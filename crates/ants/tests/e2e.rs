@@ -195,6 +195,13 @@ fn exercise_daemon(custom_tools: bool) {
     assert_eq!(get(&metrics, "/nothing").0, 404);
 
     if !custom_tools {
+        // Steering an ant with no prompt running is an ordinary message on the thread.
+        let steer = run(ants(&["steer", "--wait", "dev-a", &thread, "go", "left"]));
+        let stdout = String::from_utf8_lossy(&steer.stdout);
+        assert!(steer.status.success(), "ants steer: {}", String::from_utf8_lossy(&steer.stderr));
+        assert!(stdout.starts_with(&format!("thread {thread}\n")), "{stdout}");
+        assert!(stdout.contains("dev-a: stub: go left\n"), "{stdout}\ndaemon log:\n{}", daemon_log());
+
         // A message from a file, or written in an editor, keeps its lines.
         let file = dir.join("message.md");
         std::fs::write(&file, "first line\n\n  indented\nlast\n").unwrap();

@@ -5,16 +5,20 @@
 
 use std::collections::HashSet;
 use std::io::{Read as _, Write as _};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use ants_daemon::files;
+use ants_daemon::reading::{self, Reading};
 use ants_proto::{
-    Attachment, AttachmentHandle, AttachmentScope, MAX_ATTACHMENT_SIZE, MAX_ATTACHMENTS, SealedAttachment, Uuid,
-    guess_mime,
+    Attachment, AttachmentHandle, AttachmentScope, Envelope, MAX_ATTACHMENT_SIZE, MAX_ATTACHMENTS, SealedAttachment,
+    Uuid, guess_mime,
 };
 use anyhow::{Context as _, Result, bail, ensure};
 use async_nats::jetstream;
-use serde::{Serialize, Serializer};
+use async_nats::jetstream::consumer::DeliverPolicy;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::sealed;
 
@@ -104,7 +108,8 @@ pub fn size(bytes: u64) -> String {
 }
 
 /// An attachment as a message lists it: its reference, the handle naming where its bytes are, and why it is unavailable
-/// when the reference is invalid ([`Attachment::check`]).
+/// when the reference is invalid ([`Attachment::check`]); when the hub stored the message, if known, for the wait for
+/// chunks still on their way ([`files::get_stored`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Listed {
     #[serde(flatten)]
@@ -113,6 +118,8 @@ pub struct Listed {
     pub handle: AttachmentHandle,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unavailable: Option<String>,
+    #[serde(skip)]
+    pub stored: Option<DateTime<Utc>>,
 }
 
 fn display<S: Serializer>(handle: &AttachmentHandle, s: S) -> Result<S::Ok, S::Error> {
@@ -155,7 +162,7 @@ pub fn listed(attachments: &[Attachment], handle_of: impl Fn(Uuid) -> Attachment
             } else {
                 None
             };
-            Listed { attachment: attachment.clone(), handle: handle_of(attachment.id), unavailable }
+            Listed { attachment: attachment.clone(), handle: handle_of(attachment.id), unavailable, stored: None }
         })
         .collect()
 }
@@ -168,19 +175,27 @@ pub fn listed_on(subject: &str, attachments: &[Attachment]) -> Vec<Listed> {
     }
 }
 
+/// The attachments of the message the hub stored on `subject` at `stored` ([`listed_on`]).
+pub fn stored_on(subject: &str, attachments: &[Attachment], stored: DateTime<Utc>) -> Vec<Listed> {
+    let listed = listed_on(subject, attachments);
+    listed.into_iter().map(|listed| Listed { stored: Some(stored), ..listed }).collect()
+}
+
 /// The lines of `listed` under a message, each at `indent` and ending in a newline.
 pub fn render(listed: &[Listed], indent: &str) -> String {
     listed.iter().map(|l| format!("{indent}{}\n", l.line())).collect()
 }
 
 /// Read the attachment under `handle` and check its bytes against `expected`, the reference of the message carrying
-/// it, or without one against the reference stored with them.
+/// it, or without one against the reference stored with them; missing chunks are waited for as [`files::get_stored`]
+/// does for a message the hub stored at `stored`.
 pub async fn fetch(
     js: &jetstream::Context,
     handle: &AttachmentHandle,
     expected: Option<&Attachment>,
+    stored: Option<DateTime<Utc>>,
 ) -> Result<(Attachment, Vec<u8>)> {
-    files::get(js, handle, expected).await
+    files::get_stored(js, handle, expected, stored).await
 }
 
 /// Where an attachment named `name` is saved: `out`, or in it under `name` when it is a directory; `./name` without.
@@ -210,7 +225,7 @@ pub fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 /// Read the attachment under `handle` and check its bytes ([`fetch`]) against `expected`, the reference of the message
-/// carrying it, if given. When the store holds it as an attachment of a sealed message
+/// carrying it, if given, which the hub stored at `stored`. When the store holds it as an attachment of a sealed message
 /// ([`SealedAttachment::STORED_NAME`]), or `expected` is sealed, its reference and content key are those of the sealed
 /// message carrying it, which `keyring` opens ([`sealed::carrier`]), and its bytes are opened; refused when that
 /// message does not open on this device. Returns its reference and bytes.
@@ -219,9 +234,10 @@ pub async fn open(
     keyring: Option<&sealed::Keyring>,
     handle: &AttachmentHandle,
     expected: Option<&Attachment>,
+    carried: Option<DateTime<Utc>>,
 ) -> Result<(Attachment, Vec<u8>)> {
     let sealed_expected = expected.is_some_and(|e| e.sealed.is_some());
-    let (stored, bytes) = fetch(js, handle, expected.filter(|_| !sealed_expected)).await?;
+    let (stored, bytes) = fetch(js, handle, expected.filter(|_| !sealed_expected), carried).await?;
     let stored_sealed = stored.name == SealedAttachment::STORED_NAME
         && stored.mime == Attachment::UNKNOWN_MIME
         && matches!(handle.scope, AttachmentScope::Inbox(_));
@@ -254,14 +270,15 @@ pub async fn open(
     }
 }
 
-/// Save the attachment under `handle` where [`target`] puts it, read and opened as [`open`] does with `keyring` and
-/// `expected`: nothing is written when its bytes do not match. Returns its reference, the size of the file and the path
+/// Save the attachment under `handle` where [`target`] puts it, read and opened as [`open`] does with `keyring`,
+/// `expected` and `stored`: nothing is written when its bytes do not match. Returns its reference, the size of the file and the path
 /// written.
 pub async fn save(
     js: &jetstream::Context,
     keyring: Option<&sealed::Keyring>,
     handle: &AttachmentHandle,
     expected: Option<&Attachment>,
+    stored: Option<DateTime<Utc>>,
     out: Option<&Path>,
 ) -> Result<(Attachment, u64, PathBuf)> {
     if let Some(path) = out.filter(|path| !path.is_dir())
@@ -269,7 +286,7 @@ pub async fn save(
     {
         bail!("{} exists: not overwriting it (-o names another path)", path.display());
     }
-    let (attachment, bytes) = open(js, keyring, handle, expected).await?;
+    let (attachment, bytes) = open(js, keyring, handle, expected, stored).await?;
     let path = target(out, &attachment.name);
     write_new(&path, &bytes)?;
     Ok((attachment, bytes.len() as u64, path))
@@ -278,15 +295,82 @@ pub async fn save(
 /// `ants attachment get HANDLE [-o PATH]`.
 pub async fn get(nats: &crate::Nats<'_>, handle: &AttachmentHandle, out: Option<&Path>) -> Result<()> {
     let (_, js) = nats.connect("ants-cli").await?;
-    let keyring = if nats.me.role.is_human() { sealed::Keyring::load(nats, &js).await } else { None };
-    let (attachment, bytes, path) = save(&js, keyring.as_ref(), handle, None, out).await?;
+    let human = nats.me.role.is_human();
+    let keyring = if human { sealed::Keyring::load(nats, &js).await } else { None };
+    let (attachment, bytes, path) = save_handle(&js, human, keyring.as_ref(), handle, out).await?;
     println!("saved {} ({}, {}) to {}", attachment.name, size(bytes), attachment.mime, path.display());
     Ok(())
 }
 
+/// [`save`] of the attachment under `handle`, with no message at hand. Missing chunks of one made over
+/// [`files::RECENT`] ago are waited for when, read with a `human`'s credentials, the message carrying it was stored
+/// within that time ([`carried_recently`]), as one from a leaf's outbox after a long outage.
+async fn save_handle(
+    js: &jetstream::Context,
+    human: bool,
+    keyring: Option<&sealed::Keyring>,
+    handle: &AttachmentHandle,
+    out: Option<&Path>,
+) -> Result<(Attachment, u64, PathBuf)> {
+    match save(js, keyring, handle, None, None, out).await {
+        Err(e) if human && files::missing(&e) && !files::recent(handle, None, Utc::now()) => {
+            match carried_recently(js, keyring, handle).await? {
+                Some(stored) => save(js, keyring, handle, None, Some(stored), out).await,
+                None => Err(e),
+            }
+        }
+        saved => saved,
+    }
+}
+
+/// When the hub stored the message carrying the attachment under `handle`, if within [`files::RECENT`]: looked for by
+/// message gets, as a human's credentials read, among the messages stored on its message's subject since, a sealed
+/// one opened with `keyring`.
+async fn carried_recently(
+    js: &jetstream::Context,
+    keyring: Option<&sealed::Keyring>,
+    handle: &AttachmentHandle,
+) -> Result<Option<DateTime<Utc>>> {
+    #[derive(Deserialize)]
+    struct Carried {
+        id: Uuid,
+    }
+    #[derive(Deserialize)]
+    struct Carrying {
+        #[serde(default)]
+        attachments: Vec<Carried>,
+    }
+    let carries = |payload: &[u8]| {
+        if let Ok(envelope) = serde_json::from_slice::<Envelope>(payload)
+            && envelope.sealed.is_some()
+        {
+            return match keyring.and_then(|k| k.open(&envelope)) {
+                Some(sealed::Opening::Opened(body)) => body.attachments.iter().any(|a| a.id == handle.id),
+                _ => false,
+            };
+        }
+        serde_json::from_slice::<Carrying>(payload).is_ok_and(|m| m.attachments.iter().any(|a| a.id == handle.id))
+    };
+    let since = std::time::SystemTime::now() - files::RECENT;
+    let start = DeliverPolicy::ByStartTime { start_time: since.into() };
+    let mut found = None;
+    reading::read_back(js, "", Reading::Gets, &handle.message_subject(), start, |_, stored, _, payload| {
+        if !carries(payload) {
+            return ControlFlow::Continue(());
+        }
+        found = Some(stored.into());
+        ControlFlow::Break(())
+    })
+    .await
+    .with_context(|| format!("reading the messages that may carry attachment {handle}"))?;
+    Ok(found)
+}
+
 #[cfg(test)]
 mod tests {
-    use ants_proto::{Envelope, Role, UserId};
+    use std::time::Duration;
+
+    use ants_proto::{Role, UserId};
 
     use super::*;
     use crate::auth::tests::Server;
@@ -368,22 +452,58 @@ mod tests {
 
         let out = dir.join("out");
         std::fs::create_dir(&out).unwrap();
-        let (saved, _, path) = save(&js, None, &shown.handle, Some(&shown.attachment), Some(&out)).await.unwrap();
+        let (saved, _, path) = save(&js, None, &shown.handle, Some(&shown.attachment), None, Some(&out)).await.unwrap();
         assert_eq!((saved, path.clone()), (attached[0].attachment.clone(), out.join("report.txt")));
         assert_eq!(std::fs::read(&path).unwrap(), b"findings");
-        let again = save(&js, None, &shown.handle, None, Some(&out)).await.unwrap_err().to_string();
+        let again = save(&js, None, &shown.handle, None, None, Some(&out)).await.unwrap_err().to_string();
         assert!(again.contains("exists: not overwriting it"), "{again}");
         assert_eq!(std::fs::read(&path).unwrap(), b"findings");
 
         let named = out.join("renamed.txt");
         let lying = Attachment { sha256: files::sha256(b"other"), ..shown.attachment.clone() };
-        let mismatch = save(&js, None, &shown.handle, Some(&lying), Some(&named)).await.unwrap_err().to_string();
+        let mismatch = save(&js, None, &shown.handle, Some(&lying), None, Some(&named)).await.unwrap_err().to_string();
         assert!(mismatch.contains("does not match its reference"), "{mismatch}");
         assert!(!named.exists(), "nothing written when the bytes do not match");
-        save(&js, None, &shown.handle, None, Some(&named)).await.unwrap();
+        save(&js, None, &shown.handle, None, None, Some(&named)).await.unwrap();
         assert_eq!(std::fs::read(&named).unwrap(), b"findings");
 
         let unknown = message.attachment_handle(Uuid::now_v7());
-        assert!(save(&js, None, &unknown, None, Some(&out)).await.unwrap_err().to_string().contains("is not stored"));
+        assert!(
+            save(&js, None, &unknown, None, None, Some(&out)).await.unwrap_err().to_string().contains("is not stored")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_old_attachment_on_a_message_stored_just_now_is_waited_for() {
+        let Some(server) = Server::start() else { return };
+        let (alice, dev_a): (UserId, UserId) = ("alice".parse().unwrap(), "dev-a".parse().unwrap());
+        let (_, js) = server.connect_as(&alice, Role::Human).await;
+        js.create_stream(ants_daemon::hub::stream_config()).await.unwrap();
+        js.create_stream(ants_daemon::hub::files_config()).await.unwrap();
+        let out = server.dir().join("got");
+        std::fs::create_dir_all(&out).unwrap();
+        // UUIDv7 ids made in November 2023.
+        let old = |n: u8| -> Uuid { format!("018bcfe5-6800-7000-8000-0000000000{n:02x}").parse().unwrap() };
+
+        // Kept in a leaf's outbox through a long outage: its message is stored now, its chunks later.
+        let kept = Attachment { id: old(0), ..files::reference("kept.txt", "text/plain", b"kept").unwrap() };
+        let mut message = Envelope::new(alice.clone(), dev_a, "see attached");
+        message.attachments = vec![kept.clone()];
+        ants_daemon::bus::store(&js, message.subject(), &message, &message.id.to_string()).await.unwrap();
+        let handle = message.attachment_handle(kept.id);
+        let getting = tokio::spawn({
+            let (js, handle, out) = (js.clone(), handle.clone(), out.clone());
+            async move { save_handle(&js, true, None, &handle, Some(&out)).await }
+        });
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        files::put(&js, &handle, &kept, b"kept").await.unwrap();
+        let (saved, _, path) = getting.await.unwrap().unwrap();
+        assert_eq!((saved, std::fs::read(path).unwrap()), (kept, b"kept".to_vec()));
+
+        // One no recent message carries is not waited for.
+        let started = std::time::Instant::now();
+        let gone = save_handle(&js, true, None, &message.attachment_handle(old(1)), Some(&out)).await.unwrap_err();
+        assert!(files::missing(&gone), "{gone:#}");
+        assert!(started.elapsed() < files::SETTLE / 2, "not waited for");
     }
 }

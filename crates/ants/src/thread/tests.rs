@@ -664,3 +664,60 @@ async fn a_thread_shows_its_ants_tool_calls_once_each_as_last_stored() {
     assert!(without.iter().all(|e| e.kind == Kind::Message), "{without:?}");
     assert!(!<Kind as clap::ValueEnum>::value_variants().contains(&Kind::Tool), "tool calls are not searched");
 }
+
+#[tokio::test]
+async fn a_sealed_message_from_a_device_enrolled_mid_follow_opens_everywhere_it_is_read() {
+    use ants_proto::Role;
+
+    let Some(server) = crate::auth::tests::Server::start() else { return };
+    let (alice, bob) = (p("alice"), p("bob"));
+    let enrolled = |name: &str| {
+        let creds = server.dir().join(format!("alice-{name}.creds"));
+        crate::auth::issue(&server.dir().join("auth"), &alice, Role::Human, None, &creds).unwrap();
+        creds
+    };
+    let desk = enrolled("desk");
+    crate::Nats::new(&server.url, Some(&desk), None).unwrap().connect("test").await.unwrap();
+    let bob_creds = server.creds_as(&bob, Role::Human);
+    let bob_nats = crate::Nats::new(&server.url, Some(&bob_creds), None).unwrap();
+    let (_, bob_js) = bob_nats.connect("test").await.unwrap();
+    // One keyring per read, each loaded before the device was enrolled and learning it on its own.
+    let load = async || crate::sealed::Keyring::load(&bob_nats, &bob_js).await.map(Arc::new);
+    let (keyring, for_history, for_search) = (load().await, load().await, load().await);
+    assert!(keyring.is_some());
+
+    // Bob follows the inbox; meanwhile alice enrolls a second device and asks from it.
+    let mut inbox = crate::inbox::Inbox::open(&bob_js, &bob).await.unwrap();
+    let select = crate::inbox::Select { limit: Some(1), ..Default::default() };
+    let mut followed = Vec::new();
+    let follow = inbox.follow(
+        &select,
+        keyring.as_deref(),
+        |e| {
+            followed.push(crate::sealed::read(e.clone(), keyring.as_deref()));
+            Ok(())
+        },
+        tokio::time::sleep(Duration::from_secs(20)),
+    );
+    let asked = async {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let laptop = enrolled("laptop");
+        let alice_nats = crate::Nats::new(&server.url, Some(&laptop), None).unwrap();
+        alice_nats.connect("test").await.unwrap();
+        let words = vec!["@bob".to_owned(), "lunch at noon?".to_owned()];
+        let (sending, replies, input, attach) = Default::default();
+        Box::pin(crate::cmd::send::ask(&alice_nats, None, sending, &replies, &input, &attach, words)).await.unwrap();
+    };
+    let (follow, ()) = tokio::join!(follow, asked);
+    follow.unwrap();
+    let [(e, state)] = followed.as_slice() else { panic!("not one message: {followed:?}") };
+    assert_eq!((e.text.as_str(), *state), ("lunch at noon?", Some(crate::sealed::State::Opened)));
+
+    // The thread's history and a search open it too.
+    let shown = history(&bob_js, &e.thread_id, None, false, for_history).await.unwrap();
+    let opened: Vec<_> = shown.iter().map(|e| (e.text.as_str(), e.sealed)).collect();
+    assert_eq!(opened, [("lunch at noon?", Some(crate::sealed::State::Opened))]);
+    let search = crate::search::Search { grep: Some("lunch".into()), limit: 10, ..Default::default() };
+    let (found, _) = search.run(&bob_js, for_search).await.unwrap();
+    assert_eq!(found.iter().map(|e| e.text.as_str()).collect::<Vec<_>>(), ["lunch at noon?"]);
+}

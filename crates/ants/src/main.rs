@@ -133,6 +133,9 @@ async fn run() -> Result<()> {
         Command::Status { tmux, json } => Box::pin(tui::status(&nats()?, tmux, json)).await,
         Command::Dash { since } => Box::pin(dash::run(&nats()?, since)).await,
         Command::Cancel { ant, thread } => cmd::cancel::cancel(&nats()?, ant, thread).await,
+        Command::Steer { ant, thread, replies, input, attach, words } => {
+            Box::pin(send::steer(&nats()?, &ant, thread, &replies, &input, &attach, words)).await
+        }
         Command::Queue { ant, json } => queue::list(&nats()?, ant, json).await,
         Command::Withdraw { ant, message } => queue::withdraw(&nats()?, ant, message).await,
         Command::Init => {
@@ -335,10 +338,10 @@ async fn serve_metrics(
     }
 }
 
-/// Create the hub's stream and buckets that are missing, and add the subjects the stream lacks, as `ants init` does
-/// ([`hub::check`]), saying what was fixed; an object otherwise stays as it is. Those the credentials may not fix are
-/// reported as needing `ants init`; those whose stream info the credentials do not get, or that cannot be checked (the
-/// hub out of reach), are left alone. Returns what was fixed.
+/// Create the hub's stream and buckets that are missing, add the subjects the stream lacks and widen a duplicate window
+/// too short, as `ants init` does ([`hub::check`]), saying what was fixed; an object otherwise stays as it is. Those
+/// the credentials may not fix are reported as needing `ants init`; those whose stream info the credentials do not
+/// get, or that cannot be checked (the hub out of reach), are left alone. Returns what was fixed.
 async fn create_missing(js: &async_nats::jetstream::Context, rights: &humans::Rights) -> Vec<hub::Finding> {
     let mut created = Vec::new();
     for finding in hub::check(js, |subject| rights.may_publish(subject)).await {

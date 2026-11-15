@@ -40,6 +40,7 @@ use ants_proto::{
     ReactionsRequest, Role, RosterEntry, ThreadId, ThreadTitle, UserId, Uuid, Verdict,
 };
 use anyhow::{Context as _, Result};
+use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
 use futures::future::BoxFuture;
 use http_body_util::{BodyExt as _, Full};
@@ -452,12 +453,25 @@ pub struct Turn {
     thread: ThreadId,
 }
 
+impl Turn {
+    /// With the handles of the files attached to the message, which the hub stored at `stored`: `read_attachment`
+    /// waits for their chunks still on their way as long as that time says ([`crate::files::get_stored`]).
+    #[must_use]
+    pub fn carrying(self, handles: Vec<AttachmentHandle>, stored: Option<DateTime<Utc>>) -> Self {
+        if let Some(stored) = stored.filter(|_| !handles.is_empty()) {
+            self.hub.sessions.locked().carried.insert(self.thread.clone(), (handles, stored));
+        }
+        self
+    }
+}
+
 impl Drop for Turn {
     fn drop(&mut self) {
         let mut sessions = self.hub.sessions.locked();
         sessions.current.remove(&self.thread);
         sessions.titles.remove(&self.thread);
         sessions.reply_files.remove(&self.thread);
+        sessions.carried.remove(&self.thread);
     }
 }
 
@@ -500,6 +514,8 @@ struct Sessions {
     dirs: HashMap<ThreadId, PathBuf>,
     /// The paths of the files each thread's session attached to the final answer of its turn.
     reply_files: HashMap<ThreadId, Vec<String>>,
+    /// The handles of the files attached to the message each thread is handling, and when the hub stored it.
+    carried: HashMap<ThreadId, (Vec<AttachmentHandle>, DateTime<Utc>)>,
 }
 
 /// What `<home>/mcp.json` keeps.
@@ -649,7 +665,9 @@ impl Hub {
         if !handle.readable_by(&self.ant) {
             return Err(format!("attachment {handle} is on a message {} does not read", self.ant));
         }
-        let (attachment, bytes) = (files.get)(handle.clone()).await.map_err(|e| format!("{e:#}"))?;
+        let stored =
+            self.sessions.locked().carried.get(thread).filter(|(handles, _)| handles.contains(&handle)).map(|c| c.1);
+        let (attachment, bytes) = (files.get)(handle.clone(), stored).await.map_err(|e| format!("{e:#}"))?;
         let about = attach::describe(&attachment);
         if attachment.is_image() {
             let image = ContentBlock::image(data_encoding::BASE64.encode(&bytes), attachment.mime.clone());

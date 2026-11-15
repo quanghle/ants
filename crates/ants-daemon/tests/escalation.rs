@@ -281,3 +281,21 @@ async fn an_escalation_reaching_the_human_is_pushed_and_reminded_after_a_restart
     }
     assert!(timeout(Duration::from_millis(500), to_human.next()).await.is_err(), "one reminder, one answer told");
 }
+
+#[tokio::test]
+async fn a_stored_question_is_told_on_the_ant_s_status_without_the_message_s_text() {
+    let Some(server) = Server::start() else { return };
+    let (client, js) = bus::connect(&server.url, None, None, &ant("dev-a"), "test").await.unwrap();
+    bus::ensure_stream(&js).await.unwrap();
+    let thread = ThreadId::generate();
+    let mut status = client.subscribe(subject::status(&ant("dev-a"), &thread)).await.unwrap();
+    client.flush().await.unwrap();
+    let options = ["yes".to_owned(), "not yet".to_owned()];
+    let question = ants_proto::Question::new("Ship it?", &options, false).unwrap();
+    let asking = Envelope::asking(thread, ant("dev-a"), UserId::human(), question.clone());
+    escalation::jetstream_sender(js)(asking.clone(), asking.id.to_string()).await.unwrap();
+    let told = timeout(WAIT, status.next()).await.expect("no status").unwrap();
+    let told: StatusEvent = serde_json::from_slice(&told.payload).unwrap();
+    assert_eq!(told.update, StatusUpdate::Asked { to: UserId::human(), message: asking.id, question });
+    assert!(!String::from_utf8_lossy(&serde_json::to_vec(&told).unwrap()).contains("1. yes"));
+}

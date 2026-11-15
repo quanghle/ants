@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 use anyhow::{Context as _, Result, anyhow};
 use http_body_util::{BodyExt as _, Full, Limited};
 use hyper::body::Bytes;
-use hyper::http::{Method, Request, StatusCode, Uri, header};
+use hyper::http::{HeaderMap, Method, Request, StatusCode, Uri, header};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
@@ -34,6 +34,18 @@ pub(crate) async fn fetch(
     body: Option<(&str, Vec<u8>)>,
     limit: usize,
 ) -> Result<(StatusCode, Bytes)> {
+    let (status, _, answer) = fetch_with_headers(method, url, headers, body, limit).await?;
+    Ok((status, answer))
+}
+
+/// [`fetch`], with the headers of the answer.
+pub(crate) async fn fetch_with_headers(
+    method: Method,
+    url: &str,
+    headers: &[(&str, String)],
+    body: Option<(&str, Vec<u8>)>,
+    limit: usize,
+) -> Result<(StatusCode, HeaderMap, Bytes)> {
     let uri: Uri = url.parse().map_err(|_| anyhow!("a malformed URL"))?;
     let https = uri.scheme_str() == Some("https");
     let host = uri.host().context("a URL without a host")?;
@@ -66,7 +78,7 @@ pub(crate) async fn fetch(
         .send_request(request.body(Full::new(Bytes::from(body.map_or_default(|(_, body)| body))))?)
         .await
         .context("sending")?;
-    let status = response.status();
+    let (status, answer_headers) = (response.status(), response.headers().clone());
     let answer = Limited::new(response.into_body(), limit).collect().await;
-    Ok((status, answer.map_or_default(http_body_util::Collected::to_bytes)))
+    Ok((status, answer_headers, answer.map_or_default(http_body_util::Collected::to_bytes)))
 }

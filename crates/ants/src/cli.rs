@@ -269,6 +269,25 @@ pub(crate) enum Command {
         #[arg(add = ArgValueCandidates::new(completions::threads))]
         thread: thread::Pick,
     },
+    /// Steer ANT on THREAD, as `ants ask --steer --thread THREAD @ANT` does: the prompt ANT runs on the thread is
+    /// cancelled, and the message prompts its session next, ahead of the messages waiting there; with no prompt
+    /// running, the message waits its turn as any other. Needs a human's credentials.
+    Steer {
+        #[arg(add = ArgValueCandidates::new(completions::ants))]
+        ant: UserId,
+        /// The thread: its id, a unique start of one, or `last`.
+        #[arg(add = ArgValueCandidates::new(completions::threads))]
+        thread: thread::Pick,
+        #[command(flatten)]
+        replies: Replies,
+        #[command(flatten)]
+        input: compose::Input,
+        #[command(flatten)]
+        attach: attachments::Attach,
+        /// The message, unless --file or --edit gives it.
+        #[arg(num_args = 1..)]
+        words: Vec<String>,
+    },
     /// List the messages waiting for ANT, oldest first: those its daemon holds, running or waiting their turn on their
     /// thread, then those still in the stream, with id, thread, sender, age and place in the thread's queue. Needs a
     /// human's credentials, and a daemon of the ant to answer.
@@ -323,7 +342,8 @@ pub(crate) enum Command {
     /// Slack, Telegram). Names taken, ants added by added ants and forged requests are refused. Also answers ants'
     /// reactions requests (their `react` and `list_reactions` tools, `ants react` with an ant's credentials) for the
     /// messages each ant reads, and the renewal requests (`ants renew`) of devices registered with `ants login`,
-    /// renewing them while their grant holds.
+    /// renewing them while their grant holds; every [registration] sweep, revokes those whose GitHub users left the
+    /// policy's organizations and teams.
     Signer {
         /// Config file whose [[ant_template]] tables are the policy; the rest of it is ignored
         /// (default: ~/.ants/config.toml).
@@ -594,6 +614,10 @@ mod tests {
         assert_matches!(cli.command, Some(Command::Ask { sending, thread: Some(thread::Pick::Last), .. }) if sending == steering);
         let cli = Cli::try_parse_from(["ants", "ask", "--thread", "last", "@dev-a", "go"]).unwrap();
         assert_matches!(cli.command, Some(Command::Ask { sending: Sending { steer: false, .. }, .. }));
+        let cli = Cli::try_parse_from(["ants", "steer", "dev-a", "last", "go", "left", "--wait"]).unwrap();
+        assert_matches!(cli.command, Some(Command::Steer { ant, thread: thread::Pick::Last, replies, words, .. })
+            if ant.as_str() == "dev-a" && replies.wait && words == ["go", "left"]);
+        assert!(Cli::try_parse_from(["ants", "steer", "dev-a", "--edit"]).is_err(), "no thread");
     }
 
     #[test]

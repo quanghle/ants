@@ -298,8 +298,15 @@ impl Parser {
             return;
         }
         if let Ok(envelope) = serde_json::from_slice::<Envelope>(payload) {
-            keyring.learn(&envelope).await;
+            // Boxed: the directory lookup would otherwise swell every read of the stream.
+            Box::pin(keyring.learn(&envelope)).await;
         }
+    }
+
+    /// [`Parser::entry`], the sending device of a sealed message looked up first ([`Parser::learn`]).
+    pub async fn read(&mut self, seq: u64, stored_at: DateTime<Utc>, subject: &str, payload: &[u8]) -> Option<Entry> {
+        self.learn(subject, payload).await;
+        self.entry(seq, stored_at, subject, payload)
     }
 
     /// The valid question `e` asks, kept to check later answers against, and its valid answer to a question read
@@ -343,7 +350,7 @@ impl Parser {
             note,
             text,
             // Under the handles of the subject it was stored on, a forged one's too: its sender stored them.
-            attachments: attachments::listed_on(subject, &e.attachments),
+            attachments: attachments::stored_on(subject, &e.attachments, stored_at),
             forged,
             stuck: e.escalation.as_ref().map(|x| x.stuck.clone()),
             sealed,
@@ -371,7 +378,7 @@ impl Parser {
             let forged = post.check_subject(subject).is_err();
             let note = Some(format!("{} turns left", post.turn_budget));
             return Some(Entry {
-                attachments: attachments::listed_on(subject, &post.attachments),
+                attachments: attachments::stored_on(subject, &post.attachments, stored_at),
                 id: Some(post.id),
                 from: Some(post.from),
                 channel: Some(post.channel),
@@ -390,7 +397,7 @@ impl Parser {
             let forged = post.check_subject(subject).is_err();
             let note = Some(format!("{} turns left", post.turn_budget));
             return Some(Entry {
-                attachments: attachments::listed_on(subject, &post.attachments),
+                attachments: attachments::stored_on(subject, &post.attachments, stored_at),
                 id: Some(post.id),
                 from: Some(post.from),
                 note,
@@ -825,7 +832,7 @@ pub async fn scan(js: &jetstream::Context, start: consumer::DeliverPolicy, take:
     scan_opening(js, start, None, take).await
 }
 
-/// [`scan`], opening sealed messages with `keyring`.
+/// [`scan`], opening sealed messages with `keyring`, which looks up a sending device added since it was loaded.
 pub async fn scan_opening(
     js: &jetstream::Context,
     start: consumer::DeliverPolicy,
@@ -833,10 +840,10 @@ pub async fn scan_opening(
     mut take: impl FnMut(Entry),
 ) -> Result<()> {
     let mut parser = Parser::opening(keyring);
-    reading::read_back(js, "", Reading::Gets, subject::ALL, start, |seq, stored, subject, payload| {
-        match parser.entry(seq, stored.into(), subject, payload) {
+    reading::read_back_awaiting(js, "", Reading::Gets, subject::ALL, start, async |seq, stored, msg| {
+        match parser.read(seq, stored.into(), &msg.subject, &msg.payload).await {
             Some(entry) => take(entry),
-            None => tracing::debug!(seq, subject, "skipping a message on no thread"),
+            None => tracing::debug!(seq, subject = %msg.subject, "skipping a message on no thread"),
         }
         ControlFlow::Continue(())
     })
@@ -1234,7 +1241,7 @@ fn marked_start<'a>(threads: impl Iterator<Item = &'a ThreadId>) -> Option<consu
 /// Every message stored on `thread`, in stream order, with the reactions to each: read from `since` ago, else from the
 /// thread's start when its id is time-ordered, else from all the stream keeps. With `tools`, the tool calls its ants
 /// stored on their timelines too, each once as its latest record has it ([`timeline`]), placed by when it started.
-/// Sealed messages are opened with `keyring`.
+/// Sealed messages are opened with `keyring`, which looks up a sending device added since it was loaded.
 pub async fn history(
     js: &jetstream::Context,
     thread: &ThreadId,
@@ -1247,12 +1254,13 @@ pub async fn history(
     let mut timelines = Timelines::default();
     let mut seqs = HashMap::new();
     let start = show_start(thread, since);
-    reading::read_back(js, "", Reading::Gets, subject::ALL, start, |seq, stored, subject, payload| {
+    reading::read_back_awaiting(js, "", Reading::Gets, subject::ALL, start, async |seq, stored, msg| {
+        let (subject, payload) = (msg.subject.as_str(), &msg.payload[..]);
         if let Some((on, _)) = subject::parse_timeline(subject) {
             if tools && on == *thread {
                 add_timeline(&mut timelines, &mut seqs, seq, subject, payload);
             }
-        } else if let Some(entry) = parser.entry(seq, stored.into(), subject, payload)
+        } else if let Some(entry) = parser.read(seq, stored.into(), subject, payload).await
             && entry.thread_id == *thread
         {
             entries.push(entry);

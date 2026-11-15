@@ -2729,9 +2729,10 @@ async fn attachments_reach_a_harness_taking_images_as_images_and_any_other_as_a_
     let handle = |id| to.attachment_handle(id);
     let shot = attach(&bus, handle, "shot.png", "image/png", b"\x89PNG shot").await;
     let log_file = attach(&bus, handle, "build.log", "text/plain", b"error: E0308").await;
-    // Made long ago, so the prompt does not wait for its chunks to come from a leaf's outbox.
-    let mut gone = crate::files::reference("gone.png", "image/png", b"never stored").unwrap();
-    gone.id = uuid::Uuid::new_v7(uuid::Timestamp::from_unix(uuid::NoContext, 1_700_000_000, 0));
+    // Stored as other bytes than its reference says: unavailable, with no chunk missing to wait for.
+    let gone = crate::files::reference("gone.png", "image/png", b"as referenced").unwrap();
+    let other = Attachment { id: gone.id, ..crate::files::reference("gone.png", "image/png", b"other").unwrap() };
+    crate::files::put(&bus.js, &handle(gone.id), &other, b"other").await.unwrap();
     message.attachments = vec![shot.clone(), log_file.clone(), gone.clone()];
     bus::publish_json(&bus.js, message.subject(), &message, None).await.unwrap();
 
@@ -2762,7 +2763,7 @@ async fn attachments_reach_a_harness_taking_images_as_images_and_any_other_as_a_
     let named = format!("{}; call read_attachment with the handle to read it.", line(&log_file, &handle(log_file.id)));
     assert!(first.starts_with("look\n\n") && first.contains(&format!("{shown}\n{named}\n")), "{first}");
     let unavailable =
-        format!("{}: unavailable now (attachment {} is not stored", line(&gone, &handle(gone.id)), handle(gone.id));
+        format!("{}: unavailable now (attachment {} does not match", line(&gone, &handle(gone.id)), handle(gone.id));
     assert!(
         first.contains(&unavailable) && first.ends_with("call read_attachment with the handle to try again."),
         "{first}"

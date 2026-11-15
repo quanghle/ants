@@ -124,8 +124,7 @@ pub(crate) fn tail(
                         entries.extend(thread::tool_entries(seq, subject, payload));
                     }
                 } else {
-                    parser.learn(subject, payload).await;
-                    entries.extend(parser.entry(seq, stored.into(), subject, payload));
+                    entries.extend(parser.read(seq, stored.into(), subject, payload).await);
                 }
             }
             Ok((entries, last))

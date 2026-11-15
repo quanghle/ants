@@ -135,6 +135,31 @@ fn enrollment_credentials_issued_with_a_zero_ttl_never_expire() {
 }
 
 #[test]
+fn no_user_device_or_enrollment_takes_a_reserved_name() {
+    let dir = ants_test_support::scratch_dir("reserved-names");
+    let team = dir.join("auth");
+    init(&team).unwrap();
+    issue_bootstrap(&team, Duration::ZERO, &dir.join("bootstrap.creds")).unwrap();
+    let key = KeyPair::new_user().public_key();
+    for name in ["bootstrap", "signer", "channel-manager", "revoked"] {
+        let (user, out) = (p(name), dir.join(format!("{name}.creds")));
+        for role in [Role::Human, Role::Ant] {
+            let err = issue(&team, &user, role, None, &out).unwrap_err().to_string();
+            assert!(err.contains("is reserved"), "{name}: {err}");
+            let permissions = Permissions::for_user(&user, role);
+            let err = sign_with(&team, &user, role.into(), permissions, &key).unwrap_err().to_string();
+            assert!(err.contains("is reserved"), "{name}: {err}");
+        }
+        assert!(issue_enrollment(&team, &user, Duration::ZERO, &out).is_err(), "{name}");
+        assert!(sign_added(&team, &user, None, &key, "worker", &p("lead")).is_err(), "{name}");
+        assert!(!out.exists() || name == "bootstrap", "{name}");
+    }
+    let issued = revoke::issued(&team).unwrap();
+    assert_eq!(issued.iter().map(|i| i.kind).collect::<Vec<_>>(), [Kind::Bootstrap], "only the bootstrap credentials");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn a_renewed_uplink_keeps_its_key_and_rights_and_a_revoked_one_is_not_renewed() {
     let dir = ants_test_support::scratch_dir("extend-leaf");
     let (team, out, m1) = (dir.join("auth"), dir.join("leaf-m1.creds"), "m1".parse::<Machine>().unwrap());
@@ -355,7 +380,7 @@ fn issued_credentials_carry_the_current_permissions_version_and_name_their_renew
         (creds::Kind::LeafSystem { machine: m1.clone() }, VersionStatus::Current)
     );
     let (jwt, _) = read_creds(&out("leaf-m1")).unwrap();
-    let more = Permissions::for_leaf(&m1, [(&p("dev-c"), Role::Ant)]).with_js_domain(Some(&hub));
+    let more = Permissions::for_leaf(&m1, [(&p("dev-c"), Role::Ant)]).with_uplink_js_domain(Some(&hub));
     let renewed = creds::Finding::from_jwt(&extend_leaf(&team, &jwt, &m1, more).unwrap()).unwrap();
     assert_eq!(renewed.version_status(), VersionStatus::Current);
     assert!(renewed.renew()[0].starts_with("ants auth leaf m1 --ant dev-a --ant dev-c --human alice"), "{renewed:?}");
@@ -387,42 +412,49 @@ fn uplink_credentials_a_hub_would_refuse_are_neither_issued_nor_renewed() {
     init(&team).unwrap();
     let domain: JsDomain = "hub".parse().unwrap();
     let (ants, err) = uplink_for_most_ants(&team, &m1, Some(&domain), &out);
-    assert!(ants.len() >= 29, "only {} ants fit", ants.len());
+    eprintln!("{} ants fit the uplink of m1 (domain {domain})", ants.len());
+    assert!(ants.len() >= 48, "only {} ants fit", ants.len());
     assert!(err.contains("max_control_line 16384") && err.contains("another leaf node"), "{err}");
     let (jwt, _) = read_creds(&out).unwrap();
     assert!(jwt.len() <= MAX_UPLINK_JWT, "the refused credentials are not written");
     // As long a name as that of the ant refused.
-    let more = Permissions::for_leaf(&m1, [(&p("dev-xx"), Role::Ant)]).with_js_domain(Some(&domain));
+    let more = Permissions::for_leaf(&m1, [(&p("dev-xx"), Role::Ant)]).with_uplink_js_domain(Some(&domain));
     let err = extend_leaf(&team, &jwt, &m1, more).unwrap_err().to_string();
     assert!(err.contains("the uplink credentials of m1 would take"), "{err}");
     std::fs::remove_dir_all(dir).unwrap();
 }
 
 /// Each ant added behind a leaf node (`request_ant`, enrollment) grows its uplink JWT by the same amount, about
-/// 4.7 KB for a six-character name, 8.7 KB with the hub's JetStream domain: no permission is shared between two
-/// ants, and none is a pattern matching an ant not yet added.
+/// 4.7 KB for a six-character name, 5 KB with the hub's JetStream domain, whose plain JetStream API and KV forms it
+/// leaves out: no permission is shared between two ants, and none is a pattern matching an ant not yet added.
 #[test]
 fn each_ant_added_grows_the_uplink_by_the_same_measure() {
     let dir = ants_test_support::scratch_dir("uplink-growth");
     let (team, out, m1) = (dir.join("auth"), dir.join("leaf-m1.creds"), "m1".parse::<Machine>().unwrap());
     init(&team).unwrap();
     let hub: JsDomain = "hub".parse().unwrap();
-    for (domain, least, most) in [(None, 4_200, 5_000), (Some(&hub), 8_000, 9_000)] {
+    for (domain, least, most) in [(None, 4_200, 5_000), (Some(&hub), 4_800, 5_400)] {
         issue_leaf(&team, &m1, &members(&[p("dev-00")], &[]), &[], EnrollApprover::Without, domain, &out).unwrap();
         let (mut jwt, _) = read_creds(&out).unwrap();
         let mut growth = Vec::new();
         for i in 1..=5 {
-            let more = Permissions::for_leaf(&m1, [(&p(&format!("dev-{i:02}")), Role::Ant)]).with_js_domain(domain);
+            let more =
+                Permissions::for_leaf(&m1, [(&p(&format!("dev-{i:02}")), Role::Ant)]).with_uplink_js_domain(domain);
             let renewed = extend_leaf(&team, &jwt, &m1, more).unwrap();
             growth.push(renewed.len() - jwt.len());
             jwt = renewed;
+        }
+        if domain.is_some() {
+            let publish = allowed(&verified_body(&jwt).unwrap().1).publish;
+            let plain = publish.iter().find(|s| s.starts_with("$JS.API.") || s.starts_with("$KV."));
+            assert_eq!(plain, None, "the hub denies the plain forms on a leaf connection of another domain");
         }
         let (min, max) = (*growth.iter().min().unwrap(), *growth.iter().max().unwrap());
         eprintln!("uplink of m1 (domain {domain:?}): {} bytes, each ant adds {growth:?}", jwt.len());
         assert!(max - min <= 4, "ants of names of one length grow it alike: {growth:?}");
         assert!((least..=most).contains(&max), "{max} bytes per ant, domain {domain:?}");
         let room = (MAX_UPLINK_JWT - jwt.len()) / max + 6;
-        assert!(room >= if domain.is_some() { 29 } else { 54 }, "{room} ants fit");
+        assert!(room >= if domain.is_some() { 48 } else { 54 }, "{room} ants fit");
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -1614,6 +1646,22 @@ async fn a_hook_runs_once_per_dead_letter_from_where_its_consumer_left_off() {
     let got = timeout(WAIT, lines(1)).await.expect("the hook ran");
     assert_eq!(got.iter().map(|d| d.stream_seq).collect::<Vec<_>>(), [2]);
     running.abort();
+    let _ = running.await;
+    // A dead letter the server delivers to the stopped reader's pull request, until it learns the reader is gone, waits
+    // out the whole ack wait: the next is stored once no pull request waits and the hook's ack is in.
+    timeout(WAIT, async {
+        loop {
+            let mut reader =
+                o_js.get_consumer_from_stream::<consumer::pull::Config, _, _>(&reader, STREAM).await.unwrap();
+            let info = reader.info().await.unwrap();
+            if info.num_waiting == 0 && info.num_ack_pending == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the stopped reader's pull request and the hook's ack reach the server");
 
     // A dead letter stored while no hook runs is handed on when one starts again.
     bus::publish_json(&a_js, subject::dead(&dev_a), &bury(3, &dev_a), None).await.unwrap();

@@ -11,6 +11,7 @@ use ants_proto::{
     ATTACHMENT_CHUNK, Attachment, AttachmentHandle, MAX_ATTACHMENT_SIZE, MAX_ATTACHMENTS, Uuid, guess_mime,
 };
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -22,7 +23,9 @@ pub(super) const MAX_TEXT: usize = ATTACHMENT_CHUNK;
 const MAX_SAVE_TRIES: usize = 100;
 
 /// What the tools need of the attachments' store: `put` stores the bytes of an attachment under a handle, resolving
-/// once stored; `get` reads those under a handle, with the reference stored with them, checked against it.
+/// once stored; `get` reads those under a handle, with the reference stored with them, checked against it, waiting for
+/// chunks still on their way as long as the time the hub stored the message carrying it says, if known
+/// ([`crate::files::get_stored`]).
 #[derive(Clone)]
 pub struct FileAccess {
     pub put: Arc<PutFile>,
@@ -31,8 +34,9 @@ pub struct FileAccess {
 
 /// Stores the bytes of an attachment under a handle.
 pub type PutFile = dyn Fn(AttachmentHandle, Attachment, Arc<[u8]>) -> BoxFuture<'static, Result<()>> + Send + Sync;
-/// Reads the reference and bytes of the attachment under a handle.
-pub type GetFile = dyn Fn(AttachmentHandle) -> BoxFuture<'static, Result<(Attachment, Vec<u8>)>> + Send + Sync;
+/// Reads the reference and bytes of the attachment under a handle, of a message the hub stored at the time given.
+pub type GetFile =
+    dyn Fn(AttachmentHandle, Option<DateTime<Utc>>) -> BoxFuture<'static, Result<(Attachment, Vec<u8>)>> + Send + Sync;
 
 /// Stores and reads in the attachments' store through JetStream ([`crate::files`]), by direct gets only.
 pub fn jetstream_files(js: async_nats::jetstream::Context) -> FileAccess {
@@ -42,9 +46,9 @@ pub fn jetstream_files(js: async_nats::jetstream::Context) -> FileAccess {
             let js = js.clone();
             Box::pin(async move { crate::files::put(&js, &handle, &attachment, &bytes).await.map(drop) })
         }),
-        get: Arc::new(move |handle| {
+        get: Arc::new(move |handle, stored| {
             let js = reader.clone();
-            Box::pin(async move { crate::files::get(&js, &handle, None).await })
+            Box::pin(async move { crate::files::get_stored(&js, &handle, None, stored).await })
         }),
     }
 }

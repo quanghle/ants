@@ -17,5 +17,6 @@ expression: value
         ]
       }
     ]
-  }
+  },
+  "responder": "webhook"
 }

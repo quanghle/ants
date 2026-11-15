@@ -69,7 +69,7 @@ ants webhook add gitlab --to dev-a --preset gitlab --signing-token
 
 ## Notifications
 
-`[[human]]` entries in `webhooks.toml` push pending tool requests, inbox escalations (including reminders, expired approvals, and unserved-ant notices), and optional reply completions:
+`[[human]]` entries in `webhooks.toml` push pending tool requests, inbox escalations (including reminders, expired approvals, and unserved-ant notices), questions ants ask the human (`ask_human`), and optional reply completions:
 
 ```toml
 public_url = "https://hub.example/hooks"      # enables signed approve/reject links at <public_url>/_approval
@@ -83,14 +83,16 @@ ants = ["dev-a", "dev-b"]                     # optional filter for tool request
 approvals = true                              # default true
 escalations = true                            # default true (also enables unserved-ant notices)
 completions = true                            # ants' replies to alice, but for TL;DRs and digests (default false)
+questions = true                              # questions ants ask alice with ask_human (default: as escalations)
 quiet = "22:00-07:00"                         # optional local quiet window (start inclusive, end exclusive)
 timezone = "America/New_York"                 # optional per-human zone (requires `quiet`)
-bypass = ["approvals"]                        # optional kinds bypassing quiet hours and snooze: approvals, escalations
+bypass = ["approvals"]                        # optional kinds bypassing quiet hours and snooze: approvals, escalations, questions
 digest = true                                 # one digest of the held notices when quiet hours or snooze end (default false)
 stand_in = "bob"                              # optional human relayed what waits for alice while away
 ```
 
-- **Delivery & presence:** each human reads shared durable consumer `notify-<human>` on `ANTS` (deliver new, explicit ack), so multiple `ants webhook serve` instances send each notice once (skipping decided/expired/forged requests and escalations > 24 h old). Sinks with `device = "<id>"` (`ants auth devices alice`) skip notices while that device records active presence in `ants_presence` (`ants tools list -f`, `ants dash`, `ants chat`, or `ants inbox -f` without `--thread`/`--json` for approvals; `ants chat` or `ants inbox -f` without `--thread` for escalations and completions). Unreadable presence defaults to away.
+- **Delivery & presence:** each human reads shared durable consumer `notify-<human>` on `ANTS` (deliver new, explicit ack), so multiple `ants webhook serve` instances send each notice once (skipping decided/expired/forged requests and escalations > 24 h old). Sinks with `device = "<id>"` (`ants auth devices alice`) skip notices while that device records active presence in `ants_presence` (`ants tools list -f`, `ants dash`, `ants chat`, or `ants inbox -f` without `--thread`/`--json` for approvals; `ants chat` or `ants inbox -f` without `--thread` for escalations, questions and completions). Unreadable presence defaults to away.
+- **Questions:** a message carrying `question` (MCP `ask_human`) is notified as kind `question`, titled `<ant> asks: <question>`, its text numbering the options and giving `ants answer <id> NUMBER`; it is neither an escalation nor a completion, comes with no links and is not relayed to a stand-in. `questions` defaults to the value of `escalations`.
 - **Reactions for ants:** each `[[human]]` connection also answers ants' `list_reactions` requests (`ants.reactions.<ant>`, queue group `reactions` shared with `ants signer`, so one process answers each), since ant credentials do not read `ants_reactions`. It lists the reactions only for a message the asking ant reads; otherwise it answers `unknown` (see [auth.md](auth.md#wire-acls-and-verification-invariants)). Requests to add or remove an ant's reaction (`react`) go to `ants signer` alone: human credentials write only the human's own reactions.
 - **Sealed messages:** a notice about a [sealed message](auth.md#sealed-messages-between-humans) names its sender and thread and says only `a sealed message arrived`, with none of its text, title or attachments.
 - **Test:** `ants webhook notify-test HUMAN [--config FILE]` sends a test notice to all sinks of `HUMAN` (ignoring presence and holds, without NATS), prints `ok`/`fail` per sink without leaking URLs or secrets, reports quiet-hours status, and exits `1` on any failure.
@@ -109,9 +111,9 @@ All sinks run concurrently within `timeout` (`1s`–`30s`, default `10s`); failu
 
 ### Quiet hours, snooze and muted threads
 
-Held notices for approvals, escalations and completions are dropped (logged as `held back a notice`, leaving requests pending and inbox messages unread); unserved-ant notices (`unserved`) wait until quiet hours or snooze end. `bypass` never overrides a muted thread.
+Held notices for approvals, escalations, questions and completions are dropped (logged as `held back a notice`, leaving requests pending and inbox messages unread); unserved-ant notices (`unserved`) wait until quiet hours or snooze end. `bypass` never overrides a muted thread.
 
-- **Digest:** with `digest = true`, each approval, escalation or completion held back by quiet hours or a snooze (not by a mute) is counted per kind in KV `ants_notify` under `held.<human>` (`{since, counts}`), with compare-and-set by whichever instance took it. Once neither quiet hours nor a snooze hold (checked every minute and before the next notice sent, so `ants notify resume` ends one early), one instance claims the count by deleting it at the revision it read and sends a single `digest` notice to every sink: the counts per kind since the first held notice, and the tool requests still pending (up to 10 in the text, all in the [JSON notice](#json-notice)). The count survives restarts and is shared by every instance listing the human, which should all set `digest` alike; a digest is sent at most once, a lost one is not retried, and nothing is marked read or decided.
+- **Digest:** with `digest = true`, each approval, escalation, question or completion held back by quiet hours or a snooze (not by a mute) is counted per kind in KV `ants_notify` under `held.<human>` (`{since, counts}`), with compare-and-set by whichever instance took it. Once neither quiet hours nor a snooze hold (checked every minute and before the next notice sent, so `ants notify resume` ends one early), one instance claims the count by deleting it at the revision it read and sends a single `digest` notice to every sink: the counts per kind since the first held notice, and the tool requests still pending (up to 10 in the text, all in the [JSON notice](#json-notice)). The count survives restarts and is shared by every instance listing the human, which should all set `digest` alike; a digest is sent at most once, a lost one is not retried, and nothing is marked read or decided.
 
 - **Snooze:** `ants notify snooze DUR` (`1s`–`365d`), `ants notify resume`, `ants notify status [--json]`.
 - **Thread mute:** `ants thread mute THREAD [--for DUR]` (default `30d`) and `ants thread unmute THREAD`.
@@ -140,12 +142,13 @@ With `public_url` and `action_secret_*`, approval notices include `<public_url>/
 | Field | Kinds | Meaning |
 |---|---|---|
 | `version` | all | `1` |
-| `kind` | all | `approval`, `escalation`, `completion`, `unserved`, `digest`, or `test` |
+| `kind` | all | `approval`, `escalation`, `question`, `completion`, `unserved`, `digest`, or `test` |
 | `id` | all | Request ID, message ID, first waiting message ID, or fresh digest or test UUID (deduplicate on `(kind, id)`) |
 | `human`, `title`, `text`, `urgent`, `sent_at`, `links` | all | Target human, formatted notice, urgency (`true` for `approval`), RFC 3339 UTC timestamp, `{verdict, label, url}[]` |
-| `ant`, `thread` | `approval`, `escalation`, `completion` | Source ant and thread ID to answer on |
+| `ant`, `thread` | `approval`, `escalation`, `question`, `completion` | Source ant and thread ID to answer on |
 | `request`, `seq`, `tool`, `options`, `expires_at` | `approval` | `<ant>/<id>`, `ANTS` sequence, `{kind, title, locations?, input?}`, verdicts offered, RFC 3339 expiry |
 | `reason`, `stuck`, `level` | `escalation` | Escalation reason, stuck ant, chain level (`0` = direct) |
 | `stand_in_for` | `escalation` | Present on a [stand-in](#stand-in) relay: the human away; `ant` is then the ant to answer |
+| `question`, `options`, `free_text` | `question` | The question (redacted), its options in order (`ants answer <id> N` picks the `N`th, from 1), whether a typed answer is taken |
 | `ant`, `messages` | `unserved` | Unserved ant and waiting message UUIDs |
 | `since`, `counts`, `pending` | `digest` | RFC 3339 time of the first held notice, `{kind: n}` held back per kind, `{request, ant, thread, title, expires_at}[]` of the tool requests still pending (`urgent` when any) |
