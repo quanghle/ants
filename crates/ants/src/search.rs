@@ -20,7 +20,6 @@ use async_nats::jetstream::{self, consumer};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use clap::ValueEnum as _;
 
-use crate::sealed;
 use crate::thread::{self, Entry, Kind, Parser};
 
 type Time = DateTime<Utc>;
@@ -158,18 +157,14 @@ impl Search {
     }
 
     /// The latest [`Self::limit`] matches among the messages `js` reads back, oldest first, and how many earlier
-    /// matches the limit left out. Sealed messages are opened with `keyring`.
-    pub async fn run(
-        &self,
-        js: &jetstream::Context,
-        keyring: Option<Arc<sealed::Keyring>>,
-    ) -> Result<(Vec<Entry>, usize)> {
+    /// matches the limit left out. `parser` opens sealed messages and checks the claims of messages sent for a human
+    /// ([`Parser::opening`], [`Parser::checking`]).
+    pub async fn run(&self, js: &jetstream::Context, mut parser: Parser) -> Result<(Vec<Entry>, usize)> {
         let start = match self.since {
             Some(since) => consumer::DeliverPolicy::ByStartTime { start_time: SystemTime::from(since).into() },
             None => consumer::DeliverPolicy::All,
         };
         let kinds = self.kinds();
-        let mut parser = Parser::opening(keyring);
         let mut found: BTreeMap<u64, Entry> = BTreeMap::new();
         let mut omitted = 0;
         for filter in self.filters() {
@@ -248,7 +243,8 @@ pub async fn search(
     (search.since, search.until) = bounds(since, until, Utc::now())?;
     let js = thread::connect(nats).await?;
     let keyring = crate::sealed::Keyring::load(nats, &js).await.map(Arc::new);
-    let (entries, omitted) = search.run(&js, keyring).await?;
+    let behalf = Arc::new(crate::behalf::Checker::new(nats, &js));
+    let (entries, omitted) = search.run(&js, Parser::opening(keyring).checking(Some(behalf))).await?;
     if json {
         for entry in &entries {
             println!("{}", serde_json::to_string(entry)?);
@@ -377,7 +373,7 @@ mod tests {
 
         let run = |search: Search| {
             let js = js.clone();
-            async move { search.run(&js, None).await.unwrap() }
+            async move { search.run(&js, Parser::default()).await.unwrap() }
         };
         let kinds = |search: Search| {
             let run = run(Search { limit: 50, ..search });

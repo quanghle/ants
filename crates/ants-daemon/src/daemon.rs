@@ -1392,7 +1392,8 @@ impl Inbox<'_> {
     /// The channel post `msg` to answer, if it wakes the ant ([`channel::wake`]). Any other is acked at once: the
     /// ant's own, one in a channel it is not a member of, one that does not @mention it and is not for it to
     /// triage. A malformed or forged one is dropped, with no dead letter: every daemon sees it. A post is a webhook's
-    /// only from a webhook ([`Webhooks`]) or a human. A top-level post kept names its thread's owner, a human, and its
+    /// only from a webhook ([`Webhooks`]) or a human, and for a human only from its assistant while the grant stands: a
+    /// forged `on_behalf_of` is cleared. No daemon tells the human of an honoured one, as every daemon sees it. A top-level post kept names its thread's owner, a human, and its
     /// creator, an ant ([`ThreadOrigin`]); any other names none until [`Inbox::handle`] reads its thread's.
     async fn admit_post(&self, msg: &jetstream::Message, channels: &mut Channels) -> Option<Incoming> {
         let post = serde_json::from_slice::<ChannelPost>(&msg.payload)
@@ -1416,6 +1417,15 @@ impl Inbox<'_> {
                 "taking a post marked as a webhook's for an ant's: the sender has no webhook marker"
             );
             post.webhook = false;
+        }
+        if let Acting::Forged(human) = self.behalf.acting(self.humans, &post.from, post.on_behalf_of.as_ref()).await {
+            tracing::warn!(
+                channel = %post.channel,
+                sender = %post.from,
+                %human,
+                "ignoring a forged on_behalf_of; taking the post as its sender's own"
+            );
+            post.on_behalf_of = None;
         }
         let humans = self.humans.humans();
         if (post.from == *self.ant || post.webhook) && !self.notify_mentioned(msg, &post, channels, &humans).await {

@@ -891,9 +891,8 @@ mod tests {
         m.stored(entries.clone(), at(1));
         let mut page = Page::new(thread.clone());
         page.history.loaded(&thread, Ok(entries)).unwrap();
-        let reacted = |name: &str, by: &[&str]| Reacted {
-            reaction: name.parse().unwrap(),
-            by: by.iter().map(|b| crate::live::tests::user(b)).collect(),
+        let reacted = |name: &str, by: &[&str]| {
+            Reacted::new(name.parse().unwrap(), by.iter().map(|b| crate::live::tests::user(b)).collect())
         };
         m.data.reactions.insert(first, vec![reacted("eyes", &["alice", "bob"]), reacted("shipit", &["dev-a"])]);
         m.data.reactions.insert(nested, vec![reacted("check", &["alice"])]);

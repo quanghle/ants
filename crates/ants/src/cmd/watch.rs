@@ -37,8 +37,9 @@ pub(crate) async fn watch(nats: &Nats<'_>, target: &str, thread: Option<thread::
     let mut sub = client.subscribe(filter).await?;
     let faces = crate::avatars::Faces::stdout(crate::avatars::read_or_none(&js).await);
     let mut printer = Printer { faces: Some(faces), ..Printer::default() };
-    let mut reacted = watched_reactions(&js, target, nats.me.role.is_human()).await;
-    let behalf = crate::behalf::Checker::new(nats, &js);
+    let behalf = std::sync::Arc::new(crate::behalf::Checker::new(nats, &js));
+    let _following = behalf.follow();
+    let mut reacted = watched_reactions(&js, target, nats.me.role.is_human(), &behalf).await;
     loop {
         let msg = tokio::select! {
             msg = sub.next() => match msg {
@@ -63,10 +64,12 @@ pub(crate) async fn watch(nats: &Nats<'_>, target: &str, thread: Option<thread::
             printer.line(&line)
         } else if let Ok(post) = serde_json::from_slice::<ChannelPost>(&msg.payload) {
             // Before notes posts: a channel post has every field of one.
-            printer.line(&channel_line(&post, &forged(post.check_subject(&msg.subject).is_ok())))
+            let acting = behalf.check(&post.from, post.on_behalf_of.as_ref()).await;
+            printer.line(&channel_line(&post, &acting, &forged(post.check_subject(&msg.subject).is_ok())))
         } else if let Ok(post) = serde_json::from_slice::<NotesPost>(&msg.payload) {
             let forged = forged(post.check_subject(&msg.subject).is_ok());
-            let (thread, from, left) = (&post.thread_id, &post.from, post.turn_budget);
+            let acting = behalf.check(&post.from, post.on_behalf_of.as_ref()).await;
+            let (thread, from, left) = (&post.thread_id, acting.label(post.from.as_str()), post.turn_budget);
             printer.line(&format!("[{thread}] {from} -> thread notes ({left} turns left){forged}: {}", post.text))
         } else if let Ok(d) = serde_json::from_slice::<DeadLetter>(&msg.payload) {
             printer.line(&format!("dead letter of {} after {} deliveries: {}", d.ant, d.deliveries, d.error))
@@ -103,18 +106,19 @@ pub(crate) async fn watch(nats: &Nats<'_>, target: &str, thread: Option<thread::
 }
 
 /// The reactions `ants watch` follows besides `target`: all of them for a human taking every message (`ants.>` or
-/// `>`), else none, as when the bucket cannot be read.
+/// `>`), else none, as when the bucket cannot be read. `behalf` checks an assistant's for its human.
 pub(crate) async fn watched_reactions(
     js: &async_nats::jetstream::Context,
     target: &str,
     human: bool,
+    behalf: &std::sync::Arc<crate::behalf::Checker>,
 ) -> futures::stream::BoxStream<'static, reactions::Change> {
     let none = || futures::stream::pending().boxed();
     if !human || ![subject::ALL, ">"].contains(&target) {
         return none();
     }
     match reactions::watch(js).await {
-        Ok(changes) => changes.chain(futures::stream::pending()).boxed(),
+        Ok(changes) => crate::reacted::checked(changes, behalf).chain(futures::stream::pending()).boxed(),
         Err(e) => {
             tracing::warn!("not showing reactions: {e:#}");
             none()
@@ -122,10 +126,11 @@ pub(crate) async fn watched_reactions(
     }
 }
 
-/// A reaction added or removed as `ants watch` prints it.
+/// A reaction added or removed as `ants watch` prints it, an assistant's for its human naming both ([`Acting::label`]).
 pub(crate) fn reaction_line(change: &reactions::Change) -> String {
     let verb = if change.removed { "removed the reaction" } else { "reacted" };
-    format!("{} {verb} {} to message {}", change.by, change.reaction, change.message)
+    let by = change.acting.label(change.by.as_str());
+    format!("{by} {verb} {} to message {}", change.reaction, change.message)
 }
 
 /// An envelope as `ants watch` prints it: an escalation it carries with its level, reason, stuck ant and thread,
@@ -153,9 +158,10 @@ pub(crate) fn request_line(r: &ApprovalRequest, forged: &str) -> String {
     format!("[{thread}] {ant}{forged} asks approval {ant}/{id} ({options}): {}: {}", r.tool.kind, r.tool.title)
 }
 
-/// A channel post as `ants watch` prints it.
-pub(crate) fn channel_line(post: &ChannelPost, forged: &str) -> String {
-    let (thread, from, channel, left) = (&post.thread_id, &post.from, &post.channel, post.turn_budget);
+/// A channel post as `ants watch` prints it, an assistant's for its human naming both ([`Acting::label`]).
+pub(crate) fn channel_line(post: &ChannelPost, acting: &Acting, forged: &str) -> String {
+    let (thread, from, channel, left) =
+        (&post.thread_id, acting.label(post.from.as_str()), &post.channel, post.turn_budget);
     let created = post.creator.as_ref().map_or_default(|c| format!(", created by {c}"));
     format!("[{thread}] {from} -> #{channel} ({left} turns left{created}){forged}: {}", post.text)
 }
@@ -300,11 +306,19 @@ mod tests {
     fn watched_channel_posts_name_the_channel_and_turns_left() {
         let mut post = ChannelPost::new("ops".parse().unwrap(), "dev-a".parse().unwrap(), "@dev-b ready?");
         (post.thread_id, post.turn_budget) = ("t1".parse().unwrap(), 3);
-        assert_eq!(channel_line(&post, ""), "[t1] dev-a -> #ops (3 turns left): @dev-b ready?");
+        let own = &Acting::Own;
+        assert_eq!(channel_line(&post, own, ""), "[t1] dev-a -> #ops (3 turns left): @dev-b ready?");
         let forged = " (forged: sent on ants.chan.ops.dev-b)";
-        assert_eq!(channel_line(&post, forged), format!("[t1] dev-a -> #ops (3 turns left){forged}: @dev-b ready?"));
+        let line = channel_line(&post, own, forged);
+        assert_eq!(line, format!("[t1] dev-a -> #ops (3 turns left){forged}: @dev-b ready?"));
         let created = post.with_creator(Some("lead".parse().unwrap()));
-        assert_eq!(channel_line(&created, ""), "[t1] dev-a -> #ops (3 turns left, created by lead): @dev-b ready?");
+        let line = channel_line(&created, own, "");
+        assert_eq!(line, "[t1] dev-a -> #ops (3 turns left, created by lead): @dev-b ready?");
+        let alice: UserId = "alice".parse().unwrap();
+        let line = channel_line(&created, &Acting::For(alice.clone()), "");
+        assert!(line.starts_with("[t1] alice via dev-a -> #ops"), "{line}");
+        let line = channel_line(&created, &Acting::Forged(alice), "");
+        assert!(line.starts_with("[t1] dev-a (forged: for alice) -> #ops"), "{line}");
     }
 
     #[test]

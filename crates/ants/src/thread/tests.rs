@@ -85,7 +85,7 @@ fn every_kind_of_stored_message_lands_on_its_thread() {
     assert_eq!((entries[2].id, entries[3].id), (Some(post.id), Some(note.id)));
     assert_eq!((entries[5].id, entries[7].id), (None, None), "a tool request and a dead letter");
     let mut entries = entries;
-    let eyes = Reacted { reaction: "eyes".parse().unwrap(), by: vec![p("alice"), p("dev-a")] };
+    let eyes = Reacted::new("eyes".parse().unwrap(), vec![p("alice"), p("dev-a")]);
     entries[1].reactions = vec![eyes];
     let shown = render(&entries[..2]);
     assert!(shown.contains(&format!("message     alice -> dev-a (message {}): fix it\n", ask.id)), "{shown}");
@@ -321,7 +321,7 @@ fn only_messages_posts_and_notes_reopen_a_thread_and_done_ones_list_so() {
     read.iter().for_each(|e| threads.add(e));
     let (mut listed, _) = threads.finish(&Select::default(), &ThreadMarks::default());
     assert_eq!(listed[0].last_reopening, 1);
-    listed[0].done = Some(Done { by: alice, at: at(0) });
+    listed[0].done = Some(Done { by: alice, at: at(0), acting: Acting::Own });
     let mut pinned = listed[0].clone();
     pinned.pinned = true;
     let table = table(&[listed[0].clone(), pinned]);
@@ -719,6 +719,6 @@ async fn a_sealed_message_from_a_device_enrolled_mid_follow_opens_everywhere_it_
     let opened: Vec<_> = shown.iter().map(|e| (e.text.as_str(), e.sealed)).collect();
     assert_eq!(opened, [("lunch at noon?", Some(crate::sealed::State::Opened))]);
     let search = crate::search::Search { grep: Some("lunch".into()), limit: 10, ..Default::default() };
-    let (found, _) = search.run(&bob_js, for_search).await.unwrap();
+    let (found, _) = search.run(&bob_js, Parser::opening(for_search)).await.unwrap();
     assert_eq!(found.iter().map(|e| e.text.as_str()).collect::<Vec<_>>(), ["lunch at noon?"]);
 }

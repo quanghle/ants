@@ -4,6 +4,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use ants_daemon::reactions::{self, Change};
 use ants_proto::{REACTIONS_BUCKET, UserId, Uuid};
@@ -12,24 +13,42 @@ use futures::stream::BoxStream;
 use futures::{Stream, StreamExt as _};
 
 use crate::Nats;
+use crate::behalf::Checker;
 
 /// How many characters of a message's first line name it beside a reaction.
 const OPENING: usize = 40;
 
-/// Every reaction added or removed from now on; none, quietly, with credentials that may not read them all, as an
-/// ant's, and none, with a warning, when the bucket cannot be watched.
-pub async fn changes(nats: &Nats<'_>, js: &async_nats::jetstream::Context) -> BoxStream<'static, Change> {
+/// Every reaction added or removed from now on, an assistant's for its human checked by `behalf`
+/// ([`Checker::change`]); none, quietly, with credentials that may not read them all, as an ant's, and none, with a
+/// warning, when the bucket cannot be watched.
+pub async fn changes(
+    nats: &Nats<'_>,
+    js: &async_nats::jetstream::Context,
+    behalf: &Arc<Checker>,
+) -> BoxStream<'static, Change> {
     let none = || futures::stream::pending().boxed();
     if !nats.rights.may_publish(&format!("$JS.API.CONSUMER.CREATE.KV_{REACTIONS_BUCKET}")) {
         return none();
     }
     match reactions::watch(js).await {
-        Ok(changes) => changes.chain(futures::stream::pending()).boxed(),
+        Ok(changes) => checked(changes, behalf).chain(futures::stream::pending()).boxed(),
         Err(e) => {
             tracing::warn!("not showing reactions: {e:#}");
             none()
         }
     }
+}
+
+/// `changes`, each checked by `behalf` ([`Checker::change`]).
+pub fn checked(
+    changes: impl Stream<Item = Change> + Send + 'static,
+    behalf: &Arc<Checker>,
+) -> impl Stream<Item = Change> + Send + 'static {
+    let behalf = Arc::clone(behalf);
+    changes.then(move |change| {
+        let behalf = Arc::clone(&behalf);
+        async move { behalf.change(change).await }
+    })
 }
 
 /// The messages a follow showed, each with how a reaction line names it: its sender and the start of its text.
@@ -98,7 +117,7 @@ mod tests {
         let follow = async |user: &UserId, role, js| {
             let creds = server.creds_as(user, role);
             let nats = Nats::new(&server.url, Some(&creds), None).unwrap();
-            changes(&nats, js).await
+            changes(&nats, js, &Arc::new(Checker::new(&nats, js))).await
         };
         let mut as_human = follow(&human, Role::Human, &h_js).await;
         let mut as_ant = follow(&dev_a, Role::Ant, &a_js).await;
@@ -121,6 +140,7 @@ mod tests {
             by: by.parse().unwrap(),
             reaction: "eyes".parse().unwrap(),
             removed,
+            acting: ants_proto::Acting::Own,
         };
         let (tx, rx) = futures::channel::mpsc::unbounded();
         tx.unbounded_send(change(asked, "dev-a", false)).unwrap();
