@@ -123,23 +123,40 @@ pub const SNOOZE_MAX: chrono::TimeDelta = chrono::TimeDelta::days(7);
 /// The threads a human snoozed on home, under its [`snoozed_key`] in [`THREADS_BUCKET`], shared by all its devices,
 /// which update it with compare-and-set. A snooze set `at` hides the thread from home until `until`, at most
 /// [`SNOOZE_MAX`] later, or until an item for the human arrives on the thread after `at`. Snoozing changes no ant's
-/// work, reply or notification.
+/// work, reply or notification. The human's assistant snoozes threads for it in the same entry ([`Snooze::by`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ThreadSnoozes(pub std::collections::BTreeMap<ThreadId, Snooze>);
 
 /// When a thread was snoozed, and until when.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snooze {
     pub at: DateTime<Utc>,
     pub until: DateTime<Utc>,
+    /// The assistant that snoozed the thread for the human, if not the human: readers honour the snooze only while
+    /// the human's grant names it ([`ThreadSnoozes::honoured`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<UserId>,
 }
 
 impl ThreadSnoozes {
     /// Snooze `thread` from `now` until `until`, cut to [`SNOOZE_MAX`] from now, dropping the snoozes already past.
     pub fn snooze(&mut self, thread: &ThreadId, now: DateTime<Utc>, until: DateTime<Utc>) {
+        self.snooze_by(thread, now, until, None);
+    }
+
+    /// The same, for the human by its assistant `by`, if any.
+    pub fn snooze_by(&mut self, thread: &ThreadId, now: DateTime<Utc>, until: DateTime<Utc>, by: Option<&UserId>) {
         self.prune(now);
-        self.0.insert(thread.clone(), Snooze { at: now, until: until.min(now + SNOOZE_MAX) });
+        let snooze = Snooze { at: now, until: until.min(now + SNOOZE_MAX), by: by.cloned() };
+        self.0.insert(thread.clone(), snooze);
+    }
+
+    /// The snoozes but those by an assistant `honour` refuses.
+    #[must_use]
+    pub fn honoured(mut self, honour: impl Fn(&UserId) -> bool) -> Self {
+        self.0.retain(|_, s| s.by.as_ref().is_none_or(&honour));
+        self
     }
 
     /// End the snooze of `thread`, dropping the snoozes already past. Whether it was snoozed.
@@ -163,7 +180,8 @@ impl ThreadSnoozes {
 /// which update it with compare-and-set. A thread is pinned or archived, never both: pinning one unarchives it and
 /// archiving one unpins it. Marks change nothing else: an archived thread keeps its messages, its work goes on and
 /// its replies reach the inbox as before. A thread with neither mark may count as archived for having been idle
-/// ([`ThreadMarks::idle`]), unless the human kept it since.
+/// ([`ThreadMarks::idle`]), unless the human kept it since. The human's assistant marks threads for it in the same
+/// entry ([`ThreadMarks::by`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadMarks {
     /// When each pinned thread was pinned.
@@ -174,6 +192,10 @@ pub struct ThreadMarks {
     /// When each thread the human unarchived while it was idle was kept: it is idle again only once idle since then.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub kept: std::collections::BTreeMap<ThreadId, DateTime<Utc>>,
+    /// The assistant that pinned or archived each thread so marked for the human, not the human: readers honour such
+    /// a mark only while the human's grant names that assistant ([`ThreadMarks::honoured`]).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub by: std::collections::BTreeMap<ThreadId, UserId>,
 }
 
 /// When a thread was archived, and the last [`STREAM`] sequence then: a message on the thread stored after it is new
@@ -199,35 +221,80 @@ pub enum Mark {
 impl ThreadMarks {
     /// Pin `thread`, unarchiving it. Whether that changed anything.
     pub fn pin(&mut self, thread: &ThreadId) -> bool {
+        self.pin_by(thread, None)
+    }
+
+    /// The same, for the human by its assistant `by`, if any. The human pinning a thread its assistant pinned makes
+    /// the pin its own; the assistant pinning one pinned already changes nothing.
+    pub fn pin_by(&mut self, thread: &ThreadId, by: Option<&UserId>) -> bool {
         self.archived.remove(thread);
         self.kept.remove(thread);
         if self.pinned.contains_key(thread) {
-            return false;
+            return by.is_none() && self.by.remove(thread).is_some();
         }
         self.pinned.insert(thread.clone(), Utc::now());
+        self.set_by(thread, by);
         true
     }
 
     /// Unpin `thread`. Whether it was pinned.
     pub fn unpin(&mut self, thread: &ThreadId) -> bool {
-        self.pinned.remove(thread).is_some()
+        let unpinned = self.pinned.remove(thread).is_some();
+        if unpinned {
+            self.by.remove(thread);
+        }
+        unpinned
     }
 
     /// Archive `thread` as of `after`, the last [`STREAM`] sequence now, unpinning it. Whether that changed anything:
     /// archiving it again once a message was stored on it since moves `after` on, so that message is no longer new.
     pub fn archive(&mut self, thread: &ThreadId, after: u64) -> bool {
+        self.archive_by(thread, after, None)
+    }
+
+    /// The same, for the human by its assistant `by`, if any, which makes an archive as [`ThreadMarks::pin_by`] makes
+    /// a pin, and moves on one of the human's own as the human's.
+    pub fn archive_by(&mut self, thread: &ThreadId, after: u64, by: Option<&UserId>) -> bool {
         let unpinned = self.pinned.remove(thread).is_some();
         self.kept.remove(thread);
         if self.archived.get(thread).is_some_and(|a| a.after >= after) {
-            return unpinned;
+            return unpinned || (by.is_none() && self.by.remove(thread).is_some());
         }
+        // An archive of the human's own, moved on by its assistant, stays its own.
+        let own = self.archived.contains_key(thread) && !self.by.contains_key(thread);
         self.archived.insert(thread.clone(), Archived { at: Utc::now(), after });
+        if !own || by.is_none() {
+            self.set_by(thread, by);
+        }
         true
     }
 
     /// Unarchive `thread`. Whether it was archived.
     pub fn unarchive(&mut self, thread: &ThreadId) -> bool {
-        self.archived.remove(thread).is_some()
+        let unarchived = self.archived.remove(thread).is_some();
+        if unarchived {
+            self.by.remove(thread);
+        }
+        unarchived
+    }
+
+    fn set_by(&mut self, thread: &ThreadId, by: Option<&UserId>) {
+        match by {
+            Some(by) => self.by.insert(thread.clone(), by.clone()),
+            None => self.by.remove(thread),
+        };
+    }
+
+    /// The marks but those by an assistant `honour` refuses.
+    #[must_use]
+    pub fn honoured(mut self, honour: impl Fn(&UserId) -> bool) -> Self {
+        let refused: Vec<ThreadId> = self.by.iter().filter(|(_, by)| !honour(by)).map(|(t, _)| t.clone()).collect();
+        for thread in refused {
+            self.pinned.remove(&thread);
+            self.archived.remove(&thread);
+            self.by.remove(&thread);
+        }
+        self
     }
 
     /// Forget the marks placed before `before` on the threads `gone` says have no message left in [`STREAM`], and the
@@ -243,6 +310,8 @@ impl ThreadMarks {
         self.pinned.retain(|thread, at| *at >= before || !gone(thread));
         self.archived.retain(|thread, archived| archived.at >= before || !gone(thread));
         self.kept.retain(|thread, at| (*at >= before || !gone(thread)) && !active(thread, *at));
+        let (pinned, archived) = (&self.pinned, &self.archived);
+        self.by.retain(|thread, _| pinned.contains_key(thread) || archived.contains_key(thread));
         had - self.pinned.len() - self.archived.len() - self.kept.len()
     }
 
@@ -335,6 +404,40 @@ mod tests {
     }
 
     #[test]
+    fn an_assistant_s_marks_and_snoozes_hold_while_honoured_and_the_human_s_own_take_over() {
+        let (t1, t2, t3) = (ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
+        let pa = p("pa");
+        let mut marks = ThreadMarks::default();
+        assert!(marks.pin(&t1));
+        assert!(!marks.pin_by(&t1, Some(&pa)), "the human's own pin stays its own");
+        assert!(marks.pin_by(&t2, Some(&pa)) && marks.archive_by(&t3, 5, Some(&pa)));
+        assert_eq!(marks.by, [(t2.clone(), pa.clone()), (t3.clone(), pa.clone())].into());
+        let refused = marks.clone().honoured(|_| false);
+        assert_eq!(refused.pinned.keys().collect::<Vec<_>>(), [&t1], "only the human's own");
+        assert!(refused.archived.is_empty() && refused.by.is_empty());
+        assert_eq!(marks.clone().honoured(|by| *by == pa), marks);
+        let json = serde_json::to_string(&marks).unwrap();
+        assert_eq!(serde_json::from_str::<ThreadMarks>(&json).unwrap(), marks);
+
+        assert!(marks.pin(&t2) && !marks.by.contains_key(&t2), "the human's pin takes it over");
+        assert!(marks.archive(&t3, 5) && !marks.by.contains_key(&t3), "as does its archive");
+        assert!(marks.archive_by(&t3, 9, Some(&pa)) && !marks.by.contains_key(&t3), "moved on, it stays the human's");
+        assert!(marks.archive_by(&t1, 5, Some(&pa)), "the assistant archives a thread the human pinned");
+        assert_eq!(marks.by.get(&t1), Some(&pa));
+        assert!(marks.unarchive(&t1) && marks.by.is_empty(), "unmarking forgets who marked");
+
+        let now = Utc::now();
+        let mut snoozes = ThreadSnoozes::default();
+        snoozes.snooze(&t1, now, now + chrono::TimeDelta::hours(1));
+        snoozes.snooze_by(&t2, now, now + chrono::TimeDelta::hours(1), Some(&pa));
+        assert_eq!(snoozes.clone().honoured(|_| false).0.keys().collect::<Vec<_>>(), [&t1]);
+        assert_eq!(snoozes.clone().honoured(|_| true), snoozes);
+        let json = serde_json::to_string(&snoozes).unwrap();
+        assert_eq!(json.matches("\"by\":\"pa\"").count(), 1, "{json}");
+        assert_eq!(serde_json::from_str::<ThreadSnoozes>(&json).unwrap(), snoozes);
+    }
+
+    #[test]
     fn only_old_marks_of_threads_gone_are_forgotten() {
         let (gone, old_gone, kept) = (ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
         let mut marks = ThreadMarks::default();
@@ -384,7 +487,7 @@ mod tests {
         assert!(!snoozes.0.contains_key(&t1), "a write drops the snoozes past");
         assert!(snoozes.wake(&t2, now) && !snoozes.wake(&t2, now));
         let json = serde_json::to_string(&ThreadSnoozes(
-            [(t1.clone(), Snooze { at: now, until: now + chrono::TimeDelta::days(8) })].into(),
+            [(t1.clone(), Snooze { at: now, until: now + chrono::TimeDelta::days(8), by: None })].into(),
         ))
         .unwrap();
         assert!(json.starts_with(&format!("{{\"{t1}\":{{\"at\":")), "{json}");

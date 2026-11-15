@@ -129,7 +129,7 @@ pub struct Source {
     /// Why there is none, when ants_threads cannot be read.
     meta: Result<Rc<Meta>, String>,
     sessions: Result<DirectKv, String>,
-    /// What checks the claims of the done states an assistant marked for its human.
+    /// What checks the claims of the done states, marks and snoozes an assistant set for its human.
     behalf: Arc<crate::behalf::Checker>,
 }
 
@@ -143,7 +143,10 @@ impl Source {
 
     /// The source, checking claims with `behalf` rather than a checker of its own.
     pub fn checking(self, behalf: Option<Arc<crate::behalf::Checker>>) -> Self {
-        Self { behalf: behalf.unwrap_or(self.behalf), ..self }
+        let behalf = behalf.unwrap_or(self.behalf);
+        let meta =
+            self.meta.map(|m| Rc::try_unwrap(m).map_or_else(|m| m, |m| Rc::new(m.checking(Some(behalf.clone())))));
+        Self { behalf, meta, ..self }
     }
 
     /// Read what there is of `threads`: their titles, done states and TL;DRs, what was spent on them, that day's spend, and the

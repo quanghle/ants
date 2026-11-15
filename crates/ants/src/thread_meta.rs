@@ -2,16 +2,17 @@
 //! thread, each shared by every human, and each human's pinned and archived threads ([`ThreadMarks`]) and the threads
 //! it snoozed on home ([`ThreadSnoozes`]), shared by its devices. Read and written by direct gets and plain publishes
 //! ([`DirectKv`]); the marks and snoozes, one entry each per human, with compare-and-set, so devices marking at once
-//! lose nothing.
+//! lose nothing. The human's assistant sets marks and snoozes in the same entries, naming itself ([`ThreadMarks::by`],
+//! [`ants_proto::Snooze::by`]): they count only while the human's grant names it ([`crate::behalf::Checker`]).
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Once};
 use std::time::Duration;
 
 use ants_daemon::direct_kv::{DirectKv, Lookup};
 use ants_proto::{
-    JsDomain, Mark, STREAM, THREADS_BUCKET, ThreadDone, ThreadId, ThreadMarks, ThreadSnoozes, ThreadSummary,
+    Acting, JsDomain, Mark, STREAM, THREADS_BUCKET, ThreadDone, ThreadId, ThreadMarks, ThreadSnoozes, ThreadSummary,
     ThreadTitle, UserId, done_key, marks_key, snoozed_key, summary_key, title_key,
 };
 use anyhow::{Context as _, Result, bail};
@@ -71,7 +72,8 @@ pub async fn open(nats: &crate::Nats<'_>, js: &jetstream::Context) -> Result<Met
              `ants auth user NAME --human`"
         );
     }
-    let mut meta = Meta::open(js, nats.domain, me).await?;
+    let mut meta =
+        Meta::open(js, nats.domain, me).await?.checking(Some(Arc::new(crate::behalf::Checker::new(nats, js))));
     meta.keyring = Keyring::lazy(nats.creds, ants_daemon::keystore::os(), js).map(Arc::new);
     meta.done_right = nats.rights.may_publish(&done_right());
     meta.summaries_right = nats.rights.may_publish(&summaries_right());
@@ -324,6 +326,8 @@ pub struct Meta {
     snoozed_right: bool,
     /// What opens sealed titles; without one, they read `[sealed]`.
     keyring: Option<Arc<Keyring>>,
+    /// What checks the marks and snoozes set by an assistant; without one, none counts.
+    behalf: Option<Arc<crate::behalf::Checker>>,
 }
 
 impl Meta {
@@ -337,7 +341,25 @@ impl Meta {
             summaries_right: true,
             snoozed_right: true,
             keyring: None,
+            behalf: None,
         })
+    }
+
+    /// Checking the marks and snoozes set by an assistant with `behalf`, if any, rather than the checker it had.
+    pub fn checking(self, behalf: Option<Arc<crate::behalf::Checker>>) -> Self {
+        Self { behalf: behalf.or(self.behalf), ..self }
+    }
+
+    /// Which of `assistants` act for the human now.
+    async fn honoured<'a>(&self, assistants: impl IntoIterator<Item = &'a UserId>) -> HashSet<UserId> {
+        let mut honoured = HashSet::new();
+        let Some(behalf) = &self.behalf else { return honoured };
+        for assistant in assistants.into_iter().collect::<BTreeSet<_>>() {
+            if let Acting::For(_) = behalf.check(assistant, Some(&self.human)).await {
+                honoured.insert(assistant.clone());
+            }
+        }
+        honoured
     }
 
     /// Opening sealed titles with `keyring`.
@@ -559,9 +581,11 @@ impl Meta {
         }
     }
 
-    /// The human's pinned and archived threads.
+    /// The human's pinned and archived threads, but those its assistant marked while it does not act for it.
     pub async fn marks(&self) -> Result<ThreadMarks> {
-        Ok(self.marks_last().await?.0)
+        let marks = self.marks_last().await?.0;
+        let honoured = self.honoured(marks.by.values()).await;
+        Ok(marks.honoured(|by| honoured.contains(by)))
     }
 
     /// Forget what was said of the threads `gone` says have no message left in the stream more than [`KEPT`] ago:
@@ -676,9 +700,11 @@ impl Meta {
         }
     }
 
-    /// The threads the human snoozed on home.
+    /// The threads the human snoozed on home, but those its assistant snoozed while it does not act for it.
     pub async fn snoozes(&self) -> Result<ThreadSnoozes> {
-        Ok(self.snoozes_last().await?.0)
+        let snoozes = self.snoozes_last().await?.0;
+        let honoured = self.honoured(snoozes.0.values().filter_map(|s| s.by.as_ref())).await;
+        Ok(snoozes.honoured(|by| honoured.contains(by)))
     }
 
     /// Change the human's snoozes with `change`, on top of whatever its other devices changed meanwhile, storing them

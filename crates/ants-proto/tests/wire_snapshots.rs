@@ -332,7 +332,24 @@ fn kv_entries() {
             pinned: BTreeMap::from([(thread(), at(0))]),
             archived: BTreeMap::from([(other_thread(), Archived { at: at(1), after: 4211 })]),
             kept: BTreeMap::from([(thread(), at(2))]),
+            by: BTreeMap::new(),
         },
+    );
+    snap(
+        "thread_marks_by_assistant",
+        &ThreadMarks {
+            pinned: BTreeMap::from([(thread(), at(0))]),
+            archived: BTreeMap::new(),
+            kept: BTreeMap::new(),
+            by: BTreeMap::from([(thread(), user("asst"))]),
+        },
+    );
+    snap(
+        "thread_snoozes",
+        &ThreadSnoozes(BTreeMap::from([
+            (thread(), Snooze { at: at(0), until: at(30), by: None }),
+            (other_thread(), Snooze { at: at(1), until: at(45), by: Some(user("asst")) }),
+        ])),
     );
     snap("notify_prefs", &NotifyPrefs { snoozed_until: Some(at(30)), muted: BTreeMap::from([(thread(), at(45))]) });
     snap(

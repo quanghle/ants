@@ -346,10 +346,12 @@ impl Permissions {
     /// What the credentials of `assistant`, the assistant of `human` ([`AssistantOf`]), allow: everything an ant may do,
     /// as it is one run by a daemon, and what a human may read and keep of its own besides ([`Self::for_user`]): it
     /// watches all ants traffic, so its human's home queue, reads the stream and the buckets a human reads, sets
-    /// titles, TL;DRs and done states, puts its own reactions, pins, archives and read markers, and reads every
-    /// attachment and every device's encryption key. Of its human's own keys it reads, by direct gets, never writes,
-    /// the read markers, pins, archives and snoozed threads ([`read_marker_rights`], [`thread_rights`]) and the markers
-    /// of messages kept waiting ([`unserved_key`]), so it sees what its human has read and set aside.
+    /// titles, TL;DRs and done states, puts its own reactions and read markers, and reads every attachment and every
+    /// device's encryption key. Of its human's own keys it reads, by direct gets, never writes, the read markers
+    /// ([`read_marker_rights`]) and the markers of messages kept waiting ([`unserved_key`]), so it sees what its human
+    /// has read and set aside. It keeps no pins, archives or snoozed threads of its own: it reads and writes its
+    /// human's ([`thread_rights`]), each pin, archive or snooze it sets naming it ([`ThreadMarks::by`],
+    /// [`crate::Snooze::by`]), which readers honour only while the human's grant names it.
     ///
     /// It reads the stream back by direct gets, as a human does, so it holds none of an ant's reader consumers but its
     /// dead letters' (its inbox and channel consumers still deliver), no spare of one, and no consumer of a human's
@@ -389,6 +391,7 @@ impl Permissions {
         publish.retain(|s| !reads_through(s));
         as_human.retain(|s| !reads_through(s));
         let devices_only = [subject::devices_of(assistant), subject::presence_of(assistant)];
+        let own_marks = [marks_key(assistant), snoozed_key(assistant)].map(|k| format!("$KV.{THREADS_BUCKET}.{k}"));
         let notify = notify_prefs_rights(assistant);
         let unattributed = [
             // Acts for its human that wait for the human's confirmation, which these subjects cannot carry.
@@ -414,8 +417,14 @@ impl Permissions {
                     .iter()
                     .any(|prefix| s.starts_with(prefix))
         };
-        as_human
-            .retain(|s| !devices_only.contains(s) && !notify.contains(s) && !unattributed.contains(s) && !withheld(s));
+        let marks_of_its_own = |s: &str| own_marks.iter().any(|k| s.ends_with(k.as_str()));
+        as_human.retain(|s| {
+            !devices_only.contains(s)
+                && !notify.contains(s)
+                && !unattributed.contains(s)
+                && !withheld(s)
+                && !marks_of_its_own(s)
+        });
         publish.extend(as_human);
         let chunks = format!("$O.{FILES_BUCKET}.C");
         publish.push(format!("$JS.API.DIRECT.GET.{FILES_STREAM}.{chunks}.>"));
@@ -432,6 +441,8 @@ impl Permissions {
         ]);
         publish.extend(gets_only(&read_marker_rights(human)));
         publish.extend(gets_only(&thread_rights(human)));
+        // Its human's pins, archives and snoozes, which it sets naming itself.
+        publish.extend([marks_key(human), snoozed_key(human)].map(|k| format!("$KV.{THREADS_BUCKET}.{k}")));
         let attempts = kv_stream(ATTEMPTS_BUCKET);
         publish.push(format!("$JS.API.DIRECT.GET.{attempts}.$KV.{ATTEMPTS_BUCKET}.{human}.unserved.*"));
         let mut seen = std::collections::HashSet::new();

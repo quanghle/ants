@@ -412,6 +412,24 @@ fn only_an_assistant_acts_for_its_human_on_the_subjects_naming_it() {
             assert_eq!(leaf.publish.iter().any(|have| covers(have, s)), carries, "a leaf uplink carrying {s}");
         }
     }
+    // Its human's pins, archives and snoozes, and only its human's of all humans' and assistants'.
+    let marks = ["marks", "snoozed"].map(|k| format!("$KV.ants_threads.{k}.alice"));
+    for (n, other) in others.iter().enumerate() {
+        let held = |s: &String| other.publish.iter().any(|have| covers(have, s));
+        assert!(marks.iter().all(|s| held(s) == (n == 0 || n == 4)), "credentials {n} set alice's marks");
+    }
+    assert!(marks.iter().all(|s| assistant.publish.contains(s)));
+    for own in ["marks", "snoozed"].map(|k| format!("ants_threads.{k}.pa")) {
+        assert!(!assistant.publish.iter().any(|s| s.contains(&own)), "keeps {own}");
+    }
+    for (role, carries) in
+        [(LeafRole::AssistantOf(&alice), true), (LeafRole::Ant, false), (LeafRole::AssistantOf(&bob), false)]
+    {
+        let leaf = Permissions::for_leaf(&m1, [(&pa, role)]);
+        for s in &marks {
+            assert_eq!(leaf.publish.iter().any(|have| covers(have, s)), carries, "a leaf uplink carrying {s}");
+        }
+    }
     let a = Permissions::for_user(&p("dev-a"), Role::Ant);
     for heard in [cancel.subject(), "ants.cancel.dev-a.t1".to_owned(), queue.subject(), "ants.queue.dev-a".to_owned()] {
         assert!(a.subscribe.iter().any(|have| covers(have, &heard)), "the ant's daemon hears {heard}");
@@ -1124,11 +1142,13 @@ fn an_assistant_keeps_its_ant_rights_and_a_humans_under_its_own_name() {
         assert!(human.publish.iter().any(|have| have == s), "{s} is a human's");
         assert!(!assistant.publish.iter().any(|have| covers(have, s)), "{s} is not an assistant's");
     }
-    // Of its human's keys it only reads; it moves no device's key, presence or notifications.
+    // Of its human's keys it only reads but its pins, archives and snoozes; it moves no device's key, presence or
+    // notifications.
     for s in &assistant.publish {
         let key = s.strip_prefix("$JS.API.DIRECT.GET.").and_then(|get| get.split_once('.')).map_or(s.as_str(), |g| g.1);
         let owner = s == "$KV.ants_owners.*.*.alice.pa";
-        assert!(owner || s.starts_with("$JS.API.DIRECT.GET.") || !s.contains(".alice"), "writes {s}");
+        let marks = ["$KV.ants_threads.marks.alice", "$KV.ants_threads.snoozed.alice"].contains(&s.as_str());
+        assert!(owner || marks || s.starts_with("$JS.API.DIRECT.GET.") || !s.contains(".alice"), "writes {s}");
         assert!(!key.starts_with("$KV.ants_reactions.alice"), "reads {s}");
         for bucket in ["ants_devices", "ants_presence", "ants_notify", "ants_humans"] {
             // Save the record of its own credentials, which readers check its acts for its human against.
