@@ -1073,7 +1073,8 @@ async fn ants_record_the_links_they_pass_on_and_read_everyone_s() {
             .with_creator(Some(lead.clone()))
             .spun_off(ThreadId::generate())
     };
-    ants_daemon::links::pass_on(&a_js, &spin(&dev_a, &dev_b)).await.unwrap();
+    let spun = spin(&dev_a, &dev_b);
+    ants_daemon::links::pass_on(&a_js, &spun).await.unwrap();
     let a_kv = a_js.get_key_value(ants_proto::LINKS_BUCKET).await.unwrap();
     for forged in [link_key(&lead, &origin, &dev_b), link_key(&dev_b, &origin, &dev_a)] {
         assert!(a_kv.put(forged, "spoof".into()).await.is_err(), "dev-a records its own links only");
@@ -1085,6 +1086,8 @@ async fn ants_record_the_links_they_pass_on_and_read_everyone_s() {
         assert_eq!(ants_daemon::links::passed_on(js, &origin).await.unwrap(), [(dev_a.clone(), dev_b.clone())]);
     }
     assert!(ants_daemon::links::passed_on(&b_js, &ThreadId::generate()).await.unwrap().is_empty());
+    let passed = ants_daemon::links::Passed { from: dev_a, to: dev_b, on: Some(spun.thread_id) };
+    assert_eq!(ants_daemon::links::passed(&h_js, &origin).await.unwrap(), [passed], "with the thread it went on");
 }
 
 #[tokio::test]

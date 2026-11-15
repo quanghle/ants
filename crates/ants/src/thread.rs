@@ -166,6 +166,9 @@ pub struct Entry {
     /// An inbox message a webhook or schedule sent ([`Envelope::webhook`]).
     #[serde(skip)]
     pub webhook: bool,
+    /// The thread an inbox message's thread was spun off ([`Envelope::origin_thread`]).
+    #[serde(skip)]
+    pub origin: Option<ThreadId>,
 }
 
 /// A tool call an ant stored on its timeline, as a [`Kind::Tool`] entry has it.
@@ -213,6 +216,7 @@ impl Entry {
             tool: None,
             turns: None,
             webhook: false,
+            origin: None,
         }
     }
 
@@ -351,6 +355,7 @@ impl Parser {
             answer,
             turns: Some(e.turn_budget),
             webhook: e.webhook,
+            origin: e.origin_thread,
             ..entry(kind, e.thread_id)
         })
     }
