@@ -8,6 +8,7 @@
 mod channel;
 mod frame;
 mod home;
+mod markdown;
 mod model;
 mod nav;
 mod reads;

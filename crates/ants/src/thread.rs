@@ -589,30 +589,41 @@ fn state(thread: &Summary) -> Option<&'static str> {
 pub fn render(entries: &[Entry]) -> String {
     let mut out = String::new();
     for e in entries {
-        let forged = if e.forged { " (forged)" } else { "" };
-        let note = e.note.as_ref().map_or_default(|n| format!(" [{n}]"));
-        let answering = e.answer.as_ref().map_or_default(|a| match a.option {
-            Some(n) => format!(" [answers {} with option {n}]", a.question),
-            None => format!(" [answers {} as typed]", a.question),
-        });
-        let text = match (&e.question, e.id) {
-            (Some(question), Some(id)) => {
-                let answers = answers_to(e, entries).map(|(by, answered)| answer_line(by, answered)).collect();
-                crate::inbox::render_question(id, question, answers)
-            }
-            _ => e.text.clone(),
-        };
+        let text = body(e, entries);
         let mut lines = text.lines();
         let first = lines.next().unwrap_or("");
-        let kind = e.kind.as_str();
-        let id = e.id.map_or_default(|id| format!(" (message {id})"));
-        let _ = writeln!(out, "{}  {kind:<10}  {}{forged}{note}{answering}{id}: {first}", time(e.stored_at), e.route());
+        let _ = writeln!(out, "{}: {first}", heading(e));
         for line in lines {
             let _ = writeln!(out, "    {line}");
         }
         out.push_str(&crate::inbox::render_reactions(&e.reactions, "    "));
     }
     out
+}
+
+/// What [`render`] shows of an entry before its text: time, kind, route, note, answer and id.
+pub fn heading(e: &Entry) -> String {
+    let forged = if e.forged { " (forged)" } else { "" };
+    let note = e.note.as_ref().map_or_default(|n| format!(" [{n}]"));
+    let answering = e.answer.as_ref().map_or_default(|a| match a.option {
+        Some(n) => format!(" [answers {} with option {n}]", a.question),
+        None => format!(" [answers {} as typed]", a.question),
+    });
+    let kind = e.kind.as_str();
+    let id = e.id.map_or_default(|id| format!(" (message {id})"));
+    format!("{}  {kind:<10}  {}{forged}{note}{answering}{id}", time(e.stored_at), e.route())
+}
+
+/// The text [`render`] shows of an entry among `entries`: a question with its options and its answers among them, else
+/// the entry's text.
+pub fn body(e: &Entry, entries: &[Entry]) -> String {
+    match (&e.question, e.id) {
+        (Some(question), Some(id)) => {
+            let answers = answers_to(e, entries).map(|(by, answered)| answer_line(by, answered)).collect();
+            crate::inbox::render_question(id, question, answers)
+        }
+        _ => e.text.clone(),
+    }
 }
 
 /// The answers among `entries` to `question`, an entry asking one, oldest first, each with who answered: an option
