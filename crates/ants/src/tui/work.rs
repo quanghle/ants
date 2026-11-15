@@ -3,13 +3,13 @@
 
 use std::collections::HashMap;
 
-use ants_proto::{ChannelId, EscalationReason, ThreadId, UserId};
+use ants_proto::{ChannelId, EscalationReason, ThreadDone, ThreadId, UserId, Uuid};
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Rect};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
-use ratatui::text::Line;
-use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
 
 use super::frame::{self, ago};
 use super::model::{Data, Key, To};
@@ -27,11 +27,14 @@ pub enum ThreadState {
     /// An ant has a message on it it did not answer yet.
     WaitingOnAnt,
     Idle,
+    /// A human marked it done, and nothing was said on it since.
+    Done,
 }
 
 impl ThreadState {
     /// The states, as the nav lists them.
-    pub const ALL: [Self; 5] = [Self::WaitingOnMe, Self::Working, Self::WaitingOnAnt, Self::Stuck, Self::Idle];
+    pub const ALL: [Self; 6] =
+        [Self::WaitingOnMe, Self::Working, Self::WaitingOnAnt, Self::Stuck, Self::Idle, Self::Done];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -40,6 +43,7 @@ impl ThreadState {
             Self::Working => "working",
             Self::WaitingOnAnt => "waiting on ant",
             Self::Idle => "idle",
+            Self::Done => "done",
         }
     }
 
@@ -51,6 +55,7 @@ impl ThreadState {
             Self::Working => 2,
             Self::WaitingOnAnt => 3,
             Self::Idle => 4,
+            Self::Done => 5,
         }
     }
 
@@ -61,6 +66,7 @@ impl ThreadState {
             Self::Working => Color::Green,
             Self::WaitingOnAnt => Color::Cyan,
             Self::Idle => Color::DarkGray,
+            Self::Done => Color::Blue,
         }
     }
 }
@@ -105,6 +111,12 @@ pub struct Fact {
     /// The last message given up on.
     dead: Option<Alert>,
     pub latest: Option<Said>,
+    /// The turns left that its latest message, post or note carries.
+    pub turns: Option<u32>,
+    /// Who first messaged each user on it, in the order they were first messaged: who delegated to whom.
+    pub asked: Vec<(UserId, UserId)>,
+    /// The questions to the human no answer was read to yet.
+    questions: Vec<Uuid>,
     /// The messages to the human.
     pub inbox: Vec<Inboxed>,
 }
@@ -129,9 +141,13 @@ impl Facts {
             && matches!(entry.kind, Kind::Message | Kind::Post | Kind::Note)
         {
             fact.sent.insert(from.clone(), entry.seq);
+            fact.turns = entry.turns.or(fact.turns);
         }
         match (entry.kind, &entry.from, &entry.to) {
             (Kind::Message, Some(from), Some(to)) => {
+                if !fact.asked.iter().any(|(_, asked)| asked == to) {
+                    fact.asked.push((from.clone(), to.clone()));
+                }
                 fact.received.insert(to.clone(), entry.seq);
                 fact.latest = Some(Said { seq: entry.seq, at: entry.stored_at, from: from.clone(), to: to.clone() });
             }
@@ -140,6 +156,14 @@ impl Facts {
             }
             (Kind::Dead, _, _) => fact.dead = Some(alert()),
             _ => {}
+        }
+        if let Some(answer) = &entry.answer {
+            fact.questions.retain(|q| *q != answer.question);
+        }
+        if to(entry, me)
+            && let (Some(_), Some(id)) = (&entry.question, entry.id)
+        {
+            fact.questions.push(id);
         }
         if to(entry, me)
             && let Some(from) = &entry.from
@@ -178,11 +202,24 @@ impl Data {
         fact.received.iter().any(|(u, seq)| !self.is_human(u) && fact.sent.get(u).is_none_or(|sent| sent < seq))
     }
 
-    /// Whether an ant answered the human on a thread the human owns, and is done with it: the human's turn.
+    /// The thread's shared done state, while nothing said on it since reopened it.
+    pub fn done(&self, thread: &ThreadId) -> Option<&ThreadDone> {
+        let last = self.live.summary(thread)?.last_reopening;
+        self.cards.done.get(thread).filter(|d| d.holds(last))
+    }
+
+    /// Whether a question to the human on the thread has no answer yet.
+    pub fn asks(&self, thread: &ThreadId) -> bool {
+        self.facts.get(thread).is_some_and(|f| !f.questions.is_empty())
+    }
+
+    /// Whether an ant answered the human on a thread the human owns and nobody marked done, and is done with it: the
+    /// human's turn.
     pub fn finished(&self, thread: &ThreadId) -> bool {
         let (Some(summary), Some(fact)) = (self.live.summary(thread), self.facts.get(thread)) else { return false };
         let Some(latest) = &fact.latest else { return false };
-        summary.owner.as_ref() == Some(self.me())
+        self.done(thread).is_none()
+            && summary.owner.as_ref() == Some(self.me())
             && latest.to == *self.me()
             && !self.is_human(&latest.from)
             && !self.live.progress.contains_key(thread)
@@ -195,10 +232,14 @@ impl Data {
     }
 
     pub fn state(&self, thread: &ThreadId) -> ThreadState {
+        if self.done(thread).is_some() {
+            return ThreadState::Done;
+        }
         if self.stuck(thread).is_some() {
             return ThreadState::Stuck;
         }
         if self.live.approvals.iter().any(|r| r.thread_id == *thread)
+            || self.asks(thread)
             || self.unread_on(thread).next().is_some()
             || self.finished(thread)
         {
@@ -310,41 +351,135 @@ impl Page {
             frame.render_widget(Paragraph::new(text).block(block), area);
             return;
         }
-        let me = data.me();
-        let table: Vec<Row> = rows
-            .iter()
-            .map(|(thread, state)| {
-                let summary = data.live.summary(thread);
-                let ants: Vec<&str> =
-                    summary.iter().flat_map(|s| &s.users).filter(|u| !data.is_human(u)).map(UserId::as_str).collect();
-                let owner =
-                    summary.and_then(|s| s.owner.as_ref()).map_or("-", |o| if o == me { "me" } else { o.as_str() });
-                let age = summary.map_or_else(String::new, |s| ago(s.last_at, now));
-                let doing = data.live.progress_of(thread, 60).map_or_else(String::new, |(line, _)| line);
-                Row::new(vec![
-                    Cell::from(state.label()).style(Style::new().fg(state.color())),
-                    Cell::from(data.title(thread)),
-                    Cell::from(ants.join(",")),
-                    Cell::from(owner.to_owned()),
-                    Cell::from(age),
-                    Cell::from(doing),
-                ])
-            })
-            .collect();
+        let at = self.at(&rows);
+        let (list, detail) = if area.height >= DETAIL_HEIGHT * 2 {
+            let [list, detail] = Layout::vertical([Constraint::Min(3), Constraint::Length(DETAIL_HEIGHT)]).areas(area);
+            (list, Some(detail))
+        } else {
+            (area, None)
+        };
+        let table: Vec<Row> = rows.iter().map(|(thread, state)| row(data, thread, *state, now)).collect();
         let widths = [
             Constraint::Length(14),
             Constraint::Fill(3),
             Constraint::Fill(1),
             Constraint::Length(8),
+            Constraint::Length(5),
+            Constraint::Length(7),
             Constraint::Length(8),
             Constraint::Fill(2),
         ];
-        let header = Row::new(["STATE", "THREAD", "ANTS", "OWNER", "AGE", "NOW"]).style(frame::dim());
+        let header = Row::new(["STATE", "THREAD", "ANTS", "OWNER", "TURNS", "SPEND", "AGE", "NOW"]).style(frame::dim());
         let table =
             Table::new(table, widths).header(header).block(block).row_highlight_style(frame::highlight(focused));
-        let mut state = TableState::default().with_selected(Some(self.at(&rows)));
-        frame.render_stateful_widget(table, area, &mut state);
+        let mut state = TableState::default().with_selected(Some(at));
+        frame.render_stateful_widget(table, list, &mut state);
+        if let (Some(detail), Some((thread, _))) = (detail, rows.get(at)) {
+            let block = frame::block(" Selected ".to_owned(), false);
+            let width = usize::from(detail.width.saturating_sub(2));
+            let paragraph = Paragraph::new(card(data, thread, now, width)).block(block).wrap(Wrap { trim: false });
+            frame.render_widget(paragraph, detail);
+        }
     }
+}
+
+/// How tall the selected thread's card is, borders included.
+const DETAIL_HEIGHT: u16 = 7;
+
+/// A cost, such as `$0.42`.
+pub fn dollars(cost: f64) -> String {
+    format!("${cost:.2}")
+}
+
+/// The thread's row in the work view.
+fn row(data: &Data, thread: &ThreadId, state: ThreadState, now: DateTime<Utc>) -> Row<'static> {
+    let me = data.me();
+    let summary = data.live.summary(thread);
+    let ants: Vec<&str> =
+        summary.iter().flat_map(|s| &s.users).filter(|u| !data.is_human(u)).map(UserId::as_str).collect();
+    let owner = summary.and_then(|s| s.owner.as_ref()).map_or("-", |o| if o == me { "me" } else { o.as_str() });
+    let turns = data.facts.get(thread).and_then(|f| f.turns).map_or_else(|| "-".to_owned(), |t| t.to_string());
+    let spend = data.cards.spent(thread).map_or_else(|| "-".to_owned(), |s| dollars(s.cost));
+    let age = summary.map_or_else(String::new, |s| ago(s.last_at, now));
+    Row::new(vec![
+        Cell::from(state.label()).style(Style::new().fg(state.color())),
+        Cell::from(data.title(thread)),
+        Cell::from(ants.join(",")),
+        Cell::from(owner.to_owned()),
+        Cell::from(turns),
+        Cell::from(spend),
+        Cell::from(age),
+        Cell::from(doing(data, thread, 60)),
+    ])
+}
+
+/// What happens on the thread now, in at most `width` characters: a tool request or a question waiting for the
+/// human, else the ants' progress.
+pub fn doing(data: &Data, thread: &ThreadId, width: usize) -> String {
+    if data.live.approvals.iter().any(|r| r.thread_id == *thread) {
+        "approval".to_owned()
+    } else if data.asks(thread) {
+        "question".to_owned()
+    } else {
+        data.live.progress_of(thread, width).map_or_else(String::new, |(line, _)| line)
+    }
+}
+
+/// The selected thread's card, in lines of `width`: its TL;DR, and who delegated to whom on it.
+fn card(data: &Data, thread: &ThreadId, now: DateTime<Utc>, width: usize) -> Vec<Line<'static>> {
+    let label = |text: &'static str| Span::styled(text, frame::dim());
+    let tldr = match data.cards.tldr.get(thread) {
+        Some(t) => {
+            let last = data.live.summary(thread).map_or(0, |s| s.last_reopening);
+            let stale = if t.is_current(last) { "" } else { ", stale" };
+            let about = format!(" ({}, {}{stale})", t.by, ago(t.at, now));
+            let text = crate::excerpt(&t.text, (width * 3).saturating_sub(about.len() + 8));
+            vec![Span::raw(text), Span::styled(about, frame::dim())]
+        }
+        None => vec![Span::styled("none kept: `ants thread tldr` asks for one", frame::dim())],
+    };
+    let chain = chain(data, thread)
+        .into_iter()
+        .map(|path| {
+            path.iter()
+                .map(|user| match data.cards.spent_by(thread, user) {
+                    Some(s) => format!("{user} {}", dollars(s.cost)),
+                    None => user.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(" → ")
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    vec![Line::from([vec![label("TL;DR  ")], tldr].concat()), Line::from(vec![label("Chain  "), Span::raw(chain)])]
+}
+
+/// Who delegated to whom on the thread, as paths from its owner (else whoever spoke first) through each user first
+/// messaged by the one before: the first path in full, each later one from where it branches off.
+pub fn chain(data: &Data, thread: &ThreadId) -> Vec<Vec<UserId>> {
+    let Some(fact) = data.facts.get(thread) else { return Vec::new() };
+    let owner = data.live.summary(thread).and_then(|s| s.owner.clone());
+    let Some(root) = owner.or_else(|| fact.asked.first().map(|(from, _)| from.clone())) else { return Vec::new() };
+    let mut paths = Vec::new();
+    let mut seen = vec![root.clone()];
+    let mut stack = vec![vec![root]];
+    while let Some(path) = stack.pop() {
+        let last = path.last().expect("a path");
+        let next: Vec<&UserId> =
+            fact.asked.iter().filter(|(from, to)| from == last && !seen.contains(to)).map(|(_, to)| to).collect();
+        if next.is_empty() {
+            if path.len() > 1 {
+                paths.push(path);
+            }
+            continue;
+        }
+        seen.extend(next.iter().map(|u| (*u).clone()));
+        for (i, to) in next.into_iter().enumerate().rev() {
+            let from = if i == 0 { path.clone() } else { vec![last.clone()] };
+            stack.push([from, vec![to.clone()]].concat());
+        }
+    }
+    paths
 }
 
 /// The line under the title of an open thread: its state, and why.
@@ -355,6 +490,8 @@ pub fn why(data: &Data, thread: &ThreadId) -> Line<'static> {
         ThreadState::WaitingOnMe if data.live.approvals.iter().any(|r| r.thread_id == *thread) => {
             Some("a tool request waits for a decision".to_owned())
         }
+        ThreadState::WaitingOnMe if data.asks(thread) => Some("a question waits for an answer".to_owned()),
+        ThreadState::Done => data.done(thread).map(|d| format!("by {}", d.by)),
         ThreadState::WaitingOnMe => data.unread_on(thread).last().map(|i| format!("{}: {}", i.from, i.text)),
         _ => None,
     };
@@ -446,6 +583,104 @@ mod tests {
         };
         m.data.live.approval(&crate::tools::Update::Pending(push));
         assert_eq!(state(&m, &asked), ThreadState::WaitingOnMe);
+    }
+
+    #[test]
+    fn a_done_thread_stays_done_until_something_is_said_on_it() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let mut opening = message(1, &thread, "alice", "dev-a", "deploy");
+        opening.owner = Some(user("alice"));
+        m.stored(vec![opening, message(2, &thread, "dev-a", "alice", "deployed")], at(2));
+        m.data.marker.as_mut().unwrap().mark(2);
+        assert_eq!(state(&m, &thread), ThreadState::WaitingOnMe);
+        m.data.cards.done.insert(thread.clone(), ThreadDone::new(thread.clone(), user("bob"), 2));
+        assert_eq!(state(&m, &thread), ThreadState::Done, "done comes first, for every human");
+        assert!(!m.data.finished(&thread), "nothing to review once done");
+        assert_eq!(why(&m.data, &thread).to_string(), "done: by bob");
+        m.stored(vec![message(3, &thread, "dev-a", "alice", "one more thing")], at(3));
+        assert_eq!(state(&m, &thread), ThreadState::WaitingOnMe, "reopened");
+    }
+
+    #[test]
+    fn a_question_to_the_human_waits_on_it_until_answered() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let mut asked = message(1, &thread, "dev-a", "alice", "Which policy?");
+        asked.question = Some(ants_proto::Question::new("Which policy?", &["a".into(), "b".into()], true).unwrap());
+        m.stored(vec![asked.clone()], at(1));
+        m.data.marker.as_mut().unwrap().mark(1);
+        assert_eq!(state(&m, &thread), ThreadState::WaitingOnMe, "read, but not answered");
+        assert_eq!(doing(&m.data, &thread, 60), "question");
+        let mut answer = message(2, &thread, "alice", "dev-a", "a");
+        answer.answer = Some(ants_proto::Answer { question: asked.id.unwrap(), option: Some(1) });
+        m.stored(vec![answer], at(2));
+        assert_eq!(state(&m, &thread), ThreadState::WaitingOnAnt);
+        assert_eq!(doing(&m.data, &thread, 60), "");
+    }
+
+    #[test]
+    fn the_chain_follows_who_messaged_whom_first() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let mut opening = message(1, &thread, "alice", "dev-a", "deploy");
+        opening.owner = Some(user("alice"));
+        m.stored(
+            vec![
+                opening,
+                message(2, &thread, "dev-a", "dev-b", "is it read?"),
+                message(3, &thread, "dev-b", "dev-a", "no"),
+                message(4, &thread, "dev-a", "scout", "audit"),
+                message(5, &thread, "scout", "reviewer", "review"),
+                message(6, &thread, "dev-a", "alice", "done"),
+            ],
+            at(6),
+        );
+        let names = |paths: Vec<Vec<UserId>>| -> Vec<Vec<String>> {
+            paths.into_iter().map(|p| p.iter().map(ToString::to_string).collect()).collect()
+        };
+        assert_eq!(
+            names(chain(&m.data, &thread)),
+            [vec!["alice", "dev-a", "dev-b"], vec!["dev-a", "scout", "reviewer"]]
+        );
+    }
+
+    #[test]
+    fn the_work_view_shows_turns_spend_and_the_selected_card() {
+        use ants_daemon::caps::Spent;
+        use ants_proto::ThreadSummary;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let mut opening = message(1, &thread, "alice", "dev-a", "deploy the site");
+        (opening.owner, opening.turns) = (Some(user("alice")), Some(8));
+        let mut asked = message(2, &thread, "dev-a", "dev-b", "is it read?");
+        asked.turns = Some(5);
+        m.stored(vec![opening, asked], at(2));
+        let spent = |cost| Spent { tokens: 100, cost };
+        m.data.cards.spend.insert(thread.clone(), vec![(user("dev-a"), spent(0.38)), (user("dev-b"), spent(0.04))]);
+        let tldr = ThreadSummary {
+            thread_id: thread.clone(),
+            text: "The migration lacks a default.".to_owned(),
+            by: user("messenger"),
+            asker: user("alice"),
+            at: at(1),
+            upto: 1,
+            tokens: 10,
+        };
+        m.data.cards.tldr.insert(thread, tldr);
+        let page = Page::new(Filter::default());
+        let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
+        terminal.draw(|f| page.draw(f, f.area(), &m.data, at(62), true)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let cells: Vec<&str> = buffer.content.iter().map(ratatui::buffer::Cell::symbol).collect();
+        let shown = cells.chunks(120).map(<[&str]>::concat).collect::<Vec<_>>().join("\n");
+        assert!(shown.contains("TURNS SPEND"), "{shown}");
+        assert!(shown.contains("me       5     $0.42   1m ago"), "{shown}");
+        assert!(shown.contains("TL;DR  The migration lacks a default. (messenger, 1m ago, stale)"), "{shown}");
+        assert!(shown.contains("Chain  alice → dev-a $0.38 → dev-b $0.04"), "{shown}");
     }
 
     #[test]

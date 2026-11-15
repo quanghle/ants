@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
 use super::model::{Focus, Level, Model, Page};
-use super::{channel, home, nav, search, thread, work};
+use super::{channel, compact, home, nav, search, thread, work};
 use crate::live::Link;
 use crate::roster;
 
@@ -38,6 +38,9 @@ pub fn highlight(focused: bool) -> Style {
 }
 
 pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
+    if model.compact {
+        return compact::draw(frame, model, now);
+    }
     let [header, body, footer] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)]).areas(frame.area());
     frame.render_widget(Paragraph::new(header_line(model, now)), header);

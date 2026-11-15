@@ -7,8 +7,10 @@
 //! which draws it and takes its keys.
 
 mod acts;
+mod cards;
 mod channel;
 mod command;
+mod compact;
 mod complete;
 mod dm;
 mod exec;
@@ -20,6 +22,7 @@ mod nav;
 mod people;
 mod reads;
 mod search;
+mod status;
 mod thread;
 mod timeline;
 mod work;
@@ -44,6 +47,8 @@ use self::reads::Reads;
 use self::search::Searches;
 use crate::live::{self, Feed, Screen};
 use crate::{compose, presence, progress, thread_meta};
+
+pub use self::status::run as status;
 
 /// How far back `ants chat` reads threads unless told otherwise, as `ants` alone does.
 pub const SINCE: Duration = Duration::from_hours(7 * 24);
@@ -117,7 +122,8 @@ fn host(url: &str) -> &str {
     rest.split(['/', '?', '#']).next().unwrap_or(rest)
 }
 
-pub async fn run(nats: &crate::Nats<'_>, since: Duration) -> Result<()> {
+/// `ants chat`, as the two-line pane when `compact`.
+pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Result<()> {
     terminal_check(std::io::stdin().is_terminal(), std::io::stdout().is_terminal())?;
     let me = &nats.me.id;
     if !nats.me.role.is_human() {
@@ -142,20 +148,13 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration) -> Result<()> {
     let may_read = nats.rights.may_publish(&presence::online_right());
     let people = people::Io::new(js.clone(), nats.domain.cloned(), nats.me.clone(), may_read);
     let searches = Searches::new(js.clone());
-    let server = host(nats.url).to_owned();
+    let cards = cards::Io::new(cards::Source::open(nats, &js).await);
+    let mut model = Model::new(state, host(nats.url).to_owned());
+    model.compact = compact;
     // The UI shows the replies and the tool requests as they come, so notifications spare this device theirs meanwhile.
     let shown = async {
         let mut screen = Screen::open()?;
-        let chat = Chat {
-            feed,
-            reads,
-            acts,
-            people,
-            searches,
-            exec: Exec::new(ctx),
-            model: Model::new(state, server),
-            edit: None,
-        };
+        let chat = Chat { feed, reads, acts, people, searches, cards, exec: Exec::new(ctx), model, edit: None };
         Box::pin(chat.run(&mut screen.terminal)).await
     };
     let (domain, device) = (nats.domain, nats.device);
@@ -202,6 +201,7 @@ struct Chat {
     acts: Acts,
     people: people::Io,
     searches: Searches,
+    cards: cards::Io,
     model: Model,
     /// The command bar's text to edit in the editor.
     edit: Option<String>,
@@ -231,6 +231,7 @@ impl Chat {
                         }
                         logged = log;
                     }
+                    self.cards.threads(&self.model.data.live.order);
                     if dirty || drawn.elapsed() >= REDRAW {
                         terminal.draw(|f| frame::draw(f, &self.model, Utc::now())).context("drawing")?;
                         (dirty, drawn) = (false, Instant::now());
@@ -263,6 +264,11 @@ impl Chat {
                 found = self.searches.next() => {
                     dirty = true;
                     self.model.found(found);
+                    Vec::new()
+                }
+                read = self.cards.next() => {
+                    dirty = true;
+                    self.model.cards(read, Utc::now());
                     Vec::new()
                 }
             };
@@ -328,6 +334,7 @@ impl Chat {
                 self.reads.refresh();
                 self.acts.refresh();
                 self.people.refresh();
+                self.cards.refresh();
                 if let Some(thread) = self.model.open_thread() {
                     self.feed.load_history(thread, true);
                 }
