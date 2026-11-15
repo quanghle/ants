@@ -10,5 +10,8 @@ expression: value
   "title": "cargo test",
   "tool_kind": "execute",
   "status": "in_progress",
+  "paths": [
+    "crates/ants/src/main.rs"
+  ],
   "at": "2025-01-01T12:00:00Z"
 }

@@ -149,7 +149,7 @@ impl Machine {
 
     /// What the hub's [`STREAM`] admits from the machine's outbox for `user` in `role`, as pairs of an
     /// [`INTAKE_STREAM`] subject filter and the subject it is stored under: exactly the inbox, notes and channel
-    /// subjects the user may publish itself ([`subject::sendable`]), and for an ant its own dead letters.
+    /// subjects the user may publish itself ([`subject::sendable`]), and for an ant its own dead letters and timeline.
     /// With `inbox` false, no inbox subjects: a human's admission takes every inbox subject of a machine it is on, and
     /// the filters of one stream's sources may not overlap. A human's dead letters, of any ant, are written from
     /// what only the hub holds, so none are buffered.
@@ -157,7 +157,7 @@ impl Machine {
         let [own_inbox, own_notes, own_chan] = subject::sendable(user, role);
         let mut patterns = if inbox { vec![own_inbox, own_notes, own_chan] } else { vec![own_notes, own_chan] };
         if !role.is_human() {
-            patterns.push(subject::dead(user));
+            patterns.extend([subject::dead(user), subject::timeline_from(user)]);
         }
         patterns
             .into_iter()

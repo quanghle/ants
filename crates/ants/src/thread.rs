@@ -1,5 +1,5 @@
 //! `ants thread`: the threads in the ANTS stream, across inboxes (both ways), channel posts, notes, escalations, tool
-//! requests and their decisions, and dead letters.
+//! requests and their decisions, dead letters, and the tool calls ants stored on their timelines.
 //!
 //! Read back by a human by message gets (batched direct gets, [`Reading::Gets`]), so nothing is consumed or acked
 //! and no consumer is left behind. Only notes subjects name their thread, so a read goes through every message stored
@@ -16,7 +16,8 @@ use ants_daemon::reactions::Reacted;
 use ants_daemon::reading::{self, Reading};
 use ants_proto::{
     Answer, Answered, ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, Envelope,
-    EscalationReason, Humans, Mark, NotesPost, Question, ThreadId, ThreadMarks, UserId, Uuid, subject,
+    EscalationReason, Humans, Mark, NotesPost, Question, ThreadId, ThreadMarks, Timeline, Timelines, UserId, Uuid,
+    subject,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream::stream::LastRawMessageErrorKind;
@@ -60,6 +61,9 @@ pub enum Kind {
     Decision,
     /// A message an ant gave up on.
     Dead,
+    /// A tool call an ant made, from its timeline records: not a message, so not searched.
+    #[value(skip)]
+    Tool,
 }
 
 impl Kind {
@@ -73,6 +77,7 @@ impl Kind {
             Self::Approval => "approval",
             Self::Decision => "decision",
             Self::Dead => "dead",
+            Self::Tool => "tool",
         }
     }
 
@@ -135,6 +140,26 @@ pub struct Entry {
     /// ([`Envelope::answers`]); an invalid one, or one to a question not read, leaves an ordinary message.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub answer: Option<Answer>,
+    /// A tool call's details, its title the text and its ant the sender.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<ToolCall>,
+}
+
+/// A tool call an ant stored on its timeline, as a [`Kind::Tool`] entry has it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ToolCall {
+    /// The call's id, unique within its prompt.
+    pub call_id: String,
+    /// The message whose prompt made the call.
+    pub message: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
 }
 
 impl Entry {
@@ -157,6 +182,29 @@ impl Entry {
             suggested_title: None,
             question: None,
             answer: None,
+            tool: None,
+        }
+    }
+
+    /// The entry of a tool call merged from timeline records, the last of them stored at `seq`.
+    fn tool(seq: u64, merged: &ants_proto::MergedCall) -> Self {
+        let call = &merged.call;
+        let tool = ToolCall {
+            call_id: call.id.clone(),
+            message: merged.message,
+            tool_kind: call.tool_kind.clone(),
+            status: call.status.clone(),
+            duration_ms: call.duration_ms,
+            paths: call.paths.clone(),
+        };
+        let note = [tool.tool_kind.clone(), tool.status.clone(), tool.duration_ms.map(took)];
+        let note = note.into_iter().flatten().collect::<Vec<_>>().join(", ");
+        Self {
+            from: Some(merged.ant.clone()),
+            note: (!note.is_empty()).then_some(note),
+            text: call.title.clone(),
+            tool: Some(tool),
+            ..Self::new(seq, call.started, Kind::Tool, merged.thread_id.clone())
         }
     }
 
@@ -615,6 +663,15 @@ pub fn render(entries: &[Entry]) -> String {
     out
 }
 
+/// How long a tool call took: `840ms`, `2.1s`, `3m`.
+fn took(ms: u64) -> String {
+    match ms {
+        0..1000 => format!("{ms}ms"),
+        1000..60_000 => format!("{:.1}s", Duration::from_millis(ms).as_secs_f64()),
+        _ => ants_proto::duration::format(Duration::from_millis(ms)),
+    }
+}
+
 /// The answers among `entries` to `question`, an entry asking one, oldest first, each with who answered: an option
 /// picked or a typed answer, the answer's text.
 pub fn answers_to<'a>(question: &'a Entry, entries: &'a [Entry]) -> impl Iterator<Item = (&'a Entry, Answered<'a>)> {
@@ -1046,15 +1103,40 @@ fn marked_start<'a>(threads: impl Iterator<Item = &'a ThreadId>) -> Option<consu
 }
 
 /// Every message stored on `thread`, in stream order, with the reactions to each: read from `since` ago, else from the
-/// thread's start when its id is time-ordered, else from all the stream keeps.
-pub async fn history(js: &jetstream::Context, thread: &ThreadId, since: Option<Duration>) -> Result<Vec<Entry>> {
+/// thread's start when its id is time-ordered, else from all the stream keeps. With `tools`, the tool calls its ants
+/// stored on their timelines too, each once as its latest record has it ([`timeline`]), placed by when it started.
+pub async fn history(
+    js: &jetstream::Context,
+    thread: &ThreadId,
+    since: Option<Duration>,
+    tools: bool,
+) -> Result<Vec<Entry>> {
     let mut entries = Vec::new();
-    scan(js, show_start(thread, since), |entry| {
-        if entry.thread_id == *thread {
+    let mut parser = Parser::default();
+    let mut timelines = Timelines::default();
+    let mut seqs = HashMap::new();
+    let start = show_start(thread, since);
+    reading::read_back(js, "", Reading::Gets, subject::ALL, start, |seq, stored, subject, payload| {
+        if let Some((on, _)) = subject::parse_timeline(subject) {
+            if tools && on == *thread {
+                add_timeline(&mut timelines, &mut seqs, seq, subject, payload);
+            }
+        } else if let Some(entry) = parser.entry(seq, stored.into(), subject, payload)
+            && entry.thread_id == *thread
+        {
             entries.push(entry);
         }
+        ControlFlow::Continue(())
     })
     .await?;
+    if !timelines.is_empty() {
+        let calls = timelines.calls().iter().map(|call| {
+            let key = (call.ant.clone(), call.message, call.call.id.clone());
+            Entry::tool(seqs.get(&key).copied().unwrap_or_default(), call)
+        });
+        entries.extend(calls);
+        entries.sort_by_key(|e| e.stored_at);
+    }
     let ids: Vec<Uuid> = entries.iter().filter_map(|e| e.id).collect();
     let mut reactions = crate::inbox::reactions_or_none(js, &ids).await;
     for entry in &mut entries {
@@ -1063,6 +1145,33 @@ pub async fn history(js: &jetstream::Context, thread: &ThreadId, since: Option<D
         }
     }
     Ok(entries)
+}
+
+/// Merge the timeline record stored at `seq` on `subject`, noting it as the last of each call it holds.
+fn add_timeline(
+    timelines: &mut Timelines,
+    seqs: &mut HashMap<(UserId, Uuid, String), u64>,
+    seq: u64,
+    subject: &str,
+    payload: &[u8],
+) {
+    let Ok(record) = serde_json::from_slice::<Timeline>(payload) else {
+        tracing::debug!(seq, subject, "skipping a timeline record that does not parse");
+        return;
+    };
+    let calls: Vec<_> = record
+        .entries
+        .iter()
+        .filter_map(|e| match e {
+            ants_proto::TimelineEntry::Tool(call) => Some((record.ant.clone(), record.message, call.id.clone())),
+            _ => None,
+        })
+        .collect();
+    if timelines.add(subject, record) {
+        seqs.extend(calls.into_iter().map(|key| (key, seq)));
+    } else {
+        tracing::debug!(seq, subject, "skipping a timeline record its subject does not name");
+    }
 }
 
 /// When the last message stored on `thread` was, reading from the thread's start when its id is time-ordered, else
@@ -1078,17 +1187,25 @@ pub async fn last_activity(js: &jetstream::Context, thread: &ThreadId) -> Result
     Ok(last)
 }
 
-/// `ants thread show THREAD`: every message stored on the thread `pick` picks, in the order the stream stored them.
-pub async fn show(nats: &crate::Nats<'_>, pick: Pick, since: Option<Duration>, json: bool) -> Result<()> {
+/// `ants thread show THREAD`: every message stored on the thread `pick` picks, in the order the stream stored them,
+/// and unless `no_tools` the tool calls its ants made.
+pub async fn show(
+    nats: &crate::Nats<'_>,
+    pick: Pick,
+    since: Option<Duration>,
+    json: bool,
+    no_tools: bool,
+) -> Result<()> {
     let auto_archive = crate::defaults::auto_archive()?;
     let js = connect(nats).await?;
     let thread = &pick.resolve(&js, &nats.me).await?;
-    let entries = history(&js, thread, since).await?;
+    let entries = history(&js, thread, since, !no_tools).await?;
     let suggested = entries.iter().find_map(|e| Some((e.from.as_ref()?, e.suggested_title.as_deref()?)));
     let thread_meta::About { title, mark, done } = if json {
         thread_meta::About::default()
     } else {
-        thread_meta::of_or_none(nats, &js, thread, &entries, suggested, auto_archive).await
+        let messages: Vec<Entry> = entries.iter().filter(|e| e.kind != Kind::Tool).cloned().collect();
+        thread_meta::of_or_none(nats, &js, thread, &messages, suggested, auto_archive).await
     };
     if json {
         for entry in &entries {

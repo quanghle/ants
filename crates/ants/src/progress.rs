@@ -193,7 +193,7 @@ impl Status {
             StatusUpdate::Approval { request_id } => Stand::Approval(Some(*request_id)),
             StatusUpdate::Message { .. } => Stand::Writing,
             StatusUpdate::Thought { .. } => Stand::Thinking,
-            StatusUpdate::Tool { id, title, tool_kind, status } => {
+            StatusUpdate::Tool { id, title, tool_kind, status, .. } => {
                 let done = matches!(status.as_deref(), Some("completed" | "failed"));
                 match &view.stand {
                     Stand::Tool { id: current, .. } if current == id && done => Stand::Working,
@@ -321,7 +321,7 @@ mod tests {
 
     fn tool(title: Option<&str>, status: &str) -> StatusUpdate {
         let title = title.map(str::to_owned);
-        StatusUpdate::Tool { id: "c1".to_owned(), title, tool_kind: None, status: Some(status.to_owned()) }
+        StatusUpdate::Tool { id: "c1".to_owned(), title, tool_kind: None, status: Some(status.to_owned()), paths: None }
     }
 
     #[test]

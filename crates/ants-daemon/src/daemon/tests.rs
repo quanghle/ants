@@ -199,6 +199,7 @@ impl Bus {
             humans: &self.humans,
             retry_delay: Duration::from_millis(300),
             progress_every,
+            timeline_every: Some(Duration::from_millis(300)),
             sign_in: SignIn::default(),
             sign_in_every: Duration::from_millis(300),
             breaker: Breaker::default(),
@@ -398,6 +399,7 @@ async fn progress_streams_to_the_status_subject() {
             title: Some("tool".to_owned()),
             tool_kind: Some("other".to_owned()),
             status: Some("pending".to_owned()),
+            paths: None,
         };
         assert_eq!(
             updates,
@@ -408,6 +410,47 @@ async fn progress_streams_to_the_status_subject() {
                 StatusUpdate::State { state: State::Idle },
             ]
         );
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+}
+
+#[tokio::test]
+async fn tool_calls_are_stored_on_the_thread_timeline() {
+    let Some((bus, mut replies)) = Bus::start().await else { return };
+    let (launch, _, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let t1 = ThreadId::generate();
+    let (sent, _) = bus.send(&t1, "tools 2").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        assert_eq!(next_reply(&mut replies).await, (t1.clone(), "tools 2".to_owned()));
+        let subject = subject::timeline(&t1, &bus.dev);
+        let msg = timeout(WAIT, async {
+            loop {
+                if let Ok(msg) = bus.stream.direct_get_last_for_subject(&subject).await {
+                    break msg;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("no timeline record");
+        let record: ants_proto::Timeline = serde_json::from_slice(&msg.payload).unwrap();
+        assert_eq!(record.check_subject(&msg.subject), Ok(()));
+        assert_eq!(record.message, sent.id);
+        let calls: Vec<_> = record
+            .entries
+            .iter()
+            .map(|e| match e {
+                ants_proto::TimelineEntry::Tool(call) => {
+                    (call.id.as_str(), call.title.as_str(), call.status.as_deref())
+                }
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(calls, [("call-0", "tool", Some("pending")), ("call-1", "tool", Some("pending"))]);
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);

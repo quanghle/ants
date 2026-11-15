@@ -14,10 +14,10 @@ use agent_client_protocol::v1::schema::{
     PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOptions, SessionId,
     SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest,
-    TextContent, ToolCall, ToolCallId, ToolCallUpdate,
+    TextContent, ToolCall, ToolCallId, ToolCallLocation, ToolCallUpdate,
 };
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, DynConnectTo};
-use ants_proto::{HarnessAgent, PlanStep, StatusUpdate, ThreadId};
+use ants_proto::{HarnessAgent, MAX_TOOL_PATHS, PlanStep, StatusUpdate, ThreadId};
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde::Deserialize;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
@@ -1048,8 +1048,8 @@ fn strip(call: &mut ToolCall) {
     call.raw_output = None;
 }
 
-/// The status update a session update streams, if any. A tool call update counts only when its title or status
-/// changes, not for every piece of output.
+/// The status update a session update streams, if any. A tool call update counts only when its title, status or
+/// locations change, not for every piece of output.
 fn progress(update: &SessionUpdate) -> Option<StatusUpdate> {
     Some(match update {
         SessionUpdate::AgentMessageChunk(chunk) => match &chunk.content {
@@ -1065,13 +1065,17 @@ fn progress(update: &SessionUpdate) -> Option<StatusUpdate> {
             title: Some(call.title.clone()),
             tool_kind: name(&call.kind),
             status: name(&call.status),
+            paths: paths(&call.locations),
         },
-        SessionUpdate::ToolCallUpdate(call) if call.fields.title.is_some() || call.fields.status.is_some() => {
+        SessionUpdate::ToolCallUpdate(call)
+            if call.fields.title.is_some() || call.fields.status.is_some() || call.fields.locations.is_some() =>
+        {
             StatusUpdate::Tool {
                 id: call.tool_call_id.to_string(),
                 title: call.fields.title.clone(),
                 tool_kind: call.fields.kind.as_ref().and_then(name),
                 status: call.fields.status.as_ref().and_then(name),
+                paths: call.fields.locations.as_deref().and_then(paths),
             }
         }
         SessionUpdate::Plan(plan) => StatusUpdate::Plan {
@@ -1083,6 +1087,13 @@ fn progress(update: &SessionUpdate) -> Option<StatusUpdate> {
         },
         _ => return None,
     })
+}
+
+/// The paths of a tool call's first [`MAX_TOOL_PATHS`] locations; None when it has none.
+fn paths(locations: &[ToolCallLocation]) -> Option<Vec<String>> {
+    let paths: Vec<String> =
+        locations.iter().take(MAX_TOOL_PATHS).map(|l| l.path.to_string_lossy().into_owned()).collect();
+    (!paths.is_empty()).then_some(paths)
 }
 
 /// The wire name of an ACP enum value.

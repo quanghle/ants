@@ -1,5 +1,6 @@
-//! The JetStream objects `ants init` sets up on the hub, the `ANTS` stream, the KV buckets and the attachments' store. [`check`] finds those
-//! missing and [`apply`] creates one with this version's configuration; an object already there is left as it is.
+//! The JetStream objects `ants init` sets up on the hub, the `ANTS` stream, the KV buckets and the attachments' store.
+//! [`check`] finds those missing and [`apply`] creates one with this version's configuration; an object already there
+//! is left as it is, except that the stream gains the subjects added since it was created ([`STREAM_SUBJECTS`]).
 //!
 //! An object whose stream info the credentials do not get, as the presence bucket for every human's, cannot be
 //! checked: [`init`] creates it all the same, which changes nothing when it exists with the same settings.
@@ -128,6 +129,10 @@ impl Object {
 
     async fn check(self, js: &jetstream::Context) -> Option<Problem> {
         match js.get_stream(self.stream_name()).await {
+            Ok(stream) if self == Self::Stream => {
+                let missing = uncaptured(&stream.cached_info().config.subjects);
+                (!missing.is_empty()).then_some(Problem::Outdated(missing))
+            }
             Ok(_) => None,
             Err(e) if not_found(&e) => Some(Problem::Missing),
             Err(e) => Some(Problem::Unchecked(e.to_string())),
@@ -169,6 +174,20 @@ enum Spec {
     Bucket(Box<kv::Config>),
 }
 
+/// The subjects of [`STREAM_SUBJECTS`] missing from `subjects`.
+fn uncaptured(subjects: &[String]) -> Vec<String> {
+    STREAM_SUBJECTS.iter().filter(|s| !subjects.iter().any(|have| have == *s)).map(|s| (*s).to_owned()).collect()
+}
+
+/// Add the subjects of [`STREAM_SUBJECTS`] the `ANTS` stream lacks, keeping the rest of its configuration.
+async fn capture_all(js: &jetstream::Context) -> Result<()> {
+    let object = Object::Stream;
+    let stream = js.get_stream(STREAM).await.with_context(|| format!("looking up {object}"))?;
+    let mut config = stream.cached_info().config.clone();
+    config.subjects.extend(uncaptured(&config.subjects));
+    js.update_stream(&config).await.map(drop).with_context(|| format!("updating the subjects of {object}"))
+}
+
 fn not_found(e: &GetStreamError) -> bool {
     matches!(e.kind(), GetStreamErrorKind::JetStream(e) if e.error_code() == ErrorCode::STREAM_NOT_FOUND)
 }
@@ -177,11 +196,13 @@ fn not_found(e: &GetStreamError) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Problem {
     Missing,
+    /// The `ANTS` stream does not capture these subjects, added since it was created.
+    Outdated(Vec<String>),
     /// Its stream info could not be had, for this reason.
     Unchecked(String),
 }
 
-/// An object [`check`] found missing or impossible to check.
+/// An object [`check`] found missing, outdated or impossible to check.
 #[derive(Debug, Clone)]
 pub struct Finding {
     pub object: Object,
@@ -202,7 +223,16 @@ impl Finding {
                 }
                 rights
             }
+            (Problem::Outdated(_), _) => vec![format!("$JS.API.STREAM.UPDATE.{name}")],
             (Problem::Unchecked(_), _) => Vec::new(),
+        }
+    }
+
+    /// What [`apply`] did about it, as `created stream ANTS`.
+    pub fn fixed(&self) -> String {
+        match &self.problem {
+            Problem::Outdated(subjects) => format!("{} now captures {}", self.object, subjects.join(", ")),
+            _ => format!("created {}", self.object),
         }
     }
 }
@@ -212,14 +242,15 @@ impl fmt::Display for Finding {
         let object = self.object;
         match &self.problem {
             Problem::Missing => write!(f, "{object} is missing"),
+            Problem::Outdated(subjects) => write!(f, "{object} does not capture {}", subjects.join(", ")),
             Problem::Unchecked(e) => write!(f, "{object} could not be checked: {e}"),
         }
     }
 }
 
 /// Look up the hub's objects whose stream info `may` says the credentials get (by its JetStream API subject,
-/// [`Object::info_subject`]), all at once: one round trip. Returns the objects missing or impossible to check, in the
-/// order of [`Object::ALL`].
+/// [`Object::info_subject`]), all at once: one round trip. Returns the objects missing, outdated or impossible to check,
+/// in the order of [`Object::ALL`].
 pub async fn check(js: &jetstream::Context, may: impl Fn(&str) -> bool) -> Vec<Finding> {
     let checks = Object::ALL
         .into_iter()
@@ -228,19 +259,20 @@ pub async fn check(js: &jetstream::Context, may: impl Fn(&str) -> bool) -> Vec<F
     futures::future::join_all(checks).await.into_iter().flatten().collect()
 }
 
-/// Fix what `finding` found: create the missing object.
+/// Fix what `finding` found: create the missing object, or add the subjects the stream lacks.
 pub async fn apply(js: &jetstream::Context, finding: &Finding) -> Result<()> {
     let object = finding.object;
     match &finding.problem {
         Problem::Missing => Box::pin(object.create(js)).await,
+        Problem::Outdated(_) => capture_all(js).await,
         Problem::Unchecked(e) => bail!("{object} could not be checked: {e}"),
     }
 }
 
-/// `ants init`: check every object and create each one found missing, failing at once when `may` says the credentials
+/// `ants init`: check every object, create each one found missing and update the stream found outdated, failing at once when `may` says the credentials
 /// may not (by JetStream API subject), as denied requests would only time out. An object whose stream info they do not
-/// get is created all the same, which changes nothing if it is there with the same settings. Returns what it created
-/// among the objects checked.
+/// get is created all the same, which changes nothing if it is there with the same settings. Returns what it created or
+/// updated among the objects checked.
 pub async fn init(js: &jetstream::Context, may: impl Fn(&str) -> bool) -> Result<Vec<Finding>> {
     for object in Object::ALL.into_iter().filter(|object| !may(&object.info_subject())) {
         let unseen = Finding { object, problem: Problem::Missing };
@@ -252,7 +284,8 @@ pub async fn init(js: &jetstream::Context, may: impl Fn(&str) -> bool) -> Result
     let findings = check(js, &may).await;
     for finding in &findings {
         if let Some(denied) = finding.rights().into_iter().find(|subject| !may(subject)) {
-            bail!("{finding}, and the credentials may not create it ({denied})");
+            let fix = if matches!(finding.problem, Problem::Outdated(_)) { "update" } else { "create" };
+            bail!("{finding}, and the credentials may not {fix} it ({denied})");
         }
         apply(js, finding).await?;
     }
@@ -474,6 +507,7 @@ mod tests {
     fn problems(findings: &[Finding]) -> Vec<Object> {
         let missing = |f: &Finding| match &f.problem {
             Problem::Missing => f.object,
+            Problem::Outdated(subjects) => panic!("{subjects:?}"),
             Problem::Unchecked(e) => panic!("{e}"),
         };
         findings.iter().map(missing).collect()
@@ -535,6 +569,40 @@ mod tests {
         assert_eq!(config.sources.unwrap()[0].name, "OUTBOX", "sources stay");
         let channels = js.get_stream(Object::Channels.stream_name()).await.unwrap().cached_info().config.clone();
         assert_ne!(channels.max_consumers, MAX_CONSUMERS, "not changed");
+    }
+
+    /// A stream created before a subject was added gains it, keeping its sources.
+    #[tokio::test]
+    async fn init_adds_the_subjects_an_older_stream_lacks() {
+        let Some(server) = NatsServer::start() else { return };
+        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        js.create_stream(stream::Config {
+            name: "OUTBOX".into(),
+            subjects: vec!["out.>".into()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let source = stream::Source { name: "OUTBOX".into(), ..Default::default() };
+        let mut old = stream_config();
+        old.subjects.retain(|s| s != subject::ALL_TIMELINE);
+        js.create_stream(stream::Config { sources: Some(vec![source]), ..old }).await.unwrap();
+
+        let found = check(&js, |s| s == Object::Stream.info_subject()).await;
+        assert_eq!(found[0].to_string(), "stream ANTS does not capture ants.timeline.>");
+        let update = "$JS.API.STREAM.UPDATE.ANTS";
+        assert_eq!(found[0].rights(), [update]);
+        let denied = init(&js, |s| s != update).await.unwrap_err();
+        assert_eq!(
+            denied.to_string(),
+            format!("stream ANTS does not capture ants.timeline.>, and the credentials may not update it ({update})")
+        );
+        let fixed = init(&js, |_| true).await.unwrap();
+        assert_eq!(fixed[0].fixed(), "stream ANTS now captures ants.timeline.>");
+        let config = js.get_stream(STREAM).await.unwrap().cached_info().config.clone();
+        assert!(config.subjects.iter().any(|s| s == subject::ALL_TIMELINE));
+        assert_eq!(config.sources.unwrap()[0].name, "OUTBOX", "sources stay");
+        assert!(check(&js, |_| true).await.is_empty());
     }
 
     /// A copy kept in a leaf's outbox can land long after its twin stored directly: the stream drops it for a day.

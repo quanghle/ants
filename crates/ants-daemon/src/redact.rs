@@ -139,11 +139,13 @@ impl Redactor {
         }
     }
 
-    /// Redact the text of a status update.
+    /// Redact the text of a status update, and a tool call's title and paths.
     pub fn redact_status(&self, update: &mut StatusUpdate) {
         match update {
             StatusUpdate::Message { text } | StatusUpdate::Thought { text } => self.redact_string(text),
-            StatusUpdate::Tool { title: Some(title), .. } => self.redact_string(title),
+            StatusUpdate::Tool { title, paths, .. } => {
+                title.iter_mut().chain(paths.iter_mut().flatten()).for_each(|text| self.redact_string(text));
+            }
             StatusUpdate::Plan { steps } => steps.iter_mut().for_each(|s| self.redact_string(&mut s.content)),
             _ => {}
         }

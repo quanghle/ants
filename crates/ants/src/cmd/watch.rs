@@ -170,7 +170,7 @@ impl Printer {
             StatusUpdate::State { state } => {
                 return self.line(&format!("[{thread}] {who}{forged}: {}", state.as_str()));
             }
-            StatusUpdate::Tool { id, title, tool_kind, status } => {
+            StatusUpdate::Tool { id, title, tool_kind, status, .. } => {
                 let kind = tool_kind.as_deref().map_or_default(|k| format!(" ({k})"));
                 let status = status.as_deref().map_or_default(|s| format!(": {s}"));
                 let title = title.as_deref().unwrap_or(id);
@@ -261,6 +261,7 @@ mod tests {
                     title: Some("cargo test".to_owned()),
                     tool_kind: Some("execute".to_owned()),
                     status: Some("in_progress".to_owned()),
+                    paths: None,
                 }),
                 "",
             ),
