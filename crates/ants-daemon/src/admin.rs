@@ -34,6 +34,7 @@ use crate::direct_kv::{DirectKv, Lookup};
 mod add;
 mod ask;
 mod clone;
+pub mod held;
 mod memories;
 pub use memories::files_under;
 mod pause;
@@ -81,6 +82,8 @@ pub struct Orders {
     pub restarts: restart::Restarts,
     /// The machine's leaf node, whose uplink an added ant needs to reach the hub; none on a machine without one.
     pub leaf: Option<LeafNode>,
+    /// The humans' consent to their assistants' orders ([`held`]).
+    pub hold: held::Hold,
 }
 
 /// A machine's leaf node, as an add order needs it: the uplink credentials sign the order's enrollment request with the
@@ -141,21 +144,25 @@ impl Eq for ConfigFile {}
 
 /// Take the orders to the machine's ants and record their outcomes, for as long as the connection `js` lasts:
 /// [`take`] again, after a pause, whenever it stops. `js_domain` is the domain `js` was made for.
+/// Meanwhile decide the orders held for a human's consent ([`held::keep`]).
 pub async fn serve(js: jetstream::Context, js_domain: Option<JsDomain>, orders: Orders) {
-    let mut delay = RETRY_FIRST;
-    loop {
-        match take(&js, js_domain.as_ref(), &orders).await {
-            Ok(()) => delay = RETRY_FIRST,
-            Err(e) => {
-                tracing::warn!(
-                    machine = %orders.machine, error = format!("{e:#}"), retry_in = ?delay,
-                    "taking the admin orders failed; `ants init` with a human's credentials sets up the stream"
-                );
-                tokio::time::sleep(delay).await;
-                delay = (delay * 2).min(RETRY_MAX);
+    let taking = async {
+        let mut delay = RETRY_FIRST;
+        loop {
+            match take(&js, js_domain.as_ref(), &orders).await {
+                Ok(()) => delay = RETRY_FIRST,
+                Err(e) => {
+                    tracing::warn!(
+                        machine = %orders.machine, error = format!("{e:#}"), retry_in = ?delay,
+                        "taking the admin orders failed; `ants init` with a human's credentials sets up the stream"
+                    );
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(RETRY_MAX);
+                }
             }
         }
-    }
+    };
+    tokio::join!(taking, held::keep(&js, js_domain.as_ref(), &orders));
 }
 
 /// Take the orders through the machine's consumer, created if missing, until its messages stop.
@@ -175,10 +182,7 @@ async fn take(js: &jetstream::Context, js_domain: Option<&JsDomain>, orders: &Or
         .with_context(|| format!("creating consumer {name}"))?;
     let mut messages = consumer.messages().await.with_context(|| format!("reading consumer {name}"))?;
     let outcomes = DirectKv::new(js, js_domain, MACHINES_BUCKET).await?;
-    let stores = Stores {
-        devices: DirectKv::new(js, js_domain, DEVICES_BUCKET).await?,
-        identities: DirectKv::new(js, js_domain, IDENTITIES_BUCKET).await?,
-    };
+    let stores = Stores::open(js, js_domain).await?;
     tracing::debug!(machine = %orders.machine, "taking admin orders");
     while let Some(msg) = messages.next().await {
         let msg = msg.with_context(|| format!("reading consumer {name}"))?;
@@ -212,13 +216,14 @@ async fn handle(
         Taken::Unnamed(why) => tracing::warn!(subject = %msg.subject, "dropping an admin order: {why}"),
         taken => {
             let key = taken.key();
+            let _deciding = orders.hold.deciding().await;
             if matches!(outcomes.lookup(&key).await?, Lookup::Value(_)) {
                 tracing::debug!(key, "the admin order has an outcome already: a replay");
             } else {
                 let outcome = match taken {
                     Taken::Order { order, machine, ant } => {
                         let stored_at = stored_at.unwrap_or_else(|_| Utc::now());
-                        let deciding = decide(js, stores, orders, &msg.subject, &order, stored_at);
+                        let deciding = decide(js, outcomes, stores, orders, &msg.subject, &order, stored_at);
                         let mut outcome = in_progress(msg, deciding).await?;
                         (outcome.machine, outcome.ant) = (machine, ant);
                         outcome
@@ -227,6 +232,9 @@ async fn handle(
                     Taken::Unnamed(_) => unreachable!("handled above"),
                 };
                 let recorded = record(outcomes, &key, &outcome).await?;
+                if outcome.state == OrderState::Held {
+                    orders.hold.added();
+                }
                 tracing::info!(
                     key,
                     recorded,
@@ -327,11 +335,21 @@ struct Stores {
     identities: DirectKv,
 }
 
+impl Stores {
+    async fn open(js: &jetstream::Context, js_domain: Option<&JsDomain>) -> Result<Self> {
+        Ok(Self {
+            devices: DirectKv::new(js, js_domain, DEVICES_BUCKET).await?,
+            identities: DirectKv::new(js, js_domain, IDENTITIES_BUCKET).await?,
+        })
+    }
+}
+
 /// The outcome of `order`, taken from `subject` and stored at `stored_at`: refused unless the config allows remote
 /// administration and an admin of the team signed it with credentials not revoked, as [`Stores::devices`] records
-/// them; else what carrying it out ([`apply`]) gave.
+/// them, or an assistant of one for it, which [`held`] holds in `machines`; else what carrying it out ([`apply`]) gave.
 async fn decide(
     js: &jetstream::Context,
+    machines: &DirectKv,
     stores: &Stores,
     orders: &Orders,
     subject: &str,
@@ -345,17 +363,19 @@ async fn decide(
     if orders.accounts.is_empty() {
         return Ok(refused("the machine's host connection has no credentials whose account vouches for an admin"));
     }
-    let revoked = match order.signing_key() {
-        Some(key) => match stores.devices.lookup(revoked_device_key(&key)).await? {
+    let signer = order.signing_key();
+    let revoked = match &signer {
+        Some(key) => match stores.devices.lookup(revoked_device_key(key)).await? {
             Lookup::Value(_) => true,
             Lookup::NoValue | Lookup::NoBucket => false,
         },
         None => false,
     };
     let accounts = orders.accounts.iter().map(String::as_str);
-    match order.verify(subject, accounts, |_| revoked, stored_at) {
-        Err(e) => Ok(refused(&e.to_string())),
-        Ok(_) => apply(js, stores, orders, order, stored_at).await,
+    match (order.verify(subject, accounts, |_| revoked, stored_at), signer) {
+        (Err(e), _) => Ok(refused(&e.to_string())),
+        (Ok(_), Some(signer)) if order.on_behalf_of.is_some() => held::hold(machines, orders, order, &signer).await,
+        (Ok(_), _) => apply(js, stores, orders, order, stored_at).await,
     }
 }
 
@@ -373,7 +393,9 @@ async fn apply(
         AdminOp::Pause => pause::apply(orders, order, true),
         AdminOp::Resume => pause::apply(orders, order, false),
         AdminOp::Restart { now } => restart::apply(orders, order, *now).await,
-        AdminOp::Add { settings } => Box::pin(add::apply(js, orders, order, settings)).await,
+        AdminOp::Add { settings, assistant_of } => {
+            Box::pin(add::apply(js, &stores.identities, orders, order, settings, assistant_of.as_ref())).await
+        }
         AdminOp::Retire => retire::apply(js, orders, order).await,
         AdminOp::Clone { new, settings } => {
             Box::pin(clone::apply(js, &stores.identities, orders, order, new, settings)).await

@@ -6,13 +6,16 @@
 //! the ant twice; the key waits in `<ant>.nk` beside the credentials until they are written, so that the signer is
 //! asked about the same key again. On a machine running a leaf node ([`LeafNode`]), the uplink credentials sign the
 //! request too, and the signer renews them to carry the ant, which the daemon has the leaf node use before listing the
-//! ant.
+//! ant. An order adding the assistant of a human (`assistant_of`, as `ants assistant enable --on` sends) has the
+//! credentials checked as that human's assistant's, and, where the hub keeps shared settings ([`crate::shared`]), the
+//! order's shared settings written as the ant's record in place of any an earlier ant of the name left, so that the
+//! assistant runs with the role and tool rules it was added with.
 
 use std::path::{Path, PathBuf};
 
 #[cfg(doc)]
 use ants_proto::AdminOp;
-use ants_proto::{AdminOrder, AdminOutcome, EnrollReply, Machine, UserId};
+use ants_proto::{AdminOrder, AdminOutcome, EnrollReply, Machine, SharedSettings, UserId, is_shared_field};
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream;
 use nkeys::KeyPair;
@@ -20,24 +23,29 @@ use serde_json::{Map, Value, json};
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table};
 
 use super::ask::{SIGNER_WAIT, Uplink, ask};
-use super::{LeafNode, NO_CONFIG, Orders, applied, refused};
+use super::{ConfigFile, LeafNode, NO_CONFIG, Orders, applied, refused};
 use crate::config::{self, edit::toml_value};
 use crate::creds;
+use crate::direct_kv::DirectKv;
+use crate::shared::{self, Found, Roles};
 
 /// Settings an order does not give: what the daemon sets itself, or what an ant added from a template has.
 pub(super) const NOT_GIVEN: [&str; 4] = ["creds", "template", "added_by", "builtin"];
 
 pub(super) async fn apply(
     js: &jetstream::Context,
+    identities: &DirectKv,
     orders: &Orders,
     order: &AdminOrder,
     settings: &Map<String, Value>,
+    assistant_of: Option<&UserId>,
 ) -> AdminOutcome {
     let Some(config) = &orders.config else { return refused(order, NO_CONFIG) };
     let Some(host_creds) = &orders.creds else {
         return refused(order, "the machine has no host credentials to ask `ants signer` with");
     };
-    match add(js, &config.path, host_creds, orders.leaf.as_ref(), &orders.accounts, order, settings).await {
+    let assisting = assistant_of.map(|human| (human, identities));
+    match add(js, orders, config, host_creds, order, settings, assisting).await {
         Ok(Added::Already) => applied(order, None),
         Ok(Added::Now { creds, key, uplink }) => {
             config.edited.notify_one();
@@ -62,15 +70,17 @@ enum Added {
     },
 }
 
+/// Add the order's ant, with `assisting` the human it is to assist and the bucket of shared settings.
 async fn add(
     js: &jetstream::Context,
-    path: &Path,
+    orders: &Orders,
+    config: &ConfigFile,
     host_creds: &Path,
-    leaf: Option<&LeafNode>,
-    accounts: &[String],
     order: &AdminOrder,
     settings: &Map<String, Value>,
+    assisting: Option<(&UserId, &DirectKv)>,
 ) -> Result<Added> {
+    let (path, accounts) = (&config.path, &orders.accounts);
     let ant = &order.ant;
     let mark = mark(order);
     let text = std::fs::read_to_string(path).with_context(|| format!("reading config {}", path.display()))?;
@@ -107,11 +117,21 @@ async fn add(
     let probe = entry(ant, &creds_path, workdir.as_ref().map(|_| base), settings, &mark)?;
     let probe = entry_text(&text, &probe);
     config::parse(&probe, &std::path::absolute(path)?, &home).context("the config with the ant added")?;
-    let leaf = leaf_uplink(leaf)?;
+    let shared_fields: Map<String, Value> =
+        settings.iter().filter(|(key, _)| is_shared_field(key)).map(|(k, v)| (k.clone(), v.clone())).collect();
+    if assisting.is_some() {
+        Roles::of(&shared_fields)?;
+    }
+    let leaf = leaf_uplink(orders.leaf.as_ref())?;
     let seed_path = dir.join(format!("{ant}.nk"));
     let key = key_for(&creds_path, &seed_path, ant)?;
     let public_key = key.public_key();
     let (jwt, renewal) = sign(js, host_creds, leaf, accounts, order, ant, &public_key).await?;
+    if let Some((human, _)) = assisting {
+        let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default();
+        ants_proto::verify_assistant_of(&jwt, accounts.iter().map(String::as_str), human, now)
+            .with_context(|| format!("the signed credentials of {ant}, to assist {human}"))?;
+    }
     let seed = key.seed().map_err(|e| anyhow!("the seed of {public_key}: {e}"))?;
     write_secret(&creds_path, &creds::text(&jwt, &seed))?;
     if let Some(workdir) = &workdir {
@@ -122,6 +142,19 @@ async fn add(
         Some((leaf, machine, renewed)) => Some(renew(leaf, &machine, ant, renewed).await),
         None => None,
     };
+    if let Some((_, identities)) = assisting
+        && !matches!(shared::read(identities, ant).await?, Found::NoBucket)
+    {
+        let record = SharedSettings {
+            ant: ant.clone(),
+            fields: shared_fields,
+            machine: orders.machine.clone(),
+            by: Some(order.admin.clone()),
+            updated_at: chrono::Utc::now(),
+        };
+        identities.put(record.key(), serde_json::to_vec(&record)?).await.context("writing the shared settings")?;
+        config.shared.store(record);
+    }
     config::append(path, &table)?;
     if let Err(e) = std::fs::remove_file(&seed_path)
         && e.kind() != std::io::ErrorKind::NotFound

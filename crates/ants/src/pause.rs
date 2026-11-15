@@ -46,7 +46,7 @@ fn said(order: &AdminOrder, outcome: Option<&AdminOutcome>, paused: bool) -> Res
     let (ant, machine) = (&order.ant, &order.machine);
     let verb = if paused { "pause" } else { "resume" };
     match outcome.map(|o| (o.state, o.reason.as_deref())) {
-        None | Some((OrderState::Pending, _)) => Ok(format!(
+        None | Some((OrderState::Pending | OrderState::Held, _)) => Ok(format!(
             "the order to {verb} {ant} waits for the daemon of {machine}: `ants ant orders {ant}` tells when it is \
              decided"
         )),

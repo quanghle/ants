@@ -358,9 +358,8 @@ impl Permissions {
     /// reactions requests or another's renewal, setting another ant's avatar ([`IDENTITIES_BUCKET`]). Nor does it
     /// decide approval requests on [`subject::ALL_APPROVAL_DECISIONS`]: it decides one for its human in a message to
     /// the ant (`on_behalf_of`), which waits for its human's confirmation, as readers ignore a stored decision carrying
-    /// `on_behalf_of` and one stored there would keep its human's own from being stored. Nor does it send admin orders,
-    /// until daemons hold an assistant's orders for its human's confirmation. Nor
-    /// does it change the team: no entry of [`HUMANS_BUCKET`] (where its human's grant stands) or [`CHANNELS_BUCKET`],
+    /// `on_behalf_of` and one stored there would keep its human's own from being stored. It sends admin orders for its
+    /// human (`on_behalf_of`), which daemons hold for the human's confirmation. Nor does it change the team: no entry of [`HUMANS_BUCKET`] (where its human's grant stands) or [`CHANNELS_BUCKET`],
     /// no stream created, updated or purged of a message. It puts no device encryption key, no presence and no
     /// notification holds, which only a human's devices have, and it gets no power of the account key: it signs no
     /// credentials and records no revocation.
@@ -374,7 +373,6 @@ impl Permissions {
         let notify = notify_prefs_rights(assistant);
         let unattributed = [
             // Acts for its human that wait for the human's confirmation, which these subjects cannot carry.
-            subject::ALL_ADMIN_ORDERS_SENT.to_owned(),
             subject::ALL_APPROVAL_DECISIONS.to_owned(),
             // Subjects naming no sender, whose readers could not tell its acts from its human's.
             subject::ALL_CANCELS.to_owned(),
@@ -808,11 +806,14 @@ impl Permissions {
             // nats-server lets the hub stream's interest (`ants.inbox.>`, `ants.notes.>`, ...) cross the uplink only if
             // `ReverseMatch` finds a publish allowance under it, and that skips allowances with `*` before the last
             // token, such as `ants.inbox.*.dev-a`. One literal subject each of them already allows is found.
-            let own = if role.is_human() {
+            let mut own = if role.is_human() {
                 vec![subject::ALL_ADMIN_ORDERS_SENT.to_owned()]
             } else {
                 vec![subject::chanadm_from(user), subject::timeline_from(user)]
             };
+            if !role.is_human() && publish.iter().any(|s| s == subject::ALL_ADMIN_ORDERS_SENT) {
+                own.push(subject::ALL_ADMIN_ORDERS_SENT.to_owned());
+            }
             let found = subject::sendable(user, role).into_iter().chain(own);
             let found = found.map(|s| s.replace('*', user.as_str()));
             for (all, new) in
@@ -868,6 +869,7 @@ impl Permissions {
     /// every user's. Carrying out an order to add or retire an ant, it asks `ants signer` with an enrollment request
     /// carrying the order ([`subject::enroll`], [`EnrollRequest::order`](crate::EnrollRequest::order)) and hears the
     /// answers ([`subject::ALL_ENROLL_REPLIES`]), and reads the roster by direct gets to see a retired ant stopped.
+    /// It reads and watches [`HUMANS_BUCKET`], for the humans' consent to the orders their assistants sent for them.
     /// Nothing else: no other machine's record or outcomes, no ant's identity record, no message to or from an ant. No
     /// ant gets any of it.
     pub fn for_host(machine: &Machine) -> Self {
@@ -888,6 +890,13 @@ impl Permissions {
             format!("$JS.API.DIRECT.GET.{}.$KV.{ROSTER_BUCKET}.*", kv_stream(ROSTER_BUCKET)),
             subject::ALL_ENROLL_REQUESTS.to_owned(),
         ];
+        let humans = kv_stream(HUMANS_BUCKET);
+        publish.extend([
+            format!("$JS.API.STREAM.INFO.{humans}"),
+            format!("$JS.API.DIRECT.GET.{humans}.>"),
+            format!("$JS.API.CONSUMER.CREATE.{humans}"),
+        ]);
+        publish.extend(flow_control_subjects("*", &humans));
         publish.extend(ack_subjects(STREAM, &consumer));
         let subscribe = vec![format!("{}.>", host_inbox_prefix(machine)), subject::ALL_ENROLL_REPLIES.to_owned()];
         Self { publish, subscribe }

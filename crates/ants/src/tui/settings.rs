@@ -263,7 +263,7 @@ impl Pane {
 /// An order on one line: when, who, what, and where it stands, in its colour.
 fn order_line(o: &Listed, now: DateTime<Utc>) -> Line<'static> {
     let color = match o.state {
-        OrderState::Pending => Color::Yellow,
+        OrderState::Pending | OrderState::Held => Color::Yellow,
         OrderState::Applied => Color::Green,
         OrderState::Refused => Color::Red,
     };
@@ -275,7 +275,7 @@ fn order_line(o: &Listed, now: DateTime<Utc>) -> Line<'static> {
         Span::styled(o.sent_at.map_or_else(|| "-".to_owned(), |at| ago(at, now)), frame::dim()),
         Span::raw(format!(
             "  {} · {} on {}  ",
-            o.admin.as_ref().map_or_else(|| "-".to_owned(), ToString::to_string),
+            o.by(),
             o.op.as_ref().map_or_else(|| "-".to_owned(), AdminOp::describe),
             o.machine
         )),
@@ -434,6 +434,7 @@ mod tests {
             machine,
             ant: user("dev-a"),
             admin: Some(user("alice")),
+            on_behalf_of: None,
             op: Some(AdminOp::Restart { now: false }),
             sent_at: Some(at(2)),
             state: OrderState::Pending,

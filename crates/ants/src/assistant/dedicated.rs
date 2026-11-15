@@ -1,7 +1,10 @@
 //! `ants assistant enable` and `disable`: the dedicated assistant ant of the CLI's human. `enable` creates it in one
 //! step where the team's account key is: credentials naming the human ([`AssistantOf`](ants_proto::AssistantOf)), an
 //! `[[ant]]` working in its own home with an assistant's whoami and no fetch or execute rules, and the grant. Each
-//! step finds what an earlier run did and keeps it, so a run that failed half-way completes when run again.
+//! step finds what an earlier run did and keeps it, so a run that failed half-way completes when run again. With
+//! `--on MACHINE` it sends the daemon of that machine an add order ([`AdminOp::Add`]) naming the human the ant is to
+//! assist, which has `ants signer` sign the assistant's credentials and the daemon list it with the same settings, and
+//! signs the grant once the order applied.
 //! `disable` withdraws the grant, ending any enrollment of the assistant as a device of the human, then retires the
 //! dedicated ant when asked: its entry leaves the config file, its credentials are revoked and their file and the
 //! seed of its encryption key removed, its home stays.
@@ -13,13 +16,14 @@ use std::time::Duration;
 use ants_daemon::config::{self, Ant, Summary};
 use ants_daemon::creds::{Finding, Kind};
 use ants_daemon::sealing;
-use ants_proto::{JsDomain, JwtError, Permissions, UserId};
+use ants_proto::{AdminOp, JsDomain, JwtError, Machine, OrderState, Permissions, UserId};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
+use serde_json::{Map, Value, json};
 
 use super::{Local, Sealing, check, ended_sealing, put, read, replaced, risky, signing_creds};
 use crate::service::{Action, Outcome, Service, Services, failure, manual};
-use crate::{Nats, add, auth, humans, keys, retire, revoke};
+use crate::{Nats, add, auth, humans, keys, orders, retire, revoke};
 
 /// Tool rules a dedicated assistant runs without asking: reading and searching within its own home, and thinking.
 const ALLOW: [&str; 3] = ["read", "search", "think"];
@@ -30,6 +34,14 @@ pub struct EnableArgs {
     /// The assistant ant (default: <human>-assistant).
     #[arg(long, value_name = "NAME")]
     pub name: Option<UserId>,
+    /// Create the assistant on MACHINE by admin order instead of here: its daemon has `ants signer` sign the
+    /// assistant's credentials and lists it with the settings given, paths being MACHINE's. Needs a human device's
+    /// admin credentials, and `ants signer` running.
+    #[arg(long = "on", value_name = "MACHINE", conflicts_with_all = ["config", "dir", "out", "store_key"])]
+    pub on: Option<Machine>,
+    /// With --on: how long to wait for the daemon's outcome (a duration such as 90s, 10m or 1h).
+    #[arg(long, value_name = "DURATION", default_value = "3m", value_parser = ants_proto::duration::parse)]
+    pub wait: Duration,
     /// Config file to list the ant in (default: ~/.ants/config.toml).
     #[arg(long, env = "ANTS_CONFIG")]
     pub config: Option<PathBuf>,
@@ -133,6 +145,9 @@ pub async fn enable(nats: &Nats<'_>, args: EnableArgs) -> Result<()> {
         bail!("{name} is a human: an assistant is an ant");
     }
     auth::check_not_reserved(&name)?;
+    if let Some(machine) = args.on.clone() {
+        return enable_on(nats, &args, &name, machine).await;
+    }
     let dir = crate::team_dir(args.dir.clone())?;
     if auth::account_key(&dir).is_err() {
         bail!(
@@ -219,6 +234,68 @@ pub async fn enable(nats: &Nats<'_>, args: EnableArgs) -> Result<()> {
         ),
     }
     Ok(())
+}
+
+/// `ants assistant enable --on MACHINE`: send the add order of the assistant `ant` to the daemon of `machine`, then
+/// sign the grant once the daemon applied it.
+async fn enable_on(nats: &Nats<'_>, args: &EnableArgs, ant: &UserId, machine: Machine) -> Result<()> {
+    let creds = signing_creds(nats)?;
+    let admin = orders::Admin::of(nats)?;
+    let human = &nats.me.id;
+    let settings = order_settings(args, ant, human);
+    for rule in args.allow.iter().filter(|r| risky(r)) {
+        println!("warning: {ant} runs {rule} requests without asking: fetched pages and command output can steer it");
+    }
+    let (_, js) = nats.connect("ants-assistant").await?;
+    if humans::load(&js, &nats.me).await.contains(ant) {
+        bail!("{ant} is a human: an assistant is an ant");
+    }
+    let op = AdminOp::Add { settings, assistant_of: Some(human.clone()) };
+    let (order, outcome) = admin.send(&js, Some(machine.clone()), ant, op, args.wait).await?;
+    let set = format!("ants assistant set {ant}");
+    let Some(outcome) = outcome else {
+        println!("{}", orders::pending_note(&order));
+        println!("once {ant} is added, `{set}` makes it the assistant of {human}");
+        return Ok(());
+    };
+    if outcome.state != OrderState::Applied {
+        bail!(
+            "the daemon of {machine} refused to add {ant}: {} (were {ant} added there already as the assistant of \
+             {human}, `{set}` signs the grant)",
+            orders::reason(&outcome)
+        );
+    }
+    println!("{ant} added on {machine} as the assistant of {human}; its daemon starts it");
+    let (before, _) = put(&js, creds, human, Some(ant.clone()), Sealing::Keep)
+        .await
+        .with_context(|| format!("{ant} is added on {machine}, but the grant is not signed: run `{set}`"))?;
+    replaced(ant, human, before, None);
+    Ok(())
+}
+
+/// The settings of the assistant `ant` of `human` an add order carries: the assistant's whoami and tool rules and the
+/// flags' settings, a home only when given, as a path on the machine the order goes to.
+fn order_settings(args: &EnableArgs, ant: &UserId, human: &UserId) -> Map<String, Value> {
+    let mut allow: Vec<String> = ALLOW.iter().map(ToString::to_string).collect();
+    allow.extend(args.allow.iter().filter(|r| !ALLOW.contains(&r.as_str())).cloned());
+    let mut settings = Map::new();
+    settings.insert("whoami".into(), json!(args.whoami.clone().unwrap_or_else(|| whoami(ant, human))));
+    let given = [
+        ("harness", &args.harness),
+        ("model", &args.model),
+        ("reasoning_effort", &args.reasoning_effort),
+        ("context", &args.context),
+    ];
+    for (key, value) in given {
+        if let Some(value) = value {
+            settings.insert(key.into(), json!(value));
+        }
+    }
+    settings.insert("allow".into(), json!(allow));
+    if let Some(home) = &args.home {
+        settings.insert("home".into(), json!(home.to_string_lossy()));
+    }
+    settings
 }
 
 /// What credentials of the ant are at their path already.
@@ -530,6 +607,8 @@ mod tests {
     fn enable_args(config: &Path, dir: &Path, home: &Path) -> EnableArgs {
         EnableArgs {
             name: None,
+            on: None,
+            wait: Duration::ZERO,
             config: Some(config.to_owned()),
             dir: Some(dir.to_owned()),
             out: None,
@@ -646,5 +725,74 @@ mod tests {
         assert_eq!(read(&js, &alice).await.unwrap().unwrap().assistant, None);
         assert_eq!(std::fs::read_to_string(&config).unwrap(), with_pa, "pa stays listed");
         assert!(team.join("pa.creds").exists());
+    }
+
+    /// `enable --on` sends the machine's daemon an add order naming the human, which has the signer sign the
+    /// assistant's credentials, the daemon list it with the assistant's settings and write its shared settings, and
+    /// then signs the grant; the signer refuses an assistant add order of another human.
+    #[tokio::test]
+    async fn enable_on_a_machine_adds_the_assistant_by_order() {
+        use ants_proto::{IDENTITIES_BUCKET, SharedSettings};
+
+        use crate::orders::add::tests::{SIGNED, with_signer};
+        use crate::orders::tests::host_of_m1;
+
+        let Some(server) = Server::start() else { return };
+        let (alice, bob, pa) = (p("alice"), p("bob"), p("alice-assistant"));
+        let team = server.dir().join("auth");
+        let (_, h_js) = server.connect_as(&bob, Role::Human).await;
+        bus::ensure_stream(&h_js).await.unwrap();
+        for kv in [ants_daemon::hub::machines_config(), ants_daemon::hub::devices_config()] {
+            h_js.create_key_value(kv).await.unwrap();
+        }
+        h_js.create_key_value(ants_daemon::hub::identities_config()).await.unwrap();
+        let admin_creds = server.dir().join("alice-admin.creds");
+        let admin = auth::NewDevice { label: Some("laptop"), admin: true, ..auth::NewDevice::default() };
+        let rights = Permissions::for_user(&alice, Role::Human);
+        auth::issue_device_with(&team, &alice, revoke::Kind::Human, rights, &admin, &admin_creds).unwrap();
+        let nats = Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+        let (_, js) = nats.connect("test").await.unwrap();
+        let (path, home) = (server.dir().join("config.toml"), server.dir().join("pa-home"));
+        let work = server.dir().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let text =
+            format!("harness = \"copilot\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = {:?}\n", work.display().to_string());
+        std::fs::write(&path, text).unwrap();
+        let file = ants_daemon::admin::ConfigFile::new(path.clone(), std::sync::Arc::default());
+        let (ants, task) = host_of_m1(&server, &js, true, Some(file)).await;
+        let m1: Machine = "m1".parse().unwrap();
+
+        let mut args = enable_args(&path, &team, &home);
+        (args.config, args.dir, args.on, args.wait) = (None, None, Some(m1.clone()), SIGNED);
+        args.model = Some("gpt-5".to_owned());
+        with_signer(&server, Box::pin(enable(&nats, args))).await.unwrap();
+        let out = server.dir().join("alice-assistant.creds");
+        let finding = Finding::from_creds(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!((finding.name.as_str(), &finding.kind), ("alice-assistant", &Kind::Assistant { of: alice.clone() }));
+        let issued = revoke::issued(&team).unwrap();
+        let signed = issued.iter().find(|i| i.key == finding.key).expect("the signer records the key");
+        assert_eq!((signed.kind, signed.assistant_of.as_ref()), (revoke::Kind::Assistant, Some(&alice)));
+        assert!(signed.order.is_some());
+        let ant = config::load(&path).unwrap().ants.into_iter().find(|a| a.name == pa).expect("listed");
+        assert_eq!((ant.workdir, ant.model.as_deref()), (home.canonicalize().unwrap(), Some("gpt-5")));
+        assert_eq!(ant.allow, ["read", "search", "think"]);
+        assert!(ant.whoami.as_deref().unwrap().starts_with("Personal assistant of alice."));
+        let shared = ants_daemon::direct_kv::DirectKv::whole(&js, None, IDENTITIES_BUCKET).await.unwrap();
+        let record = shared.get(SharedSettings::key_of(&pa)).await.unwrap().expect("its shared settings");
+        let record: SharedSettings = serde_json::from_slice(&record).unwrap();
+        assert_eq!((record.fields["model"].as_str(), record.by.as_ref()), (Some("gpt-5"), Some(&alice)));
+        assert_eq!(record.fields["allow"], serde_json::json!(["read", "search", "think"]));
+        assert_eq!(read(&js, &alice).await.unwrap().unwrap().assistant, Some(pa.clone()));
+
+        let op = AdminOp::Add { settings: Map::new(), assistant_of: Some(bob.clone()) };
+        let bobs = p("bob-assistant");
+        let sent = crate::orders::send(&nats, &js, Some(m1), &bobs, op, SIGNED);
+        let (_, refused) = with_signer(&server, Box::pin(sent)).await.unwrap();
+        let refused = refused.expect("the daemon decides once the signer answers");
+        assert_eq!(refused.state, OrderState::Refused);
+        assert!(refused.reason.as_deref().unwrap().contains("only bob adds an assistant of bob"), "{refused:?}");
+        assert!(!config::load(&path).unwrap().ants.iter().any(|a| a.name == bobs));
+        drop(ants);
+        tokio::time::timeout(Duration::from_secs(5), task).await.unwrap().unwrap().unwrap();
     }
 }

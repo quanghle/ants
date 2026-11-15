@@ -19,8 +19,13 @@
 //!   [`MACHINES_BUCKET`], beside the machine's record, under [`admin_outcome_key`], which only the machine's host
 //!   credentials write: humans read every outcome, so the orders of an ant ([`subject::admin_outcomes_of`]); an order
 //!   without one waits, pending.
-//! - An assistant does not send orders: its credentials do not publish them. Confirming an assistant's order on behalf
-//!   of its human will add who it acts for to the signed lines, which a daemon not knowing the field fails to verify.
+//! - An assistant sends orders for its human ([`AdminOrder::on_behalf_of`]), signed by its own credentials, whose user
+//!   JWT names the human ([`crate::AssistantOf`]). The daemon holds such an order ([`OrderState::Held`]) and carries it
+//!   out only once the human, an admin, confirms it ([`crate::Act::Order`]) or a pre-allow rule of the human covers it
+//!   ([`covers_order`]), while the human's grant names the assistant; a denial, a withdrawal or [`ORDER_HOLD`] passing
+//!   refuses it. It never adds, retires or clones an ant for an assistant. Who it acts for is a signed line appended
+//!   only when there is one, so the signatures of other orders stay what they were; a daemon not knowing the field
+//!   fails to verify such an order.
 
 use std::fmt::Write as _;
 
@@ -31,10 +36,20 @@ use uuid::Uuid;
 
 #[cfg(doc)]
 use crate::{ADMIN_TAG, MACHINES_BUCKET, admin_consumer};
-use crate::{JwtError, Machine, UserId, VerifiedUser, subject, verified_jwt, verify_admin};
+use crate::{JwtError, Machine, UserId, VerifiedUser, subject, verified_jwt, verify_admin, verify_assistant_of};
 
 /// How far ahead of the time the stream stored it an order may say it was sent.
 pub const ORDER_CLOCK_SKEW: TimeDelta = TimeDelta::minutes(5);
+
+/// How long after it was sent an assistant's order waits for its human's consent before the daemon refuses it.
+pub const ORDER_HOLD: TimeDelta = TimeDelta::days(7);
+
+/// The pre-allow rule ([`crate::pre_allow_rule`]) prefix of an order kind: `order:pause` covers the pause orders of
+/// an assistant, `order:*` all of them ([`covers_order`]).
+pub const ORDER_RULE: &str = "order:";
+
+/// The kinds of the orders an assistant may send for its human ([`AdminOp::for_assistant`]).
+pub const ASSISTANT_ORDER_KINDS: [&str; 6] = ["set", "pause", "resume", "restart", "read_memories", "read_settings"];
 
 /// What the first of the lines an admin signs says ([`AdminOrder::signed`]), so a signature of anything else is no
 /// order's.
@@ -46,8 +61,11 @@ pub const ORDER_SIGNING_CONTEXT: &str = "ants-admin-order";
 pub struct AdminOrder {
     /// A version 7 UUID, the key of the order's outcome and its `Nats-Msg-Id`.
     pub id: Uuid,
-    /// The admin, as its user JWT names it.
+    /// The admin, as its user JWT names it; for an order of an assistant, the assistant.
     pub admin: UserId,
+    /// The human an assistant sent the order for, whose consent it waits for. See the [module docs](self).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_behalf_of: Option<UserId>,
     /// The machine whose daemon serves the ant, or is to serve it ([`AdminOp::Add`]).
     pub machine: Machine,
     pub ant: UserId,
@@ -77,10 +95,12 @@ pub enum AdminOp {
         now: bool,
     },
     /// Add the ant on the machine with these settings: the keys of its `[[ant]]` table in the config file, its name the
-    /// order's ant.
+    /// order's ant; with `assistant_of`, as the assistant of that human, who must be the order's admin.
     Add {
         #[serde(default)]
         settings: Map<String, Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assistant_of: Option<UserId>,
     },
     /// Drain the ant, revoke and delete its credentials, keeping its home.
     Retire,
@@ -99,6 +119,27 @@ pub enum AdminOp {
 }
 
 impl AdminOp {
+    /// The op's `kind`, as it travels: `set`, `read_memories`.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Set { .. } => "set",
+            Self::Pause => "pause",
+            Self::Resume => "resume",
+            Self::Restart { .. } => "restart",
+            Self::Add { .. } => "add",
+            Self::Retire => "retire",
+            Self::ReadMemories => "read_memories",
+            Self::ReadSettings => "read_settings",
+            Self::Clone { .. } => "clone",
+        }
+    }
+
+    /// Whether an assistant may order it for its human: anything but adding, retiring or cloning an ant, which
+    /// `ants signer` signs for an admin's own order only.
+    pub fn for_assistant(&self) -> bool {
+        !matches!(self, Self::Add { .. } | Self::Retire | Self::Clone { .. })
+    }
+
     /// The op in a few words, as an ant's orders list it.
     pub fn describe(&self) -> String {
         match self {
@@ -110,7 +151,8 @@ impl AdminOp {
             Self::Resume => "resume".to_owned(),
             Self::Restart { now: false } => "restart".to_owned(),
             Self::Restart { now: true } => "restart now".to_owned(),
-            Self::Add { .. } => "add".to_owned(),
+            Self::Add { assistant_of: None, .. } => "add".to_owned(),
+            Self::Add { assistant_of: Some(human), .. } => format!("add as the assistant of {human}"),
             Self::Retire => "retire".to_owned(),
             Self::ReadMemories => "read memories".to_owned(),
             Self::ReadSettings => "read settings".to_owned(),
@@ -155,6 +197,7 @@ impl AdminOrder {
         Self {
             id: Uuid::now_v7(),
             admin,
+            on_behalf_of: None,
             machine,
             ant,
             op,
@@ -162,6 +205,13 @@ impl AdminOrder {
             credentials: credentials.into(),
             signature: String::new(),
         }
+    }
+
+    /// The order sent by an assistant for `human`.
+    #[must_use]
+    pub fn on_behalf(mut self, human: Option<UserId>) -> Self {
+        self.on_behalf_of = human;
+        self
     }
 
     /// The subject it travels on.
@@ -175,15 +225,24 @@ impl AdminOrder {
     }
 
     /// What the admin's key signs: lines joined by `\n`, [`ORDER_SIGNING_CONTEXT`], the id, the admin, the machine, the
-    /// ant, `sent_at` in RFC 3339 with nanoseconds and `Z`, and the op as canonical JSON ([`canonical_json`]). Every
-    /// field but the JWT, which the signing key is checked against, and the signature.
+    /// ant, `sent_at` in RFC 3339 with nanoseconds and `Z`, the op as canonical JSON ([`canonical_json`]), and, only
+    /// when there is one, `on_behalf_of`. Every field but the JWT, which the signing key is checked against, and the
+    /// signature.
     pub fn signed(&self) -> Vec<u8> {
         let sent_at = self.sent_at.to_rfc3339_opts(SecondsFormat::Nanos, true);
         let op = canonical_json(&serde_json::to_value(&self.op).expect("an op serializes"));
         let id = self.id.to_string();
-        [ORDER_SIGNING_CONTEXT, &id, self.admin.as_str(), self.machine.as_str(), self.ant.as_str(), &sent_at, &op]
-            .join("\n")
-            .into_bytes()
+        let mut lines = vec![
+            ORDER_SIGNING_CONTEXT,
+            &id,
+            self.admin.as_str(),
+            self.machine.as_str(),
+            self.ant.as_str(),
+            &sent_at,
+            &op,
+        ];
+        lines.extend(self.on_behalf_of.as_ref().map(UserId::as_str));
+        lines.join("\n").into_bytes()
     }
 
     /// The public key (`U...`) of the credentials that signed, as their JWT says before anything checks it: the key
@@ -194,9 +253,11 @@ impl AdminOrder {
 
     /// Check the order, taken from `subject`, which the stream stored at `stored_at`, for the daemon of a team whose
     /// accounts are `accounts` (the issuers of the daemon's credentials): on its machine's and ant's subject, signed by
-    /// the key of credentials of the admin it names that an account signed, that carry [`ADMIN_TAG`], that had not
-    /// expired when it was stored and whose key `revoked` (looked up in the revocation records) does not say is revoked,
-    /// and sent no further ahead of `stored_at` than [`ORDER_CLOCK_SKEW`].
+    /// the key of credentials of the admin it names that an account signed, that carry [`ADMIN_TAG`] (for an order
+    /// [`AdminOrder::on_behalf_of`] a human, that make the admin the human's assistant instead), that had not expired
+    /// when it was stored and whose key `revoked` (looked up in the revocation records) does not say is revoked, and
+    /// sent no further ahead of `stored_at` than [`ORDER_CLOCK_SKEW`]. Whether the human's grant stands, the caller
+    /// checks.
     pub fn verify<'a>(
         &self,
         subject: &str,
@@ -208,7 +269,14 @@ impl AdminOrder {
             return Err(OrderError::WrongSubject(subject.to_owned()));
         }
         let at = u64::try_from(stored_at.timestamp()).unwrap_or_default();
-        let admin = verify_admin(&self.credentials, accounts, &self.signed(), &self.signature, at)?;
+        let admin = match &self.on_behalf_of {
+            None => verify_admin(&self.credentials, accounts, &self.signed(), &self.signature, at)?,
+            Some(human) => {
+                let assistant = verify_assistant_of(&self.credentials, accounts, human, at)?;
+                assistant.check_signature(&self.signed(), &self.signature)?;
+                assistant
+            }
+        };
         if admin.id != self.admin {
             return Err(OrderError::NotTheAdmin { named: admin.id, admin: self.admin.clone() });
         }
@@ -243,6 +311,8 @@ pub enum OrderError {
 pub enum OrderState {
     /// Waiting in the stream for its machine's daemon, which has recorded no outcome yet.
     Pending,
+    /// An assistant's order, which its machine's daemon holds until the human consents ([`AdminOrder::on_behalf_of`]).
+    Held,
     Applied,
     Refused,
 }
@@ -251,6 +321,7 @@ impl OrderState {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
+            Self::Held => "held",
             Self::Applied => "applied",
             Self::Refused => "refused",
         }
@@ -268,12 +339,15 @@ pub struct AdminOutcome {
     /// The admin the order names; none when it could not be read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admin: Option<UserId>,
+    /// The human the admin, an assistant, sent it for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_behalf_of: Option<UserId>,
     /// What the order asked for; none when it could not be read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub op: Option<AdminOp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sent_at: Option<DateTime<Utc>>,
-    /// Applied or refused: an order with no outcome is pending.
+    /// Held, applied or refused: an order with no outcome is pending. A held order's outcome is replaced once decided.
     pub state: OrderState,
     /// Why it was refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -293,6 +367,7 @@ impl AdminOutcome {
             machine: order.machine.clone(),
             ant: order.ant.clone(),
             admin: Some(order.admin.clone()),
+            on_behalf_of: order.on_behalf_of.clone(),
             op: Some(order.op.clone()),
             sent_at: Some(order.sent_at),
             state,
@@ -309,6 +384,7 @@ impl AdminOutcome {
             machine,
             ant,
             admin: None,
+            on_behalf_of: None,
             op: None,
             sent_at: None,
             state: OrderState::Refused,
@@ -395,6 +471,18 @@ impl Settings {
 /// machine's name, which its host credentials alone write, and beside its record, the key of its name alone.
 pub fn admin_outcome_key(machine: &Machine, ant: &UserId, id: &Uuid) -> String {
     format!("{machine}.{ant}.{id}")
+}
+
+/// Key in [`MACHINES_BUCKET`] of the assistants' orders the daemon of `machine` holds ([`OrderState::Held`]), for it
+/// to read back on start: `<machine>.held`, two tokens, apart from the machine's record and its orders' outcomes.
+pub fn held_orders_key(machine: &Machine) -> String {
+    format!("{machine}.held")
+}
+
+/// Whether the pre-allow rule `rule` ([`crate::pre_allow_rule`]'s second part) covers an order of `op`: `order:*` or
+/// `order:<kind>` ([`AdminOp::kind`]). No tool rule, `*` among them, covers an order.
+pub fn covers_order(rule: &str, op: &AdminOp) -> bool {
+    rule.strip_prefix(ORDER_RULE).is_some_and(|kind| kind == "*" || kind == op.kind())
 }
 
 /// The machine, ant and order id an outcome key names ([`admin_outcome_key`]), if it is one.

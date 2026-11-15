@@ -183,6 +183,7 @@ async fn a_read_is_answered_from_the_config_only_while_fresh() {
         creds: None,
         js_domain: None,
         leaf: None,
+        hold: Default::default(),
     };
     let order = |ant: &str| {
         AdminOrder::new(

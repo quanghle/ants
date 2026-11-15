@@ -1546,6 +1546,7 @@ struct MemoryHuman {
     titles: StdMutex<Vec<ThreadTitle>>,
     done: StdMutex<Vec<ants_proto::ThreadDone>>,
     reactions: StdMutex<Vec<Reacted>>,
+    orders: StdMutex<Vec<ants_proto::AdminOrder>>,
 }
 
 impl MemoryHuman {
@@ -1617,6 +1618,11 @@ impl HumanStore for MemoryHuman {
         }
         Box::pin(async { Ok(true) })
     }
+
+    fn send_order(&self, order: ants_proto::AdminOrder) -> BoxFuture<'_, Result<ants_proto::AdminOrder>> {
+        self.orders.locked().push(order.clone());
+        Box::pin(async { Ok(order) })
+    }
 }
 
 /// Opens and seals as [`crate::sealing::AssistantSealing`] does as far as enrollment goes: only while the grant
@@ -1687,9 +1693,17 @@ fn grant(humans: &Registry, device: &crate::humans::TestDevice, assistant: Optio
 async fn assistant(
     name: &str,
 ) -> (Mcp, mpsc::UnboundedReceiver<Envelope>, Registry, crate::humans::TestDevice, Arc<MemoryHuman>) {
+    assistant_with(name, Arc::default()).await
+}
+
+/// [`assistant`], with `notes` as the thread notes.
+async fn assistant_with(
+    name: &str,
+    notes: Arc<MemoryNotes>,
+) -> (Mcp, mpsc::UnboundedReceiver<Envelope>, Registry, crate::humans::TestDevice, Arc<MemoryHuman>) {
     let device = crate::humans::TestDevice::default();
     let humans = Registry::with(UserId::human(), &["alice", "bob"]).verifying_grants(Some(device.account()));
-    let (mcp, sent) = start_with(&home(name), Vec::new(), Arc::default(), humans.clone()).await;
+    let (mcp, sent) = start_with(&home(name), Vec::new(), notes, humans.clone()).await;
     let store = Arc::new(MemoryHuman::default());
     mcp.with_assisting(user("alice"));
     mcp.with_human_store(store.clone());
@@ -1697,14 +1711,17 @@ async fn assistant(
     (mcp, sent, humans, device, store)
 }
 
-const ASSIST_TOOLS: [&str; 7] = [
+const ASSIST_TOOLS: [&str; 10] = [
     "human_queue",
     "answer_for_human",
     "send_for_human",
+    "post_for_human",
+    "notes_for_human",
     "react_for_human",
     "title_for_human",
     "done_for_human",
     "decide_for_human",
+    "order_for_human",
 ];
 
 #[tokio::test]
@@ -1724,7 +1741,7 @@ async fn the_assistant_tools_stand_only_while_the_grant_names_the_ant() {
 
     grant(&humans, &device, Some("dev-a"), false);
     let granted = tools().await;
-    assert_eq!((granted.len(), offered(&granted)), (24, 7), "{granted:?}");
+    assert_eq!((granted.len(), offered(&granted)), (27, 10), "{granted:?}");
     assert_eq!(call(&client, "human_queue", serde_json::json!({})).await, (true, "Nothing waits for alice.".into()));
 
     // The same connection loses them at once.
@@ -1827,6 +1844,77 @@ async fn what_the_assistant_does_for_its_human_carries_on_behalf_of() {
         call(&client, "title_for_human", serde_json::json!({"thread": ThreadId::generate().to_string(), "title": "x"}))
             .await;
     assert!(!ok && refused.contains("alice has no message on thread"), "{refused}");
+
+    let (ok, ordered) =
+        call(&client, "order_for_human", serde_json::json!({"ant": "dev-b", "machine": "m1", "op": "restart-now"}))
+            .await;
+    assert!(ok && ordered.contains("until then it is held") && ordered.contains("dev-b/order:restart"), "{ordered}");
+    let order = store.orders.locked().pop().unwrap();
+    assert_eq!((&order.admin, order.on_behalf_of.as_ref()), (&dev_a, Some(&alice)));
+    assert_eq!(
+        (order.machine.as_str(), &order.ant, &order.op),
+        ("m1", &dev_b, &ants_proto::AdminOp::Restart { now: true })
+    );
+    let notice = sent.try_recv().unwrap();
+    assert_eq!(notice.to, alice);
+    assert!(notice.text.contains(&format!("ants assistant confirm m1/dev-b/{}", order.id)), "{}", notice.text);
+    let (ok, refused) =
+        call(&client, "order_for_human", serde_json::json!({"ant": "dev-b", "machine": "m1", "op": "retire"})).await;
+    assert!(!ok && refused.contains("unknown op retire"), "{refused}");
+}
+
+#[tokio::test]
+async fn the_assistant_posts_in_channels_and_notes_for_its_human() {
+    let notes = Arc::new(MemoryNotes::default());
+    let (mcp, mut sent, humans, device, _store) = assistant_with("assist-posts", notes.clone()).await;
+    grant(&humans, &device, Some("dev-a"), false);
+    let (alice, dev_a) = (user("alice"), user("dev-a"));
+    let mut ops = ChannelEntry::new("ops".parse().unwrap());
+    ops.add_member(alice.clone());
+    ops.add_member(user("dev-b"));
+    let dev = ChannelEntry::new("dev".parse().unwrap());
+    let posted = Arc::new(StdMutex::new(Vec::new()));
+    mcp.with_channels(channels(vec![ops, dev], posted.clone()));
+    let (url, token) = http_server(&mcp, &ThreadId::generate());
+    let client = http_client(&url, &token).await;
+
+    let (ok, refused) = call(&client, "post_for_human", serde_json::json!({"channel": "dev", "text": "hi"})).await;
+    assert!(!ok && refused.contains("alice is no member of #dev"), "{refused}");
+    let (ok, result) =
+        call(&client, "post_for_human", serde_json::json!({"channel": "#ops", "text": "@dev-b deploy friday"})).await;
+    assert!(ok && result.contains("alice is told in its inbox"), "{result}");
+    let post = posted.locked().pop().unwrap();
+    assert_eq!((&post.from, post.on_behalf_of.as_ref(), post.owner.as_ref()), (&dev_a, Some(&alice), Some(&alice)));
+    assert_eq!((post.mentions.clone(), post.turn_budget), (vec![user("dev-b")], ants_proto::DEFAULT_TURN_BUDGET));
+    let notice = sent.try_recv().unwrap();
+    assert_eq!((&notice.to, notice.on_behalf_of.as_ref()), (&alice, None));
+    assert!(notice.text.contains("as the assistant of alice, posted to #ops on thread"), "{}", notice.text);
+
+    let thread = post.thread_id.clone();
+    let reply = serde_json::json!({"channel": "ops", "text": "done", "thread": thread.to_string()});
+    let (ok, _) = call(&client, "post_for_human", reply).await;
+    assert!(ok);
+    let reply = posted.locked().pop().unwrap();
+    assert_eq!(
+        (&reply.thread_id, reply.in_reply_to, reply.on_behalf_of.as_ref()),
+        (&thread, Some(post.id), Some(&alice))
+    );
+    sent.try_recv().unwrap();
+
+    let spent = NotesPost::spend(thread.clone(), user("dev-b"), "stuck", 1, None).unwrap();
+    notes.0.locked().insert(thread.clone(), vec![spent]);
+    let (ok, result) =
+        call(&client, "notes_for_human", serde_json::json!({"thread": thread.to_string(), "text": "go on"})).await;
+    assert!(ok && result.contains(&format!("({} turns left)", ants_proto::DEFAULT_TURN_BUDGET)), "{result}");
+    let noted = notes.0.locked()[&thread].last().cloned().unwrap();
+    assert_eq!((&noted.from, noted.on_behalf_of.as_ref(), noted.text.as_str()), (&dev_a, Some(&alice), "go on"));
+    let notice = sent.try_recv().unwrap();
+    assert!(notice.text.contains("posted to the notes of thread"), "{}", notice.text);
+
+    grant(&humans, &device, None, false);
+    let (ok, refused) =
+        call(&client, "notes_for_human", serde_json::json!({"thread": thread.to_string(), "text": "x"})).await;
+    assert!(!ok && refused.contains("no longer names dev-a"), "{refused}");
 }
 
 #[tokio::test]

@@ -116,7 +116,7 @@ async fn sent(
 }
 
 /// What a command says of `order` still pending when it stopped waiting.
-fn pending_note(order: &AdminOrder) -> String {
+pub(crate) fn pending_note(order: &AdminOrder) -> String {
     format!(
         "order {} sent; the daemon of {} has not decided it yet: `ants ant orders {}` shows its outcome",
         order.id, order.machine, order.ant
@@ -124,7 +124,7 @@ fn pending_note(order: &AdminOrder) -> String {
 }
 
 /// Why the daemon refused an order, as its outcome says.
-fn reason(outcome: &AdminOutcome) -> &str {
+pub(crate) fn reason(outcome: &AdminOutcome) -> &str {
     outcome.reason.as_deref().unwrap_or("no reason given")
 }
 
@@ -172,6 +172,9 @@ pub struct Listed {
     /// The admin the order names; none when it could not be read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub admin: Option<UserId>,
+    /// The human the admin, an assistant, sent the order for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_behalf_of: Option<UserId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub op: Option<AdminOp>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -187,12 +190,22 @@ pub struct Listed {
 }
 
 impl Listed {
+    /// Who sent it: the admin, or `<human> via <assistant>`.
+    pub(crate) fn by(&self) -> String {
+        match (&self.admin, &self.on_behalf_of) {
+            (Some(admin), Some(human)) => format!("{human} via {admin}"),
+            (Some(admin), None) => admin.to_string(),
+            (None, _) => "-".to_owned(),
+        }
+    }
+
     fn pending(order: AdminOrder, machine: Machine, ant: UserId) -> Self {
         Self {
             id: order.id,
             machine,
             ant,
             admin: Some(order.admin),
+            on_behalf_of: order.on_behalf_of,
             op: Some(order.op),
             sent_at: Some(order.sent_at),
             state: OrderState::Pending,
@@ -210,6 +223,7 @@ impl From<AdminOutcome> for Listed {
             machine: o.machine,
             ant: o.ant,
             admin: o.admin,
+            on_behalf_of: o.on_behalf_of,
             op: o.op,
             sent_at: o.sent_at,
             state: o.state,
@@ -285,7 +299,7 @@ pub(crate) fn table(orders: &[Listed], now: DateTime<Utc>) -> String {
             };
             [
                 o.sent_at.map_or_else(|| "-".to_owned(), |at| format!("{} ago", short(since(at, now)))),
-                o.admin.as_ref().map_or_else(|| "-".to_owned(), ToString::to_string),
+                o.by(),
                 o.machine.to_string(),
                 o.op.as_ref().map_or_else(|| "-".to_owned(), AdminOp::describe),
                 state,
