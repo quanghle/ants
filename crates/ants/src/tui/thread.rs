@@ -535,7 +535,7 @@ impl Shown<'_> {
 
     /// A message at the top level: who sent it to whom and when, then its text under it.
     fn block(&self, lines: &mut Vec<Line<'static>>, e: &Entry, entries: &[Entry]) {
-        let from = e.from.as_ref().map_or("a human", UserId::as_str);
+        let from = e.acting.label(e.from.as_ref().map_or("a human", UserId::as_str));
         let to = match (e.kind, &e.channel, &e.to) {
             (Kind::Post, Some(channel), _) => format!(" → #{channel}"),
             (Kind::Note, ..) => " → notes".to_owned(),
@@ -618,7 +618,7 @@ impl Shown<'_> {
 
 /// How a message nested under another shows after its time: its route and what it is, and its style.
 fn nested(e: &Entry) -> (String, Style) {
-    let from = e.from.as_ref().map_or("a human", UserId::as_str);
+    let from = e.acting.label(e.from.as_ref().map_or("a human", UserId::as_str));
     let to = e.to.as_ref().map_or("", UserId::as_str);
     let lock = if e.sealed.is_some() { format!(" {}", super::dm::LOCK) } else { String::new() };
     let forged = if e.forged || e.sealed == Some(sealed::State::Forged) { " (forged)" } else { "" };
@@ -685,12 +685,12 @@ fn indented(indent: &str, line: Line<'static>) -> Line<'static> {
 /// Where the thread came from, as `first`, its first message read, tells: a channel post, a webhook or schedule
 /// (which send alike), a human's ask, or an ant.
 fn origin(first: &Entry, data: &Data) -> String {
-    let from = first.from.as_ref().map_or("a human", UserId::as_str);
+    let from = first.acting.label(first.from.as_ref().map_or("a human", UserId::as_str));
     match (&first.channel, first.kind) {
         (Some(channel), Kind::Post | Kind::Mention) => format!("#{channel} post"),
         _ if first.webhook => format!("webhook {from}"),
         _ if first.from.as_ref().is_none_or(|u| data.is_human(u)) => format!("ask by {from}"),
-        _ => from.to_owned(),
+        _ => from,
     }
 }
 

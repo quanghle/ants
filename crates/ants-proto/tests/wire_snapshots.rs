@@ -102,6 +102,7 @@ fn decision() -> ApprovalDecision {
         verdict: Verdict::AllowOnce,
         decided_at: at(1),
         by: None,
+        on_behalf_of: None,
     }
 }
 
@@ -123,6 +124,7 @@ fn envelope() -> Envelope {
         origin_thread: Some(other_thread()),
         escalation: Some(Box::new(escalation())),
         approval: Some(Box::new(decision())),
+        on_behalf_of: Some(user("alice")),
         webhook: true,
         allow: Some(vec!["read:*".to_owned(), "other:send_message".to_owned()]),
         mention: Some(mention()),
@@ -150,6 +152,7 @@ fn plain_envelope() -> Envelope {
         origin_thread: None,
         escalation: None,
         approval: None,
+        on_behalf_of: None,
         webhook: false,
         allow: None,
         mention: None,
@@ -254,12 +257,20 @@ fn kv_entries() {
     snap("human_entry", &HumanEntry { human: user("alice"), registered_at: Some(at(0)) });
     snap(
         "reaction_entry",
-        &ReactionEntry { message: id(1), by: user("alice"), reaction: "eyes".parse().unwrap(), at: at(0) },
+        &ReactionEntry {
+            message: id(1),
+            by: user("alice"),
+            reaction: "eyes".parse().unwrap(),
+            at: at(0),
+            on_behalf_of: None,
+        },
     );
+    let reaction = ReactionEntry::new(user("asst"), id(1), "eyes".parse().unwrap());
+    snap("reaction_entry_on_behalf", &ReactionEntry { at: at(0), ..reaction.on_behalf(Some(user("alice"))) });
     let request = ReactionsRequest { id: id(1), ant: user("dev-a"), message: id(2), requested_at: at(0), change: None };
     snap("reactions_request", &request);
     for (kind, remove) in [("react", false), ("unreact", true)] {
-        let change = Some(ReactionChange { reaction: "eyes".parse().unwrap(), remove });
+        let change = Some(ReactionChange::new("eyes".parse().unwrap(), remove));
         snap(&format!("reactions_request_{kind}"), &ReactionsRequest { change, ..request.clone() });
     }
     let reacted = Reacted { reaction: "eyes".parse().unwrap(), by: vec![user("alice"), user("dev-b")] };
@@ -282,6 +293,7 @@ fn kv_entries() {
             by: user("alice"),
             at: at(0),
             sealed: None,
+            on_behalf_of: None,
         },
     );
     snap(
@@ -292,10 +304,14 @@ fn kv_entries() {
             by: user("alice"),
             at: at(0),
             sealed: Some(Box::new(sealed())),
+            on_behalf_of: None,
         },
     );
     snap("sealed_title", &SealedTitle { thread_id: thread(), by: user("alice"), title: "Lunch".to_owned() });
-    snap("thread_done", &ThreadDone { thread_id: thread(), by: user("alice"), at: at(0), after: 4211 });
+    let done = ThreadDone { thread_id: thread(), by: user("alice"), at: at(0), after: 4211, on_behalf_of: None };
+    snap("thread_done", &done);
+    let on_behalf = ThreadDone { by: user("asst"), ..done }.on_behalf(Some(user("alice")));
+    snap("thread_done_on_behalf", &on_behalf);
     snap(
         "thread_summary",
         &ThreadSummary {
@@ -570,6 +586,7 @@ fn approvals() {
     snap("approval_request_for_human", &request.for_human(Some(user("alice")), Some(user("bob"))));
     snap("approval_decision", &decision());
     snap("approval_decision_by", &decision().by(Some(user("bob"))));
+    snap("approval_decision_on_behalf", &decision().on_behalf(Some(user("alice"))));
 }
 
 #[test]

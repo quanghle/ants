@@ -226,4 +226,4 @@ pub fn verify_assistant_of<'a>(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

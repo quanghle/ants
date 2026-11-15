@@ -693,6 +693,7 @@ async fn a_sealed_message_from_a_device_enrolled_mid_follow_opens_everywhere_it_
     let follow = inbox.follow(
         &select,
         keyring.as_deref(),
+        None,
         |e| {
             followed.push(crate::sealed::read(e.clone(), keyring.as_deref()));
             Ok(())

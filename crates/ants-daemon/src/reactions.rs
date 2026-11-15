@@ -55,13 +55,25 @@ pub async fn add(
     message: &Uuid,
     reaction: &Reaction,
 ) -> Result<bool> {
+    add_for(js, js_domain, by, message, reaction, None).await
+}
+
+/// [`add`], made for `on_behalf_of` when `by` is its assistant ([`ReactionEntry::on_behalf_of`]).
+pub async fn add_for(
+    js: &jetstream::Context,
+    js_domain: Option<&JsDomain>,
+    by: &UserId,
+    message: &Uuid,
+    reaction: &Reaction,
+    on_behalf_of: Option<UserId>,
+) -> Result<bool> {
     let kv = own(js, js_domain).await?;
     let key = reaction_key(by, message, reaction);
     match kv.lookup(&key).await.context("reading the reaction")? {
         Lookup::Value(_) => Ok(false),
         Lookup::NoBucket => bail!(MISSING),
         Lookup::NoValue => {
-            let entry = ReactionEntry::new(by.clone(), *message, reaction.clone());
+            let entry = ReactionEntry::new(by.clone(), *message, reaction.clone()).on_behalf(on_behalf_of);
             kv.put(&key, serde_json::to_vec(&entry)?).await.context("storing the reaction")?;
             Ok(true)
         }
@@ -256,11 +268,12 @@ pub async fn answer(
     }
     let (ant, message) = (&request.ant, &request.message);
     Ok(match &request.change {
-        Some(ReactionChange { reaction, remove: true }) => {
+        Some(ReactionChange { reaction, remove: true, .. }) => {
             ReactionsOutcome::Applied { changed: remove(js, js_domain, ant, message, reaction).await? }
         }
-        Some(ReactionChange { reaction, remove: false }) => {
-            ReactionsOutcome::Applied { changed: add(js, js_domain, ant, message, reaction).await? }
+        Some(ReactionChange { reaction, remove: false, on_behalf_of }) => {
+            let changed = add_for(js, js_domain, ant, message, reaction, on_behalf_of.clone()).await?;
+            ReactionsOutcome::Applied { changed }
         }
         None => {
             let reactions = load(js, &[request.message]).await?.remove(&request.message).unwrap_or_default();
@@ -518,7 +531,7 @@ mod tests {
         assert_eq!(outcome(&dev_a, quiet.id).await, ReactionsOutcome::Listed { reactions: Vec::new() });
 
         // An ant changes its own reactions to the messages it reads only, as itself.
-        let change = |reaction: &str, remove| ReactionChange { reaction: r(reaction), remove };
+        let change = |reaction: &str, remove| ReactionChange::new(r(reaction), remove);
         let changing = async |ant: &UserId, message, reaction, remove| {
             answer(&js, None, &ReactionsRequest::change(ant.clone(), message, change(reaction, remove))).await.unwrap()
         };

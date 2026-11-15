@@ -1045,7 +1045,7 @@ async fn check_ant_reactions(ant: &Ant, setup: &Setup, wait: Duration) -> Check 
         }
     };
     let ask = async |request: ReactionsRequest| reactions::request_within(&client, &request, wait).await;
-    let remove = ReactionChange { reaction: "eyes".parse().expect("a reaction"), remove: true };
+    let remove = ReactionChange::new("eyes".parse().expect("a reaction"), true);
     let (listed, changed) = tokio::join!(
         ask(ReactionsRequest::new(ant.name.clone(), Uuid::nil())),
         ask(ReactionsRequest::change(ant.name.clone(), Uuid::nil(), remove)),

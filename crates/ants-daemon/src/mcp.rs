@@ -305,6 +305,7 @@ impl Mcp {
             admin: OnceLock::new(),
             requester: OnceLock::new(),
             reaction_asker: OnceLock::new(),
+            assisting: OnceLock::new(),
             files: OnceLock::new(),
             redactor: OnceLock::new(),
             state_path,
@@ -351,6 +352,19 @@ impl Mcp {
     /// Serve `react` and `list_reactions` through `asker`; without it both are refused.
     pub fn with_reaction_asker(&self, asker: ReactionAsker) {
         let _ = self.hub.reaction_asker.set(asker);
+    }
+
+    /// Take the ant for the assistant of `human`, as its credentials' assistant_of tag says.
+    pub fn with_assisting(&self, human: UserId) {
+        let _ = self.hub.assisting.set(human);
+    }
+
+    /// The human the tools may act for, setting `on_behalf_of` on what they send ([`Envelope::on_behalf`]): the one
+    /// the ant's credentials make it the assistant of, while that human's grant names the ant. None otherwise, so
+    /// whatever the tools send then is the ant's own.
+    pub fn assisting(&self) -> Option<UserId> {
+        let human = self.hub.assisting.get()?;
+        (self.hub.humans.assistant(human).as_ref() == Some(&self.hub.ant)).then(|| human.clone())
     }
 
     /// Store and read attachments through `files`, attaching and saving files in `workdir`, or the directory a
@@ -558,6 +572,8 @@ struct Hub {
     admin: OnceLock<Arc<dyn Admin>>,
     requester: OnceLock<AntRequester>,
     reaction_asker: OnceLock<ReactionAsker>,
+    /// The human whose assistant the ant's credentials make it ([`ants_proto::AssistantOf`]).
+    assisting: OnceLock<UserId>,
     /// The attachments' store and the ant's workdir.
     files: OnceLock<(FileAccess, PathBuf)>,
     /// What redacts the text files the tools attach; none redacts nothing.
@@ -800,7 +816,7 @@ impl Hub {
         let asker = self.reaction_asker.get().ok_or("reactions are not available here")?;
         let reaction: Reaction = args.reaction.trim().parse().map_err(|e| format!("{e}"))?;
         let message = self.message(thread, args.message_id.as_deref())?;
-        let change = ReactionChange { reaction: reaction.clone(), remove: args.remove };
+        let change = ReactionChange::new(reaction.clone(), args.remove);
         let outcome = asker(ReactionsRequest::change(self.ant.clone(), message, change))
             .await
             .map_err(|e| format!("{e:#}"))?

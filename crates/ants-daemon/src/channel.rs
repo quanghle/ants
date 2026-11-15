@@ -226,6 +226,7 @@ pub fn as_envelope(post: &ChannelPost, ant: &UserId) -> Envelope {
         origin_thread: None,
         escalation: None,
         approval: None,
+        on_behalf_of: None,
         webhook: post.webhook,
         allow: post.allow.clone(),
         mention: None,

@@ -910,7 +910,7 @@ mod tests {
         bus::publish(&h_js, &to_a).await.unwrap();
         let (a_client, _) = server.connect_as(&dev_a, Role::Ant).await;
 
-        let change = ReactionChange { reaction: "eyes".parse().unwrap(), remove: false };
+        let change = ReactionChange::new("eyes".parse().unwrap(), false);
         let (outcomes, _) = signing(&server, &config, async {
             let changed =
                 reactions::request(&a_client, &ReactionsRequest::change(dev_a.clone(), to_a.id, change)).await;

@@ -15,7 +15,7 @@ use ants_daemon::humans::Registry;
 use ants_daemon::reactions::{self, Reacted};
 use ants_daemon::reading::{self, Reading};
 use ants_daemon::unserved;
-use ants_proto::{Envelope, Question, READ_BUCKET, ReadMarker, Role, ThreadId, UserId, Uuid, subject};
+use ants_proto::{Acting, Envelope, Question, READ_BUCKET, ReadMarker, Role, ThreadId, UserId, Uuid, subject};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
 use async_nats::jetstream::consumer::DeliverPolicy;
@@ -190,6 +190,7 @@ impl Inbox {
         &mut self,
         select: &Select,
         keyring: Option<&Keyring>,
+        behalf: Option<&crate::behalf::Checker>,
         mut show: impl FnMut(&Envelope) -> Result<()>,
         stop: impl Future<Output = ()>,
     ) -> Result<()> {
@@ -213,6 +214,9 @@ impl Inbox {
                         self.taken += 1;
                         if let Some(keyring) = keyring {
                             keyring.learn(&e).await;
+                        }
+                        if let Some(behalf) = behalf {
+                            behalf.learn(&e).await;
                         }
                         show(&e)?;
                         marks.push(seq);
@@ -275,6 +279,9 @@ pub struct Shown<'a> {
     /// What the CLI made of a sealed message, whose text it opened or shows `[sealed]` or `[forged]` for.
     #[serde(skip_serializing_if = "Option::is_none")]
     sealed: Option<State>,
+    /// What the CLI made of the message's `on_behalf_of` ([`crate::behalf::Checker`]).
+    #[serde(skip_serializing_if = "Acting::is_own")]
+    acting: Acting,
 }
 
 impl<'a> Shown<'a> {
@@ -285,7 +292,13 @@ impl<'a> Shown<'a> {
             attachments,
             reactions,
             sealed: None,
+            acting: Acting::Own,
         }
+    }
+
+    /// With what the CLI made of the message's `on_behalf_of`.
+    pub fn acting(self, acting: Acting) -> Self {
+        Self { acting, ..self }
     }
 
     /// With what the CLI made of the message if sealed ([`crate::sealed::read`]).
@@ -353,24 +366,26 @@ pub fn render_question(id: Uuid, question: &Question, answers: Vec<String>) -> S
 
 /// A message for the terminal: a header line with its id, then the text indented, its attachments and the reactions to
 /// it. A mention notice names its channel, the sender that relayed it if any, and how to answer there; a question shows
-/// its options numbered, whether a typed answer is taken and how to answer it.
-pub fn render(e: &Envelope, reactions: &[Reacted]) -> String {
+/// its options numbered, whether a typed answer is taken and how to answer it. An assistant's message for its human
+/// names both ([`Acting::label`]).
+pub fn render(e: &Envelope, acting: &Acting, reactions: &[Reacted]) -> String {
+    let from = acting.label(e.from.as_str());
     let at = e.sent_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M");
     let indent = |text: &str| text.lines().map(|line| format!("  {line}")).collect::<Vec<_>>().join("\n");
     let attached = attachments::render(&attachments::listed(&e.attachments, |id| e.attachment_handle(id)), "  ");
     let under = attached + &render_reactions(reactions, "  ");
     if let Some(question) = e.asks() {
         let text = indent(&render_question(e.id, question, Vec::new()));
-        return format!("{at}  {} asks on thread {}, message {}\n{text}\n{under}", e.from, e.thread_id, e.id);
+        return format!("{at}  {from} asks on thread {}, message {}\n{text}\n{under}", e.thread_id, e.id);
     }
     let text = indent(&e.text);
     let Some(mention) = &e.mention else {
-        return format!("{at}  {} on thread {}, message {}\n{text}\n{under}", e.from, e.thread_id, e.id);
+        return format!("{at}  {from} on thread {}, message {}\n{text}\n{under}", e.thread_id, e.id);
     };
     let (channel, thread) = (&mention.channel, &e.thread_id);
     let (author, relayed) = match &mention.author {
-        Some(author) => (author, format!(" (relayed by {})", e.from)),
-        None => (&e.from, String::new()),
+        Some(author) => (author.to_string(), format!(" (relayed by {from})")),
+        None => (from, String::new()),
     };
     format!(
         "{at}  {author} mentioned {} in #{channel} on thread {thread}{relayed}, message {}\n{text}\n  (`ants post \
@@ -418,7 +433,7 @@ mod tests {
         let post = ants_proto::ChannelPost::new("ops".parse().unwrap(), "github".parse().unwrap(), "deploy failed")
             .from_webhook(vec![alice.clone()]);
         let notice = post.relayed_notice(&alice, &dev_a);
-        let shown = render(&notice, &[]);
+        let shown = render(&notice, &Acting::Own, &[]);
         let header = format!(
             "github mentioned alice in #ops on thread {} (relayed by dev-a), message {}\n",
             post.thread_id, notice.id
@@ -432,7 +447,7 @@ mod tests {
         let options = ["yes".to_owned(), "not yet".to_owned()];
         let question = Question::new("Ship it?", &options, false).unwrap();
         let asked = Envelope::asking("t1".parse().unwrap(), "dev-a".parse().unwrap(), UserId::human(), question);
-        let shown = render(&asked, &[]);
+        let shown = render(&asked, &Acting::Own, &[]);
         assert!(shown.contains(&format!("dev-a asks on thread t1, message {}\n  Ship it?\n", asked.id)), "{shown}");
         assert!(shown.contains("\n  1. yes\n  2. not yet\n"), "{shown}");
         assert!(shown.contains("\n  Answer with an option's number.\n"), "{shown}");
@@ -445,7 +460,7 @@ mod tests {
         let shot = ants_daemon::files::reference("shot.png", "image/png", &[0; 2048]).unwrap();
         reply.attachments = vec![shot.clone()];
         let handle = format!("dev-a.inbox.human.{}", shot.id);
-        let shown = render(&reply, &[]);
+        let shown = render(&reply, &Acting::Own, &[]);
         assert!(shown.contains(&format!("\n  the screenshot\n  📎 shot.png (2.0 KiB) {handle}\n")), "{shown}");
         let json = serde_json::to_string(&Shown::new(&reply, &[])).unwrap();
         assert_eq!(json.matches("\"attachments\"").count(), 1, "{json}");
@@ -508,6 +523,7 @@ mod tests {
             let select = Select { limit: Some(1), ..Default::default() };
             let follow = inbox.follow(
                 &select,
+                None,
                 None,
                 |e| {
                     shown.push(e.text.clone());

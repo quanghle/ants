@@ -667,7 +667,15 @@ fn humans_read_every_device_key_put_only_their_own_and_only_the_revoker_records_
     let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
     let observer = Permissions::for_observer(&p("watcher"));
     let webhook = Permissions::for_webhook(&p("hook"), &[Destination::Ant(p("dev-a"))]);
-    for none in [ant, observer, webhook, Permissions::for_channel_manager(), Permissions::for_reactions_responder()] {
+    // An ant reads only the assistants' records and the revocations, to check what an assistant does for its human.
+    assert_eq!(
+        devices(&ant),
+        [
+            "$JS.API.DIRECT.GET.KV_ants_devices.$KV.ants_devices.*.assistant",
+            "$JS.API.DIRECT.GET.KV_ants_devices.$KV.ants_devices.revoked.*",
+        ]
+    );
+    for none in [observer, webhook, Permissions::for_channel_manager(), Permissions::for_reactions_responder()] {
         assert_eq!(devices(&none), Vec::<String>::new());
     }
 
@@ -892,9 +900,13 @@ fn an_assistant_keeps_its_ant_rights_and_a_humans_under_its_own_name() {
         assert!(s.starts_with("$JS.API.DIRECT.GET.") || !s.contains(".alice"), "writes {s}");
         assert!(!key.starts_with("$KV.ants_reactions.alice"), "reads {s}");
         for bucket in ["ants_devices", "ants_presence", "ants_notify", "ants_humans"] {
-            assert!(!s.starts_with(&format!("$KV.{bucket}.")), "puts {s}");
+            // Save the record of its own credentials, which readers check its acts for its human against.
+            let record = s == "$KV.ants_devices.pa.assistant";
+            assert!(record || !s.starts_with(&format!("$KV.{bucket}.")), "puts {s}");
         }
     }
+    assert!(has("$KV.ants_devices.pa.assistant"));
+    assert!(!ant.publish.iter().any(|s| s.starts_with("$KV.ants_devices.")), "an ant keeps no record");
     let unique: std::collections::HashSet<&String> = assistant.publish.iter().collect();
     assert_eq!(unique.len(), assistant.publish.len(), "no subject twice");
 }

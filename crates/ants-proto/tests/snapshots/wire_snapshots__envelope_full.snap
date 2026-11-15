@@ -31,6 +31,7 @@ expression: value
     "verdict": "allow_once",
     "decided_at": "2025-01-01T12:01:00Z"
   },
+  "on_behalf_of": "alice",
   "webhook": true,
   "allow": [
     "read:*",

@@ -496,7 +496,7 @@ mod tests {
 
     use ants_daemon::bus;
     use ants_daemon::humans::{Registry, Withdrawal};
-    use ants_proto::Role;
+    use ants_proto::{Acting, Role};
 
     use super::*;
     use crate::auth::tests::Server;
@@ -721,5 +721,46 @@ mod tests {
         enrolled_now(None).await;
         let (_, stored) = put(&alice_js, &creds[0], &alice, Some(pa.clone()), Sealing::Keep).await.unwrap();
         assert_eq!(stored.sealing, None, "an enrollment ends with its assistant");
+    }
+
+    /// What an ant does for a human counts for the human only while the human's grant names the ant and the ant's
+    /// record, its own credentials, names the human; any other claim is forged.
+    #[tokio::test]
+    async fn an_assistant_acts_for_its_human_only_while_grant_and_credentials_say_so() {
+        let Some(server) = Server::start() else { return };
+        let (alice, pa, pb, dev_a) = (p("alice"), p("pa"), p("pb"), p("dev-a"));
+        let creds = server.creds_as(&alice, Role::Human);
+        let (_, js) = bus::connect(&server.url, Some(&creds), None, &alice, "test").await.unwrap();
+        humans::ensure(&js).await.unwrap();
+        js.create_key_value(ants_daemon::hub::devices_config()).await.unwrap();
+        for ant in [&pa, &pb] {
+            let assistant = server.dir().join(format!("{ant}-assistant.creds"));
+            let new = auth::NewDevice { assistant_of: Some(alice.clone()), ..auth::NewDevice::default() };
+            let rights = ants_proto::Permissions::for_assistant(ant, &alice);
+            auth::issue_device_with(&server.dir().join("auth"), ant, revoke::Kind::Assistant, rights, &new, &assistant)
+                .unwrap();
+            let (_, ant_js) = bus::connect(&server.url, Some(&assistant), None, ant, "test").await.unwrap();
+            let kept = ants_daemon::behalf::keep_record(&ant_js, None, ant, &assistant).await.unwrap();
+            assert_eq!(kept, Some(alice.clone()));
+        }
+        let ant_creds = server.creds_as(&dev_a, Role::Ant);
+        let (_, ant_js) = bus::connect(&server.url, Some(&ant_creds), None, &dev_a, "test").await.unwrap();
+        assert_eq!(ants_daemon::behalf::keep_record(&ant_js, None, &dev_a, &ant_creds).await.unwrap(), None);
+        let devices = ants_daemon::direct_kv::DirectKv::new(&ant_js, None, ants_proto::DEVICES_BUCKET).await.unwrap();
+        let record = ants_proto::assistant_record_key(&dev_a);
+        assert!(devices.put(&record, b"{}".to_vec()).await.is_err(), "an ant keeps no record");
+        let nats = crate::Nats::new(&server.url, Some(&creds), None).unwrap();
+        let acting =
+            async |by: &UserId, claim: Option<&UserId>| crate::behalf::Checker::new(&nats, &js).check(by, claim).await;
+
+        put(&js, &creds, &alice, Some(pa.clone()), Sealing::Keep).await.unwrap();
+        assert_eq!(acting(&pa, Some(&alice)).await, Acting::For(alice.clone()));
+        assert_eq!(acting(&pa, None).await, Acting::Own);
+        assert_eq!(acting(&pb, Some(&alice)).await, Acting::Forged(alice.clone()), "another assistant of alice");
+        put(&js, &creds, &alice, Some(dev_a.clone()), Sealing::Keep).await.unwrap();
+        assert_eq!(acting(&dev_a, Some(&alice)).await, Acting::Forged(alice.clone()), "credentials naming no human");
+        put(&js, &creds, &alice, None, Sealing::Keep).await.unwrap();
+        assert_eq!(acting(&pa, Some(&alice)).await, Acting::Forged(alice.clone()), "withdrawn");
+        assert_eq!(Acting::For(alice.clone()).label("pa"), "alice via pa");
     }
 }

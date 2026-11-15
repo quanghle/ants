@@ -471,6 +471,12 @@ fn now() -> Option<u64> {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs())
 }
 
+/// The user JWT of the credentials at `path`.
+pub fn jwt(path: &Path) -> Result<String> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading credentials {}", path.display()))?;
+    creds_jwt(&text).map(str::to_owned).with_context(|| format!("no user JWT in {}", path.display()))
+}
+
 /// The user JWT of a `.creds` file's text: the line after the `BEGIN NATS USER JWT` marker.
 fn creds_jwt(creds: &str) -> Option<&str> {
     creds_block(creds, "BEGIN NATS USER JWT")

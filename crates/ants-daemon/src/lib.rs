@@ -3,6 +3,7 @@
 pub mod admin;
 pub mod approvals;
 pub mod attempts;
+pub mod behalf;
 pub mod breaker;
 pub mod bus;
 pub mod caps;
