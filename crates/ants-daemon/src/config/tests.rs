@@ -561,8 +561,17 @@ fn the_cli_section_overrides_the_top_level_server() {
     let relative = cli("[cli]\ncreds = \"auth/alice.creds\"\njs_domain = \"own\"").unwrap();
     assert_eq!(relative.creds.as_deref(), Some(Path::new("/team/auth/alice.creds")));
     assert_eq!(relative.js_domain.as_ref().map(JsDomain::as_str), Some("own"));
+    assert_eq!(relative.auto_archive, None, "never by default");
+    assert_eq!(cli("[cli]\nauto_archive = \"14d\"").unwrap().auto_archive, Some(Duration::from_hours(14 * 24)));
+    assert_eq!(cli("[cli]\nauto_archive = \"0\"").unwrap().auto_archive, None);
 
-    for bad in ["[cli]\ncred = \"a.creds\"", "nats = 4222", "nats = \"nats://u:secret@hub\"", "[cli"] {
+    for bad in [
+        "[cli]\ncred = \"a.creds\"",
+        "[cli]\nauto_archive = 14",
+        "nats = 4222",
+        "nats = \"nats://u:secret@hub\"",
+        "[cli",
+    ] {
         let err = format!("{:#}", cli(bad).unwrap_err());
         assert!(err.contains("/team/config.toml") && !err.contains("secret"), "{bad}: {err}");
     }

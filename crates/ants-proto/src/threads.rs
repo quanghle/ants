@@ -36,7 +36,8 @@ fn breaks_title(c: char) -> bool {
 /// A human's pinned and archived threads, under its [`marks_key`] in [`THREADS_BUCKET`], shared by all its devices,
 /// which update it with compare-and-set. A thread is pinned or archived, never both: pinning one unarchives it and
 /// archiving one unpins it. Marks change nothing else: an archived thread keeps its messages, its work goes on and
-/// its replies reach the inbox as before.
+/// its replies reach the inbox as before. A thread with neither mark may count as archived for having been idle
+/// ([`ThreadMarks::idle`]), unless the human kept it since.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadMarks {
     /// When each pinned thread was pinned.
@@ -44,6 +45,9 @@ pub struct ThreadMarks {
     pub pinned: std::collections::BTreeMap<ThreadId, DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub archived: std::collections::BTreeMap<ThreadId, Archived>,
+    /// When each thread the human unarchived while it was idle was kept: it is idle again only once idle since then.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub kept: std::collections::BTreeMap<ThreadId, DateTime<Utc>>,
 }
 
 /// When a thread was archived, and the last [`STREAM`] sequence then: a message on the thread stored after it is new
@@ -62,12 +66,15 @@ pub enum Mark {
     Archived {
         new_activity: bool,
     },
+    /// Neither, but archived for having been idle ([`ThreadMarks::idle`]).
+    Idle,
 }
 
 impl ThreadMarks {
     /// Pin `thread`, unarchiving it. Whether that changed anything.
     pub fn pin(&mut self, thread: &ThreadId) -> bool {
         self.archived.remove(thread);
+        self.kept.remove(thread);
         if self.pinned.contains_key(thread) {
             return false;
         }
@@ -84,6 +91,7 @@ impl ThreadMarks {
     /// archiving it again once a message was stored on it since moves `after` on, so that message is no longer new.
     pub fn archive(&mut self, thread: &ThreadId, after: u64) -> bool {
         let unpinned = self.pinned.remove(thread).is_some();
+        self.kept.remove(thread);
         if self.archived.get(thread).is_some_and(|a| a.after >= after) {
             return unpinned;
         }
@@ -96,13 +104,20 @@ impl ThreadMarks {
         self.archived.remove(thread).is_some()
     }
 
-    /// Forget the marks placed before `before` on the threads `gone` says have no message left in [`STREAM`]. How
-    /// many it forgot.
-    pub fn prune(&mut self, before: DateTime<Utc>, gone: impl Fn(&ThreadId) -> bool) -> usize {
-        let had = self.pinned.len() + self.archived.len();
+    /// Forget the marks placed before `before` on the threads `gone` says have no message left in [`STREAM`], and the
+    /// keeps ([`ThreadMarks::keep`]) of threads `active` says had a message stored at or after they were kept, which
+    /// then count as idle from that message on anyway. How many it forgot.
+    pub fn prune(
+        &mut self,
+        before: DateTime<Utc>,
+        gone: impl Fn(&ThreadId) -> bool,
+        active: impl Fn(&ThreadId, DateTime<Utc>) -> bool,
+    ) -> usize {
+        let had = self.pinned.len() + self.archived.len() + self.kept.len();
         self.pinned.retain(|thread, at| *at >= before || !gone(thread));
         self.archived.retain(|thread, archived| archived.at >= before || !gone(thread));
-        had - self.pinned.len() - self.archived.len()
+        self.kept.retain(|thread, at| (*at >= before || !gone(thread)) && !active(thread, *at));
+        had - self.pinned.len() - self.archived.len() - self.kept.len()
     }
 
     /// How `thread`, whose last message read has [`STREAM`] sequence `last`, is marked.
@@ -111,6 +126,36 @@ impl ThreadMarks {
             return Some(Mark::Pinned);
         }
         self.archived.get(thread).map(|a| Mark::Archived { new_activity: last > a.after })
+    }
+
+    /// Keep `thread` from counting as idle until it is idle again from now on, as unarchiving a thread archived for
+    /// having been idle does. Whether that changed anything: a pinned thread is never idle.
+    pub fn keep(&mut self, thread: &ThreadId) -> bool {
+        if self.pinned.contains_key(thread) {
+            return false;
+        }
+        self.kept.insert(thread.clone(), Utc::now());
+        true
+    }
+
+    /// Whether `thread`, whose last message was stored at `last_at`, is archived for having been idle since `cutoff`
+    /// or before: neither pinned nor archived, with no message stored and not kept ([`ThreadMarks::keep`]) after
+    /// `cutoff`. A new message makes it active again, as does keeping it.
+    pub fn idle(&self, thread: &ThreadId, last_at: DateTime<Utc>, cutoff: DateTime<Utc>) -> bool {
+        let active_at = self.kept.get(thread).map_or(last_at, |kept| last_at.max(*kept));
+        !self.pinned.contains_key(thread) && !self.archived.contains_key(thread) && active_at <= cutoff
+    }
+
+    /// How `thread`, whose last message read has [`STREAM`] sequence `last` and was stored at `last_at`, is marked,
+    /// [`Mark::Idle`] included when threads idle since `cutoff` count as archived.
+    pub fn mark_at(
+        &self,
+        thread: &ThreadId,
+        last: u64,
+        last_at: DateTime<Utc>,
+        cutoff: Option<DateTime<Utc>>,
+    ) -> Option<Mark> {
+        self.mark(thread, last).or_else(|| cutoff.is_some_and(|c| self.idle(thread, last_at, c)).then_some(Mark::Idle))
     }
 }
 
@@ -142,6 +187,28 @@ mod tests {
     }
 
     #[test]
+    fn an_unmarked_thread_idle_since_the_cutoff_is_archived_until_a_message_or_keeping_it() {
+        let thread = ThreadId::generate();
+        let mut marks = ThreadMarks::default();
+        let now = Utc::now();
+        let (cutoff, old, recent) = (now - chrono::TimeDelta::days(14), now - chrono::TimeDelta::days(20), now);
+        assert!(marks.idle(&thread, old, cutoff) && marks.idle(&thread, cutoff, cutoff));
+        assert!(!marks.idle(&thread, recent, cutoff), "a new message makes it active");
+        assert_eq!(marks.mark_at(&thread, 1, old, Some(cutoff)), Some(Mark::Idle));
+        assert_eq!(marks.mark_at(&thread, 1, old, None), None, "auto-archiving off");
+
+        assert!(marks.keep(&thread));
+        assert!(!marks.idle(&thread, old, cutoff), "kept from now on");
+        assert!(marks.idle(&thread, old, now + chrono::TimeDelta::days(1)), "idle again once idle since keeping it");
+        assert!(marks.archive(&thread, 1) && marks.kept.is_empty(), "archiving drops the keep");
+        assert_eq!(marks.mark_at(&thread, 1, old, Some(cutoff)), Some(Mark::Archived { new_activity: false }));
+        assert!(!marks.idle(&thread, old, cutoff), "archived by hand instead");
+        assert!(marks.keep(&thread) && marks.pin(&thread) && marks.kept.is_empty(), "pinning drops the keep");
+        assert!(!marks.idle(&thread, old, cutoff) && !marks.keep(&thread), "a pinned thread is never idle");
+        assert_eq!(marks.mark_at(&thread, 1, old, Some(cutoff)), Some(Mark::Pinned));
+    }
+
+    #[test]
     fn only_old_marks_of_threads_gone_are_forgotten() {
         let (gone, old_gone, kept) = (ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
         let mut marks = ThreadMarks::default();
@@ -151,11 +218,22 @@ mod tests {
         marks.pinned.insert(old_gone.clone(), long_ago);
         marks.archived.insert(kept.clone(), Archived { at: long_ago, after: 1 });
         let mut pruned = marks.clone();
-        assert_eq!(pruned.prune(before, |t| *t != kept), 1, "only the old mark of a thread gone");
+        let inactive = |_: &ThreadId, _| false;
+        assert_eq!(pruned.prune(before, |t| *t != kept, inactive), 1, "only the old mark of a thread gone");
         assert!(pruned.pinned.contains_key(&gone) && !pruned.pinned.contains_key(&old_gone));
         assert!(pruned.archived.contains_key(&kept));
-        assert_eq!(marks.prune(before, |_| true), 2);
+        assert_eq!(marks.prune(before, |_| true, inactive), 2);
         assert_eq!(marks.pinned.keys().collect::<Vec<_>>(), [&gone], "a recent mark stays");
+
+        let (old_keep, recent_keep, outdone, idle) =
+            (ThreadId::generate(), ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
+        let now = Utc::now();
+        marks.kept = [(&old_keep, long_ago), (&recent_keep, now), (&outdone, now), (&idle, now)]
+            .map(|(t, at)| (t.clone(), at))
+            .into();
+        let active = |t: &ThreadId, at| *t == outdone || (*t == idle && at > now);
+        assert_eq!(marks.prune(before, |t| *t != idle, active), 2, "the old keep of a thread gone, one outdone");
+        assert!(marks.kept.len() == 2 && marks.kept.contains_key(&recent_keep) && marks.kept.contains_key(&idle));
     }
 
     #[test]

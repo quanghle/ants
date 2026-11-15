@@ -52,14 +52,16 @@ pub async fn open(nats: &crate::Nats<'_>, js: &jetstream::Context) -> Result<Met
     Meta::open(js, nats.domain, me).await
 }
 
-/// The title of `thread`, whose last message read is `last`, and how the CLI's human marked it; none on any error,
-/// warned of. A thread that never had a title gets the one an ant `suggested`, if any ([`Meta::adopt_title`]).
+/// The title of `thread`, whose last message read is `last`, and how the CLI's human marked it, idle for
+/// `auto_archive` included; none on any error, warned of. A thread that never had a title gets the one an ant
+/// `suggested`, if any ([`Meta::adopt_title`]).
 pub async fn of_or_none(
     nats: &crate::Nats<'_>,
     js: &jetstream::Context,
     thread: &ThreadId,
     last: Option<&Entry>,
     suggested: Option<(&UserId, &str)>,
+    auto_archive: Option<Duration>,
 ) -> (Option<ThreadTitle>, Option<Mark>) {
     let read = async {
         let meta = open(nats, js).await?;
@@ -70,7 +72,11 @@ pub async fn of_or_none(
                 None
             });
         }
-        let mark = meta.marks().await?.mark(thread, last.map_or(0, |e| e.seq));
+        let marks = meta.marks().await?;
+        let mark = match last {
+            Some(e) => marks.mark_at(thread, e.seq, e.stored_at, thread::idle_before(auto_archive, Utc::now())),
+            None => marks.mark(thread, 0),
+        };
         anyhow::Ok((title, mark))
     };
     read.await.unwrap_or_else(|e| {
@@ -116,8 +122,12 @@ pub enum Marking {
 }
 
 /// `ants thread pin|unpin|archive|unarchive THREAD`: mark the thread `pick` picks so, for every device of the CLI's
-/// human.
+/// human. Unarchiving a thread archived for having been idle keeps it ([`ThreadMarks::keep`]).
 pub async fn mark(nats: &crate::Nats<'_>, pick: Pick, marking: Marking) -> Result<()> {
+    let auto_archive = match marking {
+        Marking::Unarchive => crate::defaults::auto_archive()?,
+        _ => None,
+    };
     let js = thread::connect(nats).await?;
     let thread = &pick.resolve(&js, &nats.me).await?;
     let meta = open(nats, &js).await?;
@@ -125,14 +135,30 @@ pub async fn mark(nats: &crate::Nats<'_>, pick: Pick, marking: Marking) -> Resul
         Marking::Archive => last_sequence(&js).await?,
         _ => 0,
     };
+    let last_at = match auto_archive {
+        Some(_) => thread::last_activity(&js, thread).await?,
+        None => None,
+    };
+    let idle_before = thread::idle_before(auto_archive, Utc::now());
+    let kept = Cell::new(false);
     let changed = meta
         .change_marks(|marks| match marking {
             Marking::Pin => marks.pin(thread),
             Marking::Unpin => marks.unpin(thread),
             Marking::Archive => marks.archive(thread, after),
-            Marking::Unarchive => marks.unarchive(thread),
+            Marking::Unarchive => {
+                let unarchived = marks.unarchive(thread);
+                let idle = last_at.zip(idle_before).is_some_and(|(at, before)| marks.idle(thread, at, before));
+                kept.set(idle && marks.keep(thread));
+                unarchived || kept.get()
+            }
         })
         .await?;
+    if changed && kept.get() {
+        let idle = ants_proto::duration::format(auto_archive.unwrap_or_default());
+        println!("thread {thread} unarchived; archived again automatically after {idle} without a message");
+        return Ok(());
+    }
     let line = match (marking, changed) {
         (Marking::Pin, true) => "pinned",
         (Marking::Pin, false) => "already pinned",
@@ -247,21 +273,23 @@ impl Meta {
     }
 
     /// Forget what was said of the threads `gone` says have no message left in the stream more than [`KEPT`] ago:
-    /// the human's marks, which `marks` are as last read, and with `titles`, every title. A mark or title set again
-    /// meanwhile stays: marks change by compare-and-set and a title is deleted only if unchanged since read. How many
-    /// marks and titles it forgot.
+    /// the human's marks, which `marks` are as last read, and with `titles`, every title; and the keeps of threads
+    /// `active` says had a message stored at or after the given time ([`ThreadMarks::prune`]). A mark or title set
+    /// again meanwhile stays: marks change by compare-and-set and a title is deleted only if unchanged since read. How
+    /// many marks and titles it forgot.
     pub async fn prune(
         &self,
         marks: &ThreadMarks,
         titles: bool,
         gone: impl Fn(&ThreadId) -> bool,
+        active: impl Fn(&ThreadId, DateTime<Utc>) -> bool,
     ) -> Result<(usize, usize)> {
         let before = Utc::now() - KEPT;
         let mut marked = 0;
-        if marks.clone().prune(before, &gone) > 0 {
+        if marks.clone().prune(before, &gone, &active) > 0 {
             let forgot = Cell::new(0);
             self.change_marks(|marks| {
-                forgot.set(marks.prune(before, &gone));
+                forgot.set(marks.prune(before, &gone, &active));
                 forgot.get() > 0
             })
             .await?;
@@ -368,6 +396,15 @@ mod tests {
         assert!(meta.change_marks(|m| m.pin(thread)).await.unwrap());
         let pinned = listed(&Select { pinned: true, ..Default::default() }).await;
         assert!(pinned[0].pinned && !pinned[0].archived, "pinning unarchives");
+
+        assert!(meta.change_marks(|m| m.unpin(thread)).await.unwrap());
+        let last_at = thread::last_activity(&js, thread).await.unwrap().unwrap();
+        let idle = Select { idle_before: Some(last_at), ..Default::default() };
+        assert!(listed(&idle).await.is_empty(), "idle since its last message");
+        assert!(listed(&Select { archived: true, ..idle.clone() }).await[0].auto_archived);
+        assert!(meta.change_marks(|m| m.keep(thread)).await.unwrap());
+        assert!(!listed(&idle).await[0].archived, "kept");
+        assert_eq!(thread::last_activity(&js, &ThreadId::generate()).await.unwrap(), None);
     }
 
     #[tokio::test]
@@ -396,6 +433,9 @@ mod tests {
                 m.pinned.insert(thread.clone(), long_ago);
             }
             m.archived.insert(renamed.clone(), ants_proto::Archived { at: long_ago, after: 0 });
+            m.kept.insert(alive.clone(), Utc::now() - chrono::Duration::days(1));
+            m.kept.insert(fresh.clone(), Utc::now());
+            m.kept.insert(gone.clone(), long_ago);
             m.pin(&fresh)
         })
         .await
@@ -403,7 +443,7 @@ mod tests {
         let present = async |start: DeliverPolicy| {
             let mut threads = Threads::new(None);
             scan(&js, start, |e| threads.add(&e)).await.unwrap();
-            threads.summaries().map(|t| t.thread_id.clone()).collect::<HashSet<_>>()
+            threads.summaries().map(|t| (t.thread_id.clone(), t.last_at)).collect::<HashMap<_, _>>()
         };
         let (last, revision) = meta.kv.lookup_last(title_key(&renamed)).await.unwrap();
         assert!(matches!(last, Lookup::Value(_)));
@@ -416,6 +456,7 @@ mod tests {
         let pinned: HashSet<&ThreadId> = marks.pinned.keys().collect();
         assert_eq!(pinned, HashSet::from([&alive, &fresh, &unordered]), "the old pin of a thread gone goes");
         assert!(marks.archived.is_empty(), "so does an old archive");
+        assert!(marks.kept.is_empty(), "and keeps of threads gone or with a message since");
         assert_eq!(meta.title(&gone).await.unwrap(), None, "and an old title");
         assert_eq!(meta.title(&alive).await.unwrap().unwrap().title, "old", "a thread with a message keeps its title");
         assert_eq!(meta.title(&fresh).await.unwrap().unwrap().title, "new", "a recent title stays");

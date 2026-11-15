@@ -219,6 +219,35 @@ fn pinned_threads_list_last_and_archived_ones_only_with_a_message_since() {
 }
 
 #[test]
+fn threads_idle_since_the_cutoff_list_only_as_auto_archived() {
+    let (alice, dev_a) = (p("alice"), p("dev-a"));
+    let on = |thread: &str| Envelope::on_thread(t(thread), alice.clone(), dev_a.clone(), thread);
+    let messages: Vec<(String, Vec<u8>)> =
+        ["t1", "t2", "t3", "t4", "t5"].map(on).iter().map(|e| (e.subject(), json(e))).collect();
+    let read = entries(&messages);
+    let mut marks = ThreadMarks::default();
+    marks.pin(&t("t1"));
+    marks.archive(&t("t2"), 5);
+    marks.kept.insert(t("t3"), at(10));
+    let threads = |select: &Select| {
+        let mut threads = Threads::new(None);
+        read.iter().for_each(|e| threads.add(e));
+        threads.finish(&Select { idle_before: Some(at(3)), ..select.clone() }, &marks).0
+    };
+    let ids = |threads: &[Summary]| -> Vec<String> { threads.iter().map(|t| t.thread_id.to_string()).collect() };
+
+    let listed = threads(&Select::default());
+    assert_eq!(ids(&listed), ["t3", "t5", "t1"], "t4 idle since at(3), t3 kept since, t1 pinned");
+    let archived = threads(&Select { archived: true, ..Default::default() });
+    assert_eq!(ids(&archived), ["t2", "t4"]);
+    assert_eq!(archived.iter().map(state).collect::<Vec<_>>(), [Some("archived"), Some("auto-archived")]);
+    assert!(table(&archived).lines().nth(2).unwrap().contains("auto-archived"));
+    let json = serde_json::to_value(&archived[1]).unwrap();
+    assert_eq!((&json["archived"], &json["auto_archived"]), (&true.into(), &true.into()));
+    assert!(serde_json::to_value(&archived[0]).unwrap().get("auto_archived").is_none());
+}
+
+#[test]
 fn an_escalation_reaching_a_human_stays_open_until_a_human_s_message_on_the_thread() {
     let (alice, dev_a, lead) = (p("alice"), p("dev-a"), p("lead"));
     let escalate = |thread: &str, to: &UserId, reason| {

@@ -14,6 +14,7 @@
 //! creds = "~/.config/ants/auth/alice.creds"
 //! nats = "wss://hub.example/nats"   # default: the top-level nats
 //! js_domain = "hub"                 # default: the top-level js_domain
+//! auto_archive = "14d"              # archive threads idle this long for the CLI's human (default 0: never)
 //!
 //! [storage]                         # warnings of JetStream storage filling up (crate::storage)
 //! warn_percent = 80                 # warn a human past this share of a store's limit; 0 never
@@ -890,15 +891,21 @@ struct CliSection {
     nats: Option<String>,
     creds: Option<PathBuf>,
     js_domain: Option<JsDomain>,
+    #[serde(default, deserialize_with = "ants_proto::duration::deserialize")]
+    auto_archive: Duration,
 }
 
 /// What the CLI connects with where neither a flag nor the environment sets it: the `[cli]` section of a config
-/// file, else its top-level `nats` and `js_domain`. Credentials come from `[cli]` alone, an ant's being no human's.
+/// file, else its top-level `nats` and `js_domain`. Credentials come from `[cli]` alone, an ant's being no human's,
+/// as does `auto_archive`.
 #[derive(Debug, Default, PartialEq)]
 pub struct CliDefaults {
     pub nats: Option<String>,
     pub creds: Option<PathBuf>,
     pub js_domain: Option<JsDomain>,
+    /// How long a thread goes without a message before `ants thread list` and `ants dash` take it as archived for
+    /// the CLI's human; None (unset or 0) for never.
+    pub auto_archive: Option<Duration>,
 }
 
 impl CliDefaults {
@@ -928,7 +935,8 @@ impl CliDefaults {
             crate::bus::check_url(url).with_context(|| format!("config {}", path.display()))?;
         }
         let creds = view.cli.creds.map(|c| resolve(&c, base, home));
-        Ok(Self { nats, creds, js_domain: view.cli.js_domain.or(view.js_domain) })
+        let auto_archive = Some(view.cli.auto_archive).filter(|d| !d.is_zero());
+        Ok(Self { nats, creds, js_domain: view.cli.js_domain.or(view.js_domain), auto_archive })
     }
 }
 
