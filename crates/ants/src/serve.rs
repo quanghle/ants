@@ -6,12 +6,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use ants_daemon::config::{self, Ant, Summary};
+use ants_daemon::config::{self, Ant, HostSettings, Summary};
+use ants_daemon::host::{self, Host};
 use ants_daemon::schedule::Schedule;
 use ants_daemon::{Config, Harnesses, Stop};
 use ants_proto::{JsDomain, UserId};
 use anyhow::{Context as _, Result, bail};
 use futures::stream::{FuturesUnordered, StreamExt as _};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::Instrument as _;
 
@@ -267,6 +269,8 @@ pub struct Listed {
     /// The ants that get `request_ant`, managers of the file's templates, and the file they add ants to: only when
     /// the daemon serves the whole file, which the ants added join.
     pub managers: Option<(Vec<UserId>, PathBuf)>,
+    /// The machine's host connection the file describes: only when the daemon serves the whole file.
+    pub host: Option<HostSettings>,
 }
 
 /// The ants to serve, the harnesses they may name and the schedules to run: those of the config file, or for an ant
@@ -282,7 +286,8 @@ pub fn ants(args: &DaemonArgs, default_path: &Path) -> Result<Listed> {
                 ant.harness = summary.harness;
             }
             let harnesses = summary.harnesses;
-            Ok(Listed { ants: vec![ant], harnesses, schedules: Vec::new(), metrics: args.metrics, managers: None })
+            let (schedules, metrics) = (Vec::new(), args.metrics);
+            Ok(Listed { ants: vec![ant], harnesses, schedules, metrics, managers: None, host: None })
         }
         Source::File(path) => {
             let loaded = config::load(&path)?;
@@ -296,8 +301,9 @@ pub fn ants(args: &DaemonArgs, default_path: &Path) -> Result<Listed> {
                 .map(|a| a.name.clone())
                 .collect();
             let managers = whole.then(|| (managers, path.clone()));
+            let host = whole.then_some(loaded.host);
             let ants = pick(loaded.ants, args, &path)?;
-            Ok(Listed { ants, harnesses: loaded.harnesses, schedules, metrics, managers })
+            Ok(Listed { ants, harnesses: loaded.harnesses, schedules, metrics, managers, host })
         }
     }
 }
@@ -357,6 +363,23 @@ pub struct Served {
     pub configs: Vec<Config>,
     pub schedules: Vec<Schedule>,
     pub metrics: Option<SocketAddr>,
+    /// The machine's host connection, with the ants to record as the machine's ([`host`]).
+    pub host: Option<(Host, Vec<UserId>)>,
+}
+
+/// The host connection of a daemon serving `configs` as `settings` describe it, `nats` and `js_domain` standing for
+/// what the file does not set ([`Host::new`]).
+pub fn host(
+    settings: Option<HostSettings>,
+    configs: &[Config],
+    nats: &str,
+    js_domain: Option<&JsDomain>,
+) -> Option<(Host, Vec<UserId>)> {
+    let HostSettings { creds, machine, nats: file_nats, js_domain: file_domain } = settings?;
+    let nats = file_nats.unwrap_or_else(|| nats.to_owned());
+    let host =
+        Host::new(machine, nats, creds, file_domain.or(js_domain.cloned()), configs.iter().map(|c| c.creds.is_some()))?;
+    Some((host, configs.iter().map(|c| c.ant.clone()).collect()))
 }
 
 /// How [`run`] ended.
@@ -386,6 +409,8 @@ pub async fn run(
     let mut tasks: FuturesUnordered<_> = reconcile(&mut running, served.configs).into_iter().map(serve).collect();
     let mut schedules = Schedules::default();
     schedules.reconcile(served.schedules, run_schedule);
+    let mut host = HostRun::default();
+    host.reconcile(served.host);
     let shutdown = async {
         if let Err(e) = ants_daemon::daemon::stop_signal().await {
             tracing::warn!(error = %e, "waiting for Ctrl-C or SIGTERM");
@@ -413,11 +438,13 @@ pub async fn run(
             () = &mut shutdown, if !stopping => {
                 stopping = true;
                 schedules.reconcile(Vec::new(), run_schedule);
+                host.reconcile(None);
             }
             () = &mut replaced, if !stopping => {
                 tracing::info!("stopping every ant as on SIGTERM, finishing the prompts in flight");
                 (stopping, ended) = (true, Ended::Replaced);
                 schedules.reconcile(Vec::new(), run_schedule);
+                host.reconcile(None);
                 for r in running.values_mut() {
                     r.next = None;
                     r.ask_to_stop();
@@ -431,6 +458,7 @@ pub async fn run(
                     }
                     tasks.extend(reconcile(&mut running, served.configs).into_iter().map(serve));
                     schedules.reconcile(served.schedules, run_schedule);
+                    host.reconcile(served.host);
                 }
                 Err(e) => tracing::error!(
                     on = trigger.describe(),
@@ -512,6 +540,58 @@ impl Schedules {
 impl Drop for Schedules {
     fn drop(&mut self) {
         for run in self.0.values() {
+            run.task.abort();
+        }
+    }
+}
+
+/// The machine's host connection, if any, in its task.
+#[derive(Default)]
+struct HostRun(Option<HostTask>);
+
+struct HostTask {
+    host: Host,
+    /// The contents of its credentials file when it started ([`creds_snapshot`]).
+    creds: Option<Vec<u8>>,
+    ants: watch::Sender<Vec<UserId>>,
+    task: JoinHandle<()>,
+}
+
+impl HostRun {
+    /// Run the host connection `wanted` recording its ants: the one running is told the ants unless it changed, its
+    /// credentials file changed or it stopped, when it starts again; with none wanted, it stops.
+    fn reconcile(&mut self, wanted: Option<(Host, Vec<UserId>)>) {
+        let Some((wanted, ants)) = wanted else {
+            if let Some(old) = self.0.take() {
+                tracing::info!("stopping the host connection");
+                old.task.abort();
+            }
+            return;
+        };
+        let creds = creds_snapshot(wanted.creds.as_deref());
+        if let Some(run) = self.0.as_ref().filter(|r| r.host == wanted && r.creds == creds && !r.task.is_finished()) {
+            run.ants.send_replace(ants);
+            return;
+        }
+        let (sender, receiver) = watch::channel(ants);
+        let started = wanted.clone();
+        let task = tokio::spawn(
+            async move {
+                if let Err(e) = host::run(started, receiver).await {
+                    tracing::error!(error = format!("{e:#}"), "host connection stopped");
+                }
+            }
+            .instrument(tracing::info_span!("host")),
+        );
+        if let Some(old) = self.0.replace(HostTask { host: wanted, creds, ants: sender, task }) {
+            old.task.abort();
+        }
+    }
+}
+
+impl Drop for HostRun {
+    fn drop(&mut self) {
+        if let Some(run) = &self.0 {
             run.task.abort();
         }
     }

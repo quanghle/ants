@@ -4,11 +4,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, ChannelId, DEVICES_BUCKET, ENROLL_INBOX, FILES_BUCKET,
-    FILES_STREAM, Feed, HUMANS_BUCKET, INTAKE_STREAM, JsDomain, LINKS_BUCKET, Machine, NOTIFY_BUCKET, OUTBOX_STREAM,
-    OWNERS_BUCKET, PRESENCE_BUCKET, REACTIONS_BUCKET, READ_BUCKET, ROSTER_BUCKET, Role, SESSIONS_BUCKET,
-    STORAGE_WARNING_PREFIX, STREAM, THREADS_BUCKET, UserId, WEBHOOK_MARKER, WEBHOOKS_BUCKET, chan_consumer,
-    chan_reader, channel_manager_serving_subject, dead_reader, inbox_consumer, inbox_prefix, marks_key, notes_consumer,
-    notify_consumer, sent_reader, snoozed_key, spare_readers, subject,
+    FILES_STREAM, Feed, HUMANS_BUCKET, INTAKE_STREAM, JsDomain, LINKS_BUCKET, MACHINES_BUCKET, Machine, NOTIFY_BUCKET,
+    OUTBOX_STREAM, OWNERS_BUCKET, PRESENCE_BUCKET, REACTIONS_BUCKET, READ_BUCKET, ROSTER_BUCKET, Role, SESSIONS_BUCKET,
+    STORAGE_WARNING_PREFIX, STREAM, THREADS_BUCKET, UserId, WEBHOOK_MARKER, WEBHOOKS_BUCKET, admin_consumer,
+    chan_consumer, chan_reader, channel_manager_serving_subject, dead_reader, host_inbox_prefix, inbox_consumer,
+    inbox_prefix, marks_key, notes_consumer, notify_consumer, sent_reader, snoozed_key, spare_readers, subject,
 };
 #[cfg(doc)]
 use crate::{
@@ -35,6 +35,18 @@ fn ack_subjects(stream: &str, consumer: &str) -> [String; 2] {
 /// [`ack_subjects`]), in both forms: v1 `$JS.FC.<stream>.…` and v2 `$JS.FC.<domain>.<account hash>.<stream>.…`.
 fn flow_control_subjects(domain: &str, stream: &str) -> [String; 2] {
     [format!("$JS.FC.{stream}.>"), format!("$JS.FC.{domain}.*.{stream}.>")]
+}
+
+/// What a human's credentials need of [`MACHINES_BUCKET`]: looking it up and creating it, and reading every machine's
+/// record by batched direct gets naming no subject (`ants machines`), writing none. No consumer, as a human's JWT has
+/// little room left.
+fn machine_record_rights() -> [String; 3] {
+    let machines = kv_stream(MACHINES_BUCKET);
+    [
+        format!("$JS.API.STREAM.INFO.{machines}"),
+        format!("$JS.API.STREAM.CREATE.{machines}"),
+        format!("$JS.API.DIRECT.GET.{machines}"),
+    ]
 }
 
 /// What a human's credentials need for what it read ([`READ_BUCKET`]): creating the bucket and reading and writing its
@@ -511,6 +523,7 @@ impl Permissions {
             publish.push(format!("$JS.API.STREAM.{op}.{OUTBOX_STREAM}"));
             publish.push(format!("$JS.*.API.STREAM.{op}.{OUTBOX_STREAM}"));
         }
+        publish.extend(machine_record_rights());
         publish.extend(read_marker_rights(user));
         publish.extend(presence_rights(user));
         publish.extend(thread_rights(user));
@@ -700,6 +713,10 @@ impl Permissions {
                 }
             }
         }
+        // The machine's host connection, which its daemon makes through the leaf node.
+        let host = Self::for_host(machine);
+        leaf.publish.extend(host.publish);
+        leaf.subscribe.extend(host.subscribe);
         let api = machine.api_prefix();
         leaf.publish.extend([format!("{}.>", machine.deliver_prefix()), format!("{}.>", machine.source_replies())]);
         leaf.publish.extend(setup.iter().map(|human| format!("{}.>", machine.setup_inbox(human))));
@@ -725,6 +742,26 @@ impl Permissions {
             }
         }
         leaf
+    }
+
+    /// What the host credentials of `machine` allow (`ants auth host`), with which the machine's daemon makes one
+    /// connection besides its ants': putting the machine's own record in [`MACHINES_BUCKET`] ([`subject::machine_record`]),
+    /// and taking the admin orders to the machine's ants from the stream through its own consumer
+    /// ([`admin_consumer`]), whose filter, in the subject, is pinned to the machine's orders ([`subject::admin_orders`]),
+    /// and acking them. It hears its own replies under [`host_inbox_prefix`], apart from every user's. Nothing else: no
+    /// other machine's record, no message to or from an ant. No ant gets any of it.
+    pub fn for_host(machine: &Machine) -> Self {
+        let record = subject::machine_record(machine);
+        let consumer = admin_consumer(machine);
+        let mut publish = vec![
+            record,
+            // Finding JetStream on connecting, as an ant does with its inbox consumer, without the stream's info.
+            format!("$JS.API.CONSUMER.INFO.{STREAM}.{consumer}"),
+            format!("$JS.API.CONSUMER.CREATE.{STREAM}.{consumer}.{}", subject::admin_orders(machine)),
+            format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{consumer}"),
+        ];
+        publish.extend(ack_subjects(STREAM, &consumer));
+        Self { publish, subscribe: vec![format!("{}.>", host_inbox_prefix(machine))] }
     }
 
     /// What the credentials of the channel manager (`ants channel serve`) allow: hearing every channel management
@@ -962,8 +999,9 @@ impl Permissions {
 /// [`PermissionsVersion::tag`]. Credentials carrying an older version were issued before the permissions changed:
 /// ants processes using them warn and name the command that renews them.
 ///
-/// Bump it whenever the permissions of any role change: [`Permissions::for_user`], [`Permissions::for_leaf`],
-/// [`Permissions::for_webhook`], [`Permissions::for_channel_manager`], [`Permissions::for_enrollment`],
+/// Bump it whenever the permissions of any role change: [`Permissions::for_user`], [`Permissions::for_assistant`], [`Permissions::for_leaf`],
+/// [`Permissions::for_webhook`], [`Permissions::for_channel_manager`], [`Permissions::for_host`],
+/// [`Permissions::for_enrollment`],
 /// [`Permissions::for_enroll_approver`], [`Permissions::for_reactions_responder`], [`Permissions::for_device_revoker`]
 /// or [`Permissions::with_js_domain`], or
 /// the other claims `ants auth` puts in a

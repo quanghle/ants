@@ -51,12 +51,12 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Command {
-    /// Send a message as the CLI's human, who owns the thread. Starts with @ant to pick the recipient; the
-    /// messenger gets it otherwise. With --wait or --follow, print the replies to the CLI's human on the thread and
-    /// mark them read.
+    /// Send a message as the CLI's human, who owns the thread. Starts with @ant to pick the recipient; otherwise the
+    /// human's assistant gets it while its grant stands, else the messenger. With --wait or --follow, print the
+    /// replies to the CLI's human on the thread and mark them read.
     Ask {
         /// Continue an existing thread: its id, a unique start of one, or `last`. The message still prompts only
-        /// its recipient (@ant, else the messenger), not the thread's other ants.
+        /// its recipient (@ant, else the human's assistant or the messenger), not the thread's other ants.
         #[arg(long, value_name = "THREAD")]
         #[arg(add = ArgValueCandidates::new(completions::threads))]
         thread: Option<thread::Pick>,
@@ -106,6 +106,16 @@ pub(crate) enum Command {
     /// One ant at a glance, as the ant view of `ants chat` shows it.
     #[command(subcommand)]
     Ant(AntCommand),
+    /// List the machines whose daemons recorded the ants they serve, with host credentials (`ants auth host`): kept
+    /// when an ant goes offline and its roster entry expires. With ANT, the machine serving it, or that last did.
+    Machines {
+        /// Only the machines of this ant.
+        #[arg(add = ArgValueCandidates::new(completions::ants))]
+        ant: Option<UserId>,
+        /// One JSON record per line; with ANT, one object with its machines.
+        #[arg(long)]
+        json: bool,
+    },
     /// Report the tokens and cost ants spent, as their daemons keep them: per ant, today and over the last --days UTC
     /// days; for one ANT, each day and each thread since a human's last message on it; with --thread, that thread.
     /// Caps come from the local config file for the ants it lists. Needs human credentials.
@@ -222,8 +232,8 @@ pub(crate) enum Command {
     #[command(subcommand)]
     Notify(NotifyCommand),
     /// Create the CLI's human's dedicated assistant ant, designate an existing ant as its assistant, withdraw or
-    /// retire it, or show a human's. The human's device signs the designation. Needs a human device's credentials,
-    /// but for `show`.
+    /// retire it, show a human's, or enroll it as a device of the human for sealed messages. The human's device signs
+    /// the designation. Needs a human device's credentials, but for `show` and `key`.
     #[command(subcommand)]
     Assistant(AssistantCommand),
     /// Print ants traffic as it happens, escalations with their level, leader and ants visited, or the live
@@ -585,8 +595,8 @@ pub(crate) enum AssistantCommand {
     /// no fetch or execute rules, and the grant; then reload the daemon. Needs the team's account key; run again,
     /// it keeps what is in place and completes the rest.
     Enable(Box<assistant::EnableArgs>),
-    /// Withdraw the human's assistant and offer to retire the dedicated one `enable` created: unlist it, revoke its
-    /// credentials and remove their file, keeping its home.
+    /// Withdraw the human's assistant, ending any enrollment as a device, and offer to retire the dedicated one
+    /// `enable` created: unlist it, revoke its credentials and remove their file, keeping its home.
     Disable(assistant::DisableArgs),
     /// Designate ANT as the human's assistant, in place of any other. Refused for an ant added from a template; a
     /// warning for one with a workdir other than its home or tools allowed without asking. ANT acts for the human only while its
@@ -597,11 +607,34 @@ pub(crate) enum AssistantCommand {
     },
     /// Withdraw the human's assistant, at once for every reader.
     Clear,
-    /// Show the assistant of HUMAN, by default the CLI's human, if its grant verifies.
+    /// Show the assistant of HUMAN, by default the CLI's human, if its grant verifies, and whether it is enrolled as a
+    /// device of the human.
     Show {
         #[arg(value_name = "HUMAN")]
         human: Option<UserId>,
     },
+    /// Enroll the human's assistant as one of its devices (`on`), so messages sealed for the human are sealed for it
+    /// too and it seals those it sends for the human, or end that (`off`). Off unless enrolled; `clear` ends it too.
+    #[command(subcommand)]
+    Seal(SealCommand),
+    /// Print the encryption key ANT, an ant of this machine's config file, is enrolled with, making it if it has none:
+    /// for `ants assistant seal on --key` on the human's machine. Its seed waits beside its credentials, as `ANT.xk`.
+    Key {
+        #[arg(value_name = "ANT", add = ArgValueCandidates::new(completions::ants))]
+        ant: UserId,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum SealCommand {
+    /// Enroll the assistant, with the key of the assistant on this machine, made if it has none, unless `--key`.
+    On {
+        /// The encryption key `ants assistant key ANT` printed on the machine running the assistant.
+        #[arg(long, value_name = "KEY")]
+        key: Option<ants_proto::DeviceKey>,
+    },
+    /// End the enrollment: nothing is sealed for the assistant any more, and it opens nothing.
+    Off,
 }
 
 #[cfg(test)]

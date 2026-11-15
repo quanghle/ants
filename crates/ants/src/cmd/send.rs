@@ -12,19 +12,64 @@ use futures::StreamExt as _;
 use futures::stream::BoxStream;
 
 use crate::cli::{Replies, Sending};
-use crate::{Nats, attachments, channel, compose, humans, inbox, progress, reacted, roster, sealed, thread};
+use crate::{Nats, assistant, attachments, channel, compose, humans, inbox, progress, reacted, roster, sealed, thread};
 
-/// Split a leading `@ant` off the words; the message is the rest, or what `input` reads.
-pub(crate) fn recipient(mut words: Vec<String>, input: &compose::Input) -> Result<(UserId, String)> {
+/// Split a leading `@ant` off the words, none when they name no one ([`unaddressed`]); the message is the rest, or
+/// what `input` reads.
+pub(crate) fn recipient(mut words: Vec<String>, input: &compose::Input) -> Result<(Option<UserId>, String)> {
     let to = match words.first().and_then(|w| w.strip_prefix('@')) {
         Some(name) => {
             let to = name.parse()?;
             words.remove(0);
-            to
+            Some(to)
         }
-        None => UserId::messenger(),
+        None => None,
     };
     Ok((to, input.text(words)?))
+}
+
+/// Who a message goes to, with the human it assists when it got the message as that human's assistant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Recipient {
+    pub to: UserId,
+    pub assistant_of: Option<UserId>,
+}
+
+impl From<UserId> for Recipient {
+    fn from(to: UserId) -> Self {
+        Self { to, assistant_of: None }
+    }
+}
+
+impl std::fmt::Display for Recipient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.assistant_of {
+            Some(human) => write!(f, "{} (assistant of {human})", self.to),
+            None => write!(f, "{}", self.to),
+        }
+    }
+}
+
+/// Who gets what `me` sends without naming anyone: the human's assistant while the grant naming it stands, as the
+/// CLI verifies it for the team of `account` ([`assistant::designated`]), else the messenger.
+pub(crate) async fn unaddressed(js: &jetstream::Context, me: &humans::Me, account: Option<&str>) -> Recipient {
+    if me.role.is_human()
+        && let Some(assistant) = assistant::designated(js, account, &me.id).await
+    {
+        return Recipient { to: assistant, assistant_of: Some(me.id.clone()) };
+    }
+    UserId::messenger().into()
+}
+
+/// `to`, else who gets what names no one ([`unaddressed`]), which `ants ask` then tells.
+async fn addressee(js: &jetstream::Context, nats: &Nats<'_>, to: Option<UserId>) -> (UserId, Option<Recipient>) {
+    match to {
+        Some(to) => (to, None),
+        None => {
+            let recipient = unaddressed(js, &nats.me, nats.account.as_deref()).await;
+            (recipient.to.clone(), Some(recipient))
+        }
+    }
 }
 
 /// `ants steer ANT THREAD`: `ants ask --steer --thread THREAD @ANT`.
@@ -59,6 +104,7 @@ pub(crate) async fn ask(
     let mut files = attach.read()?;
     let (client, js) = nats.connect("ants-cli").await?;
     let thread = thread::resolve(thread, &js, &nats.me).await?;
+    let (to, unaddressed) = addressee(&js, nats, to).await;
     let mut envelope = ask_envelope(&nats.me, thread, to, text);
     envelope.attachments = attachments::references(&files);
     let mut envelope = if steer { envelope.steering() } else { envelope };
@@ -99,6 +145,9 @@ pub(crate) async fn ask(
     }
     println!("thread {}", envelope.thread_id);
     println!("message {}", envelope.id);
+    if let Some(recipient) = &unaddressed {
+        println!("to {recipient}");
+    }
     print_attached(&files, |id| envelope.attachment_handle(id));
     if !replies.wait && !replies.follow {
         return Ok(());
@@ -488,13 +537,13 @@ mod tests {
     #[test]
     fn leading_at_picks_the_recipient() {
         let (to, text) = recipient(words("@dev-b check the build"), &compose::Input::default()).unwrap();
-        assert_eq!((to.as_str(), text.as_str()), ("dev-b", "check the build"));
+        assert_eq!((to.unwrap().as_str(), text.as_str()), ("dev-b", "check the build"));
     }
 
     #[test]
-    fn messenger_is_the_default_recipient() {
+    fn words_naming_no_one_leave_the_recipient_open() {
         let (to, text) = recipient(words("who owns billing?"), &compose::Input::default()).unwrap();
-        assert_eq!((to, text.as_str()), (UserId::messenger(), "who owns billing?"));
+        assert_eq!((to, text.as_str()), (None, "who owns billing?"));
     }
 
     #[test]

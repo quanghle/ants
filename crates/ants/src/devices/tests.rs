@@ -1,4 +1,5 @@
-use ants_proto::{Permissions, Role};
+use ants_daemon::devices::verify;
+use ants_proto::{DeviceKey, Permissions, Role};
 use data_encoding::BASE64URL_NOPAD;
 use nkeys::KeyPair;
 use serde_json::Value;

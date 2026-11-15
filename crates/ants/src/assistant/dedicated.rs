@@ -2,8 +2,9 @@
 //! step where the team's account key is: credentials naming the human ([`AssistantOf`](ants_proto::AssistantOf)), an
 //! `[[ant]]` working in its own home with an assistant's whoami and no fetch or execute rules, and the grant. Each
 //! step finds what an earlier run did and keeps it, so a run that failed half-way completes when run again.
-//! `disable` withdraws the grant, then retires the dedicated ant when asked: its entry leaves the config file, its
-//! credentials are revoked and their file removed, its home stays.
+//! `disable` withdraws the grant, ending any enrollment of the assistant as a device of the human, then retires the
+//! dedicated ant when asked: its entry leaves the config file, its credentials are revoked and their file and the
+//! seed of its encryption key removed, its home stays.
 
 use std::io::{BufRead as _, IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -11,11 +12,12 @@ use std::time::Duration;
 
 use ants_daemon::config::{self, Ant, Summary};
 use ants_daemon::creds::{Finding, Kind};
+use ants_daemon::sealing;
 use ants_proto::{JsDomain, JwtError, Permissions, UserId};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
 
-use super::{Local, check, designated, put, read, risky, signing_creds};
+use super::{Local, Sealing, check, ended_sealing, put, read, replaced, risky, signing_creds};
 use crate::service::{Action, Outcome, Service, Services, failure, manual};
 use crate::{Nats, add, auth, humans, keys, retire, revoke};
 
@@ -83,7 +85,8 @@ impl EnableArgs {
 #[derive(clap::Args, Debug)]
 pub struct DisableArgs {
     /// Also retire the dedicated assistant `ants assistant enable` created: unlist it from the config file, revoke
-    /// its credentials and remove their file, keeping its home. Asked on a terminal otherwise.
+    /// its credentials and remove their file and any encryption key seed beside it, keeping its home. Asked on a
+    /// terminal otherwise.
     #[arg(long)]
     pub retire: bool,
     /// The dedicated assistant to retire (default: the one the grant names, else <human>-assistant).
@@ -141,7 +144,7 @@ pub async fn enable(nats: &Nats<'_>, args: EnableArgs) -> Result<()> {
     }
     let path = match &args.config {
         Some(path) => path.clone(),
-        None => config::default_path()?,
+        None => crate::defaults::path()?,
     };
     let summary = Summary::load(&path)?;
     let local = Local::read(&name, &path, Some(&dir));
@@ -195,10 +198,10 @@ pub async fn enable(nats: &Nats<'_>, args: EnableArgs) -> Result<()> {
         Some(name) => format!("ants assistant enable --name {name}"),
         None => "ants assistant enable".to_owned(),
     };
-    let before = put(&js, creds, human, Some(name.clone())).await.with_context(|| {
+    let (before, _) = put(&js, creds, human, Some(name.clone()), Sealing::Keep).await.with_context(|| {
         format!("the credentials and [[ant]] of {name} are in place, but the grant is not signed: run `{again}` again")
     })?;
-    designated(&name, human, before);
+    replaced(&name, human, before, Some(&path));
     if let Ok(Some((_, leaf))) = add::leaf_node(None) {
         println!(
             "this machine runs the leaf node of {}: a leaf node's uplink carries only an ant's rights, so the `nats` \
@@ -342,7 +345,7 @@ async fn disable_with(
     let human = &nats.me.id;
     let path = match &args.config {
         Some(path) => path.clone(),
-        None => config::default_path()?,
+        None => crate::defaults::path()?,
     };
     let (_, js) = nats.connect("ants-assistant").await?;
     let named = read(&js, human).await?.and_then(|g| g.assistant);
@@ -367,13 +370,17 @@ async fn disable_with(
             path.display()
         );
     }
-    let withdrawn = match named {
-        Some(_) => put(&js, creds, human, None).await?.and_then(|g| g.assistant),
+    let before = match named {
+        Some(_) => put(&js, creds, human, None, Sealing::Off).await?.0,
         None => None,
     };
+    let withdrawn = before.as_ref().and_then(|g| g.assistant.clone());
     match &withdrawn {
         Some(before) => println!("{before} is no longer the assistant of {human}"),
         None => println!("{human} has no assistant"),
+    }
+    if let Some(before) = &before {
+        ended_sealing(before, Some(&path));
     }
     let Some(dedicated) = dedicated else {
         if let Some(before) = &withdrawn {
@@ -487,6 +494,11 @@ impl Dedicated {
         };
         retire::forget(&self.creds)?;
         println!("{} removed", self.creds.display());
+        let seed = sealing::key_path(&self.creds);
+        if seed.exists() {
+            std::fs::remove_file(&seed).with_context(|| format!("removing {}", seed.display()))?;
+            println!("{} removed, the seed of its encryption key for sealed messages", seed.display());
+        }
         println!(
             "Its home {} stays: `ants assistant enable --name {name}` brings it back with its memory and task \
              database.",
@@ -539,7 +551,8 @@ mod tests {
     const WAIT: Duration = Duration::from_millis(100);
 
     /// `enable` issues the credentials, lists the ant and signs the grant; run again it keeps all three; `disable
-    /// --retire` withdraws the grant, unlists the ant and revokes its credentials, keeping its home.
+    /// --retire` withdraws the grant, ending the ant's enrollment as a device, unlists the ant and revokes its
+    /// credentials, keeping its home.
     #[tokio::test]
     async fn enable_creates_the_dedicated_assistant_once_and_disable_retires_it() {
         let Some(server) = Server::start() else { return };
@@ -567,7 +580,14 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&out).unwrap(), held, "live credentials are kept");
         assert_eq!(std::fs::read_to_string(&config).unwrap(), listed, "the entry is not appended twice");
 
+        let (xkey, _) = crate::assistant::key_of(&out).unwrap();
+        let key = auth::device_key(&xkey).unwrap();
+        put(&js, &creds, &alice, Some(p("alice-assistant")), Sealing::Set(key)).await.unwrap();
+        let seed = sealing::key_path(&out);
+        assert!(seed.exists());
+
         disable_with(&nats, disable_args(&config, &team, true), WAIT, |_| unreachable!()).await.unwrap();
+        assert!(!seed.exists(), "ending the enrollment deletes the seed");
         assert_eq!(read(&js, &alice).await.unwrap().unwrap().assistant, None);
         assert!(!std::fs::read_to_string(&config).unwrap().contains("alice-assistant"));
         assert!(!out.exists());
