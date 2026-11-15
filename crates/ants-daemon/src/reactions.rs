@@ -1,9 +1,10 @@
 //! Reactions to messages, from ants and humans: `eyes`, `check` and the like, kept in [`REACTIONS_BUCKET`] apart from
 //! the messages, each under its reactor's key ([`reaction_key`]), so credentials let each user add and remove only its
 //! own. A reaction is no message: it reaches no inbox, wakes no ant, marks nothing read and ends no wait for a reply.
-//! Humans read them all ([`load`], [`watch`]); ants add and remove their own, and read those to the messages they read
-//! by asking ([`ask`]): a human's `ants webhook serve` answers ([`serve`]) once it found the ant reads the message
-//! ([`readable`]).
+//! Humans read them all ([`load`], [`watch`]) and add and remove their own ([`add`], [`remove`]). Ants read those to the
+//! messages they read, and add and remove their own, by asking ([`ask`], [`request`]): `ants signer`, or for a list a
+//! human's `ants webhook serve`, answers ([`serve`]) once it found the ant reads the message ([`readable`]); a daemon
+//! on a server without credentials answers its ants itself ([`answer`]).
 
 use std::collections::{BTreeMap, HashMap};
 use std::ops::ControlFlow;
@@ -11,8 +12,9 @@ use std::time::{Duration, SystemTime};
 
 pub use ants_proto::Reacted;
 use ants_proto::{
-    JsDomain, REACTIONS_BUCKET, REACTIONS_REPEAT, REACTIONS_WAIT, Reaction, ReactionEntry, ReactionsOutcome,
-    ReactionsReply, ReactionsRequest, UserId, Uuid, parse_reaction_key, reaction_key, reactions_to, subject,
+    JsDomain, REACTIONS_BUCKET, REACTIONS_REPEAT, REACTIONS_WAIT, Reaction, ReactionChange, ReactionEntry,
+    ReactionsOutcome, ReactionsReply, ReactionsRequest, UserId, Uuid, parse_reaction_key, reaction_key, reactions_to,
+    subject,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::stream::{ConsumerError, ConsumerErrorKind};
@@ -239,28 +241,71 @@ pub async fn readable(js: &jetstream::Context, ant: &UserId, message: Uuid) -> R
     Ok(first == Some(true))
 }
 
-/// The answer to `request`: the reactions to its message if the ant reads it ([`readable`]), else
-/// [`ReactionsOutcome::Unknown`]. Takes a human's credentials.
-pub async fn answer(js: &jetstream::Context, request: &ReactionsRequest) -> Result<ReactionsOutcome> {
+/// The answer to `request`, if the ant reads its message ([`readable`]): the reactions to it, or with a change, that
+/// change made to the ant's own reactions ([`add`], [`remove`] as the ant), else [`ReactionsOutcome::Unknown`] and no
+/// change. Takes a human's credentials to list, and those of [`Permissions::for_reactions_responder`] to change.
+///
+/// [`Permissions::for_reactions_responder`]: ants_proto::Permissions::for_reactions_responder
+pub async fn answer(
+    js: &jetstream::Context,
+    js_domain: Option<&JsDomain>,
+    request: &ReactionsRequest,
+) -> Result<ReactionsOutcome> {
     if !readable(js, &request.ant, request.message).await? {
         return Ok(ReactionsOutcome::Unknown);
     }
-    let reactions = load(js, &[request.message]).await?.remove(&request.message).unwrap_or_default();
-    Ok(ReactionsOutcome::Listed { reactions })
+    let (ant, message) = (&request.ant, &request.message);
+    Ok(match &request.change {
+        Some(ReactionChange { reaction, remove: true }) => {
+            ReactionsOutcome::Applied { changed: remove(js, js_domain, ant, message, reaction).await? }
+        }
+        Some(ReactionChange { reaction, remove: false }) => {
+            ReactionsOutcome::Applied { changed: add(js, js_domain, ant, message, reaction).await? }
+        }
+        None => {
+            let reactions = load(js, &[request.message]).await?.remove(&request.message).unwrap_or_default();
+            ReactionsOutcome::Listed { reactions }
+        }
+    })
 }
 
-/// Answer the reactions requests of ants on `client`, a human's connection, in the queue group of every process that
-/// does, until the subscription ends. Each answer goes to the asking ant's [`subject::reactions_reply`] only.
-pub async fn serve(client: async_nats::Client, js: jetstream::Context) -> Result<()> {
-    let requests = client
-        .queue_subscribe(subject::ALL_REACTIONS_REQUESTS, QUEUE.to_owned())
-        .await
-        .context("subscribing to reactions requests")?;
-    requests.for_each_concurrent(CONCURRENT, |msg| respond(&client, &js, msg)).await;
+/// Which reactions requests a process answers ([`serve`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answering {
+    /// Only those for the reactions to a message, as a human's connection may.
+    Lists,
+    /// Those to change an ant's own reactions as well, as `ants signer`'s connection may.
+    ListsAndChanges,
+}
+
+/// Answer the reactions requests of ants on `client`, in the queue group of every process that does, until the
+/// subscription ends. Each answer goes to the asking ant's [`subject::reactions_reply`] only.
+pub async fn serve(
+    client: async_nats::Client,
+    js: jetstream::Context,
+    js_domain: Option<JsDomain>,
+    answering: Answering,
+) -> Result<()> {
+    let subscribe = async |subject: &'static str| {
+        client.queue_subscribe(subject, QUEUE.to_owned()).await.context("subscribing to reactions requests")
+    };
+    let lists = subscribe(subject::ALL_REACTIONS_REQUESTS).await?;
+    let requests = match answering {
+        Answering::Lists => lists.boxed(),
+        Answering::ListsAndChanges => {
+            futures::stream::select(lists, subscribe(subject::ALL_REACT_REQUESTS).await?).boxed()
+        }
+    };
+    requests.for_each_concurrent(CONCURRENT, |msg| respond(&client, &js, js_domain.as_ref(), msg)).await;
     bail!("the subscription to reactions requests ended")
 }
 
-async fn respond(client: &async_nats::Client, js: &jetstream::Context, msg: async_nats::Message) {
+async fn respond(
+    client: &async_nats::Client,
+    js: &jetstream::Context,
+    js_domain: Option<&JsDomain>,
+    msg: async_nats::Message,
+) {
     let request = serde_json::from_slice::<ReactionsRequest>(&msg.payload)
         .map_err(|e| e.to_string())
         .and_then(|r| r.check_subject(&msg.subject).map(|()| r).map_err(|e| e.to_string()));
@@ -271,11 +316,11 @@ async fn respond(client: &async_nats::Client, js: &jetstream::Context, msg: asyn
             return;
         }
     };
-    let outcome = match answer(js, &request).await {
+    let outcome = match answer(js, js_domain, &request).await {
         Ok(outcome) => outcome,
         Err(e) => {
             // No answer: the ant repeats the request, and a later attempt may get through.
-            tracing::warn!(ant = %request.ant, message = %request.message, error = format!("{e:#}"), "reading reactions");
+            tracing::warn!(ant = %request.ant, message = %request.message, error = format!("{e:#}"), "answering reactions");
             return;
         }
     };
@@ -289,15 +334,20 @@ async fn respond(client: &async_nats::Client, js: &jetstream::Context, msg: asyn
     }
 }
 
-/// Ask, as the ant `ant` on `client`, for the reactions to message `message`, repeating the request every
-/// [`REACTIONS_REPEAT`]: the answer, None when nothing answered within [`REACTIONS_WAIT`].
+/// Ask, as the ant `ant` on `client`, for the reactions to message `message` ([`ReactionsRequest::new`]).
 pub async fn ask(client: &async_nats::Client, ant: &UserId, message: Uuid) -> Result<Option<ReactionsOutcome>> {
-    let request = ReactionsRequest::new(ant.clone(), message);
+    request(client, &ReactionsRequest::new(ant.clone(), message)).await
+}
+
+/// Make `request` on `client`, as its ant, repeating it every [`REACTIONS_REPEAT`]: the answer, None when nothing
+/// answered within [`REACTIONS_WAIT`]. An answer to a repeated change may say it changed nothing, an earlier attempt
+/// having made it.
+pub async fn request(client: &async_nats::Client, request: &ReactionsRequest) -> Result<Option<ReactionsOutcome>> {
     let mut replies = client.subscribe(request.reply_subject()).await.context("subscribing to the answers")?;
-    let payload = serde_json::to_vec(&request)?;
+    let payload = serde_json::to_vec(request)?;
     let deadline = tokio::time::Instant::now() + REACTIONS_WAIT;
     while tokio::time::Instant::now() < deadline {
-        client.publish(request.subject(), payload.clone().into()).await.context("asking for the reactions")?;
+        client.publish(request.subject(), payload.clone().into()).await.context("asking about the reactions")?;
         let next = (tokio::time::Instant::now() + REACTIONS_REPEAT).min(deadline);
         while let Ok(msg) = tokio::time::timeout_at(next, replies.next()).await {
             let msg = msg.context("the answers ended")?;
@@ -392,10 +442,10 @@ mod tests {
         assert_eq!(load(&js, &[message]).await.unwrap()[&message], [reacted("eyes", &["alice"])]);
     }
 
-    /// An ant learns the reactions to the messages it reads, and nothing of the others, not even by storing a copy of
+    /// An ant learns and changes the reactions to the messages it reads, and nothing of the others, not even by storing a copy of
     /// one under its id where it reads.
     #[tokio::test]
-    async fn ants_read_the_reactions_to_the_messages_they_read_only() {
+    async fn ants_read_and_change_reactions_to_the_messages_they_read_only() {
         use ants_proto::{ChannelPost, Envelope, NotesPost};
         let Some(server) = NatsServer::start() else { return };
         let (client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
@@ -422,8 +472,9 @@ mod tests {
             add(&js, None, &p("alice"), &message, &r("eyes")).await.unwrap();
         }
 
-        let outcome =
-            async |ant: &UserId, message| answer(&js, &ReactionsRequest::new(ant.clone(), message)).await.unwrap();
+        let outcome = async |ant: &UserId, message| {
+            answer(&js, None, &ReactionsRequest::new(ant.clone(), message)).await.unwrap()
+        };
         let listed = ReactionsOutcome::Listed { reactions: vec![reacted("eyes", &["alice"])] };
         for message in [to_a.id, notes.id, post.id] {
             assert_eq!(outcome(&dev_a, message).await, listed, "{message}");
@@ -439,17 +490,51 @@ mod tests {
         bus::publish(&js, &quiet).await.unwrap();
         assert_eq!(outcome(&dev_a, quiet.id).await, ReactionsOutcome::Listed { reactions: Vec::new() });
 
-        // Over NATS: the ant asks on its own subject and hears the answer on its own reply subject.
-        let serving = tokio::spawn(serve(client, js.clone()));
+        // An ant changes its own reactions to the messages it reads only, as itself.
+        let change = |reaction: &str, remove| ReactionChange { reaction: r(reaction), remove };
+        let changing = async |ant: &UserId, message, reaction, remove| {
+            answer(&js, None, &ReactionsRequest::change(ant.clone(), message, change(reaction, remove))).await.unwrap()
+        };
+        let applied = |changed| ReactionsOutcome::Applied { changed };
+        assert_eq!(changing(&dev_a, to_a.id, "check", false).await, applied(true));
+        assert_eq!(changing(&dev_a, to_a.id, "check", false).await, applied(false), "already");
+        assert_eq!(changing(&dev_a, between.id, "x", false).await, ReactionsOutcome::Unknown);
+        assert_eq!(changing(&dev_a, notes.id, "eyes", true).await, applied(false), "none to remove");
+        assert_eq!(load(&js, &[to_a.id, between.id]).await.unwrap()[&to_a.id][0], reacted("check", &["dev-a"]));
+        assert_eq!(load(&js, &[between.id]).await.unwrap()[&between.id], [reacted("eyes", &["alice"])], "unchanged");
+        assert_eq!(changing(&dev_a, to_a.id, "check", true).await, applied(true));
+
+        // Over NATS: the ant asks on its own subjects and hears the answers on its own reply subject; a process
+        // answering lists only leaves changes to another.
+        let lists = tokio::spawn(serve(client.clone(), js.clone(), None, Answering::Lists));
         let (ant, _) = bus::connect(&server.url, None, None, &dev_a, "test").await.unwrap();
-        assert_eq!(ask(&ant, &dev_a, to_a.id).await.unwrap(), Some(listed));
+        assert_eq!(ask(&ant, &dev_a, to_a.id).await.unwrap(), Some(listed.clone()));
         assert_eq!(ask(&ant, &dev_a, between.id).await.unwrap(), Some(ReactionsOutcome::Unknown));
-        // A request naming another ant than its subject does goes unanswered.
+        let mut replies = ant.subscribe(subject::reactions_reply(&dev_a)).await.unwrap();
+        let react = ReactionsRequest::change(dev_a.clone(), to_a.id, change("rocket", false));
+        ant.publish(react.subject(), serde_json::to_vec(&react).unwrap().into()).await.unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(500), replies.next()).await.is_err(), "no change answered");
+        lists.abort();
+        let serving = tokio::spawn(serve(client, js.clone(), None, Answering::ListsAndChanges));
+        assert_eq!(request(&ant, &react).await.unwrap(), Some(applied(true)));
+        assert_eq!(
+            ask(&ant, &dev_a, to_a.id).await.unwrap(),
+            Some(ReactionsOutcome::Listed {
+                reactions: vec![reacted("eyes", &["alice"]), reacted("rocket", &["dev-a"])]
+            })
+        );
+        // A request naming another ant than its subject does goes unanswered, and changes nothing.
         let mut replies = ant.subscribe(subject::reactions_reply(&dev_b)).await.unwrap();
-        let forged = ReactionsRequest::new(dev_b.clone(), between.id);
-        let payload = serde_json::to_vec(&forged).unwrap();
-        ant.publish(subject::reactions(&dev_a), payload.into()).await.unwrap();
+        for forged in [
+            ReactionsRequest::new(dev_b.clone(), between.id),
+            ReactionsRequest::change(dev_b.clone(), between.id, change("x", false)),
+        ] {
+            let payload = serde_json::to_vec(&forged).unwrap();
+            ant.publish(subject::reactions(&dev_a), payload.clone().into()).await.unwrap();
+            ant.publish(subject::react(&dev_a), payload.into()).await.unwrap();
+        }
         assert!(tokio::time::timeout(Duration::from_millis(500), replies.next()).await.is_err());
+        assert_eq!(load(&js, &[between.id]).await.unwrap()[&between.id], [reacted("eyes", &["alice"])]);
         serving.abort();
     }
 }

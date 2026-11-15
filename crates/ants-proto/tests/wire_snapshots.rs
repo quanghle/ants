@@ -212,11 +212,18 @@ fn kv_entries() {
         "reaction_entry",
         &ReactionEntry { message: id(1), by: user("alice"), reaction: "eyes".parse().unwrap(), at: at(0) },
     );
-    snap("reactions_request", &ReactionsRequest { id: id(1), ant: user("dev-a"), message: id(2), requested_at: at(0) });
+    let request = ReactionsRequest { id: id(1), ant: user("dev-a"), message: id(2), requested_at: at(0), change: None };
+    snap("reactions_request", &request);
+    for (kind, remove) in [("react", false), ("unreact", true)] {
+        let change = Some(ReactionChange { reaction: "eyes".parse().unwrap(), remove });
+        snap(&format!("reactions_request_{kind}"), &ReactionsRequest { change, ..request.clone() });
+    }
     let reacted = Reacted { reaction: "eyes".parse().unwrap(), by: vec![user("alice"), user("dev-b")] };
-    for (kind, outcome) in
-        [("listed", ReactionsOutcome::Listed { reactions: vec![reacted] }), ("unknown", ReactionsOutcome::Unknown)]
-    {
+    for (kind, outcome) in [
+        ("listed", ReactionsOutcome::Listed { reactions: vec![reacted] }),
+        ("applied", ReactionsOutcome::Applied { changed: true }),
+        ("unknown", ReactionsOutcome::Unknown),
+    ] {
         let reply = ReactionsReply { request_id: id(1), ant: user("dev-a"), message: id(2), outcome };
         snap(&format!("reactions_reply_{kind}"), &reply);
     }

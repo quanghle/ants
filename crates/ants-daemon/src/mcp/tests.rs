@@ -176,11 +176,21 @@ async fn react_takes_the_current_message_or_a_named_one_and_removes() {
 
     let stored: Arc<StdMutex<std::collections::BTreeSet<(Uuid, String)>>> = Arc::default();
     let kept = stored.clone();
-    mcp.with_reactor(Arc::new(move |message, reaction: Reaction, remove| {
+    let (unread, silent) = (Uuid::now_v7(), Uuid::now_v7());
+    mcp.with_reaction_asker(Arc::new(move |request: ants_proto::ReactionsRequest| {
+        assert_eq!(request.ant.as_str(), "dev-a");
+        let change = request.change.expect("a change");
         let mut stored = kept.locked();
-        let entry = (message, reaction.as_str().to_owned());
-        let changed = if remove { stored.remove(&entry) } else { stored.insert(entry) };
-        Box::pin(async move { Ok(changed) })
+        let entry = (request.message, change.reaction.as_str().to_owned());
+        let outcome = if request.message == unread {
+            Some(ants_proto::ReactionsOutcome::Unknown)
+        } else if request.message == silent {
+            None
+        } else {
+            let changed = if change.remove { stored.remove(&entry) } else { stored.insert(entry) };
+            Some(ants_proto::ReactionsOutcome::Applied { changed })
+        };
+        Box::pin(async move { Ok(outcome) })
     }));
     let (ok, text) = call(&client, "react", serde_json::json!({"reaction": "eyes"})).await;
     assert!(!ok && text.contains("name the message by message_id"), "{text}");
@@ -204,6 +214,12 @@ async fn react_takes_the_current_message_or_a_named_one_and_removes() {
     let (ok, text) = call(&client, "react", remove).await;
     assert!(ok && text.starts_with("No reaction eyes"), "{text}");
     assert_eq!(*stored.locked(), std::collections::BTreeSet::from([(other, "check".to_owned())]));
+
+    let named = |id: Uuid| serde_json::json!({"reaction": "eyes", "message_id": id.to_string()});
+    let (ok, text) = call(&client, "react", named(unread)).await;
+    assert!(!ok && text.contains("none this ant reads") && text.contains("nothing changed"), "{text}");
+    let (ok, text) = call(&client, "react", named(silent)).await;
+    assert!(!ok && text.contains("ants signer"), "{text}");
 }
 
 #[tokio::test]
@@ -217,7 +233,9 @@ async fn list_reactions_shows_those_to_the_current_message_or_a_named_one() {
 
     let (unread, silent) = (Uuid::now_v7(), Uuid::now_v7());
     let quiet = current.id;
-    mcp.with_reaction_reader(Arc::new(move |message| {
+    mcp.with_reaction_asker(Arc::new(move |request: ants_proto::ReactionsRequest| {
+        assert!(request.change.is_none(), "only listing");
+        let message = request.message;
         let outcome = if message == unread {
             Some(ants_proto::ReactionsOutcome::Unknown)
         } else if message == silent {
@@ -247,7 +265,7 @@ async fn list_reactions_shows_those_to_the_current_message_or_a_named_one() {
     let (ok, text) = call(&client, "list_reactions", named(unread)).await;
     assert!(ok && text.contains("none this ant reads"), "{text}");
     let (ok, text) = call(&client, "list_reactions", named(silent)).await;
-    assert!(!ok && text.contains("ants webhook serve"), "{text}");
+    assert!(!ok && text.contains("ants signer") && text.contains("ants webhook serve"), "{text}");
     let (ok, text) = call(&client, "list_reactions", serde_json::json!({"message_id": "nope"})).await;
     assert!(!ok && text.contains("message_id"), "{text}");
 }

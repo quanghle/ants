@@ -36,9 +36,11 @@ pub struct Reacted {
     pub by: Vec<UserId>,
 }
 
-/// An ant's request for the reactions to message `message`, on [`subject::reactions`]: core NATS, not stored. Only
-/// humans read the reactions bucket, so `ants webhook serve` answers with a human's credentials, and only after
-/// checking that the ant reads the message: its first copy in the stream is on a subject the ant's credentials read
+/// An ant's request for the reactions to message `message`, on [`subject::reactions`], or, with a `change`, to add or
+/// remove its own reaction to it, on [`subject::react`]: core NATS, not stored. Only humans read the reactions bucket,
+/// and no ant writes it, so a human's `ants webhook serve` or `ants signer` answers a request for the reactions, and
+/// only `ants signer`, whose credentials write any user's reactions, a change; each only after checking that the ant
+/// reads the message: its first copy in the stream is on a subject the ant's credentials read
 /// ([`subject::readable_by`]). The ant repeats the request with the same id while no answer arrives
 /// ([`REACTIONS_REPEAT`]); the answer goes to [`subject::reactions_reply`], which only the ant reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,15 +51,36 @@ pub struct ReactionsRequest {
     /// The message whose reactions it asks for ([`Envelope::id`], or that of a notes or channel post).
     pub message: Uuid,
     pub requested_at: DateTime<Utc>,
+    /// The change to the ant's own reactions to the message it asks for; none to only list them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<ReactionChange>,
+}
+
+/// A reaction an ant adds to a message, or removes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReactionChange {
+    pub reaction: Reaction,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub remove: bool,
 }
 
 impl ReactionsRequest {
+    /// `ant`'s request for the reactions to `message`.
     pub fn new(ant: UserId, message: Uuid) -> Self {
-        Self { id: Uuid::now_v7(), ant, message, requested_at: Utc::now() }
+        Self { id: Uuid::now_v7(), ant, message, requested_at: Utc::now(), change: None }
     }
 
+    /// `ant`'s request to make `change` to its reactions to `message`.
+    pub fn change(ant: UserId, message: Uuid, change: ReactionChange) -> Self {
+        Self { change: Some(change), ..Self::new(ant, message) }
+    }
+
+    /// Where the request goes: [`subject::react`] with a change, else [`subject::reactions`].
     pub fn subject(&self) -> String {
-        subject::reactions(&self.ant)
+        match self.change {
+            Some(_) => subject::react(&self.ant),
+            None => subject::reactions(&self.ant),
+        }
     }
 
     /// Where the answer goes.
@@ -103,8 +126,12 @@ impl ReactionsReply {
 pub enum ReactionsOutcome {
     /// The reactions to the message, in order of reaction; none when nobody reacted.
     Listed { reactions: Vec<Reacted> },
+    /// The change asked for is made: `changed` says whether it changed anything, adding a reaction the ant made
+    /// already or removing one it did not make changing nothing.
+    Applied { changed: bool },
     /// No message the ant reads has that id, as far as the stream keeps it. The same whether there is no such
-    /// message or the ant may not read it, so the answer tells nothing of messages the ant does not read.
+    /// message or the ant may not read it, so the answer tells nothing of messages the ant does not read. A change
+    /// asked for is not made.
     Unknown,
 }
 
@@ -129,5 +156,12 @@ mod tests {
         assert_eq!(reply.check_subject(&request.reply_subject()), Ok(()));
         assert!(reply.check_subject("_INBOX.dev-b.reactions").is_err());
         assert_eq!(serde_json::to_value(&reply.outcome).unwrap(), serde_json::json!({"outcome": "unknown"}));
+
+        let change = ReactionChange { reaction: "eyes".parse().unwrap(), remove: false };
+        let react = ReactionsRequest::change(p("dev-a"), Uuid::now_v7(), change);
+        assert_eq!(react.subject(), "ants.reactions.dev-a.react");
+        assert_eq!(react.reply_subject(), request.reply_subject());
+        assert!(react.check_subject("ants.reactions.dev-a").is_err(), "a change goes on its own subject");
+        assert!(request.check_subject("ants.reactions.dev-a.react").is_err(), "and a listing on its own");
     }
 }

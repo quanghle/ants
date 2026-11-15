@@ -431,8 +431,11 @@ async fn connect_mcp(
     mcp.listen(bus::live_inbox(client, &config.ant).await?);
     mcp.with_channels(redacting_posts(crate::mcp::jetstream_channels(js.clone()), redactor.clone()));
     mcp.with_lookup(crate::mcp::jetstream_lookup(js.clone()));
-    mcp.with_reactor(crate::mcp::jetstream_reactor(js.clone(), config.js_domain.clone(), config.ant.clone()));
-    mcp.with_reaction_reader(crate::mcp::nats_reaction_reader(client.clone(), config.ant.clone()));
+    // Without credentials the server is open, with no `ants signer` to answer, and the daemon reads what it would.
+    mcp.with_reaction_asker(match config.creds {
+        Some(_) => crate::mcp::nats_reaction_asker(client.clone()),
+        None => crate::mcp::local_reaction_asker(js.clone(), config.js_domain.clone()),
+    });
     if let Some(requester) = &config.requester.0 {
         mcp.with_requester(requester.clone());
     }

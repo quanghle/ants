@@ -173,6 +173,8 @@ ants signer --config ~/.ants/config.toml
 
 It verifies the manager's account signature and evaluates the request against its **own** `--config` `[[ant_template]]` tables (reread per request) and live issued keys in `issued.jsonl` (`ants auth revoke NAME` frees a slot). Policy-compliant requests are signed immediately for the manager's `js_domain` (recording `template` and `added_by` in `issued.jsonl`). Out-of-policy requests publish a manager `ApprovalRequest` (`request_ant: add ant NAME from template T (why)`, `allow_once` or `reject`), visible in `ants tools`, `ants inbox -f`, `ants dash` and all `ants webhook serve` notification sinks, waiting up to `--approval-timeout` (default `15m`, capped by request expiry). Forged requests, human/manager/reserved/taken names, templated managers, and > 3 pending human approvals per manager are refused outright. Pending human requests drop on signer restart and re-trigger on the manager's next 5 s retry.
 
+The signer also answers ants' reactions requests (MCP `react` and `list_reactions`, `ants react` with ant credentials) in queue group `reactions`: ant credentials neither read nor write `ants_reactions`, so the signer lists the reactions to a message, or adds or removes the ant's own, once it finds that the ant reads the message. With authentication, `react` therefore needs a running `ants signer` (listings are also answered by `ants webhook serve` with a `[[human]]` entry); a daemon without credentials answers its ants itself. Behind a leaf node, the signer's machine needs its uplink issued with `--enroll-approver` (see [auth.md](auth.md#wire-acls-and-verification-invariants)).
+
 ### Retiring an added ant
 
 Managers also get `retire_ant(name)` (`other:retire_ant`) for ants whose `added_by` matches them:

@@ -257,7 +257,9 @@ pub(crate) enum Command {
     /// `request_ant` tool), until stopped: at once for a request within the policy of the [[ant_template]] tables of
     /// --config (the template lists the manager, has room under its max_ants among the live keys the team issued,
     /// and bounds the request), on a human's approval of a tool request of the manager otherwise (`ants tools`, ntfy,
-    /// Slack, Telegram). Names taken, ants added by added ants and forged requests are refused.
+    /// Slack, Telegram). Names taken, ants added by added ants and forged requests are refused. Also answers ants'
+    /// reactions requests (their `react` and `list_reactions` tools, `ants react` with an ant's credentials) for the
+    /// messages each ant reads.
     Signer {
         /// Config file whose [[ant_template]] tables are the policy; the rest of it is ignored
         /// (default: ~/.ants/config.toml).
