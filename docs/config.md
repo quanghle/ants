@@ -295,12 +295,28 @@ rate_limited = ["slow down"]                   # extra rate-limit error substrin
 quota_exhausted = ["monthly cap reached"]      # extra quota-exhausted error substrings
 window = 200000                                # optional context window (tokens); sizes history seed
 history_budget = 65536                         # optional history seed budget (bytes)
+memory_files = ["AGENTS.md", "~/.custom/*.md"] # memory files an admin's read shows (see Memory files)
 
 [harnesses.custom-acp.context]
 default = {}
 large = { args = ["--context-window", "1m"], window = 1000000 }
 huge = { model_suffix = "-1m", history_budget = 262144 }
 ```
+
+### Memory files
+
+`memory_files` lists globs of the files a harness takes as memory, which an admin's `read_memories` order shows read-only (`ants ant memories ANT`, the memories pane of the ant view in `ants chat`; [auth.md](auth.md#admin-orders)). A glob is relative to the ant's workdir, `~/` names the home directory of the daemon's user and an absolute path is taken as is; `*` and `?` match within a path component, `**` any number of directories, and `..` is refused. The built-ins default to:
+
+| Harness | `memory_files` |
+|---|---|
+| `copilot` | `AGENTS.md`, `.github/copilot-instructions.md`, `.github/instructions/**/*.instructions.md`, `CLAUDE.md`, `GEMINI.md`, `~/.copilot/copilot-instructions.md` |
+| `claude` | `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`, `~/.claude/CLAUDE.md` |
+| `codex` | `AGENTS.md`, `AGENTS.override.md`, `~/.codex/AGENTS.md`, `~/.codex/AGENTS.override.md` |
+| `antigravity` | `GEMINI.md`, `AGENTS.md`, `.agent/rules/*.md`, `~/.gemini/GEMINI.md` |
+
+A `[harnesses.NAME]` redefining a harness without `memory_files` keeps the globs of the one it replaces; `memory_files = []` shows none. A read follows a symbolic link only when its target, resolved, still matches one of the globs and lies under the ant's workdir, the ant's home (`home`, default `~/.ants/<name>`) or the home directory of the daemon's user; `**` follows no linked directory. Anything else is left out, named with the reason. With `BD_DB` in the ant's environment (the ant's `env`, else its harness's, else the daemon's), the read also lists the bd memories of that database (`bd memories --json`, run in the workdir, at most 10 s).
+
+A read is capped so its outcome fits the `ants_machines` bucket: 32 KiB per file or memory (cut short beyond), 192 KiB of JSON for all of them, and 64 files; what is left out is listed with why. The ant's core memories (`whoami`, `memory`, `tasks` of its `[[ant]]`) come from the config file and are edited with a `set` order.
 
 ### Choosing a harness in `ants setup`
 

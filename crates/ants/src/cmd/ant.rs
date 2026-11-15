@@ -8,7 +8,7 @@ use anyhow::Result;
 use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
 
-use crate::{ant, completions, orders, pause, restart};
+use crate::{ant, completions, memories, orders, pause, restart};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum AntCommand {
@@ -34,6 +34,20 @@ pub(crate) enum AntCommand {
         /// One JSON object per order.
         #[arg(long)]
         json: bool,
+    },
+    /// Show ANT's memories, which an admin order asks the daemon of its machine to read while online: its core
+    /// memories (whoami, memory, tasks), which a set order edits, and its harness's memory files (the `memory_files`
+    /// globs of its harness) and bd memories (with BD_DB in its environment), read-only and size-capped. Needs a
+    /// human device's admin credentials.
+    Memories {
+        #[arg(add = ArgValueCandidates::new(completions::ants))]
+        ant: UserId,
+        /// One JSON object: core, harness, workdir, files, bd and skipped.
+        #[arg(long)]
+        json: bool,
+        /// The machine whose daemon serves ANT (default: the machine that last recorded serving it).
+        #[arg(long)]
+        machine: Option<Machine>,
     },
     /// Order ANT's daemon to restart its harnesses: idle ones stop at once, working ones once their current prompt
     /// ends, and each thread's next prompt resumes its session in a new harness. Waits up to 10 s for the outcome, else
@@ -90,6 +104,7 @@ pub(crate) async fn run(nats: &crate::Nats<'_>, command: AntCommand) -> Result<(
             ant::show(nats, ant, &caps, json).await
         }
         AntCommand::Orders { ant, json } => orders::show(nats, &ant, json).await,
+        AntCommand::Memories { ant, json, machine } => memories::show(nats, &ant, machine, json).await,
         AntCommand::Restart { ant, now, machine, json } => restart::run(nats, &ant, now, machine, json).await,
         AntCommand::Pause { order: Order { ant, machine, wait } } => pause::run(nats, &ant, machine, true, wait).await,
         AntCommand::Resume { order: Order { ant, machine, wait } } => {

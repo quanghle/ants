@@ -36,7 +36,6 @@ fn admin_creds<'a>(nats: &Nats<'a>) -> Result<&'a Path> {
 /// Send `op` about `ant` to the daemon of `machine`, else of the machine that last recorded serving it, signed with
 /// the admin credentials of `nats`, once the hub's stream has stored it; then wait up to `wait` for its outcome. None
 /// when the order is still pending then, as it stays until the machine's daemon takes it.
-#[cfg_attr(not(test), expect(dead_code, reason = "the admin commands of ants-5ggma.6 send orders"))]
 pub async fn send(
     nats: &Nats<'_>,
     js: &jetstream::Context,
@@ -574,6 +573,50 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
         let reload = tokio::time::timeout(WAIT, triggers.next()).await.expect("a reload at once");
         assert_eq!(reload, crate::reload::Trigger::Edited);
+        drop(ants);
+        tokio::time::timeout(WAIT, task).await.unwrap().unwrap().unwrap();
+    }
+
+    /// A read_memories order has the daemon answer with the ant's core memories from its config file and its
+    /// harness's memory files in the workdir, which `ants ant memories` shows.
+    #[tokio::test]
+    async fn a_read_memories_order_answers_with_the_ant_s_core_and_harness_memories() {
+        let Some(server) = Server::start() else { return };
+        let (alice, bob, dev_a) = (p("alice"), p("bob"), p("dev-a"));
+        let (_, h_js) = server.connect_as(&bob, Role::Human).await;
+        ants_daemon::bus::ensure_stream(&h_js).await.unwrap();
+        h_js.create_key_value(ants_daemon::hub::machines_config()).await.unwrap();
+        h_js.create_key_value(ants_daemon::hub::devices_config()).await.unwrap();
+        let admin_creds = server.dir().join("alice-admin.creds");
+        let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
+        let rights = Permissions::for_user(&alice, Role::Human);
+        issue_device_with(&server.dir().join("auth"), &alice, Kind::Human, rights, &admin, &admin_creds).unwrap();
+        let admin = crate::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+        let (_, js) = admin.connect("test").await.unwrap();
+
+        let workdir = server.dir().join("work");
+        std::fs::create_dir_all(&workdir).unwrap();
+        std::fs::write(workdir.join("AGENTS.md"), "Run the checks.\n").unwrap();
+        let path = server.dir().join("config.toml");
+        let text = format!(
+            "harness = \"codex\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = {:?}\nwhoami = \"A tester.\"\ntasks = \
+             \"Test.\"\n",
+            workdir.display().to_string()
+        );
+        std::fs::write(&path, text).unwrap();
+        let triggers = crate::reload::Triggers::new(path.clone(), None, Duration::from_secs(3600)).unwrap();
+        let config = ConfigFile::new(path, triggers.edits());
+        let (ants, task) = host_of_m1(&server, &js, true, Some(config)).await;
+
+        let memories = crate::memories::read(&admin, &js, None, &dev_a).await.unwrap();
+        assert_eq!(memories.core.whoami.as_deref(), Some("A tester."));
+        assert_eq!((memories.core.memory.as_deref(), memories.core.tasks.as_deref()), (None, Some("Test.")));
+        assert_eq!(memories.harness.as_deref(), Some("codex"));
+        let files: Vec<_> = memories.files.iter().map(|f| (Path::new(&f.path).file_name(), f.text.as_str())).collect();
+        assert_eq!(files, [(Some("AGENTS.md".as_ref()), "Run the checks.\n")]);
+        let shown = crate::memories::render(&dev_a, &memories);
+        assert!(shown.contains("whoami\n  A tester.\nmemory (unset)\n"), "{shown}");
+        assert!(shown.contains("── AGENTS.md (16 B)\n  Run the checks.\n"), "{shown}");
         drop(ants);
         tokio::time::timeout(WAIT, task).await.unwrap().unwrap().unwrap();
     }
