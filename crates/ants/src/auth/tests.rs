@@ -2557,6 +2557,7 @@ async fn a_host_records_only_its_own_machine_s_ants_and_humans_read_where_each_a
         nats: server.url.clone(),
         creds: Some(creds.clone()),
         js_domain: None,
+        remote_admin: true,
     };
     let (ants, watched) = tokio::sync::watch::channel(vec![dev_a.clone(), UserId::messenger()]);
     let task = tokio::spawn(ants_daemon::host::run(host, watched));

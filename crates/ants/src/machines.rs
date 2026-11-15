@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use ants_proto::{MACHINES_BUCKET, Machine, MachineRecord, UserId};
+use ants_proto::{MACHINES_BUCKET, Machine, MachineRecord, UserId, subject};
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::{StatusCode, jetstream};
 use chrono::Utc;
@@ -15,18 +15,32 @@ use crate::roster::{short, since};
 /// Records asked for at once.
 const BATCH: usize = 256;
 
-/// The machines' records, read with a human's credentials by batched direct gets of the whole bucket, which keeps one
-/// message per key, sorted by machine.
+/// The machines' records, read with a human's credentials by batched direct gets of their keys
+/// ([`subject::machine_records`]), sorted by machine.
 pub async fn list(js: &jetstream::Context) -> Result<Vec<MachineRecord>> {
+    let mut records = Vec::new();
+    for (key, payload) in latest(js, &subject::machine_records()).await? {
+        match serde_json::from_slice::<MachineRecord>(&payload) {
+            Ok(record) if record.key() == key => records.push(record),
+            Ok(_) => tracing::warn!(key, "skipping the record of another machine"),
+            Err(e) => tracing::warn!(key, error = %e, "skipping a malformed machine record"),
+        }
+    }
+    Ok(sorted(records))
+}
+
+/// The key and value of each live entry of [`MACHINES_BUCKET`] on `filter` (a subject under `$KV.ants_machines.`), by
+/// batched direct gets of the bucket's stream, which keeps one message per key, in the order they were last put.
+pub(crate) async fn latest(js: &jetstream::Context, filter: &str) -> Result<Vec<(String, Vec<u8>)>> {
     let stream = format!("KV_{MACHINES_BUCKET}");
     let client = js.client();
     let wait = client.timeout().unwrap_or(Duration::from_secs(10));
     let inbox = client.new_inbox();
     let mut replies = client.subscribe(inbox.clone()).await?;
     let prefix = format!("$KV.{MACHINES_BUCKET}.");
-    let (mut records, mut seq) = (Vec::new(), 1);
+    let (mut entries, mut seq) = (Vec::new(), 1);
     loop {
-        let request = json!({ "seq": seq, "next_by_subj": format!("{prefix}>"), "batch": BATCH });
+        let request = json!({ "seq": seq, "next_by_subj": filter, "batch": BATCH });
         let request = async_nats::Request::new().inbox(inbox.clone()).payload(serde_json::to_vec(&request)?.into());
         js.send_request(format!("DIRECT.GET.{stream}"), request)
             .await
@@ -38,12 +52,12 @@ pub async fn list(js: &jetstream::Context) -> Result<Vec<MachineRecord>> {
             };
             match msg.status {
                 None => {}
-                Some(StatusCode::NOT_FOUND) => return Ok(sorted(records)),
+                Some(StatusCode::NOT_FOUND) => return Ok(entries),
                 Some(StatusCode::NO_RESPONDERS) => bail!("no {MACHINES_BUCKET} bucket: `ants init` creates it"),
                 Some(status) if status.as_u16() == 204 => {
                     let pending = msg.headers.as_ref().and_then(|h| h.get("Nats-Num-Pending"));
                     if got == 0 || pending.is_some_and(|n| n.as_str() == "0") {
-                        return Ok(sorted(records));
+                        return Ok(entries);
                     }
                     break;
                 }
@@ -53,11 +67,8 @@ pub async fn list(js: &jetstream::Context) -> Result<Vec<MachineRecord>> {
             let msg = jetstream::message::StreamMessage::try_from(msg).map_err(|e| anyhow!(e))?;
             seq = msg.sequence + 1;
             let deleted = msg.headers.get("KV-Operation").is_some();
-            let Some(key) = msg.subject.strip_prefix(prefix.as_str()).filter(|_| !deleted) else { continue };
-            match serde_json::from_slice::<MachineRecord>(&msg.payload) {
-                Ok(record) if record.key() == key => records.push(record),
-                Ok(_) => tracing::warn!(key, "skipping the record of another machine"),
-                Err(e) => tracing::warn!(key, error = %e, "skipping a malformed machine record"),
+            if let Some(key) = msg.subject.strip_prefix(prefix.as_str()).filter(|_| !deleted) {
+                entries.push((key.to_owned(), msg.payload.to_vec()));
             }
         }
     }

@@ -134,6 +134,9 @@ fn leaf_permissions_cover_each_user_once() {
             "ants.timeline.dev-a.dev-a",
             // The machine's host connection.
             "$KV.ants_machines.m1",
+            "$JS.API.DIRECT.GET.KV_ants_machines.$KV.ants_machines.m1.>",
+            "$KV.ants_machines.m1.>",
+            "$JS.API.DIRECT.GET.KV_ants_devices.$KV.ants_devices.revoked.*",
             "$JS.API.CONSUMER.INFO.ANTS.admin-m1",
             "$JS.API.CONSUMER.CREATE.ANTS.admin-m1.ants.admin.m1.>",
             "$JS.API.CONSUMER.MSG.NEXT.ANTS.admin-m1",
@@ -761,6 +764,11 @@ fn a_host_writes_only_its_own_machine_record_and_takes_only_its_own_orders() {
         assert!(host.publish.iter().any(|have| have == s), "{s} missing from {:?}", host.publish);
     }
     assert!(host.publish.iter().all(|s| !s.contains("ants_machines.*") && !s.contains("ants_machines.>")));
+    // It records the outcomes of its own machine's orders only, and reads revocations, which it never writes.
+    let outcomes: Vec<_> = host.publish.iter().filter(|s| s.contains("ants_machines.m1.")).collect();
+    assert_eq!(outcomes, ["$JS.API.DIRECT.GET.KV_ants_machines.$KV.ants_machines.m1.>", "$KV.ants_machines.m1.>"]);
+    assert!(host.publish.iter().all(|s| !s.starts_with("$KV.ants_devices")), "{:?}", host.publish);
+    assert_eq!(subject::admin_outcomes(&m1), "$KV.ants_machines.m1.>");
     assert!(host.publish.iter().all(|s| !s.starts_with("ants.") && !s.contains("STREAM.")), "{:?}", host.publish);
     assert_eq!(host.subscribe, ["_INBOX_HOST.m1.>"]);
     let in_domain = Permissions::for_host(&m1).with_js_domain(Some(&"hub".parse().unwrap()));
@@ -776,6 +784,12 @@ fn a_host_writes_only_its_own_machine_record_and_takes_only_its_own_orders() {
         assert!(human.publish.iter().any(|have| have == s), "{s}");
     }
     assert!(!human.publish.iter().any(|s| s.starts_with("$KV.ants_machines") || s.contains("KV_ants_machines.")));
+    // A human sends orders to any machine's ants, and neither an ant nor an assistant sends any.
+    assert!(human.publish.iter().any(|s| s == "ants.admin.*.*"));
+    let assistant = Permissions::for_assistant(&p("pa"), &p("alice"));
+    for (who, rights) in [("ant", Permissions::for_user(&p("dev-a"), Role::Ant)), ("assistant", assistant)] {
+        assert!(!rights.publish.iter().any(|s| s.starts_with("ants.admin") || s == ">"), "{who}: {:?}", rights.publish);
+    }
     assert_eq!(subject::machine_record(&m1), "$KV.ants_machines.m1");
     assert_eq!(subject::admin_orders(&m1), "ants.admin.m1.>");
 }

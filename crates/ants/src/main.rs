@@ -34,6 +34,7 @@ mod machines;
 mod manager;
 mod members;
 mod notify;
+mod orders;
 mod outbox;
 mod presence;
 mod progress;

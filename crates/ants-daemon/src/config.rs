@@ -33,6 +33,9 @@
 //! creds = "~/.config/ants/auth/host.creds"  # default: that file, else host-<machine>.creds beside it, if either exists
 //! machine = "laptop"                # default: the name the credentials carry, else the host name's first label
 //!
+//! [admin]                           # admin orders to this machine's ants (crate::admin)
+//! remote = false                    # refuse every order (default true: carry out those an admin signed)
+//!
 //! [[ant]]
 //! name = "dev-a"
 //! workdir = "~/src/repo-a"
@@ -158,6 +161,8 @@ struct File {
     cli: CliSection,
     #[serde(default)]
     host: HostSection,
+    #[serde(default)]
+    admin: AdminSection,
     #[serde(default, rename = "ant_template")]
     ant_templates: Vec<AntTemplate>,
     #[serde(default, rename = "ant")]
@@ -528,9 +533,24 @@ struct HostSection {
     machine: Option<Machine>,
 }
 
+/// The `[admin]` table: the admin orders to the machine's ants ([`crate::admin`]).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AdminSection {
+    /// Whether to carry out the orders an admin signed; false refuses every one.
+    #[serde(default = "yes")]
+    remote: bool,
+}
+
+impl Default for AdminSection {
+    fn default() -> Self {
+        Self { remote: true }
+    }
+}
+
 /// The machine's host connection a config file describes ([`crate::host`]), made only by a daemon serving the whole
 /// file.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostSettings {
     /// The host credentials (`ants auth host`): the `[host]` table's `creds`, else `~/.config/ants/auth/host.creds`,
     /// else `host-<machine>.creds` there for the table's `machine` or the host name's first label, whichever exists
@@ -541,11 +561,20 @@ pub struct HostSettings {
     /// The file's top-level `nats` and `js_domain`.
     pub nats: Option<String>,
     pub js_domain: Option<JsDomain>,
+    /// The `[admin]` table's `remote`: whether the admin orders to the machine's ants may be carried out.
+    pub remote_admin: bool,
+}
+
+impl Default for HostSettings {
+    fn default() -> Self {
+        Self { creds: None, machine: None, nats: None, js_domain: None, remote_admin: true }
+    }
 }
 
 impl HostSettings {
     fn resolve(
         section: HostSection,
+        admin: AdminSection,
         nats: Option<String>,
         js_domain: Option<JsDomain>,
         base: &Path,
@@ -555,7 +584,7 @@ impl HostSettings {
             Some(creds) => Some(resolve(&creds, base, home)),
             None => default_host_creds(&home.join(".config/ants/auth"), section.machine.as_ref()),
         };
-        Self { creds, machine: section.machine, nats, js_domain }
+        Self { creds, machine: section.machine, nats, js_domain, remote_admin: admin.remote }
     }
 }
 
@@ -742,7 +771,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
         }
         schedules.push(schedule);
     }
-    let host = HostSettings::resolve(file.host, file.nats, file.js_domain, base, home);
+    let host = HostSettings::resolve(file.host, file.admin, file.nats, file.js_domain, base, home);
     let (base, home) = (base.to_owned(), home.to_owned());
     Ok(Loaded { ants, harnesses, templates, schedules, metrics: file.metrics, storage: file.storage, host, base, home })
 }
@@ -983,7 +1012,7 @@ impl Summary {
         let harnesses = define(file.harnesses, path, home)?;
         let caps = file.ants.iter().map(|ant| (ant.name.clone(), summary_caps(ant, &file.ant_templates))).collect();
         let ants = file.ants.into_iter().map(|ant| (ant.name, ant.creds.map(|c| resolve(&c, base, home)))).collect();
-        let host = HostSettings::resolve(file.host, file.nats.clone(), file.js_domain.clone(), base, home);
+        let host = HostSettings::resolve(file.host, file.admin, file.nats.clone(), file.js_domain.clone(), base, home);
         Ok(Self { nats: file.nats, js_domain: file.js_domain, harness: file.harness, harnesses, ants, caps, host })
     }
 

@@ -361,6 +361,46 @@ pub fn admin_orders(machine: &Machine) -> String {
     format!("ants.admin.{machine}.>")
 }
 
+/// Where an admin sends its orders about `ant` to the daemon of `machine` ([`super::AdminOrder`]): only humans publish
+/// here, the `ANTS` stream keeps them, and only the machine's host credentials take them from it.
+pub fn admin_order(machine: &Machine, ant: &UserId) -> String {
+    format!("ants.admin.{machine}.{ant}")
+}
+
+/// Every admin order about `ant`, on whatever machine.
+pub fn admin_orders_to(ant: &UserId) -> String {
+    format!("ants.admin.*.{ant}")
+}
+
+/// Every admin order a human may send.
+pub const ALL_ADMIN_ORDERS_SENT: &str = "ants.admin.*.*";
+
+/// Every admin order, as the `ANTS` stream keeps them.
+pub const ALL_ADMIN_ORDERS: &str = "ants.admin.>";
+
+/// The machine and the ant an admin order subject names ([`admin_order`]), or `None` when it is none.
+pub fn parse_admin_order(subject: &str) -> Option<(Machine, UserId)> {
+    let (machine, ant) = subject.strip_prefix("ants.admin.")?.split_once('.')?;
+    Some((machine.parse().ok()?, ant.parse().ok()?))
+}
+
+/// The records of every machine in [`super::MACHINES_BUCKET`], whose keys are the machines' names alone, without the
+/// outcomes of admin orders kept beside them ([`super::admin_outcome_key`]).
+pub fn machine_records() -> String {
+    format!("$KV.{}.*", super::MACHINES_BUCKET)
+}
+
+/// The outcomes of the admin orders to the ants of `machine` in [`super::MACHINES_BUCKET`], which only its host
+/// credentials write.
+pub fn admin_outcomes(machine: &Machine) -> String {
+    format!("$KV.{}.{machine}.>", super::MACHINES_BUCKET)
+}
+
+/// The outcomes of the admin orders about `ant`, on whatever machine ([`super::admin_outcome_key`]).
+pub fn admin_outcomes_of(ant: &UserId) -> String {
+    format!("$KV.{}.*.{ant}.*", super::MACHINES_BUCKET)
+}
+
 /// The chain of an ant in [`super::CHAINS_BUCKET`]: the subject its daemon puts [`super::ChainEntry`] on.
 pub fn chain(ant: &UserId) -> String {
     format!("$KV.{}.{ant}", super::CHAINS_BUCKET)
@@ -449,6 +489,12 @@ mod tests {
         assert_eq!(subject::parse_timeline("ants.timeline.t1.dev-a"), Some((t.clone(), p("dev-a"))));
         assert_eq!(subject::parse_timeline("ants.notes.t1.dev-a"), None);
         assert!(STREAM_SUBJECTS.contains(&subject::ALL_TIMELINE), "timelines are durable");
+        let m: Machine = "box".parse().unwrap();
+        assert_eq!(subject::admin_order(&m, &p("dev-a")), "ants.admin.box.dev-a");
+        assert_eq!(subject::parse_admin_order("ants.admin.box.dev-a"), Some((m, p("dev-a"))));
+        assert_eq!(subject::parse_admin_order("ants.admin.box"), None);
+        assert_eq!(subject::parse_admin_order("ants.inbox.box.dev-a"), None);
+        assert!(STREAM_SUBJECTS.contains(&subject::ALL_ADMIN_ORDERS), "admin orders are durable");
         assert_eq!(inbox_consumer(&p("dev-a")), "inbox-dev-a");
         let id = Uuid::now_v7();
         assert_eq!(subject::approval_decision(&p("dev-a"), &id), format!("ants.approvals.dev-a.{id}"));

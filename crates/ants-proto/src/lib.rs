@@ -7,6 +7,7 @@ use std::time::Duration;
 
 pub use uuid::Uuid;
 
+mod admin;
 mod ant_request;
 mod approvals;
 mod attachments;
@@ -38,6 +39,7 @@ pub mod subject;
 mod threads;
 mod timeline;
 
+pub use admin::*;
 pub use ant_request::*;
 pub use approvals::*;
 pub use attachments::*;
@@ -70,8 +72,15 @@ pub use timeline::*;
 /// JetStream stream holding every durable ants message.
 pub const STREAM: &str = "ANTS";
 /// Subjects captured by [`STREAM`]. Status updates are core NATS only and stay out of it.
-pub const STREAM_SUBJECTS: [&str; 6] =
-    ["ants.inbox.>", "ants.notes.>", "ants.approvals.>", "ants.dead.>", "ants.chan.>", subject::ALL_TIMELINE];
+pub const STREAM_SUBJECTS: [&str; 7] = [
+    "ants.inbox.>",
+    "ants.notes.>",
+    "ants.approvals.>",
+    "ants.dead.>",
+    "ants.chan.>",
+    subject::ALL_TIMELINE,
+    subject::ALL_ADMIN_ORDERS,
+];
 /// The inbox subjects [`STREAM`] republishes each message it stores on, to [`STORED_INBOX_DESTINATION`]: what it
 /// sources from a leaf's outbox it stores without publishing it on its subject.
 pub const STORED_INBOX_SOURCE: &str = "ants.inbox.*.*";
@@ -100,7 +109,9 @@ pub const ROSTER_TTL: Duration = Duration::from_secs(30);
 /// KV bucket of the machines: one [`MachineRecord`] per machine running a daemon, keyed by its name, listing the ants
 /// the daemon serves. Unlike the roster's, records never expire, so an ant whose daemon stopped still has a machine,
 /// where admin orders to it wait ([`subject::admin_orders`]). Each machine's daemon writes only its own record, with
-/// the machine's host credentials ([`Permissions::for_host`]); humans read them all; ants read none.
+/// the machine's host credentials ([`Permissions::for_host`]); humans read them all; ants read none. Beside its record,
+/// under keys starting with its name, the machine's daemon records the outcome of each admin order to its ants
+/// ([`admin_outcome_key`]).
 pub const MACHINES_BUCKET: &str = "ants_machines";
 /// KV bucket mapping a thread to its harness session, for resuming after a restart.
 pub const SESSIONS_BUCKET: &str = "ants_sessions";

@@ -35,6 +35,9 @@ max_harnesses = 1                          # default; per-ant harness cap while 
 creds = "~/.config/ants/auth/host.creds"   # default: that file, else host-<machine>.creds beside it, if either exists
 machine = "macbook"                        # default: the name the credentials carry, else the host name's first label
 
+[admin]                                    # admin orders to this machine's ants (docs/auth.md, Admin orders)
+remote = false                             # refuse every order (default true: take the orders an admin signed)
+
 [[ant]]
 name = "dev-a"
 workdir = "~/src/repo-a"                   # must exist
@@ -108,7 +111,7 @@ allow = ["read:*", "execute:cargo test*"]
 
 - Added ants (and previously failed ants still listed) start; removed ants drain prompts in flight and return waiting messages for redelivery; ants whose resolved settings changed (including via top-level defaults, `[harnesses.NAME]`, or `[[ant_template]]`) drain and restart; unchanged ants continue uninterrupted (pool membership changes alone do not restart members).
 - Added schedules start; removed schedules stop immediately; changed or stopped schedules restart.
-- The machine's record of its ants in `ants_machines` follows the ants listed; a changed `[host]` table or host credentials file reconnects the host. Only a daemon serving the whole file (no `--ant`) runs the host, with the top-level `nats` and `js_domain`, else `--nats` and `--js-domain`.
+- The machine's record of its ants in `ants_machines` follows the ants listed; a changed `[host]` or `[admin]` table or host credentials file reconnects the host. With `[admin] remote = false`, the host refuses every admin order to the machine's ants, recording `this machine's config sets [admin] remote = false` as its outcome. Only a daemon serving the whole file (no `--ant`) runs the host, with the top-level `nats` and `js_domain`, else `--nats` and `--js-domain`.
 - Invalid reloads log an error and keep running the previous config. `metrics` requires a process restart.
 
 ## Worktrees

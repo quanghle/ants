@@ -1,5 +1,6 @@
 //! Ant daemon: consumes an ant's durable inbox and answers each message through an ACP harness.
 
+pub mod admin;
 pub mod approvals;
 pub mod attempts;
 pub mod breaker;
