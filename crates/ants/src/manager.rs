@@ -271,7 +271,8 @@ mod tests {
         std::fs::write(&signer_config, text).unwrap();
         let config = dir.join("config.toml");
         let text = format!(
-            "nats = {:?}\nmessenger = false\n{}{}[[ant]]\nname = \"lead\"\nworkdir = {src:?}\ncreds = {lead:?}\n",
+            "nats = {:?}\nmessenger = false\nharness = \"copilot\"\n{}{}[[ant]]\nname = \"lead\"\nworkdir = {src:?}\n\
+             creds = {lead:?}\n",
             server.url,
             template("worker", "\"lead\""),
             template("helper", "\"lead\"")

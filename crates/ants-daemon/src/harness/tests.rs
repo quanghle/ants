@@ -289,20 +289,23 @@ fn command_line(harness: &Harness, env: &[(&str, &str)], context: Option<&str>) 
 }
 
 #[test]
-fn builtin_harnesses_launch_as_before() {
+fn builtin_harnesses_launch_in_their_most_permissive_setting() {
     let strings = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
     let cases = [
-        ("copilot", None, "copilot", &["--acp"][..], None),
-        ("copilot", Some("long_context"), "copilot", &["--acp", "--context", "long_context"][..], None),
-        ("copilot", Some("default"), "copilot", &["--acp", "--context", "default"][..], None),
-        ("claude", Some("1m"), "claude-agent-acp", &[][..], Some("default")),
-        ("antigravity", None, "agy", &["acp", "--disable-telemetry"][..], Some("default")),
+        ("copilot", None, "copilot", &["--acp", "--allow-all"][..], None),
+        ("copilot", Some("long_context"), "copilot", &["--acp", "--allow-all", "--context", "long_context"][..], None),
+        ("copilot", Some("default"), "copilot", &["--acp", "--allow-all", "--context", "default"][..], None),
+        ("claude", Some("1m"), "claude-agent-acp", &[][..], Some("bypassPermissions")),
+        ("codex", None, "codex-acp", &[][..], Some("agent-full-access")),
+        ("antigravity", None, "agy", &["acp", "--disable-telemetry", "--dangerously-skip-permissions"][..], None),
     ];
     for (name, context, command, args, mode) in cases {
         let harness = builtin(name);
         assert_eq!(command_line(&harness, &[], context), (command.to_owned(), strings(args), Vec::new()), "{name}");
         assert_eq!(harness.mode.as_deref(), mode, "{name}");
+        assert!(harness.bypasses_permissions(), "{name}");
     }
+    assert_eq!(builtin("codex").sign_in(), Some("codex-acp login"));
     let claude =
         ModelSettings { model: Some("smart".to_owned()), context: Some("1m".to_owned()), ..Default::default() };
     assert_eq!(claude.model_id(&builtin("claude")).as_deref(), Some("smart[1m]"));
@@ -383,7 +386,31 @@ fn definitions_are_checked_and_replace_builtins_whole() {
     assert_eq!((copilot.name(), copilot.args.is_empty(), copilot.context.is_empty()), ("copilot", true, true));
     assert_eq!(harnesses.get("claude").unwrap(), builtin("claude"));
     let unknown = harnesses.get("vim").unwrap_err().to_string();
-    assert!(unknown.contains("unknown harness \"vim\", expected one of antigravity, claude, copilot"), "{unknown}");
+    assert!(
+        unknown.contains("unknown harness \"vim\", expected one of antigravity, claude, codex, copilot"),
+        "{unknown}"
+    );
+    assert!(!copilot.bypasses_permissions(), "a definition replacing a built-in sets its own");
+}
+
+#[test]
+fn a_harness_running_its_tools_unasked_tells_which_gating_misses_them() {
+    let rules = |rules: &[&str]| rules.iter().map(|rule| (*rule).to_owned()).collect::<Vec<_>>();
+    let copilot = builtin("copilot");
+    assert_eq!(copilot.unenforced(&[], false), None, "nothing gated");
+    assert_eq!(copilot.unenforced(&rules(&["read", "*"]), false), None, "everything allowed anyway");
+    assert_eq!(
+        copilot.unenforced(&rules(&["read"]), true).as_deref(),
+        Some(
+            "harness copilot runs its tools unasked, so its allow rules and tool approvals by its escalate_to ants do \
+             not apply to them"
+        )
+    );
+    let approvals = copilot.unenforced(&[], true).unwrap();
+    assert!(approvals.contains("so tool approvals by its escalate_to ants do not apply"), "{approvals}");
+    let asking = parse_definitions("[harnesses.copilot]\ncommand = \"copilot\"\nargs = [\"--acp\"]").unwrap();
+    let asking = Harnesses::builtin().define(asking).unwrap();
+    assert_eq!(asking.get("copilot").unwrap().unenforced(&rules(&["read"]), true), None);
 }
 
 #[derive(Clone, Copy)]

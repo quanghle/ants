@@ -606,6 +606,11 @@ impl Webhook {
 }
 
 impl Webhook {
+    /// Whether the threads it starts are narrowed to fewer tools than all.
+    pub fn narrows(&self) -> bool {
+        self.allow.as_deref().is_none_or(|allow| !ants_daemon::harness::allows_all(allow))
+    }
+
     fn authorized_before_body(&self, headers: &HeaderMap) -> bool {
         match &self.auth {
             Auth::Hmac { .. } => true,

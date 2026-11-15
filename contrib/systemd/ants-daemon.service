@@ -11,7 +11,7 @@ After=ants-nats.service
 [Service]
 ExecStart="@ANTS@" daemon --config "@CONFIG@"
 ExecReload=kill -HUP $MAINPID
-# The harness (copilot) and bd are looked up on this PATH.
+# The harness command (such as copilot or claude-agent-acp) and bd are looked up on this PATH.
 Environment="PATH=@PATH@" NO_COLOR=1
 Restart=on-failure
 RestartSec=10

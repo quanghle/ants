@@ -6,7 +6,8 @@ fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// Parse as if the file sat in this crate's directory, with the workspace root as home.
+/// Parse as if the file sat in this crate's directory, with the workspace root as home and `harness = "copilot"` on
+/// top unless the file names its own top-level harness.
 fn parse_here(text: &str) -> Result<Vec<Ant>> {
     Ok(parse_with_harnesses(text)?.0)
 }
@@ -16,8 +17,23 @@ fn parse_with_harnesses(text: &str) -> Result<(Vec<Ant>, Harnesses)> {
 }
 
 fn parse_all(text: &str) -> Result<Loaded> {
+    parse_as_is(&with_harness(text))
+}
+
+/// Parse as [`parse_here`] does, the file as it is.
+fn parse_as_is(text: &str) -> Result<Loaded> {
     let dir = manifest_dir();
     parse(text, &dir.join("config.toml"), dir.parent().unwrap().parent().unwrap())
+}
+
+/// `text` with `harness = "copilot"` on top unless it names a top-level harness.
+fn with_harness(text: &str) -> String {
+    let top = text.lines().map(str::trim).take_while(|line| !line.starts_with('['));
+    if top.clone().any(|line| line.starts_with("harness")) {
+        text.to_owned()
+    } else {
+        format!("harness = \"copilot\"\n{text}")
+    }
 }
 
 fn config(ant: Ant) -> Result<Config> {
@@ -112,7 +128,8 @@ Review changes for correctness."""
     assert_eq!(b.nats.as_deref(), Some("nats://127.0.0.1:4222"));
     assert_eq!(b.workdir, manifest_dir().join("src").canonicalize().unwrap());
     let defaults = Ant::new(b.name.clone(), b.workdir.clone());
-    assert_eq!(b, Ant { nats: b.nats.clone(), js_domain: b.js_domain.clone(), human: b.human.clone(), ..defaults });
+    let set = Ant { nats: b.nats.clone(), js_domain: b.js_domain.clone(), human: b.human.clone(), ..defaults };
+    assert_eq!(b, Ant { harness: Some("copilot".to_owned()), ..set }, "the file's harness");
 
     let config = b.into_config("nats://unused", &Harnesses::builtin()).unwrap();
     assert_eq!(config.nats_url, "nats://127.0.0.1:4222");
@@ -262,7 +279,7 @@ fn the_top_level_harness_is_the_default_one_and_runs_the_builtin_messenger() {
 fn the_builtin_messenger_is_on_unless_turned_off() {
     let empty = parse_here("").unwrap();
     let only: Vec<_> = empty.iter().map(|ant| (ant.name.as_str(), ant.harness.as_deref(), ant.builtin)).collect();
-    assert_eq!(only, [("messenger", Some("copilot"), true)], "the default harness");
+    assert_eq!(only, [("messenger", Some("copilot"), true)], "the file's harness");
 
     let ants = parse_here("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"").unwrap();
     let names: Vec<_> = ants.iter().map(|ant| ant.name.as_str()).collect();
@@ -384,7 +401,8 @@ fn the_summary_resolves_harnesses_for_direct_use() {
     assert_eq!(summary.harness(None).unwrap().command, PathBuf::from("/c/./my-agent"));
     assert_eq!(summary.harness(Some("claude")).unwrap().name(), "claude");
     assert!(summary.harness(Some("vim")).is_err());
-    assert_eq!(Summary::default().harness(None).unwrap().name(), DEFAULT_HARNESS);
+    let unset = Summary::default().harness(None).unwrap_err();
+    assert!(unset.is::<crate::harness::Unset>(), "no default harness: {unset}");
 }
 
 #[test]
@@ -447,22 +465,37 @@ fn the_summary_keeps_each_ant_s_caps() {
 }
 
 #[test]
-fn without_a_top_level_harness_ants_get_the_default_one() {
-    let ants = parse_here("messenger = false\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"").unwrap();
-    assert_eq!(ants.len(), 1);
-    assert_eq!(ants[0].harness, None);
-    let config = config(ants[0].clone()).unwrap();
-    assert_eq!((config.harness.name(), config.defer_to_others), ("copilot", false));
+fn without_a_top_level_harness_each_ant_and_template_names_its_own() {
+    let unset = |text: &str| {
+        let e = parse_as_is(text).unwrap_err();
+        assert!(harness::Unset::caused(&e), "{e:#}");
+        format!("{e:#}")
+    };
+    let e = unset("messenger = false\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"");
+    assert!(e.contains(": ant dev-a: no harness set: add `harness = \"NAME\"`"), "{e}");
+    assert!(e.contains("(antigravity, claude, codex, copilot)") && e.contains("`ants setup`"), "{e}");
+    assert!(unset("").contains(": ant messenger: no harness set"), "nor the built-in messenger");
+    let template = "messenger = false\n[[ant_template]]\nname = \"worker\"\nmanagers = [\"lead\"]\nmax_ants = 1\n\
+                    workdirs = [\".\"]\n[[ant]]\nname = \"lead\"\nworkdir = \".\"\nharness = \"codex\"";
+    let e = unset(template);
+    assert!(e.contains(": ant template worker lists no harnesses: no harness set"), "{e}");
+
+    let ants =
+        parse_as_is("messenger = false\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nharness = \"codex\"").unwrap().ants;
+    let codex = config(ants[0].clone()).unwrap();
+    assert_eq!((codex.harness.name(), codex.defer_to_others), ("codex", false));
+    let e = config(Ant::new("dev-a".parse().unwrap(), manifest_dir())).unwrap_err();
+    assert!(harness::Unset::caused(&e), "{e:#}");
 }
 
 #[test]
 fn the_builtin_messenger_finds_its_credentials_and_creates_its_workdir() {
     let home = ants_test_support::scratch_dir("config-home").canonicalize().unwrap();
     let auth = home.join(".config/ants/auth");
-    assert_eq!(builtin_messenger("copilot", &home).creds, None, "no credentials issued");
+    assert_eq!(builtin_messenger(Some("copilot"), &home).creds, None, "no credentials issued");
     std::fs::create_dir_all(&auth).unwrap();
     std::fs::write(auth.join("messenger.creds"), "").unwrap();
-    let messenger = builtin_messenger("copilot", &home);
+    let messenger = builtin_messenger(Some("copilot"), &home);
     assert_eq!(messenger.creds, Some(auth.join("messenger.creds")));
     let config = config(messenger).unwrap();
     assert!(config.defer_to_others);
@@ -621,7 +654,8 @@ fn entries_read_back_as_written() {
     let plain = Ant::new("dev-a".parse().unwrap(), workdir.clone());
     let text = entry(&plain).unwrap();
     assert_eq!(text, format!("[[ant]]\nname = \"dev-a\"\nworkdir = {:?}\n", workdir.to_str().unwrap()));
-    assert_eq!(parse_here(&format!("messenger = false\n{text}")).unwrap(), [plain]);
+    let read = parse_here(&format!("messenger = false\n{text}")).unwrap();
+    assert_eq!(read, [Ant { harness: Some("copilot".to_owned()), ..plain }], "the file's harness");
 
     let mut full = Ant::new("dev-b".parse().unwrap(), workdir);
     full.nats = Some("wss://hub.example/nats".to_owned());
@@ -658,10 +692,12 @@ fn entries_read_back_as_written() {
 fn appending_keeps_the_file_as_it_was_and_checks_it() {
     let dir = ants_test_support::scratch_dir("config-append").canonicalize().unwrap();
     let path = dir.join("ants/config.toml");
-    let add = |name: &str| append(&path, &entry(&Ant::new(name.parse().unwrap(), dir.clone())).unwrap());
-    add("dev-a").unwrap();
-    let first = std::fs::read_to_string(&path).unwrap();
-    assert!(first.starts_with("[[ant]]\nname = \"dev-a\""), "{first}");
+    let ant = |name: &str| Ant { harness: Some("copilot".to_owned()), ..Ant::new(name.parse().unwrap(), dir.clone()) };
+    let add = |name: &str| append(&path, &entry(&ant(name)).unwrap());
+    let err = format!("{:#}", add("dev-a").unwrap_err());
+    assert!(err.contains("ant messenger: no harness set"), "a new file needs a top-level harness: {err}");
+    assert!(!path.exists(), "nothing written");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
 
     let old = "# the team\nharness = \"copilot\"\nnats = \"nats://hub:4222\" # the hub\n\n[[ant]]\nname = \"dev-a\"\n\
                    workdir = \".\"\ncreds = \"keys/dev-a.creds\"";
@@ -689,7 +725,8 @@ fn appending_keeps_the_file_as_it_was_and_checks_it() {
 fn an_allow_rule_goes_into_the_ants_list_and_the_rest_stays() {
     let dir = ants_test_support::scratch_dir("config-allow").canonicalize().unwrap();
     let path = dir.join("config.toml");
-    let old = "# the team\nnats = \"nats://hub:4222\"\n\n[[ant]]\nname = \"dev-a\" # first\nworkdir = \".\"\n\n\
+    let old = "# the team\nharness = \"copilot\"\nnats = \"nats://hub:4222\"\n\n[[ant]]\nname = \"dev-a\" # first\n\
+                   workdir = \".\"\n\n\
                    [[ant]]\nname = \"dev-b\"\nworkdir = \".\"\nallow = [\n  \"read\", # reading is fine\n]\n\n\
                    [[ant]]\nname = \"dev-c\"\nworkdir = \".\"\nallow = []\n";
     std::fs::write(&path, old).unwrap();
@@ -725,14 +762,15 @@ fn an_allow_rule_goes_into_the_ants_list_and_the_rest_stays() {
 fn an_ants_table_leaves_the_file_and_the_rest_stays() {
     let dir = ants_test_support::scratch_dir("config-without").canonicalize().unwrap();
     let path = dir.join("config.toml");
-    let a = "# the team\nnats = \"nats://hub:4222\"\n\n[[ant]]\nname = \"dev-a\" # first\nworkdir = \".\"\n\n";
+    let top = "# the team\nharness = \"copilot\"\nnats = \"nats://hub:4222\"\n\n";
+    let a = format!("{top}[[ant]]\nname = \"dev-a\" # first\nworkdir = \".\"\n\n");
     let b = "[[ant]]\nname = \"dev-b\"\nworkdir = \".\"\nallow = [\n  \"read\",\n]\n\n";
     let c = "# last\n[[ ant ]] # spaced\nworkdir = \".\"\nname = \"dev-c\"\n";
     std::fs::write(&path, format!("{a}{b}{c}")).unwrap();
     let without = |ant: &str| without_ant(&path, &ant.parse().unwrap());
     assert_eq!(without("dev-b").unwrap(), format!("{a}{c}"));
     assert_eq!(without("dev-c").unwrap(), format!("{a}{b}# last\n"), "the comment above stays");
-    assert_eq!(without("dev-a").unwrap(), format!("# the team\nnats = \"nats://hub:4222\"\n\n{b}{c}"));
+    assert_eq!(without("dev-a").unwrap(), format!("{top}{b}{c}"));
     assert!(format!("{:#}", without("dev-d").unwrap_err()).contains("lists no ant dev-d"));
     std::fs::write(&path, "ant = [{ name = \"dev-a\", workdir = \".\" }]\n").unwrap();
     assert!(format!("{:#}", without("dev-a").unwrap_err()).contains("remove it by hand"));

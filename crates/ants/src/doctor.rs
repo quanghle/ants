@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use ants_daemon::config::{self, Ant};
 use ants_daemon::creds::{self, Expiry, Kind, Seed, VersionStatus};
-use ants_daemon::harness::{self, DEFAULT_HARNESS, Harnesses, Readiness};
+use ants_daemon::harness::{self, Harnesses, Readiness};
 use ants_daemon::keystore::{self, Store};
 use ants_daemon::storage::{self, Usage};
 use ants_daemon::{Launch, PermissionPolicy, bus, hub};
@@ -137,6 +137,10 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     checks.extend(check_storage(connected.as_ref(), setup, settings).await);
     checks.extend(ants_checked);
     checks.extend(check_shared_workdirs(ants, &setup.config));
+    if let Some(loaded) = &loaded {
+        let webhooks = setup.webhooks.exists().then(|| webhook::Config::read(&setup.webhooks).ok()).flatten();
+        checks.extend(check_bypassed(loaded, webhooks.as_ref().map_or_default(|c| c.webhooks.as_slice())));
+    }
     checks.push(resolver);
     checks.extend(check_backup(&setup.team));
     let human = identity.as_ref().map(|i| &i.me).filter(|me| me.role.is_human() && !me.id.is_human());
@@ -177,8 +181,19 @@ fn check_config(path: &Path, checks: &mut Vec<Check>) -> Option<config::Loaded> 
             Some(loaded)
         }
         Err(e) => {
-            let fix = format!("correct {}; `ants daemon --config {0}` refuses it as it is", path.display());
-            checks.push(Check::fail("config", format!("{e:#}"), vec![fix]));
+            let mut fix = vec![format!("correct {}; `ants daemon --config {0}` refuses it as it is", path.display())];
+            if harness::Unset::caused(&e) {
+                let builtin = Harnesses::builtin().names().collect::<Vec<_>>().join(", ");
+                fix.insert(
+                    0,
+                    format!(
+                        "add `harness = \"NAME\"` at the top of {}, NAME a built-in harness ({builtin}) or a \
+                         [harnesses.NAME] table; `ants setup` lists the ones installed here",
+                        path.display()
+                    ),
+                );
+            }
+            checks.push(Check::fail("config", format!("{e:#}"), fix));
             None
         }
     }
@@ -825,7 +840,7 @@ async fn check_ants(ants: &[Ant], harnesses: &Harnesses, setup: &Setup, now: u64
     let mut launches: Vec<Started> = Vec::new();
     let mut picked = Vec::with_capacity(ants.len());
     for ant in ants {
-        let name = ant.harness.as_deref().unwrap_or(DEFAULT_HARNESS);
+        let name = ant.harness.as_deref().unwrap_or_default();
         let env: Vec<(String, String)> = ant.env.clone().into_iter().collect();
         let index = match launches.iter().position(|(n, e, ..)| n == name && *e == env) {
             Some(index) => Some(index),
@@ -939,6 +954,46 @@ fn check_shared_workdirs(ants: &[Ant], config: &Path) -> Vec<Check> {
             Check::warn(format!("ant {} workdir", ant.name), detail, vec![fix])
         })
         .collect()
+}
+
+/// A warning for each ant whose harness runs its tools unasked while the ant gates them: with allow rules or tool
+/// approvals by its `escalate_to` ants, or as the destination of schedules or webhooks narrowing the threads they
+/// start.
+fn check_bypassed(loaded: &config::Loaded, webhooks: &[webhook::Webhook]) -> Vec<Check> {
+    let mut checks = Vec::new();
+    for ant in &loaded.ants {
+        let Some(harness) = ant.harness.as_deref().and_then(|name| loaded.harnesses.get(name).ok()) else { continue };
+        if !harness.bypasses_permissions() {
+            continue;
+        }
+        let check = format!("ant {} tool permissions", ant.name);
+        let fix = vec![harness.gated_fix()];
+        let allow = if ant.allow_tools { vec!["*".to_owned()] } else { ant.allow.clone() };
+        if let Some(detail) = harness.unenforced(&allow, !ant.escalate_to.is_empty()) {
+            checks.push(Check::warn(check.clone(), detail, fix.clone()));
+        }
+        let to_ant = |destination: &ants_proto::Destination| matches!(destination, ants_proto::Destination::Ant(to) if *to == ant.name);
+        let narrowing: Vec<String> = loaded
+            .schedules
+            .iter()
+            .filter(|s| to_ant(&s.destination) && s.allow.as_deref().is_none_or(|a| !harness::allows_all(a)))
+            .map(|s| format!("schedule {}", s.name))
+            .chain(
+                webhooks
+                    .iter()
+                    .filter(|w| to_ant(&w.destination) && w.narrows())
+                    .map(|w| format!("webhook {}", w.name)),
+            )
+            .collect();
+        if !narrowing.is_empty() {
+            let detail = format!(
+                "harness {harness} runs its tools unasked, so the tool rules {} narrow its threads to do not apply",
+                narrowing.join(", ")
+            );
+            checks.push(Check::warn(check, detail, fix));
+        }
+    }
+    checks
 }
 
 /// The machine's leaf node, as `ants leaf config` wrote its configuration.

@@ -231,7 +231,7 @@ fn ants_sharing_a_git_workdir_with_worktrees_turned_off_are_warned() {
     let config = dir.join("config.toml");
     std::fs::write(
         &config,
-        "messenger = false\n\
+        "messenger = false\nharness = \"copilot\"\n\
              [[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nworktrees = false\n\
              [[ant]]\nname = \"dev-b\"\nworkdir = \".\"\nworktrees = true\n\
              [[ant]]\nname = \"dev-c\"\nworkdir = \".\"\nmax_harnesses = 1\nworktrees = false\n\
@@ -282,7 +282,7 @@ async fn a_leaf_reports_an_ant_its_uplink_misses_and_a_node_not_listening() {
     let config = dir.join("config.toml");
     std::fs::write(
         &config,
-        "messenger = false\nnats = \"nats://127.0.0.1:1\"\n[[ant]]\nname = \"dev-b\"\nworkdir = \".\"\n",
+        "messenger = false\nharness = \"copilot\"\nnats = \"nats://127.0.0.1:1\"\n[[ant]]\nname = \"dev-b\"\nworkdir = \".\"\n",
     )
     .unwrap();
     let loaded = config::load(&config).unwrap();
@@ -765,4 +765,36 @@ fn the_hub_service_of_ants_setup_must_be_installed_and_running() {
     assert!(named(&checks, "hub service").is_empty(), "the leaf node is the machine's nats-server: {checks:#?}");
     assert_eq!(one(&checks, "leaf node service").status, Status::Warn, "{checks:#?}");
     std::fs::remove_dir_all(&home).unwrap();
+}
+
+#[test]
+fn ants_whose_harness_runs_tools_unasked_are_warned_of_rules_that_miss_them() {
+    let dir = ants_test_support::scratch_dir("doctor-bypassed");
+    let config = dir.join("ants.toml");
+    let creds = dir.join("nightly.creds");
+    std::fs::write(
+        &config,
+        format!(
+            "messenger = false\nharness = \"claude\"\n\
+             [harnesses.gated]\ncommand = \"claude-agent-acp\"\n\
+             [[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nallow = [\"read:*\"]\n\
+             [[ant]]\nname = \"dev-b\"\nworkdir = \".\"\n\
+             [[ant]]\nname = \"dev-c\"\nworkdir = \".\"\nharness = \"gated\"\nallow = [\"read:*\"]\n\
+             [[schedule]]\nname = \"nightly\"\ncreds = {creds:?}\nevery = \"4h\"\nant = \"dev-b\"\ntext = \"t\"\nallow = [\"read:*\"]\n"
+        ),
+    )
+    .unwrap();
+    let loaded = config::load(&config).unwrap();
+    let checks = check_bypassed(&loaded, &[]);
+    assert_eq!(
+        checks.iter().map(|c| (c.check.as_str(), c.status)).collect::<Vec<_>>(),
+        [("ant dev-a tool permissions", Status::Warn), ("ant dev-b tool permissions", Status::Warn)]
+    );
+    assert!(checks[1].detail.contains("schedule nightly"), "{}", checks[1]);
+
+    std::fs::write(&config, "messenger = false\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\n").unwrap();
+    let mut checks = Vec::new();
+    assert!(check_config(&config, &mut checks).is_none());
+    assert!(checks[0].fix[0].starts_with("add `harness = \"NAME\"` at the top of"), "{}", checks[0]);
+    std::fs::remove_dir_all(&dir).unwrap();
 }

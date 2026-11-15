@@ -163,6 +163,9 @@ impl Stop {
 /// [`run`], also stopping on `stop`'s request.
 pub async fn run_until(config: Config, stop: &Stop) -> Result<()> {
     let _serving = crate::metrics::ant(&config.ant).serving();
+    if let Some(detail) = config.harness.unenforced(&config.allow, !config.escalation.escalate_to.is_empty()) {
+        tracing::warn!(ant = %config.ant, fix = config.harness.gated_fix(), "{detail}");
+    }
     let config = settle_worktrees(config).await;
     while Box::pin(serve(&config, stop)).await? == Served::HandedOver {
         tracing::info!("another daemon serves the ant; waiting for it to stop");
@@ -1983,7 +1986,18 @@ impl Inbox<'_> {
         tracing::info!(%thread, from = %envelope.from, cut_off, "prompting");
         status::state(self.client, self.ant, thread, State::Working);
 
-        let _narrowed = self.pool.launch().policy().narrow(thread, envelope.allow.as_deref());
+        let launch = self.pool.launch();
+        if envelope.allow.as_deref().is_some_and(|allow| !crate::harness::allows_all(allow))
+            && launch.bypasses_permissions()
+        {
+            tracing::warn!(
+                %thread,
+                harness = launch.harness_name(),
+                "the thread's tool rules are narrowed, but the harness runs its tools unasked: the narrowing does not \
+                 apply to them"
+            );
+        }
+        let _narrowed = launch.policy().narrow(thread, envelope.allow.as_deref());
         let _turn = self.mcp.map(|mcp| mcp.begin(envelope));
         let _asking = self.approvals.map(|approvals| approvals.begin(envelope));
         let flush = tokio::time::interval_at(tokio::time::Instant::now() + status::FLUSH_EVERY, status::FLUSH_EVERY);

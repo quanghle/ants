@@ -28,9 +28,6 @@ use crate::overflow::{ContextOverflow, overflows};
 use crate::permission::PermissionPolicy;
 use crate::sync::MutexExt as _;
 
-/// The harness of an ant that names none, in a file that names none.
-pub const DEFAULT_HARNESS: &str = "copilot";
-
 /// The built-in definitions, in the same form as a config file's `[harnesses.<name>]` tables.
 pub const BUILTIN_HARNESSES: &str = include_str!("harnesses.toml");
 
@@ -51,9 +48,13 @@ pub struct Harness {
     /// Added to the daemon's environment; the ant's own `env` wins over it.
     #[serde(default)]
     pub(crate) env: BTreeMap<String, String>,
-    /// ACP session mode every session is switched to, so that tool requests reach the client instead of being
-    /// approved by the harness itself; a harness that does not offer it fails the session.
+    /// ACP session mode every session is switched to, such as one sending tool requests to the client or one
+    /// approving them all; a harness that does not offer it fails the session.
     pub(crate) mode: Option<String>,
+    /// It runs its own tools without asking the client, as its arguments or mode make it: allow rules, approvals and
+    /// a thread's narrowed tool rules do not reach them.
+    #[serde(default)]
+    pub(crate) bypass_permissions: bool,
     /// The values an ant's `context` may take, and what each selects. Empty: the harness takes no `context`.
     #[serde(default)]
     pub(crate) context: BTreeMap<String, ContextValue>,
@@ -109,6 +110,36 @@ impl Harness {
     /// The command a human runs to sign the harness in, if its definition names one.
     pub fn sign_in(&self) -> Option<&str> {
         self.sign_in.as_deref()
+    }
+
+    /// Whether it runs its own tools without asking ants ([`Self::bypass_permissions`]).
+    pub fn bypasses_permissions(&self) -> bool {
+        self.bypass_permissions
+    }
+
+    /// What of an ant's tool gating does not reach this harness's own tools, when it bypasses permissions and the ant
+    /// gates any: `allow` rules short of `*`, and tool approvals by its `escalate_to` ants when it `escalates`.
+    pub fn unenforced(&self, allow: &[String], escalates: bool) -> Option<String> {
+        if !self.bypass_permissions {
+            return None;
+        }
+        let rules = !allow.is_empty() && !allows_all(allow);
+        let gating = match (rules, escalates) {
+            (false, false) => return None,
+            (true, false) => "its allow rules",
+            (false, true) => "tool approvals by its escalate_to ants",
+            (true, true) => "its allow rules and tool approvals by its escalate_to ants",
+        };
+        Some(format!("harness {} runs its tools unasked, so {gating} do not apply to them", self.name))
+    }
+
+    /// What to change for the ant's tool gating to reach the harness's tools.
+    pub fn gated_fix(&self) -> String {
+        format!(
+            "redefine [harnesses.{}] without bypass_permissions, with a mode or arguments that ask before running \
+             tools (docs/config.md#harnesses), or pick another harness",
+            self.name
+        )
     }
 
     /// Whether `command` is a path rather than a name to look up on `PATH`.
@@ -197,18 +228,14 @@ impl Harness {
     /// Where the harness's executable is, with the ant's `env` over the definition's over the daemon's: the path its
     /// command names, else the first match on `PATH`. None when it is not installed there; a relative path, which the
     /// harness's working directory resolves, counts as found.
-    pub(crate) fn locate(&self, env: &[(String, String)]) -> Option<PathBuf> {
+    pub fn locate(&self, env: &[(String, String)]) -> Option<PathBuf> {
         if self.command_is_path() {
             let unsure = self.command.is_relative() || self.command.is_file();
             return unsure.then(|| self.command.clone());
         }
         let path = env.iter().rev().find(|(name, _)| name == "PATH").map(|(_, path)| path.into());
         let path = path.or_else(|| self.env.get("PATH").map(Into::into)).or_else(|| std::env::var_os("PATH"))?;
-        // npm puts a shell script without extension beside the `.cmd` one, which Windows cannot start.
-        let names: &[&str] = if cfg!(windows) { &[".exe", ".cmd", ".bat", ""] } else { &[""] };
-        std::env::split_paths(&path).find_map(|dir| {
-            names.iter().map(|ext| dir.join(format!("{}{ext}", self.command.display()))).find(|p| p.is_file())
-        })
+        on_path(self.command.as_os_str(), &path)
     }
 
     /// The command that signs the harness in: the definition's, else the one of a terminal auth method it offers, run
@@ -236,6 +263,28 @@ impl fmt::Display for Harness {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.name)
     }
+}
+
+/// Whether tool rules allow every tool: one of them is `*`.
+pub fn allows_all(rules: &[String]) -> bool {
+    rules.iter().any(|rule| rule.trim() == "*")
+}
+
+/// The first file named `name` in the directories of `path`, as a harness command is looked up: on Windows as an
+/// `.exe`, `.cmd` or `.bat` file, in that order, then as named.
+pub fn on_path(name: &std::ffi::OsStr, path: &std::ffi::OsStr) -> Option<PathBuf> {
+    // npm puts a shell script without extension beside the `.cmd` one, which Windows cannot start.
+    let extensions: &[&str] = if cfg!(windows) { &[".exe", ".cmd", ".bat", ""] } else { &[""] };
+    std::env::split_paths(path).find_map(|dir| {
+        extensions
+            .iter()
+            .map(|ext| {
+                let mut file = name.to_owned();
+                file.push(ext);
+                dir.join(file)
+            })
+            .find(|p| p.is_file())
+    })
 }
 
 /// Environment variable names must be non-empty without `=` or NUL, values without NUL. Errors never show values.
@@ -290,6 +339,19 @@ impl Harnesses {
         Ok(Self(Arc::new(all)))
     }
 
+    /// The names of the harnesses, in name order.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.0.keys().map(String::as_str)
+    }
+
+    /// The harness named `name`, else, with none named, an [`Unset`] error.
+    pub fn named(&self, name: Option<&str>) -> Result<Arc<Harness>> {
+        match name {
+            Some(name) => self.get(name),
+            None => Err(Unset.into()),
+        }
+    }
+
     /// The harness named `name`.
     pub fn get(&self, name: &str) -> Result<Arc<Harness>> {
         self.0.get(name).cloned().ok_or_else(|| {
@@ -300,6 +362,32 @@ impl Harnesses {
                 known.join(", ")
             )
         })
+    }
+}
+
+/// An ant names no harness, nor does its config file: ants has no default one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unset;
+
+impl fmt::Display for Unset {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let builtin: Vec<_> = BUILTIN.0.keys().map(String::as_str).collect();
+        write!(
+            f,
+            "no harness set: add `harness = \"NAME\"` at the top of the config file or to the ant's entry (`ants \
+             daemon --ant` takes --harness NAME), NAME being a built-in harness ({}) or a [harnesses.NAME] table; \
+             `ants setup` lists the ones installed",
+            builtin.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for Unset {}
+
+impl Unset {
+    /// Whether `error` is, or was caused by, an [`Unset`].
+    pub fn caused(error: &anyhow::Error) -> bool {
+        error.chain().any(<dyn std::error::Error>::is::<Self>)
     }
 }
 
@@ -578,6 +666,11 @@ impl Launch {
         &self.harness.name
     }
 
+    /// Whether the harness it starts runs its tools without asking ([`Harness::bypasses_permissions`]).
+    pub fn bypasses_permissions(&self) -> bool {
+        self.harness.bypass_permissions
+    }
+
     /// The same launch, for sessions serving `thread`.
     #[must_use]
     pub fn for_thread(&self, thread: &ThreadId) -> Self {
@@ -630,6 +723,7 @@ impl Launch {
             args: Vec::new(),
             env: BTreeMap::new(),
             mode: None,
+            bypass_permissions: false,
             context: BTreeMap::new(),
             sign_in: None,
             rate_limited: Vec::new(),

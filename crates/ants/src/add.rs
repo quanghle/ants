@@ -266,7 +266,11 @@ fn entry(args: &AddArgs, summary: &Summary, out: &Path, nats: &str, js_domain: O
     if js_domain.is_some() && js_domain != summary.js_domain.as_ref() {
         p.js_domain = js_domain.cloned();
     }
-    p.clone().into_config(nats, &summary.harnesses)?;
+    let mut checked = p.clone();
+    if checked.harness.is_none() {
+        checked.harness.clone_from(&summary.harness);
+    }
+    checked.into_config(nats, &summary.harnesses)?;
     config::entry(&p)
 }
 
@@ -465,6 +469,7 @@ mod tests {
         let Some(server) = crate::auth::tests::Server::start() else { return };
         let dir = ants_test_support::scratch_dir("ant-add-stored").canonicalize().unwrap();
         let config = dir.join("config.toml");
+        std::fs::write(&config, "harness = \"copilot\"\n").unwrap();
         let (config_arg, workdir) = (config.to_str().unwrap(), dir.to_str().unwrap());
         let out = dir.join("keys/dev-a.creds");
         let out_arg = out.to_str().unwrap();
@@ -474,7 +479,8 @@ mod tests {
         store.lock();
         let err = format!("{:#}", run_with(&add, &server.url, &store).await.unwrap_err());
         assert!(err.contains("locked"), "{err}");
-        assert!(!seed_path(&out).exists() && !config.exists(), "nothing half-done");
+        let kept = std::fs::read_to_string(&config).unwrap() == "harness = \"copilot\"\n";
+        assert!(!seed_path(&out).exists() && kept, "nothing half-done");
         store.unlock();
 
         run_with(&add, &server.url, &store).await.unwrap();
