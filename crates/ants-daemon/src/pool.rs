@@ -7,10 +7,13 @@
 //! A prompt runs on the ant's own harness or on one of its fallbacks ([`crate::fallback`]). A thread whose live
 //! harness is another one's moves to a new harness once that one is idle, and a session that last ran in another
 //! harness, as stored beside it, is not resumed: the new one starts over from the thread's history.
+//!
+//! A restart ([`Pool::restart`]) stops the idle harnesses at once and each busy one once its prompts end; the thread's
+//! next prompt starts a new harness, which resumes its session.
 
 use std::collections::HashMap;
 use std::pin::pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -91,6 +94,8 @@ struct Live {
     last_used: Instant,
     /// Prompts in flight. A busy harness is never stopped.
     busy: usize,
+    /// The pool's [`Pool::restarts`] when the harness started: a restart since stops it once it is idle.
+    restarts: u64,
 }
 
 enum Slot {
@@ -125,6 +130,17 @@ pub struct Pool {
     pressure: Option<(Mutex<pressure::Gauge>, usize)>,
     /// Whether memory was low at the latest check.
     memory_low: AtomicBool,
+    /// How many restarts were asked for ([`Pool::restart`]).
+    restarts: AtomicU64,
+}
+
+/// What a [`Pool::restart`] did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Restarting {
+    /// The idle harnesses stopped at once.
+    pub stopped: usize,
+    /// The threads whose harness is busy or starting, which stops once its prompts end.
+    pub working: Vec<ThreadId>,
 }
 
 impl Pool {
@@ -149,6 +165,7 @@ impl Pool {
             workload: None,
             pressure: None,
             memory_low: AtomicBool::new(false),
+            restarts: AtomicU64::new(0),
         }
     }
 
@@ -336,6 +353,30 @@ impl Pool {
         }
     }
 
+    /// Stop the idle harnesses at once, and each busy or starting one once its prompts end. A thread's next prompt
+    /// starts a new harness, resuming its session, rather than run on one started before.
+    pub fn restart(&self) -> Restarting {
+        let mut slots = self.slots();
+        self.restarts.fetch_add(1, Ordering::Relaxed);
+        let idle: Vec<ThreadId> = slots
+            .iter()
+            .filter(|(_, slot)| matches!(slot, Slot::Ready(live) if live.busy == 0))
+            .map(|(thread, _)| thread.clone())
+            .collect();
+        for thread in &idle {
+            slots.remove(thread);
+            tracing::info!(%thread, "stopping idle harness: restart");
+        }
+        let mut working: Vec<ThreadId> = slots.keys().cloned().collect();
+        working.sort();
+        drop(slots);
+        for thread in &working {
+            tracing::info!(%thread, "stopping harness once its prompt ends: restart");
+        }
+        self.changed.notify_waiters();
+        Restarting { stopped: idle.len(), working }
+    }
+
     /// Stop every harness and wait for them to exit. Prompts still in flight end with an error.
     pub async fn shutdown(self) {
         let slots = self.slots.into_inner().unwrap_or_else(PoisonError::into_inner);
@@ -369,14 +410,17 @@ impl Pool {
 
     fn claim(&self, thread: &ThreadId, fallback: Option<usize>) -> Claim {
         let mut slots = self.slots();
+        let restarts = self.restarts.load(Ordering::Relaxed);
         match slots.get_mut(thread) {
-            Some(Slot::Ready(live)) if live.session.is_alive() && live.fallback == fallback => {
+            Some(Slot::Ready(live))
+                if live.session.is_alive() && live.fallback == fallback && live.restarts == restarts =>
+            {
                 live.busy += 1;
                 return Claim::Live(live.session.clone());
             }
             // A dead harness with a prompt in flight is about to fail it; take over once it has.
             Some(Slot::Ready(Live { busy: 1.., .. }) | Slot::Starting) => return Claim::Wait,
-            // Dead, or idle on another harness.
+            // Dead, idle on another harness, or started before a restart.
             Some(Slot::Ready(_)) => {
                 slots.remove(thread);
             }
@@ -404,6 +448,7 @@ impl Pool {
     /// that last ran in another harness.
     async fn start(&self, thread: &ThreadId, fallback: Option<usize>) -> Result<Lease<'_>> {
         let mut starting = Starting { pool: self, thread, done: false };
+        let restarts = self.restarts.load(Ordering::Relaxed);
         let launch = self.launch_on(fallback)?;
         let harness = launch.harness_name();
         let stored = self.store.get(thread).await?;
@@ -434,7 +479,7 @@ impl Pool {
             tracing::warn!(%thread, error = format!("{e:#}"), "storing the session of the thread");
         }
         let session = Arc::new(session);
-        let live = Live { session: session.clone(), fallback, last_used: Instant::now(), busy: 1 };
+        let live = Live { session: session.clone(), fallback, last_used: Instant::now(), busy: 1, restarts };
         self.slots().insert(thread.clone(), Slot::Ready(live));
         starting.done = true;
         Ok(Lease { pool: self, thread: thread.clone(), session })
@@ -466,12 +511,18 @@ struct Lease<'a> {
 
 impl Drop for Lease<'_> {
     fn drop(&mut self) {
-        if let Some(Slot::Ready(live)) = self.pool.slots().get_mut(&self.thread)
+        let mut slots = self.pool.slots();
+        if let Some(Slot::Ready(live)) = slots.get_mut(&self.thread)
             && Arc::ptr_eq(&live.session, &self.session)
         {
             live.busy -= 1;
             live.last_used = Instant::now();
+            if live.busy == 0 && live.restarts != self.pool.restarts.load(Ordering::Relaxed) {
+                tracing::info!(thread = %self.thread, "stopping harness after its prompt: restart");
+                slots.remove(&self.thread);
+            }
         }
+        drop(slots);
         self.pool.changed.notify_waiters();
     }
 }

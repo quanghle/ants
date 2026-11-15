@@ -45,6 +45,7 @@ mod reacted;
 mod registrar;
 mod reload;
 mod renew;
+mod restart;
 mod retire;
 mod revoke;
 mod roster;
