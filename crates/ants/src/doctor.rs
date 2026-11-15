@@ -14,8 +14,11 @@ use ants_daemon::creds::{self, Expiry, Kind, Seed, VersionStatus};
 use ants_daemon::harness::{self, Harnesses, Readiness};
 use ants_daemon::keystore::{self, Store};
 use ants_daemon::storage::{self, Usage};
-use ants_daemon::{Launch, PermissionPolicy, bus, hub};
-use ants_proto::{INTAKE_STREAM, JsDomain, Machine, PERMISSIONS_VERSION, STREAM, UserId, inbox_consumer};
+use ants_daemon::{Launch, PermissionPolicy, bus, hub, reactions};
+use ants_proto::{
+    INTAKE_STREAM, JsDomain, Machine, PERMISSIONS_VERSION, ReactionChange, ReactionsRequest, ReactionsResponder,
+    STREAM, UserId, Uuid, inbox_consumer,
+};
 use async_nats::jetstream;
 use hyper::StatusCode;
 use serde::Serialize;
@@ -111,8 +114,8 @@ pub struct Setup {
 }
 
 /// Run every check, in order: the config file, the CLI's credentials, the server, JetStream, the hub's stream and
-/// buckets, the versions of ants running across the team, the JetStream storage, each ant's credentials, harness and
-/// workdir, the hub's account resolver, the team keys' backup, the leaf node and outbox, the installed services, the
+/// buckets, the versions of ants running across the team, the JetStream storage, each ant's credentials, harness,
+/// workdir and reactions responder, the hub's account resolver, the team keys' backup, the leaf node and outbox, the installed services, the
 /// webhooks' config file and notification sinks, and the Dev Tunnel and HTTPS bridge services installed.
 pub async fn run(setup: &Setup) -> Vec<Check> {
     let now = auth::now().unwrap_or_default();
@@ -131,12 +134,15 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     let through_leaf =
         leaf.as_ref().and_then(|l| l.as_ref().ok()).is_some_and(|l| same_address(&setup.nats, &l.listen));
     let resolver = check_resolver(setup, through_leaf);
-    let ((reached, connected), ants_checked, resolver) = tokio::join!(reach, ants_checked, resolver);
+    let reactions = check_reactions(ants, setup, NETWORK_TIMEOUT);
+    let ((reached, connected), ants_checked, resolver, reactions) =
+        tokio::join!(reach, ants_checked, resolver, reactions);
     checks.extend(reached);
     let settings = loaded.as_ref().map_or_default(|l| l.storage);
     checks.extend(check_storage(connected.as_ref(), setup, settings).await);
     checks.extend(ants_checked);
     checks.extend(check_shared_workdirs(ants, &setup.config));
+    checks.extend(reactions);
     if let Some(loaded) = &loaded {
         let webhooks = setup.webhooks.exists().then(|| webhook::Config::read(&setup.webhooks).ok()).flatten();
         checks.extend(check_bypassed(loaded, webhooks.as_ref().map_or_default(|c| c.webhooks.as_slice())));
@@ -979,6 +985,73 @@ fn check_shared_workdirs(ants: &[Ant], config: &Path) -> Vec<Check> {
             Check::warn(format!("ant {} workdir", ant.name), detail, vec![fix])
         })
         .collect()
+}
+
+/// Whether something answers each ant's reactions requests, which its MCP list_reactions and react make, and which
+/// kind of process does: asked as the ant, where its daemon connects, about the nil id, which no ant reads, so the
+/// answers are unknown and nothing changes. An ant without credentials, on an open server, asks no one: its daemon
+/// answers them itself.
+async fn check_reactions(ants: &[Ant], setup: &Setup, wait: Duration) -> Vec<Check> {
+    futures::future::join_all(ants.iter().map(|ant| check_ant_reactions(ant, setup, wait))).await
+}
+
+async fn check_ant_reactions(ant: &Ant, setup: &Setup, wait: Duration) -> Check {
+    let check = format!("ant {} reactions", ant.name);
+    let Some(creds) = &ant.creds else {
+        return Check::ok(
+            check,
+            "no credentials, so an open server: the daemon answers list_reactions and react itself",
+        );
+    };
+    let url = ant.nats.as_deref().unwrap_or(&setup.nats);
+    let client = match connect(url, Some(creds), &ant.name).await {
+        Ok(client) => client,
+        Err(Unreached::Refused(e) | Unreached::Unreachable(e) | Unreached::NoKey(e) | Unreached::Other(e)) => {
+            return Check::skip(check, format!("not connected to {url} as {}: {e}", ant.name));
+        }
+    };
+    let ask = async |request: ReactionsRequest| reactions::request_within(&client, &request, wait).await;
+    let remove = ReactionChange { reaction: "eyes".parse().expect("a reaction"), remove: true };
+    let (listed, changed) = tokio::join!(
+        ask(ReactionsRequest::new(ant.name.clone(), Uuid::nil())),
+        ask(ReactionsRequest::change(ant.name.clone(), Uuid::nil(), remove)),
+    );
+    let (listed, changed) = match (listed, changed) {
+        (Ok(listed), Ok(changed)) => (listed, changed),
+        (Err(e), _) | (_, Err(e)) => return Check::skip(check, format!("asking as {}: {e:#}", ant.name)),
+    };
+    let within = format!("within {}s", wait.as_secs());
+    let signer = "ants signer on the machine holding the account key (scripts/install-units.sh --signer runs it as a \
+                  service)"
+        .to_owned();
+    match (listed, changed) {
+        (listed, Some(changed)) => {
+            let mut by = vec![responder(changed.responder)];
+            by.extend(listed.map(|l| responder(l.responder)).filter(|l| !by.contains(l)));
+            Check::ok(check, format!("{} answers list_reactions and react", by.join(" and ")))
+        }
+        (Some(listed), None) => {
+            let detail = format!(
+                "{} answers list_reactions, but nothing answers react {within}: the ant's react fails",
+                responder(listed.responder)
+            );
+            Check::warn(check, detail, vec![signer])
+        }
+        (None, None) => {
+            let detail = format!("nothing answers its reactions requests {within}: list_reactions and react fail");
+            let webhook = "or, for list_reactions only, ants webhook serve with a [[human]] entry".to_owned();
+            Check::warn(check, detail, vec![signer, webhook])
+        }
+    }
+}
+
+/// The kind of process that answered a reactions request, as a user-facing name.
+fn responder(responder: Option<ReactionsResponder>) -> &'static str {
+    match responder {
+        Some(ReactionsResponder::Signer) => "ants signer",
+        Some(ReactionsResponder::Webhook) => "ants webhook serve",
+        None => "an older ants",
+    }
 }
 
 /// A warning for each ant whose harness runs its tools unasked while the ant gates them: with allow rules or tool

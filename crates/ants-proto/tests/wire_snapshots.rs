@@ -258,12 +258,12 @@ fn kv_entries() {
         snap(&format!("reactions_request_{kind}"), &ReactionsRequest { change, ..request.clone() });
     }
     let reacted = Reacted { reaction: "eyes".parse().unwrap(), by: vec![user("alice"), user("dev-b")] };
-    for (kind, outcome) in [
-        ("listed", ReactionsOutcome::Listed { reactions: vec![reacted] }),
-        ("applied", ReactionsOutcome::Applied { changed: true }),
-        ("unknown", ReactionsOutcome::Unknown),
+    for (kind, outcome, responder) in [
+        ("listed", ReactionsOutcome::Listed { reactions: vec![reacted] }, Some(ReactionsResponder::Webhook)),
+        ("applied", ReactionsOutcome::Applied { changed: true }, Some(ReactionsResponder::Signer)),
+        ("unknown", ReactionsOutcome::Unknown, None),
     ] {
-        let reply = ReactionsReply { request_id: id(1), ant: user("dev-a"), message: id(2), outcome };
+        let reply = ReactionsReply { request_id: id(1), ant: user("dev-a"), message: id(2), outcome, responder };
         snap(&format!("reactions_reply_{kind}"), &reply);
     }
     snap("read_marker", &ReadMarker { below: 4200, read: BTreeSet::from([4203, 4207]) });
