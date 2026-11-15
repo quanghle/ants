@@ -943,6 +943,7 @@ mod tests {
             signed_out: None,
             limited: None,
             failing: None,
+            fallback: None,
             memory_low: None,
         };
         let context = Context { posts: vec![post("dev-b", "earlier")], ..Context::default() };

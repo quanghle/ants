@@ -319,6 +319,7 @@ mod tests {
             signed_out: None,
             limited: None,
             failing: None,
+            fallback: None,
             memory_low: None,
         };
         let same = [entry("dev-a", "m1", Some(("copilot", "1.0.3"))), entry("dev-b", "m2", Some(("copilot", "1.0.3")))];

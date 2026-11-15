@@ -34,6 +34,8 @@ pub enum Rebuild {
     Lost,
     /// The session outgrew the model's context window, so the prompt runs again in a new one.
     Overflow,
+    /// The thread's earlier session ran in another harness, the ant's own or a fallback ([`crate::fallback`]).
+    Moved,
 }
 
 /// Most bytes of history a prompt shows when neither a budget nor the context window is known; older entries are
@@ -70,6 +72,9 @@ pub(crate) async fn seed(why: Rebuild, history: Option<History>, budget: usize) 
         Rebuild::Lost => ("The earlier session of this thread could not be resumed, so this one starts over", budget),
         Rebuild::Overflow => {
             ("The session of this thread outgrew the model's context window, so this one starts over", budget / 2)
+        }
+        Rebuild::Moved => {
+            ("The earlier session of this thread ran in another harness, so this one starts over", budget)
         }
     };
     match history {

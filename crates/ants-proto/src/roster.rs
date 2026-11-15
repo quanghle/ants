@@ -73,10 +73,23 @@ pub struct RosterEntry {
     /// check starts it. Missing otherwise, and from entries of older daemons.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failing: Option<HarnessFailing>,
+    /// Set while a fallback of the ant answers its messages, its own harness signed out, out of quota or failing to
+    /// start. Missing otherwise, and from entries of older daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<ServingFallback>,
     /// Set while the system memory available on `machine` is low: the daemon stops the ant's idle harnesses at once
     /// and runs fewer of them. Missing otherwise, and from entries of older daemons.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_low: Option<MemoryLow>,
+}
+
+/// A fallback answering an ant's messages, as its roster entry reports it ([`RosterEntry::fallback`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServingFallback {
+    /// The fallback as the ant's config names it: `<harness>`, or `<harness>:<model>`.
+    pub name: String,
+    /// When it first answered since the ant's own harness last could.
+    pub since: DateTime<Utc>,
 }
 
 /// Low memory on an ant's machine, as its roster entry reports it ([`RosterEntry::memory_low`]).
@@ -227,6 +240,7 @@ mod tests {
             signed_out: None,
             limited: None,
             failing: None,
+            fallback: None,
             memory_low: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
@@ -234,7 +248,7 @@ mod tests {
         assert!(!json.contains("escalate_to") && !json.contains("instance"), "{json}");
         assert!(!json.contains("version") && !json.contains("perms"), "{json}");
         assert!(!json.contains("signed_out") && !json.contains("limited") && !json.contains("failing"), "{json}");
-        assert!(!json.contains("agent") && !json.contains("memory_low"), "{json}");
+        assert!(!json.contains("agent") && !json.contains("fallback") && !json.contains("memory_low"), "{json}");
         assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), entry);
         assert_eq!(entry.leader(), None);
         let agent = HarnessAgent { name: "copilot-agent".to_owned(), version: "1.0.3".to_owned() };
@@ -288,6 +302,13 @@ mod tests {
         let json = serde_json::to_string(&failing).unwrap();
         assert!(json.contains(r#""failing":{"since":"2026-01-01T00:00:00Z","error":"copilot: not found"}"#), "{json}");
         assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), failing);
+        let fallback = RosterEntry {
+            fallback: Some(ServingFallback { name: "claude:sonnet".to_owned(), since }),
+            ..entry.clone()
+        };
+        let json = serde_json::to_string(&fallback).unwrap();
+        assert!(json.contains(r#""fallback":{"name":"claude:sonnet","since":"2026-01-01T00:00:00Z"}"#), "{json}");
+        assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), fallback);
         let low = RosterEntry {
             memory_low: Some(MemoryLow { since, available: 512 << 20, max_harnesses: 1 }),
             ..entry.clone()
@@ -313,6 +334,7 @@ mod tests {
         assert_eq!(entry.signed_out, None, "an older daemon's entry");
         assert_eq!(entry.limited, None, "an older daemon's entry");
         assert_eq!(entry.failing, None, "an older daemon's entry");
+        assert_eq!(entry.fallback, None, "an older daemon's entry");
         assert_eq!(entry.memory_low, None, "an older daemon's entry");
 
         let newer = r#"{"ant":"dev-b","machine":"m","harness":"copilot","activity":"draining","harnesses":3,

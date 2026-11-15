@@ -88,9 +88,9 @@ Without `ants setup`: `nats-server -js &`, `ants harness check`, and `ants daemo
 
 | Command | Description |
 |---|---|
-| `ants ask [--thread THREAD] [--wait \| -f] [--timeout DUR] [@ant] TEXT \| --file PATH \| --edit` | Send to `@ant` (`messenger` if omitted); prints `thread <id>` and `message <id>`. Warns on stderr if `@ant` is missing from `ants_roster`, `stale`, `signed-out`, `failing`, or provider-limited. |
+| `ants ask [--thread THREAD] [--wait \| -f] [--timeout DUR] [@ant] TEXT \| --file PATH \| --edit` | Send to `@ant` (`messenger` if omitted); prints `thread <id>` and `message <id>`. Warns on stderr if `@ant` is missing from `ants_roster`, `stale`, `signed-out`, `failing`, or provider-limited with no fallback answering. |
 | `ants inbox [--peek] [--thread THREAD] [--limit N] [-f] [--json]` | Print unread replies (with message IDs and reactions) and mark read across all devices (`--peek` keeps unread; `-f` streams replies, reactions added/removed to shown messages (human creds; `--json`: `{message, by, reaction, removed}`), `MAX_DELIVERIES` advisories and, without `--thread`/`--json`, tool requests; records presence without `--thread`). |
-| `ants roster [--json]` | List ants (`live`/`stale`, `idle`/`working`/`signed-out`/`failing`/`rate-limited`/`out-of-quota`), daemon/perms versions, harness and `AGENT` (`name@version`), capabilities, `escalate_to` and workdirs, plus version-drift, recovery and memory-pressure notes. |
+| `ants roster [--json]` | List ants (`live`/`stale`, `idle`/`working`/`signed-out`/`failing`/`rate-limited`/`out-of-quota`/`fallback`), daemon/perms versions, harness and `AGENT` (`name@version`), capabilities, `escalate_to` and workdirs, plus version-drift, recovery and memory-pressure notes. |
 | `ants spend [ANT] [--thread THREAD \| --days N] [--json] [--config FILE]` | Report token and cost spend over UTC days (default 7, max 366) or on a thread against local config caps ([docs/config.md](docs/config.md#spend-report)). |
 | `ants notes THREAD [TEXT]` | Show thread notes, or post `TEXT` as the CLI human (resets budget to 8 turns; wakes nobody). |
 | `ants react MESSAGE REACTION [--remove]` | Add or remove a message reaction (`1–64` of `a-z0-9-`); wakes nobody, marks nothing read, ends no wait. `MESSAGE` is a message id or, for humans, a unique start of one (ambiguous or unknown starts list candidates). |
@@ -216,7 +216,7 @@ Full reference in [docs/config.md](docs/config.md):
 
 - [Precedence and reload](docs/config.md#precedence-and-reload)
 - [Ant templates](docs/config.md#ant-templates), [Manager ants](docs/config.md#manager-ants) (`request_ant`, `ants signer`) and [Retiring an added ant](docs/config.md#retiring-an-added-ant) (`retire_ant`, `ants retire`)
-- [Harnesses](docs/config.md#harnesses) (`copilot`, `claude`, `antigravity`, Codex, `harnesses.d` drop-ins, sign-in/rate-limit/quota/failure holds, session rebuilds and context windows)
+- [Harnesses](docs/config.md#harnesses) (`copilot`, `claude`, `antigravity`, Codex, `harnesses.d` drop-ins, sign-in/rate-limit/quota/failure holds, [fallbacks](docs/config.md#fallbacks), session rebuilds and context windows)
 - [Prompt limits and spending caps](docs/config.md#prompt-limits-and-spending-caps) and [Spend report](docs/config.md#spend-report)
 - [Tool permissions](docs/config.md#tool-permissions) (allowlist rules, `--rule` suggestions, chain approvals, webhook/schedule narrowing) and [Redaction](docs/config.md#redaction)
 - [Schedules](docs/config.md#schedules) (`[[schedule]]` `cron` / `every`, time zones, `catch_up`)
@@ -226,7 +226,7 @@ Full reference in [docs/config.md](docs/config.md):
 Each daemon publishes a `RosterEntry` at `<ant>` in `ants_roster` every 10 s (and immediately on state transitions), deleting it on clean exit (`30s` TTL with `MaxAge` delete markers; `ants roster` marks entries without a heartbeat for 20 s as `stale`):
 
 - **Identity & runtime:** `machine`, daemon `instance`, `harness`, `agent` (`{name, version}` from ACP `initialize`), `workdir`, `capabilities`, `whoami`, `escalate_to`, `version`, `perms`, `started_at`, `heartbeat_at`, `activity` (`idle` / `working`), `handling` count, live `harnesses` count.
-- **Hold states:** `signed_out` (`{since, sign_in?}`), `limited` (`{kind: "rate_limit" | "quota", since, until}`), and `failing` (`{since, error}`).
+- **Hold states:** `signed_out` (`{since, sign_in?}`), `limited` (`{kind: "rate_limit" | "quota", since, until}`), and `failing` (`{since, error}`), plus `fallback` (`{name, since}`) while one of the ant's `fallback` harnesses or models answers instead.
 - **Memory pressure:** `memory_low` (`{since, available, max_harnesses}`) while the machine's available memory is below `[memory_pressure]` `min_available` ([docs/config.md](docs/config.md#memory-pressure)).
 
 Per-ant prompt instructions and state isolation:
@@ -247,7 +247,7 @@ Each session gets the `ants` MCP server over streamable HTTP (`127.0.0.1:<port>/
 | `react(reaction, message_id?, remove?)` | Add or remove the ant's reaction on a message (default: active message); 0 turns, wakes nobody. |
 | `list_reactions(message_id?)` | List reactions and reactors on a message the ant reads (default: active message), answered by `ants webhook serve` with a `[[human]]` entry. |
 | `list_ants(capability?)` | List peer ants from `ants_roster` with capabilities, `agent`, activity and hold states. |
-| `route(capability, text, wait?, timeout?)` | Route to the best peer advertising `capability` (healthy > held, `live` > `stale`, `idle` > `working`, fewest messages); waits unless `wait: false`. |
+| `route(capability, text, wait?, timeout?)` | Route to the best peer advertising `capability` (healthy > on a fallback > held, `live` > `stale`, `idle` > `working`, fewest messages); waits unless `wait: false`. |
 | `post_notes(text)` / `read_notes(thread?)` | Append to (1 turn) or read (up to 50 posts, 0 turns) passive thread notes; wakes nobody. |
 | `decide_approval(verdict)` | Answer an incoming chain approval notice (`allow_once`, `allow_always`, `reject`). |
 | `post_channel(channel, text)` | Start a channel thread as `creator` (member or channel messenger only; inherits turns minus 1 for ant messages). |

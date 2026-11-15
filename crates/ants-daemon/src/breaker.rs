@@ -148,8 +148,9 @@ fn excerpt(text: &str) -> String {
 
 /// The message on the thread of `envelope`, held because the harness of `ant` on `machine` keeps failing to start
 /// with `error`, that tells its owner, else the default human of `humans`, how to check the harness. It carries a
-/// level-0 `harness` escalation, so `ants webhook serve` pushes it. A reply to `envelope` unless it stands for a
-/// channel post.
+/// level-0 `harness` escalation, so `ants webhook serve` pushes it. Messages go to the ant's `fallbacks`
+/// ([`crate::fallback`]) meanwhile if it has any. A reply to `envelope` unless it stands for a channel post.
+#[allow(clippy::too_many_arguments)]
 pub fn notice(
     ant: &UserId,
     envelope: &Envelope,
@@ -157,16 +158,24 @@ pub fn notice(
     failed: &StartFailed,
     machine: &str,
     every: Duration,
+    fallbacks: &[String],
     humans: &Registry,
 ) -> Envelope {
     let harness = &failed.harness;
     let detail = excerpt(&failed.detail);
+    let back = format!("{harness} once a check of it, every {every:?}, starts it");
+    let meanwhile = crate::fallback::meanwhile(ant, fallbacks, &back).unwrap_or_else(|| {
+        format!(
+            "Messages to {ant} wait meanwhile, spending no attempts, and are answered once a check of the harness, \
+             every {every:?}, starts it."
+        )
+    });
     let text = format!(
-        "[ants] {ant} cannot answer: harness {harness} on {machine} keeps failing to start ({detail}).\nRun `ants \
-         harness check --harness {harness}` on {machine} as the user the ants daemon runs as, then fix the harness's \
-         install, its [harnesses.{harness}] definition or the settings of {ant} in the config file. Messages to {ant} \
-         wait meanwhile, spending no attempts, and are answered once a check of the harness, every {every:?}, starts \
-         it."
+        "[ants] {ant} cannot answer{own}: harness {harness} on {machine} keeps failing to start ({detail}).\nRun \
+         `ants harness check --harness {harness}` on {machine} as the user the ants daemon runs as, then fix the \
+         harness's install, its [harnesses.{harness}] definition or the settings of {ant} in the config file. \
+         {meanwhile}",
+        own = crate::fallback::own(fallbacks),
     );
     let owner = humans.human_owner(envelope.owner.as_ref());
     let creator = humans.ant_creator(envelope.creator.as_ref());

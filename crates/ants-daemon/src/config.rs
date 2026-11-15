@@ -36,6 +36,7 @@
 //!                                   # workdir git does not ignore, with max_harnesses above 1
 //!                                   # (crate::worktrees::per_thread)
 //! harness = "my-agent"
+//! fallback = ["claude", "copilot:gpt-5"]  # tried in order while my-agent cannot serve (crate::fallback)
 //!
 //! [harnesses.my-agent]              # an ACP adapter on stdio, besides the built-in ones (harnesses.toml)
 //! command = "~/bin/my-agent-acp"     # a path, or a bare name looked up on PATH
@@ -85,6 +86,7 @@ use serde::Deserialize;
 use crate::caps::{Caps, Members, Pool};
 use crate::daemon::Config;
 use crate::escalation::{self, Chain};
+use crate::fallback;
 use crate::harness::{self, DEFAULT_HARNESS, Harness, Harnesses, ModelSettings, PromptLimits};
 use crate::pressure;
 use crate::schedule::{self, Schedule};
@@ -191,6 +193,10 @@ pub struct Ant {
     pub context: Option<String>,
     /// Bytes of the thread's history a rebuilt session is seeded with, over the harness's and its context's.
     pub history_budget: Option<usize>,
+    /// Harnesses and models tried in order while the ant's own harness cannot serve ([`crate::fallback`]):
+    /// `<harness>`, `<harness>:<model>` or `:<model>` for another model of its own harness.
+    #[serde(default)]
+    pub fallback: Vec<String>,
     /// Same as `allow = ["*"]`.
     #[serde(default)]
     pub allow_tools: bool,
@@ -322,6 +328,7 @@ impl Ant {
             reasoning_effort: None,
             context: None,
             history_budget: None,
+            fallback: Vec::new(),
             allow_tools: false,
             allow: Vec::new(),
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
@@ -365,6 +372,8 @@ impl Ant {
             history_budget: self.history_budget,
         };
         model_settings.validate(&harness).with_context(|| format!("ant {}", self.name))?;
+        let fallbacks = fallback::resolve(&self.fallback, &harness, &model_settings, harnesses)
+            .with_context(|| format!("ant {}", self.name))?;
         if self.builtin {
             std::fs::create_dir_all(&self.workdir)
                 .with_context(|| format!("ant {}: creating workdir {}", self.name, self.workdir.display()))?;
@@ -391,6 +400,7 @@ impl Ant {
             env: self.env,
             harness,
             model_settings,
+            fallbacks,
             max_harnesses: self.max_harnesses,
             worktrees: self.worktrees,
             idle_timeout: self.idle_timeout,
@@ -586,9 +596,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
         if ant.harness.is_none() {
             ant.harness.clone_from(&file.harness);
         }
-        if let Some(harness) = &ant.harness {
-            harnesses.get(harness).with_context(|| format!("config {}: ant {}", path.display(), ant.name))?;
-        }
+        check_harnesses(&ant, &harnesses).with_context(|| format!("config {}: ant {}", path.display(), ant.name))?;
         if !ant.builtin {
             let abs = |dir: &Path| resolve(dir, base, home);
             ant.workdir = abs(&ant.workdir).canonicalize().with_context(|| {
@@ -646,6 +654,19 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
     }
     let (base, home) = (base.to_owned(), home.to_owned());
     Ok(Loaded { ants, harnesses, templates, schedules, metrics: file.metrics, storage: file.storage, base, home })
+}
+
+/// Check that the harness of `ant` and those of its fallbacks are defined.
+fn check_harnesses(ant: &Ant, harnesses: &Harnesses) -> Result<()> {
+    if let Some(harness) = &ant.harness {
+        harnesses.get(harness)?;
+    }
+    if !ant.fallback.is_empty() {
+        let own = harnesses.get(ant.harness.as_deref().unwrap_or(DEFAULT_HARNESS))?;
+        let settings = ModelSettings { model: ant.model.clone(), ..ModelSettings::default() };
+        fallback::resolve(&ant.fallback, &own, &settings, harnesses)?;
+    }
+    Ok(())
 }
 
 /// The file's `templates`, checked, each named once, their workdirs resolved and the harnesses they list defined.

@@ -908,6 +908,7 @@ async fn ants_write_their_own_roster_entry_and_everyone_reads_the_roster() {
         signed_out: None,
         limited: None,
         failing: None,
+        fallback: None,
         memory_low: None,
     };
     let registration = Registration::start(a_kv.clone(), entry.clone(), ants_proto::ROSTER_HEARTBEAT).await.unwrap();
@@ -1600,6 +1601,7 @@ async fn the_channel_manager_applies_the_owner_s_changes_only_and_announces_them
         signed_out: None,
         limited: None,
         failing: None,
+        fallback: None,
         memory_low: None,
     };
     let b_roster = bus::ensure_roster(&b_js, ants_proto::ROSTER_TTL).await.unwrap();

@@ -81,8 +81,9 @@ fn now_ms() -> u64 {
 }
 
 /// The message on the thread of `envelope`, which found the harness of `ant` on `machine` signed out, that tells its
-/// owner, else the default human of `humans`, how to sign the harness in. A reply to `envelope` unless it stands for a
-/// channel post.
+/// owner, else the default human of `humans`, how to sign the harness in, and where messages go meanwhile: to the ant's
+/// `fallbacks` ([`crate::fallback`]) if it has any. A reply to `envelope` unless it stands for a channel post.
+#[allow(clippy::too_many_arguments)]
 pub fn notice(
     ant: &UserId,
     envelope: &Envelope,
@@ -90,6 +91,7 @@ pub fn notice(
     signed_out: &SignedOut,
     machine: &str,
     every: Duration,
+    fallbacks: &[String],
     humans: &Registry,
 ) -> Envelope {
     let SignedOut { harness, sign_in, detail } = signed_out;
@@ -101,10 +103,17 @@ pub fn notice(
         Some(command) => format!("Run `{command}` on {machine}"),
         None => format!("Sign {harness} in on {machine}"),
     };
+    let back = format!("{harness} once a check of it, every {every:?}, finds it signed in");
+    let meanwhile = crate::fallback::meanwhile(ant, fallbacks, &back).unwrap_or_else(|| {
+        format!(
+            "Messages to {ant} wait meanwhile, spending no attempts, and are answered once a check of the harness, \
+             every {every:?}, finds it signed in."
+        )
+    });
     let text = format!(
-        "[ants] {ant} cannot answer: harness {harness} on {machine} is not signed in ({detail}).\n{how} as the user \
-         the ants daemon runs as. Messages to {ant} wait meanwhile, spending no attempts, and are answered once a \
-         check of the harness, every {every:?}, finds it signed in."
+        "[ants] {ant} cannot answer{own}: harness {harness} on {machine} is not signed in ({detail}).\n{how} as the \
+         user the ants daemon runs as. {meanwhile}",
+        own = crate::fallback::own(fallbacks),
     );
     let owner = humans.human_owner(envelope.owner.as_ref());
     let mut notice = Envelope::on_thread(

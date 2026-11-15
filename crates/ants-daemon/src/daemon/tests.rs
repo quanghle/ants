@@ -124,6 +124,7 @@ impl Bus {
             signed_out: None,
             limited: None,
             failing: None,
+            fallback: None,
             memory_low: None,
         };
         roster.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
@@ -202,6 +203,8 @@ impl Bus {
                 rate_limit: ratelimit::Backoff { first: Duration::from_millis(100), max: Duration::from_millis(300) },
                 quota: ratelimit::Backoff { first: Duration::from_millis(200), max: Duration::from_millis(400) },
             },
+            failover: crate::fallback::Failover::default(),
+            fallback_retry: Duration::from_millis(300),
         };
         let stop = || {
             let ctrl_c = ctrl_c.clone();
@@ -553,6 +556,62 @@ async fn messages_wait_unspent_while_the_harness_is_signed_out() {
     let mut answered = log.locked().answered.clone();
     answered.sort();
     assert_eq!(answered, ["a", "b", "c", "d"]);
+    assert!(dead::list(&bus.stream).await.unwrap().is_empty());
+    assert_eq!(bus.unacked().await, 0);
+}
+
+#[tokio::test]
+async fn a_fallback_answers_while_the_harness_is_signed_out() {
+    let Some((bus, mut replies)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let (spare, spare_log, _) = fake::launch();
+    let spare = spare.named("spare");
+    log.locked().signed_out = true;
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE).with_fallbacks(vec![("spare".to_owned(), spare)]);
+    let thread = ThreadId::generate();
+    let (_, seq) = bus.send(&thread, "a").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let notice = next_envelope(&mut replies).await;
+        assert!(notice.text.contains("cannot answer with its own harness: harness test on"), "{}", notice.text);
+        assert!(notice.text.contains("go to its fallback spare meanwhile, and back to the harness test"), "{notice:?}");
+        let reply = next_envelope(&mut replies).await;
+        assert_eq!(reply.thread_id, thread);
+        assert!(
+            reply.text.ends_with("a\n\n[ants] Answered by fallback spare, harness test being signed out."),
+            "{reply:?}"
+        );
+        let shown = bus.workload.fallback().expect("the roster shows the fallback");
+        assert_eq!(shown.name, "spare");
+        assert!(bus.workload.signed_out().is_some(), "the harness itself is still signed out");
+        bus.until_acked(seq).await;
+
+        // The fallback turned away too: the message waits, telling nobody again, until one answers.
+        spare_log.locked().signed_out = true;
+        bus.send(&thread, "b").await;
+        let starts = spare_log.locked().starts;
+        until("the fallback tried again", || spare_log.locked().starts > starts).await;
+        assert!(timeout(Duration::from_millis(100), replies.next()).await.is_err(), "told once");
+        spare_log.locked().signed_out = false;
+        let reply = next_envelope(&mut replies).await;
+        assert!(reply.text.contains("b\n\n[ants] Answered by fallback spare"), "{reply:?}");
+        assert_eq!(bus.workload.fallback().map(|f| f.since), Some(shown.since), "the same outage");
+
+        // Signed in again: the thread goes back to the ant's own harness, rebuilt from its history.
+        log.locked().signed_out = false;
+        until("the fallback stood down", || bus.workload.fallback().is_none()).await;
+        bus.send(&thread, "c").await;
+        let reply = next_envelope(&mut replies).await;
+        assert!(reply.text.ends_with("\nc"), "answered by the ant's own harness, with no footer: {reply:?}");
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(spare_log.locked().answered, ["a", "b"]);
+    let answered = log.locked().answered.clone();
+    let [rebuilt] = answered.as_slice() else { panic!("{answered:?}") };
+    assert!(rebuilt.contains("ran in another harness") && rebuilt.ends_with('c'), "{rebuilt}");
+    assert!(log.locked().loaded.is_empty(), "the fallback's session is not loaded in another harness");
     assert!(dead::list(&bus.stream).await.unwrap().is_empty());
     assert_eq!(bus.unacked().await, 0);
 }
@@ -2739,6 +2798,7 @@ async fn the_messenger_answers_a_post_mentioning_nobody_with_the_members_it_conc
         signed_out: None,
         limited: None,
         failing: None,
+        fallback: None,
         memory_low: None,
     };
     roster.put(dev_b.key(), serde_json::to_vec(&dev_b).unwrap().into()).await.unwrap();

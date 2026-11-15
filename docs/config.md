@@ -36,6 +36,7 @@ model = "claude-sonnet-4-5"                # optional exact ACP model ID
 reasoning_effort = "high"                  # optional effort ID offered by the model
 context = "1m"                             # optional key from the harness context table
 history_budget = 131072                    # optional bytes of thread history seeding a rebuilt session
+fallback = ["copilot", ":claude-opus-4-1"] # optional; tried in order while the harness cannot serve
 home = "~/.ants/dev-a"                     # default: ~/.ants/<name>
 whoami = "Maintain Rust backend services." # published in roster and prepended to prompts
 memory = "Use notes MCP for durable memory."
@@ -241,6 +242,25 @@ When a harness cannot run prompts for an environmental reason, the daemon holds 
   - Explicit retry hints in the error (`retry after 30s`, `resets in 2h27m3s`, `retryDelay`, epoch after `|`) override the delay within the cap. Publishes `limited` (`rate_limit` or `quota`, `since`, `until`) in `ants_roster`.
   - Retry notices the harness streams before an attempt that succeeds (Copilot's `Info: … Retrying...`, Antigravity's `⚠ API error (attempt N): …`) are dropped from the answer when the last of them ends a line, or ends a sentence the answer does not continue on the same line; status updates still show them. An answer whose own first chunk starts like an error line (`Error:` followed by more of the same sentence) is sent whole.
 - **Startup failures** (missing/broken binary, bad flags/mode/model): retried as normal prompt failures on a single thread (dead-lettered after 5 attempts). After **3 startup failures within 10 m across ≥ 2 threads** with no success in between, a breaker opens: holds messages, publishes `failing` (`since`, `error`) in `ants_roster`, sends one direct notice with a level-0 `harness` escalation (`ants harness check --harness NAME`), and probes every 60 s with the ant's settings. After a probe succeeds, one failure before a message completes reopens the breaker immediately without re-notifying.
+
+### Fallbacks
+
+An ant's optional `fallback` list names harnesses and models tried in order while its own harness is signed out, out of quota or behind an open startup breaker; a rate limit is still waited out. Each entry is one of:
+
+- `"<harness>"`: that harness with its default model, e.g. `"claude"`.
+- `"<harness>:<model>"`: that harness with that model (split at the first `:`), e.g. `"copilot:gpt-5"`.
+- `":<model>"`: the ant's own harness with another model, e.g. `":claude-opus-4-1"`.
+
+Entries must name a known harness (built-in, `[harnesses.NAME]` or `harnesses.d`), name a model after a colon, differ from the ant's own harness and model, and appear once; anything else fails config loading. A fallback runs with only its model and the ant's `history_budget`: the ant's `reasoning_effort` and `context` belong to its own harness. Templated ants take no `fallback`.
+
+While the ant's own harness cannot serve, each message goes to the first fallback not passed over:
+
+- **Sessions:** a thread whose stored session ran in another harness starts a new session seeded from the thread's history, as after a failed `session/load`; a `:<model>` fallback resumes the thread's session. A live harness on another backend is replaced once idle.
+- **Turned away:** a fallback that is signed out, limited or fails to start is passed over for 5 min (or its limit's retry hint), spending no attempt and touching none of the own harness's holds; with every fallback passed over, messages wait as without fallbacks.
+- **Shown:** each reply ends with `[ants] Answered by fallback NAME, harness OWN being signed out.` (or `out of quota`, `failing to start`); `ants_roster` publishes `fallback` (`name`, `since`); `ants roster` shows `fallback` as the activity; `ants ask`, `ask_ant` and `route` treat the ant as served (`route` prefers ants answered by their own harness).
+- **Told once:** the owner's sign-in, quota or breaker notice (one per outage, as without fallbacks) says the messages go to the fallbacks meanwhile.
+- **Back:** a successful sign-in check or breaker probe, or after a quota's backoff the next message the own harness answers, sends messages to the own harness again and clears `fallback`; live fallback sessions are replaced as their threads come up.
+- **Caps:** prompt limits and spending caps apply to every prompt whichever harness runs it.
 
 ### Lost sessions and context window
 

@@ -3,6 +3,10 @@
 //! Threads run concurrently, each in its own harness. A harness with a prompt in flight is never stopped, so when the
 //! cap is reached and every live harness is busy, a new thread waits for one to finish. While memory is low
 //! ([`crate::pressure`]) idle harnesses stop at once and the cap is lowered.
+//!
+//! A prompt runs on the ant's own harness or on one of its fallbacks ([`crate::fallback`]). A thread whose live
+//! harness is another one's moves to a new harness once that one is idle, and a session that last ran in another
+//! harness is not resumed: the new one starts over from the thread's history.
 
 use std::collections::HashMap;
 use std::pin::pin;
@@ -16,7 +20,9 @@ use anyhow::{Context as _, Result};
 use tokio::sync::Notify;
 
 use crate::direct_kv::DirectKv;
+use crate::fallback::OnFallback;
 use crate::harness::{Launch, Prompt, Reply, Session};
+use crate::history::Rebuild;
 use crate::pressure;
 use crate::roster::Workload;
 use crate::sync::MutexExt as _;
@@ -68,6 +74,8 @@ impl SessionStore {
 
 struct Live {
     session: Arc<Session>,
+    /// The fallback it runs, `None` for the ant's own harness.
+    fallback: Option<usize>,
     last_used: Instant,
     /// Prompts in flight. A busy harness is never stopped.
     busy: usize,
@@ -87,7 +95,13 @@ enum Claim {
 
 pub struct Pool {
     launch: Launch,
+    /// The fallbacks, by name, in order.
+    fallbacks: Vec<(String, Launch)>,
     store: SessionStore,
+    /// The harness each thread's stored session last ran in, of those whose last ran in another than the ant's own:
+    /// held in memory only, so after a restart a stored session is resumed in the ant's own harness, or rebuilt
+    /// should that fail.
+    ran_in: Mutex<HashMap<ThreadId, String>>,
     max_live: usize,
     idle_after: Duration,
     slots: Mutex<HashMap<ThreadId, Slot>>,
@@ -116,7 +130,9 @@ impl Pool {
     pub fn new(launch: Launch, store: SessionStore, max_live: usize, idle_after: Duration) -> Self {
         Self {
             launch,
+            fallbacks: Vec::new(),
             store,
+            ran_in: Mutex::default(),
             max_live: max_live.max(1),
             idle_after,
             slots: Mutex::default(),
@@ -127,6 +143,21 @@ impl Pool {
             pressure: None,
             memory_low: AtomicBool::new(false),
         }
+    }
+
+    /// Run prompts on `fallbacks`, by name, when asked to ([`Pool::run_on`]).
+    #[must_use]
+    pub fn with_fallbacks(self, fallbacks: Vec<(String, Launch)>) -> Self {
+        Self { fallbacks, ..self }
+    }
+
+    pub fn fallback_count(&self) -> usize {
+        self.fallbacks.len()
+    }
+
+    /// The names of the fallbacks, in order.
+    pub fn fallbacks(&self) -> Vec<String> {
+        self.fallbacks.iter().map(|(name, _)| name.clone()).collect()
     }
 
     /// While `probe` tells of low memory by `settings`, stop idle harnesses at once and run at most
@@ -211,9 +242,18 @@ impl Pool {
 
     /// [`Pool::prompt`] with the prompt's own limits, spend reports and stop.
     pub async fn run(&self, thread: &ThreadId, prompt: Prompt) -> Result<Reply> {
-        let lease = self.checkout(thread).await?;
+        self.run_on(thread, prompt, None).await
+    }
+
+    /// [`Pool::run`] on `fallback`, `None` for the ant's own harness. An error on a fallback carries [`OnFallback`].
+    pub async fn run_on(&self, thread: &ThreadId, prompt: Prompt, fallback: Option<usize>) -> Result<Reply> {
+        let on = |e: anyhow::Error| match fallback.and_then(|i| Some((i, self.fallbacks.get(i)?))) {
+            Some((index, (name, _))) => e.context(OnFallback { index, name: name.clone() }),
+            None => e,
+        };
+        let lease = self.checkout(thread, fallback).await.map_err(on)?;
         let before = lease.session.id();
-        let reply = lease.session.run(prompt).await;
+        let reply = lease.session.run(prompt).await.map_err(on);
         let after = lease.session.id();
         if after != before {
             tracing::info!(%thread, session = %after, "the harness moved to a new session");
@@ -301,28 +341,29 @@ impl Pool {
         self.slots.locked()
     }
 
-    /// The thread's live session, marked busy until the lease drops.
-    async fn checkout(&self, thread: &ThreadId) -> Result<Lease<'_>> {
+    /// The thread's live session on `fallback`, marked busy until the lease drops.
+    async fn checkout(&self, thread: &ThreadId, fallback: Option<usize>) -> Result<Lease<'_>> {
         loop {
             let mut changed = pin!(self.changed.notified());
             changed.as_mut().enable();
-            match self.claim(thread) {
+            match self.claim(thread, fallback) {
                 Claim::Live(session) => return Ok(Lease { pool: self, thread: thread.clone(), session }),
-                Claim::Start => return self.start(thread).await,
+                Claim::Start => return self.start(thread, fallback).await,
                 Claim::Wait => changed.await,
             }
         }
     }
 
-    fn claim(&self, thread: &ThreadId) -> Claim {
+    fn claim(&self, thread: &ThreadId, fallback: Option<usize>) -> Claim {
         let mut slots = self.slots();
         match slots.get_mut(thread) {
-            Some(Slot::Ready(live)) if live.session.is_alive() => {
+            Some(Slot::Ready(live)) if live.session.is_alive() && live.fallback == fallback => {
                 live.busy += 1;
                 return Claim::Live(live.session.clone());
             }
             // A dead harness with a prompt in flight is about to fail it; take over once it has.
             Some(Slot::Ready(Live { busy: 1.., .. }) | Slot::Starting) => return Claim::Wait,
+            // Dead, or idle on another harness.
             Some(Slot::Ready(_)) => {
                 slots.remove(thread);
             }
@@ -338,20 +379,41 @@ impl Pool {
         Claim::Start
     }
 
-    /// Start the harness of a thread claimed as [`Slot::Starting`], resuming its stored session.
-    async fn start(&self, thread: &ThreadId) -> Result<Lease<'_>> {
+    /// Start the harness of a thread claimed as [`Slot::Starting`] on `fallback`, resuming its stored session unless
+    /// that last ran in another harness.
+    async fn start(&self, thread: &ThreadId, fallback: Option<usize>) -> Result<Lease<'_>> {
         let mut starting = Starting { pool: self, thread, done: false };
-        let resume = self.store.get(thread).await?;
-        let mut launch = self.launch.for_thread(thread);
+        let launch = match fallback {
+            Some(i) => &self.fallbacks.get(i).with_context(|| format!("no fallback {i}"))?.1,
+            None => &self.launch,
+        };
+        let harness = launch.harness_name();
+        let stored = self.store.get(thread).await?;
+        let moved = stored.is_some()
+            && match self.ran_in.locked().get(thread) {
+                Some(ran_in) => ran_in != harness,
+                None => harness != self.launch.harness_name(),
+            };
+        let resume = stored.filter(|_| !moved);
+        let mut launch = launch.for_thread(thread);
         if let Some(worktrees) = self.worktrees.as_ref().filter(|_| self.isolate) {
             match worktrees.checkout(thread).await {
                 Ok(dir) => launch = launch.in_dir(dir),
                 Err(e) => tracing::warn!(%thread, error = format!("{e:#}"), "working in the shared workdir"),
             }
         }
-        let session = Session::start(&launch, resume.clone()).await?;
-        if let Some(workload) = &self.workload {
+        let session = if moved {
+            Session::start_over(&launch, Rebuild::Moved).await?
+        } else {
+            Session::start(&launch, resume.clone()).await?
+        };
+        if let Some(workload) = self.workload.as_ref().filter(|_| fallback.is_none()) {
             workload.set_agent(session.agent().cloned());
+        }
+        if harness == self.launch.harness_name() {
+            self.ran_in.locked().remove(thread);
+        } else {
+            self.ran_in.locked().insert(thread.clone(), harness.to_owned());
         }
         match &resume {
             Some(old) if *old == session.id() => tracing::info!(%thread, session = %old, "resumed harness session"),
@@ -363,7 +425,7 @@ impl Pool {
             tracing::warn!(%thread, error = format!("{e:#}"), "storing the session of the thread");
         }
         let session = Arc::new(session);
-        let live = Live { session: session.clone(), last_used: Instant::now(), busy: 1 };
+        let live = Live { session: session.clone(), fallback, last_used: Instant::now(), busy: 1 };
         self.slots().insert(thread.clone(), Slot::Ready(live));
         starting.done = true;
         Ok(Lease { pool: self, thread: thread.clone(), session })
