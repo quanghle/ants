@@ -42,6 +42,8 @@ pub enum Kind {
     Observer,
     /// The team's public bootstrap credentials, with which `ants login` asks to register a human's device.
     Bootstrap,
+    /// An ant that is a human's assistant ([`Issued::assistant_of`]).
+    Assistant,
 }
 
 impl From<ants_proto::Role> for Kind {
@@ -104,6 +106,12 @@ pub struct Issued {
     /// epoch), on a later line of its key ([`withdraw_approvals`]): the binding stays, the approval no longer stands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub withdrawn: Option<u64>,
+    /// Whether a human's credentials carry the admin role ([`ants_proto::ADMIN_TAG`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub admin: bool,
+    /// The human an assistant's credentials make the ant the assistant of ([`ants_proto::AssistantOf`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_of: Option<ants_proto::UserId>,
 }
 
 impl Issued {
@@ -127,6 +135,8 @@ impl Issued {
             github: None,
             grant: None,
             withdrawn: None,
+            admin: false,
+            assistant_of: None,
         })
     }
 
@@ -166,6 +176,9 @@ pub struct Device {
     /// Why `ants signer` signed the device, if it registered it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grant: Option<Grant>,
+    /// Whether its credentials carry the admin role ([`ants_proto::ADMIN_TAG`]).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub admin: bool,
 }
 
 /// The devices of the human `name` in the registry of `dir`, oldest first: one per key issued to it as a human, but one
@@ -186,6 +199,7 @@ pub fn devices(dir: &Path, name: &str) -> Result<Vec<Device>> {
             expires_at: one.expires_at,
             github: one.github.map(|g| g.login),
             grant: one.grant,
+            admin: one.admin,
         };
         let same = |d: &Device| d.key == device.key || d.device == device.device;
         match found.iter_mut().find(|d| same(d)) {
@@ -243,10 +257,12 @@ pub fn rename(dir: &Path, name: &str, selector: &str, label: &str) -> Result<Dev
     Ok(Device { label: Some(label.to_owned()), ..device.clone() })
 }
 
-/// Print the devices of the human `name` in `dir`: id, label, key, encryption key, when issued, and whether revoked;
-/// with `json`, one JSON object per line.
+/// Print the devices of the human `name` in `dir`: id, label, key, encryption key, when issued, whether an admin's
+/// and whether revoked; with `json`, one JSON object per line. Then, but for `json`, the keys of its assistant's
+/// credentials ([`Kind::Assistant`]).
 pub fn list_devices(dir: &Path, name: &str, json: bool) -> Result<()> {
     let devices = devices(dir, name)?;
+    let assistants = if json { Vec::new() } else { assistants(dir, name)? };
     if devices.is_empty() && !json {
         println!("no devices of {name} known in {}", dir.display());
     }
@@ -264,7 +280,65 @@ pub fn list_devices(dir: &Path, name: &str, json: bool) -> Result<()> {
             (Some(login), None) => format!("  github {login}"),
             (None, _) => String::new(),
         };
-        println!("{id}  {label}  {}  {xkey}  issued {}{github}{revoked}", d.key, time(d.issued_at));
+        let admin = if d.admin { "  admin" } else { "" };
+        println!("{id}  {label}  {}  {xkey}  issued {}{github}{admin}{revoked}", d.key, time(d.issued_at));
+    }
+    for (one, revoked) in assistants {
+        let revoked = if revoked { "  revoked" } else { "" };
+        println!("assistant {}  {}  issued {}{revoked}", one.name, one.key, time(one.issued_at));
+    }
+    Ok(())
+}
+
+/// The latest line of each key of the registry of `dir`, oldest first, keeping when its key was first issued.
+fn latest_lines(dir: &Path) -> Result<Vec<Issued>> {
+    let mut latest: Vec<Issued> = Vec::new();
+    for one in issued(dir)? {
+        match latest.iter_mut().find(|known| known.key == one.key) {
+            Some(known) => *known = Issued { issued_at: known.issued_at, ..one },
+            None => latest.push(one),
+        }
+    }
+    Ok(latest)
+}
+
+/// The keys of the credentials of the assistant of the human `name` in `dir` ([`Kind::Assistant`]), oldest first,
+/// each with whether it is revoked.
+pub fn assistants(dir: &Path, name: &str) -> Result<Vec<(Issued, bool)>> {
+    let revoked = revoked(dir)?;
+    let of = |i: &Issued| i.kind == Kind::Assistant && i.assistant_of.as_ref().is_some_and(|h| h.as_str() == name);
+    let lines = latest_lines(dir)?.into_iter().filter(of);
+    Ok(lines.map(|i| (revoked.iter().any(|r| r.key == i.key), i)).map(|(r, i)| (i, r)).collect())
+}
+
+/// The keys of the credentials in `dir` carrying the admin role ([`Issued::admin`]) neither revoked nor expired at
+/// `now`, oldest first.
+pub fn admins(dir: &Path, now: u64) -> Result<Vec<Issued>> {
+    let revoked = revoked(dir)?;
+    let live = |i: &Issued| !revoked.iter().any(|r| r.key == i.key) && i.expires_at.is_none_or(|exp| exp > now);
+    Ok(latest_lines(dir)?.into_iter().filter(|i| i.admin && live(i)).collect())
+}
+
+/// Print [`admins`]: human, device, label, key, when issued and expiry; with `json`, one JSON object per line.
+pub fn list_admins(dir: &Path, json: bool) -> Result<()> {
+    let now = auth::now()?;
+    let admins = admins(dir, now)?;
+    if admins.is_empty() && !json {
+        println!("no admin credentials in {}", dir.display());
+    }
+    for a in admins {
+        if json {
+            let admin = serde_json::json!({
+                "name": a.name, "device": a.device, "label": a.label, "key": a.key, "issued_at": a.issued_at,
+                "expires_at": a.expires_at,
+            });
+            println!("{admin}");
+            continue;
+        }
+        let device = a.device.map_or_else(|| "-".to_owned(), |d| d.to_string());
+        let label = a.label.as_deref().unwrap_or("-");
+        let expiry = a.expires_at.map_or_else(|| "no expiry".to_owned(), |exp| format!("expires {}", time(exp)));
+        println!("{}  {device}  {label}  {}  issued {}  {expiry}", a.name, a.key, time(a.issued_at));
     }
     Ok(())
 }
@@ -483,13 +557,7 @@ pub struct Listed {
 /// The keys of the registry of `dir` at `now`, oldest first, each once.
 pub fn listing(dir: &Path, now: u64) -> Result<Vec<Listed>> {
     let revoked = revoked(dir)?;
-    let mut latest: Vec<Issued> = Vec::new();
-    for one in issued(dir)? {
-        match latest.iter_mut().find(|known| known.key == one.key) {
-            Some(known) => *known = Issued { issued_at: known.issued_at, ..one },
-            None => latest.push(one),
-        }
-    }
+    let latest = latest_lines(dir)?;
     let files = team_findings(dir)?;
     let mut listed = Vec::new();
     for (n, one) in latest.iter().enumerate() {
@@ -519,6 +587,7 @@ fn renew_without_file(issued: &Issued) -> Vec<String> {
     let domain = "[--js-domain DOMAIN]";
     vec![match issued.kind {
         Kind::Ant => format!("ants auth user {name} {domain}"),
+        Kind::Human if issued.admin => format!("ants auth user {name} --human --admin {domain}"),
         Kind::Human => format!("ants auth user {name} --human {domain}"),
         Kind::Webhook => format!("ants auth user {name} --webhook --to ANT... --channel CHANNEL... {domain}"),
         Kind::Leaf => format!("ants auth leaf {} {domain}", name.trim_prefix("leaf-")),
@@ -526,6 +595,10 @@ fn renew_without_file(issued: &Issued) -> Vec<String> {
         Kind::Observer => format!("ants auth user {name} --observer {domain}"),
         Kind::Enrollment => format!("ants auth enroll {}", name.trim_prefix("enroll-")),
         Kind::Bootstrap => "ants auth bootstrap".to_owned(),
+        Kind::Assistant => {
+            let of = issued.assistant_of.as_ref().map_or_else(|| "HUMAN".to_owned(), ToString::to_string);
+            format!("ants auth user {name} --assistant-of {of} {domain}")
+        }
     }]
 }
 
@@ -564,7 +637,13 @@ pub fn list_issued(dir: &Path, json: bool) -> Result<()> {
             continue;
         }
         let i = &l.issued;
-        let kind = serde_json::to_value(i.kind)?.as_str().unwrap_or("?").to_owned();
+        let mut kind = serde_json::to_value(i.kind)?.as_str().unwrap_or("?").to_owned();
+        if let Some(of) = &i.assistant_of {
+            kind = format!("{kind} of {of}");
+        }
+        if i.admin {
+            kind.push_str(" (admin)");
+        }
         let expiry = match i.expires_at {
             Some(exp) if exp <= now => format!("expired {}", time(exp)),
             Some(exp) => format!("expires {}", time(exp)),

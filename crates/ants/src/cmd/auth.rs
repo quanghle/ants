@@ -18,65 +18,10 @@ pub(crate) enum AuthCommand {
         dir: Option<PathBuf>,
     },
     /// Issue credentials for an ant, allowing only the subjects of its role, with --human for a human, a CLI user,
-    /// with --webhook for a webhook of `ants webhook serve`, or with --observer for a hook observing the team's
-    /// events. `human` always gets a human's. Give the hub's --js-domain, if it has one, so they work with it.
-    #[command(group = clap::ArgGroup::new("targets").args(["to", "channels"]).multiple(true))]
-    User {
-        /// The ant, with --human the human, with --webhook the webhook, or with --observer the observer.
-        user: UserId,
-        /// Issue a human's credentials, with the same rights as every other human. The human joins `ants_humans`,
-        /// the team's humans, on its first CLI connection.
-        #[arg(long, conflicts_with = "webhook")]
-        human: bool,
-        /// Issue an observer's read-only credentials, for hooks (`ants hook run`, docs/hooks.md): it reads approval
-        /// requests and decisions, dead letters, every ant's status (escalations among it) and the roster, and
-        /// publishes nothing.
-        #[arg(long, conflicts_with_all = ["human", "webhook", "label"])]
-        observer: bool,
-        /// Issue a webhook's credentials: it may only message the ants of --to and post to the channels of
-        /// --channel, as itself, and record the events it delivered.
-        #[arg(long, requires = "targets")]
-        webhook: bool,
-        /// With --webhook: an ant the webhook may message (repeatable).
-        #[arg(long, value_name = "ANT", requires = "webhook")]
-        to: Vec<UserId>,
-        /// With --webhook: a channel the webhook may post to (repeatable).
-        #[arg(long = "channel", value_name = "CHANNEL", value_parser = channel::parse_channel, requires = "webhook")]
-        channels: Vec<ChannelId>,
-        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
-        #[arg(long, env = "ANTS_AUTH_DIR")]
-        dir: Option<PathBuf>,
-        /// Where to write the credentials (default: <dir>/<user>.creds), or with --public-key the JWT (default:
-        /// print it).
-        #[arg(long)]
-        out: Option<PathBuf>,
-        /// Sign this public user NKey (U...), from `ants add` on the ant's machine, instead of generating a key:
-        /// the JWT, given to `ants add --jwt` there, completes the credentials.
-        #[arg(long, value_name = "KEY")]
-        public_key: Option<String>,
-        /// With --public-key, for a human: the public encryption key (X...) generated on the device beside its NKey,
-        /// for the JWT to bind. Without it, credentials signed for a key generated elsewhere bind none until
-        /// `ants renew` adds one; generated credentials always bind a new one.
-        #[arg(long, value_name = "XKEY", requires = "public_key")]
-        xkey: Option<DeviceKey>,
-        /// With --human (or for `human`): a label for the device the credentials are for, such as "Quang's laptop",
-        /// shown by `ants auth devices`. Each human's credentials are for a new device with a generated id.
-        #[arg(long, conflicts_with = "webhook")]
-        label: Option<String>,
-        /// Keep the NKey seed in the OS credential store (macOS keychain, Linux Secret Service, Windows Credential
-        /// Manager), never in a file, for credentials used on this machine: the file names the stored key, written
-        /// only once the seed reads back and authenticates at --nats, unless no server answers there.
-        #[arg(long, conflicts_with = "public_key")]
-        store_key: bool,
-        /// With --human: bind the human's name to this GitHub user's numeric id, looked up through the GitHub API, so
-        /// that the user may register more devices with `ants login`. Refused for a name or user bound otherwise.
-        #[arg(long, value_name = "LOGIN", requires = "human")]
-        github: Option<String>,
-        /// With --github: the signer's config file, whose [registration] table names the GitHub API and the token to
-        /// look the user up with (default: ~/.ants/config.toml; github.com, with no token, without the table).
-        #[arg(long, env = "ANTS_CONFIG")]
-        config: Option<PathBuf>,
-    },
+    /// with --webhook for a webhook of `ants webhook serve`, with --observer for a hook observing the team's
+    /// events, or with --assistant-of for an ant assisting a human. `human` always gets a human's. Give the hub's
+    /// --js-domain, if it has one, so they work with it.
+    User(UserArgs),
     /// Issue enrollment credentials for a new ant: they may only ask for the ant's credentials, with
     /// `ants add NAME --enroll FILE` on its machine, and hear the answer `ants enroll approve` or `reject`
     /// gives here. They expire after --ttl, or never with --ttl 0.
@@ -222,6 +167,9 @@ pub(crate) enum AuthCommand {
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
+    /// The humans with the admin role: list them, or drop the role of one.
+    #[command(subcommand)]
+    Admin(AdminCommand),
     /// Restore the team keys and files of a backup of `ants auth backup` into the team directory, as files there.
     /// Keys issued and revocations made after the backup are not restored.
     Restore {
@@ -239,69 +187,112 @@ pub(crate) enum AuthCommand {
     },
 }
 
+/// `ants auth user`.
+#[derive(clap::Args, Debug)]
+#[command(group = clap::ArgGroup::new("targets").args(["to", "channels"]).multiple(true))]
+pub(crate) struct UserArgs {
+    /// The ant, with --human the human, with --webhook the webhook, or with --observer the observer.
+    user: UserId,
+    /// Issue a human's credentials, with the same rights as every other human. The human joins `ants_humans`,
+    /// the team's humans, on its first CLI connection.
+    #[arg(long, conflicts_with = "webhook")]
+    human: bool,
+    /// Issue an observer's read-only credentials, for hooks (`ants hook run`, docs/hooks.md): it reads approval
+    /// requests and decisions, dead letters, every ant's status (escalations among it) and the roster, and
+    /// publishes nothing.
+    #[arg(long, conflicts_with_all = ["human", "webhook", "label"])]
+    observer: bool,
+    /// Issue a webhook's credentials: it may only message the ants of --to and post to the channels of
+    /// --channel, as itself, and record the events it delivered.
+    #[arg(long, requires = "targets")]
+    webhook: bool,
+    /// With --webhook: an ant the webhook may message (repeatable).
+    #[arg(long, value_name = "ANT", requires = "webhook")]
+    to: Vec<UserId>,
+    /// With --webhook: a channel the webhook may post to (repeatable).
+    #[arg(long = "channel", value_name = "CHANNEL", value_parser = channel::parse_channel, requires = "webhook")]
+    channels: Vec<ChannelId>,
+    /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+    #[arg(long, env = "ANTS_AUTH_DIR")]
+    dir: Option<PathBuf>,
+    /// Where to write the credentials (default: <dir>/<user>.creds), or with --public-key the JWT (default:
+    /// print it).
+    #[arg(long)]
+    out: Option<PathBuf>,
+    /// Sign this public user NKey (U...), from `ants add` on the ant's machine, instead of generating a key:
+    /// the JWT, given to `ants add --jwt` there, completes the credentials.
+    #[arg(long, value_name = "KEY")]
+    public_key: Option<String>,
+    /// With --public-key, for a human: the public encryption key (X...) generated on the device beside its NKey,
+    /// for the JWT to bind. Without it, credentials signed for a key generated elsewhere bind none until
+    /// `ants renew` adds one; generated credentials always bind a new one.
+    #[arg(long, value_name = "XKEY", requires = "public_key")]
+    xkey: Option<DeviceKey>,
+    /// With --human (or for `human`): a label for the device the credentials are for, such as "Quang's laptop",
+    /// shown by `ants auth devices`. Each human's credentials are for a new device with a generated id.
+    #[arg(long, conflicts_with = "webhook")]
+    label: Option<String>,
+    /// Keep the NKey seed in the OS credential store (macOS keychain, Linux Secret Service, Windows Credential
+    /// Manager), never in a file, for credentials used on this machine: the file names the stored key, written
+    /// only once the seed reads back and authenticates at --nats, unless no server answers there.
+    #[arg(long, conflicts_with = "public_key")]
+    store_key: bool,
+    /// With --human: bind the human's name to this GitHub user's numeric id, looked up through the GitHub API, so
+    /// that the user may register more devices with `ants login`. Refused for a name or user bound otherwise.
+    #[arg(long, value_name = "LOGIN", requires = "human")]
+    github: Option<String>,
+    /// With --human (or for `human`): give the human the admin role, carried in the user JWT of the new device's
+    /// credentials: it may order any ant's daemon to change the ant. Revoking the credentials withdraws it
+    /// (`ants auth admin drop`, `ants auth revoke`).
+    #[arg(long, conflicts_with_all = ["observer", "webhook"])]
+    admin: bool,
+    /// Issue the credentials of the assistant of HUMAN, a human the registry knows: an ant that also reads what a
+    /// human reads and keeps a human's state of its own, under its own name, and reads HUMAN's read markers and
+    /// pins. Its user JWT names HUMAN; no ant's config can. One assistant per human: revoke another's first.
+    #[arg(
+        long,
+        value_name = "HUMAN",
+        conflicts_with_all = ["human", "observer", "webhook", "label", "github", "admin", "xkey"]
+    )]
+    assistant_of: Option<UserId>,
+    /// With --github: the signer's config file, whose [registration] table names the GitHub API and the token to
+    /// look the user up with (default: ~/.ants/config.toml; github.com, with no token, without the table).
+    #[arg(long, env = "ANTS_CONFIG")]
+    config: Option<PathBuf>,
+}
+
+/// `ants auth admin`. The role comes with a human's credentials: `ants auth user NAME --human --admin` issues a device's.
+#[derive(Subcommand, Debug)]
+pub(crate) enum AdminCommand {
+    /// List the credentials carrying the admin role that are neither revoked nor expired: human, device, label, key,
+    /// when issued and expiry.
+    List {
+        /// One JSON object per line.
+        #[arg(long)]
+        json: bool,
+        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        #[arg(long, env = "ANTS_AUTH_DIR")]
+        dir: Option<PathBuf>,
+    },
+    /// Drop the admin role of a human: revoke every key of its credentials carrying it, as `ants auth revoke --key`
+    /// does, and push the account. Its other devices keep working; issue a device without the role with `ants auth
+    /// user NAME --human`.
+    Drop {
+        human: UserId,
+        /// Only record the revocation and write server.conf; push later with `ants auth push`.
+        #[arg(long)]
+        no_push: bool,
+        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        #[arg(long, env = "ANTS_AUTH_DIR")]
+        dir: Option<PathBuf>,
+    },
+}
+
 pub(crate) async fn run(command: AuthCommand, conn: &Connection<'_>) -> Result<()> {
     let domain = conn.js_domain;
     match command {
         AuthCommand::Init { dir } => init(dir),
-        AuthCommand::User {
-            user,
-            human,
-            observer,
-            webhook,
-            to,
-            channels,
-            dir,
-            out,
-            public_key,
-            xkey,
-            label,
-            store_key,
-            github,
-            config,
-        } => {
-            let (kind, permissions) = user_rights(&user, human, observer, webhook, to, channels, domain)?;
-            let dir = team_dir(dir)?;
-            let github = match github {
-                Some(login) => Some(github_binding(&dir, &user, &login, config).await?),
-                None => None,
-            };
-            let new = auth::NewDevice { label: label.as_deref(), github, ..auth::NewDevice::default() };
-            if store_key {
-                let out = out.unwrap_or_else(|| dir.join(format!("{user}.creds")));
-                let key = nkeys::KeyPair::new_user();
-                let xkey = (kind == revoke::Kind::Human).then(nkeys::XKey::new);
-                let bound = xkey.as_ref().map(auth::device_key).transpose()?;
-                let (jwt, device) =
-                    auth::sign_device_with(&dir, &user, kind, permissions, &new, &key.public_key(), bound.as_ref())?;
-                keys::issue_stored(&out, &jwt, &key, xkey.as_ref(), conn.nats).await?;
-                println!("{}", out.display());
-                if let Some(device) = device {
-                    eprintln!("device {device}");
-                }
-                return Ok(());
-            }
-            let Some(key) = public_key else {
-                let out = out.unwrap_or_else(|| dir.join(format!("{user}.creds")));
-                let device = auth::issue_device_with(&dir, &user, kind, permissions, &new, &out)?;
-                println!("{}", out.display());
-                if let Some(device) = device {
-                    eprintln!("device {device}");
-                }
-                return Ok(());
-            };
-            let (jwt, device) = auth::sign_device_with(&dir, &user, kind, permissions, &new, &key, xkey.as_ref())?;
-            if let Some(device) = device {
-                eprintln!("device {device}");
-            }
-            match out {
-                Some(out) => {
-                    std::fs::write(&out, format!("{jwt}\n")).with_context(|| format!("writing {}", out.display()))?;
-                    println!("{}", out.display());
-                }
-                None => println!("{jwt}"),
-            }
-            Ok(())
-        }
+        AuthCommand::User(args) => issue_user(args, conn).await,
         AuthCommand::Enroll { ant, ttl, dir, out } => enrollment(&ant, ttl, dir, out),
         AuthCommand::Bootstrap { ttl, dir, out } => bootstrap(ttl, dir, out),
         AuthCommand::ChannelManager { dir, out, store_key } => {
@@ -336,7 +327,94 @@ pub(crate) async fn run(command: AuthCommand, conn: &Connection<'_>) -> Result<(
         AuthCommand::Restore { file, passphrase_file, force, dir } => {
             backup::run_restore(&team_dir(dir)?, &file, passphrase_file.as_deref(), force)
         }
+        AuthCommand::Admin(AdminCommand::List { json, dir }) => revoke::list_admins(&team_dir(dir)?, json),
+        AuthCommand::Admin(AdminCommand::Drop { human, no_push, dir }) => {
+            let dir = team_dir(dir)?;
+            let keys: Vec<String> = revoke::admins(&dir, auth::now()?)?
+                .into_iter()
+                .filter(|a| a.name == human.as_str())
+                .map(|a| a.key)
+                .collect();
+            if keys.is_empty() {
+                bail!(
+                    "{human} holds no admin credentials neither revoked nor expired; `ants auth admin list` lists them"
+                );
+            }
+            revoke_credentials(None, keys, Vec::new(), no_push, Some(dir), conn.nats, domain).await
+        }
     }
+}
+
+/// `ants auth user`.
+async fn issue_user(args: UserArgs, conn: &Connection<'_>) -> Result<()> {
+    let UserArgs {
+        user,
+        human,
+        observer,
+        webhook,
+        to,
+        channels,
+        dir,
+        out,
+        public_key,
+        xkey,
+        label,
+        store_key,
+        github,
+        config,
+        admin,
+        assistant_of,
+    } = args;
+    let domain = conn.js_domain;
+    let dir = team_dir(dir)?;
+    if admin && auth::role(&user, human) != ants_proto::Role::Human {
+        bail!("only a human's credentials carry the admin role: add --human");
+    }
+    if let Some(human) = &assistant_of {
+        auth::check_assistant(&dir, &user, human)?;
+    }
+    let kind = Kind { human, observer, webhook, assistant_of: assistant_of.as_ref() };
+    let (kind, permissions) = user_rights(&user, kind, to, channels, domain)?;
+    let github = match github {
+        Some(login) => Some(github_binding(&dir, &user, &login, config).await?),
+        None => None,
+    };
+    let new = auth::NewDevice { label: label.as_deref(), github, admin, assistant_of, ..auth::NewDevice::default() };
+    if store_key {
+        let out = out.unwrap_or_else(|| dir.join(format!("{user}.creds")));
+        let key = nkeys::KeyPair::new_user();
+        let xkey = (kind == revoke::Kind::Human).then(nkeys::XKey::new);
+        let bound = xkey.as_ref().map(auth::device_key).transpose()?;
+        let (jwt, device) =
+            auth::sign_device_with(&dir, &user, kind, permissions, &new, &key.public_key(), bound.as_ref())?;
+        keys::issue_stored(&out, &jwt, &key, xkey.as_ref(), conn.nats).await?;
+        println!("{}", out.display());
+        if let Some(device) = device {
+            eprintln!("device {device}");
+        }
+        return Ok(());
+    }
+    let Some(key) = public_key else {
+        let out = out.unwrap_or_else(|| dir.join(format!("{user}.creds")));
+        let device = auth::issue_device_with(&dir, &user, kind, permissions, &new, &out)?;
+        println!("{}", out.display());
+        if let Some(device) = device {
+            eprintln!("device {device}");
+        }
+        return Ok(());
+    };
+    let (jwt, device) = auth::sign_device_with(&dir, &user, kind, permissions, &new, &key, xkey.as_ref())?;
+    if let Some(device) = device {
+        eprintln!("device {device}");
+    }
+    match out {
+        Some(out) => {
+            std::fs::write(&out, format!("{jwt}\n")).with_context(|| format!("writing {}", out.display()))?;
+            println!("{}", out.display());
+        }
+        None => println!("{jwt}"),
+    }
+    Ok(())
 }
 
 /// `ants auth init`.
@@ -353,16 +431,26 @@ fn init(dir: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// The kind of credentials `ants auth user` issues, and their rights.
-fn user_rights(
-    user: &UserId,
+/// The kind of credentials `ants auth user` was asked for, by its flags.
+struct Kind<'a> {
     human: bool,
     observer: bool,
     webhook: bool,
+    assistant_of: Option<&'a UserId>,
+}
+
+/// The kind of credentials `ants auth user` issues, and their rights.
+fn user_rights(
+    user: &UserId,
+    asked: Kind<'_>,
     to: Vec<UserId>,
     channels: Vec<ChannelId>,
     domain: Option<&JsDomain>,
 ) -> Result<(revoke::Kind, Permissions)> {
+    let Kind { human, observer, webhook, assistant_of } = asked;
+    if let Some(of) = assistant_of {
+        return Ok((revoke::Kind::Assistant, Permissions::for_assistant(user, of).with_js_domain(domain)));
+    }
     let kind = match (webhook, observer) {
         (true, _) => revoke::Kind::Webhook,
         (_, true) => revoke::Kind::Observer,

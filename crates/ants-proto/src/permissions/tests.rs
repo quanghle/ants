@@ -788,3 +788,63 @@ fn only_bootstrap_credentials_ask_to_register_and_only_the_signer_hears_them() {
         assert!(subjects.clone().all(|s| !s.starts_with("ants.login.") && s != ">"), "{subjects:?}");
     }
 }
+
+#[test]
+fn an_assistant_keeps_its_ant_rights_and_a_humans_under_its_own_name() {
+    let assistant = Permissions::for_assistant(&p("pa"), &p("alice"));
+    let has = |s: &str| assistant.publish.iter().any(|have| have == s);
+    let ant = Permissions::for_user(&p("pa"), Role::Ant);
+    for s in &ant.publish {
+        assert!(has(s), "ant right {s} missing");
+    }
+    for s in &ant.subscribe {
+        assert!(assistant.subscribe.contains(s), "ant subscription {s} missing");
+    }
+    assert!(assistant.subscribe.iter().any(|s| s == subject::ALL));
+    for s in [
+        "$JS.API.STREAM.MSG.GET.ANTS",
+        "$KV.ants_threads.title.*",
+        "$KV.ants_threads.done.*",
+        "$KV.ants_reactions.pa.>",
+        "$KV.ants_read.pa",
+        "$JS.API.DIRECT.GET.KV_ants_devices.>",
+        "$JS.API.DIRECT.GET.OBJ_ants_files.$O.ants_files.C.>",
+        "$JS.API.DIRECT.GET.KV_ants_read.$KV.ants_read.alice",
+        "$JS.API.DIRECT.GET.KV_ants_read.$KV.ants_read.alice.chan",
+        "$JS.API.DIRECT.GET.KV_ants_attempts.$KV.ants_attempts.alice.unserved.*",
+    ] {
+        assert!(has(s), "{s} missing from {:?}", assistant.publish);
+    }
+    let human = Permissions::for_user(&p("alice"), Role::Human);
+    // A human's sending under any name, acts readers could not tell from its human's, and changes to the team.
+    let human_only = [
+        "ants.inbox.>",
+        "ants.out.inbox.>",
+        "$O.ants_files.C.>",
+        "ants.out.files.>",
+        "ants.approvals.*.*",
+        "ants.cancel.*.*",
+        "ants.queue.*",
+        "$KV.ants_owners.*.*",
+        "$KV.ants_humans.>",
+        "$KV.ants_channels.>",
+        "$JS.API.STREAM.UPDATE.ANTS",
+        "$JS.API.STREAM.MSG.DELETE.ANTS",
+        "$JS.API.STREAM.CREATE.KV_ants_read",
+    ];
+    for s in human_only {
+        assert!(human.publish.iter().any(|have| have == s), "{s} is a human's");
+        assert!(!has(s), "{s} is not an assistant's");
+    }
+    // Of its human's keys it only reads; it moves no device's key, presence or notifications.
+    for s in &assistant.publish {
+        let key = s.strip_prefix("$JS.API.DIRECT.GET.").and_then(|get| get.split_once('.')).map_or(s.as_str(), |g| g.1);
+        assert!(s.starts_with("$JS.API.DIRECT.GET.") || !s.contains(".alice"), "writes {s}");
+        assert!(!key.starts_with("$KV.ants_reactions.alice"), "reads {s}");
+        for bucket in ["ants_devices", "ants_presence", "ants_notify"] {
+            assert!(!s.starts_with(&format!("$KV.{bucket}.")), "puts {s}");
+        }
+    }
+    let unique: std::collections::HashSet<&String> = assistant.publish.iter().collect();
+    assert_eq!(unique.len(), assistant.publish.len(), "no subject twice");
+}

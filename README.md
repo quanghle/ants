@@ -361,7 +361,7 @@ Every 5 m (first check at 30 s), one ant per daemon/server queries hub and local
 
 ## Credentials
 
-`ants auth` manages operator, account and system NKeys (`~/.config/ants/auth`), role-scoped `.creds` (ants, humans with per-device IDs and encryption keys, webhooks, observers, `channel-manager`, leaf uplinks), account revocations (`ants auth revoke` / `push`), and passphrase-encrypted `age` backups (`ants auth backup` / `restore`). `ants auth bootstrap` and `ants login` let humans register their own devices after a GitHub sign-in, checked by `ants signer`. `ants add`, `ants renew` / `ants enroll`, and `ants keys store` handle local key generation, over-NATS enrollment/renewal, and OS credential stores (macOS Keychain, Linux Secret Service, Windows Credential Manager). See [docs/auth.md](docs/auth.md).
+`ants auth` manages operator, account and system NKeys (`~/.config/ants/auth`), role-scoped `.creds` (ants, humans with per-device IDs and encryption keys, admins (`--admin`, `ants auth admin list` / `drop`), assistants of humans (`--assistant-of`), webhooks, observers, `channel-manager`, leaf uplinks), account revocations (`ants auth revoke` / `push`), and passphrase-encrypted `age` backups (`ants auth backup` / `restore`). `ants auth bootstrap` and `ants login` let humans register their own devices after a GitHub sign-in, checked by `ants signer`. `ants add`, `ants renew` / `ants enroll`, and `ants keys store` handle local key generation, over-NATS enrollment/renewal, and OS credential stores (macOS Keychain, Linux Secret Service, Windows Credential Manager). See [docs/auth.md](docs/auth.md).
 
 ## Leaf nodes
 

@@ -434,6 +434,7 @@ impl<'a> Registrar<'a> {
             github: Some(account.clone()),
             grant: Some(grant),
             expires_at: Some(expires_at),
+            ..auth::NewDevice::default()
         };
         let permissions = Permissions::for_user(name, Role::Human).with_js_domain(self.js_domain);
         let (jwt, _) = auth::sign_device_with(

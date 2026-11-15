@@ -299,12 +299,13 @@ fn revoked_entry(entry: &str, user_key: &str) -> Skipped {
 }
 
 /// The revocations of the team in `dir` that the devices bucket keeps a record of: those of every key of a human's
-/// credentials, and of every key the registry does not know, which may be one.
+/// credentials (an admin's among them) and of an assistant's, whose roles readers honour only from a key without one,
+/// and of every key the registry does not know, which may be one.
 fn device_revocations(dir: &Path) -> Result<Vec<DeviceRevocation>> {
     let issued = revoke::issued(dir)?;
     let human_or_unknown = |key: &str| {
         let mut known = issued.iter().filter(|i| i.key == key).peekable();
-        known.peek().is_none() || known.any(|i| i.kind == revoke::Kind::Human)
+        known.peek().is_none() || known.any(|i| matches!(i.kind, revoke::Kind::Human | revoke::Kind::Assistant))
     };
     let revoked = revoke::revoked(dir)?.into_iter().filter(|r| human_or_unknown(&r.key));
     Ok(revoked.map(|r| DeviceRevocation { key: r.key, revoked_at: r.revoked_at }).collect())
