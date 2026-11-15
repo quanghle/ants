@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use ants_daemon::admin::ConfigFile;
 use ants_daemon::config::{self, Ant, HostSettings, Summary};
 use ants_daemon::host::{self, Host};
 use ants_daemon::schedule::Schedule;
@@ -368,18 +369,20 @@ pub struct Served {
 }
 
 /// The host connection of a daemon serving `configs` as `settings` describe it, `nats` and `js_domain` standing for
-/// what the file does not set ([`Host::new`]).
+/// what the file does not set ([`Host::new`]), and admin orders editing the file `config`.
 pub fn host(
     settings: Option<HostSettings>,
     configs: &[Config],
     nats: &str,
     js_domain: Option<&JsDomain>,
+    config: Option<ConfigFile>,
 ) -> Option<(Host, Vec<UserId>)> {
     let HostSettings { creds, machine, nats: file_nats, js_domain: file_domain, remote_admin } = settings?;
     let nats = file_nats.unwrap_or_else(|| nats.to_owned());
     let mut host =
         Host::new(machine, nats, creds, file_domain.or(js_domain.cloned()), configs.iter().map(|c| c.creds.is_some()))?;
     host.remote_admin = remote_admin;
+    host.config = config;
     Some((host, configs.iter().map(|c| c.ant.clone()).collect()))
 }
 
@@ -393,7 +396,8 @@ pub enum Ended {
 
 /// Serve every ant until Ctrl-C or SIGTERM, each over its own NATS connection, and run the schedules alongside, each
 /// over its own as well. An ant that fails is reported and the others keep running; it is an error only when none is
-/// left. On SIGHUP, or once the config file changed and settled (`triggers`), `reload` lists the ants and schedules
+/// left. On SIGHUP, once the config file changed and settled, or at once after an admin order edited it (`triggers`),
+/// `reload` lists the ants and schedules
 /// again and the daemon serves those ([`reconcile`], [`Schedules::reconcile`]); a list it cannot read is reported and
 /// what runs stays as it is. Health and metrics are
 /// served on `served.metrics`, if given, until the daemon stops; a reload does not move them. Once `replaced` the ants

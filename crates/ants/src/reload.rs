@@ -1,13 +1,15 @@
-//! When `ants daemon` and `ants webhook serve` reload their config file: on SIGHUP, and once an edit of the file, or
-//! of the daemon's drop-in harness files, settled. The file is polled, its modification time, length and inode
+//! When `ants daemon` and `ants webhook serve` reload their config file: on SIGHUP, at once after an admin order
+//! edited it ([`Triggers::edits`]), and once an edit of the file, or of the daemon's drop-in harness files, settled. The file is polled, its modification time, length and inode
 //! compared every [`CHECK_EVERY`] on the process's own runtime, with no watcher thread, and so are the drop-in files
 //! ([`ants_daemon::config::dropin_files`]) listed by name; a change counts once two checks in a row find them the
 //! same.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
+use tokio::sync::Notify;
 
 /// How often the config file is checked for a change.
 pub const CHECK_EVERY: Duration = Duration::from_secs(3);
@@ -97,6 +99,8 @@ pub enum Trigger {
     Hangup,
     /// The config file, or a drop-in file, changed and settled.
     Changed,
+    /// An admin order edited the config file.
+    Edited,
 }
 
 impl Trigger {
@@ -104,6 +108,7 @@ impl Trigger {
         match self {
             Trigger::Hangup => "SIGHUP",
             Trigger::Changed => "the config changed",
+            Trigger::Edited => "an admin order edited the config",
         }
     }
 }
@@ -113,6 +118,7 @@ pub struct Triggers {
     hangup: Hangup,
     file: Watched,
     checks: tokio::time::Interval,
+    edited: Arc<Notify>,
 }
 
 impl Triggers {
@@ -121,7 +127,12 @@ impl Triggers {
     pub fn new(path: PathBuf, dropins: Option<PathBuf>, every: Duration) -> Result<Self> {
         let mut checks = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
         checks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        Ok(Self { hangup: Hangup::new()?, file: Watched::new(path, dropins), checks })
+        Ok(Self { hangup: Hangup::new()?, file: Watched::new(path, dropins), checks, edited: Arc::default() })
+    }
+
+    /// What to notify once an edit of the config file is written, to reload it at once.
+    pub fn edits(&self) -> Arc<Notify> {
+        Arc::clone(&self.edited)
     }
 
     /// Wait for the next reason to reload. Cancel-safe, for `tokio::select!`.
@@ -131,6 +142,10 @@ impl Triggers {
                 () = self.hangup.recv() => {
                     self.file.loading();
                     return Trigger::Hangup;
+                }
+                () = self.edited.notified() => {
+                    self.file.loading();
+                    return Trigger::Edited;
                 }
                 _ = self.checks.tick() => if self.file.settled() {
                     tracing::info!(file = %self.file.path.display(), "the config changed");
