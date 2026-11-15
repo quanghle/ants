@@ -65,6 +65,7 @@ fn attachment() -> Attachment {
         mime: "text/plain".to_owned(),
         size: 1234,
         sha256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08".to_owned(),
+        sealed: None,
     }
 }
 
@@ -401,7 +402,11 @@ fn envelopes() {
             id: id(1),
             text: "lunch?".to_owned(),
             title: Some("Lunch".to_owned()),
-            attachments: vec![attachment()],
+            attachments: vec![Attachment {
+                size: 1250,
+                sealed: Some(SealedAttachment { nonce: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned() }),
+                ..attachment()
+            }],
         },
     );
     snap("mention", &mention());

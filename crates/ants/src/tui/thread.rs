@@ -30,6 +30,7 @@ use super::model::{Action, Data, Key, Model, To};
 use super::timeline::Call;
 use super::{approvals, markdown, react, work};
 use crate::live::History;
+use crate::sealed;
 use crate::thread::{Entry, Kind};
 
 /// How deep delegations nest, deeper ones shown at this depth.
@@ -495,7 +496,10 @@ impl Shown<'_> {
         if !what.is_empty() {
             head.push(Span::styled(format!("  {what}"), style));
         }
-        if e.forged {
+        if e.sealed.is_some() {
+            head.push(Span::raw(format!("  {}", super::dm::LOCK)));
+        }
+        if e.forged || e.sealed == Some(sealed::State::Forged) {
             head.push(Span::styled("  forged", Style::new().fg(Color::Red).bold()));
         }
         lines.push(Line::from(head));
@@ -531,7 +535,9 @@ impl Shown<'_> {
 fn nested(e: &Entry) -> (String, Style) {
     let from = e.from.as_ref().map_or("a human", UserId::as_str);
     let to = e.to.as_ref().map_or("", UserId::as_str);
-    let forged = if e.forged { " (forged)" } else { "" };
+    let lock = if e.sealed.is_some() { format!(" {}", super::dm::LOCK) } else { String::new() };
+    let forged = if e.forged || e.sealed == Some(sealed::State::Forged) { " (forged)" } else { "" };
+    let forged = format!("{lock}{forged}");
     match e.kind {
         Kind::Note => (format!("{from} → notes{forged}"), Style::new()),
         Kind::Approval => (format!("{from} asks to run{forged}"), Style::new().fg(Color::Yellow)),
@@ -544,6 +550,9 @@ fn nested(e: &Entry) -> (String, Style) {
 
 /// A message's text: a question's with its options numbered and its answers.
 fn body(e: &Entry, entries: &[Entry]) -> String {
+    if let Some(unopened) = super::dm::unopened(e.sealed) {
+        return unopened.to_owned();
+    }
     let Some(question) = &e.question else {
         return match (&e.note, e.kind) {
             (Some(note), Kind::Approval | Kind::Decision) => format!("{} [{note}]", e.text),
@@ -864,6 +873,33 @@ mod tests {
         assert!(shown[from + 5].ends_with("dev-a → dev-b  check retry.rs"), "one line on its heading");
         assert!(shown[from + 6].ends_with("dev-b → notes"), "{shown:#?}");
         assert_eq!(shown[from + 7..from + 10], ["│            Found", "│", "│            in two places"]);
+    }
+
+    #[test]
+    fn sealed_messages_show_a_lock_opened_or_why_not() {
+        let thread = ThreadId::generate();
+        let m = model();
+        let sealed = |seq, from, to, text: &str, state| {
+            let mut e = message(seq, &thread, from, to, text);
+            e.sealed = Some(state);
+            e
+        };
+        let entries = vec![
+            sealed(1, "alice", "bob", "lunch at noon?", sealed::State::Opened),
+            sealed(2, "bob", "alice", "[sealed]", sealed::State::Unreadable),
+            sealed(3, "bob", "alice", "[forged]", sealed::State::Forged),
+        ];
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(entries)).unwrap();
+        let shown = screen(&page, &m, 80, at(40));
+        let shown: Vec<&str> = shown.lines().map(|l| l.trim_end_matches('│').trim_end()).collect();
+        let from = shown.iter().position(|l| l.contains("alice → bob")).unwrap();
+        assert!(shown[from].ends_with("🔒"), "{shown:#?}");
+        assert_eq!(shown[from + 1], "│  lunch at noon?");
+        assert!(shown[from + 3].ends_with("🔒") && !shown[from + 3].contains("forged"), "{shown:#?}");
+        assert_eq!(shown[from + 4], "│  [sealed] sent before this device had a key");
+        assert!(shown[from + 6].contains("🔒") && shown[from + 6].ends_with("forged"), "{shown:#?}");
+        assert!(shown[from + 7].starts_with("│  [forged] "), "{shown:#?}");
     }
 
     #[test]

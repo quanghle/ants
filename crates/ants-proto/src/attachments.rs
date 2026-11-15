@@ -8,9 +8,9 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[cfg(doc)]
-use crate::Permissions;
 use crate::{ChannelId, ChannelPost, Envelope, Error, NotesPost, ThreadId, UserId, subject};
+#[cfg(doc)]
+use crate::{Permissions, SealedBody};
 
 /// The store of the bytes of attachments, a JetStream stream named [`FILES_STREAM`] that keeps them as chunks on
 /// [`AttachmentHandle::chunk_subject`]s, laid out as an Object Store's chunks but with no object metadata: the reference
@@ -41,7 +41,7 @@ pub const IMAGE_MIMES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "ima
 /// [`AttachmentHandle`] the subject of that message and the id give, where only the readers of that message read them.
 ///
 /// `size` and `sha256` describe the bytes as stored. Readers ignore fields they do not know, so later ones, such as how
-/// the bytes of an attachment on a sealed message are sealed, leave them working.
+/// the bytes of an attachment on a sealed message are sealed ([`Attachment::sealed`]), leave them working.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attachment {
     /// A UUIDv7, unique among the attachments of the message.
@@ -54,6 +54,28 @@ pub struct Attachment {
     pub size: u64,
     /// The SHA-256 of its bytes, in lowercase hex.
     pub sha256: String,
+    /// How its bytes are sealed, on an attachment of a sealed message: its reference then travels only inside the
+    /// message's [`SealedBody`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed: Option<SealedAttachment>,
+}
+
+/// How the bytes of an attachment of a sealed message are sealed: stored as the XSalsa20-Poly1305 encryption
+/// (`crypto_secretbox`) of the file's bytes under the message's content key and a random nonce of their own, so the
+/// [`Attachment::size`] and [`Attachment::sha256`] of its reference are those of the ciphertext. The first chunk's
+/// [`ATTACHMENT_HEADER`] names it [`SealedAttachment::STORED_NAME`], of media type [`Attachment::UNKNOWN_MIME`],
+/// without this.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SealedAttachment {
+    /// The 24-byte nonce, in standard padded base64.
+    pub nonce: String,
+}
+
+impl SealedAttachment {
+    /// The name the store holds an attachment of a sealed message under.
+    pub const STORED_NAME: &str = "sealed";
+    /// How many bytes longer sealing makes an attachment: XSalsa20-Poly1305's tag.
+    pub const OVERHEAD: u64 = 16;
 }
 
 impl Attachment {
@@ -67,7 +89,14 @@ impl Attachment {
         size: u64,
         sha256: impl Into<String>,
     ) -> Result<Self, Error> {
-        let attachment = Self { id: Uuid::now_v7(), name: name.into(), mime: mime.into(), size, sha256: sha256.into() };
+        let attachment = Self {
+            id: Uuid::now_v7(),
+            name: name.into(),
+            mime: mime.into(),
+            size,
+            sha256: sha256.into(),
+            sealed: None,
+        };
         attachment.check()?;
         Ok(attachment)
     }

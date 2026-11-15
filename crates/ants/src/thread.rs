@@ -290,6 +290,18 @@ impl Parser {
         Self { keyring, ..Self::default() }
     }
 
+    /// Look the sending device of a sealed message stored on `subject` up unless known ([`sealed::Keyring::learn`]),
+    /// before [`Parser::entry`] takes it, so one from a device added since the keyring was loaded opens.
+    pub async fn learn(&self, subject: &str, payload: &[u8]) {
+        let Some(keyring) = &self.keyring else { return };
+        if subject::parse_inbox(subject).is_none() || !payload.windows(8).any(|w| w == b"\"sealed\"") {
+            return;
+        }
+        if let Ok(envelope) = serde_json::from_slice::<Envelope>(payload) {
+            keyring.learn(&envelope).await;
+        }
+    }
+
     /// The valid question `e` asks, kept to check later answers against, and its valid answer to a question read
     /// earlier; none of either for a forged message.
     fn question_and_answer(&mut self, e: &Envelope, forged: bool) -> (Option<Question>, Option<Answer>) {

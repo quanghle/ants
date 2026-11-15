@@ -50,7 +50,7 @@ use self::model::{Action, Key, Level, Model};
 use self::reads::Reads;
 use self::search::Searches;
 use crate::live::{self, Feed, Screen};
-use crate::{compose, presence, progress, thread_meta};
+use crate::{compose, presence, progress, sealed, thread_meta};
 
 pub use self::status::run as status;
 
@@ -143,15 +143,22 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
     };
     nats.prepare(&js).await;
     let meta = thread_meta::open(nats, &js).await.map_err(|e| format!("{e:#}"));
-    let ctx =
-        exec::Ctx { client: client.clone(), js: js.clone(), me: nats.me.clone(), domain: nats.domain.cloned(), meta };
+    let sealing = sealed::Sealing::of(nats);
+    let ctx = exec::Ctx {
+        client: client.clone(),
+        js: js.clone(),
+        me: nats.me.clone(),
+        domain: nats.domain.cloned(),
+        meta,
+        sealing: sealing.clone(),
+    };
     let (feed, state) = live::start(nats, client, js.clone(), since).await?;
     let feed = feed.with_timelines();
     let reads = Reads::new(js.clone(), nats.domain.cloned(), me.clone(), crate::channel::reads::allowed(nats));
     let acts = Acts::new(js.clone(), nats.domain.cloned(), me.clone(), thread_meta::open(nats, &js).await);
     let may_read = nats.rights.may_publish(&presence::online_right());
-    let people = people::Io::new(js.clone(), nats.domain.cloned(), nats.me.clone(), may_read);
-    let searches = Searches::new(js.clone());
+    let people = people::Io::new(js.clone(), nats.domain.cloned(), nats.me.clone(), sealing, may_read);
+    let searches = Searches::new(js.clone(), feed.keyring());
     let trees = tree::Io::new(js.clone(), nats.domain.cloned(), me.clone());
     let cards = cards::Io::new(cards::Source::open(nats, &js).await);
     let mut model = Model::new(state, host(nats.url).to_owned());

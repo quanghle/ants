@@ -15,7 +15,21 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
 use super::frame::{self, ago};
 use super::model::{Action, Data, Key, To};
+use crate::sealed::State;
 use crate::thread::{Entry, Kind};
+
+/// The lock marking a sealed message between two humans, and a thread with one.
+pub const LOCK: &str = "🔒";
+
+/// What a sealed message the device did not open reads in place of its text: one it has no key entry for was sent
+/// before it had a key; None for one opened or not sealed.
+pub fn unopened(sealed: Option<State>) -> Option<&'static str> {
+    match sealed? {
+        State::Opened => None,
+        State::Unreadable => Some("[sealed] sent before this device had a key"),
+        State::Forged => Some("[forged] does not open with the key of the device it names"),
+    }
+}
 
 /// A message between the human and another user.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +38,8 @@ pub struct Said {
     pub at: DateTime<Utc>,
     pub from: UserId,
     pub text: String,
+    /// Whether it was sealed, and opened.
+    pub sealed: Option<State>,
 }
 
 /// A thread's messages between the human and another user.
@@ -53,7 +69,13 @@ impl Dms {
             (false, true) => from,
             _ => return,
         };
-        let said = Said { seq: entry.seq, at: entry.stored_at, from: from.clone(), text: entry.text.clone() };
+        let said = Said {
+            seq: entry.seq,
+            at: entry.stored_at,
+            from: from.clone(),
+            text: entry.text.clone(),
+            sealed: entry.sealed,
+        };
         let dm = self.0.entry(with.clone()).or_default().entry(entry.thread_id.clone()).or_insert_with(|| Dm {
             thread: entry.thread_id.clone(),
             latest: said.clone(),
@@ -87,9 +109,11 @@ pub fn unread(data: &Data, with: &UserId) -> usize {
     data.people.dms.with(with).into_iter().map(|dm| unread_on(data, dm)).sum()
 }
 
-/// What a message says, in a line: where every message of the view is rendered.
+/// What a message says, in a line: where every message of the view is rendered, a sealed one after a lock.
 fn said(said: &Said, width: usize) -> String {
-    crate::excerpt(&format!("{}: {}", said.from, said.text.replace('\n', " ")), width)
+    let text = unopened(said.sealed).map_or_else(|| said.text.replace('\n', " "), str::to_owned);
+    let lock = if said.sealed.is_some() { format!("{LOCK} ") } else { String::new() };
+    crate::excerpt(&format!("{lock}{}: {text}", said.from), width)
 }
 
 /// A message to write to another human, on a new thread.
@@ -246,6 +270,25 @@ mod tests {
         m.data.marker.as_mut().unwrap().mark(2);
         assert_eq!(unread(&m.data, &user("bob")), 1, "read by the human's marker");
         assert_eq!(said(&dms[0].latest, 80), "bob: review my PR");
+    }
+
+    #[test]
+    fn a_sealed_message_shows_after_a_lock_opened_or_why_not() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let sealed = |seq, text: &str, state| {
+            let mut e = message(seq, &thread, "bob", "alice", text);
+            e.sealed = Some(state);
+            e
+        };
+        m.stored(vec![sealed(1, "lunch\nat noon?", State::Opened)], at(1));
+        let latest = |m: &crate::tui::model::Model| said(&m.data.people.dms.with(&user("bob"))[0].latest, 80);
+        assert_eq!(latest(&m), "🔒 bob: lunch at noon?");
+        assert!(m.data.title(&thread).starts_with("🔒 lunch"), "{}", m.data.title(&thread));
+        m.stored(vec![sealed(2, "[sealed]", State::Unreadable)], at(2));
+        assert_eq!(latest(&m), "🔒 bob: [sealed] sent before this device had a key");
+        m.stored(vec![sealed(3, "[forged]", State::Forged)], at(3));
+        assert!(latest(&m).starts_with("🔒 bob: [forged] "), "{}", latest(&m));
     }
 
     #[test]

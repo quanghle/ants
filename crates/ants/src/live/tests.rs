@@ -171,3 +171,30 @@ async fn the_feed_reads_follows_and_answers_what_the_human_sees() {
     feed.refresh();
     assert!(matches!(feed.next().await, Event::Following));
 }
+
+#[tokio::test]
+async fn the_feed_opens_a_sealed_message_from_a_device_added_since_its_keyring_was_loaded() {
+    use ants_proto::Role;
+
+    let Some(server) = Server::start() else { return };
+    let (alice, bob) = (user("alice"), user("bob"));
+    let bob_creds = server.creds_as(&bob, Role::Human);
+    let bob_nats = crate::Nats::new(&server.url, Some(&bob_creds), None).unwrap();
+    let (_, bob_js) = bob_nats.connect("test").await.unwrap();
+    let keyring = crate::sealed::Keyring::load(&bob_nats, &bob_js).await.map(Arc::new);
+    assert!(keyring.is_some());
+
+    // A device of alice's registered after bob's keyring was loaded.
+    let alice_creds = server.dir().join("alice-laptop.creds");
+    crate::auth::issue(&server.dir().join("auth"), &alice, Role::Human, None, &alice_creds).unwrap();
+    let alice_nats = crate::Nats::new(&server.url, Some(&alice_creds), None).unwrap();
+    alice_nats.connect("test").await.unwrap();
+    let words = vec!["@bob".to_owned(), "lunch at noon?".to_owned()];
+    let (sending, replies, input, attach) = Default::default();
+    Box::pin(crate::cmd::send::ask(&alice_nats, None, sending, &replies, &input, &attach, words)).await.unwrap();
+
+    let (_, read) = tail(bob_js, Parser::opening(keyring), None, Duration::from_hours(1), false).await;
+    let entries = read.unwrap().0;
+    let [entry] = entries.as_slice() else { panic!("not one message: {entries:?}") };
+    assert_eq!((entry.text.as_str(), entry.sealed), ("lunch at noon?", Some(crate::sealed::State::Opened)));
+}

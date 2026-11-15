@@ -8,6 +8,7 @@ mod state;
 pub(crate) mod tests;
 
 use std::ops::ControlFlow;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ants_daemon::reading::{self, Reading};
@@ -47,7 +48,8 @@ pub async fn start(
     since: Duration,
 ) -> Result<(Feed, State)> {
     let state = state(nats, &js, since).await?;
-    Ok((Feed::new(client, js, since).await?, state))
+    let keyring = crate::sealed::Keyring::load(nats, &js).await.map(Arc::new);
+    Ok((Feed::new(client, js, since).await?.opening(keyring), state))
 }
 
 /// The state of a live view of the window `since`, with the threads the human archived or left idle to be left out.
@@ -87,7 +89,7 @@ pub enum Event {
 pub(crate) type Tail = LocalBoxFuture<'static, (Parser, Result<(Vec<Entry>, u64)>)>;
 
 /// Read the messages stored after sequence `after`, or else those of the window `since`, with `parser`, which keeps
-/// the threads of the tool requests read for their decisions. Returns them and the sequence read up to. With
+/// the threads of the tool requests read for their decisions and opens sealed messages. Returns them and the sequence read up to. With
 /// `timelines`, the tool calls of the timeline records stored after `after` come as entries of kind tool too
 /// ([`thread::tool_entries`]); the first read, of the window, leaves them out.
 pub(crate) fn tail(
@@ -106,20 +108,26 @@ pub(crate) fn tail(
                 Some(after) => consumer::DeliverPolicy::ByStartSequence { start_sequence: after + 1 },
                 None => thread::window(since),
             };
-            let mut entries = Vec::new();
-            reading::read_back(&js, "", Reading::Gets, subject::ALL, start, |seq, stored, subject, payload| {
+            let mut read = Vec::new();
+            reading::read_back_messages(&js, "", Reading::Gets, subject::ALL, start, |seq, stored, msg| {
                 last = last.max(seq);
+                read.push((seq, stored, msg));
+                ControlFlow::Continue(())
+            })
+            .await
+            .context("reading the stream")?;
+            let mut entries = Vec::new();
+            for (seq, stored, msg) in read {
+                let (subject, payload) = (msg.subject.as_str(), &msg.payload[..]);
                 if subject::parse_timeline(subject).is_some() {
                     if timelines && after.is_some() {
                         entries.extend(thread::tool_entries(seq, subject, payload));
                     }
                 } else {
+                    parser.learn(subject, payload).await;
                     entries.extend(parser.entry(seq, stored.into(), subject, payload));
                 }
-                ControlFlow::Continue(())
-            })
-            .await
-            .context("reading the stream")?;
+            }
             Ok((entries, last))
         }
         .await;
@@ -175,6 +183,8 @@ pub struct Feed {
     updated: mpsc::UnboundedReceiver<Update>,
     rereads: tokio::time::Interval,
     rosters: tokio::time::Interval,
+    /// What opens sealed messages between two humans, for the reads of the stream and of a thread's history.
+    keyring: Option<Arc<crate::sealed::Keyring>>,
     /// The parser for the next read of the stream, None while one is in flight.
     parser: Option<Parser>,
     tail: Option<Tail>,
@@ -206,6 +216,7 @@ impl Feed {
             updated,
             rereads: tokio::time::interval(REREAD),
             rosters: tokio::time::interval(ROSTER_EVERY),
+            keyring: None,
             parser: Some(Parser::default()),
             tail: None,
             tail_wanted: true,
@@ -223,6 +234,18 @@ impl Feed {
     pub fn with_timelines(mut self) -> Self {
         self.timelines = true;
         self
+    }
+
+    /// Open sealed messages between two humans with `keyring`.
+    pub fn opening(mut self, keyring: Option<Arc<crate::sealed::Keyring>>) -> Self {
+        self.parser = Some(Parser::opening(keyring.clone()));
+        self.keyring = keyring;
+        self
+    }
+
+    /// What opens sealed messages, if anything.
+    pub fn keyring(&self) -> Option<Arc<crate::sealed::Keyring>> {
+        self.keyring.clone()
     }
 
     pub fn js(&self) -> &jetstream::Context {
@@ -321,10 +344,10 @@ impl Feed {
     /// Read the history of `thread`, dropping any read of another one; with `tools`, with the tool calls its ants
     /// stored on their timelines ([`thread::history`]).
     pub fn load_history(&mut self, thread: ThreadId, tools: bool) {
-        let js = self.js.clone();
+        let (js, keyring) = (self.js.clone(), self.keyring.clone());
         self.history = Some(
             async move {
-                let read = thread::history(&js, &thread, None, tools, None).await;
+                let read = thread::history(&js, &thread, None, tools, keyring).await;
                 (thread, read)
             }
             .boxed_local(),
