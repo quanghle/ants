@@ -188,6 +188,29 @@ Managers also get `retire_ant(name)` (`other:retire_ant`) for ants whose `added_
 
 Humans retire any templated ant on the manager's machine with `ants retire NAME [--config FILE] [--dir DIR] [--no-push]`, revoking locally if `--dir` holds the account key or printing `ants auth revoke --key U...` otherwise. Non-templated ants are removed by editing `config.toml` and running `ants auth revoke NAME`.
 
+## Human registration
+
+`ants signer` registers a human's new device after a GitHub sign-in (`ants login`, with the team's bootstrap credentials; see [auth.md](auth.md#registering-humans)) when its `--config` has a `[registration]` table, reread per request. Without the table, every registration is refused as not enabled.
+
+```toml
+[registration]
+client_id = "Ov23liAbCdEf"                    # the team's GitHub OAuth App, device flow enabled (required)
+orgs = ["acme"]                               # members of these organizations are signed at once
+teams = ["acme/core"]                         # ... and members of these teams (org/team slug)
+email_domains = ["acme.example"]              # ... and users with a verified email address in these domains
+ttl = "30d"                                   # validity of a registered device's credentials (default 30d, at least 1m)
+token_file = "~/.config/ants/github-token"    # the signer's GitHub token, mode 0600 (relative to the config file)
+# token_store = "github-token"                # or its entry in the OS credential store (service ants)
+# github_url = "https://github.com"           # GitHub Enterprise Server: its own URL
+# api_url = "https://api.github.com"          # ... and its REST API, such as https://ghe.example/api/v3
+```
+
+- **Policy:** a user who is a member of a listed organization, then of a listed team, then has a verified email address in a listed domain (exact domain, no subdomains; names compared without case) is signed at once, and the grant (`org`, `team` or `email-domain`) is recorded with the device in `issued.jsonl`. Anyone else is refused.
+- **Signer token:** optional; a classic token with `read:org` (or a fine-grained token with organization members read access) checks memberships and looks GitHub users up (`ants auth user NAME --human --github LOGIN`). `token_file` must be readable by its owner only; `token_file` and `token_store` exclude each other.
+- **GitHub only:** no other identity provider signs users in.
+
+`ants daemon` ignores the table.
+
 ## Harnesses
 
 Built-in ACP stdio harnesses live in `crates/ants-daemon/src/harnesses.toml`. None is a default: an ant names its harness, or the file's top-level `harness` does.

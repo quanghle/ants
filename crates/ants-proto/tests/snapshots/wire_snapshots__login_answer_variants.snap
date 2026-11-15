@@ -1,0 +1,25 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+[
+  {
+    "outcome": "verify",
+    "url": "https://github.com/login/device",
+    "user_code": "WDJB-MJHT",
+    "expires_at": "2025-01-01T12:15:00Z"
+  },
+  {
+    "outcome": "waiting",
+    "login": "octocat",
+    "reason": "outside the registration policy"
+  },
+  {
+    "outcome": "refused",
+    "reason": "alice is bound to another GitHub user"
+  },
+  {
+    "outcome": "signed",
+    "jwt": "eyJ0eXAiOiJKV1QifQ.alice"
+  }
+]

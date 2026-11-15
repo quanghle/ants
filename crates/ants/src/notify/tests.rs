@@ -1,6 +1,9 @@
 use std::assert_matches;
 
 use ants_proto::{Escalation, ThreadId, ToolCall};
+use http_body_util::BodyExt as _;
+use hyper::http::Request;
+use hyper_util::rt::TokioIo;
 
 use super::*;
 

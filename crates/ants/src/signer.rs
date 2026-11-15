@@ -37,6 +37,7 @@ use futures::StreamExt as _;
 use nkeys::KeyPair;
 
 use crate::enroll::{Approver, Leaf};
+use crate::registrar::{self, Registrar};
 use crate::{auth, members, outbox, revoke};
 
 /// Most requests of one manager waiting for a human at once; more are refused.
@@ -137,10 +138,12 @@ pub async fn serve(
     stop: impl Future<Output = ()>,
 ) -> Result<()> {
     let mut signer = Signer { url, dir, options, answered: HashMap::new(), waiting: Vec::new() };
+    let mut registrar = Registrar::new(dir, options.config, js_domain, registrar::print);
     tokio::pin!(stop);
     loop {
         let approver = Approver::connect_signer(url, dir, js_domain, crate::enroll::LISTEN).await?;
         let mut requests = approver.client.subscribe(subject::ALL_ANT_REQUESTS).await?;
+        let mut logins = approver.client.subscribe(subject::ALL_LOGIN_REQUESTS).await?;
         let answering = reactions::serve(
             approver.client.clone(),
             approver.hub().clone(),
@@ -162,7 +165,15 @@ pub async fn serve(
                     let msg = msg.context("the NATS connection closed")?;
                     signer.heard(&approver, &msg, &mut report).await?;
                 }
-                _ = ticks.tick() => signer.look(&approver, &mut report).await?,
+                msg = logins.next() => {
+                    let msg = msg.context("the NATS connection closed")?;
+                    registrar.heard(&approver.client, &msg).await?;
+                }
+                update = registrar.next() => registrar.progressed(&approver.client, update).await?,
+                _ = ticks.tick() => {
+                    registrar.expire();
+                    signer.look(&approver, &mut report).await?;
+                }
                 () = &mut until => break,
                 () = &mut stop => return Ok(()),
             }
@@ -170,7 +181,7 @@ pub async fn serve(
     }
 }
 
-struct AbortOnDrop(tokio::task::JoinHandle<()>);
+pub(crate) struct AbortOnDrop(pub(crate) tokio::task::JoinHandle<()>);
 
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {

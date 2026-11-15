@@ -85,6 +85,8 @@ use ants_proto::{JsDomain, UserId};
 use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 
+pub mod registration;
+
 use crate::caps::{Caps, Members, Pool};
 use crate::daemon::Config;
 use crate::escalation::{self, Chain};
@@ -152,6 +154,9 @@ struct File {
     ants: Vec<Ant>,
     #[serde(default, rename = "schedule")]
     schedules: Vec<schedule::Entry>,
+    /// Read by `ants signer` only ([`registration::signer_registration`]).
+    #[serde(default, rename = "registration")]
+    _registration: Option<serde::de::IgnoredAny>,
 }
 
 /// The keys of an `[[ant]]` entry added from a template besides those of a [`Request`].

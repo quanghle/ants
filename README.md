@@ -122,7 +122,7 @@ Without `ants setup`: `nats-server -js &`, `ants harness check --harness claude`
 | `ants daemon [--ant NAME] [--config FILE] [--metrics ADDR] [ant-flags...]` | Serve config-file ants and schedules, or a single `--ant` ([docs/config.md](docs/config.md)). |
 | `ants add NAME [--config FILE] [--out FILE] [--store-key] [--jwt JWT \| --enroll CREDS [--hub URL] [--leaf-config FILE]] [ant-flags...]` | Generate local NKey, append `[[ant]]` to `config.toml`, and complete credentials ([docs/auth.md](docs/auth.md#adding-an-ant)). |
 | `ants retire NAME [--config FILE] [--dir DIR] [--no-push]` | Unlist, drain, revoke and delete credentials of a templated ant while keeping `~/.ants/<name>` ([docs/config.md](docs/config.md#retiring-an-added-ant)). |
-| `ants signer [--config FILE] [--approval-timeout DUR] [--dir DIR]` | Sign or human-gate `request_ant` requests, process `retire_ant` revocations and answer ants' reaction requests ([docs/config.md](docs/config.md#manager-ants)). |
+| `ants signer [--config FILE] [--approval-timeout DUR] [--dir DIR]` | Sign or human-gate `request_ant` requests, process `retire_ant` revocations, answer ants' reaction requests ([docs/config.md](docs/config.md#manager-ants)) and register humans' devices after a GitHub sign-in ([`[registration]`](docs/config.md#human-registration)). |
 | `ants enroll list` / `approve NAME [...]` / `reject NAME [--reason TEXT]` | List, sign (`--webhook --to/--channel` for webhooks) or reject `ants add --enroll` requests. |
 | `ants enroll renewals` / `renew NAME [--public-key KEY]` / `renew --auto` | List or sign over-NATS `ants renew` requests ([docs/auth.md](docs/auth.md#renewing-over-nats)). |
 | `ants renew [FILE] [--config FILE] [--leaf-config FILE]` | Rotate `.creds` over NATS and reload the daemon, or reconnect the leaf node's uplink. |
@@ -131,7 +131,7 @@ Without `ants setup`: `nats-server -js &`, `ants harness check --harness claude`
 | `ants setup [--ant NAME --workdir DIR] [--harness NAME] [--config FILE] [--nats-server PATH] [--no-services] [--no-harness] [--no-completions] [--dry-run]` | Idempotently set up a single machine and run `ants doctor`. |
 | `ants completions SHELL` / `--install [SHELL]` | Print or install dynamic completions for `bash`, `zsh` or `fish`. |
 | `ants doctor [--config FILE] [--leaf-config FILE] [--dir DIR] [--webhook-config FILE] [--no-harness] [--json]` | Audit local config, keys, hub/leaf/outbox, versions, storage, services, webhooks and tunnels (`exit 1` on `fail`). |
-| `ants auth init` / `user` / `enroll` / `channel-manager` / `leaf` / `revoke` / `revoked` / `issued` / `push` / `backup` / `restore` / `devices` / `rename` | Manage team NKeys, role `.creds`, revocations, age-encrypted backups and human devices ([docs/auth.md](docs/auth.md)). |
+| `ants auth init` / `user` / `enroll` / `bootstrap` / `channel-manager` / `leaf` / `revoke` / `revoked` / `issued` / `push` / `backup` / `restore` / `devices` / `rename` | Manage team NKeys, role `.creds`, revocations, age-encrypted backups and human devices ([docs/auth.md](docs/auth.md)). |
 | `ants leaf config MACHINE --uplink URL ...` / `outbox MACHINE ...` | Write `~/.config/ants/leaf.conf` or configure store-and-forward outbox sourcing ([docs/transport.md](docs/transport.md)). |
 | `ants bridge serve` / `connect URL` | Tunnel a leaf uplink over plain HTTPS `POST`/`GET` requests ([docs/transport.md](docs/transport.md#https-fallback-bridge)). |
 | `ants webhook serve [--config FILE] [--listen ADDR] [--metrics ADDR]` / `notify-test HUMAN` / `add NAME ...` | Serve HTTP webhooks and human push notifications, test sinks, or provision a webhook ([docs/webhooks.md](docs/webhooks.md)). |
@@ -227,6 +227,7 @@ Full reference in [docs/config.md](docs/config.md):
 
 - [Precedence and reload](docs/config.md#precedence-and-reload)
 - [Ant templates](docs/config.md#ant-templates), [Manager ants](docs/config.md#manager-ants) (`request_ant`, `ants signer`) and [Retiring an added ant](docs/config.md#retiring-an-added-ant) (`retire_ant`, `ants retire`)
+- [Human registration](docs/config.md#human-registration) (`[registration]`, GitHub sign-in policy)
 - [Harnesses](docs/config.md#harnesses) (`copilot`, `claude`, `codex`, `antigravity`, custom `[harnesses.NAME]` and `harnesses.d` drop-ins, sign-in/rate-limit/quota/failure holds, [fallbacks](docs/config.md#fallbacks), session rebuilds and context windows)
 - [Prompt limits and spending caps](docs/config.md#prompt-limits-and-spending-caps) and [Spend report](docs/config.md#spend-report)
 - [Tool permissions](docs/config.md#tool-permissions) (allowlist rules, `--rule` suggestions, chain approvals, webhook/schedule narrowing, all for harnesses that ask before running tools) and [Redaction](docs/config.md#redaction)

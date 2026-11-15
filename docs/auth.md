@@ -16,7 +16,7 @@ ants auth user alice --human --store-key --js-domain hub  # seed stored in OS cr
 
 ## Issuing and revoking credentials
 
-Every key issued or signed (`user`, `enroll`, `channel-manager`, `leaf`, `enroll approve`, `enroll renew`, `signer`) is recorded in `issued.jsonl` (public key, name, kind, issue time, expiry, permissions version, plus device ID/label or leaf members). Credentials stay valid until expiry unless revoked:
+Every key issued or signed (`user`, `enroll`, `bootstrap`, `channel-manager`, `leaf`, `enroll approve`, `enroll renew`, `signer`) is recorded in `issued.jsonl` (public key, name, kind, issue time, expiry, permissions version, plus device ID/label, GitHub binding and grant, or leaf members). Credentials stay valid until expiry unless revoked:
 
 ```sh
 ants auth revoke alice --nats wss://hub.example/nats        # every key issued to alice, all devices
@@ -56,6 +56,8 @@ ants auth rename alice "Alice's laptop" "Work laptop"   # by unique label, devic
 ants auth revoke alice --device 01968f7e-...            # revoke one device only
 ```
 
+`ants auth devices` prints, per device, its ID, label, public key, encryption key and issue time, plus `github LOGIN (grant)` for a device of a name bound to a GitHub user, and `revoked`; `--json` prints the same as JSON lines (`github`, `grant`).
+
 All devices of a human share one read marker in `ants_read` (CAS-updated) and per-device presence in `ants_presence` for notification suppression (see [webhooks.md](webhooks.md#notifications)).
 
 ### Device encryption keys
@@ -89,6 +91,35 @@ ants enroll approve dev-c --js-domain hub                         # or: ants enr
 `ants add --enroll` repeats its request every 5 s and stops with an error at a rejection, when the enrollment credentials expire, or when the server refuses them (revoked), even while the server is unreachable.
 
 Behind a leaf node (`~/.config/ants/leaf.conf` or `--leaf-config`), `ants add --enroll` signs the request with the leaf uplink key; `ants enroll approve` renews the leaf uplink JWT (up to the 252 KiB limit, ~29 ants with a domain or 54 without; beyond it the approval fails before anything is signed or recorded), records the ant in `issued.jsonl`, admits it to `ANTS_IN` outbox sourcing, and `ants add` has the leaf node reconnect its uplink with the renewed credentials, by a reload keeping local connections (`ants enroll` behind a leaf requires `ants auth leaf --enroll-approver`). After out-of-band `--jwt` behind a leaf, run `ants auth leaf MACHINE --add-ant NAME` and `ants leaf outbox MACHINE`. See [transport.md](transport.md#enrollment-behind-a-leaf-node).
+
+## Registering humans
+
+Humans register their own devices with `ants login`, which `ants signer` answers after a GitHub sign-in. Requests travel with the team's public bootstrap credentials:
+
+```sh
+ants auth bootstrap [--ttl 0] [--out FILE]   # bootstrap.creds (mode 0644; default: no expiry)
+ants auth revoke bootstrap --nats wss://hub.example/nats   # withdraw them; reissue with ants auth bootstrap
+```
+
+Bootstrap credentials are meant to be shared: they only publish registration requests on `ants.login.*` and hear the answers on `ants.login.*.reply`, with messages of at most 4 KiB and no JetStream. They are recorded in `issued.jsonl` (kind `bootstrap`) and revoked like any key. Registration happens on the hub only: leaf uplinks never carry `ants.login` subjects, so both `ants login` and `ants signer` connect to the hub.
+
+A registration request on `ants.login.<name>` carries the name asked for, the device's new NKey public key, a one-off X25519 reply key, optionally the device's [encryption key](#device-encryption-keys) and label, and its making and expiry times (at most 15 min apart), signed by the NKey. Requests are core NATS messages, stored nowhere: the machine repeats its request every 5 s until an answer settles it, and `ants signer` (with a `[registration]` table in its `--config`; see [config.md](config.md#human-registration)) answers each repeat on `ants.login.<name>.reply` with what it has for that key, sealed to the latest reply key and naming the signer's sealing key:
+
+- `verify`: sign in to GitHub at the URL with the user code, before the time given. The signer runs one GitHub device flow per key, at most 10 at once, and reads the signed-in user's ID, login, verified email addresses and memberships with the user's token, which it then drops.
+- `signed`: the human's credentials (a JWT for the request's NKey, with the device's encryption key when given), valid for the policy's `ttl`, recorded in `issued.jsonl` with the label, GitHub binding and grant.
+- `refused`: why, such as registration not enabled, a key already issued, a GitHub user outside the policy, or a name bound to someone else.
+
+Requests that are malformed, unsigned by their key, expired or for another subject get no answer. A key whose registration ended gets the same answer until its request expires; another attempt uses a new key.
+
+### GitHub bindings
+
+A name registered with a GitHub sign-in belongs to that GitHub user's numeric ID for good: renamed GitHub accounts keep their names, and no other GitHub user can register it. The binding is recorded on each device's record in `issued.jsonl`, with the grant that admitted the device (`org`, `team`, `email-domain` or `approval`), so it is kept across renewals and in backups. An existing human name (issued with `ants auth user --human` before registration was enabled) is bound by the operator before its owner registers more devices with `ants login`:
+
+```sh
+ants auth user alice --human --github octocat [--config FILE]   # bind alice to GitHub user octocat, new device
+```
+
+`--github` looks the login up on GitHub (with the signer's token and GitHub URLs of the `[registration]` table in `--config`, `ANTS_CONFIG` or the default config file when present; see [config.md](config.md#human-registration)) and records its ID. It refuses `human`, the reserved names `bootstrap` and `channel-manager`, a name holding credentials of anything but a human, a name bound to another GitHub user and a GitHub user bound to another name; on a name already bound to the same user it adds a device. `ants signer` applies the same rules, and also refuses to register a name that holds human credentials but no binding.
 
 ## Renewing over NATS
 

@@ -543,6 +543,45 @@ fn enrollment() {
 }
 
 #[test]
+fn login() {
+    snap(
+        "login_request",
+        &LoginRequest {
+            name: user("alice"),
+            public_key: "UDEF".to_owned(),
+            reply_xkey: "XREPLY".to_owned(),
+            xkey: Some("XBLFEIK7UCHY5XKH7LGNQ4JZNVOZEWMIHPZH3LP4JUBJ6KQZDVBEWHWB".parse().unwrap()),
+            label: Some("Alice's laptop".to_owned()),
+            made_at: at(0),
+            expires_at: at(15),
+            signature: "c2lnLWxvZ2lu".to_owned(),
+        },
+    );
+    snap(
+        "login_reply",
+        &LoginReply {
+            name: user("alice"),
+            public_key: "UDEF".to_owned(),
+            sender: "XSIGNER".to_owned(),
+            sealed: "c2VhbGVk".to_owned(),
+        },
+    );
+    snap(
+        "login_answer_variants",
+        &vec![
+            LoginAnswer::Verify {
+                url: "https://github.com/login/device".to_owned(),
+                user_code: "WDJB-MJHT".to_owned(),
+                expires_at: at(15),
+            },
+            LoginAnswer::Waiting { login: "octocat".to_owned(), reason: "outside the registration policy".to_owned() },
+            LoginAnswer::Refused { reason: "alice is bound to another GitHub user".to_owned() },
+            LoginAnswer::Signed { jwt: "eyJ0eXAiOiJKV1QifQ.alice".to_owned() },
+        ],
+    );
+}
+
+#[test]
 fn ant_requests() {
     snap(
         "ant_request",
