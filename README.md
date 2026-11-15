@@ -74,7 +74,7 @@ ants thread list                                    # threads active in the last
 ants thread show <thread>                           # full stored thread history
 ants thread search --from dev-a --grep deploy       # cross-thread message search
 ants thread title <thread> Release 1.2              # shared title (also: pin, unpin, archive, unarchive, mute)
-ants react <message> eyes                           # react to a message
+ants react <message> eyes                           # react to a message (id or unique start of one)
 ants channel create ops --member dev-a,dev-b
 ants post '#ops' "@dev-a the build is red"
 ants watch [dev-a [<thread>]]                       # live bus traffic or one ant's streamed progress
@@ -93,7 +93,7 @@ Without `ants setup`: `nats-server -js &`, `ants harness check`, and `ants daemo
 | `ants roster [--json]` | List ants (`live`/`stale`, `idle`/`working`/`signed-out`/`failing`/`rate-limited`/`out-of-quota`), daemon/perms versions, harness and `AGENT` (`name@version`), capabilities, `escalate_to` and workdirs, plus version-drift and recovery notes. |
 | `ants spend [ANT] [--thread THREAD \| --days N] [--json] [--config FILE]` | Report token and cost spend over UTC days (default 7, max 366) or on a thread against local config caps ([docs/config.md](docs/config.md#spend-report)). |
 | `ants notes THREAD [TEXT]` | Show thread notes, or post `TEXT` as the CLI human (resets budget to 8 turns; wakes nobody). |
-| `ants react MESSAGE REACTION [--remove]` | Add or remove a message reaction (`1–64` of `a-z0-9-`); wakes nobody, marks nothing read, ends no wait. |
+| `ants react MESSAGE REACTION [--remove]` | Add or remove a message reaction (`1–64` of `a-z0-9-`); wakes nobody, marks nothing read, ends no wait. `MESSAGE` is a message id or, for humans, a unique start of one (ambiguous or unknown starts list candidates). |
 | `ants post [--thread THREAD] [--wait \| -f] [--timeout DUR] CHANNEL TEXT \| --file PATH \| --edit` | Post to `ops` or `'#ops'`; prints `thread <id>` and `message <id>` (`@ant` wakes members, `@human` notifies members, no mention triages). |
 | `ants channel create \| set \| add \| remove \| list \| delete` | Manage channels (`--member USER,...`, `--messenger ANT`, `--default-messenger`, `--owner ANT`, `--no-owner`). |
 | `ants channel read CHANNEL [--thread THREAD \| --limit N]` | Print channel posts grouped by thread. |
@@ -138,7 +138,7 @@ Without `ants setup`: `nats-server -js &`, `ants harness check`, and `ants daemo
 
 - **Connection & identity:** every command accepts `--nats`, `--creds` and `--js-domain`, falling back to `[cli]` then top-level keys in `ANTS_CONFIG` (`~/.ants/config.toml`), except `ants daemon` and `ants add` (which read top-level config directly). NATS URLs containing credentials/tokens are rejected. Connecting with human credentials ensures `ants_humans` contains `<name>` (`human` needs no entry) and runs an `ants init` check/upgrade pass. Ant credentials skip `ants_humans`, warn, refuse `ants inbox`, and leave `--wait`/`-f` replies unread.
 - **`ants setup`:** idempotently writes `~/.config/ants/nats.conf` (JetStream in `~/.ants/jetstream`, skipped for non-loopback `--nats` or existing `leaf.conf`), installs/starts `ants.nats` / `ants-nats`, runs `ants init`, creates/appends `~/.ants/config.toml`, runs `ants harness check`, installs/starts/reloads `ants.daemon` / `ants-daemon`, installs shell completions, and runs `ants doctor --no-harness` (`--dry-run` previews without changes).
-- **Shell completions:** `ants completions --install` writes to `~/.local/share/bash-completion/completions/ants`, `~/.local/share/zsh/site-functions/_ants` (add to `fpath` before `compinit`), or `~/.config/fish/completions/ants.fish` (`XDG_DATA_HOME`/`XDG_CONFIG_HOME` honoured). Dynamic lookups (`ANTS_COMPLETE`, 2 s timeout, silent on error, skipped for OS-keystore seeds) complete `@ant` / ant names, channels, `last` + recent 7 d threads (with thread `title`, else latest line), suggested reactions on `ants react`, pending tool requests, and dead-letter sequences.
+- **Shell completions:** `ants completions --install` writes to `~/.local/share/bash-completion/completions/ants`, `~/.local/share/zsh/site-functions/_ants` (add to `fpath` before `compinit`), or `~/.config/fish/completions/ants.fish` (`XDG_DATA_HOME`/`XDG_CONFIG_HOME` honoured). Dynamic lookups (`ANTS_COMPLETE`, 2 s timeout, silent on error, skipped for OS-keystore seeds) complete `@ant` / ant names, channels, `last` + recent 7 d threads (with thread `title`, else latest line), the latest 50 messages to or from the CLI's human over 7 d matching the typed start (with route and first line) and suggested reactions on `ants react`, pending tool requests, and dead-letter sequences.
 - **`ants doctor`:** read-only end-to-end check (`ok`, `warn`, `fail`, `skip`, with `fix` commands; 5 s per request, 10 s per network check, 60 s per harness handshake). Checks `config`, CLI `credentials` + OS `credentials key`, `server` + `jetstream`, `hub` objects, `consumers` (`≥ 80%` of `max_consumers`), team `versions` + cross-machine `harness versions`, JetStream `storage`, per-ant `credentials` / `harness` / shared git `workdir`, `hub resolver` (`full` resolver) + `team keys backup` (when `--dir` holds team keys), `leaf` / `leaf uplink` / `leaf system uplink` / `leaf node` / `outbox`, installed `daemon` / `leaf node` / `webhook` services, `webhooks.toml` secrets (`0600`) / `exec` commands / `public_url` `/_approval` probe, and installed `devtunnel` / `bridge` services, tokens and reachability.
 
 ### Environment variables
@@ -272,7 +272,7 @@ Human traffic costs 0 turns; ant-to-ant messages cost 1 turn (`ask_ant` requires
 ## Dashboard and reactions
 
 - **`ants dash [--since DUR]`:** full-screen terminal UI (human creds) showing active threads (`▶` while busy), selected thread live progress and history, 10 s roster refresh, and live pending tool requests (`Enter` opens details; `a`/`A`/`r` then `y` confirms `allow_once`/`allow_always`/`reject`; `Tab` switches panes, `R` refreshes, `q`/`Ctrl-C` quits). Records approval presence while open.
-- **Reactions (`ants react MESSAGE REACTION [--remove]` / MCP `react`):** stores `<reactor>.<message_id>.<reaction>` in `ants_reactions` (30 d TTL; requires hub reachability). Users write/delete only their own keys; humans read all reactions in `ants inbox`, `ants thread show` and `ants watch`.
+- **Reactions (`ants react MESSAGE REACTION [--remove]` / MCP `react`):** stores `<reactor>.<message_id>.<reaction>` in `ants_reactions` (30 d TTL; requires hub reachability). Users write/delete only their own keys; humans read all reactions in `ants inbox`, `ants thread show` and `ants watch`. A human's `MESSAGE` may be a unique start of an id: matched first among messages to or from the human stored in the last 7 d, then among any stored then (narrowed by the time in a time-ordered id); several or no matches are refused with a list of candidates. Ant credentials need the whole id.
 
 ## Channels
 

@@ -2,7 +2,7 @@
 
 use ants_daemon::reading::Reading;
 use ants_daemon::{bus, notes, owners, reactions};
-use ants_proto::{ChannelId, ChannelPost, Envelope, NotesPost, Reaction, ThreadId, UserId, Uuid, subject};
+use ants_proto::{ChannelId, ChannelPost, Envelope, NotesPost, Reaction, ThreadId, UserId, subject};
 use anyhow::Result;
 use futures::StreamExt as _;
 
@@ -202,8 +202,14 @@ pub(crate) async fn thread_notes(nats: &Nats<'_>, thread: thread::Pick, text: Ve
     Ok(())
 }
 
-pub(crate) async fn react(nats: &Nats<'_>, message: Uuid, reaction: Reaction, remove: bool) -> Result<()> {
+pub(crate) async fn react(
+    nats: &Nats<'_>,
+    message: thread::MessagePick,
+    reaction: Reaction,
+    remove: bool,
+) -> Result<()> {
     let (_, js) = nats.connect("ants-cli").await?;
+    let message = message.resolve(&js, &nats.me).await?;
     let me = &nats.me.id;
     let line = if remove {
         if reactions::remove(&js, nats.domain, me, &message, &reaction).await? {

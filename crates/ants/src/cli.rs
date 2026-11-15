@@ -6,7 +6,7 @@ use std::time::Duration;
 use ants_proto::{ChannelId, JsDomain, Reaction, ThreadId, UserId, Uuid, subject};
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
-use clap_complete::engine::ArgValueCandidates;
+use clap_complete::engine::{ArgValueCandidates, ArgValueCompleter};
 use futures::StreamExt as _;
 
 use crate::cmd::{
@@ -155,8 +155,10 @@ pub(crate) enum Command {
     /// reactions beneath the messages in `ants inbox`, `ants thread show` and `ants watch`. Message ids come from
     /// `ants ask`, `ants post`, `ants inbox` and `ants thread show`.
     React {
-        /// The message's id.
-        message: Uuid,
+        /// The message's id, or with a human's credentials a unique start of one among the messages to or from the
+        /// CLI's human stored in the last 7 days, else any stored then.
+        #[arg(add = ArgValueCompleter::new(completions::messages))]
+        message: thread::MessagePick,
         /// The reaction: 1-64 of lowercase letters, digits and '-', such as eyes, check, thumbsup, x, heart or rocket.
         #[arg(add = ArgValueCandidates::new(completions::reactions))]
         reaction: Reaction,
@@ -491,11 +493,13 @@ mod tests {
 
     #[test]
     fn react_takes_a_message_id_a_reaction_and_remove() {
-        let id = Uuid::now_v7().to_string();
-        let cli = Cli::try_parse_from(["ants", "react", &id, "--remove", "eyes"]).unwrap();
+        let id = Uuid::now_v7();
+        let cli = Cli::try_parse_from(["ants", "react", &id.to_string().to_uppercase(), "--remove", "eyes"]).unwrap();
         assert_matches!(cli.command, Command::React { message, reaction, remove: true }
-            if message.to_string() == id && reaction.as_str() == "eyes");
-        assert!(Cli::try_parse_from(["ants", "react", &id, "Eyes!"]).is_err(), "no subject token");
+            if message == thread::MessagePick::Id(id) && reaction.as_str() == "eyes");
+        let cli = Cli::try_parse_from(["ants", "react", "019A-", "eyes"]).unwrap();
+        assert_matches!(cli.command, Command::React { message: thread::MessagePick::Prefix(p), .. } if p == "019a-");
+        assert!(Cli::try_parse_from(["ants", "react", &id.to_string(), "Eyes!"]).is_err(), "no subject token");
         assert!(Cli::try_parse_from(["ants", "react", "t1", "eyes"]).is_err(), "no message id");
     }
 

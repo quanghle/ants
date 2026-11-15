@@ -346,6 +346,65 @@ async fn a_human_picks_its_threads_by_a_start_of_their_id_or_the_last() {
 }
 
 #[tokio::test]
+async fn a_human_picks_a_message_by_a_start_of_its_id() {
+    let Some(server) = crate::auth::tests::Server::start() else { return };
+    let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
+    let (_, js) = server.connect_as(&alice, ants_proto::Role::Human).await;
+    ants_daemon::bus::init_stream(&js).await.unwrap();
+    let me = crate::humans::Me { id: alice.clone(), role: ants_proto::Role::Human };
+    let resolve = |pick: &str| pick.parse::<MessagePick>().unwrap().resolve(&js, &me);
+
+    let asked = Envelope::new(alice.clone(), dev_a.clone(), "build it");
+    let reply = asked.reply(dev_a.clone(), "built", ants_proto::Role::Human).unwrap();
+    let posted = ChannelPost::new("ops".parse().unwrap(), alice.clone(), "deploy?");
+    let others = Envelope::new(dev_a.clone(), dev_b.clone(), "between ants");
+    // Messages made in the same millisecond, so the same 13 characters start their ids: two to alice a minute ago,
+    // two between ants two minutes ago.
+    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
+    let made = |millis: u128, tail: u128| Uuid::from_u128((millis << 80) | (0x7 << 76) | (0x8 << 60) | tail);
+    let mine = [0x1_0000, 0x2_0000].map(|tail| Envelope { id: made(now - 60_000, tail), ..reply.clone() });
+    let twins = [0x1_0000, 0x2_0000].map(|tail| Envelope { id: made(now - 120_000, tail), ..others.clone() });
+    for (subject, payload) in [
+        (asked.subject(), json(&asked)),
+        (reply.subject(), json(&reply)),
+        (posted.subject(), json(&posted)),
+        (others.subject(), json(&others)),
+        (mine[0].subject(), json(&mine[0])),
+        (mine[1].subject(), json(&mine[1])),
+        (twins[0].subject(), json(&twins[0])),
+        (twins[1].subject(), json(&twins[1])),
+    ] {
+        js.publish(subject, payload.into()).await.unwrap().await.unwrap();
+    }
+
+    let ids: Vec<Uuid> = recent_messages(&js, &alice).await.unwrap().iter().filter_map(|e| e.id).collect();
+    assert_eq!(ids, [mine[1].id, mine[0].id, posted.id, reply.id, asked.id], "alice's, most recent first");
+    let start = |id: Uuid| id.to_string()[..32].to_owned();
+    assert_eq!(resolve(&start(reply.id)).await.unwrap(), reply.id);
+    assert_eq!(resolve(&start(posted.id).to_uppercase()).await.unwrap(), posted.id);
+    assert_eq!(resolve(&start(others.id)).await.unwrap(), others.id, "a message between ants");
+    assert_eq!(resolve(&start(twins[1].id)).await.unwrap(), twins[1].id);
+    let several = resolve(&mine[0].id.to_string()[..13]).await.unwrap_err().to_string();
+    assert!(several.starts_with("2 messages to or from alice over the last 7 days start with"), "{several}");
+    assert!(several.contains(&format!("\n  {} ", mine[1].id)), "{several}");
+    assert!(several.contains("dev-a -> alice: built"), "{several}");
+    let twin = resolve(&twins[0].id.to_string()[..13]).await.unwrap_err().to_string();
+    assert!(twin.contains("2 messages over the last 7 days start with"), "{twin}");
+    assert!(twin.contains("none of them to or from alice"), "{twin}");
+    let unknown = resolve("ffff").await.unwrap_err().to_string();
+    assert!(unknown.contains("no message over the last 7 days starts with ffff"), "{unknown}");
+    assert!(unknown.contains(&format!("\n  {} ", asked.id)) && !unknown.contains(&others.id.to_string()), "{unknown}");
+    // A whole id needs no read, whoever's message it is.
+    let whole = Uuid::now_v7();
+    assert_eq!(resolve(&whole.to_string()).await.unwrap(), whole);
+
+    let ant = crate::humans::Me { id: dev_a, role: ants_proto::Role::Ant };
+    let start = MessagePick::Prefix(start(reply.id));
+    let refused = start.resolve(&js, &ant).await.unwrap_err().to_string();
+    assert!(refused.contains("give the whole message id"), "{refused}");
+}
+
+#[tokio::test]
 async fn a_human_reads_threads_back_without_consuming_them() {
     let Some(server) = crate::auth::tests::Server::start() else { return };
     let (alice, dev_a) = (p("alice"), p("dev-a"));
