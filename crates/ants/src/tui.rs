@@ -16,6 +16,7 @@ mod channel;
 mod command;
 mod compact;
 mod complete;
+mod credentials;
 mod dm;
 mod exec;
 mod frame;
@@ -170,9 +171,12 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
     let searches = Searches::new(js.clone(), feed.keyring());
     let trees = tree::Io::new(js.clone(), nats.domain.cloned(), me.clone());
     let ants = ant::Io::new(js.clone(), nats.domain.cloned(), me.clone());
+    let (credentials, holder) =
+        credentials::Io::new(nats.url, nats.domain.cloned(), crate::team_dir(None), crate::enroll::LISTEN);
     let cards = cards::Io::new(cards::Source::open(nats, &js).await);
     let mut model = Model::new(state, host(nats.url).to_owned());
     model.compact = compact;
+    model.data.credentials.holder = Some(holder);
     let chat_state = catchup::state_path();
     model.catchup.since = chat_state.as_deref().ok().and_then(catchup::ended);
     model.catchup.ahead = summaries.ahead();
@@ -191,6 +195,7 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
             searches,
             trees,
             ants,
+            credentials,
             cards,
             summaries,
             images,
@@ -251,6 +256,8 @@ struct Chat {
     trees: tree::Io,
     /// The reads of the shown ant's queue.
     ants: ant::Io,
+    /// The credentials asked for, where the team's account key is.
+    credentials: credentials::Io,
     cards: cards::Io,
     summaries: catchup::Io,
     /// The images drawn, with `[cli]` `inline_images` on.
@@ -271,6 +278,7 @@ impl Chat {
             {
                 return Ok(());
             }
+            // Anything but a tick changes what shows.
             let actions = tokio::select! {
                 _ = ticks.tick() => {
                     if self.read_terminal(&mut dirty)?.is_break() {
@@ -282,70 +290,64 @@ impl Chat {
                         terminal.draw(|f| frame::draw(f, &self.model, Utc::now())).context("drawing")?;
                         (dirty, drawn) = (false, Instant::now());
                     }
-                    Vec::new()
+                    None
                 }
                 event = self.feed.next() => {
-                    dirty = true;
-                    self.model.take(event, Utc::now())
+                    Some(self.model.take(event, Utc::now()))
                 }
                 read = self.reads.next() => {
-                    dirty = true;
                     self.model.read(read, Utc::now());
-                    Vec::new()
+                    Some(Vec::new())
                 }
                 outcome = self.exec.next() => {
-                    dirty = true;
                     // A title set through the bar shows once read back.
                     self.cards.refresh();
-                    self.model.outcome(outcome).into_iter().collect()
+                    Some(self.model.outcome(outcome).into_iter().collect())
                 }
                 acted = self.acts.next() => {
-                    dirty = true;
                     if matches!(acted, acts::Acted::Changed(..)) {
                         // Home shows done states and snoozes: read them back at once.
                         self.cards.refresh();
                     }
                     self.model.acted(acted, Utc::now());
-                    Vec::new()
+                    Some(Vec::new())
                 }
                 event = self.people.next() => {
-                    dirty = true;
                     self.model.people(event, Utc::now());
-                    Vec::new()
+                    Some(Vec::new())
                 }
                 found = self.searches.next() => {
-                    dirty = true;
                     self.model.found(found);
-                    Vec::new()
+                    Some(Vec::new())
                 }
                 read = self.cards.next() => {
-                    dirty = true;
                     self.model.cards(read, Utc::now());
                     // TL;DRs ahead of time follow what was read.
-                    self.model.ahead(Utc::now()).into_iter().collect()
+                    Some(self.model.ahead(Utc::now()).into_iter().collect())
                 }
                 summarised = self.summaries.next() => {
-                    dirty = true;
                     self.model.summarised(summarised, Utc::now());
-                    self.model.ahead(Utc::now()).into_iter().collect()
+                    Some(self.model.ahead(Utc::now()).into_iter().collect())
                 }
                 event = self.trees.next() => {
-                    dirty = true;
                     self.model.tree_event(event, Utc::now());
-                    Vec::new()
+                    Some(Vec::new())
                 }
                 event = self.ants.next() => {
-                    dirty = true;
                     self.model.ant_event(event);
-                    Vec::new()
+                    Some(Vec::new())
+                }
+                event = self.credentials.next() => {
+                    self.model.credentials(event, Utc::now());
+                    Some(Vec::new())
                 }
                 (handle, image) = next_image(self.images.as_mut()) => {
-                    dirty = true;
                     self.model.data.images.insert(handle, image);
-                    Vec::new()
+                    Some(Vec::new())
                 }
             };
-            for action in actions.into_iter().chain(self.model.mark_shown()) {
+            dirty |= actions.is_some();
+            for action in actions.into_iter().flatten().chain(self.model.mark_shown()) {
                 if self.act(action).is_break() {
                     return Ok(());
                 }
@@ -444,6 +446,12 @@ impl Chat {
                 self.model.notify(text, Level::Info, Utc::now());
                 self.trees.cancel(prompts);
             }
+            Action::Credentials(order) => {
+                if !self.credentials.order(order) {
+                    self.model.data.credentials.busy = None;
+                    self.model.notify("another answer to a request runs", Level::Error, Utc::now());
+                }
+            }
             Action::Refresh => {
                 self.feed.refresh();
                 self.reads.refresh();
@@ -451,6 +459,7 @@ impl Chat {
                 self.people.refresh();
                 self.trees.refresh();
                 self.ants.refresh();
+                self.credentials.refresh();
                 self.cards.refresh();
                 if let Some(thread) = self.model.open_thread() {
                     self.feed.load_history(thread, true);

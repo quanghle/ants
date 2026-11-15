@@ -18,7 +18,8 @@ use super::react::{self, Pick, Picker};
 use super::reads::{Mark, Read};
 use super::work::{Facts, Filter};
 use super::{
-    ant, cards, catchup, channel, dm, home, images, nav, people, search, snooze, thread, timeline, tree, work,
+    ant, cards, catchup, channel, credentials, dm, home, images, nav, people, search, snooze, thread, timeline, tree,
+    work,
 };
 use crate::live::{self, State};
 use crate::thread::{Entry, Kind};
@@ -82,6 +83,8 @@ pub enum Action {
     CancelSubtree(Vec<(UserId, ThreadId)>),
     /// Ask for a catch-up summary.
     Summarise(catchup::Ask),
+    /// Answer a request for credentials, as `ants enroll approve`, `reject` or `renew` does.
+    Credentials(credentials::Order),
     Quit,
 }
 
@@ -134,6 +137,8 @@ pub struct Data {
     pub cards: cards::Cards,
     /// The image attachments drawn in the thread view.
     pub images: images::Images,
+    /// The credentials asked for, heard where the team's account key is.
+    pub credentials: credentials::Heard,
 }
 
 impl Data {
@@ -186,6 +191,7 @@ pub enum Page {
     Search(search::Page),
     Tree(tree::Page),
     Ant(ant::Page),
+    Credentials(credentials::Page),
 }
 
 impl Page {
@@ -210,6 +216,7 @@ impl Page {
             Self::Search(_) => "search",
             Self::Tree(_) => "tree",
             Self::Ant(_) => "ant",
+            Self::Credentials(_) => "credentials",
         }
     }
 }
@@ -239,6 +246,8 @@ pub enum To {
     Tldr(ThreadId),
     /// The digest of what changed since the last `ants chat` on the device ended.
     Digest,
+    /// The credentials asked for.
+    Credentials,
     /// Not another view: something to do.
     Do(Action),
 }
@@ -285,6 +294,7 @@ impl Model {
             delegations: tree::Delegations::default(),
             cards: cards::Cards::default(),
             images: images::Images::default(),
+            credentials: credentials::Heard::default(),
         };
         let nav = nav::Item::Home;
         Self {
@@ -587,7 +597,13 @@ impl Model {
                 seqs.iter().for_each(|seq| markers.mark(channel, *seq));
                 Some(Action::MarkChannel(channel.clone(), Mark::Posts(seqs)))
             }
-            Page::Home(_) | Page::Work(_) | Page::Dm(_) | Page::Search(_) | Page::Tree(_) | Page::Ant(_) => None,
+            Page::Home(_)
+            | Page::Work(_)
+            | Page::Dm(_)
+            | Page::Search(_)
+            | Page::Tree(_)
+            | Page::Ant(_)
+            | Page::Credentials(_) => None,
         }
     }
 
@@ -758,6 +774,7 @@ impl Model {
             Page::Search(page) => page.key(key),
             Page::Tree(page) => page.key(key, data, now),
             Page::Ant(page) => page.key(key, data),
+            Page::Credentials(page) => page.key(key, data),
         }?;
         self.go(to, now)
     }
@@ -804,6 +821,14 @@ impl Model {
                 None
             }
             To::Tldr(thread) => self.tldr(thread),
+            To::Credentials => {
+                self.pages.push(Page::Credentials(credentials::Page::default()));
+                None
+            }
+            To::Do(Action::Credentials(order)) => {
+                self.data.credentials.busy = Some(order.clone());
+                Some(Action::Credentials(order))
+            }
             To::Digest => self.home_digest(now),
             To::Do(Action::Run(Job::Open(listed), text)) => {
                 self.bar.set_status(format!("opening {}…", listed.attachment.name), Tone::Busy);
@@ -833,6 +858,15 @@ impl Model {
     pub fn ant_shown(&self) -> Option<UserId> {
         let Page::Ant(page) = self.page() else { return None };
         Some(page.ant.clone())
+    }
+
+    /// Take in what a gathering of the credentials asked for, or an answer to one, brought.
+    pub fn credentials(&mut self, event: credentials::Event, now: DateTime<Utc>) {
+        match self.data.credentials.take(event, now) {
+            Some(Ok(done)) => self.notify(done, Level::Info, now),
+            Some(Err(e)) => self.notify(e, Level::Error, now),
+            None => {}
+        }
     }
 
     /// Take in what a read of an ant's queue brought.

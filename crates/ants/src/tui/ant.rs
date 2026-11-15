@@ -123,6 +123,7 @@ impl Page {
             }
             Key::Char('w') => return Some(To::Work(Filter { user: Some(self.ant.clone()), ..Filter::default() })),
             Key::Char('a') => return Some(To::Bar(format!("@{} ", self.ant))),
+            Key::Char('c') => return Some(To::Credentials),
             _ => {}
         }
         if self.pane == Pane::Threads {
@@ -257,6 +258,9 @@ fn status(ant: &UserId, entry: Option<&RosterEntry>, data: &Data, now: DateTime<
         lines.push(Line::styled(format!("nothing holds {ant} back"), frame::dim()));
     }
     lines.extend(holds.into_iter().map(|h| Line::styled(h, Style::new().fg(Color::Yellow))));
+    for asked in data.credentials.of(ant.as_str()) {
+        lines.push(Line::styled(format!("{}: c answers", asked.describe()), Style::new().fg(Color::Yellow)));
+    }
     let mut working: Vec<(&ThreadId, String, DateTime<Utc>)> = data
         .live
         .progress
