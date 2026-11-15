@@ -6,9 +6,9 @@
 //! deciding again. It refuses every order while the config sets `[admin] remote = false`.
 //!
 //! An order an admin signed it carries out ([`apply`]) with the module of its op: [`set`] edits the ant's settings in
-//! the config file the daemon serves ([`ConfigFile`]), which the daemon reloads at once; [`pause`] pauses or resumes
-//! the ant there; [`restart`] has the daemon serving the ant restart its harnesses; [`memories`] reads the ant's
-//! memories, only while online.
+//! the config file the daemon serves ([`ConfigFile`]), which the daemon reloads at once; [`settings`] reads them;
+//! [`pause`] pauses or resumes the ant there; [`restart`] has the daemon serving the ant restart its harnesses;
+//! [`memories`] reads the ant's memories, only while online.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -33,6 +33,7 @@ mod memories;
 mod pause;
 pub mod restart;
 mod set;
+mod settings;
 
 /// How long an order may stay in hand unacked before the stream delivers it again.
 const ACK_WAIT: Duration = Duration::from_secs(60);
@@ -273,6 +274,7 @@ async fn apply(orders: &Orders, order: &AdminOrder, stored_at: DateTime<Utc>) ->
         AdminOp::Add { .. } => refused(order, NOT_SUPPORTED),
         AdminOp::Retire => refused(order, NOT_SUPPORTED),
         AdminOp::ReadMemories => memories::apply(orders, order, stored_at).await,
+        AdminOp::ReadSettings => settings::apply(orders, order),
     }
 }
 
