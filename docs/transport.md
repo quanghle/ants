@@ -38,6 +38,8 @@ include "server.conf"
 resolver { type: full, dir: "/var/lib/ants/jwt" }
 ```
 
+Without `max_file_store` and `max_memory_store` in its `jetstream` block, the hub takes up to 75% of the disk and of the memory. The accounts `ants auth` issues do not tell these limits, so the daemons warn of a store filling up only when `[storage]` of their config file repeats them (see [JetStream storage](../README.md#jetstream-storage)).
+
 - `include "server.conf"` resolves relative to the config directory even if prefixed with `/`. Copy `server.conf` (`ants auth init`) next to the hub config; it configures operator/account trust and `max_control_line: 16384` so permission JWTs fit in `CONNECT`.
 - `websocket` routes paths ending in `/leafnode` to leaf connections, `/mqtt` to MQTT, and any other path (such as `/nats`) to client connections. WebSocket and TCP clients authenticate identically with `.creds`.
 - `leafnodes { no_advertise: true }` stops the hub from advertising `127.0.0.1:7422` to leaves, keeping reconnects on the proxy or tunnel address (likewise set `no_advertise: true` on clustered hubs or client WebSocket blocks).

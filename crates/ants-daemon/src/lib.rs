@@ -34,6 +34,7 @@ pub mod roster;
 pub mod schedule;
 pub mod signin;
 pub mod status;
+pub mod storage;
 pub mod template;
 pub mod webhooks;
 pub mod worktrees;

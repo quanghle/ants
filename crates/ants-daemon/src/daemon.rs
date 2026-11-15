@@ -110,6 +110,8 @@ pub struct Config {
     pub caps: Caps,
     /// The share of a cap, in percent, past which a human is warned once; 0 for never.
     pub spend_warn_percent: u8,
+    /// When to warn a human of JetStream storage filling up.
+    pub storage: crate::storage::Settings,
     /// The daily caps the ant shares with the other ants added from its template, if any.
     pub pool: Option<crate::caps::Pool>,
     /// Serve the ant only while holding its roster entry, as the built-in messenger does: wait while another
@@ -256,6 +258,15 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     let stream = bus::open_stream(&js, &config.ant).await?;
     let threads = Threads::new(js.clone(), config.ant.clone(), sessions_kv.clone());
     let webhooks = Webhooks::new(js.clone());
+    let storage = crate::storage::Watcher {
+        js: js.clone(),
+        hub_domain: config.js_domain.clone(),
+        notes: sessions_kv.clone(),
+        ant: config.ant.clone(),
+        human: config.human.clone(),
+        settings: config.storage,
+        server: format!("{} {:?}", config.nats_url, config.js_domain),
+    };
     let sessions = SessionStore::kv(sessions_kv, config.ant.clone());
     let attempts =
         Attempts::new(bus::ensure_attempts(&js, config.js_domain.as_ref(), &config.ant).await?, config.ant.clone());
@@ -354,6 +365,7 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
         }) => {}
         () = inbox.hear_cancels() => {}
         () = crate::creds::recheck(config.creds.as_deref()) => {}
+        () = storage.watch(crate::storage::CHECK_EVERY) => {}
     }
     let handed_over = registration.is_lost() && !stopping.get();
     registration.deregister().await;

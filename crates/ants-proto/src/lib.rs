@@ -746,6 +746,15 @@ pub fn daily_spend_key(ant: &UserId, day: &str) -> String {
     format!("{ant}.day.{day}")
 }
 
+/// Key in [`SESSIONS_BUCKET`] noting that the humans were warned of JetStream `store` (`file` or `memory`) of `domain`
+/// (`_` for none) filling up, shared by every daemon so that one warning goes out per crossing. A user id never starts
+/// with `_`, so it is no ant's key, and its four tokens match none of the spend keys.
+pub fn storage_warning_key(domain: Option<&str>, store: &str) -> String {
+    format!("{STORAGE_WARNING_PREFIX}.{}.{store}.warned", domain.unwrap_or("_"))
+}
+
+const STORAGE_WARNING_PREFIX: &str = "_storage";
+
 /// Key of the attempt marker of the inbox message at stream sequence `seq` in [`ATTEMPTS_BUCKET`]. Keys start with the
 /// ant, so its credentials can be confined to its own.
 pub fn attempt_key(ant: &UserId, seq: u64) -> String {
@@ -1111,7 +1120,9 @@ impl Permissions {
     /// markers in [`WEBHOOKS_BUCKET`], none of their events), asks the channel manager for changes to
     /// a channel only as itself ([`subject::chanadm_from`]), and reads and writes only its own keys in the sessions and attempts buckets,
     /// except that it reads every ant's daily spend there ([`daily_spend_key`]), to hold the ants of a template to
-    /// their pool caps. Of
+    /// their pool caps, and reads and writes the shared notes of the storage warnings ([`storage_warning_key`]), of
+    /// the usage it reads in the account's JetStream info. Every user lists the streams, with their sizes and no
+    /// subject stored. Of
     /// these and the owners bucket it gets no stream info, which lists every key of a bucket (so the threads of other
     /// ants): it reads single keys by direct gets. Nor does it get the stream's info, which lists every subject stored,
     /// so who messages whom: it finds the stream through the info of its own inbox consumer. The filter of each of its consumers is
@@ -1159,6 +1170,8 @@ impl Permissions {
         let mut publish: Vec<String> = sendable.iter().cloned().chain(outbox).collect();
         publish.extend([
             format!("$JS.API.STREAM.INFO.{roster_stream}"),
+            // The size of every stream, for the storage warnings: a stream list carries no subject stored.
+            "$JS.API.STREAM.LIST".to_owned(),
             // Also how its connection finds JetStream, and the stream, whose info it does not get.
             format!("$JS.API.CONSUMER.INFO.{STREAM}.{consumer}"),
             // The filter is part of the subject, so the consumer cannot be pointed at another inbox.
@@ -1308,6 +1321,10 @@ impl Permissions {
                 own_keys,
                 // Get of every ant's daily spend, which pool caps add up.
                 format!("$JS.API.DIRECT.GET.{sessions}.$KV.{SESSIONS_BUCKET}.*.day.*"),
+                // The account's JetStream usage, and the shared notes of the storage warnings given.
+                "$JS.API.INFO".to_owned(),
+                format!("$JS.API.DIRECT.GET.{sessions}.$KV.{SESSIONS_BUCKET}.{STORAGE_WARNING_PREFIX}.*.*.warned"),
+                format!("$KV.{SESSIONS_BUCKET}.{STORAGE_WARNING_PREFIX}.*.*.warned"),
                 // Get, put and delete of the markers of its own attempts.
                 format!("$JS.API.DIRECT.GET.{attempts}.{own_attempts}"),
                 own_attempts,
@@ -2461,6 +2478,8 @@ pub enum EscalationReason {
     Asked,
     /// A prompt does not fit the model's context window, even in a fresh session.
     ContextWindow,
+    /// JetStream storage passed its warning share ([`storage_warning_key`]); the stuck ant is the one that noticed.
+    Storage,
     /// A value from a newer daemon.
     #[serde(other)]
     Unknown,
@@ -2476,6 +2495,7 @@ impl EscalationReason {
             Self::Approval => "approval",
             Self::Asked => "asked",
             Self::ContextWindow => "context_window",
+            Self::Storage => "storage",
             Self::Unknown => "unknown",
         }
     }

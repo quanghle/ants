@@ -1786,6 +1786,49 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn ants_warn_a_human_once_per_crossing_of_a_storage_limit() {
+        use ants_daemon::storage::{self, Settings, Watcher};
+        let Some(server) = Server::start() else { return };
+        let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
+        let (h_client, h_js) = server.connect(&human).await;
+        bus::ensure_stream(&h_js).await.unwrap();
+        bus::init_own_buckets(&h_js).await.unwrap();
+        h_js.publish(subject::inbox(&dev_a, &human), vec![b'x'; 4096].into()).await.unwrap().await.unwrap();
+        let used = storage::measure(&h_js, None, &Settings::default()).await.unwrap()[0].used;
+        let watcher = async |ant: &UserId, max_file_store: u64| {
+            let (_, js) = server.connect(ant).await;
+            Watcher {
+                notes: bus::ensure_sessions(&js, None, ant).await.unwrap(),
+                js,
+                hub_domain: None,
+                ant: ant.clone(),
+                human: human.clone(),
+                settings: Settings { max_file_store: Some(max_file_store), ..Settings::default() },
+                server: String::new(),
+            }
+        };
+        let (a, b) = (watcher(&dev_a, used + used / 10).await, watcher(&dev_b, used + used / 10).await);
+        let mut warnings = h_client.subscribe(subject::inbox_of(&human)).await.unwrap();
+        h_client.flush().await.unwrap();
+        let note = ants_proto::storage_warning_key(None, "file");
+
+        tokio::join!(a.check(), b.check());
+        a.check().await;
+        let got = timeout(WAIT, warnings.next()).await.unwrap().unwrap();
+        let warning: Envelope = serde_json::from_slice(&got.payload).unwrap();
+        assert_eq!(warning.escalation.map(|e| e.reason), Some(ants_proto::EscalationReason::Storage));
+        assert!(warning.text.contains("JetStream file store of the hub") && warning.text.contains("Using most: "));
+        assert!(timeout(Duration::from_millis(300), warnings.next()).await.is_err(), "one warning per crossing");
+        assert!(a.notes.get(&note).await.unwrap().is_some());
+
+        // Well under the share the note goes, and the next crossing warns again.
+        watcher(&dev_a, used * 100).await.check().await;
+        assert!(a.notes.get(&note).await.unwrap().is_none());
+        b.check().await;
+        timeout(WAIT, warnings.next()).await.expect("a warning of the next crossing");
+    }
+
+    #[tokio::test]
     async fn ants_keep_their_own_escalation_chain_and_read_everyone_s() {
         let Some(server) = Server::start() else { return };
         let (human, dev_a, lead) = (UserId::human(), p("dev-a"), p("lead"));
@@ -2851,6 +2894,8 @@ pub(crate) mod tests {
         }
         let stream = stream.expect("dev-a on the leaf reaches the hub stream");
         assert!(bus::open_stream(&a_plain, &dev_a).await.is_err(), "no JetStream without the domain");
+        let usages = ants_daemon::storage::measure(&a_js, Some(&domain), &Default::default()).await.unwrap();
+        assert!(usages.iter().all(|u| !u.leaf && u.domain.as_deref() == Some("hub")), "{usages:?}");
 
         // github, as `ants webhook serve` on the leaf, keeps its events in the bucket and delivers to dev-b's inbox.
         let hook_js = connect_to(&leaf.url, &team.join("github.creds"), Some(&domain), &github).await;

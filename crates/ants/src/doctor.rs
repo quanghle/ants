@@ -13,6 +13,7 @@ use ants_daemon::config::{self, Ant};
 use ants_daemon::creds::{self, Expiry, Kind, Seed, VersionStatus};
 use ants_daemon::harness::{self, DEFAULT_HARNESS, Harnesses, Readiness};
 use ants_daemon::keystore::{self, Store};
+use ants_daemon::storage::{self, Usage};
 use ants_daemon::{Launch, PermissionPolicy, bus, hub};
 use ants_proto::{INTAKE_STREAM, JsDomain, Machine, PERMISSIONS_VERSION, STREAM, UserId, inbox_consumer};
 use async_nats::jetstream;
@@ -107,8 +108,8 @@ pub struct Setup {
 }
 
 /// Run every check, in order: the config file, the CLI's credentials, the server, JetStream, the hub's stream and
-/// buckets, the versions of ants running across the team, each ant's credentials, harness and workdir, the hub's
-/// account resolver, the leaf node and outbox, the installed services, the webhooks' config file and notification
+/// buckets, the versions of ants running across the team, the JetStream storage, each ant's credentials, harness and
+/// workdir, the hub's account resolver, the leaf node and outbox, the installed services, the webhooks' config file and notification
 /// sinks, and the Dev Tunnel and HTTPS bridge services installed.
 pub async fn run(setup: &Setup) -> Vec<Check> {
     let now = auth::now().unwrap_or_default();
@@ -129,6 +130,8 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     let resolver = check_resolver(setup, through_leaf);
     let ((reached, connected), ants_checked, resolver) = tokio::join!(reach, ants_checked, resolver);
     checks.extend(reached);
+    let settings = loaded.as_ref().map(|l| l.storage).unwrap_or_default();
+    checks.extend(check_storage(connected.as_ref(), setup, settings).await);
     checks.extend(ants_checked);
     checks.extend(check_shared_workdirs(ants, &setup.config));
     checks.push(resolver);
@@ -527,6 +530,53 @@ async fn check_consumers(js: &jetstream::Context, identity: &Identity) -> Vec<Ch
         });
     }
     checks
+}
+
+/// JetStream storage against its limits ([`storage::measure`]): the hub's, and the leaf node's when the CLI connects
+/// through one. Warns past the warning share of `settings` (its default when 0), naming the streams using most when
+/// the credentials list them.
+async fn check_storage(connected: Option<&Connected>, setup: &Setup, settings: storage::Settings) -> Vec<Check> {
+    let check = "storage";
+    let Some(Connected { js, rights }) = connected else {
+        return vec![Check::skip(check, "JetStream does not answer")];
+    };
+    if !rights.may_publish("$JS.API.INFO") {
+        return vec![Check::skip(check, "the credentials may not read the account's JetStream info")];
+    }
+    let measured = tokio::time::timeout(NETWORK_TIMEOUT * 2, storage::measure(js, setup.js_domain.as_ref(), &settings));
+    let usages = match measured.await {
+        Ok(Ok(usages)) => usages,
+        Ok(Err(e)) => return vec![Check::skip(check, format!("{e:#}"))],
+        Err(_) => return vec![Check::skip(check, "no account info in time")],
+    };
+    let warn_percent = Some(settings.warn_percent).filter(|p| *p > 0).unwrap_or(storage::DEFAULT_WARN_PERCENT);
+    let mut checks = Vec::new();
+    for usage in &usages {
+        let mut largest = Vec::new();
+        if usage.over(warn_percent) && rights.may_publish("$JS.API.STREAM.LIST") {
+            largest = storage::largest(js, usage, 3).await.unwrap_or_default();
+        }
+        checks.push(storage_check(usage, &largest, warn_percent, &setup.config));
+    }
+    checks
+}
+
+fn storage_check(usage: &Usage, largest: &[(String, u64)], warn_percent: u8, config: &Path) -> Check {
+    let check = "storage";
+    if usage.over(warn_percent) {
+        let mut detail = format!("{usage}, past {warn_percent}%: once full, JetStream refuses new messages");
+        if let Some(streams) = storage::using_most(largest) {
+            let _ = write!(detail, "; using most: {streams}");
+        }
+        return Check::warn(check, detail, vec![usage.fix()]);
+    }
+    if usage.limit.is_none() {
+        let setting = usage.store.setting();
+        let detail =
+            format!("{usage}: set {setting} in [storage] of {} to be warned before it fills", config.display());
+        return Check::ok(check, detail);
+    }
+    Check::ok(check, usage.to_string())
 }
 
 /// The most consumers a stream configured as `config` takes: its `max_consumers`, else the 1000 nats-server 2.15 and
@@ -1558,6 +1608,24 @@ mod tests {
             "900 on stream KV_ants_humans, which takes 1000: once full, no daemon can watch bucket ants_humans"
         );
         assert_eq!(humans.fix, ["ants init"]);
+    }
+
+    #[test]
+    fn storage_warns_past_the_share_naming_the_largest_streams() {
+        let config = Path::new("ants.toml");
+        let usage = |used, limit| Usage { domain: None, leaf: false, store: storage::Store::File, used, limit };
+        assert_eq!(storage_check(&usage(79, Some(100)), &[], 80, config).status, Status::Ok);
+        let full = storage_check(&usage(90, Some(100)), &[("ANTS".to_owned(), 70)], 80, config);
+        assert_eq!(full.status, Status::Warn);
+        assert!(full.detail.ends_with("past 80%: once full, JetStream refuses new messages; using most: ANTS 70 B"));
+        assert!(full.fix[0].contains("max_file_store"), "{:?}", full.fix);
+        let unknown = storage_check(&usage(90, None), &[], 80, config);
+        assert_eq!(unknown.status, Status::Ok);
+        assert!(
+            unknown
+                .detail
+                .ends_with("limit unknown: set max_file_store in [storage] of ants.toml to be warned before it fills")
+        );
     }
 
     #[tokio::test]

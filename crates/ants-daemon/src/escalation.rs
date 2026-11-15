@@ -716,6 +716,7 @@ fn reason_text(reason: EscalationReason) -> &'static str {
         EscalationReason::Approval => "a tool request awaits a decision",
         EscalationReason::Asked => "asked for help",
         EscalationReason::ContextWindow => "context window exceeded",
+        EscalationReason::Storage => "JetStream storage filling up",
         EscalationReason::Unknown => "reason unknown",
     }
 }

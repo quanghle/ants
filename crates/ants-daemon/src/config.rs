@@ -14,6 +14,11 @@
 //! nats = "wss://hub.example/nats"   # default: the top-level nats
 //! js_domain = "hub"                 # default: the top-level js_domain
 //!
+//! [storage]                         # warnings of JetStream storage filling up (crate::storage)
+//! warn_percent = 80                 # warn a human past this share of a store's limit; 0 never
+//! max_file_store = "10GB"           # the hub's limits, which its account's JetStream info does not tell
+//! max_memory_store = "1GB"
+//!
 //! [[ant]]
 //! name = "dev-a"
 //! workdir = "~/src/repo-a"
@@ -73,6 +78,7 @@ use crate::daemon::Config;
 use crate::escalation::{self, Chain};
 use crate::harness::{self, DEFAULT_HARNESS, Harness, Harnesses, ModelSettings, PromptLimits};
 use crate::schedule::{self, Schedule};
+use crate::storage;
 use crate::template::{AntTemplate, REQUEST_KEYS, Request};
 
 /// Environment variable naming the config file.
@@ -113,6 +119,9 @@ struct File {
     metrics: Option<SocketAddr>,
     /// Default time zone of the schedules' cron timetables.
     timezone: Option<String>,
+    /// The warnings of JetStream storage filling up ([`crate::storage`]).
+    #[serde(default)]
+    storage: storage::Settings,
     #[serde(default)]
     cli: CliSection,
     #[serde(default, rename = "ant_template")]
@@ -220,6 +229,9 @@ pub struct Ant {
     /// The daily caps it shares with the other ants added from its template, if the template has any.
     #[serde(skip)]
     pub pool: Option<Pool>,
+    /// The file's `[storage]` table.
+    #[serde(skip)]
+    pub storage: storage::Settings,
 }
 
 fn default_max_harnesses() -> usize {
@@ -305,6 +317,7 @@ impl Ant {
             escalation_reminder: DEFAULT_ESCALATION_REMINDER,
             builtin: false,
             pool: None,
+            storage: storage::Settings::default(),
         }
     }
 
@@ -362,6 +375,7 @@ impl Ant {
             },
             caps,
             spend_warn_percent: self.spend_warn_percent,
+            storage: self.storage,
             pool: self.pool,
             escalation: Chain {
                 escalate_to: self.escalate_to,
@@ -445,6 +459,8 @@ pub struct Loaded {
     pub schedules: Vec<Schedule>,
     /// Where to serve health and metrics, if anywhere.
     pub metrics: Option<SocketAddr>,
+    /// The `[storage]` table.
+    pub storage: storage::Settings,
     /// The file's directory, which relative paths are relative to, and the home directory `~` stands for.
     base: PathBuf,
     home: PathBuf,
@@ -508,6 +524,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
     if let Some(url) = &file.cli.nats {
         crate::bus::check_url(url).with_context(|| format!("config {}: [cli]", path.display()))?;
     }
+    file.storage.validate().with_context(|| format!("config {}", path.display()))?;
     if file.ants.is_empty() && !file.messenger {
         bail!("config {}: messenger = false and no [[ant]] entries: nothing to serve", path.display());
     }
@@ -556,6 +573,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
         if ant.human.is_none() {
             ant.human.clone_from(&file.human);
         }
+        ant.storage = file.storage;
         ants.push(ant);
     }
     let timezone = file
@@ -589,7 +607,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
         schedules.push(schedule);
     }
     let (base, home) = (base.to_owned(), home.to_owned());
-    Ok(Loaded { ants, harnesses, templates, schedules, metrics: file.metrics, base, home })
+    Ok(Loaded { ants, harnesses, templates, schedules, metrics: file.metrics, storage: file.storage, base, home })
 }
 
 /// The file's `templates`, checked, each named once, their workdirs resolved and the harnesses they list defined.
@@ -1772,6 +1790,25 @@ Review changes for correctness."""
         assert!(warn.contains("spend_warn_percent must be below 100"), "{warn}");
         assert!(chain("[\"lead\", \"lead\"]").contains("escalate_to lists lead twice"));
         assert!(chain("[\"Lead!\"]").contains("parsing config"));
+    }
+
+    #[test]
+    fn the_storage_table_reaches_every_ant() {
+        let loaded = parse_all(
+            "[storage]\nwarn_percent = 90\nmax_file_store = \"10GB\"\nmax_memory_store = 1024\n\
+             [[ant]]\nname = \"dev-a\"\nworkdir = \".\"",
+        )
+        .unwrap();
+        let settings =
+            storage::Settings { warn_percent: 90, max_file_store: Some(10 << 30), max_memory_store: Some(1024) };
+        assert_eq!(loaded.storage, settings);
+        assert_eq!(loaded.ants.len(), 2, "dev-a and the messenger");
+        assert!(loaded.ants.iter().all(|ant| ant.storage == settings));
+        assert_eq!(config(loaded.ants[0].clone()).unwrap().storage, settings);
+        let err = |text: &str| format!("{:#}", parse_here(text).unwrap_err());
+        assert!(err("[storage]\nwarn_percent = 100").contains("warn_percent must be below 100"));
+        assert!(err("[storage]\nmax_file_store = \"10 parsecs\"").contains("invalid size"));
+        assert!(err("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nstorage = {}").contains("unknown field"));
     }
 
     #[test]
