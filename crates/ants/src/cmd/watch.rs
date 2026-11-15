@@ -2,8 +2,8 @@
 
 use ants_daemon::reactions;
 use ants_proto::{
-    ApprovalDecision, ApprovalRequest, CancelReply, CancelRequest, ChannelPost, DeadLetter, Envelope, NotesPost,
-    StatusEvent, StatusUpdate, ThreadId, UserId, subject,
+    ApprovalDecision, ApprovalRequest, CancelReply, CancelRequest, ChannelPost, DeadLetter, DecidedBy, Envelope,
+    NotesPost, StatusEvent, StatusUpdate, ThreadId, UserId, subject,
 };
 use anyhow::{Result, bail};
 use futures::StreamExt as _;
@@ -204,6 +204,16 @@ impl Printer {
                 return self
                     .line(&format!("[{thread}] {who}{forged} escalated {stuck}'s {reason} to {to} (level {level})"));
             }
+            StatusUpdate::Decided { request_id, verdict, by, decider } => {
+                let verdict = tools::spelling(*verdict);
+                let outcome = match (by, decider) {
+                    (DecidedBy::Expiry, _) => format!("expired: {verdict}"),
+                    (_, Some(decider)) => format!("decided {verdict} by {decider}"),
+                    (DecidedBy::Human, None) => format!("decided {verdict} by a human"),
+                    (DecidedBy::Chain, None) => format!("decided {verdict} by its chain"),
+                };
+                return self.line(&format!("[{thread}] {who}{forged}: approval {who}/{request_id} {outcome}"));
+            }
         };
         let key = (who.clone(), thread.clone(), verb);
         if !forged.is_empty() {
@@ -310,6 +320,21 @@ mod tests {
         assert_eq!(
             envelope_line(&decided, ""),
             format!("[t1] lead -> dev-a decides allow-once on approval request dev-a/{id}")
+        );
+
+        let mut printer = Printer::default();
+        let mut told = |by, decider| {
+            let verdict = ants_proto::Verdict::AllowOnce;
+            let update = StatusUpdate::Decided { request_id: id, verdict, by, decider };
+            printer.status(&StatusEvent::new(p("dev-a"), "t1".parse().unwrap(), update), "")
+        };
+        assert_eq!(
+            told(DecidedBy::Chain, Some(p("lead"))),
+            format!("[t1] dev-a: approval dev-a/{id} decided allow-once by lead\n")
+        );
+        assert_eq!(
+            told(DecidedBy::Human, None),
+            format!("[t1] dev-a: approval dev-a/{id} decided allow-once by a human\n")
         );
     }
 }

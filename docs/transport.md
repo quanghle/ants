@@ -168,7 +168,7 @@ ants enroll approve dev-c --js-domain hub                         # account-key 
 ```
 
 - **Request & verification:** `ants add --enroll` reads `server_name` and uplink credentials from `leaf.conf` (`--leaf-config`), signing the request with both the enrollment key and the leaf uplink key. `ants enroll` rejects expired, revoked or mismatched enrollment/uplink JWTs or invalid signatures.
-- **Approval & leaf restart:** `ants enroll approve` re-signs the leaf uplink JWT to add the ant (`leaf_jwt`), records the ant in `issued.jsonl`, and admits it to `ANTS` and `ants_links` outbox sourcing if `ANTS_IN` sources the machine. `ants add` writes `<ant>.creds` and the renewed uplink credentials (unless modified concurrently), reloads `ants.daemon`, and restarts `ants.nats` so `nats-server` loads the new uplink file.
+- **Approval & uplink reconnect:** `ants enroll approve` re-signs the leaf uplink JWT to add the ant (`leaf_jwt`), records the ant in `issued.jsonl`, and admits it to `ANTS` and `ants_links` outbox sourcing if `ANTS_IN` sources the machine. `ants add` writes `<ant>.creds` and the renewed uplink credentials (unless modified concurrently), reloads `ants.daemon`, and then has `ants.nats` connect the uplink again with the new file: when the leaf node listening at `leaf.conf`'s `listen` address reports `nats-server` 2.14+ (its `INFO`), it toggles `./` on the remote's `credentials` path in `leaf.conf` and reloads `ants.nats` (`SIGHUP`), reconnecting only the uplink while local clients stay connected; otherwise it restarts `ants.nats`, cutting local connections until they reconnect. Without the service installed, it prints the commands. `ants renew` does the same when the renewed file is the leaf's uplink credentials.
 - **Manager `request_ant`:** signs with the manager's credentials instead of enrollment credentials (`ants signer` renews the uplink JWT and outbox admission). To avoid dropping local client connections on restart, the daemon toggles `./` on the remote's `credentials` path in `leaf.conf` and reloads `ants.nats` (`SIGHUP`), reconnecting only the uplink (`nats-server` 2.14+).
 
 ## Store and forward
@@ -196,7 +196,7 @@ JetStream sources move buffered messages to the hub automatically across outages
 | Daemon dead letters (`ants.dead.<ant>`) | Buffered in `ANTS_OUT` and noted in `<home>/buried`; notice and `+TERM` run on redelivery (or within 30 s of reconnect on the 6th extra delivery) after checking `deadread-<ant>` against duplicates landing past the 24 h window. |
 | Pull consumers, acks, stream reads (`ants inbox`, `ants channel read`, `ants notes`, `ants dead list`/`replay`) | Fail immediately; require the hub stream. |
 | Sequenced `post_notes`, tool approvals (`ants.approvals.*`), channel admin (`ants.chanadm.*`), `ants cancel` of a prompt on another machine (`ants.cancel.*`), `ants queue` of an ant on another machine (`ants.queue.*`) | Fail immediately; require live hub coordination or optimistic concurrency. |
-| Enrollment (`ants.enroll.*`) | `ants add --enroll` keeps repeating its request until the uplink is back and an answer comes or the enrollment credentials expire. |
+| Enrollment (`ants.enroll.*`) | `ants add --enroll` keeps repeating its request until the uplink is back and an answer comes or the enrollment credentials expire or are refused. |
 | Requests for new ants (`ants.antreq.*`) | `request_ant` keeps repeating its request until the uplink is back and an answer comes or its timeout passes. |
 | Requests for reactions (`ants.reactions.*`) | `list_reactions` repeats its request for up to 10 s, then reports that no answer came. |
 | Renewal (`ants.renew.*`) | `ants renew` keeps repeating its request until the uplink is back and an answer comes or the credentials expire. |
@@ -212,6 +212,7 @@ Because core NATS republishes do not cross a down uplink, waiters also poll `ANT
 - **`ants ask --wait` / `--follow`**: polls `ANTS` every 5 s (up to 100 messages/round from the starting sequence): humans via batched direct gets (`$JS.API.DIRECT.GET.ANTS`, `next_by_subj`) updating `ants_read`; ants via short-lived no-ack spare consumers `inbox-<ant>_1..3` (`inactive_threshold` 30 s).
 - **Daemon `ask_ant` and escalation waiters**: listen on live subscriptions while connected and receive outage replies via durable consumer `inbox-<ant>` on reconnect.
 - **`ants post --wait` / `--follow`**: subscribes to `ants.chan.<channel>.*` and polls stored channel posts every 5 s (humans via batched direct gets; ants via `chanread-<ant>_1..3`), starting from the publish ack sequence or 5 m before send time if buffered in `ANTS_OUT`, deduplicating the last 1,024 post IDs.
+- **Reactions while following** (`ants inbox -f`, `ants ask -f`, `ants post -f`): credentials holding `$JS.API.CONSUMER.CREATE.KV_ants_reactions` (humans) open one ordered push consumer (`DeliverPolicy::New`, headers only) on `$KV.ants_reactions.>` before the message is sent or the inbox read, and print changes to shown messages; ant credentials skip it silently, and a consumer that cannot be created logs one warning while following continues.
 
 ## HTTPS fallback bridge
 

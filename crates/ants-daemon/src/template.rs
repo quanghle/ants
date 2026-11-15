@@ -139,8 +139,7 @@ pub struct AntTemplate {
     pub capabilities: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
-    #[serde(default)]
-    pub worktrees: bool,
+    pub worktrees: Option<bool>,
     #[serde(default = "default_idle_timeout", deserialize_with = "ants_proto::duration::deserialize")]
     pub idle_timeout: Duration,
     #[serde(default = "default_approval_timeout", deserialize_with = "ants_proto::duration::deserialize")]
@@ -615,7 +614,7 @@ mod tests {
         assert_eq!((ant.max_harnesses, ant.max_tool_calls), (2, 0));
         assert_eq!(ant.prompt_timeout, Duration::from_mins(20));
         assert_eq!((ant.allow, ant.escalate_to), (vec!["read".to_owned()], vec![id("lead")]));
-        assert_eq!((ant.whoami.as_deref(), ant.worktrees, ant.env.len()), (Some("Work."), true, 1));
+        assert_eq!((ant.whoami.as_deref(), ant.worktrees, ant.env.len()), (Some("Work."), Some(true), 1));
     }
 
     #[test]

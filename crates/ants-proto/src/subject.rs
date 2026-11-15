@@ -321,6 +321,12 @@ pub fn notify_prefs(human: &UserId) -> String {
     format!("$KV.{}.{human}", super::NOTIFY_BUCKET)
 }
 
+/// The [`super::HeldNotices`] of a human in [`super::NOTIFY_BUCKET`]: the subject only that human's credentials put
+/// them on.
+pub fn notify_held(human: &UserId) -> String {
+    format!("$KV.{}.{}", super::NOTIFY_BUCKET, super::held_key(human))
+}
+
 /// Every [`super::Presence`] of a human's devices in [`super::PRESENCE_BUCKET`]: the subjects only that human puts
 /// them on.
 pub fn presence_of(human: &UserId) -> String {

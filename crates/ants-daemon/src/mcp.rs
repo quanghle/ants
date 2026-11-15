@@ -10,6 +10,7 @@
 //! `manage_channel` asks the channel manager to change a channel the ant owns (see [`crate::chanadm`]).
 //! `react` adds or removes the ant's reaction to a message, by default the one being handled, and `list_reactions`
 //! lists the reactions to a message the ant reads (see [`crate::reactions`]).
+//! `suggest_thread_title` has the ant's next message on the thread suggest a title for it ([`Envelope::title`]).
 //!
 //! One server per ant, with two ways in: streamable HTTP on a loopback port, for harnesses that take HTTP MCP
 //! servers, and a local socket that `ants mcp` bridges stdio to, for the others (see [`crate::ipc`]). The sessions of each thread get their
@@ -29,7 +30,7 @@ use agent_client_protocol::v1::schema::{EnvVariable, HttpHeader, McpServer, McpS
 use ants_proto::{
     ApprovalDecision, CHANADM_WAIT, CHANNELS_BUCKET, ChannelAdminOutcome, ChannelAdminRequest, ChannelEntry, ChannelId,
     ChannelOp, ChannelPost, Envelope, EscalationReason, JsDomain, NotesPost, ROSTER_BUCKET, Reaction, ReactionsOutcome,
-    Role, RosterEntry, ThreadId, UserId, Uuid, Verdict,
+    Role, RosterEntry, ThreadId, ThreadTitle, UserId, Uuid, Verdict,
 };
 use anyhow::{Context as _, Result};
 use futures::StreamExt as _;
@@ -395,6 +396,12 @@ impl Mcp {
         self.hub.asks.lock().await.stored.late.iter().filter(|e| &e.thread_id == thread).count()
     }
 
+    /// Take the title the session of `thread` suggested for it during the turn, for the reply to carry, unless a
+    /// message it sent on the thread already carried it.
+    pub fn take_title(&self, thread: &ThreadId) -> Option<String> {
+        self.hub.sessions.locked().titles.remove(thread)
+    }
+
     /// Mark `envelope` as the message its thread is handling until the guard drops. Messages the thread's session
     /// sends meanwhile follow on from it, and spend its turn budget.
     pub fn begin(&self, envelope: &Envelope) -> Turn {
@@ -411,7 +418,9 @@ pub struct Turn {
 
 impl Drop for Turn {
     fn drop(&mut self) {
-        self.hub.sessions.locked().current.remove(&self.thread);
+        let mut sessions = self.hub.sessions.locked();
+        sessions.current.remove(&self.thread);
+        sessions.titles.remove(&self.thread);
     }
 }
 
@@ -448,6 +457,8 @@ struct Sessions {
     by_thread: HashMap<ThreadId, String>,
     /// The message each thread is handling.
     current: HashMap<ThreadId, Envelope>,
+    /// The title each thread's session suggested during its turn, until a message on the thread carries it.
+    titles: HashMap<ThreadId, String>,
 }
 
 /// What `<home>/mcp.json` keeps.
@@ -761,6 +772,22 @@ impl Hub {
         Ok(format!(
             "Posted to #{channel}, starting thread {} that {} created ({left} turns left); {wakes}.",
             post.thread_id, self.ant
+        ))
+    }
+
+    /// Have the reply to the message `thread` is handling suggest `title` for the thread, in place of any title
+    /// suggested earlier in the turn.
+    fn suggest_title(&self, thread: &ThreadId, title: &str) -> Result<String, String> {
+        let title = ThreadTitle::new(thread.clone(), title, self.ant.clone()).map_err(|e| e.to_string())?;
+        let mut sessions = self.sessions.locked();
+        if !sessions.current.contains_key(thread) {
+            return Err("no message is being handled on this thread; a title is suggested only while one is".to_owned());
+        }
+        sessions.titles.insert(thread.clone(), title.title.clone());
+        Ok(format!(
+            "The reply on thread {thread} suggests the title {:?}. It becomes the thread's title when a human lists or \
+             shows the thread, unless the thread has or had another title.",
+            title.title
         ))
     }
 
@@ -1184,6 +1211,12 @@ struct ListReactions {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+struct SuggestThreadTitle {
+    /// The title: one line of 1-120 characters, such as `Fix the flaky login test`.
+    title: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 struct DecideApproval {
     /// `allow_once`, `allow_always` or `reject`.
     verdict: String,
@@ -1408,6 +1441,16 @@ fn describe(entries: &[&RosterEntry]) -> String {
                     limited.kind.as_str(),
                     e.ant,
                     limited.until.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                );
+            }
+            if let Some(low) = &e.memory_low {
+                let _ = write!(
+                    text,
+                    "\n  memory low on {} since {}: at most {} {} at once, so messages may wait longer",
+                    e.machine,
+                    low.since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    low.max_harnesses,
+                    if low.max_harnesses == 1 { "harness runs" } else { "harnesses run" }
                 );
             }
             if let Some(whoami) = &e.whoami
@@ -1668,6 +1711,20 @@ impl Tools {
         Ok(text(self.hub.list_reactions(&thread, args).await))
     }
 
+    #[tool(description = "Suggest a short title for the current thread, one line of 1-120 characters naming what \
+        it is about, such as `Fix the flaky login test`. The reply to the message being handled carries it, when that \
+        reply is a message rather than a channel or notes post; calling again in the same turn replaces it. It \
+        becomes the thread's title, shown to humans in their thread lists, only if the thread has never had one: a \
+        title a human set, renamed or cleared always stays.")]
+    async fn suggest_thread_title(
+        &self,
+        Parameters(args): Parameters<SuggestThreadTitle>,
+        cx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let thread = self.thread(&cx)?;
+        Ok(text(self.hub.suggest_title(&thread, &args.title)))
+    }
+
     #[tool(description = "Decide the approval request that the message being handled brings up the chain: another \
         ant asks to run a tool outside its allowlist, shown in the message. `verdict` is allow_once, allow_always \
         or reject, and goes to that ant; the first decision wins, a human's included, and none before the \
@@ -1870,7 +1927,8 @@ fn instructions(ant: &UserId, manager: bool) -> String {
          channels a human made this ant the owner of, and changes their members and messenger. react marks a \
          message, by default the one being handled, with a reaction such as eyes (seen) or check (done) that \
          humans see beneath it: it wakes nobody, so it acknowledges without a reply. list_reactions shows the \
-         reactions to a message this ant reads, which never arrive as messages. Memory and task \
+         reactions to a message this ant reads, which never arrive as messages. suggest_thread_title proposes a \
+         title for the thread, which the reply carries and which becomes its title unless it ever had one. Memory and task \
          tools follow the ant's configured instructions."
     );
     if manager {
@@ -1884,7 +1942,8 @@ fn instructions(ant: &UserId, manager: bool) -> String {
         text.push_str(
             " As the messenger, answer each request by routing it: pick the capability it needs from list_ants, \
              route it there and reply with the answer. Split a request that needs several capabilities into one \
-             route per capability. When no ant has what it needs, say so instead of answering it yourself.",
+             route per capability. When no ant has what it needs, say so instead of answering it yourself. When a \
+             human's request starts a thread, suggest a short title for it with suggest_thread_title.",
         );
     }
     text

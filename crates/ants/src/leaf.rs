@@ -19,8 +19,9 @@
 
 use std::fmt::Write as _;
 use std::fs;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 
 use ants_proto::{JsDomain, Machine};
 use anyhow::{Context as _, Result, bail};
@@ -207,6 +208,58 @@ pub fn reconnect_uplink(path: &Path, apply: impl FnOnce(Action) -> Outcome) -> R
             path.display()
         ),
     })
+}
+
+/// The oldest nats-server whose reload reconnects a remote whose credentials path changed ([`reconnect_uplink`]).
+const RELOAD_RECONNECTS: (u32, u32) = (2, 14);
+
+/// How long [`running_version`] waits for the leaf node to connect and to say its version.
+const PROBE: Duration = Duration::from_secs(2);
+
+/// Have the leaf node of the configuration at `path`, as [`write`] writes it, use the uplink credentials just renewed
+/// in their file, with `apply` doing it on its service ([`crate::service::Services::apply`]): by [`reconnect_uplink`],
+/// which keeps local connections, when the leaf node listening there runs nats-server 2.14 or later; else, or when it
+/// does not say its version, by a restart. Says what came of it, or how to do it by hand.
+pub fn use_renewed_uplink(path: &Path, mut apply: impl FnMut(Action) -> Outcome) -> String {
+    let version = read_listen(path).ok().and_then(|listen| running_version(&listen));
+    let mut failed = String::new();
+    if version.is_some_and(|version| version >= RELOAD_RECONNECTS) {
+        match reconnect_uplink(path, &mut apply) {
+            Ok(done) => return done,
+            Err(e) => failed = format!("{e:#}; "),
+        }
+    }
+    let (major, minor) = RELOAD_RECONNECTS;
+    let restart = match apply(Action::Restart) {
+        Outcome::Done(command) => format!(
+            "leaf node restarted to use the renewed uplink credentials ({command}); a reload connects the uplink \
+             again alone only with nats-server {major}.{minor} and later"
+        ),
+        Outcome::NotRunning => {
+            "the leaf node service is not running; it uses the renewed uplink credentials once started".to_owned()
+        }
+        outcome => format!(
+            "{}restart the leaf node to use the renewed uplink credentials ({}); SIGHUP connects the uplink again \
+             only with nats-server {major}.{minor} and later",
+            failure(outcome),
+            manual(Service::Nats, Action::Restart)
+        ),
+    };
+    failed + &restart
+}
+
+/// The version, major and minor, of the nats-server listening for local clients at `listen`, as the `INFO` it sends
+/// first on a connection says; None when it does not.
+fn running_version(listen: &str) -> Option<(u32, u32)> {
+    use std::io::{BufRead as _, Read as _};
+    let address: SocketAddr = listen.parse().ok()?;
+    let stream = TcpStream::connect_timeout(&address, PROBE).ok()?;
+    stream.set_read_timeout(Some(PROBE)).ok()?;
+    let mut line = String::new();
+    std::io::BufReader::new(stream.take(64 * 1024)).read_line(&mut line).ok()?;
+    let info: Value = serde_json::from_str(line.strip_prefix("INFO ")?.trim()).ok()?;
+    let mut parts = info.get("version")?.as_str()?.split(['.', '-']).map(|part| part.parse::<u32>().ok());
+    Some((parts.next()??, parts.next()??))
 }
 
 /// The other spelling of the file `path`: with `./` before its name, or without.

@@ -28,6 +28,11 @@
 //! Each human's connection also answers ants asking for the reactions to a message, in one queue group across every
 //! process and human: only humans' credentials read the reactions bucket, and the answer lists them only for a message
 //! the ant reads ([`ants_daemon::reactions::serve`]).
+//!
+//! A notice a snooze or quiet hours hold back is dropped. With `digest = true`, it is counted first in the human's
+//! [`HeldNotices`] in [`NOTIFY_BUCKET`], with compare-and-set, by whichever process took it; once neither holds any
+//! more, checked every [`DIGEST_EVERY`] and before the next notice sent, one process claims the count by deleting it
+//! at the revision it read and sends one digest notice: the counts per kind and the tool requests still pending.
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
@@ -42,11 +47,11 @@ use ants_daemon::redact::Redactor;
 use ants_daemon::sync::MutexExt as _;
 use ants_daemon::unserved::{self, Unserved, Watch};
 use ants_proto::{
-    ApprovalRequest, DeviceId, Envelope, Escalation, EscalationReason, Following, JsDomain, NOTIFY_BUCKET, NotifyPrefs,
-    Role, STREAM, ThreadId, UserId, Uuid, Verdict, notify_consumer, subject,
+    ApprovalRequest, DeviceId, Envelope, Escalation, EscalationReason, Following, HeldNotices, JsDomain, NOTIFY_BUCKET,
+    NotifyPrefs, Role, STREAM, ThreadId, UserId, Uuid, Verdict, held_key, notify_consumer, subject,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
-use async_nats::jetstream::{self, consumer, stream::Stream};
+use async_nats::jetstream::{self, consumer, kv, stream::Stream};
 use chrono::{DateTime, TimeDelta, Utc};
 use data_encoding::{HEXLOWER, HEXLOWER_PERMISSIVE};
 use futures::StreamExt as _;
@@ -90,6 +95,12 @@ const MAX_TEXT: usize = 1500;
 const RECENT: usize = 256;
 /// Most of a sink's answer read, for its error.
 const MAX_ANSWER: usize = 512;
+/// How often a human's held notices are checked for a digest due, besides before each notice sent.
+const DIGEST_EVERY: Duration = if cfg!(test) { Duration::from_millis(200) } else { Duration::from_secs(60) };
+/// Most pending tool requests a digest's text lists.
+const DIGEST_PENDING: usize = 10;
+/// How many times a held notice is counted again when another process counted or claimed meanwhile.
+const CONFLICTS: usize = 10;
 
 // ---- config ----------------------------------------------------------------------------------------------------
 
@@ -118,6 +129,9 @@ pub struct HumanEntry {
     /// What quiet hours and a snooze let through.
     #[serde(default)]
     bypass: Vec<Bypass>,
+    /// Whether one digest of the notices quiet hours or a snooze held back is sent when they end.
+    #[serde(default)]
+    digest: bool,
     #[serde(default)]
     notify: Vec<SinkEntry>,
 }
@@ -187,6 +201,7 @@ pub struct Human {
     completions: bool,
     quiet: Option<QuietHours>,
     bypass: Vec<Bypass>,
+    digest: bool,
     sinks: Vec<Target>,
 }
 
@@ -326,6 +341,7 @@ impl Human {
             completions: entry.completions,
             quiet,
             bypass: entry.bypass,
+            digest: entry.digest,
             sinks,
         })
     }
@@ -371,7 +387,8 @@ impl Human {
             })
             .collect();
         let through = if through.is_empty() { "nothing".to_owned() } else { through.join(" and ") };
-        Some(format!("quiet hours {quiet} ({state}); quiet hours and a snooze let {through} through"))
+        let digest = if self.digest { ", and a digest of the others follows" } else { "" };
+        Some(format!("quiet hours {quiet} ({state}); quiet hours and a snooze let {through} through{digest}"))
     }
 
     /// The consumer's subjects: tool requests and the human's inbox, as configured.
@@ -756,6 +773,8 @@ enum About {
     Test { id: Uuid },
     /// The messages `messages` the human sent, waiting for `ant`, which no daemon serves.
     Unserved { ant: UserId, messages: Vec<Uuid> },
+    /// The digest `id` of the notices `held` back, with the tool requests `pending` when it was sent.
+    Digest { id: Uuid, held: HeldNotices, pending: Vec<ApprovalRequest> },
 }
 
 impl About {
@@ -765,7 +784,19 @@ impl About {
             Self::Approval { request, .. } => Some(&request.thread_id),
             Self::Escalation { escalation, .. } => Some(&escalation.thread_id),
             Self::Completion { thread, .. } => Some(thread),
-            Self::Test { .. } | Self::Unserved { .. } => None,
+            Self::Test { .. } | Self::Unserved { .. } | Self::Digest { .. } => None,
+        }
+    }
+
+    /// Its `kind` in the JSON notice.
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Approval { .. } => "approval",
+            Self::Escalation { .. } => "escalation",
+            Self::Completion { .. } => "completion",
+            Self::Test { .. } => "test",
+            Self::Unserved { .. } => "unserved",
+            Self::Digest { .. } => "digest",
         }
     }
 
@@ -774,7 +805,7 @@ impl About {
         match self {
             Self::Approval { .. } => Some(Bypass::Approvals),
             Self::Escalation { .. } => Some(Bypass::Escalations),
-            Self::Completion { .. } | Self::Test { .. } | Self::Unserved { .. } => None,
+            Self::Completion { .. } | Self::Test { .. } | Self::Unserved { .. } | Self::Digest { .. } => None,
         }
     }
 }
@@ -792,6 +823,12 @@ fn held(human: &Human, about: &About, prefs: &NotifyPrefs, now: DateTime<Utc>) -
         return Some("snoozed");
     }
     human.quiet.as_ref().is_some_and(|quiet| quiet.contains(now)).then_some("quiet hours")
+}
+
+/// Whether a snooze or quiet hours hold back notices of `human` at `now`, whatever its `bypass` lets through: while
+/// they do, no digest is due.
+fn holding(human: &Human, prefs: &NotifyPrefs, now: DateTime<Utc>) -> bool {
+    prefs.snoozed(now) || human.quiet.as_ref().is_some_and(|quiet| quiet.contains(now))
 }
 
 /// `notice` as exec and http sinks get it, at `now`: version [`NOTICE_VERSION`] of the schema the README documents.
@@ -840,6 +877,27 @@ fn notice_json(notice: &Notice, now: DateTime<Utc>) -> Value {
         About::Test { id } => json!({ "kind": "test", "id": id }),
         About::Unserved { ant, messages } => {
             json!({ "kind": "unserved", "id": messages.first(), "ant": ant, "messages": messages })
+        }
+        About::Digest { id, held, pending } => {
+            let pending: Vec<Value> = pending
+                .iter()
+                .map(|request| {
+                    json!({
+                        "request": tools::qualified(request),
+                        "ant": request.ant,
+                        "thread": request.thread_id,
+                        "title": request.tool.title,
+                        "expires_at": request.expires_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    })
+                })
+                .collect();
+            json!({
+                "kind": "digest",
+                "id": id,
+                "since": held.since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                "counts": held.counts,
+                "pending": pending,
+            })
         }
     };
     if let (Value::Object(json), Value::Object(facts)) = (&mut json, facts) {
@@ -1001,6 +1059,61 @@ fn unserved_notice(found: &Unserved, human: &UserId, now: DateTime<Utc>) -> Noti
         text: text.strip_prefix("[ants] ").unwrap_or(&text).to_owned(),
         buttons: Vec::new(),
         urgent: false,
+    }
+}
+
+/// How `n` notices of `kind` read.
+fn counted(kind: &str, n: u32) -> String {
+    let (one, many) = match kind {
+        "approval" => ("tool request", "tool requests"),
+        "escalation" => ("escalation", "escalations"),
+        "completion" => ("reply", "replies"),
+        _ => return format!("{n} {kind} notices"),
+    };
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// The digest to `human` of the notices `held` back, with the tool requests `pending` at `now` (redacted, at most
+/// [`DIGEST_PENDING`] in its text), its times on the wall clock of the human's quiet hours, else UTC.
+fn digest_notice(human: &Human, held: HeldNotices, pending: &[ApprovalRequest], now: DateTime<Utc>) -> Notice {
+    let zone = human.quiet.as_ref().map_or(TimeZone::UTC, |quiet| quiet.zone.clone());
+    let since = jiff::Timestamp::from_second(held.since.timestamp())
+        .map_or_default(|at| at.to_zoned(zone).strftime("%Y-%m-%d %H:%M %Z").to_string());
+    let counts: Vec<String> = held.counts.iter().map(|(kind, n)| counted(kind, *n)).collect();
+    let mut text = format!(
+        "{} held back by quiet hours or a snooze since {since}; nothing was marked read: ants inbox shows the \
+         messages.",
+        counts.join(", ")
+    );
+    let pending: Vec<ApprovalRequest> = pending.iter().map(redacted).collect();
+    if !pending.is_empty() {
+        let _ = write!(
+            text,
+            "\n\n{} still pending:",
+            counted("approval", u32::try_from(pending.len()).unwrap_or(u32::MAX))
+        );
+        for request in pending.iter().take(DIGEST_PENDING) {
+            let _ = write!(
+                text,
+                "\n{} {} ({}), rejected in {} unless answered",
+                tools::qualified(request),
+                request.tool.title,
+                request.tool.kind,
+                tools::left(request.expires_at, now)
+            );
+        }
+        if pending.len() > DIGEST_PENDING {
+            let _ = write!(text, "\n…and {} more: ants tools list", pending.len() - DIGEST_PENDING);
+        }
+    }
+    let total = held.total();
+    Notice {
+        title: format!("{total} {} held back", if total == 1 { "notice" } else { "notices" }),
+        human: human.name.clone(),
+        text,
+        buttons: Vec::new(),
+        urgent: !pending.is_empty(),
+        about: About::Digest { id: Uuid::now_v7(), held, pending },
     }
 }
 
@@ -1177,6 +1290,9 @@ struct HumanBus {
     present: Present,
     /// The human's holds ([`NotifyPrefs`]); none when its credentials may not read them.
     prefs: Option<DirectKv>,
+    /// Where the notices held back are counted for a digest ([`HeldNotices`]); none without `digest` or when its
+    /// credentials may not write them.
+    held: Option<kv::Store>,
 }
 
 /// A human of the config, and its connection once made.
@@ -1244,13 +1360,22 @@ pub async fn run(
     let present = Present::new(&js, js_domain.as_ref()).await?;
     let rights = crate::humans::Rights::from_creds(creds);
     let answers = rights.as_ref().is_ok_and(|r| r.may_publish(subject::ALL_REACTIONS_REPLIES));
-    let prefs = match rights {
+    let (prefs, held) = match rights {
         Ok(rights) if rights.may_publish(&subject::notify_prefs(name)) => {
             // Through a leaf node, a direct get of a missing bucket goes unanswered rather than finding none.
-            if let Err(e) = crate::quiet::ensure_bucket(&js).await {
-                tracing::warn!(human = %name, "{e:#}");
-            }
-            Some(DirectKv::new(&js, js_domain.as_ref(), NOTIFY_BUCKET).await?)
+            let bucket = crate::quiet::ensure_bucket(&js).await.inspect_err(|e| tracing::warn!(human = %name, "{e:#}"));
+            let held = match human.config.digest {
+                false => None,
+                true if rights.may_publish(&subject::notify_held(name)) => bucket.ok(),
+                true => {
+                    tracing::warn!(
+                        human = %name,
+                        "credentials from before digests: none is sent; renew with `ants auth user {name} --human`"
+                    );
+                    None
+                }
+            };
+            (Some(DirectKv::new(&js, js_domain.as_ref(), NOTIFY_BUCKET).await?), held)
         }
         _ => {
             tracing::warn!(
@@ -1258,21 +1383,23 @@ pub async fn run(
                 "credentials from before snoozes and muted threads: every notice is sent; renew with `ants auth user \
                  {name} --human`"
             );
-            None
+            (None, None)
         }
     };
     let unserved = unserved_watch(&human.config, &js, js_domain.as_ref()).await;
-    let _ = human.bus.set(HumanBus { client, js, stream, present, prefs });
+    let _ = human.bus.set(HumanBus { client, js, stream, present, prefs, held });
     let bus = human.bus.get().expect("just set");
     tracing::info!(human = %name, sinks = ?human.config.sinks, "notifying");
     let mut unserved = Box::pin(tell_unserved(&human.config, bus, unserved));
     let mut reactions = Box::pin(answer_reactions(name, answers, bus));
+    let mut digests = Box::pin(digests(&human.config, bus));
     let mut delay = Duration::from_secs(1);
     loop {
         let watched = tokio::select! {
             watched = watch(&human, bus, links.as_deref()) => watched,
             never = &mut unserved => match never {},
             never = &mut reactions => match never {},
+            never = &mut digests => match never {},
         };
         match watched {
             Ok(()) => delay = Duration::from_secs(1),
@@ -1369,8 +1496,12 @@ async fn notify(human: &Notified, bus: &HumanBus, links: Option<&Links>, subject
     if let Some(why) = held(config, &notice.about, &prefs, now) {
         // Dropped, not sent later: the message stays unread and a request pending, as for a notice never sent.
         tracing::info!(human = %config.name, why, title = notice.title, "held back a notice");
+        if why != "muted thread" {
+            count_held(config, bus, notice.about.kind(), now).await;
+        }
         return;
     }
+    digest(config, bus, &prefs, now).await;
     let what = if inbox { Following::Inbox } else { Following::Approvals };
     let reading = bus.present.following(&config.name, config.devices(), what).await;
     if !reading.is_empty() {
@@ -1445,6 +1576,106 @@ async fn answer_reactions(human: &UserId, answers: bool, bus: &HumanBus) -> std:
         tokio::time::sleep(delay).await;
         delay = (delay * 2).min(Duration::from_secs(30));
     }
+}
+
+/// The notices held back from `human` and the revision they were read at, 0 when never stored: none when missing or
+/// deleted, empty counts when malformed.
+async fn load_held(kv: &kv::Store, human: &UserId) -> Result<(Option<HeldNotices>, u64)> {
+    let Some(entry) = kv.entry(held_key(human)).await.context("reading the notices held back")? else {
+        return Ok((None, 0));
+    };
+    if entry.operation != kv::Operation::Put {
+        return Ok((None, entry.revision));
+    }
+    let held = serde_json::from_slice(&entry.value).unwrap_or_else(|e| {
+        tracing::warn!(%human, error = %e, "malformed notices held back: starting over");
+        HeldNotices::default()
+    });
+    Ok((Some(held), entry.revision))
+}
+
+/// Count a notice of `kind` held back from `human` at `now`, for its digest, on top of what other processes counted
+/// meanwhile; a failure is logged.
+async fn count_held(human: &Human, bus: &HumanBus, kind: &str, now: DateTime<Utc>) {
+    let Some(kv) = &bus.held else { return };
+    let name = &human.name;
+    for _ in 0..CONFLICTS {
+        let (held, revision) = match load_held(kv, name).await {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                tracing::warn!(human = %name, error = format!("{e:#}"), "counting a notice held back");
+                return;
+            }
+        };
+        let mut held = held.unwrap_or_default();
+        held.add(kind, now);
+        let Ok(value) = serde_json::to_vec(&held) else { return };
+        match kv.update(held_key(name), value.into(), revision).await {
+            Ok(_) => return,
+            Err(e) if e.kind() == kv::UpdateErrorKind::WrongLastRevision => {}
+            Err(e) => {
+                tracing::warn!(human = %name, error = %e, "counting a notice held back");
+                return;
+            }
+        }
+    }
+    tracing::warn!(human = %name, "counting a notice held back: other processes kept changing the count");
+}
+
+/// Send `human` one digest of the notices held back, if any, once a snooze or quiet hours no longer hold at `now`
+/// ([`holding`]), as `prefs` and its config say. The process whose delete of the count, at the revision it read, is
+/// stored sends it, so one of those notifying the human does, at most once; the others find it gone or changed.
+/// Nothing is marked read or decided.
+async fn digest(human: &Human, bus: &HumanBus, prefs: &NotifyPrefs, now: DateTime<Utc>) {
+    let Some(kv) = &bus.held else { return };
+    if holding(human, prefs, now) {
+        return;
+    }
+    let name = &human.name;
+    let (held, revision) = match load_held(kv, name).await {
+        Ok((Some(held), revision)) => (held, revision),
+        Ok((None, _)) => return,
+        Err(e) => {
+            tracing::warn!(human = %name, error = format!("{e:#}"), "reading the notices held back");
+            return;
+        }
+    };
+    match kv.delete_expect_revision(held_key(name), Some(revision)).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == kv::UpdateErrorKind::WrongLastRevision => return,
+        Err(e) => {
+            tracing::warn!(human = %name, error = %e, "claiming the notices held back");
+            return;
+        }
+    }
+    if held.total() == 0 {
+        return;
+    }
+    let pending = match human.approvals {
+        None => Vec::new(),
+        Some(_) => match tools::pending(&bus.js, &bus.stream, now).await {
+            Ok(pending) => pending.into_iter().filter(|r| human.wants_request_of(&r.ant)).collect(),
+            Err(e) => {
+                tracing::warn!(human = %name, error = format!("{e:#}"), "reading the tool requests still pending");
+                Vec::new()
+            }
+        },
+    };
+    let notice = digest_notice(human, held, &pending, now);
+    tracing::info!(human = %name, title = notice.title, "sending the digest of the notices held back");
+    send(human, &notice, |_| true).await;
+}
+
+/// Check every [`DIGEST_EVERY`] whether the digest of what was held back from `human` is due, and send it if so.
+async fn digests(human: &Human, bus: &HumanBus) -> std::convert::Infallible {
+    if bus.held.is_some() {
+        loop {
+            tokio::time::sleep(DIGEST_EVERY).await;
+            let prefs = holds(human, bus).await;
+            digest(human, bus, &prefs, Utc::now()).await;
+        }
+    }
+    std::future::pending().await
 }
 
 /// The holds `human` set, read anew for each notice: none when they cannot be read, so a failure sends a notice too
