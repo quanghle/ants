@@ -400,7 +400,7 @@ impl Approver {
         // First, as it records nothing: an uplink the hub would refuse leaves no ant signed.
         let renewed = match &request.leaf {
             Some(leaf) => {
-                let more = Permissions::for_leaf(&leaf.machine, [(ant, Role::Ant)]).with_js_domain(domain);
+                let more = Permissions::for_leaf(&leaf.machine, [(ant, Role::Ant)]).with_uplink_js_domain(domain);
                 let renewed = auth::extend_leaf(dir, &leaf.jwt, &leaf.machine, more)
                     .with_context(|| format!("the uplink of the leaf node {} cannot carry {ant}", leaf.machine))?;
                 Some(renewed)

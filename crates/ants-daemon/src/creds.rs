@@ -562,12 +562,17 @@ fn kind(name: &str, publish: &[String], subscribe: &[String], leaf_only: bool) -
             return Ok(Kind::LeafSystem { machine });
         }
         let users = subscribe.iter().filter_map(|s| s.strip_prefix("_INBOX.")?.strip_suffix(".>")?.parse().ok());
+        // With a JetStream domain, an uplink allows KV writes in their domain form only.
+        let domain = js_domain(publish);
+        let has_kv = |kv: &str| {
+            has(publish, kv) || domain.as_ref().is_some_and(|domain| has(publish, &format!("$JS.{domain}.API.{kv}")))
+        };
         let (mut ants, mut humans, mut webhooks) = (Vec::new(), Vec::new(), Vec::new());
         for user in users {
             let user: UserId = user;
-            if has(publish, &subject::roster(&user)) {
+            if has_kv(&subject::roster(&user)) {
                 ants.push(user);
-            } else if has(publish, &format!("$KV.{WEBHOOKS_BUCKET}.{user}.>")) {
+            } else if has_kv(&format!("$KV.{WEBHOOKS_BUCKET}.{user}.>")) {
                 webhooks.push(user);
             } else {
                 humans.push(user);
