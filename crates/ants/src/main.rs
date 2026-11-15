@@ -53,6 +53,7 @@ mod sealed;
 mod search;
 mod serve;
 mod service;
+mod settings;
 mod setup;
 mod signer;
 mod spend;

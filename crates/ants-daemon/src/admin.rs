@@ -6,7 +6,7 @@
 //! deciding again. It refuses every order while the config sets `[admin] remote = false`.
 //!
 //! An order an admin signed it carries out ([`apply`]) with the module of its op: [`set`] edits the ant's settings in
-//! the config file the daemon serves ([`ConfigFile`]), which the daemon reloads at once.
+//! the config file the daemon serves ([`ConfigFile`]), which the daemon reloads at once; [`settings`] reads them.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -28,6 +28,7 @@ use crate::bus;
 use crate::direct_kv::{DirectKv, Lookup};
 
 mod set;
+mod settings;
 
 /// How long an order may stay in hand unacked before the stream delivers it again.
 const ACK_WAIT: Duration = Duration::from_secs(60);
@@ -257,6 +258,7 @@ async fn apply(orders: &Orders, order: &AdminOrder) -> AdminOutcome {
         AdminOp::Add { .. } => refused(order, NOT_SUPPORTED),
         AdminOp::Retire => refused(order, NOT_SUPPORTED),
         AdminOp::ReadMemories => refused(order, NOT_SUPPORTED),
+        AdminOp::ReadSettings => settings::apply(orders, order),
     }
 }
 

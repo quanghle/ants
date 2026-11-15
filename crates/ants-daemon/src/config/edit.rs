@@ -4,12 +4,16 @@
 //!
 //! A field is named by the keys leading to it from the ant's table: `["model"]`, `["env", "RUST_LOG"]`. Values are
 //! JSON, as orders carry them: strings, numbers, booleans, arrays and objects, which become inline tables; a field
-//! holding a datetime reads as its text.
+//! holding a datetime reads as its text. A field whose first key is [`HARNESSES_FIELD`] is one of the file's
+//! `[harnesses]` table instead, which every ant of the machine shares.
 
 use std::path::{Path, PathBuf};
 
-use ants_proto::{FieldChange, UserId};
+use std::sync::LazyLock;
+
+use ants_proto::{FieldChange, HARNESSES_FIELD, UserId, canonical_json};
 use anyhow::{Context as _, Result, bail};
+use ring::hmac;
 use serde_json::{Map, Number, Value};
 use toml_edit::{DocumentMut, InlineTable, Item, TableLike};
 
@@ -38,7 +42,7 @@ impl Edit {
 
     /// The value `field` of `ant`'s `[[ant]]` table holds; none when absent. Fails when the file lists no such ant.
     pub fn get(&self, ant: &UserId, field: &[String]) -> Result<Option<Value>> {
-        let mut table = self.ant(ant)?;
+        let mut table = self.root(ant, field)?;
         let Some((last, parents)) = field.split_last() else { bail!("no field named") };
         for key in parents {
             match table.get(key).and_then(Item::as_table_like) {
@@ -55,7 +59,7 @@ impl Edit {
     pub fn set(&mut self, ant: &UserId, field: &[String], value: Option<&Value>) -> Result<()> {
         let path = self.path.display().to_string();
         let (last, parents) = field.split_last().context("no field named")?;
-        let mut table = self.ant_mut(ant)?;
+        let mut table = self.root_mut(ant, field)?;
         for (i, key) in parents.iter().enumerate() {
             if value.is_none() && !table.contains_key(key) {
                 return Ok(());
@@ -91,9 +95,18 @@ impl Edit {
         Ok(())
     }
 
-    /// Make `changes` to `ant`'s `[[ant]]` table, all or none: each only if its field holds the value it expects, or
-    /// already the new one, which it leaves as it is. Returns whether anything changed. Fails naming the first field
-    /// holding neither, changing nothing; `name`, which names the ant, is never changed.
+    /// The keys of `ant`'s `[[ant]]` table and their values. Fails when the file lists no such ant.
+    pub fn table(&self, ant: &UserId) -> Result<Map<String, Value>> {
+        match table_json(self.ant(ant)?) {
+            Value::Object(map) => Ok(map),
+            _ => unreachable!("a table reads as an object"),
+        }
+    }
+
+    /// Make `changes` to `ant`'s `[[ant]]` table, all or none: each only if its field holds the value it expects (or
+    /// one whose [`digest`] it expects), or already the new one, which it leaves as it is. Returns whether anything
+    /// changed. Fails naming the first field holding neither, changing nothing; `name`, which names the ant, is never
+    /// changed.
     pub fn change(&mut self, ant: &UserId, changes: &[FieldChange]) -> Result<bool> {
         if changes.is_empty() {
             bail!("no field to change");
@@ -109,6 +122,15 @@ impl Edit {
             let current = self.get(ant, &change.field)?;
             if same_opt(current.as_ref(), change.value.as_ref()) {
                 continue;
+            }
+            if let Some(expected) = &change.expected_digest {
+                if current.as_ref().is_some_and(|current| digest(current) == *expected) {
+                    make.push(change);
+                    continue;
+                }
+                bail!(
+                    "{field} changed since the order was sent: it no longer holds the value read, hidden as a secret"
+                );
             }
             if !same_opt(current.as_ref(), change.expected.as_ref()) {
                 bail!(
@@ -142,6 +164,24 @@ impl Edit {
         Ok(loaded)
     }
 
+    /// The table `field` starts from: the file's top level for the `[harnesses]` table, else `ant`'s, which must be
+    /// listed either way.
+    fn root(&self, ant: &UserId, field: &[String]) -> Result<&dyn TableLike> {
+        let table = self.ant(ant)?;
+        if field.first().is_some_and(|key| key == HARNESSES_FIELD) {
+            return Ok(self.doc.as_table());
+        }
+        Ok(table)
+    }
+
+    fn root_mut(&mut self, ant: &UserId, field: &[String]) -> Result<&mut dyn TableLike> {
+        if field.first().is_some_and(|key| key == HARNESSES_FIELD) {
+            self.ant(ant)?;
+            return Ok(self.doc.as_table_mut());
+        }
+        self.ant_mut(ant)
+    }
+
     fn ant(&self, ant: &UserId) -> Result<&dyn TableLike> {
         let named = |t: &dyn TableLike| t.get("name").and_then(Item::as_str) == Some(ant.as_str());
         let found = match self.doc.get("ant") {
@@ -169,6 +209,46 @@ impl Edit {
         };
         found.with_context(|| format!("config {} lists no ant {ant}", self.path.display()))
     }
+}
+
+/// The key the daemon keeps while it runs for [`digest`], so a digest tells nothing of a value to anyone guessing it.
+static DIGEST_KEY: LazyLock<hmac::Key> = LazyLock::new(|| {
+    hmac::Key::generate(hmac::HMAC_SHA256, &ring::rand::SystemRandom::new()).expect("the system's random numbers")
+});
+
+/// The digest of `value`, which stands for a value hidden as a secret: what a change expecting it carries
+/// ([`FieldChange::expected_digest`]). Only the daemon makes one, with a key it keeps from start to exit, so a digest
+/// read before the daemon last started matches no value.
+pub fn digest(value: &Value) -> String {
+    let tag = hmac::sign(&DIGEST_KEY, canonical_json(value).as_bytes());
+    data_encoding::HEXLOWER.encode(&tag.as_ref()[..16])
+}
+
+/// The keys of a field as `KEY` of `ants ant set KEY=VALUE` names them, dotted and quoted where needed: `model`,
+/// `env.RUST_LOG`, `env."a.b"`.
+pub fn field_text(field: &[String]) -> String {
+    field.iter().map(|key| toml_edit::Key::new(key.as_str()).display_repr().into_owned()).collect::<Vec<_>>().join(".")
+}
+
+/// The keys a dotted `KEY` names ([`field_text`]).
+pub fn parse_field(text: &str) -> Result<Vec<String>> {
+    let keys = toml_edit::Key::parse(text.trim()).with_context(|| format!("{text:?} is no TOML key"))?;
+    Ok(keys.into_iter().map(|key| key.get().to_owned()).collect())
+}
+
+/// The value TOML `text` stands for, as a change carries it: `5`, `true`, `"gpt-5"`, `["read"]`, `{ A = "1" }`.
+pub fn parse_value(text: &str) -> Result<Value> {
+    let value: toml_edit::Value = text.trim().parse().with_context(|| format!("{text:?} is no TOML value"))?;
+    let json = value_json(&value);
+    if json.is_null() {
+        bail!("{text:?} is no value a field may hold");
+    }
+    Ok(json)
+}
+
+/// `value` as TOML text, on one line: `"gpt-5"`, `["read", "search"]`, `{ RUST_LOG = "info" }`.
+pub fn toml_text(value: &Value) -> String {
+    toml_value(value).map_or_else(|_| value.to_string(), |value| value.decorated("", "").to_string())
 }
 
 /// A value as a change names it: `"gpt-5"`, `nothing` for none.
@@ -273,7 +353,7 @@ max_harnesses = 2
     }
 
     fn change(field: &str, expected: Option<Value>, value: Option<Value>) -> FieldChange {
-        FieldChange { field: f(field), expected, value }
+        FieldChange { field: f(field), expected, expected_digest: None, value }
     }
 
     fn p(s: &str) -> UserId {
@@ -331,5 +411,20 @@ max_harnesses = 2
         assert!(file.change(&p("dev-b"), &[change("max_harnesses", Some(json!(2)), Some(json!("many")))]).unwrap());
         let e = format!("{:#}", file.check().unwrap_err());
         assert!(e.contains("max_harnesses"), "{e}");
+    }
+
+    #[test]
+    fn keys_and_values_read_and_show_as_toml() {
+        assert_eq!(parse_field("env.RUST_LOG").unwrap(), f("env.RUST_LOG"));
+        let quoted = parse_field("env.\"a.b\"").unwrap();
+        assert_eq!(quoted, ["env", "a.b"]);
+        assert_eq!(field_text(&quoted), "env.\"a.b\"");
+        assert!(parse_field("env..x").is_err());
+        assert_eq!(parse_value("3").unwrap(), json!(3));
+        assert_eq!(parse_value("[\"read\", 'search']").unwrap(), json!(["read", "search"]));
+        assert_eq!(parse_value("{ A = \"1\", b = true }").unwrap(), json!({ "A": "1", "b": true }));
+        assert!(parse_value("gpt-5").is_err());
+        assert_eq!(toml_text(&json!({ "RUST_LOG": "info" })), "{ RUST_LOG = \"info\" }");
+        assert_eq!(toml_text(&json!(["a", 2])), "[\"a\", 2]");
     }
 }

@@ -36,7 +36,6 @@ fn admin_creds<'a>(nats: &Nats<'a>) -> Result<&'a Path> {
 /// Send `op` about `ant` to the daemon of `machine`, else of the machine that last recorded serving it, signed with
 /// the admin credentials of `nats`, once the hub's stream has stored it; then wait up to `wait` for its outcome. None
 /// when the order is still pending then, as it stays until the machine's daemon takes it.
-#[cfg_attr(not(test), expect(dead_code, reason = "the admin commands of ants-5ggma.6 send orders"))]
 pub async fn send(
     nats: &Nats<'_>,
     js: &jetstream::Context,
@@ -208,7 +207,7 @@ pub async fn show(nats: &Nats<'_>, ant: &UserId, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn table(orders: &[Listed], now: DateTime<Utc>) -> String {
+pub(crate) fn table(orders: &[Listed], now: DateTime<Utc>) -> String {
     let header = ["SENT", "ADMIN", "MACHINE", "ORDER", "STATE"].map(str::to_owned);
     let rows: Vec<[String; 5]> = std::iter::once(header)
         .chain(orders.iter().map(|o| {
@@ -242,7 +241,7 @@ fn table(orders: &[Listed], now: DateTime<Utc>) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use ants_daemon::admin::ConfigFile;
     use ants_daemon::direct_kv::DirectKv;
     use ants_daemon::host::{self, Host};
@@ -253,7 +252,7 @@ mod tests {
     use crate::auth::{NewDevice, issue_device_with, issue_host};
     use crate::revoke::Kind;
 
-    const WAIT: Duration = Duration::from_secs(5);
+    pub(crate) const WAIT: Duration = Duration::from_secs(5);
 
     fn p(s: &str) -> UserId {
         s.parse().unwrap()
@@ -261,7 +260,7 @@ mod tests {
 
     /// The host connection of m1 serving dev-a, as a daemon whose config sets `[admin] remote` to `remote` runs it,
     /// serving the file `config`, once it recorded its ants; dropping the sender stops it.
-    async fn host_of_m1(
+    pub(crate) async fn host_of_m1(
         server: &Server,
         js: &jetstream::Context,
         remote: bool,
@@ -405,7 +404,7 @@ mod tests {
         let config = ConfigFile { path: path.clone(), edited: triggers.edits() };
         let (ants, task) = host_of_m1(&server, &js, true, Some(config)).await;
         let set = |field: &str, expected: Option<Value>, value: Option<Value>| AdminOp::Set {
-            changes: vec![FieldChange { field: vec![field.to_owned()], expected, value }],
+            changes: vec![FieldChange { field: vec![field.to_owned()], expected, expected_digest: None, value }],
         };
 
         let model = set("model", Some("gpt-5".into()), Some("o3".into()));

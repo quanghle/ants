@@ -56,10 +56,16 @@ impl Team {
 fn set() -> AdminOp {
     AdminOp::Set {
         changes: vec![
-            FieldChange { field: vec!["model".to_owned()], expected: None, value: Some(json!("gpt-5")) },
+            FieldChange {
+                field: vec!["model".to_owned()],
+                expected: None,
+                expected_digest: None,
+                value: Some(json!("gpt-5")),
+            },
             FieldChange {
                 field: vec!["caps".to_owned(), "daily".to_owned()],
                 expected: Some(json!({ "usd": 5, "tokens": 100 })),
+                expected_digest: None,
                 value: None,
             },
         ],
@@ -151,4 +157,25 @@ fn an_outcome_names_what_was_ordered() {
     let json = serde_json::to_value(&unreadable).unwrap();
     assert_eq!(json.get("admin"), None);
     assert_eq!(json["reason"], "malformed");
+}
+
+#[test]
+fn a_change_expects_what_the_settings_read_or_the_digest_of_a_secret() {
+    let f = |path: &str| path.split('.').map(str::to_owned).collect::<Vec<_>>();
+    let settings: Settings = serde_json::from_value(json!({
+        "fields": { "model": "gpt-5", "env": { "TOKEN": "[redacted]", "RUST_LOG": "info" }, "caps": {} },
+        "hidden": [{ "field": ["env"], "digest": "d1" }, { "field": ["env", "TOKEN"], "digest": "d2" }],
+    }))
+    .unwrap();
+    let model = settings.change(f("model"), Some(json!("o3")));
+    assert_eq!((model.expected, model.expected_digest), (Some(json!("gpt-5")), None));
+    let token = settings.change(f("env.TOKEN"), None);
+    assert_eq!((token.expected, token.expected_digest.as_deref()), (None, Some("d2")));
+    assert_eq!(settings.change(f("env"), None).expected_digest.as_deref(), Some("d1"));
+    let added = settings.change(f("env.TERM"), Some(json!("dumb")));
+    assert_eq!((added.expected, added.expected_digest), (None, None), "absent: expected absent");
+    assert_eq!(settings.get(&f("model.id")), None);
+    let mut leaves: Vec<String> = settings.leaves().into_iter().map(|(field, _)| field.join(".")).collect();
+    leaves.sort();
+    assert_eq!(leaves, ["caps", "env.RUST_LOG", "env.TOKEN", "model"], "an empty table stands for itself");
 }

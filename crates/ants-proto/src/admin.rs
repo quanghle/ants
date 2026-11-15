@@ -86,6 +86,9 @@ pub enum AdminOp {
     Retire,
     /// Read the ant's core and harness memories, which the outcome's `result` carries.
     ReadMemories,
+    /// Read the ant's settings as the machine's config file has them, which the outcome's `result` carries
+    /// ([`Settings`]).
+    ReadSettings,
 }
 
 impl AdminOp {
@@ -103,6 +106,7 @@ impl AdminOp {
             Self::Add { .. } => "add".to_owned(),
             Self::Retire => "retire".to_owned(),
             Self::ReadMemories => "read memories".to_owned(),
+            Self::ReadSettings => "read settings".to_owned(),
         }
     }
 }
@@ -110,11 +114,16 @@ impl AdminOp {
 /// A change of one field of the ant's settings in an [`AdminOp::Set`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FieldChange {
-    /// The keys leading to the field from the ant's `[[ant]]` table: `["model"]`, `["caps", "daily"]`.
+    /// The keys leading to the field from the ant's `[[ant]]` table: `["model"]`, `["caps", "daily"]`; or, first
+    /// [`HARNESSES_FIELD`], from the config file's top level: `["harnesses", "copilot", "command"]`.
     pub field: Vec<String>,
     /// The value the field must hold for the change to apply; none when the field must be absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected: Option<Value>,
+    /// In place of `expected`, for a value a read of the settings hid as a secret ([`Settings::hidden`]): the digest
+    /// that read gave of the value the field must hold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_digest: Option<String>,
     /// The new value; none to remove the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<Value>,
@@ -303,6 +312,74 @@ impl AdminOutcome {
 
     pub fn key(&self) -> String {
         admin_outcome_key(&self.machine, &self.ant, &self.id)
+    }
+}
+
+/// The first key of a field naming the `[harnesses]` table of the config file, which every ant of the machine shares,
+/// rather than a key of the ant's `[[ant]]` table, which has none of that name.
+pub const HARNESSES_FIELD: &str = "harnesses";
+
+/// An ant's settings as its machine's config file has them: what the outcome of an [`AdminOp::ReadSettings`] order
+/// carries as its `result`, and what an admin's changes expect ([`Settings::change`]).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct Settings {
+    /// The keys of the ant's `[[ant]]` table and, under [`HARNESSES_FIELD`], the file's `[harnesses]` table, if any.
+    /// A string holding a secret reads `[redacted]` where the secret is.
+    pub fields: Map<String, Value>,
+    /// The fields holding a secret, and those holding them, with the digest of each one's value.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden: Vec<Hidden>,
+}
+
+/// A field of [`Settings`] whose value holds a secret, so reads otherwise than it is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hidden {
+    pub field: Vec<String>,
+    /// What a change expecting the value the field holds carries as its `expected_digest`.
+    pub digest: String,
+}
+
+impl Settings {
+    /// The value `field` holds, as read; none when absent.
+    pub fn get(&self, field: &[String]) -> Option<&Value> {
+        let (first, rest) = field.split_first()?;
+        rest.iter().try_fold(self.fields.get(first)?, |value, key| value.as_object()?.get(key))
+    }
+
+    /// The digest of the value of `field`, if it holds a secret.
+    pub fn digest(&self, field: &[String]) -> Option<&str> {
+        self.hidden.iter().find(|h| h.field == field).map(|h| h.digest.as_str())
+    }
+
+    /// The change of `field` to `value`, or its removal with none, expecting the value read: refused, should the
+    /// field hold another by the time the order is applied.
+    pub fn change(&self, field: Vec<String>, value: Option<Value>) -> FieldChange {
+        match self.digest(&field) {
+            Some(digest) => FieldChange { expected: None, expected_digest: Some(digest.to_owned()), field, value },
+            None => FieldChange { expected: self.get(&field).cloned(), expected_digest: None, field, value },
+        }
+    }
+
+    /// Every field holding something other than a table, as the keys leading to it, in order: those of tables
+    /// stand for their fields, an empty one for itself.
+    pub fn leaves(&self) -> Vec<(Vec<String>, &Value)> {
+        fn walk<'a>(path: &mut Vec<String>, value: &'a Value, out: &mut Vec<(Vec<String>, &'a Value)>) {
+            match value {
+                Value::Object(map) if !map.is_empty() => {
+                    for (key, value) in map {
+                        path.push(key.clone());
+                        walk(path, value, out);
+                        path.pop();
+                    }
+                }
+                _ => out.push((path.clone(), value)),
+            }
+        }
+        let mut out = Vec::new();
+        for (key, value) in &self.fields {
+            walk(&mut vec![key.clone()], value, &mut out);
+        }
+        out
     }
 }
 

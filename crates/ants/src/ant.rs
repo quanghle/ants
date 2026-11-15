@@ -1,6 +1,7 @@
 //! `ants ant show`, and what the ant view of `ants chat` shows the same way: one ant at a glance. Where and how it runs
 //! and what holds it back, as its roster entry tells; the messages waiting for it, as `ants queue` lists them; its
-//! threads, as `ants thread list --ant` lists them; and what it spent that UTC day, as `ants spend` reports it.
+//! threads, as `ants thread list --ant` lists them; what it spent that UTC day, as `ants spend` reports it; and its
+//! settings and the admin orders to it ([`crate::settings`]).
 
 use std::collections::BTreeMap;
 
@@ -12,7 +13,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::roster::{self, State, short, since};
-use crate::{queue, spend, thread};
+use crate::{orders, queue, settings, spend, thread};
 
 /// How many of its most recently active threads `ants ant show` lists.
 const THREADS_SHOWN: usize = 10;
@@ -74,6 +75,12 @@ struct Shown {
     /// None when it could not be read.
     spend_today: Option<spend::AntReport>,
     threads: Vec<thread::Summary>,
+    /// None when never read.
+    settings: Option<settings::Read>,
+    /// Why the settings are not read afresh, if they are not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    settings_stale: Option<String>,
+    orders: Vec<orders::Listed>,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -108,13 +115,26 @@ pub async fn show(nats: &crate::Nats<'_>, ant: UserId, caps: &BTreeMap<UserId, C
         idle_before: None,
     };
     let (threads, omitted) = thread::listed(nats, None, &select).await?;
+    let reading = settings::read(nats, &js, &ant, settings::READ_WAIT).await?;
     let now = Utc::now();
     let holds = holds(&ant, entry.as_ref(), now);
     if json {
         let roster = entry.as_ref().map(|e| roster::json(e, now)).transpose()?;
         let roster = roster.map(|r| serde_json::from_str(&r)).transpose()?;
         let (queue, queue_unlisted) = queue.map_or((None, 0), |(waiting, more)| (Some(waiting), more));
-        let shown = Shown { ant, roster, holds, queue, queue_unlisted, spend_today: spend, threads };
+        let settings::Reading { read, stale, orders } = reading;
+        let shown = Shown {
+            ant,
+            roster,
+            holds,
+            queue,
+            queue_unlisted,
+            spend_today: spend,
+            threads,
+            settings: read,
+            settings_stale: stale,
+            orders,
+        };
         println!("{}", serde_json::to_string(&shown)?);
         return Ok(());
     }
@@ -156,6 +176,9 @@ pub async fn show(nats: &crate::Nats<'_>, ant: UserId, caps: &BTreeMap<UserId, C
     }
     if omitted > 0 {
         println!("  and {omitted} less recently active");
+    }
+    for line in settings::sections(&ant, &reading, now) {
+        println!("{line}");
     }
     Ok(())
 }
