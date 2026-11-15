@@ -261,8 +261,33 @@ async fn a_session_that_cannot_be_resumed_starts_over_from_the_thread_history() 
                       context rebuilt from the thread's history.\n\nHISTORY 65536\n\nb";
     assert_eq!(pool.run(&thread(1), with_history("b")).await.unwrap().text, format!("s2: {seeded}"));
     assert_eq!(pool.run(&thread(1), with_history("c")).await.unwrap().text, "s2: c", "only the first prompt");
-    assert_eq!(store.get(&thread(1)).await.unwrap(), Some(SessionId::new("s2")));
+    assert_eq!(store.get(&thread(1)).await.unwrap().map(|s| s.session), Some(SessionId::new("s2")));
     assert_eq!(log.locked().prompts, ["a", seeded, "c"], "a session started anew is not seeded");
+}
+
+#[tokio::test]
+async fn a_restarted_pool_resumes_a_session_only_in_the_harness_it_ran_in() {
+    let (launch, log, _) = fake::launch();
+    let (spare, spare_log, _) = fake::launch();
+    let fallbacks = vec![("spare".to_owned(), spare.named("spare"))];
+    let store = SessionStore::memory();
+    let restart = || Pool::new(launch.clone(), store.clone(), 4, IDLE).with_fallbacks(fallbacks.clone());
+    let pool = restart();
+    pool.run_on(&thread(1), with_history("a"), Some(0)).await.unwrap();
+    pool.shutdown().await;
+    let ran_in = |harness: &str| Some(Stored { session: SessionId::new("s1"), harness: harness.to_owned() });
+    assert_eq!(store.get(&thread(1)).await.unwrap(), ran_in("spare"));
+
+    let pool = restart();
+    assert_eq!(pool.run_on(&thread(1), with_history("b"), Some(0)).await.unwrap().text, "s1: b");
+    assert_eq!(spare_log.locked().loaded, ["s1"], "resumed on the fallback it ran in");
+    pool.shutdown().await;
+
+    let pool = restart();
+    let reply = pool.run(&thread(1), with_history("c")).await.unwrap().text;
+    assert!(reply.starts_with("s1: [ants] The earlier session of this thread ran in another harness"), "{reply}");
+    assert!(log.locked().loaded.is_empty(), "the fallback's session is not loaded in the own harness");
+    assert_eq!(store.get(&thread(1)).await.unwrap(), ran_in("test"));
 }
 
 #[tokio::test]
@@ -275,7 +300,11 @@ async fn a_prompt_that_outgrows_the_context_window_runs_again_in_a_new_session_o
     let seeded = "[ants] The session of this thread outgrew the model's context window, so this one starts over, \
                       its context rebuilt from the thread's history.\n\nHISTORY 32768\n\noverflow";
     assert_eq!(reply, Reply { text: format!("s2: {seeded}"), cut: None });
-    assert_eq!(store.get(&thread(1)).await.unwrap(), Some(SessionId::new("s2")), "resumed from now on");
+    assert_eq!(
+        store.get(&thread(1)).await.unwrap().map(|s| s.session),
+        Some(SessionId::new("s2")),
+        "resumed from now on"
+    );
     assert_eq!(pool.run(&thread(1), with_history("b")).await.unwrap().text, "s2: b");
     assert_eq!(log.locked().starts, 1, "the same harness");
 

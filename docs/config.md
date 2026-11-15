@@ -292,7 +292,7 @@ Entries must name a known harness (built-in, `[harnesses.NAME]` or `harnesses.d`
 
 While the ant's own harness cannot serve, each message goes to the first fallback not passed over:
 
-- **Sessions:** a thread whose stored session ran in another harness starts a new session seeded from the thread's history, as after a failed `session/load`; a `:<model>` fallback resumes the thread's session. A live harness on another backend is replaced once idle.
+- **Sessions:** a thread whose stored session ran in another harness (recorded beside the session in `ants_sessions`, so across daemon restarts too) starts a new session seeded from the thread's history, as after a failed `session/load`; a `:<model>` fallback resumes the thread's session. A live harness on another backend is replaced once idle.
 - **Turned away:** a fallback that is signed out, limited or fails to start is passed over for 5 min (or its limit's retry hint), spending no attempt and touching none of the own harness's holds; with every fallback passed over, messages wait as without fallbacks.
 - **Shown:** each reply ends with `[ants] Answered by fallback NAME, harness OWN being signed out.` (or `out of quota`, `failing to start`); `ants_roster` publishes `fallback` (`name`, `since`); `ants roster` shows `fallback` as the activity; `ants ask`, `ask_ant` and `route` treat the ant as served (`route` prefers ants answered by their own harness).
 - **Told once:** the owner's sign-in, quota or breaker notice (one per outage, as without fallbacks) says the messages go to the fallbacks meanwhile.

@@ -6,7 +6,7 @@
 //!
 //! A prompt runs on the ant's own harness or on one of its fallbacks ([`crate::fallback`]). A thread whose live
 //! harness is another one's moves to a new harness once that one is idle, and a session that last ran in another
-//! harness is not resumed: the new one starts over from the thread's history.
+//! harness, as stored beside it, is not resumed: the new one starts over from the thread's history.
 
 use std::collections::HashMap;
 use std::pin::pin;
@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use agent_client_protocol::v1::schema::SessionId;
 use ants_proto::{ThreadId, UserId, session_key};
 use anyhow::{Context as _, Result};
+use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use crate::direct_kv::DirectKv;
@@ -28,13 +29,20 @@ use crate::roster::Workload;
 use crate::sync::MutexExt as _;
 use crate::worktrees::{Branch, Pruned, Worktrees};
 
+/// A thread's stored session and the harness it ran in, so a restarted daemon resumes it only in that harness.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stored {
+    pub session: SessionId,
+    pub harness: String,
+}
+
 /// Where the session of every thread is kept, so a stopped harness or a restarted daemon resumes it.
 #[derive(Clone)]
 pub enum SessionStore {
-    /// The KV bucket [`ants_proto::SESSIONS_BUCKET`], under the ant's own keys.
+    /// The KV bucket [`ants_proto::SESSIONS_BUCKET`], under the ant's own keys, as JSON [`Stored`].
     Kv { kv: Box<DirectKv>, ant: UserId },
     /// In this process only, shared by clones.
-    Memory(Arc<Mutex<HashMap<ThreadId, SessionId>>>),
+    Memory(Arc<Mutex<HashMap<ThreadId, Stored>>>),
 }
 
 impl SessionStore {
@@ -46,26 +54,30 @@ impl SessionStore {
         Self::Memory(Arc::default())
     }
 
-    /// The session the thread last ran in, if any.
-    pub async fn get(&self, thread: &ThreadId) -> Result<Option<SessionId>> {
+    /// The session the thread last ran in, if any, and its harness.
+    pub async fn get(&self, thread: &ThreadId) -> Result<Option<Stored>> {
         match self {
             Self::Kv { kv, ant } => {
-                let value = kv.get(session_key(ant, thread)).await.context("reading the session of the thread")?;
-                Ok(value.and_then(|v| String::from_utf8(v).ok()).map(SessionId::new))
+                let Some(value) =
+                    kv.get(session_key(ant, thread)).await.context("reading the session of the thread")?
+                else {
+                    return Ok(None);
+                };
+                serde_json::from_slice(&value).context("reading the session of the thread").map(Some)
             }
             Self::Memory(map) => Ok(map.locked().get(thread).cloned()),
         }
     }
 
-    pub async fn put(&self, thread: &ThreadId, session: &SessionId) -> Result<()> {
+    pub async fn put(&self, thread: &ThreadId, stored: Stored) -> Result<()> {
         match self {
             Self::Kv { kv, ant } => {
-                kv.put(session_key(ant, thread), session.to_string())
+                kv.put(session_key(ant, thread), serde_json::to_vec(&stored)?)
                     .await
                     .context("storing the session of the thread")?;
             }
             Self::Memory(map) => {
-                map.locked().insert(thread.clone(), session.clone());
+                map.locked().insert(thread.clone(), stored);
             }
         }
         Ok(())
@@ -98,10 +110,6 @@ pub struct Pool {
     /// The fallbacks, by name, in order.
     fallbacks: Vec<(String, Launch)>,
     store: SessionStore,
-    /// The harness each thread's stored session last ran in, of those whose last ran in another than the ant's own:
-    /// held in memory only, so after a restart a stored session is resumed in the ant's own harness, or rebuilt
-    /// should that fail.
-    ran_in: Mutex<HashMap<ThreadId, String>>,
     max_live: usize,
     idle_after: Duration,
     slots: Mutex<HashMap<ThreadId, Slot>>,
@@ -132,7 +140,6 @@ impl Pool {
             launch,
             fallbacks: Vec::new(),
             store,
-            ran_in: Mutex::default(),
             max_live: max_live.max(1),
             idle_after,
             slots: Mutex::default(),
@@ -262,7 +269,8 @@ impl Pool {
         let after = lease.session.id();
         if after != before {
             tracing::info!(%thread, session = %after, "the harness moved to a new session");
-            if let Err(e) = self.store.put(thread, &after).await {
+            let harness = self.launch_on(fallback)?.harness_name().to_owned();
+            if let Err(e) = self.store.put(thread, Stored { session: after, harness }).await {
                 tracing::warn!(%thread, error = format!("{e:#}"), "storing the session of the thread");
             }
         }
@@ -384,22 +392,23 @@ impl Pool {
         Claim::Start
     }
 
+    /// The launch of `fallback`, `None` for the ant's own harness.
+    fn launch_on(&self, fallback: Option<usize>) -> Result<&Launch> {
+        match fallback {
+            Some(i) => Ok(&self.fallbacks.get(i).with_context(|| format!("no fallback {i}"))?.1),
+            None => Ok(&self.launch),
+        }
+    }
+
     /// Start the harness of a thread claimed as [`Slot::Starting`] on `fallback`, resuming its stored session unless
     /// that last ran in another harness.
     async fn start(&self, thread: &ThreadId, fallback: Option<usize>) -> Result<Lease<'_>> {
         let mut starting = Starting { pool: self, thread, done: false };
-        let launch = match fallback {
-            Some(i) => &self.fallbacks.get(i).with_context(|| format!("no fallback {i}"))?.1,
-            None => &self.launch,
-        };
+        let launch = self.launch_on(fallback)?;
         let harness = launch.harness_name();
         let stored = self.store.get(thread).await?;
-        let moved = stored.is_some()
-            && match self.ran_in.locked().get(thread) {
-                Some(ran_in) => ran_in != harness,
-                None => harness != self.launch.harness_name(),
-            };
-        let resume = stored.filter(|_| !moved);
+        let moved = stored.as_ref().is_some_and(|stored| stored.harness != harness);
+        let resume = stored.filter(|_| !moved).map(|stored| stored.session);
         let mut launch = launch.for_thread(thread);
         if let Some(worktrees) = self.worktrees.as_ref().filter(|_| self.isolate) {
             match worktrees.checkout(thread).await {
@@ -415,18 +424,13 @@ impl Pool {
         if let Some(workload) = self.workload.as_ref().filter(|_| fallback.is_none()) {
             workload.set_agent(session.agent().cloned());
         }
-        if harness == self.launch.harness_name() {
-            self.ran_in.locked().remove(thread);
-        } else {
-            self.ran_in.locked().insert(thread.clone(), harness.to_owned());
-        }
         match &resume {
             Some(old) if *old == session.id() => tracing::info!(%thread, session = %old, "resumed harness session"),
             _ => tracing::info!(%thread, session = %session.id(), "started harness session"),
         }
         // Stored on every start, so the key of a thread still in use does not age out. Losing it only costs the
         // thread its history after the next stop, so the prompt goes ahead.
-        if let Err(e) = self.store.put(thread, &session.id()).await {
+        if let Err(e) = self.store.put(thread, Stored { session: session.id(), harness: harness.to_owned() }).await {
             tracing::warn!(%thread, error = format!("{e:#}"), "storing the session of the thread");
         }
         let session = Arc::new(session);
