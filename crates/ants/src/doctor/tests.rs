@@ -423,6 +423,50 @@ fn the_key_check_finds_a_stored_seed_locked_missing_or_of_another_key() {
 }
 
 #[test]
+fn the_xkey_check_warns_of_a_human_device_binding_none_and_fails_on_a_lost_seed() {
+    let dir = ants_test_support::scratch_dir("doctor-xkey");
+    let team = dir.join("team");
+    auth::init(&team).unwrap();
+    let alice: UserId = "alice".parse().unwrap();
+    let path = dir.join("alice.creds");
+    let store = keystore::Memory::default();
+    let rights = || ants_proto::Permissions::for_user(&alice, Role::Human);
+    let check = |path: &Path| {
+        let text = std::fs::read_to_string(path).unwrap();
+        let check = check_xkey("credentials xkey", path, &creds::Finding::from_creds(&text).unwrap(), &store).unwrap();
+        let shown = check.to_string();
+        if let Some(Seed::File(seed)) = creds::xkey_of(&text) {
+            assert!(!shown.contains(seed), "{shown}");
+        }
+        (check.status, shown)
+    };
+
+    auth::issue_device(&team, &alice, revoke::Kind::Human, rights(), None, &path).unwrap();
+    let (status, shown) = check(&path);
+    assert!(status == Status::Ok && shown.contains("in the file"), "{shown}");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let Some(Seed::File(seed)) = creds::xkey_of(&text) else { panic!("{text}") };
+    let other = auth::xseed(&nkeys::XKey::new()).unwrap();
+    std::fs::write(&path, text.replace(seed, &other)).unwrap();
+    let (status, shown) = check(&path);
+    assert!(status == Status::Fail && shown.contains("not that of the key") && shown.contains("backup"), "{shown}");
+
+    let user = nkeys::KeyPair::new_user();
+    let (jwt, _) =
+        auth::sign_device(&team, &alice, revoke::Kind::Human, rights(), None, &user.public_key(), None).unwrap();
+    auth::write_creds(&path, &jwt, &user).unwrap();
+    let (status, shown) = check(&path);
+    assert!(
+        status == Status::Warn && shown.contains("bind no encryption key") && shown.contains("ants renew"),
+        "{shown}"
+    );
+    let ant = auth::sign_user(&team, &"dev-a".parse().unwrap(), Role::Ant, None, &user.public_key()).unwrap();
+    let finding = creds::Finding::from_jwt(&ant).unwrap();
+    assert!(check_xkey("credentials xkey", &path, &finding, &store).is_none(), "an ant's bind none");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn a_check_renders_on_one_line_with_its_fixes_indented() {
     let check = Check::fail("hub", "stream ANTS is missing", vec!["ants init".to_owned()]);
     assert_eq!(check.to_string(), "fail  hub: stream ANTS is missing\n      fix: ants init");

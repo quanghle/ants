@@ -1,9 +1,13 @@
-//! `ants ask`, `ants post`, `ants notes` and `ants react`: what the CLI's human sends.
+//! `ants ask`, `ants post`, `ants notes`, `ants react` and `ants answer`: what the CLI's human sends.
 
 use ants_daemon::reading::Reading;
-use ants_daemon::{bus, notes, owners, reactions};
-use ants_proto::{ChannelId, ChannelPost, Envelope, NotesPost, Reaction, ThreadId, UserId, subject};
-use anyhow::Result;
+use ants_daemon::{bus, notes, owners, questions, reactions};
+use ants_proto::{
+    ChannelId, ChannelPost, Choice, Envelope, NotesPost, Reaction, ReactionChange, ReactionsOutcome, ReactionsRequest,
+    Role, ThreadId, UserId, Uuid, subject,
+};
+use anyhow::{Result, anyhow, bail};
+use async_nats::jetstream;
 use futures::StreamExt as _;
 use futures::stream::BoxStream;
 
@@ -26,15 +30,20 @@ pub(crate) fn recipient(mut words: Vec<String>, input: &compose::Input) -> Resul
 pub(crate) async fn ask(
     nats: &Nats<'_>,
     thread: Option<thread::Pick>,
+    steer: bool,
     replies: &Replies,
     input: &compose::Input,
     words: Vec<String>,
 ) -> Result<()> {
+    if steer && !nats.me.role.is_human() {
+        bail!("the credentials of {} are an ant's; only a human steers an ant", nats.me.id);
+    }
     // Refuse a message with nothing to send before connecting.
     let (to, text) = recipient(words, input)?;
     let (client, js) = nats.connect("ants-cli").await?;
     let thread = thread::resolve(thread, &js, &nats.me).await?;
     let envelope = ask_envelope(&nats.me, thread, to, text);
+    let envelope = if steer { envelope.steering() } else { envelope };
     // Subscribe first so a fast reply is not missed. A waiter also reads back what the hub stored while out of its
     // reach.
     let inbox = if replies.wait || replies.follow {
@@ -234,22 +243,67 @@ pub(crate) async fn react(
     reaction: Reaction,
     remove: bool,
 ) -> Result<()> {
-    let (_, js) = nats.connect("ants-cli").await?;
+    let (client, js) = nats.connect("ants-cli").await?;
     let message = message.resolve(&js, &nats.me).await?;
     let me = &nats.me.id;
-    let line = if remove {
-        if reactions::remove(&js, nats.domain, me, &message, &reaction).await? {
-            format!("removed {reaction} from message {message}")
-        } else {
-            format!("no {reaction} reaction to message {message} to remove")
+    let changed = match nats.me.role {
+        Role::Human if remove => reactions::remove(&js, nats.domain, me, &message, &reaction).await?,
+        Role::Human => reactions::add(&js, nats.domain, me, &message, &reaction).await?,
+        // An ant's credentials write no reactions: `ants signer` makes the change once it found the ant reads the
+        // message.
+        Role::Ant => {
+            let change = ReactionChange { reaction: reaction.clone(), remove };
+            match reactions::request(&client, &ReactionsRequest::change(me.clone(), message, change)).await? {
+                Some(ReactionsOutcome::Applied { changed }) => changed,
+                Some(ReactionsOutcome::Unknown) => {
+                    bail!("message {message} is none {me} reads, or the stream no longer keeps it: nothing changed")
+                }
+                Some(ReactionsOutcome::Listed { .. }) => bail!("an answer to another request"),
+                None => bail!(
+                    "no answer about the reaction, so it may not be made: `ants signer`, on the machine with the \
+                     account key, makes such changes"
+                ),
+            }
         }
-    } else if reactions::add(&js, nats.domain, me, &message, &reaction).await? {
-        format!("reacted {reaction} to message {message}")
-    } else {
-        format!("already reacted {reaction} to message {message}")
+    };
+    let line = match (remove, changed) {
+        (true, true) => format!("removed {reaction} from message {message}"),
+        (true, false) => format!("no {reaction} reaction to message {message} to remove"),
+        (false, true) => format!("reacted {reaction} to message {message}"),
+        (false, false) => format!("already reacted {reaction} to message {message}"),
     };
     println!("{line}");
     Ok(())
+}
+
+/// Answer the question `message` asks the CLI's human with `words`: an option's number, else a typed answer. The
+/// answer goes to the asking ant on the question's thread, as the human's message on it.
+pub(crate) async fn answer(nats: &Nats<'_>, message: thread::MessagePick, words: Vec<String>) -> Result<()> {
+    let me = &nats.me;
+    if !me.role.is_human() {
+        bail!("the credentials of {} are an ant's: only the human an ant asked answers its question", me.id);
+    }
+    let choice = Choice::parse(&words.join(" "));
+    let (_, js) = nats.connect("ants-cli").await?;
+    let id = message.resolve(&js, me).await?;
+    let envelope = answering(&js, &me.id, id, choice).await?;
+    owners::recording(&js, nats.domain, &envelope.thread_id, &envelope.to, &me.id).await;
+    if bus::publish(&js, &envelope).await? == bus::Stored::Outbox {
+        println!("kept in this machine's outbox until the hub is reachable");
+    }
+    println!("thread {}", envelope.thread_id);
+    println!("message {}", envelope.id);
+    Ok(())
+}
+
+/// `human`'s answer `choice` to the question message `id`, read back from those to `human`, asks: a message `human`
+/// owns the thread of, as `ants ask` sends. Fails when no such message is kept, it asks no question, or `choice` is
+/// no answer to it.
+async fn answering(js: &jetstream::Context, human: &UserId, id: Uuid, choice: Choice) -> Result<Envelope> {
+    let question = questions::find(js, "", Reading::Gets, &subject::inbox_of(human), id)
+        .await?
+        .ok_or_else(|| anyhow!("no message {id} to {human} is kept"))?;
+    Ok(Envelope::answering(&question, human.clone(), choice)?.with_owner(Some(human.clone())))
 }
 
 #[cfg(test)]
@@ -297,5 +351,40 @@ mod tests {
         assert!(recipient(words("@Bad.Name hi"), &input).is_err());
         let file = compose::Input { file: Some("-".into()), edit: false };
         assert!(recipient(words("@dev-b more"), &file).unwrap_err().to_string().contains("not both"));
+    }
+
+    #[tokio::test]
+    async fn a_human_answers_a_question_asked_of_it_with_an_option_or_typed_text() {
+        let Some(server) = crate::auth::tests::Server::start() else { return };
+        let (alice, dev_a): (UserId, UserId) = ("alice".parse().unwrap(), "dev-a".parse().unwrap());
+        let (_, js) = server.connect_as(&alice, ants_proto::Role::Human).await;
+        bus::ensure_stream(&js).await.unwrap();
+        let options = ["yes".to_owned(), "not yet".to_owned()];
+        let question = ants_proto::Question::new("Ship it?", &options, false).unwrap();
+        let asked = Envelope::asking(ThreadId::generate(), dev_a.clone(), alice.clone(), question);
+        let plain = Envelope::new(dev_a.clone(), alice.clone(), "hi");
+        let mut forged = asked.clone();
+        forged.id = Uuid::now_v7();
+        for (subject, envelope) in [
+            (asked.subject(), &asked),
+            (plain.subject(), &plain),
+            (subject::inbox(&alice, &"dev-b".parse().unwrap()), &forged),
+        ] {
+            js.publish(subject, serde_json::to_vec(envelope).unwrap().into()).await.unwrap().await.unwrap();
+        }
+
+        let answer = answering(&js, &alice, asked.id, Choice::Option(2)).await.unwrap();
+        assert_eq!((&answer.to, &answer.thread_id, answer.text.as_str()), (&dev_a, &asked.thread_id, "not yet"));
+        assert_eq!((answer.owner.as_ref(), answer.in_reply_to), (Some(&alice), None));
+        assert!(answer.answers(&asked).is_some());
+        let refused = |choice| answering(&js, &alice, asked.id, choice);
+        let wrong = refused(Choice::Option(3)).await.unwrap_err().to_string();
+        assert!(wrong.contains("no option 3; pick 1-2"), "{wrong}");
+        let typed = refused(Choice::parse("after lunch")).await.unwrap_err().to_string();
+        assert!(typed.contains("takes only an option's number"), "{typed}");
+        let none = answering(&js, &alice, plain.id, Choice::Option(1)).await.unwrap_err().to_string();
+        assert!(none.contains("asks no question"), "{none}");
+        let unknown = answering(&js, &alice, forged.id, Choice::Option(1)).await.unwrap_err().to_string();
+        assert!(unknown.contains("is kept"), "a forged question is none: {unknown}");
     }
 }

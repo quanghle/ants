@@ -164,7 +164,7 @@ fn renewed_credentials_keep_what_they_are_for_a_new_key() {
     let renewed = |name: &str| {
         let (jwt, key) = read_creds(&out(name)).unwrap();
         let new = KeyPair::new_user();
-        let renewed = renew(&team, &jwt, &new.public_key()).unwrap();
+        let renewed = renew(&team, &jwt, &new.public_key(), None).unwrap();
         assert!(creds::Finding::from_jwt(&jwt).unwrap().same_credentials(&renewed.finding), "{name}");
         assert_eq!(renewed.finding.version, PERMISSIONS_VERSION, "{name}");
         assert_eq!(
@@ -207,6 +207,9 @@ fn renewed_credentials_keep_what_they_are_for_a_new_key() {
     issue_leaf(&team, &m1, &members, &[p("hook")], EnrollApprover::With, Some(&hub), &out("leaf-m1")).unwrap();
     let leaf = renewed("leaf-m1");
     check_leaf(&account_key(&team).unwrap(), &leaf.jwt, &m1).unwrap();
+    let uplink = allowed(&verified_body(&leaf.jwt).unwrap().1);
+    let react = subject::ALL_REACT_REQUESTS.to_owned();
+    assert!(uplink.subscribe.contains(&react), "`ants signer` on the machine answers ants' reactions requests");
     let kept = crate::members::issued(&team, &m1).unwrap().unwrap();
     assert_eq!(
         kept,
@@ -219,8 +222,49 @@ fn renewed_credentials_keep_what_they_are_for_a_new_key() {
     let key = KeyPair::new_user().public_key();
     let ant = Permissions::for_user(&p("dev-c"), Role::Ant);
     let expiring = user_jwt(&account, &key, "dev-c", ant, json!({}), Some(now().unwrap() + 3600)).unwrap();
-    let exp = verified(&renew(&team, &expiring, &KeyPair::new_user().public_key()).unwrap().jwt).unwrap().exp;
+    let exp = verified(&renew(&team, &expiring, &KeyPair::new_user().public_key(), None).unwrap().jwt).unwrap().exp;
     assert!(exp.is_some_and(|exp| exp.abs_diff(now().unwrap() + 3600) <= 2), "{exp:?}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_human_device_binds_its_encryption_key_and_renewal_keeps_it_or_adds_one() {
+    use ants_daemon::{creds, keystore};
+    let dir = ants_test_support::scratch_dir("renew-xkey");
+    let team = dir.join("auth");
+    init(&team).unwrap();
+    let out = |name: &str| dir.join(format!("{name}.creds"));
+    let human = || Permissions::for_user(&p("alice"), Role::Human);
+    let new = || KeyPair::new_user().public_key();
+    let bound = |jwt: &str| creds::Finding::from_jwt(jwt).unwrap().xkey;
+    let registered = || revoke::issued(&team).unwrap().pop().unwrap().xkey;
+
+    issue_device(&team, &p("alice"), Kind::Human, human(), Some("laptop"), &out("alice")).unwrap();
+    let (jwt, _) = read_creds(&out("alice")).unwrap();
+    let xkey = creds::load_xkey(&out("alice"), &keystore::Memory::default()).unwrap().unwrap();
+    let laptop = device_key(&xkey).unwrap();
+    assert_eq!((bound(&jwt), registered()), (Some(laptop.clone()), Some(laptop.clone())));
+    let renewed = renew(&team, &jwt, &new(), None).unwrap();
+    assert_eq!((bound(&renewed.jwt), registered()), (Some(laptop.clone()), Some(laptop.clone())), "kept");
+    let other = device_key(&XKey::new()).unwrap();
+    let err = renew(&team, &jwt, &new(), Some(&other)).unwrap_err().to_string();
+    assert!(err.contains("already"), "{err}");
+
+    let (unbound, _) = sign_device(&team, &p("alice"), Kind::Human, human(), None, &new(), None).unwrap();
+    assert_eq!(bound(&unbound), None, "signed for a key generated elsewhere, without --xkey");
+    let added = renew(&team, &unbound, &new(), Some(&other)).unwrap();
+    assert_eq!((bound(&added.jwt), registered()), (Some(other.clone()), Some(other.clone())));
+    let devices = revoke::devices(&team, "alice").unwrap();
+    assert_eq!(devices.iter().map(|d| d.xkey.clone()).collect::<Vec<_>>(), [Some(laptop), Some(other.clone())]);
+
+    issue(&team, &p("dev-a"), Role::Ant, None, &out("dev-a")).unwrap();
+    let (ant, _) = read_creds(&out("dev-a")).unwrap();
+    assert_eq!(bound(&ant), None);
+    assert!(creds::xkey_of(&std::fs::read_to_string(out("dev-a")).unwrap()).is_none(), "an ant holds no xkey");
+    let err = renew(&team, &ant, &new(), Some(&other)).unwrap_err().to_string();
+    assert!(err.contains("only a human's"), "{err}");
+    let ant_rights = Permissions::for_user(&p("dev-b"), Role::Ant);
+    assert!(sign_device(&team, &p("dev-b"), Kind::Ant, ant_rights, None, &new(), Some(&other)).is_err());
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -232,7 +276,7 @@ fn credentials_expired_revoked_foreign_or_of_no_renewable_kind_are_not_renewed()
     init(&other).unwrap();
     let out = |name: &str| dir.join(format!("{name}.creds"));
     let jwt = |name: &str| read_creds(&out(name)).unwrap();
-    let refused = |jwt: &str, key: &str| renew(&team, jwt, key).unwrap_err().to_string();
+    let refused = |jwt: &str, key: &str| renew(&team, jwt, key, None).unwrap_err().to_string();
     let new = || KeyPair::new_user().public_key();
 
     issue(&team, &p("dev-a"), Role::Ant, None, &out("dev-a")).unwrap();
@@ -343,7 +387,7 @@ fn uplink_credentials_a_hub_would_refuse_are_neither_issued_nor_renewed() {
     init(&team).unwrap();
     let domain: JsDomain = "hub".parse().unwrap();
     let (ants, err) = uplink_for_most_ants(&team, &m1, Some(&domain), &out);
-    assert!(ants.len() >= 30, "only {} ants fit", ants.len());
+    assert!(ants.len() >= 29, "only {} ants fit", ants.len());
     assert!(err.contains("max_control_line 16384") && err.contains("another leaf node"), "{err}");
     let (jwt, _) = read_creds(&out).unwrap();
     assert!(jwt.len() <= MAX_UPLINK_JWT, "the refused credentials are not written");
@@ -354,7 +398,7 @@ fn uplink_credentials_a_hub_would_refuse_are_neither_issued_nor_renewed() {
 }
 
 /// Each ant added behind a leaf node (`request_ant`, enrollment) grows its uplink JWT by the same amount, about
-/// 4.2 KB for a six-character name, 8 KB with the hub's JetStream domain: no permission is shared between two
+/// 4.6 KB for a six-character name, 8.6 KB with the hub's JetStream domain: no permission is shared between two
 /// ants, and none is a pattern matching an ant not yet added.
 #[test]
 fn each_ant_added_grows_the_uplink_by_the_same_measure() {
@@ -362,7 +406,7 @@ fn each_ant_added_grows_the_uplink_by_the_same_measure() {
     let (team, out, m1) = (dir.join("auth"), dir.join("leaf-m1.creds"), "m1".parse::<Machine>().unwrap());
     init(&team).unwrap();
     let hub: JsDomain = "hub".parse().unwrap();
-    for (domain, least, most) in [(None, 3_800, 4_600), (Some(&hub), 7_500, 8_500)] {
+    for (domain, least, most) in [(None, 4_200, 5_000), (Some(&hub), 8_000, 9_000)] {
         issue_leaf(&team, &m1, &members(&[p("dev-00")], &[]), &[], EnrollApprover::Without, domain, &out).unwrap();
         let (mut jwt, _) = read_creds(&out).unwrap();
         let mut growth = Vec::new();
@@ -377,7 +421,7 @@ fn each_ant_added_grows_the_uplink_by_the_same_measure() {
         assert!(max - min <= 4, "ants of names of one length grow it alike: {growth:?}");
         assert!((least..=most).contains(&max), "{max} bytes per ant, domain {domain:?}");
         let room = (MAX_UPLINK_JWT - jwt.len()) / max + 6;
-        assert!(room >= if domain.is_some() { 30 } else { 55 }, "{room} ants fit");
+        assert!(room >= if domain.is_some() { 29 } else { 55 }, "{room} ants fit");
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -1033,50 +1077,119 @@ async fn ants_record_the_links_they_pass_on_and_read_everyone_s() {
 }
 
 #[tokio::test]
-async fn each_reactor_adds_and_removes_only_its_own_reactions_and_only_humans_read_them() {
-    use ants_daemon::reactions::{self, Reacted};
+async fn senders_store_their_own_attachments_and_ants_read_those_of_the_messages_they_read() {
+    use ants_daemon::files;
+    use ants_proto::{AttachmentHandle, AttachmentScope};
+
+    let Some(server) = Server::start() else { return };
+    let (human, dev_a, dev_b, dev_c) = (UserId::human(), p("dev-a"), p("dev-b"), p("dev-c"));
+    let (_a, a_js) = server.connect(&dev_a).await;
+    assert!(a_js.create_stream(ants_daemon::hub::files_config()).await.is_err(), "only a human creates it");
+    let (_h, h_js) = server.connect(&human).await;
+    h_js.create_stream(ants_daemon::hub::files_config()).await.unwrap();
+    let (_b, b_js) = server.connect(&dev_b).await;
+    let (_c, c_js) = server.connect(&dev_c).await;
+
+    let store = async |js: &jetstream::Context, from: &UserId, scope: AttachmentScope| {
+        let attachment = files::reference("report.txt", "text/plain", b"findings").unwrap();
+        let handle = AttachmentHandle { from: from.clone(), scope, id: attachment.id };
+        files::put(js, &handle, &attachment, b"findings").await.unwrap();
+        handle
+    };
+    let to_b = store(&a_js, &dev_a, AttachmentScope::Inbox(dev_b.clone())).await;
+    let notes = store(&a_js, &dev_a, AttachmentScope::Notes(ThreadId::generate())).await;
+    let channel: ChannelId = "ops".parse().unwrap();
+    let chan = store(&b_js, &dev_b, AttachmentScope::Chan(channel)).await;
+    let from_human = store(&h_js, &human, AttachmentScope::Inbox(dev_a.clone())).await;
+    for (js, handle) in [(&b_js, &to_b), (&a_js, &to_b), (&h_js, &to_b), (&c_js, &notes), (&c_js, &chan)] {
+        assert_eq!(files::get(js, handle, None).await.unwrap().1, b"findings", "{handle}");
+    }
+    assert_eq!(files::get(&a_js, &from_human, None).await.unwrap().1, b"findings");
+    assert!(files::get(&c_js, &to_b, None).await.is_err(), "dev-c reads no messages between dev-a and dev-b");
+
+    let (raw, mut errors) = server.watched(&dev_c).await;
+    let theirs = format!("$JS.API.DIRECT.GET.{}.{}", ants_proto::FILES_STREAM, to_b.chunk_subject(0));
+    raw.publish(theirs.clone(), "".into()).await.unwrap();
+    assert!(next_violation(&raw, &mut errors).await.contains(&theirs), "reading others' attachments is denied");
+    let forged = AttachmentHandle { from: dev_a.clone(), ..to_b.clone() }.chunk_subject(1);
+    raw.publish(forged.clone(), "x".into()).await.unwrap();
+    assert!(next_violation(&raw, &mut errors).await.contains(&forged), "storing as another sender is denied");
+}
+
+#[tokio::test]
+async fn humans_write_only_their_own_reactions_and_ants_change_theirs_through_ants_signer() {
+    use ants_daemon::reactions::{self, Answering, Reacted};
+    use ants_proto::{ReactionChange, ReactionsOutcome, ReactionsRequest};
 
     let Some(server) = Server::start() else { return };
     let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
     let (eyes, check): (ants_proto::Reaction, ants_proto::Reaction) =
         ("eyes".parse().unwrap(), "check".parse().unwrap());
-    let message = ants_proto::Uuid::now_v7();
-    let (_a, a_js) = server.connect(&dev_a).await;
+    let (a_client, a_js) = server.connect(&dev_a).await;
     assert!(a_js.create_stream(ants_daemon::hub::reactions_config()).await.is_err(), "only a human creates it");
     let (h_client, h_js) = server.connect(&human).await;
+    bus::ensure_stream(&h_js).await.unwrap();
     h_js.create_stream(ants_daemon::hub::reactions_config()).await.unwrap();
+    let (to_a, between) = (
+        Envelope::new(human.clone(), dev_a.clone(), "for dev-a"),
+        Envelope::new(human.clone(), dev_b.clone(), "for dev-b"),
+    );
+    for envelope in [&to_a, &between] {
+        bus::publish(&h_js, envelope).await.unwrap();
+    }
+    let message = to_a.id;
     let mut heard = h_client.subscribe(subject::ALL).await.unwrap();
     h_client.flush().await.unwrap();
 
-    assert!(reactions::add(&a_js, None, &dev_a, &message, &eyes).await.unwrap());
-    assert!(reactions::add(&a_js, None, &dev_a, &message, &check).await.unwrap());
     assert!(reactions::add(&h_js, None, &human, &message, &eyes).await.unwrap());
-    // dev-a can neither read nor remove the human's reaction, nor react as dev-b.
-    assert!(reactions::remove(&a_js, None, &human, &message, &eyes).await.is_err());
-    assert!(reactions::add(&a_js, None, &dev_b, &message, &eyes).await.is_err());
-    assert!(reactions::load(&a_js, &[message]).await.is_err(), "an ant reads no one else's reactions");
+    assert!(reactions::add(&h_js, None, &dev_a, &message, &check).await.is_err(), "a human reacts as nobody else");
+    // dev-a neither writes reactions, not even its own, nor reads them.
+    assert!(reactions::add(&a_js, None, &dev_a, &message, &eyes).await.is_err());
+    assert!(reactions::load(&a_js, &[message]).await.is_err(), "an ant reads no reactions");
     let (raw, mut errors) = server.watched(&dev_a).await;
-    let forged = format!("$KV.ants_reactions.dev-b.{message}.x");
-    raw.publish(forged.clone(), "{}".into()).await.unwrap();
-    assert!(next_violation(&raw, &mut errors).await.contains(&forged), "a forged reaction is denied");
+    for key in [format!("dev-a.{message}.x"), format!("dev-b.{message}.x")] {
+        let forged = format!("$KV.ants_reactions.{key}");
+        raw.publish(forged.clone(), "{}".into()).await.unwrap();
+        assert!(next_violation(&raw, &mut errors).await.contains(&forged), "a direct reaction is denied");
+    }
     let theirs = format!("$KV.ants_reactions.{human}.{message}.eyes");
     let mut delete = async_nats::HeaderMap::new();
     delete.insert("KV-Operation", "DEL");
     raw.publish_with_headers(theirs.clone(), delete, "".into()).await.unwrap();
     assert!(next_violation(&raw, &mut errors).await.contains(&theirs), "removing another's reaction is denied");
+    let quiet = timeout(Duration::from_millis(300), heard.next()).await;
+    assert!(quiet.is_err(), "a reaction is no message: {quiet:?}");
 
-    let all = reactions::load(&h_js, &[message]).await.unwrap();
+    // `ants signer`'s credentials answer an ant's requests, for the messages it reads only.
+    let approver =
+        crate::enroll::Approver::connect_signer(&server.url, &server.dir().join("auth"), None, WAIT).await.unwrap();
+    let serving = tokio::spawn(reactions::serve(
+        approver.client.clone(),
+        approver.hub().clone(),
+        None,
+        Answering::ListsAndChanges,
+    ));
+    let change = |message, reaction: &ants_proto::Reaction, remove| {
+        ReactionsRequest::change(dev_a.clone(), message, ReactionChange { reaction: reaction.clone(), remove })
+    };
+    let applied = |changed| Some(ReactionsOutcome::Applied { changed });
+    assert_eq!(reactions::request(&a_client, &change(message, &eyes, false)).await.unwrap(), applied(true));
+    assert_eq!(reactions::request(&a_client, &change(message, &check, false)).await.unwrap(), applied(true));
+    let unread = reactions::request(&a_client, &change(between.id, &eyes, false)).await.unwrap();
+    assert_eq!(unread, Some(ReactionsOutcome::Unknown), "dev-a reads no message to dev-b");
     let expected = vec![
         Reacted { reaction: check.clone(), by: vec![dev_a.clone()] },
         Reacted { reaction: eyes.clone(), by: vec![dev_a.clone(), human.clone()] },
     ];
-    assert_eq!(all[&message], expected);
-    assert!(reactions::remove(&a_js, None, &dev_a, &message, &eyes).await.unwrap());
-    assert!(!reactions::remove(&a_js, None, &dev_a, &message, &eyes).await.unwrap(), "removed already");
+    let listed = reactions::ask(&a_client, &dev_a, message).await.unwrap();
+    assert_eq!(listed, Some(ReactionsOutcome::Listed { reactions: expected.clone() }));
+    assert_eq!(reactions::load(&h_js, &[message]).await.unwrap()[&message], expected);
+    assert!(!reactions::load(&h_js, &[between.id]).await.unwrap().contains_key(&between.id));
+    assert_eq!(reactions::request(&a_client, &change(message, &eyes, true)).await.unwrap(), applied(true));
+    assert_eq!(reactions::request(&a_client, &change(message, &eyes, true)).await.unwrap(), applied(false));
     let all = reactions::load(&h_js, &[message]).await.unwrap();
     assert_eq!(all[&message][1], Reacted { reaction: eyes, by: vec![human] });
-    let quiet = timeout(Duration::from_millis(300), heard.next()).await;
-    assert!(quiet.is_err(), "a reaction is no message: {quiet:?}");
+    serving.abort();
 }
 
 #[tokio::test]
@@ -1105,6 +1218,10 @@ async fn any_human_titles_a_thread_but_each_marks_only_its_own_threads() {
     let ant = Meta::open(&d_js, None, &dev_a).await.unwrap();
     assert!(ant.title(&thread).await.is_err(), "an ant reads no title");
     assert!(ant.set_title(&thread, "mine").await.is_err(), "nor sets one");
+    assert!(alice_meta.set_done(&thread, 1).await.unwrap());
+    assert!(bob_meta.clear_done(&thread).await.unwrap().is_some_and(|d| d.by == alice), "bob clears alice's done");
+    assert!(ant.done(&thread).await.is_err(), "an ant reads no done state");
+    assert!(ant.set_done(&thread, 1).await.is_err(), "nor marks a thread done");
 
     assert!(alice_meta.change_marks(|m| m.pin(&thread)).await.unwrap());
     assert!(!alice_meta.change_marks(|m| m.pin(&thread)).await.unwrap(), "pinned already");
@@ -1124,6 +1241,9 @@ async fn any_human_titles_a_thread_but_each_marks_only_its_own_threads() {
     let (raw, mut errors) = server.watched(&dev_a).await;
     raw.publish(title.clone(), "{}".into()).await.unwrap();
     assert!(next_violation(&raw, &mut errors).await.contains(&title), "an ant's title is denied");
+    let done = format!("$KV.{}.{}", ants_proto::THREADS_BUCKET, ants_proto::done_key(&thread));
+    raw.publish(done.clone(), "{}".into()).await.unwrap();
+    assert!(next_violation(&raw, &mut errors).await.contains(&done), "an ant's done state is denied");
 }
 
 #[tokio::test]

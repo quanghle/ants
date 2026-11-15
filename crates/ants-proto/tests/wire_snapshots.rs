@@ -58,6 +58,16 @@ fn at(minute: u32) -> DateTime<Utc> {
     format!("2025-01-01T12:{minute:02}:00Z").parse().unwrap()
 }
 
+fn attachment() -> Attachment {
+    Attachment {
+        id: id(20),
+        name: "build log.txt".to_owned(),
+        mime: "text/plain".to_owned(),
+        size: 1234,
+        sha256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08".to_owned(),
+    }
+}
+
 fn escalation() -> Escalation {
     Escalation {
         stuck: user("dev-a"),
@@ -104,6 +114,14 @@ fn envelope() -> Envelope {
         allow: Some(vec!["read:*".to_owned(), "other:send_message".to_owned()]),
         mention: Some(mention()),
         title: Some("Fix the build".to_owned()),
+        question: Some(Question {
+            text: "Ship the fix?".to_owned(),
+            options: vec!["yes".to_owned(), "not yet".to_owned()],
+            free_text: false,
+        }),
+        answer: Some(Answer { question: id(4), option: Some(2) }),
+        steer: true,
+        attachments: vec![attachment()],
         sent_at: at(0),
     }
 }
@@ -121,6 +139,10 @@ fn plain_envelope() -> Envelope {
         allow: None,
         mention: None,
         title: None,
+        question: None,
+        answer: None,
+        steer: false,
+        attachments: Vec::new(),
         ..envelope()
     }
 }
@@ -212,11 +234,18 @@ fn kv_entries() {
         "reaction_entry",
         &ReactionEntry { message: id(1), by: user("alice"), reaction: "eyes".parse().unwrap(), at: at(0) },
     );
-    snap("reactions_request", &ReactionsRequest { id: id(1), ant: user("dev-a"), message: id(2), requested_at: at(0) });
+    let request = ReactionsRequest { id: id(1), ant: user("dev-a"), message: id(2), requested_at: at(0), change: None };
+    snap("reactions_request", &request);
+    for (kind, remove) in [("react", false), ("unreact", true)] {
+        let change = Some(ReactionChange { reaction: "eyes".parse().unwrap(), remove });
+        snap(&format!("reactions_request_{kind}"), &ReactionsRequest { change, ..request.clone() });
+    }
     let reacted = Reacted { reaction: "eyes".parse().unwrap(), by: vec![user("alice"), user("dev-b")] };
-    for (kind, outcome) in
-        [("listed", ReactionsOutcome::Listed { reactions: vec![reacted] }), ("unknown", ReactionsOutcome::Unknown)]
-    {
+    for (kind, outcome) in [
+        ("listed", ReactionsOutcome::Listed { reactions: vec![reacted] }),
+        ("applied", ReactionsOutcome::Applied { changed: true }),
+        ("unknown", ReactionsOutcome::Unknown),
+    ] {
         let reply = ReactionsReply { request_id: id(1), ant: user("dev-a"), message: id(2), outcome };
         snap(&format!("reactions_reply_{kind}"), &reply);
     }
@@ -225,6 +254,7 @@ fn kv_entries() {
         "thread_title",
         &ThreadTitle { thread_id: thread(), title: "Release 0.2".to_owned(), by: user("alice"), at: at(0) },
     );
+    snap("thread_done", &ThreadDone { thread_id: thread(), by: user("alice"), at: at(0), after: 4211 });
     snap(
         "thread_marks",
         &ThreadMarks {
@@ -284,6 +314,7 @@ fn envelopes() {
             ..message.clone()
         },
     );
+    snap("envelope_steer", &Envelope { owner: Some(user("alice")), steer: true, ..message.clone() });
     snap(
         "envelope_mention_notice",
         &Envelope { from: user("dev-b"), to: user("alice"), mention: Some(mention()), ..message },
@@ -327,6 +358,8 @@ fn notes() {
             from: user("dev-a"),
             text: "taking the parser".to_owned(),
             turn_budget: 7,
+            title: Some("Rewrite the parser".to_owned()),
+            attachments: vec![attachment()],
             sent_at: at(0),
         },
     );
@@ -400,6 +433,8 @@ fn channels() {
             creator: Some(user("planner")),
             webhook: true,
             allow: Some(vec!["read:*".to_owned()]),
+            title: Some("Fix CI".to_owned()),
+            attachments: vec![attachment()],
             sent_at: at(0),
         },
     );
@@ -481,6 +516,19 @@ fn enrollment() {
             host: "laptop.local".to_owned(),
             sent_at: at(0),
             current: "eyJ0eXAiOiJKV1QifQ.current".to_owned(),
+            xkey: None,
+            signature: "c2lnLXJlbmV3".to_owned(),
+        },
+    );
+    snap(
+        "renew_request_xkey",
+        &RenewRequest {
+            name: "alice".to_owned(),
+            public_key: "UDEF".to_owned(),
+            host: "laptop.local".to_owned(),
+            sent_at: at(0),
+            current: "eyJ0eXAiOiJKV1QifQ.current".to_owned(),
+            xkey: Some("XBLFEIK7UCHY5XKH7LGNQ4JZNVOZEWMIHPZH3LP4JUBJ6KQZDVBEWHWB".parse().unwrap()),
             signature: "c2lnLXJlbmV3".to_owned(),
         },
     );

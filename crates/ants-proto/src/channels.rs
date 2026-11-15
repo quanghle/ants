@@ -2,12 +2,12 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[cfg(doc)]
-use crate::{CHANNELS_BUCKET, HUMANS_BUCKET, WEBHOOK_ALLOW, WEBHOOKS_BUCKET, webhook_marker_key};
 use crate::{
-    ChannelId, ChannelOp, DEFAULT_TURN_BUDGET, Envelope, Error, Humans, Mention, Refusal, ThreadId, UserId,
+    Attachment, ChannelId, ChannelOp, DEFAULT_TURN_BUDGET, Envelope, Error, Humans, Mention, Refusal, ThreadId, UserId,
     parse_mentions, subject,
 };
+#[cfg(doc)]
+use crate::{CHANNELS_BUCKET, HUMANS_BUCKET, WEBHOOK_ALLOW, WEBHOOKS_BUCKET, webhook_marker_key};
 
 /// A channel's entry in the [`CHANNELS_BUCKET`], under the key of its channel id. Humans write it, and the channel
 /// manager on its owner's requests ([`ChannelEntry::apply`]).
@@ -188,6 +188,14 @@ pub struct ChannelPost {
     /// none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow: Option<Vec<String>>,
+    /// The title the posting ant suggests for the thread, as [`Envelope::title`]: an ant's reply on the thread
+    /// carries the one its MCP tool suggest_thread_title took. Never copied by [`ChannelPost::reply`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// The files attached to the post, stored before it under its [`ChannelPost::attachment_handle`]s. Never copied
+    /// by [`ChannelPost::reply`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
     pub sent_at: DateTime<Utc>,
 }
 
@@ -217,6 +225,8 @@ impl ChannelPost {
             creator: None,
             webhook: false,
             allow: None,
+            title: None,
+            attachments: Vec::new(),
             sent_at: Utc::now(),
         }
     }

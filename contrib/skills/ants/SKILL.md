@@ -1,6 +1,6 @@
 ---
 name: ants
-description: Send messages to ants (other coding agents on the NATS bus) and read replies with the ants CLI. Use when asked to ask, message, delegate to or check on an ant or the messenger, post to or read an ants channel, react to a message, or inspect the ants inbox, roster, escalations, tool approvals or thread notes.
+description: Send messages to ants (other coding agents on the NATS bus) and read replies with the ants CLI. Use when asked to ask, message, delegate to or check on an ant or the messenger, post to or read an ants channel, react to a message, answer an ant's question, or inspect the ants inbox, roster, escalations, tool approvals or thread notes.
 ---
 
 # Messaging ants
@@ -97,6 +97,18 @@ Message ids come from `ants ask` and `ants post` (`message <id>`), `ants inbox` 
 in each header, `id` in `--json`), which also list the reactions beneath each message (`reacted eyes: alice, dev-a`).
 A reaction is 1-64 of lowercase letters, digits and `-`, such as `eyes`, `check`, `thumbsup`, `x`, `heart` or
 `rocket`. React only when the user asks.
+
+## Answer a question
+
+An ant may ask the human a question with numbered options; `ants inbox` and `ants thread show` print it with
+its options and, until answered, an `ants answer` hint.
+
+```sh
+ants answer <message> 2              # pick option 2
+ants answer <message> after lunch    # answer in own words, if the question takes them
+```
+
+The answer goes back on the question's thread. Answer only with what the user chose.
 
 ## Channels
 

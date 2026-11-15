@@ -183,7 +183,7 @@ async fn complete(
 ) -> Result<()> {
     let name = &args.name;
     if stored {
-        match keys::write_new_stored(out, jwt, user, store, url).await {
+        match keys::write_new_stored(out, jwt, user, None, store, url).await {
             Ok(keys::Proven::Authenticated) => {}
             Ok(keys::Proven::Unreached) => {
                 eprintln!(

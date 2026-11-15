@@ -54,6 +54,10 @@ pub(crate) enum Command {
         #[arg(long, value_name = "THREAD")]
         #[arg(add = ArgValueCandidates::new(completions::threads))]
         thread: Option<thread::Pick>,
+        /// Steer the ant: a prompt it runs on the thread is cancelled, and the message prompts its session next,
+        /// ahead of the messages waiting there. Needs --thread and a human's credentials.
+        #[arg(long, requires = "thread")]
+        steer: bool,
         #[command(flatten)]
         replies: Replies,
         #[command(flatten)]
@@ -169,6 +173,19 @@ pub(crate) enum Command {
         #[arg(long)]
         remove: bool,
     },
+    /// Answer a question an ant asked the CLI's human (with ask_human), shown with its options numbered in `ants inbox`
+    /// and `ants thread show`: a number picks that option, any other text is a typed answer, which only a question
+    /// taking one accepts. The answer goes to the asking ant on the question's thread, as a message from the human.
+    /// Needs a human's credentials.
+    Answer {
+        /// The question's message id, or a unique start of one among the messages to or from the CLI's human stored in
+        /// the last 7 days, else any stored then.
+        #[arg(add = ArgValueCompleter::new(completions::messages))]
+        message: thread::MessagePick,
+        /// An option's number, or the typed answer.
+        #[arg(value_name = "N|TEXT", required = true, num_args = 1..)]
+        answer: Vec<String>,
+    },
     /// Threads read back from the stream across inboxes (both ways), channel posts, notes, escalations, tool requests
     /// and decisions, and dead letters: list the recent ones, find those mentioning a text, show one's whole history,
     /// or search messages by sender, recipient, channel, kind, time and text; title, pin or archive one. Nothing is
@@ -266,7 +283,9 @@ pub(crate) enum Command {
     /// `request_ant` tool), until stopped: at once for a request within the policy of the [[ant_template]] tables of
     /// --config (the template lists the manager, has room under its max_ants among the live keys the team issued,
     /// and bounds the request), on a human's approval of a tool request of the manager otherwise (`ants tools`, ntfy,
-    /// Slack, Telegram). Names taken, ants added by added ants and forged requests are refused.
+    /// Slack, Telegram). Names taken, ants added by added ants and forged requests are refused. Also answers ants'
+    /// reactions requests (their `react` and `list_reactions` tools, `ants react` with an ant's credentials) for the
+    /// messages each ant reads.
     Signer {
         /// Config file whose [[ant_template]] tables are the policy; the rest of it is ignored
         /// (default: ~/.ants/config.toml).
@@ -504,6 +523,15 @@ mod tests {
     }
 
     #[test]
+    fn ask_steers_only_a_thread() {
+        assert!(Cli::try_parse_from(["ants", "ask", "--steer", "@dev-a", "go", "left"]).is_err());
+        let cli = Cli::try_parse_from(["ants", "ask", "--steer", "--thread", "last", "@dev-a", "go"]).unwrap();
+        assert_matches!(cli.command, Some(Command::Ask { steer: true, thread: Some(thread::Pick::Last), .. }));
+        let cli = Cli::try_parse_from(["ants", "ask", "--thread", "last", "@dev-a", "go"]).unwrap();
+        assert_matches!(cli.command, Some(Command::Ask { steer: false, .. }));
+    }
+
+    #[test]
     fn notes_shows_without_text_and_posts_with_it() {
         let cli = Cli::try_parse_from(["ants", "notes", "t1", "split", "the", "work"]).unwrap();
         let Command::Notes { thread, text } = cli.command.unwrap() else { panic!("not notes") };
@@ -512,6 +540,17 @@ mod tests {
         let cli = Cli::try_parse_from(["ants", "notes", "t1"]).unwrap();
         assert_matches!(cli.command.unwrap(), Command::Notes { text, .. } if text.is_empty());
         assert!(Cli::try_parse_from(["ants", "plan", "t1"]).is_err());
+    }
+
+    #[test]
+    fn answer_takes_a_message_and_an_option_or_words() {
+        let id = Uuid::now_v7();
+        let cli = Cli::try_parse_from(["ants", "answer", &id.to_string(), "2"]).unwrap();
+        assert_matches!(cli.command.unwrap(), Command::Answer { message, answer }
+            if message == thread::MessagePick::Id(id) && answer == ["2"]);
+        let cli = Cli::try_parse_from(["ants", "answer", "019a-", "after", "lunch"]).unwrap();
+        assert_matches!(cli.command.unwrap(), Command::Answer { answer, .. } if answer == ["after", "lunch"]);
+        assert!(Cli::try_parse_from(["ants", "answer", &id.to_string()]).is_err(), "no answer");
     }
 
     #[test]

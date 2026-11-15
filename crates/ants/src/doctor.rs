@@ -218,6 +218,7 @@ fn check_cli_creds(setup: &Setup, now: u64, checks: &mut Vec<Check>) -> Option<I
             let finding = identity.finding.as_ref()?;
             checks.push(check_creds(check, path, finding, now));
             checks.extend(check_key("credentials key", path, finding.renew(), keystore::os()));
+            checks.extend(check_xkey("credentials xkey", path, finding, keystore::os()));
             Some(identity)
         }
         Err(e) => {
@@ -290,16 +291,42 @@ fn check_key(check: &str, path: &Path, issue: Vec<String>, store: &dyn Store) ->
     let Some(Seed::Stored(key)) = creds::seed_of(&text) else { return None };
     Some(match creds::load(path, store) {
         Ok(_) => Check::ok(check, format!("{key} ({}): its seed is in the OS credential store", path.display())),
-        Err(e) if keystore::is_unavailable(&e) => {
-            let fix =
-                "unlock the OS credential store (log in), then check again; services started before then wait for it";
-            Check::fail(check, format!("{e:#}"), vec![fix.to_owned()])
-        }
-        Err(e) => {
-            let restore = "restore the seed from a backup of the OS credential store, or issue the credentials again:";
-            Check::fail(check, format!("{e:#}"), std::iter::once(restore.to_owned()).chain(issue).collect())
-        }
+        Err(e) => unloaded(check, &e, issue),
     })
+}
+
+/// The check of the encryption key of a human's credentials at `path`, of `finding`: a user JWT binding none warns,
+/// with `ants renew` to add one; a seed missing, unreadable or of another key than the JWT binds fails, as in
+/// [`check_key`]. None for others' credentials. Never shows the seed.
+fn check_xkey(check: &str, path: &Path, finding: &creds::Finding, store: &dyn Store) -> Option<Check> {
+    if finding.kind != Kind::Human {
+        return None;
+    }
+    let Some(bound) = &finding.xkey else {
+        let detail = format!(
+            "{} ({}) bind no encryption key, so no message can be sealed for this device",
+            finding.holder(),
+            path.display()
+        );
+        return Some(Check::warn(check, detail, finding.renew_over_nats(path)));
+    };
+    let stored = std::fs::read_to_string(path).is_ok_and(|text| matches!(creds::xkey_of(&text), Some(Seed::Stored(_))));
+    let held = if stored { "the OS credential store" } else { "the file" };
+    Some(match creds::load_xkey(path, store) {
+        Ok(_) => Check::ok(check, format!("{bound} ({}): its seed is in {held}", path.display())),
+        Err(e) => unloaded(check, &e, finding.renew()),
+    })
+}
+
+/// A failed check of a seed that did not load: unlocking the OS credential store when it did not answer, else
+/// restoring the seed or `issue` again.
+fn unloaded(check: &str, e: &anyhow::Error, issue: Vec<String>) -> Check {
+    if keystore::is_unavailable(e) {
+        let fix = "unlock the OS credential store (log in), then check again; services started before then wait for it";
+        return Check::fail(check, format!("{e:#}"), vec![fix.to_owned()]);
+    }
+    let restore = "restore the seed from a backup of the OS credential store, or issue the credentials again:";
+    Check::fail(check, format!("{e:#}"), std::iter::once(restore.to_owned()).chain(issue).collect())
 }
 
 /// Connect, then check JetStream and the hub's stream and buckets.

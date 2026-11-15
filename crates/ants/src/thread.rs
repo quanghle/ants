@@ -15,8 +15,8 @@ use ants_daemon::channel::CLOCK_SLACK;
 use ants_daemon::reactions::Reacted;
 use ants_daemon::reading::{self, Reading};
 use ants_proto::{
-    ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, Envelope, EscalationReason, Humans, Mark,
-    NotesPost, ThreadId, ThreadMarks, UserId, Uuid, subject,
+    Answer, Answered, ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, Envelope,
+    EscalationReason, Humans, Mark, NotesPost, Question, ThreadId, ThreadMarks, UserId, Uuid, subject,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream::stream::LastRawMessageErrorKind;
@@ -75,6 +75,17 @@ impl Kind {
             Self::Dead => "dead",
         }
     }
+
+    /// Whether an entry of the kind is a message, channel post or note, which reopens a thread marked done
+    /// ([`ants_proto::ThreadDone::holds`]): no tool request, decision on one or dead letter does.
+    pub fn reopens(self) -> bool {
+        matches!(self, Self::Message | Self::Escalation | Self::Mention | Self::Post | Self::Note)
+    }
+}
+
+/// The sequence of the last of `entries` that reopens a thread marked done ([`Kind::reopens`]); 0 for none.
+pub fn last_reopening(entries: &[Entry]) -> u64 {
+    entries.iter().filter(|e| e.kind.reopens()).map(|e| e.seq).max().unwrap_or(0)
 }
 
 /// One stored message on a thread, as `ants thread show` prints it.
@@ -113,9 +124,17 @@ pub struct Entry {
     /// The reason of the escalation an inbox message carries, which the note spells out.
     #[serde(skip)]
     pub reason: Option<EscalationReason>,
-    /// The title an inbox message that is not forged suggests for its thread ([`Envelope::title`]).
+    /// The title an inbox message, channel post or notes post that is not forged suggests for its thread
+    /// ([`Envelope::title`], [`ChannelPost::title`], [`NotesPost::title`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggested_title: Option<String>,
+    /// The question an inbox message that is not forged asks, if valid ([`Envelope::asks`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question: Option<Question>,
+    /// The answer an inbox message that is not forged gives a question read before it, if valid
+    /// ([`Envelope::answers`]); an invalid one, or one to a question not read, leaves an ordinary message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer: Option<Answer>,
 }
 
 impl Entry {
@@ -136,7 +155,17 @@ impl Entry {
             reactions: Vec::new(),
             reason: None,
             suggested_title: None,
+            question: None,
+            answer: None,
         }
+    }
+
+    /// What this entry answers `question`, an entry asking one, with: set only on a valid answer
+    /// ([`Entry::answer`]).
+    pub fn answers<'q>(&self, question: &'q Entry) -> Option<Answered<'q>> {
+        let answer = self.answer.as_ref()?;
+        (question.id == Some(answer.question)).then_some(())?;
+        question.question.as_ref()?.answered(answer)
     }
 
     /// Who sent it to whom: `alice -> dev-a`, `dev-a -> #ops`, `dev-a -> notes`, `(a human) -> dev-a`.
@@ -158,19 +187,36 @@ impl Entry {
 }
 
 /// Turns stored messages into [`Entry`]s, in stream order. A human's decision does not name its request's thread, so
-/// the threads of the requests read so far are kept to place it.
+/// the threads of the requests read so far are kept to place it, and an answer names its question by id only, so the
+/// questions read so far are kept to check it.
 #[derive(Default)]
 pub struct Parser {
     requests: HashMap<(UserId, Uuid), ThreadId>,
+    questions: HashMap<Uuid, Envelope>,
 }
 
 impl Parser {
+    /// The valid question `e` asks, kept to check later answers against, and its valid answer to a question read
+    /// earlier; none of either for a forged message.
+    fn question_and_answer(&mut self, e: &Envelope, forged: bool) -> (Option<Question>, Option<Answer>) {
+        if forged {
+            return (None, None);
+        }
+        let question = e.asks().cloned();
+        if question.is_some() {
+            self.questions.insert(e.id, Envelope { text: String::new(), ..e.clone() });
+        }
+        let asked = e.answer.as_ref().and_then(|a| self.questions.get(&a.question));
+        (question, asked.filter(|q| e.answers(q).is_some()).and(e.answer.clone()))
+    }
+
     /// The entry of the message stored at `seq` on `subject`, None for one that is not ants' or does not parse.
     pub fn entry(&mut self, seq: u64, stored_at: DateTime<Utc>, subject: &str, payload: &[u8]) -> Option<Entry> {
         let entry = |kind, thread| Entry::new(seq, stored_at, kind, thread);
         if subject::parse_inbox(subject).is_some() {
             let e: Envelope = serde_json::from_slice(payload).ok()?;
             let forged = e.check_subject(subject).is_err();
+            let (question, answer) = self.question_and_answer(&e, forged);
             let (kind, note, text) = if let Some(d) = &e.approval {
                 let text = format!("{} on {}/{}", tools::spelling(d.verdict), d.ant, d.request_id);
                 (Kind::Decision, None, text)
@@ -193,6 +239,8 @@ impl Parser {
                 forged,
                 reason: e.escalation.map(|x| x.reason),
                 suggested_title: e.title.filter(|_| !forged),
+                question,
+                answer,
                 ..entry(kind, e.thread_id)
             });
         }
@@ -208,6 +256,7 @@ impl Parser {
                 note,
                 text: post.text,
                 forged,
+                suggested_title: post.title.filter(|_| !forged),
                 ..entry(Kind::Post, post.thread_id)
             });
         }
@@ -221,6 +270,7 @@ impl Parser {
                 note,
                 text: post.text,
                 forged,
+                suggested_title: post.title.filter(|_| !forged),
                 ..entry(Kind::Note, post.thread_id)
             });
         }
@@ -302,9 +352,22 @@ pub struct Summary {
     /// Archived for having been idle (`auto_archive`), not by hand.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub auto_archived: bool,
+    /// Marked done by a human, and no message, post or note stored on it since.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub done: Option<Done>,
     /// The stream sequence of its last message read.
     #[serde(skip)]
     pub last_seq: u64,
+    /// The stream sequence of its last message, post or note read ([`Kind::reopens`]); 0 for none.
+    #[serde(skip)]
+    pub last_reopening: u64,
+}
+
+/// Who marked a thread done, and when ([`ants_proto::ThreadDone`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Done {
+    pub by: UserId,
+    pub at: DateTime<Utc>,
 }
 
 /// What `ants thread list` keeps of the threads read.
@@ -369,10 +432,15 @@ impl Threads {
             archived: false,
             new_activity: false,
             auto_archived: false,
+            done: None,
             last_seq: entry.seq,
+            last_reopening: 0,
         });
         summary.messages += 1;
         summary.last_seq = summary.last_seq.max(entry.seq);
+        if entry.kind.reopens() {
+            summary.last_reopening = summary.last_reopening.max(entry.seq);
+        }
         summary.first_at = summary.first_at.min(entry.stored_at);
         summary.last_at = summary.last_at.max(entry.stored_at);
         summary.users.extend(entry.users().cloned());
@@ -452,10 +520,10 @@ pub(crate) fn time(at: DateTime<Utc>) -> String {
 
 /// The threads as a table: one row per thread under a header, columns padded to line up, and under a thread
 /// matching `--grep` its matching line, under one with an open escalation that escalation. A STATE column (pinned,
-/// archived, archived+new for one with a message stored since, or auto-archived for one idle) and a TITLE column show only when a thread listed
-/// has one.
+/// archived, archived+new for one with a message stored since, or auto-archived for one idle, then done for one
+/// marked done, comma-separated) and a TITLE column show only when a thread listed has one.
 pub fn table(threads: &[Summary]) -> String {
-    let marked = threads.iter().any(|t| t.pinned || t.archived);
+    let marked = threads.iter().any(|t| t.pinned || t.archived || t.done.is_some());
     let titled = threads.iter().any(|t| t.title.is_some());
     let mut header = vec!["THREAD", "OWNER", "USERS", "FIRST", "LAST", "MSGS"];
     header.extend(marked.then_some("STATE"));
@@ -474,7 +542,8 @@ pub fn table(threads: &[Summary]) -> String {
                 t.messages.to_string(),
             ];
             if marked {
-                row.push(state(t).unwrap_or("-").to_owned());
+                let states: Vec<&str> = state(t).into_iter().chain(t.done.as_ref().map(|_| "done")).collect();
+                row.push(if states.is_empty() { "-".to_owned() } else { states.join(",") });
             }
             if titled {
                 row.push(t.title.clone().unwrap_or_else(|| "-".to_owned()));
@@ -514,23 +583,51 @@ fn state(thread: &Summary) -> Option<&'static str> {
 }
 
 /// The entries of a thread as `ants thread show` prints them: time, kind, route, note, id and text, one entry per
-/// line, its text's further lines and the reactions to it indented under it.
+/// line, its text's further lines and the reactions to it indented under it. A question shows its options numbered,
+/// whether a typed answer is taken, and the answers to it among `entries` or how to answer it; an answer, the question
+/// and the option it picks.
 pub fn render(entries: &[Entry]) -> String {
     let mut out = String::new();
     for e in entries {
         let forged = if e.forged { " (forged)" } else { "" };
         let note = e.note.as_ref().map_or_default(|n| format!(" [{n}]"));
-        let mut lines = e.text.lines();
+        let answering = e.answer.as_ref().map_or_default(|a| match a.option {
+            Some(n) => format!(" [answers {} with option {n}]", a.question),
+            None => format!(" [answers {} as typed]", a.question),
+        });
+        let text = match (&e.question, e.id) {
+            (Some(question), Some(id)) => {
+                let answers = answers_to(e, entries).map(|(by, answered)| answer_line(by, answered)).collect();
+                crate::inbox::render_question(id, question, answers)
+            }
+            _ => e.text.clone(),
+        };
+        let mut lines = text.lines();
         let first = lines.next().unwrap_or("");
         let kind = e.kind.as_str();
         let id = e.id.map_or_default(|id| format!(" (message {id})"));
-        let _ = writeln!(out, "{}  {kind:<10}  {}{forged}{note}{id}: {first}", time(e.stored_at), e.route());
+        let _ = writeln!(out, "{}  {kind:<10}  {}{forged}{note}{answering}{id}: {first}", time(e.stored_at), e.route());
         for line in lines {
             let _ = writeln!(out, "    {line}");
         }
         out.push_str(&crate::inbox::render_reactions(&e.reactions, "    "));
     }
     out
+}
+
+/// The answers among `entries` to `question`, an entry asking one, oldest first, each with who answered: an option
+/// picked or a typed answer, the answer's text.
+pub fn answers_to<'a>(question: &'a Entry, entries: &'a [Entry]) -> impl Iterator<Item = (&'a Entry, Answered<'a>)> {
+    entries.iter().filter_map(move |e| Some((e, e.answers(question)?)))
+}
+
+/// How a question's answer is shown beneath it: who answered with which option, or typed what.
+fn answer_line(by: &Entry, answered: Answered<'_>) -> String {
+    let from = by.from.as_ref().map_or("(a human)", UserId::as_str);
+    match answered {
+        Answered::Option(n, option) => format!("answered by {from}: option {n}, {option}"),
+        Answered::Typed => format!("answered by {from}, typed: {}", crate::excerpt(&by.text, 72)),
+    }
 }
 
 /// Where a read of the last `since` starts: everything kept for zero.
@@ -549,7 +646,7 @@ pub fn idle_before(auto_archive: Option<Duration>, now: DateTime<Utc>) -> Option
 
 /// Where `ants thread show` reads `thread` from: as `since` says, else the thread's start when its id is
 /// time-ordered, else everything kept.
-fn show_start(thread: &ThreadId, since: Option<Duration>) -> consumer::DeliverPolicy {
+pub(crate) fn show_start(thread: &ThreadId, since: Option<Duration>) -> consumer::DeliverPolicy {
     match (since, ants_daemon::channel::thread_start(thread)) {
         (Some(since), _) => window(since),
         (None, Some(start)) => consumer::DeliverPolicy::ByStartTime { start_time: start.into() },
@@ -859,8 +956,11 @@ pub async fn list(nats: &crate::Nats<'_>, since: Option<Duration>, select: &Sele
     let (mut threads, omitted) = threads.finish(select, &marks);
     if let Some(meta) = &meta {
         let mut titles = meta.titles(threads.iter().map(|t| &t.thread_id)).await?;
+        let mut dones = meta.dones(threads.iter().map(|t| &t.thread_id)).await?;
         for thread in &mut threads {
             thread.title = titles.remove(&thread.thread_id).map(|t| t.title);
+            let done = dones.remove(&thread.thread_id).filter(|d| d.holds(thread.last_reopening));
+            thread.done = done.map(|d| Done { by: d.by, at: d.at });
         }
         adopt_suggested(meta, &mut threads).await;
     }
@@ -985,10 +1085,10 @@ pub async fn show(nats: &crate::Nats<'_>, pick: Pick, since: Option<Duration>, j
     let thread = &pick.resolve(&js, &nats.me).await?;
     let entries = history(&js, thread, since).await?;
     let suggested = entries.iter().find_map(|e| Some((e.from.as_ref()?, e.suggested_title.as_deref()?)));
-    let (title, mark) = if json {
-        (None, None)
+    let thread_meta::About { title, mark, done } = if json {
+        thread_meta::About::default()
     } else {
-        thread_meta::of_or_none(nats, &js, thread, entries.last(), suggested, auto_archive).await
+        thread_meta::of_or_none(nats, &js, thread, &entries, suggested, auto_archive).await
     };
     if json {
         for entry in &entries {
@@ -1006,6 +1106,9 @@ pub async fn show(nats: &crate::Nats<'_>, pick: Pick, since: Option<Duration>, j
             let by_ant = entries.iter().any(|e| e.suggested_title.is_some() && e.from.as_ref() == Some(&title.by));
             let suggested = if by_ant { format!(" (suggested by {})", title.by) } else { String::new() };
             println!("title: {}{suggested}", title.title);
+        }
+        if let Some(done) = done {
+            println!("done by {} {}", done.by, time(done.at));
         }
         match mark {
             Some(Mark::Pinned) => println!("pinned"),
