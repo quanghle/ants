@@ -14,11 +14,16 @@
 //! creds = "~/.config/ants/auth/alice.creds"
 //! nats = "wss://hub.example/nats"   # default: the top-level nats
 //! js_domain = "hub"                 # default: the top-level js_domain
+//! auto_archive = "14d"              # archive threads idle this long for the CLI's human (default 0: never)
 //!
 //! [storage]                         # warnings of JetStream storage filling up (crate::storage)
 //! warn_percent = 80                 # warn a human past this share of a store's limit; 0 never
 //! max_file_store = "10GB"           # the hub's limits, which its account's JetStream info does not tell
 //! max_memory_store = "1GB"
+//!
+//! [memory_pressure]                 # while memory is low (crate::pressure)
+//! min_available = "1GB"             # below this much memory available, or a share such as "10%"; "0" never
+//! max_harnesses = 1                 # the most harnesses each ant runs while memory is low
 //!
 //! [[ant]]
 //! name = "dev-a"
@@ -26,7 +31,9 @@
 //! creds = "~/.config/ants/auth/dev-a.creds"
 //! escalate_to = ["lead", "dev-b"]   # escalations go to these ants first, lead leading
 //! idle_timeout = "10m"              # durations: 90s, 10m, 1h30m, 0
-//! worktrees = true                  # a git worktree per thread, under the ant's home
+//! worktrees = true                  # a git worktree per thread, under the ant's home; unset: on for a git
+//!                                   # workdir git does not ignore, with max_harnesses above 1
+//!                                   # (crate::worktrees::per_thread)
 //! harness = "my-agent"
 //! fallback = ["claude", "copilot:gpt-5"]  # tried in order while my-agent cannot serve (crate::fallback)
 //!
@@ -80,6 +87,7 @@ use crate::daemon::Config;
 use crate::escalation::{self, Chain};
 use crate::fallback;
 use crate::harness::{self, DEFAULT_HARNESS, Harness, Harnesses, ModelSettings, PromptLimits};
+use crate::pressure;
 use crate::schedule::{self, Schedule};
 use crate::storage;
 use crate::template::{AntTemplate, REQUEST_KEYS, Request};
@@ -128,6 +136,9 @@ struct File {
     /// The warnings of JetStream storage filling up ([`crate::storage`]).
     #[serde(default)]
     storage: storage::Settings,
+    /// What the ants do while memory is low ([`crate::pressure`]).
+    #[serde(default)]
+    memory_pressure: pressure::Settings,
     #[serde(default)]
     cli: CliSection,
     #[serde(default, rename = "ant_template")]
@@ -198,9 +209,9 @@ pub struct Ant {
     pub capabilities: Vec<String>,
     #[serde(default = "default_max_harnesses")]
     pub max_harnesses: usize,
-    /// Give each thread its own git worktree of the workdir's repository under the home.
-    #[serde(default)]
-    pub worktrees: bool,
+    /// Give each thread its own git worktree of the workdir's repository under the home; unset, see
+    /// [`crate::worktrees::per_thread`].
+    pub worktrees: Option<bool>,
     #[serde(default = "default_idle_timeout", deserialize_with = "ants_proto::duration::deserialize")]
     pub idle_timeout: Duration,
     /// How long a prompt may run before it is cancelled; 0 for no limit.
@@ -245,6 +256,9 @@ pub struct Ant {
     /// The file's `[storage]` table.
     #[serde(skip)]
     pub storage: storage::Settings,
+    /// The file's `[memory_pressure]` table.
+    #[serde(skip)]
+    pub memory_pressure: pressure::Settings,
 }
 
 fn default_max_harnesses() -> usize {
@@ -316,7 +330,7 @@ impl Ant {
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
             capabilities: Vec::new(),
             max_harnesses: DEFAULT_MAX_HARNESSES,
-            worktrees: false,
+            worktrees: None,
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
             prompt_timeout: DEFAULT_PROMPT_TIMEOUT,
             max_tool_calls: DEFAULT_MAX_TOOL_CALLS,
@@ -333,6 +347,7 @@ impl Ant {
             pool: None,
             redact: true,
             storage: storage::Settings::default(),
+            memory_pressure: pressure::Settings::default(),
         }
     }
 
@@ -394,6 +409,7 @@ impl Ant {
             caps,
             spend_warn_percent: self.spend_warn_percent,
             storage: self.storage,
+            memory_pressure: self.memory_pressure,
             pool: self.pool,
             escalation: Chain {
                 escalate_to: self.escalate_to,
@@ -544,6 +560,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
         crate::bus::check_url(url).with_context(|| format!("config {}: [cli]", path.display()))?;
     }
     file.storage.validate().with_context(|| format!("config {}", path.display()))?;
+    file.memory_pressure.validate().with_context(|| format!("config {}", path.display()))?;
     if file.ants.is_empty() && !file.messenger {
         bail!("config {}: messenger = false and no [[ant]] entries: nothing to serve", path.display());
     }
@@ -569,15 +586,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
         if ant.harness.is_none() {
             ant.harness.clone_from(&file.harness);
         }
-        if let Some(harness) = &ant.harness {
-            harnesses.get(harness).with_context(|| format!("config {}: ant {}", path.display(), ant.name))?;
-        }
-        if !ant.fallback.is_empty() {
-            let own = harnesses.get(ant.harness.as_deref().unwrap_or(DEFAULT_HARNESS))?;
-            let settings = ModelSettings { model: ant.model.clone(), ..ModelSettings::default() };
-            fallback::resolve(&ant.fallback, &own, &settings, &harnesses)
-                .with_context(|| format!("config {}: ant {}", path.display(), ant.name))?;
-        }
+        check_harnesses(&ant, &harnesses).with_context(|| format!("config {}: ant {}", path.display(), ant.name))?;
         if !ant.builtin {
             let abs = |dir: &Path| resolve(dir, base, home);
             ant.workdir = abs(&ant.workdir).canonicalize().with_context(|| {
@@ -600,6 +609,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
         }
         ant.redact = file.redact;
         ant.storage = file.storage;
+        ant.memory_pressure = file.memory_pressure;
         ants.push(ant);
     }
     let timezone = file
@@ -634,6 +644,19 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
     }
     let (base, home) = (base.to_owned(), home.to_owned());
     Ok(Loaded { ants, harnesses, templates, schedules, metrics: file.metrics, storage: file.storage, base, home })
+}
+
+/// Check that the harness of `ant` and those of its fallbacks are defined.
+fn check_harnesses(ant: &Ant, harnesses: &Harnesses) -> Result<()> {
+    if let Some(harness) = &ant.harness {
+        harnesses.get(harness)?;
+    }
+    if !ant.fallback.is_empty() {
+        let own = harnesses.get(ant.harness.as_deref().unwrap_or(DEFAULT_HARNESS))?;
+        let settings = ModelSettings { model: ant.model.clone(), ..ModelSettings::default() };
+        fallback::resolve(&ant.fallback, &own, &settings, harnesses)?;
+    }
+    Ok(())
 }
 
 /// The file's `templates`, checked, each named once, their workdirs resolved and the harnesses they list defined.
@@ -889,15 +912,21 @@ struct CliSection {
     nats: Option<String>,
     creds: Option<PathBuf>,
     js_domain: Option<JsDomain>,
+    #[serde(default, deserialize_with = "ants_proto::duration::deserialize")]
+    auto_archive: Duration,
 }
 
 /// What the CLI connects with where neither a flag nor the environment sets it: the `[cli]` section of a config
-/// file, else its top-level `nats` and `js_domain`. Credentials come from `[cli]` alone, an ant's being no human's.
+/// file, else its top-level `nats` and `js_domain`. Credentials come from `[cli]` alone, an ant's being no human's,
+/// as does `auto_archive`.
 #[derive(Debug, Default, PartialEq)]
 pub struct CliDefaults {
     pub nats: Option<String>,
     pub creds: Option<PathBuf>,
     pub js_domain: Option<JsDomain>,
+    /// How long a thread goes without a message before `ants thread list` and `ants dash` take it as archived for
+    /// the CLI's human; None (unset or 0) for never.
+    pub auto_archive: Option<Duration>,
 }
 
 impl CliDefaults {
@@ -927,7 +956,8 @@ impl CliDefaults {
             crate::bus::check_url(url).with_context(|| format!("config {}", path.display()))?;
         }
         let creds = view.cli.creds.map(|c| resolve(&c, base, home));
-        Ok(Self { nats, creds, js_domain: view.cli.js_domain.or(view.js_domain) })
+        let auto_archive = Some(view.cli.auto_archive).filter(|d| !d.is_zero());
+        Ok(Self { nats, creds, js_domain: view.cli.js_domain.or(view.js_domain), auto_archive })
     }
 }
 
@@ -1181,8 +1211,8 @@ pub fn entry(ant: &Ant) -> Result<String> {
     if ant.allow_tools {
         set("allow_tools", "true".to_owned());
     }
-    if ant.worktrees {
-        set("worktrees", "true".to_owned());
+    if let Some(worktrees) = ant.worktrees {
+        set("worktrees", worktrees.to_string());
     }
     if !ant.allow.is_empty() {
         set("allow", strings(&mut ant.allow.iter().map(String::as_str)));

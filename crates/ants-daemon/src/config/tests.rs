@@ -105,7 +105,7 @@ Review changes for correctness."""
     let escalate_to = vec!["lead".parse().unwrap(), "dev-b".parse().unwrap()];
     let chain = Chain { escalate_to, max_hops: 2, after: None, remind: None };
     assert_eq!(config.escalation, chain, "0 waits for the leader for good and never reminds");
-    assert!(config.worktrees);
+    assert_eq!(config.worktrees, Some(true));
 
     let b = ants[1].clone();
     assert_eq!(b.nats.as_deref(), Some("nats://127.0.0.1:4222"));
@@ -119,7 +119,7 @@ Review changes for correctness."""
     assert!(config.allow.is_empty(), "rejects every tool request unless the human allows it");
     assert_eq!(config.approval_timeout, crate::approvals::DEFAULT_TIMEOUT);
     assert_eq!(config.idle_timeout, DEFAULT_IDLE_TIMEOUT);
-    assert!(!config.worktrees, "threads share the workdir by default");
+    assert_eq!(config.worktrees, None, "settled at start by crate::worktrees::per_thread");
     assert_eq!(config.limits, PromptLimits::default());
     assert_eq!(config.caps, Caps::default(), "no spend caps unless set");
     assert_eq!(config.spend_warn_percent, DEFAULT_SPEND_WARN_PERCENT);
@@ -510,6 +510,22 @@ fn the_storage_table_reaches_every_ant() {
 }
 
 #[test]
+fn the_memory_pressure_table_reaches_every_ant() {
+    let loaded = parse_all(
+        "[memory_pressure]\nmin_available = \"10%\"\nmax_harnesses = 2\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"",
+    )
+    .unwrap();
+    let settings = pressure::Settings { min_available: pressure::Threshold::Percent(10), max_harnesses: 2 };
+    assert!(loaded.ants.iter().all(|ant| ant.memory_pressure == settings));
+    assert_eq!(config(loaded.ants[0].clone()).unwrap().memory_pressure, settings);
+    let default = parse_all("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"").unwrap();
+    assert_eq!(default.ants[0].memory_pressure, pressure::Settings::default(), "on unless turned off");
+    let err = |text: &str| format!("{:#}", parse_here(text).unwrap_err());
+    assert!(err("[memory_pressure]\nmax_harnesses = 0").contains("max_harnesses must be at least 1"));
+    assert!(err("[memory_pressure]\nmin_available = \"100%\"").contains("invalid share"));
+}
+
+#[test]
 fn schedules_take_the_top_level_server_and_unique_names() {
     let loaded = parse_all(
         "nats = \"wss://hub.example/nats\"\njs_domain = \"hub\"\n\
@@ -567,8 +583,17 @@ fn the_cli_section_overrides_the_top_level_server() {
     let relative = cli("[cli]\ncreds = \"auth/alice.creds\"\njs_domain = \"own\"").unwrap();
     assert_eq!(relative.creds.as_deref(), Some(Path::new("/team/auth/alice.creds")));
     assert_eq!(relative.js_domain.as_ref().map(JsDomain::as_str), Some("own"));
+    assert_eq!(relative.auto_archive, None, "never by default");
+    assert_eq!(cli("[cli]\nauto_archive = \"14d\"").unwrap().auto_archive, Some(Duration::from_hours(14 * 24)));
+    assert_eq!(cli("[cli]\nauto_archive = \"0\"").unwrap().auto_archive, None);
 
-    for bad in ["[cli]\ncred = \"a.creds\"", "nats = 4222", "nats = \"nats://u:secret@hub\"", "[cli"] {
+    for bad in [
+        "[cli]\ncred = \"a.creds\"",
+        "[cli]\nauto_archive = 14",
+        "nats = 4222",
+        "nats = \"nats://u:secret@hub\"",
+        "[cli",
+    ] {
         let err = format!("{:#}", cli(bad).unwrap_err());
         assert!(err.contains("/team/config.toml") && !err.contains("secret"), "{bad}: {err}");
     }
@@ -611,7 +636,7 @@ fn entries_read_back_as_written() {
     full.capabilities = vec!["rust".to_owned(), "nats".to_owned()];
     full.escalate_to = vec!["lead".parse().unwrap()];
     full.max_harnesses = 1;
-    full.worktrees = true;
+    full.worktrees = Some(false);
     full.prompt_timeout = Duration::ZERO;
     full.idle_timeout = Duration::from_mins(90);
     full.max_thread_cost = Some(2.5);

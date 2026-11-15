@@ -1,11 +1,11 @@
 //! Shell completions: `ants completions SHELL` prints the script registering them for bash, zsh or fish, and
 //! `--install` writes it where the shell loads it from. The script asks `ants` itself for the candidates (clap's
 //! dynamic completion, with `ANTS_COMPLETE` set), so they follow the installed version: subcommands and flags, and
-//! values looked up as the command line is completed: ants, channels, recent threads, pending tool requests and dead
-//! letters. A lookup gives up after [`TIMEOUT`], and on any error completes nothing: it never prints an error or
-//! asks for a password, and reads no seed from the OS credential store.
+//! values looked up as the command line is completed: ants, channels, recent threads and messages, pending tool
+//! requests and dead letters. A lookup gives up after [`TIMEOUT`], and on any error completes nothing: it never
+//! prints an error or asks for a password, and reads no seed from the OS credential store.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -27,6 +27,9 @@ pub const VAR: &str = "ANTS_COMPLETE";
 
 /// How long a lookup of values over NATS may take.
 const TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How many messages a completion of a message id offers at most.
+const MESSAGES: usize = 50;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Shell {
@@ -252,6 +255,26 @@ pub fn threads() -> Vec<CompletionCandidate> {
             .collect())
     });
     std::iter::once(last).chain(recent).collect()
+}
+
+/// The latest messages to or from the CLI's human whose id starts with `current`, most recent first, each with its
+/// route and first line.
+pub fn messages(current: &OsStr) -> Vec<CompletionCandidate> {
+    let current = current.to_string_lossy().to_ascii_lowercase();
+    lookup(async |js, me| {
+        let messages = thread::recent_messages(js, me).await?;
+        Ok(messages
+            .into_iter()
+            .filter_map(|e| Some((e.id?.hyphenated().to_string(), e)))
+            .filter(|(id, _)| id.starts_with(&current))
+            .take(MESSAGES)
+            .enumerate()
+            .map(|(i, (id, e))| {
+                let help = format!("{}: {}", e.route(), crate::excerpt(&e.text, 60));
+                CompletionCandidate::new(id).help(Some(help.into())).display_order(Some(i))
+            })
+            .collect())
+    })
 }
 
 /// The reactions suggested ([`ants_daemon::reactions::SUGGESTED`]); any other of the same syntax is taken too.

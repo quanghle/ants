@@ -516,6 +516,23 @@ fn every_human_has_the_human_rights_and_only_humans_write_the_humans_bucket() {
 }
 
 #[test]
+fn humans_keep_only_their_own_holds_and_held_notices_and_ants_neither() {
+    let human = Permissions::for_user(&p("alice"), Role::Human);
+    for s in [
+        "$KV.ants_notify.alice",
+        "$JS.API.DIRECT.GET.KV_ants_notify.$KV.ants_notify.alice",
+        "$KV.ants_notify.held.alice",
+        "$JS.API.DIRECT.GET.KV_ants_notify.$KV.ants_notify.held.alice",
+    ] {
+        assert!(human.publish.iter().any(|have| have == s), "{s} missing from {:?}", human.publish);
+    }
+    let notify: Vec<&String> = human.publish.iter().filter(|s| s.contains("$KV.ants_notify")).collect();
+    assert!(notify.iter().all(|s| s.ends_with(".alice") && !s.contains('*') && !s.contains('>')), "{notify:?}");
+    let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
+    assert!(!ant.publish.iter().any(|s| s.contains("ants_notify")));
+}
+
+#[test]
 fn humans_set_every_title_but_only_their_own_pins_and_archives_and_ants_neither() {
     let human = Permissions::for_user(&p("alice"), Role::Human);
     for s in [
@@ -554,6 +571,23 @@ fn everyone_writes_only_their_own_reactions_and_only_humans_read_others() {
     }
     let observer = Permissions::for_observer(&p("watcher"));
     assert!(!observer.publish.iter().chain(&observer.subscribe).any(|s| s.contains("ants_reactions")));
+
+    // Ants ask for the reactions to messages they read only as themselves, and only humans answer.
+    let asks = |list: &[String]| -> Vec<String> {
+        list.iter().filter(|s| s.starts_with("ants.reactions.")).cloned().collect()
+    };
+    assert_eq!(asks(&ant.publish), ["ants.reactions.dev-a"]);
+    assert!(ant.subscribe.iter().any(|s| s == "_INBOX.dev-a.>"), "hears the answers in its reply inboxes");
+    assert!(human.publish.iter().any(|s| s == subject::ALL_REACTIONS_REPLIES), "only humans answer");
+    for other in [&observer, &Permissions::for_user(&p("dev-b"), Role::Ant)] {
+        assert!(!other.publish.iter().any(|s| s.starts_with("_INBOX.*")), "{:?}", other.publish);
+    }
+    assert!(human.subscribe.iter().any(|s| s == subject::ALL), "hears the requests");
+    let m1: Machine = "m1".parse().unwrap();
+    let leaf = Permissions::for_leaf(&m1, [(&p("dev-a"), Role::Ant), (&p("alice"), Role::Human)]);
+    assert!(leaf.publish.iter().any(|s| s == "ants.reactions.dev-a"), "an ant on a leaf asks through its uplink");
+    assert!(leaf.publish.iter().any(|s| s == subject::ALL_REACTIONS_REPLIES), "and a human there answers");
+    assert!(leaf.subscribe.iter().any(|s| s == "_INBOX.dev-a.>"), "and its answers come down");
 }
 
 #[test]

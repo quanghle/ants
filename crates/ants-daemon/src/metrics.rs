@@ -3,7 +3,8 @@
 //! a [`Source`] of its own.
 //!
 //! The daemon's counters ([`Ant`]) are kept per ant in one registry ([`ant`]) whether or not anything listens: a few
-//! atomics each. The JetStream storage usage [`crate::storage`] last measured is kept beside them ([`stored`]).
+//! atomics each. The JetStream storage usage [`crate::storage`] last measured is kept beside them ([`stored`]), and so
+//! is the system memory [`crate::pressure`] last read ([`memory_available`]).
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
@@ -231,6 +232,14 @@ pub fn stored(domain: Option<&str>, store: &'static str, used: u64, limit: Optio
     STORAGE.locked().insert((domain.unwrap_or_default().to_owned(), store), (used, limit));
 }
 
+/// Bytes of system memory available at the latest read, if any.
+static MEMORY_AVAILABLE: Mutex<Option<u64>> = Mutex::new(None);
+
+/// Note that `bytes` of system memory are available.
+pub fn memory_available(bytes: u64) {
+    *MEMORY_AVAILABLE.locked() = Some(bytes);
+}
+
 /// What one ant's daemon did and is doing.
 #[derive(Default)]
 pub struct Ant {
@@ -348,11 +357,17 @@ impl Source for Daemon {
             ant.live.locked().as_ref().map_or(0.0, |live| of(&live.workload) as f64)
         }
         type Family = (&'static str, Kind, &'static str, fn(&Ant) -> f64);
-        let families: [Family; 9] = [
+        let families: [Family; 10] = [
             ("ants_nats_connected", Kind::Gauge, "Whether the ant's NATS connection is up.", |a| {
                 flag(a.is_connected())
             }),
             ("ants_harnesses", Kind::Gauge, "Harness processes alive.", |a| workload(a, Workload::harnesses)),
+            (
+                "ants_memory_low",
+                Kind::Gauge,
+                "Whether memory is low, so idle harnesses stop at once and fewer run.",
+                |a| workload(a, |w| usize::from(w.memory_low().is_some())),
+            ),
             (
                 "ants_messages_in_hand",
                 Kind::Gauge,
@@ -377,6 +392,10 @@ impl Source for Daemon {
             for (ant, counters) in &serving {
                 out.sample(name, &[("ant", ant.as_str())], read(counters));
             }
+        }
+        if let Some(bytes) = *MEMORY_AVAILABLE.locked() {
+            let help = "Bytes of system memory available at the latest check of memory pressure.";
+            out.single("ants_memory_available_bytes", Kind::Gauge, help, bytes as f64);
         }
         let storage = STORAGE.locked();
         let (bytes, limit) = ("ants_jetstream_bytes", "ants_jetstream_limit_bytes");
@@ -469,6 +488,7 @@ mod tests {
         for line in [
             "ants_nats_connected{ant=\"metrics-unit\"} 0",
             "ants_harnesses{ant=\"metrics-unit\"} 0",
+            "ants_memory_low{ant=\"metrics-unit\"} 0",
             "ants_prompts_in_flight{ant=\"metrics-unit\"} 1",
             "ants_prompts_total{ant=\"metrics-unit\"} 1",
             "ants_retries_total{ant=\"metrics-unit\"} 1",
@@ -484,6 +504,7 @@ mod tests {
         drop(serving);
         assert!(!rendered().contains("metrics-unit"), "not reported once it stopped");
         stored(Some("metrics-unit"), "file", 900, Some(1000));
+        memory_available(4096);
         stored(Some("metrics-unit"), "memory", 5, None);
         let text = rendered();
         for line in [
@@ -494,5 +515,7 @@ mod tests {
             assert!(text.lines().any(|l| l == line), "no {line:?} in\n{text}");
         }
         assert!(!text.contains("ants_jetstream_limit_bytes{domain=\"metrics-unit\",store=\"memory\"}"));
+        // Other tests read memory too, so only the sample's presence is certain.
+        assert!(text.lines().any(|l| l.starts_with("ants_memory_available_bytes ")), "{text}");
     }
 }

@@ -1,0 +1,14 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "ant": "dev-a",
+  "thread_id": "019a7d2c-0000-7000-8000-000000000001",
+  "type": "decided",
+  "request_id": "019a7d2e-0000-7000-8000-00000000000a",
+  "verdict": "allow_once",
+  "by": "chain",
+  "decider": "lead",
+  "at": "2025-01-01T12:00:00Z"
+}

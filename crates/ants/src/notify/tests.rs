@@ -178,6 +178,67 @@ fn a_mute_holds_back_everything_of_its_thread_and_a_snooze_or_quiet_hours_what_b
 }
 
 #[test]
+fn a_digest_is_due_once_neither_a_snooze_nor_quiet_hours_hold_whatever_bypass_lets_through() {
+    let now = at("2026-03-10T12:00:00Z");
+    let text = format!("name = \"bob\"\nquiet = \"11:00-13:00\"\nbypass = [\"approvals\"]\ndigest = true\n{NTFY_SINK}");
+    let night = human(&text).unwrap();
+    let mut prefs = NotifyPrefs::default();
+    assert!(holding(&night, &prefs, now), "quiet hours, though approvals bypass them");
+    let after = at("2026-03-10T13:00:00Z");
+    assert!(!holding(&night, &prefs, after));
+    prefs.snoozed_until = Some(after + TimeDelta::minutes(5));
+    assert!(holding(&night, &prefs, after), "snoozed");
+    assert!(!holding(&night, &prefs, after + TimeDelta::minutes(5)), "the snooze ended on its own");
+    assert!(night.quiet_hours(now).unwrap().ends_with("let approvals through, and a digest of the others follows"));
+    let day = human(&format!("name = \"bob\"\n{NTFY_SINK}")).unwrap();
+    assert!(!day.digest && !holding(&day, &NotifyPrefs::default(), now), "off unless asked for");
+}
+
+#[test]
+fn a_digest_counts_what_was_held_back_and_lists_the_requests_still_pending() {
+    let now = at("2026-03-10T13:00:00Z");
+    let mut held = HeldNotices::default();
+    held.add("completion", at("2026-03-10T11:05:00Z"));
+    held.add("approval", at("2026-03-10T11:30:00Z"));
+    held.add("completion", at("2026-03-10T12:00:00Z"));
+    assert_eq!((held.since, held.total()), (at("2026-03-10T11:05:00Z"), 3), "since the first");
+    let night = human(&format!("name = \"bob\"\nquiet = \"11:00-13:00\"\ntimezone = \"Europe/Paris\"\n{NTFY_SINK}"));
+    let night = night.unwrap();
+    let mut pending: Vec<ApprovalRequest> = (0..12).map(|_| request()).collect();
+    pending[0].tool.title = "deploy ghp_0123456789abcdefghijABCDEFGHIJ".to_owned();
+    let notice = digest_notice(&night, held.clone(), &pending, now);
+    assert_eq!((notice.title.as_str(), notice.urgent, notice.buttons.len()), ("3 notices held back", true, 0));
+    let mut lines = notice.text.lines();
+    assert_eq!(
+        lines.next(),
+        Some(
+            "1 tool request, 2 replies held back by quiet hours or a snooze since 2026-03-10 12:05 CET; nothing was \
+             marked read: ants inbox shows the messages."
+        )
+    );
+    assert_eq!(lines.nth(1), Some("12 tool requests still pending:"));
+    let first = lines.next().unwrap();
+    assert!(first.starts_with(&tools::qualified(&pending[0])) && !first.contains("ghp_"), "redacted: {first}");
+    assert_eq!(lines.clone().count(), DIGEST_PENDING, "nine more and how many are left");
+    assert_eq!(lines.last(), Some("…and 2 more: ants tools list"));
+
+    let json = notice_json(&notice, now);
+    assert_eq!(
+        (&json["kind"], &json["since"], &json["counts"]),
+        (&json!("digest"), &json!("2026-03-10T11:05:00Z"), &json!({ "approval": 1, "completion": 2 }))
+    );
+    let listed = json["pending"].as_array().unwrap();
+    assert_eq!(listed.len(), 12, "all of them");
+    assert_eq!(listed[1]["request"], json!(tools::qualified(&pending[1])));
+    assert_eq!((&listed[1]["ant"], &listed[1]["title"]), (&json!("dev-a"), &json!("rm -rf <build>")));
+    assert!(json["id"].is_string() && json["links"] == json!([]), "{json}");
+
+    let calm = digest_notice(&human(&format!("name = \"bob\"\n{NTFY_SINK}")).unwrap(), held, &[], now);
+    assert!(!calm.urgent && !calm.text.contains("pending"), "{}", calm.text);
+    assert!(calm.text.contains("since 2026-03-10 11:05 UTC"), "{}", calm.text);
+}
+
+#[test]
 fn a_reply_is_a_completion_and_nothing_else_is() {
     let (alice, dev_a) = (p("alice"), p("dev-a"));
     let asked = Envelope::new(alice.clone(), dev_a.clone(), "build it");

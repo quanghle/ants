@@ -62,10 +62,36 @@ pub async fn connect_with(
     name: &str,
 ) -> Result<(async_nats::Client, jetstream::Context)> {
     check_url(url)?;
-    let client = options(creds, store, user, name)?
-        .connect(url)
-        .await
-        .with_context(|| format!("connecting to NATS at {}", redacted(url)))?;
+    connect_options(url, options(creds, store, user, name)?, js_domain).await
+}
+
+/// [`connect`], also passing each event of the connection, after logging it, to `events`: a server error, a
+/// disconnection or a failed reconnect, which the client otherwise retries forever.
+pub async fn connect_watched(
+    url: &str,
+    creds: Option<&Path>,
+    js_domain: Option<&JsDomain>,
+    user: &UserId,
+    name: &str,
+    events: tokio::sync::mpsc::UnboundedSender<Event>,
+) -> Result<(async_nats::Client, jetstream::Context)> {
+    check_url(url)?;
+    let options = options(creds, keystore::os(), user, name)?.event_callback(move |event| {
+        let events = events.clone();
+        async move {
+            let _ = events.send(event.clone());
+            log_event(event);
+        }
+    });
+    connect_options(url, options, js_domain).await
+}
+
+async fn connect_options(
+    url: &str,
+    options: async_nats::ConnectOptions,
+    js_domain: Option<&JsDomain>,
+) -> Result<(async_nats::Client, jetstream::Context)> {
+    let client = options.connect(url).await.with_context(|| format!("connecting to NATS at {}", redacted(url)))?;
     Ok((client.clone(), jetstream(client, js_domain)))
 }
 

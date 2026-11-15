@@ -28,6 +28,9 @@ pub enum Event {
     DeadLetter,
     /// An escalation sent (a `StatusEvent` of type `escalated`).
     Escalation,
+    /// A tool request settled by a human, an ant of the requester's chain or its expiry (a `StatusEvent` of type
+    /// `decided`).
+    Decided,
     /// Every live status update of every ant (a `StatusEvent`).
     Status,
     /// A roster entry written: an ant starting, stopping or reporting in (a `RosterEntry`).
@@ -41,7 +44,7 @@ impl Event {
             Self::ApprovalRequest => Some(Feed::ApprovalRequests),
             Self::ApprovalDecision => Some(Feed::ApprovalDecisions),
             Self::DeadLetter => Some(Feed::DeadLetters),
-            Self::Escalation | Self::Status | Self::Roster => None,
+            Self::Escalation | Self::Decided | Self::Status | Self::Roster => None,
         }
     }
 
@@ -62,10 +65,14 @@ impl Event {
                     bail!("a dead letter of {} read on {subject}", dead.ant);
                 }
             }
-            Self::Escalation | Self::Status => {
+            Self::Escalation | Self::Decided | Self::Status => {
                 let event: StatusEvent = serde_json::from_slice(payload)?;
                 event.check_subject(subject)?;
-                return Ok(self == Self::Status || matches!(event.update, StatusUpdate::Escalated { .. }));
+                return Ok(match event.update {
+                    StatusUpdate::Escalated { .. } => self != Self::Decided,
+                    StatusUpdate::Decided { .. } => self != Self::Escalation,
+                    _ => self == Self::Status,
+                });
             }
             Self::Roster => serde_json::from_slice::<RosterEntry>(payload)?.check_key(subject)?,
         }
@@ -242,6 +249,17 @@ mod tests {
         let json = serde_json::to_vec(&working).unwrap();
         assert!(Event::Status.accepts(&working.subject(), &json).unwrap());
         assert!(!Event::Escalation.accepts(&working.subject(), &json).unwrap());
+        assert!(!Event::Decided.accepts(&working.subject(), &json).unwrap());
+        let decided = StatusUpdate::Decided {
+            request_id: decision.request_id,
+            verdict: Verdict::Reject,
+            by: ants_proto::DecidedBy::Expiry,
+            decider: None,
+        };
+        let decided = serde_json::to_vec(&StatusEvent::new(working.ant.clone(), thread.clone(), decided)).unwrap();
+        assert!(Event::Decided.accepts(&working.subject(), &decided).unwrap());
+        assert!(Event::Status.accepts(&working.subject(), &decided).unwrap());
+        assert!(!Event::Escalation.accepts(&working.subject(), &decided).unwrap());
         assert!(Event::Status.accepts(&subject::status(&"dev-c".parse().unwrap(), &thread), &json).is_err());
     }
 }

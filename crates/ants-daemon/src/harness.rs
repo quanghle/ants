@@ -856,6 +856,9 @@ struct Current {
     /// Whether every piece of the text so far reads as the harness's error or notice
     /// ([`crate::ratelimit::is_error_chunk`]).
     errors_only: bool,
+    /// Where the last of the pieces read as errors or notices ends in the text, while no other piece came: the end of
+    /// the retry notices a harness may stream before the answer ([`crate::ratelimit::strip_notices`]).
+    notices: usize,
     /// What the session reported of each tool call, without its content or output.
     tool_calls: HashMap<ToolCallId, ToolCall>,
     max_tool_calls: Option<usize>,
@@ -892,10 +895,14 @@ impl Observed {
         match n.update {
             SessionUpdate::AgentMessageChunk(chunk) => {
                 if let ContentBlock::Text(t) = chunk.content {
-                    if !t.text.trim().is_empty() && !crate::ratelimit::is_error_chunk(&t.text) {
+                    let error = crate::ratelimit::is_error_chunk(&t.text);
+                    if !t.text.trim().is_empty() && !error {
                         current.errors_only = false;
                     }
                     current.text.push_str(&t.text);
+                    if current.errors_only && error {
+                        current.notices = current.text.len();
+                    }
                 }
             }
             SessionUpdate::ToolCall(mut call) => {
@@ -1111,6 +1118,7 @@ impl Connected<'_> {
                 observed.current = Some(Current {
                     text: String::new(),
                     errors_only: true,
+                    notices: 0,
                     tool_calls: HashMap::new(),
                     max_tool_calls: limits.max_tool_calls,
                     too_many: too_many.clone(),
@@ -1135,8 +1143,11 @@ impl Connected<'_> {
                 .send_request(PromptRequest::new(id.clone(), vec![ContentBlock::Text(TextContent::new(text))]))
                 .block_task();
             let (done, cut) = bounded(self.cx, id, request, limits, &too_many, &mut stop, self.cancelled).await;
-            let (text, errors_only) =
-                self.observed.locked().current.take().map_or_else(Default::default, |c| (c.text, c.errors_only));
+            let (text, errors_only) = self.observed.locked().current.take().map_or_else(Default::default, |c| {
+                let text =
+                    if c.errors_only { c.text } else { crate::ratelimit::strip_notices(&c.text, c.notices).into() };
+                (text, c.errors_only)
+            });
             let overflowed = |e: &agent_client_protocol::Error| overflows(&self.launch.harness, &e.to_string());
             match &done {
                 Some(Err(e)) if cut.is_none() && retry && overflowed(e) => {

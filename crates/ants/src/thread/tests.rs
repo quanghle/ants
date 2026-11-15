@@ -101,6 +101,30 @@ fn a_message_on_another_sender_s_subject_is_marked_forged() {
 }
 
 #[test]
+fn a_thread_keeps_the_first_title_an_ant_suggested_but_none_from_a_forged_message() {
+    let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
+    let ask = Envelope::on_thread(t("t1"), alice, dev_a.clone(), "fix it");
+    let titled = |from: &UserId, title: &str| {
+        let mut reply = ask.reply(from.clone(), "on it", ants_proto::Role::Human).unwrap();
+        reply.title = Some(title.to_owned());
+        reply
+    };
+    let (forged, first, second) = (titled(&dev_b, "Forged"), titled(&dev_a, "Fix it"), titled(&dev_b, "Later"));
+    let messages = [
+        (ask.subject(), json(&ask)),
+        ("ants.inbox.alice.dev-a".to_owned(), json(&forged)),
+        (first.subject(), json(&first)),
+        (second.subject(), json(&second)),
+    ];
+    let read = entries(&messages);
+    assert_eq!((read[1].forged, &read[1].suggested_title), (true, &None));
+    let mut threads = Threads::new(None);
+    read.iter().for_each(|e| threads.add(e));
+    let (all, _) = threads.finish(&Select::default(), &ThreadMarks::default());
+    assert_eq!(all[0].suggested, Some((dev_a, "Fix it".to_owned())));
+}
+
+#[test]
 fn threads_sum_up_their_users_owner_times_and_opening() {
     let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
     let one = Envelope::on_thread(t("t1"), alice.clone(), dev_a.clone(), "first line\nmore");
@@ -192,6 +216,35 @@ fn pinned_threads_list_last_and_archived_ones_only_with_a_message_since() {
         (&"Release 1.2".into(), &true.into(), &true.into())
     );
     assert!(serde_json::to_value(&listed[0]).unwrap().get("pinned").is_none());
+}
+
+#[test]
+fn threads_idle_since_the_cutoff_list_only_as_auto_archived() {
+    let (alice, dev_a) = (p("alice"), p("dev-a"));
+    let on = |thread: &str| Envelope::on_thread(t(thread), alice.clone(), dev_a.clone(), thread);
+    let messages: Vec<(String, Vec<u8>)> =
+        ["t1", "t2", "t3", "t4", "t5"].map(on).iter().map(|e| (e.subject(), json(e))).collect();
+    let read = entries(&messages);
+    let mut marks = ThreadMarks::default();
+    marks.pin(&t("t1"));
+    marks.archive(&t("t2"), 5);
+    marks.kept.insert(t("t3"), at(10));
+    let threads = |select: &Select| {
+        let mut threads = Threads::new(None);
+        read.iter().for_each(|e| threads.add(e));
+        threads.finish(&Select { idle_before: Some(at(3)), ..select.clone() }, &marks).0
+    };
+    let ids = |threads: &[Summary]| -> Vec<String> { threads.iter().map(|t| t.thread_id.to_string()).collect() };
+
+    let listed = threads(&Select::default());
+    assert_eq!(ids(&listed), ["t3", "t5", "t1"], "t4 idle since at(3), t3 kept since, t1 pinned");
+    let archived = threads(&Select { archived: true, ..Default::default() });
+    assert_eq!(ids(&archived), ["t2", "t4"]);
+    assert_eq!(archived.iter().map(state).collect::<Vec<_>>(), [Some("archived"), Some("auto-archived")]);
+    assert!(table(&archived).lines().nth(2).unwrap().contains("auto-archived"));
+    let json = serde_json::to_value(&archived[1]).unwrap();
+    assert_eq!((&json["archived"], &json["auto_archived"]), (&true.into(), &true.into()));
+    assert!(serde_json::to_value(&archived[0]).unwrap().get("auto_archived").is_none());
 }
 
 #[test]
@@ -343,6 +396,65 @@ async fn a_human_picks_its_threads_by_a_start_of_their_id_or_the_last() {
     let ant = crate::humans::Me { id: dev_a, role: ants_proto::Role::Ant };
     let refused = Pick::Last.resolve(&js, &ant).await.unwrap_err().to_string();
     assert!(refused.contains("give the whole thread id"), "{refused}");
+}
+
+#[tokio::test]
+async fn a_human_picks_a_message_by_a_start_of_its_id() {
+    let Some(server) = crate::auth::tests::Server::start() else { return };
+    let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
+    let (_, js) = server.connect_as(&alice, ants_proto::Role::Human).await;
+    ants_daemon::bus::init_stream(&js).await.unwrap();
+    let me = crate::humans::Me { id: alice.clone(), role: ants_proto::Role::Human };
+    let resolve = |pick: &str| pick.parse::<MessagePick>().unwrap().resolve(&js, &me);
+
+    let asked = Envelope::new(alice.clone(), dev_a.clone(), "build it");
+    let reply = asked.reply(dev_a.clone(), "built", ants_proto::Role::Human).unwrap();
+    let posted = ChannelPost::new("ops".parse().unwrap(), alice.clone(), "deploy?");
+    let others = Envelope::new(dev_a.clone(), dev_b.clone(), "between ants");
+    // Messages made in the same millisecond, so the same 13 characters start their ids: two to alice a minute ago,
+    // two between ants two minutes ago.
+    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
+    let made = |millis: u128, tail: u128| Uuid::from_u128((millis << 80) | (0x7 << 76) | (0x8 << 60) | tail);
+    let mine = [0x1_0000, 0x2_0000].map(|tail| Envelope { id: made(now - 60_000, tail), ..reply.clone() });
+    let twins = [0x1_0000, 0x2_0000].map(|tail| Envelope { id: made(now - 120_000, tail), ..others.clone() });
+    for (subject, payload) in [
+        (asked.subject(), json(&asked)),
+        (reply.subject(), json(&reply)),
+        (posted.subject(), json(&posted)),
+        (others.subject(), json(&others)),
+        (mine[0].subject(), json(&mine[0])),
+        (mine[1].subject(), json(&mine[1])),
+        (twins[0].subject(), json(&twins[0])),
+        (twins[1].subject(), json(&twins[1])),
+    ] {
+        js.publish(subject, payload.into()).await.unwrap().await.unwrap();
+    }
+
+    let ids: Vec<Uuid> = recent_messages(&js, &alice).await.unwrap().iter().filter_map(|e| e.id).collect();
+    assert_eq!(ids, [mine[1].id, mine[0].id, posted.id, reply.id, asked.id], "alice's, most recent first");
+    let start = |id: Uuid| id.to_string()[..32].to_owned();
+    assert_eq!(resolve(&start(reply.id)).await.unwrap(), reply.id);
+    assert_eq!(resolve(&start(posted.id).to_uppercase()).await.unwrap(), posted.id);
+    assert_eq!(resolve(&start(others.id)).await.unwrap(), others.id, "a message between ants");
+    assert_eq!(resolve(&start(twins[1].id)).await.unwrap(), twins[1].id);
+    let several = resolve(&mine[0].id.to_string()[..13]).await.unwrap_err().to_string();
+    assert!(several.starts_with("2 messages to or from alice over the last 7 days start with"), "{several}");
+    assert!(several.contains(&format!("\n  {} ", mine[1].id)), "{several}");
+    assert!(several.contains("dev-a -> alice: built"), "{several}");
+    let twin = resolve(&twins[0].id.to_string()[..13]).await.unwrap_err().to_string();
+    assert!(twin.contains("2 messages over the last 7 days start with"), "{twin}");
+    assert!(twin.contains("none of them to or from alice"), "{twin}");
+    let unknown = resolve("ffff").await.unwrap_err().to_string();
+    assert!(unknown.contains("no message over the last 7 days starts with ffff"), "{unknown}");
+    assert!(unknown.contains(&format!("\n  {} ", asked.id)) && !unknown.contains(&others.id.to_string()), "{unknown}");
+    // A whole id needs no read, whoever's message it is.
+    let whole = Uuid::now_v7();
+    assert_eq!(resolve(&whole.to_string()).await.unwrap(), whole);
+
+    let ant = crate::humans::Me { id: dev_a, role: ants_proto::Role::Ant };
+    let start = MessagePick::Prefix(start(reply.id));
+    let refused = start.resolve(&js, &ant).await.unwrap_err().to_string();
+    assert!(refused.contains("give the whole message id"), "{refused}");
 }
 
 #[tokio::test]

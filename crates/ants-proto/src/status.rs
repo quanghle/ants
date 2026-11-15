@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 #[cfg(doc)]
 use crate::ToolCall;
-use crate::{Error, Escalation, ThreadId, UserId, subject};
+use crate::{Error, Escalation, ThreadId, UserId, Verdict, subject};
 
 /// Where an ant stands on a thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -30,6 +30,28 @@ impl State {
             State::Idle => "idle",
             State::Failed => "failed",
             State::SignedOut => "signed_out",
+        }
+    }
+}
+
+/// Who settled a tool request ([`StatusUpdate::Decided`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecidedBy {
+    /// A human, with the decision stored on the request's decision subject.
+    Human,
+    /// An ant of the requester's escalate_to, with `decide_approval`.
+    Chain,
+    /// Nobody: the request expired unanswered and was rejected.
+    Expiry,
+}
+
+impl DecidedBy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Human => "human",
+            Self::Chain => "chain",
+            Self::Expiry => "expiry",
         }
     }
 }
@@ -90,6 +112,17 @@ pub enum StatusUpdate {
     Escalated {
         to: UserId,
         escalation: Escalation,
+    },
+    /// The tool request `<ant>/<request_id>` was settled, `by` a human, an ant of the chain (`decider`) or its expiry,
+    /// and the ant goes on with `verdict`, a verdict the harness did not offer counting as a rejection. Sent just
+    /// before the [`State::Working`] state, however the decision arrived.
+    Decided {
+        request_id: Uuid,
+        verdict: Verdict,
+        by: DecidedBy,
+        /// The ant of the chain that decided, with [`DecidedBy::Chain`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decider: Option<UserId>,
     },
 }
 
@@ -160,7 +193,22 @@ mod tests {
             (json["escalation"]["stuck"].as_str(), json["escalation"]["reason"].as_str()),
             (Some("dev-a"), Some("asked"))
         );
-        for event in [state, tool, queued, approval, escalated] {
+        let decided = StatusEvent::new(
+            p("dev-a"),
+            t.clone(),
+            StatusUpdate::Decided {
+                request_id: Uuid::nil(),
+                verdict: Verdict::AllowOnce,
+                by: DecidedBy::Chain,
+                decider: Some(p("lead")),
+            },
+        );
+        let json = serde_json::to_value(&decided).unwrap();
+        assert_eq!(
+            (json["type"].as_str(), json["verdict"].as_str(), json["by"].as_str(), json["decider"].as_str()),
+            (Some("decided"), Some("allow_once"), Some("chain"), Some("lead"))
+        );
+        for event in [state, tool, queued, approval, escalated, decided] {
             let json = serde_json::to_string(&event).unwrap();
             assert_eq!(serde_json::from_str::<StatusEvent>(&json).unwrap(), event);
         }

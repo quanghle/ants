@@ -909,6 +909,7 @@ async fn ants_write_their_own_roster_entry_and_everyone_reads_the_roster() {
         limited: None,
         failing: None,
         fallback: None,
+        memory_low: None,
     };
     let registration = Registration::start(a_kv.clone(), entry.clone(), ants_proto::ROSTER_HEARTBEAT).await.unwrap();
     assert!(a_kv.put("dev-b", "spoof".into()).await.is_err(), "dev-a cannot list dev-b");
@@ -1126,6 +1127,37 @@ async fn any_human_titles_a_thread_but_each_marks_only_its_own_threads() {
     let (raw, mut errors) = server.watched(&dev_a).await;
     raw.publish(title.clone(), "{}".into()).await.unwrap();
     assert!(next_violation(&raw, &mut errors).await.contains(&title), "an ant's title is denied");
+}
+
+#[tokio::test]
+async fn a_human_adopts_an_ant_s_title_only_on_a_thread_never_titled() {
+    use crate::thread_meta::Meta;
+
+    let Some(server) = Server::start() else { return };
+    let (alice, dev_a) = (p("alice"), p("dev-a"));
+    let (_, a_js) = server.connect_as(&alice, Role::Human).await;
+    let (_, d_js) = server.connect(&dev_a).await;
+    ants_daemon::hub::create_bucket(&a_js, ants_daemon::hub::threads_config()).await.unwrap();
+    let meta = Meta::open(&a_js, None, &alice).await.unwrap();
+    let (fresh, titled, cleared) = (ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
+
+    let adopted = meta.adopt_title(&fresh, " Fix the build ", &dev_a).await.unwrap().unwrap();
+    assert_eq!((adopted.title.as_str(), &adopted.by), ("Fix the build", &dev_a));
+    assert_eq!(meta.title(&fresh).await.unwrap(), Some(adopted));
+    assert_eq!(meta.adopt_title(&fresh, "Something else", &dev_a).await.unwrap(), None, "adopted once");
+    assert!(meta.adopt_title(&ThreadId::generate(), "two\nlines", &dev_a).await.is_err());
+
+    meta.set_title(&titled, "Release 1.2").await.unwrap();
+    assert_eq!(meta.adopt_title(&titled, "Fix the build", &dev_a).await.unwrap(), None);
+    assert_eq!(meta.title(&titled).await.unwrap().unwrap().by, alice, "a human's title wins");
+
+    meta.set_title(&cleared, "Release 1.2").await.unwrap();
+    meta.clear_title(&cleared).await.unwrap();
+    assert_eq!(meta.adopt_title(&cleared, "Fix the build", &dev_a).await.unwrap(), None);
+    assert_eq!(meta.title(&cleared).await.unwrap(), None, "a cleared title stays cleared");
+
+    let ant = Meta::open(&d_js, None, &dev_a).await.unwrap();
+    assert!(ant.adopt_title(&ThreadId::generate(), "mine", &dev_a).await.is_err(), "an ant adopts none");
 }
 
 #[tokio::test]
@@ -1570,6 +1602,7 @@ async fn the_channel_manager_applies_the_owner_s_changes_only_and_announces_them
         limited: None,
         failing: None,
         fallback: None,
+        memory_low: None,
     };
     let b_roster = bus::ensure_roster(&b_js, ants_proto::ROSTER_TTL).await.unwrap();
     b_roster.put("dev-b", serde_json::to_vec(&listed).unwrap().into()).await.unwrap();

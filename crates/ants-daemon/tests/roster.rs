@@ -39,6 +39,7 @@ fn entry_on(ant: &str, machine: &str) -> RosterEntry {
         limited: None,
         failing: None,
         fallback: None,
+        memory_low: None,
     }
 }
 

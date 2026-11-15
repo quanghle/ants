@@ -263,11 +263,19 @@ async fn a_reply_of_error_lines_reporting_a_limit_is_no_answer() {
     assert_eq!(limited(session.prompt(overloaded).await), Some(LimitKind::RateLimit));
     let answers = [
         "A provider |answers 429 |when a rate limit is hit.",
-        "Info: Request failed due to a transient API error. Retrying...|Hello",
+        "Error:| handling in Rust uses Result.",
         "Error: Failed to get response from the AI model; retried 5 times Last error: 500 Internal Server Error",
     ];
     for answer in answers {
         assert_eq!(session.prompt(answer).await.unwrap(), answer.replace('|', ""), "the session lives on");
+    }
+    // Retry notices before an attempt that succeeds, as Copilot CLI and Antigravity stream them, are no part of it.
+    let retried = [
+        "Info: Request failed due to a transient API error. Retrying...|Hello| there.",
+        "\n⚠ API error (attempt 1): Error 429, Message: Resource exhausted. Please retry in 1.0s.\n|Hello| there.",
+    ];
+    for reply in retried {
+        assert_eq!(session.prompt(reply).await.unwrap(), "Hello there.", "{reply}");
     }
     session.close().await;
 }

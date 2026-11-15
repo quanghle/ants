@@ -16,11 +16,16 @@ redact = true                              # redact secrets from daemon publicat
 creds = "~/.config/ants/auth/alice.creds"  # human credentials (ant credentials are not used here)
 nats = "nats://127.0.0.1:4222"             # default: top-level nats
 js_domain = "hub"                          # default: top-level js_domain
+auto_archive = "14d"                       # hide threads idle this long from thread list and dash (default "0": never; README.md, Auto-archive)
 
 [storage]                                  # JetStream capacity warnings (see README.md, JetStream storage)
 warn_percent = 80                          # warn past this share of a store's limit (default 80; 0 disables)
 max_file_store = "100GB"                   # hub max_file_store (default: unknown); bytes or 1024-based K/M/G/T[B]
 max_memory_store = "1GB"                   # hub max_memory_store (default: unknown)
+
+[memory_pressure]                          # stop idle harnesses early when memory runs low (see Memory pressure)
+min_available = "1GB"                      # default; bytes, 1024-based K/M/G/T[B] or a share like "10%"; "0" disables
+max_harnesses = 1                          # default; per-ant harness cap while memory is low (at least 1)
 
 [[ant]]
 name = "dev-a"
@@ -42,7 +47,9 @@ allow_tools = false                        # true equals allow = ["*"]
 approval_timeout = "5m"                    # default
 capabilities = ["rust", "backend"]         # routing tags published in roster
 max_harnesses = 4                          # default
-worktrees = false                          # default; true gives each thread a git worktree
+worktrees = true                           # git worktree per thread; default: on for a git workdir
+                                           # not ignored by git, with max_harnesses > 1 (see Worktrees);
+                                           # false shares the workdir
 idle_timeout = "10m"                       # default
 prompt_timeout = "30m"                     # default; "0" disables
 max_tool_calls = 300                       # default; 0 disables
@@ -92,6 +99,19 @@ allow = ["read:*", "execute:cargo test*"]
 - Added schedules start; removed schedules stop immediately; changed or stopped schedules restart.
 - Invalid reloads log an error and keep running the previous config. `metrics` requires a process restart.
 
+## Worktrees
+
+With worktrees on, each thread works in its own git worktree at `<home>/worktrees/<thread>` on branch `ants/<ant>/<thread>`, created from `HEAD` on the thread's first prompt and removed once its session expires (a branch with unmerged commits is kept, and its thread is told). A workdir outside a git work tree stays shared.
+
+- Unset `worktrees` turns them on when the workdir is inside a git work tree (a `.git` directory or file in it or above it) that does not ignore it (`git check-ignore`, as for a directory in `target/`) and `max_harnesses > 1`, logging so at daemon start; otherwise threads share the workdir.
+- `worktrees = true` (`--worktrees`) turns them on; `worktrees = false` (`--no-worktrees`) keeps every thread in the shared workdir, with a warning at daemon start and in `ants doctor` when `max_harnesses > 1` and the workdir is a git work tree, as threads running at once may clobber each other's edits.
+
+Trade-offs of worktrees:
+
+- **Disk:** one full checkout per thread, plus build outputs (`target/`, `node_modules`) each thread builds from scratch, for up to `max_harnesses` live threads and every thread whose session has not expired.
+- **Branches:** a branch `ants/<ant>/<thread>` per thread in the repository; branches with unmerged commits remain after their worktree is removed until merged or deleted by hand.
+- **Starting point:** a worktree starts from `HEAD` without uncommitted changes of the workdir, and edits land on the thread's branch, not in the workdir, until merged; tools keyed by the workdir path (trust prompts, per-directory config, caches) see a new directory per thread.
+
 ## Ant templates
 
 An `[[ant_template]]` bounds worker ants added by manager ants. A templated `[[ant]]` sets `template`, `added_by`, `name`, `creds`, optional `nats`/`js_domain`, and any allowed request overrides below; any other key or out-of-bounds value fails config load and reload. Escalations go to `added_by` first (`escalate_to = [manager]`). Templated ants cannot be managers (`managers` and `added_by` reject them).
@@ -116,8 +136,8 @@ allow_sets = { build = ["execute:cargo build*", "execute:cargo test*"] } # named
 pool_daily_cost = 25.0                     # optional shared UTC daily cap across template ants; also pool_daily_tokens
 whoami = "Implement what the manager assigns." # overridable defaults: whoami, memory, tasks, capabilities
 capabilities = ["rust"]
-env = { CARGO_TARGET_DIR = "target" }      # fixed on template: env, worktrees, idle_timeout,
-worktrees = true                           # approval_timeout, spend_warn_percent
+env = { CARGO_TARGET_DIR = "target" }      # fixed on template: env, worktrees (unset: the ant default),
+worktrees = true                           # idle_timeout, approval_timeout, spend_warn_percent
 ```
 
 Allowed per-ant overrides within template bounds:
@@ -219,6 +239,7 @@ When a harness cannot run prompts for an environmental reason, the daemon holds 
   - *Rate limit / overload* (HTTP `429`/`529`, `rate limit`, `too many requests`, `overloaded`, `resource_exhausted`, `exhausted your capacity`, `rate_limited`, or a quota resetting within 5 m): backs off `30s` doubling to `10m` (logged only).
   - *Exhausted quota* (`insufficient_quota`, `quota exceeded`, `usage limit`, `spending limit`, `credit balance is too low`, `quota_exhausted`, plus built-in Copilot/Claude/Antigravity quota phrases): notifies the owner once on the thread and backs off `15m` doubling to `2h`.
   - Explicit retry hints in the error (`retry after 30s`, `resets in 2h27m3s`, `retryDelay`, epoch after `|`) override the delay within the cap. Publishes `limited` (`rate_limit` or `quota`, `since`, `until`) in `ants_roster`.
+  - Retry notices the harness streams before an attempt that succeeds (Copilot's `Info: … Retrying...`, Antigravity's `⚠ API error (attempt N): …`) are dropped from the answer when the last of them ends a line, or ends a sentence the answer does not continue on the same line; status updates still show them. An answer whose own first chunk starts like an error line (`Error:` followed by more of the same sentence) is sent whole.
 - **Startup failures** (missing/broken binary, bad flags/mode/model): retried as normal prompt failures on a single thread (dead-lettered after 5 attempts). After **3 startup failures within 10 m across ≥ 2 threads** with no success in between, a breaker opens: holds messages, publishes `failing` (`since`, `error`) in `ants_roster`, sends one direct notice with a level-0 `harness` escalation (`ants harness check --harness NAME`), and probes every 60 s with the ant's settings. After a probe succeeds, one failure before a message completes reopens the breaker immediately without re-notifying.
 
 ### Fallbacks
@@ -255,6 +276,16 @@ History budget precedence: ant `history_budget` -> selected `context`'s `history
 - **Copilot:** `context` accepts `default` or `long_context` (`--context ...`).
 - **Claude:** `context` accepts `default`, or `1m` with an explicit `model` (selects `<model>[1m]`).
 - **Antigravity:** no `context` selector; choose a model with the desired window.
+
+### Memory pressure
+
+Each harness process takes hundreds of MB (about 255 MB for Copilot CLI, see README.md, Footprint). On every idle check of an ant's harness pool (every `idle_timeout`, at most 30 s), the daemon reads the system's available memory (Linux `MemAvailable` in `/proc/meminfo`; macOS `hw.memsize × kern.memorystatus_level`; Windows `GlobalMemoryStatusEx`; elsewhere, or when unreadable, memory never counts as low). Below `min_available`:
+
+- Every idle harness (no prompt in flight) stops at once, least recently used first, instead of after `idle_timeout`; its session resumes via `session/load` on the next message. Busy harnesses finish their prompts.
+- New threads get a harness only while fewer than `max_harnesses` from `[memory_pressure]` run (capped by the ant's own `max_harnesses`); other messages wait in hand as when the pool is full.
+- The daemon logs a warning, sets `memory_low` (`{since, available, max_harnesses}`) in the ant's `ants_roster` entry (shown by `ants roster` and `list_ants`) and `ants_memory_low` to `1` in `/metrics`.
+
+Memory counts as recovered once available memory reaches 150 % of `min_available`, so the state does not flap; the daemon logs it, clears `memory_low` and admits threads up to `max_harnesses` again. Each ant checks on its own, so the lower cap applies per ant. `[memory_pressure]` applies to every ant in the file; changing it on reload restarts them.
 
 ## Prompt limits and spending caps
 
@@ -293,7 +324,7 @@ Matched calls auto-approve (`allow_once`). Unmatched calls publish an `ApprovalR
 - **Humans and push links:** `ants tools approve|reject <ant>/<id>`, `ants dash`, or signed `/_approval` links from `ants webhook serve` store an `ApprovalDecision` on `ants.approvals.<ant>.<id>` (`Nats-Expected-Last-Subject-Sequence` ensures first answer wins; verified by direct get).
 - **Chain members:** ants in `escalate_to` receive an `approval` escalation notice on the thread and may answer via MCP `decide_approval(verdict)` (`escalate` is refused on approval notices). Earliest decision wins (human or chain).
 - **Suggested rules & `--rule`:** once humans approve an identical call 3 times for an ant (`execute:<cmd>`, `<kind>:<abs-path>` for one file, `fetch:<url>`, else `<kind>:<title>`, excluding `*` and shell metacharacters), `ants tools approve` and approval notices print that rule. `ants tools approve ID --rule` appends it to the ant's `allow` in `config.toml` and reloads the daemon (for templated ants, `--rule` approves once and prints the rule to add to `[[ant_template]]`).
-- **Webhook & schedule narrowing:** threads started by a webhook or schedule intersect the ant's allowlist with the entry's `allow` (default read-only: `read:*`, `search`, `think`, and MCP `list_ants`, `check_inbox`, `read_notes`, `post_notes`, `send_message`, `ask_ant`, `route`, `escalate`, `react`; `["*"]` opts out; `[]` requires human approval for all calls). The narrowing travels on every message, spin-off, channel post, escalation and approval notice on the thread (persisted at `<ant>.<thread>.spend`) until a human messages the ant on the thread or wakes it on the channel thread.
+- **Webhook & schedule narrowing:** threads started by a webhook or schedule intersect the ant's allowlist with the entry's `allow` (default read-only: `read:*`, `search`, `think`, and MCP `list_ants`, `check_inbox`, `read_notes`, `post_notes`, `send_message`, `ask_ant`, `route`, `escalate`, `react`, `list_reactions`, `suggest_thread_title`; `["*"]` opts out; `[]` requires human approval for all calls). The narrowing travels on every message, spin-off, channel post, escalation and approval notice on the thread (persisted at `<ant>.<thread>.spend`) until a human messages the ant on the thread or wakes it on the channel thread.
 - **Expiry:** after `approval_timeout`, the call is rejected; the thread owner (else default human) receives a level-0 `approval` escalation notice on a separate thread (so `ants ask --wait` keeps waiting for the reply), and asked chain ants receive a cancellation notice on the request's thread.
 
 ### Redaction

@@ -229,6 +229,7 @@ pub fn as_envelope(post: &ChannelPost, ant: &UserId) -> Envelope {
         webhook: post.webhook,
         allow: post.allow.clone(),
         mention: None,
+        title: None,
         sent_at: post.sent_at,
     }
 }
@@ -943,6 +944,7 @@ mod tests {
             limited: None,
             failing: None,
             fallback: None,
+            memory_low: None,
         };
         let context = Context { posts: vec![post("dev-b", "earlier")], ..Context::default() };
         let text = triage_prompt(&root, &entry, &[a], &humans(), &context, 7);

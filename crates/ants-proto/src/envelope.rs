@@ -8,8 +8,8 @@ use crate::{
 };
 #[cfg(doc)]
 use crate::{
-    ChannelPost, LINKS_BUCKET, OWNERS_BUCKET, ThreadOrigin, Verdict, WEBHOOK_ALLOW, WEBHOOKS_BUCKET, owner_key,
-    webhook_marker_key,
+    ChannelPost, LINKS_BUCKET, MAX_TITLE, OWNERS_BUCKET, THREADS_BUCKET, ThreadOrigin, ThreadTitle, Verdict,
+    WEBHOOK_ALLOW, WEBHOOKS_BUCKET, owner_key, title_key, webhook_marker_key,
 };
 
 /// One message between ants, or between an ant and a human.
@@ -77,6 +77,13 @@ pub struct Envelope {
     /// post ([`ChannelPost::relayed_notice`]), the thread and text are the post's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mention: Option<Mention>,
+    /// The title the sending ant suggests for the thread, as its MCP tool suggest_thread_title took it: a trimmed line
+    /// of 1 to [`MAX_TITLE`] characters ([`ThreadTitle::new`]). A human's CLI reading it on a thread whose
+    /// [`title_key`] never had an entry in [`THREADS_BUCKET`] stores it there by the sender, so a title a human set or
+    /// cleared always wins. The subject pins the sender, so only an ant that messaged on the thread suggests its
+    /// title. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub sent_at: DateTime<Utc>,
 }
 
@@ -116,6 +123,7 @@ impl Envelope {
             webhook: false,
             allow: None,
             mention: None,
+            title: None,
             sent_at: Utc::now(),
         }
     }
@@ -242,6 +250,7 @@ impl Envelope {
             webhook: false,
             allow: self.allow.clone(),
             mention: None,
+            title: None,
             sent_at: Utc::now(),
         })
     }
