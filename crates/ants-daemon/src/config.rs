@@ -1,7 +1,7 @@
 //! The daemon config file, `~/.ants/config.toml`: the ants one daemon process serves.
 //!
 //! ```toml
-//! harness = "copilot"               # default harness of every ant and of the built-in messenger
+//! harness = "claude"                # harness of every ant naming none and of the built-in messenger; no default
 //! messenger = true                  # serve the built-in messenger (the default)
 //! nats = "wss://hub.example/nats"   # default server for every ant
 //! js_domain = "hub"                 # JetStream domain of the hub, if it has one; also per ant
@@ -89,7 +89,7 @@ use crate::caps::{Caps, Members, Pool};
 use crate::daemon::Config;
 use crate::escalation::{self, Chain};
 use crate::fallback;
-use crate::harness::{self, DEFAULT_HARNESS, Harness, Harnesses, ModelSettings, PromptLimits};
+use crate::harness::{self, Harness, Harnesses, ModelSettings, PromptLimits};
 use crate::pressure;
 use crate::publish::Publish;
 use crate::schedule::{self, Schedule};
@@ -190,7 +190,7 @@ pub struct Ant {
     /// Added to the harness's inherited environment.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
-    /// A harness name ([`Harnesses`]); the file's top-level `harness`, then [`DEFAULT_HARNESS`], when absent.
+    /// A harness name ([`Harnesses`]); the file's top-level `harness` when absent, which one of them must set.
     pub harness: Option<String>,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
@@ -374,9 +374,7 @@ impl Ant {
         self.validate()?;
         let instructions = self.prompt_instructions();
         let caps = self.caps();
-        let harness = harnesses
-            .get(self.harness.as_deref().unwrap_or(DEFAULT_HARNESS))
-            .with_context(|| format!("ant {}", self.name))?;
+        let harness = harnesses.named(self.harness.as_deref()).with_context(|| format!("ant {}", self.name))?;
         let model_settings = ModelSettings {
             model: self.model,
             reasoning_effort: self.reasoning_effort,
@@ -490,16 +488,16 @@ impl Ant {
     }
 }
 
-/// The ant a file serves unless it sets `messenger = false` or lists one named `messenger`: the file's `harness`
-/// (else the default harness) with its default model, reasoning effort and context, and otherwise the settings of an ant that sets nothing. Its home and
-/// workdir are `~/.ants/messenger`, created when it starts, and its credentials
+/// The ant a file serves unless it sets `messenger = false` or lists one named `messenger`: the file's `harness`, which
+/// it needs, with its default model, reasoning effort and context, and otherwise the settings of an ant that sets
+/// nothing. Its home and workdir are `~/.ants/messenger`, created when it starts, and its credentials
 /// `~/.config/ants/auth/messenger.creds` (where `ants auth user messenger` writes them) if that file exists.
-pub fn builtin_messenger(harness: &str, home: &Path) -> Ant {
+pub fn builtin_messenger(harness: Option<&str>, home: &Path) -> Ant {
     let name = UserId::messenger();
     let dir = home.join(".ants").join(name.as_str());
     let creds = home.join(".config/ants/auth").join(format!("{name}.creds"));
     Ant {
-        harness: Some(harness.to_owned()),
+        harness: harness.map(str::to_owned),
         home: Some(dir.clone()),
         creds: creds.is_file().then_some(creds),
         builtin: true,
@@ -589,9 +587,9 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
         bail!("config {}: messenger = false and no [[ant]] entries: nothing to serve", path.display());
     }
     if file.messenger && !file.ants.iter().any(|ant| ant.name == UserId::messenger()) {
-        file.ants.push(builtin_messenger(file.harness.as_deref().unwrap_or(DEFAULT_HARNESS), home));
+        file.ants.push(builtin_messenger(file.harness.as_deref(), home));
     }
-    let templates = templates(std::mem::take(&mut file.ant_templates), &harnesses, base, home)
+    let templates = templates(std::mem::take(&mut file.ant_templates), &harnesses, file.harness.is_some(), base, home)
         .with_context(|| format!("config {}", path.display()))?;
     let tables = ant_tables(text)?;
     let mut names = BTreeSet::new();
@@ -670,23 +668,22 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
     Ok(Loaded { ants, harnesses, templates, schedules, metrics: file.metrics, storage: file.storage, base, home })
 }
 
-/// Check that the harness of `ant` and those of its fallbacks are defined.
+/// Check that `ant` names a harness, and that it and those of its fallbacks are defined.
 fn check_harnesses(ant: &Ant, harnesses: &Harnesses) -> Result<()> {
-    if let Some(harness) = &ant.harness {
-        harnesses.get(harness)?;
-    }
+    let own = harnesses.named(ant.harness.as_deref())?;
     if !ant.fallback.is_empty() {
-        let own = harnesses.get(ant.harness.as_deref().unwrap_or(DEFAULT_HARNESS))?;
         let settings = ModelSettings { model: ant.model.clone(), ..ModelSettings::default() };
         fallback::resolve(&ant.fallback, &own, &settings, harnesses)?;
     }
     Ok(())
 }
 
-/// The file's `templates`, checked, each named once, their workdirs resolved and the harnesses they list defined.
+/// The file's `templates`, checked, each named once, their workdirs resolved and the harnesses they list defined;
+/// one listing none needs the file's top-level `harness` (`default_harness`).
 fn templates(
     mut templates: Vec<AntTemplate>,
     harnesses: &Harnesses,
+    default_harness: bool,
     base: &Path,
     home: &Path,
 ) -> Result<Vec<AntTemplate>> {
@@ -694,6 +691,10 @@ fn templates(
     for template in &mut templates {
         if !names.insert(template.name.clone()) {
             bail!("ant template {} is listed twice", template.name);
+        }
+        if template.harnesses.is_empty() && !default_harness {
+            let lists = format!("ant template {} lists no harnesses", template.name);
+            return Err(anyhow::Error::from(harness::Unset).context(lists));
         }
         template.validate(|dir| resolve(dir, base, home), |name| harnesses.get(name).map(drop))?;
     }
@@ -904,9 +905,9 @@ impl Summary {
         Ok(Self { nats: file.nats, js_domain: file.js_domain, harness: file.harness, harnesses, ants, caps })
     }
 
-    /// The harness named `name`, else the file's top-level `harness`, else [`DEFAULT_HARNESS`].
+    /// The harness named `name`, else the file's top-level `harness`; with neither, an [`harness::Unset`] error.
     pub fn harness(&self, name: Option<&str>) -> Result<std::sync::Arc<Harness>> {
-        self.harnesses.get(name.or(self.harness.as_deref()).unwrap_or(DEFAULT_HARNESS))
+        self.harnesses.named(name.or(self.harness.as_deref()))
     }
 
     /// The credentials the file names for `ant`: `None` when it does not list the ant, `Some(None)` when its

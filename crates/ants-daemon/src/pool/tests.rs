@@ -296,6 +296,7 @@ async fn ant_and_tool_instructions_reach_every_prompt_and_resumed_session() {
     ant.whoami = Some("Maintain the Rust backend.".to_owned());
     ant.memory = Some("Use notes.".to_owned());
     ant.tasks = Some("Use tickets.".to_owned());
+    ant.harness = Some("copilot".to_owned());
     let config = ant.into_config("nats://unused", &Default::default()).unwrap();
     let instructions =
         "[ants role dev-a]\nMaintain the Rust backend.\n\n[ants memory]\nUse notes.\n\n[ants tasks]\nUse tickets.";

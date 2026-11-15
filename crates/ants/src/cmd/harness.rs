@@ -13,7 +13,8 @@ pub(crate) enum HarnessCommand {
         #[command(flatten)]
         pick: HarnessPick,
     },
-    /// Run one prompt in the current directory and print the reply. Tool requests are rejected.
+    /// Run one prompt in the current directory and print the reply. Tool requests are rejected, but a harness
+    /// running its tools unasked, as the built-ins do, asks none.
     Prompt {
         #[command(flatten)]
         pick: HarnessPick,
@@ -24,8 +25,8 @@ pub(crate) enum HarnessCommand {
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct HarnessPick {
-    /// Harness name: built in (`copilot`, `claude`, `antigravity`) or defined in the config file (default: the
-    /// file's top-level `harness`, else `copilot`).
+    /// Harness name: built in (`copilot`, `claude`, `codex`, `antigravity`) or defined in the config file (default:
+    /// the file's top-level `harness`; with none, required).
     #[arg(long)]
     pub(crate) harness: Option<String>,
     /// Config file defining harnesses (default: ~/.ants/config.toml, if it exists).

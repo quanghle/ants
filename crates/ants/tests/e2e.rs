@@ -94,7 +94,8 @@ fn exercise_daemon(custom_tools: bool) {
         std::fs::write(
             &config,
             format!(
-                "messenger = false\nmetrics = {metrics:?}\n[[ant]]\nname = \"dev-a\"\nworkdir = {dir:?}\nhome = {home:?}\n\
+                "messenger = false\nharness = \"copilot\"\nmetrics = {metrics:?}\n\
+                 [[ant]]\nname = \"dev-a\"\nworkdir = {dir:?}\nhome = {home:?}\n\
                  whoami = \"Maintain the Rust backend.\"\n\
                  model = \"stub-model\"\nreasoning_effort = \"high\"\ncontext = \"long_context\"\n\
                  memory = \"Use the notes tool.\"\ntasks = \"Use the ticket tool.\"\n\
@@ -105,6 +106,7 @@ fn exercise_daemon(custom_tools: bool) {
         command.arg("--config").arg(config);
     } else {
         command.env("ANTS_ANT", "dev-a").arg("--home").arg(&home).arg("--workdir").arg(&dir);
+        command.arg("--harness").arg("copilot");
         command.arg("--metrics").arg(&metrics);
     }
     let daemon = command
@@ -364,7 +366,8 @@ fn a_daemon_exits_once_its_executable_was_replaced() {
     let log = || std::fs::read_to_string(dir.join("daemon.log")).unwrap_or_default();
     let mut daemon = Command::new(&installed);
     daemon
-        .args(["--nats", &server.url, "daemon", "--ant", "dev-a", "--upgrade-check", "1s", "--workdir"])
+        .args(["--nats", &server.url, "daemon", "--ant", "dev-a", "--harness", "copilot", "--upgrade-check", "1s"])
+        .arg("--workdir")
         .arg(&dir)
         .arg("--home")
         .arg(dir.join("home"))
@@ -446,7 +449,8 @@ fn the_builtin_messenger_hands_over_to_a_listed_one() {
 
     let _builtin = daemon("builtin", "harness = \"copilot\"\n");
     wait_for("builtin", "serving inbox", 1);
-    let listed = daemon("listed", &format!("[[ant]]\nname = \"messenger\"\nworkdir = {dir:?}\n"));
+    let listed =
+        daemon("listed", &format!("[[ant]]\nname = \"messenger\"\nworkdir = {dir:?}\nharness = \"copilot\"\n"));
     wait_for("listed", "serving inbox", 1);
     wait_for("builtin", "another daemon took over the ant", 1);
     assert_eq!(served_from(), dir.canonicalize().unwrap().display().to_string(), "{}", logs());
@@ -589,15 +593,38 @@ fn setup_brings_a_machine_up_once_and_completions_name_its_ants_channels_and_thr
     let home = scratch_dir("setup");
     let workdir = home.join("work");
     std::fs::create_dir_all(&workdir).unwrap();
-    let ants = |args: &[&str]| {
+    // A PATH with codex-acp the only built-in harness on it.
+    let bin = home.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join(if cfg!(windows) { "codex-acp.exe" } else { "codex-acp" }), "").unwrap();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let builtins = ["copilot", "claude-agent-acp", "codex-acp", "agy"];
+    let others: Vec<_> = std::env::split_paths(&path)
+        .filter(|dir| {
+            !builtins.iter().any(|command| ants_daemon::harness::on_path(command.as_ref(), dir.as_os_str()).is_some())
+        })
+        .collect();
+    let none = std::env::join_paths(&others).unwrap();
+    let codex = std::env::join_paths(std::iter::once(bin).chain(others)).unwrap();
+    let ants_on = |path: &std::ffi::OsStr, args: &[&str]| {
         let mut command = Command::new(ANTS);
-        command.args(args).env("HOME", &home).env("SHELL", "/bin/bash").current_dir(&home);
+        command.args(args).env("HOME", &home).env("PATH", path).env("SHELL", "/bin/bash").current_dir(&home);
         for var in ["ANTS_CREDS", "ANTS_CONFIG", "ANTS_NATS_URL", "ANTS_JS_DOMAIN", "XDG_DATA_HOME", "XDG_CONFIG_HOME"]
         {
             command.env_remove(var);
         }
         command
     };
+    let ants = |args: &[&str]| ants_on(&codex, args);
+
+    let other = home.join("other.toml");
+    let out =
+        run(ants_on(&none, &["--nats", &server.url, "setup", "--no-services", "--config", other.to_str().unwrap()]));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success() && !other.exists(), "{stdout}");
+    assert!(stdout.starts_with("fail   harness choice: no built-in harness is installed here"), "{stdout}");
+    assert!(stdout.contains("npm install -g @agentclientprotocol/codex-acp; sign in: codex-acp login"), "{stdout}");
+
     let setup = |ant: &str| {
         let workdir = workdir.to_str().unwrap();
         let args =
@@ -610,11 +637,18 @@ fn setup_brings_a_machine_up_once_and_completions_name_its_ants_channels_and_thr
 
     let first = setup("dev");
     let config = home.join(".ants/config.toml");
-    for line in ["done   nats-server config", "done   ants init", "done   config", "done   completions", "ok    config"]
-    {
+    for line in [
+        "done   harness choice: codex, the only built-in harness installed here",
+        "done   nats-server config",
+        "done   ants init",
+        "done   config",
+        "done   completions",
+        "ok    config",
+    ] {
         assert!(first.contains(line), "{line:?} in:\n{first}");
     }
     let written = std::fs::read_to_string(&config).unwrap();
+    assert!(written.contains("\nharness = \"codex\"\n"), "{written}");
     assert!(written.contains(&format!("nats = \"{}\"", server.url)), "{written}");
     assert!(written.contains("messenger = true\n") && written.contains("name = \"dev\""), "{written}");
     assert!(std::fs::read_to_string(home.join(".config/ants/nats.conf")).unwrap().contains("jetstream {"));

@@ -1,9 +1,13 @@
-//! `ants setup`: bring up ants on a single machine, step by step, each step left alone when already done: a local
-//! nats-server with JetStream and its service, the hub's stream and buckets (`ants init`), the config file with the
-//! messenger and optionally one ant, the harness check, the daemon service, the shell completions, and last
-//! `ants doctor`. It never overwrites a file: one already there is reported and kept.
+//! `ants setup`: bring up ants on a single machine, step by step, each step left alone when already done: the
+//! harness of a new config file ([`pick`]), a local nats-server with JetStream and its service, the hub's stream and
+//! buckets (`ants init`), the config file with the messenger and optionally one ant, the harness check, the daemon
+//! service, the shell completions, and last `ants doctor`. It never overwrites a file: one already there is reported
+//! and kept.
+
+mod pick;
 
 use std::fmt::Write as _;
+use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -28,8 +32,9 @@ pub struct SetupArgs {
     /// The working directory of --ant.
     #[arg(long, value_name = "DIR", requires = "ant")]
     pub workdir: Option<PathBuf>,
-    /// The harness of a new config file, its top-level `harness`: built in (`copilot`, `claude`, `antigravity`)
-    /// (default: copilot).
+    /// The harness of a new config file, its top-level `harness`: built in (`copilot`, `claude`, `codex`,
+    /// `antigravity`) or defined under `[harnesses.NAME]` (default: the only built-in one installed, else asked for
+    /// on a terminal).
     #[arg(long)]
     pub harness: Option<String>,
     /// Config file of the machine's ants (default: ~/.ants/config.toml).
@@ -94,6 +99,7 @@ pub async fn run(args: &SetupArgs, connection: &Connection<'_>) -> Result<()> {
     let leaf_conf = auth::default_dir()?.with_file_name("leaf.conf");
     let nats_conf = auth::default_dir()?.with_file_name("nats.conf");
     let mut report = Report { dry_run: args.dry_run, failed: 0 };
+    let harness = pick_harness(&mut report, args, &config_path)?;
     let mut services = Services::local();
     let values = || -> Result<Values> {
         let nats_server = match &args.nats_server {
@@ -127,8 +133,8 @@ pub async fn run(args: &SetupArgs, connection: &Connection<'_>) -> Result<()> {
     }
 
     init(&mut report, args, connection, listen.as_deref()).await;
-    let appended = config_file(&mut report, args, connection, &config_path);
-    harness_check(&mut report, args, &config_path).await;
+    let appended = config_file(&mut report, args, harness.as_deref(), connection, &config_path);
+    harness_check(&mut report, args, harness, &config_path).await;
     daemon_service(&mut report, args, &mut services, &config_path, appended, values);
     shell_completions(&mut report, args, &home);
 
@@ -159,6 +165,30 @@ pub async fn run(args: &SetupArgs, connection: &Connection<'_>) -> Result<()> {
         (0, 0) => Ok(()),
         (0, n) => bail!("{n} of {} checks failed", checks.len()),
         (n, _) => bail!("{n} setup steps failed"),
+    }
+}
+
+/// The harness of a new config file at `config`: --harness, else the only built-in one installed, else one asked for
+/// on a terminal; None for a file there. Fails, listing the harnesses, when none can be picked.
+fn pick_harness(report: &mut Report, args: &SetupArgs, config: &Path) -> Result<Option<String>> {
+    let step = "harness choice";
+    if args.harness.is_some() || config.exists() {
+        return Ok(args.harness.clone());
+    }
+    let detected = pick::detect(&std::env::var_os("PATH").unwrap_or_default());
+    let (mut input, mut output) = (std::io::stdin().lock(), std::io::stdout());
+    let terminal = input.is_terminal();
+    let prompt: Option<(&mut dyn std::io::BufRead, &mut dyn std::io::Write)> =
+        terminal.then_some((&mut input, &mut output));
+    match pick::choose(&detected, prompt) {
+        Ok((name, how)) => {
+            report.step(Mark::Done, step, how);
+            Ok(Some(name))
+        }
+        Err(e) => {
+            report.step(Mark::Fail, step, format!("{e:#}"));
+            bail!("no harness for {}: install one or pass --harness NAME", config.display())
+        }
     }
 }
 
@@ -297,9 +327,16 @@ async fn init(report: &mut Report, args: &SetupArgs, connection: &Connection<'_>
     }
 }
 
-/// Write the config file, unless there is one: the messenger, the harness and the server given, and the ant of
-/// --ant. To a file there, only add the ant, when not listed. Returns whether it changed the file.
-fn config_file(report: &mut Report, args: &SetupArgs, connection: &Connection<'_>, path: &Path) -> bool {
+/// Write the config file, unless there is one: the messenger, `harness` and the server given, and the ant of --ant.
+/// To a file there, only add the ant, when not listed; one naming no harness for its ants fails the step. Returns
+/// whether it changed the file.
+fn config_file(
+    report: &mut Report,
+    args: &SetupArgs,
+    harness: Option<&str>,
+    connection: &Connection<'_>,
+    path: &Path,
+) -> bool {
     let step = "config";
     let shown = path.display();
     let summary = if path.exists() {
@@ -314,7 +351,7 @@ fn config_file(report: &mut Report, args: &SetupArgs, connection: &Connection<'_
         None
     };
     let entry = match (&args.ant, &args.workdir) {
-        (Some(name), Some(workdir)) => match ant_entry(name, workdir, connection.nats, summary.as_ref()) {
+        (Some(name), Some(workdir)) => match ant_entry(name, workdir, connection.nats, summary.as_ref(), harness) {
             Ok(entry) => Some((name, entry)),
             Err(e) => {
                 report.step(Mark::Fail, step, format!("ant {name}: {e:#}"));
@@ -325,7 +362,7 @@ fn config_file(report: &mut Report, args: &SetupArgs, connection: &Connection<'_
     };
     let Some(summary) = summary else {
         let mut text = String::from("# The ants of this machine (README.md, Config file), written by `ants setup`.\n");
-        if let Some(harness) = &args.harness {
+        if let Some(harness) = harness {
             let _ = writeln!(text, "harness = {}", quoted(harness));
         }
         if connection.nats != crate::add::DEFAULT_NATS {
@@ -342,7 +379,11 @@ fn config_file(report: &mut Report, args: &SetupArgs, connection: &Connection<'_
         };
         let written = if report.dry_run { Ok(()) } else { write_new(path, &text) };
         match written {
-            Ok(()) => report.step(Mark::Done, step, format!("{shown} serving {listed}")),
+            Ok(()) => report.step(
+                Mark::Done,
+                step,
+                format!("{shown} serving {listed} on harness {}", harness.unwrap_or("none")),
+            ),
             Err(e) => report.step(Mark::Fail, step, format!("{e:#}")),
         }
         return !report.dry_run;
@@ -351,7 +392,17 @@ fn config_file(report: &mut Report, args: &SetupArgs, connection: &Connection<'_
         report.step(Mark::Skip, step, format!("{shown} kept: its harness stays, not set to {harness}"));
     }
     let Some((name, entry)) = entry else {
-        report.step(Mark::Exists, step, format!("{shown} kept"));
+        match config::load(path) {
+            Err(e) if harness::Unset::caused(&e) => {
+                let installed = pick::installed(&pick::detect(&std::env::var_os("PATH").unwrap_or_default()));
+                let installed = match installed.as_slice() {
+                    [] => "none of the built-in ones".to_owned(),
+                    names => names.join(", "),
+                };
+                report.step(Mark::Fail, step, format!("{shown} kept: {e:#}; installed here: {installed}"));
+            }
+            _ => report.step(Mark::Exists, step, format!("{shown} kept")),
+        }
         return false;
     };
     if summary.ants.iter().any(|(ant, _)| ant == name) {
@@ -366,17 +417,28 @@ fn config_file(report: &mut Report, args: &SetupArgs, connection: &Connection<'_
     !report.dry_run
 }
 
-/// The `[[ant]]` entry of `name` working in `workdir`, checked as the daemon will check it.
-fn ant_entry(name: &UserId, workdir: &Path, nats: &str, summary: Option<&Summary>) -> Result<String> {
+/// The `[[ant]]` entry of `name` working in `workdir`, checked as the daemon will check it: running the top-level
+/// harness of the file there, else `harness`, that of a new file.
+fn ant_entry(
+    name: &UserId,
+    workdir: &Path,
+    nats: &str,
+    summary: Option<&Summary>,
+    harness: Option<&str>,
+) -> Result<String> {
     let workdir = workdir.canonicalize().with_context(|| format!("workdir {}", workdir.display()))?;
     let ant = Ant::new(name.clone(), workdir);
     let harnesses = summary.map_or_default(|s| s.harnesses.clone());
-    ant.clone().into_config(nats, &harnesses)?;
+    let harness = match summary {
+        Some(summary) => summary.harness.clone(),
+        None => harness.map(str::to_owned),
+    };
+    Ant { harness, ..ant.clone() }.into_config(nats, &harnesses)?;
     config::entry(&ant)
 }
 
-/// Start the harness of the config file for an ACP handshake, as `ants harness check` does.
-async fn harness_check(report: &mut Report, args: &SetupArgs, config: &Path) {
+/// Start `harness`, else the one of the config file, for an ACP handshake, as `ants harness check` does.
+async fn harness_check(report: &mut Report, args: &SetupArgs, harness: Option<String>, config: &Path) {
     let step = "harness";
     if args.no_harness {
         return report.step(Mark::Skip, step, "--no-harness");
@@ -384,7 +446,7 @@ async fn harness_check(report: &mut Report, args: &SetupArgs, config: &Path) {
     if args.dry_run {
         return report.step(Mark::Done, step, "ants harness check");
     }
-    let pick = HarnessPick { harness: args.harness.clone(), config: Some(config.to_owned()) };
+    let pick = HarnessPick { harness, config: Some(config.to_owned()) };
     let checked = async {
         let harness = pick.resolve()?;
         let agent = harness::check(&harness).await?;

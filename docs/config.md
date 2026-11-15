@@ -1,9 +1,9 @@
 # Configuration
 
-`~/.ants/config.toml` (`--config` / `ANTS_CONFIG`) configures multi-ant daemons, CLI defaults, custom harnesses, worker templates and schedules. An empty file is valid and serves the built-in `messenger` on `copilot`.
+`~/.ants/config.toml` (`--config` / `ANTS_CONFIG`) configures multi-ant daemons, CLI defaults, custom harnesses, worker templates and schedules. Every ant needs a harness: a file with a top-level `harness` (such as `harness = "claude"` alone) serves the built-in `messenger` on it, and a file without one whose ants (or the built-in messenger) name none fails to load, naming the built-in harnesses. `ants setup` writes the top-level `harness` of a new file ([Choosing a harness in `ants setup`](#choosing-a-harness-in-ants-setup)); `ants doctor` tells how to fix an existing file.
 
 ```toml
-harness = "copilot"                        # default for every ant and built-in messenger
+harness = "copilot"                        # for every ant and built-in messenger naming none; no default
 messenger = true                           # default: serve built-in messenger unless [[ant]] names "messenger"
 nats = "wss://hub.example/nats"            # default NATS URL for ants and schedules without `nats`
 js_domain = "hub"                          # default hub JetStream domain; also per ant and schedule
@@ -127,7 +127,7 @@ managers = ["lead"]                        # exact ant names allowed to add work
 name_pattern = "<manager>-*"               # default; <manager> = manager name, * = any text
 max_ants = 3                               # required; max templated ants listed in config
 workdirs = ["~/src/repo-a", "~/src/repo-b"] # required; first is default
-harnesses = ["claude"]                     # first is default; default: top-level harness only
+harnesses = ["claude"]                     # first is default; default: top-level harness only (else required)
 models = { "claude-sonnet-4-5" = "high", "claude-haiku-4-5" = "max" } # model ID = max reasoning_effort
 contexts = ["1m"]                          # default: harness default only
 max_thread_cost = 2.0                      # ceilings + defaults: max_thread_tokens/cost, max_daily_tokens/cost
@@ -188,15 +188,51 @@ Humans retire any templated ant on the manager's machine with `ants retire NAME 
 
 ## Harnesses
 
-Built-in ACP stdio harnesses live in `crates/ants-daemon/src/harnesses.toml`:
+Built-in ACP stdio harnesses live in `crates/ants-daemon/src/harnesses.toml`. None is a default: an ant names its harness, or the file's top-level `harness` does.
 
-| Name | Command | Forced ACP mode | Sign-in |
-|---|---|---|---|
-| `copilot` (default) | `copilot --acp` | none | `copilot login` |
-| `claude` | `claude-agent-acp` (`@agentclientprotocol/claude-agent-acp`) | `default` | `claude login` or `ANTHROPIC_API_KEY` |
-| `antigravity` | `agy acp --disable-telemetry` | `default` | `agy` (`agy acp --login`) or Gemini API key |
+| Name | Command | Install | Sign-in | Runs tools unasked through |
+|---|---|---|---|---|
+| `copilot` | `copilot --acp --allow-all` | `npm install -g @github/copilot` | `copilot login` | `--allow-all` (agent mode, not autopilot) |
+| `claude` | `claude-agent-acp` | `npm install -g @agentclientprotocol/claude-agent-acp` | `claude login` or `ANTHROPIC_API_KEY` | ACP mode `bypassPermissions` |
+| `codex` | `codex-acp` | `npm install -g @agentclientprotocol/codex-acp` | `codex-acp login`, or `CODEX_API_KEY` / `OPENAI_API_KEY` | ACP mode `agent-full-access` (no approvals, no sandbox) |
+| `antigravity` | `agy acp --disable-telemetry --dangerously-skip-permissions` | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | `agy` (`agy acp --login`) or Gemini API key | `--dangerously-skip-permissions` |
 
-Define custom harnesses or replace built-ins whole under `[harnesses.NAME]` in `config.toml` or `harnesses.d/*.toml`:
+**Built-in harnesses run their own tools unasked.** Each starts in its most permissive native setting, so its shell commands, edits and fetches never reach the daemon as tool requests: an ant's `allow` rules, tool approvals by humans or `escalate_to` ants, and [webhook and schedule narrowing](#tool-permissions) do not apply to them. `ants daemon` logs a warning at start (and for each narrowed prompt), and `ants doctor` warns (`ant NAME tool permissions`), when an ant on such a harness sets allow rules other than `*`, has `escalate_to` ants, or is the destination of a narrowing webhook or schedule. Checks the daemon makes itself still apply: [prompt limits and spending caps](#prompt-limits-and-spending-caps), and the [branch push](#tool-permissions) of `publish = "draft-pr"`. Run such ants in workdirs and accounts their harness may change freely.
+
+- **Claude Code:** `bypassPermissions` is offered only when the adapter does not run as root (unless `IS_SANDBOX=1` is in its environment, e.g. `env = { IS_SANDBOX = "1" }` on the ant) and the Claude Code settings do not set `permissions.disableBypassPermissionsMode = "disable"`; otherwise sessions fail to start with the mode missing. Loads `CLAUDE.md`, `.claude/settings*.json` and hooks.
+- **Codex:** reports MCP calls as `execute` titled `mcp.<server>.<tool>` (matched as `other:`). Loads `~/.codex/config.toml` and `AGENTS.md`. For an API key, set `env = { DEFAULT_AUTH_REQUEST = '{"methodId":"api-key"}' }` beside `CODEX_API_KEY` or `OPENAI_API_KEY`.
+- **Antigravity:** loads `GEMINI.md`, `AGENTS.md` and `~/.gemini/antigravity-cli/settings.json`. Keychain login requires running the daemon as that OS user.
+
+To have a built-in ask before running tools, so that allow rules, approvals and narrowing apply, redefine it whole under `[harnesses.NAME]` with a gated mode or without the permissive argument (a redefinition does not run tools unasked unless it sets `bypass_permissions = true`):
+
+```toml
+[harnesses.claude]
+command = "claude-agent-acp"
+mode = "default"                               # asks for edits and commands; `auto` approves internally
+sign_in = "claude login"
+
+[harnesses.codex]
+command = "codex-acp"
+mode = "read-only"                             # sandboxes reads unasked; asks before edits, network or unsandboxed commands
+sign_in = "codex-acp login"
+
+[harnesses.copilot]
+command = "copilot"
+args = ["--acp"]
+sign_in = "copilot login"
+
+[harnesses.antigravity]
+command = "agy"
+args = ["acp", "--disable-telemetry"]
+mode = "default"
+sign_in = "agy"
+```
+
+Even gated, Claude Code runs its built-in read-only tools (`Read`, `Grep`, `ls`, `echo`) and rules from `.claude/settings*.json` unasked, and Antigravity applies workspace reads/edits and its `settings.json` first. A redefinition replaces the built-in's quota and context-overflow phrases, `window` and `context` table too: copy those from `harnesses.toml` to keep them.
+
+### Custom harnesses
+
+Define other ACP harnesses under `[harnesses.NAME]` in `config.toml` or `harnesses.d/*.toml`:
 
 ```toml
 [harnesses.custom-acp]
@@ -205,6 +241,7 @@ args = ["--stdio", "--log-level", "warn"]
 env = { CUSTOM_ACP_TELEMETRY = "off" }         # precedence: daemon env < harness env < ant env < --env
 mode = "default"                               # session fails if harness lacks this mode
 sign_in = "custom-acp login"                   # shown when signed out
+bypass_permissions = false                     # default; true when args or mode make it run tools unasked (warns as above)
 context_overflow = ["context too long"]        # extra context-overflow error substrings
 rate_limited = ["slow down"]                   # extra rate-limit error substrings
 quota_exhausted = ["monthly cap reached"]      # extra quota-exhausted error substrings
@@ -217,19 +254,15 @@ large = { args = ["--context-window", "1m"], window = 1000000 }
 huge = { model_suffix = "-1m", history_budget = 262144 }
 ```
 
-Codex (`npm install -g @agentclientprotocol/codex-acp`):
+### Choosing a harness in `ants setup`
 
-```toml
-[harnesses.codex]
-command = "codex-acp"
-mode = "read-only"                             # default `agent` auto-approves; `workspace-write` edits workdir unasked
-sign_in = "codex-acp login"
-# env = { DEFAULT_AUTH_REQUEST = '{"methodId":"api-key"}' }  # for OPENAI_API_KEY / CODEX_API_KEY
-```
+Without `--harness`, `ants setup` creating a config file chooses the file's top-level `harness` among the built-ins installed here, found by looking up each one's command on `PATH` as the daemon does (`.exe`, `.cmd`, `.bat` on Windows), without starting any. A provider CLI without its ACP adapter (`claude` without `claude-agent-acp`, `codex` without `codex-acp`) is reported as such. Then:
 
-- **Claude Code:** forced to `default` mode (`auto` approves internally). Built-in read-only tools (`Read`, `Grep`, `ls`, `echo`) and `.claude/settings*.json` still run unasked; loads `CLAUDE.md` and hooks.
-- **Codex:** `read-only` sandboxes read commands unasked and prompts before edits, network or unsandboxed commands. Reports MCP calls as `execute` titled `mcp.<server>.<tool>` (matched as `other:`). Loads `~/.codex/config.toml` and `AGENTS.md`.
-- **Antigravity:** forced to `default` mode; workspace reads/edits and `~/.gemini/antigravity-cli/settings.json` apply first; loads `GEMINI.md` and `AGENTS.md`. Keychain login requires running the daemon as that OS user.
+- **One installed:** it is picked and reported (`harness choice`).
+- **Several installed:** on a terminal, a numbered prompt lists the four built-ins, marking the installed ones, and takes a number or name; without a terminal, setup fails, asking for `--harness NAME`.
+- **None installed:** setup fails, listing each built-in's install and sign-in commands and pointing to custom harnesses.
+
+`--dry-run` reports the choice without writing. With an existing file, setup chooses nothing: a file lacking a harness fails the `config` step, listing the built-ins installed here. `ants harness check` then runs on the chosen harness.
 
 ### Drop-in harness files
 
@@ -312,7 +345,7 @@ Ants listed with caps in the local `--config` show `spent/cap`; remote ants show
 
 ## Tool permissions
 
-Harness tool calls are checked against `allow` (`--allow RULE`; `allow_tools = true` / `--allow-tools` equals `*`, for sandboxed workdirs only):
+Tool calls a harness asks about are checked against `allow` (the [built-in harnesses](#harnesses) run their own tools unasked, so neither rules nor approvals reach those) (`--allow RULE`; `allow_tools = true` / `--allow-tools` equals `*`, for sandboxed workdirs only):
 
 | Rule | Matches |
 |---|---|
@@ -329,7 +362,7 @@ Matched calls auto-approve (`allow_once`). Unmatched calls publish an `ApprovalR
 - **Humans and push links:** `ants tools approve|reject <ant>/<id>`, `ants dash`, or signed `/_approval` links from `ants webhook serve` store an `ApprovalDecision` on `ants.approvals.<ant>.<id>` (`Nats-Expected-Last-Subject-Sequence` ensures first answer wins; verified by direct get).
 - **Chain members:** ants in `escalate_to` receive an `approval` escalation notice on the thread and may answer via MCP `decide_approval(verdict)` (`escalate` is refused on approval notices). Earliest decision wins (human or chain).
 - **Suggested rules & `--rule`:** once humans approve an identical call 3 times for an ant (`execute:<cmd>`, `<kind>:<abs-path>` for one file, `fetch:<url>`, else `<kind>:<title>`, excluding `*` and shell metacharacters), `ants tools approve` and approval notices print that rule. `ants tools approve ID --rule` appends it to the ant's `allow` in `config.toml` and reloads the daemon (for templated ants, `--rule` approves once and prints the rule to add to `[[ant_template]]`).
-- **Webhook & schedule narrowing:** threads started by a webhook or schedule intersect the ant's allowlist with the entry's `allow` (default read-only: `read:*`, `search`, `think`, and MCP `list_ants`, `check_inbox`, `read_notes`, `post_notes`, `send_message`, `ask_ant`, `route`, `escalate`, `react`, `list_reactions`, `suggest_thread_title`; `["*"]` opts out; `[]` requires human approval for all calls). The narrowing travels on every message, spin-off, channel post, escalation and approval notice on the thread (persisted at `<ant>.<thread>.spend`) until a human messages the ant on the thread or wakes it on the channel thread.
+- **Webhook & schedule narrowing:** on harnesses that ask before running tools (not the [built-ins](#harnesses), which run them unasked), threads started by a webhook or schedule intersect the ant's allowlist with the entry's `allow` (default read-only: `read:*`, `search`, `think`, and MCP `list_ants`, `check_inbox`, `read_notes`, `post_notes`, `send_message`, `ask_ant`, `route`, `escalate`, `react`, `list_reactions`, `suggest_thread_title`; `["*"]` opts out; `[]` requires human approval for all calls). The narrowing travels on every message, spin-off, channel post, escalation and approval notice on the thread (persisted at `<ant>.<thread>.spend`) until a human messages the ant on the thread or wakes it on the channel thread.
 - **Stand-in:** each request names the human it waits for (`human`: the thread's human owner, else the default human) and the ant's `stand_in`, if set (escalations sent to a human carry it too). While that human is away, `ants webhook serve` relays the request or escalation to the stand-in, which overrides the human's own `[[human]] stand_in` (see [webhooks.md](webhooks.md#stand-in)). Decisions name their human (`by`); when another human decides, the human the request waited for gets an inbox notice (`[ants] <by> decided tool request <ant>/<id> … in place of <human>`); likewise when another human answers a pending human escalation or reminder (`[ants] <by> answered the escalation of <ant> …`). `stand_in` must not name the ant itself; templated ants take no `stand_in` (the `[[human]]` one applies).
 - **Branch pushes:** with `publish = "draft-pr"`, the daemon's own `git push <remote> ants/<ant>/<thread>` goes through the same check as an `execute` call titled `Push branch … and open a draft pull request`: `execute:git push origin ants/dev-a/*` lets dev-a push its thread branches to `origin` unasked; otherwise the push is an approval request on the thread, and a rejection (narrowed threads included) leaves the branch unpushed with an `[ants]` line in the reply.
 - **Expiry:** after `approval_timeout`, the call is rejected; the thread owner (else default human) receives a level-0 `approval` escalation notice on a separate thread (so `ants ask --wait` keeps waiting for the reply), and asked chain ants receive a cancellation notice on the request's thread.

@@ -57,8 +57,8 @@ pub struct AntOptions {
     /// Add NAME=VALUE to the harness environment (repeatable); overrides the file's entry for NAME.
     #[arg(long = "env", value_name = "NAME=VALUE", value_parser = env_pair)]
     env: Vec<(String, String)>,
-    /// Agent harness: `copilot` (default), `claude`, `antigravity`, or a name the config file defines under
-    /// `[harnesses.NAME]`.
+    /// Agent harness: built in (`copilot`, `claude`, `codex`, `antigravity`) or a name the config file defines under
+    /// `[harnesses.NAME]` (default: the config file's top-level `harness`; with none, required).
     #[arg(long)]
     harness: Option<String>,
     /// Model ID advertised by the harness. Omitted: keep the harness default.
@@ -270,13 +270,18 @@ pub struct Listed {
 }
 
 /// The ants to serve, the harnesses they may name and the schedules to run: those of the config file, or for an ant
-/// described by flags the harnesses of the file at `default_path` if it exists. The schedules run only when the
+/// described by flags the harnesses of the file at `default_path` if it exists, and its top-level `harness` unless
+/// the flags name one. The schedules run only when the
 /// daemon serves the whole file, not one ant picked with `--ant`.
 pub fn ants(args: &DaemonArgs, default_path: &Path) -> Result<Listed> {
     match source(args, default_path)? {
         Source::Flags(name) => {
-            let ant = args.options.apply(Ant::new(name, std::env::current_dir()?));
-            let harnesses = Summary::load(default_path)?.harnesses;
+            let mut ant = args.options.apply(Ant::new(name, std::env::current_dir()?));
+            let summary = Summary::load(default_path)?;
+            if ant.harness.is_none() {
+                ant.harness = summary.harness;
+            }
+            let harnesses = summary.harnesses;
             Ok(Listed { ants: vec![ant], harnesses, schedules: Vec::new(), metrics: args.metrics, managers: None })
         }
         Source::File(path) => {
@@ -610,6 +615,7 @@ mod tests {
         let mut p = Ant::new(name.parse().unwrap(), here());
         p.nats = Some(format!("nats://{name}:4222"));
         p.creds = Some(PathBuf::from(format!("{name}.creds")));
+        p.harness = Some("copilot".to_owned());
         p
     }
 
