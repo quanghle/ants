@@ -3039,6 +3039,29 @@ async fn a_claim_to_send_for_a_human_without_its_grant_is_forged() {
     assert!(timeout(Duration::from_millis(200), to_human.next()).await.is_err(), "the human is told nothing");
 }
 
+/// A post claiming to be posted for a human by an ant its grant does not name is the ant's own.
+#[tokio::test]
+async fn a_claim_to_post_for_a_human_without_its_grant_is_forged() {
+    let Some((bus, mut to_human)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let (ops, mut replies) = bus.channel("ops", &["dev-a", "pa"]).await;
+    let claimed = ChannelPost::new(ops, "pa".parse().unwrap(), "@dev-a for the human").on_behalf(Some(UserId::human()));
+    let seq = bus.post(&claimed).await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let reply = next_post(&mut replies).await;
+        assert_eq!((reply.in_reply_to, &reply.on_behalf_of), (Some(claimed.id), &None));
+        bus.until_posts_acked(seq).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    let answered = log.locked().answered.clone();
+    assert!(answered[0].contains("Post from pa mentioning dev-a:\n"), "{}", answered[0]);
+    assert!(timeout(Duration::from_millis(200), to_human.next()).await.is_err(), "the human is told nothing");
+}
+
 #[tokio::test]
 async fn an_ant_names_a_creator_only_as_the_top_level_post_of_the_thread_says() {
     let Some((bus, mut to_human)) = Bus::start().await else { return };

@@ -103,7 +103,8 @@ fn posts_group_by_thread_with_replies_indented() {
     assert_eq!(grouped[2].posts, [c, c1]);
     assert!(!grouped[3].has_start());
 
-    let shown = render(&grouped[..1]);
+    let from = |post: &ChannelPost| post.from.to_string();
+    let shown = render(&grouped[..1], &from);
     assert_eq!(
         shown,
         format!(
@@ -111,12 +112,14 @@ fn posts_group_by_thread_with_replies_indented() {
             a.thread_id
         )
     );
-    let shown = render(&grouped[3..]);
+    let shown = render(&grouped[3..], &from);
     assert_eq!(
         shown,
         "thread t1\n(the post that started the thread is no longer kept)\n    2027-01-15 08:00:05 dev-b: lost root\n"
     );
-    assert_eq!(render(&grouped[..2]).matches("\n\nthread ").count(), 1, "a blank line between threads");
+    assert_eq!(render(&grouped[..2], &from).matches("\n\nthread ").count(), 1, "a blank line between threads");
+    let alice = |post: &ChannelPost| ants_proto::Acting::For("alice".parse().unwrap()).label(post.from.as_str());
+    assert!(render(&grouped[3..], &alice).contains(" alice via dev-b: lost root\n"));
 }
 
 /// With the human's credentials, so it also checks what they allow.

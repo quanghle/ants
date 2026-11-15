@@ -218,7 +218,12 @@ async fn read(
             None => println!("no posts in #{channel}"),
         }
     }
-    print!("{}", channel::render(&threads));
+    let behalf = crate::behalf::Checker::new(nats, js);
+    let mut by = std::collections::HashMap::new();
+    for post in threads.iter().flat_map(|t| &t.posts) {
+        by.insert(post.id, behalf.label(&post.from, post.on_behalf_of.as_ref()).await);
+    }
+    print!("{}", channel::render(&threads, &|post| by.get(&post.id).cloned().unwrap_or_else(|| post.from.to_string())));
     if !peek && reads::allowed(nats) {
         mark_read(js, &nats.me.id, channel, &posts, &threads).await;
     }

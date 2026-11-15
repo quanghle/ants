@@ -246,9 +246,8 @@ async fn list_reactions_shows_those_to_the_current_message_or_a_named_one() {
         } else if message == quiet {
             Some(ants_proto::ReactionsOutcome::Listed { reactions: Vec::new() })
         } else {
-            let reacted = |reaction: &str, by: &[&str]| ants_proto::Reacted {
-                reaction: reaction.parse().unwrap(),
-                by: by.iter().map(|b| b.parse().unwrap()).collect(),
+            let reacted = |reaction: &str, by: &[&str]| {
+                ants_proto::Reacted::new(reaction.parse().unwrap(), by.iter().map(|b| b.parse().unwrap()).collect())
             };
             let reactions = vec![reacted("check", &["dev-b"]), reacted("eyes", &["alice", "dev-b"])];
             Some(ants_proto::ReactionsOutcome::Listed { reactions })
@@ -1655,6 +1654,19 @@ impl HumanSealing for EnrolledSealing {
         });
         Box::pin(async move { sealed.ok_or_else(|| anyhow::anyhow!("{human} has not enrolled the ant")) })
     }
+
+    fn seal_title<'a>(
+        &'a self,
+        human: &'a UserId,
+        other: &'a UserId,
+        title: &'a mut ThreadTitle,
+    ) -> BoxFuture<'a, Result<()>> {
+        let sealed = self.enrolled(human).map(|device| {
+            let body = format!("{other}: {}", std::mem::take(&mut title.title));
+            title.sealed = Some(Box::new(ants_proto::Sealed { v: 1, device, keys: Vec::new(), body }));
+        });
+        Box::pin(async move { sealed.ok_or_else(|| anyhow::anyhow!("{human} has not enrolled the ant")) })
+    }
 }
 
 /// Alice's grant naming `assistant`, or withdrawing hers with none, enrolling it as a device with `sealing`.
@@ -1848,13 +1860,20 @@ async fn the_assistant_reads_and_sends_its_human_s_sealed_messages_only_when_enr
     let notice = sent.try_recv().unwrap();
     assert!(notice.to == alice && notice.text.contains("sent bob a sealed message"), "{}", notice.text);
     assert!(!notice.text.contains("yes"), "the notice is in the clear, so it never quotes a sealed message");
-    let (ok, refused) =
-        call(&client, "title_for_human", serde_json::json!({"thread": sealed.thread_id.to_string(), "title": "Lunch"}))
-            .await;
-    assert!(!ok && refused.contains("sealed"), "{refused}");
+    let title = serde_json::json!({"thread": sealed.thread_id.to_string(), "title": "Lunch"});
+    let (ok, titled) = call(&client, "title_for_human", title.clone()).await;
+    assert!(ok, "{titled}");
+    let stored = store.titles.locked().pop().unwrap();
+    assert_eq!((stored.title.as_str(), &stored.by, stored.on_behalf_of.as_ref()), ("", &user("dev-a"), Some(&alice)));
+    assert_eq!(stored.sealed.as_ref().unwrap().body, "bob: Lunch", "sealed for alice's and bob's devices");
+    let notice = sent.try_recv().unwrap();
+    assert!(notice.text.contains("a sealed title") && !notice.text.contains("Lunch"), "{}", notice.text);
 
     grant(&humans, &device, Some("dev-a"), false);
     assert!(read().await.contains("bob to alice: [sealed]"), "enrollment ended");
+    let (ok, refused) = call(&client, "title_for_human", title).await;
+    assert!(!ok && refused.contains("not enrolled") && refused.contains("no title is set"), "{refused}");
+    assert!(store.titles.locked().is_empty());
     let (ok, plain) =
         call(&client, "send_for_human", serde_json::json!({"to": "bob", "text": "yes", "plaintext": true})).await;
     assert!(ok, "{plain}");

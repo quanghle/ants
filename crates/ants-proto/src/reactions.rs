@@ -1,10 +1,12 @@
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::{Acting, Error, Reaction, UserId, reaction_key, subject};
 #[cfg(doc)]
 use crate::{Envelope, REACTIONS_BUCKET, REACTIONS_REPEAT};
-use crate::{Error, Reaction, UserId, reaction_key, subject};
 
 /// A reaction in [`REACTIONS_BUCKET`], under its [`reaction_key`]: `by` reacted `reaction` to message `message`
 /// ([`Envelope::id`]). Readers take the reactor, message and reaction from the key, which credentials pin to the
@@ -43,6 +45,22 @@ impl ReactionEntry {
 pub struct Reacted {
     pub reaction: Reaction,
     pub by: Vec<UserId>,
+    /// What a reader made of the [`ReactionEntry::on_behalf_of`] of each reaction of `by` that claims one
+    /// ([`crate::Acting`]); absent for the others, the reactor's own.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub acting: BTreeMap<UserId, Acting>,
+}
+
+impl Reacted {
+    /// `reaction`, by `by`, each its own.
+    pub fn new(reaction: Reaction, by: Vec<UserId>) -> Self {
+        Self { reaction, by, acting: BTreeMap::new() }
+    }
+
+    /// Who reacted so, an assistant's reaction for its human as [`Acting::label`] names it.
+    pub fn labels(&self) -> impl Iterator<Item = String> + '_ {
+        self.by.iter().map(|by| self.acting.get(by).map_or_else(|| by.to_string(), |acting| acting.label(by.as_str())))
+    }
 }
 
 /// An ant's request for the reactions to message `message`, on [`subject::reactions`], or, with a `change`, to add or

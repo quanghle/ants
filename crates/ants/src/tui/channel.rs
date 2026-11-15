@@ -30,6 +30,8 @@ pub struct Post {
     pub id: Uuid,
     pub thread: ThreadId,
     pub from: String,
+    /// Who posted it, an assistant's post for its human naming both ([`Entry::sender`]).
+    pub by: String,
     pub at: DateTime<Utc>,
     pub text: String,
     pub attachments: Vec<Listed>,
@@ -79,6 +81,7 @@ impl Feeds {
                 id,
                 thread: entry.thread_id.clone(),
                 from,
+                by: entry.sender(),
                 at: entry.stored_at,
                 text: entry.text.clone(),
                 attachments: entry.attachments.clone(),
@@ -222,7 +225,7 @@ fn post_lines(post: &Post, data: &Data, now: DateTime<Utc>, marked: Option<usize
     let face = post.from.parse().ok().and_then(|from| data.face(&from));
     let mut head: Vec<Span<'static>> = face.into_iter().flatten().collect();
     head.extend([
-        Span::styled(post.from.clone(), Style::new().fg(Color::Blue).bold()),
+        Span::styled(post.by.clone(), Style::new().fg(Color::Blue).bold()),
         Span::styled(format!(" {} ", ago(post.at, now)), frame::dim()),
         Span::raw(crate::excerpt(first, 200)),
     ]);
@@ -279,7 +282,7 @@ pub mod tests {
         assert_eq!(threads, [second.thread_id.clone(), first.thread_id.clone()]);
         assert_eq!(m.data.feeds.replies(&first.thread_id), Some(Replies { count: 2, last_at: at(4) }));
         assert_eq!(m.data.feeds.replies(&second.thread_id), None);
-        let reacted = Reacted { reaction: "eyes".parse().unwrap(), by: vec![user("bob")] };
+        let reacted = Reacted::new("eyes".parse().unwrap(), vec![user("bob")]);
         m.read(super::super::reads::Read::Reactions([(second.id, vec![reacted])].into()), at(4));
         let View::Channel(page) = m.page() else { panic!("not the channel") };
         let shown: Vec<String> = post_lines(m.data.feeds.posts(&ops).nth(1).unwrap(), &m.data, at(64), None)

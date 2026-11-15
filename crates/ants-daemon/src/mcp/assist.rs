@@ -79,6 +79,13 @@ pub trait HumanStore: Send + Sync {
 pub trait HumanSealing: Send + Sync {
     fn open<'a>(&'a self, human: &'a UserId, envelope: &'a Envelope) -> BoxFuture<'a, Result<Opening>>;
     fn seal<'a>(&'a self, human: &'a UserId, envelope: &'a mut Envelope) -> BoxFuture<'a, Result<()>>;
+    /// Seal `title`, set for `human` on a thread between `human` and `other` whose messages are sealed.
+    fn seal_title<'a>(
+        &'a self,
+        human: &'a UserId,
+        other: &'a UserId,
+        title: &'a mut ThreadTitle,
+    ) -> BoxFuture<'a, Result<()>>;
 }
 
 impl HumanSealing for AssistantSealing {
@@ -88,6 +95,15 @@ impl HumanSealing for AssistantSealing {
 
     fn seal<'a>(&'a self, human: &'a UserId, envelope: &'a mut Envelope) -> BoxFuture<'a, Result<()>> {
         Box::pin(AssistantSealing::seal(self, human, envelope))
+    }
+
+    fn seal_title<'a>(
+        &'a self,
+        human: &'a UserId,
+        other: &'a UserId,
+        title: &'a mut ThreadTitle,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(AssistantSealing::seal_title(self, human, other, title))
     }
 }
 
@@ -516,17 +532,23 @@ impl Hub {
         let (human, store) = self.acting_for()?;
         let messages = self.human_messages(&human, store).await?;
         let thread = self.human_thread(&messages, &args.thread)?;
-        if messages.on(&thread).any(|m| m.envelope.sealed.is_some()) {
-            return Err(format!(
-                "thread {thread} carries sealed messages; a title is stored in the clear, so none is set"
-            ));
-        }
-        let title = ThreadTitle::new(thread.clone(), &args.title, self.ant.clone())
+        let mut title = ThreadTitle::new(thread.clone(), &args.title, self.ant.clone())
             .map_err(|e| format!("{e}"))?
             .on_behalf(Some(human.clone()));
         let shown = title.title.clone();
+        let sealed = messages.on(&thread).find(|m| m.envelope.sealed.is_some()).map(|m| &m.envelope);
+        if let Some(sealed) = sealed {
+            let ant = &self.ant;
+            let other = [&sealed.from, &sealed.to].into_iter().find(|u| **u != human && *u != ant).cloned();
+            let other = other.ok_or_else(|| format!("thread {thread} carries sealed messages with no other party"))?;
+            let sealing = self.sealing.get().ok_or_else(|| {
+                format!("thread {thread} carries sealed messages, and {human} has not enrolled {ant} as one of its devices, so the title is not sealed; no title is set")
+            })?;
+            sealing.seal_title(&human, &other, &mut title).await.map_err(|e| format!("{e:#}; no title is set"))?;
+        }
         store.put_title(title).await.map_err(|e| format!("{e:#}"))?;
-        let told = self.tell(&human, format!("titled thread {thread} {shown:?} for {human}.")).await;
+        let what = if sealed.is_some() { "a sealed title".to_owned() } else { format!("{shown:?}") };
+        let told = self.tell(&human, format!("titled thread {thread} {what} for {human}.")).await;
         Ok(format!("Titled thread {thread} {shown:?} for {human}.{told}"))
     }
 
@@ -670,7 +692,8 @@ impl Tools {
     }
 
     #[tool(description = "As the assistant of a human, set the title of one of its threads for it; the human is \
-        told. A thread carrying sealed messages gets no title, which would be stored in the clear.")]
+        told. On a thread carrying sealed messages the title is sealed for the human's and the other party's devices, \
+        which needs the human to have enrolled this ant as one of its devices; the notice never quotes it.")]
     async fn title_for_human(&self, Parameters(args): Parameters<TitleForHuman>) -> Result<CallToolResult, ErrorData> {
         Ok(text(self.hub.title_for_human(args).await))
     }

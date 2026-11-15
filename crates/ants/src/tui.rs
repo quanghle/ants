@@ -174,14 +174,14 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
     let acts = Acts::new(js.clone(), nats.domain.cloned(), me.clone(), thread_meta::open(nats, &js).await);
     let may_read = nats.rights.may_publish(&presence::online_right());
     let people = people::Io::new(js.clone(), nats.domain.cloned(), nats.me.clone(), sealing, may_read);
-    let searches = Searches::new(js.clone(), feed.keyring());
+    let searches = Searches::new(js.clone(), feed.keyring(), feed.behalf());
     let trees = tree::Io::new(js.clone(), nats.domain.cloned(), me.clone());
     let ants = ant::Io::new(js.clone(), nats.domain.cloned(), me.clone());
     let memories = memories::Io::new(nats, js.clone());
     let settings = settings::Io::new(js.clone(), nats.url, nats.creds.map(Path::to_path_buf), nats.domain.cloned());
     let (credentials, holder) =
         credentials::Io::new(js.clone(), nats.url, nats.domain.cloned(), crate::team_dir(None), crate::enroll::LISTEN);
-    let cards = cards::Io::new(cards::Source::open(nats, &js).await);
+    let cards = cards::Io::new(cards::Source::open(nats, &js).await.checking(feed.behalf()));
     let mut model = Model::new(state, host(nats.url).to_owned());
     model.compact = compact;
     model.data.credentials.holder = Some(holder);
