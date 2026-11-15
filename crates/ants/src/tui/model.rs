@@ -8,7 +8,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 
 use super::reads::Read;
 use super::work::{Facts, Filter};
-use super::{channel, home, nav, thread, work};
+use super::{channel, dm, home, nav, people, thread, work};
 use crate::live::{self, State};
 use crate::thread::Entry;
 
@@ -23,6 +23,7 @@ pub enum Key {
     Tab,
     Enter,
     Esc,
+    Backspace,
     /// Ctrl-C.
     Interrupt,
     /// Ctrl and another key, for the views to come (Ctrl-K, Ctrl-X).
@@ -39,6 +40,8 @@ pub enum Action {
     MarkRead(ThreadId),
     /// Read the reactions to these messages, and again every while.
     Reactions(Vec<Uuid>),
+    /// Send a message to another human on a new thread, as `ants ask @human` does.
+    Send(dm::Draft),
     /// Read again what may have missed changes.
     Refresh,
     Quit,
@@ -79,6 +82,8 @@ pub struct Data {
     pub humans: Option<Humans>,
     /// The reactions to the messages watched.
     pub reactions: Reactions,
+    /// Who of the other humans is online, and the messages with each.
+    pub people: people::People,
 }
 
 impl Data {
@@ -124,6 +129,7 @@ pub enum Page {
     Work(work::Page),
     Channel(channel::Page),
     Thread(thread::Page),
+    Dm(dm::Page),
 }
 
 impl Page {
@@ -133,9 +139,10 @@ impl Page {
             nav::Item::Home => Self::Home(home::Page::default()),
             nav::Item::Work(state) => Self::Work(work::Page::new(Filter { state: *state, ..Filter::default() })),
             nav::Item::Channel(channel) => Self::Channel(channel::Page::new(channel.clone())),
-            nav::Item::Ant(user) | nav::Item::Person(user) => {
+            nav::Item::Ant(user) => {
                 Self::Work(work::Page::new(Filter { user: Some(user.clone()), ..Filter::default() }))
             }
+            nav::Item::Person(user) => Self::Dm(dm::Page::new(user.clone())),
         }
     }
 
@@ -145,6 +152,7 @@ impl Page {
             Self::Work(_) => "work",
             Self::Channel(_) => "channel",
             Self::Thread(_) => "thread",
+            Self::Dm(_) => "dm",
         }
     }
 }
@@ -178,6 +186,7 @@ impl Model {
             channels: Vec::new(),
             humans: None,
             reactions: Reactions::new(),
+            people: people::People::default(),
         };
         let nav = nav::Item::Home;
         Self { data, pages: vec![Page::of(&nav)], nav, focus: Focus::View, help: false, notice: None }
@@ -234,6 +243,7 @@ impl Model {
         let mut posted = false;
         for entry in &entries {
             data.facts.add(entry, &me);
+            data.people.dms.add(entry, &me);
             posted |= data.feeds.add(entry);
         }
         let mut actions = Vec::new();
@@ -272,6 +282,21 @@ impl Model {
         }
     }
 
+    /// Take what was read of the other humans, or done for them.
+    pub fn people(&mut self, event: people::Event, now: DateTime<Utc>) {
+        match event {
+            people::Event::Online(read) => {
+                if let Some(text) = self.data.people.read(read) {
+                    self.notify(text, Level::Error, now);
+                }
+            }
+            people::Event::Sent(sent) => {
+                let (text, level) = sent.notice();
+                self.notify(text, level, now);
+            }
+        }
+    }
+
     /// The open thread, to be read again from the start: its history is to be loaded.
     pub fn open_thread(&mut self) -> Option<ThreadId> {
         let Some(Page::Thread(page)) = self.pages.last_mut() else { return None };
@@ -296,6 +321,12 @@ impl Model {
         if self.help {
             self.help = false;
             return None;
+        }
+        if self.focus == Focus::View
+            && let Some(Page::Dm(page)) = self.pages.last_mut()
+            && let Some(action) = page.write(key)
+        {
+            return action;
         }
         match key {
             Key::Char('q') => Some(Action::Quit),
@@ -364,6 +395,7 @@ impl Model {
             Page::Work(page) => page.key(key, data),
             Page::Channel(page) => page.key(key, data),
             Page::Thread(page) => page.key(key),
+            Page::Dm(page) => page.key(key, data),
         }?;
         match to {
             To::Thread(thread) => {

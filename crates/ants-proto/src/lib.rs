@@ -142,8 +142,9 @@ pub const READ_BUCKET: &str = "ants_read";
 /// KV bucket of where each human is reading: one [`Presence`] per device of a human following its inbox or the tool
 /// requests, keyed by [`presence_key`], put when the following starts, renewed every [`PRESENCE_HEARTBEAT`] and
 /// deleted when it ends. Kept in memory with a max age of [`PRESENCE_TTL`], so the presence of a CLI that died expires
-/// on its own. Each human reads, by direct gets, and writes only its own keys ([`Permissions::for_user`]); `ants
-/// webhook serve` reads them so a notice skips the push targets of a device reading it already.
+/// on its own. Each human writes only its own keys and reads every human's, by direct gets and a watch, so a CLI
+/// shows which humans have a device following; no ant reads any ([`Permissions::for_user`]). `ants webhook serve`
+/// reads them so a notice skips the push targets of a device reading it already.
 pub const PRESENCE_BUCKET: &str = "ants_presence";
 /// KV bucket of the directory of human devices' encryption keys: the user JWT of each device of a human whose
 /// credentials carry an encryption key ([`DeviceKey`]), keyed by [`device_entry_key`] and put by its CLI on connecting
