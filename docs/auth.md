@@ -312,7 +312,7 @@ Behind a leaf node (`~/.config/ants/leaf.conf` or `--leaf-config`), `ants add --
 
 ### Host credentials over NATS
 
-On a machine without host credentials where the daemon looks for them (the `[host]` table's `creds`, else `~/.config/ants/auth/host.creds`), `ants add --enroll` asks for the machine's [host credentials](#machine-host-credentials) in the same request: it generates a second NKey (kept as `host.nk` beside the credentials until the answer) and asks for `host-<machine>`, the machine being the `[host]` table's `machine`, else the leaf node's machine behind one, else the first label of the host name; a table naming another machine than the leaf's asks for none. `ants enroll list` and `ants chat` name the machine whose host credentials the request asks for, and the human approving the ant grants them too, signed as `ants auth host` would (never expiring, recorded in `issued.jsonl` as kind `host`); `ants enroll approve --no-host` approves the ant alone. `ants add` writes them where the daemon looks for them, and the daemon's reload starts the host connection with them. Admin orders never grant host credentials: the machine asking holds its own.
+On a machine without host credentials where the daemon looks for them (the `[host]` table's `creds`, else `~/.config/ants/auth/host.creds`), `ants add --enroll` (and `ants ant import --enroll`) asks for the machine's [host credentials](#machine-host-credentials) in the same request: it generates a second NKey (kept as `host.nk` beside the credentials until the answer) and asks for `host-<machine>`, the machine being the `[host]` table's `machine`, else the leaf node's machine behind one, else the first label of the host name; a table naming another machine than the leaf's asks for none. `ants enroll list` and `ants chat` name the machine whose host credentials the request asks for, and the human approving the ant grants them too, signed as `ants auth host` would (never expiring, recorded in `issued.jsonl` as kind `host`); `ants enroll approve --no-host` approves the ant alone. `ants add` writes them where the daemon looks for them, and the daemon's reload starts the host connection with them. Admin orders never grant host credentials: the machine asking holds its own.
 
 The machine name is bound as tightly as the ant's: the enrollment key signs the machine and the host key with the request (`host_creds.signature`, over the request's signed text plus `ants-enroll-host`, the machine and the key), so a request altered on the way is ignored; behind a leaf node, the uplink key's signature proves the leaf's machine, and only that machine's host credentials are granted through it. The approval still approves the ant but grants no host credentials (telling why, and to use `ants auth host MACHINE` if the machine needs them) when:
 
@@ -321,6 +321,22 @@ The machine name is bound as tightly as the ant's: the enrollment key signs the 
 - the host key is revoked, is the ant's key, or was issued under another name.
 
 Otherwise an enrollment key names its ant only, so a human approving trusts the machine name the way `ants auth host` trusts the operator typing it: before granting, check that the request comes from that machine. An approver predating host credentials ignores the field and approves the ant alone.
+
+## Moving an ant to another bus
+
+An ant moves between buses as a file ([config.md](config.md#exporting-and-importing-an-ant)), never with its keys:
+
+```sh
+ants ant export dev-c --move                  # old bus: writes ./dev-c.ant and marks dev-c moved
+ants ant import dev-c.ant --enroll enroll-dev-c.creds  # new bus: identity, settings, memories and a new key
+ants auth revoke dev-c                        # old bus, once the import succeeded: ends dev-c there
+```
+
+The import creates the ant's identity record with a KV create, refused when a record of the bus holds its name or its
+id, so no bus holds two copies of one ant; on one bus, `--as NEW` refuses too while the old record stays. `ants auth
+revoke` of the ant deletes its record, after which its id may come back. Until then the moved mark keeps every daemon
+of the old bus from serving it; `ants ant unseal NAME` undoes a move. Nothing signs or checks the file: whoever carries
+it is trusted with the ant's memories.
 
 ## Registering humans
 

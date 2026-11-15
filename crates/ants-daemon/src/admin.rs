@@ -33,6 +33,7 @@ use crate::direct_kv::{DirectKv, Lookup};
 mod add;
 mod ask;
 mod memories;
+pub use memories::files_under;
 mod pause;
 pub mod restart;
 mod retire;

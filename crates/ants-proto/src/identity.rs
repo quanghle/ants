@@ -10,8 +10,10 @@ use crate::{Error, UserId};
 /// An ant's record in [`IDENTITIES_BUCKET`], under the key of its name: what makes it the same ant on every machine.
 /// Its daemon creates it on start only when absent, so across machines the first creator wins and later ones keep it;
 /// the daemon serving the ant then adds each completed prompt by compare-and-set, keeping the other fields. Humans set
-/// and clear `avatar` and `color` (`ants ant avatar`), by compare-and-set too. `ants auth revoke NAME` of the ant
-/// deletes it, so a later ant of that name is born anew. Readers should treat unknown fields as additions, not errors.
+/// and clear `avatar` and `color` (`ants ant avatar`), and `moved` (`ants ant export --move`, `ants ant unseal`), by
+/// compare-and-set too. `ants ant import` creates it on another bus from an export, by a KV create refused when a
+/// record holds its name or its id, so no bus holds two copies of one ant. `ants auth revoke NAME` of the ant deletes
+/// it, so a later ant of that name is born anew. Readers should treat unknown fields as additions, not errors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AntIdentity {
     pub ant: UserId,
@@ -28,7 +30,8 @@ pub struct AntIdentity {
     /// The prompts the ant completed since its birth.
     #[serde(default)]
     pub prompts: u64,
-    /// Set when the ant was moved to another bus, by whom and when; no daemon serves it while set.
+    /// Set when the ant was moved to another bus, by whom and when; no daemon serves it while set: the daemon serving it
+    /// drains it as on a stop and leaves the roster, and a daemon starting it waits for the mark to go.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub moved: Option<MovedMark>,
     /// The ant this one was cloned from, when it was.
