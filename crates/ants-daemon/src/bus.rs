@@ -581,7 +581,8 @@ pub async fn store_acked<T: serde::Serialize>(
     };
     if let Err(e) = kept {
         if uncaptured {
-            return Err(explained(unreachable, &subject, true)).context("waiting for JetStream to store the message");
+            return Err(explained(unreachable, &subject, uncaptured))
+                .context("waiting for JetStream to store the message");
         }
         return Err(anyhow::anyhow!(e)).with_context(|| {
             format!(

@@ -9,6 +9,7 @@ use tokio::time::timeout;
 
 use super::*;
 use crate::auth;
+use crate::members::EnrollApprover;
 
 fn uplink(raw: &str) -> Result<String> {
     Uplink::parse(raw).map(|u| u.url())
@@ -43,7 +44,8 @@ fn team() -> (PathBuf, PathBuf) {
     let dir = scratch_dir("leaf-team");
     auth::init(&dir).unwrap();
     let creds = dir.join("leaf-m1.creds");
-    auth::issue_leaf(&dir, &M1, &[("dev-a".parse().unwrap(), Role::Ant)], &[], false, None, &creds).unwrap();
+    auth::issue_leaf(&dir, &M1, &[("dev-a".parse().unwrap(), Role::Ant)], &[], EnrollApprover::Without, None, &creds)
+        .unwrap();
     (dir, creds)
 }
 
@@ -221,7 +223,16 @@ async fn a_generated_leaf_reaches_the_hub_and_switches_its_uplink_on_reload() {
     let (_h, h_js) = bus::connect(&hub.url, Some(&creds(&human)), Some(&domain), &human, "test").await.unwrap();
     bus::init_stream(&h_js).await.unwrap();
     let leaf_creds = hub.dir().join("leaf-m1.creds");
-    auth::issue_leaf(&team, &M1, &[(dev_a.clone(), Role::Ant)], &[], false, Some(&domain), &leaf_creds).unwrap();
+    auth::issue_leaf(
+        &team,
+        &M1,
+        &[(dev_a.clone(), Role::Ant)],
+        &[],
+        EnrollApprover::Without,
+        Some(&domain),
+        &leaf_creds,
+    )
+    .unwrap();
 
     // The leaf's file includes the hub's server.conf from another directory, by a relative path.
     let server_conf = team.join(auth::SERVER_CONF);
@@ -307,7 +318,16 @@ async fn renewed_uplink_credentials_reconnect_the_uplink_alone_on_reload() {
     let (_h, h_js) = bus::connect(&hub.url, Some(&creds(&human)), Some(&domain), &human, "test").await.unwrap();
     bus::init_stream(&h_js).await.unwrap();
     let leaf_creds = hub.dir().join("leaf-m1.creds");
-    auth::issue_leaf(&team, &M1, &[(dev_a.clone(), Role::Ant)], &[], false, Some(&domain), &leaf_creds).unwrap();
+    auth::issue_leaf(
+        &team,
+        &M1,
+        &[(dev_a.clone(), Role::Ant)],
+        &[],
+        EnrollApprover::Without,
+        Some(&domain),
+        &leaf_creds,
+    )
+    .unwrap();
     let server_conf = team.join(auth::SERVER_CONF);
     let listen = format!("127.0.0.1:{}", free_port());
     let leaf_node = NatsServer::spawn_with(|dir| {
@@ -417,7 +437,7 @@ impl Revocable {
         let (a, b) = (creds(&dev_a), creds(&dev_b));
         let leaf_creds = hub.dir().join("leaf-m1.creds");
         let members = [(dev_a, Role::Ant), (dev_b, Role::Ant)];
-        auth::issue_leaf(&team, &M1, &members, &[], false, None, &leaf_creds).unwrap();
+        auth::issue_leaf(&team, &M1, &members, &[], EnrollApprover::Without, None, &leaf_creds).unwrap();
 
         let files = scratch_dir("leaf-files");
         let server_conf = files.join(auth::SERVER_CONF);

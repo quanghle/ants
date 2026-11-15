@@ -133,10 +133,10 @@ async fn waits_for_a_locked_credential_store_but_not_for_a_seed_it_lacks() {
     fails_at_once("the seed of another key").await;
 
     store.set(&key.public_key(), &key.seed().unwrap()).unwrap();
-    store.lock(true);
+    store.lock();
     let unlock = async {
         tokio::time::sleep(RETRY_FIRST * 2).await;
-        store.lock(false);
+        store.unlock();
     };
     let (connected, ()) = tokio::time::timeout(RETRY_MAX, async { tokio::join!(connect(), unlock) })
         .await

@@ -32,7 +32,7 @@ use std::time::Duration;
 
 use ants_proto::{
     ChannelId, DEFAULT_MAX_ESCALATION_HOPS, DEFAULT_TURN_BUDGET, Envelope, Escalation, EscalationReason, Hop,
-    NotesPost, OwnerBecause, ThreadId, UserId,
+    NotesPost, OwnerBecause, Role, ThreadId, UserId,
 };
 use anyhow::Result;
 use futures::future::BoxFuture;
@@ -232,13 +232,13 @@ impl Escalator {
         }
     }
 
-    /// A message the ant is about to answer: a human's ends the thread's escalation and gives the thread a fresh
-    /// allowance. One from the leader of the thread's escalation, carrying it, is the leader's answer: the first one
-    /// at the escalation's level gives the thread a fresh allowance and `envelope` a fresh turn budget, and stops the
-    /// deadline. Returns whether it did; a delivery of the same message again does again.
-    pub async fn arrived(&self, envelope: &mut Envelope, human: bool) -> Result<bool> {
+    /// A message the ant is about to answer, from a `sender` in that role: a human's ends the thread's escalation and
+    /// gives the thread a fresh allowance. One from the leader of the thread's escalation, carrying it, is the leader's
+    /// answer: the first one at the escalation's level gives the thread a fresh allowance and `envelope` a fresh turn
+    /// budget, and stops the deadline. Returns whether it did; a delivery of the same message again does again.
+    pub async fn arrived(&self, envelope: &mut Envelope, sender: Role) -> Result<bool> {
         let thread = envelope.thread_id.clone();
-        if human {
+        if sender.is_human() {
             if self.ledger.reset(&thread).await? {
                 tracing::info!(%thread, from = %envelope.from, "a human ended the thread's escalation");
             }

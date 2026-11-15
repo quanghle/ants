@@ -10,7 +10,7 @@ use ants_daemon::escalation::{self, Chain, Escalated, Escalator, Stuck};
 use ants_daemon::humans::Registry;
 use ants_daemon::mcp::Roster;
 use ants_daemon::{bus, chains};
-use ants_proto::{Envelope, EscalationReason, RosterEntry, StatusEvent, StatusUpdate, ThreadId, UserId, subject};
+use ants_proto::{Envelope, EscalationReason, Role, RosterEntry, StatusEvent, StatusUpdate, ThreadId, UserId, subject};
 use ants_test_support::NatsServer as Server;
 use async_nats::jetstream;
 use futures::StreamExt as _;
@@ -110,12 +110,12 @@ async fn an_escalation_climbs_past_its_deadline_after_a_restart_and_goes_to_the_
         let mut answer = two.reply(ant("boss"), "go on", ants_proto::Role::Ant).unwrap();
         answer = answer.with_escalation(Some(level));
         answer.turn_budget = 0;
-        assert!(escalator.arrived(&mut answer, false).await.unwrap());
+        assert!(escalator.arrived(&mut answer, Role::Ant).await.unwrap());
         assert_eq!(answer.turn_budget, ants_proto::DEFAULT_TURN_BUDGET);
         let mut other = answer.clone();
         other.id = ants_proto::Uuid::now_v7();
         other.turn_budget = 0;
-        assert!(!escalator.arrived(&mut other, false).await.unwrap(), "once per level");
+        assert!(!escalator.arrived(&mut other, Role::Ant).await.unwrap(), "once per level");
         assert!(escalator.ledger().deadlines().await.unwrap().is_empty());
 
         // boss's chain leads back to dev-a, so the human gets the thread.
@@ -127,7 +127,7 @@ async fn an_escalation_climbs_past_its_deadline_after_a_restart_and_goes_to_the_
         assert_eq!(notice.escalation.as_deref().map(|e| e.level), Some(2));
 
         let mut human = Envelope::on_thread(thread.clone(), UserId::human(), ant("dev-a"), "carry on");
-        assert!(!escalator.arrived(&mut human, true).await.unwrap());
+        assert!(!escalator.arrived(&mut human, Role::Human).await.unwrap());
         assert_eq!(escalator.ledger().pending(&thread).await.unwrap(), None, "a human ends it");
     };
     tokio::select! {
@@ -261,7 +261,7 @@ async fn an_escalation_reaching_the_human_is_pushed_and_reminded_after_a_restart
         assert_eq!(escalator.ledger().deadlines().await.unwrap().get(&thread), Some(&reminder.at));
 
         let mut human = Envelope::on_thread(thread.clone(), UserId::human(), ant("dev-a"), "carry on");
-        assert!(!escalator.arrived(&mut human, true).await.unwrap());
+        assert!(!escalator.arrived(&mut human, Role::Human).await.unwrap());
         assert_eq!(escalator.ledger().reminder(&thread).await.unwrap(), None, "a human ends it");
         assert!(escalator.ledger().deadlines().await.unwrap().is_empty());
     };

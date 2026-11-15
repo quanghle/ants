@@ -83,7 +83,7 @@ async fn run() -> Result<()> {
         Command::Ask { thread, replies, input, words } => send::ask(&nats()?, thread, &replies, &input, words).await,
         Command::Inbox { peek, thread, limit, follow, json } => {
             let select = inbox::Select { thread: None, limit, peek };
-            Box::pin(cmd::inbox::show(&nats()?, select, thread, follow, json)).await
+            Box::pin(cmd::inbox::show(&nats()?, select, thread, Listing { follow, json })).await
         }
         Command::Roster { json } => roster::show(&nats()?, json).await,
         Command::Spend { ant, thread, days, json, config } => {
@@ -172,6 +172,13 @@ impl<'a> Connection<'a> {
     fn nats(&self) -> Result<Nats<'a>> {
         Nats::new(self.nats, self.creds, self.js_domain)
     }
+}
+
+/// How a listing command prints: once or following new entries until interrupted, as text or one JSON value a line.
+#[derive(Debug, Clone, Copy)]
+pub struct Listing {
+    pub follow: bool,
+    pub json: bool,
 }
 
 pub struct Nats<'a> {

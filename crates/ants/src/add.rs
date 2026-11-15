@@ -484,11 +484,11 @@ mod tests {
         let add = ["dev-a", "--config", config_arg, "--out", out_arg, "--workdir", workdir, "--store-key"];
         let store = keystore::Memory::default();
 
-        store.lock(true);
+        store.lock();
         let err = format!("{:#}", run_with(&add, &server.url, &store).await.unwrap_err());
         assert!(err.contains("locked"), "{err}");
         assert!(!seed_path(&out).exists() && !config.exists(), "nothing half-done");
-        store.lock(false);
+        store.unlock();
 
         run_with(&add, &server.url, &store).await.unwrap();
         let key = std::fs::read_to_string(seed_path(&out)).unwrap().trim().to_owned();

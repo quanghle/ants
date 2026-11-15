@@ -722,7 +722,8 @@ pub fn render(update: &Update, now: DateTime<Utc>) -> String {
 }
 
 /// `ants tools list`: the pending requests, then with `follow` new ones as they come, until interrupted.
-pub async fn list(nats: &crate::Nats<'_>, follow: bool, json: bool) -> Result<()> {
+pub async fn list(nats: &crate::Nats<'_>, listing: crate::Listing) -> Result<()> {
+    let crate::Listing { follow, json } = listing;
     let (client, js) = nats.connect("ants-tools").await?;
     let print = |request: &ApprovalRequest| -> Result<()> {
         if json {

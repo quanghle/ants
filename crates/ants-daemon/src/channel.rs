@@ -233,6 +233,13 @@ pub fn as_envelope(post: &ChannelPost, ant: &UserId) -> Envelope {
     }
 }
 
+/// Whether [`Threads::context`] also reads the earlier posts of a thread the ant has not been shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Earlier {
+    Unseen,
+    Omitted,
+}
+
 /// The earlier posts on a thread to show with a prompt, and the later ones its turns left go by.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Context {
@@ -715,13 +722,17 @@ impl Threads {
         Ok(origin)
     }
 
-    /// The posts on the thread of `post`, at stream sequence `seq`, stored after it; with `earlier`, also those before
+    /// The posts on the thread of `post`, at stream sequence `seq`, stored after it; with [`Earlier::Unseen`], also those before
     /// it that the ant has not been shown: after the last one shown, or since the thread started, without its own.
     /// The posts of `humans` renew the thread's turns. The read ends at the last post stored as it starts.
-    pub async fn context(&self, post: &ChannelPost, seq: u64, earlier: bool, humans: &Humans) -> Result<Context> {
+    pub async fn context(&self, post: &ChannelPost, seq: u64, earlier: Earlier, humans: &Humans) -> Result<Context> {
         let mut collect = Collect::new(&self.ant, humans, &post.thread_id, seq);
         let after = consumer::DeliverPolicy::ByStartSequence { start_sequence: seq + 1 };
-        let seen = if earlier && !post.starts_thread() { Some(self.last_seen(&post.thread_id).await?) } else { None };
+        let seen = if earlier == Earlier::Unseen && !post.starts_thread() {
+            Some(self.last_seen(&post.thread_id).await?)
+        } else {
+            None
+        };
         let start = match seen {
             None => after,
             Some(Some(seen)) if seen + 1 >= seq => after,

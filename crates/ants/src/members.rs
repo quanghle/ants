@@ -34,11 +34,29 @@ pub struct Members {
     pub enroll_approver: bool,
 }
 
+/// Whether a leaf node's uplink also carries what `ants enroll` on the machine needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnrollApprover {
+    Without,
+    With,
+}
+
+impl From<bool> for EnrollApprover {
+    fn from(enroll_approver: bool) -> Self {
+        if enroll_approver { Self::With } else { Self::Without }
+    }
+}
+
 impl Members {
     /// The members of an uplink issued for `members`, ants and humans each in its role, and `webhooks`.
-    pub fn new(members: &[(UserId, Role)], webhooks: &[UserId], enroll_approver: bool) -> Self {
+    pub fn new(members: &[(UserId, Role)], webhooks: &[UserId], approver: EnrollApprover) -> Self {
         let of = |human: bool| members.iter().filter(move |(_, role)| role.is_human() == human).map(|(u, _)| u.clone());
-        Self { ants: of(false).collect(), humans: of(true).collect(), webhooks: webhooks.to_vec(), enroll_approver }
+        Self {
+            ants: of(false).collect(),
+            humans: of(true).collect(),
+            webhooks: webhooks.to_vec(),
+            enroll_approver: approver == EnrollApprover::With,
+        }
     }
 
     /// The ants and humans, each in its role ([`auth::members`]).
@@ -359,7 +377,7 @@ mod tests {
         assert_eq!(issued(&team, &m1, &out).unwrap(), None, "nothing issued yet");
 
         let on_m1 = auth::members(&users(&["dev-a", "human"]), &users(&["alice"]));
-        auth::issue_leaf(&team, &m1, &on_m1, &[], true, None, &out).unwrap();
+        auth::issue_leaf(&team, &m1, &on_m1, &[], EnrollApprover::With, None, &out).unwrap();
         let kept = Members {
             ants: users(&["dev-a"]),
             humans: users(&["alice", "human"]),

@@ -476,6 +476,7 @@ mod tests {
 
     use super::*;
     use crate::auth::tests::Server;
+    use crate::members::EnrollApprover;
     use crate::revoke;
 
     const WAIT: Duration = Duration::from_secs(5);
@@ -539,11 +540,11 @@ mod tests {
         let refused = KeyPair::new_user();
         let jwt = renewal(&refused).await;
         let before = std::fs::read(&creds).unwrap();
-        store.refuse_writes(true);
+        store.refuse_writes();
         let err = format!("{:#}", keys::replace(&creds, &jwt, &refused, &store, &server.url).await.unwrap_err());
         assert!(err.contains("stay as they were") && err.contains("denied"), "{err}");
         assert_eq!((std::fs::read(&creds).unwrap(), store.keys()), (before, vec![old_key.clone()]));
-        store.refuse_writes(false);
+        store.allow_writes();
 
         let user = KeyPair::new_user();
         let jwt = renewal(&user).await;
@@ -688,7 +689,7 @@ mod tests {
         let m1: ants_proto::Machine = "m1".parse().unwrap();
         let uplink = server.dir().join("leaf-m1.creds");
         let members = auth::members(&[p("dev-a")], &[p("alice")]);
-        auth::issue_leaf(&team, &m1, &members, &[], true, None, &uplink).unwrap();
+        auth::issue_leaf(&team, &m1, &members, &[], EnrollApprover::With, None, &uplink).unwrap();
         let before = Finding::from_jwt(&auth::read_creds(&uplink).unwrap().0).unwrap();
         let alice = server.creds_as(&p("alice"), Role::Human);
         let approver = Approver::connect(&server.url, &team, None, LISTEN).await.unwrap();

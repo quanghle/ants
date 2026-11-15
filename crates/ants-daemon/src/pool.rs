@@ -415,9 +415,21 @@ pub(crate) mod fake {
     /// `overflows` fails as a prompt that outgrew the context window, and so does `overflow` unless the session was
     /// rebuilt for it. While [`Log::signed_out`] is set, sessions and prompts fail as with a harness that is not signed
     /// in; while [`Log::limited`] is, prompts stream its text and fail with it, or end with it as their reply; while
-    /// [`Log::broken`] is, the handshake fails.
+    /// [`Log::broken`] is, the handshake fails. They can load stored sessions.
+    pub fn launch() -> (Launch, Arc<Mutex<Log>>, Arc<Semaphore>) {
+        launch_with(Sessions::Loadable)
+    }
+
+    /// Whether fake harnesses can load a stored session, or only start new ones.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum Sessions {
+        Loadable,
+        NewOnly,
+    }
+
+    /// [`launch`], with harnesses that load stored `sessions` or not.
     #[allow(clippy::too_many_lines)]
-    pub fn launch(can_load: bool) -> (Launch, Arc<Mutex<Log>>, Arc<Semaphore>) {
+    pub fn launch_with(sessions: Sessions) -> (Launch, Arc<Mutex<Log>>, Arc<Semaphore>) {
         let log = Arc::new(Mutex::new(Log::default()));
         let gate = Arc::new(Semaphore::new(0));
         let (shared, held) = (log.clone(), gate.clone());
@@ -446,7 +458,9 @@ pub(crate) mod fake {
                             }
                             responder.respond(
                                 InitializeResponse::new(init.protocol_version)
-                                    .agent_capabilities(AgentCapabilities::new().load_session(can_load))
+                                    .agent_capabilities(
+                                        AgentCapabilities::new().load_session(sessions == Sessions::Loadable),
+                                    )
                                     .agent_info(Implementation::new("fake", "1.0")),
                             )
                         },

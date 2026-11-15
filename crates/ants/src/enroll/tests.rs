@@ -9,6 +9,7 @@ use tokio::time::timeout;
 
 use super::*;
 use crate::auth::tests::Server;
+use crate::members::EnrollApprover;
 
 const WAIT: Duration = Duration::from_secs(5);
 const REPEAT: Duration = Duration::from_millis(100);
@@ -138,14 +139,14 @@ async fn requests_must_prove_their_enrollment_and_leaf_credentials() {
     let (enrollment_jwt, enrollment_key) = auth::read_creds(&creds).unwrap();
     let m1: Machine = "m1".parse().unwrap();
     let leaf_creds = server.dir().join("leaf-m1.creds");
-    auth::issue_leaf(&team, &m1, &[(p("dev-b"), Role::Ant)], &[], false, None, &leaf_creds).unwrap();
+    auth::issue_leaf(&team, &m1, &[(p("dev-b"), Role::Ant)], &[], EnrollApprover::Without, None, &leaf_creds).unwrap();
     let (leaf_jwt, leaf_key) = auth::read_creds(&leaf_creds).unwrap();
     // An ant named like a leaf's uplink user, which may connect as a client only.
     let posing = server.dir().join("leaf-m1-ant.creds");
     auth::issue(&team, &p("leaf-m1"), Role::Ant, None, &posing).unwrap();
     let (posing_jwt, posing_key) = auth::read_creds(&posing).unwrap();
     let revoked = server.dir().join("leaf-m1-revoked.creds");
-    auth::issue_leaf(&team, &m1, &[(p("dev-b"), Role::Ant)], &[], false, None, &revoked).unwrap();
+    auth::issue_leaf(&team, &m1, &[(p("dev-b"), Role::Ant)], &[], EnrollApprover::Without, None, &revoked).unwrap();
     let (revoked_jwt, revoked_key) = auth::read_creds(&revoked).unwrap();
     revoke::revoke(&team, None, &[revoked_key.public_key()]).unwrap();
     let approver = Approver::connect(&server.url, &team, None, LISTEN).await.unwrap();
@@ -229,7 +230,7 @@ async fn an_ant_new_to_a_leaf_enrolls_through_it_and_reaches_the_hub() {
     bus::init_stream(&h_js).await.unwrap();
     bus::ensure_links(&h_js).await.unwrap();
 
-    let spawn_leaf = |machine: &Machine, members: &[(UserId, Role)], approver: bool| {
+    let spawn_leaf = |machine: &Machine, members: &[(UserId, Role)], approver: EnrollApprover| {
         // Its configuration, outbox and uplink credentials outlive each of its runs.
         let dir = hub.dir().join(machine.as_str());
         std::fs::create_dir_all(&dir).unwrap();
@@ -257,8 +258,8 @@ async fn an_ant_new_to_a_leaf_enrolls_through_it_and_reaches_the_hub() {
     };
     let (m1, m2): (Machine, Machine) = ("m1".parse().unwrap(), "m2".parse().unwrap());
     let on_m1 = [(dev_a.clone(), Role::Ant), (human.clone(), Role::Human)];
-    let (m1_node, m1_conf) = spawn_leaf(&m1, &on_m1, false);
-    let (m2_node, _) = spawn_leaf(&m2, &[(human.clone(), Role::Human)], true);
+    let (m1_node, m1_conf) = spawn_leaf(&m1, &on_m1, EnrollApprover::Without);
+    let (m2_node, _) = spawn_leaf(&m2, &[(human.clone(), Role::Human)], EnrollApprover::With);
     let (_a, a_js) = bus::connect(&m1_node.url, Some(&creds(&dev_a)), Some(&domain), &dev_a, "test").await.unwrap();
     eventually("m1 reaches the hub", async || bus::open_stream(&a_js, &dev_a).await.is_ok()).await;
     let setup = crate::outbox::connect(&hub.url, Some(&creds(&human)), &human, &m1).await.unwrap();
@@ -299,7 +300,7 @@ async fn an_ant_new_to_a_leaf_enrolls_through_it_and_reaches_the_hub() {
     assert!(carried.ants.contains(&dev_c), "a later `ants leaf outbox m1` admits dev-c: {carried}");
     drop((_a, _c));
     drop(m1_node);
-    let (m1_node, _) = spawn_leaf(&m1, &on_m1, false);
+    let (m1_node, _) = spawn_leaf(&m1, &on_m1, EnrollApprover::Without);
 
     let (_c, c_js) = bus::connect(&m1_node.url, Some(&c_creds), Some(&domain), &dev_c, "test").await.unwrap();
     eventually("dev-c reaches the hub", async || bus::open_stream(&c_js, &dev_c).await.is_ok()).await;

@@ -22,6 +22,7 @@ use data_encoding::{BASE32_NOPAD, BASE64URL_NOPAD};
 use nkeys::KeyPair;
 use serde_json::{Value, json};
 
+use crate::members::EnrollApprover;
 use crate::revoke::{self, Issued, Kind};
 
 pub(crate) const OPERATOR_SEED: &str = "operator.nk";
@@ -177,7 +178,7 @@ fn with_device(issued: Issued, device: Option<DeviceId>, label: Option<&str>) ->
 /// Issue the uplink user of `machine`'s leaf node and write its `.creds` file to `out`. It may carry only what
 /// `members`, ants and humans each in its role ([`members`]), may do and the sourcing of the machine's outbox
 /// ([`Permissions::for_leaf`]), plus what the credentials of `webhooks` allow, for an `ants webhook serve` on the
-/// machine ([`webhook_permissions`]), plus with `enroll_approver` what `ants enroll` on the machine needs
+/// machine ([`webhook_permissions`]), plus [`EnrollApprover::With`] what `ants enroll` on the machine needs
 /// ([`Permissions::for_enroll_approver`]), and connect only as a leaf node, not as a client. Also writes the system
 /// account credentials of the leaf's second uplink beside them ([`leaf_system_creds`]).
 ///
@@ -188,7 +189,7 @@ pub fn issue_leaf(
     machine: &Machine,
     members: &[(UserId, Role)],
     webhooks: &[UserId],
-    enroll_approver: bool,
+    approver: EnrollApprover,
     js_domain: Option<&JsDomain>,
     out: &Path,
 ) -> Result<()> {
@@ -206,7 +207,7 @@ pub fn issue_leaf(
     for webhook in webhooks {
         merge(&mut permissions, webhook_permissions(dir, webhook)?);
     }
-    if enroll_approver {
+    if approver == EnrollApprover::With {
         merge(&mut permissions, Permissions::for_enroll_approver());
     }
     let mut permissions = permissions.with_js_domain(js_domain);
@@ -217,7 +218,7 @@ pub fn issue_leaf(
     check_uplink_size(&jwt, machine)?;
     write_secret(out, &creds(&jwt, &seed(&user)?))?;
     let issued = Issued::new(&user.public_key(), &name, Kind::Leaf, None)?;
-    let members = crate::members::Members::new(members, webhooks, enroll_approver);
+    let members = crate::members::Members::new(members, webhooks, approver);
     revoke::record(dir, &Issued { members: Some(members), ..issued })?;
     issue_leaf_system(dir, machine, &account.public_key(), &leaf_system_creds(out))
 }

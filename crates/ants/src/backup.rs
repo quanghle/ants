@@ -76,7 +76,7 @@ pub fn run_backup(dir: &Path, file: &Path, passphrase_file: Option<&Path>) -> Re
     if !auth::holds_team(dir) {
         bail!("no team keys in {}: back them up on the machine holding them, or give --dir", dir.display());
     }
-    let passphrase = passphrase(passphrase_file, true)?;
+    let passphrase = passphrase(passphrase_file, Confirm::Twice)?;
     let record = backup(dir, file, &passphrase, age::WORK_FACTOR)?;
     println!(
         "team keys of {} ({} issued.jsonl entries) backed up to {}: keep it off this machine, and the passphrase \
@@ -90,11 +90,12 @@ pub fn run_backup(dir: &Path, file: &Path, passphrase_file: Option<&Path>) -> Re
 
 /// `ants auth restore FILE`, with the passphrase as for [`run_backup`].
 pub fn run_restore(dir: &Path, file: &Path, passphrase_file: Option<&Path>, force: bool) -> Result<()> {
-    if !force {
+    let existing = if force { Existing::Replace } else { Existing::Refuse };
+    if existing == Existing::Refuse {
         refuse_overwrite(dir)?;
     }
-    let passphrase = passphrase(passphrase_file, false)?;
-    let record = restore(dir, file, &passphrase, force)?;
+    let passphrase = passphrase(passphrase_file, Confirm::Once)?;
+    let record = restore(dir, file, &passphrase, existing)?;
     println!(
         "team keys of account {} restored into {}, as backed up {} ({} issued.jsonl entries); keys issued and \
          revocations made since are not in it: revoke any such key again, and push the account with `ants auth push`",
@@ -132,10 +133,18 @@ pub fn backup(dir: &Path, out: &Path, passphrase: &str, work_factor: u8) -> Resu
     Ok(record)
 }
 
+/// What [`restore`] does with the team files a directory holds already.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Existing {
+    /// Restore only into a directory without any.
+    Refuse,
+    /// Restore over them, removing those the backup has none of.
+    Replace,
+}
+
 /// Restore the team keys of the backup `file`, encrypted with `passphrase`, into `dir`, over the team files there
-/// with `force` (removing those the backup has none of), else only into a directory without any; the backup then
-/// counts as the last one of `dir`.
-pub fn restore(dir: &Path, file: &Path, passphrase: &str, force: bool) -> Result<Record> {
+/// or not as `existing` says; the backup then counts as the last one of `dir`.
+pub fn restore(dir: &Path, file: &Path, passphrase: &str, existing: Existing) -> Result<Record> {
     let encrypted = fs::read(file).with_context(|| format!("reading {}", file.display()))?;
     let plaintext =
         age::decrypt(&encrypted, passphrase.as_bytes()).with_context(|| format!("decrypting {}", file.display()))?;
@@ -145,7 +154,7 @@ pub fn restore(dir: &Path, file: &Path, passphrase: &str, force: bool) -> Result
         bail!("{} is a backup of a newer ants (format {}): upgrade ants", file.display(), contents.ants_backup);
     }
     check_contents(&contents).with_context(|| format!("{} holds no team keys to restore", file.display()))?;
-    if !force {
+    if existing == Existing::Refuse {
         refuse_overwrite(dir)?;
     }
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -281,9 +290,16 @@ fn check_passphrase(passphrase: &str) -> Result<()> {
     Ok(())
 }
 
+/// How often a passphrase read from the terminal is asked for: twice to confirm it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Confirm {
+    Once,
+    Twice,
+}
+
 /// The passphrase: the first line of `file`, else [`PASSPHRASE_ENV`], else read from the terminal without echo,
-/// twice to `confirm` it.
-fn passphrase(file: Option<&Path>, confirm: bool) -> Result<String> {
+/// [`Confirm::Twice`] to confirm it.
+fn passphrase(file: Option<&Path>, confirm: Confirm) -> Result<String> {
     let passphrase = if let Some(file) = file {
         let text = fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
         text.lines().next().unwrap_or_default().to_owned()
@@ -292,7 +308,7 @@ fn passphrase(file: Option<&Path>, confirm: bool) -> Result<String> {
     } else {
         let passphrase = prompt("passphrase")?;
         check_passphrase(&passphrase)?;
-        if confirm && prompt("passphrase again")? != passphrase {
+        if confirm == Confirm::Twice && prompt("passphrase again")? != passphrase {
             bail!("the passphrases differ");
         }
         passphrase
@@ -377,21 +393,21 @@ mod tests {
         assert_eq!((record.issued, mode(&file)), (1, 0o600));
 
         let elsewhere = root.join("restored");
-        let e = restore(&elsewhere, &file, "wrong", false).unwrap_err();
+        let e = restore(&elsewhere, &file, "wrong", Existing::Refuse).unwrap_err();
         assert_eq!(e.downcast_ref::<Refused>(), Some(&Refused::WrongPassphrase), "{e:#}");
         assert!(!elsewhere.exists());
-        restore(&elsewhere, &file, PASS, false).unwrap();
+        restore(&elsewhere, &file, PASS, Existing::Refuse).unwrap();
         for name in [OPERATOR_SEED, ACCOUNT_SEED, SYSTEM_SEED, SERVER_CONF, ISSUED] {
             assert_eq!(fs::read(elsewhere.join(name)).unwrap(), fs::read(dir.join(name)).unwrap(), "{name}");
         }
         assert_eq!(mode(&elsewhere.join(ACCOUNT_SEED)), 0o600);
         assert!(matches!(state(&elsewhere).unwrap(), State::Current(_)));
 
-        let e = restore(&dir, &file, PASS, false).unwrap_err();
+        let e = restore(&dir, &file, PASS, Existing::Refuse).unwrap_err();
         assert!(format!("{e:#}").contains("--force"), "{e:#}");
         auth::init(&root.join("other")).unwrap();
         fs::copy(root.join("other").join(ACCOUNT_SEED), dir.join(ACCOUNT_SEED)).unwrap();
-        restore(&dir, &file, PASS, true).unwrap();
+        restore(&dir, &file, PASS, Existing::Replace).unwrap();
         assert_eq!(fs::read(dir.join(ACCOUNT_SEED)).unwrap(), fs::read(elsewhere.join(ACCOUNT_SEED)).unwrap());
         fs::remove_dir_all(root).unwrap();
     }
@@ -409,7 +425,7 @@ mod tests {
         line.replace_range(..1, flipped);
         fs::write(&file, lines.join("\n")).unwrap();
         let elsewhere = root.join("restored");
-        let e = restore(&elsewhere, &file, PASS, false).unwrap_err();
+        let e = restore(&elsewhere, &file, PASS, Existing::Refuse).unwrap_err();
         assert_eq!(e.downcast_ref::<Refused>(), Some(&Refused::Damaged), "{e:#}");
         assert!(!elsewhere.exists());
         assert!(backup(&dir, &file, " ", FAST).is_err());

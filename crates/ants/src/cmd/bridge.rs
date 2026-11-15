@@ -68,7 +68,7 @@ pub(crate) async fn run(command: BridgeCommand) -> Result<()> {
     match command {
         BridgeCommand::Serve { listen, upstream, token, token_file, metrics, upgrade } => {
             let token = bridge::token(token, token_file.as_deref())?;
-            let addr = bridge::listen_addr(&listen, false)?;
+            let addr = bridge::listen_addr(&listen, bridge::Listen::Any)?;
             let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("listening on {addr}"))?;
             let server = bridge::Server::new(upstream.clone(), token);
             let _metrics = serve_metrics(metrics, server.traffic()).await?;
@@ -78,7 +78,7 @@ pub(crate) async fn run(command: BridgeCommand) -> Result<()> {
         BridgeCommand::Connect { url, listen, token, token_file, headers, proxy, metrics, upgrade } => {
             let token = bridge::token(token, token_file.as_deref())?;
             let remote = bridge::Remote::new(&url, token.as_deref(), &headers, proxy.as_deref())?;
-            let addr = bridge::listen_addr(&listen, true)?;
+            let addr = bridge::listen_addr(&listen, bridge::Listen::LoopbackOnly)?;
             let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("listening on {addr}"))?;
             let _metrics = serve_metrics(metrics, remote.traffic()).await?;
             tracing::info!("bridging {addr} to {url}; leaf uplink: nats-leaf://{addr}");

@@ -61,7 +61,7 @@ pub(crate) async fn run(command: WebhookCommand, conn: &Connection<'_>) -> Resul
             };
             let config = load()?;
             let addr = config.listen.as_deref().unwrap_or(webhook::DEFAULT_LISTEN);
-            let addr = bridge::listen_addr(addr, false)?;
+            let addr = bridge::listen_addr(addr, bridge::Listen::Any)?;
             let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("listening on {addr}"))?;
             tracing::info!("webhooks on http://{addr}{}/<webhook>", config.path);
             if config.links.is_some() {

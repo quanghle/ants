@@ -320,7 +320,7 @@ async fn until(what: &str, done: impl Fn() -> bool) {
 #[tokio::test]
 async fn threads_run_concurrently_and_each_stays_in_order() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
-    let (launch, log, gate) = fake::launch(true);
+    let (launch, log, gate) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
     bus.send(&t1, "hold a").await;
@@ -348,7 +348,7 @@ async fn threads_run_concurrently_and_each_stays_in_order() {
 async fn replies_are_redacted() {
     let Some((mut bus, mut replies)) = Bus::start().await else { return };
     bus.redactor = Redactor::default().with_env([("DEPLOY_TOKEN", "d3pl0y-s3cret")]);
-    let (launch, _, _) = fake::launch(true);
+    let (launch, _, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
     bus.send(&t1, "use d3pl0y-s3cret or ghp_0123456789abcdefghijABCDEFGHIJ").await;
@@ -364,7 +364,7 @@ async fn replies_are_redacted() {
 #[tokio::test]
 async fn progress_streams_to_the_status_subject() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
-    let (launch, _, _) = fake::launch(true);
+    let (launch, _, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
     let mut statuses = bus.client.subscribe(subject::status(&bus.dev, &t1)).await.unwrap();
@@ -408,7 +408,7 @@ async fn progress_streams_to_the_status_subject() {
 #[tokio::test]
 async fn messages_waiting_on_their_thread_hear_where_they_stand() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
-    let (launch, _, gate) = fake::launch(true);
+    let (launch, _, gate) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
     let mut statuses = bus.client.subscribe(subject::status(&bus.dev, &t1)).await.unwrap();
@@ -443,7 +443,7 @@ async fn messages_waiting_on_their_thread_hear_where_they_stand() {
 #[tokio::test]
 async fn a_failed_message_is_retried_before_the_rest_of_its_thread() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
     bus.send(&t1, "flaky a").await;
@@ -464,7 +464,7 @@ async fn a_failed_message_is_retried_before_the_rest_of_its_thread() {
 #[tokio::test]
 async fn a_prompt_too_large_even_for_a_new_session_goes_to_the_owner_with_the_thread_history_tried() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
     bus.send(&t1, "hello").await;
@@ -494,7 +494,7 @@ async fn a_prompt_too_large_even_for_a_new_session_goes_to_the_owner_with_the_th
 #[tokio::test]
 async fn messages_wait_unspent_while_the_harness_is_signed_out() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     log.locked().signed_out = true;
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
@@ -559,7 +559,7 @@ async fn messages_wait_unspent_while_the_harness_is_signed_out() {
 #[tokio::test]
 async fn messages_wait_unspent_while_the_harness_keeps_failing_to_start() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     log.locked().broken = true;
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
@@ -614,7 +614,7 @@ async fn messages_wait_unspent_while_the_harness_keeps_failing_to_start() {
 #[tokio::test]
 async fn messages_wait_unspent_through_a_provider_rate_limit() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     log.locked().limited = Some("API Error: 429 Too Many Requests, retry after 0.2s".to_owned());
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
@@ -659,7 +659,7 @@ async fn messages_wait_unspent_through_a_provider_rate_limit() {
 #[tokio::test]
 async fn an_exhausted_quota_is_told_once_and_spends_no_attempt() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     // Copilot CLI's reply when the provider turns the prompt away, which is no answer.
     let error = "Error: Failed to get response from the AI model; retried 5 times (total retry wait time: 56.70 \
                      seconds) Last error: 429 You exceeded your current quota, please check your plan and billing \
@@ -698,7 +698,7 @@ async fn an_exhausted_quota_is_told_once_and_spends_no_attempt() {
 #[tokio::test]
 async fn a_forged_sender_is_dead_lettered_unanswered() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let thread = ThreadId::generate();
     // dev-b sends on its own subject, but the envelope claims the human sent it.
@@ -724,7 +724,7 @@ async fn a_forged_sender_is_dead_lettered_unanswered() {
 #[tokio::test]
 async fn an_approval_decision_is_acked_without_a_prompt() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let thread = ThreadId::generate();
     let dev_b: UserId = "dev-b".parse().unwrap();
@@ -763,7 +763,7 @@ async fn inbox_consumers_from_before_sender_subjects_get_the_new_filter() {
 #[tokio::test]
 async fn ctrl_c_finishes_prompts_in_flight_and_a_restart_resumes() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
-    let (launch, log, gate) = fake::launch(true);
+    let (launch, log, gate) = fake::launch();
     let store = SessionStore::memory();
     let t1 = ThreadId::generate();
     bus.send(&t1, "hold a").await;
@@ -797,7 +797,7 @@ async fn progress_acks_keep_messages_in_hand_past_the_ack_wait() {
     let (progress_every, ack_wait) = (Duration::from_millis(200), ack_wait(Duration::from_millis(200)));
     // A consumer left by an older daemon with a longer ack wait takes the new one.
     drop(bus::inbox_consumer(&bus.stream, &bus.dev, ack_wait * 100, MAX_DELIVER, 4).await.unwrap());
-    let (launch, log, gate) = fake::launch(true);
+    let (launch, log, gate) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
     bus.send(&t1, "hold a").await;
@@ -822,7 +822,7 @@ async fn progress_acks_keep_messages_in_hand_past_the_ack_wait() {
 #[tokio::test]
 async fn a_redelivery_of_a_message_in_hand_is_not_prompted_again() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
-    let (launch, log, gate) = fake::launch(true);
+    let (launch, log, gate) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
     bus.send(&t1, "hold a").await;
@@ -855,7 +855,7 @@ async fn a_redelivery_of_a_message_in_hand_is_not_prompted_again() {
 async fn a_prompt_past_its_limit_is_cancelled_and_the_human_told() {
     let Some((mut bus, mut replies)) = Bus::start().await else { return };
     bus.limits.timeout = Some(Duration::from_millis(100));
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
     bus.send(&t1, "stall").await;
@@ -883,7 +883,7 @@ async fn a_reply_names_the_thread_branch_holding_new_commits() {
     let setup = Worktrees::find(&bus.dev, &repo, &home).await.unwrap();
     let worktree = setup.checkout(&t1).await.unwrap();
     crate::worktrees::tests::commit(&worktree, "work of t1");
-    let (launch, _, _) = fake::launch(true);
+    let (launch, _, _) = fake::launch();
     let worktrees = Worktrees::find(&bus.dev, &repo, &home).await.unwrap();
     let pool = Pool::new(launch.in_dir(repo.clone()), SessionStore::memory(), 2, IDLE).with_worktrees(worktrees);
     bus.send(&t1, "one").await;
@@ -944,7 +944,7 @@ async fn cancel(bus: &Bus, thread: &ThreadId) -> bool {
 #[tokio::test]
 async fn a_human_cancels_a_running_prompt_and_the_sender_gets_what_it_wrote() {
     let Some((bus, mut to_human)) = Bus::start().await else { return };
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let dev_b: UserId = "dev-b".parse().unwrap();
     let mut to_dev_b = bus.client.subscribe(subject::inbox_of(&dev_b)).await.unwrap();
@@ -1007,7 +1007,7 @@ const WITHDRAWN: &str = "[ants] Withdrawn by human before dev-a was prompted wit
 async fn a_queued_message_is_listed_and_withdrawn_while_the_running_prompt_goes_on() {
     use ants_proto::MessageMark;
     let Some((bus, mut replies)) = Bus::start().await else { return };
-    let (launch, log, gate) = fake::launch(true);
+    let (launch, log, gate) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
     let (a, a_seq) = bus.send(&t1, "hold a").await;
@@ -1065,7 +1065,7 @@ async fn a_queued_message_is_listed_and_withdrawn_while_the_running_prompt_goes_
 #[tokio::test]
 async fn a_message_withdrawn_before_its_delivery_is_never_prompted() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
     let (a, a_seq) = bus.send(&t1, "a").await;
@@ -1093,7 +1093,7 @@ async fn a_message_withdrawn_before_its_delivery_is_never_prompted() {
 async fn a_withdrawn_message_redelivered_after_a_crash_is_acked_unprompted() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
     let (progress_every, ack_wait) = (Duration::from_millis(100), ack_wait(Duration::from_millis(100)));
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let store = SessionStore::memory();
     let t1 = ThreadId::generate();
     bus.send(&t1, "hold a").await;
@@ -1127,7 +1127,7 @@ async fn a_withdrawn_message_redelivered_after_a_crash_is_acked_unprompted() {
 #[tokio::test]
 async fn a_message_held_for_a_sign_in_can_be_withdrawn() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     log.locked().signed_out = true;
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
@@ -1150,7 +1150,7 @@ async fn a_message_held_for_a_sign_in_can_be_withdrawn() {
 #[tokio::test]
 async fn a_first_delivery_is_prompted_as_sent_and_leaves_no_marker() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
     let (_, seq) = bus.send(&t1, "a").await;
@@ -1170,7 +1170,7 @@ async fn a_first_delivery_is_prompted_as_sent_and_leaves_no_marker() {
 async fn a_spent_cap_hands_the_thread_to_the_human_until_the_human_answers() {
     let Some((mut bus, mut to_human)) = Bus::start().await else { return };
     bus.ledger = Arc::new(Ledger::memory(bus.dev.clone(), Caps { thread_cost: Some(1.0), ..Caps::default() }));
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let dev_b: UserId = "dev-b".parse().unwrap();
     let mut to_dev_b = bus.client.subscribe(subject::inbox_of(&dev_b)).await.unwrap();
@@ -1203,7 +1203,7 @@ async fn spend_nearing_a_cap_warns_the_human_once_on_a_thread_of_its_own() {
     let Some((mut bus, mut to_human)) = Bus::start().await else { return };
     let caps = Caps { thread_cost: Some(1.0), ..Caps::default() };
     bus.ledger = Arc::new(Ledger::memory(bus.dev.clone(), caps).warn_at(80));
-    let (launch, _, _) = fake::launch(true);
+    let (launch, _, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let dev_b: UserId = "dev-b".parse().unwrap();
     let t1 = ThreadId::generate();
@@ -1239,7 +1239,7 @@ async fn escalations_go_to_the_owner_and_a_registered_human_renews_the_allowance
     humans.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
     until("alice to be a human", || bus.humans.is_human(&alice)).await;
 
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let dev_b: UserId = "dev-b".parse().unwrap();
     let mut to_dev_b = bus.client.subscribe(subject::inbox_of(&dev_b)).await.unwrap();
@@ -1298,7 +1298,7 @@ async fn a_spent_budget_goes_up_the_chain_and_its_leader_renews_it_once_per_leve
     bus.chain = Chain { escalate_to: vec![lead.clone(), dev_b.clone()], after: None, ..Chain::default() };
     bus.put_roster(&lead, std::slice::from_ref(&boss)).await;
     let [mut to_lead, mut to_dev_b, mut to_boss] = inboxes(&bus, &[lead.clone(), dev_b.clone(), boss.clone()]).await;
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
     bus.send_spent(&carol, &t1, "no turns", None).await;
@@ -1347,7 +1347,7 @@ async fn the_leader_s_answer_to_a_channel_thread_out_of_turns_is_posted_back_wit
     let [lead, dev_b] = ants(["lead", "dev-b"]);
     bus.chain = Chain { escalate_to: vec![lead.clone()], after: None, ..Chain::default() };
     let [mut to_lead] = inboxes(&bus, std::slice::from_ref(&lead).try_into().unwrap()).await;
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (ops, mut posts) = bus.channel("ops", &["dev-a", "dev-b"]).await;
     let root = ChannelPost::new(ops.clone(), UserId::human(), "deploy friday?");
@@ -1397,7 +1397,7 @@ async fn past_the_hop_limit_the_owner_gets_it_and_a_human_starts_the_chain_over(
     bus.chain = Chain { escalate_to: vec![lead.clone()], max_hops: 1, after: None, ..Chain::default() };
     bus.put_roster(&lead, &[boss]).await;
     let [mut to_lead] = inboxes(&bus, std::slice::from_ref(&lead).try_into().unwrap()).await;
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
     bus.send_spent(&carol, &t1, "stuck", None).await;
@@ -1434,7 +1434,7 @@ async fn an_unanswered_escalation_goes_one_level_higher_after_escalate_after() {
     bus.chain = Chain { escalate_to: vec![lead.clone()], after: Some(Duration::from_millis(300)), ..Chain::default() };
     bus.put_roster(&lead, std::slice::from_ref(&boss)).await;
     let [mut to_lead, mut to_boss] = inboxes(&bus, &[lead.clone(), boss.clone()]).await;
-    let (launch, _, _) = fake::launch(true);
+    let (launch, _, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
     bus.send_spent(&carol, &t1, "stuck", None).await;
@@ -1479,7 +1479,7 @@ async fn only_the_leader_answers_the_stuck_ant_and_members_answer_in_the_thread_
     let [lead, carol, boss] = ants(["lead", "carol", "boss"]);
     bus.put_roster(&lead, std::slice::from_ref(&boss)).await;
     let [mut to_carol, mut to_lead, mut to_boss] = inboxes(&bus, &[carol.clone(), lead.clone(), boss.clone()]).await;
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (t1, t2, t3) = (ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
     // dev-a is a member of carol's escalation on t1 and t3, led by lead, and leads it on t2, one level up.
@@ -1547,7 +1547,7 @@ async fn a_member_sending_the_escalation_higher_moves_the_stuck_thread_up_with_i
     bus.chain = Chain { escalate_to: vec![lead.clone()], after: Some(after), ..Chain::default() };
     bus.put_roster(&lead, std::slice::from_ref(&boss)).await;
     let [mut to_lead, mut to_boss] = inboxes(&bus, &[lead.clone(), boss.clone()]).await;
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
     bus.send_spent(&carol, &t1, "stuck", None).await;
@@ -1597,7 +1597,7 @@ async fn a_member_sending_the_escalation_higher_moves_the_stuck_thread_up_with_i
 #[tokio::test]
 async fn an_owner_that_is_no_human_is_dropped_and_the_default_human_gets_the_thread() {
     let Some((bus, mut to_human)) = Bus::start().await else { return };
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let dev_b: UserId = "dev-b".parse().unwrap();
     let mut to_dev_b = bus.client.subscribe(subject::inbox_of(&dev_b)).await.unwrap();
@@ -1631,7 +1631,7 @@ async fn an_owner_that_is_no_human_is_dropped_and_the_default_human_gets_the_thr
 async fn a_message_cut_off_mid_prompt_is_prompted_again_with_a_warning() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
     let (progress_every, ack_wait) = (Duration::from_millis(100), ack_wait(Duration::from_millis(100)));
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let store = SessionStore::memory();
     let t1 = ThreadId::generate();
     let (_, seq) = bus.send(&t1, "hold a").await;
@@ -1668,7 +1668,7 @@ async fn a_message_cut_off_mid_prompt_is_prompted_again_with_a_warning() {
 #[tokio::test]
 async fn a_reply_recorded_before_a_crash_is_stored_once_without_a_prompt() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
     let (ask, seq) = bus.send(&t1, "a").await;
@@ -1691,6 +1691,13 @@ async fn a_reply_recorded_before_a_crash_is_stored_once_without_a_prompt() {
     assert_eq!(state.messages, 2, "the message and one copy of its reply");
     assert!(!bus.marked(seq).await);
     assert_eq!(bus.unacked().await, 0);
+}
+
+/// Whether the uplink of [`Uplinked`] reaches the hub.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Link {
+    Up,
+    Down,
 }
 
 /// A hub (JetStream domain `hub`) and a leaf node (domain `m1`) with an outbox, whose uplink can be cut.
@@ -1735,7 +1742,7 @@ impl Uplinked {
         let mut through_leaf = bus::jetstream(local, Some(&"hub".parse().unwrap()));
         through_leaf.set_timeout(Duration::from_secs(1));
         let uplinked = Self { leaf, uplink_port, dead_port, hub_js, through_leaf, outbox };
-        uplinked.until(true).await;
+        uplinked.until(Link::Up).await;
         Some((hub, uplinked))
     }
 
@@ -1749,14 +1756,19 @@ impl Uplinked {
     }
 
     /// Point the uplink at the hub, or at a dead port, and wait until it is so.
-    async fn switch(&self, up: bool) {
-        Self::write_uplink(self.leaf.dir(), if up { self.uplink_port } else { self.dead_port });
+    async fn switch(&self, link: Link) {
+        let port = match link {
+            Link::Up => self.uplink_port,
+            Link::Down => self.dead_port,
+        };
+        Self::write_uplink(self.leaf.dir(), port);
         let reload = std::process::Command::new("kill").arg("-HUP").arg(self.leaf.pid().to_string()).status();
         assert!(reload.unwrap().success());
-        self.until(up).await;
+        self.until(link).await;
     }
 
-    async fn until(&self, up: bool) {
+    async fn until(&self, link: Link) {
+        let up = link == Link::Up;
         timeout(WAIT * 2, async {
             while bus::ensure_stream(&self.through_leaf).await.is_ok() != up {
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1787,7 +1799,7 @@ const SHORT_WINDOW: Duration = Duration::from_millis(300);
 async fn a_reply_kept_in_the_outbox_answers_its_message_once() {
     let Some((hub, uplinked)) = Uplinked::start().await else { return };
     let (bus, _) = Bus::connect(hub, &uplinked.url(), Some(&"hub".parse().unwrap())).await;
-    let (launch, log, gate) = fake::launch(true);
+    let (launch, log, gate) = fake::launch();
     let t1 = ThreadId::generate();
     let ask = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "hold a");
     let seq = bus::publish_json(&uplinked.hub_js, ask.subject(), &ask, None).await.unwrap();
@@ -1797,7 +1809,7 @@ async fn a_reply_kept_in_the_outbox_answers_its_message_once() {
     let ctrl_c = Arc::new(Semaphore::new(0));
     let down = async {
         until("the prompt to start", || log.locked().starts == 1).await;
-        uplinked.switch(false).await;
+        uplinked.switch(Link::Down).await;
         gate.add_permits(1);
         until("the answer", || log.locked().answered.len() == 1).await;
         // Stopped, as for a restart, after the prompt in flight is handled.
@@ -1807,7 +1819,7 @@ async fn a_reply_kept_in_the_outbox_answers_its_message_once() {
     drop(pool);
     assert_eq!(uplinked.kept().await, 1, "the reply is kept in the outbox");
 
-    uplinked.switch(true).await;
+    uplinked.switch(Link::Up).await;
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let check = async {
         bus.until_acked(seq).await;
@@ -1846,7 +1858,7 @@ async fn dead_letter_kept_in_the_outbox(past_window: bool) {
         uplinked.shorten_duplicate_window().await;
     }
     let (bus, _) = Bus::connect(hub, &uplinked.url(), Some(&"hub".parse().unwrap())).await;
-    let (launch, log, gate) = fake::launch(true);
+    let (launch, log, gate) = fake::launch();
     let t1 = ThreadId::generate();
     let ask = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "doomed a");
     let seq = bus::publish_json(&uplinked.hub_js, ask.subject(), &ask, None).await.unwrap();
@@ -1859,7 +1871,7 @@ async fn dead_letter_kept_in_the_outbox(past_window: bool) {
     gate.add_permits(attempts - 1);
     let down = async {
         until("the last attempt", || log.locked().doomed == attempts).await;
-        uplinked.switch(false).await;
+        uplinked.switch(Link::Down).await;
         gate.add_permits(1);
         timeout(WAIT, async {
             while uplinked.kept().await == 0 {
@@ -1878,7 +1890,7 @@ async fn dead_letter_kept_in_the_outbox(past_window: bool) {
     assert!(kept.error.contains("doomed"), "{}", kept.error);
     assert!(dead::list(&stream).await.unwrap().is_empty(), "not in the hub's stream yet");
 
-    uplinked.switch(true).await;
+    uplinked.switch(Link::Up).await;
     if past_window {
         // As the hub's stream takes the outbox copy once the uplink is back.
         bus::publish_json(&uplinked.hub_js, kept.subject(), &kept, Some(&kept.msg_id())).await.unwrap();
@@ -1959,7 +1971,7 @@ async fn dead_letter_kept_on_the_extra_delivery(back: UplinkBack) {
         uplinked.shorten_duplicate_window().await;
     }
     let (bus, _) = Bus::connect(hub, &uplinked.url(), Some(&"hub".parse().unwrap())).await;
-    let (launch, log, gate) = fake::launch(true);
+    let (launch, log, gate) = fake::launch();
     let t1 = ThreadId::generate();
     let hold = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "hold a");
     let doomed = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "doomed b");
@@ -2013,12 +2025,12 @@ async fn dead_letter_kept_on_the_extra_delivery(back: UplinkBack) {
     let ctrl_c = Arc::new(Semaphore::new(0));
     let down = async {
         until("the prompt to start", || log.locked().starts == 1).await;
-        uplinked.switch(false).await;
+        uplinked.switch(Link::Down).await;
         gate.add_permits(1);
         until_buried(true).await;
         let kept = bus.buried.get(&doomed).await.expect("noted on the machine");
         if back == UplinkBack::Live {
-            uplinked.switch(true).await;
+            uplinked.switch(Link::Up).await;
             until_buried(false).await;
             // Only the held message is left, whose ack failed while the uplink was down.
             timeout(WAIT, async {
@@ -2066,10 +2078,10 @@ async fn dead_letter_kept_on_the_extra_delivery(back: UplinkBack) {
         let outbox_copy = || bus::publish_json(&uplinked.hub_js, kept.dead.subject(), &kept.dead, Some(&dead_id));
         if watcher_first {
             let (dead_seq, _) = watch().await.unwrap().expect("buried by the watcher");
-            uplinked.switch(true).await;
+            uplinked.switch(Link::Up).await;
             assert_eq!(outbox_copy().await.unwrap(), dead_seq, "the outbox copy is dropped");
         } else {
-            uplinked.switch(true).await;
+            uplinked.switch(Link::Up).await;
             outbox_copy().await.unwrap();
             assert_eq!(watch().await.unwrap(), None, "a dead letter already");
             assert!(notices().await.is_empty(), "the watcher sends no notice for the outbox copy");
@@ -2103,7 +2115,7 @@ async fn dead_letter_kept_on_the_extra_delivery(back: UplinkBack) {
 #[tokio::test]
 async fn the_next_prompt_mentions_late_replies_waiting_on_its_thread() {
     let Some((mut bus, mut replies)) = Bus::start().await else { return };
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let dev_b: UserId = "dev-b".parse().unwrap();
     let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
@@ -2141,7 +2153,7 @@ async fn the_next_prompt_mentions_late_replies_waiting_on_its_thread() {
 #[tokio::test]
 async fn a_mentioned_member_answers_on_the_thread_after_the_posts_it_missed() {
     let Some((bus, _)) = Bus::start().await else { return };
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (ops, mut replies) = bus.channel("ops", &["dev-a", "dev-b"]).await;
     let root = ChannelPost::new(ops.clone(), UserId::human(), "deploy friday?");
@@ -2190,7 +2202,7 @@ async fn a_mentioned_member_answers_on_the_thread_after_the_posts_it_missed() {
 #[tokio::test]
 async fn the_ant_that_started_a_channel_thread_is_its_creator_whatever_its_post_says() {
     let Some((bus, _)) = Bus::start().await else { return };
-    let (launch, _, _) = fake::launch(true);
+    let (launch, _, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (ops, mut replies) = bus.channel("ops", &["dev-a", "lead"]).await;
     let root = ChannelPost::new(ops.clone(), "lead".parse().unwrap(), "@dev-a fix it")
@@ -2220,7 +2232,7 @@ async fn the_ant_that_started_a_channel_thread_is_its_creator_whatever_its_post_
 #[tokio::test]
 async fn an_answer_to_a_webhook_goes_to_the_thread_s_owner_or_nowhere() {
     let Some((bus, mut to_human)) = Bus::start().await else { return };
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (hook, human) = ("github".parse::<UserId>().unwrap(), UserId::human());
     bus.mark_webhook(&hook).await;
@@ -2256,7 +2268,7 @@ async fn an_answer_to_a_webhook_goes_to_the_thread_s_owner_or_nowhere() {
 #[tokio::test]
 async fn an_ant_that_marks_its_message_as_a_webhook_s_gets_the_answer_itself() {
     let Some((bus, mut to_human)) = Bus::start().await else { return };
-    let (launch, _, _) = fake::launch(true);
+    let (launch, _, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let [hook, dev_b] = ants(["github", "dev-b"]);
     bus.mark_webhook(&hook).await;
@@ -2280,7 +2292,7 @@ async fn an_ant_that_marks_its_message_as_a_webhook_s_gets_the_answer_itself() {
 #[tokio::test]
 async fn an_ant_names_a_creator_only_as_the_top_level_post_of_the_thread_says() {
     let Some((bus, mut to_human)) = Bus::start().await else { return };
-    let (launch, _, _) = fake::launch(true);
+    let (launch, _, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let [dev_b, lead, boss] = ants(["dev-b", "lead", "boss"]);
     let [mut to_dev_b, mut to_boss] = inboxes(&bus, &[dev_b.clone(), boss.clone()]).await;
@@ -2328,7 +2340,7 @@ async fn an_ant_names_an_owner_only_as_recorded_for_the_thread_or_the_one_it_was
     let entry = ants_proto::HumanEntry::new(alice.clone());
     humans.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
     until("alice to be a human", || bus.humans.is_human(&alice)).await;
-    let (launch, _, _) = fake::launch(true);
+    let (launch, _, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let dev_b: UserId = "dev-b".parse().unwrap();
     let [mut to_dev_b, mut to_alice] = inboxes(&bus, &[dev_b.clone(), alice.clone()]).await;
@@ -2387,7 +2399,7 @@ async fn an_ant_names_an_owner_only_as_recorded_for_the_thread_or_the_one_it_was
 #[tokio::test]
 async fn a_human_s_message_from_an_outbox_waits_for_its_thread_s_owner_to_be_recorded() {
     let Some((bus, mut to_human)) = Bus::start().await else { return };
-    let (launch, _, _) = fake::launch(true);
+    let (launch, _, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     bus::ensure_owners(&bus.js).await.unwrap();
     let human = UserId::human();
@@ -2425,7 +2437,7 @@ async fn a_human_s_message_from_an_outbox_waits_for_its_thread_s_owner_to_be_rec
 #[tokio::test]
 async fn a_thread_spun_off_a_channel_thread_keeps_its_creator_only_from_an_ant_taking_part_in_it() {
     let Some((bus, mut to_human)) = Bus::start().await else { return };
-    let (launch, _, _) = fake::launch(true);
+    let (launch, _, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let [dev_b, dev_c, eve, lead, boss] = ants(["dev-b", "dev-c", "eve", "lead", "boss"]);
     let [mut to_dev_b, mut to_dev_c, mut to_eve] = inboxes(&bus, &[dev_b.clone(), dev_c.clone(), eve.clone()]).await;
@@ -2470,7 +2482,7 @@ async fn a_thread_spun_off_a_channel_thread_keeps_its_creator_only_from_an_ant_t
 async fn a_link_passed_on_from_an_ant_taking_part_carries_the_creator_further() {
     let Some((bus, _to_human)) = Bus::start().await else { return };
     bus::ensure_links(&bus.js).await.unwrap();
-    let (launch, _, _) = fake::launch(true);
+    let (launch, _, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let [dev_b, dev_x, dev_y, eve, mallory, lead, boss] =
         ants(["dev-b", "dev-x", "dev-y", "eve", "mallory", "lead", "boss"]);
@@ -2512,7 +2524,7 @@ async fn a_link_to_a_message_thread_passed_on_from_an_ant_messaged_on_it_carries
     let Some((bus, _to_human)) = Bus::start().await else { return };
     bus::ensure_links(&bus.js).await.unwrap();
     bus::ensure_owners(&bus.js).await.unwrap();
-    let (launch, _, _) = fake::launch(true);
+    let (launch, _, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let human = UserId::human();
     let [dev_b, dev_x, dev_y, dev_z, eve, mallory] = ants(["dev-b", "dev-x", "dev-y", "dev-z", "eve", "mallory"]);
@@ -2569,7 +2581,7 @@ async fn a_link_to_a_message_thread_passed_on_from_an_ant_messaged_on_it_carries
 #[tokio::test]
 async fn posts_that_do_not_wake_the_ant_are_acked_without_a_prompt() {
     let Some((bus, mut human)) = Bus::start().await else { return };
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (ops, mut replies) = bus.channel("ops", &["dev-a", "dev-b"]).await;
     let (dev_b, human_id) = ("dev-b".parse::<UserId>().unwrap(), UserId::human());
@@ -2607,7 +2619,7 @@ async fn posts_that_do_not_wake_the_ant_are_acked_without_a_prompt() {
 #[tokio::test]
 async fn members_woken_by_one_post_spend_the_thread_s_turns_together() {
     let Some((bus, mut human)) = Bus::start().await else { return };
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (ops, mut replies) = bus.channel("ops", &["dev-a", "dev-b", "dev-c"]).await;
     let human_id = UserId::human();
@@ -2643,7 +2655,7 @@ async fn members_woken_by_one_post_spend_the_thread_s_turns_together() {
 #[tokio::test]
 async fn the_messenger_answers_a_post_mentioning_nobody_with_the_members_it_concerns() {
     let Some((bus, _)) = Bus::start().await else { return };
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     // dev-a is the channel's messenger, not a member.
     let mut entry = ChannelEntry::new("ops".parse().unwrap());
@@ -2698,7 +2710,7 @@ async fn the_messenger_answers_a_post_mentioning_nobody_with_the_members_it_conc
 #[tokio::test]
 async fn an_ant_s_post_marked_as_a_webhook_s_counts_as_the_ant_s() {
     let Some((bus, _)) = Bus::start().await else { return };
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let [hook, dev_b] = ants(["github", "dev-b"]);
     bus.mark_webhook(&hook).await;
@@ -2741,7 +2753,7 @@ async fn an_ant_s_post_marked_as_a_webhook_s_counts_as_the_ant_s() {
 async fn a_thread_a_human_started_stays_hers_and_goes_back_to_her_out_of_turns() {
     let Some((mut bus, _)) = Bus::start().await else { return };
     bus.humans = Registry::with(UserId::human(), &["alice"]);
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     // dev-a is the channel's messenger and a member.
     let mut entry = ChannelEntry::new("ops".parse().unwrap());
@@ -2787,7 +2799,7 @@ async fn a_thread_a_human_started_stays_hers_and_goes_back_to_her_out_of_turns()
 async fn the_ant_s_own_post_notifies_the_human_members_it_mentions_and_wakes_no_messenger() {
     let Some((mut bus, _)) = Bus::start().await else { return };
     bus.humans = Registry::with(UserId::human(), &["alice", "bob"]);
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (alice, bob, dev_b) =
         ("alice".parse::<UserId>().unwrap(), "bob".parse::<UserId>().unwrap(), "dev-b".parse::<UserId>().unwrap());
@@ -2836,7 +2848,7 @@ async fn the_ant_s_own_post_notifies_the_human_members_it_mentions_and_wakes_no_
 async fn a_mention_notice_that_failed_is_sent_on_the_post_s_redelivery_and_only_once() {
     let Some((mut bus, _)) = Bus::start().await else { return };
     bus.humans = Registry::with(UserId::human(), &["alice"]);
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let alice: UserId = "alice".parse().unwrap();
     let (ops, _) = bus.channel("ops", &["dev-a", "alice"]).await;
@@ -2880,7 +2892,7 @@ async fn a_mention_notice_that_failed_is_sent_on_the_post_s_redelivery_and_only_
 async fn the_messenger_relays_the_mention_notices_of_a_webhook_s_post_once() {
     let Some((mut bus, _)) = Bus::start().await else { return };
     bus.humans = Registry::with(UserId::human(), &["alice"]);
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (alice, github, dev_b) =
         ("alice".parse::<UserId>().unwrap(), "github".parse::<UserId>().unwrap(), "dev-b".parse::<UserId>().unwrap());

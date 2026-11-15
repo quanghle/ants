@@ -113,7 +113,7 @@ pub async fn store_seed(path: &Path, store: &dyn Store, url: &str) -> Result<Mov
     if key != finding.key {
         bail!("the seed in {} is not that of the key {} of their user JWT", path.display(), finding.key);
     }
-    write_stored(path, jwt, &key, seed, store, url, true)
+    write_stored(path, jwt, &key, seed, store, url, Proof::Required)
         .await
         .with_context(|| format!("the seed stays in {}", path.display()))?;
     Ok(Moved::Now(key))
@@ -163,7 +163,7 @@ pub async fn replace(path: &Path, jwt: &str, user: &KeyPair, store: &dyn Store, 
         return auth::replace_creds(path, jwt, user);
     };
     let key = user.public_key();
-    write_stored(path, jwt, &key, &auth::seed(user)?, store, url, true)
+    write_stored(path, jwt, &key, &auth::seed(user)?, store, url, Proof::Required)
         .await
         .with_context(|| format!("{} stay as they were", path.display()))?;
     if earlier != key
@@ -179,7 +179,7 @@ pub async fn replace(path: &Path, jwt: &str, user: &KeyPair, store: &dyn Store, 
 /// authenticates at `url`, or unproven when no server answers there ([`Proven::Unreached`]). A failure deletes the seed
 /// when it was not stored before and leaves `path` as it was.
 pub async fn write_new_stored(path: &Path, jwt: &str, user: &KeyPair, store: &dyn Store, url: &str) -> Result<Proven> {
-    write_stored(path, jwt, &user.public_key(), &auth::seed(user)?, store, url, false)
+    write_stored(path, jwt, &user.public_key(), &auth::seed(user)?, store, url, Proof::Optional)
         .await
         .with_context(|| format!("{} not written", path.display()))
 }
@@ -224,8 +224,15 @@ pub enum Proven {
     Unreached,
 }
 
+/// Whether new credentials must authenticate before they are written, or may also be written when no server answers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Proof {
+    Required,
+    Optional,
+}
+
 /// Store `seed` for `key` in `store` and check it reads back, then write `path` naming it, once it authenticates at
-/// `url`, or, unless `required`, also when no server answers there. A failure deletes the seed when it was not stored
+/// `url`, or, with [`Proof::Optional`], also when no server answers there. A failure deletes the seed when it was not stored
 /// before, and leaves `path` as it was.
 async fn write_stored(
     path: &Path,
@@ -234,7 +241,7 @@ async fn write_stored(
     seed: &str,
     store: &dyn Store,
     url: &str,
-    required: bool,
+    proof: Proof,
 ) -> Result<Proven> {
     let user = KeyPair::from_seed(seed).map_err(|e| anyhow::anyhow!("the seed of {key}: {e}"))?;
     let created = store_new(&user, store)?;
@@ -246,7 +253,7 @@ async fn write_stored(
     let temporary = beside(path)?;
     let written = async {
         auth::write_secret(&temporary, &creds::stored_text(jwt, key))?;
-        let proven = authenticate(url, &temporary, store, required).await?;
+        let proven = authenticate(url, &temporary, store, proof).await?;
         fs::rename(&temporary, path).with_context(|| format!("replacing {}", path.display()))?;
         Ok(proven)
     }
@@ -259,13 +266,13 @@ async fn write_stored(
 }
 
 /// Connect to `url` with the credentials at `path`, reading their seed from `store`, to check the server takes them;
-/// unless `required`, a server that does not answer is [`Proven::Unreached`] rather than a failure.
-async fn authenticate(url: &str, path: &Path, store: &dyn Store, required: bool) -> Result<Proven> {
+/// with [`Proof::Optional`], a server that does not answer is [`Proven::Unreached`] rather than a failure.
+async fn authenticate(url: &str, path: &Path, store: &dyn Store, proof: Proof) -> Result<Proven> {
     bus::check_url(url)?;
     let options = async_nats::ConnectOptions::new().name("ants-keys").event_callback(|_| async {});
     let client = match bus::authenticate(options, path, store)?.connect(url).await {
         Ok(client) => client,
-        Err(e) if !required && bus::worth_retrying(&e) => return Ok(Proven::Unreached),
+        Err(e) if proof == Proof::Optional && bus::worth_retrying(&e) => return Ok(Proven::Unreached),
         Err(e) => return Err(e).with_context(|| format!("authenticating at {url} with the stored key")),
     };
     client.flush().await.with_context(|| format!("authenticating at {url} with the stored key"))?;
@@ -286,6 +293,7 @@ mod tests {
 
     use super::*;
     use crate::auth::tests::Server;
+    use crate::members::EnrollApprover;
 
     fn p(s: &str) -> UserId {
         s.parse().unwrap()
@@ -309,12 +317,12 @@ mod tests {
         client.flush().await.unwrap();
         assert_eq!(store_seed(&creds, &store, &server.url).await.unwrap(), Moved::Before(key.clone()));
 
-        store.lock(true);
+        store.lock();
         let err = bus::connect_with(&server.url, Some(&creds), &store, None, &p("alice"), "test").await.unwrap_err();
         let err = format!("{err:#}");
         assert!(err.contains("locked") && !err.contains(&seed), "{err}");
         assert!(unstore_seed(&creds, &store).is_err(), "nothing to move back while locked");
-        store.lock(false);
+        store.unlock();
 
         assert_eq!(unstore_seed(&creds, &store).unwrap(), Moved::Now(key.clone()));
         assert!(fs::read_to_string(&creds).unwrap().contains(&seed));
@@ -342,17 +350,17 @@ mod tests {
             assert!(left.is_empty(), "{left:?}");
         };
 
-        store.lock(true);
+        store.lock();
         let err = format!("{:#}", store_seed(&creds, &store, &server.url).await.unwrap_err());
         assert!(err.contains("locked") && err.contains("the seed stays in"), "{err}");
         unchanged();
-        store.lock(false);
+        store.unlock();
 
-        store.refuse_writes(true);
+        store.refuse_writes();
         let err = format!("{:#}", store_seed(&creds, &store, &server.url).await.unwrap_err());
         assert!(err.contains("denied"), "{err}");
         unchanged();
-        store.refuse_writes(false);
+        store.allow_writes();
 
         // A server of another team refuses the stored key: what was stored goes.
         let err = format!("{:#}", store_seed(&creds, &store, &other.url).await.unwrap_err());
@@ -361,8 +369,16 @@ mod tests {
 
         let uplink = server.dir().join("leaf-m1.creds");
         let m1: Machine = "m1".parse().unwrap();
-        auth::issue_leaf(&server.dir().join("auth"), &m1, &[(p("dev-a"), Role::Ant)], &[], false, None, &uplink)
-            .unwrap();
+        auth::issue_leaf(
+            &server.dir().join("auth"),
+            &m1,
+            &[(p("dev-a"), Role::Ant)],
+            &[],
+            EnrollApprover::Without,
+            None,
+            &uplink,
+        )
+        .unwrap();
         let err = store_seed(&uplink, &store, &server.url).await.unwrap_err().to_string();
         assert!(err.contains("nats-server reads"), "{err}");
         assert!(creds::seed_of(&fs::read_to_string(&uplink).unwrap()).is_some_and(|s| matches!(s, Seed::File(_))));
@@ -400,10 +416,10 @@ mod tests {
         let creds = server.creds_as(&p("bob"), Role::Human);
         let Moved::Now(key) = store_seed(&creds, &store, &server.url).await.unwrap() else { panic!() };
 
-        store.lock(true);
+        store.lock();
         assert!(remove(&creds, &store).is_err());
         assert!(creds.exists(), "kept while the store cannot delete the seed");
-        store.lock(false);
+        store.unlock();
 
         let finding = remove(&creds, &store).unwrap();
         assert_eq!((finding.name.as_str(), finding.key), ("bob", key));

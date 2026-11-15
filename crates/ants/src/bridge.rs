@@ -787,10 +787,17 @@ pub fn token(token: Option<String>, file: Option<&Path>) -> Result<Option<String
     Ok(Some(token.to_owned()))
 }
 
-/// `addr` parsed, and checked to be loopback when `local_only`.
-pub fn listen_addr(addr: &str, local_only: bool) -> Result<SocketAddr> {
+/// Which addresses [`listen_addr`] takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Listen {
+    Any,
+    LoopbackOnly,
+}
+
+/// `addr` parsed, and checked to be loopback with [`Listen::LoopbackOnly`].
+pub fn listen_addr(addr: &str, listen: Listen) -> Result<SocketAddr> {
     let parsed: SocketAddr = addr.parse().with_context(|| format!("--listen {addr}: expected host:port"))?;
-    if local_only && !parsed.ip().is_loopback() {
+    if listen == Listen::LoopbackOnly && !parsed.ip().is_loopback() {
         bail!("--listen {addr}: the bridge serves this machine only; use a loopback address");
     }
     Ok(parsed)

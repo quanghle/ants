@@ -2,14 +2,15 @@ use std::sync::Mutex;
 
 use tokio::sync::{Semaphore, mpsc, oneshot};
 
+use super::fake::Sessions;
 use super::*;
 use crate::harness::{PromptLimits, Spend};
 use crate::overflow::ContextOverflow;
 
 const IDLE: Duration = Duration::from_secs(60);
 
-fn fake_pool(max_live: usize, can_load: bool) -> (Pool, Arc<Mutex<fake::Log>>, Arc<Semaphore>) {
-    let (launch, log, gate) = fake::launch(can_load);
+fn fake_pool(max_live: usize, sessions: Sessions) -> (Pool, Arc<Mutex<fake::Log>>, Arc<Semaphore>) {
+    let (launch, log, gate) = fake::launch_with(sessions);
     (Pool::new(launch, SessionStore::memory(), max_live, IDLE), log, gate)
 }
 
@@ -28,7 +29,7 @@ async fn settle() {
 async fn each_thread_works_in_its_own_worktree_until_its_session_expires() {
     let Some(repo) = crate::worktrees::tests::repo("pool-worktrees") else { return };
     let home = repo.parent().unwrap().join("home");
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let store = SessionStore::memory();
     let worktrees = Worktrees::find(&"dev-a".parse().unwrap(), &repo, &home).await.unwrap();
     let pool = Pool::new(launch.in_dir(repo.clone()), store.clone(), 4, IDLE).with_worktrees(worktrees);
@@ -58,7 +59,7 @@ async fn worktrees_left_behind_are_pruned_while_threads_share_the_workdir() {
     let worktrees = Worktrees::find(&"dev-a".parse().unwrap(), &repo, &home).await.unwrap();
     worktrees.checkout(&thread(1)).await.unwrap();
     worktrees.checkout(&thread(2)).await.unwrap();
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let store = SessionStore::memory();
     let left = Worktrees::left_behind(&"dev-a".parse().unwrap(), &home).await.unwrap();
     let pool = Pool::new(launch.in_dir(repo.clone()), store.clone(), 4, IDLE).with_worktrees_left_behind(left);
@@ -80,7 +81,7 @@ async fn worktrees_left_behind_are_pruned_while_threads_share_the_workdir() {
 async fn a_thread_whose_worktree_fails_shares_the_workdir() {
     let Some(repo) = crate::worktrees::tests::repo("pool-worktrees-fail") else { return };
     let home = repo.parent().unwrap().join("home");
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let worktrees = Worktrees::find(&"dev-a".parse().unwrap(), &repo, &home).await.unwrap();
     crate::worktrees::tests::run(&repo, &["branch", "ants/dev-a/t1"]);
     crate::worktrees::tests::run(&repo, &["switch", "--quiet", "ants/dev-a/t1"]);
@@ -92,7 +93,7 @@ async fn a_thread_whose_worktree_fails_shares_the_workdir() {
 
 #[tokio::test]
 async fn a_thread_keeps_its_harness_between_messages() {
-    let (pool, log, _) = fake_pool(4, true);
+    let (pool, log, _) = fake_pool(4, Sessions::Loadable);
     assert_eq!(pool.prompt(&thread(1), "one").await.unwrap(), "s1: one");
     assert_eq!(pool.prompt(&thread(1), "two").await.unwrap(), "s1: two");
     assert_eq!(pool.prompt(&thread(2), "three").await.unwrap(), "s2: three");
@@ -102,7 +103,7 @@ async fn a_thread_keeps_its_harness_between_messages() {
 
 #[tokio::test]
 async fn a_harness_start_tells_the_roster_its_agent() {
-    let (launch, _, _) = fake::launch(true);
+    let (launch, _, _) = fake::launch();
     let workload = Arc::new(Workload::default());
     let pool = Pool::new(launch, SessionStore::memory(), 4, IDLE).reporting_to(workload.clone());
     assert_eq!(workload.agent(), None, "no harness started yet");
@@ -113,7 +114,7 @@ async fn a_harness_start_tells_the_roster_its_agent() {
 
 #[tokio::test]
 async fn the_cap_stops_the_least_recently_used_and_it_resumes() {
-    let (pool, log, _) = fake_pool(1, true);
+    let (pool, log, _) = fake_pool(1, Sessions::Loadable);
     pool.prompt(&thread(1), "a").await.unwrap();
     pool.prompt(&thread(2), "b").await.unwrap();
     assert_eq!(pool.live(), 1);
@@ -124,7 +125,7 @@ async fn the_cap_stops_the_least_recently_used_and_it_resumes() {
 
 #[tokio::test]
 async fn idle_harnesses_stop_and_resume_on_the_next_message() {
-    let (pool, log, _) = fake_pool(4, true);
+    let (pool, log, _) = fake_pool(4, Sessions::Loadable);
     pool.prompt(&thread(1), "a").await.unwrap();
     assert_eq!(pool.evict_idle(Instant::now()), 0);
     assert_eq!(pool.evict_idle(Instant::now() + IDLE + Duration::from_secs(1)), 1);
@@ -134,7 +135,7 @@ async fn idle_harnesses_stop_and_resume_on_the_next_message() {
 
 #[tokio::test]
 async fn a_harness_without_session_load_starts_over() {
-    let (pool, log, _) = fake_pool(1, false);
+    let (pool, log, _) = fake_pool(1, Sessions::NewOnly);
     pool.prompt(&thread(1), "a").await.unwrap();
     pool.prompt(&thread(2), "b").await.unwrap();
     let told = "[ants] The earlier session of this thread could not be resumed, so this one starts over, without \
@@ -145,7 +146,7 @@ async fn a_harness_without_session_load_starts_over() {
 
 #[tokio::test]
 async fn threads_run_concurrently_up_to_the_cap() {
-    let (pool, log, gate) = fake_pool(2, true);
+    let (pool, log, gate) = fake_pool(2, Sessions::Loadable);
     let (t1, t2) = (thread(1), thread(2));
     let (a, b) = (pool.prompt(&t1, "hold a"), pool.prompt(&t2, "hold b"));
     let release = async {
@@ -159,7 +160,7 @@ async fn threads_run_concurrently_up_to_the_cap() {
 
 #[tokio::test]
 async fn a_busy_harness_is_never_stopped() {
-    let (pool, log, gate) = fake_pool(1, true);
+    let (pool, log, gate) = fake_pool(1, Sessions::Loadable);
     let (t1, t2) = (thread(1), thread(2));
     let busy = pool.prompt(&t1, "hold a");
     let others = async {
@@ -181,7 +182,7 @@ async fn a_busy_harness_is_never_stopped() {
 
 #[tokio::test]
 async fn a_restarted_pool_resumes_the_stored_session() {
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let store = SessionStore::memory();
     let pool = Pool::new(launch.clone(), store.clone(), 4, IDLE);
     pool.prompt(&thread(1), "a").await.unwrap();
@@ -200,7 +201,7 @@ fn with_history(text: &str) -> Prompt {
 
 #[tokio::test]
 async fn a_session_that_cannot_be_resumed_starts_over_from_the_thread_history() {
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let store = SessionStore::memory();
     let pool = Pool::new(launch.clone(), store.clone(), 4, IDLE);
     pool.run(&thread(1), with_history("a")).await.unwrap();
@@ -218,7 +219,7 @@ async fn a_session_that_cannot_be_resumed_starts_over_from_the_thread_history() 
 
 #[tokio::test]
 async fn a_prompt_that_outgrows_the_context_window_runs_again_in_a_new_session_once() {
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let store = SessionStore::memory();
     let pool = Pool::new(launch.clone(), store.clone(), 4, IDLE);
     pool.run(&thread(1), with_history("a")).await.unwrap();
@@ -242,7 +243,7 @@ async fn a_prompt_that_outgrows_the_context_window_runs_again_in_a_new_session_o
 
 #[tokio::test]
 async fn ant_and_tool_instructions_reach_every_prompt_and_resumed_session() {
-    let (launch, log, _) = fake::launch(true);
+    let (launch, log, _) = fake::launch();
     let mut ant = crate::config::Ant::new("dev-a".parse().unwrap(), env!("CARGO_MANIFEST_DIR").into());
     ant.whoami = Some("Maintain the Rust backend.".to_owned());
     ant.memory = Some("Use notes.".to_owned());
@@ -263,7 +264,7 @@ async fn ant_and_tool_instructions_reach_every_prompt_and_resumed_session() {
 
 #[tokio::test]
 async fn a_prompt_past_its_time_limit_is_cancelled_and_the_session_goes_on() {
-    let (pool, log, _) = fake_pool(1, true);
+    let (pool, log, _) = fake_pool(1, Sessions::Loadable);
     let limits = PromptLimits { timeout: Some(Duration::from_millis(50)), max_tool_calls: None };
     let reply = pool.run(&thread(1), Prompt { limits, ..Prompt::new("stall") }).await.unwrap();
     let cut = "Prompt time limit reached (50ms)".to_owned();
@@ -275,7 +276,7 @@ async fn a_prompt_past_its_time_limit_is_cancelled_and_the_session_goes_on() {
 
 #[tokio::test]
 async fn a_prompt_past_its_tool_call_limit_is_cancelled() {
-    let (pool, log, _) = fake_pool(1, true);
+    let (pool, log, _) = fake_pool(1, Sessions::Loadable);
     let limits = PromptLimits { timeout: None, max_tool_calls: Some(2) };
     let reply = pool.run(&thread(1), Prompt { limits, ..Prompt::new("tools 2") }).await.unwrap();
     assert_eq!(reply.cut, None, "up to the limit is fine");
@@ -286,7 +287,7 @@ async fn a_prompt_past_its_tool_call_limit_is_cancelled() {
 
 #[tokio::test]
 async fn spend_is_reported_and_a_stop_cancels_the_prompt() {
-    let (pool, log, _) = fake_pool(1, true);
+    let (pool, log, _) = fake_pool(1, Sessions::Loadable);
     let (spend, mut spent) = mpsc::unbounded_channel();
     let (stop, stopped) = oneshot::channel();
     let prompt = Prompt { spend: Some(spend), stop: Some(stopped), ..Prompt::new("cost 0.5 stall") };

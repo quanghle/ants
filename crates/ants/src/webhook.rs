@@ -1097,13 +1097,13 @@ impl Server {
         let routes = self.routes();
         let name = parts.uri.path().strip_prefix(&routes.prefix);
         if let Some(answers) = routes.answers.as_ref().filter(|_| name == notify::APPROVAL_PATH.strip_prefix('/')) {
-            if let Err(e) = read_body(body, false).await {
+            if let Err(e) = read_body(body, Body::Drain).await {
                 return refuse(StatusCode::BAD_REQUEST, format!("reading the body: {e}"));
             }
             return Ok(answers.answer(&parts.method, parts.uri.query()).await);
         }
         let Some(hook) = name.and_then(|name| routes.hooks.get(name)) else {
-            let _ = read_body(body, false).await;
+            let _ = read_body(body, Body::Drain).await;
             return refuse(StatusCode::NOT_FOUND, "no such webhook");
         };
         let outcome = hook.take(parts, body).await;
@@ -1180,7 +1180,7 @@ impl Hook {
         } else {
             None
         };
-        let body = read_body(body, refused.is_none()).await;
+        let body = read_body(body, if refused.is_none() { Body::Keep } else { Body::Drain }).await;
         if let Some(refused) = refused {
             return Err(refused);
         }
@@ -1207,9 +1207,16 @@ impl Hook {
     }
 }
 
-/// The body when `keep`, or None when it is longer than [`MAX_BODY`]. The rest of the body is read and dropped up
-/// to [`DRAIN`], so the answer reaches the sender rather than a reset connection.
-async fn read_body(mut body: Incoming, keep: bool) -> Result<Option<Vec<u8>>, hyper::Error> {
+/// Whether [`read_body`] keeps the body read, or only drains it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Body {
+    Keep,
+    Drain,
+}
+
+/// The body, empty unless [`Body::Keep`], or None when it is longer than [`MAX_BODY`]. The rest of the body is read
+/// and dropped up to [`DRAIN`], so the answer reaches the sender rather than a reset connection.
+async fn read_body(mut body: Incoming, read: Body) -> Result<Option<Vec<u8>>, hyper::Error> {
     let (mut kept, mut length) = (Vec::new(), 0);
     while let Some(frame) = body.frame().await {
         let Ok(data) = frame?.into_data() else { continue };
@@ -1217,7 +1224,7 @@ async fn read_body(mut body: Incoming, keep: bool) -> Result<Option<Vec<u8>>, hy
         if length > DRAIN {
             break;
         }
-        if keep && length <= MAX_BODY {
+        if read == Body::Keep && length <= MAX_BODY {
             kept.extend_from_slice(&data);
         }
     }
@@ -1241,12 +1248,12 @@ impl Hook {
             })
             .await?;
         if delivered.duplicate {
-            return Ok(accepted(StatusCode::OK, delivered.thread.as_ref(), true));
+            return Ok(accepted(StatusCode::OK, delivered.thread.as_ref(), delivered.duplicate));
         }
         if let Some(thread) = &delivered.thread {
             tracing::info!(webhook = %hook.name, %thread, "event delivered");
         }
-        Ok(accepted(StatusCode::ACCEPTED, delivered.thread.as_ref(), false))
+        Ok(accepted(StatusCode::ACCEPTED, delivered.thread.as_ref(), delivered.duplicate))
     }
 
     fn warn_rejected(&self) {

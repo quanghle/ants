@@ -648,14 +648,24 @@ pub struct Memory {
 }
 
 impl Memory {
-    /// Fail every request from now on, as a locked store does, or no longer.
-    pub fn lock(&self, locked: bool) {
-        self.locked.store(locked, Ordering::SeqCst);
+    /// Fail every request from now on, as a locked store does, until [`Memory::unlock`].
+    pub fn lock(&self) {
+        self.locked.store(true, Ordering::SeqCst);
     }
 
-    /// Refuse to store from now on, or no longer, while still reading and deleting.
-    pub fn refuse_writes(&self, refuse: bool) {
-        self.read_only.store(refuse, Ordering::SeqCst);
+    /// Serve requests again after [`Memory::lock`].
+    pub fn unlock(&self) {
+        self.locked.store(false, Ordering::SeqCst);
+    }
+
+    /// Refuse to store from now on, while still reading and deleting, until [`Memory::allow_writes`].
+    pub fn refuse_writes(&self) {
+        self.read_only.store(true, Ordering::SeqCst);
+    }
+
+    /// Store again after [`Memory::refuse_writes`].
+    pub fn allow_writes(&self) {
+        self.read_only.store(false, Ordering::SeqCst);
     }
 
     /// The public keys of the seeds stored.

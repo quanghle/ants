@@ -2,6 +2,7 @@ use ants_proto::Role;
 
 use super::*;
 use crate::auth::tests::Server;
+use crate::members::EnrollApprover;
 
 fn setup(server: &Server, creds: Option<PathBuf>) -> Setup {
     Setup {
@@ -251,7 +252,16 @@ async fn a_leaf_reports_an_ant_its_uplink_misses_and_a_node_not_listening() {
     auth::init(&dir).unwrap();
     let machine: Machine = "m1".parse().unwrap();
     let uplink = dir.join("leaf-m1.creds");
-    auth::issue_leaf(&dir, &machine, &[("dev-a".parse().unwrap(), Role::Ant)], &[], false, None, &uplink).unwrap();
+    auth::issue_leaf(
+        &dir,
+        &machine,
+        &[("dev-a".parse().unwrap(), Role::Ant)],
+        &[],
+        EnrollApprover::Without,
+        None,
+        &uplink,
+    )
+    .unwrap();
     let leaf_config = dir.join("leaf.conf");
     let uplinks = ["nats-leaf://127.0.0.1:7422".to_owned()];
     let leaf = leaf::Leaf {
@@ -383,10 +393,10 @@ fn the_key_check_finds_a_stored_seed_locked_missing_or_of_another_key() {
     std::fs::write(&path, creds::stored_text(&jwt, &key)).unwrap();
     store.set(&key, &seed).unwrap();
     assert_eq!(check(&store).0, Status::Ok);
-    store.lock(true);
+    store.lock();
     let (status, shown) = check(&store);
     assert!(status == Status::Fail && shown.contains("locked") && shown.contains("unlock"), "{shown}");
-    store.lock(false);
+    store.unlock();
     store.set(&key, &auth::seed(&nkeys::KeyPair::new_user()).unwrap()).unwrap();
     let (status, shown) = check(&store);
     assert!(status == Status::Fail && shown.contains("another key") && shown.contains("ants add"), "{shown}");
