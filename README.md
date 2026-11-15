@@ -181,7 +181,7 @@ In-hand messages send 20 s progress acks against a 60 s `ack_wait`, acking only 
 
 1. Claims `<ant>.msg.<id>` = `started` in `ants_attempts` (unless already `withdrawn`), then writes `<ant>.<seq>` before prompting so redeliveries after a crash prepend a prior-tool-call warning.
 2. Saves the finished reply in `<ant>.<seq>` and `<home>/answered` before publishing with 24 h dedup ID `reply-<ant>-<envelope_id>`, preventing re-prompts across post-generation disconnects or offline leaf outboxes, then marks `<ant>.msg.<id>` = `finished`.
-3. Streams unpersisted `StatusEvent` JSON on `ants.status.<ant>.<thread>` (`state`, 250 ms batched `message`/`thought`, `tool`, `plan`, `queued`, `approval`, `escalated`).
+3. Streams unpersisted `StatusEvent` JSON on `ants.status.<ant>.<thread>` (`state`, 250 ms batched `message`/`thought`, `tool`, `plan`, `queued`, `approval`, `escalated`, `decided`).
 
 ### Queue and withdrawal
 
@@ -292,7 +292,7 @@ Unresolved conditions (`turn_budget`, `cap`, `notes`, `dead_letter`, `context_wi
 - All unvisited chain ants receive an `[ants]` notice and 8 fresh thread-note turns; only the first listed ant (leader) may answer on the thread or `escalate` further.
 - Escalation climbs to the leader's `escalate_to` after `escalate_after` (`30m`; `"0"` disables) or if a member gets stuck, up to `max_escalation_hops` (default 3). Only a human message on the thread resets escalation to level 0.
 - Human-bound escalations repeat an `[ants] Reminder:` after `escalation_reminder` (default `4h`, `"0"` disables) and then daily for 30 d until answered.
-- **Status updates:** chain escalations, human escalations, reminders, and chain/expired tool approvals also emit `StatusEvent` (`type: "escalated"`) on `ants.status.<ant>.<thread>` (direct `harness`, `storage`, and `ants dead watch` notices do not; see [docs/hooks.md](docs/hooks.md#escalations)).
+- **Status updates:** chain escalations, human escalations, reminders, and chain/expired tool approvals also emit `StatusEvent` (`type: "escalated"`) on `ants.status.<ant>.<thread>` (direct `harness`, `storage`, and `ants dead watch` notices do not; see [docs/hooks.md](docs/hooks.md#escalations)). Every settled tool request, whether by a human, a chain member's `decide_approval` or expiry, emits `type: "decided"` on the requester's status ([docs/hooks.md](docs/hooks.md#decisions)).
 
 ### Dead letters
 
@@ -381,7 +381,7 @@ Options: `--ants PATH`, `--nats-server PATH`, `--nats-conf FILE` (default `~/.co
 
 ## Hooks
 
-`ants hook run --on EVENT [--concurrency N] [--timeout DUR] -- CMD [ARGS...]` runs `CMD` once per `approval-request`, `approval-decision`, `dead-letter`, `escalation`, `status` or `roster` event with its JSON document on stdin (`--observer` credentials; default concurrency `4`, timeout `60s`). Stored feeds resume from durable consumers. See [docs/hooks.md](docs/hooks.md).
+`ants hook run --on EVENT [--concurrency N] [--timeout DUR] -- CMD [ARGS...]` runs `CMD` once per `approval-request`, `approval-decision`, `dead-letter`, `escalation`, `decided`, `status` or `roster` event with its JSON document on stdin (`--observer` credentials; default concurrency `4`, timeout `60s`). Stored feeds resume from durable consumers. See [docs/hooks.md](docs/hooks.md).
 
 ## Footprint
 
