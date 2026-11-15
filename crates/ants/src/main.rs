@@ -4,6 +4,7 @@
 
 mod add;
 mod age;
+mod attachments;
 mod auth;
 mod backup;
 mod bridge;
@@ -82,8 +83,8 @@ async fn run() -> Result<()> {
     let conn = Connection { nats: &cli.nats, creds: cli.creds.as_deref(), js_domain: domain };
     let nats = || conn.nats();
     match cli.command {
-        Command::Ask { thread, steer, replies, input, words } => {
-            send::ask(&nats()?, thread, steer, &replies, &input, words).await
+        Command::Ask { thread, steer, replies, input, attach, words } => {
+            send::ask(&nats()?, thread, steer, &replies, &input, &attach, words).await
         }
         Command::Inbox { peek, thread, limit, follow, json } => {
             let select = inbox::Select { thread: None, limit, peek };
@@ -98,17 +99,18 @@ async fn run() -> Result<()> {
             let caps = ants_daemon::config::Summary::load(&path)?.caps;
             spend::show(&nats()?, &spend::Select { ant, thread, days }, &caps, json).await
         }
-        Command::Post { channel, thread, replies, input, words } => {
-            Box::pin(send::post(&nats()?, channel, thread, &replies, &input, words)).await
+        Command::Post { channel, thread, replies, input, attach, words } => {
+            Box::pin(send::post(&nats()?, channel, thread, &replies, &input, &attach, words)).await
         }
         Command::Channel(ChannelCommand::Serve { upgrade }) => {
             Box::pin(upgrade::or_exit(channel::serve(&cli.nats, cli.creds.as_deref(), domain), &upgrade)).await
         }
         Command::Channel(command) => cmd::channel::run(&nats()?, command).await,
-        Command::Notes { thread, text } => send::thread_notes(&nats()?, thread, text).await,
+        Command::Notes { thread, attach, text } => send::thread_notes(&nats()?, thread, &attach, text).await,
         Command::React { message, reaction, remove } => send::react(&nats()?, message, reaction, remove).await,
         Command::Answer { message, answer } => send::answer(&nats()?, message, answer).await,
         Command::Thread(command) => cmd::thread::run(&nats()?, command).await,
+        Command::Attachment(command) => cmd::attachment::run(&nats()?, command).await,
         Command::Notify(NotifyCommand::Snooze { duration }) => quiet::snooze(&nats()?, duration).await,
         Command::Notify(NotifyCommand::Resume) => quiet::resume(&nats()?).await,
         Command::Notify(NotifyCommand::Status { json }) => quiet::status(&nats()?, json).await,

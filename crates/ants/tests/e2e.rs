@@ -30,11 +30,12 @@ fn main() {
     if Path::new(&me).file_stem().is_some_and(|name| name == "copilot" || name == "stub-adapter") {
         return stub_harness();
     }
-    let tests: [(&str, fn()); 7] = [
+    let tests: [(&str, fn()); 8] = [
         ("ask_gets_the_reply_of_a_daemon_harness", ask_gets_the_reply_of_a_daemon_harness),
         ("a_daemon_exits_once_its_executable_was_replaced", a_daemon_exits_once_its_executable_was_replaced),
         ("custom_whoami_and_tools_reach_the_harness", custom_whoami_and_tools_reach_the_harness),
         ("channels_are_managed_posted_to_and_read", channels_are_managed_posted_to_and_read),
+        ("files_are_attached_listed_and_saved", files_are_attached_listed_and_saved),
         ("the_builtin_messenger_hands_over_to_a_listed_one", the_builtin_messenger_hands_over_to_a_listed_one),
         (
             "a_configured_adapter_serves_ants_the_messenger_and_the_cli",
@@ -349,6 +350,85 @@ fn channels_are_managed_posted_to_and_read() {
     assert_eq!(ok(&["channel", "delete", "dev"]).0, "deleted #dev; the posts to #dev stay in the stream\n");
     assert!(!ok(&["channel", "list"]).0.contains("#dev"));
     drop(server);
+}
+
+/// `--attach` stores files before the message carrying them, `ants thread show`, `ants channel read` and `ants notes` list
+/// them with their handles, and `ants attachment get` saves one as stored, once.
+fn files_are_attached_listed_and_saved() {
+    let Some(server) = NatsServer::start() else { return };
+    let dir = scratch_dir("attach");
+    let ants = |args: &[&str]| {
+        let mut command = Command::new(ANTS);
+        command.args(["--nats", &server.url]).args(args).env_remove("ANTS_CREDS").env_remove("ANTS_CONFIG");
+        command.current_dir(&dir);
+        command
+    };
+    let ok = |args: &[&str]| {
+        let out = run(ants(args));
+        let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "ants {args:?}: {stderr}");
+        stdout.into_owned()
+    };
+    let failed = |args: &[&str]| {
+        let out = run(ants(args));
+        assert!(!out.status.success(), "ants {args:?} succeeded");
+        assert!(out.stdout.is_empty(), "nothing sent: {}", String::from_utf8_lossy(&out.stdout));
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    ok(&["init"]);
+    let shot: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(dir.join("shot.png"), &shot).unwrap();
+    std::fs::write(dir.join("notes.txt"), b"line\n").unwrap();
+
+    let asked = ok(&["ask", "@dev-a", "--attach", "shot.png", "--attach", "notes.txt", "look"]);
+    let said: Vec<&str> = asked.lines().collect();
+    let thread = said[0].strip_prefix("thread ").expect(&asked);
+    let handles: Vec<&str> = said[2..].iter().map(|l| l.strip_prefix("attachment ").expect(&asked)).collect();
+    assert_eq!(handles.len(), 2, "{asked}");
+    assert!(handles.iter().all(|h| h.starts_with("human.inbox.dev-a.")), "{asked}");
+    let shown = ok(&["thread", "show", thread]);
+    assert!(shown.contains(&format!("\n    📎 shot.png (293 KiB) {}\n", handles[0])), "{shown}");
+    assert!(shown.contains(&format!("\n    📎 notes.txt (5 B) {}\n", handles[1])), "{shown}");
+    let json: serde_json::Value = serde_json::from_str(ok(&["thread", "show", thread, "--json"]).trim()).unwrap();
+    let listed = &json["attachments"][0];
+    assert_eq!(
+        (&listed["handle"], &listed["mime"], &listed["size"]),
+        (&handles[0].into(), &"image/png".into(), &300_000.into())
+    );
+
+    let missing = failed(&["ask", "@dev-a", "--attach", "notes.txt", "--attach", "missing.png", "lost"]);
+    assert!(missing.contains("missing.png"), "{missing}");
+    let nine: Vec<&str> = ["--attach", "notes.txt"].repeat(9);
+    let many = failed(&[&["ask", "@dev-a"], &nine[..], &["too many"]].concat());
+    assert!(many.contains("9 files to attach: a message carries at most 8"), "{many}");
+    assert!(failed(&["notes", thread, "--attach", "notes.txt"]).contains("give TEXT"));
+
+    std::fs::create_dir(dir.join("out")).unwrap();
+    let saved = ok(&["attachment", "get", handles[0], "-o", "out"]);
+    assert_eq!(saved, "saved shot.png (293 KiB, image/png) to out/shot.png\n");
+    assert_eq!(std::fs::read(dir.join("out/shot.png")).unwrap(), shot);
+    let again = failed(&["attachment", "get", handles[0], "-o", "out"]);
+    assert!(again.contains("out/shot.png exists: not overwriting it"), "{again}");
+    let mut here = ants(&["attachment", "get", handles[1]]);
+    std::fs::create_dir(dir.join("here")).unwrap();
+    here.current_dir(dir.join("here"));
+    assert!(run(here).status.success());
+    assert_eq!(std::fs::read(dir.join("here/notes.txt")).unwrap(), b"line\n");
+
+    let posted = ok(&["post", "ops", "--attach", "notes.txt", "see", "the", "notes"]);
+    let posted = posted.lines().find_map(|l| l.strip_prefix("attachment ")).expect(&posted).to_owned();
+    assert!(posted.starts_with("human.chan.ops."), "{posted}");
+    let read = ok(&["channel", "read", "ops"]);
+    assert!(read.contains(&format!("    📎 notes.txt (5 B) {posted}\n")), "{read}");
+    let noted = ok(&["notes", thread, "--attach", "shot.png", "the", "plan"]);
+    let noted = noted.lines().find_map(|l| l.strip_prefix("attachment ")).expect(&noted).to_owned();
+    assert!(noted.starts_with(&format!("human.notes.{thread}.")), "{noted}");
+    let notes = ok(&["notes", thread]);
+    assert!(notes.contains(&format!("the plan\n  📎 shot.png (293 KiB) {noted}\n")), "{notes}");
+    ok(&["attachment", "get", &noted, "-o", "out/plan.png"]);
+    assert_eq!(std::fs::read(dir.join("out/plan.png")).unwrap(), shot);
+    drop(server);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A daemon serving the built-in messenger hands it over to a daemon started later with a listed messenger, on the same

@@ -24,7 +24,7 @@ use async_nats::jetstream::{self, consumer};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::{thread_meta, tools};
+use crate::{attachments, thread_meta, tools};
 
 pub use message::{MessagePick, recent_messages};
 
@@ -115,6 +115,9 @@ pub struct Entry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     pub text: String,
+    /// The files attached to an inbox message, channel post, notes post or dead letter, each with its handle.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<attachments::Listed>,
     /// The subject it was stored on names another sender (or ant) than the message: the message is forged.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub forged: bool,
@@ -151,6 +154,7 @@ impl Entry {
             owner: None,
             note: None,
             text: String::new(),
+            attachments: Vec::new(),
             forged: false,
             reactions: Vec::new(),
             reason: None,
@@ -236,6 +240,8 @@ impl Parser {
                 owner: e.owner,
                 note,
                 text,
+                // Under the handles of the subject it was stored on, a forged one's too: its sender stored them.
+                attachments: attachments::listed_on(subject, &e.attachments),
                 forged,
                 reason: e.escalation.map(|x| x.reason),
                 suggested_title: e.title.filter(|_| !forged),
@@ -249,6 +255,7 @@ impl Parser {
             let forged = post.check_subject(subject).is_err();
             let note = Some(format!("{} turns left", post.turn_budget));
             return Some(Entry {
+                attachments: attachments::listed_on(subject, &post.attachments),
                 id: Some(post.id),
                 from: Some(post.from),
                 channel: Some(post.channel),
@@ -265,6 +272,7 @@ impl Parser {
             let forged = post.check_subject(subject).is_err();
             let note = Some(format!("{} turns left", post.turn_budget));
             return Some(Entry {
+                attachments: attachments::listed_on(subject, &post.attachments),
                 id: Some(post.id),
                 from: Some(post.from),
                 note,
@@ -298,6 +306,8 @@ impl Parser {
             let note = Some(format!("after {} deliveries: {}", d.deliveries, d.error));
             let e = d.envelope?;
             return Some(Entry {
+                // Stored under the handles of the message as it was sent.
+                attachments: attachments::listed(&e.attachments, |id| e.attachment_handle(id)),
                 from: Some(e.from),
                 to: Some(d.ant),
                 owner: e.owner,
@@ -583,7 +593,7 @@ fn state(thread: &Summary) -> Option<&'static str> {
 }
 
 /// The entries of a thread as `ants thread show` prints them: time, kind, route, note, id and text, one entry per
-/// line, its text's further lines and the reactions to it indented under it. A question shows its options numbered,
+/// line, its text's further lines, its attachments and the reactions to it indented under it. A question shows its options numbered,
 /// whether a typed answer is taken, and the answers to it among `entries` or how to answer it; an answer, the question
 /// and the option it picks.
 pub fn render(entries: &[Entry]) -> String {
@@ -610,6 +620,7 @@ pub fn render(entries: &[Entry]) -> String {
         for line in lines {
             let _ = writeln!(out, "    {line}");
         }
+        out.push_str(&attachments::render(&e.attachments, "    "));
         out.push_str(&crate::inbox::render_reactions(&e.reactions, "    "));
     }
     out

@@ -491,7 +491,7 @@ pub fn threads(posts: Vec<ChannelPost>) -> Vec<Thread> {
     threads
 }
 
-/// One post at `indent`: time, author and text, the text's further lines indented under it.
+/// One post at `indent`: time, author and text, the text's further lines and its attachments indented under it.
 fn render_post(out: &mut String, post: &ChannelPost, indent: &str) {
     let time = post.sent_at.format("%Y-%m-%d %H:%M:%S");
     let mut lines = post.text.lines();
@@ -499,6 +499,8 @@ fn render_post(out: &mut String, post: &ChannelPost, indent: &str) {
     for line in lines {
         let _ = writeln!(out, "{indent}    {line}");
     }
+    let attached = crate::attachments::listed(&post.attachments, |id| post.attachment_handle(id));
+    out.push_str(&crate::attachments::render(&attached, &format!("{indent}    ")));
 }
 
 /// Threads as `ants channel read` prints them: a header line with the thread id, the post that started it, then the

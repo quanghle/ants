@@ -22,6 +22,8 @@ use async_nats::jetstream::consumer::DeliverPolicy;
 use async_nats::jetstream::kv::{self, Operation, UpdateErrorKind};
 use futures::{FutureExt as _, StreamExt as _};
 
+use crate::attachments;
+
 /// How often a followed inbox is read again with no message announced, against an announcement missed.
 const RESCAN: Duration = Duration::from_secs(30);
 /// How many times a mark is tried again after another device moved the marker first.
@@ -246,12 +248,21 @@ pub async fn mark_read(js: &jetstream::Context, human: &UserId, reply: &Envelope
     Ok(false)
 }
 
-/// A message as `ants inbox --json` prints it: the envelope with the reactions to it.
+/// A message as `ants inbox --json` prints it: the envelope, each attachment with its handle, and the reactions to it.
 #[derive(serde::Serialize)]
 pub struct Shown<'a> {
     #[serde(flatten)]
-    pub envelope: &'a Envelope,
-    pub reactions: &'a [Reacted],
+    envelope: Envelope,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    attachments: Vec<attachments::Listed>,
+    reactions: &'a [Reacted],
+}
+
+impl<'a> Shown<'a> {
+    pub fn new(envelope: &Envelope, reactions: &'a [Reacted]) -> Self {
+        let attachments = attachments::listed(&envelope.attachments, |id| envelope.attachment_handle(id));
+        Self { envelope: Envelope { attachments: Vec::new(), ..envelope.clone() }, attachments, reactions }
+    }
 }
 
 /// Print, while it runs, the notices of the messages the human of `nats` sent that keep waiting for an ant no daemon
@@ -311,20 +322,21 @@ pub fn render_question(id: Uuid, question: &Question, answers: Vec<String>) -> S
     text
 }
 
-/// A message for the terminal: a header line with its id, then the text indented and the reactions to it. A mention
-/// notice names its channel, the sender that relayed it if any, and how to answer there; a question shows its options
-/// numbered, whether a typed answer is taken and how to answer it.
+/// A message for the terminal: a header line with its id, then the text indented, its attachments and the reactions to
+/// it. A mention notice names its channel, the sender that relayed it if any, and how to answer there; a question shows
+/// its options numbered, whether a typed answer is taken and how to answer it.
 pub fn render(e: &Envelope, reactions: &[Reacted]) -> String {
     let at = e.sent_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M");
     let indent = |text: &str| text.lines().map(|line| format!("  {line}")).collect::<Vec<_>>().join("\n");
-    let reacted = render_reactions(reactions, "  ");
+    let attached = attachments::render(&attachments::listed(&e.attachments, |id| e.attachment_handle(id)), "  ");
+    let under = attached + &render_reactions(reactions, "  ");
     if let Some(question) = e.asks() {
         let text = indent(&render_question(e.id, question, Vec::new()));
-        return format!("{at}  {} asks on thread {}, message {}\n{text}\n{reacted}", e.from, e.thread_id, e.id);
+        return format!("{at}  {} asks on thread {}, message {}\n{text}\n{under}", e.from, e.thread_id, e.id);
     }
     let text = indent(&e.text);
     let Some(mention) = &e.mention else {
-        return format!("{at}  {} on thread {}, message {}\n{text}\n{reacted}", e.from, e.thread_id, e.id);
+        return format!("{at}  {} on thread {}, message {}\n{text}\n{under}", e.from, e.thread_id, e.id);
     };
     let (channel, thread) = (&mention.channel, &e.thread_id);
     let (author, relayed) = match &mention.author {
@@ -333,7 +345,7 @@ pub fn render(e: &Envelope, reactions: &[Reacted]) -> String {
     };
     format!(
         "{at}  {author} mentioned {} in #{channel} on thread {thread}{relayed}, message {}\n{text}\n  (`ants post \
-         {channel} --thread {thread} ...` answers on the thread)\n{reacted}",
+         {channel} --thread {thread} ...` answers on the thread)\n{under}",
         e.to, e.id,
     )
 }
@@ -396,6 +408,21 @@ mod tests {
         assert!(shown.contains("\n  1. yes\n  2. not yet\n"), "{shown}");
         assert!(shown.contains("\n  Answer with an option's number.\n"), "{shown}");
         assert!(shown.contains(&format!("\n  (`ants answer {} N` answers it)\n", asked.id)), "{shown}");
+    }
+
+    #[test]
+    fn attachments_are_listed_with_their_handles() {
+        let mut reply = Envelope::new("dev-a".parse().unwrap(), UserId::human(), "the screenshot");
+        let shot = ants_daemon::files::reference("shot.png", "image/png", &[0; 2048]).unwrap();
+        reply.attachments = vec![shot.clone()];
+        let handle = format!("dev-a.inbox.human.{}", shot.id);
+        let shown = render(&reply, &[]);
+        assert!(shown.contains(&format!("\n  the screenshot\n  📎 shot.png (2.0 KiB) {handle}\n")), "{shown}");
+        let json = serde_json::to_string(&Shown::new(&reply, &[])).unwrap();
+        assert_eq!(json.matches("\"attachments\"").count(), 1, "{json}");
+        let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!((&json["attachments"][0]["handle"], &json["text"]), (&handle.into(), &"the screenshot".into()));
+        assert_eq!(json["attachments"][0]["sha256"], shot.sha256);
     }
 
     /// Runs as the human and dev-a with their own credentials, so it also checks the human's permissions.

@@ -12,7 +12,7 @@ use futures::StreamExt as _;
 use futures::stream::BoxStream;
 
 use crate::cli::Replies;
-use crate::{Nats, channel, compose, humans, inbox, progress, reacted, roster, thread};
+use crate::{Nats, attachments, channel, compose, humans, inbox, progress, reacted, roster, thread};
 
 /// Split a leading `@ant` off the words; the message is the rest, or what `input` reads.
 pub(crate) fn recipient(mut words: Vec<String>, input: &compose::Input) -> Result<(UserId, String)> {
@@ -33,16 +33,19 @@ pub(crate) async fn ask(
     steer: bool,
     replies: &Replies,
     input: &compose::Input,
+    attach: &attachments::Attach,
     words: Vec<String>,
 ) -> Result<()> {
     if steer && !nats.me.role.is_human() {
         bail!("the credentials of {} are an ant's; only a human steers an ant", nats.me.id);
     }
-    // Refuse a message with nothing to send before connecting.
+    // Refuse a message with nothing to send, or a file that cannot be attached, before connecting.
     let (to, text) = recipient(words, input)?;
+    let files = attach.read()?;
     let (client, js) = nats.connect("ants-cli").await?;
     let thread = thread::resolve(thread, &js, &nats.me).await?;
-    let envelope = ask_envelope(&nats.me, thread, to, text);
+    let mut envelope = ask_envelope(&nats.me, thread, to, text);
+    envelope.attachments = attachments::references(&files);
     let envelope = if steer { envelope.steering() } else { envelope };
     // Subscribe first so a fast reply is not missed. A waiter also reads back what the hub stored while out of its
     // reach.
@@ -70,6 +73,7 @@ pub(crate) async fn ask(
     } else {
         None
     };
+    attachments::store(&js, &files, |id| envelope.attachment_handle(id)).await?;
     if let Some(owner) = &envelope.owner {
         owners::recording(&js, nats.domain, &envelope.thread_id, &envelope.to, owner).await;
     }
@@ -78,6 +82,7 @@ pub(crate) async fn ask(
     }
     println!("thread {}", envelope.thread_id);
     println!("message {}", envelope.id);
+    print_attached(&files, |id| envelope.attachment_handle(id));
     if !replies.wait && !replies.follow {
         return Ok(());
     }
@@ -106,6 +111,7 @@ pub(crate) async fn ask(
         progress::clear();
         shown.add(reply.id, &reply.from, &reply.text);
         println!("{}: {}", reply.from, reply.text);
+        print!("{}", attachments::render(&attachments::listed_on(&reply.subject(), &reply.attachments), "  "));
         // Seen here, so `ants inbox` need not show it again. The other replies stay unread; an ant's inbox
         // consumer is its daemon's.
         if nats.me.role.is_human() {
@@ -138,13 +144,16 @@ pub(crate) async fn post(
     thread: Option<thread::Pick>,
     replies: &Replies,
     input: &compose::Input,
+    attach: &attachments::Attach,
     words: Vec<String>,
 ) -> Result<()> {
     let text = input.text(words)?;
+    let files = attach.read()?;
     let (client, js) = nats.connect("ants-cli").await?;
     let thread = thread::resolve(thread, &js, &nats.me).await?;
     let humans = humans::load(&js, &nats.me).await;
-    let post = channel::compose(&js, &nats.me, &humans, channel, thread, text).await;
+    let mut post = channel::compose(&js, &nats.me, &humans, channel, thread, text).await;
+    post.attachments = attachments::references(&files);
     let entry = channel::get(&channel::open(&js).await?, &post.channel).await?;
     if entry.is_none() {
         tracing::warn!("no channel #{0} (`ants channel create {0}` makes one): the post wakes nobody", post.channel);
@@ -164,6 +173,7 @@ pub(crate) async fn post(
     } else {
         None
     };
+    attachments::store(&js, &files, |id| post.attachment_handle(id)).await?;
     let stored = bus::store_acked(&js, post.subject(), &post, &post.id.to_string()).await?.map(|ack| ack.sequence);
     if stored.is_none() {
         println!("kept in this machine's outbox until the hub is reachable");
@@ -178,6 +188,7 @@ pub(crate) async fn post(
     }
     println!("thread {}", post.thread_id);
     println!("message {}", post.id);
+    print_attached(&files, |id| post.attachment_handle(id));
     let Some(room) = room else { return Ok(()) };
     let _shown = status.map(|sub| progress::start(sub, progress::Status::new(vec![post.id]), replies.wait));
     // Waiting is for an answer, so the poster's own posts from elsewhere do not count; following shows them all. What
@@ -190,6 +201,7 @@ pub(crate) async fn post(
         progress::clear();
         shown.add(reply.id, &reply.from, &reply.text);
         println!("{}: {}", reply.from, reply.text);
+        print!("{}", attachments::render(&attachments::listed_on(&reply.subject(), &reply.attachments), "  "));
         Ok(())
     });
     Box::pin(with_reactions(shown_replies, &shown, changes)).await
@@ -217,13 +229,25 @@ async fn with_reactions(
     }
 }
 
-pub(crate) async fn thread_notes(nats: &Nats<'_>, thread: thread::Pick, text: Vec<String>) -> Result<()> {
+pub(crate) async fn thread_notes(
+    nats: &Nats<'_>,
+    thread: thread::Pick,
+    attach: &attachments::Attach,
+    text: Vec<String>,
+) -> Result<()> {
+    if text.is_empty() && !attach.paths.is_empty() {
+        bail!("--attach posts to the notes: give TEXT to post with the files");
+    }
+    let files = attach.read()?;
     let (_, js) = nats.connect("ants-cli").await?;
     let thread = thread.resolve(&js, &nats.me).await?;
     if !text.is_empty() {
-        let post = NotesPost::new(thread, nats.me.id.clone(), text.join(" "));
+        let mut post = NotesPost::new(thread, nats.me.id.clone(), text.join(" "));
+        post.attachments = attachments::references(&files);
+        attachments::store(&js, &files, |id| post.attachment_handle(id)).await?;
         notes::publish(&js, &post, None).await?;
         println!("posted to the notes of thread {} ({} turns left)", post.thread_id, post.turn_budget);
+        print_attached(&files, |id| post.attachment_handle(id));
         return Ok(());
     }
     let read = notes::read(&js, &nats.me.id, Reading::cli(nats.me.role), &thread).await?;
@@ -233,8 +257,16 @@ pub(crate) async fn thread_notes(nats: &Nats<'_>, thread: thread::Pick, text: Ve
     for post in &read.posts {
         let time = post.sent_at.format("%Y-%m-%d %H:%M:%S");
         println!("{time} {} ({} turns left): {}", post.from, post.turn_budget, post.text);
+        print!("{}", attachments::render(&attachments::listed_on(&post.subject(), &post.attachments), "  "));
     }
     Ok(())
+}
+
+/// Print the handle of each file attached to the message sent, as `attachment <handle>`.
+fn print_attached(files: &[attachments::File], handle_of: impl Fn(Uuid) -> ants_proto::AttachmentHandle) {
+    for file in files {
+        println!("attachment {}", handle_of(file.attachment.id));
+    }
 }
 
 pub(crate) async fn react(

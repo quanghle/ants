@@ -24,7 +24,7 @@ pub(crate) async fn show(
     let mut inbox = inbox::Inbox::open(&js, me).await?;
     let show_with = |e: &Envelope, reactions: &[reactions::Reacted]| -> Result<()> {
         if json {
-            println!("{}", serde_json::to_string(&inbox::Shown { envelope: e, reactions })?);
+            println!("{}", serde_json::to_string(&inbox::Shown::new(e, reactions))?);
         } else {
             println!("{}", inbox::render(e, reactions));
         }
