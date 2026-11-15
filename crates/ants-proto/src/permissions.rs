@@ -353,9 +353,13 @@ impl Permissions {
     ///
     /// It sends only as itself, never under any sender as a human may, nor writes attachments under another's name.
     /// It gets none of a human's rights whose subjects do not name who acts, which readers could not tell from its
-    /// human's: sending admin orders, deciding approval requests, cancelling, queueing or withdrawing an ant's messages,
-    /// recording a thread's owner, putting dead letters, answering an ant's reactions requests or another's renewal,
-    /// setting another ant's avatar ([`IDENTITIES_BUCKET`]). Nor
+    /// human's: cancelling an ant's prompt or asking for its queue (whose request's `by` no reader can check),
+    /// withdrawing an ant's queued messages, recording a thread's owner, putting dead letters, answering an ant's
+    /// reactions requests or another's renewal, setting another ant's avatar ([`IDENTITIES_BUCKET`]). Nor does it
+    /// decide approval requests on [`subject::ALL_APPROVAL_DECISIONS`]: it decides one for its human in a message to
+    /// the ant (`on_behalf_of`), which waits for its human's confirmation, as readers ignore a stored decision carrying
+    /// `on_behalf_of` and one stored there would keep its human's own from being stored. Nor does it send admin orders,
+    /// until daemons hold an assistant's orders for its human's confirmation. Nor
     /// does it change the team: no entry of [`HUMANS_BUCKET`] (where its human's grant stands) or [`CHANNELS_BUCKET`],
     /// no stream created, updated or purged of a message. It puts no device encryption key, no presence and no
     /// notification holds, which only a human's devices have, and it gets no power of the account key: it signs no
@@ -369,8 +373,10 @@ impl Permissions {
         let devices_only = [subject::devices_of(assistant), subject::presence_of(assistant)];
         let notify = notify_prefs_rights(assistant);
         let unattributed = [
+            // Acts for its human that wait for the human's confirmation, which these subjects cannot carry.
             subject::ALL_ADMIN_ORDERS_SENT.to_owned(),
             subject::ALL_APPROVAL_DECISIONS.to_owned(),
+            // Subjects naming no sender, whose readers could not tell its acts from its human's.
             subject::ALL_CANCELS.to_owned(),
             subject::ALL_QUEUE_REQUESTS.to_owned(),
             subject::ALL_REACTIONS_REPLIES.to_owned(),

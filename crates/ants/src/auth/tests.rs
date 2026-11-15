@@ -939,6 +939,32 @@ async fn every_human_has_the_same_rights_and_reads_only_its_own_inbox() {
     assert_eq!(heard, [&b"allow"[..], b"reject"]);
 }
 
+/// An assistant decides no approval request on its subject, sends no admin order, cancels no prompt, asks for no
+/// queue, and withdraws no queued message nor records an owner: its decisions wait in its messages for its human's
+/// confirmation, and readers of the rest could not tell its acts from its human's.
+#[tokio::test]
+async fn an_assistant_takes_no_act_readers_could_not_tell_from_its_human_s() {
+    let Some(server) = Server::start() else { return };
+    let (alice, pa) = (p("alice"), p("pa"));
+    let creds = server.dir().join("pa-assistant.creds");
+    let new = NewDevice { assistant_of: Some(alice.clone()), ..NewDevice::default() };
+    let rights = Permissions::for_assistant(&pa, &alice);
+    issue_device_with(&server.dir().join("auth"), &pa, Kind::Assistant, rights, &new, &creds).unwrap();
+    let (client, mut errors) = server.watched_with(&pa, &creds).await;
+    for s in [
+        "ants.approvals.dev-a.r1",
+        "ants.admin.m1.dev-a",
+        "ants.cancel.dev-a.t1",
+        "ants.queue.dev-a",
+        "$KV.ants_attempts.dev-a.msg.m1",
+        "$KV.ants_owners.t1.dev-a",
+    ] {
+        client.publish(s, "{}".into()).await.unwrap();
+        let v = next_violation(&client, &mut errors).await;
+        assert!(v.contains(&format!("Publish to \"{s}\"")), "{v}");
+    }
+}
+
 /// An assistant watches the team's traffic and keeps its own state as a human does, under its own name, and reads
 /// its human's read marker but never moves it, nor sends as anyone else.
 #[tokio::test]

@@ -993,9 +993,12 @@ fn an_assistant_keeps_its_ant_rights_and_a_humans_under_its_own_name() {
         "$O.ants_files.C.>",
         "ants.out.files.>",
         "ants.approvals.*.*",
+        "ants.admin.*.*",
         "ants.cancel.*.*",
         "ants.queue.*",
+        "$KV.ants_attempts.*.msg.*",
         "$KV.ants_owners.*.*",
+        "ants.out.owners.*.*",
         "$KV.ants_humans.*",
         "$KV.ants_channels.>",
         "$JS.API.STREAM.UPDATE.ANTS",
@@ -1004,7 +1007,7 @@ fn an_assistant_keeps_its_ant_rights_and_a_humans_under_its_own_name() {
     ];
     for s in human_only {
         assert!(human.publish.iter().any(|have| have == s), "{s} is a human's");
-        assert!(!has(s), "{s} is not an assistant's");
+        assert!(!assistant.publish.iter().any(|have| covers(have, s)), "{s} is not an assistant's");
     }
     // Of its human's keys it only reads; it moves no device's key, presence or notifications.
     for s in &assistant.publish {
