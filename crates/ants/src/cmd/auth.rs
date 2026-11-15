@@ -133,8 +133,8 @@ pub(crate) enum AuthCommand {
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
-    /// List the devices of a human, one per credentials issued to it with `ants auth user NAME --human`: id
-    /// (`legacy` for credentials issued before devices had ids), label, key, when issued, and whether revoked.
+    /// List the devices of a human, one per credentials issued to it with `ants auth user NAME --human`: id, label,
+    /// key, when issued, and whether revoked.
     Devices {
         human: UserId,
         /// One JSON object per line.
@@ -162,9 +162,9 @@ pub(crate) enum AuthCommand {
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
-    /// List the keys issued here: key, name, kind, when issued, expiry, permissions version (`-` for credentials
-    /// issued before versions), and whether revoked or reissued since. Credentials in use that are outdated or expire
-    /// within 7 days get a line naming the command that renews them.
+    /// List the keys issued here: key, name, kind, when issued, expiry, permissions version, and whether revoked or
+    /// reissued since. Credentials in use that are outdated or expire within 7 days get a line naming the command that
+    /// renews them.
     Issued {
         /// One JSON object per line.
         #[arg(long)]
@@ -276,8 +276,7 @@ pub(crate) async fn run(command: AuthCommand, conn: &Connection<'_>) -> Result<(
         AuthCommand::Devices { human, json, dir } => revoke::list_devices(&team_dir(dir)?, human.as_str(), json),
         AuthCommand::Rename { human, device, label, dir } => {
             let renamed = revoke::rename(&team_dir(dir)?, human.as_str(), &device, &label)?;
-            let id = renamed.device.map_or_else(|| format!("legacy device {}", renamed.key), |id| id.to_string());
-            println!("{id} of {human} is now labelled {label:?}");
+            println!("{} of {human} is now labelled {label:?}", renamed.device);
             Ok(())
         }
         AuthCommand::Push { dir } => push(conn.nats, &team_dir(dir)?).await,
@@ -372,7 +371,7 @@ fn leaf_creds(
 ) -> Result<()> {
     let dir = team_dir(dir)?;
     let out = out.unwrap_or_else(|| dir.join(format!("leaf-{machine}.creds")));
-    let kept = members::issued(&dir, &machine, &out)?;
+    let kept = members::issued(&dir, &machine)?;
     let set = members::Change::from(members).apply(&machine, kept, || {
         anyhow::anyhow!("{} keeps no members of {machine}: name them with --ant, --human or --webhook", dir.display())
     })?;

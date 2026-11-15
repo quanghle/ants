@@ -457,7 +457,6 @@ fn the_channel_manager_hears_requests_and_writes_channels_only() {
     let json = serde_json::to_string(&marker).unwrap();
     assert_eq!(json, format!(r#"{{"machine":"m1","version":"{ANTS_VERSION}","perms":{PERMISSIONS_VERSION}}}"#));
     assert_eq!(serde_json::from_str::<Serving>(&json).unwrap(), marker);
-    assert!(serde_json::from_slice::<Serving>(b"github").is_err(), "the marker of an older webhook holds its name");
 
     let a = Permissions::for_user(&p("dev-a"), Role::Ant);
     assert!(a.publish.iter().any(|s| s == "ants.chanadm.*.dev-a"));

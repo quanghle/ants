@@ -236,10 +236,6 @@ mod tests {
         let reply = escalated.reply(p("lead"), "done", Role::Ant).unwrap();
         assert_eq!((reply.escalation, escalated.follow_up(p("dev-a"), p("dev-b"), "x").escalation), (None, None));
 
-        let older = r#"{"id":"0190a5c4-1d2e-7f00-8000-000000000001","thread_id":"t1","from":"human","to":"dev-a",
-            "text":"hi","turn_budget":8,"sent_at":"2026-01-01T00:00:00Z"}"#;
-        let older = serde_json::from_str::<Envelope>(older).unwrap();
-        assert_eq!((older.escalation, older.approval), (None, None));
         let newer = r#"{"stuck":"dev-a","thread_id":"t1","reason":"melted","level":2,"leader":"lead",
             "visited":["dev-a","lead"],"since":"2026-01-01T00:00:00Z"}"#;
         assert_eq!(serde_json::from_str::<Escalation>(newer).unwrap().reason, EscalationReason::Unknown);

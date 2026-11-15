@@ -69,7 +69,7 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration) -> Result<()> {
         (model.marks, model.auto_archive) = (marks, auto_archive);
         Box::pin(Dash::new(client, js.clone(), model).run(&mut screen.terminal)).await
     };
-    Box::pin(presence::while_following(&js, nats.domain, me, nats.device.id, Following::Approvals, shown)).await
+    Box::pin(presence::while_following(&js, nats.domain, me, nats.device, Following::Approvals, shown)).await
 }
 
 /// The terminal, drawn on full screen while this lives; log lines are kept meanwhile and written once it is restored.

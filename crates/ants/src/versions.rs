@@ -21,13 +21,13 @@ use futures::TryStreamExt as _;
 /// A [`Serving`] put longer ago than this is of a process that stopped.
 pub const SERVING_STALE_AFTER: Duration = SERVING_EVERY.saturating_mul(2);
 
-/// A running component and the version it publishes; none when it is older than version publishing.
+/// A running component and the version it publishes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Component {
     /// What it is, in words: `the daemon of dev-a on m1`, `webhook github on m2`, `the channel manager on m1`.
     pub what: String,
-    pub version: Option<String>,
-    pub perms: Option<PermissionsVersion>,
+    pub version: String,
+    pub perms: PermissionsVersion,
 }
 
 impl Component {
@@ -40,19 +40,12 @@ impl Component {
     }
 
     fn of_serving(what: &str, serving: Serving) -> Self {
-        Self {
-            what: format!("{what} on {}", serving.machine),
-            version: Some(serving.version),
-            perms: Some(serving.perms),
-        }
+        Self { what: format!("{what} on {}", serving.machine), version: serving.version, perms: serving.perms }
     }
 
     /// It, with its version: `the daemon of dev-a on m1 (ants 0.2.0, permissions 2)`.
     fn described(&self) -> String {
-        match (&self.version, self.perms) {
-            (Some(version), Some(perms)) => format!("{} (ants {version}, permissions {perms})", self.what),
-            _ => format!("{} (no version published: an ants from before versions were published)", self.what),
-        }
+        format!("{} (ants {}, permissions {})", self.what, self.version, self.perms)
     }
 }
 
@@ -65,33 +58,27 @@ pub struct Running {
 }
 
 /// The ants versions in `components`, with how many run each: `0.2.0 (3), 0.1.0 (1)`, newest first; `None` unless
-/// they run more than one, those publishing none counting as one more.
+/// they run more than one.
 pub fn mixed(components: &[Component]) -> Option<String> {
-    let mut counts: BTreeMap<Option<&str>, usize> = BTreeMap::new();
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for component in components {
-        *counts.entry(component.version.as_deref()).or_default() += 1;
+        *counts.entry(component.version.as_str()).or_default() += 1;
     }
     if counts.len() < 2 {
         return None;
     }
-    let mut versions: Vec<(Option<&str>, usize)> = counts.into_iter().collect();
-    versions.sort_by(|(a, _), (b, _)| newest_first(*a, *b));
-    let named: Vec<String> =
-        versions.into_iter().map(|(version, n)| format!("{} ({n})", version.unwrap_or("none published"))).collect();
+    let mut versions: Vec<(&str, usize)> = counts.into_iter().collect();
+    versions.sort_by(|(a, _), (b, _)| newest_first(a, b));
+    let named: Vec<String> = versions.into_iter().map(|(version, n)| format!("{version} ({n})")).collect();
     Some(named.join(", "))
 }
 
-/// Versions compared by their numeric parts, newest first, unknown last.
-fn newest_first(a: Option<&str>, b: Option<&str>) -> std::cmp::Ordering {
+/// Versions compared by their numeric parts, newest first.
+fn newest_first(a: &str, b: &str) -> std::cmp::Ordering {
     let parts = |v: &str| -> Vec<u64> {
         v.split(|c: char| !c.is_ascii_digit()).filter(|p| !p.is_empty()).filter_map(|p| p.parse().ok()).collect()
     };
-    match (a, b) {
-        (Some(a), Some(b)) => parts(b).cmp(&parts(a)).then_with(|| b.cmp(a)),
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => std::cmp::Ordering::Equal,
-    }
+    parts(b).cmp(&parts(a)).then_with(|| b.cmp(a))
 }
 
 /// The line `ants roster` adds under its table when the live daemons listed run more than one version at `now`.
@@ -120,7 +107,7 @@ pub fn harness_drift(entries: &[RosterEntry], now: DateTime<Utc>) -> Vec<String>
         })
         .map(|(name, versions)| {
             let mut versions: Vec<_> = versions.into_iter().collect();
-            versions.sort_by(|(a, _), (b, _)| newest_first(Some(a), Some(b)));
+            versions.sort_by(|(a, _), (b, _)| newest_first(a, b));
             let described: Vec<String> = versions
                 .into_iter()
                 .map(|(version, ants)| {
@@ -145,7 +132,7 @@ pub fn harness_note(entries: &[RosterEntry], now: DateTime<Utc>) -> Option<Strin
 pub enum Renewal {
     /// Every component runs this permissions version or a newer one.
     Allowed,
-    /// Some run an older permissions version, or publish none: renewed credentials may lack rights they use.
+    /// Some run an older permissions version: renewed credentials may lack rights they use.
     Behind(Vec<String>),
     /// Some run a newer one than this ants: credentials it renews may lack rights they use.
     Ahead(Vec<String>),
@@ -153,14 +140,14 @@ pub enum Renewal {
 
 /// How `components` stand with renewing credentials to [`PERMISSIONS_VERSION`].
 pub fn renewal(components: &[Component]) -> Renewal {
-    let described = |keep: &dyn Fn(Option<PermissionsVersion>) -> bool| -> Vec<String> {
+    let described = |keep: &dyn Fn(PermissionsVersion) -> bool| -> Vec<String> {
         components.iter().filter(|c| keep(c.perms)).map(Component::described).collect()
     };
-    let behind = described(&|perms| perms.is_none_or(|p| p < PERMISSIONS_VERSION));
+    let behind = described(&|perms| perms < PERMISSIONS_VERSION);
     if !behind.is_empty() {
         return Renewal::Behind(behind);
     }
-    let ahead = described(&|perms| perms.is_some_and(|p| p > PERMISSIONS_VERSION));
+    let ahead = described(&|perms| perms > PERMISSIONS_VERSION);
     if !ahead.is_empty() {
         return Renewal::Ahead(ahead);
     }
@@ -169,8 +156,7 @@ pub fn renewal(components: &[Component]) -> Renewal {
 
 /// What the running components publish, read with a human's credentials, whose rights `may` tells: the live roster
 /// entries, the markers of webhooks and schedules, and the channel manager's entry, each put within
-/// [`SERVING_STALE_AFTER`] of `now`. A marker of an older webhook, which holds no version and is put only when it
-/// delivers, counts as running for all of [`ants_proto::WEBHOOK_RETENTION`].
+/// [`SERVING_STALE_AFTER`] of `now`.
 pub async fn running(js: &jetstream::Context, may: impl Fn(&str) -> bool, now: DateTime<Utc>) -> Result<Running> {
     let mut running = Running::default();
     match js.get_key_value(ROSTER_BUCKET).await {
@@ -204,12 +190,14 @@ pub async fn running(js: &jetstream::Context, may: impl Fn(&str) -> bool, now: D
     markers.sort();
     for subject in markers {
         let Some((value, at)) = last(&stream, &subject).await? else { continue };
+        if !fresh(at, now) {
+            continue;
+        }
         let webhook = subject.strip_prefix(&prefix).and_then(|k| k.strip_suffix(".webhook")).unwrap_or(&subject);
         let what = format!("webhook {webhook}");
         match serde_json::from_slice::<Serving>(&value) {
-            Ok(serving) if fresh(at, now) => running.components.push(Component::of_serving(&what, serving)),
-            Ok(_) => {}
-            Err(_) => running.components.push(Component { what, version: None, perms: None }),
+            Ok(serving) => running.components.push(Component::of_serving(&what, serving)),
+            Err(e) => running.unseen.push(format!("the marker of {what} is malformed: {e}")),
         }
     }
 
@@ -227,8 +215,7 @@ pub async fn running(js: &jetstream::Context, may: impl Fn(&str) -> bool, now: D
             Err(e) => running.unseen.push(format!("the channel manager's version is malformed: {e}")),
         },
         _ => running.unseen.push(format!(
-            "no channel manager published its version in the last {}h: none runs, or one from before versions were \
-             published",
+            "no channel manager published its version in the last {}h: none runs",
             SERVING_STALE_AFTER.as_secs() / 3600
         )),
     }
@@ -276,23 +263,19 @@ pub async fn keep_putting(kv: DirectKv, key: String, value: Vec<u8>, put: impl F
 mod tests {
     use super::*;
 
-    fn component(what: &str, version: Option<&str>, perms: Option<u32>) -> Component {
-        Component { what: what.to_owned(), version: version.map(str::to_owned), perms: perms.map(PermissionsVersion) }
+    fn component(what: &str, version: &str, perms: u32) -> Component {
+        Component { what: what.to_owned(), version: version.to_owned(), perms: PermissionsVersion(perms) }
     }
 
     #[test]
     fn mixed_versions_are_counted_newest_first() {
         let now = PERMISSIONS_VERSION.0;
-        let same = [component("a", Some("0.2.0"), Some(now)), component("b", Some("0.2.0"), Some(now))];
+        let same = [component("a", "0.2.0", now), component("b", "0.2.0", now)];
         assert_eq!(mixed(&same), None);
         assert_eq!(mixed(&[]), None);
         let mut all = same.to_vec();
-        all.extend([
-            component("c", Some("0.10.0"), Some(now)),
-            component("d", None, None),
-            component("e", Some("0.9.1"), Some(now)),
-        ]);
-        assert_eq!(mixed(&all).as_deref(), Some("0.10.0 (1), 0.9.1 (1), 0.2.0 (2), none published (1)"));
+        all.extend([component("c", "0.10.0", now), component("e", "0.9.1", now)]);
+        assert_eq!(mixed(&all).as_deref(), Some("0.10.0 (1), 0.9.1 (1), 0.2.0 (2)"));
     }
 
     #[test]
@@ -301,7 +284,7 @@ mod tests {
         let entry = |ant: &str, machine: &str, agent: Option<(&str, &str)>| RosterEntry {
             ant: ant.parse().unwrap(),
             machine: machine.to_owned(),
-            instance: None,
+            instance: "run-1".to_owned(),
             harness: "copilot".to_owned(),
             agent: agent
                 .map(|(name, version)| ants_proto::HarnessAgent { name: name.to_owned(), version: version.to_owned() }),
@@ -310,12 +293,12 @@ mod tests {
             workdir: None,
             started_at: now,
             heartbeat_at: now,
-            activity: None,
-            handling: None,
-            harnesses: None,
+            activity: ants_proto::Activity::Idle,
+            handling: 0,
+            harnesses: 0,
             escalate_to: Vec::new(),
-            version: None,
-            perms: None,
+            version: ants_proto::ANTS_VERSION.to_owned(),
+            perms: ants_proto::PERMISSIONS_VERSION,
             signed_out: None,
             limited: None,
             failing: None,
@@ -351,23 +334,15 @@ mod tests {
     #[test]
     fn renewal_waits_for_every_component() {
         let now = PERMISSIONS_VERSION.0;
-        let current = component("the daemon of dev-a on m1", Some("0.2.0"), Some(now));
+        let current = component("the daemon of dev-a on m1", "0.2.0", now);
         assert_eq!(renewal(&[]), Renewal::Allowed);
         assert_eq!(renewal(std::slice::from_ref(&current)), Renewal::Allowed);
 
-        let old = component("webhook github on m2", Some("0.1.0"), Some(now - 1));
-        let unknown = component("the daemon of dev-b on m2", None, None);
-        let Renewal::Behind(behind) = renewal(&[current.clone(), old, unknown]) else { panic!("behind") };
-        assert_eq!(
-            behind,
-            [
-                format!("webhook github on m2 (ants 0.1.0, permissions {})", now - 1),
-                "the daemon of dev-b on m2 (no version published: an ants from before versions were published)"
-                    .to_owned()
-            ]
-        );
+        let old = component("webhook github on m2", "0.1.0", now - 1);
+        let Renewal::Behind(behind) = renewal(&[current.clone(), old]) else { panic!("behind") };
+        assert_eq!(behind, [format!("webhook github on m2 (ants 0.1.0, permissions {})", now - 1)]);
 
-        let newer = component("the channel manager on m1", Some("9.0.0"), Some(now + 1));
+        let newer = component("the channel manager on m1", "9.0.0", now + 1);
         let Renewal::Ahead(ahead) = renewal(&[current, newer]) else { panic!("ahead") };
         assert_eq!(ahead, [format!("the channel manager on m1 (ants 9.0.0, permissions {})", now + 1)]);
     }

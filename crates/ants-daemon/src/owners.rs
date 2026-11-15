@@ -14,7 +14,7 @@ use std::time::Duration;
 use ants_proto::{JsDomain, OWNERS_BUCKET, ThreadId, UserId, owner_key, owner_outbox, owner_record_id};
 use anyhow::{Context as _, Result};
 use async_nats::HeaderMap;
-use async_nats::jetstream::{self, stream};
+use async_nats::jetstream;
 
 use crate::direct_kv::{DirectKv, Lookup};
 use crate::sync::MutexExt as _;
@@ -179,19 +179,6 @@ pub fn owners_stream() -> String {
     format!("KV_{OWNERS_BUCKET}")
 }
 
-/// Have the owners bucket's stream, as `config` describes it, keep the first record of each key and drop, rather than
-/// refuse, a repeat of its message id ([`owner_record_id`]) while the first is kept: a refused message stalls the
-/// source it came from, a machine's outbox. Returns whether it changed anything.
-pub fn first_records_only(config: &mut stream::Config) -> bool {
-    let before =
-        (config.max_messages_per_subject, config.discard, config.discard_new_per_subject, config.duplicate_window);
-    config.max_messages_per_subject = 1;
-    config.discard = stream::DiscardPolicy::New;
-    config.discard_new_per_subject = true;
-    config.duplicate_window = config.max_age;
-    before != (config.max_messages_per_subject, config.discard, config.discard_new_per_subject, config.duplicate_window)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,29 +232,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_bucket_from_before_drops_a_repeated_record_once_ensured() {
+    async fn the_bucket_drops_a_repeated_record() {
         let Some(server) = NatsServer::start() else { return };
         let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
-        js.create_stream(stream::Config {
-            name: owners_stream(),
-            subjects: vec![format!("$KV.{OWNERS_BUCKET}.>")],
-            max_messages_per_subject: 1,
-            discard: stream::DiscardPolicy::New,
-            discard_new_per_subject: true,
-            max_age: Duration::from_secs(3600),
-            allow_direct: true,
-            deny_delete: true,
-            deny_purge: true,
-            ..Default::default()
-        })
-        .await
-        .unwrap();
+        bus::ensure_owners(&js).await.unwrap();
+        let config = js.get_stream(owners_stream()).await.unwrap().cached_info().config.clone();
+        assert_eq!(config.duplicate_window, config.max_age, "as long as a record is kept");
         let thread = ThreadId::generate();
         let [dev, alice]: [UserId; 2] = ["dev".parse().unwrap(), "alice".parse().unwrap()];
         record(&js, None, &thread, &dev, &alice).await.unwrap();
-        bus::ensure_owners(&js).await.unwrap();
-        let config = js.get_stream(owners_stream()).await.unwrap().cached_info().config.clone();
-        assert_eq!(config.duplicate_window, Duration::from_secs(3600), "as long as a record is kept");
         let key = owner_key(&thread, &dev);
         let mut headers = HeaderMap::new();
         headers.insert("Nats-Msg-Id", owner_record_id(&key).as_str());

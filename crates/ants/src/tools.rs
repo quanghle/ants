@@ -750,7 +750,7 @@ pub async fn list(nats: &crate::Nats<'_>, listing: crate::Listing) -> Result<()>
             _ = tokio::signal::ctrl_c() => Ok(()),
         }
     };
-    let (me, device) = (&nats.me.id, nats.device.id);
+    let (me, device) = (&nats.me.id, nats.device);
     crate::presence::while_following(&js, nats.domain, me, device, Following::Approvals, follow).await
 }
 

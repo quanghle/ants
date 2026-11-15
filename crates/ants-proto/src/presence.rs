@@ -11,7 +11,7 @@ use crate::UserId;
 
 /// The id of one device of a human: each `ants auth user NAME --human` issues credentials for a new device, whose user
 /// JWT carries its id as the tag [`DeviceId::tag`]. Generated (a UUIDv7), never chosen and never reused; a label
-/// for display is kept beside it where the credentials were issued. Credentials without one are a legacy device's.
+/// for display is kept beside it where the credentials were issued.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct DeviceId(Uuid);

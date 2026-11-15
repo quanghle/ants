@@ -4,23 +4,17 @@
 //! created for the read and deleted after it, one read at a time. The CLI with the ant's credentials reads through a
 //! spare of that reader ([`spare_readers`]) taken by a strict create, so it never deletes a consumer the daemon or
 //! another CLI read is reading through. A human gets the messages with no consumer, in batches of direct gets
-//! (`$JS.API.DIRECT.GET.ANTS`, nats-server 2.11 or later), one request per batch; on a connection whose credentials, or
-//! leaf node uplink, predate that right, or whose server lacks batches, one by one (`STREAM.MSG.GET`).
+//! (`$JS.API.DIRECT.GET.ANTS`), one request per batch.
 
-use std::collections::BTreeMap;
 use std::ops::ControlFlow;
-use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
-use ants_proto::{PermissionsVersion, Role, STREAM, Uuid, spare_readers};
+use ants_proto::{Role, STREAM, Uuid, spare_readers};
 use anyhow::{Context as _, Result};
 use async_nats::StatusCode;
-use async_nats::jetstream::response::Response;
 use async_nats::jetstream::stream::ConsumerCreateStrictErrorKind;
 use async_nats::jetstream::{self, consumer};
 use futures::StreamExt as _;
-
-use crate::sync::MutexExt as _;
 
 /// How long a reader consumer left behind by an interrupted read lives on.
 const INACTIVE: Duration = Duration::from_secs(30);
@@ -38,8 +32,8 @@ pub enum Reading {
     /// Through a free spare of the user's reader consumer ([`spare_readers`]), taken for the read and deleted after
     /// it: the CLI with an ant's credentials, while the ant's daemon reads through the reader itself.
     Spare,
-    /// By getting the messages, in batches of direct gets or else one by one (`STREAM.MSG.GET`), with no consumer, so
-    /// any number of reads at once: a human's.
+    /// By getting the messages in batches of direct gets, with no consumer, so any number of reads at once: a
+    /// human's.
     Gets,
 }
 
@@ -147,11 +141,7 @@ async fn take_spare(
             match js.create_consumer_strict_on_stream(config, STREAM).await {
                 Ok(consumer) => return Ok((name, consumer)),
                 Err(e) if e.kind() == ConsumerCreateStrictErrorKind::AlreadyExists => {}
-                Err(e) => {
-                    return Err(e).with_context(|| {
-                        format!("creating {name} (credentials issued before spare readers need `ants auth user` again)")
-                    });
-                }
+                Err(e) => return Err(e).with_context(|| format!("creating {name}")),
             }
         }
         if tokio::time::Instant::now() >= deadline {
@@ -187,7 +177,7 @@ async fn read_through(
     Ok(())
 }
 
-/// Where a read by message gets goes on from: the first message on the filter at or after `seq`, or stored at or after
+/// Where a read by direct gets goes on from: the first message on the filter at or after `seq`, or stored at or after
 /// `since` when nothing was read yet.
 struct Position {
     seq: u64,
@@ -205,9 +195,9 @@ async fn read_by_gets(
     js: &jetstream::Context,
     filter: &str,
     start: consumer::DeliverPolicy,
-    mut take: impl FnMut(u64, SystemTime, async_nats::Message) -> ControlFlow<()>,
+    take: impl FnMut(u64, SystemTime, async_nats::Message) -> ControlFlow<()>,
 ) -> Result<()> {
-    let mut at = match start {
+    let at = match start {
         consumer::DeliverPolicy::All => Position { seq: 1, since: None },
         consumer::DeliverPolicy::ByStartSequence { start_sequence } => {
             Position { seq: start_sequence.max(1), since: None }
@@ -219,42 +209,20 @@ async fn read_by_gets(
         other => anyhow::bail!("reading from {other:?}"),
     };
     let stream = js.get_stream(STREAM).await.context("opening the ANTS stream")?;
-    let info = stream.cached_info();
-    let last = info.state.last_sequence;
-    if info.config.allow_direct && read_by_batches(js, filter, &mut at, last, &mut take).await? == Batches::Done {
-        return Ok(());
-    }
-    read_one_by_one(js, filter, at, last, take).await
+    let last = stream.cached_info().state.last_sequence;
+    read_by_batches(js, filter, at, last, take).await
 }
 
 /// Messages asked for at once by a direct get, and the bytes they come to at most (a larger message comes alone).
 const DIRECT_BATCH: usize = 256;
 const DIRECT_BATCH_BYTES: usize = 4 << 20;
-/// How long the first direct get on a connection waits for its first answer. With credentials, or a leaf node's uplink,
-/// issued before humans got batched direct gets of the stream, the server drops the request unanswered.
-const PROBE: Duration = Duration::from_secs(2);
 /// The headers a direct get adds to each message, which a read hands on without, as the message was published.
 const DIRECT_HEADERS: [&str; 6] =
     ["Nats-Stream", "Nats-Subject", "Nats-Sequence", "Nats-Time-Stamp", "Nats-Num-Pending", "Nats-Last-Sequence"];
 const NUM_PENDING: &str = "Nats-Num-Pending";
 
-/// Whether batched direct gets of the stream answered on each connection (its server's id and client id) a read tried
-/// them on, so a connection that cannot use them pays for finding out once.
-static DIRECT_GETS: Mutex<BTreeMap<(String, u64), bool>> = Mutex::new(BTreeMap::new());
-
-/// The permissions version that gave a human's credentials batched direct gets of the stream.
-pub const BATCHES_SINCE: PermissionsVersion = PermissionsVersion(3);
-
-/// Have reads on `client`'s current connection get the stream's messages one by one from the start, sparing the
-/// probe that finds out only by going unanswered: for credentials known to predate [`BATCHES_SINCE`]. Newer
-/// credentials still need the probe, as a leaf node's uplink may predate it. A reconnection probes again.
-pub fn without_batches(client: &async_nats::Client) {
-    let info = client.server_info();
-    DIRECT_GETS.locked().insert((info.server_id, info.client_id), false);
-}
-
-/// A batched direct get (nats-server 2.11 or later): up to `batch` messages on `next_by_subj`, the first at or after
-/// `seq`, or stored at or after `start_time`, followed by an end of batch.
+/// A batched direct get: up to `batch` messages on `next_by_subj`, the first at or after `seq`, or stored at or after
+/// `start_time`, followed by an end of batch.
 #[derive(serde::Serialize)]
 struct BatchGet<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -266,40 +234,16 @@ struct BatchGet<'a> {
     max_bytes: usize,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum Batches {
-    /// The read is over.
-    Done,
-    /// Direct gets do not answer on this connection: the read goes on one message at a time from where it is.
-    Refused,
-}
-
-/// Read up to `last` by batched direct gets (`$JS.API.DIRECT.GET.ANTS`), one request per batch, unless this
-/// connection's credentials, its leaf node's uplink or the server do not allow them.
+/// Read up to `last` by batched direct gets (`$JS.API.DIRECT.GET.ANTS`), one request per batch.
 async fn read_by_batches(
     js: &jetstream::Context,
     filter: &str,
-    at: &mut Position,
+    mut at: Position,
     last: u64,
-    take: &mut impl FnMut(u64, SystemTime, async_nats::Message) -> ControlFlow<()>,
-) -> Result<Batches> {
+    mut take: impl FnMut(u64, SystemTime, async_nats::Message) -> ControlFlow<()>,
+) -> Result<()> {
     let client = js.client();
-    let info = client.server_info();
-    let connection = (info.server_id, info.client_id);
-    let known = DIRECT_GETS.locked().get(&connection).copied();
-    if known == Some(false) {
-        return Ok(Batches::Refused);
-    }
-    let full = client.timeout().unwrap_or(Duration::from_secs(10));
-    let mut wait = if known == Some(true) { full } else { PROBE.min(full) };
-    let mut answered = false;
-    let found = |works: bool| {
-        DIRECT_GETS.locked().insert(connection.clone(), works);
-    };
-    let refused = |why: &str| {
-        tracing::debug!(why, "reading {STREAM} one message at a time instead of by batched direct gets");
-        Ok(Batches::Refused)
-    };
+    let wait = client.timeout().unwrap_or(Duration::from_secs(10));
     let inbox = client.new_inbox();
     let mut replies = client.subscribe(inbox.clone()).await?;
     while at.seq <= last {
@@ -315,44 +259,26 @@ async fn read_by_batches(
         let mut got = 0;
         loop {
             let Ok(Some(msg)) = tokio::time::timeout(wait, replies.next()).await else {
-                if !answered {
-                    found(false);
-                }
-                return refused("no answer");
+                anyhow::bail!("no answer to a direct get of {STREAM}");
             };
-            let first = !answered;
-            answered = true;
-            wait = full;
             match msg.status {
                 None => {}
-                Some(StatusCode::NOT_FOUND) => {
-                    found(true);
-                    return Ok(Batches::Done);
-                }
+                Some(StatusCode::NOT_FOUND) => return Ok(()),
                 Some(status) if status.as_u16() == 204 => {
-                    found(true);
                     let pending = msg.headers.as_ref().and_then(|h| h.get(NUM_PENDING)).map(|n| n.as_str().parse());
                     if got == 0 || matches!(pending, Some(Ok(0u64))) {
-                        return Ok(Batches::Done);
+                        return Ok(());
                     }
                     break;
                 }
                 Some(status) => {
-                    if first {
-                        found(false);
-                    }
-                    return refused(&format!("answered {status} {:?}", msg.description));
+                    anyhow::bail!("a direct get of {STREAM} answered {status} {:?}", msg.description);
                 }
-            }
-            if first && msg.headers.as_ref().and_then(|h| h.get(NUM_PENDING)).is_none() {
-                // A server older than 2.11 answers the first message only.
-                found(false);
-                return refused("no batches");
             }
             got += 1;
             let msg = jetstream::message::StreamMessage::try_from(msg).map_err(|e| anyhow::anyhow!(e))?;
             if msg.sequence > last {
-                return Ok(Batches::Done);
+                return Ok(());
             }
             let mut headers = async_nats::HeaderMap::new();
             for (name, values) in msg.headers.iter() {
@@ -363,11 +289,11 @@ async fn read_by_batches(
             let (sequence, stored) = (msg.sequence, msg.time.into());
             at.after(sequence);
             if take(sequence, stored, published(msg, headers)).is_break() {
-                return Ok(Batches::Done);
+                return Ok(());
             }
         }
     }
-    Ok(Batches::Done)
+    Ok(())
 }
 
 /// `msg` as it was published, with `headers` and no reply subject.
@@ -376,75 +302,14 @@ fn published(msg: jetstream::message::StreamMessage, headers: async_nats::Header
     async_nats::Message { subject, reply: None, payload, headers, status: None, description: None, length: 0 }
 }
 
-/// A `STREAM.MSG.GET` request for the first message on `next_by_subj` at or after `seq`, or stored at or after
-/// `start_time` (nats-server 2.11 or later).
-#[derive(serde::Serialize)]
-struct NextGet<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    seq: Option<u64>,
-    next_by_subj: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    start_time: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
-struct Got {
-    message: jetstream::stream::RawMessage,
-}
-
-/// Read up to `last` from `at` by one `STREAM.MSG.GET` per message: credentials issued before humans got direct gets
-/// of the stream allow only these.
-async fn read_one_by_one(
-    js: &jetstream::Context,
-    filter: &str,
-    mut at: Position,
-    last: u64,
-    mut take: impl FnMut(u64, SystemTime, async_nats::Message) -> ControlFlow<()>,
-) -> Result<()> {
-    while at.seq <= last {
-        let request =
-            NextGet { seq: (at.seq > 0).then_some(at.seq), next_by_subj: filter, start_time: at.since.take() };
-        let got: Response<Got> = js.request(format!("STREAM.MSG.GET.{STREAM}"), &request).await?;
-        let msg = match got {
-            Response::Ok(got) => {
-                jetstream::message::StreamMessage::try_from(got.message).map_err(|e| anyhow::anyhow!(e))?
-            }
-            Response::Err { error } if error.error_code() == jetstream::ErrorCode::NO_MESSAGE_FOUND => break,
-            Response::Err { error } => return Err(error.into()),
-        };
-        if msg.sequence > last {
-            break;
-        }
-        let (sequence, stored, headers) = (msg.sequence, msg.time.into(), msg.headers.clone());
-        at.after(sequence);
-        if take(sequence, stored, published(msg, headers)).is_break() {
-            break;
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use ants_proto::{ThreadId, UserId, subject};
     use ants_test_support::NatsServer;
 
-    /// A server whose user `new` may do anything and `old` may not batch direct gets of the stream, as a human's
-    /// credentials issued before them.
-    fn server() -> Option<NatsServer> {
-        NatsServer::start_with(|_| {
-            "authorization { users: [\n\
-             { user: new, password: pw }\n\
-             { user: old, password: pw, permissions: { publish: { deny: [\"$JS.API.DIRECT.GET.ANTS\"] } } }\n\
-             ] }\n"
-                .to_owned()
-        })
-    }
-
-    async fn connect(server: &NatsServer, user: &str) -> (async_nats::Client, jetstream::Context) {
-        let options = async_nats::ConnectOptions::with_user_and_password(user.into(), "pw".into());
-        let client = options.connect(&server.url).await.unwrap();
+    async fn connect(server: &NatsServer) -> (async_nats::Client, jetstream::Context) {
+        let client = async_nats::connect(&server.url).await.unwrap();
         (client.clone(), jetstream::new(client))
     }
 
@@ -465,29 +330,24 @@ mod tests {
         got
     }
 
-    /// How many requests of each kind reach the stream: batched direct gets and single message gets.
-    async fn count(client: &async_nats::Client) -> impl Fn() -> (usize, usize) + use<> {
-        let counts = std::sync::Arc::new(Mutex::new((0, 0)));
+    /// How many batched direct gets reach the stream.
+    async fn count(client: &async_nats::Client) -> impl Fn() -> usize + use<> {
+        let counts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut direct = client.subscribe(format!("$JS.API.DIRECT.GET.{STREAM}")).await.unwrap();
-        let mut single = client.subscribe(format!("$JS.API.STREAM.MSG.GET.{STREAM}")).await.unwrap();
         client.flush().await.unwrap();
         let tally = counts.clone();
         tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    Some(_) = direct.next() => tally.locked().0 += 1,
-                    Some(_) = single.next() => tally.locked().1 += 1,
-                    else => break,
-                }
+            while direct.next().await.is_some() {
+                tally.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         });
-        move || *counts.locked()
+        move || counts.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     #[tokio::test]
-    async fn a_human_reads_thousands_of_messages_in_batches_and_falls_back_to_single_gets() {
-        let Some(server) = server() else { return };
-        let (watcher, js) = connect(&server, "new").await;
+    async fn a_human_reads_thousands_of_messages_in_batches() {
+        let Some(server) = NatsServer::start() else { return };
+        let (watcher, js) = connect(&server).await;
         js.create_stream(crate::hub::stream_config()).await.unwrap();
         let (human, dev_a): (UserId, UserId) = ("human".parse().unwrap(), "dev-a".parse().unwrap());
         let thread: ThreadId = "t1".parse().unwrap();
@@ -516,7 +376,7 @@ mod tests {
             got.iter().map(|(seq, msg)| (*seq, String::from_utf8(msg.payload.to_vec()).unwrap())).collect()
         };
 
-        let (client, new) = connect(&server, "new").await;
+        let (_client, new) = connect(&server).await;
         let requests = count(&watcher).await;
         let got = read(&new, &filter, all, |_| false).await;
         assert_eq!(body(&got), sent);
@@ -528,9 +388,7 @@ mod tests {
         assert_eq!(names, ["Nats-Msg-Id"], "as published");
         watcher.flush().await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(requests(), (sent.len().div_ceil(DIRECT_BATCH), 0), "one request per batch");
-        let info = client.server_info();
-        assert_eq!(DIRECT_GETS.locked().get(&(info.server_id, info.client_id)), Some(&true));
+        assert_eq!(requests(), sent.len().div_ceil(DIRECT_BATCH), "one request per batch");
 
         // From a sequence, from a time, and up to where the taker stops.
         let from = consumer::DeliverPolicy::ByStartSequence { start_sequence: sent[700].0 };
@@ -541,65 +399,5 @@ mod tests {
         assert_eq!(body(&read(&new, &filter, all, |seq| seq == stop).await), sent[..=300]);
         let nothing = consumer::DeliverPolicy::ByStartSequence { start_sequence: sent.last().unwrap().0 + 1 };
         assert!(read(&new, &filter, nothing, |_| false).await.is_empty());
-
-        // Credentials without the right get the same, one message at a time, and find that out once.
-        let (client, old) = connect(&server, "old").await;
-        let before = requests();
-        let got = read(&old, &filter, all, |_| false).await;
-        assert_eq!(body(&got), sent);
-        assert_eq!(
-            got[0].1.headers.as_ref().unwrap().get(async_nats::header::NATS_MESSAGE_ID).unwrap().as_str(),
-            "id-0"
-        );
-        let info = client.server_info();
-        assert_eq!(DIRECT_GETS.locked().get(&(info.server_id, info.client_id)), Some(&false));
-        let started = std::time::Instant::now();
-        let since = consumer::DeliverPolicy::ByStartTime { start_time: moment.unwrap().into() };
-        assert_eq!(body(&read(&old, &filter, since, |_| false).await), sent[500..]);
-        assert!(started.elapsed() < PROBE, "no second probe");
-        watcher.flush().await.unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let (direct, single) = requests();
-        assert_eq!(direct, before.0, "a denied request never reaches the stream");
-        assert!(single - before.1 >= sent.len() + 1000, "{single}");
-    }
-
-    #[tokio::test]
-    async fn a_connection_known_to_refuse_batches_reads_one_message_at_a_time_without_a_probe() {
-        let Some(server) = server() else { return };
-        let (watcher, js) = connect(&server, "new").await;
-        js.create_stream(crate::hub::stream_config()).await.unwrap();
-        let (human, dev_a): (UserId, UserId) = ("human".parse().unwrap(), "dev-a".parse().unwrap());
-        for i in 0..3 {
-            js.publish(subject::inbox(&human, &dev_a), format!("m{i}").into()).await.unwrap().await.unwrap();
-        }
-        let (client, old) = connect(&server, "old").await;
-        without_batches(&client);
-        let requests = count(&watcher).await;
-        let started = std::time::Instant::now();
-        let got = read(&old, &subject::inbox_of(&human), consumer::DeliverPolicy::All, |_| false).await;
-        assert!(started.elapsed() < PROBE, "no probe");
-        let payloads: Vec<_> = got.iter().map(|(_, msg)| msg.payload.clone()).collect();
-        assert_eq!(payloads, ["m0", "m1", "m2"]);
-        watcher.flush().await.unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(requests(), (0, 3), "no direct get asked for, one message get each");
-    }
-
-    #[tokio::test]
-    async fn a_stream_without_direct_gets_is_read_one_message_at_a_time() {
-        let Some(server) = server() else { return };
-        let (client, js) = connect(&server, "new").await;
-        let config = jetstream::stream::Config { allow_direct: false, ..crate::hub::stream_config() };
-        js.create_stream(config).await.unwrap();
-        let (human, dev_a): (UserId, UserId) = ("human".parse().unwrap(), "dev-a".parse().unwrap());
-        for i in 0..3 {
-            js.publish(subject::inbox(&human, &dev_a), format!("m{i}").into()).await.unwrap().await.unwrap();
-        }
-        let got = read(&js, &subject::inbox_of(&human), consumer::DeliverPolicy::All, |_| false).await;
-        let payloads: Vec<_> = got.iter().map(|(_, msg)| msg.payload.clone()).collect();
-        assert_eq!(payloads, ["m0", "m1", "m2"]);
-        let info = client.server_info();
-        assert_eq!(DIRECT_GETS.locked().get(&(info.server_id, info.client_id)), None, "not even tried");
     }
 }

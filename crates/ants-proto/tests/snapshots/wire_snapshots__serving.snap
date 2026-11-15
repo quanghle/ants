@@ -5,5 +5,5 @@ expression: value
 {
   "machine": "studio.local",
   "version": "0.1.0",
-  "perms": 4
+  "perms": 1
 }

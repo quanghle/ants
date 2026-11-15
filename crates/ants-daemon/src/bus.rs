@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use ants_proto::{
     ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, Envelope, JsDomain, LINKS_BUCKET, ROSTER_BUCKET, Role,
-    SESSIONS_BUCKET, STREAM, STREAM_SUBJECTS, UserId, inbox_prefix, subject,
+    SESSIONS_BUCKET, STREAM, UserId, inbox_prefix, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::consumer::{self, PullConsumer, pull};
@@ -326,7 +326,7 @@ pub async fn ensure_roster(js: &jetstream::Context, ttl: Duration) -> Result<kv:
     if let Ok(store) = js.get_key_value(ROSTER_BUCKET).await {
         return Ok(store);
     }
-    hub::create_bucket(js, hub::roster_config(ttl))
+    js.create_key_value(hub::roster_config(ttl))
         .await
         .context("creating the roster bucket (with credentials, `ants init` as the human creates it)")
 }
@@ -350,55 +350,11 @@ pub async fn open_stream(js: &jetstream::Context, user: &UserId) -> Result<strea
     Ok(stream)
 }
 
-/// Create the `ANTS` stream, or return it as it is, with its info: only the human's credentials allow both. A stream from an older
-/// version that lacks some of [`STREAM_SUBJECTS`], direct gets, the republishing of inbox messages or a duplicate
-/// window of [`DUPLICATE_WINDOW`] is returned with a warning: [`init_stream`] upgrades it.
+/// Create the `ANTS` stream, or return it as it is, with its info: only the human's credentials allow both.
 pub async fn ensure_stream(js: &jetstream::Context) -> Result<stream::Stream> {
-    let stream = js
-        .get_or_create_stream(hub::stream_config())
+    js.get_or_create_stream(hub::stream_config())
         .await
-        .context("creating the ANTS stream (with credentials, `ants init` as the human creates it)")?;
-    let missing = missing_subjects(&stream.cached_info().config.subjects);
-    if !missing.is_empty() {
-        tracing::warn!(?missing, "stream {STREAM} lacks subjects; `ants init` as the human adds them");
-    }
-    if !stream.cached_info().config.allow_direct {
-        tracing::warn!("stream {STREAM} lacks direct gets; `ants init` as the human allows them");
-    }
-    if stream.cached_info().config.republish.as_ref() != Some(&hub::stored_inbox()) {
-        tracing::warn!(
-            "stream {STREAM} does not republish inbox messages, so replies kept in a leaf's outbox reach only inbox \
-             consumers; `ants init` as the human sets it up"
-        );
-    }
-    let config = &stream.cached_info().config;
-    let window = hub::duplicate_window(config);
-    if config.duplicate_window < window {
-        tracing::warn!(
-            "stream {STREAM} drops repeated message ids for only {}, so a message kept in a leaf's outbox can land \
-             twice; `ants init` as the human widens the window to {}",
-            ants_proto::duration::format(config.duplicate_window),
-            ants_proto::duration::format(window)
-        );
-    }
-    Ok(stream)
-}
-
-/// Create the `ANTS` stream, or add the subjects an older version did not capture, allow direct gets, republish
-/// inbox messages and widen the duplicate window. Needs the human's credentials.
-pub async fn init_stream(js: &jetstream::Context) -> Result<stream::Stream> {
-    let stream = ensure_stream(js).await?;
-    let mut config = stream.cached_info().config.clone();
-    if hub::upgrade_stream(&mut config).is_empty() {
-        return Ok(stream);
-    }
-    js.update_stream(&config).await.context("upgrading the ANTS stream")?;
-    Ok(js.get_stream(STREAM).await?)
-}
-
-/// The subjects of [`STREAM_SUBJECTS`] that `subjects` lacks.
-pub fn missing_subjects(subjects: &[String]) -> Vec<String> {
-    STREAM_SUBJECTS.iter().filter(|s| !subjects.iter().any(|have| have == *s)).map(|s| (*s).to_owned()).collect()
+        .context("creating the ANTS stream (with credentials, `ants init` as the human creates it)")
 }
 
 /// The KV bucket mapping threads to harness sessions, under `ant`'s own keys, created when missing and the credentials
@@ -466,17 +422,9 @@ pub async fn ensure_links(js: &jetstream::Context) -> Result<kv::Store> {
 }
 
 /// The bucket of the owners of message threads ([`OWNERS_BUCKET`]), created when missing and the credentials allow it
-/// (the human's). Its stream keeps one record per key and refuses another, but drops one repeating the first's
-/// message id while the first is kept, as a refused one from a machine's outbox would stall its source
-/// ([`crate::owners::first_records_only`]); it denies deletes and purges, and records expire with the stream's
-/// messages. A stream from before, dropping repeats only for 2 min, is changed to drop them while it keeps records.
+/// (the human's), as [`hub::owners_config`] describes it.
 pub async fn ensure_owners(js: &jetstream::Context) -> Result<()> {
-    let name = crate::owners::owners_stream();
-    if let Ok(stream) = js.get_stream(&name).await {
-        let mut config = stream.cached_info().config.clone();
-        if crate::owners::first_records_only(&mut config) {
-            js.update_stream(&config).await.context("having the owners bucket drop repeated records")?;
-        }
+    if js.get_stream(crate::owners::owners_stream()).await.is_ok() {
         return Ok(());
     }
     let created = js.create_stream(hub::owners_config()).await;
@@ -499,8 +447,7 @@ async fn create_kept(js: &jetstream::Context, bucket: &str) -> Result<kv::Store>
 }
 
 /// Messages from the durable consumer of `ant`'s inbox, which is created if missing and updated if its settings
-/// changed (such as the filter of a consumer from before inbox subjects named the sender). At most `max_ack_pending`
-/// messages are in hand at once.
+/// changed. At most `max_ack_pending` messages are in hand at once.
 pub async fn inbox_consumer<I>(
     stream: &stream::Stream<I>,
     ant: &UserId,
@@ -626,8 +573,8 @@ pub async fn store_acked<T: serde::Serialize>(
 }
 
 /// After a publish found no stream capturing its subject: whether the hub's JetStream answers all the same, so the
-/// hub is in reach and its `ANTS` stream is missing or predates the subject, as when an older version created it and
-/// no `ants init` with a human's credentials has run since. Out of the hub's reach (a leaf node's uplink is down),
+/// hub is in reach and its `ANTS` stream is missing, as when no `ants init` with a human's credentials has run yet.
+/// Out of the hub's reach (a leaf node's uplink is down),
 /// false. It asks for the info of the connection's own inbox consumer, as [`reach_jetstream`] does, which every
 /// user's credentials allow; the user is the one the connection's reply inboxes are named after ([`inbox_prefix`]).
 pub async fn uncaptured(js: &jetstream::Context) -> bool {
@@ -645,8 +592,8 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 /// What to do when no stream captures `subject` while the hub is in reach ([`uncaptured`]).
 fn uncaptured_hint(subject: &str) -> String {
     format!(
-        "the hub's JetStream answers, but no stream captures {subject}: its {STREAM} stream is missing or predates \
-         this version; run `ants init` with a human's credentials to create or upgrade it"
+        "the hub's JetStream answers, but no stream captures {subject}: its {STREAM} stream is missing; run `ants init` \
+         with a human's credentials to create it"
     )
 }
 
@@ -727,8 +674,8 @@ pub type LiveInbox = Pin<Box<dyn Stream<Item = async_nats::Message> + Send>>;
 const SEEN: usize = 1024;
 
 /// Messages to `user` as they come, each once, on their inbox subject: published there, and as the hub's stream
-/// stored them ([`subject::stored_inbox`]). A message sourced from a leaf's outbox comes only the second way, and so
-/// does any message while the stream lacks the republishing `ants init` sets up. Subscribed before it returns, so
+/// stored them ([`subject::stored_inbox`]). A message sourced from a leaf's outbox comes only the second way.
+/// Subscribed before it returns, so
 /// nothing published after that is missed while the connection reaches the hub; [`caught_up_inbox`] also gets what
 /// the hub stored meanwhile.
 pub async fn live_inbox(client: &async_nats::Client, user: &UserId) -> Result<LiveInbox> {

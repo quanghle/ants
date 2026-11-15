@@ -89,7 +89,7 @@ fn listed(name: &str, capabilities: &[&str]) -> RosterEntry {
     RosterEntry {
         ant: user(name),
         machine: "m1".to_owned(),
-        instance: None,
+        instance: "run-1".to_owned(),
         harness: "copilot".to_owned(),
         agent: None,
         capabilities: capabilities.iter().map(|c| (*c).to_owned()).collect(),
@@ -97,12 +97,12 @@ fn listed(name: &str, capabilities: &[&str]) -> RosterEntry {
         workdir: None,
         started_at: now,
         heartbeat_at: now,
-        activity: None,
-        handling: None,
-        harnesses: None,
+        activity: ants_proto::Activity::Idle,
+        handling: 0,
+        harnesses: 0,
         escalate_to: Vec::new(),
-        version: None,
-        perms: None,
+        version: ants_proto::ANTS_VERSION.to_owned(),
+        perms: ants_proto::PERMISSIONS_VERSION,
         signed_out: None,
         limited: None,
         failing: None,
@@ -466,13 +466,12 @@ async fn requests_are_routed_by_roster_capabilities() {
     let mut billing = listed("dev-c", &["Rust", "billing"]);
     billing.whoami = Some("Maintain billing services.\nReview invoices.".to_owned());
     let mut docs = listed("docs", &[]);
-    docs.activity = Some(ants_proto::Activity::Working);
+    docs.activity = ants_proto::Activity::Working;
     docs.agent = Some(ants_proto::HarnessAgent { name: "copilot".to_owned(), version: "1.0.3".to_owned() });
     let mut busy = listed("dev-b", &["rust"]);
-    busy.activity = Some(ants_proto::Activity::Working);
-    busy.handling = Some(1);
+    busy.activity = ants_proto::Activity::Working;
+    busy.handling = 1;
     let mut out = listed("ops", &["billing"]);
-    out.activity = Some(ants_proto::Activity::Idle);
     let since = "2026-01-01T00:00:00Z".parse().unwrap();
     out.signed_out = Some(ants_proto::SignInNeeded { since, sign_in: Some("copilot login".to_owned()) });
     let mut limited = listed("dev-q", &[]);
@@ -509,7 +508,7 @@ async fn requests_are_routed_by_roster_capabilities() {
         "{text}"
     );
     let (ok, text) = call(&client, "list_ants", serde_json::json!({"capability": "billing"})).await;
-    assert!(ok && text.starts_with("dev-c: Rust, billing (copilot on m1)") && !text.contains("dev-b"), "{text}");
+    assert!(ok && text.starts_with("dev-c: Rust, billing (copilot on m1, idle)") && !text.contains("dev-b"), "{text}");
     assert!(text.contains("Maintain billing services.\nReview invoices."), "{text}");
 
     // dev-a has the capability too, but does not route to itself; dev-b comes before dev-c by name, but works.

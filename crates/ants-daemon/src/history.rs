@@ -165,7 +165,7 @@ impl Thread {
             ControlFlow::Continue(())
         })
         .await
-        .context("reading back the messages sent (credentials from before permissions version 3 cannot)")
+        .context("reading back the messages sent")
     }
 
     fn take_envelope(

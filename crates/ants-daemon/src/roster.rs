@@ -155,9 +155,9 @@ impl Workload {
     /// Write the current workload into `entry`.
     pub fn stamp(&self, entry: &mut RosterEntry) {
         let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
-        entry.activity = Some(self.activity());
-        entry.handling = Some(count(self.handling()));
-        entry.harnesses = Some(count(self.harnesses()));
+        entry.activity = self.activity();
+        entry.handling = count(self.handling());
+        entry.harnesses = count(self.harnesses());
         entry.agent = self.agent();
         entry.signed_out = self.signed_out();
         entry.limited = self.limited();
@@ -184,7 +184,7 @@ pub async fn entry(config: &Config) -> RosterEntry {
     RosterEntry {
         ant: config.ant.clone(),
         machine: machine().await,
-        instance: Some(uuid::Uuid::new_v4().to_string()),
+        instance: uuid::Uuid::new_v4().to_string(),
         harness: config.harness.to_string(),
         agent: None,
         capabilities: config.capabilities.clone(),
@@ -192,12 +192,12 @@ pub async fn entry(config: &Config) -> RosterEntry {
         workdir: Some(config.workdir.display().to_string()),
         started_at: now,
         heartbeat_at: now,
-        activity: None,
-        handling: None,
-        harnesses: None,
+        activity: Activity::Idle,
+        handling: 0,
+        harnesses: 0,
         escalate_to: config.escalation.escalate_to.clone(),
-        version: Some(ANTS_VERSION.to_owned()),
-        perms: Some(PERMISSIONS_VERSION),
+        version: ANTS_VERSION.to_owned(),
+        perms: PERMISSIONS_VERSION,
         signed_out: None,
         limited: None,
         failing: None,
@@ -222,7 +222,7 @@ pub async fn register(
 /// roster until its daemon stops or it goes [`ROSTER_TTL`] without a heartbeat, by the server's clock, so no clocks are
 /// compared. Two daemons on one machine are told apart by [`RosterEntry::instance`].
 pub fn may_start(current: Option<&RosterEntry>, ours: &RosterEntry) -> bool {
-    current.is_none_or(|e| e.instance.is_some() && e.instance == ours.instance)
+    current.is_none_or(|e| e.instance == ours.instance)
 }
 
 /// What one look at an ant's roster entry came to.
@@ -230,7 +230,7 @@ enum Claim {
     /// The entry was put, at this revision.
     Put(u64),
     /// Another daemon's entry is there.
-    Held { machine: String, instance: Option<String> },
+    Held { machine: String, instance: String },
     /// The entry changed between the look and the put.
     Raced,
 }
@@ -270,9 +270,8 @@ pub const LOOK_AGAIN: Duration = Duration::from_secs(60);
 
 /// Wait until [`may_start`] allows `entry`, then put `entry`, started now, and return the revision put, for [`hold`].
 /// The put expects the entry it looked at, so of two daemons starting at once only one goes ahead; the other waits on.
-/// It looks again as soon as a watch of the entry shows it deleted or expired, which a bucket with limit markers
-/// shows (nats-server 2.11 or later, [`crate::hub::has_limit_markers`]), and otherwise every `every`, as an expiry
-/// without a marker goes unseen; with markers, only every [`LOOK_AGAIN`].
+/// It looks again as soon as a watch of the entry shows it deleted or expired (the bucket leaves a marker of an
+/// expired entry), and otherwise only every [`LOOK_AGAIN`]; every `every` when it has no watch.
 pub async fn wait_for_turn(kv: &kv::Store, entry: &mut RosterEntry, every: Duration) -> Result<u64> {
     let key = entry.key().to_owned();
     let mut changes = match kv.watch(&key).await {
@@ -282,7 +281,6 @@ pub async fn wait_for_turn(kv: &kv::Store, entry: &mut RosterEntry, every: Durat
             None
         }
     };
-    let markers = crate::hub::has_limit_markers(&kv.stream.cached_info().config);
     let mut waiting_for = None;
     loop {
         let now = Utc::now();
@@ -295,7 +293,7 @@ pub async fn wait_for_turn(kv: &kv::Store, entry: &mut RosterEntry, every: Durat
                     tracing::info!(ant = key, machine, "waiting while another daemon serves it");
                     waiting_for = Some(instance);
                 }
-                if markers && changes.is_some() {
+                if changes.is_some() {
                     wait = every.max(LOOK_AGAIN);
                 }
             }
@@ -366,7 +364,7 @@ async fn due(ticks: &mut tokio::time::Interval, workload: Option<&Workload>, ent
         };
         if let Some(workload) = workload {
             if !beat
-                && entry.activity == Some(workload.activity())
+                && entry.activity == workload.activity()
                 && entry.agent == workload.agent()
                 && entry.signed_out == workload.signed_out()
                 && entry.limited == workload.limited()
@@ -406,7 +404,7 @@ async fn keep_held(
                 }
                 if change.operation == kv::Operation::Put {
                     let ours = serde_json::from_slice::<RosterEntry>(&change.value)
-                        .is_ok_and(|e| e.instance.is_some() && e.instance == entry.instance);
+                        .is_ok_and(|e| e.instance == entry.instance);
                     if !ours {
                         break;
                     }
@@ -585,8 +583,8 @@ pub fn is_live(entry: &RosterEntry, now: DateTime<Utc>) -> bool {
 /// The ant a request needing `capability` goes to, of the entries other than `asking` that advertise it: ants whose
 /// harness is signed in and starting before those signed out or failing to start, then those held back by no provider
 /// limit before limited ones, unless a fallback answers for them, then those answered by their own harness before
-/// those answered by a fallback, then live entries before stale ones, then idle ants before those of unknown activity
-/// (older daemons) and those working, then the fewest messages in hand, then the first by id. The same roster at the
+/// those answered by a fallback, then live entries before stale ones, then idle ants before those of an activity unknown
+/// to this daemon (newer daemons) and those working, then the fewest messages in hand, then the first by id. The same roster at the
 /// same time always gives the same answer.
 pub fn pick<'a>(
     entries: &'a [RosterEntry],
@@ -596,9 +594,9 @@ pub fn pick<'a>(
 ) -> Option<&'a RosterEntry> {
     entries.iter().filter(|e| &e.ant != asking && has_capability(e, capability)).min_by_key(|e| {
         let busyness = match e.activity {
-            Some(Activity::Idle) => 0,
-            None | Some(Activity::Unknown) => 1,
-            Some(Activity::Working) => 2,
+            Activity::Idle => 0,
+            Activity::Unknown => 1,
+            Activity::Working => 2,
         };
         (
             (e.signed_out.is_some() || e.failing.is_some()) && e.fallback.is_none(),
@@ -606,7 +604,7 @@ pub fn pick<'a>(
             e.fallback.is_some(),
             !is_live(e, now),
             busyness,
-            e.handling.unwrap_or(u32::MAX),
+            e.handling,
             &e.ant,
         )
     })
@@ -645,7 +643,7 @@ mod tests {
         RosterEntry {
             ant: ant.parse().unwrap(),
             machine: machine.to_owned(),
-            instance: None,
+            instance: format!("{ant}@{machine}"),
             harness: "copilot".to_owned(),
             agent: None,
             capabilities: capabilities.iter().map(|c| (*c).to_owned()).collect(),
@@ -653,12 +651,12 @@ mod tests {
             workdir: None,
             started_at: now,
             heartbeat_at: now,
-            activity: None,
-            handling: None,
-            harnesses: None,
+            activity: Activity::Idle,
+            handling: 0,
+            harnesses: 0,
             escalate_to: Vec::new(),
-            version: None,
-            perms: None,
+            version: ANTS_VERSION.to_owned(),
+            perms: PERMISSIONS_VERSION,
             signed_out: None,
             limited: None,
             failing: None,
@@ -673,12 +671,12 @@ mod tests {
         let mut stamped = entry("dev-a", &[]);
         workload.set_harnesses(2);
         workload.stamp(&mut stamped);
-        assert_eq!((stamped.activity, stamped.handling, stamped.harnesses), (Some(Activity::Idle), Some(0), Some(2)));
+        assert_eq!((stamped.activity, stamped.handling, stamped.harnesses), (Activity::Idle, 0, 2));
 
         let first = workload.working();
         let second = workload.working();
         workload.stamp(&mut stamped);
-        assert_eq!((stamped.activity, stamped.handling), (Some(Activity::Working), Some(2)));
+        assert_eq!((stamped.activity, stamped.handling), (Activity::Working, 2));
         drop(first);
         assert_eq!(workload.activity(), Activity::Working);
         drop(second);
@@ -763,25 +761,23 @@ mod tests {
         };
         let me: UserId = "me".parse().unwrap();
         let picked = |entries: &[RosterEntry]| pick(entries, "rust", &me, now).map(|e| e.ant.to_string());
-        let (idle, working, unknown) = (Some(Activity::Idle), Some(Activity::Working), Some(Activity::Unknown));
+        let (idle, working, unknown) = (Activity::Idle, Activity::Working, Activity::Unknown);
 
         let mut entries = vec![
-            with("dev-a", working, Some(1), 0),
-            with("dev-b", None, None, 0),
-            with("dev-c", working, Some(3), 0),
-            with("dev-d", idle, Some(0), 0),
-            with("dev-e", idle, Some(0), 0),
-            with("dev-0", idle, Some(0), 25),
-            with("me", idle, Some(0), 0),
+            with("dev-a", working, 1, 0),
+            with("dev-b", unknown, 0, 0),
+            with("dev-c", working, 3, 0),
+            with("dev-d", idle, 0, 0),
+            with("dev-e", idle, 0, 0),
+            with("dev-0", idle, 0, 25),
+            with("me", idle, 0, 0),
         ];
         assert_eq!(picked(&entries).as_deref(), Some("dev-d"), "idle and live, ties by name, never the caller");
         entries.retain(|e| !["dev-d", "dev-e"].contains(&e.ant.as_str()));
-        assert_eq!(picked(&entries).as_deref(), Some("dev-b"), "unknown activity before working");
-        entries[1].activity = unknown;
-        assert_eq!(picked(&entries).as_deref(), Some("dev-b"), "a newer daemon's activity counts as unknown");
+        assert_eq!(picked(&entries).as_deref(), Some("dev-b"), "a newer daemon's unknown activity before working");
         entries.remove(1);
         assert_eq!(picked(&entries).as_deref(), Some("dev-a"), "fewest messages in hand");
-        entries[0].handling = Some(5);
+        entries[0].handling = 5;
         assert_eq!(picked(&entries).as_deref(), Some("dev-c"));
         entries.retain(|e| e.ant.as_str() != "dev-c");
         entries[0].heartbeat_at = now - chrono::Duration::seconds(21);
@@ -805,15 +801,14 @@ mod tests {
 
     #[test]
     fn starts_unless_another_daemon_lists_the_ant() {
-        let run = |machine, instance: Option<&str>| RosterEntry {
-            instance: instance.map(str::to_owned),
+        let run = |machine, instance: &str| RosterEntry {
+            instance: instance.to_owned(),
             ..entry_on("messenger", machine, &[])
         };
-        let ours = run("m1", Some("a"));
+        let ours = run("m1", "a");
         assert!(may_start(None, &ours), "nobody serves it");
         assert!(may_start(Some(&ours), &ours), "its own put");
-        assert!(!may_start(Some(&run("m1", Some("b"))), &ours), "another daemon on this machine");
-        assert!(!may_start(Some(&run("m2", Some("b"))), &ours), "served on another machine");
-        assert!(!may_start(Some(&run("m1", None)), &ours), "an older daemon on this machine");
+        assert!(!may_start(Some(&run("m1", "b")), &ours), "another daemon on this machine");
+        assert!(!may_start(Some(&run("m2", "b")), &ours), "served on another machine");
     }
 }

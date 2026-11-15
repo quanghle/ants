@@ -37,9 +37,8 @@ fn flow_control_subjects(domain: &str, stream: &str) -> [String; 2] {
 }
 
 /// What a human's credentials need for its inbox ([`READ_BUCKET`]): creating the bucket and reading and writing its own
-/// [`ReadMarker`] only, by key, so no human reads or moves another's; and deleting its own inbox consumer
-/// ([`inbox_consumer`]), which kept a human's read state before the marker, once its state moved into the marker.
-fn read_marker_rights(human: &UserId) -> [String; 5] {
+/// [`ReadMarker`] only, by key, so no human reads or moves another's.
+fn read_marker_rights(human: &UserId) -> [String; 4] {
     let read = kv_stream(READ_BUCKET);
     let marker = subject::read_marker(human);
     [
@@ -47,7 +46,6 @@ fn read_marker_rights(human: &UserId) -> [String; 5] {
         format!("$JS.API.STREAM.CREATE.{read}"),
         format!("$JS.API.DIRECT.GET.{read}.{marker}"),
         marker,
-        format!("$JS.API.CONSUMER.DELETE.{STREAM}.{}", inbox_consumer(human)),
     ]
 }
 
@@ -168,8 +166,8 @@ impl Permissions {
     /// an ant's queue ([`QueueRequest`], [`message_mark_key`]: with its own [`unserved_key`]s, the only keys of the
     /// attempts bucket it writes or reads),
     /// reads every ant's thread and daily spend in the
-    /// sessions bucket ([`thread_spend_key`], [`daily_spend_key`]) but none of its other keys there, may create and
-    /// upgrade the stream and create the roster, sessions,
+    /// sessions bucket ([`thread_spend_key`], [`daily_spend_key`]) but none of its other keys there, may create the
+    /// stream and the roster, sessions,
     /// attempts, channels, humans, chains, links and owners buckets, writes the channels, humans and owners buckets
     /// (the owners also in its outbox form, [`owner_outbox`]), reads the version the channel manager runs
     /// ([`channel_manager_serving_key`]), reads the stream's messages by sequence, one at a time or in batches of
@@ -309,8 +307,8 @@ impl Permissions {
             // Creating a KV bucket first looks up the account's JetStream limits.
             "$JS.API.INFO".to_owned(),
             format!("$JS.API.STREAM.CREATE.{roster_stream}"),
-            // Adding what an older version lacks, such as the markers of expired entries, and room for the
-            // consumers of every daemon watching the bucket, which a KV bucket gets only by an update.
+            // Room for the consumers of every daemon watching the bucket, which a KV bucket gets only by an update
+            // right after creating it.
             format!("$JS.API.STREAM.UPDATE.{roster_stream}"),
             format!("$JS.API.STREAM.UPDATE.{channels}"),
             format!("$JS.API.STREAM.UPDATE.{humans}"),
@@ -338,6 +336,7 @@ impl Permissions {
             // Recording the owner of each thread it messages an ant on, and the same in the leaf's outbox.
             format!("$KV.{OWNERS_BUCKET}.*.*"),
             "ants.out.owners.*.*".to_owned(),
+            // Sourcing leaf outboxes into the stream (`ants leaf outbox`).
             format!("$JS.API.STREAM.UPDATE.{STREAM}"),
             format!("$JS.API.STREAM.MSG.GET.{STREAM}"),
             // Reading the stream back in batches; it reads nothing more than STREAM.MSG.GET, which takes any
@@ -718,18 +717,14 @@ impl Permissions {
 
 /// The version of the permissions `ants auth` gives credentials of every kind (ants, humans, webhooks, leaf node
 /// uplinks, the channel manager, enrollment), stamped into each user JWT it issues as the tag
-/// [`PermissionsVersion::tag`]. Credentials carrying an older version, or none, were issued before the permissions
-/// changed: ants processes using them warn and name the command that renews them.
+/// [`PermissionsVersion::tag`]. Credentials carrying an older version were issued before the permissions changed:
+/// ants processes using them warn and name the command that renews them.
 ///
 /// Bump it whenever the permissions of any role change: [`Permissions::for_user`], [`Permissions::for_leaf`],
 /// [`Permissions::for_webhook`], [`Permissions::for_channel_manager`], [`Permissions::for_enrollment`],
 /// [`Permissions::for_enroll_approver`] or [`Permissions::with_js_domain`], or the other claims `ants auth` puts in a
 /// user JWT.
-pub const PERMISSIONS_VERSION: PermissionsVersion = PermissionsVersion(4);
-
-/// The first permissions version whose credentials ask for their own renewal over NATS ([`subject::renew`],
-/// [`RenewRequest`]); older ones are renewed on the machine holding the team keys.
-pub const RENEW_SINCE: PermissionsVersion = PermissionsVersion(2);
+pub const PERMISSIONS_VERSION: PermissionsVersion = PermissionsVersion(1);
 
 /// A version of the permissions `ants auth` gives ([`PERMISSIONS_VERSION`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

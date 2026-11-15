@@ -211,12 +211,11 @@ fn check_leaf_approval(
     leaf: Option<&Leaf>,
     uplink: Option<&KeyPair>,
 ) -> Result<()> {
-    let (Some(jwt), Some(leaf), Some(uplink)) = (leaf_jwt, leaf, uplink) else {
-        if leaf_jwt.is_some() {
-            bail!("renews uplink credentials no leaf node asked for");
-        }
-        // A request through no leaf node, or an approver from before leaf nodes were named: no uplink to renew.
-        return Ok(());
+    let (jwt, leaf, uplink) = match (leaf_jwt, leaf, uplink) {
+        (None, None, _) => return Ok(()),
+        (Some(jwt), Some(leaf), Some(uplink)) => (jwt, leaf, uplink),
+        (Some(_), _, _) => bail!("renews uplink credentials no leaf node asked for"),
+        (None, Some(leaf), _) => bail!("renews no uplink credentials of {}, whose leaf node asked", leaf.machine),
     };
     let claims = auth::check_leaf(&enrollment.iss, jwt, &leaf.machine).context("the renewed uplink credentials")?;
     if claims.sub != uplink.public_key() {
@@ -393,8 +392,8 @@ impl Approver {
         };
         let jwt = auth::sign_user(dir, ant, Role::Ant, domain, &request.public_key)?;
         let leaf = match (&request.leaf, &renewed) {
-            (Some(leaf), Some(renewed)) => {
-                members::enrolled(dir, &leaf.machine, renewed, ant)
+            (Some(leaf), Some(_)) => {
+                members::enrolled(dir, &leaf.machine, ant)
                     .with_context(|| format!("keeping {ant} among the members of {}", leaf.machine))?;
                 // Before the answer: a machine that heard none asks again, and this runs again.
                 let outbox = outbox::admit_ant(&self.hub, &leaf.machine, ant)

@@ -28,7 +28,7 @@ pub(crate) struct Cli {
     /// NATS credentials file (`ants auth user` writes one). Needed when the server enforces per-user permissions.
     /// The CLI acts as the human they name, and registers it in `ants_humans` on connecting; without them, as `human`.
     /// Unset, the config file's `[cli]` `creds` apply, except to `ants daemon` and `ants add`.
-    /// A human's also bring the hub's stream and buckets up to date on connecting, as `ants init` does.
+    /// A human's also create the hub's stream and buckets that are missing on connecting, as `ants init` does.
     #[arg(long, global = true, env = "ANTS_CREDS")]
     pub(crate) creds: Option<PathBuf>,
 
@@ -226,9 +226,8 @@ pub(crate) enum Command {
         message: Uuid,
     },
     /// Create the ANTS stream and the roster, sessions, attempts, channels, humans, chains, links, owners, webhooks,
-    /// reactions, threads, read and presence buckets on the server, or upgrade those an older version set up (stream subjects, direct gets, the
-    /// republishing of inbox messages, the stream's and the owners bucket's duplicate windows), keeping the rest of
-    /// their settings. Needs a human's credentials. Every other command run with them does the same on connecting.
+    /// reactions, threads, read, presence and notify buckets on the server, those missing; one already there stays as
+    /// it is. Needs a human's credentials. Every other command run with them does the same on connecting.
     Init,
     /// Tool requests ants escalate to humans: list the pending ones, show one, approve or reject it. Every human
     /// sees every request; the first decision wins, a human's or that of an ant of the ant's escalation chain.
@@ -276,7 +275,7 @@ pub(crate) enum Command {
     /// Renew credentials over NATS: generate a new user NKey here, ask for the credentials of the file renewed for it,
     /// signed with their key, and wait for `ants enroll renew NAME` on the machine holding the account key. Then
     /// replace the file and reload the daemon serving an ant with it, or restart the leaf node whose uplink it is.
-    /// Credentials expired, or older than renewal over NATS, are renewed with `ants auth` instead.
+    /// Expired credentials are renewed with `ants auth` instead.
     Renew(renew::RenewArgs),
     /// Keep the NKey seeds of credentials files in the OS credential store (macOS keychain, Linux Secret Service,
     /// Windows Credential Manager) instead of the files, move them back, or remove credentials from the machine.

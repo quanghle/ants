@@ -21,7 +21,7 @@ fn entry_on(ant: &str, machine: &str) -> RosterEntry {
     RosterEntry {
         ant: ant.parse().unwrap(),
         machine: machine.to_owned(),
-        instance: Some(format!("run-{}", RUNS.fetch_add(1, Ordering::Relaxed))),
+        instance: format!("run-{}", RUNS.fetch_add(1, Ordering::Relaxed)),
         harness: "copilot".to_owned(),
         agent: None,
         capabilities: vec!["rust".to_owned()],
@@ -29,12 +29,12 @@ fn entry_on(ant: &str, machine: &str) -> RosterEntry {
         workdir: None,
         started_at: now,
         heartbeat_at: now,
-        activity: None,
-        handling: None,
-        harnesses: None,
+        activity: ants_proto::Activity::Idle,
+        handling: 0,
+        harnesses: 0,
         escalate_to: Vec::new(),
-        version: None,
-        perms: None,
+        version: ants_proto::ANTS_VERSION.to_owned(),
+        perms: ants_proto::PERMISSIONS_VERSION,
         signed_out: None,
         limited: None,
         failing: None,
@@ -110,7 +110,7 @@ async fn wait_activity(kv: &kv::Store, ant: &str, activity: Activity, limit: Dur
     let start = Instant::now();
     loop {
         let entry = read(kv, ant).await.expect("listed");
-        if entry.activity == Some(activity) {
+        if entry.activity == activity {
             return entry;
         }
         assert!(start.elapsed() < limit, "{ant} not {activity:?} after {limit:?}: {entry:?}");
@@ -128,11 +128,11 @@ async fn turning_working_or_idle_shows_before_the_next_beat() {
     let beat = Duration::from_secs(60);
     let _a = Registration::start_with(kv.clone(), entry("dev-a"), beat, Some(workload.clone())).await.unwrap();
     let first = read(&kv, "dev-a").await.unwrap();
-    assert_eq!((first.activity, first.handling, first.harnesses), (Some(Activity::Idle), Some(0), Some(1)));
+    assert_eq!((first.activity, first.handling, first.harnesses), (Activity::Idle, 0, 1));
 
     let working = workload.working();
     let busy = wait_activity(&kv, "dev-a", Activity::Working, Duration::from_secs(5)).await;
-    assert_eq!(busy.handling, Some(1));
+    assert_eq!(busy.handling, 1);
     drop(working);
     wait_activity(&kv, "dev-a", Activity::Idle, Duration::from_secs(5)).await;
 }
@@ -218,7 +218,6 @@ async fn a_waiting_daemon_takes_over_as_soon_as_the_entry_expires() {
     let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
     let ttl = Duration::from_secs(2);
     let kv = bus::ensure_roster(&js, ttl).await.unwrap();
-    assert!(ants_daemon::hub::has_limit_markers(&kv.stream.cached_info().config), "nats-server 2.11 or later");
 
     let there = Registration::start(kv.clone(), entry_on("messenger", "there"), Duration::from_secs(60)).await;
     let put_at = Instant::now();

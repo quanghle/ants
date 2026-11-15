@@ -1,7 +1,7 @@
 //! `ants doctor`: check a machine's ants setup end to end, reporting each check with the command that fixes it.
 //!
-//! It changes nothing: the hub's stream and buckets are compared with what this version expects ([`hub::check`]),
-//! not brought up to date as the first connection of other commands does, and only the requests the credentials
+//! It changes nothing: the hub's stream and buckets are looked up ([`hub::check`]), not created when missing as the
+//! first connection of other commands does, and only the requests the credentials
 //! allow are made, so none just times out. Every network check has a timeout; a harness handshake has its own.
 
 use std::fmt;
@@ -235,10 +235,7 @@ fn check_cli_creds(setup: &Setup, now: u64, checks: &mut Vec<Check>) -> Option<I
 /// The check of credentials at `path`: their holder, permissions version and expiry ([`creds::Finding`]), failing
 /// once expired and warning as [`creds::Finding::warnings`] does, with the commands renewing them.
 fn check_creds(check: &str, path: &Path, finding: &creds::Finding, now: u64) -> Check {
-    let version = match finding.version {
-        Some(version) => format!("permissions version {version}"),
-        None => "no permissions version".to_owned(),
-    };
+    let version = format!("permissions version {}", finding.version);
     let at = |exp: Option<u64>| exp.map_or_default(creds::time);
     let mut problems = Vec::new();
     match finding.version_status() {
@@ -318,13 +315,17 @@ async fn reach(setup: &Setup, identity: Option<&Identity>, leaf: Option<&Leaf>) 
     };
     let info = client.server_info();
     let via = if through_leaf.is_some() { "the leaf node " } else { "" };
-    let mut checks = vec![Check::ok(
-        "server",
-        format!(
-            "connected to {via}{} (server {}, nats-server {}) as {}",
-            setup.nats, info.server_name, info.version, me.id
-        ),
-    )];
+    let connected = format!(
+        "connected to {via}{} (server {}, nats-server {}) as {}",
+        setup.nats, info.server_name, info.version, me.id
+    );
+    let (major, minor) = MIN_NATS_SERVER;
+    let mut checks = vec![if supported_server(&info.version) {
+        Check::ok("server", connected)
+    } else {
+        let detail = format!("{connected}: ants needs nats-server {major}.{minor} or later");
+        Check::fail("server", detail, vec![format!("upgrade nats-server to {major}.{minor} or later")])
+    }];
     let mut js = bus::jetstream(client, setup.js_domain.as_ref());
     js.set_timeout(NETWORK_TIMEOUT);
     let answered = check_jetstream(setup, identity, &js, leaf, through_leaf.is_some()).await;
@@ -342,6 +343,18 @@ async fn reach(setup: &Setup, identity: Option<&Identity>, leaf: Option<&Leaf>) 
     checks.push(check_versions(&js, identity).await);
     checks.push(check_harness_versions(&js).await);
     (checks, Some(Connected { js, rights: identity.rights.clone() }))
+}
+
+/// The oldest nats-server, major and minor version, ants runs on.
+const MIN_NATS_SERVER: (u32, u32) = (2, 15);
+
+/// Whether nats-server `version` is [`MIN_NATS_SERVER`] or later; a version that does not parse passes.
+fn supported_server(version: &str) -> bool {
+    let mut parts = version.split(['.', '-']).map(|part| part.parse::<u32>().ok());
+    match (parts.next().flatten(), parts.next().flatten()) {
+        (Some(major), Some(minor)) => (major, minor) >= MIN_NATS_SERVER,
+        _ => true,
+    }
 }
 
 /// Connect to `url` with `creds` as `user`, as the CLI does, within [`NETWORK_TIMEOUT`].
@@ -505,7 +518,7 @@ async fn check_hub(js: &jetstream::Context, identity: &Identity) -> Vec<Check> {
         hub::Object::ALL.into_iter().filter(|o| !may(&o.info_subject())).map(|o| o.to_string()).collect();
     if findings.is_empty() {
         let checked = hub::Object::ALL.len() - unseen.len();
-        let mut detail = format!("stream {STREAM} and {} buckets up to date", checked.saturating_sub(1));
+        let mut detail = format!("stream {STREAM} and {} buckets present", checked.saturating_sub(1));
         if !unseen.is_empty() {
             let _ = write!(detail, " ({} not checked: the credentials get no stream info of it)", unseen.join(", "));
         }
@@ -601,35 +614,20 @@ fn storage_check(usage: &Usage, largest: &[(String, u64)], warn_percent: u8, con
     Check::ok(check, usage.to_string())
 }
 
-/// The most consumers a stream configured as `config` takes: its `max_consumers`, else the 1000 nats-server 2.15 and
-/// later give a stream by default (`default_max_consumers` in its configuration may change that); None for no limit.
-fn consumer_limit(config: &jetstream::stream::Config) -> Option<usize> {
-    if let Ok(max) = usize::try_from(config.max_consumers)
-        && max > 0
-    {
-        return Some(max);
-    }
-    let version = config.metadata.get("_nats.ver")?;
-    let mut parts = version.split(['.', '-']).map(|part| part.parse::<u32>().unwrap_or(0));
-    let (major, minor) = (parts.next()?, parts.next()?);
-    ((major, minor) >= (2, 15)).then_some(1000)
+/// The most consumers a stream configured as `config` takes: its `max_consumers`, else the 1000 nats-server gives a
+/// stream by default (`default_max_consumers` in its configuration may change that).
+fn consumer_limit(config: &jetstream::stream::Config) -> usize {
+    usize::try_from(config.max_consumers).ok().filter(|&max| max > 0).unwrap_or(1000)
 }
 
-fn consumers(object: hub::Object, count: usize, limit: Option<usize>) -> Check {
+fn consumers(object: hub::Object, count: usize, limit: usize) -> Check {
     let check = "consumers";
     let name = object.stream_name();
-    let Some(limit) = limit else {
-        return Check::ok(check, format!("{count} on stream {name}, which takes any number"));
-    };
     let detail = format!("{count} on stream {name}, which takes {limit}");
     if count.saturating_mul(5) < limit.saturating_mul(4) {
         return Check::ok(check, detail);
     }
-    let raise = if usize::try_from(hub::MAX_CONSUMERS).is_ok_and(|max| limit < max) {
-        "ants init".to_owned()
-    } else {
-        format!("nats stream edit {name} --max-consumers {}", limit.saturating_mul(2))
-    };
+    let raise = format!("nats stream edit {name} --max-consumers {}", limit.saturating_mul(2));
     let full = match object {
         hub::Object::Stream => "no ant can open a consumer to read its inbox".to_owned(),
         _ => format!("no daemon can watch {object}"),
@@ -755,8 +753,8 @@ async fn check_resolver(setup: &Setup, through_leaf: bool) -> Check {
                 return Check::skip(check, format!("connecting to {} as the system account: {e:#}", setup.nats));
             }
             let detail = format!(
-                "{} refuses the team's system account ({e:#}): its server.conf is older than revocations or of \
-                 another team, and `ants auth push` fails",
+                "{} refuses the team's system account ({e:#}): its server.conf is of another team or lacks \
+                 the team's system account, and `ants auth push` fails",
                 setup.nats
             );
             return Check::warn(check, detail, vec![copy_server_conf(&conf, "reload it (SIGHUP)")]);
@@ -1203,15 +1201,10 @@ async fn check_outbox(
             (outbox::Hearing::Silent, []) => Check::warn(
                 check,
                 format!("the hub sources the outbox of {machine} but has not heard from it"),
-                ["feature_flags { js_api_reply_v2: true } in the hub's nats-server configuration, then restart it"
-                    .to_owned()]
-                .into_iter()
-                .chain(
-                    uplink
-                        .and_then(|f| f.renew().into_iter().next())
-                        .map(|c| format!("{c}, for uplink credentials issued before store and forward")),
-                )
-                .collect(),
+                vec![
+                    "feature_flags { js_api_reply_v2: true } in the hub's nats-server configuration, then restart it"
+                        .to_owned(),
+                ],
             ),
             (outbox::Hearing::Heard, []) => {
                 let names: Vec<&str> = members.iter().map(|(user, _)| user.as_str()).collect();

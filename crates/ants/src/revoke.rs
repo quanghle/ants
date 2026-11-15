@@ -50,7 +50,7 @@ impl From<ants_proto::Role> for Kind {
     }
 }
 
-/// One user key the team issued, a line of [`ISSUED`]. Fields added later are optional, so older lines still read.
+/// One user key the team issued, a line of [`ISSUED`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Issued {
     /// The user's public NKey, `U...`.
@@ -65,22 +65,19 @@ pub struct Issued {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<u64>,
     /// A human's device the credentials are for, whose user JWT carries it ([`DeviceId::tag`]); none for an ant's, a
-    /// webhook's and so on, and for a human's issued before devices had ids.
+    /// webhook's and so on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<DeviceId>,
     /// The label of a human's device, for display: a later line of the same key relabels it ([`rename`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    /// The permissions version its JWT carries ([`PERMISSIONS_VERSION`]); none for keys issued before versions were
-    /// stamped.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub perms: Option<PermissionsVersion>,
+    /// The permissions version its JWT carries ([`PERMISSIONS_VERSION`]).
+    pub perms: PermissionsVersion,
     /// The key of the credentials these renew (`ants renew`), of the same name, kind and device, which stays valid
     /// until it expires or is revoked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub renewed_from: Option<String>,
-    /// The members of a leaf node's uplink ([`crate::members`]); none for other credentials, and for an uplink issued
-    /// before the registry kept them.
+    /// The members of a leaf node's uplink ([`crate::members`]); none for other credentials.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub members: Option<crate::members::Members>,
     /// The template of an ant a manager added (`ants signer`), whose `max_ants` the signer counts its live keys
@@ -104,7 +101,7 @@ impl Issued {
             expires_at,
             device: None,
             label: None,
-            perms: Some(PERMISSIONS_VERSION),
+            perms: PERMISSIONS_VERSION,
             renewed_from: None,
             members: None,
             template: None,
@@ -132,8 +129,7 @@ pub fn check_label(label: &str) -> Result<()> {
 /// One device of a human: the latest line of [`ISSUED`] for one of its keys.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Device {
-    /// None for a legacy device, whose credentials carry no id.
-    pub device: Option<DeviceId>,
+    pub device: DeviceId,
     pub label: Option<String>,
     pub key: String,
     pub issued_at: u64,
@@ -148,15 +144,17 @@ pub fn devices(dir: &Path, name: &str) -> Result<Vec<Device>> {
     let revoked = revoked(dir)?;
     let mut found: Vec<Device> = Vec::new();
     for one in issued(dir)?.into_iter().filter(|i| i.name == name && i.kind == Kind::Human) {
+        let id =
+            one.device.with_context(|| format!("{ISSUED}: the key {} of the human {name} names no device", one.key))?;
         let device = Device {
-            device: one.device,
+            device: id,
             label: one.label,
             revoked: revoked.iter().any(|r| r.key == one.key),
             key: one.key,
             issued_at: one.issued_at,
             expires_at: one.expires_at,
         };
-        let same = |d: &Device| d.key == device.key || (device.device.is_some() && d.device == device.device);
+        let same = |d: &Device| d.key == device.key || d.device == device.device;
         match found.iter_mut().find(|d| same(d)) {
             Some(known) => *known = Device { issued_at: known.issued_at, ..device },
             None => found.push(device),
@@ -168,8 +166,7 @@ pub fn devices(dir: &Path, name: &str) -> Result<Vec<Device>> {
 /// The device of `devices` that `selector` names: its id, its public key, or its label when no other device of the
 /// human has that label.
 pub fn select<'a>(devices: &'a [Device], name: &str, selector: &str) -> Result<&'a Device> {
-    let by_id_or_key =
-        devices.iter().find(|d| d.key == selector || d.device.is_some_and(|id| id.to_string() == selector));
+    let by_id_or_key = devices.iter().find(|d| d.key == selector || d.device.to_string() == selector);
     if let Some(device) = by_id_or_key {
         return Ok(device);
     }
@@ -178,10 +175,7 @@ pub fn select<'a>(devices: &'a [Device], name: &str, selector: &str) -> Result<&
         [device] => Ok(device),
         [] => bail!("{name} has no device {selector:?}; `ants auth devices {name}` lists them"),
         several => {
-            let ids: Vec<String> = several
-                .iter()
-                .map(|d| d.device.map_or_else(|| format!("legacy device {}", d.key), |id| id.to_string()))
-                .collect();
+            let ids: Vec<String> = several.iter().map(|d| d.device.to_string()).collect();
             bail!("{name} has {} devices labelled {selector:?}; name one by id: {}", several.len(), ids.join(", "))
         }
     }
@@ -195,9 +189,7 @@ pub fn device_keys(dir: &Path, name: &str, selectors: &[String]) -> Result<Vec<S
     let mut keys = Vec::new();
     for selector in selectors {
         let device = select(&devices, name, selector)?;
-        let of_device = |i: &&Issued| {
-            i.name == name && i.kind == Kind::Human && device.device.is_some() && i.device == device.device
-        };
+        let of_device = |i: &&Issued| i.name == name && i.kind == Kind::Human && i.device == Some(device.device);
         keys.push(device.key.clone());
         keys.extend(issued.iter().filter(of_device).map(|i| i.key.clone()));
     }
@@ -218,8 +210,8 @@ pub fn rename(dir: &Path, name: &str, selector: &str, label: &str) -> Result<Dev
     Ok(Device { label: Some(label.to_owned()), ..device.clone() })
 }
 
-/// Print the devices of the human `name` in `dir`: id (`legacy` for one without), label, key, when issued, and
-/// whether revoked; with `json`, one JSON object per line.
+/// Print the devices of the human `name` in `dir`: id, label, key, when issued, and whether revoked; with `json`, one
+/// JSON object per line.
 pub fn list_devices(dir: &Path, name: &str, json: bool) -> Result<()> {
     let devices = devices(dir, name)?;
     if devices.is_empty() && !json {
@@ -230,7 +222,7 @@ pub fn list_devices(dir: &Path, name: &str, json: bool) -> Result<()> {
             println!("{}", serde_json::to_string(&d)?);
             continue;
         }
-        let id = d.device.map_or_else(|| "legacy".to_owned(), |id| id.to_string());
+        let id = d.device;
         let label = d.label.as_deref().unwrap_or("-");
         let revoked = if d.revoked { "  revoked" } else { "" };
         println!("{id}  {label}  {}  issued {}{revoked}", d.key, time(d.issued_at));
@@ -302,8 +294,7 @@ fn write_revoked(dir: &Path, revoked: &[Revoked]) -> Result<()> {
     fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
 }
 
-/// Revoke every key known for `name`, in the registry or in a `.creds` file of `dir` the team's account signed, and
-/// each of `keys`, then write `server.conf` again ([`apply`]). Returns the keys revoked, some perhaps already expired;
+/// Revoke every key the registry of `dir` knows for `name`, and each of `keys`, then write `server.conf` again ([`apply`]). Returns the keys revoked, some perhaps already expired;
 /// fails without a change when `name` has no known key.
 pub fn revoke(dir: &Path, name: Option<&str>, keys: &[String]) -> Result<Vec<Revoked>> {
     let now = auth::now()?;
@@ -325,14 +316,10 @@ pub fn revoke(dir: &Path, name: Option<&str>, keys: &[String]) -> Result<Vec<Rev
         for one in issued.iter().filter(|i| i.name == name) {
             add(&mut targets, &one.key, Some(name), one.expires_at);
         }
-        for claims in team_creds(dir)?.into_iter().filter(|c| c.name == name) {
-            add(&mut targets, &claims.sub, Some(name), claims.exp);
-        }
         if targets.is_empty() {
             bail!(
-                "no credentials of {name} known in {} ({ISSUED}, or a .creds file there); revoke them by public key \
-                 with --key U...",
-                dir.display()
+                "no credentials of {name} known in {}; revoke them by public key with --key U...",
+                dir.join(ISSUED).display()
             );
         }
     }
@@ -368,23 +355,6 @@ pub fn apply(dir: &Path) -> Result<(String, String)> {
     }
     let revocations: BTreeMap<String, u64> = all.into_iter().map(|r| (r.key, r.revoked_at)).collect();
     auth::write_server_conf(dir, &revocations)
-}
-
-/// The claims of the `.creds` files in `dir` that the team's account signed.
-fn team_creds(dir: &Path) -> Result<Vec<auth::Claims>> {
-    let account = auth::account_key(dir)?;
-    let entries = fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;
-    let mut found = Vec::new();
-    for entry in entries {
-        let path = entry?.path();
-        if path.extension().is_none_or(|ext| ext != "creds") {
-            continue;
-        }
-        let Ok(text) = fs::read_to_string(&path) else { continue };
-        let claims = auth::creds_jwt(&text).and_then(|jwt| auth::verified(jwt).ok());
-        found.extend(claims.filter(|c| c.iss == account));
-    }
-    Ok(found)
 }
 
 /// Print the revocations of `dir`: key, name if known, when revoked and until when it matters.
@@ -443,14 +413,14 @@ pub fn listing(dir: &Path, now: u64) -> Result<Vec<Listed>> {
     let files = team_findings(dir)?;
     let mut listed = Vec::new();
     for (n, one) in latest.iter().enumerate() {
-        let device = |later: &Issued| one.kind != Kind::Human || (one.device.is_some() && later.device == one.device);
+        let device = |later: &Issued| one.kind != Kind::Human || later.device == one.device;
         let reissued =
             latest[n + 1..].iter().any(|later| later.name == one.name && later.kind == one.kind && device(later));
         let revoked = revoked.iter().any(|r| r.key == one.key);
         let expired = one.expires_at.is_some_and(|exp| exp <= now);
         let expiring =
             !expired && one.expires_at.is_some_and(|exp| exp - now <= ants_daemon::creds::EXPIRY_WARNING.as_secs());
-        let outdated = one.perms != Some(PERMISSIONS_VERSION);
+        let outdated = one.perms != PERMISSIONS_VERSION;
         let in_use = !revoked && !reissued && !expired && one.kind != Kind::Enrollment;
         let renew = match (in_use && (outdated || expiring), files.iter().find(|f| f.key == one.key)) {
             (false, _) => Vec::new(),
@@ -462,8 +432,8 @@ pub fn listing(dir: &Path, now: u64) -> Result<Vec<Listed>> {
     Ok(listed)
 }
 
-/// The command renewing `issued` when no `.creds` file tells more: placeholders stand for a webhook's destinations,
-/// a leaf node's members when the registry does not keep them, and the hub's JetStream domain.
+/// The command renewing `issued` when no `.creds` file tells more: placeholders stand for a webhook's destinations
+/// and the hub's JetStream domain; `ants auth leaf` takes a leaf node's members from the registry.
 fn renew_without_file(issued: &Issued) -> Vec<String> {
     let name = &issued.name;
     let domain = "[--js-domain DOMAIN]";
@@ -471,13 +441,7 @@ fn renew_without_file(issued: &Issued) -> Vec<String> {
         Kind::Ant => format!("ants auth user {name} {domain}"),
         Kind::Human => format!("ants auth user {name} --human {domain}"),
         Kind::Webhook => format!("ants auth user {name} --webhook --to ANT... --channel CHANNEL... {domain}"),
-        Kind::Leaf if issued.members.is_some() => {
-            format!("ants auth leaf {} {domain}", name.trim_prefix("leaf-"))
-        }
-        Kind::Leaf => format!(
-            "ants auth leaf {} --ant ANT... --human HUMAN... --webhook WEBHOOK... {domain}",
-            name.trim_prefix("leaf-")
-        ),
+        Kind::Leaf => format!("ants auth leaf {} {domain}", name.trim_prefix("leaf-")),
         Kind::ChannelManager => format!("ants auth channel-manager {domain}"),
         Kind::Observer => format!("ants auth user {name} --observer {domain}"),
         Kind::Enrollment => format!("ants auth enroll {}", name.trim_prefix("enroll-")),
@@ -525,7 +489,7 @@ pub fn list_issued(dir: &Path, json: bool) -> Result<()> {
             Some(exp) => format!("expires {}", time(exp)),
             None => "no expiry".to_owned(),
         };
-        let perms = i.perms.map_or_else(|| "-".to_owned(), |v| v.to_string());
+        let perms = i.perms;
         let revoked = if l.revoked { "  revoked" } else { "" };
         let reissued = if l.reissued { "  reissued" } else { "" };
         println!(

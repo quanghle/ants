@@ -7,10 +7,6 @@ use futures::StreamExt as _;
 
 use crate::{Listing, Nats, inbox, presence, reacted, thread, tools};
 
-/// Why credentials of a human from before the read marker cannot mark replies read.
-pub(crate) const REISSUE_HUMAN: &str = "these credentials predate the read marker every device of a human shares: issue new ones \
-                             with `ants auth user NAME --human` (and a leaf's with `ants auth leaf`)";
-
 pub(crate) async fn show(
     nats: &Nats<'_>,
     mut select: inbox::Select,
@@ -21,9 +17,6 @@ pub(crate) async fn show(
     let me = &nats.me.id;
     if !nats.me.role.is_human() {
         bail!("the credentials of {me} are an ant's, whose inbox its daemon reads; `ants inbox` reads a human's");
-    }
-    if !nats.device.marks_read {
-        bail!("{REISSUE_HUMAN}");
     }
     let (client, js) = nats.connect("ants-inbox").await?;
     select.thread = thread::resolve(thread, &js, &nats.me).await?;
@@ -76,7 +69,7 @@ pub(crate) async fn show(
         let followed = async {
             match select.thread {
                 None => {
-                    let device = nats.device.id;
+                    let device = nats.device;
                     Box::pin(presence::while_following(&js, nats.domain, me, device, Following::Inbox, followed)).await
                 }
                 Some(_) => followed.await,
@@ -107,7 +100,7 @@ pub(crate) async fn show(
                     _ = stopped => {}
                 }
             };
-            let device = nats.device.id;
+            let device = nats.device;
             Box::pin(presence::while_following(&js, nats.domain, me, device, Following::Approvals, shown)).await;
         };
         let followed = async { tokio::join!(followed, requests).0 };

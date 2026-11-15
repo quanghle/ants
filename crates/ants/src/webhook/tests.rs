@@ -322,7 +322,7 @@ async fn deliver(addr: SocketAddr, path: &str, headers: &[(&str, &str)], body: &
 pub(crate) async fn hub() -> Option<(Server, jetstream::Context, PathBuf)> {
     let server = Server::start()?;
     let (_, js) = server.connect(&UserId::human()).await;
-    bus::init_stream(&js).await.unwrap();
+    bus::ensure_stream(&js).await.unwrap();
     ensure_bucket(&js).await.unwrap();
     bus::ensure_owners(&js).await.unwrap();
     let channels = bus::ensure_channels(&js).await.unwrap();

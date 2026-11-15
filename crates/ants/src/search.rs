@@ -330,7 +330,7 @@ mod tests {
         let Some(server) = crate::auth::tests::Server::start() else { return };
         let (alice, dev_a, dev_b, lead) = (p("alice"), p("dev-a"), p("dev-b"), p("lead"));
         let (_, js) = server.connect_as(&alice, Role::Human).await;
-        ants_daemon::bus::init_stream(&js).await.unwrap();
+        ants_daemon::bus::ensure_stream(&js).await.unwrap();
         let (_, js_a) = server.connect_as(&dev_a, Role::Ant).await;
         let (_, js_b) = server.connect_as(&dev_b, Role::Ant).await;
         let read = crate::inbox::ensure_bucket(&js).await.unwrap();

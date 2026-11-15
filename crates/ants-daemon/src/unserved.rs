@@ -414,8 +414,9 @@ mod tests {
 
     fn entry(ant: &str, capabilities: &[&str], heartbeat_at: DateTime<Utc>) -> RosterEntry {
         serde_json::from_value(serde_json::json!({
-            "ant": ant, "machine": "m1", "harness": "copilot", "capabilities": capabilities,
-            "started_at": heartbeat_at, "heartbeat_at": heartbeat_at,
+            "ant": ant, "machine": "m1", "instance": "run-1", "harness": "copilot", "capabilities": capabilities,
+            "started_at": heartbeat_at, "heartbeat_at": heartbeat_at, "activity": "idle", "handling": 0,
+            "harnesses": 0, "version": ants_proto::ANTS_VERSION, "perms": ants_proto::PERMISSIONS_VERSION,
         }))
         .unwrap()
     }

@@ -49,30 +49,37 @@ async fn a_fresh_hub_is_missing_its_stream_until_init() {
 }
 
 #[test]
+fn a_server_older_than_nats_server_2_15_is_unsupported() {
+    assert!(supported_server("2.15.0-beta.1"));
+    assert!(supported_server("2.16.1"));
+    assert!(supported_server("3.0.0"));
+    assert!(!supported_server("2.14.9"));
+    assert!(!supported_server("2.10.0"));
+    assert!(supported_server("unknown"));
+}
+
+#[test]
 fn consumers_warn_near_the_limit_the_hub_enforces() {
     let mut config = jetstream::stream::Config::default();
-    assert_eq!(consumer_limit(&config), None, "no limit before nats-server 2.15");
-    config.metadata.insert("_nats.ver".to_owned(), "2.14.9".to_owned());
-    assert_eq!(consumer_limit(&config), None);
-    config.metadata.insert("_nats.ver".to_owned(), "2.15.0-beta.1".to_owned());
+    assert_eq!(consumer_limit(&config), 1000);
     config.max_consumers = -1;
-    assert_eq!(consumer_limit(&config), Some(1000), "-1 leaves the default");
+    assert_eq!(consumer_limit(&config), 1000, "-1 leaves the default");
     config.max_consumers = hub::MAX_CONSUMERS;
-    assert_eq!(consumer_limit(&config), Some(10_000));
+    assert_eq!(consumer_limit(&config), 10_000);
 
     let stream = hub::Object::Stream;
-    assert_eq!(consumers(stream, 799, Some(1000)).status, Status::Ok);
-    let near = consumers(stream, 800, Some(1000));
-    assert_eq!((near.status, near.fix.as_slice()), (Status::Warn, ["ants init".to_owned()].as_slice()));
-    let full = consumers(stream, 9_000, Some(10_000));
+    assert_eq!(consumers(stream, 799, 1000).status, Status::Ok);
+    let near = consumers(stream, 800, 1000);
+    assert_eq!(near.status, Status::Warn);
+    assert_eq!(near.fix, [format!("nats stream edit {STREAM} --max-consumers 2000")]);
+    let full = consumers(stream, 9_000, 10_000);
     assert_eq!(full.fix, [format!("nats stream edit {STREAM} --max-consumers 20000")]);
-    assert_eq!(consumers(stream, 5_000, None).status, Status::Ok);
-    let humans = consumers(hub::Object::Humans, 900, Some(1000));
+    let humans = consumers(hub::Object::Humans, 900, 1000);
     assert_eq!(
         humans.detail,
         "900 on stream KV_ants_humans, which takes 1000: once full, no daemon can watch bucket ants_humans"
     );
-    assert_eq!(humans.fix, ["ants init"]);
+    assert_eq!(humans.fix, ["nats stream edit KV_ants_humans --max-consumers 2000"]);
 }
 
 #[test]
@@ -109,7 +116,9 @@ async fn the_versions_check_waits_for_every_component_to_allow_renewal() {
     let roster = a_js.get_key_value(ants_proto::ROSTER_BUCKET).await.unwrap();
     let now = chrono::Utc::now();
     let mut entry = serde_json::json!({
-        "ant": "dev-a", "machine": "m1", "harness": "copilot", "started_at": now, "heartbeat_at": now,
+        "ant": "dev-a", "machine": "m1", "instance": "run-1", "harness": "copilot", "capabilities": [],
+        "started_at": now, "heartbeat_at": now, "activity": "idle", "handling": 0, "harnesses": 0,
+        "version": "0.0.1", "perms": PERMISSIONS_VERSION.0 - 1,
     });
     roster.put("dev-a", serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
 
@@ -140,7 +149,7 @@ async fn the_versions_check_waits_for_every_component_to_allow_renewal() {
     }
     let check = versions().await;
     assert_eq!(check.status, Status::Warn, "{check}");
-    let old = "the daemon of dev-a on m1 (no version published";
+    let old = format!("the daemon of dev-a on m1 (ants 0.0.1, permissions {})", PERMISSIONS_VERSION.0 - 1);
     assert!(check.detail.starts_with(&format!("older than permissions version {PERMISSIONS_VERSION}: {old}")));
     assert!(check.detail.contains("mixed: "), "{check}");
     assert!(!check.detail.contains("the channel manager on") && !check.detail.contains("webhook github on"));
@@ -168,7 +177,9 @@ fn harness_versions_warn_of_drift_across_machines() {
     let now = chrono::Utc::now();
     let entry = |ant: &str, machine: &str, version: Option<&str>| {
         let mut json = serde_json::json!({
-            "ant": ant, "machine": machine, "harness": "copilot", "started_at": now, "heartbeat_at": now,
+            "ant": ant, "machine": machine, "instance": "run-1", "harness": "copilot", "capabilities": [],
+            "started_at": now, "heartbeat_at": now, "activity": "idle", "handling": 0, "harnesses": 0,
+            "version": ants_proto::ANTS_VERSION, "perms": ants_proto::PERMISSIONS_VERSION,
         });
         if let Some(version) = version {
             json["agent"] = serde_json::json!({"name": "copilot", "version": version});

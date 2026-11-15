@@ -3,8 +3,7 @@
 //!
 //! `ants auth leaf` runs where the team keys are. It keeps the members in the line of the registry
 //! ([`revoke::ISSUED`]) recording the uplink key it issues, and `ants enroll approve`, there too, adds an ant enrolled
-//! through the leaf node with a later line for that key. For uplink credentials issued before the registry kept
-//! members, their `.creds` file, where `ants auth leaf` wrote them, names them.
+//! through the leaf node with a later line for that key.
 //!
 //! `ants leaf outbox` runs on the machine itself: the uplink credentials of its leaf node configuration name its
 //! members, enrolled ants included, as an enrollment through the leaf renews them there.
@@ -260,44 +259,20 @@ fn latest(dir: &Path, machine: &Machine) -> Result<Option<Issued>> {
 }
 
 /// The members `ants auth leaf` last issued the uplink of `machine` for, from the team directory `dir`, with the ants
-/// enrolled through the leaf node since. For an uplink issued before the registry kept them, those its credentials
-/// at `creds` carry, if the team's account issued them for `machine`. None when neither tells.
-pub fn issued(dir: &Path, machine: &Machine, creds: &Path) -> Result<Option<Members>> {
-    if let Some(members) = latest(dir, machine)?.and_then(|line| line.members) {
-        return Ok(Some(members));
-    }
-    if !creds.is_file() {
-        return Ok(None);
-    }
-    let (jwt, _) = auth::read_creds(creds)?;
-    // Expired credentials still tell their members: renewing them is what the run is for.
-    if auth::verified(&jwt).is_ok_and(|claims| claims.iss == auth::account_key(dir).unwrap_or_default()) {
-        return Ok(Members::carried(Finding::from_jwt(&jwt)?, machine));
-    }
-    Ok(None)
+/// enrolled through the leaf node since; none when it issued none.
+pub fn issued(dir: &Path, machine: &Machine) -> Result<Option<Members>> {
+    Ok(latest(dir, machine)?.and_then(|line| line.members))
 }
 
 /// Keep `ant`, enrolled through the leaf node of `machine`, among its members in the registry of `dir`, with a later
-/// line for the latest uplink key issued there; `renewed` is the uplink JWT the approval extended to carry `ant`,
-/// which tells the members when the registry kept none.
-pub fn enrolled(dir: &Path, machine: &Machine, renewed: &str, ant: &UserId) -> Result<()> {
-    let finding = Finding::from_jwt(renewed)?;
+/// line for the latest uplink key issued there.
+pub fn enrolled(dir: &Path, machine: &Machine, ant: &UserId) -> Result<()> {
     let latest = latest(dir, machine)?;
-    let mut members = match latest.as_ref().and_then(|line| line.members.clone()) {
-        Some(members) => members,
-        None => Members::carried(finding.clone(), machine).context("the renewed uplink credentials")?,
-    };
+    let mut line = latest.with_context(|| format!("{} keeps no uplink of {machine}", dir.display()))?;
+    let members = line.members.get_or_insert_default();
     if !members.holds(ant) {
         members.ants.push(ant.clone());
     }
-    let line = match latest {
-        Some(line) => Issued { members: Some(members), ..line },
-        None => Issued {
-            perms: finding.version,
-            members: Some(members),
-            ..Issued::new(&finding.key, &finding.name, Kind::Leaf, finding.expires_at)?
-        },
-    };
     revoke::record(dir, &line)
 }
 
@@ -374,7 +349,7 @@ mod tests {
         let dir = ants_test_support::scratch_dir("leaf-members");
         let (team, out, m1) = (dir.join("auth"), dir.join("leaf-m1.creds"), m1());
         auth::init(&team).unwrap();
-        assert_eq!(issued(&team, &m1, &out).unwrap(), None, "nothing issued yet");
+        assert_eq!(issued(&team, &m1).unwrap(), None, "nothing issued yet");
 
         let on_m1 = auth::members(&users(&["dev-a", "human"]), &users(&["alice"]));
         auth::issue_leaf(&team, &m1, &on_m1, &[], EnrollApprover::With, None, &out).unwrap();
@@ -384,22 +359,14 @@ mod tests {
             webhooks: Vec::new(),
             enroll_approver: true,
         };
-        assert_eq!(issued(&team, &m1, &out).unwrap(), Some(kept.clone()));
-        assert_eq!(issued(&team, &"m2".parse().unwrap(), &dir.join("none")).unwrap(), None);
+        assert_eq!(issued(&team, &m1).unwrap(), Some(kept.clone()));
+        assert_eq!(issued(&team, &"m2".parse().unwrap()).unwrap(), None);
 
-        let (jwt, _) = auth::read_creds(&out).unwrap();
-        let more = ants_proto::Permissions::for_leaf(&m1, [(&p("dev-c"), Role::Ant)]);
-        let renewed = auth::extend_leaf(&team, &jwt, &m1, more).unwrap();
-        enrolled(&team, &m1, &renewed, &p("dev-c")).unwrap();
-        let with_c = Members { ants: users(&["dev-a", "dev-c"]), ..kept.clone() };
-        assert_eq!(issued(&team, &m1, &out).unwrap(), Some(with_c.clone()), "the enrolled ant joins");
+        enrolled(&team, &m1, &p("dev-c")).unwrap();
+        let with_c = Members { ants: users(&["dev-a", "dev-c"]), ..kept };
+        assert_eq!(issued(&team, &m1).unwrap(), Some(with_c), "the enrolled ant joins");
         let listed = revoke::listing(&team, auth::now().unwrap()).unwrap();
         assert!(listed.len() == 1 && !listed[0].reissued, "the same key, once: {listed:?}");
-
-        // A registry from before members were kept: the uplink credentials tell them.
-        std::fs::remove_file(team.join(revoke::ISSUED)).unwrap();
-        assert_eq!(issued(&team, &m1, &out).unwrap(), Some(kept));
-        enrolled(&team, &m1, &renewed, &p("dev-c")).unwrap();
-        assert_eq!(issued(&team, &m1, &out).unwrap(), Some(with_c));
+        assert!(enrolled(&team, &"m2".parse().unwrap(), &p("dev-c")).is_err(), "no uplink of m2 issued");
     }
 }

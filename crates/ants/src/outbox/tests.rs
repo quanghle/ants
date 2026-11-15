@@ -3,7 +3,7 @@
 use std::assert_matches;
 use std::process::Command;
 
-use ants_daemon::{bus, links, notes};
+use ants_daemon::{bus, links, notes, owners};
 use ants_proto::{ChannelId, ChannelPost, DeadLetter, Envelope, JsDomain, NotesPost, ThreadId};
 use ants_test_support::NatsServer;
 use async_nats::jetstream::message::{PublishMessage, StreamMessage};
@@ -65,7 +65,7 @@ async fn the_hub_takes_what_a_leaf_kept_while_its_uplink_was_down() {
         (client, js)
     };
     let (h, h_js) = connect(&hub.url, &human).await;
-    bus::init_stream(&h_js).await.unwrap();
+    bus::ensure_stream(&h_js).await.unwrap();
     bus::ensure_links(&h_js).await.unwrap();
     bus::ensure_owners(&h_js).await.unwrap();
 
@@ -277,7 +277,7 @@ async fn a_post_waiter_reads_back_what_never_comes_live() {
         (client, js)
     };
     let (h, h_js) = connect(&hub.url, &human).await;
-    bus::init_stream(&h_js).await.unwrap();
+    bus::ensure_stream(&h_js).await.unwrap();
     let (_b, b_js) = connect(&hub.url, &dev_b).await;
 
     let leaf_creds = hub.dir().join("leaf-m1.creds");
@@ -410,7 +410,7 @@ async fn a_hub_without_js_api_reply_v2_is_reported() {
     let human_creds = hub.dir().join("human.creds");
     auth::issue(&team, &human, Role::Human, Some(&domain), &human_creds).unwrap();
     let (_h, h_js) = bus::connect(&hub.url, Some(&human_creds), Some(&domain), &human, "test").await.unwrap();
-    bus::init_stream(&h_js).await.unwrap();
+    bus::ensure_stream(&h_js).await.unwrap();
     let on_m1 = auth::members(std::slice::from_ref(&human), &[]);
     let leaf_creds = hub.dir().join("leaf-m1.creds");
     auth::issue_leaf(&team, &m1, &on_m1, &[], EnrollApprover::Without, Some(&domain), &leaf_creds).unwrap();

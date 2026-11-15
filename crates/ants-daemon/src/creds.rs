@@ -3,15 +3,14 @@
 //! over NATS for credentials that may ask for it ([`Finding::renewable`]), else `ants auth` on the machine holding the
 //! team keys.
 //!
-//! The kind of credentials, and what renewing them takes, comes from the permissions their user JWT carries, so
-//! credentials issued before the version was stamped are told apart too.
+//! The kind of credentials, and what renewing them takes, comes from the permissions their user JWT carries.
 
 use std::path::Path;
 use std::time::Duration;
 
 use ants_proto::{
     ChannelId, DeviceId, ENROLL_INBOX, HUMANS_BUCKET, JsDomain, Machine, PERMISSIONS_VERSION, PermissionsVersion,
-    RENEW_SINCE, UserId, WEBHOOKS_BUCKET, inbox_prefix, subject,
+    UserId, WEBHOOKS_BUCKET, inbox_prefix, subject,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use data_encoding::BASE64URL_NOPAD;
@@ -65,7 +64,7 @@ pub enum Kind {
 #[serde(rename_all = "kebab-case")]
 pub enum VersionStatus {
     Current,
-    /// Issued with an older version, or before versions were stamped: what the role allows since may be refused.
+    /// Issued with an older version: what the role allows since may be refused.
     Outdated,
     /// Issued by a newer ants.
     Newer,
@@ -91,13 +90,13 @@ pub struct Finding {
     pub key: String,
     #[serde(flatten)]
     pub kind: Kind,
-    /// The permissions version they carry; none for credentials issued before versions were stamped.
-    pub version: Option<PermissionsVersion>,
+    /// The permissions version they carry.
+    pub version: PermissionsVersion,
     /// Seconds since the epoch; none for credentials that never expire.
     pub expires_at: Option<u64>,
     /// The hub's JetStream domain they were issued for, if any.
     pub js_domain: Option<JsDomain>,
-    /// The human's device they are for, if their user JWT names one ([`DeviceId::tag`]).
+    /// The human's device they are for ([`DeviceId::tag`]), which a human's user JWT names; none for others.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device: Option<DeviceId>,
 }
@@ -131,22 +130,28 @@ impl Finding {
             let types = list(&nats["allowed_connection_types"]);
             !types.is_empty() && types.iter().all(|t| t.starts_with("LEAFNODE"))
         };
+        let kind = kind(&name, &publish, &subscribe, leaf_only)?;
+        let device = DeviceId::from_tags(tags.iter().map(String::as_str));
+        if kind == Kind::Human && device.is_none() {
+            bail!("a human's credentials without a device id");
+        }
         Ok(Self {
-            kind: kind(&name, &publish, &subscribe, leaf_only)?,
-            version: PermissionsVersion::from_tags(tags.iter().map(String::as_str)),
+            kind,
+            version: PermissionsVersion::from_tags(tags.iter().map(String::as_str))
+                .context("no permissions version")?,
             expires_at: claims["exp"].as_u64(),
             js_domain: js_domain(&publish),
-            device: DeviceId::from_tags(tags.iter().map(String::as_str)),
+            device,
             name,
             key,
         })
     }
 
     pub fn version_status(&self) -> VersionStatus {
-        match self.version {
-            Some(version) if version == PERMISSIONS_VERSION => VersionStatus::Current,
-            Some(version) if version > PERMISSIONS_VERSION => VersionStatus::Newer,
-            _ => VersionStatus::Outdated,
+        match self.version.cmp(&PERMISSIONS_VERSION) {
+            std::cmp::Ordering::Equal => VersionStatus::Current,
+            std::cmp::Ordering::Greater => VersionStatus::Newer,
+            std::cmp::Ordering::Less => VersionStatus::Outdated,
         }
     }
 
@@ -231,11 +236,11 @@ impl Finding {
     }
 
     /// Whether they may ask for their own renewal over NATS at `now` (`ants renew`): those of an ant, a human, a
-    /// webhook, the channel manager or a leaf node's uplink, issued with permissions version [`RENEW_SINCE`] or later,
-    /// whose subjects they need, and not expired, as the approver renews only credentials still valid.
+    /// webhook, the channel manager or a leaf node's uplink, not expired, as the approver renews only credentials still
+    /// valid.
     pub fn renewable(&self, now: u64) -> bool {
         let kind = !matches!(self.kind, Kind::LeafSystem { .. } | Kind::Enrollment { .. });
-        kind && self.version.is_some_and(|v| v >= RENEW_SINCE) && self.expiry(now) != Expiry::Expired
+        kind && self.expiry(now) != Expiry::Expired
     }
 
     /// The commands renewing them over NATS when they are at `path`: `ants renew` where they are used, then
@@ -298,24 +303,19 @@ impl Finding {
     pub fn warnings(&self, path: Option<&Path>, now: u64) -> Vec<String> {
         let mut warnings = Vec::new();
         let holder = self.holder();
-        match (self.version_status(), self.version) {
-            (VersionStatus::Outdated, None) => warnings.push(format!(
-                "the credentials of {holder} predate permission versions, and this ants gives version \
-                 {PERMISSIONS_VERSION}: requests their role allows now may be refused; {}{}",
-                self.renew_hint(path, now),
-                self.renew_when()
-            )),
-            (VersionStatus::Outdated, Some(version)) => warnings.push(format!(
+        let version = self.version;
+        match self.version_status() {
+            VersionStatus::Outdated => warnings.push(format!(
                 "the credentials of {holder} carry permissions version {version}, older than version \
                  {PERMISSIONS_VERSION} of this ants: requests their role allows now may be refused; {}{}",
                 self.renew_hint(path, now),
                 self.renew_when()
             )),
-            (VersionStatus::Newer, Some(version)) => warnings.push(format!(
+            VersionStatus::Newer => warnings.push(format!(
                 "the credentials of {holder} carry permissions version {version}, newer than version \
                  {PERMISSIONS_VERSION} of this ants: upgrade ants"
             )),
-            _ => {}
+            VersionStatus::Current => {}
         }
         let at = || self.expires_at.map_or_default(time);
         match self.expiry(now) {
@@ -561,7 +561,8 @@ mod tests {
         let (path, store) = (dir.join("alice.creds"), keystore::Memory::default());
         let (user, other) = (KeyPair::new_user(), KeyPair::new_user());
         let (key, seed) = (user.public_key(), user.seed().unwrap());
-        let mut named = claims("alice", &Permissions::for_user(&p("alice"), Role::Human), &[], None);
+        let tags = [PERMISSIONS_VERSION.tag(), DeviceId::generate().tag()];
+        let mut named = claims("alice", &Permissions::for_user(&p("alice"), Role::Human), &tags, None);
         named["sub"] = key.clone().into();
         let jwt = format!("e30.{}.sig", BASE64URL_NOPAD.encode(named.to_string().as_bytes()));
         let load = |text: String| {
@@ -592,7 +593,7 @@ mod tests {
         let domain: JsDomain = "hub".parse().unwrap();
         let ant = Permissions::for_user(&dev_a, Role::Ant).with_js_domain(Some(&domain));
         let current = PERMISSIONS_VERSION.tag();
-        let older = PermissionsVersion(PERMISSIONS_VERSION.0 - 1).tag();
+        let older = PermissionsVersion(0).tag();
         let newer = PermissionsVersion(PERMISSIONS_VERSION.0 + 1).tag();
         let finding = |tags: &[String]| Finding::from_claims(&claims("dev-a", &ant, tags, None)).unwrap();
 
@@ -601,18 +602,17 @@ mod tests {
         assert!(fresh.warnings(None, 0).is_empty());
         assert_eq!(fresh.renew(), ["ants auth user dev-a --js-domain hub"]);
 
-        let unstamped = finding(&[]);
-        assert_eq!((unstamped.version, unstamped.version_status()), (None, VersionStatus::Outdated));
-        let warnings = unstamped.warnings(None, 0);
-        assert!(warnings.len() == 1 && warnings[0].contains("`ants auth user dev-a --js-domain hub`"), "{warnings:?}");
         let outdated = finding(std::slice::from_ref(&older));
         assert_eq!(outdated.version_status(), VersionStatus::Outdated);
+        let warnings = outdated.warnings(None, 0);
+        assert!(warnings.len() == 1 && warnings[0].contains("`ants auth user dev-a --js-domain hub`"), "{warnings:?}");
         assert!(
             outdated.warnings(None, 0)[0].ends_with("(its `versions` check)"),
             "renew once every component allows it"
         );
         let human = Permissions::for_user(&p("alice"), Role::Human);
-        let human = Finding::from_claims(&claims("alice", &human, &[older], None)).unwrap();
+        let tags = [older, DeviceId::generate().tag()];
+        let human = Finding::from_claims(&claims("alice", &human, &tags, None)).unwrap();
         assert!(
             !human.warnings(None, 0)[0].contains("ants doctor"),
             "a human's renewal withdraws no right a service uses"
@@ -652,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    fn credentials_since_renewal_over_nats_name_ants_renew_until_they_expire() {
+    fn credentials_name_ants_renew_until_they_expire() {
         let now = 1_000_000_000;
         let path = Path::new("/home/a/dev-a.creds");
         let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
@@ -660,7 +660,7 @@ mod tests {
             let tags = [PermissionsVersion(version).tag()];
             Finding::from_claims(&claims("dev-a", &ant, &tags, exp)).unwrap()
         };
-        let soon = at(RENEW_SINCE.0, Some(now + 60));
+        let soon = at(PERMISSIONS_VERSION.0, Some(now + 60));
         assert!(soon.renewable(now));
         let warning = &soon.warnings(Some(path), now)[0];
         assert!(
@@ -669,11 +669,11 @@ mod tests {
         );
         assert!(soon.warnings(None, now)[0].contains("`ants auth user dev-a`"), "no path, no `ants renew`");
         assert_eq!(soon.renew_over_nats(path), ["ants renew /home/a/dev-a.creds", "ants enroll renew dev-a"]);
-        let expired = at(RENEW_SINCE.0, Some(now));
+        let expired = at(PERMISSIONS_VERSION.0, Some(now));
         assert!(!expired.renewable(now) && expired.warnings(Some(path), now)[0].contains("`ants auth user dev-a`"));
-        let older = at(RENEW_SINCE.0 - 1, None);
-        assert!(!older.renewable(now), "their subjects came with {RENEW_SINCE}");
-        assert!(older.warnings(Some(path), now)[0].contains("`ants auth user dev-a`"));
+        let older = at(0, None);
+        assert!(older.renewable(now), "any version renews over NATS");
+        assert!(older.warnings(Some(path), now)[0].contains("`ants renew /home/a/dev-a.creds`"));
         let enrollment = Permissions::for_enrollment(&p("dev-a"));
         let tags = [PERMISSIONS_VERSION.tag()];
         assert!(!Finding::from_claims(&claims("enroll-dev-a", &enrollment, &tags, None)).unwrap().renewable(now));
@@ -694,10 +694,16 @@ mod tests {
     #[test]
     fn a_creds_file_s_user_jwt_is_decoded() {
         let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
-        let body = BASE64URL_NOPAD.encode(&serde_json::to_vec(&claims("dev-a", &ant, &[], Some(5))).unwrap());
-        let text = format!("-----BEGIN NATS USER JWT-----\nhead.{body}.sig\n------END NATS USER JWT------\n");
-        let finding = Finding::from_creds(&text).unwrap();
+        let text = |tags: &[String]| {
+            let body = BASE64URL_NOPAD.encode(&serde_json::to_vec(&claims("dev-a", &ant, tags, Some(5))).unwrap());
+            format!("-----BEGIN NATS USER JWT-----\nhead.{body}.sig\n------END NATS USER JWT------\n")
+        };
+        let finding = Finding::from_creds(&text(&[PERMISSIONS_VERSION.tag()])).unwrap();
         assert_eq!((finding.name.as_str(), finding.expires_at), ("dev-a", Some(5)));
         assert!(Finding::from_creds("no jwt").is_err());
+        assert!(Finding::from_creds(&text(&[])).is_err(), "no permissions version");
+        let human = Permissions::for_user(&p("alice"), Role::Human);
+        let tags = [PERMISSIONS_VERSION.tag()];
+        assert!(Finding::from_claims(&claims("alice", &human, &tags, None)).is_err(), "no device id");
     }
 }

@@ -23,7 +23,6 @@
 use std::path::Path;
 use std::time::Duration;
 
-use ants_daemon::owners;
 use ants_proto::{
     INTAKE_STREAM, LINKS_BUCKET, Machine, OUTBOX_STREAM, OUTBOX_SUBJECTS, OWNERS_BUCKET, Role, STREAM, UserId, subject,
 };
@@ -85,7 +84,6 @@ pub async fn admit(
         hub.update_stream(&config).await.context("admitting the machine's outbox into the links bucket")?;
     }
     if let Some(mut config) = bucket_config(hub, OWNERS_BUCKET).await? {
-        owners::first_records_only(&mut config);
         admit_into(&mut config, machine, owner_admissions(machine, members, start));
         hub.update_stream(&config).await.context("admitting the machine's outbox into the owners bucket")?;
     }
@@ -159,8 +157,8 @@ pub async fn sourced(hub: &Context, machine: &Machine, wait: Duration) -> Result
             Hearing::Silent if tokio::time::Instant::now() >= deadline => anyhow::bail!(
                 "the hub has not heard from the outbox of {machine} within {}s, so nothing kept there reaches the \
                  hub's stream. The hub's nats-server needs `feature_flags {{ js_api_reply_v2: true }}` in its \
-                 configuration, then a restart; uplink credentials issued before store and forward existed need \
-                 `ants auth leaf` again. The setup is in place: the hub takes from the outbox once it hears from it",
+                 configuration, then a restart. The setup is in place: the hub takes from the outbox once it hears \
+                 from it",
                 wait.as_secs()
             ),
             Hearing::Silent => tokio::time::sleep(Duration::from_millis(250)).await,

@@ -4,11 +4,8 @@
 //!
 //! Showing a message marks it read, unless peeking, for every device at once: the marker is updated with
 //! compare-and-set, so devices reading at the same time each keep the other's marks. Nothing is consumed, so a reply
-//! one device reads still reaches the others following the inbox. The marker replaced the shared durable consumer
-//! `inbox-<name>`; the first read with credentials that write the marker moves the consumer's read state into it and
-//! deletes the consumer ([`migrate`]).
+//! one device reads still reaches the others following the inbox.
 
-use std::collections::BTreeSet;
 use std::ops::ControlFlow;
 use std::time::Duration;
 
@@ -17,15 +14,13 @@ use ants_daemon::humans::Registry;
 use ants_daemon::reactions::{self, Reacted};
 use ants_daemon::reading::{self, Reading};
 use ants_daemon::unserved;
-use ants_proto::{Envelope, READ_BUCKET, ReadMarker, Role, STREAM, ThreadId, UserId, Uuid, inbox_consumer, subject};
-use anyhow::{Context as _, Result, anyhow, bail};
-use async_nats::jetstream::consumer::{DeliverPolicy, PullConsumer};
+use ants_proto::{Envelope, READ_BUCKET, ReadMarker, Role, ThreadId, UserId, Uuid, subject};
+use anyhow::{Context as _, Result, bail};
+use async_nats::jetstream;
+use async_nats::jetstream::consumer::DeliverPolicy;
 use async_nats::jetstream::kv::{self, Operation, UpdateErrorKind};
-use async_nats::jetstream::stream::ConsumerErrorKind;
-use async_nats::jetstream::{self, ErrorCode};
 use futures::{FutureExt as _, StreamExt as _};
 
-const BATCH: usize = 256;
 /// How often a followed inbox is read again with no message announced, against an announcement missed.
 const RESCAN: Duration = Duration::from_secs(30);
 /// How many times a mark is tried again after another device moved the marker first.
@@ -51,9 +46,7 @@ pub async fn ensure_bucket(js: &jetstream::Context) -> Result<kv::Store> {
     if let Ok(store) = js.get_key_value(READ_BUCKET).await {
         return Ok(store);
     }
-    js.create_key_value(ants_daemon::hub::read_config())
-        .await
-        .context("creating the read bucket (credentials issued before it need `ants auth user NAME --human` again)")
+    js.create_key_value(ants_daemon::hub::read_config()).await.context("creating the read bucket")
 }
 
 /// A message to the human, unless malformed or forged.
@@ -73,16 +66,11 @@ pub struct Inbox {
 }
 
 impl Inbox {
-    /// The inbox of `human`, whose read state moves from its old inbox consumer into its marker if it has none yet.
+    /// The inbox of `human`.
     pub async fn open(js: &jetstream::Context, human: &UserId) -> Result<Self> {
         bus::ensure_stream(js).await?;
         let kv = ensure_bucket(js).await?;
-        let inbox =
-            Self { js: js.clone(), kv, human: human.clone(), start: None, seqs: Vec::new(), cursor: 0, taken: 0 };
-        if inbox.kv.entry(human.as_str()).await.context("reading the read marker")?.is_none() {
-            migrate(&inbox).await?;
-        }
-        Ok(inbox)
+        Ok(Self { js: js.clone(), kv, human: human.clone(), start: None, seqs: Vec::new(), cursor: 0, taken: 0 })
     }
 
     fn left(&self, select: &Select) -> usize {
@@ -243,72 +231,6 @@ fn parse(subject: &str, payload: &[u8]) -> Result<Envelope, String> {
     Ok(envelope)
 }
 
-/// Move the read state of the human's old inbox consumer, if any, into a new marker, and delete the consumer. A message
-/// the consumer still has to deliver is unread, and so is every one it delivered past its ack floor when another
-/// process holds some of them unacked, as those cannot be told apart from the acked ones. A marker another device put
-/// first stays.
-async fn migrate(inbox: &Inbox) -> Result<()> {
-    let name = inbox_consumer(&inbox.human);
-    let mut marker = ReadMarker::default();
-    let mut found = true;
-    match inbox.js.get_consumer_from_stream(&name, STREAM).await {
-        Ok(consumer) => {
-            let mut consumer: PullConsumer = consumer;
-            let mut held = BTreeSet::new();
-            loop {
-                let mut batch =
-                    consumer.fetch().max_messages(BATCH).messages().await.context("reading the old inbox")?;
-                let mut fresh = false;
-                while let Some(msg) = batch.next().await {
-                    let msg = msg.map_err(|e| anyhow!(e)).context("reading the old inbox")?;
-                    fresh |= held.insert(msg.info().map_err(|e| anyhow!(e))?.stream_sequence);
-                }
-                if !fresh {
-                    break;
-                }
-            }
-            let info = consumer.info().await.context("reading the old inbox")?;
-            let (floor, delivered) = (info.ack_floor.stream_sequence, info.delivered.stream_sequence);
-            // Held elsewhere too: by a CLI showing the inbox right now, or one that died holding it.
-            let elsewhere = info.num_ack_pending > held.len();
-            marker.below = floor;
-            let mut seqs = Vec::new();
-            let filter = subject::inbox_of(&inbox.human);
-            let start = DeliverPolicy::ByStartSequence { start_sequence: floor + 1 };
-            reading::read_back(&inbox.js, inbox.human.as_str(), Reading::Gets, &filter, start, |seq, _, _, _| {
-                if seq > delivered {
-                    return ControlFlow::Break(());
-                }
-                seqs.push(seq);
-                ControlFlow::Continue(())
-            })
-            .await
-            .context("reading the inbox")?;
-            if !elsewhere {
-                seqs.iter().filter(|seq| !held.contains(seq)).for_each(|seq| marker.mark(*seq));
-            }
-            marker.compact(seqs);
-        }
-        Err(e) if matches!(e.kind(), ConsumerErrorKind::JetStream(e) if e.error_code() == ErrorCode::CONSUMER_NOT_FOUND) =>
-        {
-            found = false;
-        }
-        Err(e) => return Err(e).with_context(|| format!("reading consumer {name}")),
-    }
-    match inbox.kv.update(inbox.human.as_str(), serde_json::to_vec(&marker)?.into(), 0).await {
-        Ok(_) => {}
-        Err(e) if e.kind() == UpdateErrorKind::WrongLastRevision => {}
-        Err(e) => return Err(e).context("putting the read marker"),
-    }
-    if found {
-        tracing::info!(consumer = name, below = marker.below, "moved the inbox read state into the read marker");
-        if let Err(e) = inbox.js.delete_consumer_from_stream(&name, STREAM).await {
-            tracing::debug!(error = %e, consumer = name, "deleting the old inbox consumer");
-        }
-    }
-    Ok(())
-}
-
 /// Mark `reply`, already shown by `ants ask --wait`, read in the inbox of `human`. JetStream may store it a moment
 /// after it was delivered, so a miss is retried briefly. Returns whether it was found unread.
 pub async fn mark_read(js: &jetstream::Context, human: &UserId, reply: &Envelope) -> Result<bool> {
@@ -398,7 +320,7 @@ pub fn render(e: &Envelope, reactions: &[Reacted]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use ants_proto::Role;
+    use ants_proto::{Role, STREAM, inbox_consumer};
 
     use tokio::time::timeout;
 
@@ -532,7 +454,8 @@ mod tests {
         // Bob has an inbox and a marker of his own, and reaches neither of Alice's.
         bus::publish(&ant_js, &Envelope::new(dev_a.clone(), bob.clone(), "for bob")).await.unwrap();
         assert_eq!(texts(&read_as(&b_js, &bob, Select::default()).await), ["for bob"]);
-        assert!(Inbox::open(&b_js, &alice).await.is_err(), "bob reads alice's read marker");
+        let alices = async { Inbox::open(&b_js, &alice).await?.unread(&Select::default()).await };
+        assert!(alices.await.is_err(), "bob reads alice's read marker");
         let b_kv = ensure_bucket(&b_js).await.unwrap();
         assert!(b_kv.get("alice").await.is_err());
         assert!(b_kv.put("alice", "{}".into()).await.is_err(), "bob moves alice's read marker");
@@ -548,41 +471,5 @@ mod tests {
         b_client.flush().await.unwrap();
         bus::publish(&ant_js, &asks[0].reply(dev_a.clone(), "five", Role::Human).unwrap()).await.unwrap();
         assert!(timeout(Duration::from_millis(500), announced.next()).await.is_err(), "bob hears alice's replies");
-    }
-
-    #[tokio::test]
-    async fn the_read_state_of_the_old_inbox_consumer_moves_into_the_marker() {
-        let Some(server) = Server::start() else { return };
-        let dev_a: UserId = "dev-a".parse().unwrap();
-        let (_, human) = server.connect(&UserId::human()).await;
-        let stream = bus::ensure_stream(&human).await.unwrap();
-        let (_, ant_js) = server.connect(&dev_a).await;
-        let ask = Envelope::new(UserId::human(), dev_a.clone(), "a");
-        for text in ["one", "two", "three", "four"] {
-            bus::publish(&ant_js, &ask.reply(dev_a.clone(), text, Role::Human).unwrap()).await.unwrap();
-        }
-        // As the CLI before the marker kept it: "one" and "three" read, "two" handed back, "four" never fetched.
-        let name = inbox_consumer(&UserId::human());
-        let config = jetstream::consumer::pull::Config {
-            durable_name: Some(name.clone()),
-            filter_subject: subject::inbox_of(&UserId::human()),
-            ack_policy: jetstream::consumer::AckPolicy::Explicit,
-            max_deliver: -1,
-            max_ack_pending: -1,
-            ..Default::default()
-        };
-        let consumer: PullConsumer = stream.create_consumer(config).await.unwrap();
-        let mut batch = consumer.fetch().max_messages(3).messages().await.unwrap();
-        for read in [true, false, true] {
-            let msg = batch.next().await.unwrap().unwrap();
-            let kind = if read { jetstream::AckKind::Ack } else { jetstream::AckKind::Nak(None) };
-            msg.double_ack_with(kind).await.unwrap();
-        }
-        drop(batch);
-
-        assert_eq!(texts(&read(&human, Select { peek: true, ..Default::default() }).await), ["two", "four"]);
-        assert!(stream.get_consumer::<jetstream::consumer::pull::Config>(&name).await.is_err(), "deleted");
-        assert_eq!(texts(&read(&human, Select::default()).await), ["two", "four"]);
-        assert!(read(&human, Select::default()).await.is_empty());
     }
 }

@@ -206,17 +206,9 @@ async fn the_ant_acts_on_the_stored_decision_not_the_first_heard() {
 
     // A decision that is never stored leaves the request to expire.
     let impatient = NatsApprover::new(client.clone(), js.clone(), ant.clone(), Duration::from_secs(1));
-    let decided = tokio::spawn(impatient.decide(thread.clone(), tool(), options.clone()));
+    let decided = tokio::spawn(impatient.decide(thread, tool(), options));
     publish_refused(&human, &next_request().await.decide(Verdict::AllowOnce)).await;
     assert_eq!(timeout(WAIT, decided).await.unwrap().unwrap(), Verdict::Reject);
-
-    // A stream from before direct gets leaves only the first decision heard.
-    let mut config = stream.cached_info().config.clone();
-    config.allow_direct = false;
-    human_js.update_stream(&config).await.unwrap();
-    let decided = tokio::spawn(approver.decide(thread, tool(), options));
-    publish_refused(&human, &next_request().await.decide(Verdict::AllowOnce)).await;
-    assert_eq!(timeout(WAIT, decided).await.unwrap().unwrap(), Verdict::AllowOnce);
 }
 
 fn chain(escalate_to: &[&UserId]) -> Chain {

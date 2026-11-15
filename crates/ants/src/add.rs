@@ -245,7 +245,6 @@ fn tell_completed(name: &UserId, out: &Path, uplink: Option<&Uplink>, path: &Pat
             crate::service::manual(Service::Daemon, Action::Reload)
         ),
     }
-    // Last, as a restart, the fallback before nats-server 2.14, cuts the connections through the leaf node.
     if let Some((true, _, conf)) = uplink {
         println!("{}", leaf::use_renewed_uplink(conf, |action| services.apply(Service::Nats, action, conf)));
     }

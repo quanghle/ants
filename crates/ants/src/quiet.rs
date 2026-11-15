@@ -24,9 +24,7 @@ pub async fn ensure_bucket(js: &jetstream::Context) -> Result<kv::Store> {
     if let Ok(store) = js.get_key_value(NOTIFY_BUCKET).await {
         return Ok(store);
     }
-    js.create_key_value(ants_daemon::hub::notify_config())
-        .await
-        .context("creating the notify bucket (credentials issued before it need `ants auth user NAME --human` again)")
+    js.create_key_value(ants_daemon::hub::notify_config()).await.context("creating the notify bucket")
 }
 
 /// The holds of `human` and their revision, 0 when there are none.

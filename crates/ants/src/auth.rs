@@ -32,9 +32,9 @@ pub const SERVER_CONF: &str = "server.conf";
 const TEAM: &str = "ants";
 /// `max_control_line` of the servers that include [`SERVER_CONF`], hub and leaf nodes alike.
 const MAX_CONTROL_LINE: u32 = 16 * 1024;
-/// The longest uplink user JWT of a leaf node ([`issue_leaf`]): nats-server (2.14 and later) closes a leaf node
-/// connection whose CONNECT line is longer than 16 times the hub's `max_control_line`, and the line holds the JWT's
-/// signature and the leaf's names besides.
+/// The longest uplink user JWT of a leaf node ([`issue_leaf`]): nats-server closes a leaf node connection whose
+/// CONNECT line is longer than 16 times the hub's `max_control_line`, and the line holds the JWT's signature and the
+/// leaf's names besides.
 const MAX_UPLINK_JWT: usize = 16 * MAX_CONTROL_LINE as usize - 4 * 1024;
 
 /// The default team directory, `~/.config/ants/auth`.

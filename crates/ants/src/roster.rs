@@ -54,7 +54,7 @@ fn chain(entry: &RosterEntry) -> String {
 
 /// What the ant is doing: `fallback` while a fallback answers for its harness, `signed-out` while its harness is,
 /// `failing` while its harness keeps failing to start, `rate-limited` or `out-of-quota` while a provider limit holds its
-/// messages, else its activity, or `-` when its daemon does not say.
+/// messages, else its activity.
 pub(crate) fn activity(entry: &RosterEntry) -> &'static str {
     if entry.fallback.is_some() {
         return "fallback";
@@ -63,7 +63,7 @@ pub(crate) fn activity(entry: &RosterEntry) -> &'static str {
         (Some(_), _, _, _) => "signed-out",
         (None, Some(_), _, _) => "failing",
         (None, None, Some(limited), _) => limited.kind.as_str(),
-        (None, None, None, activity) => activity.map_or("-", |a| a.as_str()),
+        (None, None, None, activity) => activity.as_str(),
     }
 }
 
@@ -233,8 +233,8 @@ async fn read_unserved(js: &jetstream::Context, ants: &[&UserId]) -> Result<Vec<
     Ok(warnings)
 }
 
-/// The roster as a table: one row per ant under a header, columns padded to line up. `-` stands for what an older
-/// daemon does not publish.
+/// The roster as a table: one row per ant under a header, columns padded to line up. `-` stands for what an entry
+/// leaves out.
 pub fn table(entries: &[RosterEntry], now: DateTime<Utc>) -> String {
     let header = [
         "ANT",
@@ -259,12 +259,12 @@ pub fn table(entries: &[RosterEntry], now: DateTime<Utc>) -> String {
                 e.ant.to_string(),
                 State::of(e, now).as_str().to_owned(),
                 activity(e).to_owned(),
-                e.harnesses.map_or_else(|| "-".to_owned(), |n| n.to_string()),
+                e.harnesses.to_string(),
                 e.harness.clone(),
                 e.agent.as_ref().map_or_else(|| "-".to_owned(), |a| format!("{}@{}", a.name, a.version)),
                 e.machine.clone(),
-                e.version.clone().unwrap_or_else(|| "-".to_owned()),
-                e.perms.map_or_else(|| "-".to_owned(), |p| p.to_string()),
+                e.version.clone(),
+                e.perms.to_string(),
                 format!("{} ago", short(since(e.heartbeat_at, now))),
                 short(since(e.started_at, now)),
                 if e.capabilities.is_empty() { "-".to_owned() } else { e.capabilities.join(",") },
@@ -343,7 +343,7 @@ mod tests {
         RosterEntry {
             ant: ant.parse().unwrap(),
             machine: "m1".to_owned(),
-            instance: None,
+            instance: "run-1".to_owned(),
             harness: "copilot".to_owned(),
             agent: None,
             capabilities: vec!["rust".to_owned(), "review".to_owned()],
@@ -351,12 +351,12 @@ mod tests {
             workdir: Some("/src/app".to_owned()),
             started_at: now - chrono::Duration::seconds(started),
             heartbeat_at: now - chrono::Duration::seconds(beat),
-            activity: None,
-            handling: None,
-            harnesses: None,
+            activity: ants_proto::Activity::Idle,
+            handling: 0,
+            harnesses: 0,
             escalate_to: Vec::new(),
-            version: None,
-            perms: None,
+            version: ants_proto::ANTS_VERSION.to_owned(),
+            perms: ants_proto::PERMISSIONS_VERSION,
             signed_out: None,
             limited: None,
             failing: None,
@@ -373,16 +373,14 @@ mod tests {
         quiet.capabilities.clear();
         quiet.workdir = None;
         let mut busy = entry("dev-a", 190, 4, now);
-        (busy.activity, busy.handling, busy.harnesses) = (Some(Activity::Working), Some(1), Some(2));
+        (busy.activity, busy.handling, busy.harnesses) = (Activity::Working, 1, 2);
         busy.escalate_to = vec!["lead".parse().unwrap(), "dev-b".parse().unwrap()];
-        (busy.version, busy.perms) = (Some("0.2.0".to_owned()), Some(PermissionsVersion(2)));
+        (busy.version, busy.perms) = ("0.2.0".to_owned(), PermissionsVersion(2));
         busy.agent = Some(ants_proto::HarnessAgent { name: "copilot".to_owned(), version: "1.0.3".to_owned() });
-        let older = entry("dev-c", 60, 4, now);
+        let older = RosterEntry { version: "0.1.0".to_owned(), ..entry("dev-c", 60, 4, now) };
         assert_eq!(
             crate::versions::roster_note(&[busy.clone(), older, quiet.clone()], now).as_deref(),
-            Some(
-                "mixed ants versions: 0.2.0 (1), none published (1); `ants doctor` tells whether credentials may be renewed"
-            )
+            Some("mixed ants versions: 0.2.0 (1), 0.1.0 (1); `ants doctor` tells whether credentials may be renewed")
         );
         assert_eq!(crate::versions::roster_note(&[busy.clone(), quiet.clone()], now), None, "a stale one runs nothing");
         let table = table(&[busy, quiet], now);
@@ -426,34 +424,48 @@ mod tests {
                 "/src/app"
             ]
         );
+        let perms = ants_proto::PERMISSIONS_VERSION.to_string();
         assert_eq!(
             rows[2],
-            ["dev-b", "stale", "-", "-", "copilot", "-", "m1", "-", "-", "25s", "ago", "2h", "-", "-", "-"]
+            [
+                "dev-b",
+                "stale",
+                "idle",
+                "0",
+                "copilot",
+                "-",
+                "m1",
+                ants_proto::ANTS_VERSION,
+                &perms,
+                "25s",
+                "ago",
+                "2h",
+                "-",
+                "-",
+                "-"
+            ]
         );
         let columns: Vec<Option<usize>> = table.lines().map(|l| l.find("copilot").or(l.find("HARNESS "))).collect();
         assert!(columns.iter().all(|c| c.is_some() && *c == columns[0]), "{table}");
 
         let mut out = entry("dev-c", 600, 2, now);
-        out.activity = Some(Activity::Idle);
         let since = now - chrono::Duration::seconds(300);
         out.signed_out = Some(ants_proto::SignInNeeded { since, sign_in: Some("copilot login".to_owned()) });
         let mut unnamed = entry("dev-d", 600, 2, now);
         unnamed.signed_out = Some(ants_proto::SignInNeeded { since, sign_in: None });
         let mut limited = entry("dev-f", 600, 2, now);
-        limited.activity = Some(Activity::Idle);
         let until = now + chrono::Duration::seconds(120);
         limited.limited = Some(HarnessLimit { kind: LimitKind::RateLimit, since: now, until });
         let mut quota = entry("dev-g", 600, 2, now);
         quota.limited = Some(HarnessLimit { kind: LimitKind::Quota, since, until });
         let mut failing = entry("dev-h", 600, 2, now);
-        failing.activity = Some(Activity::Idle);
         failing.failing = Some(ants_proto::HarnessFailing { since, error: "copilot: not found".to_owned() });
         let entries = [out.clone(), unnamed, entry("dev-e", 600, 2, now), limited, quota, failing];
         let table = super::table(&entries, now);
         let activities: Vec<&str> = table.lines().map(|l| l.split_whitespace().nth(2).unwrap()).collect();
         assert_eq!(
             activities,
-            ["ACTIVITY", "signed-out", "signed-out", "-", "rate-limited", "out-of-quota", "failing"]
+            ["ACTIVITY", "signed-out", "signed-out", "idle", "rate-limited", "out-of-quota", "failing"]
         );
         let at = until.format("%H:%M:%SZ");
         assert_eq!(

@@ -77,7 +77,7 @@ the ant rejects it; no decision is stored for an expired request.
 
 `tool.kind` is an ACP tool kind (`read`, `edit`, `delete`, `move`, `search`, `execute`, `think`, `fetch`,
 `switch_mode`, `other`); `locations` and `input` may be absent. `human` names the human the request waits for and
-`stand_in` the ant's stand-in, both absent from older daemons (see [webhooks.md](webhooks.md#stand-in)). Check:
+`stand_in` the ant's stand-in, each absent when there is none (see [webhooks.md](webhooks.md#stand-in)). Check:
 `subject == "ants.approvals." + ant`.
 
 ### `ApprovalDecision` on `ants.approvals.<ant>.<request id>`
@@ -161,13 +161,13 @@ a decision of an ant of its chain sent to its inbox (which observers cannot read
 `verdict` is what the ant goes on with (`allow_once`, `allow_always`, `reject`), a verdict the harness did not offer
 counting as `reject`. `by` is `human`, `chain` (an ant of the requester's `escalate_to`, named by `decider`) or
 `expiry` (rejected unanswered). A human's decision names its human in `decider` when its `ApprovalDecision` names one
-(`by`, as the deciding client claims it; absent from older clients); the `ApprovalDecision` feed holds it.
+(`by`, as the deciding client claims it); the `ApprovalDecision` feed holds it.
 
 ### `RosterEntry` at `ants_roster` key `<ant>`
 
-What a daemon says of an ant it serves: `ant`, `machine`, `instance`?, `harness`, `agent`? (`{name, version}`),
-`capabilities`, `whoami`?, `workdir`, `started_at`, `heartbeat_at`, `activity`? (`idle`, `working`), `handling`?,
-`harnesses`?, `escalate_to`, `version`?, `perms`?, `signed_out`?, `limited`?, `failing`?, `memory_low`?
+What a daemon says of an ant it serves: `ant`, `machine`, `instance`, `harness`, `agent`? (`{name, version}`),
+`capabilities`, `whoami`?, `workdir`, `started_at`, `heartbeat_at`, `activity` (`idle`, `working`), `handling`,
+`harnesses`, `escalate_to`?, `version`, `perms`, `signed_out`?, `limited`?, `failing`?, `fallback`?, `memory_low`?
 (`{since, available, max_harnesses}`). The daemon puts it on start and every 10 s, and deletes it on a clean stop; the
 bucket's entries expire after 30 s, so a daemon that died leaves none. `ants hook run --on roster` hands on puts only, every heartbeat included. Check: `key == ant`.
 
@@ -193,11 +193,11 @@ Changes that may come in any release, and which hooks must accept:
 - new fields in any document, and new values in enumerations (`type` of a status update, `reason`, `state`, `by`,
   `activity`, `tool.kind`): ignore what is not known;
 - new feeds, subjects and observer rights;
-- fields documented as optional (`?`, or absent from older daemons) being absent.
+- fields documented as optional (marked `?`, or documented as absent in some cases) being absent.
 
 Removing or renaming a subject, a consumer name or a field, or changing what a field means, is a breaking change,
 called out in the release notes; one changing what observer credentials allow also comes with a new permissions
 version (see [Credentials across upgrades](auth.md#credentials-across-upgrades)).
 
 Snapshot tests (`crates/ants-proto/tests/wire_snapshots.rs`) pin the JSON form of these documents and of every other
-wire type, and check that documents in the shape older daemons wrote still parse.
+wire type: a changed snapshot is a wire change, reviewed against the rules above.

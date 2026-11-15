@@ -52,7 +52,7 @@ User, channel, thread and JetStream domain IDs use 1–64 characters of `a-z`, `
 
 ## Install
 
-Requirements: Rust 1.100+, [nats-server](https://github.com/nats-io/nats-server/releases) 2.11+ (tested with 2.15.3), and a signed-in harness CLI on machines running `ants daemon`.
+Requirements: Rust 1.100+, [nats-server](https://github.com/nats-io/nats-server/releases) 2.15+ (tested with 2.15.3), and a signed-in harness CLI on machines running `ants daemon`.
 
 ```sh
 cargo install --locked --git https://github.com/quanghle/ants ants   # or --path crates/ants
@@ -112,7 +112,7 @@ Without `ants setup`: `nats-server -js &`, `ants harness check --harness claude`
 | `ants tools list [-f] [--json]` / `show ID [--json]` | List or inspect pending tool requests (`<ant>/<id>`, unique prefix accepted; `-f` records approval presence). |
 | `ants tools approve ID [--always] [--rule [--config FILE]]` / `reject ID` | Decide a pending tool request; `--rule` appends the exact allow rule to `config.toml` and reloads the daemon. |
 | `ants dead list` / `replay SEQ` / `drop SEQ` / `watch` | Inspect, replay or drop dead letters; `watch` converts `MAX_DELIVERIES` advisories into dead letters. |
-| `ants init` | Create or upgrade stream `ANTS` and all 14 KV buckets (human creds; also runs automatically on first human CLI connect). |
+| `ants init` | Create whichever of stream `ANTS` and the 14 KV buckets is missing, leaving existing ones as they are (human creds; also runs automatically on first human CLI connect). |
 | `ants daemon [--ant NAME] [--config FILE] [--metrics ADDR] [ant-flags...]` | Serve config-file ants and schedules, or a single `--ant` ([docs/config.md](docs/config.md)). |
 | `ants add NAME [--config FILE] [--out FILE] [--store-key] [--jwt JWT \| --enroll CREDS [--hub URL] [--leaf-config FILE]] [ant-flags...]` | Generate local NKey, append `[[ant]]` to `config.toml`, and complete credentials ([docs/auth.md](docs/auth.md#adding-an-ant)). |
 | `ants retire NAME [--config FILE] [--dir DIR] [--no-push]` | Unlist, drain, revoke and delete credentials of a templated ant while keeping `~/.ants/<name>` ([docs/config.md](docs/config.md#retiring-an-added-ant)). |
@@ -136,10 +136,10 @@ Without `ants setup`: `nats-server -js &`, `ants harness check --harness claude`
 
 ### Identity, setup, completions and doctor
 
-- **Connection & identity:** every command accepts `--nats`, `--creds` and `--js-domain`, falling back to `[cli]` then top-level keys in `ANTS_CONFIG` (`~/.ants/config.toml`), except `ants daemon` and `ants add` (which read top-level config directly). NATS URLs containing credentials/tokens are rejected. Connecting with human credentials ensures `ants_humans` contains `<name>` (`human` needs no entry) and runs an `ants init` check/upgrade pass. Ant credentials skip `ants_humans`, warn, refuse `ants inbox`, and leave `--wait`/`-f` replies unread.
+- **Connection & identity:** every command accepts `--nats`, `--creds` and `--js-domain`, falling back to `[cli]` then top-level keys in `ANTS_CONFIG` (`~/.ants/config.toml`), except `ants daemon` and `ants add` (which read top-level config directly). NATS URLs containing credentials/tokens are rejected. Connecting with human credentials ensures `ants_humans` contains `<name>` (`human` needs no entry) and runs an `ants init` pass creating missing objects. Ant credentials skip `ants_humans`, warn, refuse `ants inbox`, and leave `--wait`/`-f` replies unread.
 - **`ants setup`:** without `--harness` and a config file, first chooses the harness of a new config by looking up each built-in's command on `PATH` (no handshake): the only one installed is picked and reported, several are offered in a numbered prompt on a terminal (failing without one), and none installed fails with each built-in's install and sign-in commands ([docs/config.md](docs/config.md#choosing-a-harness-in-ants-setup)). It then idempotently writes `~/.config/ants/nats.conf` (JetStream in `~/.ants/jetstream`, skipped for non-loopback `--nats` or existing `leaf.conf`), installs/starts `ants.nats` / `ants-nats`, runs `ants init`, creates/appends `~/.ants/config.toml`, runs `ants harness check`, installs/starts/reloads `ants.daemon` / `ants-daemon`, installs shell completions, and runs `ants doctor --no-harness` (`--dry-run` previews without changes).
 - **Shell completions:** `ants completions --install` writes to `~/.local/share/bash-completion/completions/ants`, `~/.local/share/zsh/site-functions/_ants` (add to `fpath` before `compinit`), or `~/.config/fish/completions/ants.fish` (`XDG_DATA_HOME`/`XDG_CONFIG_HOME` honoured). Dynamic lookups (`ANTS_COMPLETE`, 2 s timeout, silent on error, skipped for OS-keystore seeds) complete `@ant` / ant names, channels, `last` + recent 7 d threads (with thread `title`, else latest line), the latest 50 messages to or from the CLI's human over 7 d matching the typed start (with route and first line) and suggested reactions on `ants react`, pending tool requests, and dead-letter sequences.
-- **`ants doctor`:** read-only end-to-end check (`ok`, `warn`, `fail`, `skip`, with `fix` commands; 5 s per request, 10 s per network check, 60 s per harness handshake). Checks `config`, CLI `credentials` + OS `credentials key`, `server` + `jetstream`, `hub` objects, `consumers` (`≥ 80%` of `max_consumers`), team `versions` + cross-machine `harness versions`, JetStream `storage`, per-ant `credentials` / `harness` / shared git `workdir` / `tool permissions` (allow rules, approvals or webhook/schedule narrowing a harness running its tools unasked skips), `hub resolver` (`full` resolver) + `team keys backup` (when `--dir` holds team keys), `leaf` / `leaf uplink` / `leaf system uplink` / `leaf node` / `outbox`, installed `daemon` / `leaf node` / `hub` (the `ants setup` nats-server of `~/.config/ants/nats.conf`, without `leaf.conf`) / `webhook` services, `webhooks.toml` secrets (`0600`) / `exec` commands / `public_url` `/_approval` probe, and installed `devtunnel` / `bridge` services, tokens and reachability.
+- **`ants doctor`:** read-only end-to-end check (`ok`, `warn`, `fail`, `skip`, with `fix` commands; 5 s per request, 10 s per network check, 60 s per harness handshake). Checks `config`, CLI `credentials` + OS `credentials key`, `server` (failing below `nats-server` 2.15) + `jetstream`, `hub` objects, `consumers` (`≥ 80%` of `max_consumers`, raised with `nats stream edit`), team `versions` + cross-machine `harness versions`, JetStream `storage`, per-ant `credentials` / `harness` / shared git `workdir` / `tool permissions` (allow rules, approvals or webhook/schedule narrowing a harness running its tools unasked skips), `hub resolver` (`full` resolver) + `team keys backup` (when `--dir` holds team keys), `leaf` / `leaf uplink` / `leaf system uplink` / `leaf node` / `outbox`, installed `daemon` / `leaf node` / `hub` (the `ants setup` nats-server of `~/.config/ants/nats.conf`, without `leaf.conf`) / `webhook` services, `webhooks.toml` secrets (`0600`) / `exec` commands / `public_url` `/_approval` probe, and installed `devtunnel` / `bridge` services, tokens and reachability.
 
 ### Environment variables
 
@@ -160,7 +160,7 @@ Without `ants setup`: `nats-server -js &`, `ants harness check --harness claude`
 | `ANTS_LOG` | All commands | `tracing` stderr filter, default `info,rmcp=warn` |
 | `SSL_CERT_FILE` | TLS / `ants bridge connect` | PEM CA bundle trusted by `rustls` |
 | `ANTS_REQUIRE_TOOLS` | `cargo test` | When `1`, fail instead of skipping when `nats-server` is missing |
-| `ANTS_TEST_JS_ACK_FC_V2` | `cargo test` | When `1`, enable `js_ack_fc_v2: true` on test `nats-server`s (2.14+) |
+| `ANTS_TEST_JS_ACK_FC_V2` | `cargo test` | When `1`, enable `js_ack_fc_v2: true` on test `nats-server`s |
 
 `contrib/skills/ants/SKILL.md` teaches external coding agents to use the `ants` CLI (`copilot skill add contrib/skills/ants/SKILL.md`).
 
@@ -269,7 +269,7 @@ Human traffic costs 0 turns; ant-to-ant messages cost 1 turn (`ask_ant` requires
 
 ## Threads, search, titles and marks
 
-`ants thread list`, `show` and `search` read `ANTS` with human credentials via batched direct gets (`$JS.API.DIRECT.GET.ANTS`, 256 messages/request; falling back to `STREAM.MSG.GET` on pre-v3 credentials or older servers), consuming and marking read nothing. Entry kinds: `message`, `escalation`, `mention`, `post`, `note`, `approval`, `decision`, `dead` (subject mismatches marked `(forged)`).
+`ants thread list`, `show` and `search` read `ANTS` with human credentials via batched direct gets (`$JS.API.DIRECT.GET.ANTS`, 256 messages/request), consuming and marking read nothing. Entry kinds: `message`, `escalation`, `mention`, `post`, `note`, `approval`, `decision`, `dead` (subject mismatches marked `(forged)`).
 
 - **Search (`ants thread search`):** combines `--from`, `--to`, `--channel`, `--type`, `--grep` (case-insensitive), `--since` (inclusive, default 24 h before `--until`), `--until` (exclusive, default now; accepts durations, RFC 3339, or UTC `YYYY-MM-DD[ HH:MM]`), and `--limit` (default 50). `--from`, `--to` and `--type` prune scanned subjects server-side.
 - **Titles (`ants thread title`):** 1–120 trimmed single-line chars stored at `title.<thread>` in `ants_threads`, shared across all humans and shown in `thread list`, `thread show` and tab completion. A title an ant suggests (`suggest_thread_title`, carried as `title` on its reply) is stored by the next `ants thread list` or `thread show` of a human, by compare-and-set and only if `title.<thread>` never had an entry, with `by` naming the ant: a title a human set, renamed or cleared always wins. `thread show` marks it `(suggested by <ant>)`.
@@ -316,7 +316,7 @@ Every 5 m (first check at 30 s), one ant per daemon/server queries hub and local
 
 ## Credentials
 
-`ants auth` manages operator, account and system NKeys (`~/.config/ants/auth`), role-scoped `.creds` (ants, humans with per-device IDs, webhooks, observers, `channel-manager`, leaf uplinks), account revocations (`ants auth revoke` / `push`), and passphrase-encrypted `age` backups (`ants auth backup` / `restore`). `ants add`, `ants renew` / `ants enroll`, and `ants keys store` handle local key generation, over-NATS enrollment/renewal, and OS credential stores (macOS Keychain, Linux Secret Service, Windows Credential Manager). Renew all credentials to permissions version `4` before upgrading any server to `nats-server` 2.16 (`js_ack_fc_v2`). See [docs/auth.md](docs/auth.md).
+`ants auth` manages operator, account and system NKeys (`~/.config/ants/auth`), role-scoped `.creds` (ants, humans with per-device IDs, webhooks, observers, `channel-manager`, leaf uplinks), account revocations (`ants auth revoke` / `push`), and passphrase-encrypted `age` backups (`ants auth backup` / `restore`). `ants add`, `ants renew` / `ants enroll`, and `ants keys store` handle local key generation, over-NATS enrollment/renewal, and OS credential stores (macOS Keychain, Linux Secret Service, Windows Credential Manager). See [docs/auth.md](docs/auth.md).
 
 ## Leaf nodes
 
@@ -363,7 +363,7 @@ Options: `--ants PATH`, `--nats-server PATH`, `--nats-conf FILE` (default `~/.co
 | HTTPS bridge (`ants bridge connect` / `serve`) | `ants.bridge[-serve]` | `ants-bridge[-serve].service` | `--bridge URL` / `--bridge-serve` |
 | Log rotation (macOS) | `ants.logrotate` (`logrotate.log`) | — (`journald` rotates) | Always on macOS |
 
-- **Reload & restart:** `ants.daemon` and `ants.webhook` auto-reload edited config files (~6 s) and accept `SIGHUP` (`launchctl kill SIGHUP gui/$(id -u)/<label>`, `systemctl --user reload <unit>`); `ants add`, `ants webhook add`, `ants renew`, `ants leaf config`, `request_ant` and `ants tools approve --rule` reload or restart matching running units automatically. For renewed leaf uplink credentials (`ants add --enroll`, `ants renew`, `request_ant`), `ants.nats` gets a reload that reconnects only the uplink, keeping local connections (`nats-server` 2.14+, as the running leaf node reports; `ants add` and `ants renew` restart older ones).
+- **Reload & restart:** `ants.daemon` and `ants.webhook` auto-reload edited config files (~6 s) and accept `SIGHUP` (`launchctl kill SIGHUP gui/$(id -u)/<label>`, `systemctl --user reload <unit>`); `ants add`, `ants webhook add`, `ants renew`, `ants leaf config`, `request_ant` and `ants tools approve --rule` reload or restart matching running units automatically. For renewed leaf uplink credentials (`ants add --enroll`, `ants renew`, `request_ant`), `ants.nats` gets a reload that reconnects only the uplink, keeping local connections.
 - **Logs & linger:** on macOS, `ants.logrotate` copy-truncates logs > 10 MiB hourly (keeping `.1`..`.5.gz`). On Linux, enable `loginctl enable-linger $USER` (`[boot] systemd=true` in `/etc/wsl.conf` on WSL 2). Remove units with `launchctl bootout gui/$(id -u)/<label>` or `systemctl --user disable --now <unit>`.
 
 ## Monitoring
@@ -421,7 +421,7 @@ cargo deny check        # licenses, advisories, bans, sources (deny.toml)
 - **Warnings & Windows:** CI sets `CARGO_BUILD_WARNINGS=deny` and cross-checks `windows-latest` (`rustup target add x86_64-pc-windows-gnu` + mingw-w64 locally).
 - **Dependency cooldown:** `.cargo/config.toml` sets a 7-day `registry.global-min-publish-age` (`CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow cargo update -p CRATE --precise VERSION` overrides for security fixes).
 - **Tests:** NATS integration tests skip without `nats-server` on `PATH` unless `ANTS_REQUIRE_TOOLS=1`; CI runs `cargo test` both with default acks and with `ANTS_TEST_JS_ACK_FC_V2=1`.
-- **Wire snapshots:** `crates/ants-proto/tests/wire_snapshots.rs` pins the JSON form of every wire type in [insta](https://insta.rs) snapshots, so a renamed field or variant fails `cargo test`; after an intended wire change, review them with `cargo insta review` (or `INSTA_UPDATE=always`) and keep older peers reading the new form.
+- **Wire snapshots:** `crates/ants-proto/tests/wire_snapshots.rs` pins the JSON form of every wire type in [insta](https://insta.rs) snapshots, so a renamed field or variant fails `cargo test`; after an intended wire change, review them with `cargo insta review` (or `INSTA_UPDATE=always`): a changed snapshot is a wire change, which follows the [versioning rules](docs/hooks.md#versioning).
 
 ## Layout
 

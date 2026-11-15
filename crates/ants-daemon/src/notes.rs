@@ -19,7 +19,7 @@ use crate::reading::{self, Reading};
 
 /// Reads of busy notes before [`spend`] gives up.
 const SPEND_TRIES: usize = 5;
-/// Header naming the subjects `Nats-Expected-Last-Subject-Sequence` applies to (nats-server 2.11).
+/// Header naming the subjects `Nats-Expected-Last-Subject-Sequence` applies to.
 const EXPECTED_LAST_SUBJECT: &str = "Nats-Expected-Last-Subject-Sequence-Subject";
 
 /// The notes of one thread: its posts, oldest first.

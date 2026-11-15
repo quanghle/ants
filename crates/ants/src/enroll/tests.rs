@@ -227,7 +227,7 @@ async fn an_ant_new_to_a_leaf_enrolls_through_it_and_reaches_the_hub() {
         out
     };
     let (h, h_js) = bus::connect(&hub.url, Some(&creds(&human)), Some(&domain), &human, "test").await.unwrap();
-    bus::init_stream(&h_js).await.unwrap();
+    bus::ensure_stream(&h_js).await.unwrap();
     bus::ensure_links(&h_js).await.unwrap();
 
     let spawn_leaf = |machine: &Machine, members: &[(UserId, Role)], approver: EnrollApprover| {
@@ -285,7 +285,7 @@ async fn an_ant_new_to_a_leaf_enrolls_through_it_and_reaches_the_hub() {
     let leaf_approved = approved.leaf.unwrap();
     assert_eq!(leaf_approved.machine, m1);
     assert!(leaf_approved.outbox, "the hub sources m1's outbox");
-    let kept = members::issued(&team, &m1, &uplink_creds).unwrap().unwrap();
+    let kept = members::issued(&team, &m1).unwrap().unwrap();
     assert_eq!(kept.ants, [dev_a.clone(), dev_c.clone()], "a later `ants auth leaf m1` keeps dev-c");
 
     let (old, key) = auth::read_creds(&uplink_creds).unwrap();
@@ -416,8 +416,7 @@ async fn an_ant_the_uplink_has_no_room_for_is_neither_signed_nor_recorded() {
     let uplink = server.dir().join("leaf-m1.creds");
     auth::tests::uplink_for_most_ants(&team, &m1, None, &uplink);
     let before = std::fs::read_to_string(&uplink).unwrap();
-    let (members_before, issued_before) =
-        (members::issued(&team, &m1, &uplink).unwrap(), revoke::issued(&team).unwrap().len());
+    let (members_before, issued_before) = (members::issued(&team, &m1).unwrap(), revoke::issued(&team).unwrap().len());
     let approver = Approver::connect(&server.url, &team, None, LISTEN).await.unwrap();
     let (leaf, user) = (Leaf { machine: m1.clone(), creds: uplink.clone() }, KeyPair::new_user());
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
@@ -441,6 +440,6 @@ async fn an_ant_the_uplink_has_no_room_for_is_neither_signed_nor_recorded() {
     let issued = revoke::issued(&team).unwrap();
     assert!(!issued.iter().any(|i| i.name == "dev-x"), "dev-x is not signed");
     assert_eq!(issued.len(), issued_before);
-    assert_eq!(members::issued(&team, &m1, &uplink).unwrap(), members_before, "dev-x is not among m1's members");
+    assert_eq!(members::issued(&team, &m1).unwrap(), members_before, "dev-x is not among m1's members");
     assert_eq!(std::fs::read_to_string(&uplink).unwrap(), before);
 }

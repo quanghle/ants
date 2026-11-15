@@ -6,9 +6,9 @@
 //! the file or in the OS credential store ([`keys::replace`]), and reloads what uses it ([`run`]).
 //!
 //! As with enrollment, requests are core NATS messages, repeated every [`ENROLL_REPEAT`] until an answer comes, and
-//! the answer carries only a JWT, useless without the seed that never leaves the holder. Only credentials still valid,
-//! not revoked, and issued with permissions version [`RENEW_SINCE`] or later, whose subjects they need, may ask:
-//! expired ones cannot connect, and are issued again with `ants auth` on the machine holding the team keys.
+//! the answer carries only a JWT, useless without the seed that never leaves the holder. Only credentials still valid
+//! and not revoked may ask: expired ones cannot connect, and are issued again with `ants auth` on the machine holding
+//! the team keys.
 //!
 //! The uplink credentials of a leaf node connect as no client: a human's credentials carry their request
 //! (`ants renew LEAF.creds --creds HUMAN.creds`).
@@ -18,10 +18,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ants_daemon::config::{self, Summary};
-use ants_daemon::creds::{self, Expiry, Finding, Kind};
+use ants_daemon::creds::{self, Finding, Kind};
 use ants_daemon::keystore::{self, Store};
 use ants_daemon::{bus, roster};
-use ants_proto::{ENROLL_REPEAT, JsDomain, RENEW_SINCE, RenewReply, RenewRequest, UserId, subject};
+use ants_proto::{ENROLL_REPEAT, JsDomain, RenewReply, RenewRequest, UserId, subject};
 use anyhow::{Context as _, Result, bail};
 use chrono::Utc;
 use futures::StreamExt as _;
@@ -69,7 +69,6 @@ pub async fn run(args: RenewArgs, nats: &str, cli_creds: Option<&Path>) -> Resul
         _ => path.clone(),
     };
     let user = KeyPair::new_user();
-    warn_old_uplink(args.leaf_config.as_deref(), &path);
     eprintln!(
         "asking to renew {} ({}) for the new key {}: approve with `ants enroll renew {}` on the machine holding the \
          account key; waiting (Ctrl-C stops)",
@@ -97,13 +96,9 @@ fn renewable(path: &Path, jwt: &str) -> Result<(auth::Claims, Finding)> {
     if finding.renewable(now) {
         return Ok((claims, finding));
     }
-    let why = match (&finding.kind, finding.expiry(now), finding.version) {
-        (Kind::Enrollment { .. } | Kind::LeafSystem { .. }, _, _) => "are not renewed over NATS".to_owned(),
-        (_, Expiry::Expired, _) => "expired, and expired credentials connect no more".to_owned(),
-        (_, _, Some(version)) => {
-            format!("carry permissions version {version}, older than renewal over NATS (version {RENEW_SINCE})")
-        }
-        (_, _, None) => format!("carry no permissions version, older than renewal over NATS (version {RENEW_SINCE})"),
+    let why = match &finding.kind {
+        Kind::Enrollment { .. } | Kind::LeafSystem { .. } => "are not renewed over NATS",
+        _ => "expired, and expired credentials connect no more",
     };
     bail!(
         "{} ({}) {why}: renew them on the machine holding the team keys, `{}`",
@@ -191,25 +186,6 @@ fn check_renewed(jwt: &str, current: &auth::Claims, finding: &Finding, public_ke
         bail!("would make {} into {}", finding.holder(), renewed.holder());
     }
     Ok(())
-}
-
-/// Warn when the uplink of the machine's leaf node, from the configuration at `leaf_config` or the default one,
-/// cannot carry renewal requests, unless it is what `renewing` names.
-fn warn_old_uplink(leaf_config: Option<&Path>, renewing: &Path) {
-    let Some((conf, uplink)) = leaf_uplink(leaf_config) else { return };
-    if same_file(&uplink, renewing) {
-        return;
-    }
-    let finding = auth::read_creds(&uplink).ok().and_then(|(jwt, _)| Finding::from_jwt(&jwt).ok());
-    if let Some(finding) = finding.filter(|f| f.version.is_none_or(|v| v < RENEW_SINCE)) {
-        eprintln!(
-            "warning: the leaf node of {} carries no renewal request with uplink credentials {} older than \
-             permissions version {RENEW_SINCE}; connect to the hub with --nats, or renew them first: `{}`",
-            conf.display(),
-            uplink.display(),
-            finding.renew().join("`, then `")
-        );
-    }
 }
 
 /// The configuration of the machine's leaf node, at `path` or the default one when it exists, and the path of its
@@ -696,7 +672,7 @@ mod tests {
     }
 
     #[test]
-    fn expired_enrollment_and_older_credentials_name_their_renewal_on_the_team_key_machine() {
+    fn expired_and_enrollment_credentials_name_their_renewal_on_the_team_key_machine() {
         let dir = ants_test_support::scratch_dir("renewable");
         let team = dir.join("auth");
         auth::init(&team).unwrap();

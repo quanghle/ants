@@ -27,7 +27,7 @@ expression: value
     "cto"
   ],
   "version": "0.1.0",
-  "perms": 4,
+  "perms": 1,
   "signed_out": {
     "since": "2025-01-01T12:02:00Z",
     "sign_in": "copilot login"

@@ -726,7 +726,7 @@ fn why_text(escalation: &Escalation, because: &OwnerBecause) -> String {
         .to_owned()
 }
 
-/// Why an escalation went to the owner, unless it never went up a chain for want of one, as before chains existed.
+/// Why an escalation went to the owner, unless it never went up a chain for want of one.
 fn owner_text(escalation: &Escalation, because: &OwnerBecause) -> Option<String> {
     let (stuck, level) = (&escalation.stuck, escalation.level);
     match because {

@@ -267,7 +267,7 @@ impl ChannelPost {
     }
 
     /// The owner of the post's thread, one of the `humans`: the one it carries, else its author when a human
-    /// ([`ChannelPost::by_human`]), as for a post stored before posts carried owners. An owner that is no human is
+    /// ([`ChannelPost::by_human`]). An owner that is no human is
     /// ignored: only a human owns a thread. The owner a post carries is its author's choice: a reader takes a thread's
     /// owner from its stored posts instead ([`ThreadOrigin`]).
     pub fn thread_owner(&self, humans: &Humans) -> Option<UserId> {

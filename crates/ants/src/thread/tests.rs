@@ -353,7 +353,7 @@ async fn a_human_picks_its_threads_by_a_start_of_their_id_or_the_last() {
     let Some(server) = crate::auth::tests::Server::start() else { return };
     let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
     let (_, js) = server.connect_as(&alice, ants_proto::Role::Human).await;
-    ants_daemon::bus::init_stream(&js).await.unwrap();
+    ants_daemon::bus::ensure_stream(&js).await.unwrap();
     let me = crate::humans::Me { id: alice.clone(), role: ants_proto::Role::Human };
     let resolve = |pick: &str| pick.parse::<Pick>().unwrap().resolve(&js, &me);
     assert!(resolve("last").await.unwrap_err().to_string().contains("no message to or from alice"));
@@ -403,7 +403,7 @@ async fn a_human_picks_a_message_by_a_start_of_its_id() {
     let Some(server) = crate::auth::tests::Server::start() else { return };
     let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
     let (_, js) = server.connect_as(&alice, ants_proto::Role::Human).await;
-    ants_daemon::bus::init_stream(&js).await.unwrap();
+    ants_daemon::bus::ensure_stream(&js).await.unwrap();
     let me = crate::humans::Me { id: alice.clone(), role: ants_proto::Role::Human };
     let resolve = |pick: &str| pick.parse::<MessagePick>().unwrap().resolve(&js, &me);
 
@@ -462,7 +462,7 @@ async fn a_human_reads_threads_back_without_consuming_them() {
     let Some(server) = crate::auth::tests::Server::start() else { return };
     let (alice, dev_a) = (p("alice"), p("dev-a"));
     let (_, js) = server.connect_as(&alice, ants_proto::Role::Human).await;
-    ants_daemon::bus::init_stream(&js).await.unwrap();
+    ants_daemon::bus::ensure_stream(&js).await.unwrap();
     let ask = Envelope::new(alice.clone(), dev_a.clone(), "build it").with_owner(Some(alice.clone()));
     let reply = ask.reply(dev_a.clone(), "built", ants_proto::Role::Human).unwrap();
     let note = NotesPost::new(ask.thread_id.clone(), alice.clone(), "remember the tests");

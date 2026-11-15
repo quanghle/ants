@@ -115,7 +115,8 @@ async fn waits_for_a_locked_credential_store_but_not_for_a_seed_it_lacks() {
         return;
     };
     let key = nkeys::KeyPair::new_user();
-    let claims = serde_json::json!({ "name": "dev-a", "sub": key.public_key(), "nats": {} });
+    let tags = [ants_proto::PERMISSIONS_VERSION.tag()];
+    let claims = serde_json::json!({ "name": "dev-a", "sub": key.public_key(), "nats": { "tags": tags } });
     let jwt = format!("e30.{}.sig", data_encoding::BASE64URL_NOPAD.encode(claims.to_string().as_bytes()));
     let creds = server.dir().join("dev-a.creds");
     std::fs::write(&creds, crate::creds::stored_text(&jwt, &key.public_key())).unwrap();
@@ -145,37 +146,31 @@ async fn waits_for_a_locked_credential_store_but_not_for_a_seed_it_lacks() {
 }
 
 /// The `ANTS` stream of a version before channels: it captures no `ants.chan.>`.
-async fn stream_before_channels(js: &jetstream::Context) {
-    let mut config = hub::stream_config();
-    config.subjects.retain(|s| s != subject::ALL_CHANNELS);
-    js.create_stream(config).await.unwrap();
-}
-
 fn post() -> ants_proto::ChannelPost {
     ants_proto::ChannelPost::new("ops".parse().unwrap(), dev(), "hi")
 }
 
-/// Straight to the hub, a publish no stream captures fails, naming `ants init`; one the stream captures does not.
+/// Straight to the hub, a publish while the hub has no stream fails, naming `ants init`; once it has, it does not.
 #[tokio::test]
-async fn a_publish_the_hubs_stream_does_not_capture_names_ants_init() {
+async fn a_publish_with_no_stream_on_the_hub_names_ants_init() {
     let Some(server) = NatsServer::start() else {
         return;
     };
     let (_client, js) = connect(&server.url, None, None, &dev(), "test").await.unwrap();
-    stream_before_channels(&js).await;
     let post = post();
     let err = format!("{:#}", store(&js, post.subject(), &post, &post.id.to_string()).await.unwrap_err());
     assert!(err.contains("`ants init` with a human's credentials") && err.contains(&post.subject()), "{err}");
     let err = format!("{:#}", publish_json(&js, post.subject(), &post, None).await.unwrap_err());
     assert!(err.contains("`ants init`"), "{err}");
+    ensure_stream(&js).await.unwrap();
     let envelope = Envelope::new(dev(), UserId::human(), "captured");
     assert_eq!(publish(&js, &envelope).await.unwrap(), Stored::Hub);
 }
 
-/// Through a leaf node whose uplink is up, a publish the hub's stream does not capture is kept in the machine's
-/// outbox with a warning naming `ants init`; with the uplink down, the hub is just out of reach.
+/// Through a leaf node whose uplink is up, a publish while the hub has no stream is kept in the machine's outbox with
+/// a warning naming `ants init`; with the uplink down, the hub is just out of reach.
 #[tokio::test]
-async fn through_a_leaf_a_publish_the_hubs_stream_does_not_capture_names_ants_init() {
+async fn through_a_leaf_a_publish_with_no_stream_on_the_hub_names_ants_init() {
     let uplink_port = free_port();
     let Some(hub) = NatsServer::spawn_with(|dir| {
         format!(
@@ -196,7 +191,6 @@ async fn through_a_leaf_a_publish_the_hubs_stream_does_not_capture_names_ants_in
     let (dev, domain) = (dev(), "hub".parse().unwrap());
     let (client, js) =
         connect_retrying(&leaf.url, None, Some(&domain), &dev, "test", std::future::pending()).await.unwrap().unwrap();
-    stream_before_channels(&js).await;
     let outbox = stream::Config {
         name: ants_proto::OUTBOX_STREAM.to_owned(),
         subjects: vec![ants_proto::OUTBOX_SUBJECTS.to_owned()],

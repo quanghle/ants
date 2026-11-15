@@ -19,8 +19,7 @@ use futures::StreamExt as _;
 use crate::thread::{self, Entry, Pick};
 
 /// Why titles and marks cannot be had when the hub has no bucket for them.
-pub const MISSING: &str = "there is no bucket ants_threads (a hub set up by an older ants): `ants init` as a human \
-                           creates it";
+pub const MISSING: &str = "there is no bucket ants_threads: `ants init` as a human creates it";
 /// How many times a change of the marks is tried again when another device changed them meanwhile.
 const CONFLICTS: usize = 16;
 /// How many titles are read at once.
@@ -29,7 +28,7 @@ const CONCURRENT: usize = 16;
 /// stream that late, out of a leaf's outbox, and a title or mark may come before it.
 pub const KEPT: Duration = ants_daemon::bus::RETENTION;
 
-/// The direct get subject of `human`'s marks: credentials that may not publish it predate titles, pins and archives.
+/// The direct get subject of `human`'s marks, which only `human`'s credentials may publish.
 fn marks_right(human: &UserId) -> String {
     format!("$JS.API.DIRECT.GET.KV_{THREADS_BUCKET}.$KV.{THREADS_BUCKET}.{}", marks_key(human))
 }
@@ -39,14 +38,14 @@ pub fn titles_right() -> String {
     format!("$JS.API.DIRECT.GET.KV_{THREADS_BUCKET}.$KV.{THREADS_BUCKET}.title.*")
 }
 
-/// The titles and the marks of the CLI's human, unless its credentials predate them: a request they deny would only
+/// The titles and the marks of the CLI's human, unless its credentials are no human's: a request they deny would only
 /// time out.
 pub async fn open(nats: &crate::Nats<'_>, js: &jetstream::Context) -> Result<Meta> {
     let me = &nats.me.id;
     if !nats.rights.may_publish(&marks_right(me)) {
         bail!(
-            "the credentials of {me} predate thread titles, pins and archives: renew them with `ants renew FILE`, or \
-             issue new ones with `ants auth user {me} --human`"
+            "the credentials of {me} may not read thread titles, pins and archives: those of a human may, from \
+             `ants auth user NAME --human`"
         );
     }
     Meta::open(js, nats.domain, me).await
@@ -360,8 +359,8 @@ mod tests {
         let Some(server) = crate::auth::tests::Server::start() else { return };
         let (alice, dev_a) = ("alice".parse::<UserId>().unwrap(), "dev-a".parse::<UserId>().unwrap());
         let (_, js) = server.connect_as(&alice, Role::Human).await;
-        ants_daemon::bus::init_stream(&js).await.unwrap();
-        ants_daemon::hub::create_bucket(&js, ants_daemon::hub::threads_config()).await.unwrap();
+        ants_daemon::bus::ensure_stream(&js).await.unwrap();
+        js.create_key_value(ants_daemon::hub::threads_config()).await.unwrap();
         let meta = Meta::open(&js, None, &alice).await.unwrap();
         let ask = Envelope::new(alice.clone(), dev_a.clone(), "build it");
         let thread = &ask.thread_id;
@@ -412,8 +411,8 @@ mod tests {
         let Some(server) = crate::auth::tests::Server::start() else { return };
         let (alice, dev_a) = ("alice".parse::<UserId>().unwrap(), "dev-a".parse::<UserId>().unwrap());
         let (_, js) = server.connect_as(&alice, Role::Human).await;
-        ants_daemon::bus::init_stream(&js).await.unwrap();
-        ants_daemon::hub::create_bucket(&js, ants_daemon::hub::threads_config()).await.unwrap();
+        ants_daemon::bus::ensure_stream(&js).await.unwrap();
+        js.create_key_value(ants_daemon::hub::threads_config()).await.unwrap();
         let meta = Meta::open(&js, None, &alice).await.unwrap();
         let (gone, alive, fresh, renamed) = (made_ago(40), made_ago(40), made_ago(40), made_ago(40));
         let unordered: ThreadId = "deploy-1".parse().unwrap();

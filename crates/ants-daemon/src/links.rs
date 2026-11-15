@@ -57,7 +57,7 @@ pub async fn pass_on(js: &jetstream::Context, envelope: &Envelope) -> Result<()>
 }
 
 /// [`pass_on`], logging a failure: the message goes out anyway, its recipient's own messages linking to the thread
-/// losing its creator and owner, as they would before the links bucket or credentials allowing it existed.
+/// losing its creator and owner, as with no link recorded.
 pub async fn passing_on(js: &jetstream::Context, envelope: &Envelope) {
     if let Err(e) = pass_on(js, envelope).await {
         tracing::warn!(

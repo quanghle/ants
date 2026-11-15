@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use ants_proto::{DeviceId, HUMANS_BUCKET, HumanEntry, Humans, PermissionsVersion, Role, UserId, subject};
+use ants_proto::{DeviceId, HUMANS_BUCKET, HumanEntry, Humans, Role, UserId, subject};
 use anyhow::{Context as _, Result, anyhow};
 use async_nats::jetstream::stream::DirectGetErrorKind;
 use async_nats::jetstream::{self, kv};
@@ -44,38 +44,31 @@ impl Me {
         let claims = creds_claims(text)?;
         let name = claims["name"].as_str().context("a user JWT without a name")?;
         let id: UserId = name.parse().with_context(|| format!("a user JWT naming {name:?}, not a user id"))?;
-        // Writing the humans bucket is the right only humans have.
-        let writes_humans = may_publish(&claims, &format!("$KV.{HUMANS_BUCKET}.>"));
-        let role = if writes_humans { Role::Human } else { Role::by_default(&id) };
+        let role = if writes_humans(&claims) { Role::Human } else { Role::by_default(&id) };
         Ok(Self { id, role })
     }
 }
 
-/// The device of a human the credentials were issued for ([`DeviceId`]), as the CLI acting as the human tells it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Device {
-    /// None for a legacy device, whose credentials carry no id, and without credentials.
-    pub id: Option<DeviceId>,
-    /// Whether the credentials write the human's read marker ([`subject::read_marker`]): those issued before it was
-    /// kept do not.
-    pub marks_read: bool,
+/// The device of a human the credentials file `creds` were issued for ([`DeviceId`]), which a human's credentials
+/// carry; none for an ant's, and without credentials.
+pub fn device(creds: Option<&Path>) -> Result<Option<DeviceId>> {
+    let Some(path) = creds else { return Ok(None) };
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading credentials {}", path.display()))?;
+    device_of(&text).with_context(|| format!("credentials {}", path.display()))
 }
 
-impl Device {
-    /// The device the credentials file `creds` of `me` were issued for.
-    pub fn from_creds(creds: Option<&Path>, me: &UserId) -> Result<Self> {
-        let Some(path) = creds else {
-            return Ok(Self { id: None, marks_read: true });
-        };
-        let text = std::fs::read_to_string(path).with_context(|| format!("reading credentials {}", path.display()))?;
-        Self::from_creds_text(&text, me).with_context(|| format!("credentials {}", path.display()))
+fn device_of(text: &str) -> Result<Option<DeviceId>> {
+    let claims = creds_claims(text)?;
+    if !writes_humans(&claims) {
+        return Ok(None);
     }
+    let tags = claims["nats"]["tags"].as_array().into_iter().flatten().filter_map(Value::as_str);
+    DeviceId::from_tags(tags).context("a human's credentials without a device id").map(Some)
+}
 
-    fn from_creds_text(text: &str, me: &UserId) -> Result<Self> {
-        let claims = creds_claims(text)?;
-        let tags = claims["nats"]["tags"].as_array().into_iter().flatten().filter_map(Value::as_str);
-        Ok(Self { id: DeviceId::from_tags(tags), marks_read: may_publish(&claims, &subject::read_marker(me)) })
-    }
+/// Whether user JWT `claims` write the humans bucket, the right only humans have.
+fn writes_humans(claims: &Value) -> bool {
+    may_publish(claims, &format!("$KV.{HUMANS_BUCKET}.>"))
 }
 
 /// What the credentials let the CLI publish, so JetStream API requests they would have denied, which only time out,
@@ -93,14 +86,6 @@ impl Rights {
         let text = std::fs::read_to_string(path).with_context(|| format!("reading credentials {}", path.display()))?;
         let claims = creds_claims(&text).with_context(|| format!("credentials {}", path.display()))?;
         Ok(Self { claims: Some(claims) })
-    }
-
-    /// Whether they carry a permissions version older than `version`, or none (issued before versions were stamped);
-    /// false without credentials.
-    pub fn older_than(&self, version: PermissionsVersion) -> bool {
-        let Some(claims) = &self.claims else { return false };
-        let tags = claims["nats"]["tags"].as_array().into_iter().flatten().filter_map(Value::as_str);
-        PermissionsVersion::from_tags(tags).is_none_or(|v| v < version)
     }
 
     /// Whether they allow publishing `subject`: listed as it is, or no publish allow list at all.
@@ -228,16 +213,6 @@ mod tests {
     }
 
     #[test]
-    fn credentials_tell_the_permissions_version_they_predate() {
-        let rights = |tags: Value| Rights { claims: Some(json!({ "name": "alice", "nats": { "tags": tags } })) };
-        let v3 = PermissionsVersion(3);
-        assert!(rights(json!(["ants-perms:2"])).older_than(v3));
-        assert!(rights(json!([])).older_than(v3), "unstamped");
-        assert!(!rights(json!(["device:x", "ants-perms:3"])).older_than(v3));
-        assert!(!Rights { claims: None }.older_than(v3), "no credentials");
-    }
-
-    #[test]
     fn the_credentials_name_whom_the_cli_acts_as() {
         assert_eq!(Me::from_creds(None).unwrap(), Me { id: UserId::human(), role: Role::Human });
         let human = json!({ "pub": { "allow": ["ants.inbox.*.alice", "$KV.ants_humans.>"] } });
@@ -252,19 +227,16 @@ mod tests {
     }
 
     #[test]
-    fn the_credentials_tell_the_device_and_whether_they_mark_read() {
+    fn a_human_s_credentials_tell_the_device() {
         let device = DeviceId::generate();
-        let claims = json!({ "name": "alice", "nats": {
-            "tags": ["team", device.tag()], "pub": { "allow": ["$KV.ants_read.alice"] } } });
-        let alice = p("alice");
-        let got = Device::from_creds_text(&creds_with(claims), &alice).unwrap();
-        assert_eq!(got, Device { id: Some(device), marks_read: true });
-        let legacy = json!({ "name": "alice", "nats": { "pub": { "allow": ["$KV.ants_humans.>"] } } });
-        assert_eq!(
-            Device::from_creds_text(&creds_with(legacy), &alice).unwrap(),
-            Device { id: None, marks_read: false }
-        );
-        assert_eq!(Device::from_creds(None, &UserId::human()).unwrap(), Device { id: None, marks_read: true });
+        let human = json!({ "allow": ["$KV.ants_humans.>"] });
+        let claims = json!({ "name": "alice", "nats": { "tags": ["team", device.tag()], "pub": human } });
+        assert_eq!(device_of(&creds_with(claims)).unwrap(), Some(device));
+        let without = json!({ "name": "alice", "nats": { "pub": human } });
+        assert!(device_of(&creds_with(without)).is_err(), "a human's credentials name their device");
+        let ant = json!({ "name": "dev-a", "nats": { "pub": { "allow": ["ants.inbox.*.dev-a"] } } });
+        assert_eq!(device_of(&creds_with(ant)).unwrap(), None);
+        assert_eq!(super::device(None).unwrap(), None);
     }
 
     /// With real credentials: the human's first connection creates the bucket and registers it, later ones find it.

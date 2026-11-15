@@ -17,10 +17,6 @@ use serde::Serialize;
 /// UTC days reported by default, today included.
 pub const DEFAULT_DAYS: u32 = 7;
 
-/// What a failed read of a spend key most likely means.
-const STALE_CREDS: &str = "human credentials issued before `ants spend` existed cannot read spend: re-issue them with \
-                           `ants auth user`";
-
 /// What to report: one ant or all, one thread or the days up to today.
 pub struct Select {
     pub ant: Option<UserId>,
@@ -146,7 +142,7 @@ pub async fn ants(
     }
     for key in keys(js, &format!("{}.day.*", ant.map_or("*", UserId::as_str))).await? {
         let Some((ant, day)) = parse_day_key(&key).filter(|(_, day)| wanted.contains(day.as_str())) else { continue };
-        if let Some(spent) = caps::day_spent(kv, &ant, &day).await.context(STALE_CREDS)? {
+        if let Some(spent) = caps::day_spent(kv, &ant, &day).await? {
             found.entry(ant).or_default().insert(day, spent);
         }
     }
@@ -167,7 +163,7 @@ async fn threads_of(js: &jetstream::Context, kv: &DirectKv, ant: &UserId) -> Res
     let mut threads = Vec::new();
     for key in keys(js, &format!("{ant}.*.spend")).await? {
         let Some((ant, thread)) = parse_thread_key(&key) else { continue };
-        if let Some(spent) = caps::thread_spent(kv, &ant, &thread).await.context(STALE_CREDS)?
+        if let Some(spent) = caps::thread_spent(kv, &ant, &thread).await?
             && (spent.tokens > 0 || spent.cost > 0.0)
         {
             threads.push(ThreadSpent { thread, spent });
@@ -188,7 +184,7 @@ pub async fn thread(
     let mut reports = Vec::new();
     for key in keys(js, &format!("{}.{thread}.spend", ant.map_or("*", UserId::as_str))).await? {
         let Some((ant, thread)) = parse_thread_key(&key) else { continue };
-        if let Some(spent) = caps::thread_spent(kv, &ant, &thread).await.context(STALE_CREDS)? {
+        if let Some(spent) = caps::thread_spent(kv, &ant, &thread).await? {
             let caps = caps.get(&ant).copied();
             reports.push(ThreadReport { ant, thread, spent, caps });
         }

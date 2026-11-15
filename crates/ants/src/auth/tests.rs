@@ -12,9 +12,8 @@ use ants_daemon::roster::Registration;
 use ants_daemon::webhooks::Webhooks;
 use ants_daemon::{notes, owners};
 use ants_proto::{
-    ChannelEntry, ChannelId, ChannelPost, DeadLetter, Destination, Envelope, NotesPost, RosterEntry, STREAM,
-    STREAM_SUBJECTS, ThreadId, attempt_key, chan_consumer, chan_reader, inbox_prefix, link_key, notes_consumer,
-    session_key, subject,
+    ChannelEntry, ChannelId, ChannelPost, DeadLetter, Destination, Envelope, NotesPost, RosterEntry, STREAM, ThreadId,
+    attempt_key, chan_consumer, chan_reader, inbox_prefix, link_key, notes_consumer, session_key, subject,
 };
 use ants_test_support::NatsServer;
 use async_nats::jetstream::AckKind;
@@ -167,7 +166,7 @@ fn renewed_credentials_keep_what_they_are_for_a_new_key() {
         let new = KeyPair::new_user();
         let renewed = renew(&team, &jwt, &new.public_key()).unwrap();
         assert!(creds::Finding::from_jwt(&jwt).unwrap().same_credentials(&renewed.finding), "{name}");
-        assert_eq!(renewed.finding.version, Some(PERMISSIONS_VERSION), "{name}");
+        assert_eq!(renewed.finding.version, PERMISSIONS_VERSION, "{name}");
         assert_eq!(
             (verified(&renewed.jwt).unwrap().sub, renewed.previous.as_str()),
             (new.public_key(), &*key.public_key())
@@ -208,7 +207,7 @@ fn renewed_credentials_keep_what_they_are_for_a_new_key() {
     issue_leaf(&team, &m1, &members, &[p("hook")], EnrollApprover::With, Some(&hub), &out("leaf-m1")).unwrap();
     let leaf = renewed("leaf-m1");
     check_leaf(&account_key(&team).unwrap(), &leaf.jwt, &m1).unwrap();
-    let kept = crate::members::issued(&team, &m1, &out("none")).unwrap().unwrap();
+    let kept = crate::members::issued(&team, &m1).unwrap().unwrap();
     assert_eq!(
         kept,
         crate::members::Members::new(&members, &[p("hook")], EnrollApprover::With),
@@ -617,7 +616,7 @@ async fn every_human_has_the_same_rights_and_reads_only_its_own_inbox() {
     assert!(bus::ensure_stream(&carol_js).await.is_err(), "carol is no human");
     assert!(crate::humans::ensure(&d_js).await.is_err(), "only a human creates the humans bucket");
     bus::ensure_stream(&a_js).await.unwrap();
-    let b_stream = bus::init_stream(&b_js).await.unwrap();
+    let b_stream = bus::ensure_stream(&b_js).await.unwrap();
     bus::ensure_roster(&b_js, ants_proto::ROSTER_TTL).await.unwrap();
     bus::init_own_buckets(&a_js).await.unwrap();
     bus::init_own_buckets(&b_js).await.unwrap();
@@ -656,7 +655,8 @@ async fn every_human_has_the_same_rights_and_reads_only_its_own_inbox() {
         assert_eq!(timeout(WAIT, all.next()).await.unwrap().unwrap().subject.as_str(), to_alice.subject());
     }
     for (js, human, other, sent) in [(&a_js, &alice, &bob, &to_alice), (&b_js, &bob, &alice, &to_bob)] {
-        assert!(crate::inbox::Inbox::open(js, other).await.is_err(), "{human} reads {other}'s inbox");
+        let theirs = async { crate::inbox::Inbox::open(js, other).await?.unread(&Default::default()).await };
+        assert!(theirs.await.is_err(), "{human} reads {other}'s inbox");
         let mut inbox = crate::inbox::Inbox::open(js, human).await.unwrap();
         let unread = inbox.unread(&crate::inbox::Select::default()).await.unwrap();
         assert_eq!(unread.as_slice(), std::slice::from_ref(sent));
@@ -683,7 +683,7 @@ async fn only_a_human_creates_and_reads_its_own_notification_consumer() {
     let Some(server) = Server::start() else { return };
     let (alice, bob, dev_a) = (p("alice"), p("bob"), p("dev-a"));
     let (_, h_js) = server.connect(&UserId::human()).await;
-    bus::init_stream(&h_js).await.unwrap();
+    bus::ensure_stream(&h_js).await.unwrap();
     let config = |of: &UserId| jetstream::consumer::pull::Config {
         durable_name: Some(ants_proto::notify_consumer(of)),
         filter_subjects: vec![subject::ALL_APPROVAL_REQUESTS.to_owned(), subject::inbox_of(of)],
@@ -891,7 +891,7 @@ async fn ants_write_their_own_roster_entry_and_everyone_reads_the_roster() {
     let entry = RosterEntry {
         ant: dev_a.clone(),
         machine: "m1".to_owned(),
-        instance: None,
+        instance: "run-1".to_owned(),
         harness: "copilot".to_owned(),
         agent: None,
         capabilities: vec!["rust".to_owned()],
@@ -899,12 +899,12 @@ async fn ants_write_their_own_roster_entry_and_everyone_reads_the_roster() {
         workdir: None,
         started_at: now,
         heartbeat_at: now,
-        activity: None,
-        handling: None,
-        harnesses: None,
+        activity: ants_proto::Activity::Idle,
+        handling: 0,
+        harnesses: 0,
         escalate_to: Vec::new(),
-        version: None,
-        perms: None,
+        version: ants_proto::ANTS_VERSION.to_owned(),
+        perms: ants_proto::PERMISSIONS_VERSION,
         signed_out: None,
         limited: None,
         failing: None,
@@ -1090,12 +1090,9 @@ async fn any_human_titles_a_thread_but_each_marks_only_its_own_threads() {
     let (_, b_js) = server.connect_as(&bob, Role::Human).await;
     let (_, d_js) = server.connect(&dev_a).await;
     let missing = Meta::open(&a_js, None, &alice).await.unwrap().title(&thread).await.unwrap_err();
-    assert_eq!(missing.to_string(), MISSING, "an older hub has no bucket");
-    assert!(
-        ants_daemon::hub::create_bucket(&d_js, ants_daemon::hub::threads_config()).await.is_err(),
-        "only a human creates it"
-    );
-    ants_daemon::hub::create_bucket(&a_js, ants_daemon::hub::threads_config()).await.unwrap();
+    assert_eq!(missing.to_string(), MISSING, "no bucket before `ants init`");
+    assert!(d_js.create_key_value(ants_daemon::hub::threads_config()).await.is_err(), "only a human creates it");
+    a_js.create_key_value(ants_daemon::hub::threads_config()).await.unwrap();
     let (alice_meta, bob_meta) =
         (Meta::open(&a_js, None, &alice).await.unwrap(), Meta::open(&b_js, None, &bob).await.unwrap());
 
@@ -1137,7 +1134,7 @@ async fn a_human_adopts_an_ant_s_title_only_on_a_thread_never_titled() {
     let (alice, dev_a) = (p("alice"), p("dev-a"));
     let (_, a_js) = server.connect_as(&alice, Role::Human).await;
     let (_, d_js) = server.connect(&dev_a).await;
-    ants_daemon::hub::create_bucket(&a_js, ants_daemon::hub::threads_config()).await.unwrap();
+    a_js.create_key_value(ants_daemon::hub::threads_config()).await.unwrap();
     let meta = Meta::open(&a_js, None, &alice).await.unwrap();
     let (fresh, titled, cleared) = (ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
 
@@ -1234,7 +1231,7 @@ async fn a_webhook_posts_as_itself_to_its_destinations_only_and_reads_no_message
     )
     .unwrap();
     let (_, h_js) = server.connect(&UserId::human()).await;
-    bus::init_stream(&h_js).await.unwrap();
+    bus::ensure_stream(&h_js).await.unwrap();
     crate::webhook::ensure_bucket(&h_js).await.unwrap();
 
     let (raw, mut errors) = server.watched_with(&hook, &creds).await;
@@ -1314,7 +1311,7 @@ async fn an_observer_reads_approvals_dead_letters_status_and_the_roster_and_publ
     let text = std::fs::read_to_string(&creds).unwrap();
     assert_eq!(ants_daemon::creds::Finding::from_creds(&text).unwrap().kind, ants_daemon::creds::Kind::Observer);
     let (_, h_js) = server.connect(&UserId::human()).await;
-    bus::init_stream(&h_js).await.unwrap();
+    bus::ensure_stream(&h_js).await.unwrap();
     bus::ensure_roster(&h_js, Duration::from_secs(60)).await.unwrap();
     let (a, a_js) = server.connect(&dev_a).await;
     let (_, b_js) = server.connect(&dev_b).await;
@@ -1429,7 +1426,7 @@ async fn a_hook_runs_once_per_dead_letter_from_where_its_consumer_left_off() {
     )
     .unwrap();
     let (_, h_js) = server.connect(&UserId::human()).await;
-    bus::init_stream(&h_js).await.unwrap();
+    bus::ensure_stream(&h_js).await.unwrap();
     let (_, a_js) = server.connect(&dev_a).await;
     let connecting = bus::connect_retrying(&server.url, Some(&creds), None, &audit, "test", std::future::pending());
     let (_, o_js) = timeout(WAIT, connecting).await.expect("audit reaches JetStream").unwrap().unwrap();
@@ -1486,7 +1483,7 @@ async fn ants_post_to_channels_as_themselves_and_read_but_never_write_the_channe
     let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
     let ops: ChannelId = "ops".parse().unwrap();
     let (_h, h_js) = server.connect(&human).await;
-    let stream = bus::init_stream(&h_js).await.unwrap();
+    let stream = bus::ensure_stream(&h_js).await.unwrap();
     assert!(stream.cached_info().config.subjects.iter().any(|s| s == subject::ALL_CHANNELS));
     let (_a, a_js) = server.connect(&dev_a).await;
 
@@ -1573,7 +1570,7 @@ async fn the_channel_manager_applies_the_owner_s_changes_only_and_announces_them
     let (human, dev_a, dev_b, manager) = (UserId::human(), p("dev-a"), p("dev-b"), UserId::channel_manager());
     let ops: ChannelId = "ops".parse().unwrap();
     let (h_client, h_js) = server.connect(&human).await;
-    bus::init_stream(&h_js).await.unwrap();
+    bus::ensure_stream(&h_js).await.unwrap();
     let roster = bus::ensure_roster(&h_js, ants_proto::ROSTER_TTL).await.unwrap();
     let channels = bus::ensure_channels(&h_js).await.unwrap();
     let mut entry = ChannelEntry::new(ops.clone());
@@ -1584,7 +1581,7 @@ async fn the_channel_manager_applies_the_owner_s_changes_only_and_announces_them
     let listed = RosterEntry {
         ant: dev_b.clone(),
         machine: "m1".to_owned(),
-        instance: None,
+        instance: "run-1".to_owned(),
         harness: "copilot".to_owned(),
         agent: None,
         capabilities: Vec::new(),
@@ -1592,12 +1589,12 @@ async fn the_channel_manager_applies_the_owner_s_changes_only_and_announces_them
         workdir: None,
         started_at: now,
         heartbeat_at: now,
-        activity: None,
-        handling: None,
-        harnesses: None,
+        activity: ants_proto::Activity::Idle,
+        handling: 0,
+        harnesses: 0,
         escalate_to: Vec::new(),
-        version: None,
-        perms: None,
+        version: ants_proto::ANTS_VERSION.to_owned(),
+        perms: ants_proto::PERMISSIONS_VERSION,
         signed_out: None,
         limited: None,
         failing: None,
@@ -1707,23 +1704,7 @@ async fn failed_messages_become_dead_letters_the_human_replays() {
     let (human, dev_a) = (UserId::human(), p("dev-a"));
     let (h_client, h_js) = server.connect(&human).await;
     let (_, a_js) = server.connect(&dev_a).await;
-
-    // A stream from before dead letters, thread notes and direct gets gains them on `ants init`, and keeps the
-    // subject of its older thread notes, whose posts stay stored.
-    let mut old: Vec<String> = STREAM_SUBJECTS
-        .iter()
-        .filter(|s| ![subject::DEAD_ALL, subject::ALL_NOTES].contains(*s))
-        .map(|s| (*s).to_owned())
-        .collect();
-    old.push("ants.plan.>".to_owned());
-    h_js.create_stream(jetstream::stream::Config { name: STREAM.to_owned(), subjects: old, ..Default::default() })
-        .await
-        .unwrap();
-    let stream = bus::init_stream(&h_js).await.unwrap();
-    assert!(bus::missing_subjects(&stream.cached_info().config.subjects).is_empty());
-    assert!(stream.cached_info().config.subjects.iter().any(|s| s == "ants.plan.>"), "older subjects stay");
-    assert!(stream.cached_info().config.allow_direct, "and direct gets");
-    assert!(stream.cached_info().config.republish.is_some(), "and republishes inbox messages");
+    let stream = bus::ensure_stream(&h_js).await.unwrap();
 
     let mut human_inbox = h_client.subscribe(subject::inbox_of(&human)).await.unwrap();
     h_client.flush().await.unwrap();
@@ -1808,7 +1789,7 @@ async fn messages_jetstream_stops_delivering_become_one_dead_letter() {
     let (human, dev_a) = (UserId::human(), p("dev-a"));
     let (h_client, h_js) = server.connect(&human).await;
     let (_, a_js) = server.connect(&dev_a).await;
-    let stream = bus::init_stream(&h_js).await.unwrap();
+    let stream = bus::ensure_stream(&h_js).await.unwrap();
     let mut human_inbox = h_client.subscribe(subject::inbox_of(&human)).await.unwrap();
 
     // Two watchers, as with `ants dead watch` and `ants inbox --follow` running at once.
@@ -1894,7 +1875,7 @@ async fn the_human_s_side_tells_the_owner_the_thread_s_posts_name_not_the_one_an
     let (h_client, h_js) = server.connect_as(&alice, Role::Human).await;
     let (_, b_js) = server.connect(&dev_b).await;
     let (_, lead_js) = server.connect(&lead).await;
-    let stream = bus::init_stream(&h_js).await.unwrap();
+    let stream = bus::ensure_stream(&h_js).await.unwrap();
     let mut to_human = h_client.subscribe(subject::inbox_of(&human)).await.unwrap();
     let mut to_alice = h_client.subscribe(subject::inbox_of(&alice)).await.unwrap();
     h_client.flush().await.unwrap();
@@ -1961,7 +1942,7 @@ async fn the_longest_uplink_credentials_connect() {
             .await
             .unwrap();
     h_js.set_timeout(Duration::from_secs(1));
-    bus::init_stream(&h_js).await.unwrap();
+    bus::ensure_stream(&h_js).await.unwrap();
     let leaf_creds = hub.dir().join("leaf-m1.creds");
     let (ants, _) = uplink_for_most_ants(&team, &m1, Some(&domain), &leaf_creds);
     assert!(read_creds(&leaf_creds).unwrap().0.len() > MAX_UPLINK_JWT - 8 * 1024);
@@ -2008,7 +1989,7 @@ async fn clients_on_a_leaf_node_reach_the_hub_stream_through_its_domain() {
             .await
             .unwrap();
     h_js.set_timeout(Duration::from_secs(1));
-    bus::init_stream(&h_js).await.unwrap();
+    bus::ensure_stream(&h_js).await.unwrap();
     bus::init_own_buckets(&h_js).await.unwrap();
     crate::webhook::ensure_bucket(&h_js).await.unwrap();
 

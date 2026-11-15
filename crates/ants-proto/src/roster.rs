@@ -19,17 +19,14 @@ pub struct RosterEntry {
     /// Host name of the machine the daemon runs on.
     pub machine: String,
     /// The daemon run that put the entry, unique to it, so two daemons on one machine tell their entries apart.
-    /// Missing from entries of older daemons.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub instance: Option<String>,
+    pub instance: String,
     /// Agent harness behind the ant, such as `copilot`.
     pub harness: String,
     /// The agent the harness runs, as the ACP handshake of its latest start named it. Missing until a harness of the
-    /// daemon started, when the agent does not name itself, and from entries of older daemons.
+    /// daemon started, and when the agent does not name itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<HarnessAgent>,
     /// Free-form tags the ant is good for (`rust`, `frontend`, `billing`), for routing requests to it.
-    #[serde(default)]
     pub capabilities: Vec<String>,
     /// Role instructions advertised to other ants.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -41,44 +38,38 @@ pub struct RosterEntry {
     pub started_at: DateTime<Utc>,
     /// When the daemon last refreshed the entry.
     pub heartbeat_at: DateTime<Utc>,
-    /// Whether the ant was handling a message at the last refresh. Missing from entries of older daemons.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub activity: Option<Activity>,
+    /// Whether the ant was handling a message at the last refresh.
+    pub activity: Activity,
     /// Messages being handled at the last refresh.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub handling: Option<u32>,
+    pub handling: u32,
     /// Live harness processes (sessions) at the last refresh.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub harnesses: Option<u32>,
+    pub harnesses: u32,
     /// The ant's escalation chain, in order: what it cannot settle goes to these ants before a human. The first
     /// leads. Published so any daemon can follow the chain while the ant is offline.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub escalate_to: Vec<UserId>,
-    /// The version of ants the daemon runs ([`ANTS_VERSION`]). Missing from entries of older daemons.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
-    /// The permissions version of the ants the daemon runs ([`PERMISSIONS_VERSION`]). Missing from entries of older
-    /// daemons.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub perms: Option<PermissionsVersion>,
+    /// The version of ants the daemon runs ([`ANTS_VERSION`]).
+    pub version: String,
+    /// The permissions version of the ants the daemon runs ([`PERMISSIONS_VERSION`]).
+    pub perms: PermissionsVersion,
     /// Set while the ant's harness is signed out: messages to the ant wait, unanswered, until a check finds the
-    /// harness signed in again. Missing while it is signed in, and from entries of older daemons.
+    /// harness signed in again. Missing while it is signed in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signed_out: Option<SignInNeeded>,
     /// Set while the ant's harness is held back by a provider limit: messages to the ant wait, spending no attempts,
-    /// until `until`. Missing otherwise, and from entries of older daemons.
+    /// until `until`. Missing otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limited: Option<HarnessLimit>,
     /// Set while the ant's harness keeps failing to start: messages to the ant wait, spending no attempts, until a
-    /// check starts it. Missing otherwise, and from entries of older daemons.
+    /// check starts it. Missing otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failing: Option<HarnessFailing>,
     /// Set while a fallback of the ant answers its messages, its own harness signed out, out of quota or failing to
-    /// start. Missing otherwise, and from entries of older daemons.
+    /// start. Missing otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback: Option<ServingFallback>,
     /// Set while the system memory available on `machine` is low: the daemon stops the ant's idle harnesses at once
-    /// and runs fewer of them. Missing otherwise, and from entries of older daemons.
+    /// and runs fewer of them. Missing otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_low: Option<MemoryLow>,
 }
@@ -223,7 +214,7 @@ mod tests {
         let entry = RosterEntry {
             ant: p("dev-a"),
             machine: "build-1".to_owned(),
-            instance: None,
+            instance: "run-1".to_owned(),
             harness: "copilot".to_owned(),
             agent: None,
             capabilities: vec!["rust".to_owned(), "nats".to_owned()],
@@ -231,12 +222,12 @@ mod tests {
             workdir: None,
             started_at: Utc::now(),
             heartbeat_at: Utc::now(),
-            activity: None,
-            handling: None,
-            harnesses: None,
+            activity: Activity::Idle,
+            handling: 0,
+            harnesses: 0,
             escalate_to: Vec::new(),
-            version: None,
-            perms: None,
+            version: "0.3.1".to_owned(),
+            perms: PermissionsVersion(2),
             signed_out: None,
             limited: None,
             failing: None,
@@ -244,9 +235,10 @@ mod tests {
             memory_low: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
-        assert!(!json.contains("workdir") && !json.contains("activity") && !json.contains("harnesses"), "{json}");
-        assert!(!json.contains("escalate_to") && !json.contains("instance"), "{json}");
-        assert!(!json.contains("version") && !json.contains("perms"), "{json}");
+        assert!(json.contains(r#""instance":"run-1""#), "{json}");
+        assert!(json.contains(r#""activity":"idle","handling":0,"harnesses":0"#), "{json}");
+        assert!(json.contains(r#""version":"0.3.1","perms":2"#), "{json}");
+        assert!(!json.contains("workdir") && !json.contains("escalate_to"), "{json}");
         assert!(!json.contains("signed_out") && !json.contains("limited") && !json.contains("failing"), "{json}");
         assert!(!json.contains("agent") && !json.contains("fallback") && !json.contains("memory_low"), "{json}");
         assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), entry);
@@ -257,18 +249,12 @@ mod tests {
         assert!(json.contains(r#""agent":{"name":"copilot-agent","version":"1.0.3"}"#), "{json}");
         assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), named);
         assert_eq!(agent.to_string(), "copilot-agent 1.0.3");
-        let versioned =
-            RosterEntry { version: Some("0.3.1".to_owned()), perms: Some(PermissionsVersion(2)), ..entry.clone() };
-        let json = serde_json::to_string(&versioned).unwrap();
-        assert!(json.contains(r#""version":"0.3.1","perms":2"#), "{json}");
-        assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), versioned);
         let chained = RosterEntry { escalate_to: vec![p("lead"), p("dev-b")], ..entry.clone() };
         let json = serde_json::to_string(&chained).unwrap();
         assert!(json.contains(r#""escalate_to":["lead","dev-b"]"#), "{json}");
         assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), chained);
         assert_eq!(chained.leader(), Some(&p("lead")));
-        let busy =
-            RosterEntry { activity: Some(Activity::Working), handling: Some(2), harnesses: Some(1), ..entry.clone() };
+        let busy = RosterEntry { activity: Activity::Working, handling: 2, harnesses: 1, ..entry.clone() };
         let json = serde_json::to_string(&busy).unwrap();
         assert!(json.contains(r#""activity":"working","handling":2,"harnesses":1"#), "{json}");
         assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), busy);
@@ -324,25 +310,22 @@ mod tests {
         assert_eq!(entry.check_key("dev-b").unwrap_err().to_string(), "roster entry of dev-a found at key dev-b");
         assert_eq!(subject::roster(&entry.ant), "$KV.ants_roster.dev-a");
 
-        let minimal = r#"{"ant":"dev-b","machine":"m","harness":"copilot","state":"idle",
-            "started_at":"2026-01-01T00:00:00Z","heartbeat_at":"2026-01-01T00:00:10Z"}"#;
+        let minimal = r#"{"ant":"dev-b","machine":"m","instance":"run-2","harness":"copilot","capabilities":[],
+            "started_at":"2026-01-01T00:00:00Z","heartbeat_at":"2026-01-01T00:00:10Z",
+            "activity":"idle","handling":0,"harnesses":0,"version":"0.3.1","perms":1}"#;
         let entry: RosterEntry = serde_json::from_str(minimal).unwrap();
-        assert!(entry.capabilities.is_empty() && entry.escalate_to.is_empty());
-        assert_eq!((entry.whoami, entry.instance), (None, None));
-        assert_eq!((entry.version, entry.perms), (None, None), "older daemons publish no version");
-        assert_eq!((entry.activity, entry.handling, entry.harnesses), (None, None, None));
-        assert_eq!(entry.signed_out, None, "an older daemon's entry");
-        assert_eq!(entry.limited, None, "an older daemon's entry");
-        assert_eq!(entry.failing, None, "an older daemon's entry");
-        assert_eq!(entry.fallback, None, "an older daemon's entry");
-        assert_eq!(entry.memory_low, None, "an older daemon's entry");
+        assert!(entry.escalate_to.is_empty());
+        assert_eq!((entry.agent, entry.whoami, entry.workdir), (None, None, None));
+        assert_eq!((entry.signed_out, entry.limited, entry.failing), (None, None, None));
+        assert_eq!((entry.fallback, entry.memory_low), (None, None));
 
-        let newer = r#"{"ant":"dev-b","machine":"m","harness":"copilot","activity":"draining","harnesses":3,
+        let newer = r#"{"ant":"dev-b","machine":"m","instance":"run-2","harness":"copilot","capabilities":[],
+            "activity":"draining","handling":0,"harnesses":3,"version":"9.0.0","perms":9,"queue":4,
             "signed_out":{"since":"2026-01-01T00:00:05Z","sign_in":"x login","reason":"expired"},
             "limited":{"kind":"daily_cap","since":"2026-01-01T00:00:05Z","until":"2026-01-01T01:00:00Z"},
             "started_at":"2026-01-01T00:00:00Z","heartbeat_at":"2026-01-01T00:00:10Z"}"#;
         let entry: RosterEntry = serde_json::from_str(newer).unwrap();
-        assert_eq!((entry.activity, entry.harnesses), (Some(Activity::Unknown), Some(3)));
+        assert_eq!((entry.activity, entry.harnesses), (Activity::Unknown, 3));
         assert_eq!(entry.signed_out.and_then(|s| s.sign_in).as_deref(), Some("x login"));
         assert_eq!(entry.limited.map(|l| l.kind), Some(LimitKind::Unknown));
     }

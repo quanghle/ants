@@ -18,20 +18,13 @@ fn revoking_a_name_takes_all_its_keys_and_drops_revocations_once_expired() {
         auth::verified(auth::creds_jwt(&fs::read_to_string(out).unwrap()).unwrap()).unwrap().sub
     };
     let (laptop, phone) = (human("laptop"), human("phone"));
-    // Credentials issued before the registry are found through their .creds file.
-    let old = nkeys::KeyPair::new_user();
-    let jwt = auth::sign_user(&team, &alice, ants_proto::Role::Human, None, &old.public_key()).unwrap();
-    auth::write_creds(&team.join("alice-old.creds"), &jwt, &old).unwrap();
-    let registry: Vec<Issued> = issued(&team).unwrap().into_iter().filter(|i| i.key != old.public_key()).collect();
-    let lines: String = registry.iter().map(|i| serde_json::to_string(i).unwrap() + "\n").collect();
-    fs::write(team.join(ISSUED), lines).unwrap();
 
     let err = revoke(&team, Some("bob"), &[]).unwrap_err().to_string();
     assert!(err.contains("no credentials of bob"), "{err}");
     assert!(revoke(&team, None, &["not-a-key".to_owned()]).is_err());
     let mut keys: Vec<String> = revoke(&team, Some("alice"), &[]).unwrap().into_iter().map(|r| r.key).collect();
     keys.sort();
-    let mut expected = vec![laptop.clone(), phone, old.public_key()];
+    let mut expected = vec![laptop.clone(), phone];
     expected.sort();
     assert_eq!(keys, expected);
     let conf = fs::read_to_string(team.join(auth::SERVER_CONF)).unwrap();
@@ -39,18 +32,18 @@ fn revoking_a_name_takes_all_its_keys_and_drops_revocations_once_expired() {
     let body = account.unwrap().split('.').nth(1).unwrap();
     let claims: serde_json::Value =
         serde_json::from_slice(&data_encoding::BASE64URL_NOPAD.decode(body.as_bytes()).unwrap()).unwrap();
-    assert_eq!(claims["nats"]["revocations"].as_object().unwrap().len(), 3, "{claims}");
+    assert_eq!(claims["nats"]["revocations"].as_object().unwrap().len(), 2, "{claims}");
 
     // A key of credentials that expired needs no revocation: it is dropped on the next change.
     let enrollment = team.join("enroll.creds");
     auth::issue_enrollment(&team, &"dev-c".parse().unwrap(), Duration::from_secs(1), &enrollment).unwrap();
     let revoked_now = revoke(&team, Some("enroll-dev-c"), std::slice::from_ref(&laptop)).unwrap();
     assert_eq!(revoked_now.len(), 2);
-    assert_eq!(revoked(&team).unwrap().len(), 4, "laptop's revocation is replaced, not repeated");
+    assert_eq!(revoked(&team).unwrap().len(), 3, "laptop's revocation is replaced, not repeated");
     std::thread::sleep(Duration::from_secs(2));
     apply(&team).unwrap();
     let left: Vec<Option<String>> = revoked(&team).unwrap().into_iter().map(|r| r.name).collect();
-    assert_eq!(left, vec![Some("alice".to_owned()); 3]);
+    assert_eq!(left, vec![Some("alice".to_owned()); 2]);
     fs::remove_dir_all(dir).unwrap();
 }
 
@@ -67,12 +60,12 @@ fn the_listing_names_the_renewal_of_credentials_in_use_that_are_outdated_or_expi
     ant("dev-c", &team.join("dev-c.creds"));
     auth::issue_enrollment(&team, &"dev-d".parse().unwrap(), Duration::from_secs(60), &dir.join("e.creds")).unwrap();
     let now = auth::now().unwrap();
-    // dev-a's keys predate versions; dev-b's expires in a day.
+    // dev-a's keys carry an older permissions version; dev-b's expires in a day.
     let lines: String = issued(&team)
         .unwrap()
         .into_iter()
         .map(|i| match i.name.as_str() {
-            "dev-a" => Issued { perms: None, ..i },
+            "dev-a" => Issued { perms: ants_proto::PermissionsVersion(0), ..i },
             "dev-b" => Issued { expires_at: Some(now + 86_400), ..i },
             _ => i,
         })
@@ -249,16 +242,6 @@ async fn a_human_s_devices_are_listed_relabelled_and_revoked_one_by_one() {
     let (laptop, laptop_id) = issue("Laptop", "alice-laptop.creds");
     let (phone, phone_id) = issue("Phone", "alice-phone.creds");
     let (tablet, tablet_id) = issue("Phone", "alice-tablet.creds");
-    // Credentials of a human from before devices: a legacy device.
-    let legacy = team.join("alice-legacy.creds");
-    let permissions = ants_proto::Permissions::for_user(&alice, ants_proto::Role::Human);
-    let mut old = issued(&team).unwrap();
-    auth::issue_device(&team, &alice, Kind::Ant, permissions, None, &legacy).unwrap();
-    let mut line = issued(&team).unwrap().pop().unwrap();
-    line.kind = Kind::Human;
-    old.push(line);
-    let lines: String = old.iter().map(|i| serde_json::to_string(i).unwrap() + "\n").collect();
-    fs::write(team.join(ISSUED), lines).unwrap();
     let text = fs::read_to_string(&laptop).unwrap();
     let claims = crate::humans::creds_claims(&text).unwrap();
     assert_eq!(claims["nats"]["tags"][0], laptop_id.tag(), "the JWT carries the device id");
@@ -269,22 +252,22 @@ async fn a_human_s_devices_are_listed_relabelled_and_revoked_one_by_one() {
             Kind::Ant,
             ants_proto::Permissions::for_user(&alice, ants_proto::Role::Ant),
             Some("x"),
-            &legacy
+            &team.join("x.creds")
         )
         .is_err()
     );
 
     let listed = devices(&team, "alice").unwrap();
-    let ids: Vec<Option<ants_proto::DeviceId>> = listed.iter().map(|d| d.device).collect();
-    assert_eq!(ids, [Some(laptop_id), Some(phone_id), Some(tablet_id), None]);
+    let ids: Vec<ants_proto::DeviceId> = listed.iter().map(|d| d.device).collect();
+    assert_eq!(ids, [laptop_id, phone_id, tablet_id]);
     let err = device_keys(&team, "alice", &["Phone".to_owned()]).unwrap_err().to_string();
     assert!(err.contains(&phone_id.to_string()) && err.contains(&tablet_id.to_string()), "{err}");
     assert!(device_keys(&team, "alice", &["Desk".to_owned()]).is_err());
     assert!(rename(&team, "alice", "Laptop", "").is_err());
     let renamed = rename(&team, "alice", &tablet_id.to_string(), "Tablet").unwrap();
-    assert_eq!((renamed.device, renamed.label.as_deref()), (Some(tablet_id), Some("Tablet")));
+    assert_eq!((renamed.device, renamed.label.as_deref()), (tablet_id, Some("Tablet")));
     let labels: Vec<Option<String>> = devices(&team, "alice").unwrap().into_iter().map(|d| d.label).collect();
-    assert_eq!(labels, [Some("Laptop".into()), Some("Phone".into()), Some("Tablet".into()), None]);
+    assert_eq!(labels, [Some("Laptop".into()), Some("Phone".into()), Some("Tablet".into())]);
 
     // Revoking the phone, by its label now unique, closes its connection only.
     let connected = async |creds: &Path| {
@@ -303,5 +286,5 @@ async fn a_human_s_devices_are_listed_relabelled_and_revoked_one_by_one() {
     assert!(laptop_closed.try_recv().is_err(), "the laptop's connection was closed");
     assert!(watched(&server.url, &tablet).await.is_ok());
     let revoked: Vec<bool> = devices(&team, "alice").unwrap().into_iter().map(|d| d.revoked).collect();
-    assert_eq!(revoked, [false, true, false, false]);
+    assert_eq!(revoked, [false, true, false]);
 }

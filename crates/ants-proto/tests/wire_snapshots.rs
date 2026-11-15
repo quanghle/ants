@@ -1,9 +1,8 @@
-//! Golden snapshots of the JSON form of every ants-proto wire type, and parse checks of documents older versions wrote.
+//! Golden snapshots of the JSON form of every ants-proto wire type, pinning the current wire form.
 //!
-//! Peers of different versions share these documents, so renaming or dropping a field, or a variant, breaks the older
-//! ones even when every round trip still passes. Each value is fully populated, every optional field set, so each
-//! field name is pinned. A changed snapshot is a wire change: review it with `cargo insta review`, and keep older
-//! peers reading what newer ones write.
+//! Peers share these documents, so renaming or dropping a field, or a variant, is a wire change even when every round
+//! trip still passes. Each value is fully populated, every optional field set, so each field name is pinned. A changed
+//! snapshot is a wire change: review it with `cargo insta review`.
 
 #![allow(clippy::too_many_lines)]
 
@@ -109,7 +108,7 @@ fn envelope() -> Envelope {
     }
 }
 
-/// [`envelope`] with none of its optional fields: a plain message, as the first versions wrote one.
+/// [`envelope`] with none of its optional fields: a plain message.
 fn plain_envelope() -> Envelope {
     Envelope {
         in_reply_to: None,
@@ -160,7 +159,7 @@ fn identifiers() {
             "hub".parse::<JsDomain>().unwrap(),
             machine(),
             device(),
-            PermissionsVersion(4),
+            PermissionsVersion(1),
         ),
     );
 }
@@ -169,7 +168,7 @@ fn identifiers() {
 fn serving() {
     snap(
         "serving",
-        &Serving { machine: "studio.local".to_owned(), version: "0.1.0".to_owned(), perms: PermissionsVersion(4) },
+        &Serving { machine: "studio.local".to_owned(), version: "0.1.0".to_owned(), perms: PermissionsVersion(1) },
     );
 }
 
@@ -180,7 +179,7 @@ fn roster() {
         &RosterEntry {
             ant: user("dev-a"),
             machine: "studio.local".to_owned(),
-            instance: Some("019a7d2b-0000-7000-8000-000000000001".to_owned()),
+            instance: "019a7d2b-0000-7000-8000-000000000001".to_owned(),
             harness: "copilot".to_owned(),
             agent: Some(HarnessAgent { name: "copilot".to_owned(), version: "1.2.3".to_owned() }),
             capabilities: vec!["rust".to_owned(), "frontend".to_owned()],
@@ -188,12 +187,12 @@ fn roster() {
             workdir: Some("/src/app".to_owned()),
             started_at: at(0),
             heartbeat_at: at(1),
-            activity: Some(Activity::Working),
-            handling: Some(1),
-            harnesses: Some(2),
+            activity: Activity::Working,
+            handling: 1,
+            harnesses: 2,
             escalate_to: vec![user("lead"), user("cto")],
-            version: Some("0.1.0".to_owned()),
-            perms: Some(PermissionsVersion(4)),
+            version: "0.1.0".to_owned(),
+            perms: PermissionsVersion(1),
             signed_out: Some(SignInNeeded { since: at(2), sign_in: Some("copilot login".to_owned()) }),
             limited: Some(HarnessLimit { kind: LimitKind::RateLimit, since: at(3), until: at(8) }),
             failing: Some(HarnessFailing { since: at(4), error: "harness exited".to_owned() }),
@@ -668,140 +667,18 @@ fn hooks_doc_examples_parse() {
     assert_eq!((verdict, by, decider), (Verdict::Reject, DecidedBy::Human, None));
 }
 
-/// Documents in the shape older versions wrote, before the fields they lack were added, still parse, the missing
-/// fields taking their defaults.
-#[test]
-fn older_documents_parse() {
-    // The first envelope: no owner, creator, origin thread, escalation, approval, webhook flag, tool rules or mention.
-    let message: Envelope = parse(
-        r#"{"id": "019a7d2e-0000-7000-8000-000000000001", "thread_id": "019a7d2c-0000-7000-8000-000000000001",
-            "from": "alice", "to": "dev-a", "text": "fix the build", "turn_budget": 8, "sent_at": "2025-01-01T12:00:00Z"}"#,
-    );
-    assert_eq!(message, plain_envelope());
-    let notice: Mention = parse(r#"{"channel": "backend", "post": "019a7d2e-0000-7000-8000-000000000003"}"#);
-    assert_eq!(notice.author, None);
-
-    // The first roster entry: no instance, agent, whoami, activity, counts, chain, versions or harness troubles.
-    let roster: RosterEntry = parse(
-        r#"{"ant": "dev-a", "machine": "studio.local", "harness": "copilot",
-            "started_at": "2025-01-01T12:00:00Z", "heartbeat_at": "2025-01-01T12:01:00Z"}"#,
-    );
-    assert_eq!(
-        roster,
-        RosterEntry {
-            ant: user("dev-a"),
-            machine: "studio.local".to_owned(),
-            instance: None,
-            harness: "copilot".to_owned(),
-            agent: None,
-            capabilities: Vec::new(),
-            whoami: None,
-            workdir: None,
-            started_at: at(0),
-            heartbeat_at: at(1),
-            activity: None,
-            handling: None,
-            harnesses: None,
-            escalate_to: Vec::new(),
-            version: None,
-            perms: None,
-            signed_out: None,
-            limited: None,
-            failing: None,
-            fallback: None,
-            memory_low: None,
-        }
-    );
-    let signed_out: SignInNeeded = parse(r#"{"since": "2025-01-01T12:00:00Z"}"#);
-    assert_eq!(signed_out.sign_in, None);
-    let chain: ChainEntry = parse(r#"{"ant": "dev-a", "updated_at": "2025-01-01T12:00:00Z"}"#);
-    assert!(chain.escalate_to.is_empty());
-    let human: HumanEntry = parse(r#"{"human": "alice"}"#);
-    assert_eq!(human.registered_at, None);
-
-    // What each human keeps, from before any of its fields were set.
-    assert_eq!(parse::<ReadMarker>("{}"), ReadMarker::default());
-    assert_eq!(parse::<ThreadMarks>("{}"), ThreadMarks::default());
-    assert_eq!(parse::<NotifyPrefs>("{}"), NotifyPrefs::default());
-
-    // Channels before members, messengers and owners; posts before mentions, owners, creators, webhooks and tool rules.
-    let entry: ChannelEntry = parse(r#"{"channel": "backend"}"#);
-    assert_eq!(entry, ChannelEntry::new(channel()));
-    let post: ChannelPost = parse(
-        r#"{"id": "019a7d2e-0000-7000-8000-000000000002", "channel": "backend",
-            "thread_id": "019a7d2c-0000-7000-8000-000000000001", "from": "alice", "text": "hello", "turn_budget": 8,
-            "sent_at": "2025-01-01T12:00:00Z"}"#,
-    );
-    assert!(post.mentions.is_empty() && post.in_reply_to.is_none() && post.owner.is_none());
-    assert!(post.creator.is_none() && !post.webhook && post.allow.is_none());
-    let applied: ChannelAdminReply = parse(
-        r#"{"request_id": "019a7d2e-0000-7000-8000-000000000001",
-            "outcome": {"outcome": "applied", "entry": {"channel": "backend"}, "revision": 3}}"#,
-    );
-    let ChannelAdminOutcome::Applied { changed, .. } = applied.outcome else { panic!("not applied") };
-    assert!(changed.is_empty());
-
-    // Escalations without a tool request, tool calls without locations or input, dead letters of neither kind.
-    let asked: Escalation = parse(
-        r#"{"stuck": "dev-a", "thread_id": "019a7d2c-0000-7000-8000-000000000001", "reason": "asked", "level": 0,
-            "leader": "dev-a", "visited": ["dev-a"]}"#,
-    );
-    assert_eq!(asked.request_id, None);
-    let tool: ToolCall = parse(r#"{"kind": "read", "title": "README.md"}"#);
-    assert!(tool.locations.is_empty() && tool.input.is_none());
-    let dead: DeadLetter = parse(
-        r#"{"ant": "dev-a", "stream_seq": 1, "deliveries": 6, "error": "boom", "died_at": "2025-01-01T12:00:00Z"}"#,
-    );
-    assert!(dead.envelope.is_none() && dead.payload.is_none());
-
-    // Enrollment and ant requests before leaf nodes and retirement; their answers without a leaf JWT or a reason.
-    let enroll: EnrollRequest = parse(
-        r#"{"ant": "dev-a", "public_key": "UABC", "host": "laptop.local", "sent_at": "2025-01-01T12:00:00Z",
-            "enrollment": "jwt", "signature": "sig"}"#,
-    );
-    assert_eq!(enroll.leaf, None);
-    let approved: EnrollReply = parse(r#"{"outcome": "approved", "ant": "dev-a", "public_key": "UABC", "jwt": "jwt"}"#);
-    assert!(matches!(approved, EnrollReply::Approved { leaf_jwt: None, .. }));
-    let rejected: EnrollReply = parse(r#"{"outcome": "rejected", "ant": "dev-a", "public_key": null}"#);
-    assert!(matches!(rejected, EnrollReply::Rejected { public_key: None, reason: None, .. }));
-    let request: AntRequest = parse(
-        r#"{"manager": "lead", "name": "dev-c", "template": "rust-dev", "request": "{}", "reason": "help",
-            "thread_id": "019a7d2c-0000-7000-8000-000000000001", "public_key": "UGHI", "host": "studio.local",
-            "sent_at": "2025-01-01T12:00:00Z", "expires_at": "2025-01-01T12:10:00Z", "credentials": "jwt",
-            "signature": "sig"}"#,
-    );
-    assert!(request.leaf.is_none() && !request.retire);
-    let approved: AntReply =
-        parse(r#"{"outcome": "approved", "manager": "lead", "name": "dev-c", "public_key": "UGHI", "jwt": "jwt"}"#);
-    assert!(matches!(approved, AntReply::Approved { leaf_jwt: None, .. }));
-    let retired: AntReply =
-        parse(r#"{"outcome": "retired", "manager": "lead", "name": "dev-c", "public_key": "UGHI", "revoked": []}"#);
-    assert!(matches!(retired, AntReply::Retired { push_error: None, .. }));
-
-    // A tool update naming only its call; a queue answer before the consumer's state and channel posts were in it.
-    let tool: StatusEvent = parse(
-        r#"{"ant": "dev-a", "thread_id": "019a7d2c-0000-7000-8000-000000000001", "type": "tool", "id": "call-1",
-            "at": "2025-01-01T12:00:00Z"}"#,
-    );
-    assert_eq!(tool.update, StatusUpdate::Tool { id: "call-1".to_owned(), title: None, tool_kind: None, status: None });
-    let queue: QueueReply = parse(
-        r#"{"request_id": "019a7d2e-0000-7000-8000-000000000001", "ant": "dev-a",
-            "messages": [{"id": "019a7d2e-0000-7000-8000-000000000002", "thread_id": "019a7d2c-0000-7000-8000-000000000001",
-                          "from": "alice", "sent_at": "2025-01-01T12:00:00Z", "seq": 4211, "running": false, "ahead": 1}]}"#,
-    );
-    assert!(queue.delivered.is_none() && queue.undelivered.is_none() && queue.messages[0].channel.is_none());
-}
-
 /// What newer versions may add: unknown fields are ignored, and unknown values of the open enumerations read as
 /// `unknown`.
 #[test]
 fn newer_documents_parse() {
     let roster: RosterEntry = parse(
-        r#"{"ant": "dev-a", "machine": "studio.local", "harness": "copilot", "started_at": "2025-01-01T12:00:00Z",
-            "heartbeat_at": "2025-01-01T12:01:00Z", "activity": "napping", "mood": "great",
+        r#"{"ant": "dev-a", "machine": "studio.local", "instance": "019a7d2b-0000-7000-8000-000000000001",
+            "harness": "copilot", "capabilities": [], "started_at": "2025-01-01T12:00:00Z",
+            "heartbeat_at": "2025-01-01T12:01:00Z", "activity": "napping", "handling": 0, "harnesses": 0,
+            "version": "9.0.0", "perms": 9, "mood": "great",
             "limited": {"kind": "solar_flare", "since": "2025-01-01T12:00:00Z", "until": "2025-01-01T12:05:00Z"}}"#,
     );
-    assert_eq!(roster.activity, Some(Activity::Unknown));
+    assert_eq!(roster.activity, Activity::Unknown);
     assert_eq!(roster.limited.map(|l| l.kind), Some(LimitKind::Unknown));
     let escalation: Escalation = parse(
         r#"{"stuck": "dev-a", "thread_id": "019a7d2c-0000-7000-8000-000000000001", "reason": "moon_phase", "level": 0,

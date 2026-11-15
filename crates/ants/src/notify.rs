@@ -45,7 +45,7 @@ use ants_daemon::direct_kv::{DirectKv, Lookup};
 use ants_daemon::humans::{Registry, Watching};
 use ants_daemon::redact::Redactor;
 use ants_daemon::sync::MutexExt as _;
-use ants_daemon::unserved::{self, Unserved, Watch};
+use ants_daemon::unserved::{Unserved, Watch};
 use ants_proto::{
     ApprovalRequest, Away, DeviceId, Envelope, Escalation, EscalationReason, Following, HeldNotices, JsDomain,
     NOTIFY_BUCKET, NotifyPrefs, Role, STREAM, ThreadId, UserId, Uuid, Verdict, held_key, notify_consumer, subject,
@@ -364,13 +364,6 @@ impl Human {
         if claims["name"].as_str() != Some(name.as_str()) || !human {
             bail!(
                 "credentials {} are not human {name}'s; issue them with `ants auth user {name} --human`",
-                path.display()
-            );
-        }
-        if self.devices().next().is_some() && !crate::humans::may_publish(&claims, &subject::presence_of(name)) {
-            bail!(
-                "credentials {} predate presence, which sinks of a device need; issue them again with `ants auth \
-                 user {name} --human`",
                 path.display()
             );
         }
@@ -1364,13 +1357,13 @@ struct HumanBus {
     js: jetstream::Context,
     stream: Stream,
     present: Present,
-    /// The human's holds ([`NotifyPrefs`]); none when its credentials may not read them.
-    prefs: Option<DirectKv>,
+    /// The human's holds ([`NotifyPrefs`]).
+    prefs: DirectKv,
     /// The humans of the team, kept current while `_watching` lives.
     humans: Registry,
     _watching: Watching,
-    /// Where the notices held back are counted for a digest ([`HeldNotices`]); none without `digest` or when its
-    /// credentials may not write them.
+    /// Where the notices held back are counted for a digest ([`HeldNotices`]); none without `digest`, or when the
+    /// bucket cannot be created.
     held: Option<kv::Store>,
 }
 
@@ -1437,34 +1430,10 @@ pub async fn run(
         tracing::warn!(human = %name, "sinks of a device get every notice: {e:#}");
     }
     let present = Present::new(&js, js_domain.as_ref()).await?;
-    let rights = crate::humans::Rights::from_creds(creds);
-    let answers = rights.as_ref().is_ok_and(|r| r.may_publish(subject::ALL_REACTIONS_REPLIES));
-    let (prefs, held) = match rights {
-        Ok(rights) if rights.may_publish(&subject::notify_prefs(name)) => {
-            // Through a leaf node, a direct get of a missing bucket goes unanswered rather than finding none.
-            let bucket = crate::quiet::ensure_bucket(&js).await.inspect_err(|e| tracing::warn!(human = %name, "{e:#}"));
-            let held = match human.config.digest {
-                false => None,
-                true if rights.may_publish(&subject::notify_held(name)) => bucket.ok(),
-                true => {
-                    tracing::warn!(
-                        human = %name,
-                        "credentials from before digests: none is sent; renew with `ants auth user {name} --human`"
-                    );
-                    None
-                }
-            };
-            (Some(DirectKv::new(&js, js_domain.as_ref(), NOTIFY_BUCKET).await?), held)
-        }
-        _ => {
-            tracing::warn!(
-                human = %name,
-                "credentials from before snoozes and muted threads: every notice is sent; renew with `ants auth user \
-                 {name} --human`"
-            );
-            (None, None)
-        }
-    };
+    // Through a leaf node, a direct get of a missing bucket goes unanswered rather than finding none.
+    let bucket = crate::quiet::ensure_bucket(&js).await.inspect_err(|e| tracing::warn!(human = %name, "{e:#}"));
+    let held = bucket.ok().filter(|_| human.config.digest);
+    let prefs = DirectKv::new(&js, js_domain.as_ref(), NOTIFY_BUCKET).await?;
     let unserved = unserved_watch(&human.config, &js, js_domain.as_ref()).await;
     let humans = Registry::new(name.clone());
     let _watching = humans.watch(js.clone(), ants_daemon::humans::RETRY);
@@ -1472,7 +1441,7 @@ pub async fn run(
     let bus = human.bus.get().expect("just set");
     tracing::info!(human = %name, sinks = ?human.config.sinks, "notifying");
     let mut unserved = Box::pin(tell_unserved(&human.config, bus, unserved));
-    let mut reactions = Box::pin(answer_reactions(name, answers, bus));
+    let mut reactions = Box::pin(answer_reactions(name, bus));
     let mut digests = Box::pin(digests(&human.config, bus));
     let mut delay = Duration::from_secs(1);
     loop {
@@ -1619,23 +1588,12 @@ async fn relay(human: &Human, bus: &HumanBus, notice: &Notice, why: &str, seq: u
     }
 }
 
-/// The watch of the messages `human` sends ([`unserved`]), when it takes escalations and its credentials may mark
-/// what it was told of.
+/// The watch of the messages `human` sends ([`unserved`]), when it takes escalations.
 async fn unserved_watch(human: &Human, js: &jetstream::Context, js_domain: Option<&JsDomain>) -> Option<Watch> {
     if !human.escalations {
         return None;
     }
     let name = &human.name;
-    if !crate::humans::Rights::from_creds(human.creds.as_deref())
-        .is_ok_and(|rights| rights.may_publish(&unserved::marker_subject(name)))
-    {
-        tracing::warn!(
-            human = %name,
-            "credentials from before notices of messages waiting for an ant no daemon serves: none is sent; renew \
-             with `ants auth user {name} --human`"
-        );
-        return None;
-    }
     let roster = ants_daemon::mcp::jetstream_roster(js.clone());
     Watch::new(js, js_domain, name.clone(), Role::Human, roster)
         .await
@@ -1665,16 +1623,8 @@ async fn tell_unserved(human: &Human, bus: &HumanBus, watch: Option<Watch>) -> s
 }
 
 /// Answer the ants asking for the reactions to the messages they read, with the credentials of `human`, which read
-/// every reaction, while the process runs; with `answers` false, credentials too old to answer, nothing.
-async fn answer_reactions(human: &UserId, answers: bool, bus: &HumanBus) -> std::convert::Infallible {
-    if !answers {
-        tracing::warn!(
-            human = %human,
-            "credentials from before ants read reactions: no ant's request for them is answered here; renew with \
-             `ants auth user {human} --human`"
-        );
-        std::future::pending::<()>().await;
-    }
+/// every reaction, while the process runs.
+async fn answer_reactions(human: &UserId, bus: &HumanBus) -> std::convert::Infallible {
     let mut delay = Duration::from_secs(1);
     loop {
         if let Err(e) = ants_daemon::reactions::serve(bus.client.clone(), bus.js.clone()).await {
@@ -1788,8 +1738,7 @@ async fn digests(human: &Human, bus: &HumanBus) -> std::convert::Infallible {
 /// The holds `human` set, read anew for each notice: none when they cannot be read, so a failure sends a notice too
 /// many, never one too few.
 async fn holds(human: &Human, bus: &HumanBus) -> NotifyPrefs {
-    let Some(kv) = &bus.prefs else { return NotifyPrefs::default() };
-    match kv.lookup(human.name.as_str()).await {
+    match bus.prefs.lookup(human.name.as_str()).await {
         Ok(Lookup::Value(value)) => serde_json::from_slice(&value).unwrap_or_else(|e| {
             tracing::warn!(human = %human.name, error = %e, "malformed snooze and muted threads: ignored");
             NotifyPrefs::default()

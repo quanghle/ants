@@ -115,7 +115,7 @@ async fn the_human_manages_channels_and_reads_them_back() {
     let Some(server) = Server::start() else { return };
     let (human, dev_a) = (UserId::human(), p("dev-a"));
     let (client, js) = server.connect(&human).await;
-    bus::init_stream(&js).await.unwrap();
+    bus::ensure_stream(&js).await.unwrap();
     let kv = open(&js).await.unwrap();
 
     let mut entry = ChannelEntry::new(ops());
@@ -174,7 +174,7 @@ async fn a_human_posts_under_its_own_name_and_keeps_the_thread_it_started() {
     let me = |id: &UserId| crate::humans::Me { id: id.clone(), role: ants_proto::Role::Human };
     let (a_client, a_js) = server.connect_as(&alice, ants_proto::Role::Human).await;
     let (_, b_js) = server.connect_as(&bob, ants_proto::Role::Human).await;
-    bus::init_stream(&a_js).await.unwrap();
+    bus::ensure_stream(&a_js).await.unwrap();
     crate::humans::ensure(&a_js).await.unwrap();
     for (js, human) in [(&a_js, &alice), (&b_js, &bob)] {
         crate::humans::register(js, &me(human)).await.unwrap();
@@ -205,27 +205,23 @@ async fn a_human_posts_under_its_own_name_and_keeps_the_thread_it_started() {
     assert_eq!((lost.owner, lost.creator), (Some(bob.clone()), None));
     assert_eq!(read(&b_js, &me(&bob), &ops()).await.unwrap(), [top.clone(), answer.clone(), on.clone()]);
 
-    // bob's reads get the posts one by one: many at once all read the whole channel, and none touches a reader
-    // consumer, here one an older ants is reading through.
+    // bob's reads get the posts one by one: many at once all read the whole channel.
     let reader = |user: &UserId| consumer::pull::Config {
         name: Some(chan_reader(user)),
         filter_subject: subject::chan_room(&ops()),
         ack_policy: consumer::AckPolicy::None,
         ..Default::default()
     };
-    let older: consumer::PullConsumer = b_js.create_consumer_on_stream(reader(&bob), STREAM).await.unwrap();
     let next = |c: &consumer::PullConsumer| {
         let c = c.clone();
         async move { c.fetch().max_messages(1).messages().await.unwrap().next().await.unwrap().unwrap() }
     };
     let post = |msg: jetstream::Message| serde_json::from_slice::<ChannelPost>(&msg.payload).unwrap();
-    assert_eq!(post(next(&older).await), top);
     let (as_bob, room) = (me(&bob), ops());
     let reads = futures::future::join_all((0..8).map(|_| read(&b_js, &as_bob, &room))).await;
     for posts in reads {
         assert_eq!(posts.unwrap(), [top.clone(), answer.clone(), on.clone()]);
     }
-    assert_eq!(post(next(&older).await), answer, "the older read carries on where it was");
 
     // dev-a's CLI reads through spares of dev-a's reader: more reads at once than it has spares all read the whole
     // channel, and the read of dev-a's daemon, through the reader itself, carries on.
@@ -264,7 +260,7 @@ async fn a_post_on_a_thread_an_ant_started_as_a_webhook_counts_it_as_the_ant_s()
     let me = |id: &UserId| crate::humans::Me { id: id.clone(), role: ants_proto::Role::Human };
     let (_, a_js) = server.connect_as(&alice, ants_proto::Role::Human).await;
     let (_, b_js) = server.connect_as(&bob, ants_proto::Role::Human).await;
-    bus::init_stream(&a_js).await.unwrap();
+    bus::ensure_stream(&a_js).await.unwrap();
     crate::humans::ensure(&a_js).await.unwrap();
     crate::webhook::ensure_bucket(&a_js).await.unwrap();
     for (js, human) in [(&a_js, &alice), (&b_js, &bob)] {
@@ -278,7 +274,7 @@ async fn a_post_on_a_thread_an_ant_started_as_a_webhook_counts_it_as_the_ant_s()
         .unwrap();
     let (_, h_js) = bus::connect(&server.url, Some(&creds), None, &hook, "test").await.unwrap();
     let markers = ants_daemon::direct_kv::DirectKv::new(&h_js, None, ants_proto::WEBHOOKS_BUCKET).await.unwrap();
-    markers.put(ants_proto::webhook_marker_key(&hook), "github").await.unwrap();
+    markers.put(ants_proto::webhook_marker_key(&hook), crate::versions::serving().await).await.unwrap();
     let (_, d_js) = server.connect(&dev_a).await;
 
     let owner = Some(alice.clone());
@@ -304,7 +300,7 @@ async fn a_mention_of_a_human_member_reaches_its_inbox_once() {
     let me = |id: &UserId| crate::humans::Me { id: id.clone(), role: ants_proto::Role::Human };
     let (_, a_js) = server.connect_as(&alice, ants_proto::Role::Human).await;
     let (_, b_js) = server.connect_as(&bob, ants_proto::Role::Human).await;
-    bus::init_stream(&a_js).await.unwrap();
+    bus::ensure_stream(&a_js).await.unwrap();
     crate::humans::ensure(&a_js).await.unwrap();
     for (js, human) in [(&a_js, &alice), (&b_js, &bob)] {
         crate::humans::register(js, &me(human)).await.unwrap();

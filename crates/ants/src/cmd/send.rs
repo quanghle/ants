@@ -8,7 +8,6 @@ use futures::StreamExt as _;
 use futures::stream::BoxStream;
 
 use crate::cli::Replies;
-use crate::cmd::inbox::REISSUE_HUMAN;
 use crate::{Nats, channel, compose, humans, inbox, progress, reacted, roster, thread};
 
 /// Split a leading `@ant` off the words; the message is the rest, or what `input` reads.
@@ -100,9 +99,7 @@ pub(crate) async fn ask(
         println!("{}: {}", reply.from, reply.text);
         // Seen here, so `ants inbox` need not show it again. The other replies stay unread; an ant's inbox
         // consumer is its daemon's.
-        if nats.me.role.is_human() && !nats.device.marks_read {
-            tracing::warn!("{REISSUE_HUMAN}; the reply stays unread");
-        } else if nats.me.role.is_human() {
+        if nats.me.role.is_human() {
             match inbox::mark_read(&js, &nats.me.id, &reply).await {
                 Ok(true) => {}
                 Ok(false) => tracing::debug!("reply already read"),

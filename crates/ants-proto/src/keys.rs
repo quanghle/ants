@@ -265,7 +265,7 @@ pub fn webhook_seen_key(webhook: &UserId, hash: &str) -> String {
 /// Key of the marker of `webhook` in [`WEBHOOKS_BUCKET`], which `ants webhook serve` (or the daemon running the
 /// schedule of that name) puts on connecting, before it delivers, and every [`SERVING_EVERY`] while it runs. Only the
 /// webhook's credentials write it, so a daemon honours [`Envelope::webhook`] only from a sender whose marker is there.
-/// Its value is the [`Serving`] of the process that put it; that of older versions, the webhook's name.
+/// Its value is the [`Serving`] of the process that put it.
 pub fn webhook_marker_key(webhook: &UserId) -> String {
     format!("{webhook}.{WEBHOOK_MARKER}")
 }

@@ -479,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn the_owner_is_left_out_when_none_and_older_envelopes_have_none() {
+    fn the_owner_is_left_out_when_none() {
         let msg = Envelope::new(p("dev-a"), p("dev-b"), "q");
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("owner"), "{json}");
@@ -487,9 +487,6 @@ mod tests {
         let json = serde_json::to_string(&owned).unwrap();
         assert!(json.contains(r#""owner":"alice""#), "{json}");
         assert_eq!(serde_json::from_str::<Envelope>(&json).unwrap(), owned);
-        let older = r#"{"id":"0190a5c4-1d2e-7f00-8000-000000000001","thread_id":"t1","from":"human","to":"dev-a",
-            "text":"hi","turn_budget":8,"sent_at":"2026-01-01T00:00:00Z"}"#;
-        assert_eq!(serde_json::from_str::<Envelope>(older).unwrap().owner, None);
     }
 
     #[test]

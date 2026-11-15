@@ -1,7 +1,7 @@
 //! Where a human reads: while `ants inbox --follow` (the inbox, and the tool requests it shows), `ants tools list
 //! --follow` or `ants dash` runs, the CLI keeps its device's [`Presence`] in [`PRESENCE_BUCKET`], so `ants webhook
-//! serve` pushes nothing to that device's push targets that it shows already ([`Present`]). Only a device with an id
-//! has a presence: a legacy device's credentials name none.
+//! serve` pushes nothing to that device's push targets that it shows already ([`Present`]). Only a human's credentials
+//! name a device, so only those keep a presence.
 
 use std::collections::HashSet;
 
@@ -18,8 +18,8 @@ pub async fn ensure_bucket(js: &jetstream::Context) -> Result<()> {
 }
 
 /// Run `work` with `device` of `human` present as following `what`: its presence is put first, renewed every
-/// [`PRESENCE_HEARTBEAT`] while `work` runs and deleted once it ends. A device without an id, or credentials that may
-/// not write the presence, leave `work` to run without one.
+/// [`PRESENCE_HEARTBEAT`] while `work` runs and deleted once it ends. Without a device (an ant's credentials, or
+/// none), or when the presence cannot be written, `work` runs without one.
 pub async fn while_following<T>(
     js: &jetstream::Context,
     js_domain: Option<&JsDomain>,
@@ -29,15 +29,14 @@ pub async fn while_following<T>(
     work: impl Future<Output = T>,
 ) -> T {
     let Some(device) = device else {
-        tracing::debug!("a legacy device: no presence kept");
+        tracing::debug!("no device: no presence kept");
         return work.await;
     };
     let kv = match open(js, js_domain).await {
         Ok(kv) => kv,
         Err(e) => {
             tracing::warn!(
-                "not telling notifications that this device reads, so its push targets get what it shows; credentials \
-                 issued before presence need `ants auth user {human} --human` again: {e:#}"
+                "not telling notifications that this device reads, so its push targets get what it shows: {e:#}"
             );
             return work.await;
         }
@@ -173,9 +172,9 @@ pub(crate) mod tests {
         assert_eq!(out, 7);
         assert!(present.following(&alice, devices, Following::Inbox).await.is_empty(), "gone once it ends");
 
-        let legacy = while_following(&phone, None, &alice, None, Following::Inbox, async {
+        let deviceless = while_following(&phone, None, &alice, None, Following::Inbox, async {
             present.following(&alice, devices, Following::Inbox).await
         });
-        assert!(legacy.await.is_empty(), "a device without an id has no presence");
+        assert!(deviceless.await.is_empty(), "no device, no presence");
     }
 }

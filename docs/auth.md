@@ -31,7 +31,7 @@ ants auth push --nats wss://hub.example/nats                # push account JWT t
 
 Include `server.conf` on the hub followed by `resolver { type: full, dir: "/ABSOLUTE/DIR" }` so pushed revocations persist across hub restarts and offline leaf nodes catch up within 10 s of reconnecting via their `leaf-<machine>.system.creds` uplink. Without a `full` resolver, copy `server.conf` to the hub and reload (`SIGHUP`) after each revocation. Full hub/leaf resolver mechanics live in [transport.md](transport.md#revocation).
 
-Run `ants init` once with human credentials to create stream `ANTS` and all 14 KV buckets (the first connection of any CLI command with human credentials also creates missing objects and upgrades outdated stream/bucket settings in one concurrent pass, preserving leaf outbox sources). On `nats-server` 2.15+, `ants init` raises `max_consumers` from the default `1000` to `10000` on `ANTS`, `KV_ants_roster`, `KV_ants_channels` and `KV_ants_humans`, and enables `ants_roster` expiry markers (`nats-server` 2.11+).
+Run `ants init` once with human credentials to create stream `ANTS` and all 14 KV buckets (the first connection of any CLI command with human credentials also creates missing objects, after one concurrent round of stream infos). `ants init` only creates: an object already on the hub keeps its settings, such as the sources `ants leaf outbox` adds. It creates `ANTS`, `KV_ants_roster`, `KV_ants_channels` and `KV_ants_humans` with `max_consumers` `10000` rather than the `1000` `nats-server` gives by default (the buckets by a stream update right after creating them), and `ants_roster` with expiry markers.
 
 ## Backing up the team keys
 
@@ -47,7 +47,7 @@ Backups use ASCII-armored [age](https://age-encryption.org) passphrase encryptio
 
 ## Devices
 
-Each `ants auth user NAME --human` issues credentials with a unique UUIDv7 `ants-device:<id>` JWT tag and optional `--label` (credentials from before device IDs show as `legacy`):
+Each `ants auth user NAME --human` issues credentials with a unique UUIDv7 `ants-device:<id>` JWT tag and optional `--label`; the tag is required on human credentials:
 
 ```sh
 ants auth user alice --human --label "Alice's laptop"
@@ -56,7 +56,7 @@ ants auth rename alice "Alice's laptop" "Work laptop"   # by unique label, devic
 ants auth revoke alice --device 01968f7e-...            # revoke one device only
 ```
 
-All devices of a human share one read marker in `ants_read` (CAS-updated; migrating and deleting any legacy `inbox-<name>` consumer on first `ants inbox` run) and per-device presence in `ants_presence` for notification suppression (see [webhooks.md](webhooks.md#notifications)).
+All devices of a human share one read marker in `ants_read` (CAS-updated) and per-device presence in `ants_presence` for notification suppression (see [webhooks.md](webhooks.md#notifications)).
 
 ## Adding an ant
 
@@ -77,11 +77,11 @@ ants enroll approve dev-c --js-domain hub                         # or: ants enr
 
 `ants add --enroll` repeats its request every 5 s and stops with an error at a rejection, when the enrollment credentials expire, or when the server refuses them (revoked), even while the server is unreachable.
 
-Behind a leaf node (`~/.config/ants/leaf.conf` or `--leaf-config`), `ants add --enroll` signs the request with the leaf uplink key; `ants enroll approve` renews the leaf uplink JWT (up to the 252 KiB limit, ~30 ants with a domain or 60 without; beyond it the approval fails before anything is signed or recorded), records the ant in `issued.jsonl`, admits it to `ANTS_IN` outbox sourcing, and `ants add` has the leaf node reconnect its uplink with the renewed credentials, by a reload keeping local connections (`nats-server` 2.14+) or else a restart (`ants enroll` behind a leaf requires `ants auth leaf --enroll-approver`). After out-of-band `--jwt` behind a leaf, run `ants auth leaf MACHINE --add-ant NAME` and `ants leaf outbox MACHINE`. See [transport.md](transport.md#enrollment-behind-a-leaf-node).
+Behind a leaf node (`~/.config/ants/leaf.conf` or `--leaf-config`), `ants add --enroll` signs the request with the leaf uplink key; `ants enroll approve` renews the leaf uplink JWT (up to the 252 KiB limit, ~30 ants with a domain or 60 without; beyond it the approval fails before anything is signed or recorded), records the ant in `issued.jsonl`, admits it to `ANTS_IN` outbox sourcing, and `ants add` has the leaf node reconnect its uplink with the renewed credentials, by a reload keeping local connections (`ants enroll` behind a leaf requires `ants auth leaf --enroll-approver`). After out-of-band `--jwt` behind a leaf, run `ants auth leaf MACHINE --add-ant NAME` and `ants leaf outbox MACHINE`. See [transport.md](transport.md#enrollment-behind-a-leaf-node).
 
 ## Renewing over NATS
 
-Valid, unrevoked credentials at permissions version 2+ (ants, humans, webhooks, observers, `channel-manager`, and `leaf-<machine>` uplinks) can renew over NATS without copying files from the auth machine:
+Valid, unrevoked credentials (ants, humans, webhooks, observers, `channel-manager`, and `leaf-<machine>` uplinks) can renew over NATS without copying files from the auth machine:
 
 ```sh
 ants renew ~/.ants/dev-a.creds                                                            # target machine
@@ -90,18 +90,11 @@ ants enroll renewals --js-domain hub                                            
 ants enroll renew dev-a --js-domain hub                                                   # sign one (or --auto to sign continuously)
 ```
 
-`ants renew` generates a local NKey, publishes signed `RenewRequest`s on `ants.renew.<name>` every 5 s, verifies the returned JWT, atomically replaces the `.creds` file (preserving OS credential store placement), and reloads `ants.daemon`, or for leaf uplink credentials reconnects the uplink by reloading `ants.nats` with the `credentials` path respelled in `leaf.conf` (`nats-server` 2.14+; restarting older ones, see [transport.md](transport.md#enrollment-behind-a-leaf-node)). `ants enroll renew` preserves role, device, domain, webhook destinations, leaf members and TTL while stamping the current permissions version, records `renewed_from` in `issued.jsonl`, and prints `ants auth revoke --key` for the old key. `ants enroll renew --auto` continuously approves valid unrevoked requests (reconnecting every 5 m to refresh `revoked.json`). Enrollment, leaf system, expired, revoked, or pre-v2 credentials must be reissued via `ants auth`.
+`ants renew` generates a local NKey, publishes signed `RenewRequest`s on `ants.renew.<name>` every 5 s, verifies the returned JWT, atomically replaces the `.creds` file (preserving OS credential store placement), and reloads `ants.daemon`, or for leaf uplink credentials reconnects the uplink by reloading `ants.nats` with the `credentials` path respelled in `leaf.conf` (see [transport.md](transport.md#enrollment-behind-a-leaf-node)). `ants enroll renew` preserves role, device, domain, webhook destinations, leaf members and TTL while stamping the current permissions version, records `renewed_from` in `issued.jsonl`, and prints `ants auth revoke --key` for the old key. `ants enroll renew --auto` continuously approves valid unrevoked requests (reconnecting every 5 m to refresh `revoked.json`). Enrollment, leaf system, expired, or revoked credentials must be reissued via `ants auth`.
 
 ## Credentials across upgrades
 
-Each user JWT carries `ants-perms:<n>` (current: `4`), and live daemons, webhooks, schedules and `ants channel serve` publish their running `ants` and `perms` versions. Connecting with outdated or soon-to-expire (< 7 d) credentials logs a warning with the exact renewal command; `ants doctor` (**versions**) verifies that all live services run the current permissions version before old rights (such as non-human stream info on `ANTS`, `ants_sessions`, `ants_attempts`, `ants_owners`, `ants_webhooks`) are withdrawn by renewing.
-
-| Version | Key additions (cumulative; leaf uplinks on affected machines need renewal + `ants leaf outbox` too) |
-|---|---|
-| `1` | Base inbox, notes, channel, roster, approvals, dead letters; pre-tag credentials count as `< 1`. |
-| `2` | Over-NATS renewal (`ants.renew.*`), `channel-manager.serve` version marker, `ants_read`, `ants_presence`, `ants_owners`, `ants cancel`, `ants spend`, `notify-<human>` consumer, ant inbox/notes/channel spare readers (`_1..3`). |
-| `3` | Human batched direct gets (`$JS.API.DIRECT.GET.ANTS`), human `STREAM.UPDATE` on `KV_ants_roster` (expiry markers), ant `sentread-<ant>` consumer. |
-| `4` | **Required before `nats-server` 2.16 / `js_ack_fc_v2`** (v2 `$JS.ACK.<domain>.<hash>.*` and `$JS.FC.<domain>.<hash>.*` subjects; older creds fail acks and stall KV watches). Also adds: `KV_ants_channels`/`KV_ants_humans` `STREAM.UPDATE` (`max_consumers`), template pool daily spend reads, `ants.antreq.*` + signer approvals, `ants_reactions` (and ants' reaction requests: `ants.reactions.<ant>`, answered by humans on `_INBOX.*.reactions`), `ants_threads`, `ants_notify` (`<self>` and `held.<self>`), `ants queue`/`ants withdraw` (`ants.queue.*`, `$KV.ants_attempts.*.msg.*`), JetStream storage checks (`$JS.API.INFO`, `$JS.API.STREAM.LIST`, `_storage.*.*.warned`), and unserved-message markers (`<self>.unserved.*`). |
+Each user JWT carries `ants-perms:<n>` (current: `1`), required on every user JWT `ants auth` issues, and live daemons, webhooks, schedules and `ants channel serve` publish their running `ants` and `perms` versions. The version goes up whenever the permissions of a kind of credentials change. Connecting with outdated or soon-to-expire (< 7 d) credentials logs a warning with the exact renewal command (credentials newer than the running ants ask for an upgrade of ants); `ants doctor` (**versions**) verifies that all live services run the current permissions version before rights an older version had are withdrawn by renewing. Leaf uplinks whose members' rights changed need renewal and `ants leaf outbox` too.
 
 ## Private keys in the OS credential store
 

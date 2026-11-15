@@ -880,9 +880,7 @@ impl Hub {
     }
 
     async fn others(&self) -> Result<Vec<RosterEntry>, String> {
-        let mut entries = (self.roster)().await.map_err(|e| {
-            format!("cannot read the roster: {e:#} (credentials issued before ants could read it need `ants auth user` again)")
-        })?;
+        let mut entries = (self.roster)().await.map_err(|e| format!("cannot read the roster: {e:#}"))?;
         entries.retain(|e| e.ant != self.ant);
         Ok(entries)
     }
@@ -1414,7 +1412,7 @@ fn describe(entries: &[&RosterEntry]) -> String {
                 (Some(_), _, _, _) => ", signed out".to_owned(),
                 (None, Some(_), _, _) => ", failing".to_owned(),
                 (None, None, Some(limited), _) => format!(", {}", limited.kind.as_str()),
-                (None, None, None, activity) => activity.map_or_default(|a| format!(", {}", a.as_str())),
+                (None, None, None, activity) => format!(", {}", activity.as_str()),
             };
             let agent = e.agent.as_ref().map_or_default(|a| format!(" running {a}"));
             let mut text = format!("{}: {capabilities} ({}{agent} on {}{activity})", e.ant, e.harness, e.machine);

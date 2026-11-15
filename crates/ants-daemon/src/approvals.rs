@@ -17,8 +17,7 @@
 //! subject holds none, so the last stored is the first. The stored decision is not republished to a subject of its
 //! own: an ant can point a push consumer at any subject outside the stream, and nats-server does not check its deliver
 //! subject against the ant's permissions, so only a subject the stream captures, or a reply to the ant's own request,
-//! cannot be forged. A stream without direct gets, from before them, or credentials without the permission make the ant
-//! act on the first decision it hears, as it used to, with a warning: `ants init` and `ants auth user` upgrade them.
+//! cannot be forged. While the stream cannot be asked, the ant waits: a decision it cannot read decides nothing.
 //!
 //! # The ant's chain
 //!
@@ -63,15 +62,6 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_mins(5);
 
 /// How often the ant looks for the stored decision after hearing one that is not stored (yet).
 pub const RECHECK: Duration = Duration::from_millis(250);
-
-/// What the stream holds on a request's decision subject.
-enum Stored {
-    Decision(ApprovalDecision),
-    /// Nothing, or nothing that decides the request.
-    None,
-    /// The stream cannot be asked: no direct gets, or credentials without them.
-    Unknown(String),
-}
 
 /// A decision on a waiting request from an ant of the ant's chain, and who sent it.
 type FromChain = (UserId, ApprovalDecision);
@@ -267,11 +257,11 @@ impl NatsApprover {
         crate::status::state(&self.client, &self.ant, &request.thread_id, State::WaitingApproval);
         // The verdict, who gave it, and the ant of the chain that did; None once nothing more can be heard.
         let wait = async {
-            // The first decision heard for the request, acted on only if the stream cannot be asked.
-            let mut heard: Option<ApprovalDecision> = None;
+            // Whether a decision was heard for the request, and a failure to read the stored one was warned of.
+            let (mut heard, mut warned) = (false, false);
             loop {
                 // Until the stream holds a decision heard, it is asked again every RECHECK.
-                let recheck = heard.is_some();
+                let recheck = heard;
                 let next = tokio::select! {
                     msg = decisions.next() => msg.map_or(Heard::Closed, Heard::Human),
                     msg = next_message(&mut inbox) => match msg {
@@ -286,20 +276,17 @@ impl NatsApprover {
                 };
                 match next {
                     Heard::Human(msg) => match decided(&request, &msg.payload) {
-                        Some(d) => {
-                            heard.get_or_insert(d);
-                        }
+                        Some(_) => heard = true,
                         None => {
                             tracing::warn!(subject = %msg.subject, "ignoring a malformed decision or one for another request");
                         }
                     },
                     Heard::Chain((from, decision)) => {
                         // A human's decision stored by now came first.
-                        let human = match self.stored(&request).await {
-                            Stored::Decision(d) => Some(d),
-                            Stored::Unknown(_) => heard.clone(),
-                            Stored::None => None,
-                        };
+                        let human = self.stored(&request).await.unwrap_or_else(|e| {
+                            tracing::warn!(request = %request.id, error = format!("{e:#}"), "reading the stored decision");
+                            None
+                        });
                         if let Some(human) = human {
                             self.tell_decided(&request, &human).await;
                             return Some((request.decide(human.verdict).verdict, DecidedBy::Human, human.by));
@@ -311,18 +298,17 @@ impl NatsApprover {
                     Heard::Closed => return None,
                     Heard::Nothing => {}
                 }
-                let Some(first) = &heard else { continue };
+                if !heard {
+                    continue;
+                }
                 let decision = match self.stored(&request).await {
-                    Stored::Decision(d) => d,
-                    Stored::None => continue,
-                    Stored::Unknown(error) => {
-                        tracing::warn!(
-                            request = %request.id,
-                            error,
-                            "cannot read the stored decision; taking the first one heard (`ants init` and \
-                             `ants auth user` as a human upgrade the stream and the credentials)"
-                        );
-                        first.clone()
+                    Ok(Some(d)) => d,
+                    Ok(None) => continue,
+                    Err(e) => {
+                        if !std::mem::replace(&mut warned, true) {
+                            tracing::warn!(request = %request.id, error = format!("{e:#}"), "reading the stored decision");
+                        }
+                        continue;
                     }
                 };
                 self.tell_decided(&request, &decision).await;
@@ -364,22 +350,20 @@ impl NatsApprover {
     }
 
     /// The decision the stream stored on `request`'s decision subject: its last message, which is also its first, as
-    /// `ants tools approve` and `reject` store one only while the subject holds none.
-    async fn stored(&self, request: &ApprovalRequest) -> Stored {
-        let stream = match self.js.get_stream_no_info(STREAM).await {
-            Ok(stream) => stream,
-            Err(e) => return Stored::Unknown(e.to_string()),
-        };
+    /// `ants tools approve` and `reject` store one only while the subject holds none. None while it holds nothing that
+    /// decides the request.
+    async fn stored(&self, request: &ApprovalRequest) -> Result<Option<ApprovalDecision>> {
+        let stream = self.js.get_stream_no_info(STREAM).await?;
         match stream.direct_get_last_for_subject(request.decision_subject()).await {
-            Ok(msg) => match decided(request, &msg.payload) {
-                Some(decision) => Stored::Decision(decision),
-                None => {
+            Ok(msg) => {
+                let decision = decided(request, &msg.payload);
+                if decision.is_none() {
                     tracing::warn!(request = %request.id, "ignoring a stored decision, malformed or for another request");
-                    Stored::None
                 }
-            },
-            Err(e) if e.kind() == DirectGetErrorKind::NotFound => Stored::None,
-            Err(e) => Stored::Unknown(e.to_string()),
+                Ok(decision)
+            }
+            Err(e) if e.kind() == DirectGetErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e).context("reading the stored decision"),
         }
     }
 

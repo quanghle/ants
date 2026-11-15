@@ -305,7 +305,7 @@ impl Signer<'_> {
         let (Some(leaf), Some(renewed)) = (&request.leaf, renewed) else {
             return Ok((jwt, None));
         };
-        members::enrolled(self.dir, &leaf.machine, &renewed, name)
+        members::enrolled(self.dir, &leaf.machine, name)
             .with_context(|| format!("keeping {name} among the members of {}", leaf.machine))?;
         outbox::admit_ant(approver.hub(), &leaf.machine, name)
             .await

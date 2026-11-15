@@ -6,7 +6,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -15,7 +14,7 @@ pub const REQUIRE_TOOLS: &str = "ANTS_REQUIRE_TOOLS";
 
 /// Environment variable that, set to `1`, turns on nats-server's feature flag `js_ack_fc_v2` in every test server:
 /// acks and flow control then go to the v2 subjects `$JS.ACK.<domain>.<account hash>.…` and `$JS.FC.<domain>.…`, the
-/// default from nats-server 2.16. Needs nats-server 2.14 or later, which knows the flag.
+/// default from nats-server 2.16.
 pub const JS_ACK_FC_V2: &str = "ANTS_TEST_JS_ACK_FC_V2";
 
 /// Whether `tool` runs. When it does not, the caller skips its test, or this panics under [`REQUIRE_TOOLS`]`=1`.
@@ -45,24 +44,9 @@ pub fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
 
-/// Whether [`JS_ACK_FC_V2`] asks for v2 ack and flow control subjects; panics when the nats-server on PATH is older than
-/// 2.14, which would refuse the flag.
+/// Whether [`JS_ACK_FC_V2`] asks for v2 ack and flow control subjects.
 fn ack_fc_v2() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
-        if std::env::var(JS_ACK_FC_V2).as_deref() != Ok("1") {
-            return false;
-        }
-        let out = Command::new("nats-server").arg("--version").output().expect("nats-server --version");
-        let version = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-        let numbers: Vec<u32> =
-            version.rsplit('v').next().unwrap_or_default().split('.').take(2).map_while(|n| n.parse().ok()).collect();
-        assert!(
-            numbers >= vec![2, 14],
-            "{JS_ACK_FC_V2}=1 needs nats-server 2.14 or later, which knows js_ack_fc_v2; found {version:?}"
-        );
-        true
-    })
+    std::env::var(JS_ACK_FC_V2).as_deref() == Ok("1")
 }
 
 /// `config` with feature flag `js_ack_fc_v2` on, in its `feature_flags` block if it has one: a second block would

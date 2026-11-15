@@ -145,10 +145,6 @@ fn a_mention_notifies_human_members_and_wakes_ant_members() {
 
     let json = serde_json::to_value(&notice).unwrap();
     assert_eq!(json["mention"]["channel"], "ops");
-    let mut old = json;
-    old.as_object_mut().unwrap().remove("mention");
-    let read: Envelope = serde_json::from_value(old).unwrap();
-    assert_eq!(read, Envelope { mention: None, ..notice }, "an envelope from before mentions reads as a message");
     let plain = serde_json::to_string(&Envelope::new(p("dev-a"), alice, "hi")).unwrap();
     assert!(!plain.contains("mention"), "{plain}");
 }
@@ -201,7 +197,7 @@ fn any_human_s_posts_count_as_human_and_threads_keep_the_owner_who_started_them(
     assert_eq!((by_bob.owner.as_ref(), by_bob.turn_budget), (Some(&alice), DEFAULT_TURN_BUDGET), "fresh, alice's");
     assert_eq!(spent.turns_left(std::slice::from_ref(&by_bob), &humans), DEFAULT_TURN_BUDGET);
 
-    // A thread from before owners: its human author owns it, else the first human to answer on it.
+    // A post carrying no owner: its human author owns the thread, else the first human to answer on it.
     let old = ChannelPost::new(c.clone(), alice.clone(), "old");
     assert_eq!(old.reply(p("dev-a"), "a", &[], &humans).unwrap().owner, Some(alice.clone()));
     let ant_post = ChannelPost::new(c, p("dev-a"), "@dev-b status?");
@@ -215,7 +211,6 @@ fn any_human_s_posts_count_as_human_and_threads_keep_the_owner_who_started_them(
     let json = serde_json::to_string(&old).unwrap();
     assert!(!json.contains("owner"), "{json}");
     assert!(serde_json::to_string(&top).unwrap().contains(r#""owner":"alice""#));
-    assert_eq!(serde_json::from_str::<ChannelPost>(&json).unwrap(), old, "posts without an owner still read");
 }
 
 #[test]
@@ -338,8 +333,4 @@ fn threads_keep_the_ant_that_created_them_and_only_its_own_post_makes_it_so() {
     let json = serde_json::to_string(&ChannelPost::new("ops".parse().unwrap(), p("lead"), "x")).unwrap();
     assert!(!json.contains("creator"), "{json}");
     assert!(serde_json::to_string(&top).unwrap().contains(r#""creator":"boss""#));
-    assert_eq!(serde_json::from_str::<ChannelPost>(&json).unwrap().creator, None, "older posts read");
-    let older = r#"{"id":"0190a5c4-1d2e-7f00-8000-000000000001","thread_id":"t1","from":"human","to":"dev-a",
-            "text":"hi","turn_budget":8,"sent_at":"2026-01-01T00:00:00Z"}"#;
-    assert_eq!(serde_json::from_str::<Envelope>(older).unwrap().creator, None);
 }

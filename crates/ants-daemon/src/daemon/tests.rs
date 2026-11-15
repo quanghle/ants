@@ -109,7 +109,7 @@ impl Bus {
         let entry = ants_proto::RosterEntry {
             ant: ant.clone(),
             machine: "m".to_owned(),
-            instance: None,
+            instance: "run-1".to_owned(),
             harness: "copilot".to_owned(),
             agent: None,
             capabilities: Vec::new(),
@@ -117,12 +117,12 @@ impl Bus {
             workdir: None,
             started_at: now,
             heartbeat_at: now,
-            activity: None,
-            handling: None,
-            harnesses: None,
+            activity: ants_proto::Activity::Idle,
+            handling: 0,
+            harnesses: 0,
             escalate_to: escalate_to.to_vec(),
-            version: None,
-            perms: None,
+            version: ants_proto::ANTS_VERSION.to_owned(),
+            perms: ants_proto::PERMISSIONS_VERSION,
             signed_out: None,
             limited: None,
             failing: None,
@@ -154,7 +154,8 @@ impl Bus {
             ..Default::default()
         };
         let webhooks = self.js.create_key_value(config).await.unwrap();
-        webhooks.put(ants_proto::webhook_marker_key(hook), hook.to_string().into()).await.unwrap();
+        let marker = serde_json::to_vec(&ants_proto::Serving::here("m")).unwrap();
+        webhooks.put(ants_proto::webhook_marker_key(hook), marker.into()).await.unwrap();
     }
 
     async fn marked(&self, seq: u64) -> bool {
@@ -858,7 +859,7 @@ async fn ctrl_c_finishes_prompts_in_flight_and_a_restart_resumes() {
 async fn progress_acks_keep_messages_in_hand_past_the_ack_wait() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
     let (progress_every, ack_wait) = (Duration::from_millis(200), ack_wait(Duration::from_millis(200)));
-    // A consumer left by an older daemon with a longer ack wait takes the new one.
+    // A consumer left by a daemon configured with a longer ack wait takes the new one.
     drop(bus::inbox_consumer(&bus.stream, &bus.dev, ack_wait * 100, MAX_DELIVER, 4).await.unwrap());
     let (launch, log, gate) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
@@ -2869,7 +2870,7 @@ async fn the_messenger_answers_a_post_mentioning_nobody_with_the_members_it_conc
     let dev_b = ants_proto::RosterEntry {
         ant: "dev-b".parse().unwrap(),
         machine: "m".to_owned(),
-        instance: None,
+        instance: "run-1".to_owned(),
         harness: "copilot".to_owned(),
         agent: None,
         capabilities: vec!["ci".to_owned()],
@@ -2877,12 +2878,12 @@ async fn the_messenger_answers_a_post_mentioning_nobody_with_the_members_it_conc
         workdir: None,
         started_at: now,
         heartbeat_at: now,
-        activity: None,
-        handling: None,
-        harnesses: None,
+        activity: ants_proto::Activity::Idle,
+        handling: 0,
+        harnesses: 0,
         escalate_to: Vec::new(),
-        version: None,
-        perms: None,
+        version: ants_proto::ANTS_VERSION.to_owned(),
+        perms: ants_proto::PERMISSIONS_VERSION,
         signed_out: None,
         limited: None,
         failing: None,
@@ -2966,8 +2967,8 @@ async fn a_thread_a_human_started_stays_hers_and_goes_back_to_her_out_of_turns()
     let alice: UserId = "alice".parse().unwrap();
     let mut alice_inbox = bus.client.subscribe(subject::inbox_of(&alice)).await.unwrap();
     bus.client.flush().await.unwrap();
-    // No owner on it, as from before posts carried one: alice, a human, started the thread.
-    let root = ChannelPost::new(entry.channel.clone(), alice.clone(), "the build is red");
+    let root =
+        ChannelPost::new(entry.channel.clone(), alice.clone(), "the build is red").with_owner(Some(alice.clone()));
     bus.post(&root).await;
     let bob = ChannelPost::new(entry.channel.clone(), "bob".parse().unwrap(), "no human, no triage");
     bus.post(&bob).await;
