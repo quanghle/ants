@@ -25,6 +25,7 @@ use ratatui::widgets::Paragraph;
 
 use super::acts::{About, Change};
 use super::frame::{self, ago};
+use super::interrupt::Intent;
 use super::model::{Action, Data, Key, Model, To};
 use super::timeline::Call;
 use super::{approvals, markdown, react, work};
@@ -69,7 +70,7 @@ impl Page {
         self.messages().find(|e| e.id == Some(at)).map(|e| e.seq)
     }
 
-    pub const KEYS: &str = "↑↓ select · y copy · + react · p pin · m mute · e archive · d done · t tree · a A r answer a tool request · End latest · Esc back";
+    pub const KEYS: &str = "↑↓ select · y copy · + react · p pin · m mute · e archive · d done · t tree · s steer · x cancel · a A r answer a tool request · End latest · Esc back";
 
     /// The messages shown, in the order stored.
     fn messages(&self) -> impl DoubleEndedIterator<Item = &Entry> {
@@ -162,6 +163,8 @@ impl Page {
                 return Some(To::Ask(oldest.clone(), verdict));
             }
             Key::Char('t') => return Some(To::Tree(self.history.thread.clone())),
+            Key::Char('s') => return Some(To::Interrupt(Intent::Steer, self.history.thread.clone())),
+            Key::Char('x') | Key::Ctrl('x') => return Some(To::Interrupt(Intent::Cancel, self.history.thread.clone())),
             _ => {}
         }
         None

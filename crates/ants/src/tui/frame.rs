@@ -90,6 +90,9 @@ fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
     if let Some(picker) = &model.picking {
         return picker.line();
     }
+    if let Some(confirm) = &model.interrupting {
+        return confirm.line();
+    }
     if let Some(line) = model.asking.as_ref().and_then(approvals::Asking::footer) {
         return line;
     }
@@ -136,6 +139,8 @@ const HELP: &[(&str, &str)] = &[
     ("a A r, y", "on a tool request: allow once, always or reject, then confirm"),
     ("+", "in a thread: react to the selected message, or take a reaction back"),
     ("t", "in a thread: its delegation tree"),
+    ("s", "in a thread or work: the bar on /steer for the ant at work"),
+    ("x Ctrl-X", "in a thread or work: cancel the prompt running there"),
     ("x y", "in a delegation tree: cancel every prompt in the selected subtree"),
     ("n", "with a person: write a message, starting a thread"),
     ("/", "the bar on /search, as in: /search deploy from:dev-a"),

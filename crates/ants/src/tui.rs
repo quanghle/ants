@@ -17,6 +17,7 @@ mod dm;
 mod exec;
 mod frame;
 mod home;
+mod interrupt;
 mod markdown;
 mod model;
 mod nav;

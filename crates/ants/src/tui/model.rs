@@ -13,6 +13,7 @@ use super::acts::{Acted, Change};
 use super::approvals::{self, Answer, Asking};
 use super::command::Bar;
 use super::exec::Job;
+use super::interrupt::{Confirm, Intent};
 use super::react::{self, Pick, Picker};
 use super::reads::{Mark, Read};
 use super::work::{Facts, Filter};
@@ -216,6 +217,8 @@ pub enum To {
     React(Uuid),
     /// A thread's delegation tree.
     Tree(ThreadId),
+    /// Steer or cancel the prompt running on a thread.
+    Interrupt(Intent, ThreadId),
     /// Not another view: something to do.
     Do(Action),
 }
@@ -234,6 +237,8 @@ pub struct Model {
     pub asking: Option<Asking>,
     /// The reaction being picked.
     pub picking: Option<Picker>,
+    /// The steer or cancel waiting for y while an ant runs a tool call.
+    pub interrupting: Option<Confirm>,
     /// Whether the two-line pane shows instead of the full view ([`super::compact`]).
     pub compact: bool,
 }
@@ -267,6 +272,7 @@ impl Model {
             bar: Bar::default(),
             asking: None,
             picking: None,
+            interrupting: None,
             compact: false,
         }
     }
@@ -589,6 +595,9 @@ impl Model {
             self.help = false;
             return None;
         }
+        if self.interrupting.is_some() {
+            return self.confirm_key(key);
+        }
         if let Some(picker) = &mut self.picking {
             return match picker.key(key) {
                 Pick::Typing => None,
@@ -749,6 +758,7 @@ impl Model {
                 self.tree(thread);
                 None
             }
+            To::Interrupt(intent, thread) => self.interrupt(intent, thread),
             To::Do(action) => Some(action),
         }
     }
