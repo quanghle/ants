@@ -82,8 +82,10 @@ pub enum Event {
 type Tail = LocalBoxFuture<'static, (Parser, Result<(Vec<Entry>, u64)>)>;
 
 /// Read the messages stored after sequence `after`, or else those of the window `since`, with `parser`, which keeps
-/// the threads of the tool requests read for their decisions. Returns them and the sequence read up to.
-fn tail(js: jetstream::Context, mut parser: Parser, after: Option<u64>, since: Duration) -> Tail {
+/// the threads of the tool requests read for their decisions. Returns them and the sequence read up to. With
+/// `timelines`, the tool calls of the timeline records stored after `after` come as entries of kind tool too
+/// ([`thread::tool_entries`]); the first read, of the window, leaves them out.
+fn tail(js: jetstream::Context, mut parser: Parser, after: Option<u64>, since: Duration, timelines: bool) -> Tail {
     async move {
         let read = async {
             let stream = js.get_stream(STREAM).await.context("opening the ANTS stream")?;
@@ -96,7 +98,13 @@ fn tail(js: jetstream::Context, mut parser: Parser, after: Option<u64>, since: D
             let mut entries = Vec::new();
             reading::read_back(&js, "", Reading::Gets, subject::ALL, start, |seq, stored, subject, payload| {
                 last = last.max(seq);
-                entries.extend(parser.entry(seq, stored.into(), subject, payload));
+                if subject::parse_timeline(subject).is_some() {
+                    if timelines && after.is_some() {
+                        entries.extend(thread::tool_entries(seq, subject, payload));
+                    }
+                } else {
+                    entries.extend(parser.entry(seq, stored.into(), subject, payload));
+                }
                 ControlFlow::Continue(())
             })
             .await
@@ -163,6 +171,8 @@ pub struct Feed {
     tail_wanted: bool,
     /// The stream sequence read up to, once the threads were read.
     stored_seq: Option<u64>,
+    /// Whether reads of the stream after the first bring the tool calls of timeline records.
+    timelines: bool,
     history: Option<LocalBoxFuture<'static, (ThreadId, Result<Vec<Entry>>)>>,
     decision: Option<LocalBoxFuture<'static, Result<String>>>,
     follow: Option<LocalBoxFuture<'static, Result<()>>>,
@@ -189,12 +199,19 @@ impl Feed {
             tail: None,
             tail_wanted: true,
             stored_seq: None,
+            timelines: false,
             history: None,
             decision: None,
             follow: None,
             follow_at: Instant::now(),
             roster: None,
         })
+    }
+
+    /// Have reads of the stream after the first bring the tool calls stored on timelines, as entries of kind tool.
+    pub fn with_timelines(mut self) -> Self {
+        self.timelines = true;
+        self
     }
 
     pub fn js(&self) -> &jetstream::Context {
@@ -215,7 +232,7 @@ impl Feed {
                 && let Some(parser) = self.parser.take()
             {
                 self.tail_wanted = false;
-                self.tail = Some(tail(self.js.clone(), parser, self.stored_seq, self.since));
+                self.tail = Some(tail(self.js.clone(), parser, self.stored_seq, self.since, self.timelines));
             }
             if connected && self.follow.is_none() && Instant::now() >= self.follow_at {
                 self.follow_tools();
@@ -290,12 +307,13 @@ impl Feed {
         }
     }
 
-    /// Read the history of `thread`, dropping any read of another one.
-    pub fn load_history(&mut self, thread: ThreadId) {
+    /// Read the history of `thread`, dropping any read of another one; with `tools`, with the tool calls its ants
+    /// stored on their timelines ([`thread::history`]).
+    pub fn load_history(&mut self, thread: ThreadId, tools: bool) {
         let js = self.js.clone();
         self.history = Some(
             async move {
-                let read = thread::history(&js, &thread, None, false).await;
+                let read = thread::history(&js, &thread, None, tools).await;
                 (thread, read)
             }
             .boxed_local(),

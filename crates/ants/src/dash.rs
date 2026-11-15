@@ -161,7 +161,7 @@ impl Dash {
     fn act(&mut self, action: Action) -> ControlFlow<()> {
         match action {
             Action::Quit => return ControlFlow::Break(()),
-            Action::LoadHistory(thread) => self.feed.load_history(thread),
+            Action::LoadHistory(thread) => self.feed.load_history(thread, false),
             Action::Decide(request, verdict) => self.feed.decide(*request, verdict, self.model.live.me.clone()),
             Action::Refresh => {
                 self.feed.refresh();

@@ -1,11 +1,12 @@
 use std::time::Duration;
 
 use ants_daemon::bus;
-use ants_proto::{Envelope, StatusUpdate, ToolCall};
+use ants_proto::{Envelope, StatusUpdate, ToolCall, Uuid};
 use chrono::DateTime;
 
 use super::*;
 use crate::auth::tests::Server;
+use crate::thread::Kind;
 
 pub fn at(secs: i64) -> DateTime<Utc> {
     DateTime::from_timestamp(1_800_000_000 + secs, 0).unwrap()
@@ -78,7 +79,7 @@ async fn the_feed_reads_follows_and_answers_what_the_human_sees() {
     let push = request("dev-a", "git push", vec![Verdict::AllowOnce]);
     bus::publish_json(&ant_js, push.subject(), &push, None).await.unwrap();
 
-    let mut feed = Feed::new(client, js, Duration::from_hours(1)).await.unwrap();
+    let mut feed = Feed::new(client, js, Duration::from_hours(1)).await.unwrap().with_timelines();
     assert!(feed.connected());
     assert!(matches!(feed.next().await, Event::Following), "the tool requests are followed first");
     // The stream read and the pending requests come in either order.
@@ -115,13 +116,39 @@ async fn the_feed_reads_follows_and_answers_what_the_human_sees() {
     .await;
     assert_eq!(heard, working);
 
-    feed.load_history(thread.clone());
+    // A tool call stored on the ant's timeline is read after the first read, and with the thread's history.
+    let call = ants_proto::TimelineCall {
+        id: "c1".to_owned(),
+        tool_kind: Some("execute".to_owned()),
+        title: "cargo test".to_owned(),
+        status: Some("completed".to_owned()),
+        started: Utc::now(),
+        duration_ms: Some(3100),
+        paths: Vec::new(),
+    };
+    let record = ants_proto::Timeline {
+        ant: user("dev-a"),
+        thread_id: thread.clone(),
+        message: Uuid::new_v4(),
+        entries: vec![ants_proto::TimelineEntry::Tool(call)],
+        omitted: 0,
+        at: Utc::now(),
+    };
+    bus::publish_json(&ant_js, subject::timeline(&thread, &record.ant), &record, None).await.unwrap();
+    let tools = until(&mut feed, |e| match e {
+        Event::Stored(read) => Some(read.unwrap()).filter(|entries| !entries.is_empty()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(tools.iter().map(|e| (e.kind, e.text.as_str())).collect::<Vec<_>>(), [(Kind::Tool, "cargo test")]);
+
+    feed.load_history(thread.clone(), true);
     let (loaded, read) = until(&mut feed, |e| match e {
         Event::History(thread, read) => Some((thread, read.unwrap())),
         _ => None,
     })
     .await;
-    assert_eq!((&loaded, texts(&read, &thread)), (&thread, vec!["first", "second"]));
+    assert_eq!((&loaded, texts(&read, &thread)), (&thread, vec!["first", "second", "cargo test"]));
 
     feed.decide(push.clone(), Verdict::AllowOnce, UserId::human());
     let (mut decided, mut resolved) = (None, None);

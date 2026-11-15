@@ -597,7 +597,7 @@ impl Model {
         };
         match live::refusal(&request, &tools::State::Pending, verdict) {
             Some(why) => Err(why),
-            None => Ok(Action::Decide(request, verdict)),
+            None => Ok(Action::Decide(Box::new(request), verdict)),
         }
     }
 
@@ -868,12 +868,16 @@ mod tests {
             m.bar.set_text(text);
             m.key(Key::Enter, at(0))
         };
-        assert_eq!(run(&mut m, "/approve"), Some(Action::Decide(push.clone(), Verdict::AllowOnce)), "home selects it");
+        assert_eq!(
+            run(&mut m, "/approve"),
+            Some(Action::Decide(Box::new(push.clone()), Verdict::AllowOnce)),
+            "home selects it"
+        );
         assert_eq!(run(&mut m, "/approve --always"), None);
         assert!(m.bar.status.as_ref().unwrap().text.starts_with("allow-always is not offered"));
         let id = push.id.to_string();
         let named = format!("/reject dev-a/{}", &id[..8]);
-        assert_eq!(run(&mut m, &named), Some(Action::Decide(push, Verdict::Reject)));
+        assert_eq!(run(&mut m, &named), Some(Action::Decide(Box::new(push), Verdict::Reject)));
         m.decided(Ok("answered request".into()));
         assert_eq!(m.bar.status, Some(Status { text: "answered request".into(), tone: Tone::Done }));
         assert_eq!(run(&mut m, "/reject 0000"), None);

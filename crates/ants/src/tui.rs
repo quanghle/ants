@@ -6,6 +6,7 @@
 //! What it shows and how keys change it is the [`model::Model`]; each view and component has a module of its own,
 //! which draws it and takes its keys.
 
+mod acts;
 mod channel;
 mod command;
 mod complete;
@@ -20,9 +21,10 @@ mod people;
 mod reads;
 mod search;
 mod thread;
+mod timeline;
 mod work;
 
-use std::io::IsTerminal as _;
+use std::io::{IsTerminal as _, Write as _};
 use std::ops::ControlFlow;
 use std::time::{Duration, Instant};
 
@@ -35,6 +37,7 @@ use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::crossterm::{execute, terminal};
 
+use self::acts::Acts;
 use self::exec::Exec;
 use self::model::{Action, Key, Level, Model};
 use self::reads::Reads;
@@ -133,7 +136,9 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration) -> Result<()> {
     let ctx =
         exec::Ctx { client: client.clone(), js: js.clone(), me: nats.me.clone(), domain: nats.domain.cloned(), meta };
     let (feed, state) = live::start(nats, client, js.clone(), since).await?;
-    let reads = Reads::new(js.clone(), me.clone());
+    let feed = feed.with_timelines();
+    let reads = Reads::new(js.clone(), me.clone(), crate::channel::reads::allowed(nats));
+    let acts = Acts::new(js.clone(), nats.domain.cloned(), me.clone(), thread_meta::open(nats, &js).await);
     let may_read = nats.rights.may_publish(&presence::online_right());
     let people = people::Io::new(js.clone(), nats.domain.cloned(), nats.me.clone(), may_read);
     let searches = Searches::new(js.clone());
@@ -141,8 +146,16 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration) -> Result<()> {
     // The UI shows the replies and the tool requests as they come, so notifications spare this device theirs meanwhile.
     let shown = async {
         let mut screen = Screen::open()?;
-        let chat =
-            Chat { feed, reads, people, searches, exec: Exec::new(ctx), model: Model::new(state, server), edit: None };
+        let chat = Chat {
+            feed,
+            reads,
+            acts,
+            people,
+            searches,
+            exec: Exec::new(ctx),
+            model: Model::new(state, server),
+            edit: None,
+        };
         Box::pin(chat.run(&mut screen.terminal)).await
     };
     let (domain, device) = (nats.domain, nats.device);
@@ -186,6 +199,7 @@ struct Chat {
     feed: Feed,
     reads: Reads,
     exec: Exec,
+    acts: Acts,
     people: people::Io,
     searches: Searches,
     model: Model,
@@ -236,6 +250,11 @@ impl Chat {
                     dirty = true;
                     self.model.outcome(outcome).into_iter().collect()
                 }
+                acted = self.acts.next() => {
+                    dirty = true;
+                    self.model.acted(acted, Utc::now());
+                    Vec::new()
+                }
                 event = self.people.next() => {
                     dirty = true;
                     self.model.people(event, Utc::now());
@@ -247,7 +266,7 @@ impl Chat {
                     Vec::new()
                 }
             };
-            for action in actions {
+            for action in actions.into_iter().chain(self.model.mark_shown()) {
                 if self.act(action).is_break() {
                     return Ok(());
                 }
@@ -256,6 +275,7 @@ impl Chat {
                 self.model.edited(edit(terminal, text).await);
                 dirty = true;
             }
+            self.acts.watch(self.model.open().cloned());
         }
     }
 
@@ -282,22 +302,34 @@ impl Chat {
         match action {
             Action::Quit => return ControlFlow::Break(()),
             Action::Open(thread) => {
-                self.feed.load_history(thread.clone());
+                self.feed.load_history(thread.clone(), true);
                 self.reads.mark_read(thread);
+            }
+            Action::Change(thread, change, last) => self.acts.change(thread, change, last),
+            Action::Copy(text) => {
+                let copied =
+                    std::io::stdout().write_all(osc52(&text).as_bytes()).and_then(|()| std::io::stdout().flush());
+                let line = match copied {
+                    Ok(()) => (format!("copied {} characters", text.chars().count()), Level::Info),
+                    Err(e) => (format!("copying: {e}"), Level::Error),
+                };
+                self.model.notify(line.0, line.1, Utc::now());
             }
             Action::MarkRead(thread) => self.reads.mark_read(thread),
             Action::Run(job, text) => self.exec.run(job, text),
-            Action::Decide(request, verdict) => self.feed.decide(request, verdict, self.model.data.me().clone()),
+            Action::Decide(request, verdict) => self.feed.decide(*request, verdict, self.model.data.me().clone()),
             Action::Edit(text) => self.edit = Some(text),
+            Action::MarkChannel(channel, marks) => self.reads.mark_channel(channel, marks),
             Action::Reactions(messages) => self.reads.watch_reactions(messages),
             Action::Send(draft) => self.people.send(draft),
             Action::Search(search) => self.searches.start(search),
             Action::Refresh => {
                 self.feed.refresh();
                 self.reads.refresh();
+                self.acts.refresh();
                 self.people.refresh();
                 if let Some(thread) = self.model.open_thread() {
-                    self.feed.load_history(thread);
+                    self.feed.load_history(thread, true);
                 }
             }
         }
@@ -315,9 +347,33 @@ async fn edit(terminal: &mut DefaultTerminal, text: String) -> Result<String> {
     edited.context("running the editor")?
 }
 
+/// The OSC 52 sequence that has the terminal put `text` on its clipboard, through SSH and tmux alike.
+fn osc52(text: &str) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(text.len().div_ceil(3) * 4);
+    for chunk in text.as_bytes().chunks(3) {
+        let bytes = [chunk[0], chunk.get(1).copied().unwrap_or(0), chunk.get(2).copied().unwrap_or(0)];
+        let n = u32::from(bytes[0]) << 16 | u32::from(bytes[1]) << 8 | u32::from(bytes[2]);
+        for at in 0..4 {
+            let sextet = (n >> (18 - 6 * at)) & 63;
+            encoded.push(if at <= chunk.len() { char::from(ALPHABET[sextet as usize]) } else { '=' });
+        }
+    }
+    format!("\x1b]52;c;{encoded}\x07")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_copy_is_the_text_in_base64_in_an_osc_52_sequence() {
+        assert_eq!(osc52(""), "\x1b]52;c;\x07");
+        assert_eq!(osc52("f"), "\x1b]52;c;Zg==\x07");
+        assert_eq!(osc52("fo"), "\x1b]52;c;Zm8=\x07");
+        assert_eq!(osc52("foo"), "\x1b]52;c;Zm9v\x07");
+        assert_eq!(osc52("héllo wörld"), "\x1b]52;c;aMOpbGxvIHfDtnJsZA==\x07");
+    }
 
     #[test]
     fn without_a_terminal_chat_names_the_commands_for_scripts() {

@@ -34,6 +34,8 @@ pub const MAX_ATTACHMENT_NAME: usize = 255;
 pub const ATTACHMENT_HEADER: &str = "Ants-Attachment";
 /// Most bytes of an attachment's media type.
 const MAX_MIME: usize = 127;
+/// The media types of attachments shown as images ([`Attachment::is_image`]).
+pub const IMAGE_MIMES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
 /// A file attached to a message: what the message carries of it. Its bytes are stored, before the message, under the
 /// [`AttachmentHandle`] the subject of that message and the id give, where only the readers of that message read them.
@@ -100,6 +102,55 @@ impl Attachment {
     /// How many chunks hold its bytes: one at least, empty for an empty file.
     pub fn chunks(&self) -> u64 {
         self.size.div_ceil(ATTACHMENT_CHUNK as u64).max(1)
+    }
+
+    /// Whether it is an image of a type harnesses and MCP clients take as image content ([`IMAGE_MIMES`]).
+    pub fn is_image(&self) -> bool {
+        IMAGE_MIMES.contains(&self.mime.as_str())
+    }
+}
+
+/// The media type of a file named `name`, guessed from its extension; [`Attachment::UNKNOWN_MIME`] when unknown.
+pub fn guess_mime(name: &str) -> &'static str {
+    // A leading dot starts a hidden file's name, such as `.bashrc`, not an extension.
+    let Some((_, extension)) = name.rsplit_once('.').filter(|(stem, _)| !stem.is_empty()) else {
+        return Attachment::UNKNOWN_MIME;
+    };
+    match extension.to_ascii_lowercase().as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        "ico" => "image/vnd.microsoft.icon",
+        "tif" | "tiff" => "image/tiff",
+        "heic" => "image/heic",
+        "avif" => "image/avif",
+        "md" | "markdown" => "text/markdown",
+        "csv" => "text/csv",
+        "tsv" => "text/tab-separated-values",
+        "html" | "htm" => "text/html",
+        "css" => "text/css",
+        "js" | "mjs" | "cjs" => "text/javascript",
+        "diff" | "patch" => "text/x-diff",
+        "txt" | "text" | "log" | "rs" | "py" | "go" | "ts" | "tsx" | "jsx" | "c" | "h" | "cc" | "cpp" | "hpp"
+        | "java" | "kt" | "swift" | "rb" | "sh" | "bash" | "zsh" | "fish" | "ps1" | "toml" | "yaml" | "yml" | "ini"
+        | "cfg" | "conf" | "sql" | "lock" => "text/plain",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        "gz" | "tgz" => "application/gzip",
+        "tar" => "application/x-tar",
+        "wasm" => "application/wasm",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" => "audio/ogg",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        _ => Attachment::UNKNOWN_MIME,
     }
 }
 
@@ -270,6 +321,25 @@ mod tests {
         let many: Vec<_> = (0..=MAX_ATTACHMENTS).map(|_| attachment("a")).collect();
         assert_eq!(check_attachments(&many), Err(Error::TooManyAttachments(MAX_ATTACHMENTS + 1)));
         assert!(check_attachments(&many[1..]).is_ok());
+    }
+
+    #[test]
+    fn a_media_type_is_guessed_from_the_extension() {
+        for (name, mime) in [
+            ("shot.PNG", "image/png"),
+            ("a.b.jpeg", "image/jpeg"),
+            ("notes.md", "text/markdown"),
+            ("main.rs", "text/plain"),
+            ("data.json", "application/json"),
+            ("icon.ico", "image/vnd.microsoft.icon"),
+            (".bashrc", Attachment::UNKNOWN_MIME),
+            ("README", Attachment::UNKNOWN_MIME),
+            ("x.unknown", Attachment::UNKNOWN_MIME),
+        ] {
+            assert_eq!(guess_mime(name), mime, "{name}");
+            let guessed = Attachment::new(name, guess_mime(name), 1, "ab".repeat(32)).unwrap();
+            assert_eq!(guessed.is_image(), mime.starts_with("image/") && mime != "image/vnd.microsoft.icon");
+        }
     }
 
     #[test]

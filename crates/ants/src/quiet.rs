@@ -42,6 +42,14 @@ async fn load(kv: &kv::Store, human: &UserId) -> Result<(NotifyPrefs, u64)> {
     Ok((prefs, entry.revision))
 }
 
+/// The holds of `human` as stored; none when the bucket does not exist.
+pub(crate) async fn prefs(js: &jetstream::Context, human: &UserId) -> Result<NotifyPrefs> {
+    match js.get_key_value(NOTIFY_BUCKET).await {
+        Ok(kv) => Ok(load(&kv, human).await?.0),
+        Err(_) => Ok(NotifyPrefs::default()),
+    }
+}
+
 /// Apply `change` to the holds of `human`, on top of whatever other devices changed meanwhile, dropping those that
 /// ended: the holds as stored.
 pub(crate) async fn update(
@@ -65,7 +73,7 @@ pub(crate) async fn update(
 }
 
 /// `now` plus `hold`, which must be from a second to [`MAX_HOLD`].
-fn until(now: DateTime<Utc>, hold: Duration) -> Result<DateTime<Utc>> {
+pub(crate) fn until(now: DateTime<Utc>, hold: Duration) -> Result<DateTime<Utc>> {
     if hold < Duration::from_secs(1) || hold > MAX_HOLD {
         bail!("from 1s to {}", ants_proto::duration::format(MAX_HOLD));
     }

@@ -9,7 +9,7 @@
 //! Members are ants and humans. A human's post that @mentions a human member puts a notice in that human's inbox
 //! ([`notify_mentioned`]); an ant's daemon sends those of the ant's posts.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::ops::ControlFlow;
 use std::time::{Duration, SystemTime};
@@ -90,14 +90,26 @@ pub fn describe(entry: &ChannelEntry) -> String {
     format!("#{}: members {}; messenger {}{owner}", entry.channel, members_label(entry), messenger_label(entry))
 }
 
-/// The channels as a table: one row per channel under a header, columns padded to line up.
-pub fn table(entries: &[ChannelEntry]) -> String {
-    let header = ["CHANNEL", "MEMBERS", "MESSENGER", "OWNER"].map(str::to_owned);
+/// The channels as a table: one row per channel under a header, columns padded to line up. With `unread`, an UNREAD
+/// column shows the unread posts of each channel it has, and how many of them @mention the human, `-` for the others.
+pub fn table(entries: &[ChannelEntry], unread: Option<&HashMap<ChannelId, reads::Unread>>) -> String {
+    let mut header = ["CHANNEL", "MEMBERS", "MESSENGER", "OWNER"].map(str::to_owned).to_vec();
+    if unread.is_some() {
+        header.push("UNREAD".to_owned());
+    }
     let owner = |e: &ChannelEntry| e.owner.as_ref().map_or_else(|| "-".to_owned(), UserId::to_string);
-    let rows: Vec<[String; 4]> = std::iter::once(header)
-        .chain(entries.iter().map(|e| [format!("#{}", e.channel), members_label(e), messenger_label(e), owner(e)]))
+    let unread_label = |e: &ChannelEntry| match unread?.get(&e.channel) {
+        None => Some("-".to_owned()),
+        Some(u) if u.mentions > 0 => Some(format!("{} (@{})", u.posts, u.mentions)),
+        Some(u) => Some(u.posts.to_string()),
+    };
+    let rows: Vec<Vec<String>> = std::iter::once(header)
+        .chain(entries.iter().map(|e| {
+            let row = [format!("#{}", e.channel), members_label(e), messenger_label(e), owner(e)];
+            row.into_iter().chain(unread_label(e)).collect()
+        }))
         .collect();
-    let mut widths = [0; 4];
+    let mut widths = vec![0; rows[0].len()];
     for row in &rows {
         for (width, cell) in widths.iter_mut().zip(row) {
             *width = (*width).max(cell.chars().count());
@@ -106,7 +118,7 @@ pub fn table(entries: &[ChannelEntry]) -> String {
     let lines: Vec<String> = rows
         .iter()
         .map(|row| {
-            let cells: Vec<String> = row.iter().zip(widths).map(|(cell, width)| format!("{cell:width$}")).collect();
+            let cells: Vec<String> = row.iter().zip(&widths).map(|(cell, width)| format!("{cell:width$}")).collect();
             cells.join("  ").trim_end().to_owned()
         })
         .collect();
@@ -261,8 +273,8 @@ pub async fn compose(
     human_post(channel, thread, me.id.clone(), owner, text).with_creator(creator)
 }
 
-/// The owner and creator of `thread` in `channel`, read as `reader` reads channels back ([`read`]): as its posts still
-/// kept say ([`ThreadOrigin`] with `humans`), or None. A thread named after the post that started it is read from its
+/// The owner and creator of `thread` in `channel`, read as `reader` reads channels back ([`read_from`]): as its posts
+/// still kept say ([`ThreadOrigin`] with `humans`), or None. A thread named after the post that started it is read from its
 /// start; any other from the channel's oldest post kept. A top-level post marked as a webhook's counts as one only from
 /// a human or a webhook ([`OriginFold`]).
 pub async fn thread_origin(
@@ -277,7 +289,7 @@ pub async fn thread_origin(
         None => consumer::DeliverPolicy::All,
     };
     let mut fold = OriginFold::new(ThreadOrigin::default());
-    scan(js, reader, channel, start, |post| {
+    scan(js, reader, channel, start, |_, post| {
         if post.thread_id == *thread {
             fold.push(post, humans);
         }
@@ -324,11 +336,11 @@ pub const CATCH_UP: Duration = Duration::from_secs(5);
 const SEEN: usize = 1024;
 
 /// The posts `room`, a subscription to the channel of `post`, receives ([`live_posts`]), and those the hub's stream
-/// stores after `post`, read back every [`CATCH_UP`] as `reader` reads channels back ([`read`]), each once: what the
-/// hub stores while this connection, or the uplink of the leaf node it goes through, is down never comes live, nor does
-/// a post the hub takes from a leaf's outbox. `stored` is the stream sequence of `post`, when the hub stored it; for a
-/// post kept in the machine's outbox, the read-back looks for it from [`CLOCK_SLACK`] before it was sent, and takes
-/// only what the stream stores after it.
+/// stores after `post`, read back every [`CATCH_UP`] as `reader` reads channels back ([`read_from`]), each once:
+/// what the hub stores while this connection, or the uplink of the leaf node it goes through, is down never comes
+/// live, nor does a post the hub takes from a leaf's outbox. `stored` is the stream sequence of `post`, when the hub
+/// stored it; for a post kept in the machine's outbox, the read-back looks for it from [`CLOCK_SLACK`] before it was
+/// sent, and takes only what the stream stores after it.
 pub fn caught_up_posts(
     room: async_nats::Subscriber,
     js: &jetstream::Context,
@@ -424,32 +436,42 @@ impl Seen {
     }
 }
 
-/// The posts of `channel` kept in the stream, oldest first, read as the CLI reads channels back as `reader`
-/// ([`Reading::cli`]): a human by message gets, an ant through a free spare of its reader consumer, taken for the read
-/// and deleted after it, so any number of reads, and the ant's daemon's, may run at once. Posts whose sender or channel disagrees with their subject are
-/// dropped with a warning.
-pub async fn read(js: &jetstream::Context, reader: &Me, channel: &ChannelId) -> Result<Vec<ChannelPost>> {
+/// The posts of `channel` stored at stream sequence `from` or after (0: every one kept), oldest first, each with its
+/// sequence, read as the CLI reads channels back as `reader` ([`Reading::cli`]): a human by message gets, an ant
+/// through a free spare of its reader consumer, taken for the read and deleted after it, so any number of reads, and
+/// the ant's daemon's, may run at once. Posts whose sender or channel disagrees with their subject are dropped with a
+/// warning.
+pub async fn read_from(
+    js: &jetstream::Context,
+    reader: &Me,
+    channel: &ChannelId,
+    from: u64,
+) -> Result<Vec<(u64, ChannelPost)>> {
+    let start = match from {
+        0 | 1 => consumer::DeliverPolicy::All,
+        from => consumer::DeliverPolicy::ByStartSequence { start_sequence: from },
+    };
     let mut posts = Vec::new();
-    scan(js, reader, channel, consumer::DeliverPolicy::All, |post| {
-        posts.push(post);
+    scan(js, reader, channel, start, |seq, post| {
+        posts.push((seq, post));
         ControlFlow::Continue(())
     })
     .await?;
     Ok(posts)
 }
 
-/// Hand the posts of `channel` kept in the stream from `start` on, oldest first, to `take` until it breaks, read as
-/// [`read`] does.
+/// Hand the posts of `channel` kept in the stream from `start` on, oldest first, each with its sequence, to `take`
+/// until it breaks, read as [`read_from`] does.
 async fn scan(
     js: &jetstream::Context,
     reader: &Me,
     channel: &ChannelId,
     start: consumer::DeliverPolicy,
-    mut take: impl FnMut(ChannelPost) -> ControlFlow<()>,
+    mut take: impl FnMut(u64, ChannelPost) -> ControlFlow<()>,
 ) -> Result<()> {
     let reading = Reading::cli(reader.role);
-    read_back(js, &reader.id, reading, &subject::chan_room(channel), start, |_, _, subject, post| match post {
-        Ok(post) => take(post),
+    read_back(js, &reader.id, reading, &subject::chan_room(channel), start, |seq, _, subject, post| match post {
+        Ok(post) => take(seq, post),
         Err(error) => {
             tracing::warn!(%channel, subject, error, "dropping a channel post");
             ControlFlow::Continue(())
@@ -526,5 +548,6 @@ pub fn render(threads: &[Thread]) -> String {
     out
 }
 
+pub mod reads;
 #[cfg(test)]
 mod tests;

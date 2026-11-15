@@ -1,9 +1,9 @@
 //! A channel's feed: its top-level posts, newest first, each with its replies' count and latest time and the reactions
-//! to it, as `ants channel read` shows them.
+//! to it, as `ants channel read` shows them; and which of the channels' posts the human has not read.
 
 use std::collections::HashMap;
 
-use ants_proto::{ChannelId, ThreadId, Uuid};
+use ants_proto::{ChannelId, ReadMarker, ThreadId, UserId, Uuid};
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -14,6 +14,7 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use super::frame::{self, ago};
 use super::model::{Data, Key, To};
 use super::work::Filter;
+use crate::channel::reads::Unread;
 use crate::thread::{Entry, Kind};
 
 /// The most posts of a channel whose reactions are read.
@@ -36,16 +37,36 @@ pub struct Replies {
     pub last_at: DateTime<Utc>,
 }
 
+/// A channel post of any kind, as far as its being read goes.
+#[derive(Debug, Clone)]
+struct Seen {
+    seq: u64,
+    thread: ThreadId,
+    from: UserId,
+    mentions: Vec<UserId>,
+}
+
 /// The channels' posts read from the stream.
 #[derive(Debug, Default)]
 pub struct Feeds {
     posts: HashMap<ChannelId, Vec<Post>>,
     replies: HashMap<ThreadId, Replies>,
+    /// Every post of each channel, in the order stored.
+    seen: HashMap<ChannelId, Vec<Seen>>,
+    /// The channel of each thread posted on.
+    channels: HashMap<ThreadId, ChannelId>,
 }
 
 impl Feeds {
     /// Take a message read: whether it is a top-level post.
     pub fn add(&mut self, entry: &Entry) -> bool {
+        if let (Kind::Post, Some(channel), Some(from)) = (entry.kind, &entry.channel, &entry.from) {
+            let thread = entry.thread_id.clone();
+            let seen =
+                Seen { seq: entry.seq, thread: thread.clone(), from: from.clone(), mentions: entry.mentions.clone() };
+            self.seen.entry(channel.clone()).or_default().push(seen);
+            self.channels.insert(thread, channel.clone());
+        }
         let top = entry.kind == Kind::Post && entry.id.is_some_and(|id| id.to_string() == entry.thread_id.as_str());
         if let (true, Some(id), Some(channel)) = (top, entry.id, &entry.channel) {
             let from = entry.from.as_ref().map_or_else(String::new, ToString::to_string);
@@ -70,6 +91,24 @@ impl Feeds {
 
     pub fn replies(&self, thread: &ThreadId) -> Option<Replies> {
         self.replies.get(thread).copied()
+    }
+
+    /// The sequence of the channel's newest post read.
+    pub fn newest(&self, channel: &ChannelId) -> Option<u64> {
+        self.seen.get(channel)?.last().map(|s| s.seq)
+    }
+
+    /// The channel of the posts on `thread`, and their sequences.
+    pub fn thread_posts(&self, thread: &ThreadId) -> Option<(&ChannelId, Vec<u64>)> {
+        let channel = self.channels.get(thread)?;
+        let seqs = self.seen.get(channel)?.iter().filter(|s| s.thread == *thread).map(|s| s.seq).collect();
+        Some((channel, seqs))
+    }
+
+    /// The channel's posts read that `marker` (none: nothing read) leaves unread for `me`.
+    pub fn unread(&self, channel: &ChannelId, marker: Option<&ReadMarker>, me: &UserId) -> Unread {
+        let posts = self.seen.get(channel).into_iter().flatten();
+        Unread::of(posts.map(|s| (s.seq, &s.from, s.mentions.as_slice())), marker, me)
     }
 
     /// The posts of the channel whose reactions to read: the newest.
@@ -154,7 +193,7 @@ fn post_lines(post: &Post, data: &Data, now: DateTime<Utc>) -> Vec<Line<'static>
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use ants_proto::{ChannelPost, Envelope, Reacted, subject};
 
     use super::*;
@@ -164,7 +203,8 @@ mod tests {
     use crate::tui::model::{Action, Page as View};
     use crate::tui::nav;
 
-    fn post(seq: u64, post: &ChannelPost) -> Entry {
+    /// The entry of `post`, stored at sequence `seq`.
+    pub fn post(seq: u64, post: &ChannelPost) -> Entry {
         let payload = serde_json::to_vec(post).unwrap();
         let subject = subject::chan(&post.channel, &post.from);
         Parser::default().entry(seq, at(seq.cast_signed()), &subject, &payload).unwrap()

@@ -252,6 +252,8 @@ fn kv_entries() {
         snap(&format!("reactions_reply_{kind}"), &reply);
     }
     snap("read_marker", &ReadMarker { below: 4200, read: BTreeSet::from([4203, 4207]) });
+    let marker = ReadMarker { below: 4200, read: BTreeSet::from([4207]) };
+    snap("channel_read_markers", &ChannelReadMarkers { channels: BTreeMap::from([(channel(), marker)]) });
     snap(
         "thread_title",
         &ThreadTitle { thread_id: thread(), title: "Release 0.2".to_owned(), by: user("alice"), at: at(0) },

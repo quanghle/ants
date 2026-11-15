@@ -3,16 +3,19 @@
 //! notice. Keys and changes return the [`Action`]s the UI then performs.
 
 use ants_daemon::reactions::Reactions;
-use ants_proto::{ApprovalRequest, ChannelEntry, Humans, ReadMarker, ThreadId, UserId, Uuid, Verdict};
+use ants_proto::{
+    ApprovalRequest, ChannelEntry, ChannelId, ChannelReadMarkers, Humans, ReadMarker, ThreadId, UserId, Uuid, Verdict,
+};
 use chrono::{DateTime, TimeDelta, Utc};
 
+use super::acts::{Acted, Change};
 use super::command::Bar;
 use super::exec::Job;
-use super::reads::Read;
+use super::reads::{Mark, Read};
 use super::work::{Facts, Filter};
-use super::{channel, dm, home, nav, people, search, thread, work};
+use super::{channel, dm, home, nav, people, search, thread, timeline, work};
 use crate::live::{self, State};
-use crate::thread::Entry;
+use crate::thread::{Entry, Kind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
@@ -45,8 +48,14 @@ pub enum Action {
     Open(ThreadId),
     /// Mark the human's inbox messages on the thread read on all its devices, as `ants inbox --thread` does.
     MarkRead(ThreadId),
+    /// Mark the human's posts of the channel read on all its devices, as `ants channel read` does.
+    MarkChannel(ChannelId, Mark),
     /// Read the reactions to these messages, and again every while.
     Reactions(Vec<Uuid>),
+    /// Make a change to how the human holds the thread, the last message, post or note on which has this sequence.
+    Change(ThreadId, Change, u64),
+    /// Copy the text to the terminal's clipboard.
+    Copy(String),
     /// Send a message to another human on a new thread, as `ants ask @human` does.
     Send(dm::Draft),
     /// Read again what may have missed changes.
@@ -54,7 +63,7 @@ pub enum Action {
     /// Run the command bar's job, for the bar's text.
     Run(Job, String),
     /// Store a decision on a tool request.
-    Decide(ApprovalRequest, Verdict),
+    Decide(Box<ApprovalRequest>, Verdict),
     /// Edit the command bar's text in the editor.
     Edit(String),
     /// Find the messages matching the search, replacing any search running.
@@ -91,12 +100,16 @@ pub struct Data {
     pub feeds: channel::Feeds,
     /// Which of the human's inbox messages are read, once read.
     pub marker: Option<ReadMarker>,
+    /// Which channel posts the human has read, once read; never without the credentials to.
+    pub channel_reads: Option<ChannelReadMarkers>,
     /// The channels the human is a member of.
     pub channels: Vec<ChannelEntry>,
     /// The team's humans, once read.
     pub humans: Option<Humans>,
     /// The reactions to the messages watched.
     pub reactions: Reactions,
+    /// The tool calls of the threads, heard live or read from their timelines.
+    pub calls: timeline::Threads,
     /// Who of the other humans is online, and the messages with each.
     pub people: people::People,
 }
@@ -181,6 +194,8 @@ pub enum To {
     /// A thread, shown at a message on it.
     Message(ThreadId, Uuid),
     Work(Filter),
+    /// Not another view: something to do.
+    Do(Action),
 }
 
 pub struct Model {
@@ -203,9 +218,11 @@ impl Model {
             facts: Facts::default(),
             feeds: channel::Feeds::default(),
             marker: None,
+            channel_reads: None,
             channels: Vec::new(),
             humans: None,
             reactions: Reactions::new(),
+            calls: timeline::Threads::default(),
             people: people::People::default(),
         };
         let nav = nav::Item::Home;
@@ -238,7 +255,10 @@ impl Model {
         match event {
             live::Event::Stored(Ok(entries)) => return self.stored(entries, now),
             live::Event::Stored(Err(e)) => self.notify(format!("{e:#}"), Level::Error, now),
-            live::Event::Status(event) => self.data.live.status(&event, now),
+            live::Event::Status(event) => {
+                self.data.live.status(&event, now);
+                self.data.calls.status(&event);
+            }
             live::Event::Following => self.data.live.approvals_reset(),
             live::Event::Approval(update) => self.data.live.approval(&update),
             live::Event::FollowEnded(Ok(())) => {}
@@ -249,6 +269,7 @@ impl Model {
             live::Event::Roster(Ok(entries)) => self.data.live.roster(entries, now),
             live::Event::Roster(Err(e)) => self.notify(format!("reading the roster: {e:#}"), Level::Error, now),
             live::Event::History(thread, read) => {
+                let read = read.map(|entries| self.tools(entries));
                 let page = self.pages.iter_mut().rev().find_map(|page| match page {
                     Page::Thread(page) if page.history.thread == thread => Some(page),
                     _ => None,
@@ -266,6 +287,7 @@ impl Model {
     /// Take the messages read from the stream. Marks read the human's new messages on an open thread, and reads the
     /// reactions to a shown channel's new posts.
     pub fn stored(&mut self, entries: Vec<Entry>, now: DateTime<Utc>) -> Vec<Action> {
+        let entries = self.tools(entries);
         let data = &mut self.data;
         data.live.stored(&entries, now);
         let me = data.live.me.clone();
@@ -291,12 +313,66 @@ impl Model {
         actions
     }
 
+    /// Take the tool calls among `entries` into those of their threads: the other entries.
+    fn tools(&mut self, entries: Vec<Entry>) -> Vec<Entry> {
+        let (tools, entries): (Vec<Entry>, Vec<Entry>) = entries.into_iter().partition(|e| e.kind == Kind::Tool);
+        for tool in &tools {
+            self.data.calls.stored(tool);
+        }
+        entries
+    }
+
+    /// The thread shown, if one is.
+    pub fn open(&self) -> Option<&ThreadId> {
+        match self.page() {
+            Page::Thread(page) => Some(&page.history.thread),
+            _ => None,
+        }
+    }
+
+    /// Take what was done to or read of the open thread besides its messages.
+    pub fn acted(&mut self, acted: Acted, now: DateTime<Utc>) {
+        match acted {
+            Acted::About(thread, Ok(about)) => {
+                if self.data.live.marks != about.marks {
+                    self.data.live.marks.clone_from(&about.marks);
+                    self.data.live.reorder(now);
+                }
+                for page in &mut self.pages {
+                    if let Page::Thread(page) = page
+                        && page.history.thread == thread
+                    {
+                        page.about = Some(about.clone());
+                    }
+                }
+            }
+            Acted::About(thread, Err(e)) => tracing::debug!(%thread, "reading the thread's marks: {e:#}"),
+            Acted::Changed(thread, change, Ok(changed)) => {
+                let line =
+                    format!("thread {} {}", crate::excerpt(&self.data.title(&thread), 40), change.done_line(changed));
+                self.notify(line, Level::Info, now);
+            }
+            Acted::Changed(thread, _, Err(e)) => {
+                self.notify(format!("changing thread {thread}: {e:#}"), Level::Error, now);
+            }
+        }
+    }
+
     /// Take what the UI read besides the live feed.
     pub fn read(&mut self, read: Read, now: DateTime<Utc>) {
         let data = &mut self.data;
         match read {
             Read::Marker(Ok(marker)) => data.marker = Some(marker),
             Read::Marker(Err(e)) => self.notify(format!("reading what was read: {e:#}"), Level::Error, now),
+            Read::ChannelMarkers(Ok(markers)) | Read::ChannelMarked(_, Ok(markers)) => {
+                data.channel_reads = Some(markers);
+            }
+            Read::ChannelMarkers(Err(e)) => {
+                self.notify(format!("reading which channel posts were read: {e:#}"), Level::Error, now);
+            }
+            Read::ChannelMarked(channel, Err(e)) => {
+                self.notify(format!("marking #{channel} read: {e:#}"), Level::Error, now);
+            }
             Read::Directory(Ok((channels, humans))) => {
                 let me = data.me().clone();
                 data.channels = channels.into_iter().filter(|c| c.members.contains(&me)).collect();
@@ -323,6 +399,33 @@ impl Model {
                 let (text, level) = sent.notice();
                 self.notify(text, level, now);
             }
+        }
+    }
+
+    /// Mark read the channel posts the shown view shows, once which are read is known: every post of a channel's
+    /// feed through its newest, or the posts of a thread. Marks them read here at once, so asks only once.
+    pub fn mark_shown(&mut self) -> Option<Action> {
+        let data = &mut self.data;
+        let markers = data.channel_reads.as_mut()?;
+        match self.pages.last()? {
+            Page::Channel(page) => {
+                let newest = data.feeds.newest(&page.channel)?;
+                if markers.channels.get(&page.channel).is_some_and(|m| m.below >= newest) {
+                    return None;
+                }
+                markers.mark_through(&page.channel, newest);
+                Some(Action::MarkChannel(page.channel.clone(), Mark::Through(newest)))
+            }
+            Page::Thread(page) => {
+                let (channel, mut seqs) = data.feeds.thread_posts(&page.history.thread)?;
+                seqs.retain(|seq| !markers.is_read(channel, *seq));
+                if seqs.is_empty() {
+                    return None;
+                }
+                seqs.iter().for_each(|seq| markers.mark(channel, *seq));
+                Some(Action::MarkChannel(channel.clone(), Mark::Posts(seqs)))
+            }
+            Page::Home(_) | Page::Work(_) | Page::Dm(_) | Page::Search(_) => None,
         }
     }
 
@@ -460,7 +563,7 @@ impl Model {
             Page::Home(page) => page.key(key, data, now),
             Page::Work(page) => page.key(key, data),
             Page::Channel(page) => page.key(key, data),
-            Page::Thread(page) => page.key(key),
+            Page::Thread(page) => page.key(key, data, now),
             Page::Dm(page) => page.key(key, data),
             Page::Search(page) => page.key(key),
         }?;
@@ -477,6 +580,7 @@ impl Model {
                 self.pages.push(Page::Work(work::Page::new(filter)));
                 None
             }
+            To::Do(action) => Some(action),
         }
     }
 }
@@ -485,12 +589,13 @@ impl Model {
 pub mod tests {
     use std::time::Duration;
 
-    use ants_proto::{HumanEntry, Verdict};
+    use ants_proto::{ChannelPost, HumanEntry, Verdict};
 
     use super::*;
     use crate::live::Link;
     use crate::live::tests::{at, message, request, user};
     use crate::tools::Update;
+    use crate::tui::channel::tests::post;
 
     /// The model of alice, with bob a human too and nothing read yet.
     pub fn model() -> Model {
@@ -555,6 +660,34 @@ pub mod tests {
     }
 
     #[test]
+    fn tool_calls_go_to_their_threads_timelines_and_what_was_done_shows() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        m.stored(vec![message(1, &thread, "alice", "dev-a", "deploy")], at(1));
+        m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
+        let call = crate::tui::timeline::tests::stored(2, &thread, "dev-a", Uuid::new_v4(), "c1", "completed", 1);
+        let loaded = vec![message(1, &thread, "alice", "dev-a", "deploy"), call.clone()];
+        m.take(live::Event::History(thread.clone(), Ok(loaded)), at(2));
+        m.stored(vec![call, message(3, &thread, "dev-a", "alice", "done")], at(3));
+        let Page::Thread(page) = m.page() else { panic!("not a thread") };
+        assert_eq!(page.history.entries.iter().map(|e| e.seq).collect::<Vec<_>>(), [1, 3], "no call among them");
+        assert_eq!(m.data.calls.get(&thread).map(|c| c.calls().len()), Some(1), "the call once");
+        assert_eq!(m.open(), Some(&thread));
+
+        let mut about = crate::tui::acts::About::default();
+        about.marks.archive(&thread, 3);
+        m.acted(Acted::About(thread.clone(), Ok(about.clone())), at(4));
+        assert!(m.data.live.order.is_empty(), "archived, the thread leaves the work");
+        let Page::Thread(page) = m.page() else { panic!("not a thread") };
+        assert_eq!(page.about, Some(about));
+        m.acted(Acted::Changed(thread.clone(), Change::Archive(true), Ok(true)), at(5));
+        assert!(
+            m.notice_at(at(5))
+                .is_some_and(|n| n.text == "thread deploy archived; its messages and its work stay as they are")
+        );
+    }
+
+    #[test]
     fn slash_searches_and_a_match_opens_its_thread_at_it() {
         let thread = ThreadId::generate();
         let mut m = model();
@@ -590,6 +723,33 @@ pub mod tests {
         assert_eq!((m.bar.focused, m.bar.text()), (true, "/search ".to_owned()), "a draft in the bar stays");
         m.key(Key::Esc, at(4));
         assert_eq!(m.key(Key::Char('q'), at(4)), Some(Action::Quit));
+    }
+
+    #[test]
+    fn a_shown_channel_or_thread_marks_its_posts_read_once() {
+        let ops: ChannelId = "ops".parse().unwrap();
+        let down = ChannelPost::new(ops.clone(), user("bob"), "the site is down");
+        let lunch = ChannelPost::new(ops.clone(), user("bob"), "lunch?");
+        let on = |text| ChannelPost::on_thread(ops.clone(), down.thread_id.clone(), user("dev-a"), text);
+        let mut m = model();
+        m.stored(vec![post(1, &down), post(2, &lunch), post(3, &on("looking"))], at(1));
+        m.select(nav::Item::Channel(ops.clone()));
+        assert_eq!(m.mark_shown(), None, "not before which posts are read is known");
+        m.read(Read::ChannelMarkers(Ok(ChannelReadMarkers::default())), at(1));
+        assert_eq!(m.mark_shown(), Some(Action::MarkChannel(ops.clone(), Mark::Through(3))));
+        assert_eq!(m.mark_shown(), None, "marked here at once");
+
+        m.data.channel_reads = Some(ChannelReadMarkers::default());
+        m.pages.push(Page::Thread(thread::Page::new(down.thread_id.clone())));
+        assert_eq!(m.mark_shown(), Some(Action::MarkChannel(ops.clone(), Mark::Posts(vec![1, 3]))));
+        m.stored(vec![post(4, &on("fixed"))], at(2));
+        assert_eq!(m.mark_shown(), Some(Action::MarkChannel(ops.clone(), Mark::Posts(vec![4]))));
+        assert_eq!(m.mark_shown(), None);
+        m.key(Key::Esc, at(3));
+        assert_eq!(m.mark_shown(), Some(Action::MarkChannel(ops.clone(), Mark::Through(4))), "the feed shows #2");
+        m.select(nav::Item::Home);
+        m.stored(vec![post(5, &lunch)], at(4));
+        assert_eq!(m.mark_shown(), None, "only what is shown");
     }
 
     #[test]

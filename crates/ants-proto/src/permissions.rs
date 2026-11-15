@@ -12,9 +12,9 @@ use crate::{
 };
 #[cfg(doc)]
 use crate::{
-    AntRequest, AttachmentHandle, EnrollRequest, HeldNotices, NotifyPrefs, QueueRequest, ReactionsRequest,
-    RenewRequest, StatusUpdate, ThreadSummary, channel_manager_serving_key, daily_spend_key, link_outbox,
-    message_mark_key, owner_outbox, storage_warning_key, thread_spend_key, unserved_key,
+    AntRequest, AttachmentHandle, ChannelReadMarkers, EnrollRequest, HeldNotices, NotifyPrefs, QueueRequest,
+    ReactionsRequest, RenewRequest, StatusUpdate, ThreadSummary, channel_manager_serving_key, daily_spend_key,
+    link_outbox, message_mark_key, owner_outbox, storage_warning_key, thread_spend_key, unserved_key,
 };
 
 /// JetStream stream backing a KV bucket.
@@ -37,16 +37,19 @@ fn flow_control_subjects(domain: &str, stream: &str) -> [String; 2] {
     [format!("$JS.FC.{stream}.>"), format!("$JS.FC.{domain}.*.{stream}.>")]
 }
 
-/// What a human's credentials need for its inbox ([`READ_BUCKET`]): creating the bucket and reading and writing its own
-/// [`ReadMarker`] only, by key, so no human reads or moves another's.
-fn read_marker_rights(human: &UserId) -> [String; 4] {
+/// What a human's credentials need for what it read ([`READ_BUCKET`]): creating the bucket and reading and writing its
+/// own [`ReadMarker`] and [`ChannelReadMarkers`] only, by key, so no human reads or moves another's.
+fn read_marker_rights(human: &UserId) -> [String; 6] {
     let read = kv_stream(READ_BUCKET);
     let marker = subject::read_marker(human);
+    let channels = subject::channel_reads(human);
     [
         format!("$JS.API.STREAM.INFO.{read}"),
         format!("$JS.API.STREAM.CREATE.{read}"),
         format!("$JS.API.DIRECT.GET.{read}.{marker}"),
         marker,
+        format!("$JS.API.DIRECT.GET.{read}.{channels}"),
+        channels,
     ]
 }
 
@@ -235,9 +238,9 @@ impl Permissions {
     /// attempts, channels, humans, chains, links and owners buckets, writes the channels, humans and owners buckets
     /// (the owners also in its outbox form, [`owner_outbox`]), reads the version the channel manager runs
     /// ([`channel_manager_serving_key`]), reads the stream's messages by sequence, one at a time or in batches of
-    /// direct gets, and removes dead letters by sequence; its own read marker in [`READ_BUCKET`], and no other, says which replies it has read on any
-    /// of its devices ([`read_marker_rights`]), and its own keys in [`PRESENCE_BUCKET`] where its devices read,
-    /// reading every human's there ([`presence_rights`]), and its own [`NotifyPrefs`] in [`NOTIFY_BUCKET`] what it holds back of its notifications,
+    /// direct gets, and removes dead letters by sequence; its own read markers in [`READ_BUCKET`], and no other's,
+    /// say which replies and channel posts it has read on any of its devices ([`read_marker_rights`]), and its own
+    /// keys in [`PRESENCE_BUCKET`] where its devices read, reading every human's there ([`presence_rights`]), and its own [`NotifyPrefs`] in [`NOTIFY_BUCKET`] what it holds back of its notifications,
     /// and its own [`HeldNotices`] there what was held back ([`notify_prefs_rights`]), and it reads every reaction ([`REACTIONS_BUCKET`]), of which it
     /// puts and removes only its own ([`human_reaction_rights`]), while an ant only asks for those ([`subject::reactions`],
     /// [`subject::react`]); it sets every thread's title, TL;DR and done state and its own pinned and
