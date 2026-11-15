@@ -122,11 +122,15 @@ pub(crate) fn reaction_line(change: &reactions::Change) -> String {
 }
 
 /// An envelope as `ants watch` prints it: an escalation it carries with its level, reason, stuck ant and thread,
-/// leader and the ants visited; an ant's approval decision in place of its text.
+/// leader and the ants visited; an ant's approval decision in place of its text; the size of a sealed message's
+/// ciphertext in place of its text.
 pub(crate) fn envelope_line(e: &Envelope, forged: &str) -> String {
     let head = format!("[{}] {} -> {}{forged}", e.thread_id, e.from, e.to);
     if let Some(d) = &e.approval {
         return format!("{head} decides {} on approval request {}/{}", tools::spelling(d.verdict), d.ant, d.request_id);
+    }
+    if let Some(sealed) = &e.sealed {
+        return format!("{head}: {}", crate::sealed::size_note(sealed));
     }
     match &e.escalation {
         Some(x) => format!("{head} [{}]: {}", escalation_note(x), e.text),

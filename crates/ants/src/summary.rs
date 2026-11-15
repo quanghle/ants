@@ -63,7 +63,7 @@ pub fn entries_text(entries: &[Entry], threads: bool) -> String {
 /// The text and request asking for the TL;DR of `thread`, up to its last entry; None when it has none.
 pub async fn tldr_request(js: &jetstream::Context, thread: &ThreadId) -> Result<Option<(String, SummaryRequest)>> {
     let entries: Vec<Entry> =
-        thread::history(js, thread, None, false).await?.into_iter().filter(|e| e.summary.is_none()).collect();
+        thread::history(js, thread, None, false, None).await?.into_iter().filter(|e| e.summary.is_none()).collect();
     let Some(last) = entries.last() else { return Ok(None) };
     let request = SummaryRequest::thread(thread.clone(), last.seq);
     Ok(Some((entries_text(&entries, false), request)))

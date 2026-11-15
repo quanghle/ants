@@ -155,13 +155,13 @@ impl Job {
             Self::Ask { to, thread, text, steer } => ask(ctx, to, thread, text, steer).await,
             Self::Post { channel, thread, text } => post(ctx, channel, thread, text).await,
             Self::Reply { thread, text, steer } => {
-                let entries = thread::history(&ctx.js, &thread, None, false).await?;
+                let entries = thread::history(&ctx.js, &thread, None, false, None).await?;
                 let humans = humans::load(&ctx.js, &ctx.me).await;
                 let to = reply_to(&entries, me, |u| humans.contains(u)).unwrap_or_else(UserId::messenger);
                 ask(ctx, to, Some(thread), text, steer).await
             }
             Self::Grant { thread, text } => {
-                let entries = thread::history(&ctx.js, &thread, None, false).await?;
+                let entries = thread::history(&ctx.js, &thread, None, false, None).await?;
                 let ant = stuck(&entries).ok_or_else(|| anyhow!("no ant is stuck on thread {thread}"))?;
                 ask(ctx, ant, Some(thread), text, false).await
             }
@@ -183,7 +183,7 @@ impl Job {
                 }
             }
             Self::Answer { thread, choice } => {
-                let entries = thread::history(&ctx.js, &thread, None, false).await?;
+                let entries = thread::history(&ctx.js, &thread, None, false, None).await?;
                 let question = open_question(&entries, me)
                     .ok_or_else(|| anyhow!("no question to {me} waits for an answer on thread {thread}"))?;
                 let envelope = send::answering(&ctx.js, me, question, choice).await?;
@@ -203,13 +203,13 @@ impl Job {
             Self::Mute { thread, hold } => Ok(Done::line(quiet::muted(&ctx.js, me, &thread, hold).await?)),
             Self::Unmute { thread } => Ok(Done::line(quiet::unmuted(&ctx.js, me, &thread).await?)),
             Self::Title { thread, text } => {
-                Ok(Done::line(thread_meta::retitle(ctx.meta()?, &thread, &text, false).await?))
+                Ok(Done::line(thread_meta::retitle(&ctx.js, ctx.meta()?, &ctx.me.id, &thread, &text, false).await?))
             }
             Self::React { thread, message, reaction } => {
                 let message = match message {
                     Some(message) => message,
                     None => {
-                        let entries = thread::history(&ctx.js, &thread, None, false).await?;
+                        let entries = thread::history(&ctx.js, &thread, None, false, None).await?;
                         latest(&entries, me).ok_or_else(|| anyhow!("no message on thread {thread} to react to"))?
                     }
                 };

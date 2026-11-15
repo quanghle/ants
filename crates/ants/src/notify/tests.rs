@@ -331,6 +331,29 @@ fn a_reply_is_a_completion_and_nothing_else_is() {
     assert!(completion_notice(&hooked).is_none());
 }
 
+#[test]
+fn a_notice_of_a_sealed_message_names_its_sender_and_thread_only() {
+    let (alice, bob) = (p("alice"), p("bob"));
+    let asked = Envelope::new(alice.clone(), bob.clone(), "lunch?");
+    let mut reply = asked.reply(bob, "", ants_proto::Role::Human).unwrap();
+    reply.title = Some("Lunch plans".to_owned());
+    reply.sealed = Some(Box::new(ants_proto::Sealed {
+        v: ants_proto::SEALED_VERSION,
+        device: ants_proto::DeviceId::generate(),
+        keys: Vec::new(),
+        body: "c2VjcmV0".to_owned(),
+    }));
+    let notice = completion_notice(&reply).unwrap();
+    let thread = &asked.thread_id;
+    assert_eq!((notice.title.as_str(), &notice.human), ("bob replied", &alice));
+    assert_eq!(
+        notice.text,
+        format!("a sealed message arrived\n\nthread {thread}; answer with ants ask --thread {thread} @bob TEXT")
+    );
+    let json = notice_json(&notice, at("2026-03-10T12:00:00Z")).to_string();
+    assert!(!json.contains("Lunch") && !json.contains("c2VjcmV0"), "{json}");
+}
+
 /// Where a delivery `POST`s, its bearer token and its JSON body.
 fn posted(delivery: Delivery) -> (String, Option<String>, Value) {
     let Delivery::Post { url, headers, body } = delivery else { panic!("not a POST") };
