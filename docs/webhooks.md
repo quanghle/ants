@@ -30,9 +30,19 @@ secret_env = "ANTS_ALERTS_TOKEN"
 id = "json:/alert/id"
 channel = "ops"
 mention = ["dev-a"]                           # optional; or broadcast = true for all current members
+
+[[webhook]]
+name = "gitlab"                               # ants webhook add gitlab --to dev-a --preset gitlab --signing-token
+creds = "gitlab.creds"
+auth = "standard-webhooks"                    # webhook-id, webhook-timestamp, webhook-signature (v1,<base64> ...)
+secret_file = "gitlab.secret"                 # the signing secret: whsec_<base64>, such as GitLab's signing token
+tolerance = "5m"                              # how far webhook-timestamp may be from now (default 5m, 1s to 1d)
+id = "header:webhook-id"                      # the default with standard-webhooks
+ant = "dev-a"
 ```
 
-- **Auth & HTTP responses:** `hmac-sha256` (`signature_header`), `bearer` (`Authorization: Bearer <secret>`), and `token` (`token_header`, e.g. `X-Gitlab-Token`) compare secrets in constant time (`401` on mismatch). Limits: `256 KiB` body (`413`), `15s` request timeout, `64` concurrent requests (`503` with `Retry-After: 5` when overloaded or NATS cannot store within 5 s; nothing buffers locally). Returns `202` (`{"thread": "...", "duplicate": false}`) when stored, `200` (`"duplicate": true`) on repeat, `400` bad JSON/ID, `404` unknown hook, `405` non-`POST`, `415` non-UTF-8 `{body}`.
+- **Auth & HTTP responses:** `hmac-sha256` (`signature_header`), `bearer` (`Authorization: Bearer <secret>`), `token` (`token_header`, e.g. `X-Gitlab-Token`) and `standard-webhooks` compare secrets and signatures in constant time (`401` on mismatch). Limits: `256 KiB` body (`413`), `15s` request timeout, `64` concurrent requests (`503` with `Retry-After: 5` when overloaded or NATS cannot store within 5 s; nothing buffers locally). Returns `202` (`{"thread": "...", "duplicate": false}`) when stored, `200` (`"duplicate": true`) on repeat, `400` bad JSON/ID, `404` unknown hook, `405` non-`POST`, `415` non-UTF-8 `{body}`.
+- **Standard Webhooks:** `auth = "standard-webhooks"` checks [Standard Webhooks](https://www.standardwebhooks.com) signatures, such as those of a GitLab (19.0+) signing token: `webhook-signature` lists space-separated `v1,<base64>` HMAC-SHA256 signatures of `<webhook-id>.<webhook-timestamp>.<body>`, keyed with the base64 of the secret after `whsec_` (the prefix is optional), and any one matching passes; other versions (`v1a`) are ignored. A missing `webhook-id` or `webhook-signature`, or a `webhook-timestamp` (Unix seconds) further than `tolerance` before or after now, answers `401` before the body is read. `id` defaults to `header:webhook-id`, so a request replayed within the tolerance is a duplicate.
 - **Deduplication & marker:** deduplicates for 7 d via `<webhook>.<hash>` in `ants_webhooks` plus 24 h `Nats-Msg-Id: webhook.<webhook>.<hash>`. Publishes `<webhook>.webhook` (`{machine, version, perms}`) on connect and hourly.
 - **Templates & untrusted input:** `text` substitutes `{body}`, `{id}`, `{webhook}`, `{header:Name}` and `{json:/pointer}` (`{{`/`}}` escape braces). Mentions come strictly from `mention` or `broadcast`, never from payload text. Threads are narrowed to `allow` (default read-only; see [config.md](config.md#tool-permissions)) until a human messages the ant on the thread. Replies go to `owner` if set (else logged); webhook posts never reset turn budgets.
 - **Reload:** reloads on `SIGHUP` or file change (polled every 3 s, applied once stable across two checks), restarting only changed/added/removed `[[webhook]]` and `[[human]]` workers while keeping in-flight HTTP requests alive. `listen` and `metrics` require a restart.
@@ -44,13 +54,17 @@ mention = ["dev-a"]                           # optional; or broadcast = true fo
 ```sh
 ants webhook add github --to dev-a --preset github --js-domain hub
 ants webhook add alerts --channel ops --preset grafana
+ants webhook add gitlab --to dev-a --preset gitlab --signing-token
 ```
+
+`--secret-file FILE` (its first line; `-` for standard input) or `--secret-env VAR` takes the secret from there instead of making a new one, copied to `<name>.secret`. `--preset gitlab --signing-token` checks GitLab's signing token (`auth = "standard-webhooks"`, `id = "header:webhook-id"`) rather than a secret token. GitLab generates that token (Settings > Webhooks > Generate signing token, shown once): without `--secret-file` or `--secret-env`, the command prints the URL to set in GitLab and reads the pasted token from the terminal without echo. A token that is no `whsec_<base64>` is refused before anything is written.
 
 | `--preset` | `auth` | Header | `id` | `text` |
 |---|---|---|---|---|
 | (none) | `bearer` | `Authorization: Bearer <secret>` | `body-sha256` | `[webhook {webhook}] {id}\n\n{body}` |
 | `github` | `hmac-sha256` | `X-Hub-Signature-256` | `header:X-GitHub-Delivery` | `GitHub {header:X-GitHub-Event} on {json:/repository/full_name}\n\n{body}` (use `application/json`) |
-| `gitlab` | `token` | `X-Gitlab-Token` | `header:Idempotency-Key` (17.4+) | `GitLab {header:X-Gitlab-Event} on {json:/project/path_with_namespace}\n\n{body}` (secret token, not `webhook-signature`) |
+| `gitlab` | `token` | `X-Gitlab-Token` | `header:Idempotency-Key` (17.4+) | `GitLab {header:X-Gitlab-Event} on {json:/project/path_with_namespace}\n\n{body}` (secret token) |
+| `gitlab --signing-token` | `standard-webhooks` | `webhook-signature` | `header:webhook-id` (19.0+) | as `gitlab` |
 | `grafana` | `hmac-sha256` | `X-Grafana-Alerting-Signature` | `body-sha256` | `Grafana: {json:/title}\n\n{json:/message}` |
 
 ## Notifications

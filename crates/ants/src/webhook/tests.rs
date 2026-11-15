@@ -16,7 +16,12 @@ fn p(s: &str) -> UserId {
 }
 
 fn parse(text: &str) -> Result<Config> {
-    let env = |name: &str| (name == "HOOK_SECRET").then(|| "s3cret".to_owned());
+    let env = |name: &str| match name {
+        "HOOK_SECRET" => Some("s3cret".to_owned()),
+        // The test vector of the Standard Webhooks libraries.
+        "SIGNING_SECRET" => Some("whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw".to_owned()),
+        _ => None,
+    };
     Config::parse(text, Path::new("/etc/ants/webhooks.toml"), Path::new("/home/q"), env)
 }
 
@@ -75,6 +80,71 @@ fn the_config_names_one_destination_and_its_mentions_per_webhook() {
     assert!(error("nats = \"nats://hub:4222\"\n").contains("nothing to serve"));
     let err = error(&format!("nats = \"nats://dev:secret@hub\"\n{HOOK}ant = \"dev-a\"\n"));
     assert!(err.contains("NATS URL nats://***@hub") && !err.contains("secret"), "{err}");
+}
+
+#[test]
+fn standard_webhooks_signatures_are_checked_with_the_signing_secret_within_the_tolerance() {
+    const SIGNED: &str = "[[webhook]]\nname = \"gitlab\"\nauth = \"standard-webhooks\"\nsecret_env = \"SIGNING_SECRET\"\n\
+                          ant = \"dev-a\"\n";
+    let config = parse(SIGNED).unwrap();
+    let hook = &config.webhooks[0];
+    assert_matches!(hook.id, IdSource::Header(ref h) if h == "webhook-id");
+    assert!(matches!(hook.auth, Auth::Standard { tolerance, .. } if tolerance == Duration::from_mins(5)));
+    let tolerance = parse(&format!("{SIGNED}tolerance = \"90s\"\nid = \"body-sha256\"\n")).unwrap();
+    assert!(
+        matches!(tolerance.webhooks[0].auth, Auth::Standard { tolerance, .. } if tolerance == Duration::from_secs(90))
+    );
+    assert_matches!(tolerance.webhooks[0].id, IdSource::BodySha256);
+
+    let body = br#"{"test": 2432232314}"#;
+    let signature = "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE=";
+    let headers = |signatures: &str| {
+        let mut headers = HeaderMap::new();
+        headers.insert(WEBHOOK_ID, HeaderValue::from_static("msg_p5jXN8AQM9LWM0D4loKWxJek"));
+        headers.insert(WEBHOOK_TIMESTAMP, HeaderValue::from_static("1614265330"));
+        headers.insert(WEBHOOK_SIGNATURE, signatures.parse().unwrap());
+        headers
+    };
+    assert!(hook.authorized(&headers(signature), body));
+    assert!(hook.authorized(&headers(&format!("v1a,AAAA v1,bm90IGl0 {signature}")), body), "any v1 one matches");
+    assert!(!hook.authorized(&headers(&signature.replace("v1,", "v2,")), body));
+    assert!(!hook.authorized(&headers("v1,bm90IGl0 v1,!!"), body));
+    assert!(!hook.authorized(&headers(signature), br#"{"test": 2432232315}"#));
+    let mut moved = headers(signature);
+    moved.insert(WEBHOOK_TIMESTAMP, HeaderValue::from_static("1614265331"));
+    assert!(!hook.authorized(&moved, body), "the timestamp is signed");
+    let mut unsigned = headers(signature);
+    unsigned.remove(WEBHOOK_SIGNATURE);
+    assert!(!hook.authorized(&unsigned, body));
+
+    let sent = SystemTime::UNIX_EPOCH + Duration::from_secs(1_614_265_330);
+    let five = Duration::from_mins(5);
+    assert!(recent(&headers(signature), five, sent + five) && recent(&headers(signature), five, sent - five));
+    assert!(!recent(&headers(signature), five, sent + five + Duration::from_secs(1)), "too old");
+    assert!(!recent(&headers(signature), five, sent - five - Duration::from_secs(1)), "too far ahead");
+    let mut undated = headers(signature);
+    undated.remove(WEBHOOK_TIMESTAMP);
+    assert!(!recent(&undated, five, sent));
+    assert!(!hook.authorized_before_body(&headers(signature)), "a stale request is refused before its body");
+    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs().to_string();
+    let mut fresh = headers(signature);
+    fresh.insert(WEBHOOK_TIMESTAMP, now.parse().unwrap());
+    assert!(hook.authorized_before_body(&fresh));
+    fresh.remove(WEBHOOK_ID);
+    assert!(!hook.authorized_before_body(&fresh));
+
+    for (extra, why) in [
+        ("tolerance = \"0\"", "from 1s to 1d"),
+        ("tolerance = \"2d\"", "from 1s to 1d"),
+        ("tolerance = \"5\"", "a number without a unit"),
+    ] {
+        let e = error(&format!("{SIGNED}{extra}\n"));
+        assert!(e.contains(why), "{extra}: {e}");
+    }
+    let e = error(&SIGNED.replace("SIGNING_SECRET", "HOOK_SECRET"));
+    assert!(e.contains("no Standard Webhooks signing secret"), "{e}");
+    let e = error(&format!("{HOOK}ant = \"dev-a\"\ntolerance = \"1m\"\n"));
+    assert!(e.contains("standard-webhooks\" only"), "{e}");
 }
 
 #[test]

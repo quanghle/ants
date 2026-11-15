@@ -305,7 +305,7 @@ Every 5 m (first check at 30 s), one ant per daemon/server queries hub and local
 
 ## Webhooks
 
-`ants webhook serve` (`~/.ants/webhooks.toml`) authenticates incoming HTTP `POST <path>/<webhook>` requests (`hmac-sha256`, `bearer`, `token`), deduplicates events via `ants_webhooks`, and starts narrowed inbox or channel threads (`ants webhook add` provisions credentials, secrets and presets for GitHub, GitLab and Grafana). `[[human]]` entries in the same file push tool approvals (with signed `/_approval` buttons), escalations, unserved-ant notices and optional completions to `ntfy`, `slack`, `telegram`, `exec` and `http` sinks, respecting per-device presence, quiet hours, snoozes and muted threads. See [docs/webhooks.md](docs/webhooks.md).
+`ants webhook serve` (`~/.ants/webhooks.toml`) authenticates incoming HTTP `POST <path>/<webhook>` requests (`hmac-sha256`, `bearer`, `token`, `standard-webhooks` such as GitLab's signing token), deduplicates events via `ants_webhooks`, and starts narrowed inbox or channel threads (`ants webhook add` provisions credentials, secrets and presets for GitHub, GitLab and Grafana, or takes a secret given, such as GitLab's signing token). `[[human]]` entries in the same file push tool approvals (with signed `/_approval` buttons), escalations, unserved-ant notices and optional completions to `ntfy`, `slack`, `telegram`, `exec` and `http` sinks, respecting per-device presence, quiet hours, snoozes and muted threads. See [docs/webhooks.md](docs/webhooks.md).
 
 ## Credentials
 
