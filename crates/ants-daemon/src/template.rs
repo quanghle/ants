@@ -391,14 +391,7 @@ impl AntTemplate {
             }
             bail!("context {context} is not in the contexts of template {t} ({})", self.contexts.join(", "));
         }
-        let mut allow = self.allow.clone();
-        for set in &request.allow_sets {
-            let rules = self.allow_sets.get(set).with_context(|| {
-                let sets: Vec<_> = self.allow_sets.keys().map(String::as_str).collect();
-                format!("template {t} has no allow set {set} (it has: {})", list(&sets))
-            })?;
-            allow.extend(rules.iter().filter(|r| !allow.contains(r)).cloned().collect::<Vec<_>>());
-        }
+        let allow = self.allow_for(request)?;
         let ceiling = Ceiling(t);
         let max_harnesses = ceiling.count("max_harnesses", request.max_harnesses, self.max_harnesses)?;
         if max_harnesses == 0 {
@@ -432,6 +425,20 @@ impl AntTemplate {
             escalate_to: vec![manager.clone()],
             ..Ant::new(name.clone(), workdir)
         })
+    }
+
+    /// The template's allow rules, with those of the allow sets `request` names.
+    fn allow_for(&self, request: &Request) -> Result<Vec<String>> {
+        let t = &self.name;
+        let mut allow = self.allow.clone();
+        for set in &request.allow_sets {
+            let rules = self.allow_sets.get(set).with_context(|| {
+                let sets: Vec<_> = self.allow_sets.keys().map(String::as_str).collect();
+                format!("template {t} has no allow set {set} (it has: {})", list(&sets))
+            })?;
+            allow.extend(rules.iter().filter(|r| !allow.contains(r)).cloned().collect::<Vec<_>>());
+        }
+        Ok(allow)
     }
 
     fn model_list(&self) -> String {

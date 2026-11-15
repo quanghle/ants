@@ -248,33 +248,13 @@ impl Dash {
                 self.tail = Some(tail(self.js.clone(), parser, self.model.stored_seq, self.model.since));
             }
             if connected && self.follow.is_none() && Instant::now() >= self.follow_at {
-                self.model.approvals_reset();
-                let (client, js, updates) = (self.client.clone(), self.js.clone(), updates.clone());
-                let follow = async move {
-                    tools::follow(&client, &js, |update| {
-                        let _ = updates.send(update.clone());
-                        Ok(())
-                    })
-                    .await
-                };
-                self.follow = Some(follow.boxed_local());
+                self.follow_tools(&updates);
                 dirty = true;
             }
             tokio::select! {
                 _ = ticks.tick() => {
-                    while event::poll(Duration::ZERO).context("reading the terminal")? {
-                        match event::read().context("reading the terminal")? {
-                            Event::Key(key) if key.kind != KeyEventKind::Release => {
-                                dirty = true;
-                                if let Some(action) = key_of(key).and_then(|key| self.model.key(key, Utc::now()))
-                                    && self.act(action).is_break()
-                                {
-                                    return Ok(());
-                                }
-                            }
-                            Event::Resize(..) => dirty = true,
-                            _ => {}
-                        }
+                    if self.read_terminal(&mut dirty)?.is_break() {
+                        return Ok(());
                     }
                     let log = progress::last_held_log();
                     if log != logged {
@@ -289,18 +269,7 @@ impl Dash {
                         (dirty, drawn) = (false, Instant::now());
                     }
                 }
-                Some(msg) = statuses.next() => {
-                    if msg.subject.starts_with("ants.status.") {
-                        if let Ok(event) = serde_json::from_slice::<StatusEvent>(&msg.payload)
-                            && event.check_subject(&msg.subject).is_ok()
-                        {
-                            self.model.status(&event, now);
-                            dirty = true;
-                        }
-                    } else {
-                        self.tail_wanted = true;
-                    }
-                }
+                Some(msg) = statuses.next() => dirty |= self.heard(&msg, now),
                 Some(update) = updated.recv() => {
                     self.model.approval(update);
                     dirty = true;
@@ -350,6 +319,54 @@ impl Dash {
                 }
             }
         }
+    }
+
+    /// Follow the tool requests, sending their updates to `updates`.
+    fn follow_tools(&mut self, updates: &tokio::sync::mpsc::UnboundedSender<tools::Update>) {
+        self.model.approvals_reset();
+        let (client, js, updates) = (self.client.clone(), self.js.clone(), updates.clone());
+        let follow = async move {
+            tools::follow(&client, &js, |update| {
+                let _ = updates.send(update.clone());
+                Ok(())
+            })
+            .await
+        };
+        self.follow = Some(follow.boxed_local());
+    }
+
+    /// Act on the keys pressed, setting `dirty` when the screen is to be drawn again; breaks on quitting.
+    fn read_terminal(&mut self, dirty: &mut bool) -> Result<ControlFlow<()>> {
+        while event::poll(Duration::ZERO).context("reading the terminal")? {
+            match event::read().context("reading the terminal")? {
+                Event::Key(key) if key.kind != KeyEventKind::Release => {
+                    *dirty = true;
+                    if let Some(action) = key_of(key).and_then(|key| self.model.key(key, Utc::now()))
+                        && self.act(action).is_break()
+                    {
+                        return Ok(ControlFlow::Break(()));
+                    }
+                }
+                Event::Resize(..) => *dirty = true,
+                _ => {}
+            }
+        }
+        Ok(ControlFlow::Continue(()))
+    }
+
+    /// Take in `msg`, heard on the ants traffic: whether the screen is to be drawn again.
+    fn heard(&mut self, msg: &async_nats::Message, now: chrono::DateTime<Utc>) -> bool {
+        if msg.subject.starts_with("ants.status.") {
+            if let Ok(event) = serde_json::from_slice::<StatusEvent>(&msg.payload)
+                && event.check_subject(&msg.subject).is_ok()
+            {
+                self.model.status(&event, now);
+                return true;
+            }
+        } else {
+            self.tail_wanted = true;
+        }
+        false
     }
 
     fn read_roster(&mut self) {

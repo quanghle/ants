@@ -80,14 +80,7 @@ async fn add_with(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>, store
     if listed.is_some() && args.options.sets_any() {
         bail!("{name} is already listed in {}; change its settings there", path.display());
     }
-    let out = match (&args.out, listed) {
-        (Some(out), _) => std::path::absolute(out)?,
-        (None, Some(Some(creds))) => creds.to_owned(),
-        (None, Some(None)) => {
-            bail!("the entry of {name} in {} names no creds; give --out or add `creds` to it", path.display())
-        }
-        (None, None) => auth::default_dir()?.join(format!("{name}.creds")),
-    };
+    let out = creds_out(&args, listed, &path)?;
     let entry = match listed {
         Some(_) => None,
         None => Some(entry(&args, &summary, &out, nats, js_domain)?),
@@ -105,108 +98,21 @@ async fn add_with(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>, store
         }
         (None, Some(enrollment)) => {
             url = args.hub.as_deref().unwrap_or(nats);
-            let leaf = leaf_node(args.leaf_config.as_deref())?;
-            let through =
-                leaf.as_ref().map(|(_, l)| format!(" through the leaf node of {}", l.machine)).unwrap_or_default();
-            eprintln!(
-                "asking for the credentials of {name} ({public_key}){through}; approve with `ants enroll approve {name}`"
-            );
-            let stop = async {
-                let _ = tokio::signal::ctrl_c().await;
-            };
-            let approval =
-                enroll::request(url, enrollment, name, &user, leaf.as_ref().map(|(_, l)| l), ENROLL_REPEAT, stop)
-                    .await?;
-            if let (Some((conf, leaf)), Some(renewed)) = (leaf, approval.leaf_jwt) {
-                uplink = Some((renew_uplink(&leaf, &renewed)?, leaf, conf));
-            }
-            Some(approval.jwt)
+            let (jwt, renewed) = enrolled(&args, enrollment, url, &user, &public_key).await?;
+            uplink = renewed;
+            Some(jwt)
         }
         (None, None) => None,
     };
     if let Some(jwt) = &jwt {
-        if stored {
-            match keys::write_new_stored(&out, jwt, &user, store, url).await {
-                Ok(keys::Proven::Authenticated) => {}
-                Ok(keys::Proven::Unreached) => eprintln!(
-                    "warning: no server answered at {url}, so the stored key of {name} has not authenticated yet"
-                ),
-                Err(e) => {
-                    if args.enroll.is_some() {
-                        eprintln!(
-                            "the approved user JWT of {name}, to complete the credentials with `ants add {name} --jwt \
-                             JWT` once the failure below is fixed: {jwt}"
-                        );
-                    }
-                    return Err(e);
-                }
-            }
-        } else {
-            auth::write_creds(&out, jwt, &user)?;
-        }
-        let seed = seed_path(&out);
-        if seed.exists() {
-            std::fs::remove_file(&seed).with_context(|| format!("removing {}", seed.display()))?;
-        }
+        complete(&args, &out, jwt, &user, store, stored, url).await?;
     }
     if let Some(entry) = &entry {
         config::append(&path, entry)?;
         println!("{name} listed in {}", path.display());
     }
     match jwt {
-        Some(_) => {
-            println!("credentials of {name} in {}", out.display());
-            match &uplink {
-                Some((true, leaf, _)) => println!(
-                    "uplink credentials of {} renewed in {} to carry {name}, which later `ants auth leaf {}` and \
-                     `ants leaf outbox {}` runs keep",
-                    leaf.machine,
-                    leaf.creds.display(),
-                    leaf.machine,
-                    leaf.machine
-                ),
-                Some((false, leaf, _)) => println!(
-                    "{} changed while waiting and were left as they are: add {name} to the uplink with \
-                     `ants auth leaf {} --add-ant {name}` on the machine holding the account key",
-                    leaf.creds.display(),
-                    leaf.machine
-                ),
-                None => println!(
-                    "behind a leaf node the request did not name (--leaf-config), add {name} to the uplink: \
-                     `ants auth leaf MACHINE --add-ant {name}` on the machine holding the account key, then \
-                     `ants leaf outbox MACHINE --add-ant {name}`"
-                ),
-            }
-            let mut services = Services::local();
-            match services.apply(Service::Daemon, Action::Reload, &path) {
-                Outcome::Done(command) => println!("daemon reloaded to serve {name} ({command})"),
-                Outcome::NotRunning => println!("the daemon service is not running; it serves {name} once started"),
-                outcome => println!(
-                    "{}serve {name}: reload `ants daemon` with SIGHUP, or its service ({}); the ants it serves carry on",
-                    failure(outcome),
-                    crate::service::manual(Service::Daemon, Action::Reload)
-                ),
-            }
-            // Last, as the restart cuts the connections through the leaf node.
-            if let Some((true, _, conf)) = &uplink {
-                match services.apply(Service::Nats, Action::Restart, conf) {
-                    Outcome::Done(command) => {
-                        println!("leaf node restarted to use the renewed uplink credentials ({command})")
-                    }
-                    Outcome::NotRunning => {
-                        println!(
-                            "the leaf node service is not running; it uses the renewed uplink credentials once started"
-                        )
-                    }
-                    outcome => println!(
-                        "{}restart the leaf node to use the renewed uplink credentials ({}); SIGHUP does not read them \
-                         again",
-                        failure(outcome),
-                        crate::service::manual(Service::Nats, Action::Restart)
-                    ),
-                }
-            }
-        }
+        Some(_) => tell_completed(name, &out, uplink.as_ref(), &path),
         None => println!(
             "public key of {name}: {public_key}\n\
              complete its credentials, either:\n  \
@@ -217,6 +123,143 @@ async fn add_with(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>, store
         ),
     }
     Ok(())
+}
+
+/// Where the credentials of the ant go: `--out`, else where its entry in the file at `path` keeps them, else the
+/// default directory.
+fn creds_out(args: &AddArgs, listed: Option<Option<&Path>>, path: &Path) -> Result<PathBuf> {
+    let name = &args.name;
+    Ok(match (&args.out, listed) {
+        (Some(out), _) => std::path::absolute(out)?,
+        (None, Some(Some(creds))) => creds.to_owned(),
+        (None, Some(None)) => {
+            bail!("the entry of {name} in {} names no creds; give --out or add `creds` to it", path.display())
+        }
+        (None, None) => auth::default_dir()?.join(format!("{name}.creds")),
+    })
+}
+
+/// A leaf node's uplink renewed to carry the ant: whether the renewal was written, the leaf node, and its
+/// configuration file.
+type Uplink = (bool, enroll::Leaf, PathBuf);
+
+/// Ask over NATS at `url` for the credentials of the ant holding `user`: the user JWT approved, and the uplink
+/// renewed with it.
+async fn enrolled(
+    args: &AddArgs,
+    enrollment: &Path,
+    url: &str,
+    user: &KeyPair,
+    public_key: &str,
+) -> Result<(String, Option<Uplink>)> {
+    let name = &args.name;
+    let mut uplink = None;
+    let leaf = leaf_node(args.leaf_config.as_deref())?;
+    let through = leaf.as_ref().map(|(_, l)| format!(" through the leaf node of {}", l.machine)).unwrap_or_default();
+    eprintln!(
+        "asking for the credentials of {name} ({public_key}){through}; approve with `ants enroll approve {name}`"
+    );
+    let stop = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    let approval =
+        enroll::request(url, enrollment, name, user, leaf.as_ref().map(|(_, l)| l), ENROLL_REPEAT, stop).await?;
+    if let (Some((conf, leaf)), Some(renewed)) = (leaf, approval.leaf_jwt) {
+        uplink = Some((renew_uplink(&leaf, &renewed)?, leaf, conf));
+    }
+    Ok((approval.jwt, uplink))
+}
+
+/// Complete the credentials at `out` with `jwt`: the seed in the OS credential store when `stored`, proven at `url`,
+/// else in the file; then remove the seed left waiting.
+async fn complete(
+    args: &AddArgs,
+    out: &Path,
+    jwt: &str,
+    user: &KeyPair,
+    store: &dyn Store,
+    stored: bool,
+    url: &str,
+) -> Result<()> {
+    let name = &args.name;
+    if stored {
+        match keys::write_new_stored(out, jwt, user, store, url).await {
+            Ok(keys::Proven::Authenticated) => {}
+            Ok(keys::Proven::Unreached) => {
+                eprintln!("warning: no server answered at {url}, so the stored key of {name} has not authenticated yet")
+            }
+            Err(e) => {
+                if args.enroll.is_some() {
+                    eprintln!(
+                        "the approved user JWT of {name}, to complete the credentials with `ants add {name} --jwt \
+                         JWT` once the failure below is fixed: {jwt}"
+                    );
+                }
+                return Err(e);
+            }
+        }
+    } else {
+        auth::write_creds(out, jwt, user)?;
+    }
+    let seed = seed_path(out);
+    if seed.exists() {
+        std::fs::remove_file(&seed).with_context(|| format!("removing {}", seed.display()))?;
+    }
+    Ok(())
+}
+
+/// Tell where the credentials of the ant and the renewed `uplink` went, and reload the daemon listing the ant in the
+/// file at `path`, then restart the leaf node, to take them up.
+fn tell_completed(name: &UserId, out: &Path, uplink: Option<&Uplink>, path: &Path) {
+    println!("credentials of {name} in {}", out.display());
+    match uplink {
+        Some((true, leaf, _)) => println!(
+            "uplink credentials of {} renewed in {} to carry {name}, which later `ants auth leaf {}` and \
+             `ants leaf outbox {}` runs keep",
+            leaf.machine,
+            leaf.creds.display(),
+            leaf.machine,
+            leaf.machine
+        ),
+        Some((false, leaf, _)) => println!(
+            "{} changed while waiting and were left as they are: add {name} to the uplink with \
+             `ants auth leaf {} --add-ant {name}` on the machine holding the account key",
+            leaf.creds.display(),
+            leaf.machine
+        ),
+        None => println!(
+            "behind a leaf node the request did not name (--leaf-config), add {name} to the uplink: \
+             `ants auth leaf MACHINE --add-ant {name}` on the machine holding the account key, then \
+             `ants leaf outbox MACHINE --add-ant {name}`"
+        ),
+    }
+    let mut services = Services::local();
+    match services.apply(Service::Daemon, Action::Reload, path) {
+        Outcome::Done(command) => println!("daemon reloaded to serve {name} ({command})"),
+        Outcome::NotRunning => println!("the daemon service is not running; it serves {name} once started"),
+        outcome => println!(
+            "{}serve {name}: reload `ants daemon` with SIGHUP, or its service ({}); the ants it serves carry on",
+            failure(outcome),
+            crate::service::manual(Service::Daemon, Action::Reload)
+        ),
+    }
+    // Last, as the restart cuts the connections through the leaf node.
+    if let Some((true, _, conf)) = uplink {
+        match services.apply(Service::Nats, Action::Restart, conf) {
+            Outcome::Done(command) => {
+                println!("leaf node restarted to use the renewed uplink credentials ({command})")
+            }
+            Outcome::NotRunning => {
+                println!("the leaf node service is not running; it uses the renewed uplink credentials once started")
+            }
+            outcome => println!(
+                "{}restart the leaf node to use the renewed uplink credentials ({}); SIGHUP does not read them \
+                 again",
+                failure(outcome),
+                crate::service::manual(Service::Nats, Action::Restart)
+            ),
+        }
+    }
 }
 
 /// The `[[ant]]` entry of an ant new to the file: the flags' settings, its credentials at `out`, and the server

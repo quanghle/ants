@@ -9,12 +9,13 @@ use std::time::Duration;
 
 use ants_daemon::config::{self, Ant, Summary};
 use ants_daemon::harness;
-use ants_proto::{JsDomain, UserId};
+use ants_proto::UserId;
 use anyhow::{Context as _, Result, bail};
 
+use crate::cmd::harness::HarnessPick;
 use crate::completions::{self, Shell};
 use crate::service::{self, Action, Installed, Outcome, Service, Services, State, Values};
-use crate::{HarnessPick, Nats, auth, doctor};
+use crate::{Connection, Nats, auth, doctor};
 
 /// How long to wait for a nats-server just started to listen.
 const LISTEN_WAIT: Duration = Duration::from_secs(10);
@@ -49,13 +50,6 @@ pub struct SetupArgs {
     /// Only say what each step would do; write, start and check nothing.
     #[arg(long)]
     pub dry_run: bool,
-}
-
-/// How the CLI reaches NATS.
-pub struct Connection<'a> {
-    pub nats: &'a str,
-    pub creds: Option<&'a Path>,
-    pub js_domain: Option<&'a JsDomain>,
 }
 
 /// What came of a step.

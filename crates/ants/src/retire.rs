@@ -207,7 +207,7 @@ pub async fn retire(
         println!("{}", home_note(name, &u.template, &u.home));
     }
     match revoked {
-        Some(revoked) if !revoked.is_empty() && !args.no_push => crate::push(url, &dir).await,
+        Some(revoked) if !revoked.is_empty() && !args.no_push => crate::cmd::auth::push(url, &dir).await,
         Some(revoked) if !revoked.is_empty() => {
             println!("push the revocation to the hub with: ants auth push --nats URL");
             Ok(())
