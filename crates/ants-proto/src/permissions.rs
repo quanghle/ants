@@ -98,18 +98,21 @@ fn human_reaction_rights(human: &UserId) -> Vec<String> {
     rights
 }
 
-/// What a human's credentials need for thread titles and its pins and archives ([`THREADS_BUCKET`]): creating the
-/// bucket; reading by direct gets, putting and deleting every title, which any human sets; and reading and writing its
-/// own [`ThreadMarks`] only, so no human reads or changes another's.
-fn thread_rights(human: &UserId) -> [String; 6] {
+/// What a human's credentials need for thread titles and done states and its pins and archives ([`THREADS_BUCKET`]):
+/// creating the bucket; reading by direct gets, putting and deleting every title and every done state, which any
+/// human sets; and reading and writing its own [`ThreadMarks`] only, so no human reads or changes another's.
+fn thread_rights(human: &UserId) -> [String; 8] {
     let threads = kv_stream(THREADS_BUCKET);
     let titles = format!("$KV.{THREADS_BUCKET}.title.*");
+    let done = format!("$KV.{THREADS_BUCKET}.done.*");
     let marks = format!("$KV.{THREADS_BUCKET}.{}", marks_key(human));
     [
         format!("$JS.API.STREAM.INFO.{threads}"),
         format!("$JS.API.STREAM.CREATE.{threads}"),
         format!("$JS.API.DIRECT.GET.{threads}.{titles}"),
         titles,
+        format!("$JS.API.DIRECT.GET.{threads}.{done}"),
+        done,
         format!("$JS.API.DIRECT.GET.{threads}.{marks}"),
         marks,
     ]
@@ -177,7 +180,7 @@ impl Permissions {
     /// ([`presence_rights`]), and its own [`NotifyPrefs`] in [`NOTIFY_BUCKET`] what it holds back of its notifications,
     /// and its own [`HeldNotices`] there what was held back ([`notify_prefs_rights`]), and it reads every reaction ([`REACTIONS_BUCKET`]), of which it
     /// puts and removes only its own ([`human_reaction_rights`]), while an ant only asks for those ([`subject::reactions`],
-    /// [`subject::react`]); it sets every thread's title and its own pinned and
+    /// [`subject::react`]); it sets every thread's title and done state and its own pinned and
     /// archived threads, no other human's ([`thread_rights`]). A human may send under
     /// any sender, to replay a dead letter as it was. An ant gets no `STREAM.MSG.GET`: it takes any sequence, so it
     /// would expose every inbox. So only a human hears the max-deliveries advisories of the stream's consumers and

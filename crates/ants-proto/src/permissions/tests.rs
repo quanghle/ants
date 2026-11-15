@@ -532,11 +532,13 @@ fn humans_keep_only_their_own_holds_and_held_notices_and_ants_neither() {
 }
 
 #[test]
-fn humans_set_every_title_but_only_their_own_pins_and_archives_and_ants_neither() {
+fn humans_set_every_title_and_done_state_but_only_their_own_pins_and_archives_and_ants_neither() {
     let human = Permissions::for_user(&p("alice"), Role::Human);
     for s in [
         "$KV.ants_threads.title.*",
         "$JS.API.DIRECT.GET.KV_ants_threads.$KV.ants_threads.title.*",
+        "$KV.ants_threads.done.*",
+        "$JS.API.DIRECT.GET.KV_ants_threads.$KV.ants_threads.done.*",
         "$KV.ants_threads.marks.alice",
         "$JS.API.DIRECT.GET.KV_ants_threads.$KV.ants_threads.marks.alice",
         "$JS.API.STREAM.CREATE.KV_ants_threads",
