@@ -14,6 +14,7 @@ use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
 use super::frame::{self, ago};
 use super::interrupt::Intent;
 use super::model::{Data, Key, To};
+use super::select::Selection;
 use crate::thread::{Entry, Kind};
 
 /// What a thread waits on, as its messages and the ants' progress tell.
@@ -303,12 +304,12 @@ impl Filter {
 pub struct Page {
     pub filter: Filter,
     /// The selected thread, kept as threads move.
-    selected: Option<ThreadId>,
+    selected: Selection<ThreadId>,
 }
 
 impl Page {
     pub fn new(filter: Filter) -> Self {
-        Self { filter, selected: None }
+        Self { filter, selected: Selection::default() }
     }
 
     /// The threads listed with their states, the most urgent first, then the most recently active.
@@ -337,7 +338,7 @@ impl Page {
     }
 
     fn at(&self, rows: &[(ThreadId, ThreadState)]) -> usize {
-        self.selected.as_ref().and_then(|s| rows.iter().position(|(t, _)| t == s)).unwrap_or(0)
+        self.selected.at(&threads(rows))
     }
 
     pub fn key(&mut self, key: Key, data: &Data) -> Option<To> {
@@ -347,6 +348,7 @@ impl Page {
             Key::Enter => return rows.get(at).map(|(t, _)| To::Thread(t.clone())),
             Key::Char('s') => return rows.get(at).map(|(t, _)| To::Interrupt(Intent::Steer, t.clone())),
             Key::Char('S') => return rows.get(at).map(|(t, _)| To::Tldr(t.clone())),
+            Key::Char('z') => return rows.get(at).map(|(t, _)| To::Snooze(t.clone())),
             Key::Char('x') | Key::Ctrl('x') => {
                 return rows.get(at).map(|(t, _)| To::Interrupt(Intent::Cancel, t.clone()));
             }
@@ -358,11 +360,11 @@ impl Page {
             Key::End => usize::MAX,
             _ => return None,
         };
-        self.selected = rows.get(to.min(rows.len().saturating_sub(1))).map(|(t, _)| t.clone());
+        self.selected.select(&threads(&rows), to);
         None
     }
 
-    pub const KEYS: &str = "↑↓ thread · Enter open · s steer · x cancel · S TL;DR · Esc back";
+    pub const KEYS: &str = "↑↓ thread · Enter open · s steer · x cancel · z snooze · S TL;DR · Esc back";
 
     pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
         let rows = self.rows(data);
@@ -379,7 +381,9 @@ impl Page {
         } else {
             (area, None)
         };
-        let table: Vec<Row> = rows.iter().map(|(thread, state)| row(data, thread, *state, now)).collect();
+        let snoozed = super::home::snoozed(data, now);
+        let table: Vec<Row> =
+            rows.iter().map(|(thread, state)| row(data, thread, *state, snoozed.contains_key(thread), now)).collect();
         let widths = [
             Constraint::Length(14),
             Constraint::Fill(3),
@@ -404,6 +408,10 @@ impl Page {
     }
 }
 
+fn threads(rows: &[(ThreadId, ThreadState)]) -> Vec<ThreadId> {
+    rows.iter().map(|(t, _)| t.clone()).collect()
+}
+
 /// How tall the selected thread's card is, borders included.
 const DETAIL_HEIGHT: u16 = 7;
 
@@ -412,8 +420,8 @@ pub fn dollars(cost: f64) -> String {
     format!("${cost:.2}")
 }
 
-/// The thread's row in the work view.
-fn row(data: &Data, thread: &ThreadId, state: ThreadState, now: DateTime<Utc>) -> Row<'static> {
+/// The thread's row in the work view, marked when a snooze holds it off home.
+fn row(data: &Data, thread: &ThreadId, state: ThreadState, snoozed: bool, now: DateTime<Utc>) -> Row<'static> {
     let me = data.me();
     let summary = data.live.summary(thread);
     let ants: Vec<&str> =
@@ -422,9 +430,13 @@ fn row(data: &Data, thread: &ThreadId, state: ThreadState, now: DateTime<Utc>) -
     let turns = data.facts.get(thread).and_then(|f| f.turns).map_or_else(|| "-".to_owned(), |t| t.to_string());
     let spend = data.cards.spent(thread).map_or_else(|| "-".to_owned(), |s| dollars(s.cost));
     let age = summary.map_or_else(String::new, |s| ago(s.last_at, now));
+    let mut title = vec![Span::raw(data.title(thread))];
+    if snoozed {
+        title.push(Span::styled(" · snoozed", frame::dim()));
+    }
     Row::new(vec![
         Cell::from(state.label()).style(Style::new().fg(state.color())),
-        Cell::from(data.title(thread)),
+        Cell::from(Line::from(title)),
         Cell::from(ants.join(",")),
         Cell::from(owner.to_owned()),
         Cell::from(turns),
@@ -702,6 +714,33 @@ mod tests {
         assert!(shown.contains("me       5     $0.42   1m ago"), "{shown}");
         assert!(shown.contains("TL;DR  The migration lacks a default. (messenger, 1m ago, stale)"), "{shown}");
         assert!(shown.contains("Chain  alice → dev-a $0.38 → dev-b $0.04"), "{shown}");
+    }
+
+    #[test]
+    fn z_in_work_snoozes_the_selected_thread_marks_it_and_wakes_it_again() {
+        use crate::tui::acts::Change;
+        use crate::tui::model::{Action, Key};
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let thread = ThreadId::generate();
+        let mut m = model();
+        m.stored(vec![message(1, &thread, "dev-a", "alice", "done")], at(2));
+        m.select(super::super::nav::Item::Work(None));
+        let shown = |m: &Model| {
+            let View::Work(page) = m.page() else { panic!("not the work view") };
+            let mut terminal = Terminal::new(TestBackend::new(120, 10)).unwrap();
+            terminal.draw(|f| page.draw(f, f.area(), &m.data, at(3), true)).unwrap();
+            let cells: Vec<&str> =
+                terminal.backend().buffer().content.iter().map(ratatui::buffer::Cell::symbol).collect();
+            cells.concat()
+        };
+        assert_eq!(m.key(Key::Char('z'), at(2)), None, "the footer asks how long");
+        let snooze = Change::Snooze(Some(at(2 + 3600)));
+        assert_eq!(m.key(Key::Enter, at(2)), Some(Action::Change(thread.clone(), snooze, 1)));
+        assert!(shown(&m).contains("done · snoozed"), "{}", shown(&m));
+        assert_eq!(m.key(Key::Char('z'), at(3)), Some(Action::Change(thread, Change::Snooze(None), 1)));
+        assert!(!shown(&m).contains("snoozed"), "woken");
     }
 
     #[test]

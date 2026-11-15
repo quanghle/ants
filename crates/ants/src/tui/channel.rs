@@ -15,6 +15,7 @@ use super::attach;
 use super::exec::Job;
 use super::frame::{self, ago};
 use super::model::{Action, Data, Key, To};
+use super::select::Selection;
 use super::work::Filter;
 use crate::attachments::Listed;
 use crate::channel::reads::Unread;
@@ -130,14 +131,15 @@ impl Feeds {
 #[derive(Debug)]
 pub struct Page {
     pub channel: ChannelId,
-    selected: usize,
+    /// The selected post, kept on it as posts arrive.
+    selected: Selection<Uuid>,
     /// The attachment `o` opens of the post with them, by its id.
     mark: attach::Mark<Uuid>,
 }
 
 impl Page {
     pub fn new(channel: ChannelId) -> Self {
-        Self { channel, selected: 0, mark: attach::Mark::default() }
+        Self { channel, selected: Selection::default(), mark: attach::Mark::default() }
     }
 
     pub const KEYS: &str =
@@ -145,7 +147,16 @@ impl Page {
 
     /// The selected post.
     pub fn post<'d>(&self, data: &'d Data) -> Option<&'d Post> {
-        data.feeds.posts(&self.channel).nth(self.selected)
+        data.feeds.posts(&self.channel).nth(self.at(data))
+    }
+
+    fn ids(&self, data: &Data) -> Vec<Uuid> {
+        data.feeds.posts(&self.channel).map(|p| p.id).collect()
+    }
+
+    /// Where the selected post is among the channel's.
+    fn at(&self, data: &Data) -> usize {
+        self.selected.at(&self.ids(data))
     }
 
     /// The attachment `o` opens of the selected post.
@@ -155,8 +166,8 @@ impl Page {
     }
 
     pub fn key(&mut self, key: Key, data: &Data) -> Option<To> {
-        let count = data.feeds.posts(&self.channel).count();
-        self.selected = match key {
+        let at = self.at(data);
+        let to = match key {
             Key::Char('o') => {
                 let listed = self.attachment(data)?.clone();
                 return Some(To::Do(Action::Run(Job::Open(Box::new(listed)), String::new())));
@@ -166,21 +177,19 @@ impl Page {
                 self.mark.next(post.id, post.attachments.len());
                 return None;
             }
-            Key::Enter => {
-                return data.feeds.posts(&self.channel).nth(self.selected).map(|p| To::Thread(p.thread.clone()));
-            }
+            Key::Enter => return self.post(data).map(|p| To::Thread(p.thread.clone())),
             Key::Char('w') => {
                 return Some(To::Work(Filter { channel: Some(self.channel.clone()), ..Filter::default() }));
             }
-            Key::Up | Key::Char('k') => self.selected.saturating_sub(1),
-            Key::Down | Key::Char('j') => self.selected + 1,
-            Key::PageUp => self.selected.saturating_sub(10),
-            Key::PageDown => self.selected + 10,
+            Key::Up | Key::Char('k') => at.saturating_sub(1),
+            Key::Down | Key::Char('j') => at + 1,
+            Key::PageUp => at.saturating_sub(10),
+            Key::PageDown => at + 10,
             Key::Home => 0,
             Key::End => usize::MAX,
             _ => return None,
-        }
-        .min(count.saturating_sub(1));
+        };
+        self.selected.select(&self.ids(data), to);
         None
     }
 
@@ -192,16 +201,17 @@ impl Page {
             frame.render_widget(Paragraph::new(text).block(block), area);
             return;
         }
+        let selected = self.at(data);
         let items: Vec<ListItem> = posts
             .iter()
             .enumerate()
             .map(|(at, p)| {
-                let marked = (at == self.selected).then(|| self.mark.at(p.id, p.attachments.len()));
+                let marked = (at == selected).then(|| self.mark.at(p.id, p.attachments.len()));
                 ListItem::new(post_lines(p, data, now, marked))
             })
             .collect();
         let list = List::new(items).block(block).highlight_style(frame::highlight(focused));
-        frame.render_stateful_widget(list, area, &mut ListState::default().with_selected(Some(self.selected)));
+        frame.render_stateful_widget(list, area, &mut ListState::default().with_selected(Some(selected)));
     }
 }
 

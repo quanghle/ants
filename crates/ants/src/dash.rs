@@ -1,8 +1,10 @@
 //! `ants dash`: an interactive terminal dashboard of the recent threads (but for those the human archived, by hand
 //! or for having been idle) and their history, the ants' live progress and
-//! the roster, and the pending tool requests, answered as `ants tools approve` and `reject` do. It reads with the
+//! the roster, and the pending tool requests, answered as `ants tools approve` and `reject` do; it marks done threads
+//! as `ants thread list` does. It reads with the
 //! CLI's own connection, as `ants thread`, `ants watch` and `ants tools list --follow` do, and keeps no service.
 
+mod dones;
 mod model;
 mod view;
 
@@ -16,9 +18,10 @@ use chrono::Utc;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use self::dones::Dones;
 use self::model::{Action, Key, Level, Model};
 use crate::live::{self, Feed, Screen};
-use crate::{presence, progress};
+use crate::{presence, progress, thread_meta};
 
 /// How often keys are read and the screen redrawn when something changed.
 const TICK: Duration = Duration::from_millis(50);
@@ -45,10 +48,11 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration) -> Result<()> {
     }
     let (feed, live) = live::open(nats, "ants-dash", since).await?;
     let js = feed.js().clone();
+    let dones = Dones::new(thread_meta::open(nats, &js).await.map_err(|e| format!("{e:#}")));
     // The dashboard shows the tool requests as they come, so notifications spare this device theirs meanwhile.
     let shown = async {
         let mut screen = Screen::open()?;
-        Box::pin(Dash { feed, model: Model::new(live) }.run(&mut screen.terminal)).await
+        Box::pin(Dash { feed, dones, model: Model::new(live) }.run(&mut screen.terminal)).await
     };
     Box::pin(presence::while_following(&js, nats.domain, me, nats.device, Following::Approvals, shown)).await
 }
@@ -76,6 +80,7 @@ fn key_of(key: KeyEvent) -> Option<Key> {
 /// The dashboard: what it shows, and the feed it reads it from.
 struct Dash {
     feed: Feed,
+    dones: Dones,
     model: Model,
 }
 
@@ -103,6 +108,7 @@ impl Dash {
                         }
                         logged = log;
                     }
+                    self.dones.threads(&self.model.live.order);
                     if dirty || drawn.elapsed() >= REDRAW {
                         terminal.draw(|frame| view::draw(frame, &self.model, Utc::now())).context("drawing")?;
                         (dirty, drawn) = (false, Instant::now());
@@ -113,6 +119,10 @@ impl Dash {
                     if let Some(action) = self.take(event) && self.act(action).is_break() {
                         return Ok(());
                     }
+                }
+                read = self.dones.next() => {
+                    dirty = true;
+                    self.model.dones_read(read, Utc::now());
                 }
             }
         }
@@ -165,6 +175,7 @@ impl Dash {
             Action::Decide(request, verdict) => self.feed.decide(*request, verdict, self.model.live.me.clone()),
             Action::Refresh => {
                 self.feed.refresh();
+                self.dones.refresh();
                 if let Some(action) = self.model.reload_history() {
                     return self.act(action);
                 }

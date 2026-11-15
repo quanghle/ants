@@ -3,7 +3,9 @@
 //! one, each with its one-key actions: answer ([`question`]), grant, reply, follow up, cancel, mark done, snooze ([`super::snooze`])
 //! or open. A snoozed thread's items stay off home until the snooze ends or an item for the human arrives on it.
 
-use ants_proto::{ApprovalRequest, Question, ThreadId, Verdict};
+use std::collections::HashMap;
+
+use ants_proto::{ApprovalRequest, Question, ThreadId, Uuid, Verdict};
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -18,6 +20,7 @@ use super::exec::Job;
 use super::frame::{self, ago};
 use super::interrupt::Intent;
 use super::model::{Action, Data, Key, Model, To};
+use super::select::Selection;
 use super::{catchup, question};
 use crate::thread::Kind;
 use crate::tools::State;
@@ -96,8 +99,45 @@ pub struct Item {
     pub question: Option<Question>,
 }
 
+/// What an item is, whatever else changes on it: its reason and thread, and the id of an approval's tool request.
+pub type Id = (Why, ThreadId, Option<Uuid>);
+
+impl Item {
+    pub fn id(&self) -> Id {
+        (self.why, self.thread.clone(), self.request.as_ref().map(|(r, _)| r.id))
+    }
+}
+
 /// What waits on the human at `now`.
 pub fn items(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
+    let mut items = unsnoozed(data, now);
+    let held = held(data, &items, now);
+    items.retain(|i| !held.contains_key(&i.thread));
+    // The requests waiting for the human before those settled lately.
+    items.sort_by_key(|i| (i.why, i.request.as_ref().is_some_and(|(_, settled)| settled.is_some()), i.at));
+    items
+}
+
+/// The threads a snooze keeps off home at `now`, with when each snooze ends.
+pub fn snoozed(data: &Data, now: DateTime<Utc>) -> HashMap<ThreadId, DateTime<Utc>> {
+    held(data, &unsnoozed(data, now), now)
+}
+
+/// The threads a snooze keeps off home among `items`: it holds until an item for the human arrives on the thread
+/// after it was set.
+fn held(data: &Data, items: &[Item], now: DateTime<Utc>) -> HashMap<ThreadId, DateTime<Utc>> {
+    data.cards
+        .snoozed
+        .0
+        .keys()
+        .filter_map(|thread| data.cards.snoozed.get(thread, now).map(|s| (thread, s)))
+        .filter(|(thread, s)| !items.iter().any(|i| i.thread == **thread && i.at > s.at))
+        .map(|(thread, s)| (thread.clone(), s.until))
+        .collect()
+}
+
+/// What would wait on the human at `now` were no thread snoozed, unordered.
+fn unsnoozed(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
     let mut items: Vec<Item> = approvals::cards(data, None, now)
         .into_iter()
         .map(|card| {
@@ -144,16 +184,6 @@ pub fn items(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
             items.push(item(Why::Finished, thread, latest.at, format!("{} answered", latest.from)));
         }
     }
-    // A snooze holds until an item for the human arrives on the thread after it was set.
-    let snoozes = &data.cards.snoozed;
-    let woken: Vec<ThreadId> = items
-        .iter()
-        .filter(|i| snoozes.get(&i.thread, now).is_some_and(|s| i.at > s.at))
-        .map(|i| i.thread.clone())
-        .collect();
-    items.retain(|i| snoozes.get(&i.thread, now).is_none() || woken.contains(&i.thread));
-    // The requests waiting for the human before those settled lately.
-    items.sort_by_key(|i| (i.why, i.request.as_ref().is_some_and(|(_, settled)| settled.is_some()), i.at));
     items
 }
 
@@ -164,7 +194,8 @@ pub fn waiting(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
 
 #[derive(Debug, Default)]
 pub struct Page {
-    selected: usize,
+    /// The selected item, kept on it as items arrive and leave.
+    selected: Selection<Id>,
 }
 
 impl Page {
@@ -173,12 +204,18 @@ impl Page {
     /// The selected item's thread.
     pub fn thread(&self, data: &Data) -> Option<ThreadId> {
         let items = items(data, Utc::now());
-        items.get(self.selected.min(items.len().saturating_sub(1))).map(|i| i.thread.clone())
+        items.get(self.at(&items)).map(|i| i.thread.clone())
+    }
+
+    /// Where the selected item is among `items`.
+    fn at(&self, items: &[Item]) -> usize {
+        self.selected.at(&items.iter().map(Item::id).collect::<Vec<_>>())
     }
 
     pub fn key(&mut self, key: Key, data: &Data, now: DateTime<Utc>) -> Option<To> {
         let items = items(data, now);
-        let selected = items.get(self.selected.min(items.len().saturating_sub(1)));
+        let at = self.at(&items);
+        let selected = items.get(at);
         let pending = selected.and_then(|i| i.request.as_ref()).filter(|(_, s)| s.is_none()).map(|(r, _)| r.clone());
         let verdict = match key {
             Key::Char('a') => Some(Verdict::AllowOnce),
@@ -187,7 +224,7 @@ impl Page {
             _ => None,
         };
         let thread = || selected.map(|i| i.thread.clone());
-        self.selected = match key {
+        let to = match key {
             Key::Enter => {
                 return match pending {
                     Some(request) => Some(To::Ask(request, None)),
@@ -215,13 +252,13 @@ impl Page {
             Key::Char('z') => return thread().map(To::Snooze),
             Key::Char('t') => return thread().map(To::Tree),
             Key::Char('s') => return Some(To::Digest),
-            Key::Up | Key::Char('k') => self.selected.saturating_sub(1),
-            Key::Down | Key::Char('j') => self.selected + 1,
+            Key::Up | Key::Char('k') => at.saturating_sub(1),
+            Key::Down | Key::Char('j') => at + 1,
             Key::Home => 0,
             Key::End => usize::MAX,
             _ => return None,
-        }
-        .min(items.len().saturating_sub(1));
+        };
+        self.selected.select(&items.iter().map(Item::id).collect::<Vec<_>>(), to);
         None
     }
 
@@ -239,7 +276,7 @@ impl Page {
             frame.render_widget(Paragraph::new(text), area);
             return;
         }
-        let selected = self.selected.min(items.len() - 1);
+        let selected = self.at(&items);
         let width = usize::from(area.width.saturating_sub(9));
         let rows: Vec<ListItem> = items
             .iter()
@@ -433,6 +470,54 @@ mod tests {
         m.key(Key::End, at(8));
         assert_eq!(m.key(Key::Char('f'), at(8)), Some(Action::Open(done)));
         assert!(m.bar.focused, "the bar open to follow up on the thread");
+    }
+
+    #[test]
+    fn the_selection_stays_on_its_item_as_items_arrive_above_and_leave() {
+        let (done, stuck, other) = (ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
+        let mut m = model();
+        let mut opening = message(1, &done, "alice", "dev-a", "deploy");
+        opening.owner = Some(user("alice"));
+        m.stored(vec![opening, message(2, &done, "dev-a", "alice", "deployed")], at(2));
+        m.stored(vec![message(3, &stuck, "alice", "dev-b", "review"), escalation(4, &stuck, "dev-b", "alice")], at(4));
+        m.key(Key::End, at(5));
+        assert!(shown(&m, at(5)).contains("f follow up · d mark done"), "the finished thread selected");
+
+        m.stored(vec![message(6, &other, "alice", "dev-c", "build"), escalation(7, &other, "dev-c", "alice")], at(7));
+        let whys: Vec<Why> = items(&m.data, at(8)).into_iter().map(|i| i.why).collect();
+        assert_eq!(whys, [Why::Stuck, Why::Stuck, Why::Finished], "an item arrived above the selection");
+        let last = m.data.live.summary(&done).unwrap().last_reopening;
+        assert_eq!(m.key(Key::Char('d'), at(8)), Some(Action::Change(done, Change::Done(true), last)));
+
+        let selected = |m: &crate::tui::model::Model| {
+            let crate::tui::model::Page::Home(home) = m.page() else { panic!("home") };
+            home.thread(&m.data)
+        };
+        m.key(Key::Home, at(8));
+        m.key(Key::Down, at(8));
+        assert_eq!(selected(&m), Some(other.clone()));
+        m.data.cards.snoozed.snooze(&stuck, Utc::now(), Utc::now() + chrono::TimeDelta::hours(1));
+        assert_eq!(selected(&m), Some(other), "on its item as one above leaves");
+    }
+
+    #[test]
+    fn a_title_a_human_set_shows_ahead_of_the_suggested_one_and_the_opening_line() {
+        let (done, unlisted) = (ThreadId::generate(), ThreadId::generate());
+        let mut m = model();
+        let mut opening = message(1, &done, "alice", "dev-a", "deploy");
+        opening.owner = Some(user("alice"));
+        let mut answer = message(2, &done, "dev-a", "alice", "deployed");
+        answer.suggested_title = Some("Site deploy".to_owned());
+        m.stored(vec![opening, answer], at(2));
+        assert_eq!(m.data.title(&done), "Site deploy");
+        assert!(shown(&m, at(3)).contains("Site deploy"));
+
+        m.data.cards.titles.insert(done.clone(), "Release 1.2".to_owned());
+        m.data.cards.titles.insert(unlisted.clone(), "[sealed]".to_owned());
+        assert_eq!(m.data.title(&done), "Release 1.2");
+        assert_eq!(m.data.title(&unlisted), "[sealed]", "even without a message read");
+        let screen = shown(&m, at(3));
+        assert!(screen.contains("Release 1.2") && !screen.contains("Site deploy"), "{screen}");
     }
 
     #[test]

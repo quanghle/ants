@@ -1,5 +1,5 @@
-//! What `ants chat` reads of the threads besides their messages, every while: each thread's shared done state and
-//! TL;DR and the human's snoozes in ants_threads, and what the ants spent on it since a human's last message, and in the UTC day, in
+//! What `ants chat` reads of the threads besides their messages, every while: each thread's shared title, done state
+//! and TL;DR and the human's snoozes in ants_threads, and what the ants spent on it since a human's last message, and in the UTC day, in
 //! ants_sessions.
 
 use std::collections::{HashMap, HashSet};
@@ -17,12 +17,14 @@ use futures::{FutureExt as _, StreamExt as _};
 use crate::live::maybe;
 use crate::thread_meta::{self, Meta};
 
-/// How often the done states, TL;DRs and spend are read.
+/// How often the titles, done states, TL;DRs and spend are read.
 const EVERY: Duration = Duration::from_secs(10);
 
 /// What was read of the threads besides their messages.
 #[derive(Debug, Default)]
 pub struct Cards {
+    /// Each thread's title a human set, opened where sealed, else `[sealed]`, as `ants thread list` shows it.
+    pub titles: HashMap<ThreadId, String>,
     /// Each thread's done state, whether or not a message since reopened it.
     pub done: HashMap<ThreadId, ThreadDone>,
     pub tldr: HashMap<ThreadId, ThreadSummary>,
@@ -66,6 +68,10 @@ impl Cards {
             Ok((done, tldr)) => (self.done, self.tldr, self.tldr_read) = (done, tldr, true),
             Err(e) => failed.push(format!("reading the done states and TL;DRs: {e:#}")),
         }
+        match read.titles {
+            Ok(titles) => self.titles = titles,
+            Err(e) => failed.push(format!("reading the titles: {e:#}")),
+        }
         match read.spend {
             Ok(spend) => self.spend = spend,
             Err(e) => failed.push(format!("reading the spend: {e:#}")),
@@ -89,6 +95,7 @@ impl Cards {
 
 /// One read: each part, or why it failed.
 pub struct Read {
+    pub titles: Result<HashMap<ThreadId, String>>,
     pub meta: Result<(HashMap<ThreadId, ThreadDone>, HashMap<ThreadId, ThreadSummary>)>,
     pub spend: Result<HashMap<ThreadId, Vec<(UserId, Spent)>>>,
     pub today: Result<Vec<(UserId, Spent)>>,
@@ -111,9 +118,13 @@ impl Source {
         Self { js: js.clone(), meta, sessions }
     }
 
-    /// Read what there is of `threads`: their done states and TL;DRs, what was spent on them, that day's spend, and the
+    /// Read what there is of `threads`: their titles, done states and TL;DRs, what was spent on them, that day's spend, and the
     /// human's snoozes.
     pub async fn read(self, threads: HashSet<ThreadId>) -> Read {
+        let titles = async {
+            let titles = self.meta.as_ref().map_err(|e| anyhow!("{e}"))?.titles(&threads).await?;
+            Ok(titles.into_iter().map(|(thread, title)| (thread, title.title)).collect())
+        };
         let meta = async {
             let meta = self.meta.as_ref().map_err(|e| anyhow!("{e}"))?;
             let done = meta.dones(&threads).await?;
@@ -136,8 +147,8 @@ impl Source {
             crate::spend::today(&self.js, kv).await.context("of the day")
         };
         let snoozed = async { self.meta.as_ref().map_err(|e| anyhow!("{e}"))?.snoozes().await };
-        let (meta, spend, today, snoozed) = futures::join!(meta, spend, today, snoozed);
-        Read { meta, spend, today, snoozed }
+        let (titles, meta, spend, today, snoozed) = futures::join!(titles, meta, spend, today, snoozed);
+        Read { titles, meta, spend, today, snoozed }
     }
 }
 
@@ -213,6 +224,7 @@ mod tests {
         let mut cards = Cards::default();
         let spent = Spent { tokens: 10, cost: 0.25 };
         let ok = || Read {
+            titles: Ok(HashMap::new()),
             meta: Ok((HashMap::new(), HashMap::new())),
             spend: Ok([(thread.clone(), vec![(user("dev-a"), spent), (user("dev-b"), spent)])].into()),
             today: Ok(vec![(user("dev-a"), spent)]),

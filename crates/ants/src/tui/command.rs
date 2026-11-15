@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use ants_proto::{ApprovalRequest, ChannelId, Choice, Reaction, ThreadId, UserId, Verdict};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Style};
@@ -17,7 +17,7 @@ use ratatui::widgets::{Clear, Paragraph};
 use super::exec::{Job, Outcome};
 use super::frame;
 use super::model::{Action, Focus, Key, Model, Page};
-use super::{attach, complete, nav, thread};
+use super::{attach, complete, nav, snooze, thread};
 use crate::thread_meta::Marking;
 use crate::{attachments, live, quiet, tools};
 
@@ -35,6 +35,8 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("unpin", "", "unpin the thread"),
     ("mute", "[DURATION]", "hold back the thread's notifications"),
     ("unmute", "", "notify of the thread again"),
+    ("snooze", "[DURATION]", "keep the thread off home, 1h unless given"),
+    ("unsnooze", "", "bring the thread back on home"),
     ("archive", "", "archive the thread"),
     ("unarchive", "", "unarchive the thread"),
     ("title", "TEXT", "title the thread"),
@@ -93,6 +95,9 @@ pub enum Slash {
     Mark(Marking),
     Mute(Option<Duration>),
     Unmute,
+    /// Keep the thread off home this long.
+    Snooze(TimeDelta),
+    Unsnooze,
     Title(String),
     React(Reaction),
     Goto(Goto),
@@ -192,6 +197,8 @@ fn slash(text: &str) -> Result<Slash, String> {
         "mute" if args.is_empty() => Ok(Slash::Mute(None)),
         "mute" => ants_proto::duration::parse(args).map(|hold| Slash::Mute(Some(hold))),
         "unmute" => bare(Slash::Unmute),
+        "snooze" => snooze::duration(args).map(Slash::Snooze),
+        "unsnooze" => bare(Slash::Unsnooze),
         "title" => text().map(Slash::Title),
         "react" => text()?.parse().map(Slash::React).map_err(|e| e.to_string()),
         "goto" => goto(&text()?).map(Slash::Goto),
@@ -571,6 +578,8 @@ impl Model {
             Slash::Mark(marking) => run(Job::Mark { thread: self.target()?, marking }),
             Slash::Mute(hold) => run(Job::Mute { thread: self.target()?, hold: hold.unwrap_or(quiet::MUTE_FOR) }),
             Slash::Unmute => run(Job::Unmute { thread: self.target()? }),
+            Slash::Snooze(duration) => Ok(Some(self.set_snooze(self.target()?, Some(now + duration), now))),
+            Slash::Unsnooze => Ok(Some(self.set_snooze(self.target()?, None, now))),
             Slash::Title(text) => run(Job::Title { thread: self.target()?, text }),
             Slash::React(reaction) => {
                 let message = match self.page() {
@@ -761,6 +770,7 @@ mod tests {
 
     use super::*;
     use crate::live::tests::{at, message, request, user};
+    use crate::tui::acts::Change;
     use crate::tui::exec::Done;
     use crate::tui::model::tests::model;
     use crate::tui::reads::Read;
@@ -804,6 +814,10 @@ mod tests {
         assert_eq!(ok("/goto @bob"), Slash::Goto(Goto::User(user("bob"))));
         assert_eq!(ok("/goto 019A"), Slash::Goto(Goto::Thread("019a".into())));
         assert_eq!(ok("/archive"), Slash::Mark(Marking::Archive));
+        assert_eq!(ok("/snooze"), Slash::Snooze(TimeDelta::hours(1)));
+        assert_eq!(ok("/snooze 2d"), Slash::Snooze(TimeDelta::days(2)));
+        assert_eq!(ok("/unsnooze"), Slash::Unsnooze);
+        assert_eq!(parse("/snooze 8d").unwrap_err(), "too long: at most 7d");
         assert_eq!(parse("/steer").unwrap_err(), "usage: /steer TEXT");
         assert_eq!(parse("/done now").unwrap_err(), "usage: /done");
         assert_eq!(parse("/approve a b").unwrap_err(), "usage: /approve [ID] [--always]");
@@ -930,8 +944,13 @@ mod tests {
         assert_eq!(run(&mut m, "/cancel"), Some(Action::Run(cancel, "/cancel".into())));
         let steer = Job::Ask { to: user("dev-a"), thread: Some(thread.clone()), text: "left".into(), steer: true };
         assert_eq!(run(&mut m, "/steer left"), Some(Action::Run(steer, "/steer left".into())));
-        let grant = Job::Grant { thread, text: GRANT.into() };
+        let grant = Job::Grant { thread: thread.clone(), text: GRANT.into() };
         assert_eq!(run(&mut m, "/grant"), Some(Action::Run(grant, "/grant".into())));
+        let snooze = Change::Snooze(Some(at(2 * 3600)));
+        assert_eq!(run(&mut m, "/snooze 2h"), Some(Action::Change(thread.clone(), snooze, 1)));
+        assert!(m.data.cards.snoozed.get(&thread, at(1)).is_some(), "snoozed at once");
+        assert_eq!(run(&mut m, "/unsnooze"), Some(Action::Change(thread.clone(), Change::Snooze(None), 1)));
+        assert!(m.data.cards.snoozed.get(&thread, at(1)).is_none(), "woken at once");
         assert_eq!(run(&mut m, "/nope"), None);
         assert!(m.bar.list, "an unknown command shows the list");
         assert_eq!(run(&mut m, "/quit"), Some(Action::Quit));

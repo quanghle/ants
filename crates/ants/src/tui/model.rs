@@ -152,16 +152,17 @@ impl Data {
         self.marker.as_ref().is_some_and(|m| !m.is_read(seq))
     }
 
-    /// The thread's title, else the title an ant suggested, else its opening line; after a lock when a sealed message
-    /// is on it.
+    /// The title a human set on the thread, else the title an ant suggested, else its opening line; after a lock
+    /// when a sealed message is on it.
     pub fn title(&self, thread: &ThreadId) -> String {
-        let Some(summary) = self.live.summary(thread) else { return thread.to_string() };
-        let title = summary
-            .title
-            .clone()
-            .or_else(|| summary.suggested.as_ref().map(|(_, title)| title.clone()))
-            .unwrap_or_else(|| summary.opening.clone());
-        if summary.sealed { format!("{} {title}", super::dm::LOCK) } else { title }
+        let summary = self.live.summary(thread);
+        let title = self.cards.titles.get(thread).cloned().or_else(|| {
+            let summary = summary?;
+            let suggested = summary.suggested.as_ref().map(|(_, title)| title.clone());
+            Some(summary.title.clone().or(suggested).unwrap_or_else(|| summary.opening.clone()))
+        });
+        let Some(title) = title else { return thread.to_string() };
+        if summary.is_some_and(|s| s.sealed) { format!("{} {title}", super::dm::LOCK) } else { title }
     }
 }
 
@@ -228,7 +229,7 @@ pub enum To {
     Interrupt(Intent, ThreadId),
     /// The thread, with the command bar open to reply on it.
     Reply(ThreadId),
-    /// Ask how long to keep the thread off home.
+    /// Ask how long to keep the thread off home, or wake it if a snooze holds it off.
     Snooze(ThreadId),
     /// The command bar, open on this text.
     Bar(String),
@@ -793,10 +794,7 @@ impl Model {
                 self.bar.focused = true;
                 self.go(To::Thread(thread), now)
             }
-            To::Snooze(thread) => {
-                self.snooze(thread);
-                None
-            }
+            To::Snooze(thread) => self.snooze(thread, now),
             To::Bar(text) => {
                 self.bar.set_text(&text);
                 self.bar.focused = true;

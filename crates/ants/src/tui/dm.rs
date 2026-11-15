@@ -15,6 +15,7 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
 use super::frame::{self, ago};
 use super::model::{Action, Data, Key, To};
+use super::select::Selection;
 use crate::sealed::State;
 use crate::thread::{Entry, Kind};
 
@@ -134,14 +135,15 @@ pub struct Draft {
 pub struct Page {
     /// The other human.
     pub with: UserId,
-    selected: usize,
+    /// The selected thread, kept on it as messages reorder the threads.
+    selected: Selection<ThreadId>,
     /// The message being written, if any.
     draft: Option<String>,
 }
 
 impl Page {
     pub fn new(with: UserId) -> Self {
-        Self { with, selected: 0, draft: None }
+        Self { with, selected: Selection::default(), draft: None }
     }
 
     const KEYS: &str = "↑↓ thread · Enter open · n new message";
@@ -153,19 +155,21 @@ impl Page {
 
     pub fn key(&mut self, key: Key, data: &Data) -> Option<To> {
         let dms = data.people.dms.with(&self.with);
-        self.selected = match key {
-            Key::Enter => return dms.get(self.selected).map(|dm| To::Thread(dm.thread.clone())),
+        let threads: Vec<ThreadId> = dms.iter().map(|dm| dm.thread.clone()).collect();
+        let at = self.selected.at(&threads);
+        let to = match key {
+            Key::Enter => return dms.get(at).map(|dm| To::Thread(dm.thread.clone())),
             Key::Char('n') => {
                 self.draft = Some(String::new());
                 return None;
             }
-            Key::Up | Key::Char('k') => self.selected.saturating_sub(1),
-            Key::Down | Key::Char('j') => self.selected + 1,
+            Key::Up | Key::Char('k') => at.saturating_sub(1),
+            Key::Down | Key::Char('j') => at + 1,
             Key::Home => 0,
             Key::End => usize::MAX,
             _ => return None,
-        }
-        .min(dms.len().saturating_sub(1));
+        };
+        self.selected.select(&threads, to);
         None
     }
 
@@ -229,7 +233,7 @@ impl Page {
                 })
                 .collect();
             let list_widget = List::new(rows).block(block).highlight_style(frame::highlight(focused));
-            let selected = self.selected.min(dms.len() - 1);
+            let selected = self.selected.at(&dms.iter().map(|dm| dm.thread.clone()).collect::<Vec<_>>());
             frame.render_stateful_widget(list_widget, list, &mut ListState::default().with_selected(Some(selected)));
         }
         let (text, style) = match &self.draft {
