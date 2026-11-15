@@ -187,6 +187,8 @@ pub struct Model {
     pub notice: Option<Notice>,
     /// The search prompt, while open.
     pub prompt: Option<search::Prompt>,
+    /// Whether the two-line pane shows instead of the full view ([`super::compact`]).
+    pub compact: bool,
 }
 
 impl Model {
@@ -205,7 +207,16 @@ impl Model {
             cards: cards::Cards::default(),
         };
         let nav = nav::Item::Home;
-        Self { data, pages: vec![Page::of(&nav)], nav, focus: Focus::View, help: false, notice: None, prompt: None }
+        Self {
+            data,
+            pages: vec![Page::of(&nav)],
+            nav,
+            focus: Focus::View,
+            help: false,
+            notice: None,
+            prompt: None,
+            compact: false,
+        }
     }
 
     pub fn page(&self) -> &Page {
@@ -377,6 +388,9 @@ impl Model {
         if key == Key::Interrupt {
             return Some(Action::Quit);
         }
+        if self.compact {
+            return self.compact_key(key, now);
+        }
         if self.help {
             self.help = false;
             return None;
@@ -487,7 +501,7 @@ impl Model {
         }
     }
 
-    fn view_key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
+    pub(super) fn view_key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
         if key == Key::Esc {
             if self.pages.len() > 1 {
                 self.pages.pop();

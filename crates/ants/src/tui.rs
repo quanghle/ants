@@ -8,6 +8,7 @@
 
 mod cards;
 mod channel;
+mod compact;
 mod dm;
 mod frame;
 mod home;
@@ -17,6 +18,7 @@ mod nav;
 mod people;
 mod reads;
 mod search;
+mod status;
 mod thread;
 mod work;
 
@@ -37,6 +39,8 @@ use self::reads::Reads;
 use self::search::Searches;
 use crate::live::{self, Feed, Screen};
 use crate::{presence, progress};
+
+pub use self::status::run as status;
 
 /// How far back `ants chat` reads threads unless told otherwise, as `ants` alone does.
 pub const SINCE: Duration = Duration::from_hours(7 * 24);
@@ -110,7 +114,8 @@ fn host(url: &str) -> &str {
     rest.split(['/', '?', '#']).next().unwrap_or(rest)
 }
 
-pub async fn run(nats: &crate::Nats<'_>, since: Duration) -> Result<()> {
+/// `ants chat`, as the two-line pane when `compact`.
+pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Result<()> {
     terminal_check(std::io::stdin().is_terminal(), std::io::stdout().is_terminal())?;
     let me = &nats.me.id;
     if !nats.me.role.is_human() {
@@ -131,14 +136,12 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration) -> Result<()> {
     let people = people::Io::new(js.clone(), nats.domain.cloned(), nats.me.clone(), may_read);
     let searches = Searches::new(js.clone());
     let cards = cards::Io::new(cards::Source::open(nats, &js).await);
-    let server = host(nats.url).to_owned();
+    let mut model = Model::new(state, host(nats.url).to_owned());
+    model.compact = compact;
     // The UI shows the replies and the tool requests as they come, so notifications spare this device theirs meanwhile.
     let shown = async {
         let mut screen = Screen::open()?;
-        Box::pin(
-            Chat { feed, reads, people, searches, cards, model: Model::new(state, server) }.run(&mut screen.terminal),
-        )
-        .await
+        Box::pin(Chat { feed, reads, people, searches, cards, model }.run(&mut screen.terminal)).await
     };
     let (domain, device) = (nats.domain, nats.device);
     let approvals = presence::while_following(&js, domain, me, device, Following::Approvals, shown);
