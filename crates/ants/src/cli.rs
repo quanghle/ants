@@ -10,11 +10,13 @@ use clap_complete::engine::{ArgValueCandidates, ArgValueCompleter};
 use futures::StreamExt as _;
 
 use crate::cmd::{
-    auth::AuthCommand, bridge::BridgeCommand, channel::ChannelCommand, dead::DeadCommand, enroll::EnrollCommand,
-    harness::HarnessCommand, leaf::LeafCommand, thread::ThreadCommand, tools::ToolsCommand, webhook::WebhookCommand,
+    attachment::AttachmentCommand, auth::AuthCommand, bridge::BridgeCommand, channel::ChannelCommand,
+    dead::DeadCommand, enroll::EnrollCommand, harness::HarnessCommand, leaf::LeafCommand, thread::ThreadCommand,
+    tools::ToolsCommand, webhook::WebhookCommand,
 };
 use crate::{
-    add, channel, completions, compose, hook, keys, progress, renew, retire, serve, setup, spend, thread, upgrade,
+    add, attachments, channel, completions, compose, hook, keys, progress, renew, retire, serve, setup, spend, thread,
+    upgrade,
 };
 
 #[derive(Parser)]
@@ -62,6 +64,8 @@ pub(crate) enum Command {
         replies: Replies,
         #[command(flatten)]
         input: compose::Input,
+        #[command(flatten)]
+        attach: attachments::Attach,
         /// `@ant` (optional), then the message, unless --file or --edit gives it.
         #[arg(num_args = 1.., add = ArgValueCandidates::new(completions::mentions))]
         words: Vec<String>,
@@ -139,6 +143,8 @@ pub(crate) enum Command {
         replies: Replies,
         #[command(flatten)]
         input: compose::Input,
+        #[command(flatten)]
+        attach: attachments::Attach,
         /// The post, unless --file or --edit gives it; each @ant mention wakes that member.
         #[arg(num_args = 1.., add = ArgValueCandidates::new(completions::mentions))]
         words: Vec<String>,
@@ -153,6 +159,8 @@ pub(crate) enum Command {
         /// The thread: its id, a unique start of one, or `last`.
         #[arg(add = ArgValueCandidates::new(completions::threads))]
         thread: thread::Pick,
+        #[command(flatten)]
+        attach: attachments::Attach,
         /// The post. Without it, show the notes.
         #[arg(value_name = "TEXT")]
         text: Vec<String>,
@@ -201,6 +209,9 @@ pub(crate) enum Command {
         #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse, default_value = "24h")]
         since: Duration,
     },
+    /// Files attached to messages (`--attach` of `ants ask`, `ants post` and `ants notes`): save one.
+    #[command(subcommand)]
+    Attachment(AttachmentCommand),
     /// Hold back the notifications `ants webhook serve` pushes to the CLI's human for a while, on every device of the
     /// human: snooze them, resume them, or show what is held. Needs a human's credentials.
     #[command(subcommand)]
@@ -543,7 +554,7 @@ mod tests {
     #[test]
     fn notes_shows_without_text_and_posts_with_it() {
         let cli = Cli::try_parse_from(["ants", "notes", "t1", "split", "the", "work"]).unwrap();
-        let Command::Notes { thread, text } = cli.command.unwrap() else { panic!("not notes") };
+        let Command::Notes { thread, text, .. } = cli.command.unwrap() else { panic!("not notes") };
         let words = vec!["split".to_owned(), "the".to_owned(), "work".to_owned()];
         assert_eq!((thread, text), (thread::Pick::Prefix("t1".to_owned()), words));
         let cli = Cli::try_parse_from(["ants", "notes", "t1"]).unwrap();

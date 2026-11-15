@@ -44,6 +44,10 @@ Quote the message text as one shell argument. For a multiline message, write it 
 `--file` too. Do not use `--edit`, which opens an interactive editor. Make requests self-contained: the ant shares neither this session's
 context nor files outside its own `workdir`.
 
+To send files (up to 8, 8 MiB each), add `--attach PATH` per file to `ants ask`, `ants post` or `ants notes <thread>
+"<text>"`. Received attachments show as `📎 name (size) <handle>` lines in `ants inbox` and `ants thread show`; save one
+with `ants attachment get <handle> [-o PATH]`.
+
 ## Receive
 
 Option 1, block on the thread:
