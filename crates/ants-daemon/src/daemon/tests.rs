@@ -2534,6 +2534,87 @@ async fn a_mentioned_member_answers_on_the_thread_after_the_posts_it_missed() {
     assert!(second.ends_with(&format!("\n\n{}", channel::owner_note(&ops))), "{second}");
 }
 
+/// Store `bytes` as a new attachment named `name` of type `mime`, under the handle `handle` gives its id.
+async fn attach(
+    bus: &Bus,
+    handle: impl Fn(Uuid) -> AttachmentHandle,
+    name: &str,
+    mime: &str,
+    bytes: &[u8],
+) -> Attachment {
+    let attachment = crate::files::reference(name, mime, bytes).unwrap();
+    crate::files::put(&bus.js, &handle(attachment.id), &attachment, bytes).await.unwrap();
+    attachment
+}
+
+#[tokio::test]
+async fn attachments_reach_a_harness_taking_images_as_images_and_any_other_as_a_line() {
+    let Some((bus, mut replies)) = Bus::start().await else { return };
+    bus.js.create_stream(crate::hub::files_config()).await.unwrap();
+    let (launch, log, _) = fake::launch();
+    log.locked().takes_images = true;
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let (ops, mut posts) = bus.channel("ops", &["dev-a"]).await;
+    let line = |a: &Attachment, handle: &AttachmentHandle| {
+        format!("[ants] Attached: {:?} ({}, {} bytes), handle {handle}", a.name, a.mime, a.size)
+    };
+
+    let mut message = Envelope::on_thread(ThreadId::generate(), UserId::human(), bus.dev.clone(), "look");
+    let to = message.clone();
+    let handle = |id| to.attachment_handle(id);
+    let shot = attach(&bus, handle, "shot.png", "image/png", b"\x89PNG shot").await;
+    let log_file = attach(&bus, handle, "build.log", "text/plain", b"error: E0308").await;
+    let gone = crate::files::reference("gone.png", "image/png", b"never stored").unwrap();
+    message.attachments = vec![shot.clone(), log_file.clone(), gone.clone()];
+    bus::publish_json(&bus.js, message.subject(), &message, None).await.unwrap();
+
+    let mut post = ChannelPost::new(ops.clone(), UserId::human(), "@dev-a see the chart");
+    let on = post.clone();
+    let chart = attach(&bus, |id| on.attachment_handle(id), "chart.webp", "image/webp", b"RIFF chart").await;
+    post.attachments = vec![chart.clone()];
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        next_reply(&mut replies).await;
+        bus.post(&post).await;
+        next_post(&mut posts).await;
+        // A harness started now takes no images.
+        log.locked().takes_images = false;
+        let mut plain = Envelope::on_thread(ThreadId::generate(), UserId::human(), bus.dev.clone(), "again");
+        plain.attachments = vec![attach(&bus, |id| plain.attachment_handle(id), "shot.png", "image/png", b"x").await];
+        bus::publish_json(&bus.js, plain.subject(), &plain, None).await.unwrap();
+        next_reply(&mut replies).await;
+        ctrl_c.add_permits(1);
+        plain
+    };
+    let ((), plain) = tokio::join!(bus.serve(&pool, &ctrl_c), check);
+
+    let log = log.locked();
+    let [first, second, third] = &log.prompts[..] else { panic!("{:?}", log.prompts) };
+    let shown = format!("{}; shown as an image after this text.", line(&shot, &handle(shot.id)));
+    let named = format!("{}; call read_attachment with the handle to read it.", line(&log_file, &handle(log_file.id)));
+    assert!(first.starts_with("look\n\n") && first.contains(&format!("{shown}\n{named}\n")), "{first}");
+    let unavailable =
+        format!("{}: unavailable now (attachment {} is not stored", line(&gone, &handle(gone.id)), handle(gone.id));
+    assert!(
+        first.contains(&unavailable) && first.ends_with("call read_attachment with the handle to try again."),
+        "{first}"
+    );
+    let chart_handle = post.attachment_handle(chart.id);
+    assert_eq!(chart_handle.to_string(), format!("human.chan.ops.{}", chart.id), "under the post's channel");
+    assert!(
+        second.ends_with(&format!("{}; shown as an image after this text.", line(&chart, &chart_handle))),
+        "{second}"
+    );
+    let image = |mime: &str, bytes: &[u8]| (mime.to_owned(), data_encoding::BASE64.encode(bytes));
+    assert_eq!(log.images, [image("image/png", b"\x89PNG shot"), image("image/webp", b"RIFF chart")]);
+
+    let only = &plain.attachments[0];
+    let named =
+        format!("{}; call read_attachment with the handle to read it.", line(only, &plain.attachment_handle(only.id)));
+    assert!(third.ends_with(&format!("again\n\n{named}")), "{third}");
+}
+
 #[tokio::test]
 async fn the_ant_that_started_a_channel_thread_is_its_creator_whatever_its_post_says() {
     let Some((bus, _)) = Bus::start().await else { return };

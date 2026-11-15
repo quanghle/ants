@@ -503,8 +503,8 @@ pub(crate) mod fake {
     use agent_client_protocol::v1::schema::{
         AgentCapabilities, CancelNotification, ContentBlock, ContentChunk, Cost, Implementation, InitializeRequest,
         InitializeResponse, LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse,
-        PromptRequest, PromptResponse, SessionId, SessionNotification, SessionUpdate, StopReason, TextContent,
-        ToolCall, Usage, UsageUpdate,
+        PromptCapabilities, PromptRequest, PromptResponse, SessionId, SessionNotification, SessionUpdate, StopReason,
+        TextContent, ToolCall, Usage, UsageUpdate,
     };
     use agent_client_protocol::{Agent, DynConnectTo};
     use tokio::sync::Semaphore;
@@ -544,6 +544,10 @@ pub(crate) mod fake {
         pub limited_reply: bool,
         /// While set, the handshake fails, as with a broken install.
         pub broken: bool,
+        /// While set, harnesses starting advertise that they take images in prompts.
+        pub takes_images: bool,
+        /// The images prompts carried after their text, as media type and base64 data, in order.
+        pub images: Vec<(String, String)>,
     }
 
     /// In-process fake harnesses that answer each prompt with `<session>: <text>`. A prompt starting with `hold`, or
@@ -554,7 +558,8 @@ pub(crate) mod fake {
     /// `overflows` fails as a prompt that outgrew the context window, and so does `overflow` unless the session was
     /// rebuilt for it. While [`Log::signed_out`] is set, sessions and prompts fail as with a harness that is not signed
     /// in; while [`Log::limited`] is, prompts stream its text and fail with it, or end with it as their reply; while
-    /// [`Log::broken`] is, the handshake fails. They can load stored sessions.
+    /// [`Log::broken`] is, the handshake fails; while [`Log::takes_images`] is, harnesses starting take images, which
+    /// they log. They can load stored sessions.
     pub fn launch() -> (Launch, Arc<Mutex<Log>>, Arc<Semaphore>) {
         launch_with(Sessions::Loadable)
     }
@@ -592,13 +597,18 @@ pub(crate) mod fake {
                     )
                     .on_receive_request(
                         async move |init: InitializeRequest, responder, _cx| {
-                            if on_init.locked().broken {
+                            let log = on_init.locked();
+                            if log.broken {
                                 return responder.respond_with_internal_error("broken install");
                             }
+                            let prompts = PromptCapabilities::new().image(log.takes_images);
+                            drop(log);
                             responder.respond(
                                 InitializeResponse::new(init.protocol_version)
                                     .agent_capabilities(
-                                        AgentCapabilities::new().load_session(sessions == Sessions::Loadable),
+                                        AgentCapabilities::new()
+                                            .load_session(sessions == Sessions::Loadable)
+                                            .prompt_capabilities(prompts),
                                     )
                                     .agent_info(Implementation::new("fake", "1.0")),
                             )
@@ -652,6 +662,10 @@ pub(crate) mod fake {
                             }
                             let ContentBlock::Text(t) = &prompt.prompt[0] else { unreachable!() };
                             log.prompts.push(t.text.clone());
+                            for block in &prompt.prompt[1..] {
+                                let ContentBlock::Image(image) = block else { unreachable!() };
+                                log.images.push((image.mime_type.clone(), image.data.clone()));
+                            }
                             drop(log);
                             let (text, gate, sender, log, cancels) =
                                 (t.text.clone(), gate.clone(), cx.clone(), on_prompt.clone(), cancels.clone());

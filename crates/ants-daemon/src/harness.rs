@@ -10,19 +10,21 @@ use std::time::Duration;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
-    AuthMethod, CancelNotification, ContentBlock, InitializeRequest, LoadSessionRequest, McpServer, NewSessionRequest,
-    PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOptions, SessionId,
-    SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest,
-    TextContent, ToolCall, ToolCallId, ToolCallUpdate,
+    AuthMethod, CancelNotification, ContentBlock, ImageContent, InitializeRequest, LoadSessionRequest, McpServer,
+    NewSessionRequest, PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelectOptions, SessionId, SessionModeState, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionModeRequest, TextContent, ToolCall, ToolCallId, ToolCallUpdate,
 };
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, DynConnectTo};
 use ants_proto::{HarnessAgent, PlanStep, StatusUpdate, ThreadId};
 use anyhow::{Context as _, Result, anyhow, bail};
+use data_encoding::BASE64;
 use serde::Deserialize;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 
 use crate::breaker::StartFailed;
+use crate::files::Attached;
 use crate::history::{History, Rebuild};
 use crate::overflow::{ContextOverflow, overflows};
 use crate::permission::PermissionPolicy;
@@ -815,6 +817,9 @@ pub struct Prompt {
     pub progress: Option<mpsc::Sender<StatusUpdate>>,
     /// The thread's history, read only when the prompt runs in a session that lost the thread's context.
     pub history: Option<History>,
+    /// The files attached to the message prompted with, read as the prompt runs: as images after the text for a
+    /// harness taking them, else named at the end of the text ([`Attached::show`]).
+    pub attachments: Option<Attached>,
 }
 
 impl Prompt {
@@ -827,6 +832,7 @@ impl Prompt {
             stop: None,
             progress: None,
             history: None,
+            attachments: None,
         }
     }
 }
@@ -1163,6 +1169,7 @@ async fn serve(
                 methods: &methods,
                 current: &current,
                 mcp: &mcp,
+                images: caps.prompt_capabilities.image,
             };
             while let Some(turn) = turns.recv().await {
                 if connected.run(turn, &mut id, lost.take()).await?.is_break() {
@@ -1182,6 +1189,15 @@ async fn serve(
     }
 }
 
+/// The lines ending a prompt's text for its `attachments`, and the image blocks following the text for a harness
+/// taking `images`.
+async fn attached(attachments: Option<Attached>, images: bool) -> (String, Vec<ContentBlock>) {
+    let Some(attachments) = attachments else { return Default::default() };
+    let shown = attachments.show(images).await;
+    let images = shown.images.into_iter().map(|(mime, bytes)| ImageContent::new(BASE64.encode(&bytes), mime));
+    (shown.lines, images.map(ContentBlock::Image).collect())
+}
+
 /// What [`serve`] runs prompts with once the harness is connected.
 struct Connected<'a> {
     cx: &'a ConnectionTo<Agent>,
@@ -1193,6 +1209,8 @@ struct Connected<'a> {
     /// The session's id, as the session's owner reads it.
     current: &'a Mutex<SessionId>,
     mcp: &'a Vec<McpServer>,
+    /// Whether the agent takes image content in prompts.
+    images: bool,
 }
 
 impl Connected<'_> {
@@ -1205,7 +1223,8 @@ impl Connected<'_> {
         mut rebuild: Option<Rebuild>,
     ) -> Result<ControlFlow<()>, agent_client_protocol::Error> {
         let Turn { prompt, reply } = turn;
-        let Prompt { text, limits, spend, mut stop, progress, mut history } = prompt;
+        let Prompt { text, limits, spend, mut stop, progress, mut history, attachments } = prompt;
+        let (lines, images) = attached(attachments, self.images).await;
         // Once in a new session when the prompt outgrows the context window, unless it ran in one already.
         let mut retry = rebuild.is_none();
         let (done, cut, text, errors_only) = loop {
@@ -1234,15 +1253,13 @@ impl Connected<'_> {
                 }
                 None => String::new(),
             };
-            let text = [self.launch.instructions.as_str(), &seed, &text]
+            let text = [self.launch.instructions.as_str(), &seed, &text, &lines]
                 .into_iter()
                 .filter(|part| !part.is_empty())
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            let request = self
-                .cx
-                .send_request(PromptRequest::new(id.clone(), vec![ContentBlock::Text(TextContent::new(text))]))
-                .block_task();
+            let content = std::iter::once(ContentBlock::Text(TextContent::new(text))).chain(images.iter().cloned());
+            let request = self.cx.send_request(PromptRequest::new(id.clone(), content.collect())).block_task();
             let (done, cut) = bounded(self.cx, id, request, limits, &too_many, &mut stop, self.cancelled).await;
             let (text, errors_only) = self.observed.locked().current.take().map_or_else(Default::default, |c| {
                 let text =
