@@ -248,6 +248,7 @@ mod tests {
     /// A manager's daemon adds ants from its config file's templates, signed by `ants signer` within the policy of
     /// the signer's own copy of them or on a human's approval, and serves them once its file reloads.
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn a_manager_adds_ants_that_its_daemon_serves_after_the_reload() {
         let Some(server) = Server::start() else { return };
         let dir = server.dir().to_owned();

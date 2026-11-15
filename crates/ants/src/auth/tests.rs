@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_lines)]
+
 use std::assert_matches;
 
 use ants_daemon::bus;

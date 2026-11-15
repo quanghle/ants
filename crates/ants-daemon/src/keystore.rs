@@ -551,6 +551,7 @@ mod credman {
         // SAFETY: `target` is NUL-terminated and outlives the call; on success `cred` points to a credential that
         // stays valid until freed below.
         if unsafe { CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut cred) } == 0 {
+            // SAFETY: GetLastError has no preconditions; it reads the error code the failed call above set.
             return match unsafe { GetLastError() } {
                 ERROR_NOT_FOUND => Ok(None),
                 code => Err(failure(code)),
@@ -585,6 +586,7 @@ mod credman {
         };
         // SAFETY: every pointer in `cred` points to a buffer that outlives the call, which only reads them.
         if unsafe { CredWriteW(&cred, 0) } == 0 {
+            // SAFETY: GetLastError has no preconditions; it reads the error code the failed call above set.
             return Err(failure(unsafe { GetLastError() }));
         }
         Ok(())
@@ -594,6 +596,7 @@ mod credman {
         let target = target(key);
         // SAFETY: `target` is NUL-terminated and outlives the call.
         if unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) } == 0 {
+            // SAFETY: GetLastError has no preconditions; it reads the error code the failed call above set.
             return match unsafe { GetLastError() } {
                 ERROR_NOT_FOUND => Ok(()),
                 code => Err(failure(code)),

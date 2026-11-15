@@ -406,6 +406,7 @@ mod tests {
     /// What the harnesses said when a fake provider turned their prompts away (claude-agent-acp 0.106.0 with Claude
     /// Code 2.1.325, Copilot CLI 1.0.112, agy 1.5.8), and what Copilot CLI's runtime says of GitHub's limits.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn provider_limits_are_told_apart_from_other_errors() {
         use LimitKind::{Quota, RateLimit};
         let secs = |s| Some(Duration::from_secs(s));

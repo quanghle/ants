@@ -5,6 +5,8 @@
 //! field name is pinned. A changed snapshot is a wire change: review it with `cargo insta review`, and keep older
 //! peers reading what newer ones write.
 
+#![allow(clippy::too_many_lines)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 

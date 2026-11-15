@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_lines)]
+
 use std::sync::Arc;
 
 use ants_proto::{ChannelEntry, ChannelId, DEFAULT_TURN_BUDGET, LimitKind, Role, StatusEvent, StatusUpdate};

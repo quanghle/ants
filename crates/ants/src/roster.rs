@@ -317,6 +317,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn rows_show_state_and_ages() {
         let now = Utc::now();
         let mut quiet = entry("dev-b", 7300, 25, now);
