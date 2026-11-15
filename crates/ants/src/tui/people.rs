@@ -19,6 +19,7 @@ use crate::cmd::send;
 use crate::humans::Me;
 use crate::live::maybe;
 use crate::presence;
+use crate::sealed::Sealing;
 
 /// What is known of the other humans.
 #[derive(Debug, Default)]
@@ -101,6 +102,8 @@ pub struct Io {
     js: jetstream::Context,
     js_domain: Option<JsDomain>,
     me: Me,
+    /// What seals the messages sent.
+    sealing: Sealing,
     /// Why the presences are not read, to tell once; None when they are.
     refused: Option<String>,
     may_read: bool,
@@ -112,9 +115,9 @@ pub struct Io {
 }
 
 impl Io {
-    /// Reading and sending as `me`; `may_read` tells whether its credentials may read every human's presence
-    /// ([`presence::online_right`]).
-    pub fn new(js: jetstream::Context, js_domain: Option<JsDomain>, me: Me, may_read: bool) -> Self {
+    /// Reading and sending as `me`, sealing with `sealing`; `may_read` tells whether its credentials may read every
+    /// human's presence ([`presence::online_right`]).
+    pub fn new(js: jetstream::Context, js_domain: Option<JsDomain>, me: Me, sealing: Sealing, may_read: bool) -> Self {
         let refused = (!may_read).then(|| {
             format!(
                 "the credentials of {} predate reading other humans' presence (permissions version 2); `ants renew` \
@@ -126,6 +129,7 @@ impl Io {
             js,
             js_domain,
             me,
+            sealing,
             refused,
             may_read,
             ticks: tokio::time::interval(PRESENCE_HEARTBEAT),
@@ -144,7 +148,9 @@ impl Io {
             if self.sending.is_none()
                 && let Some(draft) = self.to_send.pop_front()
             {
-                self.sending = Some(send_draft(self.js.clone(), self.js_domain.clone(), self.me.clone(), draft));
+                let (js, js_domain, me, sealing) =
+                    (self.js.clone(), self.js_domain.clone(), self.me.clone(), self.sealing.clone());
+                self.sending = Some(send_draft(js, js_domain, me, sealing, draft));
             }
             tokio::select! {
                 _ = self.ticks.tick(), if self.may_read => {
@@ -177,16 +183,21 @@ impl Io {
     }
 }
 
-/// Send `draft` as `me` on a new thread, as `ants ask @human` does.
+/// Send `draft` as `me` on a new thread, sealed, as `ants ask @human` does.
 fn send_draft(
     js: jetstream::Context,
     js_domain: Option<JsDomain>,
     me: Me,
+    sealing: Sealing,
     draft: dm::Draft,
 ) -> LocalBoxFuture<'static, Sent> {
     async move {
-        let envelope = send::ask_envelope(&me, None, draft.to.clone(), draft.text);
-        let sent = send::deliver(&js, js_domain.as_ref(), &envelope).await.map(|s| (envelope.thread_id, s));
+        let mut envelope = send::ask_envelope(&me, None, draft.to.clone(), draft.text);
+        let sent = async {
+            send::seal_to_human(&js, &me, &sealing, &mut envelope).await?;
+            send::deliver(&js, js_domain.as_ref(), &envelope).await
+        };
+        let sent = sent.await.map(|s| (envelope.thread_id, s));
         Sent { to: draft.to, sent }
     }
     .boxed_local()

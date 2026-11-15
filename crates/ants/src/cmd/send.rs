@@ -166,6 +166,20 @@ async fn sealing(
     Ok(Some(sealer))
 }
 
+/// Seal `envelope` as `ants chat` sends it, when from a human to another human, with what `sealing` reads: refused
+/// when it cannot be sealed, as `ants chat` has no `--plaintext`.
+pub(crate) async fn seal_to_human(
+    js: &jetstream::Context,
+    me: &humans::Me,
+    sealing: &sealed::Sealing,
+    envelope: &mut Envelope,
+) -> Result<()> {
+    if me.role.is_human() && humans::load(js, me).await.contains(&envelope.to) {
+        sealing.sealer(js, &envelope.to, sealed::PLAINTEXT_ASK).await?.seal(envelope, &mut [])?;
+    }
+    Ok(())
+}
+
 /// What `ants ask` sends as `me`: a thread `me` owns, as it starts it or continues it, when `me` is a human. A thread
 /// an ant starts has no owner: only a human gets a thread's escalations, with a fresh turn budget. A human's owner is
 /// recorded for the thread and the recipient before the message goes out ([`owners::record`]); the first record of a

@@ -31,6 +31,8 @@ use crate::devices::{self, Devices, Directory, Lookup, VerifiedDevice};
 
 /// What `ants ask` may do instead of sealing.
 pub const PLAINTEXT: &str = "`--plaintext` sends it in the clear";
+/// What else may be done when `ants chat` cannot seal a message.
+pub const PLAINTEXT_ASK: &str = "`ants ask --plaintext` sends it in the clear";
 /// The size of a content key.
 const KEY_LEN: usize = 32;
 /// The size of the nonce a sealed body starts with.
@@ -563,17 +565,21 @@ impl Sealer {
     /// with the fix and then `otherwise`, what else may be done, when the credentials bind no encryption key, the
     /// directory holds no verified key of the sending device or of any device of `to`.
     pub async fn new(nats: &crate::Nats<'_>, js: &jetstream::Context, to: &UserId, otherwise: &str) -> Result<Self> {
-        let me = &nats.me.id;
-        let Some(own) = devices::Own::from_creds(nats.creds)? else {
+        Sealing::of(nats).sealer(js, to, otherwise).await
+    }
+
+    async fn with(sealing: &Sealing, js: &jetstream::Context, to: &UserId, otherwise: &str) -> Result<Self> {
+        let me = &sealing.me;
+        let Some(own) = devices::Own::from_creds(sealing.creds.as_deref())? else {
             bail!(
                 "sealing for {me} and {to} takes an encryption key, which the credentials of {me} bind none of: \
                  `ants renew` binds one; {otherwise}"
             );
         };
-        let path = nats.creds.context("no credentials")?;
+        let path = sealing.creds.as_deref().context("no credentials")?;
         let xkey = creds::load_xkey(path, keystore::os())?
             .with_context(|| format!("no encryption key in {}: `ants renew` binds one; {otherwise}", path.display()))?;
-        let account = nats.account.as_deref().context("credentials without an account")?;
+        let account = sealing.account.as_deref().context("credentials without an account")?;
         let directory = Directory::open(js, account).await?;
         let humans = [me.clone(), to.clone()];
         let devices = directory
@@ -623,6 +629,30 @@ impl Sealer {
     /// Seal `title` ([`seal_title`]).
     pub fn seal_title(&self, title: &mut ThreadTitle) -> Result<()> {
         seal_title(title, self.device, &self.xkey, &self.recipients())
+    }
+}
+
+/// What a view that outlives the [`crate::Nats`] it was opened with seals with ([`Sealer`]): its human, credentials
+/// and their account.
+#[derive(Debug, Clone)]
+pub struct Sealing {
+    me: UserId,
+    creds: Option<PathBuf>,
+    account: Option<String>,
+}
+
+impl Sealing {
+    pub fn of(nats: &crate::Nats<'_>) -> Self {
+        Self { me: nats.me.id.clone(), creds: nats.creds.map(Path::to_path_buf), account: nats.account.clone() }
+    }
+
+    pub fn me(&self) -> &UserId {
+        &self.me
+    }
+
+    /// What seals for the human and `to` ([`Sealer::new`]).
+    pub async fn sealer(&self, js: &jetstream::Context, to: &UserId, otherwise: &str) -> Result<Sealer> {
+        Sealer::with(self, js, to, otherwise).await
     }
 }
 
