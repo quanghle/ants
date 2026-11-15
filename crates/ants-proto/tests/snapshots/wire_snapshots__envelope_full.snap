@@ -42,5 +42,10 @@ expression: value
     "author": "github"
   },
   "title": "Fix the build",
+  "summary": {
+    "thread": "019a7d2c-0000-7000-8000-000000000002",
+    "upto": 4211,
+    "tokens": 1834
+  },
   "sent_at": "2025-01-01T12:00:00Z"
 }

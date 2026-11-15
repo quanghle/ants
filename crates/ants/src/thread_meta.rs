@@ -1,20 +1,23 @@
-//! What humans make of threads, in [`THREADS_BUCKET`]: a title per thread, shared by every human, and each human's
-//! pinned and archived threads ([`ThreadMarks`]), shared by its devices. Read and written by direct gets and plain
+//! What humans make of threads, in [`THREADS_BUCKET`]: a title and a TL;DR ([`ThreadSummary`]) per thread, shared by
+//! every human, and each human's pinned and archived threads ([`ThreadMarks`]), shared by its devices. Read and written by direct gets and plain
 //! publishes ([`DirectKv`]); the marks, one entry per human, with compare-and-set, so devices marking at once lose
 //! nothing.
 
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use ants_daemon::direct_kv::{DirectKv, Lookup};
 use ants_proto::{
-    JsDomain, Mark, STREAM, THREADS_BUCKET, ThreadId, ThreadMarks, ThreadTitle, UserId, marks_key, title_key,
+    JsDomain, Mark, STREAM, THREADS_BUCKET, ThreadId, ThreadMarks, ThreadSummary, ThreadTitle, UserId, marks_key,
+    summary_key, title_key,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
+use serde::de::DeserializeOwned;
 
 use crate::thread::{self, Entry, Pick};
 
@@ -38,8 +41,16 @@ pub fn titles_right() -> String {
     format!("$JS.API.DIRECT.GET.KV_{THREADS_BUCKET}.$KV.{THREADS_BUCKET}.title.*")
 }
 
+/// The direct get subject of every TL;DR, which credentials older than permissions version 2 lack.
+fn summaries_right() -> String {
+    format!("$JS.API.DIRECT.GET.KV_{THREADS_BUCKET}.$KV.{THREADS_BUCKET}.summary.*")
+}
+
+/// Whether the lack of [`summaries_right`] was warned of.
+static NO_SUMMARIES: AtomicBool = AtomicBool::new(false);
+
 /// The titles and the marks of the CLI's human, unless its credentials are no human's: a request they deny would only
-/// time out.
+/// time out. With credentials lacking [`summaries_right`], TL;DRs are neither read nor stored ([`Meta::summary`]).
 pub async fn open(nats: &crate::Nats<'_>, js: &jetstream::Context) -> Result<Meta> {
     let me = &nats.me.id;
     if !nats.rights.may_publish(&marks_right(me)) {
@@ -48,7 +59,9 @@ pub async fn open(nats: &crate::Nats<'_>, js: &jetstream::Context) -> Result<Met
              `ants auth user NAME --human`"
         );
     }
-    Meta::open(js, nats.domain, me).await
+    let mut meta = Meta::open(js, nats.domain, me).await?;
+    meta.summaries = nats.rights.may_publish(&summaries_right());
+    Ok(meta)
 }
 
 /// The title of `thread`, whose last message read is `last`, and how the CLI's human marked it, idle for
@@ -179,16 +192,55 @@ pub async fn last_sequence(js: &jetstream::Context) -> Result<u64> {
     Ok(stream.cached_info().state.last_sequence)
 }
 
-/// The titles and the marks of one human.
+/// The titles, the TL;DRs and the marks of one human.
 pub struct Meta {
     kv: DirectKv,
     human: UserId,
+    /// Whether the human's credentials may read and store TL;DRs.
+    summaries: bool,
 }
 
 impl Meta {
     /// Those of `human`, through `js`, made for JetStream domain `js_domain`.
     pub async fn open(js: &jetstream::Context, js_domain: Option<&JsDomain>, human: &UserId) -> Result<Self> {
-        Ok(Self { kv: DirectKv::new(js, js_domain, THREADS_BUCKET).await?, human: human.clone() })
+        Ok(Self { kv: DirectKv::new(js, js_domain, THREADS_BUCKET).await?, human: human.clone(), summaries: true })
+    }
+
+    /// Whether TL;DRs are read and stored: the human's credentials may. Warns once when not.
+    fn keeps_summaries(&self) -> bool {
+        if !self.summaries && !NO_SUMMARIES.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                "the credentials of {} predate permissions version 2 and may not keep TL;DRs of threads: going on \
+                 without them until renewed (`ants renew`)",
+                self.human
+            );
+        }
+        self.summaries
+    }
+
+    /// The TL;DR of `thread`, if it has one and TL;DRs are kept. An entry naming another thread than its key is none.
+    pub async fn summary(&self, thread: &ThreadId) -> Result<Option<ThreadSummary>> {
+        if !self.keeps_summaries() {
+            return Ok(None);
+        }
+        match self.kv.lookup(summary_key(thread)).await.context("reading the TL;DR")? {
+            Lookup::NoBucket => bail!(MISSING),
+            Lookup::NoValue => Ok(None),
+            Lookup::Value(value) => {
+                Ok(serde_json::from_slice::<ThreadSummary>(&value).ok().filter(|t| t.thread_id == *thread))
+            }
+        }
+    }
+
+    /// Store `summary` as its thread's TL;DR for every human, in place of any it had, if TL;DRs are kept. Whether it
+    /// did.
+    pub async fn put_summary(&self, summary: &ThreadSummary) -> Result<bool> {
+        if !self.keeps_summaries() {
+            return Ok(false);
+        }
+        let key = summary_key(&summary.thread_id);
+        self.kv.put(key, serde_json::to_vec(summary)?).await.context("storing the TL;DR")?;
+        Ok(true)
     }
 
     /// The title of `thread`, if it has one. An entry naming another thread than its key is no title.
@@ -272,10 +324,10 @@ impl Meta {
     }
 
     /// Forget what was said of the threads `gone` says have no message left in the stream more than [`KEPT`] ago:
-    /// the human's marks, which `marks` are as last read, and with `titles`, every title; and the keeps of threads
-    /// `active` says had a message stored at or after the given time ([`ThreadMarks::prune`]). A mark or title set
-    /// again meanwhile stays: marks change by compare-and-set and a title is deleted only if unchanged since read. How
-    /// many marks and titles it forgot.
+    /// the human's marks, which `marks` are as last read, and with `titles`, every title and TL;DR; and the keeps of
+    /// threads `active` says had a message stored at or after the given time ([`ThreadMarks::prune`]). A mark, title
+    /// or TL;DR set again meanwhile stays: marks change by compare-and-set and a title or TL;DR is deleted only if
+    /// unchanged since read. How many marks, and titles and TL;DRs, it forgot.
     pub async fn prune(
         &self,
         marks: &ThreadMarks,
@@ -294,20 +346,33 @@ impl Meta {
             .await?;
             marked = forgot.get();
         }
-        let titled = if titles { self.prune_titles(before, &gone).await? } else { 0 };
+        let mut titled = 0;
+        if titles {
+            titled += self.prune_set::<ThreadTitle>("title", before, &gone, |t| t.at).await?;
+            if self.summaries {
+                titled += self.prune_set::<ThreadSummary>("summary", before, &gone, |t| t.at).await?;
+            }
+        }
         Ok((marked, titled))
     }
 
-    /// Delete the titles set before `before` of the threads `gone` says have no message left. How many it deleted.
-    async fn prune_titles(&self, before: DateTime<Utc>, gone: &impl Fn(&ThreadId) -> bool) -> Result<usize> {
-        let keys = self.kv.keys("title.*").await.context("listing the titles")?;
-        let threads = keys.iter().filter_map(|key| key.strip_prefix("title.")?.parse::<ThreadId>().ok());
+    /// Delete the entries under `kind.THREAD` (titles or TL;DRs) set (`at`) before `before` of the threads `gone` says
+    /// have no message left. How many it deleted.
+    async fn prune_set<T: DeserializeOwned>(
+        &self,
+        kind: &str,
+        before: DateTime<Utc>,
+        gone: &impl Fn(&ThreadId) -> bool,
+        at: impl Fn(&T) -> DateTime<Utc>,
+    ) -> Result<usize> {
+        let keys = self.kv.keys(&format!("{kind}.*")).await.with_context(|| format!("listing the {kind} entries"))?;
+        let threads = keys.iter().filter_map(|key| key.strip_prefix(kind)?.strip_prefix('.')?.parse::<ThreadId>().ok());
         let deletes = futures::stream::iter(threads.filter(|t| gone(t)))
             .map(async |thread| {
-                let key = title_key(&thread);
+                let key = format!("{kind}.{thread}");
                 let (Lookup::Value(value), last) = self.kv.lookup_last(&key).await? else { return Ok(false) };
-                match serde_json::from_slice::<ThreadTitle>(&value) {
-                    Ok(title) if title.at < before => self.kv.delete_expecting(&key, last).await,
+                match serde_json::from_slice::<T>(&value) {
+                    Ok(set) if at(&set) < before => self.kv.delete_expecting(&key, last).await,
                     _ => Ok(false),
                 }
             })
@@ -315,7 +380,7 @@ impl Meta {
         let deleted: Vec<Result<bool>> = deletes.collect().await;
         let mut count = 0;
         for deleted in deleted {
-            count += usize::from(deleted.context("deleting a title")?);
+            count += usize::from(deleted.with_context(|| format!("deleting a {kind} entry"))?);
         }
         Ok(count)
     }

@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[cfg(doc)]
-use crate::{Envelope, STREAM, THREADS_BUCKET, marks_key, title_key};
+use crate::{Envelope, STREAM, THREADS_BUCKET, marks_key, summary_key, title_key};
 use crate::{Error, MAX_TITLE, ThreadId, UserId};
 
 /// The title of a thread, under its [`title_key`] in [`THREADS_BUCKET`]: one per thread, shared by every human, which
@@ -26,6 +26,33 @@ impl ThreadTitle {
             return Err(Error::InvalidTitle(title.to_owned()));
         }
         Ok(Self { thread_id, title: trimmed.to_owned(), by, at: Utc::now() })
+    }
+}
+
+/// The TL;DR of a thread, under its [`summary_key`] in [`THREADS_BUCKET`]: the text of `by`'s reply to the summary
+/// request ([`Envelope::summary`]) of `asker` (`for` on the wire), covering the thread's entries up to the [`STREAM`]
+/// sequence `upto`, and the tokens the prompt spent. Any human's CLI puts or deletes it, for every human; no ant reads
+/// or writes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadSummary {
+    pub thread_id: ThreadId,
+    pub text: String,
+    /// The ant that wrote it.
+    pub by: UserId,
+    /// The human whose CLI asked for it.
+    #[serde(rename = "for")]
+    pub asker: UserId,
+    pub at: DateTime<Utc>,
+    pub upto: u64,
+    #[serde(default)]
+    pub tokens: u64,
+}
+
+impl ThreadSummary {
+    /// Whether it still covers the thread whose last message, post or note is at [`STREAM`] sequence `last_seq`: no
+    /// entry came after `upto`.
+    pub fn is_current(&self, last_seq: u64) -> bool {
+        last_seq <= self.upto
     }
 }
 

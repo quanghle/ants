@@ -1,4 +1,4 @@
-//! `ants thread`: list, show, search, title, pin, archive and mute threads.
+//! `ants thread`: list, show, search, title, pin, archive, mute and summarise threads.
 
 use std::time::Duration;
 
@@ -7,7 +7,7 @@ use anyhow::Result;
 use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
 
-use crate::{Nats, completions, quiet, search, thread, thread_meta};
+use crate::{Nats, completions, quiet, search, summary, thread, thread_meta};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum ThreadCommand {
@@ -109,6 +109,20 @@ pub(crate) enum ThreadCommand {
         #[arg(long)]
         clear: bool,
     },
+    /// Print a thread's TL;DR: the one kept for every human while no entry came after it, else one asked of the
+    /// config file's `[cli]` `summary_ant` (by default the messenger) and kept. The request opens a thread of its own,
+    /// left out of `ants thread list`, `ants inbox` and `ants dash`.
+    Tldr {
+        /// The thread: its id, a unique start of one, or `last`.
+        #[arg(add = ArgValueCandidates::new(completions::threads))]
+        thread: thread::Pick,
+        /// Ask for a new one even if the one kept is current.
+        #[arg(long)]
+        new: bool,
+        /// The TL;DR as one JSON object.
+        #[arg(long)]
+        json: bool,
+    },
     /// Pin a thread, unarchiving it, for every device of the human: `ants thread list` lists it after the others.
     Pin {
         /// The thread: its id, a unique start of one, or `last`.
@@ -170,6 +184,7 @@ pub(crate) async fn run(nats: &Nats<'_>, command: ThreadCommand) -> Result<()> {
             let search = search::Search { from, to, channel, kinds, grep, limit, ..Default::default() };
             search::search(nats, search, since, until, json).await
         }
+        ThreadCommand::Tldr { thread, new, json } => summary::tldr(nats, thread, new, json).await,
         ThreadCommand::Mute { thread, duration } => quiet::mute(nats, thread, duration).await,
         ThreadCommand::Unmute { thread } => quiet::unmute(nats, thread).await,
     }

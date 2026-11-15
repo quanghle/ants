@@ -16,7 +16,7 @@ use ants_daemon::reactions::Reacted;
 use ants_daemon::reading::{self, Reading};
 use ants_proto::{
     ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, Envelope, EscalationReason, Humans, Mark,
-    NotesPost, ThreadId, ThreadMarks, UserId, Uuid, subject,
+    NotesPost, SummaryRequest, ThreadId, ThreadMarks, UserId, Uuid, subject,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream::stream::LastRawMessageErrorKind;
@@ -116,6 +116,9 @@ pub struct Entry {
     /// The title an inbox message that is not forged suggests for its thread ([`Envelope::title`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggested_title: Option<String>,
+    /// The summary request an inbox message that is not forged carries, or answers ([`Envelope::summary`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<SummaryRequest>,
 }
 
 impl Entry {
@@ -136,6 +139,7 @@ impl Entry {
             reactions: Vec::new(),
             reason: None,
             suggested_title: None,
+            summary: None,
         }
     }
 
@@ -193,6 +197,7 @@ impl Parser {
                 forged,
                 reason: e.escalation.map(|x| x.reason),
                 suggested_title: e.title.filter(|_| !forged),
+                summary: e.summary.filter(|_| !forged),
                 ..entry(kind, e.thread_id)
             });
         }
@@ -305,6 +310,9 @@ pub struct Summary {
     /// The stream sequence of its last message read.
     #[serde(skip)]
     pub last_seq: u64,
+    /// Opened by a summary request ([`Envelope::summary`]): a message read on it carries one. Left out of every list.
+    #[serde(skip)]
+    pub catch_up: bool,
 }
 
 /// What `ants thread list` keeps of the threads read.
@@ -370,7 +378,9 @@ impl Threads {
             new_activity: false,
             auto_archived: false,
             last_seq: entry.seq,
+            catch_up: false,
         });
+        summary.catch_up |= entry.summary.is_some();
         summary.messages += 1;
         summary.last_seq = summary.last_seq.max(entry.seq);
         summary.first_at = summary.first_at.min(entry.stored_at);
@@ -416,9 +426,10 @@ impl Threads {
     }
 
     /// The threads `select` keeps, as the CLI's human marked them (`marks`), least recently active first and its
-    /// pinned ones after the others, and how many more it left out for its limit. Archived threads are left out,
-    /// unless a message was stored on one since it was archived, or `select` asks for archived threads; so are threads
-    /// idle since `select`'s `idle_before`, which count as archived.
+    /// pinned ones after the others, and how many more it left out for its limit. Threads opened by summary requests
+    /// ([`Summary::catch_up`]) are left out, and so are archived threads, unless a message was stored on one since it
+    /// was archived, or `select` asks for archived threads, and threads idle since `select`'s `idle_before`, which
+    /// count as archived.
     pub fn finish(self, select: &Select, marks: &ThreadMarks) -> (Vec<Summary>, usize) {
         let mut threads: Vec<Summary> = self
             .by_id
@@ -432,6 +443,7 @@ impl Threads {
                 }
                 t
             })
+            .filter(|t| !t.catch_up)
             .filter(|t| select.ant.as_ref().is_none_or(|ant| t.users.contains(ant)))
             .filter(|t| select.owner.is_none() || t.owner == select.owner)
             .filter(|t| select.grep.is_none() || t.matched.is_some())
@@ -632,11 +644,13 @@ fn own_subjects(user: &UserId) -> [String; 4] {
     [subject::inbox_of(user), subject::inbox_from(user), subject::chan_from(user), subject::notes_from(user)]
 }
 
-/// The thread of the latest message to or from `user` ([`own_subjects`]), however old.
+/// The thread of the latest message to or from `user` ([`own_subjects`]), however old, other than a summary
+/// request's or reply's: when the last of a subject is one, the latest of the last [`RECENT`] if any.
 async fn last(js: &jetstream::Context, user: &UserId) -> Result<ThreadId> {
     let stream = js.get_stream(ants_proto::STREAM).await.context("opening the ANTS stream")?;
     let mut parser = Parser::default();
     let mut latest: Option<Entry> = None;
+    let mut catch_up = false;
     for filter in own_subjects(user) {
         let msg = match stream.get_last_raw_message_by_subject(&filter).await {
             Ok(msg) => msg,
@@ -645,9 +659,14 @@ async fn last(js: &jetstream::Context, user: &UserId) -> Result<ThreadId> {
         };
         let stored = DateTime::<Utc>::from(SystemTime::from(msg.time));
         let entry = parser.entry(msg.sequence, stored, &msg.subject, &msg.payload).filter(|e| !e.forged);
+        catch_up |= entry.as_ref().is_some_and(|e| e.summary.is_some());
+        let entry = entry.filter(|e| e.summary.is_none());
         if let Some(entry) = entry.filter(|e| latest.as_ref().is_none_or(|l| l.seq < e.seq)) {
             latest = Some(entry);
         }
+    }
+    if catch_up && let Some(recent) = recent(js, user, window(RECENT)).await?.into_iter().next() {
+        return Ok(recent.thread_id);
     }
     latest.map(|e| e.thread_id).ok_or_else(|| anyhow!("no message to or from {user} in the stream, so no last thread"))
 }
@@ -657,13 +676,15 @@ pub async fn recent_threads(js: &jetstream::Context, user: &UserId) -> Result<Ve
     recent(js, user, window(RECENT)).await
 }
 
-/// The latest message of each thread `user` took part in ([`own_subjects`]) stored from `start` on, most recent first.
+/// The latest message of each thread `user` took part in ([`own_subjects`]) stored from `start` on, most recent first,
+/// summary requests and replies left out.
 async fn recent(js: &jetstream::Context, user: &UserId, start: consumer::DeliverPolicy) -> Result<Vec<Entry>> {
     let mut parser = Parser::default();
     let mut latest: HashMap<ThreadId, Entry> = HashMap::new();
     for filter in own_subjects(user) {
         reading::read_back(js, "", Reading::Gets, &filter, start, |seq, stored, subject, payload| {
-            if let Some(entry) = parser.entry(seq, stored.into(), subject, payload).filter(|e| !e.forged) {
+            let entry = parser.entry(seq, stored.into(), subject, payload).filter(|e| !e.forged && e.summary.is_none());
+            if let Some(entry) = entry {
                 match latest.get(&entry.thread_id) {
                     Some(kept) if kept.seq > entry.seq => {}
                     _ => _ = latest.insert(entry.thread_id.clone(), entry),

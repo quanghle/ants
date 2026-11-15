@@ -8,8 +8,8 @@ use crate::{
 };
 #[cfg(doc)]
 use crate::{
-    ChannelPost, LINKS_BUCKET, MAX_TITLE, OWNERS_BUCKET, THREADS_BUCKET, ThreadOrigin, ThreadTitle, Verdict,
-    WEBHOOK_ALLOW, WEBHOOKS_BUCKET, owner_key, title_key, webhook_marker_key,
+    ChannelPost, LINKS_BUCKET, MAX_TITLE, OWNERS_BUCKET, THREADS_BUCKET, ThreadOrigin, ThreadSummary, ThreadTitle,
+    Verdict, WEBHOOK_ALLOW, WEBHOOKS_BUCKET, owner_key, summary_key, title_key, webhook_marker_key,
 };
 
 /// One message between ants, or between an ant and a human.
@@ -84,7 +84,57 @@ pub struct Envelope {
     /// title. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// A human's request for a summary of the entries the text carries ([`SummaryRequest`]), or, on an ant's reply to
+    /// one, the same request with the tokens its prompt spent. A daemon prompts for a summary only when a human sent
+    /// it and clears it from any other sender; its reply carries it back. A reader that knows nothing of it takes
+    /// either as an ordinary message. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<SummaryRequest>,
     pub sent_at: DateTime<Utc>,
+}
+
+/// What a summary request ([`Envelope::summary`]) asks to summarise: the entries of one thread, a TL;DR stored under
+/// the thread's [`summary_key`] in [`THREADS_BUCKET`] ([`ThreadSummary`]), or of every thread with entries since a
+/// time, a digest nobody stores. Either covers the entries up to the ANTS stream sequence `upto`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SummaryRequest {
+    #[serde(flatten)]
+    pub of: SummaryOf,
+    /// The ANTS sequence of the last entry the text carries.
+    pub upto: u64,
+    /// On the reply, the tokens the prompt spent, as the harness reported them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<u64>,
+}
+
+/// The entries a [`SummaryRequest`] covers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SummaryOf {
+    /// A TL;DR of one thread.
+    Thread(ThreadId),
+    /// A digest of every thread with entries since then.
+    Since(DateTime<Utc>),
+}
+
+impl SummaryRequest {
+    /// A TL;DR of `thread` up to sequence `upto`.
+    pub fn thread(thread: ThreadId, upto: u64) -> Self {
+        Self { of: SummaryOf::Thread(thread), upto, tokens: None }
+    }
+
+    /// A digest of every thread with entries since `since`, up to sequence `upto`.
+    pub fn since(since: DateTime<Utc>, upto: u64) -> Self {
+        Self { of: SummaryOf::Since(since), upto, tokens: None }
+    }
+
+    /// The thread a TL;DR is of; none for a digest.
+    pub fn thread_id(&self) -> Option<&ThreadId> {
+        match &self.of {
+            SummaryOf::Thread(thread) => Some(thread),
+            SummaryOf::Since(_) => None,
+        }
+    }
 }
 
 /// Where the channel post a mention notice tells of is ([`Envelope::mention`]).
@@ -124,6 +174,7 @@ impl Envelope {
             allow: None,
             mention: None,
             title: None,
+            summary: None,
             sent_at: Utc::now(),
         }
     }
@@ -251,6 +302,7 @@ impl Envelope {
             allow: self.allow.clone(),
             mention: None,
             title: None,
+            summary: None,
             sent_at: Utc::now(),
         })
     }

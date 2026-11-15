@@ -11,7 +11,7 @@ use crate::{
 };
 #[cfg(doc)]
 use crate::{
-    AntRequest, EnrollRequest, HeldNotices, NotifyPrefs, QueueRequest, RenewRequest, StatusUpdate,
+    AntRequest, EnrollRequest, HeldNotices, NotifyPrefs, QueueRequest, RenewRequest, StatusUpdate, ThreadSummary,
     channel_manager_serving_key, daily_spend_key, link_outbox, message_mark_key, owner_outbox, storage_warning_key,
     thread_spend_key, unserved_key,
 };
@@ -97,18 +97,22 @@ fn reaction_rights(user: &UserId, role: Role) -> Vec<String> {
     rights
 }
 
-/// What a human's credentials need for thread titles and its pins and archives ([`THREADS_BUCKET`]): creating the
-/// bucket; reading by direct gets, putting and deleting every title, which any human sets; and reading and writing its
-/// own [`ThreadMarks`] only, so no human reads or changes another's.
-fn thread_rights(human: &UserId) -> [String; 6] {
+/// What a human's credentials need for thread titles and TL;DRs and its pins and archives ([`THREADS_BUCKET`]):
+/// creating the bucket; reading by direct gets, putting and deleting every title and every TL;DR
+/// ([`ThreadSummary`]), which any human sets; and reading and writing its own [`ThreadMarks`] only, so no human reads
+/// or changes another's.
+fn thread_rights(human: &UserId) -> [String; 8] {
     let threads = kv_stream(THREADS_BUCKET);
     let titles = format!("$KV.{THREADS_BUCKET}.title.*");
+    let summaries = format!("$KV.{THREADS_BUCKET}.summary.*");
     let marks = format!("$KV.{THREADS_BUCKET}.{}", marks_key(human));
     [
         format!("$JS.API.STREAM.INFO.{threads}"),
         format!("$JS.API.STREAM.CREATE.{threads}"),
         format!("$JS.API.DIRECT.GET.{threads}.{titles}"),
         titles,
+        format!("$JS.API.DIRECT.GET.{threads}.{summaries}"),
+        summaries,
         format!("$JS.API.DIRECT.GET.{threads}.{marks}"),
         marks,
     ]
@@ -175,8 +179,8 @@ impl Permissions {
     /// of its devices ([`read_marker_rights`]), and its own keys in [`PRESENCE_BUCKET`] where its devices read
     /// ([`presence_rights`]), and its own [`NotifyPrefs`] in [`NOTIFY_BUCKET`] what it holds back of its notifications,
     /// and its own [`HeldNotices`] there what was held back ([`notify_prefs_rights`]), and it reads every reaction ([`REACTIONS_BUCKET`]), of which every user, ant or human,
-    /// puts and removes only its own ([`reaction_rights`]); it sets every thread's title and its own pinned and
-    /// archived threads, no other human's ([`thread_rights`]). A human may send under
+    /// puts and removes only its own ([`reaction_rights`]); it sets every thread's title and TL;DR and its own pinned
+    /// and archived threads, no other human's ([`thread_rights`]). A human may send under
     /// any sender, to replay a dead letter as it was. An ant gets no `STREAM.MSG.GET`: it takes any sequence, so it
     /// would expose every inbox. So only a human hears the max-deliveries advisories of the stream's consumers and
     /// stores the dead letters of the messages they name, on any ant's dead letter subject.
@@ -724,7 +728,7 @@ impl Permissions {
 /// [`Permissions::for_webhook`], [`Permissions::for_channel_manager`], [`Permissions::for_enrollment`],
 /// [`Permissions::for_enroll_approver`] or [`Permissions::with_js_domain`], or the other claims `ants auth` puts in a
 /// user JWT.
-pub const PERMISSIONS_VERSION: PermissionsVersion = PermissionsVersion(1);
+pub const PERMISSIONS_VERSION: PermissionsVersion = PermissionsVersion(2);
 
 /// A version of the permissions `ants auth` gives ([`PERMISSIONS_VERSION`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

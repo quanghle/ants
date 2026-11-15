@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use ants_proto::{
     CancelRequest, ChannelEntry, ChannelId, ChannelPost, DeadLetter, Envelope, Error as ProtoError, EscalationReason,
-    Humans, JsDomain, QueueRequest, QueuedMessage, Role, State, StatusUpdate, ThreadId, ThreadOrigin, UserId, Uuid,
-    WEBHOOK_ALLOW, subject,
+    Humans, JsDomain, QueueRequest, QueuedMessage, Role, State, StatusUpdate, SummaryOf, SummaryRequest, ThreadId,
+    ThreadOrigin, UserId, Uuid, WEBHOOK_ALLOW, subject,
 };
 use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
@@ -358,6 +358,8 @@ struct Ran {
     spend: tokio::sync::mpsc::UnboundedReceiver<Spend>,
     /// The fallback the prompt ran on, `None` for the ant's own harness.
     fallback: Option<usize>,
+    /// The tokens the prompt spent so far, as the harness reported them.
+    tokens: u64,
 }
 
 /// Connect to the bus as the ant's daemon, retrying until it answers: `None` when `stop` comes first.
@@ -1837,6 +1839,10 @@ impl Inbox<'_> {
     /// daemon's alone ([`Escalator::took_climb`]).
     async fn arrived(&self, incoming: &mut Incoming) -> Result<bool> {
         let sender = self.humans.sender_role(&incoming.envelope);
+        // Only a human asks for a summary.
+        if !sender.is_human() {
+            incoming.envelope.summary = None;
+        }
         if incoming.post.is_none() && !sender.is_human() && self.escalator.took_climb(&incoming.envelope).await? {
             return Ok(false);
         }
@@ -2002,7 +2008,7 @@ impl Inbox<'_> {
         let _asking = self.approvals.map(|approvals| approvals.begin(envelope));
         let flush = tokio::time::interval_at(tokio::time::Instant::now() + status::FLUSH_EVERY, status::FLUSH_EVERY);
         let text = self.prompt_for(incoming, read.as_ref(), &humans, cut_off).await;
-        let Ran { reply, cancelled_by, cut_by_cancel, worked, mut reached, mut spend, fallback } =
+        let Ran { reply, cancelled_by, cut_by_cancel, worked, mut reached, spend, fallback, tokens } =
             self.run_prompt(incoming, msg, seq, text, flush).await;
         let reply = match reply {
             // What a human cancelled is answered as it stands, never tried again.
@@ -2014,12 +2020,7 @@ impl Inbox<'_> {
             Ok(reply) => reply,
         };
         let fallback_notice = self.served_by(fallback);
-        // Spend reported as the prompt ended, such as its tokens.
-        while let Ok(spent) = spend.try_recv() {
-            if let Some(cap) = self.record(envelope, &spent).await {
-                reached.get_or_insert(cap);
-            }
-        }
+        let tokens = tokens + self.record_ended(envelope, spend, &mut reached).await;
 
         // A human's cancel is no limit: the reply tells of it, and nothing is escalated for it.
         let cut = reply.cut.is_some() && !cut_by_cancel;
@@ -2036,8 +2037,9 @@ impl Inbox<'_> {
         let Some(mut reply) = self.reply_for(incoming, read, text, limit.as_ref(), msg, seq).await? else {
             return Ok(());
         };
-        if let (Reply::Message(message), Some(mcp)) = (&mut reply, self.mcp) {
-            message.title = mcp.take_title(thread);
+        if let Reply::Message(message) = &mut reply {
+            message.title = self.mcp.and_then(|mcp| mcp.take_title(thread));
+            message.summary = envelope.summary.clone().map(|s| SummaryRequest { tokens: Some(tokens), ..s });
         }
         // Before the reply is recorded, so a redelivery that only resends the reply still escalates; its message id
         // keeps a second escalation out of the stream.
@@ -2195,9 +2197,10 @@ impl Inbox<'_> {
         };
         let text = match (&incoming.post, read) {
             (Some(posted), Some(read)) => self.channel_prompt(posted, read, humans).await,
-            _ => match escalation::group_note(self.ant, envelope) {
-                Some(note) => format!("{note}\n\n{}", envelope.text),
-                None => envelope.text.clone(),
+            _ => match (&envelope.summary, escalation::group_note(self.ant, envelope)) {
+                (Some(summary), _) => format!("{}\n\n{}", summary_note(summary), envelope.text),
+                (None, Some(note)) => format!("{note}\n\n{}", envelope.text),
+                (None, None) => envelope.text.clone(),
             },
         };
         let text = match &incoming.resume {
@@ -2255,6 +2258,7 @@ impl Inbox<'_> {
         let mut progress = self.progress();
         // Whether a tool call started, so tools may have run; streamed text, such as a harness's error, runs nothing.
         let mut worked = false;
+        let mut tokens = 0;
         let reply = loop {
             tokio::select! {
                 r = &mut prompt => break r,
@@ -2272,6 +2276,7 @@ impl Inbox<'_> {
                     cancelled_by = Some(by);
                 }
                 Some(spent) = spend.recv() => {
+                    tokens += spent_tokens(&spent);
                     if let Some(cap) = self.record(envelope, &spent).await {
                         if let Some(stop) = stop_tx.take() {
                             let _ = stop.send(cap.clone());
@@ -2292,7 +2297,7 @@ impl Inbox<'_> {
         }
         status.flush();
         drop((cancellable, prompting));
-        Ran { reply, cancelled_by, cut_by_cancel, worked, reached, spend, fallback }
+        Ran { reply, cancelled_by, cut_by_cancel, worked, reached, spend, fallback, tokens }
     }
 
     /// The prompt for a channel post, with what was read of its thread: the posts not shown before, and the turns left.
@@ -2349,6 +2354,24 @@ impl Inbox<'_> {
         }
         status::state(self.client, self.ant, reply.thread_id(), State::Idle);
         Ok(())
+    }
+
+    /// Record the spend reported as a prompt ended, such as its tokens, keeping the first cap it reached in `reached`.
+    /// The tokens it reported.
+    async fn record_ended(
+        &self,
+        envelope: &Envelope,
+        mut spend: tokio::sync::mpsc::UnboundedReceiver<Spend>,
+        reached: &mut Option<String>,
+    ) -> u64 {
+        let mut tokens = 0;
+        while let Ok(spent) = spend.try_recv() {
+            tokens += spent_tokens(&spent);
+            if let Some(cap) = self.record(envelope, &spent).await {
+                reached.get_or_insert(cap);
+            }
+        }
+        tokens
     }
 
     /// Count what the harness spent on the thread of `envelope`, warning a human of each cap nearly reached. Returns
@@ -2559,6 +2582,33 @@ fn queue_request(msg: &async_nats::Message) -> Option<QueueRequest> {
     }
     tracing::info!(by = %request.by, "listing the messages in hand");
     Some(request)
+}
+
+/// The tokens `spent` reports.
+fn spent_tokens(spent: &Spend) -> u64 {
+    match spent {
+        Spend::Tokens(n) => *n,
+        Spend::Cost { .. } => 0,
+    }
+}
+
+/// The `[ants]` line that turns a human's message carrying `summary` into a request for a summary of the entries its
+/// text carries.
+fn summary_note(summary: &SummaryRequest) -> String {
+    let what = match &summary.of {
+        SummaryOf::Thread(thread) => format!(
+            "a TL;DR of thread {thread} from the entries below: what was asked, decided and done, and what waits on whom"
+        ),
+        SummaryOf::Since(since) => format!(
+            "a digest of the threads with entries since {} from the entries below: what finished, what is stuck, and \
+             what waits on the human",
+            since.format("%Y-%m-%d %H:%M UTC")
+        ),
+    };
+    format!(
+        "[ants] A human asks for {what}. Answer with at most 120 words of plain text; use no tools and message no \
+         one: the reply is the summary."
+    )
 }
 
 /// The prompt for a message: warned when an earlier attempt at it was cut off, and noting the `late` replies to

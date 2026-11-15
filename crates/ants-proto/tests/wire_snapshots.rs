@@ -104,6 +104,7 @@ fn envelope() -> Envelope {
         allow: Some(vec!["read:*".to_owned(), "other:send_message".to_owned()]),
         mention: Some(mention()),
         title: Some("Fix the build".to_owned()),
+        summary: Some(SummaryRequest { tokens: Some(1834), ..SummaryRequest::thread(other_thread(), 4211) }),
         sent_at: at(0),
     }
 }
@@ -121,6 +122,7 @@ fn plain_envelope() -> Envelope {
         allow: None,
         mention: None,
         title: None,
+        summary: None,
         ..envelope()
     }
 }
@@ -226,6 +228,18 @@ fn kv_entries() {
         &ThreadTitle { thread_id: thread(), title: "Release 0.2".to_owned(), by: user("alice"), at: at(0) },
     );
     snap(
+        "thread_summary",
+        &ThreadSummary {
+            thread_id: thread(),
+            text: "Asked for a release; the build is fixed; the tag waits on alice.".to_owned(),
+            by: user("messenger"),
+            asker: user("alice"),
+            at: at(0),
+            upto: 4211,
+            tokens: 1834,
+        },
+    );
+    snap(
         "thread_marks",
         &ThreadMarks {
             pinned: BTreeMap::from([(thread(), at(0))]),
@@ -286,7 +300,22 @@ fn envelopes() {
     );
     snap(
         "envelope_mention_notice",
-        &Envelope { from: user("dev-b"), to: user("alice"), mention: Some(mention()), ..message },
+        &Envelope { from: user("dev-b"), to: user("alice"), mention: Some(mention()), ..message.clone() },
+    );
+    let digest = SummaryRequest::since(at(0), 4211);
+    snap(
+        "envelope_summary_request",
+        &Envelope { from: user("alice"), to: user("messenger"), summary: Some(digest.clone()), ..message.clone() },
+    );
+    snap(
+        "envelope_summary_reply",
+        &Envelope {
+            from: user("messenger"),
+            to: user("alice"),
+            in_reply_to: Some(id(1)),
+            summary: Some(SummaryRequest { tokens: Some(1834), ..digest }),
+            ..message
+        },
     );
     snap("mention", &mention());
 }

@@ -370,6 +370,39 @@ async fn replies_are_redacted() {
 }
 
 #[tokio::test]
+async fn a_human_s_summary_request_is_prompted_as_one_and_the_reply_carries_it_with_its_tokens() {
+    let Some((bus, mut to_human)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let dev_b: UserId = "dev-b".parse().unwrap();
+    let mut to_dev_b = bus.client.subscribe(subject::inbox_of(&dev_b)).await.unwrap();
+    bus.client.flush().await.unwrap();
+    let (asked, summarised) = (ThreadId::generate(), ThreadId::generate());
+    let request = ants_proto::SummaryRequest::thread(summarised.clone(), 42);
+    for (from, thread) in [(UserId::human(), asked.clone()), (dev_b.clone(), ThreadId::generate())] {
+        let mut envelope = Envelope::on_thread(thread, from, bus.dev.clone(), "tokens 7");
+        envelope.summary = Some(request.clone());
+        bus::publish_json(&bus.js, envelope.subject(), &envelope, None).await.unwrap();
+    }
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let reply = next_envelope(&mut to_human).await;
+        assert_eq!(reply.thread_id, asked);
+        let spent = ants_proto::SummaryRequest { tokens: Some(7), ..request.clone() };
+        assert_eq!(reply.summary, Some(spent), "the reply carries the request and its tokens");
+        assert_eq!(next_envelope(&mut to_dev_b).await.summary, None, "only a human asks for a summary");
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    let prompts = log.locked().prompts.clone();
+    let tldr = format!("[ants] A human asks for a TL;DR of thread {summarised} from the entries below");
+    assert!(prompts[0].starts_with(&tldr), "{prompts:?}");
+    assert!(prompts[0].contains("use no tools and message no one") && prompts[0].ends_with("\n\ntokens 7"));
+    assert_eq!(prompts[1], "tokens 7", "an ant's request is an ordinary message");
+}
+
+#[tokio::test]
 async fn progress_streams_to_the_status_subject() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
     let (launch, _, _) = fake::launch();

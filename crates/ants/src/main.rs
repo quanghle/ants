@@ -42,6 +42,7 @@ mod service;
 mod setup;
 mod signer;
 mod spend;
+mod summary;
 mod thread;
 mod thread_meta;
 mod tools;
@@ -83,7 +84,7 @@ async fn run() -> Result<()> {
     match cli.command {
         Command::Ask { thread, replies, input, words } => send::ask(&nats()?, thread, &replies, &input, words).await,
         Command::Inbox { peek, thread, limit, follow, json } => {
-            let select = inbox::Select { thread: None, limit, peek };
+            let select = inbox::Select { thread: None, limit, peek, summaries: false };
             Box::pin(cmd::inbox::show(&nats()?, select, thread, Listing { follow, json })).await
         }
         Command::Roster { json } => roster::show(&nats()?, json).await,
@@ -105,6 +106,7 @@ async fn run() -> Result<()> {
         Command::Notes { thread, text } => send::thread_notes(&nats()?, thread, text).await,
         Command::React { message, reaction, remove } => send::react(&nats()?, message, reaction, remove).await,
         Command::Thread(command) => cmd::thread::run(&nats()?, command).await,
+        Command::Digest { since } => summary::digest(&nats()?, since).await,
         Command::Notify(NotifyCommand::Snooze { duration }) => quiet::snooze(&nats()?, duration).await,
         Command::Notify(NotifyCommand::Resume) => quiet::resume(&nats()?).await,
         Command::Notify(NotifyCommand::Status { json }) => quiet::status(&nats()?, json).await,

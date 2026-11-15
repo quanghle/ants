@@ -151,6 +151,11 @@ pub fn title_key(thread: &ThreadId) -> String {
     format!("title.{thread}")
 }
 
+/// Key in [`THREADS_BUCKET`] of the TL;DR of `thread` ([`ThreadSummary`]).
+pub fn summary_key(thread: &ThreadId) -> String {
+    format!("summary.{thread}")
+}
+
 /// Key in [`THREADS_BUCKET`] of the pinned and archived threads of `human`: starting with `marks`, so no thread id
 /// or human name collides with a title's key.
 pub fn marks_key(human: &UserId) -> String {

@@ -17,6 +17,9 @@ creds = "~/.config/ants/auth/alice.creds"  # human credentials (ant credentials 
 nats = "nats://127.0.0.1:4222"             # default: top-level nats
 js_domain = "hub"                          # default: top-level js_domain
 auto_archive = "14d"                       # hide threads idle this long from thread list and dash (default "0": never; README.md, Auto-archive)
+summary_ant = "messenger"                  # ant asked for TL;DRs and digests (default: the messenger; see Catch-up summaries)
+summaries = "on-demand"                    # default; "ahead" also allows asking for TL;DRs ahead of time (needs the next key)
+summary_daily_tokens = 50000               # most tokens summaries asked ahead of time spend per human and UTC day (default 0)
 
 [storage]                                  # JetStream capacity warnings (see README.md, JetStream storage)
 warn_percent = 80                          # warn past this share of a store's limit (default 80; 0 disables)
@@ -324,6 +327,25 @@ Each harness process takes hundreds of MB (about 255 MB for Copilot CLI, see REA
 - The daemon logs a warning, sets `memory_low` (`{since, available, max_harnesses}`) in the ant's `ants_roster` entry (shown by `ants roster` and `list_ants`) and `ants_memory_low` to `1` in `/metrics`.
 
 Memory counts as recovered once available memory reaches 150 % of `min_available`, so the state does not flap; the daemon logs it, clears `memory_low` and admits threads up to `max_harnesses` again. Each ant checks on its own, so the lower cap applies per ant. `[memory_pressure]` applies to every ant in the file; changing it on reload restarts them.
+
+## Catch-up summaries
+
+`ants thread tldr THREAD` and `ants digest` ask the ant named by `[cli]` `summary_ant` (default: the messenger) for a
+summary: a message on a new thread owned by the CLI's human, carrying a `summary` request (`thread` and `upto` for a
+TL;DR, `since` and `upto` for a digest) and, as text, the newest stored entries within 16 KiB, each cut to 1 KiB. The
+daemon prompts the ant to answer in at most 120 words of plain text without tools, and its reply carries the request
+back with the tokens the turn spent (`tokens`). The CLI waits for that reply, marks it read and prints it:
+
+- **TL;DR:** stored for every human at `summary.<thread>` in KV `ants_threads` (`{thread_id, text, by, for, at, upto,
+  tokens}`) and printed again without asking while no entry came after entry `upto` (`--new` asks anyway; `--json`
+  prints the stored object). Credentials older than permissions version 2 warn once and neither read nor store it.
+- **Digest:** of the threads with entries within `--since` (default `24h`, `0` all), stored nowhere.
+
+Threads opened by summary requests are left out of `ants thread list`, `last`, `ants dash`, digests and the inbox
+(`ants inbox` marks their replies read), and `ants webhook serve` pushes no completion for those replies. Each verb
+then notes on stderr the tokens the human's summaries spent this UTC day, as the replies to its requests carry them.
+`summaries = "ahead"` (with `summary_daily_tokens` above 0) is accepted for asking ahead of time within that daily
+token cap; a config with `ahead` and no daily tokens fails to load. No service generates summaries on its own.
 
 ## Prompt limits and spending caps
 
