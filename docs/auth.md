@@ -106,20 +106,21 @@ Bootstrap credentials are meant to be shared: they only publish registration req
 A registration request on `ants.login.<name>` carries the name asked for, the device's new NKey public key, a one-off X25519 reply key, optionally the device's [encryption key](#device-encryption-keys) and label, and its making and expiry times (at most 15 min apart), signed by the NKey. Requests are core NATS messages, stored nowhere: the machine repeats its request every 5 s until an answer settles it, and `ants signer` (with a `[registration]` table in its `--config`; see [config.md](config.md#human-registration)) answers each repeat on `ants.login.<name>.reply` with what it has for that key, sealed to the latest reply key and naming the signer's sealing key:
 
 - `verify`: sign in to GitHub at the URL with the user code, before the time given. The signer runs one GitHub device flow per key, at most 10 at once, and reads the signed-in user's ID, login, verified email addresses and memberships with the user's token, which it then drops.
+- `waiting`: the GitHub user who signed in (login) is outside the policy, and a human of the team decides ([config.md](config.md#human-registration)); `signed` or `refused` follows.
 - `signed`: the human's credentials (a JWT for the request's NKey, with the device's encryption key when given), valid for the policy's `ttl`, recorded in `issued.jsonl` with the label, GitHub binding and grant.
-- `refused`: why, such as registration not enabled, a key already issued, a GitHub user outside the policy, or a name bound to someone else.
+- `refused`: why, such as registration not enabled, a key already issued, a human's rejection or no decision in time, or a name bound to someone else.
 
 Requests that are malformed, unsigned by their key, expired or for another subject get no answer. A key whose registration ended gets the same answer until its request expires; another attempt uses a new key.
 
 ### GitHub bindings
 
-A name registered with a GitHub sign-in belongs to that GitHub user's numeric ID for good: renamed GitHub accounts keep their names, and no other GitHub user can register it. The binding is recorded on each device's record in `issued.jsonl`, with the grant that admitted the device (`org`, `team`, `email-domain` or `approval`), so it is kept across renewals and in backups. An existing human name (issued with `ants auth user --human` before registration was enabled) is bound by the operator before its owner registers more devices with `ants login`:
+A name registered with a GitHub sign-in belongs to that GitHub user's numeric ID for good: renamed GitHub accounts keep their names, and no other GitHub user can register it. The binding is recorded on each device's record in `issued.jsonl`, with the grant that admitted the device (`org`, `team`, `email-domain` or `approval`), so it is kept across renewals and in backups. `ants auth revoke NAME` keeps the binding but withdraws an `approval` grant (the key's line appended again, marked `withdrawn`), so the user registers again only by the policy or a new approval; revoking one device or key withdraws nothing. An existing human name (issued with `ants auth user --human` before registration was enabled) is bound by the operator before its owner registers more devices with `ants login`:
 
 ```sh
 ants auth user alice --human --github octocat [--config FILE]   # bind alice to GitHub user octocat, new device
 ```
 
-`--github` looks the login up on GitHub (with the signer's token and GitHub URLs of the `[registration]` table in `--config`, `ANTS_CONFIG` or the default config file when present; see [config.md](config.md#human-registration)) and records its ID. It refuses `human`, the reserved names `bootstrap` and `channel-manager`, a name holding credentials of anything but a human, a name bound to another GitHub user and a GitHub user bound to another name; on a name already bound to the same user it adds a device. `ants signer` applies the same rules, and also refuses to register a name that holds human credentials but no binding.
+`--github` looks the login up on GitHub (with the signer's token and GitHub URLs of the `[registration]` table in `--config`, `ANTS_CONFIG` or the default config file when present; see [config.md](config.md#human-registration)) and records its ID. It refuses `human`, the reserved names `bootstrap`, `channel-manager` and `signer`, a name holding credentials of anything but a human, a name bound to another GitHub user and a GitHub user bound to another name; on a name already bound to the same user it adds a device. `ants signer` applies the same rules, and also refuses to register a name that holds human credentials but no binding.
 
 ## Renewing over NATS
 

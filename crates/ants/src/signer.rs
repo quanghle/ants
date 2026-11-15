@@ -51,7 +51,8 @@ const LEAST_ASKING: Duration = Duration::from_secs(10);
 pub struct Options<'a> {
     /// The config file whose `[[ant_template]]` tables are the policy.
     pub config: &'a Path,
-    /// How long a human has to decide on a request outside the policy, at most until the manager stops waiting.
+    /// How long a human has to decide on a request outside the policy, at most until the manager stops waiting, or on
+    /// a registration outside the registration policy, at most until its request expires.
     pub approval_timeout: Duration,
     /// How long it stays connected with one set of the credentials it issues itself ([`crate::renew::AUTO_RECONNECT`]).
     pub reconnect: Duration,
@@ -138,7 +139,7 @@ pub async fn serve(
     stop: impl Future<Output = ()>,
 ) -> Result<()> {
     let mut signer = Signer { url, dir, options, answered: HashMap::new(), waiting: Vec::new() };
-    let mut registrar = Registrar::new(dir, options.config, js_domain, registrar::print);
+    let mut registrar = Registrar::new(dir, options.config, js_domain, options.approval_timeout, registrar::print);
     tokio::pin!(stop);
     loop {
         let approver = Approver::connect_signer(url, dir, js_domain, crate::enroll::LISTEN).await?;
@@ -167,11 +168,12 @@ pub async fn serve(
                 }
                 msg = logins.next() => {
                     let msg = msg.context("the NATS connection closed")?;
-                    registrar.heard(&approver.client, &msg).await?;
+                    registrar.heard(&approver, &msg).await?;
                 }
-                update = registrar.next() => registrar.progressed(&approver.client, update).await?,
+                update = registrar.next() => registrar.progressed(&approver, update).await?,
                 _ = ticks.tick() => {
                     registrar.expire();
+                    registrar.look(&approver).await?;
                     signer.look(&approver, &mut report).await?;
                 }
                 () = &mut until => break,

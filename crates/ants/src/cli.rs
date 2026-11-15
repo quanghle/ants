@@ -291,7 +291,8 @@ pub(crate) enum Command {
         /// (default: ~/.ants/config.toml).
         #[arg(long, env = "ANTS_CONFIG")]
         config: Option<PathBuf>,
-        /// How long a human has to decide on a request outside the policy, at most until the manager stops waiting.
+        /// How long a human has to decide on a request outside the policy, at most until the manager stops waiting,
+        /// or on a registration (`ants login`) outside the [registration] table, at most until its request expires.
         #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse, default_value = "15m")]
         approval_timeout: Duration,
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).

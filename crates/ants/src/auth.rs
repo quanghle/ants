@@ -119,6 +119,9 @@ pub fn check_not_reserved(user: &UserId) -> Result<()> {
     if *user == UserId::channel_manager() {
         bail!("{user} is reserved for the channel manager (`ants auth channel-manager`); choose another name");
     }
+    if *user == UserId::signer() {
+        bail!("{user} is reserved for the approval requests of `ants signer`; choose another name");
+    }
     Ok(())
 }
 

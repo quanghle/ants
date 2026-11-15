@@ -100,6 +100,10 @@ pub struct Issued {
     /// Why `ants signer` signed a registered device; none for credentials `ants auth` issued.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grant: Option<Grant>,
+    /// When revoking every key of the name withdrew the approval grant of a registered device (seconds since the
+    /// epoch), on a later line of its key ([`withdraw_approvals`]): the binding stays, the approval no longer stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withdrawn: Option<u64>,
 }
 
 impl Issued {
@@ -122,6 +126,7 @@ impl Issued {
             added_by: None,
             github: None,
             grant: None,
+            withdrawn: None,
         })
     }
 
@@ -374,7 +379,42 @@ pub fn revoke(dir: &Path, name: Option<&str>, keys: &[String]) -> Result<Vec<Rev
     all.extend(targets.iter().cloned());
     write_revoked(dir, &all)?;
     apply(dir)?;
+    if let Some(name) = name {
+        withdraw_approvals(dir, &issued, name, now)?;
+    }
     Ok(targets)
+}
+
+/// The latest line of each key of `issued`, oldest key first.
+fn latest(issued: &[Issued]) -> Vec<&Issued> {
+    let mut latest: Vec<&Issued> = Vec::new();
+    for one in issued {
+        match latest.iter_mut().find(|known| known.key == one.key) {
+            Some(known) => *known = one,
+            None => latest.push(one),
+        }
+    }
+    latest
+}
+
+/// Withdraw at `now` the approval grants of the keys of `name` in the registry `issued` of `dir`: append again the
+/// latest line of each key a human's approval registered, marked [`Issued::withdrawn`]. Its GitHub binding stays.
+fn withdraw_approvals(dir: &Path, issued: &[Issued], name: &str, now: u64) -> Result<()> {
+    let approved = |i: &&&Issued| matches!(i.grant, Some(Grant::Approval(_))) && i.withdrawn.is_none();
+    for one in latest(issued).iter().filter(|i| i.name == name).filter(approved) {
+        record(dir, &Issued { withdrawn: Some(now), ..(*one).clone() })?;
+    }
+    Ok(())
+}
+
+/// The approval grant that stands for the GitHub user `github` (a GitHub user id) on the name `name` in the registry
+/// `issued`: a human's approval that registered a key of the name for the user, not withdrawn since
+/// ([`Issued::withdrawn`]).
+pub fn standing_approval(issued: &[Issued], name: &str, github: u64) -> Option<Grant> {
+    latest(issued)
+        .into_iter()
+        .filter(|i| i.name == name && i.withdrawn.is_none() && i.github.as_ref().is_some_and(|g| g.id == github))
+        .find_map(|i| i.grant.clone().filter(|grant| matches!(grant, Grant::Approval(_))))
 }
 
 /// Drop the revocations whose credentials have all expired, and write the `server.conf` of `dir` with the rest.
