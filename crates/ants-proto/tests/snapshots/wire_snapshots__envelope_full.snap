@@ -42,5 +42,6 @@ expression: value
     "author": "github"
   },
   "title": "Fix the build",
+  "steer": true,
   "sent_at": "2025-01-01T12:00:00Z"
 }

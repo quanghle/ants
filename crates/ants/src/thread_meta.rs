@@ -29,6 +29,9 @@ const CONCURRENT: usize = 16;
 /// How long a title or mark stays at least, even on a thread with no message in the stream: a message may reach the
 /// stream that late, out of a leaf's outbox, and a title or mark may come before it.
 pub const KEPT: Duration = ants_daemon::bus::RETENTION;
+/// How long the delete marker of a pruned title or a cleared done state lasts: the shortest per-message TTL the stream
+/// takes, as nothing needs it.
+const PRUNED_MARKER: Duration = Duration::from_secs(1);
 
 /// The direct get subject of `human`'s marks, which only `human`'s credentials may publish.
 fn marks_right(human: &UserId) -> String {
@@ -301,7 +304,8 @@ impl Meta {
 
     /// Title `thread` `text` as `by`, the ant that suggested it ([`ants_proto::Envelope::title`]), only if the thread
     /// never had a title: one a human set, renamed or cleared stays, compare-and-set keeping it from one set
-    /// meanwhile. The title stored, if any.
+    /// meanwhile. A cleared title's delete marker counts until [`Meta::prune`] drops it with its thread. The title
+    /// stored, if any.
     pub async fn adopt_title(&self, thread: &ThreadId, text: &str, by: &UserId) -> Result<Option<ThreadTitle>> {
         match self.kv.lookup_last(title_key(thread)).await.context("reading the title")? {
             (Lookup::NoBucket, _) => bail!(MISSING),
@@ -376,14 +380,19 @@ impl Meta {
         Ok(true)
     }
 
-    /// Clear the done state of `thread`. The state it had, if any, whether or not it still held.
+    /// Clear the done state of `thread`, leaving a delete marker lasting [`PRUNED_MARKER`], as no reader needs it: a
+    /// state set again meanwhile stays. The state it had, if any, whether or not it still held.
     pub async fn clear_done(&self, thread: &ThreadId) -> Result<Option<ThreadDone>> {
         self.require_done()?;
-        let had = self.done(thread).await?;
-        if had.is_some() {
-            self.kv.delete(done_key(thread)).await.context("clearing the done state")?;
-        }
-        Ok(had)
+        let key = done_key(thread);
+        let (found, last) = self.kv.lookup_last(&key).await.context("reading the done state")?;
+        let value = match found {
+            Lookup::NoBucket => bail!(MISSING),
+            Lookup::NoValue => return Ok(None),
+            Lookup::Value(value) => value,
+        };
+        self.kv.delete_expecting(&key, last, Some(PRUNED_MARKER)).await.context("clearing the done state")?;
+        Ok(serde_json::from_slice::<ThreadDone>(&value).ok().filter(|d| d.thread_id == *thread))
     }
 
     fn require_done(&self) -> Result<()> {
@@ -441,20 +450,27 @@ impl Meta {
         }
         let mut shared = 0;
         if titles {
-            shared += self
-                .prune_shared("title", before, &gone, |v| Some(serde_json::from_slice::<ThreadTitle>(v).ok()?.at))
-                .await?;
+            shared += self.prune_titles(before, &gone).await?;
             if self.done_right {
-                shared += self
-                    .prune_shared("done", before, &gone, |v| Some(serde_json::from_slice::<ThreadDone>(v).ok()?.at))
-                    .await?;
+                shared += self.prune_dones(before, &gone).await?;
             }
         }
         Ok((marked, shared))
     }
 
-    /// Delete the entries under `prefix`, titles or done states, set before `before` (as `at` reads the time an entry
-    /// was set) of the threads `gone` says have no message left. How many it deleted.
+    async fn prune_titles(&self, before: DateTime<Utc>, gone: &impl Fn(&ThreadId) -> bool) -> Result<usize> {
+        self.prune_shared("title", before, gone, |v| Some(serde_json::from_slice::<ThreadTitle>(v).ok()?.at)).await
+    }
+
+    async fn prune_dones(&self, before: DateTime<Utc>, gone: &impl Fn(&ThreadId) -> bool) -> Result<usize> {
+        self.prune_shared("done", before, gone, |v| Some(serde_json::from_slice::<ThreadDone>(v).ok()?.at)).await
+    }
+
+    /// Drop, of the threads `gone` says have no message left, the entries under `prefix` (titles or done states) set
+    /// before `before`, as `at` reads the time an entry was set, and the delete markers of those cleared before then,
+    /// each replaced by a delete marker lasting [`PRUNED_MARKER`] if unchanged since read: a cleared title's marker
+    /// keeps an ant's suggestion from replacing it ([`Meta::adopt_title`]) only while its thread has messages. How
+    /// many it dropped.
     async fn prune_shared(
         &self,
         prefix: &str,
@@ -468,9 +484,13 @@ impl Meta {
         let deletes = futures::stream::iter(threads.filter(|t| gone(t)))
             .map(async |thread| {
                 let key = format!("{prefix}.{thread}");
-                let (Lookup::Value(value), last) = self.kv.lookup_last(&key).await? else { return Ok(false) };
-                match at(&value) {
-                    Some(at) if at < before => self.kv.delete_expecting(&key, last).await,
+                let set = match self.kv.lookup_stored(&key).await? {
+                    (Lookup::Value(value), last, _) => at(&value).map(|at| (at, last)),
+                    (Lookup::NoValue, last, Some(cleared)) => Some((cleared.into(), last)),
+                    _ => None,
+                };
+                match set {
+                    Some((at, last)) if at < before => self.kv.delete_expecting(&key, last, Some(PRUNED_MARKER)).await,
                     _ => Ok(false),
                 }
             })
@@ -523,7 +543,7 @@ mod tests {
         let (alice, dev_a) = ("alice".parse::<UserId>().unwrap(), "dev-a".parse::<UserId>().unwrap());
         let (_, js) = server.connect_as(&alice, Role::Human).await;
         ants_daemon::bus::ensure_stream(&js).await.unwrap();
-        js.create_key_value(ants_daemon::hub::threads_config()).await.unwrap();
+        js.create_stream(ants_daemon::hub::threads_config()).await.unwrap();
         let meta = Meta::open(&js, None, &alice).await.unwrap();
         let ask = Envelope::new(alice.clone(), dev_a.clone(), "build it");
         let thread = &ask.thread_id;
@@ -577,7 +597,7 @@ mod tests {
         let (_, js) = server.connect_as(&alice, Role::Human).await;
         let (_, b_js) = server.connect_as(&bob, Role::Human).await;
         ants_daemon::bus::ensure_stream(&js).await.unwrap();
-        js.create_key_value(ants_daemon::hub::threads_config()).await.unwrap();
+        js.create_stream(ants_daemon::hub::threads_config()).await.unwrap();
         let (meta, bob_meta) =
             (Meta::open(&js, None, &alice).await.unwrap(), Meta::open(&b_js, None, &bob).await.unwrap());
         let ask = Envelope::new(alice.clone(), dev_a, "build it");
@@ -618,7 +638,7 @@ mod tests {
         let (alice, dev_a) = ("alice".parse::<UserId>().unwrap(), "dev-a".parse::<UserId>().unwrap());
         let (_, js) = server.connect_as(&alice, Role::Human).await;
         ants_daemon::bus::ensure_stream(&js).await.unwrap();
-        js.create_key_value(ants_daemon::hub::threads_config()).await.unwrap();
+        js.create_stream(ants_daemon::hub::threads_config()).await.unwrap();
         let meta = Meta::open(&js, None, &alice).await.unwrap();
         let (gone, alive, fresh, renamed) = (made_ago(40), made_ago(40), made_ago(40), made_ago(40));
         let unordered: ThreadId = "deploy-1".parse().unwrap();
@@ -657,7 +677,8 @@ mod tests {
         let (last, revision) = meta.kv.lookup_last(title_key(&renamed)).await.unwrap();
         assert!(matches!(last, Lookup::Value(_)));
         meta.set_title(&renamed, "renamed meanwhile").await.unwrap();
-        assert!(!meta.kv.delete_expecting(title_key(&renamed), revision).await.unwrap(), "a title set again stays");
+        let deleted = meta.kv.delete_expecting(title_key(&renamed), revision, None).await.unwrap();
+        assert!(!deleted, "a title set again stays");
 
         let start = crate::thread::window(Duration::from_hours(50 * 24));
         prune(&meta, &meta.marks().await.unwrap(), &start, &present(start).await).await;
@@ -682,5 +703,43 @@ mod tests {
         assert_eq!(meta.title(&unordered).await.unwrap(), None, "a read of everything kept does");
         let pinned: Vec<ThreadId> = meta.marks().await.unwrap().pinned.into_keys().collect();
         assert_eq!(HashSet::from_iter(pinned), HashSet::from([alive, fresh]));
+    }
+
+    /// A cleared title's delete marker keeps out an ant's suggestion while its thread has messages, and goes with the
+    /// thread, as a pruned title's does, leaving no key behind.
+    #[tokio::test]
+    async fn the_markers_of_cleared_and_pruned_titles_go_with_their_threads() {
+        let Some(server) = crate::auth::tests::Server::start() else { return };
+        let (alice, dev_a) = ("alice".parse::<UserId>().unwrap(), "dev-a".parse::<UserId>().unwrap());
+        let (_, js) = server.connect_as(&alice, Role::Human).await;
+        js.create_stream(ants_daemon::hub::threads_config()).await.unwrap();
+        let meta = Meta::open(&js, None, &alice).await.unwrap();
+        let (cleared, titled, alive) = (ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
+        for thread in [&cleared, &titled, &alive] {
+            meta.set_title(thread, "Release 1.2").await.unwrap();
+        }
+        meta.clear_title(&cleared).await.unwrap();
+        meta.clear_title(&alive).await.unwrap();
+        assert_eq!(meta.adopt_title(&cleared, "Fix the build", &dev_a).await.unwrap(), None, "the clear wins");
+
+        let gone = |thread: &ThreadId| *thread != alive;
+        assert_eq!(meta.prune_titles(Utc::now() - KEPT, &gone).await.unwrap(), 0, "recent ones stay");
+        let later = Utc::now() + chrono::Duration::seconds(1);
+        assert_eq!(meta.prune_titles(later, &gone).await.unwrap(), 2);
+        assert_eq!(meta.adopt_title(&cleared, "Fix the build", &dev_a).await.unwrap(), None, "a marker for now");
+        let left = [title_key(&alive)];
+        for _ in 0..100 {
+            if meta.kv.keys("title.*").await.unwrap() == left {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(meta.kv.keys("title.*").await.unwrap(), left, "the markers of threads gone expire");
+        assert!(meta.adopt_title(&cleared, "Fix the build", &dev_a).await.unwrap().is_some());
+        assert_eq!(
+            meta.adopt_title(&alive, "Fix the build", &dev_a).await.unwrap(),
+            None,
+            "a live thread's clear wins"
+        );
     }
 }

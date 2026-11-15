@@ -124,7 +124,8 @@ pub struct Entry {
     /// The reason of the escalation an inbox message carries, which the note spells out.
     #[serde(skip)]
     pub reason: Option<EscalationReason>,
-    /// The title an inbox message that is not forged suggests for its thread ([`Envelope::title`]).
+    /// The title an inbox message, channel post or notes post that is not forged suggests for its thread
+    /// ([`Envelope::title`], [`ChannelPost::title`], [`NotesPost::title`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggested_title: Option<String>,
 }
@@ -219,6 +220,7 @@ impl Parser {
                 note,
                 text: post.text,
                 forged,
+                suggested_title: post.title.filter(|_| !forged),
                 ..entry(Kind::Post, post.thread_id)
             });
         }
@@ -232,6 +234,7 @@ impl Parser {
                 note,
                 text: post.text,
                 forged,
+                suggested_title: post.title.filter(|_| !forged),
                 ..entry(Kind::Note, post.thread_id)
             });
         }

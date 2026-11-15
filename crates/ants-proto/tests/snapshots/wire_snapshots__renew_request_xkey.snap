@@ -1,0 +1,13 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "name": "alice",
+  "public_key": "UDEF",
+  "host": "laptop.local",
+  "sent_at": "2025-01-01T12:00:00Z",
+  "current": "eyJ0eXAiOiJKV1QifQ.current",
+  "xkey": "XBLFEIK7UCHY5XKH7LGNQ4JZNVOZEWMIHPZH3LP4JUBJ6KQZDVBEWHWB",
+  "signature": "c2lnLXJlbmV3"
+}

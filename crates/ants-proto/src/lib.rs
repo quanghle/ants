@@ -159,8 +159,8 @@ pub const REACTIONS_WAIT: Duration = Duration::from_secs(10);
 /// for every human, which any human sets, renames or clears, its done state ([`ThreadDone`], keyed by [`done_key`]),
 /// one for every human too, which any human sets or clears, and each human's pinned and archived threads
 /// ([`ThreadMarks`], keyed by [`marks_key`]), shared by its devices and read and written by that human alone
-/// ([`Permissions::for_user`]). Ants read and write none of it: a title an ant suggests ([`Envelope::title`]) gets
-/// there through a human's CLI. Entries never expire.
+/// ([`Permissions::for_user`]). Ants read and write none of it: a title an ant suggests ([`Envelope::title`],
+/// [`ChannelPost::title`], [`NotesPost::title`]) gets there through a human's CLI. Entries never expire.
 pub const THREADS_BUCKET: &str = "ants_threads";
 /// Most characters a thread title has.
 pub const MAX_TITLE: usize = 120;

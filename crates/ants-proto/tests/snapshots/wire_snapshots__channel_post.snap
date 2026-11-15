@@ -19,5 +19,6 @@ expression: value
   "allow": [
     "read:*"
   ],
+  "title": "Fix CI",
   "sent_at": "2025-01-01T12:00:00Z"
 }

@@ -262,9 +262,24 @@ impl Approver {
     /// Connect to the server at `url`, signing the credentials with the account key in the team directory `dir`, for
     /// the hub's JetStream domain if it has one, and listen for `listen` each time requests are gathered.
     pub async fn connect(url: &str, dir: &Path, js_domain: Option<&JsDomain>, listen: Duration) -> Result<Self> {
+        Self::connect_with(url, &auth::approver_creds(dir, js_domain)?, dir, js_domain, listen).await
+    }
+
+    /// [`Approver::connect`] with `ants signer`'s credentials, which also answer ants' reactions requests
+    /// ([`auth::signer_creds`]).
+    pub async fn connect_signer(url: &str, dir: &Path, js_domain: Option<&JsDomain>, listen: Duration) -> Result<Self> {
+        Self::connect_with(url, &auth::signer_creds(dir, js_domain)?, dir, js_domain, listen).await
+    }
+
+    async fn connect_with(
+        url: &str,
+        creds: &str,
+        dir: &Path,
+        js_domain: Option<&JsDomain>,
+        listen: Duration,
+    ) -> Result<Self> {
         bus::check_url(url)?;
-        let creds = auth::approver_creds(dir, js_domain)?;
-        let client = async_nats::ConnectOptions::with_credentials(&creds)?
+        let client = async_nats::ConnectOptions::with_credentials(creds)?
             .name("ants-enroll")
             .custom_inbox_prefix(ENROLL_INBOX)
             .connect(url)
