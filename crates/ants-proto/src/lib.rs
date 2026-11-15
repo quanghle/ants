@@ -2006,15 +2006,19 @@ pub struct ThreadTitle {
 
 impl ThreadTitle {
     /// `title`, trimmed, set on `thread_id` by `by` now: one line of 1 to [`MAX_TITLE`] characters, no control
-    /// characters.
+    /// characters or Unicode line and paragraph separators.
     pub fn new(thread_id: ThreadId, title: &str, by: UserId) -> Result<Self, Error> {
         let trimmed = title.trim();
         let count = trimmed.chars().count();
-        if count == 0 || count > MAX_TITLE || trimmed.chars().any(char::is_control) {
+        if count == 0 || count > MAX_TITLE || trimmed.chars().any(breaks_title) {
             return Err(Error::InvalidTitle(title.to_owned()));
         }
         Ok(Self { thread_id, title: trimmed.to_owned(), by, at: Utc::now() })
     }
+}
+
+fn breaks_title(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')
 }
 
 /// A human's pinned and archived threads, under its [`marks_key`] in [`THREADS_BUCKET`], shared by all its devices,
@@ -5546,7 +5550,7 @@ mod tests {
         assert_eq!(title.title, "Deploy fix");
         assert_eq!(title_key(&title.thread_id), format!("title.{}", title.thread_id));
         assert_eq!(marks_key(&p("alice")), "marks.alice");
-        for bad in ["", "  ", "two\nlines", &"x".repeat(MAX_TITLE + 1)] {
+        for bad in ["", "  ", "two\nlines", "two\u{2028}lines", "two\u{2029}paragraphs", &"x".repeat(MAX_TITLE + 1)] {
             assert!(ThreadTitle::new(ThreadId::generate(), bad, p("alice")).is_err(), "{bad:?}");
         }
         assert!(ThreadTitle::new(ThreadId::generate(), &"é".repeat(MAX_TITLE), p("alice")).is_ok());
