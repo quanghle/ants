@@ -3,17 +3,18 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, ChannelId, ENROLL_INBOX, Feed, HUMANS_BUCKET, INTAKE_STREAM,
-    JsDomain, LINKS_BUCKET, Machine, NOTIFY_BUCKET, OUTBOX_STREAM, OWNERS_BUCKET, PRESENCE_BUCKET, REACTIONS_BUCKET,
-    READ_BUCKET, ROSTER_BUCKET, Role, SESSIONS_BUCKET, STORAGE_WARNING_PREFIX, STREAM, THREADS_BUCKET, UserId,
-    WEBHOOK_MARKER, WEBHOOKS_BUCKET, chan_consumer, chan_reader, channel_manager_serving_subject, dead_reader,
-    inbox_consumer, inbox_prefix, marks_key, notes_consumer, notify_consumer, sent_reader, spare_readers, subject,
+    ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, ChannelId, ENROLL_INBOX, FILES_BUCKET, FILES_STREAM, Feed,
+    HUMANS_BUCKET, INTAKE_STREAM, JsDomain, LINKS_BUCKET, Machine, NOTIFY_BUCKET, OUTBOX_STREAM, OWNERS_BUCKET,
+    PRESENCE_BUCKET, REACTIONS_BUCKET, READ_BUCKET, ROSTER_BUCKET, Role, SESSIONS_BUCKET, STORAGE_WARNING_PREFIX,
+    STREAM, THREADS_BUCKET, UserId, WEBHOOK_MARKER, WEBHOOKS_BUCKET, chan_consumer, chan_reader,
+    channel_manager_serving_subject, dead_reader, inbox_consumer, inbox_prefix, marks_key, notes_consumer,
+    notify_consumer, sent_reader, spare_readers, subject,
 };
 #[cfg(doc)]
 use crate::{
-    AntRequest, EnrollRequest, HeldNotices, NotifyPrefs, QueueRequest, ReactionsRequest, RenewRequest, StatusUpdate,
-    channel_manager_serving_key, daily_spend_key, link_outbox, message_mark_key, owner_outbox, storage_warning_key,
-    thread_spend_key, unserved_key,
+    AntRequest, AttachmentHandle, EnrollRequest, HeldNotices, NotifyPrefs, QueueRequest, ReactionsRequest,
+    RenewRequest, StatusUpdate, channel_manager_serving_key, daily_spend_key, link_outbox, message_mark_key,
+    owner_outbox, storage_warning_key, thread_spend_key, unserved_key,
 };
 
 /// JetStream stream backing a KV bucket.
@@ -96,6 +97,35 @@ fn human_reaction_rights(human: &UserId) -> Vec<String> {
     ];
     rights.extend(flow_control_subjects("*", &reactions));
     rights
+}
+
+/// What a user's credentials need for attachments ([`FILES_BUCKET`]): writing the chunks of those of the messages it
+/// sends only, with itself as the sender of their handles ([`AttachmentHandle`]), one subject for every kind of message
+/// to keep leaf uplink credentials small, a human's with any, as it sends under any sender to replay dead letters as
+/// they were; each also in its outbox form ([`AttachmentHandle::outbox_chunk_subject`]). A human reads every chunk by direct gets and may create the store and
+/// look it up. An ant reads by direct gets naming their subject, as [`subject::readable_by`] says it reads the messages
+/// carrying them, the chunks of the attachments sent to it and by it, and of every notes and channel post: no stream
+/// info, which lists every subject stored, and no consumer, so none of the attachments between other users.
+fn attachment_rights(user: &UserId, role: Role) -> Vec<String> {
+    let chunks = format!("$O.{FILES_BUCKET}.C");
+    let get = format!("$JS.API.DIRECT.GET.{FILES_STREAM}");
+    if role.is_human() {
+        return vec![
+            format!("{chunks}.>"),
+            "ants.out.files.>".to_owned(),
+            format!("$JS.API.STREAM.INFO.{FILES_STREAM}"),
+            format!("$JS.API.STREAM.CREATE.{FILES_STREAM}"),
+            format!("{get}.{chunks}.>"),
+        ];
+    }
+    vec![
+        format!("{chunks}.{user}.>"),
+        format!("ants.out.files.{user}.>"),
+        format!("{get}.{chunks}.*.inbox.{user}.>"),
+        format!("{get}.{chunks}.{user}.inbox.>"),
+        format!("{get}.{chunks}.*.notes.>"),
+        format!("{get}.{chunks}.*.chan.>"),
+    ]
 }
 
 /// What a human's credentials need for thread titles and done states and its pins and archives ([`THREADS_BUCKET`]):
@@ -184,7 +214,9 @@ impl Permissions {
     /// archived threads, no other human's ([`thread_rights`]). A human may send under
     /// any sender, to replay a dead letter as it was. An ant gets no `STREAM.MSG.GET`: it takes any sequence, so it
     /// would expose every inbox. So only a human hears the max-deliveries advisories of the stream's consumers and
-    /// stores the dead letters of the messages they name, on any ant's dead letter subject.
+    /// stores the dead letters of the messages they name, on any ant's dead letter subject. Every user writes the
+    /// attachments of the messages it sends only, under its own name, and an ant reads only those of the messages it
+    /// reads, by direct gets; a human reads them all and may create their store ([`attachment_rights`]).
     ///
     /// An ant stores the tool-call timeline of its own work ([`subject::timeline_from`]) and reads none back; a human
     /// reads every timeline by message gets.
@@ -280,6 +312,7 @@ impl Permissions {
             // And the webhooks' markers, not the events they delivered.
             format!("$JS.API.DIRECT.GET.{webhooks}.$KV.{WEBHOOKS_BUCKET}.*.{WEBHOOK_MARKER}"),
         ]);
+        publish.extend(attachment_rights(user, role));
         publish
     }
 

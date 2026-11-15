@@ -172,6 +172,19 @@ pub(crate) enum Command {
         #[arg(long)]
         remove: bool,
     },
+    /// Answer a question an ant asked the CLI's human (with ask_human), shown with its options numbered in `ants inbox`
+    /// and `ants thread show`: a number picks that option, any other text is a typed answer, which only a question
+    /// taking one accepts. The answer goes to the asking ant on the question's thread, as a message from the human.
+    /// Needs a human's credentials.
+    Answer {
+        /// The question's message id, or a unique start of one among the messages to or from the CLI's human stored in
+        /// the last 7 days, else any stored then.
+        #[arg(add = ArgValueCompleter::new(completions::messages))]
+        message: thread::MessagePick,
+        /// An option's number, or the typed answer.
+        #[arg(value_name = "N|TEXT", required = true, num_args = 1..)]
+        answer: Vec<String>,
+    },
     /// Threads read back from the stream across inboxes (both ways), channel posts, notes, escalations, tool requests
     /// and decisions, and dead letters: list the recent ones, find those mentioning a text, show one's whole history,
     /// or search messages by sender, recipient, channel, kind, time and text; title, pin or archive one. Nothing is
@@ -506,6 +519,17 @@ mod tests {
         let cli = Cli::try_parse_from(["ants", "notes", "t1"]).unwrap();
         assert_matches!(cli.command, Command::Notes { text, .. } if text.is_empty());
         assert!(Cli::try_parse_from(["ants", "plan", "t1"]).is_err());
+    }
+
+    #[test]
+    fn answer_takes_a_message_and_an_option_or_words() {
+        let id = Uuid::now_v7();
+        let cli = Cli::try_parse_from(["ants", "answer", &id.to_string(), "2"]).unwrap();
+        assert_matches!(cli.command, Command::Answer { message, answer }
+            if message == thread::MessagePick::Id(id) && answer == ["2"]);
+        let cli = Cli::try_parse_from(["ants", "answer", "019a-", "after", "lunch"]).unwrap();
+        assert_matches!(cli.command, Command::Answer { answer, .. } if answer == ["after", "lunch"]);
+        assert!(Cli::try_parse_from(["ants", "answer", &id.to_string()]).is_err(), "no answer");
     }
 
     #[test]
