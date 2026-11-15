@@ -404,3 +404,43 @@ async fn a_refusal_of_the_enrollment_credentials_ends_the_request() {
     let err = format!("{:#}", refused.unwrap_err());
     assert!(err.contains("the NATS server refused the enrollment credentials"), "{err}");
 }
+
+/// Behind a leaf node whose uplink the hub would refuse with one more ant, an approval fails with the reason before
+/// anything is signed, recorded or answered.
+#[tokio::test]
+async fn an_ant_the_uplink_has_no_room_for_is_neither_signed_nor_recorded() {
+    let Some(server) = Server::start() else { return };
+    let (team, dev_x) = (server.dir().join("auth"), p("dev-x"));
+    let creds = enrollment(&server, &dev_x, Duration::from_secs(60));
+    let m1: Machine = "m1".parse().unwrap();
+    let uplink = server.dir().join("leaf-m1.creds");
+    auth::tests::uplink_for_most_ants(&team, &m1, None, &uplink);
+    let before = std::fs::read_to_string(&uplink).unwrap();
+    let (members_before, issued_before) =
+        (members::issued(&team, &m1, &uplink).unwrap(), revoke::issued(&team).unwrap().len());
+    let approver = Approver::connect(&server.url, &team, None, LISTEN).await.unwrap();
+    let (leaf, user) = (Leaf { machine: m1.clone(), creds: uplink.clone() }, KeyPair::new_user());
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let asking = request(&server.url, &creds, &dev_x, &user, Some(&leaf), REPEAT, async {
+        let _ = stop_rx.await;
+    });
+    let approving = async {
+        let refused = approver.approve(&team, &dev_x, None).await;
+        // Long enough for an answer to arrive, had one gone out.
+        tokio::time::sleep(REPEAT * 3).await;
+        stop_tx.send(()).unwrap();
+        refused
+    };
+    let (asked, refused) = Box::pin(timeout(WAIT * 2, async { tokio::join!(asking, approving) })).await.unwrap();
+    let err = format!("{:#}", refused.unwrap_err());
+    assert!(err.contains("the uplink of the leaf node m1 cannot carry dev-x"), "{err}");
+    assert!(err.contains("would take") && err.contains("another leaf node"), "{err}");
+    let asked = format!("{:#}", asked.unwrap_err());
+    assert!(asked.contains("stopped before an answer came"), "no answer: {asked}");
+    let issued = revoke::issued(&team).unwrap();
+    assert!(!issued.iter().any(|i| i.name == "dev-x"), "dev-x is not signed");
+    assert_eq!(issued.len(), issued_before);
+    assert_eq!(members::issued(&team, &m1, &uplink).unwrap(), members_before, "dev-x is not among m1's members");
+    assert_eq!(std::fs::read_to_string(&uplink).unwrap(), before);
+}

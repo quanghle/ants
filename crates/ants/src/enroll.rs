@@ -373,29 +373,38 @@ impl Approver {
     /// has one, and send them. `public_key` picks the request when several machines ask for the ant. A request
     /// through a leaf node also gets the leaf's uplink credentials renewed to carry the ant, the ant kept among the
     /// leaf's members in `dir`, for later `ants auth leaf` runs, and admitted into the hub's stream from the leaf's
-    /// outbox, if the hub sources it.
+    /// outbox, if the hub sources it; uplink credentials the hub would refuse fail the approval before anything is
+    /// signed or recorded.
     pub async fn approve(&self, dir: &Path, ant: &UserId, public_key: Option<&str>) -> Result<Approved> {
         if ant.is_human() {
             bail!("{ant} is the default human; issue its credentials with `ants auth user`");
         }
         let request = self.one(ant, public_key).await?;
         let domain = self.js_domain.as_ref();
-        let jwt = auth::sign_user(dir, ant, Role::Ant, domain, &request.public_key)?;
-        let (leaf_jwt, leaf) = match &request.leaf {
+        // First, as it records nothing: an uplink the hub would refuse leaves no ant signed.
+        let renewed = match &request.leaf {
             Some(leaf) => {
                 let more = Permissions::for_leaf(&leaf.machine, [(ant, Role::Ant)]).with_js_domain(domain);
-                let renewed = auth::extend_leaf(dir, &leaf.jwt, &leaf.machine, more)?;
-                members::enrolled(dir, &leaf.machine, &renewed, ant)
+                let renewed = auth::extend_leaf(dir, &leaf.jwt, &leaf.machine, more)
+                    .with_context(|| format!("the uplink of the leaf node {} cannot carry {ant}", leaf.machine))?;
+                Some(renewed)
+            }
+            None => None,
+        };
+        let jwt = auth::sign_user(dir, ant, Role::Ant, domain, &request.public_key)?;
+        let leaf = match (&request.leaf, &renewed) {
+            (Some(leaf), Some(renewed)) => {
+                members::enrolled(dir, &leaf.machine, renewed, ant)
                     .with_context(|| format!("keeping {ant} among the members of {}", leaf.machine))?;
                 // Before the answer: a machine that heard none asks again, and this runs again.
                 let outbox = outbox::admit_ant(&self.hub, &leaf.machine, ant)
                     .await
                     .with_context(|| format!("admitting {ant} from the outbox of {}", leaf.machine))?;
-                (Some(renewed), Some(LeafApproved { machine: leaf.machine.clone(), outbox }))
+                Some(LeafApproved { machine: leaf.machine.clone(), outbox })
             }
-            None => (None, None),
+            _ => None,
         };
-        let public_key = self.send(&request, jwt, leaf_jwt).await?;
+        let public_key = self.send(&request, jwt, renewed).await?;
         Ok(Approved { public_key, leaf })
     }
 
