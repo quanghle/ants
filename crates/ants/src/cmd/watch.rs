@@ -82,6 +82,9 @@ pub(crate) async fn watch(nats: &Nats<'_>, target: &str, thread: Option<thread::
         } else if let Ok(r) = serde_json::from_slice::<ants_proto::QueueReply>(&msg.payload) {
             let forged = forged(r.check_subject(&msg.subject).is_ok());
             printer.line(&format!("{}{forged}: {} messages in hand", r.ant, r.messages.len()))
+        } else if let Ok(r) = serde_json::from_slice::<ants_proto::ReactionsRequest>(&msg.payload) {
+            let forged = forged(r.check_subject(&msg.subject).is_ok());
+            printer.line(&format!("{}{forged} asks for the reactions to message {}", r.ant, r.message))
         } else {
             printer.line(&format!("{} {}", msg.subject, String::from_utf8_lossy(&msg.payload)))
         };

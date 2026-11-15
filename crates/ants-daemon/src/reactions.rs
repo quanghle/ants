@@ -1,21 +1,28 @@
 //! Reactions to messages, from ants and humans: `eyes`, `check` and the like, kept in [`REACTIONS_BUCKET`] apart from
 //! the messages, each under its reactor's key ([`reaction_key`]), so credentials let each user add and remove only its
 //! own. A reaction is no message: it reaches no inbox, wakes no ant, marks nothing read and ends no wait for a reply.
-//! Humans read them all ([`load`], [`watch`]); ants only add and remove their own.
+//! Humans read them all ([`load`], [`watch`]); ants add and remove their own, and read those to the messages they read
+//! by asking ([`ask`]): a human's `ants webhook serve` answers ([`serve`]) once it found the ant reads the message
+//! ([`readable`]).
 
 use std::collections::{BTreeMap, HashMap};
-use std::time::Duration;
+use std::ops::ControlFlow;
+use std::time::{Duration, SystemTime};
 
+pub use ants_proto::Reacted;
 use ants_proto::{
-    JsDomain, REACTIONS_BUCKET, Reaction, ReactionEntry, UserId, Uuid, parse_reaction_key, reaction_key, reactions_to,
+    JsDomain, REACTIONS_BUCKET, REACTIONS_REPEAT, REACTIONS_WAIT, Reaction, ReactionEntry, ReactionsOutcome,
+    ReactionsReply, ReactionsRequest, UserId, Uuid, parse_reaction_key, reaction_key, reactions_to, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::stream::{ConsumerError, ConsumerErrorKind};
 use async_nats::jetstream::{self, ErrorCode, consumer};
 use futures::{Stream, StreamExt as _};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
+use crate::bus::DUPLICATE_WINDOW;
 use crate::direct_kv::{DirectKv, Lookup};
+use crate::reading::{self, Reading};
 
 /// How long a read of the reactions waits for each one the bucket said it has.
 const WAIT: Duration = Duration::from_secs(5);
@@ -23,6 +30,12 @@ const WAIT: Duration = Duration::from_secs(5);
 const MAX_FILTERS: usize = 64;
 /// Most reactions one read takes.
 const MAX_REACTIONS: u64 = 100_000;
+/// How long before the time in its id a message may be stored, its sender's clock running ahead.
+const CLOCK_SKEW: Duration = Duration::from_mins(5);
+/// Queue group of the processes answering reactions requests: one of them takes each request.
+const QUEUE: &str = "reactions";
+/// Reactions requests one process answers at once.
+const CONCURRENT: usize = 4;
 /// The reactions shown as suggestions, such as in completions; any other token is taken too.
 pub const SUGGESTED: [&str; 6] = ["check", "eyes", "heart", "rocket", "thumbsup", "x"];
 const MISSING: &str = "there is no bucket ants_reactions: `ants init` as a human creates it";
@@ -71,13 +84,6 @@ pub async fn remove(
             Ok(true)
         }
     }
-}
-
-/// One reaction to a message and who reacted so, in order of name.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Reacted {
-    pub reaction: Reaction,
-    pub by: Vec<UserId>,
 }
 
 /// The reactions to each message that has any, each in order of name.
@@ -194,6 +200,119 @@ pub async fn watch(js: &jetstream::Context) -> Result<impl Stream<Item = Change>
     }))
 }
 
+/// Whether the ant `ant` reads message `message`, as far as the stream keeps it: the first message, notes post or
+/// channel post stored with that id is on a subject the ant's credentials read ([`subject::readable_by`]). Senders
+/// choose ids, so a later copy of a message, which an ant can store on a subject it reads once it learned the id, is
+/// no proof; nobody learns an id before its message is stored. The read takes a human's credentials, and looks only
+/// at what was stored from [`CLOCK_SKEW`] before the time in the id (a UUIDv7's, as every ants id is) to
+/// [`DUPLICATE_WINDOW`] after it, the latest a message's copy from a leaf node's outbox may land: a copy stored once
+/// its message has gone is no proof either.
+pub async fn readable(js: &jetstream::Context, ant: &UserId, message: Uuid) -> Result<bool> {
+    let Some((secs, nanos)) = message.get_timestamp().filter(|_| message.get_version_num() == 7).map(|t| t.to_unix())
+    else {
+        return Ok(false);
+    };
+    let made = SystemTime::UNIX_EPOCH + Duration::new(secs, nanos);
+    let from = made.checked_sub(CLOCK_SKEW).unwrap_or(SystemTime::UNIX_EPOCH);
+    let until = made + DUPLICATE_WINDOW;
+    if from > SystemTime::now() {
+        return Ok(false);
+    }
+    #[derive(Deserialize)]
+    struct Id {
+        id: Uuid,
+    }
+    let mut first = None;
+    let start = consumer::DeliverPolicy::ByStartTime { start_time: from.into() };
+    reading::read_back(js, "", Reading::Gets, subject::ALL, start, |_, stored, subject, payload| {
+        if stored > until {
+            return ControlFlow::Break(());
+        }
+        if serde_json::from_slice::<Id>(payload).is_ok_and(|p| p.id == message) {
+            first = Some(subject::readable_by(ant, subject));
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    })
+    .await
+    .context("finding the message")?;
+    Ok(first == Some(true))
+}
+
+/// The answer to `request`: the reactions to its message if the ant reads it ([`readable`]), else
+/// [`ReactionsOutcome::Unknown`]. Takes a human's credentials.
+pub async fn answer(js: &jetstream::Context, request: &ReactionsRequest) -> Result<ReactionsOutcome> {
+    if !readable(js, &request.ant, request.message).await? {
+        return Ok(ReactionsOutcome::Unknown);
+    }
+    let reactions = load(js, &[request.message]).await?.remove(&request.message).unwrap_or_default();
+    Ok(ReactionsOutcome::Listed { reactions })
+}
+
+/// Answer the reactions requests of ants on `client`, a human's connection, in the queue group of every process that
+/// does, until the subscription ends. Each answer goes to the asking ant's [`subject::reactions_reply`] only.
+pub async fn serve(client: async_nats::Client, js: jetstream::Context) -> Result<()> {
+    let requests = client
+        .queue_subscribe(subject::ALL_REACTIONS_REQUESTS, QUEUE.to_owned())
+        .await
+        .context("subscribing to reactions requests")?;
+    requests.for_each_concurrent(CONCURRENT, |msg| respond(&client, &js, msg)).await;
+    bail!("the subscription to reactions requests ended")
+}
+
+async fn respond(client: &async_nats::Client, js: &jetstream::Context, msg: async_nats::Message) {
+    let request = serde_json::from_slice::<ReactionsRequest>(&msg.payload)
+        .map_err(|e| e.to_string())
+        .and_then(|r| r.check_subject(&msg.subject).map(|()| r).map_err(|e| e.to_string()));
+    let request = match request {
+        Ok(request) => request,
+        Err(error) => {
+            tracing::warn!(subject = %msg.subject, error, "dropping a reactions request");
+            return;
+        }
+    };
+    let outcome = match answer(js, &request).await {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            // No answer: the ant repeats the request, and a later attempt may get through.
+            tracing::warn!(ant = %request.ant, message = %request.message, error = format!("{e:#}"), "reading reactions");
+            return;
+        }
+    };
+    if outcome == ReactionsOutcome::Unknown {
+        tracing::debug!(ant = %request.ant, message = %request.message, "reactions asked of a message the ant does not read");
+    }
+    let reply = ReactionsReply { request_id: request.id, ant: request.ant, message: request.message, outcome };
+    let payload = serde_json::to_vec(&reply).expect("an answer");
+    if let Err(e) = client.publish(reply.subject(), payload.into()).await {
+        tracing::warn!(error = %e, "answering a reactions request");
+    }
+}
+
+/// Ask, as the ant `ant` on `client`, for the reactions to message `message`, repeating the request every
+/// [`REACTIONS_REPEAT`]: the answer, None when nothing answered within [`REACTIONS_WAIT`].
+pub async fn ask(client: &async_nats::Client, ant: &UserId, message: Uuid) -> Result<Option<ReactionsOutcome>> {
+    let request = ReactionsRequest::new(ant.clone(), message);
+    let mut replies = client.subscribe(request.reply_subject()).await.context("subscribing to the answers")?;
+    let payload = serde_json::to_vec(&request)?;
+    let deadline = tokio::time::Instant::now() + REACTIONS_WAIT;
+    while tokio::time::Instant::now() < deadline {
+        client.publish(request.subject(), payload.clone().into()).await.context("asking for the reactions")?;
+        let next = (tokio::time::Instant::now() + REACTIONS_REPEAT).min(deadline);
+        while let Ok(msg) = tokio::time::timeout_at(next, replies.next()).await {
+            let msg = msg.context("the answers ended")?;
+            match serde_json::from_slice::<ReactionsReply>(&msg.payload) {
+                Ok(reply) if reply.request_id == request.id && reply.check_subject(&msg.subject).is_ok() => {
+                    return Ok(Some(reply.outcome));
+                }
+                Ok(_) => tracing::debug!("ignoring an answer to another reactions request"),
+                Err(e) => tracing::warn!(error = %e, "ignoring a malformed reactions answer"),
+            }
+        }
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use ants_test_support::NatsServer;
@@ -271,5 +390,66 @@ mod tests {
         assert!(rollup.is_err(), "a rollup is refused");
         assert!(js.get_stream(format!("KV_{REACTIONS_BUCKET}")).await.unwrap().purge().await.is_err());
         assert_eq!(load(&js, &[message]).await.unwrap()[&message], [reacted("eyes", &["alice"])]);
+    }
+
+    /// An ant learns the reactions to the messages it reads, and nothing of the others, not even by storing a copy of
+    /// one under its id where it reads.
+    #[tokio::test]
+    async fn ants_read_the_reactions_to_the_messages_they_read_only() {
+        use ants_proto::{ChannelPost, Envelope, NotesPost};
+        let Some(server) = NatsServer::start() else { return };
+        let (client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        hub::init(&js, |_| true).await.unwrap();
+        let (dev_a, dev_b, dev_c) = (p("dev-a"), p("dev-b"), p("dev-c"));
+        let to_a = Envelope::new(UserId::human(), dev_a.clone(), "for dev-a");
+        let between = Envelope::new(dev_b.clone(), dev_c.clone(), "between dev-b and dev-c");
+        let notes = NotesPost::new(between.thread_id.clone(), dev_c.clone(), "notes anyone reads");
+        let post = ChannelPost::new("ops".parse().unwrap(), dev_b.clone(), "a channel anyone reads");
+        for envelope in [&to_a, &between] {
+            bus::publish(&js, envelope).await.unwrap();
+        }
+        bus::store(&js, notes.subject(), &notes, &notes.id.to_string()).await.unwrap();
+        bus::store(&js, post.subject(), &post, &post.id.to_string()).await.unwrap();
+        // dev-a learned the id, and stores a copy of the message in its own inbox, under another msg id.
+        let copy = Envelope { id: between.id, ..Envelope::new(dev_c.clone(), dev_a.clone(), "copy") };
+        bus::store(&js, copy.subject(), &copy, "copy").await.unwrap();
+        // A message stored long after the time its id says.
+        let (secs, _) = between.id.get_timestamp().unwrap().to_unix();
+        let stale = uuid::Uuid::new_v7(uuid::Timestamp::from_unix(uuid::NoContext, secs - 2 * 24 * 3600, 0));
+        let late = Envelope { id: stale, ..Envelope::new(UserId::human(), dev_a.clone(), "late") };
+        bus::publish(&js, &late).await.unwrap();
+        for message in [to_a.id, between.id, notes.id, post.id, stale] {
+            add(&js, None, &p("alice"), &message, &r("eyes")).await.unwrap();
+        }
+
+        let outcome =
+            async |ant: &UserId, message| answer(&js, &ReactionsRequest::new(ant.clone(), message)).await.unwrap();
+        let listed = ReactionsOutcome::Listed { reactions: vec![reacted("eyes", &["alice"])] };
+        for message in [to_a.id, notes.id, post.id] {
+            assert_eq!(outcome(&dev_a, message).await, listed, "{message}");
+        }
+        assert_eq!(outcome(&dev_a, between.id).await, ReactionsOutcome::Unknown, "neither its sender nor recipient");
+        assert_eq!(outcome(&dev_b, between.id).await, listed, "its sender reads it");
+        assert_eq!(outcome(&dev_c, between.id).await, listed, "as does its recipient");
+        assert_eq!(outcome(&dev_b, to_a.id).await, ReactionsOutcome::Unknown);
+        assert_eq!(outcome(&dev_a, Uuid::now_v7()).await, ReactionsOutcome::Unknown, "no such message");
+        assert_eq!(outcome(&dev_a, uuid::Uuid::new_v4()).await, ReactionsOutcome::Unknown, "no ants id");
+        assert_eq!(outcome(&dev_a, stale).await, ReactionsOutcome::Unknown, "stored too late to tell");
+        let quiet = Envelope::new(UserId::human(), dev_a.clone(), "no reactions");
+        bus::publish(&js, &quiet).await.unwrap();
+        assert_eq!(outcome(&dev_a, quiet.id).await, ReactionsOutcome::Listed { reactions: Vec::new() });
+
+        // Over NATS: the ant asks on its own subject and hears the answer on its own reply subject.
+        let serving = tokio::spawn(serve(client, js.clone()));
+        let (ant, _) = bus::connect(&server.url, None, None, &dev_a, "test").await.unwrap();
+        assert_eq!(ask(&ant, &dev_a, to_a.id).await.unwrap(), Some(listed));
+        assert_eq!(ask(&ant, &dev_a, between.id).await.unwrap(), Some(ReactionsOutcome::Unknown));
+        // A request naming another ant than its subject does goes unanswered.
+        let mut replies = ant.subscribe(subject::reactions_reply(&dev_b)).await.unwrap();
+        let forged = ReactionsRequest::new(dev_b.clone(), between.id);
+        let payload = serde_json::to_vec(&forged).unwrap();
+        ant.publish(subject::reactions(&dev_a), payload.into()).await.unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(500), replies.next()).await.is_err());
+        serving.abort();
     }
 }

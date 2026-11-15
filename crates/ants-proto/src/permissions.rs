@@ -80,7 +80,9 @@ fn notify_prefs_rights(human: &UserId) -> [String; 6] {
 /// What a user's credentials need for reactions ([`REACTIONS_BUCKET`]): putting, deleting and reading back by direct
 /// gets its own keys only, so no one forges or removes another's reaction; and for a human, creating the bucket and
 /// reading every reaction, singly and through the ordered consumers behind listing and watching them. An ant reads no
-/// one else's: subjects cannot tie a message id to the threads and channels whose messages it may read.
+/// one else's: subjects cannot tie a message id to the threads and channels whose messages it may read. It asks for
+/// those to a message instead, only as itself ([`subject::reactions`]), and a human's `ants webhook serve` answers,
+/// on the ant's own [`subject::reactions_reply`], once it found the ant reads the message.
 fn reaction_rights(user: &UserId, role: Role) -> Vec<String> {
     let reactions = kv_stream(REACTIONS_BUCKET);
     let own = format!("$KV.{REACTIONS_BUCKET}.{user}.>");
@@ -345,6 +347,8 @@ impl Permissions {
             subject::ALL_APPROVAL_DECISIONS.to_owned(),
             subject::ALL_CANCELS.to_owned(),
             subject::ALL_QUEUE_REQUESTS.to_owned(),
+            // Answering an ant's request for the reactions to a message it reads.
+            subject::ALL_REACTIONS_REPLIES.to_owned(),
             // Withdrawing a message from an ant's queue: creating its mark, and reading the mark that won.
             format!("$KV.{ATTEMPTS_BUCKET}.*.msg.*"),
             format!("$JS.API.DIRECT.GET.{attempts}.$KV.{ATTEMPTS_BUCKET}.*.msg.*"),
@@ -426,6 +430,8 @@ impl Permissions {
             subject::renew(user.as_str()),
             // Asking the signer for an ant added from a template, should it manage one.
             subject::antreq(user),
+            // Asking for the reactions to a message it reads.
+            subject::reactions(user),
         ]);
         // The spares of its inbox consumer and its notes and channel readers, for the CLI, each with the same
         // filter pinned; no ack, so the spares of the inbox consumer only read it.

@@ -25,6 +25,10 @@
 //! `ants tools approve` or `reject` does (the first decision wins). ntfy's buttons `POST` directly; Slack's and
 //! Telegram's open the confirmation page.
 //!
+//! Each human's connection also answers ants asking for the reactions to a message, in one queue group across every
+//! process and human: only humans' credentials read the reactions bucket, and the answer lists them only for a message
+//! the ant reads ([`ants_daemon::reactions::serve`]).
+//!
 //! A notice a snooze or quiet hours hold back is dropped. With `digest = true`, it is counted first in the human's
 //! [`HeldNotices`] in [`NOTIFY_BUCKET`], with compare-and-set, by whichever process took it; once neither holds any
 //! more, checked every [`DIGEST_EVERY`] and before the next notice sent, one process claims the count by deleting it
@@ -1354,7 +1358,9 @@ pub async fn run(
         tracing::warn!(human = %name, "sinks of a device get every notice: {e:#}");
     }
     let present = Present::new(&js, js_domain.as_ref()).await?;
-    let (prefs, held) = match crate::humans::Rights::from_creds(creds) {
+    let rights = crate::humans::Rights::from_creds(creds);
+    let answers = rights.as_ref().is_ok_and(|r| r.may_publish(subject::ALL_REACTIONS_REPLIES));
+    let (prefs, held) = match rights {
         Ok(rights) if rights.may_publish(&subject::notify_prefs(name)) => {
             // Through a leaf node, a direct get of a missing bucket goes unanswered rather than finding none.
             let bucket = crate::quiet::ensure_bucket(&js).await.inspect_err(|e| tracing::warn!(human = %name, "{e:#}"));
@@ -1385,12 +1391,14 @@ pub async fn run(
     let bus = human.bus.get().expect("just set");
     tracing::info!(human = %name, sinks = ?human.config.sinks, "notifying");
     let mut unserved = Box::pin(tell_unserved(&human.config, bus, unserved));
+    let mut reactions = Box::pin(answer_reactions(name, answers, bus));
     let mut digests = Box::pin(digests(&human.config, bus));
     let mut delay = Duration::from_secs(1);
     loop {
         let watched = tokio::select! {
             watched = watch(&human, bus, links.as_deref()) => watched,
             never = &mut unserved => match never {},
+            never = &mut reactions => match never {},
             never = &mut digests => match never {},
         };
         match watched {
@@ -1547,6 +1555,27 @@ async fn tell_unserved(human: &Human, bus: &HumanBus, watch: Option<Watch>) -> s
         }
     }
     std::future::pending().await
+}
+
+/// Answer the ants asking for the reactions to the messages they read, with the credentials of `human`, which read
+/// every reaction, while the process runs; with `answers` false, credentials too old to answer, nothing.
+async fn answer_reactions(human: &UserId, answers: bool, bus: &HumanBus) -> std::convert::Infallible {
+    if !answers {
+        tracing::warn!(
+            human = %human,
+            "credentials from before ants read reactions: no ant's request for them is answered here; renew with \
+             `ants auth user {human} --human`"
+        );
+        std::future::pending::<()>().await;
+    }
+    let mut delay = Duration::from_secs(1);
+    loop {
+        if let Err(e) = ants_daemon::reactions::serve(bus.client.clone(), bus.js.clone()).await {
+            tracing::warn!(human = %human, retry_in = ?delay, "answering reactions requests: {e:#}");
+        }
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(Duration::from_secs(30));
+    }
 }
 
 /// The notices held back from `human` and the revision they were read at, 0 when never stored: none when missing or
