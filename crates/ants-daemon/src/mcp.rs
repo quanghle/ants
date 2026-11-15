@@ -537,9 +537,9 @@ impl Hub {
         let current = self.sessions.lock().expect("sessions").current.get(thread).map(|e| {
             let carried = e.escalation.as_deref().cloned();
             let owner = (self.humans.human_owner(e.owner.as_ref()), e.creator.clone(), e.origin_thread.clone());
-            (e.turn_budget, owner, self.humans.owner_of(e), carried)
+            (e.turn_budget, owner, self.humans.owner_of(e), carried, e.allow.clone())
         });
-        let (budget, (owner, creator, origin_thread), human, carried) =
+        let (budget, (owner, creator, origin_thread), human, carried, allow) =
             current.ok_or("no message is being handled on this thread; posts go out only while one is")?;
         for _ in 0..POST_TRIES {
             let notes = self.notes.read(thread).await.map_err(|e| format!("cannot read the thread notes: {e:#}"))?;
@@ -565,7 +565,8 @@ impl Hub {
             )
             .with_owner(owner.clone())
             .with_creator(creator.clone())
-            .with_origin_thread(origin_thread.clone());
+            .with_origin_thread(origin_thread.clone())
+            .with_allow(allow.clone());
             let Some(escalator) = &self.escalator else {
                 tracing::info!(%thread, %human, "thread notes out of turns; handing the thread to its owner");
                 self.send(&notice).await.map_err(|e| {
@@ -689,7 +690,9 @@ impl Hub {
             .reply(self.ant.clone(), "", self.humans.sender_role(&current))
             .map_err(|_| format!("thread {thread} has no turns left; answer {} in the reply instead", current.from))?
             .turn_budget;
-        let mut post = ChannelPost::new(channel.clone(), self.ant.clone(), text).with_creator(Some(self.ant.clone()));
+        let mut post = ChannelPost::new(channel.clone(), self.ant.clone(), text)
+            .with_creator(Some(self.ant.clone()))
+            .with_allow(current.allow.clone());
         post.turn_budget = left;
         (access.post)(post.clone()).await.map_err(|e| format!("not posted: {e:#}"))?;
         let humans = self.humans.humans();

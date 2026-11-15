@@ -209,7 +209,8 @@ pub fn wake(ant: &UserId, entry: Option<&ChannelEntry>, post: &ChannelPost, huma
 
 /// `post` as an inbox message from its author to `ant`, owned by the thread's owner the post carries, and created by
 /// its creator, which the daemon took from the thread's posts ([`Threads::origin`]): what the attempt markers, caps,
-/// escalations and tools of the thread go by. A webhook's post stays a webhook's ([`Envelope::webhook`]).
+/// escalations and tools of the thread go by. A webhook's post stays a webhook's ([`Envelope::webhook`]), and the post's
+/// tool rules stay its ([`Envelope::allow`]).
 pub fn as_envelope(post: &ChannelPost, ant: &UserId) -> Envelope {
     Envelope {
         id: post.id,
@@ -225,6 +226,7 @@ pub fn as_envelope(post: &ChannelPost, ant: &UserId) -> Envelope {
         escalation: None,
         approval: None,
         webhook: post.webhook,
+        allow: post.allow.clone(),
         mention: None,
         sent_at: post.sent_at,
     }

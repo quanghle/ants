@@ -451,6 +451,10 @@ impl Escalator {
     /// Send `escalation` to every ant of `to`, with `summary`. Another ant's escalation goes to it as well, first,
     /// so its daemon follows the level ([`Escalator::took_climb`]).
     async fn to_chain(&self, escalation: &Escalation, to: &[UserId], summary: &str, stuck: &Stuck) -> Result<()> {
+        let allow = match &stuck.notice.allow {
+            Some(allow) => Some(allow.clone()),
+            None => self.ledger.narrowed(&escalation.thread_id, None).await?,
+        };
         if escalation.stuck != self.ant {
             let (thread, leader) = (&escalation.thread_id, &escalation.leader);
             let text = format!(
@@ -463,7 +467,8 @@ impl Escalator {
                 .with_owner(stuck.notice.owner.clone())
                 .with_creator(stuck.notice.creator.clone())
                 .with_origin_thread(stuck.notice.origin_thread.clone())
-                .with_escalation(Some(escalation.clone()));
+                .with_escalation(Some(escalation.clone()))
+                .with_allow(allow.clone());
             (self.send)(notice, format!("{}-{}", stuck.id, escalation.stuck)).await?;
         }
         let text = chain_text(escalation, to, summary);
@@ -473,7 +478,8 @@ impl Escalator {
                     .with_owner(stuck.notice.owner.clone())
                     .with_creator(stuck.notice.creator.clone())
                     .with_origin_thread(stuck.notice.origin_thread.clone())
-                    .with_escalation(Some(escalation.clone()));
+                    .with_escalation(Some(escalation.clone()))
+                    .with_allow(allow.clone());
             envelope.in_reply_to = stuck.notice.in_reply_to;
             (self.send)(envelope, format!("{}-{target}", stuck.id)).await?;
         }

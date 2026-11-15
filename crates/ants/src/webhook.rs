@@ -130,6 +130,7 @@ struct Entry {
     broadcast: bool,
     owner: Option<UserId>,
     text: Option<String>,
+    allow: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -167,6 +168,8 @@ pub struct Webhook {
     mentions: Mentions,
     owner: Option<UserId>,
     text: Vec<Piece>,
+    /// The tool rules the threads it starts are narrowed to; None for [`ants_proto::WEBHOOK_ALLOW`].
+    allow: Option<Vec<String>>,
 }
 
 #[derive(PartialEq)]
@@ -430,7 +433,11 @@ impl Webhook {
         };
         let text = template(entry.text.as_deref().unwrap_or(DEFAULT_TEXT))?;
         let creds = entry.creds.as_deref().map(resolve);
-        Ok(Self { name: entry.name, creds, auth, id, destination, mentions, owner: entry.owner, text })
+        if let Some(allow) = &entry.allow {
+            ants_daemon::Allowlist::parse(allow)?;
+        }
+        let (owner, allow) = (entry.owner, entry.allow);
+        Ok(Self { name: entry.name, creds, auth, id, destination, mentions, owner, text, allow })
     }
 
     fn check_creds(&self) -> Result<()> {
@@ -679,6 +686,8 @@ pub(crate) struct Delivery<'a> {
     pub(crate) destination: &'a Destination,
     pub(crate) mentions: &'a Mentions,
     pub(crate) owner: Option<&'a UserId>,
+    /// The tool rules the thread is narrowed to ([`Envelope::allow`]).
+    pub(crate) allow: Option<&'a [String]>,
     /// Its key in [`WEBHOOKS_BUCKET`] ([`webhook_seen_key`]).
     pub(crate) key: String,
     /// The stream's `Nats-Msg-Id` of the message.
@@ -994,14 +1003,18 @@ impl Bus {
 
     /// Deliver `event` as a new thread unless it was delivered already, and return once the hub's stream stored it.
     pub(crate) async fn deliver(&self, event: Delivery<'_>) -> Result<Delivered> {
-        let Delivery { from, destination, mentions, owner, key, message_id, text } = event;
+        let Delivery { from, destination, mentions, owner, allow, key, message_id, text } = event;
+        let allow = allow.map(<[String]>::to_vec);
         if let Some(seen) = self.seen(&key).await? {
             return Ok(Delivered { thread: Some(seen.thread), duplicate: true });
         }
         self.mark(from).await?;
         let (subject, payload, thread) = match destination {
             Destination::Ant(ant) => {
-                let message = Envelope::new(from.clone(), ant.clone(), text).with_owner(owner.cloned()).from_webhook();
+                let message = Envelope::new(from.clone(), ant.clone(), text)
+                    .with_owner(owner.cloned())
+                    .with_allow(allow)
+                    .from_webhook();
                 if let Some(owner) = owner {
                     owners::recording(&self.js, self.js_domain.as_ref(), &message.thread_id, ant, owner).await;
                 }
@@ -1015,6 +1028,7 @@ impl Bus {
                 };
                 let post = ChannelPost::new(channel.clone(), from.clone(), text)
                     .with_owner(owner.cloned())
+                    .with_allow(allow)
                     .from_webhook(mentions);
                 (post.subject(), serde_json::to_vec(&post)?, post.thread_id)
             }
@@ -1220,6 +1234,7 @@ impl Hook {
                 destination: &hook.destination,
                 mentions: &hook.mentions,
                 owner: hook.owner.as_ref(),
+                allow: hook.allow.as_deref(),
                 key: webhook_seen_key(&hook.name, &event.hash),
                 message_id: format!("webhook.{}.{}", hook.name, event.hash),
                 text: event.text,
@@ -1316,7 +1331,7 @@ pub(crate) mod tests {
              [[webhook]]\nname = \"ci\"\nauth = \"hmac-sha256\"\nsecret_env = \"HOOK_SECRET\"\nchannel = \"ops\"\n\
              broadcast = true\ncreds = \"ci.creds\"\n\
              [[webhook]]\nname = \"alerts\"\nauth = \"bearer\"\nsecret_env = \"HOOK_SECRET\"\nchannel = \"ops\"\n\
-             mention = [\"dev-b\"]\nid = \"json:/alert/id\"\n"
+             mention = [\"dev-b\"]\nid = \"json:/alert/id\"\nallow = [\"read:*\", \"execute:gh run view*\"]\n"
         ))
         .unwrap();
         assert_eq!(config.path, "/in");
@@ -1329,6 +1344,10 @@ pub(crate) mod tests {
         assert_matches!(alerts.id, IdSource::Json(ref p) if p == "/alert/id");
         assert_eq!((&github.mentions, &ci.mentions), (&Mentions::Nobody, &Mentions::Members));
         assert_eq!(alerts.mentions, Mentions::Listed(vec![p("dev-b")]));
+        assert_eq!(
+            (&github.allow, &alerts.allow),
+            (&None, &Some(vec!["read:*".into(), "execute:gh run view*".into()]))
+        );
 
         for (extra, why) in [
             ("", "exactly one of ant and channel"),
@@ -1343,6 +1362,7 @@ pub(crate) mod tests {
             ("ant = \"dev-a\"\nsignature_header = \"X-Sig\"", "hmac-sha256\" only"),
             ("ant = \"dev-a\"\nsecret_file = \"s\"", "exactly one of secret_env and secret_file"),
             ("ant = \"dev-a\"\nurl = \"x\"", "unknown field `url`"),
+            ("ant = \"dev-a\"\nallow = [\"write\"]", "unknown tool kind"),
         ] {
             let e = error(&format!("{HOOK}{extra}\n"));
             assert!(e.contains("webhook github") || e.contains("unknown field"), "{e}");
