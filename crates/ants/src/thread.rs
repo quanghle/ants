@@ -904,9 +904,7 @@ pub async fn prune(
     match meta.prune(marks, titles, gone, active).await {
         Ok((0, 0)) => {}
         Ok((marks, titles)) => tracing::debug!(marks, titles, "forgot the marks and titles of threads with no message"),
-        Err(e) => {
-            tracing::warn!("not forgetting the titles, pins, archives and keeps of threads with no message: {e:#}")
-        }
+        Err(e) => tracing::warn!("not forgetting the marks and titles of threads with no message: {e:#}"),
     }
 }
 
