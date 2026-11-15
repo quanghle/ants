@@ -145,7 +145,7 @@ pub fn held_notice(envelope: &Envelope, decision: &ApprovalDecision, human: &Use
 }
 
 /// The first line of `text`, cut to a short excerpt.
-fn excerpt(text: &str) -> String {
+pub fn excerpt(text: &str) -> String {
     const MAX: usize = 120;
     let line = text.trim().lines().next().unwrap_or_default();
     match line.char_indices().nth(MAX) {

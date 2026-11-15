@@ -225,14 +225,14 @@ An assistant opens and seals its human's sealed messages only when the human enr
 While a grant standing enrolls it, readers verifying the grant as above take the device as one of the human's, without an `ants_devices` entry:
 
 - `ants ask` and `ants chat` seal a message between the human and another human for the assistant too, either way, and `ants thread title` the title of their thread.
-- The daemon library opens and seals with the key for the assistant (`ants_daemon::sealing::AssistantSealing`): a sealed message from or to its human, or from the assistant, opens, and one the assistant sends for its human is sealed from the assistant (`from` the ant, never its human) for every device of the human and of the recipient, refusing attachments and a recipient without a device of its own. It reads `ants_devices` to check the sending devices.
+- The assistant's daemon opens and seals with the key for its [tools](#tools-acting-for-its-human) (`ants_daemon::sealing::AssistantSealing`), loading the seed beside its credentials on start (warning, with sealing off, when it cannot): a sealed message from or to its human, or from the assistant, opens, and one the assistant sends for its human is sealed from the assistant (`from` the ant, never its human) for every device of the human and of the recipient, refusing attachments and a recipient without a device of its own. It reads `ants_devices` to check the sending devices.
 - A reader checks a message sealed with the device as sent by the assistant: one naming its human as `from` reads `[forged]`, so the assistant cannot pass a message off as its human's.
 
 `ants assistant seal off`, `ants assistant clear`, `ants assistant disable`, and `ants assistant set` or `enable` of another ant end the enrollment at once: senders read the grant standing for each message they seal, so nothing more is sealed for the device, and the assistant's daemon opens and seals nothing once its watch delivers the record. The key is no credential the account signed, so ending it takes no account key and no `ants auth push`. The command deletes the seed where the assistant runs on the same machine, and otherwise says where it stays: deleting it there leaves the messages sealed for the device before unopened by anyone holding it. Revoking the assistant's own credentials, `ants auth revoke ANT` and `ants auth push` with the account key, stays apart from this.
 
 #### Acting for its human
 
-What an assistant does for its human it does under its own name: the subject or key pins the assistant as the sender, and the payload names the human in `on_behalf_of` (absent otherwise). It is carried by an inbox message (`Envelope`, an approval decision sent on one included), an `ApprovalDecision`, a reaction (`ReactionEntry`, and `ReactionChange` as followers hear it), a thread title (`ThreadTitle`) and a thread marked done (`ThreadDone`). The daemon library sets it for the MCP tools of an assistant's harness (`Mcp::assisting`) only while its credentials name a human.
+What an assistant does for its human it does under its own name: the subject or key pins the assistant as the sender, and the payload names the human in `on_behalf_of` (absent otherwise). It is carried by an inbox message (`Envelope`, an approval decision sent on one included), an `ApprovalDecision`, a reaction (`ReactionEntry`, and `ReactionChange` as followers hear it), a thread title (`ThreadTitle`) and a thread marked done (`ThreadDone`). The daemon sets it for the [tools an assistant acts for its human with](#tools-acting-for-its-human) only while its credentials name a human and the human's grant names the assistant.
 
 So that a reader can check the assistant's tag without a JWT in every message, the assistant's daemon puts, on start, its user JWT in `ants_devices` under `<assistant>.assistant` (`{"jwt": "<user JWT>"}`, `AssistantRecord`), when the entry differs, warning without failing when it cannot. Only an assistant's credentials put that key, and only their own; no device id is `assistant`, so the key is no device's entry. A reader honours `on_behalf_of: <human>` from publisher `<assistant>` only when:
 
@@ -262,6 +262,30 @@ The first (`Confirmations`, under `<human>.confirmed`) keeps the human's latest 
 The requester's daemon keeps the latest decision of each assistant held on each request it waits on, from its watch of `ants_humans`. It applies one as soon as the grant still names the assistant and the human's answer to that act (the request, the assistant and the verdict) is `confirm`, or a pre-allow rule covers it; a `deny` drops it. A human's own stored decision coming first wins. Withdrawing or replacing the assistant drops the decisions the daemon holds of it at once. The request's status reports the decision as the human's (`decided`, `by: human`, `decider: <human>`) with `via: <assistant>`, which `ants watch` prints as `by alice via pa`. The CLI reads the same records, unverified, to tell such a request decided: `ants tools list` and `show` and the approvals view show it decided by `pa for alice`, `ants inbox -f` prints a line when a decision is held, and `ants chat` home shows it on the request: `pa chose allow-once for alice: ants assistant confirm dev-a/<id>`.
 
 An assistant still has no right to publish admin orders or decisions on `ants.approvals.*.*` (see [wire ACLs](#wire-acls-and-verification-invariants)), and a decision stored there with `on_behalf_of` decides nothing. The consent records also carry an `order` act (`{"order": {"machine", "ant", "id"}}`) for an [admin order](#admin-orders) an assistant would issue for its human; no daemon applies such an order yet.
+
+#### Tools acting for its human
+
+An assistant's harness sessions get, beside the other [MCP tools](../README.md#mcp-tools), tools that act for its human, while the human's grant, read from the daemon's watch of `ants_humans` and verified as in [assistant grant](#assistant-grant), names the ant. Listing the tools leaves them out otherwise, and each call checks the grant again: a withdrawal or a replacement removes them from the next listing and refuses every call at once (`the grant of alice no longer names pa: nothing is done for alice`), on connections already open too, and a later grant brings them back.
+
+| Tool | What it does for the human |
+|---|---|
+| `human_queue(thread?)` | Read what the human's home in `ants chat` shows from the last 7 days: questions ants asked it not yet answered, tool requests waiting for its decision or its stand-in's (`<ant>/<id>`, the tool, its options and expiry, and whether the assistant's decision on it is held), and messages to it, not from the assistant, after its read marker, leaving out threads marked done since their last message, at most 30 of each, with their message ids and threads. With `thread`, the messages to and from the human on that thread. |
+| `answer_for_human(message_id, answer)` | Answer a question to the human with an option's number or typed text, on the question's thread. |
+| `send_for_human(to, text, thread?, plaintext?)` | Send a message to an ant or another human, on `thread` or a new one; no attachments. |
+| `react_for_human(message_id, reaction, remove?)` | Add or remove a reaction to a message to or from the human. |
+| `title_for_human(thread, title)` | Set the title of a thread of the human's (as `ants thread title`). |
+| `done_for_human(thread)` | Mark a thread of the human's done (as `ants thread done`). |
+| `decide_for_human(request, verdict)` | Decide a tool request waiting for the human (`allow_once`, `allow_always`, `reject`). |
+
+Each act goes under the assistant's own name with `on_behalf_of` the human: a message (an answer, or a decision, carried by an `Envelope`), a reaction, a title, a done mark. An answer counts as the human's for the question it answers, which takes it out of the queue; the asking ant's daemon tells the human of it, and of a message sent to an ant, as in [acting for its human](#acting-for-its-human). For a message to another human, a reaction, a title and a done mark, which no daemon receives, the tool tells the human itself, with a message in its inbox from the assistant (`[ants] pa, as the assistant of alice, ...`, with no `on_behalf_of`). A decision goes to the requesting ant's inbox, never `ants.approvals.*.*`, and is held there until the human [confirms it](#confirming-an-assistants-acts) or a pre-allow rule covers it.
+
+Sealed messages are read and sent only while the grant [enrolls the assistant as a device](#assistant-as-a-device):
+
+- `human_queue` opens the human's sealed messages for the assistant, and shows `[sealed]` for one it cannot open (no enrollment, or a message sealed before it) and `[forged]` for one failing its sender check.
+- `send_for_human` seals a message to a human for the recipient's and the human's devices, refusing without the enrollment; `plaintext: true` sends it unsealed. Its notice to the human never quotes a sealed text.
+- `title_for_human` refuses a thread carrying sealed messages: titles are stored in the clear.
+
+The tools need no right beyond the [assistant's](#wire-acls-and-verification-invariants): reads of the `ANTS` stream and `ants_read` marker of its human, puts of `ants_threads` titles and done marks and of its own reactions, and reads of `ants_devices`. An assistant cannot yet issue [admin orders](#admin-orders) for its human: no tool does.
 
 ## Adding an ant
 

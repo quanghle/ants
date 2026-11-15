@@ -18,6 +18,9 @@
 //! session works in, `attach_to_reply` attaches them to the turn's final answer ([`Mcp::reply_files`]), and
 //! `read_attachment` reads an attachment of a message the ant reads (see [`attach`]).
 //!
+//! An assistant also gets the `*_for_human` tools, which act for its human while the human's grant names it: read the
+//! human's home queue, answer questions, send, react, title, mark done and decide tool requests (see [`assist`]).
+//!
 //! One server per ant, with two ways in: streamable HTTP on a loopback port, for harnesses that take HTTP MCP
 //! servers, and a local socket that `ants mcp` bridges stdio to, for the others (see [`crate::ipc`]). The sessions of each thread get their
 //! own bearer token, which tells the tools which thread calls them.
@@ -69,8 +72,10 @@ use crate::redact::Redactor;
 use crate::sync::MutexExt as _;
 use crate::{bus, ipc, links, reactions, roster};
 
+mod assist;
 mod attach;
 
+pub use assist::{HumanMessage, HumanSealing, HumanStore, jetstream_store};
 pub use attach::{FileAccess, jetstream_files};
 
 /// Environment variable carrying the session's token to `ants mcp`.
@@ -306,6 +311,8 @@ impl Mcp {
             requester: OnceLock::new(),
             reaction_asker: OnceLock::new(),
             assisting: OnceLock::new(),
+            human_store: OnceLock::new(),
+            sealing: OnceLock::new(),
             files: OnceLock::new(),
             redactor: OnceLock::new(),
             state_path,
@@ -363,8 +370,19 @@ impl Mcp {
     /// the ant's credentials make it the assistant of, while that human's grant names the ant. None otherwise, so
     /// whatever the tools send then is the ant's own.
     pub fn assisting(&self) -> Option<UserId> {
-        let human = self.hub.assisting.get()?;
-        (self.hub.humans.assistant(human).as_ref() == Some(&self.hub.ant)).then(|| human.clone())
+        self.hub.assisting_now()
+    }
+
+    /// Serve the tools acting for the human the ant assists ([`Mcp::with_assisting`]) through `store`; without it
+    /// they are refused.
+    pub fn with_human_store(&self, store: Arc<dyn HumanStore>) {
+        let _ = self.hub.human_store.set(store);
+    }
+
+    /// Open the human's sealed messages and seal those sent for it to humans through `sealing`, which does so only
+    /// while the human enrolled the ant as one of its devices; without it none is opened or sealed.
+    pub fn with_sealing(&self, sealing: Arc<dyn HumanSealing>) {
+        let _ = self.hub.sealing.set(sealing);
     }
 
     /// Store and read attachments through `files`, attaching and saving files in `workdir`, or the directory a
@@ -574,6 +592,10 @@ struct Hub {
     reaction_asker: OnceLock<ReactionAsker>,
     /// The human whose assistant the ant's credentials make it ([`ants_proto::AssistantOf`]).
     assisting: OnceLock<UserId>,
+    /// What the tools acting for that human read and write through.
+    human_store: OnceLock<Arc<dyn HumanStore>>,
+    /// What opens and seals that human's sealed messages.
+    sealing: OnceLock<Arc<dyn HumanSealing>>,
     /// The attachments' store and the ant's workdir.
     files: OnceLock<(FileAccess, PathBuf)>,
     /// What redacts the text files the tools attach; none redacts nothing.
@@ -1608,6 +1630,9 @@ impl Tools {
             tool_router.remove_route("request_ant");
             tool_router.remove_route("retire_ant");
         }
+        if hub.assisting.get().is_some() {
+            tool_router.merge(Self::assist_router());
+        }
         Self { hub, caller, tool_router }
     }
 
@@ -2277,16 +2302,50 @@ impl Tools {
     }
 }
 
-#[tool_handler(router = self.tool_router)]
-impl ServerHandler for Tools {
-    fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new(SERVER_NAME, env!("CARGO_PKG_VERSION")))
-            .with_instructions(instructions(&self.hub.ant, self.hub.requester.get().is_some()))
+impl Tools {
+    /// The tools offered now: those acting for the human the ant assists only while its grant names the ant.
+    fn offered(&self) -> Vec<rmcp::model::Tool> {
+        let mut tools = self.tool_router.list_all();
+        if self.hub.assisting.get().is_some() && self.hub.assisting_now().is_none() {
+            let assist = Self::assist_router();
+            tools.retain(|t| !assist.has_route(&t.name));
+        }
+        tools
     }
 }
 
-fn instructions(ant: &UserId, manager: bool) -> String {
+#[tool_handler(router = self.tool_router)]
+impl ServerHandler for Tools {
+    fn get_info(&self) -> ServerConfig {
+        let assisting = self.hub.assisting_now();
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new(SERVER_NAME, env!("CARGO_PKG_VERSION")))
+            .with_instructions(instructions(&self.hub.ant, self.hub.requester.get().is_some(), assisting.as_ref()))
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::ListToolsResult, ErrorData> {
+        // As the generated one does, but with what is offered now, never to be cached.
+        let hints = context.protocol_version().is_some_and(|v| v >= rmcp::model::ProtocolVersion::V_2026_07_28);
+        Ok(rmcp::model::ListToolsResult {
+            result_type: Some(rmcp::model::ResultType::COMPLETE),
+            tools: self.offered(),
+            meta: None,
+            next_cursor: None,
+            ttl_ms: hints.then_some(0),
+            cache_scope: hints.then_some(rmcp::model::CacheScope::Public),
+        })
+    }
+
+    fn get_tool(&self, name: &str) -> Option<rmcp::model::Tool> {
+        self.offered().into_iter().find(|t| t.name == name)
+    }
+}
+
+fn instructions(ant: &UserId, manager: bool, assisting: Option<&UserId>) -> String {
     let mut text = format!(
         "Messaging between ants; this session speaks as {ant}. send_message and ask_ant reach other \
          ants, check_inbox collects late replies, list_ants shows ants with the advertised whoami field \
@@ -2314,6 +2373,18 @@ fn instructions(ant: &UserId, manager: bool) -> String {
             " As a manager of ant templates, request_ant adds a worker ant from one when the work needs more hands \
              than the roster has; give the reason a human would need to approve it. retire_ant retires one it \
              added once its work is done, keeping its memory for a later request_ant of the same name.",
+        );
+    }
+    if let Some(human) = assisting {
+        let _ = write!(
+            text,
+            " As the assistant of {human}, act for {human} with the *_for_human tools: human_queue reads what waits \
+             for {human} in its home (questions, tool requests, unread messages) or one of its threads, \
+             answer_for_human answers a question asked of it, send_for_human messages an ant or human for it, \
+             react_for_human, title_for_human and done_for_human react to its messages and title or close its \
+             threads, and decide_for_human decides a tool request waiting for it, held until {human} confirms it. \
+             Each act goes out as this ant's, marked as for {human}, and {human} is told of it. Act for {human} only \
+             as it asked; the tools stop the moment {human} withdraws its grant."
         );
     }
     if *ant == UserId::messenger() {
