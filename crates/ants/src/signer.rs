@@ -332,8 +332,8 @@ impl Signer<'_> {
         let Some(leaf) = &request.leaf else { return Ok(None) };
         let domain = ants_daemon::creds::Finding::from_jwt(&request.credentials)?.js_domain;
         let name = &request.name;
-        let more =
-            Permissions::for_leaf(&leaf.machine, [(name, ants_proto::Role::Ant)]).with_js_domain(domain.as_ref());
+        let more = Permissions::for_leaf(&leaf.machine, [(name, ants_proto::Role::Ant)])
+            .with_uplink_js_domain(domain.as_ref());
         auth::extend_leaf(self.dir, &leaf.jwt, &leaf.machine, more)
             .map(Some)
             .with_context(|| format!("the uplink of the leaf node {} cannot carry {name}", leaf.machine))
