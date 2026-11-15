@@ -45,7 +45,7 @@ async fn a_fresh_hub_is_missing_its_stream_until_init() {
     assert!(checks.iter().all(|c| matches!(c.status, Status::Ok | Status::Skip)), "{checks:#?}");
     let hub = named(&checks, "hub");
     assert_eq!(hub.len(), 1, "{checks:#?}");
-    assert!(hub[0].detail.contains("presence not checked"), "{}", hub[0]);
+    assert!(hub[0].detail.contains("ants_presence, bucket ants_identities not checked"), "{}", hub[0]);
 }
 
 #[test]

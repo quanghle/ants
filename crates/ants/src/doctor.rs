@@ -558,7 +558,9 @@ async fn check_hub(js: &jetstream::Context, identity: &Identity) -> Vec<Check> {
         let checked = hub::Object::ALL.len() - unseen.len();
         let mut detail = format!("stream {STREAM} and {} buckets present", checked.saturating_sub(1));
         if !unseen.is_empty() {
-            let _ = write!(detail, " ({} not checked: the credentials get no stream info of it)", unseen.join(", "));
+            let them = if unseen.len() == 1 { "it" } else { "them" };
+            let _ =
+                write!(detail, " ({} not checked: the credentials get no stream info of {them})", unseen.join(", "));
         }
         return vec![Check::ok(check, detail)];
     }
