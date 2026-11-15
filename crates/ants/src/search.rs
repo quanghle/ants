@@ -173,12 +173,13 @@ impl Search {
         let mut found: BTreeMap<u64, Entry> = BTreeMap::new();
         let mut omitted = 0;
         for filter in self.filters() {
-            reading::read_back(js, "", Reading::Gets, &filter, start, |seq, stored, subject, payload| {
+            reading::read_back_awaiting(js, "", Reading::Gets, &filter, start, async |seq, stored, msg| {
                 let stored = DateTime::<Utc>::from(stored);
                 if self.until.is_some_and(|until| stored >= until) {
                     return ControlFlow::Break(());
                 }
-                if let Some(entry) = parser.entry(seq, stored, subject, payload).filter(|e| self.keeps(&kinds, e)) {
+                let entry = parser.read(seq, stored, &msg.subject, &msg.payload).await;
+                if let Some(entry) = entry.filter(|e| self.keeps(&kinds, e)) {
                     found.insert(seq, entry);
                     if found.len() > self.limit {
                         found.pop_first();
