@@ -1654,6 +1654,10 @@ pub struct RosterEntry {
     pub instance: Option<String>,
     /// Agent harness behind the ant, such as `copilot`.
     pub harness: String,
+    /// The agent the harness runs, as the ACP handshake of its latest start named it. Missing until a harness of the
+    /// daemon started, when the agent does not name itself, and from entries of older daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<HarnessAgent>,
     /// Free-form tags the ant is good for (`rust`, `frontend`, `billing`), for routing requests to it.
     #[serde(default)]
     pub capabilities: Vec<String>,
@@ -1727,6 +1731,19 @@ impl LimitKind {
             Self::Quota => "out-of-quota",
             Self::Unknown => "limited",
         }
+    }
+}
+
+/// The agent behind an ant's harness, as it names itself in ACP `initialize` ([`RosterEntry::agent`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessAgent {
+    pub name: String,
+    pub version: String,
+}
+
+impl fmt::Display for HarnessAgent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {}", self.name, self.version)
     }
 }
 
@@ -5466,6 +5483,7 @@ mod tests {
             machine: "build-1".to_owned(),
             instance: None,
             harness: "copilot".to_owned(),
+            agent: None,
             capabilities: vec!["rust".to_owned(), "nats".to_owned()],
             whoami: Some("Maintain the Rust backend.\nReview NATS changes.".to_owned()),
             workdir: None,
@@ -5485,8 +5503,15 @@ mod tests {
         assert!(!json.contains("escalate_to") && !json.contains("instance"), "{json}");
         assert!(!json.contains("version") && !json.contains("perms"), "{json}");
         assert!(!json.contains("signed_out") && !json.contains("limited"), "{json}");
+        assert!(!json.contains("agent"), "{json}");
         assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), entry);
         assert_eq!(entry.leader(), None);
+        let agent = HarnessAgent { name: "copilot-agent".to_owned(), version: "1.0.3".to_owned() };
+        let named = RosterEntry { agent: Some(agent.clone()), ..entry.clone() };
+        let json = serde_json::to_string(&named).unwrap();
+        assert!(json.contains(r#""agent":{"name":"copilot-agent","version":"1.0.3"}"#), "{json}");
+        assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), named);
+        assert_eq!(agent.to_string(), "copilot-agent 1.0.3");
         let versioned =
             RosterEntry { version: Some("0.3.1".to_owned()), perms: Some(PermissionsVersion(2)), ..entry.clone() };
         let json = serde_json::to_string(&versioned).unwrap();

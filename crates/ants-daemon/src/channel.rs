@@ -912,6 +912,7 @@ mod tests {
             machine: "m".to_owned(),
             instance: None,
             harness: "copilot".to_owned(),
+            agent: None,
             capabilities: vec!["rust".to_owned(), "ci".to_owned()],
             whoami: Some("Keeps the build\ngreen.".to_owned()),
             workdir: None,

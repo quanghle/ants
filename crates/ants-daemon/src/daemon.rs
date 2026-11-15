@@ -263,7 +263,8 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     answered.prune(bus::RETENTION).await;
     let buried = Buried::new(&config.home);
     buried.prune(bus::RETENTION).await;
-    let mut pool = Pool::new(launch, sessions, config.max_harnesses, config.idle_timeout);
+    let mut pool =
+        Pool::new(launch, sessions, config.max_harnesses, config.idle_timeout).reporting_to(workload.clone());
     let isolating =
         if config.worktrees { Worktrees::find(&config.ant, &config.workdir, &config.home).await } else { None };
     if let Some(worktrees) = isolating {
@@ -2125,6 +2126,7 @@ mod tests {
                 machine: "m".to_owned(),
                 instance: None,
                 harness: "copilot".to_owned(),
+                agent: None,
                 capabilities: Vec::new(),
                 whoami: None,
                 workdir: None,
@@ -4635,6 +4637,7 @@ mod tests {
             machine: "m".to_owned(),
             instance: None,
             harness: "copilot".to_owned(),
+            agent: None,
             capabilities: vec!["ci".to_owned()],
             whoami: Some("Keeps the build green.".to_owned()),
             workdir: None,

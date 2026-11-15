@@ -15,6 +15,7 @@ use tokio::sync::Notify;
 
 use crate::direct_kv::DirectKv;
 use crate::harness::{Launch, Prompt, Reply, Session};
+use crate::roster::Workload;
 use crate::worktrees::{Branch, Pruned, Worktrees};
 
 /// Where the session of every thread is kept, so a stopped harness or a restarted daemon resumes it.
@@ -92,6 +93,8 @@ pub struct Pool {
     worktrees: Option<Worktrees>,
     /// Each thread works in its worktree, instead of the shared workdir.
     isolate: bool,
+    /// Told the agent each harness starts with, for the roster.
+    workload: Option<Arc<Workload>>,
 }
 
 impl Pool {
@@ -112,7 +115,13 @@ impl Pool {
             changed: Notify::new(),
             worktrees: None,
             isolate: false,
+            workload: None,
         }
+    }
+
+    /// Tell `workload` the agent each harness starts with ([`Workload::set_agent`]).
+    pub fn reporting_to(self, workload: Arc<Workload>) -> Self {
+        Self { workload: Some(workload), ..self }
     }
 
     /// Each thread works in its own git worktree ([`Worktrees`]).
@@ -272,6 +281,9 @@ impl Pool {
             }
         }
         let session = Session::start(&launch, resume.clone()).await?;
+        if let Some(workload) = &self.workload {
+            workload.set_agent(session.agent().cloned());
+        }
         match &resume {
             Some(old) if *old == session.id() => tracing::info!(%thread, session = %old, "resumed harness session"),
             _ => tracing::info!(%thread, session = %session.id(), "started harness session"),
@@ -349,9 +361,10 @@ pub(crate) mod fake {
     use std::sync::{Arc, Mutex};
 
     use agent_client_protocol::v1::schema::{
-        AgentCapabilities, CancelNotification, ContentBlock, ContentChunk, Cost, InitializeRequest, InitializeResponse,
-        LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
-        SessionId, SessionNotification, SessionUpdate, StopReason, TextContent, ToolCall, Usage, UsageUpdate,
+        AgentCapabilities, CancelNotification, ContentBlock, ContentChunk, Cost, Implementation, InitializeRequest,
+        InitializeResponse, LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse,
+        PromptRequest, PromptResponse, SessionId, SessionNotification, SessionUpdate, StopReason, TextContent,
+        ToolCall, Usage, UsageUpdate,
     };
     use agent_client_protocol::{Agent, DynConnectTo};
     use tokio::sync::Semaphore;
@@ -422,7 +435,8 @@ pub(crate) mod fake {
                         async move |init: InitializeRequest, responder, _cx| {
                             responder.respond(
                                 InitializeResponse::new(init.protocol_version)
-                                    .agent_capabilities(AgentCapabilities::new().load_session(can_load)),
+                                    .agent_capabilities(AgentCapabilities::new().load_session(can_load))
+                                    .agent_info(Implementation::new("fake", "1.0")),
                             )
                         },
                         agent_client_protocol::on_receive_request!(),
@@ -654,6 +668,17 @@ mod tests {
         assert_eq!(pool.prompt(&thread(2), "three").await.unwrap(), "s2: three");
         let log = log.lock().unwrap();
         assert_eq!((log.starts, log.new_sessions), (2, 2));
+    }
+
+    #[tokio::test]
+    async fn a_harness_start_tells_the_roster_its_agent() {
+        let (launch, _, _) = fake::launch(true);
+        let workload = Arc::new(Workload::default());
+        let pool = Pool::new(launch, SessionStore::memory(), 4, IDLE).reporting_to(workload.clone());
+        assert_eq!(workload.agent(), None, "no harness started yet");
+        pool.prompt(&thread(1), "a").await.unwrap();
+        let fake = ants_proto::HarnessAgent { name: "fake".to_owned(), version: "1.0".to_owned() };
+        assert_eq!(workload.agent(), Some(fake));
     }
 
     #[tokio::test]

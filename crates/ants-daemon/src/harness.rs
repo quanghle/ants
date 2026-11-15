@@ -16,7 +16,7 @@ use agent_client_protocol::v1::schema::{
     TextContent, ToolCall, ToolCallId, ToolCallUpdate,
 };
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, DynConnectTo};
-use ants_proto::{PlanStep, StatusUpdate, ThreadId};
+use ants_proto::{HarnessAgent, PlanStep, StatusUpdate, ThreadId};
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde::Deserialize;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
@@ -716,6 +716,7 @@ pub struct Session {
     id: Arc<Mutex<SessionId>>,
     turns: mpsc::Sender<Turn>,
     task: tokio::task::JoinHandle<()>,
+    agent: Option<HarnessAgent>,
 }
 
 impl Session {
@@ -725,8 +726,13 @@ impl Session {
         let (turns, turns_rx) = mpsc::channel(1);
         let id = Arc::new(Mutex::new(SessionId::new("")));
         let task = tokio::spawn(serve(launch.clone(), resume, id.clone(), opened_tx, turns_rx));
-        opened.await.map_err(|_| anyhow!("{} exited before opening a session", launch.harness))??;
-        Ok(Self { id, turns, task })
+        let agent = opened.await.map_err(|_| anyhow!("{} exited before opening a session", launch.harness))??;
+        Ok(Self { id, turns, task, agent })
+    }
+
+    /// The agent the harness runs, as it named itself in `initialize`; None when it did not.
+    pub fn agent(&self) -> Option<&HarnessAgent> {
+        self.agent.as_ref()
     }
 
     /// The session the harness holds now.
@@ -905,7 +911,7 @@ async fn serve(
     launch: Launch,
     resume: Option<SessionId>,
     current: Arc<Mutex<SessionId>>,
-    opened: oneshot::Sender<Result<()>>,
+    opened: oneshot::Sender<Result<Option<HarnessAgent>>>,
     mut turns: mpsc::Receiver<Turn>,
 ) {
     let observed: Arc<Mutex<Observed>> = Arc::default();
@@ -951,7 +957,11 @@ async fn serve(
             let mut id = open(&cx, &launch, resume.clone(), caps.load_session, mcp.clone()).await?;
             *current.lock().expect("session id") = id.clone();
             if let Some(tx) = opened.take() {
-                let _ = tx.send(Ok(()));
+                let agent = init
+                    .agent_info
+                    .as_ref()
+                    .map(|info| HarnessAgent { name: info.name.clone(), version: info.version.clone() });
+                let _ = tx.send(Ok(agent));
             }
             let mut lost = resume.filter(|old| *old != id).map(|old| {
                 tracing::warn!(lost = %old, session = %id, "the session was not resumed; rebuilding its context");
@@ -1362,6 +1372,10 @@ mod tests {
         let ready = handshake(&signing(None)).await;
         assert_eq!(ready.readiness, Readiness::Ready { agent: "fake 1.0".to_owned() });
         assert_eq!(ready.sign_in.as_deref(), Some("test --login"), "the terminal auth method it offers");
+        let session = Session::start(&signing(None), None).await.unwrap();
+        let named = HarnessAgent { name: "fake".to_owned(), version: "1.0".to_owned() };
+        assert_eq!(session.agent(), Some(&named), "the agent as it named itself");
+        session.close().await;
 
         let required = signing(Some(agent_client_protocol::Error::auth_required()));
         assert_matches!(handshake(&required).await.readiness, Readiness::SignedOut { .. });

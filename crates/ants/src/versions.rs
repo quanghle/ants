@@ -1,9 +1,10 @@
 //! The versions of ants that running components publish: each daemon in its roster entry, `ants webhook serve` and
 //! each schedule in their webhook's marker, `ants channel serve` under its own key of [`WEBHOOKS_BUCKET`]
 //! ([`Serving`]). `ants roster` flags mixed versions and `ants doctor` tells whether every component runs a version
-//! that allows renewing credentials to the permissions of this one.
+//! that allows renewing credentials to the permissions of this one. Both also flag a harness agent that live ants run
+//! at different versions on different machines ([`harness_drift`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use ants_daemon::direct_kv::DirectKv;
@@ -99,6 +100,44 @@ pub fn roster_note(entries: &[RosterEntry], now: DateTime<Utc>) -> Option<String
     let components: Vec<Component> = live.map(Component::of_entry).collect();
     let versions = mixed(&components)?;
     Some(format!("mixed ants versions: {versions}; `ants doctor` tells whether credentials may be renewed"))
+}
+
+/// One line per harness agent the live ants of `entries` run at more than one version, across more than one machine,
+/// as their roster entries name it ([`RosterEntry::agent`]): `copilot at 1.0.3 (dev-a on m1), 1.0.2 (dev-b on m2)`,
+/// newest first. Different versions on one machine only are a harness upgraded there while an older one still runs.
+pub fn harness_drift(entries: &[RosterEntry], now: DateTime<Utc>) -> Vec<String> {
+    let mut agents: BTreeMap<&str, BTreeMap<&str, Vec<&RosterEntry>>> = BTreeMap::new();
+    for entry in entries.iter().filter(|e| roster::is_live(e, now)) {
+        if let Some(agent) = &entry.agent {
+            agents.entry(&agent.name).or_default().entry(&agent.version).or_default().push(entry);
+        }
+    }
+    agents
+        .into_iter()
+        .filter(|(_, versions)| {
+            let machines: BTreeSet<&str> = versions.values().flatten().map(|e| e.machine.as_str()).collect();
+            versions.len() > 1 && machines.len() > 1
+        })
+        .map(|(name, versions)| {
+            let mut versions: Vec<_> = versions.into_iter().collect();
+            versions.sort_by(|(a, _), (b, _)| newest_first(Some(a), Some(b)));
+            let described: Vec<String> = versions
+                .into_iter()
+                .map(|(version, ants)| {
+                    let ants: Vec<String> = ants.iter().map(|e| format!("{} on {}", e.ant, e.machine)).collect();
+                    format!("{version} ({})", ants.join(", "))
+                })
+                .collect();
+            format!("{name} at {}", described.join(", "))
+        })
+        .collect()
+}
+
+/// The line `ants roster` adds under its table when live ants run a harness agent at different versions on different
+/// machines at `now` ([`harness_drift`]).
+pub fn harness_note(entries: &[RosterEntry], now: DateTime<Utc>) -> Option<String> {
+    let drift = harness_drift(entries, now);
+    (!drift.is_empty()).then(|| format!("harness versions differ across machines: {}", drift.join("; ")))
 }
 
 /// Whether credentials renewed with this ants suit every running component.
@@ -254,6 +293,56 @@ mod tests {
             component("e", Some("0.9.1"), Some(now)),
         ]);
         assert_eq!(mixed(&all).as_deref(), Some("0.10.0 (1), 0.9.1 (1), 0.2.0 (2), none published (1)"));
+    }
+
+    #[test]
+    fn a_harness_at_different_versions_across_machines_drifts() {
+        let now = Utc::now();
+        let entry = |ant: &str, machine: &str, agent: Option<(&str, &str)>| RosterEntry {
+            ant: ant.parse().unwrap(),
+            machine: machine.to_owned(),
+            instance: None,
+            harness: "copilot".to_owned(),
+            agent: agent
+                .map(|(name, version)| ants_proto::HarnessAgent { name: name.to_owned(), version: version.to_owned() }),
+            capabilities: Vec::new(),
+            whoami: None,
+            workdir: None,
+            started_at: now,
+            heartbeat_at: now,
+            activity: None,
+            handling: None,
+            harnesses: None,
+            escalate_to: Vec::new(),
+            version: None,
+            perms: None,
+            signed_out: None,
+            limited: None,
+        };
+        let same = [entry("dev-a", "m1", Some(("copilot", "1.0.3"))), entry("dev-b", "m2", Some(("copilot", "1.0.3")))];
+        assert!(harness_drift(&same, now).is_empty());
+        assert_eq!(harness_note(&same, now), None);
+        let one_machine =
+            [entry("dev-a", "m1", Some(("copilot", "1.0.3"))), entry("dev-b", "m1", Some(("copilot", "1.0.2")))];
+        assert!(harness_drift(&one_machine, now).is_empty(), "an upgrade on one machine while a harness still runs");
+
+        let mut stale = entry("dev-e", "m3", Some(("copilot", "0.9.0")));
+        stale.heartbeat_at = now - chrono::Duration::hours(1);
+        let mut all = same.to_vec();
+        all.extend([
+            entry("dev-c", "m2", Some(("copilot", "1.0.10"))),
+            entry("dev-d", "m1", None),
+            stale,
+            entry("rev-a", "m1", Some(("codex-acp", "0.3.0"))),
+            entry("rev-b", "m2", Some(("codex-acp", "0.3.0"))),
+        ]);
+        assert_eq!(harness_drift(&all, now), ["copilot at 1.0.10 (dev-c on m2), 1.0.3 (dev-a on m1, dev-b on m2)"]);
+        assert_eq!(
+            harness_note(&all, now).as_deref(),
+            Some(
+                "harness versions differ across machines: copilot at 1.0.10 (dev-c on m2), 1.0.3 (dev-a on m1, dev-b on m2)"
+            )
+        );
     }
 
     #[test]

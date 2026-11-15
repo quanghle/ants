@@ -1305,7 +1305,8 @@ fn ask_wait(timeout: Option<&str>) -> Result<Duration, String> {
     Ok(wait)
 }
 
-/// Ant, capabilities, harness, machine, activity or a signed-out harness, and advertised role instructions.
+/// Ant, capabilities, harness and the agent it runs, machine, activity or a signed-out harness, and advertised role
+/// instructions.
 fn describe(entries: &[&RosterEntry]) -> String {
     let lines: Vec<String> = entries
         .iter()
@@ -1317,7 +1318,8 @@ fn describe(entries: &[&RosterEntry]) -> String {
                 (None, Some(limited), _) => format!(", {}", limited.kind.as_str()),
                 (None, None, activity) => activity.map(|a| format!(", {}", a.as_str())).unwrap_or_default(),
             };
-            let mut text = format!("{}: {capabilities} ({} on {}{activity})", e.ant, e.harness, e.machine);
+            let agent = e.agent.as_ref().map(|a| format!(" running {a}")).unwrap_or_default();
+            let mut text = format!("{}: {capabilities} ({}{agent} on {}{activity})", e.ant, e.harness, e.machine);
             if let Some(out) = &e.signed_out {
                 let how = out.sign_in.as_ref().map(|c| format!(" (`{c}` on {})", e.machine)).unwrap_or_default();
                 let _ = write!(
@@ -1886,6 +1888,7 @@ mod tests {
             machine: "m1".to_owned(),
             instance: None,
             harness: "copilot".to_owned(),
+            agent: None,
             capabilities: capabilities.iter().map(|c| (*c).to_owned()).collect(),
             whoami: None,
             workdir: None,
@@ -2190,6 +2193,7 @@ mod tests {
         billing.whoami = Some("Maintain billing services.\nReview invoices.".to_owned());
         let mut docs = listed("docs", &[]);
         docs.activity = Some(ants_proto::Activity::Working);
+        docs.agent = Some(ants_proto::HarnessAgent { name: "copilot".to_owned(), version: "1.0.3".to_owned() });
         let mut busy = listed("dev-b", &["rust"]);
         busy.activity = Some(ants_proto::Activity::Working);
         busy.handling = Some(1);
@@ -2209,7 +2213,8 @@ mod tests {
 
         let (ok, text) = call(&client, "list_ants", serde_json::json!({})).await;
         assert!(
-            ok && !text.contains("dev-a:") && text.contains("docs: no capabilities (copilot on m1, working)"),
+            ok && !text.contains("dev-a:")
+                && text.contains("docs: no capabilities (copilot running copilot 1.0.3 on m1, working)"),
             "{text}"
         );
         assert!(text.contains("whoami (advertised):\nMaintain billing services.\nReview invoices."), "{text}");
