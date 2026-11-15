@@ -8,7 +8,7 @@ use crate::{
     OWNERS_BUCKET, PRESENCE_BUCKET, REACTIONS_BUCKET, READ_BUCKET, ROSTER_BUCKET, Role, SESSIONS_BUCKET,
     STORAGE_WARNING_PREFIX, STREAM, THREADS_BUCKET, UserId, WEBHOOK_MARKER, WEBHOOKS_BUCKET, chan_consumer,
     chan_reader, channel_manager_serving_subject, dead_reader, inbox_consumer, inbox_prefix, marks_key, notes_consumer,
-    notify_consumer, sent_reader, spare_readers, subject,
+    notify_consumer, sent_reader, snoozed_key, spare_readers, subject,
 };
 #[cfg(doc)]
 use crate::{
@@ -161,12 +161,13 @@ fn attachment_rights(user: &UserId, role: Role) -> Vec<String> {
 /// ([`THREADS_BUCKET`]): creating the bucket; reading by direct gets, putting and deleting every title, every TL;DR
 /// ([`ThreadSummary`]) and every done state, which any human sets; and reading and writing its own [`ThreadMarks`]
 /// only, so no human reads or changes another's.
-fn thread_rights(human: &UserId) -> [String; 10] {
+fn thread_rights(human: &UserId) -> [String; 12] {
     let threads = kv_stream(THREADS_BUCKET);
     let titles = format!("$KV.{THREADS_BUCKET}.title.*");
     let summaries = format!("$KV.{THREADS_BUCKET}.summary.*");
     let done = format!("$KV.{THREADS_BUCKET}.done.*");
     let marks = format!("$KV.{THREADS_BUCKET}.{}", marks_key(human));
+    let snoozed = format!("$KV.{THREADS_BUCKET}.{}", snoozed_key(human));
     [
         format!("$JS.API.STREAM.INFO.{threads}"),
         format!("$JS.API.STREAM.CREATE.{threads}"),
@@ -178,6 +179,8 @@ fn thread_rights(human: &UserId) -> [String; 10] {
         done,
         format!("$JS.API.DIRECT.GET.{threads}.{marks}"),
         marks,
+        format!("$JS.API.DIRECT.GET.{threads}.{snoozed}"),
+        snoozed,
     ]
 }
 
@@ -243,8 +246,8 @@ impl Permissions {
     /// keys in [`PRESENCE_BUCKET`] where its devices read, reading every human's there ([`presence_rights`]), and its own [`NotifyPrefs`] in [`NOTIFY_BUCKET`] what it holds back of its notifications,
     /// and its own [`HeldNotices`] there what was held back ([`notify_prefs_rights`]), and it reads every reaction ([`REACTIONS_BUCKET`]), of which it
     /// puts and removes only its own ([`human_reaction_rights`]), while an ant only asks for those ([`subject::reactions`],
-    /// [`subject::react`]); it sets every thread's title, TL;DR and done state and its own pinned and
-    /// archived threads, no other human's ([`thread_rights`]); it reads every device's encryption key in
+    /// [`subject::react`]); it sets every thread's title, TL;DR and done state and its own pinned,
+    /// archived and snoozed threads, no other human's ([`thread_rights`]); it reads every device's encryption key in
     /// [`DEVICES_BUCKET`] and puts only its own devices' ([`device_directory_rights`]). A human may send under
     /// any sender, to replay a dead letter as it was. An ant gets no `STREAM.MSG.GET`: it takes any sequence, so it
     /// would expose every inbox. So only a human hears the max-deliveries advisories of the stream's consumers and

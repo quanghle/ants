@@ -17,7 +17,7 @@ use super::interrupt::{Confirm, Intent};
 use super::react::{self, Pick, Picker};
 use super::reads::{Mark, Read};
 use super::work::{Facts, Filter};
-use super::{cards, channel, dm, home, images, nav, people, search, thread, timeline, tree, work};
+use super::{cards, catchup, channel, dm, home, images, nav, people, search, snooze, thread, timeline, tree, work};
 use crate::live::{self, State};
 use crate::thread::{Entry, Kind};
 use crate::tools::Update;
@@ -57,7 +57,8 @@ pub enum Action {
     MarkChannel(ChannelId, Mark),
     /// Read the reactions to these messages, and again every while.
     Reactions(Vec<Uuid>),
-    /// Make a change to how the human holds the thread, the last message, post or note on which has this sequence.
+    /// Make a change to how the human holds the thread, the last message, post or note on which has this sequence;
+    /// marking it done marks the human's inbox messages on it read too.
     Change(ThreadId, Change, u64),
     /// Copy the text to the terminal's clipboard.
     Copy(String),
@@ -77,6 +78,8 @@ pub enum Action {
     Search(crate::search::Search),
     /// Cancel the prompt each ant runs on its thread, as `ants cancel` does.
     CancelSubtree(Vec<(UserId, ThreadId)>),
+    /// Ask for a catch-up summary.
+    Summarise(catchup::Ask),
     Quit,
 }
 
@@ -223,6 +226,16 @@ pub enum To {
     Tree(ThreadId),
     /// Steer or cancel the prompt running on a thread.
     Interrupt(Intent, ThreadId),
+    /// The thread, with the command bar open to reply on it.
+    Reply(ThreadId),
+    /// Ask how long to keep the thread off home.
+    Snooze(ThreadId),
+    /// The command bar, open on this text.
+    Bar(String),
+    /// Ask for a new TL;DR of the thread.
+    Tldr(ThreadId),
+    /// The digest of what changed since the last `ants chat` on the device ended.
+    Digest,
     /// Not another view: something to do.
     Do(Action),
 }
@@ -243,6 +256,10 @@ pub struct Model {
     pub picking: Option<Picker>,
     /// The steer or cancel waiting for y while an ant runs a tool call.
     pub interrupting: Option<Confirm>,
+    /// How long to snooze a thread from home, being asked.
+    pub snoozing: Option<snooze::Prompt>,
+    /// The catch-up summaries: the span home's first line counts, the TL;DRs asked for, the digest.
+    pub catchup: catchup::Catchup,
     /// Whether the two-line pane shows instead of the full view ([`super::compact`]).
     pub compact: bool,
 }
@@ -278,6 +295,8 @@ impl Model {
             asking: None,
             picking: None,
             interrupting: None,
+            snoozing: None,
+            catchup: catchup::Catchup::default(),
             compact: false,
         }
     }
@@ -600,8 +619,14 @@ impl Model {
             self.help = false;
             return None;
         }
+        if self.catchup.shown() {
+            return self.digest_key(key);
+        }
         if self.interrupting.is_some() {
             return self.confirm_key(key);
+        }
+        if self.snoozing.is_some() {
+            return self.snooze_key(key, now);
         }
         if let Some(picker) = &mut self.picking {
             return match picker.key(key) {
@@ -764,9 +789,28 @@ impl Model {
                 None
             }
             To::Interrupt(intent, thread) => self.interrupt(intent, thread),
+            To::Reply(thread) => {
+                self.bar.focused = true;
+                self.go(To::Thread(thread), now)
+            }
+            To::Snooze(thread) => {
+                self.snooze(thread);
+                None
+            }
+            To::Bar(text) => {
+                self.bar.set_text(&text);
+                self.bar.focused = true;
+                None
+            }
+            To::Tldr(thread) => self.tldr(thread),
+            To::Digest => self.home_digest(now),
             To::Do(Action::Run(Job::Open(listed), text)) => {
                 self.bar.set_status(format!("opening {}…", listed.attachment.name), Tone::Busy);
                 Some(Action::Run(Job::Open(listed), text))
+            }
+            To::Do(action @ Action::Run(..)) => {
+                self.bar.set_status("running…", Tone::Busy);
+                Some(action)
             }
             To::Do(action) => Some(action),
         }

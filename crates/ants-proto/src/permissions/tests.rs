@@ -570,12 +570,15 @@ fn humans_set_every_title_tldr_and_done_state_but_only_their_own_pins_and_archiv
         "$JS.API.DIRECT.GET.KV_ants_threads.$KV.ants_threads.done.*",
         "$KV.ants_threads.marks.alice",
         "$JS.API.DIRECT.GET.KV_ants_threads.$KV.ants_threads.marks.alice",
+        "$KV.ants_threads.snoozed.alice",
+        "$JS.API.DIRECT.GET.KV_ants_threads.$KV.ants_threads.snoozed.alice",
         "$JS.API.STREAM.CREATE.KV_ants_threads",
     ] {
         assert!(human.publish.iter().any(|have| have == s), "{s} missing from {:?}", human.publish);
     }
     let threads: Vec<&String> = human.publish.iter().filter(|s| s.contains("ants_threads")).collect();
     assert!(threads.iter().all(|s| !s.contains("marks") || s.ends_with("marks.alice")), "{threads:?}");
+    assert!(threads.iter().all(|s| !s.contains("snoozed") || s.ends_with("snoozed.alice")), "{threads:?}");
     assert!(!threads.iter().any(|s| s.ends_with("ants_threads.>") || s.contains("CONSUMER")), "{threads:?}");
     let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
     let observer = Permissions::for_observer(&p("watcher"));

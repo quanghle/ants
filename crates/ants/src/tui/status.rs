@@ -35,7 +35,9 @@ pub struct Status {
 #[derive(Debug, Default, PartialEq, Serialize)]
 pub struct Counts {
     pub approve: Option<usize>,
+    pub question: Option<usize>,
     pub stuck: Option<usize>,
+    pub message: Option<usize>,
     pub mention: Option<usize>,
     pub finished: Option<usize>,
 }
@@ -78,7 +80,9 @@ impl Status {
         Self {
             home: Counts {
                 approve: count(Why::Approval, approvals),
+                question: count(Why::Question, threads),
                 stuck: count(Why::Stuck, threads),
+                message: count(Why::Message, threads && marker),
                 mention: count(Why::Mention, threads && marker),
                 finished: count(Why::Finished, threads && done),
             },
@@ -89,8 +93,8 @@ impl Status {
 
     /// How many home items there are, if all were read.
     fn waiting(&self) -> Option<usize> {
-        let Counts { approve, stuck, mention, finished } = self.home;
-        Some(approve? + stuck? + mention? + finished?)
+        let Counts { approve, question, stuck, message, mention, finished } = self.home;
+        Some(approve? + question? + stuck? + message? + mention? + finished?)
     }
 
     /// One short line, for tmux's status-right: `⚑3 ◐2 $4.12`.
@@ -99,13 +103,19 @@ impl Status {
         format!("⚑{} ◐{} {spend}", or_unknown(self.waiting()), or_unknown(self.working.as_ref().map(Vec::len)))
     }
 
-    /// One line: `1 approve · 0 stuck · 2 mention · 1 finished │ ◐ dev-a · ◐ scout │ $4.12 today`.
+    /// One line: `1 approve · 0 question · 0 stuck · 1 message · 2 mention · 1 finished │ ◐ dev-a · ◐ scout │ $4.12 today`.
     pub fn line(&self) -> String {
-        let Counts { approve, stuck, mention, finished } = self.home;
-        let counts =
-            [(approve, Why::Approval), (stuck, Why::Stuck), (mention, Why::Mention), (finished, Why::Finished)]
-                .map(|(n, why)| format!("{} {}", or_unknown(n), why.label()))
-                .join(" · ");
+        let Counts { approve, question, stuck, message, mention, finished } = self.home;
+        let counts = [
+            (approve, Why::Approval),
+            (question, Why::Question),
+            (stuck, Why::Stuck),
+            (message, Why::Message),
+            (mention, Why::Mention),
+            (finished, Why::Finished),
+        ]
+        .map(|(n, why)| format!("{} {}", or_unknown(n), why.label()))
+        .join(" · ");
         let working = match &self.working {
             None => "? working".to_owned(),
             Some(ants) if ants.is_empty() => "no ant working".to_owned(),
@@ -204,6 +214,7 @@ mod tests {
             meta: Ok(Default::default()),
             spend: Ok(Default::default()),
             today: Err(anyhow::anyhow!("timed out")),
+            snoozed: Ok(Default::default()),
         };
         let parts = Parts {
             threads: Some((State::new(user("alice"), SINCE), entries)),
@@ -213,15 +224,21 @@ mod tests {
             ..Parts::default()
         };
         let status = Status::of(parts, &user("alice"), at(3));
-        assert_eq!(status.line(), "0 approve · 0 stuck · ? mention · 1 finished │ ◐ scout │ $? today");
+        assert_eq!(
+            status.line(),
+            "0 approve · 0 question · 0 stuck · ? message · ? mention · 1 finished │ ◐ scout │ $? today"
+        );
         assert_eq!(status.tmux(), "⚑? ◐1 $?");
         assert_eq!(
             serde_json::to_string(&status).unwrap(),
-            r#"{"home":{"approve":0,"stuck":0,"mention":null,"finished":1},"working":["scout"],"spend_today":null}"#
+            r#"{"home":{"approve":0,"question":0,"stuck":0,"message":null,"mention":null,"finished":1},"working":["scout"],"spend_today":null}"#
         );
 
         let nothing = Status::of(Parts::default(), &user("alice"), at(3));
-        assert_eq!(nothing.line(), "? approve · ? stuck · ? mention · ? finished │ ? working │ $? today");
+        assert_eq!(
+            nothing.line(),
+            "? approve · ? question · ? stuck · ? message · ? mention · ? finished │ ? working │ $? today"
+        );
         assert_eq!(nothing.tmux(), "⚑? ◐? $?");
     }
 }

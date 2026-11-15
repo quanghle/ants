@@ -1,5 +1,5 @@
-//! What the thread view changes and reads of the open thread besides its messages: pinning, muting, archiving and
-//! marking it done for the human, as `ants thread pin|mute|archive|done` do, and reading every while what the side
+//! What the thread view changes and reads of the open thread besides its messages: pinning, muting, archiving,
+//! snoozing on home and marking it done for the human, as `ants thread pin|mute|archive|done` do, and reading every while what the side
 //! panel shows of it: those marks, and what its ants spent.
 
 use std::collections::{BTreeMap, VecDeque};
@@ -31,6 +31,8 @@ pub enum Change {
     Archive(bool),
     /// Done for every human, as of the last message, post or note.
     Done(bool),
+    /// Off the human's home until then, or until an item for it arrives; None ends the snooze.
+    Snooze(Option<DateTime<Utc>>),
 }
 
 impl Change {
@@ -52,6 +54,9 @@ impl Change {
             (Self::Done(true), false) => "already done",
             (Self::Done(false), true) => "no longer done",
             (Self::Done(false), false) => "not done",
+            (Self::Snooze(Some(_)), _) => "snoozed: off home until then, or until something for this human arrives",
+            (Self::Snooze(None), true) => "no longer snoozed",
+            (Self::Snooze(None), false) => "not snoozed",
         }
     }
 }
@@ -223,5 +228,17 @@ async fn changing(
         // Keeping it too unarchives one archived for having been idle.
         Change::Archive(false) => meta()?.change_marks(|marks| marks.unarchive(thread) | marks.keep(thread)).await,
         Change::Done(on) => thread_meta::mark_done(&*meta()?, thread, on, last).await,
+        Change::Snooze(until) => {
+            let now = Utc::now();
+            meta()?
+                .change_snoozes(|snoozes| match until {
+                    Some(until) => {
+                        snoozes.snooze(thread, now, until);
+                        true
+                    }
+                    None => snoozes.wake(thread, now),
+                })
+                .await
+        }
     }
 }

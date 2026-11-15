@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[cfg(doc)]
-use crate::{Envelope, STREAM, THREADS_BUCKET, done_key, marks_key, summary_key, title_key};
+use crate::{Envelope, STREAM, THREADS_BUCKET, done_key, marks_key, snoozed_key, summary_key, title_key};
 use crate::{Error, MAX_TITLE, Sealed, ThreadId, UserId};
 
 /// The title of a thread, under its [`title_key`] in [`THREADS_BUCKET`]: one per thread, shared by every human, which
@@ -96,6 +96,48 @@ impl ThreadDone {
     /// Whether the thread is still done, the last message, channel post or note stored on it having sequence `last`.
     pub fn holds(&self, last: u64) -> bool {
         last <= self.after
+    }
+}
+
+/// Longest a thread stays snoozed on a human's home ([`ThreadSnoozes`]).
+pub const SNOOZE_MAX: chrono::TimeDelta = chrono::TimeDelta::days(7);
+
+/// The threads a human snoozed on home, under its [`snoozed_key`] in [`THREADS_BUCKET`], shared by all its devices,
+/// which update it with compare-and-set. A snooze set `at` hides the thread from home until `until`, at most
+/// [`SNOOZE_MAX`] later, or until an item for the human arrives on the thread after `at`. Snoozing changes no ant's
+/// work, reply or notification.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ThreadSnoozes(pub std::collections::BTreeMap<ThreadId, Snooze>);
+
+/// When a thread was snoozed, and until when.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Snooze {
+    pub at: DateTime<Utc>,
+    pub until: DateTime<Utc>,
+}
+
+impl ThreadSnoozes {
+    /// Snooze `thread` from `now` until `until`, cut to [`SNOOZE_MAX`] from now, dropping the snoozes already past.
+    pub fn snooze(&mut self, thread: &ThreadId, now: DateTime<Utc>, until: DateTime<Utc>) {
+        self.prune(now);
+        self.0.insert(thread.clone(), Snooze { at: now, until: until.min(now + SNOOZE_MAX) });
+    }
+
+    /// End the snooze of `thread`, dropping the snoozes already past. Whether it was snoozed.
+    pub fn wake(&mut self, thread: &ThreadId, now: DateTime<Utc>) -> bool {
+        self.prune(now);
+        self.0.remove(thread).is_some()
+    }
+
+    /// The snooze of `thread` in force at `now`, if any: neither past nor longer than [`SNOOZE_MAX`].
+    pub fn get(&self, thread: &ThreadId, now: DateTime<Utc>) -> Option<&Snooze> {
+        self.0.get(thread).filter(|s| now < s.until && s.until - s.at <= SNOOZE_MAX)
+    }
+
+    /// Drop the snoozes past at `now`.
+    pub fn prune(&mut self, now: DateTime<Utc>) {
+        self.0.retain(|_, s| now < s.until);
     }
 }
 
@@ -228,7 +270,7 @@ impl ThreadMarks {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{done_key, marks_key, p, title_key};
+    use crate::{done_key, marks_key, p, snoozed_key, title_key};
 
     #[test]
     fn a_thread_is_pinned_or_archived_and_new_messages_show_on_an_archived_one() {
@@ -308,6 +350,29 @@ mod tests {
         assert_eq!(done_key(&done.thread_id), format!("done.{}", done.thread_id));
         assert!(done.holds(3) && done.holds(10));
         assert!(!done.holds(11), "a later message reopens it");
+    }
+
+    #[test]
+    fn a_snooze_holds_until_its_end_at_most_seven_days_on_and_writes_drop_those_past() {
+        let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
+        let now = Utc::now();
+        let mut snoozes = ThreadSnoozes::default();
+        snoozes.snooze(&t1, now, now + chrono::TimeDelta::hours(1));
+        snoozes.snooze(&t2, now, now + chrono::TimeDelta::days(30));
+        assert_eq!(snoozes.0[&t2].until, now + SNOOZE_MAX, "cut to seven days");
+        assert!(snoozes.get(&t1, now + chrono::TimeDelta::minutes(59)).is_some());
+        assert!(snoozes.get(&t1, now + chrono::TimeDelta::hours(1)).is_none(), "ended");
+        snoozes.snooze(&t2, now + chrono::TimeDelta::hours(2), now + chrono::TimeDelta::hours(3));
+        assert!(!snoozes.0.contains_key(&t1), "a write drops the snoozes past");
+        assert!(snoozes.wake(&t2, now) && !snoozes.wake(&t2, now));
+        let json = serde_json::to_string(&ThreadSnoozes(
+            [(t1.clone(), Snooze { at: now, until: now + chrono::TimeDelta::days(8) })].into(),
+        ))
+        .unwrap();
+        assert!(json.starts_with(&format!("{{\"{t1}\":{{\"at\":")), "{json}");
+        let read: ThreadSnoozes = serde_json::from_str(&json).unwrap();
+        assert!(read.get(&t1, now).is_none(), "longer than seven days holds not");
+        assert_eq!(snoozed_key(&p("alice")), "snoozed.alice");
     }
 
     #[test]

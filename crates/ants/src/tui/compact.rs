@@ -93,12 +93,19 @@ fn second_line(model: &Model, items: &[home::Item], now: DateTime<Utc>) -> Line<
     if let Some(line) = model.asking.as_ref().and_then(super::approvals::Asking::footer) {
         return line;
     }
-    let keys = Span::styled(format!("   {KEYS}"), frame::dim());
+    if let Some(confirm) = &model.interrupting {
+        return confirm.line();
+    }
+    if let Some(prompt) = &model.snoozing {
+        return prompt.line(&model.data);
+    }
     let Some(top) = items.first() else {
+        let keys = Span::styled(format!("   {KEYS}"), frame::dim());
         let what =
             if model.data.live.stored_at.is_some() { "nothing waits on a human" } else { "reading the stream…" };
         return Line::from(vec![Span::styled(format!("      {what}"), frame::dim()), keys]);
     };
+    let keys = Span::styled(format!("   {} · {KEYS}", top.why.keys()), frame::dim());
     let text = crate::excerpt(&top.text, 120);
     Line::from(vec![
         Span::raw("      ▸ "),
@@ -109,7 +116,8 @@ fn second_line(model: &Model, items: &[home::Item], now: DateTime<Utc>) -> Line<
 }
 
 impl Model {
-    /// Take `key` in the pane: on the top home item as home takes it, Enter opening it in the full view.
+    /// Take `key` in the pane: on the top home item as home takes it, Enter opening it in the full view, as replying
+    /// does.
     pub(super) fn compact_key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
         match key {
             Key::Char('q') => return Some(Action::Quit),
@@ -123,10 +131,12 @@ impl Model {
         // Home again, its selection on the top item.
         self.select(nav::Item::Home);
         self.focus = Focus::View;
-        if key == Key::Enter {
+        let action = self.view_key(key, now);
+        // Opened, or replying in the bar: the full view shows it.
+        if key == Key::Enter || self.bar.focused {
             self.compact = false;
         }
-        self.view_key(key, now)
+        action
     }
 }
 
@@ -162,7 +172,8 @@ mod tests {
         m.stored(vec![opening, message(2, &done, "dev-a", "alice", "deployed")], at(2));
         let shown = pane(&m, at(3));
         assert!(shown.starts_with("ants ▸ 1 finished │ no ant working │ $? today"), "{shown}");
-        assert!(shown.contains("▸ finished deploy: dev-a answered   Enter open in the full view · q quit"), "{shown}");
+        let keys = "f follow up · d mark done · z snooze · Enter open in the full view · q quit";
+        assert!(shown.contains(&format!("▸ finished deploy: dev-a answered   {keys}")), "{shown}");
 
         let push =
             ApprovalRequest { thread_id: asked.clone(), ..request("dev-a", "git push", vec![Verdict::AllowOnce]) };

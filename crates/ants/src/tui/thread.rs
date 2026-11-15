@@ -30,7 +30,7 @@ use super::frame::{self, ago};
 use super::interrupt::Intent;
 use super::model::{Action, Data, Key, Model, To};
 use super::timeline::Call;
-use super::{approvals, attach, images, markdown, react, work};
+use super::{approvals, attach, catchup, images, markdown, question, react, work};
 use crate::attachments::Listed;
 use crate::live::History;
 use crate::sealed;
@@ -83,7 +83,7 @@ impl Page {
         self.messages().find(|e| e.id == Some(at)).map(|e| e.seq)
     }
 
-    pub const KEYS: &str = "↑↓ select · i reply · y copy · o open file · ] next file · + react · p pin · m mute · e archive · d done · t tree · s steer · x cancel · a A r answer a tool request · End latest · Esc back";
+    pub const KEYS: &str = "↑↓ select · i reply · y copy · o open file · ] next file · + react · p pin · m mute · e archive · d done · t tree · S TL;DR · s steer · x cancel · a A r answer a tool request · End latest · Esc back";
 
     /// The messages shown, in the order stored.
     fn messages(&self) -> impl DoubleEndedIterator<Item = &Entry> {
@@ -186,10 +186,16 @@ impl Page {
                     _ => None,
                 };
                 let pending = data.live.approvals.iter().filter(|r| r.thread_id == self.history.thread);
-                let oldest = pending.min_by_key(|r| r.requested_at)?;
+                let Some(oldest) = pending.min_by_key(|r| r.requested_at) else {
+                    return question::thread_key(key, data, &self.history.thread, &self.history.entries, now);
+                };
                 return Some(To::Ask(oldest.clone(), verdict));
             }
+            Key::Char('1'..='9') => {
+                return question::thread_key(key, data, &self.history.thread, &self.history.entries, now);
+            }
             Key::Char('t') => return Some(To::Tree(self.history.thread.clone())),
+            Key::Char('S') => return Some(To::Tldr(self.history.thread.clone())),
             Key::Char('o') => {
                 let listed = self.attachment()?.clone();
                 return Some(To::Do(Action::Run(Job::Open(Box::new(listed)), String::new())));
@@ -220,8 +226,12 @@ impl Page {
         } else {
             (area, None)
         };
-        let area = draw_cards(frame, area, model, thread, now);
-        let width = usize::from(area.width.saturating_sub(2));
+        let area = draw_cards(frame, area, model, thread, &self.history.entries, now);
+        let block = frame::block(title, focused);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let area = catchup::draw_tldr(frame, inner, model, thread, now);
+        let width = usize::from(area.width);
         let mut lines = vec![work::why(data, thread)];
         if let Some((line, at)) = data.live.progress_of(thread, width.saturating_sub(16)) {
             lines.push(Line::styled(format!("▶ {line} ({})", ago(at, now)), Style::new().fg(Color::Green)));
@@ -252,7 +262,7 @@ impl Page {
                 range = Some((start, lines.len()));
             }
         }
-        let height = usize::from(area.height.saturating_sub(2));
+        let height = usize::from(area.height);
         let bottom = lines.len().saturating_sub(height);
         let top = match range {
             None => bottom,
@@ -269,11 +279,9 @@ impl Page {
             }
         };
         self.top.set(top);
-        let block = frame::block(title, focused);
-        let inner = block.inner(area);
-        let paragraph = Paragraph::new(lines).block(block).scroll((u16::try_from(top).unwrap_or(u16::MAX), 0));
+        let paragraph = Paragraph::new(lines).scroll((u16::try_from(top).unwrap_or(u16::MAX), 0));
         frame.render_widget(paragraph, area);
-        images::draw(frame, &data.images, &shown.placed.borrow(), top, inner);
+        images::draw(frame, &data.images, &shown.placed.borrow(), top, area);
         if let Some(panel) = panel {
             let lines = self.panel(data, calls, now, usize::from(PANEL_WIDTH.saturating_sub(4)));
             frame.render_widget(Paragraph::new(lines).block(frame::block(String::new(), false)), panel);
@@ -347,28 +355,40 @@ impl Page {
 }
 
 /// Draw the cards of the tool requests of `thread` at the bottom of `area`, in at most half of it: the area left.
-fn draw_cards(frame: &mut Frame, area: Rect, model: &Model, thread: &ThreadId, now: DateTime<Utc>) -> Rect {
+fn draw_cards(
+    frame: &mut Frame,
+    area: Rect,
+    model: &Model,
+    thread: &ThreadId,
+    entries: &[Entry],
+    now: DateTime<Utc>,
+) -> Rect {
     let width = usize::from(area.width.saturating_sub(2));
     let cards = approvals::cards(&model.data, Some(thread), now);
+    let cards = cards.into_iter().enumerate().map(|(at, card)| {
+        let lines = approvals::lines(card, model.asking.as_ref(), at == 0, now, width);
+        let style = if card.settled.is_some() { frame::dim() } else { Style::new().fg(Color::Yellow) };
+        (approvals::title(card), lines, style)
+    });
+    let questions = question::cards(&model.data, entries, now);
+    let questions = questions.iter().map(|card| (card.title(), card.lines(width), card.style()));
     let mut boxes = Vec::new();
     let mut height = 0;
-    for (at, card) in cards.into_iter().enumerate() {
-        let lines = approvals::lines(card, model.asking.as_ref(), at == 0, now, width);
+    for (title, lines, style) in cards.chain(questions) {
         let tall = u16::try_from(lines.len()).unwrap_or(u16::MAX).saturating_add(2);
         if height + tall > area.height / 2 {
             break;
         }
         height += tall;
-        boxes.push((card, lines, tall));
+        boxes.push((title, lines, style, tall));
     }
     if boxes.is_empty() {
         return area;
     }
     let [rest, mut below] = Layout::vertical([Constraint::Min(3), Constraint::Length(height)]).areas(area);
-    for (card, lines, tall) in boxes {
+    for (title, lines, style, tall) in boxes {
         let [this, next] = Layout::vertical([Constraint::Length(tall), Constraint::Min(0)]).areas(below);
-        let style = if card.settled.is_some() { frame::dim() } else { Style::new().fg(Color::Yellow) };
-        let block = ratatui::widgets::Block::bordered().title(approvals::title(card)).border_style(style);
+        let block = ratatui::widgets::Block::bordered().title(title).border_style(style);
         frame.render_widget(Paragraph::new(lines).block(block), this);
         below = next;
     }

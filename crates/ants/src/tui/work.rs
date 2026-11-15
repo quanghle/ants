@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use ants_proto::{ChannelId, EscalationReason, ThreadDone, ThreadId, UserId, Uuid};
+use ants_proto::{ChannelId, EscalationReason, Question, ThreadDone, ThreadId, UserId, Uuid};
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -89,6 +89,16 @@ pub struct Said {
     pub to: UserId,
 }
 
+/// A question to the human no answer was read to yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Asked {
+    /// The id of the question's envelope, which an answer names.
+    pub id: Uuid,
+    pub at: DateTime<Utc>,
+    pub from: UserId,
+    pub question: Question,
+}
+
 /// A message to the human, in its inbox.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Inboxed {
@@ -117,7 +127,7 @@ pub struct Fact {
     /// Who first messaged each user on it, in the order they were first messaged: who delegated to whom.
     pub asked: Vec<(UserId, UserId)>,
     /// The questions to the human no answer was read to yet.
-    questions: Vec<Uuid>,
+    questions: Vec<Asked>,
     /// The messages to the human.
     pub inbox: Vec<Inboxed>,
 }
@@ -159,12 +169,12 @@ impl Facts {
             _ => {}
         }
         if let Some(answer) = &entry.answer {
-            fact.questions.retain(|q| *q != answer.question);
+            fact.questions.retain(|q| q.id != answer.question);
         }
         if to(entry, me)
-            && let (Some(_), Some(id)) = (&entry.question, entry.id)
+            && let (Some(question), Some(id), Some(from)) = (&entry.question, entry.id, &entry.from)
         {
-            fact.questions.push(id);
+            fact.questions.push(Asked { id, at: entry.stored_at, from: from.clone(), question: question.clone() });
         }
         if to(entry, me)
             && let Some(from) = &entry.from
@@ -175,7 +185,7 @@ impl Facts {
                 kind: entry.kind,
                 from: from.clone(),
                 channel: entry.channel.clone(),
-                text: entry.text.clone(),
+                text: super::dm::unopened(entry.sealed).map_or_else(|| entry.text.clone(), str::to_owned),
             });
         }
     }
@@ -211,7 +221,12 @@ impl Data {
 
     /// Whether a question to the human on the thread has no answer yet.
     pub fn asks(&self, thread: &ThreadId) -> bool {
-        self.facts.get(thread).is_some_and(|f| !f.questions.is_empty())
+        self.question(thread).is_some()
+    }
+
+    /// The latest question to the human on the thread with no answer yet: the one the bar's `/answer` answers.
+    pub fn question(&self, thread: &ThreadId) -> Option<&Asked> {
+        self.facts.get(thread)?.questions.last()
     }
 
     /// Whether an ant answered the human on a thread the human owns and nobody marked done, and is done with it: the
@@ -331,6 +346,7 @@ impl Page {
         let to = match key {
             Key::Enter => return rows.get(at).map(|(t, _)| To::Thread(t.clone())),
             Key::Char('s') => return rows.get(at).map(|(t, _)| To::Interrupt(Intent::Steer, t.clone())),
+            Key::Char('S') => return rows.get(at).map(|(t, _)| To::Tldr(t.clone())),
             Key::Char('x') | Key::Ctrl('x') => {
                 return rows.get(at).map(|(t, _)| To::Interrupt(Intent::Cancel, t.clone()));
             }
@@ -346,7 +362,7 @@ impl Page {
         None
     }
 
-    pub const KEYS: &str = "↑↓ thread · Enter open · s steer · x cancel · Esc back";
+    pub const KEYS: &str = "↑↓ thread · Enter open · s steer · x cancel · S TL;DR · Esc back";
 
     pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
         let rows = self.rows(data);
@@ -441,7 +457,7 @@ fn card(data: &Data, thread: &ThreadId, now: DateTime<Utc>, width: usize) -> Vec
             let text = crate::excerpt(&t.text, (width * 3).saturating_sub(about.len() + 8));
             vec![Span::raw(text), Span::styled(about, frame::dim())]
         }
-        None => vec![Span::styled("none kept: `ants thread tldr` asks for one", frame::dim())],
+        None => vec![Span::styled("none kept: S or /tldr asks for one", frame::dim())],
     };
     let chain = chain(data, thread)
         .into_iter()

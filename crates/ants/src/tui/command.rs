@@ -581,8 +581,8 @@ impl Model {
             }
             Slash::Goto(to) => self.goto(to),
             Slash::Search(query) => self.search(query, now).map(Some),
-            Slash::Digest(_) => Err("/digest is not in ants chat yet".to_owned()),
-            Slash::Tldr => Err("/tldr is not in ants chat yet".to_owned()),
+            Slash::Digest(since) => self.digest(since.as_deref(), now).map(Some),
+            Slash::Tldr => Ok(self.tldr(self.target()?)),
             Slash::Tree => {
                 let thread = self.target()?;
                 self.tree(thread);

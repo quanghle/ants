@@ -116,19 +116,30 @@ pub async fn ask(nats: &Nats<'_>, js: &jetstream::Context, envelope: &Envelope) 
         let stand = if unserved.is_empty() { progress::Stand::Waiting } else { progress::Stand::Unserved };
         progress::start(sub, progress::Status::new(vec![envelope.id]).with(envelope.to.clone(), stand), true)
     });
-    let reply = loop {
+    let reply = reply(&mut replies, envelope).await?;
+    progress::clear();
+    taken(js, &me.id, reply).await
+}
+
+/// The reply to `envelope`, a summary request, among `replies`, the inbox of its sender.
+pub async fn reply(replies: &mut bus::LiveInbox, envelope: &Envelope) -> Result<Envelope> {
+    loop {
         let Some(msg) = replies.next().await else { bail!("the connection closed before {} replied", envelope.to) };
         let Ok(reply) = serde_json::from_slice::<Envelope>(&msg.payload) else { continue };
         if reply.thread_id != envelope.thread_id || reply.from != envelope.to {
             continue;
         }
         match reply.check_subject(&msg.subject) {
-            Ok(()) => break reply,
+            Ok(()) => return Ok(reply),
             Err(e) => tracing::warn!("ignoring a reply with a forged sender: {e}"),
         }
-    };
-    progress::clear();
-    if let Err(e) = inbox::mark_read(js, &me.id, &reply).await {
+    }
+}
+
+/// `reply`, to a summary request of `me`, marked read; fails when it carries no summary, such as an ant's notice of a
+/// failed prompt.
+pub async fn taken(js: &jetstream::Context, me: &UserId, reply: Envelope) -> Result<Envelope> {
+    if let Err(e) = inbox::mark_read(js, me, &reply).await {
         tracing::warn!("could not mark the reply read: {e:#}");
     }
     if reply.summary.is_none() {

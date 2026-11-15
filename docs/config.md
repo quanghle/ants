@@ -372,8 +372,11 @@ back with the tokens the turn spent (`tokens`). The CLI waits for that reply, ma
 Threads opened by summary requests are left out of `ants thread list`, `last`, `ants dash`, digests and the inbox
 (`ants inbox` marks their replies read), and `ants webhook serve` pushes no completion for those replies. Each verb
 then notes on stderr the tokens the human's summaries spent this UTC day, as the replies to its requests carry them.
-`summaries = "ahead"` (with `summary_daily_tokens` above 0) is accepted for asking ahead of time within that daily
-token cap; a config with `ahead` and no daily tokens fails to load. No service generates summaries on its own.
+`ants chat` asks the same way: `S` and `/tldr` for a TL;DR, `s` on home and `/digest [SINCE]` for a digest, shown in
+an overlay. With `summaries = "ahead"` (and `summary_daily_tokens` above 0), `ants chat` also asks for the TL;DR of
+each thread its work view lists whose TL;DR is missing or older than its last entry, one request at a time, and stops
+for the UTC day once the human's summaries spent `summary_daily_tokens` that day; a config with `ahead` and no daily
+tokens fails to load. No service generates summaries on its own.
 
 ## Prompt limits and spending caps
 

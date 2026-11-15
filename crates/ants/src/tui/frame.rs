@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
 use super::model::{Focus, Level, Model, Page};
-use super::{approvals, channel, compact, home, nav, search, thread, work};
+use super::{approvals, catchup, channel, compact, home, nav, search, thread, work};
 use crate::live::Link;
 use crate::roster;
 
@@ -64,6 +64,7 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
     if let Some(asking) = model.asking.as_ref().filter(|a| a.full) {
         approvals::draw_full(frame, asking, now);
     }
+    catchup::draw_digest(frame, model, now);
     if model.help {
         draw_help(frame);
     }
@@ -92,6 +93,9 @@ fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
     }
     if let Some(confirm) = &model.interrupting {
         return confirm.line();
+    }
+    if let Some(prompt) = &model.snoozing {
+        return prompt.line(&model.data);
     }
     if let Some(line) = model.asking.as_ref().and_then(approvals::Asking::footer) {
         return line;
@@ -134,19 +138,19 @@ const HELP: &[(&str, &str)] = &[
     ("/command", "in the bar: a command on the selection (Ctrl-K lists them)"),
     ("Alt-Enter Ctrl-E", "in the bar: a new line, the text in the editor"),
     ("↑↓ Tab", "in the bar: pick and complete an @ant, #channel or /command"),
-    ("y", "in a thread: copy the selected message"),
-    ("p m e d", "in a thread: pin, mute, archive, mark done (again to undo)"),
+    ("y p m e d", "in a thread: copy, pin, mute, archive, mark done (again to undo)"),
     ("a A r, y", "on a tool request: allow once, always or reject, then confirm"),
+    ("1-9 r", "on a question: answer with that option, or type an answer"),
+    ("g r f x d z s", "on home: grant, reply, follow up, cancel, done, snooze, digest"),
     ("+", "in a thread: react to the selected message, or take a reaction back"),
-    ("i t", "in a thread: the bar to reply there, its delegation tree"),
+    ("i t S", "in a thread: the bar to reply, its delegation tree, a new TL;DR"),
     ("o ]", "in a thread or channel: open the marked attachment, mark the next"),
     ("s", "in a thread or work: the bar on /steer for the ant at work"),
     ("x Ctrl-X", "in a thread or work: cancel the prompt running there"),
     ("x y", "in a delegation tree: cancel every prompt in the selected subtree"),
     ("n", "with a person: write a message, starting a thread"),
     ("/", "the bar on /search, as in: /search deploy from:dev-a"),
-    ("R", "read everything again"),
-    ("?", "this help"),
+    ("R ?", "read everything again, this help"),
     ("q Ctrl-C", "quit"),
 ];
 
@@ -158,7 +162,7 @@ fn draw_help(frame: &mut Frame) {
         })
         .chain([Line::raw(""), Line::styled("any key closes this help", dim())])
         .collect();
-    let area = centered(frame.area(), 68, u16::try_from(lines.len()).unwrap_or(u16::MAX) + 2);
+    let area = centered(frame.area(), 90, u16::try_from(lines.len()).unwrap_or(u16::MAX) + 2);
     frame.render_widget(Clear, area);
     frame.render_widget(Paragraph::new(lines).block(block(" Keys ".to_owned(), true)), area);
 }
@@ -203,7 +207,8 @@ mod tests {
         assert!(shown.contains("waiting on ant 1"), "{shown}");
         assert!(shown.contains("● dev-a") && shown.contains("PEOPLE") && shown.contains("bob"), "{shown}");
         assert!(shown.contains("nothing waits on a human"), "{shown}");
-        let keys = "Enter open · a A r answer a tool request · Tab nav/view · / search · ? help · q quit";
+        let keys =
+            "j/k move · Enter open · d done · z snooze · t tree · s digest · Tab nav/view · / search · ? help · q quit";
         assert!(shown.contains(keys), "{shown}");
 
         m.select(nav::Item::Work(None));

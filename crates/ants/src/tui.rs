@@ -10,6 +10,7 @@ mod acts;
 mod approvals;
 mod attach;
 mod cards;
+mod catchup;
 mod channel;
 mod command;
 mod compact;
@@ -24,9 +25,11 @@ mod markdown;
 mod model;
 mod nav;
 mod people;
+mod question;
 mod react;
 mod reads;
 mod search;
+mod snooze;
 mod status;
 mod thread;
 mod timeline;
@@ -146,6 +149,7 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
     nats.prepare(&js).await;
     let meta = thread_meta::open(nats, &js).await.map_err(|e| format!("{e:#}"));
     let sealing = sealed::Sealing::of(nats);
+    let summaries = catchup::Io::open(nats, client.clone(), js.clone()).await;
     let (feed, state) = live::start(nats, client.clone(), js.clone(), since).await?;
     let ctx = exec::Ctx {
         client,
@@ -166,6 +170,9 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
     let cards = cards::Io::new(cards::Source::open(nats, &js).await);
     let mut model = Model::new(state, host(nats.url).to_owned());
     model.compact = compact;
+    let chat_state = catchup::state_path();
+    model.catchup.since = chat_state.as_deref().ok().and_then(catchup::ended);
+    model.catchup.ahead = summaries.ahead();
     let inline_images = crate::defaults::inline_images()?;
     model.data.images = images::Images::new(inline_images);
     // The UI shows the replies and the tool requests as they come, so notifications spare this device theirs meanwhile.
@@ -173,8 +180,13 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
         let mut screen = Screen::open()?;
         let images = inline_images.then(|| images::Io::new(images::picker(), js.clone(), feed.keyring()));
         let exec = Exec::new(ctx);
-        let chat = Chat { feed, reads, acts, people, searches, trees, cards, images, exec, model, edit: None };
-        Box::pin(chat.run(&mut screen.terminal)).await
+        let chat =
+            Chat { feed, reads, acts, people, searches, trees, cards, summaries, images, exec, model, edit: None };
+        let ran = Box::pin(chat.run(&mut screen.terminal)).await;
+        if let Err(e) = chat_state.and_then(|path| catchup::end(&path, Utc::now())) {
+            tracing::debug!("not keeping when ants chat ended: {e:#}");
+        }
+        ran
     };
     let (domain, device) = (nats.domain, nats.device);
     let approvals = presence::while_following(&js, domain, me, device, Following::Approvals, shown);
@@ -222,6 +234,7 @@ struct Chat {
     searches: Searches,
     trees: tree::Io,
     cards: cards::Io,
+    summaries: catchup::Io,
     /// The images drawn, with `[cli]` `inline_images` on.
     images: Option<images::Io>,
     model: Model,
@@ -275,6 +288,10 @@ impl Chat {
                 }
                 acted = self.acts.next() => {
                     dirty = true;
+                    if matches!(acted, acts::Acted::Changed(..)) {
+                        // Home shows done states and snoozes: read them back at once.
+                        self.cards.refresh();
+                    }
                     self.model.acted(acted, Utc::now());
                     Vec::new()
                 }
@@ -291,7 +308,13 @@ impl Chat {
                 read = self.cards.next() => {
                     dirty = true;
                     self.model.cards(read, Utc::now());
-                    Vec::new()
+                    // TL;DRs ahead of time follow what was read.
+                    self.model.ahead(Utc::now()).into_iter().collect()
+                }
+                summarised = self.summaries.next() => {
+                    dirty = true;
+                    self.model.summarised(summarised, Utc::now());
+                    self.model.ahead(Utc::now()).into_iter().collect()
                 }
                 event = self.trees.next() => {
                     dirty = true;
@@ -317,13 +340,18 @@ impl Chat {
                     self.model.data.images.clear();
                 }
             }
-            self.acts.watch(self.model.open().cloned());
-            self.trees.watch(self.model.tree_shown());
-            if let Some(images) = &mut self.images {
-                let wanted = images::wanted(&self.model);
-                images.want(&wanted);
-                self.model.data.images.retain(&wanted);
-            }
+            self.watch();
+        }
+    }
+
+    /// Follow what the views show: the open thread's state, the delegation tree's links and spend, the images.
+    fn watch(&mut self) {
+        self.acts.watch(self.model.open().cloned());
+        self.trees.watch(self.model.tree_shown());
+        if let Some(images) = &mut self.images {
+            let wanted = images::wanted(&self.model);
+            images.want(&wanted);
+            self.model.data.images.retain(&wanted);
         }
     }
 
@@ -353,7 +381,12 @@ impl Chat {
                 self.feed.load_history(thread.clone(), true);
                 self.reads.mark_read(thread);
             }
-            Action::Change(thread, change, last) => self.acts.change(thread, change, last),
+            Action::Change(thread, change, last) => {
+                if change == acts::Change::Done(true) {
+                    self.reads.mark_read(thread.clone());
+                }
+                self.acts.change(thread, change, last);
+            }
             Action::Copy(text) => {
                 let copied =
                     std::io::stdout().write_all(osc52(&text).as_bytes()).and_then(|()| std::io::stdout().flush());
@@ -372,6 +405,7 @@ impl Chat {
             Action::React(message, reaction, remove) => self.reads.react(message, reaction, remove),
             Action::Send(draft) => self.people.send(draft),
             Action::Search(search) => self.searches.start(search),
+            Action::Summarise(ask) => self.summaries.ask(ask),
             Action::CancelSubtree(prompts) => {
                 let text = format!("asking {} ants to cancel their prompts…", prompts.len());
                 self.model.notify(text, Level::Info, Utc::now());

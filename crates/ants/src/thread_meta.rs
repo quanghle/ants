@@ -1,7 +1,8 @@
 //! What humans make of threads, in [`THREADS_BUCKET`]: a title, a TL;DR ([`ThreadSummary`]) and a done state per
-//! thread, each shared by every human, and each human's pinned and archived threads ([`ThreadMarks`]), shared by its devices. Read and written by
-//! direct gets and plain publishes ([`DirectKv`]); the marks, one entry per human, with compare-and-set, so devices
-//! marking at once lose nothing.
+//! thread, each shared by every human, and each human's pinned and archived threads ([`ThreadMarks`]) and the threads
+//! it snoozed on home ([`ThreadSnoozes`]), shared by its devices. Read and written by direct gets and plain publishes
+//! ([`DirectKv`]); the marks and snoozes, one entry each per human, with compare-and-set, so devices marking at once
+//! lose nothing.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -10,8 +11,8 @@ use std::time::Duration;
 
 use ants_daemon::direct_kv::{DirectKv, Lookup};
 use ants_proto::{
-    JsDomain, Mark, STREAM, THREADS_BUCKET, ThreadDone, ThreadId, ThreadMarks, ThreadSummary, ThreadTitle, UserId,
-    done_key, marks_key, summary_key, title_key,
+    JsDomain, Mark, STREAM, THREADS_BUCKET, ThreadDone, ThreadId, ThreadMarks, ThreadSnoozes, ThreadSummary,
+    ThreadTitle, UserId, done_key, marks_key, snoozed_key, summary_key, title_key,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
@@ -54,6 +55,11 @@ fn summaries_right() -> String {
     format!("$JS.API.DIRECT.GET.KV_{THREADS_BUCKET}.$KV.{THREADS_BUCKET}.summary.*")
 }
 
+/// The direct get subject of `human`'s snoozes, which credentials issued before permissions version 2 lack.
+fn snoozed_right(human: &UserId) -> String {
+    format!("$JS.API.DIRECT.GET.KV_{THREADS_BUCKET}.$KV.{THREADS_BUCKET}.{}", snoozed_key(human))
+}
+
 /// The titles, TL;DRs, done states and the marks of the CLI's human, unless its credentials are no human's: a request
 /// they deny would only time out. Credentials that may not read done states or TL;DRs leave them out ([`Meta::done`],
 /// [`Meta::summary`]).
@@ -69,6 +75,7 @@ pub async fn open(nats: &crate::Nats<'_>, js: &jetstream::Context) -> Result<Met
     meta.keyring = Keyring::lazy(nats.creds, ants_daemon::keystore::os(), js).map(Arc::new);
     meta.done_right = nats.rights.may_publish(&done_right());
     meta.summaries_right = nats.rights.may_publish(&summaries_right());
+    meta.snoozed_right = nats.rights.may_publish(&snoozed_right(me));
     Ok(meta)
 }
 
@@ -313,6 +320,8 @@ pub struct Meta {
     done_right: bool,
     /// Whether its credentials may read and write TL;DRs.
     summaries_right: bool,
+    /// Whether its credentials may read and write its snoozes.
+    snoozed_right: bool,
     /// What opens sealed titles; without one, they read `[sealed]`.
     keyring: Option<Arc<Keyring>>,
 }
@@ -321,7 +330,14 @@ impl Meta {
     /// Those of `human`, through `js`, made for JetStream domain `js_domain`.
     pub async fn open(js: &jetstream::Context, js_domain: Option<&JsDomain>, human: &UserId) -> Result<Self> {
         let kv = DirectKv::new(js, js_domain, THREADS_BUCKET).await?;
-        Ok(Self { kv, human: human.clone(), done_right: true, summaries_right: true, keyring: None })
+        Ok(Self {
+            kv,
+            human: human.clone(),
+            done_right: true,
+            summaries_right: true,
+            snoozed_right: true,
+            keyring: None,
+        })
     }
 
     /// Opening sealed titles with `keyring`.
@@ -631,6 +647,60 @@ impl Meta {
             count += usize::from(deleted.with_context(|| format!("deleting a {prefix} key"))?);
         }
         Ok(count)
+    }
+
+    /// The threads the human snoozed on home, and the stream sequence of their entry (0 for none); none when the
+    /// credentials may not read them, warned of once per process.
+    async fn snoozes_last(&self) -> Result<(ThreadSnoozes, u64)> {
+        static WARNED: Once = Once::new();
+        if !self.snoozed_right {
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    "the credentials of {} predate snoozes on home (permissions version 2): going on without them; \
+                     `ants renew` renews them",
+                    self.human
+                );
+            });
+            return Ok((ThreadSnoozes::default(), 0));
+        }
+        match self.kv.lookup_last(snoozed_key(&self.human)).await.context("reading the snoozed threads")? {
+            (Lookup::NoBucket, _) => bail!(MISSING),
+            (Lookup::NoValue, last) => Ok((ThreadSnoozes::default(), last)),
+            (Lookup::Value(value), last) => {
+                let snoozes = serde_json::from_slice(&value).unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "malformed snoozed threads; starting over");
+                    ThreadSnoozes::default()
+                });
+                Ok((snoozes, last))
+            }
+        }
+    }
+
+    /// The threads the human snoozed on home.
+    pub async fn snoozes(&self) -> Result<ThreadSnoozes> {
+        Ok(self.snoozes_last().await?.0)
+    }
+
+    /// Change the human's snoozes with `change`, on top of whatever its other devices changed meanwhile, storing them
+    /// only if `change` says it changed them. What `change` said.
+    pub async fn change_snoozes(&self, change: impl Fn(&mut ThreadSnoozes) -> bool) -> Result<bool> {
+        if !self.snoozed_right {
+            bail!(
+                "the credentials of {} predate snoozes on home (permissions version 2): `ants renew` renews them",
+                self.human
+            );
+        }
+        for _ in 0..CONFLICTS {
+            let (mut snoozes, last) = self.snoozes_last().await?;
+            if !change(&mut snoozes) {
+                return Ok(false);
+            }
+            let value = serde_json::to_vec(&snoozes)?;
+            if self.kv.update(snoozed_key(&self.human), value, last).await.context("storing the snoozes")? {
+                return Ok(true);
+            }
+        }
+        bail!("storing the snoozed threads: they kept changing")
     }
 
     /// Change the human's marks with `change`, on top of whatever its other devices changed meanwhile, storing them
