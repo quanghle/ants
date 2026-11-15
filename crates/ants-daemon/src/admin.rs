@@ -4,12 +4,17 @@
 //! under the key of the machine and ant of the subject it came on and the order's id ([`admin_outcome_key`]), and acks
 //! it only after the outcome is stored. A message whose order already has an outcome, a replay, it acks without
 //! deciding again. It refuses every order while the config sets `[admin] remote = false`.
+//!
+//! An order an admin signed it carries out ([`apply`]) with the module of its op: [`set`] edits the ant's settings in
+//! the config file the daemon serves ([`ConfigFile`]), which the daemon reloads at once.
 
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use ants_proto::{
-    AdminOrder, AdminOutcome, DEVICES_BUCKET, JsDomain, MACHINES_BUCKET, Machine, OrderState, STREAM, UserId, Uuid,
-    admin_consumer, admin_outcome_key, revoked_device_key, subject,
+    AdminOp, AdminOrder, AdminOutcome, DEVICES_BUCKET, JsDomain, MACHINES_BUCKET, Machine, OrderState, STREAM, UserId,
+    Uuid, admin_consumer, admin_outcome_key, revoked_device_key, subject,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::consumer::{AckPolicy, PullConsumer, pull};
@@ -17,9 +22,12 @@ use async_nats::jetstream::{self, AckKind};
 use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
 use serde_json::Value;
+use tokio::sync::Notify;
 
 use crate::bus;
 use crate::direct_kv::{DirectKv, Lookup};
+
+mod set;
 
 /// How long an order may stay in hand unacked before the stream delivers it again.
 const ACK_WAIT: Duration = Duration::from_secs(60);
@@ -33,6 +41,9 @@ pub const REMOTE_OFF: &str = "this machine's config sets [admin] remote = false"
 /// Why an order is refused that the daemon cannot carry out yet.
 pub const NOT_SUPPORTED: &str = "not supported yet";
 
+/// Why an order to edit the config is refused by a daemon serving no config file.
+pub const NO_CONFIG: &str = "the daemon serves no config file to edit";
+
 /// What the host connection of a machine needs to decide the orders to its ants.
 #[derive(Debug, Clone)]
 pub struct Orders {
@@ -42,7 +53,26 @@ pub struct Orders {
     /// The accounts whose admins' orders count: the issuer of the host credentials. None without credentials, which
     /// refuses every order.
     pub accounts: Vec<String>,
+    /// The config file the daemon serves whole, which orders edit; none refuses those.
+    pub config: Option<ConfigFile>,
 }
+
+/// The config file a daemon serves whole, as the orders to its machine's ants edit it, and how to have the daemon
+/// reload it at once after an edit rather than at its next check of the file.
+#[derive(Debug, Clone)]
+pub struct ConfigFile {
+    pub path: PathBuf,
+    /// Notified once per edit written.
+    pub edited: Arc<Notify>,
+}
+
+impl PartialEq for ConfigFile {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path && Arc::ptr_eq(&self.edited, &other.edited)
+    }
+}
+
+impl Eq for ConfigFile {}
 
 /// Take the orders to the machine's ants and record their outcomes, for as long as the connection `js` lasts:
 /// [`take`] again, after a pause, whenever it stops. `js_domain` is the domain `js` was made for.
@@ -213,13 +243,31 @@ async fn decide(
     let accounts = orders.accounts.iter().map(String::as_str);
     match order.verify(subject, accounts, |_| revoked, stored_at) {
         Err(e) => Ok(refused(&e.to_string())),
-        Ok(_) => Ok(apply(order)),
+        Ok(_) => Ok(apply(orders, order).await),
     }
 }
 
-/// Carry out `order`, which an admin signed: none is supported yet.
-fn apply(order: &AdminOrder) -> AdminOutcome {
-    AdminOutcome::of(order, OrderState::Refused, Some(NOT_SUPPORTED.to_owned()), None)
+/// Carry out `order`, which an admin signed, with the module of its op, which refuses it when it cannot.
+async fn apply(orders: &Orders, order: &AdminOrder) -> AdminOutcome {
+    match &order.op {
+        AdminOp::Set { changes } => set::apply(orders, order, changes),
+        AdminOp::Pause => refused(order, NOT_SUPPORTED),
+        AdminOp::Resume => refused(order, NOT_SUPPORTED),
+        AdminOp::Restart { .. } => refused(order, NOT_SUPPORTED),
+        AdminOp::Add { .. } => refused(order, NOT_SUPPORTED),
+        AdminOp::Retire => refused(order, NOT_SUPPORTED),
+        AdminOp::ReadMemories => refused(order, NOT_SUPPORTED),
+    }
+}
+
+/// `order` applied, decided now, with what its op returns, if anything.
+fn applied(order: &AdminOrder, result: Option<Value>) -> AdminOutcome {
+    AdminOutcome::of(order, OrderState::Applied, None, result)
+}
+
+/// `order` refused for `reason`, decided now.
+fn refused(order: &AdminOrder, reason: &str) -> AdminOutcome {
+    AdminOutcome::of(order, OrderState::Refused, Some(reason.to_owned()), None)
 }
 
 #[cfg(test)]

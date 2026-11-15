@@ -36,7 +36,7 @@ fn admin_creds<'a>(nats: &Nats<'a>) -> Result<&'a Path> {
 /// Send `op` about `ant` to the daemon of `machine`, else of the machine that last recorded serving it, signed with
 /// the admin credentials of `nats`, once the hub's stream has stored it; then wait up to `wait` for its outcome. None
 /// when the order is still pending then, as it stays until the machine's daemon takes it.
-#[cfg_attr(not(test), expect(dead_code, reason = "the admin commands of ants-5ggma.5 send orders"))]
+#[cfg_attr(not(test), expect(dead_code, reason = "the admin commands of ants-5ggma.6 send orders"))]
 pub async fn send(
     nats: &Nats<'_>,
     js: &jetstream::Context,
@@ -243,9 +243,10 @@ fn table(orders: &[Listed], now: DateTime<Utc>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use ants_daemon::admin::ConfigFile;
     use ants_daemon::direct_kv::DirectKv;
     use ants_daemon::host::{self, Host};
-    use ants_proto::{MACHINES_BUCKET, Permissions, Role};
+    use ants_proto::{FieldChange, MACHINES_BUCKET, Permissions, Role};
 
     use super::*;
     use crate::auth::tests::Server;
@@ -259,16 +260,17 @@ mod tests {
     }
 
     /// The host connection of m1 serving dev-a, as a daemon whose config sets `[admin] remote` to `remote` runs it,
-    /// once it recorded its ants; dropping the sender stops it.
+    /// serving the file `config`, once it recorded its ants; dropping the sender stops it.
     async fn host_of_m1(
         server: &Server,
         js: &jetstream::Context,
         remote: bool,
+        config: Option<ConfigFile>,
     ) -> (tokio::sync::watch::Sender<Vec<UserId>>, tokio::task::JoinHandle<Result<()>>) {
         let creds = server.dir().join("host-m1.creds");
         issue_host(&server.dir().join("auth"), &"m1".parse().unwrap(), None, &creds).unwrap();
-        let host =
-            Host { machine: None, nats: server.url.clone(), creds: Some(creds), js_domain: None, remote_admin: remote };
+        let (url, creds) = (server.url.clone(), Some(creds));
+        let host = Host { machine: None, nats: url, creds, js_domain: None, remote_admin: remote, config };
         let (ants, watched) = tokio::sync::watch::channel(vec![p("dev-a")]);
         let task = tokio::spawn(host::run(host, watched));
         tokio::time::timeout(WAIT, async {
@@ -299,7 +301,7 @@ mod tests {
         issue_device_with(&server.dir().join("auth"), &alice, Kind::Human, rights, &admin, &admin_creds).unwrap();
         let admin = crate::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
         let (_, js) = admin.connect("test").await.unwrap();
-        let (ants, task) = host_of_m1(&server, &js, true).await;
+        let (ants, task) = host_of_m1(&server, &js, true, None).await;
 
         let (pause, paused) = send(&admin, &js, None, &dev_a, AdminOp::Pause, WAIT).await.unwrap();
         let paused = paused.expect("the daemon decides at once");
@@ -369,10 +371,67 @@ mod tests {
         let as_host = DirectKv::new(&m_js, None, MACHINES_BUCKET).await.unwrap();
         assert!(as_host.put(away.outcome_key(), b"{}".to_vec()).await.is_err(), "m1 records no outcome of m2's");
 
-        let (ants, task) = host_of_m1(&server, &js, false).await;
+        let (ants, task) = host_of_m1(&server, &js, false, None).await;
         let (_, off) = send(&admin, &js, None, &dev_a, AdminOp::Pause, WAIT).await.unwrap();
         let off = off.expect("the daemon decides at once");
         assert_eq!((off.state, off.reason.as_deref()), (OrderState::Refused, Some(ants_daemon::admin::REMOTE_OFF)));
+        drop(ants);
+        tokio::time::timeout(WAIT, task).await.unwrap().unwrap().unwrap();
+    }
+
+    /// A set order edits the ant's table in the machine's config file in place, comments kept, and has the daemon
+    /// reload it at once; one expecting a value the field no longer holds is refused naming the field, and one the
+    /// config loader rejects is refused too, both leaving the file as it was.
+    #[tokio::test]
+    async fn a_set_order_edits_the_config_in_place_unless_a_field_changed_or_the_file_would_not_load() {
+        let Some(server) = Server::start() else { return };
+        let (alice, bob, dev_a) = (p("alice"), p("bob"), p("dev-a"));
+        let (_, h_js) = server.connect_as(&bob, Role::Human).await;
+        ants_daemon::bus::ensure_stream(&h_js).await.unwrap();
+        h_js.create_key_value(ants_daemon::hub::machines_config()).await.unwrap();
+        h_js.create_key_value(ants_daemon::hub::devices_config()).await.unwrap();
+        let admin_creds = server.dir().join("alice-admin.creds");
+        let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
+        let rights = Permissions::for_user(&alice, Role::Human);
+        issue_device_with(&server.dir().join("auth"), &alice, Kind::Human, rights, &admin, &admin_creds).unwrap();
+        let admin = crate::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+        let (_, js) = admin.connect("test").await.unwrap();
+
+        let path = server.dir().join("config.toml");
+        let text = "harness = \"copilot\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nmodel = \"gpt-5\"  # fast \
+                    enough\n\n# Keep dev-b on its own.\n[[ant]]\nname = \"dev-b\"\nworkdir = \".\"\n";
+        std::fs::write(&path, text).unwrap();
+        let mut triggers = crate::reload::Triggers::new(path.clone(), None, Duration::from_secs(3600)).unwrap();
+        let config = ConfigFile { path: path.clone(), edited: triggers.edits() };
+        let (ants, task) = host_of_m1(&server, &js, true, Some(config)).await;
+        let set = |field: &str, expected: Option<Value>, value: Option<Value>| AdminOp::Set {
+            changes: vec![FieldChange { field: vec![field.to_owned()], expected, value }],
+        };
+
+        let model = set("model", Some("gpt-5".into()), Some("o3".into()));
+        let (_, applied) = send(&admin, &js, None, &dev_a, model, WAIT).await.unwrap();
+        let applied = applied.expect("the daemon decides at once");
+        assert_eq!((applied.state, applied.reason), (OrderState::Applied, None));
+        let edited = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(edited, text.replace("\"gpt-5\"", "\"o3\""), "only the value changes, comments kept");
+        let reload = tokio::time::timeout(WAIT, triggers.next()).await.expect("a reload at once");
+        assert_eq!(reload, crate::reload::Trigger::Edited);
+
+        let stale = set("model", Some("gpt-5".into()), Some("o4".into()));
+        let (_, conflict) = send(&admin, &js, None, &dev_a, stale, WAIT).await.unwrap();
+        let conflict = conflict.expect("the daemon decides at once");
+        assert_eq!(conflict.state, OrderState::Refused);
+        let reason = conflict.reason.unwrap();
+        assert!(reason.starts_with("model changed since the order was sent"), "{reason}");
+
+        let invalid = set("max_harnesses", None, Some("many".into()));
+        let (_, invalid) = send(&admin, &js, None, &dev_a, invalid, WAIT).await.unwrap();
+        let invalid = invalid.expect("the daemon decides at once");
+        assert_eq!(invalid.state, OrderState::Refused);
+        assert!(invalid.reason.as_deref().unwrap().contains("max_harnesses"), "{invalid:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), edited, "refusals leave the file alone");
+        let quiet = tokio::time::timeout(Duration::from_millis(200), triggers.next()).await;
+        assert!(quiet.is_err(), "no reload without an edit");
         drop(ants);
         tokio::time::timeout(WAIT, task).await.unwrap().unwrap().unwrap();
     }

@@ -96,6 +96,7 @@ use ants_proto::{JsDomain, Machine, UserId};
 use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 
+pub mod edit;
 pub mod registration;
 
 use crate::caps::{Caps, Members, Pool};
@@ -1239,13 +1240,22 @@ pub fn append(path: &Path, entry: &str) -> Result<()> {
     write(path, &text)
 }
 
-/// Write `text` to the config file at `path`: beside it first, then renamed over it, so a failure leaves the old file
-/// whole.
+/// Write `text` to the config file at `path`: beside it first, with the old file's permissions, flushed to disk, then
+/// renamed over it, so a failure leaves the old file whole.
 pub fn write(path: &Path, text: &str) -> Result<()> {
+    use std::io::Write as _;
     let mut new = path.as_os_str().to_owned();
     new.push(".new");
     let new = PathBuf::from(new);
-    std::fs::write(&new, text).with_context(|| format!("writing {}", new.display()))?;
+    let written = (|| {
+        let mut file = std::fs::File::create(&new)?;
+        file.write_all(text.as_bytes())?;
+        if let Ok(old) = std::fs::metadata(path) {
+            file.set_permissions(old.permissions())?;
+        }
+        file.sync_all()
+    })();
+    written.with_context(|| format!("writing {}", new.display()))?;
     std::fs::rename(&new, path).with_context(|| format!("writing config {}", path.display()))
 }
 
