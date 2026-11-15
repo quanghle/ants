@@ -14,7 +14,7 @@ use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use tokio::sync::mpsc;
 
-use ants_proto::ChannelAdminReply;
+use ants_proto::{ChannelAdminReply, MAX_TITLE};
 
 use super::*;
 use crate::harness::Launch;
@@ -140,7 +140,7 @@ async fn send_message_follows_on_from_the_current_message() {
     let (url, token) = http_server(&mcp, &current.thread_id);
     let client = http_client(&url, &token).await;
     let tools: Vec<_> = client.list_all_tools().await.unwrap().into_iter().map(|t| t.name).collect();
-    assert_eq!(tools.len(), 12, "{tools:?}");
+    assert_eq!(tools.len(), 13, "{tools:?}");
 
     let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "dev-b", "text": "hi"})).await;
     assert!(!ok && text.contains("no message is being handled"), "{text}");
@@ -202,6 +202,33 @@ async fn react_takes_the_current_message_or_a_named_one_and_removes() {
     let (ok, text) = call(&client, "react", remove).await;
     assert!(ok && text.starts_with("No reaction eyes"), "{text}");
     assert_eq!(*stored.locked(), std::collections::BTreeSet::from([(other, "check".to_owned())]));
+}
+
+#[tokio::test]
+async fn a_suggested_title_waits_for_the_turn_s_reply_and_goes_with_the_turn() {
+    let (mcp, _sent) = start(&home("title")).await;
+    let current = from_human();
+    let thread = &current.thread_id;
+    let (url, token) = http_server(&mcp, thread);
+    let client = http_client(&url, &token).await;
+    let suggest = |title: &str| call(&client, "suggest_thread_title", serde_json::json!({ "title": title }));
+    let (ok, text) = suggest("Fix the build").await;
+    assert!(!ok && text.contains("no message is being handled"), "{text}");
+
+    let turn = mcp.begin(&current);
+    for bad in ["  ", "two\nlines", &"x".repeat(MAX_TITLE + 1)] {
+        let (ok, text) = suggest(bad).await;
+        assert!(!ok && text.contains("invalid thread title"), "{text}");
+    }
+    assert!(suggest("First idea").await.0);
+    let (ok, text) = suggest("  Fix the build ").await;
+    assert!(ok && text.contains("\"Fix the build\""), "{text}");
+    assert_eq!(mcp.take_title(thread).as_deref(), Some("Fix the build"), "the latest, trimmed");
+    assert_eq!(mcp.take_title(thread), None, "taken once");
+    assert!(suggest("Unsent").await.0);
+    drop(turn);
+    let _turn = mcp.begin(&current);
+    assert_eq!(mcp.take_title(thread), None, "a suggestion ends with its turn");
 }
 
 /// A channel manager in memory: it applies requests to its channels as `ants channel serve` does, roster aside,

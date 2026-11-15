@@ -96,6 +96,7 @@ fn envelope() -> Envelope {
         webhook: true,
         allow: Some(vec!["read:*".to_owned(), "other:send_message".to_owned()]),
         mention: Some(mention()),
+        title: Some("Fix the build".to_owned()),
         sent_at: at(0),
     }
 }
@@ -112,6 +113,7 @@ fn plain_envelope() -> Envelope {
         webhook: false,
         allow: None,
         mention: None,
+        title: None,
         ..envelope()
     }
 }

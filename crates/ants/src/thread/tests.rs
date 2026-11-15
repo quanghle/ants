@@ -101,6 +101,30 @@ fn a_message_on_another_sender_s_subject_is_marked_forged() {
 }
 
 #[test]
+fn a_thread_keeps_the_first_title_an_ant_suggested_but_none_from_a_forged_message() {
+    let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
+    let ask = Envelope::on_thread(t("t1"), alice, dev_a.clone(), "fix it");
+    let titled = |from: &UserId, title: &str| {
+        let mut reply = ask.reply(from.clone(), "on it", ants_proto::Role::Human).unwrap();
+        reply.title = Some(title.to_owned());
+        reply
+    };
+    let (forged, first, second) = (titled(&dev_b, "Forged"), titled(&dev_a, "Fix it"), titled(&dev_b, "Later"));
+    let messages = [
+        (ask.subject(), json(&ask)),
+        ("ants.inbox.alice.dev-a".to_owned(), json(&forged)),
+        (first.subject(), json(&first)),
+        (second.subject(), json(&second)),
+    ];
+    let read = entries(&messages);
+    assert_eq!((read[1].forged, &read[1].suggested_title), (true, &None));
+    let mut threads = Threads::new(None);
+    read.iter().for_each(|e| threads.add(e));
+    let (all, _) = threads.finish(&Select::default(), &ThreadMarks::default());
+    assert_eq!(all[0].suggested, Some((dev_a, "Fix it".to_owned())));
+}
+
+#[test]
 fn threads_sum_up_their_users_owner_times_and_opening() {
     let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
     let one = Envelope::on_thread(t("t1"), alice.clone(), dev_a.clone(), "first line\nmore");

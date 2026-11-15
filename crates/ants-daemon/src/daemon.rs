@@ -1815,9 +1815,12 @@ impl Inbox<'_> {
         let notice = [limit_notice, cancel_notice, branch_notice].into_iter().flatten().collect::<Vec<_>>().join("\n");
         let text = [reply.text, notice].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
         let text = self.redactor.redact(&text).into_owned();
-        let Some(reply) = self.reply_for(incoming, read, text, limit.as_ref(), msg, seq).await? else {
+        let Some(mut reply) = self.reply_for(incoming, read, text, limit.as_ref(), msg, seq).await? else {
             return Ok(());
         };
+        if let (Reply::Message(message), Some(mcp)) = (&mut reply, self.mcp) {
+            message.title = mcp.take_title(thread);
+        }
         // Before the reply is recorded, so a redelivery that only resends the reply still escalates; its message id
         // keeps a second escalation out of the stream.
         if let Some(limit) = limit

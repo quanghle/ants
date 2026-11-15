@@ -53,16 +53,23 @@ pub async fn open(nats: &crate::Nats<'_>, js: &jetstream::Context) -> Result<Met
 }
 
 /// The title of `thread`, whose last message read is `last`, and how the CLI's human marked it; none on any error,
-/// warned of.
+/// warned of. A thread that never had a title gets the one an ant `suggested`, if any ([`Meta::adopt_title`]).
 pub async fn of_or_none(
     nats: &crate::Nats<'_>,
     js: &jetstream::Context,
     thread: &ThreadId,
     last: Option<&Entry>,
+    suggested: Option<(&UserId, &str)>,
 ) -> (Option<ThreadTitle>, Option<Mark>) {
     let read = async {
         let meta = open(nats, js).await?;
-        let title = meta.title(thread).await?;
+        let mut title = meta.title(thread).await?;
+        if let (None, Some((by, text))) = (&title, suggested) {
+            title = meta.adopt_title(thread, text, by).await.unwrap_or_else(|e| {
+                tracing::warn!("not storing the title {by} suggested: {e:#}");
+                None
+            });
+        }
         let mark = meta.marks().await?.mark(thread, last.map_or(0, |e| e.seq));
         anyhow::Ok((title, mark))
     };
@@ -202,6 +209,21 @@ impl Meta {
             self.kv.delete(title_key(thread)).await.context("clearing the title")?;
         }
         Ok(had)
+    }
+
+    /// Title `thread` `text` as `by`, the ant that suggested it ([`ants_proto::Envelope::title`]), only if the thread
+    /// never had a title: one a human set, renamed or cleared stays, compare-and-set keeping it from one set
+    /// meanwhile. The title stored, if any.
+    pub async fn adopt_title(&self, thread: &ThreadId, text: &str, by: &UserId) -> Result<Option<ThreadTitle>> {
+        match self.kv.lookup_last(title_key(thread)).await.context("reading the title")? {
+            (Lookup::NoBucket, _) => bail!(MISSING),
+            (Lookup::NoValue, 0) => {}
+            _ => return Ok(None),
+        }
+        let title = ThreadTitle::new(thread.clone(), text, by.clone())?;
+        let value = serde_json::to_vec(&title)?;
+        let stored = self.kv.update(title_key(thread), value, 0).await.context("storing the suggested title")?;
+        Ok(stored.then_some(title))
     }
 
     /// The human's marks, and the stream sequence of their entry (0 for none).

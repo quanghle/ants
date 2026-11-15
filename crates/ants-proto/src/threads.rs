@@ -1,12 +1,13 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, MAX_TITLE, ThreadId, UserId};
 #[cfg(doc)]
-use crate::{STREAM, THREADS_BUCKET, marks_key, title_key};
+use crate::{Envelope, STREAM, THREADS_BUCKET, marks_key, title_key};
+use crate::{Error, MAX_TITLE, ThreadId, UserId};
 
 /// The title of a thread, under its [`title_key`] in [`THREADS_BUCKET`]: one per thread, shared by every human, which
-/// any human sets, renames or clears. `by` is the human that last set it, as its CLI says.
+/// any human sets, renames or clears. `by` is the human that last set it, as its CLI says, or the ant whose suggestion
+/// ([`Envelope::title`]) a human's CLI stored on a thread that never had a title.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadTitle {
     pub thread_id: ThreadId,

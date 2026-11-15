@@ -47,6 +47,7 @@ expression: value
       "post": "019a7d2e-0000-7000-8000-000000000003",
       "author": "github"
     },
+    "title": "Fix the build",
     "sent_at": "2025-01-01T12:00:00Z"
   },
   "payload": "{\"id\":"
