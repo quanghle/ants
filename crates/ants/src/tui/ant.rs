@@ -198,16 +198,33 @@ impl Page {
 
     pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
         let entry = data.live.roster.iter().find(|e| e.ant == self.ant);
-        let width = usize::from(area.width / 2).saturating_sub(2);
+        let (mark, color) = super::nav::marker(&entry.into_iter().collect::<Vec<_>>(), now);
+        let head = data.looks.head(&self.ant);
+        let head_width = head.iter().flatten().map(Line::width).max().map_or(0, |w| w + 2);
+        let width = (usize::from(area.width).saturating_sub(head_width) / 2).saturating_sub(2);
         let about = about(entry, now, width);
         let status = status(&self.ant, entry, data, now);
-        let tall = u16::try_from(about.len().max(status.len()) + 2).unwrap_or(u16::MAX);
+        let tall = about.len().max(status.len()).max(head.as_ref().map_or(0, Vec::len));
+        let tall = u16::try_from(tall + 2).unwrap_or(u16::MAX);
         let [top, tabs, pane] =
             Layout::vertical([Constraint::Max(tall.min(area.height / 2)), Constraint::Length(1), Constraint::Min(3)])
                 .areas(area);
-        let [left, right] = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).areas(top);
-        let (mark, color) = super::nav::marker(&entry.into_iter().collect::<Vec<_>>(), now);
-        let title = format!(" {mark} {} · {} ", self.ant, crate::ant::state(entry, now));
+        let head_width = u16::try_from(head_width).unwrap_or(u16::MAX);
+        let [face, left, right] =
+            Layout::horizontal([Constraint::Length(head_width), Constraint::Fill(1), Constraint::Fill(1)]).areas(top);
+        let title = match head {
+            Some(head) => {
+                frame.render_widget(Paragraph::new(head).block(frame::block(String::new(), false)), face);
+                format!(" {mark} {} · {} ", self.ant, crate::ant::state(entry, now))
+            }
+            None => format!(
+                " {mark} {} {} · {} ",
+                data.looks.face(&self.ant).content,
+                self.ant,
+                crate::ant::state(entry, now)
+            ),
+        };
+
         let block = frame::block(title, focused).title_style(Style::new().fg(color));
         frame.render_widget(Paragraph::new(about).block(block).wrap(Wrap { trim: false }), left);
         let block = frame::block(" now ".to_owned(), false);
@@ -475,7 +492,7 @@ mod tests {
         m.select(nav::Item::Ant(user("dev-a")));
         assert_eq!(m.page().name(), "ant");
         let shown = screen(&m, at(3));
-        assert!(shown.contains("dev-a · live, signed-out"), "{shown}");
+        assert!(shown.contains("{.~.} dev-a · live, signed-out"), "without colour, the face: {shown}");
         assert!(shown.contains("machine      m1") && shown.contains("gpt-5, effort high"), "{shown}");
         assert!(shown.contains("capabilities rust, review"), "{shown}");
         assert!(shown.contains("harness copilot signed out for 2s"), "{shown}");

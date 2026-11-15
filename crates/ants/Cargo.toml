@@ -54,3 +54,6 @@ workspace = true
 [[test]]
 name = "e2e"
 harness = false
+
+[target."cfg(unix)".dependencies]
+libc = "0.2.191"

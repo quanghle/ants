@@ -8,6 +8,8 @@ use anyhow::{Context as _, Result};
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
 
+use crate::avatars::{self, Faces};
+
 /// How fresh an entry is, judged by its last heartbeat ([`roster::is_live`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
@@ -311,13 +313,28 @@ pub fn table(entries: &[RosterEntry], now: DateTime<Utc>) -> String {
     lines.join("\n")
 }
 
-/// An entry as one JSON object, with its `state` added.
-pub fn json(entry: &RosterEntry, now: DateTime<Utc>) -> Result<String> {
+/// An entry as one JSON object, with its `state` added, and from the ant's identity record in `faces` when it has one,
+/// its `born` and `prompts`, and its `avatar` (the face) and `color`.
+pub fn json(entry: &RosterEntry, now: DateTime<Utc>, faces: &Faces) -> Result<String> {
     let mut value = serde_json::to_value(entry)?;
     if let Some(object) = value.as_object_mut() {
         object.insert("state".to_owned(), State::of(entry, now).as_str().into());
+        let identity = faces.identity(&entry.ant);
+        let avatar = faces.avatar(&entry.ant);
+        object.insert("born".to_owned(), serde_json::to_value(identity.map(|i| i.born))?);
+        object.insert("avatar".to_owned(), avatar.face().into());
+        object.insert("color".to_owned(), avatar.hue_name().into());
+        object.insert("prompts".to_owned(), identity.map(|i| i.prompts).into());
     }
     Ok(value.to_string())
+}
+
+/// `table` with each ant's face before its row, in its colour, the header indented to line up.
+pub fn faced(table: &str, entries: &[RosterEntry], faces: &Faces) -> String {
+    let mut lines = table.lines();
+    let header = lines.next().map(|h| format!("{:width$} {h}", "", width = ants_proto::FACE_WIDTH));
+    let rows = lines.zip(entries).map(|(line, e)| format!("{} {line}", faces.face(&e.ant)));
+    header.into_iter().chain(rows).collect::<Vec<_>>().join("\n")
 }
 
 /// The entries in the roster, read with a human's credentials.
@@ -330,22 +347,24 @@ pub async fn list(js: &jetstream::Context) -> Result<Vec<RosterEntry>> {
 pub async fn show(nats: &crate::Nats<'_>, json: bool) -> Result<()> {
     let (_, js) = nats.connect("ants-roster").await?;
     let entries = list(&js).await?;
+    let faces = Faces::stdout(avatars::read_or_none(&js).await);
     let now = Utc::now();
     if json {
         for entry in &entries {
-            println!("{}", self::json(entry, now)?);
+            println!("{}", self::json(entry, now, &faces)?);
         }
     } else if entries.is_empty() {
         println!("no ants registered");
     } else {
-        println!("{}", table(&entries, now));
+        println!("{}", faced(&table(&entries, now), &entries, &faces));
         if let Some(note) = crate::versions::roster_note(&entries, now) {
             println!("{note}");
         }
         if let Some(note) = crate::versions::harness_note(&entries, now) {
             println!("{note}");
         }
-        let notes = [held(&entries, now), memory_low(&entries, now)].concat();
+        let collisions = faces.collisions(entries.iter().map(|e| &e.ant));
+        let notes = [held(&entries, now), memory_low(&entries, now), collisions].concat();
         if !notes.is_empty() {
             println!("\n{}", notes.join("\n"));
         }
@@ -514,7 +533,7 @@ pub(crate) mod tests {
                     .to_owned(),
             ]
         );
-        let json: serde_json::Value = serde_json::from_str(&super::json(&out, now).unwrap()).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&super::json(&out, now, &Faces::plain()).unwrap()).unwrap();
         assert_eq!(json["signed_out"]["sign_in"].as_str(), Some("copilot login"));
         let mut low = entry("dev-i", 600, 2, now);
         low.memory_low = Some(ants_proto::MemoryLow { since, available: 768 << 20, max_harnesses: 1 });
@@ -543,9 +562,32 @@ pub(crate) mod tests {
 
         let mut led = entry("dev-a", 0, 30, now);
         led.escalate_to = vec!["lead".parse().unwrap()];
-        let json: serde_json::Value = serde_json::from_str(&super::json(&led, now).unwrap()).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&super::json(&led, now, &Faces::plain()).unwrap()).unwrap();
         assert_eq!((json["ant"].as_str(), json["state"].as_str()), (Some("dev-a"), Some("stale")));
         assert_eq!(json["escalate_to"], serde_json::json!(["lead"]));
+    }
+
+    #[test]
+    fn each_ant_s_face_comes_before_its_row_and_in_its_json() {
+        let now = Utc::now();
+        let entries = [entry("dev-a", 60, 2, now), entry("dev-b", 60, 2, now)];
+        let born = now - chrono::Duration::days(1);
+        let mut record = ants_proto::AntIdentity::new("dev-b".parse().unwrap(), "b-id".to_owned(), born);
+        record.prompts = 12;
+        let identities = avatars::Identities::from([(record.ant.clone(), record)]);
+        let faces = Faces::new(identities, avatars::Depth::Plain, ants_proto::Theme::Dark);
+        let table = table(&entries, now);
+        let lines: Vec<String> = faced(&table, &entries, &faces).lines().map(str::to_owned).collect();
+        let (a, b) = (ants_proto::Avatar::derive("dev-a"), ants_proto::Avatar::derive("b-id"));
+        assert!(lines[0].starts_with("      ANT "), "{lines:?}");
+        assert!(lines[1].starts_with(&format!("{} dev-a ", a.face())), "{lines:?}");
+        assert!(lines[2].starts_with(&format!("{} dev-b ", b.face())), "{lines:?}");
+        let shown = |e| serde_json::from_str::<serde_json::Value>(&json(e, now, &faces).unwrap()).unwrap();
+        let born = shown(&entries[1]);
+        assert_eq!((born["avatar"].as_str(), born["color"].as_str()), (Some(&*b.face()), Some(b.hue_name())));
+        assert_eq!((born["prompts"].as_u64(), born["born"].is_string()), (Some(12), true));
+        let unborn = shown(&entries[0]);
+        assert_eq!((unborn["avatar"].as_str(), unborn["born"].is_null()), (Some(&*a.face()), true), "from the name");
     }
 
     #[test]

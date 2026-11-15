@@ -32,28 +32,33 @@ pub async fn list(js: &jetstream::Context) -> Result<Vec<MachineRecord>> {
 /// The key and value of each live entry of [`MACHINES_BUCKET`] on `filter` (a subject under `$KV.ants_machines.`), by
 /// batched direct gets of the bucket's stream, which keeps one message per key, in the order they were last put.
 pub(crate) async fn latest(js: &jetstream::Context, filter: &str) -> Result<Vec<(String, Vec<u8>)>> {
-    let stream = format!("KV_{MACHINES_BUCKET}");
+    latest_in(js, MACHINES_BUCKET, filter).await
+}
+
+/// [`latest`] of `bucket`, a KV bucket of history 1, on `filter`, a subject under `$KV.<bucket>.`.
+pub(crate) async fn latest_in(js: &jetstream::Context, bucket: &str, filter: &str) -> Result<Vec<(String, Vec<u8>)>> {
+    let stream = format!("KV_{bucket}");
     let client = js.client();
     let wait = client.timeout().unwrap_or(Duration::from_secs(10));
     let inbox = client.new_inbox();
     let mut replies = client.subscribe(inbox.clone()).await?;
-    let prefix = format!("$KV.{MACHINES_BUCKET}.");
+    let prefix = format!("$KV.{bucket}.");
     let (mut entries, mut seq) = (Vec::new(), 1);
     loop {
         let request = json!({ "seq": seq, "next_by_subj": filter, "batch": BATCH });
         let request = async_nats::Request::new().inbox(inbox.clone()).payload(serde_json::to_vec(&request)?.into());
         js.send_request(format!("DIRECT.GET.{stream}"), request)
             .await
-            .with_context(|| format!("reading {MACHINES_BUCKET} (`ants init` creates it)"))?;
+            .with_context(|| format!("reading {bucket} (`ants init` creates it)"))?;
         let mut got = 0;
         loop {
             let Ok(Some(msg)) = tokio::time::timeout(wait, replies.next()).await else {
-                bail!("no answer reading {MACHINES_BUCKET} (`ants init` creates it)");
+                bail!("no answer reading {bucket} (`ants init` creates it)");
             };
             match msg.status {
                 None => {}
                 Some(StatusCode::NOT_FOUND) => return Ok(entries),
-                Some(StatusCode::NO_RESPONDERS) => bail!("no {MACHINES_BUCKET} bucket: `ants init` creates it"),
+                Some(StatusCode::NO_RESPONDERS) => bail!("no {bucket} bucket: `ants init` creates it"),
                 Some(status) if status.as_u16() == 204 => {
                     let pending = msg.headers.as_ref().and_then(|h| h.get("Nats-Num-Pending"));
                     if got == 0 || pending.is_some_and(|n| n.as_str() == "0") {
@@ -61,7 +66,7 @@ pub(crate) async fn latest(js: &jetstream::Context, filter: &str) -> Result<Vec<
                     }
                     break;
                 }
-                Some(status) => bail!("reading {MACHINES_BUCKET}: {status} {:?}", msg.description),
+                Some(status) => bail!("reading {bucket}: {status} {:?}", msg.description),
             }
             got += 1;
             let msg = jetstream::message::StreamMessage::try_from(msg).map_err(|e| anyhow!(e))?;

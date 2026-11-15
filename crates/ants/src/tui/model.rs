@@ -8,6 +8,7 @@ use ants_proto::{
     Verdict,
 };
 use chrono::{DateTime, TimeDelta, Utc};
+use ratatui::text::Span;
 
 use super::acts::{Acted, Change};
 use super::approvals::{self, Answer, Asking};
@@ -18,8 +19,8 @@ use super::react::{self, Pick, Picker};
 use super::reads::{Mark, Read};
 use super::work::{Facts, Filter};
 use super::{
-    ant, cards, catchup, channel, credentials, dm, home, images, memories, nav, people, search, settings, snooze,
-    thread, timeline, tree, work,
+    ant, cards, catchup, channel, credentials, dm, faces, home, images, memories, nav, people, search, settings,
+    snooze, thread, timeline, tree, work,
 };
 use crate::live::{self, State};
 use crate::thread::{Entry, Kind};
@@ -141,11 +142,20 @@ pub struct Data {
     pub images: images::Images,
     /// The credentials asked for, heard where the team's account key is.
     pub credentials: credentials::Heard,
+    /// How the ants look.
+    pub looks: faces::Looks,
 }
 
 impl Data {
     pub fn me(&self) -> &UserId {
         &self.live.me
+    }
+
+    /// The face of `user` and a space, to go before its name, when it is an ant: one with an identity record, or in
+    /// the roster, and no human.
+    pub fn face(&self, user: &UserId) -> Option<[Span<'static>; 2]> {
+        let ant = self.looks.known(user) || self.live.roster.iter().any(|e| e.ant == *user);
+        (ant && !self.is_human(user)).then(|| [self.looks.face(user), Span::raw(" ")])
     }
 
     /// Whether `user` is a human: as the humans bucket says once read, else only the CLI's human and `human`.
@@ -297,6 +307,7 @@ impl Model {
             cards: cards::Cards::default(),
             images: images::Images::default(),
             credentials: credentials::Heard::default(),
+            looks: faces::Looks::default(),
         };
         let nav = nav::Item::Home;
         Self {

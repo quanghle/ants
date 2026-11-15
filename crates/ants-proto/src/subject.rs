@@ -406,6 +406,12 @@ pub fn chain(ant: &UserId) -> String {
     format!("$KV.{}.{ant}", super::CHAINS_BUCKET)
 }
 
+/// The identity record of an ant in [`super::IDENTITIES_BUCKET`]: the subject its daemon creates and updates
+/// [`super::AntIdentity`] on.
+pub fn identity(ant: &UserId) -> String {
+    format!("$KV.{}.{ant}", super::IDENTITIES_BUCKET)
+}
+
 /// The entry of a human in [`super::HUMANS_BUCKET`]: the subject a human puts [`super::HumanEntry`] on.
 pub fn human_entry(human: &UserId) -> String {
     format!("$KV.{}.{human}", super::HUMANS_BUCKET)

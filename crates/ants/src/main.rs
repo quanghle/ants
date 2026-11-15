@@ -8,6 +8,7 @@ mod ant;
 mod assistant;
 mod attachments;
 mod auth;
+mod avatars;
 mod backup;
 mod behalf;
 mod binding;
@@ -317,7 +318,7 @@ async fn init_hub(nats: &Nats<'_>) -> Result<Vec<String>> {
         devices::publish_or_warn(&js, own).await;
     }
     lines.push(format!(
-        "stream {}, buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {}, and store {} ready",
+        "stream {}, buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {}, and store {} ready",
         ants_proto::STREAM,
         ants_proto::ROSTER_BUCKET,
         ants_proto::SESSIONS_BUCKET,
@@ -335,6 +336,7 @@ async fn init_hub(nats: &Nats<'_>) -> Result<Vec<String>> {
         ants_proto::NOTIFY_BUCKET,
         ants_proto::DEVICES_BUCKET,
         ants_proto::MACHINES_BUCKET,
+        ants_proto::IDENTITIES_BUCKET,
         ants_proto::FILES_BUCKET
     ));
     Ok(lines)
@@ -431,7 +433,7 @@ mod tests {
         let created: Vec<_> = create_missing(&h_js, &h_rights).await.into_iter().map(|f| f.object).collect();
         let seen: Vec<_> = hub::Object::ALL
             .into_iter()
-            .filter(|o| ![hub::Object::Stream, hub::Object::Presence].contains(o))
+            .filter(|o| ![hub::Object::Stream, hub::Object::Presence, hub::Object::Identities].contains(o))
             .collect();
         assert_eq!(created, seen, "every missing bucket a human may look up created");
         for watched in [hub::Object::Channels, hub::Object::Humans, hub::Object::Roster] {

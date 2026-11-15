@@ -9,7 +9,7 @@ use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
 
 use crate::settings::{self, Assignment};
-use crate::{ant, completions, memories, orders, pause, restart};
+use crate::{ant, avatars, completions, memories, orders, pause, restart};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum AntCommand {
@@ -55,6 +55,26 @@ pub(crate) enum AntCommand {
         /// Print the order's id and return without waiting for its outcome (`ants ant orders` tells it).
         #[arg(long)]
         no_wait: bool,
+    },
+    /// Print ANT's avatar: its pixel-art head, one-line face, parts and colour, when it was born and how it grew with
+    /// the prompts it completed. --seed or --reset and --color or --auto-color change it in the ant's identity record
+    /// by compare-and-set, the same for every machine and viewer. Needs a human's credentials.
+    Avatar {
+        #[arg(add = ArgValueCandidates::new(completions::ants))]
+        ant: UserId,
+        /// Draw the avatar from this seed instead of the ant's id, such as when two ants look alike.
+        #[arg(long, conflicts_with = "reset")]
+        seed: Option<String>,
+        /// Draw the avatar from the ant's id again.
+        #[arg(long)]
+        reset: bool,
+        /// Colour the avatar in this hue: red, orange, yellow, lime, green, mint, cyan, azure, blue, violet, magenta or
+        /// rose.
+        #[arg(long, conflicts_with = "auto_color")]
+        color: Option<String>,
+        /// Colour the avatar in the hue its seed picks again.
+        #[arg(long)]
+        auto_color: bool,
     },
     /// Show ANT's memories, which an admin order asks the daemon of its machine to read while online: its core
     /// memories (whoami, memory, tasks), which a set order edits, and its harness's memory files (the `memory_files`
@@ -122,12 +142,19 @@ pub(crate) async fn run(nats: &crate::Nats<'_>, command: AntCommand) -> Result<(
                 None => ants_daemon::config::default_path()?,
             };
             let caps = ants_daemon::config::Summary::load(&path)?.caps;
-            ant::show(nats, ant, &caps, json).await
+            Box::pin(ant::show(nats, ant, &caps, json)).await
         }
         AntCommand::Orders { ant, json } => orders::show(nats, &ant, json).await,
         AntCommand::Set { ant, changes, no_wait } => {
             let wait = if no_wait { std::time::Duration::ZERO } else { settings::SET_WAIT };
             settings::set(nats, &ant, &changes, wait).await
+        }
+        AntCommand::Avatar { ant, seed, reset, color, auto_color } => {
+            let change = avatars::Change {
+                seed: if reset { Some(None) } else { seed.map(Some) },
+                color: if auto_color { Some(None) } else { color.map(Some) },
+            };
+            avatars::show(nats, &ant, change).await
         }
         AntCommand::Memories { ant, json, machine } => memories::show(nats, &ant, machine, json).await,
         AntCommand::Restart { ant, now, machine, json } => restart::run(nats, &ant, now, machine, json).await,

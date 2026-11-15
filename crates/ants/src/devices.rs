@@ -11,8 +11,10 @@ use std::time::Duration;
 use ants_daemon::bus;
 use ants_daemon::creds::{Finding, Kind};
 pub use ants_daemon::devices::{Devices, Directory, Lookup, VerifiedDevice};
+use ants_daemon::direct_kv::DirectKv;
 use ants_proto::{
-    DEVICES_BUCKET, DeviceId, DeviceRevocation, ENROLL_INBOX, JsDomain, UserId, device_entry_key, revoked_device_key,
+    DEVICES_BUCKET, DeviceId, DeviceRevocation, ENROLL_INBOX, IDENTITIES_BUCKET, JsDomain, UserId, device_entry_key,
+    revoked_device_key,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::stream::DirectGetErrorKind;
@@ -124,16 +126,7 @@ pub async fn record_revocations(url: &str, js_domain: Option<&JsDomain>, dir: &P
     if revocations.is_empty() {
         return Ok(Vec::new());
     }
-    bus::check_url(url)?;
-    let creds = auth::revoker_creds(dir, js_domain)?;
-    let connect = async_nats::ConnectOptions::with_credentials(&creds)?
-        .name("ants-auth")
-        .custom_inbox_prefix(ENROLL_INBOX)
-        .connection_timeout(REVOKER_TIMEOUT)
-        .connect(url);
-    let client = tokio::time::timeout(REVOKER_TIMEOUT, connect).await.context("no answer from the server")??;
-    let mut js = bus::jetstream(client, js_domain);
-    js.set_timeout(REVOKER_TIMEOUT);
+    let js = revoker(url, js_domain, dir).await?;
     let kv = ensure(&js).await?;
     let mut recorded = Vec::new();
     for revocation in revocations {
@@ -146,6 +139,39 @@ pub async fn record_revocations(url: &str, js_domain: Option<&JsDomain>, dir: &P
         recorded.push(revocation.key);
     }
     Ok(recorded)
+}
+
+/// Delete `ant`'s identity record from [`IDENTITIES_BUCKET`] of the hub at `url`, so a later ant of the name is born
+/// afresh. A bucket not created yet holds no record to delete.
+pub async fn forget_identity(url: &str, js_domain: Option<&JsDomain>, dir: &Path, ant: &str) -> Result<()> {
+    let js = revoker(url, js_domain, dir).await?;
+    let kv = DirectKv::new(&js, js_domain, IDENTITIES_BUCKET).await?;
+    match kv.delete(ant).await {
+        Err(e)
+            if e
+                .downcast_ref::<jetstream::context::PublishError>()
+                .is_some_and(|e| e.kind() == jetstream::context::PublishErrorKind::StreamNotFound) =>
+        {
+            Ok(())
+        }
+        done => done.with_context(|| format!("the credentials were revoked, but {ant}'s identity is still in {IDENTITIES_BUCKET}: revoke them again by name")),
+    }
+}
+
+/// A JetStream context, in domain `js_domain` if the hub has one, of short-lived credentials signed with the account
+/// key in `dir` ([`auth::revoker_creds`]), connected to the server at `url`.
+pub(crate) async fn revoker(url: &str, js_domain: Option<&JsDomain>, dir: &Path) -> Result<jetstream::Context> {
+    bus::check_url(url)?;
+    let creds = auth::revoker_creds(dir, js_domain)?;
+    let connect = async_nats::ConnectOptions::with_credentials(&creds)?
+        .name("ants-auth")
+        .custom_inbox_prefix(ENROLL_INBOX)
+        .connection_timeout(REVOKER_TIMEOUT)
+        .connect(url);
+    let client = tokio::time::timeout(REVOKER_TIMEOUT, connect).await.context("no answer from the server")??;
+    let mut js = bus::jetstream(client, js_domain);
+    js.set_timeout(REVOKER_TIMEOUT);
+    Ok(js)
 }
 
 #[cfg(test)]
