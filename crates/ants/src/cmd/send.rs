@@ -11,8 +11,8 @@ use async_nats::jetstream;
 use futures::StreamExt as _;
 use futures::stream::BoxStream;
 
-use crate::cli::Replies;
-use crate::{Nats, attachments, channel, compose, humans, inbox, progress, reacted, roster, thread};
+use crate::cli::{Replies, Sending};
+use crate::{Nats, attachments, channel, compose, humans, inbox, progress, reacted, roster, sealed, thread};
 
 /// Split a leading `@ant` off the words; the message is the rest, or what `input` reads.
 pub(crate) fn recipient(mut words: Vec<String>, input: &compose::Input) -> Result<(UserId, String)> {
@@ -30,7 +30,7 @@ pub(crate) fn recipient(mut words: Vec<String>, input: &compose::Input) -> Resul
 pub(crate) async fn ask(
     nats: &Nats<'_>,
     thread: Option<thread::Pick>,
-    steer: bool,
+    Sending { steer, plaintext }: Sending,
     replies: &Replies,
     input: &compose::Input,
     attach: &attachments::Attach,
@@ -46,7 +46,11 @@ pub(crate) async fn ask(
     let thread = thread::resolve(thread, &js, &nats.me).await?;
     let mut envelope = ask_envelope(&nats.me, thread, to, text);
     envelope.attachments = attachments::references(&files);
-    let envelope = if steer { envelope.steering() } else { envelope };
+    let mut envelope = if steer { envelope.steering() } else { envelope };
+    let to_human = nats.me.role.is_human() && humans::load(&js, &nats.me).await.contains(&envelope.to);
+    let text = envelope.text.clone();
+    let sealer = sealing(nats, &js, &mut envelope, to_human && !plaintext, !files.is_empty()).await?;
+    let envelope = envelope;
     // Subscribe first so a fast reply is not missed. A waiter also reads back what the hub stored while out of its
     // reach.
     let inbox = if replies.wait || replies.follow {
@@ -56,7 +60,8 @@ pub(crate) async fn ask(
     };
     // Warned rather than refused: a daemon may start later and take the message, which waits in the stream.
     let warnings = roster::unserved_warnings(&js, &[&envelope.to]).await;
-    let to_human = !warnings.is_empty() && humans::load(&js, &nats.me).await.contains(&envelope.to);
+    let to_human = to_human
+        || !nats.me.role.is_human() && !warnings.is_empty() && humans::load(&js, &nats.me).await.contains(&envelope.to);
     let unserved = !warnings.is_empty() && !to_human;
     if unserved {
         for warning in warnings {
@@ -92,7 +97,12 @@ pub(crate) async fn ask(
         progress::start(sub, status, replies.wait)
     });
     let shown = reacted::Shown::default();
-    shown.add(envelope.id, &envelope.from, &envelope.text);
+    shown.add(envelope.id, &envelope.from, &text);
+    let keyring = match sealer {
+        Some(sealer) => Some(sealer.keyring),
+        None if to_human => sealed::Keyring::load(nats, &js).await,
+        None => None,
+    };
     let thread = envelope.thread_id.clone();
     let on_thread = inbox.filter_map(move |msg| {
         let reply = match serde_json::from_slice::<Envelope>(&msg.payload) {
@@ -109,9 +119,13 @@ pub(crate) async fn ask(
     });
     let shown_replies = replies.show(&envelope.thread_id, on_thread, async |reply: Envelope| {
         progress::clear();
-        shown.add(reply.id, &reply.from, &reply.text);
-        println!("{}: {}", reply.from, reply.text);
-        print!("{}", attachments::render(&attachments::listed_on(&reply.subject(), &reply.attachments), "  "));
+        if let Some(keyring) = &keyring {
+            keyring.learn(&reply).await;
+        }
+        let (opened, _) = sealed::read(reply.clone(), keyring.as_ref());
+        shown.add(opened.id, &opened.from, &opened.text);
+        println!("{}: {}", opened.from, opened.text);
+        print!("{}", attachments::render(&attachments::listed_on(&opened.subject(), &opened.attachments), "  "));
         // Seen here, so `ants inbox` need not show it again. The other replies stay unread; an ant's inbox
         // consumer is its daemon's.
         if nats.me.role.is_human() {
@@ -124,6 +138,26 @@ pub(crate) async fn ask(
         Ok(())
     });
     Box::pin(with_reactions(shown_replies, &shown, changes)).await
+}
+
+/// Seal `envelope` to another human if `seal`, returning what sealed it, which opens the replies too; refused for a
+/// message with files attached.
+async fn sealing(
+    nats: &Nats<'_>,
+    js: &jetstream::Context,
+    envelope: &mut Envelope,
+    seal: bool,
+    attached: bool,
+) -> Result<Option<sealed::Sealer>> {
+    if !seal {
+        return Ok(None);
+    }
+    if attached {
+        bail!("files are not attached to a sealed message yet: `--plaintext` sends the message in the clear");
+    }
+    let sealer = sealed::Sealer::new(nats, js, &envelope.to).await?;
+    sealer.seal(envelope)?;
+    Ok(Some(sealer))
 }
 
 /// What `ants ask` sends as `me`: a thread `me` owns, as it starts it or continues it, when `me` is a human. A thread

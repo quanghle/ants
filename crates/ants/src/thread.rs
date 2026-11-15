@@ -9,6 +9,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::ops::ControlFlow;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use ants_daemon::channel::CLOCK_SLACK;
@@ -25,7 +26,7 @@ use async_nats::jetstream::{self, consumer};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::{attachments, thread_meta, tools};
+use crate::{attachments, sealed, thread_meta, tools};
 
 pub use message::{MessagePick, recent_messages};
 
@@ -126,6 +127,10 @@ pub struct Entry {
     /// The subject it was stored on names another sender (or ant) than the message: the message is forged.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub forged: bool,
+    /// What the CLI made of a sealed message between two humans: opened, its text the message's; else its text
+    /// `[sealed]` or `[forged]` ([`sealed::State::placeholder`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sealed: Option<sealed::State>,
     /// The reactions to the message, each with who reacted so.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub reactions: Vec<Reacted>,
@@ -184,6 +189,7 @@ impl Entry {
             text: String::new(),
             attachments: Vec::new(),
             forged: false,
+            sealed: None,
             reactions: Vec::new(),
             reason: None,
             suggested_title: None,
@@ -192,6 +198,11 @@ impl Entry {
             answer: None,
             tool: None,
         }
+    }
+
+    /// Whether `--grep` looks at its text: not that of a sealed message the CLI did not open.
+    pub fn matchable(&self) -> bool {
+        self.sealed.is_none_or(|state| state == sealed::State::Opened)
     }
 
     /// The entry of a tool call merged from timeline records, the last of them stored at `seq`.
@@ -244,14 +255,21 @@ impl Entry {
 
 /// Turns stored messages into [`Entry`]s, in stream order. A human's decision does not name its request's thread, so
 /// the threads of the requests read so far are kept to place it, and an answer names its question by id only, so the
-/// questions read so far are kept to check it.
+/// questions read so far are kept to check it. A sealed message between two humans is opened with the keyring given
+/// ([`Parser::opening`]); without one, it shows as `[sealed]`.
 #[derive(Default)]
 pub struct Parser {
     requests: HashMap<(UserId, Uuid), ThreadId>,
     questions: HashMap<Uuid, Envelope>,
+    keyring: Option<Arc<sealed::Keyring>>,
 }
 
 impl Parser {
+    /// A parser opening sealed messages with `keyring`.
+    pub fn opening(keyring: Option<Arc<sealed::Keyring>>) -> Self {
+        Self { keyring, ..Self::default() }
+    }
+
     /// The valid question `e` asks, kept to check later answers against, and its valid answer to a question read
     /// earlier; none of either for a forged message.
     fn question_and_answer(&mut self, e: &Envelope, forged: bool) -> (Option<Question>, Option<Answer>) {
@@ -271,7 +289,8 @@ impl Parser {
         let entry = |kind, thread| Entry::new(seq, stored_at, kind, thread);
         let e: Envelope = serde_json::from_slice(payload).ok()?;
         let forged = e.check_subject(subject).is_err();
-        let (question, answer) = self.question_and_answer(&e, forged);
+        let (e, sealed) = sealed::read(e, self.keyring.as_deref());
+        let (question, answer) = self.question_and_answer(&e, forged || sealed == Some(sealed::State::Forged));
         let (kind, note, text) = if let Some(d) = &e.approval {
             let text = format!("{} on {}/{}", tools::spelling(d.verdict), d.ant, d.request_id);
             (Kind::Decision, None, text)
@@ -294,8 +313,10 @@ impl Parser {
             // Under the handles of the subject it was stored on, a forged one's too: its sender stored them.
             attachments: attachments::listed_on(subject, &e.attachments),
             forged,
+            sealed,
             reason: e.escalation.map(|x| x.reason),
-            suggested_title: e.title.filter(|_| !forged),
+            // Only an ant suggests a title, and no ant seals.
+            suggested_title: e.title.filter(|_| !forged && sealed.is_none()),
             summary: e.summary.filter(|_| !forged),
             question,
             answer,
@@ -364,6 +385,10 @@ impl Parser {
             let forged = d.ant.as_str() != ant;
             let note = Some(format!("after {} deliveries: {}", d.deliveries, d.error));
             let e = d.envelope?;
+            let text = match &e.sealed {
+                Some(sealed) => sealed::size_note(sealed),
+                None => e.text.clone(),
+            };
             return Some(Entry {
                 // Stored under the handles of the message as it was sent.
                 attachments: attachments::listed(&e.attachments, |id| e.attachment_handle(id)),
@@ -371,7 +396,7 @@ impl Parser {
                 to: Some(d.ant),
                 owner: e.owner,
                 note,
-                text: e.text,
+                text,
                 forged,
                 ..entry(Kind::Dead, e.thread_id)
             });
@@ -527,7 +552,7 @@ impl Threads {
         {
             summary.suggested = Some((from.clone(), title.clone()));
         }
-        if let (Some(grep), None) = (&self.grep, &summary.matched) {
+        if let (Some(grep), None, true) = (&self.grep, &summary.matched, entry.matchable()) {
             summary.matched = entry.text.lines().find(|line| line.to_lowercase().contains(grep.as_str())).map(|line| {
                 let from = entry.from.as_ref().map_or("(a human)", UserId::as_str);
                 format!("{from}: {}", crate::excerpt(line.trim(), OPENING))
@@ -741,8 +766,18 @@ pub(crate) fn show_start(thread: &ThreadId, since: Option<Duration>) -> consumer
 }
 
 /// Hand `take` the entry of every message stored from `start` on, oldest first.
-pub async fn scan(js: &jetstream::Context, start: consumer::DeliverPolicy, mut take: impl FnMut(Entry)) -> Result<()> {
-    let mut parser = Parser::default();
+pub async fn scan(js: &jetstream::Context, start: consumer::DeliverPolicy, take: impl FnMut(Entry)) -> Result<()> {
+    scan_opening(js, start, None, take).await
+}
+
+/// [`scan`], opening sealed messages with `keyring`.
+pub async fn scan_opening(
+    js: &jetstream::Context,
+    start: consumer::DeliverPolicy,
+    keyring: Option<Arc<sealed::Keyring>>,
+    mut take: impl FnMut(Entry),
+) -> Result<()> {
+    let mut parser = Parser::opening(keyring);
     reading::read_back(js, "", Reading::Gets, subject::ALL, start, |seq, stored, subject, payload| {
         match parser.entry(seq, stored.into(), subject, payload) {
             Some(entry) => take(entry),
@@ -1044,7 +1079,8 @@ pub async fn list(nats: &crate::Nats<'_>, since: Option<Duration>, select: &Sele
         threads = threads.escalated(crate::humans::load(&js, &nats.me).await);
     }
     if let Some(start) = start {
-        scan(&js, start, |entry| threads.add(&entry)).await?;
+        let keyring = sealed::Keyring::load(nats, &js).await.map(Arc::new);
+        scan_opening(&js, start, keyring, |entry| threads.add(&entry)).await?;
     }
     let present: HashMap<ThreadId, DateTime<Utc>> =
         threads.summaries().map(|t| (t.thread_id.clone(), t.last_at)).collect();
@@ -1143,14 +1179,16 @@ fn marked_start<'a>(threads: impl Iterator<Item = &'a ThreadId>) -> Option<consu
 /// Every message stored on `thread`, in stream order, with the reactions to each: read from `since` ago, else from the
 /// thread's start when its id is time-ordered, else from all the stream keeps. With `tools`, the tool calls its ants
 /// stored on their timelines too, each once as its latest record has it ([`timeline`]), placed by when it started.
+/// Sealed messages are opened with `keyring`.
 pub async fn history(
     js: &jetstream::Context,
     thread: &ThreadId,
     since: Option<Duration>,
     tools: bool,
+    keyring: Option<Arc<sealed::Keyring>>,
 ) -> Result<Vec<Entry>> {
     let mut entries = Vec::new();
-    let mut parser = Parser::default();
+    let mut parser = Parser::opening(keyring);
     let mut timelines = Timelines::default();
     let mut seqs = HashMap::new();
     let start = show_start(thread, since);
@@ -1237,7 +1275,8 @@ pub async fn show(
     let auto_archive = crate::defaults::auto_archive()?;
     let js = connect(nats).await?;
     let thread = &pick.resolve(&js, &nats.me).await?;
-    let entries = history(&js, thread, since, !no_tools).await?;
+    let keyring = sealed::Keyring::load(nats, &js).await.map(Arc::new);
+    let entries = history(&js, thread, since, !no_tools, keyring).await?;
     let suggested = entries.iter().find_map(|e| Some((e.from.as_ref()?, e.suggested_title.as_deref()?)));
     let thread_meta::About { title, mark, done } = if json {
         thread_meta::About::default()

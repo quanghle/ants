@@ -43,6 +43,7 @@ mod retire;
 mod revoke;
 mod roster;
 mod scheduler;
+mod sealed;
 mod search;
 mod serve;
 mod service;
@@ -94,8 +95,8 @@ async fn run() -> Result<()> {
         return Box::pin(tui::run(&nats()?, tui::SINCE)).await;
     };
     match command {
-        Command::Ask { thread, steer, replies, input, attach, words } => {
-            send::ask(&nats()?, thread, steer, &replies, &input, &attach, words).await
+        Command::Ask { thread, sending, replies, input, attach, words } => {
+            Box::pin(send::ask(&nats()?, thread, sending, &replies, &input, &attach, words)).await
         }
         Command::Inbox { peek, thread, limit, follow, json } => {
             let select = inbox::Select { thread: None, limit, peek, summaries: false };
