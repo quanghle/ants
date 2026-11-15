@@ -65,6 +65,9 @@ cargo install --locked --git https://github.com/quanghle/ants ants   # or --path
 - **Windows:** build with MSVC or cross-build `--target x86_64-pc-windows-gnu` (mingw-w64 on `PATH`). Stdio MCP uses a current-user named pipe (`\\.\pipe\ants-mcp-<random>`); bare harness names resolve `.exe`/`.cmd`/`.bat` on `PATH`; `ants daemon` handles Ctrl-C/Ctrl-Break/close/shutdown as `SIGTERM` and auto-reloads edited config files (`webhooks.toml` too). `scripts/install-units.sh` and service actions in `ants setup`, `ants add`, `ants webhook add`, `ants renew`, `ants leaf config`, `request_ant` and `ants tools approve --rule` cover launchd/systemd only (printing manual commands on Windows; pass `--upgrade-check 0` under Task Scheduler). Secret files inherit `%USERPROFILE%` ACLs instead of Unix `0600`.
 - **Upgrade:** `ants daemon`, `ants channel serve`, `ants webhook serve`, `ants signer`, `ants bridge serve` and `ants bridge connect` check every `30s` (`--upgrade-check DURATION` / `ANTS_UPGRADE_CHECK`, `0` disables) whether their executable was replaced by a settled, non-empty executable file, then exit with status `75` (`ants daemon` drains prompts in flight first). Installed launchd/systemd units restart automatically on status `75`.
 
+For an isolated three-node team, see the [Apple container demo](docs/apple-container-demo.md): one hub, two leaves and
+one Copilot-backed ant on each node.
+
 ## Quick start
 
 ```sh
@@ -285,7 +288,7 @@ Full reference in [docs/config.md](docs/config.md):
 
 Each daemon publishes a `RosterEntry` at `<ant>` in `ants_roster` every 10 s (and immediately on state transitions), deleting it on clean exit (`30s` TTL with `MaxAge` delete markers; `ants roster` marks entries without a heartbeat for 20 s as `stale`):
 
-- **Identity & runtime:** `machine`, daemon `instance`, `harness`, `agent` (`{name, version}` from ACP `initialize`), `workdir`, `capabilities`, `whoami`, `escalate_to`, `version`, `perms`, `started_at`, `heartbeat_at`, `activity` (`idle` / `working`), `handling` count, live `harnesses` count.
+- **Identity & runtime:** `machine` (config `machine`, else the host name), daemon `instance`, `harness`, `agent` (`{name, version}` from ACP `initialize`), `workdir`, `capabilities`, `whoami`, `escalate_to`, `version`, `perms`, `started_at`, `heartbeat_at`, `activity` (`idle` / `working`), `handling` count, live `harnesses` count.
 - **Hold states:** `signed_out` (`{since, sign_in?}`), `limited` (`{kind: "rate_limit" | "quota", since, until}`), and `failing` (`{since, error}`), plus `fallback` (`{name, since}`) while one of the ant's `fallback` harnesses or models answers instead, and `paused` (`{since, by?}`: `by` names the admin whose order paused it) while `paused = true` holds it ([docs/config.md](docs/config.md#pausing-an-ant)).
 - **Memory pressure:** `memory_low` (`{since, available, max_harnesses}`) while the machine's available memory is below `[memory_pressure]` `min_available` ([docs/config.md](docs/config.md#memory-pressure)).
 

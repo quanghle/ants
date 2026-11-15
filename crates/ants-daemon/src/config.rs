@@ -9,6 +9,7 @@
 //! metrics = "127.0.0.1:9464"        # serve /healthz and /metrics there (crate::metrics); off without it
 //! timezone = "America/New_York"     # default zone of the schedules' cron, else UTC
 //! redact = true                     # redact secrets from what the ants publish (the default; crate::redact)
+//! machine = "dev-vm1"               # the machine the roster names for the ants (default: the host name)
 //!
 //! [cli]                             # the CLI's own connection, where no flag or environment variable sets it
 //! creds = "~/.config/ants/auth/alice.creds"
@@ -154,6 +155,8 @@ struct File {
     /// Redact secrets from what the file's ants publish ([`crate::redact`]).
     #[serde(default = "yes")]
     redact: bool,
+    /// The machine the file's ants are served on, as their roster entries name it; the host name when absent.
+    machine: Option<String>,
     /// The warnings of JetStream storage filling up ([`crate::storage`]).
     #[serde(default)]
     storage: storage::Settings,
@@ -294,6 +297,9 @@ pub struct Ant {
     /// Redact secrets from what it publishes: the file's top-level `redact`.
     #[serde(skip, default = "yes")]
     pub redact: bool,
+    /// The machine its roster entry names: the file's top-level `machine`; the host name when absent.
+    #[serde(skip)]
+    pub machine: Option<String>,
     /// The file's `[storage]` table.
     #[serde(skip)]
     pub storage: storage::Settings,
@@ -391,6 +397,7 @@ impl Ant {
             builtin: false,
             pool: None,
             redact: true,
+            machine: None,
             storage: storage::Settings::default(),
             memory_pressure: pressure::Settings::default(),
         }
@@ -465,6 +472,7 @@ impl Ant {
             defer_to_others: self.builtin,
             requester: crate::mcp::Requester::default(),
             redact: self.redact,
+            machine: self.machine,
             worktree_base: self.worktree_base,
             publish: self.publish,
             pause: crate::pause::Pause::new(self.paused),
@@ -700,6 +708,9 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
     file.cli.summary().with_context(|| format!("config {}", path.display()))?;
     file.storage.validate().with_context(|| format!("config {}", path.display()))?;
     file.memory_pressure.validate().with_context(|| format!("config {}", path.display()))?;
+    if let Some(machine) = &file.machine {
+        check_machine(machine).with_context(|| format!("config {}", path.display()))?;
+    }
     if file.ants.is_empty() && !file.messenger {
         bail!("config {}: messenger = false and no [[ant]] entries: nothing to serve", path.display());
     }
@@ -747,6 +758,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
             ant.human.clone_from(&file.human);
         }
         ant.redact = file.redact;
+        ant.machine.clone_from(&file.machine);
         ant.storage = file.storage;
         ant.memory_pressure = file.memory_pressure;
         ants.push(ant);
@@ -784,6 +796,23 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
     let host = HostSettings::resolve(file.host, file.admin, file.nats, file.js_domain, base, home);
     let (base, home) = (base.to_owned(), home.to_owned());
     Ok(Loaded { ants, harnesses, templates, schedules, metrics: file.metrics, storage: file.storage, host, base, home })
+}
+
+/// The most characters of the top-level `machine`.
+const MAX_MACHINE: usize = 64;
+
+/// Check the top-level `machine`: not blank, at most [`MAX_MACHINE`] characters, none of them a control character.
+fn check_machine(machine: &str) -> Result<()> {
+    if machine.trim().is_empty() {
+        bail!("machine is blank");
+    }
+    if machine.chars().count() > MAX_MACHINE {
+        bail!("machine {machine:?} is longer than {MAX_MACHINE} characters");
+    }
+    if machine.chars().any(char::is_control) {
+        bail!("machine {machine:?} holds a control character");
+    }
+    Ok(())
 }
 
 /// Check that `ant` names a harness, and that it and those of its fallbacks are defined.

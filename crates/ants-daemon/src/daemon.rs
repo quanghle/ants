@@ -145,6 +145,8 @@ pub struct Config {
     pub requester: crate::mcp::Requester,
     /// Redact secrets from what the ant publishes ([`crate::redact`]).
     pub redact: bool,
+    /// The machine the ant's roster entry and notices name; the host name when None.
+    pub machine: Option<String>,
     /// What becomes of a thread's worktree branch holding new commits ([`crate::publish`]).
     pub publish: crate::publish::Publish,
     /// Whether the ant is paused, and since when and by whom; equal to any other, so that pausing or resuming alone
@@ -324,7 +326,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
     let pool = harness_pool(config, launch, sessions, &workload).await;
     let publisher = publisher(config, &js, &redactor, &pool).await;
     let (messages, channels) = inbox_messages(&js, &stream, config).await?;
-    let registration = enter_roster(&js, entry, claimed, &workload).await?;
+    let registration = enter_roster(&js, entry.clone(), claimed, &workload).await?;
     log_serving(config);
 
     let inbox = Inbox {
@@ -332,6 +334,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         js: &js,
         ant: &config.ant,
         reading,
+        machine: &entry.machine,
         pool: &pool,
         cancels: Cancels::default(),
         restarts,
@@ -1012,6 +1015,8 @@ struct Inbox<'a> {
     ant: &'a UserId,
     /// How the daemon reads through the ant's own readers ([`Reading::daemon`]).
     reading: Reading,
+    /// The machine its notices name, as its roster entry does.
+    machine: &'a str,
     pool: &'a Pool,
     /// The prompts running, for `ants cancel`.
     cancels: Cancels,
@@ -2091,7 +2096,6 @@ impl Inbox<'_> {
             return;
         };
         tracing::warn!(%thread, error = %signed_out, "harness signed out; messages wait until it is signed in");
-        let machine = roster::machine().await;
         let fallbacks = self.pool.fallbacks();
         let post = incoming.post.is_some();
         let notice = signin::notice(
@@ -2099,7 +2103,7 @@ impl Inbox<'_> {
             &incoming.envelope,
             post,
             signed_out,
-            &machine,
+            self.machine,
             self.sign_in_every,
             &fallbacks,
             self.humans,
@@ -2152,7 +2156,6 @@ impl Inbox<'_> {
             return;
         }
         tracing::warn!(%thread, error = %limited, %until, "provider quota exhausted; messages wait");
-        let machine = roster::machine().await;
         let fallbacks = self.pool.fallbacks();
         let post = incoming.post.is_some();
         let max = self.backoffs.quota.max;
@@ -2162,7 +2165,7 @@ impl Inbox<'_> {
             post,
             limited,
             &hold.shown,
-            &machine,
+            self.machine,
             max,
             &fallbacks,
             self.humans,
@@ -2187,7 +2190,6 @@ impl Inbox<'_> {
             return;
         }
         tracing::warn!(%thread, error = %failed, "harness keeps failing to start; messages wait until a check starts it");
-        let machine = roster::machine().await;
         let fallbacks = self.pool.fallbacks();
         let post = incoming.post.is_some();
         let mut notice = breaker::notice(
@@ -2195,7 +2197,7 @@ impl Inbox<'_> {
             &incoming.envelope,
             post,
             failed,
-            &machine,
+            self.machine,
             self.sign_in_every,
             &fallbacks,
             self.humans,

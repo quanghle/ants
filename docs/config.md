@@ -11,6 +11,7 @@ human = "alice"                            # fallback human for ownerless escala
 metrics = "127.0.0.1:9464"                 # serve /healthz and /metrics (default: off)
 timezone = "America/New_York"              # default IANA time zone for schedule cron (default UTC)
 redact = true                              # redact secrets from daemon publications (default true)
+machine = "dev-vm1"                        # machine named in roster entries and harness notices (default: host name)
 
 [cli]                                      # CLI defaults when no flag or env var is set
 creds = "~/.config/ants/auth/alice.creds"  # human credentials (ant credentials are not used here)
@@ -100,6 +101,8 @@ ant = "dev-a"
 text = "Triage the failing nightly tests."
 allow = ["read:*", "execute:cargo test*"]
 ```
+
+`machine` (1–64 characters, no control characters) labels where the file's ants run, such as a VM or container whose host name is generated: `ants roster`, `ants dash`, `list_ants` and the sign-in, quota and failing-harness notices show it in place of the host name. A daemon serving a single ant from CLI flags alone uses the host name.
 
 `~` expands to the home directory; other relative paths resolve against the config file's directory (`env` values stay literal). Unknown keys, duplicate ant/template/schedule names, a schedule named after an ant, or `messenger = false` with no `[[ant]]` fail config loading. Unreachable NATS or JetStream endpoints retry with exponential backoff (`1s` to `30s`); credential or permission errors fail that ant immediately while remaining ants keep running, exiting non-zero only if none start.
 

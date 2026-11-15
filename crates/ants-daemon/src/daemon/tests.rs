@@ -193,6 +193,7 @@ impl Bus {
             js: &self.js,
             ant: &self.dev,
             reading: crate::reading::Reading::Consumer,
+            machine: "test-machine",
             pool,
             cancels: Cancels::default(),
             restarts: &self.restarts,

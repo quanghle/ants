@@ -194,12 +194,17 @@ impl Drop for Working<'_> {
     }
 }
 
-/// The roster entry of the ant of `config` on this machine, started now.
+/// The roster entry of the ant of `config` on this machine, started now, naming the machine as `config` does, else by
+/// its host name.
 pub async fn entry(config: &Config) -> RosterEntry {
     let now = Utc::now();
+    let machine = match &config.machine {
+        Some(machine) => machine.clone(),
+        None => machine().await,
+    };
     RosterEntry {
         ant: config.ant.clone(),
-        machine: machine().await,
+        machine,
         instance: uuid::Uuid::new_v4().to_string(),
         harness: config.harness.to_string(),
         agent: None,

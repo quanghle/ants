@@ -231,6 +231,22 @@ fn redaction_is_on_unless_turned_off() {
 }
 
 #[test]
+fn names_the_machine_as_the_file_does() {
+    let ant = "[[ant]]\nname = \"dev-a\"\nworkdir = \".\"";
+    let machines = |text: &str| parse_here(text).unwrap().into_iter().map(|ant| ant.machine).collect::<Vec<_>>();
+    assert_eq!(machines(ant), [None, None], "the host name");
+    let named = machines(&format!("machine = \"dev-vm1\"\n{ant}"));
+    assert_eq!(named, [Some("dev-vm1".to_owned()), Some("dev-vm1".to_owned())], "the messenger too");
+    let mut ants = parse_here(&format!("machine = \"dev-vm1\"\n{ant}")).unwrap();
+    assert_eq!(config(ants.remove(0)).unwrap().machine.as_deref(), Some("dev-vm1"));
+    let long = "m".repeat(65);
+    for (machine, why) in [("\" \"", "blank"), (&format!("\"{long}\""), "longer than 64"), ("\"vm\\n1\"", "control")] {
+        let err = format!("{:#}", parse_here(&format!("machine = {machine}\n{ant}")).unwrap_err());
+        assert!(err.contains("machine") && err.contains(why), "{err}");
+    }
+}
+
+#[test]
 fn refuses_a_server_with_a_user_and_password() {
     let ant = "[[ant]]\nname = \"dev-a\"\nworkdir = \".\"";
     for text in [format!("nats = \"nats://dev:secret@hub\"\n{ant}"), format!("{ant}\nnats = \"wss://secret@hub\"")] {
