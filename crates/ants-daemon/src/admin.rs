@@ -6,7 +6,8 @@
 //! deciding again. It refuses every order while the config sets `[admin] remote = false`.
 //!
 //! An order an admin signed it carries out ([`apply`]) with the module of its op: [`set`] edits the ant's settings in
-//! the config file the daemon serves ([`ConfigFile`]), which the daemon reloads at once.
+//! the config file the daemon serves ([`ConfigFile`]), which the daemon reloads at once; [`memories`] reads the ant's
+//! memories, only while online.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -27,6 +28,7 @@ use tokio::sync::Notify;
 use crate::bus;
 use crate::direct_kv::{DirectKv, Lookup};
 
+mod memories;
 mod set;
 
 /// How long an order may stay in hand unacked before the stream delivers it again.
@@ -243,12 +245,13 @@ async fn decide(
     let accounts = orders.accounts.iter().map(String::as_str);
     match order.verify(subject, accounts, |_| revoked, stored_at) {
         Err(e) => Ok(refused(&e.to_string())),
-        Ok(_) => Ok(apply(orders, order).await),
+        Ok(_) => Ok(apply(orders, order, stored_at).await),
     }
 }
 
-/// Carry out `order`, which an admin signed, with the module of its op, which refuses it when it cannot.
-async fn apply(orders: &Orders, order: &AdminOrder) -> AdminOutcome {
+/// Carry out `order`, which an admin signed and the stream stored at `stored_at`, with the module of its op, which
+/// refuses it when it cannot.
+async fn apply(orders: &Orders, order: &AdminOrder, stored_at: DateTime<Utc>) -> AdminOutcome {
     match &order.op {
         AdminOp::Set { changes } => set::apply(orders, order, changes),
         AdminOp::Pause => refused(order, NOT_SUPPORTED),
@@ -256,7 +259,7 @@ async fn apply(orders: &Orders, order: &AdminOrder) -> AdminOutcome {
         AdminOp::Restart { .. } => refused(order, NOT_SUPPORTED),
         AdminOp::Add { .. } => refused(order, NOT_SUPPORTED),
         AdminOp::Retire => refused(order, NOT_SUPPORTED),
-        AdminOp::ReadMemories => refused(order, NOT_SUPPORTED),
+        AdminOp::ReadMemories => memories::apply(orders, order, stored_at).await,
     }
 }
 

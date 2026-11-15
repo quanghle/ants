@@ -78,6 +78,10 @@ pub struct Harness {
     pub(crate) window: Option<u64>,
     /// Bytes of the thread's history a rebuilt session is seeded with ([`crate::history::budget`]).
     pub(crate) history_budget: Option<usize>,
+    /// Globs of the files it keeps memories in, which an admin's read of the ant's memories shows
+    /// ([`crate::admin`]): relative to the ant's workdir, or under `~`. Unset, a table replacing a built-in harness
+    /// keeps the built-in's.
+    pub(crate) memory_files: Option<Vec<String>>,
 }
 
 /// What one `context` value selects.
@@ -113,6 +117,11 @@ impl Harness {
     /// The command a human runs to sign the harness in, if its definition names one.
     pub fn sign_in(&self) -> Option<&str> {
         self.sign_in.as_deref()
+    }
+
+    /// The globs of its memory files ([`Self::memory_files`]).
+    pub fn memory_files(&self) -> &[String] {
+        self.memory_files.as_deref().unwrap_or_default()
     }
 
     /// Whether it runs its own tools without asking ants ([`Self::bypass_permissions`]).
@@ -176,6 +185,14 @@ impl Harness {
         }
         if self.context_overflow.iter().any(|phrase| phrase.trim().is_empty()) {
             bail!("harness {name}: context_overflow phrases must not be blank");
+        }
+        for glob in self.memory_files() {
+            if glob.trim().is_empty()
+                || glob.contains('\0')
+                || Path::new(glob).components().any(|c| c == std::path::Component::ParentDir)
+            {
+                bail!("harness {name}: memory_files glob {glob:?} must not be blank nor name a parent directory (..)");
+            }
         }
         for (value, selects) in &self.context {
             if value.trim().is_empty() {
@@ -336,6 +353,9 @@ impl Harnesses {
         let mut all = (*self.0).clone();
         for (name, mut harness) in definitions {
             harness.name.clone_from(&name);
+            if harness.memory_files.is_none() {
+                harness.memory_files = all.get(&name).and_then(|h| h.memory_files.clone());
+            }
             harness.validate()?;
             all.insert(name, Arc::new(harness));
         }
@@ -735,6 +755,7 @@ impl Launch {
             context_overflow: Vec::new(),
             window: None,
             history_budget: None,
+            memory_files: None,
         };
         Self {
             harness: Arc::new(harness),
