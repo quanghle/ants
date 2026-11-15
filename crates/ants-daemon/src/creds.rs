@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use ants_proto::{
     ChannelId, DeviceId, DeviceKey, ENROLL_INBOX, HUMANS_BUCKET, JsDomain, Machine, PERMISSIONS_VERSION,
-    PermissionsVersion, UserId, WEBHOOKS_BUCKET, inbox_prefix, subject,
+    PermissionsVersion, UserId, WEBHOOKS_BUCKET, inbox_prefix, subject, tagged_registered,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use data_encoding::BASE64URL_NOPAD;
@@ -104,6 +104,10 @@ pub struct Finding {
     /// The encryption key of the human's device ([`DeviceKey::tag`]), if its user JWT binds one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub xkey: Option<DeviceKey>,
+    /// Whether a registration granted them (`ants login`), as their user JWT says
+    /// ([`ants_proto::REGISTERED_TAG`]): `ants signer` renews them, not `ants enroll renew`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub registered: bool,
 }
 
 impl Finding {
@@ -136,6 +140,7 @@ impl Finding {
         if kind == Kind::Human && device.is_none() {
             bail!("a human's credentials without a device id");
         }
+        let registered = kind == Kind::Human && tagged_registered(tags.iter().map(String::as_str));
         Ok(Self {
             kind,
             version: PermissionsVersion::from_tags(tags.iter().map(String::as_str))
@@ -144,6 +149,7 @@ impl Finding {
             js_domain: js_domain(&publish),
             device,
             xkey: DeviceKey::from_tags(tags.iter().map(String::as_str)),
+            registered,
             name,
             key,
         })
@@ -248,15 +254,28 @@ impl Finding {
     }
 
     /// The commands renewing them over NATS when they are at `path`: `ants renew` where they are used, then
-    /// `ants enroll renew` on the machine holding the account key, which approves it.
+    /// `ants enroll renew` on the machine holding the account key, which approves it, but for credentials a
+    /// registration granted ([`Finding::registered`]), which `ants signer` there renews without a command.
     pub fn renew_over_nats(&self, path: &Path) -> Vec<String> {
-        vec![format!("ants renew {}", path.display()), format!("ants enroll renew {}", self.name)]
+        let renew = format!("ants renew {}", path.display());
+        if self.registered {
+            return vec![renew];
+        }
+        vec![renew, format!("ants enroll renew {}", self.name)]
     }
 
     /// How to renew them, in words: over NATS ([`Finding::renew_over_nats`]) when they are at `path` and
-    /// [`Finding::renewable`] at `now`, else naming [`Finding::renew`].
+    /// [`Finding::renewable`] at `now`, else naming [`Finding::renew`], and `ants login` for credentials a registration
+    /// granted.
     pub fn renew_hint(&self, path: Option<&Path>, now: u64) -> String {
         if let Some(path) = path.filter(|_| self.renewable(now)) {
+            if self.registered {
+                return format!(
+                    "renew them with `ants renew {}`, which `ants signer` answers for a device registered with \
+                     `ants login`",
+                    path.display()
+                );
+            }
             return format!(
                 "renew them with `ants renew {}`, approved by `ants enroll renew {}` on the machine holding the account \
                  key",
@@ -280,6 +299,12 @@ impl Finding {
             (Kind::Leaf { .. }, _) => format!(
                 "renew them on the machine holding the team keys with {}, put the new file in their place and \
                  restart the leaf node",
+                quoted.join(" and ")
+            ),
+            _ if self.registered => format!(
+                "register the device again with `ants login --hub URL --name {}`, or renew them on the machine holding \
+                 the team keys with {} and put the new file in their place",
+                self.name,
                 quoted.join(" and ")
             ),
             _ => format!(
@@ -803,6 +828,35 @@ mod tests {
         let enrollment = Permissions::for_enrollment(&p("dev-a"));
         let tags = [PERMISSIONS_VERSION.tag()];
         assert!(!Finding::from_claims(&claims("enroll-dev-a", &enrollment, &tags, None)).unwrap().renewable(now));
+    }
+
+    #[test]
+    fn registered_credentials_name_ants_signer_not_ants_enroll_renew() {
+        let now = 1_000_000_000;
+        let path = Path::new("/home/a/alice.creds");
+        let human = Permissions::for_user(&p("alice"), Role::Human);
+        let at = |registered: bool, exp| {
+            let mut tags = vec![PERMISSIONS_VERSION.tag(), DeviceId::generate().tag()];
+            tags.extend(registered.then(|| ants_proto::REGISTERED_TAG.to_owned()));
+            Finding::from_claims(&claims("alice", &human, &tags, Some(exp))).unwrap()
+        };
+        let registered = at(true, now + 60);
+        assert!(registered.registered);
+        assert_eq!(registered.renew_over_nats(path), ["ants renew /home/a/alice.creds"]);
+        let warning = &registered.warnings(Some(path), now)[0];
+        assert!(warning.contains("`ants renew /home/a/alice.creds`, which `ants signer` answers"), "{warning}");
+        assert!(!warning.contains("ants enroll renew"), "{warning}");
+        let expired = &at(true, now).warnings(Some(path), now)[0];
+        assert!(expired.contains("`ants login --hub URL --name alice`"), "{expired}");
+
+        let issued = at(false, now + 60);
+        assert!(!issued.registered, "issued with `ants auth user`");
+        assert_eq!(issued.renew_over_nats(path), ["ants renew /home/a/alice.creds", "ants enroll renew alice"]);
+        assert!(!at(false, now).warnings(Some(path), now)[0].contains("ants login"));
+
+        let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
+        let tags = [PERMISSIONS_VERSION.tag(), ants_proto::REGISTERED_TAG.to_owned()];
+        assert!(!Finding::from_claims(&claims("dev-a", &ant, &tags, None)).unwrap().registered, "only a human's");
     }
 
     #[test]

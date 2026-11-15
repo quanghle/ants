@@ -69,18 +69,17 @@ pub async fn run(args: RenewArgs, nats: &str, cli_creds: Option<&Path>) -> Resul
         _ => path.clone(),
     };
     let user = KeyPair::new_user();
-    let registered = if finding.kind == Kind::Human {
-        " (`ants signer` there renews a device registered with `ants login`)"
+    let approver = if finding.registered {
+        "`ants signer` on the machine holding the account key answers for a device registered with `ants login`"
+            .to_owned()
     } else {
-        ""
+        format!("approve with `ants enroll renew {}` on the machine holding the account key", finding.name)
     };
     eprintln!(
-        "asking to renew {} ({}) for the new key {}: approve with `ants enroll renew {}` on the machine holding the \
-         account key{registered}; waiting (Ctrl-C stops)",
+        "asking to renew {} ({}) for the new key {}: {approver}; waiting (Ctrl-C stops)",
         finding.holder(),
         path.display(),
         user.public_key(),
-        finding.name
     );
     let stop = async {
         let _ = tokio::signal::ctrl_c().await;

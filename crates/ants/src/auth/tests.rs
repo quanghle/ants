@@ -294,6 +294,30 @@ fn a_human_device_binds_its_encryption_key_and_renewal_keeps_it_or_adds_one() {
 }
 
 #[test]
+fn only_credentials_a_registration_granted_are_marked_registered() {
+    let dir = ants_test_support::scratch_dir("renew-registered");
+    let team = dir.join("auth");
+    init(&team).unwrap();
+    let human = || Permissions::for_user(&p("alice"), Role::Human);
+    let new = || KeyPair::new_user().public_key();
+    let registered = |jwt: &str| Finding::from_jwt(jwt).unwrap().registered;
+    let github = || GithubAccount { id: 1, login: "octocat".into() };
+    let grant = || Grant::Org("acme".into());
+
+    let device = NewDevice { github: Some(github()), grant: Some(grant()), ..NewDevice::default() };
+    let (jwt, _) = sign_device_with(&team, &p("alice"), Kind::Human, human(), &device, &new(), None).unwrap();
+    assert!(registered(&jwt));
+    let renewed = renew_registered(&team, &jwt, &new(), None, github(), grant()).unwrap();
+    assert!(registered(&renewed.jwt) && renewed.finding.registered, "ants signer keeps the mark");
+    assert!(!registered(&renew(&team, &renewed.jwt, &new(), None).unwrap().jwt), "ants enroll renew drops it");
+
+    let bound = NewDevice { github: Some(github()), ..NewDevice::default() };
+    let (issued, _) = sign_device_with(&team, &p("alice"), Kind::Human, human(), &bound, &new(), None).unwrap();
+    assert!(!registered(&issued), "bound with `ants auth user --github`, without a grant");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn credentials_expired_revoked_foreign_or_of_no_renewable_kind_are_not_renewed() {
     let dir = ants_test_support::scratch_dir("renew-refused");
     let (team, other) = (dir.join("auth"), dir.join("other"));

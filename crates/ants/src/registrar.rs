@@ -1089,6 +1089,7 @@ mod tests {
             let finding = Finding::from_jwt(jwt).unwrap();
             assert_eq!((&finding.kind, finding.key.as_str()), (&CredsKind::Human, alice.key.public_key().as_str()));
             assert_eq!(finding.xkey, alice.request.xkey);
+            assert!(finding.registered, "marked for the holder's renewal hints");
             let claims = auth::verified(jwt).unwrap();
             assert_eq!(claims.name, "alice");
             let ttl = claims.exp.unwrap() - auth::now().unwrap();
@@ -1176,6 +1177,7 @@ mod tests {
             let (key, renewed) = renewing(&server, &path).await;
             let renewed = renewed.unwrap();
             assert_eq!(auth::verified(&renewed).unwrap().sub, key.public_key());
+            assert!(Finding::from_jwt(&renewed).unwrap().registered, "still marked");
             let record = revoke::issued(&team).unwrap().pop().unwrap();
             assert_eq!(record.renewed_from, Some(alice.key.public_key()));
             assert_eq!((record.github.map(|g| g.id), record.grant), (Some(1), Some(Grant::Org("acme".into()))));
