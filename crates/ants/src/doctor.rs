@@ -961,6 +961,44 @@ impl Leaf {
     }
 }
 
+/// The leaf node's system account credentials, which carry the revocations pushed to the hub.
+fn check_leaf_system(
+    setup: &Setup,
+    leaf: &Leaf,
+    uplink: &anyhow::Result<creds::Finding>,
+    generic: String,
+    now: u64,
+) -> Check {
+    let path = setup.leaf_config.display();
+    let machine = &leaf.machine;
+    let system = auth::leaf_system_creds(&leaf.uplink);
+    let rewrite = format!("ants leaf config {machine} --uplink URL ... (picks up {})", system.display());
+    if !system.is_file() {
+        let detail = format!(
+            "no system account credentials at {}: revocations pushed to the hub do not reach this leaf",
+            system.display()
+        );
+        let issue = uplink.as_ref().ok().and_then(|f| f.renew().into_iter().next()).unwrap_or(generic);
+        Check::warn("leaf system uplink", detail, vec![issue, rewrite])
+    } else if !leaf.text.contains(&*system.to_string_lossy()) {
+        let detail =
+            format!("{path} does not use {}: revocations pushed to the hub do not reach this leaf", system.display());
+        Check::warn("leaf system uplink", detail, vec![rewrite])
+    } else {
+        match creds::check(&system) {
+            Ok(finding) if finding.kind == (Kind::LeafSystem { machine: machine.clone() }) => {
+                check_creds("leaf system uplink", &system, &finding, now)
+            }
+            Ok(finding) => Check::fail(
+                "leaf system uplink",
+                format!("{} are the credentials of {}", system.display(), finding.holder()),
+                vec![generic],
+            ),
+            Err(e) => Check::fail("leaf system uplink", format!("{e:#}"), vec![generic]),
+        }
+    }
+}
+
 /// The leaf node: its configuration, uplink and system account credentials, whether it listens and the CLI connects
 /// to it, and whether the hub takes from its outbox what the machine's ants and humans send.
 async fn check_leaf(
@@ -1033,32 +1071,7 @@ async fn check_leaf(
         },
     });
 
-    let system = auth::leaf_system_creds(&leaf.uplink);
-    let rewrite = format!("ants leaf config {machine} --uplink URL ... (picks up {})", system.display());
-    checks.push(if !system.is_file() {
-        let detail = format!(
-            "no system account credentials at {}: revocations pushed to the hub do not reach this leaf",
-            system.display()
-        );
-        let issue = uplink.as_ref().ok().and_then(|f| f.renew().into_iter().next()).unwrap_or(generic);
-        Check::warn("leaf system uplink", detail, vec![issue, rewrite])
-    } else if !leaf.text.contains(&*system.to_string_lossy()) {
-        let detail =
-            format!("{path} does not use {}: revocations pushed to the hub do not reach this leaf", system.display());
-        Check::warn("leaf system uplink", detail, vec![rewrite])
-    } else {
-        match creds::check(&system) {
-            Ok(finding) if finding.kind == (Kind::LeafSystem { machine: machine.clone() }) => {
-                check_creds("leaf system uplink", &system, &finding, now)
-            }
-            Ok(finding) => Check::fail(
-                "leaf system uplink",
-                format!("{} are the credentials of {}", system.display(), finding.holder()),
-                vec![generic],
-            ),
-            Err(e) => Check::fail("leaf system uplink", format!("{e:#}"), vec![generic]),
-        }
-    });
+    checks.push(check_leaf_system(setup, &leaf, &uplink, generic, now));
 
     let listening = tokio::time::timeout(NETWORK_TIMEOUT, tokio::net::TcpStream::connect(leaf.listen.as_str())).await;
     checks.push(match listening {
