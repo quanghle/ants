@@ -11,13 +11,13 @@ use chrono::{DateTime, TimeDelta, Utc};
 
 use super::acts::{Acted, Change};
 use super::approvals::{self, Answer, Asking};
-use super::command::Bar;
+use super::command::{Bar, Tone};
 use super::exec::Job;
 use super::interrupt::{Confirm, Intent};
 use super::react::{self, Pick, Picker};
 use super::reads::{Mark, Read};
 use super::work::{Facts, Filter};
-use super::{cards, channel, dm, home, nav, people, search, thread, timeline, tree, work};
+use super::{cards, channel, dm, home, images, nav, people, search, thread, timeline, tree, work};
 use crate::live::{self, State};
 use crate::thread::{Entry, Kind};
 use crate::tools::Update;
@@ -127,6 +127,8 @@ pub struct Data {
     pub delegations: tree::Delegations,
     /// The threads' done states, TL;DRs and spend.
     pub cards: cards::Cards,
+    /// The image attachments drawn in the thread view.
+    pub images: images::Images,
 }
 
 impl Data {
@@ -262,6 +264,7 @@ impl Model {
             people: people::People::default(),
             delegations: tree::Delegations::default(),
             cards: cards::Cards::default(),
+            images: images::Images::default(),
         };
         let nav = nav::Item::Home;
         Self {
@@ -761,6 +764,10 @@ impl Model {
                 None
             }
             To::Interrupt(intent, thread) => self.interrupt(intent, thread),
+            To::Do(Action::Run(Job::Open(listed), text)) => {
+                self.bar.set_status(format!("opening {}…", listed.attachment.name), Tone::Busy);
+                Some(Action::Run(Job::Open(listed), text))
+            }
             To::Do(action) => Some(action),
         }
     }

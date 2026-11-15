@@ -166,16 +166,18 @@ async fn sealing(
     Ok(Some(sealer))
 }
 
-/// Seal `envelope` as `ants chat` sends it, when from a human to another human, with what `sealing` reads: refused
-/// when it cannot be sealed, as `ants chat` has no `--plaintext`.
+/// Seal `envelope` as `ants chat` sends it, when from a human to another human, with what `sealing` reads, and
+/// `files`, those it carries, which become what to store: refused when it cannot be sealed, as `ants chat` has no
+/// `--plaintext`.
 pub(crate) async fn seal_to_human(
     js: &jetstream::Context,
     me: &humans::Me,
     sealing: &sealed::Sealing,
     envelope: &mut Envelope,
+    files: &mut [attachments::File],
 ) -> Result<()> {
     if me.role.is_human() && humans::load(js, me).await.contains(&envelope.to) {
-        sealing.sealer(js, &envelope.to, sealed::PLAINTEXT_ASK).await?.seal(envelope, &mut [])?;
+        sealing.sealer(js, &envelope.to, sealed::PLAINTEXT_ASK).await?.seal(envelope, files)?;
     }
     Ok(())
 }

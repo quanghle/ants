@@ -120,13 +120,18 @@ fn display<S: Serializer>(handle: &AttachmentHandle, s: S) -> Result<S::Ok, S::E
 }
 
 impl Listed {
-    /// Its line under the message: `📎 name (size) handle`, the size that of the file, sealed or not, or with an
-    /// invalid reference why it is unavailable.
+    /// The size of the file, sealed or not.
+    pub fn size(&self) -> u64 {
+        let Attachment { size, sealed, .. } = &self.attachment;
+        if sealed.is_some() { size.saturating_sub(SealedAttachment::OVERHEAD) } else { *size }
+    }
+
+    /// Its line under the message: `📎 name (size) handle`, the size that of the file, sealed or not ([`Self::size`]),
+    /// or with an invalid reference why it is unavailable.
     pub fn line(&self) -> String {
-        let Attachment { name, size: bytes, sealed, .. } = &self.attachment;
-        let bytes = if sealed.is_some() { bytes.saturating_sub(SealedAttachment::OVERHEAD) } else { *bytes };
+        let name = &self.attachment.name;
         match &self.unavailable {
-            None => format!("📎 {name} ({}) {}", size(bytes), self.handle),
+            None => format!("📎 {name} ({}) {}", size(self.size()), self.handle),
             // An invalid name may hold control characters, which are escaped rather than sent to the terminal.
             Some(reason) => format!("📎 {:?} (unavailable: {reason}) {}", name, self.handle),
         }
@@ -204,12 +209,54 @@ pub fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Save the attachment under `handle` where [`target`] puts it, after checking its bytes ([`fetch`]) against
-/// `expected`, the reference of the message carrying it, if given: nothing is written when they do not match. When the
-/// store holds it as an attachment of a sealed message ([`SealedAttachment::STORED_NAME`]), or `expected` is sealed,
-/// its reference and content key are those of the sealed message carrying it, which `keyring` opens
-/// ([`sealed::carrier`]), and it is opened before it is written; refused when that message does not open on this
-/// device. Returns its reference, the size of the file and the path written.
+/// Read the attachment under `handle` and check its bytes ([`fetch`]) against `expected`, the reference of the message
+/// carrying it, if given. When the store holds it as an attachment of a sealed message
+/// ([`SealedAttachment::STORED_NAME`]), or `expected` is sealed, its reference and content key are those of the sealed
+/// message carrying it, which `keyring` opens ([`sealed::carrier`]), and its bytes are opened; refused when that
+/// message does not open on this device. Returns its reference and bytes.
+pub async fn open(
+    js: &jetstream::Context,
+    keyring: Option<&sealed::Keyring>,
+    handle: &AttachmentHandle,
+    expected: Option<&Attachment>,
+) -> Result<(Attachment, Vec<u8>)> {
+    let sealed_expected = expected.is_some_and(|e| e.sealed.is_some());
+    let (stored, bytes) = fetch(js, handle, expected.filter(|_| !sealed_expected)).await?;
+    let stored_sealed = stored.name == SealedAttachment::STORED_NAME
+        && stored.mime == Attachment::UNKNOWN_MIME
+        && matches!(handle.scope, AttachmentScope::Inbox(_));
+    if !stored_sealed && !sealed_expected {
+        return Ok((stored, bytes));
+    }
+    match Box::pin(sealed::carrier(js, keyring, handle)).await? {
+        sealed::Carrier::Opened(key, reference) => {
+            let bytes = if reference.sealed.is_some() {
+                sealed::open_attachment(&key, &reference, &bytes)?
+            } else {
+                ensure!(
+                    bytes.len() as u64 == reference.size && files::sha256(&bytes) == reference.sha256,
+                    "attachment {handle} does not match its reference: it changed or is incomplete"
+                );
+                bytes
+            };
+            Ok((reference, bytes))
+        }
+        sealed::Carrier::Unopened(state) => bail!(
+            "attachment {handle} is sealed with a message this device does not open ({}): {}",
+            state.placeholder(),
+            match state {
+                sealed::State::Forged => "it is forged",
+                _ => "sent before this device had an encryption key, or not sealed for it",
+            }
+        ),
+        sealed::Carrier::None if sealed_expected => bail!("attachment {handle} is on no sealed message stored"),
+        sealed::Carrier::None => Ok((stored, bytes)),
+    }
+}
+
+/// Save the attachment under `handle` where [`target`] puts it, read and opened as [`open`] does with `keyring` and
+/// `expected`: nothing is written when its bytes do not match. Returns its reference, the size of the file and the path
+/// written.
 pub async fn save(
     js: &jetstream::Context,
     keyring: Option<&sealed::Keyring>,
@@ -222,39 +269,7 @@ pub async fn save(
     {
         bail!("{} exists: not overwriting it (-o names another path)", path.display());
     }
-    let sealed_expected = expected.is_some_and(|e| e.sealed.is_some());
-    let (stored, bytes) = fetch(js, handle, expected.filter(|_| !sealed_expected)).await?;
-    let stored_sealed = stored.name == SealedAttachment::STORED_NAME
-        && stored.mime == Attachment::UNKNOWN_MIME
-        && matches!(handle.scope, AttachmentScope::Inbox(_));
-    let (attachment, bytes) = if stored_sealed || sealed_expected {
-        match Box::pin(sealed::carrier(js, keyring, handle)).await? {
-            sealed::Carrier::Opened(key, reference) => {
-                let bytes = if reference.sealed.is_some() {
-                    sealed::open_attachment(&key, &reference, &bytes)?
-                } else {
-                    ensure!(
-                        bytes.len() as u64 == reference.size && files::sha256(&bytes) == reference.sha256,
-                        "attachment {handle} does not match its reference: it changed or is incomplete"
-                    );
-                    bytes
-                };
-                (reference, bytes)
-            }
-            sealed::Carrier::Unopened(state) => bail!(
-                "attachment {handle} is sealed with a message this device does not open ({}): {}",
-                state.placeholder(),
-                match state {
-                    sealed::State::Forged => "it is forged",
-                    _ => "sent before this device had an encryption key, or not sealed for it",
-                }
-            ),
-            sealed::Carrier::None if sealed_expected => bail!("attachment {handle} is on no sealed message stored"),
-            sealed::Carrier::None => (stored, bytes),
-        }
-    } else {
-        (stored, bytes)
-    };
+    let (attachment, bytes) = open(js, keyring, handle, expected).await?;
     let path = target(out, &attachment.name);
     write_new(&path, &bytes)?;
     Ok((attachment, bytes.len() as u64, path))

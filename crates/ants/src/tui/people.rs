@@ -194,7 +194,7 @@ fn send_draft(
     async move {
         let mut envelope = send::ask_envelope(&me, None, draft.to.clone(), draft.text);
         let sent = async {
-            send::seal_to_human(&js, &me, &sealing, &mut envelope).await?;
+            send::seal_to_human(&js, &me, &sealing, &mut envelope, &mut []).await?;
             send::deliver(&js, js_domain.as_ref(), &envelope).await
         };
         let sent = sent.await.map(|s| (envelope.thread_id, s));

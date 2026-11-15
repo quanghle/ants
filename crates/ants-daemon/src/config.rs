@@ -18,6 +18,7 @@
 //! summaries = "on-demand"           # or "ahead": also ask for TL;DRs of the threads shown (needs the next key)
 //! summary_daily_tokens = 50000      # most tokens a human's summaries spend a UTC day ahead of time (default 0)
 //! summary_ant = "messenger"         # the ant asked for TL;DRs and digests (default: the messenger)
+//! inline_images = true              # draw image attachments in `ants chat` (default false: their lines only)
 //!
 //! [storage]                         # warnings of JetStream storage filling up (crate::storage)
 //! warn_percent = 80                 # warn a human past this share of a store's limit; 0 never
@@ -953,6 +954,8 @@ struct CliSection {
     summary_ant: Option<UserId>,
     #[serde(default)]
     summary_daily_tokens: u64,
+    #[serde(default)]
+    inline_images: bool,
 }
 
 impl CliSection {
@@ -997,7 +1000,7 @@ impl Default for SummaryConfig {
 
 /// What the CLI connects with where neither a flag nor the environment sets it: the `[cli]` section of a config
 /// file, else its top-level `nats` and `js_domain`. Credentials come from `[cli]` alone, an ant's being no human's,
-/// as do `auto_archive` and the summary keys.
+/// as do `auto_archive`, the summary keys and `inline_images`.
 #[derive(Debug, Default, PartialEq)]
 pub struct CliDefaults {
     pub nats: Option<String>,
@@ -1008,6 +1011,8 @@ pub struct CliDefaults {
     pub auto_archive: Option<Duration>,
     /// When and whom to ask for catch-up summaries.
     pub summaries: SummaryConfig,
+    /// Whether `ants chat` draws image attachments in the terminal.
+    pub inline_images: bool,
 }
 
 impl CliDefaults {
@@ -1039,7 +1044,8 @@ impl CliDefaults {
         }
         let creds = view.cli.creds.map(|c| resolve(&c, base, home));
         let auto_archive = Some(view.cli.auto_archive).filter(|d| !d.is_zero());
-        Ok(Self { nats, creds, js_domain: view.cli.js_domain.or(view.js_domain), auto_archive, summaries })
+        let js_domain = view.cli.js_domain.or(view.js_domain);
+        Ok(Self { nats, creds, js_domain, auto_archive, summaries, inline_images: view.cli.inline_images })
     }
 }
 

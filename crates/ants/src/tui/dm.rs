@@ -38,6 +38,8 @@ pub struct Said {
     pub at: DateTime<Utc>,
     pub from: UserId,
     pub text: String,
+    /// How many files are attached.
+    pub attachments: usize,
     /// Whether it was sealed, and opened.
     pub sealed: Option<State>,
 }
@@ -74,6 +76,7 @@ impl Dms {
             at: entry.stored_at,
             from: from.clone(),
             text: entry.text.clone(),
+            attachments: entry.attachments.len(),
             sealed: entry.sealed,
         };
         let dm = self.0.entry(with.clone()).or_default().entry(entry.thread_id.clone()).or_insert_with(|| Dm {
@@ -111,9 +114,13 @@ pub fn unread(data: &Data, with: &UserId) -> usize {
 
 /// What a message says, in a line: where every message of the view is rendered, a sealed one after a lock.
 fn said(said: &Said, width: usize) -> String {
+    let files = match said.attachments {
+        0 => String::new(),
+        n => format!(" 📎{n}"),
+    };
     let text = unopened(said.sealed).map_or_else(|| said.text.replace('\n', " "), str::to_owned);
     let lock = if said.sealed.is_some() { format!("{LOCK} ") } else { String::new() };
-    crate::excerpt(&format!("{lock}{}: {text}", said.from), width)
+    crate::excerpt(&format!("{lock}{}:{files} {text}", said.from), width)
 }
 
 /// A message to write to another human, on a new thread.
