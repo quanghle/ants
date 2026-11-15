@@ -32,6 +32,8 @@ pub struct Ctx {
     pub meta: Result<Meta, String>,
     /// What seals messages to another human, and titles on a thread between two humans.
     pub sealing: Sealing,
+    /// The account that signed the CLI's credentials, for whose team the human's assistant grant is verified.
+    pub account: Option<String>,
     /// What opens the attachments of sealed messages, if anything.
     pub keyring: Option<Arc<Keyring>>,
 }
@@ -52,13 +54,19 @@ pub enum Job {
         text: String,
         steer: bool,
     },
+    /// Send `text`, which names no one, on a new thread as `ants ask` does: to the human's assistant, else the
+    /// messenger ([`send::unaddressed`]).
+    Unaddressed {
+        text: String,
+    },
     /// Post `text` to `channel` as `ants post` does, on `thread` or a new one.
     Post {
         channel: ChannelId,
         thread: Option<ThreadId>,
         text: String,
     },
-    /// Reply `text` on `thread` to the ant that last messaged the human there ([`reply_to`]).
+    /// Reply `text` on `thread` to the ant that last messaged the human there ([`reply_to`]), else to the other human
+    /// ([`dm_with`]), else as [`Job::Unaddressed`] does.
     Reply {
         thread: ThreadId,
         text: String,
@@ -168,7 +176,10 @@ impl Exec {
 impl Job {
     /// Whether the job sends a message, which files staged in the bar go with.
     pub fn sends(&self) -> bool {
-        matches!(self, Self::Ask { .. } | Self::Post { .. } | Self::Reply { .. } | Self::Grant { .. })
+        matches!(
+            self,
+            Self::Ask { .. } | Self::Unaddressed { .. } | Self::Post { .. } | Self::Reply { .. } | Self::Grant { .. }
+        )
     }
 
     async fn run(self, ctx: &Ctx) -> Result<Done> {
@@ -178,20 +189,27 @@ impl Job {
             job => (job, Rc::from([])),
         };
         match job {
-            Self::Ask { to, thread, text, steer } => ask(ctx, to, thread, text, steer, &files).await,
+            Self::Ask { to, thread, text, steer } => ask(ctx, to.into(), thread, text, steer, &files).await,
+            Self::Unaddressed { text } => {
+                let to = send::unaddressed(&ctx.js, &ctx.me, ctx.account.as_deref()).await;
+                ask(ctx, to, None, text, false, &files).await
+            }
             Self::Post { channel, thread, text } => post(ctx, channel, thread, text, &files).await,
             Self::Reply { thread, text, steer } => {
                 let entries = thread::history(&ctx.js, &thread, None, false, None).await?;
                 let humans = humans::load(&ctx.js, &ctx.me).await;
                 let human = |u: &UserId| humans.contains(u);
                 let to = reply_to(&entries, me, human).or_else(|| dm_with(&entries, me, human));
-                let to = to.unwrap_or_else(UserId::messenger);
+                let to = match to {
+                    Some(to) => to.into(),
+                    None => send::unaddressed(&ctx.js, &ctx.me, ctx.account.as_deref()).await,
+                };
                 ask(ctx, to, Some(thread), text, steer, &files).await
             }
             Self::Grant { thread, text } => {
                 let entries = thread::history(&ctx.js, &thread, None, false, None).await?;
                 let ant = stuck(&entries).ok_or_else(|| anyhow!("no ant is stuck on thread {thread}"))?;
-                ask(ctx, ant, Some(thread), text, false, &files).await
+                ask(ctx, ant.into(), Some(thread), text, false, &files).await
             }
             Self::Cancel { thread, ants } => {
                 let mut lines = Vec::new();
@@ -265,14 +283,14 @@ fn outbox(stored: bus::Stored) -> Vec<String> {
 /// serves now; `files` go with it, stored before it as `ants ask --attach` stores them.
 async fn ask(
     ctx: &Ctx,
-    to: UserId,
+    to: send::Recipient,
     thread: Option<ThreadId>,
     text: String,
     steer: bool,
     files: &[File],
 ) -> Result<Done> {
     let new = thread.is_none();
-    let mut envelope = send::ask_envelope(&ctx.me, thread, to, text);
+    let mut envelope = send::ask_envelope(&ctx.me, thread, to.to.clone(), text);
     envelope.attachments = attachments::references(files);
     let mut envelope = if steer { envelope.steering() } else { envelope };
     // Sealed to a human, what is stored is each file's ciphertext.
@@ -284,7 +302,7 @@ async fn ask(
     warnings.extend(outbox(stored));
     let verb = if steer { "steered" } else { "sent to" };
     Ok(Done {
-        line: format!("{verb} {} on thread {}{}", envelope.to, envelope.thread_id, with(files)),
+        line: format!("{verb} {to} on thread {}{}", envelope.thread_id, with(files)),
         warnings,
         open: new.then_some(envelope.thread_id),
     })
@@ -416,7 +434,7 @@ mod tests {
         }
         let meta = thread_meta::open(&nats[0], &js).await.map_err(|e| format!("{e:#}"));
         let (me, sealing) = (nats[0].me.clone(), Sealing::of(&nats[0]));
-        let ctx = Ctx { client, js, me, domain: None, meta, sealing, keyring: None };
+        let ctx = Ctx { client, js, me, domain: None, meta, sealing, account: None, keyring: None };
         let source = server.dir().join("menu.txt");
         std::fs::write(&source, b"soup").unwrap();
         let files: Rc<[File]> = attachments::read_all(std::slice::from_ref(&source)).unwrap().into();
@@ -492,7 +510,8 @@ mod tests {
         std::fs::write(&source, b"# plan").unwrap();
         let files: Rc<[File]> = attachments::read_all(std::slice::from_ref(&source)).unwrap().into();
         let (me, sealing) = (nats.me.clone(), Sealing::of(&nats));
-        let ctx = Ctx { client, js: js.clone(), me, domain: None, meta: Err("unused".into()), sealing, keyring: None };
+        let meta = Err("unused".into());
+        let ctx = Ctx { client, js: js.clone(), me, domain: None, meta, sealing, account: None, keyring: None };
         let ask = Job::Ask { to: user("dev-a"), thread: None, text: "see the plan".into(), steer: false };
         let done = Job::Attached { job: Box::new(ask), files: Rc::clone(&files) }.run(&ctx).await.unwrap();
         assert!(
