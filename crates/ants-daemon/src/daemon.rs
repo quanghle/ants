@@ -61,6 +61,8 @@ const MAX_ATTEMPTS: i64 = 5;
 /// The consumer allows one more delivery, to dead-letter a message whose last attempt never finished.
 const MAX_DELIVER: i64 = MAX_ATTEMPTS + 1;
 const RETRY_DELAY: Duration = Duration::from_secs(30);
+/// How often a snapshot for a clone checks whether the ant is paused and its last prompt ended.
+const CLONE_WAIT_CHECK: Duration = Duration::from_millis(200);
 /// How long a human's message from a machine's outbox waits for its thread's owner to be recorded.
 const OWNER_LANDS_WITHIN: Duration = Duration::from_secs(10);
 /// The header JetStream marks a message it sourced from another stream with.
@@ -360,6 +362,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         failover: Failover::default(),
         fallback_retry: crate::fallback::RETRY_AFTER,
         identity: identity.as_ref(),
+        home: &config.home,
     };
     let served = Box::pin(serve_inbox(&inbox, messages, channels, config, stop, &registration, &storage)).await?;
     registration.deregister().await;
@@ -770,6 +773,7 @@ where
         }) => {}
         () = inbox.hear_cancels() => {}
         () = inbox.hear_restarts() => {}
+        () = inbox.hear_clones() => {}
         () = crate::creds::recheck(config.creds.as_deref()) => {}
         () = storage.watch(crate::storage::CHECK_EVERY) => {}
         () = tell_unserved(inbox.js, inbox.humans, &mut unserved) => {}
@@ -1056,6 +1060,8 @@ struct Inbox<'a> {
     fallback_retry: Duration,
     /// The ant's identity record, which counts each prompt completed; None when it cannot be read.
     identity: Option<&'a Identity>,
+    /// The ant's home, where a clone's copy of its threads' history is ([`crate::history::cloned`]).
+    home: &'a std::path::Path,
 }
 
 impl Inbox<'_> {
@@ -1325,6 +1331,43 @@ impl Inbox<'_> {
                 "restarting the harnesses"
             );
             let _ = request.done.send(restarted);
+        }
+    }
+
+    /// Read a snapshot of the ant for each clone of it asked ([`crate::clone`]) for as long as the daemon serves: once
+    /// the ant is paused and handles no message, so the snapshot is of one point in time.
+    async fn hear_clones(&self) {
+        let mut listening = self.restarts.listen_clones(self.ant);
+        loop {
+            let mut request = listening.next().await;
+            let snapshot = async {
+                while self.pause.get().is_none() || self.workload.handling() > 0 {
+                    tokio::time::sleep(CLONE_WAIT_CHECK).await;
+                }
+                tracing::info!(new = %request.new, "reading a snapshot of the ant for a clone");
+                let source = crate::clone::Source {
+                    js: self.js,
+                    ant: self.ant,
+                    home: self.home,
+                    store: self.pool.store(),
+                    identity: self.identity,
+                    launch: Some(self.pool.launch().clone()),
+                };
+                let root = async |thread: &ThreadId| match self.threads.root(thread, u64::MAX).await {
+                    Ok(channel) => channel,
+                    Err(e) => {
+                        tracing::warn!(%thread, error = format!("{e:#}"), "looking for the channel of a thread");
+                        None
+                    }
+                };
+                source.snapshot(&request.new, root).await
+            };
+            tokio::select! {
+                snapshot = snapshot => {
+                    let _ = request.done.send(snapshot);
+                }
+                () = request.done.closed() => {}
+            }
         }
     }
 
@@ -2633,6 +2676,7 @@ impl Inbox<'_> {
             thread: thread.clone(),
             channel: incoming.post.as_ref().map(|posted| posted.post.channel.clone()).or(incoming.resume.clone()),
             before: seq,
+            home: Some(self.home.to_owned()),
         };
         let prompt = Prompt {
             text,

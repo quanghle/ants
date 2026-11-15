@@ -184,6 +184,7 @@ impl Bus {
         let channels = Channels::watch(self.channels.clone()).await.unwrap();
         let escalator = self.escalator();
         let notes = crate::notes::JetStreamNotes::new(self.js.clone(), self.dev.clone());
+        let home = self._server.dir().join("dev-a");
         let inbox = Inbox {
             client: &self.client,
             js: &self.js,
@@ -224,6 +225,7 @@ impl Bus {
             failover: crate::fallback::Failover::default(),
             fallback_retry: Duration::from_millis(300),
             identity: None,
+            home: &home,
         };
         let stop = || {
             let ctrl_c = ctrl_c.clone();
@@ -234,6 +236,7 @@ impl Bus {
             () = escalator.deadlines() => {}
             () = inbox.hear_cancels() => {}
             () = inbox.hear_restarts() => {}
+            () = inbox.hear_clones() => {}
         }
     }
 
@@ -1278,6 +1281,38 @@ async fn a_human_cancels_a_running_prompt_and_the_sender_gets_what_it_wrote() {
     assert_eq!(log.locked().cancelled, 1);
     assert_eq!(log.locked().prompted, 2, "not retried");
     assert_eq!(bus.unacked().await, 0);
+}
+
+/// A clone's snapshot of dev-a is read once dev-a is paused and the prompt it runs ended: each thread it has a session
+/// of, with the thread's history, and how its harness starts.
+#[tokio::test]
+async fn a_clone_s_snapshot_waits_for_the_pause_and_the_prompt_running() {
+    let Some((bus, mut to_human)) = Bus::start().await else { return };
+    let (launch, log, gate) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let t1 = ThreadId::generate();
+    bus.send(&t1, "hold one").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let dev = bus.dev.clone();
+        let _served = bus.restarts.serve(&dev);
+        until("the held prompt to run", || log.locked().prompted == 1).await;
+        until("the daemon to hear clones", || bus.restarts.hears_clones(&dev)).await;
+        let mut snapshot = std::pin::pin!(bus.restarts.snapshot(&dev, "dev-c".parse().unwrap()));
+        assert!(timeout(Duration::from_millis(500), &mut snapshot).await.is_err(), "not before the pause");
+        bus.pause.replace(&crate::pause::Pause::new(true));
+        assert!(timeout(Duration::from_millis(500), &mut snapshot).await.is_err(), "not while the prompt runs");
+        gate.add_permits(1);
+        assert_eq!(next_reply(&mut to_human).await, (t1.clone(), "hold one".to_owned()));
+        let snapshot = timeout(WAIT, snapshot).await.expect("read once the prompt ended").expect("served").unwrap();
+        assert_eq!(snapshot.threads.iter().map(|copy| &copy.thread).collect::<Vec<_>>(), [&t1]);
+        assert!(snapshot.threads[0].history.contains("hold one"), "{}", snapshot.threads[0].history);
+        assert_eq!(snapshot.threads[0].stored.session.to_string(), "s1");
+        assert!(snapshot.launch.is_some());
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
 }
 
 /// Have the daemon restart dev-a's harnesses for alice once it serves the inbox.

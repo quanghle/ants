@@ -10,12 +10,12 @@ use std::time::Duration;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
-    AuthMethod, CancelNotification, ContentBlock, ImageContent, InitializeRequest, LoadSessionRequest, McpServer,
-    NewSessionRequest, PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigSelectOptions, SessionId, SessionModeState, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionModeRequest, TextContent, ToolCall, ToolCallId, ToolCallLocation,
-    ToolCallUpdate,
+    AuthMethod, CancelNotification, ContentBlock, ForkSessionRequest, ImageContent, InitializeRequest,
+    LoadSessionRequest, McpServer, NewSessionRequest, PromptRequest, PromptResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SessionConfigKind, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigSelectOptions, SessionId, SessionModeState, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest, TextContent, ToolCall, ToolCallId,
+    ToolCallLocation, ToolCallUpdate,
 };
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, DynConnectTo};
 use ants_proto::{HarnessAgent, MAX_TOOL_PATHS, PlanStep, StatusUpdate, ThreadId};
@@ -978,6 +978,23 @@ pub async fn prompt_once(launch: &Launch, text: &str) -> Result<String> {
     let reply = session.prompt(text).await;
     session.close().await;
     reply
+}
+
+/// Fork `session` with ACP's session/fork into a new session working in the launch's directory, with no MCP servers
+/// (a later session/load offers them): the new session's id, or none when the harness does not advertise forking.
+pub async fn fork(launch: &Launch, session: &SessionId) -> Result<Option<SessionId>> {
+    let connect = Client.v1().name("ants").connect_with((launch.connect)(), async |cx: ConnectionTo<Agent>| {
+        let init = cx.send_request(InitializeRequest::new(ProtocolVersion::V1)).block_task().await?;
+        if init.agent_capabilities.session_capabilities.fork.is_none() {
+            return Ok(None);
+        }
+        let fork = ForkSessionRequest::new(session.clone(), launch.cwd.clone());
+        Ok(Some(cx.send_request(fork).block_task().await?.session_id))
+    });
+    match tokio::time::timeout(HANDSHAKE_TIMEOUT, connect).await {
+        Ok(forked) => forked.with_context(|| format!("{} session/fork of {session}", launch.harness)),
+        Err(_) => bail!("{}: no session/fork answer within {HANDSHAKE_TIMEOUT:?}", launch.harness),
+    }
 }
 
 /// The prompt in flight, as the session's notifications fill it in.

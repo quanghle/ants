@@ -1,12 +1,12 @@
-//! Asking `ants signer`, with the machine's host credentials, to sign an added ant's key or revoke a retired ant's, on
-//! the admin order carried out: an enrollment request carrying the order ([`EnrollRequest::order`]), sent again every
-//! [`ENROLL_REPEAT`] until the signer answers for the key or the wait ends. Behind a leaf node, the request also
+//! Asking `ants signer`, with the machine's host credentials, to sign an added or cloned ant's key or revoke a retired
+//! ant's, on the admin order carried out: an enrollment request carrying the order ([`EnrollRequest::order`]), sent
+//! again every [`ENROLL_REPEAT`] until the signer answers for the key or the wait ends. Behind a leaf node, the request also
 //! carries the uplink credentials, signed with their key too ([`EnrollRequest::leaf`]), for the signer to renew them.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ants_proto::{AdminOrder, ENROLL_REPEAT, EnrollLeaf, EnrollReply, EnrollRequest, Machine, subject};
+use ants_proto::{AdminOrder, ENROLL_REPEAT, EnrollLeaf, EnrollReply, EnrollRequest, Machine, UserId, subject};
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream;
 use chrono::Utc;
@@ -24,14 +24,15 @@ pub(super) struct Uplink {
     pub creds: PathBuf,
 }
 
-/// Ask the signer about `public_key` for the ant of `order` with the host credentials at `host_creds`, and the
-/// credentials of `uplink` if given, waiting up to `wait`: its answer, approving, rejecting or retiring the key. Fails
-/// when none comes.
+/// Ask the signer about `public_key` for `ant`, the ant of `order` or the clone it makes, with the host credentials at
+/// `host_creds`, and the credentials of `uplink` if given, waiting up to `wait`: its answer, approving, rejecting or
+/// retiring the key. Fails when none comes.
 pub(super) async fn ask(
     js: &jetstream::Context,
     host_creds: &Path,
     uplink: Option<&Uplink>,
     order: &AdminOrder,
+    ant: &UserId,
     public_key: &str,
     wait: Duration,
 ) -> Result<EnrollReply> {
@@ -44,7 +45,6 @@ pub(super) async fn ask(
         })
         .transpose()?;
     let client = js.client();
-    let ant = &order.ant;
     let mut replies = client.subscribe(subject::enroll_reply(ant)).await?;
     let mut request = EnrollRequest::new(ant.clone(), public_key, order.machine.as_str());
     request.enrollment = jwt;
