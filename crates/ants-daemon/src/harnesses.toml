@@ -8,6 +8,11 @@
 # either over the harness's. Unset, the budget is a twelfth of the window (at 4 bytes a token), else 64 KiB, and no
 # budget exceeds a quarter of the window.
 #
+# `memory_files` lists globs of the files the harness keeps memories and instructions in, which an admin's read of an
+# ant's memories shows (`ants ant memories`): relative to the ant's workdir, or under `~`; `*` and `?` match within a
+# path component and `**` any directories. A [harnesses.<name>] table replacing a built-in keeps its memory_files
+# unless it sets them.
+#
 # Every built-in runs in its most permissive native setting, through `args` or `mode`, and so runs its own tools
 # without asking ants: `bypass_permissions` says so, and makes the daemon and `ants doctor` warn of allow rules and
 # tool narrowing that cannot reach those tools. A [harnesses.<name>] table redefining one with a gated mode (such as
@@ -31,6 +36,14 @@ quota_exhausted = [
     "spend_limit_reached",
 ]
 context_overflow = ["model_max_prompt_tokens_exceeded", "prompt token count of"]
+memory_files = [
+    "AGENTS.md",
+    ".github/copilot-instructions.md",
+    ".github/instructions/**/*.instructions.md",
+    "CLAUDE.md",
+    "GEMINI.md",
+    "~/.copilot/copilot-instructions.md",
+]
 
 [harnesses.copilot.context]
 default = { args = ["--context", "default"] }
@@ -61,6 +74,7 @@ quota_exhausted = [
 ]
 context_overflow = ["exceed context limit"]
 window = 200000
+memory_files = ["CLAUDE.md", "CLAUDE.local.md", ".claude/CLAUDE.md", "~/.claude/CLAUDE.md"]
 
 [harnesses.claude.context]
 default = {}
@@ -74,6 +88,7 @@ command = "codex-acp"
 mode = "agent-full-access"
 bypass_permissions = true
 sign_in = "codex-acp login"
+memory_files = ["AGENTS.md", "AGENTS.override.md", "~/.codex/AGENTS.md", "~/.codex/AGENTS.override.md"]
 
 # Google Antigravity CLI. Sign-in: `agy` once (or `agy acp --login`), or a Gemini API key.
 # `--dangerously-skip-permissions` approves every tool request. No context selector: the model chooses the native
@@ -86,3 +101,4 @@ bypass_permissions = true
 sign_in = "agy"
 quota_exhausted = ["daily quota", "ai credits balance is too low"]
 context_overflow = ["exceeds the maximum number of tokens allowed"]
+memory_files = ["GEMINI.md", "AGENTS.md", ".agent/rules/*.md", "~/.gemini/GEMINI.md"]

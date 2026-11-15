@@ -4,6 +4,7 @@
 //! or open. A snoozed thread's items stay off home until the snooze ends or an item for the human arrives on it.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 
 use ants_proto::{ApprovalRequest, Question, ThreadId, UserId, Uuid, Verdict};
 use chrono::{DateTime, Utc};
@@ -144,11 +145,18 @@ fn unsnoozed(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
         .into_iter()
         .map(|card| {
             let request = card.request;
+            let mut text = format!("{} asks to run {}: {}", request.ant, request.tool.kind, request.tool.title);
+            // What assistants decided for their humans, which waits for the humans' consent.
+            for held in data.live.held.get(&(request.ant.clone(), request.id)).into_iter().flatten() {
+                let (assistant, human, verdict) = (&held.assistant, &held.human, crate::tools::spelling(held.verdict));
+                let id = crate::tools::qualified(request);
+                let _ = write!(text, " · {assistant} chose {verdict} for {human}: ants assistant confirm {id}");
+            }
             Item {
                 why: Why::Approval,
                 thread: request.thread_id.clone(),
                 at: request.requested_at,
-                text: format!("{} asks to run {}: {}", request.ant, request.tool.kind, request.tool.title),
+                text,
                 who: Some(request.ant.clone()),
                 request: Some((request.clone(), card.settled.cloned())),
                 question: None,
@@ -363,6 +371,17 @@ mod tests {
         m.data.live.approval(&Update::Pending(push.clone()));
         let second = ApprovalRequest { id: Uuid::now_v7(), ..push.clone() };
         m.data.live.approval(&Update::Pending(second.clone()));
+        let held = crate::tools::HeldAct {
+            human: user("alice"),
+            assistant: user("pa"),
+            verdict: Verdict::AllowOnce,
+            sent_at: at(3),
+        };
+        m.data.live.approval(&Update::Held(push.clone(), vec![held]));
+        let shown =
+            items(&m.data, at(4)).into_iter().find(|i| i.request.as_ref().is_some_and(|(r, _)| r.id == push.id));
+        let expected = format!("pa chose allow-once for alice: ants assistant confirm dev-a/{}", push.id);
+        assert!(shown.is_some_and(|i| i.text.ends_with(&expected)), "the assistant's decision waits for consent");
         let whys: Vec<(Why, ThreadId)> = items(&m.data, at(4)).into_iter().map(|i| (i.why, i.thread)).collect();
         assert_eq!(
             whys,

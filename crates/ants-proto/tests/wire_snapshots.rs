@@ -784,6 +784,7 @@ fn status() {
                 verdict: Verdict::AllowOnce,
                 by: DecidedBy::Chain,
                 decider: Some(user("lead")),
+                via: None,
             },
         ),
     ];

@@ -259,6 +259,7 @@ mod tests {
             verdict: Verdict::Reject,
             by: ants_proto::DecidedBy::Expiry,
             decider: None,
+            via: None,
         };
         let decided = serde_json::to_vec(&StatusEvent::new(working.ant.clone(), thread.clone(), decided)).unwrap();
         assert!(Event::Decided.accepts(&working.subject(), &decided).unwrap());

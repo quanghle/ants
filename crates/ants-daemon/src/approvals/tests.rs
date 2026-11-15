@@ -17,14 +17,20 @@ async fn subscribed(js: &jetstream::Context) {
 /// The next `decided` update heard on `statuses`, after which the ant goes on working: its verdict, who gave it and
 /// the deciding ant.
 async fn decided_update(statuses: &mut async_nats::Subscriber) -> (Verdict, DecidedBy, Option<UserId>) {
+    let (verdict, by, decider, _) = decided_via(statuses).await;
+    (verdict, by, decider)
+}
+
+/// [`decided_update`], with the assistant that decided for the human.
+async fn decided_via(statuses: &mut async_nats::Subscriber) -> Settled {
     let mut next = async || {
         let msg = timeout(WAIT, statuses.next()).await.unwrap().unwrap();
         serde_json::from_slice::<ants_proto::StatusEvent>(&msg.payload).unwrap().update
     };
     loop {
-        if let StatusUpdate::Decided { verdict, by, decider, .. } = next().await {
+        if let StatusUpdate::Decided { verdict, by, decider, via, .. } = next().await {
             assert_eq!(next().await, StatusUpdate::State { state: State::Working });
-            return (verdict, by, decider);
+            return (verdict, by, decider, via);
         }
     }
 }
@@ -353,4 +359,112 @@ async fn the_first_decision_wins_whoever_makes_it() {
     assert_eq!(timeout(WAIT, decided).await.unwrap().unwrap(), Verdict::AllowAlways);
     let told = decided_update(&mut statuses).await;
     assert_eq!(told, (Verdict::AllowAlways, DecidedBy::Human, None), "the human's, though the lead's came with it");
+}
+
+#[tokio::test]
+async fn an_assistant_s_decision_takes_effect_only_with_its_human_s_consent() {
+    use ants_proto::{Confirmations, ConfirmedAct, PreAllow};
+
+    use crate::humans::TestDevice;
+
+    let Some(server) = Server::start() else { return };
+    let [ant, alice, pa]: [UserId; 3] = ["dev-a", "alice", "pa"].map(|u| u.parse().unwrap());
+    let thread: ThreadId = "t1".parse().unwrap();
+    let (client, js) = bus::connect(&server.url, None, None, &ant, "test").await.unwrap();
+    bus::ensure_stream(&js).await.unwrap();
+    let (human, human_js) = bus::connect(&server.url, None, None, &alice, "human").await.unwrap();
+    let mut requests = human.subscribe(subject::approvals(&ant)).await.unwrap();
+    let mut statuses = human.subscribe(subject::status(&ant, &thread)).await.unwrap();
+    subscribed(&human_js).await;
+
+    let device = TestDevice::default();
+    let humans = Registry::with(UserId::human(), &["alice"]).verifying_grants(Some(device.account()));
+    let at = || chrono::Utc::now();
+    let mut grant = ants_proto::AssistantGrant::new(alice.clone(), Some(pa.clone()), at(), device.jwt(&alice));
+    grant.signature = device.sign(&grant.signed());
+    humans.put_record(&grant.key(), Some(&serde_json::to_vec(&grant).unwrap()));
+    assert_eq!(humans.assistant(&alice), Some(pa.clone()));
+    let confirm = |request: &ApprovalRequest, verdict, answer| {
+        let act = Act::Decision { ant: ant.clone(), request_id: request.id, verdict };
+        let acts = vec![ConfirmedAct { assistant: pa.clone(), act, answer, until: request.expires_at }];
+        let mut record = Confirmations::new(alice.clone(), acts, at(), device.jwt(&alice));
+        record.signature = device.sign(&record.signed());
+        humans.put_record(&ants_proto::confirmations_key(&alice), Some(&serde_json::to_vec(&record).unwrap()));
+    };
+
+    let approver = NatsApprover::new(client, js, ant.clone(), WAIT).with_humans(humans.clone());
+    let options = vec![Verdict::AllowOnce, Verdict::AllowAlways];
+    let ask = async |requests: &mut async_nats::Subscriber| {
+        let pushing = ToolCall { input: Some(r#"{"command":"git push"}"#.into()), ..tool() };
+        let decided = tokio::spawn(approver.decide(thread.clone(), pushing, options.clone()));
+        let msg = timeout(WAIT, requests.next()).await.unwrap().unwrap();
+        (decided, serde_json::from_slice::<ApprovalRequest>(&msg.payload).unwrap())
+    };
+    let for_alice = |request: &ApprovalRequest, verdict| {
+        Envelope::decision(thread.clone(), pa.clone(), request.decide(verdict)).on_behalf(Some(alice.clone()))
+    };
+    let quiet = RECHECK * 2;
+
+    // Held until the human confirms that very act: a confirmation of another verdict does not do.
+    let (decided, request) = ask(&mut requests).await;
+    approver.offer(&for_alice(&request, Verdict::AllowOnce));
+    tokio::time::sleep(quiet).await;
+    assert!(!decided.is_finished(), "held");
+    confirm(&request, Verdict::AllowAlways, ActAnswer::Confirm);
+    tokio::time::sleep(quiet).await;
+    assert!(!decided.is_finished(), "another act confirmed");
+    confirm(&request, Verdict::AllowOnce, ActAnswer::Confirm);
+    assert_eq!(timeout(WAIT, decided).await.unwrap().unwrap(), Verdict::AllowOnce);
+    let told = (Verdict::AllowOnce, DecidedBy::Human, Some(alice.clone()), Some(pa.clone()));
+    assert_eq!(decided_via(&mut statuses).await, told, "the human's, via its assistant");
+
+    // A denied act is dropped; the request waits for another decision.
+    let (decided, request) = ask(&mut requests).await;
+    approver.offer(&for_alice(&request, Verdict::AllowOnce));
+    confirm(&request, Verdict::AllowOnce, ActAnswer::Deny);
+    tokio::time::sleep(quiet).await;
+    assert!(!decided.is_finished(), "denied");
+    let human_says = request.decide(Verdict::Reject).by(Some(alice.clone()));
+    human_js.publish(human_says.subject(), serde_json::to_vec(&human_says).unwrap().into()).await.unwrap();
+    assert_eq!(timeout(WAIT, decided).await.unwrap().unwrap(), Verdict::Reject);
+    assert_eq!(decided_via(&mut statuses).await, (Verdict::Reject, DecidedBy::Human, Some(alice.clone()), None));
+
+    // A pre-allow rule covering the call lets a decision take effect unconfirmed, but not one allowing always.
+    let rules = vec![format!("{ant}/execute:git push")];
+    let mut pre_allow = PreAllow::new(alice.clone(), pa.clone(), rules, at(), device.jwt(&alice));
+    pre_allow.signature = device.sign(&pre_allow.signed());
+    humans.put_record(&ants_proto::pre_allow_key(&alice), Some(&serde_json::to_vec(&pre_allow).unwrap()));
+    let (decided, request) = ask(&mut requests).await;
+    approver.offer(&for_alice(&request, Verdict::AllowAlways));
+    tokio::time::sleep(quiet).await;
+    assert!(!decided.is_finished(), "allow_always needs a confirmation");
+    approver.offer(&for_alice(&request, Verdict::AllowOnce));
+    assert_eq!(timeout(WAIT, decided).await.unwrap().unwrap(), Verdict::AllowOnce);
+    assert_eq!(decided_via(&mut statuses).await.3, Some(pa.clone()));
+
+    // Withdrawing the grant drops what the assistant did unconfirmed: a confirmation coming after it does nothing.
+    humans.put_record(&ants_proto::pre_allow_key(&alice), None);
+    let (decided, request) = ask(&mut requests).await;
+    approver.offer(&for_alice(&request, Verdict::AllowOnce));
+    tokio::time::sleep(quiet).await;
+    let mut withdrawal = ants_proto::AssistantGrant::new(alice.clone(), None, at(), device.jwt(&alice));
+    withdrawal.signature = device.sign(&withdrawal.signed());
+    humans.put_record(&withdrawal.key(), Some(&serde_json::to_vec(&withdrawal).unwrap()));
+    humans.put_record(&grant.key(), Some(&serde_json::to_vec(&grant).unwrap()));
+    confirm(&request, Verdict::AllowOnce, ActAnswer::Confirm);
+    tokio::time::sleep(quiet).await;
+    assert!(!decided.is_finished(), "dropped on withdrawal");
+    decided.abort();
+
+    // The live inbox, which cannot verify the claim, never takes such a decision.
+    let msg = async_nats::Message {
+        subject: for_alice(&request, Verdict::AllowOnce).subject().into(),
+        reply: None,
+        payload: serde_json::to_vec(&for_alice(&request, Verdict::AllowOnce)).unwrap().into(),
+        headers: None,
+        status: None,
+        description: None,
+        length: 0,
+    };
+    assert!(approver.chain_decision(&request, &msg).is_none());
 }
