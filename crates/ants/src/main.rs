@@ -133,6 +133,9 @@ async fn run() -> Result<()> {
         Command::Status { tmux, json } => Box::pin(tui::status(&nats()?, tmux, json)).await,
         Command::Dash { since } => Box::pin(dash::run(&nats()?, since)).await,
         Command::Cancel { ant, thread } => cmd::cancel::cancel(&nats()?, ant, thread).await,
+        Command::Steer { ant, thread, replies, input, attach, words } => {
+            Box::pin(send::steer(&nats()?, &ant, thread, &replies, &input, &attach, words)).await
+        }
         Command::Queue { ant, json } => queue::list(&nats()?, ant, json).await,
         Command::Withdraw { ant, message } => queue::withdraw(&nats()?, ant, message).await,
         Command::Init => {

@@ -1,4 +1,4 @@
-//! `ants ask`, `ants post`, `ants notes`, `ants react` and `ants answer`: what the CLI's human sends.
+//! `ants ask`, `ants steer`, `ants post`, `ants notes`, `ants react` and `ants answer`: what the CLI's human sends.
 
 use ants_daemon::reading::Reading;
 use ants_daemon::{bus, notes, owners, questions, reactions};
@@ -25,6 +25,21 @@ pub(crate) fn recipient(mut words: Vec<String>, input: &compose::Input) -> Resul
         None => UserId::messenger(),
     };
     Ok((to, input.text(words)?))
+}
+
+/// `ants steer ANT THREAD`: `ants ask --steer --thread THREAD @ANT`.
+pub(crate) async fn steer(
+    nats: &Nats<'_>,
+    ant: &UserId,
+    thread: thread::Pick,
+    replies: &Replies,
+    input: &compose::Input,
+    attach: &attachments::Attach,
+    words: Vec<String>,
+) -> Result<()> {
+    let words = std::iter::once(format!("@{ant}")).chain(words).collect();
+    let sending = Sending { steer: true, plaintext: false };
+    Box::pin(ask(nats, Some(thread), sending, replies, input, attach, words)).await
 }
 
 pub(crate) async fn ask(

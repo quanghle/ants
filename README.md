@@ -85,6 +85,7 @@ ants channel create ops --member dev-a,dev-b
 ants post '#ops' "@dev-a the build is red"
 ants watch [dev-a [<thread>]]                       # live bus traffic or one ant's streamed progress
 ants queue dev-a                                    # waiting messages (ants withdraw / ants cancel)
+ants steer dev-a last go left instead             # interrupt dev-a's prompt on a thread and redirect it
 ants                                                # full-screen chat UI on a terminal (also: ants chat)
 ants --compact                                      # the same as a two-line pane, as for a tmux split
 ants status --tmux                                  # one line for tmux status-right: ⚑3 ◐2 $4.12
@@ -134,6 +135,7 @@ A member of a listed GitHub organization or team, or a user with a verified emai
 | `ants status [--tmux \| --json]` | One line, no TTY needed (human creds): home items by kind, the ants working (roster) and the ants' spend that UTC day; `--tmux` prints `⚑<items> ◐<working> $<spend>` for tmux `status-right`, `--json` one object. Reads for at most 3 s; what is not read in time prints `?` (`null` in JSON). |
 | `ants dash [--since DUR]` | Interactive TUI for recent threads (archived and `auto-archived` hidden unless `archived+new`), live progress, roster and tool approvals (human creds + TTY). |
 | `ants cancel ANT THREAD` | Cancel the prompt `ANT` runs on `THREAD` (5s timeout; human creds). |
+| `ants steer ANT THREAD [--wait \| -f] [--timeout DUR] [--attach PATH]... TEXT \| --file PATH \| --edit` | Shorthand for `ants ask --steer --thread THREAD @ANT`: cancels the prompt `ANT` runs on `THREAD` and prompts the same session with the message next (human creds). |
 | `ants queue ANT [--json]` / `ants withdraw ANT MESSAGE` | Inspect waiting messages for `ANT`, or withdraw an unstarted message (human creds). |
 | `ants tools list [-f] [--json]` / `show ID [--json]` | List or inspect pending tool requests (`<ant>/<id>`, unique prefix accepted; `-f` records approval presence). |
 | `ants tools approve ID [--always] [--rule [--config FILE]]` / `reject ID` | Decide a pending tool request; `--rule` appends the exact allow rule to `config.toml` and reloads the daemon. |
