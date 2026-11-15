@@ -52,7 +52,7 @@ fn working(data: &Data) -> Vec<String> {
 pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
     let [first, second] = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(frame.area());
     let data = &model.data;
-    let items = home::items(data);
+    let items = home::waiting(data, now);
     let bar = || Span::styled(" │ ", frame::dim());
     let mut spans = vec![Span::styled("ants ▸ ", Style::new().bold())];
     let counts = counts(&items);
@@ -89,6 +89,9 @@ fn second_line(model: &Model, items: &[home::Item], now: DateTime<Utc>) -> Line<
     if let Some(notice) = model.notice_at(now) {
         let color = if notice.level == Level::Error { Color::Red } else { Color::Cyan };
         return Line::styled(format!("      {}", notice.text), Style::new().fg(color));
+    }
+    if let Some(line) = model.asking.as_ref().and_then(super::approvals::Asking::footer) {
+        return line;
     }
     let keys = Span::styled(format!("   {KEYS}"), frame::dim());
     let Some(top) = items.first() else {
@@ -173,8 +176,12 @@ mod tests {
         assert!(shown.contains("▸ approve "), "{shown}");
 
         assert_eq!(m.key(Key::Down, at(3)), None);
-        assert_eq!(m.key(Key::Enter, at(3)), Some(Action::Open(asked.clone())), "the top item");
-        assert!(!m.compact, "the full view");
+        assert_eq!(m.key(Key::Char('r'), at(3)), None);
+        assert!(pane(&m, at(3)).contains("with reject? y confirms"), "the top request is answered in the pane");
+        m.key(Key::Esc, at(3));
+        assert_eq!(m.key(Key::Enter, at(3)), None);
+        assert!(!m.compact && m.asking.as_ref().is_some_and(|a| a.full), "the request in full in the full view");
+        assert_eq!(m.key(Key::Enter, at(3)), Some(Action::Open(asked.clone())), "its thread");
         assert!(matches!(m.page(), Page::Thread(page) if page.history.thread == asked));
     }
 }
