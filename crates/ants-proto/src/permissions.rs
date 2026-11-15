@@ -566,6 +566,28 @@ impl Permissions {
         self
     }
 
+    /// The same permissions, for a leaf node's uplink to a hub in JetStream domain `domain`: the JetStream API and KV
+    /// only in their domain form (`$JS.<domain>.API.…`, `$JS.<domain>.API.$KV.…`), the plain ones dropped. Their
+    /// domains differ (the leaf's own JetStream is in the machine's), so nats-server denies `$JS.API.>`, `$KV.>` and
+    /// `$OBJ.>` on the leaf connection both ways, and checks a message from the leaf against the uplink's permissions
+    /// before mapping the domain prefix only: the plain forms never cross the uplink, and listing them would only
+    /// take room in its JWT ([`Self::for_leaf`]). Without a domain the permissions are unchanged.
+    #[must_use]
+    pub fn with_uplink_js_domain(mut self, domain: Option<&JsDomain>) -> Self {
+        let Some(domain) = domain else { return self };
+        let api = format!("$JS.{domain}.API.");
+        for s in &mut self.publish {
+            if let Some(rest) = s.strip_prefix("$JS.API.") {
+                *s = format!("{api}{rest}");
+            } else if s.starts_with("$KV.") {
+                *s = format!("{api}{s}");
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        self.publish.retain(|s| seen.insert(s.clone()));
+        self
+    }
+
     /// What the uplink credentials of `machine`'s leaf node allow: everything any of `users` may do in its role,
     /// since every message of a user on the machine crosses that one connection, except the outbox subjects, which
     /// stay on the leaf. Include each human that runs the CLI on the machine, as [`Role::Human`].

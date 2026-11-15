@@ -7,7 +7,8 @@
 //!
 //! When the hub has a JetStream domain, credentials are issued for it: they allow the JetStream API as
 //! `$JS.<domain>.API`, the prefix every ants process then uses, besides the plain `$JS.API` the hub maps it to
-//! ([`Permissions::with_js_domain`]).
+//! ([`Permissions::with_js_domain`]); a leaf node's uplink credentials allow the domain form only
+//! ([`Permissions::with_uplink_js_domain`]).
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -271,7 +272,7 @@ pub fn issue_leaf(
     if approver == EnrollApprover::With {
         merge(&mut permissions, signer_permissions());
     }
-    let mut permissions = permissions.with_js_domain(js_domain);
+    let mut permissions = permissions.with_uplink_js_domain(js_domain);
     dedup(&mut permissions);
     let only_leaf = json!({ "allowed_connection_types": LEAF_CONNECTIONS });
     let name = leaf_user(machine);
@@ -328,7 +329,7 @@ pub fn leaf_user(machine: &Machine) -> String {
 }
 
 /// Refuse `jwt`, uplink credentials of `machine`'s leaf node, if the hub would not take it in the leaf's CONNECT.
-/// Each ant adds about 4.7 KB to them, 8.7 KB with a JetStream domain.
+/// Each ant adds about 4.7 KB to them, 5 KB with a JetStream domain.
 fn check_uplink_size(jwt: &str, machine: &Machine) -> Result<()> {
     if jwt.len() > MAX_UPLINK_JWT {
         bail!(
@@ -567,6 +568,15 @@ pub fn sign_added(
     Ok(jwt)
 }
 
+/// `permissions` of credentials of `kind` for the hub's JetStream domain `domain`, if it has one: a leaf node's uplink
+/// allows the domain form only ([`Permissions::with_uplink_js_domain`]), any other credentials both.
+fn in_domain(permissions: Permissions, kind: &CredsKind, domain: Option<&JsDomain>) -> Permissions {
+    match kind {
+        CredsKind::Leaf { .. } => permissions.with_uplink_js_domain(domain),
+        _ => permissions.with_js_domain(domain),
+    }
+}
+
 /// Credentials renewed by [`renew`].
 #[derive(Debug)]
 pub struct Renewed {
@@ -688,7 +698,7 @@ fn renew_as(
             unreachable!("no registry kind")
         }
     };
-    let mut permissions = permissions.with_js_domain(finding.js_domain.as_ref());
+    let mut permissions = in_domain(permissions, &finding.kind, finding.js_domain.as_ref());
     dedup(&mut permissions);
     let lifetime = claims.exp.map(|exp| exp.saturating_sub(body["iat"].as_u64().unwrap_or(now)));
     let exp = lifetime.map(|lifetime| now + lifetime.max(1));
