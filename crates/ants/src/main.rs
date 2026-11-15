@@ -46,6 +46,7 @@ mod spend;
 mod thread;
 mod thread_meta;
 mod tools;
+mod tui;
 mod upgrade;
 mod versions;
 mod webhook;
@@ -81,7 +82,11 @@ async fn run() -> Result<()> {
     let domain = cli.js_domain.as_ref();
     let conn = Connection { nats: &cli.nats, creds: cli.creds.as_deref(), js_domain: domain };
     let nats = || conn.nats();
-    match cli.command {
+    let Some(command) = cli.command else {
+        tui::usage_without_terminal();
+        return Box::pin(tui::run(&nats()?, tui::SINCE)).await;
+    };
+    match command {
         Command::Ask { thread, replies, input, words } => send::ask(&nats()?, thread, &replies, &input, words).await,
         Command::Inbox { peek, thread, limit, follow, json } => {
             let select = inbox::Select { thread: None, limit, peek };
@@ -110,6 +115,7 @@ async fn run() -> Result<()> {
         Command::Notify(NotifyCommand::Resume) => quiet::resume(&nats()?).await,
         Command::Notify(NotifyCommand::Status { json }) => quiet::status(&nats()?, json).await,
         Command::Watch { subject, thread } => cmd::watch::watch(&nats()?, &subject, thread).await,
+        Command::Chat { since } => Box::pin(tui::run(&nats()?, since)).await,
         Command::Dash { since } => Box::pin(dash::run(&nats()?, since)).await,
         Command::Cancel { ant, thread } => cmd::cancel::cancel(&nats()?, ant, thread).await,
         Command::Queue { ant, json } => queue::list(&nats()?, ant, json).await,
@@ -207,13 +213,18 @@ impl<'a> Nats<'a> {
     /// connection of a human also creates the hub's stream and buckets that are missing ([`create_missing`]).
     pub async fn connect(&self, name: &str) -> Result<(async_nats::Client, async_nats::jetstream::Context)> {
         let (client, js) = self.connect_only(name).await?;
+        self.prepare(&js).await;
+        Ok((client, js))
+    }
+
+    /// What [`Nats::connect`] does once connected: register [`Nats::me`], and create what the hub lacks.
+    async fn prepare(&self, js: &async_nats::jetstream::Context) {
         let create = async {
             if self.me.role.is_human() && !self.hub_checked.swap(true, Ordering::Relaxed) {
-                create_missing(&js, &self.rights).await;
+                create_missing(js, &self.rights).await;
             }
         };
-        tokio::join!(humans::register_or_warn(&js, &self.me), create);
-        Ok((client, js))
+        tokio::join!(humans::register_or_warn(js, &self.me), create);
     }
 
     /// Connect as [`Nats::me`] without registering it, naming the connection after its device, if any, too.
