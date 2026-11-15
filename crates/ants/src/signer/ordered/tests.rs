@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ants_proto::{AdminOp, AdminOrder, EnrollReply, EnrollRequest, Machine, Permissions, Role, UserId, subject};
+use ants_proto::{
+    AdminOp, AdminOrder, EnrollHost, EnrollReply, EnrollRequest, Machine, Permissions, Role, UserId, subject,
+};
 use futures::StreamExt as _;
 use nkeys::KeyPair;
 use serde_json::json;
@@ -41,6 +43,19 @@ async fn ask(
     order: &AdminOrder,
     wait: Duration,
 ) -> Option<EnrollReply> {
+    ask_with(client, creds, ant, key, order, None, wait).await
+}
+
+/// [`ask`], asking for the host credentials of the machine `host` names with its key too.
+async fn ask_with(
+    client: &async_nats::Client,
+    creds: &Path,
+    ant: &str,
+    key: &KeyPair,
+    order: &AdminOrder,
+    host: Option<(&str, &KeyPair)>,
+    wait: Duration,
+) -> Option<EnrollReply> {
     let (jwt, signer) = auth::read_creds(creds).unwrap();
     let mut replies = client.subscribe(subject::enroll_reply(&p(ant))).await.unwrap();
     let mut request = EnrollRequest::new(p(ant), key.public_key(), "m1");
@@ -50,6 +65,13 @@ async fn ask(
         loop {
             request.sent_at = chrono::Utc::now();
             request.signature = auth::sign(&signer, &request.signed()).unwrap();
+            if let Some((machine, host_key)) = host {
+                let public_key = host_key.public_key();
+                let machine = machine.parse().unwrap();
+                request.host_creds = Some(EnrollHost { machine, public_key, signature: String::new() });
+                let signature = auth::sign(&signer, &request.host_signed().unwrap()).unwrap();
+                request.host_creds.as_mut().unwrap().signature = signature;
+            }
             client.publish(request.subject(), serde_json::to_vec(&request).unwrap().into()).await.unwrap();
             let reply = tokio::time::timeout(Duration::from_millis(200), replies.next()).await;
             if let Ok(Some(msg)) = reply {
@@ -124,6 +146,10 @@ async fn the_signer_signs_on_an_admin_s_order_for_the_machine_asking_only() {
         let other_ant = order("alice", &admin_creds, "m1", "dev-e", add());
         let refused = refusal(ask(&client, &host_creds, "dev-d", &second, &other_ant, WAIT).await);
         assert!(refused.contains("about dev-e, not dev-d"), "{refused}");
+        let (host_too, host_key) = (order("alice", &admin_creds, "m1", "dev-d", add()), KeyPair::new_user());
+        let with_host = ask_with(&client, &host_creds, "dev-d", &second, &host_too, Some(("m1", &host_key)), WAIT);
+        let refused = refusal(with_host.await);
+        assert!(refused.contains("grants no host credentials"), "{refused}");
         let unasked = order("alice", &admin_creds, "m1", "dev-d", AdminOp::Pause);
         let refused = refusal(ask(&client, &host_creds, "dev-d", &second, &unasked, WAIT).await);
         assert!(refused.contains("asks nothing of the signer"), "{refused}");

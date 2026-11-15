@@ -31,6 +31,28 @@ impl MachineRecord {
     }
 }
 
+/// The key in [`MACHINES_BUCKET`] of the [`AccountHolder`] record: no machine's name starts with `_`, so no machine's
+/// host credentials write it, and [`subject::machine_records`] readers skip it.
+pub const ACCOUNT_HOLDER_KEY: &str = "_account";
+
+/// Where the team's account key is, in [`MACHINES_BUCKET`] under [`ACCOUNT_HOLDER_KEY`]: `ants signer` puts it, with
+/// credentials it signs with that key, each time it connects, so that machines without the key can name the one that
+/// answers enrollment and renewal requests. Only credentials signed there write it ([`crate::Permissions::for_account_holder`]);
+/// humans read it. Readers should treat unknown fields as additions, not errors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountHolder {
+    /// The machine's name, as its `[host]` table names it, else the first label of its host name.
+    pub machine: Machine,
+    /// Host name of the machine.
+    #[serde(default)]
+    pub hostname: String,
+    /// The version of ants the signer runs ([`ANTS_VERSION`]).
+    #[serde(default)]
+    pub version: String,
+    /// When the signer last put the record: it does so every time it connects.
+    pub updated_at: DateTime<Utc>,
+}
+
 /// The name in the user JWT of a machine's host credentials (`ants auth host`), with which its daemon writes its own
 /// [`MachineRecord`] ([`crate::Permissions::for_host`]).
 pub fn host_user(machine: &Machine) -> String {
