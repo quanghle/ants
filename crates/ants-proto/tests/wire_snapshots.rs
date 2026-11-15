@@ -246,6 +246,7 @@ fn roster() {
                 context: Some("1m".to_owned()),
             }),
             paused: Some(Paused { since: at(6), by: Some(user("alice")) }),
+            drift: Vec::new(),
         },
     );
     snap("activity_variants", &[Activity::Idle, Activity::Working, Activity::Unknown]);

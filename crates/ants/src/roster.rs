@@ -187,6 +187,24 @@ pub fn memory_low(entries: &[RosterEntry], now: DateTime<Utc>) -> Vec<String> {
         .collect()
 }
 
+/// One line per ant whose machine's config sets some of its shared settings otherwise ([`RosterEntry::drift`]), which
+/// the daemon ignores for the shared ones.
+pub fn drifted(entries: &[RosterEntry]) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|e| !e.drift.is_empty())
+        .map(|e| {
+            format!(
+                "{}: drifted on {}: its config sets {} otherwise than the ant's shared settings, which serve. Run \
+                 `ants doctor` for every machine.",
+                e.ant,
+                e.machine,
+                e.drift.join(", ")
+            )
+        })
+        .collect()
+}
+
 /// Why no daemon serves `ant` now, given its roster entry, or None when one does: no entry (with no escalation chain
 /// kept for it either, the name may be wrong), a stale entry, a pause, or a harness signed out or held back by a
 /// provider limit with no fallback answering for it.
@@ -364,7 +382,7 @@ pub async fn show(nats: &crate::Nats<'_>, json: bool) -> Result<()> {
             println!("{note}");
         }
         let collisions = faces.collisions(entries.iter().map(|e| &e.ant));
-        let notes = [held(&entries, now), memory_low(&entries, now), collisions].concat();
+        let notes = [held(&entries, now), memory_low(&entries, now), drifted(&entries), collisions].concat();
         if !notes.is_empty() {
             println!("\n{}", notes.join("\n"));
         }
@@ -405,7 +423,18 @@ pub(crate) mod tests {
             memory_low: None,
             model: None,
             paused: None,
+            drift: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_drifted_ant_is_noted_with_its_machine_and_fields() {
+        let now = Utc::now();
+        let mut drifted_entry = entry("dev-a", 60, 2, now);
+        drifted_entry.drift = vec!["model".to_owned(), "whoami".to_owned()];
+        let notes = drifted(&[entry("dev-b", 60, 2, now), drifted_entry]);
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].starts_with("dev-a: drifted on m1: its config sets model, whoami otherwise"), "{notes:?}");
     }
 
     #[test]

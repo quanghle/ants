@@ -288,7 +288,7 @@ mod tests {
         };
         let served = || {
             let loaded = config::load(&config)?;
-            let mut configs = serve::configs(loaded.ants, &loaded.harnesses, &server.url, None, None)?;
+            let mut configs = serve::configs(loaded.ants, &loaded.harnesses, &server.url, None, None, None)?;
             for c in &mut configs {
                 c.home = dir.join("homes").join(c.ant.as_str());
             }

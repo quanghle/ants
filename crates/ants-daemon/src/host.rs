@@ -2,19 +2,21 @@
 //! credentials (`ants auth host`), apart from its ants' own. It keeps the machine's [`MachineRecord`] in
 //! [`MACHINES_BUCKET`] current: the ants the daemon serves, put on start and whenever they change, and never deleted,
 //! so an ant stays addressable on its machine after its roster entry expired. It also takes the admin orders to the
-//! machine's ants and records their outcomes ([`crate::admin`]). Without host credentials, where the ants have their
+//! machine's ants and records their outcomes ([`crate::admin`]), and keeps the shared settings of the machine's ants
+//! ([`crate::shared`]), creating those still missing from the machine's config. Without host credentials, where the ants have their
 //! own, the connection stays off and the daemon serves its ants as before.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use ants_proto::{JsDomain, MACHINES_BUCKET, Machine, MachineRecord, UserId, host_inbox_prefix};
+use ants_proto::{IDENTITIES_BUCKET, JsDomain, MACHINES_BUCKET, Machine, MachineRecord, UserId, host_inbox_prefix};
 use anyhow::{Context as _, Result, bail};
 use tokio::sync::watch;
 
 use crate::creds::{self, Kind};
 use crate::direct_kv::DirectKv;
+use crate::shared::{self, Shared};
 use crate::{admin, bus, keystore, roster};
 
 const RETRY_FIRST: Duration = Duration::from_secs(1);
@@ -102,6 +104,7 @@ pub fn record(machine: &Machine, hostname: &str, ants: &[UserId]) -> MachineReco
         hostname: hostname.to_owned(),
         version: ants_proto::ANTS_VERSION.to_owned(),
         updated_at: chrono::Utc::now(),
+        drift: std::collections::BTreeMap::new(),
     }
 }
 
@@ -120,30 +123,71 @@ pub async fn run(host: Host, ants: watch::Receiver<Vec<UserId>>) -> Result<()> {
         config: host.config.clone(),
         restarts: host.restarts.clone(),
     };
+    let shared = host.config.as_ref().map(|c| c.shared.clone());
+    let polled = ants.clone();
     tokio::select! {
-        recorded = keep_record(&js, &host, &machine, &hostname, ants) => recorded,
+        recorded = keep_record(&js, &host, &machine, &hostname, ants, shared.clone()) => recorded,
         () = admin::serve(js.clone(), host.js_domain.clone(), orders) => Ok(()),
+        kept = keep_shared(&js, &host, &machine, shared, polled) => kept,
     }
 }
 
-/// Keep the record of `machine` current with `ants`, until `ants` closes.
+/// Keep `shared` current with the shared settings of `ants` ([`shared::refresh`]), until `ants` closes; with no
+/// `shared`, nothing.
+async fn keep_shared(
+    js: &async_nats::jetstream::Context,
+    host: &Host,
+    machine: &Machine,
+    shared: Option<Shared>,
+    mut ants: watch::Receiver<Vec<UserId>>,
+) -> Result<()> {
+    let Some(shared) = shared else { return std::future::pending().await };
+    let kv = DirectKv::new(js, host.js_domain.as_ref(), IDENTITIES_BUCKET).await?;
+    loop {
+        let listed = ants.borrow_and_update().clone();
+        shared::refresh(&kv, machine, &shared, &listed).await;
+        shared.polled();
+        tokio::select! {
+            () = tokio::time::sleep(shared::POLL_EVERY) => {}
+            changed = ants.changed() => if changed.is_err() { return Ok(()) },
+        }
+    }
+}
+
+/// Keep the record of `machine` current with `ants` and the drift `shared` tells, until `ants` closes.
 async fn keep_record(
     js: &async_nats::jetstream::Context,
     host: &Host,
     machine: &Machine,
     hostname: &str,
     mut ants: watch::Receiver<Vec<UserId>>,
+    shared: Option<Shared>,
 ) -> Result<()> {
     let kv = DirectKv::new(js, host.js_domain.as_ref(), MACHINES_BUCKET).await?;
+    let mut changes = shared.as_ref().map(Shared::subscribe);
     let mut delay = RETRY_FIRST;
     loop {
-        let value = serde_json::to_vec(&record(machine, hostname, &ants.borrow_and_update()))?;
+        let mut record = record(machine, hostname, &ants.borrow_and_update());
+        if let Some(changes) = &mut changes {
+            changes.mark_unchanged();
+        }
+        if let Some(shared) = &shared {
+            record.drift = shared.drift().into_iter().filter(|(ant, _)| record.ants.contains(ant)).collect();
+        }
+        let value = serde_json::to_vec(&record)?;
         match kv.put(machine.as_str(), value).await {
             Ok(()) => {
                 delay = RETRY_FIRST;
                 tracing::debug!(%machine, "recorded the machine's ants");
-                if ants.changed().await.is_err() {
-                    return Ok(());
+                let shared_changed = async {
+                    match &mut changes {
+                        Some(changes) => changes.changed().await.is_ok(),
+                        None => std::future::pending().await,
+                    }
+                };
+                tokio::select! {
+                    changed = ants.changed() => if changed.is_err() { return Ok(()) },
+                    _ = shared_changed => {}
                 }
             }
             Err(e) => {

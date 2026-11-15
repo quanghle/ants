@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +25,10 @@ pub struct MachineRecord {
     pub version: String,
     /// When the daemon put the record.
     pub updated_at: DateTime<Utc>,
+    /// By ant, the settings the machine's config sets otherwise than the ant's [`crate::SharedSettings`]: drift to
+    /// mend in that config. Missing when none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub drift: BTreeMap<UserId, Vec<String>>,
 }
 
 impl MachineRecord {
@@ -67,6 +73,7 @@ mod tests {
             hostname: format!("{machine}.local"),
             version: "0.1.0".to_owned(),
             updated_at: DateTime::from_timestamp(at, 0).unwrap(),
+            drift: BTreeMap::new(),
         }
     }
 

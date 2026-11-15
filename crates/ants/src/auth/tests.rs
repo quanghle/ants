@@ -1167,6 +1167,7 @@ async fn ants_write_their_own_roster_entry_and_everyone_reads_the_roster() {
         memory_low: None,
         model: None,
         paused: None,
+        drift: Vec::new(),
     };
     let registration = Registration::start(a_kv.clone(), entry.clone(), ants_proto::ROSTER_HEARTBEAT).await.unwrap();
     assert!(a_kv.put("dev-b", "spoof".into()).await.is_err(), "dev-a cannot list dev-b");
@@ -1969,6 +1970,7 @@ async fn the_channel_manager_applies_the_owner_s_changes_only_and_announces_them
         memory_low: None,
         model: None,
         paused: None,
+        drift: Vec::new(),
     };
     let b_roster = bus::ensure_roster(&b_js, ants_proto::ROSTER_TTL).await.unwrap();
     b_roster.put("dev-b", serde_json::to_vec(&listed).unwrap().into()).await.unwrap();
@@ -2596,6 +2598,15 @@ async fn a_host_records_only_its_own_machine_s_ants_and_humans_read_where_each_a
     assert!(as_host.put("m2", b"{}".to_vec()).await.is_err(), "a host writes only its own machine's record");
     let as_ant = DirectKv::new(&a_js, None, ants_proto::MACHINES_BUCKET).await.unwrap();
     assert!(as_ant.put("m1", b"{}".to_vec()).await.is_err(), "an ant has no host powers");
+
+    h_js.create_key_value(ants_daemon::hub::identities_config()).await.unwrap();
+    let identities = |js| DirectKv::new(js, None, ants_proto::IDENTITIES_BUCKET);
+    let settings = ants_proto::SharedSettings::key_of(&dev_a);
+    assert!(identities(&m_js).await.unwrap().put(&settings, b"{}".to_vec()).await.is_ok(), "a host writes them");
+    assert!(identities(&h_js).await.unwrap().put(&settings, b"{}".to_vec()).await.is_err(), "a human orders changes");
+    assert!(identities(&a_js).await.unwrap().put(&settings, b"{}".to_vec()).await.is_err(), "an ant only reads them");
+    let read = DirectKv::whole(&a_js, None, ants_proto::IDENTITIES_BUCKET).await.unwrap();
+    assert_eq!(read.get(&settings).await.unwrap(), Some(b"{}".to_vec()), "an ant reads them");
     drop(ants);
     timeout(WAIT, task).await.unwrap().unwrap().expect("the host stops once its daemon drops it");
 }

@@ -222,6 +222,26 @@ fn harness_versions_warn_of_drift_across_machines() {
     );
 }
 
+#[test]
+fn drift_of_shared_settings_is_listed_by_field_and_machine() {
+    let record = |machine: &str, drift: &[(&str, &[&str])]| ants_proto::MachineRecord {
+        machine: machine.parse().unwrap(),
+        ants: Vec::new(),
+        hostname: machine.to_owned(),
+        version: ants_proto::ANTS_VERSION.to_owned(),
+        updated_at: chrono::Utc::now(),
+        drift: drift
+            .iter()
+            .map(|(ant, fields)| (ant.parse().unwrap(), fields.iter().map(|f| (*f).to_owned()).collect()))
+            .collect(),
+    };
+    let check = drift(&[record("m1", &[]), record("m2", &[])]);
+    assert_eq!((check.status, check.detail.as_str()), (Status::Ok, "no drift on 2 machines"));
+    let check = drift(&[record("m1", &[("dev-a", &["model"])]), record("m2", &[("dev-a", &["model", "whoami"])])]);
+    assert_eq!(check.status, Status::Warn, "{check}");
+    assert!(check.detail.ends_with("which they ignore: dev-a: model on m1; dev-a: model, whoami on m2"), "{check}");
+}
+
 #[tokio::test]
 async fn a_missing_harness_fails_with_its_fix() {
     let dir = ants_test_support::scratch_dir("doctor-harness").canonicalize().unwrap();

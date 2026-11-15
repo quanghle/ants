@@ -805,8 +805,11 @@ impl Permissions {
     /// ([`admin_consumer`]), whose filter, in the subject, is pinned to the machine's orders ([`subject::admin_orders`]),
     /// and acking them, after recording the outcome of each beside the machine's record ([`admin_outcome_key`]), which it
     /// reads back by direct gets, and looking up the revocation records of the credentials that signed them
-    /// ([`subject::revoked_devices`]). It hears its own replies under [`host_inbox_prefix`], apart from every user's.
-    /// Nothing else: no other machine's record or outcomes, no message to or from an ant. No ant gets any of it.
+    /// ([`subject::revoked_devices`]). It reads and writes every ant's shared settings in [`IDENTITIES_BUCKET`]
+    /// ([`subject::all_shared_settings`]), creating those of the machine's ants and applying admin orders to them; any
+    /// machine's host credentials may write any ant's. It hears its own replies under [`host_inbox_prefix`], apart from
+    /// every user's. Nothing else: no other machine's record or outcomes, no ant's identity record, no message to or
+    /// from an ant. No ant gets any of it.
     pub fn for_host(machine: &Machine) -> Self {
         let record = subject::machine_record(machine);
         let consumer = admin_consumer(machine);
@@ -816,6 +819,8 @@ impl Permissions {
             format!("$JS.API.DIRECT.GET.{}.{outcomes}", kv_stream(MACHINES_BUCKET)),
             outcomes,
             format!("$JS.API.DIRECT.GET.{}.{}", kv_stream(DEVICES_BUCKET), subject::revoked_devices()),
+            format!("$JS.API.DIRECT.GET.{}.{}", kv_stream(IDENTITIES_BUCKET), subject::all_shared_settings()),
+            subject::all_shared_settings(),
             // Finding JetStream on connecting, as an ant does with its inbox consumer, without the stream's info.
             format!("$JS.API.CONSUMER.INFO.{STREAM}.{consumer}"),
             format!("$JS.API.CONSUMER.CREATE.{STREAM}.{consumer}.{}", subject::admin_orders(machine)),
@@ -1019,7 +1024,7 @@ impl Permissions {
     /// allow, to say in [`DEVICES_BUCKET`] which keys of humans' credentials are revoked: creating the bucket, reading
     /// and putting the revocation records ([`subject::revoked_devices`]) and nothing else of it, with the replies of
     /// its JetStream requests under [`ENROLL_INBOX`]. No other credentials put a revocation record. They also delete
-    /// the identity record of an ant revoked whole ([`IDENTITIES_BUCKET`]), ending the ant.
+    /// the identity record and shared settings of an ant revoked whole ([`IDENTITIES_BUCKET`]), ending the ant.
     pub fn for_device_revoker() -> Self {
         let devices = kv_stream(DEVICES_BUCKET);
         let revoked = subject::revoked_devices();
@@ -1031,6 +1036,7 @@ impl Permissions {
                 format!("$JS.API.DIRECT.GET.{devices}.{revoked}"),
                 revoked,
                 format!("$KV.{IDENTITIES_BUCKET}.*"),
+                subject::all_shared_settings(),
             ],
             subscribe: vec![format!("{ENROLL_INBOX}.>")],
         }

@@ -6,7 +6,8 @@
 //! deciding again. It refuses every order while the config sets `[admin] remote = false`.
 //!
 //! An order an admin signed it carries out ([`apply`]) with the module of its op: [`set`] edits the ant's settings in
-//! the config file the daemon serves ([`ConfigFile`]), which the daemon reloads at once; [`settings`] reads them;
+//! the config file the daemon serves ([`ConfigFile`]), which the daemon reloads at once, and its shared settings in
+//! their record ([`crate::shared`]); [`settings`] reads them;
 //! [`pause`] pauses or resumes the ant there; [`restart`] has the daemon serving the ant restart its harnesses;
 //! [`memories`] reads the ant's memories, only while online.
 
@@ -15,8 +16,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ants_proto::{
-    AdminOp, AdminOrder, AdminOutcome, DEVICES_BUCKET, JsDomain, MACHINES_BUCKET, Machine, OrderState, STREAM, UserId,
-    Uuid, admin_consumer, admin_outcome_key, revoked_device_key, subject,
+    AdminOp, AdminOrder, AdminOutcome, DEVICES_BUCKET, IDENTITIES_BUCKET, JsDomain, MACHINES_BUCKET, Machine,
+    OrderState, STREAM, UserId, Uuid, admin_consumer, admin_outcome_key, revoked_device_key, subject,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::consumer::{AckPolicy, PullConsumer, pull};
@@ -74,11 +75,13 @@ pub struct ConfigFile {
     pub edited: Arc<Notify>,
     /// The admins whose orders paused ants, for the reloaded config to credit ([`crate::pause::Pause::credit`]).
     pub pausers: crate::pause::Pausers,
+    /// The shared settings of the file's ants, which the host connection keeps and settings orders change.
+    pub shared: crate::shared::Shared,
 }
 
 impl ConfigFile {
     pub fn new(path: PathBuf, edited: Arc<Notify>) -> Self {
-        Self { path, edited, pausers: crate::pause::Pausers::default() }
+        Self { path, edited, pausers: crate::pause::Pausers::default(), shared: crate::shared::Shared::default() }
     }
 }
 
@@ -126,11 +129,14 @@ async fn take(js: &jetstream::Context, js_domain: Option<&JsDomain>, orders: &Or
         .with_context(|| format!("creating consumer {name}"))?;
     let mut messages = consumer.messages().await.with_context(|| format!("reading consumer {name}"))?;
     let outcomes = DirectKv::new(js, js_domain, MACHINES_BUCKET).await?;
-    let devices = DirectKv::new(js, js_domain, DEVICES_BUCKET).await?;
+    let stores = Stores {
+        devices: DirectKv::new(js, js_domain, DEVICES_BUCKET).await?,
+        identities: DirectKv::new(js, js_domain, IDENTITIES_BUCKET).await?,
+    };
     tracing::debug!(machine = %orders.machine, "taking admin orders");
     while let Some(msg) = messages.next().await {
         let msg = msg.with_context(|| format!("reading consumer {name}"))?;
-        match handle(js, &outcomes, &devices, orders, &msg).await {
+        match handle(js, &outcomes, &stores, orders, &msg).await {
             Ok(()) => {}
             Err(e) => {
                 tracing::warn!(
@@ -150,7 +156,7 @@ async fn take(js: &jetstream::Context, js_domain: Option<&JsDomain>, orders: &Or
 async fn handle(
     js: &jetstream::Context,
     outcomes: &DirectKv,
-    devices: &DirectKv,
+    stores: &Stores,
     orders: &Orders,
     msg: &jetstream::Message,
 ) -> Result<()> {
@@ -166,7 +172,7 @@ async fn handle(
                 let outcome = match taken {
                     Taken::Order { order, machine, ant } => {
                         let stored_at = stored_at.unwrap_or_else(|_| Utc::now());
-                        let mut outcome = decide(devices, orders, &msg.subject, &order, stored_at).await?;
+                        let mut outcome = decide(stores, orders, &msg.subject, &order, stored_at).await?;
                         (outcome.machine, outcome.ant) = (machine, ant);
                         outcome
                     }
@@ -232,11 +238,19 @@ fn read(subject: &str, payload: &[u8], msg_id: Option<&str>, machine: &Machine) 
     }
 }
 
+/// The buckets deciding an order reads and writes besides its outcome's.
+struct Stores {
+    /// The revocation records of humans' credentials.
+    devices: DirectKv,
+    /// The ants' shared settings, which settings orders change ([`set`]).
+    identities: DirectKv,
+}
+
 /// The outcome of `order`, taken from `subject` and stored at `stored_at`: refused unless the config allows remote
-/// administration and an admin of the team signed it with credentials not revoked, as [`devices`] records them;
-/// else what carrying it out ([`apply`]) gave.
+/// administration and an admin of the team signed it with credentials not revoked, as [`Stores::devices`] records
+/// them; else what carrying it out ([`apply`]) gave.
 async fn decide(
-    devices: &DirectKv,
+    stores: &Stores,
     orders: &Orders,
     subject: &str,
     order: &AdminOrder,
@@ -250,7 +264,7 @@ async fn decide(
         return Ok(refused("the machine's host connection has no credentials whose account vouches for an admin"));
     }
     let revoked = match order.signing_key() {
-        Some(key) => match devices.lookup(revoked_device_key(&key)).await? {
+        Some(key) => match stores.devices.lookup(revoked_device_key(&key)).await? {
             Lookup::Value(_) => true,
             Lookup::NoValue | Lookup::NoBucket => false,
         },
@@ -259,15 +273,15 @@ async fn decide(
     let accounts = orders.accounts.iter().map(String::as_str);
     match order.verify(subject, accounts, |_| revoked, stored_at) {
         Err(e) => Ok(refused(&e.to_string())),
-        Ok(_) => Ok(apply(orders, order, stored_at).await),
+        Ok(_) => apply(stores, orders, order, stored_at).await,
     }
 }
 
 /// Carry out `order`, which an admin signed and the stream stored at `stored_at`, with the module of its op, which
-/// refuses it when it cannot.
-async fn apply(orders: &Orders, order: &AdminOrder, stored_at: DateTime<Utc>) -> AdminOutcome {
-    match &order.op {
-        AdminOp::Set { changes } => set::apply(orders, order, changes),
+/// refuses it when it cannot. Fails, for the order to be taken again, only when a bucket it writes does not answer.
+async fn apply(stores: &Stores, orders: &Orders, order: &AdminOrder, stored_at: DateTime<Utc>) -> Result<AdminOutcome> {
+    Ok(match &order.op {
+        AdminOp::Set { changes } => set::apply(&stores.identities, orders, order, changes).await?,
         AdminOp::Pause => pause::apply(orders, order, true),
         AdminOp::Resume => pause::apply(orders, order, false),
         AdminOp::Restart { now } => restart::apply(orders, order, *now).await,
@@ -275,7 +289,7 @@ async fn apply(orders: &Orders, order: &AdminOrder, stored_at: DateTime<Utc>) ->
         AdminOp::Retire => refused(order, NOT_SUPPORTED),
         AdminOp::ReadMemories => memories::apply(orders, order, stored_at).await,
         AdminOp::ReadSettings => settings::apply(orders, order),
-    }
+    })
 }
 
 /// `order` applied, decided now, with what its op returns, if anything.

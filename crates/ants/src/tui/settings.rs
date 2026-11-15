@@ -155,7 +155,8 @@ impl Pane {
             self.sent = Some(Sent::Failed("the settings are not read: r reads them".to_owned()));
             return None;
         };
-        let op = settings::order(&read.settings, &[assignment]);
+        let shared = self.reading.as_ref().and_then(|r| r.as_ref().ok()).and_then(|r| r.shared.as_deref());
+        let op = settings::order(&read.settings, shared, &[assignment]);
         let machine = read.machine.clone();
         self.draft = None;
         self.sent = Some(Sent::Sending);
@@ -444,6 +445,7 @@ mod tests {
             read: Some(read),
             stale: Some("the read waits for the daemon of m1".to_owned()),
             orders: vec![pending],
+            shared: None,
         }
     }
 

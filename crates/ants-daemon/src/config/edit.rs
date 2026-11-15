@@ -113,33 +113,14 @@ impl Edit {
         }
         let mut make = Vec::with_capacity(changes.len());
         for change in changes {
-            let field = change.field.join(".");
             match change.field.first().map(String::as_str) {
                 None | Some("") => bail!("a change names no field"),
                 Some("name") => bail!("name names the ant: an order does not rename it"),
                 Some(_) => {}
             }
-            let current = self.get(ant, &change.field)?;
-            if same_opt(current.as_ref(), change.value.as_ref()) {
-                continue;
+            if needed(change, self.get(ant, &change.field)?.as_ref())? {
+                make.push(change);
             }
-            if let Some(expected) = &change.expected_digest {
-                if current.as_ref().is_some_and(|current| digest(current) == *expected) {
-                    make.push(change);
-                    continue;
-                }
-                bail!(
-                    "{field} changed since the order was sent: it no longer holds the value read, hidden as a secret"
-                );
-            }
-            if !same_opt(current.as_ref(), change.expected.as_ref()) {
-                bail!(
-                    "{field} changed since the order was sent: it holds {}, the order expected {}",
-                    shown(current.as_ref()),
-                    shown(change.expected.as_ref())
-                );
-            }
-            make.push(change);
         }
         for change in &make {
             self.set(ant, &change.field, change.value.as_ref())?;
@@ -249,6 +230,29 @@ pub fn parse_value(text: &str) -> Result<Value> {
 /// `value` as TOML text, on one line: `"gpt-5"`, `["read", "search"]`, `{ RUST_LOG = "info" }`.
 pub fn toml_text(value: &Value) -> String {
     toml_value(value).map_or_else(|_| value.to_string(), |value| value.decorated("", "").to_string())
+}
+
+/// Whether `change` is to be made to its field, which holds `current`: not when it holds the new value already. Fails
+/// naming the field when it holds neither that nor the value the change expects, or one whose [`digest`] it expects.
+pub fn needed(change: &FieldChange, current: Option<&Value>) -> Result<bool> {
+    let field = change.field.join(".");
+    if same_opt(current, change.value.as_ref()) {
+        return Ok(false);
+    }
+    if let Some(expected) = &change.expected_digest {
+        if current.is_some_and(|current| digest(current) == *expected) {
+            return Ok(true);
+        }
+        bail!("{field} changed since the order was sent: it no longer holds the value read, hidden as a secret");
+    }
+    if !same_opt(current, change.expected.as_ref()) {
+        bail!(
+            "{field} changed since the order was sent: it holds {}, the order expected {}",
+            shown(current),
+            shown(change.expected.as_ref())
+        );
+    }
+    Ok(true)
 }
 
 /// A value as a change names it: `"gpt-5"`, `nothing` for none.

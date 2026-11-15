@@ -80,6 +80,10 @@ pub struct RosterEntry {
     /// prompt, the messages to it waiting queued, until it is resumed. Missing otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused: Option<Paused>,
+    /// The ant's settings the serving machine's config sets otherwise than the ant's [`crate::SharedSettings`], which
+    /// the daemon runs it with: drift to mend in that config. Missing when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drift: Vec<String>,
 }
 
 /// An ant's pause, as its roster entry reports it ([`RosterEntry::paused`]).
@@ -287,6 +291,7 @@ mod tests {
             memory_low: None,
             model: None,
             paused: None,
+            drift: Vec::new(),
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains(r#""instance":"run-1""#), "{json}");

@@ -143,6 +143,9 @@ fn leaf_permissions_cover_each_user_once() {
             "$KV.ants_machines.m1",
             "$JS.API.DIRECT.GET.KV_ants_machines.$KV.ants_machines.m1.>",
             "$KV.ants_machines.m1.>",
+            // The shared settings of the ants it serves.
+            "$JS.API.DIRECT.GET.KV_ants_identities.$KV.ants_identities.*.settings",
+            "$KV.ants_identities.*.settings",
             // Its revocation reads are already an ant's.
             "$JS.API.CONSUMER.INFO.ANTS.admin-m1",
             "$JS.API.CONSUMER.CREATE.ANTS.admin-m1.ants.admin.m1.>",
@@ -688,7 +691,7 @@ fn humans_read_every_device_key_put_only_their_own_and_only_the_revoker_records_
 
     let revoker = Permissions::for_device_revoker();
     let puts: Vec<&String> = revoker.publish.iter().filter(|s| s.starts_with("$KV.")).collect();
-    assert_eq!(puts, ["$KV.ants_devices.revoked.*", "$KV.ants_identities.*"]);
+    assert_eq!(puts, ["$KV.ants_devices.revoked.*", "$KV.ants_identities.*", "$KV.ants_identities.*.settings"]);
     assert!(revoker.publish.iter().any(|s| s == "$JS.API.STREAM.CREATE.KV_ants_devices"));
     assert!(!revoker.publish.iter().any(|s| s.starts_with("ants.") || s.contains("CONSUMER")));
     assert_eq!(revoker.subscribe, [format!("{ENROLL_INBOX}.>")]);
@@ -714,9 +717,14 @@ fn each_ant_writes_only_its_own_identity_and_humans_read_all() {
     );
     let observer = Permissions::for_observer(&p("watcher"));
     let webhook = Permissions::for_webhook(&p("hook"), &[Destination::Ant(p("dev-a"))]);
-    for none in [observer, webhook, Permissions::for_channel_manager(), Permissions::for_host(&"m1".parse().unwrap())] {
+    for none in [observer, webhook, Permissions::for_channel_manager()] {
         assert_eq!(identities(&none), Vec::<String>::new());
     }
+    // A host reads and writes the shared settings of any ant, and nothing else of the bucket.
+    assert_eq!(
+        identities(&Permissions::for_host(&"m1".parse().unwrap())),
+        ["$JS.API.DIRECT.GET.KV_ants_identities.$KV.ants_identities.*.settings", "$KV.ants_identities.*.settings"]
+    );
 }
 
 #[test]
