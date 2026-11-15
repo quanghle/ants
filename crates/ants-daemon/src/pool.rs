@@ -180,7 +180,12 @@ impl Pool {
     /// The thread's branch, when the thread works in its own worktree and the branch holds commits not in the
     /// repository's `HEAD` ([`Worktrees::ahead`]).
     pub async fn branch_ahead(&self, thread: &ThreadId) -> Option<Branch> {
-        self.worktrees.as_ref().filter(|_| self.isolate)?.ahead(thread).await
+        self.worktrees()?.ahead(thread).await
+    }
+
+    /// The worktrees threads work in, if each works in its own.
+    pub fn worktrees(&self) -> Option<&Worktrees> {
+        self.worktrees.as_ref().filter(|_| self.isolate)
     }
 
     /// Run a prompt in the thread's session, starting or resuming its harness when none is live. Waits while the cap

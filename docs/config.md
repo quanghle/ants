@@ -43,6 +43,7 @@ capabilities = ["rust", "backend"]         # routing tags published in roster
 max_harnesses = 4                          # default
 worktrees = false                          # default; true gives each thread a git worktree
 worktree_base = "head"                     # default; "upstream" starts its branch from the fetched remote default branch
+publish = "off"                            # default; "draft-pr" pushes a branch with new commits, opens a draft PR
 idle_timeout = "10m"                       # default
 prompt_timeout = "30m"                     # default; "0" disables
 max_tool_calls = 300                       # default; 0 disables
@@ -116,7 +117,7 @@ allow_sets = { build = ["execute:cargo build*", "execute:cargo test*"] } # named
 pool_daily_cost = 25.0                     # optional shared UTC daily cap across template ants; also pool_daily_tokens
 whoami = "Implement what the manager assigns." # overridable defaults: whoami, memory, tasks, capabilities
 capabilities = ["rust"]
-env = { CARGO_TARGET_DIR = "target" }      # fixed on template: env, worktrees, worktree_base,
+env = { CARGO_TARGET_DIR = "target" }      # fixed on template: env, worktrees, worktree_base, publish,
 worktrees = true                           # idle_timeout, approval_timeout, spend_warn_percent
 ```
 
@@ -275,6 +276,7 @@ Matched calls auto-approve (`allow_once`). Unmatched calls publish an `ApprovalR
 - **Chain members:** ants in `escalate_to` receive an `approval` escalation notice on the thread and may answer via MCP `decide_approval(verdict)` (`escalate` is refused on approval notices). Earliest decision wins (human or chain).
 - **Suggested rules & `--rule`:** once humans approve an identical call 3 times for an ant (`execute:<cmd>`, `<kind>:<abs-path>` for one file, `fetch:<url>`, else `<kind>:<title>`, excluding `*` and shell metacharacters), `ants tools approve` and approval notices print that rule. `ants tools approve ID --rule` appends it to the ant's `allow` in `config.toml` and reloads the daemon (for templated ants, `--rule` approves once and prints the rule to add to `[[ant_template]]`).
 - **Webhook & schedule narrowing:** threads started by a webhook or schedule intersect the ant's allowlist with the entry's `allow` (default read-only: `read:*`, `search`, `think`, and MCP `list_ants`, `check_inbox`, `read_notes`, `post_notes`, `send_message`, `ask_ant`, `route`, `escalate`, `react`; `["*"]` opts out; `[]` requires human approval for all calls). The narrowing travels on every message, spin-off, channel post, escalation and approval notice on the thread (persisted at `<ant>.<thread>.spend`) until a human messages the ant on the thread or wakes it on the channel thread.
+- **Branch pushes:** with `publish = "draft-pr"`, the daemon's own `git push <remote> ants/<ant>/<thread>` goes through the same check as an `execute` call titled `Push branch … and open a draft pull request`: `execute:git push origin ants/dev-a/*` lets dev-a push its thread branches to `origin` unasked; otherwise the push is an approval request on the thread, and a rejection (narrowed threads included) leaves the branch unpushed with an `[ants]` line in the reply.
 - **Expiry:** after `approval_timeout`, the call is rejected; the thread owner (else default human) receives a level-0 `approval` escalation notice on a separate thread (so `ants ask --wait` keeps waiting for the reply), and asked chain ants receive a cancellation notice on the request's thread.
 
 ### Redaction

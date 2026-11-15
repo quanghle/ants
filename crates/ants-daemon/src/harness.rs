@@ -600,6 +600,13 @@ impl Launch {
         &self.policy
     }
 
+    /// The same launch, answering permission requests with `policy`.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_policy(self, policy: PermissionPolicy) -> Self {
+        Self { policy, ..self }
+    }
+
     #[cfg(test)]
     pub(crate) fn with_transport(connect: Connector, cwd: PathBuf, policy: PermissionPolicy) -> Self {
         let harness = Harness {

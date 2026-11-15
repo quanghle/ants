@@ -28,6 +28,7 @@ pub mod overflow;
 pub mod owners;
 pub mod permission;
 pub mod pool;
+pub mod publish;
 pub mod ratelimit;
 pub mod reactions;
 pub mod reading;

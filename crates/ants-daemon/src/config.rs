@@ -28,6 +28,7 @@
 //! idle_timeout = "10m"              # durations: 90s, 10m, 1h30m, 0
 //! worktrees = true                  # a git worktree per thread, under the ant's home
 //! worktree_base = "upstream"        # start its branch from the fetched remote default branch, not HEAD
+//! publish = "draft-pr"              # push a branch with new commits and open a draft pull request with gh
 //! harness = "my-agent"
 //!
 //! [harnesses.my-agent]              # an ACP adapter on stdio, besides the built-in ones (harnesses.toml)
@@ -79,6 +80,7 @@ use crate::caps::{Caps, Members, Pool};
 use crate::daemon::Config;
 use crate::escalation::{self, Chain};
 use crate::harness::{self, DEFAULT_HARNESS, Harness, Harnesses, ModelSettings, PromptLimits};
+use crate::publish::Publish;
 use crate::schedule::{self, Schedule};
 use crate::storage;
 use crate::template::{AntTemplate, REQUEST_KEYS, Request};
@@ -232,6 +234,9 @@ pub struct Ant {
     /// Where a thread's new worktree branch starts.
     #[serde(default)]
     pub worktree_base: Base,
+    /// What becomes of a thread's worktree branch holding new commits.
+    #[serde(default)]
+    pub publish: Publish,
     /// The built-in messenger, served only while no other daemon lists a messenger in the roster.
     #[serde(skip)]
     pub builtin: bool,
@@ -328,6 +333,7 @@ impl Ant {
             escalate_after: DEFAULT_ESCALATE_AFTER,
             escalation_reminder: DEFAULT_ESCALATION_REMINDER,
             worktree_base: Base::Head,
+            publish: Publish::Off,
             builtin: false,
             pool: None,
             redact: true,
@@ -402,6 +408,7 @@ impl Ant {
             requester: crate::mcp::Requester::default(),
             redact: self.redact,
             worktree_base: self.worktree_base,
+            publish: self.publish,
         })
     }
 
@@ -1125,6 +1132,7 @@ pub fn signer_templates(path: &Path) -> Result<Vec<AntTemplate>> {
 
 /// The `[[ant]]` table of `ant` for the config file: its name, workdir and the settings that differ from those of
 /// [`Ant::new`], paths as they are.
+#[allow(clippy::too_many_lines)]
 pub fn entry(ant: &Ant) -> Result<String> {
     let default = Ant::new(ant.name.clone(), ant.workdir.clone());
     let mut out = String::from("[[ant]]\n");
@@ -1224,6 +1232,9 @@ pub fn entry(ant: &Ant) -> Result<String> {
     }
     if ant.worktree_base != default.worktree_base {
         set("worktree_base", toml_string(ant.worktree_base.as_str()));
+    }
+    if ant.publish != default.publish {
+        set("publish", toml_string(ant.publish.as_str()));
     }
     Ok(out)
 }

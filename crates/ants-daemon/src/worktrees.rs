@@ -280,6 +280,43 @@ impl Worktrees {
         })
     }
 
+    /// The repository the worktrees belong to.
+    pub fn repo(&self) -> &Path {
+        &self.repo
+    }
+
+    /// Whether `branch` is at the commit `remote` had it at when last pushed or fetched.
+    pub async fn pushed(&self, branch: &Branch, remote: &str) -> bool {
+        let tip = |name: String| async move { git(&self.repo, ["rev-parse", "--verify", "--quiet", &name]).await.ok() };
+        let local = tip(format!("refs/heads/{}", branch.name)).await;
+        local.is_some() && local == tip(format!("refs/remotes/{remote}/{}", branch.name)).await
+    }
+
+    /// Push `branch` to `remote` (`git push <remote> <branch>`), prompting for no credentials and failing after
+    /// `timeout`.
+    pub async fn push(&self, branch: &Branch, remote: &str, timeout: Duration) -> Result<()> {
+        remote_git(&self.repo, ["push", "--quiet", remote, &branch.name], timeout).await.map(drop)
+    }
+
+    /// What the thread's branch was described with ([`Worktrees::describe`]), if anything.
+    pub async fn description(&self, thread: &ThreadId) -> Option<String> {
+        let key = format!("branch.{}.description", self.branch(thread));
+        let description = git(&self.repo, ["config", "--get", &key]).await.ok()?;
+        Some(description.trim().to_owned()).filter(|d| !d.is_empty())
+    }
+
+    /// Describe the thread's branch with `text` (`branch.<branch>.description`), unless it has a description already or
+    /// does not exist.
+    pub async fn describe(&self, thread: &ThreadId, text: &str) -> Result<()> {
+        let branch = self.branch(thread);
+        if self.description(thread).await.is_some()
+            || git(&self.repo, ["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).await.is_err()
+        {
+            return Ok(());
+        }
+        git(&self.repo, ["config", &format!("branch.{branch}.description"), text]).await.map(drop)
+    }
+
     /// The threads with a worktree.
     pub fn threads(&self) -> Vec<ThreadId> {
         threads_in(&self.dir)
@@ -435,7 +472,11 @@ where
     .with_context(|| format!("running {}", shown()))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("{}: {}", shown(), stderr.trim());
+        let stderr = stderr.trim();
+        if stderr.is_empty() {
+            bail!("{}: {}", shown(), output.status);
+        }
+        bail!("{}: {stderr}", shown());
     }
     String::from_utf8(output.stdout).with_context(|| format!("{}: output is no UTF-8", shown()))
 }

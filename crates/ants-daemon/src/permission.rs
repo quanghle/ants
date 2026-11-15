@@ -246,30 +246,45 @@ impl PermissionPolicy {
         thread: Option<&ThreadId>,
         workdir: &Path,
     ) -> RequestPermissionResponse {
-        let fields = &request.tool_call.fields;
+        let verdict = self.verdict(&request.tool_call.fields, || offered(request), thread, workdir).await;
+        select(request, verdict)
+    }
+
+    /// Decide on `fields`, a tool call the daemon itself makes for the ant on `thread`, in `workdir`, as on a harness's
+    /// request offering to allow it once or reject it.
+    pub async fn decide(&self, fields: &ToolCallUpdateFields, thread: &ThreadId, workdir: &Path) -> Verdict {
+        self.verdict(fields, || vec![Verdict::AllowOnce, Verdict::Reject], Some(thread), workdir).await
+    }
+
+    /// The allowlist's verdict on `fields`, unless the thread's narrowed rules leave it out, else the approver's among
+    /// `options`, else reject.
+    async fn verdict(
+        &self,
+        fields: &ToolCallUpdateFields,
+        options: impl FnOnce() -> Vec<Verdict>,
+        thread: Option<&ThreadId>,
+        workdir: &Path,
+    ) -> Verdict {
         let tool = Tool { kind: kind_name(fields), fields };
         let allowed = self.allow.allows(&tool, workdir);
-        let verdict = if allowed && !self.narrowed_out(&tool, thread, workdir) {
+        if allowed && !self.narrowed_out(&tool, thread, workdir) {
             tracing::info!(kind = %tool.kind, title = ?fields.title, "tool allowed by the allowlist");
-            Verdict::AllowOnce
-        } else {
-            if allowed {
-                tracing::info!(kind = %tool.kind, title = ?fields.title, "tool outside the thread's narrowed rules");
+            return Verdict::AllowOnce;
+        }
+        if allowed {
+            tracing::info!(kind = %tool.kind, title = ?fields.title, "tool outside the thread's narrowed rules");
+        }
+        match (&self.approver, thread) {
+            (Some(approver), Some(thread)) => {
+                let verdict = approver.decide(thread.clone(), summary(&tool, &self.redactor), options()).await;
+                tracing::info!(kind = %tool.kind, title = ?fields.title, ?verdict, "tool request decided");
+                verdict
             }
-            match (&self.approver, thread) {
-                (Some(approver), Some(thread)) => {
-                    let verdict =
-                        approver.decide(thread.clone(), summary(&tool, &self.redactor), offered(request)).await;
-                    tracing::info!(kind = %tool.kind, title = ?fields.title, ?verdict, "tool request decided");
-                    verdict
-                }
-                _ => {
-                    tracing::info!(kind = %tool.kind, title = ?fields.title, "tool request rejected");
-                    Verdict::Reject
-                }
+            _ => {
+                tracing::info!(kind = %tool.kind, title = ?fields.title, "tool request rejected");
+                Verdict::Reject
             }
-        };
-        select(request, verdict)
+        }
     }
 }
 
@@ -618,6 +633,12 @@ mod tests {
         assert_eq!(chosen(&PermissionPolicy::reject_all().answer(&push, Some(&thread), workdir).await), Some("no"));
         assert_eq!(chosen(&policy.answer(&push, None, workdir).await), Some("no"), "no thread, no one to ask");
         assert_eq!(chosen(&PermissionPolicy::allow_all().answer(&push, None, workdir).await), Some("yes"));
+
+        let own = &shell("git push origin ants/dev-a/t1").tool_call.fields;
+        assert_eq!(policy.decide(own, &thread, workdir).await, Verdict::AllowAlways);
+        assert_eq!(fake.1.locked().pop().unwrap().2, [Verdict::AllowOnce, Verdict::Reject], "the daemon's own call");
+        let allowed = PermissionPolicy::new(Allowlist::parse(&["execute:git push origin ants/*"]).unwrap(), None);
+        assert_eq!(allowed.decide(own, &thread, workdir).await, Verdict::AllowOnce);
     }
 
     #[tokio::test]

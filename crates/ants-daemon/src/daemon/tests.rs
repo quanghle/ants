@@ -36,6 +36,7 @@ struct Bus {
     roster: Roster,
     humans: Registry,
     redactor: Redactor,
+    publisher: Option<crate::publish::Publisher>,
 }
 
 impl Bus {
@@ -85,6 +86,7 @@ impl Bus {
             roster,
             humans: Registry::default(),
             redactor: Redactor::default(),
+            publisher: None,
         };
         (bus, replies)
     }
@@ -180,6 +182,7 @@ impl Bus {
             buried: &self.buried,
             mcp: self.mcp.as_ref(),
             approvals: None,
+            publisher: self.publisher.as_ref(),
             redactor: &self.redactor,
             workload: &self.workload,
             metrics: crate::metrics::ant(&self.dev),
@@ -903,6 +906,91 @@ async fn a_reply_names_the_thread_branch_holding_new_commits() {
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
     std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
+}
+
+/// A fake gh in `dir`, logging its arguments to `dir/gh.log`: `pr create` prints a pull request's URL, which `pr list`
+/// prints from then on.
+#[cfg(unix)]
+fn fake_gh(dir: &std::path::Path) -> PathBuf {
+    let gh = dir.join("gh");
+    let script = r#"#!/bin/sh
+dir=$(dirname "$0")
+printf '[%s]' "$@" >> "$dir/gh.log"
+echo >> "$dir/gh.log"
+case "$1 $2" in
+"pr list") cat "$dir/open" 2>/dev/null || true ;;
+"pr create") echo "Creating draft pull request"; echo https://github.test/o/r/pull/7 | tee "$dir/open" ;;
+esac
+"#;
+    std::fs::write(&gh, script).unwrap();
+    std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    gh
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_thread_branch_with_new_commits_is_pushed_with_a_draft_pull_request() {
+    use crate::worktrees::tests::{commit, run};
+    let Some(repo) = crate::worktrees::tests::repo("daemon-publish") else { return };
+    let Some((mut bus, mut replies)) = Bus::start().await else { return };
+    let dir = repo.parent().unwrap().to_owned();
+    let remote = dir.join("remote.git");
+    run(&dir, &["init", "--quiet", "--bare", remote.to_str().unwrap()]);
+    run(&repo, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    bus.publisher = Some(crate::publish::Publisher::new(bus.dev.clone()).with_gh(fake_gh(&dir)));
+    let home = dir.join("home");
+    let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
+    let setup = Worktrees::find(&bus.dev, &repo, &home).await.unwrap();
+    let (w1, w2) = (setup.checkout(&t1).await.unwrap(), setup.checkout(&t2).await.unwrap());
+    commit(&w1, "work of t1");
+    commit(&w2, "work of t2");
+    let (launch, _, _) = fake::launch();
+    let allow = Allowlist::parse(&["execute:git push origin ants/dev-a/*"]).unwrap();
+    let launch = launch.in_dir(repo.clone()).with_policy(PermissionPolicy::new(allow, None));
+    let worktrees = Worktrees::find(&bus.dev, &repo, &home).await.unwrap();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE).with_worktrees(worktrees);
+    let branch = format!("ants/dev-a/{t1}");
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        bus.send(&t1, "  Fix the build\nthen test it").await;
+        let pushed = format!("[ants] Branch {branch} was pushed to origin, with draft pull request ");
+        let text = next_envelope(&mut replies).await.text;
+        assert!(text.ends_with(&format!("{pushed}https://github.test/o/r/pull/7.")), "{text}");
+        assert_eq!(run(&repo, &["ls-remote", "--heads", "origin"]).matches(&branch).count(), 1);
+        let log = std::fs::read_to_string(dir.join("gh.log")).unwrap();
+        assert!(log.starts_with(&format!("[pr][list][--head][{branch}][--state][open]")), "{log}");
+        assert!(log.contains("[--draft][--head]") && log.contains("[--title][Fix the build][--body]"), "{log}");
+        assert!(log.contains(&format!("thread {t1}, which `ants thread show {t1}` shows")), "{log}");
+
+        bus.send(&t1, "nothing new").await;
+        let text = next_envelope(&mut replies).await.text;
+        assert!(text.ends_with("not in the repository's HEAD."), "pushed as it is: {text}");
+        commit(&w1, "more work of t1");
+        bus.send(&t1, "more").await;
+        let text = next_envelope(&mut replies).await.text;
+        let updated = format!("[ants] Branch {branch} was pushed to origin, updating pull request ");
+        assert!(text.ends_with(&format!("{updated}https://github.test/o/r/pull/7.")), "{text}");
+        assert_eq!(std::fs::read_to_string(dir.join("gh.log")).unwrap().matches("[pr][create]").count(), 1);
+
+        // Another ant's message narrows the thread's rules to what it carries.
+        let dev_b: UserId = "dev-b".parse().unwrap();
+        let mut to_dev_b = bus.client.subscribe(subject::inbox_of(&dev_b)).await.unwrap();
+        bus.client.flush().await.unwrap();
+        let narrowed =
+            Envelope::on_thread(t2.clone(), dev_b, bus.dev.clone(), "two").with_allow(Some(vec!["read".to_owned()]));
+        bus::publish_json(&bus.js, narrowed.subject(), &narrowed, None).await.unwrap();
+        let text = next_envelope(&mut to_dev_b).await.text;
+        let rejected = format!(
+            "[ants] Branch ants/dev-a/{t2} was not pushed: `git push origin ants/dev-a/{t2}` was rejected. An allow \
+             rule such as `execute:git push origin ants/dev-a/*` lets it run unasked."
+        );
+        assert!(text.ends_with(&rejected), "outside the thread's narrowed rules: {text}");
+        assert!(!run(&repo, &["ls-remote", "--heads", "origin"]).contains(t2.as_str()));
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
