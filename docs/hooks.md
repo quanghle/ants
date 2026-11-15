@@ -1,9 +1,6 @@
 # Hooks
 
-A hook is a program outside ants that acts on what happens on the bus: a pager for tool requests waiting too long, a
-ticket per dead letter, a dashboard of who is working. It runs as a NATS client with read-only **observer**
-credentials and relies on the subjects and JSON documents below, which form a stable contract (see
-[Versioning](#versioning)).
+External programs act on bus events as read-only **observer** NATS clients against the subjects and JSON schemas below (see [Versioning](#versioning)).
 
 ```sh
 ants auth user audit --observer --js-domain hub         # audit.creds, on the machine holding the team keys
@@ -16,7 +13,7 @@ ants hook run --creds audit.creds --js-domain hub --on dead-letter -- ./file-tic
 the seed in the OS credential store), as `Permissions::for_observer` in `ants-proto` sets out. They are listed by
 `ants auth issued` (kind `observer`), revoked by `ants auth revoke NAME`, and renewed like ant credentials: with
 `ants auth user NAME --observer`, or over NATS with `ants renew FILE` and `ants enroll renew NAME` (see
-[Renewing over NATS](../README.md#renewing-over-nats)). The default human's name cannot be an observer's.
+[Renewing over NATS](auth.md#renewing-over-nats)). The default human's name cannot be an observer's.
 
 They may:
 
@@ -28,14 +25,12 @@ They may:
 - ask for their own renewal, and hear their own reply inboxes (`_INBOX.<observer>.>`).
 
 They publish no message, answer no tool request, cancel no prompt and write no bucket, so a leaked observer
-credentials file lets no one act for an ant or a human. They read no inbox, notes or channel subject, so no
-conversation as stored: hooks get events about the work, not the work. Stream info of `ANTS`, which lists every subject
-stored (who messages whom), and message gets, which take any sequence, are denied too. So are every other bucket:
-sessions and attempts (thread ids, spend), owners, links, chains, humans, channels, webhooks, read markers, reactions
-to messages, and presence, where humans' devices are, which not even other humans may read; an ant's own whereabouts are in its roster
-entry.
+credentials file lets no one act for an ant or a human. They read no inbox, notes or channel subject, nor `STREAM.INFO`
+or `STREAM.MSG.GET` on `ANTS`. Every KV bucket other than `ants_roster` is denied too: `ants_sessions`, `ants_attempts`,
+`ants_owners`, `ants_links`, `ants_chains`, `ants_humans`, `ants_channels`, `ants_webhooks`, `ants_read`,
+`ants_presence`, `ants_notify`, `ants_reactions` and `ants_threads`.
 
-Some of what they read still carries text from the work, which a hook should treat as such:
+Event payloads can still contain prompt or tool text:
 
 - a dead letter holds the message given up on (its `envelope`, or the start of its `payload`);
 - an approval request holds the tool call's title, files and input;
@@ -139,18 +134,19 @@ message is not part of it.
  "at": "2025-01-01T12:00:00Z"}
 ```
 
-`escalation` is an `Escalation`: `reason` is `turn_budget`, `cap`, `notes`, `dead_letter`, `approval`, `asked`,
-`context_window`, `harness` or `storage`; `request_id` names the tool request of an `approval` one; `level` is the chain level, 0 before it
-went up any chain, and `leader` who leads at that level. The notice `ants dead watch` sends with human credentials is told by the dead letter it writes, not by a status
-update, and the `harness` notice of a harness failing to start by the `failing` of the ant's roster entry.
+`escalation` is an `Escalation`: `reason` is `turn_budget`, `cap`, `notes`, `dead_letter`, `approval`, `asked` or
+`context_window`; `request_id` names the tool request of an `approval` one; `level` is the chain level, 0 before it
+went up any chain, and `leader` who leads at that level. Direct notices that emit no `StatusEvent` here: the
+`dead_letter` notice `ants dead watch` sends with human credentials (observed via `ants.dead.<ant>`), the `harness`
+notice of a harness failing to start (observed via `failing` in `ants_roster`), and the `storage` capacity warning.
 
 ### `RosterEntry` at `ants_roster` key `<ant>`
 
-What a daemon says of an ant it serves: `ant`, `machine`, `harness`, `capabilities`, `whoami`, `workdir`, `started_at`,
-`heartbeat_at`, `activity` (`idle`, `working`), `handling`, `harnesses`, `escalate_to`, `version`, `perms`,
-`signed_out`, `limited`, `failing`. The daemon puts it on start and every 10 s, and deletes it on a clean stop; the bucket's
-entries expire after 30 s, so a daemon that died leaves none. `ants hook run --on roster` hands on puts only, every
-heartbeat included. Check: `key == ant`.
+What a daemon says of an ant it serves: `ant`, `machine`, `instance`?, `harness`, `agent`? (`{name, version}`),
+`capabilities`, `whoami`?, `workdir`, `started_at`, `heartbeat_at`, `activity`? (`idle`, `working`), `handling`?,
+`harnesses`?, `escalate_to`, `version`?, `perms`?, `signed_out`?, `limited`?, `failing`?. The daemon puts it on start
+and every 10 s, and deletes it on a clean stop; the bucket's entries expire after 30 s, so a daemon that died leaves
+none. `ants hook run --on roster` hands on puts only, every heartbeat included. Check: `key == ant`.
 
 ## `ants hook run`
 
@@ -178,7 +174,7 @@ Changes that may come in any release, and which hooks must accept:
 
 Removing or renaming a subject, a consumer name or a field, or changing what a field means, is a breaking change,
 called out in the release notes; one changing what observer credentials allow also comes with a new permissions
-version (see [Credentials across upgrades](../README.md#credentials-across-upgrades)).
+version (see [Credentials across upgrades](auth.md#credentials-across-upgrades)).
 
 Snapshot tests (`crates/ants-proto/tests/wire_snapshots.rs`) pin the JSON form of these documents and of every other
 wire type, and check that documents in the shape older daemons wrote still parse.

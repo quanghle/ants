@@ -18,14 +18,14 @@ if connection fails, report the error rather than guessing a server.
 ## Find a recipient
 
 ```sh
-ants roster            # state (live/stale), activity (idle/working/signed-out/rate-limited/out-of-quota), harness, machine, capabilities, escalate_to
+ants roster            # state (live/stale), activity (idle/working/signed-out/failing/rate-limited/out-of-quota), harness, agent, machine, capabilities, escalate_to
 ants roster --json     # one JSON entry per line
 ```
 
-Pick a `live` ant whose capabilities match the request. Avoid a `signed-out` ant: its messages wait unanswered until a
-human runs the sign-in command listed below the table. A `rate-limited` or `out-of-quota` ant answers late: its
-messages wait, spending no attempts, until the time listed below the table. Without a clear match, omit `@ant` so
-`messenger` routes by capability.
+Pick a `live` ant whose capabilities match the request. Avoid a `signed-out` or `failing` ant: its messages wait
+unanswered until a human signs in or fixes the harness as listed below the table. A `rate-limited` or `out-of-quota`
+ant answers late: its messages wait, spending no attempts, until the time listed below the table. Without a clear
+match, omit `@ant` so `messenger` routes by capability.
 
 ## Send
 
@@ -127,11 +127,11 @@ Quote `'#channel'` or omit `#` (`ops`): an unquoted `#` starts a shell comment. 
 
 An ant's `escalate_to` config lists ants to escalate to, leader first (`ESCALATE_TO` in `ants roster`, `escalate_to` in
 `--json`). Unresolved work on a thread (spent turn budget, time/tool/token/cost limit, dead letter, exhausted notes
-budget, or `escalate(issue)`) goes to every unvisited member of that chain (or, on a thread another ant created, the
-creator's chain) before any human. Chain members coordinate in `ants notes <thread>` with a fresh turn budget per
-level; only the leader answers the stuck ant on its thread or escalates to the leader's own chain (also automatically
-after `escalate_after`, default `30m`). An empty chain, loop, or hop past `max_escalation_hops` (default 3) hands the
-thread to its owner, else the daemon's default human.
+budget, context window overflow, or `escalate(issue)`) goes to every unvisited member of that chain (or, on a thread
+another ant created, the creator's chain) before any human. Chain members coordinate in `ants notes <thread>` with a
+fresh turn budget per level; only the leader answers the stuck ant on its thread or escalates to the leader's own chain
+(also automatically after `escalate_after`, default `30m`). An empty chain, loop, or hop past `max_escalation_hops`
+(default 3) hands the thread to its owner, else the daemon's default human.
 
 An escalation reaching the CLI's human arrives in the inbox as a notice on the thread (`ants watch` prints live
 escalations with level, reason, stuck ant and thread, leader and visited ants). Report inbox escalations to the user

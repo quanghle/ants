@@ -23,7 +23,7 @@
 #           --no-daemon              no daemon service, on a machine without ants
 #           --channel-manager CREDS  also run the channel manager with CREDS, from `ants auth channel-manager`
 #           --signer                 also keep `ants signer --config FILE` running, on the machine holding the team
-#                                    directory (see README.md, Manager ants)
+#                                    directory (see docs/config.md, Manager ants)
 #           --devtunnel TUNNEL       also keep `devtunnel connect TUNNEL` running, for an uplink through that tunnel
 #           --devtunnel-host TUNNEL  also keep `devtunnel host TUNNEL` running, on the hub machine
 #           --devtunnel-bin PATH     devtunnel binary (default: devtunnel on PATH)
