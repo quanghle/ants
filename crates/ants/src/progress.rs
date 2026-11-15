@@ -164,6 +164,14 @@ impl Status {
             .map(|v| &v.ant)
     }
 
+    /// The ants running a tool call on the thread now, each with the call's title.
+    pub fn tools(&self) -> impl Iterator<Item = (&UserId, &str)> {
+        self.ants.iter().filter_map(|v| match &v.stand {
+            Stand::Tool { title, .. } => Some((&v.ant, title.as_str())),
+            _ => None,
+        })
+    }
+
     /// Start with `ant` standing at `stand`, before any update.
     pub fn with(mut self, ant: UserId, stand: Stand) -> Self {
         self.ants.push(View { ant, stand, signed_out: false });

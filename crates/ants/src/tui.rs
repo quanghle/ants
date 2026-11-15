@@ -7,6 +7,7 @@
 //! which draws it and takes its keys.
 
 mod acts;
+mod approvals;
 mod cards;
 mod channel;
 mod command;
@@ -16,10 +17,12 @@ mod dm;
 mod exec;
 mod frame;
 mod home;
+mod interrupt;
 mod markdown;
 mod model;
 mod nav;
 mod people;
+mod react;
 mod reads;
 mod search;
 mod status;
@@ -144,7 +147,7 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
         exec::Ctx { client: client.clone(), js: js.clone(), me: nats.me.clone(), domain: nats.domain.cloned(), meta };
     let (feed, state) = live::start(nats, client, js.clone(), since).await?;
     let feed = feed.with_timelines();
-    let reads = Reads::new(js.clone(), me.clone(), crate::channel::reads::allowed(nats));
+    let reads = Reads::new(js.clone(), nats.domain.cloned(), me.clone(), crate::channel::reads::allowed(nats));
     let acts = Acts::new(js.clone(), nats.domain.cloned(), me.clone(), thread_meta::open(nats, &js).await);
     let may_read = nats.rights.may_publish(&presence::online_right());
     let people = people::Io::new(js.clone(), nats.domain.cloned(), nats.me.clone(), may_read);
@@ -336,6 +339,7 @@ impl Chat {
             Action::Edit(text) => self.edit = Some(text),
             Action::MarkChannel(channel, marks) => self.reads.mark_channel(channel, marks),
             Action::Reactions(messages) => self.reads.watch_reactions(messages),
+            Action::React(message, reaction, remove) => self.reads.react(message, reaction, remove),
             Action::Send(draft) => self.people.send(draft),
             Action::Search(search) => self.searches.start(search),
             Action::CancelSubtree(prompts) => {
