@@ -440,6 +440,28 @@ fn the_backup_check_warns_until_a_backup_holds_every_key_issued() {
 }
 
 #[test]
+fn the_host_check_wants_host_credentials_of_the_machine_once_ants_have_credentials() {
+    let dir = ants_test_support::scratch_dir("doctor-host");
+    let team = dir.join("team");
+    auth::init(&team).unwrap();
+    let mut ant = Ant::new("dev-a".parse().unwrap(), dir.clone());
+    let mut host = config::HostSettings::default();
+    let check = |host: &config::HostSettings, ant: &Ant| check_host(host, std::slice::from_ref(ant), "box.local", 0);
+    assert_eq!(check(&host, &ant).status, Status::Skip, "no credentials anywhere: the host connects as no one");
+    ant.creds = Some(dir.join("dev-a.creds"));
+    let off = check(&host, &ant);
+    assert!(off.status == Status::Warn && off.to_string().contains("ants auth host box "), "{off}");
+    let path = dir.join("host-m1.creds");
+    auth::issue_host(&team, &"m1".parse().unwrap(), None, &path).unwrap();
+    host.creds = Some(path);
+    assert_eq!(check(&host, &ant).status, Status::Ok, "{}", check(&host, &ant));
+    host.machine = Some("m2".parse().unwrap());
+    let other = check(&host, &ant);
+    assert!(other.status == Status::Fail && other.to_string().contains("ants auth host m2 "), "{other}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn the_key_check_finds_a_stored_seed_locked_missing_or_of_another_key() {
     let dir = ants_test_support::scratch_dir("doctor-key");
     let team = dir.join("team");

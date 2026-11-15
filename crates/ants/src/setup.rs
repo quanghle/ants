@@ -1,7 +1,7 @@
 //! `ants setup`: bring up ants on a single machine, step by step, each step left alone when already done: the
 //! harness of a new config file ([`pick`]), a local nats-server with JetStream and its service, the hub's stream and
-//! buckets (`ants init`), the config file with the messenger and optionally one ant, the harness check, the daemon
-//! service, the shell completions, and last `ants doctor`. It never overwrites a file: one already there is reported
+//! buckets (`ants init`), the config file with the messenger and optionally one ant, the harness check, the machine's
+//! host credentials, the daemon service, the shell completions, and last `ants doctor`. It never overwrites a file: one already there is reported
 //! and kept.
 
 mod pick;
@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use ants_daemon::config::{self, Ant, Summary};
 use ants_daemon::harness;
-use ants_proto::UserId;
+use ants_proto::{Machine, UserId};
 use anyhow::{Context as _, Result, bail};
 
 use crate::cmd::harness::HarnessPick;
@@ -135,6 +135,7 @@ pub async fn run(args: &SetupArgs, connection: &Connection<'_>) -> Result<()> {
     init(&mut report, args, connection, listen.as_deref()).await;
     let appended = config_file(&mut report, args, harness.as_deref(), connection, &config_path);
     harness_check(&mut report, args, harness, &config_path).await;
+    host_creds(&mut report, args, connection, &config_path).await;
     daemon_service(&mut report, args, &mut services, &config_path, appended, values);
     shell_completions(&mut report, args, &home);
 
@@ -323,6 +324,42 @@ async fn init(report: &mut Report, args: &SetupArgs, connection: &Connection<'_>
     };
     match done.await {
         Ok(lines) => report.step(Mark::Done, step, lines.join("\n       ")),
+        Err(e) => report.step(Mark::Fail, step, format!("{e:#}")),
+    }
+}
+
+/// Issue the machine's host credentials where the daemon finds them, `host-<machine>.creds` in the team directory,
+/// when the config file's ants have credentials, the team's keys are here and the daemon finds none.
+async fn host_creds(report: &mut Report, args: &SetupArgs, connection: &Connection<'_>, config: &Path) {
+    let step = "host credentials";
+    let summary = match Summary::load(config) {
+        Ok(summary) => summary,
+        Err(e) => return report.step(Mark::Skip, step, format!("{e:#}")),
+    };
+    if let Some(creds) = &summary.host.creds {
+        return report.step(Mark::Exists, step, creds.display());
+    }
+    if summary.ants.iter().all(|(_, creds)| creds.is_none()) {
+        return report.step(Mark::Skip, step, "the ants connect as no one, and so does the machine's host");
+    }
+    let hostname = ants_daemon::roster::machine().await;
+    let machine = summary.host.machine.clone().unwrap_or_else(|| Machine::from_hostname(&hostname));
+    let dir = match auth::default_dir() {
+        Ok(dir) if auth::holds_team(&dir) => dir,
+        _ => {
+            let hint = format!(
+                "run `ants auth host {machine}` on the machine holding the team keys and copy the file to \
+                 ~/.config/ants/auth/host.creds here, for the daemon to record the machine's ants"
+            );
+            return report.step(Mark::Skip, step, hint);
+        }
+    };
+    let out = dir.join(format!("{}.creds", ants_proto::host_user(&machine)));
+    if args.dry_run {
+        return report.step(Mark::Done, step, format!("issue {}", out.display()));
+    }
+    match auth::issue_host(&dir, &machine, connection.js_domain, &out) {
+        Ok(()) => report.step(Mark::Done, step, out.display()),
         Err(e) => report.step(Mark::Fail, step, format!("{e:#}")),
     }
 }

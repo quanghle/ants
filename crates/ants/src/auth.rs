@@ -22,7 +22,7 @@ use ants_proto::{
     ADMIN_TAG, AssistantOf, DEVICES_BUCKET, Destination, DeviceId, DeviceKey, JsDomain, Machine, PERMISSIONS_VERSION,
     Permissions, REGISTERED_TAG, REVOKED_DEVICES, Role, UserId,
 };
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use data_encoding::{BASE32_NOPAD, BASE64URL_NOPAD};
 use nkeys::{KeyPair, XKey};
 use serde_json::{Value, json};
@@ -555,6 +555,27 @@ pub fn sign_channel_manager(dir: &Path, js_domain: Option<&JsDomain>, public_key
     Ok(jwt)
 }
 
+/// Issue the host credentials of `machine`, for the hub's JetStream domain if it has one, and write their `.creds`
+/// file to `out`: with them the daemon serving the machine's ants records them in [`ants_proto::MACHINES_BUCKET`] and
+/// takes their admin orders ([`Permissions::for_host`]). They never expire.
+pub fn issue_host(dir: &Path, machine: &Machine, js_domain: Option<&JsDomain>, out: &Path) -> Result<()> {
+    let key = KeyPair::new_user();
+    let jwt = sign_host(dir, machine, js_domain, &key.public_key())?;
+    write_secret(out, &creds(&jwt, &seed(&key)?))
+}
+
+/// Sign the user JWT of the host of `machine` for `public_key`, with the permissions [`issue_host`] gives, and record
+/// its key.
+pub fn sign_host(dir: &Path, machine: &Machine, js_domain: Option<&JsDomain>, public_key: &str) -> Result<String> {
+    check_user_key(public_key)?;
+    let account = load(&dir.join(ACCOUNT_SEED))?;
+    let permissions = Permissions::for_host(machine).with_js_domain(js_domain);
+    let name = ants_proto::host_user(machine);
+    let jwt = user_jwt(&account, public_key, &name, permissions, json!({}), None)?;
+    revoke::record(dir, &Issued::new(public_key, &name, Kind::Host, None)?)?;
+    Ok(jwt)
+}
+
 /// Sign the user JWT of `user` in `role` for `public_key`, a user NKey generated on another machine, with the
 /// permissions [`issue`] gives. The seed stays where it was generated; its `.creds` file is the JWT plus that seed.
 pub fn sign_user(
@@ -704,9 +725,7 @@ fn renew_as(
     if revoked.iter().any(|r| r.key == claims.sub) {
         bail!("the credentials of {} ({}) are revoked", claims.name, claims.sub);
     }
-    if revoked.iter().any(|r| r.key == public_key) {
-        bail!("the new key {public_key} is revoked");
-    }
+    ensure!(!revoked.iter().any(|r| r.key == public_key), "the new key {public_key} is revoked");
     let finding = Finding::from_claims(&body)?;
     if let Some(xkey) = xkey {
         if finding.kind != CredsKind::Human {
@@ -782,6 +801,7 @@ fn renewed_rights(
             (Permissions::for_webhook(&user()?, &destinations), json!({}))
         }
         CredsKind::Observer => (Permissions::for_observer(&user()?), json!({})),
+        CredsKind::Host { machine } => (Permissions::for_host(machine), json!({})),
         CredsKind::ChannelManager => {
             let ttl = u64::try_from(ants_proto::CHANADM_TTL.as_nanos())?;
             (Permissions::for_channel_manager(), json!({ "resp": { "max": 1, "ttl": ttl } }))
@@ -830,6 +850,7 @@ fn registry_kind(kind: &CredsKind) -> Option<Kind> {
         CredsKind::Assistant { .. } => Some(Kind::Assistant),
         CredsKind::Webhook { .. } => Some(Kind::Webhook),
         CredsKind::ChannelManager => Some(Kind::ChannelManager),
+        CredsKind::Host { .. } => Some(Kind::Host),
         CredsKind::Observer => Some(Kind::Observer),
         CredsKind::Leaf { .. } => Some(Kind::Leaf),
         CredsKind::LeafSystem { .. } | CredsKind::Enrollment { .. } | CredsKind::Bootstrap => None,

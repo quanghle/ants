@@ -29,6 +29,10 @@
 //! min_available = "1GB"             # below this much memory available, or a share such as "10%"; "0" never
 //! max_harnesses = 1                 # the most harnesses each ant runs while memory is low
 //!
+//! [host]                            # this machine's host connection (crate::host); off without credentials
+//! creds = "~/.config/ants/auth/host.creds"  # default: that file, else host-<machine>.creds beside it, if either exists
+//! machine = "laptop"                # default: the name the credentials carry, else the host name's first label
+//!
 //! [[ant]]
 //! name = "dev-a"
 //! workdir = "~/src/repo-a"
@@ -85,7 +89,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ants_proto::{JsDomain, UserId};
+use ants_proto::{JsDomain, Machine, UserId};
 use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 
@@ -152,6 +156,8 @@ struct File {
     memory_pressure: pressure::Settings,
     #[serde(default)]
     cli: CliSection,
+    #[serde(default)]
+    host: HostSection,
     #[serde(default, rename = "ant_template")]
     ant_templates: Vec<AntTemplate>,
     #[serde(default, rename = "ant")]
@@ -514,6 +520,66 @@ pub fn builtin_messenger(harness: Option<&str>, home: &Path) -> Ant {
     }
 }
 
+/// The `[host]` table: the machine's host connection ([`crate::host`]).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostSection {
+    creds: Option<PathBuf>,
+    machine: Option<Machine>,
+}
+
+/// The machine's host connection a config file describes ([`crate::host`]), made only by a daemon serving the whole
+/// file.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HostSettings {
+    /// The host credentials (`ants auth host`): the `[host]` table's `creds`, else `~/.config/ants/auth/host.creds`,
+    /// else `host-<machine>.creds` there for the table's `machine` or the host name's first label, whichever exists
+    /// first; None for none.
+    pub creds: Option<PathBuf>,
+    /// The `[host]` table's `machine`.
+    pub machine: Option<Machine>,
+    /// The file's top-level `nats` and `js_domain`.
+    pub nats: Option<String>,
+    pub js_domain: Option<JsDomain>,
+}
+
+impl HostSettings {
+    fn resolve(
+        section: HostSection,
+        nats: Option<String>,
+        js_domain: Option<JsDomain>,
+        base: &Path,
+        home: &Path,
+    ) -> Self {
+        let creds = match section.creds {
+            Some(creds) => Some(resolve(&creds, base, home)),
+            None => default_host_creds(&home.join(".config/ants/auth"), section.machine.as_ref()),
+        };
+        Self { creds, machine: section.machine, nats, js_domain }
+    }
+}
+
+/// `host.creds` in the auth directory `dir`, else `host-<machine>.creds` there, `machine` being the one named or
+/// else the first label of the host name, which is looked up only when `dir` holds some host's credentials.
+fn default_host_creds(dir: &Path, machine: Option<&Machine>) -> Option<PathBuf> {
+    let file = |name: &str| Some(dir.join(name)).filter(|path| path.is_file());
+    let named = |machine: &Machine| file(&format!("{}.creds", ants_proto::host_user(machine)));
+    file("host.creds").or_else(|| match machine {
+        Some(machine) => named(machine),
+        None => {
+            let mut entries = std::fs::read_dir(dir).ok()?;
+            let any = entries.any(|e| e.is_ok_and(|e| e.file_name().to_string_lossy().starts_with("host-")));
+            any.then(|| named(&Machine::from_hostname(&hostname()?))).flatten()
+        }
+    })
+}
+
+/// This machine's host name, as `hostname` prints it.
+fn hostname() -> Option<String> {
+    let out = std::process::Command::new("hostname").output().ok().filter(|out| out.status.success())?;
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_owned()).filter(|name| !name.is_empty())
+}
+
 /// What a config file lists, checked.
 #[derive(Debug)]
 pub struct Loaded {
@@ -527,6 +593,8 @@ pub struct Loaded {
     pub metrics: Option<SocketAddr>,
     /// The `[storage]` table.
     pub storage: storage::Settings,
+    /// The machine's host connection.
+    pub host: HostSettings,
     /// The file's directory, which relative paths are relative to, and the home directory `~` stands for.
     base: PathBuf,
     home: PathBuf,
@@ -674,8 +742,9 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
         }
         schedules.push(schedule);
     }
+    let host = HostSettings::resolve(file.host, file.nats, file.js_domain, base, home);
     let (base, home) = (base.to_owned(), home.to_owned());
-    Ok(Loaded { ants, harnesses, templates, schedules, metrics: file.metrics, storage: file.storage, base, home })
+    Ok(Loaded { ants, harnesses, templates, schedules, metrics: file.metrics, storage: file.storage, host, base, home })
 }
 
 /// Check that `ant` names a harness, and that it and those of its fallbacks are defined.
@@ -891,6 +960,8 @@ pub struct Summary {
     pub harnesses: Harnesses,
     pub ants: Vec<(UserId, Option<PathBuf>)>,
     pub caps: BTreeMap<UserId, Caps>,
+    /// The machine's host connection.
+    pub host: HostSettings,
 }
 
 impl Summary {
@@ -912,7 +983,8 @@ impl Summary {
         let harnesses = define(file.harnesses, path, home)?;
         let caps = file.ants.iter().map(|ant| (ant.name.clone(), summary_caps(ant, &file.ant_templates))).collect();
         let ants = file.ants.into_iter().map(|ant| (ant.name, ant.creds.map(|c| resolve(&c, base, home)))).collect();
-        Ok(Self { nats: file.nats, js_domain: file.js_domain, harness: file.harness, harnesses, ants, caps })
+        let host = HostSettings::resolve(file.host, file.nats.clone(), file.js_domain.clone(), base, home);
+        Ok(Self { nats: file.nats, js_domain: file.js_domain, harness: file.harness, harnesses, ants, caps, host })
     }
 
     /// The harness named `name`, else the file's top-level `harness`; with neither, an [`harness::Unset`] error.

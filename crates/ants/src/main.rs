@@ -31,6 +31,7 @@ mod keys;
 mod leaf;
 mod live;
 mod login;
+mod machines;
 mod manager;
 mod members;
 mod notify;
@@ -73,7 +74,7 @@ use ants_daemon::{bus, hub};
 use ants_proto::{DeviceId, Escalation, JsDomain, UserId};
 use anyhow::{Context as _, Result};
 
-use crate::cli::{AssistantCommand, Cli, Command, HookCommand, NotifyCommand};
+use crate::cli::{Cli, Command, HookCommand, NotifyCommand};
 use crate::cmd::channel::ChannelCommand;
 use crate::cmd::send;
 
@@ -108,6 +109,7 @@ async fn run() -> Result<()> {
         }
         Command::Roster { json } => roster::show(&nats()?, json).await,
         Command::Ant(command) => Box::pin(cmd::ant::run(&nats()?, command)).await,
+        Command::Machines { ant, json } => machines::show(&nats()?, ant.as_ref(), json).await,
         Command::Spend { ant, thread, days, json, config } => {
             let path = match config {
                 Some(path) => path,
@@ -132,9 +134,7 @@ async fn run() -> Result<()> {
         Command::Notify(NotifyCommand::Snooze { duration }) => quiet::snooze(&nats()?, duration).await,
         Command::Notify(NotifyCommand::Resume) => quiet::resume(&nats()?).await,
         Command::Notify(NotifyCommand::Status { json }) => quiet::status(&nats()?, json).await,
-        Command::Assistant(AssistantCommand::Set { ant }) => assistant::set(&nats()?, &ant).await,
-        Command::Assistant(AssistantCommand::Clear) => assistant::clear(&nats()?).await,
-        Command::Assistant(AssistantCommand::Show { human }) => assistant::show(&nats()?, human).await,
+        Command::Assistant(command) => assistant::run(command, nats).await,
         Command::Watch { subject, thread } => cmd::watch::watch(&nats()?, &subject, thread).await,
         Command::Chat { since, compact } => Box::pin(tui::run(&nats()?, since, compact)).await,
         Command::Status { tmux, json } => Box::pin(tui::status(&nats()?, tmux, json)).await,
@@ -312,7 +312,7 @@ async fn init_hub(nats: &Nats<'_>) -> Result<Vec<String>> {
         devices::publish_or_warn(&js, own).await;
     }
     lines.push(format!(
-        "stream {}, buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {}, and store {} ready",
+        "stream {}, buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {}, and store {} ready",
         ants_proto::STREAM,
         ants_proto::ROSTER_BUCKET,
         ants_proto::SESSIONS_BUCKET,
@@ -329,6 +329,7 @@ async fn init_hub(nats: &Nats<'_>) -> Result<Vec<String>> {
         ants_proto::PRESENCE_BUCKET,
         ants_proto::NOTIFY_BUCKET,
         ants_proto::DEVICES_BUCKET,
+        ants_proto::MACHINES_BUCKET,
         ants_proto::FILES_BUCKET
     ));
     Ok(lines)

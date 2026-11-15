@@ -12,6 +12,10 @@
 //! - An ant acts for the human only while the grant names it and its own user JWT, which the account signed, names the
 //!   human in its assistant_of tag ([`VerifiedGrant::honours`]): neither the human nor the account key alone makes an
 //!   assistant.
+//! - A grant may also enroll the assistant as one of the human's devices ([`AssistantGrant::sealing`]): an encryption
+//!   key the assistant holds, which senders seal the human's sealed messages for, and with which the assistant seals
+//!   for the human. It stands and falls with the grant, so a withdrawal, or a grant without it, stops every sender
+//!   sealing for it at once.
 
 use std::collections::BTreeMap;
 
@@ -23,7 +27,7 @@ use serde_json::Value;
 
 #[cfg(doc)]
 use crate::HUMANS_BUCKET;
-use crate::{DeviceId, UserId};
+use crate::{DeviceId, DeviceKey, UserId};
 
 /// Last token of the key of a human's grant in [`HUMANS_BUCKET`] ([`assistant_grant_key`]).
 pub const ASSISTANT_GRANT: &str = "assistant";
@@ -53,17 +57,38 @@ pub struct AssistantGrant {
     pub assistant: Option<UserId>,
     /// When the device signed it: of two records of the human, the one issued later stands.
     pub issued_at: DateTime<Utc>,
+    /// The assistant enrolled as a device of the human, for sealed messages; none: it reads and sends none. Never in a
+    /// withdrawal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealing: Option<SealingDevice>,
     /// The user JWT of the signing device's credentials, which binds the key that signed to the human.
     pub jwt: String,
     /// Signature of [`AssistantGrant::signed`] by the key `jwt` is for, base64url without padding.
     pub signature: String,
 }
 
+/// The assistant of a grant enrolled as a device of its human ([`AssistantGrant::sealing`]): a device id of its own and
+/// the public key of an encryption key whose seed the assistant's machine holds. Senders seal the human's sealed
+/// messages for it as for the human's other devices, and readers take it as the sending device of a sealed message
+/// from the assistant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SealingDevice {
+    pub device: DeviceId,
+    pub xkey: DeviceKey,
+}
+
 impl AssistantGrant {
     /// The grant of `assistant` (none: a withdrawal) by `human`, issued at `issued_at` by the device whose user JWT is
     /// `jwt`, to be completed with its signature.
     pub fn new(human: UserId, assistant: Option<UserId>, issued_at: DateTime<Utc>, jwt: impl Into<String>) -> Self {
-        Self { human, assistant, issued_at, jwt: jwt.into(), signature: String::new() }
+        Self { human, assistant, issued_at, sealing: None, jwt: jwt.into(), signature: String::new() }
+    }
+
+    /// The grant, enrolling its assistant as the device `sealing` of the human, if any.
+    #[must_use]
+    pub fn with_sealing(mut self, sealing: Option<SealingDevice>) -> Self {
+        self.sealing = sealing;
+        self
     }
 
     /// The key of the grant in [`HUMANS_BUCKET`].
@@ -72,10 +97,16 @@ impl AssistantGrant {
     }
 
     /// What the device signs: every field but the JWT, which the signing key is checked against, and the signature.
+    /// The device and key of [`AssistantGrant::sealing`] follow on lines of their own when it enrolls one.
     pub fn signed(&self) -> Vec<u8> {
         let issued_at = self.issued_at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
         let assistant = self.assistant.as_ref().map_or("", UserId::as_str);
-        ["ants-assistant-grant", self.human.as_str(), assistant, &issued_at].join("\n").into_bytes()
+        let mut lines =
+            vec!["ants-assistant-grant".to_owned(), self.human.to_string(), assistant.to_owned(), issued_at];
+        if let Some(sealing) = &self.sealing {
+            lines.extend([sealing.device.to_string(), sealing.xkey.to_string()]);
+        }
+        lines.join("\n").into_bytes()
     }
 
     /// Check the grant, read from `key`, for a reader of the team whose account is `account` (`A...`, the issuer of
@@ -88,6 +119,9 @@ impl AssistantGrant {
         }
         if self.assistant.as_ref() == Some(&self.human) {
             return Err(GrantError::Malformed(format!("{} names itself", self.human)));
+        }
+        if self.assistant.is_none() && self.sealing.is_some() {
+            return Err(GrantError::Malformed("a withdrawal enrolls a device".to_owned()));
         }
         if self.issued_at > now + GRANT_CLOCK_SKEW {
             return Err(GrantError::Ahead(self.issued_at));
@@ -113,6 +147,7 @@ impl AssistantGrant {
             human: self.human.clone(),
             assistant: self.assistant.clone(),
             issued_at: self.issued_at,
+            sealing: self.sealing.clone(),
             device,
             signer: jwt.sub,
         })
@@ -126,6 +161,8 @@ pub struct VerifiedGrant {
     /// None for a withdrawal.
     pub assistant: Option<UserId>,
     pub issued_at: DateTime<Utc>,
+    /// The assistant enrolled as a device of the human, if it is.
+    pub sealing: Option<SealingDevice>,
     /// The device that signed it.
     pub device: DeviceId,
     /// The public key of the credentials that signed it, `U...`.
@@ -157,17 +194,24 @@ pub enum GrantError {
     Replayed { issued_at: DateTime<Utc>, latest: DateTime<Utc> },
 }
 
-/// The claims of a user JWT whose issuer signed it.
-struct UserJwt {
-    sub: String,
-    iss: String,
-    name: String,
-    exp: Option<i64>,
-    tags: Vec<String>,
+/// The claims of a user JWT whose issuer signed it ([`UserJwt::verify`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct UserJwt {
+    /// The user's public key, `U...`.
+    pub sub: String,
+    /// The key that signed it.
+    pub iss: String,
+    pub name: String,
+    /// Expiry, in seconds since the epoch.
+    pub exp: Option<i64>,
+    pub tags: Vec<String>,
+    /// All of its claims.
+    pub claims: Value,
 }
 
 impl UserJwt {
-    fn verify(jwt: &str) -> Result<Self, String> {
+    /// Decode `jwt`, a user JWT, checking that its issuer signed it; else why not.
+    pub fn verify(jwt: &str) -> Result<Self, String> {
         let malformed = || "not a JWT".to_owned();
         let (signed, signature) = jwt.trim().rsplit_once('.').ok_or_else(malformed)?;
         let (_, body) = signed.split_once('.').ok_or_else(malformed)?;
@@ -187,7 +231,8 @@ impl UserJwt {
             return Err(format!("{sub} is not the public key of a user"));
         }
         let tags = claims["nats"]["tags"].as_array().into_iter().flatten().filter_map(Value::as_str);
-        Ok(Self { name: text("name")?, exp: claims["exp"].as_i64(), tags: tags.map(str::to_owned).collect(), sub, iss })
+        let tags = tags.map(str::to_owned).collect();
+        Ok(Self { name: text("name")?, exp: claims["exp"].as_i64(), tags, sub, iss, claims })
     }
 }
 
@@ -262,6 +307,11 @@ impl Grants {
     /// ([`Grants::honours`]).
     pub fn designated(&self, human: &UserId) -> Option<&UserId> {
         self.grant(human)?.assistant.as_ref()
+    }
+
+    /// The device `human` enrolled its assistant as, by a grant standing ([`AssistantGrant::sealing`]).
+    pub fn sealing(&self, human: &UserId) -> Option<&SealingDevice> {
+        self.grant(human)?.sealing.as_ref()
     }
 
     /// The record of `human` standing, a grant or a withdrawal.
@@ -384,6 +434,45 @@ mod tests {
         assert_matches!(refused(&ahead, "alice.assistant"), GrantError::Ahead(_));
         let itself = team.grant("alice", Some("alice"), now);
         assert_matches!(refused(&itself, "alice.assistant"), GrantError::Malformed(_));
+    }
+
+    #[test]
+    fn an_enrolled_device_is_signed_with_the_grant_and_never_in_a_withdrawal() {
+        let (team, now) = (Team::new(), Utc::now());
+        let sealing = SealingDevice {
+            device: DeviceId::generate(),
+            xkey: "XBLFEIK7UCHY5XKH7LGNQ4JZNVOZEWMIHPZH3LP4JUBJ6KQZDVBEWHWB".parse().unwrap(),
+        };
+        let enrolled = AssistantGrant::new(p("alice"), Some(p("pa")), now, team.device_jwt("alice"));
+        let enrolled = team.signed(enrolled.with_sealing(Some(sealing.clone())));
+        let json = serde_json::to_string(&enrolled).unwrap();
+        assert_eq!(serde_json::from_str::<AssistantGrant>(&json).unwrap(), enrolled);
+        let verified = enrolled.verify("alice.assistant", &team.account(), now).unwrap();
+        assert_eq!(verified.sealing.as_ref(), Some(&sealing));
+        assert_eq!(
+            team.grant("alice", Some("pa"), now).verify("alice.assistant", &team.account(), now).unwrap().sealing,
+            None
+        );
+
+        let refused = |grant: &AssistantGrant| grant.verify("alice.assistant", &team.account(), now).unwrap_err();
+        let stripped = AssistantGrant { sealing: None, ..enrolled.clone() };
+        assert_eq!(refused(&stripped), GrantError::BadSignature, "the device is signed");
+        let mut swapped = enrolled.clone();
+        swapped.sealing.as_mut().unwrap().xkey =
+            "XAFEIK7UCHY5XKH7LGNQ4JZNVOZEWMIHPZH3LP4JUBJ6KQZDVBEWHWBB".parse().unwrap();
+        assert_eq!(refused(&swapped), GrantError::BadSignature, "the key is signed");
+        let withdrawal = team.signed(
+            AssistantGrant::new(p("alice"), None, now, team.device_jwt("alice")).with_sealing(Some(sealing.clone())),
+        );
+        assert_matches!(refused(&withdrawal), GrantError::Malformed(_));
+
+        let mut grants = Grants::default();
+        grants.apply("alice.assistant", Some(&serde_json::to_vec(&enrolled).unwrap()), &team.account(), now);
+        assert_eq!(grants.sealing(&p("alice")), Some(&sealing));
+        let unsealed = team.grant("alice", Some("pa"), now + TimeDelta::seconds(1));
+        let applied =
+            grants.apply("alice.assistant", Some(&serde_json::to_vec(&unsealed).unwrap()), &team.account(), now);
+        assert_eq!((applied.unwrap().withdrawn(), grants.sealing(&p("alice"))), (None, None), "sealing off at once");
     }
 
     #[test]

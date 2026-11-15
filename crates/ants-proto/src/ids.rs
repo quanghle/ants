@@ -211,6 +211,21 @@ impl Machine {
     }
 }
 
+impl Machine {
+    /// The machine name a host name gives: its first label (`laptop` of `laptop.local`), each character a machine name
+    /// cannot hold made `-`, cut to 64 characters; `machine` when nothing of it is left.
+    pub fn from_hostname(hostname: &str) -> Self {
+        let label = hostname.trim().split('.').next().unwrap_or_default();
+        let name: String = label
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+            .skip_while(|c| !c.is_ascii_alphanumeric())
+            .take(64)
+            .collect();
+        name.parse().unwrap_or_else(|_| Self("machine".to_owned()))
+    }
+}
+
 impl FromStr for Machine {
     type Err = Error;
     fn from_str(s: &str) -> Result<Self, Error> {
@@ -278,5 +293,19 @@ mod tests {
             assert!(bad.parse::<Machine>().is_err(), "{bad:?} should be rejected");
         }
         assert_eq!("Mac_mini-2".parse::<Machine>().unwrap().as_str(), "Mac_mini-2");
+    }
+
+    #[test]
+    fn a_host_name_gives_a_machine_name() {
+        for (hostname, machine) in [
+            ("Quangs-MacBook.local\n", "Quangs-MacBook"),
+            ("build box", "build-box"),
+            ("_x.y", "x"),
+            ("", "machine"),
+            ("--", "machine"),
+        ] {
+            assert_eq!(Machine::from_hostname(hostname).as_str(), machine, "{hostname:?}");
+        }
+        assert_eq!(Machine::from_hostname(&"h".repeat(80)).as_str().len(), 64);
     }
 }

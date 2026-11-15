@@ -12,10 +12,12 @@ use ants_daemon::keystore::{self, Store};
 use std::ops::ControlFlow;
 
 use ants_daemon::reading::{self, Reading};
+use ants_daemon::sealing::{NONCE_LEN, open_message, open_plain, seal_envelope, seal_plain};
+pub use ants_daemon::sealing::{Opening, State};
 use ants_daemon::{creds, files};
 use ants_proto::{
-    Attachment, AttachmentHandle, DEVICES_BUCKET, DeviceId, DeviceKey, Envelope, MAX_ATTACHMENT_SIZE, SEALED_VERSION,
-    Sealed, SealedAttachment, SealedBody, SealedKey, SealedTitle, ThreadTitle, UserId,
+    Attachment, AttachmentHandle, DEVICES_BUCKET, DeviceId, DeviceKey, Envelope, MAX_ATTACHMENT_SIZE, Sealed,
+    SealedAttachment, SealedBody, SealedTitle, ThreadTitle, UserId,
 };
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use async_nats::jetstream;
@@ -24,7 +26,6 @@ use crypto_secretbox::aead::{Aead as _, AeadCore as _, KeyInit as _, OsRng};
 use crypto_secretbox::{Key, Nonce, XSalsa20Poly1305};
 use data_encoding::BASE64;
 use nkeys::XKey;
-use serde::Serialize;
 
 use crate::attachments::{self, File};
 use crate::devices::{self, Devices, Directory, Lookup, VerifiedDevice};
@@ -33,62 +34,6 @@ use crate::devices::{self, Devices, Directory, Lookup, VerifiedDevice};
 pub const PLAINTEXT: &str = "`--plaintext` sends it in the clear";
 /// What else may be done when `ants chat` cannot seal a message.
 pub const PLAINTEXT_ASK: &str = "`ants ask --plaintext` sends it in the clear";
-/// The size of a content key.
-const KEY_LEN: usize = 32;
-/// The size of the nonce a sealed body starts with.
-const NONCE_LEN: usize = 24;
-
-/// What a reader makes of a sealed message, as `--json` output says it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum State {
-    Opened,
-    /// Not sealed for the reader's device, or not openable by this CLI.
-    Unreadable,
-    /// Its key or body does not open with the verified key of the sending device it names, which has none, or its
-    /// body disagrees with its envelope.
-    Forged,
-}
-
-impl State {
-    /// What a reader shows of a message it does not open.
-    pub fn placeholder(self) -> &'static str {
-        match self {
-            Self::Opened => "",
-            Self::Unreadable => "[sealed]",
-            Self::Forged => "[forged]",
-        }
-    }
-}
-
-/// What opening one sealed message, or title, gives.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Opening<B = SealedBody> {
-    Opened(B),
-    Unreadable,
-    /// Why.
-    Forged(String),
-}
-
-impl<B> Opening<B> {
-    pub fn state(&self) -> State {
-        match self {
-            Self::Opened(_) => State::Opened,
-            Self::Unreadable => State::Unreadable,
-            Self::Forged(_) => State::Forged,
-        }
-    }
-
-    /// What `check` makes of what opened: forged when it says why not.
-    fn then<C>(self, check: impl FnOnce(B) -> Result<C, String>) -> Opening<C> {
-        match self {
-            Self::Opened(b) => check(b).map_or_else(Opening::Forged, Opening::Opened),
-            Self::Unreadable => Opening::Unreadable,
-            Self::Forged(why) => Opening::Forged(why),
-        }
-    }
-}
-
 /// How the ciphertext of a message shows where nothing is opened: `ants watch` and dead letters.
 pub fn size_note(sealed: &Sealed) -> String {
     format!("[sealed, {} bytes]", sealed.size())
@@ -115,17 +60,7 @@ pub fn seal(
         }
         *file = stored;
     }
-    let body = SealedBody {
-        from: envelope.from.clone(),
-        to: envelope.to.clone(),
-        thread_id: envelope.thread_id.clone(),
-        id: envelope.id,
-        text: std::mem::take(&mut envelope.text),
-        title: envelope.title.take(),
-        attachments,
-    };
-    envelope.sealed = Some(Box::new(seal_plain(&serde_json::to_vec(&body)?, &key, device, xkey, recipients)?));
-    Ok(())
+    seal_envelope(envelope, &key, attachments, device, xkey, recipients)
 }
 
 /// Seal the bytes of `file` under `key`, the content key of the message carrying it, with a nonce of their own: the
@@ -173,29 +108,6 @@ pub fn open_attachment(key: &Key, reference: &Attachment, stored: &[u8]) -> Resu
         .map_err(|_| anyhow!("attachment {name} does not open: forged"))
 }
 
-/// Seal `plain` under `key` for `recipients` from the sending device `device` whose key is `xkey`.
-fn seal_plain(
-    plain: &[u8],
-    key: &Key,
-    device: DeviceId,
-    xkey: &XKey,
-    recipients: &[(DeviceId, &DeviceKey)],
-) -> Result<Sealed> {
-    let nonce = XSalsa20Poly1305::generate_nonce(&mut OsRng);
-    let ciphertext = XSalsa20Poly1305::new(key).encrypt(&nonce, plain).map_err(|_| anyhow!("sealing"))?;
-    let keys = recipients
-        .iter()
-        .map(|(to, public)| {
-            let recipient = XKey::from_public_key(public.as_str())
-                .map_err(|e| anyhow!("the encryption key {public} of device {to}: {e}"))?;
-            let sealed = xkey.seal(key, &recipient).map_err(|e| anyhow!("sealing the key for device {to}: {e}"))?;
-            Ok(SealedKey { device: *to, key: BASE64.encode(&sealed) })
-        })
-        .collect::<Result<_>>()?;
-    let body = BASE64.encode(&[nonce.as_slice(), &ciphertext].concat());
-    Ok(Sealed { v: SEALED_VERSION, device, keys, body })
-}
-
 /// Seal the title of `title` for `recipients` like a message ([`seal`]), leaving it empty.
 pub fn seal_title(
     title: &mut ThreadTitle,
@@ -213,27 +125,7 @@ pub fn seal_title(
     Ok(())
 }
 
-/// Open the sealed part of `envelope` as device `device` whose key is `xkey`, with `sender`, the verified key of the
-/// sending device it names, if any: its body, and its content key, which opens its attachments ([`open_attachment`]).
-pub fn open_keyed(
-    envelope: &Envelope,
-    device: &DeviceId,
-    xkey: &XKey,
-    sender: Option<&DeviceKey>,
-) -> Opening<(Key, SealedBody)> {
-    let Some(sealed) = &envelope.sealed else { return Opening::Unreadable };
-    open_plain(sealed, &envelope.from, device, xkey, sender).then(|(key, plain)| {
-        let body: SealedBody = serde_json::from_slice(&plain).map_err(|_| "its body does not parse".to_owned())?;
-        if (&body.from, &body.to, &body.thread_id, body.id)
-            != (&envelope.from, &envelope.to, &envelope.thread_id, envelope.id)
-        {
-            return Err("its body names another message".to_owned());
-        }
-        Ok((key, body))
-    })
-}
-
-/// Open the sealed part of `title` as [`open_keyed`] does a message's, giving its title.
+/// Open the sealed part of `title` as [`open_message`] does a message's, giving its title.
 pub fn open_title(title: &ThreadTitle, device: &DeviceId, xkey: &XKey, sender: Option<&DeviceKey>) -> Opening<String> {
     let Some(sealed) = &title.sealed else { return Opening::Unreadable };
     open_plain(sealed, &title.by, device, xkey, sender).then(|(_, plain)| {
@@ -243,49 +135,6 @@ pub fn open_title(title: &ThreadTitle, device: &DeviceId, xkey: &XKey, sender: O
         }
         Ok(body.title)
     })
-}
-
-/// The content key and plaintext of `sealed`, sent by `from`, as device `device` opens it.
-fn open_plain(
-    sealed: &Sealed,
-    from: &UserId,
-    device: &DeviceId,
-    xkey: &XKey,
-    sender: Option<&DeviceKey>,
-) -> Opening<(Key, Vec<u8>)> {
-    if sealed.v != SEALED_VERSION {
-        return Opening::Unreadable;
-    }
-    let Some(entry) = sealed.key_for(device) else { return Opening::Unreadable };
-    open_body(sealed, from, &entry.key, xkey, sender).map_or_else(Opening::Forged, Opening::Opened)
-}
-
-fn open_body(
-    sealed: &Sealed,
-    from: &UserId,
-    key: &str,
-    xkey: &XKey,
-    sender: Option<&DeviceKey>,
-) -> Result<(Key, Vec<u8>), String> {
-    let Some(sender) = sender else {
-        return Err(format!("the sending device {} of {from} has no verified encryption key", sealed.device));
-    };
-    let sender = XKey::from_public_key(sender.as_str()).map_err(|e| e.to_string())?;
-    let key = BASE64.decode(key.as_bytes()).map_err(|_| "its key is not base64".to_owned())?;
-    let key = xkey.open(&key, &sender).map_err(|_| "its key does not open".to_owned())?;
-    if key.len() != KEY_LEN {
-        return Err("its key does not open".to_owned());
-    }
-    let body = BASE64.decode(sealed.body.as_bytes()).map_err(|_| "its body is not base64".to_owned())?;
-    if body.len() < NONCE_LEN {
-        return Err("its body does not open".to_owned());
-    }
-    let (nonce, ciphertext) = body.split_at(NONCE_LEN);
-    let key = *Key::from_slice(&key);
-    let plain = XSalsa20Poly1305::new(&key)
-        .decrypt(Nonce::from_slice(nonce), ciphertext)
-        .map_err(|_| "its body does not open".to_owned())?;
-    Ok((key, plain))
 }
 
 /// What a human's device opens sealed messages and titles with: its own key, and the verified keys of the sending
@@ -356,7 +205,8 @@ impl Keyring {
         complete: bool,
         directory: Option<Directory>,
     ) -> Self {
-        let keys = verified.iter().map(|d| ((d.human.clone(), d.device), Some(d.key.clone()))).collect();
+        // An assistant's device sends as its assistant, never as its human.
+        let keys = verified.iter().map(|d| ((d.sender().clone(), d.device), Some(d.key.clone()))).collect();
         Self {
             device,
             xkey,
@@ -436,11 +286,11 @@ impl Keyring {
         Some(self.open_keyed(envelope)?.then(|(_, body)| Ok(body)))
     }
 
-    /// [`Keyring::open`], giving the message's content key too ([`open_keyed`]).
+    /// [`Keyring::open`], giving the message's content key too ([`open_message`]).
     pub fn open_keyed(&self, envelope: &Envelope) -> Option<Opening<(Key, SealedBody)>> {
         let sealed = envelope.sealed.as_ref()?;
         let Some((xkey, sender)) = self.keys_for(&envelope.from, sealed) else { return Some(Opening::Unreadable) };
-        let opening = open_keyed(envelope, &self.device, xkey, sender.as_ref());
+        let opening = open_message(envelope, &self.device, xkey, sender.as_ref());
         if let Opening::Forged(why) = &opening {
             tracing::warn!(message = %envelope.id, from = %envelope.from, "a forged sealed message: {why}");
         }
@@ -594,7 +444,7 @@ impl Sealer {
                 own.device
             );
         }
-        if devices.of(to).next().is_none() {
+        if !devices.of(to).any(|d| d.assistant.is_none()) {
             bail!(
                 "{to} has no device whose encryption key is verified in {DEVICES_BUCKET}, so nothing is sealed: a \
                  device of {to} puts one there on connecting with credentials binding one (`ants renew`); {otherwise}"
@@ -682,6 +532,7 @@ mod tests {
                 key: self.key(),
                 user_key: String::new(),
                 expires_at: None,
+                assistant: None,
             }
         }
 

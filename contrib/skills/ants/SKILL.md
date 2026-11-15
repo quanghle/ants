@@ -31,12 +31,12 @@ match, omit `@ant` so `messenger` routes by capability.
 
 ```sh
 ants ask @dev-a "summarise the open TODOs in crates/ants-daemon"
-ants ask "which ant knows the transport layer?"       # goes to messenger
+ants ask "which ant knows the transport layer?"       # goes to the human's assistant, else messenger
 ants ask --thread <thread> @dev-a "follow-up on the same thread"
 ```
 
-`ants ask` prints `thread <id>`, then `message <id>`; keep the thread id to read replies and follow up (`--thread` still prompts only `@ant`, or
-`messenger` when omitted). An outbox line means the hub is unreachable and the local leaf forwards the message once
+`ants ask` prints `thread <id>`, then `message <id>`, then `to <ant>` when no `@ant` was given; keep the thread id to read replies and
+follow up (`--thread` still prompts only `@ant`, or the human's assistant, else `messenger`, when omitted). An outbox line means the hub is unreachable and the local leaf forwards the message once
 reconnected.
 
 Quote the message text as one shell argument. For a multiline message, write it to a file and pass `--file PATH`

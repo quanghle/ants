@@ -132,6 +132,13 @@ fn leaf_permissions_cover_each_user_once() {
             "ants.chan.dev-a.dev-a",
             "ants.chanadm.dev-a.dev-a",
             "ants.timeline.dev-a.dev-a",
+            // The machine's host connection.
+            "$KV.ants_machines.m1",
+            "$JS.API.CONSUMER.INFO.ANTS.admin-m1",
+            "$JS.API.CONSUMER.CREATE.ANTS.admin-m1.ants.admin.m1.>",
+            "$JS.API.CONSUMER.MSG.NEXT.ANTS.admin-m1",
+            "$JS.ACK.ANTS.admin-m1.>",
+            "$JS.ACK.*.*.ANTS.admin-m1.>",
             "$JS.S.m1.>",
             "$JSC.R.m1.*.ANTS_OUT.>",
             "_INBOX.human.leaf.m1.>",
@@ -143,6 +150,7 @@ fn leaf_permissions_cover_each_user_once() {
     let mut extra: Vec<_> = only_a.subscribe.iter().filter(|s| !own.subscribe.contains(s)).collect();
     assert_eq!(extra.pop().map(String::as_str), Some("ants.renew.*.reply"), "hearing the renewals");
     assert_eq!(extra.pop().map(String::as_str), Some("ants.enroll.*.reply"), "hearing the answer");
+    assert_eq!(extra.remove(0), "_INBOX_HOST.m1.>", "hearing the host connection's replies");
     let fc = ["$JS.FC.ANTS_OUT.>", "$JS.FC.m1.*.ANTS_OUT.>"];
     assert!(fc.iter().all(|s| extra.contains(&&s.to_string())), "both forms in m1's domain: {extra:?}");
     assert!(extra.iter().all(|s| s.starts_with("$JS.m1.API.") || fc.contains(&s.as_str())), "{extra:?}");
@@ -751,6 +759,33 @@ fn ants_write_only_their_own_chain_and_read_every_one() {
     assert!(!serde_json::to_string(&none).unwrap().contains("escalate_to"));
     assert!(entry.check_key("dev-a").is_ok());
     assert!(entry.check_key("dev-b").is_err(), "credentials vouch for the key only");
+}
+
+#[test]
+fn a_host_writes_only_its_own_machine_record_and_takes_only_its_own_orders() {
+    let m1: Machine = "m1".parse().unwrap();
+    let host = Permissions::for_host(&m1);
+    for s in ["$KV.ants_machines.m1", "$JS.API.CONSUMER.CREATE.ANTS.admin-m1.ants.admin.m1.>"] {
+        assert!(host.publish.iter().any(|have| have == s), "{s} missing from {:?}", host.publish);
+    }
+    assert!(host.publish.iter().all(|s| !s.contains("ants_machines.*") && !s.contains("ants_machines.>")));
+    assert!(host.publish.iter().all(|s| !s.starts_with("ants.") && !s.contains("STREAM.")), "{:?}", host.publish);
+    assert_eq!(host.subscribe, ["_INBOX_HOST.m1.>"]);
+    let in_domain = Permissions::for_host(&m1).with_js_domain(Some(&"hub".parse().unwrap()));
+    assert!(in_domain.publish.iter().any(|s| s == "$JS.hub.API.$KV.ants_machines.m1"));
+    // No ant gets any of it, and a human reads every record and writes none.
+    for user in [p("dev-a"), p("host-m1")] {
+        let ant = Permissions::for_user(&user, Role::Ant);
+        assert!(!ant.publish.iter().any(|s| s.contains("ants_machines") || s.contains("admin-")), "{user}");
+        assert!(!ant.subscribe.iter().any(|s| s.starts_with("_INBOX_HOST")), "{user}");
+    }
+    let human = Permissions::for_user(&p("alice"), Role::Human);
+    for s in ["$JS.API.STREAM.CREATE.KV_ants_machines", "$JS.API.DIRECT.GET.KV_ants_machines"] {
+        assert!(human.publish.iter().any(|have| have == s), "{s}");
+    }
+    assert!(!human.publish.iter().any(|s| s.starts_with("$KV.ants_machines") || s.contains("KV_ants_machines.")));
+    assert_eq!(subject::machine_record(&m1), "$KV.ants_machines.m1");
+    assert_eq!(subject::admin_orders(&m1), "ants.admin.m1.>");
 }
 
 #[test]

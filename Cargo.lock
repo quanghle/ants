@@ -188,6 +188,7 @@ dependencies = [
  "anyhow",
  "async-nats",
  "chrono",
+ "crypto_secretbox",
  "data-encoding",
  "futures",
  "http-body-util",

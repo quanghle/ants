@@ -16,8 +16,8 @@ use ants_daemon::keystore::{self, Store};
 use ants_daemon::storage::{self, Usage};
 use ants_daemon::{Launch, PermissionPolicy, bus, hub, reactions};
 use ants_proto::{
-    INTAKE_STREAM, JsDomain, Machine, PERMISSIONS_VERSION, ReactionChange, ReactionsRequest, ReactionsResponder,
-    STREAM, UserId, Uuid, inbox_consumer,
+    INTAKE_STREAM, JsDomain, MACHINES_BUCKET, Machine, PERMISSIONS_VERSION, ReactionChange, ReactionsRequest,
+    ReactionsResponder, STREAM, UserId, Uuid, inbox_consumer,
 };
 use async_nats::jetstream;
 use hyper::StatusCode;
@@ -141,6 +141,9 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     let settings = loaded.as_ref().map_or_default(|l| l.storage);
     checks.extend(check_storage(connected.as_ref(), setup, settings).await);
     checks.extend(ants_checked);
+    if let Some(loaded) = &loaded {
+        checks.push(check_host(&loaded.host, ants, &ants_daemon::roster::machine().await, now));
+    }
     checks.extend(check_shared_workdirs(ants, &setup.config));
     checks.extend(reactions);
     if let Some(loaded) = &loaded {
@@ -966,6 +969,35 @@ fn check_ant_creds(ant: &Ant, now: u64) -> Check {
         return Check::fail(check, detail, vec![issue]);
     }
     check_creds(&check, path, &finding, now)
+}
+
+/// The machine's host credentials ([`ants_daemon::host`]): a warning when the ants have credentials and the host
+/// none, which keeps the machine's record of its ants and its admin orders off; `hostname` names the machine then.
+fn check_host(host: &config::HostSettings, ants: &[Ant], hostname: &str, now: u64) -> Check {
+    let check = "host credentials";
+    let machine = |named: Option<&Machine>| named.cloned().unwrap_or_else(|| Machine::from_hostname(hostname));
+    let issue = |machine: &Machine| {
+        format!(
+            "ants auth host {machine} on the machine holding the team keys, then copy them to              ~/.config/ants/auth/host.creds here, or name them in `creds` of [host]"
+        )
+    };
+    let Some(path) = &host.creds else {
+        if ants.iter().all(|ant| ant.creds.is_none()) {
+            return Check::skip(check, "none, as no ant has any: the daemon records the machine's ants as no one");
+        }
+        let detail = format!(
+            "none: the daemon does not record the machine's ants in {MACHINES_BUCKET}, nor take their admin orders"
+        );
+        return Check::warn(check, detail, vec![issue(&machine(host.machine.as_ref()))]);
+    };
+    let finding = match creds::check(path) {
+        Ok(finding) => finding,
+        Err(e) => return Check::fail(check, format!("{e:#}"), vec![issue(&machine(host.machine.as_ref()))]),
+    };
+    match ants_daemon::host::machine_of(host.machine.as_ref(), Some(path), hostname) {
+        Ok(_) => check_creds(check, path, &finding, now),
+        Err(e) => Check::fail(check, format!("{e:#}"), vec![issue(&machine(host.machine.as_ref()))]),
+    }
 }
 
 /// A warning for each ant whose threads run at once in one git work tree, worktrees turned off, where they may

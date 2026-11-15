@@ -25,6 +25,7 @@ mod ids;
 mod inbox;
 mod keys;
 mod login;
+mod machines;
 mod permissions;
 mod presence;
 mod questions;
@@ -55,6 +56,7 @@ pub use ids::*;
 pub use inbox::*;
 pub use keys::*;
 pub use login::*;
+pub use machines::*;
 pub use permissions::*;
 pub use presence::*;
 pub use questions::*;
@@ -97,6 +99,11 @@ pub const ROSTER_HEARTBEAT: Duration = Duration::from_secs(10);
 /// Max age of the roster bucket: an entry not refreshed for this long is gone, so an ant whose daemon died drops
 /// out of the roster after at most a few missed heartbeats.
 pub const ROSTER_TTL: Duration = Duration::from_secs(30);
+/// KV bucket of the machines: one [`MachineRecord`] per machine running a daemon, keyed by its name, listing the ants
+/// the daemon serves. Unlike the roster's, records never expire, so an ant whose daemon stopped still has a machine,
+/// where admin orders to it wait ([`subject::admin_orders`]). Each machine's daemon writes only its own record, with
+/// the machine's host credentials ([`Permissions::for_host`]); humans read them all; ants read none.
+pub const MACHINES_BUCKET: &str = "ants_machines";
 /// KV bucket mapping a thread to its harness session, for resuming after a restart.
 pub const SESSIONS_BUCKET: &str = "ants_sessions";
 /// KV bucket where a daemon marks each attempt at an inbox message it started, and the reply it stored, so a
