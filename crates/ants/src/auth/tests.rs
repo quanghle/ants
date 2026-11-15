@@ -1639,6 +1639,22 @@ async fn a_hook_runs_once_per_dead_letter_from_where_its_consumer_left_off() {
     let got = timeout(WAIT, lines(1)).await.expect("the hook ran");
     assert_eq!(got.iter().map(|d| d.stream_seq).collect::<Vec<_>>(), [2]);
     running.abort();
+    let _ = running.await;
+    // A dead letter the server delivers to the stopped reader's pull request, until it learns the reader is gone, waits
+    // out the whole ack wait: the next is stored once no pull request waits and the hook's ack is in.
+    timeout(WAIT, async {
+        loop {
+            let mut reader =
+                o_js.get_consumer_from_stream::<consumer::pull::Config, _, _>(&reader, STREAM).await.unwrap();
+            let info = reader.info().await.unwrap();
+            if info.num_waiting == 0 && info.num_ack_pending == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the stopped reader's pull request and the hook's ack reach the server");
 
     // A dead letter stored while no hook runs is handed on when one starts again.
     bus::publish_json(&a_js, subject::dead(&dev_a), &bury(3, &dev_a), None).await.unwrap();
