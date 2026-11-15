@@ -2090,7 +2090,8 @@ impl Inbox<'_> {
             );
         }
         let _narrowed = launch.policy().narrow(thread, envelope.allow.as_deref());
-        let _turn = self.mcp.map(|mcp| mcp.begin(envelope));
+        let carried = incoming.attached().into_iter().map(|(handle, _)| handle).collect();
+        let _turn = self.mcp.map(|mcp| mcp.begin(envelope).carrying(carried, crate::files::stored(msg)));
         let _asking = self.approvals.map(|approvals| approvals.begin(envelope));
         let flush = tokio::time::interval_at(tokio::time::Instant::now() + status::FLUSH_EVERY, status::FLUSH_EVERY);
         let text = self.prompt_for(incoming, read.as_ref(), &humans, cut_off).await;
@@ -2399,7 +2400,7 @@ impl Inbox<'_> {
             stop: Some(stop),
             progress: Some(progress_tx),
             history: Some(history.history()),
-            attachments: Attached::new(self.js.clone(), incoming.attached()),
+            attachments: Attached::new(self.js.clone(), incoming.attached(), crate::files::stored(msg)),
         };
         let (cancellable, mut cancel) = self.cancels.register(thread);
         let (mut cancelled_by, mut cut_by_cancel) = (None, false);

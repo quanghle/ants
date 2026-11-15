@@ -110,7 +110,8 @@ pub async fn open(js: &jetstream::Context, keyring: Option<&Keyring>, listed: &L
 /// into a new private directory under the system's temporary one: the path of the file written.
 pub async fn fetched(js: &jetstream::Context, keyring: Option<&Keyring>, listed: &Listed) -> Result<PathBuf> {
     let listed = available(listed)?;
-    let (attachment, bytes) = attachments::open(js, keyring, &listed.handle, Some(&listed.attachment)).await?;
+    let (attachment, bytes) =
+        attachments::open(js, keyring, &listed.handle, Some(&listed.attachment), listed.stored).await?;
     let dir = private_dir(&std::env::temp_dir(), attachment.id)?;
     let path = dir.join(&attachment.name);
     attachments::write_new(&path, &bytes)?;
@@ -156,7 +157,7 @@ pub async fn save(
 ) -> Result<String> {
     let listed = available(listed)?;
     let expected = Some(&listed.attachment);
-    let (attachment, size, path) = attachments::save(js, keyring, &listed.handle, expected, out).await?;
+    let (attachment, size, path) = attachments::save(js, keyring, &listed.handle, expected, listed.stored, out).await?;
     Ok(format!("saved {} ({}, {}) to {}", attachment.name, attachments::size(size), attachment.mime, path.display()))
 }
 

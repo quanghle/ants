@@ -162,7 +162,7 @@ pub async fn get_stored(
 
 /// Whether the attachment under `handle`, made at the time in its id, or the message carrying it, stored at `stored`,
 /// is within [`RECENT`] of `now`. A time ahead of `now`, from a clock running ahead, is recent.
-fn recent(handle: &AttachmentHandle, stored: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+pub fn recent(handle: &AttachmentHandle, stored: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
     let made = handle.id.get_timestamp().and_then(|t| {
         let (secs, nanos) = t.to_unix();
         DateTime::from_timestamp(i64::try_from(secs).ok()?, nanos)
@@ -200,6 +200,16 @@ impl std::fmt::Display for Missing {
 }
 
 impl std::error::Error for Missing {}
+
+/// Whether `e` is a read's failing for a chunk not in the store ([`get`]).
+pub fn missing(e: &anyhow::Error) -> bool {
+    e.is::<Missing>()
+}
+
+/// When the hub stored `msg`, as [`get_stored`] takes it; None for one that is not JetStream's.
+pub fn stored(msg: &jetstream::Message) -> Option<DateTime<Utc>> {
+    msg.info().ok().map(|info| std::time::SystemTime::from(info.published).into())
+}
 
 async fn read(
     js: &jetstream::Context,
@@ -241,6 +251,8 @@ pub const PROMPT_IMAGES: [&str; 4] = ants_proto::IMAGE_MIMES;
 pub struct Attached {
     js: jetstream::Context,
     files: Vec<(AttachmentHandle, Attachment)>,
+    /// When the hub stored the message, for the wait for chunks still on their way ([`get_stored`]).
+    stored: Option<DateTime<Utc>>,
 }
 
 /// What a prompt shows of the files attached to its message ([`Attached::show`]).
@@ -253,9 +265,14 @@ pub struct Shown {
 }
 
 impl Attached {
-    /// The `files` attached to a message, read from the store through `js`; None when there are none.
-    pub fn new(js: jetstream::Context, files: Vec<(AttachmentHandle, Attachment)>) -> Option<Self> {
-        (!files.is_empty()).then_some(Self { js, files })
+    /// The `files` attached to a message the hub stored at `stored`, read from the store through `js`; None when
+    /// there are none.
+    pub fn new(
+        js: jetstream::Context,
+        files: Vec<(AttachmentHandle, Attachment)>,
+        stored: Option<DateTime<Utc>>,
+    ) -> Option<Self> {
+        (!files.is_empty()).then_some(Self { js, files, stored })
     }
 
     /// What the prompt shows of the attachments: to a harness taking `images`, each image ([`PROMPT_IMAGES`]) that
@@ -275,7 +292,7 @@ impl Attached {
                 lines.push(format!("{what}; call read_attachment with the handle to read it."));
                 continue;
             }
-            match get(&self.js, &handle, Some(&attachment)).await {
+            match get_stored(&self.js, &handle, Some(&attachment), self.stored).await {
                 Ok((_, bytes)) => {
                     lines.push(format!("{what}; shown as an image after this text."));
                     shown.images.push((mime.clone(), bytes));
@@ -370,6 +387,16 @@ mod tests {
         let started = std::time::Instant::now();
         assert!(get(&js, &handle_of(&Attachment { id: old, ..other }), None).await.is_err());
         assert!(started.elapsed() < SETTLE / 2, "not waited for");
+
+        // Unless the message carrying it was stored just now, as one kept in a leaf's outbox through a long outage.
+        let kept = Attachment { id: old, ..reference("kept.txt", "text/plain", b"kept").unwrap() };
+        let reading = tokio::spawn({
+            let (js, handle, kept) = (js.clone(), handle_of(&kept), kept.clone());
+            async move { get_stored(&js, &handle, Some(&kept), Some(Utc::now())).await }
+        });
+        tokio::time::sleep(RETRY * 2).await;
+        put(&js, &handle_of(&kept), &kept, b"kept").await.unwrap();
+        assert_eq!(reading.await.unwrap().unwrap().1, b"kept");
     }
 
     #[test]

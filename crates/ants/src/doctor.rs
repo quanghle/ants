@@ -566,7 +566,9 @@ async fn check_hub(js: &jetstream::Context, identity: &Identity) -> Vec<Check> {
                 "ants init with a human's current credentials (`ants auth user NAME --human`)".to_owned()
             };
             match finding.problem {
-                hub::Problem::Unchecked(_) => Check::warn(check, finding.to_string(), vec![fix]),
+                hub::Problem::Unchecked(_) | hub::Problem::ShortWindow { .. } => {
+                    Check::warn(check, finding.to_string(), vec![fix])
+                }
                 _ => Check::fail(check, finding.to_string(), vec![fix]),
             }
         })

@@ -191,7 +191,7 @@ async fn encoded(
     picker: Picker,
     listed: &Listed,
 ) -> Result<Protocol> {
-    let (_, bytes) = attachments::open(js, keyring, &listed.handle, Some(&listed.attachment)).await?;
+    let (_, bytes) = attachments::open(js, keyring, &listed.handle, Some(&listed.attachment), listed.stored).await?;
     tokio::task::spawn_blocking(move || encode(&picker, &bytes)).await?
 }
 

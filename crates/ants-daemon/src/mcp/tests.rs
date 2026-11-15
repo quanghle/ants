@@ -1255,7 +1255,7 @@ fn memory_files(stored: MemoryFiles) -> FileAccess {
             stored.locked().insert(handle, (attachment, bytes.to_vec()));
             Box::pin(async { Ok(()) })
         }),
-        get: Arc::new(move |handle| {
+        get: Arc::new(move |handle, _| {
             let found = reader.locked().get(&handle).cloned();
             Box::pin(async move { found.ok_or_else(|| anyhow::anyhow!("attachment {handle} is not stored")) })
         }),
@@ -1428,6 +1428,37 @@ async fn attach_redacts_secrets_in_text_files_only() {
     assert_eq!(reference(&held[0].0), reference(&expected), "the reference is of the bytes stored");
     assert_eq!(held[1].1, binary, "not text: left alone");
     assert_eq!(held[2].1, b"nothing secret");
+}
+
+/// `read_attachment` reads an attachment of the message being handled as one stored when the hub stored that message,
+/// so chunks still on their way from a leaf's outbox are waited for; any other as one stored when its id says.
+#[tokio::test]
+async fn read_attachment_waits_for_the_message_being_handled_as_its_stored_time_says() {
+    let home = home("read-stored");
+    let (mcp, _sent) = start(&home).await;
+    let asked = Arc::new(StdMutex::new(Vec::new()));
+    let seen = asked.clone();
+    let files = FileAccess {
+        put: Arc::new(|_, _, _| Box::pin(async { Ok(()) })),
+        get: Arc::new(move |handle, stored| {
+            seen.locked().push((handle.clone(), stored));
+            Box::pin(async move { Err(anyhow::anyhow!("attachment {handle} is not stored")) })
+        }),
+    };
+    mcp.with_files(files, home.clone());
+    let current = Envelope::new(user("dev-b"), user("dev-a"), "files");
+    let carried = current.attachment_handle(Uuid::now_v7());
+    let other = current.attachment_handle(Uuid::now_v7());
+    let stored = chrono::Utc::now();
+    let turn = mcp.begin(&current).carrying(vec![carried.clone()], Some(stored));
+    let client = client_in(&mcp, &current.thread_id, &home).await;
+    for handle in [&carried, &other] {
+        let (ok, _) = call(&client, "read_attachment", serde_json::json!({"handle": handle.to_string()})).await;
+        assert!(!ok);
+    }
+    drop(turn);
+    call(&client, "read_attachment", serde_json::json!({"handle": carried.to_string()})).await;
+    assert_eq!(*asked.locked(), [(carried.clone(), Some(stored)), (other, None), (carried, None)]);
 }
 
 #[tokio::test]
