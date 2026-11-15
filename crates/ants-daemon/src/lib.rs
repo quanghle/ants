@@ -31,6 +31,7 @@ pub mod pool;
 pub mod ratelimit;
 pub mod reactions;
 pub mod reading;
+pub mod redact;
 pub mod roster;
 pub mod schedule;
 pub mod signin;

@@ -33,6 +33,7 @@ use std::time::Duration;
 
 use ants_daemon::bus;
 use ants_daemon::direct_kv::{DirectKv, Lookup};
+use ants_daemon::redact::Redactor;
 use ants_proto::{
     ApprovalRequest, DeviceId, Envelope, Escalation, EscalationReason, Following, JsDomain, NOTIFY_BUCKET, NotifyPrefs,
     STREAM, ThreadId, UserId, Uuid, Verdict, notify_consumer, subject,
@@ -856,6 +857,20 @@ fn label(verdict: Verdict) -> &'static str {
     }
 }
 
+/// Redacts what notices carry, whatever the ant's `redact` setting: ntfy topics, chats and hooks are seen by more than
+/// the bus is.
+fn redactor() -> &'static Redactor {
+    static REDACTOR: OnceLock<Redactor> = OnceLock::new();
+    REDACTOR.get_or_init(|| Redactor::default().with_process_env())
+}
+
+/// `request` with its tool call redacted.
+fn redacted(request: &ApprovalRequest) -> ApprovalRequest {
+    let mut request = request.clone();
+    redactor().redact_tool(&mut request.tool);
+    request
+}
+
 /// The notice of `request`, stored at stream sequence `seq`, for `human`, with a button per verdict it offers when
 /// there are `links`, and the allow rule `suggested` for it ([`tools::suggestion`]).
 fn approval_notice(
@@ -866,6 +881,7 @@ fn approval_notice(
     suggested: Option<&tools::Suggestion>,
     now: DateTime<Utc>,
 ) -> Notice {
+    let request = &redacted(request);
     let tool = &request.tool;
     let mut text = format!("{} ({})", tool.title, tool.kind);
     if !tool.locations.is_empty() {
@@ -924,7 +940,7 @@ fn escalation_notice(envelope: &Envelope) -> Option<Notice> {
     let thread = &escalation.thread_id;
     let text = format!(
         "{}\n\nthread {thread}; answer with ants ask --thread {thread} @{} TEXT",
-        cut(&envelope.text, MAX_TEXT),
+        cut(&redactor().redact(&envelope.text), MAX_TEXT),
         envelope.from,
     );
     let title = match escalation.reason {
@@ -956,7 +972,7 @@ fn completion_notice(envelope: &Envelope) -> Option<Notice> {
     let thread = &envelope.thread_id;
     let text = format!(
         "{}\n\nthread {thread}; answer with ants ask --thread {thread} @{} TEXT",
-        cut(&envelope.text, MAX_TEXT),
+        cut(&redactor().redact(&envelope.text), MAX_TEXT),
         envelope.from,
     );
     Some(Notice {
@@ -1475,6 +1491,7 @@ fn settled(state: &tools::State) -> String {
 }
 
 fn details(request: &ApprovalRequest) -> String {
+    let request = &redacted(request);
     let tool = &request.tool;
     let mut out = format!(
         "<p><b>{}</b> asks to run <b>{}</b> ({}) on thread {}.</p>",
@@ -1808,6 +1825,29 @@ mod tests {
         };
         let options = vec![Verdict::AllowOnce, Verdict::AllowAlways];
         ApprovalRequest::new(p("dev-a"), ThreadId::generate(), tool, options, Duration::from_secs(600))
+    }
+
+    #[test]
+    fn notices_are_redacted() {
+        let secret = "ghp_0123456789abcdefghijABCDEFGHIJ";
+        let mut request = request();
+        request.tool.input = Some(format!("{{\"command\":\"git push https://x:{secret}@github.com/a/b\"}}"));
+        let notice = approval_notice(&request, 9, &p("alice"), None, None, Utc::now());
+        let json = notice_json(&notice, Utc::now());
+        assert!(notice.text.contains("x:[redacted]@github.com"), "{}", notice.text);
+        for shown in [notice.text, json.to_string(), details(&request)] {
+            assert!(!shown.contains(secret), "{shown}");
+        }
+
+        let asked = Envelope::new(p("alice"), p("dev-a"), "build it");
+        let done = asked.reply(p("dev-a"), format!("token {secret}"), ants_proto::Role::Human).unwrap();
+        assert!(completion_notice(&done).unwrap().text.starts_with("token [redacted]\n"));
+        let escalated = done.with_escalation(Some(Escalation::new(
+            p("dev-a"),
+            asked.thread_id,
+            ants_proto::EscalationReason::Asked,
+        )));
+        assert!(escalation_notice(&escalated).unwrap().text.starts_with("token [redacted]\n"));
     }
 
     #[test]

@@ -35,6 +35,7 @@ use crate::overflow::ContextOverflow;
 use crate::permission::{Allowlist, PermissionPolicy};
 use crate::pool::{Pool, SessionStore};
 use crate::ratelimit::{self, Backoffs, Limited, Throttle};
+use crate::redact::Redactor;
 use crate::signin::{self, SignIn};
 use crate::status::{self, Status};
 use crate::webhooks::Webhooks;
@@ -122,6 +123,8 @@ pub struct Config {
     pub escalation: Chain,
     /// For a manager ant of an `[[ant_template]]`, what adds the ants its `request_ant` tool asks for.
     pub requester: crate::mcp::Requester,
+    /// Redact secrets from what the ant publishes ([`crate::redact`]).
+    pub redact: bool,
 }
 
 /// Serve the ant's inbox until Ctrl-C. Prompts in flight are finished first; a second Ctrl-C stops at once. Until
@@ -205,9 +208,13 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     let approver = NatsApprover::new(client.clone(), js.clone(), config.ant.clone(), config.approval_timeout)
         .with_chain(config.escalation.clone())
         .with_humans(humans.clone());
-    let policy = PermissionPolicy::new(allow, Some(std::sync::Arc::new(approver.clone())));
-    let (outbox, roster) = (crate::mcp::jetstream_outbox(js.clone()), crate::mcp::jetstream_roster(js.clone()));
-    let notes = std::sync::Arc::new(crate::notes::JetStreamNotes::new(js.clone(), config.ant.clone()));
+    let redactor = std::sync::Arc::new(redactor(config));
+    let policy =
+        PermissionPolicy::new(allow, Some(std::sync::Arc::new(approver.clone()))).with_redactor(redactor.clone());
+    let outbox = redacting_outbox(crate::mcp::jetstream_outbox(js.clone()), redactor.clone());
+    let roster = crate::mcp::jetstream_roster(js.clone());
+    let notes = crate::notes::JetStreamNotes::new(js.clone(), config.ant.clone());
+    let notes = std::sync::Arc::new(RedactingNotes { notes, redactor: redactor.clone() });
     let sessions_kv = bus::ensure_sessions(&js, config.js_domain.as_ref(), &config.ant).await?;
     let ledger = Ledger::kv(sessions_kv.clone(), config.ant.clone(), config.caps)
         .warn_at(config.spend_warn_percent)
@@ -219,10 +226,10 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
         roster.clone(),
         humans.clone(),
         ledger.clone(),
-        escalation::jetstream_sender(js.clone()),
+        redacting_sender(escalation::jetstream_sender(js.clone()), redactor.clone()),
     )
     .with_chains(crate::chains::jetstream_chains(js.clone()))
-    .with_notes(escalation::jetstream_notes_sender(js.clone()));
+    .with_notes(redacting_notes_sender(escalation::jetstream_notes_sender(js.clone()), redactor.clone()));
     let escalator = std::sync::Arc::new(escalator);
     if let Err(e) = crate::chains::publish(&js, &config.ant, &config.escalation.escalate_to).await {
         tracing::warn!(error = format!("{e:#}"), "keeping the escalation chain past the roster");
@@ -238,7 +245,7 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     )
     .await?;
     mcp.listen(bus::live_inbox(&client, &config.ant).await?);
-    mcp.with_channels(crate::mcp::jetstream_channels(js.clone()));
+    mcp.with_channels(redacting_posts(crate::mcp::jetstream_channels(js.clone()), redactor.clone()));
     mcp.with_lookup(crate::mcp::jetstream_lookup(js.clone()));
     mcp.with_reactor(crate::mcp::jetstream_reactor(js.clone(), config.js_domain.clone(), config.ant.clone()));
     if let Some(requester) = &config.requester.0 {
@@ -316,6 +323,7 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
         buried: &buried,
         mcp: Some(&mcp),
         approvals: Some(&approver),
+        redactor: &redactor,
         workload: &workload,
         metrics,
         limits: config.limits,
@@ -529,6 +537,8 @@ struct Inbox<'a> {
     mcp: Option<&'a Mcp>,
     /// Takes the decisions agents of the ant's chain send on its tool requests.
     approvals: Option<&'a NatsApprover>,
+    /// Hides secrets in what the harness streams and answers.
+    redactor: &'a Redactor,
     /// Counts the messages being handled and the live harnesses, for the roster.
     workload: &'a roster::Workload,
     /// The ant's counters, for monitoring.
@@ -1168,7 +1178,7 @@ impl Inbox<'_> {
         };
         match e.downcast_ref::<StartFailed>() {
             Some(failed) => {
-                if let Some(hold) = self.breaker.failed(&thread, &failed.detail) {
+                if let Some(hold) = self.breaker.failed(&thread, &self.redactor.redact(&failed.detail)) {
                     self.attempts.release(&arrived.envelope).await;
                     self.wait_for_repair(&arrived, failed, hold).await;
                     return (thread, Handled::Broken(Box::new((arrived, msg))));
@@ -1357,8 +1367,9 @@ impl Inbox<'_> {
         tracing::warn!(%thread, error = %failed, "harness keeps failing to start; messages wait until a check starts it");
         let machine = roster::machine().await;
         let post = incoming.post.is_some();
-        let notice =
+        let mut notice =
             breaker::notice(self.ant, &incoming.envelope, post, failed, &machine, self.sign_in_every, self.humans);
+        self.redactor.redact_string(&mut notice.text);
         let id = format!("harness-{}-{}", self.ant, hold.shown.since.timestamp_millis());
         if let Err(e) = bus::publish_json(self.js, notice.subject(), &notice, Some(&id)).await {
             tracing::warn!(%thread, error = format!("{e:#}"), "telling a human the harness fails to start");
@@ -1379,7 +1390,7 @@ impl Inbox<'_> {
                 Err(e) => {
                     let error = format!("{e:#}");
                     tracing::warn!(error, "harness still fails to start; messages wait");
-                    self.workload.set_failing(self.breaker.still_failing(&error));
+                    self.workload.set_failing(self.breaker.still_failing(&self.redactor.redact(&error)));
                     continue;
                 }
             }
@@ -1583,7 +1594,7 @@ impl Inbox<'_> {
         let mut stop_tx = Some(stop_tx);
         let mut reached = None;
         let (progress_tx, mut streamed) = tokio::sync::mpsc::channel(status::BUFFER);
-        let mut status = Status::new(self.client, self.ant, thread);
+        let mut status = Status::new(self.client, self.ant, thread, self.redactor);
         let mut flush =
             tokio::time::interval_at(tokio::time::Instant::now() + status::FLUSH_EVERY, status::FLUSH_EVERY);
         let late = match self.mcp {
@@ -1635,7 +1646,7 @@ impl Inbox<'_> {
                     worked |= matches!(update, StatusUpdate::Tool { .. });
                     status.push(update);
                 }
-                _ = flush.tick() => status.flush(),
+                _ = flush.tick() => status.flush_settled(),
                 Some(by) = cancel.recv(), if cancelled_by.is_none() => {
                     tracing::info!(%thread, %by, "cancelling the prompt");
                     if let Some(stop) = stop_tx.take() {
@@ -1722,6 +1733,7 @@ impl Inbox<'_> {
         });
         let notice = [limit_notice, cancel_notice, branch_notice].into_iter().flatten().collect::<Vec<_>>().join("\n");
         let text = [reply.text, notice].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
+        let text = self.redactor.redact(&text).into_owned();
         let reply = match (&incoming.post, read) {
             (Some(posted), Some(read)) => {
                 // Other members' replies stored during the prompt spent the thread's turns too.
@@ -2091,6 +2103,83 @@ fn kept_branch_notice(ant: &UserId, branch: &Branch, owner: Option<UserId>, huma
 }
 
 /// The message id of `ant`'s reply to `request`: the same for every attempt at it.
+/// What hides the ant's secrets: the values of its env and its harness's, the daemon's environment variables named
+/// like secrets, and the common patterns; nothing with `redact = false`.
+fn redactor(config: &Config) -> Redactor {
+    if !config.redact {
+        return Redactor::off();
+    }
+    Redactor::default().with_env(&config.env).with_env(&config.harness.env).with_process_env()
+}
+
+/// `outbox`, redacting the text of what the ant sends with its MCP tools.
+fn redacting_outbox(outbox: crate::mcp::Outbox, redactor: std::sync::Arc<Redactor>) -> crate::mcp::Outbox {
+    std::sync::Arc::new(move |mut envelope: Envelope| {
+        redactor.redact_string(&mut envelope.text);
+        outbox(envelope)
+    })
+}
+
+/// `channels`, redacting the text of what the ant posts with its MCP tools.
+fn redacting_posts(
+    channels: crate::mcp::ChannelAccess,
+    redactor: std::sync::Arc<Redactor>,
+) -> crate::mcp::ChannelAccess {
+    let post = channels.post;
+    crate::mcp::ChannelAccess {
+        post: std::sync::Arc::new(move |mut posted: ChannelPost| {
+            redactor.redact_string(&mut posted.text);
+            post(posted)
+        }),
+        ..channels
+    }
+}
+
+/// `sender`, redacting the text of the escalations it stores.
+fn redacting_sender(sender: escalation::Sender, redactor: std::sync::Arc<Redactor>) -> escalation::Sender {
+    std::sync::Arc::new(move |mut envelope: Envelope, id| {
+        redactor.redact_string(&mut envelope.text);
+        sender(envelope, id)
+    })
+}
+
+/// `sender`, redacting the text of the notes posts it stores.
+fn redacting_notes_sender(
+    sender: escalation::NotesSender,
+    redactor: std::sync::Arc<Redactor>,
+) -> escalation::NotesSender {
+    std::sync::Arc::new(move |mut post: ants_proto::NotesPost, id| {
+        redactor.redact_string(&mut post.text);
+        sender(post, id)
+    })
+}
+
+/// Thread notes whose posts are redacted before they are stored.
+struct RedactingNotes<N> {
+    notes: N,
+    redactor: std::sync::Arc<Redactor>,
+}
+
+impl<N: NotesStore> NotesStore for RedactingNotes<N> {
+    fn read<'a>(&'a self, thread: &'a ThreadId) -> futures::future::BoxFuture<'a, Result<notes::Notes>> {
+        self.notes.read(thread)
+    }
+
+    fn post<'a>(
+        &'a self,
+        post: &'a ants_proto::NotesPost,
+        last_seq: u64,
+    ) -> futures::future::BoxFuture<'a, Result<bool>> {
+        match self.redactor.redact(&post.text) {
+            std::borrow::Cow::Borrowed(_) => self.notes.post(post, last_seq),
+            std::borrow::Cow::Owned(text) => {
+                let post = ants_proto::NotesPost { text, ..post.clone() };
+                Box::pin(async move { self.notes.post(&post, last_seq).await })
+            }
+        }
+    }
+}
+
 fn reply_id(ant: &UserId, request: &Envelope) -> String {
     format!("reply-{ant}-{}", request.id)
 }
@@ -2155,6 +2244,7 @@ mod tests {
         threads: Threads,
         roster: Roster,
         humans: Registry,
+        redactor: Redactor,
     }
 
     impl Bus {
@@ -2204,6 +2294,7 @@ mod tests {
                 threads,
                 roster,
                 humans: Registry::default(),
+                redactor: Redactor::default(),
             };
             (bus, replies)
         }
@@ -2305,6 +2396,7 @@ mod tests {
                 buried: &self.buried,
                 mcp: self.mcp.as_ref(),
                 approvals: None,
+                redactor: &self.redactor,
                 workload: &self.workload,
                 metrics: crate::metrics::ant(&self.dev),
                 limits: self.limits,
@@ -2469,6 +2561,23 @@ mod tests {
         };
         tokio::join!(bus.serve(&pool, &ctrl_c), check);
         assert_eq!(bus.unacked().await, 0);
+    }
+
+    #[tokio::test]
+    async fn replies_are_redacted() {
+        let Some((mut bus, mut replies)) = Bus::start().await else { return };
+        bus.redactor = Redactor::default().with_env([("DEPLOY_TOKEN", "d3pl0y-s3cret")]);
+        let (launch, _, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let t1 = ThreadId::generate();
+        bus.send(&t1, "use d3pl0y-s3cret or ghp_0123456789abcdefghijABCDEFGHIJ").await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            assert_eq!(next_reply(&mut replies).await, (t1.clone(), "use [redacted] or [redacted]".to_owned()));
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
     }
 
     #[tokio::test]
