@@ -125,6 +125,15 @@ pub struct GithubUser {
     pub teams: Vec<Team>,
 }
 
+/// The GitHub user a human's name is bound to, recorded with each of its devices' credentials in `issued.jsonl`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubAccount {
+    /// The numeric id, which binds.
+    pub id: u64,
+    /// The login when the device was signed, for display.
+    pub login: String,
+}
+
 /// Why a device was signed, recorded with its credentials in `issued.jsonl`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", tag = "by", content = "of")]

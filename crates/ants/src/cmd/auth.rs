@@ -7,7 +7,7 @@ use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
 
 use crate::members::EnrollApprover;
-use crate::{Connection, auth, backup, channel, keys, members, revoke, team_dir};
+use crate::{Connection, auth, backup, binding, channel, keys, members, revoke, team_dir};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum AuthCommand {
@@ -63,6 +63,14 @@ pub(crate) enum AuthCommand {
         /// only once the seed reads back and authenticates at --nats, unless no server answers there.
         #[arg(long, conflicts_with = "public_key")]
         store_key: bool,
+        /// With --human: bind the human's name to this GitHub user's numeric id, looked up through the GitHub API, so
+        /// that the user may register more devices with `ants login`. Refused for a name or user bound otherwise.
+        #[arg(long, value_name = "LOGIN", requires = "human")]
+        github: Option<String>,
+        /// With --github: the signer's config file, whose [registration] table names the GitHub API and the token to
+        /// look the user up with (default: ~/.ants/config.toml; github.com, with no token, without the table).
+        #[arg(long, env = "ANTS_CONFIG")]
+        config: Option<PathBuf>,
     },
     /// Issue enrollment credentials for a new ant: they may only ask for the ant's credentials, with
     /// `ants add NAME --enroll FILE` on its machine, and hear the answer `ants enroll approve` or `reject`
@@ -230,14 +238,32 @@ pub(crate) async fn run(command: AuthCommand, conn: &Connection<'_>) -> Result<(
     let domain = conn.js_domain;
     match command {
         AuthCommand::Init { dir } => init(dir),
-        AuthCommand::User { user, human, observer, webhook, to, channels, dir, out, public_key, label, store_key } => {
+        AuthCommand::User {
+            user,
+            human,
+            observer,
+            webhook,
+            to,
+            channels,
+            dir,
+            out,
+            public_key,
+            label,
+            store_key,
+            github,
+            config,
+        } => {
             let (kind, permissions) = user_rights(&user, human, observer, webhook, to, channels, domain)?;
             let dir = team_dir(dir)?;
-            let label = label.as_deref();
+            let github = match github {
+                Some(login) => Some(github_binding(&dir, &user, &login, config).await?),
+                None => None,
+            };
+            let new = auth::NewDevice { label: label.as_deref(), github, ..auth::NewDevice::default() };
             if store_key {
                 let out = out.unwrap_or_else(|| dir.join(format!("{user}.creds")));
                 let key = nkeys::KeyPair::new_user();
-                let (jwt, device) = auth::sign_device(&dir, &user, kind, permissions, label, &key.public_key())?;
+                let (jwt, device) = auth::sign_device_with(&dir, &user, kind, permissions, &new, &key.public_key())?;
                 keys::issue_stored(&out, &jwt, &key, conn.nats).await?;
                 println!("{}", out.display());
                 if let Some(device) = device {
@@ -247,14 +273,14 @@ pub(crate) async fn run(command: AuthCommand, conn: &Connection<'_>) -> Result<(
             }
             let Some(key) = public_key else {
                 let out = out.unwrap_or_else(|| dir.join(format!("{user}.creds")));
-                let device = auth::issue_device(&dir, &user, kind, permissions, label, &out)?;
+                let device = auth::issue_device_with(&dir, &user, kind, permissions, &new, &out)?;
                 println!("{}", out.display());
                 if let Some(device) = device {
                     eprintln!("device {device}");
                 }
                 return Ok(());
             };
-            let (jwt, device) = auth::sign_device(&dir, &user, kind, permissions, label, &key)?;
+            let (jwt, device) = auth::sign_device_with(&dir, &user, kind, permissions, &new, &key)?;
             if let Some(device) = device {
                 eprintln!("device {device}");
             }
@@ -268,24 +294,7 @@ pub(crate) async fn run(command: AuthCommand, conn: &Connection<'_>) -> Result<(
             Ok(())
         }
         AuthCommand::Enroll { ant, ttl, dir, out } => enrollment(&ant, ttl, dir, out),
-        AuthCommand::Bootstrap { ttl, dir, out } => {
-            let dir = team_dir(dir)?;
-            let out = out.unwrap_or_else(|| dir.join(format!("{}.creds", ants_proto::BOOTSTRAP_USER)));
-            let (key, exp) = auth::issue_bootstrap(&dir, ttl, &out)?;
-            let expires = match exp {
-                Some(exp) => format!(
-                    "valid until {}",
-                    chrono::DateTime::from_timestamp(i64::try_from(exp)?, 0).context("expiry")?
-                ),
-                None => "valid with no expiry".to_owned(),
-            };
-            println!(
-                "{}\n{key}, {expires}; share the file with the humans who may register: ants login NAME --creds FILE \
-                 --nats HUB, served by ants signer with a [registration] table",
-                out.display()
-            );
-            Ok(())
-        }
+        AuthCommand::Bootstrap { ttl, dir, out } => bootstrap(ttl, dir, out),
         AuthCommand::ChannelManager { dir, out, store_key } => {
             let dir = team_dir(dir)?;
             let out = out.unwrap_or_else(|| dir.join(format!("{}.creds", UserId::channel_manager())));
@@ -388,6 +397,50 @@ fn enrollment(ant: &UserId, ttl: std::time::Duration, dir: Option<PathBuf>, out:
     println!(
         "{}\n{expires}; on the ant's machine: ants add {ant} --enroll FILE ...\n\
          then here: ants enroll approve {ant}",
+        out.display()
+    );
+    Ok(())
+}
+
+/// The GitHub user `login`, looked up through the GitHub API of the `[registration]` table of `config` if any, once
+/// [`binding::check`] allows binding `user` to it.
+async fn github_binding(
+    dir: &Path,
+    user: &UserId,
+    login: &str,
+    config: Option<PathBuf>,
+) -> Result<ants_daemon::config::registration::GithubAccount> {
+    let config = match config {
+        Some(config) => Some(config),
+        None => Some(ants_daemon::config::default_path()?).filter(|path| path.exists()),
+    };
+    let registration = match config {
+        Some(config) => ants_daemon::config::registration::signer_registration(&config)?,
+        None => None,
+    };
+    let account = crate::github::Github::new(registration.as_ref())?.user_by_login(login).await?;
+    if binding::check_in(dir, user, &account, binding::Binder::Operator)? {
+        eprintln!("{user} is bound to GitHub user {} ({}): adding a device", account.login, account.id);
+    } else {
+        eprintln!("binding {user} to GitHub user {} ({})", account.login, account.id);
+    }
+    Ok(account)
+}
+
+/// `ants auth bootstrap`.
+fn bootstrap(ttl: std::time::Duration, dir: Option<PathBuf>, out: Option<PathBuf>) -> Result<()> {
+    let dir = team_dir(dir)?;
+    let out = out.unwrap_or_else(|| dir.join(format!("{}.creds", ants_proto::BOOTSTRAP_USER)));
+    let (key, exp) = auth::issue_bootstrap(&dir, ttl, &out)?;
+    let expires = match exp {
+        Some(exp) => {
+            format!("valid until {}", chrono::DateTime::from_timestamp(i64::try_from(exp)?, 0).context("expiry")?)
+        }
+        None => "valid with no expiry".to_owned(),
+    };
+    println!(
+        "{}\n{key}, {expires}; share the file with the humans who may register: ants login NAME --creds FILE \
+         --nats HUB, served by ants signer with a [registration] table",
         out.display()
     );
     Ok(())

@@ -288,3 +288,30 @@ async fn a_human_s_devices_are_listed_relabelled_and_revoked_one_by_one() {
     let revoked: Vec<bool> = devices(&team, "alice").unwrap().into_iter().map(|d| d.revoked).collect();
     assert_eq!(revoked, [false, true, false]);
 }
+
+#[test]
+fn a_github_binding_and_its_grant_are_listed_with_the_device_and_kept_on_renewal() {
+    use ants_daemon::config::registration::{GithubAccount, Grant};
+    let dir = ants_test_support::scratch_dir("binding");
+    let team = dir.join("auth");
+    auth::init(&team).unwrap();
+    let alice: ants_proto::UserId = "alice".parse().unwrap();
+    let new = auth::NewDevice {
+        label: Some("Laptop"),
+        github: Some(GithubAccount { id: 42, login: "octocat".into() }),
+        grant: Some(Grant::Org("acme".into())),
+        ..auth::NewDevice::default()
+    };
+    let key = nkeys::KeyPair::new_user();
+    let permissions = ants_proto::Permissions::for_user(&alice, ants_proto::Role::Human);
+    let (jwt, device) =
+        auth::sign_device_with(&team, &alice, Kind::Human, permissions, &new, &key.public_key()).unwrap();
+
+    let listed = devices(&team, "alice").unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!((listed[0].github.as_deref(), listed[0].grant.as_ref()), (Some("octocat"), new.grant.as_ref()));
+    auth::renew(&team, &jwt, &nkeys::KeyPair::new_user().public_key()).unwrap();
+    let renewed = issued(&team).unwrap().pop().unwrap();
+    assert_eq!(renewed.device, device);
+    assert_eq!((renewed.github, renewed.grant), (new.github, new.grant));
+}

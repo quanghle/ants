@@ -16,7 +16,7 @@ ants auth user alice --human --store-key --js-domain hub  # seed stored in OS cr
 
 ## Issuing and revoking credentials
 
-Every key issued or signed (`user`, `enroll`, `bootstrap`, `channel-manager`, `leaf`, `enroll approve`, `enroll renew`, `signer`) is recorded in `issued.jsonl` (public key, name, kind, issue time, expiry, permissions version, plus device ID/label or leaf members). Credentials stay valid until expiry unless revoked:
+Every key issued or signed (`user`, `enroll`, `bootstrap`, `channel-manager`, `leaf`, `enroll approve`, `enroll renew`, `signer`) is recorded in `issued.jsonl` (public key, name, kind, issue time, expiry, permissions version, plus device ID/label, GitHub binding and grant, or leaf members). Credentials stay valid until expiry unless revoked:
 
 ```sh
 ants auth revoke alice --nats wss://hub.example/nats        # every key issued to alice, all devices
@@ -56,6 +56,8 @@ ants auth rename alice "Alice's laptop" "Work laptop"   # by unique label, devic
 ants auth revoke alice --device 01968f7e-...            # revoke one device only
 ```
 
+`ants auth devices` prints, per device, its ID, label, public key and issue time, plus `github LOGIN (grant)` for a device of a name bound to a GitHub user, and `revoked`; `--json` prints the same as JSON lines (`github`, `grant`).
+
 All devices of a human share one read marker in `ants_read` (CAS-updated) and per-device presence in `ants_presence` for notification suppression (see [webhooks.md](webhooks.md#notifications)).
 
 ## Adding an ant
@@ -90,6 +92,16 @@ ants auth revoke bootstrap --nats wss://hub.example/nats   # withdraw them; reis
 
 Bootstrap credentials are meant to be shared: they only publish registration requests on `ants.login.*` and hear the answers on `ants.login.*.reply`, with messages of at most 4 KiB and no JetStream. They are recorded in `issued.jsonl` (kind `bootstrap`) and revoked like any key. Registration happens on the hub only: leaf uplinks never carry `ants.login` subjects, so both `ants login` and `ants signer` connect to the hub.
 
+
+### GitHub bindings
+
+A name registered with a GitHub sign-in belongs to that GitHub user's numeric ID for good: renamed GitHub accounts keep their names, and no other GitHub user can register it. The binding is recorded on each device's record in `issued.jsonl`, with the grant that admitted the device (`org`, `team`, `email-domain` or `approval`), so it is kept across renewals and in backups. An existing human name (issued with `ants auth user --human` before registration was enabled) is bound by the operator before its owner registers more devices with `ants login`:
+
+```sh
+ants auth user alice --human --github octocat [--config FILE]   # bind alice to GitHub user octocat, new device
+```
+
+`--github` looks the login up on GitHub (with the signer's token and GitHub URLs of the `[registration]` table in `--config`, `ANTS_CONFIG` or the default config file when present; see [config.md](config.md#human-registration)) and records its ID. It refuses `human`, the reserved names `bootstrap` and `channel-manager`, a name holding credentials of anything but a human, a name bound to another GitHub user and a GitHub user bound to another name; on a name already bound to the same user it adds a device. `ants signer` applies the same rules, and also refuses to register a name that holds human credentials but no binding.
 ## Renewing over NATS
 
 Valid, unrevoked credentials (ants, humans, webhooks, observers, `channel-manager`, and `leaf-<machine>` uplinks) can renew over NATS without copying files from the auth machine:

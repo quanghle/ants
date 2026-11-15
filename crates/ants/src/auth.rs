@@ -15,6 +15,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use ants_daemon::config::registration::{GithubAccount, Grant};
 use ants_daemon::creds::{Finding, Kind as CredsKind};
 use ants_proto::{Destination, DeviceId, JsDomain, Machine, PERMISSIONS_VERSION, Permissions, Role, UserId};
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -145,13 +146,44 @@ pub fn issue_device(
     label: Option<&str>,
     out: &Path,
 ) -> Result<Option<DeviceId>> {
+    issue_device_with(dir, user, kind, permissions, &NewDevice { label, ..NewDevice::default() }, out)
+}
+
+/// What the registry records of a human's new device besides its key, and when its credentials expire.
+#[derive(Debug, Clone, Default)]
+pub struct NewDevice<'a> {
+    pub label: Option<&'a str>,
+    /// The GitHub user the human's name is bound to ([`crate::binding`]).
+    pub github: Option<GithubAccount>,
+    /// Why `ants signer` signed it.
+    pub grant: Option<Grant>,
+    /// Seconds since the epoch; none for credentials that never expire.
+    pub expires_at: Option<u64>,
+}
+
+impl NewDevice<'_> {
+    fn record(&self, issued: Issued, device: Option<DeviceId>) -> Issued {
+        Issued { github: self.github.clone(), grant: self.grant.clone(), ..with_device(issued, device, self.label) }
+    }
+}
+
+/// [`issue_device`], recording `new` with the device.
+pub fn issue_device_with(
+    dir: &Path,
+    user: &UserId,
+    kind: Kind,
+    permissions: Permissions,
+    new: &NewDevice<'_>,
+    out: &Path,
+) -> Result<Option<DeviceId>> {
     check_not_reserved(user)?;
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let key = KeyPair::new_user();
-    let (device, extra) = device_claims(kind, label)?;
-    let jwt = user_jwt(&account, &key.public_key(), user.as_str(), permissions, extra, None)?;
+    let (device, extra) = device_claims(kind, new.label)?;
+    let jwt = user_jwt(&account, &key.public_key(), user.as_str(), permissions, extra, new.expires_at)?;
     write_secret(out, &creds(&jwt, &seed(&key)?))?;
-    revoke::record(dir, &with_device(Issued::new(&key.public_key(), user.as_str(), kind, None)?, device, label))?;
+    let issued = Issued::new(&key.public_key(), user.as_str(), kind, new.expires_at)?;
+    revoke::record(dir, &new.record(issued, device))?;
     Ok(device)
 }
 
@@ -457,12 +489,24 @@ pub fn sign_device(
     label: Option<&str>,
     public_key: &str,
 ) -> Result<(String, Option<DeviceId>)> {
+    sign_device_with(dir, user, kind, permissions, &NewDevice { label, ..NewDevice::default() }, public_key)
+}
+
+/// [`sign_device`], recording `new` with the device.
+pub fn sign_device_with(
+    dir: &Path,
+    user: &UserId,
+    kind: Kind,
+    permissions: Permissions,
+    new: &NewDevice<'_>,
+    public_key: &str,
+) -> Result<(String, Option<DeviceId>)> {
     check_user_key(public_key)?;
     check_not_reserved(user)?;
     let account = load(&dir.join(ACCOUNT_SEED))?;
-    let (device, extra) = device_claims(kind, label)?;
-    let jwt = user_jwt(&account, public_key, user.as_str(), permissions, extra, None)?;
-    revoke::record(dir, &with_device(Issued::new(public_key, user.as_str(), kind, None)?, device, label))?;
+    let (device, extra) = device_claims(kind, new.label)?;
+    let jwt = user_jwt(&account, public_key, user.as_str(), permissions, extra, new.expires_at)?;
+    revoke::record(dir, &new.record(Issued::new(public_key, user.as_str(), kind, new.expires_at)?, device))?;
     Ok((jwt, device))
 }
 
@@ -594,6 +638,8 @@ pub fn renew(dir: &Path, current: &str, public_key: &str) -> Result<Renewed> {
     record.renewed_from = Some(claims.sub.clone());
     record.template = previous.and_then(|p| p.template.clone());
     record.added_by = previous.and_then(|p| p.added_by.clone());
+    record.github = previous.and_then(|p| p.github.clone());
+    record.grant = previous.and_then(|p| p.grant.clone());
     if let Some(device) = finding.device {
         record = record.for_device(device, previous.and_then(|p| p.label.clone()));
     }
