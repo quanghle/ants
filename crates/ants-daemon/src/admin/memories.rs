@@ -281,6 +281,32 @@ fn expand(dir: &Path, rest: &[String], out: &mut Vec<PathBuf>, entries: &mut usi
     }
 }
 
+/// The files under `root` that `globs` match, `root` standing for the workdir they are relative to, as paths relative to
+/// `root` in name order: regular files that, their links resolved, still match a glob and lie under `root`. Globs under
+/// `~` are left out, and so is what lies under `skip`, relative to `root`.
+pub fn files_under(globs: &[String], root: &Path, skip: &[&str]) -> Vec<PathBuf> {
+    let Ok(root) = root.canonicalize() else { return Vec::new() };
+    let globs: Vec<Glob> = globs
+        .iter()
+        .filter(|pattern| !pattern.starts_with('~'))
+        .filter_map(|pattern| Glob::of(pattern, &root, &root))
+        .collect();
+    let mut found = Vec::new();
+    let mut entries = MAX_ENTRIES;
+    for glob in &globs {
+        expand(&glob.base, &glob.rest, &mut found, &mut entries);
+    }
+    let mut files = BTreeSet::new();
+    for path in found {
+        let Ok(real) = path.canonicalize() else { continue };
+        let Ok(rel) = real.strip_prefix(&root) else { continue };
+        if real.is_file() && globs.iter().any(|glob| glob.matches(&real)) && !skip.iter().any(|s| rel.starts_with(s)) {
+            files.insert(rel.to_owned());
+        }
+    }
+    files.into_iter().collect()
+}
+
 /// The memory files `globs` match, read: confined to the globs and to `workdir`, `ant_home` and `home`.
 fn files(
     globs: &[String],

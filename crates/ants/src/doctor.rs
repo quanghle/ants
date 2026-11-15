@@ -379,7 +379,7 @@ async fn reach(setup: &Setup, identity: Option<&Identity>, leaf: Option<&Leaf>) 
     checks.extend(check_consumers(&js, identity).await);
     checks.push(check_versions(&js, identity).await);
     checks.push(check_harness_versions(&js).await);
-    checks.push(check_avatars(&js, identity).await);
+    checks.extend(check_avatars(&js, identity).await);
     (checks, Some(Connected { js, rights: identity.rights.clone() }))
 }
 
@@ -733,10 +733,11 @@ async fn check_harness_versions(js: &jetstream::Context) -> Check {
 }
 
 /// Whether two ants in the roster look alike: the same face in the same colour ([`Faces::collisions`]).
-async fn check_avatars(js: &jetstream::Context, identity: &Identity) -> Check {
-    let check = "avatars";
+async fn check_avatars(js: &jetstream::Context, identity: &Identity) -> [Check; 2] {
+    let (check, moved_check) = ("avatars", "moved ants");
     if !identity.me.role.is_human() {
-        return Check::skip(check, "checked with a human's credentials, which list the roster");
+        let why = "checked with a human's credentials, which list the roster";
+        return [Check::skip(check, why), Check::skip(moved_check, why)];
     }
     let read = async {
         let entries = crate::roster::list(js).await?;
@@ -744,11 +745,31 @@ async fn check_avatars(js: &jetstream::Context, identity: &Identity) -> Check {
     };
     match tokio::time::timeout(NETWORK_TIMEOUT * 2, read).await {
         Ok(Ok((entries, identities))) => {
-            avatars(&entries, Faces::new(identities, Depth::Plain, ants_proto::Theme::Dark))
+            let moved = moved(&identities, chrono::Utc::now());
+            [avatars(&entries, Faces::new(identities, Depth::Plain, ants_proto::Theme::Dark)), moved]
         }
-        Ok(Err(e)) => Check::skip(check, format!("no roster or identities read: {e:#}")),
-        Err(_) => Check::skip(check, "no roster or identities read within 10s"),
+        Ok(Err(e)) => {
+            let why = format!("no roster or identities read: {e:#}");
+            [Check::skip(check, why.clone()), Check::skip(moved_check, why)]
+        }
+        Err(_) => {
+            let why = "no roster or identities read within 10s";
+            [Check::skip(check, why), Check::skip(moved_check, why)]
+        }
     }
+}
+
+/// The ants `ants ant export --move` marked moved to another bus, which no daemon here serves.
+fn moved(identities: &crate::avatars::Identities, now: chrono::DateTime<chrono::Utc>) -> Check {
+    let check = "moved ants";
+    let lines: Vec<String> = identities
+        .values()
+        .filter_map(|i| i.moved.as_ref().map(|mark| crate::export::moved_line(&i.ant, mark, now)))
+        .collect();
+    if lines.is_empty() {
+        return Check::ok(check, "no ant is marked moved to another bus");
+    }
+    Check::warn(check, format!("{} ants marked moved to another bus, served by no daemon here", lines.len()), lines)
 }
 
 fn avatars(entries: &[ants_proto::RosterEntry], faces: Faces) -> Check {

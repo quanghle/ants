@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use ants_proto::{MACHINES_BUCKET, Machine, MachineRecord, UserId, subject};
+use ants_proto::{ACCOUNT_HOLDER_KEY, AccountHolder, MACHINES_BUCKET, Machine, MachineRecord, UserId, subject};
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::{StatusCode, jetstream};
 use chrono::Utc;
@@ -20,6 +20,9 @@ const BATCH: usize = 256;
 pub async fn list(js: &jetstream::Context) -> Result<Vec<MachineRecord>> {
     let mut records = Vec::new();
     for (key, payload) in latest(js, &subject::machine_records()).await? {
+        if key == ACCOUNT_HOLDER_KEY {
+            continue;
+        }
         match serde_json::from_slice::<MachineRecord>(&payload) {
             Ok(record) if record.key() == key => records.push(record),
             Ok(_) => tracing::warn!(key, "skipping the record of another machine"),
@@ -27,6 +30,20 @@ pub async fn list(js: &jetstream::Context) -> Result<Vec<MachineRecord>> {
         }
     }
     Ok(sorted(records))
+}
+
+/// The machine holding the team's account key, as `ants signer` there last recorded it; None when no signer did.
+pub async fn holder(js: &jetstream::Context) -> Result<Option<AccountHolder>> {
+    let Some((_, payload)) = latest(js, &subject::account_holder()).await?.pop() else { return Ok(None) };
+    Ok(Some(serde_json::from_slice(&payload).context("the record of the machine holding the account key")?))
+}
+
+/// Where the team's account key is, in words, from `holder` as of `now`: the machine, its host and how long ago
+/// `ants signer` there recorded it.
+pub fn held_on(holder: &AccountHolder, now: chrono::DateTime<Utc>) -> String {
+    let host = if holder.hostname.is_empty() { String::new() } else { format!(" (host {})", holder.hostname) };
+    let ago = short(since(holder.updated_at, now));
+    format!("machine {}{host}, as `ants signer` there recorded {ago} ago", holder.machine)
 }
 
 /// The key and value of each live entry of [`MACHINES_BUCKET`] on `filter` (a subject under `$KV.ants_machines.`), by
@@ -116,6 +133,9 @@ pub async fn show(nats: &crate::Nats<'_>, ant: Option<&UserId>, json: bool) -> R
         println!("no machines recorded");
     } else {
         println!("{}", table(&records, Utc::now()));
+    }
+    if !json && let Ok(Some(holder)) = holder(&js).await {
+        println!("the team's account key is on {}", held_on(&holder, Utc::now()));
     }
     Ok(())
 }

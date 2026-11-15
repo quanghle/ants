@@ -168,6 +168,16 @@ async fn requests_must_prove_their_enrollment_and_leaf_credentials() {
     unsigned.signature = String::new();
     let mut moved = good.clone();
     moved.leaf.as_mut().unwrap().machine = "m2".parse().unwrap();
+    let with_host = |signer: &KeyPair| {
+        let mut request = good.clone();
+        let public_key = KeyPair::new_user().public_key();
+        request.host_creds = Some(EnrollHost { machine: m1.clone(), public_key, signature: String::new() });
+        request.host_creds.as_mut().unwrap().signature = auth::sign(signer, &request.host_signed().unwrap()).unwrap();
+        request
+    };
+    let host_by_stranger = with_host(&stranger);
+    let mut host_moved = with_host(&enrollment_key);
+    host_moved.host_creds.as_mut().unwrap().machine = "m2".parse().unwrap();
     let forged = [
         signed(None, &stranger),
         unsigned,
@@ -175,6 +185,8 @@ async fn requests_must_prove_their_enrollment_and_leaf_credentials() {
         signed(Some((&leaf_jwt, &stranger)), &enrollment_key),
         signed(Some((&posing_jwt, &posing_key)), &enrollment_key),
         signed(Some((&revoked_jwt, &revoked_key)), &enrollment_key),
+        host_by_stranger,
+        host_moved,
     ];
     let sending = async {
         for request in forged.iter().chain([&good]) {
@@ -199,6 +211,59 @@ async fn requests_must_prove_their_enrollment_and_leaf_credentials() {
     let leaf = approved.leaf.unwrap();
     assert_eq!(leaf.machine, m1);
     assert!(!leaf.outbox, "no outbox of m1 to admit dev-a from");
+}
+
+/// A machine asking for its host credentials with an ant gets them once a human approves, unless they would be another
+/// machine's: the team holding live ones of the machine for another key, the machine running a leaf node the request did
+/// not come through, or the request coming through another machine's leaf node. A refusal still approves the ant.
+#[tokio::test]
+async fn an_approval_grants_the_host_credentials_of_the_asking_machine_only() {
+    let Some(server) = Server::start() else { return };
+    let team = server.dir().join("auth");
+    let approver = Approver::connect(&server.url, &team, None, LISTEN).await.unwrap();
+    let m = |s: &str| s.parse::<Machine>().unwrap();
+    let m3_uplink = server.dir().join("leaf-m3.creds");
+    let members = [(p("dev-z"), Role::Ant)];
+    auth::issue_leaf(&team, &m("m3"), &members, &[], EnrollApprover::Without, None, &m3_uplink).unwrap();
+    let ask = async |ant: &str, machine: &str, leaf: Option<&Leaf>, grant: bool| {
+        let ant = p(ant);
+        let creds = enrollment(&server, &ant, Duration::from_secs(60));
+        let (user, host) = (KeyPair::new_user(), HostAsk { machine: m(machine), key: KeyPair::new_user() });
+        let asking = request_with(&server.url, &creds, &ant, &user, leaf, Some(&host), REPEAT, pending());
+        let approving = approver.approve_with(&team, &ant, None, grant);
+        let (approval, approved) =
+            Box::pin(timeout(WAIT * 2, async { tokio::join!(asking, approving) })).await.unwrap();
+        let (approval, approved) = (approval.unwrap(), approved.unwrap_or_else(|e| panic!("{e:#}")));
+        assert_eq!(approved.public_key, user.public_key(), "the ant is approved");
+        (approval.host_jwt, approved.host.unwrap(), host.key.public_key())
+    };
+    let refused = |host: HostApproved, machine: &str| match host {
+        HostApproved::Refused(m, why) if m.as_str() == machine => why,
+        other => panic!("{other:?}"),
+    };
+
+    let (jwt, host, key) = ask("dev-a", "m1", None, true).await;
+    assert_eq!(host, HostApproved::Granted(m("m1")));
+    let claims = auth::verified(&jwt.unwrap()).unwrap();
+    assert_eq!((claims.name.as_str(), claims.sub.as_str()), ("host-m1", key.as_str()));
+    let issued = revoke::issued(&team).unwrap();
+    assert!(issued.iter().any(|i| i.key == key && i.kind == Kind::Host && i.name == "host-m1"), "{issued:?}");
+
+    let (jwt, host, _) = ask("dev-b", "m1", None, true).await;
+    let why = refused(host, "m1");
+    assert!(jwt.is_none() && why.contains(&format!("live host credentials of m1 (key {key})")), "{why}");
+    let (jwt, host, _) = ask("dev-c", "m2", None, false).await;
+    assert!(jwt.is_none() && refused(host, "m2").contains("--no-host"));
+    let (jwt, host, _) = ask("dev-d", "m3", None, true).await;
+    let why = refused(host, "m3");
+    assert!(jwt.is_none() && why.contains("m3 runs a leaf node"), "{why}");
+    let m3 = Leaf { machine: m("m3"), creds: m3_uplink };
+    let (jwt, host, _) = ask("dev-e", "m4", Some(&m3), true).await;
+    let why = refused(host, "m4");
+    assert!(jwt.is_none() && why.contains("those of m4 through the leaf node of m3"), "{why}");
+    let (jwt, host, key) = ask("dev-f", "m3", Some(&m3), true).await;
+    assert_eq!(host, HostApproved::Granted(m("m3")), "through its own leaf node");
+    assert_eq!(auth::verified(&jwt.unwrap()).unwrap().sub, key);
 }
 
 /// A real hub and two leaf nodes: an ant new to m1 asks through m1's uplink, `ants enroll` approves it through

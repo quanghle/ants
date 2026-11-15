@@ -46,7 +46,7 @@ pub(super) async fn apply(js: &jetstream::Context, orders: &Orders, order: &Admi
             Some(json!({ "stopped": stopped, "revoked": [], "home": home, "note": "no credentials to revoke" })),
         );
     };
-    let (revoked, push_error) = match ask(js, host_creds, order, &order.ant, &key, SIGNER_WAIT).await {
+    let (revoked, push_error) = match ask(js, host_creds, None, order, &order.ant, &key, SIGNER_WAIT).await {
         Ok(EnrollReply::Retired { revoked, push_error, .. }) => (revoked, push_error),
         Ok(EnrollReply::Rejected { reason, .. }) => {
             let reason = reason.as_deref().unwrap_or("no reason given");

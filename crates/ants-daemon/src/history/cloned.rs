@@ -129,7 +129,7 @@ mod tests {
     async fn a_copy_reads_back_as_written_before_the_clones_own_entries() {
         let home = ants_test_support::scratch_dir("history-cloned");
         let thread = ThreadId::generate();
-        let start = SystemTime::UNIX_EPOCH + Duration::from_secs(1_794_646_800);
+        let start = SystemTime::UNIX_EPOCH + Duration::from_hours(498_513);
         let copied = [
             Line {
                 from: p("alice"),

@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use ants_daemon::admin::ConfigFile;
 use ants_daemon::admin::restart::Restarts;
+use ants_daemon::admin::{ConfigFile, LeafNode};
 use ants_daemon::config::{self, Ant, HostSettings, Summary};
 use ants_daemon::host::{self, Host};
 use ants_daemon::schedule::Schedule;
@@ -385,6 +385,13 @@ pub fn host(
     host.remote_admin = remote_admin;
     host.config = config;
     Some((host, configs.iter().map(|c| c.ant.clone()).collect()))
+}
+
+/// The machine's leaf node, at ~/.config/ants/leaf.conf, whose uplink an add order renews to carry the ant added
+/// ([`crate::add::renew_and_reconnect`]); none without a home directory.
+pub fn leaf_node() -> Option<LeafNode> {
+    let conf = crate::auth::default_dir().ok()?.with_file_name("leaf.conf");
+    Some(LeafNode { conf, uplink: crate::leaf::read_uplink, renew: crate::add::renew_and_reconnect })
 }
 
 /// How [`run`] ended.

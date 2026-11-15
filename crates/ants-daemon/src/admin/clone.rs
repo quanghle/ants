@@ -18,14 +18,13 @@ use std::time::Duration;
 
 #[cfg(doc)]
 use ants_proto::AdminOp;
-use ants_proto::{AdminOrder, AdminOutcome, AntIdentity, ClonedFrom, EnrollReply, ThreadId, UserId};
+use ants_proto::{AdminOrder, AdminOutcome, AntIdentity, ClonedFrom, ThreadId, UserId};
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream;
 use chrono::Utc;
 use serde_json::{Map, Value, json};
 
-use super::add::{NOT_GIVEN, check_approval, entry, entry_text, key_for, write_secret};
-use super::ask::{SIGNER_WAIT, ask};
+use super::add::{NOT_GIVEN, entry, entry_text, key_for, leaf_uplink, renew, sign, write_secret};
 use super::{ConfigFile, NO_CONFIG, Orders, applied, refused};
 #[cfg(doc)]
 use crate::clone::Snapshot;
@@ -148,20 +147,27 @@ fn mark(order: &AdminOrder) -> String {
     format!("# cloned from {} by {}'s order {}", order.ant, order.admin, order.id)
 }
 
-/// Carry out the clone of the order's ant as `new`, noting in `done` what to undo: what it did, none when the config
-/// shows it done already.
-#[expect(clippy::too_many_arguments)]
-async fn clone(
-    js: &jetstream::Context,
-    orders: &Orders,
-    config: &ConfigFile,
+/// A clone checked before anything changes.
+struct Plan {
+    /// The `[[ant]]` table of the clone.
+    table: String,
+    workdir: PathBuf,
+    src_home: PathBuf,
+    new_home: PathBuf,
+    /// The directory of the host credentials, where the clone's go.
+    dir: PathBuf,
+    creds_path: PathBuf,
+}
+
+/// Check the clone of the order's ant as `new` with the config at `path`: none when the config shows it done already.
+fn plan(
+    path: &Path,
     host_creds: &Path,
     order: &AdminOrder,
     new: &UserId,
     settings: &Map<String, Value>,
-    done: &mut Done,
-) -> Result<Option<Value>> {
-    let (src, path) = (&order.ant, &config.path);
+) -> Result<Option<Plan>> {
+    let src = &order.ant;
     let mark = mark(order);
     let text = std::fs::read_to_string(path).with_context(|| format!("reading config {}", path.display()))?;
     if text.lines().any(|line| line.trim() == mark) {
@@ -208,9 +214,32 @@ async fn clone(
     let (table, probe, workdir) = table(path, ant, &src_home, &new_home, settings, &creds_path, new, &mark)?;
     config::parse(&entry_text(&text, &probe), &std::path::absolute(path)?, &user_home)
         .context("the config with the clone added")?;
+    Ok(Some(Plan { table, workdir, src_home, new_home, dir: dir.to_owned(), creds_path }))
+}
+
+/// Carry out the clone of the order's ant as `new`, noting in `done` what to undo: what it did, none when the config
+/// shows it done already.
+#[expect(clippy::too_many_arguments)]
+async fn clone(
+    js: &jetstream::Context,
+    orders: &Orders,
+    config: &ConfigFile,
+    host_creds: &Path,
+    order: &AdminOrder,
+    new: &UserId,
+    settings: &Map<String, Value>,
+    done: &mut Done,
+) -> Result<Option<Value>> {
+    let (src, path) = (&order.ant, &config.path);
+    let Some(Plan { table, workdir, src_home, new_home, dir, creds_path }) =
+        plan(path, host_creds, order, new, settings)?
+    else {
+        return Ok(None);
+    };
     if !orders.restarts.hears_clones(src) {
         bail!("{} serves no inbox of {src} to clone", orders.machine);
     }
+    let leaf = leaf_uplink(orders.leaf.as_ref())?;
 
     if super::pause::edit(path, src, true)? {
         done.paused = true;
@@ -232,13 +261,7 @@ async fn clone(
     let trees = worktrees(&src_home, &snapshot.threads).await?;
     done.home = Some(new_home.clone());
     copy_home(&src_home, &new_home)?;
-    for copy in &snapshot.threads {
-        let file = crate::history::cloned::path(&new_home, &copy.thread);
-        if let Some(dir) = file.parent() {
-            std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        }
-        std::fs::write(&file, &copy.history).with_context(|| format!("writing {}", file.display()))?;
-    }
+    write_histories(&new_home, &snapshot.threads)?;
     let mut branches = Vec::new();
     for tree in &trees {
         branches.push(tree.add(&src_home, &new_home, new, done).await?);
@@ -248,15 +271,7 @@ async fn clone(
     done.files.push(seed_path.clone());
     let key = key_for(&creds_path, &seed_path, new)?;
     let public_key = key.public_key();
-    let jwt = match ask(js, host_creds, order, new, &public_key, SIGNER_WAIT).await? {
-        EnrollReply::Approved { jwt, .. } => jwt,
-        EnrollReply::Rejected { reason, .. } => {
-            bail!("`ants signer` refused the key: {}", reason.as_deref().unwrap_or("no reason given"))
-        }
-        EnrollReply::Retired { .. } => bail!("`ants signer` answered with a retirement"),
-    };
-    done.key = Some(public_key.clone());
-    check_approval(&jwt, &orders.accounts, new, &public_key)?;
+    let (jwt, renewal) = sign(js, host_creds, leaf, &orders.accounts, order, new, &public_key).await?;
     let seed = key.seed().map_err(|e| anyhow!("the seed of {public_key}: {e}"))?;
     done.files.push(creds_path.clone());
     write_secret(&creds_path, &creds::text(&jwt, &seed))?;
@@ -270,9 +285,9 @@ async fn clone(
         let cwd = if trees.iter().any(|t| t.thread == copy.thread) { tree } else { workdir.clone() };
         let stored = session(snapshot.launch.as_ref(), copy, cwd).await;
         if stored.cloned {
-            restart.push(copy.thread.to_string())
+            restart.push(copy.thread.to_string());
         } else {
-            forked.push(copy.thread.to_string())
+            forked.push(copy.thread.to_string());
         }
         done.sessions.get_or_insert_with(|| (store.clone(), Vec::new())).1.push(copy.thread.clone());
         store.put(&copy.thread, stored).await?;
@@ -290,13 +305,18 @@ async fn clone(
     if workdir.starts_with(&new_home) {
         std::fs::create_dir_all(&workdir).with_context(|| format!("creating {}", workdir.display()))?;
     }
+    // Before listing the ant, so its first connection finds the uplink carrying it.
+    let uplink = match renewal {
+        Some((leaf, machine, renewed)) => Some(renew(leaf, &machine, new, renewed).await),
+        None => None,
+    };
     config::append(path, &table)?;
     if let Err(e) = std::fs::remove_file(&seed_path)
         && e.kind() != std::io::ErrorKind::NotFound
     {
         tracing::warn!(path = %seed_path.display(), error = %e, "removing the key of a cloned ant");
     }
-    Ok(Some(json!({
+    let mut result = json!({
         "creds": creds_path,
         "key": public_key,
         "home": new_home,
@@ -305,11 +325,27 @@ async fn clone(
         "restarted": restart,
         "worktrees": branches,
         "identity": record_summary(&record),
-    })))
+    });
+    if let Some(uplink) = uplink {
+        result["uplink"] = Value::String(uplink);
+    }
+    Ok(Some(result))
 }
 
 fn record_summary(record: &AntIdentity) -> Value {
     json!({ "id": record.id, "prompts": record.prompts, "cloned_from": record.cloned_from })
+}
+
+/// Write the history of each thread of `copies` in `home`, the clone's.
+fn write_histories(home: &Path, copies: &[ThreadCopy]) -> Result<()> {
+    for copy in copies {
+        let file = crate::history::cloned::path(home, &copy.thread);
+        if let Some(dir) = file.parent() {
+            std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        }
+        std::fs::write(&file, &copy.history).with_context(|| format!("writing {}", file.display()))?;
+    }
+    Ok(())
 }
 
 /// Resume `ant`, paused by the clone.

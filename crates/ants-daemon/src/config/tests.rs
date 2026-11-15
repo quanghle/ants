@@ -744,6 +744,7 @@ fn entries_read_back_as_written() {
     full.env.insert("A B".to_owned(), "x=\"y\"".to_owned());
     full.harness = Some("claude".to_owned());
     full.model = Some("m".to_owned());
+    full.fallback = vec!["codex".to_owned(), ":m2".to_owned()];
     full.history_budget = Some(20_000);
     full.allow_tools = true;
     full.allow = vec!["execute:cargo test*".to_owned()];

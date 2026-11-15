@@ -4,21 +4,23 @@
 //! and, unless the settings give one, a `workdir` of the ant's home, created. A comment above the table names the
 //! order, so that the order taken again after the table was written, its outcome not stored, is applied without adding
 //! the ant twice; the key waits in `<ant>.nk` beside the credentials until they are written, so that the signer is
-//! asked about the same key again.
+//! asked about the same key again. On a machine running a leaf node ([`LeafNode`]), the uplink credentials sign the
+//! request too, and the signer renews them to carry the ant, which the daemon has the leaf node use before listing the
+//! ant.
 
 use std::path::{Path, PathBuf};
 
 #[cfg(doc)]
 use ants_proto::AdminOp;
-use ants_proto::{AdminOrder, AdminOutcome, EnrollReply, UserId};
+use ants_proto::{AdminOrder, AdminOutcome, EnrollReply, Machine, UserId};
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream;
 use nkeys::KeyPair;
 use serde_json::{Map, Value, json};
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table};
 
-use super::ask::{SIGNER_WAIT, ask};
-use super::{NO_CONFIG, Orders, applied, refused};
+use super::ask::{SIGNER_WAIT, Uplink, ask};
+use super::{LeafNode, NO_CONFIG, Orders, applied, refused};
 use crate::config::{self, edit::toml_value};
 use crate::creds;
 
@@ -35,11 +37,15 @@ pub(super) async fn apply(
     let Some(host_creds) = &orders.creds else {
         return refused(order, "the machine has no host credentials to ask `ants signer` with");
     };
-    match add(js, &config.path, host_creds, &orders.accounts, order, settings).await {
+    match add(js, &config.path, host_creds, orders.leaf.as_ref(), &orders.accounts, order, settings).await {
         Ok(Added::Already) => applied(order, None),
-        Ok(Added::Now { creds, key }) => {
+        Ok(Added::Now { creds, key, uplink }) => {
             config.edited.notify_one();
-            applied(order, Some(json!({ "creds": creds, "key": key })))
+            let mut result = json!({ "creds": creds, "key": key });
+            if let Some(uplink) = uplink {
+                result["uplink"] = Value::String(uplink);
+            }
+            applied(order, Some(result))
         }
         Err(e) => refused(order, &format!("{e:#}")),
     }
@@ -51,6 +57,8 @@ enum Added {
     Now {
         creds: PathBuf,
         key: String,
+        /// What came of renewing the uplink of the machine's leaf node to carry the ant.
+        uplink: Option<String>,
     },
 }
 
@@ -58,6 +66,7 @@ async fn add(
     js: &jetstream::Context,
     path: &Path,
     host_creds: &Path,
+    leaf: Option<&LeafNode>,
     accounts: &[String],
     order: &AdminOrder,
     settings: &Map<String, Value>,
@@ -98,33 +107,114 @@ async fn add(
     let probe = entry(ant, &creds_path, workdir.as_ref().map(|_| base), settings, &mark)?;
     let probe = entry_text(&text, &probe);
     config::parse(&probe, &std::path::absolute(path)?, &home).context("the config with the ant added")?;
+    let leaf = leaf_uplink(leaf)?;
     let seed_path = dir.join(format!("{ant}.nk"));
     let key = key_for(&creds_path, &seed_path, ant)?;
     let public_key = key.public_key();
-    let jwt = match ask(js, host_creds, order, ant, &public_key, SIGNER_WAIT).await? {
-        EnrollReply::Approved { jwt, .. } => jwt,
-        EnrollReply::Rejected { reason, .. } => {
-            bail!("`ants signer` refused the key: {}", reason.as_deref().unwrap_or("no reason given"))
-        }
-        EnrollReply::Retired { .. } => bail!("`ants signer` answered with a retirement"),
-    };
-    check_approval(&jwt, accounts, ant, &public_key)?;
+    let (jwt, renewal) = sign(js, host_creds, leaf, accounts, order, ant, &public_key).await?;
     let seed = key.seed().map_err(|e| anyhow!("the seed of {public_key}: {e}"))?;
     write_secret(&creds_path, &creds::text(&jwt, &seed))?;
     if let Some(workdir) = &workdir {
         std::fs::create_dir_all(workdir).with_context(|| format!("creating {}", workdir.display()))?;
     }
+    // Before listing the ant, so its first connection finds the uplink carrying it.
+    let uplink = match renewal {
+        Some((leaf, machine, renewed)) => Some(renew(leaf, &machine, ant, renewed).await),
+        None => None,
+    };
     config::append(path, &table)?;
     if let Err(e) = std::fs::remove_file(&seed_path)
         && e.kind() != std::io::ErrorKind::NotFound
     {
         tracing::warn!(path = %seed_path.display(), error = %e, "removing the key of an added ant");
     }
-    Ok(Added::Now { creds: creds_path, key: public_key })
+    Ok(Added::Now { creds: creds_path, key: public_key, uplink })
+}
+
+/// The machine's leaf node, if it runs one, with its uplink.
+pub(super) fn leaf_uplink(leaf: Option<&LeafNode>) -> Result<Option<(&LeafNode, Uplink)>> {
+    let Some(leaf) = leaf.filter(|leaf| leaf.conf.exists()) else { return Ok(None) };
+    let (machine, creds) = (leaf.uplink)(&leaf.conf)
+        .with_context(|| format!("the configuration of the machine's leaf node {}", leaf.conf.display()))?;
+    Ok(Some((leaf, Uplink { machine, creds })))
+}
+
+/// The leaf node of the machine, its machine and its uplink credentials as the signer renewed them to carry an ant.
+pub(super) type Renewal<'a> = (&'a LeafNode, Machine, String);
+
+/// Have `ants signer` sign `public_key` for `ant`, the ant `order` adds or the clone it makes, with the host
+/// credentials at `host_creds`, and renew the uplink of `leaf`, if given, to carry it: the ant's user JWT, checked, and
+/// the renewal, checked, for [`renew`].
+pub(super) async fn sign<'a>(
+    js: &jetstream::Context,
+    host_creds: &Path,
+    leaf: Option<(&'a LeafNode, Uplink)>,
+    accounts: &[String],
+    order: &AdminOrder,
+    ant: &UserId,
+    public_key: &str,
+) -> Result<(String, Option<Renewal<'a>>)> {
+    let uplink = leaf.as_ref().map(|(_, uplink)| uplink);
+    let (jwt, leaf_jwt) = match ask(js, host_creds, uplink, order, ant, public_key, SIGNER_WAIT).await? {
+        EnrollReply::Approved { jwt, leaf_jwt, .. } => (jwt, leaf_jwt),
+        EnrollReply::Rejected { reason, .. } => {
+            bail!("`ants signer` refused the key: {}", reason.as_deref().unwrap_or("no reason given"))
+        }
+        EnrollReply::Retired { .. } => bail!("`ants signer` answered with a retirement"),
+    };
+    check_approval(&jwt, accounts, ant, public_key)?;
+    let renewal = match (leaf, leaf_jwt) {
+        (Some((leaf, uplink)), Some(renewed)) => {
+            check_uplink(&renewed, accounts, &uplink)?;
+            Some((leaf, uplink.machine, renewed))
+        }
+        (Some((_, uplink)), None) => {
+            bail!("`ants signer` renewed no uplink credentials of the leaf node {} to carry {ant}", uplink.machine)
+        }
+        (None, _) => None,
+    };
+    Ok((jwt, renewal))
+}
+
+/// Have the leaf node `leaf` of `machine` use `renewed`, its uplink credentials renewed to carry `ant`: what came of
+/// it, said in the order's outcome. The ant is added all the same, reaching only the ants of the machine until the
+/// uplink carries it.
+pub(super) async fn renew(leaf: &LeafNode, machine: &Machine, ant: &UserId, renewed: String) -> String {
+    let (renew, conf) = (leaf.renew, leaf.conf.clone());
+    match tokio::task::spawn_blocking(move || renew(&conf, &renewed)).await.map_err(anyhow::Error::from) {
+        Ok(Ok(Some(said))) => format!("the uplink credentials of {machine} were renewed to carry {ant}: {said}"),
+        Ok(Ok(None)) => format!(
+            "the uplink credentials of {machine} changed meanwhile and were left as they are: until a human runs \
+             `ants auth leaf {machine} --add-ant {ant}` where the account key is, {ant} reaches only the ants of this \
+             machine"
+        ),
+        Ok(Err(e)) | Err(e) => format!(
+            "renewing the uplink credentials of {machine} to carry {ant} failed: {e:#}; until a human runs `ants auth \
+             leaf {machine} --add-ant {ant}` where the account key is, {ant} reaches only the ants of this machine"
+        ),
+    }
+}
+
+/// Check that `jwt`, the signer's renewal of the credentials of `uplink`, is a leaf node's of its machine for the same
+/// key, which one of `accounts` signed.
+fn check_uplink(jwt: &str, accounts: &[String], uplink: &Uplink) -> Result<()> {
+    let (claims, _) = ants_proto::verified_jwt(jwt).context("the renewed uplink credentials")?;
+    if !accounts.contains(&claims.iss) {
+        bail!(
+            "the renewed uplink credentials are issued by {}, not by the account of the host credentials",
+            claims.iss
+        );
+    }
+    let key = creds::load(&uplink.creds, crate::keystore::os())?.1.public_key();
+    let name = format!("leaf-{}", uplink.machine);
+    if claims.sub != key || claims.name != name {
+        bail!("the renewed uplink credentials are of {} ({}), not of {name} ({key})", claims.name, claims.sub);
+    }
+    Ok(())
 }
 
 /// Check that `jwt`, the signer's approval, is the user JWT of `ant` for `public_key`, which one of `accounts` signed.
-pub(super) fn check_approval(jwt: &str, accounts: &[String], ant: &UserId, public_key: &str) -> Result<()> {
+fn check_approval(jwt: &str, accounts: &[String], ant: &UserId, public_key: &str) -> Result<()> {
     let (claims, _) = ants_proto::verified_jwt(jwt).context("the signed credentials")?;
     if !accounts.contains(&claims.iss) {
         bail!("the signed credentials are issued by {}, not by the account of the host credentials", claims.iss);
