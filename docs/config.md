@@ -21,6 +21,8 @@ summary_ant = "messenger"                  # ant asked for TL;DRs and digests (d
 summaries = "on-demand"                    # default; "ahead" also allows asking for TL;DRs ahead of time (needs the next key)
 summary_daily_tokens = 50000               # most tokens summaries asked ahead of time spend per human and UTC day (default 0)
 inline_images = true                       # draw image attachments in ants chat's thread view (default false; README.md)
+theme = "auto"                             # avatar palette: "dark", "light" or "auto" (default: ask the terminal, else COLORFGBG, else dark)
+animate = true                             # avatar heads in ants chat move with their ant's state (default true; false keeps them still)
 
 [storage]                                  # JetStream capacity warnings (see README.md, JetStream storage)
 warn_percent = 80                          # warn past this share of a store's limit (default 80; 0 disables)
@@ -365,6 +367,17 @@ Each harness process takes hundreds of MB (about 255 MB for Copilot CLI, see REA
 - The daemon logs a warning, sets `memory_low` (`{since, available, max_harnesses}`) in the ant's `ants_roster` entry (shown by `ants roster` and `list_ants`) and `ants_memory_low` to `1` in `/metrics`.
 
 Memory counts as recovered once available memory reaches 150 % of `min_available`, so the state does not flap; the daemon logs it, clears `memory_low` and admits threads up to `max_harnesses` again. Each ant checks on its own, so the lower cap applies per ant. `[memory_pressure]` applies to every ant in the file; changing it on reload restarts them.
+
+## Avatars
+
+Every ant has a pixel-art avatar derived from its identity record in `ants_identities` (its avatar seed, else its
+`id`), or from its name while no record is readable. `ants chat`, `ants roster`, `ants watch`, `ants inbox` and
+`ants ant show` put its one-line face before its name, and the ant view of `ants chat` and `ants ant avatar` draw its
+head. `[cli]` `theme` picks the palette for the terminal's background: `dark`, `light`, or `auto` (the default), which
+asks the terminal for its background colour (OSC 11) and waits up to 200 ms for an answer, then reads `COLORFGBG`,
+else takes `dark`. With `NO_COLOR` set, or off a terminal, faces show without colour and the head as ASCII. `[cli]`
+`animate = false` keeps the heads in `ants chat` still; otherwise only the head on screen moves, and the screen is drawn
+again only when its frame changes.
 
 ## Catch-up summaries
 

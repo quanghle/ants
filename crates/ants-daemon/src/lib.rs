@@ -24,6 +24,7 @@ pub mod history;
 pub mod host;
 pub mod hub;
 pub mod humans;
+pub mod identity;
 pub mod ipc;
 pub mod keystore;
 pub mod links;

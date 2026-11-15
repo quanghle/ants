@@ -506,11 +506,13 @@ impl Shown<'_> {
             Item::Message(e) if row.depth == 0 => self.block(lines, e, entries),
             Item::Message(e) => {
                 let (head, style) = nested(e);
-                let head = format!("{first}{} {head}", hm(e.stored_at));
+                let face = e.from.as_ref().filter(|_| e.kind != Kind::Dead).and_then(|from| self.data.face(from));
+                let mut first = Line::styled(format!("{first}{} ", hm(e.stored_at)), style);
+                first.spans.extend(face.into_iter().flatten());
+                first.spans.push(Span::styled(head, style));
                 let under = format!("{rest}      ");
                 let mut text = text(e, entries, self.width.saturating_sub(under.chars().count()));
-                let room = self.width.saturating_sub(head.chars().count() + 2);
-                let mut first = Line::styled(head, style);
+                let room = self.width.saturating_sub(first.width() + 2);
                 // A text of one line short enough goes on the line of the heading.
                 if let [line] = &mut text[..]
                     && line.width() <= room
@@ -548,10 +550,12 @@ impl Shown<'_> {
         } else {
             Style::new().fg(Color::Magenta).bold()
         };
-        let mut head = vec![
+        let face = e.from.as_ref().and_then(|from| self.data.face(from));
+        let mut head: Vec<Span<'static>> = face.into_iter().flatten().collect();
+        head.extend([
             Span::styled(format!("{from}{to}"), from_style),
             Span::styled(format!("  {}", hm(e.stored_at)), frame::dim()),
-        ];
+        ]);
         let (what, style) = match e.kind {
             Kind::Escalation => {
                 (format!("escalation: {}", e.note.as_deref().unwrap_or("")), Style::new().fg(Color::Red))
@@ -826,8 +830,10 @@ mod tests {
         page.history.loaded(&thread, Ok(entries[..3].to_vec())).unwrap();
         page.about = Some(About { spend: Some(Vec::new()), ..About::default() });
 
+        m.data.live.roster(vec![crate::roster::tests::entry("dev-a", 3600, 2, at(5))], at(5));
         let shown = screen(&page, &m, 110, at(47));
         assert!(shown.contains("alice → dev-a"), "{shown}");
+        assert!(shown.contains("17:00 {.~.} dev-a → dev-b"), "an ant's face before its name: {shown}");
         assert!(shown.contains("  deploy the site"), "{shown}");
         assert!(shown.contains("read    read migrations") || shown.contains("execute read migrations"), "{shown}");
         assert!(shown.contains("ok 0ms"), "{shown}");

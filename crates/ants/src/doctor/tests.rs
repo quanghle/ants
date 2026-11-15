@@ -173,6 +173,27 @@ async fn an_ants_credentials_skip_the_hub_check() {
 }
 
 #[test]
+fn ants_looking_alike_are_warned_of() {
+    let now = chrono::Utc::now();
+    let entries: Vec<ants_proto::RosterEntry> =
+        ["dev-a", "dev-b"].map(|ant| crate::roster::tests::entry(ant, 60, 2, now)).into();
+    let check = avatars(&entries, Faces::new(Default::default(), Depth::Plain, ants_proto::Theme::Dark));
+    assert_eq!(
+        (check.status, check.detail.as_str()),
+        (Status::Ok, "2 ants in the roster, each with a face of its own")
+    );
+    let mut identities = crate::avatars::Identities::new();
+    for e in &entries {
+        let mut record = ants_proto::AntIdentity::new(e.ant.clone(), format!("{}-id", e.ant), now);
+        record.avatar = Some("twin".to_owned());
+        identities.insert(e.ant.clone(), record);
+    }
+    let check = avatars(&entries, Faces::new(identities, Depth::Plain, ants_proto::Theme::Dark));
+    assert_eq!(check.status, Status::Warn, "{check}");
+    assert!(check.fix[0].starts_with("dev-a and dev-b share the face "), "{check}");
+}
+
+#[test]
 fn harness_versions_warn_of_drift_across_machines() {
     let now = chrono::Utc::now();
     let entry = |ant: &str, machine: &str, version: Option<&str>| {

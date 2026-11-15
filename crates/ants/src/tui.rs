@@ -19,6 +19,7 @@ mod complete;
 mod credentials;
 mod dm;
 mod exec;
+mod faces;
 mod frame;
 mod home;
 mod images;
@@ -183,6 +184,9 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
     model.catchup.ahead = summaries.ahead();
     let inline_images = crate::defaults::inline_images()?;
     model.data.images = images::Images::new(inline_images);
+    // Before the screen takes the terminal, which then answers no query of its background.
+    model.data.looks = faces::Looks::of_terminal();
+    let looks = faces::Io::new(js.clone());
     // The UI shows the replies and the tool requests as they come, so notifications spare this device theirs meanwhile.
     let shown = async {
         let mut screen = Screen::open()?;
@@ -200,6 +204,7 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
             cards,
             summaries,
             images,
+            looks,
             exec,
             model,
             edit: None,
@@ -263,16 +268,29 @@ struct Chat {
     summaries: catchup::Io,
     /// The images drawn, with `[cli]` `inline_images` on.
     images: Option<images::Io>,
+    /// The reads of the ants' identity records, for their avatars.
+    looks: faces::Io,
     model: Model,
     /// The command bar's text to edit in the editor.
     edit: Option<String>,
 }
 
 impl Chat {
+    /// Move the head of the ant shown to its next frame; whether the frame changed.
+    fn animate(&mut self, started: Instant) -> bool {
+        let now = Utc::now();
+        let shown = self.model.ant_shown().map(|ant| {
+            let mood = faces::mood(&self.model.data, &ant, now);
+            (ant, mood)
+        });
+        self.model.data.looks.tick(shown, started.elapsed().as_secs_f64())
+    }
+
     async fn run(mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         let mut ticks = tokio::time::interval(TICK);
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let (mut dirty, mut drawn, mut logged) = (true, Instant::now(), None);
+        let started = Instant::now();
         loop {
             if let Some(action) = self.model.link(self.feed.connected(), Utc::now())
                 && self.act(action).is_break()
@@ -287,6 +305,7 @@ impl Chat {
                     }
                     dirty |= self.held_log(&mut logged);
                     self.cards.threads(&self.model.data.live.order);
+                    dirty |= self.animate(started);
                     if dirty || drawn.elapsed() >= REDRAW {
                         terminal.draw(|f| frame::draw(f, &self.model, Utc::now())).context("drawing")?;
                         (dirty, drawn) = (false, Instant::now());
@@ -340,6 +359,10 @@ impl Chat {
                 }
                 event = self.credentials.next() => {
                     self.model.credentials(event, Utc::now());
+                    Some(Vec::new())
+                }
+                identities = self.looks.next() => {
+                    self.model.data.looks.set(identities);
                     Some(Vec::new())
                 }
                 (handle, image) = next_image(self.images.as_mut()) => {
@@ -462,6 +485,7 @@ impl Chat {
                 self.ants.refresh();
                 self.credentials.refresh();
                 self.cards.refresh();
+                self.looks.refresh();
                 if let Some(thread) = self.model.open_thread() {
                     self.feed.load_history(thread, true);
                 }

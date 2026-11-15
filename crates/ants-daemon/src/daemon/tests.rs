@@ -212,6 +212,7 @@ impl Bus {
             },
             failover: crate::fallback::Failover::default(),
             fallback_retry: Duration::from_millis(300),
+            identity: None,
         };
         let stop = || {
             let ctrl_c = ctrl_c.clone();

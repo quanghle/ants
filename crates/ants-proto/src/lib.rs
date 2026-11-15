@@ -22,6 +22,7 @@ mod error;
 mod escalation;
 mod grant;
 mod humans;
+mod identity;
 mod ids;
 mod inbox;
 mod keys;
@@ -54,6 +55,7 @@ pub use error::*;
 pub use escalation::*;
 pub use grant::*;
 pub use humans::*;
+pub use identity::*;
 pub use ids::*;
 pub use inbox::*;
 pub use keys::*;
@@ -209,6 +211,13 @@ pub const REACTIONS_WAIT: Duration = Duration::from_secs(10);
 /// ([`Envelope::title`], [`ChannelPost::title`], [`NotesPost::title`]) and a TL;DR an ant replies with
 /// ([`Envelope::summary`]) get there through a human's CLI. Entries never expire.
 pub const THREADS_BUCKET: &str = "ants_threads";
+/// KV bucket of the ants' identities: one [`AntIdentity`] per ant, keyed by its name ([`subject::identity`]), what
+/// makes it the same ant on every machine, its avatar included. Its daemon creates it on start only when absent, with a
+/// KV create, so the first creator wins, and the daemon serving the ant counts its completed prompts in it by
+/// compare-and-set. Each ant writes only its own key; humans read all and set an ant's avatar and colour; the
+/// short-lived credentials of `ants auth revoke` delete the record of an ant revoked whole
+/// ([`Permissions::for_device_revoker`]). Entries never expire.
+pub const IDENTITIES_BUCKET: &str = "ants_identities";
 /// Most characters a thread title has.
 pub const MAX_TITLE: usize = 120;
 /// How often a following CLI re-puts its device's [`Presence`].

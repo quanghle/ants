@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use ants_proto::{ApprovalRequest, Question, ThreadId, Uuid, Verdict};
+use ants_proto::{ApprovalRequest, Question, ThreadId, UserId, Uuid, Verdict};
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -93,6 +93,8 @@ pub struct Item {
     pub at: DateTime<Utc>,
     /// Who or what, in a line.
     pub text: String,
+    /// Who the line starts with, whose face goes before it.
+    pub who: Option<UserId>,
     /// The tool request of an approval, and how it was settled lately, if it was.
     pub request: Option<(ApprovalRequest, Option<State>)>,
     /// The question asked.
@@ -147,41 +149,46 @@ fn unsnoozed(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
                 thread: request.thread_id.clone(),
                 at: request.requested_at,
                 text: format!("{} asks to run {}: {}", request.ant, request.tool.kind, request.tool.title),
+                who: Some(request.ant.clone()),
                 request: Some((request.clone(), card.settled.cloned())),
                 question: None,
             }
         })
         .collect();
-    let item = |why, thread: &ThreadId, at, text| Item {
+    let item = |why, thread: &ThreadId, at, text, who: &UserId| Item {
         why,
         thread: thread.clone(),
         at,
         text,
+        who: Some(who.clone()),
         request: None,
         question: None,
     };
     for thread in &data.live.order {
         if let Some(asked) = data.question(thread) {
             let text = format!("{}: {}", asked.from, asked.question.text);
-            items.push(Item { question: Some(asked.question.clone()), ..item(Why::Question, thread, asked.at, text) });
+            items.push(Item {
+                question: Some(asked.question.clone()),
+                ..item(Why::Question, thread, asked.at, text, &asked.from)
+            });
         }
         if let Some(alert) = data.stuck(thread) {
-            items.push(item(Why::Stuck, thread, alert.at, alert.text.clone()));
+            items.push(Item { who: None, ..item(Why::Stuck, thread, alert.at, alert.text.clone(), data.me()) });
         }
         let me = data.me();
         if let Some(m) =
             data.unread_on(thread).find(|i| i.kind == Kind::Message && i.from != *me && data.is_human(&i.from))
         {
-            items.push(item(Why::Message, thread, m.at, format!("{}: {}", m.from, m.text)));
+            items.push(item(Why::Message, thread, m.at, format!("{}: {}", m.from, m.text), &m.from));
         }
         if let Some(m) = data.unread_on(thread).find(|i| i.kind == Kind::Mention) {
             let text = format!("{} in #{}: {}", m.from, m.channel.as_ref().map_or("?", |c| c.as_str()), m.text);
-            items.push(item(Why::Mention, thread, m.at, text));
+            items.push(item(Why::Mention, thread, m.at, text, &m.from));
         }
         if data.finished(thread)
             && let Some(latest) = data.facts.get(thread).and_then(|f| f.latest.as_ref())
         {
-            items.push(item(Why::Finished, thread, latest.at, format!("{} answered", latest.from)));
+            items.push(item(Why::Finished, thread, latest.at, format!("{} answered", latest.from), &latest.from));
         }
     }
     items
@@ -292,7 +299,13 @@ impl Page {
                         Span::raw(data.title(&i.thread)),
                         Span::styled(format!("  {}", ago(i.at, now)), frame::dim()),
                     ]),
-                    Line::styled(format!("         {}", crate::excerpt(&i.text, 160)), frame::dim()),
+                    Line::from(
+                        [Span::raw("         ")]
+                            .into_iter()
+                            .chain(i.who.as_ref().and_then(|who| data.face(who)).into_iter().flatten())
+                            .chain([Span::styled(crate::excerpt(&i.text, 160), frame::dim())])
+                            .collect::<Vec<_>>(),
+                    ),
                 ];
                 if let Some(question) = &i.question {
                     lines.push(Line::raw(format!("         {}", crate::excerpt(&question::options(question), 160))));

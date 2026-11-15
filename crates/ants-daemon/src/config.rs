@@ -19,6 +19,8 @@
 //! summary_daily_tokens = 50000      # most tokens a human's summaries spend a UTC day ahead of time (default 0)
 //! summary_ant = "messenger"         # the ant asked for TL;DRs and digests (default: the messenger)
 //! inline_images = true              # draw image attachments in `ants chat` (default false: their lines only)
+//! theme = "auto"                    # the avatars' colours: "auto" (ask the terminal, the default), "dark" or "light"
+//! animate = true                    # move the avatars in `ants chat` with their ants' states (the default)
 //!
 //! [storage]                         # warnings of JetStream storage filling up (crate::storage)
 //! warn_percent = 80                 # warn a human past this share of a store's limit; 0 never
@@ -1057,6 +1059,20 @@ struct CliSection {
     summary_daily_tokens: u64,
     #[serde(default)]
     inline_images: bool,
+    #[serde(default)]
+    theme: Theme,
+    animate: Option<bool>,
+}
+
+/// The terminal background the avatars' colours are picked for: `[cli]` `theme`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Theme {
+    /// Ask the terminal for its background colour (OSC 11), else go by `COLORFGBG`, else dark.
+    #[default]
+    Auto,
+    Dark,
+    Light,
 }
 
 impl CliSection {
@@ -1101,8 +1117,8 @@ impl Default for SummaryConfig {
 
 /// What the CLI connects with where neither a flag nor the environment sets it: the `[cli]` section of a config
 /// file, else its top-level `nats` and `js_domain`. Credentials come from `[cli]` alone, an ant's being no human's,
-/// as do `auto_archive`, the summary keys and `inline_images`.
-#[derive(Debug, Default, PartialEq)]
+/// as do `auto_archive`, the summary keys, `inline_images`, `theme` and `animate`.
+#[derive(Debug, PartialEq)]
 pub struct CliDefaults {
     pub nats: Option<String>,
     pub creds: Option<PathBuf>,
@@ -1114,6 +1130,25 @@ pub struct CliDefaults {
     pub summaries: SummaryConfig,
     /// Whether `ants chat` draws image attachments in the terminal.
     pub inline_images: bool,
+    /// The terminal background the avatars' colours are picked for.
+    pub theme: Theme,
+    /// Whether `ants chat` moves the avatars with their ants' states; still heads otherwise.
+    pub animate: bool,
+}
+
+impl Default for CliDefaults {
+    fn default() -> Self {
+        Self {
+            nats: None,
+            creds: None,
+            js_domain: None,
+            auto_archive: None,
+            summaries: SummaryConfig::default(),
+            inline_images: false,
+            theme: Theme::Auto,
+            animate: true,
+        }
+    }
 }
 
 impl CliDefaults {
@@ -1146,7 +1181,9 @@ impl CliDefaults {
         let creds = view.cli.creds.map(|c| resolve(&c, base, home));
         let auto_archive = Some(view.cli.auto_archive).filter(|d| !d.is_zero());
         let js_domain = view.cli.js_domain.or(view.js_domain);
-        Ok(Self { nats, creds, js_domain, auto_archive, summaries, inline_images: view.cli.inline_images })
+        let (inline_images, theme, animate) =
+            (view.cli.inline_images, view.cli.theme, view.cli.animate.unwrap_or(true));
+        Ok(Self { nats, creds, js_domain, auto_archive, summaries, inline_images, theme, animate })
     }
 }
 

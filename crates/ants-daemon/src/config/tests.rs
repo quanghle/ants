@@ -686,6 +686,10 @@ fn the_cli_section_overrides_the_top_level_server() {
     assert!(!relative.inline_images, "off by default");
     assert!(cli("[cli]\ninline_images = true").unwrap().inline_images);
     assert!(parse_all("[cli]\ninline_images = true").is_ok(), "the daemon accepts it");
+    assert_eq!((relative.theme, relative.animate), (Theme::Auto, true), "asked of the terminal, moving");
+    let still = cli("[cli]\ntheme = \"light\"\nanimate = false").unwrap();
+    assert_eq!((still.theme, still.animate), (Theme::Light, false));
+    assert!(cli("[cli]\ntheme = \"blue\"").is_err());
 
     assert_eq!(relative.summaries, SummaryConfig::default(), "on demand, by the messenger");
     let ahead = cli("[cli]\nsummaries = \"ahead\"\nsummary_daily_tokens = 50000\nsummary_ant = \"scribe\"").unwrap();

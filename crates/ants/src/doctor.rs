@@ -23,6 +23,7 @@ use async_nats::jetstream;
 use hyper::StatusCode;
 use serde::Serialize;
 
+use crate::avatars::{Depth, Faces};
 use crate::bridge::{self, Probe};
 use crate::humans::{Me, Rights};
 use crate::service::{Action, Service, Services, State, Unit};
@@ -378,6 +379,7 @@ async fn reach(setup: &Setup, identity: Option<&Identity>, leaf: Option<&Leaf>) 
     checks.extend(check_consumers(&js, identity).await);
     checks.push(check_versions(&js, identity).await);
     checks.push(check_harness_versions(&js).await);
+    checks.push(check_avatars(&js, identity).await);
     (checks, Some(Connected { js, rights: identity.rights.clone() }))
 }
 
@@ -726,6 +728,34 @@ async fn check_harness_versions(js: &jetstream::Context) -> Check {
         Ok(Err(e)) => Check::skip("harness versions", format!("no roster read: {e:#}")),
         Err(_) => Check::skip("harness versions", "no roster read within 10s"),
     }
+}
+
+/// Whether two ants in the roster look alike: the same face in the same colour ([`Faces::collisions`]).
+async fn check_avatars(js: &jetstream::Context, identity: &Identity) -> Check {
+    let check = "avatars";
+    if !identity.me.role.is_human() {
+        return Check::skip(check, "checked with a human's credentials, which list the roster");
+    }
+    let read = async {
+        let entries = crate::roster::list(js).await?;
+        anyhow::Ok((entries, crate::avatars::read(js).await?))
+    };
+    match tokio::time::timeout(NETWORK_TIMEOUT * 2, read).await {
+        Ok(Ok((entries, identities))) => {
+            avatars(&entries, Faces::new(identities, Depth::Plain, ants_proto::Theme::Dark))
+        }
+        Ok(Err(e)) => Check::skip(check, format!("no roster or identities read: {e:#}")),
+        Err(_) => Check::skip(check, "no roster or identities read within 10s"),
+    }
+}
+
+fn avatars(entries: &[ants_proto::RosterEntry], faces: Faces) -> Check {
+    let check = "avatars";
+    let collisions = faces.collisions(entries.iter().map(|e| &e.ant));
+    if collisions.is_empty() {
+        return Check::ok(check, format!("{} ants in the roster, each with a face of its own", entries.len()));
+    }
+    Check::warn(check, "ants look alike", collisions)
 }
 
 fn harness_versions(entries: &[ants_proto::RosterEntry], now: chrono::DateTime<chrono::Utc>) -> Check {

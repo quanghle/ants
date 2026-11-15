@@ -219,11 +219,14 @@ impl Page {
 /// reactions.
 fn post_lines(post: &Post, data: &Data, now: DateTime<Utc>, marked: Option<usize>) -> Vec<Line<'static>> {
     let first = post.text.lines().next().unwrap_or_default();
-    let mut lines = vec![Line::from(vec![
+    let face = post.from.parse().ok().and_then(|from| data.face(&from));
+    let mut head: Vec<Span<'static>> = face.into_iter().flatten().collect();
+    head.extend([
         Span::styled(post.from.clone(), Style::new().fg(Color::Blue).bold()),
         Span::styled(format!(" {} ", ago(post.at, now)), frame::dim()),
         Span::raw(crate::excerpt(first, 200)),
-    ])];
+    ]);
+    let mut lines = vec![Line::from(head)];
     lines.extend(attach::lines(&post.attachments, marked, "  "));
     let mut under = Vec::new();
     if let Some(r) = data.feeds.replies(&post.thread) {

@@ -7,7 +7,7 @@ use anyhow::Result;
 use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
 
-use crate::{ant, completions, orders};
+use crate::{ant, avatars, completions, orders};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum AntCommand {
@@ -34,6 +34,26 @@ pub(crate) enum AntCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Print ANT's avatar: its pixel-art head, one-line face, parts and colour, when it was born and how it grew with
+    /// the prompts it completed. --seed or --reset and --color or --auto-color change it in the ant's identity record
+    /// by compare-and-set, the same for every machine and viewer. Needs a human's credentials.
+    Avatar {
+        #[arg(add = ArgValueCandidates::new(completions::ants))]
+        ant: UserId,
+        /// Draw the avatar from this seed instead of the ant's id, such as when two ants look alike.
+        #[arg(long, conflicts_with = "reset")]
+        seed: Option<String>,
+        /// Draw the avatar from the ant's id again.
+        #[arg(long)]
+        reset: bool,
+        /// Colour the avatar in this hue: red, orange, yellow, lime, green, mint, cyan, azure, blue, violet, magenta or
+        /// rose.
+        #[arg(long, conflicts_with = "auto_color")]
+        color: Option<String>,
+        /// Colour the avatar in the hue its seed picks again.
+        #[arg(long)]
+        auto_color: bool,
+    },
 }
 
 pub(crate) async fn run(nats: &crate::Nats<'_>, command: AntCommand) -> Result<()> {
@@ -47,5 +67,12 @@ pub(crate) async fn run(nats: &crate::Nats<'_>, command: AntCommand) -> Result<(
             ant::show(nats, ant, &caps, json).await
         }
         AntCommand::Orders { ant, json } => orders::show(nats, &ant, json).await,
+        AntCommand::Avatar { ant, seed, reset, color, auto_color } => {
+            let change = avatars::Change {
+                seed: if reset { Some(None) } else { seed.map(Some) },
+                color: if auto_color { Some(None) } else { color.map(Some) },
+            };
+            avatars::show(nats, &ant, change).await
+        }
     }
 }

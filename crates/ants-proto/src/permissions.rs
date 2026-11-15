@@ -4,11 +4,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, ChannelId, DEVICES_BUCKET, ENROLL_INBOX, FILES_BUCKET,
-    FILES_STREAM, Feed, HUMANS_BUCKET, INTAKE_STREAM, JsDomain, LINKS_BUCKET, MACHINES_BUCKET, Machine, NOTIFY_BUCKET,
-    OUTBOX_STREAM, OWNERS_BUCKET, PRESENCE_BUCKET, REACTIONS_BUCKET, READ_BUCKET, ROSTER_BUCKET, Role, SESSIONS_BUCKET,
-    STORAGE_WARNING_PREFIX, STREAM, THREADS_BUCKET, UserId, WEBHOOK_MARKER, WEBHOOKS_BUCKET, admin_consumer,
-    chan_consumer, chan_reader, channel_manager_serving_subject, dead_reader, host_inbox_prefix, inbox_consumer,
-    inbox_prefix, marks_key, notes_consumer, notify_consumer, sent_reader, snoozed_key, spare_readers, subject,
+    FILES_STREAM, Feed, HUMANS_BUCKET, IDENTITIES_BUCKET, INTAKE_STREAM, JsDomain, LINKS_BUCKET, MACHINES_BUCKET,
+    Machine, NOTIFY_BUCKET, OUTBOX_STREAM, OWNERS_BUCKET, PRESENCE_BUCKET, REACTIONS_BUCKET, READ_BUCKET,
+    ROSTER_BUCKET, Role, SESSIONS_BUCKET, STORAGE_WARNING_PREFIX, STREAM, THREADS_BUCKET, UserId, WEBHOOK_MARKER,
+    WEBHOOKS_BUCKET, admin_consumer, chan_consumer, chan_reader, channel_manager_serving_subject, dead_reader,
+    host_inbox_prefix, inbox_consumer, inbox_prefix, marks_key, notes_consumer, notify_consumer, sent_reader,
+    snoozed_key, spare_readers, subject,
 };
 #[cfg(doc)]
 use crate::{
@@ -21,6 +22,21 @@ use crate::{
 /// JetStream stream backing a KV bucket.
 fn kv_stream(bucket: &str) -> String {
     format!("KV_{bucket}")
+}
+
+/// Whether the permission subject `pattern` allows publishing `subject`, a permission subject too: token by token, `*`
+/// standing for any one token and `>` for the rest.
+fn covers(pattern: &str, subject: &str) -> bool {
+    let mut subject = subject.split('.');
+    for token in pattern.split('.') {
+        match (token, subject.next()) {
+            (">", Some(_)) => return true,
+            ("*", Some(s)) if s != ">" => {}
+            (t, Some(s)) if t == s => {}
+            _ => return false,
+        }
+    }
+    subject.next().is_none()
 }
 
 /// What acks the messages `consumer` of `stream` delivers, in both forms of nats-server's ack subjects (ADR-15): v1
@@ -47,6 +63,18 @@ fn machine_record_rights() -> [String; 3] {
         format!("$JS.API.STREAM.INFO.{machines}"),
         format!("$JS.API.STREAM.CREATE.{machines}"),
         format!("$JS.API.DIRECT.GET.{machines}"),
+    ]
+}
+
+/// What a human's credentials need of [`IDENTITIES_BUCKET`]: creating it, reading every ant's identity by batched
+/// direct gets naming no subject, and setting an ant's avatar and colour by compare-and-set on its key. No stream info
+/// or consumer, as a human's JWT has little room left.
+fn identity_rights() -> [String; 3] {
+    let identities = kv_stream(IDENTITIES_BUCKET);
+    [
+        format!("$JS.API.STREAM.CREATE.{identities}"),
+        format!("$JS.API.DIRECT.GET.{identities}"),
+        format!("$KV.{IDENTITIES_BUCKET}.*"),
     ]
 }
 
@@ -128,7 +156,6 @@ fn human_reaction_rights(human: &UserId) -> Vec<String> {
     let reactions = kv_stream(REACTIONS_BUCKET);
     let own = format!("$KV.{REACTIONS_BUCKET}.{human}.>");
     let mut rights = vec![
-        format!("$JS.API.DIRECT.GET.{reactions}.{own}"),
         own,
         format!("$JS.API.STREAM.INFO.{reactions}"),
         format!("$JS.API.STREAM.CREATE.{reactions}"),
@@ -272,6 +299,10 @@ impl Permissions {
     /// An ant stores the tool-call timeline of its own work ([`subject::timeline_from`]) and reads none back; a human
     /// reads every timeline by message gets.
     ///
+    /// An ant creates and updates its own identity record in [`IDENTITIES_BUCKET`] ([`subject::identity`]), no other's,
+    /// and reads every ant's, which say nothing secret; a human reads every ant's and sets their avatars and colours
+    /// ([`identity_rights`]).
+    ///
     /// Each inbox, notes and channel subject an ant may publish, and its own dead letter and timeline subjects, it may
     /// also publish in its outbox form ([`subject::outbox`]), which only a leaf node's outbox keeps, and so the links it passes on
     /// ([`link_outbox`]). Only a human sets up leaf outboxes, the hub's intake and the buckets' sources from it: a
@@ -299,7 +330,8 @@ impl Permissions {
     /// It sends only as itself, never under any sender as a human may, nor writes attachments under another's name.
     /// It gets none of a human's rights whose subjects do not name who acts, which readers could not tell from its
     /// human's: sending admin orders, deciding approval requests, cancelling, queueing or withdrawing an ant's messages,
-    /// recording a thread's owner, putting dead letters, answering an ant's reactions requests or another's renewal. Nor
+    /// recording a thread's owner, putting dead letters, answering an ant's reactions requests or another's renewal,
+    /// setting another ant's avatar ([`IDENTITIES_BUCKET`]). Nor
     /// does it change the team: no entry of [`HUMANS_BUCKET`] (where its human's grant stands) or [`CHANNELS_BUCKET`],
     /// no stream created, updated or purged of a message. It puts no device encryption key, no presence and no
     /// notification holds, which only a human's devices have, and it gets no power of the account key: it signs no
@@ -324,6 +356,7 @@ impl Permissions {
             format!("$KV.{OWNERS_BUCKET}.*.*"),
             "ants.out.owners.*.*".to_owned(),
             format!("$KV.{CHANNELS_BUCKET}.>"),
+            format!("$KV.{IDENTITIES_BUCKET}.*"),
             format!("$JS.API.STREAM.INFO.{OUTBOX_STREAM}"),
             format!("$JS.API.STREAM.INFO.{INTAKE_STREAM}"),
         ];
@@ -531,6 +564,7 @@ impl Permissions {
             publish.push(format!("$JS.*.API.STREAM.{op}.{OUTBOX_STREAM}"));
         }
         publish.extend(machine_record_rights());
+        publish.extend(identity_rights());
         publish.extend(read_marker_rights(user));
         publish.extend(presence_rights(user));
         publish.extend(thread_rights(user));
@@ -591,6 +625,10 @@ impl Permissions {
             // Put and delete of its own roster entry, and of its own escalation chain.
             subject::roster(user),
             subject::chain(user),
+            // Get of every ant's identity record, by direct gets naming no subject, one right shared by every ant
+            // behind a leaf's uplink; create and update of its own only.
+            format!("$JS.API.DIRECT.GET.{}", kv_stream(IDENTITIES_BUCKET)),
+            subject::identity(user),
             // Put of the links it passed on, and the same in the leaf's outbox.
             format!("$KV.{LINKS_BUCKET}.{user}.>"),
             format!("ants.out.links.{user}.>"),
@@ -637,7 +675,8 @@ impl Permissions {
     /// ants process does when the hub has a domain. KV puts and deletes then go through that prefix too
     /// (`$JS.<domain>.API.$KV.…`). The plain subjects stay allowed: the hub maps the domain prefix onto them and checks
     /// the mapped subject against the permissions as well. Acks, flow control and ants subjects are the same in both.
-    /// Without a domain the permissions are unchanged.
+    /// A domain form already allowed by a wildcard (`$JS.*.API.…`) is not listed again, saving room in the JWT. Without
+    /// a domain the permissions are unchanged.
     #[must_use]
     pub fn with_js_domain(mut self, domain: Option<&JsDomain>) -> Self {
         let Some(domain) = domain else { return self };
@@ -650,6 +689,7 @@ impl Permissions {
                 None if s.starts_with("$KV.") => Some(format!("{api}{s}")),
                 None => None,
             })
+            .filter(|s| !self.publish.iter().any(|have| covers(have, s)))
             .collect();
         self.publish.extend(in_domain);
         self
@@ -978,7 +1018,8 @@ impl Permissions {
     /// What the short-lived credentials `ants auth revoke` and `ants auth push` issue themselves from the account key
     /// allow, to say in [`DEVICES_BUCKET`] which keys of humans' credentials are revoked: creating the bucket, reading
     /// and putting the revocation records ([`subject::revoked_devices`]) and nothing else of it, with the replies of
-    /// its JetStream requests under [`ENROLL_INBOX`]. No other credentials put a revocation record.
+    /// its JetStream requests under [`ENROLL_INBOX`]. No other credentials put a revocation record. They also delete
+    /// the identity record of an ant revoked whole ([`IDENTITIES_BUCKET`]), ending the ant.
     pub fn for_device_revoker() -> Self {
         let devices = kv_stream(DEVICES_BUCKET);
         let revoked = subject::revoked_devices();
@@ -989,6 +1030,7 @@ impl Permissions {
                 format!("$JS.API.STREAM.CREATE.{devices}"),
                 format!("$JS.API.DIRECT.GET.{devices}.{revoked}"),
                 revoked,
+                format!("$KV.{IDENTITIES_BUCKET}.*"),
             ],
             subscribe: vec![format!("{ENROLL_INBOX}.>")],
         }

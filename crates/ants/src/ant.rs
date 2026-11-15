@@ -108,17 +108,18 @@ pub async fn show(nats: &crate::Nats<'_>, ant: UserId, caps: &BTreeMap<UserId, C
         idle_before: None,
     };
     let (threads, omitted) = thread::listed(nats, None, &select).await?;
+    let faces = crate::avatars::Faces::stdout(crate::avatars::read_or_none(&js).await);
     let now = Utc::now();
     let holds = holds(&ant, entry.as_ref(), now);
     if json {
-        let roster = entry.as_ref().map(|e| roster::json(e, now)).transpose()?;
+        let roster = entry.as_ref().map(|e| roster::json(e, now, &faces)).transpose()?;
         let roster = roster.map(|r| serde_json::from_str(&r)).transpose()?;
         let (queue, queue_unlisted) = queue.map_or((None, 0), |(waiting, more)| (Some(waiting), more));
         let shown = Shown { ant, roster, holds, queue, queue_unlisted, spend_today: spend, threads };
         println!("{}", serde_json::to_string(&shown)?);
         return Ok(());
     }
-    println!("{ant}: {}", state(entry.as_ref(), now));
+    println!("{}: {}", faces.named(&ant), state(entry.as_ref(), now));
     if let Some(e) = &entry {
         for (label, value) in about(e, now) {
             let value = value.lines().collect::<Vec<_>>().join(&format!("\n  {:13} ", ""));

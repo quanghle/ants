@@ -239,6 +239,11 @@ impl Status {
     }
 
     /// Where `ant` stands, as the line tells it after the ant's name; None when it is not shown.
+    /// Where `ant` stands on the thread, and whether its harness is signed out, if it was heard from.
+    pub fn stand(&self, ant: &UserId) -> Option<(&Stand, bool)> {
+        self.ants.iter().find(|v| v.ant == *ant).map(|v| (&v.stand, v.signed_out))
+    }
+
     pub fn of(&self, ant: &UserId) -> Option<String> {
         let view = self.ants.iter().find(|v| v.ant == *ant)?;
         let line = describe(view);
