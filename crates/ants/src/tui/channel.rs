@@ -279,7 +279,7 @@ pub mod tests {
         assert_eq!(threads, [second.thread_id.clone(), first.thread_id.clone()]);
         assert_eq!(m.data.feeds.replies(&first.thread_id), Some(Replies { count: 2, last_at: at(4) }));
         assert_eq!(m.data.feeds.replies(&second.thread_id), None);
-        let reacted = Reacted { reaction: "eyes".parse().unwrap(), by: vec![user("bob")] };
+        let reacted = Reacted::new("eyes".parse().unwrap(), vec![user("bob")]);
         m.read(super::super::reads::Read::Reactions([(second.id, vec![reacted])].into()), at(4));
         let View::Channel(page) = m.page() else { panic!("not the channel") };
         let shown: Vec<String> = post_lines(m.data.feeds.posts(&ops).nth(1).unwrap(), &m.data, at(64), None)

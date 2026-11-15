@@ -174,7 +174,7 @@ mod tests {
     use crate::live::tests::user;
 
     fn reacted(reaction: &str, by: &[&str]) -> Reacted {
-        Reacted { reaction: reaction.parse().unwrap(), by: by.iter().map(|b| user(b)).collect() }
+        Reacted::new(reaction.parse().unwrap(), by.iter().map(|b| user(b)).collect())
     }
 
     #[test]

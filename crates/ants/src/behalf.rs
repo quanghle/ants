@@ -8,10 +8,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ants_daemon::behalf::Records;
+use ants_daemon::direct_kv::{DirectKv, Lookup};
+use ants_daemon::reactions::{Change, Reactions};
 use ants_daemon::sync::MutexExt as _;
 use ants_proto::{
-    ASSISTANT_GRANT, Acting, DEVICES_BUCKET, Envelope, Grants, HUMANS_BUCKET, REVOKED_DEVICES, UserId,
-    assistant_grant_key,
+    ASSISTANT_GRANT, Acting, DEVICES_BUCKET, Envelope, Grants, HUMANS_BUCKET, JsDomain, REACTIONS_BUCKET,
+    REVOKED_DEVICES, Reaction, ReactionEntry, UserId, Uuid, assistant_grant_key, reaction_key,
 };
 use async_nats::jetstream::{self, kv};
 use chrono::Utc;
@@ -26,8 +28,12 @@ pub const REFRESH: Duration = Duration::from_secs(60);
 /// Checks the claims of the acts the CLI shows, caching what it read.
 pub struct Checker {
     js: jetstream::Context,
+    js_domain: Option<JsDomain>,
     account: Option<String>,
     records: Records,
+    /// The human each user's record makes it the assistant of, as read: only an assistant's reactions are read
+    /// for a claim.
+    assistants: Mutex<HashMap<UserId, Option<UserId>>>,
     grants: Mutex<Grants>,
     /// The humans whose grant was read.
     read: Mutex<HashSet<UserId>>,
@@ -42,8 +48,10 @@ impl Checker {
         let records = Records::new(js.clone(), nats.domain.cloned(), nats.account.clone());
         Self {
             js: js.clone(),
+            js_domain: nats.domain.cloned(),
             account: nats.account.clone(),
             records,
+            assistants: Mutex::default(),
             grants: Mutex::default(),
             read: Mutex::default(),
             known: Mutex::default(),
@@ -77,9 +85,61 @@ impl Checker {
         known.unwrap_or_else(|| Acting::Forged(human.clone()))
     }
 
+    /// What the reactions in `reactions` came to: the claim of each by an assistant, which only its entry carries,
+    /// is checked ([`Checker::check`]) into [`ants_proto::Reacted::acting`]. Another reactor's reaction is its own,
+    /// unread.
+    pub async fn reactions(&self, reactions: &mut Reactions) {
+        for (message, reacted) in reactions.iter_mut() {
+            for r in reacted.iter_mut() {
+                for by in &r.by {
+                    let acting = self.reaction(by, message, &r.reaction).await;
+                    if !acting.is_own() {
+                        r.acting.insert(by.clone(), acting);
+                    }
+                }
+            }
+        }
+    }
+
+    /// `change` with what a reaction it adds came to, as [`Checker::reactions`] checks it.
+    pub async fn change(&self, mut change: Change) -> Change {
+        if !change.removed {
+            change.acting = self.reaction(&change.by, &change.message, &change.reaction).await;
+        }
+        change
+    }
+
+    /// What `by`'s `reaction` to `message` came to.
+    async fn reaction(&self, by: &UserId, message: &Uuid, reaction: &Reaction) -> Acting {
+        if self.assistant_of(by).await.is_none() {
+            return Acting::Own;
+        }
+        let entry = async {
+            let kv = DirectKv::new(&self.js, self.js_domain.as_ref(), REACTIONS_BUCKET).await?;
+            let Lookup::Value(value) = kv.lookup(reaction_key(by, message, reaction)).await? else { return Ok(None) };
+            anyhow::Ok(Some(serde_json::from_slice::<ReactionEntry>(&value)?))
+        };
+        let claim = entry.await.unwrap_or_else(|e| {
+            tracing::warn!(%by, %message, "reading a reaction: {e:#}");
+            None
+        });
+        self.check(by, claim.and_then(|e| e.on_behalf_of).as_ref()).await
+    }
+
+    /// The human `user`'s record makes it the assistant of, read unless known.
+    async fn assistant_of(&self, user: &UserId) -> Option<UserId> {
+        if let Some(known) = self.assistants.locked().get(user) {
+            return known.clone();
+        }
+        let of = self.records.assistant_of(user).await;
+        self.assistants.locked().insert(user.clone(), of.clone());
+        of
+    }
+
     /// Read again the grant of every human read and the record behind every claim checked, so a grant withdrawn or
     /// credentials revoked since make the claims forged from now on.
     pub async fn refresh(&self) {
+        self.assistants.locked().clear();
         let humans = std::mem::take(&mut *self.read.locked());
         for human in &humans {
             self.read_grant(human).await;

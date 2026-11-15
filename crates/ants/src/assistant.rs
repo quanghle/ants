@@ -817,6 +817,54 @@ mod tests {
         comes_to(Acting::Forged(alice.clone())).await;
     }
 
+    /// pa's reaction for alice reads as hers through pa, a claim of bob, who is no assistant, is not even read,
+    /// and pa's reaction once alice withdraws the grant is pa's own, its claim forged.
+    #[tokio::test]
+    async fn an_assistant_s_reactions_for_its_human_show_as_hers() {
+        use ants_daemon::reactions::{Change, Reactions};
+        use ants_proto::{REACTIONS_BUCKET, Reacted, Reaction, ReactionEntry};
+
+        let Some(server) = Server::start() else { return };
+        let (alice, pa, bob) = (p("alice"), p("pa"), p("bob"));
+        let creds = server.creds_as(&alice, Role::Human);
+        let (_, js) = bus::connect(&server.url, Some(&creds), None, &alice, "test").await.unwrap();
+        humans::ensure(&js).await.unwrap();
+        js.create_key_value(ants_daemon::hub::devices_config()).await.unwrap();
+        js.create_stream(ants_daemon::hub::reactions_config()).await.unwrap();
+        let assistant = server.dir().join("pa-assistant.creds");
+        let new = auth::NewDevice { assistant_of: Some(alice.clone()), ..auth::NewDevice::default() };
+        let rights = ants_proto::Permissions::for_assistant(&pa, &alice);
+        auth::issue_device_with(&server.dir().join("auth"), &pa, revoke::Kind::Assistant, rights, &new, &assistant)
+            .unwrap();
+        let (_, pa_js) = bus::connect(&server.url, Some(&assistant), None, &pa, "test").await.unwrap();
+        ants_daemon::behalf::keep_record(&pa_js, None, &pa, &assistant).await.unwrap();
+        put(&js, &creds, &alice, Some(pa.clone()), Sealing::Keep).await.unwrap();
+
+        let message = ants_proto::Uuid::now_v7();
+        let check: Reaction = "check".parse().unwrap();
+        let (_, bob_js) = server.connect_as(&bob, Role::Human).await;
+        for (js, by) in [(&pa_js, &pa), (&bob_js, &bob)] {
+            let entry = ReactionEntry::new(by.clone(), message, check.clone()).on_behalf(Some(alice.clone()));
+            let subject = format!("$KV.{REACTIONS_BUCKET}.{}", entry.key());
+            js.publish(subject, serde_json::to_vec(&entry).unwrap().into()).await.unwrap().await.unwrap();
+        }
+        let read =
+            || -> Reactions { [(message, vec![Reacted::new(check.clone(), vec![pa.clone(), bob.clone()])])].into() };
+        let nats = crate::Nats::new(&server.url, Some(&creds), None).unwrap();
+        let checker = crate::behalf::Checker::new(&nats, &js);
+        let mut checked = read();
+        checker.reactions(&mut checked).await;
+        assert_eq!(crate::inbox::render_reactions(&checked[&message], ""), "reacted check: alice via pa, bob\n");
+        let change = Change { message, by: pa.clone(), reaction: check.clone(), removed: false, acting: Acting::Own };
+        assert_eq!(checker.change(change).await.acting, Acting::For(alice.clone()));
+
+        put(&js, &creds, &alice, None, Sealing::Keep).await.unwrap();
+        checker.refresh().await;
+        let mut checked = read();
+        checker.reactions(&mut checked).await;
+        assert_eq!(checked[&message][0].acting, [(pa.clone(), Acting::Forged(alice.clone()))].into());
+    }
+
     /// The store the daemon's tools act for a human through reads and writes with its assistant's own credentials:
     /// the human's messages and the tool requests waiting for it, its read marker, its threads' titles and done marks,
     /// the assistant's reactions, and the directory its sealing reads device keys from.

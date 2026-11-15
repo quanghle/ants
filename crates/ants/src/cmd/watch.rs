@@ -37,9 +37,9 @@ pub(crate) async fn watch(nats: &Nats<'_>, target: &str, thread: Option<thread::
     let mut sub = client.subscribe(filter).await?;
     let faces = crate::avatars::Faces::stdout(crate::avatars::read_or_none(&js).await);
     let mut printer = Printer { faces: Some(faces), ..Printer::default() };
-    let mut reacted = watched_reactions(&js, target, nats.me.role.is_human()).await;
     let behalf = std::sync::Arc::new(crate::behalf::Checker::new(nats, &js));
     let _following = behalf.follow();
+    let mut reacted = watched_reactions(&js, target, nats.me.role.is_human(), &behalf).await;
     loop {
         let msg = tokio::select! {
             msg = sub.next() => match msg {
@@ -104,18 +104,19 @@ pub(crate) async fn watch(nats: &Nats<'_>, target: &str, thread: Option<thread::
 }
 
 /// The reactions `ants watch` follows besides `target`: all of them for a human taking every message (`ants.>` or
-/// `>`), else none, as when the bucket cannot be read.
+/// `>`), else none, as when the bucket cannot be read. `behalf` checks an assistant's for its human.
 pub(crate) async fn watched_reactions(
     js: &async_nats::jetstream::Context,
     target: &str,
     human: bool,
+    behalf: &std::sync::Arc<crate::behalf::Checker>,
 ) -> futures::stream::BoxStream<'static, reactions::Change> {
     let none = || futures::stream::pending().boxed();
     if !human || ![subject::ALL, ">"].contains(&target) {
         return none();
     }
     match reactions::watch(js).await {
-        Ok(changes) => changes.chain(futures::stream::pending()).boxed(),
+        Ok(changes) => crate::reacted::checked(changes, behalf).chain(futures::stream::pending()).boxed(),
         Err(e) => {
             tracing::warn!("not showing reactions: {e:#}");
             none()
@@ -123,10 +124,11 @@ pub(crate) async fn watched_reactions(
     }
 }
 
-/// A reaction added or removed as `ants watch` prints it.
+/// A reaction added or removed as `ants watch` prints it, an assistant's for its human naming both ([`Acting::label`]).
 pub(crate) fn reaction_line(change: &reactions::Change) -> String {
     let verb = if change.removed { "removed the reaction" } else { "reacted" };
-    format!("{} {verb} {} to message {}", change.by, change.reaction, change.message)
+    let by = change.acting.label(change.by.as_str());
+    format!("{by} {verb} {} to message {}", change.reaction, change.message)
 }
 
 /// An envelope as `ants watch` prints it: an escalation it carries with its level, reason, stuck ant and thread,

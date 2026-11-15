@@ -245,9 +245,8 @@ async fn list_reactions_shows_those_to_the_current_message_or_a_named_one() {
         } else if message == quiet {
             Some(ants_proto::ReactionsOutcome::Listed { reactions: Vec::new() })
         } else {
-            let reacted = |reaction: &str, by: &[&str]| ants_proto::Reacted {
-                reaction: reaction.parse().unwrap(),
-                by: by.iter().map(|b| b.parse().unwrap()).collect(),
+            let reacted = |reaction: &str, by: &[&str]| {
+                ants_proto::Reacted::new(reaction.parse().unwrap(), by.iter().map(|b| b.parse().unwrap()).collect())
             };
             let reactions = vec![reacted("check", &["dev-b"]), reacted("eyes", &["alice", "dev-b"])];
             Some(ants_proto::ReactionsOutcome::Listed { reactions })

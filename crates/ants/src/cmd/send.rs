@@ -390,7 +390,10 @@ async fn followed_reactions(
     js: &async_nats::jetstream::Context,
     replies: &Replies,
 ) -> BoxStream<'static, reactions::Change> {
-    if replies.follow { reacted::changes(nats, js).await } else { futures::stream::pending().boxed() }
+    if !replies.follow {
+        return futures::stream::pending().boxed();
+    }
+    reacted::changes(nats, js, &std::sync::Arc::new(crate::behalf::Checker::new(nats, js))).await
 }
 
 /// Show the replies, printing meanwhile the reactions to the message sent and the replies shown.

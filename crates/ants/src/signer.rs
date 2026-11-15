@@ -918,7 +918,7 @@ mod tests {
         })
         .await;
         assert_eq!(outcomes.0, Some(ReactionsOutcome::Applied { changed: true }));
-        let reacted = ants_proto::Reacted { reaction: "eyes".parse().unwrap(), by: vec![dev_a] };
+        let reacted = ants_proto::Reacted::new("eyes".parse().unwrap(), vec![dev_a]);
         assert_eq!(outcomes.1, Some(ReactionsOutcome::Listed { reactions: vec![reacted] }));
     }
 

@@ -545,6 +545,9 @@ pub struct Summary {
 pub struct Done {
     pub by: UserId,
     pub at: DateTime<Utc>,
+    /// For whom `by` marked it, as its `on_behalf_of` checked ([`crate::behalf::Checker`]).
+    #[serde(skip_serializing_if = "Acting::is_own")]
+    pub acting: Acting,
 }
 
 /// What `ants thread list` keeps of the threads read.
@@ -1199,10 +1202,16 @@ pub async fn listed(nats: &crate::Nats<'_>, since: Option<Duration>, select: &Se
     if let Some(meta) = &meta {
         let mut titles = meta.titles(threads.iter().map(|t| &t.thread_id)).await?;
         let mut dones = meta.dones(threads.iter().map(|t| &t.thread_id)).await?;
+        let behalf = crate::behalf::Checker::new(nats, &js);
         for thread in &mut threads {
             thread.title = titles.remove(&thread.thread_id).map(|t| t.title);
             let done = dones.remove(&thread.thread_id).filter(|d| d.holds(thread.last_reopening));
-            thread.done = done.map(|d| Done { by: d.by, at: d.at });
+            thread.done = match done {
+                Some(d) => {
+                    Some(Done { acting: behalf.check(&d.by, d.on_behalf_of.as_ref()).await, by: d.by, at: d.at })
+                }
+                None => None,
+            };
         }
         adopt_suggested(meta, &mut threads).await;
     }
@@ -1325,6 +1334,9 @@ pub async fn history_with(
     }
     let ids: Vec<Uuid> = entries.iter().filter_map(|e| e.id).collect();
     let mut reactions = crate::inbox::reactions_or_none(js, &ids).await;
+    if let Some(behalf) = &parser.behalf {
+        behalf.reactions(&mut reactions).await;
+    }
     for entry in &mut entries {
         if let Some(id) = entry.id {
             entry.reactions = reactions.remove(&id).unwrap_or_default();
@@ -1397,7 +1409,8 @@ pub async fn show(
     let js = connect(nats).await?;
     let thread = &pick.resolve(&js, &nats.me).await?;
     let keyring = sealed::Keyring::load(nats, &js).await.map(Arc::new);
-    let parser = Parser::opening(keyring).checking(Some(Arc::new(crate::behalf::Checker::new(nats, &js))));
+    let behalf = Arc::new(crate::behalf::Checker::new(nats, &js));
+    let parser = Parser::opening(keyring).checking(Some(behalf.clone()));
     let entries = history_with(&js, thread, since, !no_tools, parser).await?;
     let sealed = entries.iter().any(|e| e.sealed.is_some());
     let suggested = entries.iter().find_map(|e| Some((e.from.as_ref()?, e.suggested_title.as_deref()?)));
@@ -1422,11 +1435,19 @@ pub async fn show(
         }
         if let Some(title) = title {
             let by_ant = entries.iter().any(|e| e.suggested_title.is_some() && e.from.as_ref() == Some(&title.by));
-            let suggested = if by_ant { format!(" (suggested by {})", title.by) } else { String::new() };
+            let acting = behalf.check(&title.by, title.on_behalf_of.as_ref()).await;
+            let suggested = if by_ant {
+                format!(" (suggested by {})", title.by)
+            } else if !acting.is_own() {
+                format!(" (set by {})", acting.label(title.by.as_str()))
+            } else {
+                String::new()
+            };
             println!("title: {}{suggested}", title.title);
         }
         if let Some(done) = done {
-            println!("done by {} {}", done.by, time(done.at));
+            let by = behalf.check(&done.by, done.on_behalf_of.as_ref()).await.label(done.by.as_str());
+            println!("done by {by} {}", time(done.at));
         }
         match mark {
             Some(Mark::Pinned) => println!("pinned"),

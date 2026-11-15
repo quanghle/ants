@@ -52,14 +52,15 @@ pub(crate) async fn show(
         print(&e, state, behalf.acting(&e.from, e.on_behalf_of.as_ref()), reactions, json, &faces)
     };
     // Watched before reading, so no reaction to a message shown is missed.
-    let changes = if follow { reacted::changes(nats, &js).await } else { futures::stream::pending().boxed() };
+    let changes = if follow { reacted::changes(nats, &js, &behalf).await } else { futures::stream::pending().boxed() };
     let show = |e: &Envelope| show_with(e, &[]);
     let unread = inbox.unread(select).await?;
     if unread.is_empty() && !follow && !json {
         println!("no unread replies");
     }
     let ids: Vec<Uuid> = unread.iter().map(|e| e.id).collect();
-    let reactions = inbox::reactions_or_none(&js, &ids).await;
+    let mut reactions = inbox::reactions_or_none(&js, &ids).await;
+    behalf.reactions(&mut reactions).await;
     for e in &unread {
         if let Some(keyring) = &keyring {
             keyring.learn(e).await;

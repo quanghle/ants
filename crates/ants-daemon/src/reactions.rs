@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime};
 
 pub use ants_proto::Reacted;
 use ants_proto::{
-    JsDomain, REACTIONS_BUCKET, REACTIONS_REPEAT, REACTIONS_WAIT, Reaction, ReactionChange, ReactionEntry,
+    Acting, JsDomain, REACTIONS_BUCKET, REACTIONS_REPEAT, REACTIONS_WAIT, Reaction, ReactionChange, ReactionEntry,
     ReactionsOutcome, ReactionsReply, ReactionsRequest, ReactionsResponder, UserId, Uuid, parse_reaction_key,
     reaction_key, reactions_to, subject,
 };
@@ -158,7 +158,7 @@ pub async fn load(js: &jetstream::Context, messages: &[Uuid]) -> Result<Reaction
                 .map(|(reaction, mut by)| {
                     by.sort();
                     by.dedup();
-                    Reacted { reaction, by }
+                    Reacted::new(reaction, by)
                 })
                 .collect();
             (message, grouped)
@@ -177,6 +177,10 @@ pub struct Change {
     pub by: UserId,
     pub reaction: Reaction,
     pub removed: bool,
+    /// What a reader made of the [`ReactionEntry::on_behalf_of`] of a reaction added, which the change itself does
+    /// not carry: the reactor's own until a reader checks it.
+    #[serde(skip_serializing_if = "Acting::is_own")]
+    pub acting: Acting,
 }
 
 impl Change {
@@ -186,7 +190,7 @@ impl Change {
         let key = msg.subject.strip_prefix(&format!("$KV.{REACTIONS_BUCKET}."))?;
         let (by, message, reaction) = parse_reaction_key(key)?;
         let removed = msg.headers.as_ref().and_then(|h| h.get("KV-Operation")).is_some_and(|op| op.as_str() != "PUT");
-        Some(Self { message, by, reaction, removed })
+        Some(Self { message, by, reaction, removed, acting: Acting::Own })
     }
 }
 
@@ -419,7 +423,7 @@ mod tests {
     }
 
     fn reacted(reaction: &str, by: &[&str]) -> Reacted {
-        Reacted { reaction: r(reaction), by: by.iter().map(|b| p(b)).collect() }
+        Reacted::new(r(reaction), by.iter().map(|b| p(b)).collect())
     }
 
     #[tokio::test]
@@ -455,7 +459,8 @@ mod tests {
         assert!(!remove(&js, None, &p("dev-a"), &one, &r("heart")).await.unwrap(), "as is removing none");
         assert!(add(&js, None, &p("dev-a"), &one, &r("eyes")).await.unwrap(), "added back");
         let changes: Vec<_> = tokio::time::timeout(WAIT, (&mut live).take(2).collect::<Vec<_>>()).await.unwrap();
-        let change = |removed| Change { message: one, by: p("dev-a"), reaction: r("eyes"), removed };
+        let change =
+            |removed| Change { message: one, by: p("dev-a"), reaction: r("eyes"), removed, acting: Acting::Own };
         assert_eq!(changes, [change(true), change(false)]);
         assert_eq!(load(&js, &[one]).await.unwrap()[&one].len(), 2);
 
