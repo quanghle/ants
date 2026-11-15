@@ -183,12 +183,14 @@ impl Escalator {
     }
 
     /// Follow the chain of a leader missing from the roster through `chains`.
+    #[must_use]
     pub fn with_chains(mut self, chains: Chains) -> Self {
         self.chains = Some(chains);
         self
     }
 
     /// Post to the thread's notes through `notes` as each escalation goes up a level, with a fresh budget.
+    #[must_use]
     pub fn with_notes(self, notes: NotesSender) -> Self {
         Self { notes: Some(notes), ..self }
     }

@@ -47,12 +47,14 @@ impl Redactor {
 
     /// The same, also redacting the values of `vars` whose name looks secret ([`secret_name`]) or that look like a
     /// token ([`token_like`]), short ones and paths aside ([`MIN_VALUE`]).
+    #[must_use]
     pub fn with_env<K: AsRef<str>, V: AsRef<str>>(self, vars: impl IntoIterator<Item = (K, V)>) -> Self {
         self.with_values(vars, |name, value| secret_name(name) || token_like(value))
     }
 
     /// The same, also redacting the values of `vars` whose name looks secret ([`secret_name`]), short ones and paths
     /// aside.
+    #[must_use]
     pub fn with_secret_env<K: AsRef<str>, V: AsRef<str>>(self, vars: impl IntoIterator<Item = (K, V)>) -> Self {
         self.with_values(vars, |name, _| secret_name(name))
     }
@@ -70,6 +72,7 @@ impl Redactor {
     }
 
     /// The same, also redacting the daemon's own environment variables whose name looks secret.
+    #[must_use]
     pub fn with_process_env(self) -> Self {
         let vars = std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)));
         self.with_secret_env(vars)

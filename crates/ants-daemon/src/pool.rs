@@ -121,17 +121,20 @@ impl Pool {
     }
 
     /// Tell `workload` the agent each harness starts with ([`Workload::set_agent`]).
+    #[must_use]
     pub fn reporting_to(self, workload: Arc<Workload>) -> Self {
         Self { workload: Some(workload), ..self }
     }
 
     /// Each thread works in its own git worktree ([`Worktrees`]).
+    #[must_use]
     pub fn with_worktrees(self, worktrees: Worktrees) -> Self {
         Self { worktrees: Some(worktrees), isolate: true, ..self }
     }
 
     /// Threads share the workdir, and the worktrees left from when each had its own are pruned
     /// ([`Worktrees::left_behind`]).
+    #[must_use]
     pub fn with_worktrees_left_behind(self, worktrees: Worktrees) -> Self {
         Self { worktrees: Some(worktrees), isolate: false, ..self }
     }

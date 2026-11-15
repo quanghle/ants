@@ -559,6 +559,7 @@ impl Threads {
     }
 
     /// Read channels back as `reading` says; an ant's daemon reads through its reader consumer.
+    #[must_use]
     pub fn reading(mut self, reading: Reading) -> Self {
         self.reading = reading;
         self

@@ -368,11 +368,13 @@ impl Ledger {
     }
 
     /// Give a [`Warning`] once spend passes `percent` of a cap; 0 for never.
+    #[must_use]
     pub fn warn_at(self, percent: u8) -> Self {
         Self { warn_percent: percent, ..self }
     }
 
     /// Hold the ant to the daily caps of `pool` too.
+    #[must_use]
     pub fn with_pool(self, pool: Option<Pool>) -> Self {
         Self { pool: pool.filter(|p| p.daily_tokens.is_some() || p.daily_cost.is_some()), ..self }
     }

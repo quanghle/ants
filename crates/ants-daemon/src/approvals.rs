@@ -112,11 +112,13 @@ impl NatsApprover {
     }
 
     /// The same, also asking every ant of `chain`'s escalate_to, which may decide too.
+    #[must_use]
     pub fn with_chain(self, chain: Chain) -> Self {
         Self { chain, ..self }
     }
 
     /// The same, telling the thread's owner when a human, else the default human of `humans`, of an expired request.
+    #[must_use]
     pub fn with_humans(self, humans: Registry) -> Self {
         Self { humans, ..self }
     }

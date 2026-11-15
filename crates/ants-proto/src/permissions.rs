@@ -457,6 +457,7 @@ impl Permissions {
     /// (`$JS.<domain>.API.$KV.…`). The plain subjects stay allowed: the hub maps the domain prefix onto them and checks
     /// the mapped subject against the permissions as well. Acks, flow control and ants subjects are the same in both.
     /// Without a domain the permissions are unchanged.
+    #[must_use]
     pub fn with_js_domain(mut self, domain: Option<&JsDomain>) -> Self {
         let Some(domain) = domain else { return self };
         let api = format!("$JS.{domain}.API.");

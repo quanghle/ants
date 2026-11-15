@@ -224,6 +224,7 @@ impl PermissionPolicy {
     }
 
     /// The same, redacting the tool requests the approver gets with `redactor`.
+    #[must_use]
     pub fn with_redactor(self, redactor: Arc<Redactor>) -> Self {
         Self { redactor, ..self }
     }
