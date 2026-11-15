@@ -1757,6 +1757,7 @@ pub(crate) mod tests {
             perms: None,
             signed_out: None,
             limited: None,
+            failing: None,
         };
         let registration =
             Registration::start(a_kv.clone(), entry.clone(), ants_proto::ROSTER_HEARTBEAT).await.unwrap();
@@ -2375,6 +2376,7 @@ pub(crate) mod tests {
             perms: None,
             signed_out: None,
             limited: None,
+            failing: None,
         };
         let b_roster = bus::ensure_roster(&b_js, ants_proto::ROSTER_TTL).await.unwrap();
         b_roster.put("dev-b", serde_json::to_vec(&listed).unwrap().into()).await.unwrap();

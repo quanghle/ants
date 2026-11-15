@@ -44,6 +44,7 @@ fn roster() -> Roster {
             perms: None,
             signed_out: None,
             limited: None,
+            failing: None,
         };
         Box::pin(async move { Ok(vec![entry("lead", "boss"), entry("boss", "dev-a")]) })
     })

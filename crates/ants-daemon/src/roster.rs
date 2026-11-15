@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ants_proto::{
-    ANTS_VERSION, Activity, HarnessLimit, PERMISSIONS_VERSION, ROSTER_HEARTBEAT, ROSTER_TTL, RosterEntry, SignInNeeded,
-    UserId,
+    ANTS_VERSION, Activity, HarnessFailing, HarnessLimit, PERMISSIONS_VERSION, ROSTER_HEARTBEAT, ROSTER_TTL,
+    RosterEntry, SignInNeeded, UserId,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, kv};
@@ -29,15 +29,17 @@ pub struct Registration {
 }
 
 /// What the daemon is doing, shared by the inbox loop and the heartbeats: the messages being handled, the live
-/// harnesses and whether the harness is signed out or held back by a provider limit.
+/// harnesses and whether the harness is signed out, held back by a provider limit or failing to start.
 #[derive(Debug, Default)]
 pub struct Workload {
     handling: AtomicUsize,
     harnesses: AtomicUsize,
     signed_out: Mutex<Option<SignInNeeded>>,
     limited: Mutex<Option<HarnessLimit>>,
-    /// Wakes the heartbeats when the ant turns idle or working, its harness signed out or in, or a provider limit
-    /// starts or ends, so the roster shows it before the next beat.
+    failing: Mutex<Option<HarnessFailing>>,
+    /// Wakes the heartbeats when the ant turns idle or working, its harness signed out or in, a provider limit starts
+    /// or ends, or the harness's start failures hold messages or no longer do, so the roster shows it before the next
+    /// beat.
     changed: Notify,
 }
 
@@ -80,6 +82,19 @@ impl Workload {
         self.limited.lock().expect("limited").clone()
     }
 
+    /// Note that the harness's start failures hold the messages, or with `None` that they no longer do.
+    pub fn set_failing(&self, failing: Option<HarnessFailing>) {
+        let mut current = self.failing.lock().expect("failing");
+        if *current != failing {
+            *current = failing;
+            self.changed.notify_one();
+        }
+    }
+
+    pub fn failing(&self) -> Option<HarnessFailing> {
+        self.failing.lock().expect("failing").clone()
+    }
+
     pub fn handling(&self) -> usize {
         self.handling.load(Ordering::Relaxed)
     }
@@ -100,6 +115,7 @@ impl Workload {
         entry.harnesses = Some(count(self.harnesses()));
         entry.signed_out = self.signed_out();
         entry.limited = self.limited();
+        entry.failing = self.failing();
     }
 }
 
@@ -135,6 +151,7 @@ pub async fn entry(config: &Config) -> RosterEntry {
         perms: Some(PERMISSIONS_VERSION),
         signed_out: None,
         limited: None,
+        failing: None,
     }
 }
 
@@ -301,6 +318,7 @@ async fn due(ticks: &mut tokio::time::Interval, workload: Option<&Workload>, ent
                 && entry.activity == Some(workload.activity())
                 && entry.signed_out == workload.signed_out()
                 && entry.limited == workload.limited()
+                && entry.failing == workload.failing()
             {
                 // Turned and turned back before this task ran: nothing new to show.
                 continue;
@@ -512,10 +530,10 @@ pub fn is_live(entry: &RosterEntry, now: DateTime<Utc>) -> bool {
 }
 
 /// The ant a request needing `capability` goes to, of the entries other than `asking` that advertise it: ants whose
-/// harness is signed in before those signed out, then those held back by no provider limit before limited ones, then
-/// live entries before stale ones, then idle ants before those
-/// of unknown activity (older daemons) and those working, then the fewest messages in hand, then the first by id. The
-/// same roster at the same time always gives the same answer.
+/// harness is signed in and starting before those signed out or failing to start, then those held back by no provider
+/// limit before limited ones, then live entries before stale ones, then idle ants before those of unknown activity
+/// (older daemons) and those working, then the fewest messages in hand, then the first by id. The same roster at the
+/// same time always gives the same answer.
 pub fn pick<'a>(
     entries: &'a [RosterEntry],
     capability: &str,
@@ -529,7 +547,7 @@ pub fn pick<'a>(
             Some(Activity::Working) => 2,
         };
         (
-            e.signed_out.is_some(),
+            e.signed_out.is_some() || e.failing.is_some(),
             e.limited.is_some(),
             !is_live(e, now),
             busyness,
@@ -587,6 +605,7 @@ mod tests {
             perms: None,
             signed_out: None,
             limited: None,
+            failing: None,
         }
     }
 
@@ -693,6 +712,8 @@ mod tests {
         assert_eq!(picked(&entries).as_deref(), Some("dev-0"), "a limited ant before a signed-out one");
         entries[0].signed_out = None;
         assert_eq!(picked(&entries).as_deref(), Some("dev-a"), "an ant held back by no limit before a limited one");
+        entries[0].failing = Some(HarnessFailing { since: now, error: "not found".to_owned() });
+        assert_eq!(picked(&entries).as_deref(), Some("dev-0"), "a limited ant before one failing to start");
     }
 
     #[test]

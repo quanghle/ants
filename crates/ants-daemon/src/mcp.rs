@@ -1312,10 +1312,11 @@ fn describe(entries: &[&RosterEntry]) -> String {
         .map(|e| {
             let capabilities =
                 if e.capabilities.is_empty() { "no capabilities".to_owned() } else { e.capabilities.join(", ") };
-            let activity = match (&e.signed_out, &e.limited, e.activity) {
-                (Some(_), _, _) => ", signed out".to_owned(),
-                (None, Some(limited), _) => format!(", {}", limited.kind.as_str()),
-                (None, None, activity) => activity.map(|a| format!(", {}", a.as_str())).unwrap_or_default(),
+            let activity = match (&e.signed_out, &e.failing, &e.limited, e.activity) {
+                (Some(_), _, _, _) => ", signed out".to_owned(),
+                (None, Some(_), _, _) => ", failing".to_owned(),
+                (None, None, Some(limited), _) => format!(", {}", limited.kind.as_str()),
+                (None, None, None, activity) => activity.map(|a| format!(", {}", a.as_str())).unwrap_or_default(),
             };
             let mut text = format!("{}: {capabilities} ({} on {}{activity})", e.ant, e.harness, e.machine);
             if let Some(out) = &e.signed_out {
@@ -1324,6 +1325,14 @@ fn describe(entries: &[&RosterEntry]) -> String {
                     text,
                     "\n  harness signed out since {}: messages to {} wait unanswered until a human signs it in{how}",
                     out.since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    e.ant
+                );
+            } else if let Some(failing) = &e.failing {
+                let _ = write!(
+                    text,
+                    "\n  harness failing to start since {} ({}): messages to {} wait unanswered until a human fixes it",
+                    failing.since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    failing.error,
                     e.ant
                 );
             } else if let Some(limited) = &e.limited {
@@ -1374,7 +1383,8 @@ fn nobody_has(capability: &str, entries: &[RosterEntry]) -> String {
 }
 
 /// Why no daemon serves `ant` now, given its roster entry, or None when one does: no entry, a stale one (see
-/// [`roster::is_live`]), a harness signed out, or a provider limit holding its messages past `wait` from `now`.
+/// [`roster::is_live`]), a harness signed out or failing to start, or a provider limit holding its messages past `wait`
+/// from `now`.
 fn why_unserved(
     ant: &UserId,
     entry: Option<&RosterEntry>,
@@ -1390,6 +1400,15 @@ fn why_unserved(
             "{ant} is stale in the roster: the daemon on {} last beat {} ago and may not serve {ant} now",
             entry.machine,
             ants_proto::duration::format(Duration::from_secs(ago.as_secs()))
+        ));
+    }
+    if let Some(failing) = entry.failing.as_ref().filter(|_| entry.signed_out.is_none()) {
+        return Some(format!(
+            "the harness of {ant} ({} on {}) fails to start since {}: messages to {ant} wait unanswered until a human \
+             fixes it",
+            entry.harness,
+            entry.machine,
+            failing.since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
         ));
     }
     let Some(out) = entry.signed_out.as_ref() else {
@@ -1432,7 +1451,8 @@ fn alternatives(
     if let Some(entry) = entry {
         let sharing: Vec<&RosterEntry> = others
             .iter()
-            .filter(|e| e.ant != *ant && roster::is_live(e, now) && e.signed_out.is_none() && e.limited.is_none())
+            .filter(|e| e.ant != *ant && roster::is_live(e, now) && e.signed_out.is_none() && e.failing.is_none())
+            .filter(|e| e.limited.is_none())
             .filter(|e| entry.capabilities.iter().any(|c| roster::has_capability(e, c)))
             .take(SHOWN_NAMES)
             .collect();
@@ -1899,6 +1919,7 @@ mod tests {
             perms: None,
             signed_out: None,
             limited: None,
+            failing: None,
         }
     }
 
@@ -2343,6 +2364,9 @@ mod tests {
         assert_eq!(why_unserved(&ant, Some(&entry), now, Duration::from_mins(30)), None, "over within a 30m ask");
         entry.limited = None;
         assert_eq!(why_unserved(&ant, Some(&entry), now, Duration::ZERO), None);
+        entry.failing = Some(ants_proto::HarnessFailing { since: now, error: "not found".to_owned() });
+        let why = why_unserved(&ant, Some(&entry), now, Duration::from_mins(30)).expect("held until fixed");
+        assert!(why.starts_with("the harness of dev-q (copilot on m1) fails to start since"), "{why}");
     }
 
     #[tokio::test]

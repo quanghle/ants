@@ -2,6 +2,7 @@
 
 pub mod approvals;
 pub mod attempts;
+pub mod breaker;
 pub mod bus;
 pub mod caps;
 pub mod chains;

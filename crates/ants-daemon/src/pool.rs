@@ -387,6 +387,8 @@ pub(crate) mod fake {
         pub limited: Option<String>,
         /// Whether [`Log::limited`] ends the prompt as its reply instead, as Copilot CLI and Antigravity do.
         pub limited_reply: bool,
+        /// While set, the handshake fails, as with a broken install.
+        pub broken: bool,
     }
 
     /// In-process fake harnesses that answer each prompt with `<session>: <text>`. A prompt starting with `hold`
@@ -396,7 +398,8 @@ pub(crate) mod fake {
     /// cost, `tokens N` reports N tokens in the response, and `stall` replies `partial` and waits for session/cancel.
     /// `overflows` fails as a prompt that outgrew the context window, and so does `overflow` unless the session was
     /// rebuilt for it. While [`Log::signed_out`] is set, sessions and prompts fail as with a harness that is not signed
-    /// in; while [`Log::limited`] is, prompts stream its text and fail with it, or end with it as their reply.
+    /// in; while [`Log::limited`] is, prompts stream its text and fail with it, or end with it as their reply; while
+    /// [`Log::broken`] is, the handshake fails.
     pub fn launch(can_load: bool) -> (Launch, Arc<Mutex<Log>>, Arc<Semaphore>) {
         let log = Arc::new(Mutex::new(Log::default()));
         let gate = Arc::new(Semaphore::new(0));
@@ -404,7 +407,8 @@ pub(crate) mod fake {
         let connect = Arc::new(move || {
             let log = shared.clone();
             log.lock().unwrap().starts += 1;
-            let (on_new, on_load, on_prompt, gate) = (log.clone(), log.clone(), log, held.clone());
+            let (on_init, on_new, on_load, on_prompt, gate) =
+                (log.clone(), log.clone(), log.clone(), log, held.clone());
             let cancels = Arc::new(Semaphore::new(0));
             let on_cancel = cancels.clone();
             DynConnectTo::new(
@@ -420,6 +424,9 @@ pub(crate) mod fake {
                     )
                     .on_receive_request(
                         async move |init: InitializeRequest, responder, _cx| {
+                            if on_init.lock().unwrap().broken {
+                                return responder.respond_with_internal_error("broken install");
+                            }
                             responder.respond(
                                 InitializeResponse::new(init.protocol_version)
                                     .agent_capabilities(AgentCapabilities::new().load_session(can_load)),
