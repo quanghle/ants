@@ -583,7 +583,7 @@ pub fn revoke_added(
 }
 
 /// The keys the team issued that are neither revoked nor expired.
-fn live(dir: &Path) -> Result<Vec<revoke::Issued>> {
+pub(crate) fn live(dir: &Path) -> Result<Vec<revoke::Issued>> {
     let revoked: BTreeSet<String> = revoke::revoked(dir)?.into_iter().map(|r| r.key).collect();
     let now = auth::now()?;
     let issued = revoke::issued(dir)?;

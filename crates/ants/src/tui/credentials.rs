@@ -78,7 +78,9 @@ impl Asked {
         match self {
             Self::Enroll(r) => {
                 let leaf = r.leaf.as_ref().map_or_default(|l| format!(" through the leaf node of {}", l.machine));
-                format!("{} asks to enroll from host {}{leaf}, key {}", r.ant, r.host, short(&r.public_key))
+                let host_creds =
+                    r.host_creds.as_ref().map_or_default(|h| format!(", with the host credentials of {}", h.machine));
+                format!("{} asks to enroll from host {}{leaf}, key {}{host_creds}", r.ant, r.host, short(&r.public_key))
             }
             Self::Renew(r) => format!(
                 "{} asks for its credentials renewed from host {}, new key {}",
@@ -450,10 +452,14 @@ impl Io {
                     anyhow::Ok(match &order {
                         Order::Approve(ant, key) => {
                             let approved = approver.approve(&dir, ant, Some(key)).await?;
-                            match approved.leaf {
+                            let mut done = match approved.leaf {
                                 Some(leaf) => format!("{ant} approved, through the leaf node of {}", leaf.machine),
                                 None => format!("{ant} approved"),
+                            };
+                            if let Some(host) = approved.host {
+                                done = format!("{done}; {}", host.describe());
                             }
+                            done
                         }
                         Order::Reject(ant, key) => {
                             approver.reject(ant, Some(key), None).await?;
@@ -523,6 +529,7 @@ mod tests {
             signature: String::new(),
             leaf: None,
             order: None,
+            host_creds: None,
         })
     }
 

@@ -6,7 +6,8 @@
 //! live host credentials of the team's account (a request failing that gets no answer, as an enrollment request
 //! failing its proof does), and the order must verify as an admin's ([`AdminOrder::verify`]) at the time the signer
 //! hears it, for that machine and the ant asked about. An order adds one key only: another key asking on the same
-//! order is refused, and a retirement revokes only keys of an ant that was there when the admin sent the order.
+//! order is refused, and a retirement revokes only keys of an ant that was there when the admin sent the order. An order
+//! never grants host credentials ([`EnrollRequest::host_creds`]): only a human approving does.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
@@ -109,6 +110,9 @@ async fn decide(
     if request.leaf.is_some() {
         bail!("an order travels with no leaf node's uplink");
     }
+    if request.host_creds.is_some() {
+        bail!("an order grants no host credentials: the machine asking holds its own");
+    }
     let dir = &approver.dir;
     let revoked: BTreeSet<String> = revoke::revoked(dir)?.into_iter().map(|r| r.key).collect();
     order
@@ -156,7 +160,7 @@ fn add(dir: &Path, request: &EnrollRequest, order: &AdminOrder, revoked: &BTreeS
     }
     let domain = Finding::from_jwt(&request.enrollment)?.js_domain;
     let jwt = auth::sign_ordered(dir, ant, domain.as_ref(), key, order.id)?;
-    Ok(EnrollReply::Approved { ant: ant.clone(), public_key: key.to_owned(), jwt, leaf_jwt: None })
+    Ok(EnrollReply::Approved { ant: ant.clone(), public_key: key.to_owned(), jwt, leaf_jwt: None, host_jwt: None })
 }
 
 /// Revoke the ant's key `request` names and the live keys of the name issued before it, which it renewed, pushing the

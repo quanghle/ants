@@ -18,8 +18,9 @@ pub(crate) enum EnrollCommand {
         dir: Option<PathBuf>,
     },
     /// Sign the credentials an ant asks for, with the rights `ants auth user` gives, for the hub's --js-domain if
-    /// it has one, and send them to the asking machine. With --webhook, those of a webhook asking with
-    /// `ants webhook add --enroll`.
+    /// it has one, and send them to the asking machine, with the machine's host credentials when it asks for them too
+    /// (`ants add --enroll` on a machine without any) and nothing tells they are another machine's. With --webhook,
+    /// those of a webhook asking with `ants webhook add --enroll`.
     #[command(group = clap::ArgGroup::new("targets").args(["to", "channels"]).multiple(true))]
     Approve {
         /// The ant, or with --webhook the webhook.
@@ -27,6 +28,9 @@ pub(crate) enum EnrollCommand {
         /// The asking machine's public key, needed when several ask for the ant.
         #[arg(long, value_name = "KEY")]
         public_key: Option<String>,
+        /// Approve the ant alone, without the host credentials its machine asks for too.
+        #[arg(long, conflicts_with = "webhook")]
+        no_host: bool,
         /// Sign a webhook's credentials, with the rights `ants auth user --webhook` gives: it may only message the
         /// ants of --to and post to the channels of --channel.
         #[arg(long, requires = "targets")]
@@ -88,7 +92,7 @@ pub(crate) async fn run(command: EnrollCommand, conn: &Connection<'_>) -> Result
         EnrollCommand::List { dir: d } => {
             enroll::Approver::connect(conn.nats, &dir(d)?, domain, enroll::LISTEN).await?.list().await
         }
-        EnrollCommand::Approve { ant, public_key, webhook: true, to, channels, dir: d } => {
+        EnrollCommand::Approve { ant, public_key, webhook: true, to, channels, dir: d, .. } => {
             let dir = dir(d)?;
             let approver = enroll::Approver::connect(conn.nats, &dir, domain, enroll::LISTEN).await?;
             let destinations: Vec<Destination> =
@@ -97,11 +101,14 @@ pub(crate) async fn run(command: EnrollCommand, conn: &Connection<'_>) -> Result
             println!("webhook {ant} approved for {key}");
             Ok(())
         }
-        EnrollCommand::Approve { ant, public_key, dir: d, .. } => {
+        EnrollCommand::Approve { ant, public_key, no_host, dir: d, .. } => {
             let dir = dir(d)?;
             let approver = enroll::Approver::connect(conn.nats, &dir, domain, enroll::LISTEN).await?;
-            let approved = approver.approve(&dir, &ant, public_key.as_deref()).await?;
+            let approved = approver.approve_with(&dir, &ant, public_key.as_deref(), !no_host).await?;
             println!("{ant} approved for {}", approved.public_key);
+            if let Some(host) = &approved.host {
+                println!("{}", host.describe());
+            }
             if let Some(leaf) = &approved.leaf {
                 println!("the uplink credentials of {} renewed to carry {ant}", leaf.machine);
                 if leaf.outbox {

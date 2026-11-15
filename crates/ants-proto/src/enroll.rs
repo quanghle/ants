@@ -32,6 +32,9 @@ pub const ENROLL_REPEAT: Duration = Duration::from_secs(5);
 /// [`crate::AdminOp::Retire`]) sends the request with the `order`, the user JWT of its host credentials as
 /// `enrollment` and their key's signature: `ants signer` takes it on the admin's word, with no human asked again,
 /// signing the new ant's key or revoking the retired ant's (`public_key`) and answering [`EnrollReply::Retired`].
+///
+/// A machine without host credentials also asks for its own ([`EnrollRequest::host_creds`]), granted only with a
+/// human's approval of the ant ([`EnrollHost`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EnrollRequest {
     pub ant: UserId,
@@ -51,6 +54,26 @@ pub struct EnrollRequest {
     /// The admin order the machine's daemon carries out by asking, which an admin signed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order: Option<Box<AdminOrder>>,
+    /// The host credentials the asking machine asks for as well, having none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_creds: Option<EnrollHost>,
+}
+
+/// The host credentials of its machine ([`crate::host_user`]) an enrollment request asks for too: the machine's name
+/// and the public key of the user NKey generated for them, whose seed stays there, with the enrollment key's
+/// `signature` of [`EnrollRequest::host_signed`], base64url without padding. The request's own signature leaves them
+/// out, so an approver that knows nothing of them still approves the ant alone.
+///
+/// The machine's name binds to the asking machine thus: the enrollment key signs it with the whole request; through a
+/// leaf node it must be the leaf's machine, which the uplink key's signature proves; a machine with a leaf node gets
+/// its host credentials only through that leaf; and the approver grants none while the team holds live host
+/// credentials of the machine for another key. A human approving the ant sees the machine named.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnrollHost {
+    pub machine: Machine,
+    /// The host's public NKey, `U...`.
+    pub public_key: String,
+    pub signature: String,
 }
 
 /// The leaf node of an asking machine ([`EnrollRequest::leaf`]): its machine name, the user JWT of its uplink
@@ -74,7 +97,17 @@ impl EnrollRequest {
             signature: String::new(),
             leaf: None,
             order: None,
+            host_creds: None,
         }
+    }
+
+    /// What the enrollment key signs for the host credentials asked for too ([`EnrollRequest::host_creds`]): what
+    /// [`EnrollRequest::signed`] holds, then the machine and the host's key; None when none are asked for.
+    pub fn host_signed(&self) -> Option<Vec<u8>> {
+        let host = self.host_creds.as_ref()?;
+        let mut signed = self.signed();
+        signed.extend_from_slice(format!("\nants-enroll-host\n{}\n{}", host.machine, host.public_key).as_bytes());
+        Some(signed)
     }
 
     /// What the enrollment key and the leaf's uplink key sign: every field but the signatures, one per line, and the
@@ -119,13 +152,16 @@ impl EnrollRequest {
 pub enum EnrollReply {
     /// The user JWT of `public_key`, which completes the ant's credentials with the seed kept on its machine, and
     /// for a request through a leaf node ([`EnrollRequest::leaf`]) the renewed user JWT of the leaf's uplink key,
-    /// allowing the ant as well.
+    /// allowing the ant as well, and for one asking for host credentials ([`EnrollRequest::host_creds`]) the user JWT
+    /// of the host's key, when they were granted too.
     Approved {
         ant: UserId,
         public_key: String,
         jwt: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         leaf_jwt: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host_jwt: Option<String>,
     },
     /// No credentials for `public_key`, or for any key asking for `ant` when it is `None`.
     Rejected {
@@ -272,11 +308,16 @@ mod tests {
         assert_eq!(request.check_subject("ants.enroll.dev-a"), Ok(()));
         assert!(request.check_subject("ants.enroll.dev-b").is_err());
 
-        let approved =
-            EnrollReply::Approved { ant: p("dev-a"), public_key: "UKEY".into(), jwt: "j".into(), leaf_jwt: None };
+        let approved = EnrollReply::Approved {
+            ant: p("dev-a"),
+            public_key: "UKEY".into(),
+            jwt: "j".into(),
+            leaf_jwt: None,
+            host_jwt: None,
+        };
         let json = serde_json::to_value(&approved).unwrap();
         assert_eq!(json["outcome"], "approved");
-        assert!(json.get("leaf_jwt").is_none());
+        assert!(json.get("leaf_jwt").is_none() && json.get("host_jwt").is_none());
         assert_eq!(serde_json::from_value::<EnrollReply>(json).unwrap(), approved);
         assert_eq!(approved.subject(), "ants.enroll.dev-a.reply");
         assert!(approved.answers("UKEY") && !approved.answers("UOTHER"));
@@ -304,6 +345,33 @@ mod tests {
         assert_eq!(back.signed(), signed, "the same bytes after the wire");
         request.order = Some(Box::new(AdminOrder::new(p("alice"), order.machine, p("dev-a"), order.op, "j")));
         assert_ne!(request.signed(), signed, "another order");
+    }
+
+    #[test]
+    fn host_credentials_asked_for_are_signed_apart_from_the_request() {
+        let mut request = EnrollRequest::new(p("dev-a"), "UKEY", "macbook");
+        let bare = request.signed();
+        assert_eq!(request.host_signed(), None);
+        let host = EnrollHost { machine: "m1".parse().unwrap(), public_key: "UHOST".into(), signature: String::new() };
+        request.host_creds = Some(host);
+        assert_eq!(request.signed(), bare, "an approver knowing nothing of them checks what it did");
+        let signed = request.host_signed().unwrap();
+        assert_eq!(signed, [bare, b"\nants-enroll-host\nm1\nUHOST".to_vec()].concat());
+        let back: EnrollRequest = serde_json::from_str(&serde_json::to_string(&request).unwrap()).unwrap();
+        assert_eq!(back.host_signed().unwrap(), signed, "the same bytes after the wire");
+        for change in [
+            |r: &mut EnrollRequest| r.host_creds.as_mut().unwrap().machine = "m2".parse().unwrap(),
+            |r: &mut EnrollRequest| r.host_creds.as_mut().unwrap().public_key = "UOTHER".into(),
+            |r: &mut EnrollRequest| r.public_key = "UOTHER".into(),
+            |r: &mut EnrollRequest| r.host = "other".into(),
+        ] {
+            let mut changed = request.clone();
+            change(&mut changed);
+            assert_ne!(changed.host_signed().unwrap(), signed);
+        }
+        let old: EnrollRequest =
+            serde_json::from_str(&serde_json::to_string(&EnrollRequest::new(p("dev-a"), "U", "h")).unwrap()).unwrap();
+        assert_eq!(old.host_creds, None);
     }
 
     #[test]
