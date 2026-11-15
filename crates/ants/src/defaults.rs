@@ -14,6 +14,10 @@ use crate::{Cli, Command};
 pub fn parse() -> Result<Cli> {
     let matches = Cli::command().get_matches();
     let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    if cli.compact && cli.command.is_some() {
+        let message = "--compact goes with bare `ants`, or after `ants chat`";
+        Cli::command().error(clap::error::ErrorKind::ArgumentConflict, message).exit();
+    }
     apply(&mut cli, &matches, &path()?)?;
     Ok(cli)
 }

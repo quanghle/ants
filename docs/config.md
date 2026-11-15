@@ -193,7 +193,7 @@ Humans retire any templated ant on the manager's machine with `ants retire NAME 
 
 ## Human registration
 
-`ants signer` registers a human's new device after a GitHub sign-in (`ants login`, with the team's bootstrap credentials; see [auth.md](auth.md#registering-humans)) when its `--config` has a `[registration]` table, reread per request. Without the table, every registration is refused as not enabled.
+`ants signer` registers a human's new device after a GitHub sign-in (`ants login`, with the team's bootstrap credentials) when its `--config` has a `[registration]` table, reread per request, and renews the credentials such registrations granted. Without the table, every registration is refused as not enabled. The flow, the grants, name bindings, renewal and offboarding are in [auth.md](auth.md#registering-humans).
 
 ```toml
 [registration]
@@ -204,15 +204,17 @@ email_domains = ["acme.example"]              # ... and users with a verified em
 ttl = "30d"                                   # validity of a registered device's credentials (default 30d, at least 1m)
 token_file = "~/.config/ants/github-token"    # the signer's GitHub token, mode 0600 (relative to the config file)
 # token_store = "github-token"                # or its entry in the OS credential store (service ants)
-# github_url = "https://github.com"           # GitHub Enterprise Server: its own URL
-# api_url = "https://api.github.com"          # ... and its REST API, such as https://ghe.example/api/v3
+# github_url = "https://github.com"           # where GitHub signs users in (default)
+# api_url = "https://api.github.com"          # GitHub's REST API (default)
 ```
 
-- **Policy:** a user who is a member of a listed organization, then of a listed team, then has a verified email address in a listed domain (exact domain, no subdomains; names compared without case) is signed at once, and the grant (`org`, `team` or `email-domain`) is recorded with the device in `issued.jsonl`. For anyone else the registration waits (`ants login` shows it) while the signer asks the humans with an `ApprovalRequest` of the reserved user `signer` (`register human NAME: GitHub user LOGIN (id N), outside the registration policy`, `allow_once` or `reject`), visible in `ants tools`, `ants inbox -f`, `ants dash` and all `ants webhook serve` notification sinks, waiting up to `--approval-timeout` (default `15m`, capped by the request's expiry). Once a human allows it, the device is signed with the grant `approval` (naming who approved); a rejection or no decision in time refuses it. At most 3 registrations wait for a human at once (more are refused), counting toward the 10 at once; waiting registrations drop on signer restart. An approval stands for that GitHub user and name: the user's later devices are signed at once, until `ants auth revoke NAME` withdraws it (revoking one device or key does not); the name stays bound to the user, who then needs the policy or a new approval.
-- **Signer token:** a classic token with `read:org` (or a fine-grained token with organization members read access) checks memberships and looks GitHub users up (`ants auth user NAME --human --github LOGIN`). Optional for registering, where the user's own token reads the memberships otherwise, but needed to renew the devices an `org` or `team` grant admitted: each renewal checks the user's memberships again with it, refusing the renewal and revoking every key of the name of a user who left ([auth.md](auth.md#renewing-over-nats)). `token_file` must be readable by its owner only; `token_file` and `token_store` exclude each other.
-- **GitHub only:** no other identity provider signs users in.
+- **`client_id`:** the client ID of a GitHub OAuth App of the team with **Enable Device Flow** checked; no client secret is needed. Signing in grants it the scopes `read:org user:email`.
+- **`orgs`, `teams`, `email_domains`:** the policy, checked in that order: an active member of a listed organization (grant `org`), then of a listed team (`team`), then a user with a verified email address in a listed domain (`email-domain`; that exact domain, no subdomains) is signed at once. Names are compared without case; organizations are GitHub logins and teams `org/slug`. Anyone else waits for a human's approval ([auth.md](auth.md#registration-policy)), within `ants signer --approval-timeout` (default `15m`). An empty policy sends every registration to the humans.
+- **`ttl`:** how long a registered device's credentials stay valid; a renewal keeps the lifetime they were signed with.
+- **`token_file` / `token_store`:** the signer's own GitHub token, in a file readable by its owner only (`~` and paths relative to the config file allowed) or in an entry of the OS credential store (service `ants`); at most one of them. A classic token with `read:org`, or a fine-grained token with organization members read access, of a member of the listed organizations, as GitHub hides private memberships from others. Optional for registering, where the user's own token reads the memberships otherwise (an organization restricting OAuth App access then hides them unless it approved the app), but needed to renew devices an `org` or `team` grant admitted: each renewal checks the memberships again with it, and is refused without it. `ants auth user NAME --human --github LOGIN` looks users up with it too.
+- **`github_url`, `api_url`:** a GitHub Enterprise Server's own URL and REST API (such as `https://ghe.example/api/v3`). `ants login` shows only github.com's device login page, so registration with a GitHub Enterprise Server stops at the sign-in; lookups by `ants auth user --github` and renewal checks use these URLs.
 
-`ants daemon` ignores the table.
+`ants signer` must connect to the hub itself (`--nats`), not through a leaf node, whose uplink never carries registration requests, and signs registered devices for its `--js-domain`. `ants daemon` ignores the table. GitHub is the only identity provider.
 
 ## Harnesses
 

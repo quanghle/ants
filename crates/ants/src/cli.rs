@@ -40,6 +40,10 @@ pub(crate) struct Cli {
     #[arg(long, global = true, env = "ANTS_JS_DOMAIN")]
     pub(crate) js_domain: Option<JsDomain>,
 
+    /// With bare `ants`: the two-line pane of `ants chat --compact`.
+    #[arg(long)]
+    pub(crate) compact: bool,
+
     // None for bare `ants`, which runs `ants chat` on a terminal.
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
@@ -231,6 +235,21 @@ pub(crate) enum Command {
         /// How far back to read threads, such as 90m, 24h or 7d; 0 for everything the stream keeps.
         #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse, default_value = "7d")]
         since: Duration,
+        /// Draw a two-line pane instead, as for a tmux split: what waits on the human by kind, the ants working and on
+        /// what, the spend that UTC day, and the top home item with its keys; Enter opens the full view.
+        #[arg(long)]
+        compact: bool,
+    },
+    /// One line of what waits on the human by kind, the ants working and the ants' spend that UTC day, without a
+    /// terminal: for a status bar or a script. Reads for at most 3s and prints ? for what it could not read in time.
+    /// Needs a human's credentials.
+    Status {
+        /// One short line for tmux's status-right: `⚑3 ◐2 $4.12`, the items waiting, the ants working, the spend.
+        #[arg(long, conflicts_with = "json")]
+        tmux: bool,
+        /// One JSON object, null for what was not read in time.
+        #[arg(long)]
+        json: bool,
     },
     /// Interactive terminal dashboard: recent threads and their history, the ants' live progress and the roster, and
     /// the pending tool requests, each shown in full and answered after a confirmation. Needs a terminal and a human's
@@ -557,9 +576,14 @@ mod tests {
         let cli = Cli::try_parse_from(["ants", "--nats", "nats://hub:4222"]).unwrap();
         assert!(cli.command.is_none());
         let cli = Cli::try_parse_from(["ants", "chat"]).unwrap();
-        assert_matches!(cli.command, Some(Command::Chat { since }) if since == Duration::from_hours(7 * 24));
+        assert_matches!(cli.command, Some(Command::Chat { since, compact: false }) if since == Duration::from_hours(7 * 24));
         let cli = Cli::try_parse_from(["ants", "chat", "--since", "90m"]).unwrap();
-        assert_matches!(cli.command, Some(Command::Chat { since }) if since == Duration::from_mins(90));
+        assert_matches!(cli.command, Some(Command::Chat { since, .. }) if since == Duration::from_mins(90));
+        let cli = Cli::try_parse_from(["ants", "--compact"]).unwrap();
+        assert!(cli.compact && cli.command.is_none());
+        let cli = Cli::try_parse_from(["ants", "chat", "--compact"]).unwrap();
+        assert_matches!(cli.command, Some(Command::Chat { compact: true, .. }));
+        assert!(Cli::try_parse_from(["ants", "status", "--tmux", "--json"]).is_err());
     }
 
     #[test]

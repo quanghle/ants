@@ -93,7 +93,7 @@ async fn run() -> Result<()> {
     let nats = || conn.nats();
     let Some(command) = cli.command else {
         tui::usage_without_terminal();
-        return Box::pin(tui::run(&nats()?, tui::SINCE)).await;
+        return Box::pin(tui::run(&nats()?, tui::SINCE, cli.compact)).await;
     };
     match command {
         Command::Ask { thread, sending, replies, input, attach, words } => {
@@ -129,7 +129,8 @@ async fn run() -> Result<()> {
         Command::Notify(NotifyCommand::Resume) => quiet::resume(&nats()?).await,
         Command::Notify(NotifyCommand::Status { json }) => quiet::status(&nats()?, json).await,
         Command::Watch { subject, thread } => cmd::watch::watch(&nats()?, &subject, thread).await,
-        Command::Chat { since } => Box::pin(tui::run(&nats()?, since)).await,
+        Command::Chat { since, compact } => Box::pin(tui::run(&nats()?, since, compact)).await,
+        Command::Status { tmux, json } => Box::pin(tui::status(&nats()?, tmux, json)).await,
         Command::Dash { since } => Box::pin(dash::run(&nats()?, since)).await,
         Command::Cancel { ant, thread } => cmd::cancel::cancel(&nats()?, ant, thread).await,
         Command::Queue { ant, json } => queue::list(&nats()?, ant, json).await,

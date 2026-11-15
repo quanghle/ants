@@ -1,5 +1,6 @@
-//! The frame around the views: a header with the human, the server and the connection, the nav beside the shown view,
-//! a footer with the view's keys, the latest notice or the search prompt, and the help over it all. Also the styles the views share.
+//! The frame around the views: a header with the human, the server and the connection, the nav beside the shown view
+//! with the command bar under it, a footer with the view's keys, the latest notice or the command bar's keys, and the
+//! help over it all. Also the styles the views share.
 
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
@@ -9,7 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
 use super::model::{Focus, Level, Model, Page};
-use super::{channel, home, nav, search, thread, work};
+use super::{channel, compact, home, nav, search, thread, work};
 use crate::live::Link;
 use crate::roster;
 
@@ -37,21 +38,27 @@ pub fn highlight(focused: bool) -> Style {
 }
 
 pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
+    if model.compact {
+        return compact::draw(frame, model, now);
+    }
     let [header, body, footer] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)]).areas(frame.area());
     frame.render_widget(Paragraph::new(header_line(model, now)), header);
     let [left, right] = Layout::horizontal([Constraint::Length(NAV_WIDTH), Constraint::Min(20)]).areas(body);
-    nav::draw(frame, left, &model.data, &model.nav, now, model.focus == Focus::Nav);
-    let focused = model.focus == Focus::View;
+    nav::draw(frame, left, &model.data, &model.nav, now, model.focus == Focus::Nav && !model.bar.focused);
+    let [view, bar] =
+        Layout::vertical([Constraint::Min(3), Constraint::Length(model.bar.height(right.width))]).areas(right);
+    let focused = model.focus == Focus::View && !model.bar.focused;
     let data = &model.data;
     match model.page() {
-        Page::Home(page) => page.draw(frame, right, data, now, focused),
-        Page::Work(page) => page.draw(frame, right, data, now, focused),
-        Page::Channel(page) => page.draw(frame, right, data, now, focused),
-        Page::Thread(page) => page.draw(frame, right, data, now, focused),
-        Page::Dm(page) => page.draw(frame, right, data, now, focused),
-        Page::Search(page) => page.draw(frame, right, data, now, focused),
+        Page::Home(page) => page.draw(frame, view, data, now, focused),
+        Page::Work(page) => page.draw(frame, view, data, now, focused),
+        Page::Channel(page) => page.draw(frame, view, data, now, focused),
+        Page::Thread(page) => page.draw(frame, view, data, now, focused),
+        Page::Dm(page) => page.draw(frame, view, data, now, focused),
+        Page::Search(page) => page.draw(frame, view, data, now, focused),
     }
+    model.bar.draw(frame, bar, &model.completions());
     frame.render_widget(Paragraph::new(footer_line(model, now)), footer);
     if model.help {
         draw_help(frame);
@@ -76,15 +83,18 @@ fn header_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
 }
 
 fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
-    if let Some(prompt) = &model.prompt {
-        return prompt.line();
-    }
     if let Some(notice) = model.notice_at(now) {
         let style = match notice.level {
             Level::Error => Style::new().fg(Color::Red),
             Level::Info => Style::new().fg(Color::Cyan),
         };
         return Line::styled(format!(" {}", notice.text), style);
+    }
+    if model.bar.focused && !model.completions().is_empty() {
+        return Line::styled(" ↑↓ select · Tab/Enter complete · Esc close the list", dim());
+    }
+    if model.bar.focused {
+        return Line::styled(" Enter send · Alt-Enter new line · Ctrl-E editor · Ctrl-K commands · Esc leave", dim());
     }
     let keys = match (model.focus, model.page()) {
         (Focus::Nav, _) => "↑↓ select · Enter view",
@@ -106,10 +116,14 @@ const HELP: &[(&str, &str)] = &[
     ("Enter", "open the selection"),
     ("Esc", "back to the previous view, else to the nav"),
     ("w", "in a channel: its threads in work"),
+    ("Ctrl-K @ #", "the command bar: @ant asks, #channel posts, else reply"),
+    ("/command", "in the bar: a command on the selection (Ctrl-K lists them)"),
+    ("Alt-Enter Ctrl-E", "in the bar: a new line, the text in the editor"),
+    ("↑↓ Tab", "in the bar: pick and complete an @ant, #channel or /command"),
     ("y", "in a thread: copy the selected message"),
     ("p m e d", "in a thread: pin, mute, archive, mark done (again to undo)"),
     ("n", "with a person: write a message, starting a thread"),
-    ("/", "search messages, as in: deploy from:dev-a"),
+    ("/", "the bar on /search, as in: /search deploy from:dev-a"),
     ("R", "read everything again"),
     ("?", "this help"),
     ("q Ctrl-C", "quit"),
@@ -181,6 +195,28 @@ mod tests {
         let shown = screen(&m, at(30));
         assert!(shown.contains("○ disconnected 27s, reconnecting"), "{shown}");
         assert!(shown.contains("any key closes this help"), "{shown}");
+    }
+
+    #[test]
+    fn the_command_bar_shows_its_hint_then_its_text_status_and_keys() {
+        let mut m = model();
+        let shown = screen(&m, at(0));
+        assert!(shown.contains("Ctrl-K commands · @ ant · # channel"), "{shown}");
+        m.key(Key::Char('@'), at(0));
+        let shown = screen(&m, at(0));
+        assert!(shown.contains("@bob") && shown.contains("human"), "{shown}");
+        assert!(shown.contains("↑↓ select · Tab/Enter complete · Esc close the list"), "{shown}");
+        for c in "dev-a".chars() {
+            m.key(Key::Char(c), at(0));
+        }
+        m.key(Key::Enter, at(0));
+        let shown = screen(&m, at(0));
+        assert!(shown.contains("@dev-a"), "{shown}");
+        assert!(shown.contains("nothing to send to @dev-a"), "{shown}");
+        assert!(shown.contains("Enter send · Alt-Enter new line"), "{shown}");
+        m.key(Key::Ctrl('k'), at(0));
+        let shown = screen(&m, at(0));
+        assert!(shown.contains("/approve   [ID] [--always]   ") && shown.contains("/quit"), "{shown}");
     }
 
     #[test]

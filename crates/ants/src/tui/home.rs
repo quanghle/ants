@@ -27,7 +27,7 @@ pub enum Why {
 }
 
 impl Why {
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::Approval => "approve",
             Self::Stuck => "stuck",
@@ -36,7 +36,7 @@ impl Why {
         }
     }
 
-    fn color(self) -> Color {
+    pub fn color(self) -> Color {
         match self {
             Self::Approval => Color::Yellow,
             Self::Stuck => Color::Red,
@@ -90,6 +90,12 @@ pub struct Page {
 
 impl Page {
     pub const KEYS: &str = "↑↓ item · Enter open its thread";
+
+    /// The selected item's thread.
+    pub fn thread(&self, data: &Data) -> Option<ThreadId> {
+        let items = items(data);
+        items.get(self.selected.min(items.len().saturating_sub(1))).map(|i| i.thread.clone())
+    }
 
     pub fn key(&mut self, key: Key, data: &Data, _now: DateTime<Utc>) -> Option<To> {
         let items = items(data);
