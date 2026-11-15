@@ -1,13 +1,14 @@
 //! The tools an assistant ant acts for its human with ([`ants_proto::AssistantGrant`]): `human_queue` reads what
 //! waits in the human's home in ants chat, or one of its threads; `answer_for_human`, `send_for_human`,
-//! `react_for_human`, `title_for_human` and `done_for_human` answer questions, send messages, react and title or mark
-//! threads done for it; `decide_for_human` decides a tool request waiting for it, held by the requesting ant's daemon
+//! `post_for_human`, `notes_for_human`, `react_for_human`, `title_for_human` and `done_for_human` answer questions,
+//! send messages, post in channels and thread notes, react and title or mark threads done for it; `decide_for_human` decides a tool request waiting for it, held by the requesting ant's daemon
 //! until the human confirms it or a pre-allow rule of the human covers it ([`crate::approvals`]).
 //!
 //! The tools are offered only while the human's grant names the ant ([`Hub::acting_for`]), and each call checks it
 //! again, so a withdrawal ends them at once. Everything they publish is the ant's own, carrying `on_behalf_of` naming
 //! the human, which readers verify against the grant. The human hears of each act in its inbox: from the recipient's
-//! daemon for a message to an ant or a decision ([`crate::behalf`]), else from the ant itself. Sealed messages open,
+//! daemon for a message to an ant or a decision ([`crate::behalf`]), else from the ant itself, as for a post, which
+//! every daemon sees. Sealed messages open,
 //! and messages to humans are sealed, only while the human enrolled the ant as one of its devices
 //! ([`crate::sealing::AssistantSealing`]).
 
@@ -18,8 +19,9 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use ants_proto::{
-    ApprovalDecision, ApprovalRequest, Choice, Envelope, JsDomain, READ_BUCKET, Reaction, ReadMarker, THREADS_BUCKET,
-    ThreadDone, ThreadId, ThreadTitle, UserId, Uuid, Verdict, done_key, subject, title_key,
+    ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, Choice, Envelope, JsDomain, NotesPost, READ_BUCKET,
+    Reaction, ReadMarker, THREADS_BUCKET, ThreadDone, ThreadId, ThreadTitle, UserId, Uuid, Verdict, done_key, subject,
+    title_key,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, consumer};
@@ -29,7 +31,7 @@ use rmcp::model::CallToolResult;
 use rmcp::{ErrorData, schemars, tool, tool_router};
 use serde::Deserialize;
 
-use super::{Hub, Tools, text};
+use super::{Hub, POST_TRIES, Tools, text};
 use crate::direct_kv::DirectKv;
 use crate::reading::{self, Reading};
 use crate::sealing::{AssistantSealing, Opening};
@@ -498,6 +500,59 @@ impl Hub {
         Ok(format!("Sent {to} message {} on thread {} for {human}.{told}", envelope.id, envelope.thread_id))
     }
 
+    /// Post in a channel the human is a member of, starting a thread or on `thread`, as the human posts there: with a
+    /// fresh turn budget.
+    async fn post_for_human(&self, args: PostForHuman) -> Result<String, String> {
+        let (human, _) = self.acting_for()?;
+        let channel: ChannelId = args.channel.trim().trim_start_matches('#').parse().map_err(|e| format!("{e}"))?;
+        let access = self.channels.get().ok_or("channels are not served here; post_for_human is unavailable")?;
+        let entry = (access.entry)(channel.clone())
+            .await
+            .map_err(|e| format!("cannot read #{channel}: {e:#}"))?
+            .ok_or_else(|| format!("there is no channel #{channel}"))?;
+        if !entry.is_member(&human) {
+            return Err(format!("{human} is no member of #{channel}; nothing posted"));
+        }
+        let post = match args.thread.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+            Some(thread) => {
+                let thread: ThreadId = thread.parse().map_err(|e| format!("{e}"))?;
+                let root = thread.as_str().parse::<Uuid>().ok();
+                let mut post = ChannelPost::on_thread(channel.clone(), thread, self.ant.clone(), args.text);
+                post.in_reply_to = root;
+                post
+            }
+            None => ChannelPost::new(channel.clone(), self.ant.clone(), args.text),
+        }
+        .with_owner(Some(human.clone()))
+        .on_behalf(Some(human.clone()));
+        let excerpt = behalf::excerpt(&post.text);
+        (access.post)(post.clone()).await.map_err(|e| format!("not posted: {e:#}"))?;
+        let thread = &post.thread_id;
+        let told = self.tell(&human, format!("posted to #{channel} on thread {thread} for {human}: {excerpt}")).await;
+        Ok(format!("Posted to #{channel} on thread {thread} for {human}.{told}"))
+    }
+
+    /// Post to the notes of `thread` as the human posts there: with a fresh turn budget.
+    async fn notes_for_human(&self, args: NotesForHuman) -> Result<String, String> {
+        let (human, _) = self.acting_for()?;
+        let thread: ThreadId = args.thread.trim().parse().map_err(|e| format!("{e}"))?;
+        let post = NotesPost::new(thread.clone(), self.ant.clone(), args.text).on_behalf(Some(human.clone()));
+        let mut posted = false;
+        for _ in 0..POST_TRIES {
+            let notes = self.notes.read(&thread).await.map_err(|e| format!("cannot read the thread notes: {e:#}"))?;
+            if self.notes.post(&post, notes.last_seq).await.map_err(|e| format!("not posted: {e:#}"))? {
+                posted = true;
+                break;
+            }
+        }
+        if !posted {
+            return Err(format!("the notes of thread {thread} kept changing; nothing posted"));
+        }
+        let excerpt = behalf::excerpt(&post.text);
+        let told = self.tell(&human, format!("posted to the notes of thread {thread} for {human}: {excerpt}")).await;
+        Ok(format!("Posted to the notes of thread {thread} for {human} ({} turns left).{told}", post.turn_budget))
+    }
+
     async fn react_for_human(&self, args: ReactForHuman) -> Result<String, String> {
         let (human, store) = self.acting_for()?;
         let reaction: Reaction = args.reaction.trim().parse().map_err(|e| format!("{e}"))?;
@@ -643,6 +698,23 @@ pub(super) struct TitleForHuman {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub(super) struct PostForHuman {
+    /// A channel the human is a member of, with or without its `#`.
+    channel: String,
+    text: String,
+    /// The thread to post on; none starts a new one.
+    #[serde(default)]
+    thread: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(super) struct NotesForHuman {
+    /// The thread whose notes to post to.
+    thread: String,
+    text: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub(super) struct DoneForHuman {
     /// A thread of the human's.
     thread: String,
@@ -683,6 +755,19 @@ impl Tools {
         devices; `plaintext` sends it unsealed. Attachments are not sent for a human.")]
     async fn send_for_human(&self, Parameters(args): Parameters<SendForHuman>) -> Result<CallToolResult, ErrorData> {
         Ok(text(self.hub.send_for_human(args).await))
+    }
+
+    #[tool(description = "As the assistant of a human, post for it in a channel it is a member of, on `thread` or \
+        starting a new one, as this ant's, for the human, with the fresh turn budget a human's post has; an @mention \
+        wakes that member as the human's would. The human is told.")]
+    async fn post_for_human(&self, Parameters(args): Parameters<PostForHuman>) -> Result<CallToolResult, ErrorData> {
+        Ok(text(self.hub.post_for_human(args).await))
+    }
+
+    #[tool(description = "As the assistant of a human, post for it to the notes of a thread, as this ant's, for the \
+        human, with the fresh turn budget a human's post gives the notes. The human is told.")]
+    async fn notes_for_human(&self, Parameters(args): Parameters<NotesForHuman>) -> Result<CallToolResult, ErrorData> {
+        Ok(text(self.hub.notes_for_human(args).await))
     }
 
     #[tool(description = "As the assistant of a human, add or remove a reaction for it to a message to or from \

@@ -19,7 +19,8 @@
 //! `read_attachment` reads an attachment of a message the ant reads (see [`attach`]).
 //!
 //! An assistant also gets the `*_for_human` tools, which act for its human while the human's grant names it: read the
-//! human's home queue, answer questions, send, react, title, mark done and decide tool requests (see [`assist`]).
+//! human's home queue, answer questions, send, post in channels and thread notes, react, title, mark done and decide
+//! tool requests (see [`assist`]).
 //!
 //! One server per ant, with two ways in: streamable HTTP on a loopback port, for harnesses that take HTTP MCP
 //! servers, and a local socket that `ants mcp` bridges stdio to, for the others (see [`crate::ipc`]). The sessions of each thread get their
@@ -2381,7 +2382,7 @@ fn instructions(ant: &UserId, manager: bool, assisting: Option<&UserId>) -> Stri
             " As the assistant of {human}, act for {human} with the *_for_human tools: human_queue reads what waits \
              for {human} in its home (questions, tool requests, unread messages) or one of its threads, \
              answer_for_human answers a question asked of it, send_for_human messages an ant or human for it, \
-             react_for_human, title_for_human and done_for_human react to its messages and title or close its \
+             post_for_human and notes_for_human post for it in a channel or a thread's notes, react_for_human, title_for_human and done_for_human react to its messages and title or close its \
              threads, and decide_for_human decides a tool request waiting for it, held until {human} confirms it. \
              Each act goes out as this ant's, marked as for {human}, and {human} is told of it. Act for {human} only \
              as it asked; the tools stop the moment {human} withdraws its grant."
