@@ -75,11 +75,13 @@ pub(crate) enum Command {
         #[arg(long)]
         limit: Option<usize>,
         /// Keep waiting for new replies until Ctrl-C, meanwhile dead-lettering the messages JetStream stops
-        /// delivering without the daemon having stored them as dead letters (as `ants dead watch` does). Without
-        /// --thread and --json, also print the pending tool requests, new ones and how each ends.
+        /// delivering without the daemon having stored them as dead letters (as `ants dead watch` does) and printing
+        /// the reactions added to or removed from the replies shown. Without --thread and --json, also print the
+        /// pending tool requests, new ones and how each ends.
         #[arg(long, short)]
         follow: bool,
-        /// One JSON envelope per line.
+        /// One JSON envelope per line; following, a reaction added or removed as one of message, by, reaction and
+        /// removed.
         #[arg(long)]
         json: bool,
     },
@@ -381,7 +383,8 @@ pub(crate) struct Replies {
     /// --timeout.
     #[arg(long, group = "awaiting")]
     pub(crate) wait: bool,
-    /// Print every reply on the thread as it arrives, until --timeout or Ctrl-C.
+    /// Print every reply on the thread as it arrives, and the reactions added to or removed from the message and
+    /// the replies, until --timeout or Ctrl-C.
     #[arg(long, short, group = "awaiting")]
     pub(crate) follow: bool,
     /// How long --wait or --follow lasts, such as 90s, 10m or 1h30m. Without it, until a reply (--wait) or Ctrl-C.
