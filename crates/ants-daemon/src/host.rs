@@ -2,7 +2,8 @@
 //! credentials (`ants auth host`), apart from its ants' own. It keeps the machine's [`MachineRecord`] in
 //! [`MACHINES_BUCKET`] current: the ants the daemon serves, put on start and whenever they change, and never deleted,
 //! so an ant stays addressable on its machine after its roster entry expired. It also takes the admin orders to the
-//! machine's ants and records their outcomes ([`crate::admin`]), and keeps the shared settings of the machine's ants
+//! machine's ants and records their outcomes ([`crate::admin`]), reading the humans' consent to their assistants'
+//! orders from [`ants_proto::HUMANS_BUCKET`] ([`crate::admin::held`]), and keeps the shared settings of the machine's ants
 //! ([`crate::shared`]), creating those still missing from the machine's config. Without host credentials, where the ants have their
 //! own, the connection stays off and the daemon serves its ants as before.
 
@@ -119,8 +120,12 @@ pub async fn run(host: Host, ants: watch::Receiver<Vec<UserId>>) -> Result<()> {
     let machine = machine_of(host.machine.as_ref(), host.creds.as_deref(), &hostname)?;
     let accounts = host.creds.as_deref().map(creds::account).transpose()?.into_iter().collect();
     let Some(js) = connect(&host, &machine).await? else { return Ok(()) };
+    let humans =
+        crate::humans::Registry::new(UserId::human()).verifying_grants(crate::humans::account(host.creds.as_deref()));
+    let _watching = humans.watch(js.clone(), crate::humans::RETRY);
     let orders = admin::Orders {
         machine: machine.clone(),
+        nats: host.nats.clone(),
         remote: host.remote_admin,
         accounts,
         config: host.config.clone(),
@@ -128,6 +133,7 @@ pub async fn run(host: Host, ants: watch::Receiver<Vec<UserId>>) -> Result<()> {
         js_domain: host.js_domain.clone(),
         restarts: host.restarts.clone(),
         leaf: host.leaf.clone(),
+        hold: admin::held::Hold::new(humans),
     };
     let shared = host.config.as_ref().map(|c| c.shared.clone());
     let polled = ants.clone();

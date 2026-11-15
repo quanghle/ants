@@ -175,6 +175,7 @@ async fn a_read_is_answered_from_the_config_only_while_fresh() {
     let config = ConfigFile::new(path, Arc::new(Notify::new()));
     let orders = Orders {
         machine: "m1".parse().unwrap(),
+        nats: String::new(),
         remote: true,
         accounts: vec![],
         config: Some(config),
@@ -182,6 +183,7 @@ async fn a_read_is_answered_from_the_config_only_while_fresh() {
         creds: None,
         js_domain: None,
         leaf: None,
+        hold: Default::default(),
     };
     let order = |ant: &str| {
         AdminOrder::new(

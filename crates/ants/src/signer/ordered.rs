@@ -1,25 +1,29 @@
 //! Enrollment requests carrying an admin's order ([`EnrollRequest::order`]): the daemon of the order's machine, carrying
-//! out an order to add an ant on it ([`AdminOp::Add`]) or to retire one ([`AdminOp::Retire`]), asks with its host
-//! credentials, and the signer answers on the admin's word, with no human asked again.
+//! out an order to add an ant on it ([`AdminOp::Add`]), to clone one under a new name ([`AdminOp::Clone`]) or to
+//! retire one ([`AdminOp::Retire`]), asks with its host credentials, and the signer answers on the admin's word, with
+//! no human asked again.
 //!
 //! The signer trusts neither the machine nor the order without checking both: the request must prove the machine's
 //! live host credentials of the team's account (a request failing that gets no answer, as an enrollment request
 //! failing its proof does), and the order must verify as an admin's ([`AdminOrder::verify`]) at the time the signer
-//! hears it, for that machine and the ant asked about. An order adds one key only: another key asking on the same
-//! order is refused, and a retirement revokes only keys of an ant that was there when the admin sent the order. An order
-//! never grants host credentials ([`EnrollRequest::host_creds`]): only a human approving does.
+//! hears it, for that machine and the ant asked about: the ant an order adds or retires, or the clone a clone order
+//! names, never the ant it clones. An order adds one key only: another key asking on the same order is refused, and a
+//! retirement revokes only keys of an ant that was there when the admin sent the order. An order never grants host
+//! credentials ([`EnrollRequest::host_creds`]): only a human approving does. An add order naming a human the ant is to
+//! assist ([`AdminOp::Add`]'s `assistant_of`) has the key signed as that human's assistant only when the human sent
+//! it, and as `ants auth user ANT --assistant-of HUMAN` would.
 //!
-//! On a machine behind a leaf node, the request of an add order also carries the leaf's live uplink credentials, which
-//! sign it too: the signer renews them to carry the ant, keeps the ant among the leaf's members and admits it from the
-//! machine's outbox, as for an ant enrolling through the leaf.
+//! On a machine behind a leaf node, the request of an add or clone order also carries the leaf's live uplink
+//! credentials, which sign it too: the signer renews them to carry the ant, keeps the ant among the leaf's members and
+//! admits it from the machine's outbox, as for an ant enrolling through the leaf.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
 use ants_daemon::creds::{Finding, Kind as CredsKind};
 use ants_proto::{
-    AdminOp, AdminOrder, EnrollLeaf, EnrollReply, EnrollRequest, Machine, ORDER_CLOCK_SKEW, Permissions, Role, Uuid,
-    host_user,
+    AdminOp, AdminOrder, EnrollLeaf, EnrollReply, EnrollRequest, LeafRole, Machine, ORDER_CLOCK_SKEW, Permissions,
+    UserId, Uuid, host_user,
 };
 use anyhow::{Context as _, Result, bail};
 use chrono::{DateTime, TimeDelta, Utc};
@@ -105,7 +109,7 @@ fn host(approver: &Approver, request: &EnrollRequest, now: DateTime<Utc>) -> Res
 }
 
 /// What to answer `request`, which `machine` proved, carrying `order`: refused, with the reason, unless the order is an
-/// admin's to add or retire the ant asked about on that machine.
+/// admin's to add, clone as or retire the ant asked about on that machine.
 async fn decide(
     approver: &Approver,
     url: &str,
@@ -125,14 +129,25 @@ async fn decide(
     if order.machine != *machine {
         bail!("the order is for {}, not {machine}", order.machine);
     }
-    if order.ant != request.ant {
-        bail!("the order is about {}, not {}", order.ant, request.ant);
+    let about = match &order.op {
+        AdminOp::Clone { new, .. } => new,
+        _ => &order.ant,
+    };
+    if *about != request.ant {
+        bail!("the order is about {about}, not {}", request.ant);
     }
     if let Some(leaf) = &request.leaf {
         check_leaf(approver, request, leaf, machine, &revoked)?;
     }
     match &order.op {
-        AdminOp::Add { .. } => add(approver, request, order, machine, &revoked).await,
+        AdminOp::Add { assistant_of: Some(human), .. } => {
+            if order.admin != *human {
+                bail!("only {human} adds an assistant of {human}: the order is {}'s", order.admin);
+            }
+            auth::check_assistant(dir, &request.ant, human)?;
+            add(approver, request, order, machine, &revoked, Some(human)).await
+        }
+        AdminOp::Add { .. } | AdminOp::Clone { .. } => add(approver, request, order, machine, &revoked, None).await,
         AdminOp::Retire => retire(dir, url, request, order).await,
         op => bail!("an order to {} asks nothing of the signer", op.describe()),
     }
@@ -159,17 +174,18 @@ fn check_leaf(
         .with_context(|| format!("the uplink credentials of {machine}"))
 }
 
-/// Sign the key `request` asks for, of the ant the order adds on `machine`: never a key revoked or issued to other
+/// Sign the key `request` asks for, of the ant the order adds on `machine` or the clone it makes there: never a key revoked or issued to other
 /// credentials than the ant's on an order, nor another key on the same order, nor while the team holds live
 /// credentials of the name for another key. Behind a leaf node, also renew its uplink credentials the request carries
 /// to carry the ant, first, so that an uplink the hub would refuse leaves no ant signed; keep the ant among the leaf's
-/// members and admit it from the machine's outbox.
+/// members and admit it from the machine's outbox. With `assistant_of`, the key is the assistant's of that human.
 async fn add(
     approver: &Approver,
     request: &EnrollRequest,
     order: &AdminOrder,
     machine: &Machine,
     revoked: &BTreeSet<String>,
+    assistant_of: Option<&UserId>,
 ) -> Result<EnrollReply> {
     let dir = approver.dir.as_path();
     let (ant, key) = (&request.ant, request.public_key.as_str());
@@ -194,7 +210,8 @@ async fn add(
     let domain = Finding::from_jwt(&request.enrollment)?.js_domain;
     let leaf_jwt = match &request.leaf {
         Some(leaf) => {
-            let more = Permissions::for_leaf(machine, [(ant, Role::Ant)]).with_uplink_js_domain(domain.as_ref());
+            let role = assistant_of.map_or(LeafRole::Ant, LeafRole::AssistantOf);
+            let more = Permissions::for_leaf(machine, [(ant, role)]).with_uplink_js_domain(domain.as_ref());
             let renewed = auth::extend_leaf(dir, &leaf.jwt, machine, more)
                 .with_context(|| format!("the uplink of the leaf node {machine} cannot carry {ant}"))?;
             Some(renewed)
@@ -205,7 +222,7 @@ async fn add(
         ),
         None => None,
     };
-    let jwt = auth::sign_ordered(dir, ant, domain.as_ref(), key, order.id)?;
+    let jwt = auth::sign_ordered(dir, ant, domain.as_ref(), key, order.id, assistant_of)?;
     if leaf_jwt.is_some() {
         members::enrolled(dir, machine, ant)
             .with_context(|| format!("keeping {ant} among the members of {machine}"))?;

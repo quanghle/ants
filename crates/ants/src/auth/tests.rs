@@ -947,10 +947,11 @@ async fn every_human_has_the_same_rights_and_reads_only_its_own_inbox() {
     assert_eq!(heard, [&b"allow"[..], b"reject"]);
 }
 
-/// An assistant decides no approval request on its subject, sends no admin order, and cancels no prompt, asks for no
-/// queue, withdraws no queued message nor records an owner on the subjects and keys a human uses: its decisions wait
-/// in its messages for its human's confirmation, and readers of the rest could not tell its acts from its human's. It
-/// does those on subjects and keys naming it, and its human for an owner, which readers check against the grant.
+/// An assistant decides no approval request on its subject, and cancels no prompt, asks for no queue, withdraws no
+/// queued message nor records an owner on the subjects and keys a human uses: its decisions wait in its messages for
+/// its human's confirmation, and readers of the rest could not tell its acts from its human's. It does those on
+/// subjects and keys naming it, and its human for an owner, which readers check against the grant. Its admin orders,
+/// which name the human they are for, wait for the human's confirmation at the machine's daemon.
 #[tokio::test]
 async fn an_assistant_takes_no_act_readers_could_not_tell_from_its_human_s() {
     let Some(server) = Server::start() else { return };
@@ -962,7 +963,6 @@ async fn an_assistant_takes_no_act_readers_could_not_tell_from_its_human_s() {
     let (client, mut errors) = server.watched_with(&pa, &creds).await;
     for s in [
         "ants.approvals.dev-a.r1",
-        "ants.admin.m1.dev-a",
         "ants.cancel.dev-a.t1",
         "ants.queue.dev-a",
         "$KV.ants_attempts.dev-a.msg.m1",
@@ -1036,6 +1036,7 @@ async fn an_assistant_reads_its_human_s_marker_but_writes_only_its_own() {
         channel: None,
         before: u64::MAX,
         reading,
+        home: None,
     };
     let history = read(Reading::daemon(true)).history()(ants_daemon::history::DEFAULT_BUDGET).await;
     for said in ["hello", "hi", "noted"] {
@@ -1224,6 +1225,7 @@ async fn an_ant_reads_back_its_thread_both_ways_and_only_its_own_sent_messages()
         channel: Some(ops),
         before: u64::MAX,
         reading: Reading::Consumer,
+        home: None,
     };
     assert_eq!(
         read.history()(ants_daemon::history::DEFAULT_BUDGET).await,

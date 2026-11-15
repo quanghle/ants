@@ -1,30 +1,34 @@
 //! The tools an assistant ant acts for its human with ([`ants_proto::AssistantGrant`]): `human_queue` reads what
 //! waits in the human's home in ants chat, or one of its threads; `answer_for_human`, `send_for_human`,
-//! `react_for_human`, `title_for_human` and `done_for_human` answer questions, send messages, react and title or mark
-//! threads done for it; `decide_for_human` decides a tool request waiting for it, held by the requesting ant's daemon
-//! until the human confirms it or a pre-allow rule of the human covers it ([`crate::approvals`]); `queue_for_human`,
-//! `cancel_for_human` and `withdraw_for_human` list an ant's queue, cancel its prompt on a thread and withdraw a message
-//! waiting for it, asking the ant's daemons on subjects naming the ant ([`ants_proto::CancelRequest::for_human`]).
+//! `post_for_human`, `notes_for_human`, `react_for_human`, `title_for_human` and `done_for_human` answer questions,
+//! send messages, post in channels and thread notes, react and title or mark threads done for it; `decide_for_human`
+//! decides a tool request waiting for it, held by the requesting ant's daemon until the human confirms it or a
+//! pre-allow rule of the human covers it ([`crate::approvals`]); `order_for_human` sends an admin order for it, held
+//! likewise by the daemon of the ant's machine ([`crate::admin::held`]); `queue_for_human`, `cancel_for_human` and
+//! `withdraw_for_human` list an ant's queue, cancel its prompt on a thread and withdraw a message waiting for it,
+//! asking the ant's daemons on subjects naming the ant ([`ants_proto::CancelRequest::for_human`]).
 //!
 //! The tools are offered only while the human's grant names the ant ([`Hub::acting_for`]), and each call checks it
 //! again, so a withdrawal ends them at once. Everything they publish is the ant's own, carrying `on_behalf_of` naming
 //! the human, which readers verify against the grant. The human hears of each act in its inbox: from the recipient's
-//! daemon for a message to an ant, a decision, a cancel or a withdrawal ([`crate::behalf`]), else from the ant itself.
-//! Before a message to an ant, the ant records the human as the thread's owner for that ant
-//! ([`crate::owners::record_for_human`]). Sealed messages open,
+//! daemon for a message to an ant, a decision, a cancel or a withdrawal ([`crate::behalf`]), else from the ant itself,
+//! as for a post, which every daemon sees. Before a message to an ant, the ant records the human as the thread's owner
+//! for that ant ([`crate::owners::record_for_human`]). Sealed messages open,
 //! and messages to humans are sealed, only while the human enrolled the ant as one of its devices
 //! ([`crate::sealing::AssistantSealing`]).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::ops::ControlFlow;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use ants_proto::{
-    ApprovalDecision, ApprovalRequest, CancelReply, CancelRequest, Choice, Envelope, JsDomain, MessageMark, QueueReply,
-    QueueRequest, QueuedMessage, READ_BUCKET, Reaction, ReadMarker, THREADS_BUCKET, ThreadDone, ThreadId, ThreadTitle,
-    UserId, Uuid, Verdict, done_key, subject, title_key,
+    Act, AdminOp, AdminOrder, ApprovalDecision, ApprovalRequest, CancelReply, CancelRequest, ChannelId, ChannelPost,
+    Choice, Envelope, JsDomain, Machine, MessageMark, NotesPost, QueueReply, QueueRequest, QueuedMessage, READ_BUCKET,
+    Reaction, ReadMarker, THREADS_BUCKET, ThreadDone, ThreadId, ThreadTitle, UserId, Uuid, Verdict, done_key, subject,
+    title_key,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, consumer};
@@ -36,7 +40,7 @@ use rmcp::{ErrorData, schemars, tool, tool_router};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
-use super::{Hub, Tools, text};
+use super::{Hub, POST_TRIES, Tools, text};
 use crate::direct_kv::DirectKv;
 use crate::reading::{self, Reading};
 use crate::sealing::{AssistantSealing, Opening};
@@ -92,6 +96,8 @@ pub trait HumanStore: Send + Sync {
     fn cancel(&self, request: CancelRequest) -> BoxFuture<'_, Result<Vec<CancelReply>>>;
     /// The answers to `request`, as [`HumanStore::cancel`] gathers them.
     fn queue(&self, request: QueueRequest) -> BoxFuture<'_, Result<Vec<QueueReply>>>;
+    /// Sign `order` with the ant's credentials and send it to the hub's stream, once stored: the order as sent.
+    fn send_order(&self, order: AdminOrder) -> BoxFuture<'_, Result<AdminOrder>>;
 }
 
 /// What opens the human's sealed messages and seals those sent for it: [`AssistantSealing`].
@@ -127,14 +133,15 @@ impl HumanSealing for AssistantSealing {
 }
 
 /// The [`HumanStore`] on the hub's JetStream, read as a human reads it, by direct gets; `js_domain` is the domain `js`
-/// was made for.
-pub fn jetstream_store(js: jetstream::Context, js_domain: Option<JsDomain>) -> Arc<dyn HumanStore> {
-    Arc::new(JetStreamStore { js, js_domain })
+/// was made for, and `creds` the ant's credentials, which sign the orders it sends.
+pub fn jetstream_store(js: jetstream::Context, js_domain: Option<JsDomain>, creds: PathBuf) -> Arc<dyn HumanStore> {
+    Arc::new(JetStreamStore { js, js_domain, creds })
 }
 
 struct JetStreamStore {
     js: jetstream::Context,
     js_domain: Option<JsDomain>,
+    creds: PathBuf,
 }
 
 impl JetStreamStore {
@@ -300,6 +307,21 @@ impl HumanStore for JetStreamStore {
             let payload = serde_json::to_vec(&request)?;
             let keep = |a: &QueueReply, at: &str| a.request_id == request.id && a.check_subject(at).is_ok();
             self.ask(request.subject(), request.reply_subject(), payload, keep).await
+        })
+    }
+
+    fn send_order(&self, mut order: AdminOrder) -> BoxFuture<'_, Result<AdminOrder>> {
+        Box::pin(async move {
+            let (jwt, key) = crate::creds::load(&self.creds, crate::keystore::os())?;
+            order.credentials = jwt;
+            order.signature = data_encoding::BASE64URL_NOPAD.encode(&key.sign(&order.signed())?);
+            let message = jetstream::message::PublishMessage::build()
+                .payload(serde_json::to_vec(&order)?.into())
+                .message_id(order.id.to_string());
+            let subject = order.subject();
+            let stored = async { self.js.send_publish(subject.clone(), message).await?.await };
+            stored.await.with_context(|| format!("sending the admin order on {subject}"))?;
+            Ok(order)
         })
     }
 }
@@ -576,6 +598,59 @@ impl Hub {
         Ok(format!("Sent {to} message {} on thread {} for {human}.{told}", envelope.id, envelope.thread_id))
     }
 
+    /// Post in a channel the human is a member of, starting a thread or on `thread`, as the human posts there: with a
+    /// fresh turn budget.
+    async fn post_for_human(&self, args: PostForHuman) -> Result<String, String> {
+        let (human, _) = self.acting_for()?;
+        let channel: ChannelId = args.channel.trim().trim_start_matches('#').parse().map_err(|e| format!("{e}"))?;
+        let access = self.channels.get().ok_or("channels are not served here; post_for_human is unavailable")?;
+        let entry = (access.entry)(channel.clone())
+            .await
+            .map_err(|e| format!("cannot read #{channel}: {e:#}"))?
+            .ok_or_else(|| format!("there is no channel #{channel}"))?;
+        if !entry.is_member(&human) {
+            return Err(format!("{human} is no member of #{channel}; nothing posted"));
+        }
+        let post = match args.thread.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+            Some(thread) => {
+                let thread: ThreadId = thread.parse().map_err(|e| format!("{e}"))?;
+                let root = thread.as_str().parse::<Uuid>().ok();
+                let mut post = ChannelPost::on_thread(channel.clone(), thread, self.ant.clone(), args.text);
+                post.in_reply_to = root;
+                post
+            }
+            None => ChannelPost::new(channel.clone(), self.ant.clone(), args.text),
+        }
+        .with_owner(Some(human.clone()))
+        .on_behalf(Some(human.clone()));
+        let excerpt = behalf::excerpt(&post.text);
+        (access.post)(post.clone()).await.map_err(|e| format!("not posted: {e:#}"))?;
+        let thread = &post.thread_id;
+        let told = self.tell(&human, format!("posted to #{channel} on thread {thread} for {human}: {excerpt}")).await;
+        Ok(format!("Posted to #{channel} on thread {thread} for {human}.{told}"))
+    }
+
+    /// Post to the notes of `thread` as the human posts there: with a fresh turn budget.
+    async fn notes_for_human(&self, args: NotesForHuman) -> Result<String, String> {
+        let (human, _) = self.acting_for()?;
+        let thread: ThreadId = args.thread.trim().parse().map_err(|e| format!("{e}"))?;
+        let post = NotesPost::new(thread.clone(), self.ant.clone(), args.text).on_behalf(Some(human.clone()));
+        let mut posted = false;
+        for _ in 0..POST_TRIES {
+            let notes = self.notes.read(&thread).await.map_err(|e| format!("cannot read the thread notes: {e:#}"))?;
+            if self.notes.post(&post, notes.last_seq).await.map_err(|e| format!("not posted: {e:#}"))? {
+                posted = true;
+                break;
+            }
+        }
+        if !posted {
+            return Err(format!("the notes of thread {thread} kept changing; nothing posted"));
+        }
+        let excerpt = behalf::excerpt(&post.text);
+        let told = self.tell(&human, format!("posted to the notes of thread {thread} for {human}: {excerpt}")).await;
+        Ok(format!("Posted to the notes of thread {thread} for {human} ({} turns left).{told}", post.turn_budget))
+    }
+
     async fn react_for_human(&self, args: ReactForHuman) -> Result<String, String> {
         let (human, store) = self.acting_for()?;
         let reaction: Reaction = args.reaction.trim().parse().map_err(|e| format!("{e}"))?;
@@ -761,6 +836,44 @@ impl Hub {
         }
     }
 
+    async fn order_for_human(&self, args: OrderForHuman) -> Result<String, String> {
+        let (human, store) = self.acting_for()?;
+        let op = match args.op.trim().replace('-', "_").as_str() {
+            "pause" => AdminOp::Pause,
+            "resume" => AdminOp::Resume,
+            "restart" => AdminOp::Restart { now: false },
+            "restart_now" => AdminOp::Restart { now: true },
+            "read_settings" => AdminOp::ReadSettings,
+            "read_memories" => AdminOp::ReadMemories,
+            other => {
+                return Err(format!(
+                    "unknown op {other}: pause, resume, restart, restart_now, read_settings or read_memories"
+                ));
+            }
+        };
+        let ant: UserId = args.ant.trim().parse().map_err(|e| format!("ant: {e}"))?;
+        let machine: Machine = args.machine.trim().parse().map_err(|e| format!("machine: {e}"))?;
+        let (kind, what) = (op.kind(), op.describe());
+        let order =
+            AdminOrder::new(self.ant.clone(), machine.clone(), ant.clone(), op, "").on_behalf(Some(human.clone()));
+        let order = store.send_order(order).await.map_err(|e| format!("{e:#}"))?;
+        let act = Act::Order { machine: machine.clone(), ant: ant.clone(), id: order.id }.qualified();
+        let told = self
+            .tell(
+                &human,
+                format!(
+                    "ordered {what} of {ant} on {machine} for {human}: the daemon of {machine} holds it until {human} \
+                     confirms it (`ants assistant confirm {act}`, or `--deny`)."
+                ),
+            )
+            .await;
+        Ok(format!(
+            "Sent order {act} ({what}) for {human}. The daemon of {machine} carries it out only once {human} confirms \
+             it or a pre-allow rule of {human} (`{ant}/order:{kind}`) covers it; until then it is held. `ants ant \
+             orders {ant}` shows where it stands.{told}"
+        ))
+    }
+
     async fn decide_for_human(&self, args: DecideForHuman) -> Result<String, String> {
         let (human, store) = self.acting_for()?;
         let verdict: Verdict = serde_json::from_value(serde_json::Value::String(args.verdict.trim().replace('-', "_")))
@@ -841,6 +954,23 @@ pub(super) struct TitleForHuman {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub(super) struct PostForHuman {
+    /// A channel the human is a member of, with or without its `#`.
+    channel: String,
+    text: String,
+    /// The thread to post on; none starts a new one.
+    #[serde(default)]
+    thread: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(super) struct NotesForHuman {
+    /// The thread whose notes to post to.
+    thread: String,
+    text: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub(super) struct DoneForHuman {
     /// A thread of the human's.
     thread: String,
@@ -876,6 +1006,16 @@ pub(super) struct WithdrawForHuman {
     message_id: String,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(super) struct OrderForHuman {
+    /// The ant to order.
+    ant: String,
+    /// The machine whose daemon serves the ant, as `ants machines` lists it.
+    machine: String,
+    /// pause, resume, restart (once the ant is idle), restart_now, read_settings or read_memories.
+    op: String,
+}
+
 #[tool_router(router = assist_router, vis = "pub(super)")]
 impl Tools {
     #[tool(description = "As the assistant of a human, read what waits for it in its home in ants chat: the \
@@ -903,6 +1043,19 @@ impl Tools {
         devices; `plaintext` sends it unsealed. Attachments are not sent for a human.")]
     async fn send_for_human(&self, Parameters(args): Parameters<SendForHuman>) -> Result<CallToolResult, ErrorData> {
         Ok(text(self.hub.send_for_human(args).await))
+    }
+
+    #[tool(description = "As the assistant of a human, post for it in a channel it is a member of, on `thread` or \
+        starting a new one, as this ant's, for the human, with the fresh turn budget a human's post has; an @mention \
+        wakes that member as the human's would. The human is told.")]
+    async fn post_for_human(&self, Parameters(args): Parameters<PostForHuman>) -> Result<CallToolResult, ErrorData> {
+        Ok(text(self.hub.post_for_human(args).await))
+    }
+
+    #[tool(description = "As the assistant of a human, post for it to the notes of a thread, as this ant's, for the \
+        human, with the fresh turn budget a human's post gives the notes. The human is told.")]
+    async fn notes_for_human(&self, Parameters(args): Parameters<NotesForHuman>) -> Result<CallToolResult, ErrorData> {
+        Ok(text(self.hub.notes_for_human(args).await))
     }
 
     #[tool(description = "As the assistant of a human, add or remove a reaction for it to a message to or from \
@@ -959,5 +1112,12 @@ impl Tools {
         Parameters(args): Parameters<WithdrawForHuman>,
     ) -> Result<CallToolResult, ErrorData> {
         Ok(text(self.hub.withdraw_for_human(args).await))
+    }
+
+    #[tool(description = "As the assistant of a human, send an admin order for it to an ant's machine: pause, \
+        resume, restart, restart_now, read_settings or read_memories. The machine's daemon holds it until the human \
+        confirms it or a pre-allow rule of the human covers it, then carries it out; the human is told.")]
+    async fn order_for_human(&self, Parameters(args): Parameters<OrderForHuman>) -> Result<CallToolResult, ErrorData> {
+        Ok(text(self.hub.order_for_human(args).await))
     }
 }

@@ -679,20 +679,28 @@ pub fn sign_added(
 }
 
 /// Sign the user JWT of `ant`, added on its machine by the admin order `order`, for `public_key`, with the permissions
-/// of an ant, and record the key with the order ([`Issued::order`]).
+/// of an ant, or, with `assistant_of`, of the assistant of that human ([`AssistantOf`]), and record the key with the
+/// order ([`Issued::order`]).
 pub fn sign_ordered(
     dir: &Path,
     ant: &UserId,
     js_domain: Option<&JsDomain>,
     public_key: &str,
     order: ants_proto::Uuid,
+    assistant_of: Option<&UserId>,
 ) -> Result<String> {
     check_user_key(public_key)?;
     check_not_reserved(ant)?;
     let account = load(&dir.join(ACCOUNT_SEED))?;
-    let permissions = Permissions::for_user(ant, Role::Ant).with_js_domain(js_domain);
-    let jwt = user_jwt(&account, public_key, ant.as_str(), permissions, json!({}), None)?;
-    revoke::record(dir, &Issued { order: Some(order), ..Issued::new(public_key, ant.as_str(), Kind::Ant, None)? })?;
+    let (permissions, extra, kind) = match assistant_of {
+        Some(human) => {
+            (Permissions::for_assistant(ant, human), json!({ "tags": [AssistantOf::tag(human)] }), Kind::Assistant)
+        }
+        None => (Permissions::for_user(ant, Role::Ant), json!({}), Kind::Ant),
+    };
+    let jwt = user_jwt(&account, public_key, ant.as_str(), permissions.with_js_domain(js_domain), extra, None)?;
+    let issued = Issued::new(public_key, ant.as_str(), kind, None)?;
+    revoke::record(dir, &Issued { order: Some(order), assistant_of: assistant_of.cloned(), ..issued })?;
     Ok(jwt)
 }
 

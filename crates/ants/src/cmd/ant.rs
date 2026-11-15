@@ -55,6 +55,26 @@ pub(crate) enum AntCommand {
         #[arg(long, value_name = "DURATION", default_value = "3m", value_parser = ants_proto::duration::parse)]
         wait: Duration,
     },
+    /// Clone SRC as the new ant NEW by admin order, on SRC's machine: its daemon pauses SRC until its prompts end,
+    /// copies its home, its `[[ant]]` table with the settings given over it, the escalation chain with it, and each
+    /// thread's session (forked when the harness can, else starting over from the thread's history), history and
+    /// worktree (on the branch ants/NEW/THREAD, with its uncommitted changes), has `ants signer` sign NEW's key on the
+    /// order, starts NEW and resumes SRC. Not copied: queued messages, channel memberships, references and spend
+    /// counters. Paths are the machine's; the home defaults to ~/.ants/NEW there. Needs a human device's admin
+    /// credentials, and `ants signer` running.
+    Clone {
+        #[arg(add = ArgValueCandidates::new(completions::ants))]
+        src: UserId,
+        new: UserId,
+        /// The machine running SRC (default: the one that last recorded serving it).
+        #[arg(long)]
+        machine: Option<Machine>,
+        #[command(flatten)]
+        options: Box<AntOptions>,
+        /// How long to wait for the daemon's outcome (a duration such as 90s, 10m or 1h).
+        #[arg(long, value_name = "DURATION", default_value = "40m", value_parser = ants_proto::duration::parse)]
+        wait: Duration,
+    },
     /// Retire ANT by admin order, templated or not: its machine's daemon removes its `[[ant]]` table, which stops
     /// it, has `ants signer` revoke its key on the order and deletes its credentials; its home stays. Needs a human
     /// device's admin credentials, and `ants signer` running.
@@ -205,6 +225,9 @@ pub(crate) async fn run(nats: &crate::Nats<'_>, command: AntCommand) -> Result<(
         }
         AntCommand::Orders { ant, json } => orders::show(nats, &ant, json).await,
         AntCommand::Add { name, on, options, wait } => orders::add::run(nats, &name, on, &options, wait).await,
+        AntCommand::Clone { src, new, machine, options, wait } => {
+            orders::clone::run(nats, &src, &new, machine, &options, wait).await
+        }
         AntCommand::Retire { ant, machine, wait } => orders::retire::run(nats, &ant, machine, wait).await,
         AntCommand::Set { ant, changes, no_wait } => {
             let wait = if no_wait { std::time::Duration::ZERO } else { settings::SET_WAIT };

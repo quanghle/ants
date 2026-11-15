@@ -34,7 +34,9 @@ pub async fn run(nats: &Nats<'_>, name: &UserId, machine: Machine, options: &Ant
     }
     let settings = settings(name, options)?;
     let (_, js) = nats.connect("ants-ant-add").await?;
-    let (order, outcome) = super::send(nats, &js, Some(machine.clone()), name, AdminOp::Add { settings }, wait).await?;
+    let (order, outcome) =
+        super::send(nats, &js, Some(machine.clone()), name, AdminOp::Add { settings, assistant_of: None }, wait)
+            .await?;
     let Some(outcome) = outcome else {
         println!("{}", super::pending_note(&order));
         return Ok(());
@@ -50,4 +52,4 @@ pub async fn run(nats: &Nats<'_>, name: &UserId, machine: Machine, options: &Ant
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -179,12 +179,14 @@ fn a_leaf_carries_an_assistant_s_rights_as_it_would_an_ant_s() {
         assert!(leaf.publish.contains(s), "{s}");
     }
     assert!(own.subscribe.iter().all(|s| leaf.subscribe.contains(s)));
-    // The literals the hub stream's interest needs, as for an ant; no outbox to set up, no admin order to send.
-    for s in ["ants.inbox.pa.pa", "ants.chan.pa.pa", "ants.chanadm.pa.pa", "ants.timeline.pa.pa"] {
+    // The literals the hub stream's interest needs, as for an ant and for the admin orders it sends; no outbox to set
+    // up.
+    for s in ["ants.inbox.pa.pa", "ants.chan.pa.pa", "ants.chanadm.pa.pa", "ants.timeline.pa.pa", "ants.admin.pa.pa"] {
         assert!(leaf.publish.iter().any(|have| have == s), "{s}");
     }
     assert!(!leaf.publish.contains(&format!("{}.>", m1.setup_inbox(&pa))));
-    assert!(!leaf.publish.iter().any(|s| s == subject::ALL_ADMIN_ORDERS_SENT));
+    let ant = Permissions::for_leaf(&m1, [(&pa, LeafRole::Ant)]);
+    assert!(!ant.publish.iter().any(|s| s.starts_with("ants.admin.")), "an ant sends no admin order");
     assert_eq!(Permissions::for_leaf(&m1, [(&pa, Role::Ant)]), Permissions::for_leaf(&m1, [(&pa, LeafRole::Ant)]));
 }
 
@@ -980,7 +982,10 @@ fn a_host_writes_only_its_own_machine_record_and_takes_only_its_own_orders() {
     // Past its own subjects, it asks the signer to enroll or retire an ant on an admin's order, and reads the roster.
     let ants: Vec<_> = host.publish.iter().filter(|s| s.starts_with("ants.")).collect();
     assert_eq!(ants, [subject::ALL_ENROLL_REQUESTS]);
-    assert!(host.publish.iter().all(|s| !s.contains("STREAM.")), "{:?}", host.publish);
+    // Of streams' info, it reads only the humans', whose consent to their assistants' orders it watches.
+    let infos: Vec<_> = host.publish.iter().filter(|s| s.contains("STREAM.")).collect();
+    assert_eq!(infos, ["$JS.API.STREAM.INFO.KV_ants_humans"]);
+    assert!(host.publish.iter().all(|s| !s.starts_with("$KV.ants_humans")), "it never writes the humans");
     assert!(host.publish.iter().any(|s| s == "$JS.API.DIRECT.GET.KV_ants_roster.$KV.ants_roster.*"));
     assert!(!host.publish.iter().any(|s| s.starts_with("$KV.ants_roster")), "it reads the roster only");
     assert_eq!(host.subscribe, ["_INBOX_HOST.m1.>", subject::ALL_ENROLL_REPLIES]);
@@ -997,12 +1002,14 @@ fn a_host_writes_only_its_own_machine_record_and_takes_only_its_own_orders() {
         assert!(human.publish.iter().any(|have| have == s), "{s}");
     }
     assert!(!human.publish.iter().any(|s| s.starts_with("$KV.ants_machines") || s.contains("KV_ants_machines.")));
-    // A human sends orders to any machine's ants, and neither an ant nor an assistant sends any.
-    assert!(human.publish.iter().any(|s| s == "ants.admin.*.*"));
+    // A human sends orders to any machine's ants, as does an assistant for its human, which daemons hold for the
+    // human's confirmation; an ant sends none.
     let assistant = Permissions::for_assistant(&p("pa"), &p("alice"));
-    for (who, rights) in [("ant", Permissions::for_user(&p("dev-a"), Role::Ant)), ("assistant", assistant)] {
-        assert!(!rights.publish.iter().any(|s| s.starts_with("ants.admin") || s == ">"), "{who}: {:?}", rights.publish);
+    for rights in [&human, &assistant] {
+        assert!(rights.publish.iter().any(|s| s == "ants.admin.*.*"));
     }
+    let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
+    assert!(!ant.publish.iter().any(|s| s.starts_with("ants.admin") || s == ">"), "{:?}", ant.publish);
     assert_eq!(subject::machine_record(&m1), "$KV.ants_machines.m1");
     assert_eq!(subject::admin_orders(&m1), "ants.admin.m1.>");
 }
@@ -1102,7 +1109,6 @@ fn an_assistant_keeps_its_ant_rights_and_a_humans_under_its_own_name() {
         "$O.ants_files.C.>",
         "ants.out.files.>",
         "ants.approvals.*.*",
-        "ants.admin.*.*",
         "ants.cancel.*.*",
         "ants.queue.*",
         "$KV.ants_attempts.*.msg.*",

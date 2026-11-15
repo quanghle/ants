@@ -10,6 +10,7 @@ pub mod caps;
 pub mod chains;
 pub mod chanadm;
 pub mod channel;
+pub mod clone;
 pub mod config;
 pub mod creds;
 pub mod daemon;

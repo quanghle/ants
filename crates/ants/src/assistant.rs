@@ -956,7 +956,7 @@ mod tests {
         let marker = ReadMarker { below: seq, ..ReadMarker::default() };
         read.put(alice.as_str(), serde_json::to_vec(&marker).unwrap().into()).await.unwrap();
 
-        let store = ants_daemon::mcp::jetstream_store(pa_js.clone(), None);
+        let store = ants_daemon::mcp::jetstream_store(pa_js.clone(), None, assistant.clone());
         let since = SystemTime::now() - Duration::from_secs(3600);
         let messages = store.messages(alice.clone(), pa.clone(), since).await.unwrap();
         let ids: Vec<_> = messages.iter().map(|m| m.envelope.id).collect();
@@ -1054,5 +1054,84 @@ mod tests {
 
         consent::allow(&nats, vec!["dev-a/execute:cargo test*".into()], true, false).await.unwrap();
         assert_eq!(state_of(&test).await, State::Pending, "the rule removed");
+    }
+
+    /// pa orders for alice: m1's daemon holds each order until alice confirms it, refuses the one she denies, and
+    /// applies at once the one a pre-allow rule of hers covers.
+    #[tokio::test]
+    async fn an_assistant_s_admin_orders_wait_for_its_human_to_consent() {
+        use ants_daemon::admin::ConfigFile;
+        use ants_proto::{AdminOp, AdminOrder, OrderState};
+
+        use crate::orders::tests::{WAIT, host_of_m1};
+
+        let Some(server) = Server::start() else { return };
+        let (alice, pa, dev_a) = (p("alice"), p("pa"), p("dev-a"));
+        let creds = server.dir().join("alice-admin.creds");
+        let device = auth::NewDevice { label: Some("laptop"), admin: true, ..auth::NewDevice::default() };
+        let rights = ants_proto::Permissions::for_user(&alice, Role::Human);
+        auth::issue_device_with(&server.dir().join("auth"), &alice, revoke::Kind::Human, rights, &device, &creds)
+            .unwrap();
+        let (_, js) = bus::connect(&server.url, Some(&creds), None, &alice, "test").await.unwrap();
+        bus::ensure_stream(&js).await.unwrap();
+        js.create_key_value(ants_daemon::hub::machines_config()).await.unwrap();
+        js.create_key_value(ants_daemon::hub::devices_config()).await.unwrap();
+        humans::ensure(&js).await.unwrap();
+        let assistant = server.dir().join("pa-assistant.creds");
+        let new = auth::NewDevice { assistant_of: Some(alice.clone()), ..auth::NewDevice::default() };
+        let rights = ants_proto::Permissions::for_assistant(&pa, &alice);
+        auth::issue_device_with(&server.dir().join("auth"), &pa, revoke::Kind::Assistant, rights, &new, &assistant)
+            .unwrap();
+        let (_, pa_js) = bus::connect(&server.url, Some(&assistant), None, &pa, "test").await.unwrap();
+        put(&js, &creds, &alice, Some(pa.clone()), Sealing::Keep).await.unwrap();
+
+        let path = server.dir().join("config.toml");
+        let text = "harness = \"copilot\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\n";
+        std::fs::write(&path, text).unwrap();
+        let triggers = crate::reload::Triggers::new(path.clone(), None, Duration::from_secs(3600)).unwrap();
+        let (ants, task) = host_of_m1(&server, &js, true, Some(ConfigFile::new(path.clone(), triggers.edits()))).await;
+
+        let store = ants_daemon::mcp::jetstream_store(pa_js, None, assistant);
+        let send = async |op: AdminOp| {
+            let order = AdminOrder::new(pa.clone(), "m1".parse().unwrap(), dev_a.clone(), op, "")
+                .on_behalf(Some(alice.clone()));
+            store.send_order(order).await.unwrap()
+        };
+        let comes_to = async |order: &AdminOrder, state: OrderState| {
+            tokio::time::timeout(WAIT, async {
+                loop {
+                    match crate::orders::outcome(&js, order).await.unwrap() {
+                        Some(o) if o.state == state => return o,
+                        _ => tokio::time::sleep(Duration::from_millis(20)).await,
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{} comes to {state:?}", order.op.describe()))
+        };
+        let nats = crate::Nats::new(&server.url, Some(&creds), None).unwrap();
+        let act = |o: &AdminOrder| format!("m1/dev-a/{}", o.id);
+
+        let pause = send(AdminOp::Pause).await;
+        let held = comes_to(&pause, OrderState::Held).await;
+        assert_eq!(held.on_behalf_of.as_ref(), Some(&alice));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "held, not applied");
+        Box::pin(consent::confirm(&nats, Some(&act(&pause)), false)).await.unwrap();
+        comes_to(&pause, OrderState::Applied).await;
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), format!("{text}paused = true\n"));
+
+        let resume = send(AdminOp::Resume).await;
+        comes_to(&resume, OrderState::Held).await;
+        Box::pin(consent::confirm(&nats, Some(&act(&resume)), true)).await.unwrap();
+        let denied = comes_to(&resume, OrderState::Refused).await;
+        assert!(denied.reason.as_deref().unwrap_or_default().contains("denied by alice"), "{denied:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), format!("{text}paused = true\n"));
+
+        consent::allow(&nats, vec!["dev-a/order:resume".into()], false, false).await.unwrap();
+        let resume = send(AdminOp::Resume).await;
+        comes_to(&resume, OrderState::Applied).await;
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        drop(ants);
+        tokio::time::timeout(WAIT, task).await.unwrap().unwrap().unwrap();
     }
 }

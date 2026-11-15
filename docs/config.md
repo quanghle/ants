@@ -220,6 +220,18 @@ Managers also get `retire_ant(name)` (`other:retire_ant`) for ants whose `added_
 
 Humans retire any templated ant on the manager's machine with `ants retire NAME [--config FILE] [--dir DIR] [--no-push]`, revoking locally if `--dir` holds the account key or printing `ants auth revoke --key U...` otherwise. Non-templated ants are removed by editing `config.toml` and running `ants auth revoke NAME`.
 
+## Cloning an ant
+
+An admin's `ants ant clone SRC NEW [settings]` has the daemon serving SRC start NEW as a copy of it, with its own key and identity record ([auth.md](auth.md#cloning-an-ant-by-order)). SRC is paused while it is copied, once its prompts in flight end, and resumed after. NEW gets:
+
+- **Table:** SRC's `[[ant]]` table (for an ant added from a template, the settings the template gave it, so NEW's table stands alone), below the comment `# cloned from SRC by <admin>'s order <id>`, without `name`, `creds`, `paused`, `added_by`, `template`, `builtin`, `home` and `allow_sets`, with SRC's [shared settings](#shared-settings), where the hub keeps them, in place of its table's, and the settings flags of `ants add` over it; its whoami, memory, tasks, harness, model, permissions and escalation chain are SRC's unless given. A workdir in SRC's home moves into NEW's.
+- **Shared settings:** where the hub keeps them, a record of NEW's own (`NEW.settings`), written before its table, in place of any left from an earlier ant of the name: SRC's with the order's settings over them, so NEW's table and record agree and no drift shows.
+- **Home:** a copy of SRC's (`--home`, default `~/.ants/NEW`; it must be empty), memory files, task DB and repositories included, but not `worktrees`, `answered`, `buried` and the MCP config and socket.
+- **Threads:** each thread SRC holds a session of, with its worktree, if any, at `<home>/worktrees/<thread>` on branch `ants/NEW/<thread>` from SRC's commit, SRC's uncommitted changes and untracked files on it. Its session is a fork of SRC's when the harness offers ACP `session/fork`; otherwise NEW's first prompt on the thread starts a new session seeded from the thread's history, as after a failed `session/load` ([Lost sessions](#lost-sessions-and-context-window)), its notice saying the session could not be forked.
+- **History:** what SRC had on each thread, kept in `<home>/history/<thread>.jsonl`; NEW reads a thread's history back with this copy first, then what came to it after.
+
+Not copied: messages queued for SRC, channel memberships, references, spend counters and the pause. NEW's identity record gets an `id` and `born` of its own, SRC's count of prompts and `cloned_from`.
+
 ## Human registration
 
 `ants signer` registers a human's new device after a GitHub sign-in (`ants login`, with the team's bootstrap credentials) when its `--config` has a `[registration]` table, reread per request, and renews the credentials such registrations granted. Without the table, every registration is refused as not enabled. The flow, the grants, name bindings, renewal and offboarding are in [auth.md](auth.md#registering-humans).

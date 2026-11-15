@@ -11,10 +11,10 @@ use crate::orders::tests::{WAIT, host_of_m1, p};
 use crate::revoke::{self, Kind};
 
 /// How long an order the signer answers may take: the daemon asks again every 5s.
-const SIGNED: Duration = Duration::from_secs(30);
+pub(crate) const SIGNED: Duration = Duration::from_secs(30);
 
 /// Run `body` while `ants signer` answers over `server` for the team of `server.dir()/auth`.
-async fn with_signer<T>(server: &Server, body: impl Future<Output = T>) -> T {
+pub(crate) async fn with_signer<T>(server: &Server, body: impl Future<Output = T>) -> T {
     with_signer_at(&server.url, server.dir(), None, body).await
 }
 
@@ -92,7 +92,7 @@ async fn an_add_order_adds_an_ant_the_signer_signs_on_it_and_a_retire_order_revo
 
     let settings = json!({ "workdir": work, "model": "gpt-5" });
     let Value::Object(settings) = settings else { unreachable!() };
-    let add = AdminOp::Add { settings };
+    let add = AdminOp::Add { settings, assistant_of: None };
     let (order, added) =
         with_signer(&server, Box::pin(send(&admin, &js, Some(m1.clone()), &dev_b, add, SIGNED))).await.unwrap();
     let added = added.expect("the daemon decides once the signer answers");
@@ -115,7 +115,7 @@ async fn an_add_order_adds_an_ant_the_signer_signs_on_it_and_a_retire_order_revo
     assert_eq!(reload, crate::reload::Trigger::Edited);
     ants_daemon::bus::connect(&server.url, Some(&creds), None, &dev_b, "test").await.expect("dev-b connects");
 
-    let listed = AdminOp::Add { settings: Default::default() };
+    let listed = AdminOp::Add { settings: Default::default(), assistant_of: None };
     let (_, again) = send(&admin, &js, Some(m1.clone()), &dev_a, listed, WAIT).await.unwrap();
     let again = again.expect("refused before the signer is asked");
     assert_eq!(again.state, OrderState::Refused);
@@ -237,7 +237,7 @@ async fn an_add_order_on_a_leaf_node_s_machine_renews_its_uplink_to_carry_the_an
     let (_, js) = admin.connect("test").await.unwrap();
     let settings = json!({ "workdir": work });
     let Value::Object(settings) = settings else { unreachable!() };
-    let add = AdminOp::Add { settings };
+    let add = AdminOp::Add { settings, assistant_of: None };
     let sending = Box::pin(send(&admin, &js, Some(m1.clone()), &dev_b, add, SIGNED));
     let (_, added) = with_signer_at(&hub.url, hub.dir(), Some(&domain), sending).await.unwrap();
     let added = added.expect("the daemon decides once the signer answers");

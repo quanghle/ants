@@ -32,7 +32,7 @@ pub(super) fn apply(orders: &Orders, order: &AdminOrder, paused: bool) -> AdminO
 }
 
 /// Pause or resume `ant` in the config file at `path`, returning whether the file was written.
-fn edit(path: &std::path::Path, ant: &UserId, paused: bool) -> Result<bool> {
+pub(super) fn edit(path: &std::path::Path, ant: &UserId, paused: bool) -> Result<bool> {
     let mut file = Edit::open(path)?;
     let field = ["paused".to_owned()];
     if file.get(ant, &field)?.and_then(|v| v.as_bool()).unwrap_or(false) == paused {

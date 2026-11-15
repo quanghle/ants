@@ -57,6 +57,8 @@ struct Entry {
     served: usize,
     /// Where the daemon serving its inbox hears restarts.
     listening: Option<mpsc::UnboundedSender<Request>>,
+    /// Where it hears the snapshots clones of it ask for ([`crate::clone`]).
+    cloning: Option<mpsc::UnboundedSender<crate::clone::Request>>,
 }
 
 impl std::fmt::Debug for Restarts {
@@ -99,8 +101,8 @@ impl Restarts {
     /// under way; none when the process does not serve `ant`.
     pub async fn restart(&self, ant: &UserId, by: UserId, now: bool) -> Option<Restarted> {
         let tx = match self.0.locked().get(ant) {
-            Some(Entry { served: 1.., listening: Some(tx) }) => tx.clone(),
-            Some(Entry { served: 1.., listening: None }) => return Some(Restarted::default()),
+            Some(Entry { served: 1.., listening: Some(tx), .. }) => tx.clone(),
+            Some(Entry { served: 1.., listening: None, .. }) => return Some(Restarted::default()),
             _ => return None,
         };
         let (done, answer) = oneshot::channel();
@@ -109,6 +111,43 @@ impl Restarts {
         }
         // Unanswered, the daemon stopped serving the inbox, its harnesses with it.
         Some(answer.await.unwrap_or_default())
+    }
+}
+
+impl Restarts {
+    /// Hear the snapshots clones of `ant` ask for until the guard drops.
+    #[must_use]
+    pub fn listen_clones(&self, ant: &UserId) -> crate::clone::Listening {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.0.locked().entry(ant.clone()).or_default().cloning = Some(tx.clone());
+        crate::clone::Listening { restarts: self.clone(), ant: ant.clone(), tx, rx }
+    }
+
+    /// Whether the daemon serving `ant` serves its inbox, hearing the snapshots clones of it ask for.
+    pub(crate) fn hears_clones(&self, ant: &UserId) -> bool {
+        matches!(self.0.locked().get(ant), Some(Entry { served: 1.., cloning: Some(_), .. }))
+    }
+
+    /// The snapshot of `ant` for a clone named `new`, once the daemon serving its inbox read it; none when the process
+    /// serves no inbox of `ant`.
+    pub async fn snapshot(&self, ant: &UserId, new: UserId) -> Option<anyhow::Result<crate::clone::Snapshot>> {
+        let tx = match self.0.locked().get(ant) {
+            Some(Entry { served: 1.., cloning: Some(tx), .. }) => tx.clone(),
+            _ => return None,
+        };
+        let (done, answer) = oneshot::channel();
+        tx.send(crate::clone::Request { new, done }).ok()?;
+        answer.await.ok()
+    }
+}
+
+impl Drop for crate::clone::Listening {
+    fn drop(&mut self) {
+        if let Some(entry) = self.restarts.0.locked().get_mut(&self.ant)
+            && entry.cloning.as_ref().is_some_and(|tx| tx.same_channel(&self.tx))
+        {
+            entry.cloning = None;
+        }
     }
 }
 

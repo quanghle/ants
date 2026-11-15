@@ -1,13 +1,16 @@
-//! `ants assistant confirm|allow`: the human of the CLI's credentials consents to what its assistant decided for it,
-//! one act at a time ([`Confirmations`]) or ahead by rules ([`PreAllow`]), records its device signs and keeps under
-//! its own name in [`HUMANS_BUCKET`]. The daemon that applies an act verifies them; see `ants_daemon::approvals`.
+//! `ants assistant confirm|allow`: the human of the CLI's credentials consents to what its assistant decided or
+//! ordered for it, one act at a time ([`Confirmations`]) or ahead by rules ([`PreAllow`]), records its device signs and
+//! keeps under its own name in [`HUMANS_BUCKET`]. The daemon that applies an act verifies them; see
+//! `ants_daemon::approvals` and, for admin orders held by their machine's daemon, `ants_daemon::admin::held`.
 
 use ants_daemon::Allowlist;
+use ants_daemon::admin::held::held_orders;
 use ants_proto::{
-    ActAnswer, Confirmations, HUMANS_BUCKET, MAX_PRE_ALLOW, PreAllow, STREAM, confirmations_key, pre_allow_key,
-    pre_allow_rule,
+    ASSISTANT_ORDER_KINDS, Act, ActAnswer, AdminOrder, Confirmations, HUMANS_BUCKET, MACHINES_BUCKET, MAX_PRE_ALLOW,
+    ORDER_HOLD, ORDER_RULE, PreAllow, STREAM, UserId, confirmations_key, pre_allow_key, pre_allow_rule,
 };
 use anyhow::{Context as _, Result, bail};
+use async_nats::jetstream;
 use async_nats::jetstream::kv;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -31,9 +34,19 @@ pub async fn confirm(nats: &Nats<'_>, act: Option<&str>, deny: bool) -> Result<(
             (!acts.is_empty()).then_some((request, acts))
         })
         .collect();
+    let orders = orders_held_for(&js, human).await?;
     let Some(act) = act else {
-        if held.is_empty() {
-            println!("no decision of an assistant waits for {human} to confirm it");
+        if held.is_empty() && orders.is_empty() {
+            println!("no decision or order of an assistant waits for {human} to confirm it");
+        }
+        for order in &orders {
+            println!(
+                "{}  {} ordered {} for {human}; expires in {}",
+                Act::Order { machine: order.machine.clone(), ant: order.ant.clone(), id: order.id }.qualified(),
+                order.admin,
+                order.op.describe(),
+                tools::left(order.sent_at + ORDER_HOLD, now)
+            );
         }
         for (request, acts) in &held {
             for a in acts {
@@ -50,6 +63,26 @@ pub async fn confirm(nats: &Nats<'_>, act: Option<&str>, deny: bool) -> Result<(
         }
         return Ok(());
     };
+    let answer = if deny { ActAnswer::Deny } else { ActAnswer::Confirm };
+    if act.matches('/').count() == 2 {
+        let order = select_order(orders, act)
+            .with_context(|| format!("no order of an assistant {act} waits for {human} to confirm it"))?;
+        let Some(assistant) = designated(&js, nats.account.as_deref(), human).await else {
+            bail!("{human} has no assistant: nothing an assistant ordered takes effect");
+        };
+        if order.admin != assistant {
+            bail!("{} sent order {act}, not {assistant}, the assistant of {human}", order.admin);
+        }
+        let act = Act::Order { machine: order.machine.clone(), ant: order.ant.clone(), id: order.id };
+        let qualified = act.qualified();
+        record(&js, creds, human, &assistant, act, answer, order.sent_at + ORDER_HOLD).await?;
+        let op = order.op.describe();
+        match answer {
+            ActAnswer::Confirm => println!("confirmed: {assistant}'s order {qualified} ({op}) is carried out"),
+            ActAnswer::Deny => println!("denied: {assistant}'s order {qualified} ({op}) is refused"),
+        }
+        return Ok(());
+    }
     let query = tools::Query::parse(act)?;
     let requests = held.iter().map(|(request, _)| request.clone()).collect();
     let request = tools::select(requests, &query)
@@ -61,18 +94,37 @@ pub async fn confirm(nats: &Nats<'_>, act: Option<&str>, deny: bool) -> Result<(
     let Some(held) = acts.into_iter().rev().find(|a| a.assistant == assistant) else {
         bail!("{assistant}, the assistant of {human}, decided nothing on {}", tools::qualified(&request));
     };
-    let answer = if deny { ActAnswer::Deny } else { ActAnswer::Confirm };
+    record(&js, creds, human, &assistant, held.act(&request), answer, request.expires_at).await?;
+    let (verdict, id) = (tools::spelling(held.verdict), tools::qualified(&request));
+    match answer {
+        ActAnswer::Confirm => println!("confirmed: {assistant}'s {verdict} on request {id} takes effect for {human}"),
+        ActAnswer::Deny => println!("denied: {assistant}'s {verdict} on request {id} is dropped"),
+    }
+    Ok(())
+}
+
+/// Record `human`'s `answer` to `act` its assistant `assistant` made, standing `until`, signed with the device
+/// credentials `creds`.
+async fn record(
+    js: &jetstream::Context,
+    creds: &std::path::Path,
+    human: &UserId,
+    assistant: &UserId,
+    act: Act,
+    answer: ActAnswer,
+    until: DateTime<Utc>,
+) -> Result<()> {
     let (jwt, key, account) = device_creds(creds, human)?;
-    let kv = humans::ensure(&js).await?;
+    let kv = humans::ensure(js).await?;
     let record_key = confirmations_key(human);
     store(&kv, &record_key, "the confirmations", |before: Option<Confirmations>, now| {
         let before = before.filter(|c| c.verify(&record_key, &account, now).is_ok());
         let acts = Confirmations::answering(
             before.as_ref().map_or(&[][..], |c| &c.acts),
-            &assistant,
-            held.act(&request),
+            assistant,
+            act.clone(),
             answer,
-            request.expires_at,
+            until,
             now,
         );
         let issued_at = after(now, before.map(|c| c.issued_at));
@@ -81,12 +133,35 @@ pub async fn confirm(nats: &Nats<'_>, act: Option<&str>, deny: bool) -> Result<(
         Ok(record)
     })
     .await?;
-    let (verdict, id) = (tools::spelling(held.verdict), tools::qualified(&request));
-    match answer {
-        ActAnswer::Confirm => println!("confirmed: {assistant}'s {verdict} on request {id} takes effect for {human}"),
-        ActAnswer::Deny => println!("denied: {assistant}'s {verdict} on request {id} is dropped"),
-    }
     Ok(())
+}
+
+/// The admin orders the machines' daemons hold for `human` to confirm, oldest first.
+async fn orders_held_for(js: &jetstream::Context, human: &UserId) -> Result<Vec<AdminOrder>> {
+    let mut orders: Vec<AdminOrder> = crate::machines::latest(js, &format!("$KV.{MACHINES_BUCKET}.*.held"))
+        .await?
+        .into_iter()
+        .flat_map(|(_, value)| held_orders(&value))
+        .filter(|order| order.on_behalf_of.as_ref() == Some(human))
+        .collect();
+    orders.sort_by_key(|order| order.sent_at);
+    Ok(orders)
+}
+
+/// The order of `orders` that `act`, `MACHINE/ANT/ID` with the id or a prefix of it, names alone.
+fn select_order(orders: Vec<AdminOrder>, act: &str) -> Result<AdminOrder> {
+    let mut parts = act.splitn(3, '/');
+    let (Some(machine), Some(ant), Some(id)) = (parts.next(), parts.next(), parts.next()) else {
+        bail!("expected MACHINE/ANT/ORDER-ID");
+    };
+    let mut found = orders
+        .into_iter()
+        .filter(|o| o.machine.as_str() == machine && o.ant.as_str() == ant && o.id.to_string().starts_with(id));
+    match (found.next(), found.next()) {
+        (Some(order), None) if !id.is_empty() => Ok(order),
+        (Some(_), Some(_)) => bail!("{act} names more than one order"),
+        _ => bail!("no such order"),
+    }
 }
 
 /// `ants assistant allow [RULE...] [--remove] [--clear]`.
@@ -160,11 +235,21 @@ pub async fn allow(nats: &Nats<'_>, rules: Vec<String>, remove: bool, clear: boo
     Ok(())
 }
 
-/// Refuse a pre-allow rule [`pre_allow_rule`] or an ant's allowlist would not take.
+/// Refuse a pre-allow rule [`pre_allow_rule`] or an ant's allowlist would not take, unless it is an order rule
+/// (`order:KIND` or `order:*`) naming a kind of admin order an assistant may send.
 fn check_rule(rule: &str) -> Result<()> {
     let Some((_, tool)) = pre_allow_rule(rule) else {
         bail!("pre-allow rule {rule:?}: expected ANT/RULE or */RULE");
     };
+    if let Some(kind) = tool.strip_prefix(ORDER_RULE) {
+        if kind != "*" && !ASSISTANT_ORDER_KINDS.contains(&kind) {
+            bail!(
+                "pre-allow rule {rule:?}: expected {ORDER_RULE}* or {ORDER_RULE}KIND, KIND one of {}",
+                ASSISTANT_ORDER_KINDS.join(", ")
+            );
+        }
+        return Ok(());
+    }
     Allowlist::parse(&[tool]).with_context(|| format!("pre-allow rule {rule:?}"))?;
     Ok(())
 }
@@ -207,10 +292,10 @@ mod tests {
 
     #[test]
     fn pre_allow_rules_name_an_ant_or_all_and_an_allow_rule() {
-        for rule in ["*/execute:cargo test*", "dev-a/read:/work/*", "dev-a/*"] {
+        for rule in ["*/execute:cargo test*", "dev-a/read:/work/*", "dev-a/*", "dev-a/order:pause", "*/order:*"] {
             check_rule(rule).unwrap();
         }
-        for rule in ["execute:cargo test*", "*/", "dev-a/launch", "dev a/read"] {
+        for rule in ["execute:cargo test*", "*/", "dev-a/launch", "dev a/read", "*/order:retire", "*/order:"] {
             assert!(check_rule(rule).is_err(), "{rule} taken");
         }
     }
