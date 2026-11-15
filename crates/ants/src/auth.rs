@@ -19,8 +19,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ants_daemon::config::registration::{GithubAccount, Grant};
 use ants_daemon::creds::{Finding, Kind as CredsKind, Seed};
 use ants_proto::{
-    ADMIN_TAG, AssistantOf, DEVICES_BUCKET, Destination, DeviceId, DeviceKey, JsDomain, Machine, PERMISSIONS_VERSION,
-    Permissions, REGISTERED_TAG, REVOKED_DEVICES, Role, UserId,
+    ADMIN_TAG, AssistantOf, DEVICES_BUCKET, Destination, DeviceId, DeviceKey, JsDomain, LeafRole, Machine,
+    PERMISSIONS_VERSION, Permissions, REGISTERED_TAG, REVOKED_DEVICES, Role, UserId,
 };
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use data_encoding::{BASE32_NOPAD, BASE64URL_NOPAD};
@@ -129,9 +129,7 @@ pub fn check_assistant(dir: &Path, user: &UserId, human: &UserId) -> Result<()> 
         bail!("{user} is a human; an assistant is an ant");
     }
     let issued = revoke::issued(dir)?;
-    let revoked = revoke::revoked(dir)?;
-    let now = now()?;
-    let live = |i: &revoke::Issued| !revoked.iter().any(|r| r.key == i.key) && i.expires_at.is_none_or(|exp| exp > now);
+    let live = live_in(dir)?;
     let named = |i: &&revoke::Issued, name: &UserId| i.name == name.as_str();
     if !human.is_human() && !issued.iter().any(|i| named(&i, human) && i.kind == revoke::Kind::Human) {
         bail!("{human} is not a human of the team: issue its credentials with `ants auth user {human} --human` first");
@@ -157,6 +155,31 @@ pub fn check_assistant(dir: &Path, user: &UserId, human: &UserId) -> Result<()> 
         );
     }
     Ok(())
+}
+
+/// Whether credentials the registry of `dir` records are neither revoked nor expired.
+fn live_in(dir: &Path) -> Result<impl Fn(&Issued) -> bool> {
+    let revoked = revoke::revoked(dir)?;
+    let now = now()?;
+    Ok(move |i: &Issued| !revoked.iter().any(|r| r.key == i.key) && i.expires_at.is_none_or(|exp| exp > now))
+}
+
+/// The ants of the team in `dir` that are a human's assistant, as their credentials neither revoked nor expired make
+/// them, each with its human.
+fn assistants(dir: &Path) -> Result<BTreeMap<UserId, UserId>> {
+    let live = live_in(dir)?;
+    let issued = revoke::issued(dir)?;
+    let assisting = issued.into_iter().filter(|i| i.kind == Kind::Assistant && live(i));
+    Ok(assisting.filter_map(|i| Some((i.name.parse().ok()?, i.assistant_of?))).collect())
+}
+
+/// The role of `member` of a leaf node, in `role` by the members kept, as [`Permissions::for_leaf`] takes it: an ant
+/// among `assistants` is its human's assistant.
+fn leaf_role<'a>(assistants: &'a BTreeMap<UserId, UserId>, member: &UserId, role: Role) -> LeafRole<'a> {
+    match assistants.get(member) {
+        Some(human) if !role.is_human() => LeafRole::AssistantOf(human),
+        _ => role.into(),
+    }
 }
 
 /// Fail when `user` is a name the team reserves: [`UserId::channel_manager`], which no ant or human may take,
@@ -301,7 +324,8 @@ fn with_device(issued: Issued, device: Option<DeviceId>, label: Option<&str>, xk
 }
 
 /// Issue the uplink user of `machine`'s leaf node and write its `.creds` file to `out`. It may carry only what
-/// `members`, ants and humans each in its role ([`members`]), may do and the sourcing of the machine's outbox
+/// `members`, ants and humans each in its role ([`members`]), an ant the registry makes a human's assistant as one
+/// ([`assistants`]), may do and the sourcing of the machine's outbox
 /// ([`Permissions::for_leaf`]), plus what the credentials of `webhooks` allow, for an `ants webhook serve` on the
 /// machine ([`webhook_permissions`]), plus [`EnrollApprover::With`] what `ants enroll` and `ants signer` on the machine
 /// need ([`Permissions::for_enroll_approver`], [`Permissions::for_reactions_responder`]), and connect only as a leaf
@@ -328,7 +352,8 @@ pub fn issue_leaf(
     }
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let user = KeyPair::new_user();
-    let roles = members.iter().map(|(member, role)| (member, *role));
+    let assistants = assistants(dir)?;
+    let roles = members.iter().map(|(member, role)| (member, leaf_role(&assistants, member, *role)));
     let mut permissions = Permissions::for_leaf(machine, roles);
     for webhook in webhooks {
         merge(&mut permissions, webhook_permissions(dir, webhook)?);
@@ -761,7 +786,8 @@ fn renew_as(
         bail!("the new key {public_key} was issued to other credentials; generate a new one");
     }
     let name = &claims.name;
-    let (permissions, extra) = renewed_rights(&finding, &body, name, xkey.as_ref(), registered.is_some())?;
+    let assistants = assistants(dir)?;
+    let (permissions, extra) = renewed_rights(&finding, &body, name, xkey.as_ref(), registered.is_some(), &assistants)?;
     let mut permissions = in_domain(permissions, &finding.kind, finding.js_domain.as_ref());
     dedup(&mut permissions);
     let lifetime = claims.exp.map(|exp| exp.saturating_sub(body["iat"].as_u64().unwrap_or(now)));
@@ -793,13 +819,15 @@ fn renew_as(
 }
 
 /// The rights and the rest of the claims (`nats` beyond them) of the renewal of credentials found as `finding`, whose
-/// claims are `body`, named `name`, binding `xkey`, and `registered` by a registration.
+/// claims are `body`, named `name`, binding `xkey`, and `registered` by a registration; a leaf node's member among
+/// `assistants` gets its human's assistant's rights.
 fn renewed_rights(
     finding: &Finding,
     body: &Value,
     name: &str,
     xkey: Option<&DeviceKey>,
     registered: bool,
+    assistants: &BTreeMap<UserId, UserId>,
 ) -> Result<(Permissions, Value)> {
     let user = || name.parse::<UserId>().map_err(|e| anyhow!("credentials named {name:?}: {e}"));
     Ok(match &finding.kind {
@@ -826,7 +854,8 @@ fn renewed_rights(
         }
         CredsKind::Leaf { machine, ants, humans, webhooks, enroll_approver } => {
             let members = members(ants, humans);
-            let mut permissions = Permissions::for_leaf(machine, members.iter().map(|(m, r)| (m, *r)));
+            let roles = members.iter().map(|(m, r)| (m, leaf_role(assistants, m, *r)));
+            let mut permissions = Permissions::for_leaf(machine, roles);
             let publish = allowed(body).publish;
             for webhook in webhooks {
                 let to = publish.iter().filter_map(|s| ants_proto::subject::parse_inbox(s));

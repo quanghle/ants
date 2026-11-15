@@ -103,12 +103,88 @@ fn a_js_domain_adds_the_domain_form_of_the_jetstream_api() {
     }
     assert!("hub.x".parse::<JsDomain>().is_err());
 
-    // A human's leaf outbox rights name any domain already, so the hub's form takes no more room.
+    // A human's leaf outbox rights name any domain already, so the hub's form takes no more room; the families a
+    // human holds whole take one wildcard each, the plain forms staying as they are.
     let human = Permissions::for_user(&p("alice"), Role::Human);
-    let in_domain = human.with_js_domain(Some(&domain)).publish;
+    let in_domain = human.clone().with_js_domain(Some(&domain)).publish;
+    assert_eq!(in_domain[..human.publish.len()], human.publish);
     assert!(in_domain.iter().any(|s| s == "$JS.*.API.STREAM.INFO.ANTS_OUT"));
-    assert!(in_domain.iter().any(|s| s == "$JS.hub.API.STREAM.INFO.ANTS_IN"));
-    assert!(!in_domain.iter().any(|s| s == "$JS.hub.API.STREAM.INFO.ANTS_OUT"));
+    for family in ["STREAM.INFO.*", "STREAM.CREATE.*", "STREAM.UPDATE.*", "CONSUMER.CREATE.*"] {
+        assert!(in_domain.iter().any(|s| *s == format!("$JS.hub.API.{family}")), "{family}");
+    }
+    for s in ["$JS.hub.API.STREAM.INFO.ANTS_IN", "$JS.hub.API.STREAM.INFO.ANTS_OUT", "$JS.hub.API.CONSUMER.CREATE.ANTS"]
+    {
+        assert!(!in_domain.iter().any(|have| have == s), "{s}");
+    }
+    assert!(in_domain.iter().any(|s| s == "$JS.hub.API.STREAM.MSG.GET.ANTS"), "other families stay listed");
+    // An ant lacks some of each family, and an assistant some stream lookups: theirs stay listed.
+    let ant = Permissions::for_user(&p("dev-a"), Role::Ant).with_js_domain(Some(&domain)).publish;
+    assert!(!ant.iter().any(|s| s.starts_with("$JS.hub.API.STREAM.") && s.ends_with(".*")));
+    assert!(!ant.iter().any(|s| s == "$JS.hub.API.CONSUMER.CREATE.*"));
+    let assistant = Permissions::for_assistant(&p("pa"), &p("alice")).with_js_domain(Some(&domain)).publish;
+    assert!(assistant.iter().any(|s| s == "$JS.hub.API.STREAM.INFO.ANTS"));
+    assert!(!assistant.iter().any(|s| s == "$JS.hub.API.STREAM.INFO.*"));
+}
+
+/// A family's domain wildcard grants nothing through a leaf node, whose uplink checks the domain form unmapped: no
+/// credentials hold a right of the family a human's lack.
+#[test]
+fn no_credentials_hold_a_jetstream_family_right_a_human_lacks() {
+    let (human, a, pa) = (UserId::human(), p("dev-a"), p("pa"));
+    let m1: Machine = "m1".parse().unwrap();
+    let most = Permissions::for_user(&human, Role::Human).publish;
+    let families = ["STREAM.INFO.*", "STREAM.CREATE.*", "STREAM.UPDATE.*", "CONSUMER.CREATE.*"];
+    for (kind, rights) in [
+        ("ant", Permissions::for_user(&a, Role::Ant)),
+        ("assistant", Permissions::for_assistant(&pa, &human)),
+        (
+            "leaf",
+            Permissions::for_leaf(
+                &m1,
+                [(&a, LeafRole::Ant), (&human, LeafRole::Human), (&pa, LeafRole::AssistantOf(&human))],
+            ),
+        ),
+        ("host", Permissions::for_host(&m1)),
+        ("channel manager", Permissions::for_channel_manager()),
+        ("enrollment", Permissions::for_enrollment(&a)),
+        ("webhook", Permissions::for_webhook(&p("hook"), &[])),
+        ("observer", Permissions::for_observer(&p("watch"))),
+        ("enroll approver", Permissions::for_enroll_approver()),
+        ("reactions responder", Permissions::for_reactions_responder()),
+        ("device revoker", Permissions::for_device_revoker()),
+        ("bootstrap", Permissions::for_bootstrap()),
+        ("registrar", Permissions::for_registrar()),
+    ] {
+        for s in &rights.publish {
+            let plain = s.strip_prefix("$JS.API.").map(str::to_owned).or_else(|| {
+                let rest = s.strip_prefix("$JS.")?;
+                Some(rest.split_once(".API.")?.1.to_owned())
+            });
+            let Some(plain) = plain else { continue };
+            if families.iter().any(|family| covers(family, &plain)) {
+                assert!(most.contains(&format!("$JS.API.{plain}")), "{kind} holds {s}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_leaf_carries_an_assistant_s_rights_as_it_would_an_ant_s() {
+    let (alice, pa) = (p("alice"), p("pa"));
+    let m1: Machine = "m1".parse().unwrap();
+    let leaf = Permissions::for_leaf(&m1, [(&pa, LeafRole::AssistantOf(&alice))]);
+    let own = Permissions::for_assistant(&pa, &alice);
+    for s in own.publish.iter().filter(|s| !s.starts_with("ants.out.")) {
+        assert!(leaf.publish.contains(s), "{s}");
+    }
+    assert!(own.subscribe.iter().all(|s| leaf.subscribe.contains(s)));
+    // The literals the hub stream's interest needs, as for an ant; no outbox to set up, no admin order to send.
+    for s in ["ants.inbox.pa.pa", "ants.chan.pa.pa", "ants.chanadm.pa.pa", "ants.timeline.pa.pa"] {
+        assert!(leaf.publish.iter().any(|have| have == s), "{s}");
+    }
+    assert!(!leaf.publish.contains(&format!("{}.>", m1.setup_inbox(&pa))));
+    assert!(!leaf.publish.iter().any(|s| s == subject::ALL_ADMIN_ORDERS_SENT));
+    assert_eq!(Permissions::for_leaf(&m1, [(&pa, Role::Ant)]), Permissions::for_leaf(&m1, [(&pa, LeafRole::Ant)]));
 }
 
 #[test]
@@ -913,7 +989,7 @@ fn an_assistant_keeps_its_ant_rights_and_a_humans_under_its_own_name() {
     let has = |s: &str| assistant.publish.iter().any(|have| have == s);
     let ant = Permissions::for_user(&p("pa"), Role::Ant);
     for s in &ant.publish {
-        assert!(has(s), "ant right {s} missing");
+        assert!(assistant.publish.iter().any(|have| covers(have, s)), "ant right {s} missing");
     }
     for s in &ant.subscribe {
         assert!(assistant.subscribe.contains(s), "ant subscription {s} missing");
@@ -945,9 +1021,12 @@ fn an_assistant_keeps_its_ant_rights_and_a_humans_under_its_own_name() {
         "$O.ants_files.C.>",
         "ants.out.files.>",
         "ants.approvals.*.*",
+        "ants.admin.*.*",
         "ants.cancel.*.*",
         "ants.queue.*",
+        "$KV.ants_attempts.*.msg.*",
         "$KV.ants_owners.*.*",
+        "ants.out.owners.*.*",
         "$KV.ants_humans.*",
         "$KV.ants_channels.>",
         "$JS.API.STREAM.UPDATE.ANTS",
@@ -956,7 +1035,7 @@ fn an_assistant_keeps_its_ant_rights_and_a_humans_under_its_own_name() {
     ];
     for s in human_only {
         assert!(human.publish.iter().any(|have| have == s), "{s} is a human's");
-        assert!(!has(s), "{s} is not an assistant's");
+        assert!(!assistant.publish.iter().any(|have| covers(have, s)), "{s} is not an assistant's");
     }
     // Of its human's keys it only reads; it moves no device's key, presence or notifications.
     for s in &assistant.publish {

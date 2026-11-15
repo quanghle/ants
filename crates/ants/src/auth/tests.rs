@@ -178,6 +178,54 @@ fn a_renewed_uplink_keeps_its_key_and_rights_and_a_revoked_one_is_not_renewed() 
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// An ant whose credentials make it a human's assistant takes the assistant's rights into a leaf node's uplink, issued
+/// or renewed, and an ant's again once those credentials are revoked.
+#[test]
+fn a_leaf_uplink_carries_an_assistant_s_rights() {
+    use ants_daemon::creds;
+    let dir = ants_test_support::scratch_dir("leaf-assistant");
+    let (team, out, m1) = (dir.join("auth"), dir.join("leaf-m1.creds"), "m1".parse::<Machine>().unwrap());
+    init(&team).unwrap();
+    let (alice, pa, dev_a) = (p("alice"), p("pa"), p("dev-a"));
+    issue(&team, &alice, Role::Human, None, &dir.join("alice.creds")).unwrap();
+    let new = NewDevice { assistant_of: Some(alice.clone()), ..NewDevice::default() };
+    let rights = Permissions::for_assistant(&pa, &alice);
+    issue_device_with(&team, &pa, Kind::Assistant, rights, &new, &dir.join("pa.creds")).unwrap();
+    issue_leaf(
+        &team,
+        &m1,
+        &[(pa.clone(), Role::Ant), (dev_a.clone(), Role::Ant)],
+        &[],
+        EnrollApprover::Without,
+        None,
+        &out,
+    )
+    .unwrap();
+    let sorted = |mut rights: Permissions| {
+        for all in [&mut rights.publish, &mut rights.subscribe] {
+            all.sort();
+            all.dedup();
+        }
+        rights
+    };
+    let carried = |jwt: &str| sorted(allowed(&verified_body(jwt).unwrap().1));
+    let as_assistant = [(&pa, LeafRole::AssistantOf(&alice)), (&dev_a, LeafRole::Ant)];
+    let (jwt, _) = read_creds(&out).unwrap();
+    assert_eq!(carried(&jwt), sorted(Permissions::for_leaf(&m1, as_assistant)));
+    let marker = "$JS.API.DIRECT.GET.KV_ants_read.$KV.ants_read.alice";
+    assert!(carried(&jwt).publish.iter().any(|s| s == marker), "pa reads alice's read marker through the leaf");
+    let finding = creds::Finding::from_jwt(&jwt).unwrap();
+    let creds::Kind::Leaf { ants, humans, .. } = finding.kind else { panic!("{:?}", finding.kind) };
+    assert_eq!((ants, humans), (vec![pa.clone(), dev_a.clone()], vec![]), "an assistant is an ant of the leaf");
+
+    let renewed = renew(&team, &jwt, &KeyPair::new_user().public_key(), None).unwrap();
+    assert_eq!(carried(&renewed.jwt), carried(&jwt));
+    revoke::revoke(&team, Some("pa"), &[]).unwrap();
+    let as_ant = renew(&team, &renewed.jwt, &KeyPair::new_user().public_key(), None).unwrap();
+    assert_eq!(carried(&as_ant.jwt), sorted(Permissions::for_leaf(&m1, [(&pa, Role::Ant), (&dev_a, Role::Ant)])));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn renewed_credentials_keep_what_they_are_for_a_new_key() {
     use ants_daemon::creds;
@@ -889,6 +937,32 @@ async fn every_human_has_the_same_rights_and_reads_only_its_own_inbox() {
     }
     heard.sort();
     assert_eq!(heard, [&b"allow"[..], b"reject"]);
+}
+
+/// An assistant decides no approval request on its subject, sends no admin order, cancels no prompt, asks for no
+/// queue, and withdraws no queued message nor records an owner: its decisions wait in its messages for its human's
+/// confirmation, and readers of the rest could not tell its acts from its human's.
+#[tokio::test]
+async fn an_assistant_takes_no_act_readers_could_not_tell_from_its_human_s() {
+    let Some(server) = Server::start() else { return };
+    let (alice, pa) = (p("alice"), p("pa"));
+    let creds = server.dir().join("pa-assistant.creds");
+    let new = NewDevice { assistant_of: Some(alice.clone()), ..NewDevice::default() };
+    let rights = Permissions::for_assistant(&pa, &alice);
+    issue_device_with(&server.dir().join("auth"), &pa, Kind::Assistant, rights, &new, &creds).unwrap();
+    let (client, mut errors) = server.watched_with(&pa, &creds).await;
+    for s in [
+        "ants.approvals.dev-a.r1",
+        "ants.admin.m1.dev-a",
+        "ants.cancel.dev-a.t1",
+        "ants.queue.dev-a",
+        "$KV.ants_attempts.dev-a.msg.m1",
+        "$KV.ants_owners.t1.dev-a",
+    ] {
+        client.publish(s, "{}".into()).await.unwrap();
+        let v = next_violation(&client, &mut errors).await;
+        assert!(v.contains(&format!("Publish to \"{s}\"")), "{v}");
+    }
 }
 
 /// An assistant watches the team's traffic and keeps its own state as a human does, under its own name, and reads
@@ -2615,8 +2689,36 @@ async fn a_host_records_only_its_own_machine_s_ants_and_humans_read_where_each_a
     timeout(WAIT, task).await.unwrap().unwrap().expect("the host stops once its daemon drops it");
 }
 
-/// A human's credentials, the longest a client connects with, fit in its `CONNECT` line with room for the rest of it
-/// (signature, name and options, some 400 bytes): nats-server closes a connection whose line is longer than
+/// On a hub with a JetStream domain, the domain wildcards of a human's credentials (`$JS.hub.API.STREAM.CREATE.*`)
+/// reach no further than its plain rights: the hub checks the subject it maps them to as well.
+#[tokio::test]
+async fn a_humans_domain_wildcards_reach_no_further_than_its_plain_rights() {
+    let Some(hub) = Server::start_with("domain: hub", "") else { return };
+    let (domain, human) = ("hub".parse::<JsDomain>().unwrap(), UserId::human());
+    let creds = hub.creds_in(&human, Some(&domain));
+    let (client, mut js) = bus::connect(&hub.url, Some(&creds), Some(&domain), &human, "test").await.unwrap();
+    js.set_timeout(Duration::from_secs(1));
+    bus::ensure_stream(&js).await.unwrap();
+    let ask = |subject: &str, body: &str| {
+        let request = client.request(subject.to_owned(), body.to_owned().into());
+        async move { timeout(Duration::from_secs(1), request).await.ok().and_then(Result::ok) }
+    };
+    assert!(ask("$JS.hub.API.STREAM.INFO.ANTS", "").await.is_some(), "a right of the family answers");
+    let config = r#"{"name":"FOO","subjects":["foo.>"]}"#;
+    for (subject, body) in [
+        ("$JS.hub.API.STREAM.CREATE.FOO", config),
+        ("$JS.hub.API.STREAM.UPDATE.KV_ants_identities", ""),
+        ("$JS.hub.API.STREAM.INFO.KV_ants_identities", ""),
+        ("$JS.hub.API.CONSUMER.CREATE.KV_ants_sessions", r#"{"stream_name":"KV_ants_sessions","config":{}}"#),
+    ] {
+        assert!(ask(subject, body).await.is_none(), "{subject} answered");
+    }
+    let streams: Vec<_> = js.streams().try_collect().await.unwrap();
+    assert!(streams.iter().all(|info| info.config.name != "FOO"));
+}
+
+/// A human's credentials fit in its `CONNECT` line with room for the rest of it (signature, name and options, some 400
+/// bytes) and for rights yet to come, 3 KiB in all: nats-server closes a connection whose line is longer than
 /// `max_control_line`.
 #[test]
 fn a_humans_credentials_fit_max_control_line() {
@@ -2628,7 +2730,7 @@ fn a_humans_credentials_fit_max_control_line() {
         let out = dir.join("alice.creds");
         issue(&team, &p("alice"), Role::Human, domain, &out).unwrap();
         let (jwt, _) = read_creds(&out).unwrap();
-        assert!(jwt.len() + 400 <= MAX_CONTROL_LINE as usize, "{} bytes with domain {domain:?}", jwt.len());
+        assert!(jwt.len() + 3 * 1024 <= MAX_CONTROL_LINE as usize, "{} bytes with domain {domain:?}", jwt.len());
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
