@@ -17,9 +17,10 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
 
+use super::exec::Job;
 use super::frame::{self, ago};
 use super::memories;
-use super::model::{Data, Key, To};
+use super::model::{Action, Data, Key, To};
 use super::select::Selection;
 use super::work::{self, Filter};
 use crate::live::maybe;
@@ -78,21 +79,26 @@ pub struct Page {
     message: Selection<Uuid>,
     pub queue: Queue,
     pub memories: memories::Page,
+    /// Whether `r` asked to restart the ant's harnesses, which the next key confirms.
+    armed: bool,
 }
 
 impl Page {
-    pub const THREADS_KEYS: &str =
-        "↑↓ thread · Enter open · s steer · x cancel · z snooze · S TL;DR · ←→ pane · a ask · w work · Esc back";
-    pub const QUEUE_KEYS: &str = "↑↓ message · Enter open its thread · ←→ pane · a ask · w work · Esc back";
+    pub const THREADS_KEYS: &str = "↑↓ thread · Enter open · s steer · x cancel · z snooze · S TL;DR · ←→ pane · a ask \
+                                    · w work · r restart · Esc back";
+    pub const QUEUE_KEYS: &str = "↑↓ message · Enter open its thread · ←→ pane · a ask · w work · r restart · Esc back";
+    pub const ARMED_KEYS: &str = "y restart the ant's harnesses after their prompts · ! restart now, cancelling the \
+                                  prompts · any other key keeps them";
 
     pub fn new(ant: UserId) -> Self {
         let threads = work::Page::new(Filter { user: Some(ant.clone()), ..Filter::default() });
         let (message, queue, memories) = (Selection::default(), Queue::Asking, memories::Page::new());
-        Self { ant, pane: Pane::Threads, threads, message, queue, memories }
+        Self { ant, pane: Pane::Threads, threads, message, queue, memories, armed: false }
     }
 
     pub fn keys(&self) -> &'static str {
         match self.pane {
+            _ if self.armed => Self::ARMED_KEYS,
             Pane::Threads => Self::THREADS_KEYS,
             Pane::Queue => Self::QUEUE_KEYS,
             Pane::Memories => memories::Page::KEYS,
@@ -120,7 +126,16 @@ impl Page {
     }
 
     pub fn key(&mut self, key: Key, data: &Data) -> Option<To> {
+        let armed = std::mem::take(&mut self.armed);
         match key {
+            Key::Char('r') => {
+                self.armed = true;
+                return None;
+            }
+            Key::Char(c @ ('y' | '!')) if armed => {
+                let job = Job::Restart { ant: self.ant.clone(), now: c == '!' };
+                return Some(To::Do(Action::Run(job, String::new())));
+            }
             Key::Left | Key::Right => {
                 self.pane = self.pane.moved(if key == Key::Left { -1 } else { 1 });
                 if self.pane == Pane::Memories {
@@ -454,6 +469,20 @@ mod tests {
         m.key(Key::Esc, at(3));
         m.key(Key::Char('a'), at(3));
         assert!(m.bar.focused && m.bar.text() == "@dev-a ", "a opens the bar on the ant");
+        m.key(Key::Esc, at(3));
+        m.focus = crate::tui::model::Focus::View;
+        assert_eq!(m.key(Key::Char('r'), at(3)), None);
+        assert!(screen(&m, at(3)).contains(Page::ARMED_KEYS), "r asks first");
+        assert_eq!(m.key(Key::Char('y'), at(3)), Some(Action::Run(restart(false), String::new())));
+        m.key(Key::Char('r'), at(3));
+        assert_eq!(m.key(Key::Char('!'), at(3)), Some(Action::Run(restart(true), String::new())));
+        m.key(Key::Char('r'), at(3));
+        assert_eq!(m.key(Key::Char('n'), at(3)), None);
+        assert_eq!(m.key(Key::Char('y'), at(3)), None, "any other key keeps the harnesses");
+    }
+
+    fn restart(now: bool) -> Job {
+        Job::Restart { ant: user("dev-a"), now }
     }
 
     #[test]
@@ -480,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn the_memories_pane_reads_them_once_shown_and_again_on_r() {
+    fn the_memories_pane_reads_them_once_shown_and_again_on_u() {
         let mut m = model();
         m.data.live.roster(vec![entry("dev-a", 60, 2, at(2))], at(2));
         m.select(nav::Item::Ant(user("dev-a")));
@@ -507,7 +536,7 @@ mod tests {
         assert!(shown.contains(memories::Page::KEYS), "{shown}");
 
         m.focus = crate::tui::model::Focus::View;
-        m.key(Key::Char('r'), at(3));
+        m.key(Key::Char('u'), at(3));
         assert_eq!(m.memories_wanted(), Some((user("dev-a"), 2)));
         m.memories_event(memories::Event(user("dev-a"), 1, Err("late".to_owned())));
         assert!(screen(&m, at(3)).contains("asking the daemon"), "an earlier asking's answer is dropped");

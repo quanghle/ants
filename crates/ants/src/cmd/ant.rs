@@ -7,7 +7,7 @@ use anyhow::Result;
 use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
 
-use crate::{ant, completions, memories, orders};
+use crate::{ant, completions, memories, orders, restart};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum AntCommand {
@@ -48,6 +48,23 @@ pub(crate) enum AntCommand {
         #[arg(long)]
         machine: Option<Machine>,
     },
+    /// Order ANT's daemon to restart its harnesses: idle ones stop at once, working ones once their current prompt
+    /// ends, and each thread's next prompt resumes its session in a new harness. Waits up to 10 s for the outcome, else
+    /// the order stays pending until the daemon takes it (`ants ant orders`). Needs a human device's admin
+    /// credentials.
+    Restart {
+        #[arg(add = ArgValueCandidates::new(completions::ants))]
+        ant: UserId,
+        /// Cancel the prompts running too, as `ants cancel` does, and stop their harnesses at once.
+        #[arg(long)]
+        now: bool,
+        /// The machine whose daemon serves ANT (default: the machine that last recorded serving it).
+        #[arg(long)]
+        machine: Option<Machine>,
+        /// The outcome as one JSON object.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub(crate) async fn run(nats: &crate::Nats<'_>, command: AntCommand) -> Result<()> {
@@ -62,5 +79,6 @@ pub(crate) async fn run(nats: &crate::Nats<'_>, command: AntCommand) -> Result<(
         }
         AntCommand::Orders { ant, json } => orders::show(nats, &ant, json).await,
         AntCommand::Memories { ant, json, machine } => memories::show(nats, &ant, machine, json).await,
+        AntCommand::Restart { ant, now, machine, json } => restart::run(nats, &ant, now, machine, json).await,
     }
 }

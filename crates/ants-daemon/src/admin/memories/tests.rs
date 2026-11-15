@@ -5,6 +5,7 @@ use tokio::sync::Notify;
 
 use super::*;
 use crate::admin::ConfigFile;
+use crate::admin::restart::Restarts;
 use crate::harness::{Harnesses, parse_definitions};
 
 fn write(path: &Path, text: &str) {
@@ -172,7 +173,13 @@ async fn a_read_is_answered_from_the_config_only_while_fresh() {
         "harness = \"claude\"\nmessenger = false\n\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\ntasks = \"triage\"\n";
     write(&path, text);
     let config = ConfigFile { path, edited: Arc::new(Notify::new()) };
-    let orders = Orders { machine: "m1".parse().unwrap(), remote: true, accounts: vec![], config: Some(config) };
+    let orders = Orders {
+        machine: "m1".parse().unwrap(),
+        remote: true,
+        accounts: vec![],
+        config: Some(config),
+        restarts: Restarts::default(),
+    };
     let order = |ant: &str| {
         AdminOrder::new(
             "alice".parse().unwrap(),

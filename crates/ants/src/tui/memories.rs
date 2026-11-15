@@ -1,6 +1,6 @@
 //! The memories pane of the ant view: the ant's memories as `ants ant memories` shows them ([`crate::memories`]),
 //! read-only, which [`Io`] asks the daemon of its machine for with an admin order when the pane first shows and on
-//! `r`.
+//! `u`.
 
 use std::path::PathBuf;
 
@@ -35,7 +35,7 @@ pub struct Page {
 }
 
 impl Page {
-    pub const KEYS: &str = "↑↓ scroll · r read again · ←→ pane · a ask · w work · Esc back";
+    pub const KEYS: &str = "↑↓ scroll · u read again · ←→ pane · a ask · w work · r restart · Esc back";
 
     pub fn new() -> Self {
         Self { state: State::Unasked, asked: 0, scroll: 0 }
@@ -82,7 +82,7 @@ impl Page {
             _ => 0,
         };
         self.scroll = match key {
-            Key::Char('r') => {
+            Key::Char('u') => {
                 self.ask();
                 0
             }
