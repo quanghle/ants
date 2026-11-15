@@ -123,14 +123,15 @@ pub async fn title(nats: &crate::Nats<'_>, pick: Pick, text: &[String], clear: b
     let thread = &pick.resolve(&js, &nats.me).await?;
     let meta = open(nats, &js).await?;
     let text = text.join(" ");
-    let had = if clear {
-        meta.clear_title(thread).await?
-    } else if text.trim().is_empty() {
+    if !clear && text.trim().is_empty() {
         match meta.title(thread).await? {
             Some(title) => println!("{}", title.title),
             None => println!("thread {thread} has no title"),
         }
         return Ok(());
+    }
+    let had = if clear {
+        meta.clear_title(thread).await?
     } else {
         let mut title = ThreadTitle::new(thread.clone(), &text, nats.me.id.clone())?;
         if let Some(sealer) = title_sealer(nats, &js, thread).await? {
@@ -138,28 +139,60 @@ pub async fn title(nats: &crate::Nats<'_>, pick: Pick, text: &[String], clear: b
         }
         meta.put_title(&title).await?
     };
+    println!("{}", titled_line(thread, &text, clear, had));
+    Ok(())
+}
+
+/// Title `thread` `text` as `me`, the human of `meta`, or with `clear` clear its title; what `ants thread title`
+/// prints. Refused for a thread between two humans whose messages are sealed, whose title only `ants thread title`
+/// seals.
+pub async fn retitle(
+    js: &jetstream::Context,
+    meta: &Meta,
+    me: &UserId,
+    thread: &ThreadId,
+    text: &str,
+    clear: bool,
+) -> Result<String> {
+    let had = if clear {
+        meta.clear_title(thread).await?
+    } else {
+        if sealed_with(js, me, thread).await?.is_some() {
+            bail!("thread {thread} holds sealed messages: `ants thread title` seals its title");
+        }
+        meta.put_title(&ThreadTitle::new(thread.clone(), text, me.clone())?).await?
+    };
+    Ok(titled_line(thread, text, clear, had))
+}
+
+/// What titling `thread` `text`, or with `clear` clearing its title, prints, given the title it `had`.
+fn titled_line(thread: &ThreadId, text: &str, clear: bool, had: Option<ThreadTitle>) -> String {
     let was = had.map_or_default(|t| format!(" (was: {})", t.title));
     match clear {
-        true if was.is_empty() => println!("thread {thread} has no title"),
-        true => println!("cleared the title of thread {thread}{was}"),
-        false => println!("titled thread {thread}: {}{was}", text.trim()),
+        true if was.is_empty() => format!("thread {thread} has no title"),
+        true => format!("cleared the title of thread {thread}{was}"),
+        false => format!("titled thread {thread}: {}{was}", text.trim()),
     }
-    Ok(())
 }
 
 /// What seals the title of `thread` if it is a thread between two humans whose messages are sealed: for the devices
 /// of both, refused unless the CLI's human is one of them.
 async fn title_sealer(nats: &crate::Nats<'_>, js: &jetstream::Context, thread: &ThreadId) -> Result<Option<Sealer>> {
+    let Some(other) = sealed_with(js, &nats.me.id, thread).await? else { return Ok(None) };
+    Sealer::new(nats, js, &other, "the title of such a thread is never stored in the clear").await.map(Some)
+}
+
+/// The other human of `thread` if it is a thread between two humans whose messages are sealed, refused unless `me`
+/// is one of them.
+async fn sealed_with(js: &jetstream::Context, me: &UserId, thread: &ThreadId) -> Result<Option<UserId>> {
     let entries = thread::history(js, thread, None, false, None).await?;
     let sealed = entries.into_iter().find(|e| e.sealed.is_some() && !e.forged);
     let Some((from, to)) = sealed.and_then(|e| Some((e.from?, e.to?))) else { return Ok(None) };
-    let me = &nats.me.id;
-    let other = match (me == &from, me == &to) {
-        (true, _) => to,
-        (_, true) => from,
+    match (me == &from, me == &to) {
+        (true, _) => Ok(Some(to)),
+        (_, true) => Ok(Some(from)),
         _ => bail!("thread {thread} holds sealed messages between {from} and {to}: only they title it"),
-    };
-    Sealer::new(nats, js, &other, "the title of such a thread is never stored in the clear").await.map(Some)
+    }
 }
 
 /// What `ants thread pin`, `unpin`, `archive` and `unarchive` do.
@@ -174,19 +207,25 @@ pub enum Marking {
 /// `ants thread pin|unpin|archive|unarchive THREAD`: mark the thread `pick` picks so, for every device of the CLI's
 /// human. Unarchiving a thread archived for having been idle keeps it ([`ThreadMarks::keep`]).
 pub async fn mark(nats: &crate::Nats<'_>, pick: Pick, marking: Marking) -> Result<()> {
+    let js = thread::connect(nats).await?;
+    let thread = &pick.resolve(&js, &nats.me).await?;
+    let meta = open(nats, &js).await?;
+    println!("{}", marked(&js, &meta, thread, marking).await?);
+    Ok(())
+}
+
+/// Mark `thread` so as the human of `meta`, through `js`; what `ants thread pin|unpin|archive|unarchive` prints.
+pub async fn marked(js: &jetstream::Context, meta: &Meta, thread: &ThreadId, marking: Marking) -> Result<String> {
     let auto_archive = match marking {
         Marking::Unarchive => crate::defaults::auto_archive()?,
         _ => None,
     };
-    let js = thread::connect(nats).await?;
-    let thread = &pick.resolve(&js, &nats.me).await?;
-    let meta = open(nats, &js).await?;
     let after = match marking {
-        Marking::Archive => last_sequence(&js).await?,
+        Marking::Archive => last_sequence(js).await?,
         _ => 0,
     };
     let last_at = match auto_archive {
-        Some(_) => thread::last_activity(&js, thread).await?,
+        Some(_) => thread::last_activity(js, thread).await?,
         None => None,
     };
     let idle_before = thread::idle_before(auto_archive, Utc::now());
@@ -206,8 +245,7 @@ pub async fn mark(nats: &crate::Nats<'_>, pick: Pick, marking: Marking) -> Resul
         .await?;
     if changed && kept.get() {
         let idle = ants_proto::duration::format(auto_archive.unwrap_or_default());
-        println!("thread {thread} unarchived; archived again automatically after {idle} without a message");
-        return Ok(());
+        return Ok(format!("thread {thread} unarchived; archived again automatically after {idle} without a message"));
     }
     let line = match (marking, changed) {
         (Marking::Pin, true) => "pinned",
@@ -219,8 +257,7 @@ pub async fn mark(nats: &crate::Nats<'_>, pick: Pick, marking: Marking) -> Resul
         (Marking::Unarchive, true) => "unarchived",
         (Marking::Unarchive, false) => "not archived",
     };
-    println!("thread {thread} {line}");
-    Ok(())
+    Ok(format!("thread {thread} {line}"))
 }
 
 /// `ants thread done|undone THREAD`: mark the thread `pick` picks done, or not, for every human, as of the last
@@ -229,15 +266,20 @@ pub async fn done(nats: &crate::Nats<'_>, pick: Pick, done: bool) -> Result<()> 
     let js = thread::connect(nats).await?;
     let thread = &pick.resolve(&js, &nats.me).await?;
     let meta = open(nats, &js).await?;
-    let last = last_reopening(&js, thread).await?;
-    let line = match (done, mark_done(&meta, thread, done, last).await?) {
+    println!("{}", marked_done(&js, &meta, thread, done).await?);
+    Ok(())
+}
+
+/// Mark `thread` done, or not, as the human of `meta`, through `js`; what `ants thread done|undone` prints.
+pub async fn marked_done(js: &jetstream::Context, meta: &Meta, thread: &ThreadId, done: bool) -> Result<String> {
+    let last = last_reopening(js, thread).await?;
+    let line = match (done, mark_done(meta, thread, done, last).await?) {
         (true, true) => "done",
         (true, false) => "already done",
         (false, true) => "no longer done",
         (false, false) => "not done",
     };
-    println!("thread {thread} {line}");
-    Ok(())
+    Ok(format!("thread {thread} {line}"))
 }
 
 /// Mark `thread`, the last message, channel post or note stored on which has sequence `last`, done as the human of

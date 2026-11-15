@@ -3,10 +3,14 @@
 //! notice. Keys and changes return the [`Action`]s the UI then performs.
 
 use ants_daemon::reactions::Reactions;
-use ants_proto::{ChannelEntry, ChannelId, ChannelReadMarkers, Humans, ReadMarker, ThreadId, UserId, Uuid};
+use ants_proto::{
+    ApprovalRequest, ChannelEntry, ChannelId, ChannelReadMarkers, Humans, ReadMarker, ThreadId, UserId, Uuid, Verdict,
+};
 use chrono::{DateTime, TimeDelta, Utc};
 
 use super::acts::{Acted, Change};
+use super::command::Bar;
+use super::exec::Job;
 use super::reads::{Mark, Read};
 use super::work::{Facts, Filter};
 use super::{cards, channel, dm, home, nav, people, search, thread, timeline, work};
@@ -25,6 +29,11 @@ pub enum Key {
     Enter,
     Esc,
     Backspace,
+    Delete,
+    Left,
+    Right,
+    /// Alt-Enter: a new line in the command bar.
+    Newline,
     /// Ctrl-C.
     Interrupt,
     /// Ctrl and another key, for the views to come (Ctrl-K, Ctrl-X).
@@ -51,6 +60,12 @@ pub enum Action {
     Send(dm::Draft),
     /// Read again what may have missed changes.
     Refresh,
+    /// Run the command bar's job, for the bar's text.
+    Run(Job, String),
+    /// Store a decision on a tool request.
+    Decide(Box<ApprovalRequest>, Verdict),
+    /// Edit the command bar's text in the editor.
+    Edit(String),
     /// Find the messages matching the search, replacing any search running.
     Search(crate::search::Search),
     Quit,
@@ -194,8 +209,7 @@ pub struct Model {
     pub pages: Vec<Page>,
     pub help: bool,
     pub notice: Option<Notice>,
-    /// The search prompt, while open.
-    pub prompt: Option<search::Prompt>,
+    pub bar: Bar,
     /// Whether the two-line pane shows instead of the full view ([`super::compact`]).
     pub compact: bool,
 }
@@ -224,7 +238,7 @@ impl Model {
             focus: Focus::View,
             help: false,
             notice: None,
-            prompt: None,
+            bar: Bar::default(),
             compact: false,
         }
     }
@@ -253,7 +267,8 @@ impl Model {
             }
             live::Event::Following => self.data.live.approvals_reset(),
             live::Event::Approval(update) => self.data.live.approval(&update),
-            live::Event::FollowEnded(Ok(())) | live::Event::Decided(_) => {}
+            live::Event::FollowEnded(Ok(())) => {}
+            live::Event::Decided(decided) => self.decided(decided),
             live::Event::FollowEnded(Err(e)) => {
                 self.notify(format!("following the tool requests: {e:#}"), Level::Error, now);
             }
@@ -459,26 +474,23 @@ impl Model {
             self.help = false;
             return None;
         }
-        if let Some(prompt) = &mut self.prompt {
-            return match prompt.key(key) {
-                search::Edit::Typing => None,
-                search::Edit::Close => {
-                    self.prompt = None;
-                    None
-                }
-                search::Edit::Run(query) => self.search(query, now),
-            };
-        }
-        if self.focus == Focus::View
+        if !self.bar.focused
+            && self.focus == Focus::View
             && let Some(Page::Dm(page)) = self.pages.last_mut()
             && let Some(action) = page.write(key)
         {
             return action;
         }
+        if let Some(action) = self.bar_key(key, now) {
+            return action;
+        }
         match key {
             Key::Char('q') => Some(Action::Quit),
             Key::Char('/') => {
-                self.prompt = Some(search::Prompt::default());
+                self.bar.focused = true;
+                if self.bar.is_empty() {
+                    self.bar.set_text("/search ");
+                }
                 None
             }
             Key::Char('?') => {
@@ -531,27 +543,19 @@ impl Model {
         }
     }
 
-    /// Run the search `query` asks for, listing its matches over the view; a query refused stays in the prompt.
-    fn search(&mut self, query: String, now: DateTime<Utc>) -> Option<Action> {
-        match search::parse(&query, now) {
-            Ok(search) => {
-                self.prompt = None;
-                for page in &mut self.pages {
-                    if let Page::Search(page) = page
-                        && page.found.is_none()
-                    {
-                        page.found = Some(Err("stopped for a later search".to_owned()));
-                    }
-                }
-                self.pages.push(Page::Search(search::Page::new(query, &search)));
-                self.focus = Focus::View;
-                Some(Action::Search(search))
-            }
-            Err(e) => {
-                self.prompt.get_or_insert_default().error = Some(e);
-                None
+    /// Run the search `query` asks for, listing its matches over the view; or why the query is refused.
+    pub fn search(&mut self, query: String, now: DateTime<Utc>) -> Result<Action, String> {
+        let search = search::parse(&query, now)?;
+        for page in &mut self.pages {
+            if let Page::Search(page) = page
+                && page.found.is_none()
+            {
+                page.found = Some(Err("stopped for a later search".to_owned()));
             }
         }
+        self.pages.push(Page::Search(search::Page::new(query, &search)));
+        self.focus = Focus::View;
+        Ok(Action::Search(search))
     }
 
     /// Take the matches of the search run last.
@@ -710,15 +714,16 @@ pub mod tests {
         m.key(Key::Tab, at(0));
         assert_eq!(m.key(Key::Char('/'), at(0)), None);
         for c in "deploy since:soon".chars() {
-            assert_eq!(m.key(Key::Char(c), at(0)), None, "keys go to the prompt");
+            assert_eq!(m.key(Key::Char(c), at(0)), None, "keys go to the command bar");
         }
         assert_eq!(m.key(Key::Enter, at(0)), None);
-        let error = m.prompt.as_ref().and_then(|p| p.error.clone());
+        let error = m.bar.status.as_ref().map(|s| s.text.clone());
         assert!(error.is_some_and(|e| e.starts_with("invalid time \"soon\"")), "a refused query stays");
+        assert_eq!(m.bar.text(), "/search deploy since:soon");
         m.key(Key::Ctrl('w'), at(0));
         let Some(Action::Search(search)) = m.key(Key::Enter, at(0)) else { panic!("no search") };
         assert_eq!(search.grep.as_deref(), Some("deploy"));
-        assert_eq!((m.prompt.is_none(), m.page().name(), m.focus), (true, "search", Focus::View));
+        assert_eq!((m.bar.focused, m.page().name(), m.focus), (false, "search", Focus::View));
 
         m.key(Key::Char('/'), at(1));
         m.key(Key::Char('d'), at(1));
@@ -733,7 +738,10 @@ pub mod tests {
         assert_eq!(m.page().name(), "search", "Esc goes back to the matches");
         m.key(Key::Char('/'), at(4));
         m.key(Key::Esc, at(4));
-        assert!(m.prompt.is_none(), "Esc closes the prompt");
+        assert!(!m.bar.focused, "Esc leaves the bar");
+        m.key(Key::Char('/'), at(4));
+        assert_eq!((m.bar.focused, m.bar.text()), (true, "/search ".to_owned()), "a draft in the bar stays");
+        m.key(Key::Esc, at(4));
         assert_eq!(m.key(Key::Char('q'), at(4)), Some(Action::Quit));
     }
 

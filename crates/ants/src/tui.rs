@@ -9,8 +9,11 @@
 mod acts;
 mod cards;
 mod channel;
+mod command;
 mod compact;
+mod complete;
 mod dm;
+mod exec;
 mod frame;
 mod home;
 mod markdown;
@@ -35,13 +38,15 @@ use chrono::Utc;
 use clap::CommandFactory as _;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::{execute, terminal};
 
 use self::acts::Acts;
+use self::exec::Exec;
 use self::model::{Action, Key, Level, Model};
 use self::reads::Reads;
 use self::search::Searches;
 use crate::live::{self, Feed, Screen};
-use crate::{presence, progress, thread_meta};
+use crate::{compose, presence, progress, thread_meta};
 
 pub use self::status::run as status;
 
@@ -133,6 +138,9 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
         Err(_) => return Err(anyhow!(Unreached::NoServer.hint(nats.url))),
     };
     nats.prepare(&js).await;
+    let meta = thread_meta::open(nats, &js).await.map_err(|e| format!("{e:#}"));
+    let ctx =
+        exec::Ctx { client: client.clone(), js: js.clone(), me: nats.me.clone(), domain: nats.domain.cloned(), meta };
     let (feed, state) = live::start(nats, client, js.clone(), since).await?;
     let feed = feed.with_timelines();
     let reads = Reads::new(js.clone(), me.clone(), crate::channel::reads::allowed(nats));
@@ -146,7 +154,8 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
     // The UI shows the replies and the tool requests as they come, so notifications spare this device theirs meanwhile.
     let shown = async {
         let mut screen = Screen::open()?;
-        Box::pin(Chat { feed, reads, acts, people, searches, cards, model }.run(&mut screen.terminal)).await
+        let chat = Chat { feed, reads, acts, people, searches, cards, exec: Exec::new(ctx), model, edit: None };
+        Box::pin(chat.run(&mut screen.terminal)).await
     };
     let (domain, device) = (nats.domain, nats.device);
     let approvals = presence::while_following(&js, domain, me, device, Following::Approvals, shown);
@@ -155,6 +164,9 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
 
 /// The key `key` is to the UI, if any.
 fn key_of(key: KeyEvent) -> Option<Key> {
+    if key.code == KeyCode::Enter && key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) {
+        return Some(Key::Newline);
+    }
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return match key.code {
             KeyCode::Char('c') => Some(Key::Interrupt),
@@ -173,6 +185,9 @@ fn key_of(key: KeyEvent) -> Option<Key> {
         KeyCode::Enter => Key::Enter,
         KeyCode::Esc => Key::Esc,
         KeyCode::Backspace => Key::Backspace,
+        KeyCode::Delete => Key::Delete,
+        KeyCode::Left => Key::Left,
+        KeyCode::Right => Key::Right,
         KeyCode::Char(c) => Key::Char(c),
         _ => return None,
     })
@@ -182,11 +197,14 @@ fn key_of(key: KeyEvent) -> Option<Key> {
 struct Chat {
     feed: Feed,
     reads: Reads,
+    exec: Exec,
     acts: Acts,
     people: people::Io,
     searches: Searches,
     cards: cards::Io,
     model: Model,
+    /// The command bar's text to edit in the editor.
+    edit: Option<String>,
 }
 
 impl Chat {
@@ -229,6 +247,10 @@ impl Chat {
                     self.model.read(read, Utc::now());
                     Vec::new()
                 }
+                outcome = self.exec.next() => {
+                    dirty = true;
+                    self.model.outcome(outcome).into_iter().collect()
+                }
                 acted = self.acts.next() => {
                     dirty = true;
                     self.model.acted(acted, Utc::now());
@@ -254,6 +276,10 @@ impl Chat {
                 if self.act(action).is_break() {
                     return Ok(());
                 }
+            }
+            if let Some(text) = self.edit.take() {
+                self.model.edited(edit(terminal, text).await);
+                dirty = true;
             }
             self.acts.watch(self.model.open().cloned());
         }
@@ -296,6 +322,9 @@ impl Chat {
                 self.model.notify(line.0, line.1, Utc::now());
             }
             Action::MarkRead(thread) => self.reads.mark_read(thread),
+            Action::Run(job, text) => self.exec.run(job, text),
+            Action::Decide(request, verdict) => self.feed.decide(*request, verdict, self.model.data.me().clone()),
+            Action::Edit(text) => self.edit = Some(text),
             Action::MarkChannel(channel, marks) => self.reads.mark_channel(channel, marks),
             Action::Reactions(messages) => self.reads.watch_reactions(messages),
             Action::Send(draft) => self.people.send(draft),
@@ -313,6 +342,16 @@ impl Chat {
         }
         ControlFlow::Continue(())
     }
+}
+
+/// Edit `text` in the editor, as `ants ask --edit` does, the terminal handed over to it meanwhile.
+async fn edit(terminal: &mut DefaultTerminal, text: String) -> Result<String> {
+    ratatui::restore();
+    let edited = tokio::task::spawn_blocking(move || compose::edit_text(&text)).await;
+    terminal::enable_raw_mode().context("setting up the terminal")?;
+    execute!(std::io::stdout(), terminal::EnterAlternateScreen).context("setting up the terminal")?;
+    terminal.clear().context("drawing")?;
+    edited.context("running the editor")?
 }
 
 /// The OSC 52 sequence that has the terminal put `text` on its clipboard, through SSH and tmux alike.
@@ -361,6 +400,9 @@ mod tests {
         assert_eq!(key(KeyCode::Char('?'), KeyModifiers::SHIFT), Some(Key::Char('?')));
         assert_eq!(key(KeyCode::BackTab, KeyModifiers::SHIFT), Some(Key::Tab));
         assert_eq!(key(KeyCode::F(1), KeyModifiers::NONE), None);
+        assert_eq!(key(KeyCode::Enter, KeyModifiers::ALT), Some(Key::Newline));
+        assert_eq!(key(KeyCode::Enter, KeyModifiers::NONE), Some(Key::Enter));
+        assert_eq!(key(KeyCode::Backspace, KeyModifiers::NONE), Some(Key::Backspace));
     }
 
     #[test]
