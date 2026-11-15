@@ -8,7 +8,8 @@
 //! nests a level under the sender, and the receiver's calls and reply nest under that message, unless the receiver
 //! nests the sender already (a reply). Messages, posts and notes render as markdown. Opened from a search, the view
 //! selects the message found and holds it at its top until moved. The thread's tool requests show as cards under the
-//! conversation ([`approvals`]), a, A or r answering the oldest pending one and Enter showing it in full.
+//! conversation ([`approvals`]), a, A or r answering the oldest pending one and Enter showing it in full. Each message
+//! shows the reactions to it under it, live, and `+` reacts to the one selected ([`react`]).
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -26,7 +27,7 @@ use super::acts::{About, Change};
 use super::frame::{self, ago};
 use super::model::{Action, Data, Key, Model, To};
 use super::timeline::Call;
-use super::{approvals, markdown, work};
+use super::{approvals, markdown, react, work};
 use crate::live::History;
 use crate::thread::{Entry, Kind};
 
@@ -68,11 +69,16 @@ impl Page {
         self.messages().find(|e| e.id == Some(at)).map(|e| e.seq)
     }
 
-    pub const KEYS: &str = "↑↓ select · y copy · p pin · m mute · e archive · d done · a A r answer a tool request · End latest · Esc back";
+    pub const KEYS: &str = "↑↓ select · y copy · + react · p pin · m mute · e archive · d done · a A r answer a tool request · End latest · Esc back";
 
     /// The messages shown, in the order stored.
     fn messages(&self) -> impl DoubleEndedIterator<Item = &Entry> {
         self.history.entries.iter().filter(|e| e.kind != Kind::Tool)
+    }
+
+    /// The ids of the messages shown, for the reactions to them.
+    pub fn message_ids(&self) -> Vec<Uuid> {
+        self.messages().filter_map(|e| e.id).collect()
     }
 
     /// The selected message, else the latest.
@@ -139,6 +145,7 @@ impl Page {
             }
             Key::End => self.selected = None,
             Key::Char('y') => return self.selection().map(|e| To::Do(Action::Copy(e.text.clone()))),
+            Key::Char('+') => return self.selection().and_then(|e| e.id).map(To::React),
             Key::Char('p') => return change(Change::Pin(!flags.pinned)),
             Key::Char('m') => return change(Change::Mute(!flags.muted)),
             Key::Char('e') => return change(Change::Archive(!flags.archived)),
@@ -441,8 +448,15 @@ impl Shown<'_> {
                 }
                 lines.push(first);
                 lines.extend(text.into_iter().map(|line| indented(&under, line).patch_style(style)));
+                lines.extend(self.reactions(e).map(|line| indented(&under, line)));
             }
         }
+    }
+
+    /// The line of the reactions to `e`, if any.
+    fn reactions(&self, e: &Entry) -> Option<Line<'static>> {
+        let reacted = self.data.reactions.get(&e.id?)?;
+        react::line(reacted, self.data.me())
     }
 
     /// A message at the top level: who sent it to whom and when, then its text under it.
@@ -482,10 +496,7 @@ impl Shown<'_> {
         }
         lines.push(Line::from(head));
         lines.extend(text(e, entries, self.width.saturating_sub(2)).into_iter().map(|line| indented("  ", line)));
-        let reactions = crate::inbox::render_reactions(&e.reactions, "  ");
-        for line in reactions.lines() {
-            push(lines, line, "  ", frame::dim(), self.width);
-        }
+        lines.extend(self.reactions(e).map(|line| indented("  ", line)));
     }
 
     /// A tool call: when it started, its kind, its title, and how it ended or how long it has run.
@@ -760,6 +771,50 @@ mod tests {
         m.data.settled.add(push, crate::tools::State::Expired, at(2));
         let shown = screen(&page, &m, 100, at(3));
         assert!(shown.contains("expired unanswered: dev-a rejected it"), "{shown}");
+    }
+
+    #[test]
+    fn reactions_show_under_each_message_and_plus_reacts_or_takes_one_back() {
+        use ants_daemon::reactions::Reacted;
+
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let entries = vec![
+            message(1, &thread, "alice", "dev-a", "deploy the site"),
+            message(2, &thread, "dev-a", "dev-b", "check the logs"),
+        ];
+        let (first, nested) = (entries[0].id.unwrap(), entries[1].id.unwrap());
+        m.stored(entries.clone(), at(1));
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(entries)).unwrap();
+        let reacted = |name: &str, by: &[&str]| Reacted {
+            reaction: name.parse().unwrap(),
+            by: by.iter().map(|b| crate::live::tests::user(b)).collect(),
+        };
+        m.data.reactions.insert(first, vec![reacted("eyes", &["alice", "bob"]), reacted("shipit", &["dev-a"])]);
+        m.data.reactions.insert(nested, vec![reacted("check", &["alice"])]);
+        let shown = screen(&page, &m, 100, at(2));
+        // A wide glyph's second cell shows as a space on the test screen.
+        assert!(shown.contains("│  👀  2  :shipit: 1"), "{shown}");
+        assert!(shown.contains("          ✅  1"), "under a nested message too: {shown}");
+
+        m.pages.push(super::super::model::Page::Thread(page));
+        m.key(Key::Home, at(2));
+        assert_eq!(m.key(Key::Char('+'), at(2)), None);
+        let footer = m.picking.as_ref().unwrap().line().to_string();
+        assert!(footer.contains("👍 thumbsup") && footer.contains("Esc close"), "{footer}");
+        for c in "eyes".chars() {
+            m.key(Key::Char(c), at(2));
+        }
+        let eyes: ants_proto::Reaction = "eyes".parse().unwrap();
+        assert_eq!(m.key(Key::Enter, at(2)), Some(Action::React(first, eyes.clone(), true)), "alice takes it back");
+        assert!(m.picking.is_none());
+        m.key(Key::Char('+'), at(2));
+        assert_eq!(m.key(Key::Enter, at(2)), Some(Action::React(first, "thumbsup".parse().unwrap(), false)));
+
+        m.read(crate::tui::reads::Read::Reacted(first, eyes, true, Ok(true)), at(3));
+        let notice = m.notice_at(at(3)).map(|n| n.text.clone());
+        assert_eq!(notice, Some(format!("removed eyes from message {first}")));
     }
 
     #[test]

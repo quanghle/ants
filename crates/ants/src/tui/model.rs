@@ -4,12 +4,14 @@
 
 use ants_daemon::reactions::Reactions;
 use ants_proto::{
-    ApprovalRequest, ChannelEntry, ChannelId, ChannelReadMarkers, Humans, ReadMarker, ThreadId, UserId, Uuid, Verdict,
+    ApprovalRequest, ChannelEntry, ChannelId, ChannelReadMarkers, Humans, Reaction, ReadMarker, ThreadId, UserId, Uuid,
+    Verdict,
 };
 use chrono::{DateTime, TimeDelta, Utc};
 
 use super::acts::{Acted, Change};
 use super::approvals::{self, Answer, Asking};
+use super::react::{self, Pick, Picker};
 use super::reads::{Mark, Read};
 use super::work::{Facts, Filter};
 use super::{cards, channel, dm, home, nav, people, search, thread, timeline, work};
@@ -57,6 +59,8 @@ pub enum Action {
     Refresh,
     /// Store a decision on a tool request.
     Decide(ApprovalRequest, Verdict),
+    /// React to the message so, or with true take the reaction back, as `ants react` does.
+    React(Uuid, Reaction, bool),
     /// Find the messages matching the search, replacing any search running.
     Search(crate::search::Search),
     Quit,
@@ -191,6 +195,8 @@ pub enum To {
     Work(Filter),
     /// Answer a pending tool request: with the verdict, once confirmed; without, shown in full.
     Ask(ApprovalRequest, Option<Verdict>),
+    /// Pick a reaction to the message.
+    React(Uuid),
     /// Not another view: something to do.
     Do(Action),
 }
@@ -208,6 +214,8 @@ pub struct Model {
     pub prompt: Option<search::Prompt>,
     /// The tool request being answered.
     pub asking: Option<Asking>,
+    /// The reaction being picked.
+    pub picking: Option<Picker>,
     /// Whether the two-line pane shows instead of the full view ([`super::compact`]).
     pub compact: bool,
 }
@@ -239,6 +247,7 @@ impl Model {
             notice: None,
             prompt: None,
             asking: None,
+            picking: None,
             compact: false,
         }
     }
@@ -285,9 +294,21 @@ impl Model {
                 {
                     self.notify(format!("reading thread {thread}: {e:#}"), Level::Error, now);
                 }
+                if self.open() == Some(&thread) {
+                    return self.shown_reactions().into_iter().collect();
+                }
             }
         }
         Vec::new()
+    }
+
+    /// Read the reactions to the messages of the view shown: a channel's posts or a thread's messages.
+    fn shown_reactions(&self) -> Option<Action> {
+        match self.page() {
+            Page::Channel(page) => Some(Action::Reactions(self.data.feeds.watched(&page.channel))),
+            Page::Thread(page) => Some(Action::Reactions(page.message_ids())),
+            _ => None,
+        }
     }
 
     /// Take the messages read from the stream. Marks read the human's new messages on an open thread, and reads the
@@ -313,9 +334,12 @@ impl Model {
                 page.history.stored(entries.clone());
             }
         }
-        if posted && let Page::Channel(page) = self.page() {
-            actions.push(Action::Reactions(self.data.feeds.watched(&page.channel)));
-        }
+        let shown = match self.page() {
+            Page::Channel(_) => posted,
+            Page::Thread(page) => entries.iter().any(|e| e.thread_id == page.history.thread),
+            _ => false,
+        };
+        actions.extend(self.shown_reactions().filter(|_| shown));
         actions
     }
 
@@ -452,6 +476,12 @@ impl Model {
                 self.notify(format!("marking thread {thread} read: {e:#}"), Level::Error, now);
             }
             Read::Reactions(reactions) => data.reactions = reactions,
+            Read::Reacted(message, reaction, remove, Ok(changed)) => {
+                self.notify(react::done_line(message, &reaction, remove, changed), Level::Info, now);
+            }
+            Read::Reacted(message, reaction, _, Err(e)) => {
+                self.notify(format!("reacting {reaction} to message {message}: {e:#}"), Level::Error, now);
+            }
         }
     }
 
@@ -545,6 +575,21 @@ impl Model {
                 search::Edit::Run(query) => self.search(query, now),
             };
         }
+        if let Some(picker) = &mut self.picking {
+            return match picker.key(key) {
+                Pick::Typing => None,
+                Pick::Close => {
+                    self.picking = None;
+                    None
+                }
+                Pick::React(message, reaction) => {
+                    self.picking = None;
+                    let reacted = self.data.reactions.get(&message).map_or(&[][..], Vec::as_slice);
+                    let remove = react::reacted(reacted, self.data.me(), &reaction);
+                    Some(Action::React(message, reaction, remove))
+                }
+            };
+        }
         if self.focus == Focus::View
             && let Some(Page::Dm(page)) = self.pages.last_mut()
             && let Some(action) = page.write(key)
@@ -601,10 +646,7 @@ impl Model {
     pub fn select(&mut self, item: nav::Item) -> Option<Action> {
         self.pages = vec![Page::of(&item)];
         self.nav = item;
-        match self.page() {
-            Page::Channel(page) => Some(Action::Reactions(self.data.feeds.watched(&page.channel))),
-            _ => None,
-        }
+        self.shown_reactions()
     }
 
     /// Run the search `query` asks for, listing its matches over the view; a query refused stays in the prompt.
@@ -645,6 +687,7 @@ impl Model {
         if key == Key::Esc {
             if self.pages.len() > 1 {
                 self.pages.pop();
+                return self.shown_reactions();
             } else {
                 self.focus = Focus::Nav;
             }
@@ -675,6 +718,10 @@ impl Model {
             }
             To::Work(filter) => {
                 self.pages.push(Page::Work(work::Page::new(filter)));
+                None
+            }
+            To::React(message) => {
+                self.picking = Some(Picker::new(message));
                 None
             }
             To::Ask(request, verdict) => {
@@ -751,9 +798,12 @@ pub mod tests {
         assert_eq!(m.key(Key::Enter, at(2)), Some(Action::Open(thread.clone())));
         assert_eq!(m.page().name(), "thread");
         let loaded = vec![message(1, &thread, "alice", "dev-a", "deploy")];
-        m.take(live::Event::History(thread.clone(), Ok(loaded)), at(3));
+        let first = loaded[0].id.unwrap();
+        let shown = m.take(live::Event::History(thread.clone(), Ok(loaded)), at(3));
+        assert_eq!(shown, [Action::Reactions(vec![first])], "the reactions to its messages are read");
         let reply = message(3, &thread, "dev-a", "alice", "done");
-        assert_eq!(m.stored(vec![reply], at(4)), [Action::MarkRead(thread.clone())]);
+        let reactions = Action::Reactions(vec![first, reply.id.unwrap()]);
+        assert_eq!(m.stored(vec![reply], at(4)), [Action::MarkRead(thread.clone()), reactions]);
         assert!(m.stored(vec![message(4, &other, "dev-b", "alice", "elsewhere")], at(5)).is_empty());
         let Page::Thread(page) = m.page() else { panic!("not a thread") };
         assert_eq!(page.history.entries.iter().map(|e| e.seq).collect::<Vec<_>>(), [1, 3]);

@@ -1,16 +1,20 @@
 //! What `ants chat` reads besides the live feed ([`crate::live::Feed`]), every while and on demand: which of the
 //! human's inbox messages and channel posts are read, the channels and the humans, and the reactions to the messages
-//! shown; and marking a thread's messages and a channel's posts read.
+//! shown, again at once as any of them changes; and marking a thread's messages and a channel's posts read, and
+//! reacting to a message as `ants react` does.
 
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use ants_daemon::reactions::{self, Reactions};
-use ants_proto::{ChannelEntry, ChannelId, ChannelReadMarkers, Humans, ReadMarker, ThreadId, UserId, Uuid};
+use ants_daemon::reactions::{self, Change, Reactions};
+use ants_proto::{
+    ChannelEntry, ChannelId, ChannelReadMarkers, Humans, JsDomain, Reaction, ReadMarker, ThreadId, UserId, Uuid,
+};
 use anyhow::Result;
 use async_nats::jetstream;
-use futures::FutureExt as _;
 use futures::future::LocalBoxFuture;
+use futures::stream::LocalBoxStream;
+use futures::{FutureExt as _, StreamExt as _};
 
 use crate::channel::reads::ChannelReads;
 use crate::inbox::{Inbox, Select};
@@ -44,10 +48,16 @@ pub enum Read {
     /// The thread's messages were marked read, or not.
     Marked(ThreadId, Result<()>),
     Reactions(Reactions),
+    /// The human reacted to the message so, or took the reaction back: whether that changed anything.
+    Reacted(Uuid, Reaction, bool, Result<bool>),
 }
+
+/// A reaction to make, or with true to take back.
+type Reacting = (Uuid, Reaction, bool);
 
 pub struct Reads {
     js: jetstream::Context,
+    domain: Option<JsDomain>,
     me: UserId,
     markers: tokio::time::Interval,
     directories: tokio::time::Interval,
@@ -65,13 +75,22 @@ pub struct Reads {
     /// The messages whose reactions are read.
     watched: Vec<Uuid>,
     reactions: Option<LocalBoxFuture<'static, Result<Reactions>>>,
+    /// Every reaction added or removed, to read again those to the messages watched.
+    changes: LocalBoxStream<'static, Change>,
+    /// The reactions to make, after the one in flight.
+    to_react: VecDeque<Reacting>,
+    reacting: Option<LocalBoxFuture<'static, (Reacting, Result<bool>)>>,
 }
 
 impl Reads {
     /// What `me` reads; `channels`, whether its channel read markers too.
-    pub fn new(js: jetstream::Context, me: UserId, channels: bool) -> Self {
+    pub fn new(js: jetstream::Context, domain: Option<JsDomain>, me: UserId, channels: bool) -> Self {
         Self {
+            changes: changes(js.clone()),
+            to_react: VecDeque::new(),
+            reacting: None,
             js,
+            domain,
             me,
             markers: tokio::time::interval(MARKER_EVERY),
             directories: tokio::time::interval(DIRECTORY_EVERY),
@@ -101,6 +120,12 @@ impl Reads {
             {
                 let (js, me) = (self.js.clone(), self.me.clone());
                 self.marking_channel = Some(mark_channel(js, me, channel, marks).boxed_local());
+            }
+            if self.reacting.is_none()
+                && let Some(reacting) = self.to_react.pop_front()
+            {
+                self.reacting =
+                    Some(react(self.js.clone(), self.domain.clone(), self.me.clone(), reacting).boxed_local());
             }
             tokio::select! {
                 _ = self.markers.tick() => {
@@ -141,6 +166,16 @@ impl Reads {
                     // What is read changed: show it at once.
                     self.read_marker();
                     return Read::Marked(thread, marked);
+                }
+                Some(change) = self.changes.next() => {
+                    if self.watched.contains(&change.message) {
+                        self.read_reactions();
+                    }
+                }
+                ((message, reaction, remove), changed) = maybe(&mut self.reacting) => {
+                    self.reacting = None;
+                    self.read_reactions();
+                    return Read::Reacted(message, reaction, remove, changed);
                 }
                 read = maybe(&mut self.reactions) => {
                     self.reactions = None;
@@ -193,6 +228,11 @@ impl Reads {
         self.read_reactions();
     }
 
+    /// React `reaction` to `message`, or with `remove` take it back, after the reactions asked for before.
+    pub fn react(&mut self, message: Uuid, reaction: Reaction, remove: bool) {
+        self.to_react.push_back((message, reaction, remove));
+    }
+
     /// Read everything again now.
     pub fn refresh(&mut self) {
         self.markers.reset_immediately();
@@ -202,6 +242,31 @@ impl Reads {
         self.directory = None;
         self.reactions = None;
     }
+}
+
+/// Every reaction added or removed from now on; none when the bucket cannot be watched.
+fn changes(js: jetstream::Context) -> LocalBoxStream<'static, Change> {
+    futures::stream::once(async move { reactions::watch(&js).await })
+        .filter_map(async |watch| watch.inspect_err(|e| tracing::debug!("watching the reactions: {e:#}")).ok())
+        .flatten()
+        .chain(futures::stream::pending())
+        .boxed_local()
+}
+
+/// Make `reacting` as `me`, as `ants react` does.
+async fn react(
+    js: jetstream::Context,
+    domain: Option<JsDomain>,
+    me: UserId,
+    reacting: Reacting,
+) -> (Reacting, Result<bool>) {
+    let (message, reaction, remove) = &reacting;
+    let changed = if *remove {
+        reactions::remove(&js, domain.as_ref(), &me, message, reaction).await
+    } else {
+        reactions::add(&js, domain.as_ref(), &me, message, reaction).await
+    };
+    (reacting, changed)
 }
 
 async fn directory(js: jetstream::Context) -> Result<Directory> {

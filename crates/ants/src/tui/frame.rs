@@ -85,6 +85,9 @@ fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
     if let Some(prompt) = &model.prompt {
         return prompt.line();
     }
+    if let Some(picker) = &model.picking {
+        return picker.line();
+    }
     if let Some(line) = model.asking.as_ref().and_then(approvals::Asking::footer) {
         return line;
     }
@@ -118,6 +121,7 @@ const HELP: &[(&str, &str)] = &[
     ("y", "in a thread: copy the selected message"),
     ("p m e d", "in a thread: pin, mute, archive, mark done (again to undo)"),
     ("a A r, y", "on a tool request: allow once, always or reject, then confirm"),
+    ("+", "in a thread: react to the selected message, or take a reaction back"),
     ("n", "with a person: write a message, starting a thread"),
     ("/", "search messages, as in: deploy from:dev-a"),
     ("R", "read everything again"),
