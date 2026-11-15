@@ -1,0 +1,21 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+[
+  {
+    "op": "add_member",
+    "ant": "dev-b"
+  },
+  {
+    "op": "remove_member",
+    "ant": "dev-c"
+  },
+  {
+    "op": "set_messenger",
+    "ant": "triage"
+  },
+  {
+    "op": "clear_messenger"
+  }
+]

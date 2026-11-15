@@ -1,0 +1,12 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "name": "dev-a",
+  "public_key": "UDEF",
+  "host": "laptop.local",
+  "sent_at": "2025-01-01T12:00:00Z",
+  "current": "eyJ0eXAiOiJKV1QifQ.current",
+  "signature": "c2lnLXJlbmV3"
+}

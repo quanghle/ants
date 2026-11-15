@@ -1,0 +1,31 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+[
+  {
+    "outcome": "approved",
+    "manager": "lead",
+    "name": "dev-c",
+    "public_key": "UGHI",
+    "jwt": "eyJ0eXAiOiJKV1QifQ.user",
+    "leaf_jwt": "eyJ0eXAiOiJKV1QifQ.leaf"
+  },
+  {
+    "outcome": "refused",
+    "manager": "lead",
+    "name": "dev-c",
+    "public_key": "UGHI",
+    "reason": "outside the template"
+  },
+  {
+    "outcome": "retired",
+    "manager": "lead",
+    "name": "dev-c",
+    "public_key": "UGHI",
+    "revoked": [
+      "UGHI"
+    ],
+    "push_error": "hub unreachable"
+  }
+]

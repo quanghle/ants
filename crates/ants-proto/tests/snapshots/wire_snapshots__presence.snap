@@ -1,0 +1,10 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "human": "alice",
+  "device": "019a7d2a-0000-7000-8000-000000000001",
+  "following": "inbox",
+  "since": "2025-01-01T12:00:00Z"
+}

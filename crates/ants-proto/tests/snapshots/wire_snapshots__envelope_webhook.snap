@@ -1,0 +1,29 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "id": "019a7d2e-0000-7000-8000-000000000001",
+  "thread_id": "019a7d2c-0000-7000-8000-000000000001",
+  "from": "github",
+  "to": "dev-a",
+  "text": "fix the build",
+  "turn_budget": 8,
+  "owner": "alice",
+  "webhook": true,
+  "allow": [
+    "read:*",
+    "search",
+    "think",
+    "other:list_ants",
+    "other:check_inbox",
+    "other:read_notes",
+    "other:post_notes",
+    "other:send_message",
+    "other:ask_agent",
+    "other:route",
+    "other:escalate",
+    "other:react"
+  ],
+  "sent_at": "2025-01-01T12:00:00Z"
+}

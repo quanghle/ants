@@ -179,3 +179,6 @@ Changes that may come in any release, and which hooks must accept:
 Removing or renaming a subject, a consumer name or a field, or changing what a field means, is a breaking change,
 called out in the release notes; one changing what observer credentials allow also comes with a new permissions
 version (see [Credentials across upgrades](../README.md#credentials-across-upgrades)).
+
+Snapshot tests (`crates/ants-proto/tests/wire_snapshots.rs`) pin the JSON form of these documents and of every other
+wire type, and check that documents in the shape older daemons wrote still parse.

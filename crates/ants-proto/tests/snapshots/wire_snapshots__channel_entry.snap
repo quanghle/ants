@@ -1,0 +1,13 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "channel": "backend",
+  "members": [
+    "dev-a",
+    "alice"
+  ],
+  "messenger": "triage",
+  "owner": "lead"
+}

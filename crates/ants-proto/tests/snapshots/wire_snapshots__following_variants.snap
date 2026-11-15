@@ -1,0 +1,8 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+[
+  "inbox",
+  "approvals"
+]

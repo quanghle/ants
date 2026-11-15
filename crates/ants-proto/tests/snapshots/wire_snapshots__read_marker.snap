@@ -1,0 +1,11 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "below": 4200,
+  "read": [
+    4203,
+    4207
+  ]
+}

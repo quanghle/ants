@@ -1,0 +1,10 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "id": "019a7d2e-0000-7000-8000-000000000001",
+  "ant": "dev-a",
+  "by": "alice",
+  "sent_at": "2025-01-01T12:00:00Z"
+}

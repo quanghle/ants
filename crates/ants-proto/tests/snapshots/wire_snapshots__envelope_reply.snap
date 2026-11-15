@@ -1,0 +1,15 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "id": "019a7d2e-0000-7000-8000-000000000001",
+  "thread_id": "019a7d2c-0000-7000-8000-000000000001",
+  "from": "dev-a",
+  "to": "alice",
+  "text": "fix the build",
+  "turn_budget": 8,
+  "in_reply_to": "019a7d2e-0000-7000-8000-000000000001",
+  "owner": "alice",
+  "sent_at": "2025-01-01T12:00:00Z"
+}

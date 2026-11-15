@@ -1,0 +1,16 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+[
+  "turn_budget",
+  "cap",
+  "notes",
+  "dead_letter",
+  "approval",
+  "asked",
+  "context_window",
+  "harness",
+  "storage",
+  "unknown"
+]

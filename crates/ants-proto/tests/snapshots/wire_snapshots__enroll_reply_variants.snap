@@ -1,0 +1,19 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+[
+  {
+    "outcome": "approved",
+    "ant": "dev-a",
+    "public_key": "UABC",
+    "jwt": "eyJ0eXAiOiJKV1QifQ.user",
+    "leaf_jwt": "eyJ0eXAiOiJKV1QifQ.leaf"
+  },
+  {
+    "outcome": "rejected",
+    "ant": "dev-a",
+    "public_key": "UABC",
+    "reason": "unknown machine"
+  }
+]

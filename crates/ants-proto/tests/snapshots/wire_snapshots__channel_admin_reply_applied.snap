@@ -1,0 +1,23 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "request_id": "019a7d2e-0000-7000-8000-000000000001",
+  "outcome": {
+    "outcome": "applied",
+    "entry": {
+      "channel": "backend",
+      "members": [
+        "dev-a",
+        "alice"
+      ],
+      "messenger": "triage",
+      "owner": "lead"
+    },
+    "revision": 12,
+    "changed": [
+      "added dev-b"
+    ]
+  }
+}

@@ -1,0 +1,16 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "stuck": "dev-a",
+  "thread_id": "019a7d2c-0000-7000-8000-000000000001",
+  "reason": "approval",
+  "request_id": "019a7d2e-0000-7000-8000-00000000000a",
+  "level": 1,
+  "leader": "lead",
+  "visited": [
+    "dev-a",
+    "lead"
+  ]
+}

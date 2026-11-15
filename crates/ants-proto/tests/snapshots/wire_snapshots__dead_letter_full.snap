@@ -1,0 +1,53 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "ant": "dev-a",
+  "stream_seq": 4211,
+  "deliveries": 6,
+  "error": "harness exited",
+  "died_at": "2025-01-01T12:00:00Z",
+  "envelope": {
+    "id": "019a7d2e-0000-7000-8000-000000000001",
+    "thread_id": "019a7d2c-0000-7000-8000-000000000001",
+    "from": "alice",
+    "to": "dev-a",
+    "text": "fix the build",
+    "turn_budget": 8,
+    "in_reply_to": "019a7d2e-0000-7000-8000-000000000002",
+    "owner": "alice",
+    "creator": "planner",
+    "origin_thread": "019a7d2c-0000-7000-8000-000000000002",
+    "escalation": {
+      "stuck": "dev-a",
+      "thread_id": "019a7d2c-0000-7000-8000-000000000001",
+      "reason": "approval",
+      "request_id": "019a7d2e-0000-7000-8000-00000000000a",
+      "level": 1,
+      "leader": "lead",
+      "visited": [
+        "dev-a",
+        "lead"
+      ]
+    },
+    "approval": {
+      "request_id": "019a7d2e-0000-7000-8000-00000000000a",
+      "ant": "dev-a",
+      "verdict": "allow_once",
+      "decided_at": "2025-01-01T12:01:00Z"
+    },
+    "webhook": true,
+    "allow": [
+      "read:*",
+      "other:send_message"
+    ],
+    "mention": {
+      "channel": "backend",
+      "post": "019a7d2e-0000-7000-8000-000000000003",
+      "author": "github"
+    },
+    "sent_at": "2025-01-01T12:00:00Z"
+  },
+  "payload": "{\"id\":"
+}

@@ -1,0 +1,11 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+[
+  "working",
+  "waiting_approval",
+  "idle",
+  "failed",
+  "signed_out"
+]

@@ -1352,7 +1352,7 @@ CI sets `CARGO_BUILD_WARNINGS=deny`, so any lint warning (rustc or clippy) fails
 
 CI also lints and builds the Windows target on `windows-latest` and runs the MCP named pipe test there. To lint it from macOS or Linux: `rustup target add x86_64-pc-windows-gnu`, then `CARGO_BUILD_WARNINGS=deny cargo clippy --all-targets --target x86_64-pc-windows-gnu` with mingw-w64 on `PATH`.
 
-Integration tests requiring `nats-server` on `PATH` skip when absent unless `ANTS_REQUIRE_TOOLS=1` is set (as in `.github/workflows/ci.yml`, which runs the suite a second time with `ANTS_TEST_JS_ACK_FC_V2=1`). `crates/ants/tests/e2e.rs` exercises `ants ask --wait` against `ants daemon` using the test binary as a stub ACP harness.
+Integration tests requiring `nats-server` on `PATH` skip when absent unless `ANTS_REQUIRE_TOOLS=1` is set (as in `.github/workflows/ci.yml`, which runs the suite a second time with `ANTS_TEST_JS_ACK_FC_V2=1`). `crates/ants/tests/e2e.rs` exercises `ants ask --wait` against `ants daemon` using the test binary as a stub ACP harness. `crates/ants-proto/tests/wire_snapshots.rs` pins the JSON form of every wire type in [insta](https://insta.rs) snapshots (`tests/snapshots/`), so a renamed field or variant fails `cargo test`; after an intended wire change, review the new snapshots with `cargo insta review` (or rerun with `INSTA_UPDATE=always`) and keep older peers reading the new form.
 
 ## Layout
 

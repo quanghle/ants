@@ -1,0 +1,12 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "kind": "execute",
+  "title": "rm -rf target",
+  "locations": [
+    "/src/app"
+  ],
+  "input": "{\"command\":\"rm -rf target\"}"
+}

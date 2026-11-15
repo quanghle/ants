@@ -1,0 +1,36 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+[
+  {
+    "refusal": "not_owner",
+    "detail": {
+      "owner": "lead"
+    }
+  },
+  {
+    "refusal": "no_such_channel"
+  },
+  {
+    "refusal": "unreadable"
+  },
+  {
+    "refusal": "human",
+    "detail": "alice"
+  },
+  {
+    "refusal": "not_in_roster",
+    "detail": "ghost"
+  },
+  {
+    "refusal": "expired"
+  },
+  {
+    "refusal": "busy"
+  },
+  {
+    "refusal": "invalid",
+    "detail": "no change asked for"
+  }
+]
