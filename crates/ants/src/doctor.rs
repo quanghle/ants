@@ -312,11 +312,13 @@ async fn reach(setup: &Setup, identity: Option<&Identity>, leaf: Option<&Leaf>) 
         checks.push(Check::skip("hub", "JetStream does not answer"));
         checks.push(Check::skip("consumers", "JetStream does not answer"));
         checks.push(Check::skip("versions", "JetStream does not answer"));
+        checks.push(Check::skip("harness versions", "JetStream does not answer"));
         return (checks, None);
     }
     checks.extend(check_hub(&js, identity).await);
     checks.extend(check_consumers(&js, identity).await);
     checks.push(check_versions(&js, identity).await);
+    checks.push(check_harness_versions(&js).await);
     (checks, Some(Connected { js, rights: identity.rights.clone() }))
 }
 
@@ -602,6 +604,50 @@ async fn check_versions(js: &jetstream::Context, identity: &Identity) -> Check {
             vec![format!("upgrade ants here and on the machine holding the team keys before {renewing}")],
         ),
     }
+}
+
+/// Whether live ants run the same harness agent at different versions on different machines, as their roster entries
+/// name it ([`versions::harness_drift`]).
+async fn check_harness_versions(js: &jetstream::Context) -> Check {
+    use anyhow::Context as _;
+    let read = async {
+        let kv = js.get_key_value(ants_proto::ROSTER_BUCKET).await.context("opening the roster")?;
+        ants_daemon::roster::list_entries(&kv).await
+    };
+    match tokio::time::timeout(NETWORK_TIMEOUT * 2, read).await {
+        Ok(Ok(entries)) => harness_versions(&entries, chrono::Utc::now()),
+        Ok(Err(e)) => Check::skip("harness versions", format!("no roster read: {e:#}")),
+        Err(_) => Check::skip("harness versions", "no roster read within 10s"),
+    }
+}
+
+fn harness_versions(entries: &[ants_proto::RosterEntry], now: chrono::DateTime<chrono::Utc>) -> Check {
+    let check = "harness versions";
+    let drift = versions::harness_drift(entries, now);
+    if !drift.is_empty() {
+        return Check::warn(
+            check,
+            format!("different versions across machines: {}", drift.join("; ")),
+            vec![
+                "upgrade the older harness agents where they run; an ant's roster entry shows the new version once its \
+                 harness starts again"
+                    .to_owned(),
+            ],
+        );
+    }
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let named = entries.iter().filter(|e| ants_daemon::roster::is_live(e, now)).filter_map(|e| e.agent.as_ref());
+    for agent in named {
+        *counts.entry(agent.to_string()).or_default() += 1;
+    }
+    if counts.is_empty() {
+        return Check::ok(
+            check,
+            "no live ant names its harness agent yet: none started a harness since its daemon did",
+        );
+    }
+    let running: Vec<String> = counts.into_iter().map(|(agent, n)| format!("{agent} ({n})")).collect();
+    Check::ok(check, format!("live ants run {}", running.join(", ")))
 }
 
 /// Whether the hub keeps the accounts `ants auth push` sends it across restarts, as only a `full` resolver does
@@ -1628,6 +1674,33 @@ mod tests {
         let checks = Box::pin(run(&setup(&server, Some(server.creds_as(&ant, Role::Ant))))).await;
         assert_eq!(named(&checks, "jetstream")[0].status, Status::Ok, "{checks:#?}");
         assert_eq!(named(&checks, "hub")[0].status, Status::Skip, "{checks:#?}");
+    }
+
+    #[test]
+    fn harness_versions_warn_of_drift_across_machines() {
+        let now = chrono::Utc::now();
+        let entry = |ant: &str, machine: &str, version: Option<&str>| {
+            let mut json = serde_json::json!({
+                "ant": ant, "machine": machine, "harness": "copilot", "started_at": now, "heartbeat_at": now,
+            });
+            if let Some(version) = version {
+                json["agent"] = serde_json::json!({"name": "copilot", "version": version});
+            }
+            serde_json::from_value::<ants_proto::RosterEntry>(json).unwrap()
+        };
+        let check = harness_versions(&[entry("dev-a", "m1", None)], now);
+        assert_eq!(check.status, Status::Ok, "{check}");
+        assert!(check.detail.starts_with("no live ant names its harness agent"), "{check}");
+        let mut entries = vec![entry("dev-a", "m1", Some("1.0.3")), entry("dev-b", "m2", Some("1.0.3"))];
+        let check = harness_versions(&entries, now);
+        assert_eq!((check.status, check.detail.as_str()), (Status::Ok, "live ants run copilot 1.0.3 (2)"));
+        entries.push(entry("dev-c", "m2", Some("1.0.2")));
+        let check = harness_versions(&entries, now);
+        assert_eq!(check.status, Status::Warn, "{check}");
+        assert_eq!(
+            check.detail,
+            "different versions across machines: copilot at 1.0.3 (dev-a on m1, dev-b on m2), 1.0.2 (dev-c on m2)"
+        );
     }
 
     #[tokio::test]

@@ -178,6 +178,7 @@ pub fn table(entries: &[RosterEntry], now: DateTime<Utc>) -> String {
         "ACTIVITY",
         "HARNESSES",
         "HARNESS",
+        "AGENT",
         "MACHINE",
         "VERSION",
         "PERMS",
@@ -188,7 +189,7 @@ pub fn table(entries: &[RosterEntry], now: DateTime<Utc>) -> String {
         "WORKDIR",
     ]
     .map(str::to_owned);
-    let rows: Vec<[String; 13]> = std::iter::once(header)
+    let rows: Vec<[String; 14]> = std::iter::once(header)
         .chain(entries.iter().map(|e| {
             [
                 e.ant.to_string(),
@@ -196,6 +197,7 @@ pub fn table(entries: &[RosterEntry], now: DateTime<Utc>) -> String {
                 activity(e).to_owned(),
                 e.harnesses.map_or_else(|| "-".to_owned(), |n| n.to_string()),
                 e.harness.clone(),
+                e.agent.as_ref().map_or_else(|| "-".to_owned(), |a| format!("{}@{}", a.name, a.version)),
                 e.machine.clone(),
                 e.version.clone().unwrap_or_else(|| "-".to_owned()),
                 e.perms.map_or_else(|| "-".to_owned(), |p| p.to_string()),
@@ -207,7 +209,7 @@ pub fn table(entries: &[RosterEntry], now: DateTime<Utc>) -> String {
             ]
         }))
         .collect();
-    let mut widths = [0; 13];
+    let mut widths = [0; 14];
     for row in &rows {
         for (width, cell) in widths.iter_mut().zip(row) {
             *width = (*width).max(cell.chars().count());
@@ -254,6 +256,9 @@ pub async fn show(nats: &crate::Nats<'_>, json: bool) -> Result<()> {
         if let Some(note) = crate::versions::roster_note(&entries, now) {
             println!("{note}");
         }
+        if let Some(note) = crate::versions::harness_note(&entries, now) {
+            println!("{note}");
+        }
         let held = held(&entries, now);
         if !held.is_empty() {
             println!("\n{}", held.join("\n"));
@@ -276,6 +281,7 @@ mod tests {
             machine: "m1".to_owned(),
             instance: None,
             harness: "copilot".to_owned(),
+            agent: None,
             capabilities: vec!["rust".to_owned(), "review".to_owned()],
             whoami: None,
             workdir: Some("/src/app".to_owned()),
@@ -302,6 +308,7 @@ mod tests {
         (busy.activity, busy.handling, busy.harnesses) = (Some(Activity::Working), Some(1), Some(2));
         busy.escalate_to = vec!["lead".parse().unwrap(), "dev-b".parse().unwrap()];
         (busy.version, busy.perms) = (Some("0.2.0".to_owned()), Some(PermissionsVersion(2)));
+        busy.agent = Some(ants_proto::HarnessAgent { name: "copilot".to_owned(), version: "1.0.3".to_owned() });
         let older = entry("dev-c", 60, 4, now);
         assert_eq!(
             crate::versions::roster_note(&[busy.clone(), older, quiet.clone()], now).as_deref(),
@@ -320,6 +327,7 @@ mod tests {
                 "ACTIVITY",
                 "HARNESSES",
                 "HARNESS",
+                "AGENT",
                 "MACHINE",
                 "VERSION",
                 "PERMS",
@@ -338,6 +346,7 @@ mod tests {
                 "working",
                 "2",
                 "copilot",
+                "copilot@1.0.3",
                 "m1",
                 "0.2.0",
                 "2",
@@ -349,7 +358,10 @@ mod tests {
                 "/src/app"
             ]
         );
-        assert_eq!(rows[2], ["dev-b", "stale", "-", "-", "copilot", "m1", "-", "-", "25s", "ago", "2h", "-", "-", "-"]);
+        assert_eq!(
+            rows[2],
+            ["dev-b", "stale", "-", "-", "copilot", "-", "m1", "-", "-", "25s", "ago", "2h", "-", "-", "-"]
+        );
         let columns: Vec<Option<usize>> = table.lines().map(|l| l.find("copilot").or(l.find("HARNESS "))).collect();
         assert!(columns.iter().all(|c| c.is_some() && *c == columns[0]), "{table}");
 

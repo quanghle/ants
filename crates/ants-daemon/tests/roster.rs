@@ -23,6 +23,7 @@ fn entry_on(ant: &str, machine: &str) -> RosterEntry {
         machine: machine.to_owned(),
         instance: Some(format!("run-{}", RUNS.fetch_add(1, Ordering::Relaxed))),
         harness: "copilot".to_owned(),
+        agent: None,
         capabilities: vec!["rust".to_owned()],
         whoami: Some("Maintain the Rust backend.".to_owned()),
         workdir: None,

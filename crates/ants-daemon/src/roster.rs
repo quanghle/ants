@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ants_proto::{
-    ANTS_VERSION, Activity, HarnessLimit, PERMISSIONS_VERSION, ROSTER_HEARTBEAT, ROSTER_TTL, RosterEntry, SignInNeeded,
-    UserId,
+    ANTS_VERSION, Activity, HarnessAgent, HarnessLimit, PERMISSIONS_VERSION, ROSTER_HEARTBEAT, ROSTER_TTL, RosterEntry,
+    SignInNeeded, UserId,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, kv};
@@ -29,15 +29,17 @@ pub struct Registration {
 }
 
 /// What the daemon is doing, shared by the inbox loop and the heartbeats: the messages being handled, the live
-/// harnesses and whether the harness is signed out or held back by a provider limit.
+/// harnesses, the agent the latest harness start named and whether the harness is signed out or held back by a provider
+/// limit.
 #[derive(Debug, Default)]
 pub struct Workload {
     handling: AtomicUsize,
     harnesses: AtomicUsize,
+    agent: Mutex<Option<HarnessAgent>>,
     signed_out: Mutex<Option<SignInNeeded>>,
     limited: Mutex<Option<HarnessLimit>>,
-    /// Wakes the heartbeats when the ant turns idle or working, its harness signed out or in, or a provider limit
-    /// starts or ends, so the roster shows it before the next beat.
+    /// Wakes the heartbeats when the ant turns idle or working, its harness signed out or in or started with another
+    /// agent, or a provider limit starts or ends, so the roster shows it before the next beat.
     changed: Notify,
 }
 
@@ -52,6 +54,19 @@ impl Workload {
 
     pub fn set_harnesses(&self, live: usize) {
         self.harnesses.store(live, Ordering::Relaxed);
+    }
+
+    /// Note the agent a harness just started with named itself as, `None` when it did not name itself.
+    pub fn set_agent(&self, agent: Option<HarnessAgent>) {
+        let mut current = self.agent.lock().expect("agent");
+        if *current != agent {
+            *current = agent;
+            self.changed.notify_one();
+        }
+    }
+
+    pub fn agent(&self) -> Option<HarnessAgent> {
+        self.agent.lock().expect("agent").clone()
     }
 
     /// Note the harness as signed out, or with `None` as signed in.
@@ -98,6 +113,7 @@ impl Workload {
         entry.activity = Some(self.activity());
         entry.handling = Some(count(self.handling()));
         entry.harnesses = Some(count(self.harnesses()));
+        entry.agent = self.agent();
         entry.signed_out = self.signed_out();
         entry.limited = self.limited();
     }
@@ -122,6 +138,7 @@ pub async fn entry(config: &Config) -> RosterEntry {
         machine: machine().await,
         instance: Some(uuid::Uuid::new_v4().to_string()),
         harness: config.harness.to_string(),
+        agent: None,
         capabilities: config.capabilities.clone(),
         whoami: config.whoami.clone(),
         workdir: Some(config.workdir.display().to_string()),
@@ -299,6 +316,7 @@ async fn due(ticks: &mut tokio::time::Interval, workload: Option<&Workload>, ent
         if let Some(workload) = workload {
             if !beat
                 && entry.activity == Some(workload.activity())
+                && entry.agent == workload.agent()
                 && entry.signed_out == workload.signed_out()
                 && entry.limited == workload.limited()
             {
@@ -574,6 +592,7 @@ mod tests {
             machine: machine.to_owned(),
             instance: None,
             harness: "copilot".to_owned(),
+            agent: None,
             capabilities: capabilities.iter().map(|c| (*c).to_owned()).collect(),
             whoami: None,
             workdir: None,
@@ -621,6 +640,14 @@ mod tests {
         assert!(futures::FutureExt::now_or_never(workload.changed.notified()).is_some(), "signing in shows at once");
         workload.stamp(&mut stamped);
         assert_eq!(stamped.signed_out, None);
+
+        let agent = HarnessAgent { name: "copilot".to_owned(), version: "1.0.3".to_owned() };
+        workload.set_agent(Some(agent.clone()));
+        assert!(futures::FutureExt::now_or_never(workload.changed.notified()).is_some(), "a new agent shows at once");
+        workload.set_agent(Some(agent.clone()));
+        assert!(futures::FutureExt::now_or_never(workload.changed.notified()).is_none(), "the same agent again");
+        workload.stamp(&mut stamped);
+        assert_eq!(stamped.agent, Some(agent));
 
         let now = Utc::now();
         let limited = HarnessLimit { kind: ants_proto::LimitKind::Quota, since: now, until: now };

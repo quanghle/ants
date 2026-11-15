@@ -31,6 +31,7 @@ fn roster() -> Roster {
             machine: "test".to_owned(),
             instance: None,
             harness: "copilot".to_owned(),
+            agent: None,
             capabilities: Vec::new(),
             whoami: None,
             workdir: None,
