@@ -58,6 +58,17 @@ ants auth revoke alice --device 01968f7e-...            # revoke one device only
 
 All devices of a human share one read marker in `ants_read` (CAS-updated) and per-device presence in `ants_presence` for notification suppression (see [webhooks.md](webhooks.md#notifications)).
 
+### Device encryption keys
+
+Each human device also gets an X25519 encryption key (an nkeys xkey, public key `X...`), generated beside its NKey and bound into its user JWT as the tag `ants-xkey:<X...>`, so the account's signature ties it to that human and device. Messages sealed for the device are opened with its seed, which never leaves the device. The seed follows the NKey seed: in the `.creds` file as an `ANTS XKEY SEED` block after the NKey seed (nats tools read only the first two blocks and ignore it), or with `--store-key` in the OS credential store under its public key, the file keeping an `ANTS STORED XKEY` block. Ant, webhook, observer, channel manager and leaf credentials carry none.
+
+```sh
+ants auth user alice --human --public-key U... --xkey X...   # sign keys generated on the device; without --xkey none is bound
+ants renew ~/.config/ants/auth/alice.creds                  # credentials binding none get a new key
+```
+
+`ants auth devices` lists each device's encryption key (`xkey` in `--json`), as `issued.jsonl` records it. `ants doctor` checks it as **credentials xkey**: no key bound warns with `ants renew` as the fix; a seed missing, unreadable or not that of the JWT's tag fails.
+
 ## Adding an ant
 
 `ants add` generates a user NKey on the target machine (`<ant>.nk` at mode `0600`, or seed straight into the OS store with `--store-key`), appends `[[ant]]` to `config.toml`, writes `<ant>.creds` once signed, and reloads `ants.daemon` / `ants-daemon`:
@@ -90,7 +101,7 @@ ants enroll renewals --js-domain hub                                            
 ants enroll renew dev-a --js-domain hub                                                   # sign one (or --auto to sign continuously)
 ```
 
-`ants renew` generates a local NKey, publishes signed `RenewRequest`s on `ants.renew.<name>` every 5 s, verifies the returned JWT, atomically replaces the `.creds` file (preserving OS credential store placement), and reloads `ants.daemon`, or for leaf uplink credentials reconnects the uplink by reloading `ants.nats` with the `credentials` path respelled in `leaf.conf` (see [transport.md](transport.md#enrollment-behind-a-leaf-node)). `ants enroll renew` preserves role, device, domain, webhook destinations, leaf members and TTL while stamping the current permissions version, records `renewed_from` in `issued.jsonl`, and prints `ants auth revoke --key` for the old key. `ants enroll renew --auto` continuously approves valid unrevoked requests (reconnecting every 5 m to refresh `revoked.json`). Enrollment, leaf system, expired, or revoked credentials must be reissued via `ants auth`.
+`ants renew` generates a local NKey, publishes signed `RenewRequest`s on `ants.renew.<name>` every 5 s, verifies the returned JWT, atomically replaces the `.creds` file (preserving OS credential store placement), and reloads `ants.daemon`, or for leaf uplink credentials reconnects the uplink by reloading `ants.nats` with the `credentials` path respelled in `leaf.conf` (see [transport.md](transport.md#enrollment-behind-a-leaf-node)). For a human's credentials without an encryption key, `ants renew` also generates one and asks for it bound (the request's signed `xkey`), keeping its seed beside the new NKey seed; credentials that hold one keep it. `ants enroll renew` refuses a requested key for credentials of others than humans or already binding one, and preserves role, device, encryption key, domain, webhook destinations, leaf members and TTL while stamping the current permissions version, records `renewed_from` in `issued.jsonl`, and prints `ants auth revoke --key` for the old key. `ants enroll renew --auto` continuously approves valid unrevoked requests (reconnecting every 5 m to refresh `revoked.json`). Enrollment, leaf system, expired, or revoked credentials must be reissued via `ants auth`.
 
 ## Credentials across upgrades
 
@@ -98,12 +109,12 @@ Each user JWT carries `ants-perms:<n>` (current: `1`), required on every user JW
 
 ## Private keys in the OS credential store
 
-`ants keys store` moves a `.creds` file's NKey seed into the OS credential store — macOS login Keychain (service `ants`), Linux Secret Service via `secret-tool` (`libsecret-tools` / `libsecret`), or Windows Credential Manager (`ants:<public_key>`) — after reading the seed back and authenticating against `--nats`, leaving only the JWT and public key reference in the file:
+`ants keys store` moves a `.creds` file's NKey seed, and the seed of its [encryption key](#device-encryption-keys) when it holds one, into the OS credential store — macOS login Keychain (service `ants`), Linux Secret Service via `secret-tool` (`libsecret-tools` / `libsecret`), or Windows Credential Manager (`ants:<public_key>`) — after reading the seed back and authenticating against `--nats`, leaving only the JWT and public key reference in the file:
 
 ```sh
 ants keys store ~/.config/ants/auth/alice.creds ~/.ants/dev-a.creds   # default: --creds
-ants keys unstore ~/.ants/dev-a.creds                                  # write seed back into file
-ants keys remove ~/.ants/dev-a.creds                                   # delete file and stored seed (does not revoke)
+ants keys unstore ~/.ants/dev-a.creds                                  # write seeds back into file
+ants keys remove ~/.ants/dev-a.creds                                   # delete file and stored seeds (does not revoke)
 ```
 
 `ants add --store-key`, `ants auth user --store-key`, and `ants auth channel-manager --store-key` write new seeds straight into the store without touching disk (printing the approved JWT if `ants add --enroll --store-key` fails so `--jwt` can finish later). `ants keys store` refuses leaf uplink credentials (read by `nats-server`), team keys (`operator.nk`, `account.nk`, `system.nk`), and ephemeral in-memory keys.

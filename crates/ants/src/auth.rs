@@ -15,11 +15,11 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use ants_daemon::creds::{Finding, Kind as CredsKind};
-use ants_proto::{Destination, DeviceId, JsDomain, Machine, PERMISSIONS_VERSION, Permissions, Role, UserId};
+use ants_daemon::creds::{Finding, Kind as CredsKind, Seed};
+use ants_proto::{Destination, DeviceId, DeviceKey, JsDomain, Machine, PERMISSIONS_VERSION, Permissions, Role, UserId};
 use anyhow::{Context as _, Result, anyhow, bail};
 use data_encoding::{BASE32_NOPAD, BASE64URL_NOPAD};
-use nkeys::KeyPair;
+use nkeys::{KeyPair, XKey};
 use serde_json::{Value, json};
 
 use crate::members::EnrollApprover;
@@ -135,8 +135,9 @@ pub fn issue_with(dir: &Path, user: &UserId, kind: Kind, permissions: Permission
     issue_device(dir, user, kind, permissions, None, out).map(drop)
 }
 
-/// [`issue_with`], with a human's credentials for a new device labelled `label`, whose id their user JWT carries
-/// ([`DeviceId::tag`]) and the registry records. Returns the device id, for a human's.
+/// [`issue_with`], with a human's credentials for a new device labelled `label`, whose id and new encryption key their
+/// user JWT carries ([`DeviceId::tag`], [`DeviceKey::tag`]) and the registry records, the key's seed in the file after
+/// the NKey seed. Returns the device id, for a human's.
 pub fn issue_device(
     dir: &Path,
     user: &UserId,
@@ -148,29 +149,41 @@ pub fn issue_device(
     check_not_reserved(user)?;
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let key = KeyPair::new_user();
-    let (device, extra) = device_claims(kind, label)?;
+    let xkey = (kind == Kind::Human).then(XKey::new);
+    let bound = xkey.as_ref().map(device_key).transpose()?;
+    let (device, extra) = device_claims(kind, label, bound.as_ref())?;
     let jwt = user_jwt(&account, &key.public_key(), user.as_str(), permissions, extra, None)?;
-    write_secret(out, &creds(&jwt, &seed(&key)?))?;
-    revoke::record(dir, &with_device(Issued::new(&key.public_key(), user.as_str(), kind, None)?, device, label))?;
+    write_secret(out, &creds_with(&jwt, &seed(&key)?, xkey.as_ref())?)?;
+    let issued = Issued::new(&key.public_key(), user.as_str(), kind, None)?;
+    revoke::record(dir, &with_device(issued, device, label, bound))?;
     Ok(device)
 }
 
-/// A new device for credentials of `kind`, if a human's, and the claims carrying it.
-fn device_claims(kind: Kind, label: Option<&str>) -> Result<(Option<DeviceId>, Value)> {
+/// The public key of `xkey`, as a user JWT binds it.
+pub(crate) fn device_key(xkey: &XKey) -> Result<DeviceKey> {
+    Ok(xkey.public_key().parse()?)
+}
+
+/// A new device for credentials of `kind`, if a human's, and the claims carrying it with its encryption key `xkey`.
+fn device_claims(kind: Kind, label: Option<&str>, xkey: Option<&DeviceKey>) -> Result<(Option<DeviceId>, Value)> {
     if kind != Kind::Human {
         if label.is_some() {
             bail!("only a human's credentials are for a device with a label");
+        }
+        if xkey.is_some() {
+            bail!("only a human's credentials bind an encryption key");
         }
         return Ok((None, json!({})));
     }
     label.map(revoke::check_label).transpose()?;
     let device = DeviceId::generate();
-    Ok((Some(device), json!({ "tags": [device.tag()] })))
+    let tags: Vec<String> = std::iter::once(device.tag()).chain(xkey.map(DeviceKey::tag)).collect();
+    Ok((Some(device), json!({ "tags": tags })))
 }
 
-fn with_device(issued: Issued, device: Option<DeviceId>, label: Option<&str>) -> Issued {
+fn with_device(issued: Issued, device: Option<DeviceId>, label: Option<&str>, xkey: Option<DeviceKey>) -> Issued {
     match device {
-        Some(device) => issued.for_device(device, label.map(str::to_owned)),
+        Some(device) => issued.for_device(device, label.map(str::to_owned), xkey),
         None => issued,
     }
 }
@@ -444,11 +457,12 @@ pub fn sign_user(
 /// Sign the user JWT of `user`, of `kind`, with `permissions` for `public_key`, a user NKey generated on another
 /// machine, and record the key ([`revoke::record`]). A human's are for a new device ([`sign_device`]).
 pub fn sign_with(dir: &Path, user: &UserId, kind: Kind, permissions: Permissions, public_key: &str) -> Result<String> {
-    sign_device(dir, user, kind, permissions, None, public_key).map(|(jwt, _)| jwt)
+    sign_device(dir, user, kind, permissions, None, public_key, None).map(|(jwt, _)| jwt)
 }
 
-/// [`sign_with`], with a human's for a new device labelled `label`, as [`issue_device`]. Returns the JWT and the
-/// device id, for a human's.
+/// [`sign_with`], with a human's for a new device labelled `label`, as [`issue_device`], binding the encryption key
+/// `xkey` generated on the device, if given; only a human's bind one. Returns the JWT and the device id, for a
+/// human's.
 pub fn sign_device(
     dir: &Path,
     user: &UserId,
@@ -456,13 +470,15 @@ pub fn sign_device(
     permissions: Permissions,
     label: Option<&str>,
     public_key: &str,
+    xkey: Option<&DeviceKey>,
 ) -> Result<(String, Option<DeviceId>)> {
     check_user_key(public_key)?;
     check_not_reserved(user)?;
     let account = load(&dir.join(ACCOUNT_SEED))?;
-    let (device, extra) = device_claims(kind, label)?;
+    let (device, extra) = device_claims(kind, label, xkey)?;
     let jwt = user_jwt(&account, public_key, user.as_str(), permissions, extra, None)?;
-    revoke::record(dir, &with_device(Issued::new(public_key, user.as_str(), kind, None)?, device, label))?;
+    let issued = Issued::new(public_key, user.as_str(), kind, None)?;
+    revoke::record(dir, &with_device(issued, device, label, xkey.cloned()))?;
     Ok((jwt, device))
 }
 
@@ -502,15 +518,16 @@ pub struct Renewed {
 }
 
 /// Renew `current`, the user JWT of credentials the account key in `dir` issued, for `public_key`, a new user NKey
-/// generated where they are used: a JWT with the same name, kind, members, device and JetStream domain, permissions as
-/// this version of ants gives them (so an upgrade applies), and as long a lifetime as `current` had, if it had an
-/// expiry. Recorded in the registry as renewed from the earlier key ([`Issued::renewed_from`]), with a leaf node's
+/// generated where they are used: a JWT with the same name, kind, members, device, encryption key and JetStream
+/// domain, permissions as this version of ants gives them (so an upgrade applies), and as long a lifetime as `current`
+/// had, if it had an expiry. A human's credentials without an encryption key bind `xkey`, generated on the device,
+/// when given; credentials of others, or with a key already, refuse one. Recorded in the registry as renewed from the earlier key ([`Issued::renewed_from`]), with a leaf node's
 /// members ([`crate::members`]), so a later `ants auth leaf` keeps them.
 ///
 /// Refused for credentials of another account, expired or revoked ones, enrollment and leaf system credentials, and
 /// for a new key revoked or already issued to other credentials. Proving that the holder has the seed of `current` is
 /// the caller's part.
-pub fn renew(dir: &Path, current: &str, public_key: &str) -> Result<Renewed> {
+pub fn renew(dir: &Path, current: &str, public_key: &str, xkey: Option<&DeviceKey>) -> Result<Renewed> {
     check_user_key(public_key)?;
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let (claims, body) = verified_body(current)?;
@@ -532,6 +549,15 @@ pub fn renew(dir: &Path, current: &str, public_key: &str) -> Result<Renewed> {
         bail!("the new key {public_key} is revoked");
     }
     let finding = Finding::from_claims(&body)?;
+    if let Some(xkey) = xkey {
+        if finding.kind != CredsKind::Human {
+            bail!("{} bind no encryption key, as only a human's do: {xkey} refused", finding.holder());
+        }
+        if let Some(bound) = &finding.xkey {
+            bail!("the credentials of {} bind the encryption key {bound} already: {xkey} refused", claims.name);
+        }
+    }
+    let xkey = finding.xkey.clone().or_else(|| xkey.cloned());
     let issued = revoke::issued(dir)?;
     let kind = registry_kind(&finding.kind)
         .with_context(|| format!("{} cannot be renewed: issue new ones with `ants auth`", finding.holder()))?;
@@ -543,7 +569,8 @@ pub fn renew(dir: &Path, current: &str, public_key: &str) -> Result<Renewed> {
     let (permissions, extra) = match &finding.kind {
         CredsKind::Ant => (Permissions::for_user(&user()?, Role::Ant), json!({})),
         CredsKind::Human => {
-            let tags: Vec<String> = finding.device.iter().map(DeviceId::tag).collect();
+            let tags = finding.device.iter().map(DeviceId::tag).chain(xkey.iter().map(DeviceKey::tag));
+            let tags: Vec<String> = tags.collect();
             (Permissions::for_user(&user()?, Role::Human), json!({ "tags": tags }))
         }
         CredsKind::Webhook { to, channels } => {
@@ -584,7 +611,7 @@ pub fn renew(dir: &Path, current: &str, public_key: &str) -> Result<Renewed> {
         check_uplink_size(&jwt, machine)?;
     }
     let renewed = Finding::from_jwt(&jwt)?;
-    if !finding.same_credentials(&renewed) {
+    if !finding.same_credentials(&renewed) || renewed.xkey != xkey {
         bail!("renewing {} would change what they are: {:?} into {:?}", finding.holder(), finding.kind, renewed.kind);
     }
     let previous = issued.iter().rev().find(|i| i.key == claims.sub);
@@ -593,7 +620,7 @@ pub fn renew(dir: &Path, current: &str, public_key: &str) -> Result<Renewed> {
     record.template = previous.and_then(|p| p.template.clone());
     record.added_by = previous.and_then(|p| p.added_by.clone());
     if let Some(device) = finding.device {
-        record = record.for_device(device, previous.and_then(|p| p.label.clone()));
+        record = record.for_device(device, previous.and_then(|p| p.label.clone()), xkey);
     }
     if let CredsKind::Leaf { ants, humans, webhooks, enroll_approver, .. } = &renewed.kind {
         let (ants, humans, webhooks) = (ants.clone(), humans.clone(), webhooks.clone());
@@ -820,6 +847,19 @@ fn creds(jwt: &str, seed: &str) -> String {
     ants_daemon::creds::text(jwt, seed)
 }
 
+/// The text of a `.creds` file holding `jwt` and `seed`, and the seed of the encryption key `xkey` if given.
+pub(crate) fn creds_with(jwt: &str, seed: &str, xkey: Option<&XKey>) -> Result<String> {
+    let mut text = creds(jwt, seed);
+    if let Some(xkey) = xkey {
+        text += &ants_daemon::creds::xkey_block(Seed::File(&xseed(xkey)?));
+    }
+    Ok(text)
+}
+
+pub(crate) fn xseed(xkey: &XKey) -> Result<String> {
+    xkey.seed().map_err(|e| anyhow!("{e}"))
+}
+
 pub(crate) fn seed(key: &KeyPair) -> Result<String> {
     key.seed().map_err(|e| anyhow!("{e}"))
 }
@@ -830,10 +870,11 @@ fn load(path: &Path) -> Result<KeyPair> {
     KeyPair::from_seed(seed.trim()).map_err(|e| anyhow!("{}: {e}", path.display()))
 }
 
-/// Replace the `.creds` file at `path` with that of `jwt` and the seed of `user` at once: written beside it, readable by
-/// its owner only, then renamed over it, so what reads it finds either the earlier credentials or the new ones.
-pub fn replace_creds(path: &Path, jwt: &str, user: &KeyPair) -> Result<()> {
-    replace_secret(path, &creds(jwt, &seed(user)?))
+/// Replace the `.creds` file at `path` with that of `jwt` and the seed of `user`, and of the encryption key `xkey` if
+/// given, at once: written beside it, readable by its owner only, then renamed over it, so what reads it finds either
+/// the earlier credentials or the new ones.
+pub fn replace_creds(path: &Path, jwt: &str, user: &KeyPair, xkey: Option<&XKey>) -> Result<()> {
+    replace_secret(path, &creds_with(jwt, &seed(user)?, xkey)?)
 }
 
 /// Replace the file at `path` with `contents` at once: written beside it, readable by its owner only, then renamed

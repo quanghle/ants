@@ -14,7 +14,7 @@ use std::io::Write as _;
 use std::path::Path;
 use std::time::Duration;
 
-use ants_proto::{DeviceId, PERMISSIONS_VERSION, PermissionsVersion};
+use ants_proto::{DeviceId, DeviceKey, PERMISSIONS_VERSION, PermissionsVersion};
 use anyhow::{Context as _, Result, bail};
 use futures::StreamExt as _;
 use serde::{Deserialize, Serialize};
@@ -71,6 +71,9 @@ pub struct Issued {
     /// The label of a human's device, for display: a later line of the same key relabels it ([`rename`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// The encryption key of a human's device that its user JWT binds ([`DeviceKey::tag`]), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xkey: Option<DeviceKey>,
     /// The permissions version its JWT carries ([`PERMISSIONS_VERSION`]).
     pub perms: PermissionsVersion,
     /// The key of the credentials these renew (`ants renew`), of the same name, kind and device, which stays valid
@@ -101,6 +104,7 @@ impl Issued {
             expires_at,
             device: None,
             label: None,
+            xkey: None,
             perms: PERMISSIONS_VERSION,
             renewed_from: None,
             members: None,
@@ -109,9 +113,9 @@ impl Issued {
         })
     }
 
-    /// The key, for `device` labelled `label`.
-    pub fn for_device(self, device: DeviceId, label: Option<String>) -> Self {
-        Self { device: Some(device), label, ..self }
+    /// The key, for `device` labelled `label`, whose encryption key is `xkey`.
+    pub fn for_device(self, device: DeviceId, label: Option<String>, xkey: Option<DeviceKey>) -> Self {
+        Self { device: Some(device), label, xkey, ..self }
     }
 }
 
@@ -132,6 +136,9 @@ pub struct Device {
     pub device: DeviceId,
     pub label: Option<String>,
     pub key: String,
+    /// The encryption key its latest credentials bind, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub xkey: Option<DeviceKey>,
     pub issued_at: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<u64>,
@@ -151,6 +158,7 @@ pub fn devices(dir: &Path, name: &str) -> Result<Vec<Device>> {
             label: one.label,
             revoked: revoked.iter().any(|r| r.key == one.key),
             key: one.key,
+            xkey: one.xkey,
             issued_at: one.issued_at,
             expires_at: one.expires_at,
         };
@@ -210,8 +218,8 @@ pub fn rename(dir: &Path, name: &str, selector: &str, label: &str) -> Result<Dev
     Ok(Device { label: Some(label.to_owned()), ..device.clone() })
 }
 
-/// Print the devices of the human `name` in `dir`: id, label, key, when issued, and whether revoked; with `json`, one
-/// JSON object per line.
+/// Print the devices of the human `name` in `dir`: id, label, key, encryption key, when issued, and whether revoked;
+/// with `json`, one JSON object per line.
 pub fn list_devices(dir: &Path, name: &str, json: bool) -> Result<()> {
     let devices = devices(dir, name)?;
     if devices.is_empty() && !json {
@@ -225,7 +233,8 @@ pub fn list_devices(dir: &Path, name: &str, json: bool) -> Result<()> {
         let id = d.device;
         let label = d.label.as_deref().unwrap_or("-");
         let revoked = if d.revoked { "  revoked" } else { "" };
-        println!("{id}  {label}  {}  issued {}{revoked}", d.key, time(d.issued_at));
+        let xkey = d.xkey.as_ref().map_or("-", DeviceKey::as_str);
+        println!("{id}  {label}  {}  {xkey}  issued {}{revoked}", d.key, time(d.issued_at));
     }
     Ok(())
 }

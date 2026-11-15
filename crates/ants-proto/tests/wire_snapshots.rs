@@ -481,6 +481,19 @@ fn enrollment() {
             host: "laptop.local".to_owned(),
             sent_at: at(0),
             current: "eyJ0eXAiOiJKV1QifQ.current".to_owned(),
+            xkey: None,
+            signature: "c2lnLXJlbmV3".to_owned(),
+        },
+    );
+    snap(
+        "renew_request_xkey",
+        &RenewRequest {
+            name: "alice".to_owned(),
+            public_key: "UDEF".to_owned(),
+            host: "laptop.local".to_owned(),
+            sent_at: at(0),
+            current: "eyJ0eXAiOiJKV1QifQ.current".to_owned(),
+            xkey: Some("XBLFEIK7UCHY5XKH7LGNQ4JZNVOZEWMIHPZH3LP4JUBJ6KQZDVBEWHWB".parse().unwrap()),
             signature: "c2lnLXJlbmV3".to_owned(),
         },
     );

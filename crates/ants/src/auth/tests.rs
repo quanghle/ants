@@ -164,7 +164,7 @@ fn renewed_credentials_keep_what_they_are_for_a_new_key() {
     let renewed = |name: &str| {
         let (jwt, key) = read_creds(&out(name)).unwrap();
         let new = KeyPair::new_user();
-        let renewed = renew(&team, &jwt, &new.public_key()).unwrap();
+        let renewed = renew(&team, &jwt, &new.public_key(), None).unwrap();
         assert!(creds::Finding::from_jwt(&jwt).unwrap().same_credentials(&renewed.finding), "{name}");
         assert_eq!(renewed.finding.version, PERMISSIONS_VERSION, "{name}");
         assert_eq!(
@@ -219,8 +219,49 @@ fn renewed_credentials_keep_what_they_are_for_a_new_key() {
     let key = KeyPair::new_user().public_key();
     let ant = Permissions::for_user(&p("dev-c"), Role::Ant);
     let expiring = user_jwt(&account, &key, "dev-c", ant, json!({}), Some(now().unwrap() + 3600)).unwrap();
-    let exp = verified(&renew(&team, &expiring, &KeyPair::new_user().public_key()).unwrap().jwt).unwrap().exp;
+    let exp = verified(&renew(&team, &expiring, &KeyPair::new_user().public_key(), None).unwrap().jwt).unwrap().exp;
     assert!(exp.is_some_and(|exp| exp.abs_diff(now().unwrap() + 3600) <= 2), "{exp:?}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_human_device_binds_its_encryption_key_and_renewal_keeps_it_or_adds_one() {
+    use ants_daemon::{creds, keystore};
+    let dir = ants_test_support::scratch_dir("renew-xkey");
+    let team = dir.join("auth");
+    init(&team).unwrap();
+    let out = |name: &str| dir.join(format!("{name}.creds"));
+    let human = || Permissions::for_user(&p("alice"), Role::Human);
+    let new = || KeyPair::new_user().public_key();
+    let bound = |jwt: &str| creds::Finding::from_jwt(jwt).unwrap().xkey;
+    let registered = || revoke::issued(&team).unwrap().pop().unwrap().xkey;
+
+    issue_device(&team, &p("alice"), Kind::Human, human(), Some("laptop"), &out("alice")).unwrap();
+    let (jwt, _) = read_creds(&out("alice")).unwrap();
+    let xkey = creds::load_xkey(&out("alice"), &keystore::Memory::default()).unwrap().unwrap();
+    let laptop = device_key(&xkey).unwrap();
+    assert_eq!((bound(&jwt), registered()), (Some(laptop.clone()), Some(laptop.clone())));
+    let renewed = renew(&team, &jwt, &new(), None).unwrap();
+    assert_eq!((bound(&renewed.jwt), registered()), (Some(laptop.clone()), Some(laptop.clone())), "kept");
+    let other = device_key(&XKey::new()).unwrap();
+    let err = renew(&team, &jwt, &new(), Some(&other)).unwrap_err().to_string();
+    assert!(err.contains("already"), "{err}");
+
+    let (unbound, _) = sign_device(&team, &p("alice"), Kind::Human, human(), None, &new(), None).unwrap();
+    assert_eq!(bound(&unbound), None, "signed for a key generated elsewhere, without --xkey");
+    let added = renew(&team, &unbound, &new(), Some(&other)).unwrap();
+    assert_eq!((bound(&added.jwt), registered()), (Some(other.clone()), Some(other.clone())));
+    let devices = revoke::devices(&team, "alice").unwrap();
+    assert_eq!(devices.iter().map(|d| d.xkey.clone()).collect::<Vec<_>>(), [Some(laptop), Some(other.clone())]);
+
+    issue(&team, &p("dev-a"), Role::Ant, None, &out("dev-a")).unwrap();
+    let (ant, _) = read_creds(&out("dev-a")).unwrap();
+    assert_eq!(bound(&ant), None);
+    assert!(creds::xkey_of(&std::fs::read_to_string(out("dev-a")).unwrap()).is_none(), "an ant holds no xkey");
+    let err = renew(&team, &ant, &new(), Some(&other)).unwrap_err().to_string();
+    assert!(err.contains("only a human's"), "{err}");
+    let ant_rights = Permissions::for_user(&p("dev-b"), Role::Ant);
+    assert!(sign_device(&team, &p("dev-b"), Kind::Ant, ant_rights, None, &new(), Some(&other)).is_err());
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -232,7 +273,7 @@ fn credentials_expired_revoked_foreign_or_of_no_renewable_kind_are_not_renewed()
     init(&other).unwrap();
     let out = |name: &str| dir.join(format!("{name}.creds"));
     let jwt = |name: &str| read_creds(&out(name)).unwrap();
-    let refused = |jwt: &str, key: &str| renew(&team, jwt, key).unwrap_err().to_string();
+    let refused = |jwt: &str, key: &str| renew(&team, jwt, key, None).unwrap_err().to_string();
     let new = || KeyPair::new_user().public_key();
 
     issue(&team, &p("dev-a"), Role::Ant, None, &out("dev-a")).unwrap();
