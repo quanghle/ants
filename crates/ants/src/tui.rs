@@ -1,6 +1,7 @@
 //! `ants chat`, which bare `ants` runs on a terminal: the full-screen chat UI. A nav of home (what waits for the
 //! human), work (the threads by state), the human's channels, the ants and the people, beside the view selected in it,
-//! kept live from what the CLI's own connection reads and hears ([`live::Feed`], [`reads::Reads`]).
+//! kept live from what the CLI's own connection reads and hears ([`live::Feed`], [`reads::Reads`]), and searched
+//! ([`search::Searches`]).
 //!
 //! What it shows and how keys change it is the [`model::Model`]; each view and component has a module of its own,
 //! which draws it and takes its keys.
@@ -12,6 +13,7 @@ mod markdown;
 mod model;
 mod nav;
 mod reads;
+mod search;
 mod thread;
 mod work;
 
@@ -29,6 +31,7 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, Ke
 
 use self::model::{Action, Key, Level, Model};
 use self::reads::Reads;
+use self::search::Searches;
 use crate::live::{self, Feed, Screen};
 use crate::{presence, progress};
 
@@ -121,11 +124,12 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration) -> Result<()> {
     nats.prepare(&js).await;
     let (feed, state) = live::start(nats, client, js.clone(), since).await?;
     let reads = Reads::new(js.clone(), me.clone());
+    let searches = Searches::new(js.clone());
     let server = host(nats.url).to_owned();
     // The UI shows the replies and the tool requests as they come, so notifications spare this device theirs meanwhile.
     let shown = async {
         let mut screen = Screen::open()?;
-        Box::pin(Chat { feed, reads, model: Model::new(state, server) }.run(&mut screen.terminal)).await
+        Box::pin(Chat { feed, reads, searches, model: Model::new(state, server) }.run(&mut screen.terminal)).await
     };
     let (domain, device) = (nats.domain, nats.device);
     let approvals = presence::while_following(&js, domain, me, device, Following::Approvals, shown);
@@ -151,6 +155,7 @@ fn key_of(key: KeyEvent) -> Option<Key> {
         KeyCode::Tab | KeyCode::BackTab => Key::Tab,
         KeyCode::Enter => Key::Enter,
         KeyCode::Esc => Key::Esc,
+        KeyCode::Backspace => Key::Backspace,
         KeyCode::Char(c) => Key::Char(c),
         _ => return None,
     })
@@ -160,6 +165,7 @@ fn key_of(key: KeyEvent) -> Option<Key> {
 struct Chat {
     feed: Feed,
     reads: Reads,
+    searches: Searches,
     model: Model,
 }
 
@@ -202,6 +208,11 @@ impl Chat {
                     self.model.read(read, Utc::now());
                     Vec::new()
                 }
+                found = self.searches.next() => {
+                    dirty = true;
+                    self.model.found(found);
+                    Vec::new()
+                }
             };
             for action in actions {
                 if self.act(action).is_break() {
@@ -239,6 +250,7 @@ impl Chat {
             }
             Action::MarkRead(thread) => self.reads.mark_read(thread),
             Action::Reactions(messages) => self.reads.watch_reactions(messages),
+            Action::Search(search) => self.searches.start(search),
             Action::Refresh => {
                 self.feed.refresh();
                 self.reads.refresh();

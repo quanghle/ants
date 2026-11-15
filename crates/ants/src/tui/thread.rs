@@ -1,13 +1,14 @@
 //! An open thread: its title, channels, state and the ants' progress on it, then its messages as `ants thread show`
-//! renders them, their text as markdown, the latest at the bottom unless scrolled up. The timeline (ants-ofmi.5) is
-//! to replace the plain rendering.
+//! renders them, their text as markdown, the latest at the bottom unless scrolled up, or opened from a search at
+//! the message found. The timeline (ants-ofmi.5) is to replace the plain rendering.
 
 use std::cell::Cell;
 
+use ants_proto::Uuid;
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -27,27 +28,47 @@ pub struct Page {
     pub scroll: usize,
     /// How far up the view scrolls at most, as last drawn.
     top: Cell<Option<usize>>,
+    /// The message the thread was opened at, highlighted.
+    at: Option<Uuid>,
+    /// Whether the view holds `at` at its top, until scrolled.
+    held: bool,
+    /// How far up the view was scrolled, as last drawn.
+    drawn: Cell<Option<usize>>,
 }
 
 impl Page {
     pub fn new(thread: ants_proto::ThreadId) -> Self {
-        Self { history: History::new(thread), scroll: 0, top: Cell::new(None) }
+        Self {
+            history: History::new(thread),
+            scroll: 0,
+            top: Cell::new(None),
+            at: None,
+            held: false,
+            drawn: Cell::new(None),
+        }
+    }
+
+    /// The thread, shown from `message` on once read.
+    pub fn at(thread: ants_proto::ThreadId, message: Uuid) -> Self {
+        Self { at: Some(message), held: true, ..Self::new(thread) }
     }
 
     pub const KEYS: &str = "↑↓ PgUp/PgDn scroll · End latest · Esc back";
 
     pub fn key(&mut self, key: Key) -> Option<To> {
         let top = self.top.get().unwrap_or(usize::MAX);
+        let scroll = if self.held { self.drawn.get().unwrap_or(self.scroll) } else { self.scroll };
         self.scroll = match key {
-            Key::Up | Key::Char('k') => self.scroll + 1,
-            Key::Down | Key::Char('j') => self.scroll.saturating_sub(1),
-            Key::PageUp => self.scroll + 10,
-            Key::PageDown => self.scroll.saturating_sub(10),
+            Key::Up | Key::Char('k') => scroll + 1,
+            Key::Down | Key::Char('j') => scroll.saturating_sub(1),
+            Key::PageUp => scroll + 10,
+            Key::PageDown => scroll.saturating_sub(10),
             Key::Home => top,
             Key::End => 0,
             _ => return None,
         }
         .min(top);
+        self.held = false;
         None
     }
 
@@ -67,11 +88,14 @@ impl Page {
         if self.history.loading {
             lines.push(Line::styled("reading the thread…", frame::dim()));
         }
-        lines.extend(messages(&self.history.entries, width));
+        let (shown, at) = messages(&self.history.entries, width, self.at);
+        let at = at.map(|i| i + lines.len()).filter(|_| self.held);
+        lines.extend(shown);
         let height = usize::from(area.height.saturating_sub(2));
         let most = lines.len().saturating_sub(height);
         self.top.set(Some(most));
-        let top = most.saturating_sub(self.scroll);
+        let top = at.map_or_else(|| most.saturating_sub(self.scroll), |at| at.min(most));
+        self.drawn.set(Some(most - top));
         let paragraph = Paragraph::new(lines)
             .block(frame::block(title, focused))
             .scroll((u16::try_from(top).unwrap_or(u16::MAX), 0));
@@ -80,13 +104,20 @@ impl Page {
 }
 
 /// The messages as `ants thread show` renders them, wrapped at `width`: each one's heading, then its text indented,
-/// as markdown for a message, post or note, and the reactions to it.
-fn messages(entries: &[Entry], width: usize) -> Vec<Line<'static>> {
+/// as markdown for a message, post or note, and the reactions to it. The heading of message `at` is highlighted and
+/// its line returned.
+fn messages(entries: &[Entry], width: usize, at: Option<Uuid>) -> (Vec<Line<'static>>, Option<usize>) {
     let inner = width.saturating_sub(INDENT.len());
     let mut lines = Vec::new();
+    let mut found = None;
     for e in entries {
+        let mut style = Style::new().fg(Color::Blue);
+        if at.is_some() && e.id == at {
+            found = Some(lines.len());
+            style = style.add_modifier(Modifier::REVERSED);
+        }
         let heading = crate::thread::heading(e);
-        lines.extend(frame::wrap(&heading, width).into_iter().map(|l| Line::styled(l, Style::new().fg(Color::Blue))));
+        lines.extend(frame::wrap(&heading, width).into_iter().map(|l| Line::styled(l, style)));
         let text = crate::thread::body(e, entries);
         let body = match e.kind {
             Kind::Message | Kind::Escalation | Kind::Mention | Kind::Post | Kind::Note if e.question.is_none() => {
@@ -106,13 +137,12 @@ fn messages(entries: &[Entry], width: usize) -> Vec<Line<'static>> {
             lines.push(Line::from(spans).style(line.style));
         }
     }
-    lines
+    (lines, found)
 }
 
 #[cfg(test)]
 mod tests {
     use ants_proto::ThreadId;
-    use ratatui::style::Modifier;
 
     use super::*;
     use crate::live::tests::message;
@@ -134,12 +164,36 @@ mod tests {
     }
 
     #[test]
+    fn opened_at_a_message_it_shows_from_there_until_scrolled() {
+        let thread = ThreadId::generate();
+        let entries: Vec<Entry> =
+            (1..=20).map(|n| message(n, &thread, "dev-a", "alice", &format!("line {n}"))).collect();
+        let (id, sixteenth) = (entries[4].id.unwrap(), entries[15].id.unwrap());
+        let mut page = Page::at(thread, id);
+        page.history.entries = entries;
+        page.history.loading = false;
+        let data = &crate::tui::model::tests::model().data;
+        let first = |page: &Page| {
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 12)).unwrap();
+            terminal.draw(|f| page.draw(f, f.area(), data, Utc::now(), true)).unwrap();
+            let row: String = (1..99).map(|x| terminal.backend().buffer()[(x, 1)].symbol().to_owned()).collect();
+            row.trim_end().to_owned()
+        };
+        assert!(first(&page).ends_with(&format!("(message {id})")), "{}", first(&page));
+        page.key(Key::Up);
+        assert_eq!(first(&page), "    line 4", "scrolling starts from the message");
+        page.key(Key::End);
+        assert!(first(&page).ends_with(&format!("(message {sixteenth})")), "the latest at the bottom");
+    }
+
+    #[test]
     fn a_message_s_text_shows_as_markdown_under_its_heading() {
         let thread = ThreadId::generate();
         let mut tool = message(2, &thread, "dev-a", "alice", "ls *.rs *.md");
         tool.kind = Kind::Dead;
         let entries = [message(1, &thread, "dev-a", "alice", "**done**:\n\n- one\n- two"), tool];
-        let lines = messages(&entries, 120);
+        let (lines, at) = messages(&entries, 120, None);
+        assert_eq!(at, None);
         let shown: Vec<String> = lines.iter().map(ToString::to_string).collect();
         let id = entries[0].id.unwrap();
         assert!(shown[0].ends_with(&format!("dev-a -> alice (message {id})")), "{}", shown[0]);

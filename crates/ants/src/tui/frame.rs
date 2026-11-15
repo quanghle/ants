@@ -1,5 +1,5 @@
 //! The frame around the views: a header with the human, the server and the connection, the nav beside the shown view,
-//! a footer with the view's keys or the latest notice, and the help over it all. Also the styles the views share.
+//! a footer with the view's keys, the latest notice or the search prompt, and the help over it all. Also the styles the views share.
 
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
 use super::model::{Focus, Level, Model, Page};
-use super::{channel, home, nav, thread, work};
+use super::{channel, home, nav, search, thread, work};
 use crate::live::Link;
 use crate::roster;
 
@@ -61,6 +61,7 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
         Page::Work(page) => page.draw(frame, right, data, now, focused),
         Page::Channel(page) => page.draw(frame, right, data, now, focused),
         Page::Thread(page) => page.draw(frame, right, data, now, focused),
+        Page::Search(page) => page.draw(frame, right, data, now, focused),
     }
     frame.render_widget(Paragraph::new(footer_line(model, now)), footer);
     if model.help {
@@ -86,6 +87,9 @@ fn header_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
 }
 
 fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
+    if let Some(prompt) = &model.prompt {
+        return prompt.line();
+    }
     if let Some(notice) = model.notice_at(now) {
         let style = match notice.level {
             Level::Error => Style::new().fg(Color::Red),
@@ -99,8 +103,9 @@ fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
         (Focus::View, Page::Work(_)) => work::Page::KEYS,
         (Focus::View, Page::Channel(_)) => channel::Page::KEYS,
         (Focus::View, Page::Thread(_)) => thread::Page::KEYS,
+        (Focus::View, Page::Search(_)) => search::Page::KEYS,
     };
-    Line::styled(format!(" {keys} · Tab nav/view · ? help · q quit"), dim())
+    Line::styled(format!(" {keys} · Tab nav/view · / search · ? help · q quit"), dim())
 }
 
 /// The keys, over the middle of the screen.
@@ -111,6 +116,7 @@ const HELP: &[(&str, &str)] = &[
     ("Enter", "open the selection"),
     ("Esc", "back to the previous view, else to the nav"),
     ("w", "in a channel: its threads in work"),
+    ("/", "search messages, as in: deploy from:dev-a"),
     ("R", "read everything again"),
     ("?", "this help"),
     ("q Ctrl-C", "quit"),
@@ -168,7 +174,7 @@ mod tests {
         assert!(shown.contains("waiting on ant 1"), "{shown}");
         assert!(shown.contains("● dev-a") && shown.contains("PEOPLE") && shown.contains("bob"), "{shown}");
         assert!(shown.contains("nothing waits on a human"), "{shown}");
-        assert!(shown.contains("Enter open its thread · Tab nav/view · ? help · q quit"), "{shown}");
+        assert!(shown.contains("Enter open its thread · Tab nav/view · / search · ? help · q quit"), "{shown}");
 
         m.select(nav::Item::Work(None));
         m.key(Key::Enter, at(2));
