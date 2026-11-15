@@ -53,6 +53,10 @@ pub(crate) enum Command {
         #[arg(long, value_name = "THREAD")]
         #[arg(add = ArgValueCandidates::new(completions::threads))]
         thread: Option<thread::Pick>,
+        /// Steer the ant: a prompt it runs on the thread is cancelled, and the message prompts its session next,
+        /// ahead of the messages waiting there. Needs --thread and a human's credentials.
+        #[arg(long, requires = "thread")]
+        steer: bool,
         #[command(flatten)]
         replies: Replies,
         #[command(flatten)]
@@ -257,7 +261,9 @@ pub(crate) enum Command {
     /// `request_ant` tool), until stopped: at once for a request within the policy of the [[ant_template]] tables of
     /// --config (the template lists the manager, has room under its max_ants among the live keys the team issued,
     /// and bounds the request), on a human's approval of a tool request of the manager otherwise (`ants tools`, ntfy,
-    /// Slack, Telegram). Names taken, ants added by added ants and forged requests are refused.
+    /// Slack, Telegram). Names taken, ants added by added ants and forged requests are refused. Also answers ants'
+    /// reactions requests (their `react` and `list_reactions` tools, `ants react` with an ant's credentials) for the
+    /// messages each ant reads.
     Signer {
         /// Config file whose [[ant_template]] tables are the policy; the rest of it is ignored
         /// (default: ~/.ants/config.toml).
@@ -480,6 +486,15 @@ mod tests {
         let cli = Cli::try_parse_from(["ants", "channel", "read", "ops", "--thread", "last"]).unwrap();
         let Command::Channel(ChannelCommand::Read { thread, .. }) = cli.command else { panic!("not channel read") };
         assert_eq!(thread, Some(thread::Pick::Last));
+    }
+
+    #[test]
+    fn ask_steers_only_a_thread() {
+        assert!(Cli::try_parse_from(["ants", "ask", "--steer", "@dev-a", "go", "left"]).is_err());
+        let cli = Cli::try_parse_from(["ants", "ask", "--steer", "--thread", "last", "@dev-a", "go"]).unwrap();
+        assert_matches!(cli.command, Command::Ask { steer: true, thread: Some(thread::Pick::Last), .. });
+        let cli = Cli::try_parse_from(["ants", "ask", "--thread", "last", "@dev-a", "go"]).unwrap();
+        assert_matches!(cli.command, Command::Ask { steer: false, .. });
     }
 
     #[test]

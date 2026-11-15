@@ -8,6 +8,7 @@ expression: value
   "from": "dev-a",
   "text": "taking the parser",
   "turn_budget": 7,
+  "title": "Rewrite the parser",
   "attachments": [
     {
       "id": "019a7d2e-0000-7000-8000-000000000014",

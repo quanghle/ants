@@ -5,6 +5,8 @@
 //! allow no stream info of these buckets. A webhook reads and records the events it delivered, under its own keys of
 //! [`ants_proto::WEBHOOKS_BUCKET`], the same way.
 
+use std::time::{Duration, SystemTime};
+
 use ants_proto::{JsDomain, UserId};
 use anyhow::{Context as _, Result, anyhow};
 use async_nats::jetstream;
@@ -18,6 +20,8 @@ const KV_OPERATION: &str = "KV-Operation";
 const DELETED: [&str; 2] = ["DEL", "PURGE"];
 /// The header making the stream refuse a message unless the last on its subject has the given sequence (0: none).
 const EXPECTED_LAST_SUBJECT_SEQUENCE: &str = "Nats-Expected-Last-Subject-Sequence";
+/// The header making the stream remove a message after the given number of seconds, if it allows per-message TTLs.
+const TTL: &str = "Nats-TTL";
 
 /// A KV bucket of history 1 that allows direct gets, as [`crate::bus`] creates them.
 #[derive(Clone)]
@@ -68,17 +72,23 @@ impl DirectKv {
     /// [`DirectKv::lookup`], with the stream sequence of the key's last message (0 for none), which
     /// [`DirectKv::update`] expects.
     pub async fn lookup_last(&self, key: impl AsRef<str>) -> Result<(Lookup, u64)> {
+        let (found, last, _) = self.lookup_stored(key).await?;
+        Ok((found, last))
+    }
+
+    /// [`DirectKv::lookup_last`], with when the key's last message was stored (None for none).
+    pub async fn lookup_stored(&self, key: impl AsRef<str>) -> Result<(Lookup, u64, Option<SystemTime>)> {
         let key = key.as_ref();
         let msg = match self.stream.direct_get_last_for_subject(self.subject(key)).await {
             Ok(msg) => msg,
-            Err(e) if e.kind() == DirectGetErrorKind::NotFound => return Ok((Lookup::NoValue, 0)),
+            Err(e) if e.kind() == DirectGetErrorKind::NotFound => return Ok((Lookup::NoValue, 0, None)),
             Err(e) if matches!(e.kind(), DirectGetErrorKind::ErrorResponse(StatusCode::NO_RESPONDERS, _)) => {
-                return Ok((Lookup::NoBucket, 0));
+                return Ok((Lookup::NoBucket, 0, None));
             }
             Err(e) => return Err(e).with_context(|| format!("reading {key}")),
         };
         let found = if is_deleted(&msg.headers) { Lookup::NoValue } else { Lookup::Value(msg.payload.to_vec()) };
-        Ok((found, msg.sequence))
+        Ok((found, msg.sequence, Some(msg.time.into())))
     }
 
     /// Store `value` under `key` if the key's last message is still the one at stream sequence `last` (0: none), as
@@ -149,12 +159,17 @@ impl DirectKv {
     }
 
     /// Delete `key`, leaving a delete marker, if the key's last message is still the one at stream sequence `last`, as
-    /// [`DirectKv::lookup_last`] found it. Whether it deleted the key: false when the key changed meanwhile.
-    pub async fn delete_expecting(&self, key: impl AsRef<str>, last: u64) -> Result<bool> {
+    /// [`DirectKv::lookup_last`] found it. With `ttl`, the stream removes the marker that long after (at least a
+    /// second), leaving the key no message, if it allows per-message TTLs, and refuses the delete otherwise. Whether
+    /// it deleted the key: false when the key changed meanwhile.
+    pub async fn delete_expecting(&self, key: impl AsRef<str>, last: u64, ttl: Option<Duration>) -> Result<bool> {
         let key = key.as_ref();
         let mut headers = HeaderMap::new();
         headers.insert(KV_OPERATION, DELETED[0]);
         headers.insert(EXPECTED_LAST_SUBJECT_SEQUENCE, last.to_string().as_str());
+        if let Some(ttl) = ttl {
+            headers.insert(TTL, ttl.as_secs().max(1).to_string().as_str());
+        }
         let deleted =
             async { self.js.publish_with_headers(self.put_subject(key), headers, Vec::new().into()).await?.await };
         match deleted.await {

@@ -29,6 +29,10 @@ pub enum Error {
     /// NATS ([`subject::renewable_name`]).
     #[error("renewal request of {name:?} found at {at}")]
     ForeignRenewal { name: String, at: String },
+    #[error(
+        "invalid device encryption key {0:?}: use the public key of an nkeys xkey, X followed by 55 base32 characters"
+    )]
+    InvalidDeviceKey(String),
     #[error("invalid attachment {name:?}: {reason}")]
     InvalidAttachment { name: String, reason: &'static str },
     #[error("{0} attachments: a message carries at most {max}", max = crate::MAX_ATTACHMENTS)]

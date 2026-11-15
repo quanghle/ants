@@ -1,5 +1,6 @@
 //! `ants keys`: moving the NKey seed of a `.creds` file into the OS credential store ([`keystore`]) and back, and
-//! removing credentials from a machine.
+//! removing credentials from a machine. The seed of a human device's encryption key, when the file holds one
+//! ([`creds::xkey_of`]), goes along with the NKey seed, stored under its own public key.
 //!
 //! A file whose seed is stored keeps its user JWT and, in place of the seed, the public key it is stored under
 //! ([`creds::stored_text`]); every ants process reads the seed from the store when it connects with the file
@@ -18,22 +19,22 @@ use ants_daemon::bus;
 use ants_daemon::creds::{self, Finding, Kind, Seed};
 use ants_daemon::keystore::{self, Store};
 use anyhow::{Context as _, Result, bail};
-use nkeys::KeyPair;
+use nkeys::{KeyPair, XKey};
 
 use crate::auth;
 
 #[derive(clap::Subcommand, Debug)]
 pub enum KeysCommand {
-    /// Move the seed of each credentials file (default: --creds) into the OS credential store: the macOS keychain,
-    /// the Linux Secret Service or the Windows Credential Manager. The seed leaves the file only once stored, read
-    /// back and used to authenticate at --nats; the file then keeps the user JWT and the stored key's reference. Leaf
-    /// node uplink credentials, which nats-server reads, are refused.
+    /// Move the seed of each credentials file (default: --creds), and of a human device's encryption key, into the
+    /// OS credential store: the macOS keychain, the Linux Secret Service or the Windows Credential Manager. The seed
+    /// leaves the file only once stored, read back and used to authenticate at --nats; the file then keeps the user
+    /// JWT and the stored keys' references. Leaf node uplink credentials, which nats-server reads, are refused.
     Store { files: Vec<PathBuf> },
-    /// Move the seed of each credentials file (default: --creds) back from the OS credential store into the file,
+    /// Move the seeds of each credentials file (default: --creds) back from the OS credential store into the file,
     /// readable by its owner only, then delete it from the store: for a machine without an unlocked store, or to
     /// back the seed up.
     Unstore { files: Vec<PathBuf> },
-    /// Delete each credentials file and the seed it keeps in the OS credential store. The credentials stay valid
+    /// Delete each credentials file and the seeds it keeps in the OS credential store. The credentials stay valid
     /// until they expire: revoke them with `ants auth revoke --key KEY` on the machine holding the team keys.
     Remove { files: Vec<PathBuf> },
 }
@@ -113,7 +114,8 @@ pub async fn store_seed(path: &Path, store: &dyn Store, url: &str) -> Result<Mov
     if key != finding.key {
         bail!("the seed in {} is not that of the key {} of their user JWT", path.display(), finding.key);
     }
-    write_stored(path, jwt, &key, seed, store, url, Proof::Required)
+    let xkey = held_xkey(&text, path, store)?;
+    write_stored(path, jwt, &key, seed, xkey.as_ref(), store, url, Proof::Required)
         .await
         .with_context(|| format!("the seed stays in {}", path.display()))?;
     Ok(Moved::Now(key))
@@ -131,15 +133,32 @@ pub fn unstore_seed(path: &Path, store: &dyn Store) -> Result<Moved> {
         None => bail!("no seed in {}", path.display()),
     };
     let (jwt, user) = creds::load(path, store)?;
-    auth::replace_creds(path, &jwt, &user)?;
+    let xkey = held_xkey(&text, path, store)?;
+    auth::replace_creds(path, &jwt, &user, xkey.as_ref())?;
     let (_, back) = creds::load(path, store)?;
     if back.public_key() != key {
         bail!("{} hold another key than {key} once written", path.display());
     }
-    if let Err(e) = store.delete(&key) {
-        eprintln!("warning: the seed of {key} stays in the OS credential store too: {e:#}");
+    let mut stored = vec![key.clone()];
+    if let Some(Seed::Stored(xkey)) = creds::xkey_of(&text) {
+        stored.push(xkey.to_owned());
+    }
+    for key in stored {
+        if let Err(e) = store.delete(&key) {
+            eprintln!("warning: the seed of {key} stays in the OS credential store too: {e:#}");
+        }
     }
     Ok(Moved::Now(key))
+}
+
+/// The encryption key whose seed the `.creds` file at `path`, of text `text`, holds or names in `store`, if any
+/// ([`creds::load_xkey`]). A user JWT binding a key whose seed the file does not hold is no error here: the NKey seed
+/// moves without it.
+pub(crate) fn held_xkey(text: &str, path: &Path, store: &dyn Store) -> Result<Option<XKey>> {
+    if creds::xkey_of(text).is_none() {
+        return Ok(None);
+    }
+    creds::load_xkey(path, store)
 }
 
 /// Delete the credentials at `path` and the seed they keep in `store`, if they do; the file stays when the store
@@ -147,29 +166,45 @@ pub fn unstore_seed(path: &Path, store: &dyn Store) -> Result<Moved> {
 pub fn remove(path: &Path, store: &dyn Store) -> Result<Finding> {
     let text = fs::read_to_string(path).with_context(|| format!("reading credentials {}", path.display()))?;
     let finding = Finding::from_creds(&text).with_context(|| format!("credentials {}", path.display()))?;
-    if let Some(Seed::Stored(key)) = creds::seed_of(&text) {
-        store.delete(key).with_context(|| format!("deleting the seed of {key}; {} stays", path.display()))?;
+    for seed in [creds::seed_of(&text), creds::xkey_of(&text)] {
+        if let Some(Seed::Stored(key)) = seed {
+            store.delete(key).with_context(|| format!("deleting the seed of {key}; {} stays", path.display()))?;
+        }
     }
     fs::remove_file(path).with_context(|| format!("removing {}", path.display()))?;
     Ok(finding)
 }
 
-/// Replace the credentials at `path` with `jwt` for the key `user`, keeping its seed where the earlier one is: in the
-/// file at once, as [`auth::replace_creds`] does, or in `store`, once stored, read back and used to authenticate at
-/// `url`, before the earlier seed is deleted from it. A failure leaves the file and the earlier seed as they were.
-pub async fn replace(path: &Path, jwt: &str, user: &KeyPair, store: &dyn Store, url: &str) -> Result<()> {
+/// Replace the credentials at `path` with `jwt` for the key `user`, and the encryption key `xkey` if given, keeping
+/// their seeds where the earlier NKey seed is: in the file at once, as [`auth::replace_creds`] does, or in `store`,
+/// once stored, read back and used to authenticate at `url`, before the earlier seeds are deleted from it. A failure
+/// leaves the file and the earlier seeds as they were.
+pub async fn replace(
+    path: &Path,
+    jwt: &str,
+    user: &KeyPair,
+    xkey: Option<&XKey>,
+    store: &dyn Store,
+    url: &str,
+) -> Result<()> {
     let text = fs::read_to_string(path).with_context(|| format!("reading credentials {}", path.display()))?;
     let Some(Seed::Stored(earlier)) = creds::seed_of(&text) else {
-        return auth::replace_creds(path, jwt, user);
+        return auth::replace_creds(path, jwt, user, xkey);
     };
     let key = user.public_key();
-    write_stored(path, jwt, &key, &auth::seed(user)?, store, url, Proof::Required)
+    write_stored(path, jwt, &key, &auth::seed(user)?, xkey, store, url, Proof::Required)
         .await
         .with_context(|| format!("{} stay as they were", path.display()))?;
-    if earlier != key
-        && let Err(e) = store.delete(earlier)
-    {
-        eprintln!("warning: the earlier seed of {earlier} stays in the OS credential store: {e:#}");
+    let mut earlier = vec![(earlier, key)];
+    if let Some(Seed::Stored(xearlier)) = creds::xkey_of(&text) {
+        earlier.push((xearlier, xkey.map_or_else(String::new, XKey::public_key)));
+    }
+    for (earlier, now) in earlier {
+        if earlier != now
+            && let Err(e) = store.delete(earlier)
+        {
+            eprintln!("warning: the earlier seed of {earlier} stays in the OS credential store: {e:#}");
+        }
     }
     Ok(())
 }
@@ -178,16 +213,24 @@ pub async fn replace(path: &Path, jwt: &str, user: &KeyPair, store: &dyn Store, 
 /// `ants auth --store-key` do: stored (unless there already), read back, and the file written naming it once it
 /// authenticates at `url`, or unproven when no server answers there ([`Proven::Unreached`]). A failure deletes the seed
 /// when it was not stored before and leaves `path` as it was.
-pub async fn write_new_stored(path: &Path, jwt: &str, user: &KeyPair, store: &dyn Store, url: &str) -> Result<Proven> {
-    write_stored(path, jwt, &user.public_key(), &auth::seed(user)?, store, url, Proof::Optional)
+pub async fn write_new_stored(
+    path: &Path,
+    jwt: &str,
+    user: &KeyPair,
+    xkey: Option<&XKey>,
+    store: &dyn Store,
+    url: &str,
+) -> Result<Proven> {
+    write_stored(path, jwt, &user.public_key(), &auth::seed(user)?, xkey, store, url, Proof::Optional)
         .await
         .with_context(|| format!("{} not written", path.display()))
 }
 
-/// Write the new credentials of `jwt` for `user` that `ants auth --store-key` issued to `path`, with the seed in the
-/// OS credential store ([`write_new_stored`]), warning when no server answered at `url` to prove them.
-pub async fn issue_stored(path: &Path, jwt: &str, user: &KeyPair, url: &str) -> Result<()> {
-    if write_new_stored(path, jwt, user, keystore::os(), url).await? == Proven::Unreached {
+/// Write the new credentials of `jwt` for `user`, and a human's encryption key `xkey`, that `ants auth --store-key`
+/// issued to `path`, with the seeds in the OS credential store ([`write_new_stored`]), warning when no server answered
+/// at `url` to prove them.
+pub async fn issue_stored(path: &Path, jwt: &str, user: &KeyPair, xkey: Option<&XKey>, url: &str) -> Result<()> {
+    if write_new_stored(path, jwt, user, xkey, keystore::os(), url).await? == Proven::Unreached {
         eprintln!(
             "warning: no server answered at {url}, so the stored key {} has not authenticated yet",
             user.public_key()
@@ -199,17 +242,21 @@ pub async fn issue_stored(path: &Path, jwt: &str, user: &KeyPair, url: &str) -> 
 /// Store a new key's seed in `store`, never in a file, and check it reads back. Returns whether it was stored now
 /// rather than there already.
 pub fn store_new(user: &KeyPair, store: &dyn Store) -> Result<bool> {
-    let (key, seed) = (user.public_key(), auth::seed(user)?);
-    let created = match store.get(&key).context("reading the OS credential store")? {
+    store_new_seed(&user.public_key(), &auth::seed(user)?, store)
+}
+
+/// [`store_new`] for the seed `seed` of the public key `key`.
+fn store_new_seed(key: &str, seed: &str, store: &dyn Store) -> Result<bool> {
+    let created = match store.get(key).context("reading the OS credential store")? {
         Some(stored) if stored.trim() == seed => false,
         Some(_) => bail!("the OS credential store holds another seed for {key}; left as it is"),
         None => {
-            store.set(&key, &seed).context("storing the seed in the OS credential store")?;
+            store.set(key, seed).context("storing the seed in the OS credential store")?;
             true
         }
     };
-    if !matches!(store.get(&key), Ok(Some(stored)) if stored.trim() == seed) {
-        if created && let Err(e) = store.delete(&key) {
+    if !matches!(store.get(key), Ok(Some(stored)) if stored.trim() == seed) {
+        if created && let Err(e) = store.delete(key) {
             eprintln!("warning: the seed of {key} stays in the OS credential store: {e:#}");
         }
         bail!("the OS credential store gave back no seed, or another one, for {key}");
@@ -231,28 +278,48 @@ enum Proof {
     Optional,
 }
 
-/// Store `seed` for `key` in `store` and check it reads back, then write `path` naming it, once it authenticates at
-/// `url`, or, with [`Proof::Optional`], also when no server answers there. A failure deletes the seed when it was not stored
-/// before, and leaves `path` as it was.
+/// Store `seed` for `key`, and the seed of `xkey` under its public key, in `store` and check they read back, then write
+/// `path` naming them, once it authenticates at `url`, or, with [`Proof::Optional`], also when no server answers
+/// there. A failure deletes the seeds not stored before, and leaves `path` as it was.
+#[allow(clippy::too_many_arguments)]
 async fn write_stored(
     path: &Path,
     jwt: &str,
     key: &str,
     seed: &str,
+    xkey: Option<&XKey>,
     store: &dyn Store,
     url: &str,
     proof: Proof,
 ) -> Result<Proven> {
     let user = KeyPair::from_seed(seed).map_err(|e| anyhow::anyhow!("the seed of {key}: {e}"))?;
-    let created = store_new(&user, store)?;
-    let undo = || {
-        if created && let Err(e) = store.delete(key) {
-            eprintln!("warning: the seed of {key} stays in the OS credential store: {e:#}");
+    let mut created = Vec::new();
+    let undo = |created: &[String]| {
+        for key in created {
+            if let Err(e) = store.delete(key) {
+                eprintln!("warning: the seed of {key} stays in the OS credential store: {e:#}");
+            }
         }
     };
+    if store_new(&user, store)? {
+        created.push(key.to_owned());
+    }
+    let mut text = creds::stored_text(jwt, key);
+    if let Some(xkey) = xkey {
+        let public = xkey.public_key();
+        match auth::xseed(xkey).and_then(|xseed| store_new_seed(&public, &xseed, store)) {
+            Ok(true) => created.push(public.clone()),
+            Ok(false) => {}
+            Err(e) => {
+                undo(&created);
+                return Err(e);
+            }
+        }
+        text += &creds::xkey_block(Seed::Stored(&public));
+    }
     let temporary = beside(path)?;
     let written = async {
-        auth::write_secret(&temporary, &creds::stored_text(jwt, key))?;
+        auth::write_secret(&temporary, &text)?;
         let proven = authenticate(url, &temporary, store, proof).await?;
         fs::rename(&temporary, path).with_context(|| format!("replacing {}", path.display()))?;
         Ok(proven)
@@ -260,7 +327,7 @@ async fn write_stored(
     .await;
     if written.is_err() {
         let _ = fs::remove_file(&temporary);
-        undo();
+        undo(&created);
     }
     written
 }
@@ -306,12 +373,16 @@ mod tests {
         let creds = server.creds_as(&p("alice"), Role::Human);
         let (jwt, user) = auth::read_creds(&creds).unwrap();
         let (seed, key) = (auth::seed(&user).unwrap(), user.public_key());
+        let xkey = creds::load_xkey(&creds, &store).unwrap().expect("a human's credentials bind an encryption key");
+        let (xseed, xpublic) = (auth::xseed(&xkey).unwrap(), xkey.public_key());
 
         assert_eq!(store_seed(&creds, &store, &server.url).await.unwrap(), Moved::Now(key.clone()));
         let text = fs::read_to_string(&creds).unwrap();
-        assert!(text.contains(&jwt) && !text.contains(&seed), "{text}");
+        assert!(text.contains(&jwt) && !text.contains(&seed) && !text.contains(&xseed), "{text}");
         assert_eq!(creds::seed_of(&text), Some(Seed::Stored(&key)));
-        assert_eq!(store.keys(), std::slice::from_ref(&key));
+        assert_eq!(creds::xkey_of(&text), Some(Seed::Stored(&xpublic)), "the encryption key moves along");
+        assert_eq!(store.keys(), [key.clone(), xpublic.clone()]);
+        assert_eq!(creds::load_xkey(&creds, &store).unwrap().map(|x| x.public_key()), Some(xpublic.clone()));
         let (client, _) =
             bus::connect_with(&server.url, Some(&creds), &store, None, &p("alice"), "test").await.unwrap();
         client.flush().await.unwrap();
@@ -325,7 +396,8 @@ mod tests {
         store.unlock();
 
         assert_eq!(unstore_seed(&creds, &store).unwrap(), Moved::Now(key.clone()));
-        assert!(fs::read_to_string(&creds).unwrap().contains(&seed));
+        let text = fs::read_to_string(&creds).unwrap();
+        assert!(text.contains(&seed) && text.contains(&xseed), "{text}");
         assert!(store.keys().is_empty());
         assert_eq!(unstore_seed(&creds, &store).unwrap(), Moved::Before(key));
         let (client, _) = bus::connect(&server.url, Some(&creds), None, &p("alice"), "test").await.unwrap();
@@ -394,16 +466,21 @@ mod tests {
         let jwt = auth::sign_user(&server.dir().join("auth"), &p("dev-a"), Role::Ant, None, &key).unwrap();
         let path = server.dir().join("dev-a.creds");
 
-        let err = format!("{:#}", write_new_stored(&path, &jwt, &user, &store, &other.url).await.unwrap_err());
+        let xkey = XKey::new();
+        let refused = write_new_stored(&path, &jwt, &user, Some(&xkey), &store, &other.url).await;
+        let err = format!("{:#}", refused.unwrap_err());
         assert!(err.contains("not written") && err.contains("authenticating"), "{err}");
-        assert!(!path.exists() && store.keys().is_empty(), "nothing half-done");
+        assert!(!path.exists() && store.keys().is_empty(), "nothing half-done, the encryption key's seed neither");
 
         let nowhere = "nats://127.0.0.1:1";
-        assert_eq!(write_new_stored(&path, &jwt, &user, &store, nowhere).await.unwrap(), Proven::Unreached);
+        assert_eq!(write_new_stored(&path, &jwt, &user, None, &store, nowhere).await.unwrap(), Proven::Unreached);
         fs::remove_file(&path).unwrap();
         store.delete(&key).unwrap();
 
-        assert_eq!(write_new_stored(&path, &jwt, &user, &store, &server.url).await.unwrap(), Proven::Authenticated);
+        assert_eq!(
+            write_new_stored(&path, &jwt, &user, None, &store, &server.url).await.unwrap(),
+            Proven::Authenticated
+        );
         let text = fs::read_to_string(&path).unwrap();
         assert_eq!(creds::seed_of(&text), Some(Seed::Stored(&key)));
         assert!(!text.contains(&auth::seed(&user).unwrap()) && store.keys() == [key]);

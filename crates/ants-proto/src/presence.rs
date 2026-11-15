@@ -49,6 +49,67 @@ impl FromStr for DeviceId {
     }
 }
 
+/// The public X25519 encryption key of one device of a human: the public key of an nkeys xkey (`X...`), generated on
+/// the device beside its NKey and carried in its user JWT as the tag [`DeviceKey::tag`], so the account's signature
+/// binds it to that human and device. Messages sealed for the device are opened with its seed, which never leaves the
+/// device. Only the form is checked here; the key's checksum is checked where it is used.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct DeviceKey(String);
+
+impl DeviceKey {
+    /// Prefix of the user JWT tag carrying the key.
+    pub const TAG: &str = "ants-xkey:";
+
+    /// The user JWT tag carrying the key.
+    pub fn tag(&self) -> String {
+        format!("{}{}", Self::TAG, self.0)
+    }
+
+    /// The key among a user JWT's `tags`, if any, in either case: tools that lowercase a JWT's tags lose nothing of
+    /// a base32 key.
+    pub fn from_tags<'a>(tags: impl IntoIterator<Item = &'a str>) -> Option<Self> {
+        tags.into_iter().find_map(|tag| tag.strip_prefix(Self::TAG)?.to_ascii_uppercase().parse().ok())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for DeviceKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl FromStr for DeviceKey {
+    type Err = crate::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let base32 = |c: char| c.is_ascii_uppercase() || ('2'..='7').contains(&c);
+        if s.len() == 56 && s.starts_with('X') && s.chars().all(base32) {
+            Ok(Self(s.to_owned()))
+        } else {
+            Err(crate::Error::InvalidDeviceKey(s.to_owned()))
+        }
+    }
+}
+
+impl TryFrom<String> for DeviceKey {
+    type Error = crate::Error;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+impl From<DeviceKey> for String {
+    fn from(key: DeviceKey) -> Self {
+        key.0
+    }
+}
+
 /// What a device of a human follows as it comes, so it needs no push of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -108,5 +169,24 @@ mod tests {
         assert_eq!(DeviceId::from_tags(["team", tag.as_str()]), Some(device));
         assert_eq!(DeviceId::from_tags(["ants-device:not-a-uuid"]), None);
         assert_eq!(device.to_string().parse::<DeviceId>().unwrap(), device);
+    }
+
+    #[test]
+    fn a_device_key_travels_as_a_user_jwt_tag_and_only_in_its_form() {
+        let public = "XBLFEIK7UCHY5XKH7LGNQ4JZNVOZEWMIHPZH3LP4JUBJ6KQZDVBEWHWB";
+        let key: DeviceKey = public.parse().unwrap();
+        assert_eq!(key.tag(), format!("ants-xkey:{public}"));
+        let tags = ["ants-perms:9".to_owned(), key.tag()];
+        assert_eq!(DeviceKey::from_tags(tags.iter().map(String::as_str)), Some(key.clone()));
+        assert_eq!(DeviceKey::from_tags([key.tag().to_lowercase().as_str()]), Some(key.clone()));
+        assert_eq!(DeviceKey::from_tags(["ants-perms:9"]), None);
+        for wrong in
+            ["", "UBLFEIK7UCHY5XKH7LGNQ4JZNVOZEWMIHPZH3LP4JUBJ6KQZDVBEWHWB", &public[..55], &public.to_lowercase()]
+        {
+            assert!(wrong.parse::<DeviceKey>().is_err(), "{wrong}");
+        }
+        let json = serde_json::to_string(&key).unwrap();
+        assert_eq!(serde_json::from_str::<DeviceKey>(&json).unwrap(), key);
+        assert!(serde_json::from_str::<DeviceKey>("\"X1\"").is_err());
     }
 }

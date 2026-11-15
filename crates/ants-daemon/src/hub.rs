@@ -112,7 +112,7 @@ impl Object {
             Self::Humans => Spec::Bucket(Box::new(humans_config())),
             Self::Chains => Spec::Bucket(Box::new(chains_config())),
             Self::Webhooks => Spec::Bucket(Box::new(webhooks_config())),
-            Self::Threads => Spec::Bucket(Box::new(threads_config())),
+            Self::Threads => Spec::Stream(Box::new(threads_config())),
             Self::Read => Spec::Bucket(Box::new(read_config())),
             Self::Presence => Spec::Bucket(Box::new(presence_config())),
             Self::Notify => Spec::Bucket(Box::new(notify_config())),
@@ -348,9 +348,24 @@ pub fn read_config() -> kv::Config {
     lasting_config(READ_BUCKET, "What each human has read of its inbox, on any of its devices")
 }
 
-/// Thread titles and each human's pinned and archived threads ([`THREADS_BUCKET`]).
-pub fn threads_config() -> kv::Config {
-    lasting_config(THREADS_BUCKET, "Thread titles, and the threads each human pinned or archived")
+/// The stream of the bucket of thread titles and each human's pinned and archived threads ([`THREADS_BUCKET`]): a KV
+/// bucket of history 1 whose entries never expire, but which takes per-message TTLs, so the delete markers of titles
+/// `ants thread list` prunes go too. It places no markers of its own when one expires.
+pub fn threads_config() -> stream::Config {
+    stream::Config {
+        name: format!("KV_{THREADS_BUCKET}"),
+        description: Some("Thread titles, and the threads each human pinned or archived".into()),
+        subjects: vec![format!("$KV.{THREADS_BUCKET}.>")],
+        max_messages_per_subject: 1,
+        discard: stream::DiscardPolicy::New,
+        storage: stream::StorageType::File,
+        num_replicas: 1,
+        allow_direct: true,
+        allow_rollup: true,
+        deny_delete: true,
+        allow_message_ttl: true,
+        ..Default::default()
+    }
 }
 
 /// What each human holds back of its notifications ([`NOTIFY_BUCKET`]): entries last, their holds end at the deadlines

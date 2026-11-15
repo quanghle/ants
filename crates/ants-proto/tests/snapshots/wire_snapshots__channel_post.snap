@@ -19,6 +19,7 @@ expression: value
   "allow": [
     "read:*"
   ],
+  "title": "Fix CI",
   "attachments": [
     {
       "id": "019a7d2e-0000-7000-8000-000000000014",

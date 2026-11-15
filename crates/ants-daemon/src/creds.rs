@@ -9,12 +9,12 @@ use std::path::Path;
 use std::time::Duration;
 
 use ants_proto::{
-    ChannelId, DeviceId, ENROLL_INBOX, HUMANS_BUCKET, JsDomain, Machine, PERMISSIONS_VERSION, PermissionsVersion,
-    UserId, WEBHOOKS_BUCKET, inbox_prefix, subject,
+    ChannelId, DeviceId, DeviceKey, ENROLL_INBOX, HUMANS_BUCKET, JsDomain, Machine, PERMISSIONS_VERSION,
+    PermissionsVersion, UserId, WEBHOOKS_BUCKET, inbox_prefix, subject,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use data_encoding::BASE64URL_NOPAD;
-use nkeys::KeyPair;
+use nkeys::{KeyPair, XKey};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -99,6 +99,9 @@ pub struct Finding {
     /// The human's device they are for ([`DeviceId::tag`]), which a human's user JWT names; none for others.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device: Option<DeviceId>,
+    /// The encryption key of the human's device ([`DeviceKey::tag`]), if its user JWT binds one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub xkey: Option<DeviceKey>,
 }
 
 impl Finding {
@@ -142,6 +145,7 @@ impl Finding {
             expires_at: claims["exp"].as_u64(),
             js_domain: js_domain(&publish),
             device,
+            xkey: DeviceKey::from_tags(tags.iter().map(String::as_str)),
             name,
             key,
         })
@@ -386,6 +390,8 @@ fn creds_jwt(creds: &str) -> Option<&str> {
 
 const SEED_MARKER: &str = "BEGIN USER NKEY SEED";
 const STORED_MARKER: &str = "BEGIN ANTS STORED NKEY";
+const XKEY_SEED_MARKER: &str = "BEGIN ANTS XKEY SEED";
+const STORED_XKEY_MARKER: &str = "BEGIN ANTS STORED XKEY";
 
 fn creds_block<'a>(creds: &'a str, marker: &str) -> Option<&'a str> {
     let mut lines = creds.lines().map(str::trim);
@@ -405,6 +411,31 @@ pub enum Seed<'a> {
 /// Where the seed of a `.creds` file's text is, if it says.
 pub fn seed_of(creds: &str) -> Option<Seed<'_>> {
     creds_block(creds, SEED_MARKER).map(Seed::File).or_else(|| creds_block(creds, STORED_MARKER).map(Seed::Stored))
+}
+
+/// Where the encryption key seed of a human's `.creds` file text is, if it says: in an `ANTS XKEY SEED` block after
+/// the NKey seed, or in the OS credential store under the public key of an `ANTS STORED XKEY` block.
+pub fn xkey_of(creds: &str) -> Option<Seed<'_>> {
+    creds_block(creds, XKEY_SEED_MARKER)
+        .map(Seed::File)
+        .or_else(|| creds_block(creds, STORED_XKEY_MARKER).map(Seed::Stored))
+}
+
+/// The block keeping an encryption key seed, or the public key of the one stored, appended to the text of a `.creds`
+/// file. nats tools read only a file's first two blocks, the user JWT and the NKey seed, so they ignore it.
+pub fn xkey_block(seed: Seed<'_>) -> String {
+    match seed {
+        Seed::File(seed) => format!(
+            "\n************************* IMPORTANT *************************\n\
+             The XKEY seed below opens the messages sealed for this device: only ants reads it.\n\n\
+             -----BEGIN ANTS XKEY SEED-----\n{seed}\n------END ANTS XKEY SEED------\n"
+        ),
+        Seed::Stored(key) => format!(
+            "\n************************* IMPORTANT *************************\n\
+             The XKEY seed of this device is in the OS credential store under the public key below.\n\n\
+             -----BEGIN ANTS STORED XKEY-----\n{key}\n------END ANTS STORED XKEY------\n"
+        ),
+    }
 }
 
 /// The text of a `.creds` file holding `jwt` and `seed`, as nats tools write it.
@@ -469,6 +500,38 @@ pub fn load(path: &Path, store: &dyn Store) -> Result<(String, KeyPair)> {
         None => bail!("no seed in {}, nor the key of one in the OS credential store", path.display()),
     };
     Ok((jwt.to_owned(), key))
+}
+
+/// The encryption key of the `.creds` file at `path`, whose seed is in the file or in `store`, if its user JWT binds
+/// one ([`DeviceKey::tag`]). A seed of another key than the JWT's, a missing seed, a seed the JWT does not bind and a
+/// store that cannot be read are errors; none names the seed.
+pub fn load_xkey(path: &Path, store: &dyn Store) -> Result<Option<XKey>> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading credentials {}", path.display()))?;
+    let bound = Finding::from_creds(&text).with_context(|| format!("credentials {}", path.display()))?.xkey;
+    let (seed, bound) = match (xkey_of(&text), bound) {
+        (None, None) => return Ok(None),
+        (None, Some(bound)) => bail!(
+            "no seed of the encryption key {bound} in {}, nor the key of one in the OS credential store",
+            path.display()
+        ),
+        (Some(_), None) => bail!("{} hold an encryption key their user JWT does not bind", path.display()),
+        (Some(Seed::File(seed)), Some(bound)) => (seed.to_owned(), bound),
+        (Some(Seed::Stored(public)), Some(bound)) => {
+            let seed = store
+                .get(public)
+                .with_context(|| format!("reading the encryption key seed of {} ({public})", path.display()))?
+                .with_context(|| {
+                    format!("the OS credential store holds no seed for {public}, which {} name", path.display())
+                })?;
+            (seed, bound)
+        }
+    };
+    let key =
+        XKey::from_seed(seed.trim()).map_err(|e| anyhow!("the encryption key seed of {}: {e}", path.display()))?;
+    if key.public_key() != bound.as_str() {
+        bail!("the encryption key seed of {} is not that of the key {bound} their user JWT binds", path.display());
+    }
+    Ok(Some(key))
 }
 
 /// The kind of credentials named `name` with these permissions; `leaf_only` when only a leaf node may connect with
@@ -584,6 +647,44 @@ mod tests {
         store.set(&key, &other.seed().unwrap()).unwrap();
         let err = load(stored_text(&jwt, &key)).unwrap_err();
         assert!(err.contains("another key"), "{err}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_encryption_key_loads_only_as_the_jwt_binds_it() {
+        let dir = ants_test_support::scratch_dir("creds-xkey");
+        let (path, store) = (dir.join("alice.creds"), keystore::Memory::default());
+        let (user, xkey, other) = (KeyPair::new_user(), XKey::new(), XKey::new());
+        let (seed, xseed) = (user.seed().unwrap(), xkey.seed().unwrap());
+        let jwt = |xkey: Option<&XKey>| {
+            let mut tags = vec![PERMISSIONS_VERSION.tag(), DeviceId::generate().tag()];
+            tags.extend(xkey.map(|x| x.public_key().parse::<DeviceKey>().unwrap().tag()));
+            let mut named = claims("alice", &Permissions::for_user(&p("alice"), Role::Human), &tags, None);
+            named["sub"] = user.public_key().into();
+            format!("e30.{}.sig", BASE64URL_NOPAD.encode(named.to_string().as_bytes()))
+        };
+        let (bound, unbound) = (jwt(Some(&xkey)), jwt(None));
+        let load = |text: String| {
+            std::fs::write(&path, text).unwrap();
+            load_xkey(&path, &store).map(|key| key.map(|key| key.public_key())).map_err(|e| format!("{e:#}"))
+        };
+
+        let file = text(&bound, &seed) + &xkey_block(Seed::File(&xseed));
+        assert_eq!(xkey_of(&file), Some(Seed::File(xseed.as_str())));
+        assert_eq!(seed_of(&file), Some(Seed::File(seed.as_str())), "the NKey seed stays the one nats tools read");
+        assert_eq!(load(file), Ok(Some(xkey.public_key())));
+        assert_eq!(load(text(&unbound, &seed)), Ok(None));
+        let err = load(text(&bound, &seed)).unwrap_err();
+        assert!(err.contains("no seed of the encryption key"), "{err}");
+        let err = load(text(&unbound, &seed) + &xkey_block(Seed::File(&xseed))).unwrap_err();
+        assert!(err.contains("does not bind"), "{err}");
+        let err = load(text(&bound, &seed) + &xkey_block(Seed::File(&other.seed().unwrap()))).unwrap_err();
+        assert!(err.contains("not that of the key") && !err.contains(&xseed), "{err}");
+
+        let stored = stored_text(&bound, &user.public_key()) + &xkey_block(Seed::Stored(&xkey.public_key()));
+        assert!(load(stored.clone()).unwrap_err().contains("holds no seed"));
+        store.set(&xkey.public_key(), &xseed).unwrap();
+        assert_eq!(load(stored), Ok(Some(xkey.public_key())));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(doc)]
 use crate::inbox_prefix;
-use crate::{Error, Machine, UserId, subject};
+use crate::{DeviceKey, Error, Machine, UserId, subject};
 
 /// Reply prefix of the connections of `ants enroll`: its first token starts with `_`, which no user id does, so no
 /// user's own reply inboxes ([`inbox_prefix`]) cover it.
@@ -151,6 +151,10 @@ pub struct RenewRequest {
     pub sent_at: DateTime<Utc>,
     /// The user JWT of the credentials renewed.
     pub current: String,
+    /// The encryption key a human's credentials without one ask to have bound ([`DeviceKey`]), its seed kept by the
+    /// asking device. The approver refuses one for credentials that are no human's or already carry a key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xkey: Option<DeviceKey>,
     /// Signature of [`RenewRequest::signed`] by the key of the credentials renewed, base64url without padding.
     pub signature: String,
 }
@@ -164,14 +168,20 @@ impl RenewRequest {
             host: host.into(),
             sent_at: Utc::now(),
             current: String::new(),
+            xkey: None,
             signature: String::new(),
         }
     }
 
-    /// What the key of the credentials renewed signs: every field but the signature, one per line.
+    /// What the key of the credentials renewed signs: every field but the signature, one per line, the encryption
+    /// key last and only when asked for, so requests without one sign what they did before it existed.
     pub fn signed(&self) -> Vec<u8> {
         let sent_at = self.sent_at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
-        ["ants-renew", &self.name, &self.public_key, &sent_at, &self.current, &self.host].join("\n").into_bytes()
+        let mut lines = vec!["ants-renew", &self.name, &self.public_key, &sent_at, &self.current, &self.host];
+        if let Some(xkey) = &self.xkey {
+            lines.push(xkey.as_str());
+        }
+        lines.join("\n").into_bytes()
     }
 
     pub fn subject(&self) -> String {
@@ -276,11 +286,13 @@ mod tests {
             |r: &mut RenewRequest| r.host = "other".into(),
             |r: &mut RenewRequest| r.current = "x.y.z".into(),
             |r: &mut RenewRequest| r.sent_at += chrono::TimeDelta::nanoseconds(1),
+            |r: &mut RenewRequest| r.xkey = "XBLFEIK7UCHY5XKH7LGNQ4JZNVOZEWMIHPZH3LP4JUBJ6KQZDVBEWHWB".parse().ok(),
         ] {
             let mut changed = request.clone();
             change(&mut changed);
             assert_ne!(changed.signed(), bare);
         }
+        assert!(!serde_json::to_string(&request).unwrap().contains("xkey"), "absent unless asked for");
         assert_eq!(request.check_subject("ants.renew.dev-a"), Ok(()));
         assert!(request.check_subject("ants.renew.dev-b").is_err());
         let leaf = RenewRequest::new("leaf-Mac_1", "UKEY", "macbook");

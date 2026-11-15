@@ -114,6 +114,7 @@ fn envelope() -> Envelope {
         allow: Some(vec!["read:*".to_owned(), "other:send_message".to_owned()]),
         mention: Some(mention()),
         title: Some("Fix the build".to_owned()),
+        steer: true,
         attachments: vec![attachment()],
         sent_at: at(0),
     }
@@ -132,6 +133,7 @@ fn plain_envelope() -> Envelope {
         allow: None,
         mention: None,
         title: None,
+        steer: false,
         attachments: Vec::new(),
         ..envelope()
     }
@@ -224,11 +226,18 @@ fn kv_entries() {
         "reaction_entry",
         &ReactionEntry { message: id(1), by: user("alice"), reaction: "eyes".parse().unwrap(), at: at(0) },
     );
-    snap("reactions_request", &ReactionsRequest { id: id(1), ant: user("dev-a"), message: id(2), requested_at: at(0) });
+    let request = ReactionsRequest { id: id(1), ant: user("dev-a"), message: id(2), requested_at: at(0), change: None };
+    snap("reactions_request", &request);
+    for (kind, remove) in [("react", false), ("unreact", true)] {
+        let change = Some(ReactionChange { reaction: "eyes".parse().unwrap(), remove });
+        snap(&format!("reactions_request_{kind}"), &ReactionsRequest { change, ..request.clone() });
+    }
     let reacted = Reacted { reaction: "eyes".parse().unwrap(), by: vec![user("alice"), user("dev-b")] };
-    for (kind, outcome) in
-        [("listed", ReactionsOutcome::Listed { reactions: vec![reacted] }), ("unknown", ReactionsOutcome::Unknown)]
-    {
+    for (kind, outcome) in [
+        ("listed", ReactionsOutcome::Listed { reactions: vec![reacted] }),
+        ("applied", ReactionsOutcome::Applied { changed: true }),
+        ("unknown", ReactionsOutcome::Unknown),
+    ] {
         let reply = ReactionsReply { request_id: id(1), ant: user("dev-a"), message: id(2), outcome };
         snap(&format!("reactions_reply_{kind}"), &reply);
     }
@@ -296,6 +305,7 @@ fn envelopes() {
             ..message.clone()
         },
     );
+    snap("envelope_steer", &Envelope { owner: Some(user("alice")), steer: true, ..message.clone() });
     snap(
         "envelope_mention_notice",
         &Envelope { from: user("dev-b"), to: user("alice"), mention: Some(mention()), ..message },
@@ -339,6 +349,7 @@ fn notes() {
             from: user("dev-a"),
             text: "taking the parser".to_owned(),
             turn_budget: 7,
+            title: Some("Rewrite the parser".to_owned()),
             attachments: vec![attachment()],
             sent_at: at(0),
         },
@@ -413,6 +424,7 @@ fn channels() {
             creator: Some(user("planner")),
             webhook: true,
             allow: Some(vec!["read:*".to_owned()]),
+            title: Some("Fix CI".to_owned()),
             attachments: vec![attachment()],
             sent_at: at(0),
         },
@@ -495,6 +507,19 @@ fn enrollment() {
             host: "laptop.local".to_owned(),
             sent_at: at(0),
             current: "eyJ0eXAiOiJKV1QifQ.current".to_owned(),
+            xkey: None,
+            signature: "c2lnLXJlbmV3".to_owned(),
+        },
+    );
+    snap(
+        "renew_request_xkey",
+        &RenewRequest {
+            name: "alice".to_owned(),
+            public_key: "UDEF".to_owned(),
+            host: "laptop.local".to_owned(),
+            sent_at: at(0),
+            current: "eyJ0eXAiOiJKV1QifQ.current".to_owned(),
+            xkey: Some("XBLFEIK7UCHY5XKH7LGNQ4JZNVOZEWMIHPZH3LP4JUBJ6KQZDVBEWHWB".parse().unwrap()),
             signature: "c2lnLXJlbmV3".to_owned(),
         },
     );
