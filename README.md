@@ -249,21 +249,24 @@ Each session gets the `ants` MCP server over streamable HTTP (`127.0.0.1:<port>/
 
 | Tool | Description |
 |---|---|
-| `send_message(to, text, thread?)` | Send to an ant or human (`thread` omitted: current; `"new"`: fresh; else ID); warns when unserved or limited. |
-| `ask_ant(to, text, timeout?)` | Ask an ant on the current thread and wait (`timeout` default `5m`, max `30m`; refuses humans, unserved ants, or limits outlasting `timeout`). |
+| `send_message(to, text, thread?, attach?)` | Send to an ant or human (`thread` omitted: current; `"new"`: fresh; else ID); warns when unserved or limited. |
+| `ask_ant(to, text, timeout?, attach?)` | Ask an ant on the current thread and wait (`timeout` default `5m`, max `30m`; refuses humans, unserved ants, or limits outlasting `timeout`). |
 | `check_inbox(all_threads?)` | Drain late `ask_ant` replies arriving after timeout (persisted in `<home>/mcp.json`). |
 | `ask_human(question, options, free_text?)` | Ask the thread's owner (else the default human) a question with 2–9 options (question ≤ 500 chars, options ≤ 200; `free_text` default `true` also takes typed answers) and return at once; 0 turns. |
 | `react(reaction, message_id?, remove?)` | Add or remove the ant's reaction on a message it reads (default: active message), made by `ants signer`; 0 turns, wakes nobody. |
 | `list_reactions(message_id?)` | List reactions and reactors on a message the ant reads (default: active message), answered by `ants signer` or `ants webhook serve` with a `[[human]]` entry. |
 | `list_ants(capability?)` | List peer ants from `ants_roster` with capabilities, `agent`, activity and hold states. |
-| `route(capability, text, wait?, timeout?)` | Route to the best peer advertising `capability` (healthy > on a fallback > held, `live` > `stale`, `idle` > `working`, fewest messages); waits unless `wait: false`. |
-| `post_notes(text)` / `read_notes(thread?)` | Append to (1 turn) or read (up to 50 posts, 0 turns) passive thread notes; wakes nobody. |
+| `route(capability, text, wait?, timeout?, attach?)` | Route to the best peer advertising `capability` (healthy > on a fallback > held, `live` > `stale`, `idle` > `working`, fewest messages); waits unless `wait: false`. |
+| `post_notes(text, attach?)` / `read_notes(thread?)` | Append to (1 turn) or read (up to 50 posts, 0 turns) passive thread notes; wakes nobody. |
+| `read_attachment(handle)` | Read a file attached to a message the ant reads, by the handle listed with it (`<from>.<inbox\|notes\|chan>.<target>.<id>`): PNG, JPEG, GIF or WebP as image content, text or JSON up to 128 KiB as text, any other saved into the working directory under its name (`name-2`… beside a different file) and its path returned; 0 turns. |
 | `decide_approval(verdict)` | Answer an incoming chain approval notice (`allow_once`, `allow_always`, `reject`). |
-| `post_channel(channel, text)` | Start a channel thread as `creator` (member or channel messenger only; inherits turns minus 1 for ant messages). |
+| `post_channel(channel, text, attach?)` | Start a channel thread as `creator` (member or channel messenger only; inherits turns minus 1 for ant messages). |
 | `manage_channel(channel?, add?, remove?, messenger?, clear_messenger?)` | List owned channels, inspect one, or modify members/messenger via `ants channel serve`. |
 | `escalate(issue)` | Escalate the thread one level up its origin chain (or to the owner) with reason `asked`. |
 | `suggest_thread_title(title)` | Suggest a title for the current thread (1–120 trimmed single-line chars); the turn's reply carries it, whether a message, a channel post or a thread notes post, and a human's `ants thread list` or `show` stores it only if the thread never had a title. |
 | `request_ant(...)` / `retire_ant(name)` | Template managers only: add or retire a templated worker ant via `ants signer` ([docs/config.md](docs/config.md#manager-ants)). |
+
+`attach` lists up to 8 files of up to 8 MiB each, by path relative to the directory the thread's session works in (the ant's `workdir`, or the thread's worktree): a path whose real location (symlinks and `..` resolved) leaves it, a non-regular file, or a file too big fails the call with nothing sent. Each file goes to the `ants_files` store under the message's handle, named by its base name, with a media type guessed from its extension. Replies, check_inbox and read_notes list a message's attachments with their handles.
 
 Human traffic costs 0 turns; ant-to-ant messages cost 1 turn (`ask_ant` requires 1 turn left for the reply), and self-messaging is refused. A 3 s `ants_roster` lookup runs before messaging ants, suggesting closest names or capability peers when the target is unserved.
 

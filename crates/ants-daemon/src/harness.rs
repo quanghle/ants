@@ -607,8 +607,9 @@ pub async fn check(harness: &Arc<Harness>) -> Result<String> {
 /// Makes the transport to a fresh harness: a process, or an in-process agent in tests.
 type Connector = Arc<dyn Fn() -> DynConnectTo<Client> + Send + Sync>;
 
-/// The MCP servers a session of a thread gets; the flag tells whether the harness takes HTTP ones.
-pub type McpServers = Arc<dyn Fn(&ThreadId, bool) -> Vec<McpServer> + Send + Sync>;
+/// The MCP servers a session of a thread working in a directory gets; the flag tells whether the harness takes HTTP
+/// ones.
+pub type McpServers = Arc<dyn Fn(&ThreadId, &Path, bool) -> Vec<McpServer> + Send + Sync>;
 
 /// How to start a harness and open sessions in it.
 #[derive(Clone)]
@@ -697,7 +698,7 @@ impl Launch {
 
     fn mcp_servers(&self, http: bool) -> Vec<McpServer> {
         match (&self.mcp, &self.thread) {
-            (Some(mcp), Some(thread)) => mcp(thread, http),
+            (Some(mcp), Some(thread)) => mcp(thread, &self.cwd, http),
             _ => Vec::new(),
         }
     }
