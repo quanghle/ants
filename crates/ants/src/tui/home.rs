@@ -501,6 +501,26 @@ mod tests {
     }
 
     #[test]
+    fn a_title_a_human_set_shows_ahead_of_the_suggested_one_and_the_opening_line() {
+        let (done, unlisted) = (ThreadId::generate(), ThreadId::generate());
+        let mut m = model();
+        let mut opening = message(1, &done, "alice", "dev-a", "deploy");
+        opening.owner = Some(user("alice"));
+        let mut answer = message(2, &done, "dev-a", "alice", "deployed");
+        answer.suggested_title = Some("Site deploy".to_owned());
+        m.stored(vec![opening, answer], at(2));
+        assert_eq!(m.data.title(&done), "Site deploy");
+        assert!(shown(&m, at(3)).contains("Site deploy"));
+
+        m.data.cards.titles.insert(done.clone(), "Release 1.2".to_owned());
+        m.data.cards.titles.insert(unlisted.clone(), "[sealed]".to_owned());
+        assert_eq!(m.data.title(&done), "Release 1.2");
+        assert_eq!(m.data.title(&unlisted), "[sealed]", "even without a message read");
+        let screen = shown(&m, at(3));
+        assert!(screen.contains("Release 1.2") && !screen.contains("Site deploy"), "{screen}");
+    }
+
+    #[test]
     fn an_unread_message_from_another_human_is_a_home_item_after_stuck_ones() {
         let (asked, stuck, ants) = (ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
         let mut m = model();

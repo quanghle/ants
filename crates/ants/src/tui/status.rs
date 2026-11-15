@@ -211,6 +211,7 @@ mod tests {
         let mut scout = crate::roster::tests::entry("scout", 60, 5, at(0));
         scout.activity = Activity::Working;
         let read = cards::Read {
+            titles: Ok(Default::default()),
             meta: Ok(Default::default()),
             spend: Ok(Default::default()),
             today: Err(anyhow::anyhow!("timed out")),

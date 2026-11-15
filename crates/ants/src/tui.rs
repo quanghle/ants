@@ -285,6 +285,8 @@ impl Chat {
                 }
                 outcome = self.exec.next() => {
                     dirty = true;
+                    // A title set through the bar shows once read back.
+                    self.cards.refresh();
                     self.model.outcome(outcome).into_iter().collect()
                 }
                 acted = self.acts.next() => {
