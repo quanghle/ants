@@ -1,0 +1,14 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "ant": "dev-a",
+  "thread_id": "019a7d2c-0000-7000-8000-000000000001",
+  "type": "tool",
+  "id": "call-1",
+  "title": "cargo test",
+  "tool_kind": "execute",
+  "status": "in_progress",
+  "at": "2025-01-01T12:00:00Z"
+}

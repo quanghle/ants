@@ -1,0 +1,17 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "ant": "dev-a",
+  "public_key": "UABC",
+  "host": "laptop.local",
+  "sent_at": "2025-01-01T12:00:00Z",
+  "enrollment": "eyJ0eXAiOiJKV1QifQ.enroll",
+  "signature": "c2lnLWVucm9sbA",
+  "leaf": {
+    "machine": "studio",
+    "jwt": "eyJ0eXAiOiJKV1QifQ.leaf",
+    "signature": "c2lnLWxlYWY"
+  }
+}

@@ -1,0 +1,24 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "manager": "lead",
+  "name": "dev-c",
+  "template": "rust-dev",
+  "request": "{\"whoami\":\"Parser work\"}",
+  "reason": "the parser needs a hand",
+  "thread_id": "019a7d2c-0000-7000-8000-000000000001",
+  "public_key": "UGHI",
+  "host": "studio.local",
+  "sent_at": "2025-01-01T12:00:00Z",
+  "expires_at": "2025-01-01T12:10:00Z",
+  "credentials": "eyJ0eXAiOiJKV1QifQ.manager",
+  "signature": "c2lnLWFudA",
+  "leaf": {
+    "machine": "studio",
+    "jwt": "eyJ0eXAiOiJKV1QifQ.leaf",
+    "signature": "c2lnLWxlYWY"
+  },
+  "retire": true
+}

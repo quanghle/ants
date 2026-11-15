@@ -1,0 +1,8 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "human": "alice",
+  "registered_at": "2025-01-01T12:00:00Z"
+}

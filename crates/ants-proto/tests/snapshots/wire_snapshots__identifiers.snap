@@ -1,0 +1,14 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+[
+  "dev-a",
+  "019a7d2c-0000-7000-8000-000000000001",
+  "backend",
+  "eyes",
+  "hub",
+  "studio",
+  "019a7d2a-0000-7000-8000-000000000001",
+  4
+]

@@ -1,0 +1,44 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "ant": "dev-a",
+  "machine": "studio.local",
+  "instance": "019a7d2b-0000-7000-8000-000000000001",
+  "harness": "copilot",
+  "agent": {
+    "name": "copilot",
+    "version": "1.2.3"
+  },
+  "capabilities": [
+    "rust",
+    "frontend"
+  ],
+  "whoami": "Backend developer",
+  "workdir": "/src/app",
+  "started_at": "2025-01-01T12:00:00Z",
+  "heartbeat_at": "2025-01-01T12:01:00Z",
+  "activity": "working",
+  "handling": 1,
+  "harnesses": 2,
+  "escalate_to": [
+    "lead",
+    "cto"
+  ],
+  "version": "0.1.0",
+  "perms": 4,
+  "signed_out": {
+    "since": "2025-01-01T12:02:00Z",
+    "sign_in": "copilot login"
+  },
+  "limited": {
+    "kind": "rate_limit",
+    "since": "2025-01-01T12:03:00Z",
+    "until": "2025-01-01T12:08:00Z"
+  },
+  "failing": {
+    "since": "2025-01-01T12:04:00Z",
+    "error": "harness exited"
+  }
+}

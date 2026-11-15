@@ -1,0 +1,29 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "id": "019a7d2e-0000-7000-8000-000000000001",
+  "channel": "backend",
+  "ant": "lead",
+  "thread_id": "019a7d2c-0000-7000-8000-000000000001",
+  "ops": [
+    {
+      "op": "add_member",
+      "ant": "dev-b"
+    },
+    {
+      "op": "remove_member",
+      "ant": "dev-c"
+    },
+    {
+      "op": "set_messenger",
+      "ant": "triage"
+    },
+    {
+      "op": "clear_messenger"
+    }
+  ],
+  "requested_at": "2025-01-01T12:00:00Z",
+  "expires_at": "2025-01-01T12:01:00Z"
+}

@@ -1,0 +1,9 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "channel": "backend",
+  "post": "019a7d2e-0000-7000-8000-000000000003",
+  "author": "github"
+}

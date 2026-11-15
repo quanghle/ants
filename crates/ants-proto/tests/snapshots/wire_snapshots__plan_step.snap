@@ -1,0 +1,8 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "content": "write tests",
+  "status": "in_progress"
+}

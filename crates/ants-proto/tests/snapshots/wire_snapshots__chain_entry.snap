@@ -1,0 +1,11 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "ant": "dev-a",
+  "escalate_to": [
+    "lead"
+  ],
+  "updated_at": "2025-01-01T12:00:00Z"
+}

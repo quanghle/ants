@@ -1,0 +1,19 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "id": "019a7d2e-0000-7000-8000-000000000001",
+  "thread_id": "019a7d2c-0000-7000-8000-000000000001",
+  "from": "lead",
+  "to": "dev-a",
+  "text": "fix the build",
+  "turn_budget": 8,
+  "approval": {
+    "request_id": "019a7d2e-0000-7000-8000-00000000000a",
+    "ant": "dev-a",
+    "verdict": "allow_once",
+    "decided_at": "2025-01-01T12:01:00Z"
+  },
+  "sent_at": "2025-01-01T12:00:00Z"
+}

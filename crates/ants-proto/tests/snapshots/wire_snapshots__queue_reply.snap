@@ -1,0 +1,22 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "request_id": "019a7d2e-0000-7000-8000-000000000001",
+  "ant": "dev-a",
+  "messages": [
+    {
+      "id": "019a7d2e-0000-7000-8000-000000000002",
+      "thread_id": "019a7d2c-0000-7000-8000-000000000001",
+      "from": "alice",
+      "channel": "backend",
+      "sent_at": "2025-01-01T12:00:00Z",
+      "seq": 4211,
+      "running": true,
+      "ahead": 0
+    }
+  ],
+  "delivered": 4211,
+  "undelivered": 3
+}

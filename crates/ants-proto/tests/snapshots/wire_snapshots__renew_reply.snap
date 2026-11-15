@@ -1,0 +1,9 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "name": "dev-a",
+  "public_key": "UDEF",
+  "jwt": "eyJ0eXAiOiJKV1QifQ.renewed"
+}

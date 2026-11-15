@@ -1,0 +1,21 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+[
+  {
+    "state": "started",
+    "thread_id": "019a7d2c-0000-7000-8000-000000000001",
+    "at": "2025-01-01T12:00:00Z"
+  },
+  {
+    "state": "finished",
+    "thread_id": "019a7d2c-0000-7000-8000-000000000001",
+    "at": "2025-01-01T12:01:00Z"
+  },
+  {
+    "state": "withdrawn",
+    "by": "alice",
+    "at": "2025-01-01T12:02:00Z"
+  }
+]

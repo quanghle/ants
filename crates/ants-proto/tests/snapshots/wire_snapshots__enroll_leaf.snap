@@ -1,0 +1,9 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "machine": "studio",
+  "jwt": "eyJ0eXAiOiJKV1QifQ.leaf",
+  "signature": "c2lnLWxlYWY"
+}
