@@ -71,6 +71,64 @@ pub async fn read_back_messages(
     start: consumer::DeliverPolicy,
     take: impl FnMut(u64, SystemTime, async_nats::Message) -> ControlFlow<()>,
 ) -> Result<()> {
+    read_back_with(js, reader, reading, filter, start, Now(take)).await
+}
+
+/// [`read_back_messages`], awaiting `take` on each message before reading on, so it may look something up first.
+pub async fn read_back_awaiting(
+    js: &jetstream::Context,
+    reader: &str,
+    reading: Reading,
+    filter: &str,
+    start: consumer::DeliverPolicy,
+    take: impl AsyncFnMut(u64, SystemTime, async_nats::Message) -> ControlFlow<()>,
+) -> Result<()> {
+    read_back_with(js, reader, reading, filter, start, Awaiting(take)).await
+}
+
+/// What a read hands each message to, its sequence and the time it was stored: the function of
+/// [`read_back_messages`] ([`Now`]) or of [`read_back_awaiting`] ([`Awaiting`]).
+trait Take {
+    fn take(&mut self, seq: u64, stored: SystemTime, msg: async_nats::Message)
+    -> impl Future<Output = ControlFlow<()>>;
+}
+
+/// A function taking each message at once. Its future borrows nothing, so a read through it stays `Send`.
+struct Now<F>(F);
+
+impl<F: FnMut(u64, SystemTime, async_nats::Message) -> ControlFlow<()>> Take for Now<F> {
+    fn take(
+        &mut self,
+        seq: u64,
+        stored: SystemTime,
+        msg: async_nats::Message,
+    ) -> impl Future<Output = ControlFlow<()>> {
+        std::future::ready((self.0)(seq, stored, msg))
+    }
+}
+
+/// An async function, awaited on each message.
+struct Awaiting<F>(F);
+
+impl<F: AsyncFnMut(u64, SystemTime, async_nats::Message) -> ControlFlow<()>> Take for Awaiting<F> {
+    fn take(
+        &mut self,
+        seq: u64,
+        stored: SystemTime,
+        msg: async_nats::Message,
+    ) -> impl Future<Output = ControlFlow<()>> {
+        (self.0)(seq, stored, msg)
+    }
+}
+
+async fn read_back_with(
+    js: &jetstream::Context,
+    reader: &str,
+    reading: Reading,
+    filter: &str,
+    start: consumer::DeliverPolicy,
+    take: impl Take,
+) -> Result<()> {
     let config = consumer::pull::Config {
         filter_subject: filter.to_owned(),
         deliver_policy: start,
@@ -151,10 +209,7 @@ async fn take_spare(
     }
 }
 
-async fn read_through(
-    consumer: &consumer::PullConsumer,
-    mut take: impl FnMut(u64, SystemTime, async_nats::Message) -> ControlFlow<()>,
-) -> Result<()> {
+async fn read_through(consumer: &consumer::PullConsumer, mut take: impl Take) -> Result<()> {
     let mut left = consumer.cached_info().num_pending;
     while left > 0 {
         let mut batch = consumer.fetch().max_messages(left.min(BATCH) as usize).messages().await?;
@@ -165,7 +220,7 @@ async fn read_through(
             let Ok(info) = msg.info() else { continue };
             let (seq, stored) = (info.stream_sequence, SystemTime::from(info.published));
             let msg = async_nats::Message { reply: None, ..msg.message };
-            if take(seq, stored, msg).is_break() {
+            if take.take(seq, stored, msg).await.is_break() {
                 return Ok(());
             }
         }
@@ -195,7 +250,7 @@ async fn read_by_gets(
     js: &jetstream::Context,
     filter: &str,
     start: consumer::DeliverPolicy,
-    take: impl FnMut(u64, SystemTime, async_nats::Message) -> ControlFlow<()>,
+    take: impl Take,
 ) -> Result<()> {
     let at = match start {
         consumer::DeliverPolicy::All => Position { seq: 1, since: None },
@@ -240,7 +295,7 @@ async fn read_by_batches(
     filter: &str,
     mut at: Position,
     last: u64,
-    mut take: impl FnMut(u64, SystemTime, async_nats::Message) -> ControlFlow<()>,
+    mut take: impl Take,
 ) -> Result<()> {
     let client = js.client();
     let wait = client.timeout().unwrap_or(Duration::from_secs(10));
@@ -288,7 +343,7 @@ async fn read_by_batches(
             }
             let (sequence, stored) = (msg.sequence, msg.time.into());
             at.after(sequence);
-            if take(sequence, stored, published(msg, headers)).is_break() {
+            if take.take(sequence, stored, published(msg, headers)).await.is_break() {
                 return Ok(());
             }
         }
