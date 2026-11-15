@@ -32,7 +32,7 @@ fn order(admin: &str, creds: &Path, machine: &str, ant: &str, op: AdminOp) -> Ad
 }
 
 fn add() -> AdminOp {
-    AdminOp::Add { settings: serde_json::Map::new() }
+    AdminOp::Add { settings: serde_json::Map::new(), assistant_of: None }
 }
 
 /// What the signer answers the enrollment request of `ant` for `key` carrying `order`, signed with the credentials
@@ -177,7 +177,8 @@ async fn the_signer_signs_on_an_admin_s_order_for_the_machine_asking_only() {
         let refused = refusal(ask(&client, &host_creds, "dev-d", &second, &no_admin, WAIT).await);
         assert!(refused.contains("admin"), "{refused}");
         let mut forged = order("alice", &admin_creds, "m1", "dev-d", add());
-        forged.op = AdminOp::Add { settings: json!({ "model": "o3" }).as_object().unwrap().clone() };
+        forged.op =
+            AdminOp::Add { settings: json!({ "model": "o3" }).as_object().unwrap().clone(), assistant_of: None };
         let refused = refusal(ask(&client, &host_creds, "dev-d", &second, &forged, WAIT).await);
         assert!(refused.contains("not signed by"), "{refused}");
         let elsewhere = order("alice", &admin_creds, "m2", "dev-d", add());

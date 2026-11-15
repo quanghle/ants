@@ -95,10 +95,12 @@ pub enum AdminOp {
         now: bool,
     },
     /// Add the ant on the machine with these settings: the keys of its `[[ant]]` table in the config file, its name the
-    /// order's ant.
+    /// order's ant; with `assistant_of`, as the assistant of that human, who must be the order's admin.
     Add {
         #[serde(default)]
         settings: Map<String, Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assistant_of: Option<UserId>,
     },
     /// Drain the ant, revoke and delete its credentials, keeping its home.
     Retire,
@@ -149,7 +151,8 @@ impl AdminOp {
             Self::Resume => "resume".to_owned(),
             Self::Restart { now: false } => "restart".to_owned(),
             Self::Restart { now: true } => "restart now".to_owned(),
-            Self::Add { .. } => "add".to_owned(),
+            Self::Add { assistant_of: None, .. } => "add".to_owned(),
+            Self::Add { assistant_of: Some(human), .. } => format!("add as the assistant of {human}"),
             Self::Retire => "retire".to_owned(),
             Self::ReadMemories => "read memories".to_owned(),
             Self::ReadSettings => "read settings".to_owned(),

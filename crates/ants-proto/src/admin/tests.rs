@@ -193,7 +193,7 @@ fn an_order_rule_covers_an_op_of_its_kind() {
         AdminOp::Pause,
         AdminOp::Resume,
         AdminOp::Restart { now: true },
-        AdminOp::Add { settings: Map::new() },
+        AdminOp::Add { settings: Map::new(), assistant_of: None },
         AdminOp::Retire,
         AdminOp::ReadMemories,
         AdminOp::ReadSettings,

@@ -116,7 +116,7 @@ async fn sent(
 }
 
 /// What a command says of `order` still pending when it stopped waiting.
-fn pending_note(order: &AdminOrder) -> String {
+pub(crate) fn pending_note(order: &AdminOrder) -> String {
     format!(
         "order {} sent; the daemon of {} has not decided it yet: `ants ant orders {}` shows its outcome",
         order.id, order.machine, order.ant
@@ -124,7 +124,7 @@ fn pending_note(order: &AdminOrder) -> String {
 }
 
 /// Why the daemon refused an order, as its outcome says.
-fn reason(outcome: &AdminOutcome) -> &str {
+pub(crate) fn reason(outcome: &AdminOutcome) -> &str {
     outcome.reason.as_deref().unwrap_or("no reason given")
 }
 

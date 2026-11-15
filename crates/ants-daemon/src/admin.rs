@@ -393,7 +393,9 @@ async fn apply(
         AdminOp::Pause => pause::apply(orders, order, true),
         AdminOp::Resume => pause::apply(orders, order, false),
         AdminOp::Restart { now } => restart::apply(orders, order, *now).await,
-        AdminOp::Add { settings } => Box::pin(add::apply(js, orders, order, settings)).await,
+        AdminOp::Add { settings, assistant_of } => {
+            Box::pin(add::apply(js, &stores.identities, orders, order, settings, assistant_of.as_ref())).await
+        }
         AdminOp::Retire => retire::apply(js, orders, order).await,
         AdminOp::Clone { new, settings } => {
             Box::pin(clone::apply(js, &stores.identities, orders, order, new, settings)).await
