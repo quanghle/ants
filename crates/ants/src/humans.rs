@@ -67,8 +67,9 @@ fn device_of(text: &str) -> Result<Option<DeviceId>> {
 }
 
 /// Whether user JWT `claims` write the humans bucket, the right only humans have.
-fn writes_humans(claims: &Value) -> bool {
-    may_publish(claims, &format!("$KV.{HUMANS_BUCKET}.>"))
+pub fn writes_humans(claims: &Value) -> bool {
+    let publish = claims["nats"]["pub"]["allow"].as_array().into_iter().flatten().filter_map(Value::as_str);
+    ants_proto::writes_human_entries(publish)
 }
 
 /// What the credentials let the CLI publish, so JetStream API requests they would have denied, which only time out,
@@ -162,7 +163,7 @@ pub(crate) async fn read(js: &jetstream::Context) -> Result<Humans> {
     let Ok(kv) = js.get_key_value(HUMANS_BUCKET).await else { return Ok(Humans::default()) };
     let keys: Vec<String> = kv.keys().await.context("listing the humans")?.try_collect().await?;
     let mut entries = Vec::with_capacity(keys.len());
-    for key in keys {
+    for key in keys.into_iter().filter(|key| !key.contains('.')) {
         let Some(value) = kv.get(&key).await.with_context(|| format!("reading human {key}"))? else { continue };
         match serde_json::from_slice::<HumanEntry>(&value) {
             Ok(entry) => entries.push((key, entry)),
