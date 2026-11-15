@@ -1,0 +1,5 @@
+# Keep in step with `rust-version` in Cargo.toml and the `toolchain:` of every job in .github/workflows/ci.yml.
+[toolchain]
+channel = "1.100"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

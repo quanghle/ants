@@ -1348,6 +1348,8 @@ cargo test
 cargo deny check        # licenses, advisories, bans, sources (deny.toml)
 ```
 
+`rust-toolchain.toml` pins the toolchain CI uses (Rust 1.100 with rustfmt and clippy); rustup installs it on the first `cargo` command in the checkout. A toolchain bump changes it, `rust-version` in `Cargo.toml` and every `toolchain:` in `.github/workflows/ci.yml` together.
+
 CI sets `CARGO_BUILD_WARNINGS=deny`, so any lint warning (rustc or clippy) fails `cargo clippy`, `cargo test` and `cargo build` there. `.cargo/config.toml` sets a 7-day dependency cooldown (`registry.global-min-publish-age`): `cargo update` and `cargo add` resolve only to crate versions published at least 7 days ago, unless `Cargo.lock` already holds them; builds and `cargo install --path` from the committed `Cargo.lock` are unaffected. `CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow cargo update -p CRATE --precise VERSION` takes a newer release, such as a security fix.
 
 CI also lints and builds the Windows target on `windows-latest` and runs the MCP named pipe test there. To lint it from macOS or Linux: `rustup target add x86_64-pc-windows-gnu`, then `CARGO_BUILD_WARNINGS=deny cargo clippy --all-targets --target x86_64-pc-windows-gnu` with mingw-w64 on `PATH`.

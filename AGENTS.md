@@ -24,7 +24,8 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
 - A daemon acks a JetStream message only after its effects are stored.
 - Also in the repo: `contrib/` (launchd and systemd units, agent skill), `scripts/` (`install-units.sh`,
   `footprint.sh`), `docs/transport.md` (hub, proxy, leaf, bridge and tunnel reference), `deny.toml` (dependency
-  policy), `.cargo/config.toml` (7-day dependency cooldown).
+  policy), `.cargo/config.toml` (7-day dependency cooldown), `rust-toolchain.toml` (pinned toolchain; moves together
+  with `rust-version` in `Cargo.toml` and the `toolchain:` of every CI job).
 - Comment only code that needs clarification.
 
 ## Checks
