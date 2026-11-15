@@ -4,18 +4,23 @@
 
 use ants_daemon::reactions::Reactions;
 use ants_proto::{
-    ApprovalRequest, ChannelEntry, ChannelId, ChannelReadMarkers, Humans, ReadMarker, ThreadId, UserId, Uuid, Verdict,
+    ApprovalRequest, ChannelEntry, ChannelId, ChannelReadMarkers, Humans, Reaction, ReadMarker, ThreadId, UserId, Uuid,
+    Verdict,
 };
 use chrono::{DateTime, TimeDelta, Utc};
 
 use super::acts::{Acted, Change};
+use super::approvals::{self, Answer, Asking};
 use super::command::{Bar, Tone};
 use super::exec::Job;
+use super::interrupt::{Confirm, Intent};
+use super::react::{self, Pick, Picker};
 use super::reads::{Mark, Read};
 use super::work::{Facts, Filter};
 use super::{cards, channel, dm, home, images, nav, people, search, thread, timeline, tree, work};
 use crate::live::{self, State};
 use crate::thread::{Entry, Kind};
+use crate::tools::Update;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
@@ -66,6 +71,8 @@ pub enum Action {
     Decide(Box<ApprovalRequest>, Verdict),
     /// Edit the command bar's text in the editor.
     Edit(String),
+    /// React to the message so, or with true take the reaction back, as `ants react` does.
+    React(Uuid, Reaction, bool),
     /// Find the messages matching the search, replacing any search running.
     Search(crate::search::Search),
     /// Cancel the prompt each ant runs on its thread, as `ants cancel` does.
@@ -112,6 +119,8 @@ pub struct Data {
     pub reactions: Reactions,
     /// The tool calls of the threads, heard live or read from their timelines.
     pub calls: timeline::Threads,
+    /// The tool requests settled while the UI runs.
+    pub settled: approvals::Settled,
     /// Who of the other humans is online, and the messages with each.
     pub people: people::People,
     /// Who messaged whom on each thread, for the delegation trees.
@@ -140,14 +149,16 @@ impl Data {
         self.marker.as_ref().is_some_and(|m| !m.is_read(seq))
     }
 
-    /// The thread's title, else the title an ant suggested, else its opening line.
+    /// The thread's title, else the title an ant suggested, else its opening line; after a lock when a sealed message
+    /// is on it.
     pub fn title(&self, thread: &ThreadId) -> String {
         let Some(summary) = self.live.summary(thread) else { return thread.to_string() };
-        summary
+        let title = summary
             .title
             .clone()
             .or_else(|| summary.suggested.as_ref().map(|(_, title)| title.clone()))
-            .unwrap_or_else(|| summary.opening.clone())
+            .unwrap_or_else(|| summary.opening.clone());
+        if summary.sealed { format!("{} {title}", super::dm::LOCK) } else { title }
     }
 }
 
@@ -204,8 +215,14 @@ pub enum To {
     /// A thread, shown at a message on it.
     Message(ThreadId, Uuid),
     Work(Filter),
+    /// Answer a pending tool request: with the verdict, once confirmed; without, shown in full.
+    Ask(ApprovalRequest, Option<Verdict>),
+    /// Pick a reaction to the message.
+    React(Uuid),
     /// A thread's delegation tree.
     Tree(ThreadId),
+    /// Steer or cancel the prompt running on a thread.
+    Interrupt(Intent, ThreadId),
     /// Not another view: something to do.
     Do(Action),
 }
@@ -220,6 +237,12 @@ pub struct Model {
     pub help: bool,
     pub notice: Option<Notice>,
     pub bar: Bar,
+    /// The tool request being answered.
+    pub asking: Option<Asking>,
+    /// The reaction being picked.
+    pub picking: Option<Picker>,
+    /// The steer or cancel waiting for y while an ant runs a tool call.
+    pub interrupting: Option<Confirm>,
     /// Whether the two-line pane shows instead of the full view ([`super::compact`]).
     pub compact: bool,
 }
@@ -237,6 +260,7 @@ impl Model {
             humans: None,
             reactions: Reactions::new(),
             calls: timeline::Threads::default(),
+            settled: approvals::Settled::default(),
             people: people::People::default(),
             delegations: tree::Delegations::default(),
             cards: cards::Cards::default(),
@@ -251,6 +275,9 @@ impl Model {
             help: false,
             notice: None,
             bar: Bar::default(),
+            asking: None,
+            picking: None,
+            interrupting: None,
             compact: false,
         }
     }
@@ -278,9 +305,9 @@ impl Model {
                 self.data.calls.status(&event);
             }
             live::Event::Following => self.data.live.approvals_reset(),
-            live::Event::Approval(update) => self.data.live.approval(&update),
+            live::Event::Approval(update) => self.approval(update, now),
+            live::Event::Decided(outcome) => self.answered(outcome, now),
             live::Event::FollowEnded(Ok(())) => {}
-            live::Event::Decided(decided) => self.decided(decided),
             live::Event::FollowEnded(Err(e)) => {
                 self.notify(format!("following the tool requests: {e:#}"), Level::Error, now);
             }
@@ -300,9 +327,21 @@ impl Model {
                 {
                     self.notify(format!("reading thread {thread}: {e:#}"), Level::Error, now);
                 }
+                if self.open() == Some(&thread) {
+                    return self.shown_reactions().into_iter().collect();
+                }
             }
         }
         Vec::new()
+    }
+
+    /// Read the reactions to the messages of the view shown: a channel's posts or a thread's messages.
+    fn shown_reactions(&self) -> Option<Action> {
+        match self.page() {
+            Page::Channel(page) => Some(Action::Reactions(self.data.feeds.watched(&page.channel))),
+            Page::Thread(page) => Some(Action::Reactions(page.message_ids())),
+            _ => None,
+        }
     }
 
     /// Take the messages read from the stream. Marks read the human's new messages on an open thread, and reads the
@@ -329,9 +368,12 @@ impl Model {
                 page.history.stored(entries.clone());
             }
         }
-        if posted && let Page::Channel(page) = self.page() {
-            actions.push(Action::Reactions(self.data.feeds.watched(&page.channel)));
-        }
+        let shown = match self.page() {
+            Page::Channel(_) => posted,
+            Page::Thread(page) => entries.iter().any(|e| e.thread_id == page.history.thread),
+            _ => false,
+        };
+        actions.extend(self.shown_reactions().filter(|_| shown));
         actions
     }
 
@@ -342,6 +384,65 @@ impl Model {
             self.data.calls.stored(tool);
         }
         entries
+    }
+
+    /// Take word from following the tool requests: a settled request keeps its card a while.
+    fn approval(&mut self, update: Update, now: DateTime<Utc>) {
+        self.data.live.approval(&update);
+        if let Update::Resolved(request, state) = update {
+            if let Some(asking) = &mut self.asking
+                && !asking.settled(&request, &state)
+            {
+                self.asking = None;
+                let how = approvals::how(&state, &request.ant);
+                self.notify(format!("request {} {how}", crate::tools::qualified(&request)), Level::Info, now);
+            }
+            self.data.settled.add(request, state, now);
+        }
+    }
+
+    /// Take the outcome of storing a decision: the line saying so, or why it was not stored, the first decision
+    /// winning.
+    fn answered(&mut self, outcome: anyhow::Result<String>, now: DateTime<Utc>) {
+        let Some(asking) = self.asking.as_mut().filter(|a| a.storing) else {
+            return self.decided(outcome);
+        };
+        asking.storing = false;
+        asking.verdict = None;
+        if outcome.is_ok() || !asking.full {
+            self.asking = None;
+        }
+        match outcome {
+            Ok(line) => self.notify(line, Level::Info, now),
+            Err(e) => self.notify(format!("{e:#}"), Level::Error, now),
+        }
+    }
+
+    /// Take `key` while a tool request is being answered.
+    fn answer(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
+        let asking = self.asking.as_mut()?;
+        match asking.key(key) {
+            Answer::Keep => {}
+            Answer::Close(line) => {
+                self.asking = None;
+                if let Some(line) = line {
+                    self.notify(line, Level::Info, now);
+                }
+            }
+            Answer::Note(line) => self.notify(line, Level::Info, now),
+            Answer::Refused(refusal) => self.notify(refusal, Level::Error, now),
+            Answer::Decide(verdict) => {
+                return self.asking.as_ref().map(|a| Action::Decide(Box::new(a.request.clone()), verdict));
+            }
+            Answer::Open(thread) => {
+                self.asking = None;
+                if self.open() != Some(&thread) {
+                    self.focus = Focus::View;
+                    return self.go(To::Thread(thread), now);
+                }
+            }
+        }
+        None
     }
 
     /// The thread shown, if one is.
@@ -410,6 +511,12 @@ impl Model {
                 self.notify(format!("marking thread {thread} read: {e:#}"), Level::Error, now);
             }
             Read::Reactions(reactions) => data.reactions = reactions,
+            Read::Reacted(message, reaction, remove, Ok(changed)) => {
+                self.notify(react::done_line(message, &reaction, remove, changed), Level::Info, now);
+            }
+            Read::Reacted(message, reaction, _, Err(e)) => {
+                self.notify(format!("reacting {reaction} to message {message}: {e:#}"), Level::Error, now);
+            }
         }
     }
 
@@ -483,12 +590,33 @@ impl Model {
         if key == Key::Interrupt {
             return Some(Action::Quit);
         }
+        if self.asking.as_ref().is_some_and(Asking::takes_keys) && !self.help {
+            return self.answer(key, now);
+        }
         if self.compact {
             return self.compact_key(key, now);
         }
         if self.help {
             self.help = false;
             return None;
+        }
+        if self.interrupting.is_some() {
+            return self.confirm_key(key);
+        }
+        if let Some(picker) = &mut self.picking {
+            return match picker.key(key) {
+                Pick::Typing => None,
+                Pick::Close => {
+                    self.picking = None;
+                    None
+                }
+                Pick::React(message, reaction) => {
+                    self.picking = None;
+                    let reacted = self.data.reactions.get(&message).map_or(&[][..], Vec::as_slice);
+                    let remove = react::reacted(reacted, self.data.me(), &reaction);
+                    Some(Action::React(message, reaction, remove))
+                }
+            };
         }
         if !self.bar.focused
             && self.focus == Focus::View
@@ -553,10 +681,7 @@ impl Model {
     pub fn select(&mut self, item: nav::Item) -> Option<Action> {
         self.pages = vec![Page::of(&item)];
         self.nav = item;
-        match self.page() {
-            Page::Channel(page) => Some(Action::Reactions(self.data.feeds.watched(&page.channel))),
-            _ => None,
-        }
+        self.shown_reactions()
     }
 
     /// Run the search `query` asks for, listing its matches over the view; or why the query is refused.
@@ -589,6 +714,7 @@ impl Model {
         if key == Key::Esc {
             if self.pages.len() > 1 {
                 self.pages.pop();
+                return self.shown_reactions();
             } else {
                 self.focus = Focus::Nav;
             }
@@ -604,6 +730,11 @@ impl Model {
             Page::Search(page) => page.key(key),
             Page::Tree(page) => page.key(key, data, now),
         }?;
+        self.go(to, now)
+    }
+
+    /// Go where a view's key leads.
+    fn go(&mut self, to: To, now: DateTime<Utc>) -> Option<Action> {
         match to {
             To::Thread(thread) => {
                 self.pages.push(Page::Thread(thread::Page::new(thread.clone())));
@@ -617,10 +748,22 @@ impl Model {
                 self.pages.push(Page::Work(work::Page::new(filter)));
                 None
             }
+            To::React(message) => {
+                self.picking = Some(Picker::new(message));
+                None
+            }
+            To::Ask(request, verdict) => {
+                match Asking::new(request, verdict) {
+                    Ok(asking) => self.asking = Some(asking),
+                    Err(refusal) => self.notify(refusal, Level::Error, now),
+                }
+                None
+            }
             To::Tree(thread) => {
                 self.tree(thread);
                 None
             }
+            To::Interrupt(intent, thread) => self.interrupt(intent, thread),
             To::Do(Action::Run(Job::Open(listed), text)) => {
                 self.bar.set_status(format!("opening {}…", listed.attachment.name), Tone::Busy);
                 Some(Action::Run(Job::Open(listed), text))
@@ -675,7 +818,6 @@ pub mod tests {
     use super::*;
     use crate::live::Link;
     use crate::live::tests::{at, message, request, user};
-    use crate::tools::Update;
     use crate::tui::channel::tests::post;
 
     /// The model of alice, with bob a human too and nothing read yet.
@@ -729,9 +871,12 @@ pub mod tests {
         assert_eq!(m.key(Key::Enter, at(2)), Some(Action::Open(thread.clone())));
         assert_eq!(m.page().name(), "thread");
         let loaded = vec![message(1, &thread, "alice", "dev-a", "deploy")];
-        m.take(live::Event::History(thread.clone(), Ok(loaded)), at(3));
+        let first = loaded[0].id.unwrap();
+        let shown = m.take(live::Event::History(thread.clone(), Ok(loaded)), at(3));
+        assert_eq!(shown, [Action::Reactions(vec![first])], "the reactions to its messages are read");
         let reply = message(3, &thread, "dev-a", "alice", "done");
-        assert_eq!(m.stored(vec![reply], at(4)), [Action::MarkRead(thread.clone())]);
+        let reactions = Action::Reactions(vec![first, reply.id.unwrap()]);
+        assert_eq!(m.stored(vec![reply], at(4)), [Action::MarkRead(thread.clone()), reactions]);
         assert!(m.stored(vec![message(4, &other, "dev-b", "alice", "elsewhere")], at(5)).is_empty());
         let Page::Thread(page) = m.page() else { panic!("not a thread") };
         assert_eq!(page.history.entries.iter().map(|e| e.seq).collect::<Vec<_>>(), [1, 3]);

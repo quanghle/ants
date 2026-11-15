@@ -73,7 +73,7 @@ impl Status {
         if let Some(read) = parts.cards {
             model.data.cards.take(read);
         }
-        let items = home::items(&model.data);
+        let items = home::items(&model.data, now);
         let count = |why: Why, known: bool| known.then(|| items.iter().filter(|i| i.why == why).count());
         Self {
             home: Counts {

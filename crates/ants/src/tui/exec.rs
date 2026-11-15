@@ -16,6 +16,7 @@ use futures::{FutureExt as _, StreamExt as _};
 use super::attach;
 use crate::attachments::{self, File, Listed};
 use crate::cmd::{cancel, send};
+use crate::sealed::Sealing;
 use crate::thread::{self, Entry, Kind};
 use crate::thread_meta::{self, Marking, Meta};
 use crate::{humans, quiet};
@@ -28,6 +29,8 @@ pub struct Ctx {
     pub domain: Option<JsDomain>,
     /// The thread titles, done states and marks, or why they cannot be had.
     pub meta: Result<Meta, String>,
+    /// What seals messages to another human, and titles on a thread between two humans.
+    pub sealing: Sealing,
 }
 
 impl Ctx {
@@ -177,7 +180,9 @@ impl Job {
             Self::Reply { thread, text, steer } => {
                 let entries = thread::history(&ctx.js, &thread, None, false, None).await?;
                 let humans = humans::load(&ctx.js, &ctx.me).await;
-                let to = reply_to(&entries, me, |u| humans.contains(u)).unwrap_or_else(UserId::messenger);
+                let human = |u: &UserId| humans.contains(u);
+                let to = reply_to(&entries, me, human).or_else(|| dm_with(&entries, me, human));
+                let to = to.unwrap_or_else(UserId::messenger);
                 ask(ctx, to, Some(thread), text, steer, &files).await
             }
             Self::Grant { thread, text } => {
@@ -223,7 +228,7 @@ impl Job {
             Self::Mute { thread, hold } => Ok(Done::line(quiet::muted(&ctx.js, me, &thread, hold).await?)),
             Self::Unmute { thread } => Ok(Done::line(quiet::unmuted(&ctx.js, me, &thread).await?)),
             Self::Title { thread, text } => {
-                Ok(Done::line(thread_meta::retitle(&ctx.js, ctx.meta()?, &ctx.me.id, &thread, &text, false).await?))
+                Ok(Done::line(thread_meta::retitle(&ctx.js, ctx.meta()?, &ctx.sealing, &thread, &text, false).await?))
             }
             Self::React { thread, message, reaction } => {
                 let message = match message {
@@ -264,9 +269,12 @@ async fn ask(
     let new = thread.is_none();
     let mut envelope = send::ask_envelope(&ctx.me, thread, to, text);
     envelope.attachments = attachments::references(files);
-    let envelope = if steer { envelope.steering() } else { envelope };
+    let mut envelope = if steer { envelope.steering() } else { envelope };
+    // Sealed to a human, what is stored is each file's ciphertext.
+    let mut stored = files.to_vec();
+    send::seal_to_human(&ctx.js, &ctx.me, &ctx.sealing, &mut envelope, &mut stored).await?;
     let (mut warnings, _) = send::unserved(&ctx.js, &ctx.me, &envelope.to).await;
-    attachments::store(&ctx.js, files, |id| envelope.attachment_handle(id)).await?;
+    attachments::store(&ctx.js, &stored, |id| envelope.attachment_handle(id)).await?;
     let stored = send::deliver(&ctx.js, ctx.domain.as_ref(), &envelope).await?;
     warnings.extend(outbox(stored));
     let verb = if steer { "steered" } else { "sent to" };
@@ -318,6 +326,21 @@ pub fn reply_to(entries: &[Entry], me: &UserId, human: impl Fn(&UserId) -> bool)
         .or_else(|| messages().filter(|e| e.from.as_ref() == Some(me)).find_map(|e| ant(&e.to)))
 }
 
+/// The other human of the latest message between `me` and another human among `entries`, for a reply on a thread
+/// with no ant; `human` tells the humans.
+pub fn dm_with(entries: &[Entry], me: &UserId, human: impl Fn(&UserId) -> bool) -> Option<UserId> {
+    let other = |from: &UserId, to: &UserId| match (from == me, to == me) {
+        (true, false) => Some(to.clone()),
+        (false, true) => Some(from.clone()),
+        _ => None,
+    };
+    entries
+        .iter()
+        .rev()
+        .filter(|e| e.kind == Kind::Message && !e.forged)
+        .find_map(|e| other(e.from.as_ref()?, e.to.as_ref()?).filter(|u| human(u)))
+}
+
 /// The ant stuck on a thread whose `entries` are these: that of its latest escalation but for a tool request's, or
 /// the ant of its latest dead letter.
 pub fn stuck(entries: &[Entry]) -> Option<UserId> {
@@ -367,6 +390,42 @@ mod tests {
         entries.push(message(3, &thread, "bob", "alice", "thanks"));
         assert_eq!(reply_to(&entries, &me, human), Some(user("dev-b")), "a human is no ant to reply to");
         assert_eq!(reply_to(&entries[2..], &me, human), None);
+        assert_eq!(dm_with(&entries, &me, human), Some(user("bob")), "on a thread with no ant, the other human");
+        assert_eq!(dm_with(&entries[..2], &me, human), None);
+    }
+
+    /// What the bar sends to another human, a reply on their thread and its title are sealed for both.
+    #[tokio::test]
+    async fn the_bar_seals_messages_to_a_human_and_titles_on_their_thread() {
+        use ants_proto::Role;
+
+        let Some(server) = crate::auth::tests::Server::start() else { return };
+        let (alice, bob) = (user("alice"), user("bob"));
+        let creds = [server.creds_as(&alice, Role::Human), server.creds_as(&bob, Role::Human)];
+        let nats: Vec<_> = creds.iter().map(|c| crate::Nats::new(&server.url, Some(c), None).unwrap()).collect();
+        let (client, js) = nats[0].connect("test").await.unwrap();
+        let (_, bob_js) = nats[1].connect("test").await.unwrap();
+        let _ = js.create_stream(ants_daemon::hub::threads_config()).await;
+        let meta = thread_meta::open(&nats[0], &js).await.map_err(|e| format!("{e:#}"));
+        let (me, sealing) = (nats[0].me.clone(), Sealing::of(&nats[0]));
+        let ctx = Ctx { client, js, me, domain: None, meta, sealing };
+
+        let ask = Job::Ask { to: bob.clone(), thread: None, text: "lunch?".into(), steer: false };
+        let thread = Box::pin(ask.run(&ctx)).await.unwrap().open.unwrap();
+        let reply = Job::Reply { thread: thread.clone(), text: "at noon".into(), steer: false };
+        assert_eq!(Box::pin(reply.run(&ctx)).await.unwrap().line, format!("sent to bob on thread {thread}"));
+        let title = Job::Title { thread: thread.clone(), text: "Team lunch".into() };
+        Box::pin(title.run(&ctx)).await.unwrap();
+
+        let unread = crate::inbox::Inbox::open(&bob_js, &bob).await.unwrap().unread(&Default::default()).await.unwrap();
+        assert!(unread.iter().all(|e| e.sealed.is_some() && e.text.is_empty()), "{unread:?}");
+        let keyring = crate::sealed::Keyring::load(&nats[1], &bob_js).await.unwrap();
+        let texts: Vec<String> = unread.into_iter().map(|e| crate::sealed::read(e, Some(&keyring)).0.text).collect();
+        assert_eq!(texts, ["lunch?", "at noon"]);
+        let title = thread_meta::open(&nats[1], &bob_js).await.unwrap().title(&thread).await.unwrap().unwrap();
+        assert_eq!((title.title.as_str(), title.sealed), ("Team lunch", None), "opened on bob's device");
+        let unopened = Meta::open(&bob_js, None, &bob).await.unwrap().title(&thread).await.unwrap().unwrap();
+        assert_eq!(unopened.title, "[sealed]", "stored sealed");
     }
 
     #[test]
@@ -400,16 +459,17 @@ mod tests {
     #[tokio::test]
     async fn an_ask_from_the_bar_stores_its_files_before_the_message() {
         let Some(server) = crate::auth::tests::Server::start() else { return };
-        let alice = user("alice");
-        let (client, js) = server.connect_as(&alice, ants_proto::Role::Human).await;
+        let creds = server.creds_as(&user("alice"), ants_proto::Role::Human);
+        let nats = crate::Nats::new(&server.url, Some(&creds), None).unwrap();
+        let (client, js) = nats.connect("test").await.unwrap();
         for config in [ants_daemon::hub::stream_config(), ants_daemon::hub::files_config()] {
             js.create_stream(config).await.unwrap();
         }
         let source = server.dir().join("plan.md");
         std::fs::write(&source, b"# plan").unwrap();
         let files: Rc<[File]> = attachments::read_all(std::slice::from_ref(&source)).unwrap().into();
-        let me = humans::Me { id: alice.clone(), role: ants_proto::Role::Human };
-        let ctx = Ctx { client, js: js.clone(), me, domain: None, meta: Err("unused".into()) };
+        let (me, sealing) = (nats.me.clone(), Sealing::of(&nats));
+        let ctx = Ctx { client, js: js.clone(), me, domain: None, meta: Err("unused".into()), sealing };
         let ask = Job::Ask { to: user("dev-a"), thread: None, text: "see the plan".into(), steer: false };
         let done = Job::Attached { job: Box::new(ask), files: Rc::clone(&files) }.run(&ctx).await.unwrap();
         assert!(

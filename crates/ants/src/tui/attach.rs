@@ -149,14 +149,8 @@ fn opener_on(os: &str, wsl: impl FnOnce() -> bool) -> &'static str {
 /// the current directory. Returns the line telling so.
 pub async fn save(js: &jetstream::Context, listed: &Listed, out: Option<&Path>) -> Result<String> {
     let listed = available(listed)?;
-    let (attachment, path) = attachments::save(js, &listed.handle, Some(&listed.attachment), out).await?;
-    Ok(format!(
-        "saved {} ({}, {}) to {}",
-        attachment.name,
-        attachments::size(attachment.size),
-        attachment.mime,
-        path.display()
-    ))
+    let (attachment, size, path) = attachments::save(js, None, &listed.handle, Some(&listed.attachment), out).await?;
+    Ok(format!("saved {} ({}, {}) to {}", attachment.name, attachments::size(size), attachment.mime, path.display()))
 }
 
 /// `path` with a leading `~/` in the home directory.

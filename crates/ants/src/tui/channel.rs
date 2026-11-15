@@ -221,7 +221,7 @@ fn post_lines(post: &Post, data: &Data, now: DateTime<Utc>, marked: Option<usize
         under.push(format!("↳ {} {replies} · last {}", r.count, ago(r.last_at, now)));
     }
     for r in data.reactions.get(&post.id).into_iter().flatten() {
-        under.push(format!(":{}: {}", r.reaction, r.by.len()));
+        under.push(format!("{} {}", super::react::glyph(r.reaction.as_str()), r.by.len()));
     }
     if !under.is_empty() {
         lines.push(Line::styled(format!("  {}", under.join("  ")), frame::dim()));
@@ -276,7 +276,7 @@ pub mod tests {
             .collect();
         assert_eq!(
             shown,
-            ["bob 1m ago the site is down", "  ↳ 2 replies · last 1m ago", "alice 1m ago deploy at noon", "  :eyes: 1"]
+            ["bob 1m ago the site is down", "  ↳ 2 replies · last 1m ago", "alice 1m ago deploy at noon", "  👀 1"]
         );
         assert_eq!(page.channel, ops);
 

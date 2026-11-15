@@ -8,13 +8,15 @@
 //! nests a level under the sender, and the receiver's calls and reply nest under that message, unless the receiver
 //! nests the sender already (a reply). Messages, posts and notes render as markdown, their attachments listed under
 //! them, images drawn under their lines when on ([`images`]). Opened from a search, the view selects the message found
-//! and holds it at its top until moved.
+//! and holds it at its top until moved. The thread's tool requests show as cards under the conversation
+//! ([`approvals`]), a, A or r answering the oldest pending one and Enter showing it in full. Each message shows the
+//! reactions to it under it, live, and `+` reacts to the one selected ([`react`]).
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
-use ants_proto::{ThreadId, UserId, Uuid};
+use ants_proto::{ThreadId, UserId, Uuid, Verdict};
 use chrono::{DateTime, Local, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -25,11 +27,13 @@ use ratatui::widgets::Paragraph;
 use super::acts::{About, Change};
 use super::exec::Job;
 use super::frame::{self, ago};
-use super::model::{Action, Data, Key, To};
+use super::interrupt::Intent;
+use super::model::{Action, Data, Key, Model, To};
 use super::timeline::Call;
-use super::{attach, images, markdown, work};
+use super::{approvals, attach, images, markdown, react, work};
 use crate::attachments::Listed;
 use crate::live::History;
+use crate::sealed;
 use crate::thread::{Entry, Kind};
 
 /// How deep delegations nest, deeper ones shown at this depth.
@@ -79,12 +83,16 @@ impl Page {
         self.messages().find(|e| e.id == Some(at)).map(|e| e.seq)
     }
 
-    pub const KEYS: &str =
-        "↑↓ select · y copy · o open file · ] next file · p pin · m mute · e archive · d done · t tree · Esc back";
+    pub const KEYS: &str = "↑↓ select · y copy · o open file · ] next file · + react · p pin · m mute · e archive · d done · t tree · s steer · x cancel · a A r answer a tool request · End latest · Esc back";
 
     /// The messages shown, in the order stored.
     fn messages(&self) -> impl DoubleEndedIterator<Item = &Entry> {
         self.history.entries.iter().filter(|e| e.kind != Kind::Tool)
+    }
+
+    /// The ids of the messages shown, for the reactions to them.
+    pub fn message_ids(&self) -> Vec<Uuid> {
+        self.messages().filter_map(|e| e.id).collect()
     }
 
     /// The selected message, else the latest.
@@ -165,10 +173,22 @@ impl Page {
             }
             Key::End => self.selected = None,
             Key::Char('y') => return self.selection().map(|e| To::Do(Action::Copy(e.text.clone()))),
+            Key::Char('+') => return self.selection().and_then(|e| e.id).map(To::React),
             Key::Char('p') => return change(Change::Pin(!flags.pinned)),
             Key::Char('m') => return change(Change::Mute(!flags.muted)),
             Key::Char('e') => return change(Change::Archive(!flags.archived)),
             Key::Char('d') => return change(Change::Done(!flags.done)),
+            Key::Char('a' | 'A' | 'r') | Key::Enter => {
+                let verdict = match key {
+                    Key::Char('a') => Some(Verdict::AllowOnce),
+                    Key::Char('A') => Some(Verdict::AllowAlways),
+                    Key::Char('r') => Some(Verdict::Reject),
+                    _ => None,
+                };
+                let pending = data.live.approvals.iter().filter(|r| r.thread_id == self.history.thread);
+                let oldest = pending.min_by_key(|r| r.requested_at)?;
+                return Some(To::Ask(oldest.clone(), verdict));
+            }
             Key::Char('t') => return Some(To::Tree(self.history.thread.clone())),
             Key::Char('o') => {
                 let listed = self.attachment()?.clone();
@@ -178,12 +198,15 @@ impl Page {
                 let (seq, count) = self.attached().map(|e| (e.seq, e.attachments.len()))?;
                 self.mark.next(seq, count);
             }
+            Key::Char('s') => return Some(To::Interrupt(Intent::Steer, self.history.thread.clone())),
+            Key::Char('x') | Key::Ctrl('x') => return Some(To::Interrupt(Intent::Cancel, self.history.thread.clone())),
             _ => {}
         }
         None
     }
 
-    pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
+    pub fn draw(&self, frame: &mut Frame, area: Rect, model: &Model, now: DateTime<Utc>, focused: bool) {
+        let data = &model.data;
         let thread = &self.history.thread;
         let summary = data.live.summary(thread);
         let mut title = format!(" {} ", data.title(thread));
@@ -197,6 +220,7 @@ impl Page {
         } else {
             (area, None)
         };
+        let area = draw_cards(frame, area, model, thread, now);
         let width = usize::from(area.width.saturating_sub(2));
         let mut lines = vec![work::why(data, thread)];
         if let Some((line, at)) = data.live.progress_of(thread, width.saturating_sub(16)) {
@@ -322,6 +346,35 @@ impl Page {
     }
 }
 
+/// Draw the cards of the tool requests of `thread` at the bottom of `area`, in at most half of it: the area left.
+fn draw_cards(frame: &mut Frame, area: Rect, model: &Model, thread: &ThreadId, now: DateTime<Utc>) -> Rect {
+    let width = usize::from(area.width.saturating_sub(2));
+    let cards = approvals::cards(&model.data, Some(thread), now);
+    let mut boxes = Vec::new();
+    let mut height = 0;
+    for (at, card) in cards.into_iter().enumerate() {
+        let lines = approvals::lines(card, model.asking.as_ref(), at == 0, now, width);
+        let tall = u16::try_from(lines.len()).unwrap_or(u16::MAX).saturating_add(2);
+        if height + tall > area.height / 2 {
+            break;
+        }
+        height += tall;
+        boxes.push((card, lines, tall));
+    }
+    if boxes.is_empty() {
+        return area;
+    }
+    let [rest, mut below] = Layout::vertical([Constraint::Min(3), Constraint::Length(height)]).areas(area);
+    for (card, lines, tall) in boxes {
+        let [this, next] = Layout::vertical([Constraint::Length(tall), Constraint::Min(0)]).areas(below);
+        let style = if card.settled.is_some() { frame::dim() } else { Style::new().fg(Color::Yellow) };
+        let block = ratatui::widgets::Block::bordered().title(approvals::title(card)).border_style(style);
+        frame.render_widget(Paragraph::new(lines).block(block), this);
+        below = next;
+    }
+    rest
+}
+
 /// How the human holds a thread.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Flags {
@@ -442,8 +495,15 @@ impl Shown<'_> {
                 lines.push(first);
                 lines.extend(text.into_iter().map(|line| indented(&under, line).patch_style(style)));
                 self.attachments(lines, e, &under);
+                lines.extend(self.reactions(e).map(|line| indented(&under, line)));
             }
         }
+    }
+
+    /// The line of the reactions to `e`, if any.
+    fn reactions(&self, e: &Entry) -> Option<Line<'static>> {
+        let reacted = self.data.reactions.get(&e.id?)?;
+        react::line(reacted, self.data.me())
     }
 
     /// A message at the top level: who sent it to whom and when, then its text under it.
@@ -478,16 +538,16 @@ impl Shown<'_> {
         if !what.is_empty() {
             head.push(Span::styled(format!("  {what}"), style));
         }
-        if e.forged {
+        if e.sealed.is_some() {
+            head.push(Span::raw(format!("  {}", super::dm::LOCK)));
+        }
+        if e.forged || e.sealed == Some(sealed::State::Forged) {
             head.push(Span::styled("  forged", Style::new().fg(Color::Red).bold()));
         }
         lines.push(Line::from(head));
         lines.extend(text(e, entries, self.width.saturating_sub(2)).into_iter().map(|line| indented("  ", line)));
         self.attachments(lines, e, "  ");
-        let reactions = crate::inbox::render_reactions(&e.reactions, "  ");
-        for line in reactions.lines() {
-            push(lines, line, "  ", frame::dim(), self.width);
-        }
+        lines.extend(self.reactions(e).map(|line| indented("  ", line)));
     }
 
     /// The lines of `e`'s attachments, begun with `indent`, each image's drawn under its line.
@@ -533,7 +593,9 @@ impl Shown<'_> {
 fn nested(e: &Entry) -> (String, Style) {
     let from = e.from.as_ref().map_or("a human", UserId::as_str);
     let to = e.to.as_ref().map_or("", UserId::as_str);
-    let forged = if e.forged { " (forged)" } else { "" };
+    let lock = if e.sealed.is_some() { format!(" {}", super::dm::LOCK) } else { String::new() };
+    let forged = if e.forged || e.sealed == Some(sealed::State::Forged) { " (forged)" } else { "" };
+    let forged = format!("{lock}{forged}");
     match e.kind {
         Kind::Note => (format!("{from} → notes{forged}"), Style::new()),
         Kind::Approval => (format!("{from} asks to run{forged}"), Style::new().fg(Color::Yellow)),
@@ -546,6 +608,9 @@ fn nested(e: &Entry) -> (String, Style) {
 
 /// A message's text: a question's with its options numbered and its answers.
 fn body(e: &Entry, entries: &[Entry]) -> String {
+    if let Some(unopened) = super::dm::unopened(e.sealed) {
+        return unopened.to_owned();
+    }
     let Some(question) = &e.question else {
         return match (&e.note, e.kind) {
             (Some(note), Kind::Approval | Kind::Decision) => format!("{} [{note}]", e.text),
@@ -683,9 +748,9 @@ mod tests {
         (entries, calls)
     }
 
-    fn screen(page: &Page, data: &Data, width: u16, now: DateTime<Utc>) -> String {
+    fn screen(page: &Page, m: &Model, width: u16, now: DateTime<Utc>) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
-        terminal.draw(|f| page.draw(f, f.area(), data, now, true)).unwrap();
+        terminal.draw(|f| page.draw(f, f.area(), m, now, true)).unwrap();
         let buffer = terminal.backend().buffer();
         let cells: Vec<&str> = buffer.content.iter().map(ratatui::buffer::Cell::symbol).collect();
         cells.chunks(usize::from(width)).map(|row| row.concat().trim_end().to_owned()).collect::<Vec<_>>().join("\n")
@@ -734,7 +799,7 @@ mod tests {
         page.history.loaded(&thread, Ok(entries[..3].to_vec())).unwrap();
         page.about = Some(About { spend: Some(Vec::new()), ..About::default() });
 
-        let shown = screen(&page, &m.data, 110, at(47));
+        let shown = screen(&page, &m, 110, at(47));
         assert!(shown.contains("alice → dev-a"), "{shown}");
         assert!(shown.contains("  deploy the site"), "{shown}");
         assert!(shown.contains("read    read migrations") || shown.contains("execute read migrations"), "{shown}");
@@ -746,7 +811,81 @@ mod tests {
             assert!(shown.contains(field), "{field}: {shown}");
         }
         assert!(shown.contains("FILES") && shown.contains("src/c3.rs"), "{shown}");
-        assert!(!screen(&page, &m.data, 80, at(47)).contains("STATE"), "no panel on a narrow view");
+        assert!(!screen(&page, &m, 80, at(47)).contains("STATE"), "no panel on a narrow view");
+    }
+
+    #[test]
+    fn the_threads_tool_requests_show_as_cards_under_it_and_answer_to_a_and_enter() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let entries = vec![message(1, &thread, "alice", "dev-a", "deploy the site")];
+        m.stored(entries.clone(), at(1));
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(entries)).unwrap();
+        let request = |command| {
+            let request = crate::live::tests::request("dev-a", command, vec![Verdict::AllowOnce]);
+            ants_proto::ApprovalRequest { thread_id: thread.clone(), ..request }
+        };
+        let (push, tag) = (request("git push"), request("git tag v1"));
+        m.data.live.approvals = vec![push.clone(), tag, crate::live::tests::request("dev-b", "ls", vec![])];
+        assert_eq!(page.key(Key::Char('A'), &m.data, at(2)), Some(To::Ask(push.clone(), Some(Verdict::AllowAlways))));
+        assert_eq!(page.key(Key::Enter, &m.data, at(2)), Some(To::Ask(push.clone(), None)));
+
+        let shown = screen(&page, &m, 100, at(2));
+        assert!(shown.contains("deploy the site"), "{shown}");
+        assert!(shown.contains("dev-a asks to run a tool") && shown.contains("execute: git push"), "{shown}");
+        assert!(shown.contains("a allow · r reject · Enter details"), "the oldest takes the keys: {shown}");
+        assert!(shown.contains("execute: git tag v1") && !shown.contains("execute: ls"), "{shown}");
+
+        m.data.live.approvals.clear();
+        assert_eq!(page.key(Key::Char('a'), &m.data, at(2)), None, "nothing pending, nothing to answer");
+        m.data.settled.add(push, crate::tools::State::Expired, at(2));
+        let shown = screen(&page, &m, 100, at(3));
+        assert!(shown.contains("expired unanswered: dev-a rejected it"), "{shown}");
+    }
+
+    #[test]
+    fn reactions_show_under_each_message_and_plus_reacts_or_takes_one_back() {
+        use ants_daemon::reactions::Reacted;
+
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let entries = vec![
+            message(1, &thread, "alice", "dev-a", "deploy the site"),
+            message(2, &thread, "dev-a", "dev-b", "check the logs"),
+        ];
+        let (first, nested) = (entries[0].id.unwrap(), entries[1].id.unwrap());
+        m.stored(entries.clone(), at(1));
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(entries)).unwrap();
+        let reacted = |name: &str, by: &[&str]| Reacted {
+            reaction: name.parse().unwrap(),
+            by: by.iter().map(|b| crate::live::tests::user(b)).collect(),
+        };
+        m.data.reactions.insert(first, vec![reacted("eyes", &["alice", "bob"]), reacted("shipit", &["dev-a"])]);
+        m.data.reactions.insert(nested, vec![reacted("check", &["alice"])]);
+        let shown = screen(&page, &m, 100, at(2));
+        // A wide glyph's second cell shows as a space on the test screen.
+        assert!(shown.contains("│  👀  2  :shipit: 1"), "{shown}");
+        assert!(shown.contains("          ✅  1"), "under a nested message too: {shown}");
+
+        m.pages.push(super::super::model::Page::Thread(page));
+        m.key(Key::Home, at(2));
+        assert_eq!(m.key(Key::Char('+'), at(2)), None);
+        let footer = m.picking.as_ref().unwrap().line().to_string();
+        assert!(footer.contains("👍 thumbsup") && footer.contains("Esc close"), "{footer}");
+        for c in "eyes".chars() {
+            m.key(Key::Char(c), at(2));
+        }
+        let eyes: ants_proto::Reaction = "eyes".parse().unwrap();
+        assert_eq!(m.key(Key::Enter, at(2)), Some(Action::React(first, eyes.clone(), true)), "alice takes it back");
+        assert!(m.picking.is_none());
+        m.key(Key::Char('+'), at(2));
+        assert_eq!(m.key(Key::Enter, at(2)), Some(Action::React(first, "thumbsup".parse().unwrap(), false)));
+
+        m.read(crate::tui::reads::Read::Reacted(first, eyes, true, Ok(true)), at(3));
+        let notice = m.notice_at(at(3)).map(|n| n.text.clone());
+        assert_eq!(notice, Some(format!("removed eyes from message {first}")));
     }
 
     #[test]
@@ -761,7 +900,7 @@ mod tests {
             .collect();
         let mut page = Page::at(thread.clone(), entries[4].id.unwrap());
         page.history.loaded(&thread, Ok(entries)).unwrap();
-        let rows = |page: &Page| screen(page, &m.data, 80, at(40)).lines().map(str::to_owned).collect::<Vec<_>>();
+        let rows = |page: &Page| screen(page, &m, 80, at(40)).lines().map(str::to_owned).collect::<Vec<_>>();
         let shown = rows(&page);
         assert!(shown[1].starts_with("│alice → dev-a"), "{shown:#?}");
         assert_eq!(shown[2].trim_end_matches('│').trim_end(), "│  line 5");
@@ -785,13 +924,40 @@ mod tests {
         entries[2].kind = Kind::Note;
         let mut page = Page::new(thread.clone());
         page.history.loaded(&thread, Ok(entries)).unwrap();
-        let shown = screen(&page, &m.data, 80, at(40));
+        let shown = screen(&page, &m, 80, at(40));
         let shown: Vec<&str> = shown.lines().map(|l| l.trim_end_matches('│').trim_end()).collect();
         let from = shown.iter().position(|l| l.contains("alice → dev-a")).unwrap();
         assert_eq!(shown[from + 1..from + 5], ["│  done:", "│", "│  • one", "│  • two"], "{shown:#?}");
         assert!(shown[from + 5].ends_with("dev-a → dev-b  check retry.rs"), "one line on its heading");
         assert!(shown[from + 6].ends_with("dev-b → notes"), "{shown:#?}");
         assert_eq!(shown[from + 7..from + 10], ["│            Found", "│", "│            in two places"]);
+    }
+
+    #[test]
+    fn sealed_messages_show_a_lock_opened_or_why_not() {
+        let thread = ThreadId::generate();
+        let m = model();
+        let sealed = |seq, from, to, text: &str, state| {
+            let mut e = message(seq, &thread, from, to, text);
+            e.sealed = Some(state);
+            e
+        };
+        let entries = vec![
+            sealed(1, "alice", "bob", "lunch at noon?", sealed::State::Opened),
+            sealed(2, "bob", "alice", "[sealed]", sealed::State::Unreadable),
+            sealed(3, "bob", "alice", "[forged]", sealed::State::Forged),
+        ];
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(entries)).unwrap();
+        let shown = screen(&page, &m, 80, at(40));
+        let shown: Vec<&str> = shown.lines().map(|l| l.trim_end_matches('│').trim_end()).collect();
+        let from = shown.iter().position(|l| l.contains("alice → bob")).unwrap();
+        assert!(shown[from].ends_with("🔒"), "{shown:#?}");
+        assert_eq!(shown[from + 1], "│  lunch at noon?");
+        assert!(shown[from + 3].ends_with("🔒") && !shown[from + 3].contains("forged"), "{shown:#?}");
+        assert_eq!(shown[from + 4], "│  [sealed] sent before this device had a key");
+        assert!(shown[from + 6].contains("🔒") && shown[from + 6].ends_with("forged"), "{shown:#?}");
+        assert!(shown[from + 7].starts_with("│  [forged] "), "{shown:#?}");
     }
 
     #[test]
@@ -863,7 +1029,7 @@ mod tests {
         let entries = vec![sent, message(2, &thread, "alice", "dev-a", "thanks")];
         let mut page = Page::new(thread.clone());
         page.history.loaded(&thread, Ok(entries)).unwrap();
-        let shown = screen(&page, &m.data, 80, at(3));
+        let shown = screen(&page, &m, 80, at(3));
         // The paperclip takes two cells.
         assert!(shown.contains("│  📎  before.png (1.5 KiB) image/png ◂"), "{shown}");
         assert!(shown.contains("│  📎  after.png (1.5 KiB) image/png  "), "{shown}");
@@ -875,7 +1041,7 @@ mod tests {
         assert_eq!(open(&mut page), "before.png", "following the latest, the latest message with files");
         page.key(Key::Char(']'), &m.data, at(3));
         assert_eq!(open(&mut page), "after.png");
-        assert!(screen(&page, &m.data, 80, at(3)).contains("after.png (1.5 KiB) image/png ◂"));
+        assert!(screen(&page, &m, 80, at(3)).contains("after.png (1.5 KiB) image/png ◂"));
         page.key(Key::Char(']'), &m.data, at(3));
         assert_eq!(open(&mut page), "before.png", "past the last, the first");
         page.key(Key::Home, &m.data, at(3));
@@ -896,19 +1062,19 @@ mod tests {
         sent.attachments = crate::attachments::listed(&[shot, log], |id| envelope.attachment_handle(id));
         let mut page = Page::new(thread.clone());
         page.history.loaded(&thread, Ok(vec![sent.clone()])).unwrap();
-        let before = screen(&page, &m.data, 80, at(3));
+        let before = screen(&page, &m, 80, at(3));
 
         m.data.images = images::Images::new(true);
         assert_eq!(images::wanted(&m), Vec::new(), "only for the open thread");
         let image = crate::tui::images::tests::halfblocks(&png);
         m.data.images.insert(sent.attachments[0].handle.clone(), Some(image));
-        let shown = screen(&page, &m.data, 80, at(3));
+        let shown = screen(&page, &m, 80, at(3));
         let rows: Vec<&str> = shown.lines().collect();
         let line = rows.iter().position(|r| r.contains("shot.png")).unwrap();
         assert!(rows[line + 3].contains("build.log"), "two rows for the image:\n{shown}");
         assert_eq!(before.lines().filter(|r| r.contains("📎")).count(), 2);
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        terminal.draw(|f| page.draw(f, f.area(), &m.data, at(3), true)).unwrap();
+        terminal.draw(|f| page.draw(f, f.area(), &m, at(3), true)).unwrap();
         let red = ratatui::style::Color::Rgb(200, 40, 40);
         let drawn: Vec<(u16, u16)> = (0..24)
             .flat_map(|y| (0..80).map(move |x| (x, y)))

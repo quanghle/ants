@@ -18,7 +18,7 @@ use async_nats::jetstream;
 use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
 
-use crate::sealed::{self, Keyring, Sealer};
+use crate::sealed::{self, Keyring, Sealer, Sealing};
 use crate::thread::{self, Entry, Pick};
 
 /// Why titles and marks cannot be had when the hub has no bucket for them.
@@ -130,26 +130,17 @@ pub async fn title(nats: &crate::Nats<'_>, pick: Pick, text: &[String], clear: b
         }
         return Ok(());
     }
-    let had = if clear {
-        meta.clear_title(thread).await?
-    } else {
-        let mut title = ThreadTitle::new(thread.clone(), &text, nats.me.id.clone())?;
-        if let Some(sealer) = title_sealer(nats, &js, thread).await? {
-            sealer.seal_title(&mut title)?;
-        }
-        meta.put_title(&title).await?
-    };
-    println!("{}", titled_line(thread, &text, clear, had));
+    println!("{}", retitle(&js, &meta, &Sealing::of(nats), thread, &text, clear).await?);
     Ok(())
 }
 
-/// Title `thread` `text` as `me`, the human of `meta`, or with `clear` clear its title; what `ants thread title`
-/// prints. Refused for a thread between two humans whose messages are sealed, whose title only `ants thread title`
-/// seals.
+/// Title `thread` `text` as the human of `sealing`, that of `meta`, or with `clear` clear its title; what `ants thread
+/// title` prints. On a thread between two humans whose messages are sealed, the title is sealed for both
+/// ([`title_sealer`]).
 pub async fn retitle(
     js: &jetstream::Context,
     meta: &Meta,
-    me: &UserId,
+    sealing: &Sealing,
     thread: &ThreadId,
     text: &str,
     clear: bool,
@@ -157,10 +148,11 @@ pub async fn retitle(
     let had = if clear {
         meta.clear_title(thread).await?
     } else {
-        if sealed_with(js, me, thread).await?.is_some() {
-            bail!("thread {thread} holds sealed messages: `ants thread title` seals its title");
+        let mut title = ThreadTitle::new(thread.clone(), text, sealing.me().clone())?;
+        if let Some(sealer) = title_sealer(sealing, js, thread).await? {
+            sealer.seal_title(&mut title)?;
         }
-        meta.put_title(&ThreadTitle::new(thread.clone(), text, me.clone())?).await?
+        meta.put_title(&title).await?
     };
     Ok(titled_line(thread, text, clear, had))
 }
@@ -177,9 +169,9 @@ fn titled_line(thread: &ThreadId, text: &str, clear: bool, had: Option<ThreadTit
 
 /// What seals the title of `thread` if it is a thread between two humans whose messages are sealed: for the devices
 /// of both, refused unless the CLI's human is one of them.
-async fn title_sealer(nats: &crate::Nats<'_>, js: &jetstream::Context, thread: &ThreadId) -> Result<Option<Sealer>> {
-    let Some(other) = sealed_with(js, &nats.me.id, thread).await? else { return Ok(None) };
-    Sealer::new(nats, js, &other, "the title of such a thread is never stored in the clear").await.map(Some)
+async fn title_sealer(sealing: &Sealing, js: &jetstream::Context, thread: &ThreadId) -> Result<Option<Sealer>> {
+    let Some(other) = sealed_with(js, sealing.me(), thread).await? else { return Ok(None) };
+    sealing.sealer(js, &other, "the title of such a thread is never stored in the clear").await.map(Some)
 }
 
 /// The other human of `thread` if it is a thread between two humans whose messages are sealed, refused unless `me`
@@ -895,7 +887,7 @@ mod tests {
         }
         let _ = js[0].create_stream(ants_daemon::hub::threads_config()).await;
         let mut ask = Envelope::new(humans[0].clone(), humans[1].clone(), "lunch?");
-        Sealer::new(&nats[0], &js[0], &humans[1], "").await.unwrap().seal(&mut ask).unwrap();
+        Sealer::new(&nats[0], &js[0], &humans[1], "").await.unwrap().seal(&mut ask, &mut []).unwrap();
         ants_daemon::bus::publish(&js[0], &ask).await.unwrap();
         let thread = &ask.thread_id;
         let dev_a: UserId = "dev-a".parse().unwrap();
@@ -904,7 +896,7 @@ mod tests {
         noted.title = Some("Lunch order".to_owned());
         ants_daemon::bus::publish(&ant_js, &noted).await.unwrap();
 
-        let sealer = title_sealer(&nats[0], &js[0], thread).await.unwrap().expect("a sealed thread");
+        let sealer = title_sealer(&Sealing::of(&nats[0]), &js[0], thread).await.unwrap().expect("a sealed thread");
         let mut title = ThreadTitle::new(thread.clone(), "Team lunch", humans[0].clone()).unwrap();
         sealer.seal_title(&mut title).unwrap();
         assert_eq!(open(&nats[0], &js[0]).await.unwrap().put_title(&title).await.unwrap(), None);
@@ -918,9 +910,9 @@ mod tests {
         let unopened = |meta: Meta| async move { meta.title(thread).await.unwrap().unwrap().title };
         assert_eq!(unopened(open(&nats[2], &js[2]).await.unwrap()).await, "[sealed]");
         assert_eq!(unopened(Meta::open(&js[1], None, &humans[1]).await.unwrap()).await, "[sealed]");
-        let refused = title_sealer(&nats[2], &js[2], thread).await.err().unwrap().to_string();
+        let refused = title_sealer(&Sealing::of(&nats[2]), &js[2], thread).await.err().unwrap().to_string();
         assert!(refused.contains("only they title it"), "{refused}");
-        assert!(title_sealer(&nats[0], &js[0], &ThreadId::generate()).await.unwrap().is_none());
+        assert!(title_sealer(&Sealing::of(&nats[0]), &js[0], &ThreadId::generate()).await.unwrap().is_none());
 
         let mut threads = Threads::new(None);
         scan(&js[0], async_nats::jetstream::consumer::DeliverPolicy::All, |e| threads.add(&e)).await.unwrap();

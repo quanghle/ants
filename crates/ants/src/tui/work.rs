@@ -12,6 +12,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
 
 use super::frame::{self, ago};
+use super::interrupt::Intent;
 use super::model::{Data, Key, To};
 use crate::thread::{Entry, Kind};
 
@@ -329,6 +330,10 @@ impl Page {
         let at = self.at(&rows);
         let to = match key {
             Key::Enter => return rows.get(at).map(|(t, _)| To::Thread(t.clone())),
+            Key::Char('s') => return rows.get(at).map(|(t, _)| To::Interrupt(Intent::Steer, t.clone())),
+            Key::Char('x') | Key::Ctrl('x') => {
+                return rows.get(at).map(|(t, _)| To::Interrupt(Intent::Cancel, t.clone()));
+            }
             Key::Up | Key::Char('k') => at.saturating_sub(1),
             Key::Down | Key::Char('j') => at + 1,
             Key::PageUp => at.saturating_sub(10),
@@ -341,7 +346,7 @@ impl Page {
         None
     }
 
-    pub const KEYS: &str = "↑↓ thread · Enter open · Esc back";
+    pub const KEYS: &str = "↑↓ thread · Enter open · s steer · x cancel · Esc back";
 
     pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
         let rows = self.rows(data);

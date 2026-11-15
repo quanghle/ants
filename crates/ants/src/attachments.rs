@@ -1,16 +1,22 @@
 //! Files attached to messages, from the CLI: reading those `--attach` names ([`Attach`]), storing them before the
 //! message carrying them ([`store`]), listing them under a message ([`Listed`]) and saving one ([`save`], `ants
-//! attachment get`). The ants TUI attaches, lists and saves through the same functions.
+//! attachment get`), opening one sealed on a message between two humans ([`crate::sealed`]). The ants TUI attaches,
+//! lists and saves through the same functions.
 
 use std::collections::HashSet;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use ants_daemon::files;
-use ants_proto::{Attachment, AttachmentHandle, MAX_ATTACHMENT_SIZE, MAX_ATTACHMENTS, Uuid, guess_mime};
+use ants_proto::{
+    Attachment, AttachmentHandle, AttachmentScope, MAX_ATTACHMENT_SIZE, MAX_ATTACHMENTS, SealedAttachment, Uuid,
+    guess_mime,
+};
 use anyhow::{Context as _, Result, bail, ensure};
 use async_nats::jetstream;
 use serde::{Serialize, Serializer};
+
+use crate::sealed;
 
 /// The `--attach` of `ants ask`, `ants post` and `ants notes`.
 #[derive(clap::Args, Debug, Default, Clone)]
@@ -114,11 +120,13 @@ fn display<S: Serializer>(handle: &AttachmentHandle, s: S) -> Result<S::Ok, S::E
 }
 
 impl Listed {
-    /// Its line under the message: `📎 name (size) handle`, or with an invalid reference why it is unavailable.
+    /// Its line under the message: `📎 name (size) handle`, the size that of the file, sealed or not, or with an
+    /// invalid reference why it is unavailable.
     pub fn line(&self) -> String {
-        let Attachment { name, size: bytes, .. } = &self.attachment;
+        let Attachment { name, size: bytes, sealed, .. } = &self.attachment;
+        let bytes = if sealed.is_some() { bytes.saturating_sub(SealedAttachment::OVERHEAD) } else { *bytes };
         match &self.unavailable {
-            None => format!("📎 {name} ({}) {}", size(*bytes), self.handle),
+            None => format!("📎 {name} ({}) {}", size(bytes), self.handle),
             // An invalid name may hold control characters, which are escaped rather than sent to the terminal.
             Some(reason) => format!("📎 {:?} (unavailable: {reason}) {}", name, self.handle),
         }
@@ -196,30 +204,68 @@ pub fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Save the attachment under `handle` where [`target`] puts it, after checking its bytes ([`fetch`]): nothing is
-/// written when they do not match. Returns its reference and the path written.
+/// Save the attachment under `handle` where [`target`] puts it, after checking its bytes ([`fetch`]) against
+/// `expected`, the reference of the message carrying it, if given: nothing is written when they do not match. When the
+/// store holds it as an attachment of a sealed message ([`SealedAttachment::STORED_NAME`]), or `expected` is sealed,
+/// its reference and content key are those of the sealed message carrying it, which `keyring` opens
+/// ([`sealed::carrier`]), and it is opened before it is written; refused when that message does not open on this
+/// device. Returns its reference, the size of the file and the path written.
 pub async fn save(
     js: &jetstream::Context,
+    keyring: Option<&sealed::Keyring>,
     handle: &AttachmentHandle,
     expected: Option<&Attachment>,
     out: Option<&Path>,
-) -> Result<(Attachment, PathBuf)> {
+) -> Result<(Attachment, u64, PathBuf)> {
     if let Some(path) = out.filter(|path| !path.is_dir())
         && path.exists()
     {
         bail!("{} exists: not overwriting it (-o names another path)", path.display());
     }
-    let (attachment, bytes) = fetch(js, handle, expected).await?;
+    let sealed_expected = expected.is_some_and(|e| e.sealed.is_some());
+    let (stored, bytes) = fetch(js, handle, expected.filter(|_| !sealed_expected)).await?;
+    let stored_sealed = stored.name == SealedAttachment::STORED_NAME
+        && stored.mime == Attachment::UNKNOWN_MIME
+        && matches!(handle.scope, AttachmentScope::Inbox(_));
+    let (attachment, bytes) = if stored_sealed || sealed_expected {
+        match Box::pin(sealed::carrier(js, keyring, handle)).await? {
+            sealed::Carrier::Opened(key, reference) => {
+                let bytes = if reference.sealed.is_some() {
+                    sealed::open_attachment(&key, &reference, &bytes)?
+                } else {
+                    ensure!(
+                        bytes.len() as u64 == reference.size && files::sha256(&bytes) == reference.sha256,
+                        "attachment {handle} does not match its reference: it changed or is incomplete"
+                    );
+                    bytes
+                };
+                (reference, bytes)
+            }
+            sealed::Carrier::Unopened(state) => bail!(
+                "attachment {handle} is sealed with a message this device does not open ({}): {}",
+                state.placeholder(),
+                match state {
+                    sealed::State::Forged => "it is forged",
+                    _ => "sent before this device had an encryption key, or not sealed for it",
+                }
+            ),
+            sealed::Carrier::None if sealed_expected => bail!("attachment {handle} is on no sealed message stored"),
+            sealed::Carrier::None => (stored, bytes),
+        }
+    } else {
+        (stored, bytes)
+    };
     let path = target(out, &attachment.name);
     write_new(&path, &bytes)?;
-    Ok((attachment, path))
+    Ok((attachment, bytes.len() as u64, path))
 }
 
 /// `ants attachment get HANDLE [-o PATH]`.
 pub async fn get(nats: &crate::Nats<'_>, handle: &AttachmentHandle, out: Option<&Path>) -> Result<()> {
     let (_, js) = nats.connect("ants-cli").await?;
-    let (attachment, path) = save(&js, handle, None, out).await?;
-    println!("saved {} ({}, {}) to {}", attachment.name, size(attachment.size), attachment.mime, path.display());
+    let keyring = if nats.me.role.is_human() { sealed::Keyring::load(nats, &js).await } else { None };
+    let (attachment, bytes, path) = save(&js, keyring.as_ref(), handle, None, out).await?;
+    println!("saved {} ({}, {}) to {}", attachment.name, size(bytes), attachment.mime, path.display());
     Ok(())
 }
 
@@ -307,22 +353,22 @@ mod tests {
 
         let out = dir.join("out");
         std::fs::create_dir(&out).unwrap();
-        let (saved, path) = save(&js, &shown.handle, Some(&shown.attachment), Some(&out)).await.unwrap();
+        let (saved, _, path) = save(&js, None, &shown.handle, Some(&shown.attachment), Some(&out)).await.unwrap();
         assert_eq!((saved, path.clone()), (attached[0].attachment.clone(), out.join("report.txt")));
         assert_eq!(std::fs::read(&path).unwrap(), b"findings");
-        let again = save(&js, &shown.handle, None, Some(&out)).await.unwrap_err().to_string();
+        let again = save(&js, None, &shown.handle, None, Some(&out)).await.unwrap_err().to_string();
         assert!(again.contains("exists: not overwriting it"), "{again}");
         assert_eq!(std::fs::read(&path).unwrap(), b"findings");
 
         let named = out.join("renamed.txt");
         let lying = Attachment { sha256: files::sha256(b"other"), ..shown.attachment.clone() };
-        let mismatch = save(&js, &shown.handle, Some(&lying), Some(&named)).await.unwrap_err().to_string();
+        let mismatch = save(&js, None, &shown.handle, Some(&lying), Some(&named)).await.unwrap_err().to_string();
         assert!(mismatch.contains("does not match its reference"), "{mismatch}");
         assert!(!named.exists(), "nothing written when the bytes do not match");
-        save(&js, &shown.handle, None, Some(&named)).await.unwrap();
+        save(&js, None, &shown.handle, None, Some(&named)).await.unwrap();
         assert_eq!(std::fs::read(&named).unwrap(), b"findings");
 
         let unknown = message.attachment_handle(Uuid::now_v7());
-        assert!(save(&js, &unknown, None, Some(&out)).await.unwrap_err().to_string().contains("is not stored"));
+        assert!(save(&js, None, &unknown, None, Some(&out)).await.unwrap_err().to_string().contains("is not stored"));
     }
 }

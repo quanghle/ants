@@ -4,6 +4,8 @@
 //! ([`crate::search::Search`]) and lists the latest matches newest first, each with where, who, how long ago and its
 //! matching line. Enter on a match opens its thread at it; Esc closes the list.
 
+use std::sync::Arc;
+
 use ants_proto::ChannelId;
 use anyhow::Result;
 use async_nats::jetstream;
@@ -20,6 +22,7 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use super::frame::{self, ago};
 use super::model::{Data, Key, To};
 use crate::live::maybe;
+use crate::sealed::Keyring;
 use crate::search::{self, Search};
 use crate::thread::{Entry, Kind};
 
@@ -175,18 +178,20 @@ type Found = Result<(Vec<Entry>, usize)>;
 /// The search running, at most one: a new one replaces it.
 pub struct Searches {
     js: jetstream::Context,
+    /// What opens the sealed messages searched, so their text is matched and shown.
+    keyring: Option<Arc<Keyring>>,
     running: Option<LocalBoxFuture<'static, Found>>,
 }
 
 impl Searches {
-    pub fn new(js: jetstream::Context) -> Self {
-        Self { js, running: None }
+    pub fn new(js: jetstream::Context, keyring: Option<Arc<Keyring>>) -> Self {
+        Self { js, keyring, running: None }
     }
 
     /// Run `search`, dropping the one running.
     pub fn start(&mut self, search: Search) {
-        let js = self.js.clone();
-        self.running = Some(async move { search.run(&js, None).await }.boxed_local());
+        let (js, keyring) = (self.js.clone(), self.keyring.clone());
+        self.running = Some(async move { search.run(&js, keyring).await }.boxed_local());
     }
 
     /// The matches of the search running, once found. Cancel-safe.
