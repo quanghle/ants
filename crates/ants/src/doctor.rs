@@ -917,7 +917,8 @@ fn check_ant_creds(ant: &Ant, now: u64) -> Check {
     check_creds(&check, path, &finding, now)
 }
 
-/// A warning for each ant whose threads run at once in one git work tree, where they may clobber each other's edits.
+/// A warning for each ant whose threads run at once in one git work tree, worktrees turned off, where they may
+/// clobber each other's edits.
 fn check_shared_workdirs(ants: &[Ant], config: &Path) -> Vec<Check> {
     ants.iter()
         .filter(|ant| ants_daemon::worktrees::shares_git_workdir(&ant.workdir, ant.max_harnesses, ant.worktrees))
