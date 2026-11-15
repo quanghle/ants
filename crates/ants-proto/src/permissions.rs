@@ -39,6 +39,30 @@ fn covers(pattern: &str, subject: &str) -> bool {
     subject.next().is_none()
 }
 
+/// The role of a member of a machine's leaf node ([`Permissions::for_leaf`]): an ant or a human in its [`Role`], or an
+/// ant that is the assistant of a human ([`AssistantOf`]), with the rights [`Permissions::for_assistant`] gives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeafRole<'a> {
+    Ant,
+    Human,
+    AssistantOf(&'a UserId),
+}
+
+impl From<Role> for LeafRole<'_> {
+    fn from(role: Role) -> Self {
+        match role {
+            Role::Ant => Self::Ant,
+            Role::Human => Self::Human,
+        }
+    }
+}
+
+/// Families of JetStream API rights naming no user, by the pattern of their plain form after `$JS.API.`: looking up,
+/// creating and updating streams, and creating the ordered consumers of a stream, whose name and filter its subject
+/// leaves out. No credentials hold a right of these a human lacks, so a human's take each family's domain forms as one
+/// wildcard ([`Permissions::with_js_domain`]).
+const DOMAIN_FAMILIES: [&str; 4] = ["STREAM.INFO.*", "STREAM.CREATE.*", "STREAM.UPDATE.*", "CONSUMER.CREATE.*"];
+
 /// What acks the messages `consumer` of `stream` delivers, in both forms of nats-server's ack subjects (ADR-15): v1
 /// `$JS.ACK.<stream>.<consumer>.…` and v2 `$JS.ACK.<domain>.<account hash>.<stream>.<consumer>.…`, the default from
 /// nats-server 2.16 (feature flag `js_ack_fc_v2`). The domain token is the JetStream domain of the server holding the
@@ -329,9 +353,13 @@ impl Permissions {
     ///
     /// It sends only as itself, never under any sender as a human may, nor writes attachments under another's name.
     /// It gets none of a human's rights whose subjects do not name who acts, which readers could not tell from its
-    /// human's: sending admin orders, deciding approval requests, cancelling, queueing or withdrawing an ant's messages,
-    /// recording a thread's owner, putting dead letters, answering an ant's reactions requests or another's renewal,
-    /// setting another ant's avatar ([`IDENTITIES_BUCKET`]). Nor
+    /// human's: cancelling an ant's prompt or asking for its queue (whose request's `by` no reader can check),
+    /// withdrawing an ant's queued messages, recording a thread's owner, putting dead letters, answering an ant's
+    /// reactions requests or another's renewal, setting another ant's avatar ([`IDENTITIES_BUCKET`]). Nor does it
+    /// decide approval requests on [`subject::ALL_APPROVAL_DECISIONS`]: it decides one for its human in a message to
+    /// the ant (`on_behalf_of`), which waits for its human's confirmation, as readers ignore a stored decision carrying
+    /// `on_behalf_of` and one stored there would keep its human's own from being stored. Nor does it send admin orders,
+    /// until daemons hold an assistant's orders for its human's confirmation. Nor
     /// does it change the team: no entry of [`HUMANS_BUCKET`] (where its human's grant stands) or [`CHANNELS_BUCKET`],
     /// no stream created, updated or purged of a message. It puts no device encryption key, no presence and no
     /// notification holds, which only a human's devices have, and it gets no power of the account key: it signs no
@@ -345,8 +373,10 @@ impl Permissions {
         let devices_only = [subject::devices_of(assistant), subject::presence_of(assistant)];
         let notify = notify_prefs_rights(assistant);
         let unattributed = [
+            // Acts for its human that wait for the human's confirmation, which these subjects cannot carry.
             subject::ALL_ADMIN_ORDERS_SENT.to_owned(),
             subject::ALL_APPROVAL_DECISIONS.to_owned(),
+            // Subjects naming no sender, whose readers could not tell its acts from its human's.
             subject::ALL_CANCELS.to_owned(),
             subject::ALL_QUEUE_REQUESTS.to_owned(),
             subject::ALL_REACTIONS_REPLIES.to_owned(),
@@ -383,6 +413,9 @@ impl Permissions {
         publish.push(format!("$JS.API.DIRECT.GET.{attempts}.$KV.{ATTEMPTS_BUCKET}.{human}.unserved.*"));
         let mut seen = std::collections::HashSet::new();
         publish.retain(|s| seen.insert(s.clone()));
+        // An ant's narrower reads (attachments, the assistants' records) a human's wider ones cover take no room.
+        let wider = publish.clone();
+        publish.retain(|s| !wider.iter().any(|other| other != s && covers(other, s)));
         let mut seen = std::collections::HashSet::new();
         subscribe.retain(|s| seen.insert(s.clone()));
         Self { publish, subscribe }
@@ -675,22 +708,38 @@ impl Permissions {
     /// ants process does when the hub has a domain. KV puts and deletes then go through that prefix too
     /// (`$JS.<domain>.API.$KV.…`). The plain subjects stay allowed: the hub maps the domain prefix onto them and checks
     /// the mapped subject against the permissions as well. Acks, flow control and ants subjects are the same in both.
-    /// A domain form already allowed by a wildcard (`$JS.*.API.…`) is not listed again, saving room in the JWT. Without
-    /// a domain the permissions are unchanged.
+    /// A domain form already allowed by a wildcard (`$JS.*.API.…`) is not listed again, saving room in the JWT.
+    ///
+    /// Credentials holding every right of a family of [`DOMAIN_FAMILIES`] that any credentials hold, as a human's do,
+    /// take the domain forms of the family as one wildcard (`$JS.<domain>.API.STREAM.CREATE.*`), keeping a human's JWT
+    /// well within `max_control_line`. The wildcard grants nothing more: the hub checks the mapped plain subject against
+    /// the plain rights, and a leaf node's uplink, which a request through a leaf crosses unmapped, holds no right of
+    /// the family that such credentials lack ([`Self::for_leaf`]). Without a domain the permissions are unchanged.
     #[must_use]
     pub fn with_js_domain(mut self, domain: Option<&JsDomain>) -> Self {
         let Some(domain) = domain else { return self };
         let api = format!("$JS.{domain}.API.");
-        let in_domain: Vec<String> = self
-            .publish
+        let most = Self::for_user(&UserId::human(), Role::Human).publish;
+        let whole: Vec<String> = DOMAIN_FAMILIES
             .iter()
-            .filter_map(|s| match s.strip_prefix("$JS.API.") {
-                Some(rest) => Some(format!("{api}{rest}")),
-                None if s.starts_with("$KV.") => Some(format!("{api}{s}")),
-                None => None,
+            .map(|family| format!("$JS.API.{family}"))
+            .filter(|family| {
+                let mut held = most.iter().filter(|s| covers(family, s)).peekable();
+                held.peek().is_some() && held.all(|s| self.publish.contains(s))
             })
-            .filter(|s| !self.publish.iter().any(|have| covers(have, s)))
             .collect();
+        let mut in_domain: Vec<String> = whole.iter().map(|family| family.replacen("$JS.API.", &api, 1)).collect();
+        in_domain.extend(
+            self.publish
+                .iter()
+                .filter(|s| !whole.iter().any(|family| covers(family, s)))
+                .filter_map(|s| match s.strip_prefix("$JS.API.") {
+                    Some(rest) => Some(format!("{api}{rest}")),
+                    None if s.starts_with("$KV.") => Some(format!("{api}{s}")),
+                    None => None,
+                })
+                .filter(|s| !self.publish.iter().any(|have| covers(have, s))),
+        );
         self.publish.extend(in_domain);
         self
     }
@@ -719,7 +768,8 @@ impl Permissions {
 
     /// What the uplink credentials of `machine`'s leaf node allow: everything any of `users` may do in its role,
     /// since every message of a user on the machine crosses that one connection, except the outbox subjects, which
-    /// stay on the leaf. Include each human that runs the CLI on the machine, as [`Role::Human`].
+    /// stay on the leaf. Include each human that runs the CLI on the machine, as [`Role::Human`], and an assistant as
+    /// [`LeafRole::AssistantOf`] its human, which carries what [`Self::for_assistant`] allows it.
     ///
     /// Besides, the hub's intake may source the leaf's outbox through the machine's own JetStream domain: the hub
     /// sends the leaf requests to create, update and look up the outbox and to create and delete the consumers that
@@ -740,14 +790,21 @@ impl Permissions {
     /// seed of the key it completes staying on the asking machine. Likewise renewal requests from the machine
     /// ([`subject::ALL_RENEW_REQUESTS`]), its own among them, and their answers ([`subject::ALL_RENEW_REPLIES`]): each
     /// request proves the credentials it renews by signature ([`RenewRequest::signed`]).
-    pub fn for_leaf<'a>(machine: &Machine, users: impl IntoIterator<Item = (&'a UserId, Role)>) -> Self {
+    pub fn for_leaf<'a, R: Into<LeafRole<'a>>>(
+        machine: &Machine,
+        users: impl IntoIterator<Item = (&'a UserId, R)>,
+    ) -> Self {
         let mut leaf = Self { publish: Vec::new(), subscribe: Vec::new() };
         let mut setup = vec![UserId::human()];
         for (user, role) in users {
+            let (role, Self { publish, subscribe }) = match role.into() {
+                LeafRole::Ant => (Role::Ant, Self::for_user(user, Role::Ant)),
+                LeafRole::Human => (Role::Human, Self::for_user(user, Role::Human)),
+                LeafRole::AssistantOf(human) => (Role::Ant, Self::for_assistant(user, human)),
+            };
             if role.is_human() && !setup.contains(user) {
                 setup.push(user.clone());
             }
-            let Self { publish, subscribe } = Self::for_user(user, role);
             // nats-server lets the hub stream's interest (`ants.inbox.>`, `ants.notes.>`, ...) cross the uplink only if
             // `ReverseMatch` finds a publish allowance under it, and that skips allowances with `*` before the last
             // token, such as `ants.inbox.*.dev-a`. One literal subject each of them already allows is found.
