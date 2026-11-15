@@ -135,6 +135,31 @@ fn enrollment_credentials_issued_with_a_zero_ttl_never_expire() {
 }
 
 #[test]
+fn no_user_device_or_enrollment_takes_a_reserved_name() {
+    let dir = ants_test_support::scratch_dir("reserved-names");
+    let team = dir.join("auth");
+    init(&team).unwrap();
+    issue_bootstrap(&team, Duration::ZERO, &dir.join("bootstrap.creds")).unwrap();
+    let key = KeyPair::new_user().public_key();
+    for name in ["bootstrap", "signer", "channel-manager", "revoked"] {
+        let (user, out) = (p(name), dir.join(format!("{name}.creds")));
+        for role in [Role::Human, Role::Ant] {
+            let err = issue(&team, &user, role, None, &out).unwrap_err().to_string();
+            assert!(err.contains("is reserved"), "{name}: {err}");
+            let permissions = Permissions::for_user(&user, role);
+            let err = sign_with(&team, &user, role.into(), permissions, &key).unwrap_err().to_string();
+            assert!(err.contains("is reserved"), "{name}: {err}");
+        }
+        assert!(issue_enrollment(&team, &user, Duration::ZERO, &out).is_err(), "{name}");
+        assert!(sign_added(&team, &user, None, &key, "worker", &p("lead")).is_err(), "{name}");
+        assert!(!out.exists() || name == "bootstrap", "{name}");
+    }
+    let issued = revoke::issued(&team).unwrap();
+    assert_eq!(issued.iter().map(|i| i.kind).collect::<Vec<_>>(), [Kind::Bootstrap], "only the bootstrap credentials");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn a_renewed_uplink_keeps_its_key_and_rights_and_a_revoked_one_is_not_renewed() {
     let dir = ants_test_support::scratch_dir("extend-leaf");
     let (team, out, m1) = (dir.join("auth"), dir.join("leaf-m1.creds"), "m1".parse::<Machine>().unwrap());
@@ -1621,6 +1646,22 @@ async fn a_hook_runs_once_per_dead_letter_from_where_its_consumer_left_off() {
     let got = timeout(WAIT, lines(1)).await.expect("the hook ran");
     assert_eq!(got.iter().map(|d| d.stream_seq).collect::<Vec<_>>(), [2]);
     running.abort();
+    let _ = running.await;
+    // A dead letter the server delivers to the stopped reader's pull request, until it learns the reader is gone, waits
+    // out the whole ack wait: the next is stored once no pull request waits and the hook's ack is in.
+    timeout(WAIT, async {
+        loop {
+            let mut reader =
+                o_js.get_consumer_from_stream::<consumer::pull::Config, _, _>(&reader, STREAM).await.unwrap();
+            let info = reader.info().await.unwrap();
+            if info.num_waiting == 0 && info.num_ack_pending == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the stopped reader's pull request and the hook's ack reach the server");
 
     // A dead letter stored while no hook runs is handed on when one starts again.
     bus::publish_json(&a_js, subject::dead(&dev_a), &bury(3, &dev_a), None).await.unwrap();

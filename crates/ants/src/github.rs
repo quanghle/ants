@@ -1,11 +1,12 @@
 //! The few GitHub calls of human registration, against GitHub's REST API or a GitHub Enterprise Server's, as the
 //! signer's `[registration]` table names them ([`Registration`]).
 
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ants_daemon::config::registration::{GITHUB_API_URL, GITHUB_URL, GithubAccount, GithubUser, Registration};
 use anyhow::{Context as _, Result, bail};
-use hyper::http::{Method, StatusCode, header};
+use hyper::http::{HeaderMap, Method, StatusCode, header};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
@@ -15,12 +16,26 @@ const MAX_ANSWER: usize = 256 * 1024;
 /// The scopes a registering user grants the signer: reading org and team memberships and verified email addresses.
 const SCOPES: &str = "read:org user:email";
 
+/// Longest wait for GitHub's rate limit to let requests through again.
+const MAX_RATE_WAIT: Duration = Duration::from_hours(1);
+
 /// Where GitHub is, and the signer's own token, if any.
 #[derive(Debug, Clone)]
 pub struct Github {
     pub github_url: String,
     pub api_url: String,
     token: Option<String>,
+    /// What GitHub's latest API answer said of the rate limit.
+    rate: Arc<Mutex<RateLimit>>,
+}
+
+/// The rate limit of the token as GitHub's latest API answer told it: requests left in the window, when the window
+/// resets, and, after GitHub refused for it, when to ask again (seconds since the epoch).
+#[derive(Debug, Clone, Copy, Default)]
+struct RateLimit {
+    remaining: Option<u64>,
+    reset: Option<u64>,
+    retry_at: Option<u64>,
 }
 
 /// A device flow begun ([RFC 8628](https://www.rfc-editor.org/rfc/rfc8628)): the user signs in at `verification_uri`
@@ -72,9 +87,45 @@ impl Github {
     /// GitHub as `registration` names it, with the signer's token; github.com, with no token, without a table.
     pub fn new(registration: Option<&Registration>) -> Result<Self> {
         Ok(match registration {
-            Some(r) => Self { github_url: r.github_url.clone(), api_url: r.api_url.clone(), token: r.token()? },
-            None => Self { github_url: GITHUB_URL.to_owned(), api_url: GITHUB_API_URL.to_owned(), token: None },
+            Some(r) => Self::at(&r.github_url, &r.api_url, r.token()?),
+            None => Self::at(GITHUB_URL, GITHUB_API_URL, None),
         })
+    }
+
+    fn at(github_url: &str, api_url: &str, token: Option<String>) -> Self {
+        let rate = Arc::default();
+        Self { github_url: github_url.to_owned(), api_url: api_url.to_owned(), token, rate }
+    }
+
+    /// Whether the signer has a GitHub token of its own.
+    pub fn has_token(&self) -> bool {
+        self.token.is_some()
+    }
+
+    /// How long to wait before the next API request so that at least `reserve` requests of the window stay for
+    /// others, or GitHub, having refused for its rate limit, takes requests again: none when one may go now. At most
+    /// an hour.
+    pub fn rate_wait(&self, reserve: u64) -> Option<Duration> {
+        let rate = *self.rate.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = epoch();
+        let until = rate.retry_at.filter(|at| *at > now).or_else(|| {
+            rate.reset.filter(|reset| *reset > now && rate.remaining.is_some_and(|left| left <= reserve))
+        })?;
+        Some(Duration::from_secs(until - now + 1).min(MAX_RATE_WAIT))
+    }
+
+    /// Keep what the answer `status` with `headers` says of the rate limit.
+    fn note_rate(&self, status: StatusCode, headers: &HeaderMap) {
+        let number = |name: &str| headers.get(name)?.to_str().ok()?.trim().parse::<u64>().ok();
+        let mut rate = self.rate.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        rate.remaining = number("x-ratelimit-remaining").or(rate.remaining);
+        rate.reset = number("x-ratelimit-reset").or(rate.reset);
+        rate.retry_at = match status {
+            StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS => number("retry-after")
+                .map(|secs| epoch() + secs)
+                .or_else(|| rate.reset.filter(|_| rate.remaining == Some(0))),
+            _ => None,
+        };
     }
 
     /// `GET` `path` of the API with `token`, else the signer's: the status, and the answer when it is a success.
@@ -96,9 +147,12 @@ impl Github {
             headers.push((header::AUTHORIZATION.as_str(), format!("Bearer {token}")));
         }
         let url = format!("{}{path}", self.api_url);
-        crate::http::fetch(Method::GET, &url, &headers, None, MAX_ANSWER)
-            .await
-            .with_context(|| format!("asking GitHub for {path}"))
+        let (status, answer_headers, body) =
+            crate::http::fetch_with_headers(Method::GET, &url, &headers, None, MAX_ANSWER)
+                .await
+                .with_context(|| format!("asking GitHub for {path}"))?;
+        self.note_rate(status, &answer_headers);
+        Ok((status, body))
     }
 
     /// Begin a device flow of the OAuth App `client_id`.
@@ -239,6 +293,28 @@ impl Github {
         Ok(Some(GithubUser { id: account.id, login: account.login, emails: Vec::new(), orgs, teams }))
     }
 
+    /// Fail unless the signer's token sees every organization and team of the policy of `registration`, so that GitHub
+    /// answering that a user is no member of one means that, not that the token cannot tell: a misspelt, renamed or
+    /// hidden organization or team, or a token without access to it, would otherwise make every user a non-member.
+    pub async fn sees_policy(&self, registration: &Registration) -> Result<()> {
+        if self.token.is_none() {
+            bail!("the signer has no GitHub token ([registration] token_file or token_store)");
+        }
+        for org in registration.policy_orgs() {
+            let status = self.status(&format!("/orgs/{org}")).await?;
+            if status != StatusCode::OK {
+                bail!("GitHub answered {status} for the organization {org}, which the signer's token must see");
+            }
+        }
+        for team in &registration.teams {
+            let status = self.status(&format!("/orgs/{}/teams/{}", team.org, team.slug)).await?;
+            if status != StatusCode::OK {
+                bail!("GitHub answered {status} for the team {team}, which the signer's token must see");
+            }
+        }
+        Ok(())
+    }
+
     /// The GitHub user whose login is `login`.
     pub async fn user_by_login(&self, login: &str) -> Result<GithubAccount> {
         if !ants_daemon::config::registration::is_login(login) {
@@ -250,6 +326,11 @@ impl Github {
             (status, _) => bail!("GitHub answered {status} for the user {login}"),
         }
     }
+}
+
+/// Seconds since the epoch.
+fn epoch() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
 /// `pairs` as an `application/x-www-form-urlencoded` body.
@@ -312,7 +393,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn at(url: &str, token: Option<&str>) -> Github {
-        Github { github_url: url.to_owned(), api_url: url.to_owned(), token: token.map(str::to_owned) }
+        Github::at(url, url, token.map(str::to_owned))
     }
 
     #[tokio::test]
@@ -339,6 +420,7 @@ pub(crate) mod tests {
             ("GET /orgs/acme/members/octocat", _) => (204, String::new()),
             ("GET /orgs/acme/members/hidden", _) => (302, String::new()),
             ("GET /orgs/acme/teams/core/memberships/octocat", _) => (200, r#"{"state":"active"}"#.into()),
+            ("GET /orgs/acme" | "GET /orgs/acme/teams/core", _) => (200, "{}".into()),
             _ => (404, "{}".into()),
         }))
         .await;
@@ -354,6 +436,42 @@ pub(crate) mod tests {
         assert!(err.contains("302"), "{err}");
         let err = at(&url, None).member(7, &registration).await.unwrap_err().to_string();
         assert!(err.contains("no GitHub token"), "{err}");
+
+        let err = github.sees_policy(&registration).await.unwrap_err().to_string();
+        assert!(err.contains("404") && err.contains("acme/ops"), "{err}");
+        let seen: Registration = toml::from_str("client_id = \"Iv1.x\"\nteams = [\"acme/core\"]\n").unwrap();
+        github.sees_policy(&seen).await.unwrap();
+        let err = at(&url, None).sees_policy(&seen).await.unwrap_err().to_string();
+        assert!(err.contains("no GitHub token"), "{err}");
+    }
+
+    #[test]
+    fn requests_wait_for_the_rate_limit_keeping_a_reserve() {
+        let github = at("http://127.0.0.1:1", Some("signer"));
+        let headers = |pairs: &[(&'static str, u64)]| {
+            let mut headers = HeaderMap::new();
+            for (name, value) in pairs {
+                headers.insert(*name, value.to_string().parse().unwrap());
+            }
+            headers
+        };
+        let reset = epoch() + 60;
+        assert_eq!(github.rate_wait(100), None, "no answer told of a limit");
+        github.note_rate(StatusCode::OK, &headers(&[("x-ratelimit-remaining", 500), ("x-ratelimit-reset", reset)]));
+        assert_eq!(github.rate_wait(100), None);
+        github.note_rate(StatusCode::OK, &headers(&[("x-ratelimit-remaining", 100)]));
+        let wait = github.rate_wait(100).unwrap();
+        assert!(wait > Duration::from_secs(55) && wait <= Duration::from_secs(61), "{wait:?}");
+        assert_eq!(github.rate_wait(10), None, "a smaller reserve goes on");
+
+        github.note_rate(StatusCode::TOO_MANY_REQUESTS, &headers(&[("retry-after", 30)]));
+        let wait = github.rate_wait(10).unwrap();
+        assert!(wait > Duration::from_secs(25) && wait <= Duration::from_secs(31), "{wait:?}");
+        github.note_rate(StatusCode::FORBIDDEN, &headers(&[("x-ratelimit-remaining", 0)]));
+        assert!(github.rate_wait(0).unwrap() > Duration::from_secs(55), "exhausted until the window resets");
+        let past = epoch() - 1;
+        github.note_rate(StatusCode::OK, &headers(&[("x-ratelimit-remaining", 0), ("x-ratelimit-reset", past)]));
+        assert_eq!(github.rate_wait(100), None, "the window has reset");
     }
 
     #[tokio::test]

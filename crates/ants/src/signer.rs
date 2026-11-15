@@ -179,6 +179,7 @@ pub async fn serve(
                 update = registrar.next() => registrar.progressed(&approver, update).await?,
                 _ = ticks.tick() => {
                     registrar.expire();
+                    registrar.sweep();
                     registrar.look(&approver).await?;
                     signer.look(&approver, &mut report).await?;
                 }

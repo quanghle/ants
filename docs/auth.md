@@ -178,7 +178,7 @@ An approval stands for that GitHub user and name: the user's later devices of th
 A name registered with a GitHub sign-in belongs to that GitHub user's numeric ID for good, so a renamed GitHub account keeps its name:
 
 - The first registration signed for a free name binds it. The same GitHub user registering the name again adds a device; another GitHub user asking for it is refused, and so is a GitHub user already bound to another name.
-- `human`, the reserved names `bootstrap`, `channel-manager` and `signer`, and names any key other than a human's was issued to (an ant, webhook, leaf node, enrollment, ...) are refused.
+- `human`, the reserved names `bootstrap`, `channel-manager`, `revoked` and `signer`, and names any key other than a human's was issued to (an ant, webhook, leaf node, enrollment, ...) are refused.
 - A name holding human credentials but no binding (issued with `ants auth user --human`) is refused until the operator binds it:
 
 ```sh
@@ -199,12 +199,22 @@ Registered credentials expire after the policy's `ttl` (default 30 d). Before th
 
 A renewal keeps the credentials' lifetime, not the policy's current `ttl`. Expired credentials are not renewed: run `ants login` again, which adds a device for the same GitHub user while the policy or a standing approval admits it.
 
+### Membership sweep
+
+Between renewals, `ants signer` checks the memberships again every `sweep` of the `[registration]` table (default `6h`, the first sweep at start; `"0"` turns it off), for every name with live credentials (neither revoked nor expired) an `org` or `team` grant admitted: it looks the bound GitHub user up by ID with its own token, as a renewal does, one user per second. A user GitHub definitely finds no longer a member of a listed organization or team, or no GitHub user any more, loses every key of the name, as at a refused renewal. A name is kept whenever GitHub cannot tell (an error, a timeout or a rate limit), until the next sweep. Credentials of `approval` and `email-domain` grants, and devices issued with `ants auth user`, are not swept.
+
+- **Off:** without the `[registration]` table, with `sweep = "0"`, without the signer's token (`token_file` or `token_store`), or with a policy listing no organization or team; `ants signer` prints why once and looks again every 10 min.
+- **Seeing the policy:** each sweep first checks that the token sees every listed organization and team (`GET /orgs/ORG`, `GET /orgs/ORG/teams/SLUG`); otherwise the sweep is skipped with a message, as GitHub would then report every user a non-member.
+- **Rate limits:** the sweep follows GitHub's `x-ratelimit-remaining` and `x-ratelimit-reset` headers, keeping the last 100 requests of each window for registrations and renewals, and waits out a `403` or `429` refusal (`retry-after`, or the window's reset), up to an hour at a time.
+
+Each name revoked by a sweep or a refused renewal is printed, logged, and appended to `offboarded.jsonl` in the team directory (`at`, `name`, `github`, `by`: `sweep` or `renewal`, `reason`, `keys`), the account is pushed, and the revoked devices are recorded in the [directory of device keys](#directory-of-device-keys), as `ants auth revoke` does. A failed push or record names `ants auth push`.
+
 ### Offboarding
 
 - **Revoking:** `ants auth revoke NAME` revokes every key of the name, closing its connections once the account is pushed, and withdraws an `approval` grant (the key's line appended again, marked `withdrawn`); revoking one device (`--device`) or key (`--key`) withdraws nothing. The binding stays, so the name remains that GitHub user's, who registers again only through the policy or a new approval. A user still in a listed organization or team, or with a verified email address in a listed domain, is signed again at once: remove the user there, or the entry from the policy, too.
-- **Leaving an organization or team:** credentials an `org` or `team` grant admitted stay valid until they expire; the first renewal after the user left is refused and revokes every key of the name. `ants auth revoke NAME` cuts them off at once.
+- **Leaving an organization or team:** the next [membership sweep](#membership-sweep) (every `6h` by default), or the first renewal after the user left, whichever comes first, revokes every key of the name an `org` or `team` grant admitted. Without the signer's token, or with `sweep = "0"`, they stay valid until they expire. `ants auth revoke NAME` cuts them off at once.
 - **Email domains:** an `email-domain` grant ends with its credentials, as only a new sign-in showing a verified address in a listed domain registers again.
-- **Closing registration:** without the `[registration]` table the signer refuses every registration and every `org` or `team` renewal; revoking the bootstrap credentials keeps requests from reaching it. Registered devices stay valid until they expire or are revoked.
+- **Closing registration:** without the `[registration]` table the signer refuses every registration and every `org` or `team` renewal, and sweeps no memberships; revoking the bootstrap credentials keeps requests from reaching it. Registered devices stay valid until they expire or are revoked.
 
 ## Renewing over NATS
 

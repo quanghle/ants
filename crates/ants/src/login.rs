@@ -97,6 +97,7 @@ pub async fn run(args: LoginArgs) -> Result<()> {
 /// expires or `stop` completes; then write the credentials, their seed in `store` with `login.store_key`, and set the
 /// config file's `[cli]`.
 pub async fn register(login: &Login<'_>, store: &dyn Store, stop: impl Future<Output = ()>) -> Result<()> {
+    auth::check_not_reserved(login.name)?;
     if let Some(label) = login.label {
         revoke::check_label(label)?;
     }
@@ -354,6 +355,27 @@ mod tests {
             }
         }))
         .await
+    }
+
+    #[tokio::test]
+    async fn no_device_registers_under_a_reserved_name() {
+        let dir = ants_test_support::scratch_dir("login-reserved");
+        let (bootstrap, config) = (dir.join("bootstrap.creds"), dir.join("config.toml"));
+        let name: UserId = BOOTSTRAP_USER.parse().unwrap();
+        let login = Login {
+            hub: "nats://127.0.0.1:1",
+            name: &name,
+            label: None,
+            store_key: false,
+            bootstrap: &bootstrap,
+            out: &bootstrap,
+            config: &config,
+            device_page: PAGE,
+            repeat: REPEAT,
+        };
+        let err = register(&login, &Memory::default(), pending()).await.unwrap_err().to_string();
+        assert!(err.contains("reserved for the public bootstrap credentials"), "{err}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
