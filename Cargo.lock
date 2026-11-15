@@ -175,6 +175,7 @@ dependencies = [
  "jiff",
  "libc",
  "nkeys",
+ "ring",
  "rmcp",
  "security-framework",
  "serde",

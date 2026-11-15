@@ -230,6 +230,8 @@ pub fn as_envelope(post: &ChannelPost, ant: &UserId) -> Envelope {
         allow: post.allow.clone(),
         mention: None,
         title: None,
+        // Stored under the post's channel handles, which an inbox message's would not name.
+        attachments: Vec::new(),
         sent_at: post.sent_at,
     }
 }

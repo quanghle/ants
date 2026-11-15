@@ -21,6 +21,7 @@ hyper = { workspace = true, features = ["server", "http1"] }
 hyper-util = { workspace = true, features = ["tokio"] }
 jiff = { version = "0.2.39", default-features = false, features = ["std", "tzdb-zoneinfo", "tzdb-bundle-platform"] }
 nkeys = "0.4.5"
+ring = "0.17.14"
 rmcp = { workspace = true, features = ["server", "macros", "transport-streamable-http-server"] }
 serde.workspace = true
 serde_json.workspace = true

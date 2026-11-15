@@ -9,6 +9,7 @@ pub use uuid::Uuid;
 
 mod ant_request;
 mod approvals;
+mod attachments;
 mod chanadm;
 mod channels;
 mod dead;
@@ -32,6 +33,7 @@ mod threads;
 
 pub use ant_request::*;
 pub use approvals::*;
+pub use attachments::*;
 pub use chanadm::*;
 pub use channels::*;
 pub use dead::*;

@@ -29,4 +29,10 @@ pub enum Error {
     /// NATS ([`subject::renewable_name`]).
     #[error("renewal request of {name:?} found at {at}")]
     ForeignRenewal { name: String, at: String },
+    #[error("invalid attachment {name:?}: {reason}")]
+    InvalidAttachment { name: String, reason: &'static str },
+    #[error("{0} attachments: a message carries at most {max}", max = crate::MAX_ATTACHMENTS)]
+    TooManyAttachments(usize),
+    #[error("invalid attachment handle {0:?}: use <from>.<inbox|notes|chan>.<to, thread or channel>.<id>")]
+    InvalidAttachmentHandle(String),
 }

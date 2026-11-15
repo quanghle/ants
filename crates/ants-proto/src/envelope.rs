@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    ApprovalDecision, ApprovalRequest, ChannelId, DEFAULT_TURN_BUDGET, Error, Escalation, Humans, Role, ThreadId,
-    UserId, subject,
+    ApprovalDecision, ApprovalRequest, Attachment, ChannelId, DEFAULT_TURN_BUDGET, Error, Escalation, Humans, Role,
+    ThreadId, UserId, subject,
 };
 #[cfg(doc)]
 use crate::{
@@ -84,6 +84,11 @@ pub struct Envelope {
     /// title. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// The files attached to the message, stored before it under its [`Envelope::attachment_handle`]s. Never copied
+    /// by [`Envelope::reply`] or [`Envelope::follow_up`]: a message passing an attachment on stores it again under its
+    /// own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
     pub sent_at: DateTime<Utc>,
 }
 
@@ -124,6 +129,7 @@ impl Envelope {
             allow: None,
             mention: None,
             title: None,
+            attachments: Vec::new(),
             sent_at: Utc::now(),
         }
     }
@@ -251,6 +257,7 @@ impl Envelope {
             allow: self.allow.clone(),
             mention: None,
             title: None,
+            attachments: Vec::new(),
             sent_at: Utc::now(),
         })
     }
@@ -283,6 +290,9 @@ pub struct NotesPost {
     pub text: String,
     /// Turns left in the notes after this post.
     pub turn_budget: u32,
+    /// The files attached to the post, stored before it under its [`NotesPost::attachment_handle`]s.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
     pub sent_at: DateTime<Utc>,
 }
 
@@ -295,6 +305,7 @@ impl NotesPost {
             from,
             text: text.into(),
             turn_budget: DEFAULT_TURN_BUDGET,
+            attachments: Vec::new(),
             sent_at: Utc::now(),
         }
     }
