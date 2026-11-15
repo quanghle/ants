@@ -1900,7 +1900,9 @@ fn settled(state: &tools::State) -> String {
     match state {
         tools::State::Pending => "Pending.".to_owned(),
         tools::State::Decided(d) => format!("Already answered: {}.", tools::spelling(d.verdict)),
-        tools::State::DecidedByAnt(by, d) => format!("Already answered by {by}: {}.", tools::spelling(d.verdict)),
+        tools::State::DecidedByAnt(by, d) => {
+            format!("Already answered by {}: {}.", tools::deciders(by, d), tools::spelling(d.verdict))
+        }
         tools::State::Expired => "Expired: its ant rejected it.".to_owned(),
     }
 }

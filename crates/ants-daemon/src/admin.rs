@@ -7,7 +7,7 @@
 //!
 //! An order an admin signed it carries out ([`apply`]) with the module of its op: [`set`] edits the ant's settings in
 //! the config file the daemon serves ([`ConfigFile`]), which the daemon reloads at once; [`pause`] pauses or resumes
-//! the ant there.
+//! the ant there; [`restart`] has the daemon serving the ant restart its harnesses.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -29,6 +29,7 @@ use crate::bus;
 use crate::direct_kv::{DirectKv, Lookup};
 
 mod pause;
+pub mod restart;
 mod set;
 
 /// How long an order may stay in hand unacked before the stream delivers it again.
@@ -57,6 +58,8 @@ pub struct Orders {
     pub accounts: Vec<String>,
     /// The config file the daemon serves whole, which orders edit; none refuses those.
     pub config: Option<ConfigFile>,
+    /// The ants the process serves, which restart their harnesses on an order.
+    pub restarts: restart::Restarts,
 }
 
 /// The config file a daemon serves whole, as the orders to its machine's ants edit it, and how to have the daemon
@@ -263,7 +266,7 @@ async fn apply(orders: &Orders, order: &AdminOrder) -> AdminOutcome {
         AdminOp::Set { changes } => set::apply(orders, order, changes),
         AdminOp::Pause => pause::apply(orders, order, true),
         AdminOp::Resume => pause::apply(orders, order, false),
-        AdminOp::Restart { .. } => refused(order, NOT_SUPPORTED),
+        AdminOp::Restart { now } => restart::apply(orders, order, *now).await,
         AdminOp::Add { .. } => refused(order, NOT_SUPPORTED),
         AdminOp::Retire => refused(order, NOT_SUPPORTED),
         AdminOp::ReadMemories => refused(order, NOT_SUPPORTED),

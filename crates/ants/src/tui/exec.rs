@@ -33,12 +33,12 @@ pub struct Ctx {
     pub meta: Result<Meta, String>,
     /// What seals messages to another human, and titles on a thread between two humans.
     pub sealing: Sealing,
-    /// What signs admin orders, or why none can be signed.
-    pub admin: Result<orders::Admin, String>,
     /// The account that signed the CLI's credentials, for whose team the human's assistant grant is verified.
     pub account: Option<String>,
     /// What opens the attachments of sealed messages, if anything.
     pub keyring: Option<Arc<Keyring>>,
+    /// The human's admin credentials, which sign admin orders, or why there are none.
+    pub admin: Result<orders::Admin, String>,
 }
 
 impl Ctx {
@@ -119,6 +119,12 @@ pub enum Job {
     Open(Box<Listed>),
     /// Save the attachment as `ants attachment get` does, to the path given, else under its name here.
     Save(Box<Listed>, Option<std::path::PathBuf>),
+    /// Order the daemon of `ant` to restart its harnesses, cancelling their prompts if `now`, as `ants ant restart`
+    /// does.
+    Restart {
+        ant: UserId,
+        now: bool,
+    },
     /// Pause `ant`, or resume it, as `ants ant pause|resume` does.
     Pause {
         ant: UserId,
@@ -218,6 +224,11 @@ impl Job {
                 let entries = thread::history(&ctx.js, &thread, None, false, None).await?;
                 let ant = stuck(&entries).ok_or_else(|| anyhow!("no ant is stuck on thread {thread}"))?;
                 ask(ctx, ant.into(), Some(thread), text, false, &files).await
+            }
+            Self::Restart { ant, now } => {
+                let admin = ctx.admin.as_ref().map_err(|e| anyhow!("{e}"))?;
+                let (order, outcome) = crate::restart::send(admin, &ctx.js, None, &ant, now).await?;
+                Ok(Done::line(crate::restart::told(&order, outcome)?))
             }
             Self::Cancel { thread, ants } => {
                 let mut lines = Vec::new();
@@ -446,17 +457,8 @@ mod tests {
         }
         let meta = thread_meta::open(&nats[0], &js).await.map_err(|e| format!("{e:#}"));
         let (me, sealing) = (nats[0].me.clone(), Sealing::of(&nats[0]));
-        let ctx = Ctx {
-            client,
-            js,
-            me,
-            domain: None,
-            meta,
-            sealing,
-            admin: Err(String::new()),
-            account: None,
-            keyring: None,
-        };
+        let admin = Err("unused".into());
+        let ctx = Ctx { client, js, me, domain: None, meta, sealing, account: None, keyring: None, admin };
         let source = server.dir().join("menu.txt");
         std::fs::write(&source, b"soup").unwrap();
         let files: Rc<[File]> = attachments::read_all(std::slice::from_ref(&source)).unwrap().into();
@@ -533,17 +535,8 @@ mod tests {
         let files: Rc<[File]> = attachments::read_all(std::slice::from_ref(&source)).unwrap().into();
         let (me, sealing) = (nats.me.clone(), Sealing::of(&nats));
         let meta = Err("unused".into());
-        let ctx = Ctx {
-            client,
-            js: js.clone(),
-            me,
-            domain: None,
-            meta,
-            sealing,
-            admin: Err(String::new()),
-            account: None,
-            keyring: None,
-        };
+        let admin = Err("unused".into());
+        let ctx = Ctx { client, js: js.clone(), me, domain: None, meta, sealing, account: None, keyring: None, admin };
         let ask = Job::Ask { to: user("dev-a"), thread: None, text: "see the plan".into(), steer: false };
         let done = Job::Attached { job: Box::new(ask), files: Rc::clone(&files) }.run(&ctx).await.unwrap();
         assert!(

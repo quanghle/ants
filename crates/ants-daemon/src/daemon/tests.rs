@@ -38,6 +38,7 @@ struct Bus {
     humans: Registry,
     redactor: Redactor,
     publisher: Option<crate::publish::Publisher>,
+    restarts: Restarts,
 }
 
 impl Bus {
@@ -89,6 +90,7 @@ impl Bus {
             humans: Registry::default(),
             redactor: Redactor::default(),
             publisher: None,
+            restarts: Restarts::default(),
         };
         (bus, replies)
     }
@@ -187,6 +189,7 @@ impl Bus {
             ant: &self.dev,
             pool,
             cancels: Cancels::default(),
+            restarts: &self.restarts,
             attempts: &self.attempts,
             answered: &self.answered,
             buried: &self.buried,
@@ -228,6 +231,7 @@ impl Bus {
             () = inbox.serve(messages, channels, IDLE, stop) => {}
             () = escalator.deadlines() => {}
             () = inbox.hear_cancels() => {}
+            () = inbox.hear_restarts() => {}
         }
     }
 
@@ -1271,6 +1275,82 @@ async fn a_human_cancels_a_running_prompt_and_the_sender_gets_what_it_wrote() {
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
     assert_eq!(log.locked().cancelled, 1);
     assert_eq!(log.locked().prompted, 2, "not retried");
+    assert_eq!(bus.unacked().await, 0);
+}
+
+/// Have the daemon restart dev-a's harnesses for alice once it serves the inbox.
+async fn restart(bus: &Bus, now: bool) -> Restarted {
+    let (dev, alice) = (bus.dev.clone(), "alice".parse::<UserId>().unwrap());
+    let _served = bus.restarts.serve(&dev);
+    timeout(WAIT, async {
+        while !bus.restarts.is_listening(&dev) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        bus.restarts.restart(&dev, alice, now).await.expect("dev-a is served")
+    })
+    .await
+    .expect("the daemon heard no restart")
+}
+
+#[tokio::test]
+async fn a_restart_stops_idle_harnesses_and_working_ones_after_their_prompt() {
+    let Some((bus, mut to_human)) = Bus::start().await else { return };
+    let (launch, log, gate) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
+    bus.send(&t1, "one").await;
+    bus.send(&t2, "hold two").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let mut replies = vec![next_reply(&mut to_human).await];
+        until("the held prompt to run", || log.locked().prompted == 2).await;
+        until("the first message to be handled", || bus.workload.handling() == 1).await;
+        assert_eq!(restart(&bus, false).await, Restarted { stopped: 1, after_prompt: 1, cancelled: 0 });
+        gate.add_permits(1);
+        replies.push(next_reply(&mut to_human).await);
+        replies.sort();
+        let mut want = vec![(t1.clone(), "one".to_owned()), (t2.clone(), "hold two".to_owned())];
+        want.sort();
+        assert_eq!(replies, want, "the working prompt ends");
+        bus.send(&t2, "again").await;
+        assert_eq!(next_reply(&mut to_human).await, (t2.clone(), "again".to_owned()));
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    {
+        let log = log.locked();
+        assert_eq!((log.starts, log.cancelled), (3, 0), "a new harness, no prompt cancelled");
+        assert_eq!(log.loaded, ["s2"], "it resumes the session");
+    }
+    assert_eq!(bus.unacked().await, 0);
+}
+
+#[tokio::test]
+async fn a_restart_now_cancels_the_running_prompt_and_the_sender_gets_what_it_wrote() {
+    let Some((bus, mut to_human)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let t1 = ThreadId::generate();
+    bus.send(&t1, "stall").await;
+    bus.send(&t1, "after").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        until("the prompt to run", || log.locked().prompted == 1).await;
+        assert_eq!(restart(&bus, true).await, Restarted { stopped: 0, after_prompt: 1, cancelled: 1 });
+        let reply = next_envelope(&mut to_human).await;
+        let notice = "[ants] The prompt was cancelled by alice to restart dev-a's harnesses (ants ant restart --now).";
+        assert_eq!(reply.text, format!("partial\n\n{notice}"));
+        assert_eq!(next_reply(&mut to_human).await, (t1.clone(), "after".to_owned()), "the thread goes on");
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    {
+        let log = log.locked();
+        assert_eq!((log.starts, log.cancelled, log.prompted), (2, 1, 2), "not retried, on a new harness");
+        assert_eq!(log.loaded, ["s1"], "it resumes the session");
+    }
     assert_eq!(bus.unacked().await, 0);
 }
 

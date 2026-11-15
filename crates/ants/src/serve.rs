@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ants_daemon::admin::ConfigFile;
+use ants_daemon::admin::restart::Restarts;
 use ants_daemon::config::{self, Ant, HostSettings, Summary};
 use ants_daemon::host::{self, Host};
 use ants_daemon::schedule::Schedule;
@@ -411,11 +412,17 @@ pub async fn run(
     let metrics = served.metrics;
     let _metrics = crate::serve_metrics(metrics, Arc::new(ants_daemon::metrics::Daemon)).await?;
     let mut running = HashMap::new();
+    // The ants served, which the host connection's admin orders restart.
+    let restarts = Restarts::default();
+    let serve = |ant| serve(ant, restarts.clone());
+    let restarting = |wanted: Option<(Host, Vec<UserId>)>| {
+        wanted.map(|(host, ants)| (Host { restarts: restarts.clone(), ..host }, ants))
+    };
     let mut tasks: FuturesUnordered<_> = reconcile(&mut running, served.configs).into_iter().map(serve).collect();
     let mut schedules = Schedules::default();
     schedules.reconcile(served.schedules, run_schedule);
     let mut host = HostRun::default();
-    host.reconcile(served.host);
+    host.reconcile(restarting(served.host));
     let shutdown = async {
         if let Err(e) = ants_daemon::daemon::stop_signal().await {
             tracing::warn!(error = %e, "waiting for Ctrl-C or SIGTERM");
@@ -463,7 +470,7 @@ pub async fn run(
                     }
                     tasks.extend(reconcile(&mut running, served.configs).into_iter().map(serve));
                     schedules.reconcile(served.schedules, run_schedule);
-                    host.reconcile(served.host);
+                    host.reconcile(restarting(served.host));
                 }
                 Err(e) => tracing::error!(
                     on = trigger.describe(),
@@ -481,11 +488,11 @@ pub async fn run(
     }
 }
 
-/// Serve one ant until it stops, reporting which.
-fn serve((config, stop): (Config, Stop)) -> impl Future<Output = (UserId, Result<()>)> {
+/// Serve one ant until it stops, reporting which, restarting its harnesses on the admin orders `restarts` passes on.
+fn serve((config, stop): (Config, Stop), restarts: Restarts) -> impl Future<Output = (UserId, Result<()>)> {
     let ant = config.ant.clone();
     let span = tracing::info_span!("ant", name = %ant);
-    async move { (ant, ants_daemon::run_until(config, &stop).await) }.instrument(span)
+    async move { (ant, ants_daemon::run_until(config, &stop, &restarts).await) }.instrument(span)
 }
 
 /// Run `schedule` in a task of its own until aborted.

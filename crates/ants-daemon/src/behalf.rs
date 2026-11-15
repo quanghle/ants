@@ -130,16 +130,15 @@ pub fn sent_notice(envelope: &Envelope, human: &UserId) -> Envelope {
 }
 
 /// The message telling `human` that `envelope`, carrying `decision`, is its assistant's decision for it, verified by a
-/// reader, and that it holds until the human confirms it: no decision made for a human takes effect as the human's
-/// unconfirmed. Sent as [`sent_notice`] is.
-// The confirmation of such a decision is still to come (ants-y6zhm.4): until then the requester never applies it
-// (`Envelope::chain_decision`), and the request waits for the human, a stand-in or its chain, or expires.
+/// reader, and that it holds until the human consents to it: no decision made for a human takes effect as the human's
+/// unconfirmed ([`crate::approvals`]). Sent as [`sent_notice`] is.
 pub fn held_notice(envelope: &Envelope, decision: &ApprovalDecision, human: &UserId) -> Envelope {
     let (from, to, id) = (&envelope.from, &envelope.to, decision.request_id);
     let text = format!(
-        "[ants] {from}, as the assistant of {human}, decided tool request {to}/{id} for {human}: {}. Not applied: \
-         a decision made for a human takes effect only once the human decides it (`ants tools approve {to}/{id}` or \
-         `ants tools reject {to}/{id}`).",
+        "[ants] {from}, as the assistant of {human}, decided tool request {to}/{id} for {human}: {}. Held until \
+         {human} confirms it (`ants assistant confirm {to}/{id}`, or `--deny` to drop it), unless a pre-allow rule \
+         of {human} covers the call (`ants assistant allow`). {human} may also decide the request itself (`ants \
+         tools approve {to}/{id}` or `ants tools reject {to}/{id}`).",
         decision.verdict.as_str()
     );
     Envelope::new(to.clone(), human.clone(), text).with_owner(Some(human.clone()))

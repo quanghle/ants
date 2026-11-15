@@ -74,21 +74,26 @@ pub struct Page {
     /// The selected message of the queue, kept as messages come and go.
     message: Selection<Uuid>,
     pub queue: Queue,
+    /// Whether `r` asked to restart the ant's harnesses, which the next key confirms.
+    armed: bool,
 }
 
 impl Page {
-    pub const THREADS_KEYS: &str = "↑↓ thread · Enter open · s steer · x cancel · z snooze · S TL;DR · ←→ pane · a ask · w work · p pause/resume · \
-         Esc back";
+    pub const THREADS_KEYS: &str = "↑↓ thread · Enter open · s steer · x cancel · z snooze · S TL;DR · ←→ pane · a ask \
+                                    · w work · r restart · p pause/resume · Esc back";
     pub const QUEUE_KEYS: &str =
-        "↑↓ message · Enter open its thread · ←→ pane · a ask · w work · p pause/resume · Esc back";
+        "↑↓ message · Enter open its thread · ←→ pane · a ask · w work · r restart · p pause/resume · Esc back";
+    pub const ARMED_KEYS: &str = "y restart the ant's harnesses after their prompts · ! restart now, cancelling the \
+                                  prompts · any other key keeps them";
 
     pub fn new(ant: UserId) -> Self {
         let threads = work::Page::new(Filter { user: Some(ant.clone()), ..Filter::default() });
-        Self { ant, pane: Pane::Threads, threads, message: Selection::default(), queue: Queue::Asking }
+        Self { ant, pane: Pane::Threads, threads, message: Selection::default(), queue: Queue::Asking, armed: false }
     }
 
     pub fn keys(&self) -> &'static str {
         match self.pane {
+            _ if self.armed => Self::ARMED_KEYS,
             Pane::Threads => Self::THREADS_KEYS,
             Pane::Queue => Self::QUEUE_KEYS,
         }
@@ -114,7 +119,16 @@ impl Page {
     }
 
     pub fn key(&mut self, key: Key, data: &Data) -> Option<To> {
+        let armed = std::mem::take(&mut self.armed);
         match key {
+            Key::Char('r') => {
+                self.armed = true;
+                return None;
+            }
+            Key::Char(c @ ('y' | '!')) if armed => {
+                let job = Job::Restart { ant: self.ant.clone(), now: c == '!' };
+                return Some(To::Do(Action::Run(job, String::new())));
+            }
             Key::Left => {
                 self.pane = self.pane.moved(-1);
                 return None;
@@ -449,6 +463,20 @@ mod tests {
         m.key(Key::Esc, at(3));
         m.key(Key::Char('a'), at(3));
         assert!(m.bar.focused && m.bar.text() == "@dev-a ", "a opens the bar on the ant");
+        m.key(Key::Esc, at(3));
+        m.focus = crate::tui::model::Focus::View;
+        assert_eq!(m.key(Key::Char('r'), at(3)), None);
+        assert!(screen(&m, at(3)).contains(Page::ARMED_KEYS), "r asks first");
+        assert_eq!(m.key(Key::Char('y'), at(3)), Some(Action::Run(restart(false), String::new())));
+        m.key(Key::Char('r'), at(3));
+        assert_eq!(m.key(Key::Char('!'), at(3)), Some(Action::Run(restart(true), String::new())));
+        m.key(Key::Char('r'), at(3));
+        assert_eq!(m.key(Key::Char('n'), at(3)), None);
+        assert_eq!(m.key(Key::Char('y'), at(3)), None, "any other key keeps the harnesses");
+    }
+
+    fn restart(now: bool) -> Job {
+        Job::Restart { ant: user("dev-a"), now }
     }
 
     #[test]
