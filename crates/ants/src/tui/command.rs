@@ -543,7 +543,11 @@ impl Model {
             Slash::Search(query) => self.search(query, now).map(Some),
             Slash::Digest(_) => Err("/digest is not in ants chat yet".to_owned()),
             Slash::Tldr => Err("/tldr is not in ants chat yet".to_owned()),
-            Slash::Tree => Err("/tree is not in ants chat yet".to_owned()),
+            Slash::Tree => {
+                let thread = self.target()?;
+                self.tree(thread);
+                Ok(None)
+            }
             Slash::Quit => Ok(Some(Action::Quit)),
         }
     }
@@ -912,6 +916,22 @@ mod tests {
         assert_eq!(m.nav, nav::Item::Ant(user("dev-a")));
         assert_eq!(run(&mut m, "/goto ffff"), None);
         assert_eq!(m.bar.status.as_ref().unwrap().text, "no thread ffff read");
+    }
+
+    #[test]
+    fn tree_shows_the_delegation_tree_of_the_thread_open() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        m.stored(vec![message(1, &thread, "alice", "dev-a", "deploy")], at(1));
+        m.bar.focused = true;
+        m.bar.set_text("/tree");
+        assert_eq!(m.key(Key::Enter, at(1)), None);
+        assert_eq!(m.bar.status.as_ref().unwrap().text, "no thread open or selected");
+        m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
+        m.bar.set_text("/tree");
+        m.key(Key::Enter, at(1));
+        assert_eq!(m.page().name(), "tree");
+        assert_eq!(m.tree_shown().unwrap().0, thread);
     }
 
     #[test]
