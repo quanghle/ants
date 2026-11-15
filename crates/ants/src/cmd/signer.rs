@@ -27,6 +27,14 @@ pub(crate) async fn run(
         config.display(),
         if names.is_empty() { "none yet: every request goes to a human".to_owned() } else { names.join(", ") }
     );
+    match ants_daemon::config::registration::signer_registration(&config)? {
+        Some(registration) => eprintln!(
+            "registering humans' devices after a GitHub sign-in (OAuth App {}), signed at once for {}",
+            registration.client_id,
+            policy(&registration)
+        ),
+        None => eprintln!("refusing registrations: {} has no [registration] table", config.display()),
+    }
     let options =
         signer::Options { config: &config, approval_timeout, reconnect: renew::AUTO_RECONNECT, tick: signer::TICK };
     let stop = async {
@@ -34,4 +42,12 @@ pub(crate) async fn run(
     };
     let serving = signer::serve(conn.nats, &dir, domain, &options, signer::print, stop);
     Box::pin(upgrade::or_exit(serving, &upgrade)).await
+}
+
+/// Whom `registration` signs for at once, in words.
+fn policy(registration: &ants_daemon::config::registration::Registration) -> String {
+    let mut whom: Vec<String> = registration.orgs.iter().map(|o| format!("org {o}")).collect();
+    whom.extend(registration.teams.iter().map(|t| format!("team {t}")));
+    whom.extend(registration.email_domains.iter().map(|d| format!("@{d}")));
+    if whom.is_empty() { "nobody: every registration goes to a human".to_owned() } else { whom.join(", ") }
 }
