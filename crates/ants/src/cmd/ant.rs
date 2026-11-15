@@ -2,12 +2,12 @@
 
 use std::path::PathBuf;
 
-use ants_proto::UserId;
+use ants_proto::{Machine, UserId};
 use anyhow::Result;
 use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
 
-use crate::{ant, completions, orders};
+use crate::{ant, completions, memories, orders};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum AntCommand {
@@ -34,6 +34,20 @@ pub(crate) enum AntCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Show ANT's memories, which an admin order asks the daemon of its machine to read while online: its core
+    /// memories (whoami, memory, tasks), which a set order edits, and its harness's memory files (the `memory_files`
+    /// globs of its harness) and bd memories (with BD_DB in its environment), read-only and size-capped. Needs a
+    /// human device's admin credentials.
+    Memories {
+        #[arg(add = ArgValueCandidates::new(completions::ants))]
+        ant: UserId,
+        /// One JSON object: core, harness, workdir, files, bd and skipped.
+        #[arg(long)]
+        json: bool,
+        /// The machine whose daemon serves ANT (default: the machine that last recorded serving it).
+        #[arg(long)]
+        machine: Option<Machine>,
+    },
 }
 
 pub(crate) async fn run(nats: &crate::Nats<'_>, command: AntCommand) -> Result<()> {
@@ -47,5 +61,6 @@ pub(crate) async fn run(nats: &crate::Nats<'_>, command: AntCommand) -> Result<(
             ant::show(nats, ant, &caps, json).await
         }
         AntCommand::Orders { ant, json } => orders::show(nats, &ant, json).await,
+        AntCommand::Memories { ant, json, machine } => memories::show(nats, &ant, machine, json).await,
     }
 }
