@@ -52,7 +52,7 @@ pub fn check_name(issued: &[Issued], name: &UserId) -> Result<()> {
     if name.is_human() {
         bail!("{name} is the default human, which no one registers");
     }
-    if *name == UserId::channel_manager() || name.as_str() == ants_proto::BOOTSTRAP_USER {
+    if *name == UserId::channel_manager() || *name == UserId::signer() || name.as_str() == ants_proto::BOOTSTRAP_USER {
         bail!("{name} is a reserved name");
     }
     if let Some(other) = issued.iter().find(|i| i.name == name.as_str() && i.kind != Kind::Human) {
@@ -112,6 +112,7 @@ mod tests {
             ("human", 2, Binder::Operator, "human is the default human"),
             ("channel-manager", 2, Binder::Signer, "reserved"),
             ("bootstrap", 2, Binder::Signer, "reserved"),
+            ("signer", 2, Binder::Signer, "reserved"),
         ];
         for (name, id, binder, why) in refused {
             let err = check(name, id, binder).unwrap_err();

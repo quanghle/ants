@@ -315,3 +315,41 @@ fn a_github_binding_and_its_grant_are_listed_with_the_device_and_kept_on_renewal
     assert_eq!(renewed.device, device);
     assert_eq!((renewed.github, renewed.grant), (new.github, new.grant));
 }
+
+#[test]
+fn revoking_a_name_withdraws_its_approval_grants_but_revoking_a_device_does_not() {
+    use ants_daemon::config::registration::{GithubAccount, Grant};
+    let dir = ants_test_support::scratch_dir("withdraw");
+    let team = dir.join("auth");
+    auth::init(&team).unwrap();
+    let carol: ants_proto::UserId = "carol".parse().unwrap();
+    let sign = |label| {
+        let new = auth::NewDevice {
+            label: Some(label),
+            github: Some(GithubAccount { id: 7, login: "mallory".into() }),
+            grant: Some(Grant::Approval("alice".into())),
+            ..auth::NewDevice::default()
+        };
+        let key = nkeys::KeyPair::new_user().public_key();
+        let permissions = ants_proto::Permissions::for_user(&carol, ants_proto::Role::Human);
+        auth::sign_device_with(&team, &carol, Kind::Human, permissions, &new, &key, None).unwrap();
+    };
+    sign("laptop");
+    sign("phone");
+    let approval = Some(Grant::Approval("alice".into()));
+    assert_eq!(standing_approval(&issued(&team).unwrap(), "carol", 7), approval);
+    assert_eq!(standing_approval(&issued(&team).unwrap(), "carol", 8), None, "another GitHub user");
+    assert_eq!(standing_approval(&issued(&team).unwrap(), "bob", 7), None, "another name");
+
+    let keys = device_keys(&team, "carol", &["laptop".to_owned()]).unwrap();
+    revoke(&team, None, &keys).unwrap();
+    assert_eq!(standing_approval(&issued(&team).unwrap(), "carol", 7), approval, "one device revoked");
+
+    revoke(&team, Some("carol"), &[]).unwrap();
+    let after = issued(&team).unwrap();
+    assert_eq!(standing_approval(&after, "carol", 7), None);
+    let binding = GithubAccount { id: 7, login: "mallory".into() };
+    assert!(after.iter().all(|i| i.github.as_ref() == Some(&binding)), "the binding stays");
+    rename(&team, "carol", "phone", "Phone").unwrap();
+    assert_eq!(standing_approval(&issued(&team).unwrap(), "carol", 7), None, "a relabelled device stays withdrawn");
+}

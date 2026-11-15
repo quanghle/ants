@@ -2,30 +2,52 @@
 //! the team's public bootstrap credentials ([`LoginRequest`] on [`subject::login`]), the signer runs a GitHub device
 //! flow for it ([`Github`]), tells the machine where to sign in, reads who signed in, and signs a human's credentials
 //! for the request's key when the GitHub user falls under the signer's `[registration]` policy and may hold the name
-//! asked for ([`binding`]).
+//! asked for ([`binding`]). A user outside the policy waits for the humans: the signer asks them with an approval
+//! request of the reserved user [`UserId::signer`], and signs once one allows it. The approval stands for that user
+//! and name until every key of the name is revoked ([`revoke::standing_approval`]), so the user's other devices sign
+//! at once.
 //!
 //! Requests are core NATS messages and stored nowhere: the machine repeats its request every
 //! [`ants_proto::LOGIN_REPEAT`] until an answer settles it, and the signer answers each repeat of a key with what it
 //! has for it, sealed to the request's one-off X25519 key ([`LoginReply`]). One device flow runs per key, and at most
 //! [`MAX_REGISTRATIONS`] at once. The user's GitHub token stays in the task that reads the user with it.
+//!
+//! The signer also answers the renewal requests ([`RenewRequest`]) of the credentials a registration granted
+//! ([`revoke::registered`]), which `ants enroll renew` leaves to it: an organization or team grant renews only while
+//! the signer's own GitHub token finds the user still a member under the policy, reread; else the signer refuses,
+//! revokes every key of the name and pushes the account. An approval grant renews while it stands; an email-domain
+//! grant, which only the user's token shows, is refused, naming `ants login`.
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
 use ants_daemon::config::registration::{GithubAccount, GithubUser, Grant, signer_registration};
-use ants_proto::{JsDomain, LoginAnswer, LoginReply, LoginRequest, MAX_REGISTRATIONS, Permissions, Role};
+use ants_proto::{
+    ApprovalDecision, ApprovalRequest, JsDomain, LOGIN_REPEAT, LoginAnswer, LoginReply, LoginRequest,
+    MAX_REGISTRATIONS, Permissions, RenewReply, RenewRequest, Role, STREAM, ThreadId, ToolCall, UserId, Verdict,
+};
 use anyhow::{Context as _, Result, anyhow, bail};
+use async_nats::jetstream::stream::DirectGetErrorKind;
 use chrono::{DateTime, Utc};
 use data_encoding::BASE64URL_NOPAD;
 use nkeys::XKey;
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 
 use crate::auth;
 use crate::binding::{self, Binder};
+use crate::enroll::Approver;
 use crate::github::Github;
 use crate::revoke::{self, Kind};
 use crate::signer::AbortOnDrop;
+
+/// Most registrations waiting for a human at once; more GitHub users outside the policy are refused.
+pub const MAX_WAITING_REGISTRATIONS: usize = 3;
+/// Least time a request must have left for a human to be asked about it.
+const LEAST_ASKING: Duration = Duration::from_secs(10);
+/// How long a renewal's answer is kept for the repeats of its request, and its membership check at most runs.
+const RENEWAL_KEPT: Duration = Duration::from_mins(10);
 
 /// What a registration's task found out.
 enum Progress {
@@ -33,10 +55,22 @@ enum Progress {
     Verify { url: String, user_code: String, expires_at: DateTime<Utc> },
     /// Who signed in, or why no one did.
     SignedIn(Result<GithubUser>),
+    /// For a renewal of `name`: the GitHub user of the credentials as the signer's token finds it now, and what of
+    /// the policy grants it (none when no organization or team of it does); none when GitHub has no such user any
+    /// more. Fails when GitHub cannot tell.
+    Member { name: String, found: Result<Option<(GithubAccount, Option<Grant>)>> },
 }
 
-/// What the task of the registration of a key found out, for [`Registrar::progressed`].
+/// What the task of the registration (or renewal) of a key found out, for [`Registrar::progressed`].
 pub struct Update(String, Progress);
+
+/// A renewal of credentials a registration granted, by name and new key.
+enum Renewal {
+    /// The signer checks the memberships of the GitHub user of the credentials, in `_task`.
+    Checking { request: RenewRequest, account: GithubAccount, _task: AbortOnDrop },
+    /// The answer, which a repeat of the request gets again.
+    Answered(RenewReply),
+}
 
 /// One registration, by the key of the device asking.
 struct Flow {
@@ -45,6 +79,15 @@ struct Flow {
     answer: Option<LoginAnswer>,
     /// The task running the device flow, until it reports who signed in.
     task: Option<AbortOnDrop>,
+    /// The approval request asking the humans about the GitHub user who signed in, outside the policy, until a human
+    /// decides or it expires.
+    asking: Option<Asking>,
+}
+
+/// A GitHub user outside the registration policy, and the approval request asking the humans about it.
+struct Asking {
+    account: GithubAccount,
+    approval: ApprovalRequest,
 }
 
 /// What the registrar did with a request.
@@ -52,6 +95,8 @@ struct Flow {
 pub enum Event {
     /// Began a GitHub sign-in.
     Started,
+    /// Asked the humans with approval request `id` about GitHub user `login`, outside the policy.
+    Asked { login: String, id: ants_proto::Uuid },
     /// Signed for GitHub user `login`, under `grant`.
     Signed { login: String, grant: Grant },
     /// Refused, and why.
@@ -63,33 +108,48 @@ pub fn print(request: &LoginRequest, event: &Event) {
     let asked = format!("registration of {} (key {})", request.name, request.public_key);
     match event {
         Event::Started => println!("{asked}: waiting for a GitHub sign-in"),
+        Event::Asked { login, id } => println!(
+            "asked the humans about {asked}, as GitHub user {login} is outside the registration policy: \
+             `ants tools approve|reject {}/{id}`",
+            UserId::signer()
+        ),
         Event::Signed { login, grant } => println!("signed {asked}: GitHub user {login}, {grant}"),
         Event::Refused(reason) => println!("refused {asked}: {reason}"),
     }
 }
 
-/// The registrations `ants signer` runs, kept across its reconnections.
+/// The registrations and renewals `ants signer` runs, kept across its reconnections.
 pub struct Registrar<'a> {
+    /// The server the account is pushed to, after a revocation.
+    url: &'a str,
     dir: &'a Path,
     /// The config file whose `[registration]` table is the policy, read for each request.
     config: &'a Path,
     js_domain: Option<&'a JsDomain>,
+    /// How long a human has to decide on a registration outside the policy, at most until its request expires.
+    approval_timeout: Duration,
     /// The signer's key sealing the answers.
     xkey: XKey,
     flows: HashMap<String, Flow>,
+    /// The renewals by name and new key, since when.
+    renewals: HashMap<(String, String), (Instant, Renewal)>,
     progress: (mpsc::UnboundedSender<Update>, mpsc::UnboundedReceiver<Update>),
     report: fn(&LoginRequest, &Event),
 }
 
 impl<'a> Registrar<'a> {
     pub fn new(
+        url: &'a str,
         dir: &'a Path,
         config: &'a Path,
         js_domain: Option<&'a JsDomain>,
+        approval_timeout: Duration,
         report: fn(&LoginRequest, &Event),
     ) -> Self {
         let progress = mpsc::unbounded_channel();
-        Self { dir, config, js_domain, xkey: XKey::new(), flows: HashMap::new(), progress, report }
+        let (flows, renewals) = (HashMap::new(), HashMap::new());
+        let xkey = XKey::new();
+        Self { url, dir, config, js_domain, approval_timeout, xkey, flows, renewals, progress, report }
     }
 
     /// The next progress of a registration's task, for [`Registrar::progressed`].
@@ -99,7 +159,7 @@ impl<'a> Registrar<'a> {
 
     /// Answer the registration request `msg`, if it is one: a repeat with what its key has, a new one by beginning
     /// a GitHub sign-in or refusing.
-    pub async fn heard(&mut self, client: &async_nats::Client, msg: &async_nats::Message) -> Result<()> {
+    pub async fn heard(&mut self, approver: &Approver, msg: &async_nats::Message) -> Result<()> {
         let request = match serde_json::from_slice::<LoginRequest>(&msg.payload) {
             Ok(request) => request,
             Err(e) => {
@@ -120,17 +180,17 @@ impl<'a> Registrar<'a> {
                 return Ok(());
             }
             flow.request = request;
-            return self.answer(client, &key).await;
+            return self.answer(approver, &key).await;
         }
         let answer = match self.start(&request) {
             Ok(task) => {
                 (self.report)(&request, &Event::Started);
-                self.flows.insert(key, Flow { request, answer: None, task: Some(task) });
+                self.flows.insert(key, Flow { request, answer: None, task: Some(task), asking: None });
                 return Ok(());
             }
             Err(e) => LoginAnswer::Refused { reason: format!("{e:#}") },
         };
-        self.settle(client, request, answer).await
+        self.settle(approver, request, answer).await
     }
 
     /// Begin a GitHub sign-in for `request`, if the policy allows one: a task reporting its [`Progress`].
@@ -138,7 +198,7 @@ impl<'a> Registrar<'a> {
         let registration = signer_registration(self.config)
             .context("the signer's registration policy does not load")?
             .context("registration is not enabled on this team")?;
-        let running = self.flows.values().filter(|f| f.task.is_some()).count();
+        let running = self.flows.values().filter(|f| f.task.is_some() || f.asking.is_some()).count();
         if running >= MAX_REGISTRATIONS {
             bail!("the signer is busy with {running} registrations: try again in a few minutes");
         }
@@ -174,42 +234,146 @@ impl<'a> Registrar<'a> {
     }
 
     /// Act on what the task of the registration of `key` found out, and answer.
-    pub async fn progressed(&mut self, client: &async_nats::Client, Update(key, progress): Update) -> Result<()> {
+    pub async fn progressed(&mut self, approver: &Approver, Update(key, progress): Update) -> Result<()> {
+        if let Progress::Member { name, found } = progress {
+            return self.member(approver, (name, key), found).await;
+        }
         let Some(flow) = self.flows.get_mut(&key) else { return Ok(()) };
         let user = match progress {
             Progress::Verify { url, user_code, expires_at } => {
                 flow.answer = Some(LoginAnswer::Verify { url, user_code, expires_at });
-                return self.answer(client, &key).await;
+                return self.answer(approver, &key).await;
             }
             Progress::SignedIn(user) => user,
+            Progress::Member { .. } => unreachable!("handled above"),
         };
+        flow.task = None;
         let request = flow.request.clone();
-        let answer = match user.and_then(|user| self.sign(&request, &user)) {
-            Ok((jwt, login, grant)) => {
-                (self.report)(&request, &Event::Signed { login, grant });
+        let granted = user.and_then(|user| Ok((self.grant(&request, &user)?, user)));
+        let answer = match granted {
+            Ok((Some(grant), user)) => self.signed(&request, &user.account(), grant),
+            Ok((None, user)) => match self.ask_humans(approver, &request, user.account()).await {
+                Ok(()) => return self.answer(approver, &key).await,
+                Err(e) => LoginAnswer::Refused { reason: format!("{e:#}") },
+            },
+            Err(e) => LoginAnswer::Refused { reason: format!("{e:#}") },
+        };
+        self.settle(approver, request, answer).await
+    }
+
+    /// What grants the GitHub user `user` the credentials `request` asks for: the policy, reread, or an approval
+    /// that stands for the user and name; none when a human must decide. Fails when the name is not the user's to
+    /// hold.
+    fn grant(&self, request: &LoginRequest, user: &GithubUser) -> Result<Option<Grant>> {
+        let registration =
+            signer_registration(self.config)?.context("registration is no longer enabled on this team")?;
+        let issued = revoke::issued(self.dir)?;
+        binding::check(&issued, &request.name, &user.account(), Binder::Signer)?;
+        Ok(registration.grant(user).or_else(|| revoke::standing_approval(&issued, request.name.as_str(), user.id)))
+    }
+
+    /// Ask the humans whether the GitHub user `account`, outside the policy, may have the credentials `request` asks
+    /// for, with an approval request of [`UserId::signer`] on a thread of its own, until a human decides or it expires:
+    /// [`Registrar::approval_timeout`] at most, and never past the request. The registration waits meanwhile.
+    async fn ask_humans(&mut self, approver: &Approver, request: &LoginRequest, account: GithubAccount) -> Result<()> {
+        let waiting = self.flows.values().filter(|f| f.asking.is_some()).count();
+        if waiting >= MAX_WAITING_REGISTRATIONS {
+            bail!(
+                "GitHub user {} is outside the team's registration policy, and {waiting} registrations wait for a \
+                 human already: try again later",
+                account.login
+            );
+        }
+        let left = (request.expires_at - Utc::now()).to_std().unwrap_or_default().saturating_sub(LOGIN_REPEAT);
+        let timeout = self.approval_timeout.min(left);
+        if timeout < LEAST_ASKING {
+            bail!(
+                "GitHub user {} is outside the team's registration policy, and too little time is left to ask a human",
+                account.login
+            );
+        }
+        let approval = approval_request(request, &account, timeout);
+        approver
+            .hub()
+            .publish(approval.subject(), serde_json::to_vec(&approval)?.into())
+            .await
+            .context("publishing the approval request")?
+            .await
+            .context("waiting for JetStream to store the approval request")?;
+        (self.report)(request, &Event::Asked { login: account.login.clone(), id: approval.id });
+        let reason = "outside the team's registration policy: a human of the team decides".to_owned();
+        let flow = self.flows.get_mut(&request.public_key).context("the registration")?;
+        flow.answer = Some(LoginAnswer::Waiting { login: account.login.clone(), reason });
+        flow.asking = Some(Asking { account, approval });
+        Ok(())
+    }
+
+    /// Act on the humans' decisions stored on the registrations asked about: sign those a human allowed, refuse
+    /// those a human rejected or no human decided on in time.
+    pub async fn look(&mut self, approver: &Approver) -> Result<()> {
+        let asked: Vec<String> =
+            self.flows.iter().filter(|(_, f)| f.asking.is_some()).map(|(k, _)| k.clone()).collect();
+        if asked.is_empty() {
+            return Ok(());
+        }
+        let stream = approver.hub().get_stream_no_info(STREAM).await.context("opening the ANTS stream")?;
+        let now = Utc::now();
+        for key in asked {
+            let Some(Flow { request, asking: Some(asking), .. }) = self.flows.get(&key) else { continue };
+            let approval = &asking.approval;
+            let decision = match stream.direct_get_last_for_subject(approval.decision_subject()).await {
+                Ok(msg) => serde_json::from_slice::<ApprovalDecision>(&msg.payload)
+                    .ok()
+                    .filter(|d| d.request_id == approval.id && d.ant == approval.ant),
+                Err(e) if e.kind() == DirectGetErrorKind::NotFound => None,
+                Err(e) => {
+                    tracing::warn!(request = %approval.id, error = %e, "reading the decision");
+                    None
+                }
+            };
+            let answer = match decision {
+                Some(d) => match approval.decide(d.verdict).verdict {
+                    Verdict::AllowOnce | Verdict::AllowAlways => {
+                        let by = d.by.map_or_else(|| "a human".to_owned(), |by| by.to_string());
+                        self.signed(request, &asking.account, Grant::Approval(by))
+                    }
+                    Verdict::Reject => LoginAnswer::Refused { reason: "a human rejected the registration".to_owned() },
+                },
+                None if approval.is_expired(now) => {
+                    LoginAnswer::Refused { reason: "no human decided on the registration in time".to_owned() }
+                }
+                None => continue,
+            };
+            let request = request.clone();
+            self.settle(approver, request, answer).await?;
+        }
+        Ok(())
+    }
+
+    /// The answer signing `request` for the GitHub user `account` under `grant` ([`Registrar::sign`]), or refusing
+    /// it.
+    fn signed(&self, request: &LoginRequest, account: &GithubAccount, grant: Grant) -> LoginAnswer {
+        match self.sign(request, account, grant.clone()) {
+            Ok(jwt) => {
+                (self.report)(request, &Event::Signed { login: account.login.clone(), grant });
                 LoginAnswer::Signed { jwt }
             }
             Err(e) => LoginAnswer::Refused { reason: format!("{e:#}") },
-        };
-        self.settle(client, request, answer).await
+        }
     }
 
-    /// Sign a human's credentials for `request`, of the GitHub user `user`, if the policy grants them and the name is
-    /// the user's to hold: the JWT, the user's login and the grant.
-    fn sign(&self, request: &LoginRequest, user: &GithubUser) -> Result<(String, String, Grant)> {
+    /// Sign a human's credentials for `request`, of the GitHub user `account`, under `grant`, if registration is still
+    /// enabled and the name is the user's to hold: the JWT.
+    fn sign(&self, request: &LoginRequest, account: &GithubAccount, grant: Grant) -> Result<String> {
         let registration =
             signer_registration(self.config)?.context("registration is no longer enabled on this team")?;
-        let Some(grant) = registration.grant(user) else {
-            bail!("GitHub user {} is outside the team's registration policy", user.login);
-        };
         let name = &request.name;
-        let account = GithubAccount { id: user.id, login: user.login.clone() };
-        binding::check_in(self.dir, name, &account, Binder::Signer)?;
+        binding::check_in(self.dir, name, account, Binder::Signer)?;
         let expires_at = auth::now()? + registration.ttl.as_secs();
         let new = auth::NewDevice {
             label: request.label.as_deref(),
-            github: Some(account),
-            grant: Some(grant.clone()),
+            github: Some(account.clone()),
+            grant: Some(grant),
             expires_at: Some(expires_at),
         };
         let permissions = Permissions::for_user(name, Role::Human).with_js_domain(self.js_domain);
@@ -223,21 +387,21 @@ impl<'a> Registrar<'a> {
             request.xkey.as_ref(),
         )
         .context("signing failed")?;
-        Ok((jwt, user.login.clone(), grant))
+        Ok(jwt)
     }
 
     /// Record `answer`, which settles `request`, and send it.
-    async fn settle(&mut self, client: &async_nats::Client, request: LoginRequest, answer: LoginAnswer) -> Result<()> {
+    async fn settle(&mut self, approver: &Approver, request: LoginRequest, answer: LoginAnswer) -> Result<()> {
         if let LoginAnswer::Refused { reason } = &answer {
             (self.report)(&request, &Event::Refused(reason.clone()));
         }
         let key = request.public_key.clone();
-        self.flows.insert(key.clone(), Flow { request, answer: Some(answer), task: None });
-        self.answer(client, &key).await
+        self.flows.insert(key.clone(), Flow { request, answer: Some(answer), task: None, asking: None });
+        self.answer(approver, &key).await
     }
 
     /// Send what the registration of `key` has to say, if anything, sealed to its latest request's reply key.
-    async fn answer(&self, client: &async_nats::Client, key: &str) -> Result<()> {
+    async fn answer(&self, approver: &Approver, key: &str) -> Result<()> {
         let Some(Flow { request, answer: Some(answer), .. }) = self.flows.get(key) else { return Ok(()) };
         let recipient = XKey::from_public_key(&request.reply_xkey).map_err(|e| anyhow!("the reply key: {e}"))?;
         let sealed = self.xkey.seal(&serde_json::to_vec(answer)?, &recipient).map_err(|e| anyhow!("sealing: {e}"))?;
@@ -247,16 +411,198 @@ impl<'a> Registrar<'a> {
             sender: self.xkey.public_key(),
             sealed: BASE64URL_NOPAD.encode(&sealed),
         };
-        client.publish(reply.subject(), serde_json::to_vec(&reply)?.into()).await?;
-        client.flush().await?;
+        approver.client.publish(reply.subject(), serde_json::to_vec(&reply)?.into()).await?;
+        approver.client.flush().await?;
         Ok(())
     }
 
-    /// Drop the registrations whose requests expired, stopping their device flows.
+    /// Drop the registrations whose requests expired, stopping their device flows, and the renewals older than
+    /// [`RENEWAL_KEPT`], stopping their membership checks.
     pub fn expire(&mut self) {
         let now = Utc::now();
         self.flows.retain(|_, flow| flow.request.expires_at > now);
+        self.renewals.retain(|_, (since, _)| since.elapsed() < RENEWAL_KEPT);
     }
+
+    /// Answer the renewal request `msg` if it is one of credentials a registration granted ([`revoke::registered`]):
+    /// a repeat with the answer it had, a new one by renewing them while their grant holds, else refusing. An
+    /// organization or team grant is checked again on GitHub first, by a task reporting [`Progress::Member`].
+    pub async fn renewal(&mut self, approver: &Approver, msg: &async_nats::Message) -> Result<()> {
+        let (request, current) = match approver.checked_renewal(msg) {
+            Ok(checked) => checked,
+            Err(e) => {
+                tracing::warn!("ignoring a renewal request: {e:#}");
+                return Ok(());
+            }
+        };
+        let key = (request.name.clone(), request.public_key.clone());
+        match self.renewals.get(&key) {
+            Some((_, Renewal::Answered(reply))) => return approver.answer_renewal(reply).await,
+            Some((_, Renewal::Checking { .. })) => return Ok(()),
+            None => {}
+        }
+        let issued = revoke::issued(self.dir)?;
+        let Some(record) = revoke::registered(&issued, &current.sub) else { return Ok(()) };
+        let (Some(account), Some(grant)) = (record.github.clone(), record.grant.clone()) else { return Ok(()) };
+        let name = request.name.as_str();
+        let reply = match grant {
+            Grant::Approval(_) => match revoke::standing_approval(&issued, name, account.id) {
+                Some(grant) => self.renewed(&request, account, grant),
+                None => self.refused(
+                    &request,
+                    "the approval that registered the device was withdrawn: register it again with `ants login`".into(),
+                ),
+            },
+            Grant::EmailDomain(domain) => self.refused(
+                &request,
+                format!(
+                    "a verified email address in {domain} registered the device, which only signing in again shows: \
+                     register it again with `ants login`"
+                ),
+            ),
+            Grant::Org(_) | Grant::Team(_) => {
+                let checking = self.renewals.values().filter(|(_, r)| matches!(r, Renewal::Checking { .. })).count();
+                if checking >= MAX_REGISTRATIONS {
+                    // The holder asks again.
+                    return Ok(());
+                }
+                match self.check_member(&request, &account) {
+                    Ok(task) => {
+                        print_renewal(&request, &format!("checking the memberships of GitHub user {}", account.login));
+                        let checking = Renewal::Checking { request, account, _task: task };
+                        self.renewals.insert(key, (Instant::now(), checking));
+                        return Ok(());
+                    }
+                    Err(e) => self.refused(&request, format!("{e:#}: try again later")),
+                }
+            }
+        };
+        self.renewals.insert(key, (Instant::now(), Renewal::Answered(reply.clone())));
+        approver.answer_renewal(&reply).await
+    }
+
+    /// Begin checking on GitHub, with the signer's token, whether the GitHub user `account` is still a member under
+    /// the policy, for the renewal `request`: a task reporting [`Progress::Member`].
+    fn check_member(&self, request: &RenewRequest, account: &GithubAccount) -> Result<AbortOnDrop> {
+        let registration =
+            signer_registration(self.config).context("the signer's registration policy does not load")?.with_context(
+                || format!("registration is no longer enabled on this team to check GitHub user {}", account.login),
+            )?;
+        let github = Github::new(Some(&registration))?;
+        let (id, tx) = (account.id, self.progress.0.clone());
+        let (key, name) = (request.public_key.clone(), request.name.clone());
+        Ok(AbortOnDrop(tokio::spawn(async move {
+            let found = github.member(id, &registration).await.map(|user| {
+                user.map(|user| {
+                    let grant = registration.grant(&user);
+                    (user.account(), grant)
+                })
+            });
+            let _ = tx.send(Update(key, Progress::Member { name, found }));
+        })))
+    }
+
+    /// Act on what the membership check of the renewal `key` found, and answer: renew the credentials under the
+    /// policy's grant; refuse, then revoke every key of the name and push the account, when the user is no member, or
+    /// no GitHub user any more; refuse alone when GitHub could not tell. The refusal goes first, as the push closes
+    /// the asking connection.
+    async fn member(
+        &mut self,
+        approver: &Approver,
+        key: (String, String),
+        found: Result<Option<(GithubAccount, Option<Grant>)>>,
+    ) -> Result<()> {
+        let Some((since, Renewal::Checking { request, account, .. })) = self.renewals.remove(&key) else {
+            return Ok(());
+        };
+        let left = |why: String| format!("{why}: every key of {} is revoked", request.name);
+        let (reply, revoking) = match found {
+            Ok(Some((now, Some(grant)))) => (self.renewed(&request, now, grant), false),
+            Ok(Some((now, None))) => {
+                let why =
+                    format!("GitHub user {} is no member of the team's organizations or teams any more", now.login);
+                (self.refused(&request, left(why)), true)
+            }
+            Ok(None) => {
+                let why = format!("GitHub has no user {} (id {}) any more", account.login, account.id);
+                (self.refused(&request, left(why)), true)
+            }
+            Err(e) => {
+                let why = format!("the memberships of GitHub user {} could not be checked ({e:#})", account.login);
+                (self.refused(&request, format!("{why}: try again later")), false)
+            }
+        };
+        self.renewals.insert(key, (since, Renewal::Answered(reply.clone())));
+        approver.answer_renewal(&reply).await?;
+        if revoking {
+            self.revoke(&request).await;
+        }
+        Ok(())
+    }
+
+    /// The answer renewing the credentials of `request` for the GitHub user `account` under `grant`
+    /// ([`auth::renew_registered`]), or refusing it.
+    fn renewed(&self, request: &RenewRequest, account: GithubAccount, grant: Grant) -> RenewReply {
+        let (login, why) = (account.login.clone(), grant.to_string());
+        let renewed = auth::renew_registered(
+            self.dir,
+            &request.current,
+            &request.public_key,
+            request.xkey.as_ref(),
+            account,
+            grant,
+        );
+        match renewed {
+            Ok(renewed) => {
+                print_renewal(request, &format!("renewed: GitHub user {login}, {why}"));
+                RenewReply::signed(&request.name, &request.public_key, renewed.jwt)
+            }
+            Err(e) => self.refused(request, format!("{e:#}")),
+        }
+    }
+
+    /// The answer refusing to renew the credentials of `request`, and why.
+    fn refused(&self, request: &RenewRequest, reason: String) -> RenewReply {
+        print_renewal(request, &format!("refused: {reason}"));
+        RenewReply::refused(&request.name, &request.public_key, reason)
+    }
+
+    /// Revoke every key of the name of `request`, whose grant no longer holds, and push the account.
+    async fn revoke(&self, request: &RenewRequest) {
+        let name = request.name.as_str();
+        let what = match revoke::revoke(self.dir, Some(name), &[]) {
+            Ok(revoked) => match revoke::push(self.url, self.dir).await {
+                Ok(_) => format!("{} keys of {name} revoked", revoked.len()),
+                Err(e) => format!(
+                    "{} keys of {name} revoked, but pushing the account failed ({e:#}): `ants auth push`",
+                    revoked.len()
+                ),
+            },
+            Err(e) => format!("revoking the keys of {name} failed ({e:#}): `ants auth revoke {name}`"),
+        };
+        print_renewal(request, &what);
+    }
+}
+
+/// Print what the signer did with the renewal `request`.
+fn print_renewal(request: &RenewRequest, what: &str) {
+    println!("renewal of {} (new key {}, host {}): {what}", request.name, request.public_key, request.host);
+}
+
+/// The approval request asking the humans whether the GitHub user `account`, outside the registration policy, may
+/// register a device of the human `request` names, for `timeout`: one of [`UserId::signer`], on a thread of its own,
+/// offering to allow once or reject.
+fn approval_request(request: &LoginRequest, account: &GithubAccount, timeout: Duration) -> ApprovalRequest {
+    let (name, login, id) = (&request.name, &account.login, account.id);
+    let title = format!("register human {name}: GitHub user {login} (id {id}), outside the registration policy");
+    let input = serde_json::json!({
+        "name": name,
+        "github": { "login": login, "id": id },
+        "label": request.label,
+        "key": request.public_key,
+    });
+    let tool = ToolCall { kind: "other".to_owned(), title, locations: Vec::new(), input: Some(input.to_string()) };
+    ApprovalRequest::new(UserId::signer(), ThreadId::generate(), tool, vec![Verdict::AllowOnce], timeout)
 }
 
 /// Check that `request` is the device's: for a well-formed key and reply key, signed by the key, and still good.
@@ -272,10 +618,14 @@ fn check(request: &LoginRequest) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::future::pending;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     use ants_daemon::creds::{Finding, Kind as CredsKind};
+    use ants_daemon::keystore;
     use ants_proto::{AntRequest, DeviceKey, UserId, subject};
+    use async_nats::jetstream::stream::Stream;
     use futures::StreamExt as _;
     use nkeys::KeyPair;
     use tokio::time::timeout;
@@ -283,7 +633,7 @@ mod tests {
     use super::*;
     use crate::auth::tests::Server;
     use crate::github::tests::fake;
-    use crate::signer;
+    use crate::{bus, renew, signer, tools};
 
     const WAIT: Duration = Duration::from_secs(20);
     const REPEAT: Duration = Duration::from_millis(200);
@@ -292,11 +642,18 @@ mod tests {
         s.parse().unwrap()
     }
 
+    type Users = &'static [(u64, &'static str, &'static str, bool)];
+
     /// A fake GitHub where the nth sign-in is of the nth of `users` (id, login, verified email, member of acme):
     /// each device flow is pending at its first poll.
-    async fn github(users: &'static [(u64, &'static str, &'static str, bool)]) -> String {
+    async fn github(users: Users) -> String {
+        fake(Arc::new(signing_in(users))).await
+    }
+
+    /// The routes of [`github`].
+    fn signing_in(users: Users) -> impl Fn(&str, Option<&str>, &str) -> (u16, String) + Send + Sync + 'static {
         let flows = Arc::new(Mutex::new((0_usize, Vec::<String>::new())));
-        fake(Arc::new(move |what, auth, body| {
+        move |what, auth, body| {
             let token = auth.and_then(|a| a.strip_prefix("Bearer tok-")).and_then(|n| n.parse::<usize>().ok());
             let user = token.and_then(|n| users.get(n));
             match (what, user) {
@@ -304,7 +661,9 @@ mod tests {
                     let mut flows = flows.lock().unwrap();
                     flows.0 += 1;
                     let n = flows.0 - 1;
-                    let code = format!(r#"{{"device_code":"dc-{n}","user_code":"CODE-{n}","verification_uri":"https://github.example/login/device","expires_in":900,"interval":0}}"#);
+                    let code = format!(
+                        r#"{{"device_code":"dc-{n}","user_code":"CODE-{n}","verification_uri":"https://github.example/login/device","expires_in":900,"interval":0}}"#
+                    );
                     (200, code)
                 }
                 ("POST /login/oauth/access_token", _) => {
@@ -312,17 +671,43 @@ mod tests {
                     let mut flows = flows.lock().unwrap();
                     if flows.1.contains(&code) {
                         let n = code.trim_start_matches("dc-");
-                        (200, format!(r#"{{"access_token":"tok-{n}","token_type":"bearer","scope":"read:org,user:email"}}"#))
+                        (
+                            200,
+                            format!(
+                                r#"{{"access_token":"tok-{n}","token_type":"bearer","scope":"read:org,user:email"}}"#
+                            ),
+                        )
                     } else {
                         flows.1.push(code);
                         (200, r#"{"error":"authorization_pending"}"#.to_owned())
                     }
                 }
                 ("GET /user", Some((id, login, _, _))) => (200, format!(r#"{{"id":{id},"login":"{login}"}}"#)),
-                ("GET /user/emails", Some((_, _, email, _))) => {
-                    (200, format!(r#"[{{"email":"{email}","verified":true}},{{"email":"x@acme.dev","verified":false}}]"#))
-                }
+                ("GET /user/emails", Some((_, _, email, _))) => (
+                    200,
+                    format!(r#"[{{"email":"{email}","verified":true}},{{"email":"x@acme.dev","verified":false}}]"#),
+                ),
                 ("GET /user/memberships/orgs/acme", Some((.., true))) => (200, r#"{"state":"active"}"#.to_owned()),
+                _ => (404, r#"{"message":"Not Found"}"#.to_owned()),
+            }
+        }
+    }
+
+    /// A fake GitHub as [`github`], where the signer's token `signer` also looks `users` up by id, and finds those
+    /// of them members of acme while `still` holds.
+    async fn github_checking(users: Users, still: Arc<AtomicBool>) -> String {
+        let signing_in = signing_in(users);
+        fake(Arc::new(move |what, auth, body| {
+            if auth != Some("Bearer signer") {
+                return signing_in(what, auth, body);
+            }
+            let id = what.strip_prefix("GET /user/").and_then(|id| id.parse::<u64>().ok());
+            if let Some((id, login, ..)) = users.iter().find(|u| Some(u.0) == id) {
+                return (200, format!(r#"{{"id":{id},"login":"{login}"}}"#));
+            }
+            let login = what.strip_prefix("GET /orgs/acme/members/");
+            match users.iter().find(|u| Some(u.1) == login) {
+                Some((.., true)) if still.load(Ordering::SeqCst) => (204, String::new()),
                 _ => (404, r#"{"message":"Not Found"}"#.to_owned()),
             }
         }))
@@ -385,43 +770,102 @@ mod tests {
         }
     }
 
+    /// The `[registration]` table of a config file, for the fake GitHub at `url`, signing members of acme for 7 days.
+    fn policy(url: &str) -> String {
+        format!(
+            "[registration]\nclient_id = \"Iv1.test\"\norgs = [\"acme\"]\nttl = \"7d\"\ngithub_url = \"{url}\"\napi_url = \"{url}\"\n"
+        )
+    }
+
+    /// A connection to `server` with new bootstrap credentials of the team `team`.
+    async fn bootstrap(server: &Server, team: &Path) -> async_nats::Client {
+        let creds = server.dir().join("bootstrap.creds");
+        auth::issue_bootstrap(team, Duration::ZERO, &creds).unwrap();
+        async_nats::ConnectOptions::with_credentials_file(&creds).await.unwrap().connect(&server.url).await.unwrap()
+    }
+
+    /// Run `asking` while `ants signer` answers over `server` for the team `team` with the policy of `config`.
+    async fn registering(server: &Server, team: &Path, config: &Path, asking: impl Future<Output = ()>) {
+        let options = signer::Options { config, approval_timeout: WAIT, reconnect: WAIT * 3, tick: REPEAT };
+        let report = |_: &AntRequest, _: &signer::Event| {};
+        let serving = Box::pin(signer::serve(&server.url, team, None, &options, report, pending()));
+        let both = async {
+            tokio::select! {
+                r = serving => panic!("the signer stopped: {r:?}"),
+                () = asking => {}
+            }
+        };
+        Box::pin(timeout(WAIT * 4, both)).await.unwrap();
+    }
+
+    /// Decide, as the default human with `js` on `stream`, `verdict` on the next approval request of the signer,
+    /// which asks about GitHub user `login`.
+    async fn decide(js: &async_nats::jetstream::Context, stream: &Stream, login: &str, verdict: Verdict) {
+        let asked = loop {
+            let mut pending = Vec::new();
+            for (_, request) in tools::requests(stream).await.unwrap() {
+                if tools::decision(stream, &request).await.unwrap().is_none() {
+                    pending.push(request);
+                }
+            }
+            if let Some(request) = pending.pop() {
+                break request;
+            }
+            tokio::time::sleep(REPEAT).await;
+        };
+        assert_eq!(asked.ant, UserId::signer());
+        assert!(asked.tool.title.contains(&format!("GitHub user {login} ")), "{}", asked.tool.title);
+        tools::answer(js, stream, &asked.id.to_string(), verdict, Utc::now()).await.unwrap();
+    }
+
+    /// Whether `answers` tell the device to wait for a human.
+    fn waited(answers: &[LoginAnswer]) -> bool {
+        answers.iter().any(|a| matches!(a, LoginAnswer::Waiting { .. }))
+    }
+
+    fn signed(answers: &[LoginAnswer]) -> bool {
+        matches!(answers.last(), Some(LoginAnswer::Signed { .. }))
+    }
+
+    /// The credentials file of `device`, signed `answers`.
+    fn creds(server: &Server, device: &Device, answers: &[LoginAnswer]) -> PathBuf {
+        let Some(LoginAnswer::Signed { jwt }) = answers.last() else { panic!("not signed: {answers:?}") };
+        let path = server.dir().join(format!("{}.creds", device.key.public_key()));
+        auth::write_creds(&path, jwt, &device.key).unwrap();
+        path
+    }
+
+    /// Ask with `ants renew` for the credentials at `path` renewed: the new key, and the JWT or why it was refused.
+    async fn renewing(server: &Server, path: &Path) -> (KeyPair, Result<String>) {
+        let user = KeyPair::new_user();
+        let renewed = renew::request(&server.url, path, path, &user, None, keystore::os(), REPEAT, pending()).await;
+        (user, renewed)
+    }
+
+    /// The renewal request of the credentials at `path`, as the signer and `ants enroll renew` hear it.
+    fn renewal_msg(path: &Path) -> async_nats::Message {
+        let (jwt, key) = auth::read_creds(path).unwrap();
+        let mut request = RenewRequest::new(&auth::verified(&jwt).unwrap().name, KeyPair::new_user().public_key(), "h");
+        request.current = jwt;
+        request.signature = auth::sign(&key, &request.signed()).unwrap();
+        let payload = hyper::body::Bytes::from(serde_json::to_vec(&request).unwrap());
+        let (subject, length) = (request.subject().into(), payload.len());
+        async_nats::Message { subject, reply: None, payload, headers: None, status: None, description: None, length }
+    }
+
     #[tokio::test]
     async fn a_github_user_under_the_policy_registers_a_device_and_holds_the_name() {
         let Some(server) = Server::start() else { return };
         let team = server.dir().join("auth");
-        let url = github(&[
-            (1, "octocat", "octo@example.com", true),
-            (2, "mallory", "m@evil.example", false),
-            (1, "octocat", "octo@example.com", true),
-        ])
-        .await;
+        let url = github(&[(1, "octocat", "octo@example.com", true), (1, "octocat", "octo@example.com", true)]).await;
         let config = server.dir().join("config.toml");
-        let table = format!(
-            "[registration]\nclient_id = \"Iv1.test\"\norgs = [\"acme\"]\nttl = \"7d\"\ngithub_url = \"{url}\"\napi_url = \"{url}\"\n"
-        );
         std::fs::write(&config, "").unwrap();
-        let bootstrap = server.dir().join("bootstrap.creds");
-        auth::issue_bootstrap(&team, Duration::ZERO, &bootstrap).unwrap();
-        let client = async_nats::ConnectOptions::with_credentials_file(&bootstrap)
-            .await
-            .unwrap()
-            .connect(&server.url)
-            .await
-            .unwrap();
+        let client = bootstrap(&server, &team).await;
 
-        let options = signer::Options { config: &config, approval_timeout: WAIT, reconnect: WAIT * 3, tick: REPEAT };
-        let serving = Box::pin(signer::serve(
-            &server.url,
-            &team,
-            None,
-            &options,
-            |_: &AntRequest, _: &signer::Event| {},
-            pending(),
-        ));
         let asking = async {
             let reason = refusal(&Device::new("alice").ask(&client, WAIT).await);
             assert!(reason.contains("registration is not enabled"), "{reason}");
-            std::fs::write(&config, table).unwrap();
+            std::fs::write(&config, policy(&url)).unwrap();
             let alice = Device::new("alice");
             let answers = alice.ask(&client, WAIT).await;
             let Some((LoginAnswer::Signed { jwt }, waits)) = answers.split_last() else { panic!("{answers:?}") };
@@ -443,8 +887,6 @@ mod tests {
             assert_eq!(record.github, Some(GithubAccount { id: 1, login: "octocat".into() }));
             assert_eq!((record.grant, record.label.as_deref()), (Some(Grant::Org("acme".into())), Some("laptop")));
 
-            let reason = refusal(&Device::new("carol").ask(&client, WAIT).await);
-            assert!(reason.contains("mallory is outside the team's registration policy"), "{reason}");
             let reason = refusal(&Device::new("bob").ask(&client, WAIT).await);
             assert!(reason.contains("octocat is bound to alice"), "{reason}");
             let reason = refusal(&Device::new("human").ask(&client, WAIT).await);
@@ -454,13 +896,96 @@ mod tests {
             forged.request.label = Some("other".into());
             assert_eq!(forged.ask(&client, REPEAT * 5).await, [], "a request its key did not sign is answered");
         };
-        timeout(WAIT * 4, async {
-            tokio::select! {
-                r = serving => panic!("the signer stopped: {r:?}"),
-                () = asking => {}
+        registering(&server, &team, &config, asking).await;
+    }
+
+    #[tokio::test]
+    async fn outside_the_policy_a_human_decides_and_an_approval_stands_until_the_name_is_revoked() {
+        let Some(server) = Server::start() else { return };
+        let team = server.dir().join("auth");
+        const MALLORY: (u64, &str, &str, bool) = (2, "mallory", "m@evil.example", false);
+        let url = github(&[MALLORY, MALLORY, (3, "eve", "eve@evil.example", false), MALLORY]).await;
+        let config = server.dir().join("config.toml");
+        std::fs::write(&config, policy(&url)).unwrap();
+        let client = bootstrap(&server, &team).await;
+        let (_, js) = server.connect_as(&UserId::human(), Role::Human).await;
+        let stream = bus::ensure_stream(&js).await.unwrap();
+        let register = async |name: &str| Device::new(name).ask(&client, WAIT).await;
+
+        let asking = async {
+            let (answers, ()) = tokio::join!(register("carol"), decide(&js, &stream, "mallory", Verdict::AllowOnce));
+            assert!(waited(&answers) && signed(&answers), "{answers:?}");
+            let record = revoke::issued(&team).unwrap().pop().unwrap();
+            assert_eq!(record.github, Some(GithubAccount { id: 2, login: "mallory".into() }));
+            assert_eq!((record.name.as_str(), record.grant), ("carol", Some(Grant::Approval("human".into()))));
+            let carol = Device::new("carol");
+            let answers = carol.ask(&client, WAIT).await;
+            assert!(!waited(&answers) && signed(&answers), "the approval stands for another device: {answers:?}");
+            let path = creds(&server, &carol, &answers);
+            let (key, renewed) = renewing(&server, &path).await;
+            assert_eq!(auth::verified(&renewed.unwrap()).unwrap().sub, key.public_key(), "the approval renews");
+
+            let (answers, ()) = tokio::join!(register("dave"), decide(&js, &stream, "eve", Verdict::Reject));
+            assert!(waited(&answers), "{answers:?}");
+            assert!(refusal(&answers).contains("a human rejected the registration"), "{answers:?}");
+            assert!(!revoke::issued(&team).unwrap().iter().any(|i| i.name == "dave"), "a rejected human is not signed");
+
+            revoke::revoke(&team, Some("carol"), &[]).unwrap();
+            let (answers, ()) = tokio::join!(register("carol"), decide(&js, &stream, "mallory", Verdict::Reject));
+            assert!(waited(&answers), "revoking the name withdraws the approval: {answers:?}");
+            assert!(refusal(&answers).contains("a human rejected"), "{answers:?}");
+        };
+        registering(&server, &team, &config, asking).await;
+    }
+
+    #[tokio::test]
+    async fn the_signer_renews_a_registered_device_while_its_grant_holds_and_revokes_a_member_who_left() {
+        let Some(server) = Server::start() else { return };
+        let team = server.dir().join("auth");
+        let still = Arc::new(AtomicBool::new(true));
+        let url = github_checking(
+            &[(1, "octocat", "o@example.com", true), (3, "erin", "e@acme.example", false)],
+            still.clone(),
+        )
+        .await;
+        let token = server.dir().join("github-token");
+        std::fs::write(&token, "signer").unwrap();
+        std::fs::set_permissions(&token, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+        let config = server.dir().join("config.toml");
+        let table = format!("{}email_domains = [\"acme.example\"]\ntoken_file = \"github-token\"\n", policy(&url));
+        std::fs::write(&config, table).unwrap();
+        let client = bootstrap(&server, &team).await;
+
+        let asking = async {
+            let alice = Device::new("alice");
+            let path = creds(&server, &alice, &alice.ask(&client, WAIT).await);
+            let approver = Approver::connect(&server.url, &team, None, REPEAT).await.unwrap();
+            let err = approver.renewal(&renewal_msg(&path)).unwrap_err().to_string();
+            assert!(err.contains("ants signer renews"), "`ants enroll renew` leaves it to the signer: {err}");
+
+            let (key, renewed) = renewing(&server, &path).await;
+            let renewed = renewed.unwrap();
+            assert_eq!(auth::verified(&renewed).unwrap().sub, key.public_key());
+            let record = revoke::issued(&team).unwrap().pop().unwrap();
+            assert_eq!(record.renewed_from, Some(alice.key.public_key()));
+            assert_eq!((record.github.map(|g| g.id), record.grant), (Some(1), Some(Grant::Org("acme".into()))));
+
+            still.store(false, Ordering::SeqCst);
+            let path = server.dir().join("alice-renewed.creds");
+            auth::write_creds(&path, &renewed, &key).unwrap();
+            let err = format!("{:#}", renewing(&server, &path).await.1.unwrap_err());
+            assert!(err.contains("octocat is no member") && err.contains("every key of alice is revoked"), "{err}");
+            let revoked = revoke::revoked(&team).unwrap();
+            for key in [alice.key.public_key(), key.public_key()] {
+                assert!(revoked.iter().any(|r| r.key == key), "{key} not revoked: {revoked:?}");
             }
-        })
-        .await
-        .unwrap();
+
+            let erin = Device::new("erin");
+            let path = creds(&server, &erin, &erin.ask(&client, WAIT).await);
+            let err = format!("{:#}", renewing(&server, &path).await.1.unwrap_err());
+            assert!(err.contains("email address in acme.example") && err.contains("`ants login`"), "{err}");
+            assert!(!revoke::revoked(&team).unwrap().iter().any(|r| r.key == erin.key.public_key()));
+        };
+        registering(&server, &team, &config, asking).await;
     }
 }

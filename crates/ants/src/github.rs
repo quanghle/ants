@@ -201,6 +201,44 @@ impl Github {
         Ok(status)
     }
 
+    /// The GitHub user whose id is `id` as the policy of `registration` sees it now, with the signer's token: login,
+    /// and memberships of the policy's organizations and teams (no email addresses, which only the user's token
+    /// reads); none if GitHub has no such user any more. Fails without the signer's token, and when GitHub cannot tell.
+    pub async fn member(&self, id: u64, registration: &Registration) -> Result<Option<GithubUser>> {
+        if self.token.is_none() {
+            bail!(
+                "the signer has no GitHub token ([registration] token_file or token_store) to check memberships with"
+            );
+        }
+        let account = match self.get::<GithubAccount>(&format!("/user/{id}"), None).await? {
+            (_, Some(account)) => account,
+            (StatusCode::NOT_FOUND, _) => return Ok(None),
+            (status, _) => bail!("GitHub answered {status} for the user {id}"),
+        };
+        let login = &account.login;
+        let mut orgs = Vec::new();
+        for org in &registration.orgs {
+            match self.status(&format!("/orgs/{org}/members/{login}")).await? {
+                StatusCode::NO_CONTENT => orgs.push(org.clone()),
+                StatusCode::NOT_FOUND => {}
+                status => bail!("GitHub answered {status} for the membership of {login} in {org}"),
+            }
+        }
+        let mut teams = Vec::new();
+        for team in &registration.teams {
+            let path = format!("/orgs/{}/teams/{}/memberships/{login}", team.org, team.slug);
+            let active = match self.get::<Membership>(&path, None).await? {
+                (_, Some(membership)) => membership.state == "active",
+                (StatusCode::NOT_FOUND, None) => false,
+                (status, None) => bail!("GitHub answered {status} for the membership of {login} in {team}"),
+            };
+            if active {
+                teams.push(team.clone());
+            }
+        }
+        Ok(Some(GithubUser { id: account.id, login: account.login, emails: Vec::new(), orgs, teams }))
+    }
+
     /// The GitHub user whose login is `login`.
     pub async fn user_by_login(&self, login: &str) -> Result<GithubAccount> {
         if !ants_daemon::config::registration::is_login(login) {
@@ -292,6 +330,32 @@ pub(crate) mod tests {
         let err = github.user_by_login("../x").await.unwrap_err().to_string();
         assert!(err.contains("no GitHub login"), "{err}");
     }
+    #[tokio::test]
+    async fn memberships_are_checked_again_by_user_id_with_the_signers_token() {
+        let url = fake(Arc::new(|what, auth, _| match (what, auth) {
+            (_, auth) if auth != Some("Bearer signer") => (401, "{}".into()),
+            ("GET /user/7", _) => (200, r#"{"id":7,"login":"octocat"}"#.into()),
+            ("GET /user/8", _) => (200, r#"{"id":8,"login":"hidden"}"#.into()),
+            ("GET /orgs/acme/members/octocat", _) => (204, String::new()),
+            ("GET /orgs/acme/members/hidden", _) => (302, String::new()),
+            ("GET /orgs/acme/teams/core/memberships/octocat", _) => (200, r#"{"state":"active"}"#.into()),
+            _ => (404, "{}".into()),
+        }))
+        .await;
+        let registration: Registration =
+            toml::from_str("client_id = \"Iv1.x\"\norgs = [\"acme\"]\nteams = [\"acme/core\", \"acme/ops\"]\n")
+                .unwrap();
+        let github = at(&url, Some("signer"));
+        let user = github.member(7, &registration).await.unwrap().unwrap();
+        assert_eq!((user.login.as_str(), user.orgs.as_slice()), ("octocat", ["acme".to_owned()].as_slice()));
+        assert_eq!(user.teams.iter().map(|t| t.slug.as_str()).collect::<Vec<_>>(), ["core"]);
+        assert_eq!(github.member(9, &registration).await.unwrap(), None);
+        let err = github.member(8, &registration).await.unwrap_err().to_string();
+        assert!(err.contains("302"), "{err}");
+        let err = at(&url, None).member(7, &registration).await.unwrap_err().to_string();
+        assert!(err.contains("no GitHub token"), "{err}");
+    }
+
     #[tokio::test]
     async fn a_device_flow_waits_slows_down_and_stops_when_refused() {
         let polls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
