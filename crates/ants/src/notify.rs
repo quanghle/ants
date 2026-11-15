@@ -1623,11 +1623,12 @@ async fn tell_unserved(human: &Human, bus: &HumanBus, watch: Option<Watch>) -> s
 }
 
 /// Answer the ants asking for the reactions to the messages they read, with the credentials of `human`, which read
-/// every reaction, while the process runs.
+/// every reaction, while the process runs; `ants signer` alone changes an ant's reactions.
 async fn answer_reactions(human: &UserId, bus: &HumanBus) -> std::convert::Infallible {
     let mut delay = Duration::from_secs(1);
     loop {
-        if let Err(e) = ants_daemon::reactions::serve(bus.client.clone(), bus.js.clone()).await {
+        let answering = ants_daemon::reactions::Answering::Lists;
+        if let Err(e) = ants_daemon::reactions::serve(bus.client.clone(), bus.js.clone(), None, answering).await {
             tracing::warn!(human = %human, retry_in = ?delay, "answering reactions requests: {e:#}");
         }
         tokio::time::sleep(delay).await;

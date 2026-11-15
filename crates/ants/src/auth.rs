@@ -178,9 +178,10 @@ fn with_device(issued: Issued, device: Option<DeviceId>, label: Option<&str>) ->
 /// Issue the uplink user of `machine`'s leaf node and write its `.creds` file to `out`. It may carry only what
 /// `members`, ants and humans each in its role ([`members`]), may do and the sourcing of the machine's outbox
 /// ([`Permissions::for_leaf`]), plus what the credentials of `webhooks` allow, for an `ants webhook serve` on the
-/// machine ([`webhook_permissions`]), plus [`EnrollApprover::With`] what `ants enroll` on the machine needs
-/// ([`Permissions::for_enroll_approver`]), and connect only as a leaf node, not as a client. Also writes the system
-/// account credentials of the leaf's second uplink beside them ([`leaf_system_creds`]).
+/// machine ([`webhook_permissions`]), plus [`EnrollApprover::With`] what `ants enroll` and `ants signer` on the machine
+/// need ([`Permissions::for_enroll_approver`], [`Permissions::for_reactions_responder`]), and connect only as a leaf
+/// node, not as a client. Also writes the system account credentials of the leaf's second uplink beside them
+/// ([`leaf_system_creds`]).
 ///
 /// nats-server applies a leaf user's permissions from the leaf's side, as for a client: publish limits what the leaf
 /// sends to the hub, subscribe what the hub sends to the leaf (the hub swaps them internally).
@@ -208,7 +209,7 @@ pub fn issue_leaf(
         merge(&mut permissions, webhook_permissions(dir, webhook)?);
     }
     if approver == EnrollApprover::With {
-        merge(&mut permissions, Permissions::for_enroll_approver());
+        merge(&mut permissions, signer_permissions());
     }
     let mut permissions = permissions.with_js_domain(js_domain);
     dedup(&mut permissions);
@@ -569,7 +570,7 @@ pub fn renew(dir: &Path, current: &str, public_key: &str) -> Result<Renewed> {
                 merge(&mut permissions, Permissions::for_webhook(webhook, &destinations));
             }
             if *enroll_approver {
-                merge(&mut permissions, Permissions::for_enroll_approver());
+                merge(&mut permissions, signer_permissions());
             }
             (permissions, json!({ "allowed_connection_types": LEAF_CONNECTIONS }))
         }
@@ -647,10 +648,28 @@ pub fn issue_enrollment(dir: &Path, ant: &UserId, ttl: Duration, out: &Path) -> 
 /// ([`Permissions::for_enroll_approver`]), for the hub's JetStream domain if it has one, issued afresh from the
 /// account key of each run.
 pub fn approver_creds(dir: &Path, js_domain: Option<&JsDomain>) -> Result<String> {
+    short_lived_creds(dir, js_domain, Permissions::for_enroll_approver())
+}
+
+/// [`approver_creds`] for `ants signer`, which also answers ants' reactions requests
+/// ([`Permissions::for_reactions_responder`]).
+pub fn signer_creds(dir: &Path, js_domain: Option<&JsDomain>) -> Result<String> {
+    short_lived_creds(dir, js_domain, signer_permissions())
+}
+
+/// What `ants enroll` and `ants signer` need: [`Permissions::for_enroll_approver`] and
+/// [`Permissions::for_reactions_responder`].
+fn signer_permissions() -> Permissions {
+    let mut permissions = Permissions::for_enroll_approver();
+    merge(&mut permissions, Permissions::for_reactions_responder());
+    permissions
+}
+
+fn short_lived_creds(dir: &Path, js_domain: Option<&JsDomain>, permissions: Permissions) -> Result<String> {
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let user = KeyPair::new_user();
     let exp = now()? + APPROVER_TTL.as_secs();
-    let permissions = Permissions::for_enroll_approver().with_js_domain(js_domain);
+    let permissions = permissions.with_js_domain(js_domain);
     let jwt = user_jwt(&account, &user.public_key(), "enroll", permissions, json!({}), Some(exp))?;
     Ok(creds(&jwt, &seed(&user)?))
 }

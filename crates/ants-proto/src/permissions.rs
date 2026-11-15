@@ -11,7 +11,7 @@ use crate::{
 };
 #[cfg(doc)]
 use crate::{
-    AntRequest, EnrollRequest, HeldNotices, NotifyPrefs, QueueRequest, RenewRequest, StatusUpdate,
+    AntRequest, EnrollRequest, HeldNotices, NotifyPrefs, QueueRequest, ReactionsRequest, RenewRequest, StatusUpdate,
     channel_manager_serving_key, daily_spend_key, link_outbox, message_mark_key, owner_outbox, storage_warning_key,
     thread_spend_key, unserved_key,
 };
@@ -75,25 +75,26 @@ fn notify_prefs_rights(human: &UserId) -> [String; 6] {
     ]
 }
 
-/// What a user's credentials need for reactions ([`REACTIONS_BUCKET`]): putting, deleting and reading back by direct
-/// gets its own keys only, so no one forges or removes another's reaction; and for a human, creating the bucket and
-/// reading every reaction, singly and through the ordered consumers behind listing and watching them. An ant reads no
-/// one else's: subjects cannot tie a message id to the threads and channels whose messages it may read. It asks for
-/// those to a message instead, only as itself ([`subject::reactions`]), and a human's `ants webhook serve` answers,
-/// on the ant's own [`subject::reactions_reply`], once it found the ant reads the message.
-fn reaction_rights(user: &UserId, role: Role) -> Vec<String> {
+/// What a human's credentials need for reactions ([`REACTIONS_BUCKET`]): putting, deleting and reading back by direct
+/// gets its own keys only, so no human forges or removes another's reaction; creating the bucket; and reading every
+/// reaction, singly and through the ordered consumers behind listing and watching them. An ant neither reads nor
+/// writes the bucket: subjects cannot tie a message id to the threads and channels whose messages it may read. It asks
+/// instead, only as itself, for the reactions to a message ([`subject::reactions`]), which a human's
+/// `ants webhook serve` or `ants signer` answers, and to add or remove its own ([`subject::react`]), which only
+/// `ants signer` does ([`Permissions::for_reactions_responder`]); each on the ant's own [`subject::reactions_reply`],
+/// once it found the ant reads the message.
+fn human_reaction_rights(human: &UserId) -> Vec<String> {
     let reactions = kv_stream(REACTIONS_BUCKET);
-    let own = format!("$KV.{REACTIONS_BUCKET}.{user}.>");
-    let mut rights = vec![format!("$JS.API.DIRECT.GET.{reactions}.{own}"), own];
-    if role.is_human() {
-        rights.extend([
-            format!("$JS.API.STREAM.INFO.{reactions}"),
-            format!("$JS.API.STREAM.CREATE.{reactions}"),
-            format!("$JS.API.DIRECT.GET.{reactions}.>"),
-            format!("$JS.API.CONSUMER.CREATE.{reactions}"),
-        ]);
-        rights.extend(flow_control_subjects("*", &reactions));
-    }
+    let own = format!("$KV.{REACTIONS_BUCKET}.{human}.>");
+    let mut rights = vec![
+        format!("$JS.API.DIRECT.GET.{reactions}.{own}"),
+        own,
+        format!("$JS.API.STREAM.INFO.{reactions}"),
+        format!("$JS.API.STREAM.CREATE.{reactions}"),
+        format!("$JS.API.DIRECT.GET.{reactions}.>"),
+        format!("$JS.API.CONSUMER.CREATE.{reactions}"),
+    ];
+    rights.extend(flow_control_subjects("*", &reactions));
     rights
 }
 
@@ -174,8 +175,9 @@ impl Permissions {
     /// direct gets, and removes dead letters by sequence; its own read marker in [`READ_BUCKET`], and no other, says which replies it has read on any
     /// of its devices ([`read_marker_rights`]), and its own keys in [`PRESENCE_BUCKET`] where its devices read
     /// ([`presence_rights`]), and its own [`NotifyPrefs`] in [`NOTIFY_BUCKET`] what it holds back of its notifications,
-    /// and its own [`HeldNotices`] there what was held back ([`notify_prefs_rights`]), and it reads every reaction ([`REACTIONS_BUCKET`]), of which every user, ant or human,
-    /// puts and removes only its own ([`reaction_rights`]); it sets every thread's title and its own pinned and
+    /// and its own [`HeldNotices`] there what was held back ([`notify_prefs_rights`]), and it reads every reaction ([`REACTIONS_BUCKET`]), of which it
+    /// puts and removes only its own ([`human_reaction_rights`]), while an ant only asks for those ([`subject::reactions`],
+    /// [`subject::react`]); it sets every thread's title and its own pinned and
     /// archived threads, no other human's ([`thread_rights`]). A human may send under
     /// any sender, to replay a dead letter as it was. An ant gets no `STREAM.MSG.GET`: it takes any sequence, so it
     /// would expose every inbox. So only a human hears the max-deliveries advisories of the stream's consumers and
@@ -272,7 +274,6 @@ impl Permissions {
             // And the webhooks' markers, not the events they delivered.
             format!("$JS.API.DIRECT.GET.{webhooks}.$KV.{WEBHOOKS_BUCKET}.*.{WEBHOOK_MARKER}"),
         ]);
-        publish.extend(reaction_rights(user, role));
         publish
     }
 
@@ -372,6 +373,7 @@ impl Permissions {
         publish.extend(presence_rights(user));
         publish.extend(thread_rights(user));
         publish.extend(notify_prefs_rights(user));
+        publish.extend(human_reaction_rights(user));
         subscribe.extend([subject::ALL.to_owned(), subject::max_deliveries_advisories()]);
     }
 
@@ -429,8 +431,9 @@ impl Permissions {
             subject::renew(user.as_str()),
             // Asking the signer for an ant added from a template, should it manage one.
             subject::antreq(user),
-            // Asking for the reactions to a message it reads.
+            // Asking for the reactions to a message it reads, and to add or remove its own.
             subject::reactions(user),
+            subject::react(user),
         ]);
         // The spares of its inbox consumer and its notes and channel readers, for the CLI, each with the same
         // filter pinned; no ack, so the spares of the inbox consumer only read it.
@@ -713,6 +716,35 @@ impl Permissions {
             ],
         }
     }
+
+    /// What `ants signer` also allows itself, on the machine holding the account key, to answer ants' reactions
+    /// requests ([`ReactionsRequest`]): hearing every request for the reactions to a message
+    /// ([`subject::ALL_REACTIONS_REQUESTS`]) and to change an ant's own ([`subject::ALL_REACT_REQUESTS`]); reading the
+    /// stream back by batched direct gets, from its info, to find whether the asking ant reads the message; reading
+    /// every reaction, singly and through ordered consumers; putting and deleting any user's reaction, which only it
+    /// does for an ant, once it found the ant reads the message; and answering on the ant's own
+    /// [`subject::reactions_reply`]. The replies of its JetStream requests come under [`ENROLL_INBOX`], as those of
+    /// [`Permissions::for_enroll_approver`], with which it is issued.
+    pub fn for_reactions_responder() -> Self {
+        let reactions = kv_stream(REACTIONS_BUCKET);
+        let mut publish = vec![
+            format!("$JS.API.STREAM.INFO.{STREAM}"),
+            format!("$JS.API.DIRECT.GET.{STREAM}"),
+            format!("$JS.API.DIRECT.GET.{reactions}.>"),
+            format!("$JS.API.CONSUMER.CREATE.{reactions}"),
+            format!("$KV.{REACTIONS_BUCKET}.>"),
+            subject::ALL_REACTIONS_REPLIES.to_owned(),
+        ];
+        publish.extend(flow_control_subjects("*", &reactions));
+        Self {
+            publish,
+            subscribe: vec![
+                subject::ALL_REACTIONS_REQUESTS.to_owned(),
+                subject::ALL_REACT_REQUESTS.to_owned(),
+                format!("{ENROLL_INBOX}.>"),
+            ],
+        }
+    }
 }
 
 /// The version of the permissions `ants auth` gives credentials of every kind (ants, humans, webhooks, leaf node
@@ -722,9 +754,10 @@ impl Permissions {
 ///
 /// Bump it whenever the permissions of any role change: [`Permissions::for_user`], [`Permissions::for_leaf`],
 /// [`Permissions::for_webhook`], [`Permissions::for_channel_manager`], [`Permissions::for_enrollment`],
-/// [`Permissions::for_enroll_approver`] or [`Permissions::with_js_domain`], or the other claims `ants auth` puts in a
+/// [`Permissions::for_enroll_approver`], [`Permissions::for_reactions_responder`] or [`Permissions::with_js_domain`], or
+/// the other claims `ants auth` puts in a
 /// user JWT.
-pub const PERMISSIONS_VERSION: PermissionsVersion = PermissionsVersion(1);
+pub const PERMISSIONS_VERSION: PermissionsVersion = PermissionsVersion(2);
 
 /// A version of the permissions `ants auth` gives ([`PERMISSIONS_VERSION`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

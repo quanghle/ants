@@ -207,6 +207,9 @@ fn renewed_credentials_keep_what_they_are_for_a_new_key() {
     issue_leaf(&team, &m1, &members, &[p("hook")], EnrollApprover::With, Some(&hub), &out("leaf-m1")).unwrap();
     let leaf = renewed("leaf-m1");
     check_leaf(&account_key(&team).unwrap(), &leaf.jwt, &m1).unwrap();
+    let uplink = allowed(&verified_body(&leaf.jwt).unwrap().1);
+    let react = subject::ALL_REACT_REQUESTS.to_owned();
+    assert!(uplink.subscribe.contains(&react), "`ants signer` on the machine answers ants' reactions requests");
     let kept = crate::members::issued(&team, &m1).unwrap().unwrap();
     assert_eq!(
         kept,
@@ -1033,50 +1036,79 @@ async fn ants_record_the_links_they_pass_on_and_read_everyone_s() {
 }
 
 #[tokio::test]
-async fn each_reactor_adds_and_removes_only_its_own_reactions_and_only_humans_read_them() {
-    use ants_daemon::reactions::{self, Reacted};
+async fn humans_write_only_their_own_reactions_and_ants_change_theirs_through_ants_signer() {
+    use ants_daemon::reactions::{self, Answering, Reacted};
+    use ants_proto::{ReactionChange, ReactionsOutcome, ReactionsRequest};
 
     let Some(server) = Server::start() else { return };
     let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
     let (eyes, check): (ants_proto::Reaction, ants_proto::Reaction) =
         ("eyes".parse().unwrap(), "check".parse().unwrap());
-    let message = ants_proto::Uuid::now_v7();
-    let (_a, a_js) = server.connect(&dev_a).await;
+    let (a_client, a_js) = server.connect(&dev_a).await;
     assert!(a_js.create_stream(ants_daemon::hub::reactions_config()).await.is_err(), "only a human creates it");
     let (h_client, h_js) = server.connect(&human).await;
+    bus::ensure_stream(&h_js).await.unwrap();
     h_js.create_stream(ants_daemon::hub::reactions_config()).await.unwrap();
+    let (to_a, between) = (
+        Envelope::new(human.clone(), dev_a.clone(), "for dev-a"),
+        Envelope::new(human.clone(), dev_b.clone(), "for dev-b"),
+    );
+    for envelope in [&to_a, &between] {
+        bus::publish(&h_js, envelope).await.unwrap();
+    }
+    let message = to_a.id;
     let mut heard = h_client.subscribe(subject::ALL).await.unwrap();
     h_client.flush().await.unwrap();
 
-    assert!(reactions::add(&a_js, None, &dev_a, &message, &eyes).await.unwrap());
-    assert!(reactions::add(&a_js, None, &dev_a, &message, &check).await.unwrap());
     assert!(reactions::add(&h_js, None, &human, &message, &eyes).await.unwrap());
-    // dev-a can neither read nor remove the human's reaction, nor react as dev-b.
-    assert!(reactions::remove(&a_js, None, &human, &message, &eyes).await.is_err());
-    assert!(reactions::add(&a_js, None, &dev_b, &message, &eyes).await.is_err());
-    assert!(reactions::load(&a_js, &[message]).await.is_err(), "an ant reads no one else's reactions");
+    assert!(reactions::add(&h_js, None, &dev_a, &message, &check).await.is_err(), "a human reacts as nobody else");
+    // dev-a neither writes reactions, not even its own, nor reads them.
+    assert!(reactions::add(&a_js, None, &dev_a, &message, &eyes).await.is_err());
+    assert!(reactions::load(&a_js, &[message]).await.is_err(), "an ant reads no reactions");
     let (raw, mut errors) = server.watched(&dev_a).await;
-    let forged = format!("$KV.ants_reactions.dev-b.{message}.x");
-    raw.publish(forged.clone(), "{}".into()).await.unwrap();
-    assert!(next_violation(&raw, &mut errors).await.contains(&forged), "a forged reaction is denied");
+    for key in [format!("dev-a.{message}.x"), format!("dev-b.{message}.x")] {
+        let forged = format!("$KV.ants_reactions.{key}");
+        raw.publish(forged.clone(), "{}".into()).await.unwrap();
+        assert!(next_violation(&raw, &mut errors).await.contains(&forged), "a direct reaction is denied");
+    }
     let theirs = format!("$KV.ants_reactions.{human}.{message}.eyes");
     let mut delete = async_nats::HeaderMap::new();
     delete.insert("KV-Operation", "DEL");
     raw.publish_with_headers(theirs.clone(), delete, "".into()).await.unwrap();
     assert!(next_violation(&raw, &mut errors).await.contains(&theirs), "removing another's reaction is denied");
+    let quiet = timeout(Duration::from_millis(300), heard.next()).await;
+    assert!(quiet.is_err(), "a reaction is no message: {quiet:?}");
 
-    let all = reactions::load(&h_js, &[message]).await.unwrap();
+    // `ants signer`'s credentials answer an ant's requests, for the messages it reads only.
+    let approver =
+        crate::enroll::Approver::connect_signer(&server.url, &server.dir().join("auth"), None, WAIT).await.unwrap();
+    let serving = tokio::spawn(reactions::serve(
+        approver.client.clone(),
+        approver.hub().clone(),
+        None,
+        Answering::ListsAndChanges,
+    ));
+    let change = |message, reaction: &ants_proto::Reaction, remove| {
+        ReactionsRequest::change(dev_a.clone(), message, ReactionChange { reaction: reaction.clone(), remove })
+    };
+    let applied = |changed| Some(ReactionsOutcome::Applied { changed });
+    assert_eq!(reactions::request(&a_client, &change(message, &eyes, false)).await.unwrap(), applied(true));
+    assert_eq!(reactions::request(&a_client, &change(message, &check, false)).await.unwrap(), applied(true));
+    let unread = reactions::request(&a_client, &change(between.id, &eyes, false)).await.unwrap();
+    assert_eq!(unread, Some(ReactionsOutcome::Unknown), "dev-a reads no message to dev-b");
     let expected = vec![
         Reacted { reaction: check.clone(), by: vec![dev_a.clone()] },
         Reacted { reaction: eyes.clone(), by: vec![dev_a.clone(), human.clone()] },
     ];
-    assert_eq!(all[&message], expected);
-    assert!(reactions::remove(&a_js, None, &dev_a, &message, &eyes).await.unwrap());
-    assert!(!reactions::remove(&a_js, None, &dev_a, &message, &eyes).await.unwrap(), "removed already");
+    let listed = reactions::ask(&a_client, &dev_a, message).await.unwrap();
+    assert_eq!(listed, Some(ReactionsOutcome::Listed { reactions: expected.clone() }));
+    assert_eq!(reactions::load(&h_js, &[message]).await.unwrap()[&message], expected);
+    assert!(!reactions::load(&h_js, &[between.id]).await.unwrap().contains_key(&between.id));
+    assert_eq!(reactions::request(&a_client, &change(message, &eyes, true)).await.unwrap(), applied(true));
+    assert_eq!(reactions::request(&a_client, &change(message, &eyes, true)).await.unwrap(), applied(false));
     let all = reactions::load(&h_js, &[message]).await.unwrap();
     assert_eq!(all[&message][1], Reacted { reaction: eyes, by: vec![human] });
-    let quiet = timeout(Duration::from_millis(300), heard.next()).await;
-    assert!(quiet.is_err(), "a reaction is no message: {quiet:?}");
+    serving.abort();
 }
 
 #[tokio::test]
