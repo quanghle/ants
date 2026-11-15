@@ -48,7 +48,8 @@ use ants_daemon::sync::MutexExt as _;
 use ants_daemon::unserved::{Unserved, Watch};
 use ants_proto::{
     ApprovalRequest, Away, DeviceId, Envelope, Escalation, EscalationReason, Following, HeldNotices, JsDomain,
-    NOTIFY_BUCKET, NotifyPrefs, Role, STREAM, ThreadId, UserId, Uuid, Verdict, held_key, notify_consumer, subject,
+    NOTIFY_BUCKET, NotifyPrefs, Question, Role, STREAM, ThreadId, UserId, Uuid, Verdict, held_key, notify_consumer,
+    subject,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream::{self, consumer, kv, stream::Stream};
@@ -118,6 +119,8 @@ pub struct HumanEntry {
     /// Whether an ant's reply reaching the human's inbox is notified.
     #[serde(default)]
     completions: bool,
+    /// Whether a question an ant asks the human (ask_human) is notified: as escalations are, unless set.
+    questions: Option<bool>,
     /// The daily window notices are held back in, such as `22:00-07:00`.
     quiet: Option<String>,
     /// The time zone `quiet` reads in, instead of the file's.
@@ -140,6 +143,7 @@ pub struct HumanEntry {
 enum Bypass {
     Approvals,
     Escalations,
+    Questions,
 }
 
 /// One `[[human.notify]]`.
@@ -197,6 +201,7 @@ pub struct Human {
     approvals: Option<Vec<UserId>>,
     escalations: bool,
     completions: bool,
+    questions: bool,
     quiet: Option<QuietHours>,
     bypass: Vec<Bypass>,
     /// Who gets what waits for the human while it is away, unless an ant names its own stand-in ([`relayed`]).
@@ -307,8 +312,9 @@ impl Human {
             (true, Some(ants)) if ants.is_empty() => bail!("ants = []: give the ants, or approvals = false"),
             (true, Some(ants)) => Some(ants),
         };
-        if approvals.is_none() && !entry.escalations && !entry.completions {
-            bail!("approvals, escalations and completions are all off: nothing to notify");
+        let questions = entry.questions.unwrap_or(entry.escalations);
+        if approvals.is_none() && !entry.escalations && !entry.completions && !questions {
+            bail!("approvals, escalations, completions and questions are all off: nothing to notify");
         }
         if entry.stand_in.as_ref() == Some(&entry.name) {
             bail!("stand_in names the human itself");
@@ -342,6 +348,7 @@ impl Human {
             approvals,
             escalations: entry.escalations,
             completions: entry.completions,
+            questions,
             quiet,
             bypass: entry.bypass,
             stand_in: entry.stand_in,
@@ -381,6 +388,7 @@ impl Human {
             .map(|b| match b {
                 Bypass::Approvals => "approvals",
                 Bypass::Escalations => "escalations",
+                Bypass::Questions => "questions",
             })
             .collect();
         let through = if through.is_empty() { "nothing".to_owned() } else { through.join(" and ") };
@@ -391,7 +399,8 @@ impl Human {
     /// The consumer's subjects: tool requests and the human's inbox, as configured.
     fn subjects(&self) -> Vec<String> {
         let approvals = self.approvals.is_some().then(|| subject::ALL_APPROVAL_REQUESTS.to_owned());
-        let escalations = (self.escalations || self.completions).then(|| subject::inbox_of(&self.name));
+        let escalations =
+            (self.escalations || self.completions || self.questions).then(|| subject::inbox_of(&self.name));
         approvals.into_iter().chain(escalations).collect()
     }
 
@@ -773,6 +782,8 @@ enum About {
     Escalation { id: Uuid, from: UserId, escalation: Box<Escalation> },
     /// An ant's reply `id` from `from` on `thread`, reaching the human's inbox.
     Completion { id: Uuid, from: UserId, thread: ThreadId },
+    /// The question `question` that `from` asks the human on `thread`, in the message `id`.
+    Question { id: Uuid, from: UserId, thread: ThreadId, question: Box<Question> },
     /// A test notice of `ants webhook notify-test`.
     Test { id: Uuid },
     /// The messages `messages` the human sent, waiting for `ant`, which no daemon serves.
@@ -787,7 +798,7 @@ impl About {
         match self {
             Self::Approval { request, .. } => Some(&request.thread_id),
             Self::Escalation { escalation, .. } => Some(&escalation.thread_id),
-            Self::Completion { thread, .. } => Some(thread),
+            Self::Completion { thread, .. } | Self::Question { thread, .. } => Some(thread),
             Self::Test { .. } | Self::Unserved { .. } | Self::Digest { .. } => None,
         }
     }
@@ -798,6 +809,7 @@ impl About {
             Self::Approval { .. } => "approval",
             Self::Escalation { .. } => "escalation",
             Self::Completion { .. } => "completion",
+            Self::Question { .. } => "question",
             Self::Test { .. } => "test",
             Self::Unserved { .. } => "unserved",
             Self::Digest { .. } => "digest",
@@ -809,6 +821,7 @@ impl About {
         match self {
             Self::Approval { .. } => Some(Bypass::Approvals),
             Self::Escalation { .. } => Some(Bypass::Escalations),
+            Self::Question { .. } => Some(Bypass::Questions),
             Self::Completion { .. } | Self::Test { .. } | Self::Unserved { .. } | Self::Digest { .. } => None,
         }
     }
@@ -884,6 +897,15 @@ fn notice_json(notice: &Notice, now: DateTime<Utc>) -> Value {
             "id": id,
             "ant": from,
             "thread": thread,
+        }),
+        About::Question { id, from, thread, question } => json!({
+            "kind": "question",
+            "id": id,
+            "ant": from,
+            "thread": thread,
+            "question": redactor().redact(&question.text),
+            "options": question.options.iter().map(|o| redactor().redact(o)).collect::<Vec<_>>(),
+            "free_text": question.free_text,
         }),
         About::Test { id } => json!({ "kind": "test", "id": id }),
         About::Unserved { ant, messages } => {
@@ -1123,6 +1145,30 @@ fn completion_notice(envelope: &Envelope) -> Option<Notice> {
     })
 }
 
+/// The notice of a question an ant asks (ask_human) in `envelope`, if it carries one: its text numbers the options,
+/// and says how `ants answer` picks one or types an answer.
+fn question_notice(envelope: &Envelope) -> Option<Notice> {
+    let question = envelope.question.as_ref()?;
+    let (id, thread) = (envelope.id, &envelope.thread_id);
+    let typed = if question.free_text { " (an option's number, or a typed answer)" } else { "" };
+    let text =
+        format!("{}\n\nthread {thread}; answer with ants answer {id} NUMBER{typed}", notice_text(envelope, MAX_TEXT));
+    let asked = cut(&redactor().redact(&question.text.split_whitespace().collect::<Vec<_>>().join(" ")), 100);
+    Some(Notice {
+        about: About::Question {
+            id,
+            from: envelope.from.clone(),
+            thread: thread.clone(),
+            question: Box::new(question.clone()),
+        },
+        human: envelope.to.clone(),
+        title: format!("{} asks: {asked}", envelope.from),
+        text,
+        buttons: Vec::new(),
+        urgent: false,
+    })
+}
+
 /// The notice to `human` of its messages `found` waiting for an ant no daemon serves, at `now`.
 fn unserved_notice(found: &Unserved, human: &UserId, now: DateTime<Utc>) -> Notice {
     let text = found.text(human, now);
@@ -1143,6 +1189,7 @@ fn counted(kind: &str, n: u32) -> String {
         "approval" => ("tool request", "tool requests"),
         "escalation" => ("escalation", "escalations"),
         "completion" => ("reply", "replies"),
+        "question" => ("question", "questions"),
         _ => return format!("{n} {kind} notices"),
     };
     format!("{n} {}", if n == 1 { one } else { many })
@@ -1462,7 +1509,8 @@ async fn watch(human: &Notified, bus: &HumanBus, links: Option<&Links>) -> Resul
     Ok(())
 }
 
-/// Notify `human` of the message at `seq` on `subject`, if it is a pending tool request it wants or an escalation.
+/// Notify `human` of the message at `seq` on `subject`, if it is a pending tool request it wants, or an escalation,
+/// question or reply it takes.
 async fn notify(human: &Notified, bus: &HumanBus, links: Option<&Links>, subject: &str, payload: &[u8], seq: u64) {
     let config = &human.config;
     let now = Utc::now();
@@ -1470,11 +1518,12 @@ async fn notify(human: &Notified, bus: &HumanBus, links: Option<&Links>, subject
     let notice = if inbox {
         match serde_json::from_slice::<Envelope>(payload) {
             Ok(envelope) if envelope.check_subject(subject).is_ok() && is_recent(&envelope.id, now) => {
-                match envelope.escalation.is_some() {
-                    true if config.escalations => {
+                match (envelope.escalation.is_some(), envelope.question.is_some()) {
+                    (true, _) if config.escalations => {
                         escalation_notice(&envelope).filter(|notice| !config.gets_relayed_request(&notice.about))
                     }
-                    false if config.completions => completion_notice(&envelope),
+                    (false, true) if config.questions => question_notice(&envelope),
+                    (false, false) if config.completions => completion_notice(&envelope),
                     _ => None,
                 }
             }

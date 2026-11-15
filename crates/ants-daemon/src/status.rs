@@ -40,12 +40,16 @@ pub fn state(client: &async_nats::Client, ant: &UserId, thread: &ThreadId, state
 }
 
 /// Tell that `envelope`, stored, escalates what its sender could not settle, if it carries an escalation
-/// ([`StatusUpdate::Escalated`]), on the sender's status of the envelope's thread.
+/// ([`StatusUpdate::Escalated`]), or asks a question ([`StatusUpdate::Asked`]), on the sender's status of the
+/// envelope's thread.
 pub fn escalated(client: &async_nats::Client, envelope: &Envelope) {
-    if let Some(escalation) = envelope.escalation.as_deref() {
-        let update = StatusUpdate::Escalated { to: envelope.to.clone(), escalation: escalation.clone() };
-        publish(client, &envelope.from, &envelope.thread_id, update);
-    }
+    let to = envelope.to.clone();
+    let update = match (envelope.escalation.as_deref(), &envelope.question) {
+        (Some(escalation), _) => StatusUpdate::Escalated { to, escalation: escalation.clone() },
+        (None, Some(question)) => StatusUpdate::Asked { to, message: envelope.id, question: question.clone() },
+        (None, None) => return,
+    };
+    publish(client, &envelope.from, &envelope.thread_id, update);
 }
 
 /// The status of one prompt, joining streamed text so a reply goes out in a few updates rather than one per token,

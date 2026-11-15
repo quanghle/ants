@@ -208,6 +208,10 @@ impl Printer {
                 return self
                     .line(&format!("[{thread}] {who}{forged} escalated {stuck}'s {reason} to {to} (level {level})"));
             }
+            StatusUpdate::Asked { to, message, question } => {
+                let question = question.text.split_whitespace().collect::<Vec<_>>().join(" ");
+                return self.line(&format!("[{thread}] {who}{forged} asked {to} {question:?} (message {message})"));
+            }
             StatusUpdate::Decided { request_id, verdict, by, decider } => {
                 let verdict = tools::spelling(*verdict);
                 let outcome = match (by, decider) {

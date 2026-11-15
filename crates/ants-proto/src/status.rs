@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 #[cfg(doc)]
 use crate::ToolCall;
-use crate::{Error, Escalation, ThreadId, UserId, Verdict, subject};
+use crate::{Error, Escalation, Question, ThreadId, UserId, Verdict, subject};
 
 /// The most paths a tool call carries, in [`StatusUpdate::Tool`] and in timeline records.
 pub const MAX_TOOL_PATHS: usize = 8;
@@ -119,6 +119,13 @@ pub enum StatusUpdate {
     Escalated {
         to: UserId,
         escalation: Escalation,
+    },
+    /// The ant asked `to`, a human, `question` (ask_human): the message `message` carrying it is stored, and the answer
+    /// comes later as a message from `to`. The message's text is not part of it.
+    Asked {
+        to: UserId,
+        message: Uuid,
+        question: Question,
     },
     /// The tool request `<ant>/<request_id>` was settled, `by` a human, an ant of the chain or its expiry (`decider`
     /// names the ant, or the human as its decision names it), and the ant goes on with `verdict`, a verdict the

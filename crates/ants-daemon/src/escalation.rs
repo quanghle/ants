@@ -63,7 +63,7 @@ const SUMMARY_CHARS: usize = 4000;
 pub type Sender = Arc<dyn Fn(Envelope, String) -> BoxFuture<'static, Result<()>> + Send + Sync>;
 
 /// Stores through JetStream ([`bus::store`]), first recording the link to a channel thread the envelope passes on, if
-/// any ([`links::pass_on`]), then tells of the escalation on the ant's status ([`status::escalated`]).
+/// any ([`links::pass_on`]), then tells of the escalation or question on the ant's status ([`status::escalated`]).
 pub fn jetstream_sender(js: async_nats::jetstream::Context) -> Sender {
     Arc::new(move |envelope, id| {
         let js = js.clone();

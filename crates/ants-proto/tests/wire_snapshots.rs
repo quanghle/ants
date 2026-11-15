@@ -748,6 +748,14 @@ fn status() {
         ("approval", StatusUpdate::Approval { request_id: id(10) }),
         ("escalated", StatusUpdate::Escalated { to: user("lead"), escalation: escalation() }),
         (
+            "asked",
+            StatusUpdate::Asked {
+                to: user("alice"),
+                message: id(11),
+                question: Question::new("Ship it?", &["yes".to_owned(), "not yet".to_owned()], false).unwrap(),
+            },
+        ),
+        (
             "decided",
             StatusUpdate::Decided {
                 request_id: id(10),

@@ -744,7 +744,36 @@ async fn a_human_is_notified_of_tool_requests_and_escalations_and_decides_on_a_l
     assert_eq!(body["title"], "dev-a escalates: asked on dev-a");
     assert!(body["message"].as_str().unwrap().starts_with("which database?"), "{body}");
     assert!(body.get("actions").is_none());
+
+    question_is_pushed(&ant, &mut posts, Envelope::asking(plain.thread_id, dev_a, alice, which_database())).await;
 }
+
+fn which_database() -> ants_proto::Question {
+    ants_proto::Question::new("Which database?", &["Postgres".to_owned(), "SQLite".to_owned()], true).unwrap()
+}
+
+/// Publish `asking` as `ant` and check that the ntfy sink gets its question.
+async fn question_is_pushed(
+    ant: &jetstream::Context,
+    posts: &mut mpsc::UnboundedReceiver<(String, Value)>,
+    asking: Envelope,
+) {
+    ant.publish(asking.subject(), serde_json::to_vec(&asking).unwrap().into()).await.unwrap().await.unwrap();
+    let body = loop {
+        // The escalation's telegram message may come first.
+        let (path, body) = next(posts).await;
+        if path == "/" {
+            break body;
+        }
+    };
+    assert_eq!(body["title"], "dev-a asks: Which database?");
+    let message = body["message"].as_str().unwrap();
+    assert!(
+        message.contains("1. Postgres") && message.contains(&format!("ants answer {} NUMBER", asking.id)),
+        "{body}"
+    );
+}
+
 /// The topics of the next `n` notifications, with their titles, sorted.
 async fn topics(posts: &mut mpsc::UnboundedReceiver<(String, Value)>, n: usize) -> Vec<(String, String)> {
     let mut got = Vec::new();
