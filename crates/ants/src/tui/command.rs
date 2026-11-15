@@ -17,9 +17,9 @@ use ratatui::widgets::{Clear, Paragraph};
 use super::exec::{Job, Outcome};
 use super::frame;
 use super::model::{Action, Focus, Key, Model, Page};
-use super::{complete, nav, thread};
+use super::{attach, complete, nav, thread};
 use crate::thread_meta::Marking;
-use crate::{live, quiet, tools};
+use crate::{attachments, live, quiet, tools};
 
 /// The slash commands: name, arguments and what each does, as the list shows them.
 pub const COMMANDS: &[(&str, &str, &str)] = &[
@@ -44,6 +44,9 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("digest", "[SINCE]", "catch-up summary"),
     ("tldr", "", "summary of the thread"),
     ("tree", "", "the thread's delegation tree"),
+    ("attach", "PATH", "attach a file to the next message"),
+    ("detach", "", "drop the files attached"),
+    ("save", "[PATH]", "save the marked attachment"),
     ("quit", "", "leave ants chat"),
 ];
 
@@ -75,8 +78,13 @@ pub enum Command {
 /// A slash command and its arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Slash {
-    Approve { id: Option<String>, always: bool },
-    Reject { id: Option<String> },
+    Approve {
+        id: Option<String>,
+        always: bool,
+    },
+    Reject {
+        id: Option<String>,
+    },
     Grant(Option<String>),
     Cancel,
     Steer(String),
@@ -92,6 +100,11 @@ pub enum Slash {
     Digest(Option<String>),
     Tldr,
     Tree,
+    /// Stage the file at the path for the next message.
+    Attach(String),
+    Detach,
+    /// Save the marked attachment of the selected message, to the path if given.
+    Save(Option<String>),
     Quit,
 }
 
@@ -186,6 +199,9 @@ fn slash(text: &str) -> Result<Slash, String> {
         "digest" => Ok(Slash::Digest(optional())),
         "tldr" => bare(Slash::Tldr),
         "tree" => bare(Slash::Tree),
+        "attach" => text().map(Slash::Attach),
+        "detach" => bare(Slash::Detach),
+        "save" => Ok(Slash::Save(optional())),
         "quit" => bare(Slash::Quit),
         _ if COMMANDS.iter().any(|(n, ..)| *n == name) => Err(usage()),
         _ => Err(format!("no command /{name}")),
@@ -246,6 +262,8 @@ pub struct Bar {
     pub list: bool,
     /// The completion selected in the list of those of the word at the cursor.
     pub pick: complete::Pick,
+    /// The files `/attach` staged for the next message.
+    pub staged: attach::Staged,
 }
 
 impl Bar {
@@ -283,7 +301,8 @@ impl Bar {
             .map_or(self.chars.len(), |at| self.cursor + at);
         let spaced = self.chars.get(end).is_some_and(|c| *c == ' ');
         let mut put: Vec<char> = word.chars().collect();
-        if !spaced {
+        // A directory completed goes on to its entries.
+        if !spaced && !word.ends_with('/') {
             put.push(' ');
         }
         self.cursor = start + put.len() + usize::from(spaced);
@@ -382,7 +401,11 @@ impl Bar {
         let width = usize::from(area.width.saturating_sub(2));
         let (lines, (row, column)) = self.lines(width);
         let top = (row + 1).saturating_sub(MAX_LINES);
-        let mut block = frame::block(" > ".to_owned(), self.focused);
+        let title = match self.staged.names()[..] {
+            [] => " > ".to_owned(),
+            ref names => format!(" > 📎 {} ", names.join(", ")),
+        };
+        let mut block = frame::block(title, self.focused);
         if let Some(status) = &self.status {
             let style = match status.tone {
                 Tone::Busy => Style::new().fg(Color::Cyan),
@@ -464,6 +487,10 @@ impl Model {
     /// Do what the bar's `text` says, emptying the bar; else keep it and tell why on its status line.
     fn submit(&mut self, text: String, now: DateTime<Utc>) -> Option<Action> {
         let command = parse(&text);
+        if let Ok(Command::Slash(slash @ (Slash::Attach(_) | Slash::Detach))) = &command {
+            self.stage(slash);
+            return None;
+        }
         let slash = matches!(command, Ok(Command::Slash(_)));
         let done = command.and_then(|command| self.command(command, now));
         let action = match done {
@@ -482,7 +509,18 @@ impl Model {
         }
         match action {
             Some(Action::Run(job, _)) => {
-                self.bar.set_status(if slash { "running…" } else { "sending…" }, Tone::Busy);
+                let job = match job.sends().then(|| self.bar.staged.take(&text)).flatten() {
+                    Some(files) => {
+                        let count =
+                            if files.len() == 1 { "1 file".to_owned() } else { format!("{} files", files.len()) };
+                        self.bar.set_status(format!("sending with {count}…"), Tone::Busy);
+                        Job::Attached { job: Box::new(job), files }
+                    }
+                    None => {
+                        self.bar.set_status(if slash { "running…" } else { "sending…" }, Tone::Busy);
+                        job
+                    }
+                };
                 Some(Action::Run(job, text))
             }
             Some(Action::Decide(request, verdict)) => {
@@ -548,7 +586,40 @@ impl Model {
                 self.tree(thread);
                 Ok(None)
             }
+            Slash::Save(to) => {
+                let listed = self.attachment().ok_or("no attachment on the selected message")?;
+                run(Job::Save(Box::new(listed), to.map(|to| attach::expand(&to))))
+            }
+            Slash::Attach(_) | Slash::Detach => Ok(None),
             Slash::Quit => Ok(Some(Action::Quit)),
+        }
+    }
+
+    /// Stage a file for the next message, or drop those staged, the bar kept open to write it.
+    fn stage(&mut self, slash: &Slash) {
+        let staged = &mut self.bar.staged;
+        let line = match slash {
+            Slash::Attach(path) => match staged.add(path) {
+                Ok(line) => line,
+                Err(e) => return self.bar.set_status(format!("{e:#}"), Tone::Error),
+            },
+            _ => match staged.clear() {
+                0 => "no files attached".to_owned(),
+                1 => "dropped the file attached".to_owned(),
+                n => format!("dropped the {n} files attached"),
+            },
+        };
+        self.bar.set_text("");
+        self.bar.list = false;
+        self.bar.set_status(line, Tone::Done);
+    }
+
+    /// The marked attachment of the message selected in the view, if any.
+    pub fn attachment(&self) -> Option<attachments::Listed> {
+        match self.page() {
+            Page::Thread(page) => page.attachment().cloned(),
+            Page::Channel(page) => page.attachment(&self.data).cloned(),
+            _ => None,
         }
     }
 
@@ -638,6 +709,7 @@ impl Model {
     /// Take how a job the bar ran went: its line and warnings on the status line, opening the thread it started; on
     /// failure, the error, and its text back into the bar if empty.
     pub fn outcome(&mut self, outcome: Outcome) -> Option<Action> {
+        self.bar.staged.sent(&outcome.text, outcome.result.is_err());
         match outcome.result {
             Ok(done) => {
                 let tone = if done.warnings.is_empty() { Tone::Done } else { Tone::Warn };
@@ -950,5 +1022,65 @@ mod tests {
         assert_eq!(m.bar.text(), "@dev-a deploy", "a success leaves the bar's text alone");
         let status = m.bar.status.as_ref().unwrap();
         assert_eq!((status.text.as_str(), status.tone), ("sent to dev-a · dev-a is served by no daemon", Tone::Warn));
+    }
+
+    #[test]
+    fn attach_stages_files_for_the_next_message_and_a_failed_send_stages_them_again() {
+        let dir = ants_test_support::scratch_dir("bar-attach");
+        std::fs::write(dir.join("notes.txt"), b"notes").unwrap();
+        let mut m = model();
+        m.key(Key::Ctrl('k'), at(0));
+        typed(&mut m, &format!("/attach {}/no", dir.display()));
+        assert_eq!(m.completions()[0].word, format!("{}/notes.txt", dir.display()), "paths complete");
+        typed(&mut m, "tes.txt");
+        assert_eq!(m.key(Key::Enter, at(0)), None);
+        assert!(m.bar.focused && m.bar.is_empty(), "the bar stays open to write the message");
+        assert_eq!(m.bar.status.as_ref().unwrap().text, "attached notes.txt (5 B): sent with the next message");
+        assert_eq!(m.bar.staged.names(), ["notes.txt"]);
+        typed(&mut m, &format!("/attach {}/missing", dir.display()));
+        m.key(Key::Enter, at(0));
+        assert_eq!(m.bar.status.as_ref().unwrap().tone, Tone::Error);
+        m.bar.set_text("");
+
+        typed(&mut m, "@dev-a read this");
+        let Some(Action::Run(Job::Attached { job, files }, text)) = m.key(Key::Enter, at(0)) else { panic!() };
+        assert_eq!(*job, Job::Ask { to: user("dev-a"), thread: None, text: "read this".into(), steer: false });
+        assert_eq!((files.len(), text.as_str()), (1, "@dev-a read this"));
+        assert_eq!(m.bar.status.as_ref().unwrap().text, "sending with 1 file…");
+        assert!(m.bar.staged.names().is_empty(), "the files go with one message");
+        m.outcome(Outcome { result: Err(anyhow::anyhow!("no route")), text });
+        assert_eq!((m.bar.text(), m.bar.staged.names()), ("@dev-a read this".to_owned(), vec!["notes.txt"]));
+
+        let thread = ThreadId::generate();
+        m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
+        m.bar.set_text("/done");
+        assert_eq!(m.key(Key::Enter, at(0)), Some(Action::Run(Job::Done { thread, done: true }, "/done".into())));
+        assert_eq!(m.bar.staged.names(), ["notes.txt"], "only a message takes the files");
+        m.key(Key::Ctrl('k'), at(0));
+        typed(&mut m, "/detach");
+        m.key(Key::Enter, at(0));
+        assert_eq!(m.bar.status.as_ref().unwrap().text, "dropped the file attached");
+        assert!(m.bar.staged.names().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_saves_the_marked_attachment_of_the_open_thread() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
+        assert_eq!(
+            m.command(Command::Slash(Slash::Save(None)), at(0)),
+            Err("no attachment on the selected message".into())
+        );
+        let mut sent = message(1, &thread, "dev-a", "alice", "the log");
+        let envelope = ants_proto::Envelope::new(user("dev-a"), user("alice"), "x");
+        let log = ants_daemon::files::reference("build.log", "text/plain", b"ok").unwrap();
+        sent.attachments = crate::attachments::listed(&[log], |id| envelope.attachment_handle(id));
+        let Page::Thread(page) = m.pages.last_mut().unwrap() else { panic!() };
+        page.history.loaded(&thread, Ok(vec![sent.clone()])).unwrap();
+        let saved = m.command(parse("/save ~/logs").unwrap(), at(0)).unwrap();
+        let to = std::env::home_dir().map(|home| home.join("logs"));
+        assert_eq!(saved, Some(Action::Run(Job::Save(Box::new(sent.attachments[0].clone()), to), String::new())));
     }
 }

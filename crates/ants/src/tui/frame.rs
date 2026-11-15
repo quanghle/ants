@@ -125,6 +125,7 @@ const HELP: &[(&str, &str)] = &[
     ("y", "in a thread: copy the selected message"),
     ("p m e d", "in a thread: pin, mute, archive, mark done (again to undo)"),
     ("t", "in a thread: its delegation tree"),
+    ("o ]", "in a thread or channel: open the marked attachment, mark the next"),
     ("x y", "in a delegation tree: cancel every prompt in the selected subtree"),
     ("n", "with a person: write a message, starting a thread"),
     ("/", "the bar on /search, as in: /search deploy from:dev-a"),
@@ -220,7 +221,7 @@ mod tests {
         assert!(shown.contains("Enter send · Alt-Enter new line"), "{shown}");
         m.key(Key::Ctrl('k'), at(0));
         let shown = screen(&m, at(0));
-        assert!(shown.contains("/approve   [ID] [--always]   ") && shown.contains("/quit"), "{shown}");
+        assert!(shown.contains("/approve   [ID] [--always]   ") && shown.contains("/reject"), "{shown}");
     }
 
     #[test]

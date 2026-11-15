@@ -24,6 +24,8 @@ pub struct Said {
     pub at: DateTime<Utc>,
     pub from: UserId,
     pub text: String,
+    /// How many files are attached.
+    pub attachments: usize,
 }
 
 /// A thread's messages between the human and another user.
@@ -53,7 +55,13 @@ impl Dms {
             (false, true) => from,
             _ => return,
         };
-        let said = Said { seq: entry.seq, at: entry.stored_at, from: from.clone(), text: entry.text.clone() };
+        let said = Said {
+            seq: entry.seq,
+            at: entry.stored_at,
+            from: from.clone(),
+            text: entry.text.clone(),
+            attachments: entry.attachments.len(),
+        };
         let dm = self.0.entry(with.clone()).or_default().entry(entry.thread_id.clone()).or_insert_with(|| Dm {
             thread: entry.thread_id.clone(),
             latest: said.clone(),
@@ -89,7 +97,11 @@ pub fn unread(data: &Data, with: &UserId) -> usize {
 
 /// What a message says, in a line: where every message of the view is rendered.
 fn said(said: &Said, width: usize) -> String {
-    crate::excerpt(&format!("{}: {}", said.from, said.text.replace('\n', " ")), width)
+    let files = match said.attachments {
+        0 => String::new(),
+        n => format!(" 📎{n}"),
+    };
+    crate::excerpt(&format!("{}:{files} {}", said.from, said.text.replace('\n', " ")), width)
 }
 
 /// A message to write to another human, on a new thread.

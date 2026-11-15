@@ -7,6 +7,7 @@
 //! which draws it and takes its keys.
 
 mod acts;
+mod attach;
 mod cards;
 mod channel;
 mod command;

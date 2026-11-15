@@ -9,7 +9,7 @@ use ants_proto::{
 use chrono::{DateTime, TimeDelta, Utc};
 
 use super::acts::{Acted, Change};
-use super::command::Bar;
+use super::command::{Bar, Tone};
 use super::exec::Job;
 use super::reads::{Mark, Read};
 use super::work::{Facts, Filter};
@@ -617,6 +617,10 @@ impl Model {
             To::Tree(thread) => {
                 self.tree(thread);
                 None
+            }
+            To::Do(Action::Run(Job::Open(listed), text)) => {
+                self.bar.set_status(format!("opening {}…", listed.attachment.name), Tone::Busy);
+                Some(Action::Run(Job::Open(listed), text))
             }
             To::Do(action) => Some(action),
         }

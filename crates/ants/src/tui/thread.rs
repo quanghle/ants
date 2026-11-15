@@ -22,10 +22,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::acts::{About, Change};
+use super::exec::Job;
 use super::frame::{self, ago};
 use super::model::{Action, Data, Key, To};
 use super::timeline::Call;
-use super::{markdown, work};
+use super::{attach, markdown, work};
+use crate::attachments::Listed;
 use crate::live::History;
 use crate::thread::{Entry, Kind};
 
@@ -49,11 +51,20 @@ pub struct Page {
     pub about: Option<About>,
     /// The message the thread was opened at, selected and held at the top of the view until a key moves it.
     at: Option<Uuid>,
+    /// The attachment `o` opens of the message with them, by its sequence.
+    mark: attach::Mark<u64>,
 }
 
 impl Page {
     pub fn new(thread: ThreadId) -> Self {
-        Self { history: History::new(thread), selected: None, top: Cell::new(0), about: None, at: None }
+        Self {
+            history: History::new(thread),
+            selected: None,
+            top: Cell::new(0),
+            about: None,
+            at: None,
+            mark: attach::Mark::default(),
+        }
     }
 
     /// The thread, shown at `message` once read.
@@ -67,7 +78,8 @@ impl Page {
         self.messages().find(|e| e.id == Some(at)).map(|e| e.seq)
     }
 
-    pub const KEYS: &str = "↑↓ select · y copy · p pin · m mute · e archive · d done · t tree · End latest · Esc back";
+    pub const KEYS: &str =
+        "↑↓ select · y copy · o open file · ] next file · p pin · m mute · e archive · d done · t tree · Esc back";
 
     /// The messages shown, in the order stored.
     fn messages(&self) -> impl DoubleEndedIterator<Item = &Entry> {
@@ -81,6 +93,20 @@ impl Page {
             Some(seq) => messages.find(|e| e.seq == seq),
             None => messages.last(),
         }
+    }
+
+    /// The message whose attachments `o` opens: the selected one, else the latest carrying any.
+    fn attached(&self) -> Option<&Entry> {
+        match self.selected.or_else(|| self.held()) {
+            Some(_) => self.selection(),
+            None => self.messages().rev().find(|e| !e.attachments.is_empty()),
+        }
+    }
+
+    /// The attachment `o` opens.
+    pub fn attachment(&self) -> Option<&Listed> {
+        let e = self.attached()?;
+        e.attachments.get(self.mark.at(e.seq, e.attachments.len()))
     }
 
     /// Move the selection `by` messages, down for a positive one; past the latest it follows the latest again.
@@ -143,6 +169,14 @@ impl Page {
             Key::Char('e') => return change(Change::Archive(!flags.archived)),
             Key::Char('d') => return change(Change::Done(!flags.done)),
             Key::Char('t') => return Some(To::Tree(self.history.thread.clone())),
+            Key::Char('o') => {
+                let listed = self.attachment()?.clone();
+                return Some(To::Do(Action::Run(Job::Open(Box::new(listed)), String::new())));
+            }
+            Key::Char(']') => {
+                let (seq, count) = self.attached().map(|e| (e.seq, e.attachments.len()))?;
+                self.mark.next(seq, count);
+            }
             _ => {}
         }
         None
@@ -170,7 +204,8 @@ impl Page {
         if self.history.loading {
             lines.push(Line::styled("reading the thread…", frame::dim()));
         }
-        let shown = Shown { data, now, busy: data.live.progress.contains_key(thread), width };
+        let marked = self.attached().map(|e| (e.seq, self.mark.at(e.seq, e.attachments.len())));
+        let shown = Shown { data, now, busy: data.live.progress.contains_key(thread), width, marked };
         let calls = data.calls.get(thread).map_or(&[][..], |c| c.calls());
         let rows = rows(&self.history.entries, calls, |u| data.is_human(u));
         let held = self.held();
@@ -374,6 +409,8 @@ struct Shown<'a> {
     /// Whether an ant is busy on the thread: a call not ended is running only then.
     busy: bool,
     width: usize,
+    /// The message whose attachments `o` opens, by its sequence, and the one marked among them.
+    marked: Option<(u64, usize)>,
 }
 
 impl Shown<'_> {
@@ -399,6 +436,7 @@ impl Shown<'_> {
                 }
                 lines.push(first);
                 lines.extend(text.into_iter().map(|line| indented(&under, line).patch_style(style)));
+                lines.extend(attach::lines(&e.attachments, self.marked_of(e), &under));
             }
         }
     }
@@ -440,10 +478,16 @@ impl Shown<'_> {
         }
         lines.push(Line::from(head));
         lines.extend(text(e, entries, self.width.saturating_sub(2)).into_iter().map(|line| indented("  ", line)));
+        lines.extend(attach::lines(&e.attachments, self.marked_of(e), "  "));
         let reactions = crate::inbox::render_reactions(&e.reactions, "  ");
         for line in reactions.lines() {
             push(lines, line, "  ", frame::dim(), self.width);
         }
+    }
+
+    /// Which of `e`'s attachments is marked, when `o` opens one of them.
+    fn marked_of(&self, e: &Entry) -> Option<usize> {
+        self.marked.filter(|(seq, _)| *seq == e.seq).map(|(_, at)| at)
     }
 
     /// A tool call: when it started, its kind, its title, and how it ended or how long it has run.
@@ -789,5 +833,38 @@ mod tests {
         assert_eq!(page.key(Key::Char('m'), data, at(200)), change(Change::Mute(true)), "the mute ended");
         data.live.marks.archive(&thread, 7);
         assert_eq!(page.key(Key::Char('e'), data, at(8)), change(Change::Archive(false)));
+    }
+
+    #[test]
+    fn attachments_list_under_their_message_and_o_opens_the_marked_one() {
+        let thread = ThreadId::generate();
+        let m = model();
+        let mut sent = message(1, &thread, "dev-a", "alice", "the screenshots");
+        let shot = |name: &str| ants_daemon::files::reference(name, "image/png", &[0; 1536]).unwrap();
+        let envelope =
+            ants_proto::Envelope::new(crate::live::tests::user("dev-a"), crate::live::tests::user("alice"), "x");
+        sent.attachments =
+            crate::attachments::listed(&[shot("before.png"), shot("after.png")], |id| envelope.attachment_handle(id));
+        let entries = vec![sent, message(2, &thread, "alice", "dev-a", "thanks")];
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(entries)).unwrap();
+        let shown = screen(&page, &m.data, 80, at(3));
+        // The paperclip takes two cells.
+        assert!(shown.contains("│  📎  before.png (1.5 KiB) image/png ◂"), "{shown}");
+        assert!(shown.contains("│  📎  after.png (1.5 KiB) image/png  "), "{shown}");
+
+        let open = |page: &mut Page| match page.key(Key::Char('o'), &m.data, at(3)) {
+            Some(To::Do(Action::Run(Job::Open(listed), text))) if text.is_empty() => listed.attachment.name,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(open(&mut page), "before.png", "following the latest, the latest message with files");
+        page.key(Key::Char(']'), &m.data, at(3));
+        assert_eq!(open(&mut page), "after.png");
+        assert!(screen(&page, &m.data, 80, at(3)).contains("after.png (1.5 KiB) image/png ◂"));
+        page.key(Key::Char(']'), &m.data, at(3));
+        assert_eq!(open(&mut page), "before.png", "past the last, the first");
+        page.key(Key::Home, &m.data, at(3));
+        page.key(Key::Down, &m.data, at(3));
+        assert_eq!(page.key(Key::Char('o'), &m.data, at(3)), None, "the selected message has no files");
     }
 }

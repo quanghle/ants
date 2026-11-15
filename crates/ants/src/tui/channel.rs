@@ -11,9 +11,12 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
+use super::attach;
+use super::exec::Job;
 use super::frame::{self, ago};
-use super::model::{Data, Key, To};
+use super::model::{Action, Data, Key, To};
 use super::work::Filter;
+use crate::attachments::Listed;
 use crate::channel::reads::Unread;
 use crate::thread::{Entry, Kind};
 
@@ -28,6 +31,7 @@ pub struct Post {
     pub from: String,
     pub at: DateTime<Utc>,
     pub text: String,
+    pub attachments: Vec<Listed>,
 }
 
 /// The replies on a post's thread: how many, and the latest's time.
@@ -70,8 +74,14 @@ impl Feeds {
         let top = entry.kind == Kind::Post && entry.id.is_some_and(|id| id.to_string() == entry.thread_id.as_str());
         if let (true, Some(id), Some(channel)) = (top, entry.id, &entry.channel) {
             let from = entry.from.as_ref().map_or_else(String::new, ToString::to_string);
-            let post =
-                Post { id, thread: entry.thread_id.clone(), from, at: entry.stored_at, text: entry.text.clone() };
+            let post = Post {
+                id,
+                thread: entry.thread_id.clone(),
+                from,
+                at: entry.stored_at,
+                text: entry.text.clone(),
+                attachments: entry.attachments.clone(),
+            };
             self.posts.entry(channel.clone()).or_default().push(post);
             return true;
         }
@@ -121,23 +131,41 @@ impl Feeds {
 pub struct Page {
     pub channel: ChannelId,
     selected: usize,
+    /// The attachment `o` opens of the post with them, by its id.
+    mark: attach::Mark<Uuid>,
 }
 
 impl Page {
     pub fn new(channel: ChannelId) -> Self {
-        Self { channel, selected: 0 }
+        Self { channel, selected: 0, mark: attach::Mark::default() }
     }
 
-    pub const KEYS: &str = "↑↓ post · Enter open its thread · w its threads in work · Esc nav";
+    pub const KEYS: &str =
+        "↑↓ post · Enter open its thread · w its threads in work · o open file · ] next file · Esc nav";
 
     /// The selected post.
     pub fn post<'d>(&self, data: &'d Data) -> Option<&'d Post> {
         data.feeds.posts(&self.channel).nth(self.selected)
     }
 
+    /// The attachment `o` opens of the selected post.
+    pub fn attachment<'d>(&self, data: &'d Data) -> Option<&'d Listed> {
+        let post = self.post(data)?;
+        post.attachments.get(self.mark.at(post.id, post.attachments.len()))
+    }
+
     pub fn key(&mut self, key: Key, data: &Data) -> Option<To> {
         let count = data.feeds.posts(&self.channel).count();
         self.selected = match key {
+            Key::Char('o') => {
+                let listed = self.attachment(data)?.clone();
+                return Some(To::Do(Action::Run(Job::Open(Box::new(listed)), String::new())));
+            }
+            Key::Char(']') => {
+                let post = self.post(data)?;
+                self.mark.next(post.id, post.attachments.len());
+                return None;
+            }
             Key::Enter => {
                 return data.feeds.posts(&self.channel).nth(self.selected).map(|p| To::Thread(p.thread.clone()));
             }
@@ -164,20 +192,29 @@ impl Page {
             frame.render_widget(Paragraph::new(text).block(block), area);
             return;
         }
-        let items: Vec<ListItem> = posts.iter().map(|p| ListItem::new(post_lines(p, data, now))).collect();
+        let items: Vec<ListItem> = posts
+            .iter()
+            .enumerate()
+            .map(|(at, p)| {
+                let marked = (at == self.selected).then(|| self.mark.at(p.id, p.attachments.len()));
+                ListItem::new(post_lines(p, data, now, marked))
+            })
+            .collect();
         let list = List::new(items).block(block).highlight_style(frame::highlight(focused));
         frame.render_stateful_widget(list, area, &mut ListState::default().with_selected(Some(self.selected)));
     }
 }
 
-/// A post: its author and age, its first line, then its replies and reactions.
-fn post_lines(post: &Post, data: &Data, now: DateTime<Utc>) -> Vec<Line<'static>> {
+/// A post: its author and age, its first line, its attachments, `marked` the one `o` opens, then its replies and
+/// reactions.
+fn post_lines(post: &Post, data: &Data, now: DateTime<Utc>, marked: Option<usize>) -> Vec<Line<'static>> {
     let first = post.text.lines().next().unwrap_or_default();
     let mut lines = vec![Line::from(vec![
         Span::styled(post.from.clone(), Style::new().fg(Color::Blue).bold()),
         Span::styled(format!(" {} ", ago(post.at, now)), frame::dim()),
         Span::raw(crate::excerpt(first, 200)),
     ])];
+    lines.extend(attach::lines(&post.attachments, marked, "  "));
     let mut under = Vec::new();
     if let Some(r) = data.feeds.replies(&post.thread) {
         let replies = if r.count == 1 { "reply" } else { "replies" };
@@ -232,9 +269,9 @@ pub mod tests {
         let reacted = Reacted { reaction: "eyes".parse().unwrap(), by: vec![user("bob")] };
         m.read(super::super::reads::Read::Reactions([(second.id, vec![reacted])].into()), at(4));
         let View::Channel(page) = m.page() else { panic!("not the channel") };
-        let shown: Vec<String> = post_lines(m.data.feeds.posts(&ops).nth(1).unwrap(), &m.data, at(64))
+        let shown: Vec<String> = post_lines(m.data.feeds.posts(&ops).nth(1).unwrap(), &m.data, at(64), None)
             .into_iter()
-            .chain(post_lines(m.data.feeds.posts(&ops).next().unwrap(), &m.data, at(64)))
+            .chain(post_lines(m.data.feeds.posts(&ops).next().unwrap(), &m.data, at(64), None))
             .map(|l| l.to_string())
             .collect();
         assert_eq!(
