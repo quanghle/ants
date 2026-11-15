@@ -140,6 +140,9 @@ pub struct Entry {
     /// The reason of the escalation an inbox message carries, which the note spells out.
     #[serde(skip)]
     pub reason: Option<EscalationReason>,
+    /// The stuck ant of the escalation an inbox message carries.
+    #[serde(skip)]
+    pub stuck: Option<UserId>,
     /// The title an inbox message, channel post or notes post that is not forged suggests for its thread
     /// ([`Envelope::title`], [`ChannelPost::title`], [`NotesPost::title`]).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -163,6 +166,9 @@ pub struct Entry {
     /// An inbox message a webhook or schedule sent ([`Envelope::webhook`]).
     #[serde(skip)]
     pub webhook: bool,
+    /// The thread an inbox message's thread was spun off ([`Envelope::origin_thread`]).
+    #[serde(skip)]
+    pub origin: Option<ThreadId>,
 }
 
 /// A tool call an ant stored on its timeline, as a [`Kind::Tool`] entry has it.
@@ -183,7 +189,7 @@ pub struct ToolCall {
 }
 
 impl Entry {
-    fn new(seq: u64, stored_at: DateTime<Utc>, kind: Kind, thread_id: ThreadId) -> Self {
+    pub(crate) fn new(seq: u64, stored_at: DateTime<Utc>, kind: Kind, thread_id: ThreadId) -> Self {
         Self {
             seq,
             id: None,
@@ -202,6 +208,7 @@ impl Entry {
             sealed: None,
             reactions: Vec::new(),
             reason: None,
+            stuck: None,
             suggested_title: None,
             summary: None,
             question: None,
@@ -209,6 +216,7 @@ impl Entry {
             tool: None,
             turns: None,
             webhook: false,
+            origin: None,
         }
     }
 
@@ -325,6 +333,7 @@ impl Parser {
             // Under the handles of the subject it was stored on, a forged one's too: its sender stored them.
             attachments: attachments::listed_on(subject, &e.attachments),
             forged,
+            stuck: e.escalation.as_ref().map(|x| x.stuck.clone()),
             sealed,
             reason: e.escalation.map(|x| x.reason),
             // Only an ant suggests a title, and no ant seals.
@@ -334,6 +343,7 @@ impl Parser {
             answer,
             turns: Some(e.turn_budget),
             webhook: e.webhook,
+            origin: e.origin_thread,
             ..entry(kind, e.thread_id)
         })
     }

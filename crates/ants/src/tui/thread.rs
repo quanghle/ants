@@ -69,7 +69,7 @@ impl Page {
         self.messages().find(|e| e.id == Some(at)).map(|e| e.seq)
     }
 
-    pub const KEYS: &str = "↑↓ select · y copy · + react · p pin · m mute · e archive · d done · a A r answer a tool request · End latest · Esc back";
+    pub const KEYS: &str = "↑↓ select · y copy · + react · p pin · m mute · e archive · d done · t tree · a A r answer a tool request · End latest · Esc back";
 
     /// The messages shown, in the order stored.
     fn messages(&self) -> impl DoubleEndedIterator<Item = &Entry> {
@@ -161,6 +161,7 @@ impl Page {
                 let oldest = pending.min_by_key(|r| r.requested_at)?;
                 return Some(To::Ask(oldest.clone(), verdict));
             }
+            Key::Char('t') => return Some(To::Tree(self.history.thread.clone())),
             _ => {}
         }
         None

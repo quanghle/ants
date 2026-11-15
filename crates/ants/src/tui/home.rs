@@ -107,6 +107,12 @@ pub struct Page {
 impl Page {
     pub const KEYS: &str = "↑↓ item · Enter open · a A r answer a tool request";
 
+    /// The selected item's thread.
+    pub fn thread(&self, data: &Data) -> Option<ThreadId> {
+        let items = items(data, Utc::now());
+        items.get(self.selected.min(items.len().saturating_sub(1))).map(|i| i.thread.clone())
+    }
+
     pub fn key(&mut self, key: Key, data: &Data, now: DateTime<Utc>) -> Option<To> {
         let items = items(data, now);
         let selected = items.get(self.selected);
@@ -222,7 +228,7 @@ mod tests {
 
         m.key(Key::Down, at(4));
         assert_eq!(m.key(Key::Char('r'), at(4)), None);
-        assert_eq!(m.key(Key::Char('y'), at(4)), Some(Action::Decide(second.clone(), Verdict::Reject)));
+        assert_eq!(m.key(Key::Char('y'), at(4)), Some(Action::Decide(Box::new(second.clone()), Verdict::Reject)));
         m.take(Event::Decided(Ok("rejected".to_owned())), at(5));
         assert!(m.asking.is_none(), "the decision stored ends the answering");
         m.take(Event::Approval(Update::Resolved(second, State::Expired)), at(5));

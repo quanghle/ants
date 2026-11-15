@@ -35,7 +35,7 @@ impl Input {
                 let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
                 read(file, &path.display().to_string())?
             }
-            None if self.edit => edit(editor)?,
+            None if self.edit => edit(editor, "")?,
             None => words.join(" "),
         };
         if text.trim().is_empty() {
@@ -96,9 +96,18 @@ impl Drop for Draft {
     }
 }
 
-/// Run the `editor` command line on a new file and return what it saved there.
-fn edit(editor: &str) -> Result<String> {
+/// Run the user's editor ($VISUAL, else $EDITOR, else the platform's default) on a new file holding `initial` and
+/// return what it saved there.
+pub fn edit_text(initial: &str) -> Result<String> {
+    edit(&editor(std::env::var("VISUAL").ok(), std::env::var("EDITOR").ok()), initial)
+}
+
+/// Run the `editor` command line on a new file holding `initial` and return what it saved there.
+fn edit(editor: &str, initial: &str) -> Result<String> {
     let draft = Draft::create()?;
+    if !initial.is_empty() {
+        std::fs::write(&draft.0, initial).with_context(|| format!("writing {}", draft.0.display()))?;
+    }
     let status = shell(editor, &draft.0).status().with_context(|| format!("running the editor `{editor}`"))?;
     // The shell's status for a command it cannot find.
     let not_found = if cfg!(windows) { 9009 } else { 127 };

@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use ants_proto::{CancelReply, CancelRequest, UserId};
+use ants_proto::{CancelReply, CancelRequest, ThreadId, UserId};
 use anyhow::{Result, bail};
 use futures::StreamExt as _;
 
@@ -22,6 +22,17 @@ pub(crate) async fn cancel(nats: &Nats<'_>, ant: UserId, thread: thread::Pick) -
     }
     let (client, js) = nats.connect("ants-cancel").await?;
     let thread = thread.resolve(&js, &nats.me).await?;
+    println!("{}", cancelled(&client, me, ant, thread).await?);
+    Ok(())
+}
+
+/// Cancel the prompt `ant` runs on `thread` as human `me`, through `client`; what `ants cancel` prints.
+pub(crate) async fn cancelled(
+    client: &async_nats::Client,
+    me: &UserId,
+    ant: UserId,
+    thread: ThreadId,
+) -> Result<String> {
     let request = CancelRequest::new(ant, thread, me.clone());
     let answers = client.subscribe(request.reply_subject()).await?;
     client.publish(request.subject(), serde_json::to_vec(&request)?.into()).await?;
@@ -29,8 +40,7 @@ pub(crate) async fn cancel(nats: &Nats<'_>, ant: UserId, thread: thread::Pick) -
     let (ant, thread) = (&request.ant, &request.thread_id);
     match cancel_outcome(&request, answers, CANCEL_WAIT, CANCEL_GRACE).await {
         Some(true) => {
-            println!("cancelled the prompt of {ant} on thread {thread}; the partial reply follows on the thread");
-            Ok(())
+            Ok(format!("cancelled the prompt of {ant} on thread {thread}; the partial reply follows on the thread"))
         }
         Some(false) => bail!("{ant} has no prompt running on thread {thread}"),
         None => bail!("no daemon serving {ant} answered within {}s", CANCEL_WAIT.as_secs()),

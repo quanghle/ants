@@ -130,6 +130,11 @@ impl Page {
 
     pub const KEYS: &str = "↑↓ post · Enter open its thread · w its threads in work · Esc nav";
 
+    /// The selected post.
+    pub fn post<'d>(&self, data: &'d Data) -> Option<&'d Post> {
+        data.feeds.posts(&self.channel).nth(self.selected)
+    }
+
     pub fn key(&mut self, key: Key, data: &Data) -> Option<To> {
         let count = data.feeds.posts(&self.channel).count();
         self.selected = match key {

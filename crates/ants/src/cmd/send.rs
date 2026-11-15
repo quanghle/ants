@@ -3,8 +3,8 @@
 use ants_daemon::reading::Reading;
 use ants_daemon::{bus, notes, owners, questions, reactions};
 use ants_proto::{
-    ChannelId, ChannelPost, Choice, Envelope, JsDomain, NotesPost, Reaction, ReactionChange, ReactionsOutcome,
-    ReactionsRequest, Role, ThreadId, UserId, Uuid, subject,
+    ChannelEntry, ChannelId, ChannelPost, Choice, Envelope, Humans, JsDomain, NotesPost, Reaction, ReactionChange,
+    ReactionsOutcome, ReactionsRequest, Role, ThreadId, UserId, Uuid, subject,
 };
 use anyhow::{Result, anyhow, bail};
 use async_nats::jetstream;
@@ -80,7 +80,7 @@ pub(crate) async fn ask(
     };
     attachments::store(&js, &files, |id| envelope.attachment_handle(id)).await?;
     if deliver(&js, nats.domain, &envelope).await? == bus::Stored::Outbox {
-        println!("kept in this machine's outbox until the hub is reachable");
+        println!("{OUTBOX}");
     }
     println!("thread {}", envelope.thread_id);
     println!("message {}", envelope.id);
@@ -135,6 +135,18 @@ pub(crate) async fn ask(
         Ok(())
     });
     Box::pin(with_reactions(shown_replies, &shown, changes)).await
+}
+
+/// What a send kept in the leaf node's outbox prints.
+pub(crate) const OUTBOX: &str = "kept in this machine's outbox until the hub is reachable";
+
+/// The warnings `ants ask` prints for sending to `to` when no daemon serves it now ([`roster::unserved_warnings`]),
+/// none for a human; and whether `to` is a human, as `me` tells: a human knows the humans, an ant asks only of a
+/// user the roster lacks.
+pub(crate) async fn unserved(js: &jetstream::Context, me: &humans::Me, to: &UserId) -> (Vec<String>, bool) {
+    let warnings = roster::unserved_warnings(js, &[to]).await;
+    let to_human = (me.role.is_human() || !warnings.is_empty()) && humans::load(js, me).await.contains(to);
+    (if to_human { Vec::new() } else { warnings }, to_human)
 }
 
 /// Seal `envelope` to another human if `seal`, returning what sealed it, which opens the replies too; refused for a
@@ -195,16 +207,12 @@ pub(crate) async fn post(
     let files = attach.read()?;
     let (client, js) = nats.connect("ants-cli").await?;
     let thread = thread::resolve(thread, &js, &nats.me).await?;
-    let humans = humans::load(&js, &nats.me).await;
-    let mut post = channel::compose(&js, &nats.me, &humans, channel, thread, text).await;
-    post.attachments = attachments::references(&files);
-    let entry = channel::get(&channel::open(&js).await?, &post.channel).await?;
-    if entry.is_none() {
-        tracing::warn!("no channel #{0} (`ants channel create {0}` makes one): the post wakes nobody", post.channel);
+    let mut posting = Posting::compose(&js, &nats.me, channel, thread, text).await?;
+    posting.post.attachments = attachments::references(&files);
+    for warning in &posting.warnings {
+        tracing::warn!("{warning}");
     }
-    for user in channel::idle_mentions(&post, entry.as_ref()) {
-        tracing::warn!("@{user} is no member of #{}: the post neither wakes nor notifies {user}", post.channel);
-    }
+    let post = &posting.post;
     // Subscribe first so a fast reply is not missed.
     let room = if replies.wait || replies.follow {
         Some(client.subscribe(subject::chan_room(&post.channel)).await?)
@@ -218,17 +226,13 @@ pub(crate) async fn post(
         None
     };
     attachments::store(&js, &files, |id| post.attachment_handle(id)).await?;
-    let stored = bus::store_acked(&js, post.subject(), &post, &post.id.to_string()).await?.map(|ack| ack.sequence);
+    let (stored, notified) = posting.deliver(&js, &nats.me).await?;
     if stored.is_none() {
-        println!("kept in this machine's outbox until the hub is reachable");
+        println!("{OUTBOX}");
     }
-    // An ant's daemon notifies the humans its posts mention.
-    if nats.me.role.is_human() {
-        let notified = channel::notify_mentioned(&js, &post, entry.as_ref(), &humans).await;
-        if !notified.is_empty() {
-            let names: Vec<&str> = notified.iter().map(UserId::as_str).collect();
-            println!("notified {}", names.join(", "));
-        }
+    if !notified.is_empty() {
+        let names: Vec<&str> = notified.iter().map(UserId::as_str).collect();
+        println!("notified {}", names.join(", "));
     }
     println!("thread {}", post.thread_id);
     println!("message {}", post.id);
@@ -237,8 +241,8 @@ pub(crate) async fn post(
     let _shown = status.map(|sub| progress::start(sub, progress::Status::new(vec![post.id]), replies.wait));
     // Waiting is for an answer, so the poster's own posts from elsewhere do not count; following shows them all. What
     // never comes live, as while the leaf's uplink is down, is read back from the hub's stream.
-    let posts = channel::caught_up_posts(room, &js, &nats.me, &post, stored);
-    let on_thread = channel::thread_posts(posts, &post, replies.wait);
+    let posts = channel::caught_up_posts(room, &js, &nats.me, post, stored);
+    let on_thread = channel::thread_posts(posts, post, replies.wait);
     let shown = reacted::Shown::default();
     shown.add(post.id, &post.from, &post.text);
     let shown_replies = replies.show(&post.thread_id, on_thread, async |reply: ChannelPost| {
@@ -249,6 +253,57 @@ pub(crate) async fn post(
         Ok(())
     });
     Box::pin(with_reactions(shown_replies, &shown, changes)).await
+}
+
+/// A post `ants post` makes, with the warnings it prints before posting.
+pub(crate) struct Posting {
+    pub post: ChannelPost,
+    /// The channel's entry, None when there is no such channel.
+    entry: Option<ChannelEntry>,
+    humans: Humans,
+    /// That there is no such channel, and the users the post @mentions that it neither wakes nor notifies.
+    pub warnings: Vec<String>,
+}
+
+impl Posting {
+    /// The post of `text` that `me` makes to `channel`, or on its `thread` ([`channel::compose`]).
+    pub async fn compose(
+        js: &jetstream::Context,
+        me: &humans::Me,
+        channel: ChannelId,
+        thread: Option<ThreadId>,
+        text: String,
+    ) -> Result<Self> {
+        let humans = humans::load(js, me).await;
+        let post = channel::compose(js, me, &humans, channel, thread, text).await;
+        let entry = channel::get(&channel::open(js).await?, &post.channel).await?;
+        let mut warnings = Vec::new();
+        if entry.is_none() {
+            warnings.push(format!(
+                "no channel #{0} (`ants channel create {0}` makes one): the post wakes nobody",
+                post.channel
+            ));
+        }
+        for user in channel::idle_mentions(&post, entry.as_ref()) {
+            warnings
+                .push(format!("@{user} is no member of #{}: the post neither wakes nor notifies {user}", post.channel));
+        }
+        Ok(Self { post, entry, humans, warnings })
+    }
+
+    /// Store the post, then, when `me` is a human, notify the humans it @mentions ([`channel::notify_mentioned`]):
+    /// an ant's daemon notifies those of its posts. Returns the post's stream sequence, None when kept in the leaf
+    /// node's outbox, and the humans notified.
+    pub async fn deliver(&self, js: &jetstream::Context, me: &humans::Me) -> Result<(Option<u64>, Vec<UserId>)> {
+        let post = &self.post;
+        let stored = bus::store_acked(js, post.subject(), post, &post.id.to_string()).await?.map(|ack| ack.sequence);
+        let notified = if me.role.is_human() {
+            channel::notify_mentioned(js, post, self.entry.as_ref(), &self.humans).await
+        } else {
+            Vec::new()
+        };
+        Ok((stored, notified))
+    }
 }
 
 /// The reactions `ants ask` and `ants post` follow: with --follow, from before the message goes out on; none with
@@ -342,14 +397,19 @@ pub(crate) async fn react(
             }
         }
     };
-    let line = match (remove, changed) {
+    println!("{}", reacted_line(&reaction, message, remove, changed));
+    Ok(())
+}
+
+/// What `ants react` prints once it added `reaction` to `message`, or with `remove` removed it, and whether that
+/// `changed` anything.
+pub(crate) fn reacted_line(reaction: &Reaction, message: Uuid, remove: bool, changed: bool) -> String {
+    match (remove, changed) {
         (true, true) => format!("removed {reaction} from message {message}"),
         (true, false) => format!("no {reaction} reaction to message {message} to remove"),
         (false, true) => format!("reacted {reaction} to message {message}"),
         (false, false) => format!("already reacted {reaction} to message {message}"),
-    };
-    println!("{line}");
-    Ok(())
+    }
 }
 
 /// Answer the question `message` asks the CLI's human with `words`: an option's number, else a typed answer. The
@@ -363,9 +423,8 @@ pub(crate) async fn answer(nats: &Nats<'_>, message: thread::MessagePick, words:
     let (_, js) = nats.connect("ants-cli").await?;
     let id = message.resolve(&js, me).await?;
     let envelope = answering(&js, &me.id, id, choice).await?;
-    owners::recording(&js, nats.domain, &envelope.thread_id, &envelope.to, &me.id).await;
-    if bus::publish(&js, &envelope).await? == bus::Stored::Outbox {
-        println!("kept in this machine's outbox until the hub is reachable");
+    if deliver(&js, nats.domain, &envelope).await? == bus::Stored::Outbox {
+        println!("{OUTBOX}");
     }
     println!("thread {}", envelope.thread_id);
     println!("message {}", envelope.id);
@@ -375,7 +434,7 @@ pub(crate) async fn answer(nats: &Nats<'_>, message: thread::MessagePick, words:
 /// `human`'s answer `choice` to the question message `id`, read back from those to `human`, asks: a message `human`
 /// owns the thread of, as `ants ask` sends. Fails when no such message is kept, it asks no question, or `choice` is
 /// no answer to it.
-async fn answering(js: &jetstream::Context, human: &UserId, id: Uuid, choice: Choice) -> Result<Envelope> {
+pub(crate) async fn answering(js: &jetstream::Context, human: &UserId, id: Uuid, choice: Choice) -> Result<Envelope> {
     let question = questions::find(js, "", Reading::Gets, &subject::inbox_of(human), id)
         .await?
         .ok_or_else(|| anyhow!("no message {id} to {human} is kept"))?;

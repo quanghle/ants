@@ -11,10 +11,12 @@ use chrono::{DateTime, TimeDelta, Utc};
 
 use super::acts::{Acted, Change};
 use super::approvals::{self, Answer, Asking};
+use super::command::Bar;
+use super::exec::Job;
 use super::react::{self, Pick, Picker};
 use super::reads::{Mark, Read};
 use super::work::{Facts, Filter};
-use super::{cards, channel, dm, home, nav, people, search, thread, timeline, work};
+use super::{cards, channel, dm, home, nav, people, search, thread, timeline, tree, work};
 use crate::live::{self, State};
 use crate::thread::{Entry, Kind};
 use crate::tools::Update;
@@ -31,6 +33,11 @@ pub enum Key {
     Enter,
     Esc,
     Backspace,
+    Delete,
+    Left,
+    Right,
+    /// Alt-Enter: a new line in the command bar.
+    Newline,
     /// Ctrl-C.
     Interrupt,
     /// Ctrl and another key, for the views to come (Ctrl-K, Ctrl-X).
@@ -57,12 +64,18 @@ pub enum Action {
     Send(dm::Draft),
     /// Read again what may have missed changes.
     Refresh,
+    /// Run the command bar's job, for the bar's text.
+    Run(Job, String),
     /// Store a decision on a tool request.
-    Decide(ApprovalRequest, Verdict),
+    Decide(Box<ApprovalRequest>, Verdict),
+    /// Edit the command bar's text in the editor.
+    Edit(String),
     /// React to the message so, or with true take the reaction back, as `ants react` does.
     React(Uuid, Reaction, bool),
     /// Find the messages matching the search, replacing any search running.
     Search(crate::search::Search),
+    /// Cancel the prompt each ant runs on its thread, as `ants cancel` does.
+    CancelSubtree(Vec<(UserId, ThreadId)>),
     Quit,
 }
 
@@ -109,6 +122,8 @@ pub struct Data {
     pub settled: approvals::Settled,
     /// Who of the other humans is online, and the messages with each.
     pub people: people::People,
+    /// Who messaged whom on each thread, for the delegation trees.
+    pub delegations: tree::Delegations,
     /// The threads' done states, TL;DRs and spend.
     pub cards: cards::Cards,
 }
@@ -158,6 +173,7 @@ pub enum Page {
     Thread(thread::Page),
     Dm(dm::Page),
     Search(search::Page),
+    Tree(tree::Page),
 }
 
 impl Page {
@@ -182,6 +198,7 @@ impl Page {
             Self::Thread(_) => "thread",
             Self::Dm(_) => "dm",
             Self::Search(_) => "search",
+            Self::Tree(_) => "tree",
         }
     }
 }
@@ -197,6 +214,8 @@ pub enum To {
     Ask(ApprovalRequest, Option<Verdict>),
     /// Pick a reaction to the message.
     React(Uuid),
+    /// A thread's delegation tree.
+    Tree(ThreadId),
     /// Not another view: something to do.
     Do(Action),
 }
@@ -210,8 +229,7 @@ pub struct Model {
     pub pages: Vec<Page>,
     pub help: bool,
     pub notice: Option<Notice>,
-    /// The search prompt, while open.
-    pub prompt: Option<search::Prompt>,
+    pub bar: Bar,
     /// The tool request being answered.
     pub asking: Option<Asking>,
     /// The reaction being picked.
@@ -235,6 +253,7 @@ impl Model {
             calls: timeline::Threads::default(),
             settled: approvals::Settled::default(),
             people: people::People::default(),
+            delegations: tree::Delegations::default(),
             cards: cards::Cards::default(),
         };
         let nav = nav::Item::Home;
@@ -245,7 +264,7 @@ impl Model {
             focus: Focus::View,
             help: false,
             notice: None,
-            prompt: None,
+            bar: Bar::default(),
             asking: None,
             picking: None,
             compact: false,
@@ -285,6 +304,9 @@ impl Model {
             live::Event::Roster(Err(e)) => self.notify(format!("reading the roster: {e:#}"), Level::Error, now),
             live::Event::History(thread, read) => {
                 let read = read.map(|entries| self.tools(entries));
+                for entry in read.iter().flatten() {
+                    self.data.delegations.add(entry);
+                }
                 let page = self.pages.iter_mut().rev().find_map(|page| match page {
                     Page::Thread(page) if page.history.thread == thread => Some(page),
                     _ => None,
@@ -323,6 +345,7 @@ impl Model {
             data.facts.add(entry, &me);
             data.people.dms.add(entry, &me);
             posted |= data.feeds.add(entry);
+            data.delegations.add(entry);
         }
         let mut actions = Vec::new();
         for page in &mut self.pages {
@@ -370,14 +393,13 @@ impl Model {
     /// Take the outcome of storing a decision: the line saying so, or why it was not stored, the first decision
     /// winning.
     fn answered(&mut self, outcome: anyhow::Result<String>, now: DateTime<Utc>) {
-        if let Some(asking) = &mut self.asking
-            && asking.storing
-        {
-            asking.storing = false;
-            asking.verdict = None;
-            if outcome.is_ok() || !asking.full {
-                self.asking = None;
-            }
+        let Some(asking) = self.asking.as_mut().filter(|a| a.storing) else {
+            return self.decided(outcome);
+        };
+        asking.storing = false;
+        asking.verdict = None;
+        if outcome.is_ok() || !asking.full {
+            self.asking = None;
         }
         match outcome {
             Ok(line) => self.notify(line, Level::Info, now),
@@ -398,7 +420,9 @@ impl Model {
             }
             Answer::Note(line) => self.notify(line, Level::Info, now),
             Answer::Refused(refusal) => self.notify(refusal, Level::Error, now),
-            Answer::Decide(verdict) => return self.asking.as_ref().map(|a| Action::Decide(a.request.clone(), verdict)),
+            Answer::Decide(verdict) => {
+                return self.asking.as_ref().map(|a| Action::Decide(Box::new(a.request.clone()), verdict));
+            }
             Answer::Open(thread) => {
                 self.asking = None;
                 if self.open() != Some(&thread) {
@@ -530,7 +554,7 @@ impl Model {
                 seqs.iter().for_each(|seq| markers.mark(channel, *seq));
                 Some(Action::MarkChannel(channel.clone(), Mark::Posts(seqs)))
             }
-            Page::Home(_) | Page::Work(_) | Page::Dm(_) | Page::Search(_) => None,
+            Page::Home(_) | Page::Work(_) | Page::Dm(_) | Page::Search(_) | Page::Tree(_) => None,
         }
     }
 
@@ -565,16 +589,6 @@ impl Model {
             self.help = false;
             return None;
         }
-        if let Some(prompt) = &mut self.prompt {
-            return match prompt.key(key) {
-                search::Edit::Typing => None,
-                search::Edit::Close => {
-                    self.prompt = None;
-                    None
-                }
-                search::Edit::Run(query) => self.search(query, now),
-            };
-        }
         if let Some(picker) = &mut self.picking {
             return match picker.key(key) {
                 Pick::Typing => None,
@@ -590,16 +604,23 @@ impl Model {
                 }
             };
         }
-        if self.focus == Focus::View
+        if !self.bar.focused
+            && self.focus == Focus::View
             && let Some(Page::Dm(page)) = self.pages.last_mut()
             && let Some(action) = page.write(key)
         {
             return action;
         }
+        if let Some(action) = self.bar_key(key, now) {
+            return action;
+        }
         match key {
             Key::Char('q') => Some(Action::Quit),
             Key::Char('/') => {
-                self.prompt = Some(search::Prompt::default());
+                self.bar.focused = true;
+                if self.bar.is_empty() {
+                    self.bar.set_text("/search ");
+                }
                 None
             }
             Key::Char('?') => {
@@ -649,27 +670,19 @@ impl Model {
         self.shown_reactions()
     }
 
-    /// Run the search `query` asks for, listing its matches over the view; a query refused stays in the prompt.
-    fn search(&mut self, query: String, now: DateTime<Utc>) -> Option<Action> {
-        match search::parse(&query, now) {
-            Ok(search) => {
-                self.prompt = None;
-                for page in &mut self.pages {
-                    if let Page::Search(page) = page
-                        && page.found.is_none()
-                    {
-                        page.found = Some(Err("stopped for a later search".to_owned()));
-                    }
-                }
-                self.pages.push(Page::Search(search::Page::new(query, &search)));
-                self.focus = Focus::View;
-                Some(Action::Search(search))
-            }
-            Err(e) => {
-                self.prompt.get_or_insert_default().error = Some(e);
-                None
+    /// Run the search `query` asks for, listing its matches over the view; or why the query is refused.
+    pub fn search(&mut self, query: String, now: DateTime<Utc>) -> Result<Action, String> {
+        let search = search::parse(&query, now)?;
+        for page in &mut self.pages {
+            if let Page::Search(page) = page
+                && page.found.is_none()
+            {
+                page.found = Some(Err("stopped for a later search".to_owned()));
             }
         }
+        self.pages.push(Page::Search(search::Page::new(query, &search)));
+        self.focus = Focus::View;
+        Ok(Action::Search(search))
     }
 
     /// Take the matches of the search run last.
@@ -701,6 +714,7 @@ impl Model {
             Page::Thread(page) => page.key(key, data, now),
             Page::Dm(page) => page.key(key, data),
             Page::Search(page) => page.key(key),
+            Page::Tree(page) => page.key(key, data, now),
         }?;
         self.go(to, now)
     }
@@ -731,7 +745,47 @@ impl Model {
                 }
                 None
             }
+            To::Tree(thread) => {
+                self.tree(thread);
+                None
+            }
             To::Do(action) => Some(action),
+        }
+    }
+
+    /// Show the delegation tree of `thread` over the view.
+    pub fn tree(&mut self, thread: ThreadId) {
+        self.pages.push(Page::Tree(tree::Page::new(thread)));
+        self.focus = Focus::View;
+    }
+
+    /// The root of the delegation tree shown, and the threads known of it, for its links and spend to be read.
+    pub fn tree_shown(&self) -> Option<(ThreadId, Vec<ThreadId>)> {
+        let Page::Tree(page) = self.page() else { return None };
+        Some((page.root.clone(), self.data.delegations.threads(&page.root)))
+    }
+
+    /// Take in what the delegation trees' reads and cancels brought.
+    pub fn tree_event(&mut self, event: tree::Event, now: DateTime<Utc>) {
+        match event {
+            tree::Event::Read(root, links, spend) => {
+                for page in &mut self.pages {
+                    if let Page::Tree(page) = page
+                        && page.root == root
+                    {
+                        if let Some(links) = &links {
+                            page.links.clone_from(links);
+                        }
+                        if spend.is_some() {
+                            page.spend.clone_from(&spend);
+                        }
+                    }
+                }
+            }
+            tree::Event::Cancelled(outcomes) => {
+                let (text, level) = tree::notice(&outcomes);
+                self.notify(text, level, now);
+            }
         }
     }
 }
@@ -847,15 +901,16 @@ pub mod tests {
         m.key(Key::Tab, at(0));
         assert_eq!(m.key(Key::Char('/'), at(0)), None);
         for c in "deploy since:soon".chars() {
-            assert_eq!(m.key(Key::Char(c), at(0)), None, "keys go to the prompt");
+            assert_eq!(m.key(Key::Char(c), at(0)), None, "keys go to the command bar");
         }
         assert_eq!(m.key(Key::Enter, at(0)), None);
-        let error = m.prompt.as_ref().and_then(|p| p.error.clone());
+        let error = m.bar.status.as_ref().map(|s| s.text.clone());
         assert!(error.is_some_and(|e| e.starts_with("invalid time \"soon\"")), "a refused query stays");
+        assert_eq!(m.bar.text(), "/search deploy since:soon");
         m.key(Key::Ctrl('w'), at(0));
         let Some(Action::Search(search)) = m.key(Key::Enter, at(0)) else { panic!("no search") };
         assert_eq!(search.grep.as_deref(), Some("deploy"));
-        assert_eq!((m.prompt.is_none(), m.page().name(), m.focus), (true, "search", Focus::View));
+        assert_eq!((m.bar.focused, m.page().name(), m.focus), (false, "search", Focus::View));
 
         m.key(Key::Char('/'), at(1));
         m.key(Key::Char('d'), at(1));
@@ -870,7 +925,10 @@ pub mod tests {
         assert_eq!(m.page().name(), "search", "Esc goes back to the matches");
         m.key(Key::Char('/'), at(4));
         m.key(Key::Esc, at(4));
-        assert!(m.prompt.is_none(), "Esc closes the prompt");
+        assert!(!m.bar.focused, "Esc leaves the bar");
+        m.key(Key::Char('/'), at(4));
+        assert_eq!((m.bar.focused, m.bar.text()), (true, "/search ".to_owned()), "a draft in the bar stays");
+        m.key(Key::Esc, at(4));
         assert_eq!(m.key(Key::Char('q'), at(4)), Some(Action::Quit));
     }
 
