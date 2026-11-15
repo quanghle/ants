@@ -23,8 +23,8 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
 - TLS stays on rustls.
 - A daemon acks a JetStream message only after its effects are stored.
 - Also in the repo: `contrib/` (launchd and systemd units, agent skill), `scripts/` (`install-units.sh`,
-  `footprint.sh`), `docs/transport.md` (hub, proxy, leaf, bridge and tunnel reference), `deny.toml` (dependency
-  policy), `.cargo/config.toml` (7-day dependency cooldown).
+  `footprint.sh`), `docs/` (`config.md`, `auth.md`, `webhooks.md`, `transport.md`, `hooks.md`), `deny.toml`
+  (dependency policy), `.cargo/config.toml` (7-day dependency cooldown).
 - Comment only code that needs clarification.
 
 ## Checks
@@ -46,5 +46,6 @@ Before finishing, as CI (`.github/workflows/ci.yml`) does:
 
 ## Docs
 
-- README.md documents what exists on main: update it with any change to the CLI, config file, wire or services.
+- `README.md` and `docs/` document what exists on main: update them with any change to the CLI, config file, wire or
+  services.
 - User-facing text (docs, CLI messages) avoids pronouns: impersonal or imperative phrasing.
