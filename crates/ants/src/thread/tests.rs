@@ -167,6 +167,28 @@ fn a_thread_keeps_the_first_title_an_ant_suggested_but_none_from_a_forged_messag
 }
 
 #[test]
+fn threads_opened_by_summary_requests_are_left_out_but_not_for_a_forged_one() {
+    let (alice, dev_a, messenger) = (p("alice"), p("dev-a"), UserId::messenger());
+    let work = Envelope::on_thread(t("t1"), alice.clone(), dev_a.clone(), "fix it");
+    let request = Some(SummaryRequest::thread(t("t1"), 1));
+    let ask =
+        Envelope { summary: request.clone(), ..Envelope::on_thread(t("t2"), alice.clone(), messenger.clone(), "x") };
+    let tldr = Envelope { summary: request.clone(), ..ask.reply(messenger, "fixed", ants_proto::Role::Human).unwrap() };
+    let forged = Envelope { summary: request, ..Envelope::on_thread(t("t3"), dev_a, alice, "hi") };
+    let messages = [
+        (work.subject(), json(&work)),
+        (ask.subject(), json(&ask)),
+        (tldr.subject(), json(&tldr)),
+        ("ants.inbox.alice.dev-b".to_owned(), json(&forged)),
+    ];
+    let mut threads = Threads::new(None);
+    entries(&messages).iter().for_each(|e| threads.add(e));
+    let (listed, _) = threads.finish(&Select::default(), &ThreadMarks::default());
+    let ids: Vec<&str> = listed.iter().map(|s| s.thread_id.as_str()).collect();
+    assert_eq!(ids, ["t1", "t3"]);
+}
+
+#[test]
 fn channel_and_notes_posts_suggest_titles_too_unless_forged() {
     let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
     let ops: ChannelId = "ops".parse().unwrap();

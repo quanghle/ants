@@ -255,6 +255,24 @@ pub const ALL_RENEW_REQUESTS: &str = "ants.renew.*";
 /// Every answer to a renewal request.
 pub const ALL_RENEW_REPLIES: &str = "ants.renew.*.reply";
 
+/// Where `ants login` asks for the credentials of a new device of the human `name`
+/// ([`LoginRequest`](super::LoginRequest); core NATS, not stored). Anyone holding the team's public bootstrap
+/// credentials publishes here.
+pub fn login(name: &UserId) -> String {
+    format!("ants.login.{name}")
+}
+
+/// Where the answers to a registration request of `name` go ([`LoginReply`](super::LoginReply); core NATS), each
+/// naming the request's key in the clear and sealed to it.
+pub fn login_reply(name: &UserId) -> String {
+    format!("ants.login.{name}.reply")
+}
+
+/// Every registration request.
+pub const ALL_LOGIN_REQUESTS: &str = "ants.login.*";
+/// Every answer to a registration request.
+pub const ALL_LOGIN_REPLIES: &str = "ants.login.*.reply";
+
 /// Where a manager ant asks for an ant added from a template (`request_ant`;
 /// [`AntRequest`](super::AntRequest); core NATS, not stored). Only the manager publishes here.
 pub fn antreq(manager: &UserId) -> String {
@@ -362,6 +380,18 @@ pub fn notify_held(human: &UserId) -> String {
 /// them on.
 pub fn presence_of(human: &UserId) -> String {
     format!("$KV.{}.{human}.>", super::PRESENCE_BUCKET)
+}
+
+/// Every entry of a human's devices in [`super::DEVICES_BUCKET`]: the subjects only that human puts its device user
+/// JWTs on.
+pub fn devices_of(human: &UserId) -> String {
+    format!("$KV.{}.{human}.>", super::DEVICES_BUCKET)
+}
+
+/// Every [`super::DeviceRevocation`] in [`super::DEVICES_BUCKET`]: the subjects only the credentials `ants auth revoke`
+/// and `ants auth push` issue put records on.
+pub fn revoked_devices() -> String {
+    format!("$KV.{}.{}.*", super::DEVICES_BUCKET, super::REVOKED_DEVICES)
 }
 
 /// The entry of a channel in [`super::CHANNELS_BUCKET`]: the subject a human, or the channel manager, puts

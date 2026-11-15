@@ -1,5 +1,5 @@
 //! The nav: home, work with a count per state, the human's channels, the ants with their state, and the team's other
-//! humans. Each entry selects a view.
+//! humans, online or not. Each entry selects a view.
 
 use ants_proto::{Activity, ChannelId, Humans, RosterEntry, UserId};
 use chrono::{DateTime, Utc};
@@ -23,7 +23,7 @@ pub enum Item {
     Channel(ChannelId),
     /// An ant's threads, until an ant view comes.
     Ant(UserId),
-    /// A human's threads, until people and direct messages (ants-ofmi.25) come.
+    /// Another human: the direct messages with it.
     Person(UserId),
 }
 
@@ -110,7 +110,7 @@ fn line(
             let (mark, color) = marker(&entries, now);
             Line::from(vec![Span::styled(mark, Style::new().fg(color)), Span::raw(format!(" {ant}"))])
         }
-        Item::Person(person) => Line::raw(person.to_string()),
+        Item::Person(person) => super::people::nav_line(data, person),
     }
 }
 

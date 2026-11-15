@@ -57,6 +57,8 @@ pub enum Kind {
     Enrollment {
         ant: UserId,
     },
+    /// The team's public bootstrap credentials, for `ants login` ([`ants_proto::Permissions::for_bootstrap`]).
+    Bootstrap,
 }
 
 /// How the permissions version of credentials compares with [`PERMISSIONS_VERSION`].
@@ -176,6 +178,7 @@ impl Finding {
             Kind::Leaf { machine, .. } => format!("the leaf node uplink of {machine}"),
             Kind::LeafSystem { machine } => format!("the system account uplink of the leaf node of {machine}"),
             Kind::Enrollment { ant } => format!("the enrollment of {ant}"),
+            Kind::Bootstrap => "the bootstrap credentials".to_owned(),
         }
     }
 
@@ -207,6 +210,7 @@ impl Finding {
                 "ants auth leaf {machine} --ant ANT... --human HUMAN... --webhook WEBHOOK... [--js-domain DOMAIN]"
             )],
             Kind::Enrollment { ant } => vec![format!("ants auth enroll {ant}")],
+            Kind::Bootstrap => vec!["ants auth bootstrap".to_owned()],
         }
     }
 
@@ -239,7 +243,7 @@ impl Finding {
     /// webhook, the channel manager or a leaf node's uplink, not expired, as the approver renews only credentials still
     /// valid.
     pub fn renewable(&self, now: u64) -> bool {
-        let kind = !matches!(self.kind, Kind::LeafSystem { .. } | Kind::Enrollment { .. });
+        let kind = !matches!(self.kind, Kind::LeafSystem { .. } | Kind::Enrollment { .. } | Kind::Bootstrap);
         kind && self.expiry(now) != Expiry::Expired
     }
 
@@ -289,7 +293,7 @@ impl Finding {
     /// rights the renewal withdraws: empty for a human's and enrollment credentials.
     pub fn renew_when(&self) -> &'static str {
         match self.kind {
-            Kind::Human | Kind::Enrollment { .. } => "",
+            Kind::Human | Kind::Enrollment { .. } | Kind::Bootstrap => "",
             _ => {
                 ", once `ants doctor` run as a human finds every daemon, `ants webhook serve` and `ants channel \
                  serve` at this permissions version (its `versions` check)"
@@ -575,6 +579,9 @@ fn kind(name: &str, publish: &[String], subscribe: &[String], leaf_only: bool) -
     let user: UserId = name.parse().map_err(|e| anyhow!("credentials named {name:?}: {e}"))?;
     if user == UserId::channel_manager() {
         return Ok(Kind::ChannelManager);
+    }
+    if name == ants_proto::BOOTSTRAP_USER && publish == [subject::ALL_LOGIN_REQUESTS] {
+        return Ok(Kind::Bootstrap);
     }
     if let Some(ant) = name.strip_prefix("enroll-")
         && !publish.is_empty()

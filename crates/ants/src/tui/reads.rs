@@ -151,7 +151,7 @@ async fn directory(js: jetstream::Context) -> Result<Directory> {
 
 /// Mark the inbox messages of `me` on `thread` read, as `ants inbox --thread THREAD` does.
 async fn mark(js: jetstream::Context, me: UserId, thread: ThreadId) -> (ThreadId, Result<()>) {
-    let select = Select { thread: Some(thread.clone()), limit: None, peek: false };
+    let select = Select { thread: Some(thread.clone()), limit: None, peek: false, summaries: false };
     let marked = async { Inbox::open(&js, &me).await?.unread(&select).await.map(drop) }.await;
     (thread, marked)
 }

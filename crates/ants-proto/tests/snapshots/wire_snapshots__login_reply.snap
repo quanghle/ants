@@ -1,0 +1,10 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "name": "alice",
+  "public_key": "UDEF",
+  "sender": "XSIGNER",
+  "sealed": "c2VhbGVk"
+}

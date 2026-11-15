@@ -16,8 +16,8 @@ use ants_daemon::reactions::Reacted;
 use ants_daemon::reading::{self, Reading};
 use ants_proto::{
     Answer, Answered, ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, Envelope,
-    EscalationReason, Humans, Mark, NotesPost, Question, ThreadId, ThreadMarks, Timeline, Timelines, UserId, Uuid,
-    subject,
+    EscalationReason, Humans, Mark, NotesPost, Question, SummaryRequest, ThreadId, ThreadMarks, Timeline, Timelines,
+    UserId, Uuid, subject,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream::stream::LastRawMessageErrorKind;
@@ -25,7 +25,7 @@ use async_nats::jetstream::{self, consumer};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::{thread_meta, tools};
+use crate::{attachments, thread_meta, tools};
 
 pub use message::{MessagePick, recent_messages};
 
@@ -120,6 +120,9 @@ pub struct Entry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     pub text: String,
+    /// The files attached to an inbox message, channel post, notes post or dead letter, each with its handle.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<attachments::Listed>,
     /// The subject it was stored on names another sender (or ant) than the message: the message is forged.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub forged: bool,
@@ -133,6 +136,9 @@ pub struct Entry {
     /// ([`Envelope::title`], [`ChannelPost::title`], [`NotesPost::title`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggested_title: Option<String>,
+    /// The summary request an inbox message that is not forged carries, or answers ([`Envelope::summary`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<SummaryRequest>,
     /// The question an inbox message that is not forged asks, if valid ([`Envelope::asks`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub question: Option<Question>,
@@ -182,10 +188,12 @@ impl Entry {
             owner: None,
             note: None,
             text: String::new(),
+            attachments: Vec::new(),
             forged: false,
             reactions: Vec::new(),
             reason: None,
             suggested_title: None,
+            summary: None,
             question: None,
             answer: None,
             tool: None,
@@ -266,47 +274,57 @@ impl Parser {
         (question, asked.filter(|q| e.answers(q).is_some()).and(e.answer.clone()))
     }
 
+    /// The entry of the envelope stored at `seq` on inbox `subject`, None for one that does not parse.
+    fn envelope_entry(&mut self, seq: u64, stored_at: DateTime<Utc>, subject: &str, payload: &[u8]) -> Option<Entry> {
+        let entry = |kind, thread| Entry::new(seq, stored_at, kind, thread);
+        let e: Envelope = serde_json::from_slice(payload).ok()?;
+        let forged = e.check_subject(subject).is_err();
+        let (question, answer) = self.question_and_answer(&e, forged);
+        let (kind, note, text) = if let Some(d) = &e.approval {
+            let text = format!("{} on {}/{}", tools::spelling(d.verdict), d.ant, d.request_id);
+            (Kind::Decision, None, text)
+        } else if let Some(x) = &e.escalation {
+            (Kind::Escalation, Some(crate::escalation_note(x)), e.text)
+        } else if e.mention.is_some() {
+            (Kind::Mention, None, e.text)
+        } else {
+            (Kind::Message, None, e.text)
+        };
+        let channel = e.mention.map(|m| m.channel);
+        Some(Entry {
+            id: Some(e.id),
+            from: Some(e.from),
+            to: Some(e.to),
+            channel,
+            owner: e.owner,
+            note,
+            text,
+            // Under the handles of the subject it was stored on, a forged one's too: its sender stored them.
+            attachments: attachments::listed_on(subject, &e.attachments),
+            forged,
+            reason: e.escalation.map(|x| x.reason),
+            suggested_title: e.title.filter(|_| !forged),
+            summary: e.summary.filter(|_| !forged),
+            question,
+            answer,
+            turns: Some(e.turn_budget),
+            webhook: e.webhook,
+            ..entry(kind, e.thread_id)
+        })
+    }
+
     /// The entry of the message stored at `seq` on `subject`, None for one that is not ants' or does not parse.
     pub fn entry(&mut self, seq: u64, stored_at: DateTime<Utc>, subject: &str, payload: &[u8]) -> Option<Entry> {
         let entry = |kind, thread| Entry::new(seq, stored_at, kind, thread);
         if subject::parse_inbox(subject).is_some() {
-            let e: Envelope = serde_json::from_slice(payload).ok()?;
-            let forged = e.check_subject(subject).is_err();
-            let (question, answer) = self.question_and_answer(&e, forged);
-            let (kind, note, text) = if let Some(d) = &e.approval {
-                let text = format!("{} on {}/{}", tools::spelling(d.verdict), d.ant, d.request_id);
-                (Kind::Decision, None, text)
-            } else if let Some(x) = &e.escalation {
-                (Kind::Escalation, Some(crate::escalation_note(x)), e.text)
-            } else if e.mention.is_some() {
-                (Kind::Mention, None, e.text)
-            } else {
-                (Kind::Message, None, e.text)
-            };
-            let channel = e.mention.map(|m| m.channel);
-            return Some(Entry {
-                id: Some(e.id),
-                from: Some(e.from),
-                to: Some(e.to),
-                channel,
-                owner: e.owner,
-                note,
-                text,
-                forged,
-                reason: e.escalation.map(|x| x.reason),
-                suggested_title: e.title.filter(|_| !forged),
-                question,
-                answer,
-                turns: Some(e.turn_budget),
-                webhook: e.webhook,
-                ..entry(kind, e.thread_id)
-            });
+            return self.envelope_entry(seq, stored_at, subject, payload);
         }
         if subject::parse_chan(subject).is_some() {
             let post: ChannelPost = serde_json::from_slice(payload).ok()?;
             let forged = post.check_subject(subject).is_err();
             let note = Some(format!("{} turns left", post.turn_budget));
             return Some(Entry {
+                attachments: attachments::listed_on(subject, &post.attachments),
                 id: Some(post.id),
                 from: Some(post.from),
                 channel: Some(post.channel),
@@ -324,6 +342,7 @@ impl Parser {
             let forged = post.check_subject(subject).is_err();
             let note = Some(format!("{} turns left", post.turn_budget));
             return Some(Entry {
+                attachments: attachments::listed_on(subject, &post.attachments),
                 id: Some(post.id),
                 from: Some(post.from),
                 note,
@@ -358,6 +377,8 @@ impl Parser {
             let note = Some(format!("after {} deliveries: {}", d.deliveries, d.error));
             let e = d.envelope?;
             return Some(Entry {
+                // Stored under the handles of the message as it was sent.
+                attachments: attachments::listed(&e.attachments, |id| e.attachment_handle(id)),
                 from: Some(e.from),
                 to: Some(d.ant),
                 owner: e.owner,
@@ -418,6 +439,9 @@ pub struct Summary {
     /// The stream sequence of its last message read.
     #[serde(skip)]
     pub last_seq: u64,
+    /// Opened by a summary request ([`Envelope::summary`]): a message read on it carries one. Left out of every list.
+    #[serde(skip)]
+    pub catch_up: bool,
     /// The stream sequence of its last message, post or note read ([`Kind::reopens`]); 0 for none.
     #[serde(skip)]
     pub last_reopening: u64,
@@ -494,8 +518,10 @@ impl Threads {
             auto_archived: false,
             done: None,
             last_seq: entry.seq,
+            catch_up: false,
             last_reopening: 0,
         });
+        summary.catch_up |= entry.summary.is_some();
         summary.messages += 1;
         summary.last_seq = summary.last_seq.max(entry.seq);
         if entry.kind.reopens() {
@@ -544,9 +570,10 @@ impl Threads {
     }
 
     /// The threads `select` keeps, as the CLI's human marked them (`marks`), least recently active first and its
-    /// pinned ones after the others, and how many more it left out for its limit. Archived threads are left out,
-    /// unless a message was stored on one since it was archived, or `select` asks for archived threads; so are threads
-    /// idle since `select`'s `idle_before`, which count as archived.
+    /// pinned ones after the others, and how many more it left out for its limit. Threads opened by summary requests
+    /// ([`Summary::catch_up`]) are left out, and so are archived threads, unless a message was stored on one since it
+    /// was archived, or `select` asks for archived threads, and threads idle since `select`'s `idle_before`, which
+    /// count as archived.
     pub fn finish(self, select: &Select, marks: &ThreadMarks) -> (Vec<Summary>, usize) {
         let mut threads: Vec<Summary> = self
             .by_id
@@ -560,6 +587,7 @@ impl Threads {
                 }
                 t
             })
+            .filter(|t| !t.catch_up)
             .filter(|t| select.ant.as_ref().is_none_or(|ant| t.users.contains(ant)))
             .filter(|t| select.owner.is_none() || t.owner == select.owner)
             .filter(|t| select.grep.is_none() || t.matched.is_some())
@@ -643,7 +671,7 @@ fn state(thread: &Summary) -> Option<&'static str> {
 }
 
 /// The entries of a thread as `ants thread show` prints them: time, kind, route, note, id and text, one entry per
-/// line, its text's further lines and the reactions to it indented under it. A question shows its options numbered,
+/// line, its text's further lines, its attachments and the reactions to it indented under it. A question shows its options numbered,
 /// whether a typed answer is taken, and the answers to it among `entries` or how to answer it; an answer, the question
 /// and the option it picks.
 pub fn render(entries: &[Entry]) -> String {
@@ -670,6 +698,7 @@ pub fn render(entries: &[Entry]) -> String {
         for line in lines {
             let _ = writeln!(out, "    {line}");
         }
+        out.push_str(&attachments::render(&e.attachments, "    "));
         out.push_str(&crate::inbox::render_reactions(&e.reactions, "    "));
     }
     out
@@ -798,11 +827,13 @@ fn own_subjects(user: &UserId) -> [String; 4] {
     [subject::inbox_of(user), subject::inbox_from(user), subject::chan_from(user), subject::notes_from(user)]
 }
 
-/// The thread of the latest message to or from `user` ([`own_subjects`]), however old.
+/// The thread of the latest message to or from `user` ([`own_subjects`]), however old, other than a summary
+/// request's or reply's: when the last of a subject is one, the latest of the last [`RECENT`] if any.
 async fn last(js: &jetstream::Context, user: &UserId) -> Result<ThreadId> {
     let stream = js.get_stream(ants_proto::STREAM).await.context("opening the ANTS stream")?;
     let mut parser = Parser::default();
     let mut latest: Option<Entry> = None;
+    let mut catch_up = false;
     for filter in own_subjects(user) {
         let msg = match stream.get_last_raw_message_by_subject(&filter).await {
             Ok(msg) => msg,
@@ -811,9 +842,14 @@ async fn last(js: &jetstream::Context, user: &UserId) -> Result<ThreadId> {
         };
         let stored = DateTime::<Utc>::from(SystemTime::from(msg.time));
         let entry = parser.entry(msg.sequence, stored, &msg.subject, &msg.payload).filter(|e| !e.forged);
+        catch_up |= entry.as_ref().is_some_and(|e| e.summary.is_some());
+        let entry = entry.filter(|e| e.summary.is_none());
         if let Some(entry) = entry.filter(|e| latest.as_ref().is_none_or(|l| l.seq < e.seq)) {
             latest = Some(entry);
         }
+    }
+    if catch_up && let Some(recent) = recent(js, user, window(RECENT)).await?.into_iter().next() {
+        return Ok(recent.thread_id);
     }
     latest.map(|e| e.thread_id).ok_or_else(|| anyhow!("no message to or from {user} in the stream, so no last thread"))
 }
@@ -823,13 +859,15 @@ pub async fn recent_threads(js: &jetstream::Context, user: &UserId) -> Result<Ve
     recent(js, user, window(RECENT)).await
 }
 
-/// The latest message of each thread `user` took part in ([`own_subjects`]) stored from `start` on, most recent first.
+/// The latest message of each thread `user` took part in ([`own_subjects`]) stored from `start` on, most recent first,
+/// summary requests and replies left out.
 async fn recent(js: &jetstream::Context, user: &UserId, start: consumer::DeliverPolicy) -> Result<Vec<Entry>> {
     let mut parser = Parser::default();
     let mut latest: HashMap<ThreadId, Entry> = HashMap::new();
     for filter in own_subjects(user) {
         reading::read_back(js, "", Reading::Gets, &filter, start, |seq, stored, subject, payload| {
-            if let Some(entry) = parser.entry(seq, stored.into(), subject, payload).filter(|e| !e.forged) {
+            let entry = parser.entry(seq, stored.into(), subject, payload).filter(|e| !e.forged && e.summary.is_none());
+            if let Some(entry) = entry {
                 match latest.get(&entry.thread_id) {
                     Some(kept) if kept.seq > entry.seq => {}
                     _ => _ = latest.insert(entry.thread_id.clone(), entry),

@@ -83,6 +83,9 @@ impl State {
     pub fn reorder(&mut self, now: DateTime<Utc>) {
         let idle_before = thread::idle_before(self.auto_archive, now);
         let shown = |s: &&Summary| {
+            if s.catch_up {
+                return false;
+            }
             let mark = self.marks.mark_at(&s.thread_id, s.last_seq, s.last_at, idle_before);
             !matches!(mark, Some(Mark::Archived { new_activity: false } | Mark::Idle))
         };

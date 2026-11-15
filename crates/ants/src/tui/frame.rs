@@ -49,6 +49,7 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
         Page::Work(page) => page.draw(frame, right, data, now, focused),
         Page::Channel(page) => page.draw(frame, right, data, now, focused),
         Page::Thread(page) => page.draw(frame, right, data, now, focused),
+        Page::Dm(page) => page.draw(frame, right, data, now, focused),
     }
     frame.render_widget(Paragraph::new(footer_line(model, now)), footer);
     if model.help {
@@ -87,6 +88,7 @@ fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
         (Focus::View, Page::Work(_)) => work::Page::KEYS,
         (Focus::View, Page::Channel(_)) => channel::Page::KEYS,
         (Focus::View, Page::Thread(_)) => thread::Page::KEYS,
+        (Focus::View, Page::Dm(page)) => page.keys(),
     };
     Line::styled(format!(" {keys} · Tab nav/view · ? help · q quit"), dim())
 }
@@ -101,6 +103,7 @@ const HELP: &[(&str, &str)] = &[
     ("w", "in a channel: its threads in work"),
     ("y", "in a thread: copy the selected message"),
     ("p m e d", "in a thread: pin, mute, archive, mark done (again to undo)"),
+    ("n", "with a person: write a message, starting a thread"),
     ("R", "read everything again"),
     ("?", "this help"),
     ("q Ctrl-C", "quit"),
@@ -132,10 +135,11 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
-    use crate::live::tests::{at, message};
+    use crate::live::tests::{at, message, user};
     use crate::roster::tests::entry;
     use crate::tui::model::Key;
     use crate::tui::model::tests::model;
+    use crate::tui::people;
 
     fn screen(m: &Model, now: DateTime<Utc>) -> String {
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
@@ -171,5 +175,20 @@ mod tests {
         let shown = screen(&m, at(30));
         assert!(shown.contains("○ disconnected 27s, reconnecting"), "{shown}");
         assert!(shown.contains("any key closes this help"), "{shown}");
+    }
+
+    #[test]
+    fn a_person_shows_online_and_opens_the_dm_with_its_keys() {
+        let mut m = model();
+        let bob = user("bob");
+        m.stored(vec![message(1, &ThreadId::generate(), "alice", "dev-a", "deploy the site")], at(0));
+        m.people(people::Event::Online(Ok([bob.clone()].into())), at(0));
+        assert!(screen(&m, at(1)).contains("● bob"));
+
+        m.select(nav::Item::Person(bob));
+        let shown = screen(&m, at(1));
+        assert!(shown.contains(" bob · online "), "{shown}");
+        assert!(shown.contains("no messages with bob yet: n writes one"), "{shown}");
+        assert!(shown.contains("Enter open · n new message"), "{shown}");
     }
 }

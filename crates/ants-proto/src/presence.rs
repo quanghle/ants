@@ -5,9 +5,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[cfg(doc)]
-use crate::PRESENCE_BUCKET;
 use crate::UserId;
+#[cfg(doc)]
+use crate::{DEVICES_BUCKET, PRESENCE_BUCKET};
 
 /// The id of one device of a human: each `ants auth user NAME --human` issues credentials for a new device, whose user
 /// JWT carries its id as the tag [`DeviceId::tag`]. Generated (a UUIDv7), never chosen and never reused; a label
@@ -156,6 +156,42 @@ impl Presence {
     }
 }
 
+/// First token of the keys of the revocation records in [`DEVICES_BUCKET`] ([`revoked_device_key`]): a name no user
+/// takes, so no human's credentials, which put only the keys under its own name, put one.
+pub const REVOKED_DEVICES: &str = "revoked";
+
+/// Key in [`DEVICES_BUCKET`] of the user JWT of `device` of `human`. Keys start with the human, so its credentials can
+/// be confined to its own.
+pub fn device_entry_key(human: &UserId, device: &DeviceId) -> String {
+    format!("{human}.{device}")
+}
+
+/// The human and device a key of [`DEVICES_BUCKET`] names, if it is the key of a device's entry
+/// ([`device_entry_key`]): a revocation record's names none.
+pub fn device_entry_of(key: &str) -> Option<(UserId, DeviceId)> {
+    let (human, device) = key.split_once('.')?;
+    if human == REVOKED_DEVICES {
+        return None;
+    }
+    Some((human.parse().ok()?, device.parse().ok()?))
+}
+
+/// Key in [`DEVICES_BUCKET`] of the record that the credentials of the user key `key` (`U...`) are revoked.
+pub fn revoked_device_key(key: &str) -> String {
+    format!("{REVOKED_DEVICES}.{key}")
+}
+
+/// That the credentials of a user key are revoked, put in [`DEVICES_BUCKET`] under [`revoked_device_key`] by `ants
+/// auth revoke` and `ants auth push`, so senders stop sealing for the device those credentials are for. The record
+/// being there is what counts: a reader takes no key from a JWT of a key with one, whatever it holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceRevocation {
+    /// The revoked user key, `U...`.
+    pub key: String,
+    /// When it was revoked, in seconds since the epoch, as the account JWT's revocation says.
+    pub revoked_at: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,5 +224,20 @@ mod tests {
         let json = serde_json::to_string(&key).unwrap();
         assert_eq!(serde_json::from_str::<DeviceKey>(&json).unwrap(), key);
         assert!(serde_json::from_str::<DeviceKey>("\"X1\"").is_err());
+    }
+
+    #[test]
+    fn device_entries_and_revocation_records_have_keys_of_their_own() {
+        let (alice, device) = ("alice".parse::<UserId>().unwrap(), DeviceId::generate());
+        let key = device_entry_key(&alice, &device);
+        assert_eq!(key, format!("alice.{device}"));
+        assert_eq!(device_entry_of(&key), Some((alice, device)));
+        let revoked = revoked_device_key("UABC");
+        assert_eq!(revoked, "revoked.UABC");
+        assert_eq!(device_entry_of(&revoked), None);
+        assert_eq!(device_entry_of(&format!("revoked.{device}")), None, "no human is named revoked");
+        for wrong in ["alice", "alice.not-a-uuid", &format!("Alice.{device}"), &format!("alice.{device}.x")] {
+            assert_eq!(device_entry_of(wrong), None, "{wrong}");
+        }
     }
 }

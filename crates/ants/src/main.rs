@@ -4,8 +4,10 @@
 
 mod add;
 mod age;
+mod attachments;
 mod auth;
 mod backup;
+mod binding;
 mod bridge;
 mod channel;
 mod cli;
@@ -14,9 +16,12 @@ mod completions;
 mod compose;
 mod dash;
 mod defaults;
+mod devices;
 mod doctor;
 mod enroll;
+mod github;
 mod hook;
+mod http;
 mod humans;
 mod inbox;
 mod keys;
@@ -31,6 +36,7 @@ mod progress;
 mod queue;
 mod quiet;
 mod reacted;
+mod registrar;
 mod reload;
 mod renew;
 mod retire;
@@ -43,6 +49,7 @@ mod service;
 mod setup;
 mod signer;
 mod spend;
+mod summary;
 mod thread;
 mod thread_meta;
 mod tools;
@@ -87,11 +94,11 @@ async fn run() -> Result<()> {
         return Box::pin(tui::run(&nats()?, tui::SINCE)).await;
     };
     match command {
-        Command::Ask { thread, steer, replies, input, words } => {
-            send::ask(&nats()?, thread, steer, &replies, &input, words).await
+        Command::Ask { thread, steer, replies, input, attach, words } => {
+            send::ask(&nats()?, thread, steer, &replies, &input, &attach, words).await
         }
         Command::Inbox { peek, thread, limit, follow, json } => {
-            let select = inbox::Select { thread: None, limit, peek };
+            let select = inbox::Select { thread: None, limit, peek, summaries: false };
             Box::pin(cmd::inbox::show(&nats()?, select, thread, Listing { follow, json })).await
         }
         Command::Roster { json } => roster::show(&nats()?, json).await,
@@ -103,17 +110,19 @@ async fn run() -> Result<()> {
             let caps = ants_daemon::config::Summary::load(&path)?.caps;
             spend::show(&nats()?, &spend::Select { ant, thread, days }, &caps, json).await
         }
-        Command::Post { channel, thread, replies, input, words } => {
-            Box::pin(send::post(&nats()?, channel, thread, &replies, &input, words)).await
+        Command::Post { channel, thread, replies, input, attach, words } => {
+            Box::pin(send::post(&nats()?, channel, thread, &replies, &input, &attach, words)).await
         }
         Command::Channel(ChannelCommand::Serve { upgrade }) => {
             Box::pin(upgrade::or_exit(channel::serve(&cli.nats, cli.creds.as_deref(), domain), &upgrade)).await
         }
         Command::Channel(command) => cmd::channel::run(&nats()?, command).await,
-        Command::Notes { thread, text } => send::thread_notes(&nats()?, thread, text).await,
+        Command::Notes { thread, attach, text } => send::thread_notes(&nats()?, thread, &attach, text).await,
         Command::React { message, reaction, remove } => send::react(&nats()?, message, reaction, remove).await,
         Command::Answer { message, answer } => send::answer(&nats()?, message, answer).await,
         Command::Thread(command) => cmd::thread::run(&nats()?, command).await,
+        Command::Digest { since } => summary::digest(&nats()?, since).await,
+        Command::Attachment(command) => cmd::attachment::run(&nats()?, command).await,
         Command::Notify(NotifyCommand::Snooze { duration }) => quiet::snooze(&nats()?, duration).await,
         Command::Notify(NotifyCommand::Resume) => quiet::resume(&nats()?).await,
         Command::Notify(NotifyCommand::Status { json }) => quiet::status(&nats()?, json).await,
@@ -153,7 +162,7 @@ async fn run() -> Result<()> {
                     None
                 }
             };
-            retire::retire(&args, roster.as_ref(), retire::STOP_WAIT, &cli.nats).await
+            retire::retire(&args, roster.as_ref(), retire::STOP_WAIT, &cli.nats, domain).await
         }
         Command::Renew(args) => renew::run(args, &cli.nats, cli.creds.as_deref()).await,
         Command::Keys(command) => keys::run(command, &cli.nats, cli.creds.as_deref()).await,
@@ -200,8 +209,15 @@ pub struct Nats<'a> {
     /// The device of the human the credentials were issued for; none for an ant's, and without credentials.
     pub device: Option<DeviceId>,
     rights: humans::Rights,
+    /// The account that signed the credentials, whose devices' keys alone the CLI takes from the directory
+    /// ([`devices::Directory`]); none without credentials.
+    pub account: Option<String>,
+    /// The human's device of the credentials, if they bind an encryption key, which a connection puts in the directory.
+    own_device: Option<devices::Own>,
     /// Whether a connection checked the hub's stream and buckets already ([`create_missing`]).
     hub_checked: AtomicBool,
+    /// Whether a connection put [`Nats::own_device`] in the directory already.
+    device_published: AtomicBool,
 }
 
 impl<'a> Nats<'a> {
@@ -209,25 +225,49 @@ impl<'a> Nats<'a> {
         let me = humans::Me::from_creds(creds)?;
         let device = humans::device(creds)?;
         let rights = humans::Rights::from_creds(creds)?;
-        Ok(Self { url, creds, domain, me, device, rights, hub_checked: AtomicBool::new(false) })
+        let account = devices::account_of(creds)?;
+        // Credentials issued before the directory existed may not put in it: asking would only time out.
+        let own_device = devices::Own::from_creds(creds)?
+            .filter(|own| rights.may_publish(&ants_proto::subject::devices_of(&own.human)));
+        Ok(Self {
+            url,
+            creds,
+            domain,
+            me,
+            device,
+            rights,
+            account,
+            own_device,
+            hub_checked: AtomicBool::new(false),
+            device_published: AtomicBool::new(false),
+        })
     }
 
     /// Connect as [`Nats::me`], and register it in the humans bucket ([`humans::register_or_warn`]). The first
-    /// connection of a human also creates the hub's stream and buckets that are missing ([`create_missing`]).
+    /// connection of a human also creates the hub's stream and buckets that are missing ([`create_missing`]), and puts
+    /// the user JWT of its device in the directory of encryption keys when it differs ([`devices::publish_or_warn`]).
     pub async fn connect(&self, name: &str) -> Result<(async_nats::Client, async_nats::jetstream::Context)> {
         let (client, js) = self.connect_only(name).await?;
         self.prepare(&js).await;
         Ok((client, js))
     }
 
-    /// What [`Nats::connect`] does once connected: register [`Nats::me`], and create what the hub lacks.
+    /// What [`Nats::connect`] does once connected: register [`Nats::me`], create what the hub lacks, and put the
+    /// device's user JWT in the directory of encryption keys.
     async fn prepare(&self, js: &async_nats::jetstream::Context) {
         let create = async {
             if self.me.role.is_human() && !self.hub_checked.swap(true, Ordering::Relaxed) {
                 create_missing(js, &self.rights).await;
             }
         };
-        tokio::join!(humans::register_or_warn(js, &self.me), create);
+        let publish = async {
+            if let Some(own) = &self.own_device
+                && !self.device_published.swap(true, Ordering::Relaxed)
+            {
+                devices::publish_or_warn(js, own).await;
+            }
+        };
+        tokio::join!(humans::register_or_warn(js, &self.me), create, publish);
     }
 
     /// Connect as [`Nats::me`] without registering it, naming the connection after its device, if any, too.
@@ -240,7 +280,8 @@ impl<'a> Nats<'a> {
     }
 }
 
-/// `ants init`: create the hub's stream and buckets that are missing, and register the human of the credentials.
+/// `ants init`: create the hub's stream and buckets that are missing, register the human of the credentials and put
+/// the user JWT of its device in the directory of encryption keys.
 /// Returns what was done, a line each.
 async fn init_hub(nats: &Nats<'_>) -> Result<Vec<String>> {
     let (_, js) = nats.connect_only("ants-cli").await?;
@@ -248,8 +289,11 @@ async fn init_hub(nats: &Nats<'_>) -> Result<Vec<String>> {
     let fixed = fixed.context("`ants init` needs a human's credentials (`ants auth user NAME --human`)")?;
     let mut lines: Vec<String> = fixed.iter().map(hub::Finding::fixed).collect();
     humans::register_or_warn(&js, &nats.me).await;
+    if let Some(own) = &nats.own_device {
+        devices::publish_or_warn(&js, own).await;
+    }
     lines.push(format!(
-        "stream {}, buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {}, and store {} ready",
+        "stream {}, buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {}, and store {} ready",
         ants_proto::STREAM,
         ants_proto::ROSTER_BUCKET,
         ants_proto::SESSIONS_BUCKET,
@@ -265,6 +309,7 @@ async fn init_hub(nats: &Nats<'_>) -> Result<Vec<String>> {
         ants_proto::READ_BUCKET,
         ants_proto::PRESENCE_BUCKET,
         ants_proto::NOTIFY_BUCKET,
+        ants_proto::DEVICES_BUCKET,
         ants_proto::FILES_BUCKET
     ));
     Ok(lines)

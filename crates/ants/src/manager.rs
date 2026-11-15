@@ -400,9 +400,10 @@ mod tests {
                 dir: Some(team.clone()),
                 no_push: false,
             };
-            let err = format!("{:#}", retire::retire(&args("lead"), Some(&js), WAIT, &server.url).await.unwrap_err());
+            let err =
+                format!("{:#}", retire::retire(&args("lead"), Some(&js), WAIT, &server.url, None).await.unwrap_err());
             assert!(err.contains("lead was not added from a template"), "{err}");
-            retire::retire(&args("lead-h"), Some(&js), WAIT, &server.url).await.unwrap();
+            retire::retire(&args("lead-h"), Some(&js), WAIT, &server.url, None).await.unwrap();
             assert!(config::load(&config).unwrap().ants.iter().all(|a| a.name != p("lead-h")));
             assert_eq!(lookup(p("lead-h")).await.unwrap(), None);
             assert!(revoke::revoked(&team).unwrap().iter().any(|r| r.key == key_h));

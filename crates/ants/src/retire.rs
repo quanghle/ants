@@ -136,12 +136,13 @@ pub struct RetireArgs {
 
 /// Retire the ant `args` names, as a human: any ant added from a template, whichever manager added it. `roster`, the
 /// connection to read the roster through, if any, waits up to `wait` for the daemon to stop the ant; `url` is where to
-/// push the revocation.
+/// push the revocation, and `js_domain` the hub's JetStream domain, if it has one.
 pub async fn retire(
     args: &RetireArgs,
     roster: Option<&async_nats::jetstream::Context>,
     wait: Duration,
     url: &str,
+    js_domain: Option<&ants_proto::JsDomain>,
 ) -> Result<()> {
     let name = &args.name;
     let path = match &args.config {
@@ -208,7 +209,7 @@ pub async fn retire(
         println!("{}", home_note(name, &u.template, &u.home));
     }
     match revoked {
-        Some(revoked) if !revoked.is_empty() && !args.no_push => crate::cmd::auth::push(url, &dir).await,
+        Some(revoked) if !revoked.is_empty() && !args.no_push => crate::cmd::auth::push(url, js_domain, &dir).await,
         Some(revoked) if !revoked.is_empty() => {
             println!("push the revocation to the hub with: ants auth push --nats URL");
             Ok(())

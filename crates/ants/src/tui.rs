@@ -1,16 +1,18 @@
 //! `ants chat`, which bare `ants` runs on a terminal: the full-screen chat UI. A nav of home (what waits for the
 //! human), work (the threads by state), the human's channels, the ants and the people, beside the view selected in it,
-//! kept live from what the CLI's own connection reads and hears ([`live::Feed`], [`reads::Reads`]).
+//! kept live from what the CLI's own connection reads and hears ([`live::Feed`], [`reads::Reads`], [`people::Io`]).
 //!
 //! What it shows and how keys change it is the [`model::Model`]; each view and component has a module of its own,
 //! which draws it and takes its keys.
 
 mod acts;
 mod channel;
+mod dm;
 mod frame;
 mod home;
 mod model;
 mod nav;
+mod people;
 mod reads;
 mod thread;
 mod timeline;
@@ -125,11 +127,13 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration) -> Result<()> {
     let feed = feed.with_timelines();
     let reads = Reads::new(js.clone(), me.clone());
     let acts = Acts::new(js.clone(), nats.domain.cloned(), me.clone(), thread_meta::open(nats, &js).await);
+    let may_read = nats.rights.may_publish(&presence::online_right());
+    let people = people::Io::new(js.clone(), nats.domain.cloned(), nats.me.clone(), may_read);
     let server = host(nats.url).to_owned();
     // The UI shows the replies and the tool requests as they come, so notifications spare this device theirs meanwhile.
     let shown = async {
         let mut screen = Screen::open()?;
-        Box::pin(Chat { feed, reads, acts, model: Model::new(state, server) }.run(&mut screen.terminal)).await
+        Box::pin(Chat { feed, reads, acts, people, model: Model::new(state, server) }.run(&mut screen.terminal)).await
     };
     let (domain, device) = (nats.domain, nats.device);
     let approvals = presence::while_following(&js, domain, me, device, Following::Approvals, shown);
@@ -155,6 +159,7 @@ fn key_of(key: KeyEvent) -> Option<Key> {
         KeyCode::Tab | KeyCode::BackTab => Key::Tab,
         KeyCode::Enter => Key::Enter,
         KeyCode::Esc => Key::Esc,
+        KeyCode::Backspace => Key::Backspace,
         KeyCode::Char(c) => Key::Char(c),
         _ => return None,
     })
@@ -165,6 +170,7 @@ struct Chat {
     feed: Feed,
     reads: Reads,
     acts: Acts,
+    people: people::Io,
     model: Model,
 }
 
@@ -210,6 +216,11 @@ impl Chat {
                 acted = self.acts.next() => {
                     dirty = true;
                     self.model.acted(acted, Utc::now());
+                    Vec::new()
+                }
+                event = self.people.next() => {
+                    dirty = true;
+                    self.model.people(event, Utc::now());
                     Vec::new()
                 }
             };
@@ -260,10 +271,12 @@ impl Chat {
             }
             Action::MarkRead(thread) => self.reads.mark_read(thread),
             Action::Reactions(messages) => self.reads.watch_reactions(messages),
+            Action::Send(draft) => self.people.send(draft),
             Action::Refresh => {
                 self.feed.refresh();
                 self.reads.refresh();
                 self.acts.refresh();
+                self.people.refresh();
                 if let Some(thread) = self.model.open_thread() {
                     self.feed.load_history(thread, true);
                 }

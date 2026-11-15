@@ -371,6 +371,39 @@ async fn replies_are_redacted() {
 }
 
 #[tokio::test]
+async fn a_human_s_summary_request_is_prompted_as_one_and_the_reply_carries_it_with_its_tokens() {
+    let Some((bus, mut to_human)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let dev_b: UserId = "dev-b".parse().unwrap();
+    let mut to_dev_b = bus.client.subscribe(subject::inbox_of(&dev_b)).await.unwrap();
+    bus.client.flush().await.unwrap();
+    let (asked, summarised) = (ThreadId::generate(), ThreadId::generate());
+    let request = ants_proto::SummaryRequest::thread(summarised.clone(), 42);
+    for (from, thread) in [(UserId::human(), asked.clone()), (dev_b.clone(), ThreadId::generate())] {
+        let mut envelope = Envelope::on_thread(thread, from, bus.dev.clone(), "tokens 7");
+        envelope.summary = Some(request.clone());
+        bus::publish_json(&bus.js, envelope.subject(), &envelope, None).await.unwrap();
+    }
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let reply = next_envelope(&mut to_human).await;
+        assert_eq!(reply.thread_id, asked);
+        let spent = ants_proto::SummaryRequest { tokens: Some(7), ..request.clone() };
+        assert_eq!(reply.summary, Some(spent), "the reply carries the request and its tokens");
+        assert_eq!(next_envelope(&mut to_dev_b).await.summary, None, "only a human asks for a summary");
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    let prompts = log.locked().prompts.clone();
+    let tldr = format!("[ants] A human asks for a TL;DR of thread {summarised} from the entries below");
+    assert!(prompts[0].starts_with(&tldr), "{prompts:?}");
+    assert!(prompts[0].contains("use no tools and message no one") && prompts[0].ends_with("\n\ntokens 7"));
+    assert_eq!(prompts[1], "tokens 7", "an ant's request is an ordinary message");
+}
+
+#[tokio::test]
 async fn progress_streams_to_the_status_subject() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
     let (launch, _, _) = fake::launch();
@@ -1936,7 +1969,7 @@ async fn a_reply_recorded_before_a_crash_is_stored_once_without_a_prompt() {
     // The crashed attempt recorded its reply and stored it, but never acked.
     let reply = ask.reply(bus.dev.clone(), "s1: done before", Role::Human).unwrap();
     bus.attempts.start(seq, &ask).await.unwrap();
-    bus.attempts.replied(seq, &ask, &Reply::Message(reply.clone())).await.unwrap();
+    bus.attempts.replied(seq, &ask, &Reply::Message(Box::new(reply.clone()))).await.unwrap();
     bus::publish_json(&bus.js, reply.subject(), &reply, Some(&reply_id(&bus.dev, &ask))).await.unwrap();
     assert_eq!(next_reply(&mut replies).await, (t1.clone(), "done before".to_owned()));
 
@@ -2575,6 +2608,87 @@ async fn a_mentioned_member_answers_on_the_thread_after_the_posts_it_missed() {
     assert!(second.contains(shown), "{second}");
     assert!(!second.contains("deploy friday") && !second.contains("dev-a: "), "{second}");
     assert!(second.ends_with(&format!("\n\n{}", channel::owner_note(&ops))), "{second}");
+}
+
+/// Store `bytes` as a new attachment named `name` of type `mime`, under the handle `handle` gives its id.
+async fn attach(
+    bus: &Bus,
+    handle: impl Fn(Uuid) -> AttachmentHandle,
+    name: &str,
+    mime: &str,
+    bytes: &[u8],
+) -> Attachment {
+    let attachment = crate::files::reference(name, mime, bytes).unwrap();
+    crate::files::put(&bus.js, &handle(attachment.id), &attachment, bytes).await.unwrap();
+    attachment
+}
+
+#[tokio::test]
+async fn attachments_reach_a_harness_taking_images_as_images_and_any_other_as_a_line() {
+    let Some((bus, mut replies)) = Bus::start().await else { return };
+    bus.js.create_stream(crate::hub::files_config()).await.unwrap();
+    let (launch, log, _) = fake::launch();
+    log.locked().takes_images = true;
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let (ops, mut posts) = bus.channel("ops", &["dev-a"]).await;
+    let line = |a: &Attachment, handle: &AttachmentHandle| {
+        format!("[ants] Attached: {:?} ({}, {} bytes), handle {handle}", a.name, a.mime, a.size)
+    };
+
+    let mut message = Envelope::on_thread(ThreadId::generate(), UserId::human(), bus.dev.clone(), "look");
+    let to = message.clone();
+    let handle = |id| to.attachment_handle(id);
+    let shot = attach(&bus, handle, "shot.png", "image/png", b"\x89PNG shot").await;
+    let log_file = attach(&bus, handle, "build.log", "text/plain", b"error: E0308").await;
+    let gone = crate::files::reference("gone.png", "image/png", b"never stored").unwrap();
+    message.attachments = vec![shot.clone(), log_file.clone(), gone.clone()];
+    bus::publish_json(&bus.js, message.subject(), &message, None).await.unwrap();
+
+    let mut post = ChannelPost::new(ops.clone(), UserId::human(), "@dev-a see the chart");
+    let on = post.clone();
+    let chart = attach(&bus, |id| on.attachment_handle(id), "chart.webp", "image/webp", b"RIFF chart").await;
+    post.attachments = vec![chart.clone()];
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        next_reply(&mut replies).await;
+        bus.post(&post).await;
+        next_post(&mut posts).await;
+        // A harness started now takes no images.
+        log.locked().takes_images = false;
+        let mut plain = Envelope::on_thread(ThreadId::generate(), UserId::human(), bus.dev.clone(), "again");
+        plain.attachments = vec![attach(&bus, |id| plain.attachment_handle(id), "shot.png", "image/png", b"x").await];
+        bus::publish_json(&bus.js, plain.subject(), &plain, None).await.unwrap();
+        next_reply(&mut replies).await;
+        ctrl_c.add_permits(1);
+        plain
+    };
+    let ((), plain) = tokio::join!(bus.serve(&pool, &ctrl_c), check);
+
+    let log = log.locked();
+    let [first, second, third] = &log.prompts[..] else { panic!("{:?}", log.prompts) };
+    let shown = format!("{}; shown as an image after this text.", line(&shot, &handle(shot.id)));
+    let named = format!("{}; call read_attachment with the handle to read it.", line(&log_file, &handle(log_file.id)));
+    assert!(first.starts_with("look\n\n") && first.contains(&format!("{shown}\n{named}\n")), "{first}");
+    let unavailable =
+        format!("{}: unavailable now (attachment {} is not stored", line(&gone, &handle(gone.id)), handle(gone.id));
+    assert!(
+        first.contains(&unavailable) && first.ends_with("call read_attachment with the handle to try again."),
+        "{first}"
+    );
+    let chart_handle = post.attachment_handle(chart.id);
+    assert_eq!(chart_handle.to_string(), format!("human.chan.ops.{}", chart.id), "under the post's channel");
+    assert!(
+        second.ends_with(&format!("{}; shown as an image after this text.", line(&chart, &chart_handle))),
+        "{second}"
+    );
+    let image = |mime: &str, bytes: &[u8]| (mime.to_owned(), data_encoding::BASE64.encode(bytes));
+    assert_eq!(log.images, [image("image/png", b"\x89PNG shot"), image("image/webp", b"RIFF chart")]);
+
+    let only = &plain.attachments[0];
+    let named =
+        format!("{}; call read_attachment with the handle to read it.", line(only, &plain.attachment_handle(only.id)));
+    assert!(third.ends_with(&format!("again\n\n{named}")), "{third}");
 }
 
 #[tokio::test]
