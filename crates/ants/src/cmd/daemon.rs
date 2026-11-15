@@ -27,7 +27,8 @@ pub(crate) async fn run(args: &serve::DaemonArgs, conn: &Connection<'_>) -> Resu
             }
         }
         let schedules = scheduler::resolve(listed.schedules, conn.nats, domain)?;
-        Ok(serve::Served { configs, schedules, metrics: listed.metrics })
+        let host = serve::host(listed.host, &configs, conn.nats, domain);
+        Ok(serve::Served { configs, schedules, metrics: listed.metrics, host })
     };
     let config = serve::config_file(args, &default_path)?;
     let dropins = ants_daemon::config::dropin_dir(&std::path::absolute(&config)?);

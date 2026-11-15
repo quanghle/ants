@@ -30,6 +30,7 @@ mod keys;
 mod leaf;
 mod live;
 mod login;
+mod machines;
 mod manager;
 mod members;
 mod notify;
@@ -107,6 +108,7 @@ async fn run() -> Result<()> {
         }
         Command::Roster { json } => roster::show(&nats()?, json).await,
         Command::Ant(command) => Box::pin(cmd::ant::run(&nats()?, command)).await,
+        Command::Machines { ant, json } => machines::show(&nats()?, ant.as_ref(), json).await,
         Command::Spend { ant, thread, days, json, config } => {
             let path = match config {
                 Some(path) => path,
@@ -311,7 +313,7 @@ async fn init_hub(nats: &Nats<'_>) -> Result<Vec<String>> {
         devices::publish_or_warn(&js, own).await;
     }
     lines.push(format!(
-        "stream {}, buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {}, and store {} ready",
+        "stream {}, buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {}, and store {} ready",
         ants_proto::STREAM,
         ants_proto::ROSTER_BUCKET,
         ants_proto::SESSIONS_BUCKET,
@@ -328,6 +330,7 @@ async fn init_hub(nats: &Nats<'_>) -> Result<Vec<String>> {
         ants_proto::PRESENCE_BUCKET,
         ants_proto::NOTIFY_BUCKET,
         ants_proto::DEVICES_BUCKET,
+        ants_proto::MACHINES_BUCKET,
         ants_proto::FILES_BUCKET
     ));
     Ok(lines)

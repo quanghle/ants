@@ -106,6 +106,16 @@ pub(crate) enum Command {
     /// One ant at a glance, as the ant view of `ants chat` shows it.
     #[command(subcommand)]
     Ant(AntCommand),
+    /// List the machines whose daemons recorded the ants they serve, with host credentials (`ants auth host`): kept
+    /// when an ant goes offline and its roster entry expires. With ANT, the machine serving it, or that last did.
+    Machines {
+        /// Only the machines of this ant.
+        #[arg(add = ArgValueCandidates::new(completions::ants))]
+        ant: Option<UserId>,
+        /// One JSON record per line; with ANT, one object with its machines.
+        #[arg(long)]
+        json: bool,
+    },
     /// Report the tokens and cost ants spent, as their daemons keep them: per ant, today and over the last --days UTC
     /// days; for one ANT, each day and each thread since a human's last message on it; with --thread, that thread.
     /// Caps come from the local config file for the ants it lists. Needs human credentials.

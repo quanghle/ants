@@ -66,6 +66,7 @@ fn kind(kind: Kind) -> &'static str {
         Kind::Webhook => "a webhook's",
         Kind::Leaf => "a leaf node's",
         Kind::ChannelManager => "the channel manager's",
+        Kind::Host => "a machine's host",
         Kind::Enrollment => "enrollment",
         Kind::Observer => "an observer's",
         Kind::Bootstrap => "bootstrap",

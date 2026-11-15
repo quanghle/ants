@@ -12,9 +12,10 @@ use std::time::Duration;
 
 use ants_proto::{
     ATTACHMENT_CHUNK, ATTACHMENT_HEADROOM, ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, DEVICES_BUCKET,
-    FILES_BUCKET, FILES_STREAM, HUMANS_BUCKET, LINKS_BUCKET, NOTIFY_BUCKET, OWNERS_BUCKET, PRESENCE_BUCKET,
-    PRESENCE_TTL, REACTIONS_BUCKET, READ_BUCKET, ROSTER_BUCKET, ROSTER_TTL, SESSIONS_BUCKET, STORED_INBOX_DESTINATION,
-    STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, THREADS_BUCKET, WEBHOOK_RETENTION, WEBHOOKS_BUCKET,
+    FILES_BUCKET, FILES_STREAM, HUMANS_BUCKET, LINKS_BUCKET, MACHINES_BUCKET, NOTIFY_BUCKET, OWNERS_BUCKET,
+    PRESENCE_BUCKET, PRESENCE_TTL, REACTIONS_BUCKET, READ_BUCKET, ROSTER_BUCKET, ROSTER_TTL, SESSIONS_BUCKET,
+    STORED_INBOX_DESTINATION, STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, THREADS_BUCKET, WEBHOOK_RETENTION,
+    WEBHOOKS_BUCKET,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::context::{GetStreamError, GetStreamErrorKind};
@@ -42,13 +43,14 @@ pub enum Object {
     Presence,
     Notify,
     Devices,
+    Machines,
     /// The attachments' store ([`FILES_BUCKET`]).
     Files,
 }
 
 impl Object {
     /// Every object, the stream first.
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 18] = [
         Self::Stream,
         Self::Roster,
         Self::Sessions,
@@ -65,6 +67,7 @@ impl Object {
         Self::Presence,
         Self::Notify,
         Self::Devices,
+        Self::Machines,
         Self::Files,
     ];
 
@@ -87,6 +90,7 @@ impl Object {
             Self::Presence => PRESENCE_BUCKET,
             Self::Notify => NOTIFY_BUCKET,
             Self::Devices => DEVICES_BUCKET,
+            Self::Machines => MACHINES_BUCKET,
         })
     }
 
@@ -123,6 +127,7 @@ impl Object {
             Self::Presence => Spec::Bucket(Box::new(presence_config())),
             Self::Notify => Spec::Bucket(Box::new(notify_config())),
             Self::Devices => Spec::Bucket(Box::new(devices_config())),
+            Self::Machines => Spec::Bucket(Box::new(machines_config())),
         }
     }
 
@@ -436,6 +441,11 @@ pub fn devices_config() -> kv::Config {
     lasting_config(DEVICES_BUCKET, "User JWTs binding the encryption keys of human devices, and revoked keys")
 }
 
+/// The machines bucket ([`MACHINES_BUCKET`]): a machine's record outlives the roster entries of its ants.
+pub fn machines_config() -> kv::Config {
+    lasting_config(MACHINES_BUCKET, "The ants each machine's daemon serves, each record written by its machine")
+}
+
 /// The read markers of the humans ([`READ_BUCKET`]).
 pub fn read_config() -> kv::Config {
     lasting_config(READ_BUCKET, "What each human has read of its inbox, on any of its devices")
@@ -595,13 +605,13 @@ mod tests {
             denied.to_string(),
             format!("bucket ants_read is missing, and the credentials may not create it ({read_create})")
         );
-        let left = [Object::Read, Object::Presence, Object::Notify, Object::Devices, Object::Files];
+        let left = [Object::Read, Object::Presence, Object::Notify, Object::Devices, Object::Machines, Object::Files];
         assert_eq!(problems(&check(&js, |_| true).await), left, "the rest is created");
         // As a human's credentials, which get no stream info of the presence bucket but may create it.
         let human = |s: &str| s != Object::Presence.info_subject();
         assert_eq!(
             problems(&init(&js, human).await.unwrap()),
-            [Object::Read, Object::Notify, Object::Devices, Object::Files]
+            [Object::Read, Object::Notify, Object::Devices, Object::Machines, Object::Files]
         );
         assert!(init(&js, human).await.unwrap().is_empty(), "creating the presence bucket again changes nothing");
         assert!(check(&js, |_| true).await.is_empty(), "all there");

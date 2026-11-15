@@ -505,6 +505,29 @@ fn the_builtin_messenger_finds_its_credentials_and_creates_its_workdir() {
 }
 
 #[test]
+fn the_host_table_names_credentials_else_they_are_found_in_the_auth_directory() {
+    let home = ants_test_support::scratch_dir("config-host").canonicalize().unwrap();
+    let path = home.join("config.toml");
+    let host = |text: &str| Summary::parse(text, &path, &home).unwrap().host;
+    let top = "nats = \"nats://hub:4222\"\njs_domain = \"hub\"\n";
+    let none = host(top);
+    assert_eq!((none.creds, none.machine), (None, None));
+    assert_eq!(
+        (none.nats.as_deref(), none.js_domain.map(|d| d.to_string())),
+        (Some("nats://hub:4222"), Some("hub".into()))
+    );
+    let auth = home.join(".config/ants/auth");
+    std::fs::create_dir_all(&auth).unwrap();
+    std::fs::write(auth.join("host-box.creds"), "").unwrap();
+    assert_eq!(host("[host]\nmachine = \"box\"").creds, Some(auth.join("host-box.creds")));
+    std::fs::write(auth.join("host.creds"), "").unwrap();
+    assert_eq!(host("[host]\nmachine = \"box\"").creds, Some(auth.join("host.creds")));
+    assert_eq!(host("[host]\ncreds = \"h.creds\"").creds, Some(home.join("h.creds")));
+    assert!(Summary::parse("[host]\nuser = \"x\"", &path, &home).is_err(), "unknown keys are refused");
+    std::fs::remove_dir_all(&home).unwrap();
+}
+
+#[test]
 fn rejects_bad_files() {
     let err = |text: &str| format!("{:#}", parse_here(text).unwrap_err());
     let twice = err("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"");

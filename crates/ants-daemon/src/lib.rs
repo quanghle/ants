@@ -18,6 +18,7 @@ pub mod fallback;
 pub mod files;
 pub mod harness;
 pub mod history;
+pub mod host;
 pub mod hub;
 pub mod humans;
 pub mod ipc;
