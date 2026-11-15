@@ -1,0 +1,154 @@
+use std::assert_matches;
+
+use data_encoding::BASE64URL_NOPAD;
+use nkeys::KeyPair;
+use serde_json::json;
+
+use super::*;
+use crate::ADMIN_TAG;
+
+fn p(s: &str) -> UserId {
+    s.parse().unwrap()
+}
+
+fn m(s: &str) -> Machine {
+    s.parse().unwrap()
+}
+
+struct Team {
+    account: KeyPair,
+    admin: KeyPair,
+}
+
+impl Team {
+    fn new() -> Self {
+        Self { account: KeyPair::new_account(), admin: KeyPair::new_user() }
+    }
+
+    fn account(&self) -> String {
+        self.account.public_key()
+    }
+
+    fn jwt(&self, name: &str, tags: &[&str], exp: Option<i64>) -> String {
+        let header = BASE64URL_NOPAD.encode(br#"{"typ":"JWT","alg":"ed25519-nkey"}"#);
+        let mut claims = json!({
+            "sub": self.admin.public_key(), "iss": self.account.public_key(), "name": name,
+            "nats": { "type": "user", "tags": tags },
+        });
+        if let Some(exp) = exp {
+            claims["exp"] = json!(exp);
+        }
+        let body = BASE64URL_NOPAD.encode(claims.to_string().as_bytes());
+        let signature = BASE64URL_NOPAD.encode(&self.account.sign(format!("{header}.{body}").as_bytes()).unwrap());
+        format!("{header}.{body}.{signature}")
+    }
+
+    fn order(&self, op: AdminOp, jwt: String) -> AdminOrder {
+        self.signed(AdminOrder::new(p("alice"), m("box"), p("dev-a"), op, jwt))
+    }
+
+    fn signed(&self, mut order: AdminOrder) -> AdminOrder {
+        order.signature = BASE64URL_NOPAD.encode(&self.admin.sign(&order.signed()).unwrap());
+        order
+    }
+}
+
+fn set() -> AdminOp {
+    AdminOp::Set {
+        changes: vec![
+            FieldChange { field: vec!["model".to_owned()], expected: None, value: Some(json!("gpt-5")) },
+            FieldChange {
+                field: vec!["caps".to_owned(), "daily".to_owned()],
+                expected: Some(json!({ "usd": 5, "tokens": 100 })),
+                value: None,
+            },
+        ],
+    }
+}
+
+#[test]
+fn an_order_travels_as_json_and_signs_canonical_lines() {
+    let team = Team::new();
+    let order = team.order(set(), team.jwt("alice", &[ADMIN_TAG], None));
+    let json = serde_json::to_string(&order).unwrap();
+    assert_eq!(serde_json::from_str::<AdminOrder>(&json).unwrap(), order);
+    assert_eq!(order.subject(), "ants.admin.box.dev-a");
+    assert_eq!(order.outcome_key(), format!("box.dev-a.{}", order.id));
+    assert_eq!(admin_outcome_of(&order.outcome_key()), Some((m("box"), p("dev-a"), order.id)));
+    assert_eq!(admin_outcome_of("box"), None, "a machine's record");
+    assert_eq!(admin_outcome_of(&format!("box.dev-a.{}.x", order.id)), None);
+
+    let signed = String::from_utf8(order.signed()).unwrap();
+    let lines: Vec<&str> = signed.lines().collect();
+    let sent_at = order.sent_at.to_rfc3339_opts(SecondsFormat::Nanos, true);
+    assert_eq!(lines[..6], [ORDER_SIGNING_CONTEXT, &order.id.to_string(), "alice", "box", "dev-a", &sent_at]);
+    let op = r#"{"changes":[{"field":["model"],"value":"gpt-5"},{"expected":{"tokens":100,"usd":5},"field":["caps","daily"]}],"kind":"set"}"#;
+    assert_eq!(lines[6..], [op]);
+    let value = json!({"b": [1, {"d": null, "c": "x\"y"}], "a": true});
+    assert_eq!(canonical_json(&value), r#"{"a":true,"b":[1,{"c":"x\"y","d":null}]}"#);
+    assert_eq!(set().describe(), r#"set model = "gpt-5", caps.daily removed"#);
+    assert_eq!(AdminOp::Restart { now: true }.describe(), "restart now");
+    let restart: AdminOp = serde_json::from_str(r#"{"kind":"restart"}"#).unwrap();
+    assert_eq!(restart, AdminOp::Restart { now: false });
+}
+
+#[test]
+fn a_daemon_carries_out_only_what_an_admin_signed() {
+    let team = Team::new();
+    let account = team.account();
+    let order = team.order(AdminOp::Pause, team.jwt("alice", &[ADMIN_TAG], None));
+    let stored_at = order.sent_at + TimeDelta::seconds(1);
+    let at = |order: &AdminOrder, revoked: bool, stored_at| {
+        order.verify(&order.subject(), [account.as_str()], |_| revoked, stored_at)
+    };
+    let check = |order: &AdminOrder| at(order, false, stored_at);
+    let verified = check(&order).unwrap();
+    assert_eq!((verified.id, verified.public_key.as_str()), (p("alice"), team.admin.public_key().as_str()));
+    assert_eq!(order.signing_key(), Some(team.admin.public_key()));
+
+    let mut tampered = order.clone();
+    tampered.op = AdminOp::Retire;
+    assert_matches!(check(&tampered), Err(OrderError::Credentials(JwtError::BadSignature(_))));
+    let mut elsewhere = order.clone();
+    elsewhere.machine = m("other");
+    assert_matches!(check(&elsewhere), Err(OrderError::Credentials(JwtError::BadSignature(_))));
+    let wrong = order.verify("ants.admin.other.dev-a", [account.as_str()], |_| false, stored_at);
+    assert_matches!(wrong, Err(OrderError::WrongSubject(_)));
+
+    let not_admin = team.order(AdminOp::Pause, team.jwt("alice", &[], None));
+    assert_matches!(check(&not_admin), Err(OrderError::Credentials(JwtError::NotAdmin(_))));
+    let other = Team::new();
+    let foreign = other.order(AdminOp::Pause, other.jwt("alice", &[ADMIN_TAG], None));
+    assert_matches!(check(&foreign), Err(OrderError::Credentials(JwtError::ForeignAccount(_))));
+    let bobs = team.signed(AdminOrder { admin: p("bob"), ..order.clone() });
+    assert_matches!(check(&bobs), Err(OrderError::NotTheAdmin { .. }));
+    let key = order.verify(&order.subject(), [account.as_str()], |key| key == team.admin.public_key(), stored_at);
+    assert_matches!(key, Err(OrderError::Revoked(_)));
+    assert_matches!(at(&order, true, stored_at), Err(OrderError::Revoked(_)));
+
+    assert!(at(&order, false, order.sent_at + TimeDelta::days(20)).is_ok(), "an order waits");
+    let ahead = team.signed(AdminOrder { sent_at: stored_at + ORDER_CLOCK_SKEW + TimeDelta::seconds(1), ..order });
+    assert_matches!(check(&ahead), Err(OrderError::Ahead(_)));
+
+    let exp = Utc::now().timestamp() + 60;
+    let expiring = team.order(AdminOp::Resume, team.jwt("alice", &[ADMIN_TAG], Some(exp)));
+    let stored = expiring.sent_at + TimeDelta::seconds(1);
+    assert!(at(&expiring, false, stored).is_ok(), "valid when stored");
+    let expired = at(&expiring, false, stored + TimeDelta::days(3));
+    assert_matches!(expired, Err(OrderError::Credentials(JwtError::Expired(_))), "stored after it expired");
+}
+
+#[test]
+fn an_outcome_names_what_was_ordered() {
+    let team = Team::new();
+    let order = team.order(AdminOp::ReadMemories, team.jwt("alice", &[ADMIN_TAG], None));
+    let outcome = AdminOutcome::of(&order, OrderState::Applied, None, Some(json!({ "whoami": "x" })));
+    assert_eq!(outcome.key(), order.outcome_key());
+    let json = serde_json::to_value(&outcome).unwrap();
+    assert_eq!((json["state"].as_str(), json["op"]["kind"].as_str()), (Some("applied"), Some("read_memories")));
+    assert_eq!(serde_json::from_value::<AdminOutcome>(json).unwrap(), outcome);
+    let unreadable = AdminOutcome::unreadable(order.id, m("box"), p("dev-a"), "malformed".to_owned());
+    let json = serde_json::to_value(&unreadable).unwrap();
+    assert_eq!(json.get("admin"), None);
+    assert_eq!(json["reason"], "malformed");
+}

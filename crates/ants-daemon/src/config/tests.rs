@@ -524,6 +524,9 @@ fn the_host_table_names_credentials_else_they_are_found_in_the_auth_directory() 
     assert_eq!(host("[host]\nmachine = \"box\"").creds, Some(auth.join("host.creds")));
     assert_eq!(host("[host]\ncreds = \"h.creds\"").creds, Some(home.join("h.creds")));
     assert!(Summary::parse("[host]\nuser = \"x\"", &path, &home).is_err(), "unknown keys are refused");
+    assert!(none.remote_admin, "admin orders are carried out unless the file says otherwise");
+    assert!(!host("[admin]\nremote = false").remote_admin);
+    assert!(Summary::parse("[admin]\nlocal = false", &path, &home).is_err(), "unknown keys are refused");
     std::fs::remove_dir_all(&home).unwrap();
 }
 

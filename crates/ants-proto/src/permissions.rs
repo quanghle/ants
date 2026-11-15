@@ -13,8 +13,9 @@ use crate::{
 #[cfg(doc)]
 use crate::{
     AntRequest, AssistantOf, AttachmentHandle, ChannelReadMarkers, EnrollRequest, HeldNotices, NotifyPrefs,
-    QueueRequest, ReactionsRequest, RenewRequest, StatusUpdate, ThreadSummary, channel_manager_serving_key,
-    daily_spend_key, link_outbox, message_mark_key, owner_outbox, storage_warning_key, thread_spend_key, unserved_key,
+    QueueRequest, ReactionsRequest, RenewRequest, StatusUpdate, ThreadSummary, admin_outcome_key,
+    channel_manager_serving_key, daily_spend_key, link_outbox, message_mark_key, owner_outbox, storage_warning_key,
+    thread_spend_key, unserved_key,
 };
 
 /// JetStream stream backing a KV bucket.
@@ -244,8 +245,9 @@ impl Permissions {
     /// so who messages whom: it finds the stream through the info of its own inbox consumer. The filter of each of its consumers is
     /// part of the subject that creates it, so none can be pointed at another inbox: a consumer with several filters
     /// has none in that subject, so no ant may create one. A human (a CLI user; [`Role::Human`], whatever its
-    /// name) also watches all ants traffic, decides approval requests, asks for and withdraws the messages waiting in
-    /// an ant's queue ([`QueueRequest`], [`message_mark_key`]: with its own [`unserved_key`]s, the only keys of the
+    /// name) also watches all ants traffic, decides approval requests, sends admin orders to any machine
+    /// ([`subject::admin_order`]), which a daemon carries out only when an admin signed them, asks for and withdraws the
+    /// messages waiting in an ant's queue ([`QueueRequest`], [`message_mark_key`]: with its own [`unserved_key`]s, the only keys of the
     /// attempts bucket it writes or reads),
     /// reads every ant's thread and daily spend in the
     /// sessions bucket ([`thread_spend_key`], [`daily_spend_key`]) but none of its other keys there, may create the
@@ -296,10 +298,10 @@ impl Permissions {
     ///
     /// It sends only as itself, never under any sender as a human may, nor writes attachments under another's name.
     /// It gets none of a human's rights whose subjects do not name who acts, which readers could not tell from its
-    /// human's: deciding approval requests, cancelling, queueing or withdrawing an ant's messages, recording a
-    /// thread's owner, putting dead letters, answering an ant's reactions requests or another's renewal. Nor does it
-    /// change the team: no entry of [`HUMANS_BUCKET`] (where its human's grant stands) or [`CHANNELS_BUCKET`], no
-    /// stream created, updated or purged of a message. It puts no device encryption key, no presence and no
+    /// human's: sending admin orders, deciding approval requests, cancelling, queueing or withdrawing an ant's messages,
+    /// recording a thread's owner, putting dead letters, answering an ant's reactions requests or another's renewal. Nor
+    /// does it change the team: no entry of [`HUMANS_BUCKET`] (where its human's grant stands) or [`CHANNELS_BUCKET`],
+    /// no stream created, updated or purged of a message. It puts no device encryption key, no presence and no
     /// notification holds, which only a human's devices have, and it gets no power of the account key: it signs no
     /// credentials and records no revocation.
     pub fn for_assistant(assistant: &UserId, human: &UserId) -> Self {
@@ -311,6 +313,7 @@ impl Permissions {
         let devices_only = [subject::devices_of(assistant), subject::presence_of(assistant)];
         let notify = notify_prefs_rights(assistant);
         let unattributed = [
+            subject::ALL_ADMIN_ORDERS_SENT.to_owned(),
             subject::ALL_APPROVAL_DECISIONS.to_owned(),
             subject::ALL_CANCELS.to_owned(),
             subject::ALL_QUEUE_REQUESTS.to_owned(),
@@ -501,6 +504,8 @@ impl Permissions {
             subject::ALL_APPROVAL_DECISIONS.to_owned(),
             subject::ALL_CANCELS.to_owned(),
             subject::ALL_QUEUE_REQUESTS.to_owned(),
+            // Sending admin orders, which only an admin's signature makes a daemon carry out.
+            subject::ALL_ADMIN_ORDERS_SENT.to_owned(),
             // Answering an ant's request for the reactions to a message it reads.
             subject::ALL_REACTIONS_REPLIES.to_owned(),
             // Withdrawing a message from an ant's queue: creating its mark, and reading the mark that won.
@@ -678,9 +683,10 @@ impl Permissions {
     /// `users` only, all of them the machine's own. nats-server carries a reply across a leaf connection only if the
     /// leaf may publish it: the interest behind it reaches the leaf only then.
     ///
-    /// For each pattern of a user's inbox, notes and channel subjects, which has a wildcard before the sender, the
-    /// uplink also gets one literal subject of it (`ants.inbox.dev-a.dev-a`): nats-server lets the hub stream's interest
-    /// cross the uplink only when it finds such a subject, and the pattern allows it anyway.
+    /// For each pattern of a user's inbox, notes and channel subjects, which has a wildcard before the sender, and of a
+    /// human's admin orders, the uplink also gets one literal subject of it (`ants.inbox.dev-a.dev-a`,
+    /// `ants.admin.alice.alice`): nats-server lets the hub stream's interest cross the uplink only when it finds such a
+    /// subject, and the pattern allows it anyway.
     ///
     /// The uplink also carries enrollment requests from the machine ([`subject::ALL_ENROLL_REQUESTS`]) and their
     /// answers to it ([`subject::ALL_ENROLL_REPLIES`]), for an ant new to the machine: never other machines' requests,
@@ -700,8 +706,12 @@ impl Permissions {
             // nats-server lets the hub stream's interest (`ants.inbox.>`, `ants.notes.>`, ...) cross the uplink only if
             // `ReverseMatch` finds a publish allowance under it, and that skips allowances with `*` before the last
             // token, such as `ants.inbox.*.dev-a`. One literal subject each of them already allows is found.
-            let own = (!role.is_human()).then(|| [subject::chanadm_from(user), subject::timeline_from(user)]);
-            let found = subject::sendable(user, role).into_iter().chain(own.into_iter().flatten());
+            let own = if role.is_human() {
+                vec![subject::ALL_ADMIN_ORDERS_SENT.to_owned()]
+            } else {
+                vec![subject::chanadm_from(user), subject::timeline_from(user)]
+            };
+            let found = subject::sendable(user, role).into_iter().chain(own);
             let found = found.map(|s| s.replace('*', user.as_str()));
             for (all, new) in
                 [(&mut leaf.publish, publish.into_iter().chain(found).collect()), (&mut leaf.subscribe, subscribe)]
@@ -748,13 +758,19 @@ impl Permissions {
     /// connection besides its ants': putting the machine's own record in [`MACHINES_BUCKET`] ([`subject::machine_record`]),
     /// and taking the admin orders to the machine's ants from the stream through its own consumer
     /// ([`admin_consumer`]), whose filter, in the subject, is pinned to the machine's orders ([`subject::admin_orders`]),
-    /// and acking them. It hears its own replies under [`host_inbox_prefix`], apart from every user's. Nothing else: no
-    /// other machine's record, no message to or from an ant. No ant gets any of it.
+    /// and acking them, after recording the outcome of each beside the machine's record ([`admin_outcome_key`]), which it
+    /// reads back by direct gets, and looking up the revocation records of the credentials that signed them
+    /// ([`subject::revoked_devices`]). It hears its own replies under [`host_inbox_prefix`], apart from every user's.
+    /// Nothing else: no other machine's record or outcomes, no message to or from an ant. No ant gets any of it.
     pub fn for_host(machine: &Machine) -> Self {
         let record = subject::machine_record(machine);
         let consumer = admin_consumer(machine);
+        let outcomes = subject::admin_outcomes(machine);
         let mut publish = vec![
             record,
+            format!("$JS.API.DIRECT.GET.{}.{outcomes}", kv_stream(MACHINES_BUCKET)),
+            outcomes,
+            format!("$JS.API.DIRECT.GET.{}.{}", kv_stream(DEVICES_BUCKET), subject::revoked_devices()),
             // Finding JetStream on connecting, as an ant does with its inbox consumer, without the stream's info.
             format!("$JS.API.CONSUMER.INFO.{STREAM}.{consumer}"),
             format!("$JS.API.CONSUMER.CREATE.{STREAM}.{consumer}.{}", subject::admin_orders(machine)),

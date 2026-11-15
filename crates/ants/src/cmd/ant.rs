@@ -7,7 +7,7 @@ use anyhow::Result;
 use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
 
-use crate::{ant, completions};
+use crate::{ant, completions, orders};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum AntCommand {
@@ -25,6 +25,15 @@ pub(crate) enum AntCommand {
         #[arg(long, env = "ANTS_CONFIG")]
         config: Option<PathBuf>,
     },
+    /// List the admin orders to ANT, oldest first: who sent what, when, and whether its machine's daemon applied or
+    /// refused it, and why, or whether it still waits for the daemon (pending). Needs a human's credentials.
+    Orders {
+        #[arg(add = ArgValueCandidates::new(completions::ants))]
+        ant: UserId,
+        /// One JSON object per order.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub(crate) async fn run(nats: &crate::Nats<'_>, command: AntCommand) -> Result<()> {
@@ -37,5 +46,6 @@ pub(crate) async fn run(nats: &crate::Nats<'_>, command: AntCommand) -> Result<(
             let caps = ants_daemon::config::Summary::load(&path)?.caps;
             ant::show(nats, ant, &caps, json).await
         }
+        AntCommand::Orders { ant, json } => orders::show(nats, &ant, json).await,
     }
 }

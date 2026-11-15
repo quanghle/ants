@@ -662,22 +662,25 @@ mod tests {
         .unwrap();
         let source = stream::Source { name: "OUTBOX".into(), ..Default::default() };
         let mut old = stream_config();
-        old.subjects.retain(|s| s != subject::ALL_TIMELINE);
+        old.subjects.retain(|s| s != subject::ALL_TIMELINE && s != subject::ALL_ADMIN_ORDERS);
         js.create_stream(stream::Config { sources: Some(vec![source]), ..old }).await.unwrap();
 
         let found = check(&js, |s| s == Object::Stream.info_subject()).await;
-        assert_eq!(found[0].to_string(), "stream ANTS does not capture ants.timeline.>");
+        let missing = "ants.timeline.>, ants.admin.>";
+        assert_eq!(found[0].to_string(), format!("stream ANTS does not capture {missing}"));
         let update = "$JS.API.STREAM.UPDATE.ANTS";
         assert_eq!(found[0].rights(), [update]);
         let denied = init(&js, |s| s != update).await.unwrap_err();
         assert_eq!(
             denied.to_string(),
-            format!("stream ANTS does not capture ants.timeline.>, and the credentials may not update it ({update})")
+            format!("stream ANTS does not capture {missing}, and the credentials may not update it ({update})")
         );
         let fixed = init(&js, |_| true).await.unwrap();
-        assert_eq!(fixed[0].fixed(), "stream ANTS now captures ants.timeline.>");
+        assert_eq!(fixed[0].fixed(), format!("stream ANTS now captures {missing}"));
         let config = js.get_stream(STREAM).await.unwrap().cached_info().config.clone();
-        assert!(config.subjects.iter().any(|s| s == subject::ALL_TIMELINE));
+        assert!(
+            [subject::ALL_TIMELINE, subject::ALL_ADMIN_ORDERS].iter().all(|a| config.subjects.iter().any(|s| s == a))
+        );
         assert_eq!(config.sources.unwrap()[0].name, "OUTBOX", "sources stay");
         assert!(check(&js, |_| true).await.is_empty());
     }

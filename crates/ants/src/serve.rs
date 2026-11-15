@@ -375,10 +375,11 @@ pub fn host(
     nats: &str,
     js_domain: Option<&JsDomain>,
 ) -> Option<(Host, Vec<UserId>)> {
-    let HostSettings { creds, machine, nats: file_nats, js_domain: file_domain } = settings?;
+    let HostSettings { creds, machine, nats: file_nats, js_domain: file_domain, remote_admin } = settings?;
     let nats = file_nats.unwrap_or_else(|| nats.to_owned());
-    let host =
+    let mut host =
         Host::new(machine, nats, creds, file_domain.or(js_domain.cloned()), configs.iter().map(|c| c.creds.is_some()))?;
+    host.remote_admin = remote_admin;
     Some((host, configs.iter().map(|c| c.ant.clone()).collect()))
 }
 

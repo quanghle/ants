@@ -1,8 +1,9 @@
 //! A machine's host connection: one NATS connection per daemon serving a whole config file, with the machine's host
 //! credentials (`ants auth host`), apart from its ants' own. It keeps the machine's [`MachineRecord`] in
 //! [`MACHINES_BUCKET`] current: the ants the daemon serves, put on start and whenever they change, and never deleted,
-//! so an ant stays addressable on its machine after its roster entry expired. Without host credentials, where the
-//! ants have their own, the connection stays off and the daemon serves its ants as before.
+//! so an ant stays addressable on its machine after its roster entry expired. It also takes the admin orders to the
+//! machine's ants and records their outcomes ([`crate::admin`]). Without host credentials, where the ants have their
+//! own, the connection stays off and the daemon serves its ants as before.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,7 +15,7 @@ use tokio::sync::watch;
 
 use crate::creds::{self, Kind};
 use crate::direct_kv::DirectKv;
-use crate::{bus, keystore, roster};
+use crate::{admin, bus, keystore, roster};
 
 const RETRY_FIRST: Duration = Duration::from_secs(1);
 const RETRY_MAX: Duration = Duration::from_secs(30);
@@ -28,6 +29,8 @@ pub struct Host {
     /// The host credentials; None to connect as no one, to a server without authentication.
     pub creds: Option<PathBuf>,
     pub js_domain: Option<JsDomain>,
+    /// The config's `[admin] remote`: whether admin orders may be carried out, else each is refused.
+    pub remote_admin: bool,
 }
 
 static OFF_TOLD: AtomicBool = AtomicBool::new(false);
@@ -52,7 +55,7 @@ impl Host {
             }
             return None;
         }
-        Some(Self { machine, nats, creds, js_domain })
+        Some(Self { machine, nats, creds, js_domain, remote_admin: true })
     }
 }
 
@@ -90,16 +93,33 @@ pub fn record(machine: &Machine, hostname: &str, ants: &[UserId]) -> MachineReco
     }
 }
 
-/// Connect as `host` and keep its machine's record current with `ants`, until `ants` closes. Fails only on what
-/// waiting cannot mend: credentials that do not load or name another machine.
-pub async fn run(host: Host, mut ants: watch::Receiver<Vec<UserId>>) -> Result<()> {
+/// Connect as `host`, keep its machine's record current with `ants` and take the admin orders to the machine's ants
+/// ([`admin::serve`]), until `ants` closes. Fails only on what waiting cannot mend: credentials that do not load or
+/// name another machine.
+pub async fn run(host: Host, ants: watch::Receiver<Vec<UserId>>) -> Result<()> {
     let hostname = roster::machine().await;
     let machine = machine_of(host.machine.as_ref(), host.creds.as_deref(), &hostname)?;
+    let accounts = host.creds.as_deref().map(creds::account).transpose()?.into_iter().collect();
     let Some(js) = connect(&host, &machine).await? else { return Ok(()) };
-    let kv = DirectKv::new(&js, host.js_domain.as_ref(), MACHINES_BUCKET).await?;
+    let orders = admin::Orders { machine: machine.clone(), remote: host.remote_admin, accounts };
+    tokio::select! {
+        recorded = keep_record(&js, &host, &machine, &hostname, ants) => recorded,
+        () = admin::serve(js.clone(), host.js_domain.clone(), orders) => Ok(()),
+    }
+}
+
+/// Keep the record of `machine` current with `ants`, until `ants` closes.
+async fn keep_record(
+    js: &async_nats::jetstream::Context,
+    host: &Host,
+    machine: &Machine,
+    hostname: &str,
+    mut ants: watch::Receiver<Vec<UserId>>,
+) -> Result<()> {
+    let kv = DirectKv::new(js, host.js_domain.as_ref(), MACHINES_BUCKET).await?;
     let mut delay = RETRY_FIRST;
     loop {
-        let value = serde_json::to_vec(&record(&machine, &hostname, &ants.borrow_and_update()))?;
+        let value = serde_json::to_vec(&record(machine, hostname, &ants.borrow_and_update()))?;
         match kv.put(machine.as_str(), value).await {
             Ok(()) => {
                 delay = RETRY_FIRST;
