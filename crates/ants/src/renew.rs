@@ -90,7 +90,8 @@ pub async fn run(args: RenewArgs, nats: &str, cli_creds: Option<&Path>) -> Resul
         (None, Some(xkey)) => Some(auth::device_key(xkey)?),
         _ => None,
     };
-    let jwt = request(nats, &carrier, &path, &user, ask.as_ref(), store, ENROLL_REPEAT, stop).await?;
+    let renewal = Renewal { creds: &path, user: &user, xkey: ask.as_ref() };
+    let jwt = request(nats, &carrier, renewal, store, ENROLL_REPEAT, stop).await?;
     keys::replace(&path, &jwt, &user, xkey.as_ref(), store, nats).await?;
     println!("{} renewed: {}, key {}", path.display(), finding.holder(), user.public_key());
     reload(&path, args.config.as_deref(), args.leaf_config.as_deref())
@@ -131,23 +132,24 @@ fn renewable(path: &Path, jwt: &str) -> Result<(auth::Claims, Finding)> {
     )
 }
 
-/// Ask for the credentials at `creds` renewed for the public key of `user`, over the server at `url`, connected with
-/// the credentials at `carrier` (`creds` themselves, but for a leaf node's uplink), each reading a seed it keeps in
-/// `store` rather than in itself, asking for a human's credentials without an encryption key to bind `xkey`, if given:
-/// repeat the signed request every `repeat` until an answer for the key arrives, the credentials expire or `stop`
-/// completes. Returns the user JWT of the answer, checked to be the account's for that key, with the same name, kind,
-/// device and JetStream domain, and the encryption key the credentials bind or `xkey`; fails with the reason of an
-/// answer refusing it (from `ants signer`, for credentials a registration granted).
-#[expect(
-    clippy::too_many_arguments,
-    reason = "registrar's tests call it as is; grouping the renewed credentials (creds, user, xkey) waits on them"
-)]
+/// Credentials to renew: those at `creds`, for the public key of `user`, asking for a human's credentials without an
+/// encryption key to bind `xkey`, if given.
+pub struct Renewal<'a> {
+    pub creds: &'a Path,
+    pub user: &'a KeyPair,
+    pub xkey: Option<&'a DeviceKey>,
+}
+
+/// Ask for the `renewal` of credentials over the server at `url`, connected with the credentials at `carrier` (the
+/// renewed ones themselves, but for a leaf node's uplink), each reading a seed it keeps in `store` rather than in
+/// itself: repeat the signed request every `repeat` until an answer for the key arrives, the credentials expire or
+/// `stop` completes. Returns the user JWT of the answer, checked to be the account's for that key, with the same name,
+/// kind, device and JetStream domain, and the encryption key the credentials bind or the renewal's `xkey`; fails with
+/// the reason of an answer refusing it (from `ants signer`, for credentials a registration granted).
 pub async fn request(
     url: &str,
     carrier: &Path,
-    creds: &Path,
-    user: &KeyPair,
-    xkey: Option<&DeviceKey>,
+    Renewal { creds, user, xkey }: Renewal<'_>,
     store: &dyn Store,
     repeat: Duration,
     stop: impl Future<Output = ()>,
@@ -518,7 +520,8 @@ mod tests {
         let approver = Approver::connect(&server.url, &team, None, LISTEN).await.unwrap();
         let user = KeyPair::new_user();
 
-        let asking = request(&server.url, &creds, &creds, &user, None, keystore::os(), REPEAT, pending());
+        let renewing = Renewal { creds: &creds, user: &user, xkey: None };
+        let asking = request(&server.url, &creds, renewing, keystore::os(), REPEAT, pending());
         let approving = async {
             let heard = approver.renewals(None).await.unwrap();
             assert_eq!(heard.len(), 1, "{heard:?}");
@@ -549,7 +552,8 @@ mod tests {
         let Ok(keys::Moved::Now(old_key)) = keys::store_seed(&creds, &store, &server.url).await else { panic!() };
         let approver = Approver::connect(&server.url, &team, None, LISTEN).await.unwrap();
         let renewal = async |user: &KeyPair| {
-            let asking = request(&server.url, &creds, &creds, user, None, &store, REPEAT, pending());
+            let renewing = Renewal { creds: &creds, user, xkey: None };
+            let asking = request(&server.url, &creds, renewing, &store, REPEAT, pending());
             let approving = async {
                 while approver.renewals(None).await.unwrap().is_empty() {}
                 approver.renew(&team, "dev-a", None).await.unwrap()
@@ -591,7 +595,8 @@ mod tests {
         auth::replace_creds(&creds, &jwt, &first, None).unwrap();
         let approver = Approver::connect(&server.url, &team, None, LISTEN).await.unwrap();
         let renewal = async |user: &KeyPair, xkey: Option<&DeviceKey>| {
-            let asking = request(&server.url, &creds, &creds, user, xkey, &store, REPEAT, pending());
+            let renewing = Renewal { creds: &creds, user, xkey };
+            let asking = request(&server.url, &creds, renewing, &store, REPEAT, pending());
             let approving = async {
                 while approver.renewals(None).await.unwrap().is_empty() {}
                 approver.renew(&team, "alice", None).await.unwrap()
@@ -643,11 +648,11 @@ mod tests {
             },
         );
         let asking = async {
-            let first =
-                request(&server.url, &creds, &creds, &user, None, keystore::os(), REPEAT, pending()).await.unwrap();
+            let renewing = Renewal { creds: &creds, user: &user, xkey: None };
+            let first = request(&server.url, &creds, renewing, keystore::os(), REPEAT, pending()).await.unwrap();
             // Asking again with the same key, as a holder that missed the answer, gets the same, signed once.
-            let again =
-                request(&server.url, &creds, &creds, &user, None, keystore::os(), REPEAT, pending()).await.unwrap();
+            let renewing = Renewal { creds: &creds, user: &user, xkey: None };
+            let again = request(&server.url, &creds, renewing, keystore::os(), REPEAT, pending()).await.unwrap();
             stop_tx.send(()).unwrap();
             (first, again)
         };
@@ -732,7 +737,8 @@ mod tests {
         let user = KeyPair::new_user();
         // The approver's connection, which may answer.
         let client = Approver::connect(&server.url, &team, None, LISTEN).await.unwrap().client;
-        let asking = request(&server.url, &creds, &creds, &user, None, keystore::os(), REPEAT, pending());
+        let renewing = Renewal { creds: &creds, user: &user, xkey: None };
+        let asking = request(&server.url, &creds, renewing, keystore::os(), REPEAT, pending());
         let answering = async {
             tokio::time::sleep(REPEAT * 3).await;
             let human = auth::sign_user(&team, &p("dev-a"), Role::Human, None, &user.public_key()).unwrap();
@@ -762,7 +768,8 @@ mod tests {
         let alice = server.creds_as(&p("alice"), Role::Human);
         let approver = Approver::connect(&server.url, &team, None, LISTEN).await.unwrap();
         let user = KeyPair::new_user();
-        let asking = request(&server.url, &alice, &uplink, &user, None, keystore::os(), REPEAT, pending());
+        let renewing = Renewal { creds: &uplink, user: &user, xkey: None };
+        let asking = request(&server.url, &alice, renewing, keystore::os(), REPEAT, pending());
         let approving = approver.renew(&team, "leaf-m1", None);
         let (jwt, renewed) = timeout(WAIT * 2, Box::pin(async { tokio::join!(asking, approving) })).await.unwrap();
         let (_, renewed) = renewed.unwrap();

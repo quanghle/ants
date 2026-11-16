@@ -218,7 +218,8 @@ fn creds(server: &Server, device: &Device, answers: &[LoginAnswer]) -> PathBuf {
 /// Ask with `ants renew` for the credentials at `path` renewed: the new key, and the JWT or why it was refused.
 async fn renewing(server: &Server, path: &Path) -> (KeyPair, Result<String>) {
     let user = KeyPair::new_user();
-    let renewed = renew::request(&server.url, path, path, &user, None, keystore::os(), REPEAT, pending()).await;
+    let renewal = renew::Renewal { creds: path, user: &user, xkey: None };
+    let renewed = renew::request(&server.url, path, renewal, keystore::os(), REPEAT, pending()).await;
     (user, renewed)
 }
 
