@@ -9,15 +9,10 @@
 //! `session/prompt`, `session/cancel`, and the session mode and model and reasoning effort selectors the daemon sets.
 //! It never asks the client for permission: tool approval is the CLI's own, set by the definition ([`deny_approval`]).
 
-#![allow(
-    dead_code,
-    unused_imports,
-    reason = "the helpers serve the native protocols to come; only the test protocol uses them yet"
-)]
-
 mod antigravity;
 mod claude;
 mod codex;
+mod copilot;
 mod io;
 mod rpc;
 #[cfg(test)]
@@ -42,12 +37,13 @@ use agent_client_protocol::v1::schema::{
 };
 use agent_client_protocol::v1::{ConnectionTo, Responder};
 use agent_client_protocol::{AcpAgent, Agent, Client, DynConnectTo, Error, ErrorCode, JsonRpcResponse};
-use anyhow::bail;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 pub(crate) use io::{JsonLines, JsonWriter, Process};
-pub(crate) use rpc::{Incoming, Rpc, RpcError};
+#[cfg(test)]
+pub(crate) use rpc::RpcError;
+pub(crate) use rpc::{Incoming, Rpc};
 
 use super::{Harness, ModelSettings};
 use crate::sync::MutexExt as _;
@@ -121,9 +117,7 @@ fn registration(protocol: Protocol) -> anyhow::Result<Option<Registration>> {
         Protocol::Claude => Ok(Some(Registration::of::<claude::Claude>())),
         Protocol::Codex => Ok(Some(Registration::of::<codex::Codex>())),
         Protocol::Antigravity => Ok(Some(Registration::of::<antigravity::Antigravity>())),
-        Protocol::CopilotSdk => {
-            bail!("protocol {protocol} is not implemented yet; omit protocol to run the harness over ACP")
-        }
+        Protocol::CopilotSdk => Ok(Some(Registration::of::<copilot::Copilot>())),
     }
 }
 
@@ -178,11 +172,6 @@ impl Cli {
             model: settings.model_id(harness),
             effort: settings.reasoning_effort.clone(),
         }
-    }
-
-    /// The harness definition, for its phrases, `sign_in`, `window` and the like.
-    pub(crate) fn harness(&self) -> &Harness {
-        &self.harness
     }
 
     /// The harness's name.
