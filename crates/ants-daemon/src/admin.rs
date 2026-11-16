@@ -252,7 +252,22 @@ async fn handle(
             }
         }
     }
-    bus::double_ack(&js.client(), msg).await
+    ack(js, msg).await
+}
+
+/// Ack `msg`, trying again for up to [`RECORD_FOR`] like [`record`]: right after an order renewed the uplink, the hub
+/// may be out of reach for a moment, and an order left unacked holds back the machine's next ones until its ack wait.
+async fn ack(js: &jetstream::Context, msg: &jetstream::Message) -> Result<()> {
+    let until = tokio::time::Instant::now() + RECORD_FOR;
+    loop {
+        match bus::double_ack(&js.client(), msg).await {
+            Err(e) if tokio::time::Instant::now() < until => {
+                tracing::debug!(subject = %msg.subject, error = format!("{e:#}"), "acking an admin order; trying again");
+                tokio::time::sleep(RETRY_FIRST).await;
+            }
+            acked => return acked,
+        }
+    }
 }
 
 /// Store `outcome` under `key`, trying again for up to [`RECORD_FOR`]: an order delivered again would be decided again,
