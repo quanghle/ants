@@ -522,7 +522,10 @@ impl Chat {
             }
             Action::MarkRead(thread) => self.reads.mark_read(thread),
             Action::Run(job, text) => self.exec.run(job, text),
-            Action::Decide(request, verdict) => self.feed.decide(*request, verdict, self.model.data.me().clone()),
+            Action::Decide(request, verdict) => {
+                self.model.data.settled.deciding(&request);
+                self.feed.decide(*request, verdict, self.model.data.me().clone());
+            }
             Action::Edit(text) => self.edit = Some(text),
             Action::MarkChannel(channel, marks) => self.reads.mark_channel(channel, marks),
             Action::Reactions(messages) => self.reads.watch_reactions(messages),

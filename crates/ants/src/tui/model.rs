@@ -449,7 +449,7 @@ impl Model {
         entries
     }
 
-    /// Take word from following the tool requests: a settled request keeps its card a while.
+    /// Take word from following the tool requests: a settled request keeps its card a while, unless decided here.
     fn approval(&mut self, update: Update, now: DateTime<Utc>) {
         self.data.live.approval(&update);
         if let Update::Resolved(request, state) = update {
@@ -460,7 +460,9 @@ impl Model {
                 let how = approvals::how(&state, &request.ant);
                 self.notify(format!("request {} {how}", crate::tools::qualified(&request)), Level::Info, now);
             }
-            self.data.settled.add(request, state, now);
+            if !self.data.settled.decided_here(&request, &state, self.data.me()) {
+                self.data.settled.add(request, state, now);
+            }
         }
     }
 
