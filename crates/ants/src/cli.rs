@@ -19,9 +19,14 @@ use crate::{
     setup, spend, thread, upgrade,
 };
 
+/// The whole command line.
+pub(crate) type Cli = Ants<Command>;
+
+/// The global options and the commands of `C`: [`Command`] for all of them, or [`DaemonCommand`] alone, which spares
+/// `ants daemon` building every other command at startup.
 #[derive(Parser)]
 #[command(name = "ants", version, about = "Agent teams messaging over NATS")]
-pub(crate) struct Cli {
+pub(crate) struct Ants<C: Subcommand> {
     /// NATS server: nats://, tls://, ws:// or wss://. Point it at the local leaf node where there is one.
     /// Unset, the config file's `[cli]` or top-level `nats` applies, except to `ants daemon` and `ants add`.
     #[arg(long, global = true, env = "ANTS_NATS_URL", default_value = "nats://127.0.0.1:4222")]
@@ -46,7 +51,7 @@ pub(crate) struct Cli {
 
     // None for bare `ants`, which runs `ants chat` on a terminal.
     #[command(subcommand)]
-    pub(crate) command: Option<Command>,
+    pub(crate) command: Option<C>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -348,8 +353,8 @@ pub(crate) enum Command {
     /// Messages ants gave up on: inspect, replay or drop them.
     #[command(subcommand)]
     Dead(DeadCommand),
-    /// Serve ant inboxes through agent harnesses: those of the config file, or one described by flags.
-    Daemon(Box<serve::DaemonArgs>),
+    #[command(flatten)]
+    Daemon(DaemonCommand),
     /// Add an ant to the machine: list it in the config file and give it credentials. Its user NKey is generated here
     /// and the seed stays here. Without --jwt or --enroll, print the public key for the machine holding the account
     /// key to sign; run again with --jwt or --enroll to complete the credentials. Completed credentials reload the
@@ -672,6 +677,12 @@ pub(crate) enum SealCommand {
     },
     /// End the enrollment: nothing is sealed for the assistant any more, and it opens nothing.
     Off,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum DaemonCommand {
+    /// Serve ant inboxes through agent harnesses: those of the config file, or one described by flags.
+    Daemon(Box<serve::DaemonArgs>),
 }
 
 #[cfg(test)]

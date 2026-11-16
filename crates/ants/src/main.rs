@@ -81,7 +81,7 @@ use ants_daemon::{bus, hub};
 use ants_proto::{DeviceId, Escalation, JsDomain, UserId};
 use anyhow::{Context as _, Result};
 
-use crate::cli::{Cli, Command, HookCommand, NotifyCommand};
+use crate::cli::{Cli, Command, DaemonCommand, HookCommand, NotifyCommand};
 use crate::cmd::channel::ChannelCommand;
 use crate::cmd::send;
 
@@ -162,7 +162,7 @@ async fn run() -> Result<()> {
         Command::Completions { shell, install } => completions::run(shell, install),
         Command::Tools(command) => cmd::tools::run(command, &conn).await,
         Command::Dead(command) => Box::pin(cmd::dead::run(&nats()?, command)).await,
-        Command::Daemon(args) => cmd::daemon::run(&args, &conn).await,
+        Command::Daemon(DaemonCommand::Daemon(args)) => cmd::daemon::run(&args, &conn).await,
         Command::Mcp { socket, token } => ants_daemon::mcp::bridge_stdio(&socket, &token).await,
         Command::Harness(command) => cmd::harness::run(command).await,
         Command::Doctor { config, leaf_config, no_harness, json, team, webhook_config } => {
