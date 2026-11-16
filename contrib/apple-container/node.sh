@@ -15,15 +15,18 @@ prepare() {
         if [ ! -f "$team/$node-ant.creds" ]; then
             ants auth user "$node-ant" --dir "$team"
         fi
+        if [ ! -f "$team/host-$node.creds" ]; then
+            ants auth host "$node" --dir "$team"
+        fi
     done
     if [ ! -f "$team/human.creds" ]; then
-        ants auth user human --dir "$team"
+        ants auth user human --admin --dir "$team"
     fi
     for node in leaf-a leaf-b; do
         if [ ! -f "$team/leaf-$node.creds" ]; then
             ants auth leaf "$node" --ant "$node-ant" --human human --dir "$team"
         fi
-        cp "$team/server.conf" "$team/human.creds" "$team/$node-ant.creds" \
+        cp "$team/server.conf" "$team/human.creds" "$team/$node-ant.creds" "$team/host-$node.creds" \
             "$team/leaf-$node.creds" "$team/leaf-$node.system.creds" "/demo/$node/auth/"
     done
 }
@@ -41,6 +44,7 @@ esac
 
 cat > /demo/config.toml <<EOF
 harness = "copilot"
+machine = "$node"
 messenger = false
 nats = "nats://127.0.0.1:4222"
 js_domain = "hub"
@@ -48,6 +52,9 @@ metrics = "127.0.0.1:9464"
 
 [cli]
 creds = "/demo/auth/human.creds"
+
+[host]
+creds = "/demo/auth/host-$node.creds"
 
 [storage]
 max_memory_store = "64MB"

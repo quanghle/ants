@@ -174,6 +174,10 @@ smoke() {
             'map(select(.state == "live" and .harness == "copilot") | .ant) | sort
              == ["hub-ant", "leaf-a-ant", "leaf-b-ant"]' >/dev/null
     done
+    for node in hub leaf-a leaf-b; do
+        run_ants hub ant pause "$node-ant" >/dev/null
+        run_ants hub ant resume "$node-ant" >/dev/null
+    done
     thread=$(uuidgen | tr '[:upper:]' '[:lower:]')
     for node in hub leaf-a leaf-b; do
         text="demo smoke $thread from $node"
@@ -185,7 +189,7 @@ smoke() {
             grep --fixed-strings "demo smoke $thread from $source" "$state/smoke-$node.log" >/dev/null
         done
     done
-    printf 'Three Copilot-backed ants live; all three nodes exchanged notes. No model calls made.\n'
+    printf 'Three Copilot-backed ants live and obeyed admin orders; all three nodes exchanged notes. No model calls made.\n'
 }
 
 case "$command" in

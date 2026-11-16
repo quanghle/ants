@@ -13,7 +13,10 @@ flowchart TD
 
 Each node is a separate Linux VM/container with its own NATS server, persistent ext4 volume, workdir, Copilot sign-in and
 one `ants daemon` serving exactly one ant. The built-in messenger is disabled. The leaves use scoped NKey/JWT uplinks
-and local JetStream domains `leaf-a` and `leaf-b`. Only the hub holds the team signing keys. This online demo requires
+and local JetStream domains `leaf-a` and `leaf-b`. Only the hub holds the team signing keys. The demo human `human` is
+an [admin](auth.md#admins), and each node's daemon runs with
+[host credentials](auth.md#machine-host-credentials) for its machine (`hub`, `leaf-a`, `leaf-b`), so admin orders such as
+`ants ant pause`, `ants ant set` and `ants ant restart` reach every ant. This online demo requires
 the hub to remain reachable; it does not provision [store-and-forward outboxes](transport.md#store-and-forward).
 
 ## Requirements
@@ -40,8 +43,9 @@ scripts/demo-apple-containers.sh smoke
 
 The build VM gets four CPUs and 4 GiB of memory. The first build downloads dependencies and compiles a Linux release
 binary. `up` also builds when the image is absent; rerun `build` after source changes. The smoke check verifies all three
-live Copilot-backed ants and their MCP sockets, then sends notes from every node, reading them from every other node
-through the hub. It makes no model calls and needs no Copilot sign-in.
+live Copilot-backed ants and their MCP sockets, pauses and resumes each ant by admin order from the hub, then sends notes
+from every node, reading them from every other node through the hub. It makes no model calls and needs no Copilot
+sign-in.
 
 Each container gets two CPUs, 2 GiB of memory and a sparse 4 GiB named volume. Linux-native volumes support the Unix
 socket permissions used by the ACP MCP bridge. A dedicated network connects the nodes; no ports are published on the
