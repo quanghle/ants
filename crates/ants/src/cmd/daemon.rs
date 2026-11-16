@@ -5,7 +5,7 @@ use std::path::Path;
 use ants_daemon::admin::ConfigFile;
 use anyhow::Result;
 
-use crate::{Connection, manager, natsd, reload, scheduler, serve, upgrade};
+use crate::{Connection, manager, natsd, reload, scheduler, serve, update, upgrade};
 
 pub(crate) async fn run(args: &serve::DaemonArgs, conn: &Connection<'_>) -> Result<()> {
     let domain = conn.js_domain;
@@ -60,7 +60,14 @@ pub(crate) async fn run(args: &serve::DaemonArgs, conn: &Connection<'_>) -> Resu
         },
         None => None,
     };
-    let replaced = upgrade::replaced(args.upgrade.upgrade_check);
+    let every = args.upgrade.upgrade_check;
+    let auto_update = listed.auto_update;
+    let replaced = async {
+        tokio::select! {
+            () = upgrade::replaced(every) => {}
+            () = Box::pin(update::auto(auto_update, every)) => {}
+        }
+    };
     let serving = async { serve::run(served()?, served, triggers, replaced, stop).await };
     let ended = match managed {
         Some(managed) => natsd::run_serving(managed, serving).await?,

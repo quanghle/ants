@@ -22,6 +22,18 @@ ants update --pre              # consider pre-releases too
 - **Refusals:** an executable under `$CARGO_HOME/bin` (`~/.cargo/bin`) is left to `cargo install --locked --git https://github.com/quanghle/ants ants`; a directory not writable makes it print the command to rerun with `sudo` (an administrator's prompt on Windows).
 - **Services:** running services pick the new executable up through their upgrade check (above); `ants update` prints the restart command of an installed unit whose check is off.
 
+### Automatic updates
+
+The top-level `auto_update` of `~/.ants/config.toml` ([config.md](config.md)) lets `ants daemon`, serving the whole file (no `--ant`), keep the machine current, opt-in:
+
+| `auto_update` | Effect |
+|---|---|
+| `"off"` (default) | No polling. |
+| `"check"` | Logs a warning naming a newer stable release; `ants doctor` reports it as the `update` check (`warn`, fix `ants update`). |
+| `"install"` | Installs a newer stable release as `ants update` does; the daemon's upgrade check then drains prompts in flight and exits with status `75` for its service to start the new executable (with `--upgrade-check 0` it keeps running the old one until restarted). |
+
+The first poll comes within 10 minutes of the start, then about every 24 hours (± 1 hour, at random, so a team's machines do not poll together). Only stable releases count and an older release is never installed. A failed poll or install logs a warning and is retried after 1 hour, doubling up to 24 hours. A change to `auto_update` takes effect on a daemon restart. With `auto_update` on, `ants doctor` asks GitHub for the latest release too.
+
 ## Services
 
 `ants setup` installs single-machine `nats` and `daemon` units (the `daemon` unit alone with `--managed-nats`). For multi-machine hubs, workers, and tunnels, `scripts/install-units.sh` renders and starts `contrib/launchd/` (`~/Library/LaunchAgents`) or `contrib/systemd/` (`~/.config/systemd/user`) units:

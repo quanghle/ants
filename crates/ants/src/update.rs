@@ -7,6 +7,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use ants_daemon::config::AutoUpdate;
 use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 
@@ -25,6 +26,14 @@ const API_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_mins(10);
 const SMOKE_TIMEOUT: Duration = Duration::from_secs(30);
 const SUMS: &str = "SHA256SUMS";
+/// How often a daemon with `auto_update` polls the releases, give or take [`POLL_JITTER`].
+const POLL_EVERY: Duration = Duration::from_hours(24);
+/// The spread of the polls around [`POLL_EVERY`], which keeps a team's machines from polling together.
+const POLL_JITTER: Duration = Duration::from_hours(2);
+/// Longest wait for the first poll after the daemon starts.
+const FIRST_POLL: Duration = Duration::from_mins(10);
+/// Wait after a first failed poll, doubled after each further one up to [`POLL_EVERY`].
+const RETRY_AFTER: Duration = Duration::from_hours(1);
 /// The services running the ants executable, which restart onto a new one.
 const SERVICES: [Service; 4] = [Service::Daemon, Service::Webhook, Service::Bridge, Service::BridgeServe];
 
@@ -421,6 +430,79 @@ pub(crate) fn remove_old() {
     }
 }
 
+/// What a daemon does about a newer release, polling the stable releases about daily while `mode` is not off: warns
+/// of it (`check`), or installs it (`install`) for the daemon's upgrade check, every `upgrade_check`, to restart onto
+/// it. Never downgrades; backs off after a failure. Never returns.
+pub(crate) async fn auto(mode: AutoUpdate, upgrade_check: Duration) {
+    if mode == AutoUpdate::Off {
+        return std::future::pending().await;
+    }
+    let mut wait = random_below(FIRST_POLL);
+    let mut retry = RETRY_AFTER;
+    loop {
+        tokio::time::sleep(wait).await;
+        match poll(mode, upgrade_check).await {
+            Ok(true) => return std::future::pending().await,
+            Ok(false) => {
+                retry = RETRY_AFTER;
+                wait = POLL_EVERY - POLL_JITTER / 2 + random_below(POLL_JITTER);
+            }
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), retry_in = ?retry, "checking for a newer release of ants");
+                (wait, retry) = (retry, backoff(retry));
+            }
+        }
+    }
+}
+
+/// The wait after another failed poll, having waited `retry` after the last one.
+fn backoff(retry: Duration) -> Duration {
+    retry.saturating_mul(2).min(POLL_EVERY)
+}
+
+/// What `mode` does once the latest stable release is `latest` and this executable `running`: nothing (off, or not
+/// newer), warn (check) or install.
+fn decide(mode: AutoUpdate, running: &Version, latest: &Version) -> AutoUpdate {
+    if latest > running { mode } else { AutoUpdate::Off }
+}
+
+/// Poll the releases once, doing what `mode` says of a newer one: whether one was installed.
+async fn poll(mode: AutoUpdate, upgrade_check: Duration) -> Result<bool> {
+    let release = resolve(None, false).await?;
+    let version = release.version().with_context(|| format!("release tag {} is not a version", release.tag_name))?;
+    let running = Version::running();
+    match decide(mode, &running, &version) {
+        AutoUpdate::Off => {
+            tracing::debug!(%running, latest = %version, "ants is up to date");
+            Ok(false)
+        }
+        AutoUpdate::Check => {
+            tracing::warn!(
+                "ants {version} is available (running {running}); `ants update` installs it, or auto_update = \
+                 \"install\" in the config file"
+            );
+            Ok(false)
+        }
+        AutoUpdate::Install => {
+            let exe = executable()?;
+            install(&release, &exe).await?;
+            tracing::info!(executable = %exe.display(), "installed ants {version} (was {running})");
+            if upgrade_check.is_zero() {
+                tracing::warn!("--upgrade-check is 0: the daemon runs ants {running} until restarted");
+            }
+            Ok(true)
+        }
+    }
+}
+
+/// A random duration below `bound`.
+fn random_below(bound: Duration) -> Duration {
+    use std::hash::BuildHasher as _;
+    let random = std::collections::hash_map::RandomState::new().hash_one(std::time::Instant::now());
+    let bound = u64::try_from(bound.as_millis()).unwrap_or(u64::MAX).max(1);
+    Duration::from_millis(random % bound)
+}
+
 /// `ants update`.
 pub(crate) async fn run(args: UpdateArgs) -> Result<()> {
     let running = Version::running();
@@ -499,6 +581,26 @@ mod tests {
         for bad in ["", "v1", "v1.2", "v1.2.3.4", "v1.x.3", "v1.2.3-", "v1.2.3-a..b", "latest"] {
             assert!(Version::parse(bad).is_none(), "{bad}");
         }
+    }
+
+    #[test]
+    fn auto_update_acts_on_a_newer_release_only_and_backs_off() {
+        let (running, newer, older) = (v("v0.2.0"), v("v0.3.0"), v("v0.1.0"));
+        for mode in [AutoUpdate::Off, AutoUpdate::Check, AutoUpdate::Install] {
+            assert_eq!(decide(mode, &running, &newer), mode);
+            assert_eq!(decide(mode, &running, &running), AutoUpdate::Off, "{mode:?}");
+            assert_eq!(decide(mode, &running, &older), AutoUpdate::Off, "{mode:?} never downgrades");
+        }
+        let mut retry = RETRY_AFTER;
+        let waits: Vec<_> = (0..7)
+            .map(|_| {
+                let wait = retry;
+                retry = backoff(retry);
+                wait.as_secs() / 3600
+            })
+            .collect();
+        assert_eq!(waits, [1, 2, 4, 8, 16, 24, 24]);
+        assert!(random_below(FIRST_POLL) < FIRST_POLL);
     }
 
     #[test]

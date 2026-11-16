@@ -265,6 +265,14 @@ fn a_managed_nats_server_needs_a_configuration_and_resolves_its_paths() {
 }
 
 #[test]
+fn auto_update_is_off_unless_set() {
+    assert_eq!(parse_all("").unwrap().auto_update, AutoUpdate::Off);
+    assert_eq!(parse_all("auto_update = \"check\"").unwrap().auto_update, AutoUpdate::Check);
+    assert_eq!(parse_all("auto_update = \"install\"").unwrap().auto_update, AutoUpdate::Install);
+    assert!(parse_all("auto_update = \"always\"").is_err());
+}
+
+#[test]
 fn redaction_is_on_unless_turned_off() {
     let ant = "[[ant]]\nname = \"dev-a\"\nworkdir = \".\"";
     let redact = |text: &str| parse_here(text).unwrap().iter().map(|ant| ant.redact).collect::<Vec<_>>();
