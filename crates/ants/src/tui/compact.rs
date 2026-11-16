@@ -172,7 +172,7 @@ mod tests {
         m.stored(vec![opening, message(2, &done, "dev-a", "alice", "deployed")], at(2));
         let shown = pane(&m, at(3));
         assert!(shown.starts_with("ants ▸ 1 finished │ no ant working │ $? today"), "{shown}");
-        let keys = "f follow up · d mark done · z snooze · Enter open in the full view · q quit";
+        let keys = "r follow up · d mark done · z snooze · Enter open in the full view · q quit";
         assert!(shown.contains(&format!("▸ finished deploy: dev-a answered   {keys}")), "{shown}");
 
         let push =

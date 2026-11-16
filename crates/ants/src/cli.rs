@@ -81,6 +81,11 @@ pub(crate) enum Command {
         #[arg(long, value_name = "MESSAGE", conflicts_with_all = ["thread", "reply_to"])]
         #[arg(add = ArgValueCompleter::new(completions::messages))]
         forward: Option<thread::MessagePick>,
+        /// Hand this thread on as --forward hands a message: its TL;DR kept (`ants thread tldr` keeps one), quoted
+        /// with who wrote it; its id, a unique start of one, or `last`, as --thread takes.
+        #[arg(long, value_name = "THREAD", conflicts_with_all = ["thread", "reply_to", "forward"])]
+        #[arg(add = ArgValueCandidates::new(completions::threads))]
+        forward_thread: Option<thread::Pick>,
         #[command(flatten)]
         sending: Sending,
         #[command(flatten)]

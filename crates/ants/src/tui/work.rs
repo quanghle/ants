@@ -401,6 +401,7 @@ impl Page {
         let to = match key {
             Key::Enter => return rows.get(at).map(|(t, _)| To::Thread(t.clone())),
             Key::Char('S') => return rows.get(at).map(|(t, _)| To::Tldr(t.clone())),
+            Key::Char('f') => return rows.get(at).map(|_| To::Bar("/forward @".to_owned())),
             Key::Char('z') => return rows.get(at).map(|(t, _)| To::Snooze(t.clone())),
             Key::Char('u') => return rows.get(at).map(|(t, _)| To::Unread(t.clone(), None)),
             Key::Char('b') => return rows.get(at).map(|(t, _)| To::Remind(t.clone(), None)),
@@ -419,7 +420,8 @@ impl Page {
         None
     }
 
-    pub const KEYS: &str = "↑↓ thread · Enter open · x cancel · z snooze · u unread · b remind · S TL;DR · Esc back";
+    pub const KEYS: &str =
+        "↑↓ thread · Enter open · x cancel · z snooze · u unread · b remind · S TL;DR · f forward · Esc back";
 
     pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
         let rows = self.rows(data);
