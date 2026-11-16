@@ -261,6 +261,9 @@ pub enum MessageMark {
     Retrying {
         thread_id: ThreadId,
         at: DateTime<Utc>,
+        /// What the daemon holds it for, when it met a sign-out or a provider limit rather than failed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        held: Option<Hold>,
     },
     Finished {
         thread_id: ThreadId,
@@ -272,5 +275,27 @@ pub enum MessageMark {
         /// The human `by`, its assistant, withdrew the message for.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         on_behalf_of: Option<UserId>,
+        /// What the daemon held the message for when it was withdrawn, from a [`MessageMark::Retrying`] mark.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        held: Option<Hold>,
     },
+}
+
+/// What a daemon holds a message for, after its tools may have run, in a [`MessageMark::Retrying`] mark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Hold {
+    /// Its harness is not signed in.
+    SignIn,
+    /// Its provider's usage limit.
+    ProviderLimit,
+}
+
+impl std::fmt::Display for Hold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::SignIn => "a sign-in",
+            Self::ProviderLimit => "a provider limit",
+        })
+    }
 }

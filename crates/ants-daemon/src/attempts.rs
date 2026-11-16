@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use ants_proto::{
-    ChannelPost, Envelope, MessageMark, NotesPost, ThreadId, UserId, Uuid, assisted_withdrawal_key, attempt_key,
+    ChannelPost, Envelope, Hold, MessageMark, NotesPost, ThreadId, UserId, Uuid, assisted_withdrawal_key, attempt_key,
     message_mark_key,
 };
 use anyhow::{Context as _, Result};
@@ -59,6 +59,15 @@ impl Reply {
             Self::Notes(post) => &post.thread_id,
         }
     }
+}
+
+/// What became of a message [`Attempts::take_up`] marked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TakenUp {
+    /// Marked started, instead of a `retrying` mark holding it for this when one did.
+    Started(Option<Hold>),
+    /// Withdrawn first, by `by` for `on_behalf_of` when an assistant withdrew it, while held for `held`.
+    Withdrawn { by: UserId, on_behalf_of: Option<UserId>, held: Option<Hold> },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -118,24 +127,24 @@ impl Attempts {
     }
 
     /// Mark `envelope` as started ([`MessageMark`]) unless it has a mark, or instead of its `retrying` mark, right
-    /// before handling it. Returns who withdrew it, and for whom when an assistant did, when a withdrawal came first; a
-    /// message started already goes on as a redelivery does.
-    pub async fn take_up(&self, envelope: &Envelope) -> Result<Option<(UserId, Option<UserId>)>> {
+    /// before handling it. A message started already goes on as a redelivery does.
+    pub async fn take_up(&self, envelope: &Envelope) -> Result<TakenUp> {
         let started = MessageMark::Started { thread_id: envelope.thread_id.clone(), at: chrono::Utc::now() };
         Ok(match mark(&self.kv, &self.ant, &envelope.id, &started).await? {
-            Some(MessageMark::Withdrawn { by, on_behalf_of, .. }) => Some((by, on_behalf_of)),
-            Some(MessageMark::Started { .. } | MessageMark::Retrying { .. } | MessageMark::Finished { .. }) | None => {
-                None
+            Ok(held) => TakenUp::Started(held),
+            Err(MessageMark::Withdrawn { by, on_behalf_of, held, .. }) => TakenUp::Withdrawn { by, on_behalf_of, held },
+            Err(MessageMark::Started { .. } | MessageMark::Retrying { .. } | MessageMark::Finished { .. }) => {
+                TakenUp::Started(None)
             }
         })
     }
 
     /// Mark `envelope`, started, as awaiting a retry after a failed attempt ([`MessageMark::Retrying`]), right before
-    /// handing it back for one or holding it for a sign-in or a provider limit, so it can be withdrawn until it is
-    /// taken up again. A failure only leaves it started.
-    pub async fn retrying(&self, envelope: &Envelope) {
+    /// handing it back for one or holding it for `held`, a sign-in or a provider limit, so it can be withdrawn until it
+    /// is taken up again. A failure only leaves it started.
+    pub async fn retrying(&self, envelope: &Envelope, held: Option<Hold>) {
         let key = message_mark_key(&self.ant, &envelope.id);
-        let retrying = MessageMark::Retrying { thread_id: envelope.thread_id.clone(), at: chrono::Utc::now() };
+        let retrying = MessageMark::Retrying { thread_id: envelope.thread_id.clone(), at: chrono::Utc::now(), held };
         let swap = async {
             let (found, last) = self.kv.lookup_last(&key).await?;
             let started = match found {
@@ -181,16 +190,17 @@ impl Attempts {
     }
 
     /// Mark `envelope`, whose started mark is at stream sequence `started`, withdrawn by `assistant` for `human`
-    /// instead, unless the mark changed meanwhile. Whether it did.
+    /// instead, unless the mark changed meanwhile; `held` is what that mark took it up from. Whether it did.
     pub async fn withdraw_started(
         &self,
         envelope: &Envelope,
         assistant: &UserId,
         human: &UserId,
         started: u64,
+        held: Option<Hold>,
     ) -> Result<bool> {
-        let mark =
-            MessageMark::Withdrawn { by: assistant.clone(), at: chrono::Utc::now(), on_behalf_of: Some(human.clone()) };
+        let (by, on_behalf_of) = (assistant.clone(), Some(human.clone()));
+        let mark = MessageMark::Withdrawn { by, at: chrono::Utc::now(), on_behalf_of, held };
         let key = message_mark_key(&self.ant, &envelope.id);
         self.kv.update(key, serde_json::to_vec(&mark)?, started).await.context("marking the message withdrawn")
     }
@@ -230,8 +240,9 @@ impl Attempts {
 
 /// Withdraw message `message` from the queue of `ant` for `by` (`ants withdraw`), or for the human `on_behalf_of` whose
 /// assistant `by` is, in `kv`, the attempts bucket, unless it has a mark already but `retrying`: a message awaiting a
-/// retry after a failed attempt is withdrawn unless its redelivery is taken up first. Returns the mark found instead:
-/// the daemon took the message up first, or it was withdrawn.
+/// retry after a failed attempt is withdrawn unless its redelivery is taken up first, and so is one held for a sign-in
+/// or a provider limit, its hold kept in the withdrawal. Returns the mark found instead: the daemon took the message up
+/// first, or it was withdrawn.
 pub async fn withdraw(
     kv: &DirectKv,
     ant: &UserId,
@@ -240,7 +251,8 @@ pub async fn withdraw(
     on_behalf_of: Option<&UserId>,
 ) -> Result<Option<MessageMark>> {
     let on_behalf_of = on_behalf_of.cloned();
-    mark(kv, ant, message, &MessageMark::Withdrawn { by: by.clone(), at: chrono::Utc::now(), on_behalf_of }).await
+    let withdrawn = MessageMark::Withdrawn { by: by.clone(), at: chrono::Utc::now(), on_behalf_of, held: None };
+    Ok(mark(kv, ant, message, &withdrawn).await?.err())
 }
 
 /// What became of a withdrawal [`record_withdrawal`] stored.
@@ -265,8 +277,8 @@ pub async fn record_withdrawal(
     human: &UserId,
 ) -> Result<Recorded> {
     let key = assisted_withdrawal_key(ant, message, assistant);
-    let record =
-        MessageMark::Withdrawn { by: assistant.clone(), at: chrono::Utc::now(), on_behalf_of: Some(human.clone()) };
+    let (by, on_behalf_of) = (assistant.clone(), Some(human.clone()));
+    let record = MessageMark::Withdrawn { by, at: chrono::Utc::now(), on_behalf_of, held: None };
     kv.create(&key, serde_json::to_vec(&record)?).await.context("recording the withdrawal")?;
     let (_, recorded) = kv.lookup_last(&key).await.context("reading the withdrawal")?;
     let (mark, marked) = kv.lookup_last(message_mark_key(ant, message)).await.context("reading the message's mark")?;
@@ -287,24 +299,31 @@ pub async fn record_withdrawal(
 
 /// Create the mark of `message` to `ant` as `mark` unless it has one, or put it instead of a
 /// [`MessageMark::Retrying`] mark: by compare-and-set on that mark, so of a daemon taking the message up again and a
-/// withdrawal exactly one wins. Returns the mark found instead.
-async fn mark(kv: &DirectKv, ant: &UserId, message: &Uuid, mark: &MessageMark) -> Result<Option<MessageMark>> {
+/// withdrawal exactly one wins; a withdrawal keeps what the message was held for. Returns that, or the mark found
+/// instead.
+async fn mark(
+    kv: &DirectKv,
+    ant: &UserId,
+    message: &Uuid,
+    mark: &MessageMark,
+) -> Result<Result<Option<Hold>, MessageMark>> {
     let key = message_mark_key(ant, message);
-    let value = serde_json::to_vec(mark)?;
     // A mark removed ([`Attempts::release`]) or changed meanwhile is read again.
     for _ in 0..3 {
-        if kv.create(&key, value.clone()).await.context("marking the message")? {
-            return Ok(None);
+        if kv.create(&key, serde_json::to_vec(mark)?).await.context("marking the message")? {
+            return Ok(Ok(None));
         }
         let (Lookup::Value(found), last) = kv.lookup_last(&key).await.context("reading the message's mark")? else {
             continue;
         };
         let found: MessageMark = serde_json::from_slice(&found).context("reading the message's mark")?;
-        if !matches!(found, MessageMark::Retrying { .. }) {
-            return Ok(Some(found));
+        let MessageMark::Retrying { held, .. } = found else { return Ok(Err(found)) };
+        let mut mark = mark.clone();
+        if let MessageMark::Withdrawn { held: withdrawn_from, .. } = &mut mark {
+            *withdrawn_from = held;
         }
-        if kv.update(&key, value.clone(), last).await.context("marking the message")? {
-            return Ok(None);
+        if kv.update(&key, serde_json::to_vec(&mark)?, last).await.context("marking the message")? {
+            return Ok(Ok(held));
         }
     }
     anyhow::bail!("the mark of message {message} keeps changing")
@@ -467,14 +486,14 @@ mod tests {
         let attempts = Attempts::new(kv.clone(), ant.clone());
 
         let started = Envelope::new(human.clone(), ant.clone(), "started");
-        assert_eq!(attempts.take_up(&started).await.unwrap(), None);
+        assert_eq!(attempts.take_up(&started).await.unwrap(), TakenUp::Started(None));
         assert!(matches!(
             withdraw(&kv, &ant, &started.id, &human, None).await.unwrap(),
             Some(MessageMark::Started { .. })
         ));
         let withdrawn = Envelope::new(human.clone(), ant.clone(), "withdrawn");
         assert_eq!(withdraw(&kv, &ant, &withdrawn.id, &human, None).await.unwrap(), None);
-        attempts.retrying(&withdrawn).await;
+        attempts.retrying(&withdrawn, None).await;
         assert!(
             matches!(mark_of(&kv, &ant, &withdrawn).await, Some(MessageMark::Withdrawn { .. })),
             "only a started mark"
@@ -483,9 +502,13 @@ mod tests {
         let (mut retried, mut withdrew) = (0, 0);
         for round in 0..20 {
             let failed = Envelope::new(human.clone(), ant.clone(), "failed");
-            assert_eq!(attempts.take_up(&failed).await.unwrap(), None);
-            attempts.retrying(&failed).await;
-            assert!(matches!(mark_of(&kv, &ant, &failed).await, Some(MessageMark::Retrying { .. })));
+            assert_eq!(attempts.take_up(&failed).await.unwrap(), TakenUp::Started(None));
+            // Every other one held for a sign-in, which the winner keeps.
+            let held = (round % 4 < 2).then_some(Hold::SignIn);
+            attempts.retrying(&failed, held).await;
+            assert!(
+                matches!(mark_of(&kv, &ant, &failed).await, Some(MessageMark::Retrying { held: h, .. }) if h == held)
+            );
             let (take_up, withdrawal) = (attempts.take_up(&failed), withdraw(&kv, &ant, &failed.id, &human, None));
             // Each going first in turn.
             let (taken, refused) = if round % 2 == 0 {
@@ -495,8 +518,16 @@ mod tests {
                 (taken, refused)
             };
             match (taken.unwrap(), refused.unwrap(), mark_of(&kv, &ant, &failed).await) {
-                (None, Some(MessageMark::Started { .. }), Some(MessageMark::Started { .. })) => retried += 1,
-                (Some((by, None)), None, Some(MessageMark::Withdrawn { .. })) if by == human => withdrew += 1,
+                (TakenUp::Started(h), Some(MessageMark::Started { .. }), Some(MessageMark::Started { .. }))
+                    if h == held =>
+                {
+                    retried += 1;
+                }
+                (
+                    TakenUp::Withdrawn { by, on_behalf_of: None, held: h },
+                    None,
+                    Some(MessageMark::Withdrawn { held: marked, .. }),
+                ) if by == human && h == held && marked == held => withdrew += 1,
                 other => panic!("both or neither won: {other:?}"),
             }
         }

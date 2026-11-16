@@ -1723,8 +1723,10 @@ async fn a_message_held_for_a_sign_in_can_be_withdrawn() {
     assert_eq!(bus.unacked().await, 0);
 }
 
-const WITHDRAWN_RETRY: &str =
-    "[ants] Withdrawn by human before dev-a retried it after a failed attempt (ants withdraw).";
+const WITHDRAWN_LIMITED: &str =
+    "[ants] Withdrawn by human before dev-a retried it after holding it for a provider limit (ants withdraw).";
+const WITHDRAWN_SIGNED_OUT: &str =
+    "[ants] Withdrawn by human before dev-a retried it after holding it for a sign-in (ants withdraw).";
 
 #[tokio::test]
 async fn a_message_held_for_a_provider_limit_after_its_tools_ran_can_be_withdrawn() {
@@ -1742,8 +1744,10 @@ async fn a_message_held_for_a_provider_limit_after_its_tools_ran_can_be_withdraw
         // Each try runs a tool before meeting the limit again; held, a awaits the next one, withdrawable.
         timeout(WAIT, async {
             loop {
-                if matches!(mark_of(&bus, &a).await, Some(MessageMark::Retrying { .. }))
-                    && withdraw(&bus, &a).await.is_none()
+                if matches!(
+                    mark_of(&bus, &a).await,
+                    Some(MessageMark::Retrying { held: Some(Hold::ProviderLimit), .. })
+                ) && withdraw(&bus, &a).await.is_none()
                 {
                     return;
                 }
@@ -1754,13 +1758,13 @@ async fn a_message_held_for_a_provider_limit_after_its_tools_ran_can_be_withdraw
         .expect("a withdrawn while held for the limit");
         log.locked().limited = None;
         let notice = next_envelope(&mut replies).await;
-        assert_eq!((notice.text.as_str(), notice.in_reply_to), (WITHDRAWN_RETRY, Some(a.id)));
+        assert_eq!((notice.text.as_str(), notice.in_reply_to), (WITHDRAWN_LIMITED, Some(a.id)));
         assert_eq!(next_reply(&mut replies).await, (t1.clone(), "b".to_owned()), "the thread goes on");
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
     assert_eq!(log.locked().answered, ["b"], "a never got past the limit");
-    assert!(matches!(mark_of(&bus, &a).await, Some(MessageMark::Withdrawn { .. })));
+    assert!(matches!(mark_of(&bus, &a).await, Some(MessageMark::Withdrawn { held: Some(Hold::ProviderLimit), .. })));
     assert_eq!(bus.unacked().await, 0);
 }
 
@@ -1799,11 +1803,49 @@ async fn a_message_cut_off_then_held_for_a_sign_in_can_be_withdrawn() {
         assert_eq!(withdraw(&bus, &a).await, None, "held for the sign-in, a is withdrawable");
         log.locked().signed_out = false;
         let notice = next_envelope(&mut replies).await;
-        assert_eq!((notice.text.as_str(), notice.in_reply_to), (WITHDRAWN_RETRY, Some(a.id)));
+        assert_eq!((notice.text.as_str(), notice.in_reply_to), (WITHDRAWN_SIGNED_OUT, Some(a.id)));
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve_timed(&pool, &ctrl_c, progress_every, ack_wait), check);
     assert!(log.locked().answered.is_empty(), "a never reached the harness again");
+    assert_eq!(bus.unacked().await, 0);
+}
+
+#[tokio::test]
+async fn a_message_held_for_a_sign_in_after_its_tools_ran_can_be_withdrawn() {
+    use ants_proto::MessageMark;
+    let Some((bus, mut replies)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let t1 = ThreadId::generate();
+    let (a, _) = bus.send(&t1, "tools 1 sign-out a").await;
+    bus.send(&t1, "b").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        // The harness signs out once a's tool ran: held, a awaits the sign-in, withdrawable.
+        let notice = next_envelope(&mut replies).await;
+        assert!(notice.text.contains("is not signed in"), "{}", notice.text);
+        timeout(WAIT, async {
+            while !matches!(mark_of(&bus, &a).await, Some(MessageMark::Retrying { held: Some(Hold::SignIn), .. })) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a held for the sign-in");
+        let listed = queue(&bus).await;
+        assert!(listed.messages.iter().any(|m| m.id == a.id), "a is listed: {listed:?}");
+        assert_eq!(withdraw(&bus, &a).await, None, "held for the sign-in, a is withdrawable");
+        log.locked().signed_out = false;
+        let notice = next_envelope(&mut replies).await;
+        assert_eq!((notice.text.as_str(), notice.in_reply_to), (WITHDRAWN_SIGNED_OUT, Some(a.id)));
+        assert_eq!(next_reply(&mut replies).await, (t1.clone(), "b".to_owned()), "the thread goes on");
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(log.locked().prompted, 2, "a reached the harness once, and b");
+    assert_eq!(log.locked().answered, ["b"]);
+    assert!(matches!(mark_of(&bus, &a).await, Some(MessageMark::Withdrawn { held: Some(Hold::SignIn), .. })));
     assert_eq!(bus.unacked().await, 0);
 }
 
@@ -3348,7 +3390,7 @@ async fn a_withdrawal_an_assistant_records_while_no_daemon_serves_is_honoured_be
     assert_eq!(record(&a, &pa).await.unwrap(), Recorded::Holds);
     assert_eq!(record(&for_alice, &pa).await.unwrap(), Recorded::Holds);
     assert_eq!(record(&b, &pb).await.unwrap(), Recorded::Holds, "stored, but pb is not alice's assistant");
-    assert_eq!(bus.attempts.take_up(&c).await.unwrap(), None, "c is taken up");
+    assert_eq!(bus.attempts.take_up(&c).await.unwrap(), crate::attempts::TakenUp::Started(None), "c is taken up");
     assert!(matches!(record(&c, &pa).await.unwrap(), Recorded::Marked(MessageMark::Started { .. })), "too late");
 
     let ctrl_c = Arc::new(Semaphore::new(0));

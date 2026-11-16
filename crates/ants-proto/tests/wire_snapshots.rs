@@ -892,10 +892,17 @@ fn cancel_and_queue() {
         "message_mark_variants",
         &[
             MessageMark::Started { thread_id: thread(), at: at(0) },
-            MessageMark::Retrying { thread_id: thread(), at: at(0) },
+            MessageMark::Retrying { thread_id: thread(), at: at(0), held: None },
+            MessageMark::Retrying { thread_id: thread(), at: at(0), held: Some(Hold::SignIn) },
             MessageMark::Finished { thread_id: thread(), at: at(1) },
-            MessageMark::Withdrawn { by: user("alice"), at: at(2), on_behalf_of: None },
-            MessageMark::Withdrawn { by: user("pa"), at: at(3), on_behalf_of: Some(user("alice")) },
+            MessageMark::Withdrawn { by: user("alice"), at: at(2), on_behalf_of: None, held: None },
+            MessageMark::Withdrawn { by: user("pa"), at: at(3), on_behalf_of: Some(user("alice")), held: None },
+            MessageMark::Withdrawn {
+                by: user("alice"),
+                at: at(4),
+                on_behalf_of: None,
+                held: Some(Hold::ProviderLimit),
+            },
         ],
     );
 }
