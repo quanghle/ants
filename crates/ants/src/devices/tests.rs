@@ -233,8 +233,7 @@ async fn revoking_an_ant_by_name_deletes_its_identity() {
         vec![],
         false,
         Some(team),
-        &server.url,
-        None,
+        &crate::Connection { nats: &server.url, creds: None, js_domain: None },
     )
     .await
     .unwrap();
