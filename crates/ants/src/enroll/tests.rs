@@ -418,7 +418,8 @@ async fn a_rejection_or_the_expiry_ends_the_request() {
     let short = enrollment(&server, &dev_a, Duration::from_secs(1));
     let asking = request(&server.url, &short, &dev_a, &first, None, REPEAT, pending());
     let err = timeout(WAIT, asking).await.expect("the request outlives its enrollment credentials").unwrap_err();
-    assert!(format!("{err:#}").contains("expire"), "{err:#}");
+    // Expired before or after connecting: NATS refuses with "User Authentication Expired" or the request ends.
+    assert!(format!("{err:#}").to_lowercase().contains("expire"), "{err:#}");
 }
 
 /// With the server gone, a flush waits forever for a reconnect: the expiry and `stop` still end a request.
