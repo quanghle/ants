@@ -549,13 +549,10 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         let (alice, dev_a) = ("alice".parse().unwrap(), "dev-a".parse::<UserId>().unwrap());
         let (_, h_js) = server.connect_as(&alice, Role::Human).await;
         ants_daemon::bus::ensure_stream(&h_js).await.unwrap();
-        for config in [
-            ants_daemon::hub::machines_config(),
-            ants_daemon::hub::devices_config(),
-            ants_daemon::hub::identities_config(),
-        ] {
+        for config in [ants_daemon::hub::machines_config(), ants_daemon::hub::devices_config()] {
             h_js.create_key_value(config).await.unwrap();
         }
+        h_js.create_stream(ants_daemon::hub::identities_config()).await.unwrap();
         let admin_creds = server.dir().join("alice-admin.creds");
         let device = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
         let rights = Permissions::for_user(&alice, Role::Human);
@@ -697,9 +694,8 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         let dev_a = "dev-a".parse::<UserId>().unwrap();
         let alice = "alice".parse::<UserId>().unwrap();
         let (_, h_js) = server.connect_as(&alice, Role::Human).await;
-        for config in [ants_daemon::hub::devices_config(), ants_daemon::hub::identities_config()] {
-            h_js.create_key_value(config).await.unwrap();
-        }
+        h_js.create_key_value(ants_daemon::hub::devices_config()).await.unwrap();
+        h_js.create_stream(ants_daemon::hub::identities_config()).await.unwrap();
         let alice_creds = server.creds_as(&alice, Role::Human);
         let human = Nats::new(&server.url, Some(&alice_creds), None).unwrap();
         let (_, js) = human.connect("test").await.unwrap();

@@ -222,10 +222,11 @@ async fn revoking_an_ant_by_name_deletes_its_identity() {
     forget_identity(&server.url, None, &team, "dev-a").await.unwrap();
 
     let (_, js) = server.connect_as(&p("alice"), Role::Human).await;
-    let kv = js.create_key_value(ants_daemon::hub::identities_config()).await.unwrap();
+    js.create_stream(ants_daemon::hub::identities_config()).await.unwrap();
+    let kv = DirectKv::whole(&js, None, IDENTITIES_BUCKET).await.unwrap();
     for ant in [&dev_a, &dev_b] {
         let record = ants_proto::AntIdentity::new(ant.clone(), format!("{ant}-id"), chrono::Utc::now());
-        kv.put(ant.as_str(), serde_json::to_vec(&record).unwrap().into()).await.unwrap();
+        kv.put(ant.as_str(), serde_json::to_vec(&record).unwrap()).await.unwrap();
     }
     crate::cmd::auth::revoke_credentials(
         Some("dev-a".to_owned()),

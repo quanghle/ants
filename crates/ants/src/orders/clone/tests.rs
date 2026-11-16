@@ -47,7 +47,7 @@ async fn a_clone_order_copies_an_ant_under_a_new_name_and_undoes_a_failed_one() 
     ants_daemon::bus::ensure_stream(&h_js).await.unwrap();
     h_js.create_key_value(ants_daemon::hub::machines_config()).await.unwrap();
     h_js.create_key_value(ants_daemon::hub::devices_config()).await.unwrap();
-    h_js.create_key_value(ants_daemon::hub::identities_config()).await.unwrap();
+    h_js.create_stream(ants_daemon::hub::identities_config()).await.unwrap();
     let admin_creds = server.dir().join("alice-admin.creds");
     let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
