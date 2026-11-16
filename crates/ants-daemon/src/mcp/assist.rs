@@ -32,8 +32,8 @@ use std::time::{Duration, SystemTime};
 
 use ants_proto::{
     ATTEMPTS_BUCKET, Act, AdminOp, AdminOrder, ApprovalDecision, ApprovalRequest, CancelReply, CancelRequest,
-    ChannelId, ChannelPost, Choice, Envelope, JsDomain, Machine, MessageMark, NotesPost, QueueReply, QueueRequest,
-    QueuedMessage, READ_BUCKET, Reaction, ReadMarker, THREADS_BUCKET, ThreadDone, ThreadId, ThreadMarks, ThreadSnoozes,
+    ChannelId, ChannelPost, Choice, Envelope, Humans, JsDomain, Machine, MessageMark, NotesPost, QueueReply,
+    QueueRequest, READ_BUCKET, Reaction, ReadMarker, THREADS_BUCKET, ThreadDone, ThreadId, ThreadMarks, ThreadSnoozes,
     ThreadTitle, UserId, Uuid, Verdict, assisted_marks_key, assisted_snoozed_key, done_key, marks_key, snoozed_key,
     subject, title_key,
 };
@@ -50,6 +50,7 @@ use serde::{Deserialize, Serialize};
 use super::{Hub, POST_TRIES, Tools, text};
 use crate::attempts::{self, Recorded};
 use crate::direct_kv::DirectKv;
+use crate::queue;
 use crate::reading::{self, Reading};
 use crate::sealing::{AssistantSealing, Opening};
 use crate::{behalf, owners, reactions};
@@ -58,6 +59,8 @@ use crate::{behalf, owners, reactions};
 const LOOKBACK: Duration = Duration::from_hours(7 * 24);
 /// The most entries of each kind `human_queue` lists, the latest ones.
 const SHOWN: usize = 30;
+/// The most messages `queue_for_human` lists of those the ant's daemons have not taken from the stream yet.
+const QUEUE_SHOWN: usize = 50;
 /// How long the cancel and queue tools wait for a daemon of the ant to answer.
 const ANSWER_WAIT: Duration = Duration::from_secs(5);
 /// How long they wait on after a first answer, for another daemon of the same ant.
@@ -129,8 +132,16 @@ pub trait HumanStore: Send + Sync {
     /// The answers of the daemons of the ant to `request`, as many as come within [`ANSWER_WAIT`], and within
     /// [`ANSWER_GRACE`] of the first.
     fn cancel(&self, request: CancelRequest) -> BoxFuture<'_, Result<Vec<CancelReply>>>;
-    /// The answers to `request`, as [`HumanStore::cancel`] gathers them.
-    fn queue(&self, request: QueueRequest) -> BoxFuture<'_, Result<Vec<QueueReply>>>;
+    /// The messages waiting for the ant of `request`, as `ants queue` lists them ([`queue::waiting`]) from the answers
+    /// to `request`, gathered as [`HumanStore::cancel`] gathers them, with up to `shown` of those the ant's daemons
+    /// have not taken from the stream yet, which wake it as `humans` tell, and how many more of those there are. None
+    /// when no daemon of the ant answers.
+    fn queue(
+        &self,
+        request: QueueRequest,
+        humans: Humans,
+        shown: usize,
+    ) -> BoxFuture<'_, Result<Option<queue::Listed>>>;
     /// Record the withdrawal of `message` from the queue of `ant` by `assistant` for `human`, while no daemon of the
     /// ant answers ([`attempts::record_withdrawal`]).
     fn record_withdrawal(
@@ -398,11 +409,23 @@ impl HumanStore for JetStreamStore {
         })
     }
 
-    fn queue(&self, request: QueueRequest) -> BoxFuture<'_, Result<Vec<QueueReply>>> {
+    fn queue(
+        &self,
+        request: QueueRequest,
+        humans: Humans,
+        shown: usize,
+    ) -> BoxFuture<'_, Result<Option<queue::Listed>>> {
         Box::pin(async move {
             let payload = serde_json::to_vec(&request)?;
             let keep = |a: &QueueReply, at: &str| a.request_id == request.id && a.check_subject(at).is_ok();
-            self.ask(request.subject(), request.reply_subject(), payload, keep).await
+            let answers = self.ask(request.subject(), request.reply_subject(), payload, keep).await?;
+            if answers.is_empty() {
+                return Ok(None);
+            }
+            let kv = DirectKv::new(&self.js, self.js_domain.as_ref(), ATTEMPTS_BUCKET).await?;
+            let (mut waiting, more) = queue::waiting(&self.js, &kv, &request.ant, humans, &answers, shown).await?;
+            queue::withdrawals(&kv, &request.ant, &mut waiting).await?;
+            Ok(Some((waiting, more)))
         })
     }
 
@@ -935,46 +958,42 @@ impl Hub {
         )
     }
 
-    /// The messages the daemons of `ant` hold, oldest first, and how many more wait in the stream.
-    async fn held(
+    /// The messages waiting for `ant`, as `ants queue` lists them, and how many more wait in the stream unlisted.
+    async fn waiting(
         &self,
         human: &UserId,
         store: &dyn HumanStore,
         ant: &UserId,
-    ) -> Result<(Vec<QueuedMessage>, u64), String> {
+        shown: usize,
+    ) -> Result<queue::Listed, String> {
         let request = QueueRequest::new(ant.clone(), self.ant.clone()).for_human(human.clone());
-        let answers = store.queue(request).await.map_err(|e| format!("{e:#}"))?;
-        if answers.is_empty() {
-            return Err(self.unanswered(ant, human));
-        }
-        let mut held: Vec<QueuedMessage> = answers.iter().flat_map(|a| a.messages.iter().cloned()).collect();
-        held.sort_by_key(|m| m.seq);
-        held.dedup_by_key(|m| m.seq);
-        Ok((held, answers.iter().filter_map(|a| a.inbox.map(|place| place.undelivered)).max().unwrap_or(0)))
+        let listed = store.queue(request, self.humans.humans(), shown).await.map_err(|e| format!("{e:#}"))?;
+        listed.ok_or_else(|| self.unanswered(ant, human))
     }
 
     async fn queue_for_human(&self, args: QueueForHuman) -> Result<String, String> {
         let (human, store) = self.acting_for()?;
         let ant = self.queued_ant(&args.ant)?;
-        let (held, undelivered) = self.held(&human, store, &ant).await?;
-        let mut out = if held.is_empty() {
-            format!("The daemon of {ant} holds no message.")
+        let (waiting, more) = self.waiting(&human, store, &ant, QUEUE_SHOWN).await?;
+        let mut out = if waiting.is_empty() {
+            format!("No message waits for {ant}.")
         } else {
-            format!("Messages the daemon of {ant} holds, oldest first:")
+            format!(
+                "Messages waiting for {ant}, those its daemon holds first, then those awaiting redelivery and those \
+                 still in the stream; each with how many of its thread go before it:"
+            )
         };
-        for m in &held {
-            let state = if m.running {
-                "running".to_owned()
-            } else if m.redelivery {
-                format!("{} ahead on its thread, awaiting a retry after a failed attempt", m.ahead)
-            } else {
-                format!("{} ahead on its thread", m.ahead)
+        for m in &waiting {
+            let from = match &m.channel {
+                Some(channel) => format!("{} in #{channel}", m.from),
+                None => m.from.to_string(),
             };
             let at = m.sent_at.format("%Y-%m-%d %H:%M UTC");
-            let _ = write!(out, "\n- message {} on thread {} from {}, sent {at}: {state}", m.id, m.thread_id, m.from);
+            let (id, thread, state) = (m.id, &m.thread_id, queue::state(m));
+            let _ = write!(out, "\n- message {id} on thread {thread} from {from}, sent {at}: {state}");
         }
-        if undelivered > 0 {
-            let _ = write!(out, "\n{undelivered} more wait in the stream, not taken up yet.");
+        if more > 0 {
+            let _ = write!(out, "\n{more} more wait in the stream, not listed.");
         }
         Ok(out)
     }
@@ -1001,18 +1020,18 @@ impl Hub {
         let (human, store) = self.acting_for()?;
         let ant = self.queued_ant(&args.ant)?;
         let id: Uuid = args.message_id.trim().parse().map_err(|e| format!("message_id: {e}"))?;
-        let held = match self.held(&human, store, &ant).await {
-            Ok((held, _)) => held,
+        let waiting = match self.waiting(&human, store, &ant, usize::MAX).await {
+            Ok((waiting, _)) => waiting,
             Err(_) => return self.record_withdrawal(&human, store, &ant, id).await,
         };
-        let thread = match held.iter().find(|m| m.id == id) {
+        let thread = match waiting.iter().find(|m| m.id == id) {
             Some(m) if m.running => {
                 let thread = &m.thread_id;
                 return Err(format!(
                     "{ant} started on message {id} already; cancel_for_human stops its prompt on thread {thread}"
                 ));
             }
-            Some(m) if m.redelivery => {
+            Some(m) if m.started => {
                 return Err(format!(
                     "{ant} started on message {id} already; the attempt failed, and the message awaits a retry"
                 ));
@@ -1023,8 +1042,8 @@ impl Hub {
                 let sent = messages.find(id).filter(|m| m.envelope.to == ant && messages.by_human(&m.envelope));
                 sent.map(|m| m.envelope.thread_id.clone()).ok_or_else(|| {
                     format!(
-                        "message {id} is neither held by the daemon of {ant} nor one of {human} to it; \
-                         queue_for_human lists those held"
+                        "message {id} is neither waiting for {ant} nor one of {human} to it; queue_for_human \
+                         lists those waiting"
                     )
                 })?
             }
@@ -1416,9 +1435,10 @@ impl Tools {
         Ok(text(self.hub.decide_for_human(args).await))
     }
 
-    #[tool(description = "As the assistant of a human, list the messages the daemon of an ant holds for it to \
-        answer, each with its message id, thread and sender, and how many more wait in the stream. The daemon answers \
-        only while the human's grant names this ant.")]
+    #[tool(description = "As the assistant of a human, list the messages waiting for an ant, as `ants queue` does: \
+        those its daemon holds, those awaiting redelivery, and the inbox messages and channel posts waking it still in \
+        the stream, each with its message id, thread, sender and place, and how many more wait unlisted. The daemon \
+        answers only while the human's grant names this ant.")]
     async fn queue_for_human(&self, Parameters(args): Parameters<QueueForHuman>) -> Result<CallToolResult, ErrorData> {
         Ok(text(self.hub.queue_for_human(args).await))
     }

@@ -40,6 +40,7 @@ pub mod pool;
 pub mod pressure;
 pub mod publish;
 pub mod questions;
+pub mod queue;
 pub mod ratelimit;
 pub mod reactions;
 pub mod reading;
