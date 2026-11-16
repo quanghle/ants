@@ -5,9 +5,9 @@
 //! leaves neither key nor file.
 //!
 //! The signer seals each answer to the request's one-off X25519 key ([`LoginReply`]): anyone holding the bootstrap
-//! credentials hears it, and only this machine opens it. A sign-in page is shown only when it is GitHub's device login
-//! page, and a JWT is taken only when the account of the bootstrap credentials issued it to the device's key, for a
-//! human of the name asked for.
+//! credentials hears it, and only this machine opens it. A sign-in page is shown only when it is the device login page
+//! of the GitHub named by `--github-url`, and a JWT is taken only when the account of the bootstrap credentials issued
+//! it to the device's key, for a human of the name asked for.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -25,8 +25,8 @@ use nkeys::{KeyPair, XKey};
 use crate::keys::{self, Proven};
 use crate::{auth, defaults, revoke};
 
-/// GitHub's device login page: the only sign-in page `ants login` shows.
-pub const GITHUB_DEVICE_PAGE: &str = "https://github.com/login/device";
+/// The GitHub whose device login page `ants login` shows by default.
+pub const GITHUB_URL: &str = "https://github.com";
 
 #[derive(clap::Args, Debug)]
 pub struct LoginArgs {
@@ -50,6 +50,10 @@ pub struct LoginArgs {
     /// ~/.config/ants/auth/bootstrap.creds).
     #[arg(long, value_name = "FILE")]
     pub bootstrap: Option<PathBuf>,
+    /// The GitHub trusted to sign in at (https://HOST): a sign-in page is shown only when it is this GitHub's device
+    /// login page, <URL>/login/device. Give a GitHub Enterprise Server's URL when the hub's `[registration]` names one.
+    #[arg(long, value_name = "URL", default_value = GITHUB_URL)]
+    pub github_url: String,
 }
 
 /// A registration to ask for, and where its credentials go.
@@ -63,7 +67,7 @@ pub struct Login<'a> {
     pub out: &'a Path,
     /// The config file whose `[cli]` gets the credentials and the hub when it names no credentials.
     pub config: &'a Path,
-    /// The only sign-in page shown: [`GITHUB_DEVICE_PAGE`].
+    /// The only sign-in page shown: the [`device_page`] of `--github-url`.
     pub device_page: &'a str,
     /// How often the request is repeated: [`LOGIN_REPEAT`].
     pub repeat: Duration,
@@ -76,6 +80,7 @@ pub async fn run(args: LoginArgs) -> Result<()> {
     let bootstrap = args.bootstrap.unwrap_or_else(|| dir.join("bootstrap.creds"));
     let out = dir.join(format!("{}.creds", args.name));
     let config = defaults::path()?;
+    let device_page = device_page(&args.github_url)?;
     let login = Login {
         hub: &args.hub,
         name: &args.name,
@@ -84,7 +89,7 @@ pub async fn run(args: LoginArgs) -> Result<()> {
         bootstrap: &bootstrap,
         out: &out,
         config: &config,
-        device_page: GITHUB_DEVICE_PAGE,
+        device_page: &device_page,
         repeat: LOGIN_REPEAT,
     };
     let stop = async {
@@ -128,6 +133,42 @@ pub async fn register(login: &Login<'_>, store: &dyn Store, stop: impl Future<Ou
         eprintln!("device {device} of {}", login.name);
     }
     use_in_config(login)
+}
+
+/// The device login page of the GitHub at `github_url`, `https://HOST` with an optional port and trailing slash:
+/// `https://HOST/login/device`, the host in lower case.
+pub fn device_page(github_url: &str) -> Result<String> {
+    let host = github_url
+        .get(.."https://".len())
+        .filter(|scheme| scheme.eq_ignore_ascii_case("https://"))
+        .map(|_| &github_url["https://".len()..])
+        .map(|rest| rest.strip_suffix('/').unwrap_or(rest))
+        .filter(|host| plain_host(host));
+    match host {
+        Some(host) => Ok(format!("https://{}/login/device", host.to_ascii_lowercase())),
+        None => bail!("--github-url {github_url}: give a GitHub's https://HOST, without a path, such as {GITHUB_URL}"),
+    }
+}
+
+/// Whether `host` is a host name or address, with an optional port, and nothing else.
+fn plain_host(host: &str) -> bool {
+    !host.is_empty() && host.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']'))
+}
+
+/// Why `url`, a sign-in page other than `page`, is not shown: when it is the device login page of another host, the
+/// error names the host and the `--github-url` that would show it.
+fn not_shown(url: &str, page: &str) -> anyhow::Error {
+    let host =
+        url.strip_prefix("https://").and_then(|rest| rest.strip_suffix("/login/device")).filter(|h| plain_host(h));
+    match host {
+        Some(host) => anyhow!(
+            "the signer sent the device login page of {host}, not {page} (--github-url): not shown; only when {host} \
+             is the team's GitHub Enterprise Server, run `ants login` again with --github-url https://{host}"
+        ),
+        None => {
+            anyhow!("the signer sent a sign-in page other than the device login page {page} (--github-url): not shown")
+        }
+    }
 }
 
 /// The account of the bootstrap credentials at `path`: the issuer of the JWTs `ants login` takes.
@@ -190,14 +231,14 @@ async fn ask(
                         }
                     },
                     LoginAnswer::Refused { reason } => bail!("the registration of {} was refused: {reason}", request.name),
-                    LoginAnswer::Verify { url, .. } if url != login.device_page => bail!(
-                        "the signer sent a sign-in page other than GitHub's device login page {}: not shown",
-                        login.device_page
-                    ),
+                    LoginAnswer::Verify { url, .. } if !url.eq_ignore_ascii_case(login.device_page) => {
+                        return Err(not_shown(url, login.device_page));
+                    }
                     _ if shown.as_ref() == Some(&answer) => continue,
-                    LoginAnswer::Verify { url, user_code, expires_at } => {
+                    LoginAnswer::Verify { user_code, expires_at, .. } => {
                         let until = expires_at.with_timezone(&chrono::Local).format("%H:%M");
-                        format!("sign in to GitHub at {url} and enter the code {user_code} (before {until})")
+                        let page = login.device_page;
+                        format!("sign in to GitHub at {page} and enter the code {user_code} (before {until})")
                     }
                     LoginAnswer::Waiting { login, reason } => {
                         format!("signed in to GitHub as {login}: {reason}; waiting for a human of the team to approve")
@@ -357,6 +398,25 @@ mod tests {
         .await
     }
 
+    #[test]
+    fn only_the_device_page_of_the_github_url_is_shown() {
+        assert_eq!(device_page(GITHUB_URL).unwrap(), "https://github.com/login/device");
+        assert_eq!(device_page("HTTPS://GHE.Example:8443/").unwrap(), "https://ghe.example:8443/login/device");
+        for bad in
+            ["http://ghe.example", "ghe.example", "https://", "https://ghe.example/login/device", "https://u@ghe"]
+        {
+            assert!(device_page(bad).is_err(), "{bad}");
+        }
+        let page = device_page(GITHUB_URL).unwrap();
+        let err = not_shown("https://ghe.example/login/device", &page).to_string();
+        assert!(err.contains("--github-url https://ghe.example") && err.contains("not shown"), "{err}");
+        for other in ["https://evil.example/login", "http://ghe.example/login/device", "https://a\x1b]8;;/login/device"]
+        {
+            let err = not_shown(other, &page).to_string();
+            assert!(!err.contains(other) && !err.contains("run `ants login` again"), "{err}");
+        }
+    }
+
     #[tokio::test]
     async fn no_device_registers_under_a_reserved_name() {
         let dir = ants_test_support::scratch_dir("login-reserved");
@@ -467,9 +527,9 @@ mod tests {
             assert!(err.contains("refused") && err.contains("octocat is bound to alice"), "{err}");
             assert!(!refused.out.exists());
 
-            let phished = Login { device_page: GITHUB_DEVICE_PAGE, ..refused };
+            let phished = Login { device_page: &device_page(GITHUB_URL).unwrap(), ..refused };
             let err = format!("{:#}", register(&phished, &store, pending()).await.unwrap_err());
-            assert!(err.contains("other than GitHub's device login page"), "{err}");
+            assert!(err.contains("not shown") && err.contains("--github-url https://github.example"), "{err}");
             assert!(!phished.out.exists());
 
             let stopped = &refused;
