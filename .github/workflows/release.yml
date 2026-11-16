@@ -1,0 +1,133 @@
+name: Release
+
+# A tag vX.Y.Z (X.Y.Z the workspace version in Cargo.toml) builds the `ants` binary for each target and publishes a
+# GitHub Release with the archives, SHA256SUMS and build provenance attestations, once the checks of ci.yml pass. A tag
+# with a pre-release suffix (v0.2.0-rc.1) makes a pre-release. Run by hand (workflow_dispatch), it checks and builds
+# only, keeping the archives as workflow artifacts.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_WARNINGS: deny
+
+# Every job's `toolchain:` matches rust-toolchain.toml and `rust-version` in Cargo.toml; the three move together.
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      name: ${{ steps.version.outputs.name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: version
+        name: Tag matches the workspace version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          [ -n "$version" ] || { echo "no version in Cargo.toml" >&2; exit 1; }
+          if [ "$REF_TYPE" = tag ]; then
+            case "$REF_NAME" in
+              "v$version" | "v$version"-*) ;;
+              *) echo "tag $REF_NAME does not match version $version in Cargo.toml" >&2; exit 1 ;;
+            esac
+            name=$REF_NAME
+          else
+            name=v$version-${GITHUB_SHA::7}
+          fi
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Built on Ubuntu 22.04: the binaries need glibc 2.35 or later.
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
+          - { target: aarch64-apple-darwin, os: macos-15 }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-11
+        with:
+          toolchain: "1.100"
+          targets: ${{ matrix.target }}
+
+      # No build cache: a release builds from the lock file alone.
+      - run: cargo build --release --locked -p ants --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        env:
+          NAME: ${{ needs.version.outputs.name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          exe=ants
+          [ "$RUNNER_OS" != Windows ] || exe=ants.exe
+          "target/$TARGET/release/$exe" --version
+          dir=ants-$NAME-$TARGET
+          mkdir -p "dist/$dir"
+          cp "target/$TARGET/release/$exe" LICENSE README.md "dist/$dir/"
+          cd dist
+          if [ "$RUNNER_OS" = Windows ]; then
+            7z a -tzip -bso0 "$dir.zip" "$dir"
+          else
+            tar -czf "$dir.tar.gz" "$dir"
+          fi
+          rm -r "$dir"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: [version, checks, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum -- * > SHA256SUMS && cat SHA256SUMS
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.name }}
+        run: |
+          prerelease=
+          case "$TAG" in *-*) prerelease=--prerelease ;; esac
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --title "ants $TAG" \
+            --generate-notes $prerelease

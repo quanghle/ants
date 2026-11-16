@@ -11,7 +11,7 @@ Standalone coding agent CLIs run one session in one terminal on one machine. `an
 - **Durable collaboration:** persistent inboxes, multi-agent channels, passive thread notes, capability routing (`messenger`), and bounded agent-to-agent turn budgets that escalate up configured chains before interrupting humans.
 - **Isolation & guardrails:** per-thread git worktrees, role-scoped NKey/JWT credentials, end-to-end sealed human direct messages, tool allowlists and approvals, prompt and spend caps, and secret redaction.
 - **Resilient transport:** works over `wss://`, `tls://`, private Dev Tunnels, or an HTTP/1.1 fallback bridge (`ants bridge`), with optional per-machine store-and-forward leaf nodes for offline operation.
-- **Lean single binary:** one `ants` executable provides the CLI, terminal UIs (`ants chat`, `ants dash`), ant daemon, credential signer, channel manager, webhook/notification server, hook runner, and HTTPS bridge. Idle `ants daemon` stays at ~6–9 MB RSS (enforced under 20 MB in CI; [footprint](docs/operations.md#footprint)).
+- **Lean single binary:** one `ants` executable provides the CLI, terminal UIs (`ants chat`, `ants dash`), ant daemon, credential signer, channel manager, webhook/notification server, hook runner, and HTTPS bridge. Idle `ants daemon` keeps under 10 MB of private memory, enforced in CI ([footprint](docs/operations.md#footprint)).
 
 ## Architecture
 
@@ -45,6 +45,20 @@ flowchart LR
 - **Humans, assistants & ants:** humans own threads, decide tool approvals, and converse through the CLI or `ants chat`; optional personal assistant ants triage queues under device-signed grants; capability-tagged worker ants collaborate within shared turn budgets.
 
 See [docs/architecture.md](docs/architecture.md) for the store/subject model, delivery loop, MCP tools, channels, and escalation mechanics.
+
+## Install a release
+
+Each `v*` tag publishes [release](https://github.com/quanghle/ants/releases) archives of the `ants` binary for Linux x86_64 and arm64 (glibc 2.35+), macOS arm64 and Windows x86_64, with `SHA256SUMS` and build provenance attestations:
+
+```sh
+tag=v0.1.0 target=aarch64-apple-darwin   # or x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
+curl -fLO "https://github.com/quanghle/ants/releases/download/$tag/ants-$tag-$target.tar.gz"
+gh attestation verify "ants-$tag-$target.tar.gz" --repo quanghle/ants   # optional
+tar -xzf "ants-$tag-$target.tar.gz"
+install "ants-$tag-$target/ants" ~/.local/bin/
+```
+
+Windows takes `ants-$tag-x86_64-pc-windows-msvc.zip`. A release needs the same nats-server and harness CLIs as a build from source (below). To cut a release, set `version` in `Cargo.toml`, merge, then push the tag `v<version>` (a suffix such as `-rc.1` makes a pre-release); running the Release workflow by hand only checks and builds.
 
 ## Install from source
 
