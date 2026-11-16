@@ -339,6 +339,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         machine: &entry.machine,
         pool: &pool,
         cancels: Cancels::default(),
+        unnarrowed: Unnarrowed::default(),
         restarts,
         attempts: &attempts,
         answered: &answered,
@@ -1010,6 +1011,28 @@ impl Cancels {
     }
 }
 
+/// The senders of the narrowed messages warned of, so a harness running its tools unasked is warned of once per webhook
+/// or schedule, or ant passing a narrowing on, rather than on each prompt.
+#[derive(Default)]
+struct Unnarrowed(std::sync::Mutex<HashSet<UserId>>);
+
+impl Unnarrowed {
+    /// The most senders kept; past it, the set starts over.
+    const MAX: usize = 1024;
+
+    /// Whether `sender` was not warned of yet, noting it so.
+    fn first(&self, sender: &UserId) -> bool {
+        let mut warned = self.0.locked();
+        if warned.contains(sender) {
+            return false;
+        }
+        if warned.len() >= Self::MAX {
+            warned.clear();
+        }
+        warned.insert(sender.clone())
+    }
+}
+
 struct Cancellable<'a> {
     cancels: &'a Cancels,
     thread: ThreadId,
@@ -1032,6 +1055,8 @@ struct Inbox<'a> {
     pool: &'a Pool,
     /// The prompts running, for `ants cancel`.
     cancels: Cancels,
+    /// The senders whose narrowing the harness, running its tools unasked, was warned not to apply.
+    unnarrowed: Unnarrowed,
     /// Where admin orders to restart the ant's harnesses arrive.
     restarts: &'a Restarts,
     attempts: &'a Attempts,
@@ -2553,12 +2578,14 @@ impl Inbox<'_> {
         let launch = self.pool.launch();
         if envelope.allow.as_deref().is_some_and(|allow| !crate::harness::allows_all(allow))
             && launch.bypasses_permissions()
+            && self.unnarrowed.first(&envelope.from)
         {
             tracing::warn!(
                 %thread,
+                from = %envelope.from,
                 harness = launch.harness_name(),
                 "the thread's tool rules are narrowed, but the harness runs its tools unasked: the narrowing does not \
-                 apply to them"
+                 apply to them (warned once per sender)"
             );
         }
         let _narrowed = launch.policy().narrow(thread, envelope.allow.as_deref());
