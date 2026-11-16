@@ -143,15 +143,11 @@ async fn add(
         None => None,
     };
     if let Some((_, identities)) = assisting
-        && !matches!(shared::read(identities, ant).await?, Found::NoBucket)
+        && !matches!(shared::read(identities, ant, accounts).await?, Found::NoBucket)
     {
-        let record = SharedSettings {
-            ant: ant.clone(),
-            fields: shared_fields,
-            machine: orders.machine.clone(),
-            by: Some(order.admin.clone()),
-            updated_at: chrono::Utc::now(),
-        };
+        let mut record =
+            SharedSettings::new(ant.clone(), shared_fields, orders.machine.clone(), Some(order.admin.clone()));
+        shared::sign(&mut record, &jwt, &key)?;
         identities.put(record.key(), serde_json::to_vec(&record)?).await.context("writing the shared settings")?;
         config.shared.store(record);
     }

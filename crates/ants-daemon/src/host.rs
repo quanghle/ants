@@ -118,7 +118,7 @@ pub fn record(machine: &Machine, hostname: &str, ants: &[UserId]) -> MachineReco
 pub async fn run(host: Host, ants: watch::Receiver<Vec<UserId>>) -> Result<()> {
     let hostname = roster::machine().await;
     let machine = machine_of(host.machine.as_ref(), host.creds.as_deref(), &hostname)?;
-    let accounts = host.creds.as_deref().map(creds::account).transpose()?.into_iter().collect();
+    let accounts: Vec<String> = host.creds.as_deref().map(creds::account).transpose()?.into_iter().collect();
     let Some(js) = connect(&host, &machine).await? else { return Ok(()) };
     let humans =
         crate::humans::Registry::new(UserId::human()).verifying_grants(crate::humans::account(host.creds.as_deref()));
@@ -127,7 +127,7 @@ pub async fn run(host: Host, ants: watch::Receiver<Vec<UserId>>) -> Result<()> {
         machine: machine.clone(),
         nats: host.nats.clone(),
         remote: host.remote_admin,
-        accounts,
+        accounts: accounts.clone(),
         config: host.config.clone(),
         creds: host.creds.clone(),
         js_domain: host.js_domain.clone(),
@@ -140,16 +140,17 @@ pub async fn run(host: Host, ants: watch::Receiver<Vec<UserId>>) -> Result<()> {
     tokio::select! {
         recorded = keep_record(&js, &host, &machine, &hostname, ants, shared.clone()) => recorded,
         () = admin::serve(js.clone(), host.js_domain.clone(), orders) => Ok(()),
-        kept = keep_shared(&js, &host, &machine, shared, polled) => kept,
+        kept = keep_shared(&js, &host, &machine, &accounts, shared, polled) => kept,
     }
 }
 
-/// Keep `shared` current with the shared settings of `ants` ([`shared::refresh`]), until `ants` closes; with no
-/// `shared`, nothing.
+/// Keep `shared` current with the shared settings of `ants`, verified against `accounts` ([`shared::refresh`]), until
+/// `ants` closes; with no `shared`, nothing.
 async fn keep_shared(
     js: &async_nats::jetstream::Context,
     host: &Host,
     machine: &Machine,
+    accounts: &[String],
     shared: Option<Shared>,
     mut ants: watch::Receiver<Vec<UserId>>,
 ) -> Result<()> {
@@ -157,7 +158,7 @@ async fn keep_shared(
     let kv = DirectKv::new(js, host.js_domain.as_ref(), IDENTITIES_BUCKET).await?;
     loop {
         let listed = ants.borrow_and_update().clone();
-        shared::refresh(&kv, machine, &shared, &listed).await;
+        shared::refresh(&kv, Some(machine), &shared, &listed, accounts).await;
         shared.polled();
         tokio::select! {
             () = tokio::time::sleep(shared::POLL_EVERY) => {}

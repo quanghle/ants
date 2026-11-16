@@ -250,9 +250,9 @@ async fn clone(
     done: &mut Done,
 ) -> Result<Option<Value>> {
     let (src, path) = (&order.ant, &config.path);
-    let src_shared = match shared::read(identities, src).await? {
+    let src_shared = match shared::read(identities, src, &orders.accounts).await? {
         Found::Record(record, _) => Some(Some(record.fields)),
-        Found::None(_) | Found::Malformed(..) => Some(None),
+        Found::None(_) | Found::Malformed(..) | Found::Unverified(..) => Some(None),
         Found::NoBucket => None,
     };
     let Some(Plan { table, workdir, src_home, new_home, dir, creds_path, shared }) =
@@ -319,13 +319,8 @@ async fn clone(
         None => None,
     };
     if let Some(fields) = shared {
-        let record = SharedSettings {
-            ant: new.clone(),
-            fields,
-            machine: orders.machine.clone(),
-            by: None,
-            updated_at: Utc::now(),
-        };
+        let mut record = SharedSettings::new(new.clone(), fields, orders.machine.clone(), None);
+        shared::sign(&mut record, &jwt, &key)?;
         done.shared = Some((identities.clone(), record.key()));
         identities.put(record.key(), serde_json::to_vec(&record)?).await?;
         config.shared.store(record);

@@ -138,7 +138,7 @@ async fn an_ant_moves_to_another_bus_with_its_identity_and_memories() {
     else {
         unreachable!()
     };
-    let shared = SharedSettings { ant: p("dev-a"), fields, machine: m1, by: None, updated_at: Utc::now() };
+    let shared = SharedSettings::new(p("dev-a"), fields, m1, None);
     assert!(host_kv.create(&shared.key(), serde_json::to_vec(&shared).unwrap()).await.unwrap());
 
     let file = dir.join("dev-a.ant");

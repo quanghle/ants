@@ -206,6 +206,7 @@ impl Bus {
             redactor: &self.redactor,
             workload: &self.workload,
             pause: &self.pause,
+            drift: &crate::shared::Drift::default(),
             metrics: crate::metrics::ant(&self.dev),
             limits: self.limits,
             ledger: &self.ledger,

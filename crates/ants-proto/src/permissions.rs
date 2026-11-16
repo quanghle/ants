@@ -905,7 +905,8 @@ impl Permissions {
     /// reads back by direct gets, and looking up the revocation records of the credentials that signed them
     /// ([`subject::revoked_devices`]). It reads and writes every ant's shared settings in [`IDENTITIES_BUCKET`]
     /// ([`subject::all_shared_settings`]), creating those of the machine's ants and applying admin orders to them; any
-    /// machine's host credentials may write any ant's. It hears its own replies under [`host_inbox_prefix`], apart from
+    /// machine's host credentials may write any ant's, but daemons serve only a record signed with the ant's own
+    /// credentials ([`SharedSettings::verify`](crate::SharedSettings::verify)), which only its machines hold. It hears its own replies under [`host_inbox_prefix`], apart from
     /// every user's. Carrying out an order to add or retire an ant, it asks `ants signer` with an enrollment request
     /// carrying the order ([`subject::enroll`], [`EnrollRequest::order`](crate::EnrollRequest::order)) and hears the
     /// answers ([`subject::ALL_ENROLL_REPLIES`]), and reads the roster by direct gets to see a retired ant stopped.

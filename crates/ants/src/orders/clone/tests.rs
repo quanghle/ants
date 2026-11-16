@@ -114,13 +114,9 @@ async fn a_clone_order_copies_an_ant_under_a_new_name_and_undoes_a_failed_one() 
     let Value::Object(fields) = json!({ "whoami": "Reviews parsers", "model": "o4", "escalate_to": ["lead"] }) else {
         unreachable!()
     };
-    let shared = SharedSettings {
-        ant: dev_a.clone(),
-        fields,
-        machine: m1.clone(),
-        by: Some(alice.clone()),
-        updated_at: chrono::Utc::now(),
-    };
+    let mut shared = SharedSettings::new(dev_a.clone(), fields, m1.clone(), Some(alice.clone()));
+    let a_creds = server.dir().join("dev-a-Ant.creds");
+    ants_daemon::shared::sign_as(&mut shared, Some(&a_creds), &[]).unwrap();
     host_kv.put(shared.key(), serde_json::to_vec(&shared).unwrap()).await.unwrap();
 
     let _served = restarts.serve(&dev_a);
