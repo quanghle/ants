@@ -625,7 +625,7 @@ mod tests {
     async fn without_a_host_connection_the_records_created_name_the_machine_given() {
         let Some(server) = ants_test_support::NatsServer::start() else { return };
         let js = async_nats::jetstream::new(async_nats::connect(&server.url).await.unwrap());
-        js.create_key_value(crate::hub::identities_config()).await.unwrap();
+        js.create_stream(crate::hub::identities_config()).await.unwrap();
         let mut dev_a = ant("dev-a");
         dev_a.model = Some("gpt-4".to_owned());
         let shared = Shared::default();
