@@ -213,7 +213,8 @@ impl Drop for Working<'_> {
 /// its host name.
 pub async fn entry(config: &Config) -> ColonyEntry {
     let now = Utc::now();
-    let machine = match &config.machine {
+    let (presence, harness) = (&config.presence, &config.harness);
+    let machine = match &presence.machine {
         Some(machine) => machine.clone(),
         None => machine().await,
     };
@@ -221,17 +222,17 @@ pub async fn entry(config: &Config) -> ColonyEntry {
         ant: config.ant.clone(),
         machine,
         instance: uuid::Uuid::new_v4().to_string(),
-        harness: config.harness.to_string(),
+        harness: harness.harness.to_string(),
         agent: None,
-        capabilities: config.capabilities.clone(),
-        whoami: config.whoami.clone(),
-        workdir: Some(config.workdir.display().to_string()),
+        capabilities: presence.capabilities.clone(),
+        whoami: presence.whoami.clone(),
+        workdir: Some(harness.workdir.display().to_string()),
         started_at: now,
         heartbeat_at: now,
         activity: Activity::Idle,
         handling: 0,
         harnesses: 0,
-        escalate_to: config.escalation.escalate_to.clone(),
+        escalate_to: config.policy.escalation.escalate_to.clone(),
         version: ANTS_VERSION.to_owned(),
         perms: PERMISSIONS_VERSION,
         signed_out: None,
@@ -242,9 +243,9 @@ pub async fn entry(config: &Config) -> ColonyEntry {
         paused: config.pause.get(),
         drift: config.drift.get(),
         model: AntModel::of(
-            config.model_settings.model.clone(),
-            config.model_settings.reasoning_effort.clone(),
-            config.model_settings.context.clone(),
+            harness.model_settings.model.clone(),
+            harness.model_settings.reasoning_effort.clone(),
+            harness.model_settings.context.clone(),
         ),
     }
 }

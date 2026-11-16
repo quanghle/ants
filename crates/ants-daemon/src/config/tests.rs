@@ -98,7 +98,7 @@ Review changes for correctness."""
     assert_eq!((a.max_harnesses, a.idle_timeout), (2, Duration::from_secs(60)));
     let config = a.clone().into_config("nats://unused", &Harnesses::builtin()).unwrap();
     assert_eq!(
-        config.model_settings,
+        config.harness.model_settings,
         ModelSettings {
             model: Some("test-model".to_owned()),
             reasoning_effort: Some("high".to_owned()),
@@ -106,21 +106,21 @@ Review changes for correctness."""
             history_budget: Some(131072),
         }
     );
-    assert_eq!(config.whoami.as_deref(), Some("Maintain the Rust backend.\nReview changes for correctness."));
+    assert_eq!(config.presence.whoami.as_deref(), Some("Maintain the Rust backend.\nReview changes for correctness."));
     assert_eq!(
-        config.instructions,
+        config.harness.instructions,
         "[ants role dev-a]\nMaintain the Rust backend.\nReview changes for correctness.\n\n\
              [ants memory]\nUse the memory MCP server.\n\n[ants tasks]\nUse the tracker CLI."
     );
-    assert_eq!(config.env.get("TRACKER_DB").map(String::as_str), Some("/srv/ants/dev-a/tasks.db"));
-    assert_eq!(config.limits, PromptLimits { timeout: None, max_tool_calls: Some(50) }, "0 is no limit");
+    assert_eq!(config.harness.env.get("TRACKER_DB").map(String::as_str), Some("/srv/ants/dev-a/tasks.db"));
+    assert_eq!(config.harness.limits, PromptLimits { timeout: None, max_tool_calls: Some(50) }, "0 is no limit");
     let caps = Caps { thread_cost: Some(2.5), daily_tokens: Some(1_000_000), ..Caps::default() };
-    assert_eq!(config.caps, caps);
-    assert_eq!(config.spend_warn_percent, 90);
+    assert_eq!(config.spending.caps, caps);
+    assert_eq!(config.spending.warn_percent, 90);
     let escalate_to = vec!["lead".parse().unwrap(), "dev-b".parse().unwrap()];
     let chain = Chain { escalate_to, max_hops: 2, after: None, remind: None, stand_in: Some("carol".parse().unwrap()) };
-    assert_eq!(config.escalation, chain, "0 waits for the leader for good and never reminds");
-    assert_eq!(config.worktrees, Some(true));
+    assert_eq!(config.policy.escalation, chain, "0 waits for the leader for good and never reminds");
+    assert_eq!(config.worktrees.per_thread, Some(true));
     check_dev_b(ants[1].clone());
 }
 
@@ -133,23 +133,23 @@ fn check_dev_b(b: Ant) {
     assert_eq!(b, Ant { harness: Some("copilot".to_owned()), ..set }, "the file's harness");
 
     let config = b.into_config("nats://unused", &Harnesses::builtin()).unwrap();
-    assert_eq!(config.nats_url, "nats://127.0.0.1:4222");
-    assert_eq!(config.human.as_str(), "bob", "an ant's own default human comes first");
-    assert!(config.allow.is_empty(), "rejects every tool request unless the human allows it");
-    assert_eq!(config.approval_timeout, crate::approvals::DEFAULT_TIMEOUT);
-    assert_eq!(config.idle_timeout, DEFAULT_IDLE_TIMEOUT);
-    assert_eq!(config.worktrees, None, "settled at start by crate::worktrees::per_thread");
-    assert_eq!(config.limits, PromptLimits::default());
-    assert_eq!(config.caps, Caps::default(), "no spend caps unless set");
-    assert_eq!(config.spend_warn_percent, DEFAULT_SPEND_WARN_PERCENT);
-    assert_eq!(config.escalation, Chain::default(), "no chain: escalations go to the owner");
-    assert_eq!(config.escalation.after, Some(DEFAULT_ESCALATE_AFTER));
-    assert_eq!(config.escalation.remind, Some(DEFAULT_ESCALATION_REMINDER));
-    assert!(config.home.ends_with(".ants/dev-b"));
-    assert_eq!(config.whoami, None);
-    assert_eq!(config.model_settings, ModelSettings::default());
-    assert!(config.instructions.is_empty(), "no memory or task tool by default");
-    assert!(config.env.is_empty(), "no tool-specific environment by default");
+    assert_eq!(config.connection.nats_url, "nats://127.0.0.1:4222");
+    assert_eq!(config.policy.human.as_str(), "bob", "an ant's own default human comes first");
+    assert!(config.policy.allow.is_empty(), "rejects every tool request unless the human allows it");
+    assert_eq!(config.policy.approval_timeout, crate::approvals::DEFAULT_TIMEOUT);
+    assert_eq!(config.pooling.idle_timeout, DEFAULT_IDLE_TIMEOUT);
+    assert_eq!(config.worktrees.per_thread, None, "settled at start by crate::worktrees::per_thread");
+    assert_eq!(config.harness.limits, PromptLimits::default());
+    assert_eq!(config.spending.caps, Caps::default(), "no spend caps unless set");
+    assert_eq!(config.spending.warn_percent, DEFAULT_SPEND_WARN_PERCENT);
+    assert_eq!(config.policy.escalation, Chain::default(), "no chain: escalations go to the owner");
+    assert_eq!(config.policy.escalation.after, Some(DEFAULT_ESCALATE_AFTER));
+    assert_eq!(config.policy.escalation.remind, Some(DEFAULT_ESCALATION_REMINDER));
+    assert!(config.storage.home.ends_with(".ants/dev-b"));
+    assert_eq!(config.presence.whoami, None);
+    assert_eq!(config.harness.model_settings, ModelSettings::default());
+    assert!(config.harness.instructions.is_empty(), "no memory or task tool by default");
+    assert!(config.harness.env.is_empty(), "no tool-specific environment by default");
 }
 
 #[test]
@@ -209,7 +209,7 @@ fn falls_back_to_the_default_server_and_human() {
     let ants = parse_here("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"").unwrap();
     assert_eq!((&ants[0].nats, &ants[0].human), (&None, &None));
     let config = ants[0].clone().into_config("nats://leaf:4222", &Harnesses::builtin()).unwrap();
-    assert_eq!((config.nats_url.as_str(), config.human), ("nats://leaf:4222", UserId::human()));
+    assert_eq!((config.connection.nats_url.as_str(), config.policy.human), ("nats://leaf:4222", UserId::human()));
     let err = parse_here("human = \"Not A Name\"").unwrap_err();
     assert!(format!("{err:#}").contains("human"), "{err:#}");
 }
@@ -239,7 +239,7 @@ fn names_the_machine_as_the_file_does() {
     let named = machines(&format!("machine = \"dev-vm1\"\n{ant}"));
     assert_eq!(named, [Some("dev-vm1".to_owned()), Some("dev-vm1".to_owned())], "the messenger too");
     let mut ants = parse_here(&format!("machine = \"dev-vm1\"\n{ant}")).unwrap();
-    assert_eq!(config(ants.remove(0)).unwrap().machine.as_deref(), Some("dev-vm1"));
+    assert_eq!(config(ants.remove(0)).unwrap().presence.machine.as_deref(), Some("dev-vm1"));
     let long = "m".repeat(65);
     for (machine, why) in [("\" \"", "blank"), (&format!("\"{long}\""), "longer than 64"), ("\"vm\\n1\"", "control")] {
         let err = format!("{:#}", parse_here(&format!("machine = {machine}\n{ant}")).unwrap_err());
@@ -362,10 +362,10 @@ fn harnesses_defined_in_the_file_run_ants_and_the_builtin_messenger() {
     let named: Vec<_> = ants.iter().map(|ant| (ant.name.as_str(), ant.harness.as_deref())).collect();
     assert_eq!(named, [("dev-a", Some("my-agent")), ("dev-b", Some("claude")), ("messenger", Some("my-agent"))]);
     let configs: Vec<_> = ants.into_iter().map(|ant| ant.into_config("nats://unused", &harnesses).unwrap()).collect();
-    assert_eq!(configs[0].harness, harness("my-agent"));
-    assert_eq!(configs[0].harness.mode.as_deref(), Some("default"));
-    assert_eq!(configs[1].harness, harness("claude"));
-    assert_eq!(configs[2].harness, harness("my-agent"));
+    assert_eq!(configs[0].harness.harness, harness("my-agent"));
+    assert_eq!(configs[0].harness.harness.mode.as_deref(), Some("default"));
+    assert_eq!(configs[1].harness.harness, harness("claude"));
+    assert_eq!(configs[2].harness.harness, harness("my-agent"));
 
     let mut alone = Ant::new("dev-a".parse().unwrap(), manifest_dir());
     alone.harness = Some("my-agent".to_owned());
@@ -403,9 +403,9 @@ fn fallbacks_name_known_harnesses_and_models() {
     };
     let (ants, harnesses) = parse_with_harnesses(&ant(r#"["claude", "copilot:gpt-5", ":m2"]"#)).unwrap();
     let config = ants.into_iter().next().unwrap().into_config("nats://unused", &harnesses).unwrap();
-    let names: Vec<_> = config.fallbacks.iter().map(crate::fallback::Fallback::name).collect();
+    let names: Vec<_> = config.harness.fallbacks.iter().map(crate::fallback::Fallback::name).collect();
     assert_eq!(names, ["claude", "copilot:gpt-5", "my-agent:m2"]);
-    assert_eq!(config.fallbacks[2].harness, config.harness, "another model of the ant's own harness");
+    assert_eq!(config.harness.fallbacks[2].harness, config.harness.harness, "another model of the ant's own harness");
 
     let err = |fallback: &str| format!("{:#}", parse_here(&ant(fallback)).unwrap_err());
     let unknown = err(r#"["vim"]"#);
@@ -449,7 +449,7 @@ fn dropin_files_define_harnesses_the_ants_may_name() {
     assert_eq!(loaded.harnesses.get("mine").unwrap().file(), None);
     let configs: Vec<_> =
         loaded.ants.into_iter().map(|ant| ant.into_config("nats://unused", &loaded.harnesses).unwrap()).collect();
-    assert_eq!((configs[0].harness.name(), configs[1].harness.name()), ("codex", "mine"));
+    assert_eq!((configs[0].harness.harness.name(), configs[1].harness.harness.name()), ("codex", "mine"));
     assert_eq!(Summary::load(&config).unwrap().harness(Some("codex")).unwrap(), codex);
     std::fs::remove_file(&config).unwrap();
     assert_eq!(Summary::load(&config).unwrap().harness(Some("codex")).unwrap(), codex, "no config file");
@@ -504,7 +504,7 @@ fn without_a_top_level_harness_each_ant_and_template_names_its_own() {
     let ants =
         parse_as_is("messenger = false\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nharness = \"codex\"").unwrap().ants;
     let codex = config(ants[0].clone()).unwrap();
-    assert_eq!((codex.harness.name(), codex.defer_to_others), ("codex", false));
+    assert_eq!((codex.harness.harness.name(), codex.presence.defer_to_others), ("codex", false));
     let e = config(Ant::new("dev-a".parse().unwrap(), manifest_dir())).unwrap_err();
     assert!(harness::Unset::caused(&e), "{e:#}");
 }
@@ -519,9 +519,9 @@ fn the_builtin_messenger_finds_its_credentials_and_creates_its_workdir() {
     let messenger = builtin_messenger(Some("copilot"), &home);
     assert_eq!(messenger.creds, Some(auth.join("messenger.creds")));
     let config = config(messenger).unwrap();
-    assert!(config.defer_to_others);
-    assert_eq!(config.workdir, home.join(".ants/messenger").canonicalize().unwrap());
-    assert_eq!(config.model_settings, ModelSettings::default());
+    assert!(config.presence.defer_to_others);
+    assert_eq!(config.harness.workdir, home.join(".ants/messenger").canonicalize().unwrap());
+    assert_eq!(config.harness.model_settings, ModelSettings::default());
     std::fs::remove_dir_all(&home).unwrap();
 }
 
@@ -614,7 +614,7 @@ fn the_storage_table_reaches_every_ant() {
     assert_eq!(loaded.storage, settings);
     assert_eq!(loaded.ants.len(), 2, "dev-a and the messenger");
     assert!(loaded.ants.iter().all(|ant| ant.storage == settings));
-    assert_eq!(config(loaded.ants[0].clone()).unwrap().storage, settings);
+    assert_eq!(config(loaded.ants[0].clone()).unwrap().storage.jetstream, settings);
     let err = |text: &str| format!("{:#}", parse_here(text).unwrap_err());
     assert!(err("[storage]\nwarn_percent = 100").contains("warn_percent must be below 100"));
     assert!(err("[storage]\nmax_file_store = \"10 parsecs\"").contains("invalid size"));
@@ -629,7 +629,7 @@ fn the_memory_pressure_table_reaches_every_ant() {
     .unwrap();
     let settings = pressure::Settings { min_available: pressure::Threshold::Percent(10), max_harnesses: 2 };
     assert!(loaded.ants.iter().all(|ant| ant.memory_pressure == settings));
-    assert_eq!(config(loaded.ants[0].clone()).unwrap().memory_pressure, settings);
+    assert_eq!(config(loaded.ants[0].clone()).unwrap().pooling.memory_pressure, settings);
     let default = parse_all("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"").unwrap();
     assert_eq!(default.ants[0].memory_pressure, pressure::Settings::default(), "on unless turned off");
     let err = |text: &str| format!("{:#}", parse_here(text).unwrap_err());
@@ -973,7 +973,7 @@ fn an_ant_added_from_a_template_takes_its_settings_and_shares_its_pool() {
     let b = loaded.ants.iter().find(|a| a.name.as_str() == "lead-b").unwrap();
     assert_eq!((b.workdir.clone(), b.max_daily_cost), (manifest_dir().join("src").canonicalize().unwrap(), Some(10.0)));
     assert!(loaded.ants.iter().find(|a| a.name.as_str() == "lead").unwrap().pool.is_none());
-    assert_eq!(config(a.clone()).unwrap().pool, Some(pool));
+    assert_eq!(config(a.clone()).unwrap().spending.pool, Some(pool));
 
     let summary = Summary::parse(&text, &manifest_dir().join("config.toml"), Path::new("/home")).unwrap();
     assert_eq!(summary.caps[&"lead-b".parse::<UserId>().unwrap()].daily_cost, Some(10.0), "the template's ceiling");
@@ -1036,7 +1036,7 @@ fn an_ant_added_from_a_template_takes_its_fallbacks_less_its_own_harness_and_mod
         let ant = loaded.ants.iter().find(|a| a.name.as_str() == ant).unwrap().clone();
         assert_eq!(ant.fallback, ["copilot", ":gpt-5", "claude:gpt-5"]);
         let config = ant.into_config("nats://unused", &loaded.harnesses).unwrap();
-        config.fallbacks.iter().map(crate::fallback::Fallback::name).collect::<Vec<_>>()
+        config.harness.fallbacks.iter().map(crate::fallback::Fallback::name).collect::<Vec<_>>()
     };
     assert_eq!(names("lead-a"), ["copilot", "claude:gpt-5"], ":gpt-5 is copilot:gpt-5, the ant's own");
     assert_eq!(names("lead-b"), ["copilot"], "claude:gpt-5, its own, twice");

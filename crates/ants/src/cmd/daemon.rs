@@ -32,9 +32,8 @@ pub(crate) async fn run(args: &serve::DaemonArgs, conn: &Connection<'_>) -> Resu
         }
         if let Some((managers, path)) = &listed.managers {
             for config in configs.iter_mut().filter(|c| managers.contains(&c.ant)) {
-                let (nats, creds, js_domain) =
-                    (config.nats_url.clone(), config.creds.clone(), config.js_domain.clone());
-                let manager = manager::Manager::new(path.clone(), nats, creds, js_domain)?;
+                let ants_daemon::daemon::Connection { nats_url, creds, js_domain } = config.connection.clone();
+                let manager = manager::Manager::new(path.clone(), nats_url, creds, js_domain)?;
                 config.requester = ants_daemon::mcp::Requester(Some(manager.requester()));
             }
         }

@@ -383,7 +383,7 @@ async fn ant_and_tool_instructions_reach_every_prompt_and_resumed_session() {
     let config = ant.into_config("nats://unused", &Default::default()).unwrap();
     let instructions =
         "[ants role dev-a]\nMaintain the Rust backend.\n\n[ants memory]\nUse notes.\n\n[ants tasks]\nUse tickets.";
-    let pool = Pool::new(launch.with_instructions(config.instructions), SessionStore::memory(), 1, IDLE);
+    let pool = Pool::new(launch.with_instructions(config.harness.instructions), SessionStore::memory(), 1, IDLE);
     for (thread_id, text, session) in [(1, "one", "s1"), (1, "two", "s1"), (2, "three", "s2"), (1, "four", "s1")] {
         assert_eq!(
             pool.prompt(&thread(thread_id), text).await.unwrap(),

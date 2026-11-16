@@ -402,12 +402,13 @@ impl Served {
         }
         let mut vias: Vec<Via> = Vec::new();
         for config in self.configs.iter().filter(|c| c.ant != UserId::messenger()) {
-            match vias.iter_mut().find(|v| v.nats == config.nats_url && v.js_domain == config.js_domain) {
+            let connection = &config.connection;
+            match vias.iter_mut().find(|v| v.nats == connection.nats_url && v.js_domain == connection.js_domain) {
                 Some(via) => via.ants.push(config.ant.clone()),
                 None => vias.push(Via {
-                    nats: config.nats_url.clone(),
-                    creds: config.creds.clone(),
-                    js_domain: config.js_domain.clone(),
+                    nats: connection.nats_url.clone(),
+                    creds: connection.creds.clone(),
+                    js_domain: connection.js_domain.clone(),
                     user: config.ant.clone(),
                     ants: vec![config.ant.clone()],
                 }),
@@ -430,7 +431,8 @@ pub fn host(
     let HostSettings { creds, machine, nats: file_nats, js_domain: file_domain, remote_admin, .. } = settings?;
     let nats = file_nats.unwrap_or_else(|| nats.to_owned());
     let domain = file_domain.or(js_domain.cloned());
-    let mut host = Host::new(machine, fallback, nats, creds, domain, configs.iter().map(|c| c.creds.is_some()))?;
+    let mut host =
+        Host::new(machine, fallback, nats, creds, domain, configs.iter().map(|c| c.connection.creds.is_some()))?;
     host.remote_admin = remote_admin;
     host.config = config;
     Some((host, configs.iter().map(|c| c.ant.clone()).collect()))
@@ -779,7 +781,7 @@ impl Running {
     /// Note `config` as served, returning it with the stop to serve it until.
     fn insert(running: &mut HashMap<UserId, Running>, config: Config) -> (Config, Stop) {
         let stop = Stop::default();
-        let creds = creds_snapshot(config.creds.as_deref());
+        let creds = creds_snapshot(config.connection.creds.as_deref());
         let entry = Running { config: config.clone(), creds, stop: stop.clone(), stopping: false, next: None };
         running.insert(config.ant.clone(), entry);
         (config, stop)
@@ -820,14 +822,14 @@ fn reconcile(running: &mut HashMap<UserId, Running>, wanted: Vec<Config>) -> Vec
             tracing::info!(%ant, "restarting the ant: its entry changed");
             r.next = Some(config);
             r.ask_to_stop();
-        } else if r.creds != creds_snapshot(config.creds.as_deref()) {
+        } else if r.creds != creds_snapshot(config.connection.creds.as_deref()) {
             tracing::info!(%ant, "restarting the ant: its credentials changed");
             r.next = Some(config);
             r.ask_to_stop();
         } else {
             // Pool members, the pause and the drift are left out of the comparison: the running ant takes them as it
             // is.
-            if let (Some(serving), Some(listed)) = (&r.config.pool, &config.pool) {
+            if let (Some(serving), Some(listed)) = (&r.config.spending.pool, &config.spending.pool) {
                 serving.members.replace(&listed.members);
             }
             r.config.pause.replace(&config.pause);
@@ -958,22 +960,25 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!((one[0].nats_url.as_str(), one[0].creds.clone()), ("nats://cli:4222", cli_creds.clone()));
-        assert_eq!(one[0].js_domain, Some(cli_domain.clone()));
+        assert_eq!(
+            (one[0].connection.nats_url.as_str(), one[0].connection.creds.clone()),
+            ("nats://cli:4222", cli_creds.clone())
+        );
+        assert_eq!(one[0].connection.js_domain, Some(cli_domain.clone()));
 
         let mut own = ant("dev-a");
         own.js_domain = Some(own_domain.clone());
         let one =
             configs(vec![own], &Harnesses::builtin(), "nats://cli:4222", cli_creds.clone(), Some(cli_domain), None)
                 .unwrap();
-        assert_eq!(one[0].nats_url, "nats://dev-a:4222");
-        assert_eq!(one[0].creds, Some(PathBuf::from("dev-a.creds")));
-        assert_eq!(one[0].js_domain, Some(own_domain));
+        assert_eq!(one[0].connection.nats_url, "nats://dev-a:4222");
+        assert_eq!(one[0].connection.creds, Some(PathBuf::from("dev-a.creds")));
+        assert_eq!(one[0].connection.js_domain, Some(own_domain));
 
         let two =
             configs(vec![bare, ant("dev-b")], &Harnesses::builtin(), "nats://cli:4222", cli_creds, None, None).unwrap();
-        assert_eq!((two[0].nats_url.as_str(), two[0].creds.clone()), ("nats://cli:4222", None));
-        assert_eq!(two[1].creds, Some(PathBuf::from("dev-b.creds")));
+        assert_eq!((two[0].connection.nats_url.as_str(), two[0].connection.creds.clone()), ("nats://cli:4222", None));
+        assert_eq!(two[1].connection.creds, Some(PathBuf::from("dev-b.creds")));
     }
 
     #[test]
@@ -986,7 +991,7 @@ mod tests {
         let names = |start: Vec<(Config, Stop)>| start.into_iter().map(|(c, _)| c.ant.to_string()).collect::<Vec<_>>();
         let state = |running: &HashMap<UserId, Running>, name: &str| {
             let r = &running[&name.parse::<UserId>().unwrap()];
-            (r.stopping, r.next.as_ref().map(|c| c.model_settings.model.clone()))
+            (r.stopping, r.next.as_ref().map(|c| c.harness.model_settings.model.clone()))
         };
         let mut running = HashMap::new();
         let (a, b) = (config("dev-a", None), config("dev-b", None));
@@ -1024,7 +1029,7 @@ mod tests {
         let (served, _) = reconcile(&mut running, vec![config(&["lead-a"])]).remove(0);
         assert!(reconcile(&mut running, vec![config(&["lead-a", "lead-b"])]).is_empty());
         assert!(!running[&member("lead-a")].stopping, "only its pool's members changed");
-        assert_eq!(served.pool.unwrap().members.get(), [member("lead-a"), member("lead-b")]);
+        assert_eq!(served.spending.pool.unwrap().members.get(), [member("lead-a"), member("lead-b")]);
     }
 
     #[test]
@@ -1074,7 +1079,10 @@ mod tests {
         };
         let mut running = HashMap::new();
         let (config, _) = reconcile(&mut running, vec![served(dev_a())]).remove(0);
-        assert_eq!((config.model_settings.model.as_deref(), config.drift.get()), (Some("gpt-5"), vec!["model".into()]));
+        assert_eq!(
+            (config.harness.model_settings.model.as_deref(), config.drift.get()),
+            (Some("gpt-5"), vec!["model".into()])
+        );
         let drift = config.drift.subscribe();
 
         let mut same = dev_a();
