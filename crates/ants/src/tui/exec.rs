@@ -21,7 +21,7 @@ use crate::orders;
 use crate::sealed::{Keyring, Sealing};
 use crate::thread::{self, Entry, Kind};
 use crate::thread_meta::{self, Marking, Meta};
-use crate::{humans, pause, quiet};
+use crate::{forward, humans, pause, quiet};
 
 /// What a job needs: the UI's connection and its human.
 pub struct Ctx {
@@ -159,6 +159,12 @@ pub enum Job {
     Retire {
         ant: UserId,
     },
+    /// Hand `source` to `to` on a new thread with `note`, as `ants ask --forward` does.
+    Forward {
+        to: UserId,
+        source: forward::Source,
+        note: String,
+    },
 }
 
 /// What a job did.
@@ -218,7 +224,12 @@ impl Job {
     pub fn sends(&self) -> bool {
         matches!(
             self,
-            Self::Ask { .. } | Self::Unaddressed { .. } | Self::Post { .. } | Self::Reply { .. } | Self::Grant { .. }
+            Self::Ask { .. }
+                | Self::Unaddressed { .. }
+                | Self::Post { .. }
+                | Self::Reply { .. }
+                | Self::Grant { .. }
+                | Self::Forward { .. }
         )
     }
 
@@ -323,6 +334,7 @@ impl Job {
                 Ok(Done::line(attach::save(&ctx.js, ctx.keyring.as_deref(), &listed, to.as_deref()).await?))
             }
             Self::Retire { ant } => retire(ctx, &ant).await,
+            Self::Forward { to, source, note } => forward(ctx, to, &source, &note, &files).await,
             Self::Pause { ant, paused } => {
                 let admin = ctx.admin.as_ref().map_err(|e| anyhow!("{e}"))?;
                 Ok(Done::line(pause::order(admin, &ctx.js, &ant, None, paused, pause::WAIT).await?))
@@ -330,6 +342,13 @@ impl Job {
             Self::Attached { .. } => Err(anyhow!("files are attached to one message")),
         }
     }
+}
+
+/// Hand `source` to `to` on a new thread, as `ants ask --forward` does.
+async fn forward(ctx: &Ctx, to: UserId, source: &forward::Source, note: &str, files: &[File]) -> Result<Done> {
+    let files = source.files(&ctx.js, ctx.keyring.as_deref(), files.to_vec()).await?;
+    let envelope = source.envelope(&ctx.me, to.clone(), note);
+    deliver(ctx, to.into(), envelope, None, &files, true).await
 }
 
 /// Retire `ant` by admin order, as `ants ant retire` does.
@@ -359,7 +378,19 @@ async fn ask(
     files: &[File],
 ) -> Result<Done> {
     let new = thread.is_none();
-    let mut envelope = send::ask_envelope(&ctx.me, thread, to.to.clone(), text);
+    let envelope = send::ask_envelope(&ctx.me, thread, to.to.clone(), text);
+    deliver(ctx, to, envelope, quote, files, new).await
+}
+
+/// Send `envelope` from [`send::ask_envelope`] to `to` as [`ask`] does, opening its thread when `new`.
+async fn deliver(
+    ctx: &Ctx,
+    to: send::Recipient,
+    mut envelope: ants_proto::Envelope,
+    quote: Option<Quoted>,
+    files: &[File],
+    new: bool,
+) -> Result<Done> {
     if let Some(q) = &quote {
         envelope = envelope.quoting(q.id, q.quote.clone());
     }

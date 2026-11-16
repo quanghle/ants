@@ -82,7 +82,7 @@ impl Page {
         self.messages().find(|e| e.id == Some(at)).map(|e| e.seq)
     }
 
-    pub const KEYS: &str = "↑↓ select · i reply · > reply to selected · y copy · o open file · ] next file · + react · p pin · m mute · e archive · d done · z snooze · t tree · S TL;DR · x cancel · a A r answer a tool request · End latest · Esc back";
+    pub const KEYS: &str = "↑↓ select · i reply · > reply to selected · y copy · f forward · o open file · ] next file · + react · p pin · m mute · e archive · d done · z snooze · t tree · T tool calls · S TL;DR · x cancel · a A r answer a tool request · End latest · Esc back";
 
     /// The messages shown, in the order stored.
     fn messages(&self) -> impl DoubleEndedIterator<Item = &Entry> {
@@ -92,6 +92,12 @@ impl Page {
     /// The ids of the messages shown, for the reactions to them.
     pub fn message_ids(&self) -> Vec<Uuid> {
         self.messages().filter_map(|e| e.id).collect()
+    }
+
+    /// The message selected, or the one the thread was opened at; none while the view follows the latest.
+    pub fn chosen(&self) -> Option<&Entry> {
+        let seq = self.selected.or_else(|| self.held())?;
+        self.messages().find(|e| e.seq == seq)
     }
 
     /// The selected message, else the latest.
@@ -207,6 +213,8 @@ impl Page {
             Key::Char('t') => return Some(To::Tree(self.history.thread.clone())),
             Key::Char('z') => return Some(To::Snooze(self.history.thread.clone())),
             Key::Char('S') => return Some(To::Tldr(self.history.thread.clone())),
+            Key::Char('f') => return Some(To::Bar("/forward @".to_owned())),
+            Key::Char('T') => return Some(To::Tools),
             Key::Char('o') => {
                 let listed = self.attachment()?.clone();
                 return Some(To::Do(Action::Run(Job::Open(Box::new(listed)), String::new())));
@@ -254,7 +262,7 @@ impl Page {
         let shown = Shown { data, now, busy, width, marked, placed: RefCell::default() };
         let calls = data.calls.get(thread).map_or(&[][..], |c| c.calls());
         let ends = data.calls.get(thread).map_or(&[][..], |c| c.ends());
-        let rows = rows(&self.history.entries, calls, ends, |u| data.is_human(u));
+        let rows = rows(&self.history.entries, calls, ends, data.tools, busy, |u| data.is_human(u));
         let held = self.held();
         let selected = self.selected.or(held).and_then(|_| self.selection()).map(|e| e.seq);
         let mut range = None;
@@ -463,6 +471,7 @@ mod tests {
     use crate::live::tests::{at, message};
     use crate::sealed;
     use crate::tui::model::tests::model;
+    use crate::tui::timeline::Tools;
     use crate::tui::timeline::tests::tool;
 
     /// A thread where alice asks dev-a, which asks dev-b, which answers it, then answers alice; each ant making a
@@ -496,13 +505,15 @@ mod tests {
         let mut m = model();
         let (entries, calls) = delegated(&thread);
         calls.iter().for_each(|c| m.data.calls.status(c));
-        let rows = rows(&entries, m.data.calls.get(&thread).unwrap().calls(), &[], |u| m.data.is_human(u));
+        let calls = m.data.calls.get(&thread).unwrap().calls();
+        let rows = rows(&entries, calls, &[], Tools::All, false, |u| m.data.is_human(u));
         let shown: Vec<(String, usize)> = rows
             .iter()
-            .map(|r| match r.item {
+            .map(|r| match &r.item {
                 Item::Message(e) => (e.text.clone(), r.depth),
                 Item::Call(c) => (c.title.clone(), r.depth),
                 Item::End(e) => (e.ant.to_string(), r.depth),
+                Item::Turn(t) => (t.ant.to_string(), r.depth),
             })
             .collect();
         let expected = [
@@ -549,6 +560,41 @@ mod tests {
     }
 
     #[test]
+    fn t_cycles_a_finished_turn_s_calls_from_one_line_to_each_to_none() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let entries = vec![
+            message(1, &thread, "alice", "dev-a", "run the tests"),
+            message(30, &thread, "dev-a", "alice", "two pass"),
+        ];
+        m.stored(entries.clone(), at(30));
+        for (id, status, secs) in
+            [("c1", "in_progress", 10), ("c1", "failed", 14), ("c2", "in_progress", 15), ("c2", "completed", 20)]
+        {
+            m.data.calls.status(&tool(&thread, "dev-a", id, Some(id), status, secs));
+        }
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(entries)).unwrap();
+        m.pages.push(super::super::model::Page::Thread(page));
+        let shown = |m: &Model| match m.pages.last() {
+            Some(super::super::model::Page::Thread(page)) => screen(page, m, 100, at(40)),
+            _ => unreachable!(),
+        };
+        let turn = format!("{} dev-a 2 tool calls, 10.0s, 1 failed", hm(at(10)));
+        assert!(shown(&m).contains(&turn), "{}", shown(&m));
+
+        assert_eq!(m.key(Key::Char('T'), at(40)), Some(Action::KeepTools(Tools::None)));
+        assert_eq!(m.notice_at(at(40)).map(|n| n.text.as_str()), Some("tool calls: none"));
+        let none = shown(&m);
+        assert!(!none.contains(" c1 ") && !none.contains("tool call") && none.contains("two pass"), "{none}");
+
+        assert_eq!(m.key(Key::Char('T'), at(40)), Some(Action::KeepTools(Tools::All)));
+        let all = shown(&m);
+        assert!(all.contains("failed 4.0s") && all.contains("ok 5.0s") && !all.contains("tool calls"), "{all}");
+        assert_eq!(m.key(Key::Char('T'), at(40)), Some(Action::KeepTools(Tools::Collapsed)));
+    }
+
+    #[test]
     fn the_view_shows_the_timeline_with_running_calls_and_a_panel_beside_it() {
         let thread = ThreadId::generate();
         let mut m = model();
@@ -569,10 +615,20 @@ mod tests {
         let face = format!("{} {{.~.}} dev-a → dev-b", hm(entries[1].stored_at));
         assert!(shown.contains(&face), "an ant's face before its name: {shown}");
         assert!(shown.contains("  deploy the site"), "{shown}");
-        assert!(shown.contains("read    read migrations") || shown.contains("execute read migrations"), "{shown}");
-        assert!(shown.contains("ok 0ms"), "{shown}");
         assert!(shown.contains("dev-a → dev-b  is jobs.retries read anywhere?"), "{shown}");
         assert!(shown.contains("running 41s"), "a call not ended runs while its ant is busy: {shown}");
+        let turn = format!("│ ├ {} dev-b 1 tool call, 0ms ", hm(calls[1].at));
+        assert!(shown.contains(&turn), "a finished turn on a line: {shown}");
+        assert!(!shown.contains("read migrations"), "{shown}");
+        m.data.tools = Tools::All;
+        let shown = screen(&page, &m, 110, at(47));
+        assert!(shown.contains("read    read migrations") || shown.contains("execute read migrations"), "{shown}");
+        assert!(shown.contains("ok 0ms"), "{shown}");
+        m.data.tools = Tools::None;
+        let shown = screen(&page, &m, 110, at(47));
+        assert!(!shown.contains("tool call") && !shown.contains("running 41s"), "{shown}");
+        assert!(shown.contains("only in worker/retry.rs"), "{shown}");
+        m.data.tools = Tools::Collapsed;
         for field in ["STATE", "OWNER", "ANTS", "dev-a ◐", "dev-b", "SPEND  $0.00 · 0 tokens", "FROM   ask by alice"]
         {
             assert!(shown.contains(field), "{field}: {shown}");

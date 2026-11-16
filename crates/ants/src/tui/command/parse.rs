@@ -33,6 +33,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("digest", "[SINCE]", "catch-up summary"),
     ("tldr", "", "summary of the thread"),
     ("tree", "", "the thread's delegation tree"),
+    ("forward", "@ANT [TEXT]", "hand the selected message, else the thread's TL;DR, to an ant on a new thread"),
     ("attach", "PATH", "attach a file to the next message"),
     ("detach", "", "drop the files attached"),
     ("save", "[PATH]", "save the marked attachment"),
@@ -85,6 +86,11 @@ pub enum Slash {
     Digest(Option<String>),
     Tldr,
     Tree,
+    /// Hand the selected message, else the thread's TL;DR, to the user on a new thread, with the note.
+    Forward {
+        to: UserId,
+        note: String,
+    },
     /// Stage the file at the path for the next message.
     Attach(String),
     Detach,
@@ -187,6 +193,11 @@ fn slash(text: &str) -> Result<Slash, String> {
         "digest" => Ok(Slash::Digest(optional())),
         "tldr" => bare(Slash::Tldr),
         "tree" => bare(Slash::Tree),
+        "forward" => {
+            let (name, note) = first_word(args);
+            let to = name.strip_prefix('@').ok_or_else(usage)?.parse().map_err(|e| format!("{e}"))?;
+            Ok(Slash::Forward { to, note: note.to_owned() })
+        }
         "attach" => text().map(Slash::Attach),
         "detach" => bare(Slash::Detach),
         "save" => Ok(Slash::Save(optional())),
@@ -255,6 +266,9 @@ mod tests {
         assert_eq!(ok("/snooze"), Slash::Snooze(TimeDelta::hours(1)));
         assert_eq!(ok("/snooze 2d"), Slash::Snooze(TimeDelta::days(2)));
         assert_eq!(ok("/unsnooze"), Slash::Unsnooze);
+        assert_eq!(ok("/forward @dev-b"), Slash::Forward { to: user("dev-b"), note: String::new() });
+        assert_eq!(ok("/forward @dev-b take it"), Slash::Forward { to: user("dev-b"), note: "take it".into() });
+        assert_eq!(parse("/forward dev-b").unwrap_err(), "usage: /forward @ANT [TEXT]");
         assert_eq!(parse("/snooze 8d").unwrap_err(), "too long: at most 7d");
         assert!(parse("/steer left").unwrap_err().starts_with("no command"));
         assert_eq!(parse("/done now").unwrap_err(), "usage: /done");

@@ -22,6 +22,7 @@ mod devices;
 mod doctor;
 mod enroll;
 mod export;
+mod forward;
 mod github;
 mod http;
 mod humans;
