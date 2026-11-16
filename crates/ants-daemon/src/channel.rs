@@ -494,7 +494,8 @@ pub fn prompt(ant: &UserId, post: &ChannelPost, context: &Context, left: Option<
 /// may not hold that message, as when another ant wrote it.
 pub fn quoted(quote: Option<&Quote>, text: &str) -> String {
     match quote {
-        Some(q) => format!("[ants] In reply to {}: \"{}\"\n{text}", q.from, q.text),
+        Some(Quote { from, text: Some(quoted) }) => format!("[ants] In reply to {from}: \"{quoted}\"\n{text}"),
+        Some(Quote { from, text: None }) => format!("[ants] In reply to a sealed message from {from}.\n{text}"),
         None => text.to_owned(),
     }
 }
@@ -1198,6 +1199,8 @@ mod tests {
             "{text}"
         );
         assert_eq!(as_envelope(&quoting, &p("dev-a")).quote, quoting.quote);
+        let withheld = Quote::new(p("bob"), "the code is 1234").withheld();
+        assert_eq!(quoted(Some(&withheld), "done"), "[ants] In reply to a sealed message from bob.\ndone");
     }
 
     #[test]

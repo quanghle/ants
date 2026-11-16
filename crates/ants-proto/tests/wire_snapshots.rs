@@ -109,7 +109,7 @@ fn mention() -> Mention {
 }
 
 fn quote() -> Quote {
-    Quote { from: user("dev-b"), text: "the build fails on main".to_owned() }
+    Quote::new(user("dev-b"), "the build fails on main")
 }
 
 fn envelope() -> Envelope {
@@ -433,7 +433,7 @@ fn envelopes() {
             id: id(1),
             text: "lunch?".to_owned(),
             title: Some("Lunch".to_owned()),
-            quote: Some(Quote { from: user("bob"), text: "noon?".to_owned() }),
+            quote: Some(Quote::new(user("bob"), "noon?")),
             attachments: vec![Attachment {
                 size: 1250,
                 sealed: Some(SealedAttachment { nonce: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned() }),

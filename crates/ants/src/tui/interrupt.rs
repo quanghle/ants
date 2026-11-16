@@ -114,6 +114,7 @@ mod tests {
         let outcome = Outcome {
             result: Err(anyhow::anyhow!("dev-b has no prompt running on thread {thread}")),
             text: String::new(),
+            quoting: None,
         };
         m.outcome(outcome);
         assert_eq!(

@@ -100,16 +100,26 @@ impl Target {
         if let Some(thread) = thread.filter(|t| *t != message.thread_id) {
             bail!("message {id} is on thread {}, not {thread}", message.thread_id);
         }
-        let replied = Replied { id, quote: Quote::new(from, &message.text), channel: message.channel };
+        let quote = Quote::new(from, &message.text);
+        let replied = Replied { id, quote, sealed: message.sealed.is_some(), channel: message.channel };
         Ok((Some(message.thread_id), Some(replied)))
     }
 }
 
-/// The message a send replies to ([`Target::reply_to`]): its id, its quote, and the channel of a post.
+/// The message a send replies to ([`Target::reply_to`]): its id, its quote, whether it was sealed, and the channel of
+/// a post.
 struct Replied {
     id: Uuid,
     quote: Quote,
+    sealed: bool,
     channel: Option<ChannelId>,
+}
+
+impl Replied {
+    /// The quote as a reply carries it, `sealed` or not: a sealed message's excerpt only goes sealed.
+    fn quote(self, sealed: bool) -> Quote {
+        if self.sealed && !sealed { self.quote.withheld() } else { self.quote }
+    }
 }
 
 pub(crate) async fn ask(
@@ -129,13 +139,17 @@ pub(crate) async fn ask(
     let author = replied.as_ref().map(|r| &r.quote.from).filter(|from| **from != nats.me.id);
     let (to, unaddressed) = addressee(&js, nats, to.or_else(|| author.cloned())).await;
     let mut envelope = ask_envelope(&nats.me, thread, to, text);
-    if let Some(Replied { id, quote, .. }) = replied {
-        envelope = envelope.quoting(id, quote);
+    if let Some(r) = &replied {
+        envelope = envelope.quoting(r.id, r.quote.clone());
     }
     envelope.attachments = attachments::references(&files);
     let to_human = nats.me.role.is_human() && humans::load(&js, &nats.me).await.contains(&envelope.to);
     let text = envelope.text.clone();
     let sealer = sealing(nats, &js, &mut envelope, &mut files, to_human && !plaintext).await?;
+    // Sealing took the quote into the sealed body; one left is in the clear.
+    if let Some(r) = replied.filter(|_| envelope.quote.is_some()) {
+        envelope.quote = Some(r.quote(false));
+    }
     let (envelope, files) = (envelope, files);
     // Subscribe first so a fast reply is not missed. A waiter also reads back what the hub stored while out of its
     // reach.
@@ -346,8 +360,8 @@ pub(crate) async fn post(
         bail!("the message replied to is a post to #{other}, not #{channel}");
     }
     let mut posting = Posting::compose(&js, &nats.me, channel, thread, text).await?;
-    if let Some(Replied { id, quote, .. }) = replied {
-        posting.post = posting.post.quoting(id, quote);
+    if let Some(r) = replied {
+        posting.post = posting.post.quoting(r.id, r.quote(false));
     }
     posting.post.attachments = attachments::references(&files);
     for warning in &posting.warnings {

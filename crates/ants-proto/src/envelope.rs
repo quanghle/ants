@@ -179,7 +179,9 @@ impl SummaryRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Quote {
     pub from: UserId,
-    pub text: String,
+    /// The excerpt, none when the quoted message was sealed and the reply is not ([`Quote::withheld`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 
 impl Quote {
@@ -194,12 +196,21 @@ impl Quote {
             Some((cut, _)) => format!("{}…", &line[..cut]),
             None => line,
         };
-        Self { from, text }
+        Self { from, text: Some(text) }
     }
 
-    /// The line a view shows above the reply: `↪ replying to <author>: <excerpt>`.
+    /// The quote without its excerpt: a sealed message's text never goes in the clear.
+    #[must_use]
+    pub fn withheld(self) -> Self {
+        Self { text: None, ..self }
+    }
+
+    /// The line a view shows above the reply: `↪ replying to <author>: <excerpt>`, or without the excerpt.
     pub fn line(&self) -> String {
-        format!("↪ replying to {}: {}", self.from, self.text)
+        match &self.text {
+            Some(text) => format!("↪ replying to {}: {text}", self.from),
+            None => format!("↪ replying to {}", self.from),
+        }
     }
 }
 

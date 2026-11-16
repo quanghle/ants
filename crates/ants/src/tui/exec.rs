@@ -54,6 +54,15 @@ impl Ctx {
 pub struct Quoted {
     pub id: Uuid,
     pub quote: Quote,
+    /// Whether the message was sealed: only a sealed reply carries its excerpt ([`Quote::withheld`]).
+    pub sealed: bool,
+}
+
+impl Quoted {
+    /// The quote as a reply carries it, `sealed` or not.
+    pub fn quote(self, sealed: bool) -> Quote {
+        if self.sealed && !sealed { self.quote.withheld() } else { self.quote }
+    }
 }
 
 /// What the bar asks to be done.
@@ -169,11 +178,12 @@ impl Done {
     }
 }
 
-/// How a job went, with the bar's text it came from.
+/// How a job went, with the bar's text it came from and the message it replied to, quoting it, on its thread.
 #[derive(Debug)]
 pub struct Outcome {
     pub result: Result<Done>,
     pub text: String,
+    pub quoting: Option<(ThreadId, Quoted)>,
 }
 
 /// The jobs running.
@@ -190,7 +200,8 @@ impl Exec {
     /// Run `job`, which the bar's `text` asked for.
     pub fn run(&mut self, job: Job, text: String) {
         let ctx = Rc::clone(&self.ctx);
-        self.jobs.push(async move { Outcome { result: job.run(&ctx).await, text } }.boxed_local());
+        let quoting = job.quoting();
+        self.jobs.push(async move { Outcome { result: job.run(&ctx).await, text, quoting } }.boxed_local());
     }
 
     /// The next job to end; pending while none runs.
@@ -209,6 +220,17 @@ impl Job {
             self,
             Self::Ask { .. } | Self::Unaddressed { .. } | Self::Post { .. } | Self::Reply { .. } | Self::Grant { .. }
         )
+    }
+
+    /// The message the job replies to, quoting it, with its thread.
+    pub fn quoting(&self) -> Option<(ThreadId, Quoted)> {
+        let (thread, quote) = match self {
+            Self::Attached { job, .. } => return job.quoting(),
+            Self::Ask { thread, quote, .. } | Self::Post { thread, quote, .. } => (thread.as_ref()?, quote),
+            Self::Reply { thread, quote, .. } => (thread, quote),
+            _ => return None,
+        };
+        Some((thread.clone(), quote.clone()?))
     }
 
     async fn run(self, ctx: &Ctx) -> Result<Done> {
@@ -338,13 +360,17 @@ async fn ask(
 ) -> Result<Done> {
     let new = thread.is_none();
     let mut envelope = send::ask_envelope(&ctx.me, thread, to.to.clone(), text);
-    if let Some(q) = quote {
-        envelope = envelope.quoting(q.id, q.quote);
+    if let Some(q) = &quote {
+        envelope = envelope.quoting(q.id, q.quote.clone());
     }
     envelope.attachments = attachments::references(files);
     // Sealed to a human, what is stored is each file's ciphertext.
     let mut stored = files.to_vec();
     send::seal_to_human(&ctx.js, &ctx.me, &ctx.sealing, &mut envelope, &mut stored).await?;
+    // Sealing took the quote into the sealed body; one left is in the clear.
+    if let Some(q) = quote.filter(|_| envelope.quote.is_some()) {
+        envelope.quote = Some(q.quote(false));
+    }
     let (mut warnings, _) = send::unserved(&ctx.js, &ctx.me, &envelope.to).await;
     attachments::store(&ctx.js, &stored, |id| envelope.attachment_handle(id)).await?;
     let stored = send::deliver(&ctx.js, ctx.domain.as_ref(), &envelope).await?;
@@ -369,7 +395,7 @@ async fn post(
     let new = thread.is_none();
     let mut posting = send::Posting::compose(&ctx.js, &ctx.me, channel, thread, text).await?;
     if let Some(q) = quote {
-        posting.post = posting.post.quoting(q.id, q.quote);
+        posting.post = posting.post.quoting(q.id, q.quote(false));
     }
     posting.post.attachments = attachments::references(files);
     attachments::store(&ctx.js, files, |id| posting.post.attachment_handle(id)).await?;
@@ -476,7 +502,7 @@ mod tests {
     }
 
     /// What the bar sends to another human, a reply on their thread with a file attached and its title are sealed for
-    /// both.
+    /// both; a reply to an ant quoting a sealed message carries no excerpt of it.
     #[tokio::test]
     async fn the_bar_seals_messages_to_a_human_their_files_and_titles_on_their_thread() {
         use ants_proto::Role;
@@ -500,13 +526,20 @@ mod tests {
 
         let ask = Job::Ask { to: bob.clone(), thread: None, text: "lunch?".into(), quote: None };
         let thread = Box::pin(ask.run(&ctx)).await.unwrap().open.unwrap();
-        let quote = Quoted { id: Uuid::now_v7(), quote: Quote::new(alice.clone(), "lunch?") };
+        let quote = Quoted { id: Uuid::now_v7(), quote: Quote::new(alice.clone(), "lunch?"), sealed: true };
         let reply = Job::Reply { thread: thread.clone(), text: "at noon".into(), quote: Some(quote.clone()) };
         let reply = Job::Attached { job: Box::new(reply), files };
         let line = Box::pin(reply.run(&ctx)).await.unwrap().line;
         assert_eq!(line, format!("sent to bob on thread {thread} with 1 file"));
         let title = Job::Title { thread: thread.clone(), text: "Team lunch".into() };
         Box::pin(title.run(&ctx)).await.unwrap();
+        let to_ant = Job::Ask {
+            to: user("dev-a"),
+            thread: Some(thread.clone()),
+            text: "book".into(),
+            quote: Some(quote.clone()),
+        };
+        Box::pin(to_ant.run(&ctx)).await.unwrap();
 
         let unread = crate::inbox::Inbox::open(&bob_js, &bob).await.unwrap().unread(&Default::default()).await.unwrap();
         assert!(unread.iter().all(|e| e.sealed.is_some() && e.text.is_empty() && e.quote.is_none()), "{unread:?}");
@@ -516,7 +549,9 @@ mod tests {
         let keyring = Arc::new(keyring);
         let entries =
             thread::history(&bob_js, &thread, None, thread::Activity::None, Some(Arc::clone(&keyring))).await.unwrap();
-        assert_eq!(entries[1].quote, Some(quote.quote), "the quote is sealed with the text");
+        assert_eq!(entries[1].quote, Some(quote.quote.clone()), "the quote is sealed with the text");
+        let to_ant = entries.iter().find(|e| e.to == Some(user("dev-a"))).unwrap();
+        assert_eq!((to_ant.sealed, &to_ant.quote), (None, &Some(quote.quote.withheld())), "no excerpt in the clear");
         let [listed] = &entries[1].attachments[..] else { panic!("{entries:?}") };
         assert!(listed.attachment.sealed.is_some(), "{listed:?}");
         assert_eq!((listed.attachment.name.as_str(), listed.size()), ("menu.txt", 4));

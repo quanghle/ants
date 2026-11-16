@@ -3,7 +3,7 @@
 //! mentioning the user), posts a new thread with `#channel` as `ants post` does, and else replies on the open thread,
 //! posts a new thread on the channel on view, or asks the human's assistant, else the messenger; `/` starts a slash
 //! command over the CLI's verbs, acting on the selected item or open thread ([`COMMANDS`]). Sends run in the background
-//! ([`super::exec`]); the bar's status line tells how they went, and a failed send's text comes back into the bar.
+//! ([`super::exec`]); the bar's status line tells how they went, and a failed send's text, with the message it quoted, comes back into the bar.
 
 use ants_proto::{ApprovalRequest, ChannelId, ThreadId, UserId, Verdict};
 use chrono::{DateTime, Utc};
@@ -322,7 +322,7 @@ impl Model {
     }
 
     /// Take how a job the bar ran went: its line and warnings on the status line, opening the thread it started; on
-    /// failure, the error, and its text back into the bar if empty.
+    /// failure, the error, and its text and quote back into the bar if empty.
     pub fn outcome(&mut self, outcome: Outcome) -> Option<Action> {
         self.bar.staged.sent(&outcome.text, outcome.result.is_err());
         match outcome.result {
@@ -341,6 +341,7 @@ impl Model {
                 self.bar.set_status(format!("{e:#}"), Tone::Error);
                 if self.bar.is_empty() && !outcome.text.is_empty() {
                     self.bar.set_text(&outcome.text);
+                    self.bar.quoting = outcome.quoting;
                     self.bar.focused = true;
                 }
                 None
@@ -583,17 +584,38 @@ mod tests {
         assert!(m.bar.focused);
         assert_eq!(m.bar.text(), "@dev-a ", "the bar addresses the author of the message selected");
         typed(&mut m, "why staging?");
-        let quote = Some(Quoted { id: ids[1], quote: ants_proto::Quote::new(user("dev-a"), "deployed to staging") });
+        let quote = Some(Quoted {
+            id: ids[1],
+            quote: ants_proto::Quote::new(user("dev-a"), "deployed to staging"),
+            sealed: false,
+        });
         let job = Job::Ask { to: user("dev-a"), thread: Some(thread.clone()), text: "why staging?".into(), quote };
-        assert_eq!(m.key(Key::Enter, at(3)), Some(Action::Run(job, "@dev-a why staging?".into())), "on the thread");
+        let sent = Some(Action::Run(job.clone(), "@dev-a why staging?".into()));
+        assert_eq!(m.key(Key::Enter, at(3)), sent, "on the thread");
         assert_eq!(m.bar.quoting, None, "sent once");
+        let failed = Outcome {
+            result: Err(anyhow::anyhow!("no route")),
+            text: "@dev-a why staging?".into(),
+            quoting: job.quoting(),
+        };
+        m.outcome(failed);
+        assert_eq!(m.bar.text(), "@dev-a why staging?");
+        assert_eq!(
+            m.bar.quoting.as_ref().map(|(t, q)| (t, q.id)),
+            Some((&thread, ids[1])),
+            "a failed send quotes again"
+        );
+        m.key(Key::Ctrl('u'), at(3));
+        m.key(Key::Esc, at(3));
+        assert_eq!(m.bar.quoting, None);
+        m.key(Key::Ctrl('k'), at(3));
 
         m.key(Key::Esc, at(3));
         m.key(Key::Up, at(3));
         m.bar.set_text("@dev-b and the docs");
         m.key(Key::Char('>'), at(3));
         assert_eq!(m.bar.text(), "and the docs", "a human's message gets no mention, and the one typed goes");
-        let quote = Some(Quoted { id: ids[0], quote: ants_proto::Quote::new(user("alice"), "deploy") });
+        let quote = Some(Quoted { id: ids[0], quote: ants_proto::Quote::new(user("alice"), "deploy"), sealed: false });
         let reply = Job::Reply { thread, text: "and the docs".into(), quote };
         assert_eq!(m.key(Key::Enter, at(3)), Some(Action::Run(reply, "and the docs".into())));
 
@@ -624,14 +646,14 @@ mod tests {
     #[test]
     fn a_failed_send_comes_back_into_the_bar_and_a_new_thread_opens() {
         let mut m = model();
-        let failed = Outcome { result: Err(anyhow::anyhow!("no route")), text: "@dev-a deploy".into() };
+        let failed = Outcome { result: Err(anyhow::anyhow!("no route")), text: "@dev-a deploy".into(), quoting: None };
         assert_eq!(m.outcome(failed), None);
         assert_eq!((m.bar.text(), m.bar.focused), ("@dev-a deploy".into(), true));
         assert_eq!(m.bar.status, Some(Status { text: "no route".into(), tone: Tone::Error }));
         let thread = ThreadId::generate();
         let warnings = vec!["dev-a is served by no daemon".to_owned()];
         let done = Done { line: "sent to dev-a".into(), warnings, open: Some(thread.clone()) };
-        let sent = Outcome { result: Ok(done), text: "@dev-a deploy".into() };
+        let sent = Outcome { result: Ok(done), text: "@dev-a deploy".into(), quoting: None };
         assert_eq!(m.outcome(sent), Some(Action::Open(thread)));
         assert_eq!(m.page().name(), "thread");
         assert_eq!(m.bar.text(), "@dev-a deploy", "a success leaves the bar's text alone");
@@ -663,7 +685,7 @@ mod tests {
         assert_eq!((files.len(), text.as_str()), (1, "@dev-a read this"));
         assert_eq!(m.bar.status.as_ref().unwrap().text, "sending with 1 file…");
         assert!(m.bar.staged.names().is_empty(), "the files go with one message");
-        m.outcome(Outcome { result: Err(anyhow::anyhow!("no route")), text });
+        m.outcome(Outcome { result: Err(anyhow::anyhow!("no route")), text, quoting: None });
         assert_eq!((m.bar.text(), m.bar.staged.names()), ("@dev-a read this".to_owned(), vec!["notes.txt"]));
 
         let thread = ThreadId::generate();

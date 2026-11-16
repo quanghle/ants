@@ -108,7 +108,7 @@ impl Page {
     fn quote(&self, data: &Data) -> Option<To> {
         let e = self.selection().filter(|e| crate::tui::dm::unopened(e.sealed).is_none())?;
         let (id, from) = (e.id?, e.from.clone()?);
-        let quoted = Quoted { id, quote: Quote::new(from.clone(), &e.text) };
+        let quoted = Quoted { id, quote: Quote::new(from.clone(), &e.text), sealed: e.sealed.is_some() };
         let mention = (!data.is_human(&from)).then_some(from);
         Some(To::Quote(self.history.thread.clone(), quoted, mention))
     }
