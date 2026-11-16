@@ -13,7 +13,8 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
   `bd spec none <id> -r "<why>"`. `bd spec drift` must report 0 problems.
 - A behaviour change that contradicts a requirement goes through `bd spec change`, not a silent edit.
 - The database is local; refresh the committed snapshot with `bd export -o .bd/issues.jsonl` in each commit that
-  changes issues or specs.
+  changes issues or specs. Release notes (`scripts/release-notes.sh`) are built from that snapshot, so the commit a
+  release tag points at must carry an up-to-date export.
 
 ## Code
 
@@ -23,8 +24,8 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
 - TLS stays on rustls.
 - A daemon acks a JetStream message only after its effects are stored.
 - Also in the repo: `contrib/` (launchd and systemd units, agent skill), `scripts/` (`check.sh`,
-  `install-units.sh`, `footprint.sh`), `docs/` (`architecture.md`, `cli.md`, `config.md`, `auth.md`, `webhooks.md`,
-  `transport.md`, `hooks.md`, `operations.md`, `apple-container-demo.md`),
+  `install-units.sh`, `footprint.sh`, `release-notes.sh`), `docs/` (`architecture.md`, `cli.md`, `config.md`,
+  `auth.md`, `webhooks.md`, `transport.md`, `hooks.md`, `operations.md`, `apple-container-demo.md`),
   `deny.toml` (dependency policy), `.cargo/config.toml` (7-day dependency cooldown), `rust-toolchain.toml` (pinned
   toolchain; moves together with `rust-version` in `Cargo.toml` and the `toolchain:` of every CI job).
 - Comment only code that needs clarification.
