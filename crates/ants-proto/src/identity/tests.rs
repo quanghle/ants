@@ -1,5 +1,3 @@
-#![allow(clippy::too_many_lines)]
-
 use std::collections::HashSet;
 
 use super::*;
@@ -33,7 +31,7 @@ fn derivation_matches_the_prototype() {
 }
 
 #[test]
-fn heads_match_the_prototype() {
+fn still_heads_match_the_prototype() {
     let still = Frame::default();
     assert_eq!(
         grid("dev-a", Stage::Worker, still),
@@ -73,6 +71,11 @@ fn heads_match_the_prototype() {
             "..............",
         ])
     );
+}
+
+#[test]
+fn twitching_and_closed_heads_match_the_prototype() {
+    let still = Frame::default();
     assert_eq!(
         grid("nightly", Stage::Veteran, Frame { twitch: Some(Side::Left), chew: true, ..still }),
         lines(&[
@@ -111,6 +114,11 @@ fn heads_match_the_prototype() {
             "..............",
         ])
     );
+}
+
+#[test]
+fn turned_heads_match_the_prototype() {
+    let still = Frame::default();
     assert_eq!(
         grid("reviewer", Stage::Worker, Frame { glint: Some(4), bob: true, turn: -1, ..still }),
         lines(&[

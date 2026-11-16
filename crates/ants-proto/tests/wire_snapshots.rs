@@ -4,8 +4,6 @@
 //! trip still passes. Each value is fully populated, every optional field set, so each field name is pinned. A changed
 //! snapshot is a wire change: review it with `cargo insta review`.
 
-#![allow(clippy::too_many_lines)]
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 

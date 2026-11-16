@@ -396,7 +396,10 @@ mod tests {
     use super::*;
     use crate::harness::Harnesses;
 
-    fn classified(harness: &str, detail: &str) -> Option<(LimitKind, Option<Duration>)> {
+    /// The kind of limit a detail classifies as, and when to retry.
+    type Classified = Option<(LimitKind, Option<Duration>)>;
+
+    fn classified(harness: &str, detail: &str) -> Classified {
         let harness = Harnesses::builtin().get(harness).unwrap();
         classify(&harness, detail).map(|l| (l.kind, l.retry_after))
     }
@@ -433,19 +436,23 @@ mod tests {
         )
     }
 
-    /// What the harnesses said when a fake provider turned their prompts away (claude-agent-acp 0.106.0 with Claude
-    /// Code 2.1.325, Copilot CLI 1.0.112, agy 1.5.8), and what Copilot CLI's runtime says of GitHub's limits.
+    /// Check that each case's detail, as its harness said it, classifies as expected.
+    fn assert_classified<const N: usize>(cases: [(&str, String, Classified); N]) {
+        for (harness, detail, expected) in cases {
+            assert_eq!(classified(harness, &detail), expected, "{detail}");
+        }
+    }
+
+    fn secs(s: u64) -> Option<Duration> {
+        Some(Duration::from_secs(s))
+    }
+
+    /// What Claude's adapter said when a fake provider turned its prompts away (claude-agent-acp 0.106.0 with Claude
+    /// Code 2.1.325).
     #[test]
-    #[allow(clippy::too_many_lines)]
-    fn provider_limits_are_told_apart_from_other_errors() {
+    fn claude_provider_limits_are_told_apart_from_other_errors() {
         use LimitKind::{Quota, RateLimit};
-        let secs = |s| Some(Duration::from_secs(s));
-        let agy = |retry, quota_id, delay| {
-            let mut reply: String = (1..=8).map(|n| gemini_429(n, retry, quota_id, delay)).collect();
-            reply.push_str(AGY_TERMINATED);
-            reply
-        };
-        let cases = [
+        assert_classified([
             (
                 "claude",
                 acp_error(
@@ -476,12 +483,29 @@ mod tests {
                 ),
                 Some((RateLimit, None)),
             ),
-            ("claude", acp_error("You've hit your 5-hour limit · resets 6:43am (Asia/Tokyo)", "rate_limit"), Some((Quota, None))),
-            ("claude", acp_error("You\u{2019}ve reached your Fable limit for this week.", "rate_limit"), Some((Quota, None))),
+            (
+                "claude",
+                acp_error("You've hit your 5-hour limit · resets 6:43am (Asia/Tokyo)", "rate_limit"),
+                Some((Quota, None)),
+            ),
+            (
+                "claude",
+                acp_error("You\u{2019}ve reached your Fable limit for this week.", "rate_limit"),
+                Some((Quota, None)),
+            ),
             ("claude", acp_error("Credit balance is too low", "billing_error"), Some((Quota, None))),
             ("claude", acp_error("spend limit reached · resets Aug 8", "billing_error"), Some((Quota, None))),
             ("claude", "Claude AI usage limit reached|4102444800".to_owned(), Some((Quota, Some(MAX_HINT)))),
             ("claude", acp_error("API Error: 500 Internal server error", "server_error"), None),
+        ]);
+    }
+
+    /// What Copilot CLI said when a fake provider turned its prompts away (Copilot CLI 1.0.112), and what its runtime
+    /// says of GitHub's limits.
+    #[test]
+    fn copilot_provider_limits_are_told_apart_from_other_errors() {
+        use LimitKind::{Quota, RateLimit};
+        assert_classified([
             (
                 "copilot",
                 format!("Info: Request failed due to a transient API error. Retrying...{}", copilot_failed("16.07", "529 Overloaded")),
@@ -523,6 +547,22 @@ mod tests {
             ("copilot", "You've used all your Copilot Free chat requests for the month.".to_owned(), Some((Quota, None))),
             ("copilot", "No remaining quota for premium requests".to_owned(), Some((Quota, None))),
             ("copilot", copilot_failed("3.20", "500 Internal Server Error"), None),
+            ("copilot", "Error: insufficient_quota; retry-after: 30".to_owned(), Some((RateLimit, secs(30)))),
+            ("copilot", "Internal error: connection reset by peer".to_owned(), None),
+            ("copilot", "Process exited: 2026-11-15T03:51:14.529 read line 429 of /src/429/main.rs".to_owned(), None),
+        ]);
+    }
+
+    /// What agy said when a fake provider turned its prompts away (agy 1.5.8).
+    #[test]
+    fn antigravity_provider_limits_are_told_apart_from_other_errors() {
+        use LimitKind::{Quota, RateLimit};
+        let agy = |retry, quota_id, delay| {
+            let mut reply: String = (1..=8).map(|n| gemini_429(n, retry, quota_id, delay)).collect();
+            reply.push_str(AGY_TERMINATED);
+            reply
+        };
+        assert_classified([
             (
                 "antigravity",
                 agy("23.4s", "GenerateRequestsPerMinutePerProjectPerModel-FreeTier", "23s"),
@@ -548,13 +588,7 @@ mod tests {
                 Some((RateLimit, secs(2 * 3600 + 27 * 60 + 3))),
             ),
             ("antigravity", "Your AI credits balance is too low to continue.".to_owned(), Some((Quota, None))),
-            ("copilot", "Error: insufficient_quota; retry-after: 30".to_owned(), Some((RateLimit, secs(30)))),
-            ("copilot", "Internal error: connection reset by peer".to_owned(), None),
-            ("copilot", "Process exited: 2026-11-15T03:51:14.529 read line 429 of /src/429/main.rs".to_owned(), None),
-        ];
-        for (harness, detail, expected) in cases {
-            assert_eq!(classified(harness, &detail), expected, "{detail}");
-        }
+        ]);
     }
 
     /// A reply is read as the harness's error only when every piece of it is an error or notice line, so an answer

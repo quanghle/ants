@@ -28,8 +28,11 @@ use async_nats::jetstream;
 use chrono::Utc;
 use serde_json::{Map, Value, json};
 
-use super::add::{NOT_GIVEN, entry, entry_text, key_for, leaf_uplink, renew, sign, write_secret};
-use super::{ConfigFile, NO_CONFIG, Orders, applied, refused};
+use nkeys::KeyPair;
+
+use super::add::{NOT_GIVEN, Renewal, entry, entry_text, key_for, leaf_uplink, renew, sign, write_secret};
+use super::ask::Uplink;
+use super::{ConfigFile, LeafNode, NO_CONFIG, Orders, applied, refused};
 use crate::clone::{Snapshot, ThreadCopy};
 use crate::config::{self, edit::Edit};
 use crate::direct_kv::DirectKv;
@@ -62,7 +65,8 @@ pub(super) async fn apply(
         return refused(order, "the machine has no host credentials to ask `ants signer` with");
     };
     let mut done = Done::default();
-    let result = clone(js, bucket, orders, config, host_creds, order, new, settings, &mut done).await;
+    let cloning = Cloning { js, bucket, orders, config, host_creds, order, new, settings };
+    let result = cloning.run(&mut done).await;
     let (paused, key) = (done.paused, done.key.take());
     if result.is_err() {
         done.undo(order).await;
@@ -227,123 +231,181 @@ fn plan(
     let dir = host_creds.parent().context("the host credentials are in no directory")?;
     let creds_path = dir.join(format!("{new}.creds"));
     let shared_over = src_shared.as_ref().and_then(Option::as_ref);
-    let (table, probe, workdir, shared) =
-        table(path, ant, &src_home, &new_home, settings, shared_over, &creds_path, new, &mark)?;
+    let source = Source { path, ant, home: &src_home, shared: shared_over };
+    let target = Target { new, home: &new_home, creds: &creds_path, settings, mark: &mark };
+    let (table, probe, workdir, shared) = table(source, target)?;
     config::parse(&entry_text(&text, &probe), &std::path::absolute(path)?, &user_home)
         .context("the config with the clone added")?;
     let shared = src_shared.map(|_| shared);
     Ok(Some(Plan { table, workdir, src_home, new_home, dir: dir.to_owned(), creds_path, shared }))
 }
 
-/// Carry out the clone of the order's ant as `new`, noting in `done` what to undo: what it did, none when the config
-/// shows it done already.
-#[expect(clippy::too_many_arguments)]
-async fn clone(
-    js: &jetstream::Context,
-    bucket: Bucket<'_>,
-    orders: &Orders,
-    config: &ConfigFile,
-    host_creds: &Path,
-    order: &AdminOrder,
+/// A clone order being carried out, with what it is carried out with.
+struct Cloning<'a> {
+    js: &'a jetstream::Context,
+    bucket: Bucket<'a>,
+    orders: &'a Orders,
+    config: &'a ConfigFile,
+    /// The machine's host credentials, which `ants signer` is asked with.
+    host_creds: &'a Path,
+    order: &'a AdminOrder,
+    new: &'a UserId,
+    settings: &'a Map<String, Value>,
+}
+
+/// The clone's key, signed by `ants signer`.
+struct Signed<'a> {
+    /// Where the key is kept until the clone is listed.
+    seed_path: PathBuf,
+    key: KeyPair,
+    public_key: String,
+    jwt: String,
+    renewal: Option<Renewal<'a>>,
+}
+
+impl Cloning<'_> {
+    /// Carry out the clone of the order's ant as `new`, noting in `done` what to undo: what it did, none when the
+    /// config shows it done already.
+    async fn run(&self, done: &mut Done) -> Result<Option<Value>> {
+        let (src, path, new) = (&self.order.ant, &self.config.path, self.new);
+        let src_shared = match shared::read(self.bucket, src).await? {
+            Found::Record(record, _) => Some(Some(record.fields)),
+            Found::None(_) | Found::Malformed(..) | Found::Unverified(..) => Some(None),
+            Found::NoBucket => None,
+        };
+        let Some(plan) = plan(path, self.host_creds, self.order, new, self.settings, src_shared)? else {
+            return Ok(None);
+        };
+        if !self.orders.restarts.hears_clones(src) {
+            bail!("{} serves no inbox of {src} to clone", self.orders.machine);
+        }
+        let leaf = leaf_uplink(self.orders.leaf.as_ref())?;
+        let snapshot = self.snapshot(done).await?;
+        let (trees, branches) = copy_files(&plan, &snapshot, new, done).await?;
+        let signed = self.sign(leaf, &plan, done).await?;
+        let (forked, restart, record) = self.store(&plan, &snapshot, &trees, done).await?;
+
+        let Plan { table, workdir, new_home, creds_path, shared, .. } = plan;
+        if workdir.starts_with(&new_home) {
+            std::fs::create_dir_all(&workdir).with_context(|| format!("creating {}", workdir.display()))?;
+        }
+        // Before listing the ant, so its first connection finds the uplink carrying it.
+        let uplink = match signed.renewal {
+            Some((leaf, machine, renewed)) => Some(renew(leaf, &machine, new, renewed).await),
+            None => None,
+        };
+        if let Some(fields) = shared {
+            let mut record = SharedSettings::new(new.clone(), fields, self.orders.machine.clone(), None);
+            done.shared = Some((self.bucket.identities.clone(), record.key()));
+            let signer = shared::Signer::new(&signed.jwt, signed.key.clone());
+            shared::write(self.bucket.identities, &mut record, &signer, None).await?;
+            self.config.shared.store(record);
+        }
+        config::append(path, &table)?;
+        if let Err(e) = std::fs::remove_file(&signed.seed_path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(path = %signed.seed_path.display(), error = %e, "removing the key of a cloned ant");
+        }
+        let mut result = json!({
+            "creds": creds_path,
+            "key": signed.public_key,
+            "home": new_home,
+            "threads": snapshot.threads.len(),
+            "forked": forked,
+            "restarted": restart,
+            "worktrees": branches,
+            "identity": record_summary(&record),
+        });
+        if let Some(uplink) = uplink {
+            result["uplink"] = Value::String(uplink);
+        }
+        Ok(Some(result))
+    }
+
+    /// Pause the ant cloned, unless it was already, and have the daemon serving its inbox read its snapshot once its
+    /// last prompt ended.
+    async fn snapshot(&self, done: &mut Done) -> Result<Snapshot> {
+        let (src, new, machine) = (&self.order.ant, self.new, &self.orders.machine);
+        if super::pause::edit(&self.config.path, src, true)? {
+            done.paused = true;
+            self.config.pausers.paused(src, &self.order.admin);
+            self.config.edited.notify_one();
+        }
+        let snapshot = tokio::time::timeout(SNAPSHOT_WAIT, self.orders.restarts.snapshot(src, new.clone()))
+            .await
+            .map_err(|_| anyhow!("{src}'s prompts did not end within {}", ants_proto::duration::format(SNAPSHOT_WAIT)))?
+            .with_context(|| format!("{machine} stopped serving the inbox of {src}"))?
+            .with_context(|| format!("reading {src}'s sessions and threads"))?;
+        if let Some(moved) = snapshot.identity.as_ref().and_then(|identity| identity.moved.as_ref()) {
+            bail!(
+                "{src} was moved to another bus by {} at {}: it is cloned where it is served now",
+                moved.by,
+                moved.at
+            );
+        }
+        if snapshot.new_identity.is_some() {
+            bail!("{new} has an identity record already: a name once used is not cloned into");
+        }
+        Ok(snapshot)
+    }
+
+    /// Have `ants signer` sign the clone's key, kept beside the host credentials, and write its credentials there,
+    /// renewing the uplink of `leaf`, if given, to carry it.
+    async fn sign<'l>(&self, leaf: Option<(&'l LeafNode, Uplink)>, plan: &Plan, done: &mut Done) -> Result<Signed<'l>> {
+        let new = self.new;
+        let seed_path = plan.dir.join(format!("{new}.nk"));
+        done.files.push(seed_path.clone());
+        let key = key_for(&plan.creds_path, &seed_path, new)?;
+        let public_key = key.public_key();
+        let (jwt, renewal) =
+            sign(self.js, self.host_creds, leaf, &self.orders.accounts, self.order, new, &public_key).await?;
+        let seed = key.seed().map_err(|e| anyhow!("the seed of {public_key}: {e}"))?;
+        done.files.push(plan.creds_path.clone());
+        write_secret(&plan.creds_path, &creds::text(&jwt, &seed))?;
+        Ok(Signed { seed_path, key, public_key, jwt, renewal })
+    }
+
+    /// Store the clone's sessions ([`store_sessions`]) and its identity record, with its credentials: the threads
+    /// forked, those that start over, and the record.
+    async fn store(
+        &self,
+        plan: &Plan,
+        snapshot: &Snapshot,
+        trees: &[Tree],
+        done: &mut Done,
+    ) -> Result<(Vec<String>, Vec<String>, AntIdentity)> {
+        let (new, domain) = (self.new, self.orders.js_domain.as_ref());
+        let (_client, new_js) = bus::connect(&self.orders.nats, Some(&plan.creds_path), domain, new, "clone").await?;
+        let store = SessionStore::kv(bus::ensure_sessions(&new_js, domain, new).await?, new.clone());
+        let (forked, restart) = store_sessions(&store, snapshot, trees, &plan.new_home, &plan.workdir, done).await?;
+
+        let identity = Identity::new(&new_js, domain, new).await?;
+        let record = born(new, &self.order.ant, snapshot.identity.as_ref())?;
+        done.identity = Some(identity.clone());
+        identity.replace(&record).await?;
+        Ok((forked, restart, record))
+    }
+}
+
+/// Copy the home of the ant cloned to the clone's, with the history of each thread of `snapshot`, and add its
+/// worktrees again for `new`: the worktrees, and the branches added.
+async fn copy_files(
+    plan: &Plan,
+    snapshot: &Snapshot,
     new: &UserId,
-    settings: &Map<String, Value>,
     done: &mut Done,
-) -> Result<Option<Value>> {
-    let (src, path) = (&order.ant, &config.path);
-    let src_shared = match shared::read(bucket, src).await? {
-        Found::Record(record, _) => Some(Some(record.fields)),
-        Found::None(_) | Found::Malformed(..) | Found::Unverified(..) => Some(None),
-        Found::NoBucket => None,
-    };
-    let Some(Plan { table, workdir, src_home, new_home, dir, creds_path, shared }) =
-        plan(path, host_creds, order, new, settings, src_shared)?
-    else {
-        return Ok(None);
-    };
-    if !orders.restarts.hears_clones(src) {
-        bail!("{} serves no inbox of {src} to clone", orders.machine);
-    }
-    let leaf = leaf_uplink(orders.leaf.as_ref())?;
-
-    if super::pause::edit(path, src, true)? {
-        done.paused = true;
-        config.pausers.paused(src, &order.admin);
-        config.edited.notify_one();
-    }
-    let snapshot = tokio::time::timeout(SNAPSHOT_WAIT, orders.restarts.snapshot(src, new.clone()))
-        .await
-        .map_err(|_| anyhow!("{src}'s prompts did not end within {}", ants_proto::duration::format(SNAPSHOT_WAIT)))?
-        .with_context(|| format!("{} stopped serving the inbox of {src}", orders.machine))?
-        .with_context(|| format!("reading {src}'s sessions and threads"))?;
-    if let Some(moved) = snapshot.identity.as_ref().and_then(|identity| identity.moved.as_ref()) {
-        bail!("{src} was moved to another bus by {} at {}: it is cloned where it is served now", moved.by, moved.at);
-    }
-    if snapshot.new_identity.is_some() {
-        bail!("{new} has an identity record already: a name once used is not cloned into");
-    }
-
-    let trees = worktrees(&src_home, &snapshot.threads).await?;
+) -> Result<(Vec<Tree>, Vec<String>)> {
+    let (src_home, new_home) = (&plan.src_home, &plan.new_home);
+    let trees = worktrees(src_home, &snapshot.threads).await?;
     done.home = Some(new_home.clone());
-    copy_home(&src_home, &new_home)?;
-    write_histories(&new_home, &snapshot.threads)?;
+    copy_home(src_home, new_home)?;
+    write_histories(new_home, &snapshot.threads)?;
     let mut branches = Vec::new();
     for tree in &trees {
-        branches.push(tree.add(&src_home, &new_home, new, done).await?);
+        branches.push(tree.add(src_home, new_home, new, done).await?);
     }
-
-    let seed_path = dir.join(format!("{new}.nk"));
-    done.files.push(seed_path.clone());
-    let key = key_for(&creds_path, &seed_path, new)?;
-    let public_key = key.public_key();
-    let (jwt, renewal) = sign(js, host_creds, leaf, &orders.accounts, order, new, &public_key).await?;
-    let seed = key.seed().map_err(|e| anyhow!("the seed of {public_key}: {e}"))?;
-    done.files.push(creds_path.clone());
-    write_secret(&creds_path, &creds::text(&jwt, &seed))?;
-
-    let domain = orders.js_domain.as_ref();
-    let (_client, new_js) = bus::connect(&orders.nats, Some(&creds_path), domain, new, "clone").await?;
-    let store = SessionStore::kv(bus::ensure_sessions(&new_js, domain, new).await?, new.clone());
-    let (forked, restart) = store_sessions(&store, &snapshot, &trees, &new_home, &workdir, done).await?;
-
-    let identity = Identity::new(&new_js, domain, new).await?;
-    let record = born(new, src, snapshot.identity.as_ref())?;
-    done.identity = Some(identity.clone());
-    identity.replace(&record).await?;
-
-    if workdir.starts_with(&new_home) {
-        std::fs::create_dir_all(&workdir).with_context(|| format!("creating {}", workdir.display()))?;
-    }
-    // Before listing the ant, so its first connection finds the uplink carrying it.
-    let uplink = match renewal {
-        Some((leaf, machine, renewed)) => Some(renew(leaf, &machine, new, renewed).await),
-        None => None,
-    };
-    if let Some(fields) = shared {
-        let mut record = SharedSettings::new(new.clone(), fields, orders.machine.clone(), None);
-        done.shared = Some((bucket.identities.clone(), record.key()));
-        shared::write(bucket.identities, &mut record, &shared::Signer::new(&jwt, key.clone()), None).await?;
-        config.shared.store(record);
-    }
-    config::append(path, &table)?;
-    if let Err(e) = std::fs::remove_file(&seed_path)
-        && e.kind() != std::io::ErrorKind::NotFound
-    {
-        tracing::warn!(path = %seed_path.display(), error = %e, "removing the key of a cloned ant");
-    }
-    let mut result = json!({
-        "creds": creds_path,
-        "key": public_key,
-        "home": new_home,
-        "threads": snapshot.threads.len(),
-        "forked": forked,
-        "restarted": restart,
-        "worktrees": branches,
-        "identity": record_summary(&record),
-    });
-    if let Some(uplink) = uplink {
-        result["uplink"] = Value::String(uplink);
-    }
-    Ok(Some(result))
+    Ok((trees, branches))
 }
 
 /// Store in `store`, the clone's, a session for each thread of `snapshot`, forked in the thread's worktree among
@@ -430,22 +492,36 @@ async fn session(launch: Option<&harness::Launch>, copy: &ThreadCopy, cwd: PathB
     }
 }
 
+/// The ant cloned, as the clone's table is made from it.
+#[derive(Clone, Copy)]
+struct Source<'a> {
+    /// The config file listing it.
+    path: &'a Path,
+    ant: &'a config::Ant,
+    home: &'a Path,
+    /// Its shared settings, when it has a record of them.
+    shared: Option<&'a Map<String, Value>>,
+}
+
+/// The clone, as its table names it.
+#[derive(Clone, Copy)]
+struct Target<'a> {
+    new: &'a UserId,
+    home: &'a Path,
+    creds: &'a Path,
+    /// The order's settings, over those of the ant cloned.
+    settings: &'a Map<String, Value>,
+    /// The comment above the table ([`mark`]).
+    mark: &'a str,
+}
+
 /// The `[[ant]]` table of the clone `new` of `ant`, one to check the file with before its workdir exists, and its
 /// workdir: the table of `ant` in the file at `path` (or, for an ant added from a template, the settings the template
 /// gave it) with `shared`, its shared settings when it has a record of them, and `settings` over it, its workdir moved
 /// into `new_home` if it was in `src_home`; and the clone's shared settings, as the table gives them.
-#[expect(clippy::too_many_arguments)]
-fn table(
-    path: &Path,
-    ant: &config::Ant,
-    src_home: &Path,
-    new_home: &Path,
-    settings: &Map<String, Value>,
-    shared: Option<&Map<String, Value>>,
-    creds: &Path,
-    new: &UserId,
-    mark: &str,
-) -> Result<(String, String, PathBuf, Map<String, Value>)> {
+fn table(source: Source<'_>, target: Target<'_>) -> Result<(String, String, PathBuf, Map<String, Value>)> {
+    let Source { path, ant, home: src_home, shared } = source;
+    let Target { new, home: new_home, creds, settings, mark } = target;
     let raw = Edit::open(path)?.table(&ant.name)?;
     let mut table = if ant.template.is_some() {
         let mut plain = resolved(ant);
@@ -657,18 +733,12 @@ mod tests {
         let loaded = config::parse(text, &path, &dir).unwrap();
         let src = loaded.ants.iter().find(|a| a.name.as_str() == "lead-a").unwrap();
         let record = json!({ "model": "gpt-5", "whoami": "a tester" });
-        let (.., shared) = table(
-            &path,
-            src,
-            &dir.join("lead-a"),
-            &dir.join("lead-b"),
-            &Map::new(),
-            record.as_object(),
-            &dir.join("lead-b.creds"),
-            &"lead-b".parse().unwrap(),
-            "# cloned",
-        )
-        .unwrap();
+        let (src_home, new_home, creds) = (dir.join("lead-a"), dir.join("lead-b"), dir.join("lead-b.creds"));
+        let source = Source { path: &path, ant: src, home: &src_home, shared: record.as_object() };
+        let new = "lead-b".parse().unwrap();
+        let settings = Map::new();
+        let target = Target { new: &new, home: &new_home, creds: &creds, settings: &settings, mark: "# cloned" };
+        let (.., shared) = table(source, target).unwrap();
         assert_eq!(shared.get("whoami"), Some(&json!("a tester")), "the shared settings of the ant cloned");
         assert_eq!(shared.get("allow"), Some(&json!(["read"])), "the template's");
         assert_eq!(shared.get("escalate_to"), Some(&json!(["lead"])));

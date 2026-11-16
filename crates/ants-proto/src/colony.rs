@@ -264,10 +264,8 @@ mod tests {
     use super::*;
     use crate::{p, subject};
 
-    #[test]
-    #[allow(clippy::too_many_lines)]
-    fn colony_entry_round_trips_and_tolerates_additions() {
-        let entry = ColonyEntry {
+    fn dev_a() -> ColonyEntry {
+        ColonyEntry {
             ant: p("dev-a"),
             machine: "build-1".to_owned(),
             instance: "run-1".to_owned(),
@@ -292,7 +290,19 @@ mod tests {
             model: None,
             paused: None,
             drift: Vec::new(),
-        };
+        }
+    }
+
+    /// Check that `entry` serializes with `part` and reads back the same.
+    fn round_trips(entry: &ColonyEntry, part: &str) {
+        let json = serde_json::to_string(entry).unwrap();
+        assert!(json.contains(part), "{json}");
+        assert_eq!(serde_json::from_str::<ColonyEntry>(&json).unwrap(), *entry);
+    }
+
+    #[test]
+    fn colony_entry_round_trips() {
+        let entry = dev_a();
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains(r#""instance":"run-1""#), "{json}");
         assert!(json.contains(r#""activity":"idle","handling":0,"harnesses":0"#), "{json}");
@@ -305,85 +315,65 @@ mod tests {
         assert_eq!(entry.leader(), None);
         let agent = HarnessAgent { name: "copilot-agent".to_owned(), version: "1.0.3".to_owned() };
         let named = ColonyEntry { agent: Some(agent.clone()), ..entry.clone() };
-        let json = serde_json::to_string(&named).unwrap();
-        assert!(json.contains(r#""agent":{"name":"copilot-agent","version":"1.0.3"}"#), "{json}");
-        assert_eq!(serde_json::from_str::<ColonyEntry>(&json).unwrap(), named);
+        round_trips(&named, r#""agent":{"name":"copilot-agent","version":"1.0.3"}"#);
         assert_eq!(agent.to_string(), "copilot-agent 1.0.3");
         let chained = ColonyEntry { escalate_to: vec![p("lead"), p("dev-b")], ..entry.clone() };
-        let json = serde_json::to_string(&chained).unwrap();
-        assert!(json.contains(r#""escalate_to":["lead","dev-b"]"#), "{json}");
-        assert_eq!(serde_json::from_str::<ColonyEntry>(&json).unwrap(), chained);
+        round_trips(&chained, r#""escalate_to":["lead","dev-b"]"#);
         assert_eq!(chained.leader(), Some(&p("lead")));
         let busy = ColonyEntry { activity: Activity::Working, handling: 2, harnesses: 1, ..entry.clone() };
-        let json = serde_json::to_string(&busy).unwrap();
-        assert!(json.contains(r#""activity":"working","handling":2,"harnesses":1"#), "{json}");
-        assert_eq!(serde_json::from_str::<ColonyEntry>(&json).unwrap(), busy);
+        round_trips(&busy, r#""activity":"working","handling":2,"harnesses":1"#);
+        assert_eq!(AntModel::of(None, None, None), None);
+        let model = AntModel::of(Some("gpt-5".to_owned()), None, Some("1m".to_owned()));
+        assert_eq!(model.as_ref().map(ToString::to_string).as_deref(), Some("gpt-5, context 1m"));
+        round_trips(&ColonyEntry { model, ..entry.clone() }, r#""model":{"model":"gpt-5","context":"1m"}"#);
+        assert_eq!(entry.key(), "dev-a");
+        assert_eq!(entry.check_key("dev-a"), Ok(()));
+        assert_eq!(entry.check_key("dev-b").unwrap_err().to_string(), "colony entry of dev-a found at key dev-b");
+        assert_eq!(subject::colony(&entry.ant), "$KV.ants_colony.dev-a");
+    }
+
+    #[test]
+    fn colony_entry_round_trips_the_harness_state() {
+        let entry = dev_a();
         let since = "2026-01-01T00:00:00Z".parse().unwrap();
         let out = ColonyEntry {
             signed_out: Some(SignInNeeded { since, sign_in: Some("copilot login".to_owned()) }),
             ..entry.clone()
         };
-        let json = serde_json::to_string(&out).unwrap();
-        assert!(json.contains(r#""signed_out":{"since":"2026-01-01T00:00:00Z","sign_in":"copilot login"}"#), "{json}");
-        assert_eq!(serde_json::from_str::<ColonyEntry>(&json).unwrap(), out);
+        round_trips(&out, r#""signed_out":{"since":"2026-01-01T00:00:00Z","sign_in":"copilot login"}"#);
         let unknown = ColonyEntry { signed_out: Some(SignInNeeded { since, sign_in: None }), ..entry.clone() };
-        let json = serde_json::to_string(&unknown).unwrap();
-        assert!(json.contains(r#""signed_out":{"since":"2026-01-01T00:00:00Z"}"#), "{json}");
-        assert_eq!(serde_json::from_str::<ColonyEntry>(&json).unwrap(), unknown);
+        round_trips(&unknown, r#""signed_out":{"since":"2026-01-01T00:00:00Z"}"#);
         let until = "2026-01-01T00:15:00Z".parse().unwrap();
         let limited =
             ColonyEntry { limited: Some(HarnessLimit { kind: LimitKind::Quota, since, until }), ..entry.clone() };
-        let json = serde_json::to_string(&limited).unwrap();
-        assert!(
-            json.contains(
-                r#""limited":{"kind":"quota","since":"2026-01-01T00:00:00Z","until":"2026-01-01T00:15:00Z"}"#
-            ),
-            "{json}"
+        round_trips(
+            &limited,
+            r#""limited":{"kind":"quota","since":"2026-01-01T00:00:00Z","until":"2026-01-01T00:15:00Z"}"#,
         );
-        assert_eq!(serde_json::from_str::<ColonyEntry>(&json).unwrap(), limited);
         let failing = ColonyEntry {
             failing: Some(HarnessFailing { since, error: "copilot: not found".to_owned() }),
             ..entry.clone()
         };
-        let json = serde_json::to_string(&failing).unwrap();
-        assert!(json.contains(r#""failing":{"since":"2026-01-01T00:00:00Z","error":"copilot: not found"}"#), "{json}");
-        assert_eq!(serde_json::from_str::<ColonyEntry>(&json).unwrap(), failing);
+        round_trips(&failing, r#""failing":{"since":"2026-01-01T00:00:00Z","error":"copilot: not found"}"#);
         let fallback = ColonyEntry {
             fallback: Some(ServingFallback { name: "claude:sonnet".to_owned(), since }),
             ..entry.clone()
         };
-        let json = serde_json::to_string(&fallback).unwrap();
-        assert!(json.contains(r#""fallback":{"name":"claude:sonnet","since":"2026-01-01T00:00:00Z"}"#), "{json}");
-        assert_eq!(serde_json::from_str::<ColonyEntry>(&json).unwrap(), fallback);
+        round_trips(&fallback, r#""fallback":{"name":"claude:sonnet","since":"2026-01-01T00:00:00Z"}"#);
         let low = ColonyEntry {
             memory_low: Some(MemoryLow { since, available: 512 << 20, max_harnesses: 1 }),
             ..entry.clone()
         };
-        let json = serde_json::to_string(&low).unwrap();
-        assert!(
-            json.contains(r#""memory_low":{"since":"2026-01-01T00:00:00Z","available":536870912,"max_harnesses":1}"#),
-            "{json}"
-        );
-        assert_eq!(serde_json::from_str::<ColonyEntry>(&json).unwrap(), low);
-        assert_eq!(AntModel::of(None, None, None), None);
-        let model = AntModel::of(Some("gpt-5".to_owned()), None, Some("1m".to_owned()));
-        assert_eq!(model.as_ref().map(ToString::to_string).as_deref(), Some("gpt-5, context 1m"));
-        let modelled = ColonyEntry { model, ..entry.clone() };
-        let json = serde_json::to_string(&modelled).unwrap();
-        assert!(json.contains(r#""model":{"model":"gpt-5","context":"1m"}"#), "{json}");
-        assert_eq!(serde_json::from_str::<ColonyEntry>(&json).unwrap(), modelled);
+        round_trips(&low, r#""memory_low":{"since":"2026-01-01T00:00:00Z","available":536870912,"max_harnesses":1}"#);
         let paused = ColonyEntry { paused: Some(Paused { since, by: Some(p("alice")) }), ..entry.clone() };
-        let json = serde_json::to_string(&paused).unwrap();
-        assert!(json.contains(r#""paused":{"since":"2026-01-01T00:00:00Z","by":"alice"}"#), "{json}");
-        assert_eq!(serde_json::from_str::<ColonyEntry>(&json).unwrap(), paused);
-        let by_hand = ColonyEntry { paused: Some(Paused { since, by: None }), ..entry.clone() };
+        round_trips(&paused, r#""paused":{"since":"2026-01-01T00:00:00Z","by":"alice"}"#);
+        let by_hand = ColonyEntry { paused: Some(Paused { since, by: None }), ..entry };
         let json = serde_json::to_string(&by_hand).unwrap();
         assert!(json.contains(r#""paused":{"since":"2026-01-01T00:00:00Z"}"#), "{json}");
-        assert_eq!(entry.key(), "dev-a");
-        assert_eq!(entry.check_key("dev-a"), Ok(()));
-        assert_eq!(entry.check_key("dev-b").unwrap_err().to_string(), "colony entry of dev-a found at key dev-b");
-        assert_eq!(subject::colony(&entry.ant), "$KV.ants_colony.dev-a");
+    }
 
+    #[test]
+    fn colony_entry_tolerates_missing_and_added_fields() {
         let minimal = r#"{"ant":"dev-b","machine":"m","instance":"run-2","harness":"copilot","capabilities":[],
             "started_at":"2026-01-01T00:00:00Z","heartbeat_at":"2026-01-01T00:00:10Z",
             "activity":"idle","handling":0,"harnesses":0,"version":"0.3.1","perms":1}"#;
