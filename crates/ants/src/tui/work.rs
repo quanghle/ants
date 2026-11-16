@@ -1,7 +1,7 @@
 //! The work view: every thread read, with the state the messages on it tell, those waiting on the human first.
 //! What each thread's messages tell ([`Facts`]) also feeds home and the nav's counts.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ants_proto::{ChannelId, EscalationReason, Question, ThreadDone, ThreadId, UserId, Uuid};
 use chrono::{DateTime, Utc};
@@ -127,6 +127,10 @@ pub struct Fact {
     pub turns: Option<u32>,
     /// Who first messaged each user on it, in the order they were first messaged: who delegated to whom.
     pub asked: Vec<(UserId, UserId)>,
+    /// Each sender and recipient a message or escalation on it went between.
+    between: HashSet<(UserId, UserId)>,
+    /// Who posted on it to a channel.
+    posted: HashSet<UserId>,
     /// The questions to the human no answer was read to yet.
     questions: Vec<Asked>,
     /// The messages to the human.
@@ -154,6 +158,15 @@ impl Facts {
         {
             fact.sent.insert(from.clone(), entry.seq);
             fact.turns = entry.turns.or(fact.turns);
+        }
+        match (entry.kind, &entry.from, &entry.to) {
+            (Kind::Message | Kind::Escalation, Some(from), Some(to)) => {
+                fact.between.insert((from.clone(), to.clone()));
+            }
+            (Kind::Post, Some(from), _) => {
+                fact.posted.insert(from.clone());
+            }
+            _ => {}
         }
         match (entry.kind, &entry.from, &entry.to) {
             (Kind::Message, Some(from), Some(to)) => {
@@ -207,6 +220,19 @@ impl Data {
         let after = self.last_human(fact);
         let escalated = fact.escalated.iter().filter(|(to, _)| self.is_human(to)).map(|(_, a)| a);
         escalated.chain(&fact.dead).filter(|a| a.seq > after).max_by_key(|a| a.seq)
+    }
+
+    /// Whether `ant` is on the thread where a human reaches it: it posted there to a channel, or a message or
+    /// escalation there went between it and a human. An ant only other ants messaged there is not, as a reply there
+    /// goes to another ant ([`super::exec::reply_to`]).
+    fn reaches(&self, thread: &ThreadId, ant: &UserId) -> bool {
+        self.facts.get(thread).is_some_and(|fact| {
+            fact.posted.contains(ant)
+                || fact
+                    .between
+                    .iter()
+                    .any(|(from, to)| (from == ant && self.is_human(to)) || (to == ant && self.is_human(from)))
+        })
     }
 
     /// Whether an ant has a message on the thread it did not answer yet.
@@ -285,7 +311,7 @@ impl Data {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Filter {
     pub state: Option<ThreadState>,
-    /// Only threads this ant or human is on.
+    /// Only threads where a human reaches this ant ([`Data::reaches`]).
     pub user: Option<UserId>,
     /// Only threads posted in this channel.
     pub channel: Option<ChannelId>,
@@ -320,7 +346,7 @@ impl Page {
             .iter()
             .filter(|t| {
                 let summary = data.live.summary(t);
-                let on = |user: &UserId| summary.is_some_and(|s| s.users.contains(user));
+                let on = |user: &UserId| data.reaches(t, user);
                 let posted = |channel: &ChannelId| summary.is_some_and(|s| s.channels.contains(channel));
                 self.filter.user.as_ref().is_none_or(on) && self.filter.channel.as_ref().is_none_or(posted)
             })
@@ -766,5 +792,25 @@ mod tests {
         m.select(super::super::nav::Item::Work(Some(ThreadState::WaitingOnAnt)));
         let View::Work(page) = m.page() else { panic!("not the work view") };
         assert_eq!(page.rows(&m.data), [(theirs, ThreadState::WaitingOnAnt)]);
+    }
+
+    #[test]
+    fn an_ant_only_other_ants_messaged_on_a_thread_is_not_filtered_to_it() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        m.stored(
+            vec![
+                message(1, &thread, "alice", "dev-a", "find out"),
+                message(2, &thread, "dev-a", "dev-b", "check the logs"),
+                message(3, &thread, "dev-b", "dev-a", "clean"),
+            ],
+            at(4),
+        );
+        let with = |ant: &str| Page::new(Filter { user: Some(user(ant)), ..Filter::default() }).rows(&m.data).len();
+        assert_eq!((with("dev-a"), with("dev-b")), (1, 0), "a reply there goes to dev-a");
+
+        m.stored(vec![message(4, &thread, "dev-b", "bob", "fyi")], at(5));
+        let with = |ant: &str| Page::new(Filter { user: Some(user(ant)), ..Filter::default() }).rows(&m.data).len();
+        assert_eq!(with("dev-b"), 1, "dev-b messaged a human there");
     }
 }
