@@ -1,6 +1,6 @@
-//! Home, the triage queue: what waits on the human, one item per thread and reason (per tool request for approvals,
-//! as cards answered where they show, [`approvals`]), the most pressing reasons first and the oldest first within
-//! one, each with its one-key actions: answer ([`question`]), grant, reply, follow up, cancel, mark done, snooze ([`super::snooze`])
+//! Home, the triage queue: what waits on the human, one item per thread under its most pressing reason with badges for
+//! the others (per tool request for approvals, as cards answered where they show, [`approvals`]), the most pressing
+//! reasons first and the oldest first within one, each with the one-key actions of its reason: answer ([`question`]), grant, reply, follow up, cancel, mark done, snooze ([`super::snooze`])
 //! or open. A snoozed thread's items stay off home until the snooze ends or an item for the human arrives on it.
 
 use std::collections::HashMap;
@@ -74,6 +74,14 @@ impl Why {
         }
     }
 
+    /// The badge of `n` reasons of this kind on a thread listed under another: `question`, `2 mentions`.
+    fn badge(self, n: usize) -> String {
+        match (self, n) {
+            (Self::Message | Self::Mention, 2..) => format!("{n} {}s", self.label()),
+            _ => self.label().to_owned(),
+        }
+    }
+
     pub fn color(self) -> Color {
         match self {
             Self::Approval => Color::Yellow,
@@ -99,14 +107,25 @@ pub struct Item {
     pub request: Option<(ApprovalRequest, Option<State>)>,
     /// The question asked.
     pub question: Option<Question>,
+    /// How many of its reason wait on the thread: unread messages or mentions.
+    pub count: usize,
+    /// The thread's other, less pressing reasons, with how many of each: its badges.
+    pub also: Vec<(Why, usize)>,
 }
 
-/// What an item is, whatever else changes on it: its reason and thread, and the id of an approval's tool request.
-pub type Id = (Why, ThreadId, Option<Uuid>);
+/// What an item is, whatever else changes on it: its thread, or an approval's tool request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Id {
+    Thread(ThreadId),
+    Request(UserId, Uuid),
+}
 
 impl Item {
     pub fn id(&self) -> Id {
-        (self.why, self.thread.clone(), self.request.as_ref().map(|(r, _)| r.id))
+        match &self.request {
+            Some((request, _)) => Id::Request(request.ant.clone(), request.id),
+            None => Id::Thread(self.thread.clone()),
+        }
     }
 }
 
@@ -117,6 +136,20 @@ pub fn items(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
     items.retain(|i| !held.contains_key(&i.thread));
     // The requests waiting for the human before those settled lately.
     items.sort_by_key(|i| (i.why, i.request.as_ref().is_some_and(|(_, settled)| settled.is_some()), i.at));
+    grouped(items)
+}
+
+/// `reasons`, sorted, as one item per thread under its most pressing reason, the others its badges; approvals stay
+/// items of their own.
+fn grouped(reasons: Vec<Item>) -> Vec<Item> {
+    let mut items: Vec<Item> = Vec::new();
+    for reason in reasons {
+        let on = |i: &&mut Item| i.why != Why::Approval && i.thread == reason.thread;
+        match items.iter_mut().find(on) {
+            Some(top) if reason.why != Why::Approval => top.also.push((reason.why, reason.count)),
+            _ => items.push(reason),
+        }
+    }
     items
 }
 
@@ -159,6 +192,8 @@ fn unsnoozed(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
                 who: Some(request.ant.clone()),
                 request: Some((request.clone(), card.settled.cloned())),
                 question: None,
+                count: 1,
+                also: Vec::new(),
             }
         })
         .collect();
@@ -170,6 +205,8 @@ fn unsnoozed(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
         who: Some(who.clone()),
         request: None,
         question: None,
+        count: 1,
+        also: Vec::new(),
     };
     for thread in &data.live.order {
         if let Some(asked) = data.question(thread) {
@@ -183,14 +220,18 @@ fn unsnoozed(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
             items.push(Item { who: None, ..item(Why::Stuck, thread, alert.at, alert.text.clone(), data.me()) });
         }
         let me = data.me();
-        if let Some(m) =
-            data.unread_on(thread).find(|i| i.kind == Kind::Message && i.from != *me && data.is_human(&i.from))
-        {
-            items.push(item(Why::Message, thread, m.at, format!("{}: {}", m.from, m.text), &m.from));
+        let messages: Vec<_> = data
+            .unread_on(thread)
+            .filter(|i| i.kind == Kind::Message && i.from != *me && data.is_human(&i.from))
+            .collect();
+        if let Some(m) = messages.first() {
+            let text = format!("{}: {}", m.from, m.text);
+            items.push(Item { count: messages.len(), ..item(Why::Message, thread, m.at, text, &m.from) });
         }
-        if let Some(m) = data.unread_on(thread).find(|i| i.kind == Kind::Mention) {
+        let mentions: Vec<_> = data.unread_on(thread).filter(|i| i.kind == Kind::Mention).collect();
+        if let Some(m) = mentions.first() {
             let text = format!("{} in #{}: {}", m.from, m.channel.as_ref().map_or("?", |c| c.as_str()), m.text);
-            items.push(item(Why::Mention, thread, m.at, text, &m.from));
+            items.push(Item { count: mentions.len(), ..item(Why::Mention, thread, m.at, text, &m.from) });
         }
         if data.finished(thread)
             && let Some(latest) = data.facts.get(thread).and_then(|f| f.latest.as_ref())
@@ -303,12 +344,17 @@ impl Page {
             .iter()
             .enumerate()
             .map(|(at, i)| {
+                let mut first = vec![
+                    Span::styled(format!("{:<9}", i.why.label()), Style::new().fg(i.why.color())),
+                    Span::raw(data.title(&i.thread)),
+                ];
+                for (why, n) in &i.also {
+                    first.push(Span::styled(" · ", frame::dim()));
+                    first.push(Span::styled(why.badge(*n), Style::new().fg(why.color())));
+                }
+                first.push(Span::styled(format!("  {}", ago(i.at, now)), frame::dim()));
                 let mut lines = vec![
-                    Line::from(vec![
-                        Span::styled(format!("{:<9}", i.why.label()), Style::new().fg(i.why.color())),
-                        Span::raw(data.title(&i.thread)),
-                        Span::styled(format!("  {}", ago(i.at, now)), frame::dim()),
-                    ]),
+                    Line::from(first),
                     Line::from(
                         [Span::raw("         ")]
                             .into_iter()
@@ -508,6 +554,50 @@ mod tests {
         m.key(Key::End, at(8));
         assert_eq!(m.key(Key::Char('f'), at(8)), Some(Action::Open(done)));
         assert!(m.bar.focused, "the bar open to follow up on the thread");
+    }
+
+    fn mention(seq: u64, thread: &ThreadId, from: &str) -> crate::thread::Entry {
+        let envelope = Envelope {
+            thread_id: thread.clone(),
+            mention: Some(Mention { channel: "ops".parse().unwrap(), post: Uuid::now_v7(), author: None }),
+            ..Envelope::new(user(from), user("alice"), "@alice look")
+        };
+        let subject = subject::inbox(&envelope.to, &envelope.from);
+        Parser::default().entry(seq, at(seq.cast_signed()), &subject, &serde_json::to_vec(&envelope).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_thread_shows_once_under_its_most_pressing_reason_with_badges_for_the_others() {
+        use crate::tui::exec::Job;
+
+        let busy = ThreadId::generate();
+        let mut m = model();
+        let mut question = message(2, &busy, "dev-b", "alice", "Which retry policy?");
+        question.question = Some(
+            ants_proto::Question::new("Which retry policy?", &["fixed".to_owned(), "none".to_owned()], false).unwrap(),
+        );
+        m.stored(
+            vec![
+                escalation(1, &busy, "dev-a", "alice"),
+                question.clone(),
+                mention(3, &busy, "dev-c"),
+                mention(4, &busy, "dev-d"),
+            ],
+            at(4),
+        );
+        let found: Vec<(Why, Vec<(Why, usize)>)> = items(&m.data, at(5)).into_iter().map(|i| (i.why, i.also)).collect();
+        assert_eq!(found, [(Why::Question, vec![(Why::Stuck, 1), (Why::Mention, 2)])]);
+        let screen = shown(&m, at(5));
+        assert!(screen.contains("question help · stuck · 2 mentions"), "{screen}");
+        assert!(screen.contains("1-9 answer · d done · z snooze · Enter open"), "the keys of the top reason: {screen}");
+        let job = Job::Answer { thread: busy.clone(), choice: ants_proto::Choice::Option(1) };
+        assert_eq!(m.key(Key::Char('1'), at(5)), Some(Action::Run(job, String::new())));
+
+        let mut answer = message(5, &busy, "alice", "dev-b", "fixed");
+        answer.answer = Some(ants_proto::Answer { question: question.id.unwrap(), option: Some(1) });
+        m.stored(vec![answer], at(5));
+        let found: Vec<(Why, Vec<(Why, usize)>)> = items(&m.data, at(6)).into_iter().map(|i| (i.why, i.also)).collect();
+        assert_eq!(found, [(Why::Mention, vec![])], "answered, and the human's message ends the escalation");
     }
 
     #[test]
