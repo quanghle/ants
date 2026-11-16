@@ -2,23 +2,26 @@
 //! thread, each shared by every human, and each human's pinned and archived threads ([`ThreadMarks`]) and the threads
 //! it snoozed on home ([`ThreadSnoozes`]), shared by its devices. Read and written by direct gets and plain publishes
 //! ([`DirectKv`]); the marks and snoozes, one entry each per human, with compare-and-set, so devices marking at once
-//! lose nothing. The human's assistant sets marks and snoozes in the same entries, naming itself ([`ThreadMarks::by`],
-//! [`ants_proto::Snooze::by`]): they count only while the human's grant names it ([`crate::behalf::Checker`]).
+//! lose nothing. The human's assistant sets marks and snoozes for it in entries of its own
+//! ([`ants_proto::assisted_marks_key`], [`ants_proto::assisted_snoozed_key`]): they count only while the human's grant
+//! names it ([`crate::behalf::Checker`]), and only on threads the human has no mark or snooze of its own on.
 
 use std::cell::Cell;
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::sync::{Arc, Once};
+use std::collections::HashMap;
+use std::sync::{Arc, Once, OnceLock};
 use std::time::Duration;
 
 use ants_daemon::direct_kv::{DirectKv, Lookup};
 use ants_proto::{
-    Acting, JsDomain, Mark, STREAM, THREADS_BUCKET, ThreadDone, ThreadId, ThreadMarks, ThreadSnoozes, ThreadSummary,
-    ThreadTitle, UserId, done_key, marks_key, snoozed_key, summary_key, title_key,
+    JsDomain, Mark, STREAM, THREADS_BUCKET, ThreadDone, ThreadId, ThreadMarks, ThreadSnoozes, ThreadSummary,
+    ThreadTitle, UserId, assisted_marks_key, assisted_snoozed_key, done_key, marks_key, snoozed_key, summary_key,
+    title_key,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
+use serde::{Serialize, de::DeserializeOwned};
 
 use crate::sealed::{self, Keyring, Sealer, Sealing};
 use crate::thread::{self, Entry, Pick};
@@ -36,9 +39,16 @@ pub const KEPT: Duration = ants_daemon::bus::RETENTION;
 /// takes, as nothing needs it.
 const PRUNED_MARKER: Duration = Duration::from_secs(1);
 
-/// The direct get subject of `human`'s marks, which only `human`'s credentials may publish.
-fn marks_right(human: &UserId) -> String {
-    format!("$JS.API.DIRECT.GET.KV_{THREADS_BUCKET}.$KV.{THREADS_BUCKET}.{}", marks_key(human))
+/// The direct get subjects of `key` of `human`'s, which only `human`'s credentials may publish: either the key's own,
+/// as credentials issued before permissions version 3 have it, or that of every key naming the human second.
+fn own_rights(human: &UserId, key: &str) -> [String; 2] {
+    [key.to_owned(), format!("*.{human}")]
+        .map(|k| format!("$JS.API.DIRECT.GET.KV_{THREADS_BUCKET}.$KV.{THREADS_BUCKET}.{k}"))
+}
+
+/// Whether `rights` let `human` read its `key`.
+fn may_read_own(rights: &crate::humans::Rights, human: &UserId, key: &str) -> bool {
+    own_rights(human, key).iter().any(|right| rights.may_publish(right))
 }
 
 /// The direct get subject of every title.
@@ -56,9 +66,10 @@ fn summaries_right() -> String {
     format!("$JS.API.DIRECT.GET.KV_{THREADS_BUCKET}.$KV.{THREADS_BUCKET}.summary.*")
 }
 
-/// The direct get subject of `human`'s snoozes, which credentials issued before permissions version 2 lack.
-fn snoozed_right(human: &UserId) -> String {
-    format!("$JS.API.DIRECT.GET.KV_{THREADS_BUCKET}.$KV.{THREADS_BUCKET}.{}", snoozed_key(human))
+/// The direct get subject of the marks and snoozes `human`'s assistants set for it, which credentials issued before
+/// permissions version 3 lack.
+fn assisted_right(human: &UserId) -> String {
+    format!("$JS.API.DIRECT.GET.KV_{THREADS_BUCKET}.$KV.{THREADS_BUCKET}.*.{human}.*")
 }
 
 /// The titles, TL;DRs, done states and the marks of the CLI's human, unless its credentials are no human's: a request
@@ -66,7 +77,7 @@ fn snoozed_right(human: &UserId) -> String {
 /// [`Meta::summary`]).
 pub async fn open(nats: &crate::Nats<'_>, js: &jetstream::Context) -> Result<Meta> {
     let me = &nats.me.id;
-    if !nats.rights.may_publish(&marks_right(me)) {
+    if !may_read_own(&nats.rights, me, &marks_key(me)) {
         bail!(
             "the credentials of {me} may not read thread titles, pins and archives: those of a human may, from \
              `ants auth user NAME --human`"
@@ -74,10 +85,12 @@ pub async fn open(nats: &crate::Nats<'_>, js: &jetstream::Context) -> Result<Met
     }
     let mut meta =
         Meta::open(js, nats.domain, me).await?.checking(Some(Arc::new(crate::behalf::Checker::new(nats, js))));
+    meta.follows = true;
     meta.keyring = Keyring::lazy(nats.creds, ants_daemon::keystore::os(), js).map(Arc::new);
     meta.done_right = nats.rights.may_publish(&done_right());
     meta.summaries_right = nats.rights.may_publish(&summaries_right());
-    meta.snoozed_right = nats.rights.may_publish(&snoozed_right(me));
+    meta.snoozed_right = may_read_own(&nats.rights, me, &snoozed_key(me));
+    meta.assisted_right = nats.rights.may_publish(&assisted_right(me));
     Ok(meta)
 }
 
@@ -232,7 +245,7 @@ pub async fn marked(js: &jetstream::Context, meta: &Meta, thread: &ThreadId, mar
     let idle_before = thread::idle_before(auto_archive, Utc::now());
     let kept = Cell::new(false);
     let changed = meta
-        .change_marks(|marks| match marking {
+        .change_thread_marks(thread, |marks| match marking {
             Marking::Pin => marks.pin(thread),
             Marking::Unpin => marks.unpin(thread),
             Marking::Archive => marks.archive(thread, after),
@@ -324,10 +337,16 @@ pub struct Meta {
     summaries_right: bool,
     /// Whether its credentials may read and write its snoozes.
     snoozed_right: bool,
+    /// Whether its credentials may read and write the marks and snoozes its assistants set for it.
+    assisted_right: bool,
     /// What opens sealed titles; without one, they read `[sealed]`.
     keyring: Option<Arc<Keyring>>,
     /// What checks the marks and snoozes set by an assistant; without one, none counts.
     behalf: Option<Arc<crate::behalf::Checker>>,
+    /// Whether `behalf` is its own, which it keeps fresh itself ([`crate::behalf::Checker::follow`]) once it read
+    /// whether the human has an assistant, rather than one a feed keeps fresh.
+    follows: bool,
+    following: OnceLock<crate::behalf::Following>,
 }
 
 impl Meta {
@@ -340,26 +359,43 @@ impl Meta {
             done_right: true,
             summaries_right: true,
             snoozed_right: true,
+            assisted_right: true,
             keyring: None,
             behalf: None,
+            follows: false,
+            following: OnceLock::new(),
         })
     }
 
-    /// Checking the marks and snoozes set by an assistant with `behalf`, if any, rather than the checker it had.
+    /// Checking the marks and snoozes set by an assistant with `behalf`, if any, rather than the checker it had: one
+    /// kept fresh by its giver.
     pub fn checking(self, behalf: Option<Arc<crate::behalf::Checker>>) -> Self {
-        Self { behalf: behalf.or(self.behalf), ..self }
+        match behalf {
+            Some(behalf) => Self { behalf: Some(behalf), follows: false, ..self },
+            None => self,
+        }
     }
 
-    /// Which of `assistants` act for the human now.
-    async fn honoured<'a>(&self, assistants: impl IntoIterator<Item = &'a UserId>) -> HashSet<UserId> {
-        let mut honoured = HashSet::new();
-        let Some(behalf) = &self.behalf else { return honoured };
-        for assistant in assistants.into_iter().collect::<BTreeSet<_>>() {
-            if let Acting::For(_) = behalf.check(assistant, Some(&self.human)).await {
-                honoured.insert(assistant.clone());
-            }
+    /// The assistant acting for the human now, whose marks and snoozes count, if any and if the credentials may read
+    /// them, warned of once per process when they may not.
+    async fn assistant(&self) -> Option<UserId> {
+        static WARNED: Once = Once::new();
+        let behalf = self.behalf.as_ref()?;
+        if self.follows {
+            self.following.get_or_init(|| behalf.follow());
         }
-        honoured
+        let assistant = behalf.assistant(&self.human).await?;
+        if !self.assisted_right {
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    "the credentials of {} predate the marks and snoozes of assistants under keys of their own \
+                     (permissions version 3): going on without those of {assistant}; `ants renew` renews them",
+                    self.human
+                );
+            });
+            return None;
+        }
+        Some(assistant)
     }
 
     /// Opening sealed titles with `keyring`.
@@ -566,26 +602,54 @@ impl Meta {
         Ok(())
     }
 
-    /// The human's marks, and the stream sequence of their entry (0 for none).
-    async fn marks_last(&self) -> Result<(ThreadMarks, u64)> {
-        match self.kv.lookup_last(marks_key(&self.human)).await.context("reading the pinned and archived threads")? {
+    /// The entry under `key`, `what` it holds, and its stream sequence (0 for none).
+    async fn entry_last<T: DeserializeOwned + Default>(&self, key: &str, what: &str) -> Result<(T, u64)> {
+        match self.kv.lookup_last(key).await.with_context(|| format!("reading the {what}"))? {
             (Lookup::NoBucket, _) => bail!(MISSING),
-            (Lookup::NoValue, last) => Ok((ThreadMarks::default(), last)),
+            (Lookup::NoValue, last) => Ok((T::default(), last)),
             (Lookup::Value(value), last) => {
-                let marks = serde_json::from_slice(&value).unwrap_or_else(|e| {
-                    tracing::warn!(error = %e, "malformed pinned and archived threads; starting over");
-                    ThreadMarks::default()
+                let entry = serde_json::from_slice(&value).unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "malformed {what}; starting over");
+                    T::default()
                 });
-                Ok((marks, last))
+                Ok((entry, last))
             }
         }
     }
 
-    /// The human's pinned and archived threads, but those its assistant marked while it does not act for it.
+    /// Change the entry under `key`, holding `what`, with `change`, on top of whatever was changed meanwhile, storing it
+    /// only if `change` says it changed it. What `change` said.
+    async fn change_entry<T: Serialize + DeserializeOwned + Default>(
+        &self,
+        key: &str,
+        what: &str,
+        change: impl Fn(&mut T) -> bool,
+    ) -> Result<bool> {
+        for _ in 0..CONFLICTS {
+            let (mut entry, last) = self.entry_last::<T>(key, what).await?;
+            if !change(&mut entry) {
+                return Ok(false);
+            }
+            let value = serde_json::to_vec(&entry)?;
+            if self.kv.update(key, value, last).await.with_context(|| format!("storing the {what}"))? {
+                return Ok(true);
+            }
+        }
+        bail!("storing the {what}: they kept changing")
+    }
+
+    /// The human's marks, and the stream sequence of their entry (0 for none).
+    async fn marks_last(&self) -> Result<(ThreadMarks, u64)> {
+        self.entry_last(&marks_key(&self.human), MARKS).await
+    }
+
+    /// The human's pinned and archived threads, with those its assistant marked for it while it acts for it on the
+    /// threads it marked none of itself ([`ThreadMarks::with_assisted`]).
     pub async fn marks(&self) -> Result<ThreadMarks> {
         let marks = self.marks_last().await?.0;
-        let honoured = self.honoured(marks.by.values()).await;
-        Ok(marks.honoured(|by| honoured.contains(by)))
+        let Some(assistant) = self.assistant().await else { return Ok(marks) };
+        let assisted = self.entry_last(&assisted_marks_key(&self.human, &assistant), MARKS).await?.0;
+        Ok(marks.with_assisted(&assisted))
     }
 
     /// Forget what was said of the threads `gone` says have no message left in the stream more than [`KEPT`] ago:
@@ -604,12 +668,16 @@ impl Meta {
         let mut marked = 0;
         if marks.clone().prune(before, &gone, &active) > 0 {
             let forgot = Cell::new(0);
-            self.change_marks(|marks| {
+            let prune = |marks: &mut ThreadMarks| {
                 forgot.set(marks.prune(before, &gone, &active));
                 forgot.get() > 0
-            })
-            .await?;
+            };
+            self.change_marks(&prune).await?;
             marked = forgot.get();
+            if let Some(assistant) = self.assistant().await {
+                self.change_entry(&assisted_marks_key(&self.human, &assistant), MARKS, &prune).await?;
+                marked += forgot.get();
+            }
         }
         let mut shared = 0;
         if titles {
@@ -687,24 +755,19 @@ impl Meta {
             });
             return Ok((ThreadSnoozes::default(), 0));
         }
-        match self.kv.lookup_last(snoozed_key(&self.human)).await.context("reading the snoozed threads")? {
-            (Lookup::NoBucket, _) => bail!(MISSING),
-            (Lookup::NoValue, last) => Ok((ThreadSnoozes::default(), last)),
-            (Lookup::Value(value), last) => {
-                let snoozes = serde_json::from_slice(&value).unwrap_or_else(|e| {
-                    tracing::warn!(error = %e, "malformed snoozed threads; starting over");
-                    ThreadSnoozes::default()
-                });
-                Ok((snoozes, last))
-            }
-        }
+        self.entry_last(&snoozed_key(&self.human), SNOOZES).await
     }
 
-    /// The threads the human snoozed on home, but those its assistant snoozed while it does not act for it.
+    /// The threads the human snoozed on home, with those its assistant snoozed for it while it acts for it on the
+    /// threads it has no snooze of its own in force on ([`ThreadSnoozes::with_assisted`]).
     pub async fn snoozes(&self) -> Result<ThreadSnoozes> {
         let snoozes = self.snoozes_last().await?.0;
-        let honoured = self.honoured(snoozes.0.values().filter_map(|s| s.by.as_ref())).await;
-        Ok(snoozes.honoured(|by| honoured.contains(by)))
+        if !self.snoozed_right {
+            return Ok(snoozes);
+        }
+        let Some(assistant) = self.assistant().await else { return Ok(snoozes) };
+        let assisted = self.entry_last(&assisted_snoozed_key(&self.human, &assistant), SNOOZES).await?.0;
+        Ok(snoozes.with_assisted(&assisted, Utc::now()))
     }
 
     /// Change the human's snoozes with `change`, on top of whatever its other devices changed meanwhile, storing them
@@ -716,35 +779,50 @@ impl Meta {
                 self.human
             );
         }
-        for _ in 0..CONFLICTS {
-            let (mut snoozes, last) = self.snoozes_last().await?;
-            if !change(&mut snoozes) {
-                return Ok(false);
-            }
-            let value = serde_json::to_vec(&snoozes)?;
-            if self.kv.update(snoozed_key(&self.human), value, last).await.context("storing the snoozes")? {
-                return Ok(true);
-            }
-        }
-        bail!("storing the snoozed threads: they kept changing")
+        self.change_entry(&snoozed_key(&self.human), SNOOZES, change).await
+    }
+
+    /// Change the human's snooze of `thread` with `change`, as [`Meta::change_snoozes`] does, ending any snooze its
+    /// assistant set on it: what the human does with a thread takes over from what its assistant did. Whether either
+    /// changed.
+    pub async fn change_thread_snoozes(
+        &self,
+        thread: &ThreadId,
+        change: impl Fn(&mut ThreadSnoozes) -> bool,
+    ) -> Result<bool> {
+        let changed = self.change_snoozes(change).await?;
+        let Some(assistant) = self.assistant().await else { return Ok(changed) };
+        let key = assisted_snoozed_key(&self.human, &assistant);
+        let woke = self.change_entry(&key, SNOOZES, |s: &mut ThreadSnoozes| s.wake(thread, Utc::now())).await?;
+        Ok(changed || woke)
     }
 
     /// Change the human's marks with `change`, on top of whatever its other devices changed meanwhile, storing them
     /// only if `change` says it changed them. What `change` said.
     pub async fn change_marks(&self, change: impl Fn(&mut ThreadMarks) -> bool) -> Result<bool> {
-        for _ in 0..CONFLICTS {
-            let (mut marks, last) = self.marks_last().await?;
-            if !change(&mut marks) {
-                return Ok(false);
-            }
-            let value = serde_json::to_vec(&marks)?;
-            if self.kv.update(marks_key(&self.human), value, last).await.context("storing the marks")? {
-                return Ok(true);
-            }
-        }
-        bail!("storing the pinned and archived threads: they kept changing")
+        self.change_entry(&marks_key(&self.human), MARKS, change).await
+    }
+
+    /// Change the human's marks of `thread` with `change`, as [`Meta::change_marks`] does, dropping any pin or archive
+    /// its assistant set on it: what the human does with a thread takes over from what its assistant did. Whether
+    /// either changed.
+    pub async fn change_thread_marks(
+        &self,
+        thread: &ThreadId,
+        change: impl Fn(&mut ThreadMarks) -> bool,
+    ) -> Result<bool> {
+        let changed = self.change_marks(change).await?;
+        let Some(assistant) = self.assistant().await else { return Ok(changed) };
+        let key = assisted_marks_key(&self.human, &assistant);
+        let dropped =
+            self.change_entry(&key, MARKS, |m: &mut ThreadMarks| m.unpin(thread) | m.unarchive(thread)).await?;
+        Ok(changed || dropped)
     }
 }
+
+/// What the marks and snoozes entries hold, as errors name them.
+const MARKS: &str = "pinned and archived threads";
+const SNOOZES: &str = "snoozed threads";
 
 #[cfg(test)]
 mod tests {

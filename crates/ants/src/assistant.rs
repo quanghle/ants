@@ -823,14 +823,18 @@ mod tests {
         comes_to(Acting::Forged(alice.clone())).await;
     }
 
-    /// pa pins, archives and snoozes alice's threads in her own entries, naming itself: her devices honour them while
-    /// her grant names pa, and her own pin takes one of pa's over. pa keeps none of its own, nor touches bob's.
+    /// pa pins, archives and snoozes alice's threads under keys of its own, never hers: her devices take them in while
+    /// her grant names pa, on the threads she marked or snoozed none of herself, and a reader keeps up with her
+    /// withdrawing the grant. Her own unarchiving drops pa's archive. pa keeps none of its own, nor touches bob's.
     #[tokio::test]
     async fn an_assistant_s_marks_and_snoozes_count_for_its_human_while_granted() {
         use ants_daemon::direct_kv::DirectKv;
         use std::collections::BTreeSet;
 
-        use ants_proto::{THREADS_BUCKET, ThreadId, ThreadMarks, ThreadSnoozes, marks_key, snoozed_key};
+        use ants_proto::{
+            THREADS_BUCKET, ThreadId, ThreadMarks, ThreadSnoozes, assisted_marks_key, assisted_snoozed_key, marks_key,
+            snoozed_key,
+        };
 
         let Some(server) = Server::start() else { return };
         let (alice, pa, bob) = (p("alice"), p("pa"), p("bob"));
@@ -851,38 +855,56 @@ mod tests {
         let (mine, pinned, archived, snoozed) =
             (ThreadId::generate(), ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
         let nats = crate::Nats::new(&server.url, Some(&creds), None).unwrap();
-        let meta = crate::thread_meta::Meta::open(&js, None, &alice)
-            .await
-            .unwrap()
-            .checking(Some(std::sync::Arc::new(crate::behalf::Checker::new(&nats, &js))));
+        let meta = crate::thread_meta::open(&nats, &js).await.unwrap();
         assert!(meta.change_marks(|m| m.pin(&mine)).await.unwrap());
-        let kv = DirectKv::new(&pa_js, None, THREADS_BUCKET).await.unwrap();
-        let (found, last) = kv.lookup_last(marks_key(&alice)).await.unwrap();
-        let ants_daemon::direct_kv::Lookup::Value(value) = found else { panic!("pa reads alice's marks") };
-        let mut marks: ThreadMarks = serde_json::from_slice(&value).unwrap();
-        assert!(marks.pin_by(&pinned, Some(&pa)) && marks.archive_by(&archived, 1, Some(&pa)));
-        assert!(kv.update(marks_key(&alice), serde_json::to_vec(&marks).unwrap(), last).await.unwrap());
         let now = chrono::Utc::now();
+        let own_snooze = |s: &mut ThreadSnoozes| {
+            s.snooze(&mine, now, now + TimeDelta::hours(1));
+            true
+        };
+        assert!(meta.change_snoozes(own_snooze).await.unwrap());
+        let kv = DirectKv::new(&pa_js, None, THREADS_BUCKET).await.unwrap();
+        let mut marks = ThreadMarks::default();
+        assert!(marks.pin(&pinned) && marks.archive(&archived, 1) && marks.archive(&mine, 1));
+        kv.put(assisted_marks_key(&alice, &pa), serde_json::to_vec(&marks).unwrap()).await.unwrap();
         let mut snoozes = ThreadSnoozes::default();
-        snoozes.snooze_by(&snoozed, now, now + TimeDelta::hours(1), Some(&pa));
-        kv.put(snoozed_key(&alice), serde_json::to_vec(&snoozes).unwrap()).await.unwrap();
-        for key in [marks_key(&bob), snoozed_key(&bob), marks_key(&pa), snoozed_key(&pa)] {
+        snoozes.snooze(&snoozed, now, now + TimeDelta::hours(1));
+        snoozes.snooze(&mine, now, now + TimeDelta::hours(5));
+        kv.put(assisted_snoozed_key(&alice, &pa), serde_json::to_vec(&snoozes).unwrap()).await.unwrap();
+        for key in [
+            marks_key(&alice),
+            snoozed_key(&alice),
+            assisted_marks_key(&alice, &bob),
+            marks_key(&bob),
+            assisted_snoozed_key(&bob, &pa),
+            marks_key(&pa),
+            snoozed_key(&pa),
+        ] {
             assert!(kv.put(&key, "{}").await.is_err(), "pa puts {key}");
         }
 
         let read = meta.marks().await.unwrap();
         assert_eq!(read.pinned.keys().collect::<BTreeSet<_>>(), [&mine, &pinned].into());
-        assert!(read.archived.contains_key(&archived) && read.by.get(&pinned) == Some(&pa));
-        assert!(meta.snoozes().await.unwrap().get(&snoozed, now).is_some());
+        assert_eq!(read.archived.keys().collect::<Vec<_>>(), [&archived], "alice's own pin of hers wins");
+        let read = meta.snoozes().await.unwrap();
+        assert!(read.get(&snoozed, now).is_some());
+        assert_eq!(read.get(&mine, now).unwrap().until, now + TimeDelta::hours(1), "as does her own snooze");
+        assert!(meta.change_thread_marks(&archived, |m| m.unarchive(&archived)).await.unwrap(), "pa's archive goes");
+        assert!(meta.marks().await.unwrap().archived.is_empty());
 
         put(&js, &creds, &alice, None, Sealing::Keep).await.unwrap();
-        let unchecked = crate::thread_meta::Meta::open(&js, None, &alice).await.unwrap();
-        let fresh = unchecked.checking(Some(std::sync::Arc::new(crate::behalf::Checker::new(&nats, &js))));
-        let read = fresh.marks().await.unwrap();
-        assert_eq!(read.pinned.keys().collect::<Vec<_>>(), [&mine], "withdrawn, pa's marks count no more");
-        assert!(read.archived.is_empty() && fresh.snoozes().await.unwrap().0.is_empty());
-        assert!(fresh.change_marks(|m| m.pin(&pinned)).await.unwrap(), "alice's own pin takes pa's over");
-        assert_eq!(fresh.marks().await.unwrap().pinned.len(), 2);
+        let withdrawn = async {
+            loop {
+                if meta.marks().await.unwrap().pinned.keys().collect::<Vec<_>>() == [&mine] {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), withdrawn).await.expect("withdrawn, pa's marks count no more");
+        assert_eq!(meta.snoozes().await.unwrap().0.keys().collect::<Vec<_>>(), [&mine]);
+        assert!(meta.change_thread_marks(&pinned, |m| m.pin(&pinned)).await.unwrap(), "alice's own pin");
+        assert_eq!(meta.marks().await.unwrap().pinned.len(), 2);
     }
 
     /// pa's reaction for alice reads as hers through pa, a claim of bob, who is no assistant, is not even read,

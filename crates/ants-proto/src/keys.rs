@@ -86,6 +86,14 @@ pub fn message_mark_key(ant: &UserId, message: &Uuid) -> String {
     format!("{ant}.msg.{message}")
 }
 
+/// Key in [`ATTEMPTS_BUCKET`] of the [`MessageMark::Withdrawn`] that `assistant` records for its human of message
+/// `message` to `ant` while no daemon of the ant answers its withdrawal: [`message_mark_key`] with the assistant after
+/// it. The daemon checks it before it starts the message, and honours it only if the human's grant names the
+/// assistant and it was stored before the message's own mark.
+pub fn assisted_withdrawal_key(ant: &UserId, message: &Uuid, assistant: &UserId) -> String {
+    format!("{ant}.msg.{message}.{assistant}")
+}
+
 /// Key in [`ATTEMPTS_BUCKET`] of the marker that `sender` was told that its message `message` keeps waiting for an
 /// ant no daemon serves: the first of the sender's watchers to create it tells, once across watchers and restarts.
 /// Keys start with the sender, so its credentials can be confined to its own.
@@ -178,6 +186,19 @@ pub fn marks_key(human: &UserId) -> String {
 /// `snoozed`, so no thread id or human name collides with a title's key.
 pub fn snoozed_key(human: &UserId) -> String {
     format!("snoozed.{human}")
+}
+
+/// Key in [`THREADS_BUCKET`] of the threads `assistant` pinned and archived for `human` ([`crate::ThreadMarks`]):
+/// [`marks_key`] of the human with the assistant after it, so the assistant writes only its own entries and never the
+/// human's.
+pub fn assisted_marks_key(human: &UserId, assistant: &UserId) -> String {
+    format!("marks.{human}.{assistant}")
+}
+
+/// Key in [`THREADS_BUCKET`] of the threads `assistant` snoozed for `human` ([`crate::ThreadSnoozes`]), as
+/// [`assisted_marks_key`] is of its marks.
+pub fn assisted_snoozed_key(human: &UserId, assistant: &UserId) -> String {
+    format!("snoozed.{human}.{assistant}")
 }
 
 /// Key in [`READ_BUCKET`] of the posts `human` read of the channels ([`ChannelReadMarkers`]): its user id with

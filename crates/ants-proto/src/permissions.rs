@@ -7,16 +7,16 @@ use crate::{
     FILES_STREAM, Feed, HUMANS_BUCKET, IDENTITIES_BUCKET, INTAKE_STREAM, JsDomain, LINKS_BUCKET, MACHINES_BUCKET,
     Machine, NOTIFY_BUCKET, OUTBOX_STREAM, OWNERS_BUCKET, PRESENCE_BUCKET, REACTIONS_BUCKET, READ_BUCKET,
     ROSTER_BUCKET, Role, SESSIONS_BUCKET, STORAGE_WARNING_PREFIX, STREAM, THREADS_BUCKET, UserId, WEBHOOK_MARKER,
-    WEBHOOKS_BUCKET, admin_consumer, chan_consumer, chan_reader, channel_manager_serving_subject, dead_reader,
-    host_inbox_prefix, inbox_consumer, inbox_prefix, marks_key, notes_consumer, notify_consumer, sent_reader,
-    snoozed_key, spare_readers, subject,
+    WEBHOOKS_BUCKET, admin_consumer, assisted_marks_key, assisted_snoozed_key, chan_consumer, chan_reader,
+    channel_manager_serving_subject, dead_reader, host_inbox_prefix, inbox_consumer, inbox_prefix, notes_consumer,
+    notify_consumer, sent_reader, spare_readers, subject,
 };
 #[cfg(doc)]
 use crate::{
     AntRequest, AssistantOf, AttachmentHandle, ChannelReadMarkers, EnrollRequest, HeldNotices, NotifyPrefs,
     QueueRequest, ReactionsRequest, RenewRequest, StatusUpdate, ThreadSummary, admin_outcome_key, assisted_owner_key,
-    channel_manager_serving_key, daily_spend_key, link_outbox, message_mark_key, owner_outbox, storage_warning_key,
-    thread_spend_key, unserved_key,
+    assisted_withdrawal_key, channel_manager_serving_key, daily_spend_key, link_outbox, marks_key, message_mark_key,
+    owner_outbox, snoozed_key, storage_warning_key, thread_spend_key, unserved_key,
 };
 
 /// JetStream stream backing a KV bucket.
@@ -224,14 +224,17 @@ fn attachment_rights(user: &UserId, role: Role) -> Vec<String> {
 /// What a human's credentials need for thread titles, TL;DRs and done states and its pins and archives
 /// ([`THREADS_BUCKET`]): creating the bucket; reading by direct gets, putting and deleting every title, every TL;DR
 /// ([`ThreadSummary`]) and every done state, which any human sets; and reading and writing its own [`ThreadMarks`]
-/// only, so no human reads or changes another's.
+/// and [`crate::ThreadSnoozes`] only, so no human reads or changes another's, with those its assistants set for it
+/// ([`assisted_marks_key`], [`assisted_snoozed_key`]), which it clears as it marks a thread itself. The keys naming
+/// the human second ([`marks_key`], [`snoozed_key`]) or second of three are all its own, and one pattern each covers
+/// them, to keep the credentials short: no other key of the bucket has a user id there.
 fn thread_rights(human: &UserId) -> [String; 12] {
     let threads = kv_stream(THREADS_BUCKET);
     let titles = format!("$KV.{THREADS_BUCKET}.title.*");
     let summaries = format!("$KV.{THREADS_BUCKET}.summary.*");
     let done = format!("$KV.{THREADS_BUCKET}.done.*");
-    let marks = format!("$KV.{THREADS_BUCKET}.{}", marks_key(human));
-    let snoozed = format!("$KV.{THREADS_BUCKET}.{}", snoozed_key(human));
+    let own = format!("$KV.{THREADS_BUCKET}.*.{human}");
+    let assisted = format!("{own}.*");
     [
         format!("$JS.API.STREAM.INFO.{threads}"),
         format!("$JS.API.STREAM.CREATE.{threads}"),
@@ -241,10 +244,10 @@ fn thread_rights(human: &UserId) -> [String; 12] {
         summaries,
         format!("$JS.API.DIRECT.GET.{threads}.{done}"),
         done,
-        format!("$JS.API.DIRECT.GET.{threads}.{marks}"),
-        marks,
-        format!("$JS.API.DIRECT.GET.{threads}.{snoozed}"),
-        snoozed,
+        format!("$JS.API.DIRECT.GET.{threads}.{own}"),
+        own,
+        format!("$JS.API.DIRECT.GET.{threads}.{assisted}"),
+        assisted,
     ]
 }
 
@@ -349,9 +352,9 @@ impl Permissions {
     /// titles, TL;DRs and done states, puts its own reactions and read markers, and reads every attachment and every
     /// device's encryption key. Of its human's own keys it reads, by direct gets, never writes, the read markers
     /// ([`read_marker_rights`]) and the markers of messages kept waiting ([`unserved_key`]), so it sees what its human
-    /// has read and set aside. It keeps no pins, archives or snoozed threads of its own: it reads and writes its
-    /// human's ([`thread_rights`]), each pin, archive or snooze it sets naming it ([`ThreadMarks::by`],
-    /// [`crate::Snooze::by`]), which readers honour only while the human's grant names it.
+    /// has read and set aside. It keeps no pins, archives or snoozed threads of its own: it reads its human's
+    /// ([`thread_rights`]) and writes only those it sets for the human, under keys naming it ([`assisted_marks_key`],
+    /// [`assisted_snoozed_key`]), never the human's own, which readers take in only while the human's grant names it.
     ///
     /// It reads the stream back by direct gets, as a human does, so it holds none of an ant's reader consumers but its
     /// dead letters' (its inbox and channel consumers still deliver), no spare of one, and no consumer of a human's
@@ -361,7 +364,8 @@ impl Permissions {
     /// It sends only as itself, never under any sender as a human may, nor writes attachments under another's name.
     /// It cancels an ant's prompt, withdraws a message waiting for one, and asks for an ant's queue only on the subjects
     /// naming it ([`subject::cancels_by`], [`subject::queues_by`]), whose daemons honour them only for its human, and
-    /// records a thread's owner only under keys naming its human ([`assisted_owner_key`]). It gets none of a human's
+    /// records a thread's owner only under keys naming its human ([`assisted_owner_key`]) and a withdrawal no daemon
+    /// answered only under keys naming it ([`assisted_withdrawal_key`]). It gets none of a human's
     /// rights whose subjects do not name who acts, which readers could not tell from its human's: cancelling or asking
     /// for a queue on [`subject::ALL_CANCELS`] and [`subject::ALL_QUEUE_REQUESTS`] (whose request's `by` no reader can
     /// check), creating message marks in [`ATTEMPTS_BUCKET`], recording an owner under any key, putting dead letters,
@@ -391,7 +395,8 @@ impl Permissions {
         publish.retain(|s| !reads_through(s));
         as_human.retain(|s| !reads_through(s));
         let devices_only = [subject::devices_of(assistant), subject::presence_of(assistant)];
-        let own_marks = [marks_key(assistant), snoozed_key(assistant)].map(|k| format!("$KV.{THREADS_BUCKET}.{k}"));
+        let own_marks =
+            [format!("$KV.{THREADS_BUCKET}.*.{assistant}"), format!("$KV.{THREADS_BUCKET}.*.{assistant}.*")];
         let notify = notify_prefs_rights(assistant);
         let unattributed = [
             // Acts for its human that wait for the human's confirmation, which these subjects cannot carry.
@@ -441,10 +446,16 @@ impl Permissions {
         ]);
         publish.extend(gets_only(&read_marker_rights(human)));
         publish.extend(gets_only(&thread_rights(human)));
-        // Its human's pins, archives and snoozes, which it sets naming itself.
-        publish.extend([marks_key(human), snoozed_key(human)].map(|k| format!("$KV.{THREADS_BUCKET}.{k}")));
+        // The pins, archives and snoozes it sets for its human, under keys naming it.
+        publish.extend(
+            [assisted_marks_key(human, assistant), assisted_snoozed_key(human, assistant)]
+                .map(|k| format!("$KV.{THREADS_BUCKET}.{k}")),
+        );
         let attempts = kv_stream(ATTEMPTS_BUCKET);
         publish.push(format!("$JS.API.DIRECT.GET.{attempts}.$KV.{ATTEMPTS_BUCKET}.{human}.unserved.*"));
+        // The withdrawals it records for its human while no daemon of the ant answers, under keys naming it.
+        let withdrawals = format!("$KV.{ATTEMPTS_BUCKET}.*.msg.*.{assistant}");
+        publish.extend([format!("$JS.API.DIRECT.GET.{attempts}.{withdrawals}"), withdrawals]);
         let mut seen = std::collections::HashSet::new();
         publish.retain(|s| seen.insert(s.clone()));
         // An ant's narrower reads (attachments, the assistants' records) a human's wider ones cover take no room.

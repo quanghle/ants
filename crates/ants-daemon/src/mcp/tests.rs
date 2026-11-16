@@ -1552,6 +1552,9 @@ struct MemoryHuman {
     cancels: StdMutex<Vec<ants_proto::CancelRequest>>,
     queues: StdMutex<Vec<ants_proto::QueueRequest>>,
     orders: StdMutex<Vec<ants_proto::AdminOrder>>,
+    /// The human's own marks and snoozes, and those its assistant set for it.
+    own_marks: StdMutex<ants_proto::ThreadMarks>,
+    own_snoozes: StdMutex<ants_proto::ThreadSnoozes>,
     marks: StdMutex<ants_proto::ThreadMarks>,
     snoozes: StdMutex<ants_proto::ThreadSnoozes>,
 }
@@ -1610,8 +1613,19 @@ impl HumanStore for MemoryHuman {
         Box::pin(async { Ok(()) })
     }
 
+    fn marks(&self, _: UserId) -> BoxFuture<'_, Result<ants_proto::ThreadMarks>> {
+        let marks = self.own_marks.locked().clone();
+        Box::pin(async move { Ok(marks) })
+    }
+
+    fn snoozes(&self, _: UserId) -> BoxFuture<'_, Result<ants_proto::ThreadSnoozes>> {
+        let snoozes = self.own_snoozes.locked().clone();
+        Box::pin(async move { Ok(snoozes) })
+    }
+
     fn change_marks(
         &self,
+        _: UserId,
         _: UserId,
         change: super::assist::Change<ants_proto::ThreadMarks>,
     ) -> BoxFuture<'_, Result<bool>> {
@@ -1621,6 +1635,7 @@ impl HumanStore for MemoryHuman {
 
     fn change_snoozes(
         &self,
+        _: UserId,
         _: UserId,
         change: super::assist::Change<ants_proto::ThreadSnoozes>,
     ) -> BoxFuture<'_, Result<bool>> {
@@ -1817,7 +1832,7 @@ async fn the_assistant_tools_stand_only_while_the_grant_names_the_ant() {
 async fn the_assistant_pins_archives_and_snoozes_for_its_human_naming_itself() {
     let (mcp, mut sent, humans, device, store) = assistant("assist-marks").await;
     grant(&humans, &device, Some("dev-a"), false);
-    let (alice, dev_a) = (user("alice"), user("dev-a"));
+    let alice = user("alice");
     let thread = ThreadId::generate();
     store.store(Envelope { thread_id: thread.clone(), ..Envelope::new(user("dev-b"), alice.clone(), "done") });
     let (url, token) = http_server(&mcp, &ThreadId::generate());
@@ -1832,7 +1847,7 @@ async fn the_assistant_pins_archives_and_snoozes_for_its_human_naming_itself() {
     };
     let (ok, pinned) = mark("pin").await;
     assert!(ok && pinned.starts_with("Pinned thread"), "{pinned}");
-    assert_eq!(store.marks.locked().by.get(&thread), Some(&dev_a), "the pin names the assistant");
+    assert!(store.marks.locked().pinned.contains_key(&thread), "the pin is the assistant's");
     let notice = sent.try_recv().unwrap();
     assert!(notice.to == alice && notice.text.contains("as the assistant of alice, pinned thread"), "{}", notice.text);
     let (ok, again) = mark("pin").await;
@@ -1840,20 +1855,35 @@ async fn the_assistant_pins_archives_and_snoozes_for_its_human_naming_itself() {
     let (ok, archived) = mark("archive").await;
     assert!(ok && archived.starts_with("Archived"), "{archived}");
     let marks = store.marks.locked().clone();
-    assert!(marks.pinned.is_empty() && marks.archived.contains_key(&thread) && marks.by.get(&thread) == Some(&dev_a));
+    assert!(marks.pinned.is_empty() && marks.archived.contains_key(&thread));
     sent.try_recv().unwrap();
     let (ok, refused) = mark("star").await;
     assert!(!ok && refused.contains("none of pin, unpin, archive and unarchive"), "{refused}");
-    let (ok, snoozed) =
-        call(&client, "snooze_for_human", serde_json::json!({"thread": thread.to_string(), "duration": "30d"})).await;
+    let snooze = async |duration: &str| {
+        let args = serde_json::json!({"thread": thread.to_string(), "duration": duration});
+        call(&client, "snooze_for_human", args).await
+    };
+    let (ok, snoozed) = snooze("30d").await;
     assert!(ok && snoozed.contains("on the home of alice until"), "{snoozed}");
-    let snooze = store.snoozes.locked().0[&thread].clone();
-    assert_eq!((snooze.until - snooze.at, snooze.by.as_ref()), (ants_proto::SNOOZE_MAX, Some(&dev_a)), "cut to 7d");
+    let snoozed = store.snoozes.locked().0[&thread];
+    assert_eq!(snoozed.until - snoozed.at, ants_proto::SNOOZE_MAX, "cut to 7d");
     assert!(sent.try_recv().unwrap().text.contains("snoozed thread"));
-    let (ok, woke) =
-        call(&client, "snooze_for_human", serde_json::json!({"thread": thread.to_string(), "duration": "off"})).await;
+    let (ok, woke) = snooze("off").await;
     assert!(ok && woke.starts_with("Ended the snooze") && store.snoozes.locked().0.is_empty(), "{woke}");
     sent.try_recv().unwrap();
+
+    // The human's own marks and snoozes stay as they are: the assistant changes none of them.
+    let now = chrono::Utc::now();
+    store.own_marks.locked().pin(&thread);
+    store.own_snoozes.locked().snooze(&thread, now, now + chrono::TimeDelta::hours(1));
+    let before = (store.own_marks.locked().clone(), store.marks.locked().clone());
+    for refused in [mark("unpin").await, mark("archive").await] {
+        assert!(!refused.0 && refused.1.contains("alice pinned thread") && refused.1.contains("itself"), "{refused:?}");
+    }
+    let (ok, refused) = snooze("off").await;
+    assert!(!ok && refused.contains("alice snoozed thread") && refused.contains("itself"), "{refused}");
+    assert_eq!((store.own_marks.locked().clone(), store.marks.locked().clone()), before);
+    assert!(store.own_snoozes.locked().get(&thread, now).is_some() && sent.try_recv().is_err());
 }
 
 #[tokio::test]

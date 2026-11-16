@@ -286,6 +286,9 @@ proptest! {
             (ants_proto::title_key(&thread), vec!["title", t]),
             (ants_proto::done_key(&thread), vec!["done", t]),
             (ants_proto::marks_key(&ant), vec!["marks", a]),
+            (ants_proto::assisted_marks_key(&ant, &other), vec!["marks", a, o]),
+            (ants_proto::assisted_snoozed_key(&ant, &other), vec!["snoozed", a, o]),
+            (ants_proto::assisted_withdrawal_key(&ant, &message, &other), vec![a, "msg", &m, o]),
             (ants_proto::webhook_marker_key(&ant), vec![a, "webhook"]),
             (ants_proto::webhook_marker_subject(&ant), vec!["$KV", ants_proto::WEBHOOKS_BUCKET, a, "webhook"]),
             // Patterns: their wildcards stand only where these say.
