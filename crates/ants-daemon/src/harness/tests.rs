@@ -1,16 +1,27 @@
 use std::assert_matches;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::v1::schema::{
-    AgentCapabilities, AuthMethodTerminal, ContentChunk, Implementation, InitializeResponse, LoadSessionResponse,
-    NewSessionResponse, PermissionOption, PermissionOptionKind, SessionConfigSelectGroup, SessionConfigSelectOption,
-    SessionMode, SetSessionConfigOptionResponse, SetSessionModeResponse, StopReason, ToolCallStatus,
-    ToolCallUpdateFields, ToolKind,
+    AgentCapabilities, AuthMethod, AuthMethodTerminal, ContentBlock, ContentChunk, Implementation, InitializeRequest,
+    InitializeResponse, LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse,
+    PermissionOption, PermissionOptionKind, PromptRequest, PromptResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelectGroup, SessionConfigSelectOption, SessionMode, SessionModeState, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
+    SetSessionModeResponse, StopReason, TextContent, ToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+    ToolKind,
 };
+use agent_client_protocol::{Agent, DynConnectTo};
+use ants_proto::HarnessAgent;
+use anyhow::Result;
 use serde_json::json;
 
+use super::launch::Connector;
 use super::*;
-use crate::permission::Allowlist;
+use crate::permission::{Allowlist, PermissionPolicy};
 use crate::ratelimit::Limited;
+use crate::sync::MutexExt as _;
 use ants_proto::LimitKind;
 
 /// A fake harness starting its sessions in `auto`, offering `modes`; returns the modes it was switched to.
