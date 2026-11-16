@@ -15,7 +15,8 @@ pub const SETTINGS_CLOCK_SKEW: TimeDelta = TimeDelta::minutes(5);
 
 /// The keys of an ant's `[[ant]]` table that are the ant's own rather than its machine's: its role and core memories
 /// (`whoami`, `memory`), which [`SharedSettings`] holds for every machine serving it. The rest (workdir, env, harness,
-/// `tasks` and the others) stays the machine's config.
+/// `tasks` and the others) stays the machine's config. Of an ant added from a template, [`SharedSettings`] holds only
+/// those a request to the template chooses: `fallback`, `allow` and `escalate_to` follow the template.
 pub const SHARED_FIELDS: [&str; 9] =
     ["whoami", "memory", "capabilities", "model", "reasoning_effort", "context", "fallback", "allow", "escalate_to"];
 

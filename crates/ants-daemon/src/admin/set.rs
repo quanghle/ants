@@ -9,7 +9,8 @@
 //!
 //! For an ant added from a template, a change of its shared settings is held to the template's bounds as its table in
 //! the config is: only what the template lets it choose changes, and its model, reasoning effort and context stay
-//! within the template's ([`AntTemplate::model_for`]). The record written is signed with the ant's credentials
+//! within the template's ([`AntTemplate::model_for`]). Its record holds only those ([`shared::shares`]): the others
+//! follow the template. The record written is signed with the ant's credentials
 //! ([`crate::shared::sign`]).
 //!
 //! The file as edited, served with the shared settings as changed, must load before either is written; the file is
@@ -128,7 +129,8 @@ fn prepare(
         Found::Malformed(_, last) | Found::Unverified(_, _, last) | Found::None(last) => (None, last),
         Found::NoBucket => bail!("there is no bucket {IDENTITIES_BUCKET} for the ant's shared settings"),
     };
-    let start = before.clone().unwrap_or_else(|| shared::local_fields(listed));
+    let mut start = before.clone().unwrap_or_else(|| shared::local_fields(listed));
+    start.retain(|key, _| shared::shares(listed, key));
     let mut fields = start.clone();
     let mut file_changes = Vec::new();
     for change in changes {
