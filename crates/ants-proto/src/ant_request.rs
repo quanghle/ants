@@ -40,7 +40,8 @@ pub struct AntRequest {
     pub credentials: String,
     /// Signature of [`AntRequest::signed`] by the manager's key, base64url without padding.
     pub signature: String,
-    /// The leaf node the asking machine reaches the hub through, whose uplink an approval extends to the ant.
+    /// The leaf node the asking machine reaches the hub through, whose uplink an approval extends to the ant and a
+    /// retirement narrows to drop it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leaf: Option<EnrollLeaf>,
     /// Retire ant `name` instead of adding it.
@@ -139,7 +140,8 @@ pub enum AntReply {
     Refused { manager: UserId, name: UserId, public_key: String, reason: String },
     /// Ant `name` retired ([`AntRequest::retire`]): the keys of it revoked now (none when an earlier request revoked
     /// them all), and the error of pushing the revocations to the hub, if it failed; the hub then refuses the keys
-    /// only once it reloads its `server.conf`.
+    /// only once it reloads its `server.conf`. For a request through a leaf node ([`AntRequest::leaf`]), the renewed
+    /// user JWT of the leaf's uplink key without the ant's permissions, or why the uplink could not be renewed so.
     Retired {
         manager: UserId,
         name: UserId,
@@ -147,6 +149,10 @@ pub enum AntReply {
         revoked: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         push_error: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        leaf_jwt: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        leaf_error: Option<String>,
     },
 }
 

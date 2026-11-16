@@ -15,17 +15,18 @@
 //!
 //! On a machine behind a leaf node, the request of an add or clone order also carries the leaf's live uplink
 //! credentials, which sign it too: the signer renews them to carry the ant, keeps the ant among the leaf's members and
-//! admits it from the machine's outbox, as for an ant enrolling through the leaf.
+//! admits it from the machine's outbox, as for an ant enrolling through the leaf. The request of a retire order there
+//! carries them too: once the ant's keys are revoked, the signer renews them without the ant, drops it from the leaf's
+//! members and from the machine's outbox sourcing, the retirement standing even when that fails.
 
 use std::collections::{BTreeSet, HashMap};
-use std::path::Path;
 
 use ants_daemon::creds::{Finding, Kind as CredsKind};
 use ants_proto::{
     AdminOp, AdminOrder, EnrollLeaf, EnrollReply, EnrollRequest, LeafRole, Machine, ORDER_CLOCK_SKEW, Permissions,
     UserId, Uuid, host_user,
 };
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use chrono::{DateTime, TimeDelta, Utc};
 
 use super::live;
@@ -136,7 +137,10 @@ async fn decide(
     if *about != request.ant {
         bail!("the order is about {about}, not {}", request.ant);
     }
-    if let Some(leaf) = &request.leaf {
+    // A retirement stands on the host's proof alone: uplink credentials failing their checks are only left as they are.
+    if let Some(leaf) = &request.leaf
+        && !matches!(order.op, AdminOp::Retire)
+    {
         check_leaf(approver, request, leaf, machine, &revoked)?;
     }
     match &order.op {
@@ -148,7 +152,7 @@ async fn decide(
             add(approver, request, order, machine, &revoked, Some(human)).await
         }
         AdminOp::Add { .. } | AdminOp::Clone { .. } => add(approver, request, order, machine, &revoked, None).await,
-        AdminOp::Retire => retire(dir, url, request, order).await,
+        AdminOp::Retire => retire(approver, url, request, order, machine, &revoked).await,
         op => bail!("an order to {} asks nothing of the signer", op.describe()),
     }
 }
@@ -242,8 +246,18 @@ async fn add(
 
 /// Revoke the ant's key `request` names and the live keys of the name issued before it, which it renewed, pushing the
 /// account to the hub when any was live: only an ant's or an assistant's key, whose first key (before renewals) was
-/// issued no later than the admin sent the order, so that the order retires no ant added again since.
-async fn retire(dir: &Path, url: &str, request: &EnrollRequest, order: &AdminOrder) -> Result<EnrollReply> {
+/// issued no later than the admin sent the order, so that the order retires no ant added again since. Then, behind a
+/// leaf node, drop the ant from it ([`drop_from_leaf`]) with the uplink credentials the request carries, answering
+/// with them renewed, or why they were not.
+async fn retire(
+    approver: &Approver,
+    url: &str,
+    request: &EnrollRequest,
+    order: &AdminOrder,
+    machine: &Machine,
+    revoked: &BTreeSet<String>,
+) -> Result<EnrollReply> {
+    let dir = approver.dir.as_path();
     let (ant, key) = (&request.ant, request.public_key.as_str());
     let issued = revoke::issued(dir)?;
     let of_ant = |key: &str| {
@@ -269,11 +283,51 @@ async fn retire(dir: &Path, url: &str, request: &EnrollRequest, order: &AdminOrd
         .filter(|i| i.name == ant.as_str() && i.issued_at <= asked.issued_at)
         .map(|i| i.key)
         .collect();
-    let revoked = if keys.is_empty() { Vec::new() } else { revoke::revoke(dir, None, &keys)? };
-    let push_error =
-        if revoked.is_empty() { None } else { revoke::push(url, dir).await.err().map(|e| format!("{e:#}")) };
-    let revoked = revoked.into_iter().map(|r| r.key).collect();
-    Ok(EnrollReply::Retired { ant: ant.clone(), public_key: key.to_owned(), revoked, push_error })
+    let role = asked.assistant_of.as_ref().map_or(LeafRole::Ant, LeafRole::AssistantOf);
+    let newly = if keys.is_empty() { Vec::new() } else { revoke::revoke(dir, None, &keys)? };
+    let push_error = if newly.is_empty() { None } else { revoke::push(url, dir).await.err().map(|e| format!("{e:#}")) };
+    let leaf = match &request.leaf {
+        Some(leaf) => match check_leaf(approver, request, leaf, machine, revoked) {
+            Ok(()) => drop_from_leaf(approver, &leaf.jwt, machine, ant, role).await,
+            Err(e) => Err(e),
+        },
+        None if live(dir)?.iter().any(|i| i.kind == Kind::Leaf && i.name == auth::leaf_user(machine)) => Err(anyhow!(
+            "{machine} runs a leaf node, and the request carries none of its uplink credentials to renew without {ant}"
+        )),
+        None => Ok(None),
+    };
+    let (leaf_jwt, leaf_error) = match leaf {
+        Ok(jwt) => (jwt, None),
+        Err(e) => (None, Some(format!("{e:#}"))),
+    };
+    let revoked = newly.into_iter().map(|r| r.key).collect();
+    Ok(EnrollReply::Retired { ant: ant.clone(), public_key: key.to_owned(), revoked, push_error, leaf_jwt, leaf_error })
+}
+
+/// Drop `ant`, retired, in `role`, from the leaf node of `machine` whose uplink user JWT is `jwt`: renew the JWT for
+/// the same key without what it allows only for the ant ([`auth::shrink_leaf`]), drop the ant from the leaf's members
+/// in the registry and from what the hub takes from the machine's outbox. Returns the renewed JWT, none when it
+/// allowed nothing only for the ant. A failure to drop the outbox sourcing is only logged: `ants leaf outbox` drops it.
+pub(super) async fn drop_from_leaf(
+    approver: &Approver,
+    jwt: &str,
+    machine: &Machine,
+    ant: &UserId,
+    role: LeafRole<'_>,
+) -> Result<Option<String>> {
+    let dir = approver.dir.as_path();
+    let shrunk = auth::shrink_leaf(dir, jwt, machine, ant, role)
+        .with_context(|| format!("renewing the uplink of the leaf node {machine} without {ant}"))?;
+    members::retired(dir, machine, ant).with_context(|| format!("dropping {ant} from the members of {machine}"))?;
+    match outbox::drop_ant(approver.hub(), machine, ant).await {
+        Ok(true) => {}
+        Ok(false) => tracing::info!(%machine, %ant, "the hub does not source the machine's outbox"),
+        Err(e) => tracing::warn!(
+            %machine, %ant,
+            "dropping the ant from the machine's outbox sourcing failed: {e:#}; `ants leaf outbox` drops it"
+        ),
+    }
+    Ok(shrunk)
 }
 
 async fn answer(approver: &Approver, reply: &EnrollReply) -> Result<()> {
@@ -289,13 +343,18 @@ fn print(order: &AdminOrder, reply: &EnrollReply) {
         EnrollReply::Rejected { reason, .. } => {
             println!("refused {asked}: {}", reason.as_deref().unwrap_or("no reason"));
         }
-        EnrollReply::Retired { revoked, push_error: None, .. } => {
-            println!("retired {asked}: {} keys revoked", revoked.len());
+        EnrollReply::Retired { revoked, push_error, leaf_jwt, leaf_error, .. } => {
+            let pushed = match push_error {
+                Some(e) => format!(", but pushing the account failed: {e}; run `ants auth push`"),
+                None => String::new(),
+            };
+            let uplink = match (leaf_jwt, leaf_error) {
+                (Some(_), _) => format!("; the uplink of {} renewed without it", order.machine),
+                (None, Some(e)) => format!("; the uplink of {} left as it is: {e}", order.machine),
+                (None, None) => String::new(),
+            };
+            println!("retired {asked}: {} keys revoked{pushed}{uplink}", revoked.len());
         }
-        EnrollReply::Retired { revoked, push_error: Some(e), .. } => println!(
-            "retired {asked}: {} keys revoked, but pushing the account failed: {e}; run `ants auth push`",
-            revoked.len()
-        ),
     }
 }
 

@@ -23,6 +23,7 @@ expression: value
     "public_key": "UABC",
     "revoked": [
       "UABC"
-    ]
+    ],
+    "leaf_jwt": "eyJ0eXAiOiJKV1QifQ.leaf"
   }
 ]

@@ -86,8 +86,9 @@ pub struct Orders {
     pub hold: held::Hold,
 }
 
-/// A machine's leaf node, as an add order needs it: the uplink credentials sign the order's enrollment request with the
-/// host credentials, and the signer's answer renews them to carry the added ant.
+/// A machine's leaf node, as an add or retire order needs it: the uplink credentials sign the order's enrollment
+/// request with the host credentials, and the signer's answer renews them to carry the added ant, or without the
+/// retired one.
 #[derive(Clone)]
 pub struct LeafNode {
     /// The leaf node's configuration (`leaf.conf`); while it does not exist, the machine runs no leaf node.
@@ -98,6 +99,11 @@ pub struct LeafNode {
     /// its uplink again: what came of it; none when the credentials changed so that the JWT would drop something they
     /// allow, and were left as they are.
     pub renew: fn(&Path, &str) -> Result<Option<String>>,
+    /// Put an uplink JWT renewed without a retired ant, from the JWT the request carried, into the credentials of the
+    /// leaf node of the configuration and have the node connect its uplink again: what came of it; none when the
+    /// credentials changed since the request so that the JWT would drop something they allow, and were left as they
+    /// are.
+    pub shrink: fn(&Path, &str, &str) -> Result<Option<String>>,
 }
 
 impl std::fmt::Debug for LeafNode {

@@ -26,6 +26,7 @@ expression: value
     "revoked": [
       "UGHI"
     ],
-    "push_error": "hub unreachable"
+    "push_error": "hub unreachable",
+    "leaf_error": "no uplink of m1"
   }
 ]

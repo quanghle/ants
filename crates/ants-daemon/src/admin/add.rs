@@ -226,7 +226,7 @@ pub(super) async fn renew(leaf: &LeafNode, machine: &Machine, ant: &UserId, rene
 
 /// Check that `jwt`, the signer's renewal of the credentials of `uplink`, is a leaf node's of its machine for the same
 /// key, which one of `accounts` signed.
-fn check_uplink(jwt: &str, accounts: &[String], uplink: &Uplink) -> Result<()> {
+pub(super) fn check_uplink(jwt: &str, accounts: &[String], uplink: &Uplink) -> Result<()> {
     let (claims, _) = ants_proto::verified_jwt(jwt).context("the renewed uplink credentials")?;
     if !accounts.contains(&claims.iss) {
         bail!(

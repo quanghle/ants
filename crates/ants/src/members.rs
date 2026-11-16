@@ -276,6 +276,16 @@ pub fn enrolled(dir: &Path, machine: &Machine, ant: &UserId) -> Result<()> {
     revoke::record(dir, &line)
 }
 
+/// Drop `ant`, retired, from the members of `machine`'s leaf node in the registry of `dir`, with a later line for the
+/// latest uplink key issued there; nothing to do when the members kept do not hold it. Returns whether they did.
+pub fn retired(dir: &Path, machine: &Machine, ant: &UserId) -> Result<bool> {
+    let Some(mut line) = latest(dir, machine)? else { return Ok(false) };
+    let Some(members) = line.members.as_mut().filter(|m| m.ants.contains(ant)) else { return Ok(false) };
+    members.ants.retain(|a| a != ant);
+    revoke::record(dir, &line)?;
+    Ok(true)
+}
+
 /// The ants and humans the uplink credentials of the leaf node configuration at `leaf_conf` carry, which must be
 /// that of `machine`.
 pub fn uplink(leaf_conf: &Path, machine: &Machine) -> Result<Members> {
@@ -363,10 +373,15 @@ mod tests {
         assert_eq!(issued(&team, &"m2".parse().unwrap()).unwrap(), None);
 
         enrolled(&team, &m1, &p("dev-c")).unwrap();
-        let with_c = Members { ants: users(&["dev-a", "dev-c"]), ..kept };
+        let with_c = Members { ants: users(&["dev-a", "dev-c"]), ..kept.clone() };
         assert_eq!(issued(&team, &m1).unwrap(), Some(with_c), "the enrolled ant joins");
         let listed = revoke::listing(&team, auth::now().unwrap()).unwrap();
         assert!(listed.len() == 1 && !listed[0].reissued, "the same key, once: {listed:?}");
         assert!(enrolled(&team, &"m2".parse().unwrap(), &p("dev-c")).is_err(), "no uplink of m2 issued");
+
+        assert!(retired(&team, &m1, &p("dev-c")).unwrap());
+        assert_eq!(issued(&team, &m1).unwrap(), Some(kept), "the retired ant leaves");
+        assert!(!retired(&team, &m1, &p("dev-c")).unwrap(), "gone already");
+        assert!(!retired(&team, &"m2".parse().unwrap(), &p("dev-a")).unwrap(), "no uplink of m2 issued");
     }
 }

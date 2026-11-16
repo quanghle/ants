@@ -48,7 +48,8 @@ pub struct EnrollRequest {
     pub enrollment: String,
     /// Signature of [`EnrollRequest::signed`] by the enrollment credentials' key, base64url without padding.
     pub signature: String,
-    /// The leaf node the asking machine reaches the hub through, whose uplink the approval extends to the ant.
+    /// The leaf node the asking machine reaches the hub through, whose uplink the approval extends to the ant and a
+    /// retirement narrows to drop it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leaf: Option<EnrollLeaf>,
     /// The admin order the machine's daemon carries out by asking, which an admin signed.
@@ -172,13 +173,18 @@ pub enum EnrollReply {
     },
     /// The answer to a request carrying an order to retire `ant` ([`crate::AdminOp::Retire`]): the keys of the ant
     /// revoked, `public_key` and those issued before it, none when none was live, and why pushing the account to the
-    /// hub failed, if it did.
+    /// hub failed, if it did. For a request through a leaf node ([`EnrollRequest::leaf`]), the renewed user JWT of
+    /// the leaf's uplink key without the ant's permissions, or why the uplink could not be renewed so.
     Retired {
         ant: UserId,
         public_key: String,
         revoked: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         push_error: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        leaf_jwt: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        leaf_error: Option<String>,
     },
 }
 
@@ -327,8 +333,14 @@ mod tests {
         assert!(all.answers("UKEY") && all.answers("UOTHER"));
         let one = EnrollReply::Rejected { ant: p("dev-a"), public_key: Some("UOTHER".into()), reason: None };
         assert!(!one.answers("UKEY"));
-        let retired =
-            EnrollReply::Retired { ant: p("dev-a"), public_key: "UKEY".into(), revoked: vec![], push_error: None };
+        let retired = EnrollReply::Retired {
+            ant: p("dev-a"),
+            public_key: "UKEY".into(),
+            revoked: vec![],
+            push_error: None,
+            leaf_jwt: None,
+            leaf_error: None,
+        };
         assert_eq!(serde_json::to_value(&retired).unwrap()["outcome"], "retired");
         assert!(retired.answers("UKEY") && !retired.answers("UOTHER"));
     }

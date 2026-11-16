@@ -159,12 +159,24 @@ impl Manager {
         let stopped = retire::stopped(&js, &name, retire::STOP_WAIT).await;
         let until = Utc::now() + RETIRE_WAIT;
         let template_name = template.as_deref().unwrap_or_default();
-        let retired =
-            signer::retire(&client, &jwt, &signing, template_name, &thread, &name, &key, ENROLL_REPEAT, until)
-                .await
-                .with_context(|| {
-                    format!("{name} is unlisted, its credentials not revoked yet: retire_ant {name} again")
-                })?;
+        let leaf = match &self.leaf_config {
+            Some(path) if path.exists() => add::leaf_node(Some(path))?,
+            _ => None,
+        };
+        let retired = signer::retire(
+            &client,
+            &jwt,
+            &signing,
+            template_name,
+            &thread,
+            &name,
+            &key,
+            leaf.as_ref().map(|(_, leaf)| leaf),
+            ENROLL_REPEAT,
+            until,
+        )
+        .await
+        .with_context(|| format!("{name} is unlisted, its credentials not revoked yet: retire_ant {name} again"))?;
         let mut said = vec![
             format!("Retired {name}: unlisted from {}.", self.config.display()),
             retire::stop_note(&name, stopped),
@@ -179,6 +191,9 @@ impl Manager {
                  `ants auth push` where the account key is, or it reloads."
             ));
         }
+        if let Some((conf, leaf)) = leaf {
+            said.extend(shrunk(conf, &leaf.machine, &name, retired).await?);
+        }
         said.push(match retire::forget(&path) {
             Ok(()) => format!("{} removed.", path.display()),
             Err(e) => {
@@ -190,6 +205,36 @@ impl Manager {
         }
         Ok(said.join(" "))
     }
+}
+
+/// Have the leaf node configured at `conf`, of `machine`, use the uplink credentials the signer renewed without `name`
+/// on `retired`, and say what came of it: nothing when they did not carry it.
+async fn shrunk(
+    conf: PathBuf,
+    machine: &ants_proto::Machine,
+    name: &UserId,
+    retired: signer::Retired,
+) -> Result<Option<String>> {
+    let remedy = format!(
+        "until a human runs `ants auth leaf {machine} --remove-ant {name}` and `ants leaf outbox {machine} \
+         --remove-ant {name}`, they keep {name}'s rights"
+    );
+    let Some(shrunk) = retired.leaf_jwt else {
+        return Ok(retired.leaf_error.map(|e| {
+            format!("The uplink credentials of the leaf node {machine} were left as they are ({e}): {remedy}.")
+        }));
+    };
+    let asked = retired.leaf_asked;
+    let renew = move || add::shrink_and_reconnect(&conf, asked.as_deref(), &shrunk);
+    Ok(Some(match tokio::task::spawn_blocking(renew).await? {
+        Ok(Some(said)) => {
+            format!("The uplink credentials of the leaf node {machine} were renewed without {name}: {said}.")
+        }
+        Ok(None) => {
+            format!("The uplink credentials of {machine} changed meanwhile and were left as they are: {remedy}.")
+        }
+        Err(e) => format!("Renewing the uplink credentials of {machine} without {name} failed ({e:#}): {remedy}."),
+    }))
 }
 
 /// The key waiting at `seed` for its credentials, from an earlier request cut off, or a new one waiting there.

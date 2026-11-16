@@ -444,7 +444,12 @@ const SHARED_FIRST_READ: Duration = Duration::from_secs(5);
 /// ([`crate::add::renew_and_reconnect`]); none without a home directory.
 pub fn leaf_node() -> Option<LeafNode> {
     let conf = crate::auth::default_dir().ok()?.with_file_name("leaf.conf");
-    Some(LeafNode { conf, uplink: crate::leaf::read_uplink, renew: crate::add::renew_and_reconnect })
+    Some(LeafNode {
+        conf,
+        uplink: crate::leaf::read_uplink,
+        renew: crate::add::renew_and_reconnect,
+        shrink: |conf, asked, shrunk| crate::add::shrink_and_reconnect(conf, Some(asked), shrunk),
+    })
 }
 
 /// How [`run`] ended.

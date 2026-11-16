@@ -561,6 +561,40 @@ fn issued_credentials_carry_the_current_permissions_version_and_name_their_renew
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// A retired ant's rights leave the uplink, renewed for the same key, while those its other members, webhooks and
+/// enrollment approver share with it stay.
+#[test]
+fn a_shrunk_uplink_drops_only_what_the_retired_ant_needed() {
+    let dir = ants_test_support::scratch_dir("shrink-leaf");
+    let (team, out, m1) = (dir.join("auth"), dir.join("leaf-m1.creds"), "m1".parse::<Machine>().unwrap());
+    init(&team).unwrap();
+    let hub: JsDomain = "hub".parse().unwrap();
+    let hook = Permissions::for_webhook(&p("hook"), &[Destination::Ant(p("dev-a"))]);
+    issue_with(&team, &p("hook"), Kind::Webhook, hook, &team.join("hook.creds")).unwrap();
+    let on_m1 = members(&[p("dev-a")], &[p("alice")]);
+    issue_leaf(&team, &m1, &on_m1, &[p("hook")], EnrollApprover::With, Some(&hub), &out).unwrap();
+    let (jwt, key) = read_creds(&out).unwrap();
+    let more = Permissions::for_leaf(&m1, [(&p("dev-c"), Role::Ant)]).with_uplink_js_domain(Some(&hub));
+    let with_c = extend_leaf(&team, &jwt, &m1, more).unwrap();
+
+    let without_c = shrink_leaf(&team, &with_c, &m1, &p("dev-c"), LeafRole::Ant).unwrap().unwrap();
+    assert!(allows_all(&without_c, &jwt).unwrap() && allows_all(&jwt, &without_c).unwrap(), "as issued again");
+    assert_eq!(check_leaf(&account_key(&team).unwrap(), &without_c, &m1).unwrap().sub, key.public_key());
+    assert_eq!(shrink_leaf(&team, &without_c, &m1, &p("dev-c"), LeafRole::Ant).unwrap(), None, "nothing left");
+
+    let without_a = shrink_leaf(&team, &jwt, &m1, &p("dev-a"), LeafRole::Ant).unwrap().unwrap();
+    let finding = ants_daemon::creds::Finding::from_jwt(&without_a).unwrap();
+    let ants_daemon::creds::Kind::Leaf { ants, humans, webhooks, enroll_approver, .. } = finding.kind else {
+        panic!("{finding:?}")
+    };
+    assert!(ants.is_empty(), "{ants:?}");
+    assert!(humans.contains(&p("alice")) && webhooks == [p("hook")] && enroll_approver, "{humans:?} {webhooks:?}");
+    let (_, body) = verified_body(&without_a).unwrap();
+    let publish = allowed(&body).publish;
+    assert!(publish.iter().any(|s| s.starts_with("ants.inbox.dev-a.")), "the webhook's: {publish:?}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// Issue `out`, uplink credentials of `machine` for the hub's `domain`, for as many ants as they may carry; returns
 /// the ants and the error refusing one more.
 pub(crate) fn uplink_for_most_ants(

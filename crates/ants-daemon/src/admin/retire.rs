@@ -3,6 +3,10 @@
 //! [`STOP_WAIT`], `ants signer` revokes its key on the order ([`super::ask`]) and its credentials are deleted, with
 //! any seed of theirs in the OS credential store. Its home stays. The order taken again after the table went, its
 //! outcome not stored, finds the credentials left beside the host credentials and goes on from the revocation.
+//!
+//! On a machine running a leaf node, the request carries its uplink credentials too, and the signer, once it revoked
+//! the key, renews them without the ant, which the leaf node then connects its uplink with ([`shrink`]). The ant is
+//! retired all the same when that fails, the outcome's `uplink` saying how to drop it from the uplink.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -14,8 +18,9 @@ use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
 use serde_json::json;
 
-use super::ask::{SIGNER_WAIT, ask};
-use super::{NO_CONFIG, Orders, applied, refused};
+use super::add::{check_uplink, leaf_uplink};
+use super::ask::{SIGNER_WAIT, Uplink, ask};
+use super::{LeafNode, NO_CONFIG, Orders, applied, refused};
 use crate::config;
 use crate::creds::{self, Finding, Seed};
 use crate::direct_kv::{DirectKv, Lookup};
@@ -46,8 +51,24 @@ pub(super) async fn apply(js: &jetstream::Context, orders: &Orders, order: &Admi
             Some(json!({ "stopped": stopped, "revoked": [], "home": home, "note": "no credentials to revoke" })),
         );
     };
-    let (revoked, push_error) = match ask(js, host_creds, None, order, &order.ant, &key, SIGNER_WAIT).await {
-        Ok(EnrollReply::Retired { revoked, push_error, .. }) => (revoked, push_error),
+    // The retirement does not wait on the leaf node: without its configuration, the uplink is left as it is.
+    let leaf = leaf_uplink(orders.leaf.as_ref()).and_then(|leaf| {
+        leaf.map(|(leaf, uplink)| {
+            let (asked, _) = creds::load(&uplink.creds, keystore::os())
+                .with_context(|| format!("the uplink credentials of the leaf node {}", uplink.machine))?;
+            Ok((leaf, uplink, asked))
+        })
+        .transpose()
+    });
+    let (leaf, leaf_error) = match leaf {
+        Ok(leaf) => (leaf, None),
+        Err(e) => (None, Some(format!("{e:#}"))),
+    };
+    let uplink = leaf.as_ref().map(|(_, uplink, _)| uplink);
+    let (revoked, push_error, shrunk) = match ask(js, host_creds, uplink, order, ant, &key, SIGNER_WAIT).await {
+        Ok(EnrollReply::Retired { revoked, push_error, leaf_jwt, leaf_error: why, .. }) => {
+            (revoked, push_error, leaf_jwt.ok_or(why))
+        }
         Ok(EnrollReply::Rejected { reason, .. }) => {
             let reason = reason.as_deref().unwrap_or("no reason given");
             return refused(order, &format!("`ants signer` refused to revoke {key}: {reason}; {}", hint(&key)));
@@ -62,17 +83,62 @@ pub(super) async fn apply(js: &jetstream::Context, orders: &Orders, order: &Admi
     {
         tracing::warn!(ant = %ant, error = format!("{e:#}"), "deleting the credentials of a retired ant");
     }
+    let uplink = match (leaf, leaf_error) {
+        (Some((leaf, uplink, asked)), _) => Some(shrink(leaf, &uplink, &orders.accounts, ant, asked, shrunk).await),
+        (None, Some(e)) => Some(format!("the uplink of the machine's leaf node is left as it is: {e}")),
+        (None, None) => None,
+    }
+    .filter(|said| !said.is_empty());
     let creds = unlisted.creds.map(|c| c.display().to_string());
-    applied(
-        order,
-        Some(json!({
-            "stopped": stopped,
-            "revoked": revoked,
-            "push_error": push_error,
-            "creds": creds,
-            "home": home,
-        })),
-    )
+    let mut result = json!({
+        "stopped": stopped,
+        "revoked": revoked,
+        "push_error": push_error,
+        "creds": creds,
+        "home": home,
+    });
+    if let Some(uplink) = uplink {
+        result["uplink"] = uplink.into();
+    }
+    applied(order, Some(result))
+}
+
+/// Have the leaf node `leaf` use `shrunk`, the uplink credentials of `uplink` the signer renewed without `ant` from
+/// `asked`, after checking them, or say why it did not renew them: what came of it, said in the order's outcome; empty
+/// when they did not carry the ant.
+async fn shrink(
+    leaf: &LeafNode,
+    uplink: &Uplink,
+    accounts: &[String],
+    ant: &UserId,
+    asked: String,
+    shrunk: Result<String, Option<String>>,
+) -> String {
+    let machine = &uplink.machine;
+    let remedy = format!(
+        "until a human runs `ants auth leaf {machine} --remove-ant {ant}` where the account key is and `ants leaf \
+         outbox {machine} --remove-ant {ant}`, they keep {ant}'s rights"
+    );
+    let shrunk = match shrunk {
+        Ok(shrunk) => shrunk,
+        Err(None) => return String::new(),
+        Err(Some(why)) => {
+            return format!("the uplink credentials of {machine} were left as they are ({why}): {remedy}");
+        }
+    };
+    if let Err(e) = check_uplink(&shrunk, accounts, uplink) {
+        return format!("the uplink credentials of {machine} were left as they are ({e:#}): {remedy}");
+    }
+    let (apply, conf) = (leaf.shrink, leaf.conf.clone());
+    match tokio::task::spawn_blocking(move || apply(&conf, &asked, &shrunk)).await.map_err(anyhow::Error::from) {
+        Ok(Ok(Some(said))) => format!("the uplink credentials of {machine} were renewed without {ant}: {said}"),
+        Ok(Ok(None)) => {
+            format!("the uplink credentials of {machine} changed meanwhile and were left as they are: {remedy}")
+        }
+        Ok(Err(e)) | Err(e) => {
+            format!("renewing the uplink credentials of {machine} without {ant} failed: {e:#}; {remedy}")
+        }
+    }
 }
 
 fn hint(key: &str) -> String {

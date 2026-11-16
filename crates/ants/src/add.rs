@@ -426,8 +426,40 @@ pub(crate) fn renew_and_apply(
     renewed: &str,
     apply: impl FnOnce(Action) -> Outcome,
 ) -> Result<Option<String>> {
+    replace_and_apply(conf, None, renewed, apply)
+}
+
+/// [`renew_and_reconnect`] with `shrunk`, the uplink JWT `asked` renewed without a retired ant: the credentials take it
+/// while they still hold `asked`, or allow nothing it does not.
+pub(crate) fn shrink_and_reconnect(conf: &Path, asked: Option<&str>, shrunk: &str) -> Result<Option<String>> {
+    shrink_and_apply(conf, asked, shrunk, |action| Services::local().apply(Service::Nats, action, conf))
+}
+
+/// [`shrink_and_reconnect`], `apply` reloading the leaf node.
+pub(crate) fn shrink_and_apply(
+    conf: &Path,
+    asked: Option<&str>,
+    shrunk: &str,
+    apply: impl FnOnce(Action) -> Outcome,
+) -> Result<Option<String>> {
+    replace_and_apply(conf, asked, shrunk, apply)
+}
+
+fn replace_and_apply(
+    conf: &Path,
+    asked: Option<&str>,
+    renewed: &str,
+    apply: impl FnOnce(Action) -> Outcome,
+) -> Result<Option<String>> {
     let (machine, creds) = leaf::read_uplink(conf)?;
-    if !renew_uplink(&enroll::Leaf { machine, creds }, renewed)? {
+    let (current, key) = auth::read_creds(&creds)?;
+    let replaced = if asked == Some(current.as_str()) {
+        auth::write_creds(&creds, renewed, &key)?;
+        true
+    } else {
+        renew_uplink(&enroll::Leaf { machine, creds }, renewed)?
+    };
+    if !replaced {
         return Ok(None);
     }
     let said = leaf::reconnect_uplink(conf, apply).unwrap_or_else(|e| {
