@@ -468,6 +468,7 @@ mod tests {
             ahead,
             delivered: true,
             redelivery: false,
+            retry: false,
             started: false,
             withdrawn_by: None,
             withdrawn_for: None,

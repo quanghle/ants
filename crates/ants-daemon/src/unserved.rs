@@ -2,8 +2,8 @@
 //!
 //! `ants ask` and the MCP tools warn at send time of an ant the colony lists no live daemon for; when the ant's daemon
 //! goes away later, or never comes, the message waits in the ant's inbox consumer with no word. A [`Watch`] reads back
-//! the messages one user sent ([`subject::inbox_from`]), and finds those still waiting ([`MessageMark`]: none or
-//! started) [`AFTER`] they were sent, for an ant it has seen absent from the colony, or paused, for [`AFTER`] too: the watcher
+//! the messages one user sent ([`subject::inbox_from`]), and finds those still waiting ([`MessageMark`]: none,
+//! started or retrying) [`AFTER`] they were sent, for an ant it has seen absent from the colony, or paused, for [`AFTER`] too: the watcher
 //! of an ant is its daemon, that of a human `ants webhook serve` or `ants inbox --follow`. Whoever tells of a message
 //! first creates its marker ([`unserved_key`]), so it is told once across watchers and restarts.
 
@@ -355,7 +355,7 @@ impl Watch {
     async fn waits(&self, sent: &Sent) -> Result<bool> {
         let Some(value) = self.attempts.get(message_mark_key(&sent.to, &sent.id)).await? else { return Ok(true) };
         Ok(match serde_json::from_slice::<MessageMark>(&value) {
-            Ok(MessageMark::Started { .. }) | Err(_) => true,
+            Ok(MessageMark::Started { .. } | MessageMark::Retrying { .. }) | Err(_) => true,
             Ok(MessageMark::Finished { .. } | MessageMark::Withdrawn { .. }) => false,
         })
     }

@@ -1589,11 +1589,11 @@ async fn a_queued_message_is_listed_and_withdrawn_while_the_running_prompt_goes_
 }
 
 #[tokio::test]
-async fn a_message_awaiting_its_retry_is_listed_ahead_of_its_thread_and_stays_started() {
+async fn a_message_awaiting_its_retry_is_listed_ahead_of_its_thread_and_withdrawn_before_it() {
     use ants_proto::MessageMark;
-    let Some((mut bus, _replies)) = Bus::start().await else { return };
+    let Some((mut bus, mut replies)) = Bus::start().await else { return };
     // Long enough for the listing to find the message between its attempts.
-    bus.retry_delay = Duration::from_secs(10);
+    bus.retry_delay = Duration::from_secs(3);
     let (launch, log, gate) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
@@ -1624,10 +1624,18 @@ async fn a_message_awaiting_its_retry_is_listed_ahead_of_its_thread_and_stays_st
         assert_eq!((inbox.delivered, inbox.undelivered, inbox.ack_pending), (b_seq, 0, 2), "{inbox:?}");
         assert!(inbox.acked < a_seq, "{inbox:?}");
         assert!(listed.posts.is_some(), "the channel consumer's place");
-        assert!(matches!(withdraw(&bus, &a).await, Some(MessageMark::Started { .. })), "a started already");
+        assert!(matches!(mark_of(&bus, &a).await, Some(MessageMark::Retrying { .. })));
+        assert_eq!(withdraw(&bus, &a).await, None, "a awaits its retry, withdrawable");
+        let notice = next_envelope(&mut replies).await;
+        let withdrawn = "[ants] Withdrawn by human before dev-a retried it after a failed attempt (ants withdraw).";
+        assert_eq!((notice.text.as_str(), notice.in_reply_to), (withdrawn, Some(a.id)));
+        assert_eq!(next_reply(&mut replies).await, (t1.clone(), "b".to_owned()), "the thread goes on");
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(log.locked().doomed, 1, "the retry never reached the harness");
+    assert!(matches!(mark_of(&bus, &a).await, Some(MessageMark::Withdrawn { .. })));
+    assert_eq!(bus.unacked().await, 0);
 }
 
 #[tokio::test]
