@@ -10,10 +10,13 @@ use super::credentials::{check_key, check_xkey};
 use super::server::{consumer_limit, consumers, storage_check, supported_server};
 use super::*;
 use crate::avatars::{Depth, Faces};
+#[cfg(unix)]
+use crate::bridge;
 use crate::members::EnrollApprover;
+#[cfg(unix)]
 use crate::service::{Action, Service};
 use crate::test_support::Server;
-use crate::{backup, bridge, leaf, revoke, versions};
+use crate::{backup, leaf, revoke, versions};
 
 fn setup(server: &Server, creds: Option<PathBuf>) -> Setup {
     Setup {

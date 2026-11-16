@@ -5,10 +5,13 @@ use ants_proto::{Away, DeviceId, Escalation, EscalationReason, ThreadId, ToolCal
 use data_encoding::HEXLOWER;
 #[cfg(unix)]
 use http_body_util::BodyExt as _;
+#[cfg(unix)]
 use http_body_util::Full;
+#[cfg(unix)]
 use hyper::body::Bytes;
 #[cfg(unix)]
 use hyper::http::Request;
+#[cfg(unix)]
 use hyper::http::{Response, StatusCode};
 #[cfg(unix)]
 use hyper_util::rt::TokioIo;

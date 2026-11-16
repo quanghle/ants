@@ -25,9 +25,9 @@ pub use session::{
 pub use sign_in::{Handshake, Readiness, SignedOut, check, handshake};
 
 // The tests of the native translators take these through this module.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use crate::breaker::StartFailed;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use ants_proto::PlanStep;
 
 #[cfg(test)]
