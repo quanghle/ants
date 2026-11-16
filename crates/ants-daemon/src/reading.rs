@@ -142,13 +142,7 @@ async fn read_back_with(
     start: consumer::DeliverPolicy,
     take: impl Take,
 ) -> Result<()> {
-    let config = consumer::pull::Config {
-        filter_subject: filter.to_owned(),
-        deliver_policy: start,
-        ack_policy: consumer::AckPolicy::None,
-        inactive_threshold: INACTIVE,
-        ..Default::default()
-    };
+    let config = reader_config(filter, start);
     let (name, consumer) = match reading {
         Reading::Gets => return read_by_gets(js, filter, start, take).await,
         Reading::Consumer => {
@@ -166,17 +160,25 @@ async fn read_back_with(
     read
 }
 
+/// A reader consumer, or a spare of it, reading `filter` from `start` for a single read. Its state is kept in memory:
+/// nats-server may hand a consumer created right after one of the same name was deleted the state that one left on
+/// disk (a flush racing the delete), so a read would start where the deleted one stopped and get nothing.
+fn reader_config(filter: &str, start: consumer::DeliverPolicy) -> consumer::pull::Config {
+    consumer::pull::Config {
+        filter_subject: filter.to_owned(),
+        deliver_policy: start,
+        ack_policy: consumer::AckPolicy::None,
+        inactive_threshold: INACTIVE,
+        memory_storage: true,
+        ..Default::default()
+    }
+}
+
 /// The stream sequence of the last message stored, read as `reading` says. An ant's credentials get no stream info
 /// (it lists every subject stored), so its reader, or a spare of it, filtering `filter` is created to start after the
 /// last message, and the sequence it delivered up to is that one's.
 pub async fn last_sequence(js: &jetstream::Context, reader: &str, reading: Reading, filter: &str) -> Result<u64> {
-    let config = consumer::pull::Config {
-        filter_subject: filter.to_owned(),
-        deliver_policy: consumer::DeliverPolicy::New,
-        ack_policy: consumer::AckPolicy::None,
-        inactive_threshold: INACTIVE,
-        ..Default::default()
-    };
+    let config = reader_config(filter, consumer::DeliverPolicy::New);
     let (name, consumer) = match reading {
         Reading::Gets => {
             let stream = js.get_stream(STREAM).await.context("opening the ANTS stream")?;
@@ -410,6 +412,62 @@ mod tests {
             }
         });
         move || counts.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// nats-server may hand a consumer the state a deleted one of the same name left on disk (its last flush racing
+    /// the delete), as a spare taken right after another read deleted it can be: the read then starts where that one
+    /// ended and gets nothing. Here the state such a reader left is put back by hand, so the next read finds it.
+    #[tokio::test]
+    async fn a_read_through_a_spare_ignores_the_state_a_deleted_one_left_behind() {
+        let Some(server) = NatsServer::start() else { return };
+        let (_client, js) = connect(&server).await;
+        js.create_stream(crate::hub::stream_config()).await.unwrap();
+        let thread: ThreadId = "t1".parse().unwrap();
+        let notes = subject::notes(&thread, &"dev-a".parse::<UserId>().unwrap());
+        for i in 0..3 {
+            js.publish(notes.clone(), format!("n{i}").into()).await.unwrap().await.unwrap();
+        }
+        let reader = "reader-dev-a";
+        let spare = spare_readers(reader).next().unwrap();
+        let dir = server.dir().join(format!("js/jetstream/$G/streams/{STREAM}/obs/{spare}"));
+        let state = dir.join("o.dat");
+
+        // A spare stored on disk as nats-server stores consumers by default, read to the end and flushed.
+        let config = consumer::pull::Config {
+            name: Some(spare.clone()),
+            filter_subject: notes.clone(),
+            ack_policy: consumer::AckPolicy::None,
+            ..Default::default()
+        };
+        let old: consumer::PullConsumer = js.create_consumer_on_stream(config, STREAM).await.unwrap();
+        let started = std::fs::read(&state).unwrap();
+        assert_eq!(old.fetch().max_messages(3).messages().await.unwrap().count().await, 3);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while std::fs::read(&state).unwrap() == started {
+            assert!(tokio::time::Instant::now() < deadline, "the read state is flushed");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                (path.clone(), std::fs::read(path).unwrap())
+            })
+            .collect();
+        js.delete_consumer_from_stream(&spare, STREAM).await.unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        for (path, bytes) in left {
+            std::fs::write(path, bytes).unwrap();
+        }
+
+        let mut got = Vec::new();
+        read_back(&js, reader, Reading::Spare, &notes, consumer::DeliverPolicy::All, |_, _, _, payload| {
+            got.push(String::from_utf8(payload.to_vec()).unwrap());
+            ControlFlow::Continue(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(got, ["n0", "n1", "n2"]);
     }
 
     #[tokio::test]

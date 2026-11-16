@@ -310,6 +310,9 @@ pub async fn stored(js: &jetstream::Context, dead: &DeadLetter) -> Result<Vec<(u
         deliver_policy: consumer::DeliverPolicy::ByStartSequence { start_sequence: dead.stream_seq + 1 },
         ack_policy: consumer::AckPolicy::None,
         inactive_threshold: INACTIVE,
+        // In memory, so it never starts from the state the reader deleted before it left on disk (as a reading
+        // reader's, `crate::reading`).
+        memory_storage: true,
         ..Default::default()
     };
     let reader: consumer::PullConsumer =
