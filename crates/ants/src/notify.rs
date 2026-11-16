@@ -39,6 +39,10 @@
 //! [`HeldNotices`] in [`NOTIFY_BUCKET`], with compare-and-set, by whichever process took it; once neither holds any
 //! more, checked every [`DIGEST_EVERY`] and before the next notice sent, one process claims the count by deleting it
 //! at the revision it read and sends one digest notice: the counts per kind and the tool requests still pending.
+//!
+//! A reply is not notified as it comes but once its thread has been quiet for the human's `completion_window`, folded
+//! with the other replies on the thread meanwhile ([`replies`]): held in memory by the process that took it, so a
+//! restart drops what waits.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -60,7 +64,7 @@ use futures::StreamExt as _;
 use tokio::sync::OnceCell;
 
 use self::notices::{
-    About, Notice, approval_notice, completion_notice, digest_notice, escalation_notice, held, holding,
+    About, Notice, action_notice, approval_notice, completion_notice, digest_notice, escalation_notice, held, holding,
     question_notice, relayed, unserved_notice,
 };
 use self::sinks::send;
@@ -74,6 +78,7 @@ pub use self::sinks::{probe_links, test};
 mod config;
 mod links;
 mod notices;
+mod replies;
 mod sinks;
 
 /// Where approval links point, under the config's `path`. A webhook name starts with a letter or digit, so no
@@ -102,6 +107,12 @@ const RECENT: usize = 256;
 const MAX_ANSWER: usize = 512;
 /// How often a human's held notices are checked for a digest due, besides before each notice sent.
 const DIGEST_EVERY: Duration = if cfg!(test) { Duration::from_millis(200) } else { Duration::from_secs(60) };
+/// How often the replies waiting are checked for notices due.
+const REPLIES_EVERY: Duration = if cfg!(test) { Duration::from_millis(100) } else { Duration::from_secs(1) };
+/// How long a thread is quiet before its replies are notified, unless `completion_window` says otherwise.
+const COMPLETION_WINDOW: Duration = Duration::from_mins(1);
+/// The longest `completion_window`.
+const MAX_COMPLETION_WINDOW: Duration = Duration::from_hours(1);
 /// Most pending tool requests a digest's text lists.
 const DIGEST_PENDING: usize = 10;
 /// How many times a held notice is counted again when another process counted or claimed meanwhile.
@@ -130,11 +141,12 @@ pub struct Notified {
     pub config: Human,
     bus: OnceCell<HumanBus>,
     recent: Mutex<VecDeque<u64>>,
+    replies: Mutex<replies::Replies>,
 }
 
 impl Notified {
     pub fn new(config: Human) -> Self {
-        Self { config, bus: OnceCell::new(), recent: Mutex::default() }
+        Self { config, bus: OnceCell::new(), recent: Mutex::default(), replies: Mutex::default() }
     }
 
     /// Whether its connection is made and up.
@@ -201,6 +213,7 @@ pub async fn run(
     let mut unserved = Box::pin(tell_unserved(&human.config, bus, unserved));
     let mut reactions = Box::pin(answer_reactions(name, bus));
     let mut digests = Box::pin(digests(&human.config, bus));
+    let mut replies = Box::pin(replies_due(&human, bus));
     let mut delay = Duration::from_secs(1);
     loop {
         let watched = tokio::select! {
@@ -208,6 +221,7 @@ pub async fn run(
             never = &mut unserved => match never {},
             never = &mut reactions => match never {},
             never = &mut digests => match never {},
+            never = &mut replies => match never {},
         };
         match watched {
             Ok(()) => delay = Duration::from_secs(1),
@@ -271,6 +285,9 @@ async fn notify(human: &Notified, bus: &HumanBus, links: Option<&Links>, subject
                         escalation_notice(&envelope).filter(|notice| !config.gets_relayed_request(&notice.about))
                     }
                     (false, true) if config.questions => question_notice(&envelope),
+                    (false, false) if envelope.notice.is_some() => {
+                        action_notice(&envelope).filter(|_| config.escalations)
+                    }
                     (false, false) if config.completions => completion_notice(&envelope),
                     _ => None,
                 }
@@ -304,6 +321,16 @@ async fn notify(human: &Notified, bus: &HumanBus, links: Option<&Links>, subject
         }
     };
     let Some(notice) = notice else { return };
+    if matches!(notice.about, About::Completion { .. }) && !config.completion_window.is_zero() {
+        human.replies.locked().add(notice, seq, now);
+        return;
+    }
+    deliver(config, bus, &notice, seq, inbox, now).await;
+}
+
+/// Send `notice`, of the message at `seq` (in the human's inbox if `inbox`, else a tool request), at `now`, unless a
+/// mute, a snooze or quiet hours hold it back, to the sinks of the devices not reading what it is about.
+async fn deliver(config: &Human, bus: &HumanBus, notice: &Notice, seq: u64, inbox: bool, now: DateTime<Utc>) {
     let prefs = holds(config, bus).await;
     if let Some(why) = held(config, &notice.about, &prefs, now) {
         // Dropped, not sent later: the message stays unread and a request pending, as for a notice never sent.
@@ -312,7 +339,7 @@ async fn notify(human: &Notified, bus: &HumanBus, links: Option<&Links>, subject
         if why != "muted thread" {
             count_held(config, bus, notice.about.kind(), now).await;
         }
-        relay(config, bus, &notice, why, seq).await;
+        relay(config, bus, notice, why, seq).await;
         return;
     }
     digest(config, bus, &prefs, now).await;
@@ -321,7 +348,22 @@ async fn notify(human: &Notified, bus: &HumanBus, links: Option<&Links>, subject
     if !reading.is_empty() {
         tracing::debug!(human = %config.name, devices = ?reading, what = what.as_str(), "skipping devices reading");
     }
-    send(config, &notice, |device| !reading.contains(device)).await;
+    send(config, notice, |device| !reading.contains(device)).await;
+}
+
+/// Check every [`REPLIES_EVERY`] which of the replies waiting for `human` are due, and send their notices.
+async fn replies_due(human: &Notified, bus: &HumanBus) -> std::convert::Infallible {
+    let window = human.config.completion_window;
+    if !window.is_zero() {
+        loop {
+            tokio::time::sleep(REPLIES_EVERY).await;
+            let due = human.replies.locked().due(Utc::now(), window);
+            for (notice, seq) in due {
+                deliver(&human.config, bus, &notice, seq, true, Utc::now()).await;
+            }
+        }
+    }
+    std::future::pending().await
 }
 
 /// Relay `notice`, held back from `human` by `why`, to its stand-in ([`relayed`]) when `human` is away: no device of

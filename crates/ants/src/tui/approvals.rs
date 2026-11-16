@@ -1,7 +1,8 @@
 //! Tool request cards: the pending tool requests, on home and on their thread, with the ant, the tool and its input,
 //! answered with a, A or r then y through the path of `ants tools approve` and `reject`, the first decision winning
 //! ([`crate::live::Feed::decide`]); Enter shows a request in full as `ants dash` does. A request settled while the UI
-//! runs keeps its card a while ([`SETTLED_FOR`]), saying how it was settled and by whom.
+//! runs keeps its card a while ([`SETTLED_FOR`]), saying how it was settled and by whom, unless the human decided it
+//! here.
 
 use ants_proto::{ApprovalRequest, ThreadId, Verdict};
 use chrono::{DateTime, Local, TimeDelta, Utc};
@@ -21,11 +22,25 @@ pub const SETTLED_FOR: TimeDelta = TimeDelta::minutes(2);
 /// How many settled requests are kept at most.
 const SETTLED_KEEP: usize = 64;
 
-/// The requests settled while the UI runs, the latest last: each with how it was settled and when word of it came.
+/// The requests settled while the UI runs, the latest last: each with how it was settled and when word of it came;
+/// and the requests the human answered here, the latest last.
 #[derive(Debug, Default)]
-pub struct Settled(Vec<(ApprovalRequest, State, DateTime<Utc>)>);
+pub struct Settled(Vec<(ApprovalRequest, State, DateTime<Utc>)>, Vec<ApprovalRequest>);
 
 impl Settled {
+    /// Take note that the human answers `request` here.
+    pub fn deciding(&mut self, request: &ApprovalRequest) {
+        self.1.retain(|r| !same(r, request));
+        self.1.push(request.clone());
+        let over = self.1.len().saturating_sub(SETTLED_KEEP);
+        self.1.drain(..over);
+    }
+
+    /// Whether `me` settled `request` as `state` with an answer given here: its card need not stay.
+    pub fn decided_here(&self, request: &ApprovalRequest, state: &State, me: &ants_proto::UserId) -> bool {
+        matches!(state, State::Decided(d) if d.by.as_ref() == Some(me)) && self.1.iter().any(|r| same(r, request))
+    }
+
     pub fn add(&mut self, request: ApprovalRequest, state: State, now: DateTime<Utc>) {
         self.0.retain(|(r, ..)| !same(r, &request));
         self.0.push((request, state, now));

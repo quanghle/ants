@@ -4,7 +4,8 @@ use super::*;
 
 #[tokio::test]
 async fn decide_approval_answers_a_request_from_the_chain() {
-    let (mcp, mut sent) = start(&home("decide")).await;
+    let home = home("decide");
+    let (mcp, mut sent) = start(&home).await;
     let tool = ants_proto::ToolCall {
         kind: "execute".to_owned(),
         title: "rm -rf target".to_owned(),
@@ -87,7 +88,8 @@ async fn start_escalating_with(
 
 #[tokio::test]
 async fn escalate_goes_up_the_chain_and_only_the_leader_sends_it_higher() {
-    let (mcp, mut sent) = start_escalating(&home("escalate"), &["lead", "dev-b"]).await;
+    let home = home("escalate");
+    let (mcp, mut sent) = start_escalating(&home, &["lead", "dev-b"]).await;
     let current = from_human();
     let thread = current.thread_id.clone();
     let client = {
@@ -144,7 +146,8 @@ async fn escalate_goes_up_the_chain_and_only_the_leader_sends_it_higher() {
 #[tokio::test]
 async fn escalate_on_a_thread_another_ant_created_goes_up_the_creator_s_chain() {
     let lead = ColonyEntry { escalate_to: vec![user("boss")], ..listed("lead", &[]) };
-    let (mcp, mut sent) = start_escalating_with(&home("escalate-creator"), &["dev-b"], vec![lead]).await;
+    let home = home("escalate-creator");
+    let (mcp, mut sent) = start_escalating_with(&home, &["dev-b"], vec![lead]).await;
     let current = Envelope::new(user("lead"), user("dev-a"), "fix it").with_creator(Some(user("lead")));
     let client = {
         let (url, token) = http_server(&mcp, &current.thread_id);
@@ -161,7 +164,8 @@ async fn escalate_on_a_thread_another_ant_created_goes_up_the_creator_s_chain() 
     assert!(sent.try_recv().is_err(), "dev-a's own chain is not used");
 
     // A creator with no chain sends it to the owner, else the default human.
-    let (mcp, mut sent) = start_escalating_with(&home("escalate-creator-none"), &["dev-b"], vec![]).await;
+    let other_home = super::home("escalate-creator-none");
+    let (mcp, mut sent) = start_escalating_with(&other_home, &["dev-b"], vec![]).await;
     let current = Envelope::new(user("lead"), user("dev-a"), "fix it").with_creator(Some(user("lead")));
     let client = {
         let (url, token) = http_server(&mcp, &current.thread_id);
@@ -177,7 +181,8 @@ async fn escalate_on_a_thread_another_ant_created_goes_up_the_creator_s_chain() 
 
 #[tokio::test]
 async fn escalate_without_a_chain_goes_to_the_owner() {
-    let (mcp, mut sent) = start_escalating(&home("escalate-owner"), &[]).await;
+    let home = home("escalate-owner");
+    let (mcp, mut sent) = start_escalating(&home, &[]).await;
     let current = from_human();
     let client = {
         let (url, token) = http_server(&mcp, &current.thread_id);
@@ -194,7 +199,8 @@ async fn escalate_without_a_chain_goes_to_the_owner() {
 
 #[tokio::test]
 async fn an_assistant_passes_an_escalation_on_to_its_human() {
-    let (mcp, mut sent) = start_escalating(&home("escalate-assistant"), &["lead"]).await;
+    let home = home("escalate-assistant");
+    let (mcp, mut sent) = start_escalating(&home, &["lead"]).await;
     let stuck = ants_proto::Escalation::new(user("dev-c"), ThreadId::generate(), EscalationReason::TurnBudget);
     let led = stuck.to_assistant(user("dev-a"), user("alice"));
     let current = Envelope::on_thread(led.thread_id.clone(), user("dev-c"), user("dev-a"), "help dev-c")

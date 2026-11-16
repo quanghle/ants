@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use ants_proto::{
-    Acting, ApprovalDecision, AssistantRecord, DEVICES_BUCKET, Envelope, Grants, JsDomain, UserId,
+    Acting, ApprovalDecision, AssistantRecord, DEVICES_BUCKET, Envelope, Grants, JsDomain, ThreadId, UserId,
     assistant_record_key, revoked_device_key,
 };
 use anyhow::{Context as _, Result};
@@ -117,21 +117,30 @@ pub async fn keep_record(
     Ok(Some(of))
 }
 
+/// A report from `from` to `human` of an act its assistant did for it: on the human's activity thread of the day
+/// ([`ThreadId::activity`]), which gathers them all, so no wait on the act's thread takes it for a reply and they do
+/// not each start a thread.
+pub fn report(from: UserId, human: &UserId, text: String) -> Envelope {
+    let thread = ThreadId::activity(human, chrono::Utc::now().date_naive());
+    Envelope::on_thread(thread, from, human.clone(), text)
+        .with_owner(Some(human.clone()))
+        .as_notice(ants_proto::NoticeKind::Assistant)
+}
+
 /// The message telling `human` that `envelope`, which its assistant sent for it and a reader verified, reached its
-/// recipient: from the recipient, on a thread of its own as a stand-in's decision notice is, so no wait on the
-/// envelope's thread takes it for a reply.
+/// recipient: a [`report`] from the recipient.
 pub fn sent_notice(envelope: &Envelope, human: &UserId) -> Envelope {
     let (from, to, thread) = (&envelope.from, &envelope.to, &envelope.thread_id);
     let text = format!(
         "[ants] {from} sent {to} a message for {human}, as its assistant, on thread {thread}: {}",
         excerpt(&envelope.text)
     );
-    Envelope::new(to.clone(), human.clone(), text).with_owner(Some(human.clone()))
+    report(to.clone(), human, text)
 }
 
 /// The message telling `human` that `envelope`, carrying `decision`, is its assistant's decision for it, verified by a
 /// reader, and that it holds until the human consents to it: no decision made for a human takes effect as the human's
-/// unconfirmed ([`crate::approvals`]). Sent as [`sent_notice`] is.
+/// unconfirmed ([`crate::approvals`]). A [`report`] from the requesting ant.
 pub fn held_notice(envelope: &Envelope, decision: &ApprovalDecision, human: &UserId) -> Envelope {
     let (from, to, id) = (&envelope.from, &envelope.to, decision.request_id);
     let text = format!(
@@ -141,7 +150,7 @@ pub fn held_notice(envelope: &Envelope, decision: &ApprovalDecision, human: &Use
          tools approve {to}/{id}` or `ants tools reject {to}/{id}`).",
         decision.verdict.as_str()
     );
-    Envelope::new(to.clone(), human.clone(), text).with_owner(Some(human.clone()))
+    report(to.clone(), human, text)
 }
 
 /// The first line of `text`, cut to a short excerpt.

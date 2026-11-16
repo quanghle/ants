@@ -274,7 +274,33 @@ impl ThreadId {
     pub(crate) fn of_post(post: Uuid) -> Self {
         Self(post.to_string())
     }
+
+    /// The thread that gathers the reports of what `human`'s assistant did for it on `day` (UTC), in its inbox:
+    /// `acts-YYYYMMDD-<human>`, the name cut and a hash of it added where it would not fit.
+    pub fn activity(human: &UserId, day: chrono::NaiveDate) -> Self {
+        let prefix = format!("{ACTIVITY_PREFIX}{}-", day.format("%Y%m%d"));
+        let id = format!("{prefix}{human}");
+        if id.len() <= 64 {
+            return Self(id);
+        }
+        // FNV-1a: stable across builds, unlike the std hasher.
+        let hash = human
+            .as_str()
+            .bytes()
+            .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3));
+        let keep = 64 - prefix.len() - 17;
+        Self(format!("{prefix}{}-{hash:016x}", &human.as_str()[..keep]))
+    }
+
+    /// Whether the thread gathers an assistant's reports to its human ([`ThreadId::activity`]).
+    pub fn is_activity(&self) -> bool {
+        self.0.strip_prefix(ACTIVITY_PREFIX).is_some_and(|rest| {
+            rest.len() > 9 && rest.as_bytes()[8] == b'-' && rest[..8].bytes().all(|b| b.is_ascii_digit())
+        })
+    }
 }
+
+const ACTIVITY_PREFIX: &str = "acts-";
 
 #[cfg(test)]
 mod tests {
@@ -294,6 +320,22 @@ mod tests {
     fn generated_thread_ids_are_valid_tokens() {
         let t = ThreadId::generate();
         assert_eq!(t.as_str().parse::<ThreadId>().unwrap(), t);
+    }
+
+    #[test]
+    fn activity_threads_are_one_per_human_and_day_and_valid_tokens() {
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 11, 17).unwrap();
+        let alice = ThreadId::activity(&p("alice"), day);
+        assert_eq!(alice.as_str(), "acts-20261117-alice");
+        assert!(alice.is_activity());
+        assert_ne!(alice, ThreadId::activity(&p("alice"), day.succ_opt().unwrap()));
+        let (long, longer) = (p(&"h".repeat(64)), p(&format!("{}x", "h".repeat(63))));
+        let (a, b) = (ThreadId::activity(&long, day), ThreadId::activity(&longer, day));
+        assert_ne!(a, b);
+        assert!(a.is_activity() && b.is_activity());
+        assert_eq!(a.as_str().parse::<ThreadId>().unwrap(), a);
+        assert!(!ThreadId::generate().is_activity());
+        assert!(!"acts-x".parse::<ThreadId>().unwrap().is_activity());
     }
 
     #[test]

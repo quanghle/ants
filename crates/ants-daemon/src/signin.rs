@@ -106,7 +106,7 @@ pub fn notice(to: &OutageNotice<'_>, signed_out: &SignedOut, every: Duration) ->
          user the ants daemon runs as. {meanwhile}",
         own = to.own(),
     );
-    to.with_text(text)
+    to.with_text(text).as_notice(ants_proto::NoticeKind::SignedOut)
 }
 
 #[cfg(test)]

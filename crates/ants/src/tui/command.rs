@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use super::exec::{Job, Outcome, Quoted};
 use super::model::{Action, Focus, Key, Model, Page};
 use super::{attach, complete, nav, snooze, thread};
-use crate::{attachments, live, quiet, tools};
+use crate::{attachments, forward, live, quiet, tools};
 
 mod bar;
 mod parse;
@@ -166,6 +166,24 @@ impl Model {
                 let thread = self.target()?;
                 self.tree(thread);
                 Ok(None)
+            }
+            Slash::Forward { to, note } => {
+                let chosen = match self.page() {
+                    Page::Thread(page) => page.chosen().cloned(),
+                    _ => None,
+                };
+                let source = match chosen {
+                    Some(entry) => forward::Source::Message(Box::new(entry)),
+                    None => {
+                        let thread = self.target()?;
+                        let tldr = self.data.cards.tldr.get(&thread).ok_or_else(|| {
+                            format!("no TL;DR of thread {thread} yet: S asks for one, then /forward again")
+                        })?;
+                        forward::Source::Thread(Box::new(tldr.clone()))
+                    }
+                };
+                source.check().map_err(|e| format!("{e:#}"))?;
+                run(Job::Forward { to, source, note })
             }
             Slash::Save(to) => {
                 let listed = self.attachment().ok_or("no attachment on the selected message")?;
@@ -660,6 +678,43 @@ mod tests {
         m.key(Key::Ctrl('u'), at(3));
         m.key(Key::Esc, at(3));
         assert_eq!(m.bar.quoting, None, "leaving the bar empty drops the reply");
+    }
+
+    #[test]
+    fn f_forwards_the_selected_message_else_the_thread_s_tldr() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
+        let entries =
+            vec![message(1, &thread, "alice", "dev-a", "deploy"), message(2, &thread, "dev-a", "alice", "done")];
+        m.stored(entries.clone(), at(2));
+        m.focus = Focus::View;
+        m.key(Key::Char('f'), at(2));
+        assert_eq!((m.bar.text(), m.bar.focused), ("/forward @".to_owned(), true));
+        typed(&mut m, "dev-b");
+        assert_eq!(m.key(Key::Enter, at(2)), None, "following the latest, the thread goes, by its TL;DR");
+        let refused = &m.bar.status.as_ref().unwrap().text;
+        assert_eq!(*refused, format!("no TL;DR of thread {thread} yet: S asks for one, then /forward again"));
+        let tldr = ants_proto::ThreadSummary {
+            thread_id: thread.clone(),
+            text: "deployed".into(),
+            by: user("messenger"),
+            asker: user("alice"),
+            at: at(2),
+            upto: 2,
+            tokens: 9,
+        };
+        m.data.cards.tldr.insert(thread, tldr.clone());
+        let source = forward::Source::Thread(Box::new(tldr));
+        let job = Job::Forward { to: user("dev-b"), source, note: String::new() };
+        assert_eq!(m.key(Key::Enter, at(2)), Some(Action::Run(job, "/forward @dev-b".into())));
+
+        m.key(Key::Up, at(2));
+        m.key(Key::Char('f'), at(2));
+        typed(&mut m, "dev-b over to you");
+        let source = forward::Source::Message(Box::new(entries[1].clone()));
+        let job = Job::Forward { to: user("dev-b"), source, note: "over to you".into() };
+        assert_eq!(m.key(Key::Enter, at(2)), Some(Action::Run(job, "/forward @dev-b over to you".into())));
     }
 
     #[test]

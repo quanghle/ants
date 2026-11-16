@@ -74,6 +74,13 @@ pub(crate) enum Command {
         /// interrupting it, as a human's message does by default.
         #[arg(long)]
         queue: bool,
+        /// Hand this message or post on to @ant (else the human's assistant or the messenger) on a new thread: its
+        /// id, or a unique start of one, as --reply-to takes. The new message quotes it with its author and the
+        /// thread it is on, carries its attachments, and the words, if any, as a note before it; the new thread
+        /// links to the source thread, as a spin-off does. Needs human credentials.
+        #[arg(long, value_name = "MESSAGE", conflicts_with_all = ["thread", "reply_to"])]
+        #[arg(add = ArgValueCompleter::new(completions::messages))]
+        forward: Option<thread::MessagePick>,
         #[command(flatten)]
         sending: Sending,
         #[command(flatten)]

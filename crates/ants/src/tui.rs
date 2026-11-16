@@ -26,6 +26,7 @@ mod home;
 mod images;
 mod interrupt;
 mod markdown;
+mod mcp;
 mod memories;
 mod model;
 mod nav;
@@ -185,6 +186,7 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
     let trees = tree::Io::new(js.clone(), nats.domain.cloned(), me.clone());
     let ants = ant::Io::new(js.clone(), nats.domain.cloned(), me.clone());
     let memories = memories::Io::new(nats, js.clone());
+    let mcp = mcp::Io::new(nats, js.clone());
     let settings = settings::Io::new(js.clone(), nats.url, nats.creds.map(Path::to_path_buf), nats.domain.cloned());
     let (credentials, holder) =
         credentials::Io::new(js.clone(), nats.url, nats.domain.cloned(), crate::team_dir(None), crate::enroll::LISTEN);
@@ -195,7 +197,9 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
     model.compact = compact;
     model.data.credentials.holder = Some(holder);
     let chat_state = catchup::state_path();
-    model.catchup.since = chat_state.as_deref().ok().and_then(catchup::ended);
+    let kept = chat_state.as_deref().map_or_default(catchup::load);
+    model.catchup.since = kept.ended;
+    model.data.tools = kept.tools;
     model.catchup.ahead = summaries.ahead();
     let inline_images = crate::defaults::inline_images()?;
     model.data.images = images::Images::new(inline_images);
@@ -216,6 +220,7 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
             trees,
             ants,
             memories,
+            mcp,
             settings,
             credentials,
             held,
@@ -228,7 +233,7 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
             edit: None,
         };
         let ran = Box::pin(chat.run(&mut screen.terminal)).await;
-        if let Err(e) = chat_state.and_then(|path| catchup::end(&path, Utc::now())) {
+        if let Err(e) = chat_state.and_then(|path| catchup::keep(&path, |kept| kept.ended = Some(Utc::now()))) {
             tracing::debug!("not keeping when ants chat ended: {e:#}");
         }
         ran
@@ -282,6 +287,8 @@ struct Chat {
     ants: ant::Io,
     /// The reads of the shown ant's memories.
     memories: memories::Io,
+    /// The reads and sign-ins of the shown ant's MCP servers.
+    mcp: mcp::Io,
     /// The reads of the shown ant's settings and orders, and the orders sent.
     settings: settings::Io,
     /// The credentials asked for, where the team's account key is.
@@ -418,6 +425,10 @@ impl Chat {
                 self.model.memories_event(event);
                 Vec::new()
             }
+            event = self.mcp.next() => {
+                self.model.mcp_event(event);
+                Vec::new()
+            }
             event = self.settings.next() => {
                 self.model.settings_event(event);
                 Vec::new()
@@ -470,6 +481,7 @@ impl Chat {
         self.trees.watch(self.model.tree_shown());
         self.ants.watch(self.model.ant_shown());
         self.memories.watch(self.model.memories_wanted());
+        self.mcp.watch(self.model.mcp_wanted());
         let (shown, unread) = self.model.settings_shown().unzip();
         self.settings.watch(shown, unread.unwrap_or(false));
         if let Some(images) = &mut self.images {
@@ -522,13 +534,21 @@ impl Chat {
             }
             Action::MarkRead(thread) => self.reads.mark_read(thread),
             Action::Run(job, text) => self.exec.run(job, text),
-            Action::Decide(request, verdict) => self.feed.decide(*request, verdict, self.model.data.me().clone()),
+            Action::Decide(request, verdict) => {
+                self.model.data.settled.deciding(&request);
+                self.feed.decide(*request, verdict, self.model.data.me().clone());
+            }
             Action::Edit(text) => self.edit = Some(text),
             Action::MarkChannel(channel, marks) => self.reads.mark_channel(channel, marks),
             Action::Reactions(messages) => self.reads.watch_reactions(messages),
             Action::React(message, reaction, remove) => self.reads.react(message, reaction, remove),
             Action::Send(draft) => self.people.send(draft),
             Action::Settings(ask) => self.settings.ask(ask),
+            Action::KeepTools(tools) => {
+                if let Err(e) = catchup::state_path().and_then(|path| catchup::keep(&path, |kept| kept.tools = tools)) {
+                    self.model.notify(format!("keeping how tool calls show: {e:#}"), Level::Error, Utc::now());
+                }
+            }
             Action::Search(search) => self.searches.start(search),
             Action::Summarise(ask) => self.summaries.ask(ask),
             Action::CancelSubtree(prompts) => {

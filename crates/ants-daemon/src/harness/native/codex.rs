@@ -19,6 +19,7 @@ use agent_client_protocol::v1::schema::{
     ContentBlock, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, PromptResponse, StopReason, ToolCall,
     ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, Usage,
 };
+use ants_proto::{MCP_SERVERS_CAP, McpServerState, McpStatus};
 use anyhow::bail;
 use serde_json::{Map, Value, json};
 use tokio::process::ChildStdin;
@@ -272,6 +273,8 @@ impl Native for Codex {
         self.info.clone()
     }
 
+    const MCP: bool = true;
+
     fn credentials(&self) -> Option<Credentials> {
         let path = self.home.as_ref()?.join("auth.json");
         let stored = std::fs::read(&path).ok()?;
@@ -384,6 +387,22 @@ pub(crate) struct CodexSession {
     tokens: Mutex<Option<Tokens>>,
 }
 
+/// An MCP server as codex's `mcpServerStatus/list` reports it.
+fn mcp_server(server: &Value) -> McpServerState {
+    let runtime = server["runtimeStatus"].as_str();
+    let status = match runtime {
+        Some("connected") => McpStatus::Connected,
+        Some("notStarted" | "starting") => McpStatus::Pending,
+        Some("authenticationRequired") => McpStatus::NeedsAuth,
+        Some("failed" | "cancelled") => McpStatus::Failed,
+        Some("disabled") => McpStatus::Disabled,
+        _ => McpStatus::Unknown,
+    };
+    let error = server["toolsError"].as_str().or(runtime.filter(|&r| r == "cancelled"));
+    let tools = server["tools"].as_object().map(Map::len);
+    McpServerState::new(server["name"].as_str().unwrap_or_default(), status, error, None).with_tools(tools)
+}
+
 /// Stop routing a thread's notifications to its prompt.
 struct Unroute<'a>(&'a Shared, &'a str);
 
@@ -405,6 +424,25 @@ impl CodexSession {
 impl NativeSession for CodexSession {
     fn id(&self) -> String {
         self.id.clone()
+    }
+
+    async fn mcp_servers(&self) -> Result<Vec<McpServerState>, Error> {
+        let (mut servers, mut cursor) = (Vec::new(), Value::Null);
+        loop {
+            let params = json!({ "threadId": self.id, "detail": "toolsAndAuthOnly", "cursor": cursor });
+            let page = self.shared.request("mcpServerStatus/list", params).await?;
+            servers.extend(page["data"].as_array().into_iter().flatten().map(mcp_server));
+            cursor = page["nextCursor"].clone();
+            if cursor.is_null() || servers.len() >= MCP_SERVERS_CAP {
+                return Ok(servers);
+            }
+        }
+    }
+
+    async fn mcp_sign_in(&self, server: &str) -> Result<Option<String>, Error> {
+        let params = json!({ "name": server, "threadId": self.id });
+        let login = self.shared.request("mcpServer/oauth/login", params).await?;
+        Ok(login["authorizationUrl"].as_str().filter(|url| !url.is_empty()).map(str::to_owned))
     }
 
     async fn prompt(&self, prompt: Vec<ContentBlock>, updates: Updates) -> Result<PromptResponse, Error> {

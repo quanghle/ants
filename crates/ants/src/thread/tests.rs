@@ -619,14 +619,14 @@ async fn ask_reply_to_answers_the_message_s_author_on_its_thread_quoting_it() {
 
     let (replies, input, attach) = Default::default();
     let send = |reply_to: Uuid, thread: Option<Pick>, words: &[&str]| {
-        let target = Target { thread, reply_to: Some(MessagePick::Id(reply_to)), queue: false };
+        let target = Target { thread, reply_to: Some(MessagePick::Id(reply_to)), queue: false, forward: None };
         let words = words.iter().map(|w| (*w).to_owned()).collect();
         Box::pin(ask(&nats, target, Default::default(), &replies, &input, &attach, words))
     };
     send(built.id, None, &["ship", "it"]).await.unwrap();
     let elsewhere = send(built.id, Some(Pick::Id(ThreadId::generate())), &["ship"]).await.unwrap_err().to_string();
     assert!(elsewhere.contains(&format!("is on thread {}, not ", asked.thread_id)), "{elsewhere}");
-    let target = Target { thread: None, reply_to: Some(MessagePick::Id(built.id)), queue: false };
+    let target = Target { thread: None, reply_to: Some(MessagePick::Id(built.id)), queue: false, forward: None };
     let words = vec!["deploy?".to_owned()];
     Box::pin(post(&nats, "ops".parse().unwrap(), target, &replies, &input, &attach, words)).await.unwrap();
 
@@ -636,6 +636,43 @@ async fn ask_reply_to_answers_the_message_s_author_on_its_thread_quoting_it() {
     for e in &shown[2..] {
         assert_eq!(e.quote, Some(ants_proto::Quote::new(dev_a.clone(), "built, all green")), "{e:?}");
     }
+}
+
+#[tokio::test]
+async fn ask_forward_hands_a_message_and_its_files_to_another_ant_on_a_thread_linked_to_its_own() {
+    use crate::cmd::send::{Target, ask};
+
+    let Some(server) = crate::test_support::Server::start() else { return };
+    let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
+    let creds = server.creds_as(&alice, ants_proto::Role::Human);
+    let nats = crate::Nats::new(&server.url, Some(&creds), None).unwrap();
+    let (_, js) = nats.connect("test").await.unwrap();
+    ants_daemon::bus::ensure_stream(&js).await.unwrap();
+    js.create_stream(ants_daemon::hub::files_config()).await.unwrap();
+    let asked = Envelope::new(alice.clone(), dev_a.clone(), "build it");
+    let mut built = asked.reply(dev_a.clone(), "built, all green", ants_proto::Role::Human).unwrap();
+    let log = ants_daemon::files::reference("build.log", "text/plain", b"ok").unwrap();
+    ants_daemon::files::put(&js, &built.attachment_handle(log.id), &log, b"ok").await.unwrap();
+    built.attachments = vec![log];
+    for e in [&asked, &built] {
+        js.publish(e.subject(), json(e).into()).await.unwrap().await.unwrap();
+    }
+
+    let (replies, input, attach) = Default::default();
+    let target = Target { forward: Some(MessagePick::Id(built.id)), ..Default::default() };
+    let words = ["@dev-b", "ship", "it"].map(str::to_owned).to_vec();
+    Box::pin(ask(&nats, target, Default::default(), &replies, &input, &attach, words)).await.unwrap();
+
+    let sent = recent_messages(&js, &alice).await.unwrap().into_iter().find(|e| e.to.as_ref() == Some(&dev_b));
+    let sent = sent.expect("a message to dev-b");
+    assert_ne!(sent.thread_id, asked.thread_id, "on a new thread");
+    assert_eq!(sent.origin.as_ref(), Some(&asked.thread_id), "linked to the source thread");
+    assert!(sent.text.starts_with("ship it\n\nForwarded from dev-a on thread "), "{}", sent.text);
+    assert!(sent.text.ends_with("> built, all green\n> 📎 build.log (attached)"), "{}", sent.text);
+    let [file] = sent.attachments.as_slice() else { panic!("{:?}", sent.attachments) };
+    assert!(file.handle.readable_by(&dev_b), "stored again for dev-b");
+    let (_, bytes) = crate::attachments::fetch(&js, &file.handle, Some(&file.attachment), None).await.unwrap();
+    assert_eq!(bytes, b"ok");
 }
 
 #[tokio::test]

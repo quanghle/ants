@@ -28,12 +28,13 @@
 //! tool, which sends the stuck ant the escalation one level up, led by the human ([`Escalation::passed_on`]); the
 //! stuck ant's daemon then sends it to the human ([`Escalator::took_climb`]), as it does without an answer from the
 //! assistant within `escalate_after`. An ask_human question goes the same way ([`Escalator::ask_first`]): the human
-//! gets it as a question once passed on. While the assistant cannot act, it all goes to the human directly; a human's
-//! message still ends it at any point.
+//! gets it as a question once passed on; should the ant get stuck while the assistant has its question, the stuck
+//! escalation takes the question's place, with the question in its text. While the assistant cannot act, it all goes
+//! to the human directly; a human's message still ends it at any point.
 //!
 //! An escalation that reaches a human carries the escalation, so `ants webhook serve` pushes it, and without a
 //! human's message on the thread by `escalation_reminder` the same human gets a reminder on the thread, carrying it
-//! too, then daily for as long as the stream keeps the escalation ([`Reminder`]). The reminder is kept with the
+//! too, then a day later and three days after that, the last ([`Reminder`]). The reminder is kept with the
 //! thread's spend and its due time in the deadlines, so the daemon serving the ant sends it, once, across restarts.
 
 use std::sync::Arc;
@@ -60,10 +61,8 @@ pub const DEFAULT_ESCALATE_AFTER: Duration = Duration::from_mins(30);
 /// Default of `escalation_reminder`: how long an escalation that reached a human waits for a human's message before
 /// the first reminder.
 pub const DEFAULT_ESCALATION_REMINDER: Duration = Duration::from_hours(4);
-/// Between reminders after the first.
-const REMIND_AGAIN: Duration = Duration::from_hours(24);
-/// How long reminders go on after an escalation first reached a human: as long as the stream keeps it.
-const REMIND_FOR: Duration = Duration::from_hours(30 * 24);
+/// The waits before each reminder after the first, backing off; the reminders stop after the last.
+const REMIND_AGAIN: [Duration; 2] = [Duration::from_hours(24), Duration::from_hours(3 * 24)];
 /// Pause after a failed look at the deadlines.
 const RETRY: Duration = Duration::from_secs(30);
 /// Most of an escalation's text kept for the escalations that follow it up.
@@ -251,7 +250,14 @@ impl Escalator {
     pub async fn escalate_explained(&self, stuck: Stuck) -> Result<(Escalated, Option<String>)> {
         let _busy = self.busy.lock().await;
         let thread = stuck.notice.thread_id.clone();
-        let pending = self.ledger.pending(&thread).await?;
+        let pending = match self.ledger.pending(&thread).await? {
+            Some(asked) if superseded(&asked, stuck.reason) => {
+                let pending = supersede(asked, &stuck);
+                self.ledger.set_pending(&thread, Some(pending.clone())).await?;
+                Some(pending)
+            }
+            pending => pending,
+        };
         let channel = stuck.channel.clone().or_else(|| pending.as_ref().and_then(|p| p.channel.clone()));
         let stuck = Stuck { channel, ..stuck };
         let origin = self.humans.ant_creator(stuck.notice.creator.as_ref());
@@ -324,7 +330,9 @@ impl Escalator {
             "[ants] {from} answered the escalation of {ant} on thread {thread} in place of {reached}: {}",
             envelope.text.chars().take(SUMMARY_CHARS).collect::<String>(),
         );
-        let notice = Envelope::new(ant.clone(), reached.clone(), text).with_owner(Some(reached));
+        let notice = Envelope::new(ant.clone(), reached.clone(), text)
+            .with_owner(Some(reached))
+            .as_notice(ants_proto::NoticeKind::InPlace);
         let to = notice.to.clone();
         match (self.send)(notice, format!("answered-{ant}-{}", envelope.id)).await {
             Ok(()) => tracing::info!(%thread, %to, %from, "told of the answer of another human"),
@@ -631,15 +639,18 @@ impl Escalator {
     }
 
     /// Remind the human `reminder` names of the thread's escalation, on the thread, carrying it, under a message id
-    /// of its own, then schedule the next reminder, if any.
+    /// of its own, then schedule the next reminder, backing off, unless this one is the last ([`REMIND_AGAIN`]).
     async fn remind(&self, thread: &ThreadId, reminder: Reminder, now: i64) -> Result<()> {
         let Reminder { escalation, to, owner, creator, origin_thread, summary, since, sent, .. } = reminder;
         let (ant, stuck) = (&self.ant, &escalation.stuck);
         let waited = chrono::DateTime::from_timestamp_millis(since)
             .map_or_else(String::new, |at| format!(" since {}", at.format("%Y-%m-%d %H:%M UTC")));
+        let again = REMIND_AGAIN.get(sent as usize);
+        let last = if again.is_none() { " This is the last reminder." } else { "" };
         let text = format!(
             "[ants] Reminder: the escalation of {stuck} on thread {thread} ({}) has waited for a human{waited}. A \
-             human's message to {ant} on the thread ends it: `ants ask --thread {thread} @{ant} TEXT`.\n\n{summary}",
+             human's message to {ant} on the thread ends it: `ants ask --thread {thread} @{ant} TEXT`.{last}\n\n\
+             {summary}",
             reason_text(escalation.reason),
         );
         let escalation = Escalation { stand_in: self.chain.stand_in.clone(), ..escalation };
@@ -650,8 +661,7 @@ impl Escalator {
             .with_escalation(Some(escalation));
         let human = notice.to.clone();
         (self.send)(notice, format!("remind-{ant}-{thread}-{since}-{}", sent + 1)).await?;
-        let next = now + millis(REMIND_AGAIN);
-        self.ledger.reminded(thread, (next < since + millis(REMIND_FOR)).then_some(next)).await?;
+        self.ledger.reminded(thread, again.map(|after| now + millis(*after))).await?;
         tracing::info!(%thread, %human, sent = sent + 1, "reminded of the escalation");
         Ok(())
     }
@@ -818,6 +828,22 @@ fn chain_of(escalation: &Escalation, to: Vec<UserId>) -> Escalated {
 /// neither another question nor an escalation, which start afresh.
 fn settled_question(pending: &Pending) -> bool {
     pending.escalation.reason == EscalationReason::Question && (pending.renewed_by.is_some() || pending.at_owner())
+}
+
+/// Whether `pending` is an ask_human question still with the assistant that an escalation for `reason` takes over.
+fn superseded(pending: &Pending, reason: EscalationReason) -> bool {
+    pending.escalation.reason == EscalationReason::Question
+        && reason != EscalationReason::Question
+        && !settled_question(pending)
+}
+
+/// The question `asked`, with the assistant, become the escalation of `stuck` at the same level: labelled with its
+/// reason and about its notice, then the question, which no longer goes on to the human as a question.
+fn supersede(asked: Pending, stuck: &Stuck) -> Pending {
+    let escalation = Escalation { reason: stuck.reason, request_id: stuck.request_id, ..asked.escalation };
+    let summary =
+        format!("{}\n\nAsked before: {}", stuck.notice.text, asked.summary).chars().take(SUMMARY_CHARS).collect();
+    Pending { escalation, summary, question: None, ..asked }
 }
 
 /// What an assistant passes on of `pending`: the question or the escalation.
@@ -1167,6 +1193,37 @@ mod tests {
         assert!(owner_text(&one, &OwnerBecause::Visited(p("dev-a"))).unwrap().contains("dev-a had it already"));
     }
 
+    #[tokio::test]
+    async fn reminders_back_off_and_stop_after_the_third() {
+        let sent = Arc::new(std::sync::Mutex::new(Vec::<Envelope>::new()));
+        let into = sent.clone();
+        let send: Sender = Arc::new(move |envelope, _id| {
+            into.lock().unwrap().push(envelope);
+            Box::pin(async { Ok(()) })
+        });
+        let colony: Colony = Arc::new(|| Box::pin(async { Ok(Vec::new()) }));
+        let humans = Registry::with(UserId::human(), &["alice"]);
+        let ledger = Arc::new(Ledger::memory(p("dev-a"), crate::caps::Caps::default()));
+        let chain = Chain { remind: Some(Duration::from_millis(1)), ..Default::default() };
+        let escalator = Escalator::new(p("dev-a"), chain, colony, humans, ledger, send);
+        let notice = Envelope::on_thread(t(), p("dev-a"), p("alice"), "stuck").with_owner(Some(p("alice")));
+        escalator.escalate(Stuck::new(EscalationReason::Cap, notice, "s-1".to_owned(), None)).await.unwrap();
+
+        let mut waits = Vec::new();
+        while let Some(reminder) = escalator.ledger.reminder(&t()).await.unwrap() {
+            let now = reminder.at;
+            escalator.remind(&t(), reminder, now).await.unwrap();
+            waits.push(escalator.ledger.reminder(&t()).await.unwrap().map(|r| r.at - now));
+        }
+        let day = millis(Duration::from_hours(24));
+        assert_eq!(waits, [Some(day), Some(3 * day), None]);
+        let sent = sent.lock().unwrap();
+        let reminders: Vec<_> = sent.iter().filter(|e| e.text.starts_with("[ants] Reminder:")).collect();
+        assert_eq!(reminders.len(), 3);
+        assert!(reminders[2].text.contains("This is the last reminder."), "{}", reminders[2].text);
+        assert!(!reminders[1].text.contains("last reminder"), "{}", reminders[1].text);
+    }
+
     mod assistant_first {
         use std::sync::Mutex as StdMutex;
 
@@ -1302,6 +1359,30 @@ mod tests {
             let [told] = take(&sent).try_into().unwrap();
             assert_eq!((&told.to, &told.question, &told.escalation), (&p("alice"), &notice.question, &None));
             assert!(told.text.contains("the question goes on to alice"), "{}", told.text);
+        }
+
+        #[tokio::test]
+        async fn an_ant_stuck_after_a_question_to_the_assistant_escalates_as_stuck() {
+            let (humans, _device) = humans();
+            let (escalator, sent) = escalator(&humans, vec![entry("pa")], Some(Duration::from_millis(1)));
+            let mut notice = Envelope::on_thread(t(), p("dev-a"), p("alice"), "which one?");
+            notice.question = Some(Question::new("which one?", &["a".to_owned(), "b".to_owned()], true).unwrap());
+            escalator.ask_first(&notice).await.unwrap();
+            take(&sent);
+
+            let escalated = escalator.escalate(stuck()).await.unwrap();
+            assert_eq!(escalated, Escalated::Assistant { assistant: p("pa"), human: p("alice") });
+            let [asked] = take(&sent).try_into().unwrap();
+            assert_eq!(asked.escalation.as_deref().unwrap().reason, EscalationReason::TurnBudget);
+            assert!(asked.text.contains("dev-a is stuck (turn budget spent) and would reach alice"), "{}", asked.text);
+
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            escalator.overdue().await.unwrap();
+            let [told] = take(&sent).try_into().unwrap();
+            assert_eq!((&told.to, &told.question), (&p("alice"), &None));
+            assert_eq!(told.escalation.as_deref().unwrap().reason, EscalationReason::TurnBudget);
+            assert!(told.text.contains("the escalation goes on to alice"), "{}", told.text);
+            assert!(told.text.contains("Asked before: which one?"), "{}", told.text);
         }
     }
 }

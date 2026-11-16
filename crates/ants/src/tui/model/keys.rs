@@ -231,6 +231,11 @@ impl Model {
                 Some(Action::Answer(answer))
             }
             To::Digest => self.home_digest(now),
+            To::Tools => {
+                self.data.tools = self.data.tools.next();
+                self.notify(format!("tool calls: {}", self.data.tools.label()), Level::Info, now);
+                Some(Action::KeepTools(self.data.tools))
+            }
             To::Do(Action::Run(Job::Open(listed), text)) => {
                 self.bar.set_status(format!("opening {}…", listed.attachment.name), Tone::Busy);
                 Some(Action::Run(Job::Open(listed), text))

@@ -1,9 +1,9 @@
 //! What humans and admins ask of the running ant besides messages: cancelling its prompt (`ants cancel`), an
-//! assistant's cancel or withdrawal for its human, restarting its harnesses and reading a snapshot of it for a clone.
+//! assistant's cancel or withdrawal for its human, restarting its harnesses, reading a snapshot of it for a clone and reading or signing in its MCP servers.
 
 use std::collections::HashMap;
 
-use ants_proto::{Acting, CancelReply, CancelRequest, Envelope, MessageMark, ThreadId, UserId, subject};
+use ants_proto::{Acting, CancelReply, CancelRequest, MessageMark, ThreadId, UserId, subject};
 use anyhow::Result;
 use futures::stream::StreamExt as _;
 
@@ -186,7 +186,7 @@ impl Inbox<'_> {
             }
         };
         if let Some(text) = text {
-            let notice = Envelope::new(ant.clone(), human.clone(), text).with_owner(Some(human.clone()));
+            let notice = crate::behalf::report(ant.clone(), human, text);
             let id = format!("on-behalf-{}", request.id);
             if let Err(e) = bus::store(self.js, notice.subject(), &notice, &id).await {
                 tracing::warn!(%human, error = format!("{e:#}"), "telling the human of its assistant's act");
@@ -220,6 +220,13 @@ impl Inbox<'_> {
             );
             let _ = request.done.send(restarted);
         }
+    }
+
+    /// Carry out the orders about the MCP servers of the ant's harness ([`crate::admin::mcp`]) for as long as the daemon
+    /// serves, with sessions of their own on a thread of their own, whose MCP servers are those of any thread.
+    pub(super) async fn hear_mcp(&self) {
+        let probe = ThreadId::generate();
+        crate::admin::mcp::serve(self.restarts.listen_mcp(self.ant), || self.pool.launch().for_thread(&probe)).await;
     }
 
     /// Read a snapshot of the ant for each clone of it asked ([`crate::clone`]) for as long as the daemon serves: once

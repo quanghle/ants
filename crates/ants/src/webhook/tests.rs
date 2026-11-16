@@ -989,7 +989,7 @@ async fn held_notices_are_dropped_unread_and_undecided_and_each_reply_is_notifie
     std::fs::write(
         &config,
         format!(
-            "[[human]]\nname = \"alice\"\ncreds = {creds:?}\ncompletions = true\nbypass = [\"escalations\"]\n\
+            "[[human]]\nname = \"alice\"\ncreds = {creds:?}\ncompletions = true\ncompletion_window = \"0\"\nbypass = [\"escalations\"]\n\
                  [[human.notify]]\nkind = \"ntfy\"\nurl = \"http://{sink}\"\ntopic = \"alice\"\n"
         ),
     )
@@ -1078,6 +1078,49 @@ async fn held_notices_are_dropped_unread_and_undecided_and_each_reply_is_notifie
 }
 
 #[tokio::test]
+async fn the_replies_on_a_thread_are_notified_once_it_is_quiet_folded_into_one() {
+    let Some((server, _, _)) = hub().await else { return };
+    let (alice, dev_a) = (p("alice"), p("dev-a"));
+    let creds = server.creds_as(&alice, ants_proto::Role::Human);
+    let (sink, mut posts) = sink().await;
+    let config = server.dir().join("webhooks.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[[human]]\nname = \"alice\"\ncreds = {creds:?}\ncompletions = true\ncompletion_window = \"1s\"\n\
+                 [[human.notify]]\nkind = \"ntfy\"\nurl = \"http://{sink}\"\ntopic = \"alice\"\n"
+        ),
+    )
+    .unwrap();
+    let (_service, _) = start(&config, &server.url).await;
+    let (_, own) = bus::connect(&server.url, Some(&creds), None, &alice, "test").await.unwrap();
+    let stream = own.get_stream(STREAM).await.unwrap();
+    for _ in 0..100 {
+        if stream.consumer_info(&ants_proto::notify_consumer(&alice)).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (_, ant) = server.connect(&dev_a).await;
+    let (busy, other) = (ThreadId::generate(), ThreadId::generate());
+    for (thread, text) in [(&busy, "starting"), (&other, "other"), (&busy, "done")] {
+        let asked = Envelope::on_thread(thread.clone(), alice.clone(), dev_a.clone(), "go on");
+        let reply = asked.reply(dev_a.clone(), text, ants_proto::Role::Human).unwrap();
+        ant.publish(reply.subject(), serde_json::to_vec(&reply).unwrap().into()).await.unwrap().await.unwrap();
+    }
+    let mut got = Vec::new();
+    for _ in 0..2 {
+        let (_, body) = next(&mut posts).await;
+        let first = body["message"].as_str().unwrap().lines().next().unwrap_or_default().to_owned();
+        got.push((body["title"].as_str().unwrap().to_owned(), first));
+    }
+    got.sort();
+    let pair = |title: &str, text: &str| (title.to_owned(), text.to_owned());
+    assert_eq!(got, [pair("dev-a replied", "other"), pair("dev-a replied (2 replies on the thread)", "done")]);
+    assert!(tokio::time::timeout(Duration::from_millis(1500), posts.recv()).await.is_err(), "each thread once");
+}
+
+#[tokio::test]
 async fn one_digest_of_what_a_snooze_held_back_follows_its_end_across_services() {
     let Some((server, _, _)) = hub().await else { return };
     let (alice, dev_a) = (p("alice"), p("dev-a"));
@@ -1087,7 +1130,7 @@ async fn one_digest_of_what_a_snooze_held_back_follows_its_end_across_services()
     std::fs::write(
         &config,
         format!(
-            "[[human]]\nname = \"alice\"\ncreds = {creds:?}\ncompletions = true\ndigest = true\n\
+            "[[human]]\nname = \"alice\"\ncreds = {creds:?}\ncompletions = true\ncompletion_window = \"0\"\ndigest = true\n\
                  [[human.notify]]\nkind = \"ntfy\"\nurl = \"http://{sink}\"\ntopic = \"alice\"\n"
         ),
     )

@@ -305,6 +305,40 @@ impl<W: AsyncWrite + Unpin> JsonWriter<W> {
     }
 }
 
+/// The longest a request on a loopback listener ([`get_loopback`]) may take.
+const LOOPBACK_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Request `url`, on a CLI's loopback listener, as a browser coming back to it would; fails unless the listener
+/// answers with a success or a redirect.
+pub(crate) async fn get_loopback(url: &str) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    let uri: hyper::Uri = url.parse().context("the address")?;
+    let host = uri.host().context("the address names no host")?;
+    anyhow::ensure!(uri.scheme_str() == Some("http") && is_loopback(host), "{url} is not on this machine's loopback");
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let path = uri.path_and_query().map_or("/", hyper::http::uri::PathAndQuery::as_str);
+    let authority = uri.authority().map_or(host, hyper::http::uri::Authority::as_str);
+    let request = async {
+        let mut tcp = tokio::net::TcpStream::connect((host, uri.port_u16().unwrap_or(80))).await?;
+        let head = format!("GET {path} HTTP/1.1\r\nHost: {authority}\r\nUser-Agent: ants\r\nConnection: close\r\n\r\n");
+        tcp.write_all(head.as_bytes()).await?;
+        let mut status = Vec::new();
+        let mut reader = BufReader::new(tcp);
+        reader.read_until(b'\n', &mut status).await?;
+        io::Result::Ok(String::from_utf8_lossy(&status).into_owned())
+    };
+    let status = tokio::time::timeout(LOOPBACK_TIMEOUT, request).await.context("timed out")?.context("requesting")?;
+    let code = status.split_whitespace().nth(1).and_then(|code| code.parse::<u16>().ok());
+    anyhow::ensure!(code.is_some_and(|code| (200..400).contains(&code)), "answered {}", status.trim());
+    Ok(())
+}
+
+/// Whether `host` (an address or a name) is this machine's loopback.
+pub(crate) fn is_loopback(host: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -5,7 +5,8 @@ use super::*;
 #[tokio::test]
 async fn registered_humans_are_humans_to_the_tools() {
     let humans = Registry::with(UserId::human(), &["alice"]);
-    let (mcp, mut sent) = start_with(&home("humans"), Vec::new(), Arc::default(), humans).await;
+    let home = home("humans");
+    let (mcp, mut sent) = start_with(&home, Vec::new(), Arc::default(), humans).await;
     let mut current = Envelope::new(user("dev-b"), user("dev-a"), "q").with_owner(Some(user("alice")));
     current.turn_budget = 0;
     let _turn = mcp.begin(&current);
@@ -54,7 +55,8 @@ async fn requests_are_routed_by_colony_capabilities() {
     limited.limited = Some(ants_proto::HarnessLimit { kind: ants_proto::LimitKind::Quota, since, until });
     limited.memory_low = Some(ants_proto::MemoryLow { since, available: 512 << 20, max_harnesses: 1 });
     let colony = vec![listed("dev-a", &["rust"]), billing, out, busy, docs, limited];
-    let (mcp, mut sent) = start_with_colony(&home("route"), colony).await;
+    let home = home("route");
+    let (mcp, mut sent) = start_with_colony(&home, colony).await;
     let current = from_human();
     let _turn = mcp.begin(&current);
     let (url, token) = http_server(&mcp, &current.thread_id);
@@ -120,7 +122,8 @@ fn lookup_in(colony: Vec<ColonyEntry>) -> ColonyLookup {
 
 #[tokio::test]
 async fn request_and_retire_ant_are_offered_to_managers_and_request_returns_once_the_ant_is_in_the_colony() {
-    let (mcp, _sent) = start(&home("request")).await;
+    let home = home("request");
+    let (mcp, _sent) = start(&home).await;
     let thread = ThreadId::generate();
     let (url, token) = http_server(&mcp, &thread);
     let names = async |client: &Client| -> Vec<String> {
@@ -228,7 +231,8 @@ async fn messages_to_an_ant_no_daemon_serves_say_so() {
     out.signed_out = Some(ants_proto::SignInNeeded { since, sign_in: None });
     let colony = vec![listed("dev-a", &["rust"]), listed("dev-b", &["rust"]), stale, out];
     let humans = Registry::with(UserId::human(), &["alice"]);
-    let (mcp, mut sent) = start_with(&home("unserved"), colony.clone(), Arc::default(), humans).await;
+    let home = home("unserved");
+    let (mcp, mut sent) = start_with(&home, colony.clone(), Arc::default(), humans).await;
     mcp.with_lookup(lookup_in(colony));
     let current = from_human();
     let _turn = mcp.begin(&current);
@@ -275,7 +279,8 @@ async fn messages_to_an_ant_no_daemon_serves_say_so() {
     }
 
     // A colony that cannot be read holds nothing back.
-    let (mcp, mut sent) = start(&home("unserved-unread")).await;
+    let other_home = super::home("unserved-unread");
+    let (mcp, mut sent) = start(&other_home).await;
     mcp.with_lookup(Arc::new(|_| Box::pin(async { Err(anyhow::anyhow!("no colony")) })));
     let _turn = mcp.begin(&current);
     let (url, token) = http_server(&mcp, &current.thread_id);

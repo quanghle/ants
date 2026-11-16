@@ -388,3 +388,62 @@ fn native_errors_reach_the_daemons_classifiers() {
         json!({ "ants": { "type": "http", "url": "http://127.0.0.1:1/mcp", "headers": { "Authorization": "Bearer t" } } })
     );
 }
+
+#[tokio::test]
+async fn a_native_cli_reports_its_mcp_servers_and_signs_them_in_on_the_loopback() {
+    let native = Fixture::new("native-mcp", "");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let browser = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut tcp = tokio::io::BufReader::new(tcp);
+        let mut line = String::new();
+        tokio::io::AsyncBufReadExt::read_line(&mut tcp, &mut line).await.unwrap();
+        tokio::io::AsyncWriteExt::write_all(tcp.get_mut(), b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+            .await
+            .unwrap();
+        line
+    });
+    let servers = json!({ "servers": [
+        { "name": "ants", "status": "connected", "tools": 3 },
+        { "name": "github", "status": "needs_auth", "error": "sign in" },
+    ] });
+    let url = format!("https://auth.example/authorize?state=s&redirect_uri=http%3A%2F%2F127.0.0.1%3A{port}%2Fcb");
+    let blocks =
+        [vec![], vec![hello()], vec![opened("p1")], vec![ok(3, servers)], vec![ok(4, json!({ "url": url }))], vec![]];
+    script(&native, None, &blocks);
+    let thread: ThreadId = "t1".parse().unwrap();
+    let stdio = McpServer::Stdio(McpServerStdio::new("ants", "/bin/ants"));
+    let launch = native
+        .launch(ModelSettings::default())
+        .with_mcp(Arc::new(move |_, _, _| vec![stdio.clone()]))
+        .for_thread(&thread);
+
+    let host = crate::harness::open_mcp(&launch).await.unwrap().unwrap();
+    let report = host.report(Duration::ZERO).await.unwrap();
+    assert_eq!((report.harness.as_str(), report.protocol.as_str()), ("native", "stub"));
+    let servers = report.servers.unwrap();
+    assert_eq!(
+        servers.iter().map(|s| (s.name.as_str(), s.status)).collect::<Vec<_>>(),
+        [("ants", ants_proto::McpStatus::Connected), ("github", ants_proto::McpStatus::NeedsAuth)]
+    );
+    assert!(host.callback("github", &format!("http://127.0.0.1:{port}/cb?code=c")).await.is_err(), "not signing in");
+    assert_eq!(host.sign_in("github").await.unwrap(), Some(url));
+    for elsewhere in [format!("http://127.0.0.1:{port}/admin"), "http://example.com/cb".to_owned()] {
+        assert!(host.callback("github", &elsewhere).await.is_err(), "{elsewhere}");
+    }
+    host.callback("github", &format!("http://localhost:{port}/cb?code=c&state=s")).await.unwrap();
+    assert_eq!(browser.await.unwrap().trim(), "GET /cb?code=c&state=s HTTP/1.1");
+    host.close().await;
+
+    let received = native.received(1);
+    let methods = received.iter().map(|m| m["method"].as_str().unwrap_or_default()).collect::<Vec<_>>();
+    assert_eq!(methods[..4], ["initialize", "new", "mcp", "mcp_sign_in"]);
+    assert_eq!(received[1]["params"]["mcp"]["ants"]["command"], "/bin/ants");
+    assert_eq!(received[3]["params"], json!({ "session": "p1", "server": "github" }));
+
+    let acp = Harnesses::builtin().get("copilot").unwrap();
+    let policy = PermissionPolicy::new(Allowlist::parse(&["*"]).unwrap(), None);
+    let acp = Launch::new(acp, native.dir.clone(), vec![], policy, ModelSettings::default());
+    assert!(crate::harness::open_mcp(&acp).await.unwrap().is_none(), "ACP reports no MCP servers");
+}

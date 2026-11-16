@@ -59,6 +59,8 @@ struct Entry {
     listening: Option<mpsc::UnboundedSender<Request>>,
     /// Where it hears the snapshots clones of it ask for ([`crate::clone`]).
     cloning: Option<mpsc::UnboundedSender<crate::clone::Request>>,
+    /// Where it hears the orders about its MCP servers ([`crate::admin::mcp`]).
+    mcp: Option<mpsc::UnboundedSender<super::mcp::Request>>,
 }
 
 impl std::fmt::Debug for Restarts {
@@ -147,6 +149,36 @@ impl Drop for crate::clone::Listening {
             && entry.cloning.as_ref().is_some_and(|tx| tx.same_channel(&self.tx))
         {
             entry.cloning = None;
+        }
+    }
+}
+
+impl Restarts {
+    /// Hear the orders about the MCP servers of `ant` until the guard drops.
+    #[must_use]
+    pub fn listen_mcp(&self, ant: &UserId) -> super::mcp::Listening {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.0.locked().entry(ant.clone()).or_default().mcp = Some(tx.clone());
+        super::mcp::Listening { restarts: self.clone(), ant: ant.clone(), tx, rx }
+    }
+
+    /// Hand `request` to the daemon serving the inbox of `ant`: none when the process does not serve `ant`, false
+    /// when it serves no inbox of it now.
+    pub(super) fn mcp(&self, ant: &UserId, request: super::mcp::Request) -> Option<bool> {
+        match self.0.locked().get(ant) {
+            Some(Entry { served: 1.., mcp: Some(tx), .. }) => Some(tx.send(request).is_ok()),
+            Some(Entry { served: 1.., .. }) => Some(false),
+            _ => None,
+        }
+    }
+}
+
+impl Drop for super::mcp::Listening {
+    fn drop(&mut self) {
+        if let Some(entry) = self.restarts.0.locked().get_mut(&self.ant)
+            && entry.mcp.as_ref().is_some_and(|tx| tx.same_channel(&self.tx))
+        {
+            entry.mcp = None;
         }
     }
 }

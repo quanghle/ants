@@ -57,8 +57,8 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         return Box::pin(tui::run(&nats()?, tui::SINCE, cli.compact)).await;
     };
     match command {
-        Command::Ask { thread, reply_to, queue, sending, replies, input, attach, words } => {
-            let target = send::Target { thread, reply_to, queue };
+        Command::Ask { thread, reply_to, queue, forward, sending, replies, input, attach, words } => {
+            let target = send::Target { thread, reply_to, queue, forward };
             Box::pin(send::ask(&nats()?, target, sending, &replies, &input, &attach, words)).await
         }
         Command::Inbox { peek, thread, limit, follow, json } => {
@@ -72,7 +72,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
             spend::run(&conn, &crate::spend::Select { ant, thread, days }, config, json).await
         }
         Command::Post { channel, thread, reply_to, queue, replies, input, attach, words } => {
-            let target = send::Target { thread, reply_to, queue };
+            let target = send::Target { thread, reply_to, queue, forward: None };
             Box::pin(send::post(&nats()?, channel, target, &replies, &input, &attach, words)).await
         }
         Command::Channel(channel::ChannelCommand::Serve { upgrade }) => channel::serve(&conn, &upgrade).await,

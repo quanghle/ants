@@ -276,6 +276,7 @@ impl Bus {
             () = inbox.hear_cancels() => {}
             () = inbox.hear_restarts() => {}
             () = inbox.hear_clones() => {}
+            () = inbox.hear_mcp() => {}
         }
     }
 

@@ -364,7 +364,7 @@ pub fn notice(to: &OutageNotice<'_>, limited: &Limited, shown: &HarnessLimit, ma
          Raising the provider plan's limit, or a quota reset, lets them through.",
         own = to.own(),
     );
-    to.with_text(text)
+    to.with_text(text).as_notice(ants_proto::NoticeKind::Quota)
 }
 
 #[cfg(test)]

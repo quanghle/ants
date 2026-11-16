@@ -2,7 +2,8 @@
 
 use ants_daemon::reactions::Reacted;
 use ants_proto::{
-    Acting, Answer, Answered, ChannelId, EscalationReason, Question, Quote, SummaryRequest, ThreadId, UserId, Uuid,
+    Acting, Answer, Answered, ChannelId, EscalationReason, NoticeKind, Question, Quote, SummaryRequest, ThreadId,
+    UserId, Uuid,
 };
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -179,6 +180,12 @@ pub struct Entry {
     /// [`Envelope::in_reply_to`]: ants_proto::Envelope::in_reply_to
     #[serde(skip)]
     pub in_reply_to: Option<Uuid>,
+    /// The daemon notice an inbox message that is not forged is ([`Envelope::notice`]): a line of the system's, not an
+    /// ant's answer.
+    ///
+    /// [`Envelope::notice`]: ants_proto::Envelope::notice
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<NoticeKind>,
 }
 
 impl Entry {
@@ -214,6 +221,7 @@ impl Entry {
             webhook: false,
             origin: None,
             in_reply_to: None,
+            notice: None,
         }
     }
 

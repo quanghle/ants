@@ -1,8 +1,8 @@
 //! The ant view: one ant at a glance, as `ants ant show` prints it ([`crate::ant`]). Above, where and how it runs, as
 //! its colony entry tells, beside what holds it back, what it does now on each thread (as `ants watch ANT` follows
 //! it) and what it spent that UTC day; below, one pane at a time ([`Pane`]): its threads, the messages waiting for it,
-//! which [`Io`] asks its daemon for every while (as `ants queue` does), its memories ([`super::memories`]), or its
-//! settings and the admin orders to it ([`settings`]).
+//! which [`Io`] asks its daemon for every while (as `ants queue` does), its memories ([`super::memories`]), its MCP
+//! servers ([`super::mcp`]), or its settings and the admin orders to it ([`settings`]).
 
 use std::time::Duration;
 
@@ -20,6 +20,7 @@ use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
 
 use super::exec::Job;
 use super::frame::{self, ago};
+use super::mcp;
 use super::memories;
 use super::model::{Action, Data, Key, To};
 use super::select::Selection;
@@ -40,18 +41,21 @@ pub enum Pane {
     Queue,
     /// The ant's core and harness memories, read-only.
     Memories,
+    /// The MCP servers of its harness, and their sign-in.
+    Mcp,
     /// Its settings, and the admin orders to it.
     Settings,
 }
 
 impl Pane {
-    pub const ALL: [Self; 4] = [Self::Threads, Self::Queue, Self::Memories, Self::Settings];
+    pub const ALL: [Self; 5] = [Self::Threads, Self::Queue, Self::Memories, Self::Mcp, Self::Settings];
 
     fn label(self) -> &'static str {
         match self {
             Self::Threads => "threads",
             Self::Queue => "queue",
             Self::Memories => "memories",
+            Self::Mcp => "mcp",
             Self::Settings => "settings",
         }
     }
@@ -84,6 +88,7 @@ pub struct Page {
     message: Selection<Uuid>,
     pub queue: Queue,
     pub memories: memories::Page,
+    pub mcp: Box<mcp::Page>,
     pub settings: settings::Pane,
     /// Whether `r` asked to restart the ant's harnesses, which the next key confirms.
     armed: bool,
@@ -101,7 +106,8 @@ impl Page {
         let threads = work::Page::new(Filter { user: Some(ant.clone()), ..Filter::default() });
         let (message, queue, memories) = (Selection::default(), Queue::Asking, memories::Page::new());
         let settings = settings::Pane::default();
-        Self { ant, pane: Pane::Threads, threads, message, queue, memories, settings, armed: false }
+        let mcp = Box::new(mcp::Page::new());
+        Self { ant, pane: Pane::Threads, threads, message, queue, memories, mcp, settings, armed: false }
     }
 
     pub fn keys(&self) -> &'static str {
@@ -110,16 +116,18 @@ impl Page {
             Pane::Threads => Self::THREADS_KEYS,
             Pane::Queue => Self::QUEUE_KEYS,
             Pane::Memories => memories::Page::KEYS,
+            Pane::Mcp => self.mcp.keys(),
             Pane::Settings => self.settings.keys(),
         }
     }
 
-    /// Take `key` into the change of a setting being written, if one is.
+    /// Take `key` into the change of a setting, or the MCP sign-in address, being written, if one is.
     pub fn write(&mut self, key: Key) -> Option<Option<super::model::Action>> {
-        if self.pane != Pane::Settings {
-            return None;
+        match self.pane {
+            Pane::Settings => self.settings.write(key, &self.ant),
+            Pane::Mcp => self.mcp.write(key),
+            _ => None,
         }
-        self.settings.write(key, &self.ant)
     }
 
     fn waiting(&self) -> &[Waiting] {
@@ -138,7 +146,7 @@ impl Page {
         match self.pane {
             Pane::Threads => self.threads.thread(data),
             Pane::Queue => self.waiting().get(self.message.at(&self.messages())).map(|m| m.thread_id.clone()),
-            Pane::Memories | Pane::Settings => None,
+            Pane::Memories | Pane::Mcp | Pane::Settings => None,
         }
     }
 
@@ -155,8 +163,10 @@ impl Page {
             }
             Key::Left | Key::Right => {
                 self.pane = self.pane.moved(if key == Key::Left { -1 } else { 1 });
-                if self.pane == Pane::Memories {
-                    self.memories.shown();
+                match self.pane {
+                    Pane::Memories => self.memories.shown(),
+                    Pane::Mcp => self.mcp.shown(),
+                    _ => {}
                 }
                 return None;
             }
@@ -179,6 +189,7 @@ impl Page {
                 self.memories.key(key);
                 return None;
             }
+            Pane::Mcp => return self.mcp.key(key).map(To::Do),
             Pane::Queue => {}
         }
         let messages = self.messages();
@@ -232,7 +243,8 @@ impl Page {
         let block = frame::block(" now ".to_owned(), false);
         frame.render_widget(Paragraph::new(status).block(block).wrap(Wrap { trim: false }), right);
         let threads = self.threads.rows(data).len();
-        let counts = [threads.to_string(), self.queued(), self.memories.count(), self.settings.count()];
+        let counts =
+            [threads.to_string(), self.queued(), self.memories.count(), self.mcp.count(), self.settings.count()];
         let mut spans = vec![Span::raw(" ")];
         for (pane, count) in Pane::ALL.iter().zip(counts) {
             let style = if *pane == self.pane { frame::highlight(focused) } else { frame::dim() };
@@ -245,6 +257,7 @@ impl Page {
             Pane::Threads => self.threads.draw(frame, pane, data, now, focused),
             Pane::Queue => self.draw_queue(frame, pane, data, now, focused),
             Pane::Memories => self.memories.draw(frame, pane, &self.ant, focused),
+            Pane::Mcp => self.mcp.draw(frame, pane, &self.ant, focused),
             Pane::Settings => self.settings.draw(frame, pane, &self.ant, now, focused),
         }
     }
@@ -439,7 +452,10 @@ impl Io {
 
 #[cfg(test)]
 mod tests {
-    use ants_proto::{AntModel, CoreMemories, Memories, MemoryFile, SignInNeeded, StatusEvent, StatusUpdate};
+    use ants_proto::{
+        AntModel, CoreMemories, McpReport, McpServerState, McpSignIn, McpStatus, Memories, MemoryFile, SignInNeeded,
+        StatusEvent, StatusUpdate,
+    };
 
     use super::*;
     use crate::colony::tests::entry;
@@ -586,6 +602,7 @@ mod tests {
         m.key(Key::Left, at(3));
         assert_eq!(m.memories_wanted(), None, "not on the settings pane");
         m.key(Key::Left, at(3));
+        m.key(Key::Left, at(3));
         assert!(screen(&m, at(3)).contains("asking the daemon of dev-a for its memories…"));
         assert_eq!(m.memories_wanted(), Some((user("dev-a"), 1)));
         let memories = Memories {
@@ -613,5 +630,62 @@ mod tests {
         assert!(screen(&m, at(3)).contains("asking the daemon"), "an earlier asking's answer is dropped");
         m.memories_event(memories::Event(user("dev-a"), 2, Err("no admin role".to_owned())));
         assert!(screen(&m, at(3)).contains("reading the memories: no admin role"));
+    }
+
+    #[test]
+    fn the_mcp_pane_reads_the_servers_and_signs_in_to_the_selected_one() {
+        let mut m = model();
+        m.data.live.colony(vec![entry("dev-a", 60, 2, at(2))], at(2));
+        m.select(nav::Item::Ant(user("dev-a")));
+        for _ in 0..3 {
+            m.key(Key::Right, at(3));
+        }
+        let wanted = m.mcp_wanted().unwrap();
+        assert_eq!((wanted.ant, wanted.asked, wanted.sign), (user("dev-a"), 1, None));
+        assert!(screen(&m, at(3)).contains("asking the daemon of dev-a for its MCP servers…"));
+        let servers = vec![
+            McpServerState::new("ants", McpStatus::Connected, None, Some("session")).with_tools(Some(12)),
+            McpServerState::new("github", McpStatus::NeedsAuth, Some("unauthorized"), None),
+        ];
+        let report = McpReport {
+            harness: "copilot".to_owned(),
+            protocol: "copilot-sdk".to_owned(),
+            servers: Some(servers),
+            truncated: false,
+            read_at: at(3),
+        };
+        m.mcp_event(mcp::Event::Read(user("dev-a"), 1, Ok(report)));
+        let shown = screen(&m, at(3));
+        assert!(shown.contains("mcp (2)") && shown.contains("12 tools") && shown.contains("needs_auth"), "{shown}");
+
+        m.focus = crate::tui::model::Focus::View;
+        m.key(Key::Down, at(3));
+        m.key(Key::Char('s'), at(3));
+        assert_eq!(m.mcp_wanted().unwrap().sign, Some((1, "github".to_owned(), None)));
+        assert!(screen(&m, at(3)).contains("asking the harness to sign in…"));
+        let url = "https://github.com/login/oauth/authorize?client_id=x".to_owned();
+        let github = McpServerState::new("github", McpStatus::NeedsAuth, None, None);
+        let signing = McpSignIn { server: github, authorization_url: Some(url.clone()), expires_at: Some(at(13)) };
+        m.mcp_event(mcp::Event::Signed(user("dev-a"), 1, Ok(signing)));
+        let shown = screen(&m, at(3));
+        assert!(shown.contains(&url) && shown.contains("y copies it"), "{shown}");
+        assert_eq!(m.key(Key::Char('y'), at(3)), Some(Action::Copy(url)));
+
+        m.key(Key::Char('v'), at(3));
+        let callback = "http://127.0.0.1:4100/callback?code=abc&state=r";
+        for c in callback.chars() {
+            m.key(Key::Char(c), at(3));
+        }
+        assert!(screen(&m, at(3)).contains(&format!("address: {callback}")));
+        m.key(Key::Enter, at(3));
+        assert_eq!(m.mcp_wanted().unwrap().sign, Some((2, "github".to_owned(), Some(callback.to_owned()))));
+        m.mcp_event(mcp::Event::Signed(user("dev-a"), 1, Err("late".to_owned())));
+        assert!(screen(&m, at(3)).contains("handing the address over…"), "an earlier sign-in's answer is dropped");
+        let github = McpServerState::new("github", McpStatus::Connected, None, None).with_tools(Some(40));
+        let signed = McpSignIn { server: github, authorization_url: None, expires_at: None };
+        m.mcp_event(mcp::Event::Signed(user("dev-a"), 2, Ok(signed)));
+        let shown = screen(&m, at(3));
+        assert!(shown.contains("now connected") && shown.contains("40 tools"), "{shown}");
+        assert_eq!(m.mcp_wanted().unwrap().sign, None);
     }
 }

@@ -143,6 +143,7 @@ fn envelope() -> Envelope {
         answer: Some(Answer { question: id(4), option: Some(2) }),
         attachments: vec![attachment()],
         sealed: Some(Box::new(sealed())),
+        notice: Some(NoticeKind::SignedOut),
         sent_at: at(0),
     }
 }
@@ -168,6 +169,7 @@ fn plain_envelope() -> Envelope {
         answer: None,
         attachments: Vec::new(),
         sealed: None,
+        notice: None,
         ..envelope()
     }
 }
