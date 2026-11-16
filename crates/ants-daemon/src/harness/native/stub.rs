@@ -4,7 +4,7 @@
 //! The CLI answers `initialize` with `{name, version, fork}`, `new` and `fork` with `{id}`, `load` with anything and
 //! `prompt` with `{stop, tokens}`, failing as [`mapped`] reads. It notifies `update` with `{kind, text}` (`message`,
 //! `thought`), `{kind: "tool", id, title}` or `{kind: "cost", usd}`, and may ask `approve`, which is denied. `cancel`
-//! is notified to it.
+//! and `close` are notified to it.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -190,6 +190,12 @@ impl NativeSession for StubSession {
     async fn cancel(&self) {
         if let Err(e) = self.shared.rpc.notify("cancel", json!({ "session": self.id })).await {
             tracing::warn!(error = %e, "cancelling the stub CLI's prompt");
+        }
+    }
+
+    async fn close(&self) {
+        if let Err(e) = self.shared.rpc.notify("close", json!({ "session": self.id })).await {
+            tracing::warn!(error = %e, "closing the stub CLI's session");
         }
     }
 }

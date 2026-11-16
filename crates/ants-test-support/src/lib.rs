@@ -176,7 +176,7 @@ fn launch(dir: &Path) -> (Child, String) {
 /// line of a block is printed to stdout as it is, except `!stderr TEXT`, printed to stderr, `!sleep SECONDS`, and
 /// `!exit CODE`, which ends the run. Blocks are separated by `---` lines. The run records its input lines, its
 /// arguments, its environment and its working directory beside the stub ([`StubCli::received`], [`StubCli::args`],
-/// [`StubCli::env`], [`StubCli::cwd`]).
+/// [`StubCli::env`], [`StubCli::cwd`]), and the end of its input ([`StubCli::ended`]).
 #[cfg(unix)]
 pub struct StubCli {
     path: PathBuf,
@@ -212,6 +212,7 @@ while IFS= read -r input; do
     n=$((n + 1))
     play "$n"
 done
+: > "$stub.ended.$run"
 "#;
 
 #[cfg(unix)]
@@ -264,6 +265,11 @@ impl StubCli {
     pub fn env(&self, run: usize, name: &str) -> Option<String> {
         let prefix = format!("{name}=");
         self.lines(&format!("env.{run}")).into_iter().find_map(|line| line.strip_prefix(&prefix).map(str::to_owned))
+    }
+
+    /// Whether the input of run `run` ended, as it does when the process starting the stub closes its stdin.
+    pub fn ended(&self, run: usize) -> bool {
+        self.file(&format!("ended.{run}")).exists()
     }
 
     /// The working directory of run `run`.

@@ -403,7 +403,7 @@ async fn a_codex_turn_outgrowing_the_context_runs_again_in_a_new_thread() {
         note(method, params)
     };
     let retried = vec![
-        ok(6, json!({ "turn": turn("turn-2", "inProgress", Value::Null) })),
+        ok(7, json!({ "turn": turn("turn-2", "inProgress", Value::Null) })),
         fresh("item/agentMessage/delta", json!({ "turnId": "turn-2", "itemId": "a1", "delta": "Fine" })),
         fresh("turn/completed", json!({ "turn": turn("turn-2", "completed", Value::Null) })),
     ];
@@ -412,7 +412,8 @@ async fn a_codex_turn_outgrowing_the_context_runs_again_in_a_new_thread() {
         vec![
             vec![opened(3, THREAD)],
             [turn_started(4, TURN), vec![turn_completed(TURN, "failed", overflow)]].concat(),
-            vec![opened(5, "fresh")],
+            vec![ok(5, json!({ "status": "unsubscribed" }))],
+            vec![opened(6, "fresh")],
             retried,
         ],
     ]
@@ -422,10 +423,20 @@ async fn a_codex_turn_outgrowing_the_context_runs_again_in_a_new_thread() {
     assert_eq!(session.prompt("go").await.unwrap(), "Fine");
     assert_eq!(session.id(), SessionId::new("fresh"));
     session.close().await;
-    let methods: Vec<_> = codex.received(1).iter().map(|m| m["method"].clone()).collect();
-    let want =
-        ["initialize", "initialized", "account/read", "thread/start", "turn/start", "thread/start", "turn/start"];
+    let received = codex.received(1);
+    let methods: Vec<_> = received.iter().map(|m| m["method"].clone()).collect();
+    let want = [
+        "initialize",
+        "initialized",
+        "account/read",
+        "thread/start",
+        "turn/start",
+        "thread/unsubscribe",
+        "thread/start",
+        "turn/start",
+    ];
     assert_eq!(methods, want);
+    assert_eq!(received[5]["params"], json!({ "threadId": THREAD }), "the abandoned thread unloaded");
 }
 
 #[tokio::test]

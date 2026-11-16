@@ -306,6 +306,7 @@ async fn claude_sessions_resume_and_fork_counting_only_their_own_cost() {
     // The fork starts at its parent's 1.5 and spends 0.25.
     native.script(Some(4), &[vec![signed_in()], vec![result(1.5, json!({ "num_turns": 0 }))]]);
     native.script(Some(6), &[vec![signed_in()], vec![init(), text("Forked"), result(1.75, json!({}))]]);
+    native.script(Some(8), &[vec![signed_in()], vec![init(), text("Restarted"), result(2.5, json!({}))]]);
 
     let resumed = Session::start(&launch, Some(SessionId::new("p1"))).await.unwrap();
     assert_eq!(resumed.id(), SessionId::new("p1"));
@@ -316,15 +317,28 @@ async fn claude_sessions_resume_and_fork_counting_only_their_own_cost() {
     let forked = fork(&launch, &SessionId::new("p1")).await.unwrap().expect("Claude Code forks");
     let args = native.cli.args(4);
     assert_eq!(args[12..16], ["--resume", "p1", "--fork-session", "--session-id"]);
-    assert_eq!(args[16], forked.to_string(), "the fork's id chosen up front");
+    let (fork_id, base) = cost_base(&forked.0);
+    assert_eq!(args[16], fork_id, "the fork's id chosen up front");
+    assert!(uuid::Uuid::parse_str(fork_id).is_ok(), "{forked}");
+    assert_eq!((forked.to_string(), base), (format!("{fork_id}~1500000"), 1.5), "the parent's cost carried in the id");
     let written = json!({ "type": "user", "message": { "role": "user", "content": [] }, "shouldQuery": false });
     assert_eq!(native.received(4)[1], written, "the fork kept without a turn");
 
     let clone = Session::start(&launch, Some(forked.clone())).await.unwrap();
     let (reply, _, spends) = run(&clone, Prompt::new("go")).await;
     assert_eq!(reply.unwrap(), "Forked");
-    assert_eq!(spends[0], Spend::Cost { session: forked, total: 0.25 }, "not the parent's cost again");
+    assert_eq!(spends[0], Spend::Cost { session: forked.clone(), total: 0.25 }, "not the parent's cost again");
     clone.close().await;
+    assert_eq!(native.cli.args(6)[12..14], ["--resume", fork_id]);
+
+    // A daemon started afresh knows the fork's base from its stored id alone.
+    let stored = SessionId::new("6e2dbd29-0bc6-45cb-b047-9e7ca523eb90~1500000");
+    let restarted = Session::start(&launch, Some(stored.clone())).await.unwrap();
+    let (reply, _, spends) = run(&restarted, Prompt::new("again")).await;
+    assert_eq!(reply.unwrap(), "Restarted");
+    assert_eq!(spends[0], Spend::Cost { session: stored, total: 1.0 });
+    restarted.close().await;
+    assert_eq!(native.cli.args(8)[12..14], ["--resume", "6e2dbd29-0bc6-45cb-b047-9e7ca523eb90"]);
 }
 
 #[tokio::test]
@@ -414,6 +428,12 @@ async fn a_claude_prompt_outgrowing_the_context_runs_again_in_a_new_session() {
     let first = session.id();
     assert_eq!(session.prompt("go").await.unwrap(), "Fine");
     assert_ne!(session.id(), first);
+    let started = std::time::Instant::now();
+    while !native.cli.ended(2) {
+        assert!(started.elapsed() < Duration::from_secs(10), "the abandoned session's CLI still runs");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!native.cli.ended(3), "the new session's CLI runs on");
     session.close().await;
     assert_eq!(native.cli.runs(), 3, "a CLI for each session");
 }

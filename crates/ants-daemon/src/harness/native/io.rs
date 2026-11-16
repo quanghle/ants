@@ -10,7 +10,7 @@ use std::time::Duration;
 use agent_client_protocol::Error;
 use serde::Serialize;
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncWrite, AsyncWriteExt as _, BufReader};
+use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 use super::Cli;
@@ -21,6 +21,9 @@ type Stderr = (Arc<Mutex<VecDeque<u8>>>, tokio::task::JoinHandle<()>);
 
 /// The most of its stderr a process keeps, to name in the error of its exit.
 const STDERR_TAIL: usize = 16 * 1024;
+
+/// How many reads of a process's stderr in a row may fail before it is no longer read.
+const STDERR_FAILURES: u32 = 10;
 
 /// How long a process left behind has to exit on its own once its stdin closes before it is killed.
 const EXIT_GRACE: Duration = Duration::from_secs(1);
@@ -83,13 +86,36 @@ impl Cli {
     }
 }
 
-/// Log the lines of a process's stderr and keep their tail.
+/// Log the lines of a process's stderr and keep their tail, reading to its end: a pipe closed early would fail the
+/// process's next write. Bytes that are not UTF-8 are replaced; a line longer than [`STDERR_TAIL`] is taken in pieces.
 async fn drain(stderr: impl AsyncRead + Unpin, name: String, tail: Arc<Mutex<VecDeque<u8>>>) {
-    let mut lines = BufReader::new(stderr).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        tracing::debug!(harness = name, "stderr: {line}");
+    let mut reader = BufReader::new(stderr);
+    let mut line = Vec::new();
+    let mut failures = 0;
+    loop {
+        line.clear();
+        let read = (&mut reader).take(STDERR_TAIL as u64).read_until(b'\n', &mut line).await;
+        match read {
+            Ok(0) => break,
+            Ok(_) => failures = 0,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => {
+                failures += 1;
+                if failures >= STDERR_FAILURES {
+                    tracing::debug!(harness = name, error = %e, "giving up reading stderr");
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+        if line.is_empty() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&line);
+        let text = text.trim_end_matches(['\n', '\r']);
+        tracing::debug!(harness = name, "stderr: {text}");
         let mut tail = tail.locked();
-        tail.extend(line.bytes().chain(std::iter::once(b'\n')));
+        tail.extend(text.bytes().chain(std::iter::once(b'\n')));
         let excess = tail.len().saturating_sub(STDERR_TAIL);
         tail.drain(..excess);
     }
@@ -276,5 +302,27 @@ impl<W: AsyncWrite + Unpin> JsonWriter<W> {
     pub(crate) async fn close(&self) -> io::Result<()> {
         let Some(mut writer) = self.writer.lock().await.take() else { return Ok(()) };
         writer.shutdown().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stderr_is_read_to_its_end_past_bytes_not_utf8() {
+        let (mut writer, reader) = tokio::io::duplex(64);
+        let tail = Arc::new(Mutex::new(VecDeque::new()));
+        let task = tokio::spawn(drain(reader, "cli".to_owned(), tail.clone()));
+        writer.write_all(b"first\n\xff\xfe not UTF-8\n").await.unwrap();
+        for n in 0..1000 {
+            writer.write_all(format!("line {n}\n").as_bytes()).await.expect("stderr still read");
+        }
+        drop(writer);
+        task.await.unwrap();
+        let tail: Vec<u8> = tail.locked().iter().copied().collect();
+        let tail = String::from_utf8(tail).unwrap();
+        assert!(tail.starts_with("first\n\u{fffd}\u{fffd} not UTF-8\nline 0\n"), "{tail}");
+        assert!(tail.ends_with("line 999\n"), "{tail}");
     }
 }

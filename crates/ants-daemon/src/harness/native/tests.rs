@@ -196,16 +196,21 @@ async fn a_native_prompt_outgrowing_the_context_runs_again_in_a_new_session() {
         vec![hello()],
         vec![opened("n1")],
         vec![overflow],
+        vec![],
         vec![ok(4, json!({ "id": "n2" }))],
         vec![message("Fine"), end_turn(5, 1)],
     ];
     script(&native, None, &blocks);
     let session = Session::start(&native.launch(ModelSettings::default()), None).await.unwrap();
-    assert_eq!(session.prompt("go").await.unwrap(), "Fine");
+    // The stub plays the new session's answer only once it read the close.
+    let reply = tokio::time::timeout(Duration::from_secs(30), session.prompt("go")).await.expect("the old one closed");
+    assert_eq!(reply.unwrap(), "Fine");
     assert_eq!(session.id(), SessionId::new("n2"));
     session.close().await;
-    let methods: Vec<_> = native.received(1).iter().map(|m| m["method"].clone()).collect();
-    assert_eq!(methods, ["initialize", "new", "prompt", "new", "prompt"]);
+    let received = native.received(1);
+    let methods: Vec<_> = received.iter().map(|m| m["method"].clone()).collect();
+    assert_eq!(methods, ["initialize", "new", "prompt", "close", "new", "prompt"], "the abandoned session closed");
+    assert_eq!(received[3]["params"], json!({ "session": "n1" }));
 }
 
 #[tokio::test]

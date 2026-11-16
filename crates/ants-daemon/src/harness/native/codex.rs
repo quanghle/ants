@@ -6,7 +6,8 @@
 //! approval policy and sandbox, the ant's model and reasoning effort, and the session's MCP servers as per-thread
 //! config (`mcp_servers.<name>`), none of which a thread keeps when resumed or forked. A prompt is a turn
 //! (`turn/start`, `turn/interrupt` to cancel) whose item and token-usage notifications stream as ACP updates until
-//! `turn/completed`. Approval requests of the server are declined at once.
+//! `turn/completed`. Approval requests of the server are declined at once. A closed session unsubscribes from its thread
+//! (`thread/unsubscribe`), which the server then unloads.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -449,6 +450,12 @@ impl NativeSession for CodexSession {
         };
         if let Some(turn) = turn {
             self.interrupt(&turn).await;
+        }
+    }
+
+    async fn close(&self) {
+        if let Err(e) = self.shared.request("thread/unsubscribe", json!({ "threadId": self.id })).await {
+            tracing::warn!(harness = self.shared.cli.name(), error = %e, "unsubscribing from a codex thread");
         }
     }
 

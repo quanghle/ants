@@ -3,7 +3,8 @@
 //!
 //! The SDK is linked without its features, so it neither downloads nor starts a CLI: the translator starts the
 //! definition's command itself and hands the SDK its stdio. Sessions are the CLI's own, created with an id chosen here,
-//! resumed and forked by id. Each carries the ant's model and reasoning effort, the ants MCP server and a permission
+//! resumed and forked by id; a fork's totals start at its parent's, so its ACP id carries that base ([`based_id`]). Each
+//! carries the ant's model and reasoning effort, the ants MCP server and a permission
 //! handler approving whatever the CLI asks about the tools the definition leaves it, so nothing waits on a human.
 //! Events are read by their type name and JSON data rather than as the SDK's typed enum, which lacks the types of
 //! newer CLIs.
@@ -27,13 +28,13 @@ use sdk::{
     Attachment, ErrorKind, MessageOptions, PermissionRequestData, ProtocolErrorKind, ResumeSessionConfig,
     SessionConfig, SessionEvent, SessionId, SetModelOptions,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::io::{AsyncRead, ReadBuf};
 use tokio::sync::{mpsc, watch};
 
 use super::{
-    Cli, Harness, Info, Native, NativeSession, Open, Process, Setting, Updates, context_overflow, deny_approval,
-    failed, mcp_servers_json, prompt_text, quota_exhausted, rate_limited, signed_out, unsupported,
+    Cli, Harness, Info, Native, NativeSession, Open, Process, Setting, Updates, based_id, context_overflow, cost_base,
+    deny_approval, failed, mcp_servers_json, prompt_text, quota_exhausted, rate_limited, signed_out, unsupported,
 };
 use crate::sync::MutexExt as _;
 
@@ -280,27 +281,43 @@ impl Native for Copilot {
         let prepared = shared.client.prepare_session(config).map_err(failed)?;
         let events = prepared.subscribe();
         match prepared.start().await {
-            Ok(session) => Ok(CopilotSession::new(shared.clone(), session, events)),
+            Ok(session) => Ok(CopilotSession::new(shared.clone(), session, events, 0.0)),
             Err(e) => Err(shared.error(&e).await),
         }
     }
 
     async fn load_session(&self, id: &str, open: Open) -> Result<CopilotSession, Error> {
+        let (id, base) = cost_base(id);
+        self.resume(id, open, base).await
+    }
+
+    async fn fork_session(&self, id: &str, open: Open) -> Result<CopilotSession, Error> {
+        let parent = SessionId::from(cost_base(id).0);
+        let request = sdk::rpc::SessionsForkRequest { session_id: parent, ..Default::default() };
+        let forked = match self.shared.client.rpc().sessions().fork(request).await {
+            Ok(forked) => forked.session_id,
+            Err(e) => return Err(self.shared.error(&e).await),
+        };
+        // The fork's accounting starts at its parent's, which the parent's thread already counted.
+        let metrics = json!({ "sessionId": forked });
+        let base = match self.shared.client.call("session.usage.getMetrics", Some(metrics)).await {
+            Ok(metrics) => metrics["totalNanoAiu"].as_f64().unwrap_or_default() * USD_PER_NANO_AIU,
+            Err(e) => return Err(self.shared.error(&e).await),
+        };
+        self.resume(&forked, open, base).await
+    }
+}
+
+impl Copilot {
+    /// Resume the CLI's session `id`, whose totals start at `base` US dollars.
+    async fn resume(&self, id: &str, open: Open, base: f64) -> Result<CopilotSession, Error> {
         let shared = &self.shared;
         let config = settings!(ResumeSessionConfig::new(SessionId::from(id)), shared, open);
         let prepared = shared.client.prepare_resume_session(config).map_err(failed)?;
         let events = prepared.subscribe();
         match prepared.start().await {
-            Ok(session) => Ok(CopilotSession::new(shared.clone(), session, events)),
+            Ok(session) => Ok(CopilotSession::new(shared.clone(), session, events, base)),
             Err(e) => Err(shared.error(&e).await),
-        }
-    }
-
-    async fn fork_session(&self, id: &str, open: Open) -> Result<CopilotSession, Error> {
-        let request = sdk::rpc::SessionsForkRequest { session_id: SessionId::from(id), ..Default::default() };
-        match self.shared.client.rpc().sessions().fork(request).await {
-            Ok(forked) => self.load_session(&forked.session_id, open).await,
-            Err(e) => Err(self.shared.error(&e).await),
         }
     }
 }
@@ -337,6 +354,8 @@ pub(crate) struct CopilotSession {
     effort: Mutex<Option<String>>,
     /// The tokens of the context window used and its size, and the session's cost in US dollars, as last reported.
     usage: Mutex<(u64, u64, Option<f64>)>,
+    /// The cost in US dollars the CLI carried over from the session's parent, which its totals include.
+    base: f64,
 }
 
 impl Drop for CopilotSession {
@@ -346,7 +365,7 @@ impl Drop for CopilotSession {
 }
 
 impl CopilotSession {
-    fn new(shared: Arc<Shared>, session: Session, events: EventSubscription) -> Self {
+    fn new(shared: Arc<Shared>, session: Session, events: EventSubscription, base: f64) -> Self {
         let current = Current::default();
         let router = tokio::spawn(route(events, current.clone()));
         let (model, effort) = (shared.cli.model().map(str::to_owned), shared.cli.effort().map(str::to_owned));
@@ -358,6 +377,7 @@ impl CopilotSession {
             model: Mutex::new(model),
             effort: Mutex::new(effort),
             usage: Mutex::default(),
+            base,
         }
     }
 
@@ -409,7 +429,8 @@ impl CopilotSession {
             }),
             "session.usage_checkpoint" => {
                 if let Some(nano) = data["totalNanoAiu"].as_f64() {
-                    self.usage(updates, |usage| usage.2 = Some(nano * USD_PER_NANO_AIU));
+                    let cost = (nano * USD_PER_NANO_AIU - self.base).max(0.0);
+                    self.usage(updates, |usage| usage.2 = Some(cost));
                 }
             }
             "session.error" => turn.failed(data),
@@ -449,7 +470,7 @@ impl Drop for Running<'_> {
 
 impl NativeSession for CopilotSession {
     fn id(&self) -> String {
-        self.session.id().to_string()
+        based_id(self.session.id(), self.base)
     }
 
     async fn prompt(&self, prompt: Vec<ContentBlock>, updates: Updates) -> Result<PromptResponse, Error> {
@@ -476,6 +497,12 @@ impl NativeSession for CopilotSession {
     async fn cancel(&self) {
         if let Err(e) = self.session.abort().await {
             tracing::warn!(harness = self.shared.cli.name(), error = %e, "aborting the Copilot CLI's turn");
+        }
+    }
+
+    async fn close(&self) {
+        if let Err(e) = self.session.disconnect().await {
+            tracing::warn!(harness = self.shared.cli.name(), error = %e, "detaching the Copilot CLI's session");
         }
     }
 

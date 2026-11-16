@@ -10,12 +10,12 @@ use std::time::Duration;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
-    AuthMethod, CancelNotification, ContentBlock, ForkSessionRequest, ImageContent, InitializeRequest,
-    LoadSessionRequest, McpServer, NewSessionRequest, PromptRequest, PromptResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SessionConfigKind, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigSelectOptions, SessionId, SessionModeState, SessionNotification,
-    SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest, TextContent, ToolCall, ToolCallId,
-    ToolCallLocation, ToolCallUpdate,
+    AuthMethod, CancelNotification, CloseSessionRequest, ContentBlock, ForkSessionRequest, ImageContent,
+    InitializeRequest, LoadSessionRequest, McpServer, NewSessionRequest, PromptRequest, PromptResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, SessionConfigKind,
+    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOptions, SessionId, SessionModeState,
+    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest, TextContent, ToolCall,
+    ToolCallId, ToolCallLocation, ToolCallUpdate,
 };
 use agent_client_protocol::{AcpAgentConfig, Agent, Client, DynConnectTo};
 use ants_proto::{HarnessAgent, MAX_TOOL_PATHS, PlanStep, StatusUpdate, ThreadId};
@@ -1256,6 +1256,7 @@ async fn serve(
                 current: &current,
                 mcp: &mcp,
                 images: caps.prompt_capabilities.image,
+                close: caps.session_capabilities.close.is_some(),
             };
             while let Some(turn) = turns.recv().await {
                 if connected.run(turn, &mut id, lost.take()).await?.is_break() {
@@ -1297,6 +1298,8 @@ struct Connected<'a> {
     mcp: &'a Vec<McpServer>,
     /// Whether the agent takes image content in prompts.
     images: bool,
+    /// Whether the agent closes sessions (`session/close`), which a native protocol's translator does.
+    close: bool,
 }
 
 impl Connected<'_> {
@@ -1356,6 +1359,12 @@ impl Connected<'_> {
             match &done {
                 Some(Err(e)) if cut.is_none() && retry && overflowed(e) => {
                     tracing::warn!(session = %id, error = %e, "the prompt outgrew the context window");
+                    // The thread leaves the session for good: what the agent runs for it can stop.
+                    if self.close
+                        && let Err(e) = self.cx.send_request(CloseSessionRequest::new(id.clone())).block_task().await
+                    {
+                        tracing::warn!(session = %id, error = %e, "session/close");
+                    }
                     *id = match new_session(self.cx, self.launch, self.mcp.clone()).await {
                         Ok(id) => id,
                         Err(e) => {

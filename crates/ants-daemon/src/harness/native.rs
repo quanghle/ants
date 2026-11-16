@@ -6,7 +6,8 @@
 //! A protocol implements [`Native`] and [`NativeSession`] in a file of its own under `native/`, and is registered by
 //! one arm of [`registration`]. This module answers ACP for it: `initialize` (naming the CLI and offering the
 //! definition's sign-in), `session/new`, `session/load` and `session/fork` (advertised as the protocol supports them),
-//! `session/prompt`, `session/cancel`, and the session mode and model and reasoning effort selectors the daemon sets.
+//! `session/prompt`, `session/cancel`, `session/close`, and the session mode and model and reasoning effort selectors the
+//! daemon sets.
 //! It never asks the client for permission: tool approval is the CLI's own, set by the definition ([`deny_approval`]).
 
 mod antigravity;
@@ -23,17 +24,19 @@ mod tests;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::v1::schema::{
-    AgentCapabilities, AuthMethod, AuthMethodAgent, CancelNotification, ContentBlock, ContentChunk, Cost,
-    ForkSessionRequest, ForkSessionResponse, Implementation, InitializeRequest, InitializeResponse, LoadSessionRequest,
-    LoadSessionResponse, McpCapabilities, McpServer, NewSessionRequest, NewSessionResponse, Plan, PromptCapabilities,
-    PromptRequest, PromptResponse, SessionCapabilities, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigSelectOption, SessionForkCapabilities, SessionId, SessionMode, SessionModeState, SessionNotification,
-    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
-    SetSessionModeResponse, TextContent, ToolCall, ToolCallUpdate, UsageUpdate,
+    AgentCapabilities, AuthMethod, AuthMethodAgent, CancelNotification, CloseSessionRequest, CloseSessionResponse,
+    ContentBlock, ContentChunk, Cost, ForkSessionRequest, ForkSessionResponse, Implementation, InitializeRequest,
+    InitializeResponse, LoadSessionRequest, LoadSessionResponse, McpCapabilities, McpServer, NewSessionRequest,
+    NewSessionResponse, Plan, PromptCapabilities, PromptRequest, PromptResponse, SessionCapabilities,
+    SessionCloseCapabilities, SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+    SessionForkCapabilities, SessionId, SessionMode, SessionModeState, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse,
+    TextContent, ToolCall, ToolCallUpdate, UsageUpdate,
 };
 use agent_client_protocol::v1::{ConnectionTo, Responder};
 use agent_client_protocol::{AcpAgent, Agent, Client, DynConnectTo, Error, ErrorCode, JsonRpcResponse};
@@ -269,13 +272,13 @@ pub(crate) trait Native: Sized + Send + Sync + 'static {
     /// Open a new session with the ant's settings ([`Cli::model`], [`Cli::effort`], [`Cli::mode`]).
     fn new_session(&self, open: Open) -> impl Future<Output = Result<Self::Session, Error>> + Send;
 
-    /// Resume session `id`; called only when [`Info::load`].
+    /// Resume the session of ACP id `id` ([`NativeSession::id`]); called only when [`Info::load`].
     fn load_session(&self, id: &str, open: Open) -> impl Future<Output = Result<Self::Session, Error>> + Send {
         let _ = (id, open);
         async { Err(unsupported("session/load")) }
     }
 
-    /// Fork session `id` into a new one; called only when [`Info::fork`].
+    /// Fork the session of ACP id `id` into a new one; called only when [`Info::fork`].
     fn fork_session(&self, id: &str, open: Open) -> impl Future<Output = Result<Self::Session, Error>> + Send {
         let _ = (id, open);
         async { Err(unsupported("session/fork")) }
@@ -284,7 +287,8 @@ pub(crate) trait Native: Sized + Send + Sync + 'static {
 
 /// A session of a native CLI.
 pub(crate) trait NativeSession: Send + Sync + 'static {
-    /// The CLI's id of the session, which ants stores and resumes it by.
+    /// The session's ACP id, which ants stores and resumes it by: the CLI's id of it, with the cost a fork starts at
+    /// ([`based_id`]).
     fn id(&self) -> String;
 
     /// Run a prompt, streaming what it does to `updates`, until the CLI ends the turn: with
@@ -300,6 +304,12 @@ pub(crate) trait NativeSession: Send + Sync + 'static {
     /// Interrupt the running prompt: with the CLI's own interrupt, else by stopping it ([`Process::stop`]), the
     /// session resuming later. The daemon stops the connection if the prompt does not end within its grace.
     fn cancel(&self) -> impl Future<Output = ()> + Send;
+
+    /// Release what the CLI holds for the session, which the daemon abandoned (`session/close`), such as the MCP servers
+    /// it started for it; the session is dropped next, which ends what the translator runs for it alone.
+    fn close(&self) -> impl Future<Output = ()> + Send {
+        async {}
+    }
 
     /// Select another model or reasoning effort than the session opened with.
     fn configure(&self, setting: Setting, value: &str) -> impl Future<Output = Result<(), Error>> + Send {
@@ -448,10 +458,28 @@ pub(crate) fn deny_approval(cli: &Cli, request: &str) {
     );
 }
 
+/// The ACP id of a session the CLI knows as `id` whose cost totals start at `base` US dollars, carried over from the
+/// session it was forked from: `<id>~<base in micro-dollars>`. The daemon stores the ACP id in `ants_sessions`, so a
+/// fork resumed after a restart still reports only its own cost ([`cost_base`]).
+pub(crate) fn based_id(id: &str, base: f64) -> String {
+    let micros = (base * 1e6).round();
+    if micros >= 1.0 { format!("{id}~{}", micros as u64) } else { id.to_owned() }
+}
+
+/// The CLI's id of the session ACP id `id` names, and the cost its totals start at ([`based_id`]).
+pub(crate) fn cost_base(id: &str) -> (&str, f64) {
+    match id.rsplit_once('~').map(|(cli, micros)| (cli, micros.parse::<u64>())) {
+        Some((cli, Ok(micros))) if !cli.is_empty() => (cli, micros as f64 / 1e6),
+        _ => (id, 0.0),
+    }
+}
+
 /// An open session, with the model and reasoning effort it runs.
 struct Live<S> {
     session: Arc<S>,
     settings: Mutex<BTreeMap<&'static str, String>>,
+    /// The prompts running in it.
+    prompts: AtomicUsize,
 }
 
 /// The ACP agent side of one connection.
@@ -465,7 +493,7 @@ struct Translator<N: Native> {
 fn connect<N: Native>(cli: Cli) -> DynConnectTo<Client> {
     let name = cli.name().to_owned();
     let t = Arc::new(Translator::<N> { cli, native: tokio::sync::OnceCell::new(), sessions: Mutex::default() });
-    let [t1, t2, t3, t4, t5, t6, t7, t8] = [(); 8].map(|()| t.clone());
+    let [t1, t2, t3, t4, t5, t6, t7, t8, t9] = [(); 9].map(|()| t.clone());
     DynConnectTo::new(
         Agent
             .v1()
@@ -507,6 +535,10 @@ fn connect<N: Native>(cli: Cli) -> DynConnectTo<Client> {
                 agent_client_protocol::on_receive_notification!(),
             )
             .on_receive_request(
+                async move |r: CloseSessionRequest, responder, cx| answer(&cx, responder, t9.clone().close_session(r)),
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
                 async move |r: SetSessionModeRequest, responder, cx| answer(&cx, responder, t7.clone().set_mode(r)),
                 agent_client_protocol::on_receive_request!(),
             )
@@ -535,7 +567,7 @@ impl<N: Native> Translator<N> {
         if self.native.set(native).is_err() {
             return Err(Error::new(ErrorCode::INVALID_REQUEST, "initialize was already called"));
         }
-        let mut sessions = SessionCapabilities::new();
+        let mut sessions = SessionCapabilities::new().close(SessionCloseCapabilities::new());
         if info.fork {
             sessions = sessions.fork(SessionForkCapabilities::new());
         }
@@ -575,7 +607,7 @@ impl<N: Native> Translator<N> {
             }
         }
         let options = options(&settings);
-        let live = Live { session: Arc::new(session), settings: Mutex::new(settings) };
+        let live = Live { session: Arc::new(session), settings: Mutex::new(settings), prompts: AtomicUsize::new(0) };
         self.sessions.locked().insert(id.clone(), Arc::new(live));
         let modes = self.cli.mode().map(|mode| {
             SessionModeState::new(mode.to_owned(), vec![SessionMode::new(mode.to_owned(), mode.to_owned())])
@@ -615,7 +647,22 @@ impl<N: Native> Translator<N> {
     ) -> Result<PromptResponse, Error> {
         let live = self.live(&request.session_id)?;
         let updates = Updates { cx, session: request.session_id };
-        live.session.prompt(request.prompt, updates).await
+        live.prompts.fetch_add(1, Ordering::Relaxed);
+        let done = live.session.prompt(request.prompt, updates).await;
+        live.prompts.fetch_sub(1, Ordering::Relaxed);
+        done
+    }
+
+    /// Forget a session the daemon abandoned, as on a context overflow, cancelling its prompt if one runs: dropped, it
+    /// ends what runs for it alone, such as Claude Code's process or agy's and its private directory.
+    async fn close_session(self: Arc<Self>, request: CloseSessionRequest) -> Result<CloseSessionResponse, Error> {
+        let live = self.live(&request.session_id)?;
+        self.sessions.locked().remove(&request.session_id);
+        if live.prompts.load(Ordering::Relaxed) > 0 {
+            live.session.cancel().await;
+        }
+        live.session.close().await;
+        Ok(CloseSessionResponse::new())
     }
 
     async fn set_mode(self: Arc<Self>, request: SetSessionModeRequest) -> Result<SetSessionModeResponse, Error> {

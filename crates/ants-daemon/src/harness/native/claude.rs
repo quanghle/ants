@@ -3,13 +3,14 @@
 //! the events of the turn, a `result` ending each.
 //!
 //! The translator chooses a new session's id (`--session-id`), resumes one with `--resume` and forks one with
-//! `--resume <parent> --fork-session --session-id <new>`. A session's process gets its MCP servers on stdin
+//! `--resume <parent> --fork-session --session-id <new>`. A fork's totals start at its parent's, so its ACP id carries
+//! that base ([`based_id`]). A session's process gets its MCP servers on stdin
 //! (`mcp_set_servers`, with `--strict-mcp-config`) and their tools allowed (`--allowedTools=mcp__<server>`), the
 //! definition's `mode` as `--permission-mode`, and `--permission-prompts none`, so whatever Claude Code would ask a
 //! human about is denied rather than waited on. Cancel is Claude Code's `interrupt`; the process is killed when the
 //! turn does not end within [`INTERRUPT_GRACE`].
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -27,8 +28,8 @@ use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use super::{
-    Cli, Harness, Info, JsonLines, JsonWriter, Native, NativeSession, Open, Process, Updates, context_overflow,
-    deny_approval, failed, mcp_servers_json, quota_exhausted, rate_limited, signed_out,
+    Cli, Harness, Info, JsonLines, JsonWriter, Native, NativeSession, Open, Process, Updates, based_id,
+    context_overflow, cost_base, deny_approval, failed, mcp_servers_json, quota_exhausted, rate_limited, signed_out,
 };
 use crate::sync::MutexExt as _;
 
@@ -91,10 +92,6 @@ const USAGE_LIMITS: &[&str] = &[
 /// The starts of Claude Code's messages of a conversation outgrowing the model's context window.
 const OVERFLOWS: &[&str] = &["Prompt is too long", "Context limit reached", "Context exceeds", "Request too large"];
 
-/// The cost Claude Code carried into each fork from its parent, by the fork's id: a fork's totals start at its
-/// parent's, which the parent's thread already counted.
-static FORKED: Mutex<BTreeMap<String, f64>> = Mutex::new(BTreeMap::new());
-
 pub(crate) struct Claude {
     cli: Cli,
     version: String,
@@ -154,12 +151,12 @@ impl Native for Claude {
     }
 
     async fn load_session(&self, id: &str, open: Open) -> Result<ClaudeSession, Error> {
-        let base = FORKED.locked().get(id).copied().unwrap_or_default();
+        let (id, base) = cost_base(id);
         self.open(How::Load(id.to_owned()), open, base).await
     }
 
     async fn fork_session(&self, id: &str, open: Open) -> Result<ClaudeSession, Error> {
-        let how = How::Fork { parent: id.to_owned(), id: uuid::Uuid::new_v4().to_string() };
+        let how = How::Fork { parent: cost_base(id).0.to_owned(), id: uuid::Uuid::new_v4().to_string() };
         let session = self.open(how, open, 0.0).await?;
         session.keep().await?;
         Ok(session)
@@ -458,9 +455,7 @@ impl ClaudeSession {
         if result["is_error"] == true {
             return Err(failed(format!("{}: forking: {}", self.shared.cli.name(), error_text(&result, None))));
         }
-        let base = result["total_cost_usd"].as_f64().unwrap_or_default();
-        self.spent.locked().base = base;
-        FORKED.locked().insert(self.id.clone(), base);
+        self.spent.locked().base = result["total_cost_usd"].as_f64().unwrap_or_default();
         Ok(())
     }
 
@@ -506,7 +501,7 @@ impl ClaudeSession {
 
 impl NativeSession for ClaudeSession {
     fn id(&self) -> String {
-        self.id.clone()
+        based_id(&self.id, self.spent.locked().base)
     }
 
     async fn prompt(&self, prompt: Vec<ContentBlock>, updates: Updates) -> Result<PromptResponse, Error> {

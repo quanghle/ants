@@ -57,6 +57,7 @@ fn default_answer(method: &str, params: &Value) -> Answer {
         "session.skills.reload" => json!({ "warnings": [], "errors": [] }),
         "sessions.fork" => json!({ "sessionId": "forked", "name": "go (fork)" }),
         "session.send" => json!({ "messageId": "u1" }),
+        "session.detach" => json!({ "success": true }),
         _ => json!({}),
     })
 }
@@ -319,16 +320,44 @@ async fn copilot_turns_stream_through_the_translator() {
 }
 
 #[tokio::test]
-async fn copilot_sessions_resume_and_fork_by_id() {
-    let played = Played::new("copilot-sessions", "", |_, _| None);
+async fn copilot_sessions_resume_and_fork_by_id_counting_only_their_own_cost() {
+    // The fork's accounting starts at its parent's 0.5 AI credits; it spends 0.25 more.
+    let played = Played::new("copilot-sessions", "", |method, params| match method {
+        "session.usage.getMetrics" if params["sessionId"] == "forked" => {
+            Some(Answer::ok(json!({ "totalNanoAiu": 500_000_000_u64, "aiCreditsStatus": "complete" })))
+        }
+        "session.send" => {
+            let id = &params["sessionId"];
+            let checkpoint = json!({ "totalNanoAiu": 750_000_000_u64 });
+            let mut events = vec![
+                event(id, "assistant.message", json!({ "messageId": "a1", "content": "Forked" })),
+                event(id, "session.usage_checkpoint", checkpoint),
+            ];
+            events.extend(idle(id, false));
+            Some(default_answer(method, params).then(events))
+        }
+        _ => None,
+    });
     let launch = played.launch(ModelSettings::default());
     let resumed = Session::start(&launch, Some(SessionId::new("s1"))).await.unwrap();
     assert_eq!(resumed.id(), SessionId::new("s1"));
     resumed.close().await;
-    assert_eq!(fork(&launch, &SessionId::new("s1")).await.unwrap(), Some(SessionId::new("forked")));
+    let forked = fork(&launch, &SessionId::new("s1")).await.unwrap().expect("the CLI forks");
+    assert_eq!(forked, SessionId::new("forked~5000"), "the parent's cost carried in the id");
     assert_eq!(played.requests("sessions.fork"), [json!({ "sessionId": "s1" })]);
+
+    // As a daemon started afresh would, from the stored id alone.
+    let clone = Session::start(&launch, Some(forked.clone())).await.unwrap();
+    let (spend, mut spent) = mpsc::unbounded_channel();
+    let reply = clone.run(Prompt { spend: Some(spend), ..Prompt::new("go") }).await.unwrap();
+    assert_eq!(reply.text, "Forked");
+    clone.close().await;
+    let cost = spent.try_recv().unwrap();
+    let Spend::Cost { session, total } = cost else { panic!("a cost: {cost:?}") };
+    assert_eq!(session, forked);
+    assert!((total - 0.0025).abs() < 1e-12, "not the parent's cost again: {total}");
     let resumed: Vec<_> = played.requests("session.resume").iter().map(|r| r["sessionId"].clone()).collect();
-    assert_eq!(resumed, [json!("s1"), json!("forked")]);
+    assert_eq!(resumed, [json!("s1"), json!("forked"), json!("forked")]);
 }
 
 #[tokio::test]
@@ -457,6 +486,7 @@ async fn a_copilot_turn_outgrowing_the_context_runs_again_in_a_new_session() {
     let first = session.id();
     assert_eq!(session.prompt("go").await.unwrap(), "Fine");
     assert_ne!(session.id(), first, "a new session");
+    assert_eq!(played.requests("session.detach"), [json!({ "sessionId": *first.0 })], "the abandoned one detached");
     session.close().await;
     assert_eq!(played.requests("session.create").len(), 2);
 }
