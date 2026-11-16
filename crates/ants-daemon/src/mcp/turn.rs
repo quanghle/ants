@@ -1,0 +1,164 @@
+//! The turn of a thread's session: the message it handles ([`Mcp::begin`]), which what the session sends meanwhile
+//! follows on from, and what the final answer of the turn carries besides its text: the title `suggest_thread_title`
+//! suggests for the thread ([`Mcp::take_title`]) and the files `attach_to_reply` attaches ([`Mcp::reply_files`]).
+
+use std::sync::Arc;
+
+use ants_proto::{Attachment, AttachmentHandle, Envelope, ThreadId, ThreadTitle, Uuid};
+use chrono::{DateTime, Utc};
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::CallToolResult;
+use rmcp::service::RequestContext;
+use rmcp::{ErrorData, RoleServer, schemars, tool, tool_router};
+use serde::Deserialize;
+
+use super::tools::{Tools, text};
+use super::{Hub, Mcp, attach};
+use crate::sync::MutexExt as _;
+
+impl Mcp {
+    /// Take the title the session of `thread` suggested for it during the turn, for the reply to carry.
+    pub fn take_title(&self, thread: &ThreadId) -> Option<String> {
+        self.hub.sessions.locked().titles.remove(thread)
+    }
+
+    /// Store the files the session of `thread` attached to the final answer of its turn (`attach_to_reply`), read
+    /// again from the directory the thread works in and confined to it as `attach` is, under the handles `handle_of`
+    /// gives their ids, those of the answer, and return their references for it to carry: none when it attached
+    /// none. Fails, the files left out, when one cannot be read or stored now.
+    pub async fn reply_files(
+        &self,
+        thread: &ThreadId,
+        handle_of: impl Fn(Uuid) -> AttachmentHandle,
+    ) -> Result<Vec<Attachment>, String> {
+        let paths = self.hub.sessions.locked().reply_files.remove(thread);
+        let Some(paths) = paths else { return Ok(Vec::new()) };
+        let loaded = self.hub.load_files(thread, &paths).await?;
+        self.hub.store_files(loaded, handle_of).await
+    }
+
+    /// Mark `envelope` as the message its thread is handling until the guard drops. Messages the thread's session
+    /// sends meanwhile follow on from it, and spend its turn budget.
+    pub fn begin(&self, envelope: &Envelope) -> Turn {
+        self.hub.sessions.locked().current.insert(envelope.thread_id.clone(), envelope.clone());
+        Turn { hub: self.hub.clone(), thread: envelope.thread_id.clone() }
+    }
+}
+
+/// See [`Mcp::begin`].
+pub struct Turn {
+    hub: Arc<Hub>,
+    thread: ThreadId,
+}
+
+impl Turn {
+    /// With the handles of the files attached to the message, which the hub stored at `stored`: `read_attachment`
+    /// waits for their chunks still on their way as long as that time says ([`crate::files::get_stored`]).
+    #[must_use]
+    pub fn carrying(self, handles: Vec<AttachmentHandle>, stored: Option<DateTime<Utc>>) -> Self {
+        if let Some(stored) = stored.filter(|_| !handles.is_empty()) {
+            self.hub.sessions.locked().carried.insert(self.thread.clone(), (handles, stored));
+        }
+        self
+    }
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        let mut sessions = self.hub.sessions.locked();
+        sessions.current.remove(&self.thread);
+        sessions.titles.remove(&self.thread);
+        sessions.reply_files.remove(&self.thread);
+        sessions.carried.remove(&self.thread);
+    }
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct SuggestThreadTitle {
+    /// The title: one line of 1-120 characters, such as `Fix the flaky login test`.
+    title: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct AttachToReply {
+    /// Files the final answer carries: paths in the working directory, at most 8 files of up to 8 MiB each, secrets in
+    /// text files redacted; empty for none.
+    #[serde(default)]
+    attach: Vec<String>,
+}
+
+impl Hub {
+    /// Have the reply to the message `thread` is handling suggest `title` for the thread, in place of any title
+    /// suggested earlier in the turn.
+    fn suggest_title(&self, thread: &ThreadId, title: &str) -> Result<String, String> {
+        let title = ThreadTitle::new(thread.clone(), title, self.ant.clone()).map_err(|e| e.to_string())?;
+        let mut sessions = self.sessions.locked();
+        if !sessions.current.contains_key(thread) {
+            return Err("no message is being handled on this thread; a title is suggested only while one is".to_owned());
+        }
+        sessions.titles.insert(thread.clone(), title.title.clone());
+        Ok(format!(
+            "The reply on thread {thread} suggests the title {:?}. It becomes the thread's title when a human lists or \
+             shows the thread, unless the thread has or had another title.",
+            title.title
+        ))
+    }
+
+    /// Have the final answer of the turn on `thread` carry the files at `paths`, in place of any given earlier in the
+    /// turn; none for no paths. They are checked now, and read again as the answer is sent ([`Mcp::reply_files`]).
+    async fn attach_to_reply(&self, thread: &ThreadId, paths: Vec<String>) -> Result<String, String> {
+        if !self.sessions.locked().current.contains_key(thread) {
+            return Err(
+                "no message is being handled on this thread; files are attached to its answer only while one is"
+                    .to_owned(),
+            );
+        }
+        if paths.is_empty() {
+            self.sessions.locked().reply_files.remove(thread);
+            return Ok("The final answer of this turn carries no files.".to_owned());
+        }
+        let loaded = self.load_files(thread, &paths).await.map_err(|e| format!("{e}; nothing attached"))?;
+        let mut sessions = self.sessions.locked();
+        if !sessions.current.contains_key(thread) {
+            return Err("the turn ended before the files were attached".to_owned());
+        }
+        sessions.reply_files.insert(thread.clone(), paths);
+        let named: Vec<String> = loaded.iter().map(|l| attach::describe(&l.attachment)).collect();
+        Ok(format!(
+            "The final answer of this turn carries {}. They are read again from the working directory as the answer is \
+             sent; attach_to_reply again replaces them.",
+            named.join(", ")
+        ))
+    }
+}
+
+#[tool_router(router = turn_router, vis = "pub(super)")]
+impl Tools {
+    #[tool(description = "Suggest a short title for the current thread, one line of 1-120 characters naming what \
+        it is about, such as `Fix the flaky login test`. The reply to the message being handled carries it, whether \
+        a message, a channel post or a thread notes post; calling again in the same turn replaces it. It \
+        becomes the thread's title, shown to humans in their thread lists, only if the thread has never had one: a \
+        title a human set, renamed or cleared always stays.")]
+    async fn suggest_thread_title(
+        &self,
+        Parameters(args): Parameters<SuggestThreadTitle>,
+        cx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let thread = self.thread(&cx)?;
+        Ok(text(self.hub.suggest_title(&thread, &args.title)))
+    }
+
+    #[tool(description = "Attach files to the final answer of this turn, the reply sent when the turn ends (a \
+        message, a channel post or a thread notes post), rather than sending them with send_message. `attach` lists \
+        files in the working directory, as for send_message; calling again in the same turn replaces them, and an \
+        empty list attaches none. They are checked now and read again as the answer is sent; one that cannot be \
+        attached then leaves the files out, the answer saying why. Spends no turn.")]
+    async fn attach_to_reply(
+        &self,
+        Parameters(args): Parameters<AttachToReply>,
+        cx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let thread = self.thread(&cx)?;
+        Ok(text(self.hub.attach_to_reply(&thread, args.attach).await))
+    }
+}
