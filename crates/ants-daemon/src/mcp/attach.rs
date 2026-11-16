@@ -8,14 +8,22 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ants_proto::{
-    ATTACHMENT_CHUNK, Attachment, AttachmentHandle, MAX_ATTACHMENT_SIZE, MAX_ATTACHMENTS, Uuid, guess_mime,
+    ATTACHMENT_CHUNK, Attachment, AttachmentHandle, MAX_ATTACHMENT_SIZE, MAX_ATTACHMENTS, ThreadId, Uuid, guess_mime,
 };
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::{CallToolResult, ContentBlock};
+use rmcp::service::RequestContext;
+use rmcp::{ErrorData, RoleServer, schemars, tool, tool_router};
+use serde::Deserialize;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
+use super::Hub;
+use super::tools::{Tools, text};
 use crate::redact::Redactor;
+use crate::sync::MutexExt as _;
 
 /// Most bytes of a text attachment `read_attachment` returns as text; a longer one is saved as a file.
 pub(super) const MAX_TEXT: usize = ATTACHMENT_CHUNK;
@@ -203,5 +211,105 @@ fn size_text(size: u64) -> String {
         0..1024 => format!("{size} B"),
         1024..1_048_576 => format!("{:.1} KiB", size as f64 / 1024.0),
         _ => format!("{:.1} MiB", size as f64 / 1_048_576.0),
+    }
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct ReadAttachment {
+    /// The attachment's handle, as listed with its message: `<from>.<inbox|notes|chan>.<target>.<id>`.
+    handle: String,
+}
+
+impl Hub {
+    /// The attachments' store, and the directory the sessions of `thread` work in: its worktree, else the ant's
+    /// workdir.
+    fn files(&self, thread: &ThreadId) -> Result<(&FileAccess, PathBuf), String> {
+        let (files, workdir) = self.files.get().ok_or("attachments are not available here")?;
+        let dir = self.sessions.locked().dirs.get(thread).cloned();
+        Ok((files, dir.unwrap_or_else(|| workdir.clone())))
+    }
+
+    /// Read the files at `paths` in the directory `thread` works in, to attach them: none for no paths.
+    pub(super) async fn load(&self, thread: &ThreadId, paths: &[String]) -> Result<Vec<Loaded>, String> {
+        self.load_files(thread, paths).await.map_err(|e| format!("{e}; nothing sent"))
+    }
+
+    /// [`Hub::load`], failing without saying what is not done.
+    pub(super) async fn load_files(&self, thread: &ThreadId, paths: &[String]) -> Result<Vec<Loaded>, String> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (_, dir) = self.files(thread)?;
+        let off = Redactor::off();
+        let redactor = self.redactor.get().map_or(&off, |r| r.as_ref());
+        load(&dir, paths, redactor).await
+    }
+
+    /// Store `loaded` under the handles `handle_of` gives, returning the references for the message to carry.
+    pub(super) async fn store(
+        &self,
+        loaded: Vec<Loaded>,
+        handle_of: impl Fn(Uuid) -> AttachmentHandle,
+    ) -> Result<Vec<Attachment>, String> {
+        self.store_files(loaded, handle_of).await.map_err(|e| format!("{e}; nothing sent"))
+    }
+
+    /// [`Hub::store`], failing without saying what is not done.
+    pub(super) async fn store_files(
+        &self,
+        loaded: Vec<Loaded>,
+        handle_of: impl Fn(Uuid) -> AttachmentHandle,
+    ) -> Result<Vec<Attachment>, String> {
+        if loaded.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (files, _) = self.files.get().ok_or("attachments are not available here")?;
+        store(files, loaded, handle_of).await
+    }
+
+    /// The attachment `handle` names, if on a message the ant reads: an image as image content, a short text as text,
+    /// and any other saved into the directory `thread` works in.
+    async fn read_attachment(&self, thread: &ThreadId, handle: &str) -> Result<Vec<ContentBlock>, String> {
+        let (files, dir) = self.files(thread)?;
+        let handle: AttachmentHandle = handle.trim().trim_matches('`').parse().map_err(|e| format!("{e}"))?;
+        if !handle.readable_by(&self.ant) {
+            return Err(format!("attachment {handle} is on a message {} does not read", self.ant));
+        }
+        let stored =
+            self.sessions.locked().carried.get(thread).filter(|(handles, _)| handles.contains(&handle)).map(|c| c.1);
+        let (attachment, bytes) = (files.get)(handle.clone(), stored).await.map_err(|e| format!("{e:#}"))?;
+        let about = describe(&attachment);
+        if attachment.is_image() {
+            let image = ContentBlock::image(data_encoding::BASE64.encode(&bytes), attachment.mime.clone());
+            return Ok(vec![ContentBlock::text(format!("Attachment {handle}: {about}")), image]);
+        }
+        if is_text(&attachment)
+            && bytes.len() <= MAX_TEXT
+            && let Ok(text) = std::str::from_utf8(&bytes)
+        {
+            return Ok(vec![ContentBlock::text(format!("Attachment {handle}: {about}\n{text}"))]);
+        }
+        let path = save(&dir, &attachment, &bytes).await?;
+        Ok(vec![ContentBlock::text(format!("Attachment {handle}: {about}, saved as {}", path.display()))])
+    }
+}
+
+#[tool_router(router = attach_router, vis = "pub(super)")]
+impl Tools {
+    #[tool(description = "Read a file attached to a message this ant reads (one sent to it or by it, a notes \
+        post or a channel post) by the handle listed with the message, `<from>.<inbox|notes|chan>.<target>.<id>`. \
+        A PNG, JPEG, GIF or WebP image comes back as an image, a text or JSON file of up to 128 KiB as text, and \
+        any other file is saved into the working directory under its name (numbered beside a different file of \
+        that name) and its path returned. Reading spends no turn.")]
+    async fn read_attachment(
+        &self,
+        Parameters(args): Parameters<ReadAttachment>,
+        cx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let thread = self.thread(&cx)?;
+        Ok(match self.hub.read_attachment(&thread, &args.handle).await {
+            Ok(content) => CallToolResult::success(content),
+            Err(e) => text(Err(e)),
+        })
     }
 }

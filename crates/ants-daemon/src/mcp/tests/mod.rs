@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Mutex as StdMutex;
+use std::time::Duration;
 
 use agent_client_protocol::v1::schema::{
     AgentCapabilities, ContentBlock as AcpContent, ContentChunk, InitializeRequest, InitializeResponse,
@@ -7,15 +8,22 @@ use agent_client_protocol::v1::schema::{
     PromptResponse, SessionNotification, SessionUpdate, StopReason, TextContent,
 };
 use agent_client_protocol::{Agent, DynConnectTo};
-use rmcp::RoleClient;
 use rmcp::model::{CallToolRequestParams, ClientConfig};
 use rmcp::service::RunningService;
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+use rmcp::{RoleClient, ServiceExt as _};
+use tokio::io::AsyncWriteExt as _;
 use tokio::sync::mpsc;
 
-use ants_proto::{ChannelAdminReply, MAX_TITLE};
+use ants_proto::{
+    Attachment, ChannelAdminOutcome, ChannelAdminReply, ChannelAdminRequest, ChannelEntry, ChannelPost, ColonyEntry,
+    EscalationReason, MAX_TITLE, NotesPost, Question, Reaction, Role, ThreadTitle, Verdict,
+};
 
+use super::managers::DEFAULT_REQUEST_WAIT;
+use super::messages::shown;
+use super::routing::{describe, why_unserved};
 use super::*;
 use crate::harness::Launch;
 use crate::pool::{Pool, SessionStore};
