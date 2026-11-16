@@ -3,7 +3,8 @@
 //! those of the ants its daemon serves every [`POLL_EVERY`], creating those still missing from the machine's config,
 //! and keeps them in a [`Shared`]; the daemon serves each ant with them in place of its config's ([`Shared::overlaid`])
 //! and reloads when they change. The fields the machine's config sets otherwise are its drift, which the ant's roster
-//! entry and the machine's record report.
+//! entry and the machine's record report. Of an ant added from a template, only the settings a request chooses are
+//! shared ([`shares`]): the others follow the template as the config loads it.
 //!
 //! As any machine's host credentials may write any ant's record, a record is signed with the ant's own credentials,
 //! which only the machines serving the ant hold ([`sign`]); a daemon whose team has credentials applies only a record so
@@ -21,7 +22,7 @@ use std::time::Duration;
 use ants_proto::SHARED_FIELDS;
 use ants_proto::{
     DEVICES_BUCKET, IDENTITIES_BUCKET, JsDomain, Machine, SETTINGS_CLOCK_SKEW, SettingsError, SharedSettings, UserId,
-    revoked_device_key,
+    is_shared_field, revoked_device_key,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
@@ -34,6 +35,7 @@ use tokio::sync::watch;
 use crate::config::Ant;
 use crate::direct_kv::{DirectKv, Lookup};
 use crate::sync::MutexExt as _;
+use crate::template::REQUEST_KEYS;
 
 /// How often the host connection reads the shared settings of the machine's ants.
 pub const POLL_EVERY: Duration = Duration::from_secs(10);
@@ -63,8 +65,12 @@ impl Roles {
         serde_json::from_value(Value::Object(fields.clone())).context("shared settings")
     }
 
-    /// `ant` with these settings in place of its own.
+    /// `ant` with these settings in place of its own, those it does not share ([`shares`]) aside.
     pub fn overlay(self, ant: Ant) -> Ant {
+        let shared = |key| shares(&ant, key);
+        let fallback = shared("fallback").then_some(self.fallback);
+        let allow = shared("allow").then_some(self.allow);
+        let escalate_to = shared("escalate_to").then_some(self.escalate_to);
         Ant {
             whoami: self.whoami,
             memory: self.memory,
@@ -72,9 +78,9 @@ impl Roles {
             model: self.model,
             reasoning_effort: self.reasoning_effort,
             context: self.context,
-            fallback: self.fallback,
-            allow: self.allow,
-            escalate_to: self.escalate_to,
+            fallback: fallback.unwrap_or(ant.fallback),
+            allow: allow.unwrap_or(ant.allow),
+            escalate_to: escalate_to.unwrap_or(ant.escalate_to),
             ..ant
         }
     }
@@ -123,7 +129,14 @@ impl PartialEq for Drift {
     }
 }
 
-/// The shared settings `ant` sets, as its machine's config gives them: those holding no default.
+/// Whether `key` is one of the shared settings of `ant`: any of [`SHARED_FIELDS`], but for an ant added from a
+/// template only those a request chooses ([`REQUEST_KEYS`]); the template, as the config loads it, gives the others,
+/// so a change of the template reaches the ant.
+pub fn shares(ant: &Ant, key: &str) -> bool {
+    is_shared_field(key) && (ant.template.is_none() || REQUEST_KEYS.contains(&key))
+}
+
+/// The shared settings `ant` sets ([`shares`]), as its machine's config gives them: those holding no default.
 pub fn local_fields(ant: &Ant) -> Map<String, Value> {
     let mut fields = Map::new();
     let texts = [
@@ -149,6 +162,7 @@ pub fn local_fields(ant: &Ant) -> Map<String, Value> {
             fields.insert(key.to_owned(), Value::from(list.clone()));
         }
     }
+    fields.retain(|key, _| shares(ant, key));
     fields
 }
 
@@ -578,6 +592,35 @@ mod tests {
         shared.store(record("dev-a", json!({ "model": 5 })));
         assert!(shared.overlaid(&dev_a).is_none(), "a record that does not parse is ignored");
         assert!(Roles::of(json!({ "workdir": "/" }).as_object().unwrap()).is_err());
+    }
+
+    #[test]
+    fn an_ant_added_from_a_template_shares_only_what_a_request_chooses() {
+        let templated = |allow: &str| {
+            let mut worker = ant("lead-a");
+            worker.template = Some("worker".to_owned());
+            worker.added_by = Some("lead".parse().unwrap());
+            worker.model = Some("sonnet".to_owned());
+            worker.allow = vec![allow.to_owned()];
+            worker.fallback = vec![":haiku".to_owned()];
+            worker.escalate_to = vec!["lead".parse().unwrap()];
+            worker
+        };
+        let worker = templated("read");
+        assert_eq!(Value::Object(local_fields(&worker)), json!({ "model": "sonnet" }), "the template gives the rest");
+
+        let shared = Shared::default();
+        shared.listed(std::slice::from_ref(&worker));
+        shared.store(record(
+            "lead-a",
+            json!({ "model": "haiku", "allow": ["execute"], "fallback": [":opus"], "escalate_to": ["bob"] }),
+        ));
+        let changed = templated("search");
+        let (overlaid, drift) = shared.overlaid(&changed).unwrap();
+        assert_eq!(overlaid.model.as_deref(), Some("haiku"));
+        assert_eq!((overlaid.allow, overlaid.fallback), (changed.allow, changed.fallback), "the template's, as loaded");
+        assert_eq!(overlaid.escalate_to, changed.escalate_to);
+        assert_eq!(drift, ["model"], "what the template fixes is no drift");
     }
 
     #[tokio::test]
