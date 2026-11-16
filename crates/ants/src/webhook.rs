@@ -48,10 +48,11 @@ use ring::{digest, hmac};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
-use tokio::sync::{OnceCell, Semaphore, mpsc};
+use tokio::sync::{OnceCell, Semaphore, mpsc, watch};
 use tokio::task::{AbortHandle, JoinSet};
 
 use crate::notify;
+use crate::serve::Ended;
 
 /// Where `ants webhook serve` listens unless told otherwise: loopback, behind the reverse proxy.
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8424";
@@ -71,6 +72,8 @@ const MAX_BODY: usize = 256 * 1024;
 const DRAIN: usize = 4 * MAX_BODY;
 /// How long a request may take, body and delivery included.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long, past the request timeout, the answers of the requests under way at a stop may take to go out.
+const ANSWER_GRACE: Duration = Duration::from_secs(1);
 const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 /// Requests handled at once; more answer 503.
 const MAX_IN_FLIGHT: usize = 64;
@@ -798,6 +801,8 @@ struct Server {
     /// Swapped whole on a reload; requests under way finish with the routes they started with.
     routes: RwLock<Arc<Routes>>,
     in_flight: Arc<Semaphore>,
+    /// How long a request may take ([`REQUEST_TIMEOUT`]).
+    timeout: Duration,
 }
 
 /// Where requests go, as of the config last loaded.
@@ -822,36 +827,58 @@ pub struct Reload<L> {
     pub load: L,
 }
 
-/// Serve the webhooks of `config` on `listener`, and notify its humans, until a webhook's or a human's credentials
-/// fail. Each webhook and human connects as itself to the config's `nats`, else to `nats`; until it is connected, its
-/// requests answer 503. Health and metrics are served on `config.metrics`, if given.
+/// Serve the webhooks of `config` on `listener`, and notify its humans, until `stop` or a webhook's or a human's
+/// credentials fail. Each webhook and human connects as itself to the config's `nats`, else to `nats`; until it is
+/// connected, its requests answer 503. Health and metrics are served on `config.metrics`, if given.
 ///
 /// On each trigger of `reload` the config is loaded again: webhooks and humans newly listed start, those no longer
 /// listed stop, those whose entry or credentials file changed start again, and the others carry on untouched, as
 /// does the listener. A config that fails to load is logged and the one served stays.
+///
+/// Once `stop` ends, no connection is accepted any more and the requests under way get the rest of their request
+/// timeout to finish and be answered, before returning how `stop` ended.
 pub async fn serve<L: FnMut() -> Result<Config>>(
     config: Config,
     nats: &str,
     js_domain: Option<&JsDomain>,
     listener: TcpListener,
+    reload: Reload<L>,
+    stop: impl Future<Output = Ended>,
+) -> Result<Ended> {
+    serve_timing(config, nats, js_domain, listener, reload, stop, REQUEST_TIMEOUT).await
+}
+
+/// [`serve`], with requests limited to `timeout`.
+async fn serve_timing<L: FnMut() -> Result<Config>>(
+    config: Config,
+    nats: &str,
+    js_domain: Option<&JsDomain>,
+    listener: TcpListener,
     mut reload: Reload<L>,
-) -> Result<()> {
+    stop: impl Future<Output = Ended>,
+    timeout: Duration,
+) -> Result<Ended> {
     bus::check_url(nats)?;
     let mut tasks = JoinSet::new();
     let (failed_tx, mut failed) = mpsc::unbounded_channel();
     let mut running = Running::new(nats, js_domain, &config);
     let metrics_addr = config.metrics;
     let routes = running.apply(config, &mut tasks, &failed_tx);
-    let server =
-        Arc::new(Server { routes: RwLock::new(Arc::new(routes)), in_flight: Arc::new(Semaphore::new(MAX_IN_FLIGHT)) });
+    let in_flight = Arc::new(Semaphore::new(MAX_IN_FLIGHT));
+    let server = Arc::new(Server { routes: RwLock::new(Arc::new(routes)), in_flight, timeout });
     let _metrics = match metrics_addr {
         Some(addr) => Some(metrics::start(addr, server.clone()).await?),
         None => None,
     };
-    loop {
+    let (draining_tx, draining) = watch::channel(false);
+    let mut connections = JoinSet::new();
+    tokio::pin!(stop);
+    let ended = loop {
         while tasks.try_join_next().is_some() {}
+        while connections.try_join_next().is_some() {}
         let stream = tokio::select! {
             Some(e) = failed.recv() => return Err(e),
+            ended = &mut stop => break ended,
             trigger = reload.triggers.next() => {
                 match (reload.load)() {
                     Ok(config) => {
@@ -876,8 +903,8 @@ pub async fn serve<L: FnMut() -> Result<Config>>(
                 }
             },
         };
-        let server = server.clone();
-        tasks.spawn(async move {
+        let (server, mut draining) = (server.clone(), draining.clone());
+        connections.spawn(async move {
             let service = hyper::service::service_fn(move |request| {
                 let server = server.clone();
                 async move { Ok::<_, Infallible>(server.handle(request).await) }
@@ -886,11 +913,29 @@ pub async fn serve<L: FnMut() -> Result<Config>>(
                 .timer(TokioTimer::new())
                 .header_read_timeout(HEADER_TIMEOUT)
                 .serve_connection(TokioIo::new(stream), service);
-            if let Err(e) = connection.await {
+            tokio::pin!(connection);
+            let served = tokio::select! {
+                served = connection.as_mut() => served,
+                // An idle connection closes at once, one with a request under way once it is answered.
+                _ = async { draining.wait_for(|draining| *draining).await.is_ok() } => {
+                    connection.as_mut().graceful_shutdown();
+                    connection.await
+                }
+            };
+            if let Err(e) = served {
                 tracing::debug!(error = %e, "webhook connection");
             }
         });
+    };
+    drop(listener);
+    let _ = draining_tx.send(true);
+    let in_flight = MAX_IN_FLIGHT - server.in_flight.available_permits();
+    tracing::info!(in_flight, "stopping: accepting no more webhook requests, finishing those under way");
+    let grace = timeout + ANSWER_GRACE;
+    if tokio::time::timeout(grace, async { while connections.join_next().await.is_some() {} }).await.is_err() {
+        tracing::warn!(connections = connections.len(), "stopping with connections still open after {grace:?}");
     }
+    Ok(ended)
 }
 
 /// The webhooks and humans served, each with the task connecting it and the contents of its credentials file when
@@ -1153,38 +1198,53 @@ impl Server {
         let Ok(_permit) = self.in_flight.clone().try_acquire_owned() else {
             return unavailable("too many requests at once");
         };
-        let outcome = tokio::time::timeout(REQUEST_TIMEOUT, self.accept(request)).await;
-        match outcome {
-            Ok(Ok(response)) => response,
-            Ok(Err(Refusal(StatusCode::SERVICE_UNAVAILABLE, why))) => unavailable(&why),
-            Ok(Err(Refusal(status, why))) => {
+        match self.accept(request).await {
+            Ok(response) => response,
+            Err(Refusal(StatusCode::SERVICE_UNAVAILABLE, why)) => unavailable(&why),
+            Err(Refusal(status, why)) => {
                 let mut response = reply(status, &why);
                 if status == StatusCode::METHOD_NOT_ALLOWED {
                     response.headers_mut().insert(header::ALLOW, HeaderValue::from_static("POST"));
                 }
                 response
             }
-            Err(_) => unavailable("the request took too long"),
         }
     }
 
+    /// Answer `request` within [`Server::timeout`], counting a webhook's outcome, a request timed out included.
     async fn accept(&self, request: Request<Incoming>) -> Result<Response<Full<Bytes>>, Refusal> {
         let (parts, body) = request.into_parts();
         let routes = self.routes();
         let name = parts.uri.path().strip_prefix(&routes.prefix);
         if let Some(answers) = routes.answers.as_ref().filter(|_| name == notify::APPROVAL_PATH.strip_prefix('/')) {
-            if let Err(e) = read_body(body, Body::Drain).await {
-                return refuse(StatusCode::BAD_REQUEST, format!("reading the body: {e}"));
-            }
-            return Ok(answers.answer(&parts.method, parts.uri.query()).await);
+            return self
+                .in_time(Box::pin(async {
+                    if let Err(e) = read_body(body, Body::Drain).await {
+                        return refuse(StatusCode::BAD_REQUEST, format!("reading the body: {e}"));
+                    }
+                    Ok(answers.answer(&parts.method, parts.uri.query()).await)
+                }))
+                .await;
         }
         let Some(hook) = name.and_then(|name| routes.hooks.get(name)) else {
-            let _ = read_body(body, Body::Drain).await;
-            return refuse(StatusCode::NOT_FOUND, "no such webhook");
+            return self
+                .in_time(async {
+                    let _ = read_body(body, Body::Drain).await;
+                    refuse(StatusCode::NOT_FOUND, "no such webhook")
+                })
+                .await;
         };
-        let outcome = hook.take(parts, body).await;
+        let outcome = self.in_time(hook.take(parts, body)).await;
         hook.outcomes.count(&outcome);
         outcome
+    }
+
+    /// What `answering` answers, or 503 once it took longer than [`Server::timeout`].
+    async fn in_time<T>(&self, answering: impl Future<Output = Result<T, Refusal>>) -> Result<T, Refusal> {
+        match tokio::time::timeout(self.timeout, answering).await {
+            Ok(answered) => answered,
+            Err(_) => refuse(StatusCode::SERVICE_UNAVAILABLE, "the request took too long"),
+        }
     }
 }
 

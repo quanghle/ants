@@ -317,6 +317,11 @@ impl Ant {
         self.dead_letters.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// The messages stored as dead letters so far ([`Ant::buried`]).
+    pub fn dead_letters(&self) -> u64 {
+        self.dead_letters.load(Ordering::Relaxed)
+    }
+
     /// Count what a harness reported spending.
     pub fn spent(&self, tokens: u64, cost: f64) {
         self.tokens.fetch_add(tokens, Ordering::Relaxed);

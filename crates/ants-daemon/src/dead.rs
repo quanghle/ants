@@ -440,7 +440,8 @@ impl MaxDeliveries {
 }
 
 /// Hear the max-deliveries advisories of the stream's consumers and dead-letter each message an ant's inbox or
-/// channel consumer stopped delivering, as its daemon would have, handing every new dead letter and its sequence to `buried`.
+/// channel consumer stopped delivering, as its daemon would have, handing every new dead letter and its sequence to `buried`
+/// and counting it in the ant's metrics ([`crate::metrics::Ant::buried`]).
 /// Channel threads are read as `reader`, the human, by message gets ([`Reading::Gets`]), so no other read of theirs
 /// gets in the way. Runs until the connection closes.
 /// Needs the human's credentials.
@@ -471,7 +472,10 @@ pub async fn watch(
             }
         };
         match bury_undelivered(js, &stream, &advisory, &claims).await {
-            Ok(Some((seq, dead))) => buried(seq, &dead),
+            Ok(Some((seq, dead))) => {
+                crate::metrics::ant(&dead.ant).buried();
+                buried(seq, &dead);
+            }
             Ok(None) => {}
             Err(e) => tracing::warn!(stream_seq = advisory.stream_seq, error = format!("{e:#}"), "dead-lettering"),
         }
