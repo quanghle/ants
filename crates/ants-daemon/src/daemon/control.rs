@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use ants_proto::{Acting, CancelReply, CancelRequest, Envelope, MessageMark, ThreadId, UserId, subject};
+use ants_proto::{Acting, CancelReply, CancelRequest, MessageMark, ThreadId, UserId, subject};
 use anyhow::Result;
 use futures::stream::StreamExt as _;
 
@@ -186,7 +186,7 @@ impl Inbox<'_> {
             }
         };
         if let Some(text) = text {
-            let notice = Envelope::new(ant.clone(), human.clone(), text).with_owner(Some(human.clone()));
+            let notice = crate::behalf::report(ant.clone(), human, text);
             let id = format!("on-behalf-{}", request.id);
             if let Err(e) = bus::store(self.js, notice.subject(), &notice, &id).await {
                 tracing::warn!(%human, error = format!("{e:#}"), "telling the human of its assistant's act");

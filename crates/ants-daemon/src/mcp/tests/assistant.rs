@@ -353,7 +353,9 @@ async fn the_assistant_pins_archives_and_snoozes_for_its_human_naming_itself() {
     assert!(ok && archived.starts_with("Archived"), "{archived}");
     let marks = store.marks.locked().clone();
     assert!(marks.pinned.is_empty() && marks.archived.contains_key(&thread));
-    sent.try_recv().unwrap();
+    let archive_notice = sent.try_recv().unwrap();
+    assert!(notice.thread_id.is_activity(), "on alice's activity thread: {}", notice.thread_id);
+    assert_eq!(archive_notice.thread_id, notice.thread_id, "the reports of a day share one thread");
     let (ok, refused) = mark("star").await;
     assert!(!ok && refused.contains("none of pin, unpin, archive and unarchive"), "{refused}");
     let snooze = async |duration: &str| {
