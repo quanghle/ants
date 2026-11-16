@@ -873,18 +873,24 @@ fn cancel_and_queue() {
         seq: 4211,
         running: true,
         ahead: 0,
+        redelivery: false,
     };
     snap("queued_message", &queued);
-    snap(
-        "queue_reply",
-        &QueueReply {
-            request_id: id(1),
-            ant: user("dev-a"),
-            messages: vec![queued],
-            delivered: Some(4211),
-            undelivered: Some(3),
-        },
-    );
+    let reply = QueueReply {
+        request_id: id(1),
+        ant: user("dev-a"),
+        messages: vec![queued.clone()],
+        delivered: Some(4211),
+        undelivered: Some(3),
+        inbox: None,
+        posts: None,
+    };
+    snap("queue_reply", &reply);
+    let retry = QueuedMessage { channel: None, seq: 4209, running: false, redelivery: true, ..queued };
+    let inbox = ConsumerPlace { acked: 4208, delivered: 4211, undelivered: 3, ack_pending: 2 };
+    let posts = ConsumerPlace { acked: 4210, delivered: 4210, undelivered: 0, ack_pending: 0 };
+    let consumers = QueueReply { messages: vec![retry], inbox: Some(inbox), posts: Some(posts), ..reply };
+    snap("queue_reply_with_consumers", &consumers);
     snap(
         "message_mark_variants",
         &[

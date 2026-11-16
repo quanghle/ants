@@ -12,9 +12,9 @@ use std::time::{Duration, Instant};
 
 use ants_proto::{
     Acting, Attachment, AttachmentHandle, AttachmentScope, CancelReply, CancelRequest, ChannelEntry, ChannelId,
-    ChannelPost, DeadLetter, Envelope, Error as ProtoError, EscalationReason, Humans, JsDomain, MessageMark,
-    QueueRequest, QueuedMessage, Role, State, StatusUpdate, SummaryOf, SummaryRequest, TIMELINE_EVERY, ThreadId,
-    ThreadOrigin, UserId, Uuid, WEBHOOK_ALLOW, subject,
+    ChannelPost, ConsumerPlace, DeadLetter, Envelope, Error as ProtoError, EscalationReason, Humans, JsDomain,
+    MessageMark, QueueRequest, QueuedMessage, Role, State, StatusUpdate, SummaryOf, SummaryRequest, TIMELINE_EVERY,
+    ThreadId, ThreadOrigin, UserId, Uuid, WEBHOOK_ALLOW, subject,
 };
 use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
@@ -447,7 +447,7 @@ async fn ack_progress(threads: &HashMap<ThreadId, Thread>) {
 fn give_up_retries(threads: &mut HashMap<ThreadId, Thread>) {
     let now = tokio::time::Instant::now();
     for (thread, t) in threads {
-        if t.retry.is_some_and(|r| r.until <= now) {
+        if t.retry.as_ref().is_some_and(|r| r.until <= now) {
             tracing::warn!(%thread, "failed message not redelivered in time; going on with the thread");
             t.retry = None;
         }
@@ -917,10 +917,11 @@ struct Withdrawal {
     recorded: bool,
 }
 
-#[derive(Clone, Copy)]
 struct Retry {
     seq: u64,
     until: tokio::time::Instant,
+    /// The message, as `ants queue` lists it.
+    queued: Option<QueuedMessage>,
 }
 
 /// A dead letter to bury: a new one, or one kept in the machine's outbox on an earlier delivery.
@@ -1134,7 +1135,7 @@ impl Inbox<'_> {
         let mut paused = self.pause.subscribe();
         let mut drift = self.drift.subscribe();
         loop {
-            let retry_deadline = threads.values().filter_map(|t| t.retry.map(|r| r.until)).min();
+            let retry_deadline = threads.values().filter_map(|t| t.retry.as_ref().map(|r| r.until)).min();
             // Every fallback was turned away lately: the first to be tried again lets the messages on.
             let now = tokio::time::Instant::now();
             let fallback_up =
@@ -1235,7 +1236,7 @@ impl Inbox<'_> {
             tracing::debug!(%thread, "ignoring a redelivery of a message in hand");
             return None;
         }
-        if t.retry.is_some_and(|r| Some(r.seq) == stream_seq(&msg)) {
+        if t.retry.as_ref().is_some_and(|r| Some(r.seq) == stream_seq(&msg)) {
             t.retry = None;
             t.waiting.push_front((incoming, msg));
         } else if let Some(steered) = self.steer(&incoming, &thread, t) {
@@ -1294,18 +1295,24 @@ impl Inbox<'_> {
         if assisted.is_some() && self.assisted(&request.by, assisted, "queue request").await.is_none() {
             return;
         }
-        let info = async {
+        let place = async |name: String| {
             let stream = self.js.get_stream_no_info(ants_proto::STREAM).await?;
-            anyhow::Ok(stream.consumer_info(ants_proto::inbox_consumer(self.ant)).await?)
+            let info = stream.consumer_info(name).await?;
+            anyhow::Ok(ConsumerPlace {
+                acked: info.ack_floor.stream_sequence,
+                delivered: info.delivered.stream_sequence,
+                undelivered: info.num_pending,
+                ack_pending: u64::try_from(info.num_ack_pending).unwrap_or(u64::MAX),
+            })
         };
-        let (delivered, undelivered) = match info.await {
-            Ok(info) => (Some(info.delivered.stream_sequence), Some(info.num_pending)),
-            Err(e) => {
-                tracing::warn!(error = format!("{e:#}"), "reading the inbox consumer for ants queue");
-                (None, None)
-            }
-        };
-        let answer = request.answer(messages, delivered, undelivered);
+        let inbox = place(ants_proto::inbox_consumer(self.ant)).await.inspect_err(|e| {
+            tracing::warn!(error = format!("{e:#}"), "reading the inbox consumer for ants queue");
+        });
+        // Missing while the daemon serves no channel posts.
+        let posts = place(ants_proto::chan_consumer(self.ant)).await.inspect_err(|e| {
+            tracing::debug!(error = format!("{e:#}"), "reading the channel consumer for ants queue");
+        });
+        let answer = request.answer(messages, inbox.ok(), posts.ok());
         let payload = serde_json::to_vec(&answer).expect("a queue answer serializes");
         if let Err(e) = self.client.publish(answer.subject(), payload.into()).await {
             tracing::warn!(error = %e, "answering a queue request");
@@ -1993,6 +2000,7 @@ impl Inbox<'_> {
             seq,
             // Redelivery may lag behind the delay; past this the thread goes on without the message.
             until: tokio::time::Instant::now() + self.retry_delay * 3,
+            queued: queued_message(&arrived, &msg, Place::Retry),
         });
         (thread, retry.map_or(Handled::Done, Handled::Retry))
     }
@@ -3181,7 +3189,9 @@ fn in_hand(threads: &HashMap<ThreadId, Thread>) -> Vec<QueuedMessage> {
             let waiting = waiting.filter_map(move |(at, (incoming, msg))| {
                 queued_message(incoming, msg, Place::Waiting { ahead: before + at })
             });
-            t.running.clone().into_iter().chain(waiting)
+            let retry = t.retry.as_ref().and_then(|r| r.queued.clone());
+            let retry = retry.map(|queued| QueuedMessage { ahead: usize::from(t.busy), ..queued });
+            t.running.clone().into_iter().chain(retry).chain(waiting)
         })
         .collect();
     messages.sort_by_key(|m| m.seq);
@@ -3196,6 +3206,8 @@ enum Place {
     Waiting {
         ahead: usize,
     },
+    /// Awaiting its redelivery after a failed attempt.
+    Retry,
 }
 
 fn queued_message(incoming: &Incoming, msg: &jetstream::Message, place: Place) -> Option<QueuedMessage> {
@@ -3203,6 +3215,7 @@ fn queued_message(incoming: &Incoming, msg: &jetstream::Message, place: Place) -
     let (running, ahead) = match place {
         Place::Running => (true, 0),
         Place::Waiting { ahead } => (false, ahead),
+        Place::Retry => (false, 0),
     };
     Some(QueuedMessage {
         id: envelope.id,
@@ -3213,6 +3226,7 @@ fn queued_message(incoming: &Incoming, msg: &jetstream::Message, place: Place) -
         seq: stream_seq(msg)?,
         running,
         ahead,
+        redelivery: matches!(place, Place::Retry),
     })
 }
 

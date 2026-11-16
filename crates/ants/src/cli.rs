@@ -307,8 +307,10 @@ pub(crate) enum Command {
         words: Vec<String>,
     },
     /// List the messages waiting for ANT, oldest first: those its daemon holds, running or waiting their turn on their
-    /// thread, then those still in the stream, with id, thread, sender, age and place in the thread's queue. Needs a
-    /// human's credentials, and a daemon of the ant to answer.
+    /// thread, then those awaiting redelivery (one retried after a failed attempt is not withdrawable), then the inbox
+    /// messages and the channel posts waking ANT still in the stream, with id, thread, sender, age and place in the
+    /// thread's queue.
+    /// Needs a human's credentials, and a daemon of the ant to answer.
     Queue {
         #[arg(add = ArgValueCandidates::new(completions::ants))]
         ant: UserId,
@@ -318,8 +320,8 @@ pub(crate) enum Command {
     },
     /// Withdraw MESSAGE (an id `ants queue` lists) from the queue of ANT before ANT is prompted with it: its daemon
     /// acks it unprompted when its turn comes, and tells the thread it was withdrawn. The prompt running and the other
-    /// messages go on. A message ANT started on is not withdrawn: `ants cancel` stops its prompt. Needs a human's
-    /// credentials.
+    /// messages go on. A message ANT started on is not withdrawn, nor one awaiting a retry after a failed attempt:
+    /// `ants cancel` stops its prompt. Needs a human's credentials.
     Withdraw {
         #[arg(add = ArgValueCandidates::new(completions::ants))]
         ant: UserId,

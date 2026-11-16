@@ -963,7 +963,13 @@ impl Hub {
             format!("Messages the daemon of {ant} holds, oldest first:")
         };
         for m in &held {
-            let state = if m.running { "running".to_owned() } else { format!("{} ahead on its thread", m.ahead) };
+            let state = if m.running {
+                "running".to_owned()
+            } else if m.redelivery {
+                format!("{} ahead on its thread, awaiting a retry after a failed attempt", m.ahead)
+            } else {
+                format!("{} ahead on its thread", m.ahead)
+            };
             let at = m.sent_at.format("%Y-%m-%d %H:%M UTC");
             let _ = write!(out, "\n- message {} on thread {} from {}, sent {at}: {state}", m.id, m.thread_id, m.from);
         }
@@ -1004,6 +1010,11 @@ impl Hub {
                 let thread = &m.thread_id;
                 return Err(format!(
                     "{ant} started on message {id} already; cancel_for_human stops its prompt on thread {thread}"
+                ));
+            }
+            Some(m) if m.redelivery => {
+                return Err(format!(
+                    "{ant} started on message {id} already; the attempt failed, and the message awaits a retry"
                 ));
             }
             Some(m) => m.thread_id.clone(),

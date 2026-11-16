@@ -1687,7 +1687,8 @@ impl HumanStore for MemoryHuman {
     }
 
     fn queue(&self, request: ants_proto::QueueRequest) -> BoxFuture<'_, Result<Vec<ants_proto::QueueReply>>> {
-        let answer = request.answer(self.held.locked().clone(), Some(0), Some(2));
+        let inbox = ants_proto::ConsumerPlace { acked: 0, delivered: 0, undelivered: 2, ack_pending: 0 };
+        let answer = request.answer(self.held.locked().clone(), Some(inbox), None);
         self.queues.locked().push(request);
         let answers = if *self.unserved.locked() { vec![] } else { vec![answer] };
         Box::pin(async move { Ok(answers) })
@@ -2123,14 +2124,17 @@ async fn the_assistant_lists_cancels_and_withdraws_for_its_human_on_requests_nam
         seq,
         running,
         ahead: 0,
+        redelivery: false,
     };
     let (prompted, queued) = (held(&running, 1, true), held(&waiting, 2, false));
-    store.held.locked().extend([prompted.clone(), queued.clone()]);
+    let retried = ants_proto::QueuedMessage { redelivery: true, ..held(&ThreadId::generate(), 3, false) };
+    store.held.locked().extend([prompted.clone(), queued.clone(), retried.clone()]);
     let (url, token) = http_server(&mcp, &ThreadId::generate());
     let client = http_client(&url, &token).await;
 
     let (ok, listed) = call(&client, "queue_for_human", serde_json::json!({"ant": "dev-b"})).await;
     assert!(ok && listed.contains(&queued.id.to_string()) && listed.contains("2 more wait"), "{listed}");
+    assert!(listed.contains("awaiting a retry after a failed attempt"), "{listed}");
     let (ok, cancelled) =
         call(&client, "cancel_for_human", serde_json::json!({"ant": "dev-b", "thread": running.to_string()})).await;
     assert!(ok && cancelled.contains("Cancelled the prompt of dev-b"), "{cancelled}");
@@ -2140,6 +2144,8 @@ async fn the_assistant_lists_cancels_and_withdraws_for_its_human_on_requests_nam
     let withdraw = |id: Uuid| serde_json::json!({"ant": "dev-b", "message_id": id.to_string()});
     let (ok, refused) = call(&client, "withdraw_for_human", withdraw(prompted.id)).await;
     assert!(!ok && refused.contains("started on message"), "{refused}");
+    let (ok, refused) = call(&client, "withdraw_for_human", withdraw(retried.id)).await;
+    assert!(!ok && refused.contains("awaits a retry"), "{refused}");
     let (ok, withdrew) = call(&client, "withdraw_for_human", withdraw(queued.id)).await;
     assert!(ok && withdrew.contains("Withdrew message"), "{withdrew}");
     let (ok, refused) = call(&client, "withdraw_for_human", withdraw(Uuid::now_v7())).await;
