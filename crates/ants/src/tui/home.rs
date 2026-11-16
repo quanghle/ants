@@ -213,7 +213,7 @@ pub struct Page {
 }
 
 impl Page {
-    pub const KEYS: &str = "j/k move · Enter open · d done · z snooze · t tree · s digest · c creds";
+    pub const KEYS: &str = "j/k move · Enter open · d done · z snooze · u unread · t tree · s digest · c creds";
 
     /// The selected item's thread.
     pub fn thread(&self, data: &Data) -> Option<ThreadId> {
@@ -264,6 +264,7 @@ impl Page {
                 return Some(To::Do(Action::Change(thread, Change::Done(true), last)));
             }
             Key::Char('z') => return thread().map(To::Snooze),
+            Key::Char('u') => return thread().map(|t| To::Unread(t, None)),
             Key::Char('t') => return thread().map(To::Tree),
             Key::Char('s') => return Some(To::Digest),
             Key::Char('c') => return Some(To::Credentials),
@@ -584,7 +585,7 @@ mod tests {
         assert_eq!(m.key(Key::Char('d'), at(6)), Some(Action::Change(asked.clone(), Change::Done(true), last)));
         assert_eq!(m.key(Key::Enter, at(6)), Some(Action::Open(asked)));
         m.key(Key::Esc, at(6));
-        m.data.marker = Some(ants_proto::ReadMarker { below: 0, read: [1].into() });
+        m.data.marker = Some(ants_proto::ReadMarker { below: 0, read: [1].into(), ..Default::default() });
         assert_eq!(items(&m.data, at(6)).len(), 1, "read, it leaves home");
     }
 }

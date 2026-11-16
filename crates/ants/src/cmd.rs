@@ -61,7 +61,8 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
             let target = send::Target { thread, reply_to };
             Box::pin(send::ask(&nats()?, target, sending, &replies, &input, &attach, words)).await
         }
-        Command::Inbox { peek, thread, limit, follow, json } => {
+        Command::Inbox { unread: Some(target), .. } => inbox::mark_unread(&nats()?, &target).await,
+        Command::Inbox { peek, thread, limit, follow, json, unread: None } => {
             let select = crate::inbox::Select { thread: None, limit, peek, summaries: false };
             Box::pin(inbox::show(&nats()?, select, thread, Listing { follow, json })).await
         }

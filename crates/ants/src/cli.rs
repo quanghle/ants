@@ -104,6 +104,12 @@ pub(crate) enum Command {
         /// removed.
         #[arg(long)]
         json: bool,
+        /// Mark unread again, on all the human's devices, a message to the human and the later ones on its thread
+        /// (a message id or a unique start of one), or the latest message to the human on a thread (its id, a unique
+        /// start of one, or `last`); prints nothing else.
+        #[arg(long, value_name = "MESSAGE|THREAD", conflicts_with_all = ["peek", "thread", "limit", "follow", "json"])]
+        #[arg(add = ArgValueCompleter::new(completions::messages))]
+        unread: Option<String>,
     },
     /// List the ants being served: harness, machine, capabilities, escalation chain, last heartbeat, and whether it
     /// is recent.

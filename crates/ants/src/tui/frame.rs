@@ -212,8 +212,8 @@ mod tests {
         assert!(shown.contains("waiting on ant 1"), "{shown}");
         assert!(shown.contains("● {.~.} dev-a") && shown.contains("PEOPLE") && shown.contains("bob"), "{shown}");
         assert!(shown.contains("nothing waits on a human"), "{shown}");
-        let keys = "j/k move · Enter open · d done · z snooze · t tree · s digest · c creds · Tab nav/view · / \
-                    search · ? help · q quit";
+        let keys = "j/k move · Enter open · d done · z snooze · u unread · t tree · s digest · c creds · Tab nav/view · \
+                    / search · ? help";
         assert!(shown.contains(keys), "{shown}");
 
         m.select(nav::Item::Work(None));

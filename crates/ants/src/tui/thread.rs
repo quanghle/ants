@@ -82,7 +82,7 @@ impl Page {
         self.messages().find(|e| e.id == Some(at)).map(|e| e.seq)
     }
 
-    pub const KEYS: &str = "↑↓ select · i reply · > reply to selected · y copy · o open file · ] next file · + react · p pin · m mute · e archive · d done · z snooze · t tree · S TL;DR · x cancel · a A r answer a tool request · End latest · Esc back";
+    pub const KEYS: &str = "↑↓ select · i reply · > reply to selected · y copy · o open file · ] next file · + react · p pin · m mute · e archive · d done · u unread from selected · z snooze · t tree · S TL;DR · x cancel · a A r answer a tool request · End latest · Esc back";
 
     /// The messages shown, in the order stored.
     fn messages(&self) -> impl DoubleEndedIterator<Item = &Entry> {
@@ -206,6 +206,7 @@ impl Page {
             }
             Key::Char('t') => return Some(To::Tree(self.history.thread.clone())),
             Key::Char('z') => return Some(To::Snooze(self.history.thread.clone())),
+            Key::Char('u') => return Some(To::Unread(self.history.thread.clone(), self.selection().map(|e| e.seq))),
             Key::Char('S') => return Some(To::Tldr(self.history.thread.clone())),
             Key::Char('o') => {
                 let listed = self.attachment()?.clone();

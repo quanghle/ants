@@ -287,8 +287,9 @@ fn kv_entries() {
         let reply = ReactionsReply { request_id: id(1), ant: user("dev-a"), message: id(2), outcome, responder };
         snap(&format!("reactions_reply_{kind}"), &reply);
     }
-    snap("read_marker", &ReadMarker { below: 4200, read: BTreeSet::from([4203, 4207]) });
-    let marker = ReadMarker { below: 4200, read: BTreeSet::from([4207]) };
+    let unread = BTreeSet::from([4198]);
+    snap("read_marker", &ReadMarker { below: 4200, read: BTreeSet::from([4203, 4207]), unread });
+    let marker = ReadMarker { below: 4200, read: BTreeSet::from([4207]), ..ReadMarker::default() };
     snap("channel_read_markers", &ChannelReadMarkers { channels: BTreeMap::from([(channel(), marker)]) });
     snap(
         "thread_title",

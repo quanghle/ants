@@ -521,6 +521,7 @@ impl Chat {
                 self.model.notify(line.0, line.1, Utc::now());
             }
             Action::MarkRead(thread) => self.reads.mark_read(thread),
+            Action::MarkUnread(thread, seqs) => self.reads.mark_unread(thread, seqs),
             Action::Run(job, text) => self.exec.run(job, text),
             Action::Decide(request, verdict) => self.feed.decide(*request, verdict, self.model.data.me().clone()),
             Action::Edit(text) => self.edit = Some(text),

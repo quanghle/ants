@@ -3,6 +3,7 @@
 use ants_daemon::{dead, reactions};
 use ants_proto::{Envelope, Following, Uuid};
 use anyhow::{Result, bail};
+use async_nats::jetstream::consumer::DeliverPolicy;
 use futures::StreamExt as _;
 
 use crate::avatars::Faces;
@@ -103,6 +104,47 @@ pub(crate) async fn show(
             printed = reactions => printed?,
         }
     }
+    Ok(())
+}
+
+/// `ants inbox --unread TARGET`: mark unread again on all the human's devices the message TARGET names to the human and
+/// the later ones on its thread, else the latest message to the human on the thread it names.
+pub(crate) async fn mark_unread(nats: &Nats<'_>, target: &str) -> Result<()> {
+    let me = &nats.me.id;
+    if !nats.me.role.is_human() {
+        bail!("the credentials of {me} are an ant's, whose inbox its daemon reads; `ants inbox` reads a human's");
+    }
+    let (_client, js) = nats.connect("ants-inbox").await?;
+    let inbox = inbox::Inbox::open(&js, me).await?;
+    let message = match target.parse::<thread::MessagePick>() {
+        Ok(pick) => match pick.resolve(&js, &nats.me).await {
+            Ok(id) => thread::find_message(&js, id, None).await?,
+            Err(e) => {
+                tracing::debug!("{target} as a message: {e:#}");
+                None
+            }
+        },
+        Err(_) => None,
+    };
+    let (thread, seqs) = match message {
+        Some(entry) => {
+            let start = DeliverPolicy::ByStartSequence { start_sequence: entry.seq };
+            let seqs = inbox.on_thread(&entry.thread_id, start).await?;
+            if seqs.is_empty() {
+                bail!("no message to {me} on thread {} from message {target} on", entry.thread_id);
+            }
+            (entry.thread_id, seqs)
+        }
+        None => {
+            let thread = target.parse::<thread::Pick>()?.resolve(nats, &js).await?;
+            let seqs = inbox.on_thread(&thread, thread::show_start(&thread, None)).await?;
+            let Some(last) = seqs.last() else { bail!("no message to {me} on thread {thread}") };
+            (thread, vec![*last])
+        }
+    };
+    inbox.unmark(&seqs).await?;
+    let messages = if seqs.len() == 1 { "1 message".to_owned() } else { format!("{} messages", seqs.len()) };
+    println!("marked {messages} to {me} on thread {thread} unread");
     Ok(())
 }
 
