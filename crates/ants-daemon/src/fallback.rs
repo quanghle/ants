@@ -299,7 +299,7 @@ pub fn exhausted_notice(
         "[ants] {ant} cannot answer with a fallback either: {turned}.\nMessages to {ant} wait meanwhile, spending no \
          attempts, until harness {own}, {outage}, answers again or a fallback answers when tried again{next}."
     );
-    to.with_text(text)
+    to.with_text(text).as_notice(ants_proto::NoticeKind::NoFallback)
 }
 
 /// What a notice of an outage of the ant's own harness says the ant cannot answer with: everything, without

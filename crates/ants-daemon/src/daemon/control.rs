@@ -186,7 +186,9 @@ impl Inbox<'_> {
             }
         };
         if let Some(text) = text {
-            let notice = Envelope::new(ant.clone(), human.clone(), text).with_owner(Some(human.clone()));
+            let notice = Envelope::new(ant.clone(), human.clone(), text)
+                .with_owner(Some(human.clone()))
+                .as_notice(ants_proto::NoticeKind::Assistant);
             let id = format!("on-behalf-{}", request.id);
             if let Err(e) = bus::store(self.js, notice.subject(), &notice, &id).await {
                 tracing::warn!(%human, error = format!("{e:#}"), "telling the human of its assistant's act");

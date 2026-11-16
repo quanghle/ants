@@ -239,7 +239,9 @@ impl Hub {
     /// own as [`crate::behalf::sent_notice`] is. Failing to, the result says so.
     async fn tell(&self, human: &UserId, act: String) -> String {
         let text = format!("[ants] {}, as the assistant of {human}, {act}", self.ant);
-        let notice = Envelope::new(self.ant.clone(), human.clone(), text).with_owner(Some(human.clone()));
+        let notice = Envelope::new(self.ant.clone(), human.clone(), text)
+            .with_owner(Some(human.clone()))
+            .as_notice(ants_proto::NoticeKind::Assistant);
         match self.send(&notice).await {
             Ok(()) => format!(" {human} is told in its inbox."),
             Err(e) => format!(" Telling {human} failed: {e}."),

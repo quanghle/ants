@@ -126,7 +126,9 @@ pub fn sent_notice(envelope: &Envelope, human: &UserId) -> Envelope {
         "[ants] {from} sent {to} a message for {human}, as its assistant, on thread {thread}: {}",
         excerpt(&envelope.text)
     );
-    Envelope::new(to.clone(), human.clone(), text).with_owner(Some(human.clone()))
+    Envelope::new(to.clone(), human.clone(), text)
+        .with_owner(Some(human.clone()))
+        .as_notice(ants_proto::NoticeKind::Assistant)
 }
 
 /// The message telling `human` that `envelope`, carrying `decision`, is its assistant's decision for it, verified by a
@@ -141,7 +143,9 @@ pub fn held_notice(envelope: &Envelope, decision: &ApprovalDecision, human: &Use
          tools approve {to}/{id}` or `ants tools reject {to}/{id}`).",
         decision.verdict.as_str()
     );
-    Envelope::new(to.clone(), human.clone(), text).with_owner(Some(human.clone()))
+    Envelope::new(to.clone(), human.clone(), text)
+        .with_owner(Some(human.clone()))
+        .as_notice(ants_proto::NoticeKind::Assistant)
 }
 
 /// The first line of `text`, cut to a short excerpt.

@@ -347,8 +347,15 @@ fn a_reply_is_a_completion_and_nothing_else_is() {
     assert!(completion_notice(&escalated).is_none(), "an escalation's notice is its own");
     let summarised = Envelope { summary: Some(ants_proto::SummaryRequest::thread(thread.clone(), 7)), ..done.clone() };
     assert!(completion_notice(&summarised).is_none(), "the CLI that asked for a summary takes it");
-    let hooked = Envelope { webhook: true, ..done };
+    let hooked = Envelope { webhook: true, ..done.clone() };
     assert!(completion_notice(&hooked).is_none());
+    let spent = done.clone().as_notice(ants_proto::NoticeKind::Spend);
+    assert!(completion_notice(&spent).is_none() && action_notice(&spent).is_none(), "a notice is no reply");
+    let signed_out = done.as_notice(ants_proto::NoticeKind::SignedOut);
+    let notice = action_notice(&signed_out).unwrap();
+    assert_eq!(notice.title, "dev-a: signed out");
+    let json = notice_json(&notice, at("2026-03-10T12:00:00Z"));
+    assert_eq!((&json["kind"], &json["notice"]), (&json!("notice"), &json!("signed_out")));
 }
 
 #[test]

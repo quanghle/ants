@@ -324,7 +324,9 @@ impl Escalator {
             "[ants] {from} answered the escalation of {ant} on thread {thread} in place of {reached}: {}",
             envelope.text.chars().take(SUMMARY_CHARS).collect::<String>(),
         );
-        let notice = Envelope::new(ant.clone(), reached.clone(), text).with_owner(Some(reached));
+        let notice = Envelope::new(ant.clone(), reached.clone(), text)
+            .with_owner(Some(reached))
+            .as_notice(ants_proto::NoticeKind::InPlace);
         let to = notice.to.clone();
         match (self.send)(notice, format!("answered-{ant}-{}", envelope.id)).await {
             Ok(()) => tracing::info!(%thread, %to, %from, "told of the answer of another human"),

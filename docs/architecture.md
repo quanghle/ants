@@ -61,6 +61,10 @@ flowchart LR
 | KV `ants_webhooks` | File, 7d | Webhook event hashes (`<webhook>.<hash>`), schedule firings (`<schedule>.<unix_time>`), and hourly `<webhook>.webhook` / `channel-manager.serve` version markers. |
 | Core NATS | Unstored | `ants.status.<ant>.<thread>`, `ants.cancel[led].<ant>.<thread>`, `ants.queue[d].<ant>`, an assistant's `ants.cancel.<ant>.<thread>.<assistant>` and `ants.queue.<ant>.<assistant>`, `ants.chanadm.<channel>.<ant>`, `ants.reactions.<ant>[.react]` (answered on `_INBOX.<ant>.reactions`), `ants.enroll.<ant>[.reply]`, `ants.renew.<name>[.reply]`, `ants.login.<name>[.reply]`, `ants.antreq.<manager>[.reply]`. |
 
+### Daemon notices
+
+An `[ants]` message a daemon sends of its own, rather than an ant's answer, carries `notice` with its kind: `spend` (a spend warning), `signed_out`, `quota`, `failing`, `no_fallback`, `gave_up` (a dead letter), `withdrawn`, `expired` (a session's kept branch), `unserved`, `assistant` (what an assistant did for its human), `in_place` (an answer or decision taken by another) or `request_expired`. A reply or follow-up never copies it. `ants chat` shows such a message as a dim system line that makes no thread finished or unread; only the kinds a human has to act on (`signed_out`, `quota`, `failing`, `no_fallback`, `gave_up`) count as what the thread is stuck on, and only those are pushed by `ants webhook serve` (kind `notice`). Notices carrying an escalation keep the escalation's handling.
+
 ### Identifiers and durations
 
 - User, channel, thread, and JetStream domain IDs use 1–64 characters of `a-z`, `0-9`, and `-`, starting with a letter or digit (`bootstrap`, `channel-manager`, `revoked`, and `signer` are reserved: no ant, human, webhook, or device takes them).

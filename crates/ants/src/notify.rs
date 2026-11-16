@@ -60,7 +60,7 @@ use futures::StreamExt as _;
 use tokio::sync::OnceCell;
 
 use self::notices::{
-    About, Notice, approval_notice, completion_notice, digest_notice, escalation_notice, held, holding,
+    About, Notice, action_notice, approval_notice, completion_notice, digest_notice, escalation_notice, held, holding,
     question_notice, relayed, unserved_notice,
 };
 use self::sinks::send;
@@ -271,6 +271,9 @@ async fn notify(human: &Notified, bus: &HumanBus, links: Option<&Links>, subject
                         escalation_notice(&envelope).filter(|notice| !config.gets_relayed_request(&notice.about))
                     }
                     (false, true) if config.questions => question_notice(&envelope),
+                    (false, false) if envelope.notice.is_some() => {
+                        action_notice(&envelope).filter(|_| config.escalations)
+                    }
                     (false, false) if config.completions => completion_notice(&envelope),
                     _ => None,
                 }

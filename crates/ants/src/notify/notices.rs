@@ -7,8 +7,8 @@ use std::sync::OnceLock;
 use ants_daemon::redact::Redactor;
 use ants_daemon::unserved::Unserved;
 use ants_proto::{
-    ApprovalRequest, Away, Envelope, Escalation, EscalationReason, HeldNotices, NotifyPrefs, Question, ThreadId,
-    UserId, Uuid, Verdict,
+    ApprovalRequest, Away, Envelope, Escalation, EscalationReason, HeldNotices, NoticeKind, NotifyPrefs, Question,
+    ThreadId, UserId, Uuid, Verdict,
 };
 use chrono::{DateTime, Utc};
 use jiff::tz::TimeZone;
@@ -43,6 +43,9 @@ pub(super) enum About {
     Escalation { id: Uuid, from: UserId, escalation: Box<Escalation> },
     /// An ant's reply `id` from `from` on `thread`, reaching the human's inbox.
     Completion { id: Uuid, from: UserId, thread: ThreadId },
+    /// A daemon's notice `kind` that a human has to act on ([`NoticeKind::needs_action`]), in the message `id` from
+    /// `from` on `thread`.
+    Notice { id: Uuid, from: UserId, thread: ThreadId, kind: NoticeKind },
     /// The question `question` that `from` asks the human on `thread`, in the message `id`.
     Question { id: Uuid, from: UserId, thread: ThreadId, question: Box<Question> },
     /// A test notice of `ants webhook notify-test`.
@@ -59,7 +62,9 @@ impl About {
         match self {
             Self::Approval { request, .. } => Some(&request.thread_id),
             Self::Escalation { escalation, .. } => Some(&escalation.thread_id),
-            Self::Completion { thread, .. } | Self::Question { thread, .. } => Some(thread),
+            Self::Completion { thread, .. } | Self::Question { thread, .. } | Self::Notice { thread, .. } => {
+                Some(thread)
+            }
             Self::Test { .. } | Self::Unserved { .. } | Self::Digest { .. } => None,
         }
     }
@@ -70,6 +75,7 @@ impl About {
             Self::Approval { .. } => "approval",
             Self::Escalation { .. } => "escalation",
             Self::Completion { .. } => "completion",
+            Self::Notice { .. } => "notice",
             Self::Question { .. } => "question",
             Self::Test { .. } => "test",
             Self::Unserved { .. } => "unserved",
@@ -81,7 +87,7 @@ impl About {
     fn bypass(&self) -> Option<Bypass> {
         match self {
             Self::Approval { .. } => Some(Bypass::Approvals),
-            Self::Escalation { .. } => Some(Bypass::Escalations),
+            Self::Escalation { .. } | Self::Notice { .. } => Some(Bypass::Escalations),
             Self::Question { .. } => Some(Bypass::Questions),
             Self::Completion { .. } | Self::Test { .. } | Self::Unserved { .. } | Self::Digest { .. } => None,
         }
@@ -158,6 +164,13 @@ pub(super) fn notice_json(notice: &Notice, now: DateTime<Utc>) -> Value {
             "id": id,
             "ant": from,
             "thread": thread,
+        }),
+        About::Notice { id, from, thread, kind } => json!({
+            "kind": "notice",
+            "id": id,
+            "ant": from,
+            "thread": thread,
+            "notice": kind.as_str(),
         }),
         About::Question { id, from, thread, question } => json!({
             "kind": "question",
@@ -383,7 +396,7 @@ pub(super) fn relayed(
 }
 
 /// The notice of an ant's reply `envelope`, if it is one: a message answering another (`in_reply_to`) that carries no
-/// escalation, decision, mention or summary and comes from no webhook. The CLI that asked for a summary takes the
+/// escalation, decision, mention, summary or daemon's notice and comes from no webhook. The CLI that asked for a summary takes the
 /// reply itself.
 pub(super) fn completion_notice(envelope: &Envelope) -> Option<Notice> {
     let reply = envelope.in_reply_to.is_some()
@@ -391,6 +404,7 @@ pub(super) fn completion_notice(envelope: &Envelope) -> Option<Notice> {
         && envelope.approval.is_none()
         && envelope.mention.is_none()
         && envelope.summary.is_none()
+        && envelope.notice.is_none()
         && !envelope.webhook
         && envelope.from != envelope.to;
     if !reply {
@@ -407,6 +421,28 @@ pub(super) fn completion_notice(envelope: &Envelope) -> Option<Notice> {
         human: envelope.to.clone(),
         title: format!("{} replied", envelope.from),
         text,
+        buttons: Vec::new(),
+        urgent: false,
+    })
+}
+
+/// The notice of the daemon's notice `envelope`, if a human has to act on it ([`NoticeKind::needs_action`]): an ant
+/// signed out or out of quota, say. Other daemon's notices tell of what needs nothing done, and push nothing.
+pub(super) fn action_notice(envelope: &Envelope) -> Option<Notice> {
+    let kind = envelope.notice.filter(|kind| kind.needs_action())?;
+    let thread = &envelope.thread_id;
+    let what = match kind {
+        NoticeKind::SignedOut => "signed out",
+        NoticeKind::Quota => "out of quota",
+        NoticeKind::Failing => "failing",
+        NoticeKind::NoFallback => "no fallback left",
+        _ => "gave up",
+    };
+    Some(Notice {
+        about: About::Notice { id: envelope.id, from: envelope.from.clone(), thread: thread.clone(), kind },
+        human: envelope.to.clone(),
+        title: format!("{}: {what}", envelope.from),
+        text: format!("{}\n\nthread {thread}", notice_text(envelope, MAX_TEXT)),
         buttons: Vec::new(),
         urgent: false,
     })
@@ -456,6 +492,7 @@ pub(super) fn counted(kind: &str, n: u32) -> String {
         "approval" => ("tool request", "tool requests"),
         "escalation" => ("escalation", "escalations"),
         "completion" => ("reply", "replies"),
+        "notice" => ("notice", "notices"),
         "question" => ("question", "questions"),
         _ => return format!("{n} {kind} notices"),
     };
