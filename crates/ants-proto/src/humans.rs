@@ -85,11 +85,10 @@ impl Humans {
 }
 
 /// Whether the publish allowances `publish` of a user JWT are a human's: they write every human's entry in
-/// [`HUMANS_BUCKET`] (`$KV.ants_humans.*`, or `$KV.ants_humans.>` as permissions version 2 and earlier gave it), as no
-/// other credentials do.
+/// [`HUMANS_BUCKET`] (`$KV.ants_humans.*`), as no other credentials do.
 pub fn writes_human_entries<'a>(publish: impl IntoIterator<Item = &'a str>) -> bool {
-    let (entries, all) = (format!("$KV.{HUMANS_BUCKET}.*"), format!("$KV.{HUMANS_BUCKET}.>"));
-    publish.into_iter().any(|s| s == entries || s == all)
+    let entries = format!("$KV.{HUMANS_BUCKET}.*");
+    publish.into_iter().any(|s| s == entries)
 }
 
 #[cfg(test)]

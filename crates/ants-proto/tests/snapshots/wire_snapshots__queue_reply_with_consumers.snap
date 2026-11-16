@@ -17,8 +17,6 @@ expression: value
       "redelivery": true
     }
   ],
-  "delivered": 4211,
-  "undelivered": 3,
   "inbox": {
     "acked": 4208,
     "delivered": 4211,

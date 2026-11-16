@@ -433,14 +433,6 @@ fn claims(jwt: &str) -> Result<Value> {
     serde_json::from_slice(&payload).context("a malformed user JWT")
 }
 
-/// Whether the credentials file at `path` allows publishing `subject`, listed as it is among the publish allowances of
-/// its user JWT. One without publish allowances, or that cannot be read, is left for the server to judge: true.
-pub fn may_publish(path: &Path, subject: &str) -> bool {
-    let Ok(text) = std::fs::read_to_string(path) else { return true };
-    let Some(Ok(claims)) = creds_jwt(&text).map(claims) else { return true };
-    claims["nats"]["pub"]["allow"].as_array().is_none_or(|allow| allow.iter().any(|s| s == subject))
-}
-
 /// Log a warning for each of [`Finding::warnings`] of the credentials file at `path`; one that cannot be read is
 /// left for the connection to report.
 pub fn warn(path: &Path) {
@@ -988,30 +980,5 @@ mod tests {
         let human = Permissions::for_user(&p("alice"), Role::Human);
         let tags = [PERMISSIONS_VERSION.tag()];
         assert!(Finding::from_claims(&claims("alice", &human, &tags, None)).is_err(), "no device id");
-    }
-
-    #[test]
-    fn only_credentials_listing_a_subject_may_publish_it() {
-        let dir = ants_test_support::scratch_dir("creds-may-publish");
-        let path = dir.join("dev-a.creds");
-        let timeline = subject::timeline_from(&p("dev-a"));
-        let write = |permissions: &Permissions| {
-            let claims = claims("dev-a", permissions, &[PERMISSIONS_VERSION.tag()], None);
-            let body = BASE64URL_NOPAD.encode(&serde_json::to_vec(&claims).unwrap());
-            std::fs::write(
-                &path,
-                format!("-----BEGIN NATS USER JWT-----\nhead.{body}.sig\n------END NATS USER JWT------\n"),
-            )
-            .unwrap();
-        };
-        assert!(may_publish(&path, &timeline), "no file: the server judges");
-        let mut ant = Permissions::for_user(&p("dev-a"), Role::Ant);
-        write(&ant);
-        assert!(may_publish(&path, &timeline));
-        assert!(!may_publish(&path, &subject::timeline_from(&p("dev-b"))));
-        ant.publish.retain(|s| *s != timeline);
-        write(&ant);
-        assert!(!may_publish(&path, &timeline), "issued before timelines");
-        std::fs::remove_dir_all(dir).unwrap();
     }
 }

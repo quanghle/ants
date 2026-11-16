@@ -363,7 +363,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         behalf: Records::new(js.clone(), config.js_domain.clone(), crate::humans::account(config.creds.as_deref())),
         retry_delay: RETRY_DELAY,
         progress_every: PROGRESS_EVERY,
-        timeline_every: crate::timeline::allowed(config.creds.as_deref(), &config.ant).then_some(TIMELINE_EVERY),
+        timeline_every: TIMELINE_EVERY,
         sign_in: SignIn::default(),
         sign_in_every: signin::CHECK_EVERY,
         breaker: Breaker::default(),
@@ -1096,9 +1096,8 @@ struct Inbox<'a> {
     behalf: Records,
     retry_delay: Duration,
     progress_every: Duration,
-    /// How often at most a prompt's tool-call timeline is stored while it runs; never, when the credentials do not
-    /// allow it.
-    timeline_every: Option<Duration>,
+    /// How often at most a prompt's tool-call timeline is stored while it runs.
+    timeline_every: Duration,
     /// Whether the harness is signed out, holding the messages.
     sign_in: SignIn,
     /// How often a signed-out harness, or one failing to start, is checked.
@@ -1347,7 +1346,6 @@ impl Inbox<'_> {
     /// Answer the humans' cancel requests ([`CancelRequest`]) for as long as the daemon serves, cancelling the prompt
     /// running on the thread each one names, and the assistants' for their humans, which may withdraw a message instead.
     async fn hear_cancels(&self) {
-        // Requests naming their sender, an assistant's, apart: credentials older than them allow only the others.
         let subscribe =
             [subject::cancel_of(self.ant), subject::cancels_by_of(self.ant)].map(|s| self.client.subscribe(s));
         let mut requests = match futures::future::try_join_all(subscribe).await {
@@ -2940,11 +2938,10 @@ impl Inbox<'_> {
         let mut reached = None;
         let (progress_tx, mut streamed) = tokio::sync::mpsc::channel(status::BUFFER);
         let mut status = Status::new(self.client, self.ant, thread, self.redactor);
-        let mut timeline = self.timeline_every.map(|every| {
-            let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            (crate::timeline::Collector::new(self.ant, thread, envelope.id, self.redactor), tick)
-        });
+        let every = self.timeline_every;
+        let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut calls = crate::timeline::Collector::new(self.ant, thread, envelope.id, self.redactor);
         let history = crate::history::Thread {
             js: self.js.clone(),
             ant: self.ant.clone(),
@@ -2981,14 +2978,12 @@ impl Inbox<'_> {
                 r = &mut prompt => break r,
                 Some(update) = streamed.recv() => {
                     worked |= matches!(update, StatusUpdate::Tool { .. });
-                    if let Some((calls, _)) = &mut timeline {
-                        calls.push(&update, chrono::Utc::now());
-                    }
+                    calls.push(&update, chrono::Utc::now());
                     status.push(update);
                 }
                 _ = flush.tick() => status.flush_settled(),
-                () = stored_every(&mut timeline) => {
-                    if let Some(record) = timeline.as_mut().and_then(|(calls, _)| calls.take()) {
+                () = stored_every(&calls, &mut tick) => {
+                    if let Some(record) = calls.take() {
                         crate::timeline::store(self.js, record);
                     }
                 }
@@ -3018,16 +3013,12 @@ impl Inbox<'_> {
         };
         while let Ok(update) = streamed.try_recv() {
             worked |= matches!(update, StatusUpdate::Tool { .. });
-            if let Some((calls, _)) = &mut timeline {
-                calls.push(&update, chrono::Utc::now());
-            }
+            calls.push(&update, chrono::Utc::now());
             status.push(update);
         }
         status.flush();
-        if let Some((calls, _)) = &mut timeline {
-            while let Some(record) = calls.take() {
-                crate::timeline::store(self.js, record);
-            }
+        while let Some(record) = calls.take() {
+            crate::timeline::store(self.js, record);
         }
         drop((cancellable, prompting));
         Ran { reply, cancelled_by, cut_by_cancel, worked, reached, spend, fallback, tokens }
@@ -3513,14 +3504,12 @@ impl<N: NotesStore> NotesStore for RedactingNotes<N> {
     }
 }
 
-/// When the next record of a prompt's tool-call timeline is due: at its next tick once something changed; never
-/// without a timeline.
-async fn stored_every(timeline: &mut Option<(crate::timeline::Collector<'_>, tokio::time::Interval)>) {
-    match timeline {
-        Some((calls, tick)) if calls.pending() => {
-            tick.tick().await;
-        }
-        _ => std::future::pending().await,
+/// When the next record of a prompt's tool-call timeline is due: at its next tick once something changed.
+async fn stored_every(calls: &crate::timeline::Collector<'_>, tick: &mut tokio::time::Interval) {
+    if calls.pending() {
+        tick.tick().await;
+    } else {
+        std::future::pending::<()>().await;
     }
 }
 

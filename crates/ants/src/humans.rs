@@ -226,7 +226,7 @@ mod tests {
     #[test]
     fn the_credentials_name_whom_the_cli_acts_as() {
         assert_eq!(Me::from_creds(None).unwrap(), Me { id: UserId::human(), role: Role::Human, assistant_of: None });
-        let human = json!({ "pub": { "allow": ["ants.inbox.*.alice", "$KV.ants_humans.>"] } });
+        let human = json!({ "pub": { "allow": ["ants.inbox.*.alice", "$KV.ants_humans.*"] } });
         let me = |claims| Me::from_creds_text(&creds_with(claims)).map_err(|e| format!("{e:#}"));
         assert_eq!(
             me(json!({ "name": "alice", "nats": human })),
@@ -249,7 +249,7 @@ mod tests {
     #[test]
     fn a_human_s_credentials_tell_the_device() {
         let device = DeviceId::generate();
-        let human = json!({ "allow": ["$KV.ants_humans.>"] });
+        let human = json!({ "allow": ["$KV.ants_humans.*"] });
         let claims = json!({ "name": "alice", "nats": { "tags": ["team", device.tag()], "pub": human } });
         assert_eq!(device_of(&creds_with(claims)).unwrap(), Some(device));
         let without = json!({ "name": "alice", "nats": { "pub": human } });

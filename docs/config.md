@@ -492,7 +492,7 @@ back with the tokens the turn spent (`tokens`). The CLI waits for that reply, ma
 
 - **TL;DR:** stored for every human at `summary.<thread>` in KV `ants_threads` (`{thread_id, text, by, for, at, upto,
   tokens}`) and printed again without asking while no entry came after entry `upto` (`--new` asks anyway; `--json`
-  prints the stored object). Credentials older than permissions version 2 warn once and neither read nor store it.
+  prints the stored object).
 - **Digest:** of the threads with entries within `--since` (default `24h`, `0` all), stored nowhere.
 
 Threads opened by summary requests are left out of `ants thread list`, `last`, `ants dash`, digests and the inbox

@@ -154,17 +154,9 @@ pub(crate) async fn run(command: LeafCommand, conn: &Connection<'_>) -> Result<(
             let nats = nats()?;
             let (_, js) = nats.connect("ants-cli").await?;
             let leaf = outbox::connect(conn.nats, conn.creds, &nats.me.id, &machine).await?;
-            let through = outbox::admit(&leaf, &js, &machine, &set.roles()).await?;
+            outbox::admit(&leaf, &js, &machine, &set.roles()).await?;
             outbox::sourced(&js, &machine, outbox::SOURCE_WAIT).await?;
             println!("outbox of {machine} ready; the hub takes from it what its members send ({set})");
-            if through == outbox::Through::Ephemeral {
-                eprintln!(
-                    "warning: the leaf node of {machine} does not answer for the outbox's durable consumer, so the hub \
-                     sources the outbox without it and, after a restart, may wait up to 2.5 minutes before taking \
-                     from it again. The uplink credentials, or the human's in use, predate the consumer: renew them (`ants renew \
-                     FILE` on the machine, or `ants auth leaf {machine}` where the team keys are), then run this again"
-                );
-            }
             Ok(())
         }
     }

@@ -105,8 +105,8 @@ impl Present {
     }
 }
 
-/// What a human's credentials need to read every human's presence ([`online`]); credentials issued before permissions
-/// version 2 lack it.
+/// What credentials need to read every human's presence ([`online`]): a human's and an assistant's have it, an ant's
+/// not.
 pub fn online_right() -> String {
     format!("$JS.API.CONSUMER.CREATE.KV_{PRESENCE_BUCKET}")
 }

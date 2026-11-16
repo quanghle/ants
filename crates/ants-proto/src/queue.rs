@@ -170,15 +170,7 @@ impl QueueRequest {
         inbox: Option<ConsumerPlace>,
         posts: Option<ConsumerPlace>,
     ) -> QueueReply {
-        QueueReply {
-            request_id: self.id,
-            ant: self.ant.clone(),
-            messages,
-            delivered: inbox.map(|place| place.delivered),
-            undelivered: inbox.map(|place| place.undelivered),
-            inbox,
-            posts,
-        }
+        QueueReply { request_id: self.id, ant: self.ant.clone(), messages, inbox, posts }
     }
 }
 
@@ -189,19 +181,11 @@ pub struct QueueReply {
     pub ant: UserId,
     /// The messages the daemon holds, in flight or waiting their turn on their thread, by stream sequence.
     pub messages: Vec<QueuedMessage>,
-    /// The stream sequence of the last message the ant's inbox consumer delivered: later inbox messages wait in the
-    /// stream. None when the consumer's info could not be read.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub delivered: Option<u64>,
-    /// How many inbox messages wait in the stream, not delivered yet.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub undelivered: Option<u64>,
-    /// Where the ant's inbox consumer stands, `delivered` and `undelivered` included, which readers older than it
-    /// take instead. None when its info could not be read, or from a daemon older than it.
+    /// Where the ant's inbox consumer stands. None when its info could not be read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inbox: Option<ConsumerPlace>,
     /// Where the ant's channel consumer, of every channel post, stands. None when the daemon serves no channel posts,
-    /// its info could not be read, or the daemon is older than it.
+    /// or its info could not be read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub posts: Option<ConsumerPlace>,
 }

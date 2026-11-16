@@ -73,7 +73,7 @@ pub struct RosterEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_low: Option<MemoryLow>,
     /// The model, reasoning effort and context the ant's config sets for its harness. Missing when the config sets
-    /// none, so the harness's defaults hold, and from daemons before it was added.
+    /// none, so the harness's defaults hold.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<AntModel>,
     /// Set while the ant is paused (`paused = true` in its config): its daemon takes no new message and starts no new

@@ -576,9 +576,7 @@ async fn check_hub(js: &jetstream::Context, identity: &Identity) -> Vec<Check> {
                 "ants init with a human's current credentials (`ants auth user NAME --human`)".to_owned()
             };
             match finding.problem {
-                hub::Problem::Unchecked(_) | hub::Problem::ShortWindow { .. } => {
-                    Check::warn(check, finding.to_string(), vec![fix])
-                }
+                hub::Problem::Unchecked(_) => Check::warn(check, finding.to_string(), vec![fix]),
                 _ => Check::fail(check, finding.to_string(), vec![fix]),
             }
         })
@@ -1190,11 +1188,10 @@ async fn check_ant_reactions(ant: &Ant, setup: &Setup, wait: Duration) -> Check 
 }
 
 /// The kind of process that answered a reactions request, as a user-facing name.
-fn responder(responder: Option<ReactionsResponder>) -> &'static str {
+fn responder(responder: ReactionsResponder) -> &'static str {
     match responder {
-        Some(ReactionsResponder::Signer) => "ants signer",
-        Some(ReactionsResponder::Webhook) => "ants webhook serve",
-        None => "an older ants",
+        ReactionsResponder::Signer => "ants signer",
+        ReactionsResponder::Webhook => "ants webhook serve",
     }
 }
 
@@ -1442,7 +1439,7 @@ async fn check_outbox(
                 );
                 Check::warn(check, detail, vec![admit])
             }
-            (outbox::Hearing::Silent, []) if sourcing.durable => Check::warn(
+            (outbox::Hearing::Silent, []) => Check::warn(
                 check,
                 format!(
                     "the hub sources the outbox of {machine} but has not heard from it since its nats-server started: \
@@ -1454,20 +1451,7 @@ async fn check_outbox(
                         .to_owned(),
                 ],
             ),
-            (outbox::Hearing::Silent, []) => Check::warn(
-                check,
-                format!(
-                    "the hub sources the outbox of {machine} but has not heard from it since its nats-server started: \
-                     after a restart, the hub asks the leaf node again within 2.5 minutes, unless it lacks the \
-                     feature flag below"
-                ),
-                vec![
-                    admit,
-                    "feature_flags { js_api_reply_v2: true } in the hub's nats-server configuration, then restart it"
-                        .to_owned(),
-                ],
-            ),
-            (outbox::Hearing::Stale(ago), []) if sourcing.durable => Check::warn(
+            (outbox::Hearing::Stale(ago), []) => Check::warn(
                 check,
                 format!(
                     "the hub last heard from the outbox of {machine} {}s ago: the uplink is down; the hub goes on \
@@ -1476,29 +1460,6 @@ async fn check_outbox(
                 ),
                 vec![admit],
             ),
-            (outbox::Hearing::Stale(ago), []) => Check::warn(
-                check,
-                format!(
-                    "the hub last heard from the outbox of {machine} {}s ago: the uplink is down, or the hub waits up \
-                     to 2.5 minutes before asking the leaf node again",
-                    ago.as_secs()
-                ),
-                vec![admit],
-            ),
-            (outbox::Hearing::Heard, []) if !sourcing.durable => {
-                let renew = uplink.map(creds::Finding::renew).filter(|renew| renew.len() > 1);
-                let renew =
-                    renew.unwrap_or_else(|| vec![format!("ants auth leaf {machine} [--js-domain DOMAIN]"), admit]);
-                Check::warn(
-                    check,
-                    format!(
-                        "the hub takes from the outbox of {machine} without its durable consumer, as the uplink \
-                         credentials, or the human's that set it up, predate it: after a restart, the hub may wait up to 2.5 minutes before taking \
-                         from the outbox again"
-                    ),
-                    renew,
-                )
-            }
             (outbox::Hearing::Heard, []) => {
                 let names: Vec<&str> = members.iter().map(|(user, _)| user.as_str()).collect();
                 Check::ok(check, format!("the hub takes from the outbox of {machine} for {}", names.join(", ")))

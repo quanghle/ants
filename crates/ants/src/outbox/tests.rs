@@ -123,10 +123,10 @@ async fn the_hub_takes_what_a_leaf_kept_while_its_uplink_was_down() {
     // Before the outbox exists, a publish that cannot reach the hub fails outright.
     outbox_missing_fails(&b_js).await;
     let setup = super::connect(&hub.url, Some(&creds(&human)), &human, &m1).await.unwrap();
-    assert_eq!(admit(&setup, &h_js, &m1, &on_m1).await.unwrap(), Through::Durable);
+    admit(&setup, &h_js, &m1, &on_m1).await.unwrap();
     sourced(&h_js, &m1, Duration::from_secs(5)).await.unwrap();
     let found = sourcing(&h_js, &m1, &on_m1).await.unwrap();
-    assert_eq!(found, Sourcing { hearing: Hearing::Heard, durable: true, unadmitted: Vec::new() });
+    assert_eq!(found, Sourcing { hearing: Hearing::Heard, unadmitted: Vec::new() });
     let more = [on_m1.clone(), vec![(dev_b.clone(), Role::Ant)]].concat();
     assert_eq!(sourcing(&h_js, &m1, &more).await.unwrap().unadmitted, std::slice::from_ref(&dev_b));
     // Any human on the machine may set it up again.
@@ -153,7 +153,7 @@ async fn the_hub_takes_what_a_leaf_kept_while_its_uplink_was_down() {
     // Setting it up again recreates a durable consumer the leaf node lost, after what the intake took.
     let leaf_js = jetstream::with_domain(setup.clone(), m1.as_str());
     leaf_js.delete_consumer_from_stream(OUTBOX_CONSUMER, OUTBOX_STREAM).await.unwrap();
-    assert_eq!(admit(&setup, &alice_js, &m1, &on_m1).await.unwrap(), Through::Durable);
+    admit(&setup, &alice_js, &m1, &on_m1).await.unwrap();
     leaf_js.get_consumer_from_stream::<consumer::push::Config, _, _>(OUTBOX_CONSUMER, OUTBOX_STREAM).await.unwrap();
     sourced(&h_js, &m1, SOURCE_WAIT).await.unwrap();
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -476,21 +476,6 @@ async fn a_hub_without_js_api_reply_v2_is_reported() {
 }
 
 #[test]
-fn the_intake_takes_an_outbox_durably_only_through_its_consumer() {
-    let m1: Machine = "m1".parse().unwrap();
-    let info = |api: &str, consumer: Option<&str>| {
-        let mut source = serde_json::json!({ "name": OUTBOX_STREAM, "external": { "api": api } });
-        if let Some(name) = consumer {
-            source["consumer"] = serde_json::json!({ "name": name, "deliver_subject": "$JS.S.m1.ANTS_IN" });
-        }
-        serde_json::json!({ "config": { "sources": [source] } })
-    };
-    assert!(durable(&info("$JS.m1.API", Some(OUTBOX_CONSUMER)), &m1));
-    assert!(!durable(&info("$JS.m1.API", None), &m1));
-    assert!(!durable(&info("$JS.m2.API", Some(OUTBOX_CONSUMER)), &m1));
-}
-
-#[test]
 fn the_intake_hears_from_an_outbox_lately_or_not_since_a_while_or_fails() {
     let m1: Machine = "m1".parse().unwrap();
     let info = |source: serde_json::Value| serde_json::json!({ "sources": [source] });
@@ -600,10 +585,8 @@ fn the_attachments_store_takes_the_chunks_of_every_sender_for_one_human_else_eac
 }
 
 /// A hub and a leaf node stopped and started again on their files, the leaf node after the hub's first request for
-/// its outbox, which nobody answers. With uplink credentials from before the outbox's durable consumer, the hub would
-/// wait at least 40 s before asking again, and setting up the outbox again has it ask at once; with renewed ones,
-/// setting it up again moves the intake to the durable consumer, taking nothing twice, and after the next restart the
-/// hub goes on by itself within seconds. The intake goes on after what it took before each restart.
+/// its outbox, which nobody answers: through the outbox's durable consumer, the hub goes on by itself within seconds,
+/// after what it took before the restart, taking nothing twice.
 #[tokio::test]
 async fn an_outbox_goes_on_after_a_restart_at_once_through_its_durable_consumer() {
     let leaf_port = free_port();
@@ -629,12 +612,7 @@ async fn an_outbox_goes_on_after_a_restart_at_once_through_its_durable_consumer(
     bus::ensure_stream(&h_js).await.unwrap();
     let on_m1 = auth::members(&[dev_a.clone(), human.clone()], &[]);
     let leaf_creds = hub.dir().join("leaf-m1.creds");
-    // Uplink credentials from before the durable consumer.
-    let durable = format!("{OUTBOX_STREAM}.{OUTBOX_CONSUMER}");
-    let mut earlier = ants_proto::Permissions::for_leaf(&m1, on_m1.iter().map(|(user, role)| (user, *role)));
-    earlier.subscribe.retain(|s| !s.ends_with(&durable));
-    let earlier = earlier.with_uplink_js_domain(Some(&domain));
-    auth::issue_leaf_with(&team, &m1, earlier, &leaf_creds).unwrap();
+    auth::issue_leaf(&team, &m1, &on_m1, &[], EnrollApprover::Without, Some(&domain), &leaf_creds).unwrap();
     let (server_conf, listen) = (team.join(auth::SERVER_CONF), format!("127.0.0.1:{}", free_port()));
     let uplinks = [format!("nats-leaf://127.0.0.1:{leaf_port}")];
     let mut leaf_node = NatsServer::spawn_with(|dir| {
@@ -654,15 +632,8 @@ async fn an_outbox_goes_on_after_a_restart_at_once_through_its_durable_consumer(
     })
     .unwrap();
     let setup = super::connect(&hub.url, Some(&human_creds), &human, &m1).await.unwrap();
-    let mut through = None;
-    eventually("the leaf reaches the hub", async || {
-        through = admit(&setup, &h_js, &m1, &on_m1).await.ok();
-        through.is_some()
-    })
-    .await;
-    assert_eq!(through, Some(Through::Ephemeral), "the leaf node does not answer for the durable consumer");
+    eventually("the leaf reaches the hub", async || admit(&setup, &h_js, &m1, &on_m1).await.is_ok()).await;
     sourced(&h_js, &m1, SOURCE_WAIT).await.unwrap();
-    assert!(!sourcing(&h_js, &m1, &on_m1).await.unwrap().durable);
     let keep = async |js: &Context, text: &str| {
         let kept = Envelope::new(dev_a.clone(), human.clone(), text);
         let message =
@@ -673,47 +644,19 @@ async fn an_outbox_goes_on_after_a_restart_at_once_through_its_durable_consumer(
     keep(&a_js, "before").await;
     eventually("the intake takes it", async || messages(&h_js, INTAKE_STREAM).await == 1).await;
 
-    let restart = async |hub: &mut NatsServer, leaf_node: &mut NatsServer| {
-        leaf_node.stop();
-        hub.stop();
-        hub.start_again();
-        // The hub asks for the outbox as it starts, before the leaf node is back.
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        leaf_node.start_again();
-        let (h, h_js) = connect(&hub.url, &human, &human_creds).await;
-        let (a, a_js) = connect(&leaf_node.url, &dev_a, &a_creds).await;
-        eventually("the leaf reaches the hub", async || bus::open_stream(&a_js, &dev_a).await.is_ok()).await;
-        (h, h_js, a, a_js)
-    };
-    let (_h, h_js, _a, a_js) = restart(&mut hub, &mut leaf_node).await;
-    keep(&a_js, "after").await;
-    assert_eq!(sourcing(&h_js, &m1, &on_m1).await.unwrap().hearing, Hearing::Silent, "the hub waits");
-    let setup = super::connect(&hub.url, Some(&human_creds), &human, &m1).await.unwrap();
-    assert_eq!(admit(&setup, &h_js, &m1, &on_m1).await.unwrap(), Through::Ephemeral);
-    sourced(&h_js, &m1, SOURCE_WAIT).await.unwrap();
-    eventually("the intake takes what the leaf kept", async || messages(&h_js, INTAKE_STREAM).await == 2).await;
-    eventually("and so does the hub's stream", async || messages(&h_js, STREAM).await == 2).await;
-
-    // Renewed uplink credentials let the hub reach the durable consumer.
     leaf_node.stop();
-    auth::issue_leaf(&team, &m1, &on_m1, &[], EnrollApprover::Without, Some(&domain), &leaf_creds).unwrap();
+    hub.stop();
+    hub.start_again();
+    // The hub asks for the outbox as it starts, before the leaf node is back.
+    tokio::time::sleep(Duration::from_secs(1)).await;
     leaf_node.start_again();
+    let (_h, h_js) = connect(&hub.url, &human, &human_creds).await;
     let (_a, a_js) = connect(&leaf_node.url, &dev_a, &a_creds).await;
     eventually("the leaf reaches the hub", async || bus::open_stream(&a_js, &dev_a).await.is_ok()).await;
-    let setup = super::connect(&hub.url, Some(&human_creds), &human, &m1).await.unwrap();
-    assert_eq!(admit(&setup, &h_js, &m1, &on_m1).await.unwrap(), Through::Durable);
-    sourced(&h_js, &m1, SOURCE_WAIT).await.unwrap();
-    assert!(sourcing(&h_js, &m1, &on_m1).await.unwrap().durable);
-    keep(&a_js, "durable").await;
-    eventually("the intake takes it", async || messages(&h_js, INTAKE_STREAM).await == 3).await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    assert_eq!(messages(&h_js, INTAKE_STREAM).await, 3, "nothing taken twice");
-
-    let (_h, h_js, _a, a_js) = restart(&mut hub, &mut leaf_node).await;
-    keep(&a_js, "after again").await;
+    keep(&a_js, "after").await;
     sourced(&h_js, &m1, Duration::from_secs(15)).await.unwrap();
-    eventually("the intake takes what the leaf kept", async || messages(&h_js, INTAKE_STREAM).await == 4).await;
-    eventually("and so does the hub's stream", async || messages(&h_js, STREAM).await == 4).await;
+    eventually("the intake takes what the leaf kept", async || messages(&h_js, INTAKE_STREAM).await == 2).await;
+    eventually("and so does the hub's stream", async || messages(&h_js, STREAM).await == 2).await;
     tokio::time::sleep(Duration::from_secs(1)).await;
-    assert_eq!(messages(&h_js, INTAKE_STREAM).await, 4, "nothing taken twice");
+    assert_eq!(messages(&h_js, INTAKE_STREAM).await, 2, "nothing taken twice");
 }

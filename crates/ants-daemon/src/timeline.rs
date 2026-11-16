@@ -6,12 +6,11 @@
 //! up the harness or an ack; a failed one is logged and dropped.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use ants_proto::{
     MAX_TIMELINE_CALLS, MAX_TIMELINE_ENTRIES, PlanStep, StatusUpdate, ThreadId, Timeline, TimelineCall, TimelineEntry,
-    UserId, subject,
+    UserId,
 };
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
@@ -155,20 +154,6 @@ fn empty_call(now: DateTime<Utc>) -> TimelineCall {
     }
 }
 
-/// Whether the credentials at `creds` let `ant` store its timeline ([`subject::timeline_from`]); without any, the
-/// server judges. Credentials issued before timelines were stored do not: that is logged once, and none is stored.
-pub fn allowed(creds: Option<&Path>, ant: &UserId) -> bool {
-    let allowed = creds.is_none_or(|path| crate::creds::may_publish(path, &subject::timeline_from(ant)));
-    if !allowed {
-        tracing::warn!(
-            "the credentials of {ant} do not allow storing tool-call timelines on {}: none is stored until they are \
-             renewed (`ants doctor` names how) and the daemon restarted",
-            subject::timeline_from(ant)
-        );
-    }
-    allowed
-}
-
 /// Store `record` in the hub's stream, or out of its reach in the machine's outbox, from a task of its own. A failure
 /// is logged, as a warning the first time.
 pub fn store(js: &jetstream::Context, record: Timeline) {
@@ -189,7 +174,7 @@ pub fn store(js: &jetstream::Context, record: Timeline) {
 
 #[cfg(test)]
 mod tests {
-    use ants_proto::{MAX_TIMELINE_TITLE, MAX_TOOL_PATHS};
+    use ants_proto::{MAX_TIMELINE_TITLE, MAX_TOOL_PATHS, subject};
     use chrono::TimeDelta;
 
     use super::*;

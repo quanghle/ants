@@ -8,7 +8,7 @@
 
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::sync::{Arc, Once, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use ants_daemon::direct_kv::{DirectKv, Lookup};
@@ -39,16 +39,9 @@ pub const KEPT: Duration = ants_daemon::bus::RETENTION;
 /// takes, as nothing needs it.
 const PRUNED_MARKER: Duration = Duration::from_secs(1);
 
-/// The direct get subjects of `key` of `human`'s, which only `human`'s credentials may publish: either the key's own,
-/// as credentials issued before permissions version 3 have it, or that of every key naming the human second.
-fn own_rights(human: &UserId, key: &str) -> [String; 2] {
-    [key.to_owned(), format!("*.{human}")]
-        .map(|k| format!("$JS.API.DIRECT.GET.KV_{THREADS_BUCKET}.$KV.{THREADS_BUCKET}.{k}"))
-}
-
-/// Whether `rights` let `human` read its `key`.
-fn may_read_own(rights: &crate::humans::Rights, human: &UserId, key: &str) -> bool {
-    own_rights(human, key).iter().any(|right| rights.may_publish(right))
+/// The direct get subject of every key naming `human` second, which only `human`'s credentials may publish.
+fn own_right(human: &UserId) -> String {
+    format!("$JS.API.DIRECT.GET.KV_{THREADS_BUCKET}.$KV.{THREADS_BUCKET}.*.{human}")
 }
 
 /// The direct get subject of every title.
@@ -56,28 +49,11 @@ pub fn titles_right() -> String {
     format!("$JS.API.DIRECT.GET.KV_{THREADS_BUCKET}.$KV.{THREADS_BUCKET}.title.*")
 }
 
-/// The direct get subject of every done state, which credentials issued before permissions version 2 lack.
-fn done_right() -> String {
-    format!("$JS.API.DIRECT.GET.KV_{THREADS_BUCKET}.$KV.{THREADS_BUCKET}.done.*")
-}
-
-/// The direct get subject of every TL;DR, which credentials issued before permissions version 2 lack.
-fn summaries_right() -> String {
-    format!("$JS.API.DIRECT.GET.KV_{THREADS_BUCKET}.$KV.{THREADS_BUCKET}.summary.*")
-}
-
-/// The direct get subject of the marks and snoozes `human`'s assistants set for it, which credentials issued before
-/// permissions version 3 lack.
-fn assisted_right(human: &UserId) -> String {
-    format!("$JS.API.DIRECT.GET.KV_{THREADS_BUCKET}.$KV.{THREADS_BUCKET}.*.{human}.*")
-}
-
 /// The titles, TL;DRs, done states and the marks of the CLI's human, unless its credentials are no human's: a request
-/// they deny would only time out. Credentials that may not read done states or TL;DRs leave them out ([`Meta::done`],
-/// [`Meta::summary`]).
+/// they deny would only time out.
 pub async fn open(nats: &crate::Nats<'_>, js: &jetstream::Context) -> Result<Meta> {
     let me = &nats.me.id;
-    if !may_read_own(&nats.rights, me, &marks_key(me)) {
+    if !nats.rights.may_publish(&own_right(me)) {
         bail!(
             "the credentials of {me} may not read thread titles, pins and archives: those of a human may, from \
              `ants auth user NAME --human`"
@@ -87,10 +63,6 @@ pub async fn open(nats: &crate::Nats<'_>, js: &jetstream::Context) -> Result<Met
         Meta::open(js, nats.domain, me).await?.checking(Some(Arc::new(crate::behalf::Checker::new(nats, js))));
     meta.follows = true;
     meta.keyring = Keyring::lazy(nats.creds, ants_daemon::keystore::os(), js).map(Arc::new);
-    meta.done_right = nats.rights.may_publish(&done_right());
-    meta.summaries_right = nats.rights.may_publish(&summaries_right());
-    meta.snoozed_right = may_read_own(&nats.rights, me, &snoozed_key(me));
-    meta.assisted_right = nats.rights.may_publish(&assisted_right(me));
     Ok(meta)
 }
 
@@ -331,14 +303,6 @@ pub async fn last_sequence(js: &jetstream::Context) -> Result<u64> {
 pub struct Meta {
     kv: DirectKv,
     human: UserId,
-    /// Whether its credentials may read and write done states.
-    done_right: bool,
-    /// Whether its credentials may read and write TL;DRs.
-    summaries_right: bool,
-    /// Whether its credentials may read and write its snoozes.
-    snoozed_right: bool,
-    /// Whether its credentials may read and write the marks and snoozes its assistants set for it.
-    assisted_right: bool,
     /// What opens sealed titles; without one, they read `[sealed]`.
     keyring: Option<Arc<Keyring>>,
     /// What checks the marks and snoozes set by an assistant; without one, none counts.
@@ -353,18 +317,7 @@ impl Meta {
     /// Those of `human`, through `js`, made for JetStream domain `js_domain`.
     pub async fn open(js: &jetstream::Context, js_domain: Option<&JsDomain>, human: &UserId) -> Result<Self> {
         let kv = DirectKv::new(js, js_domain, THREADS_BUCKET).await?;
-        Ok(Self {
-            kv,
-            human: human.clone(),
-            done_right: true,
-            summaries_right: true,
-            snoozed_right: true,
-            assisted_right: true,
-            keyring: None,
-            behalf: None,
-            follows: false,
-            following: OnceLock::new(),
-        })
+        Ok(Self { kv, human: human.clone(), keyring: None, behalf: None, follows: false, following: OnceLock::new() })
     }
 
     /// Checking the marks and snoozes set by an assistant with `behalf`, if any, rather than the checker it had: one
@@ -376,26 +329,13 @@ impl Meta {
         }
     }
 
-    /// The assistant acting for the human now, whose marks and snoozes count, if any and if the credentials may read
-    /// them, warned of once per process when they may not.
+    /// The assistant acting for the human now, whose marks and snoozes count, if any.
     async fn assistant(&self) -> Option<UserId> {
-        static WARNED: Once = Once::new();
         let behalf = self.behalf.as_ref()?;
         if self.follows {
             self.following.get_or_init(|| behalf.follow());
         }
-        let assistant = behalf.assistant(&self.human).await?;
-        if !self.assisted_right {
-            WARNED.call_once(|| {
-                tracing::warn!(
-                    "the credentials of {} predate the marks and snoozes of assistants under keys of their own \
-                     (permissions version 3): going on without those of {assistant}; `ants renew` renews them",
-                    self.human
-                );
-            });
-            return None;
-        }
-        Some(assistant)
+        behalf.assistant(&self.human).await
     }
 
     /// Opening sealed titles with `keyring`.
@@ -403,27 +343,8 @@ impl Meta {
         Self { keyring, ..self }
     }
 
-    /// Whether the credentials may read and write TL;DRs; warns once per process when they may not.
-    fn may_summarise(&self) -> bool {
-        static WARNED: Once = Once::new();
-        if !self.summaries_right {
-            WARNED.call_once(|| {
-                tracing::warn!(
-                    "the credentials of {} predate TL;DRs of threads (permissions version 2): going on without \
-                     keeping them; `ants renew` renews them",
-                    self.human
-                );
-            });
-        }
-        self.summaries_right
-    }
-
-    /// The TL;DR of `thread`, if it has one and the credentials may read it. An entry naming another thread than its
-    /// key is none.
+    /// The TL;DR of `thread`, if it has one. An entry naming another thread than its key is none.
     pub async fn summary(&self, thread: &ThreadId) -> Result<Option<ThreadSummary>> {
-        if !self.may_summarise() {
-            return Ok(None);
-        }
         match self.kv.lookup(summary_key(thread)).await.context("reading the TL;DR")? {
             Lookup::NoBucket => bail!(MISSING),
             Lookup::NoValue => Ok(None),
@@ -433,15 +354,11 @@ impl Meta {
         }
     }
 
-    /// Store `summary` as its thread's TL;DR for every human, in place of any it had, if the credentials may. Whether
-    /// it did.
-    pub async fn put_summary(&self, summary: &ThreadSummary) -> Result<bool> {
-        if !self.may_summarise() {
-            return Ok(false);
-        }
+    /// Store `summary` as its thread's TL;DR for every human, in place of any it had.
+    pub async fn put_summary(&self, summary: &ThreadSummary) -> Result<()> {
         let key = summary_key(&summary.thread_id);
         self.kv.put(key, serde_json::to_vec(summary)?).await.context("storing the TL;DR")?;
-        Ok(true)
+        Ok(())
     }
 
     /// The title of `thread`, if it has one, opened if sealed ([`sealed::read_title`]). An entry naming another
@@ -515,27 +432,9 @@ impl Meta {
         Ok(stored.then_some(title))
     }
 
-    /// Whether the credentials may read and write done states; warns once per process when they may not.
-    fn may_done(&self) -> bool {
-        static WARNED: Once = Once::new();
-        if !self.done_right {
-            WARNED.call_once(|| {
-                tracing::warn!(
-                    "the credentials of {} predate done states (permissions version 2): not showing threads done; \
-                     `ants renew` renews them",
-                    self.human
-                );
-            });
-        }
-        self.done_right
-    }
-
-    /// The done state of `thread`, if any, whether or not a message since reopened it ([`ThreadDone::holds`]); none
-    /// when the credentials may not read it. An entry naming another thread than its key is none.
+    /// The done state of `thread`, if any, whether or not a message since reopened it ([`ThreadDone::holds`]). An entry
+    /// naming another thread than its key is none.
     pub async fn done(&self, thread: &ThreadId) -> Result<Option<ThreadDone>> {
-        if !self.may_done() {
-            return Ok(None);
-        }
         match self.kv.lookup(done_key(thread)).await.context("reading the done state")? {
             Lookup::NoBucket => bail!(MISSING),
             Lookup::NoValue => Ok(None),
@@ -550,9 +449,6 @@ impl Meta {
         &self,
         threads: impl IntoIterator<Item = &'a ThreadId>,
     ) -> Result<HashMap<ThreadId, ThreadDone>> {
-        if !self.may_done() {
-            return Ok(HashMap::new());
-        }
         let reads =
             futures::stream::iter(threads).map(async |thread| self.done(thread).await).buffer_unordered(CONCURRENT);
         let read: Vec<Result<Option<ThreadDone>>> = reads.collect().await;
@@ -568,7 +464,6 @@ impl Meta {
     /// Mark `thread` done as the human, as of `after`, the sequence of the last message, channel post or note stored
     /// on it the human saw. Whether that changed anything: a thread done as of `after` or later stays as it is.
     pub async fn set_done(&self, thread: &ThreadId, after: u64) -> Result<bool> {
-        self.require_done()?;
         if self.done(thread).await?.is_some_and(|had| had.holds(after)) {
             return Ok(false);
         }
@@ -580,7 +475,6 @@ impl Meta {
     /// Clear the done state of `thread`, leaving a delete marker lasting [`PRUNED_MARKER`], as no reader needs it: a
     /// state set again meanwhile stays. The state it had, if any, whether or not it still held.
     pub async fn clear_done(&self, thread: &ThreadId) -> Result<Option<ThreadDone>> {
-        self.require_done()?;
         let key = done_key(thread);
         let (found, last) = self.kv.lookup_last(&key).await.context("reading the done state")?;
         let value = match found {
@@ -590,16 +484,6 @@ impl Meta {
         };
         self.kv.delete_expecting(&key, last, Some(PRUNED_MARKER)).await.context("clearing the done state")?;
         Ok(serde_json::from_slice::<ThreadDone>(&value).ok().filter(|d| d.thread_id == *thread))
-    }
-
-    fn require_done(&self) -> Result<()> {
-        if !self.done_right {
-            bail!(
-                "the credentials of {} predate done states (permissions version 2): `ants renew` renews them",
-                self.human
-            );
-        }
-        Ok(())
     }
 
     /// The entry under `key`, `what` it holds, and its stream sequence (0 for none).
@@ -682,12 +566,8 @@ impl Meta {
         let mut shared = 0;
         if titles {
             shared += self.prune_titles(before, &gone).await?;
-            if self.done_right {
-                shared += self.prune_dones(before, &gone).await?;
-            }
-            if self.summaries_right {
-                shared += self.prune_summaries(before, &gone).await?;
-            }
+            shared += self.prune_dones(before, &gone).await?;
+            shared += self.prune_summaries(before, &gone).await?;
         }
         Ok((marked, shared))
     }
@@ -741,20 +621,8 @@ impl Meta {
         Ok(count)
     }
 
-    /// The threads the human snoozed on home, and the stream sequence of their entry (0 for none); none when the
-    /// credentials may not read them, warned of once per process.
+    /// The threads the human snoozed on home, and the stream sequence of their entry (0 for none).
     async fn snoozes_last(&self) -> Result<(ThreadSnoozes, u64)> {
-        static WARNED: Once = Once::new();
-        if !self.snoozed_right {
-            WARNED.call_once(|| {
-                tracing::warn!(
-                    "the credentials of {} predate snoozes on home (permissions version 2): going on without them; \
-                     `ants renew` renews them",
-                    self.human
-                );
-            });
-            return Ok((ThreadSnoozes::default(), 0));
-        }
         self.entry_last(&snoozed_key(&self.human), SNOOZES).await
     }
 
@@ -762,9 +630,6 @@ impl Meta {
     /// threads it has no snooze of its own in force on ([`ThreadSnoozes::with_assisted`]).
     pub async fn snoozes(&self) -> Result<ThreadSnoozes> {
         let snoozes = self.snoozes_last().await?.0;
-        if !self.snoozed_right {
-            return Ok(snoozes);
-        }
         let Some(assistant) = self.assistant().await else { return Ok(snoozes) };
         let assisted = self.entry_last(&assisted_snoozed_key(&self.human, &assistant), SNOOZES).await?.0;
         Ok(snoozes.with_assisted(&assisted, Utc::now()))
@@ -773,12 +638,6 @@ impl Meta {
     /// Change the human's snoozes with `change`, on top of whatever its other devices changed meanwhile, storing them
     /// only if `change` says it changed them. What `change` said.
     pub async fn change_snoozes(&self, change: impl Fn(&mut ThreadSnoozes) -> bool) -> Result<bool> {
-        if !self.snoozed_right {
-            bail!(
-                "the credentials of {} predate snoozes on home (permissions version 2): `ants renew` renews them",
-                self.human
-            );
-        }
         self.change_entry(&snoozed_key(&self.human), SNOOZES, change).await
     }
 
@@ -927,13 +786,6 @@ mod tests {
         assert_eq!(meta.done(thread).await.unwrap(), None, "the stale state is gone though");
         assert!(mark_done(&bob_meta, thread, true, later).await.unwrap());
         assert!(mark_done(&meta, thread, false, later).await.unwrap(), "alice clears bob's");
-
-        let mut old = Meta::open(&js, None, &alice).await.unwrap();
-        old.done_right = false;
-        assert!(mark_done(&bob_meta, thread, true, later).await.unwrap());
-        assert_eq!(old.done(thread).await.unwrap(), None, "credentials without the right see no done state");
-        assert!(old.dones([thread]).await.unwrap().is_empty());
-        assert!(old.set_done(thread, later).await.is_err() && old.clear_done(thread).await.is_err());
     }
 
     #[tokio::test]

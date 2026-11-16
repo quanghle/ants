@@ -1,8 +1,6 @@
 //! The JetStream objects `ants init` sets up on the hub, the `ANTS` stream, the KV buckets and the attachments' store.
 //! [`check`] finds those missing and [`apply`] creates one with this version's configuration; an object already there
-//! is left as it is, except that the stream gains the subjects added since it was created ([`STREAM_SUBJECTS`]), and
-//! the stream and the attachments' store a duplicate window of [`DUPLICATE_WINDOW`] when theirs is shorter, their
-//! messages kept.
+//! is left as it is.
 //!
 //! An object whose stream info the credentials do not get, as the presence and identities buckets for every human's, cannot be
 //! checked: [`init`] creates it all the same, which changes nothing when it exists with the same settings.
@@ -142,39 +140,12 @@ impl Object {
         matches!(self, Self::Roster | Self::Channels | Self::Humans)
     }
 
-    /// The duplicate window its stream configured as `config` should have at least: [`DUPLICATE_WINDOW`] for the
-    /// stream and the attachments' store, whose copies kept in a leaf's outbox may land that late, or their retention
-    /// if shorter, as JetStream allows no window longer than that; None for the rest.
-    fn duplicate_window(self, config: &stream::Config) -> Option<Duration> {
-        if !matches!(self, Self::Stream | Self::Files) {
-            return None;
+    async fn check(self, js: &jetstream::Context) -> Option<Problem> {
+        match js.get_stream(self.stream_name()).await {
+            Ok(_) => None,
+            Err(e) if not_found(&e) => Some(Problem::Missing),
+            Err(e) => Some(Problem::Unchecked(e.to_string())),
         }
-        Some(match config.max_age {
-            Duration::ZERO => DUPLICATE_WINDOW,
-            max_age => DUPLICATE_WINDOW.min(max_age),
-        })
-    }
-
-    async fn check(self, js: &jetstream::Context) -> Vec<Problem> {
-        let stream = match js.get_stream(self.stream_name()).await {
-            Ok(stream) => stream,
-            Err(e) if not_found(&e) => return vec![Problem::Missing],
-            Err(e) => return vec![Problem::Unchecked(e.to_string())],
-        };
-        let config = &stream.cached_info().config;
-        let mut problems = Vec::new();
-        if self == Self::Stream {
-            let missing = uncaptured(&config.subjects);
-            if !missing.is_empty() {
-                problems.push(Problem::Outdated(missing));
-            }
-        }
-        if let Some(wanted) = self.duplicate_window(config)
-            && config.duplicate_window < wanted
-        {
-            problems.push(Problem::ShortWindow { window: config.duplicate_window, wanted });
-        }
-        problems
     }
 
     /// Create the object. A watched bucket's room for [`MAX_CONSUMERS`], which a KV configuration cannot hold, follows
@@ -212,28 +183,6 @@ enum Spec {
     Bucket(Box<kv::Config>),
 }
 
-/// The subjects of [`STREAM_SUBJECTS`] missing from `subjects`.
-fn uncaptured(subjects: &[String]) -> Vec<String> {
-    STREAM_SUBJECTS.iter().filter(|s| !subjects.iter().any(|have| have == *s)).map(|s| (*s).to_owned()).collect()
-}
-
-/// Add the subjects of [`STREAM_SUBJECTS`] the `ANTS` stream lacks, keeping the rest of its configuration.
-async fn capture_all(js: &jetstream::Context) -> Result<()> {
-    let object = Object::Stream;
-    let stream = js.get_stream(STREAM).await.with_context(|| format!("looking up {object}"))?;
-    let mut config = stream.cached_info().config.clone();
-    config.subjects.extend(uncaptured(&config.subjects));
-    js.update_stream(&config).await.map(drop).with_context(|| format!("updating the subjects of {object}"))
-}
-
-/// Give the stream of `object` the duplicate window `wanted`, keeping the rest of its configuration and its messages.
-async fn widen_window(js: &jetstream::Context, object: Object, wanted: Duration) -> Result<()> {
-    let stream = js.get_stream(object.stream_name()).await.with_context(|| format!("looking up {object}"))?;
-    let mut config = stream.cached_info().config.clone();
-    config.duplicate_window = wanted;
-    js.update_stream(&config).await.map(drop).with_context(|| format!("widening the duplicate window of {object}"))
-}
-
 fn not_found(e: &GetStreamError) -> bool {
     matches!(e.kind(), GetStreamErrorKind::JetStream(e) if e.error_code() == ErrorCode::STREAM_NOT_FOUND)
 }
@@ -242,20 +191,11 @@ fn not_found(e: &GetStreamError) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Problem {
     Missing,
-    /// The `ANTS` stream does not capture these subjects, added since it was created.
-    Outdated(Vec<String>),
-    /// The stream drops a message repeating the `Nats-Msg-Id` of one it stored only within `window`, shorter than the
-    /// `wanted` one ([`DUPLICATE_WINDOW`]), as created before that window was set: a copy from a leaf's outbox landing
-    /// later is stored twice.
-    ShortWindow {
-        window: Duration,
-        wanted: Duration,
-    },
     /// Its stream info could not be had, for this reason.
     Unchecked(String),
 }
 
-/// An object [`check`] found missing, outdated or impossible to check.
+/// An object [`check`] found missing or impossible to check.
 #[derive(Debug, Clone)]
 pub struct Finding {
     pub object: Object,
@@ -276,20 +216,13 @@ impl Finding {
                 }
                 rights
             }
-            (Problem::Outdated(_) | Problem::ShortWindow { .. }, _) => vec![format!("$JS.API.STREAM.UPDATE.{name}")],
             (Problem::Unchecked(_), _) => Vec::new(),
         }
     }
 
     /// What [`apply`] did about it, as `created stream ANTS`.
     pub fn fixed(&self) -> String {
-        match &self.problem {
-            Problem::Outdated(subjects) => format!("{} now captures {}", self.object, subjects.join(", ")),
-            Problem::ShortWindow { wanted, .. } => {
-                format!("{} now drops repeated message ids for {}", self.object, ants_proto::duration::format(*wanted))
-            }
-            _ => format!("created {}", self.object),
-        }
+        format!("created {}", self.object)
     }
 }
 
@@ -298,44 +231,35 @@ impl fmt::Display for Finding {
         let object = self.object;
         match &self.problem {
             Problem::Missing => write!(f, "{object} is missing"),
-            Problem::Outdated(subjects) => write!(f, "{object} does not capture {}", subjects.join(", ")),
-            Problem::ShortWindow { window, wanted } => write!(
-                f,
-                "{object} drops repeated message ids for only {}, not {}",
-                ants_proto::duration::format(*window),
-                ants_proto::duration::format(*wanted)
-            ),
             Problem::Unchecked(e) => write!(f, "{object} could not be checked: {e}"),
         }
     }
 }
 
 /// Look up the hub's objects whose stream info `may` says the credentials get (by its JetStream API subject,
-/// [`Object::info_subject`]), all at once: one round trip. Returns the objects missing, outdated or impossible to check,
-/// in the order of [`Object::ALL`], an object outdated in two ways twice.
+/// [`Object::info_subject`]), all at once: one round trip. Returns the objects missing or impossible to check, in the
+/// order of [`Object::ALL`].
 pub async fn check(js: &jetstream::Context, may: impl Fn(&str) -> bool) -> Vec<Finding> {
     let checks = Object::ALL
         .into_iter()
         .filter(|object| may(&object.info_subject()))
-        .map(async |object| object.check(js).await.into_iter().map(move |problem| Finding { object, problem }));
+        .map(async |object| object.check(js).await.map(|problem| Finding { object, problem }));
     futures::future::join_all(checks).await.into_iter().flatten().collect()
 }
 
-/// Fix what `finding` found: create the missing object, add the subjects the stream lacks, or widen a duplicate window.
+/// Fix what `finding` found: create the missing object.
 pub async fn apply(js: &jetstream::Context, finding: &Finding) -> Result<()> {
     let object = finding.object;
     match &finding.problem {
         Problem::Missing => Box::pin(object.create(js)).await,
-        Problem::Outdated(_) => capture_all(js).await,
-        Problem::ShortWindow { wanted, .. } => widen_window(js, object, *wanted).await,
         Problem::Unchecked(e) => bail!("{object} could not be checked: {e}"),
     }
 }
 
-/// `ants init`: check every object, create each one found missing and update each one found outdated, failing at once
-/// when `may` says the credentials may not (by JetStream API subject), as denied requests would only time out. An object whose stream info they do not
-/// get is created all the same, which changes nothing if it is there with the same settings. Returns what it created or
-/// updated among the objects checked.
+/// `ants init`: check every object and create each one found missing, failing at once when `may` says the credentials
+/// may not (by JetStream API subject), as denied requests would only time out. An object whose stream info they do not
+/// get is created all the same, which changes nothing if it is there with the same settings. Returns what it created
+/// among the objects checked.
 pub async fn init(js: &jetstream::Context, may: impl Fn(&str) -> bool) -> Result<Vec<Finding>> {
     for object in Object::ALL.into_iter().filter(|object| !may(&object.info_subject())) {
         let unseen = Finding { object, problem: Problem::Missing };
@@ -347,8 +271,7 @@ pub async fn init(js: &jetstream::Context, may: impl Fn(&str) -> bool) -> Result
     let findings = check(js, &may).await;
     for finding in &findings {
         if let Some(denied) = finding.rights().into_iter().find(|subject| !may(subject)) {
-            let fix = if matches!(finding.problem, Problem::Missing) { "create" } else { "update" };
-            bail!("{finding}, and the credentials may not {fix} it ({denied})");
+            bail!("{finding}, and the credentials may not create it ({denied})");
         }
         apply(js, finding).await?;
     }
@@ -589,8 +512,6 @@ mod tests {
     fn problems(findings: &[Finding]) -> Vec<Object> {
         let missing = |f: &Finding| match &f.problem {
             Problem::Missing => f.object,
-            Problem::Outdated(subjects) => panic!("{subjects:?}"),
-            Problem::ShortWindow { window, .. } => panic!("{window:?}"),
             Problem::Unchecked(e) => panic!("{e}"),
         };
         findings.iter().map(missing).collect()
@@ -663,95 +584,6 @@ mod tests {
         assert_eq!(config.sources.unwrap()[0].name, "OUTBOX", "sources stay");
         let channels = js.get_stream(Object::Channels.stream_name()).await.unwrap().cached_info().config.clone();
         assert_ne!(channels.max_consumers, MAX_CONSUMERS, "not changed");
-    }
-
-    /// A stream created before a subject was added gains it, keeping its sources.
-    #[tokio::test]
-    async fn init_adds_the_subjects_an_older_stream_lacks() {
-        let Some(server) = NatsServer::start() else { return };
-        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
-        js.create_stream(stream::Config {
-            name: "OUTBOX".into(),
-            subjects: vec!["out.>".into()],
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-        let source = stream::Source { name: "OUTBOX".into(), ..Default::default() };
-        let mut old = stream_config();
-        old.subjects.retain(|s| s != subject::ALL_TIMELINE && s != subject::ALL_ADMIN_ORDERS);
-        js.create_stream(stream::Config { sources: Some(vec![source]), ..old }).await.unwrap();
-
-        let found = check(&js, |s| s == Object::Stream.info_subject()).await;
-        let missing = "ants.timeline.>, ants.admin.>";
-        assert_eq!(found[0].to_string(), format!("stream ANTS does not capture {missing}"));
-        let update = "$JS.API.STREAM.UPDATE.ANTS";
-        assert_eq!(found[0].rights(), [update]);
-        let denied = init(&js, |s| s != update).await.unwrap_err();
-        assert_eq!(
-            denied.to_string(),
-            format!("stream ANTS does not capture {missing}, and the credentials may not update it ({update})")
-        );
-        let fixed = init(&js, |_| true).await.unwrap();
-        assert_eq!(fixed[0].fixed(), format!("stream ANTS now captures {missing}"));
-        let config = js.get_stream(STREAM).await.unwrap().cached_info().config.clone();
-        assert!(
-            [subject::ALL_TIMELINE, subject::ALL_ADMIN_ORDERS].iter().all(|a| config.subjects.iter().any(|s| s == a))
-        );
-        assert_eq!(config.sources.unwrap()[0].name, "OUTBOX", "sources stay");
-        assert!(check(&js, |_| true).await.is_empty());
-    }
-
-    /// A store and a stream created with JetStream's default duplicate window of two minutes get a day's, keeping
-    /// what they hold.
-    #[tokio::test]
-    async fn init_widens_a_short_duplicate_window_in_place() {
-        let Some(server) = NatsServer::start() else { return };
-        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
-        let mut old_files = files_config();
-        old_files.duplicate_window = Duration::ZERO;
-        js.create_stream(old_files).await.unwrap();
-        let mut old_stream = stream_config();
-        old_stream.duplicate_window = Duration::ZERO;
-        old_stream.subjects.retain(|s| s != subject::ALL_TIMELINE);
-        js.create_stream(old_stream).await.unwrap();
-        let kept = crate::files::reference("kept.txt", "text/plain", b"kept").unwrap();
-        let handle = ants_proto::AttachmentHandle {
-            from: "alice".parse().unwrap(),
-            scope: ants_proto::AttachmentScope::Inbox("dev-a".parse().unwrap()),
-            id: kept.id,
-        };
-        crate::files::put(&js, &handle, &kept, b"kept").await.unwrap();
-
-        let found = check(&js, |s| s == Object::Stream.info_subject() || s == Object::Files.info_subject()).await;
-        let found: Vec<String> = found.iter().map(Finding::to_string).collect();
-        assert_eq!(
-            found,
-            [
-                "stream ANTS does not capture ants.timeline.>",
-                "stream ANTS drops repeated message ids for only 2m, not 1d",
-                "store ants_files drops repeated message ids for only 2m, not 1d",
-            ]
-        );
-        let update = format!("$JS.API.STREAM.UPDATE.{FILES_STREAM}");
-        let denied = init(&js, |s| s != update).await.unwrap_err().to_string();
-        assert!(denied.ends_with(&format!("and the credentials may not update it ({update})")), "{denied}");
-
-        let fixed = init(&js, |_| true).await.unwrap();
-        let fixed: Vec<String> = fixed.iter().filter(|f| f.object == Object::Files).map(Finding::fixed).collect();
-        assert_eq!(fixed, ["store ants_files now drops repeated message ids for 1d"]);
-        for object in [Object::Stream, Object::Files] {
-            let config = js.get_stream(object.stream_name()).await.unwrap().cached_info().config.clone();
-            assert_eq!(config.duplicate_window, DUPLICATE_WINDOW, "{object}");
-        }
-        let (_, bytes) = crate::files::get(&js, &handle, Some(&kept)).await.unwrap();
-        assert_eq!(bytes, b"kept", "the store keeps what it held");
-        assert!(check(&js, |_| true).await.is_empty());
-
-        let mut longer = files_config();
-        longer.duplicate_window = DUPLICATE_WINDOW * 2;
-        js.update_stream(&longer).await.unwrap();
-        assert!(check(&js, |_| true).await.is_empty(), "a longer window stays");
     }
 
     /// A copy kept in a leaf's outbox can land long after its twin stored directly: the stream drops it for a day.

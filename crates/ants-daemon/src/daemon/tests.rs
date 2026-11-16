@@ -223,7 +223,7 @@ impl Bus {
             behalf: Records::new(self.js.clone(), None, self.account.clone()),
             retry_delay: self.retry_delay,
             progress_every,
-            timeline_every: Some(Duration::from_millis(300)),
+            timeline_every: Duration::from_millis(300),
             sign_in: SignIn::default(),
             sign_in_every: Duration::from_millis(300),
             breaker: Breaker::default(),
@@ -1562,7 +1562,8 @@ async fn a_queued_message_is_listed_and_withdrawn_while_the_running_prompt_goes_
                 (c.id, c_seq, false, 2, human.clone(), t1.clone()),
             ]
         );
-        assert_eq!((listed.delivered, listed.undelivered), (Some(c_seq), Some(0)));
+        let inbox = listed.inbox.expect("the inbox consumer's place");
+        assert_eq!((inbox.delivered, inbox.undelivered), (c_seq, 0));
 
         assert_eq!(withdraw(&bus, &b).await, None, "b is withdrawn");
         assert!(
@@ -1622,7 +1623,6 @@ async fn a_message_awaiting_its_retry_is_listed_ahead_of_its_thread_and_stays_st
         let inbox = listed.inbox.expect("the inbox consumer's place");
         assert_eq!((inbox.delivered, inbox.undelivered, inbox.ack_pending), (b_seq, 0, 2), "{inbox:?}");
         assert!(inbox.acked < a_seq, "{inbox:?}");
-        assert_eq!((listed.delivered, listed.undelivered), (Some(b_seq), Some(0)), "for older readers");
         assert!(listed.posts.is_some(), "the channel consumer's place");
         assert!(matches!(withdraw(&bus, &a).await, Some(MessageMark::Started { .. })), "a started already");
         ctrl_c.add_permits(1);

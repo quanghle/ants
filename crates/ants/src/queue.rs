@@ -302,13 +302,7 @@ async fn waiting(
     for m in &waiting {
         *ahead.entry(m.thread_id.clone()).or_default() += 1;
     }
-    let inbox = place(answers, |a| {
-        a.inbox.or_else(|| {
-            // A daemon older than ConsumerPlace tells only where the inbox consumer delivered up to.
-            let (delivered, undelivered) = (a.delivered?, a.undelivered?);
-            Some(ConsumerPlace { acked: delivered, delivered, undelivered, ack_pending: 0 })
-        })
-    });
+    let inbox = place(answers, |a| a.inbox);
     let posts = place(answers, |a| a.posts);
     let mut wakes = Wakes::new(js, ant).await?;
     let mut found = Vec::new();
@@ -743,12 +737,6 @@ mod tests {
         let (listed, more) = waiting(&js, &kv, &ant, &[answer], 1).await.unwrap();
         assert_eq!(listed.last().map(|m| m.id), Some(woken.id));
         assert_eq!(more, 1, "the later inbox message waits unlisted");
-
-        // A daemon older than ConsumerPlace tells only where its inbox consumer delivered up to.
-        let mut old = QueueRequest::new(ant.clone(), alice.clone()).answer(Vec::new(), Some(inbox), None);
-        (old.inbox, old.posts) = (None, None);
-        let (listed, _) = waiting(&js, &kv, &ant, &[old], 10).await.unwrap();
-        assert_eq!(listed.iter().map(|m| m.id).collect::<Vec<_>>(), [later.id]);
     }
 
     #[tokio::test]

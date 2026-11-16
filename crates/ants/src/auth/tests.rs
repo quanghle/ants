@@ -1613,7 +1613,7 @@ async fn any_human_titles_a_thread_and_keeps_its_tldr_but_each_marks_only_its_ow
         upto: 7,
         tokens: 42,
     };
-    assert!(alice_meta.put_summary(&tldr).await.unwrap());
+    alice_meta.put_summary(&tldr).await.unwrap();
     assert_eq!(bob_meta.summary(&thread).await.unwrap(), Some(tldr), "every human reads the TL;DR");
     assert!(ant.summary(&thread).await.is_err(), "an ant reads no TL;DR");
     assert!(alice_meta.set_done(&thread, 1).await.unwrap());

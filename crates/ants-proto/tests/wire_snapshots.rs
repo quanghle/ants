@@ -277,9 +277,9 @@ fn kv_entries() {
     }
     let reacted = Reacted::new("eyes".parse().unwrap(), vec![user("alice"), user("dev-b")]);
     for (kind, outcome, responder) in [
-        ("listed", ReactionsOutcome::Listed { reactions: vec![reacted] }, Some(ReactionsResponder::Webhook)),
-        ("applied", ReactionsOutcome::Applied { changed: true }, Some(ReactionsResponder::Signer)),
-        ("unknown", ReactionsOutcome::Unknown, None),
+        ("listed", ReactionsOutcome::Listed { reactions: vec![reacted] }, ReactionsResponder::Webhook),
+        ("applied", ReactionsOutcome::Applied { changed: true }, ReactionsResponder::Signer),
+        ("unknown", ReactionsOutcome::Unknown, ReactionsResponder::Signer),
     ] {
         let reply = ReactionsReply { request_id: id(1), ant: user("dev-a"), message: id(2), outcome, responder };
         snap(&format!("reactions_reply_{kind}"), &reply);
@@ -880,15 +880,8 @@ fn cancel_and_queue() {
         redelivery: false,
     };
     snap("queued_message", &queued);
-    let reply = QueueReply {
-        request_id: id(1),
-        ant: user("dev-a"),
-        messages: vec![queued.clone()],
-        delivered: Some(4211),
-        undelivered: Some(3),
-        inbox: None,
-        posts: None,
-    };
+    let reply =
+        QueueReply { request_id: id(1), ant: user("dev-a"), messages: vec![queued.clone()], inbox: None, posts: None };
     snap("queue_reply", &reply);
     let retry = QueuedMessage { channel: None, seq: 4209, running: false, redelivery: true, ..queued };
     let inbox = ConsumerPlace { acked: 4208, delivered: 4211, undelivered: 3, ack_pending: 2 };

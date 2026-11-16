@@ -16,7 +16,5 @@ expression: value
       "running": true,
       "ahead": 0
     }
-  ],
-  "delivered": 4211,
-  "undelivered": 3
+  ]
 }

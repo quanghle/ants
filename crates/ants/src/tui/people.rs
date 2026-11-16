@@ -118,13 +118,7 @@ impl Io {
     /// Reading and sending as `me`, sealing with `sealing`; `may_read` tells whether its credentials may read every
     /// human's presence ([`presence::online_right`]).
     pub fn new(js: jetstream::Context, js_domain: Option<JsDomain>, me: Me, sealing: Sealing, may_read: bool) -> Self {
-        let refused = (!may_read).then(|| {
-            format!(
-                "the credentials of {} predate reading other humans' presence (permissions version 2); `ants renew` \
-                 renews them",
-                me.id
-            )
-        });
+        let refused = (!may_read).then(|| format!("the credentials of {} may not read humans' presence", me.id));
         Self {
             js,
             js_domain,

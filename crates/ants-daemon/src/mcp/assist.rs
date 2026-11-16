@@ -950,7 +950,7 @@ impl Hub {
         let mut held: Vec<QueuedMessage> = answers.iter().flat_map(|a| a.messages.iter().cloned()).collect();
         held.sort_by_key(|m| m.seq);
         held.dedup_by_key(|m| m.seq);
-        Ok((held, answers.iter().filter_map(|a| a.undelivered).max().unwrap_or(0)))
+        Ok((held, answers.iter().filter_map(|a| a.inbox.map(|place| place.undelivered)).max().unwrap_or(0)))
     }
 
     async fn queue_for_human(&self, args: QueueForHuman) -> Result<String, String> {

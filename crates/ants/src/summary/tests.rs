@@ -68,7 +68,7 @@ async fn a_tldr_is_asked_kept_while_current_and_its_thread_left_out() {
     assert_eq!((tldr.text.as_str(), &tldr.by, tldr.tokens), ("The build is fixed.", &p("dev-a"), 42));
 
     let meta = thread_meta::open(&nats, &js).await.unwrap();
-    assert!(meta.put_summary(&tldr).await.unwrap());
+    meta.put_summary(&tldr).await.unwrap();
     let kept = meta.summary(&work.thread_id).await.unwrap().unwrap();
     let (_, now) = tldr_request(&js, &work.thread_id).await.unwrap().unwrap();
     assert!(kept.is_current(now.upto), "no entry since");

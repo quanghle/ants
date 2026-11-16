@@ -148,9 +148,8 @@ pub struct ReactionsReply {
     pub ant: UserId,
     pub message: Uuid,
     pub outcome: ReactionsOutcome,
-    /// The kind of process that answered; absent from the answers of older ones.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub responder: Option<ReactionsResponder>,
+    /// The kind of process that answered.
+    pub responder: ReactionsResponder,
 }
 
 /// The kind of process answering a [`ReactionsRequest`].
@@ -208,7 +207,7 @@ mod tests {
             ant: request.ant.clone(),
             message: request.message,
             outcome: ReactionsOutcome::Unknown,
-            responder: None,
+            responder: ReactionsResponder::Signer,
         };
         assert_eq!(reply.check_subject(&request.reply_subject()), Ok(()));
         assert!(reply.check_subject("_INBOX.dev-b.reactions").is_err());

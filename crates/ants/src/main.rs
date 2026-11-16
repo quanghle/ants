@@ -252,9 +252,7 @@ impl<'a> Nats<'a> {
         let device = humans::device(creds)?;
         let rights = humans::Rights::from_creds(creds)?;
         let account = devices::account_of(creds)?;
-        // Credentials issued before the directory existed may not put in it: asking would only time out.
-        let own_device = devices::Own::from_creds(creds)?
-            .filter(|own| rights.may_publish(&ants_proto::subject::devices_of(&own.human)));
+        let own_device = devices::Own::from_creds(creds)?;
         Ok(Self {
             url,
             creds,
@@ -354,10 +352,10 @@ async fn serve_metrics(
     }
 }
 
-/// Create the hub's stream and buckets that are missing, add the subjects the stream lacks and widen a duplicate window
-/// too short, as `ants init` does ([`hub::check`]), saying what was fixed; an object otherwise stays as it is. Those
-/// the credentials may not fix are reported as needing `ants init`; those whose stream info the credentials do not
-/// get, or that cannot be checked (the hub out of reach), are left alone. Returns what was fixed.
+/// Create the hub's stream and buckets that are missing, as `ants init` does ([`hub::check`]), saying what was created;
+/// an object already there stays as it is. Those the credentials may not create are reported as needing `ants init`;
+/// those whose stream info the credentials do not get, or that cannot be checked (the hub out of reach), are left
+/// alone. Returns what was created.
 async fn create_missing(js: &async_nats::jetstream::Context, rights: &humans::Rights) -> Vec<hub::Finding> {
     let mut created = Vec::new();
     for finding in hub::check(js, |subject| rights.may_publish(subject)).await {

@@ -356,13 +356,8 @@ async fn respond(
     if outcome == ReactionsOutcome::Unknown {
         tracing::debug!(ant = %request.ant, message = %request.message, "reactions asked of a message the ant does not read");
     }
-    let reply = ReactionsReply {
-        request_id: request.id,
-        ant: request.ant,
-        message: request.message,
-        outcome,
-        responder: Some(responder),
-    };
+    let reply =
+        ReactionsReply { request_id: request.id, ant: request.ant, message: request.message, outcome, responder };
     let payload = serde_json::to_vec(&reply).expect("an answer");
     if let Err(e) = client.publish(reply.subject(), payload.into()).await {
         tracing::warn!(error = %e, "answering a reactions request");

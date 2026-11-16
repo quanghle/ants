@@ -3,9 +3,7 @@
 //! marking at the same time each keep the other's marks. `ants channel read` marks the posts it prints, `ants channel
 //! list` counts the unread ones, and `ants chat` does both as its views show them.
 
-use std::sync::Once;
-
-use ants_proto::{ChannelId, ChannelReadMarkers, READ_BUCKET, ReadMarker, UserId, channel_reads_key, subject};
+use ants_proto::{ChannelId, ChannelReadMarkers, ReadMarker, UserId, channel_reads_key};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
 use async_nats::jetstream::kv::{self, Operation, UpdateErrorKind};
@@ -15,30 +13,10 @@ use crate::humans::Me;
 /// How many times a change is tried again after another device moved the markers first.
 const CONFLICTS: usize = 16;
 
-/// The direct get subject of `human`'s channel read markers, which credentials issued before permissions version 2
-/// lack.
-fn right(human: &UserId) -> String {
-    format!("$JS.API.DIRECT.GET.KV_{READ_BUCKET}.{}", subject::channel_reads(human))
-}
-
-/// Whether the credentials of `nats` may read and write their human's channel read markers: a human's issued from
-/// permissions version 2 on, and never an ant's. Warns once per process when a human's may not.
+/// Whether the credentials of `nats` may read and write their human's channel read markers: a human's, never an
+/// ant's.
 pub fn allowed(nats: &crate::Nats<'_>) -> bool {
-    static WARNED: Once = Once::new();
-    if !nats.me.role.is_human() {
-        return false;
-    }
-    let may = nats.rights.may_publish(&right(&nats.me.id));
-    if !may {
-        WARNED.call_once(|| {
-            tracing::warn!(
-                "the credentials of {} predate channel read markers (permissions version 2): not counting or marking \
-                 channel posts read; `ants renew` renews them",
-                nats.me.id
-            );
-        });
-    }
-    may
+    nats.me.role.is_human()
 }
 
 /// A human's channel read markers in the read bucket.
