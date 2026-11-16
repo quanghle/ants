@@ -212,10 +212,10 @@ fn exercise_daemon(custom_tools: bool) {
     assert_eq!(get(&metrics, "/nothing").0, 404);
 
     if !custom_tools {
-        // Steering an ant with no prompt running is an ordinary message on the thread.
-        let steer = run(ants(&["steer", "--wait", "dev-a", &thread, "go", "left"]));
-        let stdout = String::from_utf8_lossy(&steer.stdout);
-        assert!(steer.status.success(), "ants steer: {}", String::from_utf8_lossy(&steer.stderr));
+        // A reply with no prompt running is an ordinary message on the thread.
+        let ask = run(ants(&["ask", "--wait", "--thread", &thread, "@dev-a", "go", "left"]));
+        let stdout = String::from_utf8_lossy(&ask.stdout);
+        assert!(ask.status.success(), "ants ask: {}", String::from_utf8_lossy(&ask.stderr));
         assert!(stdout.starts_with(&format!("thread {thread}\n")), "{stdout}");
         assert!(stdout.contains("dev-a: stub: go left\n"), "{stdout}\ndaemon log:\n{}", daemon_log());
 

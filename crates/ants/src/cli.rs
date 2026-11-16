@@ -60,6 +60,7 @@ pub(crate) enum Command {
     Ask {
         /// Continue an existing thread: its id, a unique start of one, or `last`. The message still prompts only
         /// its recipient (@ant, else the human's assistant or the messenger), not the thread's other ants.
+        /// A human's message interrupts a running prompt on that thread and prompts the same session next.
         #[arg(long, value_name = "THREAD")]
         #[arg(add = ArgValueCandidates::new(completions::threads))]
         thread: Option<thread::Pick>,
@@ -290,25 +291,6 @@ pub(crate) enum Command {
         #[arg(add = ArgValueCandidates::new(completions::threads))]
         thread: thread::Pick,
     },
-    /// Steer ANT on THREAD, as `ants ask --steer --thread THREAD @ANT` does: the prompt ANT runs on the thread is
-    /// cancelled, and the message prompts its session next, ahead of the messages waiting there; with no prompt
-    /// running, the message waits its turn as any other. Needs a human's credentials.
-    Steer {
-        #[arg(add = ArgValueCandidates::new(completions::ants))]
-        ant: UserId,
-        /// The thread: its id, a unique start of one, or `last`.
-        #[arg(add = ArgValueCandidates::new(completions::threads))]
-        thread: thread::Pick,
-        #[command(flatten)]
-        replies: Replies,
-        #[command(flatten)]
-        input: compose::Input,
-        #[command(flatten)]
-        attach: attachments::Attach,
-        /// The message, unless --file or --edit gives it.
-        #[arg(num_args = 1..)]
-        words: Vec<String>,
-    },
     /// List the messages waiting for ANT, oldest first: those its daemon holds, running, waiting their turn on their
     /// thread or held for a sign-in or a provider limit, then those awaiting redelivery (one started in an attempt that
     /// did not end is not withdrawable), then the inbox messages and the channel posts waking ANT still in the stream,
@@ -486,10 +468,6 @@ pub(crate) enum Command {
 /// How `ants ask` sends.
 #[derive(clap::Args, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Sending {
-    /// Steer the ant: a prompt it runs on the thread is cancelled, and the message prompts its session next,
-    /// ahead of the messages waiting there. Needs --thread and a human's credentials.
-    #[arg(long, requires = "thread")]
-    pub(crate) steer: bool,
     /// Send a message from a human to another human in the clear: by default it is sealed so only the two humans'
     /// devices read it.
     #[arg(long)]
@@ -607,17 +585,11 @@ mod tests {
     }
 
     #[test]
-    fn ask_steers_only_a_thread() {
-        assert!(Cli::try_parse_from(["ants", "ask", "--steer", "@dev-a", "go", "left"]).is_err());
-        let cli = Cli::try_parse_from(["ants", "ask", "--steer", "--thread", "last", "@dev-a", "go"]).unwrap();
-        let steering = Sending { steer: true, plaintext: false };
-        assert_matches!(cli.command, Some(Command::Ask { sending, thread: Some(thread::Pick::Last), .. }) if sending == steering);
+    fn ask_on_a_thread_needs_no_steering_command() {
         let cli = Cli::try_parse_from(["ants", "ask", "--thread", "last", "@dev-a", "go"]).unwrap();
-        assert_matches!(cli.command, Some(Command::Ask { sending: Sending { steer: false, .. }, .. }));
-        let cli = Cli::try_parse_from(["ants", "steer", "dev-a", "last", "go", "left", "--wait"]).unwrap();
-        assert_matches!(cli.command, Some(Command::Steer { ant, thread: thread::Pick::Last, replies, words, .. })
-            if ant.as_str() == "dev-a" && replies.wait && words == ["go", "left"]);
-        assert!(Cli::try_parse_from(["ants", "steer", "dev-a", "--edit"]).is_err(), "no thread");
+        assert_matches!(cli.command, Some(Command::Ask { thread: Some(thread::Pick::Last), .. }));
+        assert!(Cli::try_parse_from(["ants", "ask", "--steer", "--thread", "last", "@dev-a", "go"]).is_err());
+        assert!(Cli::try_parse_from(["ants", "steer", "dev-a", "last", "go"]).is_err());
     }
 
     #[test]

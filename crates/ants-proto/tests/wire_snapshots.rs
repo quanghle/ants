@@ -134,7 +134,6 @@ fn envelope() -> Envelope {
             free_text: false,
         }),
         answer: Some(Answer { question: id(4), option: Some(2) }),
-        steer: true,
         attachments: vec![attachment()],
         sealed: Some(Box::new(sealed())),
         sent_at: at(0),
@@ -158,7 +157,6 @@ fn plain_envelope() -> Envelope {
         summary: None,
         question: None,
         answer: None,
-        steer: false,
         attachments: Vec::new(),
         sealed: None,
         ..envelope()
@@ -390,7 +388,6 @@ fn envelopes() {
             ..message.clone()
         },
     );
-    snap("envelope_steer", &Envelope { owner: Some(user("alice")), steer: true, ..message.clone() });
     snap(
         "envelope_mention_notice",
         &Envelope { from: user("dev-b"), to: user("alice"), mention: Some(mention()), ..message.clone() },

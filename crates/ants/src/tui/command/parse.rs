@@ -15,7 +15,6 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("reject", "[ID]", "refuse a tool request"),
     ("grant", "[TEXT]", "fresh turns for the stuck ant"),
     ("cancel", "", "stop the prompt an ant runs"),
-    ("steer", "TEXT", "redirect the ant at work"),
     ("answer", "N|TEXT", "answer the question asked"),
     ("done", "", "mark the thread done"),
     ("undone", "", "mark the thread not done"),
@@ -71,7 +70,6 @@ pub enum Slash {
     },
     Grant(Option<String>),
     Cancel,
-    Steer(String),
     Answer(Choice),
     Done(bool),
     Mark(Marking),
@@ -170,7 +168,6 @@ fn slash(text: &str) -> Result<Slash, String> {
         }
         "grant" => Ok(Slash::Grant(optional())),
         "cancel" => bare(Slash::Cancel),
-        "steer" => text().map(Slash::Steer),
         "answer" => text().map(|answer| Slash::Answer(Choice::parse(&answer))),
         "done" => bare(Slash::Done(true)),
         "undone" => bare(Slash::Done(false)),
@@ -259,7 +256,7 @@ mod tests {
         assert_eq!(ok("/snooze 2d"), Slash::Snooze(TimeDelta::days(2)));
         assert_eq!(ok("/unsnooze"), Slash::Unsnooze);
         assert_eq!(parse("/snooze 8d").unwrap_err(), "too long: at most 7d");
-        assert_eq!(parse("/steer").unwrap_err(), "usage: /steer TEXT");
+        assert!(parse("/steer left").unwrap_err().starts_with("no command"));
         assert_eq!(parse("/done now").unwrap_err(), "usage: /done");
         assert_eq!(parse("/approve a b").unwrap_err(), "usage: /approve [ID] [--always]");
         assert_eq!(parse("/frobnicate").unwrap_err(), "no command /frobnicate");

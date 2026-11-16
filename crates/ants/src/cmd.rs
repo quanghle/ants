@@ -5,7 +5,7 @@
 //!
 //! - in `cmd/NAME.rs` for `ants NAME`, which holds the clap enum of its subcommands, if it has some, and the
 //!   handler: what turns the arguments into calls, connects and prints. `cmd/send.rs` serves the commands that
-//!   send (`ask`, `post`, `steer`, `notes`, `react`, `answer`). A module only one command uses lives in `cmd/`
+//!   send (`ask`, `post`, `notes`, `react`, `answer`). A module only one command uses lives in `cmd/`
 //!   whole (`cmd/setup.rs`, `cmd/webhook/add.rs`);
 //! - or in a top-level module, when one function there is the whole command (`colony::show`).
 //!
@@ -88,9 +88,6 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         Command::Status { tmux, json } => Box::pin(tui::status(&nats()?, tmux, json)).await,
         Command::Dash { since } => Box::pin(dash::run(&nats()?, since)).await,
         Command::Cancel { ant, thread } => cancel::cancel(&nats()?, ant, thread).await,
-        Command::Steer { ant, thread, replies, input, attach, words } => {
-            Box::pin(send::steer(&nats()?, &ant, thread, &replies, &input, &attach, words)).await
-        }
         Command::Queue { ant, json } => queue::list(&nats()?, ant, json).await,
         Command::Withdraw { ant, message } => queue::withdraw(&nats()?, ant, message).await,
         Command::Init { identities_restored } => init::run(&nats()?, identities_restored).await,

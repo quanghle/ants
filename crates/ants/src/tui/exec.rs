@@ -50,12 +50,11 @@ impl Ctx {
 /// What the bar asks to be done.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Job {
-    /// Send `text` to `to` as `ants ask` does, on `thread` or a new one; with `steer` steering the ant.
+    /// Send `text` to `to` as `ants ask` does, on `thread` or a new one.
     Ask {
         to: UserId,
         thread: Option<ThreadId>,
         text: String,
-        steer: bool,
     },
     /// Send `text`, which names no one, on a new thread as `ants ask` does: to the human's assistant, else the
     /// messenger ([`send::unaddressed`]).
@@ -73,7 +72,6 @@ pub enum Job {
     Reply {
         thread: ThreadId,
         text: String,
-        steer: bool,
     },
     /// Send `text` to the ant stuck on `thread` ([`stuck`]), which the human's message gives fresh turns.
     Grant {
@@ -207,13 +205,13 @@ impl Job {
             job => (job, Rc::from([])),
         };
         match job {
-            Self::Ask { to, thread, text, steer } => ask(ctx, to.into(), thread, text, steer, &files).await,
+            Self::Ask { to, thread, text } => ask(ctx, to.into(), thread, text, &files).await,
             Self::Unaddressed { text } => {
                 let to = send::unaddressed(&ctx.js, &ctx.me, ctx.account.as_deref()).await;
-                ask(ctx, to, None, text, false, &files).await
+                ask(ctx, to, None, text, &files).await
             }
             Self::Post { channel, thread, text } => post(ctx, channel, thread, text, &files).await,
-            Self::Reply { thread, text, steer } => {
+            Self::Reply { thread, text } => {
                 let entries = thread::history(&ctx.js, &thread, None, thread::Activity::None, None).await?;
                 let humans = humans::load(&ctx.js, &ctx.me).await;
                 let human = |u: &UserId| humans.contains(u);
@@ -222,12 +220,12 @@ impl Job {
                     Some(to) => to.into(),
                     None => send::unaddressed(&ctx.js, &ctx.me, ctx.account.as_deref()).await,
                 };
-                ask(ctx, to, Some(thread), text, steer, &files).await
+                ask(ctx, to, Some(thread), text, &files).await
             }
             Self::Grant { thread, text } => {
                 let entries = thread::history(&ctx.js, &thread, None, thread::Activity::None, None).await?;
                 let ant = stuck(&entries).ok_or_else(|| anyhow!("no ant is stuck on thread {thread}"))?;
-                ask(ctx, ant.into(), Some(thread), text, false, &files).await
+                ask(ctx, ant.into(), Some(thread), text, &files).await
             }
             Self::Restart { ant, now } => {
                 let admin = ctx.admin.as_ref().map_err(|e| anyhow!("{e}"))?;
@@ -316,18 +314,10 @@ fn outbox(stored: bus::Stored) -> Vec<String> {
 
 /// Send `text` to `to` on `thread`, or a new one, as `ants ask` does, with the warnings it prints for an ant no daemon
 /// serves now; `files` go with it, stored before it as `ants ask --attach` stores them.
-async fn ask(
-    ctx: &Ctx,
-    to: send::Recipient,
-    thread: Option<ThreadId>,
-    text: String,
-    steer: bool,
-    files: &[File],
-) -> Result<Done> {
+async fn ask(ctx: &Ctx, to: send::Recipient, thread: Option<ThreadId>, text: String, files: &[File]) -> Result<Done> {
     let new = thread.is_none();
     let mut envelope = send::ask_envelope(&ctx.me, thread, to.to.clone(), text);
     envelope.attachments = attachments::references(files);
-    let mut envelope = if steer { envelope.steering() } else { envelope };
     // Sealed to a human, what is stored is each file's ciphertext.
     let mut stored = files.to_vec();
     send::seal_to_human(&ctx.js, &ctx.me, &ctx.sealing, &mut envelope, &mut stored).await?;
@@ -335,9 +325,8 @@ async fn ask(
     attachments::store(&ctx.js, &stored, |id| envelope.attachment_handle(id)).await?;
     let stored = send::deliver(&ctx.js, ctx.domain.as_ref(), &envelope).await?;
     warnings.extend(outbox(stored));
-    let verb = if steer { "steered" } else { "sent to" };
     Ok(Done {
-        line: format!("{verb} {to} on thread {}{}", envelope.thread_id, with(files)),
+        line: format!("sent to {to} on thread {}{}", envelope.thread_id, with(files)),
         warnings,
         open: new.then_some(envelope.thread_id),
     })
@@ -475,9 +464,9 @@ mod tests {
         std::fs::write(&source, b"soup").unwrap();
         let files: Rc<[File]> = attachments::read_all(std::slice::from_ref(&source)).unwrap().into();
 
-        let ask = Job::Ask { to: bob.clone(), thread: None, text: "lunch?".into(), steer: false };
+        let ask = Job::Ask { to: bob.clone(), thread: None, text: "lunch?".into() };
         let thread = Box::pin(ask.run(&ctx)).await.unwrap().open.unwrap();
-        let reply = Job::Reply { thread: thread.clone(), text: "at noon".into(), steer: false };
+        let reply = Job::Reply { thread: thread.clone(), text: "at noon".into() };
         let reply = Job::Attached { job: Box::new(reply), files };
         let line = Box::pin(reply.run(&ctx)).await.unwrap().line;
         assert_eq!(line, format!("sent to bob on thread {thread} with 1 file"));
@@ -550,7 +539,7 @@ mod tests {
         let meta = Err("unused".into());
         let admin = Err("unused".into());
         let ctx = Ctx { client, js: js.clone(), me, domain: None, meta, sealing, account: None, keyring: None, admin };
-        let ask = Job::Ask { to: user("dev-a"), thread: None, text: "see the plan".into(), steer: false };
+        let ask = Job::Ask { to: user("dev-a"), thread: None, text: "see the plan".into() };
         let done = Job::Attached { job: Box::new(ask), files: Rc::clone(&files) }.run(&ctx).await.unwrap();
         assert!(
             done.line.starts_with("sent to dev-a on thread ") && done.line.ends_with(" with 1 file"),

@@ -926,7 +926,7 @@ struct Incoming {
     /// The channel the answer goes to instead of the sender's inbox: that of the thread, when the message is the
     /// escalation leader's reply that renewed it ([`Inbox::arrived`]).
     resume: Option<ChannelId>,
-    /// How a human's steer ([`Envelope::steer`]) placed the message on its thread.
+    /// How a human's message interrupted its thread.
     steered: Steered,
 }
 

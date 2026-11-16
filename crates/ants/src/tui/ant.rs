@@ -90,7 +90,7 @@ pub struct Page {
 }
 
 impl Page {
-    pub const THREADS_KEYS: &str = "↑↓ thread · Enter open · s steer · x cancel · z snooze · S TL;DR · ←→ pane · \
+    pub const THREADS_KEYS: &str = "↑↓ thread · Enter open · x cancel · z snooze · S TL;DR · ←→ pane · \
          a ask · w work · r restart · p (un)pause · X retire · Esc back";
     pub const QUEUE_KEYS: &str =
         "↑↓ message · Enter open its thread · ←→ pane · a ask · w work · r restart · p (un)pause · X retire · Esc back";

@@ -106,7 +106,7 @@ impl Model {
     fn command(&mut self, command: Command, now: DateTime<Utc>) -> Result<Option<Action>, String> {
         let run = |job| Ok(Some(Action::Run(job, String::new())));
         let slash = match command {
-            Command::Ask { to, text } => return run(Job::Ask { to, thread: None, text, steer: false }),
+            Command::Ask { to, text } => return run(Job::Ask { to, thread: None, text }),
             Command::Post { channel, text } => return run(Job::Post { channel, thread: None, text }),
             Command::Say(text) => return run(self.say(text)),
             Command::Slash(slash) => slash,
@@ -127,13 +127,6 @@ impl Model {
                     return Err(format!("no ant is at work on thread {thread}"));
                 }
                 run(Job::Cancel { thread, ants })
-            }
-            Slash::Steer(text) => {
-                let thread = self.target()?;
-                match self.busy(&thread).into_iter().next() {
-                    Some(to) => run(Job::Ask { to, thread: Some(thread), text, steer: true }),
-                    None => run(Job::Reply { thread, text, steer: true }),
-                }
             }
             Slash::Answer(choice) => run(Job::Answer { thread: self.target()?, choice }),
             Slash::Done(done) => run(Job::Done { thread: self.target()?, done }),
@@ -204,8 +197,8 @@ impl Model {
             return Job::Post { channel, thread, text };
         }
         match self.page() {
-            Page::Thread(page) => Job::Reply { thread: page.history.thread.clone(), text, steer: false },
-            Page::Dm(page) => Job::Ask { to: page.with.clone(), thread: None, text, steer: false },
+            Page::Thread(page) => Job::Reply { thread: page.history.thread.clone(), text },
+            Page::Dm(page) => Job::Ask { to: page.with.clone(), thread: None, text },
             _ => Job::Unaddressed { text },
         }
     }
@@ -372,7 +365,7 @@ mod tests {
         assert!(m.bar.focused && m.bar.text() == "@");
         typed(&mut m, "dev-a deploy");
         let action = m.key(Key::Enter, at(0));
-        let job = Job::Ask { to: user("dev-a"), thread: None, text: "deploy".into(), steer: false };
+        let job = Job::Ask { to: user("dev-a"), thread: None, text: "deploy".into() };
         assert_eq!(action, Some(Action::Run(job, "@dev-a deploy".into())));
         assert!(m.bar.focused && m.bar.is_empty(), "the bar stays for the next message");
         assert_eq!(m.bar.status.as_ref().map(|s| s.tone), Some(Tone::Busy));
@@ -392,7 +385,7 @@ mod tests {
         assert_eq!(m.key(Key::Enter, at(0)), Some(Action::Run(job, "who owns billing?".into())));
         m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
         typed(&mut m, "go on");
-        let reply = Job::Reply { thread: thread.clone(), text: "go on".into(), steer: false };
+        let reply = Job::Reply { thread: thread.clone(), text: "go on".into() };
         assert_eq!(m.key(Key::Enter, at(0)), Some(Action::Run(reply, "go on".into())));
         let mut post = message(1, &thread, "dev-a", "ops", "hi");
         (post.kind, post.channel) = (crate::thread::Kind::Post, Some("ops".parse().unwrap()));
@@ -422,7 +415,7 @@ mod tests {
         m.key(Key::Ctrl('k'), at(0));
         typed(&mut m, "n");
         assert_eq!(m.bar.text(), "n", "the focused bar takes the keys of the DM");
-        let job = Job::Ask { to: user("bob"), thread: None, text: "n".into(), steer: false };
+        let job = Job::Ask { to: user("bob"), thread: None, text: "n".into() };
         assert_eq!(m.key(Key::Enter, at(0)), Some(Action::Run(job, "n".into())));
     }
 
@@ -449,8 +442,6 @@ mod tests {
         m.take(live::Event::Status(working), at(2));
         let cancel = Job::Cancel { thread: thread.clone(), ants: vec![user("dev-a")] };
         assert_eq!(run(&mut m, "/cancel"), Some(Action::Run(cancel, "/cancel".into())));
-        let steer = Job::Ask { to: user("dev-a"), thread: Some(thread.clone()), text: "left".into(), steer: true };
-        assert_eq!(run(&mut m, "/steer left"), Some(Action::Run(steer, "/steer left".into())));
         let grant = Job::Grant { thread: thread.clone(), text: GRANT.into() };
         assert_eq!(run(&mut m, "/grant"), Some(Action::Run(grant, "/grant".into())));
         let snooze = Change::Snooze(Some(at(2 * 3600)));
@@ -588,7 +579,7 @@ mod tests {
 
         typed(&mut m, "@dev-a read this");
         let Some(Action::Run(Job::Attached { job, files }, text)) = m.key(Key::Enter, at(0)) else { panic!() };
-        assert_eq!(*job, Job::Ask { to: user("dev-a"), thread: None, text: "read this".into(), steer: false });
+        assert_eq!(*job, Job::Ask { to: user("dev-a"), thread: None, text: "read this".into() });
         assert_eq!((files.len(), text.as_str()), (1, "@dev-a read this"));
         assert_eq!(m.bar.status.as_ref().unwrap().text, "sending with 1 file…");
         assert!(m.bar.staged.names().is_empty(), "the files go with one message");

@@ -242,11 +242,10 @@ impl Inbox<'_> {
         Some(thread)
     }
 
-    /// How the message in `incoming` steers `thread`, holding `t`, if it does: a human's steer to the ant while a prompt
-    /// runs there ([`Envelope::steer`]), which it cancels unless a steer waiting already did.
+    /// A human's message interrupts the prompt on its thread, unless an earlier human message already did.
     fn steer(&self, incoming: &Incoming, thread: &ThreadId, t: &Thread) -> Option<Steered> {
         let envelope = &incoming.envelope;
-        if !envelope.steer || incoming.post.is_some() || !self.humans.sender_role(envelope).is_human() || !t.busy {
+        if !self.humans.sender_role(envelope).is_human() || !t.busy {
             return None;
         }
         if t.waiting.front().is_some_and(|(waiting, _)| waiting.steered != Steered::No) {

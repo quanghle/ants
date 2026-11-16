@@ -1,4 +1,4 @@
-//! `ants ask`, `ants steer`, `ants post`, `ants notes`, `ants react` and `ants answer`: what the CLI's human sends.
+//! `ants ask`, `ants post`, `ants notes`, `ants react` and `ants answer`: what the CLI's human sends.
 
 use ants_daemon::reading::Reading;
 use ants_daemon::{bus, notes, owners, questions, reactions};
@@ -72,33 +72,15 @@ async fn addressee(js: &jetstream::Context, nats: &Nats<'_>, to: Option<UserId>)
     }
 }
 
-/// `ants steer ANT THREAD`: `ants ask --steer --thread THREAD @ANT`.
-pub(crate) async fn steer(
-    nats: &Nats<'_>,
-    ant: &UserId,
-    thread: thread::Pick,
-    replies: &Replies,
-    input: &compose::Input,
-    attach: &attachments::Attach,
-    words: Vec<String>,
-) -> Result<()> {
-    let words = std::iter::once(format!("@{ant}")).chain(words).collect();
-    let sending = Sending { steer: true, plaintext: false };
-    Box::pin(ask(nats, Some(thread), sending, replies, input, attach, words)).await
-}
-
 pub(crate) async fn ask(
     nats: &Nats<'_>,
     thread: Option<thread::Pick>,
-    Sending { steer, plaintext }: Sending,
+    Sending { plaintext }: Sending,
     replies: &Replies,
     input: &compose::Input,
     attach: &attachments::Attach,
     words: Vec<String>,
 ) -> Result<()> {
-    if steer && !nats.me.role.is_human() {
-        bail!("the credentials of {} are an ant's; only a human steers an ant", nats.me.id);
-    }
     // Refuse a message with nothing to send, or a file that cannot be attached, before connecting.
     let (to, text) = recipient(words, input)?;
     let mut files = attach.read()?;
@@ -107,7 +89,6 @@ pub(crate) async fn ask(
     let (to, unaddressed) = addressee(&js, nats, to).await;
     let mut envelope = ask_envelope(&nats.me, thread, to, text);
     envelope.attachments = attachments::references(&files);
-    let mut envelope = if steer { envelope.steering() } else { envelope };
     let to_human = nats.me.role.is_human() && humans::load(&js, &nats.me).await.contains(&envelope.to);
     let text = envelope.text.clone();
     let sealer = sealing(nats, &js, &mut envelope, &mut files, to_human && !plaintext).await?;

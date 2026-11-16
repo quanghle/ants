@@ -4,12 +4,13 @@ use super::*;
 
 #[tokio::test]
 async fn a_failed_message_is_retried_before_the_rest_of_its_thread() {
-    let Some((bus, mut replies)) = Bus::start().await else { return };
+    let Some((bus, _)) = Bus::start().await else { return };
+    let mut replies = bus.replies().await;
     let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
     bus.send(&t1, "flaky a").await;
-    bus.send(&t1, "b").await;
+    bus.send_ant(&t1, "b").await;
 
     let ctrl_c = Arc::new(Semaphore::new(0));
     let check = async {
@@ -38,13 +39,14 @@ const WITHDRAWN: &str = "[ants] Withdrawn by human before dev-a was prompted wit
 #[tokio::test]
 async fn a_queued_message_is_listed_and_withdrawn_while_the_running_prompt_goes_on() {
     use ants_proto::MessageMark;
-    let Some((bus, mut replies)) = Bus::start().await else { return };
+    let Some((bus, _)) = Bus::start().await else { return };
+    let mut replies = bus.replies().await;
     let (launch, log, gate) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
     let (a, a_seq) = bus.send(&t1, "hold a").await;
-    let (b, b_seq) = bus.send(&t1, "b").await;
-    let (c, c_seq) = bus.send(&t1, "c").await;
+    let (b, b_seq) = bus.send_ant(&t1, "b").await;
+    let (c, c_seq) = bus.send_ant(&t1, "c").await;
 
     let ctrl_c = Arc::new(Semaphore::new(0));
     let check = async {
@@ -65,8 +67,8 @@ async fn a_queued_message_is_listed_and_withdrawn_while_the_running_prompt_goes_
             listed.messages.iter().map(at).collect::<Vec<_>>(),
             [
                 (a.id, a_seq, true, 0, human.clone(), t1.clone()),
-                (b.id, b_seq, false, 1, human.clone(), t1.clone()),
-                (c.id, c_seq, false, 2, human.clone(), t1.clone()),
+                (b.id, b_seq, false, 1, b.from.clone(), t1.clone()),
+                (c.id, c_seq, false, 2, c.from.clone(), t1.clone()),
             ]
         );
         let inbox = listed.inbox.expect("the inbox consumer's place");
@@ -98,14 +100,15 @@ async fn a_queued_message_is_listed_and_withdrawn_while_the_running_prompt_goes_
 #[tokio::test]
 async fn a_message_awaiting_its_retry_is_listed_ahead_of_its_thread_and_withdrawn_before_it() {
     use ants_proto::MessageMark;
-    let Some((mut bus, mut replies)) = Bus::start().await else { return };
+    let Some((mut bus, _)) = Bus::start().await else { return };
+    let mut replies = bus.replies().await;
     // Long enough for the listing to find the message between its attempts.
     bus.retry_delay = Duration::from_secs(3);
     let (launch, log, gate) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
     let (a, a_seq) = bus.send(&t1, "doomed a").await;
-    let (b, b_seq) = bus.send(&t1, "b").await;
+    let (b, b_seq) = bus.send_ant(&t1, "b").await;
 
     let ctrl_c = Arc::new(Semaphore::new(0));
     let check = async {

@@ -125,6 +125,16 @@ impl Bus {
         self.send_from(UserId::human(), thread, text).await
     }
 
+    async fn send_ant(&self, thread: &ThreadId, text: &str) -> (Envelope, u64) {
+        self.send_from("dev-b".parse().unwrap(), thread, text).await
+    }
+
+    async fn replies(&self) -> async_nats::Subscriber {
+        let replies = self.client.subscribe(subject::inbox_from(&self.dev)).await.unwrap();
+        self.client.flush().await.unwrap();
+        replies
+    }
+
     async fn send_from(&self, from: UserId, thread: &ThreadId, text: &str) -> (Envelope, u64) {
         let envelope = Envelope::on_thread(thread.clone(), from, self.dev.clone(), text);
         let seq = bus::publish_json(&self.js, envelope.subject(), &envelope, None).await.unwrap();

@@ -1,7 +1,5 @@
-//! Steering and cancelling from the thread and work views: `s` opens the command bar on `/steer` for the ant at work
-//! on the thread, and `x` or Ctrl-X cancels the prompt running there as `ants cancel` does, each asking for `y` first
-//! while an ant on the thread runs a tool call. The bar's status line then tells whether a prompt was interrupted or
-//! none was running.
+//! Cancelling from the thread and work views: `x` or Ctrl-X cancels the prompt running there as `ants cancel` does,
+//! asking for `y` first while an ant on the thread runs a tool call.
 
 use ants_proto::{ThreadId, UserId};
 use ratatui::style::{Color, Style};
@@ -11,16 +9,9 @@ use super::command::Tone;
 use super::exec::Job;
 use super::model::{Action, Key, Model};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Intent {
-    Steer,
-    Cancel,
-}
-
-/// A steer or cancel waiting for `y` while an ant runs a tool call.
+/// A cancel waiting for `y` while an ant runs a tool call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Confirm {
-    intent: Intent,
     thread: ThreadId,
     ant: UserId,
     tool: String,
@@ -29,58 +20,41 @@ pub struct Confirm {
 impl Confirm {
     /// The footer asking for `y`.
     pub fn line(&self) -> Line<'static> {
-        let what = match self.intent {
-            Intent::Steer => "y opens /steer anyway, any other key does not",
-            Intent::Cancel => "y cancels the prompt, any other key keeps it running",
-        };
+        let what = "y cancels the prompt, any other key keeps it running";
         let text = format!(" {} is running a tool call, {}: {what}", self.ant, self.tool);
         Line::styled(text, Style::new().fg(Color::Yellow))
     }
 }
 
 impl Model {
-    /// Steer or cancel the prompt running on `thread`: at once, unless an ant there runs a tool call, then once `y`
-    /// confirms.
-    pub fn interrupt(&mut self, intent: Intent, thread: ThreadId) -> Option<Action> {
+    /// Cancel the prompt running on `thread`, asking for `y` first while an ant there runs a tool call.
+    pub fn interrupt(&mut self, thread: ThreadId) -> Option<Action> {
         let progress = self.data.live.progress.get(&thread);
         let tool = progress.and_then(|p| p.status.tools().next().map(|(ant, tool)| (ant.clone(), tool.to_owned())));
         if let Some((ant, tool)) = tool {
-            self.interrupting = Some(Confirm { intent, thread, ant, tool });
+            self.interrupting = Some(Confirm { thread, ant, tool });
             return None;
         }
-        self.interrupted(intent, thread)
+        self.interrupted(thread)
     }
 
-    /// Take `key` while a steer or cancel waits for `y`.
+    /// Take `key` while a cancel waits for `y`.
     pub fn confirm_key(&mut self, key: Key) -> Option<Action> {
         let confirm = self.interrupting.take()?;
         if key != Key::Char('y') {
             return None;
         }
-        self.interrupted(confirm.intent, confirm.thread)
+        self.interrupted(confirm.thread)
     }
 
-    fn interrupted(&mut self, intent: Intent, thread: ThreadId) -> Option<Action> {
-        match intent {
-            Intent::Steer => {
-                let draft = self.bar.text();
-                if !draft.starts_with("/steer ") {
-                    let text = if draft.starts_with('/') { String::new() } else { draft };
-                    self.bar.set_text(&format!("/steer {text}"));
-                }
-                self.bar.focused = true;
-                None
-            }
-            Intent::Cancel => {
-                let ants = self.running(&thread);
-                if ants.is_empty() {
-                    self.bar.set_status(format!("no ant runs a prompt on thread {thread}"), Tone::Error);
-                    return None;
-                }
-                self.bar.set_status("cancelling…", Tone::Busy);
-                Some(Action::Run(Job::Cancel { thread, ants }, String::new()))
-            }
+    fn interrupted(&mut self, thread: ThreadId) -> Option<Action> {
+        let ants = self.running(&thread);
+        if ants.is_empty() {
+            self.bar.set_status(format!("no ant runs a prompt on thread {thread}"), Tone::Error);
+            return None;
         }
+        self.bar.set_status("cancelling…", Tone::Busy);
+        Some(Action::Run(Job::Cancel { thread, ants }, String::new()))
     }
 
     /// The ants to ask to cancel their prompt on `thread`: those at work there, else every ant on it, as the
@@ -104,8 +78,8 @@ mod tests {
     use crate::live;
     use crate::live::tests::{at, message, user};
     use crate::tui::exec::Outcome;
+    use crate::tui::model::Focus;
     use crate::tui::model::tests::model;
-    use crate::tui::model::{Focus, Page};
     use crate::tui::nav;
     use crate::tui::timeline::tests::tool;
 
@@ -147,27 +121,5 @@ mod tests {
             Some(format!("dev-b has no prompt running on thread {thread}"))
         );
         assert!(!m.bar.focused && m.bar.is_empty(), "the bar stays as it was");
-    }
-
-    #[test]
-    fn s_opens_the_bar_on_steer_once_confirmed_while_a_tool_call_runs() {
-        let thread = ThreadId::generate();
-        let mut m = model();
-        m.select(nav::Item::Work(None));
-        m.focus = Focus::View;
-        m.stored(vec![message(1, &thread, "alice", "dev-a", "deploy")], at(1));
-        m.key(Key::Enter, at(1));
-        assert!(matches!(m.page(), Page::Thread(_)));
-        m.bar.set_text("left, not right");
-        assert_eq!(m.key(Key::Char('s'), at(2)), None);
-        assert_eq!((m.bar.focused, m.bar.text()), (true, "/steer left, not right".to_owned()), "a draft is the steer");
-
-        m.key(Key::Esc, at(2));
-        m.bar.set_text("/done");
-        m.take(live::Event::Status(tool(&thread, "dev-a", "c1", Some("cargo test"), "in_progress", 3)), at(3));
-        m.key(Key::Char('s'), at(3));
-        assert!(!m.bar.focused && m.interrupting.is_some());
-        m.key(Key::Char('y'), at(3));
-        assert_eq!((m.bar.focused, m.bar.text()), (true, "/steer ".to_owned()));
     }
 }

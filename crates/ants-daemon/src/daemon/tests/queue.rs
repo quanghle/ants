@@ -5,12 +5,13 @@ use super::*;
 
 #[tokio::test]
 async fn threads_run_concurrently_and_each_stays_in_order() {
-    let Some((bus, mut replies)) = Bus::start().await else { return };
+    let Some((bus, _)) = Bus::start().await else { return };
+    let mut replies = bus.replies().await;
     let (launch, log, gate) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
     bus.send(&t1, "hold a").await;
-    bus.send(&t1, "b").await;
+    bus.send_ant(&t1, "b").await;
     bus.send(&t2, "c").await;
 
     let ctrl_c = Arc::new(Semaphore::new(0));
@@ -32,7 +33,8 @@ async fn threads_run_concurrently_and_each_stays_in_order() {
 
 #[tokio::test]
 async fn a_paused_ant_keeps_its_messages_queued_and_takes_no_prompt_until_resumed() {
-    let Some((mut bus, mut replies)) = Bus::start().await else { return };
+    let Some((mut bus, _)) = Bus::start().await else { return };
+    let mut replies = bus.replies().await;
     bus.pause = crate::pause::Pause::new(true);
     let (launch, log, gate) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
@@ -55,7 +57,7 @@ async fn a_paused_ant_keeps_its_messages_queued_and_takes_no_prompt_until_resume
         assert_eq!(bus.workload.paused(), None);
         bus.send(&t1, "hold b").await;
         until("b to start", || log.locked().prompted == 2).await;
-        bus.send(&t1, "c").await;
+        bus.send_ant(&t1, "c").await;
         timeout(WAIT, async {
             while bus.consumer().await.num_ack_pending < 2 {
                 tokio::time::sleep(Duration::from_millis(20)).await;
@@ -86,15 +88,16 @@ async fn a_paused_ant_keeps_its_messages_queued_and_takes_no_prompt_until_resume
 
 #[tokio::test]
 async fn messages_waiting_on_their_thread_hear_where_they_stand() {
-    let Some((bus, mut replies)) = Bus::start().await else { return };
+    let Some((bus, _)) = Bus::start().await else { return };
+    let mut replies = bus.replies().await;
     let (launch, _, gate) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
     let mut statuses = bus.client.subscribe(subject::status(&bus.dev, &t1)).await.unwrap();
     bus.client.flush().await.unwrap();
     bus.send(&t1, "hold a").await;
-    let (b, _) = bus.send(&t1, "b").await;
-    let (c, _) = bus.send(&t1, "c").await;
+    let (b, _) = bus.send_ant(&t1, "b").await;
+    let (c, _) = bus.send_ant(&t1, "c").await;
 
     let ctrl_c = Arc::new(Semaphore::new(0));
     let check = async {
@@ -136,12 +139,13 @@ async fn inbox_consumers_from_before_sender_subjects_get_the_new_filter() {
 
 #[tokio::test]
 async fn ctrl_c_finishes_prompts_in_flight_and_a_restart_resumes() {
-    let Some((bus, mut replies)) = Bus::start().await else { return };
+    let Some((bus, _)) = Bus::start().await else { return };
+    let mut replies = bus.replies().await;
     let (launch, log, gate) = fake::launch();
     let store = SessionStore::memory();
     let t1 = ThreadId::generate();
     bus.send(&t1, "hold a").await;
-    bus.send(&t1, "b").await;
+    bus.send_ant(&t1, "b").await;
 
     let pool = Pool::new(launch.clone(), store.clone(), 2, IDLE);
     let ctrl_c = Arc::new(Semaphore::new(0));
@@ -167,7 +171,8 @@ async fn ctrl_c_finishes_prompts_in_flight_and_a_restart_resumes() {
 
 #[tokio::test]
 async fn progress_acks_keep_messages_in_hand_past_the_ack_wait() {
-    let Some((bus, mut replies)) = Bus::start().await else { return };
+    let Some((bus, _)) = Bus::start().await else { return };
+    let mut replies = bus.replies().await;
     let (progress_every, ack_wait) = (Duration::from_millis(200), ack_wait(Duration::from_millis(200)));
     // A consumer left by a daemon configured with a longer ack wait takes the new one.
     drop(bus::inbox_consumer(&bus.stream, &bus.dev, ack_wait * 100, MAX_DELIVER, 4).await.unwrap());
@@ -175,7 +180,7 @@ async fn progress_acks_keep_messages_in_hand_past_the_ack_wait() {
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
     bus.send(&t1, "hold a").await;
-    bus.send(&t1, "b").await;
+    bus.send_ant(&t1, "b").await;
 
     let ctrl_c = Arc::new(Semaphore::new(0));
     let check = async {
@@ -195,12 +200,13 @@ async fn progress_acks_keep_messages_in_hand_past_the_ack_wait() {
 
 #[tokio::test]
 async fn a_redelivery_of_a_message_in_hand_is_not_prompted_again() {
-    let Some((bus, mut replies)) = Bus::start().await else { return };
+    let Some((bus, _)) = Bus::start().await else { return };
+    let mut replies = bus.replies().await;
     let (launch, log, gate) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
     bus.send(&t1, "hold a").await;
-    bus.send(&t1, "b").await;
+    bus.send_ant(&t1, "b").await;
 
     // Progress acks lost, as on a silent link: both messages come back while still in hand.
     let ack_wait = Duration::from_millis(300);
@@ -226,26 +232,29 @@ async fn a_redelivery_of_a_message_in_hand_is_not_prompted_again() {
 }
 
 #[tokio::test]
-async fn a_human_steers_a_running_prompt_ahead_of_the_queue_in_the_same_session() {
-    let Some((bus, mut to_human)) = Bus::start().await else { return };
+async fn a_human_reply_automatically_steers_a_running_prompt_ahead_of_the_queue_in_the_same_session() {
+    let Some((bus, _)) = Bus::start().await else { return };
+    let mut replies = bus.replies().await;
     let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
     bus.send(&t1, "stall").await;
-    bus.send(&t1, "queued").await;
+    let (queued, _) = bus.send_ant(&t1, "queued").await;
 
     let ctrl_c = Arc::new(Semaphore::new(0));
     let check = async {
         until("the prompt to run", || log.locked().prompted == 1).await;
-        steer(&bus, UserId::human(), &t1, "go left").await;
-        let reply = next_envelope(&mut to_human).await;
-        assert_eq!(reply.text, "partial\n\n[ants] human interrupted the prompt to steer dev-a (ants ask --steer).");
-        let steered = next_envelope(&mut to_human).await;
+        let (sent, _) = bus.send(&t1, "go left").await;
+        let reply = next_envelope(&mut replies).await;
+        assert_eq!(reply.text, "partial\n\n[ants] human interrupted the prompt to steer dev-a with a new message.");
+        let steered = next_envelope(&mut replies).await;
         let note = "[ants] human interrupted the previous prompt on this thread with this message; tool calls it had \
                     in flight were cancelled, so check what they left before repeating any.";
         assert_eq!(steered.text, format!("s1: {note}\n\ngo left"), "the same session takes the steer first");
-        assert_eq!(next_reply(&mut to_human).await, (t1.clone(), "queued".to_owned()), "the queue waits");
-        assert!(timeout(Duration::from_millis(300), to_human.next()).await.is_err(), "no escalation");
+        assert_eq!(steered.in_reply_to, Some(sent.id));
+        let reply = next_envelope(&mut replies).await;
+        assert_eq!((reply.in_reply_to, reply.text.as_str()), (Some(queued.id), "s1: queued"), "the queue waits");
+        assert!(timeout(Duration::from_millis(300), replies.next()).await.is_err(), "no escalation");
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
@@ -259,7 +268,7 @@ async fn a_human_steers_a_running_prompt_ahead_of_the_queue_in_the_same_session(
 }
 
 #[tokio::test]
-async fn a_steer_with_no_prompt_running_or_from_an_ant_waits_its_turn() {
+async fn a_reply_with_no_prompt_running_or_from_an_ant_waits_its_turn() {
     let Some((bus, mut to_human)) = Bus::start().await else { return };
     let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
@@ -267,14 +276,14 @@ async fn a_steer_with_no_prompt_running_or_from_an_ant_waits_its_turn() {
     let mut to_dev_b = bus.client.subscribe(subject::inbox_of(&dev_b)).await.unwrap();
     bus.client.flush().await.unwrap();
     let t1 = ThreadId::generate();
-    steer(&bus, UserId::human(), &t1, "idle").await;
+    bus.send(&t1, "idle").await;
 
     let ctrl_c = Arc::new(Semaphore::new(0));
     let check = async {
         assert_eq!(next_reply(&mut to_human).await, (t1.clone(), "idle".to_owned()), "an ordinary prompt");
         bus.send(&t1, "stall").await;
         until("the prompt to run", || log.locked().prompted == 2).await;
-        steer(&bus, dev_b.clone(), &t1, "from an ant").await;
+        bus.send_from(dev_b.clone(), &t1, "from an ant").await;
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(log.locked().cancelled, 0, "an ant does not steer");
         assert!(cancel(&bus, &t1).await);
@@ -287,8 +296,51 @@ async fn a_steer_with_no_prompt_running_or_from_an_ant_waits_its_turn() {
     assert_eq!(bus.unacked().await, 0);
 }
 
-/// Send `text` on `thread` from `from` as a steer.
-async fn steer(bus: &Bus, from: UserId, thread: &ThreadId, text: &str) {
-    let envelope = Envelope::on_thread(thread.clone(), from, bus.dev.clone(), text).steering();
-    bus::publish_json(&bus.js, envelope.subject(), &envelope, None).await.unwrap();
+#[tokio::test]
+async fn a_human_channel_reply_automatically_steers_but_other_posts_do_not() {
+    let Some((bus, _)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let (ops, mut replies) = bus.channel("ops", &["human", "dev-a", "dev-b"]).await;
+    let root = ChannelPost::new(ops.clone(), "dev-b".parse().unwrap(), "@dev-a stall");
+    bus.post(&root).await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        until("the channel prompt to run", || log.locked().prompted == 1).await;
+        let queued =
+            ChannelPost::on_thread(ops.clone(), root.thread_id.clone(), "dev-b".parse().unwrap(), "@dev-a queued");
+        bus.post(&queued).await;
+        let ignored = ChannelPost::on_thread(ops.clone(), root.thread_id.clone(), UserId::human(), "not addressed");
+        let seq = bus.post(&ignored).await;
+        timeout(WAIT, async {
+            loop {
+                let info = bus.stream.consumer_info(ants_proto::chan_consumer(&bus.dev)).await.unwrap();
+                if info.delivered.stream_sequence >= seq {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the other posts to arrive");
+        assert_eq!(log.locked().cancelled, 0, "ant posts and unaddressed human posts do not interrupt");
+
+        let sent = ChannelPost::on_thread(ops, root.thread_id.clone(), UserId::human(), "@dev-a go left");
+        let seq = bus.post(&sent).await;
+        let partial = next_post(&mut replies).await;
+        assert_eq!(partial.in_reply_to, Some(root.id));
+        assert_eq!(partial.text, "partial\n\n[ants] human interrupted the prompt to steer dev-a with a new message.");
+        let steered = next_post(&mut replies).await;
+        assert_eq!(steered.in_reply_to, Some(sent.id), "the human reply goes ahead of the ant's queued post");
+        assert!(steered.text.starts_with("s1: [ants] human interrupted the previous prompt"), "{}", steered.text);
+        assert!(steered.text.contains("@dev-a go left"), "{}", steered.text);
+        assert_eq!(next_post(&mut replies).await.in_reply_to, Some(queued.id), "the queued post still runs");
+        bus.until_posts_acked(seq).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    let log = log.locked();
+    assert_eq!((log.cancelled, log.prompted, log.new_sessions), (1, 3, 1));
+    assert!(log.loaded.is_empty());
 }

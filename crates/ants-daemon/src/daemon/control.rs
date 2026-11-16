@@ -31,7 +31,7 @@ pub(super) enum Why {
     Cancel,
     /// A cancel request of an assistant for this human, whose grant names it.
     CancelFor(UserId),
-    /// A steer message ([`Envelope::steer`]), which the thread takes next.
+    /// A human's message, which the thread takes next.
     Steer,
     /// An admin's order to restart the ant's harnesses now ([`crate::admin::restart`]).
     Restart,
@@ -44,7 +44,7 @@ impl Cancel {
         match &self.why {
             Why::Cancel => format!("[ants] The prompt was cancelled by {by} (ants cancel)."),
             Why::CancelFor(human) => format!("[ants] The prompt was cancelled by {by}, the assistant of {human}."),
-            Why::Steer => format!("[ants] {by} interrupted the prompt to steer {ant} (ants ask --steer)."),
+            Why::Steer => format!("[ants] {by} interrupted the prompt to steer {ant} with a new message."),
             Why::Restart => {
                 format!(
                     "[ants] The prompt was cancelled by {by} to restart {ant}'s harnesses (ants ant restart --now)."

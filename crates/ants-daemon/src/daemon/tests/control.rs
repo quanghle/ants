@@ -112,12 +112,13 @@ async fn a_restart_stops_idle_harnesses_and_working_ones_after_their_prompt() {
 
 #[tokio::test]
 async fn a_restart_now_cancels_the_running_prompt_and_the_sender_gets_what_it_wrote() {
-    let Some((bus, mut to_human)) = Bus::start().await else { return };
+    let Some((bus, _)) = Bus::start().await else { return };
+    let mut to_human = bus.replies().await;
     let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
     bus.send(&t1, "stall").await;
-    bus.send(&t1, "after").await;
+    bus.send_ant(&t1, "after").await;
 
     let ctrl_c = Arc::new(Semaphore::new(0));
     let check = async {

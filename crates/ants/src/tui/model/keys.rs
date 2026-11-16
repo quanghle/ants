@@ -198,7 +198,7 @@ impl Model {
                 self.tree(thread);
                 None
             }
-            To::Interrupt(intent, thread) => self.interrupt(intent, thread),
+            To::Interrupt(thread) => self.interrupt(thread),
             To::Reply(thread) => {
                 self.bar.focused = true;
                 self.go(To::Thread(thread), now)

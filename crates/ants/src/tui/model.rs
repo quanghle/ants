@@ -14,7 +14,7 @@ use super::acts::{Acted, Change};
 use super::approvals::{self, Asking};
 use super::command::Bar;
 use super::exec::Job;
-use super::interrupt::{Confirm, Intent};
+use super::interrupt::Confirm;
 use super::react::{self, Picker};
 use super::reads::{Mark, Read};
 use super::work::{Facts, Filter};
@@ -254,8 +254,8 @@ pub enum To {
     React(Uuid),
     /// A thread's delegation tree.
     Tree(ThreadId),
-    /// Steer or cancel the prompt running on a thread.
-    Interrupt(Intent, ThreadId),
+    /// Cancel the prompt running on a thread.
+    Interrupt(ThreadId),
     /// The thread, with the command bar open to reply on it.
     Reply(ThreadId),
     /// Ask how long to keep the thread off home, or wake it if a snooze holds it off.
@@ -288,7 +288,7 @@ pub struct Model {
     pub asking: Option<Asking>,
     /// The reaction being picked.
     pub picking: Option<Picker>,
-    /// The steer or cancel waiting for y while an ant runs a tool call.
+    /// The cancel waiting for y while an ant runs a tool call.
     pub interrupting: Option<Confirm>,
     /// How long to snooze a thread from home, being asked.
     pub snoozing: Option<snooze::Prompt>,

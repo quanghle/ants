@@ -25,7 +25,6 @@ use ratatui::widgets::Paragraph;
 use super::acts::{About, Change};
 use super::exec::Job;
 use super::frame::{self, ago};
-use super::interrupt::Intent;
 use super::model::{Action, Data, Key, Model, To};
 use super::timeline::Call;
 use super::{approvals, attach, catchup, images, question, work};
@@ -81,7 +80,7 @@ impl Page {
         self.messages().find(|e| e.id == Some(at)).map(|e| e.seq)
     }
 
-    pub const KEYS: &str = "↑↓ select · i reply · y copy · o open file · ] next file · + react · p pin · m mute · e archive · d done · z snooze · t tree · S TL;DR · s steer · x cancel · a A r answer a tool request · End latest · Esc back";
+    pub const KEYS: &str = "↑↓ select · i reply · y copy · o open file · ] next file · + react · p pin · m mute · e archive · d done · z snooze · t tree · S TL;DR · x cancel · a A r answer a tool request · End latest · Esc back";
 
     /// The messages shown, in the order stored.
     fn messages(&self) -> impl DoubleEndedIterator<Item = &Entry> {
@@ -203,8 +202,7 @@ impl Page {
                 let (seq, count) = self.attached().map(|e| (e.seq, e.attachments.len()))?;
                 self.mark.next(seq, count);
             }
-            Key::Char('s') => return Some(To::Interrupt(Intent::Steer, self.history.thread.clone())),
-            Key::Char('x') | Key::Ctrl('x') => return Some(To::Interrupt(Intent::Cancel, self.history.thread.clone())),
+            Key::Char('x') | Key::Ctrl('x') => return Some(To::Interrupt(self.history.thread.clone())),
             _ => {}
         }
         None

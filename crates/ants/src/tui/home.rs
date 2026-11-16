@@ -19,7 +19,6 @@ use super::approvals;
 use super::command::GRANT;
 use super::exec::Job;
 use super::frame::{self, ago};
-use super::interrupt::Intent;
 use super::model::{Action, Data, Key, Model, To};
 use super::select::Selection;
 use super::{catchup, question};
@@ -258,7 +257,7 @@ impl Page {
                 let job = Job::Grant { thread: stuck.thread.clone(), text: GRANT.to_owned() };
                 return Some(To::Do(Action::Run(job, String::new())));
             }
-            Key::Char('x') => return thread().map(|thread| To::Interrupt(Intent::Cancel, thread)),
+            Key::Char('x') => return thread().map(To::Interrupt),
             Key::Char('d') => {
                 let thread = thread()?;
                 let last = data.live.summary(&thread).map_or(0, |s| s.last_reopening);
