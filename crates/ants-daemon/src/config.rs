@@ -623,6 +623,14 @@ impl HostSettings {
     pub fn machine_or(&self, hostname: &str) -> Machine {
         self.machine.clone().or_else(|| self.fallback()).unwrap_or_else(|| Machine::from_hostname(hostname))
     }
+
+    /// The machine's name as the host connection takes it ([`crate::host::machine_of`]): the `[host]` table's
+    /// `machine`, else the one the host credentials name, else [`Self::machine_or`], which also stands when the
+    /// credentials do not load or name another machine than the table.
+    pub fn named(&self, hostname: &str) -> Machine {
+        let otherwise = self.machine_or(hostname);
+        crate::host::machine_of(self.machine.as_ref(), self.creds.as_deref(), otherwise.clone()).unwrap_or(otherwise)
+    }
 }
 
 /// `host.creds` in the auth directory `dir`, else `host-<machine>.creds` there, `machine` being the one named, else

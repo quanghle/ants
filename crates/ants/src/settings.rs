@@ -606,7 +606,7 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
             ants: vec![dev_a.clone()],
         };
         let (vias, watched) = tokio::sync::watch::channel(vec![via]);
-        let following = tokio::spawn(ants_daemon::shared::follow(follower.clone(), watched));
+        let following = tokio::spawn(ants_daemon::shared::follow(follower.clone(), watched, None));
         assert!(follower.wait_polled(WAIT).await, "the follower reads the shared settings");
         assert_eq!(follower.record(&dev_a), Some(mended));
         drop(vias);
