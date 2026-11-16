@@ -11,7 +11,7 @@ human = "alice"                            # fallback human for ownerless escala
 metrics = "127.0.0.1:9464"                 # serve /healthz and /metrics (default: off)
 timezone = "America/New_York"              # default IANA time zone for schedule cron (default UTC)
 redact = true                              # redact secrets from daemon publications (default true)
-machine = "dev-vm1"                        # machine named in roster entries and harness notices (default: host name)
+machine = "dev-vm1"                        # machine named in roster entries, notices and admin orders (default: host name)
 
 [cli]                                      # CLI defaults when no flag or env var is set
 creds = "~/.config/ants/auth/alice.creds"  # human credentials (ant credentials are not used here)
@@ -36,7 +36,7 @@ max_harnesses = 1                          # default; per-ant harness cap while 
 
 [host]                                     # the machine's host connection (docs/auth.md, Machine host credentials)
 creds = "~/.config/ants/auth/host.creds"   # default: that file, else host-<machine>.creds beside it, if either exists
-machine = "macbook"                        # default: the name the credentials carry, else the host name's first label
+machine = "macbook"                        # default: the credentials' name, else the top-level machine, else the host name
 
 [admin]                                    # admin orders to this machine's ants (docs/auth.md, Admin orders)
 remote = false                             # refuse every order (default true: take the orders an admin signed)
@@ -102,7 +102,7 @@ text = "Triage the failing nightly tests."
 allow = ["read:*", "execute:cargo test*"]
 ```
 
-`machine` (1–64 characters, no control characters) labels where the file's ants run, such as a VM or container whose host name is generated: `ants roster`, `ants dash`, `list_ants` and the sign-in, quota and failing-harness notices show it in place of the host name. A daemon serving a single ant from CLI flags alone uses the host name.
+`machine` (1–64 characters, no control characters) labels where the file's ants run, such as a VM or container whose host name is generated: `ants roster`, `ants dash`, `list_ants` and the sign-in, quota and failing-harness notices show it in place of the host name. A daemon serving a single ant from CLI flags alone uses the host name. When it is also a machine name (1–64 letters, digits, `-` and `_`, starting with a letter or digit) it names the machine for its [host credentials](auth.md#machine-host-credentials), its record in `ants_machines`, its admin orders (`--on MACHINE`) and the signer's record, where neither the `[host]` table's `machine` nor the host credentials name one; otherwise those use the host name's first label, and `ants doctor` warns.
 
 `~` expands to the home directory; other relative paths resolve against the config file's directory (`env` values stay literal). Unknown keys, duplicate ant/template/schedule names, a schedule named after an ant, or `messenger = false` with no `[[ant]]` fail config loading. Unreachable NATS or JetStream endpoints retry with exponential backoff (`1s` to `30s`); credential or permission errors fail that ant immediately while remaining ants keep running, exiting non-zero only if none start.
 
@@ -117,7 +117,7 @@ allow = ["read:*", "execute:cargo test*"]
 
 - Added ants (and previously failed ants still listed) start; removed ants drain prompts in flight and return waiting messages for redelivery; ants whose resolved settings changed (including via top-level defaults, `[harnesses.NAME]`, or `[[ant_template]]`) drain and restart; unchanged ants continue uninterrupted (pool membership changes alone do not restart members, nor does `paused` alone: see [Pausing an ant](#pausing-an-ant)).
 - Added schedules start; removed schedules stop immediately; changed or stopped schedules restart.
-- The machine's record of its ants in `ants_machines` follows the ants listed; a changed `[host]` or `[admin]` table or host credentials file reconnects the host. With `[admin] remote = false`, the host refuses every admin order to the machine's ants, recording `this machine's config sets [admin] remote = false` as its outcome; otherwise an admin's `set` order (`ants ant set`) edits the ant's `[[ant]]` table, or the `[harnesses]` table, in place, comments kept, refused naming the field when the field no longer holds the value the order expects, or with the loader's error when the file would not load, and changing nothing then. Only a daemon serving the whole file (no `--ant`) runs the host, with the top-level `nats` and `js_domain`, else `--nats` and `--js-domain`.
+- The machine's record of its ants in `ants_machines` follows the ants listed; a changed `[host]` or `[admin]` table, top-level `machine` or host credentials file reconnects the host. With `[admin] remote = false`, the host refuses every admin order to the machine's ants, recording `this machine's config sets [admin] remote = false` as its outcome; otherwise an admin's `set` order (`ants ant set`) edits the ant's `[[ant]]` table, or the `[harnesses]` table, in place, comments kept, refused naming the field when the field no longer holds the value the order expects, or with the loader's error when the file would not load, and changing nothing then. Only a daemon serving the whole file (no `--ant`) runs the host, with the top-level `nats` and `js_domain`, else `--nats` and `--js-domain`.
 - Invalid reloads log an error and keep running the previous config. `metrics` requires a process restart.
 
 ## Shared settings

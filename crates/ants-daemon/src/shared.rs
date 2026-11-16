@@ -399,9 +399,13 @@ pub struct Via {
 /// Keep `shared` current with the shared settings of the ants of `vias`, read every [`POLL_EVERY`] over a connection
 /// as one of them ([`refresh`]), until `vias` closes: for a daemon without a host connection. Ant credentials only read
 /// the records, verified against their account; over a server without authentication, missing ones are created from
-/// the machine's config as the host connection would.
-pub async fn follow(shared: Shared, mut vias: watch::Receiver<Vec<Via>>) {
-    let machine = Machine::from_hostname(&crate::roster::machine().await);
+/// the machine's config as the host connection would, naming `machine` as their writer, else the first label of the
+/// host name.
+pub async fn follow(shared: Shared, mut vias: watch::Receiver<Vec<Via>>, machine: Option<Machine>) {
+    let machine = match machine {
+        Some(machine) => machine,
+        None => Machine::from_hostname(&crate::roster::machine().await),
+    };
     let mut connected: Vec<(Via, DirectKv, Vec<String>)> = Vec::new();
     loop {
         let wanted = vias.borrow_and_update().clone();
@@ -492,5 +496,24 @@ mod tests {
         shared.store(record("dev-a", json!({ "model": 5 })));
         assert!(shared.overlaid(&dev_a).is_none(), "a record that does not parse is ignored");
         assert!(Roles::of(json!({ "workdir": "/" }).as_object().unwrap()).is_err());
+    }
+
+    #[tokio::test]
+    async fn without_a_host_connection_the_records_created_name_the_machine_given() {
+        let Some(server) = ants_test_support::NatsServer::start() else { return };
+        let js = async_nats::jetstream::new(async_nats::connect(&server.url).await.unwrap());
+        js.create_key_value(crate::hub::identities_config()).await.unwrap();
+        let mut dev_a = ant("dev-a");
+        dev_a.model = Some("gpt-4".to_owned());
+        let shared = Shared::default();
+        shared.listed(std::slice::from_ref(&dev_a));
+        let user = dev_a.name.clone();
+        let via = Via { nats: server.url.clone(), creds: None, js_domain: None, user: user.clone(), ants: vec![user] };
+        let (vias, watched) = watch::channel(vec![via]);
+        let following = tokio::spawn(follow(shared.clone(), watched, Some("dev-vm1".parse().unwrap())));
+        assert!(shared.wait_polled(Duration::from_secs(10)).await, "the follower reads the shared settings");
+        assert_eq!(shared.record(&dev_a.name).unwrap().machine.as_str(), "dev-vm1");
+        drop(vias);
+        tokio::time::timeout(Duration::from_secs(10), following).await.unwrap().unwrap();
     }
 }

@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use ants_daemon::config::{self, Ant, Summary};
 use ants_daemon::harness;
-use ants_proto::{Machine, UserId};
+use ants_proto::UserId;
 use anyhow::{Context as _, Result, bail};
 
 use crate::cmd::harness::HarnessPick;
@@ -343,7 +343,7 @@ async fn host_creds(report: &mut Report, args: &SetupArgs, connection: &Connecti
         return report.step(Mark::Skip, step, "the ants connect as no one, and so does the machine's host");
     }
     let hostname = ants_daemon::roster::machine().await;
-    let machine = summary.host.machine.clone().unwrap_or_else(|| Machine::from_hostname(&hostname));
+    let machine = summary.host.machine_or(&hostname);
     let dir = match auth::default_dir() {
         Ok(dir) if auth::holds_team(&dir) => dir,
         _ => {

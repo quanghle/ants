@@ -47,7 +47,8 @@ pub const ACCOUNT_HOLDER_KEY: &str = "_account";
 /// humans read it. Readers should treat unknown fields as additions, not errors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountHolder {
-    /// The machine's name, as its `[host]` table names it, else the first label of its host name.
+    /// The machine's name, as its `[host]` table names it, else its config's top-level `machine` if that is a machine
+    /// name, else the first label of its host name.
     pub machine: Machine,
     /// Host name of the machine.
     #[serde(default)]

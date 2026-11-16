@@ -365,6 +365,7 @@ pub(crate) mod tests {
         let (url, creds) = (server.url.clone(), Some(creds));
         let host = Host {
             machine: None,
+            fallback: None,
             nats: url,
             creds,
             js_domain: None,
@@ -548,6 +549,7 @@ pub(crate) mod tests {
         issue_host(&team, &m1, Some(&domain), &host_creds).unwrap();
         let host = Host {
             machine: None,
+            fallback: None,
             nats: leaf_node.url.clone(),
             creds: Some(host_creds),
             js_domain: Some(domain.clone()),

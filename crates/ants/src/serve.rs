@@ -13,7 +13,7 @@ use ants_daemon::host::{self, Host};
 use ants_daemon::schedule::Schedule;
 use ants_daemon::shared::{self, Drift, Shared, Via};
 use ants_daemon::{Config, Harnesses, Stop};
-use ants_proto::{JsDomain, UserId};
+use ants_proto::{JsDomain, Machine, UserId};
 use anyhow::{Context as _, Result, bail};
 use futures::stream::{FuturesUnordered, StreamExt as _};
 use tokio::sync::watch;
@@ -274,13 +274,17 @@ pub struct Listed {
     pub managers: Option<(Vec<UserId>, PathBuf)>,
     /// The machine's host connection the file describes: only when the daemon serves the whole file.
     pub host: Option<HostSettings>,
+    /// The machine's name as the file's host settings give it ([`HostSettings::named`]); None for an ant described by
+    /// flags, which goes by the host name.
+    pub machine: Option<Machine>,
 }
 
 /// The ants to serve, the harnesses they may name and the schedules to run: those of the config file, or for an ant
 /// described by flags the harnesses of the file at `default_path` if it exists, and its top-level `harness` unless
 /// the flags name one. The schedules run only when the
-/// daemon serves the whole file, not one ant picked with `--ant`.
-pub fn ants(args: &DaemonArgs, default_path: &Path) -> Result<Listed> {
+/// daemon serves the whole file, not one ant picked with `--ant`. `hostname` names the machine where the file does
+/// not.
+pub fn ants(args: &DaemonArgs, default_path: &Path, hostname: &str) -> Result<Listed> {
     match source(args, default_path)? {
         Source::Flags(name) => {
             let mut ant = args.options.apply(Ant::new(name, std::env::current_dir()?));
@@ -290,7 +294,7 @@ pub fn ants(args: &DaemonArgs, default_path: &Path) -> Result<Listed> {
             }
             let harnesses = summary.harnesses;
             let (schedules, metrics) = (Vec::new(), args.metrics);
-            Ok(Listed { ants: vec![ant], harnesses, schedules, metrics, managers: None, host: None })
+            Ok(Listed { ants: vec![ant], harnesses, schedules, metrics, managers: None, host: None, machine: None })
         }
         Source::File(path) => {
             let loaded = config::load(&path)?;
@@ -304,9 +308,10 @@ pub fn ants(args: &DaemonArgs, default_path: &Path) -> Result<Listed> {
                 .map(|a| a.name.clone())
                 .collect();
             let managers = whole.then(|| (managers, path.clone()));
+            let machine = Some(loaded.host.named(hostname));
             let host = whole.then_some(loaded.host);
             let ants = pick(loaded.ants, args, &path)?;
-            Ok(Listed { ants, harnesses: loaded.harnesses, schedules, metrics, managers, host })
+            Ok(Listed { ants, harnesses: loaded.harnesses, schedules, metrics, managers, host, machine })
         }
     }
 }
@@ -383,6 +388,9 @@ pub struct Served {
     /// The shared settings `configs` were overlaid with: kept current by the host connection, else, without one, by
     /// reading them as the ants ([`shared::follow`]).
     pub shared: Option<Shared>,
+    /// The machine's name, which shared settings created without a host connection name as their writer; None for
+    /// the first label of the host name.
+    pub machine: Option<Machine>,
 }
 
 impl Served {
@@ -418,10 +426,11 @@ pub fn host(
     js_domain: Option<&JsDomain>,
     config: Option<ConfigFile>,
 ) -> Option<(Host, Vec<UserId>)> {
-    let HostSettings { creds, machine, nats: file_nats, js_domain: file_domain, remote_admin } = settings?;
+    let fallback = settings.as_ref()?.fallback();
+    let HostSettings { creds, machine, nats: file_nats, js_domain: file_domain, remote_admin, .. } = settings?;
     let nats = file_nats.unwrap_or_else(|| nats.to_owned());
-    let mut host =
-        Host::new(machine, nats, creds, file_domain.or(js_domain.cloned()), configs.iter().map(|c| c.creds.is_some()))?;
+    let domain = file_domain.or(js_domain.cloned());
+    let mut host = Host::new(machine, fallback, nats, creds, domain, configs.iter().map(|c| c.creds.is_some()))?;
     host.remote_admin = remote_admin;
     host.config = config;
     Some((host, configs.iter().map(|c| c.ant.clone()).collect()))
@@ -640,7 +649,8 @@ impl Links {
     /// Run the host connection `host` and the reading of the shared settings `served` lists; with neither, both stop.
     fn reconcile(&mut self, host: Option<(Host, Vec<UserId>)>, served: Option<&Served>) {
         self.host.reconcile(host);
-        self.follower.reconcile(served.and_then(Served::vias), served.and_then(|s| s.shared.as_ref()));
+        let machine = served.and_then(|s| s.machine.clone());
+        self.follower.reconcile(served.and_then(Served::vias), served.and_then(|s| s.shared.as_ref()), machine);
     }
 }
 
@@ -690,36 +700,45 @@ impl HostRun {
 
 /// The reading of the shared settings without a host connection ([`shared::follow`]), if any, in its task.
 #[derive(Default)]
-struct Follower(Option<(watch::Sender<Vec<Via>>, JoinHandle<()>)>);
+struct Follower(Option<Following>);
+
+struct Following {
+    vias: watch::Sender<Vec<Via>>,
+    task: JoinHandle<()>,
+    /// The machine it names as the writer of the records it creates.
+    machine: Option<Machine>,
+}
 
 impl Follower {
-    /// Read the shared settings into `shared` where `wanted` says: the reading running is told unless it stopped,
-    /// when it starts again; with none wanted, it stops.
-    fn reconcile(&mut self, wanted: Option<Vec<Via>>, shared: Option<&Shared>) {
+    /// Read the shared settings into `shared` where `wanted` says, as `machine` ([`shared::follow`]): the reading
+    /// running is told unless it stopped or the machine changed, when it starts again; with none wanted, it stops.
+    fn reconcile(&mut self, wanted: Option<Vec<Via>>, shared: Option<&Shared>, machine: Option<Machine>) {
         let (Some(wanted), Some(shared)) = (wanted, shared) else {
-            if let Some((_, task)) = self.0.take() {
-                task.abort();
+            if let Some(old) = self.0.take() {
+                old.task.abort();
             }
             return;
         };
-        if let Some((vias, task)) = &self.0
-            && !task.is_finished()
+        if let Some(running) = &self.0
+            && !running.task.is_finished()
+            && running.machine == machine
         {
-            vias.send_replace(wanted);
+            running.vias.send_replace(wanted);
             return;
         }
-        let (sender, receiver) = watch::channel(wanted);
-        let task = tokio::spawn(shared::follow(shared.clone(), receiver).instrument(tracing::info_span!("shared")));
-        if let Some((_, old)) = self.0.replace((sender, task)) {
-            old.abort();
+        let (vias, receiver) = watch::channel(wanted);
+        let following = shared::follow(shared.clone(), receiver, machine.clone());
+        let task = tokio::spawn(following.instrument(tracing::info_span!("shared")));
+        if let Some(old) = self.0.replace(Following { vias, task, machine }) {
+            old.task.abort();
         }
     }
 }
 
 impl Drop for Follower {
     fn drop(&mut self) {
-        if let Some((_, task)) = &self.0 {
-            task.abort();
+        if let Some(running) = &self.0 {
+            running.task.abort();
         }
     }
 }
@@ -849,6 +868,34 @@ mod tests {
         assert_eq!(source(&args("--config c.toml --ant dev-a"), &missing).unwrap(), Source::File("c.toml".into()));
         let err = source(&args(""), &missing).unwrap_err().to_string();
         assert!(err.contains("no --ant given") && err.contains("no-such-config.toml"), "{err}");
+    }
+
+    #[test]
+    fn the_file_names_the_machine_as_the_host_connection_would() {
+        let dir = ants_test_support::scratch_dir("serve-machine").canonicalize().unwrap();
+        let config = dir.join("config.toml");
+        let listed = |text: &str, line: &str| {
+            std::fs::write(&config, text).unwrap();
+            ants(&args(&format!("--config {} {line}", config.display())), &config, "gen-4f2a.internal").unwrap()
+        };
+        let top = "harness = \"copilot\"\nmachine = \"dev-vm1\"\n";
+        assert_eq!(listed(top, "--ant messenger").machine, Some("dev-vm1".parse().unwrap()));
+        assert_eq!(
+            listed("harness = \"copilot\"\nmachine = \"Dev VM\"\n", "").machine,
+            Some("gen-4f2a".parse().unwrap())
+        );
+        let team = dir.join("team");
+        crate::auth::init(&team).unwrap();
+        crate::auth::issue_host(&team, &"m1".parse().unwrap(), None, &dir.join("h.creds")).unwrap();
+        let with_creds = format!("{top}[host]\ncreds = \"h.creds\"\n");
+        assert_eq!(
+            listed(&with_creds, "").machine,
+            Some("m1".parse().unwrap()),
+            "the credentials' machine comes first"
+        );
+        let flags = ants(&args("--ant dev-a"), &dir.join("none.toml"), "gen-4f2a.internal").unwrap();
+        assert_eq!(flags.machine, None, "an ant described by flags goes by the host name");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

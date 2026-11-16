@@ -547,6 +547,35 @@ fn the_host_table_names_credentials_else_they_are_found_in_the_auth_directory() 
 }
 
 #[test]
+fn the_top_level_machine_names_the_host_where_the_host_table_names_none() {
+    let home = ants_test_support::scratch_dir("config-host-top").canonicalize().unwrap();
+    let path = home.join("config.toml");
+    let host = |text: &str| Summary::parse(text, &path, &home).unwrap().host;
+    let m = |name: &str| name.parse::<Machine>().unwrap();
+    let local = Machine::from_hostname(&hostname().unwrap());
+    let top = host("machine = \"dev-vm1\"");
+    assert_eq!((top.fallback(), top.machine_or("gen-4f2a.internal")), (Some(m("dev-vm1")), m("dev-vm1")));
+    let both = host("machine = \"dev-vm1\"\n[host]\nmachine = \"box\"");
+    assert_eq!(both.machine_or("gen-4f2a.internal"), m("box"), "the [host] table's machine comes first");
+    let roster_only = host("machine = \"Dev VM 1\"");
+    assert_eq!(roster_only.top_machine.as_deref(), Some("Dev VM 1"));
+    assert_eq!((roster_only.fallback(), roster_only.machine_or("gen-4f2a.internal")), (None, m("gen-4f2a")));
+
+    let auth = home.join(".config/ants/auth");
+    std::fs::create_dir_all(&auth).unwrap();
+    std::fs::write(auth.join(format!("host-{local}.creds")), "").unwrap();
+    assert_eq!(host("").creds, Some(auth.join(format!("host-{local}.creds"))));
+    assert_eq!(
+        host("machine = \"dev-vm1\"").creds,
+        Some(auth.join(format!("host-{local}.creds"))),
+        "the host name's credentials still serve when the top-level machine has none"
+    );
+    std::fs::write(auth.join("host-dev-vm1.creds"), "").unwrap();
+    assert_eq!(host("machine = \"dev-vm1\"").creds, Some(auth.join("host-dev-vm1.creds")));
+    std::fs::remove_dir_all(&home).unwrap();
+}
+
+#[test]
 fn rejects_bad_files() {
     let err = |text: &str| format!("{:#}", parse_here(text).unwrap_err());
     let twice = err("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"");

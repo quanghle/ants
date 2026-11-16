@@ -9,7 +9,8 @@
 //! metrics = "127.0.0.1:9464"        # serve /healthz and /metrics there (crate::metrics); off without it
 //! timezone = "America/New_York"     # default zone of the schedules' cron, else UTC
 //! redact = true                     # redact secrets from what the ants publish (the default; crate::redact)
-//! machine = "dev-vm1"               # the machine the roster names for the ants (default: the host name)
+//! machine = "dev-vm1"               # the machine the roster names for the ants, and the host's where [host] and
+//!                                   # its credentials name none (default: the host name)
 //!
 //! [cli]                             # the CLI's own connection, where no flag or environment variable sets it
 //! creds = "~/.config/ants/auth/alice.creds"
@@ -34,7 +35,8 @@
 //!
 //! [host]                            # this machine's host connection (crate::host); off without credentials
 //! creds = "~/.config/ants/auth/host.creds"  # default: that file, else host-<machine>.creds beside it, if either exists
-//! machine = "laptop"                # default: the name the credentials carry, else the host name's first label
+//! machine = "laptop"                # default: the name the credentials carry, else the top-level machine if it is
+//!                                   # a machine name (ants_proto::Machine), else the host name's first label
 //!
 //! [admin]                           # admin orders to this machine's ants (crate::admin)
 //! remote = false                    # refuse every order (default true: carry out those an admin signed)
@@ -572,11 +574,13 @@ impl Default for AdminSection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostSettings {
     /// The host credentials (`ants auth host`): the `[host]` table's `creds`, else `~/.config/ants/auth/host.creds`,
-    /// else `host-<machine>.creds` there for the table's `machine` or the host name's first label, whichever exists
-    /// first; None for none.
+    /// else `host-<machine>.creds` there for the table's `machine`, else for the top-level `machine` or the host
+    /// name's first label, whichever exists first; None for none.
     pub creds: Option<PathBuf>,
     /// The `[host]` table's `machine`.
     pub machine: Option<Machine>,
+    /// The file's top-level `machine`, as written.
+    pub top_machine: Option<String>,
     /// The file's top-level `nats` and `js_domain`.
     pub nats: Option<String>,
     pub js_domain: Option<JsDomain>,
@@ -586,30 +590,54 @@ pub struct HostSettings {
 
 impl Default for HostSettings {
     fn default() -> Self {
-        Self { creds: None, machine: None, nats: None, js_domain: None, remote_admin: true }
+        Self { creds: None, machine: None, top_machine: None, nats: None, js_domain: None, remote_admin: true }
     }
 }
 
 impl HostSettings {
-    fn resolve(
-        section: HostSection,
-        admin: AdminSection,
-        nats: Option<String>,
-        js_domain: Option<JsDomain>,
-        base: &Path,
-        home: &Path,
-    ) -> Self {
+    fn resolve(file: &mut File, base: &Path, home: &Path) -> Self {
+        let section = std::mem::take(&mut file.host);
+        let top_machine = file.machine.clone();
+        let fallback = top_machine.as_deref().and_then(|m| m.parse().ok());
         let creds = match section.creds {
             Some(creds) => Some(resolve(&creds, base, home)),
-            None => default_host_creds(&home.join(".config/ants/auth"), section.machine.as_ref()),
+            None => default_host_creds(&home.join(".config/ants/auth"), section.machine.as_ref(), fallback.as_ref()),
         };
-        Self { creds, machine: section.machine, nats, js_domain, remote_admin: admin.remote }
+        Self {
+            creds,
+            machine: section.machine,
+            top_machine,
+            nats: file.nats.clone(),
+            js_domain: file.js_domain.clone(),
+            remote_admin: file.admin.remote,
+        }
+    }
+
+    /// The top-level `machine` if it is a machine name ([`Machine`]): the machine's name where neither the `[host]`
+    /// table nor the host credentials name one.
+    pub fn fallback(&self) -> Option<Machine> {
+        self.top_machine.as_deref().and_then(|m| m.parse().ok())
+    }
+
+    /// The machine's name, the host credentials left aside: the `[host]` table's `machine`, else [`Self::fallback`],
+    /// else the first label of `hostname`.
+    pub fn machine_or(&self, hostname: &str) -> Machine {
+        self.machine.clone().or_else(|| self.fallback()).unwrap_or_else(|| Machine::from_hostname(hostname))
+    }
+
+    /// The machine's name as the host connection takes it ([`crate::host::machine_of`]): the `[host]` table's
+    /// `machine`, else the one the host credentials name, else [`Self::machine_or`], which also stands when the
+    /// credentials do not load or name another machine than the table.
+    pub fn named(&self, hostname: &str) -> Machine {
+        let otherwise = self.machine_or(hostname);
+        crate::host::machine_of(self.machine.as_ref(), self.creds.as_deref(), otherwise.clone()).unwrap_or(otherwise)
     }
 }
 
-/// `host.creds` in the auth directory `dir`, else `host-<machine>.creds` there, `machine` being the one named or
-/// else the first label of the host name, which is looked up only when `dir` holds some host's credentials.
-fn default_host_creds(dir: &Path, machine: Option<&Machine>) -> Option<PathBuf> {
+/// `host.creds` in the auth directory `dir`, else `host-<machine>.creds` there, `machine` being the one named, else
+/// `fallback` or the first label of the host name, whichever's file exists; the host name is looked up only when
+/// `dir` holds some host's credentials.
+fn default_host_creds(dir: &Path, machine: Option<&Machine>, fallback: Option<&Machine>) -> Option<PathBuf> {
     let file = |name: &str| Some(dir.join(name)).filter(|path| path.is_file());
     let named = |machine: &Machine| file(&format!("{}.creds", ants_proto::host_user(machine)));
     file("host.creds").or_else(|| match machine {
@@ -617,7 +645,7 @@ fn default_host_creds(dir: &Path, machine: Option<&Machine>) -> Option<PathBuf> 
         None => {
             let mut entries = std::fs::read_dir(dir).ok()?;
             let any = entries.any(|e| e.is_ok_and(|e| e.file_name().to_string_lossy().starts_with("host-")));
-            any.then(|| named(&Machine::from_hostname(&hostname()?))).flatten()
+            any.then(|| fallback.and_then(named).or_else(|| named(&Machine::from_hostname(&hostname()?)))).flatten()
         }
     })
 }
@@ -712,6 +740,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
     if let Some(machine) = &file.machine {
         check_machine(machine).with_context(|| format!("config {}", path.display()))?;
     }
+    let host = HostSettings::resolve(&mut file, base, home);
     if file.ants.is_empty() && !file.messenger {
         bail!("config {}: messenger = false and no [[ant]] entries: nothing to serve", path.display());
     }
@@ -794,7 +823,6 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
         }
         schedules.push(schedule);
     }
-    let host = HostSettings::resolve(file.host, file.admin, file.nats, file.js_domain, base, home);
     let (base, home) = (base.to_owned(), home.to_owned());
     Ok(Loaded { ants, harnesses, templates, schedules, metrics: file.metrics, storage: file.storage, host, base, home })
 }
@@ -1057,12 +1085,12 @@ impl Summary {
     }
 
     fn parse(text: &str, path: &Path, home: &Path) -> Result<Self> {
-        let file: File = toml::from_str(text).with_context(|| format!("parsing config {}", path.display()))?;
+        let mut file: File = toml::from_str(text).with_context(|| format!("parsing config {}", path.display()))?;
         let base = path.parent().unwrap_or(Path::new("."));
+        let host = HostSettings::resolve(&mut file, base, home);
         let harnesses = define(file.harnesses, path, home)?;
         let caps = file.ants.iter().map(|ant| (ant.name.clone(), summary_caps(ant, &file.ant_templates))).collect();
         let ants = file.ants.into_iter().map(|ant| (ant.name, ant.creds.map(|c| resolve(&c, base, home)))).collect();
-        let host = HostSettings::resolve(file.host, file.admin, file.nats.clone(), file.js_domain.clone(), base, home);
         Ok(Self { nats: file.nats, js_domain: file.js_domain, harness: file.harness, harnesses, ants, caps, host })
     }
 

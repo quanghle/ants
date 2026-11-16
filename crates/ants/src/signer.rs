@@ -33,8 +33,8 @@ use ants_daemon::roster;
 use ants_daemon::template::{AntTemplate, Request};
 use ants_proto::{
     ACCOUNT_HOLDER_KEY, ANTS_VERSION, AccountHolder, AntReply, AntRequest, ApprovalDecision, ApprovalRequest,
-    ENROLL_REPEAT, EnrollLeaf, JsDomain, MACHINES_BUCKET, Machine, Permissions, STREAM, ThreadId, ToolCall, UserId,
-    Verdict, subject,
+    ENROLL_REPEAT, EnrollLeaf, JsDomain, MACHINES_BUCKET, Permissions, STREAM, ThreadId, ToolCall, UserId, Verdict,
+    subject,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::stream::DirectGetErrorKind;
@@ -206,12 +206,12 @@ pub async fn serve(
 }
 
 /// The record of this machine holding the account key: its name as the `[host]` table of the config file at `config`
-/// names it, else the first label of its host name.
+/// names it, else as its top-level `machine` does if that is a machine name, else the first label of its host name.
 async fn holder(config: &Path) -> AccountHolder {
     let hostname = roster::machine().await;
-    let named = config::Summary::load(config).ok().and_then(|summary| summary.host.machine);
+    let host = config::Summary::load(config).map_or_else(|_| config::HostSettings::default(), |summary| summary.host);
     AccountHolder {
-        machine: named.unwrap_or_else(|| Machine::from_hostname(&hostname)),
+        machine: host.machine_or(&hostname),
         hostname,
         version: ANTS_VERSION.to_owned(),
         updated_at: Utc::now(),
@@ -957,7 +957,7 @@ mod tests {
             }
         })
         .await;
-        assert_eq!(recorded.machine, "keybox".parse::<Machine>().unwrap());
+        assert_eq!(recorded.machine, "keybox".parse::<ants_proto::Machine>().unwrap());
         assert_eq!((recorded.hostname, recorded.version), (roster::machine().await, ANTS_VERSION.to_owned()));
         assert_eq!(crate::machines::list(&h_js).await.unwrap(), [], "the record is no machine's");
         let as_human = DirectKv::new(&h_js, None, MACHINES_BUCKET).await.unwrap();
