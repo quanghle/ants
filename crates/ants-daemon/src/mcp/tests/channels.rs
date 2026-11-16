@@ -35,7 +35,8 @@ impl Admin for MemoryAdmin {
 
 #[tokio::test]
 async fn manage_channel_asks_the_channel_manager_for_the_owner_s_changes() {
-    let (mcp, _sent) = start(&home("chanadm")).await;
+    let home = home("chanadm");
+    let (mcp, _sent) = start(&home).await;
     let current = from_human();
     let (url, token) = http_server(&mcp, &current.thread_id);
     let client = http_client(&url, &token).await;
@@ -70,7 +71,8 @@ async fn manage_channel_asks_the_channel_manager_for_the_owner_s_changes() {
     assert!(!ok && text.contains("not both"), "{text}");
 
     let silent = Arc::new(MemoryAdmin { channels: StdMutex::default(), requests: StdMutex::default(), silent: true });
-    let (mcp, _sent) = start(&home("chanadm-silent")).await;
+    let other_home = super::home("chanadm-silent");
+    let (mcp, _sent) = start(&other_home).await;
     mcp.manage_channels(silent);
     let (url, token) = http_server(&mcp, &current.thread_id);
     let client = http_client(&url, &token).await;
@@ -81,7 +83,8 @@ async fn manage_channel_asks_the_channel_manager_for_the_owner_s_changes() {
 
 #[tokio::test]
 async fn post_channel_starts_a_thread_the_ant_created_where_it_may_post() {
-    let (mcp, _sent) = start(&home("post-channel")).await;
+    let home = home("post-channel");
+    let (mcp, _sent) = start(&home).await;
     let current = from_human();
     let client = {
         let (url, token) = http_server(&mcp, &current.thread_id);

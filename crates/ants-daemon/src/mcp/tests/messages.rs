@@ -4,7 +4,8 @@ use super::*;
 
 #[tokio::test]
 async fn send_message_follows_on_from_the_current_message() {
-    let (mcp, mut sent) = start(&home("send")).await;
+    let home = home("send");
+    let (mcp, mut sent) = start(&home).await;
     let current = from_human();
     let (url, token) = http_server(&mcp, &current.thread_id);
     let client = http_client(&url, &token).await;
@@ -34,7 +35,8 @@ async fn send_message_follows_on_from_the_current_message() {
 
 #[tokio::test]
 async fn react_takes_the_current_message_or_a_named_one_and_removes() {
-    let (mcp, _sent) = start(&home("react")).await;
+    let home = home("react");
+    let (mcp, _sent) = start(&home).await;
     let current = from_human();
     let (url, token) = http_server(&mcp, &current.thread_id);
     let client = http_client(&url, &token).await;
@@ -91,7 +93,8 @@ async fn react_takes_the_current_message_or_a_named_one_and_removes() {
 
 #[tokio::test]
 async fn list_reactions_shows_those_to_the_current_message_or_a_named_one() {
-    let (mcp, _sent) = start(&home("list-reactions")).await;
+    let home = home("list-reactions");
+    let (mcp, _sent) = start(&home).await;
     let current = from_human();
     let (url, token) = http_server(&mcp, &current.thread_id);
     let client = http_client(&url, &token).await;
@@ -138,7 +141,8 @@ async fn list_reactions_shows_those_to_the_current_message_or_a_named_one() {
 
 #[tokio::test]
 async fn a_suggested_title_waits_for_the_turn_s_reply_and_goes_with_the_turn() {
-    let (mcp, _sent) = start(&home("title")).await;
+    let home = home("title");
+    let (mcp, _sent) = start(&home).await;
     let current = from_human();
     let thread = &current.thread_id;
     let (url, token) = http_server(&mcp, thread);
@@ -166,7 +170,8 @@ async fn a_suggested_title_waits_for_the_turn_s_reply_and_goes_with_the_turn() {
 #[tokio::test]
 async fn complete_ends_an_ant_s_message_turn_with_no_reply_and_a_check_reaction() {
     let humans = Registry::with(UserId::human(), &["alice"]);
-    let (mcp, mut sent) = start_with(&home("complete"), Vec::new(), Arc::default(), humans).await;
+    let home = home("complete");
+    let (mcp, mut sent) = start_with(&home, Vec::new(), Arc::default(), humans).await;
     let reacted: Arc<StdMutex<Vec<(Uuid, String)>>> = Arc::default();
     let kept = reacted.clone();
     mcp.with_reaction_asker(Arc::new(move |request: ants_proto::ReactionsRequest| {
@@ -208,7 +213,8 @@ async fn complete_ends_an_ant_s_message_turn_with_no_reply_and_a_check_reaction(
 
     drop(turn);
 
-    let (failing, _) = start(&home("complete-failing")).await;
+    let other_home = super::home("complete-failing");
+    let (failing, _) = start(&other_home).await;
     failing.with_reaction_asker(Arc::new(|_| Box::pin(async { Err(anyhow::anyhow!("hub unreachable")) })));
     let client = {
         let (url, token) = http_server(&failing, thread);
@@ -224,7 +230,8 @@ async fn complete_ends_an_ant_s_message_turn_with_no_reply_and_a_check_reaction(
 #[tokio::test]
 async fn complete_is_refused_for_a_message_always_answered() {
     let humans = Registry::with(UserId::human(), &["alice"]);
-    let (mcp, mut sent) = start_with(&home("complete-refused"), Vec::new(), Arc::default(), humans).await;
+    let home = home("complete-refused");
+    let (mcp, mut sent) = start_with(&home, Vec::new(), Arc::default(), humans).await;
     let from_ant = || Envelope::new(user("dev-b"), user("dev-a"), "x");
     let mut for_human = from_ant();
     for_human.on_behalf_of = Some(user("alice"));
@@ -270,7 +277,8 @@ async fn complete_is_refused_for_a_message_always_answered() {
 #[tokio::test]
 async fn ask_human_asks_the_thread_s_owner_without_spending_a_turn() {
     let humans = Registry::with(UserId::human(), &["alice"]);
-    let (mcp, mut sent) = start_with(&home("ask-human"), Vec::new(), Arc::default(), humans).await;
+    let home = home("ask-human");
+    let (mcp, mut sent) = start_with(&home, Vec::new(), Arc::default(), humans).await;
     let mut current = Envelope::new(user("dev-b"), user("dev-a"), "q").with_owner(Some(user("alice")));
     current.turn_budget = 0;
     let client = {
@@ -311,7 +319,8 @@ async fn ask_human_asks_the_thread_s_owner_without_spending_a_turn() {
 
 #[tokio::test]
 async fn messages_between_ants_spend_the_budget() {
-    let (mcp, mut sent) = start(&home("budget")).await;
+    let home = home("budget");
+    let (mcp, mut sent) = start(&home).await;
     let mut current = Envelope::new(user("dev-b"), user("dev-a"), "q");
     current.turn_budget = 1;
     let _turn = mcp.begin(&current);
@@ -335,7 +344,8 @@ async fn messages_between_ants_spend_the_budget() {
 async fn notes_posts_spend_the_budget_then_the_thread_goes_to_its_owner() {
     let notes = Arc::new(MemoryNotes::default());
     let humans = Registry::with(UserId::human(), &["alice"]);
-    let (mcp, mut sent) = start_with(&home("notes"), Vec::new(), notes.clone(), humans).await;
+    let home = home("notes");
+    let (mcp, mut sent) = start_with(&home, Vec::new(), notes.clone(), humans).await;
     let mut current =
         Envelope::new(user("dev-b"), user("dev-a"), "plan the release with me").with_owner(Some(user("alice")));
     current.turn_budget = 5;

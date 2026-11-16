@@ -4,7 +4,8 @@ use super::*;
 
 #[tokio::test]
 async fn http_needs_a_known_token() {
-    let (mcp, _sent) = start(&home("auth")).await;
+    let home = home("auth");
+    let (mcp, _sent) = start(&home).await;
     let (url, _) = http_server(&mcp, &from_human().thread_id);
     let config = StreamableHttpClientTransportConfig::with_uri(url).auth_header("nope");
     let refused = ClientConfig::default().serve(StreamableHttpClientTransport::from_config(config)).await;
@@ -13,7 +14,8 @@ async fn http_needs_a_known_token() {
 
 #[tokio::test]
 async fn the_socket_serves_the_tools_after_the_token() {
-    let (mcp, mut sent) = start(&home("sock")).await;
+    let home = home("sock");
+    let (mcp, mut sent) = start(&home).await;
     let current = from_human();
     let _turn = mcp.begin(&current);
     let [McpServer::Stdio(server)] = &mcp.servers()(&current.thread_id, Path::new("/"), false)[..] else {
@@ -98,7 +100,8 @@ fn fake_pool(mcp: &Mcp, http: bool, seen: Arc<StdMutex<Vec<Vec<McpServer>>>>) ->
 
 #[tokio::test]
 async fn sessions_get_the_tools_of_their_thread() {
-    let (mcp, mut sent) = start(&home("pool")).await;
+    let home = home("pool");
+    let (mcp, mut sent) = start(&home).await;
     let seen = Arc::new(StdMutex::new(Vec::new()));
     let pool = fake_pool(&mcp, true, seen.clone());
     let (one, two) = (from_human(), from_human());
@@ -121,7 +124,8 @@ async fn sessions_get_the_tools_of_their_thread() {
 
 #[tokio::test]
 async fn harnesses_without_http_get_the_stdio_bridge() {
-    let (mcp, _sent) = start(&home("stdio")).await;
+    let home = home("stdio");
+    let (mcp, _sent) = start(&home).await;
     let seen = Arc::new(StdMutex::new(Vec::new()));
     let pool = fake_pool(&mcp, false, seen.clone());
     let current = from_human();

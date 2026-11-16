@@ -44,7 +44,7 @@ async fn attach_sends_files_from_the_working_directory_only() {
     let (ok, text) = call(&client, "send_message", send(serde_json::json!(["notes.txt"]))).await;
     assert!(!ok && text.contains("attachments are not available here; nothing sent"), "{text}");
     let stored = MemoryFiles::default();
-    mcp.with_files(memory_files(stored.clone()), home.clone());
+    mcp.with_files(memory_files(stored.clone()), home.to_path_buf());
 
     let (ok, text) = call(&client, "send_message", send(serde_json::json!(["notes.txt", "./sub/shot.png"]))).await;
     assert!(ok, "{text}");
@@ -96,7 +96,7 @@ async fn attach_to_reply_names_the_files_the_turns_answer_carries() {
     let home = home("attach-to-reply");
     let (mcp, _sent) = start(&home).await;
     let stored = MemoryFiles::default();
-    mcp.with_files(memory_files(stored.clone()), home.clone());
+    mcp.with_files(memory_files(stored.clone()), home.to_path_buf());
     let work = home.join("work");
     std::fs::create_dir_all(&work).unwrap();
     std::fs::write(work.join("a.txt"), "aa").unwrap();
@@ -159,7 +159,7 @@ async fn attach_redacts_secrets_in_text_files_only() {
     let home = home("attach-redact");
     let (mcp, mut sent) = start(&home).await;
     let stored = MemoryFiles::default();
-    mcp.with_files(memory_files(stored.clone()), home.clone());
+    mcp.with_files(memory_files(stored.clone()), home.to_path_buf());
     mcp.with_redactor(Arc::new(crate::redact::Redactor::default()));
     let work = home.join("work");
     std::fs::create_dir_all(&work).unwrap();
@@ -202,7 +202,7 @@ async fn read_attachment_waits_for_the_message_being_handled_as_its_stored_time_
             Box::pin(async move { Err(anyhow::anyhow!("attachment {handle} is not stored")) })
         }),
     };
-    mcp.with_files(files, home.clone());
+    mcp.with_files(files, home.to_path_buf());
     let current = Envelope::new(user("dev-b"), user("dev-a"), "files");
     let carried = current.attachment_handle(Uuid::now_v7());
     let other = current.attachment_handle(Uuid::now_v7());
@@ -223,7 +223,7 @@ async fn read_attachment_returns_images_and_text_and_saves_other_files() {
     let home = home("read-attachment");
     let (mcp, _sent) = start(&home).await;
     let stored = MemoryFiles::default();
-    mcp.with_files(memory_files(stored.clone()), home.clone());
+    mcp.with_files(memory_files(stored.clone()), home.to_path_buf());
     let tree = home.join("tree");
     std::fs::create_dir_all(&tree).unwrap();
     let current = Envelope::new(user("dev-b"), user("dev-a"), "files");
