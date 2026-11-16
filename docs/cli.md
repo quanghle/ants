@@ -148,7 +148,7 @@ The `ants` binary provides scripting commands, daemon and service subcommands, a
 
 `Ctrl-K` (or typing `@`, `#`, or `/` in a view) focuses the command bar (`Esc` unfocuses keeping text; `Enter` sends; `Alt-Enter` inserts a newline; `Ctrl-E` opens `$VISUAL`/`$EDITOR`; `Tab` completes `@` users, `#` channels, `/` commands, and `/attach` paths):
 
-- `@ant TEXT` starts a new thread with `ant`; `#channel TEXT` posts to `channel`; plain text replies on the open thread (or DMs the selected person, else sends to the human's assistant or `messenger`); `//TEXT` sends literal leading `/`.
+- `@ant TEXT` starts a new thread with `ant` (on an open channel thread, posts there mentioning `ant`); `#channel TEXT` posts to `channel`; plain text replies on the open thread (or DMs the selected person, else sends to the human's assistant or `messenger`); `//TEXT` sends literal leading `/`.
 - Slash commands act on the open or selected thread: `/approve [ID] [--always]`, `/reject [ID]`, `/grant [TEXT]`, `/cancel`, `/steer TEXT`, `/answer N|TEXT`, `/done`, `/undone`, `/pin`, `/unpin`, `/mute [DURATION]`, `/unmute`, `/snooze [DURATION]`, `/unsnooze`, `/archive`, `/unarchive`, `/title TEXT`, `/react NAME`, `/goto THREAD|#channel|@user`, `/search QUERY`, `/tree`, `/save [PATH]`, `/tldr`, `/digest [SINCE]`, `/attach PATH`, `/detach`, `/retire ANT`, and `/quit`.
 
 ### `ants dash`
