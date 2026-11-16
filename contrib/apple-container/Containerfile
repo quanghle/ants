@@ -14,6 +14,7 @@ FROM nats:2.15.3-alpine AS nats
 
 FROM node:24-bookworm-slim
 ARG COPILOT_VERSION=1.0.112
+ARG BD_VERSION=v0.8.0
 ENV DO_NOT_TRACK=1 COPILOT_TELEMETRY_DISABLED=true COPILOT_OTEL_ENABLED=false \
     OTEL_SDK_DISABLED=true npm_config_audit=false npm_config_fund=false \
     HOME=/demo/home ANTS_CONFIG=/demo/config.toml ANTS_JS_DOMAIN=hub \
@@ -23,6 +24,19 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists \
     && npm install --global "@github/copilot@${COPILOT_VERSION}" \
     && npm cache clean --force
+RUN case "$(dpkg --print-architecture)" in \
+        arm64) target=aarch64-unknown-linux-musl ;; \
+        amd64) target=x86_64-unknown-linux-musl ;; \
+        *) echo "no bd release for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac \
+    && dir=$(mktemp -d) && cd "$dir" \
+    && base="https://github.com/quanghle/bd-sync/releases/download/${BD_VERSION}" \
+    && curl -fsSL -O "$base/bd-${BD_VERSION}-$target.tar.gz" -O "$base/SHA256SUMS" \
+    && sha256sum --check --ignore-missing --strict SHA256SUMS \
+    && tar -xzf "bd-${BD_VERSION}-$target.tar.gz" \
+    && install -m 0755 "$(find . -type f -name bd -perm -u+x | head -n 1)" /usr/local/bin/bd \
+    && cd / && rm -rf "$dir" \
+    && bd --version
 COPY --from=build /ants /usr/local/bin/ants
 COPY --from=nats /usr/local/bin/nats-server /usr/local/bin/nats-server
 COPY contrib/apple-container/node.sh /usr/local/bin/ants-demo-node

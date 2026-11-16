@@ -73,6 +73,13 @@ worktrees = false
 EOF
 
 if [ "$node" = hub ]; then
+    cat >> /demo/config.toml <<'EOF'
+tasks = "Track tasks and durable memories in bd (BD_DB names the database). Start with bd prime. Use bd ready, bd create, bd claim, bd close for tasks; bd remember to store a memory and bd memories to search them."
+env = { BD_DB = "/demo/work/.bd/bd.db" }
+EOF
+    if [ ! -f /demo/work/.bd/bd.db ]; then
+        bd init --prefix demo -C /demo/work
+    fi
     cat > /demo/nats.conf <<'EOF'
 server_name: demo-hub
 listen: 127.0.0.1:4222

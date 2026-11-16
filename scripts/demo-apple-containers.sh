@@ -7,7 +7,7 @@ usage() {
     cat <<'EOF'
 Usage: scripts/demo-apple-containers.sh COMMAND [ARGS...]
 
-  build                 Build ants, NATS and Copilot into a Linux image
+  build                 Build ants, NATS, Copilot and bd into a Linux image
   up                    Start the hub and two leaves (build first if needed)
   login NODE            Sign in to Copilot on hub, leaf-a or leaf-b
   ants NODE ARGS...      Run ants on a node, with its demo human credentials
@@ -21,6 +21,7 @@ Environment:
   ANTS_DEMO_STATE            Dedicated state directory
                             (default: ~/.local/share/ants/apple-container-demo)
   ANTS_DEMO_COPILOT_VERSION  Copilot npm version for build (default: 1.0.112)
+  ANTS_DEMO_BD_VERSION       bd release tag for build (default: v0.8.0)
 EOF
 }
 
@@ -82,7 +83,8 @@ build() (
     mkdir -p "$context/contrib"
     cp -R "$root/contrib/apple-container" "$root/contrib/launchd" "$root/contrib/systemd" "$context/contrib/"
     container build --cpus 4 --memory 4g --tag "$image" --file "$context/contrib/apple-container/Containerfile" \
-        --build-arg "COPILOT_VERSION=${ANTS_DEMO_COPILOT_VERSION:-1.0.112}" "$context"
+        --build-arg "COPILOT_VERSION=${ANTS_DEMO_COPILOT_VERSION:-1.0.112}" \
+        --build-arg "BD_VERSION=${ANTS_DEMO_BD_VERSION:-v0.8.0}" "$context"
 )
 
 ready() {
@@ -178,6 +180,8 @@ smoke() {
         run_ants hub ant pause "$node-ant" >/dev/null
         run_ants hub ant resume "$node-ant" >/dev/null
     done
+    run_ants hub ant memories hub-ant --json \
+        | jq --exit-status '.bd.db == "/demo/work/.bd/bd.db" and .bd.error == null' >/dev/null
     thread=$(uuidgen | tr '[:upper:]' '[:lower:]')
     for node in hub leaf-a leaf-b; do
         text="demo smoke $thread from $node"
@@ -189,7 +193,7 @@ smoke() {
             grep --fixed-strings "demo smoke $thread from $source" "$state/smoke-$node.log" >/dev/null
         done
     done
-    printf 'Three Copilot-backed ants live and obeyed admin orders; all three nodes exchanged notes. No model calls made.\n'
+    printf 'Three Copilot-backed ants live and obeyed admin orders; hub-ant has bd; all three nodes exchanged notes. No model calls made.\n'
 }
 
 case "$command" in
