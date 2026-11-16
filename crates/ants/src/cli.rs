@@ -12,8 +12,8 @@ use futures::StreamExt as _;
 use crate::cmd::{
     ant::AntCommand, assistant::AssistantCommand, attachment::AttachmentCommand, auth::AuthCommand,
     bridge::BridgeCommand, channel::ChannelCommand, dead::DeadCommand, enroll::EnrollCommand, harness::HarnessCommand,
-    hook::HookCommand, keys::KeysCommand, leaf::LeafCommand, login, notify::NotifyCommand, setup,
-    thread::ThreadCommand, tools::ToolsCommand, webhook::WebhookCommand,
+    hook::HookCommand, keys::KeysCommand, leaf::LeafCommand, login, notify::NotifyCommand, remind::RemindCommand,
+    setup, thread::ThreadCommand, tools::ToolsCommand, webhook::WebhookCommand,
 };
 use crate::{add, attachments, channel, completions, compose, progress, renew, retire, serve, spend, thread, upgrade};
 
@@ -267,6 +267,10 @@ pub(crate) enum Command {
     /// human: snooze them, resume them, or show what is held. Needs a human's credentials.
     #[command(subcommand)]
     Notify(NotifyCommand),
+    /// Remind the CLI's human of a message or thread later, on every device of the human, as `/remind` in `ants chat`
+    /// does: set a reminder, list them, or clear one. Needs a human's credentials.
+    #[command(subcommand)]
+    Remind(RemindCommand),
     /// Create the CLI's human's dedicated assistant ant, designate an existing ant as its assistant, withdraw or
     /// retire it, show a human's, or enroll it as a device of the human for sealed messages. The human's device signs
     /// the designation. Needs a human device's credentials, but for `show` and `key`.

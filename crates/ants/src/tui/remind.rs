@@ -6,42 +6,11 @@
 #[cfg(doc)]
 use ants_proto::Reminders;
 use ants_proto::{Reminder, ThreadId, Uuid};
-use chrono::{DateTime, Local, NaiveDateTime, NaiveTime, TimeDelta, TimeZone, Utc};
+use chrono::{DateTime, Local, Utc};
 
 use super::acts::Change;
 use super::model::{Action, Model};
 use super::snooze;
-
-/// When `text`, `DURATION|TIME [NOTE]`, says to be reminded from `now`, and the note: a duration such as `1h30m`
-/// from now, a time of day `HH:MM` (the next one) or a date and time `YYYY-MM-DDTHH:MM`, both in `zone`.
-pub fn parse<Z: TimeZone>(text: &str, now: DateTime<Utc>, zone: &Z) -> Result<(DateTime<Utc>, String), String> {
-    let text = text.trim();
-    let (when, note) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
-    if when.is_empty() {
-        return Err("when to remind: a duration such as 1h, a time HH:MM or YYYY-MM-DDTHH:MM".to_owned());
-    }
-    let local = now.with_timezone(zone).naive_local();
-    let at = if let Ok(time) = NaiveTime::parse_from_str(when, "%H:%M") {
-        let today = local.date().and_time(time);
-        let day = if today > local { today } else { today + TimeDelta::days(1) };
-        utc(zone, day, when)?
-    } else if let Ok(at) = NaiveDateTime::parse_from_str(when, "%Y-%m-%dT%H:%M") {
-        utc(zone, at, when)?
-    } else {
-        let duration = ants_proto::duration::parse(when)?;
-        now + TimeDelta::from_std(duration).map_err(|_| format!("too long: {when}"))?
-    };
-    if at <= now {
-        return Err(format!("{when} is past: a reminder is due later"));
-    }
-    Ok((at, note.trim().to_owned()))
-}
-
-/// `at` in `zone`, in UTC; the earlier of two in a repeated hour.
-fn utc<Z: TimeZone>(zone: &Z, at: NaiveDateTime, when: &str) -> Result<DateTime<Utc>, String> {
-    let at = zone.from_local_datetime(&at).earliest().ok_or_else(|| format!("no such local time: {when}"))?;
-    Ok(at.with_timezone(&Utc))
-}
 
 impl Model {
     /// `b` on `thread`, or on `message` on it: ask when to be reminded of it.
@@ -58,7 +27,7 @@ impl Model {
         text: &str,
         now: DateTime<Utc>,
     ) -> Result<Action, String> {
-        let (due, note) = parse(text, now, &Local)?;
+        let (due, note) = crate::remind::parse(text, now, &Local)?;
         let reminder = Reminder { at: now, due, message, note, pushed: false };
         Ok(self.set_reminder(thread, Some(reminder)))
     }
@@ -81,23 +50,6 @@ mod tests {
     use crate::live::tests::at;
     use crate::tui::model::Key;
     use crate::tui::model::tests::model;
-
-    #[test]
-    fn a_reminder_is_due_after_a_duration_at_the_next_time_of_day_or_at_a_date() {
-        let now = at(0);
-        assert_eq!(parse("90m check CI", now, &Utc), Ok((now + TimeDelta::minutes(90), "check CI".to_owned())));
-        let utc = |text: &str| text.parse::<DateTime<Utc>>().unwrap();
-        assert_eq!(now, utc("2027-01-15T08:00:00Z"));
-        assert_eq!(parse("09:30", now, &Utc).unwrap().0, utc("2027-01-15T09:30:00Z"), "later today");
-        assert_eq!(parse("07:00", now, &Utc).unwrap().0, utc("2027-01-16T07:00:00Z"), "tomorrow");
-        let east = chrono::FixedOffset::east_opt(2 * 3600).unwrap();
-        assert_eq!(parse("09:30", now, &east).unwrap().0, utc("2027-01-16T07:30:00Z"), "in the zone");
-        let date = (now + TimeDelta::days(3)).format("%Y-%m-%dT%H:%M").to_string();
-        assert_eq!(parse(&date, now, &Utc).unwrap().0, now + TimeDelta::days(3));
-        assert!(parse("2000-01-01T00:00", now, &Utc).unwrap_err().contains("past"));
-        assert!(parse("", now, &Utc).is_err());
-        assert!(parse("soon", now, &Utc).is_err());
-    }
 
     #[test]
     fn b_asks_when_and_sets_the_reminder_with_its_note_at_once() {

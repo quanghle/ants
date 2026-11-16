@@ -47,6 +47,7 @@ mod quiet;
 mod reacted;
 mod registrar;
 mod reload;
+mod remind;
 mod renew;
 mod restart;
 mod retire;

@@ -32,6 +32,7 @@ pub(crate) mod keys;
 pub(crate) mod leaf;
 pub(crate) mod login;
 pub(crate) mod notify;
+pub(crate) mod remind;
 pub(crate) mod retire;
 pub(crate) mod send;
 pub(crate) mod setup;
@@ -85,6 +86,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         Command::Digest { since } => summary::digest(&nats()?, since).await,
         Command::Attachment(command) => Box::pin(attachment::run(&nats()?, command)).await,
         Command::Notify(command) => notify::run(&nats()?, command).await,
+        Command::Remind(command) => remind::run(&nats()?, command).await,
         Command::Assistant(command) => assistant::run(command, nats).await,
         Command::Watch { subject, thread } => watch::watch(&nats()?, &subject, thread).await,
         Command::Chat { since, compact } => Box::pin(tui::run(&nats()?, since, compact)).await,
