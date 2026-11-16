@@ -34,7 +34,7 @@
 //!
 //! An escalation that reaches a human carries the escalation, so `ants webhook serve` pushes it, and without a
 //! human's message on the thread by `escalation_reminder` the same human gets a reminder on the thread, carrying it
-//! too, then daily for as long as the stream keeps the escalation ([`Reminder`]). The reminder is kept with the
+//! too, then a day later and three days after that, the last ([`Reminder`]). The reminder is kept with the
 //! thread's spend and its due time in the deadlines, so the daemon serving the ant sends it, once, across restarts.
 
 use std::sync::Arc;
@@ -61,10 +61,8 @@ pub const DEFAULT_ESCALATE_AFTER: Duration = Duration::from_mins(30);
 /// Default of `escalation_reminder`: how long an escalation that reached a human waits for a human's message before
 /// the first reminder.
 pub const DEFAULT_ESCALATION_REMINDER: Duration = Duration::from_hours(4);
-/// Between reminders after the first.
-const REMIND_AGAIN: Duration = Duration::from_hours(24);
-/// How long reminders go on after an escalation first reached a human: as long as the stream keeps it.
-const REMIND_FOR: Duration = Duration::from_hours(30 * 24);
+/// The waits before each reminder after the first, backing off; the reminders stop after the last.
+const REMIND_AGAIN: [Duration; 2] = [Duration::from_hours(24), Duration::from_hours(3 * 24)];
 /// Pause after a failed look at the deadlines.
 const RETRY: Duration = Duration::from_secs(30);
 /// Most of an escalation's text kept for the escalations that follow it up.
@@ -639,15 +637,18 @@ impl Escalator {
     }
 
     /// Remind the human `reminder` names of the thread's escalation, on the thread, carrying it, under a message id
-    /// of its own, then schedule the next reminder, if any.
+    /// of its own, then schedule the next reminder, backing off, unless this one is the last ([`REMIND_AGAIN`]).
     async fn remind(&self, thread: &ThreadId, reminder: Reminder, now: i64) -> Result<()> {
         let Reminder { escalation, to, owner, creator, origin_thread, summary, since, sent, .. } = reminder;
         let (ant, stuck) = (&self.ant, &escalation.stuck);
         let waited = chrono::DateTime::from_timestamp_millis(since)
             .map_or_else(String::new, |at| format!(" since {}", at.format("%Y-%m-%d %H:%M UTC")));
+        let again = REMIND_AGAIN.get(sent as usize);
+        let last = if again.is_none() { " This is the last reminder." } else { "" };
         let text = format!(
             "[ants] Reminder: the escalation of {stuck} on thread {thread} ({}) has waited for a human{waited}. A \
-             human's message to {ant} on the thread ends it: `ants ask --thread {thread} @{ant} TEXT`.\n\n{summary}",
+             human's message to {ant} on the thread ends it: `ants ask --thread {thread} @{ant} TEXT`.{last}\n\n\
+             {summary}",
             reason_text(escalation.reason),
         );
         let escalation = Escalation { stand_in: self.chain.stand_in.clone(), ..escalation };
@@ -658,8 +659,7 @@ impl Escalator {
             .with_escalation(Some(escalation));
         let human = notice.to.clone();
         (self.send)(notice, format!("remind-{ant}-{thread}-{since}-{}", sent + 1)).await?;
-        let next = now + millis(REMIND_AGAIN);
-        self.ledger.reminded(thread, (next < since + millis(REMIND_FOR)).then_some(next)).await?;
+        self.ledger.reminded(thread, again.map(|after| now + millis(*after))).await?;
         tracing::info!(%thread, %human, sent = sent + 1, "reminded of the escalation");
         Ok(())
     }
@@ -1189,6 +1189,37 @@ mod tests {
         assert_eq!(owner_text(&start, &OwnerBecause::NoChain), None, "as before chains");
         assert!(owner_text(&one, &OwnerBecause::HopLimit(1)).unwrap().contains("hop limit (max_escalation_hops = 1)"));
         assert!(owner_text(&one, &OwnerBecause::Visited(p("dev-a"))).unwrap().contains("dev-a had it already"));
+    }
+
+    #[tokio::test]
+    async fn reminders_back_off_and_stop_after_the_third() {
+        let sent = Arc::new(std::sync::Mutex::new(Vec::<Envelope>::new()));
+        let into = sent.clone();
+        let send: Sender = Arc::new(move |envelope, _id| {
+            into.lock().unwrap().push(envelope);
+            Box::pin(async { Ok(()) })
+        });
+        let colony: Colony = Arc::new(|| Box::pin(async { Ok(Vec::new()) }));
+        let humans = Registry::with(UserId::human(), &["alice"]);
+        let ledger = Arc::new(Ledger::memory(p("dev-a"), crate::caps::Caps::default()));
+        let chain = Chain { remind: Some(Duration::from_millis(1)), ..Default::default() };
+        let escalator = Escalator::new(p("dev-a"), chain, colony, humans, ledger, send);
+        let notice = Envelope::on_thread(t(), p("dev-a"), p("alice"), "stuck").with_owner(Some(p("alice")));
+        escalator.escalate(Stuck::new(EscalationReason::Cap, notice, "s-1".to_owned(), None)).await.unwrap();
+
+        let mut waits = Vec::new();
+        while let Some(reminder) = escalator.ledger.reminder(&t()).await.unwrap() {
+            let now = reminder.at;
+            escalator.remind(&t(), reminder, now).await.unwrap();
+            waits.push(escalator.ledger.reminder(&t()).await.unwrap().map(|r| r.at - now));
+        }
+        let day = millis(Duration::from_hours(24));
+        assert_eq!(waits, [Some(day), Some(3 * day), None]);
+        let sent = sent.lock().unwrap();
+        let reminders: Vec<_> = sent.iter().filter(|e| e.text.starts_with("[ants] Reminder:")).collect();
+        assert_eq!(reminders.len(), 3);
+        assert!(reminders[2].text.contains("This is the last reminder."), "{}", reminders[2].text);
+        assert!(!reminders[1].text.contains("last reminder"), "{}", reminders[1].text);
     }
 
     mod assistant_first {
