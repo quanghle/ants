@@ -91,6 +91,13 @@ fn available(listed: &Listed) -> Result<&Listed> {
 /// so.
 pub async fn open(js: &jetstream::Context, keyring: Option<&Keyring>, listed: &Listed) -> Result<String> {
     let path = fetched(js, keyring, listed).await?;
+    let viewer = view(path).await?;
+    Ok(format!("opened {} ({}) with {viewer}", listed.attachment.name, attachments::size(listed.size())))
+}
+
+/// Open the file at `path` with the system's viewer ([`opener`]): the viewer's name.
+#[cfg(not(windows))]
+async fn view(path: PathBuf) -> Result<&'static str> {
     let opener = opener();
     let status = tokio::process::Command::new(opener)
         .arg(&path)
@@ -103,7 +110,52 @@ pub async fn open(js: &jetstream::Context, keyring: Option<&Keyring>, listed: &L
     if !status.success() {
         bail!("{opener} {status} opening {}", path.display());
     }
-    Ok(format!("opened {} ({}) with {opener}", listed.attachment.name, attachments::size(listed.size())))
+    Ok(opener)
+}
+
+/// Open the file at `path` with the app Windows associates with its type, as Explorer does: the viewer's name.
+#[cfg(windows)]
+async fn view(path: PathBuf) -> Result<&'static str> {
+    tokio::task::spawn_blocking(move || shell_open(&path)).await.context("opening the file")??;
+    Ok("its default app")
+}
+
+#[cfg(windows)]
+fn shell_open(path: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::System::Com::{
+        COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
+    };
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let file: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    // Shell extensions a file type's handler may use need COM on the calling thread.
+    // SAFETY: the reserved pointer is null as required; a success is balanced by CoUninitialize below.
+    let com =
+        unsafe { CoInitializeEx(std::ptr::null(), (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32) } >= 0;
+    // SAFETY: `file` is NUL-terminated and outlives the call; the other pointers are null, which the call allows (the
+    // default verb, no parameters, the current directory, no owner window).
+    let done = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    let error = std::io::Error::last_os_error();
+    if com {
+        // SAFETY: balances the successful CoInitializeEx above, on the same thread.
+        unsafe { CoUninitialize() };
+    }
+    // ShellExecuteW returns a value above 32 on success.
+    if done as isize <= 32 {
+        return Err(error).with_context(|| format!("opening {}", path.display()));
+    }
+    Ok(())
 }
 
 /// Fetch the attachment `listed`, checking its bytes and opening one sealed with `keyring` ([`attachments::open`]),
@@ -131,6 +183,7 @@ fn private_dir(under: &Path, id: Uuid) -> Result<PathBuf> {
 }
 
 /// The system's viewer of a file: `open` on macOS, `wslview` under WSL, else `xdg-open`.
+#[cfg(not(windows))]
 fn opener() -> &'static str {
     let wsl = || {
         std::env::var_os("WSL_DISTRO_NAME").is_some()
@@ -140,6 +193,7 @@ fn opener() -> &'static str {
     opener_on(std::env::consts::OS, wsl)
 }
 
+#[cfg(not(windows))]
 fn opener_on(os: &str, wsl: impl FnOnce() -> bool) -> &'static str {
     match os {
         "macos" => "open",
@@ -306,6 +360,7 @@ mod tests {
         assert_eq!(mark.at(7, 3), 0, "past the last, the first");
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn the_viewer_is_that_of_the_system() {
         assert_eq!(opener_on("macos", || true), "open");
