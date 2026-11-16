@@ -76,6 +76,23 @@ if [ "$node" = hub ]; then
     cat >> /demo/config.toml <<'EOF'
 tasks = "Track tasks and durable memories in bd (BD_DB names the database). Start with bd prime. Use bd ready, bd create, bd claim, bd close for tasks; bd remember to store a memory and bd memories to search them."
 env = { BD_DB = "/demo/work/.bd/bd.db" }
+
+# The assistant acts with the human's privileges, so its Copilot asks before running tools: the daemon's own MCP
+# tools (server `ants`) run unasked; shell commands, edits and fetches meet its allow rules and the human's approval.
+[harnesses.copilot-gated]
+command = "copilot"
+args = ["--acp", "--allow-tool=ants"]
+sign_in = "copilot login"
+quota_exhausted = [
+    "premium request",
+    "ai credits",
+    "weekly rate limit",
+    "used all your copilot free",
+    "free_tier_limit",
+    "overage_limit",
+    "spend_limit_reached",
+]
+context_overflow = ["model_max_prompt_tokens_exceeded", "prompt token count of"]
 EOF
     if [ ! -f /demo/work/.bd/bd.db ]; then
         bd init --prefix demo -C /demo/work
@@ -130,6 +147,8 @@ done
 (: > /dev/tcp/127.0.0.1/4222)
 if [ "$node" = hub ]; then
     ants init --creds /demo/auth/human.creds
+    ants assistant enable --dir /demo/auth --creds /demo/auth/human.creds --config /demo/config.toml \
+        --home /demo/assistant --harness copilot-gated
 fi
 ants daemon --config /demo/config.toml --upgrade-check 0 &
 daemon_pid=$!

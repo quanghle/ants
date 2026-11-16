@@ -18,7 +18,11 @@ an [admin](auth.md#admins), and each node's daemon runs with
 [host credentials](auth.md#machine-host-credentials) for its machine (`hub`, `leaf-a`, `leaf-b`), so admin orders such as
 `ants ant pause`, `ants ant set` and `ants ant restart` reach every ant. `hub-ant` tracks tasks and durable memories in
 [bd](https://github.com/quanghle/bd-sync): its `BD_DB` names `/demo/work/.bd/bd.db`, created on the hub's first start,
-and its `tasks` memory says to use bd. This online demo requires
+and its `tasks` memory says to use bd. The hub also runs `human`'s [personal assistant](auth.md#dedicated-assistant),
+`human-assistant`, enabled on every hub start (`ants assistant enable`, which keeps what earlier runs left), working in
+`/demo/assistant`. It runs on the harness `copilot-gated`: Copilot without `--allow-all`, so its shell commands, edits
+and fetches reach the daemon's allow rules (`read`, `search`, `think`) and `human`'s approval, while the daemon's own
+MCP tools (`--allow-tool=ants`) run unasked. This online demo requires
 the hub to remain reachable; it does not provision [store-and-forward outboxes](transport.md#store-and-forward).
 
 ## Requirements
@@ -45,8 +49,8 @@ scripts/demo-apple-containers.sh smoke
 ```
 
 The build VM gets four CPUs and 4 GiB of memory. The first build downloads dependencies and compiles a Linux release
-binary. `up` also builds when the image is absent; rerun `build` after source changes. The smoke check verifies all three
-live Copilot-backed ants and their MCP sockets, pauses and resumes each ant by admin order from the hub, checks that `hub-ant`'s bd database reads (`ants ant memories`),
+binary. `up` also builds when the image is absent; rerun `build` after source changes. The smoke check verifies all four
+live Copilot-backed ants, the assistant's grant and their MCP sockets, pauses and resumes each ant by admin order from the hub, checks that `hub-ant`'s bd database reads (`ants ant memories`),
 then sends notes
 from every node, reading them from every other node through the hub. It makes no model calls and needs no Copilot
 sign-in.
@@ -67,11 +71,12 @@ scripts/demo-apple-containers.sh login leaf-b
 scripts/demo-apple-containers.sh ants hub ask --wait @hub-ant "Identify the node."
 scripts/demo-apple-containers.sh ants hub ask --wait @leaf-a-ant "Identify the node."
 scripts/demo-apple-containers.sh ants leaf-a ask --wait @leaf-b-ant "Identify the node."
+scripts/demo-apple-containers.sh ants hub ask --wait @human-assistant "Summarize what waits on human."
 scripts/demo-apple-containers.sh ants hub ask --wait @hub-ant \
   "Ask leaf-a-ant and leaf-b-ant to identify their nodes, then summarize both replies."
 ```
 
-The default Copilot model is left unchanged. Copilot runs tools unasked, as with the built-in harness elsewhere; no
+The default Copilot model is left unchanged. The node ants' Copilot runs tools unasked, as with the built-in harness elsewhere (the assistant's asks); no
 host directories are mounted into running nodes. Do not copy production secrets or repositories into the demo workdirs.
 Authentication is intentionally interactive: host GitHub tokens and Copilot configuration are
 not copied or forwarded. Sign-in data stays under `/demo/home/` in each node's volume, potentially in plaintext where no

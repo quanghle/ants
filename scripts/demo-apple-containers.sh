@@ -173,9 +173,10 @@ smoke() {
         ready "$node"
         container exec "$name-$node" test -S /demo/ant/mcp.sock
         run_ants "$node" colony --json | jq --slurp --exit-status \
-            'map(select(.state == "live" and .harness == "copilot") | .ant) | sort
-             == ["hub-ant", "leaf-a-ant", "leaf-b-ant"]' >/dev/null
+            'map(select(.state == "live" and (.harness | startswith("copilot"))) | .ant) | sort
+             == ["hub-ant", "human-assistant", "leaf-a-ant", "leaf-b-ant"]' >/dev/null
     done
+    run_ants hub assistant show >/dev/null
     for node in hub leaf-a leaf-b; do
         run_ants hub ant pause "$node-ant" >/dev/null
         run_ants hub ant resume "$node-ant" >/dev/null
@@ -193,7 +194,7 @@ smoke() {
             grep --fixed-strings "demo smoke $thread from $source" "$state/smoke-$node.log" >/dev/null
         done
     done
-    printf 'Three Copilot-backed ants live and obeyed admin orders; hub-ant has bd; all three nodes exchanged notes. No model calls made.\n'
+    printf 'Four Copilot-backed ants live (human-assistant granted) and obeyed admin orders; hub-ant has bd; all three nodes exchanged notes. No model calls made.\n'
 }
 
 case "$command" in
