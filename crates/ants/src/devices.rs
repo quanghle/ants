@@ -106,20 +106,22 @@ pub async fn publish_or_warn(js: &jetstream::Context, own: &Own) {
 
 /// The revocations of the team in `dir` that the devices bucket keeps a record of: those of every key of a human's
 /// credentials (an admin's among them) and of an assistant's, whose roles readers honour only from a key without one,
-/// and of every key the registry does not know, which may be one.
+/// of an ant's, whose shared settings readers take only signed with a key without one, and of every key the registry
+/// does not know, which may be one.
 fn device_revocations(dir: &Path) -> Result<Vec<DeviceRevocation>> {
     let issued = revoke::issued(dir)?;
     let human_or_unknown = |key: &str| {
         let mut known = issued.iter().filter(|i| i.key == key).peekable();
-        known.peek().is_none() || known.any(|i| matches!(i.kind, revoke::Kind::Human | revoke::Kind::Assistant))
+        known.peek().is_none()
+            || known.any(|i| matches!(i.kind, revoke::Kind::Human | revoke::Kind::Assistant | revoke::Kind::Ant))
     };
     let revoked = revoke::revoked(dir)?.into_iter().filter(|r| human_or_unknown(&r.key));
     Ok(revoked.map(|r| DeviceRevocation { key: r.key, revoked_at: r.revoked_at }).collect())
 }
 
 /// Put in the devices bucket on the hub at `url`, with credentials signed by the account key in `dir`
-/// ([`auth::revoker_creds`]), a record of each revoked key of a human's credentials it lacks, so senders stop sealing
-/// for the devices they are for. Returns the keys recorded now. Fails if the hub is out of reach: the next `ants auth
+/// ([`auth::revoker_creds`]), a record of each revoked key of a human's or an ant's credentials it lacks, so senders
+/// stop sealing for the devices they are for and readers refuse the shared settings they signed. Returns the keys recorded now. Fails if the hub is out of reach: the next `ants auth
 /// push` records them.
 pub async fn record_revocations(url: &str, js_domain: Option<&JsDomain>, dir: &Path) -> Result<Vec<String>> {
     let revocations = device_revocations(dir)?;

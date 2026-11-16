@@ -25,8 +25,7 @@ use serde_json::{Map, Value};
 
 use super::{ConfigFile, NO_CONFIG, Orders, applied, refused};
 use crate::config::edit::{Edit, needed};
-use crate::direct_kv::DirectKv;
-use crate::shared::{self, Found, Roles};
+use crate::shared::{self, Bucket, Found, Roles};
 use crate::template::{AntTemplate, REQUEST_KEYS};
 
 /// How often a change of the shared settings is tried while they keep changing meanwhile.
@@ -37,18 +36,15 @@ const ANY_NATS: &str = "nats://127.0.0.1:4222";
 /// Carry out the order, refusing it when its changes do not apply; fails, for the order to be taken again, only when
 /// the shared settings cannot be read or written.
 pub(super) async fn apply(
-    identities: &DirectKv,
+    bucket: Bucket<'_>,
     orders: &Orders,
     order: &AdminOrder,
     changes: &[FieldChange],
 ) -> Result<AdminOutcome> {
     let Some(config) = &orders.config else { return Ok(refused(order, NO_CONFIG)) };
     let shares = changes.iter().any(|c| c.field.first().is_some_and(|key| is_shared_field(key)));
-    let edited = if shares {
-        edit_shared(identities, config, orders, order, changes).await?
-    } else {
-        edit(config, order, changes)
-    };
+    let edited =
+        if shares { edit_shared(bucket, config, orders, order, changes).await? } else { edit(config, order, changes) };
     Ok(match edited {
         Ok(written) => {
             if written {
@@ -74,14 +70,14 @@ fn edit(config: &ConfigFile, order: &AdminOrder, changes: &[FieldChange]) -> Res
 /// record cannot be read or written, the inner one with why the changes do not apply, else holds whether the file was
 /// written.
 async fn edit_shared(
-    identities: &DirectKv,
+    bucket: Bucket<'_>,
     config: &ConfigFile,
     orders: &Orders,
     order: &AdminOrder,
     changes: &[FieldChange],
 ) -> Result<Result<bool>> {
     for _ in 0..TRIES {
-        let found = shared::read(identities, &order.ant, &orders.accounts).await?;
+        let found = config.shared.check(shared::read(bucket, &order.ant).await?);
         if matches!(found, Found::NoBucket) {
             return Ok(edit(config, order, changes));
         }
@@ -89,7 +85,7 @@ async fn edit_shared(
             Err(e) => return Ok(Err(e)),
             Ok(Prepared { record, last, file }) => {
                 if let Some(record) = record {
-                    if !identities.update(record.key(), serde_json::to_vec(&record)?, last).await? {
+                    if !bucket.identities.update(record.key(), serde_json::to_vec(&record)?, last).await? {
                         tracing::debug!(ant = %order.ant, "the shared settings changed meanwhile; trying again");
                         continue;
                     }
@@ -129,7 +125,7 @@ fn prepare(
     };
     let (before, last) = match found {
         Found::Record(record, last) => (Some(record.fields), last),
-        Found::Malformed(_, last) | Found::Unverified(_, last) | Found::None(last) => (None, last),
+        Found::Malformed(_, last) | Found::Unverified(_, _, last) | Found::None(last) => (None, last),
         Found::NoBucket => bail!("there is no bucket {IDENTITIES_BUCKET} for the ant's shared settings"),
     };
     let start = before.clone().unwrap_or_else(|| shared::local_fields(listed));

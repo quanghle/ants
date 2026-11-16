@@ -329,7 +329,7 @@ fn read(subject: &str, payload: &[u8], msg_id: Option<&str>, machine: &Machine) 
 
 /// The buckets deciding an order reads and writes besides its outcome's.
 struct Stores {
-    /// The revocation records of humans' credentials.
+    /// The revocation records of credentials.
     devices: DirectKv,
     /// The ants' shared settings, which settings orders change ([`set`]).
     identities: DirectKv,
@@ -341,6 +341,11 @@ impl Stores {
             devices: DirectKv::new(js, js_domain, DEVICES_BUCKET).await?,
             identities: DirectKv::new(js, js_domain, IDENTITIES_BUCKET).await?,
         })
+    }
+
+    /// Where the shared settings are read and checked, against the accounts of `orders`.
+    fn shared<'a>(&'a self, orders: &'a Orders) -> crate::shared::Bucket<'a> {
+        crate::shared::Bucket { identities: &self.identities, devices: &self.devices, accounts: &orders.accounts }
     }
 }
 
@@ -389,7 +394,7 @@ async fn apply(
     stored_at: DateTime<Utc>,
 ) -> Result<AdminOutcome> {
     Ok(match &order.op {
-        AdminOp::Set { changes } => set::apply(&stores.identities, orders, order, changes).await?,
+        AdminOp::Set { changes } => set::apply(stores.shared(orders), orders, order, changes).await?,
         AdminOp::Pause => pause::apply(orders, order, true),
         AdminOp::Resume => pause::apply(orders, order, false),
         AdminOp::Restart { now } => restart::apply(orders, order, *now).await,
@@ -398,7 +403,7 @@ async fn apply(
         }
         AdminOp::Retire => retire::apply(js, orders, order).await,
         AdminOp::Clone { new, settings } => {
-            Box::pin(clone::apply(js, &stores.identities, orders, order, new, settings)).await
+            Box::pin(clone::apply(js, stores.shared(orders), orders, order, new, settings)).await
         }
         AdminOp::ReadMemories => memories::apply(orders, order, stored_at).await,
         AdminOp::ReadSettings => settings::apply(orders, order),

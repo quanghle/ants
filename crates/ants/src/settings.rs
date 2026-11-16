@@ -280,13 +280,14 @@ pub async fn set(nats: &Nats<'_>, ant: &UserId, assignments: &[Assignment], wait
 #[cfg(test)]
 mod tests {
     use ants_daemon::admin::ConfigFile;
-    use ants_proto::{FieldChange, Hidden, Permissions, Role};
+    use ants_proto::{FieldChange, Hidden, Permissions, Role, SettingsError};
     use serde_json::json;
 
     use super::*;
     use crate::auth::tests::Server;
     use ants_daemon::Harnesses;
     use ants_daemon::direct_kv::DirectKv;
+    use ants_daemon::shared::{Bucket, Found};
 
     use crate::auth::{NewDevice, issue_device_with, issue_host};
     use crate::orders::tests::{WAIT, host_of_m1};
@@ -298,6 +299,20 @@ mod tests {
 
     fn field(text: &str) -> Vec<String> {
         text.split('.').map(str::to_owned).collect()
+    }
+
+    /// A connection with host credentials of `machine`, as a host daemon has.
+    async fn host_js(server: &Server, machine: &Machine) -> jetstream::Context {
+        let creds = server.dir().join(format!("host-{machine}.creds"));
+        issue_host(&server.dir().join("auth"), machine, None, &creds).unwrap();
+        let client = async_nats::ConnectOptions::with_credentials_file(&creds)
+            .await
+            .unwrap()
+            .custom_inbox_prefix(ants_proto::host_inbox_prefix(machine))
+            .connect(&server.url)
+            .await
+            .unwrap();
+        jetstream::new(client)
     }
 
     #[test]
@@ -504,7 +519,9 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         );
         assert_eq!((created.machine.as_str(), created.by.as_ref()), ("m1", None));
         let accounts = vec![ants_daemon::creds::account(&a_creds).unwrap()];
-        created.verify(accounts.iter().map(String::as_str), Utc::now()).expect("signed with dev-a's credentials");
+        created
+            .verify(accounts.iter().map(String::as_str), |_| false, Utc::now())
+            .expect("signed with dev-a's credentials");
 
         let reading = read(&admin, &js, &dev_a, WAIT).await.unwrap();
         assert_eq!(reading.shared.as_deref(), Some(&created));
@@ -520,7 +537,9 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
             json!({ "model": "o3", "whoami": "a tester", "memory": "notes" })
         );
         assert_eq!(changed.by, Some(alice.clone()));
-        changed.verify(accounts.iter().map(String::as_str), Utc::now()).expect("signed with dev-a's credentials");
+        changed
+            .verify(accounts.iter().map(String::as_str), |_| false, Utc::now())
+            .expect("signed with dev-a's credentials");
         assert!(changes.has_changed().unwrap(), "the daemon reloads with the change");
         let edited = std::fs::read_to_string(&path).unwrap();
         assert!(edited.contains("model = \"o3\"  # fast enough"), "the config sets the model too: {edited}");
@@ -542,17 +561,12 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         let mut own = ants_daemon::config::Ant::new(dev_a.clone(), server.dir().to_path_buf());
         (own.model, own.harness) = (Some("gpt-4".to_owned()), Some("copilot".to_owned()));
         standby.listed(std::slice::from_ref(&own));
-        let (m2, m2_creds) = ("m2".parse().unwrap(), server.dir().join("host-m2.creds"));
-        issue_host(&server.dir().join("auth"), &m2, None, &m2_creds).unwrap();
-        let client = async_nats::ConnectOptions::with_credentials_file(&m2_creds)
-            .await
-            .unwrap()
-            .custom_inbox_prefix(ants_proto::host_inbox_prefix(&m2))
-            .connect(&server.url)
-            .await
-            .unwrap();
-        let m2_kv = DirectKv::new(&jetstream::new(client), None, ants_proto::IDENTITIES_BUCKET).await.unwrap();
-        ants_daemon::shared::refresh(&m2_kv, Some(&m2), &standby, std::slice::from_ref(&dev_a), &accounts).await;
+        let m2: Machine = "m2".parse().unwrap();
+        let m2_js = host_js(&server, &m2).await;
+        let m2_kv = DirectKv::new(&m2_js, None, IDENTITIES_BUCKET).await.unwrap();
+        let m2_devices = DirectKv::new(&m2_js, None, ants_proto::DEVICES_BUCKET).await.unwrap();
+        let m2_bucket = Bucket { identities: &m2_kv, devices: &m2_devices, accounts: &accounts };
+        ants_daemon::shared::refresh(m2_bucket, Some(&m2), &standby, std::slice::from_ref(&dev_a)).await;
         assert_eq!(shared_of(&js, &dev_a).await.unwrap(), Some(changed), "the first record stays");
         let taken = crate::serve::configs(vec![own], &Harnesses::builtin(), &server.url, None, None, Some(&standby));
         let taken = taken.unwrap().remove(0);
@@ -578,7 +592,7 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         let forged =
             SharedSettings::new(dev_a.clone(), serde_json::Map::from_iter([("model".into(), json!("evil"))]), m2, None);
         m2_kv.put(forged.key(), serde_json::to_vec(&forged).unwrap()).await.unwrap();
-        ants_daemon::shared::refresh(&m2_kv, None, &standby, std::slice::from_ref(&dev_a), &accounts).await;
+        ants_daemon::shared::refresh(m2_bucket, None, &standby, std::slice::from_ref(&dev_a)).await;
         assert_eq!(standby.record(&dev_a), None, "not applied");
         ants.send_replace(vec![dev_a.clone()]);
         let mended = tokio::time::timeout(WAIT, async {
@@ -613,5 +627,87 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         tokio::time::timeout(WAIT, following).await.unwrap().unwrap();
         drop(ants);
         tokio::time::timeout(WAIT, task).await.unwrap().unwrap().unwrap();
+    }
+
+    /// A record the ant signed and the stream stored long after, one put back after the daemon read the record
+    /// replacing it, and one signed with revoked credentials are not verified: the daemon holding the ant's
+    /// credentials writes back the settings it kept, or none with revoked credentials.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn shared_settings_put_back_or_signed_with_revoked_credentials_are_not_verified() {
+        let Some(server) = Server::start() else { return };
+        let dev_a = "dev-a".parse::<UserId>().unwrap();
+        let alice = "alice".parse::<UserId>().unwrap();
+        let (_, h_js) = server.connect_as(&alice, Role::Human).await;
+        for config in [ants_daemon::hub::devices_config(), ants_daemon::hub::identities_config()] {
+            h_js.create_key_value(config).await.unwrap();
+        }
+        let a_creds = server.creds_as(&dev_a, Role::Ant);
+        let accounts = vec![ants_daemon::creds::account(&a_creds).unwrap()];
+        let m1: Machine = "m1".parse().unwrap();
+        let m1_js = host_js(&server, &m1).await;
+        let identities = DirectKv::new(&m1_js, None, IDENTITIES_BUCKET).await.unwrap();
+        let devices = DirectKv::new(&m1_js, None, ants_proto::DEVICES_BUCKET).await.unwrap();
+        let bucket = Bucket { identities: &identities, devices: &devices, accounts: &accounts };
+        let writer = ants_daemon::shared::Shared::default();
+        let mut own = ants_daemon::config::Ant::new(dev_a.clone(), server.dir().to_path_buf());
+        (own.model, own.creds) = (Some("gpt-5".to_owned()), Some(a_creds.clone()));
+        writer.listed(std::slice::from_ref(&own));
+        let refresh = || ants_daemon::shared::refresh(bucket, Some(&m1), &writer, std::slice::from_ref(&dev_a));
+        let signed = |model: &str, ago: chrono::TimeDelta| {
+            let fields = serde_json::Map::from_iter([("model".into(), json!(model))]);
+            let mut record = SharedSettings::new(dev_a.clone(), fields, m1.clone(), Some(alice.clone()));
+            record.updated_at -= ago;
+            ants_daemon::shared::sign_as(&mut record, Some(&a_creds), &accounts).unwrap();
+            record
+        };
+        let put = |record: &SharedSettings| identities.put(record.key(), serde_json::to_vec(record).unwrap());
+        let model_of = |record: &SharedSettings| record.fields.get("model").cloned();
+        let stored = || async {
+            match ants_daemon::shared::read(bucket, &dev_a).await.unwrap() {
+                Found::Record(record, _) => Ok(record),
+                Found::Unverified(record, why, _) => Err((*record, why)),
+                _ => panic!("no record"),
+            }
+        };
+
+        refresh().await;
+        let first = stored().await.expect("created from the config");
+        let second = signed("o3", chrono::TimeDelta::zero());
+        put(&second).await.unwrap();
+        refresh().await;
+        assert_eq!(writer.record(&dev_a), Some(second.clone()));
+
+        put(&first).await.unwrap();
+        assert_eq!(
+            stored().await,
+            Ok(first.clone()),
+            "a reader that never read the record replacing it takes one put back within minutes of its signing"
+        );
+        let replayed = writer.check(Found::Record(first.clone(), 0));
+        assert!(matches!(replayed, Found::Unverified(_, SettingsError::Replayed, _)), "the writer read the newer one");
+        refresh().await;
+        let restored = writer.record(&dev_a).expect("the settings kept, written back");
+        assert_eq!((model_of(&restored), restored.by.as_ref()), (Some(json!("o3")), Some(&alice)));
+        assert_ne!(restored, second, "signed anew");
+        assert_eq!(stored().await, Ok(restored.clone()));
+
+        let old = signed("evil", chrono::TimeDelta::hours(1));
+        put(&old).await.unwrap();
+        let (record, why) = stored().await.expect_err("a record stored an hour after its signing verifies");
+        assert_eq!((record, matches!(why, SettingsError::Stale { .. })), (old, true));
+        refresh().await;
+        assert_eq!(model_of(&stored().await.unwrap()), Some(json!("o3")), "written back");
+
+        let team = server.dir().join("auth");
+        crate::revoke::revoke(&team, Some("dev-a"), &[]).unwrap();
+        crate::devices::record_revocations(&server.url, None, &team).await.unwrap();
+        let (_, why) = stored().await.expect_err("a record signed with revoked credentials verifies");
+        assert!(matches!(why, SettingsError::Revoked(_)), "{why}");
+        let before = identities.lookup_stored(SharedSettings::key_of(&dev_a)).await.unwrap().1;
+        refresh().await;
+        assert_eq!(writer.record(&dev_a), None, "not applied");
+        let after = identities.lookup_stored(SharedSettings::key_of(&dev_a)).await.unwrap().1;
+        assert_eq!(after, before, "nothing written with the revoked credentials");
     }
 }

@@ -84,13 +84,17 @@ fn a_reader_takes_a_key_only_from_a_jwt_it_verifies() {
 }
 
 #[test]
-fn revocations_of_humans_assistants_and_unknown_keys_are_recorded_and_no_others() {
+fn revocations_of_humans_assistants_ants_and_unknown_keys_are_recorded_and_no_others() {
     let dir = ants_test_support::scratch_dir("devices-revocations");
     let team = dir.join("auth");
     auth::init(&team).unwrap();
     let human = Own::from_creds_text(&issue(&team, &p("alice"), Role::Human)).unwrap();
     let human_key = auth::verified(&human.jwt).unwrap().sub;
-    issue(&team, &p("dev-a"), Role::Ant);
+    let ant = crate::humans::creds_claims(&issue(&team, &p("dev-a"), Role::Ant)).unwrap();
+    let ant_key = ant["sub"].as_str().unwrap().to_owned();
+    let host = dir.join("host-m1.creds");
+    auth::issue_host(&team, &"m1".parse().unwrap(), None, &host).unwrap();
+    let host_key = auth::read_creds(&host).unwrap().1.public_key();
     let out = dir.join("pa.creds");
     let new = auth::NewDevice { assistant_of: Some(p("alice")), ..auth::NewDevice::default() };
     let rights = Permissions::for_assistant(&p("pa"), &p("alice"));
@@ -101,9 +105,11 @@ fn revocations_of_humans_assistants_and_unknown_keys_are_recorded_and_no_others(
     revoke::revoke(&team, Some("dev-a"), std::slice::from_ref(&unknown)).unwrap();
     revoke::revoke(&team, Some("alice"), &[]).unwrap();
     revoke::revoke(&team, Some("pa"), &[]).unwrap();
+    revoke::revoke(&team, Some("host-m1"), &[]).unwrap();
     let mut recorded: Vec<String> = device_revocations(&team).unwrap().into_iter().map(|r| r.key).collect();
     recorded.sort();
-    let mut expected = vec![unknown, human_key, assistant_key];
+    assert!(!recorded.contains(&host_key), "a host's key signs nothing readers check");
+    let mut expected = vec![unknown, human_key, assistant_key, ant_key];
     expected.sort();
     assert_eq!(recorded, expected);
 }

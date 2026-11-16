@@ -1,13 +1,17 @@
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 #[cfg(doc)]
 use crate::IDENTITIES_BUCKET;
-use crate::{Error, JwtError, Machine, UserId, VerifiedUser, canonical_json, verify_user_jwt};
+use crate::{Error, JwtError, Machine, UserId, VerifiedUser, canonical_json, verified_jwt, verify_user_jwt};
 
 /// The first line of what an ant's key signs of its shared settings ([`SharedSettings::signed`]).
 pub const SETTINGS_SIGNING_CONTEXT: &str = "ants-shared-settings";
+
+/// How far apart the time an ant's shared settings were signed (`updated_at`) and the time the stream stored them may
+/// be: past it, a reader takes the record for one put back after it was replaced ([`SharedSettings::verify`]).
+pub const SETTINGS_CLOCK_SKEW: TimeDelta = TimeDelta::minutes(5);
 
 /// The keys of an ant's `[[ant]]` table that are the ant's own rather than its machine's: its role and core memories
 /// (`whoami`, `memory`), which [`SharedSettings`] holds for every machine serving it. The rest (workdir, env, harness,
@@ -30,6 +34,14 @@ pub fn is_shared_field(key: &str) -> bool {
 /// As any machine's host credentials may write any ant's record, its writer signs it with credentials of the ant
 /// itself, which only the machines serving the ant hold ([`SharedSettings::credentials`]); a daemon of a team with
 /// credentials applies only a record it verifies ([`SharedSettings::verify`]).
+///
+/// A record the ant once signed stays valid, so a host may put back one replaced since (a replay). The bucket keeps
+/// one revision per key, so a reader cannot check a record against its predecessor; instead a record counts only if
+/// the stream stored it within [`SETTINGS_CLOCK_SKEW`] of when it was signed, which refuses a record put back later
+/// than that after its signing, whoever reads it. Within that window a reader that kept the record replacing it
+/// refuses it too (the daemon's), but a reader that never saw it replaced (a daemon starting, the CLI) takes it. A
+/// record signed with a key revoked since (a revocation record in [`crate::DEVICES_BUCKET`]) counts no more, whenever
+/// it was stored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SharedSettings {
     pub ant: UserId,
@@ -60,6 +72,22 @@ pub enum SettingsError {
     Credentials(#[from] JwtError),
     #[error("signed by the credentials of {named}, not of {ant}")]
     NotTheAnt { named: UserId, ant: UserId },
+    #[error("signed by revoked credentials ({0})")]
+    Revoked(String),
+    #[error(
+        "signed at {signed} but stored at {stored}: put back after it was replaced, or signed on a clock off from the \
+         hub's"
+    )]
+    Stale { signed: DateTime<Utc>, stored: DateTime<Utc> },
+    #[error("put back after the record replacing it was read")]
+    Replayed,
+}
+
+impl SettingsError {
+    /// Whether the record is one the ant signed, put back after it was replaced: a newer one stands for it.
+    pub fn is_replay(&self) -> bool {
+        matches!(self, Self::Stale { .. } | Self::Replayed)
+    }
 }
 
 impl SharedSettings {
@@ -90,12 +118,21 @@ impl SharedSettings {
             .into_bytes()
     }
 
+    /// The public key (`U...`) of the credentials that signed, as their JWT says before anything checks it: the key
+    /// whose revocation record to look up for [`SharedSettings::verify`].
+    pub fn signing_key(&self) -> Option<String> {
+        verified_jwt(self.credentials.as_deref()?).ok().map(|(claims, _)| claims.sub)
+    }
+
     /// Check that the record, which the stream stored at `stored_at`, is signed by the key of credentials of the ant
-    /// that one of `accounts` (the team account's public keys) signed and that had not expired when it was stored: the
-    /// credentials of a machine serving the ant. Returns the signing user.
+    /// that one of `accounts` (the team account's public keys) signed, that had not expired when it was stored and
+    /// whose key `revoked` (looked up in the revocation records) does not say is revoked: the credentials of a machine
+    /// serving the ant. It must have been stored within [`SETTINGS_CLOCK_SKEW`] of `updated_at`, so that a record
+    /// signed long before is not put back. Returns the signing user.
     pub fn verify<'a>(
         &self,
         accounts: impl IntoIterator<Item = &'a str>,
+        revoked: impl FnOnce(&str) -> bool,
         stored_at: DateTime<Utc>,
     ) -> Result<VerifiedUser, SettingsError> {
         let (Some(jwt), Some(signature)) = (&self.credentials, &self.signature) else {
@@ -107,6 +144,12 @@ impl SharedSettings {
             return Err(SettingsError::NotTheAnt { named: user.id, ant: self.ant.clone() });
         }
         user.check_signature(&self.signed(), signature)?;
+        if revoked(&user.public_key) {
+            return Err(SettingsError::Revoked(user.public_key));
+        }
+        if (stored_at - self.updated_at).abs() > SETTINGS_CLOCK_SKEW {
+            return Err(SettingsError::Stale { signed: self.updated_at, stored: stored_at });
+        }
         Ok(user)
     }
 
@@ -176,31 +219,70 @@ mod tests {
         let accounts = [account.public_key()];
         let accounts = || accounts.iter().map(String::as_str);
         let now = Utc::now();
-        assert_eq!(record.verify(accounts(), now), Err(SettingsError::Unsigned));
+        assert_eq!(record.verify(accounts(), |_| false, now), Err(SettingsError::Unsigned));
         let sign = |record: &mut SharedSettings, jwt: String, key: &KeyPair| {
             record.credentials = Some(jwt);
             record.signature = Some(BASE64URL_NOPAD.encode(&key.sign(&record.signed()).unwrap()));
         };
         sign(&mut record, crate::roles::tests::user_jwt(&account, &dev_a, "dev-a", &[], None), &dev_a);
-        assert_eq!(record.verify(accounts(), now).unwrap().id, record.ant);
+        assert_eq!(record.verify(accounts(), |_| false, now).unwrap().id, record.ant);
 
         let mut changed = record.clone();
         changed.fields.insert("allow".to_owned(), json!(["execute"]));
-        assert!(matches!(changed.verify(accounts(), now), Err(SettingsError::Credentials(JwtError::BadSignature(_)))));
+        assert!(matches!(
+            changed.verify(accounts(), |_| false, now),
+            Err(SettingsError::Credentials(JwtError::BadSignature(_)))
+        ));
 
         let mut other = record.clone();
         sign(&mut other, crate::roles::tests::user_jwt(&account, &dev_b, "dev-b", &[], None), &dev_b);
-        assert!(matches!(other.verify(accounts(), now), Err(SettingsError::NotTheAnt { .. })), "another ant's");
+        assert!(
+            matches!(other.verify(accounts(), |_| false, now), Err(SettingsError::NotTheAnt { .. })),
+            "another ant's"
+        );
 
         let foreign = KeyPair::new_account();
         let mut forged = record.clone();
         sign(&mut forged, crate::roles::tests::user_jwt(&foreign, &dev_a, "dev-a", &[], None), &dev_a);
-        assert!(matches!(forged.verify(accounts(), now), Err(SettingsError::Credentials(JwtError::ForeignAccount(_)))));
+        assert!(matches!(
+            forged.verify(accounts(), |_| false, now),
+            Err(SettingsError::Credentials(JwtError::ForeignAccount(_)))
+        ));
 
         let mut expired = record;
+        expired.updated_at = DateTime::from_timestamp(999, 0).unwrap();
         sign(&mut expired, crate::roles::tests::user_jwt(&account, &dev_a, "dev-a", &[], Some(1_000)), &dev_a);
-        assert!(expired.verify(accounts(), now).is_err());
+        assert!(expired.verify(accounts(), |_| false, now).is_err());
         let then = DateTime::from_timestamp(999, 0).unwrap();
-        assert!(expired.verify(accounts(), then).is_ok(), "expiry counts when the record was stored");
+        assert!(expired.verify(accounts(), |_| false, then).is_ok(), "expiry counts when the record was stored");
+    }
+
+    #[test]
+    fn a_record_put_back_long_after_its_signing_or_signed_with_a_revoked_key_does_not_verify() {
+        use data_encoding::BASE64URL_NOPAD;
+        use nkeys::KeyPair;
+
+        let (account, dev_a) = (KeyPair::new_account(), KeyPair::new_user());
+        let signed_at = Utc::now() - TimeDelta::days(30);
+        let mut record = SharedSettings {
+            updated_at: signed_at,
+            credentials: Some(crate::roles::tests::user_jwt(&account, &dev_a, "dev-a", &[], None)),
+            ..SharedSettings::new("dev-a".parse().unwrap(), Map::new(), "m1".parse().unwrap(), None)
+        };
+        record.signature = Some(BASE64URL_NOPAD.encode(&dev_a.sign(&record.signed()).unwrap()));
+        assert_eq!(record.signing_key(), Some(dev_a.public_key()));
+        let accounts = [account.public_key()];
+        let verify =
+            |revoked: bool, stored_at| record.verify(accounts.iter().map(String::as_str), |_| revoked, stored_at);
+
+        assert!(verify(false, signed_at + TimeDelta::seconds(1)).is_ok(), "stored as signed");
+        assert!(verify(false, signed_at - TimeDelta::minutes(4)).is_ok(), "the clocks' skew is allowed for");
+        let replayed = verify(false, Utc::now());
+        assert!(matches!(replayed, Err(SettingsError::Stale { .. })), "{replayed:?}");
+        assert!(replayed.unwrap_err().is_replay());
+        assert!(matches!(verify(false, signed_at - TimeDelta::minutes(6)), Err(SettingsError::Stale { .. })));
+        let revoked = verify(true, signed_at + TimeDelta::seconds(1));
+        assert_eq!(revoked, Err(SettingsError::Revoked(dev_a.public_key())));
+        assert!(!revoked.unwrap_err().is_replay());
     }
 }
