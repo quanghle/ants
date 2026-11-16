@@ -1,0 +1,490 @@
+//! The claude protocol against a stub CLI playing the events Claude Code 2.1.325 was seen to send (trimmed).
+
+use std::assert_matches;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use agent_client_protocol::ErrorCode;
+use agent_client_protocol::v1::schema::{EnvVariable, McpServer, McpServerStdio, SessionId};
+use ants_proto::{HarnessAgent, LimitKind, StatusUpdate, ThreadId};
+use ants_test_support::{StubCli, scratch_dir};
+use serde_json::{Value, json};
+use tokio::sync::{mpsc, oneshot};
+
+use super::*;
+use crate::harness::{
+    Harnesses, Launch, ModelSettings, PlanStep, Prompt, Readiness, Session, SignedOut, Spend, StartFailed, fork,
+    handshake, parse_definitions,
+};
+use crate::permission::{Allowlist, PermissionPolicy};
+use crate::ratelimit::Limited;
+
+const VERSION: &str = "2.1.325 (Claude Code)";
+
+/// The success response to control request `n` of a session.
+fn ok(n: u64, response: Value) -> String {
+    let response = json!({ "subtype": "success", "request_id": format!("ants-{n}"), "response": response });
+    json!({ "type": "control_response", "response": response }).to_string()
+}
+
+/// The response to `initialize`, the first control request, of a CLI signed in to claude.ai.
+fn signed_in() -> String {
+    let account = json!({ "email": "a@example.com", "subscriptionType": "Claude Max", "apiProvider": "firstParty" });
+    ok(1, json!({ "account": account, "claude_code_version": "2.1.325", "current_permission_mode": "default" }))
+}
+
+/// An event of the main thread of the turn.
+fn event(mut event: Value) -> String {
+    event["parent_tool_use_id"] = Value::Null;
+    event["session_id"] = json!("s");
+    event.to_string()
+}
+
+fn init() -> String {
+    let servers = json!([{ "name": "ants", "status": "connected", "source": "dynamic" }]);
+    event(json!({ "type": "system", "subtype": "init", "model": "claude-haiku-5-5", "mcp_servers": servers }))
+}
+
+fn stream(inner: Value) -> String {
+    event(json!({ "type": "stream_event", "event": inner }))
+}
+
+fn message_start(id: &str) -> String {
+    stream(json!({ "type": "message_start", "message": { "id": id, "model": "claude-haiku-5-5", "content": [] } }))
+}
+
+fn text(text: &str) -> String {
+    stream(json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": text } }))
+}
+
+fn thinking(text: &str) -> String {
+    stream(
+        json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "thinking_delta", "thinking": text } }),
+    )
+}
+
+/// The end of a model call whose context held `context` tokens, `output` of them its output.
+fn message_delta(context: u64, output: u64) -> String {
+    let usage = json!({ "input_tokens": 2, "cache_creation_input_tokens": 100,
+        "cache_read_input_tokens": context - 102 - output, "output_tokens": output });
+    stream(json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn" }, "usage": usage }))
+}
+
+/// A block of assistant message `id`, which Claude Code sends one per line.
+fn assistant(id: &str, block: Value) -> String {
+    let message = json!({ "id": id, "model": "claude-haiku-5-5", "role": "assistant", "content": [block] });
+    event(json!({ "type": "assistant", "message": message }))
+}
+
+fn tool_result(id: &str, is_error: bool) -> String {
+    let content = json!([{ "type": "tool_result", "tool_use_id": id, "content": "done", "is_error": is_error }]);
+    event(json!({ "type": "user", "message": { "role": "user", "content": content } }))
+}
+
+/// The result of a turn, the session having cost `total` so far, with `fields` over the usual ones.
+fn result(total: f64, fields: Value) -> String {
+    let since = json!({ "claude-haiku-5-5": { "inputTokens": 4, "outputTokens": 50, "cacheReadInputTokens": 1000,
+        "cacheCreationInputTokens": 100, "thinkingTokens": 10, "costUSD": 0.01 } });
+    let mut result = json!({
+        "type": "result", "subtype": "success", "is_error": false, "result": "", "stop_reason": "end_turn",
+        "terminal_reason": "completed", "session_id": "s", "total_cost_usd": total, "api_error_status": null,
+        "modelUsage": { "claude-haiku-5-5": { "costUSD": total, "contextWindow": 1_000_000 } },
+        "model_usage_since_last_result": since,
+    });
+    for (key, value) in fields.as_object().into_iter().flatten() {
+        result[key] = value.clone();
+    }
+    result.to_string()
+}
+
+/// A turn failing as Claude Code ends a failed model call: its own message, then an error result.
+fn failure(kind: &str, status: Option<u16>, message: &str, terminal: &str) -> Vec<String> {
+    let content = json!([{ "type": "text", "text": message }]);
+    let synthetic = json!({ "type": "assistant", "error": kind, "is_api_error_message": true,
+        "api_error_status": status, "message": { "id": "e1", "model": "<synthetic>", "content": content } });
+    let fields =
+        json!({ "is_error": true, "result": message, "api_error_status": status, "terminal_reason": terminal });
+    vec![init(), event(synthetic), result(0.0, fields)]
+}
+
+/// A harness of protocol claude run by a stub CLI in a scratch directory, removed on drop.
+struct Fixture {
+    dir: PathBuf,
+    cli: StubCli,
+    harness: Arc<Harness>,
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+impl Fixture {
+    /// `[harnesses.claude-native]` of protocol claude, with `table` added.
+    fn new(name: &str, table: &str) -> Self {
+        let dir = scratch_dir(name).canonicalize().unwrap();
+        let cli = StubCli::new(&dir, "claude");
+        let harness = define(&format!("command = {:?}\nsign_in = \"claude login\"\n{table}", cli.path())).unwrap();
+        Self { dir, cli, harness }
+    }
+
+    fn launch(&self, settings: ModelSettings) -> Launch {
+        let allow_all = PermissionPolicy::new(Allowlist::parse(&["*"]).unwrap(), None);
+        Launch::new(self.harness.clone(), self.dir.clone(), Vec::new(), allow_all, settings)
+    }
+
+    /// Have run `run` (every run when None) print the version, then play `blocks` after each line it reads: a
+    /// `--version` run reads none, a session's run its control requests and prompts.
+    fn script(&self, run: Option<usize>, blocks: &[Vec<String>]) {
+        let mut all = vec![vec![VERSION.to_owned()]];
+        all.extend(blocks.iter().cloned());
+        self.cli.script(run, &all);
+    }
+
+    /// What run `run` read, as JSON.
+    fn received(&self, run: usize) -> Vec<Value> {
+        self.cli.received(run).iter().map(|line| serde_json::from_str(line).unwrap()).collect()
+    }
+}
+
+fn define(table: &str) -> anyhow::Result<Arc<Harness>> {
+    let text = format!("[harnesses.claude-native]\nprotocol = \"claude\"\n{table}");
+    Ok(Harnesses::builtin().define(parse_definitions(&text)?)?.get("claude-native").unwrap())
+}
+
+/// Run `prompt`, collecting its status updates and spend.
+async fn run(session: &Session, prompt: Prompt) -> (anyhow::Result<String>, Vec<StatusUpdate>, Vec<Spend>) {
+    let (progress, mut status) = mpsc::channel(64);
+    let (spend, mut spent) = mpsc::unbounded_channel();
+    let reply = session.run(Prompt { progress: Some(progress), spend: Some(spend), ..prompt }).await;
+    let (mut updates, mut spends) = (Vec::new(), Vec::new());
+    while let Ok(update) = status.try_recv() {
+        updates.push(update);
+    }
+    while let Ok(spend) = spent.try_recv() {
+        spends.push(spend);
+    }
+    (reply.map(|reply| reply.text), updates, spends)
+}
+
+/// The arguments every session's CLI gets first.
+const FIRST_ARGS: [&str; 12] = [
+    "-p",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+    "--thinking-display",
+    "summarized",
+    "--permission-prompts",
+    "none",
+    "--strict-mcp-config",
+];
+
+/// The events of a turn reading a file under `dir` with a todo list, then answering "Hello there".
+fn reading_turn(dir: &std::path::Path) -> Vec<String> {
+    let todos = json!({ "todos": [
+        { "content": "Write a.txt", "status": "in_progress", "activeForm": "Writing a.txt" },
+        { "content": "Edit a.txt", "status": "pending", "activeForm": "Editing a.txt" },
+    ] });
+    let read = json!({ "type": "tool_use", "id": "toolu_2", "name": "Read",
+        "input": { "file_path": dir.join("src/a.rs"), "offset": 10 } });
+    let subagent = json!({ "type": "assistant", "parent_tool_use_id": "toolu_9",
+        "message": { "id": "msg_9", "content": [{ "type": "text", "text": "inner" }] } });
+    let limit =
+        json!({ "type": "rate_limit_event", "rate_limit_info": { "status": "allowed", "resetsAt": 1_794_895_200 } });
+    vec![
+        init(),
+        message_start("msg_1"),
+        thinking("Reading first"),
+        assistant("msg_1", json!({ "type": "thinking", "thinking": "Reading first", "signature": "x" })),
+        assistant("msg_1", json!({ "type": "tool_use", "id": "toolu_1", "name": "TodoWrite", "input": todos })),
+        assistant("msg_1", read),
+        message_delta(17_000, 30),
+        tool_result("toolu_1", false),
+        tool_result("toolu_2", false),
+        // A subagent's message is not the reply.
+        subagent.to_string(),
+        message_start("msg_2"),
+        text("Hello"),
+        text(" there"),
+        assistant("msg_2", json!({ "type": "text", "text": "Hello there" })),
+        message_delta(18_000, 20),
+        limit.to_string(),
+        result(0.25, json!({ "result": "Hello there" })),
+    ]
+}
+
+#[tokio::test]
+async fn a_claude_session_streams_its_turn_and_reports_spend() {
+    let table = "mode = \"acceptEdits\"\nargs = [\"--setting-sources\", \"project\"]\n\
+                 env = { CLAUDE_CODE_ENABLE_TODO_TOOLS = \"0\" }";
+    let native = Fixture::new("claude-turn", table);
+    let added = ok(2, json!({ "added": ["ants"], "removed": [], "errors": {} }));
+    native.script(None, &[vec![signed_in()], vec![added], reading_turn(&native.dir)]);
+    let stdio = McpServerStdio::new("ants", "/bin/ants")
+        .args(vec!["mcp".to_owned()])
+        .env(vec![EnvVariable::new("ANTS_MCP_TOKEN", "secret")]);
+    let servers = vec![McpServer::Stdio(stdio)];
+    let thread: ThreadId = "t1".parse().unwrap();
+    let settings = ModelSettings {
+        model: Some("haiku".to_owned()),
+        reasoning_effort: Some("high".to_owned()),
+        ..Default::default()
+    };
+    let launch = native
+        .launch(settings)
+        .with_mcp(Arc::new(move |_, _, http| {
+            assert!(http, "Claude Code takes HTTP MCP servers");
+            servers.clone()
+        }))
+        .for_thread(&thread);
+
+    let session = Session::start(&launch, None).await.unwrap();
+    let named = HarnessAgent { name: "Claude Code".to_owned(), version: "2.1.325".to_owned() };
+    assert_eq!(session.agent(), Some(&named));
+    let id = session.id().to_string();
+    assert!(uuid::Uuid::parse_str(&id).is_ok(), "an id of the translator's choosing: {id}");
+    let (reply, updates, spends) = run(&session, Prompt::new("go")).await;
+    assert_eq!(reply.unwrap(), "Hello there");
+    session.close().await;
+
+    let thoughts: Vec<_> = updates.iter().filter(|u| matches!(u, StatusUpdate::Thought { .. })).collect();
+    assert_eq!(thoughts, [&StatusUpdate::Thought { text: "Reading first".to_owned() }], "streamed once");
+    let steps = vec![
+        PlanStep { content: "Writing a.txt".to_owned(), status: "in_progress".to_owned() },
+        PlanStep { content: "Edit a.txt".to_owned(), status: "pending".to_owned() },
+    ];
+    assert!(updates.contains(&StatusUpdate::Plan { steps }), "{updates:?}");
+    let read = StatusUpdate::Tool {
+        id: "toolu_2".to_owned(),
+        title: Some("Read src/a.rs".to_owned()),
+        tool_kind: Some("read".to_owned()),
+        status: Some("in_progress".to_owned()),
+        paths: Some(vec![native.dir.join("src/a.rs").display().to_string()]),
+    };
+    assert!(updates.contains(&read), "{updates:?}");
+    let tools = updates.iter().filter(|u| matches!(u, StatusUpdate::Tool { .. })).count();
+    assert_eq!(tools, 2, "the Read call and its end; TodoWrite is the plan: {updates:?}");
+    assert!(!updates.iter().any(|u| matches!(u, StatusUpdate::Message { text } if text.contains("inner"))));
+    assert_eq!(spends, [Spend::Cost { session: SessionId::new(id.clone()), total: 0.25 }, Spend::Tokens(1154)]);
+
+    let own = [&id, "--model", "haiku", "--effort", "high", "--permission-mode", "acceptEdits"];
+    let mut args: Vec<&str> = FIRST_ARGS.to_vec();
+    args.push("--session-id");
+    args.extend(own);
+    args.extend(["--allowedTools=mcp__ants", "--setting-sources", "project"]);
+    assert_eq!(native.cli.args(2), args, "the protocol's arguments, then the definition's");
+    assert_eq!(native.cli.args(1), ["--version"]);
+    assert!(!native.cli.args(2).concat().contains("secret"), "the MCP token is not on the command line");
+    assert_eq!(native.cli.env(2, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC").as_deref(), Some("1"));
+    assert_eq!(native.cli.env(2, "CLAUDE_CODE_ENABLE_TODO_TOOLS").as_deref(), Some("0"), "the definition's env wins");
+    let received = native.received(2);
+    assert_eq!(received[0]["request"], json!({ "subtype": "initialize", "hooks": null }));
+    let mcp = json!({ "ants": { "type": "stdio", "command": "/bin/ants", "args": ["mcp"],
+        "env": { "ANTS_MCP_TOKEN": "secret" } } });
+    assert_eq!(received[1]["request"], json!({ "subtype": "mcp_set_servers", "servers": mcp }));
+    assert_eq!(received[2]["message"], json!({ "role": "user", "content": [{ "type": "text", "text": "go" }] }));
+    assert_eq!((&received[2]["client_composed"], &received[2]["session_id"]), (&json!(true), &json!(id)));
+
+    native.script(None, &[vec![signed_in()]]);
+    let checked = handshake(&launch).await;
+    assert_eq!(checked.readiness, Readiness::Ready { agent: "Claude Code 2.1.325".to_owned() });
+    assert!(!native.cli.args(4).iter().any(|arg| arg.starts_with("--allowedTools")), "no MCP servers for a check");
+}
+
+#[tokio::test]
+async fn claude_sessions_resume_and_fork_counting_only_their_own_cost() {
+    let native = Fixture::new("claude-fork", "");
+    let launch = native.launch(ModelSettings::default());
+    native.script(None, &[]);
+    native.script(Some(2), &[vec![signed_in()], vec![init(), text("Back"), result(0.5, json!({}))]]);
+    // The fork starts at its parent's 1.5 and spends 0.25.
+    native.script(Some(4), &[vec![signed_in()], vec![result(1.5, json!({ "num_turns": 0 }))]]);
+    native.script(Some(6), &[vec![signed_in()], vec![init(), text("Forked"), result(1.75, json!({}))]]);
+
+    let resumed = Session::start(&launch, Some(SessionId::new("p1"))).await.unwrap();
+    assert_eq!(resumed.id(), SessionId::new("p1"));
+    assert_eq!(run(&resumed, Prompt::new("again")).await.0.unwrap(), "Back");
+    resumed.close().await;
+    assert_eq!(native.cli.args(2)[12..14], ["--resume", "p1"]);
+
+    let forked = fork(&launch, &SessionId::new("p1")).await.unwrap().expect("Claude Code forks");
+    let args = native.cli.args(4);
+    assert_eq!(args[12..16], ["--resume", "p1", "--fork-session", "--session-id"]);
+    assert_eq!(args[16], forked.to_string(), "the fork's id chosen up front");
+    let written = json!({ "type": "user", "message": { "role": "user", "content": [] }, "shouldQuery": false });
+    assert_eq!(native.received(4)[1], written, "the fork kept without a turn");
+
+    let clone = Session::start(&launch, Some(forked.clone())).await.unwrap();
+    let (reply, _, spends) = run(&clone, Prompt::new("go")).await;
+    assert_eq!(reply.unwrap(), "Forked");
+    assert_eq!(spends[0], Spend::Cost { session: forked, total: 0.25 }, "not the parent's cost again");
+    clone.close().await;
+}
+
+#[tokio::test]
+async fn a_cancelled_claude_turn_is_interrupted_and_the_session_goes_on() {
+    let native = Fixture::new("claude-cancel", "");
+    let marker = json!([{ "type": "text", "text": "[Request interrupted by user]" }]);
+    let aborted = json!({ "subtype": "error_during_execution", "is_error": true, "terminal_reason": "aborted_streaming",
+        "stop_reason": null });
+    let interrupted = vec![
+        ok(2, json!({ "still_queued": [] })),
+        event(json!({ "type": "user", "message": { "role": "user", "content": marker } })),
+        result(0.0, aborted),
+    ];
+    let after = vec![init(), text("Next"), result(0.5, json!({}))];
+    native.script(None, &[vec![signed_in()], vec![init(), text("Working")], interrupted, after]);
+    let session = Session::start(&native.launch(ModelSettings::default()), None).await.unwrap();
+    let (stop, stopped) = oneshot::channel();
+    let (progress, mut status) = mpsc::channel(16);
+    let prompt = Prompt { stop: Some(stopped), progress: Some(progress), ..Prompt::new("go") };
+    let cancel = async {
+        status.recv().await;
+        stop.send("Stopped by a human".to_owned()).unwrap();
+    };
+    let (reply, ()) = tokio::join!(session.run(prompt), cancel);
+    let reply = reply.unwrap();
+    assert_eq!((reply.text.as_str(), reply.cut.as_deref()), ("Working", Some("Stopped by a human")));
+    assert!(session.is_alive(), "Claude Code ended the turn itself");
+    assert_eq!(session.prompt("more").await.unwrap(), "Next");
+    session.close().await;
+    let interrupt = json!({ "type": "control_request", "request_id": "ants-2", "request": { "subtype": "interrupt" } });
+    assert_eq!(native.received(2)[2], interrupt);
+}
+
+#[tokio::test]
+async fn a_tool_request_of_claude_is_denied_without_asking_ants() {
+    let native = Fixture::new("claude-approval", "mode = \"default\"");
+    let ask = json!({ "type": "control_request", "request_id": "c1", "request": { "subtype": "can_use_tool",
+        "tool_name": "Bash", "input": { "command": "touch x" }, "tool_use_id": "toolu_1" } });
+    let denied = event(json!({ "type": "system", "subtype": "permission_denied", "tool_name": "Write",
+        "tool_use_id": "toolu_2", "message": "Claude requested permissions to use Write, but you haven't granted it yet." }));
+    let turn = vec![init(), denied, ask.to_string()];
+    native.script(None, &[vec![signed_in()], turn, vec![text("Skipped"), result(0.1, json!({}))]]);
+    // Every tool is allowed, were the request to reach ants.
+    let session = Session::start(&native.launch(ModelSettings::default()), None).await.unwrap();
+    assert_eq!(session.prompt("clean up").await.unwrap(), "Skipped");
+    session.close().await;
+    let response = &native.received(2)[2]["response"];
+    assert_eq!((&response["request_id"], &response["response"]["behavior"]), (&json!("c1"), &json!("deny")));
+}
+
+#[tokio::test]
+async fn claude_limit_errors_are_classified() {
+    let native = Fixture::new("claude-limits", "");
+    let launch = native.launch(ModelSettings::default());
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+    let info = json!({ "status": "rejected", "resetsAt": now.as_secs() + 3 * 3600, "rateLimitType": "five_hour" });
+    let mut session_limit =
+        failure("rate_limit", Some(429), "You've hit your session limit · resets 3:45pm", "api_error");
+    session_limit.insert(1, json!({ "type": "rate_limit_event", "rate_limit_info": info }).to_string());
+    let capacity = "API Error: Server is temporarily limiting requests (not your usage limit)";
+    let overloaded = "API Error: Repeated 529 Overloaded errors. The API is at capacity";
+    let cases = [
+        (session_limit, LimitKind::Quota, true),
+        (failure("rate_limit", Some(429), capacity, "api_error"), LimitKind::RateLimit, false),
+        (failure("overloaded", Some(529), overloaded, "api_error"), LimitKind::RateLimit, false),
+        (failure("billing_error", Some(400), "Credit balance is too low", "api_error"), LimitKind::Quota, false),
+    ];
+    for (turn, kind, hinted) in cases {
+        native.script(None, &[vec![signed_in()], turn]);
+        let session = Session::start(&launch, None).await.unwrap();
+        let err = session.prompt("go").await.unwrap_err();
+        let limited = err.downcast_ref::<Limited>().expect("a provider limit");
+        assert_eq!(limited.kind, kind, "{err:#}");
+        assert_eq!(limited.retry_after.is_some_and(|wait| wait > Duration::from_hours(2)), hinted, "{err:#}");
+        session.close().await;
+    }
+}
+
+#[tokio::test]
+async fn a_claude_prompt_outgrowing_the_context_runs_again_in_a_new_session() {
+    let native = Fixture::new("claude-overflow", "");
+    let overflow = failure("invalid_request", Some(400), "Prompt is too long", "prompt_too_long");
+    native.script(None, &[]);
+    native.script(Some(2), &[vec![signed_in()], overflow]);
+    native.script(Some(3), &[vec![signed_in()], vec![init(), text("Fine"), result(0.1, json!({}))]]);
+    let session = Session::start(&native.launch(ModelSettings::default()), None).await.unwrap();
+    let first = session.id();
+    assert_eq!(session.prompt("go").await.unwrap(), "Fine");
+    assert_ne!(session.id(), first);
+    session.close().await;
+    assert_eq!(native.cli.runs(), 3, "a CLI for each session");
+}
+
+#[tokio::test]
+async fn a_signed_out_claude_is_told_apart_from_a_failing_one() {
+    let native = Fixture::new("claude-signin", "");
+    let launch = native.launch(ModelSettings::default());
+    let account = json!({ "account": { "tokenSource": "none", "apiProvider": "firstParty" } });
+    native.script(None, &[vec![ok(1, account)]]);
+    let checked = handshake(&launch).await;
+    assert_matches!(checked.readiness, Readiness::SignedOut { .. });
+    assert_eq!(checked.sign_in.as_deref(), Some("claude login"));
+
+    let bad_key = failure("authentication_failed", Some(401), "Invalid API key · Fix external API key", "api_error");
+    native.script(None, &[vec![signed_in()], bad_key]);
+    let session = Session::start(&launch, None).await.unwrap();
+    let err = session.prompt("go").await.unwrap_err();
+    assert!(err.downcast_ref::<SignedOut>().is_some(), "{err:#}");
+    session.close().await;
+
+    let in_use = "Error: Session ID 6e2dbd29-0bc6-45cb-b047-9e7ca523eb90 is already in use.";
+    native.script(None, &[vec![format!("!stderr {in_use}"), "!exit 1".to_owned()]]);
+    let err = Session::start(&launch, None).await.err().expect("a failing CLI");
+    let failed = err.downcast_ref::<StartFailed>().expect("a startup failure");
+    assert!(failed.detail.contains(&format!("exited with exit status: 1: {in_use}")), "{}", failed.detail);
+
+    native.cli.script(None, &[["2.0.1 (Claude Code)"]]);
+    let Readiness::Failed { detail } = handshake(&launch).await.readiness else { panic!("an old CLI") };
+    assert!(detail.contains("Claude Code 2.0.1 is older than 2.1.325"), "{detail}");
+}
+
+#[test]
+fn claude_errors_reach_the_daemons_classifiers() {
+    let harness = define("command = \"claude\"").unwrap();
+    let classify = |error: &Error| crate::ratelimit::classify(&harness, &error.to_string()).map(|l| l.kind);
+    let failed = |message: &str, status: Option<u16>, terminal: &str, kind: Option<&str>| {
+        let result =
+            json!({ "is_error": true, "result": message, "api_error_status": status, "terminal_reason": terminal });
+        error(&result, kind, None, None)
+    };
+    let login = failed("Not logged in · Please run /login", None, "api_error", Some("authentication_failed"));
+    assert_eq!(login.code, ErrorCode::AUTH_REQUIRED);
+    let expired = failed("Please run /login · API Error: 401 OAuth token has expired", Some(401), "api_error", None);
+    assert_eq!(expired.code, ErrorCode::AUTH_REQUIRED);
+    let weekly = failed("You've hit your weekly limit · resets Dec 1", Some(429), "api_error", Some("rate_limit"));
+    assert_eq!(classify(&weekly), Some(LimitKind::Quota));
+    let capacity = "API Error: Request rejected (429) · this may be a temporary capacity issue";
+    assert_eq!(classify(&failed(capacity, Some(429), "api_error", Some("rate_limit"))), Some(LimitKind::RateLimit));
+    let too_long = failed("Prompt is too long", Some(400), "prompt_too_long", Some("invalid_request"));
+    assert!(crate::overflow::overflows(&harness, &too_long.to_string()));
+    let unknown = json!({ "is_error": true, "errors": ["No conversation found with session ID: x"] });
+    let other = error(&unknown, None, None, None);
+    assert_eq!(
+        (other.code, other.message.as_str()),
+        (ErrorCode::INTERNAL_ERROR, "No conversation found with session ID: x")
+    );
+}
+
+#[test]
+fn claude_definitions_are_checked() {
+    let err = |table: &str| format!("{:#}", define(&format!("command = \"claude\"\n{table}")).unwrap_err());
+    let mode = err("mode = \"ask\"");
+    let modes = "default, manual, acceptEdits, plan, auto, dontAsk, bypassPermissions, not ask";
+    assert!(mode.contains(&format!("protocol claude takes mode {modes}")), "{mode}");
+    let own = err("args = [\"--permission-mode\", \"plan\"]");
+    assert!(own.contains("protocol claude passes --permission-mode itself"), "{own}");
+    let context = err("[harnesses.claude-native.context]\nx = { args = [\"--resume=abc\"] }");
+    assert!(context.contains("passes --resume itself"), "{context}");
+    for mode in MODES {
+        assert!(define(&format!("command = \"claude\"\nmode = {mode:?}")).unwrap().bypasses_permissions());
+    }
+    assert!(define("command = \"claude\"\nargs = [\"--allowedTools=Read\", \"-p\"]").is_ok());
+}

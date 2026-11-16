@@ -343,7 +343,7 @@ huge = { model_suffix = "-1m", history_budget = 262144 }
 | `protocol` | The command speaks |
 |---|---|
 | `acp` (default) | ACP: an agent or adapter the daemon drives directly, as described above |
-| `claude` | Claude Code's stream-json (`claude -p --input-format stream-json --output-format stream-json`); planned |
+| `claude` | Claude Code's stream-json (`claude -p --input-format stream-json --output-format stream-json`), from Claude Code 2.1.325 ([below](#claude-code-protocol--claude)) |
 | `codex` | Codex's JSON-RPC app server (`codex app-server`); planned |
 | `antigravity` | Antigravity's headless stream-json (`agy --input-format stream-json --output-format stream-json`); planned |
 | `copilot-sdk` | Copilot CLI through the GitHub Copilot SDK; planned |
@@ -361,6 +361,58 @@ Every protocol other than `acp` is native: the daemon runs a translator in its o
 - **Cancel:** a cancelled prompt interrupts the CLI natively where the protocol can, else stops the CLI, the session resuming on the next message.
 
 **Permissions are the CLI's own.** For a native protocol, `mode` names the CLI's own permission mode (each protocol accepts its own values; others fail loading), and `args` carry its other permission settings. The translator sends no tool request to ants and denies, with a logged warning, anything the CLI asks a human to approve, so no prompt waits on an approval. A native-protocol harness therefore runs its tools unasked: allow rules, approvals, `escalate_to` and webhook or schedule narrowing do not reach them, and `ants daemon` and `ants doctor` warn as for the built-ins, naming the definition's native permission settings as the place to restrict tools.
+
+#### Claude Code (`protocol = "claude"`)
+
+```toml
+[harnesses.claude-native]
+command = "claude"
+protocol = "claude"
+mode = "acceptEdits"                                  # Claude Code's --permission-mode
+args = ["--disallowedTools=WebFetch,WebSearch"]       # its other permission settings
+sign_in = "claude login"
+```
+
+Each session runs one `claude -p --input-format stream-json --output-format stream-json --verbose
+--include-partial-messages --thinking-display summarized --permission-prompts none --strict-mcp-config` process for its
+life, in the ant's workdir, taking each prompt as a user message on stdin; the process exits when the session closes
+(stdin closed, killed after 10 s). Claude Code 2.1.325 or later is required: an older one fails the session, naming its
+version.
+
+- **Sessions:** a new session's id is chosen up front (`--session-id`), a stored one resumes with `--resume`, and a
+  cloned thread forks with `--resume <parent> --fork-session --session-id <new>`, the fork written at once, without a
+  model call. A session that never ran a prompt has no transcript; resuming it starts a new session.
+- **Settings:** `model` (with its `context`'s `model_suffix`, as `opus[1m]`) is passed as `--model`; `reasoning_effort`
+  as `--effort` and must be `low`, `medium`, `high`, `xhigh` or `max`, else the session fails. An unknown model fails the
+  first prompt with Claude Code's message.
+- **Permissions:** `mode` is `--permission-mode`: `default` (or `manual`), `acceptEdits`, `plan`, `auto`, `dontAsk` or
+  `bypassPermissions`. With `--permission-prompts none`, a tool call Claude Code would ask a human about is denied at
+  once (logged as a warning) and the turn goes on. What runs unasked is decided by the mode, by permission flags in
+  `args` (`--allowedTools`, `--disallowedTools`, `--tools`, `--settings` with `permissions` rules) and by Claude Code's
+  own settings files (`~/.claude/settings.json`, the project's `.claude/settings*.json`; `--setting-sources` in `args`
+  limits which load). The ants MCP server's tools are always allowed (`--allowedTools=mcp__ants`). Put a list-taking
+  flag in its `--flag=value` form so that it does not take the arguments after it. `args` may not hold the flags the
+  protocol passes itself (`--input-format`, `--output-format`, `--session-id`, `--resume`, `--continue`,
+  `--fork-session`, `--no-session-persistence`, `--permission-mode`, `--permission-prompt-tool`,
+  `--permission-prompts`): loading the file fails, naming it.
+- **MCP:** the ants MCP server is given over streamable HTTP on stdin (Claude Code's `mcp_set_servers`), never on the
+  command line. `--strict-mcp-config` keeps other MCP servers out: those of `~/.claude.json`, the project's `.mcp.json`,
+  plugins and claude.ai connectors. Add servers with `--mcp-config` in `args`, and allow their tools there.
+- **Cancel:** Claude Code's `interrupt` ends the turn, the session going on; a turn not over 10 s later has its process
+  killed, and the session resumes on the next message.
+- **Errors:** "Not logged in · Please run /login", an invalid API key or an expired login are `auth_required` (a
+  Claude Code with neither a login nor an API key already fails opening a session, so `ants harness check` sees it);
+  plan, spend and credit limits ("You've hit your session limit", `billing_error`, a rejected `rate_limit_event`) are an
+  exhausted quota, retried after its reset time when Claude Code gives one; other 429 and 529 answers are rate limits;
+  "Prompt is too long" and the like are a context overflow.
+- **Spend:** the cost is Claude Code's `total_cost_usd`, which it restores when a session resumes; a fork reports only
+  what it spent itself while the daemon that forked it runs (after a restart, its first report counts its parent's cost
+  once more). The context window's use is that of the last model call. Prompts take text and images (base64 image
+  blocks).
+- **Environment:** unless the definition or the ant sets them, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` (no
+  telemetry, error reports or auto-updates), `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` and `CLAUDE_CODE_ENABLE_TASKS=0` (the
+  TodoWrite tool, whose todo list streams as the plan). `ANTHROPIC_API_KEY` in the environment takes precedence over a
+  claude.ai login.
 
 ### Memory files
 
