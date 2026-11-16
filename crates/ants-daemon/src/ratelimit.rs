@@ -7,12 +7,12 @@ use std::fmt;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use ants_proto::{Envelope, HarnessLimit, LimitKind, UserId};
+use ants_proto::{Envelope, HarnessLimit, LimitKind};
 use chrono::{DateTime, Utc};
 use tokio::time::Instant;
 
+use crate::fallback::OutageNotice;
 use crate::harness::Harness;
-use crate::humans::Registry;
 use crate::sync::MutexExt as _;
 
 /// Phrases of a harness's error or stderr, lowercase, that mean a rate limit or an overloaded provider, whatever the
@@ -336,25 +336,11 @@ impl Throttle {
     }
 }
 
-/// The message on the thread of `envelope`, which found the quota of `ant`'s harness on `machine` exhausted, that
-/// tells its owner, else the default human of `humans`, that messages wait, or go to the ant's `fallbacks`
-/// ([`crate::fallback`]), and when the harness is tried again, at most `max` apart. A reply to `envelope` unless it
-/// stands for a channel post.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the daemon's outage handlers pass these from separate fields of their own; notice_on builds the shared part"
-)]
-pub fn notice(
-    ant: &UserId,
-    envelope: &Envelope,
-    post: bool,
-    limited: &Limited,
-    shown: &HarnessLimit,
-    machine: &str,
-    max: Duration,
-    fallbacks: &[String],
-    humans: &Registry,
-) -> Envelope {
+/// The notice `to` the owner of the thread whose message found the quota of the ant's harness exhausted
+/// ([`OutageNotice`]) that messages wait, or go to the ant's fallbacks ([`crate::fallback`]), and when the harness is
+/// tried again, at most `max` apart.
+pub fn notice(to: &OutageNotice<'_>, limited: &Limited, shown: &HarnessLimit, max: Duration) -> Envelope {
+    let (ant, machine) = (to.ant, to.machine);
     let mut detail: String = limited.detail.trim().chars().take(DETAIL_CHARS).collect();
     if limited.detail.trim().chars().nth(DETAIL_CHARS).is_some() {
         detail.push('…');
@@ -367,7 +353,7 @@ pub fn notice(
         _ => format!("{max:?}"),
     };
     let back = format!("{harness} once its quota is back, tried at {until}, then at most {max} apart");
-    let meanwhile = crate::fallback::meanwhile(ant, fallbacks, &back).unwrap_or_else(|| {
+    let meanwhile = to.meanwhile(&back).unwrap_or_else(|| {
         format!(
             "Messages to {ant} wait meanwhile, spending no attempts; they are tried again at {until}, then at most \
              {max} apart until the quota is back."
@@ -376,9 +362,9 @@ pub fn notice(
     let text = format!(
         "[ants] {ant} cannot answer{own}: harness {harness} on {machine} is out of quota ({detail}).\n{meanwhile} \
          Raising the provider plan's limit, or a quota reset, lets them through.",
-        own = crate::fallback::own(fallbacks),
+        own = to.own(),
     );
-    crate::fallback::notice_on(ant, envelope, post, humans, text)
+    to.with_text(text)
 }
 
 #[cfg(test)]

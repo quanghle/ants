@@ -7,7 +7,7 @@ use ants_proto::State;
 
 use crate::breaker::{self, StartFailed};
 use crate::bus;
-use crate::fallback::OnFallback;
+use crate::fallback::{OnFallback, OutageNotice};
 use crate::harness::{self, SignedOut};
 use crate::ratelimit::{self, Limited};
 use crate::signin;
@@ -44,6 +44,18 @@ impl Inbox<'_> {
         (e.is::<SignedOut>() || e.is::<StartFailed>()).then_some(self.fallback_retry)
     }
 
+    /// Where a notice of an outage `incoming` met goes, naming `fallbacks`.
+    fn outage_notice<'a>(&'a self, incoming: &'a Incoming, fallbacks: &'a [String]) -> OutageNotice<'a> {
+        OutageNotice {
+            ant: self.ant,
+            envelope: &incoming.envelope,
+            post: incoming.post.is_some(),
+            machine: self.machine,
+            fallbacks,
+            humans: self.humans,
+        }
+    }
+
     /// The ant's own harness answers again: no fallback serves.
     fn back_on_own(&self) {
         if self.failover.clear() {
@@ -69,17 +81,7 @@ impl Inbox<'_> {
         };
         tracing::warn!(%thread, error = %signed_out, "harness signed out; messages wait until it is signed in");
         let fallbacks = self.pool.fallbacks();
-        let post = incoming.post.is_some();
-        let notice = signin::notice(
-            self.ant,
-            &incoming.envelope,
-            post,
-            signed_out,
-            self.machine,
-            self.sign_in_every,
-            &fallbacks,
-            self.humans,
-        );
+        let notice = signin::notice(&self.outage_notice(incoming, &fallbacks), signed_out, self.sign_in_every);
         let id = format!("sign-in-{}-{since}", self.ant);
         if let Err(e) = bus::publish_json(self.js, notice.subject(), &notice, Some(&id)).await {
             tracing::warn!(%thread, error = format!("{e:#}"), "telling a human to sign the harness in");
@@ -129,19 +131,8 @@ impl Inbox<'_> {
         }
         tracing::warn!(%thread, error = %limited, %until, "provider quota exhausted; messages wait");
         let fallbacks = self.pool.fallbacks();
-        let post = incoming.post.is_some();
         let max = self.backoffs.quota.max;
-        let notice = ratelimit::notice(
-            self.ant,
-            &incoming.envelope,
-            post,
-            limited,
-            &hold.shown,
-            self.machine,
-            max,
-            &fallbacks,
-            self.humans,
-        );
+        let notice = ratelimit::notice(&self.outage_notice(incoming, &fallbacks), limited, &hold.shown, max);
         let id = format!("quota-{}-{}", self.ant, hold.shown.since.timestamp_millis());
         if let Err(e) = bus::publish_json(self.js, notice.subject(), &notice, Some(&id)).await {
             tracing::warn!(%thread, error = format!("{e:#}"), "telling a human of the exhausted quota");
@@ -163,17 +154,7 @@ impl Inbox<'_> {
         }
         tracing::warn!(%thread, error = %failed, "harness keeps failing to start; messages wait until a check starts it");
         let fallbacks = self.pool.fallbacks();
-        let post = incoming.post.is_some();
-        let mut notice = breaker::notice(
-            self.ant,
-            &incoming.envelope,
-            post,
-            failed,
-            self.machine,
-            self.sign_in_every,
-            &fallbacks,
-            self.humans,
-        );
+        let mut notice = breaker::notice(&self.outage_notice(incoming, &fallbacks), failed, self.sign_in_every);
         self.redactor.redact_string(&mut notice.text);
         let id = format!("harness-{}-{}", self.ant, hold.shown.since.timestamp_millis());
         if let Err(e) = bus::publish_json(self.js, notice.subject(), &notice, Some(&id)).await {
@@ -267,16 +248,9 @@ impl Inbox<'_> {
             chrono::Utc::now() + chrono::Duration::from_std(at.saturating_duration_since(now)).unwrap_or_default()
         });
         let own = self.pool.launch().harness_name();
-        let notice = crate::fallback::exhausted_notice(
-            self.ant,
-            &arrived.envelope,
-            arrived.post.is_some(),
-            (own, outage),
-            &self.pool.fallbacks(),
-            (&on.name, why, &detail),
-            next,
-            self.humans,
-        );
+        let fallbacks = self.pool.fallbacks();
+        let to = self.outage_notice(arrived, &fallbacks);
+        let notice = crate::fallback::exhausted_notice(&to, (own, outage), (&on.name, why, &detail), next);
         let id = format!("fallbacks-{}-{}", self.ant, chrono::Utc::now().timestamp_millis());
         if let Err(e) = bus::publish_json(self.js, notice.subject(), &notice, Some(&id)).await {
             tracing::warn!(%thread, error = format!("{e:#}"), "telling a human every fallback is turned away");

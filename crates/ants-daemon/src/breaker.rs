@@ -8,10 +8,10 @@ use std::fmt;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use ants_proto::{Envelope, Escalation, EscalationReason, HarnessFailing, ThreadId, UserId};
+use ants_proto::{Envelope, Escalation, EscalationReason, HarnessFailing, ThreadId};
 use chrono::{DateTime, Utc};
 
-use crate::humans::Registry;
+use crate::fallback::OutageNotice;
 use crate::sync::MutexExt as _;
 
 /// Failures to start the harness that open the breaker, within [`WINDOW`] and on at least [`TRIP_THREADS`] threads.
@@ -146,28 +146,16 @@ fn excerpt(text: &str) -> String {
     excerpt
 }
 
-/// The message on the thread of `envelope`, held because the harness of `ant` on `machine` keeps failing to start
-/// with `error`, that tells its owner, else the default human of `humans`, how to check the harness. It carries a
-/// level-0 `harness` escalation, so `ants webhook serve` pushes it. Messages go to the ant's `fallbacks`
-/// ([`crate::fallback`]) meanwhile if it has any. A reply to `envelope` unless it stands for a channel post.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the daemon's outage handlers pass these from separate fields of their own; notice_on builds the shared part"
-)]
-pub fn notice(
-    ant: &UserId,
-    envelope: &Envelope,
-    post: bool,
-    failed: &StartFailed,
-    machine: &str,
-    every: Duration,
-    fallbacks: &[String],
-    humans: &Registry,
-) -> Envelope {
+/// The notice `to` the owner of the thread whose message is held because the ant's harness keeps failing to start
+/// ([`OutageNotice`]) with `failed`, that tells how to check the harness, checked every `every`. It carries a level-0
+/// `harness` escalation, so `ants webhook serve` pushes it. Messages go to the ant's fallbacks ([`crate::fallback`])
+/// meanwhile if it has any.
+pub fn notice(to: &OutageNotice<'_>, failed: &StartFailed, every: Duration) -> Envelope {
+    let (ant, machine) = (to.ant, to.machine);
     let harness = &failed.harness;
     let detail = excerpt(&failed.detail);
     let back = format!("{harness} once a check of it, every {every:?}, starts it");
-    let meanwhile = crate::fallback::meanwhile(ant, fallbacks, &back).unwrap_or_else(|| {
+    let meanwhile = to.meanwhile(&back).unwrap_or_else(|| {
         format!(
             "Messages to {ant} wait meanwhile, spending no attempts, and are answered once a check of the harness, \
              every {every:?}, starts it."
@@ -178,12 +166,12 @@ pub fn notice(
          `ants harness check --harness {harness}` on {machine} as the user the ants daemon runs as, then fix the \
          harness's install, its [harnesses.{harness}] definition or the settings of {ant} in the config file. \
          {meanwhile}",
-        own = crate::fallback::own(fallbacks),
+        own = to.own(),
     );
-    let notice = crate::fallback::notice_on(ant, envelope, post, humans, text);
+    let notice = to.with_text(text);
     let escalation = Escalation::new_from(
         ant.clone(),
-        envelope.thread_id.clone(),
+        to.envelope.thread_id.clone(),
         EscalationReason::Harness,
         notice.creator.as_ref(),
     );

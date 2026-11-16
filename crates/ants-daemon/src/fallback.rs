@@ -222,29 +222,66 @@ impl Failover {
 
 /// The sentence of a notice telling where messages to `ant` go while its own harness cannot serve, until `back`
 /// happens; `None` without `fallbacks`, when they wait.
-pub fn meanwhile(ant: &impl fmt::Display, fallbacks: &[String], back: &str) -> Option<String> {
+fn meanwhile(ant: &impl fmt::Display, fallbacks: &[String], back: &str) -> Option<String> {
     let (first, rest) = fallbacks.split_first()?;
     let then = if rest.is_empty() { String::new() } else { format!(", then {}", rest.join(", then ")) };
     Some(format!("Messages to {ant} go to its fallback {first}{then} meanwhile, and back to the harness {back}."))
 }
 
-/// The notice to the owner of the thread of `envelope` (a channel post if `post`), else the default human of `humans`,
-/// that `ant` cannot answer with a fallback either while its own harness `own` is `outage`: each of `fallbacks` is
-/// passed over, `last` having turned a message away just now, being `why` (`detail`), until `next`.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the daemon's outage handlers pass these from separate fields of their own; notice_on builds the shared part"
-)]
+/// Where a notice of an outage of the ant's harness goes, and what it names: `ant`'s notice on the thread of
+/// `envelope` (a channel post if `post`), to the thread's human owner, else the default human of `humans`, naming the
+/// `machine` the ant runs on and the `fallbacks` messages go to meanwhile.
+pub struct OutageNotice<'a> {
+    pub ant: &'a UserId,
+    pub envelope: &'a Envelope,
+    pub post: bool,
+    pub machine: &'a str,
+    pub fallbacks: &'a [String],
+    pub humans: &'a Registry,
+}
+
+impl OutageNotice<'_> {
+    /// The notice `text`: a reply to the envelope unless it stands for a channel post.
+    pub fn with_text(&self, text: String) -> Envelope {
+        let Self { ant, envelope, post, humans, .. } = *self;
+        let owner = humans.human_owner(envelope.owner.as_ref());
+        let mut notice = Envelope::on_thread(
+            envelope.thread_id.clone(),
+            ant.clone(),
+            owner.clone().unwrap_or_else(|| humans.default_human().clone()),
+            text,
+        )
+        .with_owner(owner)
+        .with_creator(humans.ant_creator(envelope.creator.as_ref()))
+        .with_origin_thread(envelope.origin_thread.clone());
+        if !post {
+            notice.in_reply_to = Some(envelope.id);
+        }
+        notice
+    }
+
+    /// The sentence telling where messages go while the ant's own harness cannot serve, until `back` happens; `None`
+    /// without fallbacks, when they wait.
+    pub fn meanwhile(&self, back: &str) -> Option<String> {
+        meanwhile(self.ant, self.fallbacks, back)
+    }
+
+    /// What the notice says the ant cannot answer with: everything, without fallbacks.
+    pub fn own(&self) -> &'static str {
+        own(self.fallbacks)
+    }
+}
+
+/// The notice `to` its thread's owner that the ant cannot answer with a fallback either while its own harness `own`
+/// is `outage`: each fallback is passed over, `last` having turned a message away just now, being `why` (`detail`),
+/// until `next`.
 pub fn exhausted_notice(
-    ant: &UserId,
-    envelope: &Envelope,
-    post: bool,
+    to: &OutageNotice<'_>,
     (own, outage): (&str, &str),
-    fallbacks: &[String],
     (last, why, detail): (&str, &str, &str),
     next: Option<DateTime<Utc>>,
-    humans: &Registry,
 ) -> Envelope {
+    let (ant, fallbacks) = (to.ant, to.fallbacks);
     let mut excerpt: String = detail.trim().chars().take(DETAIL_CHARS).collect();
     if detail.trim().chars().nth(DETAIL_CHARS).is_some() {
         excerpt.push('…');
@@ -262,31 +299,12 @@ pub fn exhausted_notice(
         "[ants] {ant} cannot answer with a fallback either: {turned}.\nMessages to {ant} wait meanwhile, spending no \
          attempts, until harness {own}, {outage}, answers again or a fallback answers when tried again{next}."
     );
-    notice_on(ant, envelope, post, humans, text)
-}
-
-/// The notice `text` of `ant` on the thread of `envelope`, to the thread's human owner, else the default human of
-/// `humans`: a reply to `envelope` unless it stands for a channel post (`post`).
-pub fn notice_on(ant: &UserId, envelope: &Envelope, post: bool, humans: &Registry, text: String) -> Envelope {
-    let owner = humans.human_owner(envelope.owner.as_ref());
-    let mut notice = Envelope::on_thread(
-        envelope.thread_id.clone(),
-        ant.clone(),
-        owner.clone().unwrap_or_else(|| humans.default_human().clone()),
-        text,
-    )
-    .with_owner(owner)
-    .with_creator(humans.ant_creator(envelope.creator.as_ref()))
-    .with_origin_thread(envelope.origin_thread.clone());
-    if !post {
-        notice.in_reply_to = Some(envelope.id);
-    }
-    notice
+    to.with_text(text)
 }
 
 /// What a notice of an outage of the ant's own harness says the ant cannot answer with: everything, without
 /// `fallbacks`.
-pub fn own(fallbacks: &[String]) -> &'static str {
+fn own(fallbacks: &[String]) -> &'static str {
     if fallbacks.is_empty() { "" } else { " with its own harness" }
 }
 
