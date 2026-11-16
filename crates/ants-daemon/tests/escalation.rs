@@ -286,6 +286,47 @@ async fn an_escalation_reaching_the_human_is_pushed_and_reminded_after_a_restart
 }
 
 #[tokio::test]
+async fn a_stand_in_s_answer_to_an_escalation_reaching_the_human_without_reminders_is_told_to_the_human() {
+    let Some(server) = Server::start() else { return };
+    let (client, js) = bus::connect(&server.url, None, None, &ant("dev-a"), "test").await.unwrap();
+    bus::ensure_stream(&js).await.unwrap();
+    let sessions = bus::ensure_sessions(&js, None, &ant("dev-a")).await.unwrap();
+    let mut to_human = client.subscribe(subject::inbox_of(&UserId::human())).await.unwrap();
+    client.flush().await.unwrap();
+    let chain = Chain { remind: None, stand_in: Some(ant("bob")), ..Chain::default() };
+    let ledger = Arc::new(Ledger::kv(sessions, ant("dev-a"), Caps::default()));
+    let send = escalation::jetstream_sender(js.clone());
+    let escalator = Escalator::new(ant("dev-a"), chain, roster(), Registry::default(), ledger, send);
+    let thread = ThreadId::generate();
+    let escalate = |id: &str| {
+        let notice = Envelope::on_thread(thread.clone(), ant("dev-a"), UserId::human(), "Turn budget spent.");
+        escalator.escalate(Stuck::new(EscalationReason::TurnBudget, notice, id.to_owned(), None))
+    };
+    let human_says = |from: UserId, text: &str| Envelope::on_thread(thread.clone(), from, ant("dev-a"), text);
+
+    assert_eq!(escalate("e1").await.unwrap(), Escalated::Owner(UserId::human()));
+    next(&mut to_human).await;
+    assert_eq!(escalator.ledger().pending(&thread).await.unwrap(), None, "no chain record");
+    assert_eq!(escalator.ledger().reminder(&thread).await.unwrap(), None, "no reminder");
+    assert!(escalator.ledger().deadlines().await.unwrap().is_empty(), "nothing due");
+
+    assert!(!escalator.arrived(&mut human_says(ant("bob"), "carry on"), Role::Human).await.unwrap());
+    let answered = next(&mut to_human).await;
+    let expected =
+        format!("[ants] bob answered the escalation of dev-a on thread {thread} in place of human: carry on");
+    assert_eq!(answered.text, expected);
+    // The answer ended it: the human's own message next tells nothing.
+    assert!(!escalator.arrived(&mut human_says(UserId::human(), "thanks"), Role::Human).await.unwrap());
+
+    // Answered by the human it reached, it ends untold, and a later message of the stand-in tells nothing either.
+    escalate("e2").await.unwrap();
+    next(&mut to_human).await;
+    assert!(!escalator.arrived(&mut human_says(UserId::human(), "on it"), Role::Human).await.unwrap());
+    assert!(!escalator.arrived(&mut human_says(ant("bob"), "noted"), Role::Human).await.unwrap());
+    assert!(timeout(Duration::from_millis(500), to_human.next()).await.is_err(), "one answer told");
+}
+
+#[tokio::test]
 async fn a_stored_question_is_told_on_the_ant_s_status_without_the_message_s_text() {
     let Some(server) = Server::start() else { return };
     let (client, js) = bus::connect(&server.url, None, None, &ant("dev-a"), "test").await.unwrap();

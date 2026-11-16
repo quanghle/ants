@@ -76,6 +76,10 @@ struct ThreadSpend {
     /// The reminder of the thread's escalation that reached a human, until a human's message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reminder: Option<Reminder>,
+    /// The human the thread's escalation reached when no reminder was armed for it, until a human's message: whom to
+    /// tell should another human answer it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reached: Option<UserId>,
     #[serde(default, skip_serializing_if = "Warned::none")]
     warned: Warned,
     /// The tool rules the thread is narrowed to ([`ants_proto::Envelope::allow`]), until a human's message.
@@ -275,12 +279,14 @@ pub struct Reminder {
 pub struct Ended {
     pub escalation: Option<Pending>,
     pub reminder: Option<Reminder>,
+    /// The human the escalation reached without a reminder ([`Ledger::reached_human`]).
+    pub reached: Option<UserId>,
 }
 
 impl Ended {
-    /// Whether the thread had an escalation or a reminder.
+    /// Whether the thread had an escalation, a reminder or a human its escalation reached.
     pub fn any(&self) -> bool {
-        self.escalation.is_some() || self.reminder.is_some()
+        self.escalation.is_some() || self.reminder.is_some() || self.reached.is_some()
     }
 }
 
@@ -401,11 +407,15 @@ impl Ledger {
         self.update(thread, |spent| (forget_spend(spent), ())).await
     }
 
-    /// A message from a human: the thread starts over from nothing spent, its escalation is over, with its reminder,
-    /// and its tool rules are no longer narrowed. Returns the escalation and the reminder it had.
+    /// A message from a human: the thread starts over from nothing spent, its escalation is over, with its reminder
+    /// and the human it reached, and its tool rules are no longer narrowed. Returns what the escalation had.
     pub async fn reset(&self, thread: &ThreadId) -> Result<Ended> {
         self.update(thread, |spent| {
-            let ended = Ended { escalation: spent.escalation.take(), reminder: spent.reminder.take() };
+            let ended = Ended {
+                escalation: spent.escalation.take(),
+                reminder: spent.reminder.take(),
+                reached: spent.reached.take(),
+            };
             let narrowed = spent.narrowed.take().is_some();
             (forget_spend(spent) || ended.any() || narrowed, ended)
         })
@@ -440,6 +450,17 @@ impl Ledger {
             let (since, sent) = kept.unwrap_or((reminder.since, reminder.sent));
             spent.reminder = Some(Reminder { since, sent, ..reminder });
             (true, ())
+        })
+        .await
+    }
+
+    /// The thread's escalation reached `human` without a reminder armed: keep whom it reached, until a human's
+    /// message ([`Ledger::reset`]). Sets no deadline.
+    pub async fn reached_human(&self, thread: &ThreadId, human: UserId) -> Result<()> {
+        self.update(thread, |spent| {
+            let changed = spent.reached.as_ref() != Some(&human);
+            spent.reached = Some(human);
+            (changed, ())
         })
         .await
     }
