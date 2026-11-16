@@ -5,11 +5,11 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, ChannelId, DEVICES_BUCKET, ENROLL_INBOX, FILES_BUCKET,
     FILES_STREAM, Feed, HUMANS_BUCKET, IDENTITIES_BUCKET, INTAKE_STREAM, JsDomain, LINKS_BUCKET, MACHINES_BUCKET,
-    Machine, NOTIFY_BUCKET, OUTBOX_STREAM, OWNERS_BUCKET, PRESENCE_BUCKET, REACTIONS_BUCKET, READ_BUCKET,
-    ROSTER_BUCKET, Role, SESSIONS_BUCKET, STORAGE_WARNING_PREFIX, STREAM, THREADS_BUCKET, UserId, WEBHOOK_MARKER,
-    WEBHOOKS_BUCKET, admin_consumer, assisted_marks_key, assisted_snoozed_key, chan_consumer, chan_reader,
-    channel_manager_serving_subject, dead_reader, host_inbox_prefix, inbox_consumer, inbox_prefix, notes_consumer,
-    notify_consumer, sent_reader, spare_readers, subject,
+    Machine, NOTIFY_BUCKET, OUTBOX_CONSUMER, OUTBOX_STREAM, OWNERS_BUCKET, PRESENCE_BUCKET, REACTIONS_BUCKET,
+    READ_BUCKET, ROSTER_BUCKET, Role, SESSIONS_BUCKET, STORAGE_WARNING_PREFIX, STREAM, THREADS_BUCKET, UserId,
+    WEBHOOK_MARKER, WEBHOOKS_BUCKET, admin_consumer, assisted_marks_key, assisted_snoozed_key, chan_consumer,
+    chan_reader, channel_manager_serving_subject, dead_reader, host_inbox_prefix, inbox_consumer, inbox_prefix,
+    notes_consumer, notify_consumer, sent_reader, spare_readers, subject,
 };
 #[cfg(doc)]
 use crate::{
@@ -415,6 +415,7 @@ impl Permissions {
             format!("$KV.{IDENTITIES_BUCKET}.*"),
             format!("$JS.API.STREAM.INFO.{OUTBOX_STREAM}"),
             format!("$JS.API.STREAM.INFO.{INTAKE_STREAM}"),
+            format!("$JS.API.STREAM.MSG.GET.{INTAKE_STREAM}"),
         ];
         let humans = format!("$KV.{HUMANS_BUCKET}.");
         let withheld = |s: &str| {
@@ -636,6 +637,8 @@ impl Permissions {
             format!("$JS.API.STREAM.CREATE.{INTAKE_STREAM}"),
             format!("$JS.API.STREAM.UPDATE.{INTAKE_STREAM}"),
             format!("$JS.API.STREAM.INFO.{INTAKE_STREAM}"),
+            // Where the intake is in an outbox, to start the outbox's durable consumer after it.
+            format!("$JS.API.STREAM.MSG.GET.{INTAKE_STREAM}"),
             // And the links and owners buckets' sources from the intake.
             format!("$JS.API.STREAM.UPDATE.{links}"),
             format!("$JS.API.STREAM.UPDATE.{owners}"),
@@ -644,6 +647,9 @@ impl Permissions {
             publish.push(format!("$JS.API.STREAM.{op}.{OUTBOX_STREAM}"));
             publish.push(format!("$JS.*.API.STREAM.{op}.{OUTBOX_STREAM}"));
         }
+        // The outbox's durable consumer, in a leaf's domain only: the uplink carries no more of it than its creation,
+        // lookup, reset and deletion ([`Self::for_leaf`]).
+        publish.push(format!("$JS.*.API.CONSUMER.*.{OUTBOX_STREAM}.{OUTBOX_CONSUMER}"));
         publish.extend(machine_record_rights());
         publish.extend(identity_rights());
         publish.extend(read_marker_rights(user));
@@ -825,11 +831,12 @@ impl Permissions {
     /// [`LeafRole::AssistantOf`] its human, which carries what [`Self::for_assistant`] allows it.
     ///
     /// Besides, the hub's intake may source the leaf's outbox through the machine's own JetStream domain: the hub
-    /// sends the leaf requests to create, update and look up the outbox and to create and delete the consumers that
-    /// read it, and flow control. The leaf delivers the outbox under [`Machine::deliver_prefix`] and answers under
-    /// [`Machine::source_replies`] and the [`Machine::setup_inbox`] of the default human and of each human among
-    /// `users` only, all of them the machine's own. nats-server carries a reply across a leaf connection only if the
-    /// leaf may publish it: the interest behind it reaches the leaf only then.
+    /// sends the leaf requests to create, update and look up the outbox, to create and delete the consumers that read
+    /// it, to look up and reset its durable [`OUTBOX_CONSUMER`], and flow control. The leaf delivers the outbox under
+    /// [`Machine::deliver_prefix`] and answers under [`Machine::source_replies`] and the [`Machine::setup_inbox`] of
+    /// the default human and of each human among `users` only, all of them the machine's own. nats-server carries a
+    /// reply across a leaf connection only if the leaf may publish it: the interest behind it reaches the leaf only
+    /// then.
     ///
     /// For each pattern of a user's inbox, notes and channel subjects, which has a wildcard before the sender, and of a
     /// human's admin orders, the uplink also gets one literal subject of it (`ants.inbox.dev-a.dev-a`,
@@ -896,6 +903,9 @@ impl Permissions {
             format!("{api}.CONSUMER.CREATE.{OUTBOX_STREAM}"),
             format!("{api}.CONSUMER.CREATE.{OUTBOX_STREAM}.>"),
             format!("{api}.CONSUMER.DELETE.{OUTBOX_STREAM}.>"),
+            // The durable consumer: a human looks it up, and the hub resets it to resume sourcing.
+            format!("{api}.CONSUMER.INFO.{OUTBOX_STREAM}.{OUTBOX_CONSUMER}"),
+            format!("{api}.CONSUMER.RESET.{OUTBOX_STREAM}.{OUTBOX_CONSUMER}"),
         ]);
         // The outbox is in the machine's own domain.
         leaf.subscribe.extend(flow_control_subjects(machine.as_str(), OUTBOX_STREAM));

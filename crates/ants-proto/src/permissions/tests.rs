@@ -110,6 +110,7 @@ fn a_js_domain_adds_the_domain_form_of_the_jetstream_api() {
     let in_domain = human.clone().with_js_domain(Some(&domain)).publish;
     assert_eq!(in_domain[..human.publish.len()], human.publish);
     assert!(in_domain.iter().any(|s| s == "$JS.*.API.STREAM.INFO.ANTS_OUT"));
+    assert!(in_domain.iter().any(|s| s == "$JS.*.API.CONSUMER.*.ANTS_OUT.ANTS_IN"));
     for family in ["STREAM.INFO.*", "STREAM.CREATE.*", "STREAM.UPDATE.*", "CONSUMER.CREATE.*"] {
         assert!(in_domain.iter().any(|s| *s == format!("$JS.hub.API.{family}")), "{family}");
     }
@@ -249,6 +250,10 @@ fn leaf_permissions_cover_each_user_once() {
     assert!(fc.iter().all(|s| extra.contains(&&s.to_string())), "both forms in m1's domain: {extra:?}");
     assert!(extra.iter().all(|s| s.starts_with("$JS.m1.API.") || fc.contains(&s.as_str())), "{extra:?}");
     assert!(extra.iter().all(|s| s.contains(".ANTS_OUT")), "{extra:?}");
+    for op in ["INFO", "RESET"] {
+        let durable = format!("$JS.m1.API.CONSUMER.{op}.ANTS_OUT.ANTS_IN");
+        assert!(extra.contains(&&durable), "the outbox's durable consumer: {extra:?}");
+    }
     // Never hearing the requests of other machines, nor answering them, without a human (who watches all).
     assert!(!only_a.subscribe.iter().any(|s| s == subject::ALL_ENROLL_REQUESTS || s == ">" || s == "ants.>"));
     assert!(!leaf.publish.iter().any(|s| s == subject::ALL_ENROLL_REPLIES || s == ">" || s == "ants.>"));

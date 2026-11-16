@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 #[cfg(doc)]
 use crate::{AttachmentHandle, HUMANS_BUCKET, Humans, INTAKE_STREAM, STREAM, link_outbox, owner_outbox};
-use crate::{Error, FILES_BUCKET, LINKS_BUCKET, OUTBOX_STREAM, OWNERS_BUCKET, inbox_prefix, subject};
+use crate::{Error, FILES_BUCKET, LINKS_BUCKET, OUTBOX_CONSUMER, OUTBOX_STREAM, OWNERS_BUCKET, inbox_prefix, subject};
 
 /// Whether `s` is safe as one NATS subject token and as a JetStream consumer name.
 fn valid_token(s: &str) -> bool {
@@ -139,6 +139,11 @@ impl Machine {
     /// credentials can feed only its own source.
     pub fn deliver_prefix(&self) -> String {
         format!("$JS.S.{self}")
+    }
+
+    /// Subject the machine's [`OUTBOX_CONSUMER`] delivers the outbox to the hub on, under [`Self::deliver_prefix`].
+    pub fn outbox_delivery(&self) -> String {
+        format!("{}.{OUTBOX_CONSUMER}", self.deliver_prefix())
     }
 
     /// Reply prefix of the hub's own requests for the machine's outbox, with nats-server's `js_api_reply_v2` feature

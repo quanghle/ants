@@ -374,6 +374,17 @@ pub fn issue_leaf(
     issue_leaf_system(dir, machine, &account.public_key(), &leaf_system_creds(out))
 }
 
+/// Write to `out` uplink credentials of `machine`'s leaf node allowing `permissions`, such as those of an earlier
+/// [`issue_leaf`].
+#[cfg(test)]
+pub fn issue_leaf_with(dir: &Path, machine: &Machine, permissions: Permissions, out: &Path) -> Result<()> {
+    let account = load(&dir.join(ACCOUNT_SEED))?;
+    let user = KeyPair::new_user();
+    let only_leaf = json!({ "allowed_connection_types": LEAF_CONNECTIONS });
+    let jwt = user_jwt(&account, &user.public_key(), &leaf_user(machine), permissions, only_leaf, None)?;
+    write_secret(out, &creds(&jwt, &seed(&user)?))
+}
+
 /// Where [`issue_leaf`] writes the system account credentials of a leaf node whose uplink credentials are at
 /// `uplink`: beside them, `leaf-<machine>.system.creds` for `leaf-<machine>.creds`.
 pub fn leaf_system_creds(uplink: &Path) -> PathBuf {
