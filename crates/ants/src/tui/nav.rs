@@ -1,7 +1,7 @@
-//! The nav: home, work with a count per state, the human's channels with their unread posts and @mentions, the ants
+//! The nav: home, the assistant's activity once there is any, work with a count per state, the human's channels with their unread posts and @mentions, the ants
 //! with their state, and the team's other humans, online or not. Each entry selects a view.
 
-use ants_proto::{Activity, ChannelId, ColonyEntry, Humans, UserId};
+use ants_proto::{Activity, ChannelId, ColonyEntry, Humans, ThreadId, UserId};
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -19,6 +19,8 @@ use crate::thread::Kind;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
     Home,
+    /// The threads reporting an assistant's acts to the human, one per day ([`ants_proto::ThreadId::is_activity`]).
+    Activity,
     /// Every thread, or those in a state.
     Work(Option<ThreadState>),
     Channel(ChannelId),
@@ -32,7 +34,7 @@ impl Item {
     /// The heading of the section the entry is in, if any.
     fn section(&self) -> Option<&'static str> {
         match self {
-            Self::Home | Self::Work(_) => None,
+            Self::Home | Self::Activity | Self::Work(_) => None,
             Self::Channel(_) => Some("CHANNELS"),
             Self::Ant(_) => Some("ANTS"),
             Self::Person(_) => Some("PEOPLE"),
@@ -42,7 +44,11 @@ impl Item {
 
 /// The nav's entries, in order.
 pub fn items(data: &Data, _now: DateTime<Utc>) -> Vec<Item> {
-    let mut items = vec![Item::Home, Item::Work(None)];
+    let mut items = vec![Item::Home];
+    if data.live.order.iter().any(ThreadId::is_activity) {
+        items.push(Item::Activity);
+    }
+    items.push(Item::Work(None));
     items.extend(ThreadState::ALL.map(|s| Item::Work(Some(s))));
     items.extend(data.channels.iter().map(|c| Item::Channel(c.channel.clone())));
     let mut ants: Vec<&UserId> = data.live.colony.iter().map(|e| &e.ant).collect();
@@ -101,7 +107,11 @@ fn line(
     let count = |n: usize| if n == 0 { String::new() } else { format!(" {n}") };
     match item {
         Item::Home => Line::raw(format!("Home{}", count(super::home::waiting(data, now).len()))),
-        Item::Work(None) => Line::raw(format!("Work{}", count(data.live.order.len()))),
+        Item::Activity => {
+            let days = data.live.order.iter().filter(|t| t.is_activity()).count();
+            Line::styled(format!("  assistant activity{}", count(days)), frame::dim())
+        }
+        Item::Work(None) => Line::raw(format!("Work{}", count(data.work().count()))),
         Item::Work(Some(state)) => {
             let n = counts.get(state).copied().unwrap_or(0);
             let style = if n == 0 { frame::dim() } else { Style::new().fg(state.color()) };

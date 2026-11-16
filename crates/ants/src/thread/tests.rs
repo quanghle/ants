@@ -839,6 +839,7 @@ async fn a_sealed_message_from_a_device_enrolled_mid_follow_opens_everywhere_it_
             followed.push(crate::sealed::read(e.clone(), keyring.as_deref()));
             Ok(())
         },
+        |_| Ok(()),
         tokio::time::sleep(Duration::from_secs(20)),
     );
     let asked = async {

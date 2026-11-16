@@ -116,10 +116,15 @@ pub(crate) enum Command {
         /// removed.
         #[arg(long)]
         json: bool,
+        /// Also list an assistant's reports of its acts for the human, one by one. Without it (and without --thread
+        /// naming an activity thread), they are marked read (unless --peek) and summed up in a line per activity
+        /// thread, none with --json.
+        #[arg(long)]
+        activity: bool,
         /// Mark unread again, on all the human's devices, a message to the human and the later ones on its thread
         /// (a message id or a unique start of one), or the latest message to the human on a thread (its id, a unique
         /// start of one, or `last`); prints nothing else.
-        #[arg(long, value_name = "MESSAGE|THREAD", conflicts_with_all = ["peek", "thread", "limit", "follow", "json"])]
+        #[arg(long, value_name = "MESSAGE|THREAD", conflicts_with_all = ["peek", "thread", "limit", "follow", "json", "activity"])]
         #[arg(add = ArgValueCompleter::new(completions::messages))]
         unread: Option<String>,
     },

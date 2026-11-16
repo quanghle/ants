@@ -230,6 +230,7 @@ impl Page {
         match item {
             nav::Item::Home => Self::Home(home::Page::default()),
             nav::Item::Work(state) => Self::Work(work::Page::new(Filter { state: *state, ..Filter::default() })),
+            nav::Item::Activity => Self::Work(work::Page::new(Filter { activity: true, ..Filter::default() })),
             nav::Item::Channel(channel) => Self::Channel(channel::Page::new(channel.clone())),
             nav::Item::Ant(user) => Self::Ant(ant::Page::new(user.clone())),
             nav::Item::Person(user) => Self::Dm(dm::Page::new(user.clone())),
