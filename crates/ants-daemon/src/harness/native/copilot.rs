@@ -20,6 +20,7 @@ use agent_client_protocol::v1::schema::{
     ContentBlock, PromptResponse, StopReason, ToolCall, ToolCallLocation, ToolCallStatus, ToolCallUpdate,
     ToolCallUpdateFields, ToolKind, Usage,
 };
+use ants_proto::{McpServerState, McpStatus};
 use anyhow::bail;
 use github_copilot_sdk as sdk;
 use sdk::session::Session;
@@ -28,7 +29,7 @@ use sdk::{
     Attachment, ErrorKind, MessageOptions, PermissionRequestData, ProtocolErrorKind, ResumeSessionConfig,
     SessionConfig, SessionEvent, SessionId, SetModelOptions,
 };
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tokio::io::{AsyncRead, ReadBuf};
 use tokio::sync::{mpsc, watch};
 
@@ -65,12 +66,14 @@ pub(crate) struct Copilot {
 
 /// What the definition's arguments set of each session rather than of the CLI, whose server ignores them on its
 /// command line: the tools left to the model (`--available-tools`, `--excluded-tools`, each tool named, or several
-/// separated by commas) and the context tier (`--context`).
+/// separated by commas), the context tier (`--context`) and MCP servers added to the session's own
+/// (`--additional-mcp-config`, as JSON or `@` a file of it, each naming them in `mcpServers`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct SessionArgs {
     available: Option<Vec<String>>,
     excluded: Option<Vec<String>>,
     context: Option<String>,
+    mcp: Vec<String>,
 }
 
 impl SessionArgs {
@@ -90,6 +93,14 @@ impl SessionArgs {
                 "--context" => {
                     let tier = value.or_else(|| args.next_if(|next| !next.starts_with('-')));
                     taken.context = Some(tier.ok_or("--context takes a tier")?);
+                    continue;
+                }
+                "--additional-mcp-config" => {
+                    let config = value.or_else(|| args.next()).ok_or("--additional-mcp-config takes JSON or @FILE")?;
+                    if !config.starts_with('@') {
+                        mcp_config(&config)?;
+                    }
+                    taken.mcp.push(config);
                     continue;
                 }
                 flag if IGNORED_ARGS.contains(&flag) => {
@@ -120,12 +131,49 @@ impl SessionArgs {
         *cli_args = rest;
         Ok(taken)
     }
+
+    /// The servers `--additional-mcp-config` adds, those of a later one over an earlier one's, reading its files.
+    fn mcp_servers(&self) -> Result<Map<String, Value>, String> {
+        let mut servers = Map::new();
+        for config in &self.mcp {
+            let read = match config.strip_prefix('@') {
+                Some(path) => std::fs::read_to_string(path)
+                    .map_err(|e| format!("--additional-mcp-config: reading {path}: {e}"))
+                    .and_then(|text| mcp_config(&text).map_err(|e| format!("{e} in {path}")))?,
+                None => mcp_config(config)?,
+            };
+            servers.extend(read);
+        }
+        Ok(servers)
+    }
+}
+
+/// The servers of an MCP configuration, as `--additional-mcp-config` takes it: `{"mcpServers": {NAME: SERVER}}`, a
+/// server without a `type` being `stdio` with a `command`, else `http`.
+fn mcp_config(text: &str) -> Result<Map<String, Value>, String> {
+    let config: Value = serde_json::from_str(text).map_err(|e| format!("--additional-mcp-config: {e}"))?;
+    let Some(Value::Object(servers)) = config.get("mcpServers") else {
+        return Err("--additional-mcp-config takes an object of servers in mcpServers".to_owned());
+    };
+    let mut servers = servers.clone();
+    for (name, server) in &mut servers {
+        let Value::Object(server) = server else {
+            return Err(format!("--additional-mcp-config: server {name} is no object"));
+        };
+        if !server.contains_key("type") {
+            let kind = if server.contains_key("command") { "stdio" } else { "http" };
+            server.insert("type".to_owned(), kind.into());
+        }
+    }
+    Ok(servers)
 }
 
 /// One CLI and the SDK's client of it, shared by its sessions.
 struct Shared {
     cli: Cli,
     args: SessionArgs,
+    /// The servers `--additional-mcp-config` adds to every session.
+    mcp: Map<String, Value>,
     client: sdk::Client,
     process: tokio::sync::Mutex<Process>,
     /// True once the CLI's output ended.
@@ -218,8 +266,12 @@ macro_rules! settings {
         if let Some(tools) = &shared.args.excluded {
             config = config.with_excluded_tools(tools.clone());
         }
-        if !open.mcp_servers.is_empty() {
-            let servers = serde_json::from_value(mcp_servers_json(&open.mcp_servers))
+        let mut servers = shared.mcp.clone();
+        if let Value::Object(own) = mcp_servers_json(&open.mcp_servers) {
+            servers.extend(own);
+        }
+        if !servers.is_empty() {
+            let servers = serde_json::from_value(Value::Object(servers))
                 .map_err(|e| failed(format!("the session's MCP servers: {e}")))?;
             config = config.with_mcp_servers(servers);
         }
@@ -252,13 +304,14 @@ impl Native for Copilot {
 
     async fn start(mut cli: Cli) -> Result<Self, Error> {
         let args = SessionArgs::take(&mut cli.args).map_err(failed)?;
+        let mcp = args.mcp_servers().map_err(failed)?;
         let mut process = cli.spawn(SERVER_ARGS, None)?;
         let (stdin, stdout) = process.take_io().ok_or_else(|| failed("no stdio"))?;
         let (closing, closed) = watch::channel(false);
         let cwd = std::env::current_dir().unwrap_or_default();
         let client = sdk::Client::from_streams(Output { inner: stdout, closing }, stdin, cwd)
             .map_err(|e| failed(format!("{}: {e}", cli.name())))?;
-        let shared = Arc::new(Shared { cli, args, client, process: tokio::sync::Mutex::new(process), closed });
+        let shared = Arc::new(Shared { cli, args, mcp, client, process: tokio::sync::Mutex::new(process), closed });
         let version = shared.handshake().await?;
         Ok(Self { shared, version })
     }
@@ -273,6 +326,8 @@ impl Native for Copilot {
             http_mcp: true,
         }
     }
+
+    const MCP: bool = true;
 
     async fn new_session(&self, open: Open) -> Result<CopilotSession, Error> {
         let shared = &self.shared;
@@ -341,6 +396,20 @@ impl<R: AsyncRead + Unpin> AsyncRead for Output<R> {
     }
 }
 
+/// An MCP server as the CLI's `session.mcp.list` reports it.
+fn mcp_server(server: &Value) -> McpServerState {
+    let status = match server["status"].as_str() {
+        Some("connected") => McpStatus::Connected,
+        Some("pending") => McpStatus::Pending,
+        Some("needs-auth") => McpStatus::NeedsAuth,
+        Some("failed") => McpStatus::Failed,
+        Some("disabled" | "stopped" | "not_configured") => McpStatus::Disabled,
+        _ => McpStatus::Unknown,
+    };
+    let name = server["name"].as_str().unwrap_or_default();
+    McpServerState::new(name, status, server["error"].as_str(), server["source"].as_str())
+}
+
 /// Where a session's events go: the prompt running, if any.
 type Current = Arc<Mutex<Option<mpsc::UnboundedSender<SessionEvent>>>>;
 
@@ -365,6 +434,15 @@ impl Drop for CopilotSession {
 }
 
 impl CopilotSession {
+    /// Call `method` of the session with `params`.
+    async fn call(&self, method: &str, mut params: Value) -> Result<Value, Error> {
+        params["sessionId"] = json!(self.session.id());
+        match self.shared.client.call(method, Some(params)).await {
+            Ok(result) => Ok(result),
+            Err(e) => Err(self.shared.error(&e).await),
+        }
+    }
+
     fn new(shared: Arc<Shared>, session: Session, events: EventSubscription, base: f64) -> Self {
         let current = Current::default();
         let router = tokio::spawn(route(events, current.clone()));
@@ -471,6 +549,23 @@ impl Drop for Running<'_> {
 impl NativeSession for CopilotSession {
     fn id(&self) -> String {
         based_id(self.session.id(), self.base)
+    }
+
+    async fn mcp_servers(&self) -> Result<Vec<McpServerState>, Error> {
+        let list = self.call("session.mcp.list", json!({})).await?;
+        Ok(list["servers"].as_array().into_iter().flatten().map(mcp_server).collect())
+    }
+
+    async fn mcp_sign_in(&self, server: &str) -> Result<Option<String>, Error> {
+        let login = self.call("session.mcp.oauth.login", json!({ "serverName": server })).await?;
+        Ok(login["authorizationUrl"].as_str().filter(|url| !url.is_empty()).map(str::to_owned))
+    }
+
+    async fn discard(&self) {
+        self.close().await;
+        if let Err(e) = self.shared.client.delete_session(self.session.id()).await {
+            tracing::warn!(harness = self.shared.cli.name(), error = %e, "deleting the Copilot CLI's session");
+        }
     }
 
     async fn prompt(&self, prompt: Vec<ContentBlock>, updates: Updates) -> Result<PromptResponse, Error> {

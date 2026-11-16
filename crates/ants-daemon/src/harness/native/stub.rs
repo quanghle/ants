@@ -4,13 +4,15 @@
 //! The CLI answers `initialize` with `{name, version, fork}`, `new` and `fork` with `{id}`, `load` with anything and
 //! `prompt` with `{stop, tokens}`, failing as [`mapped`] reads. It notifies `update` with `{kind, text}` (`message`,
 //! `thought`), `{kind: "tool", id, title}` or `{kind: "cost", usd}`, and may ask `approve`, which is denied. `cancel`
-//! and `close` are notified to it.
+//! and `close` are notified to it. `mcp` is answered with `{servers}`, each an [`McpServerState`], and `mcp_sign_in`
+//! with `{url}`, the address to sign in at, if any; the browser's return is requested on the loopback.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::Error;
 use agent_client_protocol::v1::schema::{ContentBlock, PromptResponse, StopReason, ToolCall, Usage};
+use ants_proto::McpServerState;
 use anyhow::bail;
 use serde_json::{Value, json};
 use tokio::process::ChildStdin;
@@ -136,6 +138,8 @@ impl Native for Stub {
         self.info.clone()
     }
 
+    const MCP: bool = true;
+
     async fn new_session(&self, open: Open) -> Result<StubSession, Error> {
         let cli = &self.shared.cli;
         let params = json!({
@@ -185,6 +189,16 @@ impl NativeSession for StubSession {
         let stop = if done["stop"] == "cancelled" { StopReason::Cancelled } else { StopReason::EndTurn };
         let tokens = done["tokens"].as_u64().unwrap_or_default();
         Ok(PromptResponse::new(stop).usage(Usage::new(tokens, tokens, 0)))
+    }
+
+    async fn mcp_servers(&self) -> Result<Vec<McpServerState>, Error> {
+        let listed = self.shared.request("mcp", json!({ "session": self.id })).await?;
+        serde_json::from_value(listed["servers"].clone()).map_err(|e| failed(format!("the stub CLI's servers: {e}")))
+    }
+
+    async fn mcp_sign_in(&self, server: &str) -> Result<Option<String>, Error> {
+        let started = self.shared.request("mcp_sign_in", json!({ "session": self.id, "server": server })).await?;
+        Ok(started["url"].as_str().map(str::to_owned))
     }
 
     async fn cancel(&self) {

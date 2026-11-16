@@ -31,6 +31,7 @@ mod leaf;
 mod live;
 mod machines;
 mod manager;
+mod mcp;
 mod members;
 mod memories;
 mod natsd;

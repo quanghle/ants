@@ -197,6 +197,8 @@ fn an_order_rule_covers_an_op_of_its_kind() {
         AdminOp::Retire,
         AdminOp::ReadMemories,
         AdminOp::ReadSettings,
+        AdminOp::ReadMcp,
+        AdminOp::McpSignIn { server: "github".to_owned(), callback: None },
         AdminOp::Clone { new: p("dev-b"), settings: Map::new() },
     ];
     for op in ops {

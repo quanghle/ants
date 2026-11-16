@@ -19,8 +19,8 @@ use super::react::{self, Picker};
 use super::reads::{Mark, Read};
 use super::work::{Facts, Filter};
 use super::{
-    ant, cards, catchup, channel, credentials, dm, faces, held, home, images, memories, nav, people, search, settings,
-    snooze, thread, timeline, tree, work,
+    ant, cards, catchup, channel, credentials, dm, faces, held, home, images, mcp, memories, nav, people, search,
+    settings, snooze, thread, timeline, tree, work,
 };
 use crate::live::{self, State};
 use crate::thread::Entry;
@@ -721,6 +721,28 @@ impl Model {
     pub fn memories_wanted(&self) -> Option<(UserId, u32)> {
         let Page::Ant(page) = self.page() else { return None };
         (page.pane == ant::Pane::Memories).then(|| (page.ant.clone(), page.memories.asked))
+    }
+
+    /// What the view wants of an ant's MCP servers: the shown ant's, on its MCP pane.
+    pub fn mcp_wanted(&self) -> Option<mcp::Wanted> {
+        let Page::Ant(page) = self.page() else { return None };
+        (page.pane == ant::Pane::Mcp).then(|| mcp::Wanted {
+            ant: page.ant.clone(),
+            asked: page.mcp.asked,
+            sign: page.mcp.sign_wanted(),
+        })
+    }
+
+    /// Take in what an order about an ant's MCP servers brought.
+    pub fn mcp_event(&mut self, event: mcp::Event) {
+        for page in &mut self.pages {
+            let Page::Ant(page) = page else { continue };
+            match &event {
+                mcp::Event::Read(ant, asked, read) if *ant == page.ant => page.mcp.read(*asked, read),
+                mcp::Event::Signed(ant, sign, signed) if *ant == page.ant => page.mcp.signed(*sign, signed),
+                _ => {}
+            }
+        }
     }
 
     /// Take in what a read of an ant's memories brought.

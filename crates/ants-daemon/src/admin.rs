@@ -35,6 +35,7 @@ mod add;
 mod ask;
 mod clone;
 pub mod held;
+pub mod mcp;
 mod memories;
 pub use memories::files_under;
 mod pause;
@@ -413,6 +414,10 @@ async fn apply(
         }
         AdminOp::ReadMemories => memories::apply(orders, order, stored_at).await,
         AdminOp::ReadSettings => settings::apply(orders, order),
+        AdminOp::ReadMcp => mcp::apply(orders, order, None, stored_at).await,
+        AdminOp::McpSignIn { server, callback } => {
+            mcp::apply(orders, order, Some((server, callback.as_deref())), stored_at).await
+        }
     })
 }
 

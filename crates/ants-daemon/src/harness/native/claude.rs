@@ -22,6 +22,7 @@ use agent_client_protocol::v1::schema::{
     ContentBlock, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, PromptResponse, StopReason, ToolCall,
     ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, Usage,
 };
+use ants_proto::{McpServerState, McpStatus};
 use anyhow::bail;
 use serde_json::{Value, json};
 use tokio::process::{ChildStdin, ChildStdout};
@@ -148,6 +149,8 @@ impl Native for Claude {
             http_mcp: true,
         }
     }
+
+    const MCP: bool = true;
 
     /// The API key and tokens in the environment and the login in `.credentials.json` of the configuration directory,
     /// which Claude Code keeps there unless in the macOS keychain.
@@ -530,6 +533,22 @@ impl NativeSession for ClaudeSession {
         based_id(&self.id, self.spent.locked().base)
     }
 
+    async fn mcp_servers(&self) -> Result<Vec<McpServerState>, Error> {
+        let status = self.shared.control(json!({ "subtype": "mcp_status" })).await?;
+        let servers = status["mcpServers"].as_array().map_or(&[][..], Vec::as_slice);
+        Ok(servers.iter().map(mcp_server).collect())
+    }
+
+    async fn mcp_sign_in(&self, server: &str) -> Result<Option<String>, Error> {
+        let auth = self.shared.control(json!({ "subtype": "mcp_authenticate", "serverName": server })).await?;
+        Ok(auth["authUrl"].as_str().filter(|url| !url.is_empty()).map(str::to_owned))
+    }
+
+    async fn mcp_callback(&self, server: &str, callback: &str) -> Result<(), Error> {
+        let request = json!({ "subtype": "mcp_oauth_callback_url", "serverName": server, "callbackUrl": callback });
+        self.shared.control(request).await.map(drop)
+    }
+
     async fn prompt(&self, prompt: Vec<ContentBlock>, updates: Updates) -> Result<PromptResponse, Error> {
         let mut events = self.events.lock().await;
         // Whatever came between turns, such as a background task's notice, belongs to no prompt.
@@ -560,6 +579,21 @@ impl NativeSession for ClaudeSession {
             }
         }
     }
+}
+
+/// An MCP server as Claude Code's `mcp_status` reports it.
+fn mcp_server(server: &Value) -> McpServerState {
+    let status = match server["status"].as_str() {
+        Some("connected") => McpStatus::Connected,
+        Some("pending") => McpStatus::Pending,
+        Some("needs-auth") => McpStatus::NeedsAuth,
+        Some("failed") => McpStatus::Failed,
+        Some("disabled") => McpStatus::Disabled,
+        _ => McpStatus::Unknown,
+    };
+    let name = server["name"].as_str().unwrap_or_default();
+    McpServerState::new(name, status, server["error"].as_str(), server["scope"].as_str())
+        .with_tools(server["tools"].as_array().map(Vec::len))
 }
 
 /// A prompt's content as Claude Code takes it: text, and images as base64 image blocks.

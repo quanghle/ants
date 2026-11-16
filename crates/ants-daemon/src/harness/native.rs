@@ -15,6 +15,7 @@ mod claude;
 mod codex;
 mod copilot;
 mod io;
+pub(crate) use io::is_loopback;
 mod rpc;
 #[cfg(test)]
 mod stub;
@@ -40,6 +41,7 @@ use agent_client_protocol::v1::schema::{
 };
 use agent_client_protocol::v1::{ConnectionTo, Responder};
 use agent_client_protocol::{AcpAgent, Agent, Client, DynConnectTo, Error, ErrorCode, JsonRpcResponse};
+use futures::future::BoxFuture;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -98,16 +100,18 @@ impl fmt::Display for Protocol {
     }
 }
 
-/// How a native protocol's definitions are checked and its translator connected.
+/// How a native protocol's definitions are checked, its translator connected and, where it reports them, its MCP
+/// servers read.
 #[derive(Clone, Copy)]
 struct Registration {
     validate: fn(&Harness) -> anyhow::Result<()>,
     connect: fn(Cli) -> DynConnectTo<Client>,
+    mcp: Option<OpenHost>,
 }
 
 impl Registration {
     fn of<N: Native>() -> Self {
-        Self { validate: N::validate, connect: connect::<N> }
+        Self { validate: N::validate, connect: connect::<N>, mcp: N::MCP.then_some(open_host::<N> as OpenHost) }
     }
 }
 
@@ -139,6 +143,71 @@ pub(crate) fn agent(harness: &Harness, env: &[(String, String)], settings: &Mode
         Ok(None) => DynConnectTo::new(AcpAgent::new(harness.process(env, settings))),
         Ok(Some(registration)) => (registration.connect)(Cli::new(harness, env, settings)),
         Err(e) => refusing(format!("harness {harness}: {e}")),
+    }
+}
+
+/// A session of `harness` with the ant's `env` and `settings`, working in `cwd` with the MCP servers `servers` gives
+/// (told whether the CLI takes HTTP ones), that reports its MCP servers and signs them in, bypassing ACP; None when the
+/// harness's protocol does not report them.
+pub(crate) fn mcp_host(
+    harness: &Harness,
+    env: &[(String, String)],
+    settings: &ModelSettings,
+    cwd: PathBuf,
+    servers: ServersFor,
+) -> Option<BoxFuture<'static, Result<Box<dyn McpHost>, Error>>> {
+    let open = registration(harness.protocol).ok()??.mcp?;
+    Some(open(Cli::new(harness, env, settings), cwd, servers))
+}
+
+/// The MCP servers of a session, given whether the CLI takes HTTP ones.
+pub(crate) type ServersFor = Box<dyn FnOnce(bool) -> Vec<McpServer> + Send>;
+
+type OpenHost = fn(Cli, PathBuf, ServersFor) -> BoxFuture<'static, Result<Box<dyn McpHost>, Error>>;
+
+fn open_host<N: Native>(
+    cli: Cli,
+    cwd: PathBuf,
+    servers: ServersFor,
+) -> BoxFuture<'static, Result<Box<dyn McpHost>, Error>> {
+    Box::pin(async move {
+        let native = N::start(cli).await?;
+        let mcp_servers = servers(native.info().http_mcp);
+        let session = native.new_session(Open { cwd, mcp_servers }).await?;
+        Ok(Box::new(Host { _native: native, session }) as Box<dyn McpHost>)
+    })
+}
+
+/// A session of a native CLI held open for its MCP servers ([`mcp_host`]): the CLI and its MCP servers stop once it is
+/// closed and dropped.
+pub(crate) trait McpHost: Send + Sync {
+    fn servers(&self) -> BoxFuture<'_, Result<Vec<ants_proto::McpServerState>, Error>>;
+    fn sign_in<'a>(&'a self, server: &'a str) -> BoxFuture<'a, Result<Option<String>, Error>>;
+    fn callback<'a>(&'a self, server: &'a str, callback: &'a str) -> BoxFuture<'a, Result<(), Error>>;
+    fn close(&self) -> BoxFuture<'_, ()>;
+}
+
+struct Host<N: Native> {
+    /// Keeps the CLI running, for CLIs shared by their sessions.
+    _native: N,
+    session: N::Session,
+}
+
+impl<N: Native> McpHost for Host<N> {
+    fn servers(&self) -> BoxFuture<'_, Result<Vec<ants_proto::McpServerState>, Error>> {
+        Box::pin(self.session.mcp_servers())
+    }
+
+    fn sign_in<'a>(&'a self, server: &'a str) -> BoxFuture<'a, Result<Option<String>, Error>> {
+        Box::pin(self.session.mcp_sign_in(server))
+    }
+
+    fn callback<'a>(&'a self, server: &'a str, callback: &'a str) -> BoxFuture<'a, Result<(), Error>> {
+        Box::pin(self.session.mcp_callback(server, callback))
+    }
+
+    fn close(&self) -> BoxFuture<'_, ()> {
+        Box::pin(self.session.discard())
     }
 }
 
@@ -296,6 +365,9 @@ pub(crate) trait Native: Sized + Send + Sync + 'static {
     fn credentials(&self) -> Option<Credentials> {
         None
     }
+
+    /// Whether its sessions report their MCP servers and sign them in ([`NativeSession::mcp_servers`]).
+    const MCP: bool = false;
 }
 
 /// The credentials a native CLI signs in with ([`Native::credentials`]).
@@ -344,6 +416,32 @@ pub(crate) trait NativeSession: Send + Sync + 'static {
     /// it started for it; the session is dropped next, which ends what the translator runs for it alone.
     fn close(&self) -> impl Future<Output = ()> + Send {
         async {}
+    }
+
+    /// Close a session opened only to read its MCP servers, leaving nothing of it to resume.
+    fn discard(&self) -> impl Future<Output = ()> + Send {
+        self.close()
+    }
+
+    /// The session's MCP servers and how each stands; called only when [`Native::MCP`].
+    fn mcp_servers(&self) -> impl Future<Output = Result<Vec<ants_proto::McpServerState>, Error>> + Send {
+        async { Err(unsupported("reading MCP servers")) }
+    }
+
+    /// Start signing the session in to MCP server `server` with OAuth: the address to open in a browser, which comes
+    /// back to the CLI's own loopback listener; none when the server needs no sign-in, such as with credentials the
+    /// CLI keeps. Called only when [`Native::MCP`].
+    fn mcp_sign_in(&self, server: &str) -> impl Future<Output = Result<Option<String>, Error>> + Send {
+        let _ = server;
+        async { Err(unsupported("signing in to MCP servers")) }
+    }
+
+    /// Hand the CLI `callback`, the address a browser came back to after a sign-in [`Self::mcp_sign_in`] started,
+    /// checked to be on the loopback listener of the sign-in: by default by requesting it, as the browser would have.
+    fn mcp_callback(&self, server: &str, callback: &str) -> impl Future<Output = Result<(), Error>> + Send {
+        let _ = server;
+        let callback = callback.to_owned();
+        async move { io::get_loopback(&callback).await.map_err(|e| failed(format!("{e:#}"))) }
     }
 
     /// Select another model or reasoning effort than the session opened with.

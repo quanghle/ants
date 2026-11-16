@@ -864,6 +864,7 @@ where
         () = inbox.hear_cancels() => {}
         () = inbox.hear_restarts() => {}
         () = inbox.hear_clones() => {}
+        () = inbox.hear_mcp() => {}
         () = crate::creds::recheck(config.connection.creds.as_deref()) => {}
         () = storage.watch(crate::storage::CHECK_EVERY) => {}
         () = tell_unserved(inbox.js, inbox.humans, &mut unserved) => {}
