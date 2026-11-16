@@ -23,8 +23,8 @@ use tokio::process::ChildStdin;
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    Cli, Harness, Info, JsonLines, JsonWriter, Native, NativeSession, Open, Process, Updates, context_overflow,
-    deny_approval, failed, mcp_servers_json, prompt_text, quota_exhausted, rate_limited, signed_out,
+    Cli, Credentials, Harness, Info, JsonLines, JsonWriter, Native, NativeSession, Open, Process, Updates,
+    context_overflow, deny_approval, failed, mcp_servers_json, prompt_text, quota_exhausted, rate_limited, signed_out,
 };
 use crate::sync::MutexExt as _;
 
@@ -60,6 +60,9 @@ const STALE_RETRY: &str = "API error (attempt ";
 
 /// The error of a `result` agy prints instead of `init` when it is not signed in.
 const NOT_SIGNED_IN: &str = "authentication failed or timed out";
+
+/// The environment variable agy reads a Gemini API key from, used with model provider `gemini`.
+const API_KEY: &str = "GEMINI_API_KEY";
 
 /// How long `agy --version` may take.
 const VERSION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -112,6 +115,14 @@ impl Native for Antigravity {
             images: false,
             http_mcp: true,
         }
+    }
+
+    /// The Gemini API key in the environment, where agy runs with it; a Google account's login, in the keychain, is
+    /// not read.
+    fn credentials(&self) -> Option<Credentials> {
+        let key = self.cli.var(API_KEY)?;
+        let home = self.cli.var("HOME").map(PathBuf::from).or_else(std::env::home_dir);
+        gemini_provider(&self.cli, home.as_deref()).then(|| Credentials::new(API_KEY, &[key.as_bytes()]))
     }
 
     async fn new_session(&self, open: Open) -> Result<AgySession, Error> {
@@ -240,6 +251,22 @@ fn settings(cli: &Cli, open: &Open) -> Result<(Vec<String>, Value), Error> {
         }
     }
     Ok((args, Value::Object(settings)))
+}
+
+/// Whether agy's settings choose model provider `gemini`, which signs in with [`API_KEY`]: those of the definition's
+/// `--settings` over agy's own `settings.json` in `home`. A settings file relative to the session's directory, not
+/// read here, counts as choosing it.
+fn gemini_provider(cli: &Cli, home: Option<&Path>) -> bool {
+    let read = |path: &Path| std::fs::read_to_string(path).ok().and_then(|text| inline_settings(&text).ok());
+    let given = match split_settings(cli.args()) {
+        Ok((_, Some(inline))) if inline.trim_start().starts_with('{') => inline_settings(&inline).ok(),
+        Ok((_, Some(file))) if Path::new(&file).is_relative() => return true,
+        Ok((_, Some(file))) => read(Path::new(&file)),
+        _ => None,
+    };
+    let own = || home.and_then(|home| read(&home.join(".gemini/antigravity-cli/settings.json")));
+    let provider = |settings: serde_json::Map<String, Value>| settings.get("modelProvider").cloned();
+    given.and_then(provider).or_else(|| own().and_then(provider)).is_some_and(|provider| provider == "gemini")
 }
 
 /// ants' MCP servers as agy's `mcp_config.json` has them.
