@@ -7,6 +7,7 @@ use ants_proto::UserId;
 use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
 
+use crate::serve::Ended;
 use crate::{Connection, bridge, notify, reload, upgrade, webhook, webhook_add};
 
 #[derive(Subcommand, Debug)]
@@ -70,7 +71,37 @@ pub(crate) async fn run(command: WebhookCommand, conn: &Connection<'_>) -> Resul
             }
             let reload =
                 webhook::Reload { triggers: reload::Triggers::new(path.clone(), None, reload::CHECK_EVERY)?, load };
-            upgrade::or_exit(webhook::serve(config, conn.nats, domain, listener, reload), &upgrade).await
+            let (stopping, stopped) = tokio::sync::oneshot::channel();
+            let stop = async move {
+                let signal = async {
+                    if let Err(e) = ants_daemon::daemon::stop_signal().await {
+                        tracing::warn!(error = %e, "waiting for Ctrl-C or SIGTERM");
+                        std::future::pending::<()>().await;
+                    }
+                };
+                let ended = tokio::select! {
+                    () = signal => Ended::Stopped,
+                    () = upgrade::replaced(upgrade.upgrade_check) => Ended::Replaced,
+                };
+                let _ = stopping.send(());
+                ended
+            };
+            // While the requests under way finish, another Ctrl-C or SIGTERM stops at once.
+            let again = async {
+                if stopped.await.is_err() || ants_daemon::daemon::stop_signal().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            };
+            tokio::select! {
+                ended = webhook::serve(config, conn.nats, domain, listener, reload, stop) => match ended? {
+                    Ended::Stopped => Ok(()),
+                    Ended::Replaced => upgrade::exit(),
+                },
+                () = again => {
+                    tracing::info!("stopping at once, cutting off the requests under way");
+                    Ok(())
+                }
+            }
         }
         WebhookCommand::NotifyTest { human, config } => {
             let path = match config {

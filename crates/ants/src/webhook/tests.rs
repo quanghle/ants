@@ -5,8 +5,10 @@ use std::net::SocketAddr;
 use ants_proto::{ChannelEntry, Permissions, STREAM};
 use futures::TryStreamExt as _;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio::time::timeout;
 
 use super::*;
 use crate::auth::{issue_with, tests::Server};
@@ -274,7 +276,7 @@ impl Answer {
 }
 
 async fn request(addr: SocketAddr, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Answer {
-    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut stream = TcpStream::connect(addr).await.unwrap();
     let mut head = format!("{method} {path} HTTP/1.1\r\nHost: hooks\r\nConnection: close\r\n");
     for (name, value) in headers {
         let _ = write!(head, "{name}: {value}\r\n");
@@ -282,9 +284,14 @@ async fn request(addr: SocketAddr, method: &str, path: &str, headers: &[(&str, &
     let _ = write!(head, "Content-Length: {}\r\n\r\n", body.len());
     stream.write_all(head.as_bytes()).await.unwrap();
     stream.write_all(body).await.unwrap();
+    answer(stream).await
+}
+
+/// The answer read from `stream` until the server closes it.
+async fn answer(mut stream: TcpStream) -> Answer {
     let mut answer = String::new();
     stream.read_to_string(&mut answer).await.unwrap();
-    let (headers, body) = answer.split_once("\r\n\r\n").unwrap_or_else(|| panic!("{method} {path}: {answer:?}"));
+    let (headers, body) = answer.split_once("\r\n\r\n").unwrap_or_else(|| panic!("no answer: {answer:?}"));
     let status = headers.split(' ').nth(1).unwrap().parse().unwrap();
     Answer { status, headers: headers.to_lowercase(), body: body.to_owned() }
 }
@@ -295,14 +302,58 @@ fn signed(body: &[u8]) -> String {
 }
 
 /// `ants webhook serve` with the config at `path`, checked for changes every 50 ms, and where it listens.
-async fn start(path: &Path, nats: &str) -> (JoinHandle<Result<()>>, SocketAddr) {
+async fn start(path: &Path, nats: &str) -> (JoinHandle<Result<Ended>>, SocketAddr) {
+    start_with(path, nats, REQUEST_TIMEOUT, std::future::pending()).await
+}
+
+/// [`start`], with requests limited to `timeout`, until `stop`.
+async fn start_with(
+    path: &Path,
+    nats: &str,
+    timeout: Duration,
+    stop: impl Future<Output = Ended> + Send + 'static,
+) -> (JoinHandle<Result<Ended>>, SocketAddr) {
     let config = Config::load(path).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (nats, path) = (nats.to_owned(), path.to_owned());
     let triggers = crate::reload::Triggers::new(path.clone(), None, Duration::from_millis(50)).unwrap();
     let reload = Reload { triggers, load: move || Config::load(&path) };
-    (tokio::spawn(async move { serve(config, &nats, None, listener, reload).await }), addr)
+    (tokio::spawn(async move { serve_timing(config, &nats, None, listener, reload, stop, timeout).await }), addr)
+}
+
+/// A config with webhook github, its bearer token s3cret, and metrics, for a hub that is not there.
+fn offline(name: &str) -> (PathBuf, SocketAddr, String) {
+    let dir = ants_test_support::scratch_dir(name);
+    let path = dir.join("webhooks.toml");
+    let metrics: SocketAddr = format!("127.0.0.1:{}", ants_test_support::free_port()).parse().unwrap();
+    let hook = format!("{HOOK}ant = \"dev-a\"\n").replace("secret_env = \"HOOK_SECRET\"", "secret_file = \"s\"");
+    std::fs::write(&path, format!("metrics = \"{metrics}\"\n{hook}")).unwrap();
+    std::fs::write(dir.join("s"), "s3cret").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(dir.join("s"), std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    (path, metrics, format!("nats://127.0.0.1:{}", ants_test_support::free_port()))
+}
+
+/// A request to webhook github whose body of `length` bytes stops after `sent`, kept alive, once it is under way.
+async fn stalled(addr: SocketAddr, metrics: SocketAddr, length: usize, sent: &[u8]) -> TcpStream {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let head = format!(
+        "POST /hooks/github HTTP/1.1\r\nHost: hooks\r\nAuthorization: Bearer s3cret\r\nContent-Length: {length}\r\n\r\n"
+    );
+    stream.write_all(head.as_bytes()).await.unwrap();
+    stream.write_all(sent).await.unwrap();
+    for _ in 0..100 {
+        let exposition = request(metrics, "GET", "/metrics", &[], b"").await.body;
+        if exposition.lines().any(|l| l == "ants_webhook_requests_in_flight 1") {
+            return stream;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("the request never got under way");
 }
 
 /// Send until the webhook is connected: 503 until then.
@@ -530,19 +581,8 @@ async fn an_edited_config_is_served_on_the_same_listener_and_a_bad_one_is_not() 
 
 #[tokio::test]
 async fn without_the_hub_an_event_is_refused_for_a_retry() {
-    let dir = ants_test_support::scratch_dir("webhook-down");
-    let path = dir.join("webhooks.toml");
-    let metrics: SocketAddr = format!("127.0.0.1:{}", ants_test_support::free_port()).parse().unwrap();
-    let hook = format!("{HOOK}ant = \"dev-a\"\n").replace("secret_env = \"HOOK_SECRET\"", "secret_file = \"s\"");
-    std::fs::write(&path, format!("metrics = \"{metrics}\"\n{hook}")).unwrap();
-    std::fs::write(dir.join("s"), "s3cret").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(dir.join("s"), std::fs::Permissions::from_mode(0o600)).unwrap();
-    }
-    let port = ants_test_support::free_port();
-    let (_ingress, addr) = start(&path, &format!("nats://127.0.0.1:{port}")).await;
+    let (path, metrics, nats) = offline("webhook-down");
+    let (_ingress, addr) = start(&path, &nats).await;
     assert_eq!(request(addr, "POST", "/hooks/github", &[], b"x").await.status, 401, "checked first");
     let down = request(addr, "POST", "/hooks/github", &[("Authorization", "Bearer s3cret")], b"x").await;
     assert_eq!(down.status, 503);
@@ -557,6 +597,54 @@ async fn without_the_hub_an_event_is_refused_for_a_retry() {
     ] {
         assert!(exposition.lines().any(|l| l == line), "{line} in:\n{exposition}");
     }
+}
+
+#[tokio::test]
+async fn a_request_timed_out_counts_as_its_webhook_s_failure() {
+    let (path, metrics, nats) = offline("webhook-timeout");
+    let (_ingress, addr) = start_with(&path, &nats, Duration::from_millis(300), std::future::pending()).await;
+    let timed_out = answer(stalled(addr, metrics, 2, b"x").await).await;
+    assert_eq!((timed_out.status, timed_out.body.as_str()), (503, "the request took too long"));
+    let exposition = request(metrics, "GET", "/metrics", &[], b"").await.body;
+    let line = "ants_webhook_events_total{webhook=\"github\",outcome=\"failed\"} 1";
+    assert!(exposition.lines().any(|l| l == line), "{line} in:\n{exposition}");
+}
+
+#[tokio::test]
+async fn a_stop_takes_no_more_requests_and_answers_those_under_way() {
+    let (path, metrics, nats) = offline("webhook-stop");
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let stopped = async { stopped.await.unwrap() };
+    let (ingress, addr) = start_with(&path, &nats, Duration::from_secs(10), stopped).await;
+    let idle = TcpStream::connect(addr).await.unwrap();
+    let mut under_way = stalled(addr, metrics, 2, b"x").await;
+
+    stop.send(Ended::Replaced).unwrap();
+    let mut refused = false;
+    for _ in 0..100 {
+        if TcpStream::connect(addr).await.is_err() {
+            refused = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(refused, "still accepting connections");
+    assert_eq!(answer_or_closed(idle).await, None, "an idle connection closes");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!ingress.is_finished(), "waits for the request under way");
+
+    under_way.write_all(b"y").await.unwrap();
+    let answered = answer(under_way).await;
+    assert_eq!((answered.status, answered.body.as_str()), (503, "not connected yet"), "answered, then closed");
+    let ended = timeout(Duration::from_secs(5), ingress).await.expect("ended once answered").unwrap();
+    assert_eq!(ended.unwrap(), Ended::Replaced);
+}
+
+/// What `stream` was answered before it closed, if anything.
+async fn answer_or_closed(mut stream: TcpStream) -> Option<String> {
+    let mut read = String::new();
+    timeout(Duration::from_secs(5), stream.read_to_string(&mut read)).await.unwrap().unwrap();
+    (!read.is_empty()).then_some(read)
 }
 
 /// A notification service on loopback that takes every `POST`, handing over its path and JSON body.

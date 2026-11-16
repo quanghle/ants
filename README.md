@@ -63,7 +63,7 @@ cargo install --locked --git https://github.com/quanghle/ants ants   # or --path
 ```
 
 - **Windows:** build with MSVC or cross-build `--target x86_64-pc-windows-gnu` (mingw-w64 on `PATH`). Stdio MCP uses a current-user named pipe (`\\.\pipe\ants-mcp-<random>`); bare harness names resolve `.exe`/`.cmd`/`.bat` on `PATH`; `ants daemon` handles Ctrl-C/Ctrl-Break/close/shutdown as `SIGTERM` and auto-reloads edited config files (`webhooks.toml` too). `scripts/install-units.sh` and service actions in `ants setup`, `ants add`, `ants webhook add`, `ants renew`, `ants leaf config`, `request_ant` and `ants tools approve --rule` cover launchd/systemd only (printing manual commands on Windows; pass `--upgrade-check 0` under Task Scheduler). Secret files inherit `%USERPROFILE%` ACLs instead of Unix `0600`.
-- **Upgrade:** `ants daemon`, `ants channel serve`, `ants webhook serve`, `ants signer`, `ants bridge serve` and `ants bridge connect` check every `30s` (`--upgrade-check DURATION` / `ANTS_UPGRADE_CHECK`, `0` disables) whether their executable was replaced by a settled, non-empty executable file, then exit with status `75` (`ants daemon` drains prompts in flight first). Installed launchd/systemd units restart automatically on status `75`.
+- **Upgrade:** `ants daemon`, `ants channel serve`, `ants webhook serve`, `ants signer`, `ants bridge serve` and `ants bridge connect` check every `30s` (`--upgrade-check DURATION` / `ANTS_UPGRADE_CHECK`, `0` disables) whether their executable was replaced by a settled, non-empty executable file, then exit with status `75` (`ants daemon` drains prompts in flight first, `ants webhook serve` the requests under way, as on `SIGTERM`). Installed launchd/systemd units restart automatically on status `75`.
 
 For an isolated three-node team, see the [Apple container demo](docs/apple-container-demo.md): one hub, two leaves and
 one Copilot-backed ant on each node.
@@ -450,11 +450,11 @@ Options: `--ants PATH`, `--nats-server PATH`, `--nats-conf FILE` (default `~/.co
 | `ants_memory_low` | gauge | `ant` | `1` while memory is low and the ant runs fewer harnesses ([memory pressure](docs/config.md#memory-pressure)), else `0` |
 | `ants_memory_available_bytes` | gauge | | System memory available at the last pool check (absent until read) |
 | `ants_messages_in_hand`, `ants_prompts_in_flight` | gauge | `ant` | Messages held by daemon; active harness prompts |
-| `ants_prompts_total`, `ants_retries_total`, `ants_dead_letters_total` | counter | `ant` | Prompts started, redelivery retries, dead letters |
+| `ants_prompts_total`, `ants_retries_total`, `ants_dead_letters_total` | counter | `ant` | Prompts started, redelivery retries, dead letters (those the max-deliveries backstop stores included, in the process running it) |
 | `ants_spend_tokens_total`, `ants_spend_cost_total` | counter | `ant` | Reported tokens and cost ([docs/config.md](docs/config.md#spend-report)) |
 | `ants_jetstream_bytes`, `ants_jetstream_limit_bytes` | gauge | `domain`, `store` | Account JetStream storage used and limit ([JetStream storage](#jetstream-storage)) |
 | `ants_webhook_requests_in_flight` | gauge | | Active HTTP webhook requests |
-| `ants_webhook_events_total` | counter | `webhook`, `outcome` | `delivered`, `duplicate`, `refused` (4xx), `failed` (503) |
+| `ants_webhook_events_total` | counter | `webhook`, `outcome` | `delivered`, `duplicate`, `refused` (4xx), `failed` (503, the request timeout included) |
 | `ants_bridge_sessions`, `ants_bridge_sessions_total` | gauge, counter | | Open and cumulative bridge sessions |
 | `ants_bridge_failures_total` | counter | | Upstream/session failures |
 | `ants_bridge_bytes_total` | counter | `direction` (`up`, `down`) | Bridge bytes transferred |

@@ -2272,7 +2272,8 @@ async fn failed_messages_become_dead_letters_the_human_replays() {
 #[tokio::test]
 async fn messages_jetstream_stops_delivering_become_one_dead_letter() {
     let Some(server) = Server::start() else { return };
-    let (human, dev_a) = (UserId::human(), p("dev-a"));
+    // An ant of its own: the metrics of an ant are the process's.
+    let (human, dev_a) = (UserId::human(), p("dev-backstop"));
     let (h_client, h_js) = server.connect(&human).await;
     let (_, a_js) = server.connect(&dev_a).await;
     let stream = bus::ensure_stream(&h_js).await.unwrap();
@@ -2333,6 +2334,7 @@ async fn messages_jetstream_stops_delivering_become_one_dead_letter() {
         assert_eq!(dead::bury_undelivered(&h_js, &stream, &advisory, &claims).await.unwrap(), None);
         tokio::time::sleep(Duration::from_secs(1)).await;
         assert!(buried.try_recv().is_err(), "one watcher reports the dead letter");
+        assert_eq!(ants_daemon::metrics::ant(&dev_a).dead_letters(), 1, "and counts it");
         let letters = dead::list(&stream).await.unwrap();
         assert_eq!(letters.iter().map(|(s, _)| *s).collect::<Vec<_>>(), [dead_seq]);
         let notices = stream.get_last_raw_message_by_subject(&subject::inbox(&human, &dev_a)).await.unwrap();

@@ -46,6 +46,7 @@ ant = "dev-a"
 - **Deduplication & marker:** deduplicates for 7 d via `<webhook>.<hash>` in `ants_webhooks` plus 24 h `Nats-Msg-Id: webhook.<webhook>.<hash>`. Publishes `<webhook>.webhook` (`{machine, version, perms}`) on connect and hourly.
 - **Templates & untrusted input:** `text` substitutes `{body}`, `{id}`, `{webhook}`, `{header:Name}` and `{json:/pointer}` (`{{`/`}}` escape braces). Mentions come strictly from `mention` or `broadcast`, never from payload text. Threads are narrowed to `allow` (default read-only; see [config.md](config.md#tool-permissions)) until a human messages the ant on the thread; the [built-in harnesses](config.md#harnesses) run their own tools unasked, so narrowing does not reach those tools (`ants doctor` warns). Replies go to `owner` if set (else logged); webhook posts never reset turn budgets.
 - **Reload:** reloads on `SIGHUP` or file change (polled every 3 s, applied once stable across two checks), restarting only changed/added/removed `[[webhook]]` and `[[human]]` workers while keeping in-flight HTTP requests alive. `listen` and `metrics` require a restart.
+- **Stop:** on `SIGTERM`, Ctrl-C or a replaced executable (`--upgrade-check`), stops accepting connections, closes idle ones, and gives requests under way the rest of their `15s` timeout to be answered before exiting (status `75` after an upgrade); a second `SIGTERM` or Ctrl-C exits at once.
 
 ## Adding a webhook
 
