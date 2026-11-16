@@ -633,14 +633,15 @@ pub(crate) mod fake {
 
     /// In-process fake harnesses that answer each prompt with `<session>: <text>`. A prompt starting with `hold`, or
     /// with a line starting with `hold:`, waits for a permit from the returned semaphore first; one starting with
-    /// `flaky` fails the first time; one with the word `doomed` waits for a permit too, then fails, every time. Words in
-    /// a prompt make it report spend and work: `tools N` starts N tool calls, `cost X` reports X as the session's
+    /// `flaky` fails the first time; one with the word `doomed` waits for a permit too, then fails, every time. Words
+    /// in a prompt make it report spend and work: `tools N` starts N tool calls, `cost X` reports X as the session's
     /// cost, `tokens N` reports N tokens in the response, and `stall` replies `partial` and waits for session/cancel.
     /// `overflows` fails as a prompt that outgrew the context window, and so does `overflow` unless the session was
     /// rebuilt for it. While [`Log::signed_out`] is set, sessions and prompts fail as with a harness that is not signed
-    /// in; while [`Log::limited`] is, prompts start their `tools N`, then stream its text and fail with it, or end with
-    /// it as their reply; while [`Log::broken`] is, the handshake fails; while [`Log::takes_images`] is, harnesses
-    /// starting take images, which they log. They can load stored sessions.
+    /// in, and a prompt with the word `sign-out` starts its `tools N`, then sets it and fails so; while
+    /// [`Log::limited`] is, prompts start their `tools N`, then stream its text and fail with it, or end with it as
+    /// their reply; while [`Log::broken`] is, the handshake fails; while [`Log::takes_images`] is, harnesses starting
+    /// take images, which they log. They can load stored sessions.
     pub fn launch() -> (Launch, Arc<Mutex<Log>>, Arc<Semaphore>) {
         launch_with(Sessions::Loadable)
     }
@@ -743,15 +744,22 @@ pub(crate) mod fake {
                                 return responder.respond_with_error(agent_client_protocol::Error::auth_required());
                             }
                             log.prompted += 1;
-                            if let Some(limited) = &log.limited {
-                                let ContentBlock::Text(t) = &prompt.prompt[0] else { unreachable!() };
-                                // Tools run before the limit is met.
-                                let words: Vec<&str> = t.text.split_whitespace().collect();
+                            let ContentBlock::Text(t) = &prompt.prompt[0] else { unreachable!() };
+                            let words: Vec<&str> = t.text.split_whitespace().collect();
+                            let signs_out = words.contains(&"sign-out");
+                            if signs_out || log.limited.is_some() {
+                                // Tools run before the sign-out or the limit is met.
                                 let tools = words.windows(2).find(|w| w[0] == "tools").and_then(|w| w[1].parse().ok());
                                 for i in 0..tools.unwrap_or(0u64) {
                                     let call = SessionUpdate::ToolCall(ToolCall::new(format!("call-{i}"), "tool"));
                                     cx.send_notification(SessionNotification::new(prompt.session_id.clone(), call))?;
                                 }
+                            }
+                            if signs_out {
+                                log.signed_out = true;
+                                return responder.respond_with_error(agent_client_protocol::Error::auth_required());
+                            }
+                            if let Some(limited) = &log.limited {
                                 cx.send_notification(chunk(&prompt.session_id, limited))?;
                                 if log.limited_reply {
                                     return responder.respond(PromptResponse::new(StopReason::EndTurn));
@@ -759,7 +767,6 @@ pub(crate) mod fake {
                                 let error = agent_client_protocol::Error::internal_error().data(limited.clone());
                                 return responder.respond_with_error(error);
                             }
-                            let ContentBlock::Text(t) = &prompt.prompt[0] else { unreachable!() };
                             log.prompts.push(t.text.clone());
                             for block in &prompt.prompt[1..] {
                                 let ContentBlock::Image(image) = block else { unreachable!() };

@@ -306,11 +306,12 @@ pub(crate) enum Command {
         #[arg(num_args = 1..)]
         words: Vec<String>,
     },
-    /// List the messages waiting for ANT, oldest first: those its daemon holds, running or waiting their turn on their
-    /// thread, then those awaiting redelivery (one retried after a failed attempt is not withdrawable), then the inbox
-    /// messages and the channel posts waking ANT still in the stream, with id, thread, sender, age and place in the
-    /// thread's queue. Without ANT, lists those of every ant live in the colony, with an ANT column, leaving out the
-    /// ants with nothing waiting. Needs a human's credentials, and a daemon of the ant to answer.
+    /// List the messages waiting for ANT, oldest first: those its daemon holds, running, waiting their turn on their
+    /// thread or held for a sign-in or a provider limit, then those awaiting redelivery (one started in an attempt that
+    /// did not end is not withdrawable), then the inbox messages and the channel posts waking ANT still in the stream,
+    /// with id, thread, sender, age and place in the thread's queue. Without ANT, lists those of every ant live in the
+    /// colony, with an ANT column, leaving out the ants with nothing waiting. Needs a human's credentials, and a daemon
+    /// of the ant to answer.
     Queue {
         #[arg(add = ArgValueCandidates::new(completions::ants))]
         ant: Option<UserId>,

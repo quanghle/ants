@@ -153,10 +153,12 @@ pub async fn withdraw(nats: &crate::Nats<'_>, ant: UserId, message: Uuid) -> Res
     if answered.is_some() && listed.is_none() {
         bail!("message {message} is not waiting for {ant}; ants queue {ant} lists the messages that are");
     }
-    let retry = if matches!(found, Some(MessageMark::Retrying { .. })) {
-        ", where it awaited a retry after a failed attempt"
-    } else {
-        ""
+    let retry = match found {
+        Some(MessageMark::Retrying { held: Some(held), .. }) => format!(", where it was held for {held}"),
+        Some(MessageMark::Retrying { held: None, .. }) => {
+            ", where it awaited a retry after a failed attempt".to_owned()
+        }
+        _ => String::new(),
     };
     match ants_daemon::attempts::withdraw(&kv, &ant, &message, me, None).await? {
         Some(found) => refused(&ant, &message, found, false),
@@ -288,6 +290,7 @@ mod tests {
             delivered,
             redelivery: false,
             retry: false,
+            held: None,
             started: false,
             withdrawn_by: None,
             withdrawn_for: None,
@@ -306,6 +309,8 @@ mod tests {
         (started.redelivery, started.started) = (true, true);
         let mut redelivered = row(7, "t3", false, 1, false);
         redelivered.redelivery = true;
+        let mut signed_out = row(9, "t4", false, 0, true);
+        (signed_out.retry, signed_out.held) = (true, Some(ants_proto::Hold::SignIn));
         let rows = [
             row(1, "t1", true, 0, true),
             row(2, "t1", false, 1, true),
@@ -315,6 +320,7 @@ mod tests {
             retried,
             redelivered,
             started,
+            signed_out,
         ];
         let table = table(&rows, Utc::now());
         let states: Vec<&str> = table.lines().skip(1).map(|l| l.split("  ").last().unwrap().trim()).collect();
@@ -331,6 +337,7 @@ mod tests {
                 "next, awaiting a retry after a failed attempt",
                 "1 ahead, awaiting redelivery",
                 "2 ahead, awaiting redelivery (started; not withdrawable)",
+                "next, held for a sign-in",
             ]
         );
     }
