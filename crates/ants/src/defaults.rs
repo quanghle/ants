@@ -1,17 +1,22 @@
 //! The global `--nats`, `--creds` and `--js-domain`, defaulted from the config file where neither a flag nor the
 //! environment sets them.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use ants_daemon::config::{self, CliDefaults};
 use anyhow::Result;
 use clap::parser::ValueSource;
-use clap::{ArgMatches, CommandFactory as _, FromArgMatches as _};
+use clap::{ArgMatches, CommandFactory as _, FromArgMatches as _, Parser as _};
 
+use crate::cli::{Ants, DaemonCommand};
 use crate::{Cli, Command};
 
 /// Parse the command line, then fill in the connection it leaves to the config file.
 pub fn parse() -> Result<Cli> {
+    if is_daemon(std::env::args_os()) {
+        return Ok(daemon(Ants::parse()));
+    }
     let matches = Cli::command().get_matches();
     let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     if cli.compact && cli.command.is_some() {
@@ -20,6 +25,28 @@ pub fn parse() -> Result<Cli> {
     }
     apply(&mut cli, &matches, &path()?)?;
     Ok(cli)
+}
+
+/// Whether the command line is `ants daemon`: its first argument that is no global connection option or value of one.
+/// Anything else, `--help` and `--version` included, goes through the whole command line.
+fn is_daemon(args: impl IntoIterator<Item = OsString>) -> bool {
+    let mut args = args.into_iter().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--nats" | "--creds" | "--js-domain") => {
+                args.next();
+            }
+            Some(arg) if ["--nats=", "--creds=", "--js-domain="].iter().any(|option| arg.starts_with(option)) => {}
+            arg => return arg == Some("daemon"),
+        }
+    }
+    false
+}
+
+/// The whole command line of a parsed `ants daemon`.
+fn daemon(lean: Ants<DaemonCommand>) -> Cli {
+    let Ants { nats, creds, js_domain, compact, command } = lean;
+    Cli { nats, creds, js_domain, compact, command: command.map(Command::Daemon) }
 }
 
 /// The config file `ANTS_CONFIG` names, else `~/.ants/config.toml`.
@@ -93,6 +120,26 @@ mod tests {
             cli.creds.as_deref().and_then(Path::to_str),
             cli.js_domain.as_ref().map(ants_proto::JsDomain::as_str),
         )
+    }
+
+    #[test]
+    fn ants_daemon_parses_the_same_without_the_other_commands() {
+        let args = |line: &str| line.split(' ').map(OsString::from).collect::<Vec<_>>();
+        for line in ["ants daemon", "ants --nats nats://hub:4222 --creds=a.creds daemon --ant a --harness h"] {
+            assert!(is_daemon(args(line)), "{line}");
+            let lean = daemon(Ants::try_parse_from(args(line)).unwrap());
+            let whole = Cli::try_parse_from(args(line)).unwrap();
+            assert_eq!(connection(&lean), connection(&whole), "{line}");
+            assert_eq!(format!("{:?}", lean.command), format!("{:?}", whole.command), "{line}");
+        }
+        for line in ["ants", "ants --nats daemon", "ants --compact daemon", "ants --help daemon", "ants ask daemon"] {
+            assert!(!is_daemon(args(line)), "{line}");
+        }
+        for line in ["ants daemon --help", "ants --js-domain hub daemon --ant", "ants daemon --bogus"] {
+            let lean = Ants::<DaemonCommand>::try_parse_from(args(line)).err().unwrap();
+            let whole = Cli::try_parse_from(args(line)).err().unwrap();
+            assert_eq!((lean.kind(), lean.to_string()), (whole.kind(), whole.to_string()), "{line}");
+        }
     }
 
     #[test]
