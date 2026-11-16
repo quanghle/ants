@@ -10,19 +10,20 @@
 //! which only the machines serving the ant hold ([`Signer`]); a daemon whose team has credentials applies only a record
 //! so signed, and writes its config's settings over any other ([`read`], [`refresh`]). It refuses a record signed with
 //! revoked credentials, and one the ant signed that was put back after it was replaced: stored at another stream
-//! sequence than the one it was signed for ([`write`], [`SharedSettings::verify`]); over a replay it writes back the
-//! settings it kept.
+//! sequence, or in another incarnation of the bucket ([`incarnation`]), than the ones it was signed for ([`write`],
+//! [`SharedSettings::verify`]); over a replay it writes back the settings it kept. In a bucket without an incarnation
+//! marker, as one not created by `ants init`, it applies and writes none.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 #[cfg(doc)]
 use ants_proto::SHARED_FIELDS;
 use ants_proto::{
-    DEVICES_BUCKET, IDENTITIES_BUCKET, JsDomain, Machine, SettingsError, SharedSettings, UserId, is_shared_field,
-    revoked_device_key,
+    DEVICES_BUCKET, IDENTITIES_BUCKET, INCARNATION_KEY, JsDomain, Machine, SettingsError, SharedSettings, UserId,
+    is_shared_field, revoked_device_key,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
@@ -311,6 +312,10 @@ impl Signer {
         self.0.as_ref().map(|(_, key)| key.public_key())
     }
 
+    fn signs(&self) -> bool {
+        self.0.is_some()
+    }
+
     fn sign(&self, record: &mut SharedSettings) -> Result<()> {
         let Some((jwt, key)) = &self.0 else { return Ok(()) };
         let signature = key.sign(&record.signed()).map_err(|e| anyhow!("signing the shared settings: {e}"))?;
@@ -320,16 +325,33 @@ impl Signer {
     }
 }
 
-/// Store `record` in `identities`, signed by `signer` for the stream sequence it is stored at
-/// ([`SharedSettings::sequence`], [`DirectKv::put_sequenced`]), if the key's last message is still the one at stream
-/// sequence `last` (0: none); with no `last`, whatever the key holds. Whether it stored the record, which then holds
-/// its sequence and signature: false when the key changed meanwhile.
+/// The incarnation of the identities bucket ([`ants_proto::incarnation`]): none while it has no marker, as a bucket not
+/// created by `ants init`, or none at all.
+pub async fn incarnation(identities: &DirectKv) -> Result<Option<String>> {
+    Ok(marked(&identities.lookup_stored(INCARNATION_KEY).await?))
+}
+
+fn marked(marker: &(Lookup, u64, Option<SystemTime>)) -> Option<String> {
+    match marker {
+        (Lookup::Value(_), sequence, Some(stored)) => Some(ants_proto::incarnation(*sequence, (*stored).into())),
+        _ => None,
+    }
+}
+
+/// Store `record` in `identities`, signed by `signer` for the stream sequence it is stored at and the bucket's
+/// incarnation ([`SharedSettings::sequence`], [`SharedSettings::incarnation`], [`DirectKv::put_sequenced`]), if the
+/// key's last message is still the one at stream sequence `last` (0: none); with no `last`, whatever the key holds.
+/// Whether it stored the record, which then holds its sequence and signature: false when the key changed meanwhile.
+/// A signer fails in a bucket without an incarnation marker.
 pub async fn write(
     identities: &DirectKv,
     record: &mut SharedSettings,
     signer: &Signer,
     last: Option<u64>,
 ) -> Result<bool> {
+    if signer.signs() {
+        record.incarnation = incarnation(identities).await?.context(NO_INCARNATION)?;
+    }
     let key = record.key();
     identities
         .put_sequenced(&key, last, |sequence| {
@@ -365,9 +387,18 @@ pub struct Bucket<'a> {
     pub accounts: &'a [String],
 }
 
-/// The shared settings of `ant` in `bucket`, verified ([`SharedSettings::verify`]); without accounts, a server without
-/// authentication, any record holds.
+/// Why no shared settings are signed or applied in a bucket.
+const NO_INCARNATION: &str =
+    "bucket ants_identities has no incarnation marker, as one not created by `ants init`, which writes it";
+
+/// The shared settings of `ant` in `bucket`, verified ([`SharedSettings::verify`]) for the bucket's incarnation;
+/// without accounts, a server without authentication, any record holds.
 pub async fn read(bucket: Bucket<'_>, ant: &UserId) -> Result<Found> {
+    let incarnation = if bucket.accounts.is_empty() { None } else { incarnation(bucket.identities).await? };
+    read_in(bucket, ant, incarnation.as_deref()).await
+}
+
+async fn read_in(bucket: Bucket<'_>, ant: &UserId, incarnation: Option<&str>) -> Result<Found> {
     let key = SharedSettings::key_of(ant);
     let (bytes, last, stored) = match bucket.identities.lookup_stored(&key).await? {
         (Lookup::Value(bytes), last, stored) => (bytes, last, stored),
@@ -389,7 +420,7 @@ pub async fn read(bucket: Bucket<'_>, ant: &UserId) -> Result<Found> {
         None => false,
     };
     let stored = stored.map_or_else(Utc::now, DateTime::<Utc>::from);
-    Ok(match record.verify(bucket.accounts.iter().map(String::as_str), |_| revoked, stored, last) {
+    Ok(match record.verify(bucket.accounts.iter().map(String::as_str), |_| revoked, stored, last, incarnation) {
         Ok(_) => Found::Record(record, last),
         Err(e) => Found::Unverified(Box::new(record), e, last),
     })
@@ -397,21 +428,46 @@ pub async fn read(bucket: Bucket<'_>, ant: &UserId) -> Result<Found> {
 
 /// Read the shared settings of `ants` into `shared`, verified ([`read`]). As `writer`, a machine whose credentials may
 /// write them, create those missing from the machine's config, and write over those not verified: the settings kept
-/// before a record put back after it was replaced, else the machine's config's. Failures are logged; the next poll
-/// tries again.
+/// before a record put back after it was replaced or of an earlier incarnation of the bucket, else the machine's
+/// config's. In a bucket without an incarnation marker, with accounts, none is applied or written. Failures are
+/// logged; the next poll tries again.
 pub async fn refresh(bucket: Bucket<'_>, writer: Option<&Machine>, shared: &Shared, ants: &[UserId]) {
-    for ant in ants.iter().filter(|ant| **ant != UserId::messenger()) {
-        if let Err(e) = refresh_one(bucket, writer, shared, ant).await {
+    let ants = ants.iter().filter(|ant| **ant != UserId::messenger());
+    let incarnation = if bucket.accounts.is_empty() {
+        None
+    } else {
+        match bucket.identities.lookup_stored(INCARNATION_KEY).await {
+            Ok((Lookup::NoBucket, ..)) => return,
+            Ok(marker) if let Some(incarnation) = marked(&marker) => Some(incarnation),
+            Ok(_) => {
+                tracing::warn!("ignoring the shared settings: {NO_INCARNATION}");
+                ants.for_each(|ant| shared.forget(ant));
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(error = format!("{e:#}"), "reading the incarnation of the shared settings failed");
+                return;
+            }
+        }
+    };
+    for ant in ants {
+        if let Err(e) = refresh_one(bucket, writer, shared, ant, incarnation.as_deref()).await {
             tracing::warn!(%ant, error = format!("{e:#}"), "reading the ant's shared settings failed");
         }
     }
 }
 
-async fn refresh_one(bucket: Bucket<'_>, writer: Option<&Machine>, shared: &Shared, ant: &UserId) -> Result<()> {
+async fn refresh_one(
+    bucket: Bucket<'_>,
+    writer: Option<&Machine>,
+    shared: &Shared,
+    ant: &UserId,
+    incarnation: Option<&str>,
+) -> Result<()> {
     for _ in 0..2 {
         // The sequence of the key's last message, which the record written expects, why the record there is refused,
         // and the settings kept to write back over a record put back.
-        let (last, why, kept) = match read(bucket, ant).await? {
+        let (last, why, kept) = match read_in(bucket, ant, incarnation).await? {
             Found::Record(record, _) => {
                 shared.store(record);
                 return Ok(());
@@ -625,7 +681,7 @@ mod tests {
     async fn without_a_host_connection_the_records_created_name_the_machine_given() {
         let Some(server) = ants_test_support::NatsServer::start() else { return };
         let js = async_nats::jetstream::new(async_nats::connect(&server.url).await.unwrap());
-        js.create_stream(crate::hub::identities_config()).await.unwrap();
+        crate::hub::create_identities(&js).await.unwrap();
         let mut dev_a = ant("dev-a");
         dev_a.model = Some("gpt-4".to_owned());
         let shared = Shared::default();

@@ -222,7 +222,7 @@ async fn revoking_an_ant_by_name_deletes_its_identity() {
     forget_identity(&server.url, None, &team, "dev-a").await.unwrap();
 
     let (_, js) = server.connect_as(&p("alice"), Role::Human).await;
-    js.create_stream(ants_daemon::hub::identities_config()).await.unwrap();
+    ants_daemon::hub::create_identities(&js).await.unwrap();
     let kv = DirectKv::whole(&js, None, IDENTITIES_BUCKET).await.unwrap();
     for ant in [&dev_a, &dev_b] {
         let record = ants_proto::AntIdentity::new(ant.clone(), format!("{ant}-id"), chrono::Utc::now());

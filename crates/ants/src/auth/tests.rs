@@ -2797,7 +2797,7 @@ async fn a_host_records_only_its_own_machine_s_ants_and_humans_read_where_each_a
     let as_ant = DirectKv::new(&a_js, None, ants_proto::MACHINES_BUCKET).await.unwrap();
     assert!(as_ant.put("m1", b"{}".to_vec()).await.is_err(), "an ant has no host powers");
 
-    h_js.create_stream(ants_daemon::hub::identities_config()).await.unwrap();
+    ants_daemon::hub::create_identities(&h_js).await.unwrap();
     let identities = |js| DirectKv::new(js, None, ants_proto::IDENTITIES_BUCKET);
     let settings = ants_proto::SharedSettings::key_of(&dev_a);
     assert!(identities(&m_js).await.unwrap().put(&settings, b"{}".to_vec()).await.is_ok(), "a host writes them");

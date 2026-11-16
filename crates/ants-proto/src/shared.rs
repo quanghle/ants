@@ -9,6 +9,19 @@ use crate::{Error, JwtError, Machine, UserId, VerifiedUser, canonical_json, veri
 /// The first line of what an ant's key signs of its shared settings ([`SharedSettings::signed`]).
 pub const SETTINGS_SIGNING_CONTEXT: &str = "ants-shared-settings";
 
+/// The key of [`IDENTITIES_BUCKET`] whose last message marks the bucket's incarnation ([`incarnation`]), written by
+/// `ants init` when absent and anew by `ants init --identities-restored`. No ant's name: ant names hold no `_`.
+pub const INCARNATION_KEY: &str = "_incarnation";
+
+/// The incarnation of [`IDENTITIES_BUCKET`] its marker ([`INCARNATION_KEY`]) names, stored at stream sequence
+/// `sequence` at `stored`: `<sequence>@<RFC 3339 time with nanoseconds>`. Writing the marker starts a new
+/// incarnation, which no later write reproduces, as the server sets both the sequence and the time; a stream restored
+/// from a backup takes back the backup's marker, so that records written after the backup verify there again until the
+/// marker is written anew.
+pub fn incarnation(sequence: u64, stored: DateTime<Utc>) -> String {
+    format!("{sequence}@{}", stored.to_rfc3339_opts(SecondsFormat::Nanos, true))
+}
+
 /// The keys of an ant's `[[ant]]` table that are the ant's own rather than its machine's: its role and core memories
 /// (`whoami`, `memory`), which [`SharedSettings`] holds for every machine serving it. The rest (workdir, env, harness,
 /// `tasks` and the others) stays the machine's config. Of an ant added from a template, [`SharedSettings`] holds only
@@ -37,8 +50,10 @@ pub fn is_shared_field(key: &str) -> bool {
 /// the stream sequence it is stored at ([`SharedSettings::sequence`]), which its writer fixes by publishing it only if
 /// the stream's last message is the one before. Stream sequences are never reused, so a record put back is stored at
 /// another sequence than the one it was signed for, and every reader refuses it, whether or not it read the record
-/// replacing it. A record signed with a key revoked since (a revocation record in [`crate::DEVICES_BUCKET`]) counts
-/// no more, whenever it was stored.
+/// replacing it. As a bucket created again, or restored from a backup, may reach the sequences of the records of the
+/// one before, the record is signed for the bucket's incarnation too ([`SharedSettings::incarnation`]), and readers
+/// refuse every record in a bucket without one. A record signed with a key revoked since (a revocation record in
+/// [`crate::DEVICES_BUCKET`]) counts no more, whenever it was stored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SharedSettings {
     pub ant: UserId,
@@ -55,6 +70,9 @@ pub struct SharedSettings {
     /// The sequence of the bucket's stream the record was written to be stored at: its writer publishes it only if the
     /// stream's last message is at the one before. Stored at any other, it was put back ([`SharedSettings::verify`]).
     pub sequence: u64,
+    /// The incarnation of the bucket the record was written in ([`incarnation`]): its marker's when written, empty
+    /// without one on a server without authentication.
+    pub incarnation: String,
     /// The user JWT of the ant's credentials whose key signed the record; none on a server without authentication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credentials: Option<String>,
@@ -76,12 +94,23 @@ pub enum SettingsError {
     Revoked(String),
     #[error("signed to be stored at sequence {signed} but stored at {stored}: put back after it was written")]
     PutBack { signed: u64, stored: u64 },
+    #[error(
+        "the bucket has no incarnation marker ({INCARNATION_KEY}), as when created otherwise than by `ants init`, \
+         which writes it"
+    )]
+    NoIncarnation,
+    #[error(
+        "signed in incarnation {signed} of the bucket, now in {current}: written before the bucket was restored or \
+         created again"
+    )]
+    OtherIncarnation { signed: String, current: String },
 }
 
 impl SettingsError {
-    /// Whether the record is one the ant signed, put back after it was replaced: a newer one stands for it.
+    /// Whether the record is one the ant signed, put back after it was replaced, or written in an incarnation of the
+    /// bucket before this one: a newer one stands for it.
     pub fn is_replay(&self) -> bool {
-        matches!(self, Self::PutBack { .. })
+        matches!(self, Self::PutBack { .. } | Self::OtherIncarnation { .. })
     }
 }
 
@@ -89,7 +118,8 @@ impl SharedSettings {
     /// The record of `ant` holding `fields`, written now on `machine`, by `by` when an admin's order changed it,
     /// unsigned and for no sequence yet.
     pub fn new(ant: UserId, fields: Map<String, Value>, machine: Machine, by: Option<UserId>) -> Self {
-        Self { ant, fields, machine, by, updated_at: Utc::now(), sequence: 0, credentials: None, signature: None }
+        let (sequence, incarnation, updated_at) = (0, String::new(), Utc::now());
+        Self { ant, fields, machine, by, updated_at, sequence, incarnation, credentials: None, signature: None }
     }
 
     /// The key of `ant`'s shared settings: `<ant>.settings`, which no ant's credentials and no human's write.
@@ -103,14 +133,15 @@ impl SharedSettings {
 
     /// What the ant's key signs: lines joined by `\n`, [`SETTINGS_SIGNING_CONTEXT`], the ant, the fields as canonical
     /// JSON ([`canonical_json`]), the machine, the admin or an empty line, `updated_at` in RFC 3339 with nanoseconds
-    /// and `Z`, and the sequence in decimal. Every field but the JWT, which the signing key is checked against, and the
-    /// signature.
+    /// and `Z`, the sequence in decimal and the incarnation. Every field but the JWT, which the signing key is checked
+    /// against, and the signature.
     pub fn signed(&self) -> Vec<u8> {
         let fields = canonical_json(&Value::Object(self.fields.clone()));
         let updated_at = self.updated_at.to_rfc3339_opts(SecondsFormat::Nanos, true);
         let by = self.by.as_ref().map_or("", UserId::as_str);
         let sequence = self.sequence.to_string();
-        [SETTINGS_SIGNING_CONTEXT, self.ant.as_str(), &fields, self.machine.as_str(), by, &updated_at, &sequence]
+        let machine = self.machine.as_str();
+        [SETTINGS_SIGNING_CONTEXT, self.ant.as_str(), &fields, machine, by, &updated_at, &sequence, &self.incarnation]
             .join("\n")
             .into_bytes()
     }
@@ -125,13 +156,15 @@ impl SharedSettings {
     /// signed by the key of credentials of the ant that one of `accounts` (the team account's public keys) signed,
     /// that had not expired when it was stored and whose key `revoked` (looked up in the revocation records) does not
     /// say is revoked: the credentials of a machine serving the ant. It must be stored at the sequence it was signed
-    /// for, so that a record replaced since is not put back. Returns the signing user.
+    /// for, so that a record replaced since is not put back, in `incarnation`, the bucket's ([`incarnation`]; none
+    /// without its marker), so that no record of an incarnation before is. Returns the signing user.
     pub fn verify<'a>(
         &self,
         accounts: impl IntoIterator<Item = &'a str>,
         revoked: impl FnOnce(&str) -> bool,
         stored_at: DateTime<Utc>,
         stored: u64,
+        incarnation: Option<&str>,
     ) -> Result<VerifiedUser, SettingsError> {
         let (Some(jwt), Some(signature)) = (&self.credentials, &self.signature) else {
             return Err(SettingsError::Unsigned);
@@ -144,6 +177,11 @@ impl SharedSettings {
         user.check_signature(&self.signed(), signature)?;
         if revoked(&user.public_key) {
             return Err(SettingsError::Revoked(user.public_key));
+        }
+        let Some(incarnation) = incarnation else { return Err(SettingsError::NoIncarnation) };
+        if self.incarnation != incarnation {
+            let (signed, current) = (self.incarnation.clone(), incarnation.to_owned());
+            return Err(SettingsError::OtherIncarnation { signed, current });
         }
         if self.sequence != stored {
             return Err(SettingsError::PutBack { signed: self.sequence, stored });
@@ -178,6 +216,8 @@ mod tests {
 
     use super::*;
 
+    const INCARNATION: &str = "1@2026-11-16T00:00:00.000000000Z";
+
     #[test]
     fn drift_names_the_fields_the_machine_sets_otherwise() {
         let shared = SharedSettings {
@@ -187,6 +227,7 @@ mod tests {
             by: None,
             updated_at: Utc::now(),
             sequence: 1,
+            incarnation: INCARNATION.to_owned(),
             credentials: None,
             signature: None,
         };
@@ -213,31 +254,35 @@ mod tests {
             by: Some("alice".parse().unwrap()),
             updated_at: Utc::now(),
             sequence: 7,
+            incarnation: INCARNATION.to_owned(),
             credentials: None,
             signature: None,
         };
         let accounts = [account.public_key()];
         let accounts = || accounts.iter().map(String::as_str);
         let now = Utc::now();
-        assert_eq!(record.verify(accounts(), |_| false, now, 7), Err(SettingsError::Unsigned));
+        assert_eq!(record.verify(accounts(), |_| false, now, 7, Some(INCARNATION)), Err(SettingsError::Unsigned));
         let sign = |record: &mut SharedSettings, jwt: String, key: &KeyPair| {
             record.credentials = Some(jwt);
             record.signature = Some(BASE64URL_NOPAD.encode(&key.sign(&record.signed()).unwrap()));
         };
         sign(&mut record, crate::roles::tests::user_jwt(&account, &dev_a, "dev-a", &[], None), &dev_a);
-        assert_eq!(record.verify(accounts(), |_| false, now, 7).unwrap().id, record.ant);
+        assert_eq!(record.verify(accounts(), |_| false, now, 7, Some(INCARNATION)).unwrap().id, record.ant);
 
         let mut changed = record.clone();
         changed.fields.insert("allow".to_owned(), json!(["execute"]));
         assert!(matches!(
-            changed.verify(accounts(), |_| false, now, 7),
+            changed.verify(accounts(), |_| false, now, 7, Some(INCARNATION)),
             Err(SettingsError::Credentials(JwtError::BadSignature(_)))
         ));
 
         let mut other = record.clone();
         sign(&mut other, crate::roles::tests::user_jwt(&account, &dev_b, "dev-b", &[], None), &dev_b);
         assert!(
-            matches!(other.verify(accounts(), |_| false, now, 7), Err(SettingsError::NotTheAnt { .. })),
+            matches!(
+                other.verify(accounts(), |_| false, now, 7, Some(INCARNATION)),
+                Err(SettingsError::NotTheAnt { .. })
+            ),
             "another ant's"
         );
 
@@ -245,16 +290,19 @@ mod tests {
         let mut forged = record.clone();
         sign(&mut forged, crate::roles::tests::user_jwt(&foreign, &dev_a, "dev-a", &[], None), &dev_a);
         assert!(matches!(
-            forged.verify(accounts(), |_| false, now, 7),
+            forged.verify(accounts(), |_| false, now, 7, Some(INCARNATION)),
             Err(SettingsError::Credentials(JwtError::ForeignAccount(_)))
         ));
 
         let mut expired = record;
         expired.updated_at = DateTime::from_timestamp(999, 0).unwrap();
         sign(&mut expired, crate::roles::tests::user_jwt(&account, &dev_a, "dev-a", &[], Some(1_000)), &dev_a);
-        assert!(expired.verify(accounts(), |_| false, now, 7).is_err());
+        assert!(expired.verify(accounts(), |_| false, now, 7, Some(INCARNATION)).is_err());
         let then = DateTime::from_timestamp(999, 0).unwrap();
-        assert!(expired.verify(accounts(), |_| false, then, 7).is_ok(), "expiry counts when the record was stored");
+        assert!(
+            expired.verify(accounts(), |_| false, then, 7, Some(INCARNATION)).is_ok(),
+            "expiry counts when the record was stored"
+        );
     }
 
     #[test]
@@ -265,14 +313,16 @@ mod tests {
         let (account, dev_a) = (KeyPair::new_account(), KeyPair::new_user());
         let mut record = SharedSettings {
             sequence: 41,
+            incarnation: INCARNATION.to_owned(),
             credentials: Some(crate::roles::tests::user_jwt(&account, &dev_a, "dev-a", &[], None)),
             ..SharedSettings::new("dev-a".parse().unwrap(), Map::new(), "m1".parse().unwrap(), None)
         };
         record.signature = Some(BASE64URL_NOPAD.encode(&dev_a.sign(&record.signed()).unwrap()));
         assert_eq!(record.signing_key(), Some(dev_a.public_key()));
         let accounts = [account.public_key()];
+        let accounts = || accounts.iter().map(String::as_str);
         let verify =
-            |revoked: bool, stored| record.verify(accounts.iter().map(String::as_str), |_| revoked, Utc::now(), stored);
+            |revoked: bool, stored| record.verify(accounts(), |_| revoked, Utc::now(), stored, Some(INCARNATION));
 
         assert!(verify(false, 41).is_ok(), "stored where signed for");
         let replayed = verify(false, 57);
@@ -280,10 +330,46 @@ mod tests {
         assert!(replayed.unwrap_err().is_replay());
         let mut moved = record.clone();
         moved.sequence = 57;
-        let moved = moved.verify(accounts.iter().map(String::as_str), |_| false, Utc::now(), 57);
+        let moved = moved.verify(accounts(), |_| false, Utc::now(), 57, Some(INCARNATION));
         assert!(matches!(moved, Err(SettingsError::Credentials(JwtError::BadSignature(_)))), "the sequence is signed");
         let revoked = verify(true, 41);
         assert_eq!(revoked, Err(SettingsError::Revoked(dev_a.public_key())));
         assert!(!revoked.unwrap_err().is_replay());
+    }
+
+    #[test]
+    fn a_record_of_another_incarnation_of_the_bucket_or_of_one_without_a_marker_does_not_verify() {
+        use data_encoding::BASE64URL_NOPAD;
+        use nkeys::KeyPair;
+
+        let (account, dev_a) = (KeyPair::new_account(), KeyPair::new_user());
+        let restored = DateTime::from_timestamp(1_000, 5).unwrap();
+        let mut record = SharedSettings {
+            sequence: 41,
+            incarnation: incarnation(3, restored),
+            credentials: Some(crate::roles::tests::user_jwt(&account, &dev_a, "dev-a", &[], None)),
+            ..SharedSettings::new("dev-a".parse().unwrap(), Map::new(), "m1".parse().unwrap(), None)
+        };
+        record.signature = Some(BASE64URL_NOPAD.encode(&dev_a.sign(&record.signed()).unwrap()));
+        let accounts = [account.public_key()];
+        let verify = |incarnation: Option<&str>| {
+            record.verify(accounts.iter().map(String::as_str), |_| false, Utc::now(), 41, incarnation)
+        };
+
+        assert_eq!(record.incarnation, "3@1970-01-01T00:16:40.000000005Z");
+        assert!(verify(Some(&incarnation(3, restored))).is_ok());
+        let marked_anew = incarnation(3, restored + chrono::Duration::nanoseconds(1));
+        let other = verify(Some(&marked_anew));
+        assert!(matches!(&other, Err(SettingsError::OtherIncarnation { .. })), "{other:?}");
+        assert!(other.unwrap_err().is_replay(), "the settings kept stand for it");
+        assert!(matches!(verify(Some(&incarnation(4, restored))), Err(SettingsError::OtherIncarnation { .. })));
+        assert_eq!(verify(None), Err(SettingsError::NoIncarnation));
+        let mut moved = record.clone();
+        moved.incarnation = marked_anew.clone();
+        let moved = moved.verify(accounts.iter().map(String::as_str), |_| false, Utc::now(), 41, Some(&marked_anew));
+        assert!(
+            matches!(moved, Err(SettingsError::Credentials(JwtError::BadSignature(_)))),
+            "the incarnation is signed"
+        );
     }
 }

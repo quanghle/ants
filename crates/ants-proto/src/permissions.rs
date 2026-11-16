@@ -931,11 +931,13 @@ impl Permissions {
     /// ([`subject::revoked_devices`]). It reads and writes every ant's shared settings in [`IDENTITIES_BUCKET`]
     /// ([`subject::all_shared_settings`]), creating those of the machine's ants and applying admin orders to them; any
     /// machine's host credentials may write any ant's, but daemons serve only a record signed with the ant's own
-    /// credentials ([`SharedSettings::verify`](crate::SharedSettings::verify)), which only its machines hold. It hears its own replies under [`host_inbox_prefix`], apart from
-    /// every user's. Carrying out an order to add or retire an ant, it asks `ants signer` with an enrollment request
-    /// carrying the order ([`subject::enroll`], [`EnrollRequest::order`](crate::EnrollRequest::order)) and hears the
-    /// answers ([`subject::ALL_ENROLL_REPLIES`]), and reads the colony by direct gets to see a retired ant stopped.
-    /// It reads and watches [`HUMANS_BUCKET`], for the humans' consent to the orders their assistants sent for them.
+    /// credentials ([`SharedSettings::verify`](crate::SharedSettings::verify)), which only its machines hold, for the
+    /// bucket's incarnation, whose marker it reads and never writes ([`subject::identities_incarnation`]). It hears its
+    /// own replies under [`host_inbox_prefix`], apart from every user's. Carrying out an order to add or retire an ant,
+    /// it asks `ants signer` with an enrollment request carrying the order ([`subject::enroll`],
+    /// [`EnrollRequest::order`](crate::EnrollRequest::order)) and hears the answers ([`subject::ALL_ENROLL_REPLIES`]),
+    /// and reads the colony by direct gets to see a retired ant stopped. It reads and watches [`HUMANS_BUCKET`], for
+    /// the humans' consent to the orders their assistants sent for them.
     /// Nothing else: no other machine's record or outcomes, no ant's identity record, no message to or from an ant. No
     /// ant gets any of it.
     pub fn for_host(machine: &Machine) -> Self {
@@ -948,6 +950,7 @@ impl Permissions {
             outcomes,
             format!("$JS.API.DIRECT.GET.{}.{}", kv_stream(DEVICES_BUCKET), subject::revoked_devices()),
             format!("$JS.API.DIRECT.GET.{}.{}", kv_stream(IDENTITIES_BUCKET), subject::all_shared_settings()),
+            format!("$JS.API.DIRECT.GET.{}.{}", kv_stream(IDENTITIES_BUCKET), subject::identities_incarnation()),
             subject::all_shared_settings(),
             // Finding JetStream on connecting, as an ant does with its inbox consumer, without the stream's info.
             format!("$JS.API.CONSUMER.INFO.{STREAM}.{consumer}"),

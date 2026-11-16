@@ -152,8 +152,8 @@ async fn run() -> Result<()> {
         }
         Command::Queue { ant, json } => queue::list(&nats()?, ant, json).await,
         Command::Withdraw { ant, message } => queue::withdraw(&nats()?, ant, message).await,
-        Command::Init => {
-            for line in init_hub(&nats()?).await? {
+        Command::Init { identities_restored } => {
+            for line in init_hub(&nats()?, identities_restored).await? {
                 println!("{line}");
             }
             Ok(())
@@ -307,7 +307,7 @@ impl<'a> Nats<'a> {
 /// `ants init`: create the hub's stream and buckets that are missing, register the human of the credentials and put
 /// the user JWT of its device in the directory of encryption keys.
 /// Returns what was done, a line each.
-async fn init_hub(nats: &Nats<'_>) -> Result<Vec<String>> {
+async fn init_hub(nats: &Nats<'_>, identities_restored: bool) -> Result<Vec<String>> {
     let (_, js) = nats.connect_only("ants-cli").await?;
     let fixed = hub::init(&js, |subject| nats.rights.may_publish(subject)).await;
     let fixed = fixed.context("`ants init` needs a human's credentials (`ants auth user NAME --human`)")?;
@@ -338,6 +338,15 @@ async fn init_hub(nats: &Nats<'_>) -> Result<Vec<String>> {
         ants_proto::IDENTITIES_BUCKET,
         ants_proto::FILES_BUCKET
     ));
+    if identities_restored {
+        hub::new_incarnation(&js).await?;
+        lines.push(format!(
+            "bucket {} in a new incarnation: no shared settings record signed before verifies; each daemon holding an \
+             ant's credentials signs the ant's settings anew within {} s",
+            ants_proto::IDENTITIES_BUCKET,
+            ants_daemon::shared::POLL_EVERY.as_secs()
+        ));
+    }
     Ok(lines)
 }
 

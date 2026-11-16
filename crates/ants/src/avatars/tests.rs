@@ -77,8 +77,8 @@ async fn an_ant_keeps_its_own_identity_and_humans_restyle_it() {
     let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
     let (_h, h_js) = server.connect(&human).await;
     let (_a, a_js) = server.connect(&dev_a).await;
-    assert!(a_js.create_stream(ants_daemon::hub::identities_config()).await.is_err(), "only a human creates it");
-    h_js.create_stream(ants_daemon::hub::identities_config()).await.unwrap();
+    assert!(ants_daemon::hub::create_identities(&a_js).await.is_err(), "only a human creates it");
+    ants_daemon::hub::create_identities(&h_js).await.unwrap();
 
     let own = Identity::new(&a_js, None, &dev_a).await.unwrap();
     let born = own.ensure().await.unwrap().expect("the ant's daemon creates its record");
