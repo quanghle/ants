@@ -224,7 +224,7 @@ Managers also get `retire_ant(name)` (`other:retire_ant`) for ants whose `added_
 
 `~/.ants/<name>` (memory, task DB, worktrees) is preserved: a later `request_ant` of `<name>` from the same template restores it. Revocation frees the name, the `max_ants` slot, and the ant's share of `pool_daily_*` (restored if re-added the same UTC day). Interrupted retirements resume from `<name>.creds` if retried.
 
-Humans retire any templated ant on the manager's machine with `ants retire NAME [--config FILE] [--dir DIR] [--no-push]`, revoking locally if `--dir` holds the account key, then dropping the ant from the leaf node it is behind as `ants auth revoke` does ([auth.md](auth.md#issuing-and-revoking-credentials)), or printing `ants auth revoke --key U...` otherwise, which does that where the account key is. Non-templated ants are removed by editing `config.toml` and running `ants auth revoke NAME`.
+Humans retire any templated ant on the manager's machine with `ants retire NAME [--config FILE] [--dir DIR] [--no-push]`, revoking locally if `--dir` holds the account key, then dropping the ant from the leaf node it is behind as `ants auth revoke` does ([auth.md](auth.md#issuing-and-revoking-credentials)), or printing `ants auth revoke --key U... --earlier` otherwise, which, run where the account key is, revokes the ant's key and the live keys it was renewed from, then does that. Non-templated ants are removed by editing `config.toml` and running `ants auth revoke NAME`.
 
 ## Cloning an ant
 

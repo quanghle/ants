@@ -113,6 +113,10 @@ pub(crate) enum AuthCommand {
         /// Public user NKey to revoke (repeatable), as `ants auth revoked` or the credentials' JWT shows it.
         #[arg(long = "key", value_name = "KEY")]
         keys: Vec<String>,
+        /// Also revoke the live keys each --key was renewed from (`ants renew`), and those they were renewed from in
+        /// turn, which stay valid until they expire otherwise: what `ants retire` prints, so the ant keeps no live key.
+        #[arg(long, requires = "keys")]
+        earlier: bool,
         /// Revoke only this device of the human NAME (repeatable): its id, its label when no other device of NAME
         /// has it, or its key, as `ants auth devices NAME` lists them.
         #[arg(long = "device", value_name = "DEVICE", requires = "name")]
@@ -329,7 +333,10 @@ pub(crate) async fn run(command: AuthCommand, conn: &Connection<'_>) -> Result<(
         }
         AuthCommand::Host { machine, dir, out } => host_creds(&machine, dir, out, domain),
         AuthCommand::Leaf { machine, members, dir, out } => leaf_creds(machine, members, dir, out, domain),
-        AuthCommand::Revoke { name, keys, devices, no_push, dir } => {
+        AuthCommand::Revoke { name, mut keys, earlier, devices, no_push, dir } => {
+            if earlier {
+                keys.extend(revoke::renewed_from(&team_dir(dir.clone())?, &keys)?);
+            }
             revoke_credentials(name, keys, devices, no_push, dir, conn).await
         }
         AuthCommand::Revoked { dir } => revoke::list(&team_dir(dir)?),
