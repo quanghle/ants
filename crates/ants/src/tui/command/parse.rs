@@ -15,6 +15,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("reject", "[ID]", "refuse a tool request"),
     ("grant", "[TEXT]", "fresh turns for the stuck ant"),
     ("cancel", "", "stop the prompt an ant runs"),
+    ("later", "TEXT", "reply without interrupting the ant at work"),
     ("answer", "N|TEXT", "answer the question asked"),
     ("done", "", "mark the thread done"),
     ("undone", "", "mark the thread not done"),
@@ -55,6 +56,8 @@ pub enum Command {
     },
     /// Reply on the open thread, else ask the human's assistant, else the messenger.
     Say(String),
+    /// Reply on the open thread, waiting behind the prompt running there rather than interrupting it.
+    Later(String),
     Slash(Slash),
 }
 
@@ -119,7 +122,11 @@ pub fn parse(text: &str) -> Result<Command, String> {
         return Ok(Command::Say(format!("/{literal}")));
     }
     if let Some(command) = text.strip_prefix('/') {
-        return slash(command).map(Command::Slash);
+        return match first_word(command) {
+            (name, "") if name.eq_ignore_ascii_case("later") => Err("usage: /later TEXT".to_owned()),
+            (name, later) if name.eq_ignore_ascii_case("later") => Ok(Command::Later(later.to_owned())),
+            _ => slash(command).map(Command::Slash),
+        };
     }
     if let Some(rest) = text.strip_prefix('@') {
         let (name, text) = first_word(rest);
@@ -231,6 +238,8 @@ mod tests {
         assert_eq!(parse("@dev-a").unwrap_err(), "nothing to send to @dev-a");
         assert_eq!(parse("#ops  ").unwrap_err(), "nothing to post to #ops");
         assert!(parse("@Dev A hi").is_err());
+        assert_eq!(parse("/later  then the docs ").unwrap(), Command::Later("then the docs".into()));
+        assert_eq!(parse("/later").unwrap_err(), "usage: /later TEXT");
     }
 
     #[test]

@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use ants_proto::{ApprovalRequest, ColonyEntry, Mark, StatusEvent, ThreadId, ThreadMarks, UserId, Uuid};
+use ants_proto::{ApprovalRequest, ColonyEntry, Mark, StatusEvent, StatusUpdate, ThreadId, ThreadMarks, UserId, Uuid};
 use chrono::{DateTime, Utc};
 
 use crate::progress;
@@ -39,6 +39,9 @@ pub struct State {
     /// The threads, most recently active first, but for the archived ones with no message since and the idle ones.
     pub order: Vec<ThreadId>,
     pub progress: HashMap<ThreadId, Progress>,
+    /// The messages waiting their turn on their thread, by id, with how many go before each, as the ants' daemons
+    /// told; a message leaves once its turn comes.
+    pub queued: HashMap<Uuid, usize>,
     pub colony: Vec<ColonyEntry>,
     pub colony_at: Option<DateTime<Utc>>,
     /// The pending tool requests, oldest first.
@@ -60,6 +63,7 @@ impl State {
             auto_archive: None,
             order: Vec::new(),
             progress: HashMap::new(),
+            queued: HashMap::new(),
             colony: Vec::new(),
             colony_at: None,
             approvals: Vec::new(),
@@ -98,6 +102,12 @@ impl State {
     }
 
     pub fn status(&mut self, event: &StatusEvent, now: DateTime<Utc>) {
+        if let StatusUpdate::Queued { message, ahead } = event.update {
+            match ahead {
+                0 => self.queued.remove(&message),
+                ahead => self.queued.insert(message, ahead),
+            };
+        }
         let progress = self
             .progress
             .entry(event.thread_id.clone())
@@ -203,7 +213,7 @@ impl History {
 
 #[cfg(test)]
 mod tests {
-    use ants_proto::{ApprovalDecision, StatusUpdate, Verdict};
+    use ants_proto::{ApprovalDecision, Verdict};
 
     use super::*;
     use crate::live::tests::{at, message, request, user};
@@ -317,5 +327,19 @@ mod tests {
         assert_eq!(s.progress_of(&thread, 80), Some(("dev-a: working".to_owned(), at(1))));
         s.status(&event(StatusUpdate::State { state: ants_proto::State::Idle }), at(2));
         assert_eq!(s.progress_of(&thread, 80), None);
+    }
+
+    #[test]
+    fn a_message_counts_as_queued_until_its_turn_comes() {
+        let thread = ThreadId::generate();
+        let mut s = state();
+        let message = Uuid::now_v7();
+        let queued = |ahead| StatusEvent::new(user("dev-a"), thread.clone(), StatusUpdate::Queued { message, ahead });
+        s.status(&queued(2), at(1));
+        assert_eq!(s.queued.get(&message), Some(&2));
+        s.status(&queued(1), at(2));
+        assert_eq!(s.queued.get(&message), Some(&1));
+        s.status(&queued(0), at(3));
+        assert!(s.queued.is_empty());
     }
 }

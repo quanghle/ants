@@ -549,6 +549,26 @@ mod tests {
     }
 
     #[test]
+    fn a_message_waiting_its_turn_shows_how_many_go_before_it() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let entries = vec![
+            message(1, &thread, "alice", "dev-a", "deploy the site"),
+            message(2, &thread, "alice", "dev-a", "then the docs"),
+        ];
+        m.stored(entries.clone(), at(2));
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(entries.clone())).unwrap();
+        let queued = ants_proto::StatusUpdate::Queued { message: entries[1].id.unwrap(), ahead: 1 };
+        let event = ants_proto::StatusEvent::new(crate::live::tests::user("dev-a"), thread.clone(), queued);
+        m.data.live.status(&event, at(3));
+        let shown = screen(&page, &m, 100, at(4));
+        let line = shown.lines().find(|l| l.contains("queued")).unwrap_or_default();
+        assert!(line.contains("alice → dev-a") && line.contains("queued · 1 ahead"), "{shown}");
+        assert_eq!(shown.matches("queued").count(), 1, "{shown}");
+    }
+
+    #[test]
     fn the_view_shows_the_timeline_with_running_calls_and_a_panel_beside_it() {
         let thread = ThreadId::generate();
         let mut m = model();

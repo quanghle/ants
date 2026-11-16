@@ -242,10 +242,11 @@ impl Inbox<'_> {
         Some(thread)
     }
 
-    /// A human's message interrupts the prompt on its thread, unless an earlier human message already did.
+    /// A human's message interrupts the prompt on its thread, unless an earlier human message already did or it is
+    /// to wait its turn ([`ants_proto::Envelope::queue`]).
     fn steer(&self, incoming: &Incoming, thread: &ThreadId, t: &Thread) -> Option<Steered> {
         let envelope = &incoming.envelope;
-        if !self.humans.sender_role(envelope).is_human() || !t.busy {
+        if !self.humans.sender_role(envelope).is_human() || !t.busy || envelope.queue {
             return None;
         }
         if t.waiting.front().is_some_and(|(waiting, _)| waiting.steered != Steered::No) {

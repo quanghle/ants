@@ -619,14 +619,14 @@ async fn ask_reply_to_answers_the_message_s_author_on_its_thread_quoting_it() {
 
     let (replies, input, attach) = Default::default();
     let send = |reply_to: Uuid, thread: Option<Pick>, words: &[&str]| {
-        let target = Target { thread, reply_to: Some(MessagePick::Id(reply_to)) };
+        let target = Target { thread, reply_to: Some(MessagePick::Id(reply_to)), queue: false };
         let words = words.iter().map(|w| (*w).to_owned()).collect();
         Box::pin(ask(&nats, target, Default::default(), &replies, &input, &attach, words))
     };
     send(built.id, None, &["ship", "it"]).await.unwrap();
     let elsewhere = send(built.id, Some(Pick::Id(ThreadId::generate())), &["ship"]).await.unwrap_err().to_string();
     assert!(elsewhere.contains(&format!("is on thread {}, not ", asked.thread_id)), "{elsewhere}");
-    let target = Target { thread: None, reply_to: Some(MessagePick::Id(built.id)) };
+    let target = Target { thread: None, reply_to: Some(MessagePick::Id(built.id)), queue: false };
     let words = vec!["deploy?".to_owned()];
     Box::pin(post(&nats, "ops".parse().unwrap(), target, &replies, &input, &attach, words)).await.unwrap();
 

@@ -60,7 +60,8 @@ pub(crate) enum Command {
     Ask {
         /// Continue an existing thread: its id, a unique start of one, or `last`. The message still prompts only
         /// its recipient (@ant, else the human's assistant or the messenger), not the thread's other ants.
-        /// A human's message interrupts a running prompt on that thread and prompts the same session next.
+        /// A human's message interrupts a running prompt on that thread and prompts the same session next, unless
+        /// sent with --queue.
         #[arg(long, value_name = "THREAD")]
         #[arg(add = ArgValueCandidates::new(completions::threads))]
         thread: Option<thread::Pick>,
@@ -69,6 +70,10 @@ pub(crate) enum Command {
         /// without @ant, to its author unless the CLI's human wrote it.
         #[arg(long, value_name = "MESSAGE", add = ArgValueCompleter::new(completions::messages))]
         reply_to: Option<thread::MessagePick>,
+        /// On an existing thread (--thread or --reply-to), wait behind the prompt running there rather than
+        /// interrupting it, as a human's message does by default.
+        #[arg(long)]
+        queue: bool,
         #[command(flatten)]
         sending: Sending,
         #[command(flatten)]
@@ -168,6 +173,10 @@ pub(crate) enum Command {
         /// an @mention in the text still picks whom it wakes.
         #[arg(long, value_name = "MESSAGE", add = ArgValueCompleter::new(completions::messages))]
         reply_to: Option<thread::MessagePick>,
+        /// On an existing thread (--thread or --reply-to), wait behind the prompt running there rather than
+        /// interrupting it, as a human's post does by default.
+        #[arg(long)]
+        queue: bool,
         #[command(flatten)]
         replies: Replies,
         #[command(flatten)]
@@ -600,6 +609,14 @@ mod tests {
         assert_matches!(cli.command, Some(Command::Ask { thread: Some(thread::Pick::Last), .. }));
         assert!(Cli::try_parse_from(["ants", "ask", "--steer", "--thread", "last", "@dev-a", "go"]).is_err());
         assert!(Cli::try_parse_from(["ants", "steer", "dev-a", "last", "go"]).is_err());
+    }
+
+    #[test]
+    fn ask_and_post_queue_behind_a_running_prompt() {
+        let cli = Cli::try_parse_from(["ants", "ask", "--queue", "--thread", "last", "@dev-a", "then"]).unwrap();
+        assert_matches!(cli.command, Some(Command::Ask { queue: true, .. }));
+        let cli = Cli::try_parse_from(["ants", "post", "ops", "--queue", "--thread", "last", "then"]).unwrap();
+        assert_matches!(cli.command, Some(Command::Post { queue: true, .. }));
     }
 
     #[test]

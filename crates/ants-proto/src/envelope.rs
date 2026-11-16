@@ -80,6 +80,11 @@ pub struct Envelope {
     /// sends an answer to the owner it names.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub webhook: bool,
+    /// A human's reply that waits its turn behind the prompt running on its thread rather than interrupting it, as
+    /// `ants ask --queue` and the chat's `/later` send it. A daemon honours it only from a human; from an ant, which
+    /// never interrupts, it changes nothing. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub queue: bool,
     /// The tool rules the thread is narrowed to, as a webhook or schedule that started it, or the message it follows on
     /// from, says: the recipient's daemon allows a tool call unasked only when these and the ant's own `allow` both
     /// allow it, so they never widen what an ant may do and are taken from any sender. A daemon fills in
@@ -250,6 +255,7 @@ impl Envelope {
             approval: None,
             on_behalf_of: None,
             webhook: false,
+            queue: false,
             allow: None,
             mention: None,
             title: None,
@@ -402,6 +408,7 @@ impl Envelope {
             approval: None,
             on_behalf_of: None,
             webhook: false,
+            queue: false,
             allow: self.allow.clone(),
             mention: None,
             title: None,
@@ -655,6 +662,17 @@ mod tests {
         assert_eq!((notice.turn_budget, notice.in_reply_to), (DEFAULT_TURN_BUDGET, None));
         let ownerless = Envelope::new(p("dev-a"), p("dev-b"), "q");
         assert_eq!(ownerless.reply(p("dev-b"), "a", Role::Ant).unwrap().owner, None);
+    }
+
+    #[test]
+    fn a_queued_reply_says_so_and_neither_answer_nor_follow_up_carries_it() {
+        let plain = Envelope::new(p("alice"), p("dev-a"), "then the docs");
+        assert!(!serde_json::to_string(&plain).unwrap().contains("queue"));
+        let queued = Envelope { queue: true, ..plain };
+        let back: Envelope = serde_json::from_str(&serde_json::to_string(&queued).unwrap()).unwrap();
+        assert!(back.queue);
+        assert!(!queued.reply(p("dev-a"), "on it", Role::Human).unwrap().queue);
+        assert!(!queued.follow_up(p("dev-a"), p("dev-b"), "docs").queue);
     }
 
     #[test]

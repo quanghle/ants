@@ -37,6 +37,7 @@ expression: value
   },
   "on_behalf_of": "alice",
   "webhook": true,
+  "queue": true,
   "allow": [
     "read:*",
     "other:send_message"

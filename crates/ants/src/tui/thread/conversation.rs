@@ -193,6 +193,9 @@ impl Shown<'_> {
         if !what.is_empty() {
             head.push(Span::styled(format!("  {what}"), style));
         }
+        if let Some(ahead) = e.id.and_then(|id| self.data.live.queued.get(&id)) {
+            head.push(Span::styled(format!("  queued · {ahead} ahead"), Style::new().fg(Color::Cyan)));
+        }
         if e.sealed.is_some() {
             head.push(Span::raw(format!("  {}", crate::tui::dm::LOCK)));
         }

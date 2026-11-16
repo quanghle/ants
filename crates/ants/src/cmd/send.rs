@@ -78,9 +78,19 @@ async fn addressee(js: &jetstream::Context, nats: &Nats<'_>, to: Option<UserId>)
 pub(crate) struct Target {
     pub thread: Option<thread::Pick>,
     pub reply_to: Option<thread::MessagePick>,
+    /// Wait behind the prompt running on the thread rather than interrupting it ([`Envelope::queue`]).
+    pub queue: bool,
 }
 
 impl Target {
+    /// Refuse `--queue` without an existing thread to wait on.
+    fn check_queue(&self) -> Result<()> {
+        if self.queue && self.thread.is_none() && self.reply_to.is_none() {
+            bail!("--queue waits behind a prompt on an existing thread: name one with --thread or --reply-to");
+        }
+        Ok(())
+    }
+
     /// The thread to send on, none for a new one, and the message replied to if any: the thread is that message's,
     /// which --thread, if given, must name.
     async fn resolve(self, nats: &Nats<'_>, js: &jetstream::Context) -> Result<(Option<ThreadId>, Option<Replied>)> {
@@ -132,9 +142,11 @@ pub(crate) async fn ask(
     words: Vec<String>,
 ) -> Result<()> {
     // Refuse a message with nothing to send, or a file that cannot be attached, before connecting.
+    target.check_queue()?;
     let (to, text) = recipient(words, input)?;
     let mut files = attach.read()?;
     let (client, js) = nats.connect("ants-cli").await?;
+    let queue = target.queue;
     let (thread, replied) = target.resolve(nats, &js).await?;
     let author = replied.as_ref().map(|r| &r.quote.from).filter(|from| **from != nats.me.id);
     let (to, unaddressed) = addressee(&js, nats, to.or_else(|| author.cloned())).await;
@@ -143,6 +155,7 @@ pub(crate) async fn ask(
         envelope = envelope.quoting(r.id, r.quote.clone());
     }
     envelope.attachments = attachments::references(&files);
+    envelope.queue = queue;
     let to_human = nats.me.role.is_human() && humans::load(&js, &nats.me).await.contains(&envelope.to);
     let text = envelope.text.clone();
     let sealer = sealing(nats, &js, &mut envelope, &mut files, to_human && !plaintext).await?;
@@ -352,9 +365,11 @@ pub(crate) async fn post(
     attach: &attachments::Attach,
     words: Vec<String>,
 ) -> Result<()> {
+    target.check_queue()?;
     let text = input.text(words)?;
     let files = attach.read()?;
     let (client, js) = nats.connect("ants-cli").await?;
+    let queue = target.queue;
     let (thread, replied) = target.resolve(nats, &js).await?;
     if let Some(other) = replied.as_ref().and_then(|r| r.channel.as_ref()).filter(|c| **c != channel) {
         bail!("the message replied to is a post to #{other}, not #{channel}");
@@ -364,6 +379,7 @@ pub(crate) async fn post(
         posting.post = posting.post.quoting(r.id, r.quote(false));
     }
     posting.post.attachments = attachments::references(&files);
+    posting.post.queue = queue;
     for warning in &posting.warnings {
         tracing::warn!("{warning}");
     }

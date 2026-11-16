@@ -118,6 +118,12 @@ impl Model {
             }
             Command::Post { channel, text } => return run(Job::Post { channel, thread: None, text, quote: None }),
             Command::Say(text) => return run(self.say(text)),
+            Command::Later(text) => {
+                return match self.say(text) {
+                    job @ (Job::Reply { .. } | Job::Post { thread: Some(_), .. }) => run(Job::Later(Box::new(job))),
+                    _ => Err("/later replies on an open thread: open one first".to_owned()),
+                };
+            }
             Command::Slash(slash) => slash,
         };
         match slash {
@@ -547,6 +553,24 @@ mod tests {
         assert_eq!(m.nav, nav::Item::Ant(user("dev-a")));
         assert_eq!(run(&mut m, "/goto ffff"), None);
         assert_eq!(m.bar.status.as_ref().unwrap().text, "no thread ffff read");
+    }
+
+    #[test]
+    fn later_replies_on_the_open_thread_waiting_its_turn() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        m.key(Key::Ctrl('k'), at(0));
+        typed(&mut m, "/later then the docs");
+        assert_eq!(m.key(Key::Enter, at(0)), None);
+        assert_eq!(m.bar.status.as_ref().unwrap().text, "/later replies on an open thread: open one first");
+        m.bar.set_text("");
+        m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
+        typed(&mut m, "/later then the docs");
+        let reply = Job::Reply { thread, text: "then the docs".into(), quote: None };
+        let job = Job::Later(Box::new(reply));
+        assert!(job.sends());
+        assert_eq!(m.key(Key::Enter, at(0)), Some(Action::Run(job, "/later then the docs".into())));
+        assert!(m.bar.focused, "the bar stays for the next message, as after a send");
     }
 
     #[test]

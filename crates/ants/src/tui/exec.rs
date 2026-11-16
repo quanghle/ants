@@ -159,6 +159,9 @@ pub enum Job {
     Retire {
         ant: UserId,
     },
+    /// Send as `job`, a [`Job::Reply`] or a [`Job::Post`] on a thread, does, waiting behind the prompt running there
+    /// rather than interrupting it, as `ants ask --queue` does.
+    Later(Box<Job>),
 }
 
 /// What a job did.
@@ -218,14 +221,19 @@ impl Job {
     pub fn sends(&self) -> bool {
         matches!(
             self,
-            Self::Ask { .. } | Self::Unaddressed { .. } | Self::Post { .. } | Self::Reply { .. } | Self::Grant { .. }
+            Self::Ask { .. }
+                | Self::Unaddressed { .. }
+                | Self::Post { .. }
+                | Self::Reply { .. }
+                | Self::Grant { .. }
+                | Self::Later(_)
         )
     }
 
     /// The message the job replies to, quoting it, with its thread.
     pub fn quoting(&self) -> Option<(ThreadId, Quoted)> {
         let (thread, quote) = match self {
-            Self::Attached { job, .. } => return job.quoting(),
+            Self::Attached { job, .. } | Self::Later(job) => return job.quoting(),
             Self::Ask { thread, quote, .. } | Self::Post { thread, quote, .. } => (thread.as_ref()?, quote),
             Self::Reply { thread, quote, .. } => (thread, quote),
             _ => return None,
@@ -239,51 +247,29 @@ impl Job {
             Self::Attached { job, files } => (*job, files),
             job => (job, Rc::from([])),
         };
+        let (job, queue) = match job {
+            Self::Later(job) => (*job, true),
+            job => (job, false),
+        };
         match job {
-            Self::Ask { to, thread, text, quote } => ask(ctx, to.into(), thread, text, quote, &files).await,
+            Self::Ask { to, thread, text, quote } => ask(ctx, to.into(), thread, text, quote, false, &files).await,
             Self::Unaddressed { text } => {
                 let to = send::unaddressed(&ctx.js, &ctx.me, ctx.account.as_deref()).await;
-                ask(ctx, to, None, text, None, &files).await
+                ask(ctx, to, None, text, None, false, &files).await
             }
-            Self::Post { channel, thread, text, quote } => post(ctx, channel, thread, text, quote, &files).await,
-            Self::Reply { thread, text, quote } => {
-                let entries = thread::history(&ctx.js, &thread, None, thread::Activity::None, None).await?;
-                let humans = humans::load(&ctx.js, &ctx.me).await;
-                let human = |u: &UserId| humans.contains(u);
-                let to = reply_to(&entries, me, human).or_else(|| dm_with(&entries, me, human));
-                let to = match to {
-                    Some(to) => to.into(),
-                    None => send::unaddressed(&ctx.js, &ctx.me, ctx.account.as_deref()).await,
-                };
-                ask(ctx, to, Some(thread), text, quote, &files).await
-            }
+            Self::Post { channel, thread, text, quote } => post(ctx, channel, thread, text, quote, queue, &files).await,
+            Self::Reply { thread, text, quote } => reply(ctx, thread, text, quote, queue, &files).await,
             Self::Grant { thread, text } => {
                 let entries = thread::history(&ctx.js, &thread, None, thread::Activity::None, None).await?;
                 let ant = stuck(&entries).ok_or_else(|| anyhow!("no ant is stuck on thread {thread}"))?;
-                ask(ctx, ant.into(), Some(thread), text, None, &files).await
+                ask(ctx, ant.into(), Some(thread), text, None, false, &files).await
             }
             Self::Restart { ant, now } => {
                 let admin = ctx.admin.as_ref().map_err(|e| anyhow!("{e}"))?;
                 let (order, outcome) = crate::restart::send(admin, &ctx.js, None, &ant, now).await?;
                 Ok(Done::line(crate::restart::told(&order, outcome)?))
             }
-            Self::Cancel { thread, ants } => {
-                let mut lines = Vec::new();
-                let mut failed = None;
-                for ant in ants {
-                    match cancel::cancelled(&ctx.client, me, ant, thread.clone()).await {
-                        Ok(line) => lines.push(line),
-                        Err(e) => failed = Some(e),
-                    }
-                }
-                match failed {
-                    Some(e) if lines.is_empty() => Err(e),
-                    failed => {
-                        let warnings = failed.map(|e| format!("{e:#}")).into_iter().collect();
-                        Ok(Done { line: lines.join("; "), warnings, open: None })
-                    }
-                }
-            }
+            Self::Cancel { thread, ants } => cancel_all(ctx, &thread, ants).await,
             Self::Answer { thread, choice } => {
                 let entries = thread::history(&ctx.js, &thread, None, thread::Activity::None, None).await?;
                 let question = open_question(&entries, me)
@@ -328,6 +314,46 @@ impl Job {
                 Ok(Done::line(pause::order(admin, &ctx.js, &ant, None, paused, pause::WAIT).await?))
             }
             Self::Attached { .. } => Err(anyhow!("files are attached to one message")),
+            Self::Later(_) => Err(anyhow!("a message waits its turn once")),
+        }
+    }
+}
+
+/// Reply on `thread` to whoever the human talks with there, or as an unaddressed message.
+async fn reply(
+    ctx: &Ctx,
+    thread: ThreadId,
+    text: String,
+    quote: Option<Quoted>,
+    queue: bool,
+    files: &[File],
+) -> Result<Done> {
+    let me = &ctx.me.id;
+    let entries = thread::history(&ctx.js, &thread, None, thread::Activity::None, None).await?;
+    let humans = humans::load(&ctx.js, &ctx.me).await;
+    let human = |u: &UserId| humans.contains(u);
+    let to = match reply_to(&entries, me, human).or_else(|| dm_with(&entries, me, human)) {
+        Some(to) => to.into(),
+        None => send::unaddressed(&ctx.js, &ctx.me, ctx.account.as_deref()).await,
+    };
+    ask(ctx, to, Some(thread), text, quote, queue, files).await
+}
+
+/// Cancel the prompts of `ants` on `thread`, failing only when none is cancelled.
+async fn cancel_all(ctx: &Ctx, thread: &ThreadId, ants: Vec<UserId>) -> Result<Done> {
+    let mut lines = Vec::new();
+    let mut failed = None;
+    for ant in ants {
+        match cancel::cancelled(&ctx.client, &ctx.me.id, ant, thread.clone()).await {
+            Ok(line) => lines.push(line),
+            Err(e) => failed = Some(e),
+        }
+    }
+    match failed {
+        Some(e) if lines.is_empty() => Err(e),
+        failed => {
+            let warnings = failed.map(|e| format!("{e:#}")).into_iter().collect();
+            Ok(Done { line: lines.join("; "), warnings, open: None })
         }
     }
 }
@@ -348,14 +374,15 @@ fn outbox(stored: bus::Stored) -> Vec<String> {
 }
 
 /// Send `text` to `to` on `thread`, or a new one, as `ants ask` does, with the warnings it prints for an ant no daemon
-/// serves now; quoting the message it replies to if any; `files` go with it, stored before it as `ants ask --attach`
-/// stores them.
+/// serves now; quoting the message it replies to if any, and with `queue` waiting behind the prompt running on the
+/// thread; `files` go with it, stored before it as `ants ask --attach` stores them.
 async fn ask(
     ctx: &Ctx,
     to: send::Recipient,
     thread: Option<ThreadId>,
     text: String,
     quote: Option<Quoted>,
+    queue: bool,
     files: &[File],
 ) -> Result<Done> {
     let new = thread.is_none();
@@ -364,6 +391,7 @@ async fn ask(
         envelope = envelope.quoting(q.id, q.quote.clone());
     }
     envelope.attachments = attachments::references(files);
+    envelope.queue = queue;
     // Sealed to a human, what is stored is each file's ciphertext.
     let mut stored = files.to_vec();
     send::seal_to_human(&ctx.js, &ctx.me, &ctx.sealing, &mut envelope, &mut stored).await?;
@@ -376,20 +404,22 @@ async fn ask(
     let stored = send::deliver(&ctx.js, ctx.domain.as_ref(), &envelope).await?;
     warnings.extend(outbox(stored));
     Ok(Done {
-        line: format!("sent to {to} on thread {}{}", envelope.thread_id, with(files)),
+        line: format!("{} {to} on thread {}{}", sent(queue), envelope.thread_id, with(files)),
         warnings,
         open: new.then_some(envelope.thread_id),
     })
 }
 
 /// Post `text` to `channel` on `thread`, or a new one, as `ants post` does, with the warnings it prints; quoting the
-/// post or message it replies to if any; `files` go with it, stored before it as `ants post --attach` stores them.
+/// post or message it replies to if any, and with `queue` waiting behind the prompt running on the thread; `files` go
+/// with it, stored before it as `ants post --attach` stores them.
 async fn post(
     ctx: &Ctx,
     channel: ChannelId,
     thread: Option<ThreadId>,
     text: String,
     quote: Option<Quoted>,
+    queue: bool,
     files: &[File],
 ) -> Result<Done> {
     let new = thread.is_none();
@@ -398,10 +428,12 @@ async fn post(
         posting.post = posting.post.quoting(q.id, q.quote(false));
     }
     posting.post.attachments = attachments::references(files);
+    posting.post.queue = queue;
     attachments::store(&ctx.js, files, |id| posting.post.attachment_handle(id)).await?;
     let (stored, notified) = posting.deliver(&ctx.js, &ctx.me).await?;
     let post = &posting.post;
-    let mut line = format!("posted to #{} on thread {}{}", post.channel, post.thread_id, with(files));
+    let posted = if queue { "queued a post to" } else { "posted to" };
+    let mut line = format!("{posted} #{} on thread {}{}", post.channel, post.thread_id, with(files));
     if !notified.is_empty() {
         let names: Vec<&str> = notified.iter().map(UserId::as_str).collect();
         line = format!("{line}; notified {}", names.join(", "));
@@ -411,6 +443,11 @@ async fn post(
         warnings.push(send::OUTBOX.to_owned());
     }
     Ok(Done { line, warnings, open: new.then(|| post.thread_id.clone()) })
+}
+
+/// How a sent line begins: a message sent, or with `queue` one waiting its turn.
+fn sent(queue: bool) -> &'static str {
+    if queue { "queued for" } else { "sent to" }
 }
 
 /// How a sent line tells of the `files` attached.
