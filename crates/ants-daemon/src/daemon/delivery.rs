@@ -2,8 +2,8 @@
 //! before the message is acked.
 
 use ants_proto::{
-    Attachment, AttachmentHandle, AttachmentScope, ChannelPost, Envelope, Error as ProtoError, EscalationReason, Role,
-    State, ThreadId, UserId, Uuid,
+    Attachment, AttachmentHandle, AttachmentScope, ChannelPost, Envelope, Error as ProtoError, EscalationReason,
+    NotesPost, Role, State, ThreadId, UserId, Uuid,
 };
 use anyhow::Result;
 use async_nats::jetstream;
@@ -34,27 +34,10 @@ impl Inbox<'_> {
         let title = self.mcp.and_then(|mcp| mcp.take_title(thread));
         let reply = match (&incoming.post, read) {
             (Some(posted), Some(read)) => {
-                // Other members' replies stored during the prompt spent the thread's turns too.
-                let humans = self.humans.humans();
-                let later = match self.threads.context(&posted.post, seq, Earlier::Omitted, &humans).await {
-                    Ok(now) => now.later,
-                    Err(e) => {
-                        tracing::warn!(%thread, error = format!("{e:#}"), "rereading the thread's turns");
-                        read.later
-                    }
+                let Some(post) = self.post_reply(incoming, &posted.post, read, &text, msg, seq).await? else {
+                    return Ok(None);
                 };
-                match posted.post.reply(self.ant.clone(), text.as_str(), &later, &humans) {
-                    Ok(post) => Reply::Post(post),
-                    Err(ProtoError::BudgetExhausted(_)) => {
-                        // The answer is not posted: the escalation carries it.
-                        let why = "Turn budget spent before the answer was posted";
-                        self.escalate(incoming, why, EscalationReason::TurnBudget, seq, Some(&text)).await?;
-                        bus::double_ack(self.client, msg).await?;
-                        self.attempts.forget(seq).await;
-                        return Ok(None);
-                    }
-                    Err(e) => return Err(e.into()),
-                }
+                Reply::Post(post)
             }
             _ if let Some(channel) = &incoming.resume => {
                 let post = ChannelPost::on_thread(channel.clone(), thread.clone(), self.ant.clone(), text);
@@ -80,25 +63,10 @@ impl Inbox<'_> {
                 let mut reply = envelope.reply(self.ant.clone(), text, self.humans.sender_role(envelope))?;
                 match escalation::route(self.ant, envelope).map(|(_, route)| route) {
                     Some(Route::Notes) => {
-                        let (store, budget) = (self.notes, envelope.turn_budget);
-                        let ant = self.ant.clone();
-                        let handle_of = |id| AttachmentHandle {
-                            from: ant.clone(),
-                            scope: AttachmentScope::Notes(thread.clone()),
-                            id,
+                        let Some(post) = self.notes_reply(incoming, reply.text, title.clone(), msg, seq).await? else {
+                            return Ok(None);
                         };
-                        let (files, left_out) = self.reply_files(thread, handle_of).await;
-                        let text = with_left_out(reply.text, left_out);
-                        match notes::spend(store, thread, self.ant, &text, budget, title.clone(), files).await? {
-                            Some(post) => Reply::Notes(post),
-                            None => {
-                                let why = "Thread notes out of turns before the answer was posted";
-                                let reason = EscalationReason::Notes;
-                                self.escalate(incoming, why, reason, seq, Some(&text)).await?;
-                                self.done(msg, seq).await?;
-                                return Ok(None);
-                            }
-                        }
+                        Reply::Notes(post)
                     }
                     route => {
                         if let Some(Route::Stuck(stuck)) = route {
@@ -123,6 +91,66 @@ impl Inbox<'_> {
             // Posted with the title and files already.
             Reply::Notes(post) => Reply::Notes(post),
         }))
+    }
+
+    /// The post answering the channel post `post` with `text`, given the thread's turns `read` before the prompt:
+    /// `None` when the thread's turn budget is spent, the escalation carrying the answer, and the message is done with.
+    async fn post_reply(
+        &self,
+        incoming: &Incoming,
+        post: &ChannelPost,
+        read: Context,
+        text: &str,
+        msg: &jetstream::Message,
+        seq: u64,
+    ) -> Result<Option<ChannelPost>> {
+        // Other members' replies stored during the prompt spent the thread's turns too.
+        let humans = self.humans.humans();
+        let later = match self.threads.context(post, seq, Earlier::Omitted, &humans).await {
+            Ok(now) => now.later,
+            Err(e) => {
+                let thread = &incoming.envelope.thread_id;
+                tracing::warn!(%thread, error = format!("{e:#}"), "rereading the thread's turns");
+                read.later
+            }
+        };
+        match post.reply(self.ant.clone(), text, &later, &humans) {
+            Ok(post) => Ok(Some(post)),
+            Err(ProtoError::BudgetExhausted(_)) => {
+                // The answer is not posted: the escalation carries it.
+                let why = "Turn budget spent before the answer was posted";
+                self.escalate(incoming, why, EscalationReason::TurnBudget, seq, Some(text)).await?;
+                bus::double_ack(self.client, msg).await?;
+                self.attempts.forget(seq).await;
+                Ok(None)
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The post of `text` to the notes of the thread of `incoming`, with `title` and the files the session attached:
+    /// `None` when the notes are out of turns, the escalation carrying the answer, and the message is done with.
+    async fn notes_reply(
+        &self,
+        incoming: &Incoming,
+        text: String,
+        title: Option<String>,
+        msg: &jetstream::Message,
+        seq: u64,
+    ) -> Result<Option<NotesPost>> {
+        let thread = &incoming.envelope.thread_id;
+        let (store, budget) = (self.notes, incoming.envelope.turn_budget);
+        let ant = self.ant.clone();
+        let handle_of = |id| AttachmentHandle { from: ant.clone(), scope: AttachmentScope::Notes(thread.clone()), id };
+        let (files, left_out) = self.reply_files(thread, handle_of).await;
+        let text = with_left_out(text, left_out);
+        let posted = notes::spend(store, thread, self.ant, &text, budget, title, files).await?;
+        if posted.is_none() {
+            let why = "Thread notes out of turns before the answer was posted";
+            self.escalate(incoming, why, EscalationReason::Notes, seq, Some(&text)).await?;
+            self.done(msg, seq).await?;
+        }
+        Ok(posted)
     }
 
     /// Store the files the session of `thread` attached to its final answer under the handles `handle_of` gives,
