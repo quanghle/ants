@@ -13,9 +13,40 @@ use ants_proto::{
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream::{self, consumer, kv};
+use clap::Subcommand;
 use futures::StreamExt as _;
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::Semaphore;
+
+use crate::Nats;
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum HookCommand {
+    /// Run CMD once per event of one kind, with the event's JSON document on its stdin, until stopped. Stored
+    /// events (tool requests, verdicts, dead letters) are read through the credentials' own consumer, from where it
+    /// left off, and acked once CMD ends, whatever its exit; live ones (escalations, status, colony) from now on.
+    /// Failures and timeouts are logged.
+    Run {
+        /// The kind of event.
+        #[arg(long, value_enum)]
+        on: Event,
+        /// Most runs of CMD at once.
+        #[arg(long, default_value_t = 4, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
+        concurrency: usize,
+        /// How long one run of CMD may take before it is killed (a duration such as 90s, 10m or 1h).
+        #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse, default_value = "60s")]
+        timeout: Duration,
+        /// The command and its arguments.
+        #[arg(last = true, required = true, value_name = "CMD")]
+        command: Vec<String>,
+    },
+}
+
+pub(crate) async fn run(nats: &Nats<'_>, command: HookCommand) -> Result<()> {
+    let HookCommand::Run { on, concurrency, timeout, command } = command;
+    let (_, js) = nats.connect_only("ants-hook").await?;
+    Hook { event: on, command, timeout, concurrency }.run(&js, &nats.me.id).await
+}
 
 /// The events a hook may run on.
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]

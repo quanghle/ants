@@ -10,14 +10,12 @@ use clap_complete::engine::{ArgValueCandidates, ArgValueCompleter};
 use futures::StreamExt as _;
 
 use crate::cmd::{
-    ant::AntCommand, attachment::AttachmentCommand, auth::AuthCommand, bridge::BridgeCommand, channel::ChannelCommand,
-    dead::DeadCommand, enroll::EnrollCommand, harness::HarnessCommand, hook, leaf::LeafCommand, login, setup,
+    ant::AntCommand, assistant::AssistantCommand, attachment::AttachmentCommand, auth::AuthCommand,
+    bridge::BridgeCommand, channel::ChannelCommand, dead::DeadCommand, enroll::EnrollCommand, harness::HarnessCommand,
+    hook::HookCommand, keys::KeysCommand, leaf::LeafCommand, login, notify::NotifyCommand, setup,
     thread::ThreadCommand, tools::ToolsCommand, webhook::WebhookCommand,
 };
-use crate::{
-    add, assistant, attachments, channel, completions, compose, keys, progress, renew, retire, serve, spend, thread,
-    upgrade,
-};
+use crate::{add, attachments, channel, completions, compose, progress, renew, retire, serve, spend, thread, upgrade};
 
 /// The whole command line.
 pub(crate) type Cli = Ants<Command>;
@@ -410,7 +408,7 @@ pub(crate) enum Command {
     /// Keep the NKey seeds of credentials files in the OS credential store (macOS keychain, Linux Secret Service,
     /// Windows Credential Manager) instead of the files, move them back, or remove credentials from the machine.
     #[command(subcommand)]
-    Keys(keys::KeysCommand),
+    Keys(KeysCommand),
     /// Bridge stdio to a daemon's MCP tools, for harnesses without HTTP MCP. The daemon configures this itself.
     Mcp {
         /// The daemon's MCP socket (a named pipe on Windows).
@@ -483,28 +481,6 @@ pub(crate) enum Command {
     /// Run commands on bus events, with observer credentials (`ants auth user NAME --observer`).
     #[command(subcommand)]
     Hook(HookCommand),
-}
-
-#[derive(Subcommand, Debug)]
-pub(crate) enum HookCommand {
-    /// Run CMD once per event of one kind, with the event's JSON document on its stdin, until stopped. Stored
-    /// events (tool requests, verdicts, dead letters) are read through the credentials' own consumer, from where it
-    /// left off, and acked once CMD ends, whatever its exit; live ones (escalations, status, colony) from now on.
-    /// Failures and timeouts are logged.
-    Run {
-        /// The kind of event.
-        #[arg(long, value_enum)]
-        on: hook::Event,
-        /// Most runs of CMD at once.
-        #[arg(long, default_value_t = 4, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
-        concurrency: usize,
-        /// How long one run of CMD may take before it is killed (a duration such as 90s, 10m or 1h).
-        #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse, default_value = "60s")]
-        timeout: Duration,
-        /// The command and its arguments.
-        #[arg(last = true, required = true, value_name = "CMD")]
-        command: Vec<String>,
-    },
 }
 
 /// How `ants ask` sends.
@@ -586,97 +562,6 @@ impl Replies {
         }
         Ok(())
     }
-}
-
-#[derive(Subcommand, Debug)]
-pub(crate) enum NotifyCommand {
-    /// Hold back every notice for DURATION (such as 30m, 1h or 2d), but those the human's `bypass` in the webhook
-    /// config lets through. Held notices are dropped, not sent later; nothing is marked read or decided.
-    Snooze {
-        #[arg(value_name = "DURATION", value_parser = ants_proto::duration::parse)]
-        duration: Duration,
-    },
-    /// End a snooze.
-    Resume,
-    /// Show the snooze and the muted threads (quiet hours are in the webhook config).
-    Status {
-        /// One JSON object.
-        #[arg(long)]
-        json: bool,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-pub(crate) enum AssistantCommand {
-    /// Create the human's dedicated assistant ant and designate it, in one step: its credentials naming the human
-    /// (`ants auth user ANT --assistant-of HUMAN`), an [[ant]] working in its own home with an assistant's whoami and
-    /// no fetch or execute rules, and the grant; then reload the daemon. Needs the team's account key; run again,
-    /// it keeps what is in place and completes the rest.
-    Enable(Box<assistant::EnableArgs>),
-    /// Withdraw the human's assistant, ending any enrollment as a device, and offer to retire the dedicated one
-    /// `enable` created: unlist it, revoke its credentials and remove their file, keeping its home.
-    Disable(assistant::DisableArgs),
-    /// Designate ANT as the human's assistant, in place of any other. Refused for an ant added from a template; a
-    /// warning for one with a workdir other than its home or tools allowed without asking. ANT acts for the human only while its
-    /// credentials also name the human (`ants auth user ANT --assistant-of HUMAN`).
-    Set {
-        #[arg(value_name = "ANT", add = ArgValueCandidates::new(completions::ants))]
-        ant: UserId,
-    },
-    /// Withdraw the human's assistant, at once for every reader.
-    Clear,
-    /// Show the assistant of HUMAN, by default the CLI's human, if its grant verifies, and whether it is enrolled as a
-    /// device of the human.
-    Show {
-        #[arg(value_name = "HUMAN")]
-        human: Option<UserId>,
-    },
-    /// Enroll the human's assistant as one of its devices (`on`), so messages sealed for the human are sealed for it
-    /// too and it seals those it sends for the human, or end that (`off`). Off unless enrolled; `clear` ends it too.
-    #[command(subcommand)]
-    Seal(SealCommand),
-    /// Print the encryption key ANT, an ant of this machine's config file, is enrolled with, making it if it has none:
-    /// for `ants assistant seal on --key` on the human's machine. Its seed waits beside its credentials, as `ANT.xk`.
-    Key {
-        #[arg(value_name = "ANT", add = ArgValueCandidates::new(completions::ants))]
-        ant: UserId,
-    },
-    /// List the decisions the human's assistant made for the human on pending tool requests, held until the human
-    /// confirms them; or answer the one on ACT (`ANT/ID`, as `ants tools` writes a request): confirm it, so it takes
-    /// effect as the human's, or drop it with `--deny`. Signed by the human's device.
-    Confirm {
-        #[arg(value_name = "ACT")]
-        act: Option<String>,
-        /// Drop the decision instead.
-        #[arg(long, requires = "act")]
-        deny: bool,
-    },
-    /// Show the human's pre-allow rules, or add RULES: a decision of the assistant on a tool request a rule covers takes
-    /// effect unconfirmed, unless it allows always. A rule is `ANT/RULE` or `*/RULE` for every ant, RULE an allow rule
-    /// (`execute:cargo test*`, `read:/work/*`; paths absolute). Signed by the human's device, for the assistant now
-    /// designated.
-    Allow {
-        #[arg(value_name = "RULE")]
-        rules: Vec<String>,
-        /// Remove RULES instead.
-        #[arg(long, requires = "rules")]
-        remove: bool,
-        /// Remove every rule.
-        #[arg(long, conflicts_with_all = ["rules", "remove"])]
-        clear: bool,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-pub(crate) enum SealCommand {
-    /// Enroll the assistant, with the key of the assistant on this machine, made if it has none, unless `--key`.
-    On {
-        /// The encryption key `ants assistant key ANT` printed on the machine running the assistant.
-        #[arg(long, value_name = "KEY")]
-        key: Option<ants_proto::DeviceKey>,
-    },
-    /// End the enrollment: nothing is sealed for the assistant any more, and it opens nothing.
-    Off,
 }
 
 #[derive(Subcommand, Debug)]

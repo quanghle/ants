@@ -1,7 +1,5 @@
 //! `ants`: talk to agent teams over NATS from the terminal, and run the ant daemon.
 
-//! `ants`: talk to agent teams over NATS from the terminal, and run the ant daemon.
-
 mod add;
 mod age;
 mod ant;
@@ -76,9 +74,7 @@ use ants_daemon::{bus, hub};
 use ants_proto::{DeviceId, Escalation, JsDomain, UserId};
 use anyhow::{Context as _, Result};
 
-use crate::cli::{Cli, Command, DaemonCommand, HookCommand, NotifyCommand};
-use crate::cmd::channel::ChannelCommand;
-use crate::cmd::send;
+use crate::cli::{Cli, Command};
 
 fn main() -> Result<()> {
     completions::answer();
@@ -93,113 +89,7 @@ async fn run() -> Result<()> {
         )
         .with_writer(progress::log_writer)
         .init();
-    let cli = defaults::parse()?;
-    let domain = cli.js_domain.as_ref();
-    let conn = Connection { nats: &cli.nats, creds: cli.creds.as_deref(), js_domain: domain };
-    let nats = || conn.nats();
-    let Some(command) = cli.command else {
-        tui::usage_without_terminal();
-        return Box::pin(tui::run(&nats()?, tui::SINCE, cli.compact)).await;
-    };
-    match command {
-        Command::Ask { thread, sending, replies, input, attach, words } => {
-            Box::pin(send::ask(&nats()?, thread, sending, &replies, &input, &attach, words)).await
-        }
-        Command::Inbox { peek, thread, limit, follow, json } => {
-            let select = inbox::Select { thread: None, limit, peek, summaries: false };
-            Box::pin(cmd::inbox::show(&nats()?, select, thread, Listing { follow, json })).await
-        }
-        Command::Colony { json } => colony::show(&nats()?, json).await,
-        Command::Ant(command) => Box::pin(cmd::ant::run(&nats()?, command)).await,
-        Command::Machines { ant, json } => machines::show(&nats()?, ant.as_ref(), json).await,
-        Command::Spend { ant, thread, days, json, config } => {
-            let path = match config {
-                Some(path) => path,
-                None => ants_daemon::config::default_path()?,
-            };
-            let caps = ants_daemon::config::Summary::load(&path)?.caps;
-            spend::show(&nats()?, &spend::Select { ant, thread, days }, &caps, json).await
-        }
-        Command::Post { channel, thread, replies, input, attach, words } => {
-            Box::pin(send::post(&nats()?, channel, thread, &replies, &input, &attach, words)).await
-        }
-        Command::Channel(ChannelCommand::Serve { upgrade }) => {
-            Box::pin(upgrade::or_exit(channel::serve(&cli.nats, cli.creds.as_deref(), domain), &upgrade)).await
-        }
-        Command::Channel(command) => cmd::channel::run(&nats()?, command).await,
-        Command::Notes { thread, attach, text } => send::thread_notes(&nats()?, thread, &attach, text).await,
-        Command::React { message, reaction, remove } => send::react(&nats()?, message, reaction, remove).await,
-        Command::Answer { message, answer } => send::answer(&nats()?, message, answer).await,
-        Command::Thread(command) => cmd::thread::run(&nats()?, command).await,
-        Command::Digest { since } => summary::digest(&nats()?, since).await,
-        Command::Attachment(command) => Box::pin(cmd::attachment::run(&nats()?, command)).await,
-        Command::Notify(NotifyCommand::Snooze { duration }) => quiet::snooze(&nats()?, duration).await,
-        Command::Notify(NotifyCommand::Resume) => quiet::resume(&nats()?).await,
-        Command::Notify(NotifyCommand::Status { json }) => quiet::status(&nats()?, json).await,
-        Command::Assistant(command) => assistant::run(command, nats).await,
-        Command::Watch { subject, thread } => cmd::watch::watch(&nats()?, &subject, thread).await,
-        Command::Chat { since, compact } => Box::pin(tui::run(&nats()?, since, compact)).await,
-        Command::Status { tmux, json } => Box::pin(tui::status(&nats()?, tmux, json)).await,
-        Command::Dash { since } => Box::pin(cmd::dash::run(&nats()?, since)).await,
-        Command::Cancel { ant, thread } => cmd::cancel::cancel(&nats()?, ant, thread).await,
-        Command::Steer { ant, thread, replies, input, attach, words } => {
-            Box::pin(send::steer(&nats()?, &ant, thread, &replies, &input, &attach, words)).await
-        }
-        Command::Queue { ant, json } => queue::list(&nats()?, ant, json).await,
-        Command::Withdraw { ant, message } => queue::withdraw(&nats()?, ant, message).await,
-        Command::Init { identities_restored } => {
-            for line in init_hub(&nats()?, identities_restored).await? {
-                println!("{line}");
-            }
-            Ok(())
-        }
-        Command::Setup(args) => Box::pin(cmd::setup::run(&args, &conn)).await,
-        Command::Completions { shell, install } => completions::run(shell, install),
-        Command::Tools(command) => cmd::tools::run(command, &conn).await,
-        Command::Dead(command) => Box::pin(cmd::dead::run(&nats()?, command)).await,
-        Command::Daemon(DaemonCommand::Daemon(args)) => cmd::daemon::run(&args, &conn).await,
-        Command::Mcp { socket, token } => ants_daemon::mcp::bridge_stdio(&socket, &token).await,
-        Command::Harness(command) => cmd::harness::run(command).await,
-        Command::Doctor { config, leaf_config, no_harness, json, team, webhook_config } => {
-            cmd::doctor::run(config, leaf_config, no_harness, json, team, webhook_config, &conn).await
-        }
-        Command::Auth(command) => cmd::auth::run(command, &conn).await,
-        Command::Add(args) => Box::pin(add::add(*args, &cli.nats, domain)).await,
-        Command::Retire(args) => {
-            let colony = retire_colony(&conn, &args.name).await;
-            retire::retire(&args, colony.as_ref(), retire::STOP_WAIT, &cli.nats, domain).await
-        }
-        Command::Login(args) => cmd::login::run(args).await,
-        Command::Renew(args) => renew::run(args, &cli.nats, cli.creds.as_deref()).await,
-        Command::Keys(command) => keys::run(command, &cli.nats, cli.creds.as_deref()).await,
-        Command::Signer { config, approval_timeout, dir, upgrade } => {
-            cmd::signer::run(config, approval_timeout, dir, upgrade, &conn).await
-        }
-        Command::Enroll(command) => cmd::enroll::run(command, &conn).await,
-        Command::Leaf(command) => cmd::leaf::run(command, &conn).await,
-        Command::Bridge(command) => cmd::bridge::run(command).await,
-        Command::Hook(HookCommand::Run { on, concurrency, timeout, command }) => {
-            let nats = nats()?;
-            let (_, js) = nats.connect_only("ants-hook").await?;
-            cmd::hook::Hook { event: on, command, timeout, concurrency }.run(&js, &nats.me.id).await
-        }
-        Command::Webhook(command) => cmd::webhook::run(command, &conn).await,
-    }
-}
-
-/// The colony `ants retire` waits on for `name` to stop, None (said) when it cannot be read.
-async fn retire_colony(conn: &Connection<'_>, name: &impl std::fmt::Display) -> Option<async_nats::jetstream::Context> {
-    let connected = match conn.nats() {
-        Ok(nats) => nats.connect("ants-retire").await,
-        Err(e) => Err(e),
-    };
-    match connected {
-        Ok((_, js)) => Some(js),
-        Err(e) => {
-            println!("cannot read the colony ({e:#}): not waiting for {name} to stop");
-            None
-        }
-    }
+    cmd::run(defaults::parse()?).await
 }
 
 /// How the CLI reaches NATS.
