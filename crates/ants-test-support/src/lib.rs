@@ -113,27 +113,22 @@ impl NatsServer {
             config = with_ack_fc_v2(&config);
         }
         std::fs::write(&path, config).unwrap();
-        let child = Command::new("nats-server")
-            .arg("-c")
-            .arg(&path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let ports = dir.join(format!("nats-server_{}.ports", child.id()));
-        let mut server = Self { child, dir, url: String::new() };
-        for _ in 0..100 {
-            let url = std::fs::read_to_string(&ports).ok().and_then(|json| {
-                let ports: serde_json::Value = serde_json::from_str(&json).ok()?;
-                Some(ports["nats"][0].as_str()?.to_owned())
-            });
-            if let Some(url) = url {
-                server.url = url;
-                return Some(server);
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        panic!("nats-server did not start");
+        let (child, url) = launch(&dir);
+        Some(Self { child, dir, url })
+    }
+
+    /// Stop the server as a container's stop does (SIGTERM), letting it shut down gracefully, keeping its files for
+    /// [`start_again`](Self::start_again).
+    pub fn stop(&mut self) {
+        let status = Command::new("kill").arg("-TERM").arg(self.child.id().to_string()).status().unwrap();
+        assert!(status.success());
+        self.child.wait().unwrap();
+    }
+
+    /// Start the server [`stop`](Self::stop)ped again on the same configuration and files. A server that picked its
+    /// own port may get another one: [`url`](Self::url) follows.
+    pub fn start_again(&mut self) {
+        (self.child, self.url) = launch(&self.dir);
     }
 
     /// The server's directory, removed with it.
@@ -145,6 +140,31 @@ impl NatsServer {
     pub fn pid(&self) -> u32 {
         self.child.id()
     }
+}
+
+/// Start nats-server on the configuration in `dir`; the child and its client URL, from its ports file.
+fn launch(dir: &Path) -> (Child, String) {
+    let mut child = Command::new("nats-server")
+        .arg("-c")
+        .arg(dir.join("nats.conf"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let ports = dir.join(format!("nats-server_{}.ports", child.id()));
+    for _ in 0..100 {
+        let url = std::fs::read_to_string(&ports).ok().and_then(|json| {
+            let ports: serde_json::Value = serde_json::from_str(&json).ok()?;
+            Some(ports["nats"][0].as_str()?.to_owned())
+        });
+        if let Some(url) = url {
+            return (child, url);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    panic!("nats-server did not start");
 }
 
 #[cfg(test)]

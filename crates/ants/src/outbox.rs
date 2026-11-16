@@ -44,6 +44,9 @@ const RETENTION: Duration = Duration::from_hours(30 * 24);
 const LEAF_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the hub may take to hear from an outbox it sources: a source that works is active within a second.
 pub const SOURCE_WAIT: Duration = Duration::from_secs(10);
+/// How long a source the hub heard from may stay silent before it counts as stalled: the leaf node sends a heartbeat
+/// every second, and nats-server checks its sources this often.
+const STALE: Duration = Duration::from_secs(10);
 
 /// Connect as `human` to set up the outbox of `machine`, with the machine's own inbox prefix
 /// ([`Machine::setup_inbox`]): the leaf node may answer there and nowhere else.
@@ -63,6 +66,10 @@ pub async fn connect(url: &str, creds: Option<&Path>, human: &UserId, machine: &
 /// bucket the links its ants pass on, the owners bucket the owners its humans record, and the attachments' store the
 /// chunks of the attachments they send, once `ants init` created them. Admissions of members no longer listed are
 /// dropped; those already in place are kept as they are.
+///
+/// When the intake sourced the outbox already but has not heard from it lately, its source is restarted
+/// ([`restart_source`]): after nats-server restarts, the hub's first request for the outbox may go out before the leaf
+/// node is back, and the hub then waits up to 2.5 minutes before asking again.
 pub async fn admit(
     leaf: &async_nats::Client,
     hub: &Context,
@@ -102,11 +109,35 @@ pub async fn admit(
 
     let mut intake = intake_config(hub).await?;
     let sources = intake.sources.get_or_insert_default();
-    if !sources.iter().any(|s| outbox_of(s, machine)) {
+    let sourced = sources.iter().any(|s| outbox_of(s, machine));
+    if !sourced {
         sources.push(intake_source(machine));
     }
     hub.create_or_update_stream(intake).await.context("sourcing the machine's outbox into the hub's intake")?;
+    if sourced && hearing(&intake_info(hub).await?, machine) != Hearing::Heard {
+        restart_source(hub, machine).await?;
+    }
     Ok(())
+}
+
+/// Have the hub's intake ask the leaf node of `machine` for its outbox again at once, dropping its source and adding
+/// it back: nats-server has no other way to cut short the wait between its requests. The source added back goes on
+/// after the last message the intake took from it, which the intake finds among its messages.
+async fn restart_source(hub: &Context, machine: &Machine) -> Result<()> {
+    let mut intake = intake_config(hub).await?;
+    let mut sources = intake.sources.take().unwrap_or_default();
+    let ours: Vec<Source> = sources.extract_if(.., |s| outbox_of(s, machine)).collect();
+    intake.sources = Some(sources.clone());
+    hub.update_stream(&intake).await.context("dropping the machine's outbox from the hub's intake")?;
+    sources.extend(ours);
+    intake.sources = Some(sources);
+    hub.update_stream(&intake).await.context("sourcing the machine's outbox into the hub's intake again")?;
+    Ok(())
+}
+
+/// The intake's stream info (`STREAM.INFO`), as JSON: async-nats leaves out a source's `external` and `error`.
+async fn intake_info(hub: &Context) -> Result<serde_json::Value> {
+    hub.request(format!("STREAM.INFO.{INTAKE_STREAM}"), &()).await.context("looking up the hub's intake")
 }
 
 /// Admit `ant`, new to `machine`, into the hub's stream from the machine's outbox, and into the links bucket and the
@@ -172,19 +203,23 @@ fn add_source(sources: &mut Vec<Source>, source: Source) -> bool {
 pub async fn sourced(hub: &Context, machine: &Machine, wait: Duration) -> Result<()> {
     let deadline = tokio::time::Instant::now() + wait;
     loop {
-        let info: serde_json::Value =
-            hub.request(format!("STREAM.INFO.{INTAKE_STREAM}"), &()).await.context("looking up the hub's intake")?;
-        match hearing(&info, machine) {
+        let late = tokio::time::Instant::now() >= deadline;
+        match hearing(&intake_info(hub).await?, machine) {
             Hearing::Heard => return Ok(()),
             Hearing::Failed(error) => anyhow::bail!("the hub cannot source the outbox of {machine}: {error}"),
-            Hearing::Silent if tokio::time::Instant::now() >= deadline => anyhow::bail!(
+            Hearing::Stale(ago) if late => anyhow::bail!(
+                "the hub last heard from the outbox of {machine} {}s ago, so nothing kept there reaches the hub's \
+                 stream: check that the leaf node is up and connected to the hub, then run this again",
+                ago.as_secs()
+            ),
+            Hearing::Silent if late => anyhow::bail!(
                 "the hub has not heard from the outbox of {machine} within {}s, so nothing kept there reaches the \
                  hub's stream. The hub's nats-server needs `feature_flags {{ js_api_reply_v2: true }}` in its \
                  configuration, then a restart. The setup is in place: the hub takes from the outbox once it hears \
                  from it",
                 wait.as_secs()
             ),
-            Hearing::Silent => tokio::time::sleep(Duration::from_millis(250)).await,
+            Hearing::Silent | Hearing::Stale(_) => tokio::time::sleep(Duration::from_millis(250)).await,
         }
     }
 }
@@ -192,9 +227,12 @@ pub async fn sourced(hub: &Context, machine: &Machine, wait: Duration) -> Result
 /// Whether the hub's intake hears from a machine's outbox.
 #[derive(Debug, PartialEq)]
 pub enum Hearing {
+    /// Heard from within the last few seconds ([`STALE`]).
     Heard,
-    /// Sourced, never heard from yet.
+    /// Sourced, not heard from since the hub's nats-server started, or ever.
     Silent,
+    /// Heard from, but not for this long: the uplink is down, or the hub waits before asking the leaf node again.
+    Stale(Duration),
     /// Not sourced, or failing, for this reason.
     Failed(String),
 }
@@ -212,9 +250,7 @@ pub struct Sourcing {
 /// it for, as [`admit`] would set them up. Reads the intake's, the stream's and the store's info, which only a human's
 /// credentials get; changes nothing.
 pub async fn sourcing(hub: &Context, machine: &Machine, members: &[(UserId, Role)]) -> Result<Sourcing> {
-    let info: serde_json::Value =
-        hub.request(format!("STREAM.INFO.{INTAKE_STREAM}"), &()).await.context("looking up the hub's intake")?;
-    let hearing = hearing(&info, machine);
+    let hearing = hearing(&intake_info(hub).await?, machine);
     let mut ants = hub.get_stream(STREAM).await.context("looking up the hub's stream")?;
     let sources = ants.info().await?.config.sources.clone().unwrap_or_default();
     let files = stream_config(hub, FILES_STREAM).await?;
@@ -252,8 +288,12 @@ fn hearing(info: &serde_json::Value, machine: &Machine) -> Hearing {
     if let Some(e) = source.get("error") {
         return Hearing::Failed(error(e));
     }
-    // `active` is how long ago the source last heard from the leaf, -1 if it never did.
-    if source["active"].as_i64().is_some_and(|active| active >= 0) { Hearing::Heard } else { Hearing::Silent }
+    // `active` is how long ago, in nanoseconds, the source last heard from the leaf, -1 if it never did.
+    match source["active"].as_i64().and_then(|active| u64::try_from(active).ok()) {
+        Some(active) if Duration::from_nanos(active) < STALE => Hearing::Heard,
+        Some(active) => Hearing::Stale(Duration::from_nanos(active)),
+        None => Hearing::Silent,
+    }
 }
 
 /// Stop taking anything from the outbox of `machine`. What its intake already holds stays there.

@@ -1421,11 +1421,25 @@ async fn check_outbox(
             }
             (outbox::Hearing::Silent, []) => Check::warn(
                 check,
-                format!("the hub sources the outbox of {machine} but has not heard from it"),
+                format!(
+                    "the hub sources the outbox of {machine} but has not heard from it since its nats-server started: \
+                     after a restart, the hub asks the leaf node again within 2.5 minutes, unless it lacks the \
+                     feature flag below"
+                ),
                 vec![
+                    admit,
                     "feature_flags { js_api_reply_v2: true } in the hub's nats-server configuration, then restart it"
                         .to_owned(),
                 ],
+            ),
+            (outbox::Hearing::Stale(ago), []) => Check::warn(
+                check,
+                format!(
+                    "the hub last heard from the outbox of {machine} {}s ago: the uplink is down, or the hub waits up \
+                     to 2.5 minutes before asking the leaf node again",
+                    ago.as_secs()
+                ),
+                vec![admit],
             ),
             (outbox::Hearing::Heard, []) => {
                 let names: Vec<&str> = members.iter().map(|(user, _)| user.as_str()).collect();

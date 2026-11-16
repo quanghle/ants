@@ -193,6 +193,8 @@ JetStream sources move buffered messages to the hub automatically across outages
 
 `ants leaf outbox` uses reply prefix `_INBOX.<human>.leaf.<machine>`, updates sources, and waits up to 10 s for `ANTS_IN` to hear from `ANTS_OUT`. If inactive, it fails naming `feature_flags { js_api_reply_v2: true }` on the hub while leaving the setup in place.
 
+After the hub's `nats-server` restarts, `ANTS_IN` asks each leaf node for its outbox at once; a leaf node not yet connected misses that request, which times out after 30 s; the hub asks again 10 s later, waiting 10 s longer after each further miss, up to 2 min (so up to 2.5 min between requests). Until then the source reports `active: -1` (nothing heard since the start) and `ants doctor` warns. The source resumes by itself; to cut the wait short, run `ants leaf outbox` again with the leaf node connected: finding its source of `ANTS_IN` silent, or last heard from over 10 s before, it drops that source and adds it back, which has the hub ask at once and go on after the last message `ANTS_IN` took from the outbox.
+
 | Operation | While leaf uplink is down |
 |---|---|
 | Inbox messages and replies (`ants ask`, daemon replies, ant messages) | Buffered in `ANTS_OUT`; daemons record unacked requests in `<home>/answered` and ack redeliveries on reconnect (ignoring `"no responders"`) without re-prompting. |
