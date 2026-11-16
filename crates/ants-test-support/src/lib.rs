@@ -1,4 +1,5 @@
-//! Test helpers shared by the ants crates (dev-dependency only): external tools and a throwaway nats-server.
+//! Test helpers shared by the ants crates (dev-dependency only): external tools, a throwaway nats-server and a scripted
+//! stub CLI ([`StubCli`]).
 //!
 //! A test that needs `nats-server` skips when the tool is not on PATH, unless [`REQUIRE_TOOLS`] is set to `1`
 //! (CI sets it), where it fails instead, so a broken install cannot pass as skipped tests. Under [`JS_ACK_FC_V2`]`=1`
@@ -167,9 +168,157 @@ fn launch(dir: &Path) -> (Child, String) {
     panic!("nats-server did not start");
 }
 
+/// A scripted stub of a CLI speaking JSON lines on stdio, such as a native harness protocol: a POSIX shell script that
+/// plays blocks of lines from a script file and records what it gets.
+///
+/// Each start of the stub is a run, numbered from 1. A run plays the script `<stub>.script.<run>` if there is one, else
+/// `<stub>.script`: block 0 when it starts, then block N after reading its Nth line of input, until its input ends. A
+/// line of a block is printed to stdout as it is, except `!stderr TEXT`, printed to stderr, `!sleep SECONDS`, and
+/// `!exit CODE`, which ends the run. Blocks are separated by `---` lines. The run records its input lines, its
+/// arguments, its environment and its working directory beside the stub ([`StubCli::received`], [`StubCli::args`],
+/// [`StubCli::env`], [`StubCli::cwd`]).
+#[cfg(unix)]
+pub struct StubCli {
+    path: PathBuf,
+}
+
+#[cfg(unix)]
+const STUB_CLI: &str = r#"#!/bin/sh
+stub=$0
+run=$(( $(cat "$stub.runs" 2>/dev/null || echo 0) + 1 ))
+echo "$run" > "$stub.runs"
+script="$stub.script.$run"
+[ -f "$script" ] || script="$stub.script"
+log="$stub.log.$run"
+: > "$log"
+for arg in "$@"; do printf '%s\n' "$arg"; done > "$stub.args.$run"
+env > "$stub.env.$run"
+pwd > "$stub.cwd.$run"
+play() {
+    awk -v want="$1" '/^---$/ { n++; next } n == want' "$script" > "$stub.block.$run"
+    while IFS= read -r line; do
+        case "$line" in
+        '!exit '*) exit "${line#!exit }" ;;
+        '!stderr '*) printf '%s\n' "${line#!stderr }" >&2 ;;
+        '!sleep '*) sleep "${line#!sleep }" ;;
+        *) printf '%s\n' "$line" ;;
+        esac
+    done < "$stub.block.$run"
+}
+n=0
+play 0
+while IFS= read -r input; do
+    printf '%s\n' "$input" >> "$log"
+    n=$((n + 1))
+    play "$n"
+done
+"#;
+
+#[cfg(unix)]
+impl StubCli {
+    /// A stub named `name` in `dir`, with an empty script.
+    pub fn new(dir: &Path, name: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = dir.join(name);
+        std::fs::write(&path, STUB_CLI).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let stub = Self { path };
+        std::fs::write(stub.file("script"), "").unwrap();
+        stub
+    }
+
+    /// Set the blocks run `run` plays, or every run without a script of its own when None.
+    pub fn script<L: AsRef<str>>(&self, run: Option<usize>, blocks: &[impl AsRef<[L]>]) {
+        let text: Vec<String> = blocks
+            .iter()
+            .map(|block| block.as_ref().iter().map(|line| format!("{}\n", line.as_ref())).collect())
+            .collect();
+        let file = match run {
+            Some(run) => format!("script.{run}"),
+            None => "script".to_owned(),
+        };
+        std::fs::write(self.file(&file), text.join("---\n")).unwrap();
+    }
+
+    /// The stub's executable.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// How many times it was started.
+    pub fn runs(&self) -> usize {
+        std::fs::read_to_string(self.file("runs")).map_or(0, |n| n.trim().parse().unwrap())
+    }
+
+    /// The lines of input run `run` read.
+    pub fn received(&self, run: usize) -> Vec<String> {
+        self.lines(&format!("log.{run}"))
+    }
+
+    /// The arguments run `run` was started with.
+    pub fn args(&self, run: usize) -> Vec<String> {
+        self.lines(&format!("args.{run}"))
+    }
+
+    /// The value of the environment variable `name` in run `run`.
+    pub fn env(&self, run: usize, name: &str) -> Option<String> {
+        let prefix = format!("{name}=");
+        self.lines(&format!("env.{run}")).into_iter().find_map(|line| line.strip_prefix(&prefix).map(str::to_owned))
+    }
+
+    /// The working directory of run `run`.
+    pub fn cwd(&self, run: usize) -> PathBuf {
+        self.lines(&format!("cwd.{run}")).concat().into()
+    }
+
+    fn file(&self, suffix: &str) -> PathBuf {
+        let mut name = self.path.as_os_str().to_owned();
+        name.push(format!(".{suffix}"));
+        name.into()
+    }
+
+    fn lines(&self, suffix: &str) -> Vec<String> {
+        std::fs::read_to_string(self.file(suffix)).unwrap_or_default().lines().map(str::to_owned).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stub_cli_plays_a_block_per_line_read() {
+        use std::io::Write as _;
+        let dir = scratch_dir("stub-cli");
+        let stub = StubCli::new(&dir, "cli");
+        stub.script(None, &[&["ready"][..], &["!stderr oops", "one"], &["!exit 3"]]);
+        stub.script(Some(2), &[["second"]]);
+        let run = |input: &str| {
+            let mut child = Command::new(stub.path())
+                .arg("--flag")
+                .env("STUB_VAR", "set")
+                .current_dir(&dir)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+            child.wait_with_output().unwrap()
+        };
+        let first = run("a\nb\nc\n");
+        assert_eq!(String::from_utf8_lossy(&first.stdout), "ready\none\n");
+        assert_eq!(String::from_utf8_lossy(&first.stderr), "oops\n");
+        assert_eq!(first.status.code(), Some(3), "ended by the third block");
+        assert_eq!(stub.received(1), ["a", "b"]);
+        assert_eq!(String::from_utf8_lossy(&run("x\n").stdout), "second\n", "its own script");
+        assert_eq!(stub.runs(), 2);
+        assert_eq!(stub.args(1), ["--flag"]);
+        assert_eq!(stub.env(1, "STUB_VAR").as_deref(), Some("set"));
+        assert_eq!(stub.cwd(1).canonicalize().unwrap(), dir.canonicalize().unwrap());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn the_ack_flag_joins_the_feature_flags_block_a_config_has() {

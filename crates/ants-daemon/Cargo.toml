@@ -33,6 +33,11 @@ tower-service = "0.3.3"
 tracing.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 
+# Stopping a native harness CLI with the processes it started (crate::harness::native), as agent-client-protocol does
+# for ACP harnesses.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.6", default-features = false, features = ["std", "process"] }
+
 # The keychain holding NKey seeds (crate::keystore), rustls-native-certs already bringing it in; sysctl for the memory
 # available (crate::pressure).
 [target.'cfg(target_os = "macos")'.dependencies]

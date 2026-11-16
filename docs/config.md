@@ -277,7 +277,7 @@ Built-in ACP stdio harnesses live in `crates/ants-daemon/src/harnesses.toml`. No
 | `codex` | `codex-acp` | `npm install -g @agentclientprotocol/codex-acp` | `codex-acp login`, or `CODEX_API_KEY` / `OPENAI_API_KEY` | ACP mode `agent-full-access` (no approvals, no sandbox) |
 | `antigravity` | `agy acp --disable-telemetry --dangerously-skip-permissions` | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | `agy` (`agy acp --login`) or Gemini API key | `--dangerously-skip-permissions` |
 
-**Built-in harnesses run their own tools unasked.** Each starts in its most permissive native setting, so its shell commands, edits and fetches never reach the daemon as tool requests: an ant's `allow` rules, tool approvals by humans or `escalate_to` ants, and [webhook and schedule narrowing](#tool-permissions) do not apply to them. `ants daemon` logs a warning at start (and at the first prompt each webhook or schedule narrows), and `ants doctor` warns (`ant NAME tool permissions`), when an ant on such a harness sets allow rules other than `*`, has `escalate_to` ants, or is the destination of a narrowing webhook or schedule. Checks the daemon makes itself still apply: [prompt limits and spending caps](#prompt-limits-and-spending-caps), and the [branch push](#tool-permissions) of `publish = "draft-pr"`. Run such ants in workdirs and accounts their harness may change freely.
+**Built-in harnesses run their own tools unasked**, as does every harness of a [native protocol](#harness-protocols). Each built-in starts in its most permissive native setting, so its shell commands, edits and fetches never reach the daemon as tool requests: an ant's `allow` rules, tool approvals by humans or `escalate_to` ants, and [webhook and schedule narrowing](#tool-permissions) do not apply to them. `ants daemon` logs a warning at start (and at the first prompt each webhook or schedule narrows), and `ants doctor` warns (`ant NAME tool permissions`), when an ant on such a harness sets allow rules other than `*`, has `escalate_to` ants, or is the destination of a narrowing webhook or schedule. Checks the daemon makes itself still apply: [prompt limits and spending caps](#prompt-limits-and-spending-caps), and the [branch push](#tool-permissions) of `publish = "draft-pr"`. Run such ants in workdirs and accounts their harness may change freely.
 
 - **Claude Code:** `bypassPermissions` is offered only when the adapter does not run as root (unless `IS_SANDBOX=1` is in its environment, e.g. `env = { IS_SANDBOX = "1" }` on the ant) and the Claude Code settings do not set `permissions.disableBypassPermissionsMode = "disable"`; otherwise sessions fail to start with the mode missing. Loads `CLAUDE.md`, `.claude/settings*.json` and hooks.
 - **Codex:** reports MCP calls as `execute` titled `mcp.<server>.<tool>` (matched as `other:`). Loads `~/.codex/config.toml` and `AGENTS.md`. For an API key, set `env = { DEFAULT_AUTH_REQUEST = '{"methodId":"api-key"}' }` beside `CODEX_API_KEY` or `OPENAI_API_KEY`.
@@ -317,6 +317,7 @@ Define other ACP harnesses under `[harnesses.NAME]` in `config.toml` or `harness
 ```toml
 [harnesses.custom-acp]
 command = "~/.local/bin/custom-acp"            # path if containing '/', else looked up on PATH
+protocol = "acp"                               # default; see Harness protocols
 args = ["--stdio", "--log-level", "warn"]
 env = { CUSTOM_ACP_TELEMETRY = "off" }         # precedence: daemon env < harness env < ant env < --env
 mode = "default"                               # session fails if harness lacks this mode
@@ -334,6 +335,32 @@ default = {}
 large = { args = ["--context-window", "1m"], window = 1000000 }
 huge = { model_suffix = "-1m", history_budget = 262144 }
 ```
+
+### Harness protocols
+
+`protocol` names what a definition's command speaks on stdio. The built-ins speak ACP.
+
+| `protocol` | The command speaks |
+|---|---|
+| `acp` (default) | ACP: an agent or adapter the daemon drives directly, as described above |
+| `claude` | Claude Code's stream-json (`claude -p --input-format stream-json --output-format stream-json`); planned |
+| `codex` | Codex's JSON-RPC app server (`codex app-server`); planned |
+| `antigravity` | Antigravity's headless stream-json (`agy --input-format stream-json --output-format stream-json`); planned |
+| `copilot-sdk` | Copilot CLI through the GitHub Copilot SDK; planned |
+
+Any other value fails loading the file defining the harness, naming that file; so does a planned protocol until it is implemented.
+
+Every protocol other than `acp` is native: the daemon runs a translator in its own process that starts the definition's command and speaks the CLI's protocol to it, and ACP to the rest of the daemon. The command is found and started as for ACP (a path, else looked up on `PATH`, as `.exe`, `.cmd` or `.bat` on Windows, without a shell), with the protocol's own arguments before the definition's `args` and those of the ant's `context`, and the same environment layering. The rest works as for ACP:
+
+- **Sessions:** the CLI's own session id is the one stored in `ants_sessions` and resumed after an idle stop or restart; a cloned thread forks the session where the CLI can fork one, else starts over from the thread's history.
+- **Settings:** the ant's `model` (with its `context`'s `model_suffix`) and `reasoning_effort` go to the CLI natively; unsupported values fail the session.
+- **Errors:** the CLI's not-signed-in errors reach the daemon as ACP `auth_required` (`sign_in` names the command), and its provider limit, quota and context-overflow errors carry its message, HTTP status and retry hint, so [sign-in, limits](#sign-in-provider-limits-and-failures), [fallbacks](#fallbacks) and the [context-window retry](#lost-sessions-and-context-window) behave as for ACP.
+- **Updates and spend:** replies, reasoning, tool calls, plans, token usage and cost stream as status updates and count toward [caps](#prompt-limits-and-spending-caps).
+- **MCP:** each session gets the ants MCP server in the CLI's own per-run MCP configuration, never on its command line.
+- **Checks:** `ants harness check` starts the CLI, completes its handshake and opens a session, naming the CLI and its version.
+- **Cancel:** a cancelled prompt interrupts the CLI natively where the protocol can, else stops the CLI, the session resuming on the next message.
+
+**Permissions are the CLI's own.** For a native protocol, `mode` names the CLI's own permission mode (each protocol accepts its own values; others fail loading), and `args` carry its other permission settings. The translator sends no tool request to ants and denies, with a logged warning, anything the CLI asks a human to approve, so no prompt waits on an approval. A native-protocol harness therefore runs its tools unasked: allow rules, approvals, `escalate_to` and webhook or schedule narrowing do not reach them, and `ants daemon` and `ants doctor` warn as for the built-ins, naming the definition's native permission settings as the place to restrict tools.
 
 ### Memory files
 
@@ -526,7 +553,7 @@ Ants listed with caps in the local `--config` show `spent/cap`; remote ants show
 
 ## Tool permissions
 
-Tool calls a harness asks about are checked against `allow` (the [built-in harnesses](#harnesses) run their own tools unasked, so neither rules nor approvals reach those) (`--allow RULE`; `allow_tools = true` / `--allow-tools` equals `*`, for sandboxed workdirs only):
+Tool calls a harness asks about are checked against `allow` (the [built-in harnesses](#harnesses) and harnesses of a [native protocol](#harness-protocols) run their own tools unasked, so neither rules nor approvals reach those) (`--allow RULE`; `allow_tools = true` / `--allow-tools` equals `*`, for sandboxed workdirs only):
 
 | Rule | Matches |
 |---|---|
@@ -543,7 +570,7 @@ Matched calls auto-approve (`allow_once`). Unmatched calls publish an `ApprovalR
 - **Humans and push links:** `ants tools approve|reject <ant>/<id>`, `ants dash`, or signed `/_approval` links from `ants webhook serve` store an `ApprovalDecision` on `ants.approvals.<ant>.<id>` (`Nats-Expected-Last-Subject-Sequence` ensures first answer wins; verified by direct get).
 - **Chain members:** ants in `escalate_to` receive an `approval` escalation notice on the thread and may answer via MCP `decide_approval(verdict)` (`escalate` is refused on approval notices). Earliest decision wins (human or chain).
 - **Suggested rules & `--rule`:** once humans approve an identical call 3 times for an ant (`execute:<cmd>`, `<kind>:<abs-path>` for one file, `fetch:<url>`, else `<kind>:<title>`, excluding `*` and shell metacharacters), `ants tools approve` and approval notices print that rule. `ants tools approve ID --rule` appends it to the ant's `allow` in `config.toml` and reloads the daemon (for templated ants, `--rule` approves once and prints the rule to add to `[[ant_template]]`).
-- **Webhook & schedule narrowing:** on harnesses that ask before running tools (not the [built-ins](#harnesses), which run them unasked), threads started by a webhook or schedule intersect the ant's allowlist with the entry's `allow` (default read-only: `read:*`, `search`, `think`, and MCP `list_ants`, `check_inbox`, `read_notes`, `post_notes`, `send_message`, `ask_ant`, `route`, `escalate`, `react`, `list_reactions`, `suggest_thread_title`, `ask_human`; `["*"]` opts out; `[]` requires human approval for all calls). The narrowing travels on every message, spin-off, channel post, escalation and approval notice on the thread (persisted at `<ant>.<thread>.spend`) until a human messages the ant on the thread or wakes it on the channel thread.
+- **Webhook & schedule narrowing:** on harnesses that ask before running tools (not the [built-ins](#harnesses) nor [native protocols](#harness-protocols), which run them unasked), threads started by a webhook or schedule intersect the ant's allowlist with the entry's `allow` (default read-only: `read:*`, `search`, `think`, and MCP `list_ants`, `check_inbox`, `read_notes`, `post_notes`, `send_message`, `ask_ant`, `route`, `escalate`, `react`, `list_reactions`, `suggest_thread_title`, `ask_human`; `["*"]` opts out; `[]` requires human approval for all calls). The narrowing travels on every message, spin-off, channel post, escalation and approval notice on the thread (persisted at `<ant>.<thread>.spend`) until a human messages the ant on the thread or wakes it on the channel thread.
 - **Stand-in:** each request names the human it waits for (`human`: the thread's human owner, else the default human) and the ant's `stand_in`, if set (escalations sent to a human carry it too). While that human is away, `ants webhook serve` relays the request or escalation to the stand-in, which overrides the human's own `[[human]] stand_in`; a human that set no `stand_in` of its own has it relayed to its assistant instead, when it has one (see [webhooks.md](webhooks.md#stand-in)). Decisions name their human (`by`); when another human decides, the human the request waited for gets an inbox notice (`[ants] <by> decided tool request <ant>/<id> … in place of <human>`); likewise when another human answers an escalation that reached a human, reminders on or off (`[ants] <by> answered the escalation of <ant> …`). `stand_in` must not name the ant itself; templated ants take no `stand_in` (the `[[human]]` one applies).
 - **Branch pushes:** with `publish = "draft-pr"`, the daemon's own `git push <remote> ants/<ant>/<thread>` goes through the same check as an `execute` call titled `Push branch … and open a draft pull request`: `execute:git push origin ants/dev-a/*` lets dev-a push its thread branches to `origin` unasked; otherwise the push is an approval request on the thread, and a rejection (narrowed threads included) leaves the branch unpushed with an `[ants]` line in the reply.
 - **Expiry:** after `approval_timeout`, the call is rejected; the thread owner (else default human) receives a level-0 `approval` escalation notice on a separate thread (so `ants ask --wait` keeps waiting for the reply), and asked chain ants receive a cancellation notice on the request's thread.

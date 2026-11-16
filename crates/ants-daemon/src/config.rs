@@ -58,6 +58,7 @@
 //!
 //! [harnesses.my-agent]              # an ACP adapter on stdio, besides the built-in ones (harnesses.toml)
 //! command = "~/bin/my-agent-acp"     # a path, or a bare name looked up on PATH
+//! protocol = "acp"                  # what it speaks on stdio (crate::harness::native)
 //! args = ["--stdio"]
 //! env = { MY_AGENT_LOG = "warn" }   # under the ant's own env
 //! mode = "default"                  # ACP session mode every session must run in

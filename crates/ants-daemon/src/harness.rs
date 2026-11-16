@@ -17,7 +17,7 @@ use agent_client_protocol::v1::schema::{
     SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest, TextContent, ToolCall, ToolCallId,
     ToolCallLocation, ToolCallUpdate,
 };
-use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, DynConnectTo};
+use agent_client_protocol::{AcpAgentConfig, Agent, Client, DynConnectTo};
 use ants_proto::{HarnessAgent, MAX_TOOL_PATHS, PlanStep, StatusUpdate, ThreadId};
 use anyhow::{Context as _, Result, anyhow, bail};
 use data_encoding::BASE64;
@@ -31,11 +31,16 @@ use crate::overflow::{ContextOverflow, overflows};
 use crate::permission::PermissionPolicy;
 use crate::sync::MutexExt as _;
 
+pub(crate) mod native;
+
+pub use native::Protocol;
+
 /// The built-in definitions, in the same form as a config file's `[harnesses.<name>]` tables.
 pub const BUILTIN_HARNESSES: &str = include_str!("harnesses.toml");
 
 /// A named agent harness ants drives over ACP on stdio: an executable and its arguments, run directly (no shell),
-/// with the environment it adds, the session mode it must run in and the context settings it takes.
+/// with the environment it adds, the session mode it must run in and the context settings it takes. A harness whose CLI
+/// speaks another protocol runs behind a translator ([`native`]).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Harness {
@@ -46,13 +51,17 @@ pub struct Harness {
     pub(crate) file: Option<PathBuf>,
     /// A path, or a bare name looked up on `PATH` when the harness starts.
     pub(crate) command: PathBuf,
+    /// The protocol the command speaks on stdio: ACP, else one a translator speaks ([`native`]).
+    #[serde(default)]
+    pub(crate) protocol: Protocol,
     #[serde(default)]
     pub(crate) args: Vec<String>,
     /// Added to the daemon's environment; the ant's own `env` wins over it.
     #[serde(default)]
     pub(crate) env: BTreeMap<String, String>,
     /// ACP session mode every session is switched to, such as one sending tool requests to the client or one
-    /// approving them all; a harness that does not offer it fails the session.
+    /// approving them all; a harness that does not offer it fails the session. For a native protocol, the CLI's own
+    /// permission mode.
     pub(crate) mode: Option<String>,
     /// It runs its own tools without asking the client, as its arguments or mode make it: allow rules, approvals and
     /// a thread's narrowed tool rules do not reach them.
@@ -124,15 +133,21 @@ impl Harness {
         self.memory_files.as_deref().unwrap_or_default()
     }
 
-    /// Whether it runs its own tools without asking ants ([`Self::bypass_permissions`]).
+    /// The protocol its command speaks.
+    pub fn protocol(&self) -> Protocol {
+        self.protocol
+    }
+
+    /// Whether it runs its own tools without asking ants ([`Self::bypass_permissions`]), as every harness of a native
+    /// protocol does: the CLI's own permission settings decide.
     pub fn bypasses_permissions(&self) -> bool {
-        self.bypass_permissions
+        self.bypass_permissions || self.protocol.is_native()
     }
 
     /// What of an ant's tool gating does not reach this harness's own tools, when it bypasses permissions and the ant
     /// gates any: `allow` rules short of `*`, and tool approvals by its `escalate_to` ants when it `escalates`.
     pub fn unenforced(&self, allow: &[String], escalates: bool) -> Option<String> {
-        if !self.bypass_permissions {
+        if !self.bypasses_permissions() {
             return None;
         }
         let rules = !allow.is_empty() && !allows_all(allow);
@@ -145,8 +160,16 @@ impl Harness {
         Some(format!("harness {} runs its tools unasked, so {gating} do not apply to them", self.name))
     }
 
-    /// What to change for the ant's tool gating to reach the harness's tools.
+    /// What to change for the ant's tool gating to reach the harness's tools, or, for a native protocol, which no
+    /// tool request leaves, where to restrict them.
     pub fn gated_fix(&self) -> String {
+        if self.protocol.is_native() {
+            return format!(
+                "restrict its tools with the native permission settings of [harnesses.{}] (protocol {}: its mode and \
+                 arguments; docs/config.md#harness-protocols), or pick a harness speaking ACP",
+                self.name, self.protocol
+            );
+        }
         format!(
             "redefine [harnesses.{}] without bypass_permissions, with a mode or arguments that ask before running \
              tools (docs/config.md#harnesses), or pick another harness",
@@ -174,6 +197,7 @@ impl Harness {
             bail!("harness {name}: command and arguments must not contain NUL");
         }
         validate_env(&self.env).with_context(|| format!("harness {name}"))?;
+        native::validate(self).with_context(|| format!("harness {name}"))?;
         if self.mode.as_ref().is_some_and(|mode| mode.trim().is_empty()) {
             bail!("harness {name}: mode must not be blank; omit it to keep the harness's own mode");
         }
@@ -227,9 +251,18 @@ impl Harness {
     /// The harness process: its arguments with those of the ant's `context`, its environment with the ant's `env`
     /// over it.
     pub(crate) fn process(&self, env: &[(String, String)], settings: &ModelSettings) -> AcpAgentConfig {
+        AcpAgentConfig::new(self.executable(env)).args(self.launch_args(settings)).envs(self.launch_env(env))
+    }
+
+    /// Its arguments with those of the ant's `context`.
+    fn launch_args(&self, settings: &ModelSettings) -> Vec<String> {
         let context = settings.context.as_ref().and_then(|value| self.context.get(value));
-        let args = self.args.iter().chain(context.into_iter().flat_map(|value| &value.args)).cloned();
-        AcpAgentConfig::new(self.executable(env)).args(args).envs(self.env.clone()).envs(env.iter().cloned())
+        self.args.iter().chain(context.into_iter().flat_map(|value| &value.args)).cloned().collect()
+    }
+
+    /// Its environment with the ant's `env` over it, which the harness process gets over the daemon's.
+    fn launch_env(&self, env: &[(String, String)]) -> BTreeMap<String, String> {
+        self.env.clone().into_iter().chain(env.iter().cloned()).collect()
     }
 
     /// The executable to start: the command, except on Windows a name found on `PATH` ([`Self::locate`]), since
@@ -241,8 +274,9 @@ impl Harness {
         self.command.clone()
     }
 
-    fn agent(&self, env: &[(String, String)], settings: &ModelSettings) -> AcpAgent {
-        AcpAgent::new(self.process(env, settings))
+    /// What the daemon's ACP client connects to: the harness process, or a translator of its protocol.
+    fn agent(&self, env: &[(String, String)], settings: &ModelSettings) -> DynConnectTo<Client> {
+        native::agent(self, env, settings)
     }
 
     /// Where the harness's executable is, with the ant's `env` over the definition's over the daemon's: the path its
@@ -463,7 +497,7 @@ impl ModelSettings {
         Ok(())
     }
 
-    fn model_id(&self, harness: &Harness) -> Option<String> {
+    pub(crate) fn model_id(&self, harness: &Harness) -> Option<String> {
         let suffix = self.context.as_ref().and_then(|value| harness.context.get(value)?.model_suffix.as_deref());
         self.model.as_ref().map(|model| match suffix {
             Some(suffix) => format!("{}{suffix}", model.trim_end_matches(suffix)),
@@ -661,7 +695,7 @@ impl Launch {
         settings: ModelSettings,
     ) -> Self {
         let (process, process_settings, process_env) = (harness.clone(), settings.clone(), env.clone());
-        let connect: Connector = Arc::new(move || DynConnectTo::new(process.agent(&process_env, &process_settings)));
+        let connect: Connector = Arc::new(move || process.agent(&process_env, &process_settings));
         let process_env = Some(env);
         Self {
             harness,
@@ -681,7 +715,7 @@ impl Launch {
     pub fn with_fallback(&self, fallback: &crate::fallback::Fallback) -> Self {
         let (process, settings) = (fallback.harness.clone(), fallback.settings.clone());
         let env = self.process_env.clone().unwrap_or_default();
-        let connect: Connector = Arc::new(move || DynConnectTo::new(process.agent(&env, &settings)));
+        let connect: Connector = Arc::new(move || process.agent(&env, &settings));
         Self { harness: fallback.harness.clone(), settings: fallback.settings.clone(), connect, ..self.clone() }
     }
 
@@ -692,7 +726,7 @@ impl Launch {
 
     /// Whether the harness it starts runs its tools without asking ([`Harness::bypasses_permissions`]).
     pub fn bypasses_permissions(&self) -> bool {
-        self.harness.bypass_permissions
+        self.harness.bypasses_permissions()
     }
 
     /// The same launch, for sessions serving `thread`.
@@ -744,6 +778,7 @@ impl Launch {
             name: "test".to_owned(),
             file: None,
             command: "test".into(),
+            protocol: Protocol::Acp,
             args: Vec::new(),
             env: BTreeMap::new(),
             mode: None,
