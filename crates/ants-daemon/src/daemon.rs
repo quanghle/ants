@@ -2438,11 +2438,60 @@ impl Inbox<'_> {
         };
         let thread = &arrived.envelope.thread_id;
         tracing::warn!(%thread, error = format!("{e:#}"), "fallback turned the message away; passing it over");
-        self.failover.down(on.index, tokio::time::Instant::now() + retry);
+        let now = tokio::time::Instant::now();
+        self.failover.down(on.index, now + retry);
         if e.is::<StartFailed>() {
             self.attempts.release(&arrived.envelope).await;
         }
+        if let Some(outage) = self.outage()
+            && self.fallback(now).is_none()
+            && self.failover.exhausted()
+        {
+            self.tell_fallbacks_passed_over(e, on, arrived, outage, now).await;
+        }
         true
+    }
+
+    /// Tell the owner of the thread `arrived` came on, else the default human, that every fallback is passed over
+    /// while the ant's own harness is `outage`, the last, `on`, having turned the message away with `e`.
+    async fn tell_fallbacks_passed_over(
+        &self,
+        e: &anyhow::Error,
+        on: &OnFallback,
+        arrived: &Incoming,
+        outage: &str,
+        now: tokio::time::Instant,
+    ) {
+        let thread = &arrived.envelope.thread_id;
+        tracing::warn!(%thread, "every fallback is turned away; messages wait");
+        let why = if e.is::<SignedOut>() {
+            "signed out"
+        } else if e.is::<StartFailed>() {
+            "failing to start"
+        } else {
+            "limited"
+        };
+        let detail: Vec<String> = e.chain().map(ToString::to_string).filter(|c| *c != on.to_string()).collect();
+        let detail = self.redactor.redact(&detail.join(": ")).into_owned();
+        let next = self.failover.next_up(now).map(|at| {
+            chrono::Utc::now() + chrono::Duration::from_std(at.saturating_duration_since(now)).unwrap_or_default()
+        });
+        let own = self.pool.launch().harness_name();
+        let notice = crate::fallback::exhausted_notice(
+            self.ant,
+            &arrived.envelope,
+            arrived.post.is_some(),
+            (own, outage),
+            &self.pool.fallbacks(),
+            (&on.name, why, &detail),
+            next,
+            self.humans,
+        );
+        let id = format!("fallbacks-{}-{}", self.ant, chrono::Utc::now().timestamp_millis());
+        if let Err(e) = bus::publish_json(self.js, notice.subject(), &notice, Some(&id)).await {
+            tracing::warn!(%thread, error = format!("{e:#}"), "telling a human every fallback is turned away");
+            self.failover.untold();
+        }
     }
 
     /// Record which backend answered: the roster names a fallback, and the reply's notice says why it answered.

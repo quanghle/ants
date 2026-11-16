@@ -4,9 +4,10 @@
 //! An ant's `fallback` list names each one as `<harness>`, a harness with its default model, `<harness>:<model>`, a
 //! harness with that model, or `:<model>`, the ant's own harness with another model. They are tried in order: each
 //! message goes to the first one not turned away lately, in a new session seeded from the thread's history unless it
-//! runs the ant's own harness. A fallback that is signed out, limited or fails to start is passed over for a while. The
-//! ant goes back to its own harness once a check finds it signed in or starting, or, after a quota, once the backoff
-//! passes and a message gets through.
+//! runs the ant's own harness. A fallback that is signed out, limited or fails to start is passed over for a while;
+//! with every one passed over, messages wait, and a human is told once until a fallback answers again. The ant goes
+//! back to its own harness once a check finds it signed in or starting, or, after a quota, once the backoff passes and
+//! a message gets through.
 //!
 //! An ant added from a template takes the template's `fallback` list, which no request chooses, less any entry that
 //! names the harness and model the ant runs ([`inherit`]).
@@ -20,11 +21,17 @@ use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use tokio::time::Instant;
 
+use ants_proto::{Envelope, UserId};
+
 use crate::harness::{Harness, Harnesses, ModelSettings};
+use crate::humans::Registry;
 use crate::sync::MutexExt as _;
 
 /// How long a fallback that was signed out or failed to start is passed over, and a limited one that gave no hint.
 pub const RETRY_AFTER: Duration = Duration::from_mins(5);
+
+/// The most of what the last fallback said that a notice of every fallback passed over quotes.
+const DETAIL_CHARS: usize = 500;
 
 /// A harness and model an ant fails over to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,6 +174,8 @@ struct State {
     down: HashMap<usize, Instant>,
     /// When a fallback first answered since the ant's own harness last could.
     since: Option<DateTime<Utc>>,
+    /// A human was told every fallback is passed over, and none has answered since.
+    told: bool,
 }
 
 impl Failover {
@@ -188,7 +197,20 @@ impl Failover {
 
     /// A fallback answered: since when one serves.
     pub fn served(&self) -> DateTime<Utc> {
-        *self.0.locked().since.get_or_insert_with(Utc::now)
+        let mut state = self.0.locked();
+        state.told = false;
+        *state.since.get_or_insert_with(Utc::now)
+    }
+
+    /// Every fallback is passed over: whether to tell a human, once until a fallback answers again or the ant's own
+    /// harness does.
+    pub fn exhausted(&self) -> bool {
+        !std::mem::replace(&mut self.0.locked().told, true)
+    }
+
+    /// Telling a human every fallback is passed over failed: tell the next time.
+    pub fn untold(&self) {
+        self.0.locked().told = false;
     }
 
     /// The ant's own harness serves again: every fallback may be tried at the next outage. Returns whether one
@@ -204,6 +226,53 @@ pub fn meanwhile(ant: &impl fmt::Display, fallbacks: &[String], back: &str) -> O
     let (first, rest) = fallbacks.split_first()?;
     let then = if rest.is_empty() { String::new() } else { format!(", then {}", rest.join(", then ")) };
     Some(format!("Messages to {ant} go to its fallback {first}{then} meanwhile, and back to the harness {back}."))
+}
+
+/// The notice to the owner of the thread of `envelope` (a channel post if `post`), else the default human of `humans`,
+/// that `ant` cannot answer with a fallback either while its own harness `own` is `outage`: each of `fallbacks` is
+/// passed over, `last` having turned a message away just now, being `why` (`detail`), until `next`.
+#[allow(clippy::too_many_arguments)]
+pub fn exhausted_notice(
+    ant: &UserId,
+    envelope: &Envelope,
+    post: bool,
+    (own, outage): (&str, &str),
+    fallbacks: &[String],
+    (last, why, detail): (&str, &str, &str),
+    next: Option<DateTime<Utc>>,
+    humans: &Registry,
+) -> Envelope {
+    let mut excerpt: String = detail.trim().chars().take(DETAIL_CHARS).collect();
+    if detail.trim().chars().nth(DETAIL_CHARS).is_some() {
+        excerpt.push('…');
+    }
+    let turned = if fallbacks.len() > 1 {
+        let names = fallbacks.join(", ");
+        format!("fallbacks {names} turned messages away lately, the last, {last}, being {why} ({excerpt})")
+    } else {
+        format!("fallback {last} is {why} ({excerpt})")
+    };
+    let next = next.map_or_else(String::new, |at| {
+        format!(", the next one at {}", at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+    });
+    let text = format!(
+        "[ants] {ant} cannot answer with a fallback either: {turned}.\nMessages to {ant} wait meanwhile, spending no \
+         attempts, until harness {own}, {outage}, answers again or a fallback answers when tried again{next}."
+    );
+    let owner = humans.human_owner(envelope.owner.as_ref());
+    let mut notice = Envelope::on_thread(
+        envelope.thread_id.clone(),
+        ant.clone(),
+        owner.clone().unwrap_or_else(|| humans.default_human().clone()),
+        text,
+    )
+    .with_owner(owner)
+    .with_creator(humans.ant_creator(envelope.creator.as_ref()))
+    .with_origin_thread(envelope.origin_thread.clone());
+    if !post {
+        notice.in_reply_to = Some(envelope.id);
+    }
+    notice
 }
 
 /// What a notice of an outage of the ant's own harness says the ant cannot answer with: everything, without
@@ -282,9 +351,16 @@ mod tests {
         assert_eq!(failover.pick(2, later), Some(1));
         assert_eq!(failover.next_up(later), Some(now + Duration::from_secs(60)));
 
+        assert!(failover.exhausted());
+        assert!(!failover.exhausted(), "told once");
+        failover.untold();
+        assert!(failover.exhausted(), "telling failed");
         let since = failover.served();
+        assert!(failover.exhausted(), "a fallback answered since");
         assert_eq!(failover.served(), since, "the same outage");
+        assert!(failover.exhausted());
         assert!(failover.clear());
+        assert!(failover.exhausted(), "a new outage");
         assert!(!failover.clear());
         assert_eq!((failover.pick(2, now), failover.next_up(now)), (Some(0), None), "a new outage tries all again");
     }
