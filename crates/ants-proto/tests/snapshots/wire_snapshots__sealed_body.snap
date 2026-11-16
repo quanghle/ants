@@ -9,6 +9,10 @@ expression: value
   "id": "019a7d2e-0000-7000-8000-000000000001",
   "text": "lunch?",
   "title": "Lunch",
+  "quote": {
+    "from": "bob",
+    "text": "noon?"
+  },
   "attachments": [
     {
       "id": "019a7d2e-0000-7000-8000-000000000014",

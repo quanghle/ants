@@ -286,21 +286,22 @@ pub(super) fn body(e: &Entry, entries: &[Entry]) -> String {
     text
 }
 
-/// A message's text in lines at most `width` wide: as markdown for a message, post or note, else as it is.
+/// A message's text in lines at most `width` wide: as markdown for a message, post or note, else as it is; after a
+/// dim line on the message it replies to, if it quotes one.
 fn text(e: &Entry, entries: &[Entry], width: usize) -> Vec<Line<'static>> {
     let text = body(e, entries);
+    let mut lines: Vec<_> = e.quote.iter().map(|q| Line::styled(cut(&q.line(), width), frame::dim())).collect();
     match e.kind {
         Kind::Message | Kind::Escalation | Kind::Mention | Kind::Post | Kind::Note if e.question.is_none() => {
-            markdown::render(&text, width)
+            lines.extend(markdown::render(&text, width));
         }
         _ => {
-            let mut lines = Vec::new();
             for line in text.lines() {
                 push(&mut lines, line, "", Style::new(), width);
             }
-            lines
         }
     }
+    lines
 }
 
 /// `line` begun with `indent`, its style kept.

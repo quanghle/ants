@@ -33,6 +33,7 @@ match, omit `@ant` so `messenger` routes by capability.
 ants ask @dev-a "summarise the open TODOs in crates/ants-daemon"
 ants ask "which ant knows the transport layer?"       # goes to the human's assistant, else messenger
 ants ask --thread <thread> @dev-a "follow-up on the same thread"
+ants ask --reply-to <message> "answer that message"  # on its thread, to its author, quoting it
 ```
 
 `ants ask` prints `thread <id>`, then `message <id>`, then `to <ant>` when no `@ant` was given; keep the thread id to read replies and
@@ -130,6 +131,7 @@ escalations reach the inbox.
 ants channel list                                   # channels, members, messenger, owner; a human's unread `N (@M)`
 ants post '#ops' "@dev-b @alice the deploy failed"  # wakes dev-b, notifies alice's inbox, prints thread and message <id>
 ants post '#ops' --thread <thread> "any news?"      # follow up on the thread
+ants post '#ops' --reply-to <message> "@dev-b why?" # reply on its thread, quoting that post
 ants post --wait '#ops' "who owns billing?"         # print the first post by another user and exit
 ants post --follow --timeout 10m '#ops' "status?"   # print each later post on the thread for 10m
 ants channel read ops --thread <thread>             # read one thread (or --limit <n> for the last n threads)

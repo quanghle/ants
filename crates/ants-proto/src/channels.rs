@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    Attachment, ChannelId, ChannelOp, DEFAULT_TURN_BUDGET, Envelope, Error, Humans, Mention, Refusal, ThreadId, UserId,
-    parse_mentions, subject,
+    Attachment, ChannelId, ChannelOp, DEFAULT_TURN_BUDGET, Envelope, Error, Humans, Mention, Quote, Refusal, ThreadId,
+    UserId, parse_mentions, subject,
 };
 #[cfg(doc)]
 use crate::{CHANNELS_BUCKET, HUMANS_BUCKET, WEBHOOK_ALLOW, WEBHOOKS_BUCKET, webhook_marker_key};
@@ -175,6 +175,10 @@ pub struct ChannelPost {
     pub turn_budget: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_reply_to: Option<Uuid>,
+    /// The quote of the post or message `in_reply_to` names, as a human's quoted reply carries it
+    /// ([`ChannelPost::quoting`], [`Envelope::quote`]). Never copied by [`ChannelPost::reply`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote: Option<Quote>,
     /// The human who started the thread. Replies keep it ([`ChannelPost::reply`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<UserId>,
@@ -229,6 +233,7 @@ impl ChannelPost {
             text,
             turn_budget: DEFAULT_TURN_BUDGET,
             in_reply_to: None,
+            quote: None,
             owner: None,
             creator: None,
             webhook: false,
@@ -244,6 +249,12 @@ impl ChannelPost {
     #[must_use]
     pub fn on_behalf(self, human: Option<UserId>) -> Self {
         Self { on_behalf_of: human, ..self }
+    }
+
+    /// The post as a reply to post or message `id`, quoting it with `quote` ([`ChannelPost::quote`]).
+    #[must_use]
+    pub fn quoting(self, id: Uuid, quote: Quote) -> Self {
+        Self { in_reply_to: Some(id), quote: Some(quote), ..self }
     }
 
     /// The post with `owner` as the human who started its thread.

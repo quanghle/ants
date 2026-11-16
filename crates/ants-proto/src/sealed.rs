@@ -1,10 +1,10 @@
-//! Messages between two humans sealed so only their devices read them ([`Sealed`]): the text, and the suggested title
-//! and attachments if any, travel encrypted in [`SealedBody`], under a content key sealed for each device.
+//! Messages between two humans sealed so only their devices read them ([`Sealed`]): the text, and the suggested title,
+//! quote and attachments if any, travel encrypted in [`SealedBody`], under a content key sealed for each device.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{Attachment, DeviceId, ThreadId, UserId};
+use crate::{Attachment, DeviceId, Quote, ThreadId, UserId};
 #[cfg(doc)]
 use crate::{DEVICES_BUCKET, DeviceKey, Envelope};
 
@@ -49,8 +49,8 @@ impl Sealed {
     }
 }
 
-/// What the [`Sealed::body`] of a message holds: the envelope's text, and its suggested title and attachments if any,
-/// with what names the message, which a reader checks against the envelope it came in.
+/// What the [`Sealed::body`] of a message holds: the envelope's text, and its suggested title, quote and attachments if
+/// any, with what names the message, which a reader checks against the envelope it came in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SealedBody {
     pub from: UserId,
@@ -61,6 +61,8 @@ pub struct SealedBody {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote: Option<Quote>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
 }

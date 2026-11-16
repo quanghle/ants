@@ -127,6 +127,7 @@ impl Parser {
             owner: e.owner,
             note,
             text,
+            quote: e.quote,
             // Under the handles of the subject it was stored on, a forged one's too: its sender stored them.
             attachments: attachments::stored_on(subject, &e.attachments, stored_at),
             forged,
@@ -167,6 +168,7 @@ impl Parser {
                 owner: post.owner,
                 note,
                 text: post.text,
+                quote: post.quote,
                 forged,
                 suggested_title: post.title.filter(|_| !forged),
                 turns: Some(post.turn_budget),

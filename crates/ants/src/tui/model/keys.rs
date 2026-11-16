@@ -203,6 +203,10 @@ impl Model {
                 self.bar.focused = true;
                 self.go(To::Thread(thread), now)
             }
+            To::Quote(thread, quoted, mention) => {
+                self.quote(thread, quoted, mention.as_ref());
+                None
+            }
             To::Snooze(thread) => self.snooze(thread, now),
             To::Bar(text) => {
                 self.bar.set_text(&text);

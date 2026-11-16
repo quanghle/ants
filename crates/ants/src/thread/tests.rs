@@ -101,6 +101,20 @@ fn every_kind_of_stored_message_lands_on_its_thread() {
 }
 
 #[test]
+fn a_quoted_reply_shows_the_message_it_replies_to_before_its_text() {
+    let (alice, dev_a) = (p("alice"), p("dev-a"));
+    let done = Envelope::on_thread(t("t1"), dev_a.clone(), alice.clone(), "done, see the diff");
+    let quote = ants_proto::Quote::new(dev_a.clone(), &done.text);
+    let why = Envelope::on_thread(t("t1"), alice.clone(), dev_a, "why?").quoting(done.id, quote.clone());
+    let post = ChannelPost::on_thread("ops".parse().unwrap(), t("t1"), alice, "@dev-a and?").quoting(done.id, quote);
+    let entries = entries(&[(why.subject(), json(&why)), (post.subject(), json(&post))]);
+    assert!(entries.iter().all(|e| e.quote == why.quote), "{entries:?}");
+    let shown = render(&entries);
+    assert!(shown.contains(": ↪ replying to dev-a: done, see the diff\n    why?\n"), "{shown}");
+    assert!(shown.contains(": ↪ replying to dev-a: done, see the diff\n    @dev-a and?\n"), "{shown}");
+}
+
+#[test]
 fn a_message_on_another_sender_s_subject_is_marked_forged() {
     let e = Envelope::on_thread(t("t1"), p("alice"), p("dev-a"), "hi");
     let entries = entries(&[("ants.inbox.dev-a.mallory".to_owned(), json(&e))]);
@@ -588,6 +602,43 @@ async fn a_human_picks_a_message_by_a_start_of_its_id() {
 }
 
 #[tokio::test]
+async fn ask_reply_to_answers_the_message_s_author_on_its_thread_quoting_it() {
+    use crate::cmd::send::{Target, ask, post};
+
+    let Some(server) = crate::test_support::Server::start() else { return };
+    let (alice, dev_a) = (p("alice"), p("dev-a"));
+    let creds = server.creds_as(&alice, ants_proto::Role::Human);
+    let nats = crate::Nats::new(&server.url, Some(&creds), None).unwrap();
+    let (_, js) = nats.connect("test").await.unwrap();
+    ants_daemon::bus::ensure_stream(&js).await.unwrap();
+    let asked = Envelope::new(alice.clone(), dev_a.clone(), "build it");
+    let built = asked.reply(dev_a.clone(), "built,\n  all green", ants_proto::Role::Human).unwrap();
+    for e in [&asked, &built] {
+        js.publish(e.subject(), json(e).into()).await.unwrap().await.unwrap();
+    }
+
+    let (replies, input, attach) = Default::default();
+    let send = |reply_to: Uuid, thread: Option<Pick>, words: &[&str]| {
+        let target = Target { thread, reply_to: Some(MessagePick::Id(reply_to)) };
+        let words = words.iter().map(|w| (*w).to_owned()).collect();
+        Box::pin(ask(&nats, target, Default::default(), &replies, &input, &attach, words))
+    };
+    send(built.id, None, &["ship", "it"]).await.unwrap();
+    let elsewhere = send(built.id, Some(Pick::Id(ThreadId::generate())), &["ship"]).await.unwrap_err().to_string();
+    assert!(elsewhere.contains(&format!("is on thread {}, not ", asked.thread_id)), "{elsewhere}");
+    let target = Target { thread: None, reply_to: Some(MessagePick::Id(built.id)) };
+    let words = vec!["deploy?".to_owned()];
+    Box::pin(post(&nats, "ops".parse().unwrap(), target, &replies, &input, &attach, words)).await.unwrap();
+
+    let shown = history(&js, &asked.thread_id, None, Activity::None, None).await.unwrap();
+    let replied: Vec<_> = shown[2..].iter().map(|e| (e.to.clone(), e.channel.clone(), e.text.as_str())).collect();
+    assert_eq!(replied, [(Some(dev_a.clone()), None, "ship it"), (None, Some("ops".parse().unwrap()), "deploy?")]);
+    for e in &shown[2..] {
+        assert_eq!(e.quote, Some(ants_proto::Quote::new(dev_a.clone(), "built, all green")), "{e:?}");
+    }
+}
+
+#[tokio::test]
 async fn a_human_reads_threads_back_without_consuming_them() {
     let Some(server) = crate::test_support::Server::start() else { return };
     let (alice, dev_a) = (p("alice"), p("dev-a"));
@@ -760,7 +811,9 @@ async fn a_sealed_message_from_a_device_enrolled_mid_follow_opens_everywhere_it_
         alice_nats.connect("test").await.unwrap();
         let words = vec!["@bob".to_owned(), "lunch at noon?".to_owned()];
         let (sending, replies, input, attach) = Default::default();
-        Box::pin(crate::cmd::send::ask(&alice_nats, None, sending, &replies, &input, &attach, words)).await.unwrap();
+        Box::pin(crate::cmd::send::ask(&alice_nats, Default::default(), sending, &replies, &input, &attach, words))
+            .await
+            .unwrap();
     };
     let (follow, ()) = tokio::join!(follow, asked);
     follow.unwrap();

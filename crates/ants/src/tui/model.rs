@@ -13,7 +13,7 @@ use ratatui::text::Span;
 use super::acts::{Acted, Change};
 use super::approvals::{self, Asking};
 use super::command::Bar;
-use super::exec::Job;
+use super::exec::{Job, Quoted};
 use super::interrupt::Confirm;
 use super::react::{self, Picker};
 use super::reads::{Mark, Read};
@@ -258,6 +258,8 @@ pub enum To {
     Interrupt(ThreadId),
     /// The thread, with the command bar open to reply on it.
     Reply(ThreadId),
+    /// The command bar open to reply on the thread to the message quoted, @mentioning its author when an ant.
+    Quote(ThreadId, Quoted, Option<UserId>),
     /// Ask how long to keep the thread off home, or wake it if a snooze holds it off.
     Snooze(ThreadId),
     /// The command bar, open on this text.

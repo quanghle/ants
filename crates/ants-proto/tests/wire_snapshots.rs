@@ -108,6 +108,10 @@ fn mention() -> Mention {
     Mention { channel: channel(), post: id(3), author: Some(user("github")) }
 }
 
+fn quote() -> Quote {
+    Quote { from: user("dev-b"), text: "the build fails on main".to_owned() }
+}
+
 fn envelope() -> Envelope {
     Envelope {
         id: id(1),
@@ -117,6 +121,7 @@ fn envelope() -> Envelope {
         text: "fix the build".to_owned(),
         turn_budget: 8,
         in_reply_to: Some(id(2)),
+        quote: Some(quote()),
         owner: Some(user("alice")),
         creator: Some(user("planner")),
         origin_thread: Some(other_thread()),
@@ -144,6 +149,7 @@ fn envelope() -> Envelope {
 fn plain_envelope() -> Envelope {
     Envelope {
         in_reply_to: None,
+        quote: None,
         owner: None,
         creator: None,
         origin_thread: None,
@@ -427,6 +433,7 @@ fn envelopes() {
             id: id(1),
             text: "lunch?".to_owned(),
             title: Some("Lunch".to_owned()),
+            quote: Some(Quote { from: user("bob"), text: "noon?".to_owned() }),
             attachments: vec![Attachment {
                 size: 1250,
                 sealed: Some(SealedAttachment { nonce: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned() }),
@@ -545,6 +552,7 @@ fn channels() {
             mentions: vec![user("dev-a")],
             turn_budget: 8,
             in_reply_to: Some(id(1)),
+            quote: Some(quote()),
             owner: Some(user("alice")),
             creator: Some(user("planner")),
             webhook: true,

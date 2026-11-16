@@ -13,6 +13,10 @@ expression: value
   ],
   "turn_budget": 8,
   "in_reply_to": "019a7d2e-0000-7000-8000-000000000001",
+  "quote": {
+    "from": "dev-b",
+    "text": "the build fails on main"
+  },
   "owner": "alice",
   "creator": "planner",
   "webhook": true,

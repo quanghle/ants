@@ -79,9 +79,9 @@ impl<B> Opening<B> {
     }
 }
 
-/// Seal the text and suggested title of `envelope`, and `attachments`, the references of the files it carries, under
-/// the content key `key` for `recipients`, each a device and its key, from the sending device `device` whose key is
-/// `xkey`, leaving its text empty, and its title and attachments none.
+/// Seal the text, suggested title and quote of `envelope`, and `attachments`, the references of the files it carries,
+/// under the content key `key` for `recipients`, each a device and its key, from the sending device `device` whose key
+/// is `xkey`, leaving its text empty, and its title, quote and attachments none.
 pub fn seal_envelope(
     envelope: &mut Envelope,
     key: &Key,
@@ -97,6 +97,7 @@ pub fn seal_envelope(
         id: envelope.id,
         text: std::mem::take(&mut envelope.text),
         title: envelope.title.take(),
+        quote: envelope.quote.take(),
         attachments,
     };
     envelope.attachments = Vec::new();

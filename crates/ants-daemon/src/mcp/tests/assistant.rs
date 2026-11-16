@@ -210,6 +210,7 @@ impl HumanSealing for EnrolledSealing {
                 id: envelope.id,
                 text: sealed.body.clone(),
                 title: None,
+                quote: None,
                 attachments: Vec::new(),
             }),
             _ => Opening::Unreadable,

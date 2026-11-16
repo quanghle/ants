@@ -122,17 +122,24 @@ pub fn heading(e: &Entry) -> String {
 }
 
 /// The text [`render`] shows of an entry among `entries`: a question with its options and its answers among them, why
-/// a prompt ended with no reply sent and its final text, else the entry's text.
+/// a prompt ended with no reply sent and its final text, else the entry's text; after the line on the message it
+/// replies to, if it quotes one ([`Quote::line`]).
+///
+/// [`Quote::line`]: ants_proto::Quote::line
 pub fn body(e: &Entry, entries: &[Entry]) -> String {
     if let Some(end) = &e.no_reply {
         return no_reply(end, &e.text);
     }
-    match (&e.question, e.id) {
+    let text = match (&e.question, e.id) {
         (Some(question), Some(id)) => {
             let answers = answers_to(e, entries).map(|(by, answered)| answer_line(by, answered)).collect();
             crate::inbox::render_question(id, question, answers)
         }
         _ => e.text.clone(),
+    };
+    match &e.quote {
+        Some(quote) => format!("{}\n{text}", quote.line()),
+        None => text,
     }
 }
 

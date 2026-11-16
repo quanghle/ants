@@ -2,7 +2,7 @@
 
 use ants_daemon::reactions::Reacted;
 use ants_proto::{
-    Acting, Answer, Answered, ChannelId, EscalationReason, Question, SummaryRequest, ThreadId, UserId, Uuid,
+    Acting, Answer, Answered, ChannelId, EscalationReason, Question, Quote, SummaryRequest, ThreadId, UserId, Uuid,
 };
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -102,6 +102,12 @@ pub struct Entry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     pub text: String,
+    /// The quote of the message or post an inbox message or channel post replies to, as its sender gave it
+    /// ([`Envelope::quote`]); a sealed one's only when opened.
+    ///
+    /// [`Envelope::quote`]: ants_proto::Envelope::quote
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quote: Option<Quote>,
     /// The files attached to an inbox message, channel post, notes post or dead letter, each with its handle.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<attachments::Listed>,
@@ -185,6 +191,7 @@ impl Entry {
             owner: None,
             note: None,
             text: String::new(),
+            quote: None,
             attachments: Vec::new(),
             forged: false,
             acting: Acting::Own,

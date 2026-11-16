@@ -17,8 +17,8 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 use ants_proto::{
-    CHANNELS_BUCKET, ChannelEntry, ChannelId, ChannelPost, ColonyEntry, Envelope, Humans, ThreadId, ThreadOrigin,
-    UserId, Uuid, chan_reader, channel_seen_key, mention_key, subject,
+    CHANNELS_BUCKET, ChannelEntry, ChannelId, ChannelPost, ColonyEntry, Envelope, Humans, Quote, ThreadId,
+    ThreadOrigin, UserId, Uuid, chan_reader, channel_seen_key, mention_key, subject,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, consumer, kv};
@@ -221,6 +221,7 @@ pub fn as_envelope(post: &ChannelPost, ant: &UserId) -> Envelope {
         text: post.text.clone(),
         turn_budget: post.turn_budget,
         in_reply_to: None,
+        quote: post.quote.clone(),
         owner: post.owner.clone(),
         creator: post.creator.clone(),
         origin_thread: None,
@@ -472,7 +473,12 @@ pub fn prompt(ant: &UserId, post: &ChannelPost, context: &Context, left: Option<
     let channel = &post.channel;
     let mut text = format!("[ants] Channel #{channel}, thread {}.\n\n", post.thread_id);
     text.push_str(&context_text(context));
-    let _ = write!(text, "[ants] Post from {} mentioning {ant}:\n{}", poster(post), post.text);
+    let _ = write!(
+        text,
+        "[ants] Post from {} mentioning {ant}:\n{}",
+        poster(post),
+        quoted(post.quote.as_ref(), &post.text)
+    );
     if let Some(left) = left {
         let _ = write!(
             text,
@@ -482,6 +488,15 @@ pub fn prompt(ant: &UserId, post: &ChannelPost, context: &Context, left: Option<
         );
     }
     text
+}
+
+/// `text` after the `[ants]` line on the message it replies to, if it quotes one: the sender's quote, since the ant
+/// may not hold that message, as when another ant wrote it.
+pub fn quoted(quote: Option<&Quote>, text: &str) -> String {
+    match quote {
+        Some(q) => format!("[ants] In reply to {}: \"{}\"\n{text}", q.from, q.text),
+        None => text.to_owned(),
+    }
 }
 
 /// Who `post` is from: its sender, and the human it posted for when its `on_behalf_of`, checked on arrival, stands.
@@ -517,7 +532,12 @@ pub fn triage_prompt(
     let mut text = format!("[ants] Channel #{channel}, thread {}.\n\n", post.thread_id);
     text.push_str(&context_text(context));
     let kind = if post.webhook { " (a webhook)" } else { "" };
-    let _ = write!(text, "[ants] Post from {}{kind} mentioning nobody:\n{}\n\n", post.from, post.text);
+    let _ = write!(
+        text,
+        "[ants] Post from {}{kind} mentioning nobody:\n{}\n\n",
+        post.from,
+        quoted(post.quote.as_ref(), &post.text)
+    );
     text.push_str(TRIAGE_RULES);
     let _ = write!(text, "\n\n[ants] Members of #{channel}:\n");
     if entry.members.is_empty() {
@@ -1171,6 +1191,13 @@ mod tests {
         assert!(unposted.ends_with("[ants] Post from dev-b mentioning dev-a:\n@dev-a agree?"), "{unposted}");
         let first = prompt(&p("dev-a"), &root, &Context::default(), Some(7));
         assert!(first.starts_with(&format!("[ants] Channel #ops, thread {}.\n\n[ants] Post from", root.thread_id)));
+        let quoting = ask.quoting(root.id, Quote::new(p("human"), "deploy\n friday?"));
+        let text = prompt(&p("dev-a"), &quoting, &Context::default(), None);
+        assert!(
+            text.ends_with("mentioning dev-a:\n[ants] In reply to human: \"deploy friday?\"\n@dev-a agree?"),
+            "{text}"
+        );
+        assert_eq!(as_envelope(&quoting, &p("dev-a")).quote, quoting.quote);
     }
 
     #[test]

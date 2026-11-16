@@ -6,7 +6,10 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
+use ants_proto::ThreadId;
+
 use super::COMMANDS;
+use crate::tui::exec::Quoted;
 use crate::tui::model::Key;
 use crate::tui::{attach, complete, frame};
 
@@ -58,6 +61,8 @@ pub struct Bar {
     pub pick: complete::Pick,
     /// The files `/attach` staged for the next message.
     pub staged: attach::Staged,
+    /// The message `>` picked on a thread for the next message there to reply to, quoting it.
+    pub quoting: Option<(ThreadId, Quoted)>,
 }
 
 impl Bar {
@@ -195,10 +200,15 @@ impl Bar {
         let width = usize::from(area.width.saturating_sub(2));
         let (lines, (row, column)) = self.lines(width);
         let top = (row + 1).saturating_sub(MAX_LINES);
-        let title = match self.staged.names()[..] {
+        let mut title = match self.staged.names()[..] {
             [] => " > ".to_owned(),
             ref names => format!(" > 📎 {} ", names.join(", ")),
         };
+        if let Some((_, quoted)) = &self.quoting {
+            let room = usize::from(area.width.saturating_sub(4)).saturating_sub(title.chars().count());
+            let line: String = quoted.quote.line().chars().take(room.saturating_sub(1)).collect();
+            title = format!("{title}{line} ");
+        }
         let mut block = frame::block(title, self.focused);
         if let Some(status) = &self.status {
             let style = match status.tone {

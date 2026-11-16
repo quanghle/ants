@@ -352,7 +352,7 @@ impl Inbox<'_> {
             _ => match (&envelope.summary, escalation::group_note(self.ant, envelope)) {
                 (Some(summary), _) => format!("{}\n\n{}", summary_note(summary), envelope.text),
                 (None, Some(note)) => format!("{note}\n\n{}", envelope.text),
-                (None, None) => envelope.text.clone(),
+                (None, None) => channel::quoted(envelope.quote.as_ref(), &envelope.text),
             },
         };
         let text = match &incoming.resume {

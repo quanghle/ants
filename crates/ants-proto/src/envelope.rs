@@ -30,6 +30,11 @@ pub struct Envelope {
     pub turn_budget: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_reply_to: Option<Uuid>,
+    /// The quote of the message `in_reply_to` names, as a human's quoted reply to a message on the thread carries it
+    /// ([`Envelope::quoting`]); the recipient's daemon puts it in the prompt. Sealed with the text on a message between
+    /// two humans. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote: Option<Quote>,
     /// The human who started the thread. Replies and the messages an ant sends on or from the thread keep it. A
     /// daemon takes it as a human or a webhook ([`Envelope::webhook`]) says; from an ant, only as stored state says:
     /// on a channel thread, the thread's posts ([`ThreadOrigin`]); on any other, the thread's record in
@@ -168,6 +173,36 @@ impl SummaryRequest {
     }
 }
 
+/// A short quote of the message or post a human's reply answers ([`Envelope::quote`], [`ChannelPost::quote`]): its
+/// author and an excerpt of its text, so the recipient sees what is answered even when it never held that message.
+/// It is the sender's word only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Quote {
+    pub from: UserId,
+    pub text: String,
+}
+
+impl Quote {
+    /// How many characters of the quoted text an excerpt keeps.
+    pub const MAX: usize = 160;
+
+    /// The quote of `text` by `from`: its whitespace collapsed to single spaces, cut to [`Quote::MAX`] characters with
+    /// an ellipsis.
+    pub fn new(from: UserId, text: &str) -> Self {
+        let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let text = match line.char_indices().nth(Self::MAX) {
+            Some((cut, _)) => format!("{}…", &line[..cut]),
+            None => line,
+        };
+        Self { from, text }
+    }
+
+    /// The line a view shows above the reply: `↪ replying to <author>: <excerpt>`.
+    pub fn line(&self) -> String {
+        format!("↪ replying to {}: {}", self.from, self.text)
+    }
+}
+
 /// Where the channel post a mention notice tells of is ([`Envelope::mention`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mention {
@@ -196,6 +231,7 @@ impl Envelope {
             text: text.into(),
             turn_budget: DEFAULT_TURN_BUDGET,
             in_reply_to: None,
+            quote: None,
             owner: None,
             creator: None,
             origin_thread: None,
@@ -219,6 +255,12 @@ impl Envelope {
     #[must_use]
     pub fn with_owner(self, owner: Option<UserId>) -> Self {
         Self { owner, ..self }
+    }
+
+    /// The envelope as a reply to message `id`, quoting it with `quote` ([`Envelope::quote`]).
+    #[must_use]
+    pub fn quoting(self, id: Uuid, quote: Quote) -> Self {
+        Self { in_reply_to: Some(id), quote: Some(quote), ..self }
     }
 
     /// The envelope sent for `human`, by its assistant ([`Envelope::on_behalf_of`]).
@@ -341,6 +383,7 @@ impl Envelope {
             text: text.into(),
             turn_budget,
             in_reply_to: Some(self.id),
+            quote: None,
             owner: self.owner.clone(),
             creator: self.creator.clone(),
             origin_thread: self.origin_thread.clone(),

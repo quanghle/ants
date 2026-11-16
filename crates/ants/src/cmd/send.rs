@@ -3,8 +3,8 @@
 use ants_daemon::reading::Reading;
 use ants_daemon::{bus, notes, owners, questions, reactions};
 use ants_proto::{
-    ChannelEntry, ChannelId, ChannelPost, Choice, Envelope, Humans, JsDomain, NotesPost, Reaction, ReactionChange,
-    ReactionsOutcome, ReactionsRequest, Role, ThreadId, UserId, Uuid, subject,
+    ChannelEntry, ChannelId, ChannelPost, Choice, Envelope, Humans, JsDomain, NotesPost, Quote, Reaction,
+    ReactionChange, ReactionsOutcome, ReactionsRequest, Role, ThreadId, UserId, Uuid, subject,
 };
 use anyhow::{Result, anyhow, bail};
 use async_nats::jetstream;
@@ -72,9 +72,49 @@ async fn addressee(js: &jetstream::Context, nats: &Nats<'_>, to: Option<UserId>)
     }
 }
 
+/// Where `ants ask` or `ants post` sends: on the thread `thread` picks, else a new one, or replying to the message
+/// `reply_to` picks.
+#[derive(Default)]
+pub(crate) struct Target {
+    pub thread: Option<thread::Pick>,
+    pub reply_to: Option<thread::MessagePick>,
+}
+
+impl Target {
+    /// The thread to send on, none for a new one, and the message replied to if any: the thread is that message's,
+    /// which --thread, if given, must name.
+    async fn resolve(self, nats: &Nats<'_>, js: &jetstream::Context) -> Result<(Option<ThreadId>, Option<Replied>)> {
+        let thread = thread::resolve(self.thread, nats, js).await?;
+        let Some(pick) = self.reply_to else { return Ok((thread, None)) };
+        let me = &nats.me;
+        if !me.role.is_human() {
+            bail!("the credentials of {} are an ant's, which read no message back to reply to", me.id);
+        }
+        let id = pick.resolve(js, me).await?;
+        let keyring = sealed::Keyring::load(nats, js).await.map(std::sync::Arc::new);
+        let message = thread::find_message(js, id, keyring).await?.ok_or_else(|| anyhow!("no message {id} is kept"))?;
+        if message.sealed.is_some_and(|s| s != sealed::State::Opened) {
+            bail!("message {id} is sealed and does not open on this device: there is nothing to quote");
+        }
+        let from = message.from.clone().ok_or_else(|| anyhow!("message {id} names no sender to reply to"))?;
+        if let Some(thread) = thread.filter(|t| *t != message.thread_id) {
+            bail!("message {id} is on thread {}, not {thread}", message.thread_id);
+        }
+        let replied = Replied { id, quote: Quote::new(from, &message.text), channel: message.channel };
+        Ok((Some(message.thread_id), Some(replied)))
+    }
+}
+
+/// The message a send replies to ([`Target::reply_to`]): its id, its quote, and the channel of a post.
+struct Replied {
+    id: Uuid,
+    quote: Quote,
+    channel: Option<ChannelId>,
+}
+
 pub(crate) async fn ask(
     nats: &Nats<'_>,
-    thread: Option<thread::Pick>,
+    target: Target,
     Sending { plaintext }: Sending,
     replies: &Replies,
     input: &compose::Input,
@@ -85,9 +125,13 @@ pub(crate) async fn ask(
     let (to, text) = recipient(words, input)?;
     let mut files = attach.read()?;
     let (client, js) = nats.connect("ants-cli").await?;
-    let thread = thread::resolve(thread, nats, &js).await?;
-    let (to, unaddressed) = addressee(&js, nats, to).await;
+    let (thread, replied) = target.resolve(nats, &js).await?;
+    let author = replied.as_ref().map(|r| &r.quote.from).filter(|from| **from != nats.me.id);
+    let (to, unaddressed) = addressee(&js, nats, to.or_else(|| author.cloned())).await;
     let mut envelope = ask_envelope(&nats.me, thread, to, text);
+    if let Some(Replied { id, quote, .. }) = replied {
+        envelope = envelope.quoting(id, quote);
+    }
     envelope.attachments = attachments::references(&files);
     let to_human = nats.me.role.is_human() && humans::load(&js, &nats.me).await.contains(&envelope.to);
     let text = envelope.text.clone();
@@ -288,7 +332,7 @@ pub(crate) async fn deliver(
 pub(crate) async fn post(
     nats: &Nats<'_>,
     channel: ChannelId,
-    thread: Option<thread::Pick>,
+    target: Target,
     replies: &Replies,
     input: &compose::Input,
     attach: &attachments::Attach,
@@ -297,8 +341,14 @@ pub(crate) async fn post(
     let text = input.text(words)?;
     let files = attach.read()?;
     let (client, js) = nats.connect("ants-cli").await?;
-    let thread = thread::resolve(thread, nats, &js).await?;
+    let (thread, replied) = target.resolve(nats, &js).await?;
+    if let Some(other) = replied.as_ref().and_then(|r| r.channel.as_ref()).filter(|c| **c != channel) {
+        bail!("the message replied to is a post to #{other}, not #{channel}");
+    }
     let mut posting = Posting::compose(&js, &nats.me, channel, thread, text).await?;
+    if let Some(Replied { id, quote, .. }) = replied {
+        posting.post = posting.post.quoting(id, quote);
+    }
     posting.post.attachments = attachments::references(&files);
     for warning in &posting.warnings {
         tracing::warn!("{warning}");

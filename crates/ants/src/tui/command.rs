@@ -8,7 +8,7 @@
 use ants_proto::{ApprovalRequest, ChannelId, ThreadId, UserId, Verdict};
 use chrono::{DateTime, Utc};
 
-use super::exec::{Job, Outcome};
+use super::exec::{Job, Outcome, Quoted};
 use super::model::{Action, Focus, Key, Model, Page};
 use super::{attach, complete, nav, snooze, thread};
 use crate::{attachments, live, quiet, tools};
@@ -45,6 +45,10 @@ impl Model {
         if self.bar.text() != before {
             self.bar.pick = complete::Pick::default();
         }
+        // Leaving the bar empty drops the reply `>` set up.
+        if key == Key::Esc && self.bar.is_empty() {
+            self.bar.quoting = None;
+        }
         Some(match edited {
             Edited::Done => None,
             Edited::Submit(text) => self.submit(text, now),
@@ -77,6 +81,8 @@ impl Model {
         self.bar.status = None;
         if slash {
             self.bar.focused = false;
+        } else {
+            self.bar.quoting = None;
         }
         match action {
             Some(Action::Run(job, _)) => {
@@ -106,8 +112,11 @@ impl Model {
     fn command(&mut self, command: Command, now: DateTime<Utc>) -> Result<Option<Action>, String> {
         let run = |job| Ok(Some(Action::Run(job, String::new())));
         let slash = match command {
-            Command::Ask { to, text } => return run(Job::Ask { to, thread: None, text }),
-            Command::Post { channel, text } => return run(Job::Post { channel, thread: None, text }),
+            Command::Ask { to, text } => {
+                let (thread, quote) = self.quoting().map_or((None, None), |(thread, q)| (Some(thread), Some(q)));
+                return run(Job::Ask { to, thread, text, quote });
+            }
+            Command::Post { channel, text } => return run(Job::Post { channel, thread: None, text, quote: None }),
             Command::Say(text) => return run(self.say(text)),
             Command::Slash(slash) => slash,
         };
@@ -193,13 +202,38 @@ impl Model {
     /// What plain text does: reply on the open thread, as a post on a channel's thread, post a new thread on the
     /// channel on view, else ask the human's assistant, else the messenger ([`Job::Unaddressed`]).
     fn say(&self, text: String) -> Job {
+        let quote = self.quoting().map(|(_, q)| q);
         if let Some((channel, thread)) = self.channel_on_view() {
-            return Job::Post { channel, thread, text };
+            return Job::Post { channel, thread, text, quote };
         }
         match self.page() {
-            Page::Thread(page) => Job::Reply { thread: page.history.thread.clone(), text },
-            Page::Dm(page) => Job::Ask { to: page.with.clone(), thread: None, text },
+            Page::Thread(page) => Job::Reply { thread: page.history.thread.clone(), text, quote },
+            Page::Dm(page) => Job::Ask { to: page.with.clone(), thread: None, text, quote: None },
             _ => Job::Unaddressed { text },
+        }
+    }
+
+    /// Open the bar to reply on `thread` to the message `quoted`, its text begun with an @mention of `mention` in
+    /// place of any it began with.
+    pub(super) fn quote(&mut self, thread: ThreadId, quoted: Quoted, mention: Option<&UserId>) {
+        let text = self.bar.text();
+        let rest = match text.strip_prefix('@') {
+            Some(after) => after.split_once(char::is_whitespace).map_or("", |(_, rest)| rest.trim_start()),
+            None => &text,
+        };
+        let mention = mention.map_or_default(|m| format!("@{m} "));
+        self.bar.set_text(&format!("{mention}{rest}"));
+        self.bar.quoting = Some((thread, quoted));
+        self.bar.focused = true;
+    }
+
+    /// The message the next send replies to, quoting it, with its thread: the one `>` picked, while that thread is
+    /// open.
+    fn quoting(&self) -> Option<(ThreadId, Quoted)> {
+        let (thread, quoted) = self.bar.quoting.as_ref()?;
+        match self.page() {
+            Page::Thread(page) if page.history.thread == *thread => Some((thread.clone(), quoted.clone())),
+            _ => None,
         }
     }
 
@@ -365,7 +399,7 @@ mod tests {
         assert!(m.bar.focused && m.bar.text() == "@");
         typed(&mut m, "dev-a deploy");
         let action = m.key(Key::Enter, at(0));
-        let job = Job::Ask { to: user("dev-a"), thread: None, text: "deploy".into() };
+        let job = Job::Ask { to: user("dev-a"), thread: None, text: "deploy".into(), quote: None };
         assert_eq!(action, Some(Action::Run(job, "@dev-a deploy".into())));
         assert!(m.bar.focused && m.bar.is_empty(), "the bar stays for the next message");
         assert_eq!(m.bar.status.as_ref().map(|s| s.tone), Some(Tone::Busy));
@@ -385,22 +419,27 @@ mod tests {
         assert_eq!(m.key(Key::Enter, at(0)), Some(Action::Run(job, "who owns billing?".into())));
         m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
         typed(&mut m, "go on");
-        let reply = Job::Reply { thread: thread.clone(), text: "go on".into() };
+        let reply = Job::Reply { thread: thread.clone(), text: "go on".into(), quote: None };
         assert_eq!(m.key(Key::Enter, at(0)), Some(Action::Run(reply, "go on".into())));
         let mut post = message(1, &thread, "dev-a", "ops", "hi");
         (post.kind, post.channel) = (crate::thread::Kind::Post, Some("ops".parse().unwrap()));
         m.stored(vec![post], at(1));
         typed(&mut m, "go on");
-        let post = Job::Post { channel: "ops".parse().unwrap(), thread: Some(thread.clone()), text: "go on".into() };
+        let post = Job::Post {
+            channel: "ops".parse().unwrap(),
+            thread: Some(thread.clone()),
+            text: "go on".into(),
+            quote: None,
+        };
         assert_eq!(m.key(Key::Enter, at(1)), Some(Action::Run(post, "go on".into())), "a channel thread gets a post");
         typed(&mut m, "@dev-b take a look");
         let text = "@dev-b take a look";
-        let post = Job::Post { channel: "ops".parse().unwrap(), thread: Some(thread), text: text.into() };
+        let post = Job::Post { channel: "ops".parse().unwrap(), thread: Some(thread), text: text.into(), quote: None };
         assert_eq!(m.key(Key::Enter, at(1)), Some(Action::Run(post, text.into())), "a leading @mention posts there");
         m.pages.push(Page::Channel(crate::tui::channel::Page::new("ops".parse().unwrap())));
         for text in ["status?", "@dev-b take a look"] {
             typed(&mut m, text);
-            let post = Job::Post { channel: "ops".parse().unwrap(), thread: None, text: text.into() };
+            let post = Job::Post { channel: "ops".parse().unwrap(), thread: None, text: text.into(), quote: None };
             assert_eq!(m.key(Key::Enter, at(1)), Some(Action::Run(post, text.into())), "the feed's channel");
         }
     }
@@ -415,7 +454,7 @@ mod tests {
         m.key(Key::Ctrl('k'), at(0));
         typed(&mut m, "n");
         assert_eq!(m.bar.text(), "n", "the focused bar takes the keys of the DM");
-        let job = Job::Ask { to: user("bob"), thread: None, text: "n".into() };
+        let job = Job::Ask { to: user("bob"), thread: None, text: "n".into(), quote: None };
         assert_eq!(m.key(Key::Enter, at(0)), Some(Action::Run(job, "n".into())));
     }
 
@@ -526,6 +565,47 @@ mod tests {
     }
 
     #[test]
+    fn gt_in_a_thread_replies_to_the_selected_message_quoting_it_and_mentioning_its_ant() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
+        let entries = vec![
+            message(1, &thread, "alice", "dev-a", "deploy"),
+            message(2, &thread, "dev-a", "alice", "deployed\n  to staging"),
+            message(3, &thread, "dev-b", "alice", "tests pass"),
+        ];
+        let ids: Vec<_> = entries.iter().map(|e| e.id.unwrap()).collect();
+        m.stored(entries, at(3));
+        m.focus = Focus::View;
+        m.key(Key::Up, at(3));
+        m.key(Key::Up, at(3));
+        m.key(Key::Char('>'), at(3));
+        assert!(m.bar.focused);
+        assert_eq!(m.bar.text(), "@dev-a ", "the bar addresses the author of the message selected");
+        typed(&mut m, "why staging?");
+        let quote = Some(Quoted { id: ids[1], quote: ants_proto::Quote::new(user("dev-a"), "deployed to staging") });
+        let job = Job::Ask { to: user("dev-a"), thread: Some(thread.clone()), text: "why staging?".into(), quote };
+        assert_eq!(m.key(Key::Enter, at(3)), Some(Action::Run(job, "@dev-a why staging?".into())), "on the thread");
+        assert_eq!(m.bar.quoting, None, "sent once");
+
+        m.key(Key::Esc, at(3));
+        m.key(Key::Up, at(3));
+        m.bar.set_text("@dev-b and the docs");
+        m.key(Key::Char('>'), at(3));
+        assert_eq!(m.bar.text(), "and the docs", "a human's message gets no mention, and the one typed goes");
+        let quote = Some(Quoted { id: ids[0], quote: ants_proto::Quote::new(user("alice"), "deploy") });
+        let reply = Job::Reply { thread, text: "and the docs".into(), quote };
+        assert_eq!(m.key(Key::Enter, at(3)), Some(Action::Run(reply, "and the docs".into())));
+
+        m.key(Key::Esc, at(3));
+        m.key(Key::Char('>'), at(3));
+        assert!(m.bar.quoting.is_some());
+        m.key(Key::Ctrl('u'), at(3));
+        m.key(Key::Esc, at(3));
+        assert_eq!(m.bar.quoting, None, "leaving the bar empty drops the reply");
+    }
+
+    #[test]
     fn tree_shows_the_delegation_tree_of_the_thread_open() {
         let thread = ThreadId::generate();
         let mut m = model();
@@ -579,7 +659,7 @@ mod tests {
 
         typed(&mut m, "@dev-a read this");
         let Some(Action::Run(Job::Attached { job, files }, text)) = m.key(Key::Enter, at(0)) else { panic!() };
-        assert_eq!(*job, Job::Ask { to: user("dev-a"), thread: None, text: "read this".into() });
+        assert_eq!(*job, Job::Ask { to: user("dev-a"), thread: None, text: "read this".into(), quote: None });
         assert_eq!((files.len(), text.as_str()), (1, "@dev-a read this"));
         assert_eq!(m.bar.status.as_ref().unwrap().text, "sending with 1 file…");
         assert!(m.bar.staged.names().is_empty(), "the files go with one message");

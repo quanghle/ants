@@ -199,7 +199,9 @@ async fn the_feed_opens_a_sealed_message_from_a_device_added_since_its_keyring_w
     alice_nats.connect("test").await.unwrap();
     let words = vec!["@bob".to_owned(), "lunch at noon?".to_owned()];
     let (sending, replies, input, attach) = Default::default();
-    Box::pin(crate::cmd::send::ask(&alice_nats, None, sending, &replies, &input, &attach, words)).await.unwrap();
+    Box::pin(crate::cmd::send::ask(&alice_nats, Default::default(), sending, &replies, &input, &attach, words))
+        .await
+        .unwrap();
 
     let (_, read) = tail(bob_js, Parser::opening(keyring), None, Duration::from_hours(1), false).await;
     let entries = read.unwrap().0;

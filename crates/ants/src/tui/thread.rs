@@ -10,11 +10,13 @@
 //! them, images drawn under their lines when on ([`images`]). Opened from a search, the view selects the message found
 //! and holds it at its top until moved. The thread's tool requests show as cards under the conversation
 //! ([`approvals`]), a, A or r answering the oldest pending one and Enter showing it in full. Each message shows the
-//! reactions to it under it, live, and `+` reacts to the one selected ([`react`]).
+//! reactions to it under it, live, and `+` reacts to the one selected ([`react`]). `>` opens the command bar to reply to
+//! the selected message, quoting it and @mentioning its author when an ant; a message quoting another shows
+//! `↪ replying to <author>: <excerpt>` above its text.
 
 use std::cell::{Cell, RefCell};
 
-use ants_proto::{ThreadId, UserId, Uuid, Verdict};
+use ants_proto::{Quote, ThreadId, UserId, Uuid, Verdict};
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -23,7 +25,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::acts::{About, Change};
-use super::exec::Job;
+use super::exec::{Job, Quoted};
 use super::frame::{self, ago};
 use super::model::{Action, Data, Key, Model, To};
 use super::timeline::Call;
@@ -80,7 +82,7 @@ impl Page {
         self.messages().find(|e| e.id == Some(at)).map(|e| e.seq)
     }
 
-    pub const KEYS: &str = "↑↓ select · i reply · y copy · o open file · ] next file · + react · p pin · m mute · e archive · d done · z snooze · t tree · S TL;DR · x cancel · a A r answer a tool request · End latest · Esc back";
+    pub const KEYS: &str = "↑↓ select · i reply · > reply to selected · y copy · o open file · ] next file · + react · p pin · m mute · e archive · d done · z snooze · t tree · S TL;DR · x cancel · a A r answer a tool request · End latest · Esc back";
 
     /// The messages shown, in the order stored.
     fn messages(&self) -> impl DoubleEndedIterator<Item = &Entry> {
@@ -99,6 +101,16 @@ impl Page {
             Some(seq) => messages.find(|e| e.seq == seq),
             None => messages.last(),
         }
+    }
+
+    /// Where `>` leads: the bar open to reply to the selected message, quoting it, and @mentioning its author when an
+    /// ant; none for a message with no id or author, or sealed and not opened.
+    fn quote(&self, data: &Data) -> Option<To> {
+        let e = self.selection().filter(|e| crate::tui::dm::unopened(e.sealed).is_none())?;
+        let (id, from) = (e.id?, e.from.clone()?);
+        let quoted = Quoted { id, quote: Quote::new(from.clone(), &e.text) };
+        let mention = (!data.is_human(&from)).then_some(from);
+        Some(To::Quote(self.history.thread.clone(), quoted, mention))
     }
 
     /// The message whose attachments `o` opens: the selected one, else the latest carrying any.
@@ -171,6 +183,7 @@ impl Page {
             Key::End => self.selected = None,
             Key::Char('y') => return self.selection().map(|e| To::Do(Action::Copy(e.text.clone()))),
             Key::Char('+') => return self.selection().and_then(|e| e.id).map(To::React),
+            Key::Char('>') => return self.quote(data),
             Key::Char('p') => return change(Change::Pin(!flags.pinned)),
             Key::Char('m') => return change(Change::Mute(!flags.muted)),
             Key::Char('e') => return change(Change::Archive(!flags.archived)),
@@ -684,6 +697,22 @@ mod tests {
         assert!(shown[from + 5].ends_with("dev-a → dev-b  check retry.rs"), "one line on its heading");
         assert!(shown[from + 6].ends_with("dev-b → notes"), "{shown:#?}");
         assert_eq!(shown[from + 7..from + 10], ["│            Found", "│", "│            in two places"]);
+    }
+
+    #[test]
+    fn a_quoted_reply_shows_the_message_it_replies_to_above_its_text() {
+        let thread = ThreadId::generate();
+        let m = model();
+        let mut reply = message(2, &thread, "alice", "dev-b", "why **that** one?");
+        reply.quote = Some(Quote::new(crate::live::tests::user("dev-a"), "picked dev-b for the deploy"));
+        let entries = vec![message(1, &thread, "dev-a", "alice", "picked dev-b for the deploy"), reply];
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(entries)).unwrap();
+        let shown = screen(&page, &m, 80, at(40));
+        let shown: Vec<&str> = shown.lines().map(|l| l.trim_end_matches('│').trim_end()).collect();
+        let from = shown.iter().position(|l| l.contains("alice → dev-b")).unwrap();
+        let quoted = "│  ↪ replying to dev-a: picked dev-b for the deploy";
+        assert_eq!(shown[from + 1..from + 3], [quoted, "│  why that one?"], "{shown:#?}");
     }
 
     #[test]

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ants_daemon::{bus, reactions};
-use ants_proto::{ChannelId, Choice, EscalationReason, JsDomain, Reaction, ThreadId, UserId, Uuid};
+use ants_proto::{ChannelId, Choice, EscalationReason, JsDomain, Quote, Reaction, ThreadId, UserId, Uuid};
 use anyhow::{Result, anyhow};
 use async_nats::jetstream;
 use futures::future::LocalBoxFuture;
@@ -47,31 +47,44 @@ impl Ctx {
     }
 }
 
+/// The message or post a send replies to, quoting it ([`Envelope::quoting`]).
+///
+/// [`Envelope::quoting`]: ants_proto::Envelope::quoting
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Quoted {
+    pub id: Uuid,
+    pub quote: Quote,
+}
+
 /// What the bar asks to be done.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Job {
-    /// Send `text` to `to` as `ants ask` does, on `thread` or a new one.
+    /// Send `text` to `to` as `ants ask` does, on `thread` or a new one, quoting the message it replies to if any.
     Ask {
         to: UserId,
         thread: Option<ThreadId>,
         text: String,
+        quote: Option<Quoted>,
     },
     /// Send `text`, which names no one, on a new thread as `ants ask` does: to the human's assistant, else the
     /// messenger ([`send::unaddressed`]).
     Unaddressed {
         text: String,
     },
-    /// Post `text` to `channel` as `ants post` does, on `thread` or a new one.
+    /// Post `text` to `channel` as `ants post` does, on `thread` or a new one, quoting the post or message it replies
+    /// to if any.
     Post {
         channel: ChannelId,
         thread: Option<ThreadId>,
         text: String,
+        quote: Option<Quoted>,
     },
     /// Reply `text` on `thread` to the ant that last messaged the human there ([`reply_to`]), else to the other human
-    /// ([`dm_with`]), else as [`Job::Unaddressed`] does.
+    /// ([`dm_with`]), else as [`Job::Unaddressed`] does; quoting the message it replies to if any.
     Reply {
         thread: ThreadId,
         text: String,
+        quote: Option<Quoted>,
     },
     /// Send `text` to the ant stuck on `thread` ([`stuck`]), which the human's message gives fresh turns.
     Grant {
@@ -205,13 +218,13 @@ impl Job {
             job => (job, Rc::from([])),
         };
         match job {
-            Self::Ask { to, thread, text } => ask(ctx, to.into(), thread, text, &files).await,
+            Self::Ask { to, thread, text, quote } => ask(ctx, to.into(), thread, text, quote, &files).await,
             Self::Unaddressed { text } => {
                 let to = send::unaddressed(&ctx.js, &ctx.me, ctx.account.as_deref()).await;
-                ask(ctx, to, None, text, &files).await
+                ask(ctx, to, None, text, None, &files).await
             }
-            Self::Post { channel, thread, text } => post(ctx, channel, thread, text, &files).await,
-            Self::Reply { thread, text } => {
+            Self::Post { channel, thread, text, quote } => post(ctx, channel, thread, text, quote, &files).await,
+            Self::Reply { thread, text, quote } => {
                 let entries = thread::history(&ctx.js, &thread, None, thread::Activity::None, None).await?;
                 let humans = humans::load(&ctx.js, &ctx.me).await;
                 let human = |u: &UserId| humans.contains(u);
@@ -220,12 +233,12 @@ impl Job {
                     Some(to) => to.into(),
                     None => send::unaddressed(&ctx.js, &ctx.me, ctx.account.as_deref()).await,
                 };
-                ask(ctx, to, Some(thread), text, &files).await
+                ask(ctx, to, Some(thread), text, quote, &files).await
             }
             Self::Grant { thread, text } => {
                 let entries = thread::history(&ctx.js, &thread, None, thread::Activity::None, None).await?;
                 let ant = stuck(&entries).ok_or_else(|| anyhow!("no ant is stuck on thread {thread}"))?;
-                ask(ctx, ant.into(), Some(thread), text, &files).await
+                ask(ctx, ant.into(), Some(thread), text, None, &files).await
             }
             Self::Restart { ant, now } => {
                 let admin = ctx.admin.as_ref().map_err(|e| anyhow!("{e}"))?;
@@ -313,10 +326,21 @@ fn outbox(stored: bus::Stored) -> Vec<String> {
 }
 
 /// Send `text` to `to` on `thread`, or a new one, as `ants ask` does, with the warnings it prints for an ant no daemon
-/// serves now; `files` go with it, stored before it as `ants ask --attach` stores them.
-async fn ask(ctx: &Ctx, to: send::Recipient, thread: Option<ThreadId>, text: String, files: &[File]) -> Result<Done> {
+/// serves now; quoting the message it replies to if any; `files` go with it, stored before it as `ants ask --attach`
+/// stores them.
+async fn ask(
+    ctx: &Ctx,
+    to: send::Recipient,
+    thread: Option<ThreadId>,
+    text: String,
+    quote: Option<Quoted>,
+    files: &[File],
+) -> Result<Done> {
     let new = thread.is_none();
     let mut envelope = send::ask_envelope(&ctx.me, thread, to.to.clone(), text);
+    if let Some(q) = quote {
+        envelope = envelope.quoting(q.id, q.quote);
+    }
     envelope.attachments = attachments::references(files);
     // Sealed to a human, what is stored is each file's ciphertext.
     let mut stored = files.to_vec();
@@ -332,11 +356,21 @@ async fn ask(ctx: &Ctx, to: send::Recipient, thread: Option<ThreadId>, text: Str
     })
 }
 
-/// Post `text` to `channel` on `thread`, or a new one, as `ants post` does, with the warnings it prints; `files` go with
-/// it, stored before it as `ants post --attach` stores them.
-async fn post(ctx: &Ctx, channel: ChannelId, thread: Option<ThreadId>, text: String, files: &[File]) -> Result<Done> {
+/// Post `text` to `channel` on `thread`, or a new one, as `ants post` does, with the warnings it prints; quoting the
+/// post or message it replies to if any; `files` go with it, stored before it as `ants post --attach` stores them.
+async fn post(
+    ctx: &Ctx,
+    channel: ChannelId,
+    thread: Option<ThreadId>,
+    text: String,
+    quote: Option<Quoted>,
+    files: &[File],
+) -> Result<Done> {
     let new = thread.is_none();
     let mut posting = send::Posting::compose(&ctx.js, &ctx.me, channel, thread, text).await?;
+    if let Some(q) = quote {
+        posting.post = posting.post.quoting(q.id, q.quote);
+    }
     posting.post.attachments = attachments::references(files);
     attachments::store(&ctx.js, files, |id| posting.post.attachment_handle(id)).await?;
     let (stored, notified) = posting.deliver(&ctx.js, &ctx.me).await?;
@@ -464,9 +498,10 @@ mod tests {
         std::fs::write(&source, b"soup").unwrap();
         let files: Rc<[File]> = attachments::read_all(std::slice::from_ref(&source)).unwrap().into();
 
-        let ask = Job::Ask { to: bob.clone(), thread: None, text: "lunch?".into() };
+        let ask = Job::Ask { to: bob.clone(), thread: None, text: "lunch?".into(), quote: None };
         let thread = Box::pin(ask.run(&ctx)).await.unwrap().open.unwrap();
-        let reply = Job::Reply { thread: thread.clone(), text: "at noon".into() };
+        let quote = Quoted { id: Uuid::now_v7(), quote: Quote::new(alice.clone(), "lunch?") };
+        let reply = Job::Reply { thread: thread.clone(), text: "at noon".into(), quote: Some(quote.clone()) };
         let reply = Job::Attached { job: Box::new(reply), files };
         let line = Box::pin(reply.run(&ctx)).await.unwrap().line;
         assert_eq!(line, format!("sent to bob on thread {thread} with 1 file"));
@@ -474,13 +509,14 @@ mod tests {
         Box::pin(title.run(&ctx)).await.unwrap();
 
         let unread = crate::inbox::Inbox::open(&bob_js, &bob).await.unwrap().unread(&Default::default()).await.unwrap();
-        assert!(unread.iter().all(|e| e.sealed.is_some() && e.text.is_empty()), "{unread:?}");
+        assert!(unread.iter().all(|e| e.sealed.is_some() && e.text.is_empty() && e.quote.is_none()), "{unread:?}");
         let keyring = crate::sealed::Keyring::load(&nats[1], &bob_js).await.unwrap();
         let texts: Vec<String> = unread.into_iter().map(|e| crate::sealed::read(e, Some(&keyring)).0.text).collect();
         assert_eq!(texts, ["lunch?", "at noon"]);
         let keyring = Arc::new(keyring);
         let entries =
             thread::history(&bob_js, &thread, None, thread::Activity::None, Some(Arc::clone(&keyring))).await.unwrap();
+        assert_eq!(entries[1].quote, Some(quote.quote), "the quote is sealed with the text");
         let [listed] = &entries[1].attachments[..] else { panic!("{entries:?}") };
         assert!(listed.attachment.sealed.is_some(), "{listed:?}");
         assert_eq!((listed.attachment.name.as_str(), listed.size()), ("menu.txt", 4));
@@ -539,7 +575,7 @@ mod tests {
         let meta = Err("unused".into());
         let admin = Err("unused".into());
         let ctx = Ctx { client, js: js.clone(), me, domain: None, meta, sealing, account: None, keyring: None, admin };
-        let ask = Job::Ask { to: user("dev-a"), thread: None, text: "see the plan".into() };
+        let ask = Job::Ask { to: user("dev-a"), thread: None, text: "see the plan".into(), quote: None };
         let done = Job::Attached { job: Box::new(ask), files: Rc::clone(&files) }.run(&ctx).await.unwrap();
         assert!(
             done.line.starts_with("sent to dev-a on thread ") && done.line.ends_with(" with 1 file"),

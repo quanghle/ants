@@ -64,6 +64,11 @@ pub(crate) enum Command {
         #[arg(long, value_name = "THREAD")]
         #[arg(add = ArgValueCandidates::new(completions::threads))]
         thread: Option<thread::Pick>,
+        /// Reply to this message or post, quoting its author and an excerpt of it: its id, or with a human's
+        /// credentials a unique start of one, as `ants react` takes. The message goes on that message's thread and,
+        /// without @ant, to its author unless the CLI's human wrote it.
+        #[arg(long, value_name = "MESSAGE", add = ArgValueCompleter::new(completions::messages))]
+        reply_to: Option<thread::MessagePick>,
         #[command(flatten)]
         sending: Sending,
         #[command(flatten)]
@@ -158,6 +163,11 @@ pub(crate) enum Command {
         #[arg(long, value_name = "THREAD")]
         #[arg(add = ArgValueCandidates::new(completions::threads))]
         thread: Option<thread::Pick>,
+        /// Reply to this post or message on a thread of the channel, quoting its author and an excerpt of it: its id,
+        /// or with a human's credentials a unique start of one, as `ants react` takes. The post goes on that thread;
+        /// an @mention in the text still picks whom it wakes.
+        #[arg(long, value_name = "MESSAGE", add = ArgValueCompleter::new(completions::messages))]
+        reply_to: Option<thread::MessagePick>,
         #[command(flatten)]
         replies: Replies,
         #[command(flatten)]
@@ -601,6 +611,17 @@ mod tests {
         let cli = Cli::try_parse_from(["ants", "notes", "t1"]).unwrap();
         assert_matches!(cli.command.unwrap(), Command::Notes { text, .. } if text.is_empty());
         assert!(Cli::try_parse_from(["ants", "plan", "t1"]).is_err());
+    }
+
+    #[test]
+    fn ask_and_post_reply_to_a_message() {
+        let id = Uuid::now_v7();
+        let cli = Cli::try_parse_from(["ants", "ask", "--reply-to", &id.to_string(), "ship", "it"]).unwrap();
+        assert_matches!(cli.command.unwrap(), Command::Ask { reply_to: Some(thread::MessagePick::Id(m)), .. } if m == id);
+        let cli = Cli::try_parse_from(["ants", "post", "--reply-to", "019a-", "ops", "deploy?"]).unwrap();
+        assert_matches!(cli.command.unwrap(), Command::Post { reply_to: Some(thread::MessagePick::Prefix(p)), .. }
+            if p == "019a-");
+        assert!(Cli::try_parse_from(["ants", "ask", "--reply-to", "t1", "hi"]).is_err(), "no message id");
     }
 
     #[test]

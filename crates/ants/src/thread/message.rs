@@ -1,7 +1,9 @@
 //! The MESSAGE of `ants react`: a whole message id, or a unique start of one among the messages a human can read
-//! back.
+//! back; and the message an id names, which `--reply-to` quotes ([`find`]).
 
 use std::collections::HashSet;
+
+use ants_daemon::channel::CLOCK_SLACK;
 
 use super::pick::{own_subjects, scan_made};
 use super::*;
@@ -54,6 +56,30 @@ impl MessagePick {
         any.reverse();
         select_any(&any, &own, &prefix, &me.id)
     }
+}
+
+/// The message or post `id` names, a sealed one opened with `keyring`, read back from when its time-ordered id was made,
+/// less the clocks' skew, up to [`LATE`] after; None when none is kept, or only a forged one.
+pub async fn find(js: &jetstream::Context, id: Uuid, keyring: Option<Arc<sealed::Keyring>>) -> Result<Option<Entry>> {
+    let Some((secs, nanos)) = id.get_timestamp().map(|t| t.to_unix()) else { return Ok(None) };
+    let made = SystemTime::UNIX_EPOCH + Duration::new(secs, nanos);
+    let from = made.checked_sub(CLOCK_SLACK).unwrap_or(made);
+    let start = consumer::DeliverPolicy::ByStartTime { start_time: from.into() };
+    let mut parser = Parser::opening(keyring);
+    let mut found = None;
+    reading::read_back_awaiting(js, "", Reading::Gets, subject::ALL, start, async |seq, stored, msg| {
+        if stored > made + LATE {
+            return ControlFlow::Break(());
+        }
+        let entry = parser.read(seq, stored.into(), &msg.subject, &msg.payload).await;
+        if let Some(entry) = entry.filter(|e| e.id == Some(id) && !e.forged) {
+            found = Some(entry);
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    })
+    .await?;
+    Ok(found)
 }
 
 /// The messages to or from `user` ([`own_subjects`]) stored in the last [`RECENT`] that have an id, each once, most

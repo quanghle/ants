@@ -56,6 +56,26 @@ async fn a_human_s_summary_request_is_prompted_as_one_and_the_reply_carries_it_w
 }
 
 #[tokio::test]
+async fn a_quoted_reply_is_prompted_after_its_quote() {
+    let Some((bus, mut to_human)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let quote = ants_proto::Quote::new("dev-b".parse().unwrap(), "the build fails on main");
+    let envelope = Envelope::on_thread(ThreadId::generate(), UserId::human(), bus.dev.clone(), "why?")
+        .quoting(Uuid::now_v7(), quote);
+    bus::publish_json(&bus.js, envelope.subject(), &envelope, None).await.unwrap();
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        next_envelope(&mut to_human).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    let prompts = log.locked().prompts.clone();
+    assert_eq!(prompts, ["[ants] In reply to dev-b: \"the build fails on main\"\nwhy?"]);
+}
+
+#[tokio::test]
 async fn progress_streams_to_the_status_subject() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
     let (launch, _, _) = fake::launch();

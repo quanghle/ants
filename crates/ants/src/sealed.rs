@@ -318,7 +318,7 @@ pub async fn read_title(mut title: ThreadTitle, keyring: Option<&Keyring>) -> Th
     title
 }
 
-/// `envelope` as `keyring` reads it, with what it made of it if sealed: opened, its text, suggested title and
+/// `envelope` as `keyring` reads it, with what it made of it if sealed: opened, its text, suggested title, quote and
 /// attachments put back; else its text the placeholder its state shows ([`State::placeholder`]). Either way no longer
 /// sealed. Without a keyring, every sealed message is unreadable.
 pub fn read(mut envelope: Envelope, keyring: Option<&Keyring>) -> (Envelope, Option<State>) {
@@ -329,11 +329,13 @@ pub fn read(mut envelope: Envelope, keyring: Option<&Keyring>) -> (Envelope, Opt
     let state = opening.state();
     envelope.sealed = None;
     envelope.title = None;
+    envelope.quote = None;
     envelope.attachments = Vec::new();
     match opening {
         Opening::Opened(body) => {
             envelope.text = body.text;
             envelope.title = body.title;
+            envelope.quote = body.quote;
             envelope.attachments = body.attachments;
         }
         _ => envelope.text = state.placeholder().to_owned(),
@@ -775,7 +777,9 @@ mod tests {
         let attach = attachments::Attach { paths: vec![dir.join("plan.md")] };
         let words = vec!["@bob".to_owned(), "the plan".to_owned()];
         let (sending, replies, input) = (Default::default(), Default::default(), Default::default());
-        Box::pin(crate::cmd::send::ask(&nats[0], None, sending, &replies, &input, &attach, words)).await.unwrap();
+        Box::pin(crate::cmd::send::ask(&nats[0], Default::default(), sending, &replies, &input, &attach, words))
+            .await
+            .unwrap();
 
         let unread = crate::inbox::Inbox::open(&js[1], &bob).await.unwrap().unread(&Default::default()).await.unwrap();
         let [got] = unread.as_slice() else { panic!("not one message: {unread:?}") };
