@@ -1,27 +1,34 @@
 #![allow(clippy::too_many_lines)]
 
 use std::assert_matches;
+use std::time::Duration;
 
-use ants_daemon::bus;
 use ants_daemon::channel::{Channels, Earlier, Reading, Threads};
 use ants_daemon::colony::Registration;
+use ants_daemon::config::registration::{GithubAccount, Grant};
+use ants_daemon::creds::{Finding, Kind as CredsKind};
 use ants_daemon::daemon::Claims;
 use ants_daemon::dead::{self, Attempt};
 use ants_daemon::direct_kv::DirectKv;
 use ants_daemon::humans::Registry;
 use ants_daemon::webhooks::Webhooks;
-use ants_daemon::{notes, owners};
+use ants_daemon::{bus, notes, owners};
 use ants_proto::{
-    ChannelEntry, ChannelId, ChannelPost, ColonyEntry, DeadLetter, Destination, Envelope, NotesPost, STREAM, ThreadId,
-    attempt_key, chan_consumer, chan_reader, inbox_prefix, link_key, notes_consumer, session_key, subject,
+    ChannelEntry, ChannelId, ChannelPost, ColonyEntry, DeadLetter, Destination, Envelope, JsDomain, Machine, NotesPost,
+    PERMISSIONS_VERSION, STREAM, ThreadId, attempt_key, chan_consumer, chan_reader, inbox_prefix, link_key,
+    notes_consumer, session_key, subject,
 };
 use async_nats::jetstream::AckKind;
 use async_nats::{Client, jetstream};
+use data_encoding::BASE64URL_NOPAD;
 use futures::{StreamExt as _, TryStreamExt as _};
+use nkeys::XKey;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
+use super::uplink::allowed;
 use super::*;
+use crate::members::EnrollApprover;
 use crate::test_support::Server;
 
 mod channels;

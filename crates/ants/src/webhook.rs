@@ -18,41 +18,45 @@
 //! answered at `<path>/_approval` ([`crate::notify`]).
 //!
 //! The server speaks plain HTTP, for a TLS-terminating reverse proxy in front of it.
+//!
+//! [`WEBHOOKS_BUCKET`]: ants_proto::WEBHOOKS_BUCKET
 
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
-use ants_daemon::direct_kv::DirectKv;
+use ants_daemon::bus;
 use ants_daemon::metrics::{self, Exposition, Kind};
-use ants_daemon::schedule::Mentions;
 use ants_daemon::sync::{MutexExt as _, RwLockExt as _};
-use ants_daemon::{bus, owners};
-use ants_proto::{
-    CHANNELS_BUCKET, ChannelEntry, ChannelId, ChannelPost, Destination, Envelope, JsDomain, SERVING_EVERY, ThreadId,
-    UserId, WEBHOOKS_BUCKET, subject, webhook_marker_key, webhook_seen_key,
-};
-use anyhow::{Context as _, Result, anyhow, bail};
-use async_nats::jetstream;
-use async_nats::jetstream::stream::DirectGetErrorKind;
-use data_encoding::{BASE64, HEXLOWER, HEXLOWER_PERMISSIVE};
+use ants_proto::{JsDomain, ThreadId, UserId, webhook_seen_key};
+use anyhow::Result;
 use http_body_util::{BodyExt as _, Full};
 use hyper::body::{Bytes, Incoming};
-use hyper::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode, header};
+use hyper::http::{HeaderName, HeaderValue, Method, Request, Response, StatusCode, header};
 use hyper_util::rt::{TokioIo, TokioTimer};
-use ring::{digest, hmac};
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 use tokio::net::TcpListener;
 use tokio::sync::{OnceCell, Semaphore, mpsc, watch};
 use tokio::task::{AbortHandle, JoinSet};
 
+use self::config::Auth;
+use self::requests::{Event, Refusal, refuse};
 use crate::notify;
 use crate::serve::Ended;
+
+pub use self::config::{Config, SecretSource, Webhook, outline};
+pub(crate) use self::config::{Listing, check_creds, read_secret, signing_key};
+#[cfg(test)]
+pub use self::delivery::ensure_bucket;
+pub(crate) use self::delivery::{Bus, Delivered, Delivery};
+
+mod config;
+mod delivery;
+mod requests;
 
 /// Where `ants webhook serve` listens unless told otherwise: loopback, behind the reverse proxy.
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8424";
@@ -91,694 +95,7 @@ pub fn default_path() -> Result<PathBuf> {
     Ok(ants_daemon::config::default_path()?.with_file_name("webhooks.toml"))
 }
 
-/// The bucket of delivered events ([`WEBHOOKS_BUCKET`]), created when missing and the credentials allow it (a
-/// human's), as `ants init` does.
-#[cfg(test)]
-pub async fn ensure_bucket(js: &jetstream::Context) -> Result<jetstream::kv::Store> {
-    if let Ok(store) = js.get_key_value(WEBHOOKS_BUCKET).await {
-        return Ok(store);
-    }
-    js.create_key_value(ants_daemon::hub::webhooks_config())
-        .await
-        .context("creating the webhooks bucket (with credentials, `ants init` as a human creates it)")
-}
-
-// ---- config ----------------------------------------------------------------------------------------------------
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct File {
-    listen: Option<String>,
-    metrics: Option<SocketAddr>,
-    path: Option<String>,
-    nats: Option<String>,
-    js_domain: Option<JsDomain>,
-    public_url: Option<String>,
-    action_secret_env: Option<String>,
-    action_secret_file: Option<PathBuf>,
-    /// The time zone of the humans' quiet hours, unless one names its own.
-    timezone: Option<String>,
-    #[serde(default, rename = "webhook")]
-    webhooks: Vec<Entry>,
-    #[serde(default, rename = "human")]
-    humans: Vec<notify::HumanEntry>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Entry {
-    name: UserId,
-    creds: Option<PathBuf>,
-    auth: AuthKind,
-    secret_env: Option<String>,
-    secret_file: Option<PathBuf>,
-    signature_header: Option<String>,
-    token_header: Option<String>,
-    tolerance: Option<String>,
-    id: Option<String>,
-    ant: Option<UserId>,
-    channel: Option<ChannelId>,
-    mention: Option<Vec<UserId>>,
-    #[serde(default)]
-    broadcast: bool,
-    owner: Option<UserId>,
-    text: Option<String>,
-    allow: Option<Vec<String>>,
-}
-
-#[derive(Deserialize, Clone, Copy)]
-#[serde(rename_all = "kebab-case")]
-enum AuthKind {
-    HmacSha256,
-    Bearer,
-    Token,
-    StandardWebhooks,
-}
-
-/// The config file of `ants webhook serve`, checked.
-pub struct Config {
-    pub listen: Option<String>,
-    /// Where to serve health and metrics, if anywhere.
-    pub metrics: Option<SocketAddr>,
-    /// Requests go to `<path>/<webhook>`.
-    pub path: String,
-    pub nats: Option<String>,
-    pub js_domain: Option<JsDomain>,
-    pub webhooks: Vec<Webhook>,
-    /// The humans to notify.
-    pub humans: Vec<notify::Human>,
-    /// Signs and checks approval links, with `public_url`.
-    pub links: Option<notify::Links>,
-}
-
-/// One `[[webhook]]`.
-#[derive(PartialEq)]
-pub struct Webhook {
-    pub name: UserId,
-    pub creds: Option<PathBuf>,
-    auth: Auth,
-    id: IdSource,
-    pub destination: Destination,
-    mentions: Mentions,
-    owner: Option<UserId>,
-    text: Vec<Piece>,
-    /// The tool rules the threads it starts are narrowed to; None for [`ants_proto::WEBHOOK_ALLOW`].
-    allow: Option<Vec<String>>,
-}
-
-#[derive(PartialEq)]
-enum Auth {
-    /// The hex of the body's HMAC-SHA256, keyed with the secret, in the header, after `sha256=` or alone.
-    Hmac { secret: String, header: HeaderName },
-    /// `Authorization: Bearer <token>`.
-    Bearer(String),
-    /// The token alone in the header, such as GitLab's `X-Gitlab-Token`.
-    Token { secret: String, header: HeaderName },
-    /// [Standard Webhooks](https://www.standardwebhooks.com), such as GitLab's signing token: `webhook-signature`
-    /// lists `v1,<base64>` HMAC-SHA256 signatures of `<webhook-id>.<webhook-timestamp>.<body>`, keyed with the
-    /// secret's base64 after `whsec_`, one of which must match, and the timestamp is within `tolerance` of now.
-    Standard { key: Vec<u8>, tolerance: Duration },
-}
-
-#[derive(Debug, PartialEq)]
-enum IdSource {
-    Header(HeaderName),
-    Json(String),
-    BodySha256,
-}
-
-#[derive(Debug, PartialEq)]
-enum Piece {
-    Text(String),
-    Body,
-    Id,
-    Webhook,
-    Header(HeaderName),
-    Json(String),
-}
-
-impl Config {
-    /// Read and check the config file at `path`, and the credentials of each webhook against its destination.
-    pub fn load(path: &Path) -> Result<Self> {
-        let config = Self::read(path)?;
-        for hook in &config.webhooks {
-            hook.check_creds().with_context(|| format!("webhook config {}", path.display()))?;
-        }
-        for human in &config.humans {
-            human.check_creds().with_context(|| format!("webhook config {}: human {}", path.display(), human.name))?;
-        }
-        Ok(config)
-    }
-
-    /// Read and check the config file at `path`, reading each secret, without looking at credentials.
-    pub fn read(path: &Path) -> Result<Self> {
-        let text =
-            std::fs::read_to_string(path).with_context(|| format!("reading webhook config {}", path.display()))?;
-        let home = std::env::home_dir().context("no home directory")?;
-        Self::parse(&text, &std::path::absolute(path)?, &home, |name| std::env::var(name).ok())
-    }
-
-    /// Parse the text of the config file at `path`: expand `~` to `home`, resolve relative paths against the file's
-    /// directory and read each secret, from `env` or its file.
-    pub(crate) fn parse(text: &str, path: &Path, home: &Path, env: impl Fn(&str) -> Option<String>) -> Result<Self> {
-        let shown = path.display();
-        let file: File = toml::from_str(text).with_context(|| format!("parsing webhook config {shown}"))?;
-        let resolve = resolver(path, home);
-        let path = file.path.as_deref().unwrap_or(DEFAULT_PATH).trim_end_matches('/').to_owned();
-        if !path.is_empty() && !path.starts_with('/') {
-            bail!("webhook config {shown}: path {path:?} must start with /");
-        }
-        if file.webhooks.is_empty() && file.humans.is_empty() {
-            bail!("webhook config {shown}: no [[webhook]] or [[human]] entries: nothing to serve");
-        }
-        if let Some(url) = &file.nats {
-            bus::check_url(url).with_context(|| format!("webhook config {shown}"))?;
-        }
-        let mut webhooks: Vec<Webhook> = Vec::with_capacity(file.webhooks.len());
-        for entry in file.webhooks {
-            let name = entry.name.clone();
-            if webhooks.iter().any(|w| w.name == name) {
-                bail!("webhook config {shown}: webhook {name} is listed twice");
-            }
-            let hook = Webhook::from_entry(entry, &resolve, &env)
-                .with_context(|| format!("webhook config {shown}: webhook {name}"))?;
-            webhooks.push(hook);
-        }
-        let timezone = file
-            .timezone
-            .as_deref()
-            .map(ants_daemon::schedule::time_zone)
-            .transpose()
-            .with_context(|| format!("webhook config {shown}"))?;
-        let mut humans: Vec<notify::Human> = Vec::with_capacity(file.humans.len());
-        for entry in file.humans {
-            let human = notify::Human::from_entry(entry, timezone.as_ref(), &resolve, &env)
-                .with_context(|| format!("webhook config {shown}: human"))?;
-            let name = &human.name;
-            if humans.iter().any(|h| &h.name == name) {
-                bail!("webhook config {shown}: human {name} is listed twice");
-            }
-            if webhooks.iter().any(|w| &w.name == name) {
-                bail!("webhook config {shown}: {name} is both a webhook and a human");
-            }
-            humans.push(human);
-        }
-        let secret = match (&file.action_secret_env, &file.action_secret_file) {
-            (Some(var), None) => Some(
-                env(var).with_context(|| format!("webhook config {shown}: environment variable {var} is not set"))?,
-            ),
-            (None, Some(file)) => Some(read_secret(&resolve(file)).with_context(|| format!("webhook config {shown}"))?),
-            (None, None) => None,
-            _ => bail!("webhook config {shown}: give at most one of action_secret_env and action_secret_file"),
-        };
-        let links = match (file.public_url, secret) {
-            (None, None) => None,
-            (Some(_), _) | (_, Some(_)) if humans.is_empty() => {
-                bail!("webhook config {shown}: public_url and the action secret go with [[human]] entries")
-            }
-            (Some(url), Some(secret)) => {
-                Some(notify::Links::new(&url, secret.trim()).with_context(|| format!("webhook config {shown}"))?)
-            }
-            (Some(_), None) => {
-                bail!("webhook config {shown}: public_url needs action_secret_file or action_secret_env")
-            }
-            (None, Some(_)) => bail!("webhook config {shown}: the action secret needs public_url"),
-        };
-        let (listen, metrics, nats, js_domain) = (file.listen, file.metrics, file.nats, file.js_domain);
-        Ok(Self { listen, metrics, path, nats, js_domain, webhooks, humans, links })
-    }
-}
-
-/// Paths of the config file at `path` resolved: `~` expanded to `home`, relative ones against the file's directory.
-fn resolver<'a>(path: &'a Path, home: &'a Path) -> impl Fn(&Path) -> PathBuf + 'a {
-    let base = path.parent().unwrap_or(Path::new("."));
-    move |p: &Path| match p.strip_prefix("~") {
-        Ok(rest) => home.join(rest),
-        Err(_) => base.join(p),
-    }
-}
-
-/// Where a secret of the config file comes from.
-#[derive(Debug, PartialEq, Eq)]
-pub enum SecretSource {
-    File(PathBuf),
-    Env(String),
-}
-
-/// What the config file at `path` names, without reading a secret.
-pub struct Outline {
-    /// What each secret is for and where it comes from.
-    pub secrets: Vec<(String, SecretSource)>,
-    /// What each exec sink is for and the program it runs, a path resolved or a name to find on `PATH`.
-    pub commands: Vec<(String, String)>,
-    pub public_url: Option<String>,
-}
-
-/// The config file at `path` parsed, its secrets left unread.
-pub fn outline(path: &Path) -> Result<Outline> {
-    let text = std::fs::read_to_string(path).with_context(|| format!("reading webhook config {}", path.display()))?;
-    let file: File = toml::from_str(&text).with_context(|| format!("parsing webhook config {}", path.display()))?;
-    let home = std::env::home_dir().context("no home directory")?;
-    let path = std::path::absolute(path)?;
-    let resolve = resolver(&path, &home);
-    let named = file
-        .webhooks
-        .iter()
-        .map(|w| (format!("webhook {}", w.name), w.secret_env.as_deref(), w.secret_file.as_deref()))
-        .chain(file.humans.iter().flat_map(notify::HumanEntry::secrets))
-        .chain([("action secret".to_owned(), file.action_secret_env.as_deref(), file.action_secret_file.as_deref())]);
-    let mut secrets = Vec::new();
-    for (what, env, file) in named {
-        if let Some(var) = env {
-            secrets.push((what.clone(), SecretSource::Env(var.to_owned())));
-        }
-        if let Some(file) = file {
-            secrets.push((what, SecretSource::File(resolve(file))));
-        }
-    }
-    let commands = file
-        .humans
-        .iter()
-        .flat_map(notify::HumanEntry::commands)
-        .map(|(what, program)| (what, notify::resolve_program(program, &resolve)))
-        .collect();
-    Ok(Outline { secrets, commands, public_url: file.public_url })
-}
-
-/// What `ants webhook add` reads of a config file's text: where it serves, and the webhooks it lists.
-pub(crate) struct Listing {
-    pub listen: Option<String>,
-    /// Requests go to `<path>/<webhook>`.
-    pub path: String,
-    pub public_url: Option<String>,
-    pub js_domain: Option<JsDomain>,
-    pub webhooks: Vec<UserId>,
-}
-
-impl Listing {
-    pub(crate) fn parse(text: &str) -> Result<Self> {
-        let file: File = toml::from_str(text)?;
-        Ok(Self {
-            listen: file.listen,
-            path: file.path.as_deref().unwrap_or(DEFAULT_PATH).trim_end_matches('/').to_owned(),
-            public_url: file.public_url,
-            js_domain: file.js_domain,
-            webhooks: file.webhooks.into_iter().map(|w| w.name).collect(),
-        })
-    }
-}
-
-impl Webhook {
-    fn from_entry(
-        entry: Entry,
-        resolve: &impl Fn(&Path) -> PathBuf,
-        env: &impl Fn(&str) -> Option<String>,
-    ) -> Result<Self> {
-        if entry.name.is_human() {
-            bail!("the default human is no webhook");
-        }
-        let secret = match (&entry.secret_env, &entry.secret_file) {
-            (Some(var), None) => env(var).with_context(|| format!("environment variable {var} is not set"))?,
-            (None, Some(file)) => read_secret(&resolve(file))?,
-            _ => bail!("give exactly one of secret_env and secret_file"),
-        };
-        let secret = secret.trim().to_owned();
-        if secret.is_empty() {
-            bail!("empty secret");
-        }
-        if entry.signature_header.is_some() && !matches!(entry.auth, AuthKind::HmacSha256) {
-            bail!("signature_header goes with auth = \"hmac-sha256\" only");
-        }
-        if entry.token_header.is_some() && !matches!(entry.auth, AuthKind::Token) {
-            bail!("token_header goes with auth = \"token\" only");
-        }
-        if entry.tolerance.is_some() && !matches!(entry.auth, AuthKind::StandardWebhooks) {
-            bail!("tolerance goes with auth = \"standard-webhooks\" only");
-        }
-        let auth = match entry.auth {
-            AuthKind::HmacSha256 => {
-                let header = entry.signature_header.as_deref().unwrap_or(DEFAULT_SIGNATURE_HEADER);
-                let header = HeaderName::from_bytes(header.as_bytes())
-                    .with_context(|| format!("signature_header {header:?}"))?;
-                Auth::Hmac { secret, header }
-            }
-            AuthKind::Bearer => Auth::Bearer(secret),
-            AuthKind::Token => {
-                let header = entry.token_header.as_deref().context("auth = \"token\" needs token_header")?;
-                let header =
-                    HeaderName::from_bytes(header.as_bytes()).with_context(|| format!("token_header {header:?}"))?;
-                Auth::Token { secret, header }
-            }
-            AuthKind::StandardWebhooks => {
-                let tolerance = match entry.tolerance.as_deref() {
-                    None => DEFAULT_TOLERANCE,
-                    Some(text) => {
-                        let tolerance = ants_proto::duration::parse(text).map_err(|e| anyhow!(e))?;
-                        if tolerance.is_zero() || tolerance > MAX_TOLERANCE {
-                            bail!("tolerance {text:?}: from 1s to {}", ants_proto::duration::format(MAX_TOLERANCE));
-                        }
-                        tolerance
-                    }
-                };
-                Auth::Standard { key: signing_key(&secret)?, tolerance }
-            }
-        };
-        let id = match entry.id.as_deref() {
-            None if matches!(auth, Auth::Standard { .. }) => IdSource::Header(WEBHOOK_ID),
-            None | Some("body-sha256") => IdSource::BodySha256,
-            Some(id) => match placeholder(id)? {
-                Piece::Header(name) => IdSource::Header(name),
-                Piece::Json(pointer) => IdSource::Json(pointer),
-                _ => bail!("id {id:?}: expected header:NAME, json:/POINTER or body-sha256"),
-            },
-        };
-        let destination = match (entry.ant, entry.channel) {
-            (Some(ant), None) => Destination::Ant(ant),
-            (None, Some(channel)) => Destination::Channel(channel),
-            _ => bail!("give exactly one of ant and channel"),
-        };
-        let mentions = match (entry.mention, entry.broadcast) {
-            (Some(_), true) => bail!("mention and broadcast exclude each other"),
-            (None, false) => Mentions::Nobody,
-            _ if matches!(destination, Destination::Ant(_)) => {
-                bail!("mention and broadcast go with a channel only")
-            }
-            (Some(mentions), false) => Mentions::Listed(mentions),
-            (None, true) => Mentions::Members,
-        };
-        let text = template(entry.text.as_deref().unwrap_or(DEFAULT_TEXT))?;
-        let creds = entry.creds.as_deref().map(resolve);
-        if let Some(allow) = &entry.allow {
-            ants_daemon::Allowlist::parse(allow)?;
-        }
-        let (owner, allow) = (entry.owner, entry.allow);
-        Ok(Self { name: entry.name, creds, auth, id, destination, mentions, owner, text, allow })
-    }
-
-    fn check_creds(&self) -> Result<()> {
-        check_creds("webhook", &self.name, self.creds.as_deref(), &self.destination)
-    }
-}
-
-/// Fail unless the credentials at `path`, if any, name `name`, the user a webhook or schedule (`kind`) sends as, are
-/// no human's and may send to `destination`.
-pub(crate) fn check_creds(kind: &str, name: &UserId, path: Option<&Path>, destination: &Destination) -> Result<()> {
-    let Some(path) = path else { return Ok(()) };
-    let text = std::fs::read_to_string(path).with_context(|| format!("reading credentials {}", path.display()))?;
-    let claims = crate::humans::creds_claims(&text).with_context(|| format!("credentials {}", path.display()))?;
-    let issue = |what: &str| {
-        let to = match destination {
-            Destination::Ant(ant) => format!("--to {ant}"),
-            Destination::Channel(channel) => format!("--channel {channel}"),
-        };
-        anyhow!("credentials {} {what}; issue them with `ants auth user {name} --webhook {to}`", path.display())
-    };
-    if claims["name"].as_str() != Some(name.as_str()) {
-        return Err(issue(&format!("are not {kind} {name}'s")));
-    }
-    if crate::humans::writes_humans(&claims) {
-        return Err(issue("are a human's"));
-    }
-    if !crate::humans::may_publish(&claims, &destination.subject(name)) {
-        return Err(issue("do not allow this destination"));
-    }
-    Ok(())
-}
-
-/// The HMAC key of a Standard Webhooks signing secret: its base64, after `whsec_`.
-pub(crate) fn signing_key(secret: &str) -> Result<Vec<u8>> {
-    let encoded = secret.strip_prefix("whsec_").unwrap_or(secret);
-    match BASE64.decode(encoded.as_bytes()) {
-        Ok(key) if !key.is_empty() => Ok(key),
-        _ => bail!("the secret is no Standard Webhooks signing secret: whsec_ and base64"),
-    }
-}
-
-pub(crate) fn read_secret(path: &Path) -> Result<String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let mode = std::fs::metadata(path).with_context(|| format!("secret_file {}", path.display()))?.permissions();
-        if mode.mode() & 0o077 != 0 {
-            bail!("secret_file {} is readable by others: chmod 600 it", path.display());
-        }
-    }
-    std::fs::read_to_string(path).with_context(|| format!("reading secret_file {}", path.display()))
-}
-
-/// The pieces of a `text` template: `{body}`, `{id}`, `{webhook}`, `{header:NAME}` and `{json:/POINTER}` between
-/// literal text; `{{` and `}}` are literal braces.
-fn template(text: &str) -> Result<Vec<Piece>> {
-    let mut pieces = Vec::new();
-    let mut literal = String::new();
-    let mut rest = text;
-    while let Some(i) = rest.find(['{', '}']) {
-        literal.push_str(&rest[..i]);
-        rest = &rest[i..];
-        if let Some(after) = rest.strip_prefix("{{").or_else(|| rest.strip_prefix("}}")) {
-            literal.push_str(&rest[..1]);
-            rest = after;
-            continue;
-        }
-        if rest.starts_with('}') {
-            bail!("text: a lone }}; write }}}} for a literal one");
-        }
-        let end = rest.find('}').context("text: a { without its }")?;
-        let piece = placeholder(&rest[1..end]).context("text")?;
-        if !literal.is_empty() {
-            pieces.push(Piece::Text(std::mem::take(&mut literal)));
-        }
-        pieces.push(piece);
-        rest = &rest[end + 1..];
-    }
-    literal.push_str(rest);
-    if !literal.is_empty() {
-        pieces.push(Piece::Text(literal));
-    }
-    Ok(pieces)
-}
-
-fn placeholder(name: &str) -> Result<Piece> {
-    Ok(match name {
-        "body" => Piece::Body,
-        "id" => Piece::Id,
-        "webhook" => Piece::Webhook,
-        _ => {
-            if let Some(header) = name.strip_prefix("header:") {
-                Piece::Header(HeaderName::from_bytes(header.as_bytes()).with_context(|| format!("{{{name}}}"))?)
-            } else if let Some(pointer) = name.strip_prefix("json:") {
-                if !pointer.is_empty() && !pointer.starts_with('/') {
-                    bail!("{{{name}}}: a JSON pointer starts with /");
-                }
-                Piece::Json(pointer.to_owned())
-            } else {
-                bail!("unknown placeholder {{{name}}}: expected body, id, webhook, header:NAME or json:/POINTER")
-            }
-        }
-    })
-}
-
-// ---- requests --------------------------------------------------------------------------------------------------
-
-/// A request refused, with its status and why.
-struct Refusal(StatusCode, String);
-
-fn refuse<T>(status: StatusCode, why: impl Into<String>) -> Result<T, Refusal> {
-    Err(Refusal(status, why.into()))
-}
-
-/// An authenticated event, ready to deliver.
-struct Event {
-    /// Hash of its id, in its key and `Nats-Msg-Id`.
-    hash: String,
-    text: String,
-}
-
-#[cfg(test)]
-impl Webhook {
-    /// Whether a request with `headers` and `body` gets through authentication.
-    pub(crate) fn accepts(&self, headers: &HeaderMap, body: &[u8]) -> bool {
-        self.authorized_before_body(headers) && self.authorized(headers, body)
-    }
-
-    /// The hash of the id and the text of the event in an authenticated request.
-    pub(crate) fn event_of(&self, headers: &HeaderMap, body: &[u8]) -> (String, String) {
-        let event = self.event(headers, body).ok().expect("an event");
-        (event.hash, event.text)
-    }
-}
-
-impl Webhook {
-    /// Whether the threads it starts are narrowed to fewer tools than all.
-    pub fn narrows(&self) -> bool {
-        self.allow.as_deref().is_none_or(|allow| !ants_daemon::harness::allows_all(allow))
-    }
-
-    fn authorized_before_body(&self, headers: &HeaderMap) -> bool {
-        match &self.auth {
-            Auth::Hmac { .. } => true,
-            Auth::Bearer(token) => headers
-                .get(header::AUTHORIZATION)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.strip_prefix("Bearer "))
-                .is_some_and(|given| crate::bridge::same(given.trim().as_bytes(), token.as_bytes())),
-            Auth::Token { secret, header } => headers
-                .get(header)
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|given| crate::bridge::same(given.trim().as_bytes(), secret.as_bytes())),
-            Auth::Standard { tolerance, .. } => {
-                headers.get(WEBHOOK_ID).is_some_and(|id| !id.is_empty())
-                    && headers.contains_key(WEBHOOK_SIGNATURE)
-                    && recent(headers, *tolerance, SystemTime::now())
-            }
-        }
-    }
-
-    fn authorized(&self, headers: &HeaderMap, body: &[u8]) -> bool {
-        match &self.auth {
-            Auth::Hmac { secret, header } => {
-                let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
-                let signature = headers
-                    .get(header)
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::trim)
-                    .map(|v| v.strip_prefix("sha256=").unwrap_or(v))
-                    .and_then(|hex| HEXLOWER_PERMISSIVE.decode(hex.as_bytes()).ok());
-                signature.is_some_and(|signature| hmac::verify(&key, body, &signature).is_ok())
-            }
-            Auth::Standard { key, .. } => {
-                let (Some(id), Some(timestamp), Some(signatures)) =
-                    (headers.get(WEBHOOK_ID), headers.get(WEBHOOK_TIMESTAMP), headers.get(WEBHOOK_SIGNATURE))
-                else {
-                    return false;
-                };
-                let mut signed = hmac::Context::with_key(&hmac::Key::new(hmac::HMAC_SHA256, key));
-                for part in [id.as_bytes(), b".", timestamp.as_bytes(), b".", body] {
-                    signed.update(part);
-                }
-                let expected = signed.sign();
-                String::from_utf8_lossy(signatures.as_bytes())
-                    .split_ascii_whitespace()
-                    .filter_map(|signature| signature.strip_prefix("v1,"))
-                    .filter_map(|signature| BASE64.decode(signature.as_bytes()).ok())
-                    .any(|signature| crate::bridge::same(&signature, expected.as_ref()))
-            }
-            Auth::Bearer(_) | Auth::Token { .. } => true,
-        }
-    }
-
-    /// The event in an authenticated request: its id and its text from the template.
-    fn event(&self, headers: &HeaderMap, body: &[u8]) -> Result<Event, Refusal> {
-        let wants_json = matches!(self.id, IdSource::Json(_)) || self.text.iter().any(|p| matches!(p, Piece::Json(_)));
-        let parsed = if wants_json {
-            match serde_json::from_slice::<Value>(body) {
-                Ok(value) => Some(value),
-                Err(e) => return refuse(StatusCode::BAD_REQUEST, format!("the body is no JSON: {e}")),
-            }
-        } else {
-            None
-        };
-        let id = match &self.id {
-            IdSource::BodySha256 => HEXLOWER.encode(digest::digest(&digest::SHA256, body).as_ref()),
-            IdSource::Header(name) => header_text(headers, name),
-            IdSource::Json(pointer) => parsed.as_ref().and_then(|v| v.pointer(pointer)).map_or_default(json_text),
-        };
-        if id.is_empty() {
-            return refuse(StatusCode::BAD_REQUEST, "the event has no id");
-        }
-        let mut text = String::new();
-        for piece in &self.text {
-            match piece {
-                Piece::Text(s) => text.push_str(s),
-                Piece::Body => match std::str::from_utf8(body) {
-                    Ok(body) => text.push_str(body),
-                    Err(_) => return refuse(StatusCode::UNSUPPORTED_MEDIA_TYPE, "the body is no UTF-8 text"),
-                },
-                Piece::Id => text.push_str(&id),
-                Piece::Webhook => text.push_str(self.name.as_str()),
-                Piece::Header(name) => text.push_str(&header_text(headers, name)),
-                Piece::Json(pointer) => {
-                    text.push_str(&parsed.as_ref().and_then(|v| v.pointer(pointer)).map_or_default(json_text));
-                }
-            }
-        }
-        let hash = HEXLOWER.encode(digest::digest(&digest::SHA256, id.as_bytes()).as_ref())[..ID_HASH_LEN].to_owned();
-        Ok(Event { hash, text })
-    }
-}
-
-/// Whether `webhook-timestamp`, in Unix seconds, is within `tolerance` of `now`, before or after it.
-fn recent(headers: &HeaderMap, tolerance: Duration, now: SystemTime) -> bool {
-    let Some(timestamp) = headers.get(WEBHOOK_TIMESTAMP).and_then(|v| v.to_str().ok()?.parse::<u64>().ok()) else {
-        return false;
-    };
-    let now = now.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
-    timestamp.abs_diff(now) <= tolerance.as_secs()
-}
-
-fn header_text(headers: &HeaderMap, name: &HeaderName) -> String {
-    headers.get(name).map_or_default(|v| String::from_utf8_lossy(v.as_bytes()).trim().to_owned())
-}
-
-/// A JSON value as text: a string as itself, null as nothing, anything else as JSON.
-fn json_text(value: &Value) -> String {
-    match value {
-        Value::String(s) => s.clone(),
-        Value::Null => String::new(),
-        other => other.to_string(),
-    }
-}
-
 // ---- server ----------------------------------------------------------------------------------------------------
-
-/// What [`WEBHOOKS_BUCKET`] keeps of a delivered event.
-#[derive(Serialize, Deserialize)]
-struct Seen {
-    thread: ThreadId,
-    seq: u64,
-}
-
-/// A webhook's, or a schedule's, connection to the hub, as itself.
-pub(crate) struct Bus {
-    pub(crate) client: async_nats::Client,
-    js: jetstream::Context,
-    js_domain: Option<JsDomain>,
-    /// Without stream info, which would list the events of every webhook.
-    seen: DirectKv,
-    /// What its marker holds: the version of ants this runs ([`ants_proto::Serving`]).
-    marker: Vec<u8>,
-    /// When it last put its marker.
-    marked: Arc<Mutex<Option<Instant>>>,
-    /// Puts the marker every [`SERVING_EVERY`].
-    keeper: tokio::task::JoinHandle<()>,
-}
-
-impl Drop for Bus {
-    fn drop(&mut self) {
-        self.keeper.abort();
-    }
-}
-
-/// An event to deliver, once.
-pub(crate) struct Delivery<'a> {
-    pub(crate) from: &'a UserId,
-    pub(crate) destination: &'a Destination,
-    pub(crate) mentions: &'a Mentions,
-    pub(crate) owner: Option<&'a UserId>,
-    /// The tool rules the thread is narrowed to ([`Envelope::allow`]).
-    pub(crate) allow: Option<&'a [String]>,
-    /// Its key in [`WEBHOOKS_BUCKET`] ([`webhook_seen_key`]).
-    pub(crate) key: String,
-    /// The stream's `Nats-Msg-Id` of the message.
-    pub(crate) message_id: String,
-    pub(crate) text: String,
-}
-
-/// The thread an event went to, if known, and whether it went there before.
-pub(crate) struct Delivered {
-    pub(crate) thread: Option<ThreadId>,
-    pub(crate) duplicate: bool,
-}
 
 struct Hook {
     config: Webhook,
@@ -998,8 +315,33 @@ impl Running {
         let links_changed = links != self.links;
         self.links = links;
 
+        self.apply_hooks(config.webhooks, hub_changed, tasks, failed);
+        self.apply_humans(config.humans, hub_changed || links_changed, tasks, failed);
+
+        let mut notified: Vec<_> = self.humans.values().map(|h| h.served.clone()).collect();
+        notified.sort_by(|a, b| a.config.name.cmp(&b.config.name));
+        let answers = self.links.clone().map(|links| notify::Answers {
+            humans: notified.iter().map(|human| (human.config.name.clone(), human.clone())).collect(),
+            links,
+        });
+        Routes {
+            prefix: format!("{}/", config.path),
+            hooks: self.hooks.iter().map(|(name, hook)| (name.to_string(), hook.served.clone())).collect(),
+            answers,
+            humans: notified,
+        }
+    }
+
+    /// Start the new `webhooks`, stop those gone, and restart those changed, or all of them when `hub_changed`.
+    fn apply_hooks(
+        &mut self,
+        webhooks: Vec<Webhook>,
+        hub_changed: bool,
+        tasks: &mut JoinSet<()>,
+        failed: &mpsc::UnboundedSender<anyhow::Error>,
+    ) {
         let mut hooks = HashMap::new();
-        for webhook in config.webhooks {
+        for webhook in webhooks {
             let name = webhook.name.clone();
             let creds = crate::serve::creds_snapshot(webhook.creds.as_deref());
             let outcomes = match self.hooks.remove(&name) {
@@ -1030,13 +372,23 @@ impl Running {
             old.task.abort();
         }
         self.hooks = hooks;
+    }
 
+    /// Start the notifications of the new humans `listed`, stop those gone, and restart those changed, or all of them when
+    /// `restart_all`.
+    fn apply_humans(
+        &mut self,
+        listed: Vec<notify::Human>,
+        restart_all: bool,
+        tasks: &mut JoinSet<()>,
+        failed: &mpsc::UnboundedSender<anyhow::Error>,
+    ) {
         let mut humans = HashMap::new();
-        for human in config.humans {
+        for human in listed {
             let name = human.name.clone();
             let creds = crate::serve::creds_snapshot(human.creds.as_deref());
             match self.humans.remove(&name) {
-                Some(old) if !hub_changed && !links_changed && old.served.config == human && old.creds == creds => {
+                Some(old) if !restart_all && old.served.config == human && old.creds == creds => {
                     humans.insert(name, old);
                     continue;
                 }
@@ -1062,19 +414,6 @@ impl Running {
             old.task.abort();
         }
         self.humans = humans;
-
-        let mut notified: Vec<_> = self.humans.values().map(|h| h.served.clone()).collect();
-        notified.sort_by(|a, b| a.config.name.cmp(&b.config.name));
-        let answers = self.links.clone().map(|links| notify::Answers {
-            humans: notified.iter().map(|human| (human.config.name.clone(), human.clone())).collect(),
-            links,
-        });
-        Routes {
-            prefix: format!("{}/", config.path),
-            hooks: self.hooks.iter().map(|(name, hook)| (name.to_string(), hook.served.clone())).collect(),
-            answers,
-            humans: notified,
-        }
     }
 }
 
@@ -1085,112 +424,6 @@ async fn connect(hook: &Hook, nats: &str, js_domain: Option<&JsDomain>) -> Resul
     tracing::info!(webhook = %config.name, to = ?config.destination, "webhook ready");
     let _ = hook.bus.set(bus);
     Ok(())
-}
-
-impl Bus {
-    /// Connect as `name`, and open the bucket of delivered events, waiting for both as long as it takes.
-    pub(crate) async fn connect(
-        name: &UserId,
-        creds: Option<&Path>,
-        nats: &str,
-        js_domain: Option<&JsDomain>,
-        client_name: &str,
-    ) -> Result<Self> {
-        let pending = std::future::pending();
-        let (client, mut js) =
-            bus::connect_retrying(nats, creds, js_domain, name, client_name, pending).await?.context("stopped")?;
-        js.set_timeout(ACK_TIMEOUT);
-        let seen = DirectKv::new(&js, js_domain, WEBHOOKS_BUCKET).await?;
-        let mut delay = Duration::from_secs(1);
-        loop {
-            let error = match seen.exists(name).await {
-                Ok(true) => break,
-                Ok(false) => format!("no bucket {WEBHOOKS_BUCKET}"),
-                Err(e) => format!("{e:#}"),
-            };
-            tracing::warn!(user = %name, error, retry_in = ?delay, "no bucket {WEBHOOKS_BUCKET} yet: `ants init` creates it");
-            tokio::time::sleep(delay).await;
-            delay = (delay * 2).min(Duration::from_secs(30));
-        }
-        let (marker, marked) = (crate::versions::serving().await, Arc::new(Mutex::new(None)));
-        let keeping = (seen.clone(), webhook_marker_key(name), marker.clone(), marked.clone());
-        let keeper = tokio::spawn(async move {
-            let (seen, key, marker, marked) = keeping;
-            let put = move || *marked.locked() = Some(Instant::now());
-            crate::versions::keep_putting(seen, key, marker, put).await;
-        });
-        Ok(Self { client, js, js_domain: js_domain.cloned(), seen, marker, marked, keeper })
-    }
-
-    /// Deliver `event` as a new thread unless it was delivered already, and return once the hub's stream stored it.
-    pub(crate) async fn deliver(&self, event: Delivery<'_>) -> Result<Delivered> {
-        let Delivery { from, destination, mentions, owner, allow, key, message_id, text } = event;
-        let allow = allow.map(<[String]>::to_vec);
-        if let Some(seen) = self.seen(&key).await? {
-            return Ok(Delivered { thread: Some(seen.thread), duplicate: true });
-        }
-        self.mark(from).await?;
-        let (subject, payload, thread) = match destination {
-            Destination::Ant(ant) => {
-                let message = Envelope::new(from.clone(), ant.clone(), text)
-                    .with_owner(owner.cloned())
-                    .with_allow(allow)
-                    .from_webhook();
-                if let Some(owner) = owner {
-                    owners::recording(&self.js, self.js_domain.as_ref(), &message.thread_id, ant, owner).await;
-                }
-                (message.subject(), serde_json::to_vec(&message)?, message.thread_id)
-            }
-            Destination::Channel(channel) => {
-                let mentions = match mentions {
-                    Mentions::Nobody => Vec::new(),
-                    Mentions::Listed(mentions) => mentions.clone(),
-                    Mentions::Members => members(&self.js, channel).await?,
-                };
-                let post = ChannelPost::new(channel.clone(), from.clone(), text)
-                    .with_owner(owner.cloned())
-                    .with_allow(allow)
-                    .from_webhook(mentions);
-                (post.subject(), serde_json::to_vec(&post)?, post.thread_id)
-            }
-        };
-        let message = jetstream::message::PublishMessage::build().payload(payload.into()).message_id(message_id);
-        let ack = match self.js.send_publish(subject.clone(), message).await?.await {
-            Ok(ack) => ack,
-            Err(e) => return Err(bus::explain(&self.js, &subject, e).await).context("waiting for the hub to store it"),
-        };
-        if ack.duplicate {
-            let thread = self.seen(&key).await.ok().flatten().map(|seen| seen.thread);
-            return Ok(Delivered { thread, duplicate: true });
-        }
-        let seen = serde_json::to_vec(&Seen { thread: thread.clone(), seq: ack.sequence })?;
-        for attempt in 1..=3 {
-            match self.seen.create(&key, seen.clone()).await {
-                Ok(_) => break,
-                Err(e) => {
-                    tracing::warn!(user = %from, error = format!("{e:#}"), attempt, "recording a delivered event");
-                    tokio::time::sleep(Duration::from_millis(200 * attempt)).await;
-                }
-            }
-        }
-        Ok(Delivered { thread: Some(thread), duplicate: false })
-    }
-
-    /// Put the marker of `name` ([`webhook_marker_key`]), unless put in the last [`SERVING_EVERY`]: without it, daemons
-    /// take its messages for an ant's, and answer it in its own inbox.
-    async fn mark(&self, name: &UserId) -> Result<()> {
-        if self.marked.locked().is_some_and(|at| at.elapsed() < SERVING_EVERY) {
-            return Ok(());
-        }
-        self.seen.put(webhook_marker_key(name), self.marker.clone()).await.context("putting the marker")?;
-        *self.marked.locked() = Some(Instant::now());
-        Ok(())
-    }
-
-    async fn seen(&self, key: &str) -> Result<Option<Seen>> {
-        let found = self.seen.get(key).await.context("reading the webhooks bucket")?;
-        Ok(found.and_then(|value| serde_json::from_slice(&value).ok()))
-    }
 }
 
 impl Server {
@@ -1402,20 +635,6 @@ impl Hook {
             *last = Some(Instant::now());
             tracing::warn!(webhook = %self.config.name, "rejected a request that failed authentication");
         }
-    }
-}
-
-/// The members of `channel` now; none when it does not exist.
-async fn members(js: &jetstream::Context, channel: &ChannelId) -> Result<Vec<UserId>> {
-    let bucket = js.get_stream_no_info(format!("KV_{CHANNELS_BUCKET}")).await?;
-    match bucket.direct_get_last_for_subject(subject::channel_entry(channel)).await {
-        Ok(entry) if entry.payload.is_empty() => Ok(Vec::new()),
-        Ok(entry) => {
-            let entry: ChannelEntry = serde_json::from_slice(&entry.payload).context("reading the channel")?;
-            Ok(entry.members)
-        }
-        Err(e) if e.kind() == DirectGetErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => Err(e).context("reading the channel"),
     }
 }
 

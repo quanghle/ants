@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 
+use super::pick::{own_subjects, scan_made};
 use super::*;
 
 /// What a MESSAGE argument picks: a whole message id (a UUID), taken as given, or a start of one, among the messages
@@ -86,7 +87,7 @@ fn matching<'a>(messages: &'a [Entry], prefix: &str) -> Vec<&'a Entry> {
 
 /// The one message among `messages` (to or from `user`, most recent first) whose id starts with `prefix`; None when
 /// none does. The error on several lists them.
-fn select(messages: &[Entry], prefix: &str, user: &UserId) -> Result<Option<Uuid>> {
+pub(super) fn select(messages: &[Entry], prefix: &str, user: &UserId) -> Result<Option<Uuid>> {
     let found = matching(messages, prefix);
     match found.as_slice() {
         [] => Ok(None),
@@ -103,7 +104,7 @@ fn select(messages: &[Entry], prefix: &str, user: &UserId) -> Result<Option<Uuid
 /// The one message among `messages` (any user's, most recent first) whose id starts with `prefix`, for a `user` it
 /// was neither to nor from. The error on none lists `own`, the latest messages to or from `user`, and the one on
 /// several lists those found.
-fn select_any(messages: &[Entry], own: &[Entry], prefix: &str, user: &UserId) -> Result<Uuid> {
+pub(super) fn select_any(messages: &[Entry], own: &[Entry], prefix: &str, user: &UserId) -> Result<Uuid> {
     let found = matching(messages, prefix);
     let days = RECENT.as_secs() / 86_400;
     match found.as_slice() {
