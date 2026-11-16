@@ -250,7 +250,7 @@ async fn clone(
     done: &mut Done,
 ) -> Result<Option<Value>> {
     let (src, path) = (&order.ant, &config.path);
-    let src_shared = match config.shared.check(shared::read(bucket, src).await?) {
+    let src_shared = match shared::read(bucket, src).await? {
         Found::Record(record, _) => Some(Some(record.fields)),
         Found::None(_) | Found::Malformed(..) | Found::Unverified(..) => Some(None),
         Found::NoBucket => None,
@@ -320,9 +320,8 @@ async fn clone(
     };
     if let Some(fields) = shared {
         let mut record = SharedSettings::new(new.clone(), fields, orders.machine.clone(), None);
-        shared::sign(&mut record, &jwt, &key)?;
         done.shared = Some((bucket.identities.clone(), record.key()));
-        bucket.identities.put(record.key(), serde_json::to_vec(&record)?).await?;
+        shared::write(bucket.identities, &mut record, &shared::Signer::new(&jwt, key.clone()), None).await?;
         config.shared.store(record);
     }
     config::append(path, &table)?;
@@ -548,9 +547,11 @@ fn copy(from: &Path, to: &Path) -> Result<()> {
     } else if kind.is_file() {
         std::fs::copy(from, to).with_context(|| format!("copying {} to {}", from.display(), to.display()))?;
     } else if kind.is_symlink() {
-        let target = std::fs::read_link(from).with_context(|| format!("reading {}", from.display()))?;
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&target, to).with_context(|| format!("linking {}", to.display()))?;
+        {
+            let target = std::fs::read_link(from).with_context(|| format!("reading {}", from.display()))?;
+            std::os::unix::fs::symlink(&target, to).with_context(|| format!("linking {}", to.display()))?;
+        }
     }
     Ok(())
 }
