@@ -8,7 +8,7 @@ use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
 
 use crate::channel::reads;
-use crate::{Nats, channel, colony, completions, humans, thread, upgrade};
+use crate::{Connection, Nats, channel, colony, completions, humans, thread, upgrade};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum ChannelCommand {
@@ -106,6 +106,11 @@ pub(crate) enum ChannelCommand {
     },
 }
 
+/// `ants channel serve`, which runs as the channel manager rather than as a human.
+pub(crate) async fn serve(conn: &Connection<'_>, upgrade: &upgrade::UpgradeArgs) -> Result<()> {
+    Box::pin(upgrade::or_exit(channel::serve(conn.nats, conn.creds, conn.js_domain), upgrade)).await
+}
+
 pub(crate) async fn run(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
     let (_, js) = nats.connect("ants-cli").await?;
     let kv = channel::open(&js).await?;
@@ -185,7 +190,7 @@ pub(crate) async fn run(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> 
             channel::delete(&kv, &channel).await?;
             println!("deleted #{channel}; the posts to #{channel} stay in the stream");
         }
-        ChannelCommand::Serve { .. } => unreachable!("main runs the channel manager"),
+        ChannelCommand::Serve { .. } => unreachable!("`serve` runs the channel manager"),
     }
     Ok(())
 }

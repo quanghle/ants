@@ -21,11 +21,10 @@ use chrono::{DateTime, TimeDelta, Utc};
 use nkeys::XKey;
 use serde::Deserialize;
 
-use crate::cli::{AssistantCommand, SealCommand};
 use crate::{Nats, auth, colony, devices, humans, revoke};
 
-mod consent;
-mod dedicated;
+pub(crate) mod consent;
+pub(crate) mod dedicated;
 
 pub(crate) use consent::{answer_order, orders_held_for};
 pub use dedicated::{DisableArgs, EnableArgs};
@@ -138,22 +137,6 @@ fn check(ant: &UserId, local: &Local, colony: &[ColonyEntry]) -> Result<Vec<Stri
         ));
     }
     Ok(warnings)
-}
-
-/// `ants assistant`, with the connection `nats` gives.
-pub async fn run<'a>(command: AssistantCommand, nats: impl Fn() -> Result<Nats<'a>>) -> Result<()> {
-    match command {
-        AssistantCommand::Enable(args) => dedicated::enable(&nats()?, *args).await,
-        AssistantCommand::Disable(args) => dedicated::disable(&nats()?, args).await,
-        AssistantCommand::Set { ant } => set(&nats()?, &ant).await,
-        AssistantCommand::Clear => clear(&nats()?).await,
-        AssistantCommand::Show { human } => show(&nats()?, human).await,
-        AssistantCommand::Seal(SealCommand::On { key }) => seal_on(&nats()?, key).await,
-        AssistantCommand::Seal(SealCommand::Off) => seal_off(&nats()?).await,
-        AssistantCommand::Key { ant } => key(&ant),
-        AssistantCommand::Confirm { act, deny } => Box::pin(consent::confirm(&nats()?, act.as_deref(), deny)).await,
-        AssistantCommand::Allow { rules, remove, clear } => consent::allow(&nats()?, rules, remove, clear).await,
-    }
 }
 
 /// Whether the allow rule `rule` lets an ant run what can bring in untrusted content or act beyond reading: `*`,

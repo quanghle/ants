@@ -217,8 +217,8 @@ async fn a_hook_runs_once_per_dead_letter_from_where_its_consumer_left_off() {
     let connecting = bus::connect_retrying(&server.url, Some(&creds), None, &audit, "test", std::future::pending());
     let (_, o_js) = timeout(WAIT, connecting).await.expect("audit reaches JetStream").unwrap().unwrap();
     let out = server.dir().join("dead.jsonl");
-    let hook = |out: &Path| crate::hook::Hook {
-        event: crate::hook::Event::DeadLetter,
+    let hook = |out: &Path| crate::cmd::hook::Hook {
+        event: crate::cmd::hook::Event::DeadLetter,
         command: vec!["sh".into(), "-c".into(), format!("cat >> '{}'", out.display())],
         timeout: Duration::from_secs(10),
         concurrency: 1,

@@ -3,7 +3,7 @@
 //!
 //! Each `[[webhook]]` of the config file ([`Config`]) is its own NATS user, with credentials from
 //! `ants auth user NAME --webhook --to ANT` or `--channel CHANNEL` ([`ants_proto::Permissions::for_webhook`]), or
-//! with its entry and secret from `ants webhook add` ([`crate::webhook_add`]): it sends as itself, to its destination
+//! with its entry and secret from `ants webhook add` ([`crate::cmd::webhook::add`]): it sends as itself, to its destination
 //! only. `POST <path>/<name>` with the event:
 //! - is authenticated before anything else: an HMAC-SHA256 signature of the body, a bearer token, a token in a
 //!   named header, or a [Standard Webhooks](https://www.standardwebhooks.com) signature with a recent timestamp
