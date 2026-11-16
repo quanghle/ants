@@ -39,7 +39,11 @@ pub struct Waiting {
     /// Whether it awaits redelivery: delivered, not acked, and back with the server.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub redelivery: bool,
-    /// Whether the ant started on it already, in an attempt that failed: it awaits a retry and cannot be withdrawn.
+    /// Whether it awaits a retry after a failed attempt, which can still be withdrawn.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub retry: bool,
+    /// Whether it awaits redelivery started already, in an attempt that may still have effects (its daemon stopped, or
+    /// it stored a reply): it cannot be withdrawn.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub started: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -71,6 +75,9 @@ pub async fn waiting(
     let held_posts = held.iter().filter(|m| m.channel.is_some()).count() as u64;
     let held_inbox = held.len() as u64 - held_posts;
     let mut waiting: Vec<Waiting> = held.into_iter().map(held_waiting).collect();
+    for m in waiting.iter_mut().filter(|m| m.redelivery) {
+        marked(m, mark(kv, ant, &m.id).await?);
+    }
     let mut ahead: HashMap<ThreadId, usize> = HashMap::new();
     for m in &waiting {
         *ahead.entry(m.thread_id.clone()).or_default() += 1;
@@ -105,13 +112,7 @@ pub async fn waiting(
         }
         let mut redelivered = to_waiting(seq, message, &mut ahead);
         redelivered.redelivery = true;
-        match found {
-            Some(MessageMark::Started { .. }) => redelivered.started = true,
-            Some(MessageMark::Withdrawn { by, on_behalf_of, .. }) => {
-                (redelivered.withdrawn_by, redelivered.withdrawn_for) = (Some(by), on_behalf_of);
-            }
-            _ => {}
-        }
+        marked(&mut redelivered, found);
         waiting.push(redelivered);
     }
     let mut stored = Vec::new();
@@ -134,6 +135,18 @@ pub async fn waiting(
     Ok((waiting, more))
 }
 
+/// Tell where `m`, awaiting redelivery, stands by its mark `found`.
+fn marked(m: &mut Waiting, found: Option<MessageMark>) {
+    match found {
+        Some(MessageMark::Started { .. }) => m.started = true,
+        Some(MessageMark::Retrying { .. }) => m.retry = true,
+        Some(MessageMark::Withdrawn { by, on_behalf_of, .. }) => {
+            (m.withdrawn_by, m.withdrawn_for) = (Some(by), on_behalf_of);
+        }
+        Some(MessageMark::Finished { .. }) | None => {}
+    }
+}
+
 /// Tell which of the messages `waiting` for `ant`, neither running nor started, are withdrawn, by their marks in `kv`.
 pub async fn withdrawals(kv: &DirectKv, ant: &UserId, waiting: &mut [Waiting]) -> Result<()> {
     for message in waiting.iter_mut().filter(|m| !m.running && !m.started && m.withdrawn_by.is_none()) {
@@ -150,7 +163,7 @@ pub async fn mark(kv: &DirectKv, ant: &UserId, message: &Uuid) -> Result<Option<
     serde_json::from_slice(&value).map(Some).context("reading the message's mark")
 }
 
-/// A message a daemon holds, as waiting.
+/// A message a daemon holds, as waiting; one awaiting redelivery stands as its mark tells, which [`waiting`] reads.
 pub fn held_waiting(m: QueuedMessage) -> Waiting {
     Waiting {
         id: m.id,
@@ -163,15 +176,15 @@ pub fn held_waiting(m: QueuedMessage) -> Waiting {
         ahead: m.ahead,
         delivered: !m.redelivery,
         redelivery: m.redelivery,
-        // A daemon awaits the redelivery of a message only after a failed attempt at it.
-        started: m.redelivery,
+        retry: false,
+        started: false,
         withdrawn_by: None,
         withdrawn_for: None,
     }
 }
 
 /// Where a message stands: running, withdrawn, or waiting behind others of its thread, in the daemon's hands, awaiting
-/// redelivery (or a retry, not withdrawable, after a failed attempt) or still in the stream.
+/// a retry after a failed attempt, awaiting redelivery (not withdrawable when started already) or still in the stream.
 pub fn state(m: &Waiting) -> String {
     if m.running {
         return "running".to_owned();
@@ -181,7 +194,9 @@ pub fn state(m: &Waiting) -> String {
     }
     let place = if m.ahead == 0 { "next".to_owned() } else { format!("{} ahead", m.ahead) };
     if m.started {
-        format!("{place}, awaiting a retry (started; not withdrawable)")
+        format!("{place}, awaiting redelivery (started; not withdrawable)")
+    } else if m.retry {
+        format!("{place}, awaiting a retry after a failed attempt")
     } else if m.redelivery {
         format!("{place}, awaiting redelivery")
     } else if m.delivered {
@@ -232,6 +247,7 @@ fn to_waiting(seq: u64, message: Unheld, ahead: &mut HashMap<ThreadId, usize>) -
         ahead: *before,
         delivered: false,
         redelivery: false,
+        retry: false,
         started: false,
         withdrawn_by: None,
         withdrawn_for: None,
@@ -377,9 +393,10 @@ mod tests {
         let on_thread = |text| Envelope::on_thread(running.thread_id.clone(), alice.clone(), ant.clone(), text);
         let (failed, retried, finished, later) =
             (on_thread("failed"), on_thread("retried"), on_thread("done"), on_thread("later"));
+        let (held_retry, crashed) = (on_thread("held retry"), on_thread("crashed"));
         let woken = ChannelPost::new(ops.channel.clone(), alice.clone(), "@dev-a look");
         let unwoken = ChannelPost::new("lobby".parse().unwrap(), alice.clone(), "@dev-a look");
-        for envelope in [&running, &failed, &retried, &finished] {
+        for envelope in [&running, &held_retry, &failed, &retried, &crashed, &finished] {
             js.publish(envelope.subject(), serde_json::to_vec(envelope).unwrap().into()).await.unwrap().await.unwrap();
         }
         for post in [&woken, &unwoken] {
@@ -388,7 +405,9 @@ mod tests {
         js.publish(later.subject(), serde_json::to_vec(&later).unwrap().into()).await.unwrap().await.unwrap();
         let thread_id = running.thread_id.clone();
         for (envelope, mark) in [
-            (&retried, MessageMark::Started { thread_id: thread_id.clone(), at: Utc::now() }),
+            (&held_retry, MessageMark::Retrying { thread_id: thread_id.clone(), at: Utc::now() }),
+            (&retried, MessageMark::Retrying { thread_id: thread_id.clone(), at: Utc::now() }),
+            (&crashed, MessageMark::Started { thread_id: thread_id.clone(), at: Utc::now() }),
             (&finished, MessageMark::Finished { thread_id: thread_id.clone(), at: Utc::now() }),
             (&later, MessageMark::Withdrawn { by: alice.clone(), at: Utc::now(), on_behalf_of: None }),
         ] {
@@ -406,27 +425,32 @@ mod tests {
             ahead: 0,
             redelivery: false,
         };
-        // The messages at 2 to 4 are delivered and not acked; the channel consumer has delivered no post yet.
-        let inbox = ConsumerPlace { acked: 0, delivered: 4, undelivered: 1, ack_pending: 4 };
+        let awaiting =
+            QueuedMessage { id: held_retry.id, seq: 2, running: false, ahead: 1, redelivery: true, ..held.clone() };
+        // The messages at 2 to 6 are delivered and not acked; the channel consumer has delivered no post yet.
+        let inbox = ConsumerPlace { acked: 0, delivered: 6, undelivered: 1, ack_pending: 6 };
         let posts = ConsumerPlace { acked: 0, delivered: 0, undelivered: 2, ack_pending: 0 };
-        let answer = QueueRequest::new(ant.clone(), alice.clone()).answer(vec![held], Some(inbox), Some(posts));
+        let answer =
+            QueueRequest::new(ant.clone(), alice.clone()).answer(vec![held, awaiting], Some(inbox), Some(posts));
         let (mut listed, more) =
             waiting(&js, &kv, &ant, humans.clone(), std::slice::from_ref(&answer), 10).await.unwrap();
         withdrawals(&kv, &ant, &mut listed).await.unwrap();
         let ids: Vec<Uuid> = listed.iter().map(|m| m.id).collect();
-        assert_eq!(ids, [running.id, failed.id, retried.id, woken.id, later.id]);
+        assert_eq!(ids, [running.id, held_retry.id, failed.id, retried.id, crashed.id, woken.id, later.id]);
         let states: Vec<String> = listed.iter().map(state).collect();
         assert_eq!(
             states,
             [
                 "running",
-                "1 ahead, awaiting redelivery",
-                "2 ahead, awaiting a retry (started; not withdrawable)",
+                "1 ahead, awaiting a retry after a failed attempt",
+                "2 ahead, awaiting redelivery",
+                "3 ahead, awaiting a retry after a failed attempt",
+                "4 ahead, awaiting redelivery (started; not withdrawable)",
                 "next, in the stream",
                 "withdrawn by alice",
             ]
         );
-        assert_eq!(listed[3].channel, Some(ops.channel.clone()));
+        assert_eq!(listed[5].channel, Some(ops.channel.clone()));
         assert_eq!(more, 0);
 
         let (listed, more) = waiting(&js, &kv, &ant, humans, &[answer], 1).await.unwrap();

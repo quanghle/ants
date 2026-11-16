@@ -117,15 +117,39 @@ impl Attempts {
         }
     }
 
-    /// Mark `envelope` as started ([`MessageMark`]) unless it has a mark, right before handling it. Returns who
-    /// withdrew it, and for whom when an assistant did, when a withdrawal came first; a message started already goes on
-    /// as a redelivery does.
+    /// Mark `envelope` as started ([`MessageMark`]) unless it has a mark, or instead of its `retrying` mark, right
+    /// before handling it. Returns who withdrew it, and for whom when an assistant did, when a withdrawal came first; a
+    /// message started already goes on as a redelivery does.
     pub async fn take_up(&self, envelope: &Envelope) -> Result<Option<(UserId, Option<UserId>)>> {
         let started = MessageMark::Started { thread_id: envelope.thread_id.clone(), at: chrono::Utc::now() };
         Ok(match mark(&self.kv, &self.ant, &envelope.id, &started).await? {
             Some(MessageMark::Withdrawn { by, on_behalf_of, .. }) => Some((by, on_behalf_of)),
-            Some(MessageMark::Started { .. } | MessageMark::Finished { .. }) | None => None,
+            Some(MessageMark::Started { .. } | MessageMark::Retrying { .. } | MessageMark::Finished { .. }) | None => {
+                None
+            }
         })
+    }
+
+    /// Mark `envelope`, started, as awaiting a retry after a failed attempt ([`MessageMark::Retrying`]), right before
+    /// handing it back for one, so it can be withdrawn until its redelivery. A failure only leaves it started.
+    pub async fn retrying(&self, envelope: &Envelope) {
+        let key = message_mark_key(&self.ant, &envelope.id);
+        let retrying = MessageMark::Retrying { thread_id: envelope.thread_id.clone(), at: chrono::Utc::now() };
+        let swap = async {
+            let (found, last) = self.kv.lookup_last(&key).await?;
+            let started = match found {
+                Lookup::Value(found) => matches!(serde_json::from_slice(&found), Ok(MessageMark::Started { .. })),
+                Lookup::NoValue | Lookup::NoBucket => false,
+            };
+            anyhow::Ok(started && self.kv.update(&key, serde_json::to_vec(&retrying)?, last).await?)
+        };
+        match swap.await {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::info!(message = %envelope.id, "the message's mark is no longer started; not retrying");
+            }
+            Err(e) => tracing::warn!(message = %envelope.id, error = format!("{e:#}"), "marking the message retrying"),
+        }
     }
 
     /// The human `assistant` withdrew `envelope` for under a key of its own ([`record_withdrawal`]), with the stream
@@ -204,8 +228,9 @@ impl Attempts {
 }
 
 /// Withdraw message `message` from the queue of `ant` for `by` (`ants withdraw`), or for the human `on_behalf_of` whose
-/// assistant `by` is, in `kv`, the attempts bucket, unless it has a mark already. Returns the mark found instead: the
-/// daemon took the message up first, or it was withdrawn.
+/// assistant `by` is, in `kv`, the attempts bucket, unless it has a mark already but `retrying`: a message awaiting a
+/// retry after a failed attempt is withdrawn unless its redelivery is taken up first. Returns the mark found instead:
+/// the daemon took the message up first, or it was withdrawn.
 pub async fn withdraw(
     kv: &DirectKv,
     ant: &UserId,
@@ -246,7 +271,9 @@ pub async fn record_withdrawal(
     let (mark, marked) = kv.lookup_last(message_mark_key(ant, message)).await.context("reading the message's mark")?;
     let Lookup::Value(mark) = mark else { return Ok(Recorded::Holds) };
     let mark: MessageMark = serde_json::from_slice(&mark).context("reading the message's mark")?;
-    if matches!(mark, MessageMark::Started { .. }) && marked > recorded {
+    // A message awaiting a retry is started again after the record, on its redelivery.
+    if matches!(mark, MessageMark::Retrying { .. }) || matches!(mark, MessageMark::Started { .. }) && marked > recorded
+    {
         return Ok(Recorded::Holds);
     }
     if !matches!(mark, MessageMark::Withdrawn { .. })
@@ -257,17 +284,26 @@ pub async fn record_withdrawal(
     Ok(Recorded::Marked(mark))
 }
 
-/// Create the mark of `message` to `ant` as `mark` unless it has one. Returns the mark found instead.
+/// Create the mark of `message` to `ant` as `mark` unless it has one, or put it instead of a
+/// [`MessageMark::Retrying`] mark: by compare-and-set on that mark, so of a daemon taking the message up again and a
+/// withdrawal exactly one wins. Returns the mark found instead.
 async fn mark(kv: &DirectKv, ant: &UserId, message: &Uuid, mark: &MessageMark) -> Result<Option<MessageMark>> {
     let key = message_mark_key(ant, message);
     let value = serde_json::to_vec(mark)?;
-    // A mark removed between the create and the read ([`Attempts::release`]) is created anew.
+    // A mark removed ([`Attempts::release`]) or changed meanwhile is read again.
     for _ in 0..3 {
         if kv.create(&key, value.clone()).await.context("marking the message")? {
             return Ok(None);
         }
-        if let Some(found) = kv.get(&key).await.context("reading the message's mark")? {
-            return serde_json::from_slice(&found).map(Some).context("reading the message's mark");
+        let (Lookup::Value(found), last) = kv.lookup_last(&key).await.context("reading the message's mark")? else {
+            continue;
+        };
+        let found: MessageMark = serde_json::from_slice(&found).context("reading the message's mark")?;
+        if !matches!(found, MessageMark::Retrying { .. }) {
+            return Ok(Some(found));
+        }
+        if kv.update(&key, value.clone(), last).await.context("marking the message")? {
+            return Ok(None);
         }
     }
     anyhow::bail!("the mark of message {message} keeps changing")
@@ -407,5 +443,62 @@ impl Notes {
 
     fn path_of(&self, id: Uuid) -> PathBuf {
         self.dir.join(format!("{id}.json"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ants_test_support::NatsServer;
+
+    use super::*;
+
+    async fn mark_of(kv: &DirectKv, ant: &UserId, envelope: &Envelope) -> Option<MessageMark> {
+        let found = kv.get(message_mark_key(ant, &envelope.id)).await.unwrap();
+        found.map(|found| serde_json::from_slice(&found).unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_withdrawal_and_the_retry_race_for_a_message_awaiting_it_and_exactly_one_wins() {
+        let Some(server) = NatsServer::start() else { return };
+        let (human, ant): (UserId, UserId) = (UserId::human(), "dev-a".parse().unwrap());
+        let (_, js) = crate::bus::connect(&server.url, None, None, &human, "test").await.unwrap();
+        let kv = crate::bus::ensure_attempts(&js, None, &ant).await.unwrap();
+        let attempts = Attempts::new(kv.clone(), ant.clone());
+
+        let started = Envelope::new(human.clone(), ant.clone(), "started");
+        assert_eq!(attempts.take_up(&started).await.unwrap(), None);
+        assert!(matches!(
+            withdraw(&kv, &ant, &started.id, &human, None).await.unwrap(),
+            Some(MessageMark::Started { .. })
+        ));
+        let withdrawn = Envelope::new(human.clone(), ant.clone(), "withdrawn");
+        assert_eq!(withdraw(&kv, &ant, &withdrawn.id, &human, None).await.unwrap(), None);
+        attempts.retrying(&withdrawn).await;
+        assert!(
+            matches!(mark_of(&kv, &ant, &withdrawn).await, Some(MessageMark::Withdrawn { .. })),
+            "only a started mark"
+        );
+
+        let (mut retried, mut withdrew) = (0, 0);
+        for round in 0..20 {
+            let failed = Envelope::new(human.clone(), ant.clone(), "failed");
+            assert_eq!(attempts.take_up(&failed).await.unwrap(), None);
+            attempts.retrying(&failed).await;
+            assert!(matches!(mark_of(&kv, &ant, &failed).await, Some(MessageMark::Retrying { .. })));
+            let (take_up, withdrawal) = (attempts.take_up(&failed), withdraw(&kv, &ant, &failed.id, &human, None));
+            // Each going first in turn.
+            let (taken, refused) = if round % 2 == 0 {
+                tokio::join!(take_up, withdrawal)
+            } else {
+                let (refused, taken) = tokio::join!(withdrawal, take_up);
+                (taken, refused)
+            };
+            match (taken.unwrap(), refused.unwrap(), mark_of(&kv, &ant, &failed).await) {
+                (None, Some(MessageMark::Started { .. }), Some(MessageMark::Started { .. })) => retried += 1,
+                (Some((by, None)), None, Some(MessageMark::Withdrawn { .. })) if by == human => withdrew += 1,
+                other => panic!("both or neither won: {other:?}"),
+            }
+        }
+        assert_eq!(retried + withdrew, 20);
     }
 }

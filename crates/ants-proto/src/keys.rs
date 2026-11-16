@@ -80,7 +80,8 @@ pub fn attempt_key(ant: &UserId, seq: u64) -> String {
 }
 
 /// Key in [`ATTEMPTS_BUCKET`] of the [`MessageMark`] of message `message` ([`Envelope::id`]) to `ant`: the daemon
-/// creates it as it starts the message, a human as it withdraws it, so exactly one of them does. Keys start with the
+/// creates it as it starts the message, a human as it withdraws it, so exactly one of them does; a message awaiting a
+/// retry has it `retrying`, which one of them swaps by compare-and-set. Keys start with the
 /// ant, so its credentials can be confined to its own; a human writes and reads only these keys of the bucket.
 pub fn message_mark_key(ant: &UserId, message: &Uuid) -> String {
     format!("{ant}.msg.{message}")

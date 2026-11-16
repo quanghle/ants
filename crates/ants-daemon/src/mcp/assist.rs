@@ -1033,7 +1033,8 @@ impl Hub {
             }
             Some(m) if m.started => {
                 return Err(format!(
-                    "{ant} started on message {id} already; the attempt failed, and the message awaits a retry"
+                    "{ant} started on message {id} already, in an attempt that did not end (its daemon stopped, or its \
+                     reply is stored); the message awaits redelivery to finish it"
                 ));
             }
             Some(m) => m.thread_id.clone(),
@@ -1062,7 +1063,7 @@ impl Hub {
                 let by = on_behalf_of.map_or_else(|| by.to_string(), |h| format!("{by} for {h}"));
                 Ok(format!("Message {id} was withdrawn already, by {by}."))
             }
-            Some(MessageMark::Started { thread_id, .. }) => Err(format!(
+            Some(MessageMark::Started { thread_id, .. } | MessageMark::Retrying { thread_id, .. }) => Err(format!(
                 "{ant} started on message {id} already; cancel_for_human stops its prompt on thread {thread_id}"
             )),
             Some(MessageMark::Finished { .. }) => Err(format!("{ant} finished message {id} already")),
@@ -1099,7 +1100,7 @@ impl Hub {
                 let by = on_behalf_of.map_or_else(|| by.to_string(), |h| format!("{by} for {h}"));
                 Ok(format!("Message {id} was withdrawn already, by {by}."))
             }
-            Recorded::Marked(MessageMark::Started { .. }) => Err(format!(
+            Recorded::Marked(MessageMark::Started { .. } | MessageMark::Retrying { .. }) => Err(format!(
                 "{ant} started on message {id} already; cancel_for_human stops its prompt on thread {thread} once a \
                  daemon of {ant} serves"
             )),

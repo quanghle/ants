@@ -132,8 +132,8 @@ pub async fn withdraw(nats: &crate::Nats<'_>, ant: UserId, message: Uuid) -> Res
     let (client, js) = nats.connect("ants-withdraw").await?;
     let kv = DirectKv::new(&js, nats.domain, ATTEMPTS_BUCKET).await?;
     let found = mark(&kv, &ant, &message).await?;
-    if found.as_ref().is_some_and(|found| !matches!(found, MessageMark::Started { .. })) {
-        return refused(&ant, &message, found.expect("a mark"), false);
+    if let Some(found @ (MessageMark::Withdrawn { .. } | MessageMark::Finished { .. })) = found {
+        return refused(&ant, &message, found, false);
     }
     // A message not waiting is refused, as one named by a mistyped id or ant would be; with no daemon to ask, the
     // withdrawal waits for one to take the message up.
@@ -146,13 +146,18 @@ pub async fn withdraw(nats: &crate::Nats<'_>, ant: UserId, message: Uuid) -> Res
         }
         None => None,
     };
-    let retried = listed.as_ref().is_some_and(|m| m.started);
-    if let Some(found) = found {
-        return refused(&ant, &message, found, retried);
+    let redelivery = listed.as_ref().is_some_and(|m| m.started);
+    if let Some(found @ MessageMark::Started { .. }) = found {
+        return refused(&ant, &message, found, redelivery);
     }
     if answered.is_some() && listed.is_none() {
         bail!("message {message} is not waiting for {ant}; ants queue {ant} lists the messages that are");
     }
+    let retry = if matches!(found, Some(MessageMark::Retrying { .. })) {
+        ", where it awaited a retry after a failed attempt"
+    } else {
+        ""
+    };
     match ants_daemon::attempts::withdraw(&kv, &ant, &message, me, None).await? {
         Some(found) => refused(&ant, &message, found, false),
         None if answered.is_none() => {
@@ -163,25 +168,26 @@ pub async fn withdraw(nats: &crate::Nats<'_>, ant: UserId, message: Uuid) -> Res
             Ok(())
         }
         None => {
-            println!("withdrew message {message} from the queue of {ant}; the thread is told once its turn comes");
+            println!(
+                "withdrew message {message} from the queue of {ant}{retry}; the thread is told once its turn comes"
+            );
             Ok(())
         }
     }
 }
 
-/// The outcome of withdrawing `message` when it has a mark already; `retried` when it awaits a retry after a failed
-/// attempt.
-fn refused(ant: &UserId, message: &Uuid, found: MessageMark, retried: bool) -> Result<()> {
+/// The outcome of withdrawing `message` when it has a mark already; `redelivery` when it awaits redelivery started.
+fn refused(ant: &UserId, message: &Uuid, found: MessageMark, redelivery: bool) -> Result<()> {
     match found {
         MessageMark::Withdrawn { by, on_behalf_of, .. } => {
             println!("message {message} was withdrawn already, by {}", withdrawer(&by, on_behalf_of.as_ref()));
             Ok(())
         }
-        MessageMark::Started { .. } if retried => bail!(
-            "{ant} started on message {message} already; the attempt failed and the message awaits a retry, so it \
-             cannot be withdrawn"
+        MessageMark::Started { .. } if redelivery => bail!(
+            "{ant} started on message {message} already, in an attempt that did not end (its daemon stopped, or its \
+             reply is stored); the message awaits redelivery to finish it, so it cannot be withdrawn"
         ),
-        MessageMark::Started { thread_id, .. } => bail!(
+        MessageMark::Started { thread_id, .. } | MessageMark::Retrying { thread_id, .. } => bail!(
             "{ant} started on message {message} already; ants cancel {ant} {thread_id} stops the prompt running on its \
              thread"
         ),
@@ -281,6 +287,7 @@ mod tests {
             ahead,
             delivered,
             redelivery: false,
+            retry: false,
             started: false,
             withdrawn_by: None,
             withdrawn_for: None,
@@ -294,7 +301,9 @@ mod tests {
         let mut assisted = row(5, "t2", false, 1, false);
         (assisted.withdrawn_by, assisted.withdrawn_for) = (Some("pa".parse().unwrap()), Some("bob".parse().unwrap()));
         let mut retried = row(6, "t3", false, 0, false);
-        (retried.redelivery, retried.started) = (true, true);
+        (retried.redelivery, retried.retry) = (true, true);
+        let mut started = row(8, "t3", false, 2, false);
+        (started.redelivery, started.started) = (true, true);
         let mut redelivered = row(7, "t3", false, 1, false);
         redelivered.redelivery = true;
         let rows = [
@@ -305,6 +314,7 @@ mod tests {
             assisted,
             retried,
             redelivered,
+            started,
         ];
         let table = table(&rows, Utc::now());
         let states: Vec<&str> = table.lines().skip(1).map(|l| l.split("  ").last().unwrap().trim()).collect();
@@ -318,8 +328,9 @@ mod tests {
                 "withdrawn by alice",
                 "next, in the stream",
                 "withdrawn by bob via pa",
-                "next, awaiting a retry (started; not withdrawable)",
+                "next, awaiting a retry after a failed attempt",
                 "1 ahead, awaiting redelivery",
+                "2 ahead, awaiting redelivery (started; not withdrawable)",
             ]
         );
     }

@@ -2137,24 +2137,28 @@ async fn the_assistant_lists_cancels_and_withdraws_for_its_human_on_requests_nam
         redelivery: false,
     };
     let (prompted, queued) = (held(&running, 1, true), held(&waiting, 2, false));
-    let retried = ants_proto::QueuedMessage { redelivery: true, ..held(&ThreadId::generate(), 3, false) };
-    store.held.locked().extend([prompted.clone(), queued.clone(), retried.clone()]);
-    // A message awaiting redelivery, and a channel post still in the stream.
+    store.held.locked().extend([prompted.clone(), queued.clone()]);
+    // Messages awaiting redelivery: started already in an attempt that did not end, awaiting a retry after a failed
+    // attempt, or neither; and a channel post still in the stream.
     let unheld = |seq, channel: Option<&str>| crate::queue::Waiting {
         delivered: false,
         channel: channel.map(|c| c.parse().unwrap()),
         ..crate::queue::held_waiting(held(&ThreadId::generate(), seq, false))
     };
-    let redelivered = crate::queue::Waiting { redelivery: true, ..unheld(4, None) };
-    let posted = unheld(5, Some("ops"));
-    store.unheld.locked().extend([redelivered.clone(), posted.clone()]);
+    let crashed = crate::queue::Waiting { redelivery: true, started: true, ..unheld(3, None) };
+    let retried = crate::queue::Waiting { redelivery: true, retry: true, ..unheld(4, None) };
+    let redelivered = crate::queue::Waiting { redelivery: true, ..unheld(5, None) };
+    let posted = unheld(6, Some("ops"));
+    store.unheld.locked().extend([crashed.clone(), retried.clone(), redelivered.clone(), posted.clone()]);
     let (url, token) = http_server(&mcp, &ThreadId::generate());
     let client = http_client(&url, &token).await;
 
     let (ok, listed) = call(&client, "queue_for_human", serde_json::json!({"ant": "dev-b"})).await;
     assert!(ok && listed.contains(&queued.id.to_string()) && listed.contains("2 more wait"), "{listed}");
     assert!(listed.contains(&format!("{}, sent", alice)), "{listed}");
-    assert!(listed.contains("awaiting a retry (started; not withdrawable)"), "{listed}");
+    assert!(listed.contains("awaiting redelivery (started; not withdrawable)"), "{listed}");
+    assert!(listed.contains(&format!("message {}", retried.id)), "{listed}");
+    assert!(listed.contains("awaiting a retry after a failed attempt"), "{listed}");
     assert!(listed.contains(&format!("message {}", redelivered.id)) && listed.contains("awaiting redelivery"));
     assert!(listed.contains(&format!("message {}", posted.id)) && listed.contains("alice in #ops"), "{listed}");
     assert!(listed.contains("next, in the stream"), "{listed}");
@@ -2167,11 +2171,11 @@ async fn the_assistant_lists_cancels_and_withdraws_for_its_human_on_requests_nam
     let withdraw = |id: Uuid| serde_json::json!({"ant": "dev-b", "message_id": id.to_string()});
     let (ok, refused) = call(&client, "withdraw_for_human", withdraw(prompted.id)).await;
     assert!(!ok && refused.contains("started on message"), "{refused}");
-    let (ok, refused) = call(&client, "withdraw_for_human", withdraw(retried.id)).await;
-    assert!(!ok && refused.contains("awaits a retry"), "{refused}");
+    let (ok, refused) = call(&client, "withdraw_for_human", withdraw(crashed.id)).await;
+    assert!(!ok && refused.contains("awaits redelivery to finish it"), "{refused}");
     let (ok, withdrew) = call(&client, "withdraw_for_human", withdraw(queued.id)).await;
     assert!(ok && withdrew.contains("Withdrew message"), "{withdrew}");
-    for unheld in [&redelivered, &posted] {
+    for unheld in [&retried, &redelivered, &posted] {
         let (ok, withdrew) = call(&client, "withdraw_for_human", withdraw(unheld.id)).await;
         assert!(ok && withdrew.contains("Withdrew message"), "{withdrew}");
     }
@@ -2203,14 +2207,15 @@ async fn the_assistant_lists_cancels_and_withdraws_for_its_human_on_requests_nam
 
     // Every request names the assistant and the human, so they go on the subjects naming the assistant.
     let cancels = store.cancels.locked().clone();
-    assert_eq!(cancels.len(), 5);
+    assert_eq!(cancels.len(), 6);
     for request in &cancels {
         assert_eq!((&request.ant, &request.by, request.on_behalf_of.as_ref()), (&dev_b, &dev_a, Some(&alice)));
         assert!(request.subject().ends_with(".dev-a"), "{}", request.subject());
     }
     assert_eq!(cancels[2].withdraw, Some(queued.id));
     assert_eq!(cancels[2].thread_id, waiting, "on the message's thread");
-    assert_eq!((cancels[4].withdraw, &cancels[4].thread_id), (Some(posted.id), &posted.thread_id));
+    assert_eq!((cancels[3].withdraw, &cancels[3].thread_id), (Some(retried.id), &retried.thread_id));
+    assert_eq!((cancels[5].withdraw, &cancels[5].thread_id), (Some(posted.id), &posted.thread_id));
     let queues = store.queues.locked().clone();
     assert!(queues.iter().all(|q| q.subject() == "ants.queue.dev-b.dev-a" && q.on_behalf_of == Some(alice.clone())));
 }

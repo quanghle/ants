@@ -2017,6 +2017,12 @@ impl Inbox<'_> {
                 Err(bury) => tracing::warn!(error = format!("{bury:#}"), "dead-lettering"),
             }
         }
+        // Withdrawable until its redelivery, unless that only sends the reply it stored again.
+        if delivered < MAX_DELIVER
+            && !matches!(self.attempts.get(seq, &incoming.envelope).await, Ok(Some(Marker::Replied(_))))
+        {
+            self.attempts.retrying(&incoming.envelope).await;
+        }
         nak(&msg, Some(self.retry_delay)).await;
         self.metrics.retried();
         let retry = (delivered < MAX_DELIVER).then(|| Retry {
@@ -2086,10 +2092,10 @@ impl Inbox<'_> {
     }
 
     /// Ack the message at stream sequence `seq`, which `withdrawal.by` withdrew before the ant was prompted with it,
-    /// once a notice of it is stored on its thread, so `ants thread show` tells what became of it. The notice answers
-    /// the sender, as a reply would, unless no reply can go to it: a webhook's goes to the thread's owner, and one to an
-    /// ant out of turns, or to a channel post, to the human who withdrew it. The human an assistant withdrew a message
-    /// for by a record of its own is told too, unless the notice goes to it.
+    /// or retried it after a failed attempt, once a notice of it is stored on its thread, so `ants thread show` tells
+    /// what became of it. The notice answers the sender, as a reply would, unless no reply can go to it: a webhook's
+    /// goes to the thread's owner, and one to an ant out of turns, or to a channel post, to the human who withdrew it.
+    /// The human an assistant withdrew a message for by a record of its own is told too, unless the notice goes to it.
     async fn withdrawn(
         &self,
         incoming: &Incoming,
@@ -2102,9 +2108,14 @@ impl Inbox<'_> {
         let thread = &envelope.thread_id;
         tracing::info!(%thread, %by, ?on_behalf_of, message = %envelope.id, "acking a withdrawn message unprompted");
         let ant = self.ant;
+        // A failed attempt leaves its marker, to warn the retry.
+        let before = match self.attempts.get(seq, envelope).await {
+            Ok(Some(_)) => format!("before {ant} retried it after a failed attempt"),
+            Ok(None) | Err(_) => format!("before {ant} was prompted with it"),
+        };
         let text = match on_behalf_of {
-            None => format!("[ants] Withdrawn by {by} before {ant} was prompted with it (ants withdraw)."),
-            Some(human) => format!("[ants] Withdrawn by {by} for {human} before {ant} was prompted with it."),
+            None => format!("[ants] Withdrawn by {by} {before} (ants withdraw)."),
+            Some(human) => format!("[ants] Withdrawn by {by} for {human} {before}."),
         };
         // The one who asked for the withdrawal: the human an assistant acted for.
         let by = on_behalf_of.unwrap_or(by);
