@@ -169,7 +169,7 @@ async fn run() -> Result<()> {
             cmd::doctor::run(config, leaf_config, no_harness, json, team, webhook_config, &conn).await
         }
         Command::Auth(command) => cmd::auth::run(command, &conn).await,
-        Command::Add(args) => add::add(*args, &cli.nats, domain).await,
+        Command::Add(args) => Box::pin(add::add(*args, &cli.nats, domain)).await,
         Command::Retire(args) => {
             let colony = retire_colony(&conn, &args.name).await;
             retire::retire(&args, colony.as_ref(), retire::STOP_WAIT, &cli.nats, domain).await

@@ -1,8 +1,11 @@
 use std::assert_matches;
 
 use ants_proto::{Escalation, ThreadId, ToolCall};
+#[cfg(unix)]
 use http_body_util::BodyExt as _;
+#[cfg(unix)]
 use hyper::http::Request;
+#[cfg(unix)]
 use hyper_util::rt::TokioIo;
 
 use super::*;

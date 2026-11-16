@@ -122,6 +122,7 @@ pub async fn fetched(js: &jetstream::Context, keyring: Option<&Keyring>, listed:
 /// link) is written through.
 fn private_dir(under: &Path, id: Uuid) -> Result<PathBuf> {
     let dir = under.join(format!("ants-attachment-{id}-{}", Uuid::now_v7().simple()));
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);

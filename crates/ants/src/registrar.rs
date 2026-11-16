@@ -1162,6 +1162,7 @@ mod tests {
         .await;
         let token = server.dir().join("github-token");
         std::fs::write(&token, "signer").unwrap();
+        #[cfg(unix)]
         std::fs::set_permissions(&token, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
         let config = server.dir().join("config.toml");
         let table = format!("{}email_domains = [\"acme.example\"]\ntoken_file = \"github-token\"\n", policy(&url));
@@ -1241,6 +1242,7 @@ mod tests {
         .await;
         let token = server.dir().join("github-token");
         std::fs::write(&token, "signer").unwrap();
+        #[cfg(unix)]
         std::fs::set_permissions(&token, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
         let config = server.dir().join("config.toml");
         std::fs::write(&config, format!("{}token_file = \"github-token\"\nsweep = \"1s\"\n", policy(&url))).unwrap();

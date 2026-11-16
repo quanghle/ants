@@ -224,6 +224,7 @@ fn colorfgbg_theme(colorfgbg: Option<&str>) -> Theme {
 }
 
 /// The colour of an OSC 11 answer such as `ESC ] 11 ; rgb:ffff/ffff/ffff BEL`, each channel 0 to 1.
+#[cfg(any(unix, test))]
 fn parse_background(reply: &[u8]) -> Option<(f64, f64, f64)> {
     let text = std::str::from_utf8(reply).ok()?;
     let rgb = text.split_once("rgb:")?.1.trim_end_matches(['\x07', '\x1b', '\\']);
