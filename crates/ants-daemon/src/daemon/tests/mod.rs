@@ -448,7 +448,7 @@ fn escalated(stuck: &UserId, thread: &ThreadId, chains: &[&[UserId]]) -> ants_pr
     let mut escalation = ants_proto::Escalation::new(stuck.clone(), thread.clone(), EscalationReason::TurnBudget);
     for chain in chains {
         let ants_proto::Hop::Chain { escalation: up, .. } = escalation.up(chain, 5) else { panic!("a chain") };
-        escalation = up;
+        escalation = *up;
     }
     escalation
 }

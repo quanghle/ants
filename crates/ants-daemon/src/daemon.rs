@@ -18,6 +18,7 @@ use futures::stream::{Stream, StreamExt as _};
 
 use crate::admin::restart::Restarts;
 use crate::approvals::NatsApprover;
+use crate::assistant_first::AssistantFirst;
 use crate::attempts::{Answered, Attempts};
 use crate::behalf::Records;
 use crate::breaker::Breaker;
@@ -460,15 +461,20 @@ async fn services(
     allow: Allowlist,
 ) -> Result<Services> {
     let redactor = std::sync::Arc::new(redactor(config.policy.redact, &config.harness));
-    let (approver, policy) = approval_policy(&config.ant, &config.policy, client, js, humans, allow, &redactor);
-    let outbox = redacting_outbox(crate::mcp::jetstream_outbox(js.clone()), redactor.clone());
     let colony = crate::mcp::jetstream_colony(js.clone());
+    let account = crate::humans::account(config.connection.creds.as_deref());
+    let records = Records::new(js.clone(), config.connection.js_domain.clone(), account);
+    let assistants = AssistantFirst::with_records(humans.clone(), colony.clone(), records);
+    let approver = approver(&config.ant, &config.policy, client, js, humans).with_assistants(assistants.clone());
+    let policy =
+        PermissionPolicy::new(allow, Some(std::sync::Arc::new(approver.clone()))).with_redactor(redactor.clone());
+    let outbox = redacting_outbox(crate::mcp::jetstream_outbox(js.clone()), redactor.clone());
     let reading = Reading::daemon(crate::creds::is_assistant(config.connection.creds.as_deref()));
     let notes = crate::notes::JetStreamNotes::new(js.clone(), config.ant.clone()).reading(reading);
     let notes = std::sync::Arc::new(RedactingNotes { notes, redactor: redactor.clone() });
     let sessions_kv = bus::ensure_sessions(js, config.connection.js_domain.as_ref(), &config.ant).await?;
     let ledger = ledger(&config.ant, &config.spending, &sessions_kv);
-    let escalator = escalator(config, js, &colony, humans, &ledger, &redactor);
+    let escalator = escalator(config, js, &colony, humans, &ledger, &redactor, assistants);
     let identity = ant_records(config, js).await;
     let mut mcp = Mcp::start(
         config.ant.clone(),
@@ -520,22 +526,17 @@ async fn ant_records(config: &Config, js: &jetstream::Context) -> Option<Identit
     identity.ok()
 }
 
-/// The ant's approver of tool requests, and the permission policy asking it for calls its allowlist does not cover.
-fn approval_policy(
+/// The ant's approver of tool requests, which the permission policy asks for calls its allowlist does not cover.
+fn approver(
     ant: &UserId,
     settings: &Policy,
     client: &async_nats::Client,
     js: &jetstream::Context,
     humans: &Registry,
-    allow: Allowlist,
-    redactor: &std::sync::Arc<Redactor>,
-) -> (NatsApprover, PermissionPolicy) {
-    let approver = NatsApprover::new(client.clone(), js.clone(), ant.clone(), settings.approval_timeout)
+) -> NatsApprover {
+    NatsApprover::new(client.clone(), js.clone(), ant.clone(), settings.approval_timeout)
         .with_chain(settings.escalation.clone())
-        .with_humans(humans.clone());
-    let policy =
-        PermissionPolicy::new(allow, Some(std::sync::Arc::new(approver.clone()))).with_redactor(redactor.clone());
-    (approver, policy)
+        .with_humans(humans.clone())
 }
 
 /// Connect to the bus as the ant's daemon, retrying until it answers: `None` when `stop` comes first.
@@ -588,6 +589,7 @@ fn escalator(
     humans: &Registry,
     ledger: &std::sync::Arc<Ledger>,
     redactor: &std::sync::Arc<Redactor>,
+    assistants: AssistantFirst,
 ) -> std::sync::Arc<Escalator> {
     let escalator = Escalator::new(
         config.ant.clone(),
@@ -598,7 +600,8 @@ fn escalator(
         redacting_sender(escalation::jetstream_sender(js.clone()), redactor.clone()),
     )
     .with_chains(crate::chains::jetstream_chains(js.clone()))
-    .with_notes(redacting_notes_sender(escalation::jetstream_notes_sender(js.clone()), redactor.clone()));
+    .with_notes(redacting_notes_sender(escalation::jetstream_notes_sender(js.clone()), redactor.clone()))
+    .with_assistants(assistants);
     std::sync::Arc::new(escalator)
 }
 

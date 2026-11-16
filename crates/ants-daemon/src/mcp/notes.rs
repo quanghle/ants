@@ -104,7 +104,7 @@ impl Hub {
                 Escalated::Owner(human) => {
                     format!("Posted the last turn of the notes of thread {thread}; {human} has the thread now.")
                 }
-                Escalated::Chain { .. } => {
+                Escalated::Chain { .. } | Escalated::Assistant { .. } => {
                     format!("Posted the last turn of the notes of thread {thread}; escalated to {escalated}.")
                 }
             });

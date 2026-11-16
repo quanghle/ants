@@ -66,6 +66,9 @@ pub enum EscalationReason {
     Harness,
     /// JetStream storage passed its warning share ([`storage_warning_key`]); the stuck ant is the one that noticed.
     Storage,
+    /// The ant asked its human a question with ask_human, which went to the human's assistant first
+    /// ([`Escalation::to_assistant`]).
+    Question,
     /// A value from a newer daemon.
     #[serde(other)]
     Unknown,
@@ -83,6 +86,7 @@ impl EscalationReason {
             Self::ContextWindow => "context_window",
             Self::Harness => "harness",
             Self::Storage => "storage",
+            Self::Question => "question",
             Self::Unknown => "unknown",
         }
     }
@@ -116,6 +120,9 @@ pub struct Escalation {
     /// Set on the copy a human's notifications relay to its stand-in while the human is away.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub away: Option<Away>,
+    /// The human whose assistant leads this level, which it got before that human ([`Escalation::to_assistant`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_of: Option<UserId>,
 }
 
 /// Whose escalation or tool request a stand-in got, relayed while that human was away ([`Escalation::away`]).
@@ -132,7 +139,7 @@ pub struct Away {
 pub enum Hop {
     /// To every ant of `to`, the leader's chain without those already visited, its leader first, carrying
     /// `escalation`.
-    Chain { escalation: Escalation, to: Vec<UserId> },
+    Chain { escalation: Box<Escalation>, to: Vec<UserId> },
     /// To the thread's owner, else the default human.
     Owner(OwnerBecause),
 }
@@ -146,6 +153,8 @@ pub enum OwnerBecause {
     Visited(UserId),
     /// The next level would pass the hop limit.
     HopLimit(u32),
+    /// The human's assistant led the level and passed it on, or left it unanswered.
+    PassedOn,
 }
 
 impl Escalation {
@@ -161,6 +170,7 @@ impl Escalation {
             level: 0,
             stand_in: None,
             away: None,
+            assistant_of: None,
         }
     }
 
@@ -192,10 +202,36 @@ impl Escalation {
         &self.leader == ant
     }
 
+    /// The escalation one level up, led by `assistant`, the assistant of `human`, who gets it before that human.
+    #[must_use]
+    pub fn to_assistant(&self, assistant: UserId, human: UserId) -> Self {
+        let mut visited = self.visited.clone();
+        visited.push(assistant.clone());
+        Self {
+            level: self.level.saturating_add(1),
+            leader: assistant,
+            visited,
+            assistant_of: Some(human),
+            ..self.clone()
+        }
+    }
+
+    /// What the assistant leading the escalation sends the stuck ant to pass it on to its human: the escalation one
+    /// level up, led by that human. None when no assistant leads it.
+    pub fn passed_on(&self) -> Option<Self> {
+        let human = self.assistant_of.clone()?;
+        let mut visited = self.visited.clone();
+        visited.push(human.clone());
+        Some(Self { level: self.level.saturating_add(1), leader: human, visited, assistant_of: None, ..self.clone() })
+    }
+
     /// Where the escalation goes one level up, given `chain`, the escalate_to of its [`Escalation::leader`]: up the
     /// chain, or to the owner when the chain is empty, its leader was visited, or the level would pass `max_hops`.
-    /// Members already visited are left out.
+    /// Members already visited are left out. From a level a human's assistant leads, always to that human.
     pub fn up(&self, chain: &[UserId], max_hops: u32) -> Hop {
+        if self.assistant_of.is_some() {
+            return Hop::Owner(OwnerBecause::PassedOn);
+        }
         let Some(leader) = chain.first() else { return Hop::Owner(OwnerBecause::NoChain) };
         if self.is_visited(leader) {
             return Hop::Owner(OwnerBecause::Visited(leader.clone()));
@@ -213,7 +249,7 @@ impl Escalation {
         let mut visited = self.visited.clone();
         visited.extend(to.iter().cloned());
         let escalation = Self { level, leader: leader.clone(), visited, ..self.clone() };
-        Hop::Chain { escalation, to }
+        Hop::Chain { escalation: Box::new(escalation), to }
     }
 }
 
@@ -229,7 +265,7 @@ mod tests {
         assert!(!json.contains("escalation") && !json.contains("approval"), "{json}");
         let stuck = Escalation::new(p("dev-a"), msg.thread_id.clone(), EscalationReason::TurnBudget);
         let Hop::Chain { escalation, .. } = stuck.up(&[p("lead")], DEFAULT_MAX_ESCALATION_HOPS) else { panic!() };
-        let escalated = msg.with_escalation(Some(escalation));
+        let escalated = msg.with_escalation(Some(*escalation));
         let json = serde_json::to_string(&escalated).unwrap();
         assert!(
             json.contains(r#""reason":"turn_budget","level":1,"leader":"lead","visited":["dev-a","lead"]"#),
@@ -290,5 +326,21 @@ mod tests {
         assert_eq!(from.up(&[p("dev-a")], 3), Hop::Owner(OwnerBecause::Visited(p("dev-a"))));
         assert_eq!(one.up(&[p("lead")], 3), Hop::Owner(OwnerBecause::Visited(p("lead"))));
         assert_eq!(one.up(&[p("cto")], 1), Hop::Owner(OwnerBecause::HopLimit(1)));
+    }
+
+    #[test]
+    fn an_escalation_an_assistant_leads_goes_on_to_its_human() {
+        let stuck = Escalation::new(p("dev-a"), "t1".parse().unwrap(), EscalationReason::TurnBudget);
+        assert_eq!(stuck.passed_on(), None, "no assistant leads it");
+        let first = stuck.to_assistant(p("pa"), p("alice"));
+        assert_eq!((first.level, &first.leader, first.assistant_of.as_ref()), (1, &p("pa"), Some(&p("alice"))));
+        assert_eq!(first.visited, [p("dev-a"), p("pa")]);
+        assert_eq!(first.up(&[p("lead")], 3), Hop::Owner(OwnerBecause::PassedOn), "never up the assistant's chain");
+        let on = first.passed_on().unwrap();
+        assert_eq!((on.level, &on.leader, on.assistant_of.as_ref()), (2, &p("alice"), None));
+        assert_eq!(on.visited, [p("dev-a"), p("pa"), p("alice")]);
+        let json = serde_json::to_string(&first).unwrap();
+        assert!(json.contains(r#""assistant_of":"alice""#), "{json}");
+        assert!(!serde_json::to_string(&on).unwrap().contains("assistant_of"));
     }
 }

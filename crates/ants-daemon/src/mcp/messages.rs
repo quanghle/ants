@@ -119,6 +119,18 @@ impl Hub {
         let mut envelope = self.outgoing(thread, human.as_str(), rendered, None)?;
         envelope.question = Some(question);
         envelope.escalation = None;
+        if let Some(escalator) = &self.escalator {
+            let first = escalator.ask_first(&envelope).await.map_err(|e| format!("not asked: {e:#}"))?;
+            if let Some(assistant) = first {
+                return Ok(format!(
+                    "Asked {assistant}, the assistant of {human}, first, on thread {}. The answer comes later as a \
+                     message from {assistant}, or {assistant} passes the question on to {human}, as happens without \
+                     its answer after escalate_after; {human}'s answer then names the question and the option picked, \
+                     or says the answer is typed.",
+                    envelope.thread_id
+                ));
+            }
+        }
         self.send(&envelope).await?;
         Ok(format!(
             "Asked {human} on thread {} as message {}. The answer comes later as a message from {human} naming the \
@@ -206,7 +218,8 @@ impl Tools {
     #[tool(description = "Ask the thread's owner, else the default human, a question with 2-9 options to pick from \
         by number, and return the question's message id at once without waiting. `free_text` (default true) lets the \
         human type an answer instead. The answer arrives later as a new message on this thread, naming the question \
-        and the option picked or saying the answer is typed. Spends no turn.")]
+        and the option picked or saying the answer is typed. A human with an assistant that can act gets the question \
+        through it: the assistant answers, or passes it on to the human. Spends no turn.")]
     async fn ask_human(
         &self,
         Parameters(args): Parameters<AskHuman>,

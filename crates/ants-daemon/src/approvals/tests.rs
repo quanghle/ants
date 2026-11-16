@@ -468,3 +468,65 @@ async fn an_assistant_s_decision_takes_effect_only_with_its_human_s_consent() {
     };
     assert!(approver.chain_decision(&request, &msg).is_none());
 }
+
+#[tokio::test]
+async fn a_request_goes_to_the_human_s_assistant_too_while_it_can_act() {
+    use crate::humans::TestDevice;
+
+    let Some(server) = Server::start() else { return };
+    let [ant, alice, pa]: [UserId; 3] = ["dev-a", "alice", "pa"].map(|u| u.parse().unwrap());
+    let thread: ThreadId = "t1".parse().unwrap();
+    let (client, js) = bus::connect(&server.url, None, None, &ant, "test").await.unwrap();
+    bus::ensure_stream(&js).await.unwrap();
+    let (human, human_js) = bus::connect(&server.url, None, None, &alice, "human").await.unwrap();
+    let mut requests = human.subscribe(subject::approvals(&ant)).await.unwrap();
+    let mut assistant = human.subscribe(subject::inbox_of(&pa)).await.unwrap();
+    subscribed(&human_js).await;
+
+    let device = TestDevice::default();
+    let humans = Registry::with(alice.clone(), &["alice"]).verifying_grants(Some(device.account()));
+    let mut grant =
+        ants_proto::AssistantGrant::new(alice.clone(), Some(pa.clone()), chrono::Utc::now(), device.jwt(&alice));
+    grant.signature = device.sign(&grant.signed());
+    humans.put_record(&grant.key(), Some(&serde_json::to_vec(&grant).unwrap()));
+    let listed = Arc::new(Mutex::new(vec![crate::assistant_first::live(&pa)]));
+    let colony: crate::mcp::Colony = {
+        let listed = listed.clone();
+        Arc::new(move || {
+            let colony = listed.lock().unwrap().clone();
+            Box::pin(async move { Ok(colony) })
+        })
+    };
+    let record: crate::assistant_first::RecordOf = {
+        let alice = alice.clone();
+        Arc::new(move |_| {
+            let alice = alice.clone();
+            Box::pin(async move { Some(alice) })
+        })
+    };
+    let assistants = AssistantFirst::new(humans.clone(), colony, record);
+    let approver =
+        NatsApprover::new(client, js, ant.clone(), WAIT).with_humans(humans.clone()).with_assistants(assistants);
+    let ask = async |requests: &mut async_nats::Subscriber| {
+        let decided = tokio::spawn(approver.decide(thread.clone(), tool(), vec![Verdict::AllowOnce]));
+        let msg = timeout(WAIT, requests.next()).await.unwrap().unwrap();
+        (decided, serde_json::from_slice::<ApprovalRequest>(&msg.payload).unwrap())
+    };
+
+    // The human has the request, and its assistant is asked to decide it for the human.
+    let (decided, request) = ask(&mut requests).await;
+    assert_eq!(request.human, Some(alice.clone()));
+    let msg = timeout(WAIT, assistant.next()).await.unwrap().unwrap();
+    let asked: Envelope = serde_json::from_slice(&msg.payload).unwrap();
+    let escalation = asked.escalation.as_deref().unwrap();
+    assert_eq!((escalation.reason, escalation.request_id), (EscalationReason::Approval, Some(request.id)));
+    assert_eq!((&escalation.leader, &escalation.assistant_of), (&pa, &Some(alice.clone())));
+    assert!(asked.text.contains(&format!("decide_for_human {ant}/{}", request.id)), "{}", asked.text);
+    decided.abort();
+
+    // A paused assistant is not asked.
+    listed.lock().unwrap()[0].paused = Some(ants_proto::Paused { since: chrono::Utc::now(), by: None });
+    let (decided, _) = ask(&mut requests).await;
+    assert!(timeout(RECHECK * 4, assistant.next()).await.is_err(), "the human alone");
+    decided.abort();
+}

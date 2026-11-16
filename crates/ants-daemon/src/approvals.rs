@@ -63,6 +63,7 @@ use futures::StreamExt as _;
 use futures::future::BoxFuture;
 use tokio::sync::{broadcast, mpsc};
 
+use crate::assistant_first::AssistantFirst;
 use crate::bus;
 use crate::escalation::Chain;
 use crate::humans::{Registry, Withdrawal};
@@ -128,6 +129,8 @@ pub struct NatsApprover {
     /// Who is a human, and who is told of an expired request on a thread with no owner.
     humans: Registry,
     answering: Answering,
+    /// Finds the assistant of the human a request waits for, which gets the request too; none asks no assistant.
+    assistants: Option<AssistantFirst>,
 }
 
 /// Something heard while a request waits.
@@ -159,7 +162,13 @@ impl From<Offered> for Heard {
 impl NatsApprover {
     pub fn new(client: async_nats::Client, js: jetstream::Context, ant: UserId, timeout: Duration) -> Self {
         let (chain, waiting, humans, answering) = Default::default();
-        Self { client, js, ant, timeout, chain, waiting, humans, answering }
+        Self { client, js, ant, timeout, chain, waiting, humans, answering, assistants: None }
+    }
+
+    /// The same, also sending each request to the assistant of the human it waits for, which `assistants` finds.
+    #[must_use]
+    pub fn with_assistants(self, assistants: AssistantFirst) -> Self {
+        Self { assistants: Some(assistants), ..self }
     }
 
     /// The same, also asking every ant of `chain`'s escalate_to, which may decide too.
@@ -263,13 +272,42 @@ impl NatsApprover {
         for member in &to {
             let envelope =
                 Envelope::on_thread(request.thread_id.clone(), self.ant.clone(), member.clone(), text.clone())
-                    .with_escalation(Some(escalation.clone()))
+                    .with_escalation(Some((*escalation).clone()))
                     .with_allow(answering.clone().flatten());
             let id = format!("approval-{}-{}-{member}", self.ant, request.id);
             bus::store(&self.js, envelope.subject(), &envelope, &id).await?;
             crate::status::escalated(&self.client, &envelope);
         }
         Ok(to)
+    }
+
+    /// Send `request` to the assistant of `human`, the human it waits for, when one stands for it and can act, and is
+    /// not of the chain, which asked it already: as an approval escalation the assistant decides for the human, held
+    /// until the human confirms or a pre-allow rule covers it. Returns the assistant it went to; failing to, it only
+    /// warns.
+    async fn ask_assistant(&self, request: &ApprovalRequest, human: &UserId) -> Option<UserId> {
+        let assistant = self.assistants.as_ref()?.of(human, &self.ant).await?;
+        if self.chain.escalate_to.contains(&assistant) {
+            return None;
+        }
+        let escalation = Escalation::of_request(request).to_assistant(assistant.clone(), human.clone());
+        let answering = self.answering.locked().get(&request.thread_id).and_then(|e| e.allow.clone());
+        let text = assistant_text(request, &assistant, human);
+        let envelope = Envelope::on_thread(request.thread_id.clone(), self.ant.clone(), assistant.clone(), text)
+            .with_escalation(Some(escalation))
+            .with_allow(answering);
+        let id = format!("approval-{}-{}-{assistant}", self.ant, request.id);
+        match bus::store(&self.js, envelope.subject(), &envelope, &id).await {
+            Ok(_) => {
+                crate::status::escalated(&self.client, &envelope);
+                tracing::info!(request = %request.id, %assistant, %human, "asked the human's assistant too");
+                Some(assistant)
+            }
+            Err(e) => {
+                tracing::warn!(request = %request.id, %assistant, error = format!("{e:#}"), "asking the assistant");
+                None
+            }
+        }
     }
 
     /// [`Self::ask_chain`], logging whom it asked or why it could not: those it asked.
@@ -305,7 +343,7 @@ impl NatsApprover {
             self.humans.owner_or_default(answering.get(&thread).and_then(|e| e.owner.as_ref()))
         };
         let request = ApprovalRequest::new(self.ant.clone(), thread, tool, options, self.timeout)
-            .for_human(Some(human), self.chain.stand_in.clone());
+            .for_human(Some(human.clone()), self.chain.stand_in.clone());
         // Subscribe first, so a quick answer is not missed.
         let decisions = self.client.subscribe(request.decision_subject()).await?;
         let inbox = if self.chain.escalate_to.is_empty() {
@@ -322,7 +360,8 @@ impl NatsApprover {
             self.waiting.locked().remove(&id);
         });
         self.store(&request).await?;
-        let asked = self.ask_chain_logged(&request).await;
+        let mut asked = self.ask_chain_logged(&request).await;
+        asked.extend(self.ask_assistant(&request, &human).await);
         let waits = StatusUpdate::Approval { request_id: request.id };
         crate::status::publish(&self.client, &self.ant, &request.thread_id, waits);
         crate::status::state(&self.client, &self.ant, &request.thread_id, State::WaitingApproval);
@@ -633,20 +672,41 @@ fn chain_text(request: &ApprovalRequest, to: &[UserId]) -> String {
         "[ants] Approval request {id} on thread {thread}: {ant} asks to run a tool outside its allowlist. Sent to \
          {}; any of them decides with the decide_approval tool ({}). Humans may decide too, with `ants tools \
          approve {ant}/{id}` or `ants tools reject {ant}/{id}`; the first decision wins. Without one by {} the \
-         request is rejected.\n\nTool: {} ({})",
+         request is rejected.",
         to.join(", "),
         verdicts.join(", "),
         request.expires_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        request.tool.title,
-        request.tool.kind,
     );
+    tool_lines(&mut text, request);
+    text
+}
+
+/// What the assistant of `human`, the human `request` waits for, gets about it: how to decide it for the human, and
+/// the tool call.
+fn assistant_text(request: &ApprovalRequest, assistant: &UserId, human: &UserId) -> String {
+    let verdicts: Vec<&str> = request.options.iter().map(|v| v.as_str()).collect();
+    let (ant, id, thread) = (&request.ant, request.id, &request.thread_id);
+    let mut text = format!(
+        "[ants] Tool request {ant}/{id} on thread {thread}: {ant} asks to run a tool outside its allowlist and waits \
+         for {human}, who has the request too; it comes to {assistant}, the assistant of {human}, first. Decide it \
+         for {human} with decide_for_human {ant}/{id} ({}), which takes effect once {human} confirms it or a \
+         pre-allow rule covers it, or leave it to {human}. Without a decision by {} the request is rejected.",
+        verdicts.join(", "),
+        request.expires_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    );
+    tool_lines(&mut text, request);
+    text
+}
+
+/// Add to `text` the tool call of `request`.
+fn tool_lines(text: &mut String, request: &ApprovalRequest) {
+    let _ = write!(text, "\n\nTool: {} ({})", request.tool.title, request.tool.kind);
     if !request.tool.locations.is_empty() {
         let _ = write!(text, "\nFiles: {}", request.tool.locations.join(", "));
     }
     if let Some(input) = &request.tool.input {
         let _ = write!(text, "\nInput: {input}");
     }
-    text
 }
 
 /// Drop from `held` the decisions of an assistant `withdrawal` withdrew, which never take effect now.

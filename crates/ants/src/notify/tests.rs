@@ -209,7 +209,7 @@ fn a_notice_held_from_a_human_away_is_relayed_to_its_stand_in_who_is_told_whom_t
     let asked = request().for_human(Some(p("alice")), None);
     let notice = approval_notice(&asked, 9, &p("alice"), None, None, now);
 
-    let relay = relayed(&alice, &notice, "quiet hours", None, is_human).unwrap();
+    let relay = relayed(&alice, &notice, "quiet hours", is_human).unwrap();
     assert_eq!((&relay.from, &relay.to, &relay.thread_id), (&p("alice"), &p("bob"), &asked.thread_id));
     assert!(
         relay.text.starts_with("[ants] Relayed to bob, alice's stand-in, while alice is away (quiet hours)"),
@@ -232,40 +232,19 @@ fn a_notice_held_from_a_human_away_is_relayed_to_its_stand_in_who_is_told_whom_t
     let carol = human(&format!("name = \"carol\"\nants = [\"dev-b\"]\n{NTFY_SINK}")).unwrap();
     assert!(bob.gets_relayed_request(&shown.about), "bob is notified of dev-a's requests anyway");
     assert!(!carol.gets_relayed_request(&shown.about));
-    assert!(relayed(&bob, &shown, "quiet hours", None, is_human).is_none(), "a relay is relayed no further");
+    assert!(relayed(&bob, &shown, "quiet hours", is_human).is_none(), "a relay is relayed no further");
 
     let named = asked.clone().for_human(Some(p("alice")), Some(p("carol")));
     let notice = approval_notice(&named, 9, &p("alice"), None, None, now);
-    assert_eq!(relayed(&alice, &notice, "snoozed", None, is_human).unwrap().to, p("carol"), "the ant's stand-in");
+    assert_eq!(relayed(&alice, &notice, "snoozed", is_human).unwrap().to, p("carol"), "the ant's stand-in");
     let named = asked.clone().for_human(Some(p("alice")), Some(p("dev-b")));
     let notice = approval_notice(&named, 9, &p("alice"), None, None, now);
-    assert_eq!(
-        relayed(&alice, &notice, "snoozed", None, is_human).unwrap().to,
-        p("bob"),
-        "an ant stands in for no one"
-    );
-    assert!(relayed(&alice, &notice, "muted thread", None, is_human).is_none());
-    assert!(relayed(&bob, &notice, "snoozed", None, is_human).is_none(), "the request waits for another human");
+    assert_eq!(relayed(&alice, &notice, "snoozed", is_human).unwrap().to, p("bob"), "an ant stands in for no one");
+    assert!(relayed(&alice, &notice, "muted thread", is_human).is_none());
+    assert!(relayed(&bob, &notice, "snoozed", is_human).is_none(), "the request waits for another human");
     let unnamed = human(&format!("name = \"alice\"\n{NTFY_SINK}")).unwrap();
     let notice = approval_notice(&asked, 9, &p("alice"), None, None, now);
-    assert!(relayed(&unnamed, &notice, "snoozed", None, is_human).is_none(), "no stand-in");
-
-    let (pa, carol) = (p("pa"), p("carol"));
-    let relay = relayed(&unnamed, &notice, "snoozed", Some(&pa), is_human).unwrap();
-    assert_eq!((&relay.from, &relay.to, &relay.thread_id), (&p("alice"), &pa, &asked.thread_id));
-    assert!(
-        relay.text.starts_with("[ants] Relayed to pa, the assistant of alice, while alice is away (snoozed).\n\n"),
-        "{}",
-        relay.text
-    );
-    assert_eq!(relay.escalation.unwrap().away, Some(Away { human: p("alice"), ant: p("dev-a") }));
-    let named = asked.clone().for_human(Some(p("alice")), Some(carol.clone()));
-    let notice = approval_notice(&named, 9, &p("alice"), None, None, now);
-    assert_eq!(relayed(&unnamed, &notice, "snoozed", Some(&pa), is_human).unwrap().to, pa, "before the ant's");
-    assert_eq!(relayed(&alice, &notice, "snoozed", Some(&pa), is_human).unwrap().to, carol, "a human's set wins");
-    assert!(relayed(&unnamed, &notice, "muted thread", Some(&pa), is_human).is_none());
-    let notice = approval_notice(&asked, 9, &p("alice"), None, None, now);
-    assert!(relayed(&unnamed, &notice, "snoozed", Some(&p("bob")), is_human).is_none(), "an assistant is an ant");
+    assert!(relayed(&unnamed, &notice, "snoozed", is_human).is_none(), "no stand-in");
 
     let thread = ThreadId::generate();
     let stuck = Escalation {
@@ -273,7 +252,7 @@ fn a_notice_held_from_a_human_away_is_relayed_to_its_stand_in_who_is_told_whom_t
         ..Escalation::new(p("dev-a"), thread.clone(), EscalationReason::Asked)
     };
     let escalated = Envelope::new(p("dev-a"), p("alice"), "which branch?").with_escalation(Some(stuck));
-    let relay = relayed(&alice, &escalation_notice(&escalated).unwrap(), "snoozed", None, is_human).unwrap();
+    let relay = relayed(&alice, &escalation_notice(&escalated).unwrap(), "snoozed", is_human).unwrap();
     assert_eq!((&relay.to, &relay.thread_id), (&p("carol"), &thread));
     let shown = escalation_notice(&relay).unwrap();
     assert_eq!(shown.title, "for alice (away): dev-a escalates: asked on dev-a");
@@ -281,10 +260,7 @@ fn a_notice_held_from_a_human_away_is_relayed_to_its_stand_in_who_is_told_whom_t
     let forged = Envelope { from: p("dev-b"), ..relay };
     assert_eq!(escalation_notice(&forged).unwrap().title, "dev-b escalates: asked on dev-a", "relayed by no one away");
     let expired = escalated.with_escalation(Some(Escalation::of_request(&asked)));
-    assert!(
-        relayed(&alice, &escalation_notice(&expired).unwrap(), "snoozed", None, is_human).is_none(),
-        "nothing to answer"
-    );
+    assert!(relayed(&alice, &escalation_notice(&expired).unwrap(), "snoozed", is_human).is_none(), "nothing to answer");
 }
 
 #[test]

@@ -346,14 +346,13 @@ pub(super) fn away_of<'a>(from: &UserId, escalation: &'a Escalation) -> Option<&
 /// relayed: a pending tool request that waits for `human`, or an escalation an ant sent it, but not the notice of an
 /// expired request nor one relayed already, and not what a muted thread holds back. The stand-in is the one the ant
 /// named on it, else `human`'s own; it must be a human (`is_human`), as another ant would take the relay for a
-/// human's message, and not `human`. When `human` set no stand-in of its own, `assistant`, the ant its grant designates,
-/// stands in rather than the ant's. The relay goes on the escalation's or request's thread, from `human` to the
-/// stand-in, carrying the escalation (a request's as [`Escalation::of_request`] makes it) marked [`Escalation::away`].
+/// human's message, and not `human`. `human`'s assistant gets none: what reaches `human` went to it first, or while
+/// it could not act. The relay goes on the escalation's or request's thread, from `human` to the stand-in, carrying
+/// the escalation (a request's as [`Escalation::of_request`] makes it) marked [`Escalation::away`].
 pub(super) fn relayed(
     human: &Human,
     notice: &Notice,
     why: &str,
-    assistant: Option<&UserId>,
     is_human: impl Fn(&UserId) -> bool,
 ) -> Option<Envelope> {
     if why == "muted thread" {
@@ -372,22 +371,11 @@ pub(super) fn relayed(
     };
     let owner = &human.name;
     let valid = |user: &&UserId| *user != owner && is_human(user);
-    let own = human.stand_in.as_ref().filter(valid);
-    let assistant = assistant.filter(|ant| *ant != owner && !is_human(ant));
-    let (stand_in, text) = match (own, assistant) {
-        (None, Some(assistant)) => (
-            assistant,
-            format!("[ants] Relayed to {assistant}, the assistant of {owner}, while {owner} is away ({why})."),
-        ),
-        _ => {
-            let stand_in = named.filter(valid).or(own)?;
-            let text = format!(
-                "[ants] Relayed to {stand_in}, {owner}'s stand-in, while {owner} is away ({why}); an answer acts for \
-                 {owner}, who is told of it."
-            );
-            (stand_in, text)
-        }
-    };
+    let stand_in = named.filter(valid).or(human.stand_in.as_ref().filter(valid))?;
+    let text = format!(
+        "[ants] Relayed to {stand_in}, {owner}'s stand-in, while {owner} is away ({why}); an answer acts for {owner}, \
+         who is told of it."
+    );
     let text = format!("{text}\n\n{}\n\n{}", notice.title, notice.text);
     let escalation = Escalation { away: Some(Away { human: owner.clone(), ant: ant.clone() }), ..escalation };
     let thread = escalation.thread_id.clone();

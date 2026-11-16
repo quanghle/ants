@@ -2,6 +2,7 @@
 
 pub mod admin;
 pub mod approvals;
+pub mod assistant_first;
 pub mod attempts;
 pub mod behalf;
 pub mod breaker;

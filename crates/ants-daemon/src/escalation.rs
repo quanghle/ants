@@ -22,6 +22,15 @@
 //! ([`Escalator::deadlines`]). The thread's escalation lives with its spend in `ants_sessions` ([`Pending`]), so
 //! restarts keep its level and deadline.
 //!
+//! What would reach a human goes first to the human's assistant, when one stands for it and can act
+//! ([`AssistantFirst`]): one level up, led by the assistant alone ([`Escalation::to_assistant`]). The assistant settles
+//! it by answering the stuck ant on the thread, or acting for its human, or passes it on to its human with the escalate
+//! tool, which sends the stuck ant the escalation one level up, led by the human ([`Escalation::passed_on`]); the
+//! stuck ant's daemon then sends it to the human ([`Escalator::took_climb`]), as it does without an answer from the
+//! assistant within `escalate_after`. An ask_human question goes the same way ([`Escalator::ask_first`]): the human
+//! gets it as a question once passed on. While the assistant cannot act, it all goes to the human directly; a human's
+//! message still ends it at any point.
+//!
 //! An escalation that reaches a human carries the escalation, so `ants webhook serve` pushes it, and without a
 //! human's message on the thread by `escalation_reminder` the same human gets a reminder on the thread, carrying it
 //! too, then daily for as long as the stream keeps the escalation ([`Reminder`]). The reminder is kept with the
@@ -39,6 +48,7 @@ use futures::future::BoxFuture;
 use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 
+use crate::assistant_first::AssistantFirst;
 use crate::caps::{Ended, Ledger, Pending, Reminder};
 use crate::chains::Chains;
 use crate::humans::Registry;
@@ -148,6 +158,8 @@ pub enum Escalated {
     Chain { level: u32, leader: UserId, to: Vec<UserId> },
     /// To this human, the thread's owner or the default one.
     Owner(UserId),
+    /// To the assistant of the human it would have reached, before that human.
+    Assistant { assistant: UserId, human: UserId },
 }
 
 impl std::fmt::Display for Escalated {
@@ -157,6 +169,7 @@ impl std::fmt::Display for Escalated {
                 write!(f, "{} at level {level}, led by {leader}", join(to))
             }
             Self::Owner(human) => write!(f, "{human}"),
+            Self::Assistant { assistant, human } => write!(f, "{assistant}, the assistant of {human}"),
         }
     }
 }
@@ -173,6 +186,8 @@ pub struct Escalator {
     send: Sender,
     /// Gives the thread's notes a fresh budget as an escalation goes up a level; None leaves the notes as they are.
     notes: Option<NotesSender>,
+    /// Finds the assistant that gets first what would reach a human; None sends it to the human.
+    assistants: Option<AssistantFirst>,
     /// Held while an escalation is decided and stored, so two on one thread do not climb from the same level.
     busy: Mutex<()>,
     /// A deadline was set.
@@ -183,7 +198,25 @@ impl Escalator {
     /// Escalations of `ant` up `chain`, the chains of others read from `colony`, kept in `ledger`.
     pub fn new(ant: UserId, chain: Chain, colony: Colony, humans: Registry, ledger: Arc<Ledger>, send: Sender) -> Self {
         let (busy, deadline_set) = (Mutex::default(), Notify::new());
-        Self { ant, chain, colony, chains: None, humans, ledger, send, notes: None, busy, deadline_set }
+        Self {
+            ant,
+            chain,
+            colony,
+            chains: None,
+            humans,
+            ledger,
+            send,
+            notes: None,
+            assistants: None,
+            busy,
+            deadline_set,
+        }
+    }
+
+    /// Send what would reach a human to the assistant `assistants` finds for it first.
+    #[must_use]
+    pub fn with_assistants(self, assistants: AssistantFirst) -> Self {
+        Self { assistants: Some(assistants), ..self }
     }
 
     /// Follow the chain of a leader missing from the colony through `chains`.
@@ -227,6 +260,10 @@ impl Escalator {
         tracing::info!(%thread, reason = stuck.reason.as_str(), ?step, "escalating");
         match step {
             Step::Again(pending) if pending.at_owner() => self.to_owner(&pending.escalation, None, &stuck).await,
+            Step::Again(pending) if !self.assistant_leads(&pending.escalation).await => {
+                let summary = stuck.notice.text.clone();
+                self.climb(pending.escalation, &summary, &stuck, true).await
+            }
             Step::Again(pending) => {
                 self.to_chain(&pending.escalation, &pending.to, &stuck.notice.text, &stuck).await?;
                 Ok((chain_of(&pending.escalation, pending.to), None))
@@ -302,11 +339,16 @@ impl Escalator {
     pub async fn took_climb(&self, envelope: &Envelope) -> Result<bool> {
         let Some(carried) = envelope.escalation.as_deref() else { return Ok(false) };
         let thread = &envelope.thread_id;
+        if self.humans.is_human(&carried.leader) && passes_on(&self.ant, envelope, carried) {
+            self.passed_on(envelope, carried).await?;
+            return Ok(true);
+        }
         if carried.thread_id != *thread
             || carried.reason == EscalationReason::Approval
             || carried.stuck != self.ant
             || envelope.from == self.ant
             || carried.is_leader(&envelope.from)
+            || self.humans.is_human(&carried.leader)
         {
             return Ok(false);
         }
@@ -319,6 +361,110 @@ impl Escalator {
             }
         }
         Ok(true)
+    }
+
+    /// `envelope` from the assistant leading the thread's escalation passes it on to its human, the leader of
+    /// `carried`: the escalation goes to that human, unless it is no longer the assistant's to pass on.
+    async fn passed_on(&self, envelope: &Envelope, carried: &Escalation) -> Result<()> {
+        let thread = &envelope.thread_id;
+        let _busy = self.busy.lock().await;
+        let pending = self.ledger.pending(thread).await?.filter(|p| {
+            p.escalation.assistant_of.as_ref() == Some(&carried.leader)
+                && p.escalation.is_leader(&envelope.from)
+                && !p.at_owner()
+        });
+        let Some(pending) = pending else {
+            tracing::info!(%thread, from = %envelope.from, "ignoring a pass-on of an escalation no longer the assistant's");
+            return Ok(());
+        };
+        let (assistant, human) = (&envelope.from, &carried.leader);
+        let what = what_passes(&pending);
+        let text = format!(
+            "[ants] {assistant}, the assistant of {human}, passes {what} of {} on thread {thread} on to {human}: {}\n\n{}",
+            self.ant, envelope.text, pending.summary
+        );
+        let stuck =
+            self.passing_on(&pending, text, format!("passed-{}-{thread}-{}", self.ant, pending.escalation.level));
+        let (escalated, _) = self.climb(pending.escalation.clone(), &pending.summary, &stuck, true).await?;
+        tracing::info!(%thread, %assistant, %escalated, "the assistant passed the escalation on");
+        Ok(())
+    }
+
+    /// What the thread's escalation `pending`, led by an assistant, sends its human with `text` under message id `id`.
+    fn passing_on(&self, pending: &Pending, text: String, id: String) -> Stuck {
+        let escalation = &pending.escalation;
+        let human =
+            escalation.assistant_of.clone().unwrap_or_else(|| self.humans.owner_or_default(pending.owner.as_ref()));
+        let mut notice = Envelope::on_thread(escalation.thread_id.clone(), self.ant.clone(), human, text)
+            .with_owner(pending.owner.clone())
+            .with_creator(pending.creator.clone())
+            .with_origin_thread(pending.origin_thread.clone());
+        notice.question = pending.question.as_deref().cloned();
+        Stuck {
+            reason: escalation.reason,
+            request_id: escalation.request_id,
+            notice,
+            id,
+            carried: None,
+            channel: pending.channel.clone(),
+        }
+    }
+
+    /// Ask `notice`, an ask_human question to a human, of that human's assistant first, when one stands for it and can
+    /// act, and the thread has no escalation going but a question settled: the question is the thread's escalation
+    /// then, going on to the human without the assistant's answer within `escalate_after`. Returns the assistant;
+    /// None leaves the question for the caller to send to the human.
+    pub async fn ask_first(&self, notice: &Envelope) -> Result<Option<UserId>> {
+        let Some(assistants) = &self.assistants else { return Ok(None) };
+        let (thread, human) = (&notice.thread_id, &notice.to);
+        let _busy = self.busy.lock().await;
+        if self.ledger.pending(thread).await?.is_some_and(|p| !settled_question(&p)) {
+            return Ok(None);
+        }
+        let Some(assistant) = assistants.of(human, &self.ant).await else { return Ok(None) };
+        let escalation = Escalation::new(self.ant.clone(), thread.clone(), EscalationReason::Question)
+            .to_assistant(assistant.clone(), human.clone());
+        let deadline = self.chain.after.map(|after| now_ms() + millis(after));
+        let pending = Pending {
+            escalation: escalation.clone(),
+            to: vec![assistant.clone()],
+            renewed_by: None,
+            deadline,
+            owner: notice.owner.clone(),
+            creator: notice.creator.clone(),
+            origin_thread: notice.origin_thread.clone(),
+            summary: notice.text.chars().take(SUMMARY_CHARS).collect(),
+            channel: None,
+            question: notice.question.clone().map(Box::new),
+        };
+        self.ledger.set_pending(thread, Some(pending)).await?;
+        if deadline.is_some() {
+            self.deadline_set.notify_one();
+        }
+        let text = chain_text(&escalation, std::slice::from_ref(&assistant), &notice.text);
+        let mut asked = Envelope { to: assistant.clone(), text, question: None, ..notice.clone() };
+        asked.escalation = Some(Box::new(escalation));
+        (self.send)(asked, format!("question-{}", notice.id)).await?;
+        tracing::info!(%thread, %human, %assistant, "asked the human's assistant first");
+        Ok(Some(assistant))
+    }
+
+    /// Whether the assistant leading `escalation`, if one does, still stands for its human and can act.
+    async fn assistant_leads(&self, escalation: &Escalation) -> bool {
+        let (Some(human), Some(assistants)) = (&escalation.assistant_of, &self.assistants) else { return true };
+        assistants.of(human, &self.ant).await.as_ref() == Some(&escalation.leader)
+    }
+
+    /// The assistant of the human `stuck` would reach that gets `from`'s escalation first, if any: not a tool
+    /// request's, which [`crate::approvals`] sends, nor one the assistant had already.
+    async fn assistant_first(&self, from: &Escalation, stuck: &Stuck) -> Option<(UserId, UserId)> {
+        let assistants = self.assistants.as_ref()?;
+        if from.reason == EscalationReason::Approval || from.assistant_of.is_some() {
+            return None;
+        }
+        let human = &stuck.notice.to;
+        let assistant = assistants.of(human, &self.ant).await?;
+        (!from.is_visited(&assistant)).then(|| (assistant, human.clone()))
     }
 
     /// Send every escalation whose leader did not answer by its deadline one level higher, and every reminder due, as
@@ -372,6 +518,20 @@ impl Escalator {
             };
             let escalation = &pending.escalation;
             let waited = self.chain.after.map_or_else(String::new, |after| format!(" within {}", duration(after)));
+            let id = format!("overdue-{}-{thread}-{}", self.ant, escalation.level);
+            if let Some(human) = &escalation.assistant_of {
+                let text = format!(
+                    "[ants] No answer from {}, the assistant of {human}, on thread {thread}{waited}; {} goes on to \
+                     {human}.\n\n{}",
+                    escalation.leader,
+                    what_passes(&pending),
+                    pending.summary
+                );
+                let stuck = self.passing_on(&pending, text, id);
+                let (escalated, _) = self.climb(escalation.clone(), &pending.summary, &stuck, true).await?;
+                tracing::info!(%thread, %escalated, "passed on past the deadline");
+                continue;
+            }
             let text = format!(
                 "[ants] No answer from {} on thread {thread}{waited}; the escalation goes one level higher.\n\n{}",
                 escalation.leader, pending.summary
@@ -385,7 +545,7 @@ impl Escalator {
                 reason: escalation.reason,
                 request_id: escalation.request_id,
                 notice,
-                id: format!("overdue-{}-{thread}-{}", self.ant, escalation.level),
+                id,
                 carried: None,
                 channel: pending.channel.clone(),
             };
@@ -410,17 +570,24 @@ impl Escalator {
         let summary: String = summary.chars().take(SUMMARY_CHARS).collect();
         let (owner, creator) = (stuck.notice.owner.clone(), stuck.notice.creator.clone());
         let origin_thread = stuck.notice.origin_thread.clone();
-        match from.up(&chain, self.chain.max_hops) {
+        let mut hop = from.up(&chain, self.chain.max_hops);
+        if matches!(hop, Hop::Owner(_))
+            && let Some((assistant, human)) = self.assistant_first(&from, stuck).await
+        {
+            hop = Hop::Chain { escalation: Box::new(from.to_assistant(assistant.clone(), human)), to: vec![assistant] };
+        }
+        match hop {
             Hop::Chain { escalation, to } => {
                 let ours = escalation.stuck == self.ant;
                 let deadline = self.chain.after.filter(|_| ours).map(|after| now_ms() + millis(after));
-                // Before the escalation is stored: a retry stores the post again under the same id.
-                if let Some(notes) = &self.notes {
+                // Before the escalation is stored: a retry stores the post again under the same id. An assistant
+                // settles alone, with no group to coordinate in the notes.
+                if let Some(notes) = self.notes.as_ref().filter(|_| escalation.assistant_of.is_none()) {
                     let post = NotesPost::new(thread.clone(), self.ant.clone(), notes_text(&escalation, &to));
                     notes(post, format!("{}/notes", stuck.id)).await?;
                 }
                 let pending = Pending {
-                    escalation: escalation.clone(),
+                    escalation: (*escalation).clone(),
                     to: to.clone(),
                     renewed_by: None,
                     deadline,
@@ -429,6 +596,7 @@ impl Escalator {
                     origin_thread,
                     summary,
                     channel: stuck.channel.clone(),
+                    question: stuck.notice.question.clone().map(Box::new),
                 };
                 self.ledger.set_pending(thread, Some(pending)).await?;
                 if deadline.is_some() {
@@ -438,6 +606,10 @@ impl Escalator {
                 Ok((chain_of(&escalation, to), None))
             }
             Hop::Owner(because) => {
+                let from = match because {
+                    OwnerBecause::PassedOn => from.passed_on().unwrap_or(from),
+                    _ => from,
+                };
                 if from.level > 0 || had_pending {
                     let pending = Pending {
                         escalation: from.clone(),
@@ -449,6 +621,7 @@ impl Escalator {
                         origin_thread,
                         summary,
                         channel: stuck.channel.clone(),
+                        question: stuck.notice.question.clone().map(Box::new),
                     };
                     self.ledger.set_pending(thread, Some(pending)).await?;
                 }
@@ -537,8 +710,14 @@ impl Escalator {
             notice.text = format!("{}\n\n{why}", notice.text);
         }
         let escalation = &Escalation { stand_in: self.chain.stand_in.clone(), ..escalation.clone() };
-        let notice = notice.with_escalation(Some(escalation.clone()));
         let human = notice.to.clone();
+        let why = because.map(|because| why_text(escalation, &because));
+        if stuck.reason == EscalationReason::Question && notice.question.is_some() {
+            // Asked of the human as the question it is, which the human answers as any ask_human question.
+            (self.send)(Envelope { escalation: None, ..notice }, stuck.id.clone()).await?;
+            return Ok((Escalated::Owner(human), why));
+        }
+        let notice = notice.with_escalation(Some(escalation.clone()));
         if let Some(remind) = self.chain.remind.filter(|_| escalation.reason != EscalationReason::Approval) {
             let now = now_ms();
             let reminder = Reminder {
@@ -558,7 +737,7 @@ impl Escalator {
             self.ledger.reached_human(&notice.thread_id, human.clone()).await?;
         }
         (self.send)(notice, stuck.id.clone()).await?;
-        Ok((Escalated::Owner(human), because.map(|because| why_text(escalation, &because))))
+        Ok((Escalated::Owner(human), why))
     }
 
     /// The escalate_to of `leader`: the ant's own, else what the colony lists, else the chain kept for it once its
@@ -617,6 +796,7 @@ fn next_step(
 ) -> Step {
     let Fresh { ant, origin, thread, reason } = fresh;
     let carried = carried.filter(|c| &c.thread_id == thread);
+    let pending = pending.filter(|p| !settled_question(p));
     let retarget = |e: &Escalation| Escalation { reason, request_id, ..e.clone() };
     match (carried, pending) {
         (Some(c), Some(p)) if c.level > p.escalation.level => Step::Climb(retarget(c)),
@@ -628,12 +808,53 @@ fn next_step(
 }
 
 fn chain_of(escalation: &Escalation, to: Vec<UserId>) -> Escalated {
-    Escalated::Chain { level: escalation.level, leader: escalation.leader.clone(), to }
+    match &escalation.assistant_of {
+        Some(human) => Escalated::Assistant { assistant: escalation.leader.clone(), human: human.clone() },
+        None => Escalated::Chain { level: escalation.level, leader: escalation.leader.clone(), to },
+    }
 }
 
-/// The text every member of a chain gets: the escalation, how the members settle it, and `summary`.
+/// Whether `pending` is an ask_human question settled: answered by the assistant or asked of the human. It holds back
+/// neither another question nor an escalation, which start afresh.
+fn settled_question(pending: &Pending) -> bool {
+    pending.escalation.reason == EscalationReason::Question && (pending.renewed_by.is_some() || pending.at_owner())
+}
+
+/// What an assistant passes on of `pending`: the question or the escalation.
+fn what_passes(pending: &Pending) -> &'static str {
+    match pending.escalation.reason {
+        EscalationReason::Question => "the question",
+        _ => "the escalation",
+    }
+}
+
+/// Whether `envelope` passes the escalation `carried` of the ant's thread on to a human: from the assistant leading the
+/// level below, it carries the level that human leads ([`Escalation::passed_on`]).
+fn passes_on(ant: &UserId, envelope: &Envelope, carried: &Escalation) -> bool {
+    carried.thread_id == envelope.thread_id
+        && carried.stuck == *ant
+        && carried.assistant_of.is_none()
+        && envelope.from != *ant
+        && carried.visited.ends_with(&[envelope.from.clone(), carried.leader.clone()])
+        && carried.reason != EscalationReason::Approval
+}
+
+/// The text every member of a chain gets: the escalation, how the members settle it, and `summary`; for the
+/// assistant leading a level alone, how it settles it or passes it on to its human.
 fn chain_text(escalation: &Escalation, to: &[UserId], summary: &str) -> String {
     let (thread, leader, stuck) = (&escalation.thread_id, &escalation.leader, &escalation.stuck);
+    if let Some(human) = &escalation.assistant_of {
+        let what = match escalation.reason {
+            EscalationReason::Question => format!("{stuck} asks {human} a question"),
+            reason => format!("{stuck} is stuck ({}) and would reach {human}", reason_text(reason)),
+        };
+        return format!(
+            "[ants] Escalation on thread {thread}: {what}; it comes to {leader}, the assistant of {human}, first. \
+             {leader} settles what it can, by answering {stuck} on thread {thread} or acting for {human}, and \
+             passes on to {human} what it cannot (escalate tool); without an answer from {leader} it goes on to \
+             {human} after escalate_after. A message from {human} ends it.\n\n{summary}"
+        );
+    }
     format!(
         "[ants] Escalation on thread {thread}, level {}: {stuck} is stuck ({}). Sent to {}; {leader} leads. The members \
          coordinate in the notes of thread {thread} (read_notes, post_notes). Only {leader} resolves it, by \
@@ -700,6 +921,13 @@ pub fn route<'a>(ant: &UserId, envelope: &'a Envelope) -> Option<(&'a Escalation
 pub fn group_note(ant: &UserId, envelope: &Envelope) -> Option<String> {
     let (e, route) = route(ant, envelope)?;
     let (thread, leader, stuck) = (&e.thread_id, &e.leader, &e.stuck);
+    if let Some(human) = &e.assistant_of {
+        return Some(format!(
+            "[ants] {ant} has {stuck}'s escalation on thread {thread} as the assistant of {human}, which it would \
+             reach: answer {stuck} with what settles it (the reply to this message goes to {stuck}), act for {human} \
+             where it needs that, or pass it on to {human} with the escalate tool, saying why."
+        ));
+    }
     let role = if e.is_leader(ant) {
         format!(
             "{ant} leads: it alone resolves the escalation, by answering {stuck} on thread {thread}, or sends it \
@@ -725,10 +953,11 @@ pub fn group_note(ant: &UserId, envelope: &Envelope) -> Option<String> {
 
 /// Why an escalation went to the owner, for the ant that asked for it.
 fn why_text(escalation: &Escalation, because: &OwnerBecause) -> String {
-    owner_text(escalation, because)
-        .unwrap_or_else(|| format!("{} has no escalate_to chain.", escalation.leader))
-        .trim_start_matches("[ants] ")
-        .to_owned()
+    let default = || match because {
+        OwnerBecause::PassedOn => "the assistant passed it on.".to_owned(),
+        _ => format!("{} has no escalate_to chain.", escalation.leader),
+    };
+    owner_text(escalation, because).unwrap_or_else(default).trim_start_matches("[ants] ").to_owned()
 }
 
 /// Why an escalation went to the owner, unless it never went up a chain for want of one.
@@ -750,6 +979,7 @@ fn owner_text(escalation: &Escalation, because: &OwnerBecause) -> Option<String>
         OwnerBecause::HopLimit(max) => {
             Some(format!("[ants] The escalation of {stuck} reached the hop limit (max_escalation_hops = {max})."))
         }
+        OwnerBecause::PassedOn => None,
     }
 }
 
@@ -763,6 +993,7 @@ fn reason_text(reason: EscalationReason) -> &'static str {
         EscalationReason::Asked => "asked for help",
         EscalationReason::ContextWindow => "context window exceeded",
         EscalationReason::Harness => "the harness keeps failing to start",
+        EscalationReason::Question => "a question for a human",
         EscalationReason::Storage => "JetStream storage filling up",
         EscalationReason::Unknown => "reason unknown",
     }
@@ -811,13 +1042,14 @@ mod tests {
             origin_thread: None,
             summary: String::new(),
             channel: None,
+            question: None,
         }
     }
 
     fn level(e: &Escalation, chain: &[&str]) -> Escalation {
         let chain: Vec<_> = chain.iter().map(|s| p(s)).collect();
         match e.up(&chain, 3) {
-            Hop::Chain { escalation, .. } => escalation,
+            Hop::Chain { escalation, .. } => *escalation,
             Hop::Owner(because) => panic!("to the owner: {because:?}"),
         }
     }
@@ -933,5 +1165,143 @@ mod tests {
         assert_eq!(owner_text(&start, &OwnerBecause::NoChain), None, "as before chains");
         assert!(owner_text(&one, &OwnerBecause::HopLimit(1)).unwrap().contains("hop limit (max_escalation_hops = 1)"));
         assert!(owner_text(&one, &OwnerBecause::Visited(p("dev-a"))).unwrap().contains("dev-a had it already"));
+    }
+
+    mod assistant_first {
+        use std::sync::Mutex as StdMutex;
+
+        use ants_proto::{AssistantGrant, ColonyEntry, Question};
+
+        use super::*;
+        use crate::humans::TestDevice;
+
+        type Sent = Arc<StdMutex<Vec<Envelope>>>;
+
+        fn entry(ant: &str) -> ColonyEntry {
+            crate::assistant_first::live(&p(ant))
+        }
+
+        /// alice's grant naming `assistant`, or withdrawing the one standing with None.
+        fn grant(humans: &Registry, device: &TestDevice, assistant: Option<&str>) {
+            let mut grant =
+                AssistantGrant::new(p("alice"), assistant.map(p), chrono::Utc::now(), device.jwt(&p("alice")));
+            grant.signature = device.sign(&grant.signed());
+            humans.put_record(&grant.key(), Some(&serde_json::to_vec(&grant).unwrap()));
+        }
+
+        /// dev-a's escalator with no chain, alice's assistant pa listed as `colony` has it, and what it sends.
+        fn escalator(humans: &Registry, colony: Vec<ColonyEntry>, after: Option<Duration>) -> (Escalator, Sent) {
+            let sent = Sent::default();
+            let into = sent.clone();
+            let send: Sender = Arc::new(move |envelope, _id| {
+                into.lock().unwrap().push(envelope);
+                Box::pin(async { Ok(()) })
+            });
+            let colony: Colony = Arc::new(move || {
+                let colony = colony.clone();
+                Box::pin(async move { Ok(colony) })
+            });
+            let record: crate::assistant_first::RecordOf = Arc::new(|_| Box::pin(async { Some(p("alice")) }));
+            let assistants = AssistantFirst::new(humans.clone(), colony.clone(), record);
+            let chain = Chain { after, ..Default::default() };
+            let ledger = Arc::new(Ledger::memory(p("dev-a"), crate::caps::Caps::default()));
+            let escalator = Escalator::new(p("dev-a"), chain, colony, humans.clone(), ledger, send);
+            (escalator.with_assistants(assistants), sent)
+        }
+
+        fn humans() -> (Registry, TestDevice) {
+            let device = TestDevice::default();
+            let humans = Registry::with(UserId::human(), &["alice"]).verifying_grants(Some(device.account()));
+            grant(&humans, &device, Some("pa"));
+            (humans, device)
+        }
+
+        fn stuck() -> Stuck {
+            let notice =
+                Envelope::on_thread(t(), p("dev-a"), p("alice"), "turn budget spent").with_owner(Some(p("alice")));
+            Stuck::new(EscalationReason::TurnBudget, notice, "stuck-1".to_owned(), None)
+        }
+
+        fn take(sent: &Sent) -> Vec<Envelope> {
+            std::mem::take(&mut *sent.lock().unwrap())
+        }
+
+        #[tokio::test]
+        async fn a_stuck_escalation_goes_to_the_assistant_which_passes_it_on() {
+            let (humans, _device) = humans();
+            let (escalator, sent) = escalator(&humans, vec![entry("pa")], None);
+            let escalated = escalator.escalate(stuck()).await.unwrap();
+            assert_eq!(escalated, Escalated::Assistant { assistant: p("pa"), human: p("alice") });
+            let [asked] = take(&sent).try_into().unwrap();
+            let carried = asked.escalation.as_deref().unwrap().clone();
+            assert_eq!((&asked.to, &carried.leader, &carried.assistant_of), (&p("pa"), &p("pa"), &Some(p("alice"))));
+
+            // Only the assistant passes it on, and only once.
+            let passed = carried.passed_on().unwrap();
+            let by = |from: &str| {
+                Envelope::on_thread(t(), p(from), p("dev-a"), "a human must decide")
+                    .with_escalation(Some(passed.clone()))
+            };
+            assert!(!escalator.took_climb(&by("dev-b")).await.unwrap(), "not the assistant");
+            assert!(escalator.took_climb(&by("pa")).await.unwrap());
+            let [told] = take(&sent).try_into().unwrap();
+            assert_eq!(told.to, p("alice"));
+            assert!(told.text.contains("pa, the assistant of alice, passes the escalation of dev-a"), "{}", told.text);
+            assert!(told.text.contains("a human must decide"), "{}", told.text);
+            assert_eq!(told.escalation.as_deref().unwrap().assistant_of, None);
+            assert!(escalator.ledger.pending(&t()).await.unwrap().unwrap().at_owner());
+            assert!(escalator.took_climb(&by("pa")).await.unwrap());
+            assert!(take(&sent).is_empty(), "passed on already");
+        }
+
+        #[tokio::test]
+        async fn one_the_assistant_does_not_answer_in_time_goes_on_to_its_human() {
+            let (humans, _device) = humans();
+            let (escalator, sent) = escalator(&humans, vec![entry("pa")], Some(Duration::from_millis(1)));
+            escalator.escalate(stuck()).await.unwrap();
+            assert!(escalator.ledger.pending(&t()).await.unwrap().unwrap().deadline.is_some());
+            take(&sent);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            escalator.overdue().await.unwrap();
+            let [told] = take(&sent).try_into().unwrap();
+            assert_eq!(told.to, p("alice"));
+            assert!(told.text.starts_with("[ants] No answer from pa, the assistant of alice"), "{}", told.text);
+        }
+
+        #[tokio::test]
+        async fn while_the_assistant_cannot_act_it_goes_to_the_human() {
+            let paused =
+                ColonyEntry { paused: Some(ants_proto::Paused { since: chrono::Utc::now(), by: None }), ..entry("pa") };
+            let stale = ColonyEntry { heartbeat_at: chrono::Utc::now() - chrono::Duration::hours(1), ..entry("pa") };
+            for colony in [vec![], vec![paused], vec![stale]] {
+                let (humans, _device) = humans();
+                let (escalator, _sent) = escalator(&humans, colony, None);
+                assert_eq!(escalator.escalate(stuck()).await.unwrap(), Escalated::Owner(p("alice")));
+            }
+            let (humans, device) = humans();
+            grant(&humans, &device, None);
+            let (escalator, sent) = escalator(&humans, vec![entry("pa")], None);
+            assert_eq!(escalator.escalate(stuck()).await.unwrap(), Escalated::Owner(p("alice")), "withdrawn");
+            assert_eq!(take(&sent)[0].to, p("alice"));
+        }
+
+        #[tokio::test]
+        async fn a_question_goes_to_the_assistant_then_to_its_human_as_the_question() {
+            let (humans, _device) = humans();
+            let (escalator, sent) = escalator(&humans, vec![entry("pa")], Some(Duration::from_millis(1)));
+            let mut notice = Envelope::on_thread(t(), p("dev-a"), p("alice"), "which one?");
+            notice.question = Some(Question::new("which one?", &["a".to_owned(), "b".to_owned()], true).unwrap());
+            assert_eq!(escalator.ask_first(&notice).await.unwrap(), Some(p("pa")));
+            let [asked] = take(&sent).try_into().unwrap();
+            assert_eq!((&asked.to, &asked.question), (&p("pa"), &None));
+            let escalation = asked.escalation.as_deref().unwrap();
+            assert_eq!((escalation.reason, &escalation.assistant_of), (EscalationReason::Question, &Some(p("alice"))));
+
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            escalator.overdue().await.unwrap();
+            let [told] = take(&sent).try_into().unwrap();
+            assert_eq!((&told.to, &told.question, &told.escalation), (&p("alice"), &notice.question, &None));
+            assert!(told.text.contains("the question goes on to alice"), "{}", told.text);
+        }
     }
 }

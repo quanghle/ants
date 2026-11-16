@@ -90,6 +90,7 @@ fn escalation() -> Escalation {
         visited: vec![user("dev-a"), user("lead")],
         stand_in: None,
         away: None,
+        assistant_of: None,
     }
 }
 
@@ -453,6 +454,15 @@ fn escalations() {
         ..escalation()
     };
     snap("escalation_relayed", &relayed);
+    let assistant = Escalation {
+        reason: EscalationReason::Question,
+        request_id: None,
+        leader: user("pa"),
+        visited: vec![user("dev-a"), user("pa")],
+        assistant_of: Some(user("alice")),
+        ..escalation()
+    };
+    snap("escalation_to_assistant", &assistant);
     snap(
         "escalation_reason_variants",
         &[
@@ -465,6 +475,7 @@ fn escalations() {
             EscalationReason::ContextWindow,
             EscalationReason::Harness,
             EscalationReason::Storage,
+            EscalationReason::Question,
             EscalationReason::Unknown,
         ],
     );

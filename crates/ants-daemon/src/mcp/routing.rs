@@ -279,7 +279,7 @@ fn nobody_has(capability: &str, entries: &[ColonyEntry]) -> String {
 /// Why no daemon serves `ant` now, given its colony entry, or None when one does: no entry, a stale one (see
 /// [`colony::is_live`]), a pause, a harness signed out or failing to start, or a provider limit holding its messages past `wait`
 /// from `now`, with no fallback answering for it.
-pub(super) fn why_unserved(
+pub(crate) fn why_unserved(
     ant: &UserId,
     entry: Option<&ColonyEntry>,
     now: chrono::DateTime<chrono::Utc>,

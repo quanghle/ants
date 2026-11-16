@@ -1,7 +1,7 @@
 //! `escalate`, sending the thread up its origin chain when the ant is stuck on it (see [`crate::escalation`]), and
 //! `decide_approval`, answering the tool request of another ant that came up the chain (see [`crate::approvals`]).
 
-use ants_proto::{ApprovalDecision, Envelope, EscalationReason, ThreadId, UserId, Verdict};
+use ants_proto::{ApprovalDecision, Envelope, Escalation, EscalationReason, ThreadId, UserId, Verdict};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
 use rmcp::service::RequestContext;
@@ -35,6 +35,13 @@ impl Hub {
         if let Some(e) = current.escalation.as_deref().filter(|e| e.reason == EscalationReason::Approval)
             && e.stuck != self.ant
         {
+            if let (Some(human), Some(id)) = (&e.assistant_of, e.request_id) {
+                return Err(format!(
+                    "the message being handled is {}'s tool request, which waits for {human} too: decide it for \
+                     {human} with decide_for_human {}/{id}, or leave it to {human}",
+                    e.stuck, e.stuck
+                ));
+            }
             return Err(format!(
                 "the message being handled is {}'s approval request, which goes no higher: decide it with \
                  decide_approval (reject when unsure), or leave it to {}'s owner",
@@ -49,6 +56,11 @@ impl Hub {
                 "only {leader} escalates the escalation of {stuck}'s thread {thread}; post what blocks it to the \
                  thread notes (post_notes) for {leader} to weigh"
             ));
+        }
+        if let Some(e) = escalation::group(&self.ant, &current).filter(|e| e.is_leader(&self.ant))
+            && let Some(passed) = e.passed_on()
+        {
+            return self.pass_on(&current, passed, issue).await;
         }
         let human = self.humans.owner_of(&current);
         let text =
@@ -73,9 +85,28 @@ impl Hub {
                      thread. The members coordinate in its thread notes (read_notes)."
                 )
             }
+            (Escalated::Assistant { assistant, human }, _) => format!(
+                "Escalated thread {thread} to {assistant}, the assistant of {human}, first: it answers on this thread \
+                 or passes it on to {human}."
+            ),
             (Escalated::Owner(human), Some(why)) => format!("Escalated thread {thread} to its owner {human}: {why}"),
             (Escalated::Owner(human), None) => format!("Escalated thread {thread} to its owner {human}."),
         })
+    }
+
+    /// Pass the escalation `current` carries, which the ant leads as the assistant of a human, on to that human for
+    /// `issue`: the stuck ant's daemon gets `passed`, the level the human leads, and sends it to the human.
+    async fn pass_on(&self, current: &Envelope, passed: Escalation, issue: String) -> Result<String, String> {
+        let (thread, stuck, human) = (passed.thread_id.clone(), passed.stuck.clone(), passed.leader.clone());
+        let mut envelope = Envelope::on_thread(thread.clone(), self.ant.clone(), stuck.clone(), issue)
+            .with_owner(current.owner.clone())
+            .with_creator(current.creator.clone())
+            .with_origin_thread(current.origin_thread.clone())
+            .with_escalation(Some(passed));
+        envelope.in_reply_to = Some(current.id);
+        self.send(&envelope).await?;
+        tracing::info!(%thread, %stuck, %human, "passed the escalation on to the human");
+        Ok(format!("Passed the escalation of {stuck} on thread {thread} on to {human}; {human} answers {stuck}."))
     }
 
     /// Send the ant's `verdict` on the approval request that the message `thread` is handling escalates, to the
@@ -92,6 +123,13 @@ impl Hub {
             .ok_or("the message being handled is no approval request; decide_approval answers one sent up the chain")?;
         if escalation.stuck == self.ant {
             return Err("the approval request is this ant's own; its chain or a human decides it".to_owned());
+        }
+        if let Some(human) = &escalation.assistant_of {
+            let stuck = &escalation.stuck;
+            return Err(format!(
+                "the request came to this ant as the assistant of {human}: decide it with decide_for_human \
+                 {stuck}/{id}, which takes effect once {human} confirms it or a pre-allow rule covers it"
+            ));
         }
         let decision = ApprovalDecision::new(id, escalation.stuck.clone(), verdict);
         let envelope = Envelope::decision(escalation.thread_id.clone(), self.ant.clone(), decision)
@@ -113,7 +151,8 @@ impl Tools {
         created the thread with a channel post, else this ant's, to the escalate_to ants (the first leads and \
         answers on the thread), and to the thread's owner when no chain is left. On an escalation \
         group's message only its leader escalates, one level higher; the other members post to the thread notes. \
-        Returns where it went.")]
+        What would reach a human goes to the human's assistant first, when one can act; the assistant handling such \
+        an escalation or question passes it on to its human with this tool. Returns where it went.")]
     async fn escalate(
         &self,
         Parameters(args): Parameters<Escalate>,

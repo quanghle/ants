@@ -240,6 +240,10 @@ pub struct Pending {
     /// The channel of the thread, when the ant got stuck on a post there: the leader's answer is posted back to it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<ChannelId>,
+    /// The ask_human question the escalation is, asked of the human's assistant first: asked of the human when it
+    /// goes on ([`ants_proto::EscalationReason::Question`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<Box<ants_proto::Question>>,
 }
 
 impl Pending {
@@ -969,7 +973,7 @@ mod tests {
         let to = to.iter().map(|p| p.parse().unwrap()).collect();
         let summary = "stuck".to_owned();
         Pending {
-            escalation,
+            escalation: *escalation,
             to,
             renewed_by: None,
             deadline,
@@ -978,6 +982,7 @@ mod tests {
             origin_thread: None,
             summary,
             channel: None,
+            question: None,
         }
     }
 

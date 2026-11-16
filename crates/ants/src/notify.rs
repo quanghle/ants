@@ -327,8 +327,7 @@ async fn notify(human: &Notified, bus: &HumanBus, links: Option<&Links>, subject
 /// Relay `notice`, held back from `human` by `why`, to its stand-in ([`relayed`]) when `human` is away: no device of
 /// its sinks follows what the notice is about. The relay is stored once, whichever process of `human` relays it.
 async fn relay(human: &Human, bus: &HumanBus, notice: &Notice, why: &str, seq: u64) {
-    let assistant = bus.humans.assistant(&human.name);
-    let Some(relay) = relayed(human, notice, why, assistant.as_ref(), |user| bus.humans.is_human(user)) else { return };
+    let Some(relay) = relayed(human, notice, why, |user| bus.humans.is_human(user)) else { return };
     let what = if matches!(notice.about, About::Approval { .. }) { Following::Approvals } else { Following::Inbox };
     let reading = bus.present.following(&human.name, human.devices(), what).await;
     if !reading.is_empty() {

@@ -25,7 +25,7 @@ async fn decide_approval_answers_a_request_from_the_chain() {
     };
     let asked = Envelope::on_thread(request.thread_id.clone(), user("dev-b"), user("dev-a"), "may it?")
         .with_owner(Some(UserId::human()))
-        .with_escalation(Some(escalation));
+        .with_escalation(Some(*escalation));
     let client = {
         let (url, token) = http_server(&mcp, &asked.thread_id);
         http_client(&url, &token).await
@@ -112,7 +112,7 @@ async fn escalate_goes_up_the_chain_and_only_the_leader_sends_it_higher() {
         panic!("a chain")
     };
     let member = Envelope::on_thread(thread.clone(), user("dev-c"), user("dev-a"), "help dev-c")
-        .with_escalation(Some(theirs.clone()));
+        .with_escalation(Some(*theirs.clone()));
     drop(_turn);
     let _turn = mcp.begin(&member);
     let (ok, text) = call(&client, "escalate", serde_json::json!({"issue": "no idea"})).await;
@@ -126,7 +126,7 @@ async fn escalate_goes_up_the_chain_and_only_the_leader_sends_it_higher() {
     let start = ants_proto::Escalation::new(user("dev-c"), other.clone(), EscalationReason::TurnBudget);
     let ants_proto::Hop::Chain { escalation: led, .. } = start.up(&[user("dev-a")], 3) else { panic!("a chain") };
     let leading =
-        Envelope::on_thread(other.clone(), user("dev-c"), user("dev-a"), "help dev-c").with_escalation(Some(led));
+        Envelope::on_thread(other.clone(), user("dev-c"), user("dev-a"), "help dev-c").with_escalation(Some(*led));
     let client = {
         let (url, token) = http_server(&mcp, &other);
         http_client(&url, &token).await
@@ -190,4 +190,27 @@ async fn escalate_without_a_chain_goes_to_the_owner() {
     assert!(ok && text.ends_with("to its owner human: dev-a has no escalate_to chain."), "{text}");
     let notice = sent.try_recv().unwrap();
     assert_eq!((notice.to, notice.in_reply_to), (UserId::human(), Some(current.id)));
+}
+
+#[tokio::test]
+async fn an_assistant_passes_an_escalation_on_to_its_human() {
+    let (mcp, mut sent) = start_escalating(&home("escalate-assistant"), &["lead"]).await;
+    let stuck = ants_proto::Escalation::new(user("dev-c"), ThreadId::generate(), EscalationReason::TurnBudget);
+    let led = stuck.to_assistant(user("dev-a"), user("alice"));
+    let current = Envelope::on_thread(led.thread_id.clone(), user("dev-c"), user("dev-a"), "help dev-c")
+        .with_escalation(Some(led.clone()));
+    let client = {
+        let (url, token) = http_server(&mcp, &current.thread_id);
+        http_client(&url, &token).await
+    };
+    let _turn = mcp.begin(&current);
+    let (ok, text) = call(&client, "escalate", serde_json::json!({"issue": "alice must pick"})).await;
+    assert!(ok && text.contains("Passed the escalation of dev-c") && text.contains("on to alice"), "{text}");
+    let out = sent.try_recv().unwrap();
+    assert_eq!(
+        (&out.to, &out.text, out.in_reply_to),
+        (&user("dev-c"), &"alice must pick".to_owned(), Some(current.id))
+    );
+    assert_eq!(out.escalation.as_deref(), led.passed_on().as_ref());
+    assert!(sent.try_recv().is_err(), "not up the assistant's own chain");
 }
