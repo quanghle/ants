@@ -148,6 +148,8 @@ fn quiet_hours_read_the_wall_clock_of_their_time_zone_across_midnight() {
         ("timezone = \"Asia/Tokyo\"", "timezone goes with quiet only"),
         ("quiet = \"22:00-07:00\"\ntimezone = \"Mars/Base\"", "unknown time zone"),
         ("bypass = [\"completions\"]", "unknown variant"),
+        ("completion_window = \"1m\"", "goes with completions = true only"),
+        ("completions = true\ncompletion_window = \"2h\"", "from 0 to 1h"),
     ] {
         let text = format!("name = \"bob\"\n{text}\n{NTFY_SINK}");
         assert!(error(&text).contains(why), "{text}: {}", error(&text));
@@ -171,7 +173,7 @@ fn a_mute_holds_back_everything_of_its_thread_and_a_snooze_or_quiet_hours_what_b
         from: p("dev-a"),
         escalation: Box::new(Escalation::new(p("dev-a"), other.clone(), ants_proto::EscalationReason::Asked)),
     };
-    let completion = About::Completion { id: Uuid::now_v7(), from: p("dev-a"), thread: other };
+    let completion = About::Completion { id: Uuid::now_v7(), from: p("dev-a"), thread: other, replies: 1 };
     let mut prefs = NotifyPrefs::default();
     for about in [&approval, &escalation, &completion] {
         assert_eq!(held(&bob, about, &prefs, now), None, "nothing held");
@@ -356,6 +358,33 @@ fn a_reply_is_a_completion_and_nothing_else_is() {
     assert_eq!(notice.title, "dev-a: signed out");
     let json = notice_json(&notice, at("2026-03-10T12:00:00Z"));
     assert_eq!((&json["kind"], &json["notice"]), (&json!("notice"), &json!("signed_out")));
+}
+
+#[test]
+fn replies_on_a_thread_fold_into_one_notice_once_it_is_quiet_or_has_waited_five_windows() {
+    let (alice, dev_a) = (p("alice"), p("dev-a"));
+    let asked = Envelope::new(alice.clone(), dev_a.clone(), "build it");
+    let other = Envelope::new(alice, dev_a.clone(), "test it");
+    let reply = |to: &Envelope, text: &str| completion_notice(&to.reply(dev_a.clone(), text, Role::Human).unwrap());
+    let (window, start) = (Duration::from_secs(60), at("2026-03-10T12:00:00Z"));
+    let mut replies = super::replies::Replies::default();
+    replies.add(reply(&asked, "starting").unwrap(), 1, start);
+    replies.add(reply(&other, "tested").unwrap(), 2, start + TimeDelta::seconds(30));
+    replies.add(reply(&asked, "built").unwrap(), 3, start + TimeDelta::seconds(50));
+    assert!(replies.due(start + TimeDelta::seconds(80), window).is_empty(), "both threads busy within the window");
+    let due = replies.due(start + TimeDelta::seconds(90), window);
+    assert_eq!(due.iter().map(|(n, seq)| (n.title.as_str(), *seq)).collect::<Vec<_>>(), [("dev-a replied", 2)]);
+    let due = replies.due(start + TimeDelta::seconds(110), window);
+    let [(notice, 3)] = &due[..] else { panic!("{due:?}") };
+    assert_eq!(notice.title, "dev-a replied (2 replies on the thread)");
+    assert!(notice.text.starts_with("built\n"));
+    assert_eq!(notice_json(notice, start)["replies"], json!(2));
+
+    for minute in 0..5 {
+        replies.add(reply(&asked, "still going").unwrap(), 4, start + TimeDelta::minutes(minute));
+    }
+    assert!(replies.due(start + TimeDelta::seconds(299), window).is_empty());
+    assert_eq!(replies.due(start + TimeDelta::minutes(5), window).len(), 1, "five windows after the first at most");
 }
 
 #[test]

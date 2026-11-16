@@ -41,8 +41,9 @@ pub(super) enum About {
     Approval { request: Box<ApprovalRequest>, seq: u64 },
     /// An escalation reaching the human's inbox, in the message `id` from `from`.
     Escalation { id: Uuid, from: UserId, escalation: Box<Escalation> },
-    /// An ant's reply `id` from `from` on `thread`, reaching the human's inbox.
-    Completion { id: Uuid, from: UserId, thread: ThreadId },
+    /// An ant's reply `id` from `from` on `thread`, reaching the human's inbox: the latest of `replies` on it folded
+    /// into one notice.
+    Completion { id: Uuid, from: UserId, thread: ThreadId, replies: u32 },
     /// A daemon's notice `kind` that a human has to act on ([`NoticeKind::needs_action`]), in the message `id` from
     /// `from` on `thread`.
     Notice { id: Uuid, from: UserId, thread: ThreadId, kind: NoticeKind },
@@ -159,11 +160,12 @@ pub(super) fn notice_json(notice: &Notice, now: DateTime<Utc>) -> Value {
             }
             facts
         }
-        About::Completion { id, from, thread } => json!({
+        About::Completion { id, from, thread, replies } => json!({
             "kind": "completion",
             "id": id,
             "ant": from,
             "thread": thread,
+            "replies": replies,
         }),
         About::Notice { id, from, thread, kind } => json!({
             "kind": "notice",
@@ -417,7 +419,7 @@ pub(super) fn completion_notice(envelope: &Envelope) -> Option<Notice> {
         envelope.from,
     );
     Some(Notice {
-        about: About::Completion { id: envelope.id, from: envelope.from.clone(), thread: thread.clone() },
+        about: About::Completion { id: envelope.id, from: envelope.from.clone(), thread: thread.clone(), replies: 1 },
         human: envelope.to.clone(),
         title: format!("{} replied", envelope.from),
         text,
