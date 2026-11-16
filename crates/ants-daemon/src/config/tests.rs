@@ -1,4 +1,15 @@
+use ants_proto::Machine;
+
+use super::cli::cli_login_text;
+use super::host::hostname;
 use super::*;
+use crate::caps::Caps;
+use crate::daemon::Config;
+use crate::escalation::Chain;
+use crate::harness::{ModelSettings, PromptLimits};
+use crate::publish::Publish;
+use crate::template::Request;
+use crate::worktrees::Base;
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
