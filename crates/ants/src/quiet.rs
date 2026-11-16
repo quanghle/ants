@@ -1,11 +1,11 @@
-//! What a human holds back of the notifications `ants webhook serve` pushes, on all its devices: a snooze (`ants notify
-//! snooze|resume|status`) and muted threads (`ants thread mute|unmute`), kept as one [`NotifyPrefs`] under the
-//! human's key in [`NOTIFY_BUCKET`] and updated with compare-and-set, so devices changing them at once keep each
-//! other's changes. Each hold carries its deadline and ends there on its own.
+//! What a human holds back of its notifications, on all its devices: a snooze (`ants notify snooze|resume|status`),
+//! muted threads (`ants thread mute|unmute`) and each channel's notify level (`ants channel notify`), kept as one
+//! [`NotifyPrefs`] under the human's key in [`NOTIFY_BUCKET`] and updated with compare-and-set, so devices changing
+//! them at once keep each other's changes. Each hold carries its deadline and ends there on its own.
 
 use std::time::Duration;
 
-use ants_proto::{NOTIFY_BUCKET, NotifyPrefs, ThreadId, UserId};
+use ants_proto::{ChannelId, ChannelNotify, NOTIFY_BUCKET, NotifyPrefs, ThreadId, UserId};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::{self, kv};
 use chrono::{DateTime, TimeDelta, Utc};
@@ -136,7 +136,21 @@ pub async fn status(nats: &Nats<'_>, json: bool) -> Result<()> {
     for (thread, until) in &prefs.muted {
         println!("muted thread {thread} until {}", local(*until));
     }
+    for (channel, level) in &prefs.channels {
+        println!("#{channel} notifies {level} ({})", level.describe());
+    }
     Ok(())
+}
+
+/// Set the notify level of `channel` for `human` to `level`, through `js`; what `ants channel notify` prints.
+pub async fn channel_notify(
+    js: &jetstream::Context,
+    human: &UserId,
+    channel: &ChannelId,
+    level: ChannelNotify,
+) -> Result<String> {
+    update(js, human, |prefs, _| prefs.set_channel(channel, level)).await?;
+    Ok(format!("#{channel} notifies {human}: {level} ({})", level.describe()))
 }
 
 /// `ants thread mute THREAD [--for DURATION]`.

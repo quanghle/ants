@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use ants_proto::{ChannelReadMarkers, STREAM, chan_reader};
+use ants_proto::{ChannelNotify, ChannelReadMarkers, STREAM, chan_reader};
 
 use super::*;
 use crate::test_support::Server;
@@ -48,11 +48,11 @@ fn the_table_shows_members_and_the_messenger_or_its_default() {
         "CHANNEL  MEMBERS      MESSENGER            OWNER\n#dev     -            messenger (default)  -\n\
              #ops     dev-a,dev-b  triage               lead"
     );
-    let unread = HashMap::from([(ops(), reads::Unread { posts: 3, mentions: 1, ants: 4 })]);
+    let unread = HashMap::from([(ops(), reads::Unread { posts: 3, mentions: 1, other: 4 })]);
     assert_eq!(
         table(&[quiet.clone(), busy.clone()], Some(&unread)),
         "CHANNEL  MEMBERS      MESSENGER            OWNER  UNREAD\n#dev     -            messenger (default)  -      -\n\
-             #ops     dev-a,dev-b  triage               lead   3 (@1) +4 by ants"
+             #ops     dev-a,dev-b  triage               lead   3 (@1) +4 other"
     );
     assert_eq!(describe(&quiet), "#dev: members -; messenger messenger (default)");
     assert_eq!(describe(&busy), "#ops: members dev-a,dev-b; messenger triage; owner lead");
@@ -375,13 +375,18 @@ async fn a_human_marks_channel_posts_read_for_itself_only() {
     );
     let (none, revision) = laptop.markers().await.unwrap();
     assert_eq!((&none, revision), (&ChannelReadMarkers::default(), 0));
-    let unread = |markers: ChannelReadMarkers| {
+    let unread_at = |markers: ChannelReadMarkers, level| {
         let (js, me) = (a_js.clone(), as_alice.clone());
         let humans = ants_proto::Humans::from_entries([("bob", ants_proto::HumanEntry::new(p("bob")))]);
-        async move { reads::unread(&js, &me, &humans, &markers, &ops()).await.unwrap() }
+        async move { reads::unread(&js, &me, &humans, &markers, &ops(), level).await.unwrap() }
     };
-    let counted = reads::Unread { posts: 2, mentions: 1, ants: 1 };
-    assert_eq!(unread(none).await, counted, "alice's own post is read, dev-a's unmentioning one apart");
+    let unread = |markers| unread_at(markers, ChannelNotify::default());
+    let counted = reads::Unread { posts: 2, mentions: 1, other: 1 };
+    assert_eq!(unread(none.clone()).await, counted, "alice's own post is read, dev-a's unmentioning one apart");
+    let all = reads::Unread { posts: 3, mentions: 1, other: 0 };
+    assert_eq!(unread_at(none.clone(), ChannelNotify::All).await, all, "dev-a's chatter counts too");
+    let mentions = reads::Unread { posts: 1, mentions: 1, other: 2 };
+    assert_eq!(unread_at(none.clone(), ChannelNotify::Mentions).await, mentions, "bob's post goes apart too");
     laptop.change(|m| [2, 3].into_iter().for_each(|i| m.mark(&ops(), seqs[i]))).await.unwrap();
     let marked = phone.change(|m| m.mark(&ops(), seqs[0])).await.unwrap();
     assert!(marked.is_read(&ops(), seqs[0]) && marked.is_read(&ops(), seqs[2]), "the phone keeps the laptop's mark");

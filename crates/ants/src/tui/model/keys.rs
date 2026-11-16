@@ -247,6 +247,10 @@ impl Model {
                 self.bar.set_status("the bar holds a draft: send or clear it before editing a message", Tone::Error);
                 None
             }
+            To::Do(Action::Run(Job::ChannelNotify { channel, level }, _)) => {
+                self.bar.set_status("running…", Tone::Busy);
+                Some(self.set_level(channel, level))
+            }
             To::Do(action @ Action::Run(..)) => {
                 self.bar.set_status("running…", Tone::Busy);
                 Some(action)

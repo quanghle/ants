@@ -6,8 +6,8 @@ use std::collections::HashSet;
 
 use ants_daemon::reactions::Reactions;
 use ants_proto::{
-    ApprovalRequest, ChannelEntry, ChannelId, ChannelReadMarkers, Humans, Reaction, ReadMarker, ThreadId, UserId, Uuid,
-    Verdict,
+    ApprovalRequest, ChannelEntry, ChannelId, ChannelNotify, ChannelReadMarkers, Humans, Reaction, ReadMarker,
+    ThreadId, UserId, Uuid, Verdict,
 };
 use chrono::{DateTime, TimeDelta, Utc};
 use ratatui::text::Span;
@@ -18,7 +18,7 @@ use super::command::Bar;
 use super::exec::{Job, Quoted};
 use super::interrupt::Confirm;
 use super::react::{self, Picker};
-use super::reads::{Mark, Read};
+use super::reads::{Levels, Mark, Read};
 use super::work::{Facts, Filter};
 use super::{
     ant, cards, catchup, channel, credentials, dm, faces, held, home, images, mcp, memories, nav, people, search,
@@ -133,6 +133,8 @@ pub struct Data {
     pub marker: Option<ReadMarker>,
     /// Which channel posts the human has read, once read; never without the credentials to.
     pub channel_reads: Option<ChannelReadMarkers>,
+    /// The human's notify level of each channel not at the default, on all its devices.
+    pub channel_levels: Levels,
     /// The channels the human is a member of.
     pub channels: Vec<ChannelEntry>,
     /// The team's humans, once read.
@@ -181,6 +183,11 @@ impl Data {
             Some(humans) => humans.contains(user) || user == self.me(),
             None => user.is_human() || user == self.me(),
         }
+    }
+
+    /// The human's notify level of `channel`.
+    pub fn level(&self, channel: &ChannelId) -> ChannelNotify {
+        self.channel_levels.get(channel).copied().unwrap_or_default()
     }
 
     /// Whether the human's inbox message at `seq` is unread; not while the read marker is unknown.
@@ -330,6 +337,7 @@ impl Model {
             feeds: channel::Feeds::default(),
             marker: None,
             channel_reads: None,
+            channel_levels: Levels::new(),
             channels: Vec::new(),
             humans: None,
             reactions: Reactions::new(),
@@ -567,6 +575,7 @@ impl Model {
                 data.humans = Some(humans);
             }
             Read::Directory(Err(e)) => self.notify(format!("reading the channels: {e:#}"), Level::Error, now),
+            Read::Levels(levels) => data.channel_levels = levels,
             Read::Marked(_, Ok(())) => {}
             Read::Unmarked(thread, Ok(())) => {
                 let line = format!("thread {} marked unread", crate::excerpt(&self.data.title(&thread), 40));

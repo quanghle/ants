@@ -76,11 +76,13 @@ pub fn marker(entries: &[&ColonyEntry], now: DateTime<Utc>) -> (&'static str, Co
     ("●", Color::Green)
 }
 
-/// The channel's unread posts, @mentions of the human and ants' posts among those read, once which are read is known;
-/// else, without the credentials to know, only its unread @mentions as its inbox tells of them.
+/// The channel's unread posts its notify level counts, @mentions of the human and the other posts among those read,
+/// once which are read is known; else, without the credentials to know, only its unread @mentions as its inbox tells
+/// of them.
 fn unread(data: &Data, channel: &ChannelId) -> Unread {
     if let Some(markers) = &data.channel_reads {
-        return data.feeds.unread(channel, markers.channels.get(channel), data.me(), |u| data.is_human(u));
+        let (marker, level) = (markers.channels.get(channel), data.level(channel));
+        return data.feeds.unread(channel, marker, data.me(), level, |u| data.is_human(u));
     }
     let mentions = data
         .live
@@ -89,7 +91,7 @@ fn unread(data: &Data, channel: &ChannelId) -> Unread {
         .flat_map(|t| data.unread_on(t))
         .filter(|i| i.kind == Kind::Mention && i.channel.as_ref() == Some(channel))
         .count();
-    Unread { posts: 0, mentions, ants: 0 }
+    Unread { posts: 0, mentions, other: 0 }
 }
 
 fn line(
@@ -117,8 +119,8 @@ fn line(
             if unread.mentions > 0 {
                 spans.push(Span::styled(format!(" @{}", unread.mentions), Style::new().fg(Color::Magenta).bold()));
             }
-            if unread.ants > 0 {
-                spans.push(Span::styled(format!(" ·{}", unread.ants), frame::dim()));
+            if unread.other > 0 {
+                spans.push(Span::styled(format!(" ·{}", unread.other), frame::dim()));
             }
             Line::from(spans)
         }
@@ -218,7 +220,7 @@ mod tests {
         mention.kind = Kind::Mention;
         mention.channel = Some(ops.clone());
         m.stored(vec![mention], at(1));
-        let inbox = Unread { posts: 0, mentions: 1, ants: 0 };
+        let inbox = Unread { posts: 0, mentions: 1, other: 0 };
         assert_eq!(unread(&m.data, &ops), inbox, "without channel markers, the inbox's");
         m.data.marker.as_mut().unwrap().mark(1);
         assert_eq!(unread(&m.data, &ops).mentions, 0);
@@ -228,7 +230,7 @@ mod tests {
         let mine = ChannelPost::new(ops.clone(), user("alice"), "on it");
         let other = ChannelPost::new("dev".parse().unwrap(), user("dev-a"), "@alice elsewhere");
         m.stored(vec![post(2, &look), post(3, &mine), post(4, &other)], at(2));
-        assert_eq!(unread(&m.data, &ops), Unread { posts: 1, mentions: 1, ants: 0 }, "the human's own posts are read");
+        assert_eq!(unread(&m.data, &ops), Unread { posts: 1, mentions: 1, other: 0 }, "the human's own posts are read");
         m.data.channel_reads.as_mut().unwrap().mark(&ops, 2);
         assert_eq!(unread(&m.data, &ops), Unread::default());
 
@@ -236,6 +238,10 @@ mod tests {
         let chatter = ChannelPost::new(ops.clone(), user("dev-a"), "@dev-b done?");
         let asked = ChannelPost::new(ops.clone(), user("bob"), "status?");
         m.stored(vec![post(5, &chatter), post(6, &asked)], at(3));
-        assert_eq!(unread(&m.data, &ops), Unread { posts: 1, mentions: 0, ants: 1 }, "an ant's post counts apart");
+        assert_eq!(unread(&m.data, &ops), Unread { posts: 1, mentions: 0, other: 1 }, "an ant's post counts apart");
+        m.data.channel_levels.insert(ops.clone(), ants_proto::ChannelNotify::Mentions);
+        assert_eq!(unread(&m.data, &ops), Unread { posts: 0, mentions: 0, other: 2 }, "bob's post too at mentions");
+        m.data.channel_levels.insert(ops.clone(), ants_proto::ChannelNotify::All);
+        assert_eq!(unread(&m.data, &ops), Unread { posts: 2, mentions: 0, other: 0 }, "every post at all");
     }
 }
