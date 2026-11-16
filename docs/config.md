@@ -344,7 +344,7 @@ huge = { model_suffix = "-1m", history_budget = 262144 }
 |---|---|
 | `acp` (default) | ACP: an agent or adapter the daemon drives directly, as described above |
 | `claude` | Claude Code's stream-json (`claude -p --input-format stream-json --output-format stream-json`), from Claude Code 2.1.325 ([below](#claude-code-protocol--claude)) |
-| `codex` | Codex's JSON-RPC app server (`codex app-server`); planned |
+| `codex` | Codex's JSON-RPC app server (`codex app-server`); see [Codex](#codex-protocol--codex) |
 | `antigravity` | Antigravity's headless stream-json (`agy --input-format stream-json --output-format stream-json`); planned |
 | `copilot-sdk` | Copilot CLI through the GitHub Copilot SDK; planned |
 
@@ -413,6 +413,37 @@ version.
   telemetry, error reports or auto-updates), `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` and `CLAUDE_CODE_ENABLE_TASKS=0` (the
   TodoWrite tool, whose todo list streams as the plan). `ANTHROPIC_API_KEY` in the environment takes precedence over a
   claude.ai login.
+
+#### Codex (`protocol = "codex"`)
+
+The translator starts `codex app-server` (codex 0.169.0 or later; an older one fails the session, naming its version) with the definition's `args` after `app-server`, such as `-c KEY=VALUE` config overrides, and speaks its JSON-RPC on stdio: one server per harness session, hosting its threads.
+
+```toml
+[harnesses.codex-native]
+command = "codex"
+protocol = "codex"
+mode = "workspace-write"                        # default; see below
+sign_in = "codex login"
+args = ["-c", "sandbox_workspace_write.network_access=true"]
+env = { CODEX_HOME = "/srv/ants/codex" }        # optional: config, credentials and threads of its own
+```
+
+- **Sign-in:** at start the translator reads the account (`account/read`); none signed in, where the configured provider needs an OpenAI account, is `auth_required` (`codex login`). A turn the provider refuses with HTTP 401 (a revoked or wrong API key) or a failed token refresh is too. `codex app-server` ignores `OPENAI_API_KEY` and `CODEX_API_KEY` in its environment: store a key with `printenv OPENAI_API_KEY | codex login --with-api-key`. `CODEX_HOME` selects the configuration and credentials, `~/.codex` by default.
+- **`mode`** sets each thread's approval policy and sandbox; none asks, codex's OS sandbox being the restriction. Any other value fails loading.
+
+  | `mode` | Approval policy | Sandbox |
+  |---|---|---|
+  | `workspace-write` (default) | `never` | `workspace-write`: writes in the workdir, `$TMPDIR` and `/tmp`; no network unless `sandbox_workspace_write.network_access` |
+  | `read-only` | `never` | `read-only` |
+  | `full-access` | `never` | `danger-full-access`: no sandbox |
+
+  Both are sent on every thread start, resume and fork, so `approval_policy` and `sandbox_mode` from `config.toml` or `args` do not apply; `sandbox_workspace_write.*` settings do. What codex still asks (a command or file change approval, more permissions, an MCP elicitation, user input) is declined at once, logged.
+- **Model and effort:** the ant's `model` and `reasoning_effort` (as `model_reasoning_effort`) go with each thread start, resume and fork.
+- **MCP:** the ants MCP server goes in the thread's own configuration (`mcp_servers.ants`: command, arguments, its token in `env`, `default_tools_approval_mode = "approve"` so its tools run unasked in the sandbox), sent in the request on stdin and again on resume and fork, as codex keeps none of it with a thread.
+- **Sessions:** the thread id is the session id; resuming and cloning use `thread/resume` and `thread/fork`. Codex keeps a thread only once a turn started in it, so resuming or forking one never prompted fails and the thread starts over from its history.
+- **Cancel:** `turn/interrupt`; the turn ends as cancelled.
+- **Updates:** agent messages (set apart by blank lines) form the reply; reasoning summaries stream as thoughts; commands, file changes, MCP and dynamic tool calls, web searches and image views as tool calls; plan updates as plans. Token usage counts toward token caps; codex reports no cost, so cost caps see none.
+- **Errors:** a context-window error is a context overflow; a usage limit is an exhausted quota, retried after the latest reset of a rate-limit window codex reported used up (ChatGPT sign-in only); a rate limit or HTTP 429 is a rate limit, as are an overloaded server and capacity errors.
 
 ### Memory files
 

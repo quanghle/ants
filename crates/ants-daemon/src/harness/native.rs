@@ -16,6 +16,7 @@
 )]
 
 mod claude;
+mod codex;
 mod io;
 mod rpc;
 #[cfg(test)]
@@ -117,7 +118,8 @@ fn registration(protocol: Protocol) -> anyhow::Result<Option<Registration>> {
         #[cfg(test)]
         Protocol::Stub => Ok(Some(Registration::of::<stub::Stub>())),
         Protocol::Claude => Ok(Some(Registration::of::<claude::Claude>())),
-        Protocol::Codex | Protocol::Antigravity | Protocol::CopilotSdk => {
+        Protocol::Codex => Ok(Some(Registration::of::<codex::Codex>())),
+        Protocol::Antigravity | Protocol::CopilotSdk => {
             bail!("protocol {protocol} is not implemented yet; omit protocol to run the harness over ACP")
         }
     }
