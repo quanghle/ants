@@ -63,9 +63,9 @@ Options: `--ants PATH`, `--nats-server PATH`, `--nats-conf FILE` (default `~/.co
 
 | `ants daemon` (`ants` 0.1.0 release) | Linux x86_64 | macOS arm64 |
 |---|---|---|
-| Idle (serving 1 ant), private | TBD | TBD |
-| Idle (serving 1 ant), resident | TBD | TBD |
-| Active MCP session, private | TBD | TBD |
-| Active MCP session, resident | TBD | TBD |
+| Idle (serving 1 ant), private | 1.5 MB | 4.1 MB |
+| Idle (serving 1 ant), resident | 25 MB | 14.9 MB |
+| Active MCP session, private | — | 5.2 MB |
+| Active MCP session, resident | — | 19.2 MB |
 
 External ACP harness child processes run outside the daemon's own memory budget. Below `[memory_pressure]` `min_available` (default `1GB`), each ant stops idle harnesses immediately and runs at most `[memory_pressure]` `max_harnesses` (default `1`) until available memory recovers ([config.md](config.md#memory-pressure)).
