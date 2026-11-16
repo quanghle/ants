@@ -1,6 +1,6 @@
 //! Health and metrics over HTTP, for monitoring: `GET /healthz` and `GET /metrics` in the Prometheus text format, on
-//! an address of its own, off unless configured. Shared by `ants daemon`, `ants bridge` and `ants webhook serve`, each
-//! a [`Source`] of its own.
+//! an address of its own, off unless configured. Shared by `ants daemon`, `ants bridge`, `ants webhook serve` and
+//! `ants dead watch`, each a [`Source`] of its own.
 //!
 //! The daemon's counters ([`Ant`]) are kept per ant in one registry ([`ant`]) whether or not anything listens: a few
 //! atomics each. The JetStream storage usage [`crate::storage`] last measured is kept beside them ([`stored`]), and so
@@ -413,6 +413,36 @@ impl Source for Daemon {
             if let Some(max) = max {
                 out.sample(limit, &[("domain", domain), ("store", store)], *max as f64);
             }
+        }
+    }
+}
+
+/// The max-deliveries backstop ([`crate::dead::watch`]) of `ants dead watch`: healthy while its NATS connection is
+/// up, with the dead letters it stored per ant.
+pub struct Backstop {
+    user: UserId,
+    client: async_nats::Client,
+}
+
+impl Backstop {
+    /// The backstop `user` runs over `client`.
+    pub fn new(user: UserId, client: async_nats::Client) -> Self {
+        Self { user, client }
+    }
+}
+
+impl Source for Backstop {
+    fn healthy(&self) -> bool {
+        connected(&self.client)
+    }
+
+    fn render(&self, out: &mut Exposition) {
+        out.family("ants_nats_connected", Kind::Gauge, "Whether the user's connection to NATS is up (1) or not (0).");
+        out.sample("ants_nats_connected", &[("user", self.user.as_str())], flag(connected(&self.client)));
+        out.family("ants_dead_letters_total", Kind::Counter, "Messages stored as dead letters.");
+        let ants = ANTS.locked();
+        for (ant, counters) in ants.iter().filter(|(_, counters)| counters.dead_letters() > 0) {
+            out.sample("ants_dead_letters_total", &[("ant", ant.as_str())], counters.dead_letters() as f64);
         }
     }
 }

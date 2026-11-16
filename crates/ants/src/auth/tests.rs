@@ -2280,6 +2280,15 @@ async fn messages_jetstream_stops_delivering_become_one_dead_letter() {
     let stream = bus::ensure_stream(&h_js).await.unwrap();
     let mut human_inbox = h_client.subscribe(subject::inbox_of(&human)).await.unwrap();
 
+    // Metrics served as `ants dead watch --metrics` serves them.
+    let backstop = std::sync::Arc::new(ants_daemon::metrics::Backstop::new(human.clone(), h_client.clone()));
+    let served = crate::serve_metrics(Some("127.0.0.1:0".parse().unwrap()), backstop).await.unwrap().unwrap();
+    let metrics = served.local_addr();
+    assert_eq!(scrape(metrics, "/healthz").await, (200, "ok\n".to_owned()));
+    let (_, exposition) = scrape(metrics, "/metrics").await;
+    assert!(exposition.lines().any(|l| l == "ants_nats_connected{user=\"human\"} 1"), "{exposition}");
+    assert!(!exposition.contains("dev-backstop"), "{exposition}");
+
     // Two watchers, as with `ants dead watch` and `ants inbox --follow` running at once.
     let (tx, mut buried) = mpsc::unbounded_channel();
     let tx2 = tx.clone();
@@ -2336,6 +2345,9 @@ async fn messages_jetstream_stops_delivering_become_one_dead_letter() {
         tokio::time::sleep(Duration::from_secs(1)).await;
         assert!(buried.try_recv().is_err(), "one watcher reports the dead letter");
         assert_eq!(ants_daemon::metrics::ant(&dev_a).dead_letters(), 1, "and counts it");
+        let (_, exposition) = scrape(metrics, "/metrics").await;
+        let line = "ants_dead_letters_total{ant=\"dev-backstop\"} 1";
+        assert!(exposition.lines().any(|l| l == line), "{exposition}");
         let letters = dead::list(&stream).await.unwrap();
         assert_eq!(letters.iter().map(|(s, _)| *s).collect::<Vec<_>>(), [dead_seq]);
         let notices = stream.get_last_raw_message_by_subject(&subject::inbox(&human, &dev_a)).await.unwrap();
@@ -2401,6 +2413,17 @@ async fn the_human_s_side_tells_the_owner_the_thread_s_posts_name_not_the_one_an
         }
     }
     assert!(timeout(Duration::from_millis(200), to_human.next()).await.is_err(), "nothing goes to the claimed owner");
+}
+
+/// The status and body of a GET of `path` on the metrics endpoint at `addr`.
+async fn scrape(addr: std::net::SocketAddr, path: &str) -> (u16, String) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    stream.write_all(format!("GET {path} HTTP/1.1\r\nHost: metrics\r\n\r\n").as_bytes()).await.unwrap();
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).await.unwrap();
+    let (head, body) = answer.split_once("\r\n\r\n").unwrap_or_else(|| panic!("GET {path}: {answer:?}"));
+    (head.split(' ').nth(1).unwrap().parse().unwrap(), body.to_owned())
 }
 
 /// A port nobody listens on right now (nats-server does not report its leafnode port).
