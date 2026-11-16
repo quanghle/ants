@@ -10,7 +10,9 @@
 //! pre-allow rule of the human covers it ([`crate::approvals`]); `order_for_human` sends an admin order for it, held
 //! likewise by the daemon of the ant's machine ([`crate::admin::held`]); `queue_for_human`, `cancel_for_human` and
 //! `withdraw_for_human` list an ant's queue, cancel its prompt on a thread and withdraw a message waiting for it,
-//! asking the ant's daemons on subjects naming the ant ([`ants_proto::CancelRequest::for_human`]).
+//! asking the ant's daemons on subjects naming the ant ([`ants_proto::CancelRequest::for_human`]); while none
+//! answers, `withdraw_for_human` records the withdrawal of a message of the human's under a key naming the ant instead
+//! ([`crate::attempts::record_withdrawal`]), which the ant's daemon honours before taking the message up.
 //!
 //! The tools are offered only while the human's grant names the ant ([`Hub::acting_for`]), and each call checks it
 //! again, so a withdrawal ends them at once. Everything they publish is the ant's own, carrying `on_behalf_of` naming
@@ -29,10 +31,11 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use ants_proto::{
-    Act, AdminOp, AdminOrder, ApprovalDecision, ApprovalRequest, CancelReply, CancelRequest, ChannelId, ChannelPost,
-    Choice, Envelope, JsDomain, Machine, MessageMark, NotesPost, QueueReply, QueueRequest, QueuedMessage, READ_BUCKET,
-    Reaction, ReadMarker, THREADS_BUCKET, ThreadDone, ThreadId, ThreadMarks, ThreadSnoozes, ThreadTitle, UserId, Uuid,
-    Verdict, assisted_marks_key, assisted_snoozed_key, done_key, marks_key, snoozed_key, subject, title_key,
+    ATTEMPTS_BUCKET, Act, AdminOp, AdminOrder, ApprovalDecision, ApprovalRequest, CancelReply, CancelRequest,
+    ChannelId, ChannelPost, Choice, Envelope, JsDomain, Machine, MessageMark, NotesPost, QueueReply, QueueRequest,
+    QueuedMessage, READ_BUCKET, Reaction, ReadMarker, THREADS_BUCKET, ThreadDone, ThreadId, ThreadMarks, ThreadSnoozes,
+    ThreadTitle, UserId, Uuid, Verdict, assisted_marks_key, assisted_snoozed_key, done_key, marks_key, snoozed_key,
+    subject, title_key,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, consumer};
@@ -45,6 +48,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use super::{Hub, POST_TRIES, Tools, text};
+use crate::attempts::{self, Recorded};
 use crate::direct_kv::DirectKv;
 use crate::reading::{self, Reading};
 use crate::sealing::{AssistantSealing, Opening};
@@ -127,6 +131,15 @@ pub trait HumanStore: Send + Sync {
     fn cancel(&self, request: CancelRequest) -> BoxFuture<'_, Result<Vec<CancelReply>>>;
     /// The answers to `request`, as [`HumanStore::cancel`] gathers them.
     fn queue(&self, request: QueueRequest) -> BoxFuture<'_, Result<Vec<QueueReply>>>;
+    /// Record the withdrawal of `message` from the queue of `ant` by `assistant` for `human`, while no daemon of the
+    /// ant answers ([`attempts::record_withdrawal`]).
+    fn record_withdrawal(
+        &self,
+        ant: UserId,
+        message: Uuid,
+        human: UserId,
+        assistant: UserId,
+    ) -> BoxFuture<'_, Result<Recorded>>;
     /// Sign `order` with the ant's credentials and send it to the hub's stream, once stored: the order as sent.
     fn send_order(&self, order: AdminOrder) -> BoxFuture<'_, Result<AdminOrder>>;
 }
@@ -390,6 +403,19 @@ impl HumanStore for JetStreamStore {
             let payload = serde_json::to_vec(&request)?;
             let keep = |a: &QueueReply, at: &str| a.request_id == request.id && a.check_subject(at).is_ok();
             self.ask(request.subject(), request.reply_subject(), payload, keep).await
+        })
+    }
+
+    fn record_withdrawal(
+        &self,
+        ant: UserId,
+        message: Uuid,
+        human: UserId,
+        assistant: UserId,
+    ) -> BoxFuture<'_, Result<Recorded>> {
+        Box::pin(async move {
+            let kv = DirectKv::new(&self.js, self.js_domain.as_ref(), ATTEMPTS_BUCKET).await?;
+            attempts::record_withdrawal(&kv, &ant, &message, &assistant, &human).await
         })
     }
 
@@ -969,7 +995,10 @@ impl Hub {
         let (human, store) = self.acting_for()?;
         let ant = self.queued_ant(&args.ant)?;
         let id: Uuid = args.message_id.trim().parse().map_err(|e| format!("message_id: {e}"))?;
-        let (held, _) = self.held(&human, store, &ant).await?;
+        let held = match self.held(&human, store, &ant).await {
+            Ok((held, _)) => held,
+            Err(_) => return self.record_withdrawal(&human, store, &ant, id).await,
+        };
         let thread = match held.iter().find(|m| m.id == id) {
             Some(m) if m.running => {
                 let thread = &m.thread_id;
@@ -1007,7 +1036,44 @@ impl Hub {
                 "{ant} started on message {id} already; cancel_for_human stops its prompt on thread {thread_id}"
             )),
             Some(MessageMark::Finished { .. }) => Err(format!("{ant} finished message {id} already")),
-            None => Err(self.unanswered(&ant, &human)),
+            None => self.record_withdrawal(&human, store, &ant, id).await,
+        }
+    }
+
+    /// Withdraw message `id`, one of `human`'s to `ant`, while no daemon of the ant answers: by a record under a key
+    /// naming the assistant, which the ant's daemon honours before taking the message up.
+    async fn record_withdrawal(
+        &self,
+        human: &UserId,
+        store: &dyn HumanStore,
+        ant: &UserId,
+        id: Uuid,
+    ) -> Result<String, String> {
+        let messages = self.human_messages(human, store).await?;
+        let Some(sent) = messages.find(id).filter(|m| m.envelope.to == *ant && messages.by_human(&m.envelope)) else {
+            return Err(format!(
+                "{}; with none serving, only a message of {human} to {ant} is withdrawn",
+                self.unanswered(ant, human)
+            ));
+        };
+        let thread = sent.envelope.thread_id.clone();
+        let recorded = store.record_withdrawal(ant.clone(), id, human.clone(), self.ant.clone()).await;
+        match recorded.map_err(|e| format!("{e:#}"))? {
+            Recorded::Holds => Ok(format!(
+                "No daemon serving {ant} answered: recorded the withdrawal of message {id} on thread {thread} for \
+                 {human}. A daemon of {ant} honours it before {ant} is prompted with the message, while the grant of \
+                 {human} names {}, and then tells the thread and {human}.",
+                self.ant
+            )),
+            Recorded::Marked(MessageMark::Withdrawn { by, on_behalf_of, .. }) => {
+                let by = on_behalf_of.map_or_else(|| by.to_string(), |h| format!("{by} for {h}"));
+                Ok(format!("Message {id} was withdrawn already, by {by}."))
+            }
+            Recorded::Marked(MessageMark::Started { .. }) => Err(format!(
+                "{ant} started on message {id} already; cancel_for_human stops its prompt on thread {thread} once a \
+                 daemon of {ant} serves"
+            )),
+            Recorded::Marked(MessageMark::Finished { .. }) => Err(format!("{ant} finished message {id} already")),
         }
     }
 
@@ -1319,7 +1385,8 @@ impl Tools {
 
     #[tool(description = "As the assistant of a human, withdraw a message waiting for an ant (queue_for_human \
         lists them) for it, so the ant is never prompted with it; its thread is told once its turn comes, and the \
-        ant's daemon tells the human. Needs a daemon of the ant serving.")]
+        ant's daemon tells the human. While no daemon of the ant serves, only a message of the human's to the ant is \
+        withdrawn, by a record the ant's daemon honours before taking the message up.")]
     async fn withdraw_for_human(
         &self,
         Parameters(args): Parameters<WithdrawForHuman>,

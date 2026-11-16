@@ -1551,6 +1551,10 @@ struct MemoryHuman {
     held: StdMutex<Vec<ants_proto::QueuedMessage>>,
     cancels: StdMutex<Vec<ants_proto::CancelRequest>>,
     queues: StdMutex<Vec<ants_proto::QueueRequest>>,
+    /// Whether no daemon of the ants serves, and the withdrawals recorded meanwhile, with the mark each one found.
+    unserved: StdMutex<bool>,
+    withdrawals: StdMutex<Vec<(UserId, Uuid, UserId, UserId)>>,
+    found_mark: StdMutex<Option<ants_proto::MessageMark>>,
     orders: StdMutex<Vec<ants_proto::AdminOrder>>,
     /// The human's own marks and snoozes, and those its assistant set for it.
     own_marks: StdMutex<ants_proto::ThreadMarks>,
@@ -1678,13 +1682,27 @@ impl HumanStore for MemoryHuman {
             None => request.answer(held.iter().any(|m| m.thread_id == request.thread_id && m.running)),
         };
         self.cancels.locked().push(request);
-        Box::pin(async move { Ok(vec![answer]) })
+        let answers = if *self.unserved.locked() { vec![] } else { vec![answer] };
+        Box::pin(async move { Ok(answers) })
     }
 
     fn queue(&self, request: ants_proto::QueueRequest) -> BoxFuture<'_, Result<Vec<ants_proto::QueueReply>>> {
         let answer = request.answer(self.held.locked().clone(), Some(0), Some(2));
         self.queues.locked().push(request);
-        Box::pin(async move { Ok(vec![answer]) })
+        let answers = if *self.unserved.locked() { vec![] } else { vec![answer] };
+        Box::pin(async move { Ok(answers) })
+    }
+
+    fn record_withdrawal(
+        &self,
+        ant: UserId,
+        message: Uuid,
+        human: UserId,
+        assistant: UserId,
+    ) -> BoxFuture<'_, Result<crate::attempts::Recorded>> {
+        self.withdrawals.locked().push((ant, message, human, assistant));
+        let found = self.found_mark.locked().clone();
+        Box::pin(async move { Ok(found.map_or(crate::attempts::Recorded::Holds, crate::attempts::Recorded::Marked)) })
     }
 
     fn send_order(&self, order: ants_proto::AdminOrder) -> BoxFuture<'_, Result<ants_proto::AdminOrder>> {
@@ -2088,6 +2106,27 @@ async fn the_assistant_lists_cancels_and_withdraws_for_its_human_on_requests_nam
     assert!(!ok && refused.contains("neither held"), "{refused}");
     let (ok, refused) = call(&client, "queue_for_human", serde_json::json!({"ant": "bob"})).await;
     assert!(!ok && refused.contains("bob is a human"), "{refused}");
+
+    // With no daemon of the ant serving, a message of the human's to it is withdrawn by a record naming the assistant.
+    *store.unserved.locked() = true;
+    let mut sent = Envelope::new(alice.clone(), dev_b.clone(), "later");
+    sent.thread_id = waiting.clone();
+    store.store(sent.clone());
+    store.store(Envelope::new(alice.clone(), user("dev-c"), "elsewhere"));
+    let elsewhere = store.messages.locked().last().unwrap().envelope.id;
+    let (ok, recorded) = call(&client, "withdraw_for_human", withdraw(sent.id)).await;
+    assert!(ok && recorded.contains("recorded the withdrawal of message"), "{recorded}");
+    for id in [queued.id, elsewhere] {
+        let (ok, refused) = call(&client, "withdraw_for_human", withdraw(id)).await;
+        assert!(!ok && refused.contains("only a message of alice to dev-b"), "{refused}");
+    }
+    *store.found_mark.locked() =
+        Some(ants_proto::MessageMark::Started { thread_id: waiting.clone(), at: chrono::Utc::now() });
+    let (ok, refused) = call(&client, "withdraw_for_human", withdraw(sent.id)).await;
+    assert!(!ok && refused.contains("started on message"), "{refused}");
+    let withdrawals = store.withdrawals.locked().clone();
+    assert_eq!(withdrawals, vec![(dev_b.clone(), sent.id, alice.clone(), dev_a.clone()); 2]);
+    *store.unserved.locked() = false;
 
     // Every request names the assistant and the human, so they go on the subjects naming the assistant.
     let cancels = store.cancels.locked().clone();

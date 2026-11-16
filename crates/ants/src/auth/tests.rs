@@ -971,6 +971,7 @@ async fn an_assistant_takes_no_act_readers_could_not_tell_from_its_human_s() {
         "ants.queue.dev-a.pb",
         "$KV.ants_owners.t1.dev-a.bob.pa",
         "$KV.ants_owners.t1.dev-a.alice.pb",
+        "$KV.ants_attempts.dev-a.msg.m1.pb",
     ] {
         client.publish(s, "{}".into()).await.unwrap();
         let v = next_violation(&client, &mut errors).await;
@@ -1044,6 +1045,24 @@ async fn an_assistant_reads_its_human_s_marker_but_writes_only_its_own() {
     }
     let history = read(Reading::Consumer).history()(ants_daemon::history::DEFAULT_BUDGET).await;
     assert!(history.contains("could not be read back"), "{history}");
+
+    // While no daemon of an ant answers, it withdraws a message for its human under a key naming it, which the ant's
+    // daemon reads and honours before taking the message up.
+    use ants_daemon::attempts::{Attempts, Recorded, record_withdrawal};
+    let dev_a = p("dev-a");
+    let message = Envelope::new(alice.clone(), dev_a.clone(), "later");
+    let pa_attempts = DirectKv::new(&pa_js, None, ants_proto::ATTEMPTS_BUCKET).await.unwrap();
+    let recorded = record_withdrawal(&pa_attempts, &dev_a, &message.id, &pa, &alice).await.unwrap();
+    assert_eq!(recorded, Recorded::Holds);
+    assert!(pa_attempts.put(ants_proto::message_mark_key(&dev_a, &message.id), "{}").await.is_err());
+    let (_, d_js) = server.connect(&dev_a).await;
+    let attempts = Attempts::new(bus::ensure_attempts(&d_js, None, &dev_a).await.unwrap(), dev_a.clone());
+    assert_eq!(attempts.take_up(&message).await.unwrap(), None);
+    let (human, started) = attempts.withdrawal_by(&message, &pa).await.unwrap().expect("recorded before the take-up");
+    assert_eq!(human, alice);
+    assert!(attempts.withdraw_started(&message, &pa, &alice, started).await.unwrap());
+    let recorded = record_withdrawal(&pa_attempts, &dev_a, &message.id, &pa, &alice).await.unwrap();
+    assert!(matches!(recorded, Recorded::Marked(ants_proto::MessageMark::Withdrawn { .. })), "{recorded:?}");
 }
 
 #[tokio::test]
