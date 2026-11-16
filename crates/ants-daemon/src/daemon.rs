@@ -2737,10 +2737,16 @@ impl Inbox<'_> {
             return Err(e);
         }
         // A provider limit spends no attempt. The marker stays when tools may have run, to warn the retry.
-        if e.is::<Limited>() {
-            if !cut_off && !worked {
-                self.attempts.forget(seq).await;
-                self.attempts.release(envelope).await;
+        if e.is::<Limited>() && !cut_off && !worked {
+            self.attempts.forget(seq).await;
+            self.attempts.release(envelope).await;
+            return Err(e);
+        }
+        // Held for a sign-in or a provider limit after tools may have run: withdrawable until its retry, as after a
+        // failed attempt. A fallback turning it away hands it on at once instead.
+        if e.is::<SignedOut>() || e.is::<Limited>() {
+            if !e.is::<OnFallback>() {
+                self.attempts.retrying(envelope).await;
             }
             return Err(e);
         }

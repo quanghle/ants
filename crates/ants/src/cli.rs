@@ -320,9 +320,9 @@ pub(crate) enum Command {
     },
     /// Withdraw MESSAGE (an id `ants queue` lists) from the queue of ANT before ANT is prompted with it: its daemon
     /// acks it unprompted when its turn comes, and tells the thread it was withdrawn. The prompt running and the other
-    /// messages go on. A message awaiting a retry after a failed attempt is withdrawn too, unless its retry starts
-    /// first. A message ANT started on otherwise is not withdrawn: `ants cancel` stops its prompt. Needs a human's
-    /// credentials.
+    /// messages go on. A message awaiting a retry after a failed attempt, or held for a sign-in or a provider limit
+    /// after its tools ran, is withdrawn too, unless its retry starts first. A message ANT started on otherwise is not
+    /// withdrawn: `ants cancel` stops its prompt. Needs a human's credentials.
     Withdraw {
         #[arg(add = ArgValueCandidates::new(completions::ants))]
         ant: UserId,
