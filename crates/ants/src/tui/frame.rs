@@ -148,11 +148,11 @@ const HELP: &[(&str, &str)] = &[
     ("a A r, y", "on a tool request: allow once, always or reject, then confirm"),
     ("1-9 r", "on a question: answer with that option, or type an answer"),
     ("g r f x d z s c o", "on home: grant, reply, follow up, cancel, done, snooze, digest, credentials, held orders"),
-    ("+", "in a thread: react to the selected message, or take a reaction back"),
-    ("i t S", "in a thread: the bar to reply, its delegation tree, a new TL;DR"),
+    ("i > t S", "in a thread: reply, quote the selected, delegation tree, TL;DR"),
+    ("+ f u b T", "in a thread: react, forward, unread from, remind; tool calls"),
     ("o ]", "in a thread or channel: open the marked attachment, mark the next"),
     ("x Ctrl-X", "in a thread or work: cancel the prompt running there"),
-    ("W E", "in a thread: withdraw the selected message still waiting, or withdraw it to edit in the bar"),
+    ("W E", "in a thread: withdraw a waiting message or post, or to edit it"),
     ("x y", "in a delegation tree: cancel every prompt in the selected subtree"),
     ("n", "with a person: write a message, starting a thread"),
     ("/", "the bar on /search, as in: /search deploy from:dev-a"),
@@ -199,6 +199,14 @@ mod tests {
         let width = usize::from(buffer.area.width);
         let cells: Vec<&str> = buffer.content.iter().map(ratatui::buffer::Cell::symbol).collect();
         cells.chunks(width).map(|row| row.concat().trim_end().to_owned()).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn the_help_covers_every_key_of_the_thread_view() {
+        for key in thread::Page::KEYS.split(" · ").filter_map(|hint| hint.split(' ').next()) {
+            let covered = HELP.iter().any(|(keys, _)| keys.split(' ').any(|k| k.trim_end_matches(',') == key));
+            assert!(covered, "the help lacks {key}");
+        }
     }
 
     #[test]

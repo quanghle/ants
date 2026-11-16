@@ -177,6 +177,7 @@ impl Parser {
                 forged,
                 suggested_title: post.title.filter(|_| !forged),
                 turns: Some(post.turn_budget),
+                in_reply_to: post.in_reply_to,
                 ..entry(Kind::Post, post.thread_id)
             });
         }
