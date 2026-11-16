@@ -143,6 +143,7 @@ async fn the_channel_manager_applies_the_owner_s_changes_only_and_announces_them
     let serving = tokio::spawn(chanadm::serve(m_client, m_js, colony_of, humans));
 
     let mut room = h_client.subscribe(subject::chan_room(&ops)).await.unwrap();
+    subscribed(&h_js, &human).await;
     let (a_client, a_js) = server.connect(&dev_a).await;
     let a_admin = chanadm::nats_admin(a_client.clone(), a_js);
     let ask = |admin: &std::sync::Arc<dyn chanadm::Admin>, ant: &UserId, ops_: Vec<ChannelOp>| {

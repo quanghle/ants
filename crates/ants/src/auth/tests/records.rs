@@ -92,7 +92,7 @@ async fn ants_warn_a_human_once_per_crossing_of_a_storage_limit() {
     };
     let (a, b) = (watcher(&dev_a, used + used / 10).await, watcher(&dev_b, used + used / 10).await);
     let mut warnings = h_client.subscribe(subject::inbox_of(&human)).await.unwrap();
-    h_client.flush().await.unwrap();
+    subscribed(&h_js, &human).await;
     let note = ants_proto::storage_warning_key(None, "file");
 
     tokio::join!(a.check(), b.check());

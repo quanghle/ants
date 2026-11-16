@@ -404,7 +404,8 @@ mod tests {
     async fn count(client: &async_nats::Client) -> impl Fn() -> usize + use<> {
         let counts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut direct = client.subscribe(format!("$JS.API.DIRECT.GET.{STREAM}")).await.unwrap();
-        client.flush().await.unwrap();
+        // A round trip, so the server has the subscription before another client's first request.
+        jetstream::new(client.clone()).query_account().await.unwrap();
         let tally = counts.clone();
         tokio::spawn(async move {
             while direct.next().await.is_some() {

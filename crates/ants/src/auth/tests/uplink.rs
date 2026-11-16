@@ -340,9 +340,11 @@ async fn clients_on_a_leaf_node_reach_the_hub_stream_through_its_domain() {
     let mut a_live = a_client.subscribe(subject::inbox_of(&dev_a)).await.unwrap();
     let mut b_live = b_client.subscribe(subject::inbox_of(&dev_b)).await.unwrap();
     let mut statuses = h_client.subscribe("ants.status.>").await.unwrap();
-    for c in [&a_client, &b_client, &h_client] {
-        c.flush().await.unwrap();
-    }
+    // dev-a's round trip goes up the uplink behind its subscription and comes back behind the human's, so the hub and
+    // the leaf know both before anyone publishes; dev-b's, which is to stay on the leaf, gets time to cross anyway.
+    subscribed(&h_js, &human).await;
+    subscribed(&a_js, &dev_a).await;
+    b_client.flush().await.unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
     let thread = &ask.thread_id;
     b_client.publish(subject::status(&dev_b, thread), "b".into()).await.unwrap();

@@ -20,11 +20,14 @@ async fn bootstrap_credentials_only_ask_the_signer_to_register_and_hear_its_answ
     let signer = async_nats::ConnectOptions::with_credentials_file(&signer_file)
         .await
         .unwrap()
+        .custom_inbox_prefix(ants_proto::ENROLL_INBOX)
         .connect(&server.url)
         .await
         .unwrap();
     let mut requests = signer.subscribe(subject::ALL_LOGIN_REQUESTS).await.unwrap();
-    signer.flush().await.unwrap();
+    // A round trip, as `subscribed` makes: any answer of JetStream does, even that there is no stream.
+    let answered = jetstream::new(signer.clone()).get_stream(STREAM).await.map(drop).map_err(|e| e.kind());
+    assert_matches!(answered, Ok(()) | Err(jetstream::context::GetStreamErrorKind::JetStream(_)));
     let bootstrap = p(ants_proto::BOOTSTRAP_USER);
     let (client, mut errors) = server.watched_with(&bootstrap, &out).await;
     let mut answers = client.subscribe(subject::login_reply(&alice)).await.unwrap();

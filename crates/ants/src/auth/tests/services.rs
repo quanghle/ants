@@ -145,7 +145,8 @@ async fn an_observer_reads_approvals_dead_letters_status_and_the_colony_and_publ
     let entry = timeout(WAIT, watch.next()).await.expect("no colony entry").unwrap().unwrap();
     assert_eq!(entry.key, "dev-a");
     let mut status = o.subscribe(subject::ALL_STATUS).await.unwrap();
-    o.flush().await.unwrap();
+    // A flush only writes the subscription; a request on the same connection returns once the server has it.
+    colony.get("dev-a").await.unwrap();
     let thread = ThreadId::generate();
     a.publish(subject::status(&dev_a, &thread), "{}".into()).await.unwrap();
     let heard = timeout(WAIT, status.next()).await.expect("no status").unwrap();
