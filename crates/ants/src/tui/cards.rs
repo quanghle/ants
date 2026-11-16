@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use ants_daemon::caps::Spent;
 use ants_daemon::direct_kv::DirectKv;
-use ants_proto::{Acting, SESSIONS_BUCKET, ThreadDone, ThreadId, ThreadSnoozes, ThreadSummary, UserId};
+use ants_proto::{Acting, Reminders, SESSIONS_BUCKET, ThreadDone, ThreadId, ThreadSnoozes, ThreadSummary, UserId};
 use anyhow::{Context as _, Result, anyhow};
 use async_nats::jetstream;
 use futures::future::LocalBoxFuture;
@@ -39,6 +39,8 @@ pub struct Cards {
     pub today: Option<Vec<(UserId, Spent)>>,
     /// The threads the human snoozed on home.
     pub snoozed: ThreadSnoozes,
+    /// The human's reminders.
+    pub reminders: Reminders,
     /// Why the last read failed, to tell only once.
     pub failed: Vec<String>,
 }
@@ -102,6 +104,10 @@ impl Cards {
             Ok(snoozed) => self.snoozed = snoozed,
             Err(e) => failed.push(format!("reading the snoozes: {e:#}")),
         }
+        match read.reminders {
+            Ok(reminders) => self.reminders = reminders,
+            Err(e) => failed.push(format!("reading the reminders: {e:#}")),
+        }
         failed.dedup();
         if failed == self.failed {
             return None;
@@ -120,6 +126,7 @@ pub struct Read {
     pub spend: Result<HashMap<ThreadId, Vec<(UserId, Spent)>>>,
     pub today: Result<Vec<(UserId, Spent)>>,
     pub snoozed: Result<ThreadSnoozes>,
+    pub reminders: Result<Reminders>,
 }
 
 /// Where the reads go: the titles bucket's [`Meta`], and the sessions bucket.
@@ -150,7 +157,7 @@ impl Source {
     }
 
     /// Read what there is of `threads`: their titles, done states and TL;DRs, what was spent on them, that day's spend, and the
-    /// human's snoozes.
+    /// human's snoozes and reminders.
     pub async fn read(self, threads: HashSet<ThreadId>) -> Read {
         let titles = async {
             let titles = self.meta.as_ref().map_err(|e| anyhow!("{e}"))?.titles(&threads).await?;
@@ -178,13 +185,15 @@ impl Source {
             crate::spend::today(&self.js, kv).await.context("of the day")
         };
         let snoozed = async { self.meta.as_ref().map_err(|e| anyhow!("{e}"))?.snoozes().await };
-        let (titles, meta, spend, today, snoozed) = futures::join!(titles, meta, spend, today, snoozed);
+        let reminders = async { self.meta.as_ref().map_err(|e| anyhow!("{e}"))?.reminders().await };
+        let (titles, meta, spend, today, snoozed, reminders) =
+            futures::join!(titles, meta, spend, today, snoozed, reminders);
         let mut done_acting = HashMap::new();
         for done in meta.iter().flat_map(|(done, _)| done.values()).filter(|d| d.on_behalf_of.is_some()) {
             let acting = self.behalf.check(&done.by, done.on_behalf_of.as_ref()).await;
             done_acting.insert(done.thread_id.clone(), acting);
         }
-        Read { titles, meta, done_acting, spend, today, snoozed }
+        Read { titles, meta, done_acting, spend, today, snoozed, reminders }
     }
 }
 
@@ -266,6 +275,7 @@ mod tests {
             spend: Ok([(thread.clone(), vec![(user("dev-a"), spent), (user("dev-b"), spent)])].into()),
             today: Ok(vec![(user("dev-a"), spent)]),
             snoozed: Ok(ThreadSnoozes::default()),
+            reminders: Ok(Reminders::default()),
         };
         assert_eq!(cards.take(ok()), None);
         assert_eq!(cards.spent(&thread), Some(Spent { tokens: 20, cost: 0.5 }));

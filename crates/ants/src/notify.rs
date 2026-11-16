@@ -43,6 +43,9 @@
 //! A reply is not notified as it comes but once its thread has been quiet for the human's `completion_window`, folded
 //! with the other replies on the thread meanwhile ([`replies`]): held in memory by the process that took it, so a
 //! restart drops what waits.
+//!
+//! Each human's reminders ([`ants_proto::Reminders`]) are checked every [`REMIND_EVERY`]: one process marks those due
+//! pushed with compare-and-set and sends them, neither a snooze nor quiet hours holding them back.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -65,7 +68,7 @@ use tokio::sync::OnceCell;
 
 use self::notices::{
     About, Notice, action_notice, approval_notice, completion_notice, digest_notice, escalation_notice, held, holding,
-    question_notice, relayed, unserved_notice,
+    question_notice, relayed, reminder_notice, unserved_notice,
 };
 use self::sinks::send;
 use crate::presence::Present;
@@ -115,6 +118,8 @@ const COMPLETION_WINDOW: Duration = Duration::from_mins(1);
 const MAX_COMPLETION_WINDOW: Duration = Duration::from_hours(1);
 /// Most pending tool requests a digest's text lists.
 const DIGEST_PENDING: usize = 10;
+/// How often a human's reminders are checked for those due.
+const REMIND_EVERY: Duration = if cfg!(test) { Duration::from_millis(200) } else { Duration::from_secs(30) };
 /// How many times a held notice is counted again when another process counted or claimed meanwhile.
 const CONFLICTS: usize = 10;
 
@@ -213,6 +218,7 @@ pub async fn run(
     let mut unserved = Box::pin(tell_unserved(&human.config, bus, unserved));
     let mut reactions = Box::pin(answer_reactions(name, bus));
     let mut digests = Box::pin(digests(&human.config, bus));
+    let mut reminders = Box::pin(remind(&human.config, bus, js_domain.as_ref()));
     let mut replies = Box::pin(replies_due(&human, bus));
     let mut delay = Duration::from_secs(1);
     loop {
@@ -221,6 +227,7 @@ pub async fn run(
             never = &mut unserved => match never {},
             never = &mut reactions => match never {},
             never = &mut digests => match never {},
+            never = &mut reminders => match never {},
             never = &mut replies => match never {},
         };
         match watched {
@@ -533,6 +540,37 @@ async fn digests(human: &Human, bus: &HumanBus) -> std::convert::Infallible {
             tokio::time::sleep(DIGEST_EVERY).await;
             let prefs = holds(human, bus).await;
             digest(human, bus, &prefs, Utc::now()).await;
+        }
+    }
+    std::future::pending().await
+}
+
+/// Push `human` each of its reminders once due, checked every [`REMIND_EVERY`] through `bus`, made for JetStream domain
+/// `js_domain`: the process whose
+/// compare-and-set marks it pushed sends it, so one of those notifying the human does, at most once. Neither a snooze
+/// nor quiet hours hold one back, as the human set it for then.
+async fn remind(human: &Human, bus: &HumanBus, js_domain: Option<&JsDomain>) -> std::convert::Infallible {
+    let meta = crate::thread_meta::Meta::open(&bus.js, js_domain, &human.name)
+        .await
+        .inspect_err(|e| tracing::warn!(human = %human.name, "no reminders pushed: {e:#}"));
+    if let Ok(meta) = meta {
+        loop {
+            tokio::time::sleep(REMIND_EVERY).await;
+            let now = Utc::now();
+            let due = std::sync::Mutex::new(Vec::new());
+            let pushed = meta.change_reminders(|reminders| {
+                let mut due = due.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                *due = reminders.push(now);
+                !due.is_empty()
+            });
+            if let Err(e) = pushed.await {
+                tracing::warn!(human = %human.name, error = format!("{e:#}"), "marking reminders pushed");
+                continue;
+            }
+            for (thread, reminder) in due.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner) {
+                tracing::info!(human = %human.name, %thread, "pushing a reminder");
+                send(human, &reminder_notice(&human.name, &thread, &reminder), |_| true).await;
+            }
         }
     }
     std::future::pending().await

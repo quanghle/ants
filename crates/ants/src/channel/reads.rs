@@ -3,7 +3,7 @@
 //! marking at the same time each keep the other's marks. `ants channel read` marks the posts it prints, `ants channel
 //! list` counts the unread ones, and `ants chat` does both as its views show them.
 
-use ants_proto::{ChannelId, ChannelReadMarkers, ReadMarker, UserId, channel_reads_key};
+use ants_proto::{ChannelId, ChannelReadMarkers, Humans, ReadMarker, UserId, channel_reads_key};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
 use async_nats::jetstream::kv::{self, Operation, UpdateErrorKind};
@@ -66,41 +66,50 @@ impl ChannelReads {
     }
 }
 
-/// A channel's unread posts.
+/// A channel's unread posts: those by humans or that @mention the human apart from the other ants' chatter.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Unread {
+    /// Those by a human, or that @mention the human.
     pub posts: usize,
     /// Those of them that @mention the human.
     pub mentions: usize,
+    /// Those by an ant that do not @mention the human.
+    pub ants: usize,
 }
 
 impl Unread {
     /// The unread ones of `posts`, each its sequence, author and the users it @mentions, by `marker` (none: nothing
-    /// read), for `me`. Its own posts are read.
+    /// read), for `me`, with `is_human` telling a human author from an ant. Its own posts are read.
     pub fn of<'a>(
         posts: impl IntoIterator<Item = (u64, &'a UserId, &'a [UserId])>,
         marker: Option<&ReadMarker>,
         me: &UserId,
+        is_human: impl Fn(&UserId) -> bool,
     ) -> Self {
         let mut unread = Self::default();
         for (seq, from, mentions) in posts {
             if from == me || marker.is_some_and(|m| m.is_read(seq)) {
                 continue;
             }
-            unread.posts += 1;
             if mentions.contains(me) {
+                unread.posts += 1;
                 unread.mentions += 1;
+            } else if is_human(from) {
+                unread.posts += 1;
+            } else {
+                unread.ants += 1;
             }
         }
         unread
     }
 }
 
-/// The unread posts of `channel` by `markers`, for `reader`: only those after what the marker has read up to are read
-/// from the stream.
+/// The unread posts of `channel` by `markers`, for `reader`, the team's humans being `humans`: only those after what
+/// the marker has read up to are read from the stream.
 pub async fn unread(
     js: &jetstream::Context,
     reader: &Me,
+    humans: &Humans,
     markers: &ChannelReadMarkers,
     channel: &ChannelId,
 ) -> Result<Unread> {
@@ -108,5 +117,5 @@ pub async fn unread(
     let from = marker.map_or(0, |m| m.below + 1);
     let posts = super::read_from(js, reader, channel, from).await?;
     let posts = posts.iter().map(|(seq, post)| (*seq, &post.from, post.mentions.as_slice()));
-    Ok(Unread::of(posts, marker, &reader.id))
+    Ok(Unread::of(posts, marker, &reader.id, |u| humans.contains(u)))
 }

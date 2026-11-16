@@ -119,10 +119,17 @@ impl Feeds {
         Some((channel, seqs))
     }
 
-    /// The channel's posts read that `marker` (none: nothing read) leaves unread for `me`.
-    pub fn unread(&self, channel: &ChannelId, marker: Option<&ReadMarker>, me: &UserId) -> Unread {
+    /// The channel's posts read that `marker` (none: nothing read) leaves unread for `me`, `is_human` telling a
+    /// human author from an ant.
+    pub fn unread(
+        &self,
+        channel: &ChannelId,
+        marker: Option<&ReadMarker>,
+        me: &UserId,
+        is_human: impl Fn(&UserId) -> bool,
+    ) -> Unread {
         let posts = self.seen.get(channel).into_iter().flatten();
-        Unread::of(posts.map(|s| (s.seq, &s.from, s.mentions.as_slice())), marker, me)
+        Unread::of(posts.map(|s| (s.seq, &s.from, s.mentions.as_slice())), marker, me, is_human)
     }
 
     /// The posts of the channel whose reactions to read: the newest.

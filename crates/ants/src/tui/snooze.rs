@@ -1,11 +1,12 @@
 //! Snoozing a thread from home: `z` on a home item, or on a thread in the work or thread view, asks in the footer
 //! for how long, `1h` unless edited, at most [`SNOOZE_MAX`], and Enter keeps the thread off home on all the human's
 //! devices until then, or until an item for the human arrives on it ([`ThreadSnoozes`]). `z` on a thread a snooze
-//! holds off home wakes it instead, as `/unsnooze` does; `/snooze [DURATION]` snoozes without asking.
+//! holds off home wakes it instead, as `/unsnooze` does; `/snooze [DURATION]` snoozes without asking. The same footer
+//! asks when to be reminded of a thread ([`super::remind`]).
 
 #[cfg(doc)]
 use ants_proto::ThreadSnoozes;
-use ants_proto::{SNOOZE_MAX, ThreadId};
+use ants_proto::{SNOOZE_MAX, ThreadId, Uuid};
 use chrono::{DateTime, TimeDelta, Utc};
 use ratatui::style::{Color, Style};
 use ratatui::text::Line;
@@ -21,6 +22,8 @@ const DEFAULT: &str = "1h";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Prompt {
     thread: ThreadId,
+    /// To be reminded of the thread, or of this message on it, rather than to snooze it.
+    remind: Option<Option<Uuid>>,
     text: String,
     /// Whether a key changed the text: the first one typed replaces the default.
     edited: bool,
@@ -30,17 +33,29 @@ pub struct Prompt {
 
 impl Prompt {
     pub fn new(thread: ThreadId) -> Self {
-        Self { thread, text: DEFAULT.to_owned(), edited: false, error: None }
+        Self { thread, remind: None, text: DEFAULT.to_owned(), edited: false, error: None }
+    }
+
+    /// The footer asking when to be reminded of `thread`, or of `message` on it, and what to note.
+    pub fn remind(thread: ThreadId, message: Option<Uuid>) -> Self {
+        Self { remind: Some(message), ..Self::new(thread) }
     }
 
     /// The footer: the duration typed so far, and the keys.
     pub fn line(&self, data: &Data) -> Line<'static> {
-        let title = data.title(&self.thread);
-        let tail = match &self.error {
-            Some(error) => format!(" · {error}"),
-            None => " · Enter snooze · Esc keep it on home".to_owned(),
+        let title = crate::excerpt(&data.title(&self.thread), 40);
+        let tail = match (&self.error, self.remind) {
+            (Some(error), _) => format!(" · {error}"),
+            (None, None) => " · Enter snooze · Esc keep it on home".to_owned(),
+            (None, Some(_)) => " · Enter set · Esc cancel".to_owned(),
         };
-        let text = format!(" snooze {} for (at most 7d): {}▏{tail}", crate::excerpt(&title, 40), self.text);
+        let text = match self.remind {
+            None => format!(" snooze {title} for (at most 7d): {}▏{tail}", self.text),
+            Some(None) => format!(" remind of {title} in (1h, HH:MM, then a note): {}▏{tail}", self.text),
+            Some(Some(_)) => {
+                format!(" remind of a message on {title} in (1h, HH:MM, then a note): {}▏{tail}", self.text)
+            }
+        };
         let color = if self.error.is_some() { Color::Red } else { Color::Yellow };
         Line::styled(text, Style::new().fg(color))
     }
@@ -104,6 +119,16 @@ impl Model {
                 }
                 prompt.text.push(c);
                 (prompt.edited, prompt.error) = (true, None);
+            }
+            Key::Enter if let Some(message) = prompt.remind => {
+                let (thread, text) = (prompt.thread.clone(), prompt.text.clone());
+                match self.remind_as(thread, message, &text, now) {
+                    Ok(action) => {
+                        self.snoozing = None;
+                        return Some(action);
+                    }
+                    Err(error) => self.snoozing.as_mut()?.error = Some(error),
+                }
             }
             Key::Enter => match prompt.until(now) {
                 Ok(until) => {

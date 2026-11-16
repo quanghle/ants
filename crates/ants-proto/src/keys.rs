@@ -194,6 +194,12 @@ pub fn snoozed_key(human: &UserId) -> String {
     format!("snoozed.{human}")
 }
 
+/// Key in [`THREADS_BUCKET`] of the reminders `human` set ([`crate::Reminders`]): starting with `reminders`, so no
+/// thread id or human name collides with a title's key.
+pub fn reminders_key(human: &UserId) -> String {
+    format!("reminders.{human}")
+}
+
 /// Key in [`THREADS_BUCKET`] of the threads `assistant` pinned and archived for `human` ([`crate::ThreadMarks`]):
 /// [`marks_key`] of the human with the assistant after it, so the assistant writes only its own entries and never the
 /// human's.

@@ -246,6 +246,10 @@ fn exercise_daemon(custom_tools: bool) {
     let inbox = run(ants(&["inbox"]));
     assert!(inbox.status.success(), "ants inbox: {}", String::from_utf8_lossy(&inbox.stderr));
     assert!(!String::from_utf8_lossy(&inbox.stdout).contains("stub:"), "ask --wait marked the reply read");
+    let unread = run(ants(&["inbox", "--unread", "last"]));
+    assert!(String::from_utf8_lossy(&unread.stdout).contains("marked 1 message to"), "{unread:?}");
+    let inbox = run(ants(&["inbox"]));
+    assert!(String::from_utf8_lossy(&inbox.stdout).contains("stub:"), "the latest reply is unread again: {inbox:?}");
 
     // Service managers stop it with SIGTERM: a clean stop, as on Ctrl-C.
     let mut daemon = daemon;

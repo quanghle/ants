@@ -107,23 +107,52 @@ impl Inbox {
 
     /// Mark the messages at `seqs` read, on top of whatever other devices marked meanwhile.
     async fn mark(&self, seqs: &[u64]) -> Result<()> {
-        if seqs.is_empty() {
-            return Ok(());
-        }
-        for _ in 0..CONFLICTS {
-            let (mut marker, revision) = self.marker().await?;
+        self.change(seqs, "marking read", |marker| {
             seqs.iter().for_each(|seq| marker.mark(*seq));
             // The sequences read cover the inbox from `start` on only.
             if self.start.is_some_and(|start| marker.below + 1 >= start) {
                 marker.compact(self.seqs.iter().copied());
             }
+        })
+        .await
+    }
+
+    /// Mark the messages at `seqs` unread again on all the human's devices, on top of whatever other devices marked
+    /// meanwhile.
+    pub async fn unmark(&self, seqs: &[u64]) -> Result<()> {
+        self.change(seqs, "marking unread", |marker| seqs.iter().for_each(|seq| marker.unmark(*seq))).await
+    }
+
+    /// Change the marker with `change` for `seqs`, `doing` so as errors say, by compare-and-set.
+    async fn change(&self, seqs: &[u64], doing: &str, change: impl Fn(&mut ReadMarker)) -> Result<()> {
+        if seqs.is_empty() {
+            return Ok(());
+        }
+        for _ in 0..CONFLICTS {
+            let (mut marker, revision) = self.marker().await?;
+            change(&mut marker);
             match self.kv.update(self.human.as_str(), serde_json::to_vec(&marker)?.into(), revision).await {
                 Ok(_) => return Ok(()),
                 Err(e) if e.kind() == UpdateErrorKind::WrongLastRevision => continue,
-                Err(e) => return Err(e).context("marking read"),
+                Err(e) => return Err(e).with_context(|| doing.to_owned()),
             }
         }
-        bail!("marking read: the read marker kept moving")
+        bail!("{doing}: the read marker kept moving")
+    }
+
+    /// The sequences, in order, of the human's inbox messages on `thread` stored from `start` on, but summaries'.
+    pub async fn on_thread(&self, thread: &ThreadId, start: DeliverPolicy) -> Result<Vec<u64>> {
+        let mut found = Vec::new();
+        let filter = subject::inbox_of(&self.human);
+        reading::read_back(&self.js, self.human.as_str(), Reading::Gets, &filter, start, |seq, _, subject, payload| {
+            if parse(subject, payload).is_ok_and(|e| e.thread_id == *thread && e.summary.is_none()) {
+                found.push(seq);
+            }
+            ControlFlow::Continue(())
+        })
+        .await
+        .context("reading the inbox")?;
+        Ok(found)
     }
 
     /// The messages to the human stored from `from` on.
@@ -160,7 +189,7 @@ impl Inbox {
         let (marker, _) = self.marker().await?;
         let mut found = Vec::new();
         let mut marks = Vec::new();
-        for (seq, envelope) in self.read(marker.below + 1).await? {
+        for (seq, envelope) in self.read(marker.first_unread()).await? {
             if marker.is_read(seq) {
                 continue;
             }
@@ -202,7 +231,7 @@ impl Inbox {
         if self.start.is_none() {
             // Only what is stored from now on.
             let (marker, _) = self.marker().await?;
-            self.read(marker.below + 1).await?;
+            self.read(marker.first_unread()).await?;
         }
         let mut rescan = tokio::time::interval(RESCAN);
         rescan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -595,5 +624,34 @@ mod tests {
         b_client.flush().await.unwrap();
         bus::publish(&ant_js, &asks[0].reply(dev_a.clone(), "five", Role::Human).unwrap()).await.unwrap();
         assert!(timeout(Duration::from_millis(500), announced.next()).await.is_err(), "bob hears alice's replies");
+    }
+
+    #[tokio::test]
+    async fn marking_messages_unread_on_one_device_shows_them_unread_on_all() {
+        let Some(server) = Server::start() else { return };
+        let (alice, dev_a): (UserId, UserId) = ("alice".parse().unwrap(), "dev-a".parse().unwrap());
+        let (_, laptop) = device(&server, &alice, "laptop").await;
+        let (_, phone) = device(&server, &alice, "phone").await;
+        bus::ensure_stream(&laptop).await.unwrap();
+        let (_, ant_js) = server.connect(&dev_a).await;
+        let asks = [Envelope::new(alice.clone(), dev_a.clone(), "a"), Envelope::new(alice.clone(), dev_a.clone(), "b")];
+        for (ask, text) in [(&asks[0], "one"), (&asks[1], "two"), (&asks[0], "three"), (&asks[0], "four")] {
+            bus::publish(&ant_js, &ask.reply(dev_a.clone(), text, Role::Human).unwrap()).await.unwrap();
+        }
+        assert_eq!(read_as(&laptop, &alice, Select::default()).await.len(), 4);
+
+        let on_phone = Inbox::open(&phone, &alice).await.unwrap();
+        let seqs = on_phone.on_thread(&asks[0].thread_id, DeliverPolicy::All).await.unwrap();
+        assert_eq!(seqs.len(), 3, "{seqs:?}");
+        on_phone.unmark(&seqs[1..]).await.unwrap();
+        assert_eq!(
+            texts(&read_as(&laptop, &alice, Select { peek: true, ..Default::default() }).await),
+            ["three", "four"]
+        );
+        let thread_b = Select { thread: Some(asks[1].thread_id.clone()), ..Default::default() };
+        on_phone.unmark(&on_phone.on_thread(&asks[1].thread_id, DeliverPolicy::All).await.unwrap()).await.unwrap();
+        assert_eq!(texts(&read_as(&laptop, &alice, thread_b).await), ["two"]);
+        assert_eq!(texts(&read_as(&laptop, &alice, Select::default()).await), ["three", "four"]);
+        assert!(read_as(&phone, &alice, Select::default()).await.is_empty(), "read again on both");
     }
 }

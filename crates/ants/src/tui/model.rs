@@ -61,6 +61,9 @@ pub enum Action {
     Open(ThreadId),
     /// Mark the human's inbox messages on the thread read on all its devices, as `ants inbox --thread` does.
     MarkRead(ThreadId),
+    /// Mark the human's inbox messages on the thread at these sequences unread again on all its devices, as `ants inbox
+    /// --unread` does.
+    MarkUnread(ThreadId, Vec<u64>),
     /// Mark the human's posts of the channel read on all its devices, as `ants channel read` does.
     MarkChannel(ChannelId, Mark),
     /// Read the reactions to these messages, and again every while.
@@ -270,6 +273,12 @@ pub enum To {
     Quote(ThreadId, Quoted, Option<UserId>),
     /// Ask how long to keep the thread off home, or wake it if a snooze holds it off.
     Snooze(ThreadId),
+    /// Ask when to be reminded of the thread, or of this message on it.
+    Remind(ThreadId, Option<Uuid>),
+    /// Clear the thread's reminder, done.
+    Unremind(ThreadId),
+    /// Mark the human's messages on the thread unread again: from the message at this sequence on, else the latest.
+    Unread(ThreadId, Option<u64>),
     /// The command bar, open on this text.
     Bar(String),
     /// Ask for a new TL;DR of the thread.
@@ -304,7 +313,7 @@ pub struct Model {
     pub picking: Option<Picker>,
     /// The cancel waiting for y while an ant runs a tool call.
     pub interrupting: Option<Confirm>,
-    /// How long to snooze a thread from home, being asked.
+    /// How long to snooze a thread from home, or when to be reminded of it, being asked.
     pub snoozing: Option<snooze::Prompt>,
     /// The catch-up summaries: the span home's first line counts, the TL;DRs asked for, the digest.
     pub catchup: catchup::Catchup,
@@ -559,6 +568,13 @@ impl Model {
             }
             Read::Directory(Err(e)) => self.notify(format!("reading the channels: {e:#}"), Level::Error, now),
             Read::Marked(_, Ok(())) => {}
+            Read::Unmarked(thread, Ok(())) => {
+                let line = format!("thread {} marked unread", crate::excerpt(&self.data.title(&thread), 40));
+                self.notify(line, Level::Info, now);
+            }
+            Read::Unmarked(thread, Err(e)) => {
+                self.notify(format!("marking thread {thread} unread: {e:#}"), Level::Error, now);
+            }
             Read::Marked(thread, Err(e)) => {
                 self.notify(format!("marking thread {thread} read: {e:#}"), Level::Error, now);
             }
@@ -883,6 +899,30 @@ pub mod tests {
         assert_eq!(m.open_thread(), Some(thread), "a refresh reads the open thread again");
         m.key(Key::Esc, at(6));
         assert_eq!((m.page().name(), m.focus), ("work", Focus::View));
+    }
+
+    #[test]
+    fn u_marks_the_selected_message_and_later_ones_unread_and_closes_the_thread() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        m.select(nav::Item::Work(None));
+        let messages = vec![
+            message(1, &thread, "alice", "dev-a", "deploy"),
+            message(2, &thread, "dev-a", "alice", "deploying"),
+            message(3, &thread, "dev-a", "alice", "done"),
+        ];
+        m.stored(messages.clone(), at(1));
+        m.data.marker = Some(ReadMarker { below: 3, ..Default::default() });
+        assert_eq!(m.key(Key::Char('u'), at(2)), Some(Action::MarkUnread(thread.clone(), vec![3])), "the latest");
+        assert!(m.data.unread(3) && !m.data.unread(2));
+
+        m.key(Key::Enter, at(3));
+        m.take(live::Event::History(thread.clone(), Ok(messages)), at(3));
+        m.key(Key::Up, at(4));
+        m.key(Key::Up, at(4));
+        assert_eq!(m.key(Key::Char('u'), at(4)), Some(Action::MarkUnread(thread, vec![2, 3])));
+        assert_eq!(m.page().name(), "work", "the thread closes so as not to mark them read again");
+        assert!(m.data.unread(2));
     }
 
     #[test]

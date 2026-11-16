@@ -262,6 +262,20 @@ fn colony() {
 }
 
 #[test]
+fn reminders() {
+    snap(
+        "reminders",
+        &Reminders(BTreeMap::from([
+            (
+                thread(),
+                Reminder { at: at(0), due: at(30), message: Some(id(7)), note: "check CI".into(), pushed: true },
+            ),
+            (other_thread(), Reminder { at: at(1), due: at(45), message: None, note: String::new(), pushed: false }),
+        ])),
+    );
+}
+
+#[test]
 fn kv_entries() {
     snap("chain_entry", &ChainEntry { ant: user("dev-a"), escalate_to: vec![user("lead")], updated_at: at(0) });
     snap("human_entry", &HumanEntry { human: user("alice"), registered_at: Some(at(0)) });
@@ -292,8 +306,9 @@ fn kv_entries() {
         let reply = ReactionsReply { request_id: id(1), ant: user("dev-a"), message: id(2), outcome, responder };
         snap(&format!("reactions_reply_{kind}"), &reply);
     }
-    snap("read_marker", &ReadMarker { below: 4200, read: BTreeSet::from([4203, 4207]) });
-    let marker = ReadMarker { below: 4200, read: BTreeSet::from([4207]) };
+    let unread = BTreeSet::from([4198]);
+    snap("read_marker", &ReadMarker { below: 4200, read: BTreeSet::from([4203, 4207]), unread });
+    let marker = ReadMarker { below: 4200, read: BTreeSet::from([4207]), ..ReadMarker::default() };
     snap("channel_read_markers", &ChannelReadMarkers { channels: BTreeMap::from([(channel(), marker)]) });
     snap(
         "thread_title",

@@ -82,7 +82,7 @@ impl Page {
         self.messages().find(|e| e.id == Some(at)).map(|e| e.seq)
     }
 
-    pub const KEYS: &str = "↑↓ select · i reply · > reply to selected · y copy · f forward · o open file · ] next file · + react · p pin · m mute · e archive · d done · z snooze · t tree · T tool calls · S TL;DR · x cancel · W withdraw · E withdraw to edit · a A r answer a tool request · End latest · Esc back";
+    pub const KEYS: &str = "↑↓ select · i reply · > reply to selected · y copy · f forward · o open file · ] next file · + react · p pin · m mute · e archive · d done · u unread from selected · b remind of selected · z snooze · t tree · T tool calls · S TL;DR · x cancel · W withdraw · E withdraw to edit · a A r answer a tool request · End latest · Esc back";
 
     /// The messages shown, in the order stored.
     fn messages(&self) -> impl DoubleEndedIterator<Item = &Entry> {
@@ -90,6 +90,11 @@ impl Page {
     }
 
     /// The ids of the messages shown, for the reactions to them.
+    /// The id of the selected message (else the latest), if it has one.
+    pub fn selected_id(&self) -> Option<Uuid> {
+        self.selection().and_then(|e| e.id)
+    }
+
     pub fn message_ids(&self) -> Vec<Uuid> {
         self.messages().filter_map(|e| e.id).collect()
     }
@@ -234,6 +239,11 @@ impl Page {
             }
             Key::Char('t') => return Some(To::Tree(self.history.thread.clone())),
             Key::Char('z') => return Some(To::Snooze(self.history.thread.clone())),
+            Key::Char('b') => {
+                let message = self.selection().and_then(|e| e.id);
+                return Some(To::Remind(self.history.thread.clone(), message));
+            }
+            Key::Char('u') => return Some(To::Unread(self.history.thread.clone(), self.selection().map(|e| e.seq))),
             Key::Char('S') => return Some(To::Tldr(self.history.thread.clone())),
             Key::Char('f') => return Some(To::Bar("/forward @".to_owned())),
             Key::Char('T') => return Some(To::Tools),

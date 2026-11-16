@@ -34,6 +34,7 @@ mod people;
 mod question;
 mod react;
 mod reads;
+mod remind;
 mod search;
 mod select;
 mod settings;
@@ -533,6 +534,7 @@ impl Chat {
                 self.model.notify(line.0, line.1, Utc::now());
             }
             Action::MarkRead(thread) => self.reads.mark_read(thread),
+            Action::MarkUnread(thread, seqs) => self.reads.mark_unread(thread, seqs),
             Action::Run(job, text) => self.exec.run(job, text),
             Action::Decide(request, verdict) => {
                 self.model.data.settled.deciding(&request);

@@ -16,6 +16,7 @@ use futures::future::LocalBoxFuture;
 use futures::stream::LocalBoxStream;
 use futures::{FutureExt as _, StreamExt as _};
 
+use super::model::Action;
 use crate::channel::reads::ChannelReads;
 use crate::inbox::{Inbox, Select};
 use crate::live::maybe;
@@ -47,6 +48,8 @@ pub enum Read {
     Directory(Result<Directory>),
     /// The thread's messages were marked read, or not.
     Marked(ThreadId, Result<()>),
+    /// The thread's messages were marked unread again, or not.
+    Unmarked(ThreadId, Result<()>),
     Reactions(Reactions),
     /// The human reacted to the message so, or took the reaction back: whether that changed anything.
     Reacted(Uuid, Reaction, bool, Result<bool>),
@@ -66,6 +69,9 @@ pub struct Reads {
     /// The threads to mark read, after the one in flight.
     to_mark: VecDeque<ThreadId>,
     marking: Option<LocalBoxFuture<'static, (ThreadId, Result<()>)>>,
+    /// The messages to mark unread again, by thread, after those in flight.
+    to_unmark: VecDeque<(ThreadId, Vec<u64>)>,
+    unmarking: Option<LocalBoxFuture<'static, (ThreadId, Result<()>)>>,
     /// Whether the human's credentials may read and mark its channel read markers.
     channels: bool,
     channel_marker: Option<LocalBoxFuture<'static, Result<ChannelReadMarkers>>>,
@@ -98,6 +104,8 @@ impl Reads {
             directory: None,
             to_mark: VecDeque::new(),
             marking: None,
+            to_unmark: VecDeque::new(),
+            unmarking: None,
             channels,
             channel_marker: None,
             channels_to_mark: VecDeque::new(),
@@ -114,6 +122,11 @@ impl Reads {
                 && let Some(thread) = self.to_mark.pop_front()
             {
                 self.marking = Some(mark(self.js.clone(), self.me.clone(), thread).boxed_local());
+            }
+            if self.unmarking.is_none()
+                && let Some((thread, seqs)) = self.to_unmark.pop_front()
+            {
+                self.unmarking = Some(unmark(self.js.clone(), self.me.clone(), thread, seqs).boxed_local());
             }
             if self.marking_channel.is_none()
                 && let Some((channel, marks)) = self.channels_to_mark.pop_front()
@@ -167,6 +180,11 @@ impl Reads {
                     self.read_marker();
                     return Read::Marked(thread, marked);
                 }
+                (thread, unmarked) = maybe(&mut self.unmarking) => {
+                    self.unmarking = None;
+                    self.read_marker();
+                    return Read::Unmarked(thread, unmarked);
+                }
                 Some(change) = self.changes.next() => {
                     if self.watched.contains(&change.message) {
                         self.read_reactions();
@@ -212,6 +230,12 @@ impl Reads {
         if !self.to_mark.contains(&thread) {
             self.to_mark.push_back(thread);
         }
+    }
+
+    /// Mark the human's inbox messages at `seqs`, on `thread`, unread again on all its devices, after those asked for
+    /// before.
+    pub fn mark_unread(&mut self, thread: ThreadId, seqs: Vec<u64>) {
+        self.to_unmark.push_back((thread, seqs));
     }
 
     /// Mark the human's posts of `channel` read on all its devices, after those asked for before; nothing without the
@@ -281,6 +305,12 @@ async fn mark(js: jetstream::Context, me: UserId, thread: ThreadId) -> (ThreadId
     (thread, marked)
 }
 
+/// Mark the inbox messages of `me` at `seqs`, on `thread`, unread again, as `ants inbox --unread` does.
+async fn unmark(js: jetstream::Context, me: UserId, thread: ThreadId, seqs: Vec<u64>) -> (ThreadId, Result<()>) {
+    let unmarked = async { Inbox::open(&js, &me).await?.unmark(&seqs).await }.await;
+    (thread, unmarked)
+}
+
 /// Mark the posts of `channel` read for `me`, as `ants channel read` does: the markers as changed.
 async fn mark_channel(
     js: jetstream::Context,
@@ -299,4 +329,35 @@ async fn mark_channel(
     }
     .await;
     (channel, marked)
+}
+
+impl super::model::Model {
+    /// `u` on `thread`: mark the human's messages on it unread again on all its devices, those from the message at
+    /// sequence `from` on, else (or with none from it on) the latest; here at once, not once the marker is read back.
+    /// A thread view of it shown closes, so as not to mark them read again.
+    pub fn mark_unread(
+        &mut self,
+        thread: ThreadId,
+        from: Option<u64>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<Action> {
+        let inbox: Vec<u64> =
+            self.data.facts.get(&thread).map_or_else(Vec::new, |f| f.inbox.iter().map(|i| i.seq).collect());
+        let mut seqs: Vec<u64> = inbox.iter().copied().filter(|seq| from.is_some_and(|from| *seq >= from)).collect();
+        if seqs.is_empty() {
+            seqs.extend(inbox.iter().max());
+        }
+        if seqs.is_empty() {
+            let line = format!("no message to {} on this thread to mark unread", self.data.me());
+            self.notify(line, super::model::Level::Error, now);
+            return None;
+        }
+        if let Some(marker) = &mut self.data.marker {
+            seqs.iter().for_each(|seq| marker.unmark(*seq));
+        }
+        if self.open() == Some(&thread) && self.pages.len() > 1 {
+            self.pages.pop();
+        }
+        Some(Action::MarkUnread(thread, seqs))
+    }
 }

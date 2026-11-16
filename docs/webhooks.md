@@ -117,6 +117,7 @@ All sinks run concurrently within `timeout` (`1s`–`30s`, default `10s`); failu
 Held notices for approvals, escalations, questions, notices and completions are dropped (logged as `held back a notice`, leaving requests pending and inbox messages unread); unserved-ant notices (`unserved`) wait until quiet hours or snooze end. `bypass` never overrides a muted thread.
 
 - **Digest:** with `digest = true`, each approval, escalation, question, notice or completion held back by quiet hours or a snooze (not by a mute) is counted per kind in KV `ants_notify` under `held.<human>` (`{since, counts}`), with compare-and-set by whichever instance took it. Once neither quiet hours nor a snooze hold (checked every minute and before the next notice sent, so `ants notify resume` ends one early), one instance claims the count by deleting it at the revision it read and sends a single `digest` notice to every sink: the counts per kind since the first held notice, and the tool requests still pending (up to 10 in the text, all in the [JSON notice](#json-notice)). The count survives restarts and is shared by every instance listing the human, which should all set `digest` alike; a digest is sent at most once, a lost one is not retried, and nothing is marked read or decided.
+- **Reminders:** a reminder set in `ants chat` (`/remind`, `b`) is stored per human in KV `ants_threads` under `reminders.<human>`. Every 30 seconds, each instance listing the human marks the reminders due `pushed` there with compare-and-set, and the one whose write lands sends a `reminder` notice of each to every sink: a reminder is pushed at most once, and neither quiet hours, a snooze nor a muted thread hold it back.
 
 - **Snooze:** `ants notify snooze DUR` (`1s`–`365d`), `ants notify resume`, `ants notify status [--json]`.
 - **Thread mute:** `ants thread mute THREAD [--for DUR]` (default `30d`) and `ants thread unmute THREAD`.
@@ -145,8 +146,8 @@ With `public_url` and `action_secret_*`, approval notices include `<public_url>/
 | Field | Kinds | Meaning |
 |---|---|---|
 | `version` | all | `1` |
-| `kind` | all | `approval`, `escalation`, `question`, `completion`, `notice`, `unserved`, `digest`, or `test` |
-| `id` | all | Request ID, message ID, first waiting message ID, or fresh digest or test UUID (deduplicate on `(kind, id)`) |
+| `kind` | all | `approval`, `escalation`, `question`, `completion`, `notice`, `unserved`, `digest`, `reminder`, or `test` |
+| `id` | all | Request ID, message ID, first waiting message ID, or fresh digest, reminder or test UUID (deduplicate on `(kind, id)`) |
 | `human`, `title`, `text`, `urgent`, `sent_at`, `links` | all | Target human, formatted notice, urgency (`true` for `approval`), RFC 3339 UTC timestamp, `{verdict, label, url}[]` |
 | `ant`, `thread` | `approval`, `escalation`, `question`, `completion`, `notice` | Source ant and thread ID to answer on |
 | `replies` | `completion` | How many replies on the thread the notice folds (the latest is `id`) |
@@ -156,4 +157,5 @@ With `public_url` and `action_secret_*`, approval notices include `<public_url>/
 | `stand_in_for` | `escalation` | Present on a [stand-in](#stand-in) relay: the human away; `ant` is then the ant to answer |
 | `question`, `options`, `free_text` | `question` | The question (redacted), its options in order (`ants answer <id> N` picks the `N`th, from 1), whether a typed answer is taken |
 | `ant`, `messages` | `unserved` | Unserved ant and waiting message UUIDs |
+| `thread`, `message`, `due` | `reminder` | Thread reminded of, the message reminded of (`null` for the thread), RFC 3339 time it fell due |
 | `since`, `counts`, `pending` | `digest` | RFC 3339 time of the first held notice, `{kind: n}` held back per kind, `{request, ant, thread, title, expires_at}[]` of the tool requests still pending (`urgent` when any) |

@@ -9,8 +9,8 @@ use crate::{ChannelId, ThreadId};
 #[cfg(doc)]
 use crate::{NOTIFY_BUCKET, READ_BUCKET, STREAM, channel_reads_key, held_key};
 
-/// Which of a human's inbox messages, by [`STREAM`] sequence, the human has read: every one up to `below`, and those
-/// in `read` above it. Kept under the human's key in [`READ_BUCKET`] and shared by all its devices, which update it
+/// Which of a human's inbox messages, by [`STREAM`] sequence, the human has read: every one up to `below` but those
+/// in `unread`, marked unread again, and those in `read` above it. Kept under the human's key in [`READ_BUCKET`] and shared by all its devices, which update it
 /// with compare-and-set, so reading on one device marks read on all of them without consuming the message.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadMarker {
@@ -20,18 +20,37 @@ pub struct ReadMarker {
     /// Inbox messages above `below` read too, as when only one thread's were read.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub read: std::collections::BTreeSet<u64>,
+    /// Inbox messages at or below `below` marked unread again.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub unread: std::collections::BTreeSet<u64>,
 }
 
 impl ReadMarker {
     pub fn is_read(&self, seq: u64) -> bool {
-        seq <= self.below || self.read.contains(&seq)
+        (seq <= self.below && !self.unread.contains(&seq)) || self.read.contains(&seq)
     }
 
     /// Mark the message at `seq` read.
     pub fn mark(&mut self, seq: u64) {
         if seq > self.below {
             self.read.insert(seq);
+        } else {
+            self.unread.remove(&seq);
         }
+    }
+
+    /// Mark the message at `seq` unread again.
+    pub fn unmark(&mut self, seq: u64) {
+        if seq > self.below {
+            self.read.remove(&seq);
+        } else {
+            self.unread.insert(seq);
+        }
+    }
+
+    /// The first sequence a reader of the unread messages reads from: past `below`, or the first marked unread again.
+    pub fn first_unread(&self) -> u64 {
+        self.unread.first().copied().unwrap_or(self.below + 1).min(self.below + 1)
     }
 
     /// Move `below` past the read messages that follow it, given `inbox`, the sequences, in order, of every inbox
@@ -81,6 +100,7 @@ impl ChannelReadMarkers {
         if seq > marker.below {
             marker.below = seq;
             marker.read.retain(|read| *read > seq);
+            marker.unread.clear();
         }
     }
 
@@ -173,12 +193,28 @@ mod tests {
         assert_eq!((marker.below, marker.read.len()), (5, 1), "3 and 5 read, 8 not");
         // 8 left the stream before it was read: nothing holds the marker back any more.
         marker.compact([9]);
-        assert_eq!(marker, ReadMarker { below: 9, read: Default::default() });
+        assert_eq!(marker, ReadMarker { below: 9, ..ReadMarker::default() });
         marker.mark(2);
         assert!(marker.read.is_empty(), "already read");
         let json = serde_json::to_string(&marker).unwrap();
         assert_eq!(json, r#"{"below":9}"#);
         assert_eq!(serde_json::from_str::<ReadMarker>("{}").unwrap(), ReadMarker::default());
+    }
+
+    #[test]
+    fn a_read_marker_marks_messages_unread_again_on_either_side_of_below() {
+        let mut marker = ReadMarker { below: 9, read: [12].into(), ..ReadMarker::default() };
+        assert_eq!(marker.first_unread(), 10);
+        for seq in [5, 12] {
+            marker.unmark(seq);
+        }
+        assert!(!marker.is_read(5) && !marker.is_read(12) && marker.is_read(4) && marker.is_read(9));
+        assert_eq!(marker.first_unread(), 5, "a reader reads from the first marked unread again");
+        marker.compact([10, 11]);
+        assert!(!marker.is_read(5), "moving below on keeps what was marked unread");
+        marker.mark(5);
+        assert_eq!(marker, ReadMarker { below: 9, ..ReadMarker::default() });
+        assert_eq!(marker.first_unread(), 10);
     }
 
     #[test]
@@ -189,12 +225,16 @@ mod tests {
         markers.mark(&ops, 9);
         assert!(markers.is_read(&ops, 7) && !markers.is_read(&ops, 8) && !markers.is_read(&dev, 7));
         markers.compact(&ops, [7, 8, 9]);
-        assert_eq!(markers.channels[&ops], ReadMarker { below: 7, read: [9].into() }, "8 holds the marker back");
+        assert_eq!(
+            markers.channels[&ops],
+            ReadMarker { below: 7, read: [9].into(), ..ReadMarker::default() },
+            "8 holds the marker back"
+        );
         markers.mark_through(&ops, 8);
-        assert_eq!(markers.channels[&ops], ReadMarker { below: 8, read: [9].into() });
+        assert_eq!(markers.channels[&ops], ReadMarker { below: 8, read: [9].into(), ..ReadMarker::default() });
         markers.mark_through(&ops, 9);
         markers.mark_through(&ops, 3);
-        assert_eq!(markers.channels[&ops], ReadMarker { below: 9, read: Default::default() }, "never moves back");
+        assert_eq!(markers.channels[&ops], ReadMarker { below: 9, ..ReadMarker::default() }, "never moves back");
         markers.compact(&dev, [1, 2]);
         assert!(!markers.channels.contains_key(&dev), "no marker for a channel with nothing read");
         assert_eq!(serde_json::to_string(&markers).unwrap(), r#"{"channels":{"ops":{"below":9}}}"#);

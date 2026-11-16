@@ -819,6 +819,17 @@ fn exec_and_http_sinks_get_the_notice_as_versioned_json() {
         (&json!("unserved"), &json!(first), &json!("dev-c"), &json!([first, second]))
     );
 
+    let (thread, message) = (ThreadId::generate(), Uuid::now_v7());
+    let due = at("2025-01-06T09:00:00Z");
+    let reminder = ants_proto::Reminder { at: due, due, message: Some(message), note: "ship it".into(), pushed: false };
+    let reminded = reminder_notice(&p("alice"), &thread, &reminder);
+    assert_eq!(reminded.title, "reminder: ship it");
+    let json = notice_json(&reminded, now);
+    assert_eq!(
+        (&json["kind"], &json["thread"], &json["message"], &json["due"]),
+        (&json!("reminder"), &json!(thread), &json!(message), &json!("2025-01-06T09:00:00Z"))
+    );
+
     let http = Sink::Http { url: "https://hooks.example/a".to_owned(), secret: "0123456789abcdef-hook".into() };
     let Delivery::Post { url, headers, body } = http.request(&notice) else { panic!("not a POST") };
     assert_eq!(url, "https://hooks.example/a");

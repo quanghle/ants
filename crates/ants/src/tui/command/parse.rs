@@ -25,6 +25,8 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("unmute", "", "notify of the thread again"),
     ("snooze", "[DURATION]", "keep the thread off home, 1h unless given"),
     ("unsnooze", "", "bring the thread back on home"),
+    ("remind", "DURATION|TIME [NOTE]", "remind of the thread (or selected message) on home and by push then"),
+    ("unremind", "", "clear the thread's reminder"),
     ("archive", "", "archive the thread"),
     ("unarchive", "", "unarchive the thread"),
     ("title", "TEXT", "title the thread"),
@@ -82,6 +84,9 @@ pub enum Slash {
     /// Keep the thread off home this long.
     Snooze(TimeDelta),
     Unsnooze,
+    /// Remind of the thread as `DURATION|TIME [NOTE]` says.
+    Remind(String),
+    Unremind,
     Title(String),
     React(Reaction),
     Goto(Goto),
@@ -193,6 +198,8 @@ fn slash(text: &str) -> Result<Slash, String> {
         "unmute" => bare(Slash::Unmute),
         "snooze" => snooze::duration(args).map(Slash::Snooze),
         "unsnooze" => bare(Slash::Unsnooze),
+        "remind" => text().map(Slash::Remind),
+        "unremind" => bare(Slash::Unremind),
         "title" => text().map(Slash::Title),
         "react" => text()?.parse().map(Slash::React).map_err(|e| e.to_string()),
         "goto" => goto(&text()?).map(Slash::Goto),
@@ -275,6 +282,8 @@ mod tests {
         assert_eq!(ok("/snooze"), Slash::Snooze(TimeDelta::hours(1)));
         assert_eq!(ok("/snooze 2d"), Slash::Snooze(TimeDelta::days(2)));
         assert_eq!(ok("/unsnooze"), Slash::Unsnooze);
+        assert_eq!(ok("/remind 2h look again"), Slash::Remind("2h look again".into()));
+        assert_eq!(ok("/unremind"), Slash::Unremind);
         assert_eq!(ok("/forward @dev-b"), Slash::Forward { to: user("dev-b"), note: String::new() });
         assert_eq!(ok("/forward @dev-b take it"), Slash::Forward { to: user("dev-b"), note: "take it".into() });
         assert_eq!(parse("/forward dev-b").unwrap_err(), "usage: /forward @ANT [TEXT]");
