@@ -129,7 +129,7 @@ A role comes only with a user JWT signed by the team account: no config file, me
 
 ### Admin orders
 
-An admin's order to an ant (`AdminOrder`) travels on `ants.admin.<machine>.<ant>`, kept by stream `ANTS`, to the daemon serving the whole config file on that machine. The daemon takes it over its host connection ([Machine host credentials](#machine-host-credentials)) from consumer `admin-<machine>`, one order at a time in stream order, records its outcome once and acks it only after storing the outcome, trying for up to 30 s while the hub is out of reach so the order is not decided again. The order (JSON):
+An admin's order to an ant (`AdminOrder`) travels on `ants.admin.<machine>.<ant>`, kept by stream `ANTS`, to the daemon serving the whole config file on that machine. The daemon takes it over its host connection ([Machine host credentials](#machine-host-credentials)) from consumer `admin-<machine>`, one order at a time in stream order, records its outcome once and acks it only after storing the outcome, trying each for up to 30 s while the hub is out of reach, so the order is not decided again and does not hold back the machine's next orders until its ack wait (60 s) ends. The order (JSON):
 
 ```json
 {"id": "<UUIDv7>", "admin": "<human>", "machine": "<machine>", "ant": "<ant>", "op": {"kind": "<op>", ...}, "sent_at": "<RFC 3339>", "on_behalf_of": "<human>", "credentials": "<admin device's user JWT>", "signature": "<base64url Ed25519>"}

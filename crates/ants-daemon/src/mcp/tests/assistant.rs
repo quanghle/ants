@@ -256,19 +256,19 @@ fn grant(humans: &Registry, device: &crate::humans::TestDevice, assistant: Optio
 
 /// `dev-a` as the assistant of alice, its tools acting for her through the store and sealing returned.
 async fn assistant(
-    name: &str,
+    home: &Path,
 ) -> (Mcp, mpsc::UnboundedReceiver<Envelope>, Registry, crate::humans::TestDevice, Arc<MemoryHuman>) {
-    assistant_with(name, Arc::default()).await
+    assistant_with(home, Arc::default()).await
 }
 
 /// [`assistant`], with `notes` as the thread notes.
 async fn assistant_with(
-    name: &str,
+    home: &Path,
     notes: Arc<MemoryNotes>,
 ) -> (Mcp, mpsc::UnboundedReceiver<Envelope>, Registry, crate::humans::TestDevice, Arc<MemoryHuman>) {
     let device = crate::humans::TestDevice::default();
     let humans = Registry::with(UserId::human(), &["alice", "bob"]).verifying_grants(Some(device.account()));
-    let (mcp, sent) = start_with(&home(name), Vec::new(), notes, humans.clone()).await;
+    let (mcp, sent) = start_with(home, Vec::new(), notes, humans.clone()).await;
     let store = Arc::new(MemoryHuman::default());
     mcp.with_assisting(user("alice"));
     mcp.with_human_store(store.clone());
@@ -296,7 +296,8 @@ const ASSIST_TOOLS: [&str; 15] = [
 
 #[tokio::test]
 async fn the_assistant_tools_stand_only_while_the_grant_names_the_ant() {
-    let (mcp, _sent, humans, device, _store) = assistant("assist-grant").await;
+    let home = home("assist-grant");
+    let (mcp, _sent, humans, device, _store) = assistant(&home).await;
     let (url, token) = http_server(&mcp, &ThreadId::generate());
     let client = http_client(&url, &token).await;
     let tools = async || -> Vec<String> {
@@ -327,7 +328,8 @@ async fn the_assistant_tools_stand_only_while_the_grant_names_the_ant() {
 
 #[tokio::test]
 async fn the_assistant_pins_archives_and_snoozes_for_its_human_naming_itself() {
-    let (mcp, mut sent, humans, device, store) = assistant("assist-marks").await;
+    let home = home("assist-marks");
+    let (mcp, mut sent, humans, device, store) = assistant(&home).await;
     grant(&humans, &device, Some("dev-a"), false);
     let alice = user("alice");
     let thread = ThreadId::generate();
@@ -385,7 +387,8 @@ async fn the_assistant_pins_archives_and_snoozes_for_its_human_naming_itself() {
 
 #[tokio::test]
 async fn what_the_assistant_does_for_its_human_carries_on_behalf_of() {
-    let (mcp, mut sent, humans, device, store) = assistant("assist-acts").await;
+    let home = home("assist-acts");
+    let (mcp, mut sent, humans, device, store) = assistant(&home).await;
     grant(&humans, &device, Some("dev-a"), false);
     let (alice, dev_a, dev_b) = (user("alice"), user("dev-a"), user("dev-b"));
     let thread = ThreadId::generate();
@@ -496,7 +499,8 @@ async fn what_the_assistant_does_for_its_human_carries_on_behalf_of() {
 /// An order to set an ant's settings carries the changes as given, dotted fields split; one without changes is refused.
 #[tokio::test]
 async fn the_assistant_orders_settings_changed_for_its_human() {
-    let (mcp, _sent, humans, device, store) = assistant("assist-set").await;
+    let home = home("assist-set");
+    let (mcp, _sent, humans, device, store) = assistant(&home).await;
     grant(&humans, &device, Some("dev-a"), false);
     let (url, token) = http_server(&mcp, &ThreadId::generate());
     let client = http_client(&url, &token).await;
@@ -536,7 +540,8 @@ async fn the_assistant_orders_settings_changed_for_its_human() {
 #[tokio::test]
 async fn the_assistant_posts_in_channels_and_notes_for_its_human() {
     let notes = Arc::new(MemoryNotes::default());
-    let (mcp, mut sent, humans, device, _store) = assistant_with("assist-posts", notes.clone()).await;
+    let home = home("assist-posts");
+    let (mcp, mut sent, humans, device, _store) = assistant_with(&home, notes.clone()).await;
     grant(&humans, &device, Some("dev-a"), false);
     let (alice, dev_a) = (user("alice"), user("dev-a"));
     let mut ops = ChannelEntry::new("ops".parse().unwrap());
@@ -589,7 +594,8 @@ async fn the_assistant_posts_in_channels_and_notes_for_its_human() {
 
 #[tokio::test]
 async fn the_assistant_lists_cancels_and_withdraws_for_its_human_on_requests_naming_it() {
-    let (mcp, _sent, humans, device, store) = assistant("assist-queue").await;
+    let home = home("assist-queue");
+    let (mcp, _sent, humans, device, store) = assistant(&home).await;
     grant(&humans, &device, Some("dev-a"), false);
     let (alice, dev_a, dev_b) = (user("alice"), user("dev-a"), user("dev-b"));
     let (running, waiting) = (ThreadId::generate(), ThreadId::generate());
@@ -690,7 +696,8 @@ async fn the_assistant_lists_cancels_and_withdraws_for_its_human_on_requests_nam
 
 #[tokio::test]
 async fn the_assistant_reads_and_sends_its_human_s_sealed_messages_only_when_enrolled() {
-    let (mcp, mut sent, humans, device, store) = assistant("assist-sealed").await;
+    let home = home("assist-sealed");
+    let (mcp, mut sent, humans, device, store) = assistant(&home).await;
     grant(&humans, &device, Some("dev-a"), false);
     let (alice, bob) = (user("alice"), user("bob"));
     let mut sealed = Envelope::new(bob.clone(), alice.clone(), "");

@@ -43,12 +43,32 @@ fn user(name: &str) -> UserId {
     name.parse().unwrap()
 }
 
-/// A fresh daemon home under the target directory, short enough for a socket path.
-fn home(name: &str) -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/mcp-t").join(name);
+/// A daemon home under the target directory, removed on drop. Unique to this process and call, so concurrent test
+/// processes keep apart, and short enough for a socket path.
+struct Home(PathBuf);
+
+impl std::ops::Deref for Home {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Home {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn home(name: &str) -> Home {
+    static HOMES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = HOMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let target = Path::new(env!("CARGO_MANIFEST_DIR")).parent().and_then(Path::parent).unwrap().join("target");
+    let dir = target.join("mcp-t").join(format!("{name}-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    dir
+    Home(dir)
 }
 
 /// An MCP server for `dev-a` whose sent envelopes come out of the receiver.

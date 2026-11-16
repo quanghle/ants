@@ -4,7 +4,8 @@ use super::*;
 
 #[tokio::test]
 async fn a_bad_timeout_is_refused_before_anything_is_sent() {
-    let (mcp, mut sent) = start(&home("timeout")).await;
+    let home = home("timeout");
+    let (mcp, mut sent) = start(&home).await;
     let current = from_human();
     let _turn = mcp.begin(&current);
     let (url, token) = http_server(&mcp, &current.thread_id);
@@ -23,7 +24,8 @@ async fn a_bad_timeout_is_refused_before_anything_is_sent() {
 
 #[tokio::test]
 async fn ask_ant_gets_the_reply_while_the_inbox_consumer_holds_it() {
-    let (mcp, mut sent) = start(&home("ask")).await;
+    let home = home("ask");
+    let (mcp, mut sent) = start(&home).await;
     let current = from_human();
     let _turn = mcp.begin(&current);
     let (url, token) = http_server(&mcp, &current.thread_id);
@@ -49,7 +51,8 @@ async fn ask_ant_gets_the_reply_while_the_inbox_consumer_holds_it() {
 
 #[tokio::test]
 async fn the_consumer_can_deliver_the_reply_too() {
-    let (mcp, mut sent) = start(&home("ask-js")).await;
+    let home = home("ask-js");
+    let (mcp, mut sent) = start(&home).await;
     let current = from_human();
     let _turn = mcp.begin(&current);
     let (url, token) = http_server(&mcp, &current.thread_id);
