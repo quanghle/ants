@@ -417,11 +417,9 @@ async fn a_rejection_or_the_expiry_ends_the_request() {
     }
 
     // A repeat flushed before the rejection can still reach the server after both requesters stop.
-    timeout(WAIT, async {
-        while !approver.pending(Some(&dev_a)).await.unwrap().is_empty() {}
-    })
-    .await
-    .expect("rejected machines keep asking");
+    timeout(WAIT, async { while !approver.pending(Some(&dev_a)).await.unwrap().is_empty() {} })
+        .await
+        .expect("rejected machines keep asking");
     let short = enrollment(&server, &dev_a, Duration::from_secs(1));
     let asking = request(&server.url, &short, &dev_a, &first, None, REPEAT, pending());
     let err = timeout(WAIT, asking).await.expect("the request outlives its enrollment credentials").unwrap_err();
