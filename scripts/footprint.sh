@@ -1,5 +1,5 @@
 #!/bin/sh
-# Resident memory of an idle antsd serving one ant, against a throwaway nats-server.
+# Resident memory of an idle `ants daemon` serving one ant, against a throwaway nats-server.
 #
 #   scripts/footprint.sh                          # idle RSS; fails at or above 20 MB
 #   scripts/footprint.sh --ask "reply with ok"    # also one harness session (runs the real harness)

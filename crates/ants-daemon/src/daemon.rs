@@ -481,7 +481,7 @@ async fn connect(config: &Config, stop: &Stop) -> Result<Option<(async_nats::Cli
         config.creds.as_deref(),
         config.js_domain.as_ref(),
         &config.ant,
-        &format!("antsd-{}", config.ant),
+        &format!("ants-daemon-{}", config.ant),
         stopped(stop),
     )
     .await
