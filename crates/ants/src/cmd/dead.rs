@@ -1,12 +1,15 @@
 //! `ants dead`: the dead letters of ants.
 
-use ants_daemon::dead;
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use ants_daemon::{dead, metrics};
 use ants_proto::DeadLetter;
 use anyhow::{Context as _, Result};
 use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
 
-use crate::{Nats, completions, excerpt};
+use crate::{Nats, completions, excerpt, serve_metrics};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum DeadCommand {
@@ -24,7 +27,12 @@ pub(crate) enum DeadCommand {
     },
     /// Keep dead-lettering, until Ctrl-C, the messages JetStream stops delivering without the daemon having stored
     /// them as dead letters, and print each one. `ants inbox --follow` does the same while it runs.
-    Watch,
+    Watch {
+        /// Serve GET /healthz and GET /metrics (Prometheus text format) on this address, such as 127.0.0.1:9464
+        /// (default: off).
+        #[arg(long, value_name = "ADDR")]
+        metrics: Option<SocketAddr>,
+    },
 }
 
 pub(crate) async fn run(nats: &Nats<'_>, command: DeadCommand) -> Result<()> {
@@ -48,7 +56,9 @@ pub(crate) async fn run(nats: &Nats<'_>, command: DeadCommand) -> Result<()> {
             dead::discard(&stream().await?, seq).await?;
             println!("dropped dead letter {seq}");
         }
-        DeadCommand::Watch => {
+        DeadCommand::Watch { metrics } => {
+            let backstop = Arc::new(metrics::Backstop::new(nats.me.id.clone(), client.clone()));
+            let _metrics = serve_metrics(metrics, backstop).await?;
             let watch = dead::watch(&client, &js, &nats.me.id, |seq, letter| println!("{}", dead_row(seq, letter)));
             tokio::select! {
                 watched = watch => watched?,

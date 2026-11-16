@@ -163,7 +163,7 @@ A member of a listed GitHub organization or team, or a user with a verified emai
 | `ants queue ANT [--json]` / `ants withdraw ANT MESSAGE` | Inspect waiting messages for `ANT`, or withdraw an unstarted message (human creds). |
 | `ants tools list [-f] [--json]` / `show ID [--json]` | List or inspect pending tool requests (`<ant>/<id>`, unique prefix accepted; `-f` records approval presence). |
 | `ants tools approve ID [--always] [--rule [--config FILE]]` / `reject ID` | Decide a pending tool request; `--rule` appends the exact allow rule to `config.toml` and reloads the daemon. |
-| `ants dead list` / `replay SEQ` / `drop SEQ` / `watch` | Inspect, replay or drop dead letters; `watch` converts `MAX_DELIVERIES` advisories into dead letters. |
+| `ants dead list` / `replay SEQ` / `drop SEQ` / `watch [--metrics ADDR]` | Inspect, replay or drop dead letters; `watch` converts `MAX_DELIVERIES` advisories into dead letters. |
 | `ants init` | Create whichever of stream `ANTS`, the 17 KV buckets and store `ants_files` is missing, leaving existing ones as they are except for adding the subjects `ANTS` lacks and widening a duplicate window of `ANTS` or `OBJ_ants_files` shorter than 24 h, in place (human creds; also runs automatically on first human CLI connect). |
 | `ants daemon [--ant NAME] [--config FILE] [--metrics ADDR] [ant-flags...]` | Serve config-file ants and schedules, or a single `--ant` ([docs/config.md](docs/config.md)). |
 | `ants add NAME [--config FILE] [--out FILE] [--store-key] [--jwt JWT \| --enroll CREDS [--hub URL] [--leaf-config FILE]] [ant-flags...]` | Generate local NKey, append `[[ant]]` to `config.toml`, and complete credentials ([docs/auth.md](docs/auth.md#adding-an-ant)); with `--enroll` on a machine without host credentials, ask for the machine's too ([docs/auth.md](docs/auth.md#host-credentials-over-nats)). |
@@ -374,7 +374,7 @@ Unresolved conditions (`turn_budget`, `cap`, `notes`, `dead_letter`, `context_wi
 
 ### Dead letters
 
-Inbox and channel messages get 5 prompt attempts (`max_deliver = 6`; sign-out, provider-limit and startup-breaker holds, and first context-window session rebuilds, spend none). Failure on attempt 5 (or delivery 6 after a crash) writes a `DeadLetter` to `ants.dead.<ant>`, escalates `dead_letter`, and terminates delivery (`ants dead list | replay SEQ | drop SEQ | watch`). If NATS fails on delivery 6, `ants dead watch` and `ants inbox -f` convert `$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.ANTS.*` advisories into dead letters and notify the owner directly.
+Inbox and channel messages get 5 prompt attempts (`max_deliver = 6`; sign-out, provider-limit and startup-breaker holds, and first context-window session rebuilds, spend none). Failure on attempt 5 (or delivery 6 after a crash) writes a `DeadLetter` to `ants.dead.<ant>`, escalates `dead_letter`, and terminates delivery (`ants dead list | replay SEQ | drop SEQ | watch`). If NATS fails on delivery 6, `ants dead watch` and `ants inbox -f` convert `$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.ANTS.*` advisories into dead letters and notify the owner directly; `ants dead watch --metrics ADDR` counts them in `ants_dead_letters_total` ([Monitoring](#monitoring)).
 
 ### JetStream storage
 
@@ -438,9 +438,9 @@ Options: `--ants PATH`, `--nats-server PATH`, `--nats-conf FILE` (default `~/.co
 
 ## Monitoring
 
-`ants daemon`, `ants webhook serve`, `ants bridge serve` and `ants bridge connect` expose unauthenticated loopback HTTP health and Prometheus metrics when `--metrics ADDR` (`ANTS_METRICS` on daemon) or config `metrics` is set (read at startup):
+`ants daemon`, `ants webhook serve`, `ants bridge serve`, `ants bridge connect` and `ants dead watch` expose unauthenticated loopback HTTP health and Prometheus metrics when `--metrics ADDR` (`ANTS_METRICS` on daemon) or config `metrics` is set (read at startup):
 
-- `GET /healthz`: `200 ok` when healthy (daemon: ≥ 1 ant served and all NATS connections up; webhook: all webhook and human connections up; bridge: running), else `503`.
+- `GET /healthz`: `200 ok` when healthy (daemon: ≥ 1 ant served and all NATS connections up; webhook: all webhook and human connections up; bridge: running; dead watch: its NATS connection up), else `503`.
 - `GET /metrics`: Prometheus text format (`text/plain; version=0.0.4`).
 
 | Metric | Type | Labels | Description |
@@ -450,7 +450,7 @@ Options: `--ants PATH`, `--nats-server PATH`, `--nats-conf FILE` (default `~/.co
 | `ants_memory_low` | gauge | `ant` | `1` while memory is low and the ant runs fewer harnesses ([memory pressure](docs/config.md#memory-pressure)), else `0` |
 | `ants_memory_available_bytes` | gauge | | System memory available at the last pool check (absent until read) |
 | `ants_messages_in_hand`, `ants_prompts_in_flight` | gauge | `ant` | Messages held by daemon; active harness prompts |
-| `ants_prompts_total`, `ants_retries_total`, `ants_dead_letters_total` | counter | `ant` | Prompts started, redelivery retries, dead letters (those the max-deliveries backstop stores included, in the process running it) |
+| `ants_prompts_total`, `ants_retries_total`, `ants_dead_letters_total` | counter | `ant` | Prompts started, redelivery retries, dead letters (those the max-deliveries backstop stores included, in the process running it: `ants dead watch` reports these alone) |
 | `ants_spend_tokens_total`, `ants_spend_cost_total` | counter | `ant` | Reported tokens and cost ([docs/config.md](docs/config.md#spend-report)) |
 | `ants_jetstream_bytes`, `ants_jetstream_limit_bytes` | gauge | `domain`, `store` | Account JetStream storage used and limit ([JetStream storage](#jetstream-storage)) |
 | `ants_webhook_requests_in_flight` | gauge | | Active HTTP webhook requests |
