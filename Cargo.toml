@@ -48,7 +48,7 @@ undocumented_unsafe_blocks = "warn"
 
 # Small, lean binaries: one `ants` executable runs on every machine.
 [profile.release]
-lto = "thin"
+lto = "fat"
 codegen-units = 1
 strip = true
 panic = "abort"
