@@ -139,27 +139,28 @@ fn signed_lines(context: &str, fields: &[&str], issued_at: DateTime<Utc>, body: 
     lines.join("\n").into_bytes()
 }
 
-/// The checks every consent record passes, read from `key` where `expected` is its key: its device's signature, as
-/// for a grant, and an issue time no further ahead than [`GRANT_CLOCK_SKEW`].
-#[allow(clippy::too_many_arguments)]
-fn verify_record(
-    key: &str,
-    expected: &str,
-    human: &UserId,
-    jwt: &str,
-    signature: &str,
-    signed: &[u8],
+/// What a consent record of `human` carries for its device's signature: the device's user JWT, its `signature` of
+/// `signed` and when it was issued.
+struct Record<'a> {
+    human: &'a UserId,
+    jwt: &'a str,
+    signature: &'a str,
+    signed: &'a [u8],
     issued_at: DateTime<Utc>,
-    account: &str,
-    now: DateTime<Utc>,
-) -> Result<DeviceId, ConsentError> {
-    if key != expected {
-        return Err(ConsentError::ForeignKey { human: human.clone(), key: key.to_owned() });
+}
+
+impl Record<'_> {
+    /// The checks every consent record passes, read from `key` where `expected` is its key: its device's signature,
+    /// as for a grant, and an issue time no further ahead than [`GRANT_CLOCK_SKEW`].
+    fn verify(&self, key: &str, expected: &str, account: &str, now: DateTime<Utc>) -> Result<DeviceId, ConsentError> {
+        if key != expected {
+            return Err(ConsentError::ForeignKey { human: self.human.clone(), key: key.to_owned() });
+        }
+        if self.issued_at > now + GRANT_CLOCK_SKEW {
+            return Err(ConsentError::Ahead(self.issued_at));
+        }
+        Ok(device_signed(self.human, self.jwt, self.signature, self.signed, self.issued_at, account)?.0)
     }
-    if issued_at > now + GRANT_CLOCK_SKEW {
-        return Err(ConsentError::Ahead(issued_at));
-    }
-    Ok(device_signed(human, jwt, signature, signed, issued_at, account)?.0)
 }
 
 /// The answers of `human` to its assistant's recent acts, signed by a device of the human. See the
@@ -196,17 +197,15 @@ impl Confirmations {
             return Err(ConsentError::Malformed(format!("{} answers, more than {MAX_CONFIRMED}", self.acts.len())));
         }
         let expected = confirmations_key(&self.human);
-        verify_record(
-            key,
-            &expected,
-            &self.human,
-            &self.jwt,
-            &self.signature,
-            &self.signed(),
-            self.issued_at,
-            account,
-            now,
-        )
+        let signed = self.signed();
+        let record = Record {
+            human: &self.human,
+            jwt: &self.jwt,
+            signature: &self.signature,
+            signed: &signed,
+            issued_at: self.issued_at,
+        };
+        record.verify(key, &expected, account, now)
     }
 
     /// The human's answer to `act` of `assistant`, the latest if it answered twice.
@@ -277,17 +276,15 @@ impl PreAllow {
             return Err(ConsentError::Malformed(format!("rule {rule:?} is not <ant>/<rule> or */<rule>")));
         }
         let expected = pre_allow_key(&self.human);
-        verify_record(
-            key,
-            &expected,
-            &self.human,
-            &self.jwt,
-            &self.signature,
-            &self.signed(),
-            self.issued_at,
-            account,
-            now,
-        )
+        let signed = self.signed();
+        let record = Record {
+            human: &self.human,
+            jwt: &self.jwt,
+            signature: &self.signature,
+            signed: &signed,
+            issued_at: self.issued_at,
+        };
+        record.verify(key, &expected, account, now)
     }
 
     /// The tool rules of the record for requests of `ant` ([`pre_allow_rule`]).

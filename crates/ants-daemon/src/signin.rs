@@ -83,7 +83,10 @@ fn now_ms() -> u64 {
 /// The message on the thread of `envelope`, which found the harness of `ant` on `machine` signed out, that tells its
 /// owner, else the default human of `humans`, how to sign the harness in, and where messages go meanwhile: to the ant's
 /// `fallbacks` ([`crate::fallback`]) if it has any. A reply to `envelope` unless it stands for a channel post.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the daemon's outage handlers pass these from separate fields of their own; notice_on builds the shared part"
+)]
 pub fn notice(
     ant: &UserId,
     envelope: &Envelope,
@@ -115,20 +118,7 @@ pub fn notice(
          user the ants daemon runs as. {meanwhile}",
         own = crate::fallback::own(fallbacks),
     );
-    let owner = humans.human_owner(envelope.owner.as_ref());
-    let mut notice = Envelope::on_thread(
-        envelope.thread_id.clone(),
-        ant.clone(),
-        owner.clone().unwrap_or_else(|| humans.default_human().clone()),
-        text,
-    )
-    .with_owner(owner)
-    .with_creator(humans.ant_creator(envelope.creator.as_ref()))
-    .with_origin_thread(envelope.origin_thread.clone());
-    if !post {
-        notice.in_reply_to = Some(envelope.id);
-    }
-    notice
+    crate::fallback::notice_on(ant, envelope, post, humans, text)
 }
 
 #[cfg(test)]
