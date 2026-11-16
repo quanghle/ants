@@ -26,8 +26,11 @@ const RETRY_MAX: Duration = Duration::from_secs(30);
 /// What a host connection connects with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Host {
-    /// The machine's name; None for the one its credentials name, else the first label of its host name.
+    /// The machine's name; None for the one its credentials name, else `fallback`.
     pub machine: Option<Machine>,
+    /// The config's top-level `machine`, if it is a machine name: the machine's name where neither `machine` nor the
+    /// credentials name one; None for the first label of the host name then.
+    pub fallback: Option<Machine>,
     pub nats: String,
     /// The host credentials; None to connect as no one, to a server without authentication.
     pub creds: Option<PathBuf>,
@@ -49,6 +52,7 @@ impl Host {
     /// when no ant has credentials either, else none, said once per process.
     pub fn new(
         machine: Option<Machine>,
+        fallback: Option<Machine>,
         nats: String,
         creds: Option<PathBuf>,
         js_domain: Option<JsDomain>,
@@ -56,7 +60,8 @@ impl Host {
     ) -> Option<Self> {
         if creds.is_none() && ant_creds.any(|has| has) {
             if !OFF_TOLD.swap(true, Ordering::Relaxed) {
-                let named = machine.as_ref().map_or_else(|| "MACHINE".to_owned(), ToString::to_string);
+                let named =
+                    machine.as_ref().or(fallback.as_ref()).map_or_else(|| "MACHINE".to_owned(), ToString::to_string);
                 tracing::info!(
                     "no host credentials: the machine's record of its ants and its admin orders stay off; issue \
                      them with `ants auth host {named}` and name them in the config's [host] table"
@@ -66,6 +71,7 @@ impl Host {
         }
         Some(Self {
             machine,
+            fallback,
             nats,
             creds,
             js_domain,
@@ -78,8 +84,8 @@ impl Host {
 }
 
 /// The machine `host` stands for: its `machine`, which must be the one its credentials name if they name one, else
-/// theirs, else the first label of `hostname`.
-pub fn machine_of(machine: Option<&Machine>, creds: Option<&Path>, hostname: &str) -> Result<Machine> {
+/// theirs, else `otherwise`.
+pub fn machine_of(machine: Option<&Machine>, creds: Option<&Path>, otherwise: Machine) -> Result<Machine> {
     let named = match creds {
         Some(path) => match creds::check(path)?.kind {
             Kind::Host { machine } => Some(machine),
@@ -93,7 +99,7 @@ pub fn machine_of(machine: Option<&Machine>, creds: Option<&Path>, hostname: &st
         }
         (Some(set), _) => Ok(set.clone()),
         (None, Some(named)) => Ok(named),
-        (None, None) => Ok(Machine::from_hostname(hostname)),
+        (None, None) => Ok(otherwise),
     }
 }
 
@@ -117,7 +123,8 @@ pub fn record(machine: &Machine, hostname: &str, ants: &[UserId]) -> MachineReco
 /// name another machine.
 pub async fn run(host: Host, ants: watch::Receiver<Vec<UserId>>) -> Result<()> {
     let hostname = roster::machine().await;
-    let machine = machine_of(host.machine.as_ref(), host.creds.as_deref(), &hostname)?;
+    let otherwise = host.fallback.clone().unwrap_or_else(|| Machine::from_hostname(&hostname));
+    let machine = machine_of(host.machine.as_ref(), host.creds.as_deref(), otherwise)?;
     let accounts: Vec<String> = host.creds.as_deref().map(creds::account).transpose()?.into_iter().collect();
     let Some(js) = connect(&host, &machine).await? else { return Ok(()) };
     let humans =
@@ -263,19 +270,19 @@ mod tests {
     }
 
     #[test]
-    fn the_machine_is_the_table_s_else_the_host_name_s() {
-        assert_eq!(machine_of(Some(&m("box")), None, "laptop.local").unwrap(), m("box"));
-        assert_eq!(machine_of(None, None, "laptop.local").unwrap(), m("laptop"));
+    fn the_machine_is_the_table_s_else_the_one_given() {
+        assert_eq!(machine_of(Some(&m("box")), None, m("dev-vm1")).unwrap(), m("box"));
+        assert_eq!(machine_of(None, None, m("dev-vm1")).unwrap(), m("dev-vm1"));
     }
 
     #[test]
     fn host_credentials_are_needed_unless_no_ant_has_any() {
         let nats = || "nats://localhost:4222".to_owned();
-        assert!(Host::new(None, nats(), None, None, [true, false].into_iter()).is_none());
-        let anonymous = Host::new(None, nats(), None, None, [false].into_iter()).unwrap();
+        assert!(Host::new(None, None, nats(), None, None, [true, false].into_iter()).is_none());
+        let anonymous = Host::new(None, None, nats(), None, None, [false].into_iter()).unwrap();
         assert_eq!(anonymous.creds, None);
         let creds = Some(PathBuf::from("host.creds"));
-        assert_eq!(Host::new(None, nats(), creds.clone(), None, [true].into_iter()).unwrap().creds, creds);
+        assert_eq!(Host::new(None, None, nats(), creds.clone(), None, [true].into_iter()).unwrap().creds, creds);
     }
 
     #[test]

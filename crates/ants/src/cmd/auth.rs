@@ -70,8 +70,8 @@ pub(crate) enum AuthCommand {
     /// machine's ants in the ants_machines bucket, so that each stays addressable on its machine while offline, and
     /// takes their admin orders. Behind a leaf node, they must name the leaf's machine. They never expire.
     Host {
-        /// Machine name, as the daemon's [host] table names it, else the first label of its host name: letters,
-        /// digits, '-' and '_'.
+        /// Machine name, as the daemon's [host] table names it, else its config's top-level machine, else the first
+        /// label of its host name: letters, digits, '-' and '_'.
         machine: Machine,
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]

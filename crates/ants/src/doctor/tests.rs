@@ -492,6 +492,9 @@ fn the_host_check_wants_host_credentials_of_the_machine_once_ants_have_credentia
     ant.creds = Some(dir.join("dev-a.creds"));
     let off = check(&host, &ant);
     assert!(off.status == Status::Warn && off.to_string().contains("ants auth host box "), "{off}");
+    host.top_machine = Some("dev-vm1".to_owned());
+    let named = check(&host, &ant);
+    assert!(named.to_string().contains("ants auth host dev-vm1 "), "the top-level machine names it: {named}");
     let path = dir.join("host-m1.creds");
     auth::issue_host(&team, &"m1".parse().unwrap(), None, &path).unwrap();
     host.creds = Some(path);
@@ -500,6 +503,20 @@ fn the_host_check_wants_host_credentials_of_the_machine_once_ants_have_credentia
     let other = check(&host, &ant);
     assert!(other.status == Status::Fail && other.to_string().contains("ants auth host m2 "), "{other}");
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_top_level_machine_no_machine_name_is_warned_of_unless_the_host_table_names_one() {
+    let mut host = config::HostSettings::default();
+    assert!(check_machine_name(&host, "box.local").is_none());
+    host.top_machine = Some("dev-vm1".to_owned());
+    assert!(check_machine_name(&host, "box.local").is_none());
+    host.top_machine = Some("Dev VM.1".to_owned());
+    let check = check_machine_name(&host, "box.local").unwrap();
+    assert_eq!(check.status, Status::Warn, "{check}");
+    assert!(check.detail.contains("name the machine box ") && check.fix[0].contains("\"Dev-VM-1\""), "{check}");
+    host.machine = Some("m1".parse().unwrap());
+    assert!(check_machine_name(&host, "box.local").is_none(), "the [host] table names the machine");
 }
 
 #[test]

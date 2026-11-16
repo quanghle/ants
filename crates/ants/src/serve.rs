@@ -418,10 +418,11 @@ pub fn host(
     js_domain: Option<&JsDomain>,
     config: Option<ConfigFile>,
 ) -> Option<(Host, Vec<UserId>)> {
-    let HostSettings { creds, machine, nats: file_nats, js_domain: file_domain, remote_admin } = settings?;
+    let fallback = settings.as_ref()?.fallback();
+    let HostSettings { creds, machine, nats: file_nats, js_domain: file_domain, remote_admin, .. } = settings?;
     let nats = file_nats.unwrap_or_else(|| nats.to_owned());
-    let mut host =
-        Host::new(machine, nats, creds, file_domain.or(js_domain.cloned()), configs.iter().map(|c| c.creds.is_some()))?;
+    let domain = file_domain.or(js_domain.cloned());
+    let mut host = Host::new(machine, fallback, nats, creds, domain, configs.iter().map(|c| c.creds.is_some()))?;
     host.remote_admin = remote_admin;
     host.config = config;
     Some((host, configs.iter().map(|c| c.ant.clone()).collect()))

@@ -143,7 +143,9 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     checks.extend(check_storage(connected.as_ref(), setup, settings).await);
     checks.extend(ants_checked);
     if let Some(loaded) = &loaded {
-        checks.push(check_host(&loaded.host, ants, &ants_daemon::roster::machine().await, now));
+        let hostname = ants_daemon::roster::machine().await;
+        checks.push(check_host(&loaded.host, ants, &hostname, now));
+        checks.extend(check_machine_name(&loaded.host, &hostname));
     }
     checks.extend(check_shared_workdirs(ants, &setup.config));
     checks.extend(reactions);
@@ -1059,14 +1061,16 @@ fn check_ant_creds(ant: &Ant, now: u64) -> Check {
 }
 
 /// The machine's host credentials ([`ants_daemon::host`]): a warning when the ants have credentials and the host
-/// none, which keeps the machine's record of its ants and its admin orders off; `hostname` names the machine then.
+/// none, which keeps the machine's record of its ants and its admin orders off; the `[host]` table's `machine`, else
+/// the top-level one if it is a machine name, else `hostname`'s first label names the machine then.
 fn check_host(host: &config::HostSettings, ants: &[Ant], hostname: &str, now: u64) -> Check {
     let check = "host credentials";
-    let machine = |named: Option<&Machine>| named.cloned().unwrap_or_else(|| Machine::from_hostname(hostname));
-    let issue = |machine: &Machine| {
-        format!(
-            "ants auth host {machine} on the machine holding the team keys, then copy them to              ~/.config/ants/auth/host.creds here, or name them in `creds` of [host]"
-        )
+    let machine = host.machine_or(hostname);
+    let issue = || {
+        vec![format!(
+            "ants auth host {machine} on the machine holding the team keys, then copy them to \
+             ~/.config/ants/auth/host.creds here, or name them in `creds` of [host]"
+        )]
     };
     let Some(path) = &host.creds else {
         if ants.iter().all(|ant| ant.creds.is_none()) {
@@ -1075,16 +1079,35 @@ fn check_host(host: &config::HostSettings, ants: &[Ant], hostname: &str, now: u6
         let detail = format!(
             "none: the daemon does not record the machine's ants in {MACHINES_BUCKET}, nor take their admin orders"
         );
-        return Check::warn(check, detail, vec![issue(&machine(host.machine.as_ref()))]);
+        return Check::warn(check, detail, issue());
     };
     let finding = match creds::check(path) {
         Ok(finding) => finding,
-        Err(e) => return Check::fail(check, format!("{e:#}"), vec![issue(&machine(host.machine.as_ref()))]),
+        Err(e) => return Check::fail(check, format!("{e:#}"), issue()),
     };
-    match ants_daemon::host::machine_of(host.machine.as_ref(), Some(path), hostname) {
+    match ants_daemon::host::machine_of(host.machine.as_ref(), Some(path), machine.clone()) {
         Ok(_) => check_creds(check, path, &finding, now),
-        Err(e) => Check::fail(check, format!("{e:#}"), vec![issue(&machine(host.machine.as_ref()))]),
+        Err(e) => Check::fail(check, format!("{e:#}"), issue()),
     }
+}
+
+/// A warning when the config file's top-level `machine`, which names the machine in its ants' roster entries, is no
+/// machine name ([`Machine`]) and the `[host]` table names none, so that host credentials, the machine's record and
+/// admin orders name the machine as its credentials do, else as `hostname`'s first label.
+fn check_machine_name(host: &config::HostSettings, hostname: &str) -> Option<Check> {
+    let top = host.top_machine.as_deref().filter(|_| host.machine.is_none() && host.fallback().is_none())?;
+    let detail = format!(
+        "machine {top:?} names the ants' roster entries, but holds characters a machine name cannot, so host \
+         credentials, {MACHINES_BUCKET} and admin orders name the machine {} unless its host credentials name \
+         another",
+        Machine::from_hostname(hostname)
+    );
+    let fix = format!(
+        "machine = \"{}\" at the top of the config file (letters, digits, '-' and '_', starting with a letter or \
+         digit), or under [host] to keep the roster's name",
+        Machine::from_hostname(&top.replace('.', "-"))
+    );
+    Some(Check::warn("machine name", detail, vec![fix]))
 }
 
 /// A warning for each ant whose threads run at once in one git work tree, worktrees turned off, where they may

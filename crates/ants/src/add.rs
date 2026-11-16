@@ -252,7 +252,8 @@ enum HostPlan {
 impl HostPlan {
     /// What to ask for, with the file's `host` settings, behind the leaf node of `leaf` if there is one, on the
     /// machine of host name `hostname`: the host credentials of the `[host]` table's `machine`, else the leaf's, else
-    /// the host name's first label, written to the table's `creds`, else `default_out`; nothing when the credentials
+    /// the top-level `machine` if it is a machine name, else the host name's first label, written to the table's
+    /// `creds`, else `default_out`; nothing when the credentials
     /// the daemon would use exist, or when the table names another machine than the leaf's.
     fn new(host: &HostSettings, leaf: Option<&Machine>, hostname: &str, default_out: PathBuf) -> Self {
         if host.creds.as_deref().is_some_and(Path::is_file) {
@@ -266,7 +267,7 @@ impl HostPlan {
             }
             (Some(named), _) => named.clone(),
             (None, Some(leaf)) => leaf.clone(),
-            (None, None) => Machine::from_hostname(hostname),
+            (None, None) => host.machine_or(hostname),
         };
         Self::Ask(machine, host.creds.clone().unwrap_or(default_out))
     }
@@ -549,6 +550,9 @@ mod tests {
         let none = HostSettings::default();
         assert_eq!(HostPlan::new(&none, None, "box.lan", out.clone()), HostPlan::Ask(m("box"), out.clone()));
         assert_eq!(HostPlan::new(&none, Some(&m("m1")), "box.lan", out.clone()), HostPlan::Ask(m("m1"), out.clone()));
+        let top = HostSettings { top_machine: Some("dev-vm1".to_owned()), ..HostSettings::default() };
+        assert_eq!(HostPlan::new(&top, None, "box.lan", out.clone()), HostPlan::Ask(m("dev-vm1"), out.clone()));
+        assert_eq!(HostPlan::new(&top, Some(&m("m1")), "box.lan", out.clone()), HostPlan::Ask(m("m1"), out.clone()));
         let named =
             HostSettings { machine: Some(m("m1")), creds: Some(dir.join("h.creds")), ..HostSettings::default() };
         assert_eq!(HostPlan::new(&named, None, "box", out.clone()), HostPlan::Ask(m("m1"), dir.join("h.creds")));

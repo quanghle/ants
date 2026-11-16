@@ -2718,6 +2718,7 @@ async fn a_host_records_only_its_own_machine_s_ants_and_humans_read_where_each_a
     issue_host(&server.dir().join("auth"), &m1, None, &creds).unwrap();
     let host = ants_daemon::host::Host {
         machine: None,
+        fallback: None,
         nats: server.url.clone(),
         creds: Some(creds.clone()),
         js_domain: None,

@@ -218,6 +218,7 @@ async fn an_add_order_on_a_leaf_node_s_machine_renews_its_uplink_to_carry_the_an
     let leaf = LeafNode { conf: leaf_node.dir().join("leaf.conf"), uplink: leaf::read_uplink, renew: renew_and_signal };
     let host = Host {
         machine: None,
+        fallback: None,
         nats: leaf_node.url.clone(),
         creds: Some(host_creds),
         js_domain: Some(domain.clone()),
