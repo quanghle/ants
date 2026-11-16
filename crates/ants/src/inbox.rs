@@ -6,6 +6,7 @@
 //! compare-and-set, so devices reading at the same time each keep the other's marks. Nothing is consumed, so a reply
 //! one device reads still reaches the others following the inbox.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::ops::ControlFlow;
 use std::time::Duration;
@@ -41,11 +42,21 @@ pub struct Select {
     /// Take summary requests and replies ([`Envelope::summary`]) too. Otherwise they are left out, and marked read
     /// unless peeking: the CLI that asked takes its reply as it comes.
     pub summaries: bool,
+    /// Take an assistant's reports of its acts ([`ThreadId::is_activity`]) too. Otherwise, unless a thread is
+    /// picked, they are left out, counted per thread ([`Inbox::reports`]) and marked read unless peeking.
+    pub activity: bool,
 }
 
 impl Select {
     fn wants(&self, e: &Envelope) -> bool {
-        self.thread.as_ref().is_none_or(|t| *t == e.thread_id) && (self.summaries || e.summary.is_none())
+        self.thread.as_ref().is_none_or(|t| *t == e.thread_id)
+            && (self.summaries || e.summary.is_none())
+            && !self.leaves_out_report(e)
+    }
+
+    /// Whether `e` is an assistant's report left out, to count instead.
+    fn leaves_out_report(&self, e: &Envelope) -> bool {
+        !self.activity && self.thread.is_none() && e.thread_id.is_activity()
     }
 
     /// Whether `e` is left out only for being a summary's, so taken as read.
@@ -76,6 +87,8 @@ pub struct Inbox {
     /// The last sequence read.
     cursor: u64,
     taken: usize,
+    /// The assistant's reports left out, by activity thread, since [`Inbox::reports`] last took them.
+    reports: BTreeMap<ThreadId, usize>,
 }
 
 impl Inbox {
@@ -83,7 +96,27 @@ impl Inbox {
     pub async fn open(js: &jetstream::Context, human: &UserId) -> Result<Self> {
         bus::ensure_stream(js).await?;
         let kv = ensure_bucket(js).await?;
-        Ok(Self { js: js.clone(), kv, human: human.clone(), start: None, seqs: Vec::new(), cursor: 0, taken: 0 })
+        Ok(Self {
+            js: js.clone(),
+            kv,
+            human: human.clone(),
+            start: None,
+            seqs: Vec::new(),
+            cursor: 0,
+            taken: 0,
+            reports: BTreeMap::new(),
+        })
+    }
+
+    /// The unread reports of an assistant's acts left out since last asked, how many on each activity thread.
+    pub fn reports(&mut self) -> BTreeMap<ThreadId, usize> {
+        std::mem::take(&mut self.reports)
+    }
+
+    /// Count `e`, an assistant's report left out, and whether to mark it read.
+    fn report(&mut self, select: &Select, e: Envelope) -> bool {
+        *self.reports.entry(e.thread_id).or_default() += 1;
+        !select.peek
     }
 
     fn left(&self, select: &Select) -> usize {
@@ -196,6 +229,11 @@ impl Inbox {
             match envelope {
                 Ok(e) if select.wants(&e) && wanted(&e) && self.left(select) > found.len() => found.push((seq, e)),
                 Ok(e) if select.skips_summary(&e) => marks.push(seq),
+                Ok(e) if select.leaves_out_report(&e) => {
+                    if self.report(select, e) {
+                        marks.push(seq);
+                    }
+                }
                 Ok(_) => {}
                 Err(e) => {
                     if !select.peek {
@@ -214,7 +252,8 @@ impl Inbox {
     }
 
     /// Wait for new selected messages and hand each to `show`, its sending device looked up by `keyring` if sealed
-    /// ([`Keyring::learn`]), until `stop` resolves or the limit is reached. Every
+    /// ([`Keyring::learn`]), and the assistant's reports left out of each read to `reported` ([`Inbox::reports`]),
+    /// until `stop` resolves or the limit is reached. Every
     /// device following the inbox shows each new message, even one another device already read.
     pub async fn follow(
         &mut self,
@@ -222,6 +261,7 @@ impl Inbox {
         keyring: Option<&Keyring>,
         behalf: Option<&crate::behalf::Checker>,
         mut show: impl FnMut(&Envelope) -> Result<()>,
+        mut reported: impl FnMut(BTreeMap<ThreadId, usize>) -> Result<()>,
         stop: impl Future<Output = ()>,
     ) -> Result<()> {
         tokio::pin!(stop);
@@ -252,6 +292,11 @@ impl Inbox {
                         marks.push(seq);
                     }
                     Ok(e) if select.skips_summary(&e) => marks.push(seq),
+                    Ok(e) if select.leaves_out_report(&e) => {
+                        if self.report(select, e) {
+                            marks.push(seq);
+                        }
+                    }
                     Ok(_) => {}
                     Err(e) => {
                         tracing::warn!(error = %e, seq, "skipping a malformed message");
@@ -261,6 +306,10 @@ impl Inbox {
             }
             if !select.peek {
                 self.mark(&marks).await?;
+            }
+            let reports = self.reports();
+            if !reports.is_empty() {
+                reported(reports)?;
             }
             if self.left(select) == 0 {
                 break;
@@ -288,7 +337,7 @@ fn parse(subject: &str, payload: &[u8]) -> Result<Envelope, String> {
 /// after it was delivered, so a miss is retried briefly. Returns whether it was found unread.
 pub async fn mark_read(js: &jetstream::Context, human: &UserId, reply: &Envelope) -> Result<bool> {
     let mut inbox = Inbox::open(js, human).await?;
-    let select = Select { thread: Some(reply.thread_id.clone()), limit: Some(1), peek: false, summaries: true };
+    let select = Select { thread: Some(reply.thread_id.clone()), summaries: true, limit: Some(1), ..Select::default() };
     for _ in 0..5 {
         if !inbox.unread_where(&select, |e| e.id == reply.id).await?.is_empty() {
             return Ok(true);
@@ -552,6 +601,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_assistant_s_reports_are_counted_apart_unless_asked_for() {
+        let Some(server) = Server::start() else { return };
+        let dev_a: UserId = "dev-a".parse().unwrap();
+        let (_, human) = server.connect(&UserId::human()).await;
+        bus::ensure_stream(&human).await.unwrap();
+        let (_, ant_js) = server.connect(&dev_a).await;
+        let acts = ThreadId::activity(&UserId::human(), chrono::Utc::now().date_naive());
+        let report = |text: &str| Envelope::on_thread(acts.clone(), dev_a.clone(), UserId::human(), text);
+        for e in [report("sent bob a message"), Envelope::new(dev_a.clone(), UserId::human(), "done"), report("held")] {
+            bus::publish(&ant_js, &e).await.unwrap();
+        }
+        let mut inbox = Inbox::open(&human, &UserId::human()).await.unwrap();
+        let peek = Select { peek: true, ..Default::default() };
+        assert_eq!(texts(&inbox.unread(&peek).await.unwrap()), ["done"]);
+        assert_eq!(inbox.reports(), BTreeMap::from([(acts.clone(), 2)]));
+        let activity = Select { activity: true, ..peek };
+        assert_eq!(texts(&read(&human, activity).await), ["sent bob a message", "done", "held"]);
+        let on_acts = Select { thread: Some(acts.clone()), peek: true, ..Default::default() };
+        assert_eq!(texts(&read(&human, on_acts).await), ["sent bob a message", "held"], "picked, its thread shows");
+
+        assert_eq!(texts(&inbox.unread(&Select::default()).await.unwrap()), ["done"]);
+        assert_eq!(inbox.reports().values().sum::<usize>(), 2);
+        assert!(read(&human, Select { activity: true, ..Default::default() }).await.is_empty(), "summed up, read");
+    }
+
+    #[tokio::test]
     async fn every_device_of_a_human_gets_every_reply_and_reading_on_one_reads_on_all() {
         let Some(server) = Server::start() else { return };
         let (alice, bob, dev_a): (UserId, UserId, UserId) =
@@ -577,6 +652,7 @@ mod tests {
                     shown.push(e.text.clone());
                     Ok(())
                 },
+                |_| Ok(()),
                 std::future::pending(),
             );
             timeout(Duration::from_secs(10), follow).await.expect("no reply followed").unwrap();

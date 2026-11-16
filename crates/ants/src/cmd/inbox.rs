@@ -1,7 +1,9 @@
 //! `ants inbox`: the messages to the CLI's human.
 
 use ants_daemon::{dead, reactions};
-use ants_proto::{Envelope, Following, Uuid};
+use std::collections::BTreeMap;
+
+use ants_proto::{Envelope, Following, ThreadId, Uuid};
 use anyhow::{Result, bail};
 use async_nats::jetstream::consumer::DeliverPolicy;
 use futures::StreamExt as _;
@@ -56,7 +58,8 @@ pub(crate) async fn show(
     let changes = if follow { reacted::changes(nats, &js, &behalf).await } else { futures::stream::pending().boxed() };
     let show = |e: &Envelope| show_with(e, &[]);
     let unread = inbox.unread(select).await?;
-    if unread.is_empty() && !follow && !json {
+    let reports = inbox.reports();
+    if unread.is_empty() && reports.is_empty() && !follow && !json {
         println!("no unread replies");
     }
     let ids: Vec<Uuid> = unread.iter().map(|e| e.id).collect();
@@ -69,10 +72,17 @@ pub(crate) async fn show(
         behalf.learn(e).await;
         show_with(e, reactions.get(&e.id).map_or(&[], Vec::as_slice))?;
     }
+    let reported = |reports: BTreeMap<ThreadId, usize>| {
+        if !json {
+            reports.iter().for_each(|(thread, n)| println!("{}", report_line(thread, *n)));
+        }
+        Ok(())
+    };
+    reported(reports)?;
     if follow {
         let watch = watch_stored(nats, &client, &js, select.thread.is_none() && !json);
         let ctrl_c = async { _ = tokio::signal::ctrl_c().await };
-        let followed = Box::pin(inbox.follow(select, keyring.as_ref(), Some(&behalf), show, ctrl_c));
+        let followed = Box::pin(inbox.follow(select, keyring.as_ref(), Some(&behalf), show, reported, ctrl_c));
         // Following one thread shows no escalation on the others, so only following them all counts as reading.
         let followed = async {
             match select.thread {
@@ -105,6 +115,13 @@ pub(crate) async fn show(
         }
     }
     Ok(())
+}
+
+/// The line summing up `n` reports of an assistant's acts left out on the activity `thread`.
+fn report_line(thread: &ThreadId, n: usize) -> String {
+    let reports =
+        if n == 1 { "1 assistant activity report".to_owned() } else { format!("{n} assistant activity reports") };
+    format!("{reports} on thread {thread} (`ants thread show {thread}` shows them)")
 }
 
 /// `ants inbox --unread TARGET`: mark unread again on all the human's devices the message TARGET names to the human and

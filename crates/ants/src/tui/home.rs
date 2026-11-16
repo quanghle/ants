@@ -249,7 +249,7 @@ fn unsnoozed(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
         count: 1,
         also: Vec::new(),
     };
-    for thread in &data.live.order {
+    for thread in data.work() {
         if let Some(asked) = data.question(thread) {
             let text = format!("{}: {}", asked.from, asked.question.text);
             items.push(Item {
