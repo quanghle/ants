@@ -833,7 +833,8 @@ mod tests {
         m.data.live.roster(vec![crate::roster::tests::entry("dev-a", 3600, 2, at(5))], at(5));
         let shown = screen(&page, &m, 110, at(47));
         assert!(shown.contains("alice → dev-a"), "{shown}");
-        assert!(shown.contains("17:00 {.~.} dev-a → dev-b"), "an ant's face before its name: {shown}");
+        let face = format!("{} {{.~.}} dev-a → dev-b", hm(entries[1].stored_at));
+        assert!(shown.contains(&face), "an ant's face before its name: {shown}");
         assert!(shown.contains("  deploy the site"), "{shown}");
         assert!(shown.contains("read    read migrations") || shown.contains("execute read migrations"), "{shown}");
         assert!(shown.contains("ok 0ms"), "{shown}");

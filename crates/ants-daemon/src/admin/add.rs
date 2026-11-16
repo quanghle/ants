@@ -147,8 +147,7 @@ async fn add(
     {
         let mut record =
             SharedSettings::new(ant.clone(), shared_fields, orders.machine.clone(), Some(order.admin.clone()));
-        shared::sign(&mut record, &jwt, &key)?;
-        identities.put(record.key(), serde_json::to_vec(&record)?).await.context("writing the shared settings")?;
+        shared::write(identities, &mut record, &shared::Signer::new(&jwt, key.clone()), None).await?;
         config.shared.store(record);
     }
     config::append(path, &table)?;
