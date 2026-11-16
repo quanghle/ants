@@ -155,20 +155,13 @@ fn plain_host(host: &str) -> bool {
     !host.is_empty() && host.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']'))
 }
 
-/// Why `url`, a sign-in page other than `page`, is not shown: when it is the device login page of another host, the
-/// error names the host and the `--github-url` that would show it.
-fn not_shown(url: &str, page: &str) -> anyhow::Error {
-    let host =
-        url.strip_prefix("https://").and_then(|rest| rest.strip_suffix("/login/device")).filter(|h| plain_host(h));
-    match host {
-        Some(host) => anyhow!(
-            "the signer sent the device login page of {host}, not {page} (--github-url): not shown; only when {host} \
-             is the team's GitHub Enterprise Server, run `ants login` again with --github-url https://{host}"
-        ),
-        None => {
-            anyhow!("the signer sent a sign-in page other than the device login page {page} (--github-url): not shown")
-        }
-    }
+/// Why a sign-in page other than `page` is not shown. The error never repeats the page sent, nor builds a
+/// `--github-url` from it: a hostile hub could otherwise lead the person to its own page.
+fn not_shown(page: &str) -> anyhow::Error {
+    anyhow!(
+        "the signer sent a sign-in page other than the device login page {page}: not shown; with a GitHub Enterprise \
+         Server, run `ants login` again with --github-url set to the server's URL as known to the team"
+    )
 }
 
 /// The account of the bootstrap credentials at `path`: the issuer of the JWTs `ants login` takes.
@@ -232,7 +225,7 @@ async fn ask(
                     },
                     LoginAnswer::Refused { reason } => bail!("the registration of {} was refused: {reason}", request.name),
                     LoginAnswer::Verify { url, .. } if !url.eq_ignore_ascii_case(login.device_page) => {
-                        return Err(not_shown(url, login.device_page));
+                        return Err(not_shown(login.device_page));
                     }
                     _ if shown.as_ref() == Some(&answer) => continue,
                     LoginAnswer::Verify { user_code, expires_at, .. } => {
@@ -407,14 +400,6 @@ mod tests {
         {
             assert!(device_page(bad).is_err(), "{bad}");
         }
-        let page = device_page(GITHUB_URL).unwrap();
-        let err = not_shown("https://ghe.example/login/device", &page).to_string();
-        assert!(err.contains("--github-url https://ghe.example") && err.contains("not shown"), "{err}");
-        for other in ["https://evil.example/login", "http://ghe.example/login/device", "https://a\x1b]8;;/login/device"]
-        {
-            let err = not_shown(other, &page).to_string();
-            assert!(!err.contains(other) && !err.contains("run `ants login` again"), "{err}");
-        }
     }
 
     #[tokio::test]
@@ -529,7 +514,7 @@ mod tests {
 
             let phished = Login { device_page: &device_page(GITHUB_URL).unwrap(), ..refused };
             let err = format!("{:#}", register(&phished, &store, pending()).await.unwrap_err());
-            assert!(err.contains("not shown") && err.contains("--github-url https://github.example"), "{err}");
+            assert!(err.contains("not shown") && !err.contains("github.example"), "{err}");
             assert!(!phished.out.exists());
 
             let stopped = &refused;
