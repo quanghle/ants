@@ -43,10 +43,11 @@ pub struct Workload {
     fallback: Mutex<Option<ServingFallback>>,
     memory_low: Mutex<Option<MemoryLow>>,
     paused: Mutex<Option<Paused>>,
+    drift: Mutex<Vec<String>>,
     /// Wakes the heartbeats when the ant turns idle or working, its harness signed out or in or started with another
     /// agent, a provider limit starts or ends, the harness's start failures hold messages or no longer do, a fallback
-    /// starts or stops answering, memory turns low or recovers, or the ant is paused or resumed, so the roster shows
-    /// it before the next beat.
+    /// starts or stops answering, memory turns low or recovers, the ant is paused or resumed, or its drift changes, so
+    /// the roster shows it before the next beat.
     changed: Notify,
 }
 
@@ -151,6 +152,19 @@ impl Workload {
         self.paused.locked().clone()
     }
 
+    /// Note the fields of the ant's shared settings its machine's config sets otherwise.
+    pub fn set_drift(&self, drift: Vec<String>) {
+        let mut current = self.drift.locked();
+        if *current != drift {
+            *current = drift;
+            self.changed.notify_one();
+        }
+    }
+
+    pub fn drift(&self) -> Vec<String> {
+        self.drift.locked().clone()
+    }
+
     pub fn memory_low(&self) -> Option<MemoryLow> {
         self.memory_low.locked().clone()
     }
@@ -180,6 +194,7 @@ impl Workload {
         entry.fallback = self.fallback();
         entry.memory_low = self.memory_low();
         entry.paused = self.paused();
+        entry.drift = self.drift();
     }
 }
 
@@ -225,7 +240,7 @@ pub async fn entry(config: &Config) -> RosterEntry {
         fallback: None,
         memory_low: None,
         paused: config.pause.get(),
-        drift: config.drift.clone(),
+        drift: config.drift.get(),
         model: AntModel::of(
             config.model_settings.model.clone(),
             config.model_settings.reasoning_effort.clone(),
@@ -399,6 +414,7 @@ async fn due(ticks: &mut tokio::time::Interval, workload: Option<&Workload>, ent
                 && entry.failing == workload.failing()
                 && entry.fallback == workload.fallback()
                 && entry.paused == workload.paused()
+                && entry.drift == workload.drift()
             {
                 // Turned and turned back before this task ran: nothing new to show.
                 continue;

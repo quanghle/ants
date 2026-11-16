@@ -11,7 +11,7 @@ use ants_daemon::admin::{ConfigFile, LeafNode};
 use ants_daemon::config::{self, Ant, HostSettings, Summary};
 use ants_daemon::host::{self, Host};
 use ants_daemon::schedule::Schedule;
-use ants_daemon::shared::Shared;
+use ants_daemon::shared::{self, Drift, Shared, Via};
 use ants_daemon::{Config, Harnesses, Stop};
 use ants_proto::{JsDomain, UserId};
 use anyhow::{Context as _, Result, bail};
@@ -361,7 +361,7 @@ pub fn configs(
             }
             if let Some((overlaid, drift)) = shared.and_then(|shared| shared.overlaid(&p)) {
                 match overlaid.into_config(nats, harnesses) {
-                    Ok(config) => return Ok(Config { drift, ..config }),
+                    Ok(config) => return Ok(Config { drift: Drift::new(drift), ..config }),
                     Err(e) => tracing::warn!(
                         ant = %p.name, error = format!("{e:#}"),
                         "the ant's shared settings do not suit this machine; serving it with its config's"
@@ -380,6 +380,33 @@ pub struct Served {
     pub metrics: Option<SocketAddr>,
     /// The machine's host connection, with the ants to record as the machine's ([`host`]).
     pub host: Option<(Host, Vec<UserId>)>,
+    /// The shared settings `configs` were overlaid with: kept current by the host connection, else, without one, by
+    /// reading them as the ants ([`shared::follow`]).
+    pub shared: Option<Shared>,
+}
+
+impl Served {
+    /// Where to read the shared settings of the ants served without a host connection: each server the ants connect
+    /// to, as the first of them there. None with a host connection, which reads them, or no shared settings to keep.
+    fn vias(&self) -> Option<Vec<Via>> {
+        if self.host.is_some() || self.shared.is_none() {
+            return None;
+        }
+        let mut vias: Vec<Via> = Vec::new();
+        for config in self.configs.iter().filter(|c| c.ant != UserId::messenger()) {
+            match vias.iter_mut().find(|v| v.nats == config.nats_url && v.js_domain == config.js_domain) {
+                Some(via) => via.ants.push(config.ant.clone()),
+                None => vias.push(Via {
+                    nats: config.nats_url.clone(),
+                    creds: config.creds.clone(),
+                    js_domain: config.js_domain.clone(),
+                    user: config.ant.clone(),
+                    ants: vec![config.ant.clone()],
+                }),
+            }
+        }
+        Some(vias)
+    }
 }
 
 /// The host connection of a daemon serving `configs` as `settings` describe it, `nats` and `js_domain` standing for
@@ -400,8 +427,8 @@ pub fn host(
     Some((host, configs.iter().map(|c| c.ant.clone()).collect()))
 }
 
-/// How long [`run`] waits at start for the host connection's first read of the shared settings, to serve the ants with
-/// them rather than restart them once read.
+/// How long [`run`] waits at start for the first read of the shared settings, by the host connection or without one,
+/// to serve the ants with them rather than restart them once read.
 const SHARED_FIRST_READ: Duration = Duration::from_secs(5);
 
 /// The machine's leaf node, at ~/.config/ants/leaf.conf, whose uplink an add order renews to carry the ant added
@@ -442,13 +469,12 @@ pub async fn run(
     let restarting = |wanted: Option<(Host, Vec<UserId>)>| {
         wanted.map(|(host, ants)| (Host { restarts: restarts.clone(), ..host }, ants))
     };
-    let mut host = HostRun::default();
-    let shared = served.host.as_ref().and_then(|(h, _)| h.config.as_ref()).map(|c| c.shared.clone());
-    host.reconcile(restarting(served.host.clone()));
-    let served = match shared {
+    let mut links = Links::default();
+    links.reconcile(restarting(served.host.clone()), Some(&served));
+    let served = match served.shared.clone() {
         Some(shared) if shared.wait_polled(SHARED_FIRST_READ).await => match reload() {
             Ok(again) => {
-                host.reconcile(restarting(again.host.clone()));
+                links.reconcile(restarting(again.host.clone()), Some(&again));
                 again
             }
             Err(e) => {
@@ -495,13 +521,13 @@ pub async fn run(
             () = &mut shutdown, if !stopping => {
                 stopping = true;
                 schedules.reconcile(Vec::new(), run_schedule);
-                host.reconcile(None);
+                links.reconcile(None, None);
             }
             () = &mut replaced, if !stopping => {
                 tracing::info!("stopping every ant as on SIGTERM, finishing the prompts in flight");
                 (stopping, ended) = (true, Ended::Replaced);
                 schedules.reconcile(Vec::new(), run_schedule);
-                host.reconcile(None);
+                links.reconcile(None, None);
                 for r in running.values_mut() {
                     r.next = None;
                     r.ask_to_stop();
@@ -513,9 +539,9 @@ pub async fn run(
                     if served.metrics != metrics {
                         tracing::warn!("the metrics address changed; it takes effect on a restart");
                     }
+                    links.reconcile(restarting(served.host.clone()), Some(&served));
                     tasks.extend(reconcile(&mut running, served.configs).into_iter().map(serve));
                     schedules.reconcile(served.schedules, run_schedule);
-                    host.reconcile(restarting(served.host));
                 }
                 Err(e) => tracing::error!(
                     on = trigger.describe(),
@@ -602,6 +628,22 @@ impl Drop for Schedules {
     }
 }
 
+/// The machine's links to the bus besides its ants' own: its host connection, or else the reading of the shared
+/// settings without one.
+#[derive(Default)]
+struct Links {
+    host: HostRun,
+    follower: Follower,
+}
+
+impl Links {
+    /// Run the host connection `host` and the reading of the shared settings `served` lists; with neither, both stop.
+    fn reconcile(&mut self, host: Option<(Host, Vec<UserId>)>, served: Option<&Served>) {
+        self.host.reconcile(host);
+        self.follower.reconcile(served.and_then(Served::vias), served.and_then(|s| s.shared.as_ref()));
+    }
+}
+
 /// The machine's host connection, if any, in its task.
 #[derive(Default)]
 struct HostRun(Option<HostTask>);
@@ -642,6 +684,42 @@ impl HostRun {
         );
         if let Some(old) = self.0.replace(HostTask { host: wanted, creds, ants: sender, task }) {
             old.task.abort();
+        }
+    }
+}
+
+/// The reading of the shared settings without a host connection ([`shared::follow`]), if any, in its task.
+#[derive(Default)]
+struct Follower(Option<(watch::Sender<Vec<Via>>, JoinHandle<()>)>);
+
+impl Follower {
+    /// Read the shared settings into `shared` where `wanted` says: the reading running is told unless it stopped,
+    /// when it starts again; with none wanted, it stops.
+    fn reconcile(&mut self, wanted: Option<Vec<Via>>, shared: Option<&Shared>) {
+        let (Some(wanted), Some(shared)) = (wanted, shared) else {
+            if let Some((_, task)) = self.0.take() {
+                task.abort();
+            }
+            return;
+        };
+        if let Some((vias, task)) = &self.0
+            && !task.is_finished()
+        {
+            vias.send_replace(wanted);
+            return;
+        }
+        let (sender, receiver) = watch::channel(wanted);
+        let task = tokio::spawn(shared::follow(shared.clone(), receiver).instrument(tracing::info_span!("shared")));
+        if let Some((_, old)) = self.0.replace((sender, task)) {
+            old.abort();
+        }
+    }
+}
+
+impl Drop for Follower {
+    fn drop(&mut self) {
+        if let Some((_, task)) = &self.0 {
+            task.abort();
         }
     }
 }
@@ -723,11 +801,13 @@ fn reconcile(running: &mut HashMap<UserId, Running>, wanted: Vec<Config>) -> Vec
             r.next = Some(config);
             r.ask_to_stop();
         } else {
-            // Pool members and the pause are left out of the comparison: the running ant takes them as it is.
+            // Pool members, the pause and the drift are left out of the comparison: the running ant takes them as it
+            // is.
             if let (Some(serving), Some(listed)) = (&r.config.pool, &config.pool) {
                 serving.members.replace(&listed.members);
             }
             r.config.pause.replace(&config.pause);
+            r.config.drift.replace(&config.drift);
         }
     }
     start
@@ -921,6 +1001,41 @@ mod tests {
         assert!(reconcile(&mut running, vec![ant_named(false, None)]).is_empty());
         assert!(!running[&dev_a].stopping, "only paused changed");
         assert_eq!(served.pause.get(), None, "resumed");
+    }
+
+    #[test]
+    fn a_change_of_drift_alone_restarts_no_ant() {
+        let dev_a = || {
+            let p = Ant { model: Some("gpt-4".to_owned()), ..ant("dev-a") };
+            Ant { creds: None, ..p }
+        };
+        let shared = Shared::default();
+        let record = |fields: serde_json::Value| {
+            let fields = fields.as_object().unwrap().clone();
+            ants_proto::SharedSettings::new("dev-a".parse().unwrap(), fields, "m1".parse().unwrap(), None)
+        };
+        shared.store(record(serde_json::json!({ "model": "gpt-5" })));
+        let served = |ant: Ant| {
+            shared.listed(std::slice::from_ref(&ant));
+            let harnesses = Harnesses::builtin();
+            configs(vec![ant], &harnesses, "nats://cli:4222", None, None, Some(&shared)).unwrap().remove(0)
+        };
+        let mut running = HashMap::new();
+        let (config, _) = reconcile(&mut running, vec![served(dev_a())]).remove(0);
+        assert_eq!((config.model_settings.model.as_deref(), config.drift.get()), (Some("gpt-5"), vec!["model".into()]));
+        let drift = config.drift.subscribe();
+
+        let mut same = dev_a();
+        same.model = Some("gpt-5".to_owned());
+        assert!(reconcile(&mut running, vec![served(same)]).is_empty());
+        let dev_a_id: UserId = "dev-a".parse().unwrap();
+        assert!(!running[&dev_a_id].stopping, "only the drift changed");
+        assert!(drift.has_changed().unwrap(), "the running ant hears of it");
+        assert_eq!(config.drift.get(), Vec::<String>::new());
+
+        shared.store(record(serde_json::json!({ "model": "o3" })));
+        assert!(reconcile(&mut running, vec![served(dev_a())]).is_empty());
+        assert!(running[&dev_a_id].stopping, "the shared settings changed");
     }
 
     #[test]

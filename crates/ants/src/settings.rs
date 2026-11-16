@@ -486,7 +486,9 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         let admin = Nats::new(&server.url, Some(&admin_creds), None).unwrap();
         let (_, js) = admin.connect("test").await.unwrap();
         let path = server.dir().join("config.toml");
-        std::fs::write(&path, FILE.replace("workdir = \".\"", "workdir = \".\"\nwhoami = \"a tester\"")).unwrap();
+        let a_creds = server.creds_as(&dev_a, Role::Ant);
+        let table = format!("workdir = \".\"\nwhoami = \"a tester\"\ncreds = {:?}", a_creds.display().to_string());
+        std::fs::write(&path, FILE.replace("workdir = \".\"", &table)).unwrap();
         let triggers = crate::reload::Triggers::new(path.clone(), None, Duration::from_secs(3600)).unwrap();
         let config = ConfigFile::new(path.clone(), triggers.edits());
         let shared = config.shared.clone();
@@ -501,6 +503,8 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
             json!({ "model": "gpt-5", "whoami": "a tester" })
         );
         assert_eq!((created.machine.as_str(), created.by.as_ref()), ("m1", None));
+        let accounts = vec![ants_daemon::creds::account(&a_creds).unwrap()];
+        created.verify(accounts.iter().map(String::as_str), Utc::now()).expect("signed with dev-a's credentials");
 
         let reading = read(&admin, &js, &dev_a, WAIT).await.unwrap();
         assert_eq!(reading.shared.as_deref(), Some(&created));
@@ -516,6 +520,7 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
             json!({ "model": "o3", "whoami": "a tester", "memory": "notes" })
         );
         assert_eq!(changed.by, Some(alice.clone()));
+        changed.verify(accounts.iter().map(String::as_str), Utc::now()).expect("signed with dev-a's credentials");
         assert!(changes.has_changed().unwrap(), "the daemon reloads with the change");
         let edited = std::fs::read_to_string(&path).unwrap();
         assert!(edited.contains("model = \"o3\"  # fast enough"), "the config sets the model too: {edited}");
@@ -524,7 +529,7 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         let loaded = ants_daemon::config::load(&path).unwrap();
         let served = crate::serve::configs(loaded.ants, &loaded.harnesses, &server.url, None, None, Some(&shared));
         let served = served.unwrap().remove(0);
-        assert_eq!((served.model_settings.model.as_deref(), served.drift.as_slice()), (Some("o3"), &[] as &[String]));
+        assert_eq!((served.model_settings.model.as_deref(), served.drift.get()), (Some("o3"), Vec::<String>::new()));
         let (_, read_memories) = orders::send(&admin, &js, None, &dev_a, AdminOp::ReadMemories, WAIT).await.unwrap();
         let memories: ants_proto::Memories = serde_json::from_value(read_memories.unwrap().result.unwrap()).unwrap();
         assert_eq!(
@@ -547,14 +552,11 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
             .await
             .unwrap();
         let m2_kv = DirectKv::new(&jetstream::new(client), None, ants_proto::IDENTITIES_BUCKET).await.unwrap();
-        ants_daemon::shared::refresh(&m2_kv, &m2, &standby, std::slice::from_ref(&dev_a)).await;
+        ants_daemon::shared::refresh(&m2_kv, Some(&m2), &standby, std::slice::from_ref(&dev_a), &accounts).await;
         assert_eq!(shared_of(&js, &dev_a).await.unwrap(), Some(changed), "the first record stays");
         let taken = crate::serve::configs(vec![own], &Harnesses::builtin(), &server.url, None, None, Some(&standby));
         let taken = taken.unwrap().remove(0);
-        assert_eq!(
-            (taken.model_settings.model.as_deref(), taken.drift.as_slice()),
-            (Some("o3"), &["model".to_owned()][..])
-        );
+        assert_eq!((taken.model_settings.model.as_deref(), taken.drift.get()), (Some("o3"), vec!["model".to_owned()]));
         assert_eq!(ants_daemon::roster::entry(&taken).await.drift, ["model"], "the roster tells the drift");
 
         std::fs::write(&path, edited.replace("\"o3\"", "\"o4\"")).unwrap();
@@ -571,6 +573,44 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         })
         .await
         .expect("the machine's record tells the drift");
+
+        // m2's host credentials may write dev-a's record, but not sign it as dev-a: m1 writes its config's over it.
+        let forged =
+            SharedSettings::new(dev_a.clone(), serde_json::Map::from_iter([("model".into(), json!("evil"))]), m2, None);
+        m2_kv.put(forged.key(), serde_json::to_vec(&forged).unwrap()).await.unwrap();
+        ants_daemon::shared::refresh(&m2_kv, None, &standby, std::slice::from_ref(&dev_a), &accounts).await;
+        assert_eq!(standby.record(&dev_a), None, "not applied");
+        ants.send_replace(vec![dev_a.clone()]);
+        let mended = tokio::time::timeout(WAIT, async {
+            loop {
+                if let Some(record) = shared.record(&dev_a).filter(|r| r.fields.get("model") == Some(&json!("o4"))) {
+                    return record;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        });
+        let mended = mended.await.expect("m1 writes its config's over the forged record");
+        assert_eq!(mended.machine.as_str(), "m1");
+        assert_eq!(shared_of(&js, &dev_a).await.unwrap(), Some(mended.clone()));
+
+        // A daemon without host credentials reads the record as the ant, and writes none.
+        let follower = ants_daemon::shared::Shared::default();
+        let mut own = ants_daemon::config::Ant::new(dev_a.clone(), server.dir().to_path_buf());
+        own.creds = Some(a_creds.clone());
+        follower.listed(std::slice::from_ref(&own));
+        let via = ants_daemon::shared::Via {
+            nats: server.url.clone(),
+            creds: Some(a_creds.clone()),
+            js_domain: None,
+            user: dev_a.clone(),
+            ants: vec![dev_a.clone()],
+        };
+        let (vias, watched) = tokio::sync::watch::channel(vec![via]);
+        let following = tokio::spawn(ants_daemon::shared::follow(follower.clone(), watched));
+        assert!(follower.wait_polled(WAIT).await, "the follower reads the shared settings");
+        assert_eq!(follower.record(&dev_a), Some(mended));
+        drop(vias);
+        tokio::time::timeout(WAIT, following).await.unwrap().unwrap();
         drop(ants);
         tokio::time::timeout(WAIT, task).await.unwrap().unwrap().unwrap();
     }

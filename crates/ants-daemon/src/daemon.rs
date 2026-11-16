@@ -153,8 +153,9 @@ pub struct Config {
     /// restarts no harness ([`crate::pause::Pause::replace`]).
     pub pause: crate::pause::Pause,
     /// The ant's settings this machine's config sets otherwise than its shared settings, which the ant runs with
-    /// ([`crate::shared`]), as its roster entry reports them.
-    pub drift: Vec<String>,
+    /// ([`crate::shared`]), as its roster entry reports them; equal to any other, so that a change of drift alone
+    /// restarts no harness ([`crate::shared::Drift::replace`]).
+    pub drift: crate::shared::Drift,
 }
 
 /// Serve the ant's inbox until Ctrl-C. Prompts in flight are finished first; a second Ctrl-C stops at once. Until
@@ -281,6 +282,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
     let metrics = crate::metrics::ant(&config.ant);
     let workload = std::sync::Arc::new(roster::Workload::default());
     workload.set_paused(config.pause.get());
+    workload.set_drift(config.drift.get());
     let _connected = metrics.connected(client.clone(), workload.clone());
     let mut entry = roster::entry(config).await;
     let mut claimed = None;
@@ -347,6 +349,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         redactor: &redactor,
         workload: &workload,
         pause: &config.pause,
+        drift: &config.drift,
         metrics,
         limits: config.limits,
         ledger: &ledger,
@@ -1037,6 +1040,8 @@ struct Inbox<'a> {
     workload: &'a roster::Workload,
     /// Whether the ant is paused: then no prompt starts, the messages in hand waiting.
     pause: &'a crate::pause::Pause,
+    /// The ant's drift, which its roster entry reports as it changes.
+    drift: &'a crate::shared::Drift,
     /// The ant's counters, for monitoring.
     metrics: std::sync::Arc<crate::metrics::Ant>,
     limits: PromptLimits,
@@ -1079,6 +1084,19 @@ struct Inbox<'a> {
 }
 
 impl Inbox<'_> {
+    /// The requests for the ant's queue, those naming their sender, an assistant's, apart: credentials older than
+    /// them allow only the others.
+    async fn queue_asks(&self) -> impl Stream<Item = async_nats::Message> + Unpin {
+        let asking = [subject::queue(self.ant), subject::queues_by_of(self.ant)].map(|s| self.client.subscribe(s));
+        match futures::future::try_join_all(asking).await {
+            Ok(asks) => futures::stream::select_all(asks).left_stream(),
+            Err(e) => {
+                tracing::warn!(error = %e, "serving without ants queue");
+                futures::stream::pending().right_stream()
+            }
+        }
+    }
+
     /// Handle messages, from the inbox and channel posts, until they end or `stop` resolves, then finish the prompts in
     /// flight unless it resolves again. `channels` says which posts are meant for the ant.
     async fn serve<S, E, F>(
@@ -1102,17 +1120,10 @@ impl Inbox<'_> {
         let lifting = futures::future::Fuse::terminated();
         let repairing = futures::future::Fuse::terminated();
         tokio::pin!(shutdown, finishing, signing_in, lifting, repairing);
-        // Requests naming their sender, an assistant's, apart: credentials older than them allow only the others.
-        let asking = [subject::queue(self.ant), subject::queues_by_of(self.ant)].map(|s| self.client.subscribe(s));
-        let mut asks = match futures::future::try_join_all(asking).await {
-            Ok(asks) => futures::stream::select_all(asks).left_stream(),
-            Err(e) => {
-                tracing::warn!(error = %e, "serving without ants queue");
-                futures::stream::pending().right_stream()
-            }
-        };
+        let mut asks = self.queue_asks().await;
         let mut answering = FuturesUnordered::new();
         let mut paused = self.pause.subscribe();
+        let mut drift = self.drift.subscribe();
         loop {
             let retry_deadline = threads.values().filter_map(|t| t.retry.map(|r| r.until)).min();
             // Every fallback was turned away lately: the first to be tried again lets the messages on.
@@ -1136,6 +1147,7 @@ impl Inbox<'_> {
                 () = &mut lifting => ready = Some(threads.keys().cloned().collect()),
                 () = &mut repairing => ready = Some(threads.keys().cloned().collect()),
                 Ok(()) = paused.changed() => ready = Some(threads.keys().cloned().collect()),
+                Ok(()) = drift.changed() => self.workload.set_drift(drift.borrow_and_update().clone()),
                 () = sleep_until(fallback_up), if fallback_up.is_some() => ready = Some(threads.keys().cloned().collect()),
                 Some(ask) = asks.next() => {
                     if let Some(request) = queue_request(&ask) {

@@ -366,36 +366,8 @@ impl AntTemplate {
             Some(h) => Some(h.clone()),
             None => self.harnesses.first().cloned(),
         };
-        let model = match &request.model {
-            Some(m) if !self.models.contains_key(m) => {
-                if self.models.is_empty() {
-                    bail!("template {t} lists no models: its ants run the harness default model, not {m}");
-                }
-                bail!("model {m} is not in the models of template {t} ({})", self.model_list());
-            }
-            Some(m) => Some(m.clone()),
-            None if self.models.is_empty() => None,
-            None => bail!("pick a model of template {t}: {}", self.model_list()),
-        };
-        if let Some(effort) = &request.reasoning_effort {
-            let Some(model) = &model else {
-                bail!("template {t} lists no models, so its ants keep the harness default reasoning effort");
-            };
-            let ceiling = self.models[model];
-            if effort.parse::<Effort>()? > ceiling {
-                bail!(
-                    "reasoning_effort {effort} is above {ceiling}, the highest template {t} allows for model {model}"
-                );
-            }
-        }
-        if let Some(context) = &request.context
-            && !self.contexts.contains(context)
-        {
-            if self.contexts.is_empty() {
-                bail!("template {t} lists no contexts: its ants keep the harness default context, not {context}");
-            }
-            bail!("context {context} is not in the contexts of template {t} ({})", self.contexts.join(", "));
-        }
+        let model =
+            self.model_for(request.model.as_deref(), request.reasoning_effort.as_deref(), request.context.as_deref())?;
         let allow = self.allow_for(request)?;
         let ceiling = Ceiling(t);
         let max_harnesses = ceiling.count("max_harnesses", request.max_harnesses, self.max_harnesses)?;
@@ -432,6 +404,48 @@ impl AntTemplate {
             escalate_to: vec![manager.clone()],
             ..Ant::new(name.clone(), workdir)
         })
+    }
+
+    /// The model an ant of the template runs, as `model` picks it or the template has it default, with
+    /// `reasoning_effort` and `context` checked against the template's bounds; refused with the bound one breaks.
+    pub fn model_for(
+        &self,
+        model: Option<&str>,
+        reasoning_effort: Option<&str>,
+        context: Option<&str>,
+    ) -> Result<Option<String>> {
+        let t = &self.name;
+        let model = match model {
+            Some(m) if !self.models.contains_key(m) => {
+                if self.models.is_empty() {
+                    bail!("template {t} lists no models: its ants run the harness default model, not {m}");
+                }
+                bail!("model {m} is not in the models of template {t} ({})", self.model_list());
+            }
+            Some(m) => Some(m.to_owned()),
+            None if self.models.is_empty() => None,
+            None => bail!("pick a model of template {t}: {}", self.model_list()),
+        };
+        if let Some(effort) = reasoning_effort {
+            let Some(model) = &model else {
+                bail!("template {t} lists no models, so its ants keep the harness default reasoning effort");
+            };
+            let ceiling = self.models[model];
+            if effort.parse::<Effort>()? > ceiling {
+                bail!(
+                    "reasoning_effort {effort} is above {ceiling}, the highest template {t} allows for model {model}"
+                );
+            }
+        }
+        if let Some(context) = context
+            && !self.contexts.iter().any(|c| c == context)
+        {
+            if self.contexts.is_empty() {
+                bail!("template {t} lists no contexts: its ants keep the harness default context, not {context}");
+            }
+            bail!("context {context} is not in the contexts of template {t} ({})", self.contexts.join(", "));
+        }
+        Ok(model)
     }
 
     /// The template's allow rules, with those of the allow sets `request` names.

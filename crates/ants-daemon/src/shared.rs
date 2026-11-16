@@ -4,15 +4,23 @@
 //! and keeps them in a [`Shared`]; the daemon serves each ant with them in place of its config's ([`Shared::overlaid`])
 //! and reloads when they change. The fields the machine's config sets otherwise are its drift, which the ant's roster
 //! entry and the machine's record report.
+//!
+//! As any machine's host credentials may write any ant's record, a record is signed with the ant's own credentials,
+//! which only the machines serving the ant hold ([`sign`]); a daemon whose team has credentials applies only a record so
+//! signed, and writes its config's settings over any other ([`read`], [`refresh`]).
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[cfg(doc)]
 use ants_proto::{IDENTITIES_BUCKET, SHARED_FIELDS};
-use ants_proto::{Machine, SharedSettings, UserId};
-use anyhow::{Context as _, Result};
+use ants_proto::{JsDomain, Machine, SharedSettings, UserId};
+use anyhow::{Context as _, Result, anyhow, bail};
+use chrono::{DateTime, Utc};
+use data_encoding::BASE64URL_NOPAD;
+use nkeys::KeyPair;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use tokio::sync::watch;
@@ -66,6 +74,49 @@ impl Roles {
     }
 }
 
+/// The fields of an ant's shared settings its machine's config sets otherwise (its drift); a clone shares it, so the
+/// running ant's roster entry sees it change. Equal to any other, so that a change of drift alone restarts no ant.
+#[derive(Debug, Clone)]
+pub struct Drift(Arc<watch::Sender<Vec<String>>>);
+
+impl Drift {
+    pub fn new(fields: Vec<String>) -> Self {
+        Self(Arc::new(watch::Sender::new(fields)))
+    }
+
+    pub fn get(&self) -> Vec<String> {
+        self.0.borrow().clone()
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<Vec<String>> {
+        self.0.subscribe()
+    }
+
+    /// Take the drift of `listed`, the ant's config as listed anew.
+    pub fn replace(&self, listed: &Self) {
+        let listed = listed.get();
+        self.0.send_if_modified(|fields| {
+            if *fields == listed {
+                return false;
+            }
+            *fields = listed;
+            true
+        });
+    }
+}
+
+impl Default for Drift {
+    fn default() -> Self {
+        Self::new(Vec::new())
+    }
+}
+
+impl PartialEq for Drift {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
 /// The shared settings `ant` sets, as its machine's config gives them: those holding no default.
 pub fn local_fields(ant: &Ant) -> Map<String, Value> {
     let mut fields = Map::new();
@@ -114,6 +165,8 @@ struct State {
     records: BTreeMap<UserId, SharedSettings>,
     /// The shared settings each ant's table in the machine's config sets ([`local_fields`]).
     local: BTreeMap<UserId, Map<String, Value>>,
+    /// The credentials each ant's table names, which sign its records.
+    creds: BTreeMap<UserId, PathBuf>,
 }
 
 impl Default for Shared {
@@ -153,13 +206,22 @@ impl Shared {
     /// Note the shared settings of `ants`, as the machine's config lists them, the built-in messenger left out: those
     /// the host connection creates missing records with, and tells drift by.
     pub fn listed(&self, ants: &[Ant]) {
-        let local = ants.iter().filter(|ant| !ant.builtin).map(|ant| (ant.name.clone(), local_fields(ant))).collect();
-        self.0.state.locked().local = local;
+        let ants = || ants.iter().filter(|ant| !ant.builtin);
+        let local = ants().map(|ant| (ant.name.clone(), local_fields(ant))).collect();
+        let creds = ants().filter_map(|ant| Some((ant.name.clone(), ant.creds.clone()?))).collect();
+        let mut state = self.0.state.locked();
+        state.local = local;
+        state.creds = creds;
     }
 
     /// The shared settings the machine's config sets for `ant`; none for an ant it does not list.
     pub fn local(&self, ant: &UserId) -> Option<Map<String, Value>> {
         self.0.state.locked().local.get(ant).cloned()
+    }
+
+    /// The credentials the machine's config names for `ant`.
+    pub fn creds(&self, ant: &UserId) -> Option<PathBuf> {
+        self.0.state.locked().creds.get(ant).cloned()
     }
 
     /// `ant` with its shared settings in place of its own, and the fields its own set otherwise (its drift); none
@@ -201,45 +263,84 @@ impl Shared {
     }
 }
 
+/// Sign `record` with the key of the ant's credentials `jwt`.
+pub fn sign(record: &mut SharedSettings, jwt: &str, key: &KeyPair) -> Result<()> {
+    let signature = key.sign(&record.signed()).map_err(|e| anyhow!("signing the shared settings: {e}"))?;
+    record.credentials = Some(jwt.to_owned());
+    record.signature = Some(BASE64URL_NOPAD.encode(&signature));
+    Ok(())
+}
+
+/// Sign `record` with the ant's credentials at `creds`; without any, leave it unsigned where `accounts` is empty (a
+/// server without authentication), else fail.
+pub fn sign_as(record: &mut SharedSettings, creds: Option<&Path>, accounts: &[String]) -> Result<()> {
+    match creds {
+        Some(creds) => {
+            let (jwt, key) = crate::creds::load(creds, crate::keystore::os())?;
+            sign(record, &jwt, &key)
+        }
+        None if accounts.is_empty() => Ok(()),
+        None => bail!("no credentials of {} on this machine sign its shared settings", record.ant),
+    }
+}
+
 /// What a read of an ant's shared settings found, with the stream sequence of the key's last message (0 for none),
 /// which a compare-and-set expects.
 pub enum Found {
     Record(SharedSettings, u64),
     /// A value that is no record of the ant's shared settings: why.
     Malformed(String, u64),
+    /// A record not signed by credentials of the ant: why.
+    Unverified(String, u64),
     None(u64),
     NoBucket,
 }
 
-/// The shared settings of `ant` in `kv`.
-pub async fn read(kv: &DirectKv, ant: &UserId) -> Result<Found> {
+/// The shared settings of `ant` in `kv`, verified against `accounts`, the team account's public keys
+/// ([`SharedSettings::verify`]); with none, a server without authentication, any record holds.
+pub async fn read(kv: &DirectKv, ant: &UserId, accounts: &[String]) -> Result<Found> {
     let key = SharedSettings::key_of(ant);
-    Ok(match kv.lookup_last(&key).await? {
-        (Lookup::Value(bytes), last) => match serde_json::from_slice::<SharedSettings>(&bytes) {
+    Ok(match kv.lookup_stored(&key).await? {
+        (Lookup::Value(bytes), last, stored) => match serde_json::from_slice::<SharedSettings>(&bytes) {
             Ok(record) => match record.check_key(&key) {
-                Ok(()) => Found::Record(record, last),
                 Err(e) => Found::Malformed(e.to_string(), last),
+                Ok(()) if accounts.is_empty() => Found::Record(record, last),
+                Ok(()) => {
+                    let stored = stored.map_or_else(Utc::now, DateTime::<Utc>::from);
+                    match record.verify(accounts.iter().map(String::as_str), stored) {
+                        Ok(_) => Found::Record(record, last),
+                        Err(e) => Found::Unverified(e.to_string(), last),
+                    }
+                }
             },
             Err(e) => Found::Malformed(format!("not shared settings: {e}"), last),
         },
-        (Lookup::NoValue, last) => Found::None(last),
-        (Lookup::NoBucket, _) => Found::NoBucket,
+        (Lookup::NoValue, last, _) => Found::None(last),
+        (Lookup::NoBucket, ..) => Found::NoBucket,
     })
 }
 
-/// Read the shared settings of `ants` into `shared`, creating as `machine` those missing from the machine's config.
-/// Failures are logged; the next poll tries again.
-pub async fn refresh(kv: &DirectKv, machine: &Machine, shared: &Shared, ants: &[UserId]) {
+/// Read the shared settings of `ants` into `shared`, verified against `accounts` ([`read`]). As `writer`, a machine
+/// whose credentials may write them, create those missing from the machine's config, and write it over those not
+/// signed by the ant's credentials. Failures are logged; the next poll tries again.
+pub async fn refresh(kv: &DirectKv, writer: Option<&Machine>, shared: &Shared, ants: &[UserId], accounts: &[String]) {
     for ant in ants.iter().filter(|ant| **ant != UserId::messenger()) {
-        if let Err(e) = refresh_one(kv, machine, shared, ant).await {
+        if let Err(e) = refresh_one(kv, writer, shared, ant, accounts).await {
             tracing::warn!(%ant, error = format!("{e:#}"), "reading the ant's shared settings failed");
         }
     }
 }
 
-async fn refresh_one(kv: &DirectKv, machine: &Machine, shared: &Shared, ant: &UserId) -> Result<()> {
+async fn refresh_one(
+    kv: &DirectKv,
+    writer: Option<&Machine>,
+    shared: &Shared,
+    ant: &UserId,
+    accounts: &[String],
+) -> Result<()> {
     for _ in 0..2 {
-        match read(kv, ant).await? {
+        // The sequence of the unverified record to write over; none to create the record.
+        let over = match read(kv, ant, accounts).await? {
             Found::Record(record, _) => {
                 shared.store(record);
                 return Ok(());
@@ -250,25 +351,93 @@ async fn refresh_one(kv: &DirectKv, machine: &Machine, shared: &Shared, ant: &Us
                 tracing::warn!(%ant, why, "ignoring the ant's shared settings; an admin's settings order writes them anew");
                 return Ok(());
             }
+            Found::Unverified(why, last) => {
+                shared.forget(ant);
+                tracing::warn!(%ant, why, "ignoring the ant's shared settings, not signed by its credentials");
+                Some(last)
+            }
             Found::None(_) => {
                 shared.forget(ant);
-                let Some(fields) = shared.local(ant) else { return Ok(()) };
-                let record = SharedSettings {
-                    ant: ant.clone(),
-                    fields,
-                    machine: machine.clone(),
-                    by: None,
-                    updated_at: chrono::Utc::now(),
-                };
-                if kv.create(record.key(), serde_json::to_vec(&record)?).await? {
-                    tracing::info!(%ant, "created the ant's shared settings from this machine's config");
-                    shared.store(record);
-                    return Ok(());
-                }
+                None
             }
+        };
+        let (Some(machine), Some(fields)) = (writer, shared.local(ant)) else { return Ok(()) };
+        let creds = shared.creds(ant);
+        if creds.is_none() && !accounts.is_empty() {
+            tracing::debug!(%ant, "no credentials of the ant sign its shared settings; leaving them to another machine");
+            return Ok(());
+        }
+        let mut record = SharedSettings::new(ant.clone(), fields, machine.clone(), None);
+        sign_as(&mut record, creds.as_deref(), accounts)?;
+        let value = serde_json::to_vec(&record)?;
+        let written = match over {
+            Some(last) => kv.update(record.key(), value, last).await?,
+            None => kv.create(record.key(), value).await?,
+        };
+        if written {
+            tracing::info!(%ant, "wrote the ant's shared settings from this machine's config");
+            shared.store(record);
+            return Ok(());
         }
     }
     Ok(())
+}
+
+/// Where a daemon without a host connection reads the shared settings of its ants: a server, connected to as one of
+/// them, which may read every ant's ([`follow`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Via {
+    pub nats: String,
+    pub creds: Option<PathBuf>,
+    pub js_domain: Option<JsDomain>,
+    /// The ant connected as.
+    pub user: UserId,
+    /// The ants whose shared settings to read there.
+    pub ants: Vec<UserId>,
+}
+
+/// Keep `shared` current with the shared settings of the ants of `vias`, read every [`POLL_EVERY`] over a connection
+/// as one of them ([`refresh`]), until `vias` closes: for a daemon without a host connection. Ant credentials only read
+/// the records, verified against their account; over a server without authentication, missing ones are created from
+/// the machine's config as the host connection would.
+pub async fn follow(shared: Shared, mut vias: watch::Receiver<Vec<Via>>) {
+    let machine = Machine::from_hostname(&crate::roster::machine().await);
+    let mut connected: Vec<(Via, DirectKv, Vec<String>)> = Vec::new();
+    loop {
+        let wanted = vias.borrow_and_update().clone();
+        connected.retain(|(via, ..)| wanted.contains(via));
+        for via in wanted {
+            if connected.iter().any(|(c, ..)| *c == via) {
+                continue;
+            }
+            match reader(&via).await {
+                Ok((kv, accounts)) => connected.push((via, kv, accounts)),
+                Err(e) => tracing::warn!(
+                    nats = %via.nats, as_ant = %via.user, error = format!("{e:#}"),
+                    "connecting to read the shared settings failed; trying again"
+                ),
+            }
+        }
+        for (via, kv, accounts) in &connected {
+            let writer = via.creds.is_none().then_some(&machine);
+            refresh(kv, writer, &shared, &via.ants, accounts).await;
+        }
+        shared.polled();
+        tokio::select! {
+            () = tokio::time::sleep(POLL_EVERY) => {}
+            changed = vias.changed() => if changed.is_err() { return },
+        }
+    }
+}
+
+/// The identities bucket over a connection as `via` names it, and the team account its credentials verify records
+/// against.
+async fn reader(via: &Via) -> Result<(DirectKv, Vec<String>)> {
+    let accounts = via.creds.as_deref().map(crate::creds::account).transpose()?.into_iter().collect();
+    let domain = via.js_domain.as_ref();
+    let (_client, js) = crate::bus::connect(&via.nats, via.creds.as_deref(), domain, &via.user, "shared").await?;
+    let kv = DirectKv::whole(&js, domain, ants_proto::IDENTITIES_BUCKET).await?;
+    Ok((kv, accounts))
 }
 
 #[cfg(test)]
@@ -282,13 +451,7 @@ mod tests {
     }
 
     fn record(ant: &str, fields: Value) -> SharedSettings {
-        SharedSettings {
-            ant: ant.parse().unwrap(),
-            fields: fields.as_object().unwrap().clone(),
-            machine: "m1".parse().unwrap(),
-            by: None,
-            updated_at: chrono::Utc::now(),
-        }
+        SharedSettings::new(ant.parse().unwrap(), fields.as_object().unwrap().clone(), "m1".parse().unwrap(), None)
     }
 
     #[test]
