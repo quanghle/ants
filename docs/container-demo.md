@@ -1,6 +1,8 @@
-# Apple container demo
+# Container demo
 
-A local three-node team using [Apple container](https://github.com/apple/container), not Docker:
+A local three-node team in Linux containers, run by [Apple container](https://github.com/apple/container),
+[Docker](https://docs.docker.com/engine/), [Podman](https://podman.io/) or
+[wslc](https://learn.microsoft.com/en-us/windows/wsl/wsl-container):
 
 ```mermaid
 flowchart TD
@@ -11,7 +13,7 @@ flowchart TD
     leafb -->|"leaf uplink"| hub
 ```
 
-Each node is a separate Linux VM/container with its own NATS server, persistent ext4 volume, workdir, Copilot sign-in and
+Each node is a separate Linux container (a VM of its own under Apple container) with its own NATS server, persistent volume, workdir, Copilot sign-in and
 one `ants daemon` serving exactly one ant. Every ant runs Copilot through its
 [native protocol](config.md#harness-protocols) (`protocol = "copilot-sdk"`) rather than ACP. The built-in messenger is disabled. The leaves use scoped NKey/JWT uplinks
 and local JetStream domains `leaf-a` and `leaf-b`. Only the hub holds the team signing keys. The demo human `human` is
@@ -29,8 +31,16 @@ the hub to remain reachable; it does not provision [store-and-forward outboxes](
 
 ## Requirements
 
-- Apple silicon Mac, macOS 26 or later, Apple `container` CLI with custom-network support, and `jq` on `PATH`.
-- A running container service (`container system start`).
+- `bash` and `jq` on `PATH`, and one container CLI:
+  - Apple `container` with custom-network support, on an Apple silicon Mac with macOS 26 or later, its service running
+    (`container system start`);
+  - Docker with BuildKit (the default builder since Docker 23), its daemon running;
+  - Podman;
+  - wslc, from WSL as `wslc.exe` (the build context is passed by its Windows path).
+
+  The script takes the first of `container`, `docker`, `podman`, `wslc` and `wslc.exe` on `PATH`;
+  `ANTS_DEMO_RUNTIME` names another (`ANTS_DEMO_RUNTIME=podman`). The image builds for the host's architecture, arm64
+  or amd64.
 - Network access to the image registries, Debian packages, crates.io, npm, GitHub releases and GitHub Copilot.
 - A GitHub account with Copilot CLI access. Real prompts use the account's model allowance.
 
@@ -45,19 +55,20 @@ disabled; GitHub's server-side service accounting is unaffected.
 From the repository root:
 
 ```sh
-scripts/demo-apple-containers.sh build
-scripts/demo-apple-containers.sh up
-scripts/demo-apple-containers.sh smoke
+scripts/demo-containers.sh build
+scripts/demo-containers.sh up
+scripts/demo-containers.sh smoke
 ```
 
-The build VM gets four CPUs and 8 GiB of memory, which the release profile's fat LTO link needs. The first build downloads dependencies and compiles a Linux release
+The release profile's fat LTO link needs about 5 GiB of memory: Apple container's build VM gets four CPUs and 8 GiB;
+under Docker, Podman or wslc, give the engine's VM or WSL at least that much. The first build downloads dependencies and compiles a Linux release
 binary. `up` also builds when the image is absent; rerun `build` after source changes. The smoke check verifies all four
 live Copilot-backed ants, the assistant's grant and their MCP sockets, pauses and resumes each ant by admin order from the hub, checks that `hub-ant`'s bd database reads (`ants ant memories`),
 then sends notes
 from every node, reading them from every other node through the hub. It makes no model calls and needs no Copilot
 sign-in.
 
-Each container gets two CPUs, 2 GiB of memory and a sparse 4 GiB named volume. Linux-native volumes support the Unix
+Each container gets two CPUs, 2 GiB of memory and a named volume (sparse, 4 GiB, under Apple container). Linux-native volumes support the Unix
 socket permissions used by the daemon's MCP bridge. A dedicated network connects the nodes; no ports are published on the
 host. NATS client ports and daemon metrics listen only on each container's loopback interface. The hub's authenticated
 leaf port listens on the demo network. Production NATS configuration, services and credentials stay untouched.
@@ -67,14 +78,14 @@ leaf port listens on the demo network. Production NATS configuration, services a
 Sign in separately in each container, following the displayed GitHub device-code flow:
 
 ```sh
-scripts/demo-apple-containers.sh login hub
-scripts/demo-apple-containers.sh login leaf-a
-scripts/demo-apple-containers.sh login leaf-b
-scripts/demo-apple-containers.sh ants hub ask --wait @hub-ant "Identify the node."
-scripts/demo-apple-containers.sh ants hub ask --wait @leaf-a-ant "Identify the node."
-scripts/demo-apple-containers.sh ants leaf-a ask --wait @leaf-b-ant "Identify the node."
-scripts/demo-apple-containers.sh ants hub ask --wait @human-assistant "Summarize what waits on human."
-scripts/demo-apple-containers.sh ants hub ask --wait @hub-ant \
+scripts/demo-containers.sh login hub
+scripts/demo-containers.sh login leaf-a
+scripts/demo-containers.sh login leaf-b
+scripts/demo-containers.sh ants hub ask --wait @hub-ant "Identify the node."
+scripts/demo-containers.sh ants hub ask --wait @leaf-a-ant "Identify the node."
+scripts/demo-containers.sh ants leaf-a ask --wait @leaf-b-ant "Identify the node."
+scripts/demo-containers.sh ants hub ask --wait @human-assistant "Summarize what waits on human."
+scripts/demo-containers.sh ants hub ask --wait @hub-ant \
   "Ask leaf-a-ant and leaf-b-ant to identify their nodes, then summarize both replies."
 ```
 
@@ -87,18 +98,19 @@ credential store is available.
 ## Inspect and stop
 
 ```sh
-scripts/demo-apple-containers.sh status
-scripts/demo-apple-containers.sh logs leaf-a
-scripts/demo-apple-containers.sh ants hub thread list
-scripts/demo-apple-containers.sh down
+scripts/demo-containers.sh status
+scripts/demo-containers.sh logs leaf-a
+scripts/demo-containers.sh ants hub thread list
+scripts/demo-containers.sh down
 ```
 
 `down` removes only the named demo containers and network after checking ownership labels. It preserves the image and
 named volumes `ants-demo-hub`, `ants-demo-leaf-a` and `ants-demo-leaf-b`, including generated NATS credentials,
 JetStream data, Copilot sign-ins and ant homes. `up` refuses existing containers; run `down` before recreating the
-topology. After a failed `up`, inspect the node logs and run `down` before retrying.
+topology. After a failed `up`, inspect the node logs and run `down` before retrying. Each container CLI has its own containers,
+networks and volumes: a demo started with one is stopped with the same one.
 
 `ANTS_DEMO_NAME` changes the resource prefix (default `ants-demo`); `ANTS_DEMO_STATE` changes the host directory holding
-the ownership marker, temporary build context and smoke logs (default `~/.local/share/ants/apple-container-demo/`).
+the ownership marker, temporary build context and smoke logs (default `~/.local/share/ants/container-demo/`).
 Set both for a second independent demo. Nonempty directories without the demo marker and resources belonging
 to another state directory are refused. `ANTS_DEMO_COPILOT_VERSION` changes the npm version and `ANTS_DEMO_BD_VERSION` the bd release tag on the next `build`.

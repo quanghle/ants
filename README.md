@@ -109,7 +109,7 @@ ants inbox
 | [docs/webhooks.md](docs/webhooks.md) | HTTP webhook ingress, provider presets, human push notification sinks, quiet hours, digests, stand-ins |
 | [docs/hooks.md](docs/hooks.md) | Read-only observer credentials, event feeds, JSON schemas, wire versioning |
 | [docs/operations.md](docs/operations.md) | Platform specifics, binary upgrades, launchd/systemd units, `/healthz` and Prometheus metrics, daemon footprint |
-| [docs/apple-container-demo.md](docs/apple-container-demo.md) | Isolated three-node local demo using Apple `container` |
+| [docs/container-demo.md](docs/container-demo.md) | Isolated three-node local demo in Apple container, Docker, Podman or wslc |
 | [contrib/skills/ants/SKILL.md](contrib/skills/ants/SKILL.md) | Agent skill teaching external coding agents to use the `ants` CLI |
 
 ## Contributing

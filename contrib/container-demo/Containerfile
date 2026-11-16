@@ -39,8 +39,8 @@ RUN case "$(dpkg --print-architecture)" in \
     && bd --version
 COPY --from=build /ants /usr/local/bin/ants
 COPY --from=nats /usr/local/bin/nats-server /usr/local/bin/nats-server
-COPY contrib/apple-container/node.sh /usr/local/bin/ants-demo-node
-COPY contrib/apple-container/copilot.sh /opt/ants-demo/bin/copilot
+COPY contrib/container-demo/node.sh /usr/local/bin/ants-demo-node
+COPY contrib/container-demo/copilot.sh /opt/ants-demo/bin/copilot
 RUN chmod +x /usr/local/bin/ants-demo-node /opt/ants-demo/bin/copilot
 WORKDIR /demo/work
 ENTRYPOINT ["/usr/local/bin/ants-demo-node"]

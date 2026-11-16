@@ -1,11 +1,11 @@
 #!/bin/bash
-# A local NATS hub, two leaves and three Copilot-backed ants in Apple containers.
+# A local NATS hub, two leaves and Copilot-backed ants in Linux containers: Apple container, Docker, Podman or wslc.
 set -euo pipefail
 umask 077
 
 usage() {
     cat <<'EOF'
-Usage: scripts/demo-apple-containers.sh COMMAND [ARGS...]
+Usage: scripts/demo-containers.sh COMMAND [ARGS...]
 
   build                 Build ants, NATS, Copilot and bd into a Linux image
   up                    Start the hub and two leaves (build first if needed)
@@ -17,9 +17,11 @@ Usage: scripts/demo-apple-containers.sh COMMAND [ARGS...]
   down                  Remove demo containers and network; keep all state
 
 Environment:
+  ANTS_DEMO_RUNTIME          Container CLI: container (Apple), docker, podman or wslc
+                            (default: the first of these on PATH)
   ANTS_DEMO_NAME             Resource prefix (default: ants-demo)
   ANTS_DEMO_STATE            Dedicated state directory
-                            (default: ~/.local/share/ants/apple-container-demo)
+                            (default: ~/.local/share/ants/container-demo)
   ANTS_DEMO_COPILOT_VERSION  Copilot npm version for build (default: 1.0.112)
   ANTS_DEMO_BD_VERSION       bd release tag for build (default: v0.8.0)
 EOF
@@ -38,14 +40,23 @@ esac
 if [ "$#" -gt 0 ]; then
     case "$1" in hub | leaf-a | leaf-b) ;; *) die "unknown node: $1" ;; esac
 fi
-for tool in container jq; do
-    command -v "$tool" >/dev/null || die "$tool not found"
-done
-container system status >/dev/null
+command -v jq >/dev/null || die "jq not found"
+runtime=${ANTS_DEMO_RUNTIME:-}
+if [ -z "$runtime" ]; then
+    for runtime in container docker podman wslc wslc.exe ""; do
+        if [ -n "$runtime" ] && command -v "$runtime" >/dev/null; then break; fi
+    done
+    [ -n "$runtime" ] || die "no container CLI found: install Apple container, Docker, Podman or wslc"
+fi
+command -v "$runtime" >/dev/null || die "$runtime not found"
+# Apple container has its own CLI; Docker, Podman and wslc share Docker's.
+case "${runtime##*/}" in container) apple=1 ;; *) apple= ;; esac
+rt() { "$runtime" "$@"; }
+if [ -n "$apple" ]; then rt system status >/dev/null; else rt ps >/dev/null; fi
 root=$(cd "$(dirname "$0")/.." && pwd)
 name=${ANTS_DEMO_NAME:-ants-demo}
 case "$name" in "" | -* | *[!a-z0-9-]*) die "ANTS_DEMO_NAME must contain lowercase letters, digits and hyphens" ;; esac
-state=${ANTS_DEMO_STATE:-$HOME/.local/share/ants/apple-container-demo}
+state=${ANTS_DEMO_STATE:-$HOME/.local/share/ants/container-demo}
 case "$state" in /*) ;; *) state=$PWD/$state ;; esac
 case "$state" in *,*) die "ANTS_DEMO_STATE must not contain a comma" ;; esac
 mkdir -p "$state"
@@ -58,12 +69,14 @@ else
 fi
 image=$name:local
 label=net.quangle.ants.demo
+# jq filters over inspect output, whichever CLI's layout it has.
+labelled='.[0] | (.configuration.labels // .Config.Labels // .Labels // .labels // {})[$label] == $state'
+running='.[0] | (.status.state == "running" or .State.Running == true)'
 
 owned() {
     local json
-    json=$(container inspect "$name-$1" 2>/dev/null) || return 1
-    jq --exit-status --arg label "$label" --arg state "$state" \
-        '.[0].configuration.labels[$label] == $state' <<<"$json" >/dev/null \
+    json=$(rt inspect "$name-$1" 2>/dev/null) || return 1
+    jq --exit-status --arg label "$label" --arg state "$state" "$labelled" <<<"$json" >/dev/null \
         || die "refusing to change a foreign container: $name-$1"
 }
 
@@ -71,35 +84,44 @@ run_ants() {
     local node=$1
     shift
     owned "$node" >/dev/null || die "node not found: $node (run up)"
-    container exec "$name-$node" ants --creds /demo/auth/human.creds "$@"
+    rt exec "$name-$node" ants --creds /demo/auth/human.creds "$@"
 }
 
 build() (
-    local context
+    local context path limits=()
     context=$(mktemp -d "$state/build.XXXXXX")
     trap 'rm -rf "$context"' EXIT
     cp "$root/Cargo.toml" "$root/Cargo.lock" "$root/rust-toolchain.toml" "$context/"
     cp -R "$root/.cargo" "$root/crates" "$context/"
     mkdir -p "$context/contrib"
-    cp -R "$root/contrib/apple-container" "$root/contrib/launchd" "$root/contrib/systemd" "$context/contrib/"
-    container build --cpus 4 --memory 8g --tag "$image" --file "$context/contrib/apple-container/Containerfile" \
+    cp -R "$root/contrib/container-demo" "$root/contrib/launchd" "$root/contrib/systemd" "$context/contrib/"
+    path=$context
+    # A Windows CLI run from WSL reads the build context through its Windows path.
+    case "$runtime" in *.exe) path=$(wslpath -w "$context") ;; esac
+    # Apple's build VM needs room for the release profile's fat LTO link.
+    if [ -n "$apple" ]; then limits=(--cpus 4 --memory 8g); fi
+    rt build ${limits[@]+"${limits[@]}"} --tag "$image" --file "$path/contrib/container-demo/Containerfile" \
         --build-arg "COPILOT_VERSION=${ANTS_DEMO_COPILOT_VERSION:-1.0.112}" \
-        --build-arg "BD_VERSION=${ANTS_DEMO_BD_VERSION:-v0.8.0}" "$context"
+        --build-arg "BD_VERSION=${ANTS_DEMO_BD_VERSION:-v0.8.0}" "$path"
 )
+
+logs() {
+    if [ -n "$apple" ]; then rt logs -n 80 "$name-$1"; else rt logs --tail 80 "$name-$1"; fi
+}
 
 ready() {
     local node=$1 attempt
     for ((attempt = 0; attempt < 90; attempt++)); do
-        if container exec "$name-$node" curl --fail --silent --max-time 2 \
+        if rt exec "$name-$node" curl --fail --silent --max-time 2 \
             http://127.0.0.1:9464/healthz >/dev/null 2>&1; then
             return
         fi
-        if ! container inspect "$name-$node" | jq --exit-status '.[0].status.state == "running"' >/dev/null; then
+        if ! rt inspect "$name-$node" | jq --exit-status "$running" >/dev/null; then
             break
         fi
         sleep 1
     done
-    container logs -n 80 "$name-$node" >&2 || true
+    logs "$node" >&2 || true
     die "node did not become ready: $node"
 }
 
@@ -110,35 +132,39 @@ up() {
             die "container already exists: $name-$node (run down before up)"
         fi
     done
-    container image inspect "$image" >/dev/null 2>&1 || build
-    if network=$(container network inspect "$name" 2>/dev/null); then
-        jq --exit-status --arg label "$label" --arg state "$state" \
-            '.[0].configuration.labels[$label] == $state' <<<"$network" >/dev/null \
+    rt image inspect "$image" >/dev/null 2>&1 || build
+    if network=$(rt network inspect "$name" 2>/dev/null); then
+        jq --exit-status --arg label "$label" --arg state "$state" "$labelled" <<<"$network" >/dev/null \
             || die "refusing to use a foreign network: $name"
     else
-        container network create --label "$label=$state" "$name"
+        rt network create --label "$label=$state" "$name"
     fi
     for node in hub leaf-a leaf-b; do
-        if volume=$(container volume inspect "$name-$node" 2>/dev/null); then
-            jq --exit-status --arg label "$label" --arg state "$state" \
-                '.[0].configuration.labels[$label] == $state' <<<"$volume" >/dev/null \
+        if volume=$(rt volume inspect "$name-$node" 2>/dev/null); then
+            jq --exit-status --arg label "$label" --arg state "$state" "$labelled" <<<"$volume" >/dev/null \
                 || die "refusing to use a foreign volume: $name-$node"
         else
-            container volume create --label "$label=$state" -s 4g "$name-$node"
+            if [ -n "$apple" ]; then
+                rt volume create --label "$label=$state" -s 4g "$name-$node"
+            else
+                rt volume create --label "$label=$state" "$name-$node"
+            fi
         fi
     done
-    container run --rm --name "$name-init" --label "$label=$state" \
+    rt run --rm --name "$name-init" --label "$label=$state" \
         --workdir / --mount "type=volume,source=$name-hub,target=/demo/hub" \
         --mount "type=volume,source=$name-leaf-a,target=/demo/leaf-a" \
         --mount "type=volume,source=$name-leaf-b,target=/demo/leaf-b" "$image" prepare
     for node in hub leaf-a leaf-b; do
-        container run --detach --name "$name-$node" --network "$name" --label "$label=$state" \
+        rt run --detach --name "$name-$node" --network "$name" --label "$label=$state" \
             --cpus 2 --memory 2g --mount "type=volume,source=$name-$node,target=/demo" \
             --env "ANTS_DEMO_HUB=${hub_ip:-}" "$image" "$node"
         ready "$node"
         if [ "$node" = hub ]; then
-            hub_ip=$(container inspect "$name-hub" | jq --raw-output \
-                '.[0].status.networks[0].ipv4Address | split("/")[0]')
+            hub_ip=$(rt inspect "$name-hub" | jq --raw-output --arg network "$name" \
+                '.[0] | (.status.networks[0].ipv4Address // .NetworkSettings.Networks[$network].IPAddress)
+                 | split("/")[0]')
+            [ -n "$hub_ip" ] && [ "$hub_ip" != null ] || die "no address for the hub on network $name"
         fi
     done
     printf 'Demo ready. Copilot sign-in: %s login NODE\n' "$0"
@@ -149,20 +175,21 @@ down() {
     local node network
     # Validate every owner before changing any resource.
     for node in hub leaf-a leaf-b init; do owned "$node" || true; done
-    if network=$(container network inspect "$name" 2>/dev/null); then
-        jq --exit-status --arg label "$label" --arg state "$state" \
-            '.[0].configuration.labels[$label] == $state' <<<"$network" >/dev/null \
+    if network=$(rt network inspect "$name" 2>/dev/null); then
+        jq --exit-status --arg label "$label" --arg state "$state" "$labelled" <<<"$network" >/dev/null \
             || die "refusing to remove a foreign network: $name"
     fi
     for node in leaf-b leaf-a hub init; do
         if owned "$node"; then
-            if container inspect "$name-$node" | jq --exit-status '.[0].status.state == "running"' >/dev/null; then
-                container stop --time 30 "$name-$node"
+            if rt inspect "$name-$node" | jq --exit-status "$running" >/dev/null; then
+                if [ -n "$apple" ]; then rt stop --time 30 "$name-$node"; else rt stop -t 30 "$name-$node"; fi
             fi
-            container delete "$name-$node"
+            if [ -n "$apple" ]; then rt delete "$name-$node"; else rt rm "$name-$node"; fi
         fi
     done
-    if [ -n "$network" ]; then container network delete "$name"; fi
+    if [ -n "$network" ]; then
+        if [ -n "$apple" ]; then rt network delete "$name"; else rt network rm "$name"; fi
+    fi
     printf 'Demo stopped; node volumes and state at %s kept\n' "$state"
 }
 
@@ -171,7 +198,7 @@ smoke() {
     for node in hub leaf-a leaf-b; do
         owned "$node" >/dev/null || die "node not found: $node"
         ready "$node"
-        container exec "$name-$node" test -S /demo/ant/mcp.sock
+        rt exec "$name-$node" test -S /demo/ant/mcp.sock
         run_ants "$node" colony --json | jq --slurp --exit-status \
             'map(select(.state == "live" and (.harness | startswith("copilot"))) | .ant) | sort
              == ["hub-ant", "human-assistant", "leaf-a-ant", "leaf-b-ant"]' >/dev/null
@@ -183,7 +210,7 @@ smoke() {
     done
     run_ants hub ant memories hub-ant --json \
         | jq --exit-status '.bd.db == "/demo/work/.bd/bd.db" and .bd.error == null' >/dev/null
-    thread=$(uuidgen | tr '[:upper:]' '[:lower:]')
+    thread=$({ uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid; } | tr '[:upper:]' '[:lower:]')
     for node in hub leaf-a leaf-b; do
         text="demo smoke $thread from $node"
         run_ants "$node" notes "$thread" "$text" >/dev/null
@@ -204,6 +231,6 @@ down) down ;;
 status) run_ants hub colony ;;
 smoke) smoke ;;
 ants) node=$1; shift; run_ants "$node" "$@" ;;
-login) owned "$1" || die "node not found: $1"; container exec --interactive --tty "$name-$1" copilot login --device-code ;;
-logs) owned "$1" || die "node not found: $1"; container logs -n 80 "$name-$1" ;;
+login) owned "$1" || die "node not found: $1"; rt exec --interactive --tty "$name-$1" copilot login --device-code ;;
+logs) owned "$1" || die "node not found: $1"; logs "$1" ;;
 esac
