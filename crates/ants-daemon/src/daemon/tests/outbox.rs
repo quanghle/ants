@@ -273,6 +273,7 @@ enum UplinkBack {
     Restarted { watcher_first: bool, past_window: bool },
 }
 
+#[expect(clippy::too_many_lines, reason = "one scenario, run for each way the uplink comes back")]
 async fn dead_letter_kept_on_the_extra_delivery(back: UplinkBack) {
     let Some((hub, uplinked)) = Uplinked::start().await else { return };
     let past_window = matches!(back, UplinkBack::Restarted { past_window: true, .. });

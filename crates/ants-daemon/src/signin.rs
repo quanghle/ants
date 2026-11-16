@@ -4,11 +4,11 @@
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use ants_proto::{Envelope, UserId};
+use ants_proto::Envelope;
 use chrono::{DateTime, Utc};
 
+use crate::fallback::OutageNotice;
 use crate::harness::SignedOut;
-use crate::humans::Registry;
 use crate::sync::MutexExt as _;
 
 /// How often a daemon whose harness is signed out checks it ([`crate::harness::handshake`]).
@@ -80,23 +80,11 @@ fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
-/// The message on the thread of `envelope`, which found the harness of `ant` on `machine` signed out, that tells its
-/// owner, else the default human of `humans`, how to sign the harness in, and where messages go meanwhile: to the ant's
-/// `fallbacks` ([`crate::fallback`]) if it has any. A reply to `envelope` unless it stands for a channel post.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the daemon's outage handlers pass these from separate fields of their own; notice_on builds the shared part"
-)]
-pub fn notice(
-    ant: &UserId,
-    envelope: &Envelope,
-    post: bool,
-    signed_out: &SignedOut,
-    machine: &str,
-    every: Duration,
-    fallbacks: &[String],
-    humans: &Registry,
-) -> Envelope {
+/// The notice `to` the owner of the thread whose message found the ant's harness signed out ([`OutageNotice`]) that
+/// tells how to sign the harness in, and where messages go meanwhile: to the ant's fallbacks ([`crate::fallback`]) if
+/// it has any, the harness being checked every `every`.
+pub fn notice(to: &OutageNotice<'_>, signed_out: &SignedOut, every: Duration) -> Envelope {
+    let (ant, machine) = (to.ant, to.machine);
     let SignedOut { harness, sign_in, detail } = signed_out;
     let mut detail: String = detail.trim().chars().take(DETAIL_CHARS).collect();
     if signed_out.detail.trim().chars().nth(DETAIL_CHARS).is_some() {
@@ -107,7 +95,7 @@ pub fn notice(
         None => format!("Sign {harness} in on {machine}"),
     };
     let back = format!("{harness} once a check of it, every {every:?}, finds it signed in");
-    let meanwhile = crate::fallback::meanwhile(ant, fallbacks, &back).unwrap_or_else(|| {
+    let meanwhile = to.meanwhile(&back).unwrap_or_else(|| {
         format!(
             "Messages to {ant} wait meanwhile, spending no attempts, and are answered once a check of the harness, \
              every {every:?}, finds it signed in."
@@ -116,9 +104,9 @@ pub fn notice(
     let text = format!(
         "[ants] {ant} cannot answer{own}: harness {harness} on {machine} is not signed in ({detail}).\n{how} as the \
          user the ants daemon runs as. {meanwhile}",
-        own = crate::fallback::own(fallbacks),
+        own = to.own(),
     );
-    crate::fallback::notice_on(ant, envelope, post, humans, text)
+    to.with_text(text)
 }
 
 #[cfg(test)]

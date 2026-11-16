@@ -106,7 +106,9 @@ pub mod edit;
 pub mod registration;
 
 use crate::caps::{Caps, Members, Pool};
-use crate::daemon::Config;
+use crate::daemon::{
+    Config, Connection, HarnessSettings, Policy, Pooling, Presence, Spending, Storage, WorktreeSettings,
+};
 use crate::escalation::{self, Chain};
 use crate::fallback::{self, Fallback};
 use crate::harness::{self, Harness, Harnesses, ModelSettings, PromptLimits};
@@ -438,47 +440,48 @@ impl Ant {
         let nats_url = self.nats.unwrap_or_else(|| default_nats.to_owned());
         crate::bus::check_url(&nats_url).with_context(|| format!("ant {}", self.name))?;
         Ok(Config {
-            nats_url,
-            creds: self.creds,
-            js_domain: self.js_domain,
-            human: self.human.unwrap_or_else(UserId::human),
-            workdir,
-            home,
-            instructions,
-            whoami: self.whoami,
-            env: self.env,
-            harness,
-            model_settings,
-            fallbacks,
-            max_harnesses: self.max_harnesses,
-            worktrees: self.worktrees,
-            idle_timeout: self.idle_timeout,
-            allow: if self.allow_tools { [self.allow, vec!["*".to_owned()]].concat() } else { self.allow },
-            approval_timeout: self.approval_timeout,
-            capabilities: self.capabilities,
-            limits: PromptLimits {
-                timeout: Some(self.prompt_timeout).filter(|t| !t.is_zero()),
-                max_tool_calls: Some(self.max_tool_calls).filter(|n| *n > 0),
-            },
-            caps,
-            spend_warn_percent: self.spend_warn_percent,
-            storage: self.storage,
-            memory_pressure: self.memory_pressure,
-            pool: self.pool,
-            escalation: Chain {
-                escalate_to: self.escalate_to,
-                max_hops: self.max_escalation_hops,
-                after: Some(self.escalate_after).filter(|t| !t.is_zero()),
-                remind: Some(self.escalation_reminder).filter(|t| !t.is_zero()),
-                stand_in: self.stand_in,
-            },
             ant: self.name,
-            defer_to_others: self.builtin,
+            connection: Connection { nats_url, creds: self.creds, js_domain: self.js_domain },
+            presence: Presence {
+                whoami: self.whoami,
+                capabilities: self.capabilities,
+                machine: self.machine,
+                defer_to_others: self.builtin,
+            },
+            harness: HarnessSettings {
+                harness,
+                model_settings,
+                fallbacks,
+                workdir,
+                env: self.env,
+                instructions,
+                limits: PromptLimits {
+                    timeout: Some(self.prompt_timeout).filter(|t| !t.is_zero()),
+                    max_tool_calls: Some(self.max_tool_calls).filter(|n| *n > 0),
+                },
+            },
+            pooling: Pooling {
+                max_harnesses: self.max_harnesses,
+                idle_timeout: self.idle_timeout,
+                memory_pressure: self.memory_pressure,
+            },
+            worktrees: WorktreeSettings { per_thread: self.worktrees, base: self.worktree_base, publish: self.publish },
+            policy: Policy {
+                human: self.human.unwrap_or_else(UserId::human),
+                allow: if self.allow_tools { [self.allow, vec!["*".to_owned()]].concat() } else { self.allow },
+                approval_timeout: self.approval_timeout,
+                escalation: Chain {
+                    escalate_to: self.escalate_to,
+                    max_hops: self.max_escalation_hops,
+                    after: Some(self.escalate_after).filter(|t| !t.is_zero()),
+                    remind: Some(self.escalation_reminder).filter(|t| !t.is_zero()),
+                    stand_in: self.stand_in,
+                },
+                redact: self.redact,
+            },
+            spending: Spending { caps, warn_percent: self.spend_warn_percent, pool: self.pool },
+            storage: Storage { home, jetstream: self.storage },
             requester: crate::mcp::Requester::default(),
-            redact: self.redact,
-            machine: self.machine,
-            worktree_base: self.worktree_base,
-            publish: self.publish,
             pause: crate::pause::Pause::new(self.paused),
             drift: crate::shared::Drift::default(),
         })

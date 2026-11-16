@@ -84,70 +84,28 @@ const fn ack_wait(progress_every: Duration) -> Duration {
     progress_every.saturating_mul(3)
 }
 
+/// The settings an ant is served with, grouped by what uses them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub ant: UserId,
-    pub nats_url: String,
-    /// Credentials file of the ant, when the server requires them.
-    pub creds: Option<PathBuf>,
-    /// JetStream domain of the hub, if it has one.
-    pub js_domain: Option<JsDomain>,
-    /// Directory the harness works in.
-    pub workdir: PathBuf,
-    /// The ant's own files (usually `~/.ants/<ant>`).
-    pub home: PathBuf,
-    /// Role, memory and task instructions prepended to every prompt.
-    pub instructions: String,
-    /// The ant's role instructions, shared in the colony.
-    pub whoami: Option<String>,
-    pub env: BTreeMap<String, String>,
-    pub harness: std::sync::Arc<Harness>,
-    pub model_settings: ModelSettings,
-    /// Harnesses and models tried in order while the ant's own harness cannot serve.
-    pub fallbacks: Vec<crate::fallback::Fallback>,
-    /// Tool requests the harness may run without asking (see [`crate::permission`] for the rules). Every other one
-    /// goes to the human on `ants.approvals.<ant>`.
-    pub allow: Vec<String>,
-    /// How long a tool request waits for the human before it is rejected.
-    pub approval_timeout: Duration,
-    /// Most harness processes alive at once; the least recently used idle one stops to make room.
-    pub max_harnesses: usize,
-    /// Each thread works in its own git worktree of the workdir's repository, under the home ([`Worktrees`]); unset,
-    /// [`crate::worktrees::per_thread`] decides at start.
-    pub worktrees: Option<bool>,
-    /// Where a thread's new worktree branch starts ([`Worktrees::with_base`]).
-    pub worktree_base: crate::worktrees::Base,
-    /// A thread's harness stops after this long without a message, and resumes its session on the next one.
-    pub idle_timeout: Duration,
-    /// Capabilities the ant advertises in the colony.
-    pub capabilities: Vec<String>,
-    /// Limits on every prompt.
-    pub limits: PromptLimits,
-    /// Token and cost caps of each thread and of the ant.
-    pub caps: Caps,
-    /// The share of a cap, in percent, past which a human is warned once; 0 for never.
-    pub spend_warn_percent: u8,
-    /// When to warn a human of JetStream storage filling up.
-    pub storage: crate::storage::Settings,
-    /// When memory is low, and the harnesses run at most while it is ([`crate::pressure`]).
-    pub memory_pressure: crate::pressure::Settings,
-    /// The daily caps the ant shares with the other ants added from its template, if any.
-    pub pool: Option<crate::caps::Pool>,
-    /// Serve the ant only while holding its colony entry, as the built-in messenger does: wait while another
-    /// daemon lists it, and hand over to a daemon that puts it later ([`colony::hold`]).
-    pub defer_to_others: bool,
-    /// The default human, who gets escalations and notices of threads with no owner.
-    pub human: UserId,
-    /// The ant's escalation chain, published in the colony, and its limits.
-    pub escalation: Chain,
+    /// How the daemon reaches the bus.
+    pub connection: Connection,
+    /// What the ant's colony entry shows of it, and how the daemon holds that entry.
+    pub presence: Presence,
+    /// What the ant's harnesses run, where and with what.
+    pub harness: HarnessSettings,
+    /// How many harnesses run at once, and for how long.
+    pub pooling: Pooling,
+    /// Whether each thread works in its own git worktree, and what becomes of its branch.
+    pub worktrees: WorktreeSettings,
+    /// Who the ant answers to and what it may do unasked.
+    pub policy: Policy,
+    /// What the ant may spend.
+    pub spending: Spending,
+    /// Where the ant keeps its files, and when the bus's storage filling up is told.
+    pub storage: Storage,
     /// For a manager ant of an `[[ant_template]]`, what adds the ants its `request_ant` tool asks for.
     pub requester: crate::mcp::Requester,
-    /// Redact secrets from what the ant publishes ([`crate::redact`]).
-    pub redact: bool,
-    /// The machine the ant's colony entry and notices name; the host name when None.
-    pub machine: Option<String>,
-    /// What becomes of a thread's worktree branch holding new commits ([`crate::publish`]).
-    pub publish: crate::publish::Publish,
     /// Whether the ant is paused, and since when and by whom; equal to any other, so that pausing or resuming alone
     /// restarts no harness ([`crate::pause::Pause::replace`]).
     pub pause: crate::pause::Pause,
@@ -157,9 +115,108 @@ pub struct Config {
     pub drift: crate::shared::Drift,
 }
 
+/// How the daemon reaches the bus.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Connection {
+    pub nats_url: String,
+    /// Credentials file of the ant, when the server requires them.
+    pub creds: Option<PathBuf>,
+    /// JetStream domain of the hub, if it has one.
+    pub js_domain: Option<JsDomain>,
+}
+
+/// What the ant's colony entry shows of it, besides its harness and chain, and how the daemon holds that entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Presence {
+    /// The ant's role instructions, shared in the colony.
+    pub whoami: Option<String>,
+    /// Capabilities the ant advertises in the colony.
+    pub capabilities: Vec<String>,
+    /// The machine the ant's colony entry and notices name; the host name when None.
+    pub machine: Option<String>,
+    /// Serve the ant only while holding its colony entry, as the built-in messenger does: wait while another
+    /// daemon lists it, and hand over to a daemon that puts it later ([`colony::hold`]).
+    pub defer_to_others: bool,
+}
+
+/// What the ant's harnesses run, where and with what.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HarnessSettings {
+    pub harness: std::sync::Arc<Harness>,
+    pub model_settings: ModelSettings,
+    /// Harnesses and models tried in order while the ant's own harness cannot serve.
+    pub fallbacks: Vec<crate::fallback::Fallback>,
+    /// Directory the harness works in.
+    pub workdir: PathBuf,
+    pub env: BTreeMap<String, String>,
+    /// Role, memory and task instructions prepended to every prompt.
+    pub instructions: String,
+    /// Limits on every prompt.
+    pub limits: PromptLimits,
+}
+
+/// How many harnesses run at once, and for how long.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Pooling {
+    /// Most harness processes alive at once; the least recently used idle one stops to make room.
+    pub max_harnesses: usize,
+    /// A thread's harness stops after this long without a message, and resumes its session on the next one.
+    pub idle_timeout: Duration,
+    /// When memory is low, and the harnesses run at most while it is ([`crate::pressure`]).
+    pub memory_pressure: crate::pressure::Settings,
+}
+
+/// Whether each thread works in its own git worktree, and what becomes of its branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorktreeSettings {
+    /// Each thread works in its own git worktree of the workdir's repository, under the home ([`Worktrees`]); unset,
+    /// [`crate::worktrees::per_thread`] decides at start.
+    pub per_thread: Option<bool>,
+    /// Where a thread's new worktree branch starts ([`Worktrees::with_base`]).
+    pub base: crate::worktrees::Base,
+    /// What becomes of a thread's worktree branch holding new commits ([`crate::publish`]).
+    pub publish: Publish,
+}
+
+/// Who the ant answers to and what it may do unasked.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Policy {
+    /// The default human, who gets escalations and notices of threads with no owner.
+    pub human: UserId,
+    /// Tool requests the harness may run without asking (see [`crate::permission`] for the rules). Every other one
+    /// goes to the human on `ants.approvals.<ant>`.
+    pub allow: Vec<String>,
+    /// How long a tool request waits for the human before it is rejected.
+    pub approval_timeout: Duration,
+    /// The ant's escalation chain, published in the colony, and its limits.
+    pub escalation: Chain,
+    /// Redact secrets from what the ant publishes ([`crate::redact`]).
+    pub redact: bool,
+}
+
+/// What the ant may spend.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Spending {
+    /// Token and cost caps of each thread and of the ant.
+    pub caps: Caps,
+    /// The share of a cap, in percent, past which a human is warned once; 0 for never.
+    pub warn_percent: u8,
+    /// The daily caps the ant shares with the other ants added from its template, if any.
+    pub pool: Option<crate::caps::Pool>,
+}
+
+/// Where the ant keeps its files, and when the bus's storage filling up is told.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Storage {
+    /// The ant's own files (usually `~/.ants/<ant>`).
+    pub home: PathBuf,
+    /// When to warn a human of JetStream storage filling up.
+    pub jetstream: crate::storage::Settings,
+}
+
 /// Serve the ant's inbox until Ctrl-C. Prompts in flight are finished first; a second Ctrl-C stops at once. Until
 /// the NATS server can be reached and its JetStream answers the daemon keeps trying ([`bus::connect_retrying`]). A daemon
-/// that defers to others ([`Config::defer_to_others`]) and hands the ant over waits for its turn again.
+/// that defers to others ([`Presence::defer_to_others`]) and hands the ant over waits for its turn again.
 pub async fn run(config: Config) -> Result<()> {
     run_until(config, &Stop::default(), &Restarts::default()).await
 }
@@ -181,8 +238,9 @@ impl Stop {
 pub async fn run_until(config: Config, stop: &Stop, restarts: &Restarts) -> Result<()> {
     let _serving = crate::metrics::ant(&config.ant).serving();
     let _served = restarts.serve(&config.ant);
-    if let Some(detail) = config.harness.unenforced(&config.allow, !config.escalation.escalate_to.is_empty()) {
-        tracing::warn!(ant = %config.ant, fix = config.harness.gated_fix(), "{detail}");
+    let harness = &config.harness.harness;
+    if let Some(detail) = harness.unenforced(&config.policy.allow, !config.policy.escalation.escalate_to.is_empty()) {
+        tracing::warn!(ant = %config.ant, fix = harness.gated_fix(), "{detail}");
     }
     let config = settle_worktrees(config).await;
     loop {
@@ -197,25 +255,28 @@ pub async fn run_until(config: Config, stop: &Stop, restarts: &Restarts) -> Resu
 /// The config with worktrees turned on or off for good, telling of a default turning them on and warning of threads
 /// running at once in one git work tree.
 async fn settle_worktrees(config: Config) -> Config {
-    let worktrees = crate::worktrees::per_thread(&config.workdir, config.max_harnesses, config.worktrees).await;
-    if config.worktrees.is_none() && worktrees {
+    let (workdir, max_harnesses, asked) =
+        (&config.harness.workdir, config.pooling.max_harnesses, config.worktrees.per_thread);
+    let per_thread = crate::worktrees::per_thread(workdir, max_harnesses, asked).await;
+    if asked.is_none() && per_thread {
         tracing::info!(
             ant = %config.ant,
-            workdir = %config.workdir.display(),
-            max_harnesses = config.max_harnesses,
+            workdir = %workdir.display(),
+            max_harnesses,
             "giving each thread its own git worktree, as threads may run at once in a git workdir; \
              worktrees = false shares the workdir"
         );
-    } else if crate::worktrees::shares_git_workdir(&config.workdir, config.max_harnesses, config.worktrees) {
+    } else if crate::worktrees::shares_git_workdir(workdir, max_harnesses, asked) {
         tracing::warn!(
             ant = %config.ant,
-            workdir = %config.workdir.display(),
-            max_harnesses = config.max_harnesses,
+            workdir = %workdir.display(),
+            max_harnesses,
             "threads running at once share one git work tree and may clobber each other's edits; \
              worktrees = true gives each thread its own"
         );
     }
-    Config { worktrees: Some(worktrees), ..config }
+    let worktrees = WorktreeSettings { per_thread: Some(per_thread), ..config.worktrees };
+    Config { worktrees, ..config }
 }
 
 /// How [`serve`] ended.
@@ -232,8 +293,9 @@ enum Served {
 /// act for the human ([`Mcp::with_assisting`]), opening and sealing the human's sealed messages with the ant's sealing
 /// key when it has one ([`crate::sealing::AssistantSealing`]).
 async fn assist(mcp: &Mcp, config: &Config, js: &async_nats::jetstream::Context, humans: &Registry) {
-    let Some(creds) = &config.creds else { return };
-    let human = match crate::behalf::keep_record(js, config.js_domain.as_ref(), &config.ant, creds).await {
+    let Some(creds) = &config.connection.creds else { return };
+    let js_domain = &config.connection.js_domain;
+    let human = match crate::behalf::keep_record(js, js_domain.as_ref(), &config.ant, creds).await {
         Ok(Some(human)) => human,
         Ok(None) => return,
         Err(e) => {
@@ -245,8 +307,8 @@ async fn assist(mcp: &Mcp, config: &Config, js: &async_nats::jetstream::Context,
         }
     };
     mcp.with_assisting(human);
-    mcp.with_human_store(crate::mcp::jetstream_store(js.clone(), config.js_domain.clone(), creds.clone()));
-    match assistant_sealing(config, creds, js, humans).await {
+    mcp.with_human_store(crate::mcp::jetstream_store(js.clone(), js_domain.clone(), creds.clone()));
+    match assistant_sealing(&config.ant, creds, js, humans).await {
         Ok(Some(sealing)) => mcp.with_sealing(std::sync::Arc::new(sealing)),
         Ok(None) => {}
         Err(e) => tracing::warn!(error = format!("{e:#}"), "opening and sealing none of the human's sealed messages"),
@@ -256,7 +318,7 @@ async fn assist(mcp: &Mcp, config: &Config, js: &async_nats::jetstream::Context,
 /// What an assistant opens and seals its human's messages with: none without a sealing key beside its credentials
 /// at `creds`.
 async fn assistant_sealing(
-    config: &Config,
+    ant: &UserId,
     creds: &std::path::Path,
     js: &async_nats::jetstream::Context,
     humans: &Registry,
@@ -264,14 +326,13 @@ async fn assistant_sealing(
     let Some(xkey) = crate::sealing::load_key(creds)? else { return Ok(None) };
     let Some(account) = crate::humans::account(Some(creds)) else { return Ok(None) };
     let directory = crate::devices::Directory::open(js, &account).await?;
-    Ok(Some(crate::sealing::AssistantSealing::new(config.ant.clone(), xkey, humans.clone(), directory)))
+    Ok(Some(crate::sealing::AssistantSealing::new(ant.clone(), xkey, humans.clone(), directory)))
 }
 
 /// Serve the ant's inbox until Ctrl-C or `stop`, or until another daemon takes over its colony entry.
-#[allow(clippy::too_many_lines)]
 async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Served> {
-    let allow = Allowlist::parse(&config.allow)?;
-    let Some((client, js)) = connect(config, stop).await? else {
+    let allow = Allowlist::parse(&config.policy.allow)?;
+    let Some((client, js)) = connect(&config.connection, &config.ant, stop).await? else {
         tracing::info!("stopped before connecting");
         return Ok(Served::Stopped);
     };
@@ -283,47 +344,22 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
     workload.set_paused(config.pause.get());
     workload.set_drift(config.drift.get());
     let _connected = metrics.connected(client.clone(), workload.clone());
-    let mut entry = colony::entry(config).await;
-    let mut claimed = None;
-    if config.defer_to_others {
-        let Some(revision) = wait_for_turn(&js, &mut entry, stop).await? else {
-            return Ok(Served::Stopped);
-        };
-        claimed = Some(revision);
-    }
-    let humans = Registry::new(config.human.clone()).verifying_grants(crate::humans::account(config.creds.as_deref()));
+    let Some((entry, claimed)) = take_turn(config, &js, stop).await? else {
+        return Ok(Served::Stopped);
+    };
+    let account = || crate::humans::account(config.connection.creds.as_deref());
+    let humans = Registry::new(config.policy.human.clone()).verifying_grants(account());
     let _watching = humans.watch(js.clone(), crate::humans::RETRY);
-    let redactor = std::sync::Arc::new(redactor(config));
-    let (approver, policy) = approval_policy(config, &client, &js, &humans, allow, &redactor);
-    let outbox = redacting_outbox(crate::mcp::jetstream_outbox(js.clone()), redactor.clone());
-    let colony = crate::mcp::jetstream_colony(js.clone());
-    let reading = Reading::daemon(crate::creds::is_assistant(config.creds.as_deref()));
-    let notes = crate::notes::JetStreamNotes::new(js.clone(), config.ant.clone()).reading(reading);
-    let notes = std::sync::Arc::new(RedactingNotes { notes, redactor: redactor.clone() });
-    let sessions_kv = bus::ensure_sessions(&js, config.js_domain.as_ref(), &config.ant).await?;
-    let ledger = ledger(config, &sessions_kv);
-    let escalator = escalator(config, &js, &colony, &humans, &ledger, &redactor);
-    let identity = ant_records(config, &js).await;
-    let mut mcp = Mcp::start(
-        config.ant.clone(),
-        &config.home,
-        outbox,
-        colony.clone(),
-        notes.clone(),
-        humans.clone(),
-        Some(escalator.clone()),
-    )
-    .await?;
-    connect_mcp(&mut mcp, config, &client, &js, &redactor, &humans).await?;
-    let launch = launch(config, policy, &mcp);
+    let Services { redactor, approver, colony, reading, notes, sessions_kv, ledger, escalator, identity, mcp, launch } =
+        services(config, &client, &js, &humans, allow).await?;
+    let js_domain = config.connection.js_domain.as_ref();
     let stream = bus::open_stream(&js, &config.ant).await?;
     let threads = Threads::new(js.clone(), config.ant.clone(), sessions_kv.clone()).reading(reading);
     let webhooks = Webhooks::new(js.clone());
     let storage = storage_watcher(config, &js, &sessions_kv);
     let sessions = SessionStore::kv(sessions_kv, config.ant.clone());
-    let attempts =
-        Attempts::new(bus::ensure_attempts(&js, config.js_domain.as_ref(), &config.ant).await?, config.ant.clone());
-    let (answered, buried) = delivery_marks(config).await;
+    let attempts = Attempts::new(bus::ensure_attempts(&js, js_domain, &config.ant).await?, config.ant.clone());
+    let (answered, buried) = delivery_marks(&config.storage.home).await;
     let pool = harness_pool(config, launch, sessions, &workload).await;
     let publisher = publisher(config, &js, &redactor, &pool).await;
     let (messages, channels) = inbox_messages(&js, &stream, config).await?;
@@ -351,7 +387,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         pause: &config.pause,
         drift: &config.drift,
         metrics,
-        limits: config.limits,
+        limits: config.harness.limits,
         ledger: &ledger,
         escalator: &escalator,
         notes: notes.as_ref(),
@@ -359,7 +395,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         webhooks: &webhooks,
         colony: &colony,
         humans: &humans,
-        behalf: Records::new(js.clone(), config.js_domain.clone(), crate::humans::account(config.creds.as_deref())),
+        behalf: Records::new(js.clone(), config.connection.js_domain.clone(), account()),
         retry_delay: RETRY_DELAY,
         progress_every: PROGRESS_EVERY,
         timeline_every: TIMELINE_EVERY,
@@ -371,7 +407,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         failover: Failover::default(),
         fallback_retry: crate::fallback::RETRY_AFTER,
         identity: identity.as_ref(),
-        home: &config.home,
+        home: &config.storage.home,
     };
     let served = Box::pin(serve_inbox(&inbox, messages, channels, config, stop, &registration, &storage)).await?;
     registration.deregister().await;
@@ -382,10 +418,77 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
     Ok(served)
 }
 
+/// The ant's colony entry, and the revision of it claimed when the daemon defers to others ([`wait_for_turn`]):
+/// `None` when `stop` comes first.
+async fn take_turn(
+    config: &Config,
+    js: &jetstream::Context,
+    stop: &Stop,
+) -> Result<Option<(ants_proto::ColonyEntry, Option<u64>)>> {
+    let mut entry = colony::entry(config).await;
+    if !config.presence.defer_to_others {
+        return Ok(Some((entry, None)));
+    }
+    let Some(revision) = wait_for_turn(js, &mut entry, stop).await? else {
+        return Ok(None);
+    };
+    Ok(Some((entry, Some(revision))))
+}
+
+/// What the ant's inbox serves with on the bus, besides its harness pool, in the order [`services`] builds it.
+struct Services {
+    redactor: std::sync::Arc<Redactor>,
+    approver: NatsApprover,
+    colony: Colony,
+    reading: Reading,
+    notes: std::sync::Arc<RedactingNotes<crate::notes::JetStreamNotes>>,
+    sessions_kv: crate::direct_kv::DirectKv,
+    ledger: std::sync::Arc<Ledger>,
+    escalator: std::sync::Arc<Escalator>,
+    identity: Option<Identity>,
+    mcp: Mcp,
+    /// How the harnesses start, with the ant's MCP server and its tool requests going to `approver`.
+    launch: Launch,
+}
+
+/// Set up the ant's redactor, approvals, notes, spending ledger, escalator and records, and start its MCP server.
+async fn services(
+    config: &Config,
+    client: &async_nats::Client,
+    js: &jetstream::Context,
+    humans: &Registry,
+    allow: Allowlist,
+) -> Result<Services> {
+    let redactor = std::sync::Arc::new(redactor(config.policy.redact, &config.harness));
+    let (approver, policy) = approval_policy(&config.ant, &config.policy, client, js, humans, allow, &redactor);
+    let outbox = redacting_outbox(crate::mcp::jetstream_outbox(js.clone()), redactor.clone());
+    let colony = crate::mcp::jetstream_colony(js.clone());
+    let reading = Reading::daemon(crate::creds::is_assistant(config.connection.creds.as_deref()));
+    let notes = crate::notes::JetStreamNotes::new(js.clone(), config.ant.clone()).reading(reading);
+    let notes = std::sync::Arc::new(RedactingNotes { notes, redactor: redactor.clone() });
+    let sessions_kv = bus::ensure_sessions(js, config.connection.js_domain.as_ref(), &config.ant).await?;
+    let ledger = ledger(&config.ant, &config.spending, &sessions_kv);
+    let escalator = escalator(config, js, &colony, humans, &ledger, &redactor);
+    let identity = ant_records(config, js).await;
+    let mut mcp = Mcp::start(
+        config.ant.clone(),
+        &config.storage.home,
+        outbox,
+        colony.clone(),
+        notes.clone(),
+        humans.clone(),
+        Some(escalator.clone()),
+    )
+    .await?;
+    connect_mcp(&mut mcp, config, client, js, &redactor, humans).await?;
+    let launch = launch(&config.harness, policy, &mcp);
+    Ok(Services { redactor, approver, colony, reading, notes, sessions_kv, ledger, escalator, identity, mcp, launch })
+}
+
 /// Wait while the ant's identity record is marked moved, so no daemon starts a moved ant: false when `stop` comes
 /// first. A record that cannot be read does not keep the ant from being served.
 async fn unsealed(config: &Config, js: &jetstream::Context, stop: &Stop) -> bool {
-    let identity = match Identity::new(js, config.js_domain.as_ref(), &config.ant).await {
+    let identity = match Identity::new(js, config.connection.js_domain.as_ref(), &config.ant).await {
         Ok(identity) => identity,
         Err(e) => {
             tracing::warn!(error = format!("{e:#}"), "reading the ant's identity for a move");
@@ -401,10 +504,10 @@ async fn unsealed(config: &Config, js: &jetstream::Context, stop: &Stop) -> bool
 /// Keep the ant's escalation chain past the colony, and return its identity record, created when absent: None when it
 /// cannot be read, which the warning says.
 async fn ant_records(config: &Config, js: &jetstream::Context) -> Option<Identity> {
-    if let Err(e) = crate::chains::publish(js, &config.ant, &config.escalation.escalate_to).await {
+    if let Err(e) = crate::chains::publish(js, &config.ant, &config.policy.escalation.escalate_to).await {
         tracing::warn!(error = format!("{e:#}"), "keeping the escalation chain past the colony");
     }
-    let identity = Identity::new(js, config.js_domain.as_ref(), &config.ant).await;
+    let identity = Identity::new(js, config.connection.js_domain.as_ref(), &config.ant).await;
     let ensured = match &identity {
         Ok(identity) => identity.ensure().await,
         Err(e) => Err(anyhow::anyhow!("{e:#}")),
@@ -419,15 +522,16 @@ async fn ant_records(config: &Config, js: &jetstream::Context) -> Option<Identit
 
 /// The ant's approver of tool requests, and the permission policy asking it for calls its allowlist does not cover.
 fn approval_policy(
-    config: &Config,
+    ant: &UserId,
+    settings: &Policy,
     client: &async_nats::Client,
     js: &jetstream::Context,
     humans: &Registry,
     allow: Allowlist,
     redactor: &std::sync::Arc<Redactor>,
 ) -> (NatsApprover, PermissionPolicy) {
-    let approver = NatsApprover::new(client.clone(), js.clone(), config.ant.clone(), config.approval_timeout)
-        .with_chain(config.escalation.clone())
+    let approver = NatsApprover::new(client.clone(), js.clone(), ant.clone(), settings.approval_timeout)
+        .with_chain(settings.escalation.clone())
         .with_humans(humans.clone());
     let policy =
         PermissionPolicy::new(allow, Some(std::sync::Arc::new(approver.clone()))).with_redactor(redactor.clone());
@@ -435,13 +539,17 @@ fn approval_policy(
 }
 
 /// Connect to the bus as the ant's daemon, retrying until it answers: `None` when `stop` comes first.
-async fn connect(config: &Config, stop: &Stop) -> Result<Option<(async_nats::Client, jetstream::Context)>> {
+async fn connect(
+    connection: &Connection,
+    ant: &UserId,
+    stop: &Stop,
+) -> Result<Option<(async_nats::Client, jetstream::Context)>> {
     bus::connect_retrying(
-        &config.nats_url,
-        config.creds.as_deref(),
-        config.js_domain.as_ref(),
-        &config.ant,
-        &format!("ants-daemon-{}", config.ant),
+        &connection.nats_url,
+        connection.creds.as_deref(),
+        connection.js_domain.as_ref(),
+        ant,
+        &format!("ants-daemon-{ant}"),
         stopped(stop),
     )
     .await
@@ -465,10 +573,10 @@ async fn wait_for_turn(
 }
 
 /// The ledger of the ant's spending, against its caps and its pool's.
-fn ledger(config: &Config, sessions: &crate::direct_kv::DirectKv) -> std::sync::Arc<Ledger> {
-    let ledger = Ledger::kv(sessions.clone(), config.ant.clone(), config.caps)
-        .warn_at(config.spend_warn_percent)
-        .with_pool(config.pool.clone());
+fn ledger(ant: &UserId, spending: &Spending, sessions: &crate::direct_kv::DirectKv) -> std::sync::Arc<Ledger> {
+    let ledger = Ledger::kv(sessions.clone(), ant.clone(), spending.caps)
+        .warn_at(spending.warn_percent)
+        .with_pool(spending.pool.clone());
     std::sync::Arc::new(ledger)
 }
 
@@ -483,7 +591,7 @@ fn escalator(
 ) -> std::sync::Arc<Escalator> {
     let escalator = Escalator::new(
         config.ant.clone(),
-        config.escalation.clone(),
+        config.policy.escalation.clone(),
         colony.clone(),
         humans.clone(),
         ledger.clone(),
@@ -506,12 +614,12 @@ async fn connect_mcp(
     mcp.listen(bus::live_inbox(client, &config.ant).await?);
     mcp.with_channels(redacting_posts(crate::mcp::jetstream_channels(js.clone()), redactor.clone()));
     mcp.with_lookup(crate::mcp::jetstream_lookup(js.clone()));
-    mcp.with_files(crate::mcp::jetstream_files(js.clone()), config.workdir.clone());
+    mcp.with_files(crate::mcp::jetstream_files(js.clone()), config.harness.workdir.clone());
     mcp.with_redactor(redactor.clone());
     // Without credentials the server is open, with no `ants signer` to answer, and the daemon reads what it would.
-    mcp.with_reaction_asker(match config.creds {
+    mcp.with_reaction_asker(match config.connection.creds {
         Some(_) => crate::mcp::nats_reaction_asker(client.clone()),
-        None => crate::mcp::local_reaction_asker(js.clone(), config.js_domain.clone()),
+        None => crate::mcp::local_reaction_asker(js.clone(), config.connection.js_domain.clone()),
     });
     if let Some(requester) = &config.requester.0 {
         mcp.with_requester(requester.clone());
@@ -522,15 +630,15 @@ async fn connect_mcp(
 }
 
 /// How the ant's harnesses start.
-fn launch(config: &Config, policy: PermissionPolicy, mcp: &Mcp) -> Launch {
+fn launch(harness: &HarnessSettings, policy: PermissionPolicy, mcp: &Mcp) -> Launch {
     Launch::new(
-        config.harness.clone(),
-        config.workdir.clone(),
-        config.env.clone().into_iter().collect(),
+        harness.harness.clone(),
+        harness.workdir.clone(),
+        harness.env.clone().into_iter().collect(),
         policy,
-        config.model_settings.clone(),
+        harness.model_settings.clone(),
     )
-    .with_instructions(config.instructions.clone())
+    .with_instructions(harness.instructions.clone())
     .with_mcp(mcp.servers())
 }
 
@@ -539,22 +647,23 @@ fn storage_watcher(
     js: &jetstream::Context,
     sessions: &crate::direct_kv::DirectKv,
 ) -> crate::storage::Watcher {
+    let connection = &config.connection;
     crate::storage::Watcher {
         js: js.clone(),
-        hub_domain: config.js_domain.clone(),
+        hub_domain: connection.js_domain.clone(),
         notes: sessions.clone(),
         ant: config.ant.clone(),
-        human: config.human.clone(),
-        settings: config.storage,
-        server: format!("{} {:?}", config.nats_url, config.js_domain),
+        human: config.policy.human.clone(),
+        settings: config.storage.jetstream,
+        server: format!("{} {:?}", connection.nats_url, connection.js_domain),
     }
 }
 
 /// The marks of the messages answered and buried, pruned of those the stream no longer keeps.
-async fn delivery_marks(config: &Config) -> (Answered, Buried) {
-    let answered = Answered::new(&config.home);
+async fn delivery_marks(home: &std::path::Path) -> (Answered, Buried) {
+    let answered = Answered::new(home);
     answered.prune(bus::RETENTION).await;
-    let buried = Buried::new(&config.home);
+    let buried = Buried::new(home);
     buried.prune(bus::RETENTION).await;
     (answered, buried)
 }
@@ -566,20 +675,21 @@ async fn harness_pool(
     sessions: SessionStore,
     workload: &std::sync::Arc<colony::Workload>,
 ) -> Pool {
-    let fallbacks = config.fallbacks.iter().map(|f| (f.name(), launch.with_fallback(f))).collect();
-    let mut pool = Pool::new(launch, sessions, config.max_harnesses, config.idle_timeout)
+    let (pooling, home, base) = (&config.pooling, &config.storage.home, config.worktrees.base);
+    let fallbacks = config.harness.fallbacks.iter().map(|f| (f.name(), launch.with_fallback(f))).collect();
+    let mut pool = Pool::new(launch, sessions, pooling.max_harnesses, pooling.idle_timeout)
         .with_fallbacks(fallbacks)
         .reporting_to(workload.clone())
-        .with_memory_pressure(config.memory_pressure, crate::pressure::system_probe());
-    let isolating = if config.worktrees == Some(true) {
-        Worktrees::find(&config.ant, &config.workdir, &config.home).await
+        .with_memory_pressure(pooling.memory_pressure, crate::pressure::system_probe());
+    let isolating = if config.worktrees.per_thread == Some(true) {
+        Worktrees::find(&config.ant, &config.harness.workdir, home).await
     } else {
         None
     };
     if let Some(worktrees) = isolating {
-        pool = pool.with_worktrees(worktrees.with_base(config.worktree_base));
-    } else if let Some(worktrees) = Worktrees::left_behind(&config.ant, &config.home).await {
-        pool = pool.with_worktrees_left_behind(worktrees.with_base(config.worktree_base));
+        pool = pool.with_worktrees(worktrees.with_base(base));
+    } else if let Some(worktrees) = Worktrees::left_behind(&config.ant, home).await {
+        pool = pool.with_worktrees_left_behind(worktrees.with_base(base));
     }
     pool
 }
@@ -592,7 +702,7 @@ async fn publisher(
     redactor: &std::sync::Arc<Redactor>,
     pool: &Pool,
 ) -> Option<Publisher> {
-    if config.publish == Publish::Off {
+    if config.worktrees.publish == Publish::Off {
         return None;
     }
     if pool.worktrees().is_none() {
@@ -600,7 +710,8 @@ async fn publisher(
         return None;
     }
     let publisher = Publisher::new(config.ant.clone()).with_redactor(redactor.clone());
-    Some(match crate::direct_kv::DirectKv::new(js, config.js_domain.as_ref(), ants_proto::THREADS_BUCKET).await {
+    let js_domain = config.connection.js_domain.as_ref();
+    Some(match crate::direct_kv::DirectKv::new(js, js_domain, ants_proto::THREADS_BUCKET).await {
         Ok(titles) => publisher.with_titles(titles),
         Err(e) => {
             tracing::info!(error = format!("{e:#}"), "pull requests take the opening line, not the thread's title");
@@ -616,7 +727,7 @@ async fn inbox_messages(
     stream: &jetstream::stream::Stream<()>,
     config: &Config,
 ) -> Result<(impl Stream<Item = Result<jetstream::Message, anyhow::Error>> + Unpin, Channels)> {
-    let in_hand = i64::try_from(config.max_harnesses.max(1) * IN_HAND_PER_HARNESS)?;
+    let in_hand = i64::try_from(config.pooling.max_harnesses.max(1) * IN_HAND_PER_HARNESS)?;
     let channels = match async { Channels::watch(bus::ensure_channels(js).await?).await }.await {
         Ok(channels) => Some(channels),
         Err(e) => {
@@ -673,21 +784,21 @@ async fn enter_colony(
 fn log_serving(config: &Config) {
     tracing::info!(
         ant = %config.ant,
-        harness = %config.harness,
-        model_settings = ?config.model_settings,
-        workdir = %config.workdir.display(),
-        max_harnesses = config.max_harnesses,
-        worktrees = config.worktrees == Some(true),
-        worktree_base = config.worktree_base.as_str(),
-        publish = config.publish.as_str(),
-        idle_timeout = ?config.idle_timeout,
-        capabilities = ?config.capabilities,
-        allow = ?config.allow,
-        approval_timeout = ?config.approval_timeout,
-        limits = ?config.limits,
-        caps = ?config.caps,
-        human = %config.human,
-        escalation = ?config.escalation,
+        harness = %config.harness.harness,
+        model_settings = ?config.harness.model_settings,
+        workdir = %config.harness.workdir.display(),
+        max_harnesses = config.pooling.max_harnesses,
+        worktrees = config.worktrees.per_thread == Some(true),
+        worktree_base = config.worktrees.base.as_str(),
+        publish = config.worktrees.publish.as_str(),
+        idle_timeout = ?config.pooling.idle_timeout,
+        capabilities = ?config.presence.capabilities,
+        allow = ?config.policy.allow,
+        approval_timeout = ?config.policy.approval_timeout,
+        limits = ?config.harness.limits,
+        caps = ?config.spending.caps,
+        human = %config.policy.human,
+        escalation = ?config.policy.escalation,
         "serving inbox"
     );
 }
@@ -707,10 +818,15 @@ where
     S: Stream<Item = Result<jetstream::Message, E>> + Unpin,
     E: Display,
 {
-    let mut unserved =
-        unserved::Watch::new(inbox.js, config.js_domain.as_ref(), config.ant.clone(), Role::Ant, inbox.colony.clone())
-            .await?
-            .reading(inbox.reading);
+    let mut unserved = unserved::Watch::new(
+        inbox.js,
+        config.connection.js_domain.as_ref(),
+        config.ant.clone(),
+        Role::Ant,
+        inbox.colony.clone(),
+    )
+    .await?
+    .reading(inbox.reading);
     let (stopping, moving, mut asked) = (std::cell::Cell::new(false), std::cell::Cell::new(false), 0);
     // The first stop is Ctrl-C, a stop request, the hand-over or the move, after which the prompts in flight finish;
     // the second only Ctrl-C or a stop request.
@@ -737,7 +853,7 @@ where
         }
     };
     tokio::select! {
-        () = inbox.serve(messages, channels, config.idle_timeout, stop_or_hand_over) => {}
+        () = inbox.serve(messages, channels, config.pooling.idle_timeout, stop_or_hand_over) => {}
         () = inbox.escalator.deadlines() => {}
         () = inbox.pool.prune_worktrees_every(PRUNE_WORKTREES_EVERY, async |kept| {
             tell_kept_branches(inbox.js, inbox.threads, inbox.humans, &config.ant, kept).await;
@@ -745,7 +861,7 @@ where
         () = inbox.hear_cancels() => {}
         () = inbox.hear_restarts() => {}
         () = inbox.hear_clones() => {}
-        () = crate::creds::recheck(config.creds.as_deref()) => {}
+        () = crate::creds::recheck(config.connection.creds.as_deref()) => {}
         () = storage.watch(crate::storage::CHECK_EVERY) => {}
         () = tell_unserved(inbox.js, inbox.humans, &mut unserved) => {}
     }
@@ -1004,11 +1120,11 @@ fn kept_branch_notice(ant: &UserId, branch: &Branch, owner: Option<UserId>, huma
 
 /// What hides the ant's secrets: the values of its env and its harness's, the daemon's environment variables named
 /// like secrets, and the common patterns; nothing with `redact = false`.
-fn redactor(config: &Config) -> Redactor {
-    if !config.redact {
+fn redactor(redact: bool, harness: &HarnessSettings) -> Redactor {
+    if !redact {
         return Redactor::off();
     }
-    Redactor::default().with_env(&config.env).with_env(&config.harness.env).with_process_env()
+    Redactor::default().with_env(&harness.env).with_env(&harness.harness.env).with_process_env()
 }
 
 /// `outbox`, redacting the text of what the ant sends with its MCP tools.

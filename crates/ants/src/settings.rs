@@ -605,7 +605,10 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         let loaded = ants_daemon::config::load(&path).unwrap();
         let served = crate::serve::configs(loaded.ants, &loaded.harnesses, &server.url, None, None, Some(&shared));
         let served = served.unwrap().remove(0);
-        assert_eq!((served.model_settings.model.as_deref(), served.drift.get()), (Some("o3"), Vec::<String>::new()));
+        assert_eq!(
+            (served.harness.model_settings.model.as_deref(), served.drift.get()),
+            (Some("o3"), Vec::<String>::new())
+        );
         let (_, read_memories) = orders::send(&admin, &js, None, &dev_a, AdminOp::ReadMemories, WAIT).await.unwrap();
         let memories: ants_proto::Memories = serde_json::from_value(read_memories.unwrap().result.unwrap()).unwrap();
         assert_eq!(
@@ -627,7 +630,10 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         assert_eq!(verified_of(&admin, &js, &dev_a).await, Some(changed), "the first record stays");
         let taken = crate::serve::configs(vec![own], &Harnesses::builtin(), &server.url, None, None, Some(&standby));
         let taken = taken.unwrap().remove(0);
-        assert_eq!((taken.model_settings.model.as_deref(), taken.drift.get()), (Some("o3"), vec!["model".to_owned()]));
+        assert_eq!(
+            (taken.harness.model_settings.model.as_deref(), taken.drift.get()),
+            (Some("o3"), vec!["model".to_owned()])
+        );
         assert_eq!(ants_daemon::colony::entry(&taken).await.drift, ["model"], "the colony tells the drift");
 
         std::fs::write(&path, edited.replace("\"o3\"", "\"o4\"")).unwrap();
