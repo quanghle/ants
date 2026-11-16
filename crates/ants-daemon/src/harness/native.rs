@@ -15,6 +15,7 @@
     reason = "the helpers serve the native protocols to come; only the test protocol uses them yet"
 )]
 
+mod antigravity;
 mod claude;
 mod codex;
 mod io;
@@ -119,7 +120,8 @@ fn registration(protocol: Protocol) -> anyhow::Result<Option<Registration>> {
         Protocol::Stub => Ok(Some(Registration::of::<stub::Stub>())),
         Protocol::Claude => Ok(Some(Registration::of::<claude::Claude>())),
         Protocol::Codex => Ok(Some(Registration::of::<codex::Codex>())),
-        Protocol::Antigravity | Protocol::CopilotSdk => {
+        Protocol::Antigravity => Ok(Some(Registration::of::<antigravity::Antigravity>())),
+        Protocol::CopilotSdk => {
             bail!("protocol {protocol} is not implemented yet; omit protocol to run the harness over ACP")
         }
     }

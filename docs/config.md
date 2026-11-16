@@ -345,7 +345,7 @@ huge = { model_suffix = "-1m", history_budget = 262144 }
 | `acp` (default) | ACP: an agent or adapter the daemon drives directly, as described above |
 | `claude` | Claude Code's stream-json (`claude -p --input-format stream-json --output-format stream-json`), from Claude Code 2.1.325 ([below](#claude-code-protocol--claude)) |
 | `codex` | Codex's JSON-RPC app server (`codex app-server`); see [Codex](#codex-protocol--codex) |
-| `antigravity` | Antigravity's headless stream-json (`agy --input-format stream-json --output-format stream-json`); planned |
+| `antigravity` | Antigravity's headless stream-json (`agy --input-format stream-json --output-format stream-json`); see [Antigravity](#antigravity-protocol--antigravity) |
 | `copilot-sdk` | Copilot CLI through the GitHub Copilot SDK; planned |
 
 Any other value fails loading the file defining the harness, naming that file; so does a planned protocol until it is implemented.
@@ -444,6 +444,33 @@ env = { CODEX_HOME = "/srv/ants/codex" }        # optional: config, credentials 
 - **Cancel:** `turn/interrupt`; the turn ends as cancelled.
 - **Updates:** agent messages (set apart by blank lines) form the reply; reasoning summaries stream as thoughts; commands, file changes, MCP and dynamic tool calls, web searches and image views as tool calls; plan updates as plans. Token usage counts toward token caps; codex reports no cost, so cost caps see none.
 - **Errors:** a context-window error is a context overflow; a usage limit is an exhausted quota, retried after the latest reset of a rate-limit window codex reported used up (ChatGPT sign-in only); a rate limit or HTTP 429 is a rate limit, as are an overloaded server and capacity errors.
+
+
+#### Antigravity (`protocol = "antigravity"`)
+
+Runs Antigravity CLI 1.5.9 or later headless, one `agy` process per session, as `agy --input-format stream-json --output-format stream-json --disable-slash-commands --settings FILE [--add-dir DIR] [--model MODEL] [--effort EFFORT] [--conversation ID]` followed by the definition's `args`. The environment gets `AGY_CLI_DISABLE_AUTO_UPDATE=true` unless the definition or the ant sets it (agy otherwise replaces its own binary in the background). `ants harness check` names it `agy` with the version `agy --version` prints; an older agy fails the check.
+
+- **Arguments:** flags the protocol sets or that change how agy speaks (`--input-format`, `--output-format`, `--conversation`, `--continue`/`-c`, `--print`/`-p`/`--prompt`, `--prompt-interactive`/`-i`, `--print-timeout`) fail loading the definition. A prompt starting with `/` reaches the model as typed.
+- **Settings:** agy reads only the last `--settings` given, so the definition's own `--settings` (inline JSON, else a file relative to the session's directory) is taken out of its arguments and merged into the session's settings file, with `mode` as `toolPermission` and an allow rule `mcp(NAME/*)` for each ants MCP server.
+- **`mode`:** agy's tool permission mode (`toolPermission`): `request-review` (agy's default when unset), `proceed-in-sandbox`, `always-proceed` or `strict`; anything else fails loading. Headless agy asks no one: a tool its settings would ask about is denied at once and ends the turn, the reply being what agy said until then, and each denial is logged as a warning. `--dangerously-skip-permissions` in `args` approves every tool, allow, ask and deny rules (`permissions` in `--settings`, such as `command(git)` or `write_file(src/)`) restrict them, and `--mode accept-edits` or `--mode plan` sets agy's agent mode.
+- **Sign-in:** `agy` run once on a terminal (a Google account), or a Gemini API key: `GEMINI_API_KEY` in `env` with `--settings '{"modelProvider": "gemini"}'`. Signed out, agy fails the session at once (`authentication failed or timed out`); a rejected API key also counts as signed out.
+- **MCP:** ants' MCP server, over HTTP, goes in `.agents/mcp_config.json` of a directory private to the session (mode 0700 under the system's temporary directory, removed with the session), given to agy with `--add-dir`, which also makes that directory part of the session's workspace. Its tools load lazily (agy's `call_mcp_tool`) and each call may take up to 31 minutes.
+- **Sessions:** the session id is agy's conversation id, resumed with `--conversation`. agy opens a new conversation for an id it does not have; that counts as a failed `session/load`, and the thread's history seeds the new conversation. agy cannot fork: a cloned thread starts over from the history.
+- **Model and effort:** `model` goes to `--model` (the slugs of `agy models`, such as `gemini-3.1-pro-high`), `reasoning_effort` to `--effort` (`low`, `medium`, `high`, `xhigh` or `max`); an unknown model or a conflicting pair fails the session.
+- **Updates:** reply text streams as agy writes it; tool and subagent steps are tool calls; agy streams no reasoning. A prompt's tokens are the sum of its steps' (agy's own totals cover the whole conversation); agy reports no cost.
+- **Errors:** a failed turn ends the process; its error and agy's `AGY_ERROR` stderr line are classified: HTTP 429 or `RESOURCE_EXHAUSTED` as a rate limit (or a quota, by its wording, with its retry hint), "exceeds the maximum number of tokens allowed" as a context overflow, and a too-low AI credits balance or a daily quota as an exhausted quota. A turn whose 429 agy retried successfully is no failure, although agy reports it, and every later turn of the conversation, with status `ERROR` and `API error (attempt N)`.
+- **Cancel:** SIGINT, on which agy ends the turn and exits; the next prompt starts agy again on the conversation, which keeps the cancelled prompt but not its partial answer. On Windows the process is stopped instead.
+- **Attachments:** text only: attached files are named in the prompt.
+
+```toml
+[harnesses.agy]
+command = "agy"
+protocol = "antigravity"
+sign_in = "agy"
+mode = "request-review"
+args = ["--settings", '{"permissions": {"allow": ["command(git)", "command(cargo)"]}}', "--mode", "accept-edits"]
+memory_files = ["GEMINI.md", "AGENTS.md", ".agent/rules/*.md", "~/.gemini/GEMINI.md"]
+```
 
 ### Memory files
 
