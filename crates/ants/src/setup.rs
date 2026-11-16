@@ -398,7 +398,7 @@ fn config_file(
         _ => None,
     };
     let Some(summary) = summary else {
-        let mut text = String::from("# The ants of this machine (README.md, Config file), written by `ants setup`.\n");
+        let mut text = String::from("# The ants of this machine (docs/config.md), written by `ants setup`.\n");
         if let Some(harness) = harness {
             let _ = writeln!(text, "harness = {}", quoted(harness));
         }

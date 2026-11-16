@@ -38,7 +38,7 @@ include "server.conf"
 resolver { type: full, dir: "/var/lib/ants/jwt" }
 ```
 
-Without `max_file_store` and `max_memory_store` in its `jetstream` block, the hub takes up to 75% of the disk and of the memory. The accounts `ants auth` issues do not tell these limits, so the daemons warn of a store filling up only when `[storage]` of their config file repeats them (see [JetStream storage](../README.md#jetstream-storage)).
+Without `max_file_store` and `max_memory_store` in its `jetstream` block, the hub takes up to 75% of the disk and of the memory. The accounts `ants auth` issues do not tell these limits, so the daemons warn of a store filling up only when `[storage]` of their config file repeats them (see [JetStream storage](architecture.md#jetstream-storage)).
 
 - `include "server.conf"` resolves relative to the config directory even if prefixed with `/`. Copy `server.conf` (`ants auth init`) next to the hub config; it configures operator/account trust and `max_control_line: 16384` so permission JWTs fit in `CONNECT`.
 - `websocket` routes paths ending in `/leafnode` to leaf connections, `/mqtt` to MQTT, and any other path (such as `/nats`) to client connections. WebSocket and TCP clients authenticate identically with `.creds`.
@@ -91,22 +91,22 @@ Clients connect to `wss://hub.example.com/nats` (`/nats`); leaves configured wit
 `ants leaf config <machine> --uplink <url>` writes `~/.config/ants/leaf.conf` (override with `--out`):
 
 ```sh
-ants leaf config macbook --uplink wss://hub.example.com/nats
-ants leaf config macbook --uplink wss://hub.example.com/nats --ca-file ca.pem --proxy http://proxy.corp:3128
-ants leaf config macbook --uplink nats-leaf://127.0.0.1:7422
+ants leaf config worker-1 --uplink wss://hub.example.com/nats
+ants leaf config worker-1 --uplink wss://hub.example.com/nats --ca-file ca.pem --proxy http://proxy.corp:3128
+ants leaf config worker-1 --uplink nats-leaf://127.0.0.1:7422
 ```
 
 Generated configuration:
 
 ```hcl
-server_name: "macbook"
+server_name: "worker-1"
 listen: "127.0.0.1:4222"
 ping_interval: "20s"
 include "auth/server.conf"
-resolver { type: full, dir: "/Users/alice/.config/ants/jwt", interval: "10s" }
+resolver { type: full, dir: "/home/alice/.config/ants/jwt", interval: "10s" }
 jetstream {
-  domain: "macbook"
-  store_dir: "/Users/alice/.config/ants/jetstream"
+  domain: "worker-1"
+  store_dir: "/home/alice/.config/ants/jetstream"
   max_memory_store: 64MB
   max_file_store: 1GB
 }
@@ -115,13 +115,13 @@ leafnodes {
     {
       urls: ["wss://hub.example.com:443/nats"]
       account: "A..."
-      credentials: "/Users/alice/.config/ants/auth/leaf-macbook.creds"
+      credentials: "/home/alice/.config/ants/auth/leaf-worker-1.creds"
       tls {}
     }
     {
       urls: ["wss://hub.example.com:443/nats"]
       account: "A..."   # the system account
-      credentials: "/Users/alice/.config/ants/auth/leaf-macbook.system.creds"
+      credentials: "/home/alice/.config/ants/auth/leaf-worker-1.system.creds"
       tls {}
     }
   ]
@@ -144,10 +144,10 @@ With `jetstream { domain: hub }` on the hub, every `ants` process sets `--js-dom
 ### Leaf uplink credentials
 
 ```sh
-ants auth leaf macbook --ant dev-a --ant dev-b --ant messenger --human human --human alice --js-domain hub
-ants auth leaf macbook --ant dev-a --webhook github --js-domain hub
-ants auth leaf macbook --add-ant dev-c --remove-webhook github --js-domain hub
-ants auth leaf macbook --js-domain hub                   # the same members again
+ants auth leaf worker-1 --ant dev-a --ant dev-b --ant messenger --human human --human alice --js-domain hub
+ants auth leaf worker-1 --ant dev-a --webhook github --js-domain hub
+ants auth leaf worker-1 --add-ant dev-c --remove-webhook github --js-domain hub
+ants auth leaf worker-1 --js-domain hub                  # the same members again
 ```
 
 `ants auth leaf` writes `leaf-<machine>.creds` (`leafnodes.remotes[].credentials`):
@@ -181,9 +181,32 @@ ants enroll approve dev-c --js-domain hub                         # account-key 
 Run `ants leaf outbox` as a human while the leaf is connected to the hub (and rerun when ants or humans on the machine change). Without `--ant` or `--human`, it admits those the uplink credentials of the machine's `leaf.conf` carry (`--leaf-config FILE`), changed by `--add-ant`, `--add-human`, `--remove-ant` and `--remove-human` (`--remove-ant` also taking an ant the uplink credentials no longer carry, as after `ants auth leaf M --remove-ant ANT`, when the hub still takes from the outbox for it or the team directory, `~/.config/ants/auth`, kept it among the members once; the hub then takes nothing more of it):
 
 ```sh
-ants leaf outbox macbook --ant dev-a --ant dev-b --ant messenger --human human --human alice
-ants leaf outbox macbook
-ants leaf outbox macbook --remove
+ants leaf outbox worker-1 --ant dev-a --ant dev-b --ant messenger --human human --human alice
+ants leaf outbox worker-1
+ants leaf outbox worker-1 --remove
+```
+
+```mermaid
+flowchart LR
+    subgraph leaf["Leaf node (domain: worker-1)"]
+        out["ANTS_OUT<br/>ants.out.>"]
+        cons["Durable consumer<br/>ANTS_IN"]
+        out --> cons
+    end
+
+    subgraph hub["Hub (domain: hub)"]
+        intake["ANTS_IN<br/>ants.in.worker-1.>"]
+        ants["Stream ANTS<br/>ants.*"]
+        links["KV ants_links"]
+        owners["KV ants_owners"]
+        files["OBJ_ants_files"]
+        intake --> ants
+        intake --> links
+        intake --> owners
+        intake --> files
+    end
+
+    cons -->|"leaf uplink"| intake
 ```
 
 JetStream sources move buffered messages to the hub automatically across outages and restarts:
@@ -227,8 +250,12 @@ Because core NATS republishes do not cross a down uplink, waiters also poll `ANT
 
 Where TLS-inspecting proxies block WebSocket upgrades, `ants bridge` carries a leaf's TCP uplink over HTTP/1.1 requests:
 
-```text
-leaf node --nats-leaf://127.0.0.1:7422--> ants bridge connect ==HTTPS==> reverse proxy --> ants bridge serve --> hub :7422
+```mermaid
+flowchart LR
+    leaf["nats-server leaf"] -->|"nats-leaf://127.0.0.1:7422"| connect["ants bridge connect"]
+    connect ==>|"HTTPS POST / GET"| proxy["Reverse proxy"]
+    proxy --> serve["ants bridge serve"]
+    serve -->|"127.0.0.1:7422"| hub["Hub nats-server"]
 ```
 
 ```sh
@@ -237,7 +264,7 @@ ANTS_BRIDGE_TOKEN=... ants bridge serve                                     # --
 
 # worker
 ANTS_BRIDGE_TOKEN=... ants bridge connect https://hub.example.com/bridge    # --listen 127.0.0.1:7422
-ants leaf config macbook --uplink nats-leaf://127.0.0.1:7422
+ants leaf config worker-1 --uplink nats-leaf://127.0.0.1:7422
 ```
 
 `--token-file FILE` reads the token from `FILE` at start instead of `--token` or `ANTS_BRIDGE_TOKEN`, keeping it out of the command line and environment.

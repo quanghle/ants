@@ -35,7 +35,7 @@
 #           --bridge-token FILE      the bridge's bearer token in FILE, read at each start, for either end
 #           --bridge-proxy URL       connect through this HTTP CONNECT proxy, http://[user:password@]host:port
 #           --bridge-ca FILE         connect trusting the PEM CA certificates in FILE (SSL_CERT_FILE)
-#           --webhook                also keep `ants webhook serve` running (see README.md, Webhooks)
+#           --webhook                also keep `ants webhook serve` running (see docs/webhooks.md)
 #           --webhook-config FILE    its config file (default: ~/.ants/webhooks.toml)
 #           --out DIR                write the units into DIR; install and start nothing
 #
@@ -143,11 +143,11 @@ else
 fi
 if [ -z "$out" ]; then
     [ -f "$nats_conf" ] || die "no nats-server configuration at $nats_conf (write one with \`ants leaf config\`)"
-    [ -z "$daemon" ] || [ -f "$config" ] || die "no daemon config file at $config (see README.md, Config file)"
+    [ -z "$daemon" ] || [ -f "$config" ] || die "no daemon config file at $config (see docs/config.md)"
     [ -z "$signer" ] || [ -f "$config" ] || die "no config file at $config for the signer's templates"
     [ -z "$token_file" ] || [ -r "$token_file" ] || die "no devtunnel token file at $token_file"
     [ -z "$channel_creds" ] || [ -r "$channel_creds" ] || die "no channel manager credentials at $channel_creds"
-    [ -z "$webhook" ] || [ -f "$webhook_config" ] || die "no webhook config file at $webhook_config (see README.md, Webhooks)"
+    [ -z "$webhook" ] || [ -f "$webhook_config" ] || die "no webhook config file at $webhook_config (see docs/webhooks.md)"
     [ -z "$bridge_token" ] || [ -r "$bridge_token" ] || die "no bridge token file at $bridge_token"
     [ -z "$bridge_ca" ] || [ -r "$bridge_ca" ] || die "no CA certificates at $bridge_ca"
 fi

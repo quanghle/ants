@@ -848,7 +848,7 @@ fn holding(human: &Human, prefs: &NotifyPrefs, now: DateTime<Utc>) -> bool {
     prefs.snoozed(now) || human.quiet.as_ref().is_some_and(|quiet| quiet.contains(now))
 }
 
-/// `notice` as exec and http sinks get it, at `now`: version [`NOTICE_VERSION`] of the schema the README documents.
+/// `notice` as exec and http sinks get it, at `now`: version [`NOTICE_VERSION`] of the schema docs/webhooks.md documents.
 fn notice_json(notice: &Notice, now: DateTime<Utc>) -> Value {
     let links: Vec<Value> = notice
         .buttons

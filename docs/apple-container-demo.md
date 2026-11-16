@@ -2,13 +2,13 @@
 
 A local three-node team using [Apple container](https://github.com/apple/container), not Docker:
 
-```text
-                  hub (JetStream domain: hub)
-                  ant: hub-ant
-                     /       \
-             NATS leaf       NATS leaf
-             leaf-a          leaf-b
-             ant: leaf-a-ant ant: leaf-b-ant
+```mermaid
+flowchart TD
+    hub["hub<br/>JetStream domain: hub<br/>ant: hub-ant"]
+    leafa["leaf-a<br/>NATS leaf<br/>ant: leaf-a-ant"]
+    leafb["leaf-b<br/>NATS leaf<br/>ant: leaf-b-ant"]
+    leafa -->|"leaf uplink"| hub
+    leafb -->|"leaf uplink"| hub
 ```
 
 Each node is a separate Linux VM/container with its own NATS server, persistent ext4 volume, workdir, Copilot sign-in and
@@ -45,7 +45,7 @@ through the hub. It makes no model calls and needs no Copilot sign-in.
 
 Each container gets two CPUs, 2 GiB of memory and a sparse 4 GiB named volume. Linux-native volumes support the Unix
 socket permissions used by the ACP MCP bridge. A dedicated network connects the nodes; no ports are published on the
-Mac. NATS client ports and daemon metrics listen only on each container's loopback interface. The hub's authenticated
+host. NATS client ports and daemon metrics listen only on each container's loopback interface. The hub's authenticated
 leaf port listens on the demo network. Production NATS configuration, services and credentials stay untouched.
 
 ## Sign in and send work

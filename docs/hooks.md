@@ -29,7 +29,7 @@ They publish no message, answer no tool request, cancel no prompt and write no b
 credentials file lets no one act for an ant or a human. They read no inbox, notes or channel subject, nor `STREAM.INFO`
 or `STREAM.MSG.GET` on `ANTS`. Every KV bucket other than `ants_colony` is denied too: `ants_sessions`, `ants_attempts`,
 `ants_owners`, `ants_links`, `ants_chains`, `ants_humans`, `ants_channels`, `ants_webhooks`, `ants_read`,
-`ants_presence`, `ants_notify`, `ants_reactions`, `ants_threads`, `ants_devices` and `ants_machines`, and the attachment store `ants_files`.
+`ants_presence`, `ants_notify`, `ants_reactions`, `ants_threads`, `ants_devices`, `ants_machines` and `ants_identities`, and the attachment store `ants_files`.
 
 Event payloads can still contain prompt or tool text:
 
@@ -98,7 +98,7 @@ claims it. Check: `subject == "ants.approvals." + ant + "." + request_id`.
 ### `DeadLetter` on `ants.dead.<ant>`
 
 A message an ant gave up on, stored by its daemon or by `ants dead watch` (see
-[Dead letters](../README.md#dead-letters)), with `Nats-Msg-Id` `dead-<stream_seq>`. Replaying or dropping it deletes
+[Dead letters](architecture.md#dead-letters)), with `Nats-Msg-Id` `dead-<stream_seq>`. Replaying or dropping it deletes
 it from the stream, which no feed tells.
 
 ```json
@@ -200,9 +200,10 @@ Check: `subject == "ants.timeline." + thread_id + "." + ant`.
 ### `ColonyEntry` at `ants_colony` key `<ant>`
 
 What a daemon says of an ant it serves: `ant`, `machine`, `instance`, `harness`, `agent`? (`{name, version}`),
-`capabilities`, `whoami`?, `workdir`, `started_at`, `heartbeat_at`, `activity` (`idle`, `working`), `handling`,
-`harnesses`, `escalate_to`?, `version`, `perms`, `signed_out`?, `limited`?, `failing`?, `fallback`?, `memory_low`?
-(`{since, available, max_harnesses}`). The daemon puts it on start and every 10 s, and deletes it on a clean stop; the
+`model`? (`{model, reasoning_effort, context}`), `capabilities`, `whoami`?, `workdir`, `started_at`, `heartbeat_at`,
+`activity` (`idle`, `working`), `handling`, `harnesses`, `escalate_to`?, `drift`? (`[field, ...]`), `version`, `perms`,
+`signed_out`?, `limited`?, `failing`?, `fallback`?, `memory_low`? (`{since, available, max_harnesses}`), `paused`?
+(`{since, by?}`). The daemon puts it on start and every 10 s, and deletes it on a clean stop; the
 bucket's entries expire after 30 s, so a daemon that died leaves none. `ants hook run --on colony` hands on puts only, every heartbeat included. Check: `key == ant`.
 
 ## `ants hook run`

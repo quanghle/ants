@@ -17,15 +17,15 @@ machine = "dev-vm1"                        # machine named in colony entries, no
 creds = "~/.config/ants/auth/alice.creds"  # human credentials (ant credentials are not used here)
 nats = "nats://127.0.0.1:4222"             # default: top-level nats
 js_domain = "hub"                          # default: top-level js_domain
-auto_archive = "14d"                       # hide threads idle this long from thread list and dash (default "0": never; README.md, Auto-archive)
+auto_archive = "14d"                       # hide threads idle this long from thread list and dash (default "0": never; docs/cli.md)
 summary_ant = "messenger"                  # ant asked for TL;DRs and digests (default: the messenger; see Catch-up summaries)
 summaries = "on-demand"                    # default; "ahead" also allows asking for TL;DRs ahead of time (needs the next key)
 summary_daily_tokens = 50000               # most tokens summaries asked ahead of time spend per human and UTC day (default 0)
-inline_images = true                       # draw image attachments in ants chat's thread view (default false; README.md)
+inline_images = true                       # draw image attachments in ants chat's thread view (default false; docs/cli.md)
 theme = "auto"                             # avatar palette: "dark", "light" or "auto" (default: ask the terminal, else COLORFGBG, else dark)
 animate = true                             # avatar heads in ants chat move with their ant's state (default true; false keeps them still)
 
-[storage]                                  # JetStream capacity warnings (see README.md, JetStream storage)
+[storage]                                  # JetStream capacity warnings (see docs/architecture.md, JetStream storage)
 warn_percent = 80                          # warn past this share of a store's limit (default 80; 0 disables)
 max_file_store = "100GB"                   # hub max_file_store (default: unknown); bytes or 1024-based K/M/G/T[B]
 max_memory_store = "1GB"                   # hub max_memory_store (default: unknown)
@@ -36,7 +36,7 @@ max_harnesses = 1                          # default; per-ant harness cap while 
 
 [host]                                     # the machine's host connection (docs/auth.md, Machine host credentials)
 creds = "~/.config/ants/auth/host.creds"   # default: that file, else host-<machine>.creds beside it, if either exists
-machine = "macbook"                        # default: the credentials' name, else the top-level machine, else the host name
+machine = "dev-vm1"                        # default: the credentials' name, else the top-level machine, else the host name
 
 [admin]                                    # admin orders to this machine's ants (docs/auth.md, Admin orders)
 remote = false                             # refuse every order (default true: take the orders an admin signed)
@@ -141,7 +141,7 @@ With worktrees on, each thread works in its own git worktree at `<home>/worktree
 
 - Unset `worktrees` turns them on when the workdir is inside a git work tree (a `.git` directory or file in it or above it) that does not ignore it (`git check-ignore`, as for a directory in `target/`) and `max_harnesses > 1`, logging so at daemon start; otherwise threads share the workdir.
 - `worktrees = true` (`--worktrees`) turns them on; `worktrees = false` (`--no-worktrees`) keeps every thread in the shared workdir, with a warning at daemon start and in `ants doctor` when `max_harnesses > 1` and the workdir is a git work tree, as threads running at once may clobber each other's edits.
-- `worktree_base = "upstream"` starts each new branch from the fetched default branch of the default remote instead of `HEAD`, and `publish = "draft-pr"` pushes a branch with new commits and opens a draft pull request ([README](../README.md#pool-worktrees-and-at-least-once-retries)); both apply whenever worktrees are on, set or by default.
+- `worktree_base = "upstream"` starts each new branch from the fetched default branch of the default remote instead of `HEAD`, and `publish = "draft-pr"` pushes a branch with new commits and opens a draft pull request ([architecture.md](architecture.md#pool-worktrees-and-at-least-once-retries)); both apply whenever worktrees are on, set or by default.
 
 Trade-offs of worktrees:
 
@@ -412,7 +412,7 @@ History budget precedence: ant `history_budget` -> selected `context`'s `history
 
 ### Memory pressure
 
-Each harness process takes hundreds of MB (about 255 MB for Copilot CLI, see README.md, Footprint). On every idle check of an ant's harness pool (every `idle_timeout`, at most 30 s), the daemon reads the system's available memory (Linux `MemAvailable` in `/proc/meminfo`; macOS `hw.memsize × kern.memorystatus_level`; Windows `GlobalMemoryStatusEx`; elsewhere, or when unreadable, memory never counts as low). Below `min_available`:
+External harness child processes dominate system memory use (see [operations.md](operations.md#footprint)). On every idle check of an ant's harness pool (every `idle_timeout`, at most 30 s), the daemon reads the system's available memory (Linux `MemAvailable` in `/proc/meminfo`; macOS `hw.memsize × kern.memorystatus_level`; Windows `GlobalMemoryStatusEx`; elsewhere, or when unreadable, memory never counts as low). Below `min_available`:
 
 - Every idle harness (no prompt in flight) stops at once, least recently used first, instead of after `idle_timeout`; its session resumes via `session/load` on the next message. Busy harnesses finish their prompts.
 - New threads get a harness only while fewer than `max_harnesses` from `[memory_pressure]` run (capped by the ant's own `max_harnesses`); other messages wait in hand as when the pool is full.
