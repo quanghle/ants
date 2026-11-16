@@ -113,9 +113,11 @@ impl ChannelReadMarkers {
     }
 }
 
-/// What a human holds back of its notifications for a while, on all its devices: kept under the human's key in
-/// [`NOTIFY_BUCKET`], updated with compare-and-set by `ants notify snooze|resume` and `ants thread mute|unmute`, and
-/// read by `ants webhook serve` before each notice. Each hold ends at its deadline, with no one there to lift it.
+/// What a human holds back of its notifications, on all its devices: kept under the human's key in
+/// [`NOTIFY_BUCKET`], updated with compare-and-set by `ants notify snooze|resume`, `ants thread mute|unmute` and
+/// `ants channel notify`, and read by `ants webhook serve` before each notice and by `ants chat` and `ants channel
+/// list` to count unread channel posts. Each hold ends at its deadline, with no one there to lift it; a channel's
+/// notify level stays until changed.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotifyPrefs {
     /// Until when every notice the human's config does not let through (`bypass`) is held back.
@@ -124,9 +126,87 @@ pub struct NotifyPrefs {
     /// The muted threads, each until when: none of their notices are sent.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub muted: std::collections::BTreeMap<ThreadId, DateTime<Utc>>,
+    /// The notify level of each channel not at the default ([`ChannelNotify::Humans`]).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub channels: std::collections::BTreeMap<ChannelId, ChannelNotify>,
+}
+
+/// Which unread posts of a channel count for a human, shown bold with their number, rather than apart and dim.
+/// Posts @mentioning the human always count.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelNotify {
+    /// Every post.
+    All,
+    /// Posts by humans, and those @mentioning the human.
+    #[default]
+    Humans,
+    /// Only posts @mentioning the human.
+    Mentions,
+}
+
+impl ChannelNotify {
+    pub const ALL: [Self; 3] = [Self::All, Self::Humans, Self::Mentions];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Humans => "humans",
+            Self::Mentions => "mentions",
+        }
+    }
+
+    /// How `ants chat` and `ants channel notify` describe it.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::All => "all posts",
+            Self::Humans => "posts by humans and @mentions",
+            Self::Mentions => "@mentions only",
+        }
+    }
+
+    /// Whether a post by `from`, a human or not, that @mentions the reader or not, counts.
+    pub fn counts(self, by_human: bool, mentions_me: bool) -> bool {
+        match self {
+            Self::All => true,
+            Self::Humans => by_human || mentions_me,
+            Self::Mentions => mentions_me,
+        }
+    }
+}
+
+impl std::fmt::Display for ChannelNotify {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ChannelNotify {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|level| level.as_str() == s)
+            .ok_or_else(|| format!("unknown notify level {s:?}: all, humans or mentions"))
+    }
 }
 
 impl NotifyPrefs {
+    /// The notify level of `channel`.
+    pub fn channel(&self, channel: &ChannelId) -> ChannelNotify {
+        self.channels.get(channel).copied().unwrap_or_default()
+    }
+
+    /// Set the notify level of `channel`, keeping none for the default.
+    pub fn set_channel(&mut self, channel: &ChannelId, level: ChannelNotify) {
+        if level == ChannelNotify::default() {
+            self.channels.remove(channel);
+        } else {
+            self.channels.insert(channel.clone(), level);
+        }
+    }
+
     /// Whether a snooze holds at `now`.
     pub fn snoozed(&self, now: DateTime<Utc>) -> bool {
         self.snoozed_until.is_some_and(|until| now < until)

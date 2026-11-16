@@ -5,7 +5,7 @@
 //! command over the CLI's verbs, acting on the selected item or open thread ([`COMMANDS`]). Sends run in the background
 //! ([`super::exec`]); the bar's status line tells how they went, and a failed send's text, with the message it quoted, comes back into the bar.
 
-use ants_proto::{ApprovalRequest, ChannelId, ThreadId, UserId, Verdict};
+use ants_proto::{ApprovalRequest, ChannelId, ChannelNotify, ThreadId, UserId, Verdict};
 use chrono::{DateTime, Utc};
 
 use super::exec::{Job, Outcome, Quoted};
@@ -148,6 +148,11 @@ impl Model {
             Slash::Mark(marking) => run(Job::Mark { thread: self.target()?, marking }),
             Slash::Mute(hold) => run(Job::Mute { thread: self.target()?, hold: hold.unwrap_or(quiet::MUTE_FOR) }),
             Slash::Unmute => run(Job::Unmute { thread: self.target()? }),
+            Slash::Notify(level) => {
+                let (channel, _) =
+                    self.channel_on_view().ok_or("/notify sets a channel's notify level: show the channel first")?;
+                Ok(Some(self.set_level(channel, level)))
+            }
             Slash::Snooze(duration) => Ok(Some(self.set_snooze(self.target()?, Some(now + duration), now))),
             Slash::Unsnooze => Ok(Some(self.set_snooze(self.target()?, None, now))),
             Slash::Remind(text) => {
@@ -281,6 +286,16 @@ impl Model {
             Page::Channel(page) => Some((page.channel.clone(), None)),
             _ => None,
         }
+    }
+
+    /// Set the human's notify level of `channel` here at once, and on all its devices.
+    pub(super) fn set_level(&mut self, channel: ChannelId, level: ChannelNotify) -> Action {
+        if level == ChannelNotify::default() {
+            self.data.channel_levels.remove(&channel);
+        } else {
+            self.data.channel_levels.insert(channel.clone(), level);
+        }
+        Action::Run(Job::ChannelNotify { channel, level }, String::new())
     }
 
     /// The thread slash commands act on: the open one, else the one selected in the view.

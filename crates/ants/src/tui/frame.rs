@@ -154,7 +154,7 @@ const HELP: &[(&str, &str)] = &[
     ("x Ctrl-X", "in a thread or work: cancel the prompt running there"),
     ("W E", "in a thread: withdraw the selected message still waiting, or withdraw it to edit in the bar"),
     ("x y", "in a delegation tree: cancel every prompt in the selected subtree"),
-    ("n", "with a person: write a message, starting a thread"),
+    ("n", "with a person: write a message; in a channel: its next notify level"),
     ("/", "the bar on /search, as in: /search deploy from:dev-a"),
     ("R ?", "read everything again, this help"),
     ("q Ctrl-C", "quit"),

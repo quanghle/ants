@@ -17,7 +17,7 @@ pub(crate) enum NotifyCommand {
     },
     /// End a snooze.
     Resume,
-    /// Show the snooze and the muted threads (quiet hours are in the webhook config).
+    /// Show the snooze, the muted threads and the channels' notify levels (quiet hours are in the webhook config).
     Status {
         /// One JSON object.
         #[arg(long)]

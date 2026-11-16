@@ -122,7 +122,7 @@ Held notices for approvals, escalations, questions, notices and completions are 
 - **Snooze:** `ants notify snooze DUR` (`1s`–`365d`), `ants notify resume`, `ants notify status [--json]`.
 - **Thread mute:** `ants thread mute THREAD [--for DUR]` (default `30d`) and `ants thread unmute THREAD`.
 
-Runtime holds live in KV `ants_notify` under `<human>` (`{snoozed_until, muted}`), updated via CAS across devices and read by direct get before each notice; the digest's count lives beside them under `held.<human>`.
+Runtime holds live in KV `ants_notify` under `<human>` (`{snoozed_until, muted, channels}`; `channels`, the notify levels of `ants channel notify`, governs only unread counts, since channel posts push nothing beyond what reaches the inbox), updated via CAS across devices and read by direct get before each notice; the digest's count lives beside them under `held.<human>`.
 
 ### Stand-in
 

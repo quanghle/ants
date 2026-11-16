@@ -8,7 +8,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ants_daemon::{bus, reactions};
-use ants_proto::{ChannelId, Choice, EscalationReason, JsDomain, Quote, Reaction, ThreadId, UserId, Uuid};
+use ants_proto::{
+    ChannelId, ChannelNotify, Choice, EscalationReason, JsDomain, Quote, Reaction, ThreadId, UserId, Uuid,
+};
 use anyhow::{Result, anyhow};
 use async_nats::jetstream;
 use futures::future::LocalBoxFuture;
@@ -125,6 +127,11 @@ pub enum Job {
     },
     Unmute {
         thread: ThreadId,
+    },
+    /// Set the human's notify level of `channel`, as `ants channel notify` does.
+    ChannelNotify {
+        channel: ChannelId,
+        level: ChannelNotify,
     },
     Title {
         thread: ThreadId,
@@ -316,6 +323,9 @@ impl Job {
             }
             Self::Mute { thread, hold } => Ok(Done::line(quiet::muted(&ctx.js, me, &thread, hold).await?)),
             Self::Unmute { thread } => Ok(Done::line(quiet::unmuted(&ctx.js, me, &thread).await?)),
+            Self::ChannelNotify { channel, level } => {
+                Ok(Done::line(quiet::channel_notify(&ctx.js, me, &channel, level).await?))
+            }
             Self::Title { thread, text } => {
                 Ok(Done::line(thread_meta::retitle(&ctx.js, ctx.meta()?, &ctx.sealing, &thread, &text, false).await?))
             }

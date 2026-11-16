@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use ants_proto::{ChannelId, Choice, Reaction, ThreadId, UserId};
+use ants_proto::{ChannelId, ChannelNotify, Choice, Reaction, ThreadId, UserId};
 use chrono::TimeDelta;
 
 use super::snooze;
@@ -23,6 +23,11 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("unpin", "", "unpin the thread"),
     ("mute", "[DURATION]", "hold back the thread's notifications"),
     ("unmute", "", "notify of the thread again"),
+    (
+        "notify",
+        "all|humans|mentions",
+        "which unread posts of the channel count: all, by humans and @mentions, @mentions",
+    ),
     ("snooze", "[DURATION]", "keep the thread off home, 1h unless given"),
     ("unsnooze", "", "bring the thread back on home"),
     ("remind", "DURATION|TIME [NOTE]", "remind of the thread (or selected message) on home and by push then"),
@@ -81,6 +86,8 @@ pub enum Slash {
     Mark(Marking),
     Mute(Option<Duration>),
     Unmute,
+    /// Set the notify level of the channel on view.
+    Notify(ChannelNotify),
     /// Keep the thread off home this long.
     Snooze(TimeDelta),
     Unsnooze,
@@ -196,6 +203,7 @@ fn slash(text: &str) -> Result<Slash, String> {
         "mute" if args.is_empty() => Ok(Slash::Mute(None)),
         "mute" => ants_proto::duration::parse(args).map(|hold| Slash::Mute(Some(hold))),
         "unmute" => bare(Slash::Unmute),
+        "notify" => text()?.parse().map(Slash::Notify),
         "snooze" => snooze::duration(args).map(Slash::Snooze),
         "unsnooze" => bare(Slash::Unsnooze),
         "remind" => text().map(Slash::Remind),
@@ -273,6 +281,9 @@ mod tests {
         assert_eq!(ok("/answer 2"), Slash::Answer(Choice::Option(2)));
         assert_eq!(ok("/answer ship it"), Slash::Answer(Choice::Typed("ship it".into())));
         assert_eq!(ok("/mute 2h"), Slash::Mute(Some(Duration::from_hours(2))));
+        assert_eq!(ok("/notify mentions"), Slash::Notify(ChannelNotify::Mentions));
+        assert!(parse("/notify").unwrap_err().starts_with("usage: /notify all|humans|mentions"));
+        assert!(parse("/notify some").unwrap_err().starts_with("unknown notify level"));
         assert_eq!(ok("/react eyes"), Slash::React("eyes".parse().unwrap()));
         assert_eq!(ok("/goto #ops"), Slash::Goto(Goto::Channel("ops".parse().unwrap())));
         assert_eq!(ok("/goto @bob"), Slash::Goto(Goto::User(user("bob"))));

@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use ants_proto::{ChannelId, UserId};
+use ants_proto::{ChannelId, ChannelNotify, UserId};
 use anyhow::{Result, bail};
 use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
@@ -70,9 +70,19 @@ pub(crate) enum ChannelCommand {
         users: Vec<UserId>,
     },
     /// List the channels with the members, the messenger and the owner of each; for a human member of any, also the
-    /// unread posts by humans or @mentioning it of each channel it is a member of, with how many @mention it, and
-    /// the other unread posts by ants.
+    /// unread posts its notify level of each channel it is a member of counts (by default, those by humans or
+    /// @mentioning it), with how many @mention it, and the other unread posts.
     List,
+    /// Show or set which unread posts of a channel count for the CLI's human, on all its devices: `all`, `humans`
+    /// (posts by humans and @mentions, the default) or `mentions` (@mentions only). The others show apart and dim.
+    Notify {
+        /// The channel: `ops` or `'#ops'`.
+        #[arg(value_parser = channel::parse_channel)]
+        #[arg(add = ArgValueCandidates::new(completions::channels))]
+        channel: ChannelId,
+        /// The level: `all`, `humans` or `mentions`; without one, show the channel's.
+        level: Option<ChannelNotify>,
+    },
     /// Print the posts of a channel kept in the stream, by thread: the post that started each thread, then the
     /// replies on the thread, indented. A human's printed posts are marked read on all its devices.
     Read {
@@ -184,6 +194,21 @@ pub(crate) async fn run(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> 
                 println!("{}", channel::table(&entries, unread.as_ref()));
             }
         }
+        ChannelCommand::Notify { channel, level } => {
+            if !nats.me.role.is_human() {
+                bail!("a channel's notify level needs a human's credentials; those of {} are an ant's", nats.me.id);
+            }
+            if channel::get(&kv, &channel).await?.is_none() {
+                tracing::warn!("no channel #{channel}");
+            }
+            match level {
+                Some(level) => println!("{}", crate::quiet::channel_notify(&js, &nats.me.id, &channel, level).await?),
+                None => {
+                    let level = crate::quiet::prefs(&js, &nats.me.id).await?.channel(&channel);
+                    println!("#{channel} notifies {}: {level} ({})", nats.me.id, level.describe());
+                }
+            }
+        }
         ChannelCommand::Read { channel, thread, limit, peek } => {
             read(nats, &js, &kv, &channel, thread, limit, peek).await?;
         }
@@ -250,9 +275,12 @@ async fn unread(
     let counted = async {
         let (markers, _) = reads::ChannelReads::open(js, &me.id).await?.markers().await?;
         let humans = crate::humans::read(js).await?;
+        let prefs = crate::quiet::prefs(js, &me.id).await?;
         let mut unread = HashMap::new();
         for entry in entries.iter().filter(|e| e.is_member(&me.id)) {
-            unread.insert(entry.channel.clone(), reads::unread(js, me, &humans, &markers, &entry.channel).await?);
+            let level = prefs.channel(&entry.channel);
+            unread
+                .insert(entry.channel.clone(), reads::unread(js, me, &humans, &markers, &entry.channel, level).await?);
         }
         anyhow::Ok(unread)
     };

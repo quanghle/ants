@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use ants_proto::{ChannelId, ReadMarker, ThreadId, UserId, Uuid};
+use ants_proto::{ChannelId, ChannelNotify, ReadMarker, ThreadId, UserId, Uuid};
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -119,17 +119,18 @@ impl Feeds {
         Some((channel, seqs))
     }
 
-    /// The channel's posts read that `marker` (none: nothing read) leaves unread for `me`, `is_human` telling a
-    /// human author from an ant.
+    /// The channel's posts read that `marker` (none: nothing read) leaves unread for `me` at notify level `level`,
+    /// `is_human` telling a human author from an ant.
     pub fn unread(
         &self,
         channel: &ChannelId,
         marker: Option<&ReadMarker>,
         me: &UserId,
+        level: ChannelNotify,
         is_human: impl Fn(&UserId) -> bool,
     ) -> Unread {
         let posts = self.seen.get(channel).into_iter().flatten();
-        Unread::of(posts.map(|s| (s.seq, &s.from, s.mentions.as_slice())), marker, me, is_human)
+        Unread::of(posts.map(|s| (s.seq, &s.from, s.mentions.as_slice())), marker, me, level, is_human)
     }
 
     /// The posts of the channel whose reactions to read: the newest.
@@ -152,8 +153,7 @@ impl Page {
         Self { channel, selected: Selection::default(), mark: attach::Mark::default() }
     }
 
-    pub const KEYS: &str =
-        "↑↓ post · Enter open its thread · w its threads in work · o open file · ] next file · Esc nav";
+    pub const KEYS: &str = "↑↓ post · Enter open its thread · w its threads in work · n notify level · o open file · ] next file · Esc nav";
 
     /// The selected post.
     pub fn post<'d>(&self, data: &'d Data) -> Option<&'d Post> {
@@ -191,6 +191,13 @@ impl Page {
             Key::Char('w') => {
                 return Some(To::Work(Filter { channel: Some(self.channel.clone()), ..Filter::default() }));
             }
+            Key::Char('n') => {
+                let level = next_level(data.level(&self.channel));
+                return Some(To::Do(Action::Run(
+                    Job::ChannelNotify { channel: self.channel.clone(), level },
+                    String::new(),
+                )));
+            }
             Key::Up | Key::Char('k') => at.saturating_sub(1),
             Key::Down | Key::Char('j') => at + 1,
             Key::PageUp => at.saturating_sub(10),
@@ -205,7 +212,8 @@ impl Page {
 
     pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
         let posts: Vec<&Post> = data.feeds.posts(&self.channel).collect();
-        let block = frame::block(format!(" #{} ({} posts) ", self.channel, posts.len()), focused);
+        let level = data.level(&self.channel);
+        let block = frame::block(format!(" #{} ({} posts · notify {level}) ", self.channel, posts.len()), focused);
         if posts.is_empty() {
             let text = if data.live.stored_at.is_some() { "no posts read" } else { "reading the stream…" };
             frame.render_widget(Paragraph::new(text).block(block), area);
@@ -223,6 +231,12 @@ impl Page {
         let list = List::new(items).block(block).highlight_style(frame::highlight(focused));
         frame.render_stateful_widget(list, area, &mut ListState::default().with_selected(Some(selected)));
     }
+}
+
+/// The notify level after `level`, as `n` steps through them.
+fn next_level(level: ChannelNotify) -> ChannelNotify {
+    let at = ChannelNotify::ALL.iter().position(|l| *l == level).unwrap_or(0);
+    ChannelNotify::ALL[(at + 1) % ChannelNotify::ALL.len()]
 }
 
 /// A post: its author and age, its first line, its attachments, `marked` the one `o` opens, then its replies and
@@ -260,7 +274,7 @@ pub mod tests {
     use crate::live::tests::{at, user};
     use crate::thread::Parser;
     use crate::tui::model::tests::model;
-    use crate::tui::model::{Action, Page as View};
+    use crate::tui::model::{Action, Key, Page as View};
     use crate::tui::nav;
 
     /// The entry of `post`, stored at sequence `seq`.
@@ -309,5 +323,18 @@ pub mod tests {
         m.key(super::super::model::Key::Char('w'), at(5));
         let View::Work(work) = m.page() else { panic!("not the work view") };
         assert_eq!(work.filter, Filter { channel: Some(ops), ..Filter::default() });
+    }
+
+    #[test]
+    fn n_in_a_channel_steps_its_notify_level_at_once_and_on_all_devices() {
+        let ops: ChannelId = "ops".parse().unwrap();
+        let mut m = model();
+        m.select(nav::Item::Channel(ops.clone()));
+        let set = |level| Some(Action::Run(Job::ChannelNotify { channel: ops.clone(), level }, String::new()));
+        assert_eq!(m.key(Key::Char('n'), at(1)), set(ChannelNotify::Mentions));
+        assert_eq!(m.data.level(&ops), ChannelNotify::Mentions, "shown before it is stored");
+        assert_eq!(m.key(Key::Char('n'), at(1)), set(ChannelNotify::All));
+        assert_eq!(m.key(Key::Char('n'), at(1)), set(ChannelNotify::Humans));
+        assert!(m.data.channel_levels.is_empty(), "the default is kept as none");
     }
 }
