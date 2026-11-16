@@ -345,7 +345,7 @@ huge = { model_suffix = "-1m", history_budget = 262144 }
 | `acp` (default) | ACP: an agent or adapter the daemon drives directly, as described above |
 | `claude` | Claude Code's stream-json (`claude -p --input-format stream-json --output-format stream-json`); planned |
 | `codex` | Codex's JSON-RPC app server (`codex app-server`); planned |
-| `antigravity` | Antigravity's headless stream-json (`agy --input-format stream-json --output-format stream-json`); planned |
+| `antigravity` | Antigravity's headless stream-json (`agy --input-format stream-json --output-format stream-json`); see [Antigravity](#antigravity-protocol--antigravity) |
 | `copilot-sdk` | Copilot CLI through the GitHub Copilot SDK; planned |
 
 Any other value fails loading the file defining the harness, naming that file; so does a planned protocol until it is implemented.
@@ -361,6 +361,32 @@ Every protocol other than `acp` is native: the daemon runs a translator in its o
 - **Cancel:** a cancelled prompt interrupts the CLI natively where the protocol can, else stops the CLI, the session resuming on the next message.
 
 **Permissions are the CLI's own.** For a native protocol, `mode` names the CLI's own permission mode (each protocol accepts its own values; others fail loading), and `args` carry its other permission settings. The translator sends no tool request to ants and denies, with a logged warning, anything the CLI asks a human to approve, so no prompt waits on an approval. A native-protocol harness therefore runs its tools unasked: allow rules, approvals, `escalate_to` and webhook or schedule narrowing do not reach them, and `ants daemon` and `ants doctor` warn as for the built-ins, naming the definition's native permission settings as the place to restrict tools.
+
+#### Antigravity (`protocol = "antigravity"`)
+
+Runs Antigravity CLI 1.5.9 or later headless, one `agy` process per session, as `agy --input-format stream-json --output-format stream-json --disable-slash-commands --settings FILE [--add-dir DIR] [--model MODEL] [--effort EFFORT] [--conversation ID]` followed by the definition's `args`. The environment gets `AGY_CLI_DISABLE_AUTO_UPDATE=true` unless the definition or the ant sets it (agy otherwise replaces its own binary in the background). `ants harness check` names it `agy` with the version `agy --version` prints; an older agy fails the check.
+
+- **Arguments:** flags the protocol sets or that change how agy speaks (`--input-format`, `--output-format`, `--conversation`, `--continue`/`-c`, `--print`/`-p`/`--prompt`, `--prompt-interactive`/`-i`, `--print-timeout`) fail loading the definition. A prompt starting with `/` reaches the model as typed.
+- **Settings:** agy reads only the last `--settings` given, so the definition's own `--settings` (inline JSON, else a file relative to the session's directory) is taken out of its arguments and merged into the session's settings file, with `mode` as `toolPermission` and an allow rule `mcp(NAME/*)` for each ants MCP server.
+- **`mode`:** agy's tool permission mode (`toolPermission`): `request-review` (agy's default when unset), `proceed-in-sandbox`, `always-proceed` or `strict`; anything else fails loading. Headless agy asks no one: a tool its settings would ask about is denied at once and ends the turn, the reply being what agy said until then, and each denial is logged as a warning. `--dangerously-skip-permissions` in `args` approves every tool, allow, ask and deny rules (`permissions` in `--settings`, such as `command(git)` or `write_file(src/)`) restrict them, and `--mode accept-edits` or `--mode plan` sets agy's agent mode.
+- **Sign-in:** `agy` run once on a terminal (a Google account), or a Gemini API key: `GEMINI_API_KEY` in `env` with `--settings '{"modelProvider": "gemini"}'`. Signed out, agy fails the session at once (`authentication failed or timed out`); a rejected API key also counts as signed out.
+- **MCP:** ants' MCP server, over HTTP, goes in `.agents/mcp_config.json` of a directory private to the session (mode 0700 under the system's temporary directory, removed with the session), given to agy with `--add-dir`, which also makes that directory part of the session's workspace. Its tools load lazily (agy's `call_mcp_tool`) and each call may take up to 31 minutes.
+- **Sessions:** the session id is agy's conversation id, resumed with `--conversation`. agy opens a new conversation for an id it does not have; that counts as a failed `session/load`, and the thread's history seeds the new conversation. agy cannot fork: a cloned thread starts over from the history.
+- **Model and effort:** `model` goes to `--model` (the slugs of `agy models`, such as `gemini-3.1-pro-high`), `reasoning_effort` to `--effort` (`low`, `medium`, `high`, `xhigh` or `max`); an unknown model or a conflicting pair fails the session.
+- **Updates:** reply text streams as agy writes it; tool and subagent steps are tool calls; agy streams no reasoning. A prompt's tokens are the sum of its steps' (agy's own totals cover the whole conversation); agy reports no cost.
+- **Errors:** a failed turn ends the process; its error and agy's `AGY_ERROR` stderr line are classified: HTTP 429 or `RESOURCE_EXHAUSTED` as a rate limit (or a quota, by its wording, with its retry hint), "exceeds the maximum number of tokens allowed" as a context overflow, and a too-low AI credits balance or a daily quota as an exhausted quota. A turn whose 429 agy retried successfully is no failure, although agy reports it, and every later turn of the conversation, with status `ERROR` and `API error (attempt N)`.
+- **Cancel:** SIGINT, on which agy ends the turn and exits; the next prompt starts agy again on the conversation, which keeps the cancelled prompt but not its partial answer. On Windows the process is stopped instead.
+- **Attachments:** text only: attached files are named in the prompt.
+
+```toml
+[harnesses.agy]
+command = "agy"
+protocol = "antigravity"
+sign_in = "agy"
+mode = "request-review"
+args = ["--settings", '{"permissions": {"allow": ["command(git)", "command(cargo)"]}}', "--mode", "accept-edits"]
+memory_files = ["GEMINI.md", "AGENTS.md", ".agent/rules/*.md", "~/.gemini/GEMINI.md"]
+```
 
 ### Memory files
 

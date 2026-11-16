@@ -119,6 +119,15 @@ impl Process {
         String::from_utf8_lossy(&bytes).trim().to_owned()
     }
 
+    /// Interrupt it as Ctrl-C does, with SIGINT; false where no signal can be sent, as on Windows.
+    pub(crate) fn interrupt(&self) -> bool {
+        #[cfg(unix)]
+        if let Some(pid) = self.pid.and_then(|pid| rustix::process::Pid::from_raw(pid.cast_signed())) {
+            return rustix::process::kill_process(pid, rustix::process::Signal::INT).is_ok();
+        }
+        false
+    }
+
     /// Wait for it to exit, as it does once its output ended, and describe how it did with the last of its stderr: the
     /// error to answer with when its output ends early. Its stderr may say it is not signed in, which the daemon
     /// recognizes.
