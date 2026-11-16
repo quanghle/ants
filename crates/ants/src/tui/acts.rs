@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use ants_daemon::direct_kv::DirectKv;
-use ants_proto::{JsDomain, SESSIONS_BUCKET, ThreadDone, ThreadId, ThreadMarks, UserId};
+use ants_proto::{JsDomain, Reminder, SESSIONS_BUCKET, ThreadDone, ThreadId, ThreadMarks, UserId};
 use anyhow::Result;
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
@@ -23,7 +23,7 @@ use crate::{quiet, spend};
 const ABOUT_EVERY: Duration = Duration::from_secs(10);
 
 /// A change to how the human holds a thread: on, or off again.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Change {
     Pin(bool),
     /// Notices of the thread held back for [`quiet::MUTE_FOR`].
@@ -33,11 +33,13 @@ pub enum Change {
     Done(bool),
     /// Off the human's home until then, or until an item for it arrives; None ends the snooze.
     Snooze(Option<DateTime<Utc>>),
+    /// A reminder of the thread for the human, in place of any other; None clears it, done or cancelled.
+    Remind(Option<Reminder>),
 }
 
 impl Change {
     /// What it did, after the thread's name: `pinned`, `no longer done`.
-    pub fn done_line(self, changed: bool) -> &'static str {
+    pub fn done_line(&self, changed: bool) -> &'static str {
         match (self, changed) {
             (Self::Pin(true), true) => "pinned",
             (Self::Pin(true), false) => "already pinned",
@@ -57,6 +59,9 @@ impl Change {
             (Self::Snooze(Some(_)), _) => "snoozed: off home until then, or until something for this human arrives",
             (Self::Snooze(None), true) => "no longer snoozed",
             (Self::Snooze(None), false) => "not snoozed",
+            (Self::Remind(Some(_)), _) => "to remind of: on home and pushed once due",
+            (Self::Remind(None), true) => "reminder cleared",
+            (Self::Remind(None), false) => "no reminder to clear",
         }
     }
 }
@@ -190,7 +195,7 @@ impl Acts {
     fn start(&self, thread: ThreadId, change: Change, last: u64) -> LocalBoxFuture<'static, Changing> {
         let (js, me, meta) = (self.js.clone(), self.me.clone(), self.meta.clone());
         async move {
-            let changed = changing(&js, &me, meta, &thread, change, last).await;
+            let changed = changing(&js, &me, meta, &thread, change.clone(), last).await;
             (thread, change, changed)
         }
         .boxed_local()
@@ -241,6 +246,17 @@ async fn changing(
                         true
                     }
                     None => snoozes.wake(thread, now),
+                })
+                .await
+        }
+        Change::Remind(reminder) => {
+            meta()?
+                .change_reminders(|reminders| match &reminder {
+                    Some(reminder) => {
+                        reminders.remind(thread, reminder.clone());
+                        true
+                    }
+                    None => reminders.clear(thread),
                 })
                 .await
         }

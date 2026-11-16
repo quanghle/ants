@@ -1,7 +1,7 @@
 //! Home, the triage queue: what waits on the human, one item per thread and reason (per tool request for approvals,
 //! as cards answered where they show, [`approvals`]), the most pressing reasons first and the oldest first within
-//! one, each with its one-key actions: answer ([`question`]), grant, reply, follow up, cancel, mark done, snooze ([`super::snooze`])
-//! or open. A snoozed thread's items stay off home until the snooze ends or an item for the human arrives on it.
+//! one, each with its one-key actions: answer ([`question`]), grant, reply, follow up, cancel, mark done, snooze ([`super::snooze`]),
+//! remind ([`super::remind`]) or open. A snoozed thread's items stay off home until the snooze ends or an item for the human arrives on it.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -38,6 +38,8 @@ pub enum Why {
     Message,
     /// An unread post @mentioning the human.
     Mention,
+    /// A reminder the human set is due.
+    Reminder,
     /// An ant answered on a thread the human owns.
     Finished,
 }
@@ -50,6 +52,7 @@ impl Why {
             Self::Stuck => "stuck",
             Self::Message => "message",
             Self::Mention => "mention",
+            Self::Reminder => "reminder",
             Self::Finished => "finished",
         }
     }
@@ -62,6 +65,7 @@ impl Why {
             Self::Stuck => "g grant · x cancel · d done · z snooze",
             Self::Message | Self::Mention => "r reply · d done · z snooze",
             Self::Finished => "f follow up · d mark done · z snooze",
+            Self::Reminder => "d done · b remind again",
         }
     }
 
@@ -70,7 +74,7 @@ impl Why {
         match self {
             Self::Approval => "Enter details",
             Self::Finished => "Enter review",
-            Self::Question | Self::Stuck | Self::Message | Self::Mention => "Enter open",
+            Self::Question | Self::Stuck | Self::Message | Self::Mention | Self::Reminder => "Enter open",
         }
     }
 
@@ -81,6 +85,7 @@ impl Why {
             Self::Stuck => Color::Red,
             Self::Message => Color::Blue,
             Self::Mention => Color::Magenta,
+            Self::Reminder => Color::LightCyan,
             Self::Finished => Color::Green,
         }
     }
@@ -198,6 +203,11 @@ fn unsnoozed(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
             items.push(item(Why::Finished, thread, latest.at, format!("{} answered", latest.from), &latest.from));
         }
     }
+    for (thread, reminder) in data.cards.reminders.due(now) {
+        let title = data.title(thread);
+        let text = if reminder.note.is_empty() { title } else { format!("{} · {title}", reminder.note) };
+        items.push(Item { who: None, ..item(Why::Reminder, thread, reminder.due, text, data.me()) });
+    }
     items
 }
 
@@ -213,7 +223,8 @@ pub struct Page {
 }
 
 impl Page {
-    pub const KEYS: &str = "j/k move · Enter open · d done · z snooze · u unread · t tree · s digest · c creds";
+    pub const KEYS: &str =
+        "j/k move · Enter open · d done · z snooze · u unread · b remind · t tree · s digest · c creds";
 
     /// The selected item's thread.
     pub fn thread(&self, data: &Data) -> Option<ThreadId> {
@@ -238,13 +249,18 @@ impl Page {
             _ => None,
         };
         let thread = || selected.map(|i| i.thread.clone());
+        let reminded = selected.and_then(|i| data.cards.reminders.0.get(&i.thread)).and_then(|r| r.message);
+        let reminder = selected.filter(|i| i.why == Why::Reminder).map(|i| i.thread.clone());
         let to = match key {
             Key::Enter => {
-                return match pending {
-                    Some(request) => Some(To::Ask(request, None)),
-                    None => thread().map(To::Thread),
+                return match (pending, reminder.zip(reminded)) {
+                    (Some(request), _) => Some(To::Ask(request, None)),
+                    (None, Some((thread, message))) => Some(To::Message(thread, message)),
+                    (None, None) => thread().map(To::Thread),
                 };
             }
+            Key::Char('d') if reminder.is_some() => return reminder.map(To::Unremind),
+            Key::Char('b') => return thread().map(|t| To::Remind(t, reminded)),
             Key::Char('a' | 'A') => return pending.map(|request| To::Ask(request, verdict)),
             Key::Char('r') if pending.is_some() => return pending.map(|request| To::Ask(request, verdict)),
             Key::Char('1'..='9' | 'r') if selected.is_some_and(|i| i.question.is_some()) => {
@@ -352,6 +368,24 @@ mod tests {
     use crate::tools::{State, Update};
     use crate::tui::model::Action;
     use crate::tui::model::tests::model;
+
+    #[test]
+    fn a_due_reminder_is_a_home_item_opening_its_message_until_done() {
+        let (thread, message) = (ThreadId::generate(), Uuid::now_v7());
+        let mut m = model();
+        let reminder =
+            ants_proto::Reminder { at: at(0), due: at(60), message: Some(message), note: "look".into(), pushed: false };
+        m.data.cards.reminders.remind(&thread, reminder);
+        assert!(items(&m.data, at(59)).is_empty(), "not due yet");
+        let found: Vec<(Why, String)> = items(&m.data, at(60)).into_iter().map(|i| (i.why, i.text)).collect();
+        assert_eq!(found, [(Why::Reminder, format!("look · {}", m.data.title(&thread)))]);
+        let now = at(60);
+        m.key(Key::Enter, now);
+        assert_eq!(m.page().name(), "thread", "Enter opens the message");
+        m.key(Key::Esc, now);
+        assert_eq!(m.key(Key::Char('d'), now), Some(Action::Change(thread, Change::Remind(None), 0)));
+        assert!(items(&m.data, now).is_empty(), "done, it leaves home at once");
+    }
 
     #[test]
     fn home_lists_approvals_then_stuck_then_mentions_then_finished_and_opens_them() {

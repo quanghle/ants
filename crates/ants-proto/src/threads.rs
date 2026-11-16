@@ -1,16 +1,16 @@
 //! What humans keep of threads in [`crate::THREADS_BUCKET`]: a thread's [`ThreadTitle`], TL;DR ([`ThreadSummary`]) and
-//! done mark ([`ThreadDone`]), shared by every human, and each human's snoozes ([`ThreadSnoozes`]) and pins and
-//! archives ([`ThreadMarks`]), shared by its devices.
+//! done mark ([`ThreadDone`]), shared by every human, and each human's snoozes ([`ThreadSnoozes`]), reminders
+//! ([`Reminders`]) and pins and archives ([`ThreadMarks`]), shared by its devices.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[cfg(doc)]
 use crate::{
-    Envelope, STREAM, THREADS_BUCKET, assisted_marks_key, assisted_snoozed_key, done_key, marks_key, snoozed_key,
-    summary_key, title_key,
+    Envelope, STREAM, THREADS_BUCKET, assisted_marks_key, assisted_snoozed_key, done_key, marks_key, reminders_key,
+    snoozed_key, summary_key, title_key,
 };
-use crate::{Error, MAX_TITLE, Sealed, ThreadId, UserId};
+use crate::{Error, MAX_TITLE, Sealed, ThreadId, UserId, Uuid};
 
 /// The title of a thread, under its [`title_key`] in [`THREADS_BUCKET`]: one per thread, shared by every human, which
 /// any human sets, renames or clears. `by` is the human that last set it, as its CLI says, or the ant whose suggestion
@@ -177,6 +177,63 @@ impl ThreadSnoozes {
             }
         }
         self
+    }
+}
+
+/// The reminders a human set, one per thread at most, under its [`reminders_key`] in [`THREADS_BUCKET`], shared by all
+/// its devices, which update it with compare-and-set. A reminder is due from `due` on: then its devices show it on
+/// home and a notifier pushes it once, until the human clears it (done or cancelled). A reminder changes no ant's
+/// work, reply or notification, nor what the human read.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Reminders(pub std::collections::BTreeMap<ThreadId, Reminder>);
+
+/// What to be reminded of on a thread, and when.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reminder {
+    /// When it was set.
+    pub at: DateTime<Utc>,
+    /// When it is due.
+    pub due: DateTime<Utc>,
+    /// The message on the thread it is about, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<Uuid>,
+    /// What the human noted with it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+    /// Whether a notifier pushed it, so no other does.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pushed: bool,
+}
+
+impl Reminders {
+    /// Remind of `thread` with `reminder`, in place of any other reminder of it.
+    pub fn remind(&mut self, thread: &ThreadId, reminder: Reminder) {
+        self.0.insert(thread.clone(), reminder);
+    }
+
+    /// Clear the reminder of `thread`, done or cancelled. Whether there was one.
+    pub fn clear(&mut self, thread: &ThreadId) -> bool {
+        self.0.remove(thread).is_some()
+    }
+
+    /// The reminders due at `now`, soonest due first.
+    pub fn due(&self, now: DateTime<Utc>) -> Vec<(&ThreadId, &Reminder)> {
+        let mut due: Vec<_> = self.0.iter().filter(|(_, r)| r.due <= now).collect();
+        due.sort_by_key(|(_, r)| r.due);
+        due
+    }
+
+    /// Mark pushed the reminders due at `now` and not pushed yet, returning them.
+    pub fn push(&mut self, now: DateTime<Utc>) -> Vec<(ThreadId, Reminder)> {
+        let mut pushed = Vec::new();
+        for (thread, reminder) in &mut self.0 {
+            if reminder.due <= now && !reminder.pushed {
+                reminder.pushed = true;
+                pushed.push((thread.clone(), reminder.clone()));
+            }
+        }
+        pushed
     }
 }
 

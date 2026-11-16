@@ -265,6 +265,10 @@ pub enum To {
     Quote(ThreadId, Quoted, Option<UserId>),
     /// Ask how long to keep the thread off home, or wake it if a snooze holds it off.
     Snooze(ThreadId),
+    /// Ask when to be reminded of the thread, or of this message on it.
+    Remind(ThreadId, Option<Uuid>),
+    /// Clear the thread's reminder, done.
+    Unremind(ThreadId),
     /// Mark the human's messages on the thread unread again: from the message at this sequence on, else the latest.
     Unread(ThreadId, Option<u64>),
     /// The command bar, open on this text.
@@ -297,7 +301,7 @@ pub struct Model {
     pub picking: Option<Picker>,
     /// The cancel waiting for y while an ant runs a tool call.
     pub interrupting: Option<Confirm>,
-    /// How long to snooze a thread from home, being asked.
+    /// How long to snooze a thread from home, or when to be reminded of it, being asked.
     pub snoozing: Option<snooze::Prompt>,
     /// The catch-up summaries: the span home's first line counts, the TL;DRs asked for, the digest.
     pub catchup: catchup::Catchup,

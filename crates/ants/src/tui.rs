@@ -33,6 +33,7 @@ mod people;
 mod question;
 mod react;
 mod reads;
+mod remind;
 mod search;
 mod select;
 mod settings;

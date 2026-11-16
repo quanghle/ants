@@ -209,6 +209,8 @@ impl Model {
             }
             To::Snooze(thread) => self.snooze(thread, now),
             To::Unread(thread, from) => self.mark_unread(thread, from, now),
+            To::Remind(thread, message) => self.remind(thread, message),
+            To::Unremind(thread) => Some(self.set_reminder(thread, None)),
             To::Bar(text) => {
                 self.bar.set_text(&text);
                 self.bar.focused = true;

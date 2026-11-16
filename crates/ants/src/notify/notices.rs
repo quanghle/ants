@@ -1,5 +1,5 @@
 //! What a human is notified of: the [`Notice`] of a tool request, escalation, completion, question, unserved
-//! address or digest, whether a snooze or quiet hours hold it back, and its JSON form for exec and http sinks.
+//! address, digest or reminder, whether a snooze or quiet hours hold it back, and its JSON form for exec and http sinks.
 
 use std::fmt::Write as _;
 use std::sync::OnceLock;
@@ -7,8 +7,8 @@ use std::sync::OnceLock;
 use ants_daemon::redact::Redactor;
 use ants_daemon::unserved::Unserved;
 use ants_proto::{
-    ApprovalRequest, Away, Envelope, Escalation, EscalationReason, HeldNotices, NotifyPrefs, Question, ThreadId,
-    UserId, Uuid, Verdict,
+    ApprovalRequest, Away, Envelope, Escalation, EscalationReason, HeldNotices, NotifyPrefs, Question, Reminder,
+    ThreadId, UserId, Uuid, Verdict,
 };
 use chrono::{DateTime, Utc};
 use jiff::tz::TimeZone;
@@ -51,6 +51,8 @@ pub(super) enum About {
     Unserved { ant: UserId, messages: Vec<Uuid> },
     /// The digest `id` of the notices `held` back, with the tool requests `pending` when it was sent.
     Digest { id: Uuid, held: HeldNotices, pending: Vec<ApprovalRequest> },
+    /// The reminder `id` the human set of `thread`, due at `due`, of the message `message` on it if any.
+    Reminder { id: Uuid, thread: ThreadId, message: Option<Uuid>, due: DateTime<Utc> },
 }
 
 impl About {
@@ -60,7 +62,7 @@ impl About {
             Self::Approval { request, .. } => Some(&request.thread_id),
             Self::Escalation { escalation, .. } => Some(&escalation.thread_id),
             Self::Completion { thread, .. } | Self::Question { thread, .. } => Some(thread),
-            Self::Test { .. } | Self::Unserved { .. } | Self::Digest { .. } => None,
+            Self::Test { .. } | Self::Unserved { .. } | Self::Digest { .. } | Self::Reminder { .. } => None,
         }
     }
 
@@ -74,6 +76,7 @@ impl About {
             Self::Test { .. } => "test",
             Self::Unserved { .. } => "unserved",
             Self::Digest { .. } => "digest",
+            Self::Reminder { .. } => "reminder",
         }
     }
 
@@ -83,7 +86,11 @@ impl About {
             Self::Approval { .. } => Some(Bypass::Approvals),
             Self::Escalation { .. } => Some(Bypass::Escalations),
             Self::Question { .. } => Some(Bypass::Questions),
-            Self::Completion { .. } | Self::Test { .. } | Self::Unserved { .. } | Self::Digest { .. } => None,
+            Self::Completion { .. }
+            | Self::Test { .. }
+            | Self::Unserved { .. }
+            | Self::Digest { .. }
+            | Self::Reminder { .. } => None,
         }
     }
 }
@@ -193,6 +200,13 @@ pub(super) fn notice_json(notice: &Notice, now: DateTime<Utc>) -> Value {
                 "pending": pending,
             })
         }
+        About::Reminder { id, thread, message, due } => json!({
+            "kind": "reminder",
+            "id": id,
+            "thread": thread,
+            "message": message,
+            "due": due.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        }),
     };
     if let (Value::Object(json), Value::Object(facts)) = (&mut json, facts) {
         json.extend(facts);
@@ -508,5 +522,30 @@ pub(super) fn digest_notice(
         buttons: Vec::new(),
         urgent: !pending.is_empty(),
         about: About::Digest { id: Uuid::now_v7(), held, pending },
+    }
+}
+
+/// The notice to `human` of its `reminder` of `thread`, now due.
+pub(super) fn reminder_notice(human: &UserId, thread: &ThreadId, reminder: &Reminder) -> Notice {
+    let note = cut(&redactor().redact(&reminder.note), MAX_TEXT);
+    let title = if note.is_empty() { format!("reminder of thread {thread}") } else { format!("reminder: {note}") };
+    let about = match reminder.message {
+        Some(message) => format!("message {message} on thread {thread}"),
+        None => format!("thread {thread}"),
+    };
+    Notice {
+        about: About::Reminder {
+            id: Uuid::now_v7(),
+            thread: thread.clone(),
+            message: reminder.message,
+            due: reminder.due,
+        },
+        human: human.clone(),
+        title,
+        text: format!(
+            "Reminder of {about}: `ants thread show {thread}` shows it; ants chat lists it on home until done."
+        ),
+        buttons: Vec::new(),
+        urgent: false,
     }
 }

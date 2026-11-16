@@ -144,6 +144,14 @@ impl Model {
             Slash::Unmute => run(Job::Unmute { thread: self.target()? }),
             Slash::Snooze(duration) => Ok(Some(self.set_snooze(self.target()?, Some(now + duration), now))),
             Slash::Unsnooze => Ok(Some(self.set_snooze(self.target()?, None, now))),
+            Slash::Remind(text) => {
+                let message = match self.page() {
+                    Page::Thread(page) => page.selected_id(),
+                    _ => None,
+                };
+                self.remind_as(self.target()?, message, &text, now).map(Some)
+            }
+            Slash::Unremind => Ok(Some(self.set_reminder(self.target()?, None))),
             Slash::Title(text) => run(Job::Title { thread: self.target()?, text }),
             Slash::React(reaction) => {
                 let message = match self.page() {
