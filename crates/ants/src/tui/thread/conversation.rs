@@ -57,6 +57,8 @@ pub(super) fn rows<'a>(
         }
         let ant = |user: &&UserId| !human(user);
         let depth = match (entry.kind, entry.from.as_ref(), entry.to.as_ref()) {
+            // A daemon's notice nests nothing: it shows where its ant does.
+            (Kind::Message, Some(from), _) if entry.notice.is_some() => level(&levels, from),
             (Kind::Message | Kind::Escalation, Some(from), Some(to)) if ant(&from) && ant(&to) => {
                 let depth = level(&levels, from);
                 // A reply to an ant nesting it leaves that ant where it was.
@@ -126,6 +128,17 @@ impl Shown<'_> {
                 let why = end.why.as_ref().map_or_default(|why| format!(": {why}"));
                 let line = format!("{first}{} {} ended without a reply{why}", hm(end.at), end.ant);
                 lines.push(Line::styled(cut(&line, self.width), frame::dim()));
+            }
+            Item::Message(e) if e.notice.is_some() => {
+                let from = e.from.as_ref().map_or("ants", UserId::as_str);
+                let text = e.text.strip_prefix("[ants] ").unwrap_or(&e.text).replace('\n', " ");
+                let style = if e.notice.is_some_and(ants_proto::NoticeKind::needs_action) {
+                    Style::new().fg(Color::Yellow)
+                } else {
+                    frame::dim()
+                };
+                let line = format!("{first}{} {from} · {text}", hm(e.stored_at));
+                push(lines, &line, &format!("{rest}      "), style, self.width);
             }
             Item::Message(e) if row.depth == 0 => self.block(lines, e, entries),
             Item::Message(e) => {

@@ -168,7 +168,7 @@ pub fn notice(to: &OutageNotice<'_>, failed: &StartFailed, every: Duration) -> E
          {meanwhile}",
         own = to.own(),
     );
-    let notice = to.with_text(text);
+    let notice = to.with_text(text).as_notice(ants_proto::NoticeKind::Failing);
     let escalation = Escalation::new_from(
         ant.clone(),
         to.envelope.thread_id.clone(),

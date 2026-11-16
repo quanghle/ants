@@ -154,6 +154,23 @@ impl Facts {
         }
         let fact = self.0.entry(entry.thread_id.clone()).or_default();
         let alert = || Alert { seq: entry.seq, at: entry.stored_at, text: entry.text.clone() };
+        if let Some(notice) = entry.notice {
+            // A daemon's notice answers nothing: only one a human has to act on counts, as what the thread is stuck on.
+            if let (true, Some(to)) = (notice.needs_action(), &entry.to) {
+                fact.escalated.insert(to.clone(), alert());
+                if let (true, Some(from)) = (to == me, &entry.from) {
+                    fact.inbox.push(Inboxed {
+                        seq: entry.seq,
+                        at: entry.stored_at,
+                        kind: entry.kind,
+                        from: from.clone(),
+                        channel: entry.channel.clone(),
+                        text: entry.text.clone(),
+                    });
+                }
+            }
+            return;
+        }
         if let Some(from) = &entry.from
             && matches!(entry.kind, Kind::Message | Kind::Post | Kind::Note)
         {
@@ -634,6 +651,28 @@ mod tests {
         assert_eq!(state(&m, &thread), ThreadState::WaitingOnAnt, "an end of another message's prompt");
         m.stored(ended(4, &replied), at(4));
         assert_eq!(state(&m, &thread), ThreadState::Idle);
+    }
+
+    #[test]
+    fn a_daemon_notice_answers_nothing_and_only_one_to_act_on_is_stuck() {
+        let thread = ThreadId::generate();
+        let notice = |seq: u64, kind| {
+            let envelope = Envelope {
+                thread_id: thread.clone(),
+                ..Envelope::new(user("dev-a"), user("alice"), "[ants] spent").as_notice(kind)
+            };
+            let payload = serde_json::to_vec(&envelope).unwrap();
+            let subject = subject::inbox(&user("alice"), &user("dev-a"));
+            Parser::default().entry(seq, at(seq.cast_signed()), &subject, &payload).unwrap()
+        };
+        let mut m = model();
+        m.stored(vec![message(1, &thread, "alice", "dev-a", "deploy")], at(1));
+        m.stored(vec![notice(2, ants_proto::NoticeKind::Spend)], at(2));
+        assert_eq!(state(&m, &thread), ThreadState::WaitingOnAnt);
+        assert!(!m.data.finished(&thread) && m.data.unread_on(&thread).next().is_none());
+        m.stored(vec![notice(3, ants_proto::NoticeKind::SignedOut)], at(3));
+        assert_eq!(state(&m, &thread), ThreadState::Stuck);
+        assert_eq!(m.data.stuck(&thread).map(|a| a.seq), Some(3));
     }
 
     #[test]

@@ -12,7 +12,7 @@ use jiff::tz::TimeZone;
 use serde::Deserialize;
 
 use super::notices::{About, away_of};
-use super::{MAX_SEND_TIMEOUT, MIN_SECRET, SEND_TIMEOUT};
+use super::{COMPLETION_WINDOW, MAX_COMPLETION_WINDOW, MAX_SEND_TIMEOUT, MIN_SECRET, SEND_TIMEOUT};
 
 pub(super) fn yes() -> bool {
     true
@@ -32,6 +32,8 @@ pub struct HumanEntry {
     /// Whether an ant's reply reaching the human's inbox is notified.
     #[serde(default)]
     completions: bool,
+    /// How long a thread is quiet before its replies are notified, folded into one.
+    completion_window: Option<String>,
     /// Whether a question an ant asks the human (ask_human) is notified: as escalations are, unless set.
     questions: Option<bool>,
     /// The daily window notices are held back in, such as `22:00-07:00`.
@@ -114,6 +116,8 @@ pub struct Human {
     pub(super) approvals: Option<Vec<UserId>>,
     pub(super) escalations: bool,
     pub(super) completions: bool,
+    /// How long a thread is quiet before its replies are notified, folded into one: zero for each as it comes.
+    pub(super) completion_window: Duration,
     pub(super) questions: bool,
     pub(super) quiet: Option<QuietHours>,
     pub(super) bypass: Vec<Bypass>,
@@ -330,6 +334,10 @@ impl Human {
         if approvals.is_none() && !entry.escalations && !entry.completions && !questions {
             bail!("approvals, escalations, completions and questions are all off: nothing to notify");
         }
+        let completion_window = match entry.completion_window {
+            Some(_) if !entry.completions => bail!("completion_window goes with completions = true only"),
+            text => completion_window(text)?,
+        };
         if entry.stand_in.as_ref() == Some(&entry.name) {
             bail!("stand_in names the human itself");
         }
@@ -362,6 +370,7 @@ impl Human {
             approvals,
             escalations: entry.escalations,
             completions: entry.completions,
+            completion_window,
             questions,
             quiet,
             bypass: entry.bypass,
@@ -448,6 +457,16 @@ pub(super) fn sink_timeout(text: Option<String>) -> Result<Duration> {
         bail!("timeout {text:?}: from 1s to {}", ants_proto::duration::format(MAX_SEND_TIMEOUT));
     }
     Ok(timeout)
+}
+
+/// A human's `completion_window`, [`COMPLETION_WINDOW`] unless given.
+pub(super) fn completion_window(text: Option<String>) -> Result<Duration> {
+    let Some(text) = text else { return Ok(COMPLETION_WINDOW) };
+    let window = ants_proto::duration::parse(&text).map_err(|e| anyhow!(e))?;
+    if window > MAX_COMPLETION_WINDOW {
+        bail!("completion_window {text:?}: from 0 to {}", ants_proto::duration::format(MAX_COMPLETION_WINDOW));
+    }
+    Ok(window)
 }
 
 /// `url` checked as an http(s) URL without credentials or query, without its trailing `/`.

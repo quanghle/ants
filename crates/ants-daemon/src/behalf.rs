@@ -122,7 +122,9 @@ pub async fn keep_record(
 /// not each start a thread.
 pub fn report(from: UserId, human: &UserId, text: String) -> Envelope {
     let thread = ThreadId::activity(human, chrono::Utc::now().date_naive());
-    Envelope::on_thread(thread, from, human.clone(), text).with_owner(Some(human.clone()))
+    Envelope::on_thread(thread, from, human.clone(), text)
+        .with_owner(Some(human.clone()))
+        .as_notice(ants_proto::NoticeKind::Assistant)
 }
 
 /// The message telling `human` that `envelope`, which its assistant sent for it and a reader verified, reached its
