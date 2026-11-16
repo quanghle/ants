@@ -90,6 +90,7 @@ ants channel create ops --member dev-a,dev-b
 ants post '#ops' "@dev-a the build is red"
 ants watch [dev-a [<thread>]]                       # live bus traffic or one ant's streamed progress
 ants queue dev-a                                    # waiting messages (ants withdraw / ants cancel)
+ants queue                                          # waiting messages of every live ant
 ants steer dev-a last go left instead             # interrupt dev-a's prompt on a thread and redirect it
 ants                                                # full-screen chat UI on a terminal (also: ants chat)
 ants --compact                                      # the same as a two-line pane, as for a tmux split
@@ -160,7 +161,7 @@ A member of a listed GitHub organization or team, or a user with a verified emai
 | `ants dash [--since DUR]` | Interactive TUI for recent threads (archived and `auto-archived` hidden unless `archived+new`), live progress, roster and tool approvals (human creds + TTY). |
 | `ants cancel ANT THREAD` | Cancel the prompt `ANT` runs on `THREAD` (5s timeout; human creds). |
 | `ants steer ANT THREAD [--wait \| -f] [--timeout DUR] [--attach PATH]... TEXT \| --file PATH \| --edit` | Shorthand for `ants ask --steer --thread THREAD @ANT`: cancels the prompt `ANT` runs on `THREAD` and prompts the same session with the message next (human creds). |
-| `ants queue ANT [--json]` / `ants withdraw ANT MESSAGE` | Inspect waiting messages for `ANT`, or withdraw an unstarted message (human creds). |
+| `ants queue [ANT] [--json]` / `ants withdraw ANT MESSAGE` | Inspect waiting messages for `ANT` (without it, for every live ant), or withdraw an unstarted message (human creds). |
 | `ants tools list [-f] [--json]` / `show ID [--json]` | List or inspect pending tool requests (`<ant>/<id>`, unique prefix accepted; `-f` records approval presence). |
 | `ants tools approve ID [--always] [--rule [--config FILE]]` / `reject ID` | Decide a pending tool request; `--rule` appends the exact allow rule to `config.toml` and reloads the daemon. |
 | `ants dead list` / `replay SEQ` / `drop SEQ` / `watch [--metrics ADDR]` | Inspect, replay or drop dead letters; `watch` converts `MAX_DELIVERIES` advisories into dead letters. |
@@ -247,7 +248,7 @@ In-hand messages send 20 s progress acks against a 60 s `ack_wait`, acking only 
 
 ### Queue and withdrawal
 
-- `ants queue ANT` queries `ants.queue.<ant>` (5 s timeout), combining messages held by the active daemon, messages awaiting redelivery (delivered but not acked, found from where the daemon's answer says its inbox and channel consumers stand), and up to 100 undelivered inbox messages and channel posts that wake the ant (an @mention of a member, or a triage for the messenger) from `ANTS`. A message awaiting a retry after a failed attempt shows `awaiting a retry (started; not withdrawable)`: its `started` mark stays, so `ants withdraw` refuses it.
+- `ants queue ANT` queries `ants.queue.<ant>` (5 s timeout), combining messages held by the active daemon, messages awaiting redelivery (delivered but not acked, found from where the daemon's answer says its inbox and channel consumers stand), and up to 100 undelivered inbox messages and channel posts that wake the ant (an @mention of a member, or a triage for the messenger) from `ANTS`. A message awaiting a retry after a failed attempt shows `awaiting a retry (started; not withdrawable)`: its `started` mark stays, so `ants withdraw` refuses it. Without `ANT`, `ants queue` asks the daemons of every ant live in `ants_roster` at once and lists their messages with an `ANT` column, leaving out ants with nothing waiting; an ant whose daemon does not answer is reported on stderr, and the command fails only when none answers. `--json` lines then carry an `ant` field.
 - `ants withdraw ANT MESSAGE` atomically creates `<ant>.msg.<id>` = `withdrawn` in `ants_attempts` (losing to `started` if prompting already began; sign-out and provider-limit holds before tool execution clear `started` so messages stay withdrawable). When its turn arrives, the daemon replies `[ants] Withdrawn by <human> before <ant> was prompted with it (ants withdraw).` and acks without prompting. An assistant withdraws for its human through the ant's daemon instead, or, while none answers, by a record under `<ant>.msg.<id>.<assistant>` the daemon honours before taking the message up (`withdraw_for_human`, [docs/auth.md](docs/auth.md#tools-acting-for-its-human)): the mark carries `on_behalf_of`, the reply reads `[ants] Withdrawn by <assistant> for <human> before <ant> was prompted with it.`, and `ants queue` shows `withdrawn by alice via pa`.
 - **Unserved-ant notices:** daemons (via `sentread-<ant>`), `ants webhook serve` (with `escalations = true`) and `ants inbox -f` check sent messages every minute. If a message waits ≥ 15 m for an ant absent from `ants_roster` ≥ 15 m, the first watcher to claim `<sender>.unserved.<id>` in `ants_attempts` notifies the owner/sender once with `ants withdraw` instructions and up to 5 capability-matching live peers.
 

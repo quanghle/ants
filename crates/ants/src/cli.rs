@@ -309,12 +309,12 @@ pub(crate) enum Command {
     /// List the messages waiting for ANT, oldest first: those its daemon holds, running or waiting their turn on their
     /// thread, then those awaiting redelivery (one retried after a failed attempt is not withdrawable), then the inbox
     /// messages and the channel posts waking ANT still in the stream, with id, thread, sender, age and place in the
-    /// thread's queue.
-    /// Needs a human's credentials, and a daemon of the ant to answer.
+    /// thread's queue. Without ANT, lists those of every ant live in the roster, with an ANT column, leaving out the
+    /// ants with nothing waiting. Needs a human's credentials, and a daemon of the ant to answer.
     Queue {
         #[arg(add = ArgValueCandidates::new(completions::ants))]
-        ant: UserId,
-        /// One JSON object per message instead of a table.
+        ant: Option<UserId>,
+        /// One JSON object per message instead of a table, naming its ant when listing every ant's.
         #[arg(long)]
         json: bool,
     },

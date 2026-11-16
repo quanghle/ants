@@ -79,13 +79,15 @@ pub fn unanswered(ant: &UserId) -> String {
     format!("no daemon serving {ant} answered within {}s", QUEUE_WAIT.as_secs())
 }
 
-/// Print the messages waiting for `ant`: a table, or with `json` one per line.
-pub async fn list(nats: &crate::Nats<'_>, ant: UserId, json: bool) -> Result<()> {
+/// Print the messages waiting for `ant`, or without one for every ant live in the roster: a table, or with `json` one
+/// per line.
+pub async fn list(nats: &crate::Nats<'_>, ant: Option<UserId>, json: bool) -> Result<()> {
     let me = &nats.me.id;
     if !nats.me.role.is_human() {
         bail!("the credentials of {me} are an ant's; only a human lists an ant's queue");
     }
     let (_, js) = nats.connect("ants-queue").await?;
+    let Some(ant) = ant else { return list_live(&js, nats.domain, me, json).await };
     let Some((waiting, more)) = read(&js, nats.domain, &ant, me).await? else { bail!(unanswered(&ant)) };
     if json {
         for message in &waiting {
@@ -98,6 +100,64 @@ pub async fn list(nats: &crate::Nats<'_>, ant: UserId, json: bool) -> Result<()>
     }
     if more > 0 {
         eprintln!("{more} more messages wait in the stream, not listed");
+    }
+    Ok(())
+}
+
+/// A message waiting for an ant, as `ants queue --json` without an ant lists it.
+#[derive(Serialize)]
+struct AntWaiting<'a> {
+    ant: &'a UserId,
+    #[serde(flatten)]
+    message: &'a Waiting,
+}
+
+/// Print the messages waiting for every ant live in the roster, asking their daemons at once. An ant whose daemon does
+/// not answer is told on stderr; only when none answers does the listing fail.
+async fn list_live(
+    js: &async_nats::jetstream::Context,
+    domain: Option<&ants_proto::JsDomain>,
+    me: &UserId,
+    json: bool,
+) -> Result<()> {
+    let now = Utc::now();
+    let mut ants: Vec<UserId> = crate::roster::list(js)
+        .await?
+        .into_iter()
+        .filter(|entry| ants_daemon::roster::is_live(entry, now))
+        .map(|entry| entry.ant)
+        .collect();
+    ants.sort();
+    ants.dedup();
+    if ants.is_empty() {
+        println!("no live ants in the roster");
+        return Ok(());
+    }
+    let reads = futures::future::join_all(ants.iter().map(|ant| read(js, domain, ant, me))).await;
+    let mut queues = Vec::new();
+    for (ant, queue) in ants.iter().zip(reads) {
+        match queue {
+            Ok(Some((waiting, more))) => queues.push((ant.clone(), waiting, more)),
+            Ok(None) => eprintln!("{}", unanswered(ant)),
+            Err(e) => eprintln!("{ant}: {e:#}"),
+        }
+    }
+    if queues.is_empty() {
+        bail!("none of the {} live ants answered within {}s", ants.len(), QUEUE_WAIT.as_secs());
+    }
+    if json {
+        for (ant, waiting, _) in &queues {
+            for message in waiting {
+                println!("{}", serde_json::to_string(&AntWaiting { ant, message })?);
+            }
+        }
+    } else if queues.iter().all(|(_, waiting, _)| waiting.is_empty()) {
+        println!("no messages waiting for any live ant ({} of {} answered)", queues.len(), ants.len());
+    } else {
+        println!("{}", table_by_ant(&queues, Utc::now()));
+    }
+    for (ant, _, more) in queues.iter().filter(|(_, _, more)| *more > 0) {
+        eprintln!("{more} more messages wait in the stream for {ant}, not listed");
     }
     Ok(())
 }
@@ -471,25 +531,41 @@ impl Wakes {
 }
 
 pub fn table(waiting: &[Waiting], now: DateTime<Utc>) -> String {
-    let header = ["MESSAGE", "THREAD", "FROM", "AGE", "STATE"].map(str::to_owned);
-    let rows: Vec<[String; 5]> = std::iter::once(header)
-        .chain(waiting.iter().map(|m| {
-            let from = match &m.channel {
-                Some(channel) => format!("{} in #{channel}", m.from),
-                None => m.from.to_string(),
-            };
-            let age = crate::roster::short((now - m.sent_at).to_std().unwrap_or_default());
-            [m.id.to_string(), m.thread_id.to_string(), from, age, state(m)]
-        }))
-        .collect();
-    let mut widths = [0; 5];
+    let header = ["MESSAGE", "THREAD", "FROM", "AGE", "STATE"].map(str::to_owned).to_vec();
+    grid(std::iter::once(header).chain(waiting.iter().map(|m| cells(m, now))))
+}
+
+/// The messages waiting for each ant of `queues` (the ant, its messages, and how many more are unlisted), with the
+/// ant in a column of its own; ants with nothing waiting are left out.
+fn table_by_ant(queues: &[(UserId, Vec<Waiting>, usize)], now: DateTime<Utc>) -> String {
+    let header = ["ANT", "MESSAGE", "THREAD", "FROM", "AGE", "STATE"].map(str::to_owned).to_vec();
+    let rows = queues.iter().flat_map(|(ant, waiting, _)| {
+        waiting.iter().map(move |m| std::iter::once(ant.to_string()).chain(cells(m, now)).collect())
+    });
+    grid(std::iter::once(header).chain(rows))
+}
+
+/// The cells of `m` in a table row: its id, thread, sender, age and state.
+fn cells(m: &Waiting, now: DateTime<Utc>) -> Vec<String> {
+    let from = match &m.channel {
+        Some(channel) => format!("{} in #{channel}", m.from),
+        None => m.from.to_string(),
+    };
+    let age = crate::roster::short((now - m.sent_at).to_std().unwrap_or_default());
+    vec![m.id.to_string(), m.thread_id.to_string(), from, age, state(m)]
+}
+
+/// `rows`, the first a header, in columns as wide as their widest cell.
+fn grid(rows: impl Iterator<Item = Vec<String>>) -> String {
+    let rows: Vec<Vec<String>> = rows.collect();
+    let mut widths = vec![0; rows.first().map_or(0, Vec::len)];
     for row in &rows {
         for (width, cell) in widths.iter_mut().zip(row) {
             *width = (*width).max(cell.chars().count());
         }
     }
     let lines = rows.iter().map(|row| {
-        let cells: Vec<String> = row.iter().zip(widths).map(|(cell, width)| format!("{cell:width$}")).collect();
+        let cells: Vec<String> = row.iter().zip(&widths).map(|(cell, &width)| format!("{cell:width$}")).collect();
         cells.join("  ").trim_end().to_owned()
     });
     lines.collect::<Vec<_>>().join("\n")
@@ -581,6 +657,21 @@ mod tests {
                 "1 ahead, awaiting redelivery",
             ]
         );
+    }
+
+    #[test]
+    fn every_ant_with_messages_waiting_is_listed_with_its_own() {
+        let (a, b, c): (UserId, UserId, UserId) =
+            ("dev-a".parse().unwrap(), "dev-b".parse().unwrap(), "dev-c".parse().unwrap());
+        let queues = [
+            (a, vec![row(1, "t1", true, 0, true), row(2, "t1", false, 1, false)], 0),
+            (b, Vec::new(), 0),
+            (c, vec![row(3, "t2", false, 0, false)], 4),
+        ];
+        let table = table_by_ant(&queues, Utc::now());
+        let ants: Vec<&str> = table.lines().map(|l| l.split_whitespace().next().unwrap()).collect();
+        assert_eq!(ants, ["ANT", "dev-a", "dev-a", "dev-c"], "{table}");
+        assert!(table.lines().nth(3).unwrap().ends_with("next, in the stream"), "{table}");
     }
 
     #[tokio::test]
