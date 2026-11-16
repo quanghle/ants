@@ -227,7 +227,8 @@ async fn an_approval_grants_the_host_credentials_of_the_asking_machine_only() {
         let ant = p(ant);
         let creds = enrollment(&server, &ant, Duration::from_secs(60));
         let (user, host) = (KeyPair::new_user(), HostAsk { machine: m(machine), key: KeyPair::new_user() });
-        let asking = request_with(&server.url, &creds, &ant, &user, leaf, Some(&host), REPEAT, pending());
+        let alongside = Alongside { leaf, host: Some(&host) };
+        let asking = request_with(&server.url, &creds, &ant, &user, alongside, REPEAT, pending());
         let approving = approver.approve_with(&team, &ant, None, grant);
         let (approval, approved) =
             Box::pin(timeout(WAIT * 2, async { tokio::join!(asking, approving) })).await.unwrap();

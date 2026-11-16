@@ -138,7 +138,10 @@ fn renewable(path: &Path, jwt: &str) -> Result<(auth::Claims, Finding)> {
 /// completes. Returns the user JWT of the answer, checked to be the account's for that key, with the same name, kind,
 /// device and JetStream domain, and the encryption key the credentials bind or `xkey`; fails with the reason of an
 /// answer refusing it (from `ants signer`, for credentials a registration granted).
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "registrar's tests call it as is; grouping the renewed credentials (creds, user, xkey) waits on them"
+)]
 pub async fn request(
     url: &str,
     carrier: &Path,

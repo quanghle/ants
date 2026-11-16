@@ -14,6 +14,38 @@ use nkeys::KeyPair;
 use crate::auth;
 use crate::enroll::Leaf;
 
+/// Who asks the signer, and how: over the manager's connection `client`, as the manager its credentials' user JWT
+/// `jwt` and key `key` name, through the machine's `leaf` node if it has one, repeating the request every `repeat`
+/// until an answer arrives or `until` passes.
+pub struct Requester<'a> {
+    pub client: &'a async_nats::Client,
+    pub jwt: &'a str,
+    pub key: &'a KeyPair,
+    pub leaf: Option<&'a Leaf>,
+    pub repeat: Duration,
+    pub until: DateTime<Utc>,
+}
+
+impl Requester<'_> {
+    /// Sign `asking`, with the leaf's uplink key too when through one, its credentials read again so that the request
+    /// carries the latest, and publish it; returns the uplink key and JWT it carried.
+    async fn publish(&self, asking: &mut AntRequest) -> Result<Option<(KeyPair, String)>> {
+        let mut uplink = None;
+        if let Some(leaf) = self.leaf {
+            let (jwt, key) = auth::read_creds(&leaf.creds).context("the leaf node's uplink credentials")?;
+            asking.leaf =
+                Some(EnrollLeaf { machine: leaf.machine.clone(), jwt: jwt.clone(), signature: String::new() });
+            let signature = auth::sign(&key, &asking.signed())?;
+            asking.leaf.as_mut().expect("the leaf just set").signature = signature;
+            uplink = Some((key, jwt));
+        }
+        asking.signature = auth::sign(self.key, &asking.signed())?;
+        self.client.publish(asking.subject(), serde_json::to_vec(asking)?.into()).await?;
+        self.client.flush().await?;
+        Ok(uplink)
+    }
+}
+
 /// What [`ask`] got: the ant's user JWT, and for a request through a leaf node, the renewed uplink JWT of the leaf.
 #[derive(Debug)]
 pub struct Signed {
@@ -21,27 +53,19 @@ pub struct Signed {
     pub leaf_jwt: Option<String>,
 }
 
-/// Ask, over the manager's connection `client`, as the manager its credentials' user JWT `jwt` and key `key` name, for
-/// ant `name` from `template` with the settings `request` (JSON), for the public key of `user`, through the machine's
-/// `leaf` node if it has one:
-/// repeat the request every `repeat` until an answer for the key arrives or `until` passes. Returns the ant's user
-/// JWT of an approval, checked to be the account's for that key and ant, and the leaf's renewed uplink JWT, checked
-/// likewise; a refusal is an error carrying the signer's reason.
-#[allow(clippy::too_many_arguments)]
+/// Ask, as `requester`, for ant `name` from `template` with the settings `request` (JSON), for the public key of
+/// `user`. Returns the ant's user JWT of an approval, checked to be the account's for that key and ant, and the leaf's
+/// renewed uplink JWT, checked likewise; a refusal is an error carrying the signer's reason.
 pub async fn ask(
-    client: &async_nats::Client,
-    jwt: &str,
-    key: &KeyPair,
+    requester: &Requester<'_>,
     template: &str,
     request: &str,
     reason: &str,
     thread: &ThreadId,
     name: &UserId,
     user: &KeyPair,
-    leaf: Option<&Leaf>,
-    repeat: Duration,
-    until: DateTime<Utc>,
 ) -> Result<Signed> {
+    let Requester { client, jwt, leaf, until, .. } = *requester;
     let claims = auth::verified(jwt).context("the manager's credentials")?;
     let manager: UserId = claims.name.parse().with_context(|| format!("credentials named {}", claims.name))?;
     let mut replies = client.subscribe(subject::antreq_reply(&manager)).await?;
@@ -60,23 +84,14 @@ pub async fn ask(
     );
     asking.credentials = jwt.to_owned();
     let mut uplink: Option<KeyPair> = None;
-    let mut repeats = tokio::time::interval(repeat);
+    let mut repeats = tokio::time::interval(requester.repeat);
     let left = (until - Utc::now()).to_std().unwrap_or_default();
     let deadline = tokio::time::sleep(left);
     tokio::pin!(deadline);
     loop {
         tokio::select! {
             _ = repeats.tick() => {
-                if let Some(leaf) = leaf {
-                    let (jwt, key) = auth::read_creds(&leaf.creds).context("the leaf node's uplink credentials")?;
-                    asking.leaf = Some(EnrollLeaf { machine: leaf.machine.clone(), jwt, signature: String::new() });
-                    let signature = auth::sign(&key, &asking.signed())?;
-                    asking.leaf.as_mut().expect("the leaf just set").signature = signature;
-                    uplink = Some(key);
-                }
-                asking.signature = auth::sign(key, &asking.signed())?;
-                client.publish(asking.subject(), serde_json::to_vec(&asking)?.into()).await?;
-                client.flush().await?;
+                uplink = requester.publish(&mut asking).await?.map(|(key, _)| key);
             }
             msg = replies.next() => {
                 let msg = msg.context("the NATS connection closed")?;
@@ -117,23 +132,16 @@ pub struct Retired {
     pub leaf_asked: Option<String>,
 }
 
-/// Ask, over the manager's connection `client`, as the manager its credentials' user JWT `jwt` and key `key` name, to
-/// retire ant `name`, added from `template`, whose credentials on this machine have `public_key`, through the
-/// machine's `leaf` node if it has one: repeat the request every `repeat` until an answer arrives or `until` passes. A
-/// refusal is an error carrying the signer's reason.
-#[allow(clippy::too_many_arguments)]
+/// Ask, as `requester`, to retire ant `name`, added from `template`, whose credentials on this machine have
+/// `public_key`. A refusal is an error carrying the signer's reason.
 pub async fn retire(
-    client: &async_nats::Client,
-    jwt: &str,
-    key: &KeyPair,
+    requester: &Requester<'_>,
     template: &str,
     thread: &ThreadId,
     name: &UserId,
     public_key: &str,
-    leaf: Option<&Leaf>,
-    repeat: Duration,
-    until: DateTime<Utc>,
 ) -> Result<Retired> {
+    let Requester { client, jwt, leaf, until, .. } = *requester;
     let claims = auth::verified(jwt).context("the manager's credentials")?;
     let manager: UserId = claims.name.parse().with_context(|| format!("credentials named {}", claims.name))?;
     let mut replies = client.subscribe(subject::antreq_reply(&manager)).await?;
@@ -144,26 +152,19 @@ pub async fn retire(
     asking.credentials = jwt.to_owned();
     let mut uplink: Option<KeyPair> = None;
     let mut carried: Vec<String> = Vec::new();
-    let mut repeats = tokio::time::interval(repeat);
+    let mut repeats = tokio::time::interval(requester.repeat);
     let left = (until - Utc::now()).to_std().unwrap_or_default();
     let deadline = tokio::time::sleep(left);
     tokio::pin!(deadline);
     loop {
         tokio::select! {
             _ = repeats.tick() => {
-                if let Some(leaf) = leaf {
-                    let (jwt, key) = auth::read_creds(&leaf.creds).context("the leaf node's uplink credentials")?;
+                if let Some((key, jwt)) = requester.publish(&mut asking).await? {
                     if !carried.contains(&jwt) {
-                        carried.push(jwt.clone());
+                        carried.push(jwt);
                     }
-                    asking.leaf = Some(EnrollLeaf { machine: leaf.machine.clone(), jwt, signature: String::new() });
-                    let signature = auth::sign(&key, &asking.signed())?;
-                    asking.leaf.as_mut().expect("the leaf just set").signature = signature;
                     uplink = Some(key);
                 }
-                asking.signature = auth::sign(key, &asking.signed())?;
-                client.publish(asking.subject(), serde_json::to_vec(&asking)?.into()).await?;
-                client.flush().await?;
             }
             msg = replies.next() => {
                 let msg = msg.context("the NATS connection closed")?;

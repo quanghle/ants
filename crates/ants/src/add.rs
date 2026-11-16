@@ -213,10 +213,8 @@ async fn enrolled(
     let stop = async {
         let _ = tokio::signal::ctrl_c().await;
     };
-    let leaf_asked = leaf.as_ref().map(|(_, l)| l);
-    let host_asked = host.as_ref().map(|(h, _)| h);
-    let approval =
-        enroll::request_with(url, enrollment, name, user, leaf_asked, host_asked, ENROLL_REPEAT, stop).await?;
+    let alongside = enroll::Alongside { leaf: leaf.as_ref().map(|(_, l)| l), host: host.as_ref().map(|(h, _)| h) };
+    let approval = enroll::request_with(url, enrollment, name, user, alongside, ENROLL_REPEAT, stop).await?;
     if let (Some((conf, leaf)), Some(renewed)) = (leaf, approval.leaf_jwt) {
         uplink = Some((renew_uplink(&leaf, &renewed)?, leaf, conf));
     }

@@ -47,7 +47,7 @@ use crate::{auth, members, outbox, revoke};
 mod asking;
 mod ordered;
 
-pub use asking::{Retired, ask, retire};
+pub use asking::{Requester, Retired, ask, retire};
 
 /// Most requests of one manager waiting for a human at once; more are refused.
 pub const MAX_WAITING: usize = 3;
@@ -730,7 +730,8 @@ mod tests {
             let thread = ThreadId::generate();
             let (jwt, key) = auth::read_creds(&self.creds).unwrap();
             let (template, reason) = ("worker", "more hands");
-            ask(&self.client, &jwt, &key, template, request, reason, &thread, &p(name), user, None, REPEAT, until).await
+            let requester = Requester { client: &self.client, jwt: &jwt, key: &key, leaf: None, repeat: REPEAT, until };
+            ask(&requester, template, request, reason, &thread, &p(name), user).await
         }
     }
 
@@ -884,21 +885,8 @@ mod tests {
             let (thread, until) = (ThreadId::generate(), Utc::now() + WAIT);
             let user = KeyPair::new_user();
             let leaf = Some(&leaf);
-            ask(
-                &lead.client,
-                &jwt,
-                &key,
-                "worker",
-                "{}",
-                "more hands",
-                &thread,
-                &p("lead-a"),
-                &user,
-                leaf,
-                REPEAT,
-                until,
-            )
-            .await
+            let requester = Requester { client: &lead.client, jwt: &jwt, key: &key, leaf, repeat: REPEAT, until };
+            ask(&requester, "worker", "{}", "more hands", &thread, &p("lead-a"), &user).await
         };
         let (refused, events) = signing(&server, &config, asking).await;
         let err = format!("{:#}", refused.unwrap_err());

@@ -75,19 +75,25 @@ pub async fn request(
     repeat: Duration,
     stop: impl Future<Output = ()>,
 ) -> Result<Approval> {
-    request_with(url, creds, ant, user, leaf, None, repeat, stop).await
+    request_with(url, creds, ant, user, Alongside { leaf, host: None }, repeat, stop).await
 }
 
-/// [`request`], asking for the `host` credentials of the machine too: an approval's host JWT is checked to be the
-/// account's for the host's key and machine.
-#[allow(clippy::too_many_arguments)]
+/// What a machine asks along with the credentials of an ant: through its `leaf` node if it has one, and the `host`
+/// credentials it lacks.
+#[derive(Clone, Copy, Default)]
+pub struct Alongside<'a> {
+    pub leaf: Option<&'a Leaf>,
+    pub host: Option<&'a HostAsk>,
+}
+
+/// [`request`], asking for what goes `alongside`, the `host` credentials of the machine too: an approval's host JWT is
+/// checked to be the account's for the host's key and machine.
 pub async fn request_with(
     url: &str,
     creds: &Path,
     ant: &UserId,
     user: &KeyPair,
-    leaf: Option<&Leaf>,
-    host: Option<&HostAsk>,
+    Alongside { leaf, host }: Alongside<'_>,
     repeat: Duration,
     stop: impl Future<Output = ()>,
 ) -> Result<Approval> {
