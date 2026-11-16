@@ -53,12 +53,15 @@ pub(crate) const ACCOUNT_SEED: &str = "account.nk";
 pub(crate) const SYSTEM_SEED: &str = "system.nk";
 pub const SERVER_CONF: &str = "server.conf";
 const TEAM: &str = "ants";
-/// `max_control_line` of the servers that include [`SERVER_CONF`], hub and leaf nodes alike.
-const MAX_CONTROL_LINE: u32 = 16 * 1024;
-/// The longest uplink user JWT of a leaf node ([`issue_leaf`]): nats-server closes a leaf node connection whose
-/// CONNECT line is longer than 16 times the hub's `max_control_line`, and the line holds the JWT's signature and the
-/// leaf's names besides.
-const MAX_UPLINK_JWT: usize = 16 * MAX_CONTROL_LINE as usize - 4 * 1024;
+/// `max_control_line` of the servers that include [`SERVER_CONF`], hub and leaf nodes alike: a user JWT grows with the
+/// length of its user's name and of the JetStream domain, which may each take 64 characters, and the longest, an
+/// ant's, takes about 29 KB then.
+const MAX_CONTROL_LINE: u32 = 64 * 1024;
+/// The longest uplink user JWT of a leaf node ([`issue_leaf`]): within the 16 times the hub's `max_control_line`
+/// nats-server takes in a leaf node's CONNECT line, and small enough for the replies carrying a renewed one (enrollment
+/// approval, `ants signer`) to stay well within NATS's 1 MB `max_payload`.
+const MAX_UPLINK_JWT: usize = 252 * 1024;
+const _: () = assert!(MAX_UPLINK_JWT + 4 * 1024 <= 16 * MAX_CONTROL_LINE as usize);
 
 /// The default team directory, `~/.config/ants/auth`.
 pub fn default_dir() -> Result<PathBuf> {

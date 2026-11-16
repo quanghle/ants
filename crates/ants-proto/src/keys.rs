@@ -239,7 +239,7 @@ pub fn notes_consumer(user: &UserId) -> String {
 }
 
 /// How many [`spare_readers`] each of an ant's reader consumers has.
-pub const SPARE_READERS: usize = 3;
+pub const SPARE_READERS: usize = 2;
 
 /// The spares of an ant's reader consumer `reader` ([`inbox_consumer`], [`notes_consumer`], [`chan_reader`]),
 /// `<reader>_<n>`, with the same filter pinned: the CLI with the ant's credentials takes a free one for each read, so it

@@ -380,41 +380,46 @@ fn issued_credentials_carry_the_current_permissions_version_and_name_their_renew
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// A human's credentials fit in its `CONNECT` line with room for the rest of it (signature, name and options, some 400
-/// bytes) and for rights yet to come, 3 KiB in all: nats-server closes a connection whose line is longer than
-/// `max_control_line`.
+/// Credentials of every kind of user fit in its `CONNECT` line with room for the rest of it (signature, name and
+/// options, some 400 bytes) and for rights yet to come, 3 KiB in all: nats-server closes a connection whose line is
+/// longer than `max_control_line`. A JWT grows with the user's name and the JetStream domain, so both are the longest
+/// allowed.
 #[test]
-fn a_humans_credentials_fit_max_control_line() {
-    let dir = ants_test_support::scratch_dir("human-jwt-size");
+fn credentials_of_the_longest_names_fit_max_control_line() {
+    let dir = ants_test_support::scratch_dir("jwt-size");
     let team = dir.join("auth");
     init(&team).unwrap();
-    let hub: JsDomain = "hub".parse().unwrap();
+    let (ant, human, assistant) = (p(&"a".repeat(64)), p(&"h".repeat(64)), p(&"p".repeat(64)));
+    let hub: JsDomain = "d".repeat(64).parse().unwrap();
+    issue(&team, &human, Role::Human, None, &dir.join("human.creds")).unwrap();
     for domain in [None, Some(&hub)] {
-        let out = dir.join("alice.creds");
-        issue(&team, &p("alice"), Role::Human, domain, &out).unwrap();
-        let (jwt, _) = read_creds(&out).unwrap();
-        assert!(jwt.len() + 3 * 1024 <= MAX_CONTROL_LINE as usize, "{} bytes with domain {domain:?}", jwt.len());
+        let out = dir.join("user.creds");
+        let mut sizes = Vec::new();
+        for (user, role) in [(&ant, Role::Ant), (&human, Role::Human)] {
+            issue(&team, user, role, domain, &out).unwrap();
+            sizes.push((format!("{role:?}"), read_creds(&out).unwrap().0.len()));
+        }
+        let new = NewDevice { assistant_of: Some(human.clone()), ..NewDevice::default() };
+        let rights = Permissions::for_assistant(&assistant, &human).with_js_domain(domain);
+        issue_device_with(&team, &assistant, Kind::Assistant, rights, &new, &out).unwrap();
+        sizes.push(("Assistant".to_owned(), read_creds(&out).unwrap().0.len()));
+        for (kind, size) in sizes {
+            assert!(size + 3 * 1024 <= MAX_CONTROL_LINE as usize, "{kind}: {size} bytes with domain {domain:?}");
+        }
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// An assistant's credentials fit in its `CONNECT` line as a human's do ([`a_humans_credentials_fit_max_control_line`]),
-/// with the same room for the rest of the line and rights yet to come.
-#[test]
-fn an_assistants_credentials_fit_max_control_line() {
-    let dir = ants_test_support::scratch_dir("assistant-jwt-size");
-    let team = dir.join("auth");
-    init(&team).unwrap();
-    let (alice, pa) = (p("alice"), p("pa"));
-    issue(&team, &alice, Role::Human, None, &dir.join("alice.creds")).unwrap();
-    let hub: JsDomain = "hub".parse().unwrap();
-    for domain in [None, Some(&hub)] {
-        let out = dir.join("pa.creds");
-        let new = NewDevice { assistant_of: Some(alice.clone()), ..NewDevice::default() };
-        let rights = Permissions::for_assistant(&pa, &alice).with_js_domain(domain);
-        issue_device_with(&team, &pa, Kind::Assistant, rights, &new, &out).unwrap();
-        let (jwt, _) = read_creds(&out).unwrap();
-        assert!(jwt.len() + 3 * 1024 <= MAX_CONTROL_LINE as usize, "{} bytes with domain {domain:?}", jwt.len());
-    }
-    std::fs::remove_dir_all(dir).unwrap();
+/// The longest credentials, an ant's of the longest name in the longest domain, connect to a server including the
+/// team's server.conf and read through their inbox consumer.
+#[tokio::test]
+async fn the_longest_credentials_connect() {
+    let domain: JsDomain = "d".repeat(64).parse().unwrap();
+    let Some(hub) = Server::start_with(&format!("domain: {domain}"), "") else { return };
+    let human = UserId::human();
+    let h_js = connect_to(&hub.url, &hub.creds_in(&human, Some(&domain)), Some(&domain), &human).await;
+    bus::ensure_stream(&h_js).await.unwrap();
+    let ant = p(&"a".repeat(64));
+    let js = connect_to(&hub.url, &hub.creds_in(&ant, Some(&domain)), Some(&domain), &ant).await;
+    bus::open_stream(&js, &ant).await.unwrap();
 }

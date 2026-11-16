@@ -571,10 +571,7 @@ fn channels_are_readable_by_ants_and_written_by_humans_only() {
 #[test]
 fn only_ants_get_spare_readers_pinned_like_their_own() {
     let a = Permissions::for_user(&p("dev-a"), Role::Ant);
-    assert_eq!(
-        spare_readers("chanread-dev-a").collect::<Vec<_>>(),
-        ["chanread-dev-a_1", "chanread-dev-a_2", "chanread-dev-a_3"]
-    );
+    assert_eq!(spare_readers("chanread-dev-a").collect::<Vec<_>>(), ["chanread-dev-a_1", "chanread-dev-a_2"]);
     for (reader, filter) in
         [("inbox-dev-a", "ants.inbox.dev-a.*"), ("notes-dev-a", "ants.notes.>"), ("chanread-dev-a", "ants.chan.>")]
     {

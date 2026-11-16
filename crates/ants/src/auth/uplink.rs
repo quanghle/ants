@@ -113,14 +113,14 @@ pub fn leaf_user(machine: &Machine) -> String {
     format!("leaf-{machine}")
 }
 
-/// Refuse `jwt`, uplink credentials of `machine`'s leaf node, if the hub would not take it in the leaf's CONNECT.
-/// Each ant adds about 4.7 KB to them, 5 KB with a JetStream domain.
+/// Refuse `jwt`, uplink credentials of `machine`'s leaf node, if over [`MAX_UPLINK_JWT`]. Each ant adds about 4.1 KB
+/// to them, 4.4 KB with a JetStream domain.
 pub(super) fn check_uplink_size(jwt: &str, machine: &Machine) -> Result<()> {
     if jwt.len() > MAX_UPLINK_JWT {
         bail!(
-            "the uplink credentials of {machine} would take {} bytes, over the {MAX_UPLINK_JWT} a hub takes in a leaf \
-             node's CONNECT (16 times max_control_line {MAX_CONTROL_LINE}, less room for the rest of the line): run \
-             some of its ants, humans or webhooks behind another leaf node, under another machine name",
+            "the uplink credentials of {machine} would take {} bytes, over the {MAX_UPLINK_JWT} allowed (within the 16 \
+             times max_control_line {MAX_CONTROL_LINE} a hub takes in a leaf node's CONNECT, and small enough to send \
+             renewed): run some of its ants, humans or webhooks behind another leaf node, under another machine name",
             jwt.len()
         );
     }
