@@ -753,7 +753,7 @@ fn every_human_has_the_human_rights_and_only_humans_write_the_humans_bucket() {
 }
 
 #[test]
-fn humans_keep_only_their_own_read_markers_and_ants_none() {
+fn humans_keep_only_their_own_read_markers_and_ants_only_get_inbox_ones() {
     let human = Permissions::for_user(&p("alice"), Role::Human);
     for s in [
         "$KV.ants_read.alice",
@@ -766,11 +766,13 @@ fn humans_keep_only_their_own_read_markers_and_ants_none() {
     let read: Vec<&String> = human.publish.iter().filter(|s| s.contains("$KV.ants_read")).collect();
     assert!(read.iter().all(|s| (s.ends_with(".alice") || s.ends_with(".alice.chan")) && !s.contains('>')), "{read:?}");
     let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
-    assert!(!ant.publish.iter().any(|s| s.contains("$KV.ants_read")), "{:?}", ant.publish);
+    let read: Vec<&String> = ant.publish.iter().filter(|s| s.contains("ants_read")).collect();
+    assert_eq!(read, ["$JS.API.DIRECT.GET.KV_ants_read.$KV.ants_read.*"], "an ant gets a human's inbox marker only");
+    assert!(!covers(read[0], "$JS.API.DIRECT.GET.KV_ants_read.$KV.ants_read.alice.chan"));
 }
 
 #[test]
-fn humans_keep_only_their_own_holds_and_held_notices_and_ants_neither() {
+fn humans_keep_only_their_own_holds_and_held_notices_and_ants_only_get_holds() {
     let human = Permissions::for_user(&p("alice"), Role::Human);
     for s in [
         "$KV.ants_notify.alice",
@@ -783,11 +785,13 @@ fn humans_keep_only_their_own_holds_and_held_notices_and_ants_neither() {
     let notify: Vec<&String> = human.publish.iter().filter(|s| s.contains("$KV.ants_notify")).collect();
     assert!(notify.iter().all(|s| s.ends_with(".alice") && !s.contains('*') && !s.contains('>')), "{notify:?}");
     let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
-    assert!(!ant.publish.iter().any(|s| s.contains("ants_notify")));
+    let notify: Vec<&String> = ant.publish.iter().filter(|s| s.contains("ants_notify")).collect();
+    assert_eq!(notify, ["$JS.API.DIRECT.GET.KV_ants_notify.$KV.ants_notify.*"], "an ant gets a human's holds only");
+    assert!(!covers(notify[0], "$JS.API.DIRECT.GET.KV_ants_notify.$KV.ants_notify.held.alice"));
 }
 
 #[test]
-fn humans_set_every_title_tldr_and_done_state_but_only_their_own_pins_and_archives_and_ants_only_read_titles() {
+fn humans_set_every_title_tldr_and_done_state_but_only_their_own_pins_and_archives_and_ants_only_read_some() {
     let human = Permissions::for_user(&p("alice"), Role::Human);
     for s in [
         "$KV.ants_threads.title.*",
@@ -815,7 +819,11 @@ fn humans_set_every_title_tldr_and_done_state_but_only_their_own_pins_and_archiv
     let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
     let threads: Vec<&String> =
         ant.publish.iter().chain(&ant.subscribe).filter(|s| s.contains("ants_threads")).collect();
-    assert_eq!(threads, ["$JS.API.DIRECT.GET.KV_ants_threads.$KV.ants_threads.title.*"], "an ant only reads titles");
+    let gets =
+        ["title.*", "done.*", "snoozed.*"].map(|k| format!("$JS.API.DIRECT.GET.KV_ants_threads.$KV.ants_threads.{k}"));
+    assert_eq!(threads, gets.iter().collect::<Vec<_>>(), "an ant only reads titles, done states and own snoozes");
+    let assisted = "$JS.API.DIRECT.GET.KV_ants_threads.$KV.ants_threads.snoozed.alice.pa";
+    assert!(!threads.iter().any(|s| covers(s, assisted)), "nor snoozes an assistant set");
     let observer = Permissions::for_observer(&p("watcher"));
     assert!(!observer.publish.iter().chain(&observer.subscribe).any(|s| s.contains("ants_threads")));
 }
@@ -1165,7 +1173,7 @@ fn an_assistant_keeps_its_ant_rights_and_a_humans_under_its_own_name() {
         "$JS.API.DIRECT.GET.KV_ants_read.$KV.ants_read.alice.chan",
         "$JS.API.DIRECT.GET.KV_ants_attempts.$KV.ants_attempts.alice.unserved.*",
     ] {
-        assert!(has(s), "{s} missing from {:?}", assistant.publish);
+        assert!(assistant.publish.iter().any(|have| covers(have, s)), "{s} missing from {:?}", assistant.publish);
     }
     let human = Permissions::for_user(&p("alice"), Role::Human);
     // A human's sending under any name, acts readers could not tell from its human's, and changes to the team.

@@ -59,8 +59,8 @@ fn a_leaf_uplink_carries_an_assistant_s_rights() {
     let as_assistant = [(&pa, LeafRole::AssistantOf(&alice)), (&dev_a, LeafRole::Ant)];
     let (jwt, _) = read_creds(&out).unwrap();
     assert_eq!(carried(&jwt), sorted(Permissions::for_leaf(&m1, as_assistant)));
-    let marker = "$JS.API.DIRECT.GET.KV_ants_read.$KV.ants_read.alice";
-    assert!(carried(&jwt).publish.iter().any(|s| s == marker), "pa reads alice's read marker through the leaf");
+    let marker = "$JS.API.DIRECT.GET.KV_ants_read.$KV.ants_read.alice.chan";
+    assert!(carried(&jwt).publish.iter().any(|s| s == marker), "pa reads alice's read markers through the leaf");
     let finding = creds::Finding::from_jwt(&jwt).unwrap();
     let creds::Kind::Leaf { ants, humans, .. } = finding.kind else { panic!("{:?}", finding.kind) };
     assert_eq!((ants, humans), (vec![pa.clone(), dev_a.clone()], vec![]), "an assistant is an ant of the leaf");
