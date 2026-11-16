@@ -87,21 +87,15 @@ impl Manager {
         };
         let settings = serde_json::to_string(&request)?;
         let until = Utc::now() + wait;
-        let signed = signer::ask(
-            &client,
-            &jwt,
-            &key,
-            &template,
-            &settings,
-            &reason,
-            &thread,
-            &name,
-            &user,
-            leaf.as_ref().map(|(_, leaf)| leaf),
-            ENROLL_REPEAT,
+        let requester = signer::Requester {
+            client: &client,
+            jwt: &jwt,
+            key: &key,
+            leaf: leaf.as_ref().map(|(_, leaf)| leaf),
+            repeat: ENROLL_REPEAT,
             until,
-        )
-        .await?;
+        };
+        let signed = signer::ask(&requester, &template, &settings, &reason, &thread, &name, &user).await?;
         auth::write_creds(&out, &signed.jwt, &user)?;
         let seed = add::seed_path(&out);
         std::fs::remove_file(&seed).with_context(|| format!("removing {}", seed.display()))?;
@@ -163,20 +157,17 @@ impl Manager {
             Some(path) if path.exists() => add::leaf_node(Some(path))?,
             _ => None,
         };
-        let retired = signer::retire(
-            &client,
-            &jwt,
-            &signing,
-            template_name,
-            &thread,
-            &name,
-            &key,
-            leaf.as_ref().map(|(_, leaf)| leaf),
-            ENROLL_REPEAT,
+        let requester = signer::Requester {
+            client: &client,
+            jwt: &jwt,
+            key: &signing,
+            leaf: leaf.as_ref().map(|(_, leaf)| leaf),
+            repeat: ENROLL_REPEAT,
             until,
-        )
-        .await
-        .with_context(|| format!("{name} is unlisted, its credentials not revoked yet: retire_ant {name} again"))?;
+        };
+        let retired = signer::retire(&requester, template_name, &thread, &name, &key)
+            .await
+            .with_context(|| format!("{name} is unlisted, its credentials not revoked yet: retire_ant {name} again"))?;
         let mut said = vec![
             format!("Retired {name}: unlisted from {}.", self.config.display()),
             retire::stop_note(&name, stopped),
@@ -283,7 +274,7 @@ mod tests {
     /// A manager's daemon adds ants from its config file's templates, signed by `ants signer` within the policy of
     /// the signer's own copy of them or on a human's approval, and serves them once its file reloads.
     #[tokio::test]
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines, reason = "one scenario: adding ants, the reload, then the daemon serving them")]
     async fn a_manager_adds_ants_that_its_daemon_serves_after_the_reload() {
         let Some(server) = Server::start() else { return };
         let dir = server.dir().to_owned();

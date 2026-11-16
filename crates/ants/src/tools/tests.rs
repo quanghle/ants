@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use ants_daemon::bus;
 use ants_proto::{Role, ThreadId, ToolCall};
+use futures::StreamExt as _;
 
 use super::*;
 use crate::test_support::Server;

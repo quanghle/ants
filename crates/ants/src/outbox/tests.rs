@@ -1,5 +1,3 @@
-#![allow(clippy::too_many_lines)]
-
 use std::assert_matches;
 use std::process::Command;
 
@@ -32,6 +30,7 @@ async fn messages(js: &Context, name: &str) -> u64 {
 /// outbox and lands in the hub's stream once, after the uplink is back, and reaches a live waiter then; what the
 /// machine may not send stays out.
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "one scenario: the uplink down, the outbox filling, then the hub taking it")]
 async fn the_hub_takes_what_a_leaf_kept_while_its_uplink_was_down() {
     let (leaf_port, dead_port) = (free_port(), free_port());
     let Some(hub) = spawn_hub(leaf_port, "feature_flags { js_api_reply_v2: true }") else {
@@ -281,6 +280,7 @@ async fn the_hub_takes_what_a_leaf_kept_while_its_uplink_was_down() {
 /// uplink is down and those it takes from a leaf's outbox, which never come live, read back with a human's
 /// credentials and an ant's; for a post kept in the outbox, only what the hub stores after it.
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "one scenario: posts kept while the uplink is down, then read back")]
 async fn a_post_waiter_reads_back_what_never_comes_live() {
     let (leaf_port, dead_port) = (free_port(), free_port());
     let Some(hub) = spawn_hub(leaf_port, "feature_flags { js_api_reply_v2: true }") else {

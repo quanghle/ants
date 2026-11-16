@@ -1,0 +1,269 @@
+//! What the command bar's text says to do: a message to start a thread with a user, a post to a channel, text to
+//! say on the open thread, or a slash command ([`COMMANDS`]).
+
+use std::time::Duration;
+
+use ants_proto::{ChannelId, Choice, Reaction, ThreadId, UserId};
+use chrono::TimeDelta;
+
+use super::snooze;
+use crate::thread_meta::Marking;
+
+/// The slash commands: name, arguments and what each does, as the list shows them.
+pub const COMMANDS: &[(&str, &str, &str)] = &[
+    ("approve", "[ID] [--always]", "allow a tool request, once or for the session"),
+    ("reject", "[ID]", "refuse a tool request"),
+    ("grant", "[TEXT]", "fresh turns for the stuck ant"),
+    ("cancel", "", "stop the prompt an ant runs"),
+    ("steer", "TEXT", "redirect the ant at work"),
+    ("answer", "N|TEXT", "answer the question asked"),
+    ("done", "", "mark the thread done"),
+    ("undone", "", "mark the thread not done"),
+    ("pin", "", "pin the thread"),
+    ("unpin", "", "unpin the thread"),
+    ("mute", "[DURATION]", "hold back the thread's notifications"),
+    ("unmute", "", "notify of the thread again"),
+    ("snooze", "[DURATION]", "keep the thread off home, 1h unless given"),
+    ("unsnooze", "", "bring the thread back on home"),
+    ("archive", "", "archive the thread"),
+    ("unarchive", "", "unarchive the thread"),
+    ("title", "TEXT", "title the thread"),
+    ("react", "NAME", "react to the latest message"),
+    ("goto", "THREAD|#channel|@user", "show a thread, channel or user"),
+    ("search", "QUERY", "search the threads"),
+    ("digest", "[SINCE]", "catch-up summary"),
+    ("tldr", "", "summary of the thread"),
+    ("tree", "", "the thread's delegation tree"),
+    ("attach", "PATH", "attach a file to the next message"),
+    ("detach", "", "drop the files attached"),
+    ("save", "[PATH]", "save the marked attachment"),
+    ("retire", "ANT", "retire the ant by admin order, its home kept"),
+    ("quit", "", "leave ants chat"),
+];
+
+/// What the bar's text says to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Command {
+    /// Start a thread with the user.
+    Ask {
+        to: UserId,
+        text: String,
+    },
+    /// Post a new thread to the channel.
+    Post {
+        channel: ChannelId,
+        text: String,
+    },
+    /// Reply on the open thread, else ask the human's assistant, else the messenger.
+    Say(String),
+    Slash(Slash),
+}
+
+/// A slash command and its arguments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Slash {
+    Approve {
+        id: Option<String>,
+        always: bool,
+    },
+    Reject {
+        id: Option<String>,
+    },
+    Grant(Option<String>),
+    Cancel,
+    Steer(String),
+    Answer(Choice),
+    Done(bool),
+    Mark(Marking),
+    Mute(Option<Duration>),
+    Unmute,
+    /// Keep the thread off home this long.
+    Snooze(TimeDelta),
+    Unsnooze,
+    Title(String),
+    React(Reaction),
+    Goto(Goto),
+    Search(String),
+    Digest(Option<String>),
+    Tldr,
+    Tree,
+    /// Stage the file at the path for the next message.
+    Attach(String),
+    Detach,
+    /// Save the marked attachment of the selected message, to the path if given.
+    Save(Option<String>),
+    /// Retire the ant by admin order.
+    Retire(UserId),
+    Quit,
+}
+
+/// Where `/goto` leads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Goto {
+    /// A thread, by its id or a start of one.
+    Thread(String),
+    Channel(ChannelId),
+    User(UserId),
+}
+
+/// `text`'s first word and the rest, trimmed.
+fn first_word(text: &str) -> (&str, &str) {
+    text.split_once(char::is_whitespace).map_or((text, ""), |(word, rest)| (word, rest.trim()))
+}
+
+/// What the bar's `text` says to do, or why it says nothing that can be done.
+pub fn parse(text: &str) -> Result<Command, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("nothing to send".to_owned());
+    }
+    if let Some(literal) = text.strip_prefix("//") {
+        return Ok(Command::Say(format!("/{literal}")));
+    }
+    if let Some(command) = text.strip_prefix('/') {
+        return slash(command).map(Command::Slash);
+    }
+    if let Some(rest) = text.strip_prefix('@') {
+        let (name, text) = first_word(rest);
+        let to: UserId = name.parse().map_err(|e| format!("{e}"))?;
+        if text.is_empty() {
+            return Err(format!("nothing to send to @{to}"));
+        }
+        return Ok(Command::Ask { to, text: text.to_owned() });
+    }
+    if let Some(rest) = text.strip_prefix('#') {
+        let (name, text) = first_word(rest);
+        let channel: ChannelId = name.parse().map_err(|e| format!("{e}"))?;
+        if text.is_empty() {
+            return Err(format!("nothing to post to #{channel}"));
+        }
+        return Ok(Command::Post { channel, text: text.to_owned() });
+    }
+    Ok(Command::Say(text.to_owned()))
+}
+
+/// The slash command `text`, after its `/`.
+fn slash(text: &str) -> Result<Slash, String> {
+    let (name, args) = first_word(text);
+    let name = name.to_ascii_lowercase();
+    let usage = || {
+        let args = COMMANDS.iter().find(|(n, ..)| *n == name).map_or("", |(_, args, _)| *args);
+        format!("usage: /{name} {args}").trim_end().to_owned()
+    };
+    let bare = |command: Slash| if args.is_empty() { Ok(command) } else { Err(usage()) };
+    let text = || if args.is_empty() { Err(usage()) } else { Ok(args.to_owned()) };
+    let optional = || (!args.is_empty()).then(|| args.to_owned());
+    match name.as_str() {
+        "approve" => {
+            let (mut id, mut always) = (None, false);
+            for word in args.split_whitespace() {
+                match word {
+                    "--always" if !always => always = true,
+                    word if id.is_none() && !word.starts_with('-') => id = Some(word.to_owned()),
+                    _ => return Err(usage()),
+                }
+            }
+            Ok(Slash::Approve { id, always })
+        }
+        "reject" if args.split_whitespace().count() <= 1 && !args.starts_with('-') => {
+            Ok(Slash::Reject { id: optional() })
+        }
+        "grant" => Ok(Slash::Grant(optional())),
+        "cancel" => bare(Slash::Cancel),
+        "steer" => text().map(Slash::Steer),
+        "answer" => text().map(|answer| Slash::Answer(Choice::parse(&answer))),
+        "done" => bare(Slash::Done(true)),
+        "undone" => bare(Slash::Done(false)),
+        "pin" => bare(Slash::Mark(Marking::Pin)),
+        "unpin" => bare(Slash::Mark(Marking::Unpin)),
+        "archive" => bare(Slash::Mark(Marking::Archive)),
+        "unarchive" => bare(Slash::Mark(Marking::Unarchive)),
+        "mute" if args.is_empty() => Ok(Slash::Mute(None)),
+        "mute" => ants_proto::duration::parse(args).map(|hold| Slash::Mute(Some(hold))),
+        "unmute" => bare(Slash::Unmute),
+        "snooze" => snooze::duration(args).map(Slash::Snooze),
+        "unsnooze" => bare(Slash::Unsnooze),
+        "title" => text().map(Slash::Title),
+        "react" => text()?.parse().map(Slash::React).map_err(|e| e.to_string()),
+        "goto" => goto(&text()?).map(Slash::Goto),
+        "search" => text().map(Slash::Search),
+        "digest" => Ok(Slash::Digest(optional())),
+        "tldr" => bare(Slash::Tldr),
+        "tree" => bare(Slash::Tree),
+        "attach" => text().map(Slash::Attach),
+        "detach" => bare(Slash::Detach),
+        "save" => Ok(Slash::Save(optional())),
+        "retire" => {
+            let ant = text()?;
+            ant.strip_prefix('@').unwrap_or(&ant).parse().map(Slash::Retire).map_err(|e| format!("{e}"))
+        }
+        "quit" => bare(Slash::Quit),
+        _ if COMMANDS.iter().any(|(n, ..)| *n == name) => Err(usage()),
+        _ => Err(format!("no command /{name}")),
+    }
+}
+
+fn goto(to: &str) -> Result<Goto, String> {
+    let error = |e: ants_proto::Error| format!("{e}");
+    if let Some(channel) = to.strip_prefix('#') {
+        return channel.parse().map(Goto::Channel).map_err(error);
+    }
+    if let Some(user) = to.strip_prefix('@') {
+        return user.parse().map(Goto::User).map_err(error);
+    }
+    let thread = to.to_ascii_lowercase();
+    thread.parse::<ThreadId>().map_err(error)?;
+    Ok(Goto::Thread(thread))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::live::tests::user;
+
+    #[test]
+    fn text_asks_a_user_posts_to_a_channel_or_is_said_on_the_thread() {
+        let ask = parse(" @dev-a check\nthe build ").unwrap();
+        assert_eq!(ask, Command::Ask { to: user("dev-a"), text: "check\nthe build".into() });
+        assert_eq!(
+            parse("#ops deploy?").unwrap(),
+            Command::Post { channel: "ops".parse().unwrap(), text: "deploy?".into() }
+        );
+        assert_eq!(parse("looks good").unwrap(), Command::Say("looks good".into()));
+        assert_eq!(parse("//not a command").unwrap(), Command::Say("/not a command".into()));
+        assert_eq!(parse("@dev-a").unwrap_err(), "nothing to send to @dev-a");
+        assert_eq!(parse("#ops  ").unwrap_err(), "nothing to post to #ops");
+        assert!(parse("@Dev A hi").is_err());
+    }
+
+    #[test]
+    fn slash_commands_take_their_arguments_and_refuse_others() {
+        let ok = |text: &str| match parse(text) {
+            Ok(Command::Slash(slash)) => slash,
+            other => panic!("{text}: {other:?}"),
+        };
+        assert_eq!(ok("/approve"), Slash::Approve { id: None, always: false });
+        assert_eq!(ok("/APPROVE dev-a/019a --always"), Slash::Approve { id: Some("dev-a/019a".into()), always: true });
+        assert_eq!(ok("/reject 019a"), Slash::Reject { id: Some("019a".into()) });
+        assert_eq!(ok("/grant"), Slash::Grant(None));
+        assert_eq!(ok("/answer 2"), Slash::Answer(Choice::Option(2)));
+        assert_eq!(ok("/answer ship it"), Slash::Answer(Choice::Typed("ship it".into())));
+        assert_eq!(ok("/mute 2h"), Slash::Mute(Some(Duration::from_hours(2))));
+        assert_eq!(ok("/react eyes"), Slash::React("eyes".parse().unwrap()));
+        assert_eq!(ok("/goto #ops"), Slash::Goto(Goto::Channel("ops".parse().unwrap())));
+        assert_eq!(ok("/goto @bob"), Slash::Goto(Goto::User(user("bob"))));
+        assert_eq!(ok("/retire @dev-a"), Slash::Retire(user("dev-a")));
+        assert_eq!(ok("/goto 019A"), Slash::Goto(Goto::Thread("019a".into())));
+        assert_eq!(ok("/archive"), Slash::Mark(Marking::Archive));
+        assert_eq!(ok("/snooze"), Slash::Snooze(TimeDelta::hours(1)));
+        assert_eq!(ok("/snooze 2d"), Slash::Snooze(TimeDelta::days(2)));
+        assert_eq!(ok("/unsnooze"), Slash::Unsnooze);
+        assert_eq!(parse("/snooze 8d").unwrap_err(), "too long: at most 7d");
+        assert_eq!(parse("/steer").unwrap_err(), "usage: /steer TEXT");
+        assert_eq!(parse("/done now").unwrap_err(), "usage: /done");
+        assert_eq!(parse("/approve a b").unwrap_err(), "usage: /approve [ID] [--always]");
+        assert_eq!(parse("/frobnicate").unwrap_err(), "no command /frobnicate");
+        assert!(parse("/mute forever").is_err());
+        assert!(parse("/react Thumbs Up").is_err());
+    }
+}

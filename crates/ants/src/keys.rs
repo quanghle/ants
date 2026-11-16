@@ -56,7 +56,8 @@ pub async fn store_seed(path: &Path, store: &dyn Store, url: &str) -> Result<Mov
         bail!("the seed in {} is not that of the key {} of their user JWT", path.display(), finding.key);
     }
     let xkey = held_xkey(&text, path, store)?;
-    write_stored(path, jwt, &key, seed, xkey.as_ref(), store, url, Proof::Required)
+    let new = NewCreds { jwt, key: &key, seed, xkey: xkey.as_ref() };
+    write_stored(path, new, store, url, Proof::Required)
         .await
         .with_context(|| format!("the seed stays in {}", path.display()))?;
     Ok(Moved::Now(key))
@@ -133,7 +134,8 @@ pub async fn replace(
         return auth::replace_creds(path, jwt, user, xkey);
     };
     let key = user.public_key();
-    write_stored(path, jwt, &key, &auth::seed(user)?, xkey, store, url, Proof::Required)
+    let seed = auth::seed(user)?;
+    write_stored(path, NewCreds { jwt, key: &key, seed: &seed, xkey }, store, url, Proof::Required)
         .await
         .with_context(|| format!("{} stay as they were", path.display()))?;
     let mut earlier = vec![(earlier, key)];
@@ -162,7 +164,8 @@ pub async fn write_new_stored(
     store: &dyn Store,
     url: &str,
 ) -> Result<Proven> {
-    write_stored(path, jwt, &user.public_key(), &auth::seed(user)?, xkey, store, url, Proof::Optional)
+    let (key, seed) = (user.public_key(), auth::seed(user)?);
+    write_stored(path, NewCreds { jwt, key: &key, seed: &seed, xkey }, store, url, Proof::Optional)
         .await
         .with_context(|| format!("{} not written", path.display()))
 }
@@ -219,16 +222,21 @@ enum Proof {
     Optional,
 }
 
+/// The user JWT of new credentials, the public `key` and `seed` of their user, and the curve `xkey` they hold, if any.
+#[derive(Clone, Copy)]
+struct NewCreds<'a> {
+    jwt: &'a str,
+    key: &'a str,
+    seed: &'a str,
+    xkey: Option<&'a XKey>,
+}
+
 /// Store `seed` for `key`, and the seed of `xkey` under its public key, in `store` and check they read back, then write
 /// `path` naming them, once it authenticates at `url`, or, with [`Proof::Optional`], also when no server answers
 /// there. A failure deletes the seeds not stored before, and leaves `path` as it was.
-#[allow(clippy::too_many_arguments)]
 async fn write_stored(
     path: &Path,
-    jwt: &str,
-    key: &str,
-    seed: &str,
-    xkey: Option<&XKey>,
+    NewCreds { jwt, key, seed, xkey }: NewCreds<'_>,
     store: &dyn Store,
     url: &str,
     proof: Proof,

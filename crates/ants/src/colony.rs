@@ -446,7 +446,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines, reason = "one table, each of its columns checked row by row")]
     fn rows_show_state_and_ages() {
         let now = Utc::now();
         let mut quiet = entry("dev-b", 7300, 25, now);

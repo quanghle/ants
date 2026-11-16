@@ -45,7 +45,7 @@ async fn ask(
     order: &AdminOrder,
     wait: Duration,
 ) -> Option<EnrollReply> {
-    ask_full(client, creds, None, ant, key, order, None, wait).await
+    ask_full(client, creds, ant, key, order, Alongside::default(), wait).await
 }
 
 /// [`ask`], asking for the host credentials of the machine `host` names with its key too.
@@ -58,7 +58,7 @@ async fn ask_with(
     host: Option<(&str, &KeyPair)>,
     wait: Duration,
 ) -> Option<EnrollReply> {
-    ask_full(client, creds, None, ant, key, order, host, wait).await
+    ask_full(client, creds, ant, key, order, Alongside { leaf: None, host }, wait).await
 }
 
 /// [`ask`], the request carrying the uplink credentials `leaf` of the leaf node of the machine they name, signed with
@@ -72,19 +72,25 @@ async fn ask_through(
     order: &AdminOrder,
     wait: Duration,
 ) -> Option<EnrollReply> {
-    ask_full(client, creds, leaf, ant, key, order, None, wait).await
+    ask_full(client, creds, ant, key, order, Alongside { leaf, host: None }, wait).await
 }
 
-/// [`ask`] through the leaf node `leaf` and asking for the host credentials `host`, either as given.
-#[allow(clippy::too_many_arguments)]
+/// What an ask goes along with: through the leaf node `leaf`, a machine and its uplink credentials, and asking for
+/// the host credentials `host`, a machine and its key, either as given.
+#[derive(Clone, Copy, Default)]
+struct Alongside<'a> {
+    leaf: Option<(&'a str, &'a Path)>,
+    host: Option<(&'a str, &'a KeyPair)>,
+}
+
+/// [`ask`] with what goes `alongside` it.
 async fn ask_full(
     client: &async_nats::Client,
     creds: &Path,
-    leaf: Option<(&str, &Path)>,
     ant: &str,
     key: &KeyPair,
     order: &AdminOrder,
-    host: Option<(&str, &KeyPair)>,
+    Alongside { leaf, host }: Alongside<'_>,
     wait: Duration,
 ) -> Option<EnrollReply> {
     let (jwt, signer) = auth::read_creds(creds).unwrap();
@@ -222,7 +228,6 @@ async fn the_signer_signs_on_an_admin_s_order_for_the_machine_asking_only() {
 /// members; it refuses a request carrying none, or another machine's. A retire order's request revokes the ant's key
 /// all the same without them, and with them has the signer renew them without the ant, which leaves the members.
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn on_a_leaf_node_s_machine_the_signer_renews_the_uplink_to_carry_the_ant_an_order_adds() {
     let Some(server) = Server::start() else { return };
     let team = server.dir().join("auth");

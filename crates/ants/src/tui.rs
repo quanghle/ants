@@ -350,75 +350,7 @@ impl Chat {
                     }
                     None
                 }
-                event = self.feed.next() => {
-                    Some(self.model.take(event, Utc::now()))
-                }
-                read = self.reads.next() => {
-                    self.model.read(read, Utc::now());
-                    Some(Vec::new())
-                }
-                outcome = self.exec.next() => {
-                    // A title set through the bar shows once read back.
-                    self.cards.refresh();
-                    Some(self.model.outcome(outcome).into_iter().collect())
-                }
-                acted = self.acts.next() => {
-                    if matches!(acted, acts::Acted::Changed(..)) {
-                        // Home shows done states and snoozes: read them back at once.
-                        self.cards.refresh();
-                    }
-                    self.model.acted(acted, Utc::now());
-                    Some(Vec::new())
-                }
-                event = self.people.next() => {
-                    self.model.people(event, Utc::now());
-                    Some(Vec::new())
-                }
-                found = self.searches.next() => {
-                    self.model.found(found);
-                    Some(Vec::new())
-                }
-                read = self.cards.next() => {
-                    self.model.cards(read, Utc::now());
-                    // TL;DRs ahead of time follow what was read.
-                    Some(self.model.ahead(Utc::now()).into_iter().collect())
-                }
-                summarised = self.summaries.next() => {
-                    self.model.summarised(summarised, Utc::now());
-                    Some(self.model.ahead(Utc::now()).into_iter().collect())
-                }
-                event = self.trees.next() => {
-                    self.model.tree_event(event, Utc::now());
-                    Some(Vec::new())
-                }
-                event = self.ants.next() => {
-                    self.model.ant_event(event);
-                    Some(Vec::new())
-                }
-                event = self.memories.next() => {
-                    self.model.memories_event(event);
-                    Some(Vec::new())
-                }
-                event = self.settings.next() => {
-                    self.model.settings_event(event);
-                    Some(Vec::new())
-                }
-                event = self.credentials.next() => {
-                    self.model.credentials(event, Utc::now());
-                    Some(Vec::new())
-                }
-                event = self.held.next() => {
-                    self.model.held(event, Utc::now());
-                    Some(Vec::new())
-                }
-                identities = self.looks.next() => {
-                    self.model.data.looks.set(identities);
-                    Some(Vec::new())
-                }
-                (handle, image) = next_image(self.images.as_mut()) => {
-                    self.model.data.images.insert(handle, image);
-                    Some(Vec::new())
-                }
+                actions = self.changed() => Some(actions),
             };
             dirty |= actions.is_some();
             for action in actions.into_iter().flatten().chain(self.model.mark_shown()) {
@@ -431,6 +363,81 @@ impl Chat {
                 dirty = true;
             }
             self.watch();
+        }
+    }
+
+    /// Wait for word from anything but the ticks, take it in, and return the actions it calls for.
+    async fn changed(&mut self) -> Vec<Action> {
+        tokio::select! {
+            event = self.feed.next() => {
+                self.model.take(event, Utc::now())
+            }
+            read = self.reads.next() => {
+                self.model.read(read, Utc::now());
+                Vec::new()
+            }
+            outcome = self.exec.next() => {
+                // A title set through the bar shows once read back.
+                self.cards.refresh();
+                self.model.outcome(outcome).into_iter().collect()
+            }
+            acted = self.acts.next() => {
+                if matches!(acted, acts::Acted::Changed(..)) {
+                    // Home shows done states and snoozes: read them back at once.
+                    self.cards.refresh();
+                }
+                self.model.acted(acted, Utc::now());
+                Vec::new()
+            }
+            event = self.people.next() => {
+                self.model.people(event, Utc::now());
+                Vec::new()
+            }
+            found = self.searches.next() => {
+                self.model.found(found);
+                Vec::new()
+            }
+            read = self.cards.next() => {
+                self.model.cards(read, Utc::now());
+                // TL;DRs ahead of time follow what was read.
+                self.model.ahead(Utc::now()).into_iter().collect()
+            }
+            summarised = self.summaries.next() => {
+                self.model.summarised(summarised, Utc::now());
+                self.model.ahead(Utc::now()).into_iter().collect()
+            }
+            event = self.trees.next() => {
+                self.model.tree_event(event, Utc::now());
+                Vec::new()
+            }
+            event = self.ants.next() => {
+                self.model.ant_event(event);
+                Vec::new()
+            }
+            event = self.memories.next() => {
+                self.model.memories_event(event);
+                Vec::new()
+            }
+            event = self.settings.next() => {
+                self.model.settings_event(event);
+                Vec::new()
+            }
+            event = self.credentials.next() => {
+                self.model.credentials(event, Utc::now());
+                Vec::new()
+            }
+            event = self.held.next() => {
+                self.model.held(event, Utc::now());
+                Vec::new()
+            }
+            identities = self.looks.next() => {
+                self.model.data.looks.set(identities);
+                Vec::new()
+            }
+            (handle, image) = next_image(self.images.as_mut()) => {
+                self.model.data.images.insert(handle, image);
+                Vec::new()
+            }
         }
     }
 

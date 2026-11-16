@@ -1,0 +1,330 @@
+//! The conversation of an open thread, row by row: its messages and its ants' tool calls in the order stored, how
+//! deep each nests, the tree drawn before them and the lines each row draws as.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::fmt::Write as _;
+
+use ants_proto::UserId;
+use chrono::{DateTime, Local, Utc};
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
+
+use crate::sealed;
+use crate::thread::{Entry, Kind};
+use crate::tui::model::Data;
+use crate::tui::timeline::Call;
+use crate::tui::{attach, frame, images, markdown, react};
+
+/// How deep delegations nest, deeper ones shown at this depth.
+const MAX_DEPTH: usize = 4;
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// What a row of the conversation is.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Item<'a> {
+    Message(&'a Entry),
+    Call(&'a Call),
+}
+
+/// A row of the conversation, and how deep it nests: 0 for the top level.
+#[derive(Debug)]
+pub(super) struct Row<'a> {
+    pub(super) item: Item<'a>,
+    pub(super) depth: usize,
+}
+
+/// The conversation of `entries`, in the order stored, with `calls`, by when they started, each before the first
+/// message stored after it started; `human` tells the humans.
+pub(super) fn rows<'a>(entries: &'a [Entry], calls: &'a [Call], human: impl Fn(&UserId) -> bool) -> Vec<Row<'a>> {
+    let mut levels: HashMap<&UserId, usize> = HashMap::new();
+    let level = |levels: &HashMap<&UserId, usize>, user: &UserId| levels.get(user).copied().unwrap_or(1);
+    let mut calls = calls.iter().peekable();
+    let mut rows = Vec::new();
+    for entry in entries.iter().filter(|e| e.kind != Kind::Tool) {
+        while let Some(call) = calls.next_if(|c| c.started < entry.stored_at) {
+            rows.push(Row { item: Item::Call(call), depth: level(&levels, &call.ant) });
+        }
+        let ant = |user: &&UserId| !human(user);
+        let depth = match (entry.kind, entry.from.as_ref(), entry.to.as_ref()) {
+            (Kind::Message | Kind::Escalation, Some(from), Some(to)) if ant(&from) && ant(&to) => {
+                let depth = level(&levels, from);
+                // A reply to an ant nesting it leaves that ant where it was.
+                if levels.get(to).is_none_or(|l| *l > depth) {
+                    levels.insert(to, (depth + 1).min(MAX_DEPTH));
+                }
+                depth
+            }
+            (Kind::Note | Kind::Approval, Some(from), _) if ant(&from) => level(&levels, from),
+            (Kind::Decision | Kind::Dead, _, Some(to)) if ant(&to) => level(&levels, to),
+            _ => {
+                for user in entry.from.iter().chain(&entry.to).filter(ant) {
+                    levels.insert(user, 1);
+                }
+                0
+            }
+        };
+        rows.push(Row { item: Item::Message(entry), depth });
+    }
+    rows.extend(calls.map(|call| Row { item: Item::Call(call), depth: level(&levels, &call.ant) }));
+    rows
+}
+
+/// The tree drawn before each of `rows`: before its first line, and before the others.
+pub(super) fn glyphs(rows: &[Row]) -> Vec<(String, String)> {
+    // Whether a row at each depth comes later, before any shallower one.
+    let mut open = [false; MAX_DEPTH + 1];
+    let mut out = vec![(String::new(), String::new()); rows.len()];
+    for (at, row) in rows.iter().enumerate().rev() {
+        let depth = row.depth.min(MAX_DEPTH);
+        if depth > 0 {
+            let (mut first, mut rest) = ("  ".to_owned(), "  ".to_owned());
+            for on in &open[1..depth] {
+                let bar = if *on { "│ " } else { "  " };
+                first.push_str(bar);
+                rest.push_str(bar);
+            }
+            first.push_str(if open[depth] { "├ " } else { "└ " });
+            rest.push_str(if open[depth] { "│ " } else { "  " });
+            out[at] = (first, rest);
+        }
+        open[depth] = true;
+        open[depth + 1..].fill(false);
+    }
+    out
+}
+
+/// What the rows are drawn with.
+pub(super) struct Shown<'a> {
+    pub(super) data: &'a Data,
+    pub(super) now: DateTime<Utc>,
+    /// Whether an ant is busy on the thread: a call not ended is running only then.
+    pub(super) busy: bool,
+    pub(super) width: usize,
+    /// The message whose attachments `o` opens, by its sequence, and the one marked among them.
+    pub(super) marked: Option<(u64, usize)>,
+    /// Where the images drawn go among the lines.
+    pub(super) placed: RefCell<Vec<images::Placed>>,
+}
+
+impl Shown<'_> {
+    /// Add the lines of `row`, which `first` and `rest` begin; `entries` are the thread's, for a question's answers.
+    pub(super) fn row(&self, lines: &mut Vec<Line<'static>>, row: &Row, entries: &[Entry], first: &str, rest: &str) {
+        match row.item {
+            Item::Call(call) => self.call(lines, call, first),
+            Item::Message(e) if row.depth == 0 => self.block(lines, e, entries),
+            Item::Message(e) => {
+                let (head, style) = nested(e);
+                let face = e.from.as_ref().filter(|_| e.kind != Kind::Dead).and_then(|from| self.data.face(from));
+                let mut first = Line::styled(format!("{first}{} ", hm(e.stored_at)), style);
+                first.spans.extend(face.into_iter().flatten());
+                first.spans.push(Span::styled(head, style));
+                let under = format!("{rest}      ");
+                let mut text = text(e, entries, self.width.saturating_sub(under.chars().count()));
+                let room = self.width.saturating_sub(first.width() + 2);
+                // A text of one line short enough goes on the line of the heading.
+                if let [line] = &mut text[..]
+                    && line.width() <= room
+                {
+                    first.spans.push(Span::raw("  "));
+                    first.spans.append(&mut line.spans);
+                    text.clear();
+                }
+                lines.push(first);
+                lines.extend(text.into_iter().map(|line| indented(&under, line).patch_style(style)));
+                self.attachments(lines, e, &under);
+                lines.extend(self.reactions(e).map(|line| indented(&under, line)));
+            }
+        }
+    }
+
+    /// The line of the reactions to `e`, if any.
+    fn reactions(&self, e: &Entry) -> Option<Line<'static>> {
+        let reacted = self.data.reactions.get(&e.id?)?;
+        react::line(reacted, self.data.me())
+    }
+
+    /// A message at the top level: who sent it to whom and when, then its text under it.
+    fn block(&self, lines: &mut Vec<Line<'static>>, e: &Entry, entries: &[Entry]) {
+        let from = e.acting.label(e.from.as_ref().map_or("a human", UserId::as_str));
+        let to = match (e.kind, &e.channel, &e.to) {
+            (Kind::Post, Some(channel), _) => format!(" → #{channel}"),
+            (Kind::Note, ..) => " → notes".to_owned(),
+            (Kind::Approval, ..) => " → humans".to_owned(),
+            (_, _, Some(to)) => format!(" → {to}"),
+            _ => String::new(),
+        };
+        let from_style = if self.data.is_human(e.from.as_ref().unwrap_or(&UserId::human())) {
+            Style::new().fg(Color::Cyan).bold()
+        } else {
+            Style::new().fg(Color::Magenta).bold()
+        };
+        let face = e.from.as_ref().and_then(|from| self.data.face(from));
+        let mut head: Vec<Span<'static>> = face.into_iter().flatten().collect();
+        head.extend([
+            Span::styled(format!("{from}{to}"), from_style),
+            Span::styled(format!("  {}", hm(e.stored_at)), frame::dim()),
+        ]);
+        let (what, style) = match e.kind {
+            Kind::Escalation => {
+                (format!("escalation: {}", e.note.as_deref().unwrap_or("")), Style::new().fg(Color::Red))
+            }
+            Kind::Mention => ("mention".to_owned(), frame::dim()),
+            Kind::Approval => ("tool request".to_owned(), Style::new().fg(Color::Yellow)),
+            Kind::Dead => (format!("gave up: {}", e.note.as_deref().unwrap_or("")), Style::new().fg(Color::Red)),
+            _ if e.question.is_some() => ("asks".to_owned(), Style::new().fg(Color::Yellow)),
+            _ => (String::new(), Style::new()),
+        };
+        if !what.is_empty() {
+            head.push(Span::styled(format!("  {what}"), style));
+        }
+        if e.sealed.is_some() {
+            head.push(Span::raw(format!("  {}", crate::tui::dm::LOCK)));
+        }
+        if e.forged || e.sealed == Some(sealed::State::Forged) {
+            head.push(Span::styled("  forged", Style::new().fg(Color::Red).bold()));
+        }
+        lines.push(Line::from(head));
+        lines.extend(text(e, entries, self.width.saturating_sub(2)).into_iter().map(|line| indented("  ", line)));
+        self.attachments(lines, e, "  ");
+        lines.extend(self.reactions(e).map(|line| indented("  ", line)));
+    }
+
+    /// The lines of `e`'s attachments, begun with `indent`, each image's drawn under its line.
+    fn attachments(&self, lines: &mut Vec<Line<'static>>, e: &Entry, indent: &str) {
+        let shown = attach::lines(&e.attachments, self.marked_of(e), indent);
+        let mut placed = self.placed.borrow_mut();
+        for (line, listed) in shown.into_iter().zip(&e.attachments) {
+            lines.push(line);
+            images::place(lines, &mut placed, &self.data.images, listed, indent.chars().count(), self.width);
+        }
+    }
+
+    /// Which of `e`'s attachments is marked, when `o` opens one of them.
+    fn marked_of(&self, e: &Entry) -> Option<usize> {
+        self.marked.filter(|(seq, _)| *seq == e.seq).map(|(_, at)| at)
+    }
+
+    /// A tool call: when it started, its kind, its title, and how it ended or how long it has run.
+    fn call(&self, lines: &mut Vec<Line<'static>>, call: &Call, first: &str) {
+        let kind = call.kind.as_deref().unwrap_or("tool");
+        let (status, style) = match call.status.as_deref() {
+            Some("completed") => (format!("ok {}", took(call)), Style::new().fg(Color::Green)),
+            Some("failed") => (format!("failed {}", took(call)), Style::new().fg(Color::Red)),
+            _ if self.busy => {
+                let elapsed = crate::colony::short(crate::colony::since(call.started, self.now));
+                let spin = SPINNER[usize::try_from(self.now.timestamp()).unwrap_or(0) % SPINNER.len()];
+                (format!("{spin} running {elapsed}"), busy())
+            }
+            Some(status) => (status.replace('_', " "), frame::dim()),
+            None => ("started".to_owned(), frame::dim()),
+        };
+        let head = format!("{first}{} {kind:<7} ", hm(call.started));
+        let room = self.width.saturating_sub(head.chars().count() + status.chars().count() + 2);
+        lines.push(Line::from(vec![
+            Span::styled(head, frame::dim()),
+            Span::raw(format!("{:<room$}  ", cut(&call.title, room))),
+            Span::styled(status, style),
+        ]));
+    }
+}
+
+/// How a message nested under another shows after its time: its route and what it is, and its style.
+fn nested(e: &Entry) -> (String, Style) {
+    let from = e.acting.label(e.from.as_ref().map_or("a human", UserId::as_str));
+    let to = e.to.as_ref().map_or("", UserId::as_str);
+    let lock = if e.sealed.is_some() { format!(" {}", crate::tui::dm::LOCK) } else { String::new() };
+    let forged = if e.forged || e.sealed == Some(sealed::State::Forged) { " (forged)" } else { "" };
+    let forged = format!("{lock}{forged}");
+    match e.kind {
+        Kind::Note => (format!("{from} → notes{forged}"), Style::new()),
+        Kind::Approval => (format!("{from} asks to run{forged}"), Style::new().fg(Color::Yellow)),
+        Kind::Decision => (format!("{from} decided for {to}"), frame::dim()),
+        Kind::Dead => (format!("{to} gave up"), Style::new().fg(Color::Red)),
+        Kind::Escalation => (format!("{from} → {to} escalation{forged}"), Style::new().fg(Color::Red)),
+        _ => (format!("{from} → {to}{forged}"), Style::new()),
+    }
+}
+
+/// A message's text: a question's with its options numbered and its answers.
+pub(super) fn body(e: &Entry, entries: &[Entry]) -> String {
+    if let Some(unopened) = crate::tui::dm::unopened(e.sealed) {
+        return unopened.to_owned();
+    }
+    let Some(question) = &e.question else {
+        return match (&e.note, e.kind) {
+            (Some(note), Kind::Approval | Kind::Decision) => format!("{} [{note}]", e.text),
+            _ => e.text.clone(),
+        };
+    };
+    let mut text = question.text.clone();
+    for (n, option) in question.options.iter().enumerate() {
+        let _ = write!(text, "\n{} {option}", n + 1);
+    }
+    if question.free_text {
+        text.push_str("\nor type an answer");
+    }
+    for (by, answered) in crate::thread::answers_to(e, entries) {
+        text.push('\n');
+        text.push_str(&crate::thread::answer_line(by, answered));
+    }
+    text
+}
+
+/// A message's text in lines at most `width` wide: as markdown for a message, post or note, else as it is.
+fn text(e: &Entry, entries: &[Entry], width: usize) -> Vec<Line<'static>> {
+    let text = body(e, entries);
+    match e.kind {
+        Kind::Message | Kind::Escalation | Kind::Mention | Kind::Post | Kind::Note if e.question.is_none() => {
+            markdown::render(&text, width)
+        }
+        _ => {
+            let mut lines = Vec::new();
+            for line in text.lines() {
+                push(&mut lines, line, "", Style::new(), width);
+            }
+            lines
+        }
+    }
+}
+
+/// `line` begun with `indent`, its style kept.
+fn indented(indent: &str, line: Line<'static>) -> Line<'static> {
+    let mut spans = vec![Span::raw(indent.to_owned())];
+    spans.extend(line.spans);
+    Line::from(spans).style(line.style)
+}
+
+/// Add `line`, cut to `width` characters a line, those after the first begun with `rest`.
+fn push(lines: &mut Vec<Line<'static>>, line: &str, rest: &str, style: Style, width: usize) {
+    let mut chars = line.chars().peekable();
+    lines.push(Line::styled(chars.by_ref().take(width.max(1)).collect::<String>(), style));
+    let room = width.saturating_sub(rest.chars().count()).max(1);
+    while chars.peek().is_some() {
+        lines.push(Line::styled(format!("{rest}{}", chars.by_ref().take(room).collect::<String>()), style));
+    }
+}
+
+pub(super) fn busy() -> Style {
+    Style::new().fg(Color::Yellow)
+}
+
+/// How long a call that ended took.
+fn took(call: &Call) -> String {
+    call.duration.and_then(|d| u64::try_from(d.num_milliseconds()).ok()).map_or_default(crate::thread::took)
+}
+
+/// The local hour and minute of `at`.
+pub(super) fn hm(at: DateTime<Utc>) -> String {
+    at.with_timezone(&Local).format("%H:%M").to_string()
+}
+
+/// `text` in at most `width` characters, an ellipsis ending it when cut.
+pub(super) fn cut(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_owned();
+    }
+    let mut cut: String = text.chars().take(width.saturating_sub(1)).collect();
+    cut.push('…');
+    cut
+}

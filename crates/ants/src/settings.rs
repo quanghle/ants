@@ -543,7 +543,10 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
     /// standby machine serves the shared settings over its own config's, telling which fields drift, as does the
     /// first's record of its machine once its config is edited otherwise.
     #[tokio::test]
-    #[allow(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario: the settings created, changed by orders, then served everywhere"
+    )]
     async fn the_shared_settings_are_created_once_changed_by_orders_and_served_on_every_machine() {
         let Some(server) = Server::start() else { return };
         let (alice, dev_a) = ("alice".parse().unwrap(), "dev-a".parse::<UserId>().unwrap());
@@ -690,7 +693,6 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
     /// `ants ant set` expects the config's values over it, and the daemon holding the ant's credentials writes back the
     /// settings it kept, or none with revoked credentials.
     #[tokio::test]
-    #[allow(clippy::too_many_lines)]
     async fn shared_settings_put_back_or_signed_with_revoked_credentials_are_not_verified() {
         let Some(server) = Server::start() else { return };
         let dev_a = "dev-a".parse::<UserId>().unwrap();

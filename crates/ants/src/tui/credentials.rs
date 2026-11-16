@@ -5,7 +5,7 @@
 //! on the machine `ants signer` recorded as holding the key ([`AccountHolder`]), when one did.
 
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -447,41 +447,43 @@ impl Io {
         let approver = self.approver(dir.clone());
         self.order = Some(
             async move {
-                let done = async {
-                    let approver = approver.await?;
-                    anyhow::Ok(match &order {
-                        Order::Approve(ant, key) => {
-                            let approved = approver.approve(&dir, ant, Some(key)).await?;
-                            let mut done = match approved.leaf {
-                                Some(leaf) => format!("{ant} approved, through the leaf node of {}", leaf.machine),
-                                None => format!("{ant} approved"),
-                            };
-                            if let Some(host) = approved.host {
-                                done = format!("{done}; {}", host.describe());
-                            }
-                            done
-                        }
-                        Order::Reject(ant, key) => {
-                            approver.reject(ant, Some(key), None).await?;
-                            format!("{ant} rejected")
-                        }
-                        Order::Renew(name, key) => {
-                            let (_, renewed) = approver.renew(&dir, name, Some(key)).await?;
-                            format!(
-                                "{} renewed; once the new credentials are in use, retire the earlier key: `ants auth \
-                                 revoke --key {} --earlier`, then `ants auth push`",
-                                renewed.finding.holder(),
-                                renewed.previous
-                            )
-                        }
-                    })
-                };
+                let done = async { Self::carry_out(&*approver.await?, &dir, &order).await };
                 let done = done.await.map_err(|e| format!("{}: {e:#}", order.describe()));
                 Event::Done(order, done)
             }
             .boxed_local(),
         );
         true
+    }
+
+    /// Carry `order` out with `approver`, the credentials in `dir`; what was done.
+    async fn carry_out(approver: &Approver, dir: &Path, order: &Order) -> Result<String> {
+        Ok(match order {
+            Order::Approve(ant, key) => {
+                let approved = approver.approve(dir, ant, Some(key)).await?;
+                let mut done = match approved.leaf {
+                    Some(leaf) => format!("{ant} approved, through the leaf node of {}", leaf.machine),
+                    None => format!("{ant} approved"),
+                };
+                if let Some(host) = approved.host {
+                    done = format!("{done}; {}", host.describe());
+                }
+                done
+            }
+            Order::Reject(ant, key) => {
+                approver.reject(ant, Some(key), None).await?;
+                format!("{ant} rejected")
+            }
+            Order::Renew(name, key) => {
+                let (_, renewed) = approver.renew(dir, name, Some(key)).await?;
+                format!(
+                    "{} renewed; once the new credentials are in use, retire the earlier key: `ants auth revoke --key \
+                     {} --earlier`, then `ants auth push`",
+                    renewed.finding.holder(),
+                    renewed.previous
+                )
+            }
+        })
     }
 
     /// The connection to the server, made afresh once older than [`renew::AUTO_RECONNECT`], as its credentials last
