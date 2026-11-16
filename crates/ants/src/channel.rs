@@ -91,17 +91,24 @@ pub fn describe(entry: &ChannelEntry) -> String {
 }
 
 /// The channels as a table: one row per channel under a header, columns padded to line up. With `unread`, an UNREAD
-/// column shows the unread posts of each channel it has, and how many of them @mention the human, `-` for the others.
+/// column shows the unread posts by humans or @mentioning the human of each channel it has, how many of them
+/// @mention the human, and the other unread posts by ants, `-` for the channels it lacks.
 pub fn table(entries: &[ChannelEntry], unread: Option<&HashMap<ChannelId, reads::Unread>>) -> String {
     let mut header = ["CHANNEL", "MEMBERS", "MESSENGER", "OWNER"].map(str::to_owned).to_vec();
     if unread.is_some() {
         header.push("UNREAD".to_owned());
     }
     let owner = |e: &ChannelEntry| e.owner.as_ref().map_or_else(|| "-".to_owned(), UserId::to_string);
-    let unread_label = |e: &ChannelEntry| match unread?.get(&e.channel) {
-        None => Some("-".to_owned()),
-        Some(u) if u.mentions > 0 => Some(format!("{} (@{})", u.posts, u.mentions)),
-        Some(u) => Some(u.posts.to_string()),
+    let unread_label = |e: &ChannelEntry| {
+        let Some(u) = unread?.get(&e.channel) else { return Some("-".to_owned()) };
+        let mut label = u.posts.to_string();
+        if u.mentions > 0 {
+            label = format!("{label} (@{})", u.mentions);
+        }
+        if u.ants > 0 {
+            label = format!("{label} +{} by ants", u.ants);
+        }
+        Some(label)
     };
     let rows: Vec<Vec<String>> = std::iter::once(header)
         .chain(entries.iter().map(|e| {

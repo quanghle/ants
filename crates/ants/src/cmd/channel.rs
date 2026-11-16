@@ -70,7 +70,8 @@ pub(crate) enum ChannelCommand {
         users: Vec<UserId>,
     },
     /// List the channels with the members, the messenger and the owner of each; for a human member of any, also the
-    /// unread posts of each channel it is a member of, with how many @mention it.
+    /// unread posts by humans or @mentioning it of each channel it is a member of, with how many @mention it, and
+    /// the other unread posts by ants.
     List,
     /// Print the posts of a channel kept in the stream, by thread: the post that started each thread, then the
     /// replies on the thread, indented. A human's printed posts are marked read on all its devices.
@@ -248,9 +249,10 @@ async fn unread(
     let me = &nats.me;
     let counted = async {
         let (markers, _) = reads::ChannelReads::open(js, &me.id).await?.markers().await?;
+        let humans = crate::humans::read(js).await?;
         let mut unread = HashMap::new();
         for entry in entries.iter().filter(|e| e.is_member(&me.id)) {
-            unread.insert(entry.channel.clone(), reads::unread(js, me, &markers, &entry.channel).await?);
+            unread.insert(entry.channel.clone(), reads::unread(js, me, &humans, &markers, &entry.channel).await?);
         }
         anyhow::Ok(unread)
     };
