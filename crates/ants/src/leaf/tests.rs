@@ -413,6 +413,15 @@ fn a_respelled_path_names_the_same_file() {
     assert_eq!(respell("/home/me/.config/ants/./leaf-m1.creds"), "/home/me/.config/ants/leaf-m1.creds");
     assert_eq!(respell("leaf-m1.creds"), "./leaf-m1.creds");
     assert_eq!(respell("./leaf-m1.creds"), "leaf-m1.creds");
+    assert_eq!(respell("/leaf-m1.creds"), "/./leaf-m1.creds");
+    assert_eq!(respell("/./leaf-m1.creds"), "/leaf-m1.creds");
+
+    let windows = |path| respell_at(path, |c| c == '\\' || c == '/');
+    assert_eq!(windows(r"C:\Users\me\.config\ants\leaf-m1.creds"), r"C:\Users\me\.config\ants\.\leaf-m1.creds");
+    assert_eq!(windows(r"C:\Users\me\.config\ants\.\leaf-m1.creds"), r"C:\Users\me\.config\ants\leaf-m1.creds");
+    assert_eq!(windows(r"C:\leaf-m1.creds"), r"C:\.\leaf-m1.creds");
+    assert_eq!(windows(r"C:\.\leaf-m1.creds"), r"C:\leaf-m1.creds");
+    assert_eq!(windows("C:/Users/me/leaf-m1.creds"), "C:/Users/me/./leaf-m1.creds");
 }
 
 /// A connection with `creds` to `url` that reports when the server closes it.

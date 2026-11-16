@@ -169,7 +169,7 @@ pub fn take(out: &Path, old: Option<&str>, new: &str, apply: impl FnOnce(Action)
 /// Have the leaf node of the configuration at `path`, as [`write`] writes it, connect its uplink again, to send the
 /// uplink credentials just renewed in their file. nats-server reads that file at each connect, but a reload keeps the
 /// connection of an unchanged remote, and a restart would cut every local connection too. So the remote's credentials
-/// path switches between two spellings of the same file, with and without `./` before its name: a remote being its
+/// path switches between two spellings of the same file, with and without `./` (`.\` on Windows) before its name: a remote being its
 /// URLs, account and credentials path, the reload drops it and adds it again, which reconnects the uplink alone.
 /// `apply` reloads the leaf node's service ([`crate::service::Services::apply`]);
 /// returns what came of it, or how to do it by hand.
@@ -220,15 +220,21 @@ pub fn use_renewed_uplink(path: &Path, apply: impl FnOnce(Action) -> Outcome) ->
     })
 }
 
-/// The other spelling of the file `path`: with `./` before its name, or without.
+/// The other spelling of the file `path`: with `./` before its name (`.\` after a Windows directory), or without.
 fn respell(path: &str) -> String {
-    match path.rsplit_once('/') {
-        Some((".", name)) => name.to_owned(),
-        Some((dir, name)) => match dir.strip_suffix("/.") {
-            Some(dir) => format!("{dir}/{name}"),
-            None => format!("{dir}/./{name}"),
-        },
-        None => format!("./{path}"),
+    respell_at(path, std::path::is_separator)
+}
+
+/// [`respell`], with the separators of paths of the platform whose separators `is_separator` tells.
+fn respell_at(path: &str, is_separator: impl Fn(char) -> bool) -> String {
+    let Some(at) = path.rfind(&is_separator) else { return format!("./{path}") };
+    let (dir, separator, name) = (&path[..at], &path[at..=at], &path[at + 1..]);
+    if dir == "." {
+        return name.to_owned();
+    }
+    match dir.strip_suffix('.').filter(|dir| dir.ends_with(&is_separator)) {
+        Some(dir) => format!("{dir}{name}"),
+        None => format!("{dir}{separator}.{separator}{name}"),
     }
 }
 

@@ -220,7 +220,7 @@ An ant listed in `managers` (when `ants daemon` serves the whole config file, no
 3. Publishes signed `AntRequest`s on `ants.antreq.<manager>` every 5 s until `ants signer` answers or `timeout` elapses (default `15m`, max `30m`).
 4. Writes `<name>.creds`, deletes `<name>.nk`, appends `[[ant]]` to `config.toml`, and returns once `<name>` appears in `ants_colony` (or after 60 s noting it is not yet listed).
 
-Behind a leaf node, `ants signer` also renews the leaf uplink JWT and admits the ant to the outbox (refusing up front if the uplink JWT would exceed 252 KiB; see [transport.md](transport.md#enrollment-behind-a-leaf-node)). The daemon writes the renewed uplink credentials and toggles `./` on the `credentials` path in `leaf.conf` before reloading `ants.nats` / `ants-nats`, or the nats-server an `ants daemon` runs from that file ([Managed nats-server](#managed-nats-server)), with `SIGHUP`, reconnecting only the uplink while local clients stay connected.
+Behind a leaf node, `ants signer` also renews the leaf uplink JWT and admits the ant to the outbox (refusing up front if the uplink JWT would exceed 252 KiB; see [transport.md](transport.md#enrollment-behind-a-leaf-node)). The daemon writes the renewed uplink credentials and toggles `./` (`.\` after a Windows directory) on the `credentials` path in `leaf.conf` before reloading `ants.nats` / `ants-nats`, or the nats-server an `ants daemon` runs from that file ([Managed nats-server](#managed-nats-server)), with `SIGHUP`, reconnecting only the uplink while local clients stay connected.
 
 `ants signer` runs on the account-key machine (`scripts/install-units.sh --signer`):
 
