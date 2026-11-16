@@ -647,7 +647,9 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
             SharedSettings::new(dev_a.clone(), serde_json::Map::from_iter([("model".into(), json!("evil"))]), m2, None);
         m2_kv.put(forged.key(), serde_json::to_vec(&forged).unwrap()).await.unwrap();
         ants_daemon::shared::refresh(m2_bucket, None, &standby, std::slice::from_ref(&dev_a)).await;
-        assert_eq!(standby.record(&dev_a), None, "not applied");
+        // m1 may have mended the record already; the forged one is never applied.
+        let applied = standby.record(&dev_a);
+        assert!(applied.is_none_or(|r| r.fields.get("model") != Some(&json!("evil"))), "not applied");
         ants.send_replace(vec![dev_a.clone()]);
         let mended = tokio::time::timeout(WAIT, async {
             loop {
