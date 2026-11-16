@@ -908,6 +908,15 @@ struct Thread {
     queued: HashSet<Uuid>,
 }
 
+/// Who withdrew a message before the ant was prompted with it.
+struct Withdrawal {
+    by: UserId,
+    /// The human an assistant withdrew it for.
+    on_behalf_of: Option<UserId>,
+    /// Whether the assistant recorded it under a key of its own, the human untold yet.
+    recorded: bool,
+}
+
 #[derive(Clone, Copy)]
 struct Retry {
     seq: u64,
@@ -1930,8 +1939,8 @@ impl Inbox<'_> {
         }
         let attempt = Attempt::of(delivered, MAX_ATTEMPTS);
         // Taken up before anything is done for it, unless a human withdrew it first (`ants withdraw`).
-        let result = match self.attempts.take_up(envelope).await {
-            Ok(Some((by, on_behalf_of))) => self.withdrawn(&incoming, &msg, seq, &by, on_behalf_of.as_ref()).await,
+        let result = match self.take_up(envelope).await {
+            Ok(Some(withdrawal)) => self.withdrawn(&incoming, &msg, seq, &withdrawal).await,
             Ok(None) => self.take(&mut incoming, &msg, seq, attempt).await,
             Err(e) => Err(e),
         };
@@ -2015,18 +2024,49 @@ impl Inbox<'_> {
         Ok(())
     }
 
-    /// Ack the message at stream sequence `seq`, which `by` withdrew before the ant was prompted with it, once a
-    /// notice of it is stored on its thread, so `ants thread show` tells what became of it. The notice answers the
-    /// sender, as a reply would, unless no reply can go to it: a webhook's goes to the thread's owner, and one to an ant
-    /// out of turns, or to a channel post, to the human who withdrew it.
+    /// Mark `envelope` as started right before handling it ([`Attempts::take_up`]), unless it was withdrawn first: by
+    /// a human (`ants withdraw`), by an assistant for its human through a daemon of the ant ([`Self::cancel_for`]), or
+    /// by the assistant of the message's human, its sender or the one it was sent for, under a key of the assistant's
+    /// own while no daemon answered ([`crate::attempts::record_withdrawal`]), honoured as a cancel request is: while the
+    /// human's grant names the assistant.
+    async fn take_up(&self, envelope: &Envelope) -> Result<Option<Withdrawal>> {
+        if let Some((by, on_behalf_of)) = self.attempts.take_up(envelope).await? {
+            return Ok(Some(Withdrawal { by, on_behalf_of, recorded: false }));
+        }
+        let sender = Some(&envelope.from).filter(|from| self.humans.is_human(from));
+        let mut humans: Vec<&UserId> = sender.into_iter().chain(envelope.on_behalf_of.as_ref()).collect();
+        humans.dedup();
+        for human in humans {
+            let Some(assistant) = self.humans.assistant(human) else { continue };
+            let Some((claimed, started)) = self.attempts.withdrawal_by(envelope, &assistant).await? else { continue };
+            if &claimed != human {
+                tracing::warn!(%assistant, %claimed, %human, "ignoring a withdrawal for a human the message is not of");
+                continue;
+            }
+            if self.assisted(&assistant, Some(&claimed), "withdrawal").await.is_none() {
+                continue;
+            }
+            if self.attempts.withdraw_started(envelope, &assistant, &claimed, started).await? {
+                return Ok(Some(Withdrawal { by: assistant, on_behalf_of: Some(claimed), recorded: true }));
+            }
+            tracing::warn!(message = %envelope.id, "the mark of a message changed while honouring its withdrawal");
+        }
+        Ok(None)
+    }
+
+    /// Ack the message at stream sequence `seq`, which `withdrawal.by` withdrew before the ant was prompted with it,
+    /// once a notice of it is stored on its thread, so `ants thread show` tells what became of it. The notice answers
+    /// the sender, as a reply would, unless no reply can go to it: a webhook's goes to the thread's owner, and one to an
+    /// ant out of turns, or to a channel post, to the human who withdrew it. The human an assistant withdrew a message
+    /// for by a record of its own is told too, unless the notice goes to it.
     async fn withdrawn(
         &self,
         incoming: &Incoming,
         msg: &jetstream::Message,
         seq: u64,
-        by: &UserId,
-        on_behalf_of: Option<&UserId>,
+        withdrawal: &Withdrawal,
     ) -> Result<()> {
+        let (by, on_behalf_of) = (&withdrawal.by, withdrawal.on_behalf_of.as_ref());
         let envelope = &incoming.envelope;
         let thread = &envelope.thread_id;
         tracing::info!(%thread, %by, ?on_behalf_of, message = %envelope.id, "acking a withdrawn message unprompted");
@@ -2053,6 +2093,15 @@ impl Inbox<'_> {
             }
         };
         bus::store(self.js, notice.subject(), &notice, &reply_id(self.ant, envelope)).await?;
+        if let Some(human) = on_behalf_of.filter(|human| withdrawal.recorded && **human != notice.to) {
+            let (assistant, message) = (&withdrawal.by, envelope.id);
+            let text = format!(
+                "[ants] {assistant}, as the assistant of {human}, withdrew message {message} from the queue of {ant} \
+                 on thread {thread} for {human}."
+            );
+            let told = Envelope::new(ant.clone(), human.clone(), text).with_owner(Some(human.clone()));
+            bus::store(self.js, told.subject(), &told, &format!("on-behalf-withdrawn-{message}")).await?;
+        }
         self.done(msg, seq).await
     }
 

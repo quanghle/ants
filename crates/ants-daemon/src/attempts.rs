@@ -16,12 +16,13 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use ants_proto::{
-    ChannelPost, Envelope, MessageMark, NotesPost, ThreadId, UserId, Uuid, attempt_key, message_mark_key,
+    ChannelPost, Envelope, MessageMark, NotesPost, ThreadId, UserId, Uuid, assisted_withdrawal_key, attempt_key,
+    message_mark_key,
 };
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::direct_kv::DirectKv;
+use crate::direct_kv::{DirectKv, Lookup};
 
 /// What an earlier attempt at a message left.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,6 +128,48 @@ impl Attempts {
         })
     }
 
+    /// The human `assistant` withdrew `envelope` for under a key of its own ([`record_withdrawal`]), with the stream
+    /// sequence of the message's started mark, when the withdrawal was stored before that mark: the message was not
+    /// taken up when the assistant was told the withdrawal holds. The human is as the record claims it, unchecked.
+    pub async fn withdrawal_by(&self, envelope: &Envelope, assistant: &UserId) -> Result<Option<(UserId, u64)>> {
+        let key = assisted_withdrawal_key(&self.ant, &envelope.id, assistant);
+        let (Lookup::Value(record), recorded) = self.kv.lookup_last(&key).await.context("reading a withdrawal")? else {
+            return Ok(None);
+        };
+        let (Lookup::Value(mark), started) =
+            self.kv.lookup_last(message_mark_key(&self.ant, &envelope.id)).await.context("reading the mark")?
+        else {
+            return Ok(None);
+        };
+        if recorded > started || !matches!(serde_json::from_slice(&mark), Ok(MessageMark::Started { .. })) {
+            return Ok(None);
+        }
+        match serde_json::from_slice(&record) {
+            Ok(MessageMark::Withdrawn { by, on_behalf_of: Some(human), .. }) if &by == assistant => {
+                Ok(Some((human, started)))
+            }
+            _ => {
+                tracing::warn!(%key, "ignoring a withdrawal naming no human, or another assistant");
+                Ok(None)
+            }
+        }
+    }
+
+    /// Mark `envelope`, whose started mark is at stream sequence `started`, withdrawn by `assistant` for `human`
+    /// instead, unless the mark changed meanwhile. Whether it did.
+    pub async fn withdraw_started(
+        &self,
+        envelope: &Envelope,
+        assistant: &UserId,
+        human: &UserId,
+        started: u64,
+    ) -> Result<bool> {
+        let mark =
+            MessageMark::Withdrawn { by: assistant.clone(), at: chrono::Utc::now(), on_behalf_of: Some(human.clone()) };
+        let key = message_mark_key(&self.ant, &envelope.id);
+        self.kv.update(key, serde_json::to_vec(&mark)?, started).await.context("marking the message withdrawn")
+    }
+
     /// Withdraw `message` for `by`, or for `on_behalf_of` whose assistant `by` is, as [`withdraw`] does.
     pub async fn withdraw(
         &self,
@@ -172,6 +215,46 @@ pub async fn withdraw(
 ) -> Result<Option<MessageMark>> {
     let on_behalf_of = on_behalf_of.cloned();
     mark(kv, ant, message, &MessageMark::Withdrawn { by: by.clone(), at: chrono::Utc::now(), on_behalf_of }).await
+}
+
+/// What became of a withdrawal [`record_withdrawal`] stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Recorded {
+    /// It holds: the daemon of the ant honours it before taking the message up, the grant still naming the assistant.
+    Holds,
+    /// The message has this mark already, of a withdrawal or one stored before the record: the record holds no more.
+    Marked(MessageMark),
+}
+
+/// Record the withdrawal of message `message` from the queue of `ant` by the assistant `assistant` for `human`, in
+/// `kv`, the attempts bucket, while no daemon of the ant answers its cancel request: under a key of the assistant's
+/// own ([`assisted_withdrawal_key`]), which the ant's daemon reads before taking up a message of `human`'s
+/// ([`Attempts::withdrawal_by`]). A message taken up or finished before the record is stored keeps going: the record
+/// is deleted again.
+pub async fn record_withdrawal(
+    kv: &DirectKv,
+    ant: &UserId,
+    message: &Uuid,
+    assistant: &UserId,
+    human: &UserId,
+) -> Result<Recorded> {
+    let key = assisted_withdrawal_key(ant, message, assistant);
+    let record =
+        MessageMark::Withdrawn { by: assistant.clone(), at: chrono::Utc::now(), on_behalf_of: Some(human.clone()) };
+    kv.create(&key, serde_json::to_vec(&record)?).await.context("recording the withdrawal")?;
+    let (_, recorded) = kv.lookup_last(&key).await.context("reading the withdrawal")?;
+    let (mark, marked) = kv.lookup_last(message_mark_key(ant, message)).await.context("reading the message's mark")?;
+    let Lookup::Value(mark) = mark else { return Ok(Recorded::Holds) };
+    let mark: MessageMark = serde_json::from_slice(&mark).context("reading the message's mark")?;
+    if matches!(mark, MessageMark::Started { .. }) && marked > recorded {
+        return Ok(Recorded::Holds);
+    }
+    if !matches!(mark, MessageMark::Withdrawn { .. })
+        && let Err(e) = kv.delete(&key).await
+    {
+        tracing::warn!(%key, error = format!("{e:#}"), "deleting a withdrawal that came too late");
+    }
+    Ok(Recorded::Marked(mark))
 }
 
 /// Create the mark of `message` to `ant` as `mark` unless it has one. Returns the mark found instead.

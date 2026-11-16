@@ -3155,6 +3155,75 @@ async fn an_assistant_withdraws_and_cancels_for_its_human_and_no_other_ant_does(
     assert_eq!(bus.unacked().await, 0);
 }
 
+/// While no daemon of the ant serves, the assistant of a human withdraws a message of the human's, or one it sent for
+/// the human, by a record under a key of its own, which the daemon honours as it takes the message up, telling the
+/// human; one recorded by an ant the grant does not name, or after the message was taken up, withdraws nothing.
+#[tokio::test]
+async fn a_withdrawal_an_assistant_records_while_no_daemon_serves_is_honoured_before_the_prompt() {
+    use crate::attempts::{Recorded, record_withdrawal};
+    use ants_proto::{AssistantRecord, MessageMark};
+    let Some((mut bus, _)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let [alice, pa, pb] = ants(["alice", "pa", "pb"]);
+    let device = crate::humans::TestDevice::default();
+    bus.humans = Registry::with(UserId::human(), &["alice"]).verifying_grants(Some(device.account()));
+    bus.account = Some(device.account());
+    let mut grant =
+        ants_proto::AssistantGrant::new(alice.clone(), Some(pa.clone()), chrono::Utc::now(), device.jwt(&alice));
+    grant.signature = device.sign(&grant.signed());
+    bus.humans.put_record(&grant.key(), Some(&serde_json::to_vec(&grant).unwrap()));
+    let devices = jetstream::kv::Config { bucket: ants_proto::DEVICES_BUCKET.to_owned(), ..Default::default() };
+    let devices = bus.js.create_key_value(devices).await.unwrap();
+    for ant in [&pa, &pb] {
+        let record = AssistantRecord { jwt: device.assistant_jwt(ant, &alice) };
+        devices.put(ants_proto::assistant_record_key(ant), serde_json::to_vec(&record).unwrap().into()).await.unwrap();
+    }
+    let mut to_alice = bus.client.subscribe(subject::inbox_of(&alice)).await.unwrap();
+    bus.client.flush().await.unwrap();
+    let [t1, t2, t3, t4] = [(); 4].map(|()| ThreadId::generate());
+    let (a, _) = bus.send_from(alice.clone(), &t1, "a").await;
+    let (b, _) = bus.send_from(alice.clone(), &t2, "b").await;
+    let (c, _) = bus.send_from(alice.clone(), &t3, "c").await;
+    let mut for_alice = Envelope::on_thread(t4.clone(), pa.clone(), bus.dev.clone(), "d");
+    for_alice.on_behalf_of = Some(alice.clone());
+    bus::publish_json(&bus.js, for_alice.subject(), &for_alice, None).await.unwrap();
+
+    let record = async |message: &Envelope, assistant: &UserId| {
+        record_withdrawal(&bus.markers, &bus.dev, &message.id, assistant, &alice).await
+    };
+    assert_eq!(record(&a, &pa).await.unwrap(), Recorded::Holds);
+    assert_eq!(record(&for_alice, &pa).await.unwrap(), Recorded::Holds);
+    assert_eq!(record(&b, &pb).await.unwrap(), Recorded::Holds, "stored, but pb is not alice's assistant");
+    assert_eq!(bus.attempts.take_up(&c).await.unwrap(), None, "c is taken up");
+    assert!(matches!(record(&c, &pa).await.unwrap(), Recorded::Marked(MessageMark::Started { .. })), "too late");
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let mut texts = Vec::new();
+        for _ in 0..5 {
+            texts.push(next_envelope(&mut to_alice).await.text);
+        }
+        let has = |part: &str| texts.iter().any(|t| t.contains(part));
+        assert!(has("[ants] Withdrawn by pa for alice before dev-a was prompted with it."), "{texts:?}");
+        assert!(has(&format!("pa, as the assistant of alice, withdrew message {} from the queue", for_alice.id)));
+        assert!(!has(&format!("withdrew message {}", a.id)), "a's withdrawal notice went to alice: {texts:?}");
+        assert!(has(": b") && has(": c"), "{texts:?}");
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    let mut answered = log.locked().answered.clone();
+    answered.sort();
+    assert_eq!(answered, ["b", "c"]);
+    for message in [&a, &for_alice] {
+        assert!(
+            matches!(mark_of(&bus, message).await, Some(MessageMark::Withdrawn { by, on_behalf_of: Some(human), .. })
+                if by == pa && human == alice)
+        );
+    }
+    assert_eq!(bus.unacked().await, 0);
+}
+
 /// A message claiming to be sent for a human by an ant its grant does not name is the ant's own: answered as any
 /// other, with nothing told to the human.
 #[tokio::test]

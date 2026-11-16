@@ -4,7 +4,7 @@ use super::*;
 use crate::{
     ANTS_VERSION, AntReply, AntRequest, CancelReply, CancelRequest, ChainEntry, ChannelEntry, ChannelOp, DeviceId,
     HumanEntry, Humans, QueueRequest, Refusal, SPARE_READERS, Serving, ThreadId, Uuid, assisted_owner_key,
-    channel_manager_serving_key, p,
+    assisted_withdrawal_key, channel_manager_serving_key, p,
 };
 
 #[test]
@@ -412,11 +412,16 @@ fn only_an_assistant_acts_for_its_human_on_the_subjects_naming_it() {
             assert_eq!(leaf.publish.iter().any(|have| covers(have, s)), carries, "a leaf uplink carrying {s}");
         }
     }
-    // Its human's pins, archives and snoozes, and only its human's of all humans' and assistants'.
-    let marks = ["marks", "snoozed"].map(|k| format!("$KV.ants_threads.{k}.alice"));
+    // The pins, archives and snoozes it sets for its human under keys naming it, never its human's own, and the
+    // withdrawals it records under keys naming it.
+    let own = ["marks", "snoozed"].map(|k| format!("$KV.ants_threads.{k}.alice"));
+    let marks = ["marks", "snoozed"].map(|k| format!("$KV.ants_threads.{k}.alice.pa"));
+    let withdrawal = format!("$KV.ants_attempts.{}", assisted_withdrawal_key(&p("dev-a"), &Uuid::now_v7(), &pa));
     for (n, other) in others.iter().enumerate() {
         let held = |s: &String| other.publish.iter().any(|have| covers(have, s));
-        assert!(marks.iter().all(|s| held(s) == (n == 0 || n == 4)), "credentials {n} set alice's marks");
+        assert!(own.iter().all(|s| held(s) == (n == 0)), "credentials {n} set alice's own marks");
+        assert!(marks.iter().all(|s| held(s) == (n == 0 || n == 4)), "credentials {n} set pa's marks for alice");
+        assert_eq!(held(&withdrawal), n == 1 || n == 4, "credentials {n} record pa's withdrawal");
     }
     assert!(marks.iter().all(|s| assistant.publish.contains(s)));
     for own in ["marks", "snoozed"].map(|k| format!("ants_threads.{k}.pa")) {
@@ -429,6 +434,8 @@ fn only_an_assistant_acts_for_its_human_on_the_subjects_naming_it() {
         for s in &marks {
             assert_eq!(leaf.publish.iter().any(|have| covers(have, s)), carries, "a leaf uplink carrying {s}");
         }
+        let any_assistant = !matches!(role, LeafRole::Ant);
+        assert_eq!(leaf.publish.iter().any(|have| covers(have, &withdrawal)), any_assistant, "{withdrawal}");
     }
     let a = Permissions::for_user(&p("dev-a"), Role::Ant);
     for heard in [cancel.subject(), "ants.cancel.dev-a.t1".to_owned(), queue.subject(), "ants.queue.dev-a".to_owned()] {
@@ -757,17 +764,21 @@ fn humans_set_every_title_tldr_and_done_state_but_only_their_own_pins_and_archiv
         "$JS.API.DIRECT.GET.KV_ants_threads.$KV.ants_threads.summary.*",
         "$KV.ants_threads.done.*",
         "$JS.API.DIRECT.GET.KV_ants_threads.$KV.ants_threads.done.*",
-        "$KV.ants_threads.marks.alice",
-        "$JS.API.DIRECT.GET.KV_ants_threads.$KV.ants_threads.marks.alice",
-        "$KV.ants_threads.snoozed.alice",
-        "$JS.API.DIRECT.GET.KV_ants_threads.$KV.ants_threads.snoozed.alice",
         "$JS.API.STREAM.CREATE.KV_ants_threads",
     ] {
         assert!(human.publish.iter().any(|have| have == s), "{s} missing from {:?}", human.publish);
     }
+    // Its own marks and snoozes, and those its assistants set for it, and no other human's.
+    for key in ["marks.alice", "snoozed.alice", "marks.alice.pa", "snoozed.alice.pb"] {
+        for s in
+            [format!("$KV.ants_threads.{key}"), format!("$JS.API.DIRECT.GET.KV_ants_threads.$KV.ants_threads.{key}")]
+        {
+            assert!(human.publish.iter().any(|have| covers(have, &s)), "{s} missing from {:?}", human.publish);
+            let bob = s.replace("alice", "bob");
+            assert!(!human.publish.iter().any(|have| covers(have, &bob)), "{bob}");
+        }
+    }
     let threads: Vec<&String> = human.publish.iter().filter(|s| s.contains("ants_threads")).collect();
-    assert!(threads.iter().all(|s| !s.contains("marks") || s.ends_with("marks.alice")), "{threads:?}");
-    assert!(threads.iter().all(|s| !s.contains("snoozed") || s.ends_with("snoozed.alice")), "{threads:?}");
     assert!(!threads.iter().any(|s| s.ends_with("ants_threads.>") || s.contains("CONSUMER")), "{threads:?}");
     let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
     let threads: Vec<&String> =
@@ -1143,12 +1154,12 @@ fn an_assistant_keeps_its_ant_rights_and_a_humans_under_its_own_name() {
         assert!(human.publish.iter().any(|have| have == s), "{s} is a human's");
         assert!(!assistant.publish.iter().any(|have| covers(have, s)), "{s} is not an assistant's");
     }
-    // Of its human's keys it only reads but its pins, archives and snoozes; it moves no device's key, presence or
-    // notifications.
+    // Of its human's keys it only reads but the pins, archives and snoozes it sets for it; it moves no device's key,
+    // presence or notifications.
     for s in &assistant.publish {
         let key = s.strip_prefix("$JS.API.DIRECT.GET.").and_then(|get| get.split_once('.')).map_or(s.as_str(), |g| g.1);
         let owner = s == "$KV.ants_owners.*.*.alice.pa";
-        let marks = ["$KV.ants_threads.marks.alice", "$KV.ants_threads.snoozed.alice"].contains(&s.as_str());
+        let marks = ["$KV.ants_threads.marks.alice.pa", "$KV.ants_threads.snoozed.alice.pa"].contains(&s.as_str());
         assert!(owner || marks || s.starts_with("$JS.API.DIRECT.GET.") || !s.contains(".alice"), "writes {s}");
         assert!(!key.starts_with("$KV.ants_reactions.alice"), "reads {s}");
         for bucket in ["ants_devices", "ants_presence", "ants_notify", "ants_humans"] {

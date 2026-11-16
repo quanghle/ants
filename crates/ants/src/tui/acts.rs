@@ -220,18 +220,22 @@ async fn changing(
             .await?;
             Ok(on || was.get())
         }
-        Change::Pin(on) => meta()?.change_marks(|marks| if on { marks.pin(thread) } else { marks.unpin(thread) }).await,
+        Change::Pin(on) => {
+            meta()?.change_thread_marks(thread, |marks| if on { marks.pin(thread) } else { marks.unpin(thread) }).await
+        }
         Change::Archive(true) => {
             let after = thread_meta::last_sequence(js).await?;
-            meta()?.change_marks(|marks| marks.archive(thread, after)).await
+            meta()?.change_thread_marks(thread, |marks| marks.archive(thread, after)).await
         }
         // Keeping it too unarchives one archived for having been idle.
-        Change::Archive(false) => meta()?.change_marks(|marks| marks.unarchive(thread) | marks.keep(thread)).await,
+        Change::Archive(false) => {
+            meta()?.change_thread_marks(thread, |marks| marks.unarchive(thread) | marks.keep(thread)).await
+        }
         Change::Done(on) => thread_meta::mark_done(&*meta()?, thread, on, last).await,
         Change::Snooze(until) => {
             let now = Utc::now();
             meta()?
-                .change_snoozes(|snoozes| match until {
+                .change_thread_snoozes(thread, |snoozes| match until {
                     Some(until) => {
                         snoozes.snooze(thread, now, until);
                         true

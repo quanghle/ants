@@ -77,6 +77,13 @@ impl Checker {
         acting
     }
 
+    /// The assistant acting for `human` now, if any: the one its grant names, whose record names the human.
+    pub async fn assistant(&self, human: &UserId) -> Option<UserId> {
+        self.read_grant(human).await;
+        let assistant = self.grants.locked().designated(human).cloned()?;
+        matches!(self.check(&assistant, Some(human)).await, Acting::For(_)).then_some(assistant)
+    }
+
     /// Who `publisher`'s act claiming `claim` is by, as [`Acting::label`] names it once checked ([`Checker::check`]).
     pub async fn label(&self, publisher: &UserId, claim: Option<&UserId>) -> String {
         self.check(publisher, claim).await.label(publisher.as_str())
