@@ -45,7 +45,7 @@ pub(crate) mod webhook;
 use anyhow::Result;
 
 use crate::cli::{Cli, Command, DaemonCommand};
-use crate::{Connection, Listing, add, colony, completions, machines, queue, renew, summary, tui};
+use crate::{Connection, Listing, add, colony, completions, machines, queue, renew, summary, tui, update};
 
 /// Run the command `cli` names, or the terminal UI without one.
 pub(crate) async fn run(cli: Cli) -> Result<()> {
@@ -96,6 +96,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         Command::Init { identities_restored } => init::run(&nats()?, identities_restored).await,
         Command::Setup(args) => Box::pin(setup::run(&args, &conn)).await,
         Command::Completions { shell, install } => completions::run(shell, install),
+        Command::Update(args) => update::run(args).await,
         Command::Tools(command) => tools::run(command, &conn).await,
         Command::Dead(command) => Box::pin(dead::run(&nats()?, command)).await,
         Command::Daemon(DaemonCommand::Daemon(args)) => daemon::run(&args, &conn).await,

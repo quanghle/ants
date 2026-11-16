@@ -15,7 +15,9 @@ use crate::cmd::{
     hook::HookCommand, keys::KeysCommand, leaf::LeafCommand, login, notify::NotifyCommand, setup,
     thread::ThreadCommand, tools::ToolsCommand, webhook::WebhookCommand,
 };
-use crate::{add, attachments, channel, completions, compose, progress, renew, retire, serve, spend, thread, upgrade};
+use crate::{
+    add, attachments, channel, completions, compose, progress, renew, retire, serve, spend, thread, update, upgrade,
+};
 
 /// The whole command line.
 pub(crate) type Cli = Ants<Command>;
@@ -480,6 +482,11 @@ pub(crate) enum Command {
         #[arg(long)]
         install: bool,
     },
+    /// Replace this ants executable with a release published on GitHub: the latest, when newer than this one, or the
+    /// one of --version. Checks the archive against the release's SHA256SUMS, runs the new binary with --version, then
+    /// renames it over the executable at once; services running ants restart onto it through their upgrade check.
+    /// Refuses an executable installed by cargo install, or in a directory not writable, printing the command to run.
+    Update(update::UpdateArgs),
     /// Issue NATS credentials: one operator and account for the team, one user per ant or human.
     #[command(subcommand)]
     Auth(AuthCommand),
