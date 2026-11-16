@@ -1,5 +1,7 @@
 //! `ants webhook`: add webhooks, serve them, and test the notifications of a human.
 
+mod add;
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -8,7 +10,7 @@ use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
 
 use crate::serve::Ended;
-use crate::{Connection, bridge, notify, reload, upgrade, webhook, webhook_add};
+use crate::{Connection, bridge, notify, reload, upgrade, webhook};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum WebhookCommand {
@@ -43,13 +45,13 @@ pub(crate) enum WebhookCommand {
     /// --enroll), write a new secret (or the one given, such as GitLab's signing token) to <name>.secret beside the
     /// config file (mode 0600), add its [[webhook]] entry, reload the webhook service, and print the URL and secret to
     /// give the sender.
-    Add(Box<webhook_add::AddArgs>),
+    Add(Box<add::AddArgs>),
 }
 
 pub(crate) async fn run(command: WebhookCommand, conn: &Connection<'_>) -> Result<()> {
     let domain = conn.js_domain;
     match command {
-        WebhookCommand::Add(args) => webhook_add::add(*args, conn.nats, domain).await,
+        WebhookCommand::Add(args) => add::add(*args, conn.nats, domain).await,
         WebhookCommand::Serve { config, listen, metrics, upgrade } => {
             let path = match config {
                 Some(path) => path,

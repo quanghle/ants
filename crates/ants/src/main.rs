@@ -19,21 +19,18 @@ mod cmd;
 mod colony;
 mod completions;
 mod compose;
-mod dash;
 mod defaults;
 mod devices;
 mod doctor;
 mod enroll;
 mod export;
 mod github;
-mod hook;
 mod http;
 mod humans;
 mod inbox;
 mod keys;
 mod leaf;
 mod live;
-mod login;
 mod machines;
 mod manager;
 mod members;
@@ -59,7 +56,6 @@ mod search;
 mod serve;
 mod service;
 mod settings;
-mod setup;
 mod signer;
 mod spend;
 mod summary;
@@ -70,7 +66,6 @@ mod tui;
 mod upgrade;
 mod versions;
 mod webhook;
-mod webhook_add;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -145,7 +140,7 @@ async fn run() -> Result<()> {
         Command::Watch { subject, thread } => cmd::watch::watch(&nats()?, &subject, thread).await,
         Command::Chat { since, compact } => Box::pin(tui::run(&nats()?, since, compact)).await,
         Command::Status { tmux, json } => Box::pin(tui::status(&nats()?, tmux, json)).await,
-        Command::Dash { since } => Box::pin(dash::run(&nats()?, since)).await,
+        Command::Dash { since } => Box::pin(cmd::dash::run(&nats()?, since)).await,
         Command::Cancel { ant, thread } => cmd::cancel::cancel(&nats()?, ant, thread).await,
         Command::Steer { ant, thread, replies, input, attach, words } => {
             Box::pin(send::steer(&nats()?, &ant, thread, &replies, &input, &attach, words)).await
@@ -158,7 +153,7 @@ async fn run() -> Result<()> {
             }
             Ok(())
         }
-        Command::Setup(args) => Box::pin(setup::run(&args, &conn)).await,
+        Command::Setup(args) => Box::pin(cmd::setup::run(&args, &conn)).await,
         Command::Completions { shell, install } => completions::run(shell, install),
         Command::Tools(command) => cmd::tools::run(command, &conn).await,
         Command::Dead(command) => Box::pin(cmd::dead::run(&nats()?, command)).await,
@@ -174,7 +169,7 @@ async fn run() -> Result<()> {
             let colony = retire_colony(&conn, &args.name).await;
             retire::retire(&args, colony.as_ref(), retire::STOP_WAIT, &cli.nats, domain).await
         }
-        Command::Login(args) => login::run(args).await,
+        Command::Login(args) => cmd::login::run(args).await,
         Command::Renew(args) => renew::run(args, &cli.nats, cli.creds.as_deref()).await,
         Command::Keys(command) => keys::run(command, &cli.nats, cli.creds.as_deref()).await,
         Command::Signer { config, approval_timeout, dir, upgrade } => {
@@ -186,7 +181,7 @@ async fn run() -> Result<()> {
         Command::Hook(HookCommand::Run { on, concurrency, timeout, command }) => {
             let nats = nats()?;
             let (_, js) = nats.connect_only("ants-hook").await?;
-            hook::Hook { event: on, command, timeout, concurrency }.run(&js, &nats.me.id).await
+            cmd::hook::Hook { event: on, command, timeout, concurrency }.run(&js, &nats.me.id).await
         }
         Command::Webhook(command) => cmd::webhook::run(command, &conn).await,
     }

@@ -11,12 +11,12 @@ use futures::StreamExt as _;
 
 use crate::cmd::{
     ant::AntCommand, attachment::AttachmentCommand, auth::AuthCommand, bridge::BridgeCommand, channel::ChannelCommand,
-    dead::DeadCommand, enroll::EnrollCommand, harness::HarnessCommand, leaf::LeafCommand, thread::ThreadCommand,
-    tools::ToolsCommand, webhook::WebhookCommand,
+    dead::DeadCommand, enroll::EnrollCommand, harness::HarnessCommand, hook, leaf::LeafCommand, login, setup,
+    thread::ThreadCommand, tools::ToolsCommand, webhook::WebhookCommand,
 };
 use crate::{
-    add, assistant, attachments, channel, completions, compose, hook, keys, login, progress, renew, retire, serve,
-    setup, spend, thread, upgrade,
+    add, assistant, attachments, channel, completions, compose, keys, progress, renew, retire, serve, spend, thread,
+    upgrade,
 };
 
 /// The whole command line.

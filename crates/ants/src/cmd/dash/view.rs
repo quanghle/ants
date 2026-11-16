@@ -282,7 +282,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
-    use crate::dash::model::{Action, Key};
+    use crate::cmd::dash::model::{Action, Key};
     use crate::live::State;
     use crate::live::tests::{at, message, request, user};
 
