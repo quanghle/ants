@@ -585,7 +585,8 @@ fn leaf_creds(
     let out = out.unwrap_or_else(|| dir.join(format!("leaf-{machine}.creds")));
     let kept = members::issued(&dir, &machine)?;
     let mut change = members::Change::from(members);
-    for ant in change.left_already(&dir, &machine, kept.as_ref())? {
+    let ever = members::ever(&dir, &machine)?;
+    for ant in change.left_already(kept.as_ref(), |ant| ever.contains(ant)) {
         println!("{ant} left the members of {machine} already: the uplink is issued without it");
     }
     let set = change.apply(&machine, kept, || {

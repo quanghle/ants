@@ -137,7 +137,7 @@ pub(crate) async fn run(command: LeafCommand, conn: &Connection<'_>) -> Result<(
                 println!("the hub no longer takes anything from the outbox of {machine}");
                 return Ok(());
             }
-            let change = members::Change::from(members);
+            let mut change = members::Change::from(members);
             let kept = if change.lists() {
                 None
             } else {
@@ -150,9 +150,15 @@ pub(crate) async fn run(command: LeafCommand, conn: &Connection<'_>) -> Result<(
                 })?;
                 Some(members)
             };
-            let set = change.apply(&machine, kept, || anyhow::anyhow!("no members of {machine}"))?;
             let nats = nats()?;
             let (_, js) = nats.connect("ants-cli").await?;
+            let dir = auth::default_dir()?;
+            for ant in outbox::left_already(&js, &machine, &dir, &mut change, kept.as_ref()).await? {
+                println!(
+                    "{ant} left the members of {machine} already: the hub takes nothing more of it from the outbox"
+                );
+            }
+            let set = change.apply(&machine, kept, || anyhow::anyhow!("no members of {machine}"))?;
             let leaf = outbox::connect(conn.nats, conn.creds, &nats.me.id, &machine).await?;
             outbox::admit(&leaf, &js, &machine, &set.roles()).await?;
             outbox::sourced(&js, &machine, outbox::SOURCE_WAIT).await?;
