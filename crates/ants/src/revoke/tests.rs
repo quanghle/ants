@@ -380,6 +380,8 @@ fn the_keys_a_key_was_renewed_from_are_its_live_predecessors() {
     expected.sort();
     assert_eq!(earlier, expected);
     assert!(renewed_from(&team, std::slice::from_ref(&first)).unwrap().is_empty());
+    // What a renewal's hint revokes for the key it replaced reaches back, never forward to the new key.
+    assert_eq!(renewed_from(&team, std::slice::from_ref(&second)).unwrap(), std::slice::from_ref(&first));
     revoke(&team, None, std::slice::from_ref(&first)).unwrap();
     assert_eq!(renewed_from(&team, std::slice::from_ref(&third)).unwrap(), [second]);
 

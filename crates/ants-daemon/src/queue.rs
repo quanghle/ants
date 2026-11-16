@@ -7,8 +7,8 @@ use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 
 use ants_proto::{
-    CHANNELS_BUCKET, ChannelEntry, ChannelId, ChannelPost, ConsumerPlace, Envelope, Humans, MessageMark, QueueReply,
-    QueuedMessage, ThreadId, UserId, Uuid, message_mark_key, subject,
+    CHANNELS_BUCKET, ChannelEntry, ChannelId, ChannelPost, ConsumerPlace, Envelope, Hold, Humans, MessageMark,
+    QueueReply, QueuedMessage, ThreadId, UserId, Uuid, message_mark_key, subject,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::consumer::DeliverPolicy;
@@ -43,6 +43,9 @@ pub struct Waiting {
     /// which can still be withdrawn.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub retry: bool,
+    /// What it is held for, awaiting a retry after its tools ran: a sign-in or a provider limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub held: Option<Hold>,
     /// Whether it awaits redelivery started already, in an attempt that may still have effects (its daemon stopped, or
     /// it stored a reply): it cannot be withdrawn.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -140,7 +143,7 @@ pub async fn waiting(
 fn marked(m: &mut Waiting, found: Option<MessageMark>) {
     match found {
         Some(MessageMark::Started { .. }) => m.started = true,
-        Some(MessageMark::Retrying { .. }) => m.retry = true,
+        Some(MessageMark::Retrying { held, .. }) => (m.retry, m.held) = (true, held),
         Some(MessageMark::Withdrawn { by, on_behalf_of, .. }) => {
             (m.withdrawn_by, m.withdrawn_for) = (Some(by), on_behalf_of);
         }
@@ -156,7 +159,7 @@ pub async fn withdrawals(kv: &DirectKv, ant: &UserId, waiting: &mut [Waiting]) -
             Some(MessageMark::Withdrawn { by, on_behalf_of, .. }) => {
                 (message.withdrawn_by, message.withdrawn_for) = (Some(by), on_behalf_of);
             }
-            Some(MessageMark::Retrying { .. }) => message.retry = true,
+            Some(MessageMark::Retrying { held, .. }) => (message.retry, message.held) = (true, held),
             Some(MessageMark::Started { .. } | MessageMark::Finished { .. }) | None => {}
         }
     }
@@ -183,6 +186,7 @@ pub fn held_waiting(m: QueuedMessage) -> Waiting {
         delivered: !m.redelivery,
         redelivery: m.redelivery,
         retry: false,
+        held: None,
         started: false,
         withdrawn_by: None,
         withdrawn_for: None,
@@ -190,7 +194,8 @@ pub fn held_waiting(m: QueuedMessage) -> Waiting {
 }
 
 /// Where a message stands: running, withdrawn, or waiting behind others of its thread, in the daemon's hands, awaiting
-/// a retry after a failed attempt, awaiting redelivery (not withdrawable when started already) or still in the stream.
+/// a retry after a failed attempt, held for a sign-in or a provider limit after its tools ran, awaiting redelivery (not
+/// withdrawable when started already) or still in the stream.
 pub fn state(m: &Waiting) -> String {
     if m.running {
         return "running".to_owned();
@@ -201,6 +206,8 @@ pub fn state(m: &Waiting) -> String {
     let place = if m.ahead == 0 { "next".to_owned() } else { format!("{} ahead", m.ahead) };
     if m.started {
         format!("{place}, awaiting redelivery (started; not withdrawable)")
+    } else if let Some(held) = m.held {
+        format!("{place}, held for {held}")
     } else if m.retry {
         format!("{place}, awaiting a retry after a failed attempt")
     } else if m.redelivery {
@@ -254,6 +261,7 @@ fn to_waiting(seq: u64, message: Unheld, ahead: &mut HashMap<ThreadId, usize>) -
         delivered: false,
         redelivery: false,
         retry: false,
+        held: None,
         started: false,
         withdrawn_by: None,
         withdrawn_for: None,
@@ -411,12 +419,15 @@ mod tests {
         js.publish(later.subject(), serde_json::to_vec(&later).unwrap().into()).await.unwrap().await.unwrap();
         let thread_id = running.thread_id.clone();
         for (envelope, mark) in [
-            (&limited, MessageMark::Retrying { thread_id: thread_id.clone(), at: Utc::now() }),
-            (&held_retry, MessageMark::Retrying { thread_id: thread_id.clone(), at: Utc::now() }),
-            (&retried, MessageMark::Retrying { thread_id: thread_id.clone(), at: Utc::now() }),
+            (
+                &limited,
+                MessageMark::Retrying { thread_id: thread_id.clone(), at: Utc::now(), held: Some(Hold::ProviderLimit) },
+            ),
+            (&held_retry, MessageMark::Retrying { thread_id: thread_id.clone(), at: Utc::now(), held: None }),
+            (&retried, MessageMark::Retrying { thread_id: thread_id.clone(), at: Utc::now(), held: None }),
             (&crashed, MessageMark::Started { thread_id: thread_id.clone(), at: Utc::now() }),
             (&finished, MessageMark::Finished { thread_id: thread_id.clone(), at: Utc::now() }),
-            (&later, MessageMark::Withdrawn { by: alice.clone(), at: Utc::now(), on_behalf_of: None }),
+            (&later, MessageMark::Withdrawn { by: alice.clone(), at: Utc::now(), on_behalf_of: None, held: None }),
         ] {
             kv.put(message_mark_key(&ant, &envelope.id), serde_json::to_vec(&mark).unwrap()).await.unwrap();
         }
@@ -454,7 +465,7 @@ mod tests {
             states,
             [
                 "running",
-                "1 ahead, awaiting a retry after a failed attempt",
+                "1 ahead, held for a provider limit",
                 "2 ahead, awaiting a retry after a failed attempt",
                 "3 ahead, awaiting redelivery",
                 "4 ahead, awaiting a retry after a failed attempt",

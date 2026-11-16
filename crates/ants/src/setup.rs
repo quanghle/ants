@@ -320,7 +320,7 @@ async fn init(report: &mut Report, args: &SetupArgs, connection: &Connection<'_>
     }
     let done = async {
         let nats = Nats::new(connection.nats, connection.creds, connection.js_domain)?;
-        crate::init_hub(&nats).await
+        crate::init_hub(&nats, false).await
     };
     match done.await {
         Ok(lines) => report.step(Mark::Done, step, lines.join("\n       ")),

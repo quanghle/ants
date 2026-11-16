@@ -3,21 +3,22 @@
 //! is left as it is.
 //!
 //! An object whose stream info the credentials do not get, as the presence and identities buckets for every human's, cannot be
-//! checked: [`init`] creates it all the same, which changes nothing when it exists with the same settings, or, for the
-//! identities bucket, whose stream each creation starts at a sequence of its own ([`identities_config`]), when it exists.
+//! checked: [`init`] creates it all the same, which changes nothing when it exists with the same settings. Creating the
+//! identities bucket also writes its incarnation marker when absent ([`mark_incarnation`]).
 
 use std::fmt;
 use std::time::Duration;
 
 use ants_proto::{
     ATTACHMENT_CHUNK, ATTACHMENT_HEADROOM, ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, COLONY_BUCKET, COLONY_TTL,
-    DEVICES_BUCKET, FILES_BUCKET, FILES_STREAM, HUMANS_BUCKET, IDENTITIES_BUCKET, LINKS_BUCKET, MACHINES_BUCKET,
-    NOTIFY_BUCKET, OWNERS_BUCKET, PRESENCE_BUCKET, PRESENCE_TTL, REACTIONS_BUCKET, READ_BUCKET, SESSIONS_BUCKET,
-    STORED_INBOX_DESTINATION, STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, THREADS_BUCKET, Uuid, WEBHOOK_RETENTION,
-    WEBHOOKS_BUCKET,
+    DEVICES_BUCKET, FILES_BUCKET, FILES_STREAM, HUMANS_BUCKET, IDENTITIES_BUCKET, INCARNATION_KEY, LINKS_BUCKET,
+    MACHINES_BUCKET, NOTIFY_BUCKET, OWNERS_BUCKET, PRESENCE_BUCKET, PRESENCE_TTL, REACTIONS_BUCKET, READ_BUCKET,
+    SESSIONS_BUCKET, STORED_INBOX_DESTINATION, STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, THREADS_BUCKET,
+    WEBHOOK_RETENTION, WEBHOOKS_BUCKET,
 };
 use anyhow::{Context as _, Result, bail};
-use async_nats::jetstream::context::{CreateStreamError, CreateStreamErrorKind, GetStreamError, GetStreamErrorKind};
+use async_nats::jetstream::context::{GetStreamError, GetStreamErrorKind};
+use async_nats::jetstream::stream::DirectGetErrorKind;
 use async_nats::jetstream::{self, ErrorCode, kv, stream};
 
 use crate::bus::{DUPLICATE_WINDOW, RETENTION};
@@ -130,7 +131,7 @@ impl Object {
             Self::Notify => Spec::Bucket(Box::new(notify_config())),
             Self::Devices => Spec::Bucket(Box::new(devices_config())),
             Self::Machines => Spec::Bucket(Box::new(machines_config())),
-            Self::Identities => Spec::Stream(Box::new(identities_config())),
+            Self::Identities => Spec::Bucket(Box::new(identities_config())),
         }
     }
 
@@ -150,18 +151,18 @@ impl Object {
     }
 
     /// Create the object. A watched bucket's room for [`MAX_CONSUMERS`], which a KV configuration cannot hold, follows
-    /// by an update of its stream. The identities bucket there already is left as it is, though its first sequence
-    /// differs from the one drawn for it now.
+    /// by an update of its stream; the identities bucket's incarnation marker, when absent, by a write
+    /// ([`mark_incarnation`]).
     async fn create(self, js: &jetstream::Context) -> Result<()> {
         let store = match self.spec() {
             Spec::Stream(config) => {
-                return match js.create_stream(*config).await {
-                    Err(e) if self == Self::Identities && exists(&e) => Ok(()),
-                    created => created.map(drop).with_context(|| format!("creating {self}")),
-                };
+                return js.create_stream(*config).await.map(drop).with_context(|| format!("creating {self}"));
             }
             Spec::Bucket(config) => js.create_key_value(*config).await.with_context(|| format!("creating {self}"))?,
         };
+        if self == Self::Identities {
+            mark_incarnation(&store, false).await?;
+        }
         if self.watched() {
             let mut config = store.stream.cached_info().config.clone();
             config.max_consumers = MAX_CONSUMERS;
@@ -190,10 +191,6 @@ enum Spec {
 
 fn not_found(e: &GetStreamError) -> bool {
     matches!(e.kind(), GetStreamErrorKind::JetStream(e) if e.error_code() == ErrorCode::STREAM_NOT_FOUND)
-}
-
-fn exists(e: &CreateStreamError) -> bool {
-    matches!(e.kind(), CreateStreamErrorKind::JetStream(e) if e.error_code() == ErrorCode::STREAM_NAME_EXIST)
 }
 
 /// What is wrong with an object on the hub.
@@ -382,29 +379,46 @@ pub fn machines_config() -> kv::Config {
     lasting_config(MACHINES_BUCKET, "The ants each machine's daemon serves, each record written by its machine")
 }
 
-/// The stream of the identities bucket ([`IDENTITIES_BUCKET`]), a KV bucket of history 1 whose entries never expire: an
-/// ant's record lasts until `ants auth revoke` of the ant deletes it. The stream starts at a random sequence below
-/// 2^53, drawn anew for each creation, so a bucket deleted and created again shares no sequence with the one before
-/// but by a chance of about one in 2^53 per message stored, and an ant's shared settings, signed for the sequence they
-/// are stored at ([`ants_proto::SharedSettings::sequence`]), cannot be put back at their sequence in the new one.
-pub fn identities_config() -> stream::Config {
-    // Lower bits of a v4 UUID's second half, all random. Past 2^53, JSON readers lose precision, and nats-server's
-    // file store fails near 2^62.
-    let first = Uuid::new_v4().as_u64_pair().1 & ((1 << 53) - 1);
-    stream::Config {
-        name: format!("KV_{IDENTITIES_BUCKET}"),
-        description: Some("Each ant's identity: its id, birth, avatar and prompts, written by its daemon".into()),
-        subjects: vec![format!("$KV.{IDENTITIES_BUCKET}.>")],
-        max_messages_per_subject: 1,
-        discard: stream::DiscardPolicy::New,
-        storage: stream::StorageType::File,
-        num_replicas: 1,
-        allow_direct: true,
-        allow_rollup: true,
-        deny_delete: true,
-        first_sequence: Some(first.max(1)),
-        ..Default::default()
-    }
+/// The identities bucket ([`IDENTITIES_BUCKET`]): an ant's record lasts until `ants auth revoke` of the ant deletes it.
+pub fn identities_config() -> kv::Config {
+    lasting_config(IDENTITIES_BUCKET, "Each ant's identity: its id, birth, avatar and prompts, written by its daemon")
+}
+
+/// Create the identities bucket ([`IDENTITIES_BUCKET`]) as `ants init` does: with its incarnation marker.
+pub async fn create_identities(js: &jetstream::Context) -> Result<()> {
+    Object::Identities.create(js).await
+}
+
+/// Start a new incarnation of the identities bucket ([`IDENTITIES_BUCKET`]), creating it if missing: write its marker
+/// anew, so that no shared settings record signed before verifies any more ([`ants_proto::incarnation`]), as after
+/// restoring the bucket from a backup (`ants init --identities-restored`).
+pub async fn new_incarnation(js: &jetstream::Context) -> Result<()> {
+    let store = js.create_key_value(identities_config()).await.context("creating bucket ants_identities")?;
+    mark_incarnation(&store, true).await
+}
+
+/// Write the incarnation marker of the identities bucket ([`INCARNATION_KEY`]) when it has none (also when deleted),
+/// or, `anew`, in any case. Read by a direct get naming no subject, which a human's credentials allow.
+async fn mark_incarnation(identities: &kv::Store, anew: bool) -> Result<()> {
+    let value = chrono::Utc::now().to_rfc3339().into();
+    let written = if anew {
+        identities.put(INCARNATION_KEY, value).await.map(drop).map_err(anyhow::Error::from)
+    } else {
+        let subject = format!("$KV.{IDENTITIES_BUCKET}.{INCARNATION_KEY}");
+        let last = match identities.stream.direct_get_next_for_subject(subject, None).await {
+            Ok(msg) if !msg.headers.get("KV-Operation").is_some_and(|op| ["DEL", "PURGE"].contains(&op.as_str())) => {
+                return Ok(());
+            }
+            Ok(deleted) => deleted.sequence,
+            Err(e) if e.kind() == DirectGetErrorKind::NotFound => 0,
+            Err(e) => return Err(e).context("reading the incarnation marker of bucket ants_identities"),
+        };
+        match identities.update(INCARNATION_KEY, value, last).await {
+            Err(e) if e.kind() == kv::UpdateErrorKind::WrongLastRevision => Ok(()),
+            written => written.map(drop).map_err(anyhow::Error::from),
+        }
+    };
+    written.context("writing the incarnation marker of bucket ants_identities")
 }
 
 /// The read markers of the humans ([`READ_BUCKET`]).
@@ -590,29 +604,31 @@ mod tests {
         assert!(init(&js, |_| true).await.unwrap().is_empty());
     }
 
-    /// The identities bucket deleted and created again starts at a sequence of its own, so a record signed for the
-    /// sequence it was stored at in the old stream ([`ants_proto::SharedSettings::sequence`]) cannot be put back there.
+    /// Creating the identities bucket marks its incarnation, which a creation again leaves and a deleted marker or
+    /// `ants init --identities-restored` replaces; a bucket created otherwise has none.
     #[tokio::test]
-    async fn the_identities_bucket_created_again_shares_no_sequence_with_the_one_before() {
+    async fn the_identities_bucket_carries_an_incarnation_marker_that_init_writes() {
         let Some(server) = NatsServer::start() else { return };
         let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
         let identities = crate::direct_kv::DirectKv::new(&js, None, IDENTITIES_BUCKET).await.unwrap();
-        let key = "dev-a.settings";
-        let write = || identities.put_sequenced(key, None, |sequence| Ok(sequence.to_string().into_bytes()));
-        Object::Identities.create(&js).await.unwrap();
-        Object::Identities.create(&js).await.expect("the bucket there is left as it is");
-        assert!(write().await.unwrap());
-        let signed_for = identities.lookup_last(key).await.unwrap().1;
+        let incarnation = || crate::shared::incarnation(&identities);
 
-        js.delete_stream(Object::Identities.stream_name()).await.unwrap();
-        Object::Identities.create(&js).await.unwrap();
-        let mut headers = async_nats::HeaderMap::new();
-        headers.insert("Nats-Expected-Last-Sequence", (signed_for - 1).to_string().as_str());
-        let subject = format!("$KV.{IDENTITIES_BUCKET}.{key}");
-        let put_back = js.publish_with_headers(subject, headers, signed_for.to_string().into()).await.unwrap().await;
-        assert!(put_back.is_err(), "put back at the sequence {signed_for} it was signed for");
-        assert!(write().await.unwrap());
-        assert_ne!(identities.lookup_last(key).await.unwrap().1, signed_for);
+        js.create_key_value(identities_config()).await.unwrap();
+        assert_eq!(incarnation().await.unwrap(), None, "as `nats kv add` creates it");
+        create_identities(&js).await.unwrap();
+        let first = incarnation().await.unwrap().expect("marked");
+        create_identities(&js).await.unwrap();
+        init(&js, |s| s != Object::Identities.info_subject()).await.unwrap();
+        assert_eq!(incarnation().await.unwrap().as_ref(), Some(&first), "left as it is");
+
+        new_incarnation(&js).await.unwrap();
+        let restored = incarnation().await.unwrap().expect("marked");
+        assert_ne!(restored, first);
+        js.get_key_value(IDENTITIES_BUCKET).await.unwrap().delete(INCARNATION_KEY).await.unwrap();
+        assert_eq!(incarnation().await.unwrap(), None);
+        create_identities(&js).await.unwrap();
+        let again = incarnation().await.unwrap().expect("marked again");
+        assert!(![&first, &restored].contains(&&again));
     }
 
     /// An object already there stays as it is, such as the sources `ants leaf outbox` adds to the stream.

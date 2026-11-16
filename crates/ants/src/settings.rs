@@ -552,7 +552,7 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         for config in [ants_daemon::hub::machines_config(), ants_daemon::hub::devices_config()] {
             h_js.create_key_value(config).await.unwrap();
         }
-        h_js.create_stream(ants_daemon::hub::identities_config()).await.unwrap();
+        ants_daemon::hub::create_identities(&h_js).await.unwrap();
         let admin_creds = server.dir().join("alice-admin.creds");
         let device = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
         let rights = Permissions::for_user(&alice, Role::Human);
@@ -695,7 +695,7 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         let alice = "alice".parse::<UserId>().unwrap();
         let (_, h_js) = server.connect_as(&alice, Role::Human).await;
         h_js.create_key_value(ants_daemon::hub::devices_config()).await.unwrap();
-        h_js.create_stream(ants_daemon::hub::identities_config()).await.unwrap();
+        ants_daemon::hub::create_identities(&h_js).await.unwrap();
         let alice_creds = server.creds_as(&alice, Role::Human);
         let human = Nats::new(&server.url, Some(&alice_creds), None).unwrap();
         let (_, js) = human.connect("test").await.unwrap();
@@ -760,5 +760,74 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         assert_eq!(writer.record(&dev_a), None, "not applied");
         let after = identities.lookup_stored(SharedSettings::key_of(&dev_a)).await.unwrap().1;
         assert_eq!(after, before, "nothing written with the revoked credentials");
+    }
+
+    /// In a bucket without an incarnation marker, as `nats kv add` creates it, no record is signed or verified; `ants
+    /// init` marks it. After `ants init --identities-restored`, no record signed before verifies, and the daemon
+    /// holding the ant's credentials writes back the settings it kept.
+    #[tokio::test]
+    async fn shared_settings_of_a_bucket_without_a_marker_or_of_an_earlier_incarnation_are_not_verified() {
+        let Some(server) = Server::start() else { return };
+        let dev_a = "dev-a".parse::<UserId>().unwrap();
+        let alice = "alice".parse::<UserId>().unwrap();
+        let (_, h_js) = server.connect_as(&alice, Role::Human).await;
+        h_js.create_key_value(ants_daemon::hub::devices_config()).await.unwrap();
+        h_js.create_key_value(ants_daemon::hub::identities_config()).await.unwrap();
+        let alice_creds = server.creds_as(&alice, Role::Human);
+        let human = Nats::new(&server.url, Some(&alice_creds), None).unwrap();
+        let (_, js) = human.connect("test").await.unwrap();
+        let a_creds = server.creds_as(&dev_a, Role::Ant);
+        let accounts = vec![ants_daemon::creds::account(&a_creds).unwrap()];
+        let m1: Machine = "m1".parse().unwrap();
+        let m1_js = host_js(&server, &m1).await;
+        let identities = DirectKv::new(&m1_js, None, IDENTITIES_BUCKET).await.unwrap();
+        let devices = DirectKv::new(&m1_js, None, DEVICES_BUCKET).await.unwrap();
+        let bucket = Bucket { identities: &identities, devices: &devices, accounts: &accounts };
+        let writer = ants_daemon::shared::Shared::default();
+        let mut own = ants_daemon::config::Ant::new(dev_a.clone(), server.dir().to_path_buf());
+        (own.model, own.creds) = (Some("gpt-5".to_owned()), Some(a_creds.clone()));
+        writer.listed(std::slice::from_ref(&own));
+        let refresh = || ants_daemon::shared::refresh(bucket, Some(&m1), &writer, std::slice::from_ref(&dev_a));
+        let signer = ants_daemon::shared::Signer::load(&dev_a, Some(&a_creds), &accounts).unwrap();
+        let sequence = || async { identities.lookup_stored(SharedSettings::key_of(&dev_a)).await.unwrap().1 };
+
+        refresh().await;
+        assert_eq!((writer.record(&dev_a), sequence().await), (None, 0), "none written");
+        let fields = serde_json::Map::from_iter([("model".into(), json!("o3"))]);
+        let mut set = SharedSettings::new(dev_a.clone(), fields, m1.clone(), Some(alice.clone()));
+        let unmarked = ants_daemon::shared::write(&identities, &mut set, &signer, None).await.unwrap_err();
+        assert!(format!("{unmarked:#}").contains("ants init"), "{unmarked:#}");
+
+        crate::init_hub(&human, false).await.unwrap();
+        refresh().await;
+        assert_eq!(
+            verified_of(&human, &js, &dev_a).await.and_then(|r| r.fields.get("model").cloned()),
+            Some(json!("gpt-5"))
+        );
+        assert!(ants_daemon::shared::write(&identities, &mut set, &signer, None).await.unwrap());
+        refresh().await;
+        assert_eq!(writer.record(&dev_a), Some(set.clone()));
+
+        let lines = crate::init_hub(&human, true).await.unwrap();
+        assert!(lines.last().unwrap().contains("new incarnation"), "{lines:?}");
+        let Some(SharedRecord::Unverified(record, why)) = shared_of(&human, &js, &dev_a).await.unwrap() else {
+            panic!("a record of the bucket's earlier incarnation verifies")
+        };
+        assert_eq!(record, set);
+        assert!(why.contains("incarnation"), "{why}");
+        refresh().await;
+        let restored = writer.record(&dev_a).expect("the settings kept, written back");
+        assert_eq!((restored.fields.get("model"), restored.by.as_ref()), (Some(&json!("o3")), Some(&alice)));
+        assert_eq!(verified_of(&human, &js, &dev_a).await, Some(restored));
+
+        let store = h_js.create_key_value(ants_daemon::hub::identities_config()).await.unwrap();
+        store.delete(ants_proto::INCARNATION_KEY).await.unwrap();
+        let Some(SharedRecord::Unverified(_, why)) = shared_of(&human, &js, &dev_a).await.unwrap() else {
+            panic!("a record of a bucket without a marker verifies")
+        };
+        assert!(why.contains("ants init"), "{why}");
+        let before = sequence().await;
+        refresh().await;
+        assert_eq!((writer.record(&dev_a), sequence().await), (None, before), "none applied or written");
     }
 }

@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use ants_proto::{
     Acting, Attachment, AttachmentHandle, AttachmentScope, CancelReply, CancelRequest, ChannelEntry, ChannelId,
-    ChannelPost, ConsumerPlace, DeadLetter, Envelope, Error as ProtoError, EscalationReason, Humans, JsDomain,
+    ChannelPost, ConsumerPlace, DeadLetter, Envelope, Error as ProtoError, EscalationReason, Hold, Humans, JsDomain,
     MessageMark, QueueRequest, QueuedMessage, Role, State, StatusUpdate, SummaryOf, SummaryRequest, TIMELINE_EVERY,
     ThreadId, ThreadOrigin, UserId, Uuid, WEBHOOK_ALLOW, subject,
 };
@@ -23,7 +23,7 @@ use futures::stream::{FuturesUnordered, Stream, StreamExt as _};
 
 use crate::admin::restart::{Restarted, Restarts};
 use crate::approvals::NatsApprover;
-use crate::attempts::{Answered, Attempts, Marker, Reply};
+use crate::attempts::{Answered, Attempts, Marker, Reply, TakenUp};
 use crate::behalf::Records;
 use crate::breaker::{self, Breaker, StartFailed};
 use crate::caps::{Caps, Ledger, Recorded, Warning};
@@ -916,6 +916,8 @@ struct Withdrawal {
     on_behalf_of: Option<UserId>,
     /// Whether the assistant recorded it under a key of its own, the human untold yet.
     recorded: bool,
+    /// What the message was held for when it was withdrawn.
+    held: Option<Hold>,
 }
 
 struct Retry {
@@ -2021,7 +2023,7 @@ impl Inbox<'_> {
         if delivered < MAX_DELIVER
             && !matches!(self.attempts.get(seq, &incoming.envelope).await, Ok(Some(Marker::Replied(_))))
         {
-            self.attempts.retrying(&incoming.envelope).await;
+            self.attempts.retrying(&incoming.envelope, None).await;
         }
         nak(&msg, Some(self.retry_delay)).await;
         self.metrics.retried();
@@ -2067,9 +2069,12 @@ impl Inbox<'_> {
     /// own while no daemon answered ([`crate::attempts::record_withdrawal`]), honoured as a cancel request is: while the
     /// human's grant names the assistant.
     async fn take_up(&self, envelope: &Envelope) -> Result<Option<Withdrawal>> {
-        if let Some((by, on_behalf_of)) = self.attempts.take_up(envelope).await? {
-            return Ok(Some(Withdrawal { by, on_behalf_of, recorded: false }));
-        }
+        let held = match self.attempts.take_up(envelope).await? {
+            TakenUp::Withdrawn { by, on_behalf_of, held } => {
+                return Ok(Some(Withdrawal { by, on_behalf_of, recorded: false, held }));
+            }
+            TakenUp::Started(held) => held,
+        };
         let sender = Some(&envelope.from).filter(|from| self.humans.is_human(from));
         let mut humans: Vec<&UserId> = sender.into_iter().chain(envelope.on_behalf_of.as_ref()).collect();
         humans.dedup();
@@ -2083,19 +2088,20 @@ impl Inbox<'_> {
             if self.assisted(&assistant, Some(&claimed), "withdrawal").await.is_none() {
                 continue;
             }
-            if self.attempts.withdraw_started(envelope, &assistant, &claimed, started).await? {
-                return Ok(Some(Withdrawal { by: assistant, on_behalf_of: Some(claimed), recorded: true }));
+            if self.attempts.withdraw_started(envelope, &assistant, &claimed, started, held).await? {
+                return Ok(Some(Withdrawal { by: assistant, on_behalf_of: Some(claimed), recorded: true, held }));
             }
             tracing::warn!(message = %envelope.id, "the mark of a message changed while honouring its withdrawal");
         }
         Ok(None)
     }
 
-    /// Ack the message at stream sequence `seq`, which `withdrawal.by` withdrew before the ant was prompted with it,
-    /// or retried it after a failed attempt, once a notice of it is stored on its thread, so `ants thread show` tells
-    /// what became of it. The notice answers the sender, as a reply would, unless no reply can go to it: a webhook's
-    /// goes to the thread's owner, and one to an ant out of turns, or to a channel post, to the human who withdrew it.
-    /// The human an assistant withdrew a message for by a record of its own is told too, unless the notice goes to it.
+    /// Ack the message at stream sequence `seq`, which `withdrawal.by` withdrew before the ant was prompted with it, or
+    /// retried it after a failed attempt or a hold for a sign-in or a provider limit, once a notice of it is stored on
+    /// its thread, so `ants thread show` tells what became of it. The notice answers the sender, as a reply would,
+    /// unless no reply can go to it: a webhook's goes to the thread's owner, and one to an ant out of turns, or to a
+    /// channel post, to the human who withdrew it. The human an assistant withdrew a message for by a record of its own
+    /// is told too, unless the notice goes to it.
     async fn withdrawn(
         &self,
         incoming: &Incoming,
@@ -2109,9 +2115,10 @@ impl Inbox<'_> {
         tracing::info!(%thread, %by, ?on_behalf_of, message = %envelope.id, "acking a withdrawn message unprompted");
         let ant = self.ant;
         // A failed attempt leaves its marker, to warn the retry.
-        let before = match self.attempts.get(seq, envelope).await {
-            Ok(Some(_)) => format!("before {ant} retried it after a failed attempt"),
-            Ok(None) | Err(_) => format!("before {ant} was prompted with it"),
+        let before = match (withdrawal.held, self.attempts.get(seq, envelope).await) {
+            (Some(held), _) => format!("before {ant} retried it after holding it for {held}"),
+            (None, Ok(Some(_))) => format!("before {ant} retried it after a failed attempt"),
+            (None, Ok(None) | Err(_)) => format!("before {ant} was prompted with it"),
         };
         let text = match on_behalf_of {
             None => format!("[ants] Withdrawn by {by} {before} (ants withdraw)."),
@@ -2746,7 +2753,8 @@ impl Inbox<'_> {
         // failed attempt. A fallback turning it away hands it on at once instead.
         if e.is::<SignedOut>() || e.is::<Limited>() {
             if !e.is::<OnFallback>() {
-                self.attempts.retrying(envelope).await;
+                let held = if e.is::<SignedOut>() { Hold::SignIn } else { Hold::ProviderLimit };
+                self.attempts.retrying(envelope, Some(held)).await;
             }
             return Err(e);
         }

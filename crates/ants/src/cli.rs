@@ -306,11 +306,12 @@ pub(crate) enum Command {
         #[arg(num_args = 1..)]
         words: Vec<String>,
     },
-    /// List the messages waiting for ANT, oldest first: those its daemon holds, running or waiting their turn on their
-    /// thread, then those awaiting redelivery (one retried after a failed attempt is not withdrawable), then the inbox
-    /// messages and the channel posts waking ANT still in the stream, with id, thread, sender, age and place in the
-    /// thread's queue. Without ANT, lists those of every ant live in the colony, with an ANT column, leaving out the
-    /// ants with nothing waiting. Needs a human's credentials, and a daemon of the ant to answer.
+    /// List the messages waiting for ANT, oldest first: those its daemon holds, running, waiting their turn on their
+    /// thread or held for a sign-in or a provider limit, then those awaiting redelivery (one started in an attempt that
+    /// did not end is not withdrawable), then the inbox messages and the channel posts waking ANT still in the stream,
+    /// with id, thread, sender, age and place in the thread's queue. Without ANT, lists those of every ant live in the
+    /// colony, with an ANT column, leaving out the ants with nothing waiting. Needs a human's credentials, and a daemon
+    /// of the ant to answer.
     Queue {
         #[arg(add = ArgValueCandidates::new(completions::ants))]
         ant: Option<UserId>,
@@ -330,8 +331,16 @@ pub(crate) enum Command {
     },
     /// Create the ANTS stream and the colony, sessions, attempts, channels, humans, chains, links, owners, webhooks,
     /// reactions, threads, read, presence and notify buckets on the server, those missing; one already there stays as
-    /// it is. Needs a human's credentials. Every other command run with them does the same on connecting.
-    Init,
+    /// it is. Needs a human's credentials. Every other command run with them does the same on connecting. Also writes
+    /// the incarnation marker of the identities bucket when absent, which every ant's shared settings are signed for.
+    Init {
+        /// After restoring the identities bucket (stream KV_ants_identities) from a backup: write its incarnation
+        /// marker anew, so that no shared settings record signed before verifies, the backup's included. Each daemon
+        /// holding an ant's credentials signs the ant's settings anew within seconds: those it kept, else its
+        /// config's.
+        #[arg(long)]
+        identities_restored: bool,
+    },
     /// Tool requests ants escalate to humans: list the pending ones, show one, approve or reject it. Every human
     /// sees every request; the first decision wins, a human's or that of an ant of the ant's escalation chain.
     #[command(subcommand)]
