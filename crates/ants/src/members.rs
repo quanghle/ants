@@ -286,6 +286,24 @@ pub fn retired(dir: &Path, machine: &Machine, ant: &UserId) -> Result<bool> {
     Ok(true)
 }
 
+/// The machines whose leaf node's members in the registry of `dir`, kept with the latest uplink key issued there,
+/// hold the ant `ant`.
+pub fn behind(dir: &Path, ant: &UserId) -> Result<Vec<Machine>> {
+    let mut seen = Vec::new();
+    let mut behind = Vec::new();
+    for line in revoke::issued(dir)?.into_iter().rev().filter(|i| i.kind == Kind::Leaf) {
+        if seen.contains(&line.name) {
+            continue;
+        }
+        if line.members.as_ref().is_some_and(|m| m.ants.contains(ant)) {
+            let machine = line.name.strip_prefix("leaf-").and_then(|m| m.parse().ok());
+            behind.push(machine.with_context(|| format!("{} names no leaf node", line.name))?);
+        }
+        seen.push(line.name);
+    }
+    Ok(behind)
+}
+
 /// The ants and humans the uplink credentials of the leaf node configuration at `leaf_conf` carry, which must be
 /// that of `machine`.
 pub fn uplink(leaf_conf: &Path, machine: &Machine) -> Result<Members> {

@@ -103,7 +103,9 @@ pub(crate) enum AuthCommand {
     /// Revoke credentials before they expire: every key issued to NAME (an ant, human, webhook or observer,
     /// `leaf-<machine>`, `host-<machine>`, `channel-manager` or `enroll-<ant>`) and each --key. The team's account in server.conf
     /// refuses them from then on, and the account is pushed to the server of --nats, which closes their connections,
-    /// as do the leaf nodes connected to it through a system account uplink.
+    /// as do the leaf nodes connected to it through a system account uplink. Revoking an ant's last live key also
+    /// drops it from the uplink, members and outbox sourcing of this machine's leaf node, if it is behind it, and
+    /// names what to run for a leaf node of another machine.
     Revoke {
         /// Name the credentials carry; every key issued to it is revoked.
         #[arg(required_unless_present = "keys")]
@@ -328,7 +330,7 @@ pub(crate) async fn run(command: AuthCommand, conn: &Connection<'_>) -> Result<(
         AuthCommand::Host { machine, dir, out } => host_creds(&machine, dir, out, domain),
         AuthCommand::Leaf { machine, members, dir, out } => leaf_creds(machine, members, dir, out, domain),
         AuthCommand::Revoke { name, keys, devices, no_push, dir } => {
-            revoke_credentials(name, keys, devices, no_push, dir, conn.nats, domain).await
+            revoke_credentials(name, keys, devices, no_push, dir, conn).await
         }
         AuthCommand::Revoked { dir } => revoke::list(&team_dir(dir)?),
         AuthCommand::Issued { json, dir } => revoke::list_issued(&team_dir(dir)?, json),
@@ -358,7 +360,7 @@ pub(crate) async fn run(command: AuthCommand, conn: &Connection<'_>) -> Result<(
                     "{human} holds no admin credentials neither revoked nor expired; `ants auth admin list` lists them"
                 );
             }
-            revoke_credentials(None, keys, Vec::new(), no_push, Some(dir), conn.nats, domain).await
+            revoke_credentials(None, keys, Vec::new(), no_push, Some(dir), conn).await
         }
     }
 }
@@ -598,9 +600,9 @@ pub(crate) async fn revoke_credentials(
     devices: Vec<String>,
     no_push: bool,
     dir: Option<PathBuf>,
-    url: &str,
-    domain: Option<&JsDomain>,
+    conn: &Connection<'_>,
 ) -> Result<()> {
+    let (url, domain) = (conn.nats, conn.js_domain);
     let dir = team_dir(dir)?;
     let now = auth::now()?;
     let mut name = name;
@@ -612,11 +614,33 @@ pub(crate) async fn revoke_credentials(
         let issued = revoke::issued(&dir).unwrap_or_default();
         issued.iter().any(|i| &i.name == name && matches!(i.kind, revoke::Kind::Ant | revoke::Kind::Assistant))
     });
-    for r in revoke::revoke(&dir, name.as_deref(), &keys)? {
+    let revoked = revoke::revoke(&dir, name.as_deref(), &keys)?;
+    for r in &revoked {
         let expired = if r.expires_at.is_some_and(|exp| exp <= now) { " (already expired)" } else { "" };
         println!("revoked {} ({}){expired}", r.key, r.name.as_deref().unwrap_or("name unknown"));
     }
     println!("{} carries the revocations", dir.join(auth::SERVER_CONF).display());
+    let retired = retired_ants(&dir, &revoked)?;
+    let behind_leaf = retired.iter().any(|ant| members::behind(&dir, ant).is_ok_and(|m| !m.is_empty()));
+    let hub = match (behind_leaf && !no_push).then(|| conn.nats()) {
+        Some(Ok(nats)) => match nats.connect("ants-cli").await {
+            Ok((_, js)) => Some(js),
+            Err(e) => {
+                println!("cannot reach the hub ({e:#})");
+                None
+            }
+        },
+        Some(Err(e)) => {
+            println!("cannot reach the hub ({e:#})");
+            None
+        }
+        None => None,
+    };
+    for ant in &retired {
+        for line in crate::retire::leave_leaves(&dir, ant, hub.as_ref()).await {
+            println!("{line}");
+        }
+    }
     if no_push {
         println!(
             "push them to the hub with: ants auth push --nats URL (leaf nodes with a system account uplink get \
@@ -633,6 +657,23 @@ pub(crate) async fn revoke_credentials(
         println!("{ant}'s identity deleted from {IDENTITIES_BUCKET}");
     }
     Ok(())
+}
+
+/// The ants among the names of `revoked` that hold no live key in the team directory `dir` any more: retired.
+fn retired_ants(dir: &Path, revoked: &[revoke::Revoked]) -> Result<Vec<UserId>> {
+    let issued = revoke::issued(dir)?;
+    let live = crate::signer::live(dir)?;
+    let mut ants: Vec<UserId> = Vec::new();
+    for r in revoked {
+        let of_ant =
+            |i: &revoke::Issued| i.key == r.key && matches!(i.kind, revoke::Kind::Ant | revoke::Kind::Assistant);
+        let Some(name) = r.name.as_deref().filter(|_| issued.iter().any(of_ant)) else { continue };
+        let Ok(ant) = name.parse::<UserId>() else { continue };
+        if !ants.contains(&ant) && !live.iter().any(|i| i.name == name) {
+            ants.push(ant);
+        }
+    }
+    Ok(ants)
 }
 
 /// Push the team's account to the server at `url` ([`revoke::push`]), saying how to apply it otherwise on failure;
@@ -706,5 +747,36 @@ pub(crate) async fn push(url: &str, domain: Option<&JsDomain>, dir: &Path) -> Re
             "the account was pushed, but the revoked keys of humans' credentials are not all recorded in \
              {DEVICES_BUCKET}, so messages may still be sealed for their devices: run `ants auth push --nats URL` again"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ants_proto::Role;
+
+    use super::*;
+
+    /// An ant is retired once no key of it is live, whichever revocation took the last.
+    #[test]
+    fn an_ant_is_retired_once_its_last_live_key_is_revoked() {
+        let dir = ants_test_support::scratch_dir("retired-ants");
+        let team = dir.join("auth");
+        auth::init(&team).unwrap();
+        let issue = |user: &str, role: Role, n: usize| {
+            let user: UserId = user.parse().unwrap();
+            let out = dir.join(format!("{user}-{n}.creds"));
+            auth::issue_device(&team, &user, role.into(), Permissions::for_user(&user, role), None, &out).unwrap();
+            auth::read_creds(&out).unwrap().1.public_key()
+        };
+        let (first, second) = (issue("dev-c", Role::Ant, 1), issue("dev-c", Role::Ant, 2));
+        issue("alice", Role::Human, 1);
+
+        let revoked = revoke::revoke(&team, None, &[first]).unwrap();
+        assert!(retired_ants(&team, &revoked).unwrap().is_empty(), "another key of dev-c is live");
+        let revoked = revoke::revoke(&team, None, &[second]).unwrap();
+        assert_eq!(retired_ants(&team, &revoked).unwrap(), ["dev-c".parse::<UserId>().unwrap()]);
+        let revoked = revoke::revoke(&team, Some("alice"), &[]).unwrap();
+        assert!(retired_ants(&team, &revoked).unwrap().is_empty(), "a human is no ant");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

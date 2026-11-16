@@ -347,7 +347,8 @@ pub(crate) enum Command {
     Add(Box<add::AddArgs>),
     /// Retire an ant added from a template (by a manager's `request_ant`): unlist it from the config file, so the
     /// daemon stops it as on any reload, its prompts in flight ending first; wait up to 5m for that; revoke its
-    /// credentials, when the account key is in --dir, and push the account; remove its credentials file. Its home
+    /// credentials, when the account key is in --dir, drop it from the uplink of this machine's leaf node, and push the
+    /// account; remove its credentials file. Its home
     /// stays: a later `request_ant` of the same name from the same template brings it back with its memory, task
     /// database and worktrees. Other ants are refused: edit the config file and run `ants auth revoke NAME` instead.
     Retire(Box<retire::RetireArgs>),
