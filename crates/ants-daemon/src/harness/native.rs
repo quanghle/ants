@@ -128,6 +128,11 @@ fn registration(protocol: Protocol) -> anyhow::Result<Option<Registration>> {
     }
 }
 
+/// Whether a session of a CLI speaking `protocol` reports its MCP servers and signs them in ([`mcp_host`]).
+pub(crate) fn reports_mcp(protocol: Protocol) -> bool {
+    registration(protocol).ok().flatten().is_some_and(|registration| registration.mcp.is_some())
+}
+
 /// Check the keys of `harness` its protocol reads, such as the native permission mode `mode` names.
 pub(crate) fn validate(harness: &Harness) -> anyhow::Result<()> {
     match registration(harness.protocol)? {

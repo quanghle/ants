@@ -563,6 +563,7 @@ async fn the_messenger_answers_a_post_mentioning_nobody_with_the_members_it_conc
         model: None,
         paused: None,
         drift: Vec::new(),
+        mcp: false,
     };
     colony.put(dev_b.key(), serde_json::to_vec(&dev_b).unwrap().into()).await.unwrap();
     let post = ChannelPost::new(entry.channel.clone(), UserId::human(), "the build is red");

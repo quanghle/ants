@@ -170,6 +170,7 @@ impl Bus {
             model: None,
             paused: None,
             drift: Vec::new(),
+            mcp: false,
         };
         colony.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
     }

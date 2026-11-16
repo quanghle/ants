@@ -58,5 +58,6 @@ expression: value
   "paused": {
     "since": "2025-01-01T12:06:00Z",
     "by": "alice"
-  }
+  },
+  "mcp": true
 }

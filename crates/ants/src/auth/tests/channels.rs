@@ -128,6 +128,7 @@ async fn the_channel_manager_applies_the_owner_s_changes_only_and_announces_them
         model: None,
         paused: None,
         drift: Vec::new(),
+        mcp: false,
     };
     let b_colony = bus::ensure_colony(&b_js, ants_proto::COLONY_TTL).await.unwrap();
     b_colony.put("dev-b", serde_json::to_vec(&listed).unwrap().into()).await.unwrap();

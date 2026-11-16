@@ -432,6 +432,7 @@ pub(crate) mod tests {
             model: None,
             paused: None,
             drift: Vec::new(),
+            mcp: false,
         }
     }
 

@@ -43,6 +43,7 @@ fn entry_on(ant: &str, machine: &str) -> ColonyEntry {
         model: None,
         paused: None,
         drift: Vec::new(),
+        mcp: false,
     }
 }
 

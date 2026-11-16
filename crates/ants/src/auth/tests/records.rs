@@ -41,6 +41,7 @@ async fn ants_write_their_own_colony_entry_and_everyone_reads_the_colony() {
         model: None,
         paused: None,
         drift: Vec::new(),
+        mcp: false,
     };
     let registration = Registration::start(a_kv.clone(), entry.clone(), ants_proto::COLONY_HEARTBEAT).await.unwrap();
     assert!(a_kv.put("dev-b", "spoof".into()).await.is_err(), "dev-a cannot list dev-b");

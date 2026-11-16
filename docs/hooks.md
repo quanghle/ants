@@ -206,7 +206,8 @@ What a daemon says of an ant it serves: `ant`, `machine`, `instance`, `harness`,
 `model`? (`{model, reasoning_effort, context}`), `capabilities`, `whoami`?, `workdir`, `started_at`, `heartbeat_at`,
 `activity` (`idle`, `working`), `handling`, `harnesses`, `escalate_to`?, `drift`? (`[field, ...]`), `version`, `perms`,
 `signed_out`?, `limited`?, `failing`?, `fallback`?, `memory_low`? (`{since, available, max_harnesses}`), `paused`?
-(`{since, by?}`). The daemon puts it on start and every 10 s, and deletes it on a clean stop; the
+(`{since, by?}`), `mcp`? (`true` when the harness's protocol reports its MCP servers: `claude`, `codex`,
+`copilot-sdk`). The daemon puts it on start and every 10 s, and deletes it on a clean stop; the
 bucket's entries expire after 30 s, so a daemon that died leaves none. `ants hook run --on colony` hands on puts only, every heartbeat included. Check: `key == ant`.
 
 ## `ants hook run`

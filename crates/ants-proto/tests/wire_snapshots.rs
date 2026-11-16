@@ -254,6 +254,7 @@ fn colony() {
             }),
             paused: Some(Paused { since: at(6), by: Some(user("alice")) }),
             drift: Vec::new(),
+            mcp: true,
         },
     );
     snap("activity_variants", &[Activity::Idle, Activity::Working, Activity::Unknown]);

@@ -51,6 +51,7 @@ fn colony() -> Colony {
             model: None,
             paused: None,
             drift: Vec::new(),
+            mcp: false,
         };
         Box::pin(async move { Ok(vec![entry("lead", "boss"), entry("boss", "dev-a")]) })
     })

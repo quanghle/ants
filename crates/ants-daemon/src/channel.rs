@@ -1072,6 +1072,7 @@ mod tests {
             model: None,
             paused: None,
             drift: Vec::new(),
+            mcp: false,
         };
         let context = Context { posts: vec![post("dev-b", "earlier")], ..Context::default() };
         let text = triage_prompt(&root, &entry, &[a], &humans(), &context, 7);

@@ -85,6 +85,11 @@ impl Harness {
         &self.name
     }
 
+    /// Whether its protocol reports the MCP servers of its sessions ([`super::open_mcp`]).
+    pub fn reports_mcp(&self) -> bool {
+        super::native::reports_mcp(self.protocol)
+    }
+
     /// Its executable: a path, or a name looked up on `PATH`.
     pub fn command(&self) -> &Path {
         &self.command

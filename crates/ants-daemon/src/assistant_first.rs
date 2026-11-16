@@ -108,5 +108,6 @@ pub fn live(ant: &UserId) -> ants_proto::ColonyEntry {
         model: None,
         paused: None,
         drift: Vec::new(),
+        mcp: false,
     }
 }

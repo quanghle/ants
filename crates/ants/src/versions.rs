@@ -307,6 +307,7 @@ mod tests {
             model: None,
             paused: None,
             drift: Vec::new(),
+            mcp: false,
         };
         let same = [entry("dev-a", "m1", Some(("copilot", "1.0.3"))), entry("dev-b", "m2", Some(("copilot", "1.0.3")))];
         assert!(harness_drift(&same, now).is_empty());

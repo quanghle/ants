@@ -389,6 +389,15 @@ fn native_errors_reach_the_daemons_classifiers() {
     );
 }
 
+#[test]
+fn claude_codex_and_copilot_sdk_report_their_mcp_servers_and_no_other_protocol_does() {
+    let reporting = [Protocol::Acp, Protocol::Claude, Protocol::Codex, Protocol::Antigravity, Protocol::CopilotSdk]
+        .into_iter()
+        .filter(|p| reports_mcp(*p))
+        .collect::<Vec<_>>();
+    assert_eq!(reporting, [Protocol::Claude, Protocol::Codex, Protocol::CopilotSdk]);
+}
+
 #[tokio::test]
 async fn a_native_cli_reports_its_mcp_servers_and_signs_them_in_on_the_loopback() {
     let native = Fixture::new("native-mcp", "");

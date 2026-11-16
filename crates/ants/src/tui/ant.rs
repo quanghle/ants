@@ -60,11 +60,11 @@ impl Pane {
         }
     }
 
-    /// The pane `by` panes on, round.
-    fn moved(self, by: isize) -> Self {
-        let at = Self::ALL.iter().position(|p| *p == self).unwrap_or(0);
-        let len = Self::ALL.len().cast_signed();
-        Self::ALL[(at.cast_signed() + by).rem_euclid(len).cast_unsigned()]
+    /// The pane of `panes` `by` panes on, round.
+    fn moved(self, panes: &[Self], by: isize) -> Self {
+        let at = panes.iter().position(|p| *p == self).unwrap_or(0);
+        let len = panes.len().cast_signed();
+        panes[(at.cast_signed() + by).rem_euclid(len).cast_unsigned()]
     }
 }
 
@@ -162,7 +162,7 @@ impl Page {
                 return Some(To::Do(Action::Run(job, String::new())));
             }
             Key::Left | Key::Right => {
-                self.pane = self.pane.moved(if key == Key::Left { -1 } else { 1 });
+                self.pane = self.pane.moved(&self.panes(data), if key == Key::Left { -1 } else { 1 });
                 match self.pane {
                     Pane::Memories => self.memories.shown(),
                     Pane::Mcp => self.mcp.shown(),
@@ -243,11 +243,16 @@ impl Page {
         let block = frame::block(" now ".to_owned(), false);
         frame.render_widget(Paragraph::new(status).block(block).wrap(Wrap { trim: false }), right);
         let threads = self.threads.rows(data).len();
-        let counts =
-            [threads.to_string(), self.queued(), self.memories.count(), self.mcp.count(), self.settings.count()];
         let mut spans = vec![Span::raw(" ")];
-        for (pane, count) in Pane::ALL.iter().zip(counts) {
-            let style = if *pane == self.pane { frame::highlight(focused) } else { frame::dim() };
+        for pane in self.panes(data) {
+            let count = match pane {
+                Pane::Threads => threads.to_string(),
+                Pane::Queue => self.queued(),
+                Pane::Memories => self.memories.count(),
+                Pane::Mcp => self.mcp.count(),
+                Pane::Settings => self.settings.count(),
+            };
+            let style = if pane == self.pane { frame::highlight(focused) } else { frame::dim() };
             spans.push(Span::styled(format!(" {} ({count}) ", pane.label()), style));
             spans.push(Span::raw(" "));
         }
@@ -260,6 +265,13 @@ impl Page {
             Pane::Mcp => self.mcp.draw(frame, pane, &self.ant, focused),
             Pane::Settings => self.settings.draw(frame, pane, &self.ant, now, focused),
         }
+    }
+
+    /// The panes the view offers: the MCP one only while the ant's colony entry tells that its harness reports its
+    /// MCP servers, or while it shows.
+    fn panes(&self, data: &Data) -> Vec<Pane> {
+        let mcp = self.pane == Pane::Mcp || data.live.colony.iter().any(|e| e.ant == self.ant && e.mcp);
+        Pane::ALL.into_iter().filter(|p| *p != Pane::Mcp || mcp).collect()
     }
 
     /// How many messages wait, as the queue's tab counts them.
@@ -602,7 +614,6 @@ mod tests {
         m.key(Key::Left, at(3));
         assert_eq!(m.memories_wanted(), None, "not on the settings pane");
         m.key(Key::Left, at(3));
-        m.key(Key::Left, at(3));
         assert!(screen(&m, at(3)).contains("asking the daemon of dev-a for its memories…"));
         assert_eq!(m.memories_wanted(), Some((user("dev-a"), 1)));
         let memories = Memories {
@@ -637,9 +648,16 @@ mod tests {
         let mut m = model();
         m.data.live.colony(vec![entry("dev-a", 60, 2, at(2))], at(2));
         m.select(nav::Item::Ant(user("dev-a")));
-        for _ in 0..3 {
-            m.key(Key::Right, at(3));
-        }
+        m.key(Key::Left, at(3));
+        assert!(screen(&m, at(3)).contains("settings ("), "an ACP harness reports no MCP servers: no mcp tab");
+        assert!(!screen(&m, at(3)).contains("mcp ("));
+        m.key(Key::Left, at(3));
+        assert!(screen(&m, at(3)).contains("memories of dev-a"));
+        m.key(Key::Right, at(3));
+
+        let acp = entry("dev-a", 60, 2, at(2));
+        m.data.live.colony(vec![ColonyEntry { mcp: true, ..acp }], at(2));
+        m.key(Key::Left, at(3));
         let wanted = m.mcp_wanted().unwrap();
         assert_eq!((wanted.ant, wanted.asked, wanted.sign), (user("dev-a"), 1, None));
         assert!(screen(&m, at(3)).contains("asking the daemon of dev-a for its MCP servers…"));

@@ -148,6 +148,7 @@ fn listed(name: &str, capabilities: &[&str]) -> ColonyEntry {
         model: None,
         paused: None,
         drift: Vec::new(),
+        mcp: false,
     }
 }
 

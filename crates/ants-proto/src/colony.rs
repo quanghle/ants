@@ -88,6 +88,10 @@ pub struct ColonyEntry {
     /// the daemon runs it with: drift to mend in that config. Missing when none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub drift: Vec<String>,
+    /// Whether the ant's harness reports its MCP servers to an [`crate::AdminOp::ReadMcp`] order: protocols claude,
+    /// codex and copilot-sdk do. Missing when it does not.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mcp: bool,
 }
 
 /// An ant's pause, as its colony entry reports it ([`ColonyEntry::paused`]).
@@ -294,6 +298,7 @@ mod tests {
             model: None,
             paused: None,
             drift: Vec::new(),
+            mcp: false,
         }
     }
 

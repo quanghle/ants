@@ -242,6 +242,7 @@ pub async fn entry(config: &Config) -> ColonyEntry {
         memory_low: None,
         paused: config.pause.get(),
         drift: config.drift.get(),
+        mcp: harness.harness.reports_mcp(),
         model: AntModel::of(
             harness.model_settings.model.clone(),
             harness.model_settings.reasoning_effort.clone(),
@@ -712,6 +713,7 @@ mod tests {
             model: None,
             paused: None,
             drift: Vec::new(),
+            mcp: false,
         }
     }
 
