@@ -354,7 +354,7 @@ Every protocol other than `acp` is native: the daemon runs a translator in its o
 
 - **Sessions:** the CLI's own session id is the one stored in `ants_sessions` and resumed after an idle stop or restart; a cloned thread forks the session where the CLI can fork one, else starts over from the thread's history. A fork whose cost totals start at its parent's (Claude Code, Copilot CLI) has that base appended to its id, in micro-dollars (`<id>~<base>`), so that it reports only its own cost, after a restart too. A session the daemon leaves for a new one, on a [context-window retry](#lost-sessions-and-context-window), is closed (ACP `session/close`): the CLI process run for it alone ends (Claude Code, agy, whose private directory goes too), codex unloads its thread and Copilot CLI detaches it.
 - **Settings:** the ant's `model` (with its `context`'s `model_suffix`) and `reasoning_effort` go to the CLI natively; unsupported values fail the session.
-- **Errors:** the CLI's not-signed-in errors reach the daemon as ACP `auth_required` (`sign_in` names the command), and its provider limit, quota and context-overflow errors carry its message, HTTP status and retry hint, so [sign-in, limits](#sign-in-provider-limits-and-failures), [fallbacks](#fallbacks) and the [context-window retry](#lost-sessions-and-context-window) behave as for ACP.
+- **Errors:** the CLI's not-signed-in errors reach the daemon as ACP `auth_required` (`sign_in` names the command), and its provider limit, quota and context-overflow errors carry its message, HTTP status and retry hint, so [sign-in, limits](#sign-in-provider-limits-and-failures), [fallbacks](#fallbacks) and the [context-window retry](#lost-sessions-and-context-window) behave as for ACP. Credentials the provider refuses only at a prompt (a revoked or wrong API key, which still opens a session) stay refused where the translator can read them (Claude Code, codex): until they change, or the daemon restarts, opening a session fails `auth_required` too, so the sign-in check every 60 s keeps the harness signed out rather than finding it signed in for the next prompt to be refused again.
 - **Updates and spend:** replies, reasoning, tool calls, plans, token usage and cost stream as status updates and count toward [caps](#prompt-limits-and-spending-caps).
 - **MCP:** each session gets the ants MCP server in the CLI's own per-run MCP configuration, never on its command line.
 - **Checks:** `ants harness check` starts the CLI, completes its handshake and opens a session, naming the CLI and its version.
@@ -401,7 +401,10 @@ version.
 - **Cancel:** Claude Code's `interrupt` ends the turn, the session going on; a turn not over 10 s later has its process
   killed, and the session resumes on the next message.
 - **Errors:** "Not logged in · Please run /login", an invalid API key or an expired login are `auth_required` (a
-  Claude Code with neither a login nor an API key already fails opening a session, so `ants harness check` sees it);
+  Claude Code with neither a login nor an API key already fails opening a session, so `ants harness check` sees it;
+  one refused at a prompt keeps sessions from opening until `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+  `CLAUDE_CODE_OAUTH_TOKEN` or `.credentials.json` in the configuration directory changes, a login kept in the macOS
+  keychain excepted);
   plan, spend and credit limits ("You've hit your session limit", `billing_error`, a rejected `rate_limit_event`) are an
   exhausted quota, retried after its reset time when Claude Code gives one; other 429 and 529 answers are rate limits;
   "Prompt is too long" and the like are a context overflow.
@@ -428,7 +431,7 @@ args = ["-c", "sandbox_workspace_write.network_access=true"]
 env = { CODEX_HOME = "/srv/ants/codex" }        # optional: config, credentials and threads of its own
 ```
 
-- **Sign-in:** at start the translator reads the account (`account/read`); none signed in, where the configured provider needs an OpenAI account, is `auth_required` (`codex login`). A turn the provider refuses with HTTP 401 (a revoked or wrong API key) or a failed token refresh is too. `codex app-server` ignores `OPENAI_API_KEY` and `CODEX_API_KEY` in its environment: store a key with `printenv OPENAI_API_KEY | codex login --with-api-key`. `CODEX_HOME` selects the configuration and credentials, `~/.codex` by default.
+- **Sign-in:** at start the translator reads the account (`account/read`); none signed in, where the configured provider needs an OpenAI account, is `auth_required` (`codex login`). A turn the provider refuses with HTTP 401 (a revoked or wrong API key) or a failed token refresh is too, and since `account/read` still finds the stored account, sessions then fail `auth_required` until `auth.json` in `CODEX_HOME` changes (`codex login`; credentials kept in the OS keyring are not watched). `codex app-server` ignores `OPENAI_API_KEY` and `CODEX_API_KEY` in its environment: store a key with `printenv OPENAI_API_KEY | codex login --with-api-key`. `CODEX_HOME` selects the configuration and credentials, `~/.codex` by default.
 - **`mode`** sets each thread's approval policy and sandbox; none asks, codex's OS sandbox being the restriction. Any other value fails loading.
 
   | `mode` | Approval policy | Sandbox |

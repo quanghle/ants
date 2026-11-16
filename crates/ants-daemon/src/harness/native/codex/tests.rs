@@ -2,7 +2,7 @@
 //! a signed-out server shows them (handshake, threads, a turn failing with 401), else as its JSON schema gives them.
 
 use std::assert_matches;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -50,9 +50,13 @@ fn on(turn: &str, method: &str, mut params: Value) -> String {
 /// The blocks of the handshake of codex `version`, signed in to `account`: `initialize` (request 1), `initialized`
 /// and `account/read` (request 2).
 fn handshake_of(version: &str, account: Value) -> Vec<Vec<String>> {
+    handshake_in(Path::new("/h/.codex"), version, account)
+}
+
+/// The blocks of [`handshake_of`] from a server whose `CODEX_HOME` is `home`.
+fn handshake_in(home: &Path, version: &str, account: Value) -> Vec<Vec<String>> {
     let user_agent = format!("ants/{version} (Mac OS 27.2.1; arm64) rex/0.1.0-preview.14 (ants; 0.1.0)");
-    let hello =
-        json!({ "userAgent": user_agent, "codexHome": "/h/.codex", "platformFamily": "unix", "platformOs": "macos" });
+    let hello = json!({ "userAgent": user_agent, "codexHome": home, "platformFamily": "unix", "platformOs": "macos" });
     let status = json!({ "status": "disabled", "serverName": "m", "installationId": "i", "environmentId": null });
     let account = json!({ "account": account, "userId": null, "requiresOpenaiAuth": true, "workspaceRouting": null });
     vec![vec![], vec![ok(1, hello), note("remoteControl/status/changed", status)], vec![], vec![ok(2, account)]]
@@ -346,6 +350,38 @@ async fn a_signed_out_codex_is_told_apart() {
 
     let Readiness::Failed { detail } = handshake(&launch).await.readiness else { panic!("a failing CLI") };
     assert!(detail.contains("exited with exit status: 101: Error: thread 'main' panicked"), "{detail}");
+}
+
+#[tokio::test]
+async fn credentials_refused_at_a_prompt_keep_codex_signed_out_until_they_change() {
+    let codex = Fixture::new("codex-refused", "");
+    let launch = codex.launch(ModelSettings::default());
+    let home = codex.dir.join("codex-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let auth = home.join("auth.json");
+    std::fs::write(&auth, r#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk-revoked"}"#).unwrap();
+    let signed_in = handshake_in(&home, "0.169.0", json!({ "type": "apiKey" }));
+    let unauthorized = turn_error(
+        "unexpected status 401 Unauthorized: Incorrect API key provided",
+        json!({ "httpConnectionFailed": { "httpStatusCode": 401 } }),
+    );
+    let failing = [turn_started(4, TURN), vec![turn_completed(TURN, "failed", unauthorized)]].concat();
+    codex.script(Some(1), &[signed_in.clone(), vec![vec![opened(3, THREAD)], failing]].concat());
+    codex.script(None, &[signed_in, vec![vec![opened(3, THREAD)]]].concat());
+
+    let session = Session::start(&launch, None).await.unwrap();
+    let err = session.prompt("go").await.unwrap_err();
+    assert!(err.downcast_ref::<SignedOut>().is_some(), "{err:#}");
+    session.close().await;
+
+    let Readiness::SignedOut { detail } = handshake(&launch).await.readiness else {
+        panic!("signed out although account/read still finds the refused key")
+    };
+    assert!(detail.contains("401 Unauthorized") && detail.contains("auth.json unchanged since"), "{detail}");
+    assert!(codex.received(2).iter().all(|sent| sent["method"] != "thread/start"), "no thread opens");
+
+    std::fs::write(&auth, r#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk-new"}"#).unwrap();
+    assert_matches!(handshake(&launch).await.readiness, Readiness::Ready { .. });
 }
 
 #[tokio::test]

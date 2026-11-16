@@ -131,8 +131,19 @@ impl Fixture {
     }
 
     fn launch(&self, settings: ModelSettings) -> Launch {
+        self.launch_with_key("", settings)
+    }
+
+    /// A launch with no credentials but ANTHROPIC_API_KEY `key` (none when empty), the ones of the daemon's
+    /// environment and home left out.
+    fn launch_with_key(&self, key: &str, settings: ModelSettings) -> Launch {
         let allow_all = PermissionPolicy::new(Allowlist::parse(&["*"]).unwrap(), None);
-        Launch::new(self.harness.clone(), self.dir.clone(), Vec::new(), allow_all, settings)
+        let env = [("CLAUDE_CONFIG_DIR", self.dir.to_str().unwrap()), ("ANTHROPIC_API_KEY", key)]
+            .into_iter()
+            .chain([("ANTHROPIC_AUTH_TOKEN", ""), ("CLAUDE_CODE_OAUTH_TOKEN", "")])
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .collect();
+        Launch::new(self.harness.clone(), self.dir.clone(), env, allow_all, settings)
     }
 
     /// Have run `run` (every run when None) print the version, then play `blocks` after each line it reads: a
@@ -464,6 +475,26 @@ async fn a_signed_out_claude_is_told_apart_from_a_failing_one() {
     native.cli.script(None, &[["2.0.1 (Claude Code)"]]);
     let Readiness::Failed { detail } = handshake(&launch).await.readiness else { panic!("an old CLI") };
     assert!(detail.contains("Claude Code 2.0.1 is older than 2.1.325"), "{detail}");
+}
+
+#[tokio::test]
+async fn an_api_key_refused_at_a_prompt_keeps_claude_signed_out_until_it_changes() {
+    let native = Fixture::new("claude-refused", "");
+    let bad_key = failure("authentication_failed", Some(401), "Invalid API key · Fix external API key", "api_error");
+    native.script(None, &[vec![signed_in()], bad_key]);
+    let revoked = native.launch_with_key("sk-ant-revoked", ModelSettings::default());
+    let session = Session::start(&revoked, None).await.unwrap();
+    let err = session.prompt("go").await.unwrap_err();
+    assert!(err.downcast_ref::<SignedOut>().is_some(), "{err:#}");
+    session.close().await;
+
+    native.script(None, &[vec![signed_in()]]);
+    let Readiness::SignedOut { detail } = handshake(&revoked).await.readiness else {
+        panic!("signed out although the session opens with the refused key")
+    };
+    assert!(detail.contains("Invalid API key") && detail.contains("ANTHROPIC_API_KEY unchanged since"), "{detail}");
+    let replaced = native.launch_with_key("sk-ant-replaced", ModelSettings::default());
+    assert_matches!(handshake(&replaced).await.readiness, Readiness::Ready { .. });
 }
 
 #[test]

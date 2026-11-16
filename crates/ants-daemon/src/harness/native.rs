@@ -283,7 +283,36 @@ pub(crate) trait Native: Sized + Send + Sync + 'static {
         let _ = (id, open);
         async { Err(unsupported("session/fork")) }
     }
+
+    /// The credentials the CLI signs in with as they are now, where the protocol can read them. Once a prompt fails
+    /// with [`signed_out`], no session opens with the same credentials, so a handshake does not find signed in a CLI
+    /// whose provider refuses them only at a prompt.
+    fn credentials(&self) -> Option<Credentials> {
+        None
+    }
 }
+
+/// The credentials a native CLI signs in with ([`Native::credentials`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Credentials {
+    /// Where the CLI keeps them.
+    place: String,
+    /// A hash of them, which tells whether they changed.
+    fingerprint: u64,
+}
+
+impl Credentials {
+    /// The credentials kept at `place`, made of `parts`.
+    pub(crate) fn new(place: impl Into<String>, parts: &[&[u8]]) -> Self {
+        use std::hash::{DefaultHasher, Hash as _, Hasher as _};
+        let mut hasher = DefaultHasher::new();
+        parts.hash(&mut hasher);
+        Self { place: place.into(), fingerprint: hasher.finish() }
+    }
+}
+
+/// Credentials a provider refused at a prompt, by where they are kept and their fingerprint: what the CLI said then.
+static REFUSED: Mutex<BTreeMap<(String, u64), String>> = Mutex::new(BTreeMap::new());
 
 /// A session of a native CLI.
 pub(crate) trait NativeSession: Send + Sync + 'static {
@@ -589,6 +618,28 @@ impl<N: Native> Translator<N> {
         self.native.get().ok_or_else(|| Error::new(ErrorCode::INVALID_REQUEST, "initialize first"))
     }
 
+    /// The CLI, to open a session with: signed out while its credentials are ones a provider refused at a prompt.
+    fn opening(&self) -> Result<&N, Error> {
+        let native = self.native()?;
+        let Some(Credentials { place, fingerprint }) = native.credentials() else { return Ok(native) };
+        match REFUSED.locked().get(&(place, fingerprint)) {
+            Some(refused) => Err(Error::new(ErrorCode::AUTH_REQUIRED, refused.clone())),
+            None => Ok(native),
+        }
+    }
+
+    /// Note that the provider refused the CLI's credentials at a prompt, which said `e`.
+    fn refused(&self, e: &Error) {
+        let Some(credentials) = self.native.get().and_then(N::credentials) else { return };
+        tracing::warn!(
+            harness = self.cli.name(),
+            credentials = credentials.place,
+            "credentials refused at a prompt; the harness stays signed out until they change"
+        );
+        let detail = format!("{} (refused at a prompt; {} unchanged since)", e.message, credentials.place);
+        REFUSED.locked().insert((credentials.place, credentials.fingerprint), detail);
+    }
+
     fn live(&self, id: &SessionId) -> Result<Arc<Live<N::Session>>, Error> {
         let live = self.sessions.locked().get(id).cloned();
         live.ok_or_else(|| Error::new(ErrorCode::RESOURCE_NOT_FOUND, format!("no session {id}")))
@@ -617,20 +668,20 @@ impl<N: Native> Translator<N> {
 
     async fn new_session(self: Arc<Self>, request: NewSessionRequest) -> Result<NewSessionResponse, Error> {
         let open = Open { cwd: request.cwd, mcp_servers: request.mcp_servers };
-        let session = self.native()?.new_session(open).await?;
+        let session = self.opening()?.new_session(open).await?;
         let (id, modes, options) = self.opened(SessionId::new(session.id()), session);
         Ok(NewSessionResponse::new(id).modes(modes).config_options(options))
     }
 
     async fn load_session(self: Arc<Self>, request: LoadSessionRequest) -> Result<LoadSessionResponse, Error> {
         let open = Open { cwd: request.cwd, mcp_servers: request.mcp_servers };
-        let session = self.native()?.load_session(&request.session_id.0, open).await?;
+        let session = self.opening()?.load_session(&request.session_id.0, open).await?;
         let (_, modes, options) = self.opened(request.session_id, session);
         Ok(LoadSessionResponse::new().modes(modes).config_options(options))
     }
 
     async fn fork_session(self: Arc<Self>, request: ForkSessionRequest) -> Result<ForkSessionResponse, Error> {
-        let native = self.native()?;
+        let native = self.opening()?;
         if !native.info().fork {
             return Err(unsupported("session/fork"));
         }
@@ -650,6 +701,11 @@ impl<N: Native> Translator<N> {
         live.prompts.fetch_add(1, Ordering::Relaxed);
         let done = live.session.prompt(request.prompt, updates).await;
         live.prompts.fetch_sub(1, Ordering::Relaxed);
+        if let Err(e) = &done
+            && e.code == ErrorCode::AUTH_REQUIRED
+        {
+            self.refused(e);
+        }
         done
     }
 

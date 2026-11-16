@@ -10,7 +10,7 @@
 //! (`thread/unsubscribe`), which the server then unloads.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -25,8 +25,8 @@ use tokio::process::ChildStdin;
 use tokio::sync::mpsc;
 
 use super::{
-    Cli, Harness, Incoming, Info, Native, NativeSession, Open, Process, Rpc, Setting, Updates, context_overflow,
-    deny_approval, failed, mcp_servers_json, quota_exhausted, rate_limited, signed_out,
+    Cli, Credentials, Harness, Incoming, Info, Native, NativeSession, Open, Process, Rpc, Setting, Updates,
+    context_overflow, deny_approval, failed, mcp_servers_json, quota_exhausted, rate_limited, signed_out,
 };
 use crate::sync::MutexExt as _;
 
@@ -54,6 +54,8 @@ const UNREAD: [&str; 6] = [
 pub(crate) struct Codex {
     shared: Arc<Shared>,
     info: Info,
+    /// The server's `CODEX_HOME`, where it keeps its credentials (`auth.json`) unless in the OS keyring.
+    home: Option<PathBuf>,
     router: tokio::task::JoinHandle<()>,
 }
 
@@ -261,13 +263,19 @@ impl Native for Codex {
             images: true,
             http_mcp: false,
         };
-        let mut codex = Self { shared, info, router };
-        codex.info.version = codex.handshake().await?;
+        let mut codex = Self { shared, info, home: None, router };
+        (codex.info.version, codex.home) = codex.handshake().await?;
         Ok(codex)
     }
 
     fn info(&self) -> Info {
         self.info.clone()
+    }
+
+    fn credentials(&self) -> Option<Credentials> {
+        let path = self.home.as_ref()?.join("auth.json");
+        let stored = std::fs::read(&path).ok()?;
+        Some(Credentials::new(path.display().to_string(), &[&stored]))
     }
 
     async fn new_session(&self, open: Open) -> Result<CodexSession, Error> {
@@ -287,8 +295,8 @@ impl Native for Codex {
 }
 
 impl Codex {
-    /// Initialize the server and check an account is signed in: the server's version.
-    async fn handshake(&self) -> Result<String, Error> {
+    /// Initialize the server and check an account is signed in: the server's version and `CODEX_HOME`.
+    async fn handshake(&self) -> Result<(String, Option<PathBuf>), Error> {
         let client = json!({ "name": "ants", "title": "ants", "version": env!("CARGO_PKG_VERSION") });
         let capabilities = json!({ "experimentalApi": false, "optOutNotificationMethods": UNREAD });
         let hello =
@@ -310,7 +318,7 @@ impl Codex {
         if account["account"].is_null() && account["requiresOpenaiAuth"] == true {
             return Err(signed_out("codex has no account signed in"));
         }
-        Ok(version)
+        Ok((version, hello["codexHome"].as_str().map(PathBuf::from)))
     }
 
     /// The params opening a thread (`thread/start`), or resuming or forking thread `id`, with the definition's

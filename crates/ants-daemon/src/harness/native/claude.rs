@@ -28,7 +28,7 @@ use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use super::{
-    Cli, Harness, Info, JsonLines, JsonWriter, Native, NativeSession, Open, Process, Updates, based_id,
+    Cli, Credentials, Harness, Info, JsonLines, JsonWriter, Native, NativeSession, Open, Process, Updates, based_id,
     context_overflow, cost_base, deny_approval, failed, mcp_servers_json, quota_exhausted, rate_limited, signed_out,
 };
 use crate::sync::MutexExt as _;
@@ -65,6 +65,9 @@ const ENV: &[(&str, &str)] = &[
     ("CLAUDE_CODE_ENABLE_TODO_TOOLS", "1"),
     ("CLAUDE_CODE_ENABLE_TASKS", "0"),
 ];
+
+/// The environment variables Claude Code reads an API key or a token from.
+const CREDENTIAL_VARIABLES: [&str; 3] = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"];
 
 /// How long an interrupted turn has to end before the CLI is killed.
 const INTERRUPT_GRACE: Duration = Duration::from_secs(10);
@@ -144,6 +147,32 @@ impl Native for Claude {
             images: true,
             http_mcp: true,
         }
+    }
+
+    /// The API key and tokens in the environment and the login in `.credentials.json` of the configuration directory,
+    /// which Claude Code keeps there unless in the macOS keychain.
+    fn credentials(&self) -> Option<Credentials> {
+        let env = |name: &str| {
+            let value = self.cli.env().get(name).cloned().or_else(|| std::env::var(name).ok());
+            value.filter(|value| !value.is_empty())
+        };
+        let (mut places, mut parts) = (Vec::new(), Vec::new());
+        for name in CREDENTIAL_VARIABLES {
+            if let Some(value) = env(name) {
+                places.push(name.to_owned());
+                parts.push(value.into_bytes());
+            }
+        }
+        let home = env("HOME").map(PathBuf::from).or_else(std::env::home_dir);
+        let dir = env("CLAUDE_CONFIG_DIR").map(PathBuf::from).or_else(|| home.map(|home| home.join(".claude")));
+        if let Some(file) = dir.map(|dir| dir.join(".credentials.json"))
+            && let Ok(stored) = std::fs::read(&file)
+        {
+            places.push(file.display().to_string());
+            parts.push(stored);
+        }
+        let parts: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
+        (!places.is_empty()).then(|| Credentials::new(places.join(" and "), &parts))
     }
 
     async fn new_session(&self, open: Open) -> Result<ClaudeSession, Error> {
