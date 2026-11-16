@@ -323,8 +323,6 @@ fn a_native_protocol_runs_tools_unasked_restricted_by_its_own_settings() {
 
     let err = format!("{:#}", define("protocol = \"stub\"\nmode = \"default\"").unwrap_err());
     assert!(err.contains("harness native: protocol stub takes mode ask or auto, not default"), "{err}");
-    let err = format!("{:#}", define("protocol = \"claude\"").unwrap_err());
-    assert!(err.contains("harness native: protocol claude is not implemented yet"), "{err}");
     assert!(format!("{:#}", define("protocol = \"vim\"").unwrap_err()).contains("unknown variant `vim`"));
     assert!(!define("protocol = \"acp\"\nmode = \"default\"").unwrap().bypasses_permissions());
     assert!(!Harnesses::builtin().get("copilot").unwrap().protocol().is_native(), "built-ins speak ACP");

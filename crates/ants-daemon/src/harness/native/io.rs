@@ -243,12 +243,13 @@ impl<R: AsyncRead + Unpin> JsonLines<R> {
 
 /// Writes JSON values one per line; shared by the tasks writing to one CLI.
 pub(crate) struct JsonWriter<W> {
-    writer: tokio::sync::Mutex<W>,
+    /// None once closed.
+    writer: tokio::sync::Mutex<Option<W>>,
 }
 
 impl<W: AsyncWrite + Unpin> JsonWriter<W> {
     pub(crate) fn new(writer: W) -> Self {
-        Self { writer: tokio::sync::Mutex::new(writer) }
+        Self { writer: tokio::sync::Mutex::new(Some(writer)) }
     }
 
     /// Write `value` as one line and flush it.
@@ -256,12 +257,15 @@ impl<W: AsyncWrite + Unpin> JsonWriter<W> {
         let mut line = serde_json::to_vec(value)?;
         line.push(b'\n');
         let mut writer = self.writer.lock().await;
+        let writer = writer.as_mut().ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "closed"))?;
         writer.write_all(&line).await?;
         writer.flush().await
     }
 
-    /// Close the output, which a CLI reading prompts until the end of its input takes as the end of the session.
+    /// Close the output, which a CLI reading prompts until the end of its input takes as the end of the session: the
+    /// writer is dropped, as shutting a child's stdin down does not close it.
     pub(crate) async fn close(&self) -> io::Result<()> {
-        self.writer.lock().await.shutdown().await
+        let Some(mut writer) = self.writer.lock().await.take() else { return Ok(()) };
+        writer.shutdown().await
     }
 }
