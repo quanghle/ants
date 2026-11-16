@@ -273,9 +273,10 @@ impl Escalator {
     /// with `envelope`: the stand-in it went to while that human was away, say. On a thread of its own, as
     /// [`crate::approvals`] tells of a tool request decided by another human; failing to, it only warns.
     async fn tell_answered(&self, envelope: &Envelope, ended: Ended) {
-        let reached = match (ended.reminder, ended.escalation) {
-            (Some(reminder), _) => reminder.to,
-            (None, Some(pending)) if pending.at_owner() => self.humans.owner_or_default(pending.owner.as_ref()),
+        let reached = match (ended.reminder, ended.reached, ended.escalation) {
+            (Some(reminder), _, _) => reminder.to,
+            (None, Some(reached), _) => reached,
+            (None, None, Some(pending)) if pending.at_owner() => self.humans.owner_or_default(pending.owner.as_ref()),
             _ => return,
         };
         if reached == envelope.from || !self.humans.is_human(&reached) {
@@ -522,7 +523,9 @@ impl Escalator {
 
     /// Send the notice of `stuck` to the thread's owner, else the default human, with `escalation`, and `because` it
     /// did not go up a chain, which it returns. The human gets a reminder after [`Chain::remind`] without a human's
-    /// message on the thread.
+    /// message on the thread; with no reminder, the ledger keeps whom it reached alone, for
+    /// [`Escalator::tell_answered`]. A tool request's escalation keeps neither: [`crate::approvals`] tells of its
+    /// decision.
     async fn to_owner(
         &self,
         escalation: &Escalation,
@@ -551,6 +554,8 @@ impl Escalator {
             };
             self.ledger.arm_reminder(&notice.thread_id, reminder).await?;
             self.deadline_set.notify_one();
+        } else if escalation.reason != EscalationReason::Approval {
+            self.ledger.reached_human(&notice.thread_id, human.clone()).await?;
         }
         (self.send)(notice, stuck.id.clone()).await?;
         Ok((Escalated::Owner(human), because.map(|because| why_text(escalation, &because))))
