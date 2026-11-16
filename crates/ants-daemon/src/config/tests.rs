@@ -386,8 +386,8 @@ fn unknown_harness_references_and_bad_definitions_fail_to_load() {
     assert!(err("[harnesses.\"My.Agent\"]\ncommand = \"x\"").contains("use lowercase letters"));
     let protocol = err("[harnesses.my-agent]\ncommand = \"x\"\nprotocol = \"vim\"");
     assert!(protocol.contains("config.toml") && protocol.contains("unknown variant `vim`"), "{protocol}");
-    let planned = err("[harnesses.my-agent]\ncommand = \"x\"\nprotocol = \"codex\"");
-    assert!(planned.contains("config.toml") && planned.contains("protocol codex is not implemented yet"), "{planned}");
+    let mode = err("[harnesses.my-agent]\ncommand = \"x\"\nprotocol = \"codex\"\nmode = \"default\"");
+    assert!(mode.contains("config.toml") && mode.contains("protocol codex takes mode"), "{mode}");
     let summary = Summary::parse("[harnesses.my-agent]\ncommand = \"\"", Path::new("/c/config.toml"), Path::new("/h"));
     assert!(format!("{:#}", summary.unwrap_err()).contains("command must not be empty"));
 }
