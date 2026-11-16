@@ -1548,8 +1548,9 @@ async fn any_human_titles_a_thread_and_keeps_its_tldr_but_each_marks_only_its_ow
     assert_eq!((title.title.as_str(), &title.by), ("Release 1.2.1", &bob));
     assert!(alice_meta.set_title(&thread, "two\nlines").await.is_err());
     let ant = Meta::open(&d_js, None, &dev_a).await.unwrap();
-    assert!(ant.title(&thread).await.is_err(), "an ant reads no title");
-    assert!(ant.set_title(&thread, "mine").await.is_err(), "nor sets one");
+    let read = ant.title(&thread).await.unwrap().unwrap();
+    assert_eq!((read.title.as_str(), &read.by), ("Release 1.2.1", &bob), "an ant reads a title by its key");
+    assert!(ant.set_title(&thread, "mine").await.is_err(), "but sets none");
     let tldr = ants_proto::ThreadSummary {
         thread_id: thread.clone(),
         text: "Release 1.2.1 is out.".to_owned(),

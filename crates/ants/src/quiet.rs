@@ -144,7 +144,7 @@ pub async fn mute(nats: &Nats<'_>, pick: thread::Pick, hold: Option<Duration>) -
     let hold = hold.unwrap_or(MUTE_FOR);
     until(Utc::now(), hold).context("--for")?;
     let js = connect(nats, "muting a thread").await?;
-    let thread = pick.resolve(&js, &nats.me).await?;
+    let thread = pick.resolve(nats, &js).await?;
     println!("{}", muted(&js, &nats.me.id, &thread, hold).await?);
     Ok(())
 }
@@ -165,7 +165,7 @@ pub async fn muted(js: &jetstream::Context, human: &UserId, thread: &ThreadId, h
 /// `ants thread unmute THREAD`.
 pub async fn unmute(nats: &Nats<'_>, pick: thread::Pick) -> Result<()> {
     let js = connect(nats, "unmuting a thread").await?;
-    let thread: ThreadId = pick.resolve(&js, &nats.me).await?;
+    let thread: ThreadId = pick.resolve(nats, &js).await?;
     println!("{}", unmuted(&js, &nats.me.id, &thread).await?);
     Ok(())
 }

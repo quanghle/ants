@@ -33,7 +33,7 @@ pub(crate) async fn watch(nats: &Nats<'_>, target: &str, thread: Option<thread::
 
     watched_ant(target, thread.is_some())?;
     let (client, js) = nats.connect("ants-watch").await?;
-    let filter = watch_filter(target, thread::resolve(thread, &js, &nats.me).await?.as_ref())?;
+    let filter = watch_filter(target, thread::resolve(thread, nats, &js).await?.as_ref())?;
     let mut sub = client.subscribe(filter).await?;
     let faces = crate::avatars::Faces::stdout(crate::avatars::read_or_none(&js).await);
     let mut printer = Printer { faces: Some(faces), ..Printer::default() };

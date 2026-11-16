@@ -466,10 +466,12 @@ fn a_start_of_a_time_ordered_id_bounds_when_it_was_made() {
 async fn a_human_picks_its_threads_by_a_start_of_their_id_or_the_last() {
     let Some(server) = crate::auth::tests::Server::start() else { return };
     let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
-    let (_, js) = server.connect_as(&alice, ants_proto::Role::Human).await;
+    let creds = server.creds_as(&alice, ants_proto::Role::Human);
+    let nats = crate::Nats::new(&server.url, Some(&creds), None).unwrap();
+    let js = nats.connect("test").await.unwrap().1;
     ants_daemon::bus::ensure_stream(&js).await.unwrap();
-    let me = crate::humans::Me { id: alice.clone(), role: ants_proto::Role::Human, assistant_of: None };
-    let resolve = |pick: &str| pick.parse::<Pick>().unwrap().resolve(&js, &me);
+    let _ = js.create_stream(ants_daemon::hub::threads_config()).await;
+    let resolve = |pick: &str| pick.parse::<Pick>().unwrap().resolve(&nats, &js);
     assert!(resolve("last").await.unwrap_err().to_string().contains("no message to or from alice"));
 
     let asked = Envelope::new(alice.clone(), dev_a.clone(), "build it");
@@ -496,9 +498,14 @@ async fn a_human_picks_its_threads_by_a_start_of_their_id_or_the_last() {
     assert_eq!(resolve(&start(&posted.thread_id)).await.unwrap(), posted.thread_id);
     assert_eq!(resolve(&start(&others.thread_id)).await.unwrap(), others.thread_id, "a thread between ants");
     assert_eq!(resolve(&start(&twins[1].thread_id)).await.unwrap(), twins[1].thread_id);
+    let meta = crate::thread_meta::open(&nats, &js).await.unwrap();
+    let title = ants_proto::ThreadTitle::new(twins[1].thread_id.clone(), "Twin one", alice.clone()).unwrap();
+    meta.put_title(&title).await.unwrap();
     let twin = resolve(&twins[0].thread_id.as_str()[..13]).await.unwrap_err().to_string();
     assert!(twin.starts_with("2 threads over the last 7 days start with"), "{twin}");
     assert!(twin.contains(&format!("\n  {} ", twins[1].thread_id)), "{twin}");
+    assert!(twin.contains("  \"Twin one\"  dev-b -> dev-a: twin\n"), "titled where it has one: {twin}");
+    assert!(twin.trim_end().ends_with("  dev-b -> dev-a: twin"), "untitled: {twin}");
     let unknown = resolve("ffff").await.unwrap_err().to_string();
     assert!(unknown.contains("no thread over the last 7 days starts with ffff"), "{unknown}");
     assert!(unknown.contains(&format!("\n  {} ", asked.thread_id)), "{unknown}");
@@ -507,8 +514,9 @@ async fn a_human_picks_its_threads_by_a_start_of_their_id_or_the_last() {
     // A whole id needs no read, whoever's thread it is.
     assert_eq!(resolve(others.thread_id.as_str()).await.unwrap(), others.thread_id);
 
-    let ant = crate::humans::Me { id: dev_a, role: ants_proto::Role::Ant, assistant_of: None };
-    let refused = Pick::Last.resolve(&js, &ant).await.unwrap_err().to_string();
+    let ant_creds = server.creds_as(&dev_a, ants_proto::Role::Ant);
+    let ant = crate::Nats::new(&server.url, Some(&ant_creds), None).unwrap();
+    let refused = Pick::Last.resolve(&ant, &js).await.unwrap_err().to_string();
     assert!(refused.contains("give the whole thread id"), "{refused}");
 }
 

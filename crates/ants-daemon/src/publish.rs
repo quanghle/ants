@@ -198,14 +198,14 @@ impl Publisher {
         worktrees::run(&self.gh, dir, args, &env, Some(self.gh_timeout)).await
     }
 
-    /// The title of `thread`, if it has one the ant's credentials may read.
+    /// The title of `thread`, if it has one the ant's credentials may read, not sealed between humans.
     async fn thread_title(&self, thread: &ThreadId) -> Option<String> {
         let titles = self.titles.as_ref().filter(|_| !self.no_titles.load(Ordering::Relaxed))?;
         let read = tokio::time::timeout(TITLE_TIMEOUT, titles.lookup(title_key(thread))).await;
         let failed = match read {
             Ok(Ok(Lookup::Value(value))) => {
                 let title = serde_json::from_slice::<ThreadTitle>(&value).ok().filter(|t| t.thread_id == *thread);
-                return title.map(|t| t.title);
+                return title.and_then(plain_title);
             }
             Ok(Ok(Lookup::NoValue)) => return None,
             Ok(Ok(Lookup::NoBucket)) => "there is no bucket".to_owned(),
@@ -216,6 +216,11 @@ impl Publisher {
         self.no_titles.store(true, Ordering::Relaxed);
         None
     }
+}
+
+/// The text of `title` for a pull request: none when sealed between humans, whose text never leaves their devices.
+fn plain_title(title: ThreadTitle) -> Option<String> {
+    Some(title.title).filter(|text| title.sealed.is_none() && !text.trim().is_empty())
 }
 
 /// The first line of `text` holding more than blanks, trimmed and shortened to [`MAX_TITLE`] characters.

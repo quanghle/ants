@@ -936,9 +936,11 @@ impl std::str::FromStr for Pick {
 }
 
 impl Pick {
-    /// The thread this picks for `me`, reading the stream with `js` unless given a whole thread id. Only a human's
-    /// credentials get stream messages by sequence, so only a human picks by a start of an id or `last`.
-    pub async fn resolve(self, js: &jetstream::Context, me: &crate::humans::Me) -> Result<ThreadId> {
+    /// The thread this picks for the CLI's user, reading the stream with `js` unless given a whole thread id. Only a
+    /// human's credentials get stream messages by sequence, so only a human picks by a start of an id or `last`. The
+    /// threads an error lists show their titles where the credentials may read them.
+    pub async fn resolve(self, nats: &crate::Nats<'_>, js: &jetstream::Context) -> Result<ThreadId> {
+        let me = &nats.me;
         let prefix = match self {
             Self::Id(thread) => return Ok(thread),
             Self::Prefix(prefix) => Some(prefix),
@@ -949,17 +951,25 @@ impl Pick {
         }
         let Some(prefix) = prefix else { return last(js, &me.id).await };
         let own = recent(js, &me.id, window(RECENT)).await?;
-        if let Some(thread) = select(&own, &prefix, &me.id)? {
-            return Ok(thread);
-        }
-        select_any(&any_recent(js, &prefix).await?, &own, &prefix, &me.id)
+        let unpicked = match select(&own, &prefix, &me.id) {
+            Ok(Some(thread)) => return Ok(thread),
+            Ok(None) => {
+                let any = any_recent(js, &prefix).await?;
+                match select_any(&any, &own, &prefix, &me.id) {
+                    Ok(thread) => return Ok(thread),
+                    Err(unpicked) => unpicked.titled(nats, js).await,
+                }
+            }
+            Err(unpicked) => unpicked.titled(nats, js).await,
+        };
+        Err(anyhow!(unpicked))
     }
 }
 
 /// [`Pick::resolve`] for an optional pick.
-pub async fn resolve(pick: Option<Pick>, js: &jetstream::Context, me: &crate::humans::Me) -> Result<Option<ThreadId>> {
+pub async fn resolve(pick: Option<Pick>, nats: &crate::Nats<'_>, js: &jetstream::Context) -> Result<Option<ThreadId>> {
     match pick {
-        Some(pick) => Ok(Some(pick.resolve(js, me).await?)),
+        Some(pick) => Ok(Some(pick.resolve(nats, js).await?)),
         None => Ok(None),
     }
 }
@@ -1102,52 +1112,110 @@ fn matching<'a>(threads: &'a [Entry], prefix: &str) -> Vec<&'a Entry> {
     }
 }
 
+/// Why a start of an id picks no thread: what to say, and the threads to list beneath, with their titles if known.
+#[derive(Debug)]
+struct Unpicked<'a> {
+    why: String,
+    listed: Vec<&'a Entry>,
+    titles: HashMap<ThreadId, String>,
+}
+
+impl<'a> Unpicked<'a> {
+    fn new(why: String, listed: impl IntoIterator<Item = &'a Entry>) -> Self {
+        Self { why, listed: listed.into_iter().collect(), titles: HashMap::new() }
+    }
+
+    /// The same, with the titles of the threads listed, read as `ants thread list` reads them; none where the
+    /// credentials may not read them, which a request would only wait on.
+    async fn titled(self, nats: &crate::Nats<'_>, js: &jetstream::Context) -> String {
+        if self.listed.is_empty() {
+            return self.to_string();
+        }
+        let shown = self.listed.iter().take(LISTED).map(|e| &e.thread_id);
+        let titles = match thread_meta::open(nats, js).await {
+            Ok(meta) => meta.titles(shown).await,
+            Err(e) => Err(e),
+        };
+        let titles = titles.unwrap_or_else(|e| {
+            tracing::debug!("listing threads without their titles: {e:#}");
+            HashMap::new()
+        });
+        Self { titles: titles.into_iter().map(|(thread, title)| (thread, title.title)).collect(), ..self }.to_string()
+    }
+}
+
+impl std::fmt::Display for Unpicked<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.listed.is_empty() {
+            return f.write_str(&self.why);
+        }
+        write!(f, "{}:\n{}", self.why, listing(self.listed.iter().copied(), &self.titles))
+    }
+}
+
 /// The one thread among `threads` `user` took part in (the latest message of each, most recent first) whose id is
-/// `prefix`, else starts with it; None when none does. The error on several lists them.
-fn select(threads: &[Entry], prefix: &str, user: &UserId) -> Result<Option<ThreadId>> {
+/// `prefix`, else starts with it; None when none does. Several are listed.
+fn select<'a>(threads: &'a [Entry], prefix: &str, user: &UserId) -> Result<Option<ThreadId>, Unpicked<'a>> {
     let found = matching(threads, prefix);
     match found.as_slice() {
         [] => Ok(None),
         [one] => Ok(Some(one.thread_id.clone())),
-        _ => bail!(
-            "{} threads {user} took part in over the last {} days start with {prefix}; give more of the id:\n{}",
-            found.len(),
-            RECENT.as_secs() / 86_400,
-            listing(found.iter().copied())
-        ),
+        _ => Err(Unpicked::new(
+            format!(
+                "{} threads {user} took part in over the last {} days start with {prefix}; give more of the id",
+                found.len(),
+                RECENT.as_secs() / 86_400,
+            ),
+            found,
+        )),
     }
 }
 
 /// The one thread among `threads` (any user's, the latest message of each, most recent first) whose id is `prefix`,
-/// else starts with it, for a `user` who took part in none of them. The error on none lists `own`, the threads `user`
-/// took part in, and the one on several lists those found.
-fn select_any(threads: &[Entry], own: &[Entry], prefix: &str, user: &UserId) -> Result<ThreadId> {
+/// else starts with it, for a `user` who took part in none of them. None lists `own`, the threads `user` took part
+/// in, and several list those found.
+fn select_any<'a>(
+    threads: &'a [Entry],
+    own: &'a [Entry],
+    prefix: &str,
+    user: &UserId,
+) -> Result<ThreadId, Unpicked<'a>> {
     let found = matching(threads, prefix);
     let days = RECENT.as_secs() / 86_400;
     match found.as_slice() {
         [one] => Ok(one.thread_id.clone()),
-        [] if own.is_empty() => {
-            bail!("no thread over the last {days} days starts with {prefix}: give the whole thread id")
-        }
-        [] => bail!(
-            "no thread over the last {days} days starts with {prefix}; give the whole id of an older one, or pick one \
-             of the most recent {user} took part in:\n{}",
-            listing(own.iter())
-        ),
-        _ => bail!(
-            "{} threads over the last {days} days start with {prefix}, none of them with {user}; give more of the id:\n{}",
-            found.len(),
-            listing(found.iter().copied())
-        ),
+        [] if own.is_empty() => Err(Unpicked::new(
+            format!("no thread over the last {days} days starts with {prefix}: give the whole thread id"),
+            [],
+        )),
+        [] => Err(Unpicked::new(
+            format!(
+                "no thread over the last {days} days starts with {prefix}; give the whole id of an older one, or pick \
+                 one of the most recent {user} took part in"
+            ),
+            own,
+        )),
+        _ => Err(Unpicked::new(
+            format!(
+                "{} threads over the last {days} days start with {prefix}, none of them with {user}; give more of the id",
+                found.len()
+            ),
+            found,
+        )),
     }
 }
 
-/// Threads as an error lists them, one per line: id, time and route of the latest message, and its first line.
-fn listing<'a>(threads: impl ExactSizeIterator<Item = &'a Entry>) -> String {
+/// Threads as an error lists them, one per line: id, time of the latest message, the thread's title in `titles` if
+/// any, and the route and first line of that message.
+fn listing<'a>(threads: impl ExactSizeIterator<Item = &'a Entry>, titles: &HashMap<ThreadId, String>) -> String {
     let more = threads.len().saturating_sub(LISTED);
     let mut lines: Vec<String> = threads
         .take(LISTED)
-        .map(|e| format!("  {}  {}  {}: {}", e.thread_id, time(e.stored_at), e.route(), crate::excerpt(&e.text, 48)))
+        .map(|e| {
+            let title = titles.get(&e.thread_id).map(|t| format!("\"{}\"  ", crate::excerpt(t, 48)));
+            let (id, at, route) = (&e.thread_id, time(e.stored_at), e.route());
+            format!("  {id}  {at}  {}{route}: {}", title.unwrap_or_default(), crate::excerpt(&e.text, 48))
+        })
         .collect();
     if more > 0 {
         lines.push(format!("  and {more} more"));
@@ -1430,7 +1498,7 @@ pub async fn show(
 ) -> Result<()> {
     let auto_archive = crate::defaults::auto_archive()?;
     let js = connect(nats).await?;
-    let thread = &pick.resolve(&js, &nats.me).await?;
+    let thread = &pick.resolve(nats, &js).await?;
     let keyring = sealed::Keyring::load(nats, &js).await.map(Arc::new);
     let behalf = Arc::new(crate::behalf::Checker::new(nats, &js));
     let parser = Parser::opening(keyring).checking(Some(behalf.clone()));

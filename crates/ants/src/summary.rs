@@ -186,7 +186,7 @@ pub async fn spent_today(js: &jetstream::Context, human: &UserId) -> Result<u64>
 pub async fn tldr(nats: &Nats<'_>, pick: Pick, new: bool, json: bool) -> Result<()> {
     let config = crate::defaults::summaries()?;
     let js = thread::connect(nats).await?;
-    let thread = pick.resolve(&js, &nats.me).await?;
+    let thread = pick.resolve(nats, &js).await?;
     let Some((text, request)) = tldr_request(&js, &thread).await? else {
         bail!("no messages on thread {thread} to summarise")
     };
