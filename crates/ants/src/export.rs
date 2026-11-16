@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::add::{self, AddArgs};
 use crate::serve::AntOptions;
+use crate::settings::SharedRecord;
 
 /// The version of [`Export`] this build writes and reads.
 pub const VERSION: u32 = 1;
@@ -242,7 +243,18 @@ pub async fn export(
     let identity =
         identity.with_context(|| format!("{ant} has no identity record: its daemon creates one when it starts"))?;
     wait_between_prompts(&js, ant).await;
-    let shared = crate::settings::shared_of(&js, ant).await.context("reading the ant's shared settings")?;
+    let shared = match crate::settings::shared_of(nats, &js, ant).await? {
+        Some(SharedRecord::Verified(record)) => Some(record),
+        Some(SharedRecord::Unverified(_, why)) => {
+            eprintln!(
+                "warning: the shared settings of {ant} are not verified ({why}) and daemons ignore them: exporting \
+                 the settings of {} instead",
+                path.display()
+            );
+            None
+        }
+        None => None,
+    };
     let harness = listed.harness.as_deref().and_then(|name| loaded.harnesses.get(name).ok());
 
     let export = pack_ant(listed, harness.as_deref(), shared.as_ref(), identity, nats.account.clone())?;
@@ -501,7 +513,7 @@ async fn import_with(nats: &crate::Nats<'_>, args: ImportArgs, store: &dyn Store
     let kv = DirectKv::whole(&js, nats.domain, IDENTITIES_BUCKET).await?;
     let identity = AntIdentity { ant: name.clone(), moved: None, ..export.identity.clone() };
     create(&js, &kv, &identity).await?;
-    if let Some(shared) = crate::settings::shared_of(&js, &name).await.ok().flatten() {
+    if let Some(SharedRecord::Verified(shared)) = crate::settings::shared_of(nats, &js, &name).await.ok().flatten() {
         let drift = shared.drift(&ants_daemon::shared::local_fields(ant));
         if !drift.is_empty() {
             eprintln!(

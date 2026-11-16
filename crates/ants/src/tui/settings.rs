@@ -155,7 +155,7 @@ impl Pane {
             self.sent = Some(Sent::Failed("the settings are not read: r reads them".to_owned()));
             return None;
         };
-        let shared = self.reading.as_ref().and_then(|r| r.as_ref().ok()).and_then(|r| r.shared.as_deref());
+        let shared = self.reading.as_ref().and_then(|r| r.as_ref().ok()).and_then(settings::Reading::verified_shared);
         let op = settings::order(&read.settings, shared, &[assignment]);
         let machine = read.machine.clone();
         self.draft = None;

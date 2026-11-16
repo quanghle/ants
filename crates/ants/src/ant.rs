@@ -83,13 +83,33 @@ struct Shown {
     threads: Vec<thread::Summary>,
     /// None when never read.
     settings: Option<settings::Read>,
-    /// The ant's settings on every machine; none while it has no record of them.
+    /// The ant's settings on every machine; none while it has no verified record of them.
     #[serde(skip_serializing_if = "Option::is_none")]
-    shared_settings: Option<Box<ants_proto::SharedSettings>>,
+    shared_settings: Option<ants_proto::SharedSettings>,
+    /// A record of them that daemons ignore, not verified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shared_settings_unverified: Option<Unverified>,
     /// Why the settings are not read afresh, if they are not.
     #[serde(skip_serializing_if = "Option::is_none")]
     settings_stale: Option<String>,
     orders: Vec<orders::Listed>,
+}
+
+#[derive(Serialize)]
+struct Unverified {
+    why: String,
+    record: ants_proto::SharedSettings,
+}
+
+impl Unverified {
+    /// `shared` as shown: the verified record, or the unverified one with why.
+    fn split(shared: Option<settings::SharedRecord>) -> (Option<ants_proto::SharedSettings>, Option<Self>) {
+        match shared {
+            Some(settings::SharedRecord::Verified(record)) => (Some(record), None),
+            Some(settings::SharedRecord::Unverified(record, why)) => (None, Some(Self { why, record })),
+            None => (None, None),
+        }
+    }
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -134,6 +154,7 @@ pub async fn show(nats: &crate::Nats<'_>, ant: UserId, caps: &BTreeMap<UserId, C
         let roster = roster.map(|r| serde_json::from_str(&r)).transpose()?;
         let (queue, queue_unlisted) = queue.map_or((None, 0), |(waiting, more)| (Some(waiting), more));
         let settings::Reading { read, stale, orders, shared } = reading;
+        let (shared_settings, shared_settings_unverified) = Unverified::split(shared.map(|s| *s));
         let shown = Shown {
             ant,
             roster,
@@ -143,7 +164,8 @@ pub async fn show(nats: &crate::Nats<'_>, ant: UserId, caps: &BTreeMap<UserId, C
             spend_today: spend,
             threads,
             settings: read,
-            shared_settings: shared,
+            shared_settings,
+            shared_settings_unverified,
             settings_stale: stale,
             orders,
         };
