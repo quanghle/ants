@@ -25,7 +25,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::acts::{About, Change};
-use super::exec::{Job, Quoted};
+use super::exec::{Edit, Job, Quoted};
 use super::frame::{self, ago};
 use super::model::{Action, Data, Key, Model, To};
 use super::timeline::Call;
@@ -36,7 +36,7 @@ use crate::thread::{Entry, Kind};
 
 mod conversation;
 
-use conversation::{Item, Shown, busy, cut, glyphs, hm, rows};
+use conversation::{Item, Shown, busy, cut, glyphs, hm, rows, started, withdrawn};
 
 /// How wide the side panel is, shown only when the view is at least [`PANEL_FROM`] wide.
 const PANEL_WIDTH: u16 = 34;
@@ -82,7 +82,7 @@ impl Page {
         self.messages().find(|e| e.id == Some(at)).map(|e| e.seq)
     }
 
-    pub const KEYS: &str = "↑↓ select · i reply · > reply to selected · y copy · o open file · ] next file · + react · p pin · m mute · e archive · d done · z snooze · t tree · S TL;DR · x cancel · a A r answer a tool request · End latest · Esc back";
+    pub const KEYS: &str = "↑↓ select · i reply · > reply to selected · y copy · o open file · ] next file · + react · p pin · m mute · e archive · d done · z snooze · t tree · S TL;DR · x cancel · W withdraw · E withdraw to edit · a A r answer a tool request · End latest · Esc back";
 
     /// The messages shown, in the order stored.
     fn messages(&self) -> impl DoubleEndedIterator<Item = &Entry> {
@@ -111,6 +111,28 @@ impl Page {
         let quoted = Quoted { id, quote: Quote::new(from.clone(), &e.text), sealed: e.sealed.is_some() };
         let mention = (!data.is_human(&from)).then_some(from);
         Some(To::Quote(self.history.thread.clone(), quoted, mention))
+    }
+
+    /// What `W` does, or `E` with `edit`: withdraw the selected message, the human's to an ant, from the ant's queue,
+    /// putting its text and files back into the bar with `edit`; refused for one known started or withdrawn.
+    fn withdrawal(&self, data: &Data, edit: bool) -> To {
+        let me = data.me();
+        let selected = self.selection().filter(|e| e.kind == Kind::Message && e.from.as_ref() == Some(me));
+        let Some((e, id, ant)) = selected.and_then(|e| Some((e, e.id?, e.to.clone()?))) else {
+            return To::Refused(format!("withdraw: select a message of {me} to an ant"));
+        };
+        let entries = &self.history.entries;
+        if data.is_human(&ant) {
+            return To::Refused(format!("withdraw: message {id} is to {ant}, a human, not waiting in an ant's queue"));
+        }
+        if withdrawn(data, entries, id) {
+            return To::Refused(format!("message {id} is withdrawn already"));
+        }
+        if !data.live.queued.contains_key(&id) && started(entries, &ant, id) {
+            return To::Refused(format!("withdraw unavailable: {ant} started on message {id} already; x cancels it"));
+        }
+        let edit = edit.then(|| Box::new(Edit { text: e.text.clone(), files: e.attachments.clone() }));
+        To::Do(Action::Run(Job::Withdraw { ant, message: id, edit }, String::new()))
     }
 
     /// The message whose attachments `o` opens: the selected one, else the latest carrying any.
@@ -216,6 +238,8 @@ impl Page {
                 self.mark.next(seq, count);
             }
             Key::Char('x') | Key::Ctrl('x') => return Some(To::Interrupt(self.history.thread.clone())),
+            Key::Char('W') => return Some(self.withdrawal(data, false)),
+            Key::Char('E') => return Some(self.withdrawal(data, true)),
             _ => {}
         }
         None
@@ -566,6 +590,51 @@ mod tests {
         let line = shown.lines().find(|l| l.contains("queued")).unwrap_or_default();
         assert!(line.contains("alice → dev-a") && line.contains("queued · 1 ahead"), "{shown}");
         assert_eq!(shown.matches("queued").count(), 1, "{shown}");
+    }
+
+    #[test]
+    fn w_and_e_withdraw_a_waiting_message_of_the_human_to_an_ant_and_withdrawn_ones_are_marked() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let mut entries = vec![
+            message(1, &thread, "alice", "dev-a", "deploy the site"),
+            message(2, &thread, "dev-a", "alice", "deploying"),
+            message(3, &thread, "alice", "dev-a", "then the docs"),
+        ];
+        let (first, last) = (entries[0].id.unwrap(), entries[2].id.unwrap());
+        entries[1].in_reply_to = Some(first);
+        m.stored(entries.clone(), at(3));
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(entries.clone())).unwrap();
+        let withdraw = |edit| {
+            Some(To::Do(Action::Run(
+                Job::Withdraw { ant: crate::live::tests::user("dev-a"), message: last, edit },
+                String::new(),
+            )))
+        };
+        assert_eq!(page.key(Key::Char('W'), &m.data, at(4)), withdraw(None));
+        let edit = Edit { text: "then the docs".into(), files: Vec::new() };
+        assert_eq!(page.key(Key::Char('E'), &m.data, at(4)), withdraw(Some(Box::new(edit))));
+        page.key(Key::Up, &m.data, at(4));
+        page.key(Key::Up, &m.data, at(4));
+        let refused = |why: &str| Some(To::Refused(why.to_owned()));
+        assert_eq!(page.key(Key::Char('W'), &m.data, at(4)), refused("withdraw: select a message of alice to an ant"));
+        page.key(Key::Up, &m.data, at(4));
+        let started = format!("withdraw unavailable: dev-a started on message {first} already; x cancels it");
+        assert_eq!(page.key(Key::Char('W'), &m.data, at(4)), refused(&started));
+
+        let mut notice =
+            message(4, &thread, "dev-a", "alice", "[ants] Withdrawn by alice before dev-a was prompted with it");
+        notice.in_reply_to = Some(last);
+        entries.push(notice);
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(entries)).unwrap();
+        page.key(Key::Up, &m.data, at(5));
+        page.key(Key::Up, &m.data, at(5));
+        assert_eq!(page.key(Key::Char('W'), &m.data, at(5)), refused(&format!("message {last} is withdrawn already")));
+        m.data.withdrawn.insert(first);
+        let shown = screen(&page, &m, 100, at(5));
+        assert_eq!(shown.matches("  withdrawn").count(), 2, "{shown}");
     }
 
     #[test]

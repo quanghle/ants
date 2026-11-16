@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
-use ants_proto::UserId;
+use ants_proto::{UserId, Uuid};
 use chrono::{DateTime, Local, Utc};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -117,6 +117,20 @@ pub(super) struct Shown<'a> {
     pub(super) placed: RefCell<Vec<images::Placed>>,
 }
 
+/// The daemon's notice of a withdrawal, which answers the message withdrawn.
+const WITHDRAWN: &str = "[ants] Withdrawn by ";
+
+/// Whether message `id` was withdrawn: here, or as a notice among `entries` tells.
+pub(super) fn withdrawn(data: &Data, entries: &[Entry], id: Uuid) -> bool {
+    data.withdrawn.contains(&id) || entries.iter().any(|e| e.in_reply_to == Some(id) && e.text.starts_with(WITHDRAWN))
+}
+
+/// Whether the ant `ant` started on message `id`: a reply to it from the ant, other than a withdrawal's notice, is on
+/// `entries`.
+pub(super) fn started(entries: &[Entry], ant: &UserId, id: Uuid) -> bool {
+    entries.iter().any(|e| e.in_reply_to == Some(id) && e.from.as_ref() == Some(ant) && !e.text.starts_with(WITHDRAWN))
+}
+
 impl Shown<'_> {
     /// Add the lines of `row`, which `first` and `rest` begin; `entries` are the thread's, for a question's answers.
     pub(super) fn row(&self, lines: &mut Vec<Line<'static>>, row: &Row, entries: &[Entry], first: &str, rest: &str) {
@@ -193,7 +207,9 @@ impl Shown<'_> {
         if !what.is_empty() {
             head.push(Span::styled(format!("  {what}"), style));
         }
-        if let Some(ahead) = e.id.and_then(|id| self.data.live.queued.get(&id)) {
+        if e.id.is_some_and(|id| withdrawn(self.data, entries, id)) {
+            head.push(Span::styled("  withdrawn", Style::new().fg(Color::Yellow)));
+        } else if let Some(ahead) = e.id.and_then(|id| self.data.live.queued.get(&id)) {
             head.push(Span::styled(format!("  queued · {ahead} ahead"), Style::new().fg(Color::Cyan)));
         }
         if e.sealed.is_some() {

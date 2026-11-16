@@ -174,6 +174,11 @@ pub struct Entry {
     /// [`Envelope::origin_thread`]: ants_proto::Envelope::origin_thread
     #[serde(skip)]
     pub origin: Option<ThreadId>,
+    /// The message an inbox message answers ([`Envelope::in_reply_to`]).
+    ///
+    /// [`Envelope::in_reply_to`]: ants_proto::Envelope::in_reply_to
+    #[serde(skip)]
+    pub in_reply_to: Option<Uuid>,
 }
 
 impl Entry {
@@ -208,6 +213,7 @@ impl Entry {
             turns: None,
             webhook: false,
             origin: None,
+            in_reply_to: None,
         }
     }
 

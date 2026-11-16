@@ -2,6 +2,7 @@
 //! on: the same library code as `ants ask`, `ants post`, `ants answer`, `ants react`, `ants cancel`, `ants thread
 //! done|title|pin|mute...` run, each returning the line those print and the warnings they log.
 
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -162,10 +163,24 @@ pub enum Job {
     /// Send as `job`, a [`Job::Reply`] or a [`Job::Post`] on a thread, does, waiting behind the prompt running there
     /// rather than interrupting it, as `ants ask --queue` does.
     Later(Box<Job>),
+    /// Withdraw `message` from the queue of `ant`, as `ants withdraw` does; with `edit`, its text and files come back
+    /// into the bar.
+    Withdraw {
+        ant: UserId,
+        message: Uuid,
+        edit: Option<Box<Edit>>,
+    },
+}
+
+/// A message withdrawn to send again: its text and attachments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Edit {
+    pub text: String,
+    pub files: Vec<Listed>,
 }
 
 /// What a job did.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Done {
     /// What the CLI prints for it.
     pub line: String,
@@ -173,11 +188,15 @@ pub struct Done {
     pub warnings: Vec<String>,
     /// The thread it started, to show.
     pub open: Option<ThreadId>,
+    /// The message it withdrew.
+    pub withdrew: Option<Uuid>,
+    /// The text, and the files fetched, of a message withdrawn to edit, for the bar.
+    pub edit: Option<(String, Vec<PathBuf>)>,
 }
 
 impl Done {
     fn line(line: String) -> Self {
-        Self { line, warnings: Vec::new(), open: None }
+        Self { line, ..Self::default() }
     }
 }
 
@@ -279,7 +298,7 @@ impl Job {
                 Ok(Done {
                     line: format!("answered {} on thread {thread}", envelope.to),
                     warnings: outbox(stored),
-                    open: None,
+                    ..Done::default()
                 })
             }
             Self::Done { thread, done } => {
@@ -315,6 +334,7 @@ impl Job {
             }
             Self::Attached { .. } => Err(anyhow!("files are attached to one message")),
             Self::Later(_) => Err(anyhow!("a message waits its turn once")),
+            Self::Withdraw { ant, message, edit } => withdraw(ctx, &ant, message, edit.map(|e| *e)).await,
         }
     }
 }
@@ -353,9 +373,29 @@ async fn cancel_all(ctx: &Ctx, thread: &ThreadId, ants: Vec<UserId>) -> Result<D
         Some(e) if lines.is_empty() => Err(e),
         failed => {
             let warnings = failed.map(|e| format!("{e:#}")).into_iter().collect();
-            Ok(Done { line: lines.join("; "), warnings, open: None })
+            Ok(Done { line: lines.join("; "), warnings, ..Done::default() })
         }
     }
+}
+
+/// Withdraw `message` from the queue of `ant`, fetching the files of `edit` for the bar.
+async fn withdraw(ctx: &Ctx, ant: &UserId, message: Uuid, edit: Option<Edit>) -> Result<Done> {
+    let line = crate::queue::withdrawn(&ctx.js, ctx.domain.as_ref(), &ctx.me.id, ant, message).await?;
+    let mut warnings = Vec::new();
+    let edit = match edit {
+        Some(Edit { text, files }) => {
+            let mut paths = Vec::new();
+            for listed in &files {
+                match attach::fetched(&ctx.js, ctx.keyring.as_deref(), listed).await {
+                    Ok(path) => paths.push(path),
+                    Err(e) => warnings.push(format!("{} not attached again: {e:#}", listed.attachment.name)),
+                }
+            }
+            Some((text, paths))
+        }
+        None => None,
+    };
+    Ok(Done { line, warnings, withdrew: Some(message), edit, ..Done::default() })
 }
 
 /// Retire `ant` by admin order, as `ants ant retire` does.
@@ -407,6 +447,7 @@ async fn ask(
         line: format!("{} {to} on thread {}{}", sent(queue), envelope.thread_id, with(files)),
         warnings,
         open: new.then_some(envelope.thread_id),
+        ..Done::default()
     })
 }
 
@@ -442,7 +483,7 @@ async fn post(
     if stored.is_none() {
         warnings.push(send::OUTBOX.to_owned());
     }
-    Ok(Done { line, warnings, open: new.then(|| post.thread_id.clone()) })
+    Ok(Done { line, warnings, open: new.then(|| post.thread_id.clone()), ..Done::default() })
 }
 
 /// How a sent line begins: a message sent, or with `queue` one waiting its turn.

@@ -2,6 +2,8 @@
 //! is known of the ants ([`Data`]), the nav's selection, the views opened from it, the focus, the help and the latest
 //! notice. Keys and changes return the [`Action`]s the UI then performs.
 
+use std::collections::HashSet;
+
 use ants_daemon::reactions::Reactions;
 use ants_proto::{
     ApprovalRequest, ChannelEntry, ChannelId, ChannelReadMarkers, Humans, Reaction, ReadMarker, ThreadId, UserId, Uuid,
@@ -150,6 +152,8 @@ pub struct Data {
     pub held: held::Orders,
     /// How the ants look.
     pub looks: faces::Looks,
+    /// The messages the human withdrew here, marked before the ant's notice of each comes.
+    pub withdrawn: HashSet<Uuid>,
 }
 
 impl Data {
@@ -274,6 +278,8 @@ pub enum To {
     Held,
     /// Not another view: something to do.
     Do(Action),
+    /// Nothing done, for the reason the status line tells.
+    Refused(String),
 }
 
 pub struct Model {
@@ -318,6 +324,7 @@ impl Model {
             delegations: tree::Delegations::default(),
             cards: cards::Cards::default(),
             images: images::Images::default(),
+            withdrawn: HashSet::new(),
             credentials: credentials::Heard::default(),
             held: held::Orders::default(),
             looks: faces::Looks::default(),

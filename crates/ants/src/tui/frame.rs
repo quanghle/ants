@@ -152,6 +152,7 @@ const HELP: &[(&str, &str)] = &[
     ("i t S", "in a thread: the bar to reply, its delegation tree, a new TL;DR"),
     ("o ]", "in a thread or channel: open the marked attachment, mark the next"),
     ("x Ctrl-X", "in a thread or work: cancel the prompt running there"),
+    ("W E", "in a thread: withdraw the selected message still waiting, or withdraw it to edit in the bar"),
     ("x y", "in a delegation tree: cancel every prompt in the selected subtree"),
     ("n", "with a person: write a message, starting a thread"),
     ("/", "the bar on /search, as in: /search deploy from:dev-a"),

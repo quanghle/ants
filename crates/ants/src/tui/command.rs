@@ -327,12 +327,23 @@ impl Model {
         Ok(self.select(item))
     }
 
-    /// Take how a job the bar ran went: its line and warnings on the status line, opening the thread it started; on
-    /// failure, the error, and its text and quote back into the bar if empty.
+    /// Take how a job the bar ran went: its line and warnings on the status line, opening the thread it started, and
+    /// the text and files of a message withdrawn to edit into the bar; on failure, the error, and its text and quote
+    /// back into the bar if empty.
     pub fn outcome(&mut self, outcome: Outcome) -> Option<Action> {
         self.bar.staged.sent(&outcome.text, outcome.result.is_err());
         match outcome.result {
-            Ok(done) => {
+            Ok(mut done) => {
+                self.data.withdrawn.extend(done.withdrew);
+                if let Some((text, files)) = done.edit.take() {
+                    self.bar.set_text(&text);
+                    for path in files {
+                        if let Err(e) = self.bar.staged.add(&path.to_string_lossy()) {
+                            done.warnings.push(format!("{e:#}"));
+                        }
+                    }
+                    self.bar.focused = true;
+                }
                 let tone = if done.warnings.is_empty() { Tone::Done } else { Tone::Warn };
                 let text = std::iter::once(done.line).chain(done.warnings).collect::<Vec<_>>().join(" · ");
                 self.bar.set_status(text, tone);
@@ -676,13 +687,40 @@ mod tests {
         assert_eq!(m.bar.status, Some(Status { text: "no route".into(), tone: Tone::Error }));
         let thread = ThreadId::generate();
         let warnings = vec!["dev-a is served by no daemon".to_owned()];
-        let done = Done { line: "sent to dev-a".into(), warnings, open: Some(thread.clone()) };
+        let done = Done { line: "sent to dev-a".into(), warnings, open: Some(thread.clone()), ..Done::default() };
         let sent = Outcome { result: Ok(done), text: "@dev-a deploy".into(), quoting: None };
         assert_eq!(m.outcome(sent), Some(Action::Open(thread)));
         assert_eq!(m.page().name(), "thread");
         assert_eq!(m.bar.text(), "@dev-a deploy", "a success leaves the bar's text alone");
         let status = m.bar.status.as_ref().unwrap();
         assert_eq!((status.text.as_str(), status.tone), ("sent to dev-a · dev-a is served by no daemon", Tone::Warn));
+    }
+
+    #[test]
+    fn a_message_withdrawn_to_edit_comes_back_into_the_bar_with_its_files() {
+        let dir = ants_test_support::scratch_dir("bar-withdrawn");
+        std::fs::write(dir.join("notes.txt"), b"notes").unwrap();
+        let mut m = model();
+        let withdrawn = ants_proto::Uuid::new_v4();
+        let edit = Some(("deploy the site".to_owned(), vec![dir.join("notes.txt"), dir.join("gone.txt")]));
+        let done = Done { line: "withdrew".into(), withdrew: Some(withdrawn), edit, ..Done::default() };
+        m.outcome(Outcome { result: Ok(done), text: String::new(), quoting: None });
+        assert!(m.data.withdrawn.contains(&withdrawn));
+        assert!(m.bar.focused && m.bar.text() == "deploy the site");
+        assert_eq!(m.bar.staged.names(), ["notes.txt"]);
+        let status = m.bar.status.as_ref().unwrap();
+        assert!(status.tone == Tone::Warn && status.text.starts_with("withdrew · "), "{}", status.text);
+
+        let thread = ThreadId::generate();
+        let entries = vec![message(1, &thread, "alice", "dev-a", "deploy the docs")];
+        m.stored(entries.clone(), at(1));
+        let mut page = thread::Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(entries)).unwrap();
+        m.pages.push(Page::Thread(page));
+        m.key(Key::Esc, at(1));
+        assert_eq!(m.key(Key::Char('E'), at(1)), None, "a draft in the bar is kept");
+        assert_eq!(m.bar.text(), "deploy the site");
+        assert!(m.bar.status.as_ref().unwrap().text.starts_with("the bar holds a draft"));
     }
 
     #[test]

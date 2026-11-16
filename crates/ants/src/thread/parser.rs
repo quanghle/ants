@@ -143,6 +143,7 @@ impl Parser {
             turns: Some(e.turn_budget),
             webhook: e.webhook,
             origin: e.origin_thread,
+            in_reply_to: e.in_reply_to,
             ..entry(kind, e.thread_id)
         })
     }
