@@ -23,7 +23,7 @@ use super::{
     snooze, thread, timeline, tree, work,
 };
 use crate::live::{self, State};
-use crate::thread::{Entry, Kind};
+use crate::thread::Entry;
 use crate::tools::Update;
 
 mod keys;
@@ -433,11 +433,16 @@ impl Model {
         actions
     }
 
-    /// Take the tool calls among `entries` into those of their threads: the other entries.
+    /// Take the tool calls and ends with no reply among `entries` into those of their threads, an end into what its
+    /// thread's messages tell too: the other entries.
     fn tools(&mut self, entries: Vec<Entry>) -> Vec<Entry> {
-        let (tools, entries): (Vec<Entry>, Vec<Entry>) = entries.into_iter().partition(|e| e.kind == Kind::Tool);
+        let (tools, entries): (Vec<Entry>, Vec<Entry>) = entries.into_iter().partition(|e| e.kind.on_timeline());
+        let me = self.data.live.me.clone();
         for tool in &tools {
             self.data.calls.stored(tool);
+            if tool.kind == crate::thread::Kind::NoReply {
+                self.data.facts.add(tool, &me);
+            }
         }
         entries
     }

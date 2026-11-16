@@ -214,7 +214,7 @@ impl Job {
             }
             Self::Post { channel, thread, text } => post(ctx, channel, thread, text, &files).await,
             Self::Reply { thread, text, steer } => {
-                let entries = thread::history(&ctx.js, &thread, None, false, None).await?;
+                let entries = thread::history(&ctx.js, &thread, None, thread::Activity::None, None).await?;
                 let humans = humans::load(&ctx.js, &ctx.me).await;
                 let human = |u: &UserId| humans.contains(u);
                 let to = reply_to(&entries, me, human).or_else(|| dm_with(&entries, me, human));
@@ -225,7 +225,7 @@ impl Job {
                 ask(ctx, to, Some(thread), text, steer, &files).await
             }
             Self::Grant { thread, text } => {
-                let entries = thread::history(&ctx.js, &thread, None, false, None).await?;
+                let entries = thread::history(&ctx.js, &thread, None, thread::Activity::None, None).await?;
                 let ant = stuck(&entries).ok_or_else(|| anyhow!("no ant is stuck on thread {thread}"))?;
                 ask(ctx, ant.into(), Some(thread), text, false, &files).await
             }
@@ -252,7 +252,7 @@ impl Job {
                 }
             }
             Self::Answer { thread, choice } => {
-                let entries = thread::history(&ctx.js, &thread, None, false, None).await?;
+                let entries = thread::history(&ctx.js, &thread, None, thread::Activity::None, None).await?;
                 let question = open_question(&entries, me)
                     .ok_or_else(|| anyhow!("no question to {me} waits for an answer on thread {thread}"))?;
                 let envelope = send::answering(&ctx.js, me, question, choice).await?;
@@ -278,7 +278,7 @@ impl Job {
                 let message = match message {
                     Some(message) => message,
                     None => {
-                        let entries = thread::history(&ctx.js, &thread, None, false, None).await?;
+                        let entries = thread::history(&ctx.js, &thread, None, thread::Activity::None, None).await?;
                         latest(&entries, me).ok_or_else(|| anyhow!("no message on thread {thread} to react to"))?
                     }
                 };
@@ -490,7 +490,8 @@ mod tests {
         let texts: Vec<String> = unread.into_iter().map(|e| crate::sealed::read(e, Some(&keyring)).0.text).collect();
         assert_eq!(texts, ["lunch?", "at noon"]);
         let keyring = Arc::new(keyring);
-        let entries = thread::history(&bob_js, &thread, None, false, Some(Arc::clone(&keyring))).await.unwrap();
+        let entries =
+            thread::history(&bob_js, &thread, None, thread::Activity::None, Some(Arc::clone(&keyring))).await.unwrap();
         let [listed] = &entries[1].attachments[..] else { panic!("{entries:?}") };
         assert!(listed.attachment.sealed.is_some(), "{listed:?}");
         assert_eq!((listed.attachment.name.as_str(), listed.size()), ("menu.txt", 4));
@@ -557,7 +558,7 @@ mod tests {
             done.line
         );
         let thread = done.open.unwrap();
-        let entries = thread::history(&js, &thread, None, false, None).await.unwrap();
+        let entries = thread::history(&js, &thread, None, thread::Activity::None, None).await.unwrap();
         let [listed] = &entries[0].attachments[..] else { panic!("{entries:?}") };
         assert_eq!(listed.attachment, files[0].attachment);
         let (_, bytes) =

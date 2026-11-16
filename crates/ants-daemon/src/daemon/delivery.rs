@@ -1,9 +1,10 @@
 //! Delivering the answer: the reply of the kind the message calls for, carrying the files attached to it, stored
-//! before the message is acked.
+//! before the message is acked; or none, for another ant's reply to the ant's own message and for a turn ended by
+//! `complete`, whose answer is kept on the thread's timeline instead.
 
 use ants_proto::{
     Attachment, AttachmentHandle, AttachmentScope, ChannelPost, Envelope, Error as ProtoError, EscalationReason,
-    NotesPost, Role, State, ThreadId, UserId, Uuid,
+    NoReplyWhy, NotesPost, Role, State, ThreadId, Timeline, TimelineEntry, UserId, Uuid,
 };
 use anyhow::Result;
 use async_nats::jetstream;
@@ -18,6 +19,78 @@ use crate::status;
 use super::{Inbox, Incoming};
 
 impl Inbox<'_> {
+    /// Whether `incoming` is another ant's reply to a message or post the ant sent, which is prompted but not answered
+    /// back, so that two ants answering each other stop after one reply: given what was read of a post's thread.
+    /// Never a message carrying an escalation or an approval request, a webhook's, nor the resume of a channel thread
+    /// after an escalation ([`Inbox::always_answered`]).
+    pub(super) fn replies_to_own(&self, incoming: &Incoming, read: Option<&Context>) -> bool {
+        if self.always_answered(incoming).is_some() {
+            return false;
+        }
+        match (&incoming.post, read) {
+            // A post's `in_reply_to` is its author's to set: it counts only when it names a post the ant made.
+            (Some(posted), Some(read)) => posted.triage.is_none() && read.answers_own,
+            (Some(_), None) => false,
+            // `Envelope::reply` addresses the sender of the message it answers (only `Route::Stuck` redirects it, with
+            // an escalation), and what an ant sends with send_message, ask_ant or ask_human answers nothing: an ant's
+            // message answering one answers a message this ant sent.
+            (None, _) => incoming.envelope.in_reply_to.is_some(),
+        }
+    }
+
+    /// Why `incoming` is always answered, if it is: a human's message, or one an assistant sent for its human, a
+    /// webhook's, one carrying an escalation or an approval request, and the resume of a channel thread after an
+    /// escalation.
+    pub(super) fn always_answered(&self, incoming: &Incoming) -> Option<&'static str> {
+        let envelope = &incoming.envelope;
+        if envelope.on_behalf_of.is_some() || self.humans.sender_role(envelope).is_human() {
+            Some("a human's message")
+        } else if envelope.webhook {
+            Some("a webhook's message")
+        } else if envelope.escalation.is_some() {
+            Some("a message carrying an escalation")
+        } else if envelope.approval.is_some() {
+            Some("an approval request")
+        } else if incoming.resume.is_some() {
+            Some("the resume of a channel thread after an escalation")
+        } else {
+            None
+        }
+    }
+
+    /// End the turn on `incoming`, the message at stream sequence `seq`, with no reply, for `why` and the reason
+    /// `complete` gave: its final `text`, redacted, goes to the thread's timeline, then the `limit` the prompt reached
+    /// escalates, the posts of a post's thread up to it are noted as shown, and the message is acked. The timeline
+    /// record is best effort, but stored before the ack; nothing is noted in `answered`, so a redelivery before the
+    /// ack prompts again, told it was cut off.
+    pub(super) async fn end_unanswered(
+        &self,
+        incoming: &Incoming,
+        (why, reason): (NoReplyWhy, Option<String>),
+        text: String,
+        limit: Option<&String>,
+        msg: &jetstream::Message,
+        seq: u64,
+    ) -> Result<()> {
+        let envelope = &incoming.envelope;
+        let thread = &envelope.thread_id;
+        tracing::info!(%thread, from = %envelope.from, ?why, "ending the turn with no reply");
+        let entry = TimelineEntry::NoReply { why, reason, text };
+        let record = Timeline::new(self.ant.clone(), thread.clone(), envelope.id, vec![entry], 0);
+        crate::timeline::publish(self.js, &record).await;
+        if let Some(limit) = limit {
+            self.escalate(incoming, limit, EscalationReason::Cap, seq, None).await?;
+        }
+        if incoming.post.is_some()
+            && let Err(e) = self.threads.seen(thread, seq).await
+        {
+            tracing::warn!(%thread, error = format!("{e:#}"), "noting the posts shown");
+        }
+        self.done(msg, seq).await?;
+        status::state(self.client, self.ant, thread, State::Idle);
+        Ok(())
+    }
+
     /// The reply carrying `text`, the answer to `incoming`, and the title the turn suggested for the thread, whatever
     /// kind of reply it is: `None` when the answer went up the chain or nowhere instead, and the message is done with.
     pub(super) async fn reply_for(

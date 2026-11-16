@@ -25,10 +25,11 @@ pub const MAX_TIMELINE_CALLS: usize = 200;
 pub const TIMELINE_EVERY: Duration = Duration::from_secs(30);
 
 /// Part of the tool-call timeline of `ant` on a thread: the calls of the prompt that handled `message` that changed
-/// since the last record, and the prompt's plan as last reported, stored on [`subject::timeline`]. A record holds 1 to
-/// [`MAX_TIMELINE_ENTRIES`] entries, never a tool's input or output, message text or thoughts. Calls are merged by
-/// message and call id, later records replacing earlier ones ([`Timelines`]). Readers ignore unknown entry kinds and
-/// fields.
+/// since the last record, the prompt's plan as last reported, and whether it ended with no reply sent, stored on
+/// [`subject::timeline`]. A record holds 1 to [`MAX_TIMELINE_ENTRIES`] entries, never a tool's input or output, message
+/// text or thoughts, but for the final text of a prompt that ended with no reply sent ([`TimelineEntry::NoReply`]),
+/// which no message carries. Calls are merged by message and call id, later records replacing earlier ones
+/// ([`Timelines`]). Readers ignore unknown entry kinds and fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Timeline {
     pub ant: UserId,
@@ -47,7 +48,7 @@ fn is_zero(n: &u32) -> bool {
     *n == 0
 }
 
-/// One entry of a [`Timeline`] record.
+/// One entry of a [`Timeline`] record, tagged by `type`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TimelineEntry {
@@ -56,9 +57,29 @@ pub enum TimelineEntry {
     Plan {
         steps: Vec<PlanStep>,
     },
-    /// An entry of a kind this version does not know.
+    /// The prompt ended with no reply sent: why, the reason the ant gave to `complete` if any, and the turn's final text,
+    /// which went to nobody.
+    NoReply {
+        why: NoReplyWhy,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        text: String,
+    },
+    /// An entry of a kind this version does not know, read as this and ignored: a reader older than a kind skips it
+    /// (one before [`TimelineEntry::NoReply`] skips that). Stays the last variant.
     #[serde(other)]
     Unknown,
+}
+
+/// Why a prompt ended with no reply sent ([`TimelineEntry::NoReply`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoReplyWhy {
+    /// The message was another ant's reply to a message this ant sent, so the answer is not sent back.
+    ReplyToOwn,
+    /// The ant ended the turn with the `complete` tool.
+    Completed,
 }
 
 /// A tool call as a [`Timeline`] record holds it.
@@ -154,15 +175,32 @@ pub struct MergedCall {
     pub call: TimelineCall,
 }
 
-/// The tool calls and plans of [`Timeline`] records, merged: fed in the order they were stored, each call and plan is
-/// as its latest record has it. Calls are keyed by ant, message and call id, since a channel post reaches several ants
-/// under one message id.
+/// A prompt of a thread's timeline that ended with no reply sent ([`TimelineEntry::NoReply`]), as its latest record
+/// has it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergedNoReply {
+    pub ant: UserId,
+    pub thread_id: ThreadId,
+    /// The message whose prompt ended so.
+    pub message: Uuid,
+    pub why: NoReplyWhy,
+    pub reason: Option<String>,
+    /// The turn's final text, which went to nobody.
+    pub text: String,
+    /// When the record saying so was made.
+    pub at: DateTime<Utc>,
+}
+
+/// The tool calls, plans and ends with no reply of [`Timeline`] records, merged: fed in the order they were stored,
+/// each call, plan and end is as its latest record has it. Calls are keyed by ant, message and call id, since a
+/// channel post reaches several ants under one message id; plans and ends by ant and message.
 #[derive(Debug, Clone, Default)]
 pub struct Timelines {
     calls: Vec<MergedCall>,
     index: HashMap<(UserId, Uuid, String), usize>,
     plans: HashMap<(UserId, Uuid), Vec<PlanStep>>,
     omitted: HashMap<(UserId, Uuid), u32>,
+    no_replies: Vec<MergedNoReply>,
 }
 
 impl Timelines {
@@ -171,7 +209,7 @@ impl Timelines {
         if record.check_subject(subject).is_err() {
             return false;
         }
-        let Timeline { ant, thread_id, message, entries, omitted, .. } = record;
+        let Timeline { ant, thread_id, message, entries, omitted, at } = record;
         if omitted > 0 {
             self.omitted.insert((ant.clone(), message), omitted);
         }
@@ -190,6 +228,14 @@ impl Timelines {
                 TimelineEntry::Plan { steps } => {
                     self.plans.insert((ant.clone(), message), steps);
                 }
+                TimelineEntry::NoReply { why, reason, text } => {
+                    let (ant, thread_id) = (ant.clone(), thread_id.clone());
+                    let end = MergedNoReply { ant, thread_id, message, why, reason, text, at };
+                    match self.no_replies.iter_mut().find(|n| n.ant == end.ant && n.message == message) {
+                        Some(had) => *had = end,
+                        None => self.no_replies.push(end),
+                    }
+                }
                 TimelineEntry::Unknown => {}
             }
         }
@@ -199,6 +245,11 @@ impl Timelines {
     /// Every call, in the order first stored.
     pub fn calls(&self) -> &[MergedCall] {
         &self.calls
+    }
+
+    /// Every prompt that ended with no reply sent, in the order first stored.
+    pub fn no_replies(&self) -> &[MergedNoReply] {
+        &self.no_replies
     }
 
     /// The plan of `ant` for `message` as last stored, if any.
@@ -212,7 +263,7 @@ impl Timelines {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.calls.is_empty() && self.plans.is_empty()
+        self.calls.is_empty() && self.plans.is_empty() && self.no_replies.is_empty()
     }
 }
 
@@ -274,6 +325,23 @@ mod tests {
         assert_eq!(timelines.plan(&p("dev-a"), m1), Some(plan.as_slice()));
         assert_eq!(timelines.omitted(&p("dev-a"), m1), 3);
         assert_eq!(timelines.omitted(&p("dev-a"), m2), 0);
+    }
+
+    #[test]
+    fn a_later_no_reply_of_a_prompt_replaces_the_earlier_one() {
+        let t: ThreadId = "t1".parse().unwrap();
+        let (m1, m2) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let end = |why, text: &str| TimelineEntry::NoReply { why, reason: None, text: text.to_owned() };
+        let mut timelines = Timelines::default();
+        let first = Timeline::new(p("dev-a"), t.clone(), m1, vec![end(NoReplyWhy::ReplyToOwn, "thanks")], 0);
+        let subject = first.subject();
+        assert!(timelines.add(&subject, first));
+        assert!(!timelines.is_empty());
+        let entries = vec![end(NoReplyWhy::Completed, "done")];
+        assert!(timelines.add(&subject, Timeline::new(p("dev-a"), t.clone(), m1, entries, 0)));
+        assert!(timelines.add(&subject, Timeline::new(p("dev-a"), t, m2, vec![end(NoReplyWhy::ReplyToOwn, "")], 0)));
+        let ends: Vec<_> = timelines.no_replies().iter().map(|n| (n.message, n.why, n.text.as_str())).collect();
+        assert_eq!(ends, [(m1, NoReplyWhy::Completed, "done"), (m2, NoReplyWhy::ReplyToOwn, "")]);
     }
 
     #[test]

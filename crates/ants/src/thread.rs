@@ -1,5 +1,6 @@
 //! `ants thread`: the threads in the ANTS stream, across inboxes (both ways), channel posts, notes, escalations, tool
-//! requests and their decisions, dead letters, and the tool calls ants stored on their timelines.
+//! requests and their decisions, dead letters, and the tool calls and prompts ended with no reply ants stored on their
+//! timelines.
 //!
 //! Read back by a human by message gets (batched direct gets, [`Reading::Gets`]), so nothing is consumed or acked
 //! and no consumer is left behind. Only notes subjects name their thread, so a read goes through every message stored
@@ -12,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use ants_daemon::reading::{self, Reading};
-use ants_proto::{Mark, ThreadId, ThreadMarks, Timeline, Timelines, UserId, Uuid, subject};
+use ants_proto::{Mark, NoReplyWhy, ThreadId, ThreadMarks, Timeline, Timelines, UserId, Uuid, subject};
 use anyhow::{Result, anyhow, bail};
 use async_nats::jetstream::{self, consumer};
 use chrono::{DateTime, Utc};
@@ -64,6 +65,28 @@ pub struct ToolCall {
     pub duration_ms: Option<u64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
+}
+
+/// A prompt an ant ended with no reply sent, from its timeline, as a [`Kind::NoReply`] entry has it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NoReply {
+    /// The message whose prompt ended so.
+    pub message: Uuid,
+    pub why: NoReplyWhy,
+    /// The reason the ant gave to `complete`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// What of its ants' timelines [`history`] adds to a thread's messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Activity {
+    /// Only the messages.
+    None,
+    /// The prompts ended with no reply sent.
+    NoReplies,
+    /// The tool calls and the prompts ended with no reply sent.
+    All,
 }
 
 /// Where a read of the last `since` starts: everything kept for zero.
@@ -266,17 +289,18 @@ fn marked_start<'a>(threads: impl Iterator<Item = &'a ThreadId>) -> Option<consu
 }
 
 /// Every message stored on `thread`, in stream order, with the reactions to each: read from `since` ago, else from the
-/// thread's start when its id is time-ordered, else from all the stream keeps. With `tools`, the tool calls its ants
-/// stored on their timelines too, each once as its latest record has it ([`timeline`]), placed by when it started.
-/// Sealed messages are opened with `keyring`, which looks up a sending device added since it was loaded.
+/// thread's start when its id is time-ordered, else from all the stream keeps. With `activity`, what its ants stored on
+/// their timelines too, each tool call and prompt ended with no reply once as its latest record has it, a call placed
+/// by when it started and an end by when its record was made. Sealed messages are opened with `keyring`, which looks
+/// up a sending device added since it was loaded.
 pub async fn history(
     js: &jetstream::Context,
     thread: &ThreadId,
     since: Option<Duration>,
-    tools: bool,
+    activity: Activity,
     keyring: Option<Arc<sealed::Keyring>>,
 ) -> Result<Vec<Entry>> {
-    history_with(js, thread, since, tools, Parser::opening(keyring)).await
+    history_with(js, thread, since, activity, Parser::opening(keyring)).await
 }
 
 /// [`history`], read with `parser`.
@@ -284,7 +308,7 @@ pub async fn history_with(
     js: &jetstream::Context,
     thread: &ThreadId,
     since: Option<Duration>,
-    tools: bool,
+    activity: Activity,
     mut parser: Parser,
 ) -> Result<Vec<Entry>> {
     let mut entries = Vec::new();
@@ -294,7 +318,7 @@ pub async fn history_with(
     reading::read_back_awaiting(js, "", Reading::Gets, subject::ALL, start, async |seq, stored, msg| {
         let (subject, payload) = (msg.subject.as_str(), &msg.payload[..]);
         if let Some((on, _)) = subject::parse_timeline(subject) {
-            if tools && on == *thread {
+            if activity != Activity::None && on == *thread {
                 add_timeline(&mut timelines, &mut seqs, seq, subject, payload);
             }
         } else if let Some(entry) = parser.read(seq, stored.into(), subject, payload).await
@@ -306,11 +330,16 @@ pub async fn history_with(
     })
     .await?;
     if !timelines.is_empty() {
-        let calls = timelines.calls().iter().map(|call| {
-            let key = (call.ant.clone(), call.message, call.call.id.clone());
-            Entry::tool(seqs.get(&key).copied().unwrap_or_default(), call)
-        });
+        let seq = |key| seqs.get(&key).copied().unwrap_or_default();
+        let calls = timelines
+            .calls()
+            .iter()
+            .filter(|_| activity == Activity::All)
+            .map(|call| Entry::tool(seq((call.ant.clone(), call.message, Some(call.call.id.clone()))), call));
         entries.extend(calls);
+        let ends =
+            timelines.no_replies().iter().map(|end| Entry::no_reply(seq((end.ant.clone(), end.message, None)), end));
+        entries.extend(ends);
         entries.sort_by_key(|e| e.stored_at);
     }
     let ids: Vec<Uuid> = entries.iter().filter_map(|e| e.id).collect();
@@ -326,21 +355,23 @@ pub async fn history_with(
     Ok(entries)
 }
 
-/// The tool calls of the timeline record stored at `seq` on `subject`, each an entry of kind tool as that record has
-/// it; none for a record that does not parse or that its subject does not name.
-pub fn tool_entries(seq: u64, subject: &str, payload: &[u8]) -> Vec<Entry> {
+/// The tool calls and the end with no reply of the timeline record stored at `seq` on `subject`, entries of kind tool
+/// and no reply as that record has them; none for a record that does not parse or that its subject does not name.
+pub fn timeline_entries(seq: u64, subject: &str, payload: &[u8]) -> Vec<Entry> {
     let mut timelines = Timelines::default();
     let Ok(record) = serde_json::from_slice::<Timeline>(payload) else { return Vec::new() };
     if !timelines.add(subject, record) {
         return Vec::new();
     }
-    timelines.calls().iter().map(|c| Entry::tool(seq, c)).collect()
+    let calls = timelines.calls().iter().map(|c| Entry::tool(seq, c));
+    calls.chain(timelines.no_replies().iter().map(|end| Entry::no_reply(seq, end))).collect()
 }
 
-/// Merge the timeline record stored at `seq` on `subject`, noting it as the last of each call it holds.
+/// Merge the timeline record stored at `seq` on `subject`, noting it as the last of each call and end it holds (an
+/// end keyed with no call id).
 fn add_timeline(
     timelines: &mut Timelines,
-    seqs: &mut HashMap<(UserId, Uuid, String), u64>,
+    seqs: &mut HashMap<(UserId, Uuid, Option<String>), u64>,
     seq: u64,
     subject: &str,
     payload: &[u8],
@@ -353,7 +384,8 @@ fn add_timeline(
         .entries
         .iter()
         .filter_map(|e| match e {
-            ants_proto::TimelineEntry::Tool(call) => Some((record.ant.clone(), record.message, call.id.clone())),
+            ants_proto::TimelineEntry::Tool(call) => Some((record.ant.clone(), record.message, Some(call.id.clone()))),
+            ants_proto::TimelineEntry::NoReply { .. } => Some((record.ant.clone(), record.message, None)),
             _ => None,
         })
         .collect();
@@ -378,7 +410,7 @@ pub async fn last_activity(js: &jetstream::Context, thread: &ThreadId) -> Result
 }
 
 /// `ants thread show THREAD`: every message stored on the thread `pick` picks, in the order the stream stored them,
-/// and unless `no_tools` the tool calls its ants made.
+/// the prompts its ants ended with no reply sent, and unless `no_tools` the tool calls its ants made.
 pub async fn show(
     nats: &crate::Nats<'_>,
     pick: Pick,
@@ -392,14 +424,15 @@ pub async fn show(
     let keyring = sealed::Keyring::load(nats, &js).await.map(Arc::new);
     let behalf = Arc::new(crate::behalf::Checker::new(nats, &js));
     let parser = Parser::opening(keyring).checking(Some(behalf.clone()));
-    let entries = history_with(&js, thread, since, !no_tools, parser).await?;
+    let activity = if no_tools { Activity::NoReplies } else { Activity::All };
+    let entries = history_with(&js, thread, since, activity, parser).await?;
     let sealed = entries.iter().any(|e| e.sealed.is_some());
     let suggested = entries.iter().find_map(|e| Some((e.from.as_ref()?, e.suggested_title.as_deref()?)));
     let suggested = suggested.filter(|_| !sealed);
     let thread_meta::About { title, mark, done } = if json {
         thread_meta::About::default()
     } else {
-        let messages: Vec<Entry> = entries.iter().filter(|e| e.kind != Kind::Tool).cloned().collect();
+        let messages: Vec<Entry> = entries.iter().filter(|e| !e.kind.on_timeline()).cloned().collect();
         thread_meta::of_or_none(nats, &js, thread, &messages, suggested, auto_archive).await
     };
     if json {

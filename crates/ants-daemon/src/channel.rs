@@ -258,6 +258,8 @@ pub struct Context {
     /// The posts stored on the thread after the one being answered, from a human's last one on: what
     /// [`ChannelPost::turns_left`] goes by.
     pub later: Vec<ChannelPost>,
+    /// Whether the post being answered answers one of the ant's own ([`ChannelPost::in_reply_to`]).
+    pub answers_own: bool,
 }
 
 /// Picks the context of a prompt from the posts of a channel, read in stream order.
@@ -267,14 +269,19 @@ struct Collect<'a> {
     thread: &'a ThreadId,
     /// Stream sequence of the post being answered: the context ends before it, and the later posts start after it.
     at: u64,
+    /// The post the one being answered answers.
+    answering: Option<Uuid>,
     posts: VecDeque<ChannelPost>,
     skipped: usize,
     later: Vec<ChannelPost>,
+    /// Whether the post the one being answered answers is the ant's, once read.
+    answered_own: Option<bool>,
 }
 
 impl<'a> Collect<'a> {
-    fn new(ant: &'a UserId, humans: &'a Humans, thread: &'a ThreadId, at: u64) -> Self {
-        Self { ant, humans, thread, at, posts: VecDeque::new(), skipped: 0, later: Vec::new() }
+    fn new(ant: &'a UserId, humans: &'a Humans, thread: &'a ThreadId, at: u64, answering: Option<Uuid>) -> Self {
+        let (posts, later) = (VecDeque::new(), Vec::new());
+        Self { ant, humans, thread, at, answering, posts, skipped: 0, later, answered_own: None }
     }
 
     /// Take the post at stream sequence `seq`.
@@ -290,6 +297,9 @@ impl<'a> Collect<'a> {
             self.later.push(post);
             return;
         }
+        if self.answering == Some(post.id) {
+            self.answered_own = Some(post.from == *self.ant);
+        }
         if post.from == *self.ant {
             return;
         }
@@ -301,7 +311,8 @@ impl<'a> Collect<'a> {
     }
 
     fn done(self) -> Context {
-        Context { posts: self.posts.into(), skipped: self.skipped, later: self.later }
+        let answers_own = self.answered_own == Some(true);
+        Context { posts: self.posts.into(), skipped: self.skipped, later: self.later, answers_own }
     }
 }
 
@@ -386,6 +397,27 @@ impl Sink for Origin<'_> {
     }
 }
 
+/// Finds the author of post `id` on `thread`, among the posts stored before stream sequence `before`.
+struct Author<'a> {
+    thread: &'a ThreadId,
+    id: Uuid,
+    before: u64,
+    from: Option<UserId>,
+}
+
+impl Sink for Author<'_> {
+    fn take(&mut self, seq: u64, _: SystemTime, post: ChannelPost) -> ControlFlow<()> {
+        if seq >= self.before {
+            return ControlFlow::Break(());
+        }
+        if post.thread_id == *self.thread && post.id == self.id {
+            self.from = Some(post.from);
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    }
+}
+
 /// Finds the channel of the top-level post that starts `thread`, among the posts of every channel stored up to stream
 /// sequence `upto` and before `until`.
 struct Root<'a> {
@@ -436,18 +468,20 @@ impl Sink for Part<'_> {
 }
 
 /// The prompt for `post`, which @mentions `ant`, after the `context` of its thread. `left` is the turns the thread
-/// keeps after the reply.
-pub fn prompt(ant: &UserId, post: &ChannelPost, context: &Context, left: u32) -> String {
+/// keeps after the reply; none when the final answer is not posted, as for a post answering one of the ant's own.
+pub fn prompt(ant: &UserId, post: &ChannelPost, context: &Context, left: Option<u32>) -> String {
     let channel = &post.channel;
     let mut text = format!("[ants] Channel #{channel}, thread {}.\n\n", post.thread_id);
     text.push_str(&context_text(context));
-    let _ = write!(text, "[ants] Post from {} mentioning {ant}:\n{}\n\n", poster(post), post.text);
-    let _ = write!(
-        text,
-        "[ants] The final answer of this turn is posted to #{channel} on this thread and spends one of its turns \
-         ({left} left after it). An @mention in it wakes that member of the channel, or notifies it if a human; \
-         mentioning nobody wakes nobody."
-    );
+    let _ = write!(text, "[ants] Post from {} mentioning {ant}:\n{}", poster(post), post.text);
+    if let Some(left) = left {
+        let _ = write!(
+            text,
+            "\n\n[ants] The final answer of this turn is posted to #{channel} on this thread and spends one of its \
+             turns ({left} left after it). An @mention in it wakes that member of the channel, or notifies it if a \
+             human; mentioning nobody wakes nobody."
+        );
+    }
     text
 }
 
@@ -754,16 +788,19 @@ impl Threads {
     }
 
     /// The posts on the thread of `post`, at stream sequence `seq`, stored after it; with [`Earlier::Unseen`], also those before
-    /// it that the ant has not been shown: after the last one shown, or since the thread started, without its own.
+    /// it that the ant has not been shown: after the last one shown, or since the thread started, without its own,
+    /// and whether `post` answers one of the ant's own ([`Context::answers_own`]), looked up for an ant's post when not
+    /// read.
     /// The posts of `humans` renew the thread's turns. The read ends at the last post stored as it starts.
     pub async fn context(&self, post: &ChannelPost, seq: u64, earlier: Earlier, humans: &Humans) -> Result<Context> {
-        let mut collect = Collect::new(&self.ant, humans, &post.thread_id, seq);
+        let mut collect = Collect::new(&self.ant, humans, &post.thread_id, seq, post.in_reply_to);
         let after = consumer::DeliverPolicy::ByStartSequence { start_sequence: seq + 1 };
         let seen = if earlier == Earlier::Unseen && !post.starts_thread() {
             Some(self.last_seen(&post.thread_id).await?)
         } else {
             None
         };
+        let whole = seen == Some(None);
         let start = match seen {
             None => after,
             Some(Some(seen)) if seen + 1 >= seq => after,
@@ -773,7 +810,38 @@ impl Threads {
         self.scan(&subject::chan_room(&post.channel), start, &mut collect)
             .await
             .with_context(|| format!("reading thread {} of #{}", post.thread_id, post.channel))?;
-        Ok(collect.done())
+        let unread = collect.answered_own.is_none() && earlier == Earlier::Unseen && !whole;
+        // Only an ant's post (no human's, webhook's or assistant's for its human) goes unanswered as one answering
+        // the ant's own.
+        let by_ant = !post.webhook && post.on_behalf_of.is_none() && !humans.contains(&post.from);
+        let mut context = collect.done();
+        if let Some(id) = post.in_reply_to.filter(|_| unread && by_ant) {
+            context.answers_own = match self.author(post, id, seq).await {
+                Ok(author) => author.as_ref() == Some(&self.ant),
+                Err(e) => {
+                    tracing::warn!(thread = %post.thread_id, error = format!("{e:#}"), "looking up the post answered");
+                    false
+                }
+            };
+        }
+        Ok(context)
+    }
+
+    /// The author of post `id` on the thread of `post`, at stream sequence `seq`, stored before it: read from the time
+    /// in `id`, a time-ordered UUID, or else from the thread's start.
+    async fn author(&self, post: &ChannelPost, id: Uuid, seq: u64) -> Result<Option<UserId>> {
+        let start = match (uuid_start(id), thread_start(&post.thread_id)) {
+            (Some(at), started) => {
+                let at = started.map_or(at, |started| at.max(started));
+                consumer::DeliverPolicy::ByStartTime { start_time: at.into() }
+            }
+            (None, _) => from_start(&post.thread_id),
+        };
+        let mut author = Author { thread: &post.thread_id, id, before: seq, from: None };
+        self.scan(&subject::chan_room(&post.channel), start, &mut author)
+            .await
+            .with_context(|| format!("reading post {id} on thread {} of #{}", post.thread_id, post.channel))?;
+        Ok(author.from)
     }
 
     /// Read the channel posts on `filter` from `start` into `sink`, up to the last one stored as the read starts.
@@ -880,7 +948,12 @@ fn from_start(thread: &ThreadId) -> consumer::DeliverPolicy {
 
 /// When `thread` started, a little early, if its id is a time-ordered UUID as a top-level post's is.
 pub fn thread_start(thread: &ThreadId) -> Option<SystemTime> {
-    let (secs, nanos) = Uuid::parse_str(thread.as_str()).ok()?.get_timestamp()?.to_unix();
+    uuid_start(Uuid::parse_str(thread.as_str()).ok()?)
+}
+
+/// The time in `id`, a little early, if it is a time-ordered UUID.
+fn uuid_start(id: Uuid) -> Option<SystemTime> {
+    let (secs, nanos) = id.get_timestamp()?.to_unix();
     (SystemTime::UNIX_EPOCH + Duration::new(secs, nanos)).checked_sub(CLOCK_SLACK)
 }
 
@@ -1014,7 +1087,7 @@ mod tests {
         let on = |from: &str, text: &str| {
             ChannelPost::on_thread(root.channel.clone(), root.thread_id.clone(), p(from), text)
         };
-        let mut collect = Collect::new(&a, &humans, &root.thread_id, 1000);
+        let mut collect = Collect::new(&a, &humans, &root.thread_id, 1000, None);
         collect.push(1, root.clone());
         collect.push(2, post("human", "another thread"));
         collect.push(3, on("dev-a", "its own"));
@@ -1036,7 +1109,7 @@ mod tests {
         let on = |from: &str, text: &str| {
             ChannelPost::on_thread(root.channel.clone(), root.thread_id.clone(), p(from), text)
         };
-        let mut collect = Collect::new(&a, &humans, &root.thread_id, 5);
+        let mut collect = Collect::new(&a, &humans, &root.thread_id, 5, None);
         collect.push(5, root.clone());
         collect.push(6, on("dev-b", "first"));
         collect.push(7, post("human", "another thread"));
@@ -1052,13 +1125,32 @@ mod tests {
     }
 
     #[test]
+    fn the_context_tells_whether_the_post_answers_one_of_the_ant_s_own() {
+        let (a, root, humans) = (p("dev-a"), post("human", "deploy"), humans());
+        let on = |from: &str| ChannelPost::on_thread(root.channel.clone(), root.thread_id.clone(), p(from), "x");
+        let (own, other) = (on("dev-a"), on("dev-b"));
+        let answers = |answering: &ChannelPost, upto: u64| {
+            let mut collect = Collect::new(&a, &humans, &root.thread_id, 10, Some(answering.id));
+            for (seq, post) in [(1, &root), (2, &own), (3, &other)].into_iter().filter(|(seq, _)| *seq <= upto) {
+                collect.push(seq, post.clone());
+            }
+            collect.push(11, on("dev-a"));
+            collect.done().answers_own
+        };
+        assert!(answers(&own, 3));
+        assert!(!answers(&other, 3), "another's post");
+        assert!(!answers(&root, 3), "a human's post");
+        assert!(!answers(&own, 1), "the ant's post not read: looked up by `Threads::context`");
+    }
+
+    #[test]
     fn the_prompt_shows_the_thread_then_the_post_and_where_the_reply_goes() {
         let mut root = post("human", "deploy friday?");
         let plan = crate::files::reference("plan.md", "text/markdown", b"# plan").unwrap();
         root.attachments = vec![plan.clone()];
         let ask = ChannelPost::on_thread(root.channel.clone(), root.thread_id.clone(), p("dev-b"), "@dev-a agree?");
         let context = Context { posts: vec![root.clone()], skipped: 2, ..Context::default() };
-        let text = prompt(&p("dev-a"), &ask, &context, 6);
+        let text = prompt(&p("dev-a"), &ask, &context, Some(6));
         let expected = format!(
             "[ants] Channel #ops, thread {}.\n\n\
              [ants] Earlier posts on the thread not shown before (2 older ones left out), oldest first:\n\
@@ -1072,11 +1164,13 @@ mod tests {
             root.thread_id, plan.id
         );
         assert_eq!(text, expected);
-        let for_alice = ask.on_behalf(Some(p("alice")));
-        let text = prompt(&p("dev-a"), &for_alice, &Context::default(), 6);
+        let for_alice = ask.clone().on_behalf(Some(p("alice")));
+        let text = prompt(&p("dev-a"), &for_alice, &Context::default(), Some(6));
         assert!(text.contains("[ants] Post from dev-b for alice mentioning dev-a:\n"), "{text}");
         assert_eq!(as_envelope(&for_alice, &p("dev-a")).on_behalf_of, Some(p("alice")));
-        let first = prompt(&p("dev-a"), &root, &Context::default(), 7);
+        let unposted = prompt(&p("dev-a"), &ask, &Context::default(), None);
+        assert!(unposted.ends_with("[ants] Post from dev-b mentioning dev-a:\n@dev-a agree?"), "{unposted}");
+        let first = prompt(&p("dev-a"), &root, &Context::default(), Some(7));
         assert!(first.starts_with(&format!("[ants] Channel #ops, thread {}.\n\n[ants] Post from", root.thread_id)));
     }
 

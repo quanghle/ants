@@ -110,7 +110,8 @@ fn instructions(ant: &UserId, manager: bool, assisting: Option<&UserId>) -> Stri
          message, by default the one being handled, with a reaction such as eyes (seen) or check (done) that \
          humans see beneath it: it wakes nobody, so it acknowledges without a reply. list_reactions shows the \
          reactions to a message this ant reads, which never arrive as messages. suggest_thread_title proposes a \
-         title for the thread, which the reply carries and which becomes its title unless it ever had one. ask_human \
+         title for the thread, which the reply carries and which becomes its title unless it ever had one. complete \
+         ends the turn with no reply, for an ant's message needing none, such as an acknowledgement. ask_human \
          asks the thread's owner a question with numbered options and returns at once; the answer arrives later as a \
          message, prefixed with an [ants] line naming the question and the option picked. send_message, \
          ask_ant, route, post_channel and post_notes attach files from the working directory (attach), and \

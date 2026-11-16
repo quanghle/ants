@@ -3,7 +3,9 @@
 //! While a prompt runs, its tool calls and plan are collected from the status updates the harness streams, redacted as
 //! those are, and stored as records of what changed: at most one every [`TIMELINE_EVERY`] while anything changed, and
 //! what is left when the prompt ends. A record is stored from a task of its own, so a slow or failed store never holds
-//! up the harness or an ack; a failed one is logged and dropped.
+//! up the harness or an ack; a failed one is logged and dropped. The record of a prompt that ended with no reply sent
+//! ([`ants_proto::TimelineEntry::NoReply`]) is stored before its message is acked instead, still best effort
+//! ([`publish`]).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -154,22 +156,26 @@ fn empty_call(now: DateTime<Utc>) -> TimelineCall {
     }
 }
 
-/// Store `record` in the hub's stream, or out of its reach in the machine's outbox, from a task of its own. A failure
-/// is logged, as a warning the first time.
+/// Store `record` in the hub's stream, or out of its reach in the machine's outbox, from a task of its own
+/// ([`publish`]).
 pub fn store(js: &jetstream::Context, record: Timeline) {
-    static WARNED: AtomicBool = AtomicBool::new(false);
     let js = js.clone();
-    tokio::spawn(async move {
-        let id = format!("timeline-{}", Uuid::now_v7());
-        if let Err(e) = bus::store(&js, record.subject(), &record, &id).await {
-            let error = format!("{e:#}");
-            if WARNED.swap(true, Ordering::Relaxed) {
-                tracing::debug!(thread = %record.thread_id, error, "dropping a tool-call timeline record");
-            } else {
-                tracing::warn!(thread = %record.thread_id, error, "dropping a tool-call timeline record");
-            }
+    tokio::spawn(async move { publish(&js, &record).await });
+}
+
+/// Store `record` in the hub's stream, or out of its reach in the machine's outbox. A failure is logged, as a warning
+/// the first time, and returns as a success would.
+pub async fn publish(js: &jetstream::Context, record: &Timeline) {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    let id = format!("timeline-{}", Uuid::now_v7());
+    if let Err(e) = bus::store(js, record.subject(), record, &id).await {
+        let error = format!("{e:#}");
+        if WARNED.swap(true, Ordering::Relaxed) {
+            tracing::debug!(thread = %record.thread_id, error, "dropping a timeline record");
+        } else {
+            tracing::warn!(thread = %record.thread_id, error, "dropping a timeline record");
         }
-    });
+    }
 }
 
 #[cfg(test)]

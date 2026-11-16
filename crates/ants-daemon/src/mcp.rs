@@ -12,6 +12,9 @@
 //! lists the reactions to a message the ant reads (see [`crate::reactions`]).
 //! `suggest_thread_title` has the turn's reply on the thread suggest a title for it ([`Envelope::title`],
 //! [`ants_proto::ChannelPost::title`], [`ants_proto::NotesPost::title`]).
+//! `complete` ends the turn with no reply to the message being handled, which gets a `check` reaction
+//! ([`Mcp::take_completed`]); a human's, a webhook's, an escalation's or an approval request's message is always
+//! answered.
 //! `ask_human` asks the thread's owner, else the default human, a question with options ([`Envelope::question`]) and
 //! returns at once; the answer arrives as a later message ([`Envelope::answer`]).
 //! `send_message`, `ask_ant`, `route`, `post_channel` and `post_notes` attach files from the directory the thread's
@@ -74,7 +77,7 @@ pub use managers::{AntAsk, AntRequester, ManagerAsk, Requester, RetireAsk};
 pub use reactions::{ReactionAsker, local_reaction_asker, nats_reaction_asker};
 pub use routing::{Colony, ColonyLookup, jetstream_colony, jetstream_lookup};
 pub use serve::bridge_stdio;
-pub use turn::Turn;
+pub use turn::{Completed, Turn};
 
 use asks::{Asks, Stored};
 use serve::{serve_http, serve_socket};
@@ -297,6 +300,8 @@ struct Sessions {
     current: HashMap<ThreadId, Envelope>,
     /// The title each thread's session suggested during its turn, until a message on the thread carries it.
     titles: HashMap<ThreadId, String>,
+    /// Whether each thread's session called `complete` during its turn, and why.
+    completed: HashMap<ThreadId, turn::Completed>,
     /// The directory each thread's sessions work in.
     dirs: HashMap<ThreadId, PathBuf>,
     /// The paths of the files each thread's session attached to the final answer of its turn.

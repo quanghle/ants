@@ -1,5 +1,5 @@
-//! The conversation of an open thread, row by row: its messages and its ants' tool calls in the order stored, how
-//! deep each nests, the tree drawn before them and the lines each row draws as.
+//! The conversation of an open thread, row by row: its messages, its ants' tool calls and the prompts they ended with
+//! no reply in the order stored, how deep each nests, the tree drawn before them and the lines each row draws as.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -13,7 +13,7 @@ use ratatui::text::{Line, Span};
 use crate::sealed;
 use crate::thread::{Entry, Kind};
 use crate::tui::model::Data;
-use crate::tui::timeline::Call;
+use crate::tui::timeline::{Call, End};
 use crate::tui::{attach, frame, images, markdown, react};
 
 /// How deep delegations nest, deeper ones shown at this depth.
@@ -25,6 +25,7 @@ const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 pub(super) enum Item<'a> {
     Message(&'a Entry),
     Call(&'a Call),
+    End(&'a End),
 }
 
 /// A row of the conversation, and how deep it nests: 0 for the top level.
@@ -34,16 +35,25 @@ pub(super) struct Row<'a> {
     pub(super) depth: usize,
 }
 
-/// The conversation of `entries`, in the order stored, with `calls`, by when they started, each before the first
-/// message stored after it started; `human` tells the humans.
-pub(super) fn rows<'a>(entries: &'a [Entry], calls: &'a [Call], human: impl Fn(&UserId) -> bool) -> Vec<Row<'a>> {
+/// The conversation of `entries`, in the order stored, with `calls`, by when they started, and `ends`, by when they
+/// ended, each before the first message stored after it; `human` tells the humans.
+pub(super) fn rows<'a>(
+    entries: &'a [Entry],
+    calls: &'a [Call],
+    ends: &'a [End],
+    human: impl Fn(&UserId) -> bool,
+) -> Vec<Row<'a>> {
     let mut levels: HashMap<&UserId, usize> = HashMap::new();
     let level = |levels: &HashMap<&UserId, usize>, user: &UserId| levels.get(user).copied().unwrap_or(1);
-    let mut calls = calls.iter().peekable();
+    let mut timeline: Vec<(DateTime<Utc>, &UserId, Item)> =
+        calls.iter().map(|c| (c.started, &c.ant, Item::Call(c))).collect();
+    timeline.extend(ends.iter().map(|e| (e.at, &e.ant, Item::End(e))));
+    timeline.sort_by_key(|(at, ..)| *at);
+    let mut timeline = timeline.into_iter().peekable();
     let mut rows = Vec::new();
-    for entry in entries.iter().filter(|e| e.kind != Kind::Tool) {
-        while let Some(call) = calls.next_if(|c| c.started < entry.stored_at) {
-            rows.push(Row { item: Item::Call(call), depth: level(&levels, &call.ant) });
+    for entry in entries.iter().filter(|e| !e.kind.on_timeline()) {
+        while let Some((_, ant, item)) = timeline.next_if(|(at, ..)| *at < entry.stored_at) {
+            rows.push(Row { item, depth: level(&levels, ant) });
         }
         let ant = |user: &&UserId| !human(user);
         let depth = match (entry.kind, entry.from.as_ref(), entry.to.as_ref()) {
@@ -66,7 +76,7 @@ pub(super) fn rows<'a>(entries: &'a [Entry], calls: &'a [Call], human: impl Fn(&
         };
         rows.push(Row { item: Item::Message(entry), depth });
     }
-    rows.extend(calls.map(|call| Row { item: Item::Call(call), depth: level(&levels, &call.ant) }));
+    rows.extend(timeline.map(|(_, ant, item)| Row { item, depth: level(&levels, ant) }));
     rows
 }
 
@@ -112,6 +122,11 @@ impl Shown<'_> {
     pub(super) fn row(&self, lines: &mut Vec<Line<'static>>, row: &Row, entries: &[Entry], first: &str, rest: &str) {
         match row.item {
             Item::Call(call) => self.call(lines, call, first),
+            Item::End(end) => {
+                let why = end.why.as_ref().map_or_default(|why| format!(": {why}"));
+                let line = format!("{first}{} {} ended without a reply{why}", hm(end.at), end.ant);
+                lines.push(Line::styled(cut(&line, self.width), frame::dim()));
+            }
             Item::Message(e) if row.depth == 0 => self.block(lines, e, entries),
             Item::Message(e) => {
                 let (head, style) = nested(e);

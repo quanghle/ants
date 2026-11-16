@@ -281,3 +281,142 @@ async fn members_woken_by_one_post_spend_the_thread_s_turns_together() {
     assert_eq!(answered.len(), 1, "no prompt once the thread is out of turns: {answered:?}");
     assert!(answered[0].contains("(0 left after it)"), "{}", answered[0]);
 }
+
+#[tokio::test]
+async fn an_ant_s_reply_to_the_ant_s_own_message_is_prompted_but_not_answered_back_even_out_of_turns() {
+    use super::super::prompt::own_reply_note;
+    use ants_proto::{NoReplyWhy, TimelineEntry};
+
+    let Some((bus, mut to_human)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let [dev_b] = ants(["dev-b"]);
+    let [mut to_dev_b] = inboxes(&bus, std::slice::from_ref(&dev_b).try_into().unwrap()).await;
+    let (asked, spent) = (ThreadId::generate(), ThreadId::generate());
+    let (hello, _) = bus.send_from(dev_b.clone(), &asked, "hello").await;
+    // dev-b's reply to a message dev-a sent on a thread with no turns left.
+    let mut thanks = Envelope::on_thread(spent.clone(), dev_b.clone(), bus.dev.clone(), "thanks");
+    (thanks.in_reply_to, thanks.turn_budget) = (Some(Uuid::now_v7()), 0);
+    let thanks_seq = bus::publish_json(&bus.js, thanks.subject(), &thanks, None).await.unwrap();
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let (message, entry) = no_reply_on(&bus, &spent).await;
+        let TimelineEntry::NoReply { why: NoReplyWhy::ReplyToOwn, reason: None, text } = entry else {
+            panic!("{entry:?}")
+        };
+        // The fake harness answers with its session's name and the prompt.
+        let prompt = format!("{}\n\nthanks", own_reply_note(&dev_b, false, true));
+        assert!(message == thanks.id && text.ends_with(&format!(": {prompt}")), "{text}");
+        bus.until_acked(thanks_seq).await;
+
+        // dev-a answers dev-b's message, spending a turn; dev-b's reply to that answer goes no further.
+        let answer = next_envelope(&mut to_dev_b).await;
+        assert_eq!((answer.in_reply_to, answer.turn_budget), (Some(hello.id), DEFAULT_TURN_BUDGET - 1));
+        let reply = answer.reply(dev_b.clone(), "noted", Role::Ant).unwrap();
+        let seq = bus::publish_json(&bus.js, reply.subject(), &reply, None).await.unwrap();
+        let (message, entry) = no_reply_on(&bus, &asked).await;
+        assert_eq!(message, reply.id);
+        assert!(matches!(entry, TimelineEntry::NoReply { why: NoReplyWhy::ReplyToOwn, .. }), "{entry:?}");
+        bus.until_acked(seq).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(bus.unacked().await, 0);
+    let prompts = log.locked().prompts.clone();
+    assert_eq!(prompts.len(), 3, "{prompts:?}");
+    assert!(prompts.contains(&format!("{}\n\nnoted", own_reply_note(&dev_b, false, false))), "{prompts:?}");
+    let quiet = Duration::from_millis(200);
+    assert!(timeout(quiet, to_dev_b.next()).await.is_err(), "nothing goes back to dev-b");
+    assert!(timeout(quiet, to_human.next()).await.is_err(), "no turns left is no escalation then");
+}
+
+#[tokio::test]
+async fn complete_ends_the_turn_on_an_ant_s_message_with_no_reply_but_not_on_a_human_s() {
+    use ants_proto::{NoReplyWhy, TimelineEntry};
+
+    let Some((mut bus, mut to_human)) = Bus::start().await else { return };
+    let (launch, log, gate) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let home = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/daemon-t/complete");
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    let (outbox, colony) = (crate::mcp::jetstream_outbox(bus.js.clone()), crate::mcp::jetstream_colony(bus.js.clone()));
+    let notes = Arc::new(crate::notes::JetStreamNotes::new(bus.js.clone(), bus.dev.clone()));
+    let mcp = Mcp::start(bus.dev.clone(), &home, outbox, colony, notes, bus.humans.clone(), None).await;
+    bus.mcp = Some(mcp.unwrap());
+    let [dev_b] = ants(["dev-b"]);
+    let [mut to_dev_b] = inboxes(&bus, std::slice::from_ref(&dev_b).try_into().unwrap()).await;
+    let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
+    let (sent, seq) = bus.send_from(dev_b.clone(), &t1, "hold: merged").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let mcp = bus.mcp.as_ref().unwrap();
+        until("the prompt to run", || log.locked().prompted == 1).await;
+        let done = call_tool(mcp, &t1, "complete", serde_json::json!({"reason": " only confirms "})).await;
+        assert_ne!(done.is_error, Some(true), "{done:?}");
+        gate.add_permits(1);
+        let (message, entry) = no_reply_on(&bus, &t1).await;
+        assert_eq!(message, sent.id);
+        let (why, reason, text) = (NoReplyWhy::Completed, Some("only confirms".to_owned()), "s1: hold: merged");
+        assert_eq!(entry, TimelineEntry::NoReply { why, reason, text: text.to_owned() });
+        bus.until_acked(seq).await;
+
+        // A human's message is answered all the same.
+        bus.send(&t2, "hold: status?").await;
+        until("the human's prompt to run", || log.locked().prompted == 2).await;
+        let refused = call_tool(mcp, &t2, "complete", serde_json::json!({})).await;
+        assert_eq!(refused.is_error, Some(true), "{refused:?}");
+        gate.add_permits(1);
+        assert_eq!(next_reply(&mut to_human).await, (t2.clone(), "hold: status?".to_owned()));
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(bus.unacked().await, 0);
+    assert!(timeout(Duration::from_millis(200), to_dev_b.next()).await.is_err(), "nothing goes to dev-b");
+}
+
+#[tokio::test]
+async fn a_member_s_answers_to_an_ant_s_replies_to_its_own_post_are_not_posted() {
+    use super::super::prompt::own_reply_note;
+    use ants_proto::{NoReplyWhy, TimelineEntry};
+
+    let Some((bus, _)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let (ops, mut posts) = bus.channel("ops", &["dev-a", "dev-b"]).await;
+    let [dev_b] = ants(["dev-b"]);
+    let humans = Humans::default();
+    let own = ChannelPost::new(ops.clone(), bus.dev.clone(), "@dev-b check the build");
+    bus.post(&own).await;
+    let green = own.reply(dev_b.clone(), "@dev-a green", &[], &humans).unwrap();
+    bus.post(&green).await;
+    // Read after `green`, its answer, moved the ant's last post seen past its own.
+    let tests = own.reply(dev_b.clone(), "@dev-a tests pass too", &[], &humans).unwrap();
+    bus.post(&tests).await;
+    let human = tests.reply(UserId::human(), "@dev-b and the deploy?", &[], &humans).unwrap();
+    bus.post(&human).await;
+    let deploy = human.reply(dev_b.clone(), "@dev-a can you deploy?", &[], &humans).unwrap();
+    let deploy_seq = bus.post(&deploy).await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        assert_eq!(next_post(&mut posts).await.id, own.id);
+        let reply = next_post(&mut posts).await;
+        assert_eq!(reply.in_reply_to, Some(deploy.id), "dev-b's answer to a human's post is answered");
+        let (message, entry) = no_reply_on(&bus, &own.thread_id).await;
+        assert_eq!(message, tests.id);
+        assert!(matches!(entry, TimelineEntry::NoReply { why: NoReplyWhy::ReplyToOwn, .. }), "{entry:?}");
+        bus.until_posts_acked(deploy_seq).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert!(timeout(Duration::from_millis(200), posts.next()).await.is_err(), "one post only");
+    let answered = log.locked().answered.clone();
+    let [first, again, second] = &answered[..] else { panic!("{answered:?}") };
+    assert!(first.starts_with(&own_reply_note(&dev_b, true, false)), "{first}");
+    assert!(first.contains("@dev-a green") && !first.contains("is posted to #ops"), "{first}");
+    assert!(again.starts_with(&own_reply_note(&dev_b, true, false)), "{again}");
+    assert!(!second.contains("[ants] dev-b replied") && second.contains("is posted to #ops"), "{second}");
+}

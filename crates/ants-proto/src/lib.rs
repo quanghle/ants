@@ -240,8 +240,8 @@ pub const PRESENCE_TTL: Duration = Duration::from_secs(30);
 pub const DEFAULT_TURN_BUDGET: u32 = 8;
 /// The tool rules a thread a webhook or schedule starts is narrowed to when its config sets no `allow`
 /// ([`Envelope::allow`]): reading files in the workdir, searching, thinking, and the ants tools that talk to other ants,
-/// whose messages carry the narrowing on, or ask a human a question.
-pub const WEBHOOK_ALLOW: [&str; 15] = [
+/// whose messages carry the narrowing on, ask a human a question, or end a turn with no reply.
+pub const WEBHOOK_ALLOW: [&str; 16] = [
     "read:*",
     "search",
     "think",
@@ -256,6 +256,7 @@ pub const WEBHOOK_ALLOW: [&str; 15] = [
     "other:react",
     "other:list_reactions",
     "other:suggest_thread_title",
+    "other:complete",
     "other:ask_human",
 ];
 /// Chain levels an escalation may climb before it goes to the thread's owner ([`Escalation::up`]).

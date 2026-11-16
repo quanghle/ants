@@ -658,8 +658,11 @@ async fn a_thread_shows_its_ants_tool_calls_once_each_as_last_stored() {
     tokio::time::sleep(Duration::from_millis(5)).await;
     let reply = ask.reply(dev_a.clone(), "built", ants_proto::Role::Human).unwrap();
     js.publish(reply.subject(), json(&reply).into()).await.unwrap().await.unwrap();
+    let why = ants_proto::NoReplyWhy::ReplyToOwn;
+    let end = record(vec![ants_proto::TimelineEntry::NoReply { why, reason: None, text: "noted".to_owned() }]);
+    ant_js.publish(end.subject(), json(&end).into()).await.unwrap().await.unwrap();
 
-    let shown = history(&js, &ask.thread_id, None, true, None).await.unwrap();
+    let shown = history(&js, &ask.thread_id, None, Activity::All, None).await.unwrap();
     let kinds: Vec<_> = shown.iter().map(|e| (e.kind, e.text.as_str())).collect();
     assert_eq!(
         kinds,
@@ -667,7 +670,8 @@ async fn a_thread_shows_its_ants_tool_calls_once_each_as_last_stored() {
             (Kind::Message, "build it"),
             (Kind::Tool, "cargo build"),
             (Kind::Tool, "cargo test"),
-            (Kind::Message, "built")
+            (Kind::Message, "built"),
+            (Kind::NoReply, "noted"),
         ]
     );
     let rendered = render(&shown[1..2]);
@@ -676,9 +680,42 @@ async fn a_thread_shows_its_ants_tool_calls_once_each_as_last_stored() {
     assert_eq!(line["tool"]["status"], "failed");
     assert_eq!(line["tool"]["duration_ms"], 840);
     assert_eq!(line["tool"]["message"], ask.id.to_string());
-    let without = history(&js, &ask.thread_id, None, false, None).await.unwrap();
-    assert!(without.iter().all(|e| e.kind == Kind::Message), "{without:?}");
+    let without = history(&js, &ask.thread_id, None, Activity::NoReplies, None).await.unwrap();
+    let kinds: Vec<_> = without.iter().map(|e| e.kind).collect();
+    assert_eq!(kinds, [Kind::Message, Kind::Message, Kind::NoReply], "--no-tools keeps the ends with no reply");
+    let messages = history(&js, &ask.thread_id, None, Activity::None, None).await.unwrap();
+    assert!(messages.iter().all(|e| e.kind == Kind::Message), "{messages:?}");
     assert!(!<Kind as clap::ValueEnum>::value_variants().contains(&Kind::Tool), "tool calls are not searched");
+}
+
+#[test]
+fn a_prompt_ended_with_no_reply_shows_why_and_its_final_text() {
+    use ants_proto::NoReplyWhy::{Completed, ReplyToOwn};
+
+    let (dev_a, thread): (UserId, ThreadId) = (p("dev-a"), "t1".parse().unwrap());
+    let at = DateTime::parse_from_rfc3339("2026-11-16T07:50:43Z").unwrap().to_utc();
+    let record = |why, reason: Option<&str>, text: &str| {
+        let end = ants_proto::TimelineEntry::NoReply { why, reason: reason.map(str::to_owned), text: text.to_owned() };
+        Timeline { at, ..Timeline::new(dev_a.clone(), thread.clone(), Uuid::nil(), vec![end], 0) }
+    };
+    let entries = |record: &Timeline| timeline_entries(7, &record.subject(), &json(record));
+
+    let own = entries(&record(ReplyToOwn, None, "Thanks, noted.\nNothing else."));
+    assert_eq!(
+        render(&own),
+        "2026-11-16 07:50:43  no reply    dev-a: reply to own message, answer not sent: Thanks, noted.\n    Nothing \
+         else.\n"
+    );
+    let completed = entries(&record(Completed, Some("nothing to add"), ""));
+    assert_eq!(render(&completed), "2026-11-16 07:50:43  no reply    dev-a: completed (nothing to add)\n");
+    let line = serde_json::to_value(&completed[0]).unwrap();
+    assert_eq!((&line["kind"], &line["seq"]), (&"no_reply".into(), &7.into()));
+    assert_eq!(
+        line["no_reply"],
+        serde_json::json!({"message": Uuid::nil(), "why": "completed", "reason": "nothing to add"})
+    );
+    let forged = record(Completed, None, "");
+    assert!(timeline_entries(7, &subject::timeline(&thread, &p("dev-b")), &json(&forged)).is_empty());
 }
 
 #[tokio::test]
@@ -731,7 +768,7 @@ async fn a_sealed_message_from_a_device_enrolled_mid_follow_opens_everywhere_it_
     assert_eq!((e.text.as_str(), *state), ("lunch at noon?", Some(crate::sealed::State::Opened)));
 
     // The thread's history and a search open it too.
-    let shown = history(&bob_js, &e.thread_id, None, false, for_history).await.unwrap();
+    let shown = history(&bob_js, &e.thread_id, None, Activity::None, for_history).await.unwrap();
     let opened: Vec<_> = shown.iter().map(|e| (e.text.as_str(), e.sealed)).collect();
     assert_eq!(opened, [("lunch at noon?", Some(crate::sealed::State::Opened))]);
     let search = crate::search::Search { grep: Some("lunch".into()), limit: 10, ..Default::default() };

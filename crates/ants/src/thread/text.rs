@@ -3,9 +3,10 @@
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use ants_proto::{Answered, UserId};
+use ants_proto::{Answered, NoReplyWhy, UserId};
 use chrono::{DateTime, Utc};
 
+use super::NoReply;
 use super::entry::Entry;
 use super::summaries::Summary;
 use crate::attachments;
@@ -120,9 +121,12 @@ pub fn heading(e: &Entry) -> String {
     format!("{}  {kind:<10}  {}{forged}{note}{answering}{id}", time(e.stored_at), e.route())
 }
 
-/// The text [`render`] shows of an entry among `entries`: a question with its options and its answers among them, else
-/// the entry's text.
+/// The text [`render`] shows of an entry among `entries`: a question with its options and its answers among them, why
+/// a prompt ended with no reply sent and its final text, else the entry's text.
 pub fn body(e: &Entry, entries: &[Entry]) -> String {
+    if let Some(end) = &e.no_reply {
+        return no_reply(end, &e.text);
+    }
     match (&e.question, e.id) {
         (Some(question), Some(id)) => {
             let answers = answers_to(e, entries).map(|(by, answered)| answer_line(by, answered)).collect();
@@ -130,6 +134,16 @@ pub fn body(e: &Entry, entries: &[Entry]) -> String {
         }
         _ => e.text.clone(),
     }
+}
+
+/// Why a prompt ended with no reply sent, then its final `text`, which went to nobody.
+fn no_reply(end: &NoReply, text: &str) -> String {
+    let why = match (end.why, &end.reason) {
+        (NoReplyWhy::ReplyToOwn, _) => "reply to own message, answer not sent".to_owned(),
+        (NoReplyWhy::Completed, Some(reason)) => format!("completed ({reason})"),
+        (NoReplyWhy::Completed, None) => "completed".to_owned(),
+    };
+    if text.is_empty() { why } else { format!("{why}: {text}") }
 }
 
 /// The answers among `entries` to `question`, an entry asking one, oldest first, each with who answered: an option

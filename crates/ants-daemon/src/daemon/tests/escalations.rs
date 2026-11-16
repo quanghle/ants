@@ -195,8 +195,10 @@ async fn the_leader_s_answer_to_a_channel_thread_out_of_turns_is_posted_back_wit
         assert_eq!((&resumed.channel, &resumed.thread_id), (&ops, &root.thread_id));
         assert_eq!((resumed.turn_budget, resumed.owner.as_ref()), (DEFAULT_TURN_BUDGET - 1, Some(&root.from)));
 
-        // Later posts on the thread go by the fresh budget: no escalation again.
-        let more = resumed.reply(dev_b.clone(), "@dev-a and then?", &[], &Humans::default()).unwrap();
+        // Later posts on the thread go by the fresh budget: no escalation again. dev-b's post answers its own, as one
+        // answering dev-a's would get no reply.
+        let mut more = resumed.reply(dev_b.clone(), "@dev-a and then?", &[], &Humans::default()).unwrap();
+        more.in_reply_to = Some(spent.id);
         bus.post(&more).await;
         let reply = next_post(&mut posts).await;
         assert_eq!((reply.in_reply_to, reply.turn_budget), (Some(more.id), DEFAULT_TURN_BUDGET - 3));
@@ -428,8 +430,8 @@ async fn a_thread_a_human_started_stays_hers_and_goes_back_to_her_out_of_turns()
         let answer = next_post(&mut replies).await;
         assert_eq!((&answer.thread_id, answer.in_reply_to), (&root.thread_id, Some(root.id)));
         assert_eq!((answer.owner.as_ref(), answer.turn_budget), (Some(&alice), DEFAULT_TURN_BUDGET - 1));
-        let mut spent =
-            answer.reply("dev-b".parse().unwrap(), "@dev-a over to you", &[], &bus.humans.humans()).unwrap();
+        // Answering alice's post: one answering dev-a's would be prompted, out of turns or not, with no reply.
+        let mut spent = root.reply("dev-b".parse().unwrap(), "@dev-a over to you", &[], &bus.humans.humans()).unwrap();
         spent.turn_budget = 0;
         assert_eq!(spent.owner.as_ref(), Some(&alice), "ants' posts keep the owner");
         let seq = bus.post(&spent).await;
@@ -445,4 +447,33 @@ async fn a_thread_a_human_started_stays_hers_and_goes_back_to_her_out_of_turns()
     assert_eq!(answered.len(), 1, "alice's post only: {answered:?}");
     assert!(answered[0].contains(channel::TRIAGE_RULES), "{}", answered[0]);
     assert!(answered[0].contains("Post from alice mentioning nobody:\nthe build is red"), "{}", answered[0]);
+}
+
+#[tokio::test]
+async fn the_leader_s_reply_carrying_the_escalation_is_answered_though_it_answers_the_ant_s_message() {
+    let Some((mut bus, mut to_human)) = Bus::start().await else { return };
+    let [lead, carol] = ants(["lead", "carol"]);
+    bus.chain = Chain { escalate_to: vec![lead.clone()], after: None, ..Chain::default() };
+    let [mut to_lead] = inboxes(&bus, std::slice::from_ref(&lead).try_into().unwrap()).await;
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let t1 = ThreadId::generate();
+    bus.send_spent(&carol, &t1, "no turns", None).await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let notice = next_envelope(&mut to_lead).await;
+        let one = notice.escalation.as_deref().expect("the escalation").clone();
+        let mut answer = notice.reply(lead.clone(), "go on", Role::Ant).unwrap().with_escalation(Some(one.clone()));
+        answer.turn_budget = 0;
+        bus::publish_json(&bus.js, answer.subject(), &answer, None).await.unwrap();
+        let reply = next_envelope(&mut to_lead).await;
+        assert_eq!((reply.in_reply_to, reply.escalation.as_deref()), (Some(answer.id), Some(&one)));
+        assert!(reply.text.ends_with(": go on"), "{}", reply.text);
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(bus.unacked().await, 0);
+    assert_eq!(log.locked().answered, ["go on"], "prompted as an ordinary message");
+    assert!(timeout(Duration::from_millis(200), to_human.next()).await.is_err(), "nothing went to the human");
 }

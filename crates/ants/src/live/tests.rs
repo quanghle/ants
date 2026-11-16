@@ -79,7 +79,7 @@ async fn the_feed_reads_follows_and_answers_what_the_human_sees() {
     let push = request("dev-a", "git push", vec![Verdict::AllowOnce]);
     bus::publish_json(&ant_js, push.subject(), &push, None).await.unwrap();
 
-    let mut feed = Feed::new(client, js, Duration::from_hours(1)).await.unwrap().with_timelines();
+    let mut feed = Feed::new(client, js.clone(), Duration::from_hours(1)).await.unwrap().with_timelines();
     assert!(feed.connected());
     assert!(matches!(feed.next().await, Event::Following), "the tool requests are followed first");
     // The stream read and the pending requests come in either order.
@@ -141,6 +141,14 @@ async fn the_feed_reads_follows_and_answers_what_the_human_sees() {
     })
     .await;
     assert_eq!(tools.iter().map(|e| (e.kind, e.text.as_str())).collect::<Vec<_>>(), [(Kind::Tool, "cargo test")]);
+    // The first read brings the ends with no reply only.
+    let why = ants_proto::NoReplyWhy::Completed;
+    let end = ants_proto::TimelineEntry::NoReply { why, reason: None, text: "noted".to_owned() };
+    let ended = ants_proto::Timeline { entries: vec![end], ..record.clone() };
+    bus::publish_json(&ant_js, subject::timeline(&thread, &record.ant), &ended, None).await.unwrap();
+    let (_, first) = tail(js.clone(), Parser::default(), None, Duration::from_hours(1), true).await;
+    let timeline: Vec<_> = first.unwrap().0.into_iter().filter(|e| e.kind.on_timeline()).collect();
+    assert_eq!(timeline.iter().map(|e| (e.kind, e.text.as_str())).collect::<Vec<_>>(), [(Kind::NoReply, "noted")]);
 
     feed.load_history(thread.clone(), true);
     let (loaded, read) = until(&mut feed, |e| match e {
@@ -148,7 +156,7 @@ async fn the_feed_reads_follows_and_answers_what_the_human_sees() {
         _ => None,
     })
     .await;
-    assert_eq!((&loaded, texts(&read, &thread)), (&thread, vec!["first", "second", "cargo test"]));
+    assert_eq!((&loaded, texts(&read, &thread)), (&thread, vec!["first", "second", "cargo test", "noted"]));
 
     feed.decide(push.clone(), Verdict::AllowOnce, UserId::human());
     let (mut decided, mut resolved) = (None, None);

@@ -23,7 +23,7 @@ use tokio::sync::mpsc;
 
 pub use self::screen::{Screen, warning};
 pub use self::state::{History, Link, State};
-use crate::thread::{self, Entry, Parser};
+use crate::thread::{self, Entry, Kind, Parser};
 use crate::tools::{self, Update};
 use crate::{colony, thread_meta};
 
@@ -87,12 +87,16 @@ pub enum Event {
     Decided(Result<String>),
 }
 
+/// What a timeline record holding an end with no reply has in its JSON.
+const NO_REPLY: &[u8] = br#""no_reply""#;
+
 pub(crate) type Tail = LocalBoxFuture<'static, (Parser, Result<(Vec<Entry>, u64)>)>;
 
 /// Read the messages stored after sequence `after`, or else those of the window `since`, with `parser`, which keeps
 /// the threads of the tool requests read for their decisions and opens sealed messages. Returns them and the sequence read up to. With
-/// `timelines`, the tool calls of the timeline records stored after `after` come as entries of kind tool too
-/// ([`thread::tool_entries`]); the first read, of the window, leaves them out.
+/// `timelines`, the tool calls and ends with no reply of the timeline records stored after `after` come as entries of
+/// kind tool and no reply too ([`thread::timeline_entries`]); the first read, of the window, brings only the ends, which
+/// tell a message answered, parsing only the records that may hold one.
 pub(crate) fn tail(
     js: jetstream::Context,
     mut parser: Parser,
@@ -122,7 +126,10 @@ pub(crate) fn tail(
                 let (subject, payload) = (msg.subject.as_str(), &msg.payload[..]);
                 if subject::parse_timeline(subject).is_some() {
                     if timelines && after.is_some() {
-                        entries.extend(thread::tool_entries(seq, subject, payload));
+                        entries.extend(thread::timeline_entries(seq, subject, payload));
+                    } else if timelines && payload.windows(NO_REPLY.len()).any(|w| w == NO_REPLY) {
+                        let ends = thread::timeline_entries(seq, subject, payload).into_iter();
+                        entries.extend(ends.filter(|e| e.kind == Kind::NoReply));
                     }
                 } else {
                     entries.extend(parser.read(seq, stored.into(), subject, payload).await);
@@ -237,7 +244,8 @@ impl Feed {
         })
     }
 
-    /// Have reads of the stream after the first bring the tool calls stored on timelines, as entries of kind tool.
+    /// Have reads of the stream after the first bring the tool calls and ends with no reply stored on timelines, as
+    /// entries of kind tool and no reply, and the first the ends only ([`tail`]).
     pub fn with_timelines(mut self) -> Self {
         self.timelines = true;
         self
@@ -367,7 +375,8 @@ impl Feed {
         let (js, parser) = (self.js.clone(), Parser::opening(self.keyring.clone()).checking(self.behalf.clone()));
         self.history = Some(
             async move {
-                let read = thread::history_with(&js, &thread, None, tools, parser).await;
+                let activity = if tools { thread::Activity::All } else { thread::Activity::None };
+                let read = thread::history_with(&js, &thread, None, activity, parser).await;
                 (thread, read)
             }
             .boxed_local(),

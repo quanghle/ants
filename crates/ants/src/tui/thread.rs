@@ -85,7 +85,7 @@ impl Page {
 
     /// The messages shown, in the order stored.
     fn messages(&self) -> impl DoubleEndedIterator<Item = &Entry> {
-        self.history.entries.iter().filter(|e| e.kind != Kind::Tool)
+        self.history.entries.iter().filter(|e| !e.kind.on_timeline())
     }
 
     /// The ids of the messages shown, for the reactions to them.
@@ -242,7 +242,8 @@ impl Page {
         let busy = data.live.progress.contains_key(thread);
         let shown = Shown { data, now, busy, width, marked, placed: RefCell::default() };
         let calls = data.calls.get(thread).map_or(&[][..], |c| c.calls());
-        let rows = rows(&self.history.entries, calls, |u| data.is_human(u));
+        let ends = data.calls.get(thread).map_or(&[][..], |c| c.ends());
+        let rows = rows(&self.history.entries, calls, ends, |u| data.is_human(u));
         let held = self.held();
         let selected = self.selected.or(held).and_then(|_| self.selection()).map(|e| e.seq);
         let mut range = None;
@@ -484,12 +485,13 @@ mod tests {
         let mut m = model();
         let (entries, calls) = delegated(&thread);
         calls.iter().for_each(|c| m.data.calls.status(c));
-        let rows = rows(&entries, m.data.calls.get(&thread).unwrap().calls(), |u| m.data.is_human(u));
+        let rows = rows(&entries, m.data.calls.get(&thread).unwrap().calls(), &[], |u| m.data.is_human(u));
         let shown: Vec<(String, usize)> = rows
             .iter()
             .map(|r| match r.item {
                 Item::Message(e) => (e.text.clone(), r.depth),
                 Item::Call(c) => (c.title.clone(), r.depth),
+                Item::End(e) => (e.ant.to_string(), r.depth),
             })
             .collect();
         let expected = [
@@ -504,6 +506,35 @@ mod tests {
         assert_eq!(shown, expected.map(|(t, d)| (t.to_owned(), d)));
         let first: Vec<String> = glyphs(&rows).into_iter().map(|(first, _)| first).collect();
         assert_eq!(first, ["", "  ├ ", "  ├ ", "  │ ├ ", "  │ └ ", "  └ ", ""]);
+    }
+
+    #[test]
+    fn a_prompt_ended_with_no_reply_shows_dim_where_it_ended() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let entries = vec![
+            message(1, &thread, "dev-a", "dev-b", "check the logs"),
+            message(3, &thread, "dev-b", "dev-a", "clean"),
+        ];
+        let end = ants_proto::TimelineEntry::NoReply {
+            why: ants_proto::NoReplyWhy::ReplyToOwn,
+            reason: None,
+            text: "\nThanks, noted.\nMore.".to_owned(),
+        };
+        let user = crate::live::tests::user;
+        let record = ants_proto::Timeline {
+            at: at(4),
+            ..ants_proto::Timeline::new(user("dev-a"), thread.clone(), entries[1].id.unwrap(), vec![end], 0)
+        };
+        let ended = crate::thread::timeline_entries(9, &record.subject(), &serde_json::to_vec(&record).unwrap());
+        m.stored(entries.iter().cloned().chain(ended).collect(), at(5));
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(entries)).unwrap();
+        assert_eq!(page.messages().count(), 2, "an end is no message");
+
+        let shown = screen(&page, &m, 100, at(6));
+        assert!(shown.contains(&format!("{} dev-a ended without a reply: Thanks, noted.", hm(at(4)))), "{shown}");
+        assert!(!shown.contains("More."), "{shown}");
     }
 
     #[test]

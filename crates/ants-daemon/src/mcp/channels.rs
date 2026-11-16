@@ -16,6 +16,7 @@ use rmcp::{ErrorData, RoleServer, schemars, tool, tool_router};
 use serde::Deserialize;
 
 use super::Hub;
+use super::messages::no_turns;
 use super::tools::{Tools, text};
 use crate::bus;
 use crate::sync::MutexExt as _;
@@ -110,7 +111,7 @@ impl Hub {
         }
         let left = current
             .reply(self.ant.clone(), "", self.humans.sender_role(&current))
-            .map_err(|_| format!("thread {thread} has no turns left; answer {} in the reply instead", current.from))?
+            .map_err(|_| no_turns(thread, &current.from))?
             .turn_budget;
         let loaded = self.load(thread, attach).await?;
         let mut post = ChannelPost::new(channel.clone(), self.ant.clone(), text)

@@ -184,7 +184,8 @@ the human in `decider` and the assistant in `via`; no `ApprovalDecision` is stor
 ### `Timeline` on `ants.timeline.<thread>.<ant>`
 
 Stored in `ANTS`: part of the tool-call timeline of an ant's prompt on a thread, so a thread's history shows the calls
-after their live status updates are gone. Humans read it back by message gets (`ants thread show`); no ant reads it.
+after their live status updates are gone, and whether the prompt ended with no reply sent. Humans read it back by
+message gets (`ants thread show`); no ant reads it.
 `ant`, `thread_id`, `message` (the id of the message whose prompt it covers), `at`, `omitted`? (calls of the prompt
 left out past 200) and 1 to 50 `entries`, each named by `type`:
 
@@ -192,9 +193,11 @@ left out past 200) and 1 to 50 `entries`, each named by `type`:
 |---|---|---|
 | `tool` | `id`, `title` (≤ 200 chars), `tool_kind`?, `status`?, `started`, `duration_ms`? (once ended), `paths`? (≤ 8) | A tool call as it stands |
 | `plan` | `steps`: `[{"content", "status"}]` (≤ 50) | The prompt's plan as last reported |
+| `no_reply` | `why` (`reply_to_own`, `completed`), `reason`?, `text`? | The prompt sent no reply: the message was another ant's reply to the ant's own, or the ant called `complete` (with `reason`); `text` is the final text that went to nobody, redacted as replies are |
 
-A daemon stores a record at most every 30 s while calls changed and the rest when the prompt ends. Merge calls by
-`ant`, `message` and `id`, later records replacing earlier ones; ignore entries of other types and unknown fields.
+A daemon stores a record at most every 30 s while calls changed and the rest when the prompt ends, a `no_reply` entry
+then too. Merge calls by `ant`, `message` and `id`, later records replacing earlier ones; ignore entries of other
+types and unknown fields.
 Check: `subject == "ants.timeline." + thread_id + "." + ant`.
 
 ### `ColonyEntry` at `ants_colony` key `<ant>`

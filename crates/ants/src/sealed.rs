@@ -670,8 +670,15 @@ mod tests {
         let shown = |keyring: Option<Keyring>, js: &jetstream::Context| {
             let (js, thread) = (js.clone(), e.thread_id.clone());
             async move {
-                let entries =
-                    crate::thread::history(&js, &thread, None, false, keyring.map(std::sync::Arc::new)).await.unwrap();
+                let entries = crate::thread::history(
+                    &js,
+                    &thread,
+                    None,
+                    crate::thread::Activity::None,
+                    keyring.map(std::sync::Arc::new),
+                )
+                .await
+                .unwrap();
                 entries.into_iter().map(|e| (e.text, e.sealed)).collect::<Vec<_>>()
             }
         };

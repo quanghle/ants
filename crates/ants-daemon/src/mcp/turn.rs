@@ -1,6 +1,7 @@
 //! The turn of a thread's session: the message it handles ([`Mcp::begin`]), which what the session sends meanwhile
 //! follows on from, and what the final answer of the turn carries besides its text: the title `suggest_thread_title`
 //! suggests for the thread ([`Mcp::take_title`]) and the files `attach_to_reply` attaches ([`Mcp::reply_files`]).
+//! `complete` ends the turn with no reply at all ([`Mcp::take_completed`]).
 
 use std::sync::Arc;
 
@@ -16,10 +17,25 @@ use super::tools::{Tools, text};
 use super::{Hub, Mcp, attach};
 use crate::sync::MutexExt as _;
 
+/// Most characters the reason given to `complete` has.
+const MAX_REASON: usize = 500;
+
+/// The session of a thread called `complete` during its turn: the turn ends with no reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Completed {
+    /// Why no reply is needed, as the session said: a trimmed line of 1-500 characters.
+    pub reason: Option<String>,
+}
+
 impl Mcp {
     /// Take the title the session of `thread` suggested for it during the turn, for the reply to carry.
     pub fn take_title(&self, thread: &ThreadId) -> Option<String> {
         self.hub.sessions.locked().titles.remove(thread)
+    }
+
+    /// Take whether the session of `thread` called `complete` during the turn: then its final answer goes to nobody.
+    pub fn take_completed(&self, thread: &ThreadId) -> Option<Completed> {
+        self.hub.sessions.locked().completed.remove(thread)
     }
 
     /// Store the files the session of `thread` attached to the final answer of its turn (`attach_to_reply`), read
@@ -68,6 +84,7 @@ impl Drop for Turn {
         let mut sessions = self.hub.sessions.locked();
         sessions.current.remove(&self.thread);
         sessions.titles.remove(&self.thread);
+        sessions.completed.remove(&self.thread);
         sessions.reply_files.remove(&self.thread);
         sessions.carried.remove(&self.thread);
     }
@@ -87,7 +104,67 @@ struct AttachToReply {
     attach: Vec<String>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+struct Complete {
+    /// Why no reply is needed, kept on the thread's timeline: one line of up to 500 characters, such as `only confirms
+    /// the fix`; omitted for none.
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+/// `reason` trimmed, None when empty; an error when it is longer than [`MAX_REASON`] or several lines.
+fn completion_reason(reason: Option<&str>) -> Result<Option<String>, String> {
+    let Some(reason) = reason.map(str::trim).filter(|r| !r.is_empty()) else { return Ok(None) };
+    if reason.contains(['\n', '\r']) {
+        return Err("invalid reason: one line only; nothing recorded".to_owned());
+    }
+    if reason.chars().count() > MAX_REASON {
+        return Err(format!("invalid reason: at most {MAX_REASON} characters; nothing recorded"));
+    }
+    Ok(Some(reason.to_owned()))
+}
+
+/// Why the message `current` may not go without a reply, if so.
+fn always_answered(hub: &Hub, current: &Envelope) -> Option<&'static str> {
+    if current.on_behalf_of.is_some() || hub.humans.sender_role(current).is_human() {
+        Some("the message being handled is a human's, which is always answered; reply to it")
+    } else if current.webhook {
+        Some("the message being handled is a webhook's, whose answer goes to the thread's owner; reply to it")
+    } else if current.escalation.is_some() {
+        Some("the message being handled carries an escalation, which is always answered; answer it or escalate")
+    } else if current.approval.is_some() {
+        Some("the message being handled carries an approval request, which is always answered; answer it or escalate")
+    } else {
+        None
+    }
+}
+
 impl Hub {
+    /// End the turn on `thread` with no reply to the message it handles, for `reason`, which replaces any given earlier
+    /// in the turn, then react `check` to that message. Refused, nothing recorded, for a message always answered.
+    async fn complete(&self, thread: &ThreadId, reason: Option<&str>) -> Result<String, String> {
+        let reason = completion_reason(reason)?;
+        let current = self.sessions.locked().current.get(thread).cloned();
+        let current =
+            current.ok_or("no message is being handled on this thread; a turn is completed only while one is")?;
+        if let Some(why) = always_answered(self, &current) {
+            return Err(format!("{why}; nothing recorded"));
+        }
+        {
+            let mut sessions = self.sessions.locked();
+            if sessions.current.get(thread).map(|e| e.id) != Some(current.id) {
+                return Err("the turn ended before it was completed".to_owned());
+            }
+            sessions.completed.insert(thread.clone(), Completed { reason });
+        }
+        let reacted = self.react(thread, super::reactions::React::current("check")).await;
+        let note = reacted.err().map_or_default(|e| format!(" The check reaction to the message was not made: {e}."));
+        Ok(format!(
+            "This turn ends with no reply once it finishes: its final answer goes to nobody. send_message and \
+             post_channel still reach others; complete again replaces the reason.{note}"
+        ))
+    }
+
     /// Have the reply to the message `thread` is handling suggest `title` for the thread, in place of any title
     /// suggested earlier in the turn.
     fn suggest_title(&self, thread: &ThreadId, title: &str) -> Result<String, String> {
@@ -146,6 +223,19 @@ impl Tools {
     ) -> Result<CallToolResult, ErrorData> {
         let thread = self.thread(&cx)?;
         Ok(text(self.hub.suggest_title(&thread, &args.title)))
+    }
+
+    #[tool(description = "End this turn without replying, for a message needing no answer, such as an \
+        acknowledgement or a reply that only confirms. The turn's final answer is then sent to nobody; it spends no \
+        turn and wakes nobody, and the message gets a `check` reaction. `reason`, optional, says why. Refused for a \
+        human's, a webhook's, an escalation's or an approval request's message, which are always answered.")]
+    async fn complete(
+        &self,
+        Parameters(args): Parameters<Complete>,
+        cx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let thread = self.thread(&cx)?;
+        Ok(text(self.hub.complete(&thread, args.reason.as_deref()).await))
     }
 
     #[tool(description = "Attach files to the final answer of this turn, the reply sent when the turn ends (a \

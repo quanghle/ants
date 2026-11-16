@@ -79,9 +79,7 @@ impl Hub {
         let current = self.sessions.locked().current.get(thread).cloned();
         let current = current.ok_or("no message is being handled on this thread; messages go out only while one is")?;
         let role = if self.humans.is_human(&to) { Role::Human } else { self.humans.sender_role(&current) };
-        let mut envelope = current
-            .reply(self.ant.clone(), text, role)
-            .map_err(|_| format!("thread {thread} has no turns left; answer {} in the reply instead", current.from))?;
+        let mut envelope = current.reply(self.ant.clone(), text, role).map_err(|_| no_turns(thread, &current.from))?;
         envelope.to = to;
         envelope.in_reply_to = None;
         match on.map(str::trim) {
@@ -260,6 +258,14 @@ impl Tools {
             .collect();
         Ok(text(Ok(shown.join("\n\n"))))
     }
+}
+
+/// Why a message or post cannot go out on `thread`, which has no turns left, while answering `from`.
+pub(super) fn no_turns(thread: &ThreadId, from: &UserId) -> String {
+    format!(
+        "thread {thread} has no turns left; answer {from} in the reply instead, or call escalate if the prompt says \
+         the answer is not sent back"
+    )
 }
 
 /// The wait an `ask_ant` or `route` call asked for, from its `timeout` argument.

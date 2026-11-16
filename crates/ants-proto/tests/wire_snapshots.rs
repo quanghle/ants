@@ -842,6 +842,15 @@ fn timeline() {
         at: at(1),
     };
     snap("timeline", &record);
+    let ends = vec![
+        TimelineEntry::NoReply { why: NoReplyWhy::ReplyToOwn, reason: None, text: "Thanks, noted.".to_owned() },
+        TimelineEntry::NoReply {
+            why: NoReplyWhy::Completed,
+            reason: Some("nothing to add".to_owned()),
+            text: String::new(),
+        },
+    ];
+    snap("timeline_no_reply", &Timeline { entries: ends, omitted: 0, ..record });
 }
 
 #[test]

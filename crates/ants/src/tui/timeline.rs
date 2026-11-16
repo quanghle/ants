@@ -1,6 +1,6 @@
 //! The tool calls of threads, as the thread view's timeline shows them: those the ants make now, heard in their status
 //! updates, and those stored on their timelines ([`ants_proto::Timeline`] records), merged so that each call shows
-//! once with its latest status. A stored record names the message whose prompt made a call, which a status update
+//! once with its latest status; and the prompts the ants ended with no reply sent, stored on their timelines. A stored record names the message whose prompt made a call, which a status update
 //! does not: a call heard live is matched by its ant and ACP id, and by when it started, which the same daemon's clock
 //! tells both ways.
 
@@ -47,10 +47,23 @@ impl Call {
     }
 }
 
-/// One thread's tool calls, by when they started.
+/// A prompt an ant ended with no reply sent, stored on its timeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct End {
+    pub ant: UserId,
+    /// The message whose prompt ended so.
+    pub message: Uuid,
+    /// When its record was made.
+    pub at: DateTime<Utc>,
+    /// The reason the ant gave to `complete`, else the first line of the turn's final text, if any.
+    pub why: Option<String>,
+}
+
+/// One thread's tool calls, by when they started, and its prompts ended with no reply, by when they ended.
 #[derive(Debug, Default)]
 pub struct Calls {
     calls: Vec<Call>,
+    ends: Vec<End>,
     /// When a call was last heard of or stored.
     touched: Option<DateTime<Utc>>,
 }
@@ -58,6 +71,10 @@ pub struct Calls {
 impl Calls {
     pub fn calls(&self) -> &[Call] {
         &self.calls
+    }
+
+    pub fn ends(&self) -> &[End] {
+        &self.ends
     }
 
     /// Take a status update: a tool update starts a call or changes the one of its ant and id not ended yet.
@@ -109,6 +126,11 @@ impl Calls {
     /// id that started about when it did, or the one stored before with its ant, message and id, but for the status of
     /// a call heard ended that the record does not have ended yet.
     pub fn stored(&mut self, entry: &Entry) {
+        if let (Kind::NoReply, Some(end), Some(ant)) = (entry.kind, &entry.no_reply, &entry.from) {
+            let why = end.reason.as_deref().or_else(|| entry.text.lines().map(str::trim).find(|l| !l.is_empty()));
+            let end = End { ant: ant.clone(), message: end.message, at: entry.stored_at, why: why.map(one_line) };
+            return self.end(end);
+        }
         let (Kind::Tool, Some(tool), Some(ant)) = (entry.kind, &entry.tool, &entry.from) else { return };
         self.touched = Some(self.touched.map_or(entry.stored_at, |t| t.max(entry.stored_at)));
         let call = Call {
@@ -140,6 +162,16 @@ impl Calls {
         }
         let started = had.started.min(call.started);
         *had = Call { started, ..call };
+    }
+
+    /// Keep `end` in order of time, replacing the one of its ant and message, dropping the oldest past [`MAX_CALLS`].
+    fn end(&mut self, end: End) {
+        self.touched = Some(self.touched.map_or(end.at, |t| t.max(end.at)));
+        self.ends.retain(|e| e.ant != end.ant || e.message != end.message);
+        let at = self.ends.partition_point(|e| e.at <= end.at);
+        self.ends.insert(at, end);
+        let over = self.ends.len().saturating_sub(MAX_CALLS);
+        self.ends.drain(..over);
     }
 
     /// Keep `call` in order of start, dropping the oldest past [`MAX_CALLS`].
@@ -186,7 +218,7 @@ impl Threads {
         }
     }
 
-    /// Take a tool call stored on a timeline.
+    /// Take a tool call or end with no reply stored on a timeline.
     pub fn stored(&mut self, entry: &Entry) {
         self.of(&entry.thread_id).stored(entry);
     }

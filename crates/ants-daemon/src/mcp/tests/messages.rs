@@ -9,7 +9,7 @@ async fn send_message_follows_on_from_the_current_message() {
     let (url, token) = http_server(&mcp, &current.thread_id);
     let client = http_client(&url, &token).await;
     let tools: Vec<_> = client.list_all_tools().await.unwrap().into_iter().map(|t| t.name).collect();
-    assert_eq!(tools.len(), 17, "{tools:?}");
+    assert_eq!(tools.len(), 18, "{tools:?}");
 
     let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "dev-b", "text": "hi"})).await;
     assert!(!ok && text.contains("no message is being handled"), "{text}");
@@ -161,6 +161,110 @@ async fn a_suggested_title_waits_for_the_turn_s_reply_and_goes_with_the_turn() {
     drop(turn);
     let _turn = mcp.begin(&current);
     assert_eq!(mcp.take_title(thread), None, "a suggestion ends with its turn");
+}
+
+#[tokio::test]
+async fn complete_ends_an_ant_s_message_turn_with_no_reply_and_a_check_reaction() {
+    let humans = Registry::with(UserId::human(), &["alice"]);
+    let (mcp, mut sent) = start_with(&home("complete"), Vec::new(), Arc::default(), humans).await;
+    let reacted: Arc<StdMutex<Vec<(Uuid, String)>>> = Arc::default();
+    let kept = reacted.clone();
+    mcp.with_reaction_asker(Arc::new(move |request: ants_proto::ReactionsRequest| {
+        let change = request.change.expect("a change");
+        kept.locked().push((request.message, change.reaction.as_str().to_owned()));
+        Box::pin(async move { Ok(Some(ants_proto::ReactionsOutcome::Applied { changed: true })) })
+    }));
+    let current = Envelope::new(user("dev-b"), user("dev-a"), "thanks, done");
+    let thread = &current.thread_id;
+    let client = {
+        let (url, token) = http_server(&mcp, thread);
+        http_client(&url, &token).await
+    };
+    let complete = |args: serde_json::Value| call(&client, "complete", args);
+    let (ok, text) = complete(serde_json::json!({})).await;
+    assert!(!ok && text.contains("no message is being handled"), "{text}");
+
+    let turn = mcp.begin(&current);
+    for bad in ["two\nlines", &"x".repeat(501)] {
+        let (ok, text) = complete(serde_json::json!({ "reason": bad })).await;
+        assert!(!ok && text.contains("invalid reason"), "{text}");
+        assert_eq!(mcp.take_completed(thread), None, "nothing recorded");
+    }
+    assert!(reacted.locked().is_empty(), "no reaction for a refused call");
+    let (ok, text) = complete(serde_json::json!({})).await;
+    assert!(ok && text.contains("no reply") && !text.contains("not made"), "{text}");
+    assert!(complete(serde_json::json!({ "reason": "first" })).await.0);
+    assert!(complete(serde_json::json!({ "reason": format!("  {}  ", "y".repeat(500)) })).await.0);
+    let expected = Completed { reason: Some("y".repeat(500)) };
+    assert_eq!(mcp.take_completed(thread), Some(expected), "the latest, trimmed");
+    assert_eq!(mcp.take_completed(thread), None, "taken once");
+    assert!(complete(serde_json::json!({ "reason": "   " })).await.0);
+    assert_eq!(mcp.take_completed(thread), Some(Completed { reason: None }), "a blank reason is none");
+    assert_eq!(*reacted.locked(), vec![(current.id, "check".to_owned()); 4]);
+    assert!(complete(serde_json::json!({ "reason": "unsent" })).await.0);
+    drop(turn);
+    let turn = mcp.begin(&current);
+    assert_eq!(mcp.take_completed(thread), None, "a completion ends with its turn");
+
+    drop(turn);
+
+    let (failing, _) = start(&home("complete-failing")).await;
+    failing.with_reaction_asker(Arc::new(|_| Box::pin(async { Err(anyhow::anyhow!("hub unreachable")) })));
+    let client = {
+        let (url, token) = http_server(&failing, thread);
+        http_client(&url, &token).await
+    };
+    let _turn = failing.begin(&current);
+    let (ok, text) = call(&client, "complete", serde_json::json!({ "reason": "acknowledged" })).await;
+    assert!(ok && text.contains("check reaction to the message was not made: hub unreachable"), "{text}");
+    assert_eq!(failing.take_completed(thread), Some(Completed { reason: Some("acknowledged".to_owned()) }));
+    assert!(sent.try_recv().is_err(), "nothing is sent");
+}
+
+#[tokio::test]
+async fn complete_is_refused_for_a_message_always_answered() {
+    let humans = Registry::with(UserId::human(), &["alice"]);
+    let (mcp, mut sent) = start_with(&home("complete-refused"), Vec::new(), Arc::default(), humans).await;
+    let from_ant = || Envelope::new(user("dev-b"), user("dev-a"), "x");
+    let mut for_human = from_ant();
+    for_human.on_behalf_of = Some(user("alice"));
+    let mut webhook = Envelope::new(user("github"), user("dev-a"), "push");
+    webhook.webhook = true;
+    let mut escalation = from_ant();
+    let stuck = ants_proto::Escalation::new(user("dev-b"), escalation.thread_id.clone(), EscalationReason::TurnBudget);
+    escalation.escalation = Some(Box::new(stuck));
+    let cases = [
+        (Envelope::new(user("alice"), user("dev-a"), "x"), "a human's"),
+        (for_human, "a human's"),
+        (webhook, "a webhook's"),
+        (escalation, "an escalation"),
+    ];
+    for (current, why) in cases {
+        let client = {
+            let (url, token) = http_server(&mcp, &current.thread_id);
+            http_client(&url, &token).await
+        };
+        let _turn = mcp.begin(&current);
+        let (ok, text) = call(&client, "complete", serde_json::json!({ "reason": "seen" })).await;
+        assert!(!ok && text.contains(why) && text.contains("nothing recorded"), "{why}: {text}");
+        assert_eq!(mcp.take_completed(&current.thread_id), None, "{why}");
+    }
+
+    let post = |from: &str| {
+        let post = ChannelPost::new("general".parse().unwrap(), user(from), "@dev-a ok");
+        crate::channel::as_envelope(&post, &user("dev-a"))
+    };
+    for (current, allowed) in [(post("alice"), false), (post("dev-b"), true)] {
+        let client = {
+            let (url, token) = http_server(&mcp, &current.thread_id);
+            http_client(&url, &token).await
+        };
+        let _turn = mcp.begin(&current);
+        let (ok, text) = call(&client, "complete", serde_json::json!({})).await;
+        assert_eq!(ok, allowed, "{text}");
+        assert_eq!(mcp.take_completed(&current.thread_id).is_some(), allowed);
+    }
+    assert!(sent.try_recv().is_err(), "nothing is sent");
 }
 
 #[tokio::test]

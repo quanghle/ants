@@ -304,19 +304,19 @@ async fn the_assistant_tools_stand_only_while_the_grant_names_the_ant() {
     let offered = |tools: &[String]| ASSIST_TOOLS.iter().filter(|t| tools.iter().any(|n| n == *t)).count();
 
     let before = tools().await;
-    assert_eq!((before.len(), offered(&before)), (17, 0), "no grant: {before:?}");
+    assert_eq!((before.len(), offered(&before)), (18, 0), "no grant: {before:?}");
     let (ok, refused) = call(&client, "human_queue", serde_json::json!({})).await;
     assert!(!ok && refused.contains("no longer names dev-a"), "{refused}");
 
     grant(&humans, &device, Some("dev-a"), false);
     let granted = tools().await;
-    assert_eq!((granted.len(), offered(&granted)), (32, 15), "{granted:?}");
+    assert_eq!((granted.len(), offered(&granted)), (33, 15), "{granted:?}");
     assert_eq!(call(&client, "human_queue", serde_json::json!({})).await, (true, "Nothing waits for alice.".into()));
 
     // The same connection loses them at once.
     grant(&humans, &device, None, false);
     let withdrawn = tools().await;
-    assert_eq!((withdrawn.len(), offered(&withdrawn)), (17, 0), "{withdrawn:?}");
+    assert_eq!((withdrawn.len(), offered(&withdrawn)), (18, 0), "{withdrawn:?}");
     let (ok, refused) = call(&client, "send_for_human", serde_json::json!({"to": "dev-b", "text": "hi"})).await;
     assert!(!ok && refused.contains("the grant of alice no longer names dev-a"), "{refused}");
 

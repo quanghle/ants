@@ -46,7 +46,7 @@ fn unread(message: Uuid) -> String {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
-struct React {
+pub(super) struct React {
     /// The reaction: 1-64 of lowercase letters, digits and '-', such as `eyes`, `check`, `thumbsup`, `x`, `heart` or
     /// `rocket`.
     reaction: String,
@@ -56,6 +56,13 @@ struct React {
     /// Remove the ant's reaction instead of adding it.
     #[serde(default)]
     remove: bool,
+}
+
+impl React {
+    /// Adding `reaction` to the message being handled.
+    pub(super) fn current(reaction: &str) -> Self {
+        Self { reaction: reaction.to_owned(), message_id: None, remove: false }
+    }
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -68,7 +75,7 @@ struct ListReactions {
 impl Hub {
     /// Add or remove the ant's reaction to the message `args` names, by default the one `thread` is handling. A
     /// reaction is no message: it reaches no inbox and spends no turn.
-    async fn react(&self, thread: &ThreadId, args: React) -> Result<String, String> {
+    pub(super) async fn react(&self, thread: &ThreadId, args: React) -> Result<String, String> {
         let asker = self.reaction_asker.get().ok_or("reactions are not available here")?;
         let reaction: Reaction = args.reaction.trim().parse().map_err(|e| format!("{e}"))?;
         let message = self.message(thread, args.message_id.as_deref())?;

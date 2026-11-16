@@ -116,8 +116,10 @@ pub struct Inboxed {
 pub struct Fact {
     /// Each user's last message, post or note on it.
     sent: HashMap<UserId, u64>,
-    /// Each user's last inbox message on it.
-    received: HashMap<UserId, u64>,
+    /// Each user's last inbox message on it, by sequence and id.
+    received: HashMap<UserId, (u64, Option<Uuid>)>,
+    /// The last message each ant's prompt ended with no reply sent to ([`Kind::NoReply`]): answered all the same.
+    ended: HashMap<UserId, Uuid>,
     /// The last escalation to each user, but for tool requests, which [`crate::live::State::approvals`] holds.
     escalated: HashMap<UserId, Alert>,
     /// The last message given up on.
@@ -173,13 +175,18 @@ impl Facts {
                 if !fact.asked.iter().any(|(_, asked)| asked == to) {
                     fact.asked.push((from.clone(), to.clone()));
                 }
-                fact.received.insert(to.clone(), entry.seq);
+                fact.received.insert(to.clone(), (entry.seq, entry.id));
                 fact.latest = Some(Said { seq: entry.seq, at: entry.stored_at, from: from.clone(), to: to.clone() });
             }
             (Kind::Escalation, _, Some(to)) if entry.reason != Some(EscalationReason::Approval) => {
                 fact.escalated.insert(to.clone(), alert());
             }
             (Kind::Dead, _, _) => fact.dead = Some(alert()),
+            (Kind::NoReply, Some(ant), _) => {
+                if let Some(end) = &entry.no_reply {
+                    fact.ended.insert(ant.clone(), end.message);
+                }
+            }
             _ => {}
         }
         if let Some(answer) = &entry.answer {
@@ -235,9 +242,14 @@ impl Data {
         })
     }
 
-    /// Whether an ant has a message on the thread it did not answer yet.
+    /// Whether an ant has a message on the thread it did not answer yet: sent nothing since, and its prompt did not end
+    /// with no reply sent.
     fn waiting_on_ant(&self, fact: &Fact) -> bool {
-        fact.received.iter().any(|(u, seq)| !self.is_human(u) && fact.sent.get(u).is_none_or(|sent| sent < seq))
+        fact.received.iter().any(|(u, (seq, id))| {
+            !self.is_human(u)
+                && fact.sent.get(u).is_none_or(|sent| sent < seq)
+                && id.is_none_or(|id| fact.ended.get(u) != Some(&id))
+        })
     }
 
     /// The thread's shared done state, while nothing said on it since reopened it.
@@ -604,6 +616,26 @@ mod tests {
         assert_eq!(state(&m, &thread), ThreadState::WaitingOnMe, "an unread answer");
         m.data.marker.as_mut().unwrap().mark(2);
         assert_eq!(state(&m, &thread), ThreadState::Idle, "nobody owns it, so read means done");
+    }
+
+    #[test]
+    fn a_message_whose_prompt_ended_with_no_reply_waits_on_nobody() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let (asked, replied) =
+            (message(1, &thread, "dev-a", "dev-b", "check the logs"), message(2, &thread, "dev-b", "dev-a", "clean"));
+        m.stored(vec![asked.clone(), replied.clone()], at(2));
+        assert_eq!(state(&m, &thread), ThreadState::WaitingOnAnt);
+        let ended = |seq, message: &Entry| {
+            let why = ants_proto::NoReplyWhy::ReplyToOwn;
+            let end = ants_proto::TimelineEntry::NoReply { why, reason: None, text: "noted".to_owned() };
+            let record = ants_proto::Timeline::new(user("dev-a"), thread.clone(), message.id.unwrap(), vec![end], 0);
+            crate::thread::timeline_entries(seq, &record.subject(), &serde_json::to_vec(&record).unwrap())
+        };
+        m.stored(ended(3, &asked), at(3));
+        assert_eq!(state(&m, &thread), ThreadState::WaitingOnAnt, "an end of another message's prompt");
+        m.stored(ended(4, &replied), at(4));
+        assert_eq!(state(&m, &thread), ThreadState::Idle);
     }
 
     #[test]

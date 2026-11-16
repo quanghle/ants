@@ -7,6 +7,7 @@ use ants_proto::{
 };
 use ants_test_support::{NatsServer as Server, free_port};
 use async_nats::jetstream::consumer::PullConsumer;
+use rmcp::model::CallToolResult;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
 
@@ -447,4 +448,40 @@ async fn read_notes(bus: &Bus, thread: &ThreadId) -> Vec<ants_proto::NotesPost> 
         .await
         .unwrap()
         .posts
+}
+
+/// The `no_reply` entry of the last timeline record of dev-a on `thread`, and the message it is about, once stored.
+async fn no_reply_on(bus: &Bus, thread: &ThreadId) -> (Uuid, ants_proto::TimelineEntry) {
+    let subject = subject::timeline(thread, &bus.dev);
+    let msg = timeout(WAIT, async {
+        loop {
+            if let Ok(msg) = bus.stream.direct_get_last_for_subject(&subject).await {
+                break msg;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("no timeline record");
+    let record: ants_proto::Timeline = serde_json::from_slice(&msg.payload).unwrap();
+    assert_eq!(record.check_subject(&msg.subject), Ok(()));
+    let [entry] = &record.entries[..] else { panic!("{record:?}") };
+    (record.message, entry.clone())
+}
+
+/// Call the tool `name` of `mcp` with `args`, as the session of `thread` does.
+async fn call_tool(mcp: &Mcp, thread: &ThreadId, name: &'static str, args: serde_json::Value) -> CallToolResult {
+    use agent_client_protocol::v1::schema::McpServer;
+    use rmcp::ServiceExt as _;
+    use rmcp::model::{CallToolRequestParams, ClientConfig};
+    use rmcp::transport::StreamableHttpClientTransport;
+    use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+
+    let servers = mcp.servers()(thread, std::path::Path::new("/"), true);
+    let [McpServer::Http(server)] = &servers[..] else { panic!("one HTTP server") };
+    let token = server.headers[0].value.strip_prefix("Bearer ").unwrap();
+    let config = StreamableHttpClientTransportConfig::with_uri(server.url.as_str()).auth_header(token);
+    let client = ClientConfig::default().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
+    let serde_json::Value::Object(args) = args else { panic!("arguments are an object") };
+    client.call_tool(CallToolRequestParams::new(name).with_arguments(args)).await.unwrap()
 }

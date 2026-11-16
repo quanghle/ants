@@ -1,0 +1,22 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "ant": "dev-a",
+  "thread_id": "019a7d2c-0000-7000-8000-000000000001",
+  "message": "019a7d2e-0000-7000-8000-000000000001",
+  "entries": [
+    {
+      "type": "no_reply",
+      "why": "reply_to_own",
+      "text": "Thanks, noted."
+    },
+    {
+      "type": "no_reply",
+      "why": "completed",
+      "reason": "nothing to add"
+    }
+  ],
+  "at": "2025-01-01T12:01:00Z"
+}

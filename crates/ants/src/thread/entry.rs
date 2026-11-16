@@ -7,8 +7,8 @@ use ants_proto::{
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use super::ToolCall;
 use super::text::took;
+use super::{NoReply, ToolCall};
 use crate::{attachments, sealed};
 
 /// What a stored message on a thread is.
@@ -34,6 +34,9 @@ pub enum Kind {
     /// A tool call an ant made, from its timeline records: not a message, so not searched.
     #[value(skip)]
     Tool,
+    /// A prompt an ant ended with no reply sent, from its timeline records: not a message, so not searched.
+    #[value(skip)]
+    NoReply,
 }
 
 impl Kind {
@@ -48,7 +51,13 @@ impl Kind {
             Self::Decision => "decision",
             Self::Dead => "dead",
             Self::Tool => "tool",
+            Self::NoReply => "no reply",
         }
+    }
+
+    /// Whether an entry of the kind comes from an ant's timeline records rather than a stored message.
+    pub fn on_timeline(self) -> bool {
+        matches!(self, Self::Tool | Self::NoReply)
     }
 
     /// Whether an entry of the kind is a message, channel post or note, which reopens a thread marked done
@@ -143,6 +152,9 @@ pub struct Entry {
     /// A tool call's details, its title the text and its ant the sender.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool: Option<ToolCall>,
+    /// Why a prompt ended with no reply sent, its ant the sender and its final text the text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_reply: Option<NoReply>,
     /// The ant-to-ant turns an inbox message, channel post or notes post leaves on its thread.
     #[serde(skip)]
     pub turns: Option<u32>,
@@ -185,6 +197,7 @@ impl Entry {
             question: None,
             answer: None,
             tool: None,
+            no_reply: None,
             turns: None,
             webhook: false,
             origin: None,
@@ -215,6 +228,17 @@ impl Entry {
             text: call.title.clone(),
             tool: Some(tool),
             ..Self::new(seq, call.started, Kind::Tool, merged.thread_id.clone())
+        }
+    }
+
+    /// The entry of a prompt that ended with no reply sent, from timeline records, the last of them stored at `seq`.
+    pub(super) fn no_reply(seq: u64, merged: &ants_proto::MergedNoReply) -> Self {
+        let end = NoReply { message: merged.message, why: merged.why, reason: merged.reason.clone() };
+        Self {
+            from: Some(merged.ant.clone()),
+            text: merged.text.clone(),
+            no_reply: Some(end),
+            ..Self::new(seq, merged.at, Kind::NoReply, merged.thread_id.clone())
         }
     }
 

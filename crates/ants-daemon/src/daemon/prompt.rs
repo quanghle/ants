@@ -5,8 +5,8 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 
 use ants_proto::{
-    Envelope, Error as ProtoError, EscalationReason, Hold, Humans, State, StatusUpdate, SummaryOf, SummaryRequest,
-    UserId,
+    Envelope, Error as ProtoError, EscalationReason, Hold, Humans, NoReplyWhy, State, StatusUpdate, SummaryOf,
+    SummaryRequest, UserId,
 };
 use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
@@ -113,7 +113,8 @@ impl Inbox<'_> {
 
     /// Answer the message at stream sequence `seq`, given what an earlier attempt at it left. Every attempt after one
     /// that started, whether it failed or was cut off, is told that tools may already have run; one whose reply was
-    /// recorded is not prompted again.
+    /// recorded is not prompted again. Another ant's reply to the ant's own message, and a turn ended by `complete`,
+    /// are answered with no reply ([`Inbox::end_unanswered`]); the former is prompted even with no turns left.
     pub(super) async fn answer(
         &self,
         incoming: &Incoming,
@@ -137,34 +138,18 @@ impl Inbox<'_> {
             Some(posted) => Some(self.threads.context(&posted.post, seq, Earlier::Unseen, &humans).await?),
             None => None,
         };
-        let spent = match (&incoming.post, &read) {
-            (Some(posted), Some(read)) => posted.post.reply(self.ant.clone(), "", &read.later, &humans).err(),
-            _ => envelope.reply(self.ant.clone(), "", self.humans.sender_role(envelope)).err(),
-        };
-        if let Some(ProtoError::BudgetExhausted(_)) = spent {
-            // Out of turns: escalate the thread instead of spending another prompt.
-            self.escalate(incoming, "Turn budget spent", EscalationReason::TurnBudget, seq, None).await?;
-            bus::double_ack(self.client, msg).await?;
-            self.attempts.forget(seq).await;
+        // Answered with no reply, so it spends no turn.
+        let own = self.replies_to_own(incoming, read.as_ref());
+        let spent = self.turns_spent(incoming, read.as_ref(), &humans);
+        if self.out_of_turns(incoming, spent && !own, msg, seq).await? {
             return Ok(());
-        }
-        match self.ledger.reached(thread).await {
-            Ok(Some(cap)) => {
-                // Out of allowance: the same, until a human or the escalation's leader answers, or the day ends.
-                self.escalate(incoming, &cap, EscalationReason::Cap, seq, None).await?;
-                bus::double_ack(self.client, msg).await?;
-                self.attempts.forget(seq).await;
-                return Ok(());
-            }
-            Ok(None) => {}
-            Err(e) => tracing::warn!(%thread, error = format!("{e:#}"), "reading what the thread spent"),
         }
         if !cut_off {
             // Durable before the harness can run anything.
             self.attempts.start(seq, envelope).await?;
         }
 
-        tracing::info!(%thread, from = %envelope.from, cut_off, "prompting");
+        tracing::info!(%thread, from = %envelope.from, cut_off, own, "prompting");
         status::state(self.client, self.ant, thread, State::Working);
 
         let launch = self.pool.launch();
@@ -185,9 +170,11 @@ impl Inbox<'_> {
         let _turn = self.mcp.map(|mcp| mcp.begin(envelope).carrying(carried, crate::files::stored(msg)));
         let _asking = self.approvals.map(|approvals| approvals.begin(envelope));
         let flush = tokio::time::interval_at(tokio::time::Instant::now() + status::FLUSH_EVERY, status::FLUSH_EVERY);
-        let text = self.prompt_for(incoming, read.as_ref(), &humans, cut_off).await;
+        let text = self.prompt_for(incoming, read.as_ref(), &humans, cut_off, own.then_some(spent)).await;
         let Ran { reply, cancelled_by, cut_by_cancel, worked, mut reached, spend, fallback, tokens } =
             self.run_prompt(incoming, msg, seq, text, flush).await;
+        // While the turn lasts: it ends with `_turn`.
+        let completed = self.completed(incoming);
         let reply = match reply {
             // What a human cancelled is answered as it stands, never tried again.
             Err(e) if cancelled_by.is_some() => {
@@ -213,6 +200,13 @@ impl Inbox<'_> {
         let notice = notice.into_iter().flatten().collect::<Vec<_>>().join("\n");
         let text = [reply.text, notice].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
         let text = self.redactor.redact(&text).into_owned();
+        let unanswered = match completed {
+            Some(completed) => Some((NoReplyWhy::Completed, completed.reason)),
+            None => own.then_some((NoReplyWhy::ReplyToOwn, None)),
+        };
+        if let Some(unanswered) = unanswered {
+            return self.end_unanswered(incoming, unanswered, text, limit.as_ref(), msg, seq).await;
+        }
         let Some(mut reply) = self.reply_for(incoming, read, text, limit.as_ref(), msg, seq).await? else {
             return Ok(());
         };
@@ -288,8 +282,65 @@ impl Inbox<'_> {
         Err(e)
     }
 
-    /// The prompt for `incoming`, given what was read of a post's thread.
-    async fn prompt_for(&self, incoming: &Incoming, read: Option<&Context>, humans: &Humans, cut_off: bool) -> String {
+    /// Whether the thread of `incoming` has no turns left for its answer, given what was read of a post's thread.
+    fn turns_spent(&self, incoming: &Incoming, read: Option<&Context>, humans: &Humans) -> bool {
+        let envelope = &incoming.envelope;
+        let spent = match (&incoming.post, read) {
+            (Some(posted), Some(read)) => posted.post.reply(self.ant.clone(), "", &read.later, humans).err(),
+            _ => envelope.reply(self.ant.clone(), "", self.humans.sender_role(envelope)).err(),
+        };
+        matches!(spent, Some(ProtoError::BudgetExhausted(_)))
+    }
+
+    /// Escalates the thread instead of prompting when it has no turns (`spent`) or allowance left; true if so.
+    async fn out_of_turns(&self, incoming: &Incoming, spent: bool, msg: &jetstream::Message, seq: u64) -> Result<bool> {
+        let envelope = &incoming.envelope;
+        let thread = &envelope.thread_id;
+        if spent {
+            // Out of turns: escalate the thread instead of spending another prompt.
+            self.escalate(incoming, "Turn budget spent", EscalationReason::TurnBudget, seq, None).await?;
+            bus::double_ack(self.client, msg).await?;
+            self.attempts.forget(seq).await;
+            return Ok(true);
+        }
+        match self.ledger.reached(thread).await {
+            Ok(Some(cap)) => {
+                // Out of allowance: the same, until a human or the escalation's leader answers, or the day ends.
+                self.escalate(incoming, &cap, EscalationReason::Cap, seq, None).await?;
+                bus::double_ack(self.client, msg).await?;
+                self.attempts.forget(seq).await;
+                Ok(true)
+            }
+            Ok(None) => Ok(false),
+            Err(e) => {
+                tracing::warn!(%thread, error = format!("{e:#}"), "reading what the thread spent");
+                Ok(false)
+            }
+        }
+    }
+
+    /// Whether the session called `complete` in the turn on `incoming`, and why: never for a message always answered,
+    /// which the tool refuses, so one taken anyway is ignored.
+    fn completed(&self, incoming: &Incoming) -> Option<crate::mcp::Completed> {
+        let completed = self.mcp?.take_completed(&incoming.envelope.thread_id)?;
+        if let Some(what) = self.always_answered(incoming) {
+            let thread = &incoming.envelope.thread_id;
+            tracing::warn!(%thread, what, "ignoring complete on a message always answered; replying");
+            return None;
+        }
+        Some(completed)
+    }
+
+    /// The prompt for `incoming`, given what was read of a post's thread; `own` when it is another ant's reply to the
+    /// ant's own message ([`Inbox::replies_to_own`]), true if the thread has no turns left.
+    async fn prompt_for(
+        &self,
+        incoming: &Incoming,
+        read: Option<&Context>,
+        humans: &Humans,
+        cut_off: bool,
+        own: Option<bool>,
+    ) -> String {
         let envelope = &incoming.envelope;
         let thread = &envelope.thread_id;
         let late = match self.mcp {
@@ -297,7 +348,7 @@ impl Inbox<'_> {
             None => 0,
         };
         let text = match (&incoming.post, read) {
-            (Some(posted), Some(read)) => self.channel_prompt(posted, read, humans).await,
+            (Some(posted), Some(read)) => self.channel_prompt(posted, read, humans, own.is_some()).await,
             _ => match (&envelope.summary, escalation::group_note(self.ant, envelope)) {
                 (Some(summary), _) => format!("{}\n\n{}", summary_note(summary), envelope.text),
                 (None, Some(note)) => format!("{note}\n\n{}", envelope.text),
@@ -313,6 +364,9 @@ impl Inbox<'_> {
         };
         let text = match self.answer_line(envelope, humans).await {
             Some(line) => format!("{line}\n\n{text}"),
+            None if let Some(spent) = own => {
+                format!("{}\n\n{text}", own_reply_note(&envelope.from, incoming.post.is_some(), spent))
+            }
             None => text,
         };
         let text = prompt_text(&text, cut_off, late);
@@ -444,12 +498,13 @@ impl Inbox<'_> {
         Ran { reply, cancelled_by, cut_by_cancel, worked, reached, spend, fallback, tokens }
     }
 
-    /// The prompt for a channel post, with what was read of its thread: the posts not shown before, and the turns left.
-    async fn channel_prompt(&self, posted: &Posted, read: &Context, humans: &Humans) -> String {
+    /// The prompt for a channel post, with what was read of its thread: the posts not shown before, and the turns left,
+    /// unless the answer is not posted, as for a post answering one of the ant's `own`.
+    async fn channel_prompt(&self, posted: &Posted, read: &Context, humans: &Humans, own: bool) -> String {
         let post = &posted.post;
         let left = post.turns_left(&read.later, humans).saturating_sub(1);
         let mut text = match &posted.triage {
-            None => channel::prompt(self.ant, post, read, left),
+            None => channel::prompt(self.ant, post, read, (!own).then_some(left)),
             Some(entry) => {
                 let colony = (self.colony)().await.unwrap_or_else(|e| {
                     tracing::warn!(error = format!("{e:#}"), "reading the colony; members show as offline");
@@ -566,6 +621,26 @@ fn summary_note(summary: &SummaryRequest) -> String {
     format!(
         "[ants] A human asks for {what}. Answer with at most 120 words of plain text; use no tools and message no \
          one: the reply is the summary."
+    )
+}
+
+/// The `[ants]` line starting the prompt of `from`'s reply to a message, or a `post`, the ant sent: its answer is not
+/// sent back.
+pub(super) fn own_reply_note(from: &UserId, post: bool, spent: bool) -> String {
+    let (what, going_on) = if post {
+        ("a post this ant made", "post_channel on this thread (or send_message)")
+    } else {
+        ("a message this ant sent", "send_message (or post_channel on a channel)")
+    };
+    if spent {
+        return format!(
+            "[ants] {from} replied to {what}; the answer to this prompt is not sent back, and the thread has no turns \
+             left: escalate hands it on when it needs more; complete ends the turn."
+        );
+    }
+    format!(
+        "[ants] {from} replied to {what}; the answer to this prompt is not sent back. {going_on} continues the \
+         exchange; complete ends the turn."
     )
 }
 

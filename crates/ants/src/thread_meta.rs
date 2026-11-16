@@ -171,7 +171,7 @@ async fn title_sealer(sealing: &Sealing, js: &jetstream::Context, thread: &Threa
 /// The other human of `thread` if it is a thread between two humans whose messages are sealed, refused unless `me`
 /// is one of them.
 async fn sealed_with(js: &jetstream::Context, me: &UserId, thread: &ThreadId) -> Result<Option<UserId>> {
-    let entries = thread::history(js, thread, None, false, None).await?;
+    let entries = thread::history(js, thread, None, thread::Activity::None, None).await?;
     let sealed = entries.into_iter().find(|e| e.sealed.is_some() && !e.forged);
     let Some((from, to)) = sealed.and_then(|e| Some((e.from?, e.to?))) else { return Ok(None) };
     match (me == &from, me == &to) {
