@@ -1,9 +1,9 @@
 //! The command bar under the view: Ctrl-K focuses it, and @ or # typed in a view focuses it with that character. Its
-//! text starts a thread with `@user` as `ants ask` does (on an open channel thread, posts there mentioning the user),
-//! posts a new thread with `#channel` as `ants post` does, and else replies on the open thread, or asks the human's
-//! assistant, else the messenger; `/` starts a slash command over the CLI's verbs, acting on
-//! the selected item or open thread ([`COMMANDS`]). Sends run in the background ([`super::exec`]); the bar's status
-//! line tells how they went, and a failed send's text comes back into the bar.
+//! text starts a thread with `@user` as `ants ask` does (on an open channel thread or a channel's feed, posts there
+//! mentioning the user), posts a new thread with `#channel` as `ants post` does, and else replies on the open thread,
+//! posts a new thread on the channel on view, or asks the human's assistant, else the messenger; `/` starts a slash
+//! command over the CLI's verbs, acting on the selected item or open thread ([`COMMANDS`]). Sends run in the background
+//! ([`super::exec`]); the bar's status line tells how they went, and a failed send's text comes back into the bar.
 
 use ants_proto::{ApprovalRequest, ChannelId, ThreadId, UserId, Verdict};
 use chrono::{DateTime, Utc};
@@ -54,7 +54,7 @@ impl Model {
 
     /// Do what the bar's `text` says, emptying the bar; else keep it and tell why on its status line.
     fn submit(&mut self, text: String, now: DateTime<Utc>) -> Option<Action> {
-        let command = match self.channel_thread() {
+        let command = match self.channel_on_view() {
             Some(_) if text.trim_start().starts_with('@') => Ok(Command::Say(text.trim().to_owned())),
             _ => parse(&text),
         };
@@ -197,11 +197,11 @@ impl Model {
         }
     }
 
-    /// What plain text does: reply on the open thread, as a post on a channel's thread, else ask the human's assistant,
-    /// else the messenger ([`Job::Unaddressed`]).
+    /// What plain text does: reply on the open thread, as a post on a channel's thread, post a new thread on the
+    /// channel on view, else ask the human's assistant, else the messenger ([`Job::Unaddressed`]).
     fn say(&self, text: String) -> Job {
-        if let Some((channel, thread)) = self.channel_thread() {
-            return Job::Post { channel, thread: Some(thread), text };
+        if let Some((channel, thread)) = self.channel_on_view() {
+            return Job::Post { channel, thread, text };
         }
         match self.page() {
             Page::Thread(page) => Job::Reply { thread: page.history.thread.clone(), text, steer: false },
@@ -210,12 +210,18 @@ impl Model {
         }
     }
 
-    /// The channel and thread of the open thread, when it is a channel's.
-    fn channel_thread(&self) -> Option<(ChannelId, ThreadId)> {
-        let Page::Thread(page) = self.page() else { return None };
-        let thread = &page.history.thread;
-        let channel = self.data.live.summary(thread)?.channels.first()?.clone();
-        Some((channel, thread.clone()))
+    /// The channel the bar posts to: that of the open channel thread, with the thread, else the channel whose feed is
+    /// on view.
+    fn channel_on_view(&self) -> Option<(ChannelId, Option<ThreadId>)> {
+        match self.page() {
+            Page::Thread(page) => {
+                let thread = &page.history.thread;
+                let channel = self.data.live.summary(thread)?.channels.first()?.clone();
+                Some((channel, Some(thread.clone())))
+            }
+            Page::Channel(page) => Some((page.channel.clone(), None)),
+            _ => None,
+        }
     }
 
     /// The thread slash commands act on: the open one, else the one selected in the view.
@@ -398,6 +404,12 @@ mod tests {
         let text = "@dev-b take a look";
         let post = Job::Post { channel: "ops".parse().unwrap(), thread: Some(thread), text: text.into() };
         assert_eq!(m.key(Key::Enter, at(1)), Some(Action::Run(post, text.into())), "a leading @mention posts there");
+        m.pages.push(Page::Channel(crate::tui::channel::Page::new("ops".parse().unwrap())));
+        for text in ["status?", "@dev-b take a look"] {
+            typed(&mut m, text);
+            let post = Job::Post { channel: "ops".parse().unwrap(), thread: None, text: text.into() };
+            assert_eq!(m.key(Key::Enter, at(1)), Some(Action::Run(post, text.into())), "the feed's channel");
+        }
     }
 
     #[test]
