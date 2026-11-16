@@ -458,7 +458,7 @@ pub fn revoke(dir: &Path, name: Option<&str>, keys: &[String]) -> Result<Vec<Rev
     all.retain(|r| !targets.iter().any(|t| t.key == r.key));
     all.extend(targets.iter().cloned());
     write_revoked(dir, &all)?;
-    apply(dir)?;
+    apply_at(dir, now)?;
     if let Some(name) = name {
         withdraw_approvals(dir, &issued, name, now)?;
     }
@@ -506,7 +506,11 @@ pub fn standing_approval(issued: &[Issued], name: &str, github: u64) -> Option<G
 /// Drop the revocations whose credentials have all expired, and write the `server.conf` of `dir` with the rest.
 /// Returns the account's public key and JWT.
 pub fn apply(dir: &Path) -> Result<(String, String)> {
-    let now = auth::now()?;
+    apply_at(dir, auth::now()?)
+}
+
+/// [`apply`] at `now`, in seconds since the epoch.
+fn apply_at(dir: &Path, now: u64) -> Result<(String, String)> {
     let mut all = revoked(dir)?;
     let before = all.len();
     all.retain(|r| !r.expired(now));

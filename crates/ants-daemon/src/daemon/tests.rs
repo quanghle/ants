@@ -196,6 +196,7 @@ impl Bus {
             machine: "test-machine",
             pool,
             cancels: Cancels::default(),
+            unnarrowed: Unnarrowed::default(),
             restarts: &self.restarts,
             attempts: &self.attempts,
             answered: &self.answered,
@@ -3917,4 +3918,20 @@ async fn the_messenger_relays_the_mention_notices_of_a_webhook_s_post_once() {
     let humans = bus.humans.humans();
     assert!(bus.threads.notify_mentioned(&hook, hook_seq, Some(&entry), &humans).await.unwrap().is_empty());
     assert_eq!(bus.stored(&subject::inbox_of(&alice)).await, 1);
+}
+
+#[test]
+fn an_unnarrowing_harness_is_warned_of_once_per_sender_within_a_bounded_set() {
+    let p = |name: &str| -> UserId { name.parse().unwrap() };
+    let unnarrowed = Unnarrowed::default();
+    let (nightly, deploys) = (p("nightly"), p("deploys"));
+    assert!(unnarrowed.first(&nightly));
+    assert!(!unnarrowed.first(&nightly), "the same schedule again");
+    assert!(unnarrowed.first(&deploys), "another webhook");
+    for n in 2..Unnarrowed::MAX {
+        unnarrowed.first(&p(&format!("hook-{n}")));
+    }
+    assert!(unnarrowed.first(&p("one-too-many")), "past the bound, the set starts over");
+    assert_eq!(unnarrowed.0.locked().len(), 1);
+    assert!(unnarrowed.first(&nightly), "forgotten when the set started over");
 }
