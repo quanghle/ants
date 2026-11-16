@@ -48,7 +48,7 @@ See [docs/architecture.md](docs/architecture.md) for the store/subject model, de
 
 ## Install a release
 
-Each `v*` tag publishes [release](https://github.com/quanghle/ants/releases) archives of the `ants` binary for Linux x86_64 and arm64 (glibc 2.35+), macOS arm64 and Windows x86_64, with `SHA256SUMS` and build provenance attestations:
+Each `v*` tag publishes [release](https://github.com/quanghle/ants/releases) archives of the `ants` binary for Linux x86_64 and arm64 (glibc 2.43+), macOS arm64 and Windows x86_64, with `SHA256SUMS` and build provenance attestations:
 
 ```sh
 tag=v0.1.0 target=aarch64-apple-darwin   # or x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu

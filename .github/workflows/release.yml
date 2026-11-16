@@ -22,7 +22,7 @@ env:
 # Every job's `toolchain:` matches rust-toolchain.toml and `rust-version` in Cargo.toml; the three move together.
 jobs:
   version:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
       actions: read
@@ -91,10 +91,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Built on Ubuntu 22.04: the binaries need glibc 2.35 or later.
-          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
-          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
-          - { target: aarch64-apple-darwin, os: macos-15 }
+          # Built on Ubuntu 26.04: the binaries need glibc 2.43 or later.
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-26.04 }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-26.04-arm }
+          - { target: aarch64-apple-darwin, os: xcode-27 }
           - { target: x86_64-pc-windows-msvc, os: windows-latest }
     runs-on: ${{ matrix.os }}
     steps:
@@ -143,7 +143,7 @@ jobs:
       && needs.version.result == 'success' && needs.build.result == 'success'
       && (needs.checks.result == 'success' || needs.checks.result == 'skipped')
     needs: [version, checks, build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: write
       id-token: write
