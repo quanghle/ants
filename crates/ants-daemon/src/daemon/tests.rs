@@ -1723,6 +1723,90 @@ async fn a_message_held_for_a_sign_in_can_be_withdrawn() {
     assert_eq!(bus.unacked().await, 0);
 }
 
+const WITHDRAWN_RETRY: &str =
+    "[ants] Withdrawn by human before dev-a retried it after a failed attempt (ants withdraw).";
+
+#[tokio::test]
+async fn a_message_held_for_a_provider_limit_after_its_tools_ran_can_be_withdrawn() {
+    use ants_proto::MessageMark;
+    let Some((bus, mut replies)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    log.locked().limited = Some("API Error: 429 Too Many Requests, retry after 0.2s".to_owned());
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let t1 = ThreadId::generate();
+    let (a, _) = bus.send(&t1, "tools 1 a").await;
+    bus.send(&t1, "b").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        // Each try runs a tool before meeting the limit again; held, a awaits the next one, withdrawable.
+        timeout(WAIT, async {
+            loop {
+                if matches!(mark_of(&bus, &a).await, Some(MessageMark::Retrying { .. }))
+                    && withdraw(&bus, &a).await.is_none()
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a withdrawn while held for the limit");
+        log.locked().limited = None;
+        let notice = next_envelope(&mut replies).await;
+        assert_eq!((notice.text.as_str(), notice.in_reply_to), (WITHDRAWN_RETRY, Some(a.id)));
+        assert_eq!(next_reply(&mut replies).await, (t1.clone(), "b".to_owned()), "the thread goes on");
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(log.locked().answered, ["b"], "a never got past the limit");
+    assert!(matches!(mark_of(&bus, &a).await, Some(MessageMark::Withdrawn { .. })));
+    assert_eq!(bus.unacked().await, 0);
+}
+
+#[tokio::test]
+async fn a_message_cut_off_then_held_for_a_sign_in_can_be_withdrawn() {
+    use ants_proto::MessageMark;
+    let Some((bus, mut replies)) = Bus::start().await else { return };
+    let (progress_every, ack_wait) = (Duration::from_millis(100), ack_wait(Duration::from_millis(100)));
+    let (launch, log, _) = fake::launch();
+    let store = SessionStore::memory();
+    let t1 = ThreadId::generate();
+    let (a, _) = bus.send(&t1, "hold a").await;
+
+    // The daemon stops mid-prompt; redelivered, a meets a signed-out harness and is held, its attempt cut off.
+    let pool = Pool::new(launch.clone(), store.clone(), 2, IDLE);
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let crash = async {
+        until("the prompt to reach the harness", || log.locked().prompted == 1).await;
+        ctrl_c.add_permits(2);
+    };
+    tokio::join!(bus.serve_timed(&pool, &ctrl_c, progress_every, ack_wait), crash);
+    drop(pool);
+    log.locked().signed_out = true;
+
+    let pool = Pool::new(launch, store, 2, IDLE);
+    let check = async {
+        let notice = next_envelope(&mut replies).await;
+        assert!(notice.text.contains("is not signed in"), "{}", notice.text);
+        timeout(WAIT, async {
+            while !matches!(mark_of(&bus, &a).await, Some(MessageMark::Retrying { .. })) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a held, awaiting a retry");
+        assert_eq!(withdraw(&bus, &a).await, None, "held for the sign-in, a is withdrawable");
+        log.locked().signed_out = false;
+        let notice = next_envelope(&mut replies).await;
+        assert_eq!((notice.text.as_str(), notice.in_reply_to), (WITHDRAWN_RETRY, Some(a.id)));
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve_timed(&pool, &ctrl_c, progress_every, ack_wait), check);
+    assert!(log.locked().answered.is_empty(), "a never reached the harness again");
+    assert_eq!(bus.unacked().await, 0);
+}
+
 #[tokio::test]
 async fn a_first_delivery_is_prompted_as_sent_and_leaves_no_marker() {
     let Some((bus, mut replies)) = Bus::start().await else { return };

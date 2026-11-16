@@ -244,11 +244,11 @@ pub struct QueuedMessage {
 /// mark [`MessageMark::Started`] right before handling the message, and a human creates it
 /// [`MessageMark::Withdrawn`] (`ants withdraw`), or the daemon for an assistant's [`CancelRequest::withdraw`]: both
 /// create the key only if it has no value, so the first wins and the other sees what it found. After a failed attempt
-/// the daemon swaps its `started` mark for [`MessageMark::Retrying`] before handing the message back for a retry; on
-/// its redelivery the daemon swaps that mark for `started` again, and a withdrawal for `withdrawn`, each by
-/// compare-and-set on the `retrying` mark, so again exactly one wins. A daemon acks a withdrawn message without
-/// prompting with it, and puts [`MessageMark::Finished`] once it acked a message it started. Marks expire with the
-/// stream's messages.
+/// the daemon swaps its `started` mark for [`MessageMark::Retrying`] before handing the message back for a retry, or
+/// holding it for a sign-in or a provider limit; taking it up again the daemon swaps that mark for `started` again,
+/// and a withdrawal for `withdrawn`, each by compare-and-set on the `retrying` mark, so again exactly one wins. A
+/// daemon acks a withdrawn message without prompting with it, and puts [`MessageMark::Finished`] once it acked a
+/// message it started. Marks expire with the stream's messages.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum MessageMark {
@@ -256,7 +256,8 @@ pub enum MessageMark {
         thread_id: ThreadId,
         at: DateTime<Utc>,
     },
-    /// An attempt at the message failed, and it awaits a retry: it can still be withdrawn.
+    /// An attempt at the message failed, or met a sign-out or a provider limit after tools may have run, and it awaits
+    /// a retry: it can still be withdrawn.
     Retrying {
         thread_id: ThreadId,
         at: DateTime<Utc>,
