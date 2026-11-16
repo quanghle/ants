@@ -8,6 +8,7 @@ use std::collections::HashMap;
 
 use ants_proto::{StatusEvent, StatusUpdate, ThreadId, UserId, Uuid};
 use chrono::{DateTime, TimeDelta, Utc};
+use serde::{Deserialize, Serialize};
 
 use crate::thread::{Entry, Kind};
 
@@ -17,6 +18,38 @@ const MAX_CALLS: usize = 1000;
 const MAX_THREADS: usize = 64;
 /// How far apart a call heard live and a stored one with its ant and id may have started and still be the same call.
 const SAME_CALL: TimeDelta = TimeDelta::minutes(2);
+
+/// How the thread view shows the tool calls and the prompts ended with no reply, cycled by `T`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Tools {
+    /// Each call and each end with no reply on a line of its own.
+    All,
+    /// A line for each ant's turn between two messages, but for the one running, shown in full.
+    #[default]
+    Collapsed,
+    /// Neither.
+    None,
+}
+
+impl Tools {
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            Self::All => Self::Collapsed,
+            Self::Collapsed => Self::None,
+            Self::None => Self::All,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Collapsed => "collapsed",
+            Self::None => "none",
+        }
+    }
+}
 
 /// A tool call an ant made on a thread.
 #[derive(Debug, Clone, PartialEq, Eq)]

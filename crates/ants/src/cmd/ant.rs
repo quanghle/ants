@@ -10,7 +10,7 @@ use clap_complete::engine::ArgValueCandidates;
 
 use crate::serve::AntOptions;
 use crate::settings::{self, Assignment};
-use crate::{ant, avatars, completions, export, memories, orders, pause, restart};
+use crate::{ant, avatars, completions, export, mcp, memories, orders, pause, restart};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum AntCommand {
@@ -139,6 +139,30 @@ pub(crate) enum AntCommand {
         #[arg(long)]
         machine: Option<Machine>,
     },
+    /// Show the MCP servers of ANT's harness and how each stands (connected, pending, needs_auth, failed, disabled),
+    /// which an admin order asks the daemon of its machine to read while online, with a session of the harness opened
+    /// for that alone. Protocols claude, codex and copilot-sdk report them; others do not. With --sign-in, sign the
+    /// harness in to a server asking for OAuth: prints the address to open in a browser. Needs a human device's admin
+    /// credentials.
+    Mcp {
+        #[arg(add = ArgValueCandidates::new(completions::ants))]
+        ant: UserId,
+        /// One JSON object: the report (harness, protocol, servers, truncated, read_at), or with --sign-in what it did
+        /// (server, authorization_url, expires_at).
+        #[arg(long)]
+        json: bool,
+        /// The machine whose daemon serves ANT (default: the machine that last recorded serving it).
+        #[arg(long)]
+        machine: Option<Machine>,
+        /// Sign the harness in to this MCP server. The harness keeps the credentials in its own store, which the
+        /// ant's sessions share; running ones may need `ants ant restart ANT` to use them.
+        #[arg(long, value_name = "SERVER")]
+        sign_in: Option<String>,
+        /// The address a browser on another machine came back to after signing in, which fails to load there: hand
+        /// it to the harness waiting for it.
+        #[arg(long, value_name = "URL", requires = "sign_in")]
+        callback: Option<String>,
+    },
     /// Order ANT's daemon to restart its harnesses: idle ones stop at once, working ones once their current prompt
     /// ends, and each thread's next prompt resumes its session in a new harness. Waits up to 10 s for the outcome, else
     /// the order stays pending until the daemon takes it (`ants ant orders`). Needs a human device's admin
@@ -241,6 +265,9 @@ pub(crate) async fn run(nats: &crate::Nats<'_>, command: AntCommand) -> Result<(
             avatars::show(nats, &ant, change).await
         }
         AntCommand::Memories { ant, json, machine } => memories::show(nats, &ant, machine, json).await,
+        AntCommand::Mcp { ant, json, machine, sign_in, callback } => {
+            mcp::show(nats, &ant, machine, json, sign_in, callback).await
+        }
         AntCommand::Restart { ant, now, machine, json } => restart::run(nats, &ant, now, machine, json).await,
         AntCommand::Pause { order: Order { ant, machine, wait } } => pause::run(nats, &ant, machine, true, wait).await,
         AntCommand::Resume { order: Order { ant, machine, wait } } => {

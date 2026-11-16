@@ -256,9 +256,12 @@ fn reading(id: &Value) -> Vec<Value> {
 
 #[tokio::test]
 async fn copilot_turns_stream_through_the_translator() {
-    let table = "args = [\"--log-level\", \"debug\", \"--excluded-tools\", \"bash\", \"read_bash,write_bash\"]\n\
-                 [harnesses.native.context]\nlong = { args = [\"--context=long_context\"] }";
-    let played = Played::new("copilot-prompt", table, |method, params| {
+    let extra = r#"'{"mcpServers": {"github": {"type": "http", "url": "https://api.example/mcp"}, "ants": {"command": "/old"}}}'"#;
+    let table = format!(
+        "args = [\"--log-level\", \"debug\", \"--excluded-tools\", \"bash\", \"read_bash,write_bash\", \
+         \"--additional-mcp-config\", {extra}]\n[harnesses.native.context]\nlong = {{ args = [\"--context=long_context\"] }}"
+    );
+    let played = Played::new("copilot-prompt", &table, |method, params| {
         (method == "session.send").then(|| Answer::ok(json!({ "messageId": "u1" })).then(reading(&params["sessionId"])))
     });
     let stdio = McpServerStdio::new("ants", "/bin/ants")
@@ -310,6 +313,7 @@ async fn copilot_turns_stream_through_the_translator() {
     assert_eq!(keys.map(|key| created[key].clone()), expected);
     assert_eq!((&created["workingDirectory"], &created["requestPermission"]), (&json!(played.dir), &json!(true)));
     let mcp = json!({
+        "github": { "type": "http", "url": "https://api.example/mcp" },
         "ants": { "type": "stdio", "command": "/bin/ants", "args": ["mcp"], "env": { "ANTS_MCP_TOKEN": "secret" } }
     });
     assert_eq!(created["mcpServers"], mcp);
@@ -559,6 +563,9 @@ fn copilot_definitions_choose_tools_and_no_mode() {
         "--context",
         "default",
         "--excluded-tools=bash",
+        "--additional-mcp-config",
+        r#"{"mcpServers": {"a": {"command": "a"}, "b": {"command": "b"}}}"#,
+        "--additional-mcp-config=@servers.json",
     ]
     .map(str::to_owned)
     .into();
@@ -569,6 +576,25 @@ fn copilot_definitions_choose_tools_and_no_mode() {
         available: tools(&["view", "mcp:*", "grep"]),
         excluded: tools(&["bash"]),
         context: Some("default".to_owned()),
+        mcp: vec![
+            r#"{"mcpServers": {"a": {"command": "a"}, "b": {"command": "b"}}}"#.to_owned(),
+            "@servers.json".to_owned(),
+        ],
     };
     assert_eq!(taken, expected);
+    let dir = scratch_dir("copilot-mcp-config");
+    let file = dir.join("servers.json");
+    std::fs::write(&file, r#"{"mcpServers": {"b": {"command": "file"}}}"#).unwrap();
+    let file_arg = format!("@{}", file.display());
+    let taken = SessionArgs { mcp: vec![expected.mcp[0].clone(), file_arg.clone()], ..expected };
+    let servers = taken.mcp_servers().unwrap();
+    let expected = json!({ "a": { "type": "stdio", "command": "a" }, "b": { "type": "stdio", "command": "file" } });
+    assert_eq!(Value::Object(servers), expected, "the later");
+    std::fs::remove_dir_all(&dir).unwrap();
+    for wrong in ["{", r#"{"servers": {}}"#, r#"{"mcpServers": {"a": 1}}"#] {
+        let mut args = vec!["--additional-mcp-config".to_owned(), wrong.to_owned()];
+        assert!(SessionArgs::take(&mut args).is_err(), "{wrong}");
+    }
+    let missing = SessionArgs { mcp: vec![file_arg], ..SessionArgs::default() };
+    assert!(missing.mcp_servers().unwrap_err().contains("servers.json"));
 }

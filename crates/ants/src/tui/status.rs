@@ -84,7 +84,7 @@ impl Status {
                 stuck: count(Why::Stuck, threads),
                 message: count(Why::Message, threads && marker),
                 mention: count(Why::Mention, threads && marker),
-                finished: count(Why::Finished, threads && done),
+                finished: count(Why::Finished, threads && done && marker),
             },
             working,
             spend_today: today.then(|| model.data.cards.today().map_or(0.0, |s: Spent| s.cost)),
@@ -229,12 +229,12 @@ mod tests {
         let status = Status::of(parts, &user("alice"), at(3));
         assert_eq!(
             status.line(),
-            "0 approve · 0 question · 0 stuck · ? message · ? mention · 1 finished │ ◐ scout │ $? today"
+            "0 approve · 0 question · 0 stuck · ? message · ? mention · ? finished │ ◐ scout │ $? today"
         );
         assert_eq!(status.tmux(), "⚑? ◐1 $?");
         assert_eq!(
             serde_json::to_string(&status).unwrap(),
-            r#"{"home":{"approve":0,"question":0,"stuck":0,"message":null,"mention":null,"finished":1},"working":["scout"],"spend_today":null}"#
+            r#"{"home":{"approve":0,"question":0,"stuck":0,"message":null,"mention":null,"finished":null},"working":["scout"],"spend_today":null}"#
         );
 
         let nothing = Status::of(Parts::default(), &user("alice"), at(3));

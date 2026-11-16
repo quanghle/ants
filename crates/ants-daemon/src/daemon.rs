@@ -864,6 +864,7 @@ where
         () = inbox.hear_cancels() => {}
         () = inbox.hear_restarts() => {}
         () = inbox.hear_clones() => {}
+        () = inbox.hear_mcp() => {}
         () = crate::creds::recheck(config.connection.creds.as_deref()) => {}
         () = storage.watch(crate::storage::CHECK_EVERY) => {}
         () = tell_unserved(inbox.js, inbox.humans, &mut unserved) => {}
@@ -1099,7 +1100,8 @@ async fn tell_unserved(js: &jetstream::Context, humans: &Registry, watch: &mut u
         for found in watch.next(|user| humans.is_human(user)).await {
             let Some(found) = watch.claim(found).await else { continue };
             let to = humans.owner_or_default(found.owner.as_ref());
-            let notice = Envelope::new(ant.clone(), to, found.text(&ant, chrono::Utc::now()));
+            let notice = Envelope::new(ant.clone(), to, found.text(&ant, chrono::Utc::now()))
+                .as_notice(ants_proto::NoticeKind::Unserved);
             if let Err(e) = bus::publish_json(js, notice.subject(), &notice, None).await {
                 tracing::warn!(waiting_for = %found.ant, error = format!("{e:#}"), "telling a human of messages waiting");
             }
@@ -1118,7 +1120,9 @@ fn kept_branch_notice(ant: &UserId, branch: &Branch, owner: Option<UserId>, huma
         branch.outside()
     );
     let to = owner.clone().unwrap_or_else(|| humans.default_human().clone());
-    Envelope::on_thread(thread.clone(), ant.clone(), to, text).with_owner(owner)
+    Envelope::on_thread(thread.clone(), ant.clone(), to, text)
+        .with_owner(owner)
+        .as_notice(ants_proto::NoticeKind::Expired)
 }
 
 /// What hides the ant's secrets: the values of its env and its harness's, the daemon's environment variables named

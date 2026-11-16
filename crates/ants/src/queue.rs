@@ -129,8 +129,22 @@ pub async fn withdraw(nats: &crate::Nats<'_>, ant: UserId, message: Uuid) -> Res
     if !nats.me.role.is_human() {
         bail!("the credentials of {me} are an ant's; only a human withdraws a message");
     }
-    let (client, js) = nats.connect("ants-withdraw").await?;
-    let kv = DirectKv::new(&js, nats.domain, ATTEMPTS_BUCKET).await?;
+    let (_client, js) = nats.connect("ants-withdraw").await?;
+    println!("{}", withdrawn(&js, nats.domain, me, &ant, message).await?);
+    Ok(())
+}
+
+/// Withdraw `message` from the queue of `ant` as `me`, a human: what was done, or why it was refused.
+pub async fn withdrawn(
+    js: &async_nats::jetstream::Context,
+    domain: Option<&ants_proto::JsDomain>,
+    me: &UserId,
+    ant: &UserId,
+    message: Uuid,
+) -> Result<String> {
+    let ant = ant.clone();
+    let client = js.client();
+    let kv = DirectKv::new(js, domain, ATTEMPTS_BUCKET).await?;
     let found = mark(&kv, &ant, &message).await?;
     if let Some(found @ (MessageMark::Withdrawn { .. } | MessageMark::Finished { .. })) = found {
         return refused(&ant, &message, found, false);
@@ -140,8 +154,8 @@ pub async fn withdraw(nats: &crate::Nats<'_>, ant: UserId, message: Uuid) -> Res
     let answered = ask(&client, &ant, me).await?;
     let listed = match &answered {
         Some(answers) => {
-            let humans = crate::humans::read(&js).await?;
-            let (waiting, _) = waiting(&js, &kv, &ant, humans, answers, usize::MAX).await?;
+            let humans = crate::humans::read(js).await?;
+            let (waiting, _) = waiting(js, &kv, &ant, humans, answers, usize::MAX).await?;
             waiting.into_iter().find(|m| m.id == message)
         }
         None => None,
@@ -162,28 +176,21 @@ pub async fn withdraw(nats: &crate::Nats<'_>, ant: UserId, message: Uuid) -> Res
     };
     match ants_daemon::attempts::withdraw(&kv, &ant, &message, me, None).await? {
         Some(found) => refused(&ant, &message, found, false),
-        None if answered.is_none() => {
-            println!(
-                "withdrew message {message} from the queue of {ant}; no daemon serving {ant} answered, so none \
-                 checked that it waits there"
-            );
-            Ok(())
-        }
-        None => {
-            println!(
-                "withdrew message {message} from the queue of {ant}{retry}; the thread is told once its turn comes"
-            );
-            Ok(())
-        }
+        None if answered.is_none() => Ok(format!(
+            "withdrew message {message} from the queue of {ant}; no daemon serving {ant} answered, so none checked \
+             that it waits there"
+        )),
+        None => Ok(format!(
+            "withdrew message {message} from the queue of {ant}{retry}; the thread is told once its turn comes"
+        )),
     }
 }
 
 /// The outcome of withdrawing `message` when it has a mark already; `redelivery` when it awaits redelivery started.
-fn refused(ant: &UserId, message: &Uuid, found: MessageMark, redelivery: bool) -> Result<()> {
+fn refused(ant: &UserId, message: &Uuid, found: MessageMark, redelivery: bool) -> Result<String> {
     match found {
         MessageMark::Withdrawn { by, on_behalf_of, .. } => {
-            println!("message {message} was withdrawn already, by {}", withdrawer(&by, on_behalf_of.as_ref()));
-            Ok(())
+            Ok(format!("message {message} was withdrawn already, by {}", withdrawer(&by, on_behalf_of.as_ref())))
         }
         MessageMark::Started { .. } if redelivery => bail!(
             "{ant} started on message {message} already, in an attempt that did not end (its daemon stopped, or its \

@@ -115,9 +115,12 @@ impl Parser {
             (Kind::Escalation, Some(crate::escalation_note(x)), e.text)
         } else if e.mention.is_some() {
             (Kind::Mention, None, e.text)
+        } else if let Some(notice) = e.notice.filter(|_| !forged) {
+            (Kind::Message, Some(format!("notice: {}", notice.as_str())), e.text)
         } else {
             (Kind::Message, None, e.text)
         };
+        let notice = e.notice.filter(|_| kind == Kind::Message && !forged);
         let channel = e.mention.map(|m| m.channel);
         Some(Entry {
             id: Some(e.id),
@@ -143,6 +146,8 @@ impl Parser {
             turns: Some(e.turn_budget),
             webhook: e.webhook,
             origin: e.origin_thread,
+            in_reply_to: e.in_reply_to,
+            notice,
             ..entry(kind, e.thread_id)
         })
     }

@@ -2,6 +2,8 @@
 //! is known of the ants ([`Data`]), the nav's selection, the views opened from it, the focus, the help and the latest
 //! notice. Keys and changes return the [`Action`]s the UI then performs.
 
+use std::collections::HashSet;
+
 use ants_daemon::reactions::Reactions;
 use ants_proto::{
     ApprovalRequest, ChannelEntry, ChannelId, ChannelReadMarkers, Humans, Reaction, ReadMarker, ThreadId, UserId, Uuid,
@@ -19,8 +21,8 @@ use super::react::{self, Picker};
 use super::reads::{Mark, Read};
 use super::work::{Facts, Filter};
 use super::{
-    ant, cards, catchup, channel, credentials, dm, faces, held, home, images, memories, nav, people, search, settings,
-    snooze, thread, timeline, tree, work,
+    ant, cards, catchup, channel, credentials, dm, faces, held, home, images, mcp, memories, nav, people, search,
+    settings, snooze, thread, timeline, tree, work,
 };
 use crate::live::{self, State};
 use crate::thread::Entry;
@@ -95,6 +97,8 @@ pub enum Action {
     Answer(held::Answer),
     /// Read an ant's settings, or send an order changing them, as `ants ant set` does.
     Settings(settings::Ask),
+    /// Keep on the device how the thread view shows tool calls.
+    KeepTools(timeline::Tools),
     Quit,
 }
 
@@ -137,6 +141,8 @@ pub struct Data {
     pub reactions: Reactions,
     /// The tool calls of the threads, heard live or read from their timelines.
     pub calls: timeline::Threads,
+    /// How the thread view shows them, kept on the device.
+    pub tools: timeline::Tools,
     /// The tool requests settled while the UI runs.
     pub settled: approvals::Settled,
     /// Who of the other humans is online, and the messages with each.
@@ -153,6 +159,8 @@ pub struct Data {
     pub held: held::Orders,
     /// How the ants look.
     pub looks: faces::Looks,
+    /// The messages the human withdrew here, marked before the ant's notice of each comes.
+    pub withdrawn: HashSet<Uuid>,
 }
 
 impl Data {
@@ -277,12 +285,16 @@ pub enum To {
     Tldr(ThreadId),
     /// The digest of what changed since the last `ants chat` on the device ended.
     Digest,
+    /// Show the thread view's tool calls the next way.
+    Tools,
     /// The credentials asked for.
     Credentials,
     /// The admin orders held for the human's consent.
     Held,
     /// Not another view: something to do.
     Do(Action),
+    /// Nothing done, for the reason the status line tells.
+    Refused(String),
 }
 
 pub struct Model {
@@ -322,11 +334,13 @@ impl Model {
             humans: None,
             reactions: Reactions::new(),
             calls: timeline::Threads::default(),
+            tools: timeline::Tools::default(),
             settled: approvals::Settled::default(),
             people: people::People::default(),
             delegations: tree::Delegations::default(),
             cards: cards::Cards::default(),
             images: images::Images::default(),
+            withdrawn: HashSet::new(),
             credentials: credentials::Heard::default(),
             held: held::Orders::default(),
             looks: faces::Looks::default(),
@@ -458,7 +472,7 @@ impl Model {
         entries
     }
 
-    /// Take word from following the tool requests: a settled request keeps its card a while.
+    /// Take word from following the tool requests: a settled request keeps its card a while, unless decided here.
     fn approval(&mut self, update: Update, now: DateTime<Utc>) {
         self.data.live.approval(&update);
         if let Update::Resolved(request, state) = update {
@@ -469,7 +483,9 @@ impl Model {
                 let how = approvals::how(&state, &request.ant);
                 self.notify(format!("request {} {how}", crate::tools::qualified(&request)), Level::Info, now);
             }
-            self.data.settled.add(request, state, now);
+            if !self.data.settled.decided_here(&request, &state, self.data.me()) {
+                self.data.settled.add(request, state, now);
+            }
         }
     }
 
@@ -737,6 +753,28 @@ impl Model {
     pub fn memories_wanted(&self) -> Option<(UserId, u32)> {
         let Page::Ant(page) = self.page() else { return None };
         (page.pane == ant::Pane::Memories).then(|| (page.ant.clone(), page.memories.asked))
+    }
+
+    /// What the view wants of an ant's MCP servers: the shown ant's, on its MCP pane.
+    pub fn mcp_wanted(&self) -> Option<mcp::Wanted> {
+        let Page::Ant(page) = self.page() else { return None };
+        (page.pane == ant::Pane::Mcp).then(|| mcp::Wanted {
+            ant: page.ant.clone(),
+            asked: page.mcp.asked,
+            sign: page.mcp.sign_wanted(),
+        })
+    }
+
+    /// Take in what an order about an ant's MCP servers brought.
+    pub fn mcp_event(&mut self, event: mcp::Event) {
+        for page in &mut self.pages {
+            let Page::Ant(page) = page else { continue };
+            match &event {
+                mcp::Event::Read(ant, asked, read) if *ant == page.ant => page.mcp.read(*asked, read),
+                mcp::Event::Signed(ant, sign, signed) if *ant == page.ant => page.mcp.signed(*sign, signed),
+                _ => {}
+            }
+        }
     }
 
     /// Take in what a read of an ant's memories brought.

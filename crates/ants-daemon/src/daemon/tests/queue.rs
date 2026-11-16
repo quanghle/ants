@@ -297,6 +297,44 @@ async fn a_reply_with_no_prompt_running_or_from_an_ant_waits_its_turn() {
 }
 
 #[tokio::test]
+async fn a_human_reply_marked_queue_waits_behind_the_running_prompt() {
+    let Some((bus, _)) = Bus::start().await else { return };
+    let mut replies = bus.replies().await;
+    let (launch, log, gate) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let t1 = ThreadId::generate();
+    let mut statuses = bus.client.subscribe(subject::status(&bus.dev, &t1)).await.unwrap();
+    bus.client.flush().await.unwrap();
+    bus.send(&t1, "hold a").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        until("the prompt to run", || log.locked().prompted == 1).await;
+        let later = Envelope { queue: true, ..Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "b") };
+        bus::publish_json(&bus.js, later.subject(), &later, None).await.unwrap();
+        let ahead = timeout(WAIT, async {
+            loop {
+                let msg = statuses.next().await.unwrap();
+                let event: StatusEvent = serde_json::from_slice(&msg.payload).unwrap();
+                if let StatusUpdate::Queued { message, ahead } = event.update {
+                    break (message, ahead);
+                }
+            }
+        })
+        .await
+        .expect("no queued status");
+        assert_eq!(ahead, (later.id, 1), "it waits behind the prompt running");
+        assert_eq!(log.locked().cancelled, 0, "a queued reply does not interrupt");
+        gate.add_permits(1);
+        assert_eq!(next_reply(&mut replies).await, (t1.clone(), "hold a".to_owned()), "the prompt finishes");
+        assert_eq!(next_reply(&mut replies).await, (t1.clone(), "b".to_owned()));
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(bus.unacked().await, 0);
+}
+
+#[tokio::test]
 async fn a_human_channel_reply_automatically_steers_but_other_posts_do_not() {
     let Some((bus, _)) = Bus::start().await else { return };
     let (launch, log, _) = fake::launch();

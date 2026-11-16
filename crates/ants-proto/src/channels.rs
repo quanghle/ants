@@ -191,6 +191,10 @@ pub struct ChannelPost {
     /// marker is in [`WEBHOOKS_BUCKET`] ([`webhook_marker_key`]) or a human, so no ant names a thread's owner with it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub webhook: bool,
+    /// A human's reply that waits its turn behind the prompt running on its thread, as [`Envelope::queue`]. Never
+    /// copied by [`ChannelPost::reply`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub queue: bool,
     /// The tool rules the thread is narrowed to, as [`Envelope::allow`]: a webhook's post without them stands for
     /// [`WEBHOOK_ALLOW`], an ant's reply keeps those of the post it answers ([`ChannelPost::reply`]) and a human's has
     /// none.
@@ -237,6 +241,7 @@ impl ChannelPost {
             owner: None,
             creator: None,
             webhook: false,
+            queue: false,
             allow: None,
             title: None,
             attachments: Vec::new(),

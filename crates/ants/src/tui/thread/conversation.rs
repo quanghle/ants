@@ -5,15 +5,15 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
-use ants_proto::UserId;
-use chrono::{DateTime, Local, Utc};
+use ants_proto::{NoticeKind, UserId, Uuid};
+use chrono::{DateTime, Local, TimeDelta, Utc};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
 use crate::sealed;
 use crate::thread::{Entry, Kind};
 use crate::tui::model::Data;
-use crate::tui::timeline::{Call, End};
+use crate::tui::timeline::{Call, End, Tools};
 use crate::tui::{attach, frame, images, markdown, react};
 
 /// How deep delegations nest, deeper ones shown at this depth.
@@ -21,11 +21,36 @@ const MAX_DEPTH: usize = 4;
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// What a row of the conversation is.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(super) enum Item<'a> {
     Message(&'a Entry),
     Call(&'a Call),
     End(&'a End),
+    /// An ant's tool calls and ends with no reply between two messages, on one line.
+    Turn(Turn<'a>),
+}
+
+/// An ant's turn collapsed: its tool calls and the prompts it ended with no reply between two messages.
+#[derive(Debug, Clone)]
+pub(super) struct Turn<'a> {
+    pub(super) ant: &'a UserId,
+    pub(super) calls: Vec<&'a Call>,
+    pub(super) ends: Vec<&'a End>,
+}
+
+impl Turn<'_> {
+    /// When it started.
+    fn started(&self) -> Option<DateTime<Utc>> {
+        let calls = self.calls.iter().map(|c| c.started);
+        calls.chain(self.ends.iter().map(|e| e.at)).min()
+    }
+
+    /// From when its first call started to when its last one ended.
+    fn took(&self) -> Option<TimeDelta> {
+        let first = self.calls.iter().map(|c| c.started).min()?;
+        let last = self.calls.iter().map(|c| c.started + c.duration.unwrap_or_default()).max()?;
+        Some(last - first)
+    }
 }
 
 /// A row of the conversation, and how deep it nests: 0 for the top level.
@@ -36,27 +61,33 @@ pub(super) struct Row<'a> {
 }
 
 /// The conversation of `entries`, in the order stored, with `calls`, by when they started, and `ends`, by when they
-/// ended, each before the first message stored after it; `human` tells the humans.
+/// ended, each before the first message stored after it, shown as `tools` has them; `busy` tells whether an ant runs
+/// a prompt on the thread, the calls after the last message then the running turn's, and `human` tells the humans.
 pub(super) fn rows<'a>(
     entries: &'a [Entry],
     calls: &'a [Call],
     ends: &'a [End],
+    tools: Tools,
+    busy: bool,
     human: impl Fn(&UserId) -> bool,
 ) -> Vec<Row<'a>> {
     let mut levels: HashMap<&UserId, usize> = HashMap::new();
-    let level = |levels: &HashMap<&UserId, usize>, user: &UserId| levels.get(user).copied().unwrap_or(1);
-    let mut timeline: Vec<(DateTime<Utc>, &UserId, Item)> =
-        calls.iter().map(|c| (c.started, &c.ant, Item::Call(c))).collect();
-    timeline.extend(ends.iter().map(|e| (e.at, &e.ant, Item::End(e))));
+    let mut timeline: Vec<(DateTime<Utc>, &UserId, Item)> = Vec::new();
+    if tools != Tools::None {
+        timeline.extend(calls.iter().map(|c| (c.started, &c.ant, Item::Call(c))));
+        timeline.extend(ends.iter().map(|e| (e.at, &e.ant, Item::End(e))));
+    }
     timeline.sort_by_key(|(at, ..)| *at);
     let mut timeline = timeline.into_iter().peekable();
     let mut rows = Vec::new();
     for entry in entries.iter().filter(|e| !e.kind.on_timeline()) {
-        while let Some((_, ant, item)) = timeline.next_if(|(at, ..)| *at < entry.stored_at) {
-            rows.push(Row { item, depth: level(&levels, ant) });
-        }
+        let stretch = std::iter::from_fn(|| timeline.next_if(|(at, ..)| *at < entry.stored_at));
+        let stretch: Vec<_> = stretch.map(|(_, ant, item)| (ant, item)).collect();
+        timed(&mut rows, &levels, stretch, tools == Tools::Collapsed);
         let ant = |user: &&UserId| !human(user);
         let depth = match (entry.kind, entry.from.as_ref(), entry.to.as_ref()) {
+            // A daemon's notice nests nothing: it shows where its ant does.
+            (Kind::Message, Some(from), _) if entry.notice.is_some() => level(&levels, from),
             (Kind::Message | Kind::Escalation, Some(from), Some(to)) if ant(&from) && ant(&to) => {
                 let depth = level(&levels, from);
                 // A reply to an ant nesting it leaves that ant where it was.
@@ -76,8 +107,42 @@ pub(super) fn rows<'a>(
         };
         rows.push(Row { item: Item::Message(entry), depth });
     }
-    rows.extend(timeline.map(|(_, ant, item)| Row { item, depth: level(&levels, ant) }));
+    let stretch: Vec<_> = timeline.map(|(_, ant, item)| (ant, item)).collect();
+    // The running turn shows in full.
+    let collapse = tools == Tools::Collapsed && !busy;
+    timed(&mut rows, &levels, stretch, collapse);
     rows
+}
+
+fn level(levels: &HashMap<&UserId, usize>, user: &UserId) -> usize {
+    levels.get(user).copied().unwrap_or(1)
+}
+
+/// Add the rows of the calls and ends of `stretch`, between two messages: each on its own, or with `collapse` one
+/// [`Turn`] for each ant, where its first one was.
+fn timed<'a>(
+    rows: &mut Vec<Row<'a>>,
+    levels: &HashMap<&UserId, usize>,
+    stretch: Vec<(&'a UserId, Item<'a>)>,
+    collapse: bool,
+) {
+    if !collapse {
+        rows.extend(stretch.into_iter().map(|(ant, item)| Row { item, depth: level(levels, ant) }));
+        return;
+    }
+    let mut turns: Vec<Turn> = Vec::new();
+    for (ant, item) in stretch {
+        let at = turns.iter().position(|t| t.ant == ant).unwrap_or_else(|| {
+            turns.push(Turn { ant, calls: Vec::new(), ends: Vec::new() });
+            turns.len() - 1
+        });
+        match item {
+            Item::Call(call) => turns[at].calls.push(call),
+            Item::End(end) => turns[at].ends.push(end),
+            Item::Message(_) | Item::Turn(_) => {}
+        }
+    }
+    rows.extend(turns.into_iter().map(|turn| Row { depth: level(levels, turn.ant), item: Item::Turn(turn) }));
 }
 
 /// The tree drawn before each of `rows`: before its first line, and before the others.
@@ -117,16 +182,52 @@ pub(super) struct Shown<'a> {
     pub(super) placed: RefCell<Vec<images::Placed>>,
 }
 
+/// Whether message `id` was withdrawn: here, or as the daemon's notice answering it among `entries` tells.
+pub(super) fn withdrawn(data: &Data, entries: &[Entry], id: Uuid) -> bool {
+    data.withdrawn.contains(&id)
+        || entries.iter().any(|e| e.in_reply_to == Some(id) && e.notice == Some(NoticeKind::Withdrawn))
+}
+
+/// Whether the ant `ant` started on message `id`: a reply to it from the ant, other than a withdrawal's notice, is on
+/// `entries`.
+pub(super) fn started(entries: &[Entry], ant: &UserId, id: Uuid) -> bool {
+    entries
+        .iter()
+        .any(|e| e.in_reply_to == Some(id) && e.from.as_ref() == Some(ant) && e.notice != Some(NoticeKind::Withdrawn))
+}
+
 impl Shown<'_> {
+    /// What became of message `e` while it waits for its ant: withdrawn, or queued behind others.
+    fn waiting(&self, e: &Entry, entries: &[Entry]) -> Option<Span<'static>> {
+        let id = e.id?;
+        if withdrawn(self.data, entries, id) {
+            return Some(Span::styled("  withdrawn", Style::new().fg(Color::Yellow)));
+        }
+        let ahead = self.data.live.queued.get(&id)?;
+        Some(Span::styled(format!("  queued · {ahead} ahead"), Style::new().fg(Color::Cyan)))
+    }
+
     /// Add the lines of `row`, which `first` and `rest` begin; `entries` are the thread's, for a question's answers.
     pub(super) fn row(&self, lines: &mut Vec<Line<'static>>, row: &Row, entries: &[Entry], first: &str, rest: &str) {
-        match row.item {
+        match &row.item {
             Item::Call(call) => self.call(lines, call, first),
             Item::End(end) => {
                 let why = end.why.as_ref().map_or_default(|why| format!(": {why}"));
                 let line = format!("{first}{} {} ended without a reply{why}", hm(end.at), end.ant);
                 lines.push(Line::styled(cut(&line, self.width), frame::dim()));
             }
+            Item::Message(e) if e.notice.is_some() => {
+                let from = e.from.as_ref().map_or("ants", UserId::as_str);
+                let text = e.text.strip_prefix("[ants] ").unwrap_or(&e.text).replace('\n', " ");
+                let style = if e.notice.is_some_and(ants_proto::NoticeKind::needs_action) {
+                    Style::new().fg(Color::Yellow)
+                } else {
+                    frame::dim()
+                };
+                let line = format!("{first}{} {from} · {text}", hm(e.stored_at));
+                push(lines, &line, &format!("{rest}      "), style, self.width);
+            }
+            Item::Turn(turn) => self.turn(lines, turn, first),
             Item::Message(e) if row.depth == 0 => self.block(lines, e, entries),
             Item::Message(e) => {
                 let (head, style) = nested(e);
@@ -134,6 +235,7 @@ impl Shown<'_> {
                 let mut first = Line::styled(format!("{first}{} ", hm(e.stored_at)), style);
                 first.spans.extend(face.into_iter().flatten());
                 first.spans.push(Span::styled(head, style));
+                first.spans.extend(self.waiting(e, entries));
                 let under = format!("{rest}      ");
                 let mut text = text(e, entries, self.width.saturating_sub(under.chars().count()));
                 let room = self.width.saturating_sub(first.width() + 2);
@@ -193,6 +295,7 @@ impl Shown<'_> {
         if !what.is_empty() {
             head.push(Span::styled(format!("  {what}"), style));
         }
+        head.extend(self.waiting(e, entries));
         if e.sealed.is_some() {
             head.push(Span::raw(format!("  {}", crate::tui::dm::LOCK)));
         }
@@ -218,6 +321,36 @@ impl Shown<'_> {
     /// Which of `e`'s attachments is marked, when `o` opens one of them.
     fn marked_of(&self, e: &Entry) -> Option<usize> {
         self.marked.filter(|(seq, _)| *seq == e.seq).map(|(_, at)| at)
+    }
+
+    /// A turn collapsed: when it started, its ant, how many tool calls it made, how long they took and how many
+    /// failed, and why it ended with no reply if it did.
+    fn turn(&self, lines: &mut Vec<Line<'static>>, turn: &Turn, first: &str) {
+        let at = turn.started().map_or_default(hm);
+        let mut said = match turn.calls.len() {
+            0 => String::new(),
+            1 => "1 tool call".to_owned(),
+            n => format!("{n} tool calls"),
+        };
+        if let Some(took) = turn.took().and_then(|d| u64::try_from(d.num_milliseconds()).ok()) {
+            let _ = write!(said, ", {}", crate::thread::took(took));
+        }
+        let failed = turn.calls.iter().filter(|c| c.status.as_deref() == Some("failed")).count();
+        let mut ended = String::new();
+        if let Some(end) = turn.ends.last() {
+            ended = if said.is_empty() { "ended without a reply" } else { ", ended without a reply" }.to_owned();
+            if let Some(why) = &end.why {
+                let _ = write!(ended, ": {why}");
+            }
+        }
+        let head = format!("{first}{at} {} {said}", turn.ant);
+        let failed = if failed > 0 { format!(", {failed} failed") } else { String::new() };
+        let room = self.width.saturating_sub(head.chars().count() + failed.chars().count());
+        lines.push(Line::from(vec![
+            Span::styled(cut(&head, self.width), frame::dim()),
+            Span::styled(cut(&failed, self.width.saturating_sub(head.chars().count())), Style::new().fg(Color::Red)),
+            Span::styled(cut(&ended, room), frame::dim()),
+        ]));
     }
 
     /// A tool call: when it started, its kind, its title, and how it ended or how long it has run.

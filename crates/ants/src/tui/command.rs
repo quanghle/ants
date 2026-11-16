@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use super::exec::{Job, Outcome, Quoted};
 use super::model::{Action, Focus, Key, Model, Page};
 use super::{attach, complete, nav, snooze, thread};
-use crate::{attachments, live, quiet, tools};
+use crate::{attachments, forward, live, quiet, tools};
 
 mod bar;
 mod parse;
@@ -118,6 +118,12 @@ impl Model {
             }
             Command::Post { channel, text } => return run(Job::Post { channel, thread: None, text, quote: None }),
             Command::Say(text) => return run(self.say(text)),
+            Command::Later(text) => {
+                return match self.say(text) {
+                    job @ (Job::Reply { .. } | Job::Post { thread: Some(_), .. }) => run(Job::Later(Box::new(job))),
+                    _ => Err("/later replies on an open thread: open one first".to_owned()),
+                };
+            }
             Command::Slash(slash) => slash,
         };
         match slash {
@@ -168,6 +174,24 @@ impl Model {
                 let thread = self.target()?;
                 self.tree(thread);
                 Ok(None)
+            }
+            Slash::Forward { to, note } => {
+                let chosen = match self.page() {
+                    Page::Thread(page) => page.chosen().cloned(),
+                    _ => None,
+                };
+                let source = match chosen {
+                    Some(entry) => forward::Source::Message(Box::new(entry)),
+                    None => {
+                        let thread = self.target()?;
+                        let tldr = self.data.cards.tldr.get(&thread).ok_or_else(|| {
+                            format!("no TL;DR of thread {thread} yet: S asks for one, then /forward again")
+                        })?;
+                        forward::Source::Thread(Box::new(tldr.clone()))
+                    }
+                };
+                source.check().map_err(|e| format!("{e:#}"))?;
+                run(Job::Forward { to, source, note })
             }
             Slash::Save(to) => {
                 let listed = self.attachment().ok_or("no attachment on the selected message")?;
@@ -329,12 +353,23 @@ impl Model {
         Ok(self.select(item))
     }
 
-    /// Take how a job the bar ran went: its line and warnings on the status line, opening the thread it started; on
-    /// failure, the error, and its text and quote back into the bar if empty.
+    /// Take how a job the bar ran went: its line and warnings on the status line, opening the thread it started, and
+    /// the text and files of a message withdrawn to edit into the bar; on failure, the error, and its text and quote
+    /// back into the bar if empty.
     pub fn outcome(&mut self, outcome: Outcome) -> Option<Action> {
         self.bar.staged.sent(&outcome.text, outcome.result.is_err());
         match outcome.result {
-            Ok(done) => {
+            Ok(mut done) => {
+                self.data.withdrawn.extend(done.withdrew);
+                if let Some((text, files)) = done.edit.take() {
+                    self.bar.set_text(&text);
+                    for path in files {
+                        if let Err(e) = self.bar.staged.add(&path.to_string_lossy()) {
+                            done.warnings.push(format!("{e:#}"));
+                        }
+                    }
+                    self.bar.focused = true;
+                }
                 let tone = if done.warnings.is_empty() { Tone::Done } else { Tone::Warn };
                 let text = std::iter::once(done.line).chain(done.warnings).collect::<Vec<_>>().join(" · ");
                 self.bar.set_status(text, tone);
@@ -558,6 +593,24 @@ mod tests {
     }
 
     #[test]
+    fn later_replies_on_the_open_thread_waiting_its_turn() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        m.key(Key::Ctrl('k'), at(0));
+        typed(&mut m, "/later then the docs");
+        assert_eq!(m.key(Key::Enter, at(0)), None);
+        assert_eq!(m.bar.status.as_ref().unwrap().text, "/later replies on an open thread: open one first");
+        m.bar.set_text("");
+        m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
+        typed(&mut m, "/later then the docs");
+        let reply = Job::Reply { thread, text: "then the docs".into(), quote: None };
+        let job = Job::Later(Box::new(reply));
+        assert!(job.sends());
+        assert_eq!(m.key(Key::Enter, at(0)), Some(Action::Run(job, "/later then the docs".into())));
+        assert!(m.bar.focused, "the bar stays for the next message, as after a send");
+    }
+
+    #[test]
     fn i_in_a_thread_focuses_the_bar_to_reply_there() {
         let thread = ThreadId::generate();
         let mut m = model();
@@ -636,6 +689,43 @@ mod tests {
     }
 
     #[test]
+    fn f_forwards_the_selected_message_else_the_thread_s_tldr() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
+        let entries =
+            vec![message(1, &thread, "alice", "dev-a", "deploy"), message(2, &thread, "dev-a", "alice", "done")];
+        m.stored(entries.clone(), at(2));
+        m.focus = Focus::View;
+        m.key(Key::Char('f'), at(2));
+        assert_eq!((m.bar.text(), m.bar.focused), ("/forward @".to_owned(), true));
+        typed(&mut m, "dev-b");
+        assert_eq!(m.key(Key::Enter, at(2)), None, "following the latest, the thread goes, by its TL;DR");
+        let refused = &m.bar.status.as_ref().unwrap().text;
+        assert_eq!(*refused, format!("no TL;DR of thread {thread} yet: S asks for one, then /forward again"));
+        let tldr = ants_proto::ThreadSummary {
+            thread_id: thread.clone(),
+            text: "deployed".into(),
+            by: user("messenger"),
+            asker: user("alice"),
+            at: at(2),
+            upto: 2,
+            tokens: 9,
+        };
+        m.data.cards.tldr.insert(thread, tldr.clone());
+        let source = forward::Source::Thread(Box::new(tldr));
+        let job = Job::Forward { to: user("dev-b"), source, note: String::new() };
+        assert_eq!(m.key(Key::Enter, at(2)), Some(Action::Run(job, "/forward @dev-b".into())));
+
+        m.key(Key::Up, at(2));
+        m.key(Key::Char('f'), at(2));
+        typed(&mut m, "dev-b over to you");
+        let source = forward::Source::Message(Box::new(entries[1].clone()));
+        let job = Job::Forward { to: user("dev-b"), source, note: "over to you".into() };
+        assert_eq!(m.key(Key::Enter, at(2)), Some(Action::Run(job, "/forward @dev-b over to you".into())));
+    }
+
+    #[test]
     fn tree_shows_the_delegation_tree_of_the_thread_open() {
         let thread = ThreadId::generate();
         let mut m = model();
@@ -660,13 +750,40 @@ mod tests {
         assert_eq!(m.bar.status, Some(Status { text: "no route".into(), tone: Tone::Error }));
         let thread = ThreadId::generate();
         let warnings = vec!["dev-a is served by no daemon".to_owned()];
-        let done = Done { line: "sent to dev-a".into(), warnings, open: Some(thread.clone()) };
+        let done = Done { line: "sent to dev-a".into(), warnings, open: Some(thread.clone()), ..Done::default() };
         let sent = Outcome { result: Ok(done), text: "@dev-a deploy".into(), quoting: None };
         assert_eq!(m.outcome(sent), Some(Action::Open(thread)));
         assert_eq!(m.page().name(), "thread");
         assert_eq!(m.bar.text(), "@dev-a deploy", "a success leaves the bar's text alone");
         let status = m.bar.status.as_ref().unwrap();
         assert_eq!((status.text.as_str(), status.tone), ("sent to dev-a · dev-a is served by no daemon", Tone::Warn));
+    }
+
+    #[test]
+    fn a_message_withdrawn_to_edit_comes_back_into_the_bar_with_its_files() {
+        let dir = ants_test_support::scratch_dir("bar-withdrawn");
+        std::fs::write(dir.join("notes.txt"), b"notes").unwrap();
+        let mut m = model();
+        let withdrawn = ants_proto::Uuid::new_v4();
+        let edit = Some(("deploy the site".to_owned(), vec![dir.join("notes.txt"), dir.join("gone.txt")]));
+        let done = Done { line: "withdrew".into(), withdrew: Some(withdrawn), edit, ..Done::default() };
+        m.outcome(Outcome { result: Ok(done), text: String::new(), quoting: None });
+        assert!(m.data.withdrawn.contains(&withdrawn));
+        assert!(m.bar.focused && m.bar.text() == "deploy the site");
+        assert_eq!(m.bar.staged.names(), ["notes.txt"]);
+        let status = m.bar.status.as_ref().unwrap();
+        assert!(status.tone == Tone::Warn && status.text.starts_with("withdrew · "), "{}", status.text);
+
+        let thread = ThreadId::generate();
+        let entries = vec![message(1, &thread, "alice", "dev-a", "deploy the docs")];
+        m.stored(entries.clone(), at(1));
+        let mut page = thread::Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(entries)).unwrap();
+        m.pages.push(Page::Thread(page));
+        m.key(Key::Esc, at(1));
+        assert_eq!(m.key(Key::Char('E'), at(1)), None, "a draft in the bar is kept");
+        assert_eq!(m.bar.text(), "deploy the site");
+        assert!(m.bar.status.as_ref().unwrap().text.starts_with("the bar holds a draft"));
     }
 
     #[test]

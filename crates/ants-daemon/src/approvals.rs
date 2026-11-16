@@ -638,7 +638,11 @@ fn decided_notice(request: &ApprovalRequest, decision: &ApprovalDecision) -> Opt
         tool.title,
         tool.kind,
     );
-    Some(Envelope::new(ant.clone(), human.clone(), text).with_owner(Some(human.clone())))
+    Some(
+        Envelope::new(ant.clone(), human.clone(), text)
+            .with_owner(Some(human.clone()))
+            .as_notice(ants_proto::NoticeKind::InPlace),
+    )
 }
 
 /// The message on `request`'s thread that tells `member`, an ant of the chain asked to decide it, that it expired
@@ -653,6 +657,7 @@ fn expired_member_notice(ant: &UserId, request: &ApprovalRequest, timeout: Durat
         tool.kind,
     );
     Envelope::on_thread(thread.clone(), ant.clone(), member.clone(), text)
+        .as_notice(ants_proto::NoticeKind::RequestExpired)
 }
 
 /// The next message of `subscriber`, if there is one; without one, never.

@@ -109,6 +109,17 @@ pub enum AdminOp {
     /// Read the ant's settings as the machine's config file has them, which the outcome's `result` carries
     /// ([`Settings`]).
     ReadSettings,
+    /// Read the MCP servers the ant's harness runs and how each stands, which the outcome's `result` carries
+    /// ([`McpReport`]).
+    ReadMcp,
+    /// Sign the ant's harness in to its MCP server `server` with OAuth, the outcome's `result` carrying the address to
+    /// open in a browser ([`McpSignIn`]); with `callback`, hand the harness waiting the address the browser came back
+    /// to, which a browser on another machine than the ant's cannot reach.
+    McpSignIn {
+        server: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        callback: Option<String>,
+    },
     /// Clone the ant, on its machine, as the ant `new`: its home, settings (these overriding them), thread sessions,
     /// thread history and worktrees, under a key of its own.
     Clone {
@@ -130,14 +141,16 @@ impl AdminOp {
             Self::Retire => "retire",
             Self::ReadMemories => "read_memories",
             Self::ReadSettings => "read_settings",
+            Self::ReadMcp => "read_mcp",
+            Self::McpSignIn { .. } => "mcp_sign_in",
             Self::Clone { .. } => "clone",
         }
     }
 
-    /// Whether an assistant may order it for its human: anything but adding, retiring or cloning an ant, which
-    /// `ants signer` signs for an admin's own order only.
+    /// Whether an assistant may order it for its human: anything but adding, retiring or cloning an ant, or reading or
+    /// signing in its MCP servers, which `ants signer` signs for an admin's own order only.
     pub fn for_assistant(&self) -> bool {
-        !matches!(self, Self::Add { .. } | Self::Retire | Self::Clone { .. })
+        !matches!(self, Self::Add { .. } | Self::Retire | Self::Clone { .. } | Self::ReadMcp | Self::McpSignIn { .. })
     }
 
     /// The op in a few words, as an ant's orders list it.
@@ -156,6 +169,9 @@ impl AdminOp {
             Self::Retire => "retire".to_owned(),
             Self::ReadMemories => "read memories".to_owned(),
             Self::ReadSettings => "read settings".to_owned(),
+            Self::ReadMcp => "read MCP servers".to_owned(),
+            Self::McpSignIn { server, callback: None } => format!("sign in to MCP server {server}"),
+            Self::McpSignIn { server, callback: Some(_) } => format!("complete the sign-in to MCP server {server}"),
             Self::Clone { new, .. } => format!("clone as {new}"),
         }
     }

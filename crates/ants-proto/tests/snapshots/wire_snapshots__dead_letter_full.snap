@@ -43,6 +43,7 @@ expression: value
     },
     "on_behalf_of": "alice",
     "webhook": true,
+    "queue": true,
     "allow": [
       "read:*",
       "other:send_message"
@@ -94,6 +95,7 @@ expression: value
       ],
       "body": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     },
+    "notice": "signed_out",
     "sent_at": "2025-01-01T12:00:00Z"
   },
   "payload": "{\"id\":"

@@ -15,6 +15,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("reject", "[ID]", "refuse a tool request"),
     ("grant", "[TEXT]", "fresh turns for the stuck ant"),
     ("cancel", "", "stop the prompt an ant runs"),
+    ("later", "TEXT", "reply without interrupting the ant at work"),
     ("answer", "N|TEXT", "answer the question asked"),
     ("done", "", "mark the thread done"),
     ("undone", "", "mark the thread not done"),
@@ -35,6 +36,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("digest", "[SINCE]", "catch-up summary"),
     ("tldr", "", "summary of the thread"),
     ("tree", "", "the thread's delegation tree"),
+    ("forward", "@ANT [TEXT]", "hand the selected message, else the thread's TL;DR, to an ant on a new thread"),
     ("attach", "PATH", "attach a file to the next message"),
     ("detach", "", "drop the files attached"),
     ("save", "[PATH]", "save the marked attachment"),
@@ -57,6 +59,8 @@ pub enum Command {
     },
     /// Reply on the open thread, else ask the human's assistant, else the messenger.
     Say(String),
+    /// Reply on the open thread, waiting behind the prompt running there rather than interrupting it.
+    Later(String),
     Slash(Slash),
 }
 
@@ -90,6 +94,11 @@ pub enum Slash {
     Digest(Option<String>),
     Tldr,
     Tree,
+    /// Hand the selected message, else the thread's TL;DR, to the user on a new thread, with the note.
+    Forward {
+        to: UserId,
+        note: String,
+    },
     /// Stage the file at the path for the next message.
     Attach(String),
     Detach,
@@ -124,7 +133,11 @@ pub fn parse(text: &str) -> Result<Command, String> {
         return Ok(Command::Say(format!("/{literal}")));
     }
     if let Some(command) = text.strip_prefix('/') {
-        return slash(command).map(Command::Slash);
+        return match first_word(command) {
+            (name, "") if name.eq_ignore_ascii_case("later") => Err("usage: /later TEXT".to_owned()),
+            (name, later) if name.eq_ignore_ascii_case("later") => Ok(Command::Later(later.to_owned())),
+            _ => slash(command).map(Command::Slash),
+        };
     }
     if let Some(rest) = text.strip_prefix('@') {
         let (name, text) = first_word(rest);
@@ -194,6 +207,11 @@ fn slash(text: &str) -> Result<Slash, String> {
         "digest" => Ok(Slash::Digest(optional())),
         "tldr" => bare(Slash::Tldr),
         "tree" => bare(Slash::Tree),
+        "forward" => {
+            let (name, note) = first_word(args);
+            let to = name.strip_prefix('@').ok_or_else(usage)?.parse().map_err(|e| format!("{e}"))?;
+            Ok(Slash::Forward { to, note: note.to_owned() })
+        }
         "attach" => text().map(Slash::Attach),
         "detach" => bare(Slash::Detach),
         "save" => Ok(Slash::Save(optional())),
@@ -238,6 +256,8 @@ mod tests {
         assert_eq!(parse("@dev-a").unwrap_err(), "nothing to send to @dev-a");
         assert_eq!(parse("#ops  ").unwrap_err(), "nothing to post to #ops");
         assert!(parse("@Dev A hi").is_err());
+        assert_eq!(parse("/later  then the docs ").unwrap(), Command::Later("then the docs".into()));
+        assert_eq!(parse("/later").unwrap_err(), "usage: /later TEXT");
     }
 
     #[test]
@@ -264,6 +284,9 @@ mod tests {
         assert_eq!(ok("/unsnooze"), Slash::Unsnooze);
         assert_eq!(ok("/remind 2h look again"), Slash::Remind("2h look again".into()));
         assert_eq!(ok("/unremind"), Slash::Unremind);
+        assert_eq!(ok("/forward @dev-b"), Slash::Forward { to: user("dev-b"), note: String::new() });
+        assert_eq!(ok("/forward @dev-b take it"), Slash::Forward { to: user("dev-b"), note: "take it".into() });
+        assert_eq!(parse("/forward dev-b").unwrap_err(), "usage: /forward @ANT [TEXT]");
         assert_eq!(parse("/snooze 8d").unwrap_err(), "too long: at most 7d");
         assert!(parse("/steer left").unwrap_err().starts_with("no command"));
         assert_eq!(parse("/done now").unwrap_err(), "usage: /done");

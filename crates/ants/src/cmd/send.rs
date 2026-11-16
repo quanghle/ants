@@ -12,7 +12,9 @@ use futures::StreamExt as _;
 use futures::stream::BoxStream;
 
 use crate::cli::{Replies, Sending};
-use crate::{Nats, assistant, attachments, channel, colony, compose, humans, inbox, progress, reacted, sealed, thread};
+use crate::{
+    Nats, assistant, attachments, channel, colony, compose, forward, humans, inbox, progress, reacted, sealed, thread,
+};
 
 /// Split a leading `@ant` off the words, none when they name no one ([`unaddressed`]); the message is the rest, or
 /// what `input` reads.
@@ -26,6 +28,17 @@ pub(crate) fn recipient(mut words: Vec<String>, input: &compose::Input) -> Resul
         None => None,
     };
     Ok((to, input.text(words)?))
+}
+
+/// Split a leading `@ant` off the words as [`recipient`] does; the note forwarded with a message is the rest, or what
+/// `input` reads, and may be empty.
+fn note(words: Vec<String>, input: &compose::Input) -> Result<(Option<UserId>, String)> {
+    let bare = input.file.is_none() && !input.edit;
+    match words.as_slice() {
+        [] if bare => Ok((None, String::new())),
+        [only] if bare && only.starts_with('@') => Ok((Some(only[1..].parse()?), String::new())),
+        _ => recipient(words, input),
+    }
 }
 
 /// Who a message goes to, with the human it assists when it got the message as that human's assistant.
@@ -73,26 +86,32 @@ async fn addressee(js: &jetstream::Context, nats: &Nats<'_>, to: Option<UserId>)
 }
 
 /// Where `ants ask` or `ants post` sends: on the thread `thread` picks, else a new one, or replying to the message
-/// `reply_to` picks.
+/// `reply_to` picks; for `ants ask`, on a new thread forwarding the message `forward` picks ([`forward`]).
 #[derive(Default)]
 pub(crate) struct Target {
     pub thread: Option<thread::Pick>,
     pub reply_to: Option<thread::MessagePick>,
+    pub forward: Option<thread::MessagePick>,
+    /// Wait behind the prompt running on the thread rather than interrupting it ([`Envelope::queue`]).
+    pub queue: bool,
 }
 
 impl Target {
+    /// Refuse `--queue` without an existing thread to wait on.
+    fn check_queue(&self) -> Result<()> {
+        if self.queue && self.thread.is_none() && self.reply_to.is_none() {
+            bail!("--queue waits behind a prompt on an existing thread: name one with --thread or --reply-to");
+        }
+        Ok(())
+    }
+
     /// The thread to send on, none for a new one, and the message replied to if any: the thread is that message's,
     /// which --thread, if given, must name.
     async fn resolve(self, nats: &Nats<'_>, js: &jetstream::Context) -> Result<(Option<ThreadId>, Option<Replied>)> {
         let thread = thread::resolve(self.thread, nats, js).await?;
         let Some(pick) = self.reply_to else { return Ok((thread, None)) };
-        let me = &nats.me;
-        if !me.role.is_human() {
-            bail!("the credentials of {} are an ant's, which read no message back to reply to", me.id);
-        }
-        let id = pick.resolve(js, me).await?;
-        let keyring = sealed::Keyring::load(nats, js).await.map(std::sync::Arc::new);
-        let message = thread::find_message(js, id, keyring).await?.ok_or_else(|| anyhow!("no message {id} is kept"))?;
+        let message = message(nats, js, pick, None, "reply to").await?;
+        let id = message.id.unwrap_or_default();
         if message.sealed.is_some_and(|s| s != sealed::State::Opened) {
             bail!("message {id} is sealed and does not open on this device: there is nothing to quote");
         }
@@ -104,6 +123,27 @@ impl Target {
         let replied = Replied { id, quote, sealed: message.sealed.is_some(), channel: message.channel };
         Ok((Some(message.thread_id), Some(replied)))
     }
+}
+
+/// The message or post `pick` picks, opened with `keyring`, else with one loaded, as the CLI's human reads it back to
+/// `what`: only with a human's credentials.
+async fn message(
+    nats: &Nats<'_>,
+    js: &jetstream::Context,
+    pick: thread::MessagePick,
+    keyring: Option<std::sync::Arc<sealed::Keyring>>,
+    what: &str,
+) -> Result<thread::Entry> {
+    let me = &nats.me;
+    if !me.role.is_human() {
+        bail!("the credentials of {} are an ant's, which read no message back to {what}", me.id);
+    }
+    let id = pick.resolve(js, me).await?;
+    let keyring = match keyring {
+        Some(keyring) => Some(keyring),
+        None => sealed::Keyring::load(nats, js).await.map(std::sync::Arc::new),
+    };
+    thread::find_message(js, id, keyring).await?.ok_or_else(|| anyhow!("no message {id} is kept"))
 }
 
 /// The message a send replies to ([`Target::reply_to`]): its id, its quote, whether it was sealed, and the channel of
@@ -124,7 +164,7 @@ impl Replied {
 
 pub(crate) async fn ask(
     nats: &Nats<'_>,
-    target: Target,
+    mut target: Target,
     Sending { plaintext }: Sending,
     replies: &Replies,
     input: &compose::Input,
@@ -132,17 +172,35 @@ pub(crate) async fn ask(
     words: Vec<String>,
 ) -> Result<()> {
     // Refuse a message with nothing to send, or a file that cannot be attached, before connecting.
-    let (to, text) = recipient(words, input)?;
+    target.check_queue()?;
+    let forward = target.forward.take();
+    let (to, text) = if forward.is_some() { note(words, input)? } else { recipient(words, input)? };
     let mut files = attach.read()?;
     let (client, js) = nats.connect("ants-cli").await?;
+    let queue = target.queue;
+    let forwarded = match forward {
+        Some(pick) => {
+            let keyring = sealed::Keyring::load(nats, &js).await.map(std::sync::Arc::new);
+            let source =
+                forward::Source::Message(Box::new(message(nats, &js, pick, keyring.clone(), "forward").await?));
+            source.check()?;
+            files = source.files(&js, keyring.as_deref(), files).await?;
+            Some(source)
+        }
+        None => None,
+    };
     let (thread, replied) = target.resolve(nats, &js).await?;
     let author = replied.as_ref().map(|r| &r.quote.from).filter(|from| **from != nats.me.id);
     let (to, unaddressed) = addressee(&js, nats, to.or_else(|| author.cloned())).await;
-    let mut envelope = ask_envelope(&nats.me, thread, to, text);
+    let mut envelope = match &forwarded {
+        Some(source) => source.envelope(&nats.me, to, &text),
+        None => ask_envelope(&nats.me, thread, to, text),
+    };
     if let Some(r) = &replied {
         envelope = envelope.quoting(r.id, r.quote.clone());
     }
     envelope.attachments = attachments::references(&files);
+    envelope.queue = queue;
     let to_human = nats.me.role.is_human() && humans::load(&js, &nats.me).await.contains(&envelope.to);
     let text = envelope.text.clone();
     let sealer = sealing(nats, &js, &mut envelope, &mut files, to_human && !plaintext).await?;
@@ -352,9 +410,11 @@ pub(crate) async fn post(
     attach: &attachments::Attach,
     words: Vec<String>,
 ) -> Result<()> {
+    target.check_queue()?;
     let text = input.text(words)?;
     let files = attach.read()?;
     let (client, js) = nats.connect("ants-cli").await?;
+    let queue = target.queue;
     let (thread, replied) = target.resolve(nats, &js).await?;
     if let Some(other) = replied.as_ref().and_then(|r| r.channel.as_ref()).filter(|c| **c != channel) {
         bail!("the message replied to is a post to #{other}, not #{channel}");
@@ -364,6 +424,7 @@ pub(crate) async fn post(
         posting.post = posting.post.quoting(r.id, r.quote(false));
     }
     posting.post.attachments = attachments::references(&files);
+    posting.post.queue = queue;
     for warning in &posting.warnings {
         tracing::warn!("{warning}");
     }

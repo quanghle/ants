@@ -234,15 +234,28 @@ impl Model {
                 Some(Action::Answer(answer))
             }
             To::Digest => self.home_digest(now),
+            To::Tools => {
+                self.data.tools = self.data.tools.next();
+                self.notify(format!("tool calls: {}", self.data.tools.label()), Level::Info, now);
+                Some(Action::KeepTools(self.data.tools))
+            }
             To::Do(Action::Run(Job::Open(listed), text)) => {
                 self.bar.set_status(format!("opening {}…", listed.attachment.name), Tone::Busy);
                 Some(Action::Run(Job::Open(listed), text))
+            }
+            To::Do(Action::Run(Job::Withdraw { edit: Some(_), .. }, _)) if !self.bar.is_empty() => {
+                self.bar.set_status("the bar holds a draft: send or clear it before editing a message", Tone::Error);
+                None
             }
             To::Do(action @ Action::Run(..)) => {
                 self.bar.set_status("running…", Tone::Busy);
                 Some(action)
             }
             To::Do(action) => Some(action),
+            To::Refused(why) => {
+                self.bar.set_status(why, Tone::Error);
+                None
+            }
         }
     }
 }

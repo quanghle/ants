@@ -20,6 +20,7 @@ expression: value
   "owner": "alice",
   "creator": "planner",
   "webhook": true,
+  "queue": true,
   "allow": [
     "read:*"
   ],

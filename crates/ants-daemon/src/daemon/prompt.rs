@@ -559,7 +559,8 @@ impl Inbox<'_> {
         let owner = if warning.daily() { None } else { self.humans.human_owner(envelope.owner.as_ref()) };
         let to = owner.unwrap_or_else(|| self.humans.default_human().clone());
         tracing::info!(%thread, %to, cap = warning.key, spent = warning.figure, "spend nearing a cap; warning a human");
-        let notice = Envelope::new(self.ant.clone(), to, warning.text(self.ant, thread));
+        let notice = Envelope::new(self.ant.clone(), to, warning.text(self.ant, thread))
+            .as_notice(ants_proto::NoticeKind::Spend);
         if let Err(e) = bus::publish_json(self.js, notice.subject(), &notice, None).await {
             tracing::warn!(%thread, error = format!("{e:#}"), "warning a human of spend nearing a cap");
         }

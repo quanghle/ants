@@ -80,6 +80,11 @@ pub struct Envelope {
     /// sends an answer to the owner it names.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub webhook: bool,
+    /// A human's reply that waits its turn behind the prompt running on its thread rather than interrupting it, as
+    /// `ants ask --queue` and the chat's `/later` send it. A daemon honours it only from a human; from an ant, which
+    /// never interrupts, it changes nothing. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub queue: bool,
     /// The tool rules the thread is narrowed to, as a webhook or schedule that started it, or the message it follows on
     /// from, says: the recipient's daemon allows a tool call unasked only when these and the ant's own `allow` both
     /// allow it, so they never widen what an ant may do and are taken from any sender. A daemon fills in
@@ -126,7 +131,69 @@ pub struct Envelope {
     /// human seals, and only to another human. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sealed: Option<Box<Sealed>>,
+    /// What the message tells of, when the sender's daemon sent it as the ant to tell of the ant's state or of what
+    /// happened on the thread, rather than as the ant's answer ([`NoticeKind`]). A reader shows it as a line of the
+    /// system's: it makes no thread finished and is unread-worthy, listed or pushed only when it needs a human to act
+    /// ([`NoticeKind::needs_action`]). Never copied by [`Envelope::reply`] or [`Envelope::follow_up`]: the daemon sets
+    /// it with [`Envelope::as_notice`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<NoticeKind>,
     pub sent_at: DateTime<Utc>,
+}
+
+/// What a daemon's notice ([`Envelope::notice`]) tells of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeKind {
+    /// The ant's spend passed the warning share of a cap.
+    Spend,
+    /// The ant's harness is signed out: messages wait, or go to its fallbacks.
+    SignedOut,
+    /// The ant's harness is out of quota: messages wait, or go to its fallbacks.
+    Quota,
+    /// The ant's harness keeps failing to start.
+    Failing,
+    /// Every fallback of the ant turns messages away while its own harness cannot serve.
+    NoFallback,
+    /// The ant gave up on a message or post after its deliveries.
+    GaveUp,
+    /// A message was withdrawn from the ant's queue before it answered it.
+    Withdrawn,
+    /// A thread's session expired and its git worktree was removed, its branch kept.
+    Expired,
+    /// Messages the ant sent wait for an ant no daemon serves.
+    Unserved,
+    /// A human's assistant acted for the human.
+    Assistant,
+    /// Another human decided a tool request, or answered an escalation, in place of the one it reached.
+    InPlace,
+    /// A tool request an ant of the chain was asked to decide expired unanswered.
+    RequestExpired,
+}
+
+impl NoticeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Spend => "spend",
+            Self::SignedOut => "signed_out",
+            Self::Quota => "quota",
+            Self::Failing => "failing",
+            Self::NoFallback => "no_fallback",
+            Self::GaveUp => "gave_up",
+            Self::Withdrawn => "withdrawn",
+            Self::Expired => "expired",
+            Self::Unserved => "unserved",
+            Self::Assistant => "assistant",
+            Self::InPlace => "in_place",
+            Self::RequestExpired => "request_expired",
+        }
+    }
+
+    /// Whether it needs a human to act: the ant answers nothing on the thread until a human signs its harness in,
+    /// waits for or raises its quota, mends its harness or replays the message given up on.
+    pub fn needs_action(self) -> bool {
+        matches!(self, Self::SignedOut | Self::Quota | Self::Failing | Self::NoFallback | Self::GaveUp)
+    }
 }
 
 /// What a summary request ([`Envelope::summary`]) asks to summarise: the entries of one thread, a TL;DR stored under
@@ -250,6 +317,7 @@ impl Envelope {
             approval: None,
             on_behalf_of: None,
             webhook: false,
+            queue: false,
             allow: None,
             mention: None,
             title: None,
@@ -258,8 +326,15 @@ impl Envelope {
             answer: None,
             attachments: Vec::new(),
             sealed: None,
+            notice: None,
             sent_at: Utc::now(),
         }
+    }
+
+    /// The envelope as a daemon's notice of `kind` ([`Envelope::notice`]).
+    #[must_use]
+    pub fn as_notice(self, kind: NoticeKind) -> Self {
+        Self { notice: Some(kind), ..self }
     }
 
     /// The envelope with `owner` as the human who started its thread.
@@ -402,6 +477,7 @@ impl Envelope {
             approval: None,
             on_behalf_of: None,
             webhook: false,
+            queue: false,
             allow: self.allow.clone(),
             mention: None,
             title: None,
@@ -410,6 +486,7 @@ impl Envelope {
             answer: None,
             attachments: Vec::new(),
             sealed: None,
+            notice: None,
             sent_at: Utc::now(),
         })
     }
@@ -548,6 +625,13 @@ mod tests {
     use crate::{ChannelPost, p};
 
     #[test]
+    fn a_notice_is_never_copied_into_a_reply_or_follow_up() {
+        let notice = Envelope::new(p("dev-a"), UserId::human(), "[ants] spent").as_notice(NoticeKind::Spend);
+        assert_eq!(notice.reply(UserId::human(), "ok", Role::Ant).unwrap().notice, None);
+        assert_eq!(notice.follow_up(p("dev-a"), p("dev-b"), "on").notice, None);
+    }
+
+    #[test]
     fn reply_swaps_parties_and_links_the_message() {
         let ask = Envelope::new(UserId::human(), p("dev-a"), "hi");
         let reply = ask.reply(p("dev-a"), "hello", Role::Human).unwrap();
@@ -655,6 +739,17 @@ mod tests {
         assert_eq!((notice.turn_budget, notice.in_reply_to), (DEFAULT_TURN_BUDGET, None));
         let ownerless = Envelope::new(p("dev-a"), p("dev-b"), "q");
         assert_eq!(ownerless.reply(p("dev-b"), "a", Role::Ant).unwrap().owner, None);
+    }
+
+    #[test]
+    fn a_queued_reply_says_so_and_neither_answer_nor_follow_up_carries_it() {
+        let plain = Envelope::new(p("alice"), p("dev-a"), "then the docs");
+        assert!(!serde_json::to_string(&plain).unwrap().contains("queue"));
+        let queued = Envelope { queue: true, ..plain };
+        let back: Envelope = serde_json::from_str(&serde_json::to_string(&queued).unwrap()).unwrap();
+        assert!(back.queue);
+        assert!(!queued.reply(p("dev-a"), "on it", Role::Human).unwrap().queue);
+        assert!(!queued.follow_up(p("dev-a"), p("dev-b"), "docs").queue);
     }
 
     #[test]

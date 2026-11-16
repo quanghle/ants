@@ -25,7 +25,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::acts::{About, Change};
-use super::exec::{Job, Quoted};
+use super::exec::{Edit, Job, Quoted};
 use super::frame::{self, ago};
 use super::model::{Action, Data, Key, Model, To};
 use super::timeline::Call;
@@ -36,7 +36,7 @@ use crate::thread::{Entry, Kind};
 
 mod conversation;
 
-use conversation::{Item, Shown, busy, cut, glyphs, hm, rows};
+use conversation::{Item, Shown, busy, cut, glyphs, hm, rows, started, withdrawn};
 
 /// How wide the side panel is, shown only when the view is at least [`PANEL_FROM`] wide.
 const PANEL_WIDTH: u16 = 34;
@@ -82,7 +82,7 @@ impl Page {
         self.messages().find(|e| e.id == Some(at)).map(|e| e.seq)
     }
 
-    pub const KEYS: &str = "↑↓ select · i reply · > reply to selected · y copy · o open file · ] next file · + react · p pin · m mute · e archive · d done · u unread from selected · b remind of selected · z snooze · t tree · S TL;DR · x cancel · a A r answer a tool request · End latest · Esc back";
+    pub const KEYS: &str = "↑↓ select · i reply · > reply to selected · y copy · f forward · o open file · ] next file · + react · p pin · m mute · e archive · d done · u unread from selected · b remind of selected · z snooze · t tree · T tool calls · S TL;DR · x cancel · W withdraw · E withdraw to edit · a A r answer a tool request · End latest · Esc back";
 
     /// The messages shown, in the order stored.
     fn messages(&self) -> impl DoubleEndedIterator<Item = &Entry> {
@@ -97,6 +97,12 @@ impl Page {
 
     pub fn message_ids(&self) -> Vec<Uuid> {
         self.messages().filter_map(|e| e.id).collect()
+    }
+
+    /// The message selected, or the one the thread was opened at; none while the view follows the latest.
+    pub fn chosen(&self) -> Option<&Entry> {
+        let seq = self.selected.or_else(|| self.held())?;
+        self.messages().find(|e| e.seq == seq)
     }
 
     /// The selected message, else the latest.
@@ -116,6 +122,28 @@ impl Page {
         let quoted = Quoted { id, quote: Quote::new(from.clone(), &e.text), sealed: e.sealed.is_some() };
         let mention = (!data.is_human(&from)).then_some(from);
         Some(To::Quote(self.history.thread.clone(), quoted, mention))
+    }
+
+    /// What `W` does, or `E` with `edit`: withdraw the selected message, the human's to an ant, from the ant's queue,
+    /// putting its text and files back into the bar with `edit`; refused for one known started or withdrawn.
+    fn withdrawal(&self, data: &Data, edit: bool) -> To {
+        let me = data.me();
+        let selected = self.selection().filter(|e| e.kind == Kind::Message && e.from.as_ref() == Some(me));
+        let Some((e, id, ant)) = selected.and_then(|e| Some((e, e.id?, e.to.clone()?))) else {
+            return To::Refused(format!("withdraw: select a message of {me} to an ant"));
+        };
+        let entries = &self.history.entries;
+        if data.is_human(&ant) {
+            return To::Refused(format!("withdraw: message {id} is to {ant}, a human, not waiting in an ant's queue"));
+        }
+        if withdrawn(data, entries, id) {
+            return To::Refused(format!("message {id} is withdrawn already"));
+        }
+        if !data.live.queued.contains_key(&id) && started(entries, &ant, id) {
+            return To::Refused(format!("withdraw unavailable: {ant} started on message {id} already; x cancels it"));
+        }
+        let edit = edit.then(|| Box::new(Edit { text: e.text.clone(), files: e.attachments.clone() }));
+        To::Do(Action::Run(Job::Withdraw { ant, message: id, edit }, String::new()))
     }
 
     /// The message whose attachments `o` opens: the selected one, else the latest carrying any.
@@ -217,6 +245,8 @@ impl Page {
             }
             Key::Char('u') => return Some(To::Unread(self.history.thread.clone(), self.selection().map(|e| e.seq))),
             Key::Char('S') => return Some(To::Tldr(self.history.thread.clone())),
+            Key::Char('f') => return Some(To::Bar("/forward @".to_owned())),
+            Key::Char('T') => return Some(To::Tools),
             Key::Char('o') => {
                 let listed = self.attachment()?.clone();
                 return Some(To::Do(Action::Run(Job::Open(Box::new(listed)), String::new())));
@@ -226,6 +256,8 @@ impl Page {
                 self.mark.next(seq, count);
             }
             Key::Char('x') | Key::Ctrl('x') => return Some(To::Interrupt(self.history.thread.clone())),
+            Key::Char('W') => return Some(self.withdrawal(data, false)),
+            Key::Char('E') => return Some(self.withdrawal(data, true)),
             _ => {}
         }
         None
@@ -264,7 +296,7 @@ impl Page {
         let shown = Shown { data, now, busy, width, marked, placed: RefCell::default() };
         let calls = data.calls.get(thread).map_or(&[][..], |c| c.calls());
         let ends = data.calls.get(thread).map_or(&[][..], |c| c.ends());
-        let rows = rows(&self.history.entries, calls, ends, |u| data.is_human(u));
+        let rows = rows(&self.history.entries, calls, ends, data.tools, busy, |u| data.is_human(u));
         let held = self.held();
         let selected = self.selected.or(held).and_then(|_| self.selection()).map(|e| e.seq);
         let mut range = None;
@@ -473,6 +505,7 @@ mod tests {
     use crate::live::tests::{at, message};
     use crate::sealed;
     use crate::tui::model::tests::model;
+    use crate::tui::timeline::Tools;
     use crate::tui::timeline::tests::tool;
 
     /// A thread where alice asks dev-a, which asks dev-b, which answers it, then answers alice; each ant making a
@@ -506,13 +539,15 @@ mod tests {
         let mut m = model();
         let (entries, calls) = delegated(&thread);
         calls.iter().for_each(|c| m.data.calls.status(c));
-        let rows = rows(&entries, m.data.calls.get(&thread).unwrap().calls(), &[], |u| m.data.is_human(u));
+        let calls = m.data.calls.get(&thread).unwrap().calls();
+        let rows = rows(&entries, calls, &[], Tools::All, false, |u| m.data.is_human(u));
         let shown: Vec<(String, usize)> = rows
             .iter()
-            .map(|r| match r.item {
+            .map(|r| match &r.item {
                 Item::Message(e) => (e.text.clone(), r.depth),
                 Item::Call(c) => (c.title.clone(), r.depth),
                 Item::End(e) => (e.ant.to_string(), r.depth),
+                Item::Turn(t) => (t.ant.to_string(), r.depth),
             })
             .collect();
         let expected = [
@@ -559,6 +594,107 @@ mod tests {
     }
 
     #[test]
+    fn a_message_waiting_its_turn_shows_how_many_go_before_it() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let entries = vec![
+            message(1, &thread, "alice", "dev-a", "deploy the site"),
+            message(2, &thread, "alice", "dev-a", "then the docs"),
+        ];
+        m.stored(entries.clone(), at(2));
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(entries.clone())).unwrap();
+        let queued = ants_proto::StatusUpdate::Queued { message: entries[1].id.unwrap(), ahead: 1 };
+        let event = ants_proto::StatusEvent::new(crate::live::tests::user("dev-a"), thread.clone(), queued);
+        m.data.live.status(&event, at(3));
+        let shown = screen(&page, &m, 100, at(4));
+        let line = shown.lines().find(|l| l.contains("queued")).unwrap_or_default();
+        assert!(line.contains("alice → dev-a") && line.contains("queued · 1 ahead"), "{shown}");
+        assert_eq!(shown.matches("queued").count(), 1, "{shown}");
+    }
+
+    #[test]
+    fn w_and_e_withdraw_a_waiting_message_of_the_human_to_an_ant_and_withdrawn_ones_are_marked() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let mut entries = vec![
+            message(1, &thread, "alice", "dev-a", "deploy the site"),
+            message(2, &thread, "dev-a", "alice", "deploying"),
+            message(3, &thread, "alice", "dev-a", "then the docs"),
+        ];
+        let (first, last) = (entries[0].id.unwrap(), entries[2].id.unwrap());
+        entries[1].in_reply_to = Some(first);
+        m.stored(entries.clone(), at(3));
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(entries.clone())).unwrap();
+        let withdraw = |edit| {
+            Some(To::Do(Action::Run(
+                Job::Withdraw { ant: crate::live::tests::user("dev-a"), message: last, edit },
+                String::new(),
+            )))
+        };
+        assert_eq!(page.key(Key::Char('W'), &m.data, at(4)), withdraw(None));
+        let edit = Edit { text: "then the docs".into(), files: Vec::new() };
+        assert_eq!(page.key(Key::Char('E'), &m.data, at(4)), withdraw(Some(Box::new(edit))));
+        page.key(Key::Up, &m.data, at(4));
+        page.key(Key::Up, &m.data, at(4));
+        let refused = |why: &str| Some(To::Refused(why.to_owned()));
+        assert_eq!(page.key(Key::Char('W'), &m.data, at(4)), refused("withdraw: select a message of alice to an ant"));
+        page.key(Key::Up, &m.data, at(4));
+        let started = format!("withdraw unavailable: dev-a started on message {first} already; x cancels it");
+        assert_eq!(page.key(Key::Char('W'), &m.data, at(4)), refused(&started));
+
+        let mut notice =
+            message(4, &thread, "dev-a", "alice", "[ants] Withdrawn by alice before dev-a was prompted with it");
+        notice.in_reply_to = Some(last);
+        notice.notice = Some(ants_proto::NoticeKind::Withdrawn);
+        entries.push(notice);
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(entries)).unwrap();
+        page.key(Key::Up, &m.data, at(5));
+        page.key(Key::Up, &m.data, at(5));
+        assert_eq!(page.key(Key::Char('W'), &m.data, at(5)), refused(&format!("message {last} is withdrawn already")));
+        m.data.withdrawn.insert(first);
+        let shown = screen(&page, &m, 100, at(5));
+        assert_eq!(shown.matches("  withdrawn").count(), 2, "{shown}");
+    }
+
+    #[test]
+    fn t_cycles_a_finished_turn_s_calls_from_one_line_to_each_to_none() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let entries = vec![
+            message(1, &thread, "alice", "dev-a", "run the tests"),
+            message(30, &thread, "dev-a", "alice", "two pass"),
+        ];
+        m.stored(entries.clone(), at(30));
+        for (id, status, secs) in
+            [("c1", "in_progress", 10), ("c1", "failed", 14), ("c2", "in_progress", 15), ("c2", "completed", 20)]
+        {
+            m.data.calls.status(&tool(&thread, "dev-a", id, Some(id), status, secs));
+        }
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(entries)).unwrap();
+        m.pages.push(super::super::model::Page::Thread(page));
+        let shown = |m: &Model| match m.pages.last() {
+            Some(super::super::model::Page::Thread(page)) => screen(page, m, 100, at(40)),
+            _ => unreachable!(),
+        };
+        let turn = format!("{} dev-a 2 tool calls, 10.0s, 1 failed", hm(at(10)));
+        assert!(shown(&m).contains(&turn), "{}", shown(&m));
+
+        assert_eq!(m.key(Key::Char('T'), at(40)), Some(Action::KeepTools(Tools::None)));
+        assert_eq!(m.notice_at(at(40)).map(|n| n.text.as_str()), Some("tool calls: none"));
+        let none = shown(&m);
+        assert!(!none.contains(" c1 ") && !none.contains("tool call") && none.contains("two pass"), "{none}");
+
+        assert_eq!(m.key(Key::Char('T'), at(40)), Some(Action::KeepTools(Tools::All)));
+        let all = shown(&m);
+        assert!(all.contains("failed 4.0s") && all.contains("ok 5.0s") && !all.contains("tool calls"), "{all}");
+        assert_eq!(m.key(Key::Char('T'), at(40)), Some(Action::KeepTools(Tools::Collapsed)));
+    }
+
+    #[test]
     fn the_view_shows_the_timeline_with_running_calls_and_a_panel_beside_it() {
         let thread = ThreadId::generate();
         let mut m = model();
@@ -579,10 +715,20 @@ mod tests {
         let face = format!("{} {{.~.}} dev-a → dev-b", hm(entries[1].stored_at));
         assert!(shown.contains(&face), "an ant's face before its name: {shown}");
         assert!(shown.contains("  deploy the site"), "{shown}");
-        assert!(shown.contains("read    read migrations") || shown.contains("execute read migrations"), "{shown}");
-        assert!(shown.contains("ok 0ms"), "{shown}");
         assert!(shown.contains("dev-a → dev-b  is jobs.retries read anywhere?"), "{shown}");
         assert!(shown.contains("running 41s"), "a call not ended runs while its ant is busy: {shown}");
+        let turn = format!("│ ├ {} dev-b 1 tool call, 0ms ", hm(calls[1].at));
+        assert!(shown.contains(&turn), "a finished turn on a line: {shown}");
+        assert!(!shown.contains("read migrations"), "{shown}");
+        m.data.tools = Tools::All;
+        let shown = screen(&page, &m, 110, at(47));
+        assert!(shown.contains("read    read migrations") || shown.contains("execute read migrations"), "{shown}");
+        assert!(shown.contains("ok 0ms"), "{shown}");
+        m.data.tools = Tools::None;
+        let shown = screen(&page, &m, 110, at(47));
+        assert!(!shown.contains("tool call") && !shown.contains("running 41s"), "{shown}");
+        assert!(shown.contains("only in worker/retry.rs"), "{shown}");
+        m.data.tools = Tools::Collapsed;
         for field in ["STATE", "OWNER", "ANTS", "dev-a ◐", "dev-b", "SPEND  $0.00 · 0 tokens", "FROM   ask by alice"]
         {
             assert!(shown.contains(field), "{field}: {shown}");

@@ -248,7 +248,8 @@ impl Inbox<'_> {
         // The one who asked for the withdrawal: the human an assistant acted for.
         let by = on_behalf_of.unwrap_or(by);
         let to_human = |to: UserId| {
-            let mut notice = envelope.follow_up(self.ant.clone(), to, text.clone());
+            let mut notice =
+                envelope.follow_up(self.ant.clone(), to, text.clone()).as_notice(ants_proto::NoticeKind::Withdrawn);
             notice.in_reply_to = Some(envelope.id);
             notice
         };
@@ -258,7 +259,9 @@ impl Inbox<'_> {
             to_human(self.humans.human_owner(envelope.owner.as_ref()).unwrap_or_else(|| by.clone()))
         } else {
             match envelope.reply(self.ant.clone(), text.clone(), self.humans.sender_role(envelope)) {
-                Ok(reply) => reply.with_escalation(envelope.escalation.as_deref().cloned()),
+                Ok(reply) => reply
+                    .with_escalation(envelope.escalation.as_deref().cloned())
+                    .as_notice(ants_proto::NoticeKind::Withdrawn),
                 Err(_) => to_human(by.clone()),
             }
         };
@@ -269,7 +272,9 @@ impl Inbox<'_> {
                 "[ants] {assistant}, as the assistant of {human}, withdrew message {message} from the queue of {ant} \
                  on thread {thread} for {human}."
             );
-            let told = Envelope::new(ant.clone(), human.clone(), text).with_owner(Some(human.clone()));
+            let told = Envelope::new(ant.clone(), human.clone(), text)
+                .with_owner(Some(human.clone()))
+                .as_notice(ants_proto::NoticeKind::Assistant);
             bus::store(self.js, told.subject(), &told, &format!("on-behalf-withdrawn-{message}")).await?;
         }
         self.done(msg, seq).await

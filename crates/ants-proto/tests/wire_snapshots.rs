@@ -130,6 +130,7 @@ fn envelope() -> Envelope {
         approval: Some(Box::new(decision())),
         on_behalf_of: Some(user("alice")),
         webhook: true,
+        queue: true,
         allow: Some(vec!["read:*".to_owned(), "other:send_message".to_owned()]),
         mention: Some(mention()),
         title: Some("Fix the build".to_owned()),
@@ -142,6 +143,7 @@ fn envelope() -> Envelope {
         answer: Some(Answer { question: id(4), option: Some(2) }),
         attachments: vec![attachment()],
         sealed: Some(Box::new(sealed())),
+        notice: Some(NoticeKind::SignedOut),
         sent_at: at(0),
     }
 }
@@ -158,6 +160,7 @@ fn plain_envelope() -> Envelope {
         approval: None,
         on_behalf_of: None,
         webhook: false,
+        queue: false,
         allow: None,
         mention: None,
         title: None,
@@ -166,6 +169,7 @@ fn plain_envelope() -> Envelope {
         answer: None,
         attachments: Vec::new(),
         sealed: None,
+        notice: None,
         ..envelope()
     }
 }
@@ -582,6 +586,7 @@ fn channels() {
             owner: Some(user("alice")),
             creator: Some(user("planner")),
             webhook: true,
+            queue: true,
             allow: Some(vec!["read:*".to_owned()]),
             title: Some("Fix CI".to_owned()),
             attachments: vec![attachment()],
