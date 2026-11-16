@@ -106,7 +106,7 @@ pub enum SharedRecord {
     /// Verified as daemons verify it: the settings every machine serves.
     Verified(SharedSettings),
     /// A record daemons ignore, and why: not signed by credentials of the ant, signed by revoked ones, or put back
-    /// long after it was signed, until a machine holding the ant's credentials writes it anew.
+    /// after it was written, until a machine holding the ant's credentials writes it anew.
     Unverified(SharedSettings, String),
 }
 
@@ -134,8 +134,7 @@ impl SharedRecord {
 }
 
 /// The shared settings of `ant`, read with a human's credentials and verified against their team account as daemons
-/// verify them ([`ants_daemon::shared::read`]); none while it has no record of them. Unlike a daemon's,
-/// the check cannot tell a record put back within minutes of its signing.
+/// verify them ([`ants_daemon::shared::read`]); none while it has no record of them.
 pub async fn shared_of(nats: &Nats<'_>, js: &jetstream::Context, ant: &UserId) -> Result<Option<SharedRecord>> {
     let identities = DirectKv::whole(js, nats.domain, IDENTITIES_BUCKET).await?;
     let devices = DirectKv::new(js, nats.domain, DEVICES_BUCKET).await?;
@@ -337,7 +336,7 @@ pub async fn set(nats: &Nats<'_>, ant: &UserId, assignments: &[Assignment], wait
 #[cfg(test)]
 mod tests {
     use ants_daemon::admin::ConfigFile;
-    use ants_proto::{FieldChange, Hidden, Permissions, Role, SettingsError};
+    use ants_proto::{FieldChange, Hidden, Permissions, Role};
     use serde_json::json;
 
     use super::*;
@@ -687,9 +686,9 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         tokio::time::timeout(WAIT, task).await.unwrap().unwrap().unwrap();
     }
 
-    /// A record the ant signed and the stream stored long after, one put back after the daemon read the record
-    /// replacing it, and one signed with revoked credentials are not verified: `ants ant show` marks the record, `ants
-    /// ant set` expects the config's values over it, and the daemon holding the ant's credentials writes back the
+    /// A record the ant signed, put back after it was replaced, however soon, and one signed with revoked credentials
+    /// are not verified, by a reader that never read the record replacing it too: `ants ant show` marks the record,
+    /// `ants ant set` expects the config's values over it, and the daemon holding the ant's credentials writes back the
     /// settings it kept, or none with revoked credentials.
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
@@ -716,44 +715,28 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         (own.model, own.creds) = (Some("gpt-5".to_owned()), Some(a_creds.clone()));
         writer.listed(std::slice::from_ref(&own));
         let refresh = || ants_daemon::shared::refresh(bucket, Some(&m1), &writer, std::slice::from_ref(&dev_a));
-        let signed = |model: &str, ago: chrono::TimeDelta| {
-            let fields = serde_json::Map::from_iter([("model".into(), json!(model))]);
-            let mut record = SharedSettings::new(dev_a.clone(), fields, m1.clone(), Some(alice.clone()));
-            record.updated_at -= ago;
-            ants_daemon::shared::sign_as(&mut record, Some(&a_creds), &accounts).unwrap();
-            record
-        };
         let put = |record: &SharedSettings| identities.put(record.key(), serde_json::to_vec(record).unwrap());
         let model_of = |record: &SharedSettings| record.fields.get("model").cloned();
 
         refresh().await;
         let first = verified_of(&human, &js, &dev_a).await.expect("created from the config");
-        let second = signed("o3", chrono::TimeDelta::zero());
-        put(&second).await.unwrap();
+        let fields = serde_json::Map::from_iter([("model".into(), json!("o3"))]);
+        let mut second = SharedSettings::new(dev_a.clone(), fields, m1.clone(), Some(alice.clone()));
+        let signer = ants_daemon::shared::Signer::load(&dev_a, Some(&a_creds), &accounts).unwrap();
+        assert!(ants_daemon::shared::write(&identities, &mut second, &signer, None).await.unwrap());
+        assert_eq!(verified_of(&human, &js, &dev_a).await.as_ref(), Some(&second));
         refresh().await;
         assert_eq!(writer.record(&dev_a), Some(second.clone()));
 
         put(&first).await.unwrap();
-        assert_eq!(
-            verified_of(&human, &js, &dev_a).await.as_ref(),
-            Some(&first),
-            "a reader that never read the record replacing it takes one put back within minutes of its signing"
-        );
-        let replayed = writer.check(Found::Record(first.clone(), 0));
-        assert!(matches!(replayed, Found::Unverified(_, SettingsError::Replayed, _)), "the writer read the newer one");
-        refresh().await;
-        let restored = writer.record(&dev_a).expect("the settings kept, written back");
-        assert_eq!((model_of(&restored), restored.by.as_ref()), (Some(json!("o3")), Some(&alice)));
-        assert_ne!(restored, second, "signed anew");
-        assert_eq!(verified_of(&human, &js, &dev_a).await, Some(restored.clone()));
-
-        let old = signed("evil", chrono::TimeDelta::hours(1));
-        put(&old).await.unwrap();
         let Some(SharedRecord::Unverified(record, why)) = shared_of(&human, &js, &dev_a).await.unwrap() else {
-            panic!("a record stored an hour after its signing verifies")
+            panic!("a reader that never read the record replacing it takes one put back a moment after its signing")
         };
-        assert_eq!(record, old);
-        assert!(why.contains("stored"), "{why}");
+        assert_eq!(record, first);
+        assert!(why.contains("put back"), "{why}");
+        let starting = ants_daemon::shared::Shared::default();
+        ants_daemon::shared::refresh(bucket, None, &starting, std::slice::from_ref(&dev_a)).await;
+        assert_eq!(starting.record(&dev_a), None, "a daemon starting does not apply it either");
         let shared = Some(Box::new(SharedRecord::Unverified(record, why)));
         let reading = Reading { read: None, stale: None, orders: Vec::new(), shared };
         assert_eq!(reading.verified_shared(), None, "an order expects the config's values");
@@ -762,9 +745,12 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
             lines.iter().any(|l| l.starts_with("  shared, NOT VERIFIED (") && l.contains("daemons ignore it")),
             "{lines:?}"
         );
-        assert!(lines.contains(&"  model = \"evil\"".to_owned()), "{lines:?}");
+        assert!(lines.contains(&"  model = \"gpt-5\"".to_owned()), "{lines:?}");
         refresh().await;
-        assert_eq!(model_of(&verified_of(&human, &js, &dev_a).await.unwrap()), Some(json!("o3")), "written back");
+        let restored = writer.record(&dev_a).expect("the settings kept, written back");
+        assert_eq!((model_of(&restored), restored.by.as_ref()), (Some(json!("o3")), Some(&alice)));
+        assert_ne!(restored, second, "signed anew");
+        assert_eq!(verified_of(&human, &js, &dev_a).await, Some(restored.clone()));
 
         let team = server.dir().join("auth");
         crate::revoke::revoke(&team, Some("dev-a"), &[]).unwrap();

@@ -116,8 +116,8 @@ async fn a_clone_order_copies_an_ant_under_a_new_name_and_undoes_a_failed_one() 
     };
     let mut shared = SharedSettings::new(dev_a.clone(), fields, m1.clone(), Some(alice.clone()));
     let a_creds = server.dir().join("dev-a-Ant.creds");
-    ants_daemon::shared::sign_as(&mut shared, Some(&a_creds), &[]).unwrap();
-    host_kv.put(shared.key(), serde_json::to_vec(&shared).unwrap()).await.unwrap();
+    let signer = ants_daemon::shared::Signer::load(&dev_a, Some(&a_creds), &[]).unwrap();
+    assert!(ants_daemon::shared::write(&host_kv, &mut shared, &signer, None).await.unwrap());
 
     let _served = restarts.serve(&dev_a);
     let mut listening = restarts.listen_clones(&dev_a);

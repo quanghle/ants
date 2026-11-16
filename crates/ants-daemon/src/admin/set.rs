@@ -10,7 +10,7 @@
 //! For an ant added from a template, a change of its shared settings is held to the template's bounds as its table in
 //! the config is: only what the template lets it choose changes, and its model, reasoning effort and context stay
 //! within the template's ([`AntTemplate::model_for`]). The record written is signed with the ant's credentials
-//! ([`crate::shared::sign`]).
+//! ([`crate::shared::write`]).
 //!
 //! The file as edited, served with the shared settings as changed, must load before either is written; the file is
 //! written over the old one after the record ([`Edit::save`]), and the daemon reloads at once ([`ConfigFile::edited`],
@@ -25,7 +25,7 @@ use serde_json::{Map, Value};
 
 use super::{ConfigFile, NO_CONFIG, Orders, applied, refused};
 use crate::config::edit::{Edit, needed};
-use crate::shared::{self, Bucket, Found, Roles};
+use crate::shared::{self, Bucket, Found, Roles, Signer};
 use crate::template::{AntTemplate, REQUEST_KEYS};
 
 /// How often a change of the shared settings is tried while they keep changing meanwhile.
@@ -77,15 +77,15 @@ async fn edit_shared(
     changes: &[FieldChange],
 ) -> Result<Result<bool>> {
     for _ in 0..TRIES {
-        let found = config.shared.check(shared::read(bucket, &order.ant).await?);
+        let found = shared::read(bucket, &order.ant).await?;
         if matches!(found, Found::NoBucket) {
             return Ok(edit(config, order, changes));
         }
         match prepare(config, orders, order, changes, found) {
             Err(e) => return Ok(Err(e)),
             Ok(Prepared { record, last, file }) => {
-                if let Some(record) = record {
-                    if !bucket.identities.update(record.key(), serde_json::to_vec(&record)?, last).await? {
+                if let Some((mut record, signer)) = record {
+                    if !shared::write(bucket.identities, &mut record, &signer, Some(last)).await? {
                         tracing::debug!(ant = %order.ant, "the shared settings changed meanwhile; trying again");
                         continue;
                     }
@@ -102,10 +102,10 @@ async fn edit_shared(
     Ok(Err(anyhow::anyhow!("the ant's shared settings kept changing meanwhile; send the order again")))
 }
 
-/// What a settings order changes: the shared settings to store, when they change, over the stream sequence they were
-/// read at, and the config file to write, when it changes.
+/// What a settings order changes: the shared settings to store, when they change, with what signs them, over the
+/// stream sequence they were read at, and the config file to write, when it changes.
 struct Prepared {
-    record: Option<SharedSettings>,
+    record: Option<(SharedSettings, Signer)>,
     last: u64,
     file: Option<Edit>,
 }
@@ -170,9 +170,8 @@ fn prepare(
     let record = if before.as_ref() == Some(&fields) {
         None
     } else {
-        let mut record = SharedSettings::new(ant.clone(), fields, orders.machine.clone(), Some(order.admin.clone()));
-        shared::sign_as(&mut record, creds.as_deref(), &orders.accounts)?;
-        Some(record)
+        let record = SharedSettings::new(ant.clone(), fields, orders.machine.clone(), Some(order.admin.clone()));
+        Some((record, Signer::load(ant, creds.as_deref(), &orders.accounts)?))
     };
     Ok(Prepared { record, last, file: file_changed.then_some(file) })
 }

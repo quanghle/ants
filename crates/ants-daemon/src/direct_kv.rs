@@ -21,6 +21,10 @@ const KV_OPERATION: &str = "KV-Operation";
 const DELETED: [&str; 2] = ["DEL", "PURGE"];
 /// The header making the stream refuse a message unless the last on its subject has the given sequence (0: none).
 const EXPECTED_LAST_SUBJECT_SEQUENCE: &str = "Nats-Expected-Last-Subject-Sequence";
+/// The header making the stream refuse a message unless its last message has the given sequence.
+const EXPECTED_LAST_SEQUENCE: &str = "Nats-Expected-Last-Sequence";
+/// How often [`DirectKv::put_sequenced`] tries while other keys keep changing.
+const SEQUENCED_TRIES: usize = 10;
 /// The header making the stream remove a message after the given number of seconds, if it allows per-message TTLs.
 const TTL: &str = "Nats-TTL";
 
@@ -140,6 +144,47 @@ impl DirectKv {
         }
     }
 
+    /// Store under `key` the value `value` makes for the stream sequence it is to be stored at, so that it is stored at
+    /// that sequence or not at all, if the key's last message is still the one at stream sequence `last` (0: none), as
+    /// [`DirectKv::lookup_last`] found it; with no `last`, whatever the key holds. Whether it stored the value: false
+    /// when the key changed meanwhile.
+    ///
+    /// Each try expects the stream's last message at the sequence before; a refusal tells the stream's last sequence,
+    /// for the next try. A value made for a sequence it was refused at is never stored there afterwards: the stream
+    /// holds another message there by then, or the key changed, which is checked before trying again.
+    pub async fn put_sequenced(
+        &self,
+        key: impl AsRef<str>,
+        last: Option<u64>,
+        mut value: impl FnMut(u64) -> Result<Vec<u8>>,
+    ) -> Result<bool> {
+        let key = key.as_ref();
+        let mut stream_last = last.unwrap_or_default();
+        for _ in 0..SEQUENCED_TRIES {
+            let mut headers = HeaderMap::new();
+            headers.insert(EXPECTED_LAST_SEQUENCE, stream_last.to_string().as_str());
+            if let Some(last) = last {
+                headers.insert(EXPECTED_LAST_SUBJECT_SEQUENCE, last.to_string().as_str());
+            }
+            let payload = value(stream_last + 1)?;
+            let stored =
+                async { self.js.publish_with_headers(self.put_subject(key), headers, payload.into()).await?.await };
+            let refused = match stored.await {
+                Ok(_) => return Ok(true),
+                Err(e) if e.kind() == PublishErrorKind::WrongLastSequence => e,
+                Err(e) => return Err(e).with_context(|| format!("storing {key}")),
+            };
+            // The stream tells the last sequence of the key when that was the one refused, which the key changing shows.
+            if let Some(last) = last
+                && self.lookup_last(key).await?.1 != last
+            {
+                return Ok(false);
+            }
+            stream_last = reported_last(&refused).with_context(|| format!("storing {key}: {refused:#}"))?;
+        }
+        Err(anyhow!("storing {key}: the bucket kept changing"))
+    }
+
     /// Store `value` under `key`, once JetStream has it.
     pub async fn put(&self, key: impl AsRef<str>, value: impl Into<Vec<u8>>) -> Result<()> {
         let key = key.as_ref();
@@ -236,6 +281,12 @@ impl DirectKv {
     fn put_subject(&self, key: &str) -> String {
         format!("{}{}", self.api, self.subject(key))
     }
+}
+
+/// The last sequence the stream told refusing a publish that expected another.
+fn reported_last(refused: &PublishError) -> Option<u64> {
+    let refusal = std::error::Error::source(refused)?.downcast_ref::<jetstream::Error>()?;
+    refusal.to_string().strip_prefix("wrong last sequence: ")?.split(' ').next()?.parse().ok()
 }
 
 fn is_deleted(headers: &HeaderMap) -> bool {
