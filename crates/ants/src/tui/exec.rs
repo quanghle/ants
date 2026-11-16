@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use ants_daemon::{bus, reactions};
 use ants_proto::{ChannelId, Choice, EscalationReason, JsDomain, Quote, Reaction, ThreadId, UserId, Uuid};
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use async_nats::jetstream;
 use futures::future::LocalBoxFuture;
 use futures::stream::FuturesUnordered;
@@ -163,10 +163,10 @@ pub enum Job {
     /// Send as `job`, a [`Job::Reply`] or a [`Job::Post`] on a thread, does, waiting behind the prompt running there
     /// rather than interrupting it, as `ants ask --queue` does.
     Later(Box<Job>),
-    /// Withdraw `message` from the queue of `ant`, as `ants withdraw` does; with `edit`, its text and files come back
-    /// into the bar.
+    /// Withdraw `message` from the queue of each of `ants`, as `ants withdraw` does; with `edit`, its text and files
+    /// come back into the bar.
     Withdraw {
-        ant: UserId,
+        ants: Vec<UserId>,
         message: Uuid,
         edit: Option<Box<Edit>>,
     },
@@ -342,7 +342,7 @@ impl Job {
             }
             Self::Attached { .. } => Err(anyhow!("files are attached to one message")),
             Self::Later(_) => Err(anyhow!("a message waits its turn once")),
-            Self::Withdraw { ant, message, edit } => withdraw(ctx, &ant, message, edit.map(|e| *e)).await,
+            Self::Withdraw { ants, message, edit } => withdraw(ctx, &ants, message, edit.map(|e| *e)).await,
         }
     }
 }
@@ -386,10 +386,24 @@ async fn cancel_all(ctx: &Ctx, thread: &ThreadId, ants: Vec<UserId>) -> Result<D
     }
 }
 
-/// Withdraw `message` from the queue of `ant`, fetching the files of `edit` for the bar.
-async fn withdraw(ctx: &Ctx, ant: &UserId, message: Uuid, edit: Option<Edit>) -> Result<Done> {
-    let line = crate::queue::withdrawn(&ctx.js, ctx.domain.as_ref(), &ctx.me.id, ant, message).await?;
-    let mut warnings = Vec::new();
+/// Withdraw `message` from the queue of each of `ants`, fetching the files of `edit` for the bar. Refused by one ant,
+/// the message stays withdrawn from the others, the refusal a warning; refused by all, the job fails.
+async fn withdraw(ctx: &Ctx, ants: &[UserId], message: Uuid, edit: Option<Edit>) -> Result<Done> {
+    let (mut lines, mut warnings, mut failed) = (Vec::new(), Vec::new(), None);
+    for ant in ants {
+        match crate::queue::withdrawn(&ctx.js, ctx.domain.as_ref(), &ctx.me.id, ant, message).await {
+            Ok(line) => lines.push(line),
+            Err(e) if ants.len() > 1 => warnings.push(format!("{e:#}")),
+            Err(e) => failed = Some(e),
+        }
+    }
+    if let Some(e) = failed {
+        return Err(e);
+    }
+    if lines.is_empty() {
+        bail!("{}", warnings.join("; "));
+    }
+    let line = lines.join("; ");
     let edit = match edit {
         Some(Edit { text, files }) => {
             let mut paths = Vec::new();

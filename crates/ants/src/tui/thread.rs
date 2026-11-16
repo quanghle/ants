@@ -36,7 +36,7 @@ use crate::thread::{Entry, Kind};
 
 mod conversation;
 
-use conversation::{Item, Shown, busy, cut, glyphs, hm, rows, started, withdrawn};
+use conversation::{Item, Shown, busy, cut, glyphs, hm, rows, started, withdrawn_from, woken};
 
 /// How wide the side panel is, shown only when the view is at least [`PANEL_FROM`] wide.
 const PANEL_WIDTH: u16 = 34;
@@ -124,26 +124,45 @@ impl Page {
         Some(To::Quote(self.history.thread.clone(), quoted, mention))
     }
 
-    /// What `W` does, or `E` with `edit`: withdraw the selected message, the human's to an ant, from the ant's queue,
-    /// putting its text and files back into the bar with `edit`; refused for one known started or withdrawn.
+    /// What `W` does, or `E` with `edit`: withdraw the selected message, the human's to an ant or its channel post
+    /// waking ants, from the queue of each ant it waits for, putting its text and files back into the bar with `edit`;
+    /// refused for one known started or withdrawn, and with `edit` for a post one of its ants started on already.
     fn withdrawal(&self, data: &Data, edit: bool) -> To {
         let me = data.me();
-        let selected = self.selection().filter(|e| e.kind == Kind::Message && e.from.as_ref() == Some(me));
-        let Some((e, id, ant)) = selected.and_then(|e| Some((e, e.id?, e.to.clone()?))) else {
-            return To::Refused(format!("withdraw: select a message of {me} to an ant"));
+        let mine = |e: &&Entry| matches!(e.kind, Kind::Message | Kind::Post) && e.from.as_ref() == Some(me);
+        let Some((e, id)) = self.selection().filter(mine).and_then(|e| Some((e, e.id?))) else {
+            return To::Refused(format!("withdraw: select a message of {me} to an ant, or a post of {me} waking one"));
         };
         let entries = &self.history.entries;
-        if data.is_human(&ant) {
-            return To::Refused(format!("withdraw: message {id} is to {ant}, a human, not waiting in an ant's queue"));
-        }
-        if withdrawn(data, entries, id) {
+        if data.withdrawn.contains(&id) {
             return To::Refused(format!("message {id} is withdrawn already"));
         }
-        if !data.live.queued.contains_key(&id) && started(entries, &ant, id) {
-            return To::Refused(format!("withdraw unavailable: {ant} started on message {id} already; x cancels it"));
+        let ants = match (e.kind, e.to.clone()) {
+            (Kind::Message, Some(ant)) if data.is_human(&ant) => {
+                return To::Refused(format!(
+                    "withdraw: message {id} is to {ant}, a human, not waiting in an ant's queue"
+                ));
+            }
+            (Kind::Message, Some(ant)) => vec![ant],
+            (Kind::Post, _) => woken(data, e),
+            _ => Vec::new(),
+        };
+        if ants.is_empty() {
+            return To::Refused(format!("withdraw: post {id} woke no ant"));
+        }
+        let queued = data.live.queued.contains_key(&id);
+        let (began, waiting): (Vec<UserId>, Vec<UserId>) =
+            ants.into_iter().partition(|ant| !queued && started(entries, ant, id));
+        let waiting: Vec<UserId> = waiting.into_iter().filter(|ant| !withdrawn_from(entries, ant, id)).collect();
+        if let Some(ant) = began.first().filter(|_| waiting.is_empty() || edit) {
+            let what = if edit { "edit" } else { "withdraw" };
+            return To::Refused(format!("{what} unavailable: {ant} started on message {id} already; x cancels it"));
+        }
+        if waiting.is_empty() {
+            return To::Refused(format!("message {id} is withdrawn already"));
         }
         let edit = edit.then(|| Box::new(Edit { text: e.text.clone(), files: e.attachments.clone() }));
-        To::Do(Action::Run(Job::Withdraw { ant, message: id, edit }, String::new()))
+        To::Do(Action::Run(Job::Withdraw { ants: waiting, message: id, edit }, String::new()))
     }
 
     /// The message whose attachments `o` opens: the selected one, else the latest carrying any.
@@ -629,7 +648,7 @@ mod tests {
         page.history.loaded(&thread, Ok(entries.clone())).unwrap();
         let withdraw = |edit| {
             Some(To::Do(Action::Run(
-                Job::Withdraw { ant: crate::live::tests::user("dev-a"), message: last, edit },
+                Job::Withdraw { ants: vec![crate::live::tests::user("dev-a")], message: last, edit },
                 String::new(),
             )))
         };
@@ -639,7 +658,10 @@ mod tests {
         page.key(Key::Up, &m.data, at(4));
         page.key(Key::Up, &m.data, at(4));
         let refused = |why: &str| Some(To::Refused(why.to_owned()));
-        assert_eq!(page.key(Key::Char('W'), &m.data, at(4)), refused("withdraw: select a message of alice to an ant"));
+        assert_eq!(
+            page.key(Key::Char('W'), &m.data, at(4)),
+            refused("withdraw: select a message of alice to an ant, or a post of alice waking one")
+        );
         page.key(Key::Up, &m.data, at(4));
         let started = format!("withdraw unavailable: dev-a started on message {first} already; x cancels it");
         assert_eq!(page.key(Key::Char('W'), &m.data, at(4)), refused(&started));
@@ -657,6 +679,47 @@ mod tests {
         m.data.withdrawn.insert(first);
         let shown = screen(&page, &m, 100, at(5));
         assert_eq!(shown.matches("  withdrawn").count(), 2, "{shown}");
+    }
+
+    #[test]
+    fn w_and_e_withdraw_a_channel_post_of_the_human_from_the_ants_it_woke_that_have_not_started() {
+        use ants_proto::{ChannelEntry, ChannelPost, Humans, NoticeKind};
+        let user = crate::live::tests::user;
+        let (ops, mut m) = ("ops".parse::<ants_proto::ChannelId>().unwrap(), model());
+        let mut channel = ChannelEntry::new(ops.clone());
+        channel.members = ["alice", "dev-a", "dev-b"].map(user).to_vec();
+        channel.messenger = Some(user("triage"));
+        m.data.channels.push(channel);
+        let parse = |seq: u64, post: &ChannelPost| {
+            let payload = serde_json::to_vec(post).unwrap();
+            crate::thread::Parser::default().entry(seq, at(seq.cast_signed()), &post.subject(), &payload).unwrap()
+        };
+        let top = ChannelPost::new(ops.clone(), user("alice"), "@dev-a @dev-b @bob ship it");
+        let thread = top.thread_id.clone();
+        let shipping = top.reply(user("dev-a"), "shipping", &[], &Humans::default()).unwrap();
+        let later = ChannelPost::on_thread(ops, thread.clone(), user("alice"), "and the docs");
+        let mut entries = vec![parse(1, &top), parse(2, &shipping), parse(3, &later)];
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(entries.clone())).unwrap();
+        let withdraw = |ants: &[&str], message, edit| {
+            let ants = ants.iter().map(|a| user(a)).collect();
+            Some(To::Do(Action::Run(Job::Withdraw { ants, message, edit }, String::new())))
+        };
+        let refused = |why: String| Some(To::Refused(why));
+        assert_eq!(page.key(Key::Char('W'), &m.data, at(4)), withdraw(&["triage"], later.id, None));
+        page.key(Key::Home, &m.data, at(4));
+        assert_eq!(page.key(Key::Char('W'), &m.data, at(4)), withdraw(&["dev-b"], top.id, None));
+        let edit = format!("edit unavailable: dev-a started on message {} already; x cancels it", top.id);
+        assert_eq!(page.key(Key::Char('E'), &m.data, at(4)), refused(edit));
+
+        let mut notice = message(4, &thread, "dev-b", "alice", "[ants] Withdrawn by alice before dev-b was prompted");
+        (notice.in_reply_to, notice.notice) = (Some(top.id), Some(NoticeKind::Withdrawn));
+        entries.push(notice);
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(entries)).unwrap();
+        page.key(Key::Home, &m.data, at(5));
+        let started = format!("withdraw unavailable: dev-a started on message {} already; x cancels it", top.id);
+        assert_eq!(page.key(Key::Char('W'), &m.data, at(5)), refused(started));
     }
 
     #[test]
