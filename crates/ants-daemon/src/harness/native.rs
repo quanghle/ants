@@ -198,6 +198,12 @@ impl Cli {
         &self.env
     }
 
+    /// The value environment variable `name` has for the CLI, unless unset or empty.
+    pub(crate) fn var(&self, name: &str) -> Option<String> {
+        let value = self.env.get(name).cloned().or_else(|| std::env::var(name).ok());
+        value.filter(|value| !value.is_empty())
+    }
+
     /// The definition's `mode`: for a native protocol, the CLI's own permission mode.
     pub(crate) fn mode(&self) -> Option<&str> {
         self.harness.mode.as_deref()

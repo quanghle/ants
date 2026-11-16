@@ -152,19 +152,16 @@ impl Native for Claude {
     /// The API key and tokens in the environment and the login in `.credentials.json` of the configuration directory,
     /// which Claude Code keeps there unless in the macOS keychain.
     fn credentials(&self) -> Option<Credentials> {
-        let env = |name: &str| {
-            let value = self.cli.env().get(name).cloned().or_else(|| std::env::var(name).ok());
-            value.filter(|value| !value.is_empty())
-        };
         let (mut places, mut parts) = (Vec::new(), Vec::new());
         for name in CREDENTIAL_VARIABLES {
-            if let Some(value) = env(name) {
+            if let Some(value) = self.cli.var(name) {
                 places.push(name.to_owned());
                 parts.push(value.into_bytes());
             }
         }
-        let home = env("HOME").map(PathBuf::from).or_else(std::env::home_dir);
-        let dir = env("CLAUDE_CONFIG_DIR").map(PathBuf::from).or_else(|| home.map(|home| home.join(".claude")));
+        let home = self.cli.var("HOME").map(PathBuf::from).or_else(std::env::home_dir);
+        let dir =
+            self.cli.var("CLAUDE_CONFIG_DIR").map(PathBuf::from).or_else(|| home.map(|home| home.join(".claude")));
         if let Some(file) = dir.map(|dir| dir.join(".credentials.json"))
             && let Ok(stored) = std::fs::read(&file)
         {

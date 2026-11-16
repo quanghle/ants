@@ -89,8 +89,14 @@ impl Agy {
     }
 
     fn launch(&self, settings: ModelSettings) -> Launch {
+        self.launch_with_key("", settings)
+    }
+
+    /// A launch with GEMINI_API_KEY `key` (none when empty), the daemon's left out.
+    fn launch_with_key(&self, key: &str, settings: ModelSettings) -> Launch {
         let allow_all = PermissionPolicy::new(Allowlist::parse(&["*"]).unwrap(), None);
-        Launch::new(self.harness.clone(), self.dir.clone(), Vec::new(), allow_all, settings)
+        let env = vec![(API_KEY.to_owned(), key.to_owned())];
+        Launch::new(self.harness.clone(), self.dir.clone(), env, allow_all, settings)
     }
 
     /// Script run `run` as `agy --version`.
@@ -397,6 +403,60 @@ async fn a_retry_agy_recovered_from_is_no_failure() {
     let err = session.prompt("three").await.unwrap_err();
     assert_matches!(err.downcast_ref::<Limited>(), Some(Limited { kind: LimitKind::RateLimit, .. }), "{err:#}");
     session.close().await;
+}
+
+#[tokio::test]
+async fn an_api_key_refused_at_a_prompt_keeps_agy_signed_out_until_it_changes() {
+    let agy = Agy::new("agy-refused", r#"args = ["--settings", '{"modelProvider": "gemini"}']"#);
+    let invalid = "agent executor error: generating and executing: Error 400, Message: API key not valid. Please pass \
+                   a valid API key., Status: INVALID_ARGUMENT";
+    let reported = json!({ "status": "INVALID_ARGUMENT", "error_code": 400, "code_kind": "http", "retryable": false });
+    let refused = vec![
+        step("c1", 1, "DONE", "error_message", json!({})),
+        result("c1", "ERROR", "", json!({ "error": invalid, "finished_reason": "error" })),
+        format!("!stderr AGY_ERROR: {reported}"),
+        "!exit 3".to_owned(),
+    ];
+    agy.version(1, "1.5.9");
+    agy.session(2, &[vec![init("c1")], refused]);
+    let revoked = agy.launch_with_key("AIza-revoked", ModelSettings::default());
+    let session = Session::start(&revoked, None).await.unwrap();
+    let err = session.prompt("go").await.unwrap_err();
+    assert!(err.downcast_ref::<SignedOut>().is_some(), "{err:#}");
+    session.close().await;
+
+    agy.version(3, "1.5.9");
+    let Readiness::SignedOut { detail } = handshake(&revoked).await.readiness else {
+        panic!("signed out although agy opens a session with the refused key")
+    };
+    assert!(detail.contains("API key not valid") && detail.contains("GEMINI_API_KEY unchanged since"), "{detail}");
+    assert_eq!(agy.cli.runs(), 3, "no agy started for a session");
+    agy.version(4, "1.5.9");
+    agy.session(5, &[vec![init("c2")]]);
+    let replaced = agy.launch_with_key("AIza-replaced", ModelSettings::default());
+    assert_matches!(handshake(&replaced).await.readiness, Readiness::Ready { .. });
+}
+
+#[test]
+fn agy_signs_in_with_the_api_key_where_its_settings_choose_gemini() {
+    let agy = Agy::new("agy-provider", "");
+    let home = agy.dir.join("home");
+    let chosen = |args: &[&str]| {
+        let mut harness = (*agy.harness).clone();
+        harness.args = args.iter().map(|&arg| arg.to_owned()).collect();
+        gemini_provider(&Cli::new(&harness, &[], &ModelSettings::default()), Some(&home))
+    };
+    assert!(!chosen(&[]), "a Google account by default");
+    let own = home.join(".gemini/antigravity-cli/settings.json");
+    std::fs::create_dir_all(own.parent().unwrap()).unwrap();
+    std::fs::write(&own, r#"{"modelProvider": "gemini"}"#).unwrap();
+    assert!(chosen(&[]));
+    assert!(chosen(&["--settings", r#"{"toolPermission": "strict"}"#]));
+    assert!(!chosen(&["--settings", r#"{"modelProvider": "other"}"#]), "the definition's settings win");
+    let file = agy.dir.join("other.json");
+    std::fs::write(&file, r#"{"modelProvider": "other"}"#).unwrap();
+    assert!(!chosen(&["--settings", file.to_str().unwrap()]));
+    assert!(chosen(&["--settings", "other.json"]), "relative to the session's directory, not read");
 }
 
 #[test]
