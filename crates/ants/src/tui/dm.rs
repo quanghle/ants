@@ -124,6 +124,23 @@ fn said(said: &Said, width: usize) -> String {
     crate::excerpt(&format!("{lock}{}:{files} {text}", said.from), width)
 }
 
+/// The row of a direct thread in the list: its unread badge and title, how many messages it has and when the latest
+/// came, then what that one says.
+fn row(data: &Data, dm: &Dm, width: usize, now: DateTime<Utc>) -> ListItem<'static> {
+    let unread = unread_on(data, dm);
+    let badge = if unread == 0 { "   ".to_owned() } else { format!("{unread:>2} ") };
+    let count = dm.messages.len();
+    let plural = if count == 1 { "" } else { "s" };
+    ListItem::new(vec![
+        Line::from(vec![
+            Span::styled(badge, Style::new().fg(Color::Yellow).bold()),
+            Span::raw(data.title(&dm.thread)),
+            Span::styled(format!("  {count} message{plural} · {}", ago(dm.latest.at, now)), frame::dim()),
+        ]),
+        Line::styled(format!("   {}", said(&dm.latest, width.saturating_sub(3))), frame::dim()),
+    ])
+}
+
 /// A message to write to another human, on a new thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Draft {
@@ -209,29 +226,7 @@ impl Page {
             frame.render_widget(Paragraph::new(text).block(block), list);
         } else {
             let width = usize::from(list.width.saturating_sub(4));
-            let rows: Vec<ListItem> = dms
-                .iter()
-                .map(|dm| {
-                    let unread = unread_on(data, dm);
-                    let badge = if unread == 0 { "   ".to_owned() } else { format!("{unread:>2} ") };
-                    let count = dm.messages.len();
-                    ListItem::new(vec![
-                        Line::from(vec![
-                            Span::styled(badge, Style::new().fg(Color::Yellow).bold()),
-                            Span::raw(data.title(&dm.thread)),
-                            Span::styled(
-                                format!(
-                                    "  {count} message{} · {}",
-                                    if count == 1 { "" } else { "s" },
-                                    ago(dm.latest.at, now)
-                                ),
-                                frame::dim(),
-                            ),
-                        ]),
-                        Line::styled(format!("   {}", said(&dm.latest, width.saturating_sub(3))), frame::dim()),
-                    ])
-                })
-                .collect();
+            let rows: Vec<ListItem> = dms.iter().map(|dm| row(data, dm, width, now)).collect();
             let list_widget = List::new(rows).block(block).highlight_style(frame::highlight(focused));
             let selected = self.selected.at(&dms.iter().map(|dm| dm.thread.clone()).collect::<Vec<_>>());
             frame.render_stateful_widget(list_widget, list, &mut ListState::default().with_selected(Some(selected)));
