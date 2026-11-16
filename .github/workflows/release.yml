@@ -1,8 +1,9 @@
 name: Release
 
 # A tag vX.Y.Z (X.Y.Z the workspace version in Cargo.toml) builds the `ants` binary for each target and publishes a
-# GitHub Release with the archives, SHA256SUMS and build provenance attestations, once the checks of ci.yml pass. A tag
-# with a pre-release suffix (v0.2.0-rc.1) makes a pre-release. The notes come from bd (scripts/release-notes.sh): the
+# GitHub Release with the archives, SHA256SUMS and build provenance attestations, once the checks of ci.yml pass. They
+# rerun here unless CI already passed on the same commit pushed to main. A tag with a pre-release suffix (v0.2.0-rc.1)
+# makes a pre-release. The notes come from bd (scripts/release-notes.sh): the
 # work closed and requirements added since the previous release, per the committed .bd/issues.jsonl. Run by hand
 # (workflow_dispatch), it checks and builds only, keeping the archives and notes as workflow artifacts and showing the
 # notes in the run summary.
@@ -22,8 +23,12 @@ env:
 jobs:
   version:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     outputs:
       name: ${{ steps.version.outputs.name }}
+      ci-passed: ${{ steps.ci.outputs.passed }}
     steps:
       # The whole history and its tags, for the previous release and its bd snapshot.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -50,6 +55,18 @@ jobs:
           fi
           echo "name=$name" >> "$GITHUB_OUTPUT"
 
+      - id: ci
+        name: CI already passed on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$sha&branch=main&event=push&status=success&per_page=1" --jq .total_count)
+          passed=false
+          [ "$runs" -eq 0 ] || passed=true
+          echo "CI passed on main for $sha: $passed"
+          echo "passed=$passed" >> "$GITHUB_OUTPUT"
+
       - name: Release notes
         env:
           REV: ${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
@@ -64,6 +81,8 @@ jobs:
           if-no-files-found: error
 
   checks:
+    needs: version
+    if: needs.version.outputs.ci-passed != 'true'
     uses: ./.github/workflows/ci.yml
 
   build:
@@ -118,7 +137,11 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: github.event_name == 'push' && github.ref_type == 'tag'
+    # A skipped `checks` (CI already passed) would otherwise skip this job too.
+    if: >-
+      !cancelled() && github.event_name == 'push' && github.ref_type == 'tag'
+      && needs.version.result == 'success' && needs.build.result == 'success'
+      && (needs.checks.result == 'success' || needs.checks.result == 'skipped')
     needs: [version, checks, build]
     runs-on: ubuntu-latest
     permissions:

@@ -58,7 +58,7 @@ tar -xzf "ants-$tag-$target.tar.gz"
 install "ants-$tag-$target/ants" ~/.local/bin/
 ```
 
-Windows takes `ants-$tag-x86_64-pc-windows-msvc.zip`. A release needs the same nats-server and harness CLIs as a build from source (below). To cut a release, set `version` in `Cargo.toml`, merge, then push the tag `v<version>` (a suffix such as `-rc.1` makes a pre-release); running the Release workflow by hand only checks and builds. Release notes list the bd work closed and the requirements added since the previous release, from the committed `.bd/issues.jsonl`; `scripts/release-notes.sh v<version>` previews them.
+Windows takes `ants-$tag-x86_64-pc-windows-msvc.zip`. A release needs the same nats-server and harness CLIs as a build from source (below). To cut a release, set `version` in `Cargo.toml`, merge, then push the tag `v<version>` (a suffix such as `-rc.1` makes a pre-release). The Release workflow reruns CI's checks unless CI already passed on that commit pushed to main; running it by hand only checks and builds. Release notes list the bd work closed and the requirements added since the previous release, from the committed `.bd/issues.jsonl`; `scripts/release-notes.sh v<version>` previews them.
 
 ## Install from source
 
