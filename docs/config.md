@@ -80,7 +80,7 @@ spend_warn_percent = 80                    # default; warn once past this % (< 1
 escalate_to = ["lead", "dev-b"]            # optional escalation chain; first ant leads
 max_escalation_hops = 3                    # default
 escalate_after = "30m"                     # default; "0" waits indefinitely; also how long the human's assistant has before passing on
-escalation_reminder = "4h"                 # default; human reminder delay; "0" disables
+escalation_reminder = "4h"                 # default; first human reminder delay, then 1d and 3d later (3 at most); "0" disables
 stand_in = "bob"                           # optional human relayed this ant's requests and escalations while their human is away
 paused = true                              # optional; takes no new prompt, messages wait queued (see Pausing an ant)
 
