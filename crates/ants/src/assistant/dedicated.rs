@@ -745,7 +745,7 @@ mod tests {
         for kv in [ants_daemon::hub::machines_config(), ants_daemon::hub::devices_config()] {
             h_js.create_key_value(kv).await.unwrap();
         }
-        h_js.create_stream(ants_daemon::hub::identities_config()).await.unwrap();
+        ants_daemon::hub::create_identities(&h_js).await.unwrap();
         let admin_creds = server.dir().join("alice-admin.creds");
         let admin = auth::NewDevice { label: Some("laptop"), admin: true, ..auth::NewDevice::default() };
         let rights = Permissions::for_user(&alice, Role::Human);

@@ -223,8 +223,9 @@ fn leaf_permissions_cover_each_user_once() {
             "$KV.ants_machines.m1",
             "$JS.API.DIRECT.GET.KV_ants_machines.$KV.ants_machines.m1.>",
             "$KV.ants_machines.m1.>",
-            // The shared settings of the ants it serves.
+            // The shared settings of the ants it serves, and the incarnation of their bucket.
             "$JS.API.DIRECT.GET.KV_ants_identities.$KV.ants_identities.*.settings",
+            "$JS.API.DIRECT.GET.KV_ants_identities.$KV.ants_identities._incarnation",
             "$KV.ants_identities.*.settings",
             // Its revocation reads are already an ant's.
             "$JS.API.CONSUMER.INFO.ANTS.admin-m1",
@@ -904,10 +905,14 @@ fn each_ant_writes_only_its_own_identity_and_humans_read_all() {
     for none in [observer, webhook, Permissions::for_channel_manager()] {
         assert_eq!(identities(&none), Vec::<String>::new());
     }
-    // A host reads and writes the shared settings of any ant, and nothing else of the bucket.
+    // A host reads and writes the shared settings of any ant, and reads the bucket's incarnation marker, nothing else.
     assert_eq!(
         identities(&Permissions::for_host(&"m1".parse().unwrap())),
-        ["$JS.API.DIRECT.GET.KV_ants_identities.$KV.ants_identities.*.settings", "$KV.ants_identities.*.settings"]
+        [
+            "$JS.API.DIRECT.GET.KV_ants_identities.$KV.ants_identities.*.settings",
+            "$JS.API.DIRECT.GET.KV_ants_identities.$KV.ants_identities._incarnation",
+            "$KV.ants_identities.*.settings"
+        ]
     );
 }
 

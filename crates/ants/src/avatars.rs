@@ -9,7 +9,8 @@ use std::time::Duration;
 use ants_daemon::config::Theme as ThemeSetting;
 use ants_daemon::direct_kv::{DirectKv, Lookup};
 use ants_proto::{
-    AntIdentity, Avatar, Frame, IDENTITIES_BUCKET, JsDomain, Palette, Rgb, Stage, Theme, UserId, hue_named,
+    AntIdentity, Avatar, Frame, IDENTITIES_BUCKET, INCARNATION_KEY, JsDomain, Palette, Rgb, Stage, Theme, UserId,
+    hue_named,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
@@ -25,6 +26,9 @@ pub async fn read(js: &jetstream::Context) -> Result<Identities> {
     let filter = format!("$KV.{IDENTITIES_BUCKET}.*");
     let mut identities = Identities::new();
     for (key, payload) in crate::machines::latest_in(js, IDENTITIES_BUCKET, &filter).await? {
+        if key == INCARNATION_KEY {
+            continue;
+        }
         match serde_json::from_slice::<AntIdentity>(&payload) {
             Ok(record) if record.check_key(&key).is_ok() => {
                 identities.insert(record.ant.clone(), record);

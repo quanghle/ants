@@ -463,6 +463,11 @@ pub fn all_shared_settings() -> String {
     format!("$KV.{}.*.settings", super::IDENTITIES_BUCKET)
 }
 
+/// The incarnation marker of [`super::IDENTITIES_BUCKET`] ([`super::INCARNATION_KEY`]), which host credentials read.
+pub fn identities_incarnation() -> String {
+    format!("$KV.{}.{}", super::IDENTITIES_BUCKET, super::INCARNATION_KEY)
+}
+
 /// The entry of a human in [`super::HUMANS_BUCKET`]: the subject a human puts [`super::HumanEntry`] on.
 pub fn human_entry(human: &UserId) -> String {
     format!("$KV.{}.{human}", super::HUMANS_BUCKET)
