@@ -4,26 +4,34 @@ use std::path::Path;
 
 use hyper::StatusCode;
 
-use super::{Check, NETWORK_TIMEOUT, Setup, Status};
+use super::{Check, NETWORK_TIMEOUT, Setup, Status, same_file};
 use crate::notify;
 use crate::service::{Service, Services, State};
 use crate::webhook::{self, SecretSource};
 
 /// The daemon service of the config file, the nats-server service of the leaf node configuration, and that of the
-/// local hub's configuration when there is no leaf node one, as scripts/install-units.sh installs them.
-pub(super) fn check_services(setup: &Setup, services: &mut Services) -> Vec<Check> {
-    let daemon = ("daemon service", Service::Daemon, &setup.config, "--config");
-    let nats = ("leaf node service", Service::Nats, &setup.leaf_config, "--nats-conf");
+/// local hub's configuration when there is no leaf node one, as scripts/install-units.sh installs them. A nats-server
+/// configuration `managed`, the `[nats_server]` config of the config file, is run by the daemon instead: its check
+/// follows the daemon service, and an ants-nats service running it too fails it.
+pub(super) fn check_services(setup: &Setup, services: &mut Services, managed: Option<&Path>) -> Vec<Check> {
+    let daemon = ("daemon service", Service::Daemon, setup.config.as_path(), "--config");
+    let nats = ("leaf node service", Service::Nats, setup.leaf_config.as_path(), "--nats-conf");
     // `ants setup` runs a local hub only on a machine with no leaf node, from the same unit.
-    let hub = ("hub service", Service::Nats, &setup.hub_config, "--nats-conf");
+    let hub = ("hub service", Service::Nats, setup.hub_config.as_path(), "--nats-conf");
     let hub = (setup.hub_config.exists() && !setup.leaf_config.exists()).then_some(hub);
+    let other = managed
+        .filter(|m| !same_file(m, &setup.leaf_config) && !same_file(m, &setup.hub_config))
+        .map(|m| ("nats-server service", Service::Nats, m, "--nats-conf"));
     // Only a machine with the webhooks' config file serves them.
-    let webhook = ("webhook service", Service::Webhook, &setup.webhooks, "--webhook --webhook-config");
+    let webhook = ("webhook service", Service::Webhook, setup.webhooks.as_path(), "--webhook --webhook-config");
     let webhook = setup.webhooks.exists().then_some(webhook);
-    [Some(daemon), Some(nats), hub, webhook]
+    [Some(daemon), Some(nats), hub, other, webhook]
         .into_iter()
         .flatten()
         .map(|(check, service, file, flag)| {
+            if service == Service::Nats && managed.is_some_and(|m| same_file(m, file)) {
+                return check_managed(setup, services, check, file);
+            }
             let install = format!("scripts/install-units.sh {flag} {}", file.display());
             let file_shown = file.display();
             if !file.exists() {
@@ -43,6 +51,62 @@ pub(super) fn check_services(setup: &Setup, services: &mut Services) -> Vec<Chec
             }
         })
         .collect()
+}
+
+/// The check `check` of the nats-server running `conf` that `ants daemon` runs from the config file's `[nats_server]`:
+/// as the daemon service runs, failed when an ants-nats service runs `conf` too.
+fn check_managed(setup: &Setup, services: &mut Services, check: &str, conf: &Path) -> Check {
+    let config = setup.config.display();
+    let shown = conf.display();
+    let table = format!("[nats_server] of {config}");
+    if !conf.exists() {
+        let fix = format!("write {shown} (`ants leaf config`), or correct config in {table}");
+        return Check::fail(check, format!("no {shown}, the configuration {table} names"), vec![fix]);
+    }
+    if let State::Running | State::Stopped(_) = services.state(Service::Nats, conf) {
+        let mut fix: Vec<String> = services.removal(Service::Nats).into_iter().collect();
+        fix.push(format!("or remove {table}"));
+        let detail =
+            format!("two owners of {shown}: an ants-nats service runs it, and `ants daemon` too, from {table}");
+        return Check::fail(check, detail, fix);
+    }
+    let install = format!("scripts/install-units.sh --managed-nats --config {config}");
+    let managed = format!("{shown} is run by `ants daemon` ({table})");
+    match services.state(Service::Daemon, &setup.config) {
+        State::Running => Check::ok(check, format!("{managed}, whose service runs")),
+        State::Stopped(start) => Check::fail(check, format!("{managed}, whose service is not running"), vec![start]),
+        State::NotInstalled => Check::warn(check, format!("{managed}; no daemon service installed"), vec![install]),
+        State::Other(unit) => Check::warn(
+            check,
+            format!("{managed}; {} runs another config file than {config}", unit.display()),
+            vec![install],
+        ),
+        State::Unsupported => Check::skip(check, format!("{managed}; no service manager ants installs units for here")),
+        State::Unknown(command, e) => Check::warn(check, format!("{managed}; {command}: {e}"), vec![install]),
+    }
+}
+
+/// The command starting the nats-server running `conf`, for a check finding it down: the daemon's, when it runs `conf`
+/// from `[nats_server]` (the config file's `managed`), else the nats-server service's.
+pub(super) fn start_server(setup: &Setup, conf: &Path, managed: Option<&Path>) -> String {
+    let config = setup.config.display();
+    if managed.is_some_and(|m| same_file(m, conf)) {
+        return match Services::local().state(Service::Daemon, &setup.config) {
+            State::Stopped(start) => start,
+            State::Running => format!(
+                "the log of `ants daemon` tells why the nats-server of [nats_server] in {config} is down \
+                 (~/Library/Logs/ants/daemon.log on macOS, journalctl --user -u ants-daemon on Linux)"
+            ),
+            _ => format!(
+                "ants daemon --config {config} starts it ([nats_server]), or scripts/install-units.sh --managed-nats \
+                 to run the daemon as a service"
+            ),
+        };
+    }
+    match Services::local().state(Service::Nats, conf) {
+        State::Stopped(start) => start,
+        _ => format!("nats-server -c {}, or scripts/install-units.sh to run it as a service", conf.display()),
+    }
 }
 
 /// The webhooks' config file at `path`, when it is there: its secret files, present and private to their owner, the

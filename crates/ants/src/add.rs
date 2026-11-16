@@ -18,6 +18,7 @@ use crate::auth;
 use crate::enroll;
 use crate::keys;
 use crate::leaf;
+use crate::natsd;
 use crate::serve::AntOptions;
 use crate::service::{Action, Outcome, Service, Services, failure};
 
@@ -347,7 +348,7 @@ fn tell_completed(name: &UserId, out: &Path, uplink: Option<&Uplink>, path: &Pat
         ),
     }
     if let Some((true, _, conf)) = uplink {
-        println!("{}", leaf::use_renewed_uplink(conf, |action| services.apply(Service::Nats, action, conf)));
+        println!("{}", leaf::use_renewed_uplink(conf, |action| natsd::apply(conf, action)));
     }
 }
 
@@ -415,7 +416,7 @@ pub(crate) fn renew_uplink(leaf: &enroll::Leaf, renewed: &str) -> Result<bool> {
 /// came of it, or None when the credentials changed meanwhile and were left as they are. Blocks while the leaf node's
 /// service reloads.
 pub(crate) fn renew_and_reconnect(conf: &Path, renewed: &str) -> Result<Option<String>> {
-    renew_and_apply(conf, renewed, |action| Services::local().apply(Service::Nats, action, conf))
+    renew_and_apply(conf, renewed, |action| natsd::apply(conf, action))
 }
 
 /// [`renew_and_reconnect`], `apply` reloading the leaf node.
@@ -430,7 +431,7 @@ pub(crate) fn renew_and_apply(
 /// [`renew_and_reconnect`] with `shrunk`, the uplink JWT `asked` renewed without a retired ant: the credentials take it
 /// while they still hold `asked`, or allow nothing it does not.
 pub(crate) fn shrink_and_reconnect(conf: &Path, asked: Option<&str>, shrunk: &str) -> Result<Option<String>> {
-    shrink_and_apply(conf, asked, shrunk, |action| Services::local().apply(Service::Nats, action, conf))
+    shrink_and_apply(conf, asked, shrunk, |action| natsd::apply(conf, action))
 }
 
 /// [`shrink_and_reconnect`], `apply` reloading the leaf node.

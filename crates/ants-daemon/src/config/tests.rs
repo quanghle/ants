@@ -235,6 +235,36 @@ fn metrics_are_off_unless_an_address_is_given() {
 }
 
 #[test]
+fn a_managed_nats_server_needs_a_configuration_and_resolves_its_paths() {
+    assert_eq!(parse_all("").unwrap().nats_server, None);
+    let dir = manifest_dir();
+    let home = dir.parent().unwrap().parent().unwrap();
+    let managed = parse_all("[nats_server]\nconfig = \"~/leaf.conf\"").unwrap().nats_server.unwrap();
+    assert_eq!(
+        managed,
+        NatsServer {
+            command: "nats-server".into(),
+            config: home.join("leaf.conf"),
+            ready_timeout: DEFAULT_READY_TIMEOUT
+        }
+    );
+    let text = "[nats_server]\nconfig = \"nats/leaf.conf\"\ncommand = \"bin/nats-server\"\nready_timeout = \"5s\"";
+    let managed = parse_all(text).unwrap().nats_server.unwrap();
+    assert_eq!(managed.command, dir.join("bin/nats-server"));
+    assert_eq!(managed.config, dir.join("nats/leaf.conf"));
+    assert_eq!(managed.ready_timeout, Duration::from_secs(5));
+    for bad in [
+        "[nats_server]\ncommand = \"nats-server\"",
+        "[nats_server]\nconfig = \"\"",
+        "[nats_server]\nconfig = \"a\"\nready_timeout = \"0s\"",
+        "[nats_server]\nconfig = \"a\"\nport = 4222",
+    ] {
+        let err = format!("{:#}", parse_all(bad).unwrap_err());
+        assert!(err.contains("nats_server") || err.contains("config") || err.contains("port"), "{bad}: {err}");
+    }
+}
+
+#[test]
 fn redaction_is_on_unless_turned_off() {
     let ant = "[[ant]]\nname = \"dev-a\"\nworkdir = \".\"";
     let redact = |text: &str| parse_here(text).unwrap().iter().map(|ant| ant.redact).collect::<Vec<_>>();

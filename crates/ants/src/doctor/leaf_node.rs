@@ -8,10 +8,10 @@ use ants_daemon::creds::{self, Kind};
 use ants_proto::{INTAKE_STREAM, JsDomain, Machine, Role, STREAM, UserId};
 
 use super::credentials::check_creds;
+use super::services::start_server;
 use super::transports::same_address;
 use super::{Check, Connected, NETWORK_TIMEOUT, Setup};
 use crate::humans::Me;
-use crate::service::{Service, Services, State};
 use crate::{auth, leaf, outbox};
 
 /// The machine's leaf node, as `ants leaf config` wrote its configuration.
@@ -80,13 +80,15 @@ pub(super) fn check_leaf_system(
 }
 
 /// The leaf node: its configuration, uplink and system account credentials, whether it listens and the CLI connects
-/// to it, and whether the hub takes from its outbox what the machine's ants and humans send.
+/// to it, and whether the hub takes from its outbox what the machine's ants and humans send. `managed` is the
+/// nats-server configuration the daemon runs itself ([`start_server`]).
 pub(super) async fn check_leaf(
     setup: &Setup,
     leaf: Option<anyhow::Result<Leaf>>,
     ants: &[Ant],
     human: Option<&Me>,
     connected: Option<&Connected>,
+    managed: Option<&Path>,
     now: u64,
 ) -> Vec<Check> {
     let path = setup.leaf_config.display();
@@ -107,7 +109,7 @@ pub(super) async fn check_leaf(
     let (check, members) = check_uplink(setup, &leaf, &uplink, ants, human, &generic, now);
     checks.push(check);
     checks.push(check_leaf_system(setup, &leaf, &uplink, generic, now));
-    checks.push(check_listening(setup, &leaf).await);
+    checks.push(check_listening(setup, &leaf, managed).await);
     checks.push(check_outbox(machine, members.as_deref(), uplink.as_ref().ok(), connected).await);
     checks
 }
@@ -172,7 +174,7 @@ fn check_uplink(
 }
 
 /// Whether the leaf node listens, and where the CLI connects.
-async fn check_listening(setup: &Setup, leaf: &Leaf) -> Check {
+async fn check_listening(setup: &Setup, leaf: &Leaf, managed: Option<&Path>) -> Check {
     let listening = tokio::time::timeout(NETWORK_TIMEOUT, tokio::net::TcpStream::connect(leaf.listen.as_str())).await;
     match listening {
         Ok(Ok(_)) if same_address(&setup.nats, &leaf.listen) => {
@@ -188,13 +190,7 @@ async fn check_listening(setup: &Setup, leaf: &Leaf) -> Check {
                 Ok(Err(e)) => e.to_string(),
                 _ => format!("no answer within {}s", NETWORK_TIMEOUT.as_secs()),
             };
-            let start = match Services::local().state(Service::Nats, &leaf.path) {
-                State::Stopped(start) => start,
-                _ => format!(
-                    "nats-server -c {}, or scripts/install-units.sh to run it as a service",
-                    setup.leaf_config.display()
-                ),
-            };
+            let start = start_server(setup, &leaf.path, managed);
             Check::fail("leaf node", format!("nothing listens on {}: {error}", leaf.listen), vec![start])
         }
     }

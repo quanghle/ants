@@ -41,6 +41,11 @@ machine = "dev-vm1"                        # default: the credentials' name, els
 [admin]                                    # admin orders to this machine's ants (docs/auth.md, Admin orders)
 remote = false                             # refuse every order (default true: take the orders an admin signed)
 
+[nats_server]                              # ants daemon starts and supervises the local nats-server (see Managed nats-server)
+config = "~/.config/ants/leaf.conf"        # its configuration, run as nats-server -c FILE; required
+command = "nats-server"                    # default; a path, or a bare name looked up on PATH
+ready_timeout = "30s"                      # default; how long each start may take to accept connections
+
 [[ant]]
 name = "dev-a"
 workdir = "~/src/repo-a"                   # must exist
@@ -118,7 +123,22 @@ allow = ["read:*", "execute:cargo test*"]
 - Added ants (and previously failed ants still listed) start; removed ants drain prompts in flight and return waiting messages for redelivery; ants whose resolved settings changed (including via top-level defaults, `[harnesses.NAME]`, or `[[ant_template]]`) drain and restart; unchanged ants continue uninterrupted (pool membership changes alone do not restart members, nor does `paused` alone: see [Pausing an ant](#pausing-an-ant)).
 - Added schedules start; removed schedules stop immediately; changed or stopped schedules restart.
 - The machine's record of its ants in `ants_machines` follows the ants listed; a changed `[host]` or `[admin]` table, top-level `machine` or host credentials file reconnects the host. With `[admin] remote = false`, the host refuses every admin order to the machine's ants, recording `this machine's config sets [admin] remote = false` as its outcome; otherwise an admin's `set` order (`ants ant set`) edits the ant's `[[ant]]` table, or the `[harnesses]` table, in place, comments kept, refused naming the field when the field no longer holds the value the order expects, or with the loader's error when the file would not load, and changing nothing then. Only a daemon serving the whole file (no `--ant`) runs the host, with the top-level `nats` and `js_domain`, else `--nats` and `--js-domain`.
-- Invalid reloads log an error and keep running the previous config. `metrics` requires a process restart.
+- Invalid reloads log an error and keep running the previous config. `metrics` and `[nats_server]` require a process restart (a changed `[nats_server]` table logs a warning).
+
+## Managed nats-server
+
+With a `[nats_server]` table, `ants daemon` serving the whole file starts one local `nats-server -c <config>` before connecting its ants, restarts it when it exits, and stops it once its ants are drained ([operations.md](operations.md#managed-nats-server)). Without the table, the daemon connects to a separately run server (the `ants.nats` / `ants-nats` service, or a hub) as before. `ants daemon --ant NAME` and every other command start no server.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `config` | required | The server's existing configuration (`leaf.conf` of `ants leaf config`, or `nats.conf` of `ants setup`), resolved like the file's other paths. Its own `store_dir` holds the JetStream data, kept across restarts. |
+| `command` | `nats-server` | The executable: a path, resolved like the file's other paths, or a bare name looked up on the daemon's `PATH` (the `PATH` its service unit sets). |
+| `ready_timeout` | `30s` | How long each start may take until the server accepts connections; above `0`. |
+
+- The daemon checks readiness at the URL its ants connect to: the file's top-level `nats`, else its `--nats` URL (`ANTS_NATS_URL`, default `nats://127.0.0.1:4222`); that must be a `nats://` or `tls://` URL (or one without a scheme) on `localhost`, `127.0.0.0/8` or `::1`; any other fails `ants daemon` at start. The server must listen there and send its `INFO` line first: a listener with TLS `handshake_first` never reports ready.
+- An unknown key, an empty `config` or `command`, or a `ready_timeout` of `0` fails config loading.
+- macOS and Linux (WSL included) only: on Windows `ants daemon` refuses to start with a `[nats_server]` table.
+- Run the server under exactly one owner: either the daemon with `[nats_server]` (`ants setup --managed-nats`, `scripts/install-units.sh --managed-nats`) or the `ants.nats` / `ants-nats` service, never both.
 
 ## Shared settings
 
@@ -200,7 +220,7 @@ An ant listed in `managers` (when `ants daemon` serves the whole config file, no
 3. Publishes signed `AntRequest`s on `ants.antreq.<manager>` every 5 s until `ants signer` answers or `timeout` elapses (default `15m`, max `30m`).
 4. Writes `<name>.creds`, deletes `<name>.nk`, appends `[[ant]]` to `config.toml`, and returns once `<name>` appears in `ants_colony` (or after 60 s noting it is not yet listed).
 
-Behind a leaf node, `ants signer` also renews the leaf uplink JWT and admits the ant to the outbox (refusing up front if the uplink JWT would exceed 252 KiB; see [transport.md](transport.md#enrollment-behind-a-leaf-node)). The daemon writes the renewed uplink credentials and toggles `./` on the `credentials` path in `leaf.conf` before reloading `ants.nats` / `ants-nats` (`SIGHUP`), reconnecting only the uplink while local clients stay connected.
+Behind a leaf node, `ants signer` also renews the leaf uplink JWT and admits the ant to the outbox (refusing up front if the uplink JWT would exceed 252 KiB; see [transport.md](transport.md#enrollment-behind-a-leaf-node)). The daemon writes the renewed uplink credentials and toggles `./` on the `credentials` path in `leaf.conf` before reloading `ants.nats` / `ants-nats`, or the nats-server an `ants daemon` runs from that file ([Managed nats-server](#managed-nats-server)), with `SIGHUP`, reconnecting only the uplink while local clients stay connected.
 
 `ants signer` runs on the account-key machine (`scripts/install-units.sh --signer`):
 

@@ -90,6 +90,8 @@ ants post --wait '#ops' "@dev-a check the failing build"
 ants                                                # full-screen terminal chat UI (also: ants chat)
 ```
 
+`ants setup --managed-nats` instead has `ants daemon` start, supervise and stop that `nats-server` itself, with no separate NATS service ([docs/operations.md](docs/operations.md#managed-nats-server)).
+
 Join an existing team hub as a human using shared bootstrap credentials ([docs/auth.md](docs/auth.md#registering-humans)):
 
 ```sh
@@ -129,7 +131,7 @@ ants ask --wait @dev-b "run the test suite"
 | [docs/transport.md](docs/transport.md) | Hub configuration, reverse proxy, leaf nodes, store-and-forward outboxes, HTTPS fallback bridge, Dev Tunnels |
 | [docs/webhooks.md](docs/webhooks.md) | HTTP webhook ingress, provider presets, human push notification sinks, quiet hours, digests, stand-ins |
 | [docs/hooks.md](docs/hooks.md) | Read-only observer credentials, event feeds, JSON schemas, wire versioning |
-| [docs/operations.md](docs/operations.md) | Platform specifics, binary upgrades, launchd/systemd units, `/healthz` and Prometheus metrics, daemon footprint |
+| [docs/operations.md](docs/operations.md) | Platform specifics, binary upgrades, launchd/systemd units, the daemon-managed `nats-server`, `/healthz` and Prometheus metrics, daemon footprint |
 | [docs/container-demo.md](docs/container-demo.md) | Isolated three-node local demo in Apple container, Docker, Podman or wslc |
 | [contrib/skills/ants/SKILL.md](contrib/skills/ants/SKILL.md) | Agent skill teaching external coding agents to use the `ants` CLI |
 

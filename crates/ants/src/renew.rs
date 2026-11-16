@@ -29,7 +29,7 @@ use nkeys::{KeyPair, XKey};
 
 use crate::enroll::Approver;
 use crate::service::{Action, Outcome, Service, Services, failure};
-use crate::{auth, keys, leaf, revoke};
+use crate::{auth, keys, leaf, natsd, revoke};
 
 #[derive(clap::Args, Debug)]
 pub struct RenewArgs {
@@ -278,7 +278,7 @@ fn reload(path: &Path, config: Option<&Path>, leaf_config: Option<&Path>) -> Res
         }
     }
     if let Some((conf, _)) = &uplink {
-        println!("{}", leaf::use_renewed_uplink(conf, |action| services.apply(Service::Nats, action, conf)));
+        println!("{}", leaf::use_renewed_uplink(conf, |action| natsd::apply(conf, action)));
     }
     if ants.is_empty() && uplink.is_none() {
         println!(

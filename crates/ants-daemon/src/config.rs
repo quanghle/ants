@@ -41,6 +41,11 @@
 //! [admin]                           # admin orders to this machine's ants (crate::admin)
 //! remote = false                    # refuse every order (default true: carry out those an admin signed)
 //!
+//! [nats_server]                     # start and supervise the local nats-server (NatsServer); off without it
+//! config = "~/.config/ants/leaf.conf"  # its configuration, run as nats-server -c; required
+//! command = "nats-server"           # a path, or a bare name looked up on PATH (the default)
+//! ready_timeout = "30s"             # how long to wait for it to accept connections (the default)
+//!
 //! [[ant]]
 //! name = "dev-a"
 //! workdir = "~/src/repo-a"
@@ -108,6 +113,7 @@ mod dropin;
 pub mod edit;
 mod entry;
 mod host;
+mod nats_server;
 pub mod registration;
 mod settle;
 mod summary;
@@ -119,6 +125,7 @@ pub use cli::{CliDefaults, Summaries, SummaryConfig, Theme, with_cli_login};
 pub use dropin::{dropin_dir, dropin_files};
 pub use entry::{entry, template_entry, toml_string};
 pub use host::HostSettings;
+pub use nats_server::{DEFAULT_READY_TIMEOUT, NatsServer};
 pub use summary::Summary;
 pub use templated::signer_templates;
 
@@ -131,6 +138,7 @@ use crate::template::AntTemplate;
 use cli::CliSection;
 use dropin::define;
 use host::{AdminSection, HostSection};
+use nats_server::NatsServerSection;
 use settle::{check_top_level, schedules, settle_ant};
 use templated::{ant_tables, check_added, from_template, templates};
 
@@ -189,6 +197,8 @@ struct File {
     host: HostSection,
     #[serde(default)]
     admin: AdminSection,
+    /// The nats-server the daemon starts and supervises ([`NatsServer`]).
+    nats_server: Option<NatsServerSection>,
     #[serde(default, rename = "ant_template")]
     ant_templates: Vec<AntTemplate>,
     #[serde(default, rename = "ant")]
@@ -219,6 +229,8 @@ pub struct Loaded {
     pub storage: storage::Settings,
     /// The machine's host connection.
     pub host: HostSettings,
+    /// The `[nats_server]` table: the nats-server a daemon serving the whole file starts and supervises.
+    pub nats_server: Option<NatsServer>,
     /// The file's directory, which relative paths are relative to, and the home directory `~` stands for.
     base: PathBuf,
     home: PathBuf,
@@ -241,6 +253,12 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
     let harnesses = define(std::mem::take(&mut file.harnesses), path, home)?;
     check_top_level(&file, &harnesses, path)?;
     let host = HostSettings::resolve(&mut file, base, home);
+    let nats_server = file
+        .nats_server
+        .take()
+        .map(|section| section.settle(base, home))
+        .transpose()
+        .with_context(|| format!("config {}", path.display()))?;
     if file.ants.is_empty() && !file.messenger {
         bail!("config {}: messenger = false and no [[ant]] entries: nothing to serve", path.display());
     }
@@ -273,7 +291,18 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
     let entries = std::mem::take(&mut file.schedules);
     let schedules = schedules(entries, &file, timezone.as_ref(), &names, base, home, path)?;
     let (base, home) = (base.to_owned(), home.to_owned());
-    Ok(Loaded { ants, harnesses, templates, schedules, metrics: file.metrics, storage: file.storage, host, base, home })
+    Ok(Loaded {
+        ants,
+        harnesses,
+        templates,
+        schedules,
+        metrics: file.metrics,
+        storage: file.storage,
+        host,
+        nats_server,
+        base,
+        home,
+    })
 }
 
 pub(crate) fn resolve(path: &Path, base: &Path, home: &Path) -> PathBuf {

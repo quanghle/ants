@@ -266,6 +266,9 @@ pub struct Listed {
     /// The machine's name as the file's host settings give it ([`HostSettings::named`]); None for an ant described by
     /// flags, which goes by the host name.
     pub machine: Option<Machine>,
+    /// The nats-server the daemon starts and supervises ([`config::NatsServer`]): only when the daemon serves the
+    /// whole file.
+    pub nats_server: Option<config::NatsServer>,
 }
 
 /// The ants to serve, the harnesses they may name and the schedules to run: those of the config file, or for an ant
@@ -283,7 +286,8 @@ pub fn ants(args: &DaemonArgs, default_path: &Path, hostname: &str) -> Result<Li
             }
             let harnesses = summary.harnesses;
             let (schedules, metrics) = (Vec::new(), args.metrics);
-            Ok(Listed { ants: vec![ant], harnesses, schedules, metrics, managers: None, host: None, machine: None })
+            let (managers, host, machine, nats_server) = (None, None, None, None);
+            Ok(Listed { ants: vec![ant], harnesses, schedules, metrics, managers, host, machine, nats_server })
         }
         Source::File(path) => {
             let loaded = config::load(&path)?;
@@ -299,8 +303,10 @@ pub fn ants(args: &DaemonArgs, default_path: &Path, hostname: &str) -> Result<Li
             let managers = whole.then(|| (managers, path.clone()));
             let machine = Some(loaded.host.named(hostname));
             let host = whole.then_some(loaded.host);
+            let nats_server = loaded.nats_server.filter(|_| whole);
             let ants = pick(loaded.ants, args, &path)?;
-            Ok(Listed { ants, harnesses: loaded.harnesses, schedules, metrics, managers, host, machine })
+            let harnesses = loaded.harnesses;
+            Ok(Listed { ants, harnesses, schedules, metrics, managers, host, machine, nats_server })
         }
     }
 }

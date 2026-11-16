@@ -208,6 +208,19 @@ impl Services {
         )
     }
 
+    /// The commands removing the installed `service` by hand, on this machine: stop it for good, then delete its unit
+    /// file.
+    pub fn removal(&self, service: Service) -> Option<String> {
+        let manager = self.manager?;
+        let unit = self.unit_file(manager, service);
+        Some(match manager {
+            Manager::Launchd => {
+                format!("launchctl bootout gui/$(id -u)/{} && rm {}", service.label(), unit.display())
+            }
+            Manager::Systemd => format!("systemctl --user disable --now {} && rm {}", service.unit(), unit.display()),
+        })
+    }
+
     fn state_of(&mut self, service: Service, file: Option<&Path>) -> State {
         match self.locate(service, file) {
             Ok((manager, target)) => match self.running(manager, &target) {

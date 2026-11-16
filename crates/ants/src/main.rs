@@ -33,6 +33,7 @@ mod machines;
 mod manager;
 mod members;
 mod memories;
+mod natsd;
 mod notify;
 mod orders;
 mod outbox;

@@ -5,7 +5,7 @@ use std::path::Path;
 use ants_daemon::admin::ConfigFile;
 use anyhow::Result;
 
-use crate::{Connection, manager, reload, scheduler, serve, upgrade};
+use crate::{Connection, manager, natsd, reload, scheduler, serve, upgrade};
 
 pub(crate) async fn run(args: &serve::DaemonArgs, conn: &Connection<'_>) -> Result<()> {
     let domain = conn.js_domain;
@@ -16,8 +16,15 @@ pub(crate) async fn run(args: &serve::DaemonArgs, conn: &Connection<'_>) -> Resu
     let edited = ConfigFile::new(config, triggers.edits());
     triggers.watch_shared(edited.shared.subscribe());
     let hostname = ants_daemon::colony::machine().await;
+    let listed = serve::ants(args, &default_path, &hostname)?;
+    // The ants connect to the file's top-level nats, where it sets one: the address the managed server must answer.
+    let local_url = listed.host.as_ref().and_then(|host| host.nats.clone()).unwrap_or_else(|| conn.nats.to_owned());
+    let nats_server = listed.nats_server;
     let served = || {
         let listed = serve::ants(args, &default_path, &hostname)?;
+        if listed.nats_server != nats_server {
+            tracing::warn!("the [nats_server] table changed; it takes effect on a restart");
+        }
         edited.shared.listed(&listed.ants);
         let mut configs = serve::configs(
             listed.ants,
@@ -43,7 +50,23 @@ pub(crate) async fn run(args: &serve::DaemonArgs, conn: &Connection<'_>) -> Resu
         let shared = Some(edited.shared.clone());
         Ok(serve::Served { configs, schedules, metrics: listed.metrics, host, shared, machine: listed.machine })
     };
-    match serve::run(served()?, served, triggers, upgrade::replaced(args.upgrade.upgrade_check)).await? {
+    // One listener for the managed nats-server's start and the serving, so a signal between them is not missed.
+    let stop = serve::stop_signal();
+    tokio::pin!(stop);
+    let managed = match &nats_server {
+        Some(settings) => match natsd::start(settings, &local_url, natsd::Policy::DEFAULT, stop.as_mut()).await? {
+            Some(managed) => Some(managed),
+            None => return Ok(()),
+        },
+        None => None,
+    };
+    let replaced = upgrade::replaced(args.upgrade.upgrade_check);
+    let serving = async { serve::run(served()?, served, triggers, replaced, stop).await };
+    let ended = match managed {
+        Some(managed) => natsd::run_serving(managed, serving).await?,
+        None => serving.await?,
+    };
+    match ended {
         serve::Ended::Stopped => Ok(()),
         serve::Ended::Replaced => upgrade::exit(),
     }

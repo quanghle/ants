@@ -1,6 +1,9 @@
-# ants: the ant daemon (ants daemon), serving the ants of its config file through the local nats-server.
+# ants: the ant daemon (ants daemon), serving the ants of its config file through the local nats-server: the
+# ants-nats unit's, or, with [nats_server] in the config file (install-units.sh --managed-nats, no ants-nats unit), one
+# the daemon starts and stops itself.
 # User unit: scripts/install-units.sh fills in the @...@ placeholders and installs it in ~/.config/systemd/user.
-# Until ants-nats listens, the daemon waits, retrying the connection; Restart covers other failures.
+# Until ants-nats listens, the daemon waits, retrying the connection; Restart covers other failures. Without the
+# ants-nats unit, Wants and After name nothing.
 # The daemon reloads an edited config file within seconds; to reload at once: systemctl --user reload ants-daemon
 
 [Unit]
@@ -20,6 +23,9 @@ SuccessExitStatus=75
 RestartForceExitStatus=75
 # SIGTERM lets prompts in flight finish; messages cut off by the timeout are redelivered.
 TimeoutStopSec=120
+# SIGTERM to the daemon alone: it drains, then stops its harnesses and its nats-server. Whatever is left in the unit
+# at the timeout or once the daemon exits gets SIGKILL.
+KillMode=mixed
 
 [Install]
 WantedBy=default.target

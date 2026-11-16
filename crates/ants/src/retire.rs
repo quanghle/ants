@@ -15,8 +15,8 @@ use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::Context;
 
 use crate::revoke::{self, Kind};
-use crate::service::{Action, Outcome, Service, Services};
-use crate::{add, auth, enroll, members, outbox};
+use crate::service::{Action, Outcome};
+use crate::{add, auth, enroll, members, natsd, outbox};
 
 /// How long a retirement waits for the daemon to stop the ant, its prompts in flight ending, before revoking its
 /// credentials, which cuts off what still runs.
@@ -130,7 +130,7 @@ pub fn home_note(name: &UserId, template: &str, home: &Path) -> String {
 /// connected, takes from the machine's outbox ([`outbox::drop_ant`]). For a leaf node whose uplink credentials are on
 /// another machine, it names what to run. What came of it, a line each; none when the ant is behind no leaf node.
 pub async fn leave_leaves(dir: &Path, ant: &UserId, hub: Option<&Context>) -> Vec<String> {
-    let apply = |conf: &Path, action| Services::local().apply(Service::Nats, action, conf);
+    let apply = |conf: &Path, action| natsd::apply(conf, action);
     leave_leaves_with(dir, ant, hub, || add::leaf_node(None), apply).await
 }
 

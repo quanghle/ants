@@ -116,19 +116,19 @@ pub enum Ended {
     Replaced,
 }
 
-/// Serve every ant until Ctrl-C or SIGTERM, each over its own NATS connection, and run the schedules alongside, each
-/// over its own as well. An ant that fails is reported and the others keep running; it is an error only when none is
-/// left. On SIGHUP, once the config file changed and settled, or at once after an admin order edited it (`triggers`),
-/// `reload` lists the ants and schedules
-/// again and the daemon serves those ([`reconcile`], [`Schedules::reconcile`]); a list it cannot read is reported and
-/// what runs stays as it is. Health and metrics are
-/// served on `served.metrics`, if given, until the daemon stops; a reload does not move them. Once `replaced` the ants
-/// stop as on SIGTERM, finishing their prompts in flight, and the schedules at once.
+/// Serve every ant until `shutdown` (Ctrl-C or SIGTERM: [`stop_signal`]), each over its own NATS connection, and run
+/// the schedules alongside, each over its own as well. An ant that fails is reported and the others keep running; it is
+/// an error only when none is left. On SIGHUP, once the config file changed and settled, or at once after an admin
+/// order edited it (`triggers`), `reload` lists the ants and schedules again and the daemon serves those
+/// ([`reconcile`], [`Schedules::reconcile`]); a list it cannot read is reported and what runs stays as it is. Health
+/// and metrics are served on `served.metrics`, if given, until the daemon stops; a reload does not move them. Once
+/// `replaced` the ants stop as on SIGTERM, finishing their prompts in flight, and the schedules at once.
 pub async fn run(
     served: Served,
     reload: impl Fn() -> Result<Served>,
     mut triggers: Triggers,
     replaced: impl Future<Output = ()>,
+    shutdown: impl Future<Output = ()>,
 ) -> Result<Ended> {
     let metrics = served.metrics;
     let _metrics = crate::serve_metrics(metrics, Arc::new(ants_daemon::metrics::Daemon)).await?;
@@ -142,7 +142,6 @@ pub async fn run(
     let mut tasks: FuturesUnordered<_> = reconcile(&mut running, served.configs).into_iter().map(serve).collect();
     let mut schedules = Schedules::default();
     schedules.reconcile(served.schedules, run_schedule);
-    let shutdown = stop_signal();
     tokio::pin!(shutdown, replaced);
     let (mut stopping, mut served, mut errors, mut ended) = (false, 0, Vec::new(), Ended::Stopped);
     while !tasks.is_empty() {
@@ -230,8 +229,8 @@ async fn after_first_read(
     }
 }
 
-/// Wait for Ctrl-C or SIGTERM, forever when they cannot be waited for.
-async fn stop_signal() {
+/// Wait for Ctrl-C or SIGTERM, forever when they cannot be waited for. Listening from its first poll on.
+pub async fn stop_signal() {
     if let Err(e) = ants_daemon::daemon::stop_signal().await {
         tracing::warn!(error = %e, "waiting for Ctrl-C or SIGTERM");
         std::future::pending::<()>().await;

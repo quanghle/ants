@@ -15,11 +15,17 @@
 #   scripts/install-units.sh --bridge https://hub.example/bridge --bridge-token FILE   # and `ants bridge connect`
 #   scripts/install-units.sh --no-daemon --bridge-serve --bridge-token FILE           # on the hub, `ants bridge serve`
 #   scripts/install-units.sh --out DIR               # only write the filled-in units into DIR, for review
+#   scripts/install-units.sh --managed-nats          # the daemon only; it runs nats-server from [nats_server]
 #
 # Options:  --ants PATH              ants binary (default: ants on PATH)
 #           --nats-server PATH       nats-server binary (default: nats-server on PATH)
 #           --nats-conf FILE         nats-server configuration (default: ~/.config/ants/leaf.conf)
 #           --config FILE            daemon config file (default: ~/.ants/config.toml)
+#           --managed-nats           no nats-server service: the daemon starts nats-server itself, from the
+#                                    [nats_server] table of --config (see docs/config.md); not with --nats-conf,
+#                                    --nats-server or --no-daemon. Refuses while an ants-nats service is installed
+#                                    and prints the commands that remove it: two owners of one nats-server would
+#                                    fight over its port, and removing a running service here would cut the bus
 #           --no-daemon              no daemon service, on a machine without ants
 #           --channel-manager CREDS  also run the channel manager with CREDS, from `ants auth channel-manager`
 #           --signer                 also keep `ants signer --config FILE` running, on the machine holding the team
@@ -62,6 +68,8 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 ants=
 nats_server=
 nats_conf=$HOME/.config/ants/leaf.conf
+nats_conf_given=
+managed=
 config=$HOME/.ants/config.toml
 daemon=1
 devtunnel=
@@ -83,7 +91,8 @@ while [ $# -gt 0 ]; do
     case "$1" in
     --ants) ants=$2; shift 2 ;;
     --nats-server) nats_server=$2; shift 2 ;;
-    --nats-conf) nats_conf=$2; shift 2 ;;
+    --nats-conf) nats_conf=$2; nats_conf_given=1; shift 2 ;;
+    --managed-nats) managed=1; shift ;;
     --config) config=$2; shift 2 ;;
     --no-daemon) daemon=; shift ;;
     --channel-manager) channel_creds=$2; shift 2 ;;
@@ -100,15 +109,21 @@ while [ $# -gt 0 ]; do
     --webhook) webhook=1; shift ;;
     --webhook-config) webhook_config=$2; shift 2 ;;
     --out) out=$2; shift 2 ;;
-    -h | --help) sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,51p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown argument: $1" ;;
     esac
 done
 
-[ -n "$nats_server" ] || nats_server=$(command -v nats-server) || die "nats-server not found (give --nats-server)"
-nats_server=$(absolute "$nats_server")
-[ -x "$nats_server" ] || die "no nats-server binary at $nats_server"
-nats_conf=$(absolute "$nats_conf")
+if [ -n "$managed" ]; then
+    [ -z "$nats_conf_given" ] || die "--managed-nats and --nats-conf: give one (the daemon runs the config of its [nats_server])"
+    [ -z "$nats_server" ] || die "--managed-nats takes no --nats-server; set command in [nats_server] of the daemon config"
+    [ -n "$daemon" ] || die "--managed-nats needs the daemon service; drop --no-daemon"
+else
+    [ -n "$nats_server" ] || nats_server=$(command -v nats-server) || die "nats-server not found (give --nats-server)"
+    nats_server=$(absolute "$nats_server")
+    [ -x "$nats_server" ] || die "no nats-server binary at $nats_server"
+    nats_conf=$(absolute "$nats_conf")
+fi
 if [ -n "$daemon$channel_creds$signer$webhook$bridge_url$bridge_serve" ]; then
     [ -n "$ants" ] || ants=$(command -v ants) || die "ants not found (give --ants, or cargo install --path crates/ants)"
     ants=$(absolute "$ants")
@@ -142,8 +157,11 @@ else
     [ -z "$bridge_ca" ] || die "--bridge-ca needs --bridge URL"
 fi
 if [ -z "$out" ]; then
-    [ -f "$nats_conf" ] || die "no nats-server configuration at $nats_conf (write one with \`ants leaf config\`)"
+    [ -n "$managed" ] || [ -f "$nats_conf" ] ||
+        die "no nats-server configuration at $nats_conf (write one with \`ants leaf config\`)"
     [ -z "$daemon" ] || [ -f "$config" ] || die "no daemon config file at $config (see docs/config.md)"
+    [ -z "$managed" ] || grep -Eq '^[[:space:]]*\[nats_server\]' "$config" ||
+        die "--managed-nats: no [nats_server] table in $config; add one naming the nats-server configuration (see docs/config.md)"
     [ -z "$signer" ] || [ -f "$config" ] || die "no config file at $config for the signer's templates"
     [ -z "$token_file" ] || [ -r "$token_file" ] || die "no devtunnel token file at $token_file"
     [ -z "$channel_creds" ] || [ -r "$channel_creds" ] || die "no channel manager credentials at $channel_creds"
@@ -151,27 +169,39 @@ if [ -z "$out" ]; then
     [ -z "$bridge_token" ] || [ -r "$bridge_token" ] || die "no bridge token file at $bridge_token"
     [ -z "$bridge_ca" ] || [ -r "$bridge_ca" ] || die "no CA certificates at $bridge_ca"
 fi
-if [ -z "$tunnel$bridge_url" ] && [ -f "$nats_conf" ] &&
+if [ -z "$managed" ] && [ -z "$tunnel$bridge_url" ] && [ -f "$nats_conf" ] &&
     grep -Eq 'nats-leaf://(127\.0\.0\.1|localhost|\[::1\]):' "$nats_conf"; then
     printf 'install-units: the uplink in %s is on this machine; for one through a Dev Tunnel or the HTTPS bridge, add %s\n' \
         "$nats_conf" '--devtunnel TUNNEL or --bridge URL' >&2
 fi
 
+with_nats=1
+[ -z "$managed" ] || with_nats=
 case "$(uname -s)" in
 Darwin)
     kind=launchd
-    units="${tunnel:+ants.devtunnel.plist }${bridge_url:+ants.bridge.plist }ants.nats.plist${daemon:+ ants.daemon.plist}${channel_creds:+ ants.channels.plist}${signer:+ ants.signer.plist}${webhook:+ ants.webhook.plist}${host_tunnel:+ ants.devtunnel-host.plist}${bridge_serve:+ ants.bridge-serve.plist} ants.logrotate.plist"
+    nats_unit=ants.nats.plist
+    units="${tunnel:+ants.devtunnel.plist }${bridge_url:+ants.bridge.plist }${with_nats:+$nats_unit}${daemon:+ ants.daemon.plist}${channel_creds:+ ants.channels.plist}${signer:+ ants.signer.plist}${webhook:+ ants.webhook.plist}${host_tunnel:+ ants.devtunnel-host.plist}${bridge_serve:+ ants.bridge-serve.plist} ants.logrotate.plist"
     dest=${out:-$HOME/Library/LaunchAgents}
     logs=$HOME/Library/Logs/ants
     ;;
 Linux)
     kind=systemd
-    units="${tunnel:+ants-devtunnel.service }${bridge_url:+ants-bridge.service }ants-nats.service${daemon:+ ants-daemon.service}${channel_creds:+ ants-channels.service}${signer:+ ants-signer.service}${webhook:+ ants-webhook.service}${host_tunnel:+ ants-devtunnel-host.service}${bridge_serve:+ ants-bridge-serve.service}"
+    nats_unit=ants-nats.service
+    units="${tunnel:+ants-devtunnel.service }${bridge_url:+ants-bridge.service }${with_nats:+$nats_unit}${daemon:+ ants-daemon.service}${channel_creds:+ ants-channels.service}${signer:+ ants-signer.service}${webhook:+ ants-webhook.service}${host_tunnel:+ ants-devtunnel-host.service}${bridge_serve:+ ants-bridge-serve.service}"
     dest=${out:-$HOME/.config/systemd/user}
     logs=
     ;;
 *) die "unsupported system: $(uname -s)" ;;
 esac
+if [ -n "$managed" ] && [ -z "$out" ] && [ -f "$dest/$nats_unit" ]; then
+    if [ "$kind" = launchd ]; then
+        remove="launchctl bootout gui/$(id -u)/${nats_unit%.plist} && rm $dest/$nats_unit"
+    else
+        remove="systemctl --user disable --now $nats_unit && rm $dest/$nats_unit"
+    fi
+    die "--managed-nats: the service $dest/$nats_unit runs nats-server already; remove it first ($remove), or drop --managed-nats"
+fi
 
 # Escapes $1 for a sed replacement, and for XML in plists or specifiers in systemd units.
 escape() {
@@ -246,8 +276,8 @@ else
     systemctl --user enable $names
     # shellcheck disable=SC2086
     systemctl --user restart $names
-    printf 'started; logs: journalctl --user%s%s -u ants-nats%s%s%s%s%s%s\n' "${tunnel:+ -u ants-devtunnel}" \
-        "${bridge_url:+ -u ants-bridge}" "${daemon:+ -u ants-daemon}" "${channel_creds:+ -u ants-channels}" \
+    printf 'started; logs: journalctl --user%s%s%s%s%s%s%s%s%s\n' "${tunnel:+ -u ants-devtunnel}" \
+        "${bridge_url:+ -u ants-bridge}" "${with_nats:+ -u ants-nats}" "${daemon:+ -u ants-daemon}" "${channel_creds:+ -u ants-channels}" \
         "${signer:+ -u ants-signer}" \
         "${webhook:+ -u ants-webhook}" "${host_tunnel:+ -u ants-devtunnel-host}" "${bridge_serve:+ -u ants-bridge-serve}"
     if [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" != yes ]; then

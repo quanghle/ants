@@ -321,7 +321,7 @@ mod tests {
             Ok(serve::Served { configs, schedules: Vec::new(), metrics: None, host: None, shared: None, machine: None })
         };
         let triggers = crate::reload::Triggers::new(config.clone(), None, Duration::from_millis(200)).unwrap();
-        let daemon = Box::pin(serve::run(served().unwrap(), served, triggers, pending()));
+        let daemon = Box::pin(serve::run(served().unwrap(), served, triggers, pending(), pending()));
         let options = signer::Options {
             config: &signer_config,
             approval_timeout: WAIT,

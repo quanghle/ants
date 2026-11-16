@@ -6,7 +6,7 @@ use ants_proto::Machine;
 use anyhow::{Context as _, Result};
 use clap::Subcommand;
 
-use crate::{Connection, auth, leaf, members, outbox, service, team_dir};
+use crate::{Connection, auth, leaf, members, natsd, outbox, team_dir};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum LeafCommand {
@@ -117,9 +117,7 @@ pub(crate) async fn run(command: LeafCommand, conn: &Connection<'_>) -> Result<(
             ants_daemon::creds::warn(&creds);
             system_creds.as_deref().map(ants_daemon::creds::warn);
             let new = std::fs::read_to_string(&out).with_context(|| format!("reading {}", out.display()))?;
-            let taken = leaf::take(&out, old.as_deref(), &new, |action| {
-                service::Services::local().apply(service::Service::Nats, action, &out)
-            });
+            let taken = leaf::take(&out, old.as_deref(), &new, |action| natsd::apply(&out, action));
             println!(
                 "{}\n{taken}\n\
                  switch the uplink: run this again\n\

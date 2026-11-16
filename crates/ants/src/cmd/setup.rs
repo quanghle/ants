@@ -3,6 +3,10 @@
 //! buckets (`ants init`), the config file with the messenger and optionally one ant, the harness check, the machine's
 //! host credentials, the daemon service, the shell completions, and last `ants doctor`. It never overwrites a file: one already there is reported
 //! and kept.
+//!
+//! With `--managed-nats` the daemon is the nats-server's only owner: the new config file's `[nats_server]` names its
+//! configuration, no nats-server service is installed, and the hub's stream and buckets wait for the daemon service
+//! to start it.
 
 mod pick;
 
@@ -20,6 +24,10 @@ use crate::cmd::harness::HarnessPick;
 use crate::completions::{self, Shell};
 use crate::service::{self, Action, Installed, Outcome, Service, Services, State, Values};
 use crate::{Connection, Nats, auth, doctor};
+
+/// How to get nats-server, when not found.
+const NATS_INSTALL: &str =
+    "install it: https://docs.nats.io/running-a-nats-service/introduction/installation, or give --nats-server";
 
 /// How long to wait for a nats-server just started to listen.
 const LISTEN_WAIT: Duration = Duration::from_secs(10);
@@ -40,10 +48,15 @@ pub struct SetupArgs {
     /// Config file of the machine's ants (default: ~/.ants/config.toml).
     #[arg(long, env = "ANTS_CONFIG")]
     pub config: Option<PathBuf>,
-    /// nats-server binary for its service (default: nats-server on PATH).
+    /// nats-server binary for its service, or with --managed-nats the `command` of `[nats_server]` (default:
+    /// nats-server on PATH).
     #[arg(long, value_name = "PATH")]
     pub nats_server: Option<PathBuf>,
-    /// Install and start no services; print how to start nats-server instead.
+    /// Have `ants daemon` run the local nats-server: the new config file gets a `[nats_server]` table naming its
+    /// configuration, and no nats-server service is installed, the daemon service being its only owner.
+    #[arg(long)]
+    pub managed_nats: bool,
+    /// Install and start no services; print how to start nats-server, or with --managed-nats the daemon, instead.
     #[arg(long)]
     pub no_services: bool,
     /// Skip starting the harness for an ACP handshake.
@@ -65,6 +78,17 @@ enum Mark {
     Exists,
     Skip,
     Fail,
+}
+
+/// What --managed-nats came to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Managed {
+    /// Not asked for, or not done: the config file there has no `[nats_server]` for it.
+    Off,
+    /// The new config file's `[nats_server]` is to name this nats-server configuration.
+    New(PathBuf),
+    /// The config file there names it in its `[nats_server]` already.
+    Kept,
 }
 
 /// The steps' outcomes, printed as they come.
@@ -112,12 +136,38 @@ pub async fn run(args: &SetupArgs, connection: &Connection<'_>) -> Result<()> {
 
     let listen = local_listen(connection.nats);
     let mut started = false;
+    let mut managed = Managed::Off;
     match &listen {
+        None if args.managed_nats => {
+            report.step(
+                Mark::Fail,
+                "nats-server",
+                format!("{} is not on this machine, and --managed-nats runs a local nats-server", connection.nats),
+            );
+            bail!(
+                "--managed-nats needs a server on this machine (nats://127.0.0.1:PORT): give --nats, or drop \
+                 --managed-nats"
+            );
+        }
         None => report.step(
             Mark::Skip,
             "nats-server",
             format!("{} is not on this machine: no local nats-server set up", connection.nats),
         ),
+        Some(listen) if args.managed_nats => {
+            let conf = if leaf_conf.exists() {
+                report.step(
+                    Mark::Skip,
+                    "nats-server",
+                    format!("the leaf node of {} is the machine's nats-server", leaf_conf.display()),
+                );
+                &leaf_conf
+            } else {
+                nats_config(&mut report, &nats_conf, listen, &home);
+                &nats_conf
+            };
+            managed = managed_nats(&mut report, args, &mut services, conf, listen, &config_path).await?;
+        }
         Some(_) if leaf_conf.exists() => report.step(
             Mark::Skip,
             "nats-server",
@@ -132,17 +182,41 @@ pub async fn run(args: &SetupArgs, connection: &Connection<'_>) -> Result<()> {
         wait_listening(listen.as_deref().unwrap_or_default()).await;
     }
 
-    init(&mut report, args, connection, listen.as_deref()).await;
-    let appended = config_file(&mut report, args, harness.as_deref(), connection, &config_path);
+    // The daemon starts a managed nats-server: only once its service runs is there one to set up.
+    let after_daemon = managed != Managed::Off;
+    if !after_daemon {
+        init(&mut report, args, connection, listen.as_deref(), None).await;
+    }
+    let appended = config_file(&mut report, args, harness.as_deref(), connection, &config_path, &managed);
     harness_check(&mut report, args, harness, &config_path).await;
     host_creds(&mut report, args, connection, &config_path).await;
-    daemon_service(&mut report, args, &mut services, &config_path, appended, values);
+    let restart = matches!(managed, Managed::New(_));
+    let daemon_up = daemon_service(&mut report, args, &mut services, &config_path, appended, restart, values);
+    if after_daemon {
+        if daemon_up && !args.dry_run {
+            wait_listening(listen.as_deref().unwrap_or_default()).await;
+        }
+        init(&mut report, args, connection, listen.as_deref(), Some(&config_path)).await;
+    }
     shell_completions(&mut report, args, &home);
 
     if args.dry_run {
         println!("would run ants doctor");
         return Ok(());
     }
+    let nats = (leaf_conf, nats_conf);
+    Box::pin(doctor_checks(report.failed, connection, config_path, nats, home)).await
+}
+
+/// Run `ants doctor` on the config file, the leaf node and local hub configurations `nats` and `home`; fail when a
+/// check failed, or one of the `failed` steps before.
+async fn doctor_checks(
+    failed: usize,
+    connection: &Connection<'_>,
+    config_path: PathBuf,
+    (leaf_conf, nats_conf): (PathBuf, PathBuf),
+    home: PathBuf,
+) -> Result<()> {
     println!("ants doctor:");
     let webhooks = config_path.with_file_name("webhooks.toml");
     let setup = doctor::Setup {
@@ -155,14 +229,14 @@ pub async fn run(args: &SetupArgs, connection: &Connection<'_>) -> Result<()> {
         harnesses: false,
         team: auth::default_dir()?,
         webhooks,
-        home: Some(home.clone()),
+        home: Some(home),
     };
     let checks = Box::pin(doctor::run(&setup)).await;
     for check in &checks {
         println!("{check}");
     }
     let doctor_failed = checks.iter().filter(|c| c.status == doctor::Status::Fail).count();
-    match (report.failed, doctor_failed) {
+    match (failed, doctor_failed) {
         (0, 0) => Ok(()),
         (0, n) => bail!("{n} of {} checks failed", checks.len()),
         (n, _) => bail!("{n} setup steps failed"),
@@ -252,11 +326,7 @@ async fn nats_service(
     }
     let values = match values() {
         Ok(values) if values.nats_server.as_os_str().is_empty() => {
-            report.step(
-                Mark::Fail,
-                step,
-                "nats-server not found on PATH (install it: https://docs.nats.io/running-a-nats-service/introduction/installation, or give --nats-server)",
-            );
+            report.step(Mark::Fail, step, format!("nats-server not found on PATH ({NATS_INSTALL})"));
             return false;
         }
         Ok(values) => values,
@@ -266,6 +336,83 @@ async fn nats_service(
         }
     };
     installed(report, step, services.install(Service::Nats, conf, &values, args.dry_run), Service::Nats)
+}
+
+/// With --managed-nats, check that the daemon of `config` can be the only owner of the nats-server running `conf`,
+/// listening on `listen`: what the config file's `[nats_server]` is to name. Fails when an ants-nats service runs
+/// `conf`, or, for a new config file, when a server listens on `listen` already, which the daemon would not replace.
+async fn managed_nats(
+    report: &mut Report,
+    args: &SetupArgs,
+    services: &mut Services,
+    conf: &Path,
+    listen: &str,
+    config: &Path,
+) -> Result<Managed> {
+    let step = "nats-server service";
+    let (shown, config_shown) = (conf.display(), config.display());
+    if let State::Running | State::Stopped(_) = services.state(Service::Nats, conf) {
+        let remove = services.removal(Service::Nats).unwrap_or_default();
+        report.step(
+            Mark::Fail,
+            step,
+            format!(
+                "an ants-nats service runs {shown}, which --managed-nats has the daemon run: remove the service \
+                 ({remove}), or drop --managed-nats"
+            ),
+        );
+        bail!("two owners for the nats-server of {shown}: the ants-nats service and the daemon");
+    }
+    if config.exists() {
+        let table = config::load(config).map(|loaded| loaded.nats_server.map(|n| n.config));
+        let to_add = format!("[nats_server] config = {}", quoted(&conf.to_string_lossy()));
+        return Ok(match table {
+            Ok(Some(named)) if doctor::same_file(&named, conf) => {
+                let how = format!("none; the daemon of {config_shown} runs {shown} ([nats_server])");
+                report.step(Mark::Exists, step, how);
+                Managed::Kept
+            }
+            Ok(Some(named)) => {
+                let how = format!("[nats_server] of {config_shown} names {}, not {shown}; kept", named.display());
+                report.step(Mark::Skip, step, how);
+                Managed::Off
+            }
+            Ok(None) => {
+                let how = format!(
+                    "{config_shown} kept, without [nats_server]: add `{to_add}` to it, then restart the daemon \
+                     service ({})",
+                    service::manual(Service::Daemon, Action::Restart)
+                );
+                report.step(Mark::Fail, step, how);
+                Managed::Off
+            }
+            Err(e) => {
+                report.step(Mark::Skip, step, format!("{config_shown} does not load: {e:#}"));
+                Managed::Off
+            }
+        });
+    }
+    if listening(listen).await {
+        report.step(
+            Mark::Fail,
+            step,
+            format!(
+                "a server listens on {listen} already, and the daemon starts none while another runs: stop it, or \
+                 drop --managed-nats"
+            ),
+        );
+        bail!("--managed-nats: a server listens on {listen} already");
+    }
+    if args.nats_server.is_none() && on_path("nats-server").is_none() {
+        report.step(Mark::Fail, step, format!("nats-server not found on PATH, for the daemon to run ({NATS_INSTALL})"));
+    }
+    let how = if args.no_services {
+        format!("--no-services; `ants daemon --config {config_shown}` runs nats-server -c {shown} ([nats_server])")
+    } else {
+        format!("none; the daemon service runs nats-server -c {shown} ([nats_server] of {config_shown})")
+    };
+    report.step(Mark::Skip, step, how);
+    Ok(Managed::New(conf.to_owned()))
 }
 
 /// Report what [`Services::install`] did; returns whether it started the service.
@@ -307,8 +454,15 @@ fn installed(report: &mut Report, step: &str, installed: Installed, service: Ser
     }
 }
 
-/// Create the hub's stream and buckets, as `ants init` does.
-async fn init(report: &mut Report, args: &SetupArgs, connection: &Connection<'_>, listen: Option<&str>) {
+/// Create the hub's stream and buckets, as `ants init` does; on the server the daemon of `managed`, a config file,
+/// runs, when given.
+async fn init(
+    report: &mut Report,
+    args: &SetupArgs,
+    connection: &Connection<'_>,
+    listen: Option<&str>,
+    managed: Option<&Path>,
+) {
     let step = "ants init";
     if args.dry_run {
         return report.step(Mark::Done, step, format!("stream and buckets on {}", connection.nats));
@@ -316,7 +470,14 @@ async fn init(report: &mut Report, args: &SetupArgs, connection: &Connection<'_>
     if let Some(listen) = listen
         && !listening(listen).await
     {
-        return report.step(Mark::Skip, step, format!("no server listens on {listen}; run `ants init` once one does"));
+        let then = match managed {
+            Some(config) if args.no_services => {
+                format!("start `ants daemon --config {}`, which runs it, then `ants init`", config.display())
+            }
+            Some(_) => "the daemon service starts it (its log tells why not), then run `ants init`".to_owned(),
+            None => "run `ants init` once one does".to_owned(),
+        };
+        return report.step(Mark::Skip, step, format!("no server listens on {listen}; {then}"));
     }
     let done = async {
         let nats = Nats::new(connection.nats, connection.creds, connection.js_domain)?;
@@ -364,15 +525,16 @@ async fn host_creds(report: &mut Report, args: &SetupArgs, connection: &Connecti
     }
 }
 
-/// Write the config file, unless there is one: the messenger, `harness` and the server given, and the ant of --ant.
-/// To a file there, only add the ant, when not listed; one naming no harness for its ants fails the step. Returns
-/// whether it changed the file.
+/// Write the config file, unless there is one: the messenger, `harness` and the server given, the `[nats_server]` of
+/// `managed`, and the ant of --ant. To a file there, only add the ant, when not listed; one naming no harness for its
+/// ants fails the step. Returns whether it changed the file.
 fn config_file(
     report: &mut Report,
     args: &SetupArgs,
     harness: Option<&str>,
     connection: &Connection<'_>,
     path: &Path,
+    managed: &Managed,
 ) -> bool {
     let step = "config";
     let shown = path.display();
@@ -406,6 +568,11 @@ fn config_file(
             let _ = writeln!(text, "nats = {}", quoted(connection.nats));
         }
         text.push_str("messenger = true\n");
+        let mut running = String::new();
+        if let Managed::New(conf) = managed {
+            text.push_str(&nats_server_table(conf, args.nats_server.as_deref()));
+            running = format!(", running nats-server -c {}", conf.display());
+        }
         if let Some((_, entry)) = &entry {
             text.push('\n');
             text.push_str(entry);
@@ -419,7 +586,7 @@ fn config_file(
             Ok(()) => report.step(
                 Mark::Done,
                 step,
-                format!("{shown} serving {listed} on harness {}", harness.unwrap_or("none")),
+                format!("{shown} serving {listed} on harness {}{running}", harness.unwrap_or("none")),
             ),
             Err(e) => report.step(Mark::Fail, step, format!("{e:#}")),
         }
@@ -452,6 +619,20 @@ fn config_file(
         Err(e) => report.step(Mark::Fail, step, format!("{e:#}")),
     }
     !report.dry_run
+}
+
+/// The `[nats_server]` table of a new config file: the daemon runs nats-server, `command` when given, with `conf`.
+fn nats_server_table(conf: &Path, command: Option<&Path>) -> String {
+    let mut table = format!(
+        "\n# The local nats-server, which `ants daemon` starts and stops itself; no other service runs it.\n\
+         [nats_server]\nconfig = {}\n",
+        quoted(&conf.to_string_lossy())
+    );
+    if let Some(command) = command {
+        let command = std::path::absolute(command).unwrap_or_else(|_| command.to_owned());
+        let _ = writeln!(table, "command = {}", quoted(&command.to_string_lossy()));
+    }
+    table
 }
 
 /// The `[[ant]]` entry of `name` working in `workdir`, checked as the daemon will check it: running the top-level
@@ -495,37 +676,49 @@ async fn harness_check(report: &mut Report, args: &SetupArgs, harness: Option<St
     }
 }
 
-/// Install and start the daemon service of the config file; reload it when running and the file changed.
+/// Install and start the daemon service of the config file; when running and the file changed, reload it, or
+/// restart it with `restart`, for what only a start reads (`[nats_server]`). Returns whether it runs.
 fn daemon_service(
     report: &mut Report,
     args: &SetupArgs,
     services: &mut Services,
     config: &Path,
     changed: bool,
+    restart: bool,
     values: impl Fn() -> Result<Values>,
-) {
+) -> bool {
     let step = "daemon service";
     if args.no_services {
-        return report.step(
-            Mark::Skip,
-            step,
-            format!("--no-services; run it: ants daemon --config {}", config.display()),
-        );
+        report.step(Mark::Skip, step, format!("--no-services; run it: ants daemon --config {}", config.display()));
+        return false;
     }
     let values = match values() {
         Ok(values) => values,
-        Err(e) => return report.step(Mark::Fail, step, format!("{e:#}")),
+        Err(e) => {
+            report.step(Mark::Fail, step, format!("{e:#}"));
+            return false;
+        }
     };
+    let (action, done) = if restart { (Action::Restart, "restarted") } else { (Action::Reload, "reloaded") };
     match services.install(Service::Daemon, config, &values, args.dry_run) {
-        Installed::Running if changed => match services.apply(Service::Daemon, Action::Reload, config) {
-            Outcome::Done(command) => report.step(Mark::Done, step, format!("running; reloaded: {command}")),
-            outcome => report.step(
-                Mark::Fail,
-                step,
-                format!("{}reload it: {}", service::failure(outcome), service::manual(Service::Daemon, Action::Reload)),
-            ),
+        Installed::Running if changed => match services.apply(Service::Daemon, action, config) {
+            Outcome::Done(command) => {
+                report.step(Mark::Done, step, format!("running; {done}: {command}"));
+                true
+            }
+            outcome => {
+                let manual = service::manual(Service::Daemon, action);
+                let how =
+                    format!("{}{} it: {manual}", service::failure(outcome), if restart { "restart" } else { "reload" });
+                report.step(Mark::Fail, step, how);
+                false
+            }
         },
-        outcome => _ = installed(report, step, outcome, Service::Daemon),
+        Installed::Running => {
+            report.step(Mark::Exists, step, "installed and running");
+            true
+        }
+        outcome => installed(report, step, outcome, Service::Daemon),
     }
 }
 
@@ -614,5 +807,97 @@ mod tests {
         assert_eq!(local_listen("127.0.0.1:5000").as_deref(), Some("127.0.0.1:5000"));
         assert_eq!(local_listen("nats://hub.example:4222"), None);
         assert_eq!(local_listen("tls://127.0.0.1:4222"), None);
+    }
+
+    fn managed_args(nats_server: Option<&str>) -> SetupArgs {
+        SetupArgs {
+            ant: None,
+            workdir: None,
+            harness: None,
+            config: None,
+            nats_server: nats_server.map(PathBuf::from),
+            managed_nats: true,
+            no_services: false,
+            no_harness: true,
+            no_completions: true,
+            dry_run: false,
+        }
+    }
+
+    #[test]
+    fn a_new_config_file_names_the_managed_nats_server_in_a_table_the_daemon_loads() {
+        let dir = ants_test_support::scratch_dir("setup-managed-table").canonicalize().unwrap();
+        let (conf, path) = (dir.join("leaf.conf"), dir.join("config.toml"));
+        let mut report = Report { dry_run: false, failed: 0 };
+        let connection = Connection { nats: crate::add::DEFAULT_NATS, creds: None, js_domain: None };
+        let args = managed_args(Some("bin/nats-server"));
+        let managed = Managed::New(conf.clone());
+        assert!(config_file(&mut report, &args, Some("copilot"), &connection, &path, &managed));
+        let nats_server = config::load(&path).unwrap().nats_server.unwrap();
+        assert_eq!(nats_server.config, conf);
+        assert_eq!(nats_server.command, std::path::absolute("bin/nats-server").unwrap());
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(config_file(&mut report, &managed_args(None), Some("copilot"), &connection, &path, &Managed::Off));
+        assert_eq!(config::load(&path).unwrap().nats_server, None, "without --managed-nats");
+        assert_eq!(report.failed, 0);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_daemon_owns_the_managed_nats_server_alone() {
+        let home = ants_test_support::scratch_dir("setup-managed-owner").canonicalize().unwrap();
+        let (conf, config) = (home.join("leaf.conf"), home.join("config.toml"));
+        std::fs::write(&conf, "listen: 127.0.0.1:4222\n").unwrap();
+        let services = || {
+            Services::answering(&home, |command| {
+                let stdout = match command {
+                    "id -u" => "501\n",
+                    c if c.starts_with("launchctl print") => "\tstate = running\n\tpid = 7\n",
+                    _ => "",
+                };
+                service::Ran { ok: true, stdout: stdout.to_owned(), stderr: String::new() }
+            })
+        };
+        let free = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let free_listen = free.local_addr().unwrap().to_string();
+        drop(free);
+        let busy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let busy_listen = busy.local_addr().unwrap().to_string();
+        let args = managed_args(Some("/bin/sh"));
+        let mut report = Report { dry_run: false, failed: 0 };
+        let mut owner = async |listen: &str| {
+            managed_nats(&mut report, &args, &mut services(), &conf, listen, &config).await.map_err(|e| e.to_string())
+        };
+
+        assert_eq!(owner(&free_listen).await, Ok(Managed::New(conf.clone())), "a new config file names it");
+        let listens = owner(&busy_listen).await.unwrap_err();
+        assert_eq!(listens, format!("--managed-nats: a server listens on {busy_listen} already"));
+
+        std::fs::write(&config, "harness = \"copilot\"\nmessenger = true\n").unwrap();
+        assert_eq!(owner(&busy_listen).await, Ok(Managed::Off), "a config file there is not edited");
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), "harness = \"copilot\"\nmessenger = true\n");
+        std::fs::write(&config, format!("harness = \"copilot\"\nmessenger = true\n{}", nats_server_table(&conf, None)))
+            .unwrap();
+        assert_eq!(owner(&busy_listen).await, Ok(Managed::Kept), "the daemon of the file there runs it");
+
+        let unit = if cfg!(target_os = "macos") {
+            home.join("Library/LaunchAgents/ants.nats.plist")
+        } else {
+            home.join(".config/systemd/user/ants-nats.service")
+        };
+        std::fs::create_dir_all(unit.parent().unwrap()).unwrap();
+        let runs = format!("ExecStart=\"/bin/nats-server\" -c \"{0}\"\n<string>{0}</string>\n", conf.display());
+        std::fs::write(&unit, runs).unwrap();
+        let two = owner(&free_listen).await.unwrap_err();
+        assert_eq!(
+            two,
+            format!("two owners for the nats-server of {}: the ants-nats service and the daemon", conf.display())
+        );
+        drop(owner);
+        assert_eq!(report.failed, 3, "the busy address, the file without the table, the ants-nats service");
+        drop(busy);
+        std::fs::remove_dir_all(&home).unwrap();
     }
 }

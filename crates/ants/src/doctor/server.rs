@@ -12,16 +12,18 @@ use async_nats::jetstream;
 
 use super::colony::{check_avatars, check_drift, check_harness_versions, check_versions};
 use super::leaf_node::Leaf;
+use super::services::start_server;
 use super::transports::same_address;
 use super::{Check, Connected, Identity, NETWORK_TIMEOUT, Setup, Status};
-use crate::service::{Service, Services, State};
 use crate::{auth, revoke};
 
-/// Connect, then check JetStream and the hub's stream and buckets.
+/// Connect, then check JetStream and the hub's stream and buckets. `managed` is the nats-server configuration the
+/// daemon runs itself ([`start_server`]).
 pub(super) async fn reach(
     setup: &Setup,
     identity: Option<&Identity>,
     leaf: Option<&Leaf>,
+    managed: Option<&Path>,
 ) -> (Vec<Check>, Option<Connected>) {
     let Some(identity) = identity else {
         return (vec![Check::skip("server", "no credentials to connect with")], None);
@@ -30,7 +32,7 @@ pub(super) async fn reach(
     let through_leaf = leaf.filter(|leaf| same_address(&setup.nats, &leaf.listen));
     let client = match connect(&setup.nats, setup.creds.as_deref(), &me.id).await {
         Ok(client) => client,
-        Err(e) => return (vec![unreached(setup, identity, through_leaf, e)], None),
+        Err(e) => return (vec![unreached(setup, identity, through_leaf, managed, e)], None),
     };
     let info = client.server_info();
     let via = if through_leaf.is_some() { "the leaf node " } else { "" };
@@ -114,7 +116,13 @@ pub(super) enum Unreached {
     Other(String),
 }
 
-pub(super) fn unreached(setup: &Setup, identity: &Identity, through_leaf: Option<&Leaf>, e: Unreached) -> Check {
+pub(super) fn unreached(
+    setup: &Setup,
+    identity: &Identity,
+    through_leaf: Option<&Leaf>,
+    managed: Option<&Path>,
+    e: Unreached,
+) -> Check {
     let check = "server";
     let url = &setup.nats;
     let set_nats = format!(
@@ -132,13 +140,7 @@ pub(super) fn unreached(setup: &Setup, identity: &Identity, through_leaf: Option
         }
         Unreached::Unreachable(e) => match through_leaf {
             Some(leaf) => {
-                let fix = match Services::local().state(Service::Nats, &leaf.path) {
-                    State::Stopped(start) => start,
-                    _ => format!(
-                        "nats-server -c {}, or scripts/install-units.sh to run it as a service",
-                        leaf.path.display()
-                    ),
-                };
+                let fix = start_server(setup, &leaf.path, managed);
                 Check::fail(check, format!("the leaf node at {url} does not answer: {e}"), vec![fix])
             }
             None => Check::fail(check, format!("{url} does not answer: {e}"), vec![set_nats]),

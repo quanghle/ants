@@ -131,7 +131,9 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     let identity = check_cli_creds(setup, now, &mut checks);
     let leaf = Leaf::read(&setup.leaf_config);
     let ants = loaded.as_ref().map_or_default(|l| l.ants.as_slice());
-    let reach = reach(setup, identity.as_ref(), leaf.as_ref().and_then(|l| l.as_ref().ok()));
+    // The nats-server configuration `ants daemon` runs itself, from `[nats_server]`.
+    let managed = loaded.as_ref().and_then(|l| l.nats_server.as_ref()).map(|n| n.config.as_path());
+    let reach = reach(setup, identity.as_ref(), leaf.as_ref().and_then(|l| l.as_ref().ok()), managed);
     let ants_checked = async {
         match &loaded {
             Some(loaded) => check_ants(&loaded.ants, &loaded.harnesses, setup, now).await,
@@ -162,15 +164,23 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     checks.push(resolver);
     checks.extend(check_backup(&setup.team));
     let human = identity.as_ref().map(|i| &i.me).filter(|me| me.role.is_human() && !me.id.is_human());
-    checks.extend(check_leaf(setup, leaf, ants, human, connected.as_ref(), now).await);
+    checks.extend(check_leaf(setup, leaf, ants, human, connected.as_ref(), managed, now).await);
     let (services, transports) = {
         let mut services = Services::under(setup.home.clone());
-        (check_services(setup, &mut services), installed_transports(&mut services))
+        (check_services(setup, &mut services, managed), installed_transports(&mut services))
     };
     checks.extend(services);
     checks.extend(check_webhooks(&setup.webhooks).await);
     checks.extend(check_transports(transports, now).await);
     checks
+}
+
+/// Whether `a` and `b` name the same file: their canonical paths when both are there, else their absolute paths.
+pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => std::path::absolute(a).ok().is_some_and(|a| std::path::absolute(b).is_ok_and(|b| a == b)),
+    }
 }
 
 /// Who the CLI connects as.
