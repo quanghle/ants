@@ -142,7 +142,9 @@ async fn shrink(
 }
 
 fn hint(key: &str) -> String {
-    format!("the ant is unlisted; its key is revoked with `ants auth revoke --key {key}` where the account key is")
+    format!(
+        "the ant is unlisted; its key is revoked with `ants auth revoke --key {key} --earlier` where the account key is"
+    )
 }
 
 struct Unlisted {

@@ -155,6 +155,19 @@ impl Change {
         }
         Ok(members)
     }
+
+    /// Take out of the ants to remove those `kept` does not hold that `left` tells left the members already, and
+    /// return them: a retire order drops a retired ant from the members in the registry, and the hub's outbox
+    /// sourcing, before the machine writes the uplink renewed without it, which may fail; and `ants auth leaf
+    /// --remove-ant` renews the uplink without it before `ants leaf outbox --remove-ant` runs. Issuing the uplink, or
+    /// admitting the members to the outbox, anew leaves them out all the same.
+    pub fn left_already(&mut self, kept: Option<&Members>, left: impl Fn(&UserId) -> bool) -> Vec<UserId> {
+        let (gone, remove) = std::mem::take(&mut self.remove.ants)
+            .into_iter()
+            .partition(|ant| !kept.is_some_and(|k| k.ants.contains(ant)) && left(ant));
+        self.remove.ants = remove;
+        gone
+    }
 }
 
 /// The members `ants auth leaf` names on its command line.
@@ -181,7 +194,8 @@ pub struct UplinkArgs {
     /// Add a webhook to the members of the last run (repeatable).
     #[arg(long = "add-webhook", value_name = "WEBHOOK", conflicts_with_all = UPLINK_LISTS)]
     add_webhooks: Vec<UserId>,
-    /// Remove an ant from the members of the last run (repeatable).
+    /// Remove an ant from the members of the last run (repeatable). An ant an earlier run had that left them since,
+    /// as a retire order drops a retired ant, stays out.
     #[arg(long = "remove-ant", value_name = "ANT", conflicts_with_all = UPLINK_LISTS)]
     remove_ants: Vec<UserId>,
     /// Remove a human from the members of the last run (repeatable).
@@ -230,7 +244,9 @@ pub struct OutboxArgs {
     /// Add a human to the members the uplink credentials carry (repeatable).
     #[arg(long = "add-human", value_name = "HUMAN", conflicts_with_all = OUTBOX_LISTS)]
     add_humans: Vec<UserId>,
-    /// Remove an ant from the members the uplink credentials carry (repeatable).
+    /// Remove an ant from the members the uplink credentials carry (repeatable). An ant they no longer carry that
+    /// the hub still takes from the outbox for, or that the team directory kept among the members once, as a retired
+    /// ant, stays out.
     #[arg(long = "remove-ant", value_name = "ANT", conflicts_with_all = OUTBOX_LISTS)]
     remove_ants: Vec<UserId>,
     /// Remove a human from the members the uplink credentials carry (repeatable).
@@ -284,6 +300,20 @@ pub fn retired(dir: &Path, machine: &Machine, ant: &UserId) -> Result<bool> {
     members.ants.retain(|a| a != ant);
     revoke::record(dir, &line)?;
     Ok(true)
+}
+
+/// The ants any line of the registry of `dir` kept among the members of `machine`'s leaf node.
+pub fn ever(dir: &Path, machine: &Machine) -> Result<Vec<UserId>> {
+    let name = auth::leaf_user(machine);
+    let mut ants: Vec<UserId> = Vec::new();
+    for line in revoke::issued(dir)?.into_iter().filter(|i| i.name == name && i.kind == Kind::Leaf) {
+        for ant in line.members.into_iter().flat_map(|m| m.ants) {
+            if !ants.contains(&ant) {
+                ants.push(ant);
+            }
+        }
+    }
+    Ok(ants)
 }
 
 /// The machines whose leaf node's members in the registry of `dir`, kept with the latest uplink key issued there,
@@ -398,8 +428,23 @@ mod tests {
         assert!(enrolled(&team, &"m2".parse().unwrap(), &p("dev-c")).is_err(), "no uplink of m2 issued");
 
         assert!(retired(&team, &m1, &p("dev-c")).unwrap());
-        assert_eq!(issued(&team, &m1).unwrap(), Some(kept), "the retired ant leaves");
+        assert_eq!(issued(&team, &m1).unwrap(), Some(kept.clone()), "the retired ant leaves");
         assert!(!retired(&team, &m1, &p("dev-c")).unwrap(), "gone already");
         assert!(!retired(&team, &"m2".parse().unwrap(), &p("dev-a")).unwrap(), "no uplink of m2 issued");
+
+        let mut remove = Change {
+            remove: Members { ants: users(&["dev-c", "dev-a", "dev-x"]), ..Members::default() },
+            ..Change::default()
+        };
+        let ever = ever(&team, &m1).unwrap();
+        assert_eq!(ever, users(&["dev-a", "dev-c"]));
+        assert_eq!(remove.left_already(Some(&kept), |a| ever.contains(a)), users(&["dev-c"]), "only one that left");
+        assert_eq!(remove.remove.ants, users(&["dev-a", "dev-x"]));
+        let err = remove.apply(&m1, Some(kept.clone()), || anyhow::anyhow!("unknown")).unwrap_err().to_string();
+        assert_eq!(err, "dev-x is no ant of m1", "an ant never a member");
+        let mut again =
+            Change { remove: Members { ants: users(&["dev-c"]), ..Members::default() }, ..Change::default() };
+        assert_eq!(again.left_already(Some(&kept), |a| ever.contains(a)), users(&["dev-c"]));
+        assert_eq!(again.apply(&m1, Some(kept.clone()), || anyhow::anyhow!("unknown")).unwrap(), kept);
     }
 }

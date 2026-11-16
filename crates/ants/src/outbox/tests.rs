@@ -555,6 +555,42 @@ fn with_humans_on_a_machine_no_two_admissions_overlap() {
     );
 }
 
+/// `ants leaf outbox M --remove-ant ANT` after the uplink credentials stopped carrying ANT: an ant the hub still takes
+/// from the outbox for, or the team directory kept among the members once, left already; any other is no ant of M.
+#[tokio::test]
+async fn removing_an_ant_the_uplink_no_longer_carries_takes_one_that_left_already() {
+    let Some(hub) = NatsServer::start() else { return };
+    let client = async_nats::connect(&hub.url).await.unwrap();
+    let js = jetstream::new(client);
+    let m1: Machine = "m1".parse().unwrap();
+    let p = |s: &str| -> UserId { s.parse().unwrap() };
+    let mut config = bus::ensure_stream(&js).await.unwrap().info().await.unwrap().config.clone();
+    config.sources = Some(admissions(&m1, &auth::members(&[p("dev-a"), p("dev-b")], &[UserId::human()]), 1));
+    js.update_stream(&config).await.unwrap();
+
+    let team = hub.dir().join("auth");
+    auth::init(&team).unwrap();
+    let on_m1 = auth::members(&[p("dev-b"), p("dev-c")], &[UserId::human()]);
+    auth::issue_leaf(&team, &m1, &on_m1, &[], EnrollApprover::Without, None, &hub.dir().join("leaf.creds")).unwrap();
+    assert!(members::retired(&team, &m1, &p("dev-c")).unwrap());
+
+    let carried = Members { ants: vec![p("dev-b")], humans: vec![UserId::human()], ..Members::default() };
+    let removing = |ants: &[&str]| Change {
+        remove: Members { ants: ants.iter().map(|a| p(a)).collect(), ..Members::default() },
+        ..Change::default()
+    };
+    let mut change = removing(&["dev-a", "dev-c", "dev-b"]);
+    let left = left_already(&js, &m1, &team, &mut change, Some(&carried)).await.unwrap();
+    assert_eq!(left, [p("dev-a"), p("dev-c")], "sourced by the hub, kept by the team directory once");
+    let set = change.apply(&m1, Some(carried.clone()), || anyhow::anyhow!("unknown")).unwrap();
+    assert_eq!(set, Members { ants: Vec::new(), ..carried.clone() }, "dev-b, carried, removed as ever");
+
+    let mut change = removing(&["dev-x"]);
+    assert!(left_already(&js, &m1, &team, &mut change, Some(&carried)).await.unwrap().is_empty());
+    let err = change.apply(&m1, Some(carried), || anyhow::anyhow!("unknown")).unwrap_err();
+    assert_eq!(err.to_string(), "dev-x is no ant of m1", "never a member");
+}
+
 #[test]
 fn the_attachments_store_takes_the_chunks_of_every_sender_for_one_human_else_each_ants_own() {
     let m1: Machine = "m1".parse().unwrap();

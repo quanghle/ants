@@ -101,7 +101,7 @@ async fn an_ant_moves_to_another_bus_with_its_identity_and_memories() {
     let creds = server.creds_as(&alice, Role::Human);
     let nats = crate::Nats::new(&server.url, Some(&creds), None).unwrap();
     let (_, js) = nats.connect("test").await.unwrap();
-    js.create_key_value(ants_daemon::hub::identities_config()).await.unwrap();
+    js.create_stream(ants_daemon::hub::identities_config()).await.unwrap();
     let kv = DirectKv::whole(&js, None, IDENTITIES_BUCKET).await.unwrap();
 
     let home = dir.join("home-a");

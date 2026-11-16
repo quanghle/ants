@@ -14,7 +14,7 @@ async fn a_record_is_created_only_when_absent() {
     let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
     let dev = Identity::new(&js, None, &p("dev-a")).await.unwrap();
     assert_eq!(dev.ensure().await.unwrap(), None, "no bucket yet");
-    js.create_key_value(hub::identities_config()).await.unwrap();
+    js.create_stream(hub::identities_config()).await.unwrap();
 
     let born = dev.ensure().await.unwrap().unwrap();
     assert_eq!((born.ant.as_str(), born.prompts, born.id.len()), ("dev-a", 0, 32));
@@ -37,7 +37,7 @@ async fn a_record_is_created_only_when_absent() {
 async fn prompts_are_counted_across_a_standby_takeover() {
     let Some(server) = NatsServer::start() else { return };
     let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
-    js.create_key_value(hub::identities_config()).await.unwrap();
+    js.create_stream(hub::identities_config()).await.unwrap();
     let (_, standby_js) = bus::connect(&server.url, None, None, &UserId::human(), "standby").await.unwrap();
     let serving = Identity::new(&js, None, &p("dev-a")).await.unwrap();
     let standby = Identity::new(&standby_js, None, &p("dev-a")).await.unwrap();
@@ -73,7 +73,7 @@ async fn a_moved_mark_drains_and_holds_the_ant_until_it_goes() {
     let dev = Identity::new(&js, None, &p("dev-a")).await.unwrap();
     assert_eq!(dev.read().await.unwrap(), None, "no bucket yet");
     assert!(!dev.is_moved().await);
-    js.create_key_value(hub::identities_config()).await.unwrap();
+    js.create_stream(hub::identities_config()).await.unwrap();
     assert_eq!(dev.read().await.unwrap(), None, "reading creates no record");
     let born = dev.ensure().await.unwrap().unwrap();
     let every = Duration::from_millis(50);

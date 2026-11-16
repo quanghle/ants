@@ -3,7 +3,8 @@
 //! is left as it is.
 //!
 //! An object whose stream info the credentials do not get, as the presence and identities buckets for every human's, cannot be
-//! checked: [`init`] creates it all the same, which changes nothing when it exists with the same settings.
+//! checked: [`init`] creates it all the same, which changes nothing when it exists with the same settings, or, for the
+//! identities bucket, whose stream each creation starts at a sequence of its own ([`identities_config`]), when it exists.
 
 use std::fmt;
 use std::time::Duration;
@@ -12,11 +13,11 @@ use ants_proto::{
     ATTACHMENT_CHUNK, ATTACHMENT_HEADROOM, ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, COLONY_BUCKET, COLONY_TTL,
     DEVICES_BUCKET, FILES_BUCKET, FILES_STREAM, HUMANS_BUCKET, IDENTITIES_BUCKET, LINKS_BUCKET, MACHINES_BUCKET,
     NOTIFY_BUCKET, OWNERS_BUCKET, PRESENCE_BUCKET, PRESENCE_TTL, REACTIONS_BUCKET, READ_BUCKET, SESSIONS_BUCKET,
-    STORED_INBOX_DESTINATION, STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, THREADS_BUCKET, WEBHOOK_RETENTION,
+    STORED_INBOX_DESTINATION, STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, THREADS_BUCKET, Uuid, WEBHOOK_RETENTION,
     WEBHOOKS_BUCKET,
 };
 use anyhow::{Context as _, Result, bail};
-use async_nats::jetstream::context::{GetStreamError, GetStreamErrorKind};
+use async_nats::jetstream::context::{CreateStreamError, CreateStreamErrorKind, GetStreamError, GetStreamErrorKind};
 use async_nats::jetstream::{self, ErrorCode, kv, stream};
 
 use crate::bus::{DUPLICATE_WINDOW, RETENTION};
@@ -129,7 +130,7 @@ impl Object {
             Self::Notify => Spec::Bucket(Box::new(notify_config())),
             Self::Devices => Spec::Bucket(Box::new(devices_config())),
             Self::Machines => Spec::Bucket(Box::new(machines_config())),
-            Self::Identities => Spec::Bucket(Box::new(identities_config())),
+            Self::Identities => Spec::Stream(Box::new(identities_config())),
         }
     }
 
@@ -149,11 +150,15 @@ impl Object {
     }
 
     /// Create the object. A watched bucket's room for [`MAX_CONSUMERS`], which a KV configuration cannot hold, follows
-    /// by an update of its stream.
+    /// by an update of its stream. The identities bucket there already is left as it is, though its first sequence
+    /// differs from the one drawn for it now.
     async fn create(self, js: &jetstream::Context) -> Result<()> {
         let store = match self.spec() {
             Spec::Stream(config) => {
-                return js.create_stream(*config).await.map(drop).with_context(|| format!("creating {self}"));
+                return match js.create_stream(*config).await {
+                    Err(e) if self == Self::Identities && exists(&e) => Ok(()),
+                    created => created.map(drop).with_context(|| format!("creating {self}")),
+                };
             }
             Spec::Bucket(config) => js.create_key_value(*config).await.with_context(|| format!("creating {self}"))?,
         };
@@ -185,6 +190,10 @@ enum Spec {
 
 fn not_found(e: &GetStreamError) -> bool {
     matches!(e.kind(), GetStreamErrorKind::JetStream(e) if e.error_code() == ErrorCode::STREAM_NOT_FOUND)
+}
+
+fn exists(e: &CreateStreamError) -> bool {
+    matches!(e.kind(), CreateStreamErrorKind::JetStream(e) if e.error_code() == ErrorCode::STREAM_NAME_EXIST)
 }
 
 /// What is wrong with an object on the hub.
@@ -373,9 +382,29 @@ pub fn machines_config() -> kv::Config {
     lasting_config(MACHINES_BUCKET, "The ants each machine's daemon serves, each record written by its machine")
 }
 
-/// The identities bucket ([`IDENTITIES_BUCKET`]): an ant's record lasts until `ants auth revoke` of the ant deletes it.
-pub fn identities_config() -> kv::Config {
-    lasting_config(IDENTITIES_BUCKET, "Each ant's identity: its id, birth, avatar and prompts, written by its daemon")
+/// The stream of the identities bucket ([`IDENTITIES_BUCKET`]), a KV bucket of history 1 whose entries never expire: an
+/// ant's record lasts until `ants auth revoke` of the ant deletes it. The stream starts at a random sequence below
+/// 2^53, drawn anew for each creation, so a bucket deleted and created again shares no sequence with the one before
+/// but by a chance of about one in 2^53 per message stored, and an ant's shared settings, signed for the sequence they
+/// are stored at ([`ants_proto::SharedSettings::sequence`]), cannot be put back at their sequence in the new one.
+pub fn identities_config() -> stream::Config {
+    // Lower bits of a v4 UUID's second half, all random. Past 2^53, JSON readers lose precision, and nats-server's
+    // file store fails near 2^62.
+    let first = Uuid::new_v4().as_u64_pair().1 & ((1 << 53) - 1);
+    stream::Config {
+        name: format!("KV_{IDENTITIES_BUCKET}"),
+        description: Some("Each ant's identity: its id, birth, avatar and prompts, written by its daemon".into()),
+        subjects: vec![format!("$KV.{IDENTITIES_BUCKET}.>")],
+        max_messages_per_subject: 1,
+        discard: stream::DiscardPolicy::New,
+        storage: stream::StorageType::File,
+        num_replicas: 1,
+        allow_direct: true,
+        allow_rollup: true,
+        deny_delete: true,
+        first_sequence: Some(first.max(1)),
+        ..Default::default()
+    }
 }
 
 /// The read markers of the humans ([`READ_BUCKET`]).
@@ -559,6 +588,31 @@ mod tests {
             assert_eq!(max == MAX_CONSUMERS, object.watched(), "{object} created with room for {max} consumers");
         }
         assert!(init(&js, |_| true).await.unwrap().is_empty());
+    }
+
+    /// The identities bucket deleted and created again starts at a sequence of its own, so a record signed for the
+    /// sequence it was stored at in the old stream ([`ants_proto::SharedSettings::sequence`]) cannot be put back there.
+    #[tokio::test]
+    async fn the_identities_bucket_created_again_shares_no_sequence_with_the_one_before() {
+        let Some(server) = NatsServer::start() else { return };
+        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        let identities = crate::direct_kv::DirectKv::new(&js, None, IDENTITIES_BUCKET).await.unwrap();
+        let key = "dev-a.settings";
+        let write = || identities.put_sequenced(key, None, |sequence| Ok(sequence.to_string().into_bytes()));
+        Object::Identities.create(&js).await.unwrap();
+        Object::Identities.create(&js).await.expect("the bucket there is left as it is");
+        assert!(write().await.unwrap());
+        let signed_for = identities.lookup_last(key).await.unwrap().1;
+
+        js.delete_stream(Object::Identities.stream_name()).await.unwrap();
+        Object::Identities.create(&js).await.unwrap();
+        let mut headers = async_nats::HeaderMap::new();
+        headers.insert("Nats-Expected-Last-Sequence", (signed_for - 1).to_string().as_str());
+        let subject = format!("$KV.{IDENTITIES_BUCKET}.{key}");
+        let put_back = js.publish_with_headers(subject, headers, signed_for.to_string().into()).await.unwrap().await;
+        assert!(put_back.is_err(), "put back at the sequence {signed_for} it was signed for");
+        assert!(write().await.unwrap());
+        assert_ne!(identities.lookup_last(key).await.unwrap().1, signed_for);
     }
 
     /// An object already there stays as it is, such as the sources `ants leaf outbox` adds to the stream.

@@ -131,7 +131,8 @@ impl Attempts {
     }
 
     /// Mark `envelope`, started, as awaiting a retry after a failed attempt ([`MessageMark::Retrying`]), right before
-    /// handing it back for one, so it can be withdrawn until its redelivery. A failure only leaves it started.
+    /// handing it back for one or holding it for a sign-in or a provider limit, so it can be withdrawn until it is
+    /// taken up again. A failure only leaves it started.
     pub async fn retrying(&self, envelope: &Envelope) {
         let key = message_mark_key(&self.ant, &envelope.id);
         let retrying = MessageMark::Retrying { thread_id: envelope.thread_id.clone(), at: chrono::Utc::now() };

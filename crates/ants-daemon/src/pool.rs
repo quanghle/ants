@@ -638,9 +638,9 @@ pub(crate) mod fake {
     /// cost, `tokens N` reports N tokens in the response, and `stall` replies `partial` and waits for session/cancel.
     /// `overflows` fails as a prompt that outgrew the context window, and so does `overflow` unless the session was
     /// rebuilt for it. While [`Log::signed_out`] is set, sessions and prompts fail as with a harness that is not signed
-    /// in; while [`Log::limited`] is, prompts stream its text and fail with it, or end with it as their reply; while
-    /// [`Log::broken`] is, the handshake fails; while [`Log::takes_images`] is, harnesses starting take images, which
-    /// they log. They can load stored sessions.
+    /// in; while [`Log::limited`] is, prompts start their `tools N`, then stream its text and fail with it, or end with
+    /// it as their reply; while [`Log::broken`] is, the handshake fails; while [`Log::takes_images`] is, harnesses
+    /// starting take images, which they log. They can load stored sessions.
     pub fn launch() -> (Launch, Arc<Mutex<Log>>, Arc<Semaphore>) {
         launch_with(Sessions::Loadable)
     }
@@ -744,6 +744,14 @@ pub(crate) mod fake {
                             }
                             log.prompted += 1;
                             if let Some(limited) = &log.limited {
+                                let ContentBlock::Text(t) = &prompt.prompt[0] else { unreachable!() };
+                                // Tools run before the limit is met.
+                                let words: Vec<&str> = t.text.split_whitespace().collect();
+                                let tools = words.windows(2).find(|w| w[0] == "tools").and_then(|w| w[1].parse().ok());
+                                for i in 0..tools.unwrap_or(0u64) {
+                                    let call = SessionUpdate::ToolCall(ToolCall::new(format!("call-{i}"), "tool"));
+                                    cx.send_notification(SessionNotification::new(prompt.session_id.clone(), call))?;
+                                }
                                 cx.send_notification(chunk(&prompt.session_id, limited))?;
                                 if log.limited_reply {
                                     return responder.respond(PromptResponse::new(StopReason::EndTurn));

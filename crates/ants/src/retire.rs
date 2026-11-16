@@ -331,7 +331,7 @@ pub async fn retire(
         ),
         Err(_) => {
             let revoke = match &key {
-                Some(key) => format!("ants auth revoke --key {key}"),
+                Some(key) => format!("ants auth revoke --key {key} --earlier"),
                 None => format!("ants auth revoke {name}"),
             };
             println!(
