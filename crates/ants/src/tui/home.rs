@@ -38,7 +38,7 @@ pub enum Why {
     Message,
     /// An unread post @mentioning the human.
     Mention,
-    /// An ant answered on a thread the human owns.
+    /// An ant answered on a thread the human owns, and the human has not read the answer yet.
     Finished,
 }
 
@@ -194,6 +194,7 @@ fn unsnoozed(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
         }
         if data.finished(thread)
             && let Some(latest) = data.facts.get(thread).and_then(|f| f.latest.as_ref())
+            && data.unread(latest.seq)
         {
             items.push(item(Why::Finished, thread, latest.at, format!("{} answered", latest.from), &latest.from));
         }
@@ -507,6 +508,22 @@ mod tests {
         m.key(Key::End, at(8));
         assert_eq!(m.key(Key::Char('f'), at(8)), Some(Action::Open(done)));
         assert!(m.bar.focused, "the bar open to follow up on the thread");
+    }
+
+    #[test]
+    fn a_finished_thread_leaves_home_once_its_answer_is_read_and_stays_in_work() {
+        let done = ThreadId::generate();
+        let mut m = model();
+        let mut opening = message(1, &done, "alice", "dev-a", "deploy");
+        opening.owner = Some(user("alice"));
+        m.stored(vec![opening, message(2, &done, "dev-a", "alice", "deployed")], at(2));
+        let whys: Vec<Why> = items(&m.data, at(3)).into_iter().map(|i| i.why).collect();
+        assert_eq!(whys, [Why::Finished]);
+
+        m.data.marker = Some(ants_proto::ReadMarker { below: 2, read: [].into() });
+        assert!(items(&m.data, at(3)).is_empty(), "read on any device, it leaves home");
+        assert!(m.data.finished(&done));
+        assert_eq!(m.data.state(&done), crate::tui::work::ThreadState::WaitingOnMe);
     }
 
     #[test]
