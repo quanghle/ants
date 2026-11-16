@@ -82,7 +82,7 @@ build() (
     cp -R "$root/.cargo" "$root/crates" "$context/"
     mkdir -p "$context/contrib"
     cp -R "$root/contrib/apple-container" "$root/contrib/launchd" "$root/contrib/systemd" "$context/contrib/"
-    container build --cpus 4 --memory 4g --tag "$image" --file "$context/contrib/apple-container/Containerfile" \
+    container build --cpus 4 --memory 8g --tag "$image" --file "$context/contrib/apple-container/Containerfile" \
         --build-arg "COPILOT_VERSION=${ANTS_DEMO_COPILOT_VERSION:-1.0.112}" \
         --build-arg "BD_VERSION=${ANTS_DEMO_BD_VERSION:-v0.8.0}" "$context"
 )

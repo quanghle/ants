@@ -60,6 +60,17 @@ creds = "/demo/auth/host-$node.creds"
 max_memory_store = "64MB"
 max_file_store = "1GB"
 
+# Copilot CLI's native JSON-RPC server through the Copilot SDK, in place of ACP: it runs its tools unasked.
+[harnesses.copilot]
+command = "/usr/local/bin/copilot"
+protocol = "copilot-sdk"
+sign_in = "copilot login"
+env = { COPILOT_AUTO_UPDATE = "false" }
+
+[harnesses.copilot.context]
+default = { args = ["--context", "default"] }
+long_context = { args = ["--context", "long_context"] }
+
 [[ant]]
 name = "$node-ant"
 creds = "/demo/auth/$node-ant.creds"
@@ -77,22 +88,26 @@ if [ "$node" = hub ]; then
 tasks = "Track tasks and durable memories in bd (BD_DB names the database). Start with bd prime. Use bd ready, bd create, bd claim, bd close for tasks; bd remember to store a memory and bd memories to search them."
 env = { BD_DB = "/demo/work/.bd/bd.db" }
 
-# The assistant acts with the human's privileges, so its Copilot asks before running tools: the daemon's own MCP
-# tools (server `ants`) run unasked; shell commands, edits and fetches meet its allow rules and the human's approval.
-[harnesses.copilot-gated]
-command = "copilot"
-args = ["--acp", "--allow-tool=ants"]
+# The assistant acts with the human's privileges, and a native harness runs its tools unasked, so the model gets
+# only Copilot's file reading and search tools and the ants MCP tools: no shell, edits or web search. mcp:* also
+# admits the built-in GitHub MCP server, which the CLI's server starts regardless of --disable-builtin-mcps, so its
+# tools are excluded by name.
+[harnesses.copilot-assistant]
+command = "/usr/local/bin/copilot"
+protocol = "copilot-sdk"
 sign_in = "copilot login"
-quota_exhausted = [
-    "premium request",
-    "ai credits",
-    "weekly rate limit",
-    "used all your copilot free",
-    "free_tier_limit",
-    "overage_limit",
-    "spend_limit_reached",
+args = [
+    "--available-tools", "view", "grep", "glob", "mcp:*",
+    "--excluded-tools", "web_search",
+    "github-mcp-server-actions_get", "github-mcp-server-actions_list", "github-mcp-server-get_commit",
+    "github-mcp-server-get_copilot_space", "github-mcp-server-get_file_contents", "github-mcp-server-get_job_logs",
+    "github-mcp-server-issue_read", "github-mcp-server-list_branches", "github-mcp-server-list_commits",
+    "github-mcp-server-list_copilot_spaces", "github-mcp-server-list_issues", "github-mcp-server-list_pull_requests",
+    "github-mcp-server-pull_request_read", "github-mcp-server-search_code", "github-mcp-server-search_issues",
+    "github-mcp-server-search_pull_requests", "github-mcp-server-search_repositories",
+    "github-mcp-server-search_users",
 ]
-context_overflow = ["model_max_prompt_tokens_exceeded", "prompt token count of"]
+env = { COPILOT_AUTO_UPDATE = "false" }
 EOF
     if [ ! -f /demo/work/.bd/bd.db ]; then
         bd init --prefix demo -C /demo/work
@@ -148,7 +163,7 @@ done
 if [ "$node" = hub ]; then
     ants init --creds /demo/auth/human.creds
     ants assistant enable --dir /demo/auth --creds /demo/auth/human.creds --config /demo/config.toml \
-        --home /demo/assistant --harness copilot-gated
+        --home /demo/assistant --harness copilot-assistant
 fi
 ants daemon --config /demo/config.toml --upgrade-check 0 &
 daemon_pid=$!

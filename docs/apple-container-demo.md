@@ -12,7 +12,8 @@ flowchart TD
 ```
 
 Each node is a separate Linux VM/container with its own NATS server, persistent ext4 volume, workdir, Copilot sign-in and
-one `ants daemon` serving exactly one ant. The built-in messenger is disabled. The leaves use scoped NKey/JWT uplinks
+one `ants daemon` serving exactly one ant. Every ant runs Copilot through its
+[native protocol](config.md#harness-protocols) (`protocol = "copilot-sdk"`) rather than ACP. The built-in messenger is disabled. The leaves use scoped NKey/JWT uplinks
 and local JetStream domains `leaf-a` and `leaf-b`. Only the hub holds the team signing keys. The demo human `human` is
 an [admin](auth.md#admins), and each node's daemon runs with
 [host credentials](auth.md#machine-host-credentials) for its machine (`hub`, `leaf-a`, `leaf-b`), so admin orders such as
@@ -20,9 +21,10 @@ an [admin](auth.md#admins), and each node's daemon runs with
 [bd](https://github.com/quanghle/bd-sync): its `BD_DB` names `/demo/work/.bd/bd.db`, created on the hub's first start,
 and its `tasks` memory says to use bd. The hub also runs `human`'s [personal assistant](auth.md#dedicated-assistant),
 `human-assistant`, enabled on every hub start (`ants assistant enable`, which keeps what earlier runs left), working in
-`/demo/assistant`. It runs on the harness `copilot-gated`: Copilot without `--allow-all`, so its shell commands, edits
-and fetches reach the daemon's allow rules (`read`, `search`, `think`) and `human`'s approval, while the daemon's own
-MCP tools (`--allow-tool=ants`) run unasked. This online demo requires
+`/demo/assistant`. A native harness runs its tools unasked, so the daemon's allow rules and `human`'s approvals do
+not apply; instead the assistant's harness, `copilot-assistant`, limits the model to Copilot's `view`, `grep` and
+`glob` and the daemon's MCP tools (`--available-tools`), and excludes web search and the built-in GitHub MCP server's
+tools by name (`--excluded-tools`): no shell, edits or fetches. This online demo requires
 the hub to remain reachable; it does not provision [store-and-forward outboxes](transport.md#store-and-forward).
 
 ## Requirements
@@ -48,7 +50,7 @@ scripts/demo-apple-containers.sh up
 scripts/demo-apple-containers.sh smoke
 ```
 
-The build VM gets four CPUs and 4 GiB of memory. The first build downloads dependencies and compiles a Linux release
+The build VM gets four CPUs and 8 GiB of memory, which the release profile's fat LTO link needs. The first build downloads dependencies and compiles a Linux release
 binary. `up` also builds when the image is absent; rerun `build` after source changes. The smoke check verifies all four
 live Copilot-backed ants, the assistant's grant and their MCP sockets, pauses and resumes each ant by admin order from the hub, checks that `hub-ant`'s bd database reads (`ants ant memories`),
 then sends notes
@@ -56,7 +58,7 @@ from every node, reading them from every other node through the hub. It makes no
 sign-in.
 
 Each container gets two CPUs, 2 GiB of memory and a sparse 4 GiB named volume. Linux-native volumes support the Unix
-socket permissions used by the ACP MCP bridge. A dedicated network connects the nodes; no ports are published on the
+socket permissions used by the daemon's MCP bridge. A dedicated network connects the nodes; no ports are published on the
 host. NATS client ports and daemon metrics listen only on each container's loopback interface. The hub's authenticated
 leaf port listens on the demo network. Production NATS configuration, services and credentials stay untouched.
 
@@ -76,7 +78,7 @@ scripts/demo-apple-containers.sh ants hub ask --wait @hub-ant \
   "Ask leaf-a-ant and leaf-b-ant to identify their nodes, then summarize both replies."
 ```
 
-The default Copilot model is left unchanged. The node ants' Copilot runs tools unasked, as with the built-in harness elsewhere (the assistant's asks); no
+The default Copilot model is left unchanged. The node ants' Copilot runs every tool unasked, the assistant only its restricted set; no
 host directories are mounted into running nodes. Do not copy production secrets or repositories into the demo workdirs.
 Authentication is intentionally interactive: host GitHub tokens and Copilot configuration are
 not copied or forwarded. Sign-in data stays under `/demo/home/` in each node's volume, potentially in plaintext where no
