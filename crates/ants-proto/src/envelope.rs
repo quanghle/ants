@@ -1,3 +1,8 @@
+//! Messages: the [`Envelope`] between ants, or between an ant and a human, on [`crate::subject::inbox`]
+//! (`ants.inbox.<to>.<from>`), with its replies, follow-ups and summary requests ([`SummaryRequest`]); the
+//! [`NotesPost`] on a thread's shared notes ([`crate::subject::notes`]), which the `ANTS` stream keeps too; and the
+//! @mentions of a text ([`parse_mentions`]).
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

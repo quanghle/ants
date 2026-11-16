@@ -1,3 +1,7 @@
+//! The [`Error`] of building and checking what travels: an invalid id, machine name, title, question, answer or
+//! attachment, a body naming another user or channel than the subject or key it came on, and a thread with no turns
+//! left.
+
 #[cfg(doc)]
 use crate::subject;
 use crate::{ChannelId, MAX_TITLE, ThreadId, UserId};

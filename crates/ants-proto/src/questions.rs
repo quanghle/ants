@@ -1,3 +1,6 @@
+//! Questions an ant asks a human with options to pick from: the [`Question`] an [`crate::Envelope`] carries, and the
+//! [`Answer`] of the reply, which picks an option by its number or types a text ([`Choice`]).
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

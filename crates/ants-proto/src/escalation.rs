@@ -1,3 +1,7 @@
+//! Escalations: the [`Escalation`] of an issue an ant could not settle on a thread, which climbs escalation chains one
+//! level per hop ([`Hop`]) in an [`crate::Envelope`], and each ant's [`ChainEntry`] in [`crate::CHAINS_BUCKET`], which
+//! keeps its `escalate_to` after its colony entry expires.
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

@@ -1,3 +1,7 @@
+//! Changes an ant asks for to a channel it owns: the [`ChannelAdminRequest`] on [`crate::subject::chanadm`]
+//! (`ants.chanadm.<channel>.<ant>`, core NATS, not stored), which the channel manager (`ants channel serve`) applies to
+//! the channel's entry, and the manager's [`ChannelAdminReply`]: the entry as changed, or why it changed nothing.
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

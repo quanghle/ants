@@ -1,3 +1,7 @@
+//! What makes an ant the same ant on every machine: its [`AntIdentity`] record in [`crate::IDENTITIES_BUCKET`], and the
+//! [`Avatar`] its seed derives, a pixel-art head that grows with the ant's [`Stage`] and a one-line ASCII face, which
+//! the CLI draws.
+
 use std::fmt;
 
 use chrono::{DateTime, Utc};

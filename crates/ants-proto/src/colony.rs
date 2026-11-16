@@ -1,3 +1,7 @@
+//! The colony: the [`ColonyEntry`] of each ant served, in [`crate::COLONY_BUCKET`], which the serving daemon keeps
+//! alive with heartbeats: its machine, harness, version, activity and what holds it back (a sign-in, a provider limit,
+//! a failing harness, low memory, a pause). `ants colony` lists it, and daemons find escalation chains in it.
+
 use std::fmt;
 
 use chrono::{DateTime, Utc};

@@ -1,3 +1,7 @@
+//! Who is a human: a human's [`HumanEntry`] in [`crate::HUMANS_BUCKET`], which only humans write; the team's [`Humans`]
+//! read from it, which give a sender its [`crate::Role`]; and whether a user JWT's publish allowances are a human's
+//! ([`writes_human_entries`]).
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 

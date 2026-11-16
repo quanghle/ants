@@ -1,3 +1,7 @@
+//! Live progress of an ant on a thread: the [`StatusEvent`] its daemon publishes on [`crate::subject::status`]
+//! (`ants.status.<ant>.<thread>`, core NATS, never stored), which the CLI follows (`ants watch`): its [`State`], text,
+//! tool calls, plan, tool requests and escalations ([`StatusUpdate`]).
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

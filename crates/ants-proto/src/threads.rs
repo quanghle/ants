@@ -1,3 +1,7 @@
+//! What humans keep of threads in [`crate::THREADS_BUCKET`]: a thread's [`ThreadTitle`], TL;DR ([`ThreadSummary`]) and
+//! done mark ([`ThreadDone`]), shared by every human, and each human's snoozes ([`ThreadSnoozes`]) and pins and
+//! archives ([`ThreadMarks`]), shared by its devices.
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 

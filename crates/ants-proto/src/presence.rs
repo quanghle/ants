@@ -1,3 +1,7 @@
+//! A human's devices: each one's id ([`DeviceId`]) and encryption key ([`DeviceKey`]), tags of its user JWT; its
+//! [`Presence`] in [`crate::PRESENCE_BUCKET`] while it follows the inbox or tool requests ([`Following`]); and the
+//! directory of device keys in [`crate::DEVICES_BUCKET`], with its revocation records ([`DeviceRevocation`]).
+
 use std::fmt;
 use std::str::FromStr;
 

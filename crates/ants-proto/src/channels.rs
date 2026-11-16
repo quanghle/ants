@@ -1,3 +1,7 @@
+//! Channels: a channel's [`ChannelEntry`] in [`crate::CHANNELS_BUCKET`], with its members, messenger and owner, and the
+//! [`ChannelPost`] on [`crate::subject::chan`] (`ants.chan.<channel>.<from>`), which the `ANTS` stream keeps: which
+//! members a post wakes or notifies, and how posts spend the thread's turn budget.
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

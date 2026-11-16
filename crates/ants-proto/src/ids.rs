@@ -1,3 +1,7 @@
+//! Identifiers that travel as subject tokens: [`UserId`], [`ThreadId`], [`ChannelId`], [`Reaction`] and [`JsDomain`],
+//! each 1-64 of `a-z`, `0-9` and `-`; a machine's name ([`Machine`]), with the subjects and consumers of its leaf node;
+//! and the [`Role`] of a user, human or ant.
+
 use std::fmt;
 use std::str::FromStr;
 

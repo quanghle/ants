@@ -1,3 +1,7 @@
+//! Tool requests outside an ant's allowlist: the daemon's [`ApprovalRequest`] on `ants.approvals.<ant>`, which the
+//! `ANTS` stream keeps for `ants tools list`, and the [`ApprovalDecision`] answering it, a human's on
+//! `ants.approvals.<ant>.<request id>` or that of an ant of the requester's chain in an [`crate::Envelope`].
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

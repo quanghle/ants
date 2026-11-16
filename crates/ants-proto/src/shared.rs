@@ -1,3 +1,8 @@
+//! An ant's shared settings ([`SharedSettings`]): its role and core memories ([`SHARED_FIELDS`]), the same on every
+//! machine serving it, in [`crate::IDENTITIES_BUCKET`], put by host connections and admins' settings orders, signed
+//! with the ant's own credentials for the stream sequence and bucket [`incarnation`] it is stored at, so a reader
+//! refuses one put back ([`SharedSettings::verify`]).
+
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};

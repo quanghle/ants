@@ -1,3 +1,8 @@
+//! Asking the daemons of an ant, over core NATS, never stored, to cancel a prompt or withdraw a message
+//! ([`CancelRequest`], `ants cancel`) or which messages they hold ([`QueueRequest`], `ants queue`), and each daemon's
+//! [`CancelReply`] or [`QueueReply`]; and the [`MessageMark`] in [`crate::ATTEMPTS_BUCKET`] of what became of a
+//! message: started, retrying, withdrawn (`ants withdraw`) or finished.
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

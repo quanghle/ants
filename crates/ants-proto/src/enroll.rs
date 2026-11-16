@@ -1,3 +1,8 @@
+//! Credentials from the machine holding the team's account key, over core NATS, not stored: a machine's
+//! [`EnrollRequest`] on [`crate::subject::enroll`] for an ant's credentials, and its host's if it lacks them, answered
+//! with an [`EnrollReply`]; and a holder's [`RenewRequest`] on [`crate::subject::renew`] (`ants renew`), answered with
+//! a [`RenewReply`].
+
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};

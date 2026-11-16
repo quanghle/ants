@@ -1,3 +1,7 @@
+//! Ants added from a template: a manager ant's [`AntRequest`] on [`crate::subject::antreq`] (`ants.antreq.<manager>`)
+//! for a new ant, or to retire one it added, and the [`AntReply`] of `ants signer`, on the machine holding the team's
+//! account key, on [`crate::subject::antreq_reply`]. Core NATS, not stored.
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 

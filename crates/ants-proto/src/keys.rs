@@ -1,3 +1,8 @@
+//! Names of the JetStream consumers, reply prefixes and KV keys of ants: each user's readers of the `ANTS` stream, and
+//! the keys of [`crate::SESSIONS_BUCKET`], [`crate::ATTEMPTS_BUCKET`], [`crate::THREADS_BUCKET`],
+//! [`crate::WEBHOOKS_BUCKET`] and other buckets, most starting with the user they belong to, so credentials can be
+//! confined to their own.
+
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};

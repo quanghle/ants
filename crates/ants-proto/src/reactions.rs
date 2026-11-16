@@ -1,3 +1,7 @@
+//! Reactions to messages: each a [`ReactionEntry`] in [`crate::REACTIONS_BUCKET`], which no ant reads or writes, and an
+//! ant's [`ReactionsRequest`] on [`crate::subject::reactions`] or [`crate::subject::react`] (core NATS, not stored) to
+//! read them or change its own, which `ants signer` or a human's `ants webhook serve` answers ([`ReactionsReply`]).
+
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};

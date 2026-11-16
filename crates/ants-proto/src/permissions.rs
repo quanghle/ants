@@ -1,3 +1,7 @@
+//! What each kind of credentials may publish and subscribe to ([`Permissions`]), which `ants auth` puts in the user
+//! JWTs it issues: a human's or an ant's, an assistant's, a leaf node's uplink, a machine's host connection, a
+//! webhook's, an observer's, and those of enrollment, bootstrap and the services, versioned by [`PERMISSIONS_VERSION`].
+
 use std::fmt;
 
 use serde::{Deserialize, Serialize};

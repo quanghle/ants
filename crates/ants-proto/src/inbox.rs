@@ -1,3 +1,7 @@
+//! A human's state shared by all its devices, each updated with compare-and-set: the inbox messages and channel posts
+//! it read ([`ReadMarker`], [`ChannelReadMarkers`]) in [`crate::READ_BUCKET`], and the notifications it holds back
+//! ([`NotifyPrefs`], [`HeldNotices`]) in [`crate::NOTIFY_BUCKET`].
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 

@@ -1,3 +1,6 @@
+//! Dead letters: the [`DeadLetter`] of a message an ant's daemon gave up on, published on [`crate::subject::dead`]
+//! (`ants.dead.<ant>`), where the `ANTS` stream keeps it until a human replays or drops it (`ants dead`).
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 

@@ -1,3 +1,7 @@
+//! Machines: a machine's [`MachineRecord`] in [`crate::MACHINES_BUCKET`], the ants its daemon serves, put with the
+//! machine's host credentials; the [`AccountHolder`] record naming where the team's account key is; and the names of a
+//! machine's host connection ([`host_user`], [`host_inbox_prefix`], [`admin_consumer`]).
+
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
