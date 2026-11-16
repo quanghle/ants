@@ -330,7 +330,6 @@ async fn assistant_sealing(
 }
 
 /// Serve the ant's inbox until Ctrl-C or `stop`, or until another daemon takes over its colony entry.
-#[allow(clippy::too_many_lines)]
 async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Served> {
     let allow = Allowlist::parse(&config.policy.allow)?;
     let Some((client, js)) = connect(&config.connection, &config.ant, stop).await? else {
@@ -345,41 +344,15 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
     workload.set_paused(config.pause.get());
     workload.set_drift(config.drift.get());
     let _connected = metrics.connected(client.clone(), workload.clone());
-    let mut entry = colony::entry(config).await;
-    let mut claimed = None;
-    if config.presence.defer_to_others {
-        let Some(revision) = wait_for_turn(&js, &mut entry, stop).await? else {
-            return Ok(Served::Stopped);
-        };
-        claimed = Some(revision);
-    }
+    let Some((entry, claimed)) = take_turn(config, &js, stop).await? else {
+        return Ok(Served::Stopped);
+    };
     let account = || crate::humans::account(config.connection.creds.as_deref());
     let humans = Registry::new(config.policy.human.clone()).verifying_grants(account());
     let _watching = humans.watch(js.clone(), crate::humans::RETRY);
-    let redactor = std::sync::Arc::new(redactor(config.policy.redact, &config.harness));
-    let (approver, policy) = approval_policy(&config.ant, &config.policy, &client, &js, &humans, allow, &redactor);
-    let outbox = redacting_outbox(crate::mcp::jetstream_outbox(js.clone()), redactor.clone());
-    let colony = crate::mcp::jetstream_colony(js.clone());
-    let reading = Reading::daemon(crate::creds::is_assistant(config.connection.creds.as_deref()));
-    let notes = crate::notes::JetStreamNotes::new(js.clone(), config.ant.clone()).reading(reading);
-    let notes = std::sync::Arc::new(RedactingNotes { notes, redactor: redactor.clone() });
+    let Services { redactor, approver, colony, reading, notes, sessions_kv, ledger, escalator, identity, mcp, launch } =
+        services(config, &client, &js, &humans, allow).await?;
     let js_domain = config.connection.js_domain.as_ref();
-    let sessions_kv = bus::ensure_sessions(&js, js_domain, &config.ant).await?;
-    let ledger = ledger(&config.ant, &config.spending, &sessions_kv);
-    let escalator = escalator(config, &js, &colony, &humans, &ledger, &redactor);
-    let identity = ant_records(config, &js).await;
-    let mut mcp = Mcp::start(
-        config.ant.clone(),
-        &config.storage.home,
-        outbox,
-        colony.clone(),
-        notes.clone(),
-        humans.clone(),
-        Some(escalator.clone()),
-    )
-    .await?;
-    connect_mcp(&mut mcp, config, &client, &js, &redactor, &humans).await?;
-    let launch = launch(&config.harness, policy, &mcp);
     let stream = bus::open_stream(&js, &config.ant).await?;
     let threads = Threads::new(js.clone(), config.ant.clone(), sessions_kv.clone()).reading(reading);
     let webhooks = Webhooks::new(js.clone());
@@ -443,6 +416,73 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         tracing::info!("stopped");
     }
     Ok(served)
+}
+
+/// The ant's colony entry, and the revision of it claimed when the daemon defers to others ([`wait_for_turn`]):
+/// `None` when `stop` comes first.
+async fn take_turn(
+    config: &Config,
+    js: &jetstream::Context,
+    stop: &Stop,
+) -> Result<Option<(ants_proto::ColonyEntry, Option<u64>)>> {
+    let mut entry = colony::entry(config).await;
+    if !config.presence.defer_to_others {
+        return Ok(Some((entry, None)));
+    }
+    let Some(revision) = wait_for_turn(js, &mut entry, stop).await? else {
+        return Ok(None);
+    };
+    Ok(Some((entry, Some(revision))))
+}
+
+/// What the ant's inbox serves with on the bus, besides its harness pool, in the order [`services`] builds it.
+struct Services {
+    redactor: std::sync::Arc<Redactor>,
+    approver: NatsApprover,
+    colony: Colony,
+    reading: Reading,
+    notes: std::sync::Arc<RedactingNotes<crate::notes::JetStreamNotes>>,
+    sessions_kv: crate::direct_kv::DirectKv,
+    ledger: std::sync::Arc<Ledger>,
+    escalator: std::sync::Arc<Escalator>,
+    identity: Option<Identity>,
+    mcp: Mcp,
+    /// How the harnesses start, with the ant's MCP server and its tool requests going to `approver`.
+    launch: Launch,
+}
+
+/// Set up the ant's redactor, approvals, notes, spending ledger, escalator and records, and start its MCP server.
+async fn services(
+    config: &Config,
+    client: &async_nats::Client,
+    js: &jetstream::Context,
+    humans: &Registry,
+    allow: Allowlist,
+) -> Result<Services> {
+    let redactor = std::sync::Arc::new(redactor(config.policy.redact, &config.harness));
+    let (approver, policy) = approval_policy(&config.ant, &config.policy, client, js, humans, allow, &redactor);
+    let outbox = redacting_outbox(crate::mcp::jetstream_outbox(js.clone()), redactor.clone());
+    let colony = crate::mcp::jetstream_colony(js.clone());
+    let reading = Reading::daemon(crate::creds::is_assistant(config.connection.creds.as_deref()));
+    let notes = crate::notes::JetStreamNotes::new(js.clone(), config.ant.clone()).reading(reading);
+    let notes = std::sync::Arc::new(RedactingNotes { notes, redactor: redactor.clone() });
+    let sessions_kv = bus::ensure_sessions(js, config.connection.js_domain.as_ref(), &config.ant).await?;
+    let ledger = ledger(&config.ant, &config.spending, &sessions_kv);
+    let escalator = escalator(config, js, &colony, humans, &ledger, &redactor);
+    let identity = ant_records(config, js).await;
+    let mut mcp = Mcp::start(
+        config.ant.clone(),
+        &config.storage.home,
+        outbox,
+        colony.clone(),
+        notes.clone(),
+        humans.clone(),
+        Some(escalator.clone()),
+    )
+    .await?;
+    connect_mcp(&mut mcp, config, client, js, &redactor, humans).await?;
+    let launch = launch(&config.harness, policy, &mcp);
+    Ok(Services { redactor, approver, colony, reading, notes, sessions_kv, ledger, escalator, identity, mcp, launch })
 }
 
 /// Wait while the ant's identity record is marked moved, so no daemon starts a moved ant: false when `stop` comes
