@@ -164,7 +164,7 @@ fn shrink_and_signal(conf: &std::path::Path, asked: &str, shrunk: &str) -> anyho
 /// so the ant reaches the hub through it; a retire order retires it the same way, the signer renewing the uplink
 /// without it and dropping it from the leaf's members and the hub's outbox sourcing.
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines, reason = "one scenario: the order, the renewed uplink, then the ant behind it")]
 async fn an_add_order_on_a_leaf_node_s_machine_renews_its_uplink_to_carry_the_ant() {
     use ants_daemon::admin::LeafNode;
     use ants_daemon::admin::restart::Restarts;

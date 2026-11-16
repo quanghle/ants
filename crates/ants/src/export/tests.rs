@@ -93,7 +93,7 @@ async fn import_as(nats: &crate::Nats<'_>, args: &[&str]) -> Result<()> {
 /// prompts, settings and memories, under its name or another, refused while a record holds its name or its id, into
 /// an empty home only, its harness memory left out when it runs another harness there. Unseal clears the mark.
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines, reason = "one scenario: an export, then the import on another bus")]
 async fn an_ant_moves_to_another_bus_with_its_identity_and_memories() {
     let Some(server) = Server::start() else { return };
     let dir = ants_test_support::scratch_dir("export-move").canonicalize().unwrap();

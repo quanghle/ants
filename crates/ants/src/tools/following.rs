@@ -1,14 +1,17 @@
 //! Following the tool requests ([`follow`]): the pending ones, then each new one and how each reported one ends, as
 //! `ants tools list --follow` and `ants inbox --follow` show them ([`render`]).
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 
-use ants_proto::{ApprovalDecision, ApprovalRequest, Envelope, STREAM, subject};
+use ants_proto::{ApprovalDecision, ApprovalRequest, Envelope, STREAM, UserId, Uuid, subject};
 use anyhow::{Context as _, Result};
+use async_nats::Subscriber;
 use async_nats::jetstream;
 use async_nats::jetstream::stream::{LastRawMessageErrorKind, Stream};
 use chrono::{DateTime, TimeDelta, Utc};
 use futures::StreamExt as _;
+use futures::stream::SelectAll;
 
 use super::{HeldAct, State, commands, deciders, excerpt, left, pending_at, qualified, spelling, standing};
 
@@ -74,43 +77,30 @@ pub async fn follow(
     // Subscribe before listing, so a request or decision published in between is not missed.
     let mut asked = client.subscribe(subject::ALL_APPROVAL_REQUESTS).await.context("following tool requests")?;
     let mut decided = client.subscribe(subject::ALL_APPROVAL_DECISIONS).await.context("following decisions")?;
-    let mut inboxes = futures::stream::SelectAll::new();
-    let mut heard = std::collections::HashSet::new();
-    let mut reported = std::collections::HashSet::new();
-    let mut open: Vec<Open> = Vec::new();
-    let mut fresh: Vec<_> = Box::pin(pending_at(js, &stream, Utc::now()))
+    let fresh = Box::pin(pending_at(js, &stream, Utc::now()))
         .await?
         .into_iter()
         .map(|(seq, r, held)| (Some(seq), r, held))
         .collect();
+    let mut watch = Watch {
+        client,
+        js,
+        stream,
+        stored,
+        inboxes: SelectAll::new(),
+        heard: HashSet::new(),
+        reported: HashSet::new(),
+        open: Vec::new(),
+        fresh,
+    };
     loop {
-        for (seq, request, held) in fresh.drain(..) {
-            if !reported.insert((request.ant.clone(), request.id)) {
-                continue;
-            }
-            if heard.insert(request.ant.clone()) {
-                let inbox = subject::inbox_of(&request.ant);
-                inboxes.push(client.subscribe(inbox).await.context("following decisions of chain ants")?);
-            }
-            report(&Update::Pending(request.clone()))?;
-            let recheck = (!held.is_empty()).then(|| Utc::now() + HELD_RECHECK);
-            if !held.is_empty() {
-                report(&Update::Held(request.clone(), held.clone()))?;
-            }
-            open.push(Open { seq, request, recheck, held });
-        }
-        let wake = open.iter().map(|o| o.recheck.unwrap_or(o.request.expires_at)).min();
-        let wake = async {
-            match wake {
-                Some(at) => tokio::time::sleep((at - Utc::now()).to_std().unwrap_or_default()).await,
-                None => std::future::pending().await,
-            }
-        };
+        watch.take(&mut report).await?;
+        let wake = sleep_until(watch.wake());
         let mut named = None;
         tokio::select! {
             msg = asked.next() => {
                 let Some(msg) = msg else { return Ok(()) };
-                fresh.extend(live_request(&msg).map(|request| (None, request, Vec::new())));
+                watch.fresh.extend(live_request(&msg).map(|request| (None, request, Vec::new())));
             }
             msg = decided.next() => {
                 let Some(msg) = msg else { return Ok(()) };
@@ -118,7 +108,7 @@ pub async fn follow(
                     named = Some((d.ant, d.request_id));
                 }
             }
-            Some(msg) = inboxes.next(), if !inboxes.is_empty() => {
+            Some(msg) = watch.inboxes.next(), if !watch.inboxes.is_empty() => {
                 if let Ok(envelope) = serde_json::from_slice::<Envelope>(&msg.payload)
                     && let Some(d) = envelope.approval
                 {
@@ -127,22 +117,81 @@ pub async fn follow(
             }
             () = wake => {}
         }
+        watch.look(named.as_ref(), &mut report).await?;
+    }
+}
+
+/// A request to report: its stream sequence once read, the request, and the decisions held on it.
+type Fresh = (Option<u64>, ApprovalRequest, Vec<HeldAct>);
+
+/// What [`follow`] keeps between the words it hears.
+struct Watch<'a> {
+    client: &'a async_nats::Client,
+    js: &'a jetstream::Context,
+    stream: Stream,
+    /// The stream's last sequence when following started: a request heard live is stored after it.
+    stored: u64,
+    /// The inboxes of the ants with a request reported, where their chains' and assistants' decisions come.
+    inboxes: SelectAll<Subscriber>,
+    /// The ants whose inbox is followed.
+    heard: HashSet<UserId>,
+    /// The requests reported, by ant and id.
+    reported: HashSet<(UserId, Uuid)>,
+    open: Vec<Open>,
+    /// The requests to report next.
+    fresh: Vec<Fresh>,
+}
+
+impl Watch<'_> {
+    /// Report the fresh requests not reported yet as pending, with their held decisions, following their ants'
+    /// inboxes.
+    async fn take(&mut self, report: &mut impl FnMut(&Update) -> Result<()>) -> Result<()> {
+        for (seq, request, held) in std::mem::take(&mut self.fresh) {
+            if !self.reported.insert((request.ant.clone(), request.id)) {
+                continue;
+            }
+            if self.heard.insert(request.ant.clone()) {
+                let inbox = subject::inbox_of(&request.ant);
+                self.inboxes.push(self.client.subscribe(inbox).await.context("following decisions of chain ants")?);
+            }
+            report(&Update::Pending(request.clone()))?;
+            let recheck = (!held.is_empty()).then(|| Utc::now() + HELD_RECHECK);
+            if !held.is_empty() {
+                report(&Update::Held(request.clone(), held.clone()))?;
+            }
+            self.open.push(Open { seq, request, recheck, held });
+        }
+        Ok(())
+    }
+
+    /// When a request open is next due a look: when rechecked, else when it expires.
+    fn wake(&self) -> Option<DateTime<Utc>> {
+        self.open.iter().map(|o| o.recheck.unwrap_or(o.request.expires_at)).min()
+    }
+
+    /// Look at the requests open that are due, the one `named` by word of a decision among them, reporting those
+    /// resolved and the held decisions changed.
+    async fn look(
+        &mut self,
+        named: Option<&(UserId, Uuid)>,
+        report: &mut impl FnMut(&Update) -> Result<()>,
+    ) -> Result<()> {
         let now = Utc::now();
         let mut i = 0;
-        while i < open.len() {
-            let o = &mut open[i];
-            let is_named = named.as_ref().is_some_and(|(ant, id)| *ant == o.request.ant && *id == o.request.id);
+        while i < self.open.len() {
+            let o = &mut self.open[i];
+            let is_named = named.is_some_and(|(ant, id)| *ant == o.request.ant && *id == o.request.id);
             let due = is_named || o.request.is_expired(now) || o.recheck.is_some_and(|at| at <= now);
             if !due {
                 i += 1;
                 continue;
             }
             o.recheck = None;
-            match Box::pin(resolution(js, &stream, stored, o, now)).await {
+            match Box::pin(resolution(self.js, &self.stream, self.stored, o, now)).await {
                 Ok((State::Pending, _)) if o.request.is_expired(now) => {
                     // Only a request no longer in the stream: an expired one is pending no more.
                     tracing::debug!(request = %qualified(&o.request), "no longer following an expired request");
-                    open.remove(i);
+                    self.open.remove(i);
                 }
                 Ok((State::Pending, held)) => {
                     if held != o.held {
@@ -156,10 +205,10 @@ pub async fn follow(
                     }
                     i += 1;
                 }
-                Ok((state, _)) => report(&Update::Resolved(open.remove(i).request, state))?,
+                Ok((state, _)) => report(&Update::Resolved(self.open.remove(i).request, state))?,
                 Err(e) if o.request.is_expired(now) => {
                     tracing::warn!(request = %qualified(&o.request), "not telling how the request ended: {e:#}");
-                    open.remove(i);
+                    self.open.remove(i);
                 }
                 Err(e) => {
                     tracing::warn!(request = %qualified(&o.request), "reading the state of the request: {e:#}");
@@ -167,6 +216,15 @@ pub async fn follow(
                 }
             }
         }
+        Ok(())
+    }
+}
+
+/// Sleep until `at`, forever without one.
+async fn sleep_until(at: Option<DateTime<Utc>>) {
+    match at {
+        Some(at) => tokio::time::sleep((at - Utc::now()).to_std().unwrap_or_default()).await,
+        None => std::future::pending().await,
     }
 }
 

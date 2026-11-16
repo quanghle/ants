@@ -258,59 +258,11 @@ fn render(leaf: &Leaf, dir: &Path) -> Result<String> {
         check_proxy(proxy)?;
     }
 
-    let creds = existing(leaf.creds, "uplink credentials (`ants auth leaf` writes them)")?;
-    let account = leaf_account(&creds, first.scheme)?;
-    let server_conf = existing(leaf.server_conf, "server.conf (copy it from the team directory)")?;
-    let trust = fs::read_to_string(&server_conf).with_context(|| format!("reading {}", server_conf.display()))?;
-    if !trust.contains(&account) {
-        bail!(
-            "{} does not trust the account of {}; use the team's server.conf",
-            server_conf.display(),
-            creds.display()
-        );
-    }
-    let system = match leaf.system_creds {
-        Some(path) => {
-            let path = existing(path, "system account credentials (`ants auth leaf` writes them)")?;
-            let account = leaf_account(&path, first.scheme)?;
-            if !trust.lines().any(|line| line.trim().strip_prefix("system_account:").map(str::trim) == Some(&account)) {
-                bail!("{} are not for the system account of {}", path.display(), server_conf.display());
-            }
-            Some((path, account))
-        }
-        None => None,
-    };
+    let accounts = Accounts::read(leaf, first.scheme)?;
     // nats-server joins an include to the including file's directory, even an absolute one.
-    let include = relative(&dir, &server_conf)?;
+    let include = relative(&dir, &accounts.server_conf)?;
 
-    let urls: Vec<String> = uplinks.iter().map(|u| quote(&u.url())).collect();
-    let mut transport = String::new();
-    if secure {
-        // Explicit, so the uplink never falls back to plain text; nats-server also wants it with a proxy.
-        match leaf.ca_file {
-            Some(ca) => {
-                let ca = existing(ca, "CA file")?;
-                let _ = writeln!(transport, "      tls {{ ca_file: {} }}", quote(&ca.to_string_lossy()));
-            }
-            None => transport += "      tls {}\n",
-        }
-    }
-    if let Some(proxy) = leaf.proxy {
-        let _ = writeln!(transport, "      proxy {{ url: {} }}", quote(proxy));
-    }
-    let remote = |account: &str, creds: &Path| {
-        format!(
-            "    {{\n      urls: [{}]\n      account: {}\n      credentials: {}\n{transport}    }}\n",
-            urls.join(", "),
-            quote(account),
-            quote(&creds.to_string_lossy()),
-        )
-    };
-    // The uplink comes first: `read_uplink` takes the first credentials.
-    let mut remotes = remote(&account, &creds);
-    if let Some((creds, account)) = &system {
-        remotes += &remote(account, creds);
-    }
+    let remotes = remotes(leaf, &uplinks, secure, &accounts)?;
     Ok(format!(
         "# Written by `ants leaf config {machine}`: the leaf node every ants process on {machine} connects to, and its\n\
          # uplink to the hub. To switch the uplink, run `ants leaf config` again: it reloads the leaf (SIGHUP).\n\
@@ -336,6 +288,82 @@ fn render(leaf: &Leaf, dir: &Path) -> Result<String> {
         sync = RESOLVER_SYNC,
         sync_quoted = quote(RESOLVER_SYNC),
     ))
+}
+
+/// The credentials of a leaf's uplinks and the accounts they are for, checked against the team's server.conf.
+struct Accounts {
+    creds: PathBuf,
+    account: String,
+    server_conf: PathBuf,
+    /// The system account's credentials and the account, for a second uplink.
+    system: Option<(PathBuf, String)>,
+}
+
+impl Accounts {
+    /// The credentials `leaf` names for uplinks of `scheme`, each checked to be for an account the team's server.conf
+    /// trusts, the system account's for the system account.
+    fn read(leaf: &Leaf, scheme: Scheme) -> Result<Self> {
+        let creds = existing(leaf.creds, "uplink credentials (`ants auth leaf` writes them)")?;
+        let account = leaf_account(&creds, scheme)?;
+        let server_conf = existing(leaf.server_conf, "server.conf (copy it from the team directory)")?;
+        let trust = fs::read_to_string(&server_conf).with_context(|| format!("reading {}", server_conf.display()))?;
+        if !trust.contains(&account) {
+            bail!(
+                "{} does not trust the account of {}; use the team's server.conf",
+                server_conf.display(),
+                creds.display()
+            );
+        }
+        let system = match leaf.system_creds {
+            Some(path) => {
+                let path = existing(path, "system account credentials (`ants auth leaf` writes them)")?;
+                let account = leaf_account(&path, scheme)?;
+                if !trust
+                    .lines()
+                    .any(|line| line.trim().strip_prefix("system_account:").map(str::trim) == Some(&account))
+                {
+                    bail!("{} are not for the system account of {}", path.display(), server_conf.display());
+                }
+                Some((path, account))
+            }
+            None => None,
+        };
+        Ok(Self { creds, account, server_conf, system })
+    }
+}
+
+/// The `remotes` of the leaf node: the uplink to `uplinks` with `accounts`' credentials, then the system account's,
+/// with TLS when `secure`.
+fn remotes(leaf: &Leaf, uplinks: &[Uplink], secure: bool, accounts: &Accounts) -> Result<String> {
+    let urls: Vec<String> = uplinks.iter().map(|u| quote(&u.url())).collect();
+    let mut transport = String::new();
+    if secure {
+        // Explicit, so the uplink never falls back to plain text; nats-server also wants it with a proxy.
+        match leaf.ca_file {
+            Some(ca) => {
+                let ca = existing(ca, "CA file")?;
+                let _ = writeln!(transport, "      tls {{ ca_file: {} }}", quote(&ca.to_string_lossy()));
+            }
+            None => transport += "      tls {}\n",
+        }
+    }
+    if let Some(proxy) = leaf.proxy {
+        let _ = writeln!(transport, "      proxy {{ url: {} }}", quote(proxy));
+    }
+    let remote = |account: &str, creds: &Path| {
+        format!(
+            "    {{\n      urls: [{}]\n      account: {}\n      credentials: {}\n{transport}    }}\n",
+            urls.join(", "),
+            quote(account),
+            quote(&creds.to_string_lossy()),
+        )
+    };
+    // The uplink comes first: `read_uplink` takes the first credentials.
+    let mut remotes = remote(&accounts.account, &accounts.creds);
+    if let Some((creds, account)) = &accounts.system {
+        remotes += &remote(account, creds);
+    }
+    Ok(remotes)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

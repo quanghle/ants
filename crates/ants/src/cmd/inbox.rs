@@ -69,22 +69,7 @@ pub(crate) async fn show(
         show_with(e, reactions.get(&e.id).map_or(&[], Vec::as_slice))?;
     }
     if follow {
-        // A dead letter stored here tells the human through the inbox, like one the daemon stores.
-        let watch = async {
-            let dead = async {
-                if let Err(e) = Box::pin(dead::watch(&client, &js, me, |_, _| {})).await {
-                    tracing::warn!("not watching for messages JetStream stopped delivering: {e:#}");
-                }
-            };
-            // Following every thread as text tells of the messages sent that keep waiting for an absent ant.
-            let unserved = async {
-                if select.thread.is_none() && !json {
-                    Box::pin(inbox::tell_unserved(nats, &js)).await;
-                }
-            };
-            tokio::join!(dead, unserved);
-            std::future::pending::<()>().await;
-        };
+        let watch = watch_stored(nats, &client, &js, select.thread.is_none() && !json);
         let ctrl_c = async { _ = tokio::signal::ctrl_c().await };
         let followed = Box::pin(inbox.follow(select, keyring.as_ref(), Some(&behalf), show, ctrl_c));
         // Following one thread shows no escalation on the others, so only following them all counts as reading.
@@ -105,25 +90,9 @@ pub(crate) async fn show(
             followed
         };
         let requests = async {
-            if select.thread.is_some() || json {
-                return;
+            if select.thread.is_none() && !json {
+                Box::pin(show_requests(nats, &client, &js, stopped)).await;
             }
-            let report = |update: &tools::Update| {
-                println!("{}", tools::render(update, chrono::Utc::now()));
-                Ok(())
-            };
-            let shown = async {
-                tokio::select! {
-                    shown = Box::pin(tools::follow(&client, &js, report)) => {
-                        if let Err(e) = shown {
-                            tracing::warn!("not showing tool requests: {e:#}");
-                        }
-                    }
-                    _ = stopped => {}
-                }
-            };
-            let device = nats.device;
-            Box::pin(presence::while_following(&js, nats.domain, me, device, Following::Approvals, shown)).await;
         };
         let followed = async { tokio::join!(followed, requests).0 };
         // Ends only when printing fails.
@@ -135,4 +104,52 @@ pub(crate) async fn show(
         }
     }
     Ok(())
+}
+
+/// Watch for what the inbox tells the human besides the replies, never ending: a dead letter stored here, like one the
+/// daemon stores, and with `unserved`, when following every thread as text, the messages sent that keep waiting for an
+/// absent ant.
+async fn watch_stored(
+    nats: &Nats<'_>,
+    client: &async_nats::Client,
+    js: &async_nats::jetstream::Context,
+    unserved: bool,
+) {
+    let dead = async {
+        if let Err(e) = Box::pin(dead::watch(client, js, &nats.me.id, |_, _| {})).await {
+            tracing::warn!("not watching for messages JetStream stopped delivering: {e:#}");
+        }
+    };
+    let unserved = async {
+        if unserved {
+            Box::pin(inbox::tell_unserved(nats, js)).await;
+        }
+    };
+    tokio::join!(dead, unserved);
+    std::future::pending::<()>().await;
+}
+
+/// Show the tool requests, as following every thread as text does, until `stopped` or showing them fails.
+async fn show_requests(
+    nats: &Nats<'_>,
+    client: &async_nats::Client,
+    js: &async_nats::jetstream::Context,
+    stopped: tokio::sync::oneshot::Receiver<()>,
+) {
+    let report = |update: &tools::Update| {
+        println!("{}", tools::render(update, chrono::Utc::now()));
+        Ok(())
+    };
+    let shown = async {
+        tokio::select! {
+            shown = Box::pin(tools::follow(client, js, report)) => {
+                if let Err(e) = shown {
+                    tracing::warn!("not showing tool requests: {e:#}");
+                }
+            }
+            _ = stopped => {}
+        }
+    };
+    let (me, device) = (&nats.me.id, nats.device);
+    Box::pin(presence::while_following(js, nats.domain, me, device, Following::Approvals, shown)).await;
 }

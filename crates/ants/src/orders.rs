@@ -487,7 +487,7 @@ pub(crate) mod tests {
     /// from m1 fails at once, saying the hub is out of reach, and nothing sends it later; one sent from the hub
     /// waits, pending, until the uplink is back.
     #[tokio::test]
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines, reason = "one scenario: orders through the uplink, then none while it is down")]
     async fn an_admin_behind_a_leaf_node_sends_orders_through_its_uplink_and_none_while_it_is_down() {
         use std::process::Command;
 

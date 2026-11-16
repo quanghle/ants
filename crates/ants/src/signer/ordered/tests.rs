@@ -222,7 +222,6 @@ async fn the_signer_signs_on_an_admin_s_order_for_the_machine_asking_only() {
 /// members; it refuses a request carrying none, or another machine's. A retire order's request revokes the ant's key
 /// all the same without them, and with them has the signer renew them without the ant, which leaves the members.
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn on_a_leaf_node_s_machine_the_signer_renews_the_uplink_to_carry_the_ant_an_order_adds() {
     let Some(server) = Server::start() else { return };
     let team = server.dir().join("auth");

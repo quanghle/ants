@@ -1,5 +1,3 @@
-#![allow(clippy::too_many_lines)]
-
 use std::future::pending;
 
 use ants_proto::{Machine, UserId};
@@ -270,6 +268,10 @@ async fn an_approval_grants_the_host_credentials_of_the_asking_machine_only() {
 /// m2's (issued with `--enroll-approver`), and once m1's leaf restarts with the renewed uplink credentials, the
 /// ant reaches the hub and what it keeps in m1's outbox reaches the hub's stream.
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario: an enrollment through a leaf node, then the ant reaching the hub"
+)]
 async fn an_ant_new_to_a_leaf_enrolls_through_it_and_reaches_the_hub() {
     use ants_proto::{JsDomain, STREAM, ThreadId};
     use ants_test_support::{NatsServer, free_port};

@@ -1,5 +1,3 @@
-#![allow(clippy::too_many_lines)]
-
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -39,6 +37,7 @@ fn clone_as(new: &str, settings: Value) -> AdminOp {
 /// failure undoes it all; a clone into a listed name or one with an identity record, of a moved ant or of one served
 /// elsewhere, is refused, the ant resumed.
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "one scenario: a clone, then a failed one undone")]
 async fn a_clone_order_copies_an_ant_under_a_new_name_and_undoes_a_failed_one() {
     let Some(server) = Server::start() else { return };
     let (alice, bob, dev_a, dev_c) = (p("alice"), p("bob"), p("dev-a"), p("dev-c"));

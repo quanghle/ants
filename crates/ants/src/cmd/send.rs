@@ -119,20 +119,7 @@ pub(crate) async fn ask(
     } else {
         bus::live_inbox(&client, &nats.me.id).await?
     };
-    // Warned rather than refused: a daemon may start later and take the message, which waits in the stream.
-    let warnings = colony::unserved_warnings(&js, &[&envelope.to]).await;
-    let to_human = to_human
-        || !nats.me.role.is_human() && !warnings.is_empty() && humans::load(&js, &nats.me).await.contains(&envelope.to);
-    let unserved = !warnings.is_empty() && !to_human;
-    if unserved {
-        for warning in warnings {
-            tracing::warn!("{warning}");
-        }
-        if replies.wait || replies.follow {
-            let flag = if replies.wait { "--wait" } else { "--follow" };
-            tracing::warn!("a reply waits for a daemon to serve {}: {flag} may not end until one does", envelope.to);
-        }
-    }
+    let (to_human, unserved) = warn_unserved(&js, &nats.me, &envelope.to, to_human, replies).await;
     let changes = followed_reactions(nats, &js, replies).await;
     let status = if (replies.wait || replies.follow) && !to_human && progress::wanted(nats.me.role.is_human()) {
         client.subscribe(subject::status(&envelope.to, &envelope.thread_id)).await.ok()
@@ -140,15 +127,8 @@ pub(crate) async fn ask(
         None
     };
     attachments::store(&js, &files, |id| envelope.attachment_handle(id)).await?;
-    if deliver(&js, nats.domain, &envelope).await? == bus::Stored::Outbox {
-        println!("{OUTBOX}");
-    }
-    println!("thread {}", envelope.thread_id);
-    println!("message {}", envelope.id);
-    if let Some(recipient) = &unaddressed {
-        println!("to {recipient}");
-    }
-    print_attached(&files, |id| envelope.attachment_handle(id));
+    let stored = deliver(&js, nats.domain, &envelope).await?;
+    print_sent(stored, &envelope, unaddressed.as_ref(), &files);
     if !replies.wait && !replies.follow {
         return Ok(());
     }
@@ -164,8 +144,55 @@ pub(crate) async fn ask(
         None if to_human => sealed::Keyring::load(nats, &js).await,
         None => None,
     };
-    let thread = envelope.thread_id.clone();
-    let on_thread = inbox.filter_map(move |msg| {
+    let on_thread = replies_on(inbox, envelope.thread_id.clone());
+    let shown_replies = replies.show(&envelope.thread_id, on_thread, async |reply: Envelope| {
+        show_reply(nats, &js, keyring.as_ref(), &shown, reply).await;
+        Ok(())
+    });
+    Box::pin(with_reactions(shown_replies, &shown, changes)).await
+}
+
+/// Warn when no daemon serves `to` now, unless a human, and when the replies `replies` waits for may then not come.
+/// Warned rather than refused: a daemon may start later and take the message, which waits in the stream. Returns
+/// whether `to` is a human, `to_human` as `me` knew it or as the colony tells for an ant, and whether `to` is unserved.
+async fn warn_unserved(
+    js: &jetstream::Context,
+    me: &humans::Me,
+    to: &UserId,
+    to_human: bool,
+    replies: &Replies,
+) -> (bool, bool) {
+    let warnings = colony::unserved_warnings(js, &[to]).await;
+    let to_human = to_human || !me.role.is_human() && !warnings.is_empty() && humans::load(js, me).await.contains(to);
+    let unserved = !warnings.is_empty() && !to_human;
+    if unserved {
+        for warning in warnings {
+            tracing::warn!("{warning}");
+        }
+        if replies.wait || replies.follow {
+            let flag = if replies.wait { "--wait" } else { "--follow" };
+            tracing::warn!("a reply waits for a daemon to serve {to}: {flag} may not end until one does");
+        }
+    }
+    (to_human, unserved)
+}
+
+/// Print where `envelope` went, `stored` as it was, to whom when it named no one, and the `files` it carries.
+fn print_sent(stored: bus::Stored, envelope: &Envelope, unaddressed: Option<&Recipient>, files: &[attachments::File]) {
+    if stored == bus::Stored::Outbox {
+        println!("{OUTBOX}");
+    }
+    println!("thread {}", envelope.thread_id);
+    println!("message {}", envelope.id);
+    if let Some(recipient) = unaddressed {
+        println!("to {recipient}");
+    }
+    print_attached(files, |id| envelope.attachment_handle(id));
+}
+
+/// The replies in `inbox` on `thread`, those with a forged sender skipped.
+fn replies_on(inbox: bus::LiveInbox, thread: ThreadId) -> impl futures::Stream<Item = Envelope> {
+    inbox.filter_map(move |msg| {
         let reply = match serde_json::from_slice::<Envelope>(&msg.payload) {
             Ok(reply) => match reply.check_subject(&msg.subject) {
                 Ok(()) => (reply.thread_id == thread).then_some(reply),
@@ -177,28 +204,34 @@ pub(crate) async fn ask(
             Err(_) => None,
         };
         std::future::ready(reply)
-    });
-    let shown_replies = replies.show(&envelope.thread_id, on_thread, async |reply: Envelope| {
-        progress::clear();
-        if let Some(keyring) = &keyring {
-            keyring.learn(&reply).await;
+    })
+}
+
+/// Print `reply`, opened with `keyring` when sealed, and mark it read for a human.
+async fn show_reply(
+    nats: &Nats<'_>,
+    js: &jetstream::Context,
+    keyring: Option<&sealed::Keyring>,
+    shown: &reacted::Shown,
+    reply: Envelope,
+) {
+    progress::clear();
+    if let Some(keyring) = keyring {
+        keyring.learn(&reply).await;
+    }
+    let (opened, _) = sealed::read(reply.clone(), keyring);
+    shown.add(opened.id, &opened.from, &opened.text);
+    println!("{}: {}", opened.from, opened.text);
+    print!("{}", attachments::render(&attachments::listed_on(&opened.subject(), &opened.attachments), "  "));
+    // Seen here, so `ants inbox` need not show it again. The other replies stay unread; an ant's inbox consumer is its
+    // daemon's.
+    if nats.me.role.is_human() {
+        match inbox::mark_read(js, &nats.me.id, &reply).await {
+            Ok(true) => {}
+            Ok(false) => tracing::debug!("reply already read"),
+            Err(e) => tracing::warn!("could not mark the reply read: {e:#}"),
         }
-        let (opened, _) = sealed::read(reply.clone(), keyring.as_ref());
-        shown.add(opened.id, &opened.from, &opened.text);
-        println!("{}: {}", opened.from, opened.text);
-        print!("{}", attachments::render(&attachments::listed_on(&opened.subject(), &opened.attachments), "  "));
-        // Seen here, so `ants inbox` need not show it again. The other replies stay unread; an ant's inbox
-        // consumer is its daemon's.
-        if nats.me.role.is_human() {
-            match inbox::mark_read(&js, &nats.me.id, &reply).await {
-                Ok(true) => {}
-                Ok(false) => tracing::debug!("reply already read"),
-                Err(e) => tracing::warn!("could not mark the reply read: {e:#}"),
-            }
-        }
-        Ok(())
-    });
-    Box::pin(with_reactions(shown_replies, &shown, changes)).await
+    }
 }
 
 /// What a send kept in the leaf node's outbox prints.

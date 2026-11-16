@@ -92,87 +92,32 @@ pub async fn request_with(
     stop: impl Future<Output = ()>,
 ) -> Result<Approval> {
     let (enrollment_jwt, enrollment_key) = auth::read_creds(creds)?;
-    let enrollment =
-        auth::verified(&enrollment_jwt).with_context(|| format!("enrollment credentials {}", creds.display()))?;
-    let name = ants_proto::enrollment_user(ant);
-    if enrollment.name != name {
-        bail!("{} are the credentials of {}, not {name} (`ants auth enroll {ant}`)", creds.display(), enrollment.name);
-    }
-    let left = match enrollment.exp {
-        Some(exp) => {
-            Some(Duration::from_secs(exp.checked_sub(now()?).filter(|left| *left > 0).with_context(|| {
-                format!(
-                    "the enrollment credentials {} have expired; issue new ones with `ants auth enroll`",
-                    creds.display()
-                )
-            })?))
-        }
-        None => None,
-    };
+    let (enrollment, left) = check_enrollment(&enrollment_jwt, creds, ant)?;
     let (events_tx, mut events) = tokio::sync::mpsc::unbounded_channel();
     let (client, _) = bus::connect_watched(url, Some(creds), None, ant, "ants-enroll", events_tx).await?;
-    let mut replies = client.subscribe(subject::enroll_reply(ant)).await?;
+    let replies = client.subscribe(subject::enroll_reply(ant)).await?;
     let public_key = user.public_key();
     let mut request = EnrollRequest::new(ant.clone(), &public_key, colony::machine().await);
     request.enrollment = enrollment_jwt;
+    let asking = Asking {
+        client: &client,
+        ant,
+        public_key: &public_key,
+        enrollment: &enrollment,
+        enrollment_key: &enrollment_key,
+        leaf,
+        host,
+    };
     // Raced against the expiry, a refusal and `stop`: a flush waits for a reconnect, which the client retries forever,
     // with the server gone or the credentials refused alike.
-    let asking = async {
-        let mut uplink: Option<KeyPair> = None;
-        let mut repeats = tokio::time::interval(repeat);
-        loop {
-            tokio::select! {
-                _ = repeats.tick() => {
-                    uplink = sign_request(&mut request, &enrollment_key, leaf, host)?;
-                    client.publish(request.subject(), serde_json::to_vec(&request)?.into()).await?;
-                    client.flush().await?;
-                }
-                msg = replies.next() => {
-                    let msg = msg.context("the NATS connection closed")?;
-                    let reply = match serde_json::from_slice::<EnrollReply>(&msg.payload) {
-                        Ok(reply) if reply.ant() == ant && reply.answers(&public_key) => reply,
-                        Ok(_) => continue,
-                        Err(e) => {
-                            tracing::warn!(error = %e, "ignoring a malformed enrollment answer");
-                            continue;
-                        }
-                    };
-                    match reply {
-                        EnrollReply::Approved { jwt, leaf_jwt, host_jwt, .. } => {
-                            let checked = check_approval(&jwt, &enrollment, ant, &public_key)
-                                .and_then(|()| {
-                                    check_leaf_approval(leaf_jwt.as_deref(), &enrollment, leaf, uplink.as_ref())
-                                })
-                                .and_then(|()| check_host_approval(host_jwt.as_deref(), &enrollment, host));
-                            match checked {
-                                Ok(()) => return Ok(Approval { jwt, leaf_jwt, host_jwt }),
-                                Err(e) => tracing::warn!(error = format!("{e:#}"), "ignoring an enrollment approval"),
-                            }
-                        }
-                        EnrollReply::Rejected { reason, .. } => match reason {
-                            Some(reason) => bail!("the enrollment of {ant} was rejected: {reason}"),
-                            None => bail!("the enrollment of {ant} was rejected"),
-                        },
-                        EnrollReply::Retired { .. } => continue,
-                    }
-                }
-            }
-        }
-    };
+    let asking = asking.until_answered(request, replies, repeat);
     let expiry = async {
         match left {
             Some(left) => tokio::time::sleep(left.min(Duration::from_hours(365 * 24))).await,
             None => std::future::pending().await,
         }
     };
-    let refused = async {
-        while let Some(event) = events.recv().await {
-            if let Some(refusal) = refusal(&event) {
-                return refusal;
-            }
-        }
-        std::future::pending().await
-    };
+    let refused = refused(&mut events);
     let expired = || anyhow::anyhow!("the enrollment credentials {} expired without an answer", creds.display());
     tokio::select! {
         approval = asking => approval,
@@ -190,6 +135,104 @@ pub async fn request_with(
         }
         () = stop => bail!("stopped before an answer came"),
     }
+}
+
+/// The claims of the enrollment credentials at `creds`, whose user JWT is `jwt`, checked to be `ant`'s, and how long
+/// they have left when they expire.
+fn check_enrollment(jwt: &str, creds: &Path, ant: &UserId) -> Result<(auth::Claims, Option<Duration>)> {
+    let enrollment = auth::verified(jwt).with_context(|| format!("enrollment credentials {}", creds.display()))?;
+    let name = ants_proto::enrollment_user(ant);
+    if enrollment.name != name {
+        bail!("{} are the credentials of {}, not {name} (`ants auth enroll {ant}`)", creds.display(), enrollment.name);
+    }
+    let Some(exp) = enrollment.exp else { return Ok((enrollment, None)) };
+    let left = exp.checked_sub(now()?).filter(|left| *left > 0).with_context(|| {
+        format!("the enrollment credentials {} have expired; issue new ones with `ants auth enroll`", creds.display())
+    })?;
+    Ok((enrollment, Some(Duration::from_secs(left))))
+}
+
+/// An enrollment request being asked: who asks, and what an approval is checked against.
+struct Asking<'a> {
+    client: &'a async_nats::Client,
+    ant: &'a UserId,
+    public_key: &'a str,
+    enrollment: &'a auth::Claims,
+    enrollment_key: &'a KeyPair,
+    leaf: Option<&'a Leaf>,
+    host: Option<&'a HostAsk>,
+}
+
+impl Asking<'_> {
+    /// Repeat `request` every `repeat` until an answer to it comes on `replies`: an approval passing its checks, or a
+    /// rejection, an error.
+    async fn until_answered(
+        &self,
+        mut request: EnrollRequest,
+        mut replies: async_nats::Subscriber,
+        repeat: Duration,
+    ) -> Result<Approval> {
+        let mut uplink: Option<KeyPair> = None;
+        let mut repeats = tokio::time::interval(repeat);
+        loop {
+            tokio::select! {
+                _ = repeats.tick() => {
+                    uplink = sign_request(&mut request, self.enrollment_key, self.leaf, self.host)?;
+                    self.client.publish(request.subject(), serde_json::to_vec(&request)?.into()).await?;
+                    self.client.flush().await?;
+                }
+                msg = replies.next() => {
+                    let msg = msg.context("the NATS connection closed")?;
+                    if let Some(approval) = self.answer(&msg.payload, uplink.as_ref())? {
+                        return Ok(approval);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The approval `payload` carries, if an answer to the request whose checks pass, the uplink key `uplink` signed
+    /// it with; a rejection is an error.
+    fn answer(&self, payload: &[u8], uplink: Option<&KeyPair>) -> Result<Option<Approval>> {
+        let reply = match serde_json::from_slice::<EnrollReply>(payload) {
+            Ok(reply) if reply.ant() == self.ant && reply.answers(self.public_key) => reply,
+            Ok(_) => return Ok(None),
+            Err(e) => {
+                tracing::warn!(error = %e, "ignoring a malformed enrollment answer");
+                return Ok(None);
+            }
+        };
+        let ant = self.ant;
+        match reply {
+            EnrollReply::Approved { jwt, leaf_jwt, host_jwt, .. } => {
+                let checked = check_approval(&jwt, self.enrollment, ant, self.public_key)
+                    .and_then(|()| check_leaf_approval(leaf_jwt.as_deref(), self.enrollment, self.leaf, uplink))
+                    .and_then(|()| check_host_approval(host_jwt.as_deref(), self.enrollment, self.host));
+                match checked {
+                    Ok(()) => Ok(Some(Approval { jwt, leaf_jwt, host_jwt })),
+                    Err(e) => {
+                        tracing::warn!(error = format!("{e:#}"), "ignoring an enrollment approval");
+                        Ok(None)
+                    }
+                }
+            }
+            EnrollReply::Rejected { reason, .. } => match reason {
+                Some(reason) => bail!("the enrollment of {ant} was rejected: {reason}"),
+                None => bail!("the enrollment of {ant} was rejected"),
+            },
+            EnrollReply::Retired { .. } => Ok(None),
+        }
+    }
+}
+
+/// The first refusal of the connection among `events`; never without one.
+async fn refused(events: &mut tokio::sync::mpsc::UnboundedReceiver<Event>) -> String {
+    while let Some(event) = events.recv().await {
+        if let Some(refusal) = refusal(&event) {
+            return refusal;
+        }
+    }
+    std::future::pending().await
 }
 
 /// Sign `request` with the enrollment key and, for a machine behind `leaf`, with the leaf's uplink key, read again so
