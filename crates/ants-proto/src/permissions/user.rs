@@ -6,7 +6,7 @@ use super::human::{
     machine_record_rights, notify_prefs_rights, outbox_setup_rights, presence_rights, read_marker_rights,
     thread_rights,
 };
-use super::{Permissions, ack_subjects, flow_control_subjects, kv_stream};
+use super::{Permissions, ack_subjects, kv_stream, ordered_consumer_subjects};
 use crate::{
     ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, COLONY_BUCKET, DEVICES_BUCKET, FILES_BUCKET, FILES_STREAM,
     HUMANS_BUCKET, IDENTITIES_BUCKET, LINKS_BUCKET, OWNERS_BUCKET, Role, SESSIONS_BUCKET, STORAGE_WARNING_PREFIX,
@@ -166,32 +166,28 @@ impl Permissions {
             format!("$JS.API.CONSUMER.DELETE.{STREAM}.{chan_read}"),
             // Reading the colony: single entries, and the ordered consumers behind listing and watching it.
             format!("$JS.API.DIRECT.GET.{colony_stream}.>"),
-            format!("$JS.API.CONSUMER.CREATE.{colony_stream}"),
         ]);
-        publish.extend(flow_control_subjects("*", &colony_stream));
+        publish.extend(ordered_consumer_subjects(&colony_stream));
         publish.extend([
             // Reading the channels the same way.
             format!("$JS.API.STREAM.INFO.{channels}"),
             format!("$JS.API.DIRECT.GET.{channels}.>"),
-            format!("$JS.API.CONSUMER.CREATE.{channels}"),
         ]);
-        publish.extend(flow_control_subjects("*", &channels));
+        publish.extend(ordered_consumer_subjects(&channels));
         publish.extend([
             // And the humans.
             format!("$JS.API.STREAM.INFO.{humans}"),
             format!("$JS.API.DIRECT.GET.{humans}.>"),
-            format!("$JS.API.CONSUMER.CREATE.{humans}"),
         ]);
-        publish.extend(flow_control_subjects("*", &humans));
+        publish.extend(ordered_consumer_subjects(&humans));
         publish.extend([
             // And single escalation chains.
             format!("$JS.API.STREAM.INFO.{chains}"),
             format!("$JS.API.DIRECT.GET.{chains}.>"),
             // And the links passed on to a channel thread, through ordered consumers filtering that thread's.
             format!("$JS.API.STREAM.INFO.{links}"),
-            format!("$JS.API.CONSUMER.CREATE.{links}"),
         ]);
-        publish.extend(flow_control_subjects("*", &links));
+        publish.extend(ordered_consumer_subjects(&links));
         publish.extend([
             // And the owners of single threads.
             format!("$JS.API.DIRECT.GET.{owners}.>"),

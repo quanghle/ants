@@ -167,6 +167,38 @@ fn no_credentials_hold_a_jetstream_family_right_a_human_lacks() {
     }
 }
 
+/// async-nats recreates an ordered consumer after a reconnect or missed heartbeats by deleting the old one and creating
+/// the next under a name: credentials creating a bucket's ordered consumers may do both, or the watch stalls.
+#[test]
+fn ordered_consumers_of_a_bucket_can_be_recreated_under_a_name() {
+    let (human, a, pa) = (UserId::human(), p("dev-a"), p("pa"));
+    let m1: Machine = "m1".parse().unwrap();
+    for (kind, rights) in [
+        ("human", Permissions::for_user(&human, Role::Human)),
+        ("ant", Permissions::for_user(&a, Role::Ant)),
+        ("assistant", Permissions::for_assistant(&pa, &human)),
+        ("host", Permissions::for_host(&m1)),
+        ("channel manager", Permissions::for_channel_manager()),
+        ("observer", Permissions::for_observer(&p("watch"))),
+        ("reactions responder", Permissions::for_reactions_responder()),
+    ] {
+        let streams: Vec<&str> =
+            rights.publish.iter().filter_map(|s| s.strip_prefix("$JS.API.CONSUMER.CREATE.KV_")).collect();
+        let streams: Vec<&str> = streams.into_iter().filter(|s| !s.contains('.')).collect();
+        assert!(!streams.is_empty(), "{kind} creates no ordered consumer of a bucket");
+        for stream in streams {
+            let recreating = [
+                format!("$JS.API.CONSUMER.CREATE.KV_{stream}.KhJx2c_1.$KV.{stream}.>"),
+                format!("$JS.API.CONSUMER.CREATE.KV_{stream}.KhJx2c_2"),
+                format!("$JS.API.CONSUMER.DELETE.KV_{stream}.KhJx2c_1"),
+            ];
+            for s in recreating {
+                assert!(rights.publish.iter().any(|have| covers(have, &s)), "{kind} may not publish {s}");
+            }
+        }
+    }
+}
+
 #[test]
 fn a_leaf_carries_an_assistant_s_rights_as_it_would_an_ant_s() {
     let (alice, pa) = (p("alice"), p("pa"));
@@ -553,7 +585,7 @@ fn channels_are_readable_by_ants_and_written_by_humans_only() {
         assert!(a.publish.iter().any(|have| have == s), "{s} missing from {:?}", a.publish);
     }
     assert!(a.subscribe.iter().any(|s| s == subject::ALL_CHANNELS));
-    assert!(!a.publish.iter().any(|s| s.contains("$KV.ants_channels") || s.contains("CREATE.KV_ants_channels.")));
+    assert!(!a.publish.iter().any(|s| s.contains("$KV.ants_channels") || s.contains("STREAM.CREATE.KV_ants_channels")));
     assert!(!a.publish.iter().any(|s| s == "ants.chan.>" || s == "$JS.API.CONSUMER.CREATE.ANTS.chan-dev-a"));
     let human = Permissions::for_user(&UserId::human(), Role::Human);
     for s in ["ants.chan.*.human", "$KV.ants_channels.>", "$JS.API.STREAM.CREATE.KV_ants_channels"] {

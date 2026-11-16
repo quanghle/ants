@@ -1,7 +1,7 @@
 //! The rights a human's credentials hold that an ant's do not, by the streams and buckets they reach, which
 //! [`Permissions::for_user`] gives a human and of which [`Permissions::for_assistant`] gives an assistant some.
 
-use super::{ack_subjects, flow_control_subjects, kv_stream};
+use super::{ack_subjects, kv_stream, ordered_consumer_subjects};
 use crate::{
     ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, COLONY_BUCKET, DEVICES_BUCKET, HUMANS_BUCKET, IDENTITIES_BUCKET,
     INTAKE_STREAM, LINKS_BUCKET, MACHINES_BUCKET, NOTIFY_BUCKET, OUTBOX_CONSUMER, OUTBOX_STREAM, OWNERS_BUCKET,
@@ -65,10 +65,9 @@ pub(super) fn presence_rights(human: &UserId) -> Vec<String> {
     let mut rights = vec![
         format!("$JS.API.STREAM.CREATE.{presence}"),
         format!("$JS.API.DIRECT.GET.{presence}.>"),
-        format!("$JS.API.CONSUMER.CREATE.{presence}"),
         subject::presence_of(human),
     ];
-    rights.extend(flow_control_subjects("*", &presence));
+    rights.extend(ordered_consumer_subjects(&presence));
     rights
 }
 
@@ -83,10 +82,9 @@ pub(super) fn device_directory_rights(human: &UserId) -> Vec<String> {
         format!("$JS.API.STREAM.INFO.{devices}"),
         format!("$JS.API.STREAM.CREATE.{devices}"),
         format!("$JS.API.DIRECT.GET.{devices}.>"),
-        format!("$JS.API.CONSUMER.CREATE.{devices}"),
         subject::devices_of(human),
     ];
-    rights.extend(flow_control_subjects("*", &devices));
+    rights.extend(ordered_consumer_subjects(&devices));
     rights
 }
 
@@ -123,9 +121,8 @@ pub(super) fn human_reaction_rights(human: &UserId) -> Vec<String> {
         format!("$JS.API.STREAM.INFO.{reactions}"),
         format!("$JS.API.STREAM.CREATE.{reactions}"),
         format!("$JS.API.DIRECT.GET.{reactions}.>"),
-        format!("$JS.API.CONSUMER.CREATE.{reactions}"),
     ];
-    rights.extend(flow_control_subjects("*", &reactions));
+    rights.extend(ordered_consumer_subjects(&reactions));
     rights
 }
 

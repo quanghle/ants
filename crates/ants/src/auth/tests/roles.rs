@@ -479,3 +479,33 @@ async fn a_humans_domain_wildcards_reach_no_further_than_its_plain_rights() {
     let streams: Vec<_> = js.streams().try_collect().await.unwrap();
     assert!(streams.iter().all(|info| info.config.name != "FOO"));
 }
+
+/// async-nats recreates an ordered consumer after a reconnect or missed heartbeats under a name, with its filter in the
+/// create subject when it has one, after deleting the old one by name: the server takes both from a human's and an
+/// ant's credentials, or their watches would stall.
+#[tokio::test]
+async fn ordered_consumers_of_a_bucket_are_recreated_under_a_name() {
+    use jetstream::consumer::push::OrderedConfig;
+    let Some(server) = Server::start() else { return };
+    let (human, dev_a) = (UserId::human(), p("dev-a"));
+    let (h_client, h_js) = server.connect_as(&human, Role::Human).await;
+    h_js.create_key_value(ants_daemon::hub::channels_config()).await.unwrap();
+    let (a_client, a_js) = server.connect_as(&dev_a, Role::Ant).await;
+    let stream = format!("KV_{}", ants_proto::CHANNELS_BUCKET);
+    for (who, client, js) in [("human", &h_client, &h_js), ("ant", &a_client, &a_js)] {
+        let kv = js.get_stream_no_info(&stream).await.unwrap();
+        let prefix = format!("$KV.{}.", ants_proto::CHANNELS_BUCKET);
+        let named = [
+            OrderedConfig { filter_subject: format!("{prefix}>"), ..Default::default() },
+            OrderedConfig { filter_subjects: vec![format!("{prefix}a"), format!("{prefix}b")], ..Default::default() },
+        ];
+        for (n, config) in named.into_iter().enumerate() {
+            let name = format!("{who}_{n}");
+            let config = OrderedConfig { name: Some(name.clone()), deliver_subject: client.new_inbox(), ..config };
+            kv.create_consumer(config).await.unwrap_or_else(|e| panic!("{who} creating {name}: {e}"));
+            js.delete_consumer_from_stream(&name, &stream)
+                .await
+                .unwrap_or_else(|e| panic!("{who} deleting {name}: {e}"));
+        }
+    }
+}

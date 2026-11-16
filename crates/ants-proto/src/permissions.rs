@@ -54,6 +54,22 @@ fn flow_control_subjects(domain: &str, stream: &str) -> [String; 2] {
     [format!("$JS.FC.{stream}.>"), format!("$JS.FC.{domain}.*.{stream}.>")]
 }
 
+/// What the ordered consumers of `stream` need, behind listing and watching a KV bucket: creating one, first unnamed
+/// (`CONSUMER.CREATE.<stream>`); answering its flow control; and, when async-nats recreates it after a reconnect or
+/// missed heartbeats, deleting the old one by name and creating the next under a name, with its filter when it has
+/// one (`CONSUMER.CREATE.<stream>.<name>[.<filter>]`). The named form also lets the credentials create a durable
+/// consumer of `stream`, which each stream's `max_consumers` bounds.
+fn ordered_consumer_subjects(stream: &str) -> [String; 5] {
+    let [fc, fc_v2] = flow_control_subjects("*", stream);
+    [
+        format!("$JS.API.CONSUMER.CREATE.{stream}"),
+        format!("$JS.API.CONSUMER.CREATE.{stream}.>"),
+        format!("$JS.API.CONSUMER.DELETE.{stream}.*"),
+        fc,
+        fc_v2,
+    ]
+}
+
 /// Subjects a set of credentials may publish and subscribe to. Everything else is denied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Permissions {
@@ -74,7 +90,7 @@ pub struct Permissions {
 /// or [`Permissions::with_js_domain`], or
 /// the other claims `ants auth` puts in a
 /// user JWT.
-pub const PERMISSIONS_VERSION: PermissionsVersion = PermissionsVersion(1);
+pub const PERMISSIONS_VERSION: PermissionsVersion = PermissionsVersion(2);
 
 /// A version of the permissions `ants auth` gives ([`PERMISSIONS_VERSION`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

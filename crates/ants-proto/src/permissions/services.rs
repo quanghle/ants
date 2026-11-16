@@ -2,7 +2,7 @@
 //! and those `ants enroll`, `ants signer`, `ants auth revoke` and `ants auth push` issue themselves from the account
 //! key.
 
-use super::{Permissions, flow_control_subjects, kv_stream};
+use super::{Permissions, kv_stream, ordered_consumer_subjects};
 #[cfg(doc)]
 use crate::{AntRequest, MACHINES_BUCKET, ReactionsRequest, channel_manager_serving_key};
 use crate::{
@@ -29,12 +29,8 @@ impl Permissions {
             format!("$JS.API.CONSUMER.INFO.{STREAM}.{}", inbox_consumer(&user)),
         ];
         for stream in [&colony, &channels, &humans] {
-            publish.extend([
-                format!("$JS.API.STREAM.INFO.{stream}"),
-                format!("$JS.API.DIRECT.GET.{stream}.>"),
-                format!("$JS.API.CONSUMER.CREATE.{stream}"),
-            ]);
-            publish.extend(flow_control_subjects("*", stream));
+            publish.extend([format!("$JS.API.STREAM.INFO.{stream}"), format!("$JS.API.DIRECT.GET.{stream}.>")]);
+            publish.extend(ordered_consumer_subjects(stream));
         }
         publish.push(subject::renew(user.as_str()));
         let subscribe = vec![
@@ -92,11 +88,10 @@ impl Permissions {
             format!("$JS.API.STREAM.INFO.{STREAM}"),
             format!("$JS.API.DIRECT.GET.{STREAM}"),
             format!("$JS.API.DIRECT.GET.{reactions}.>"),
-            format!("$JS.API.CONSUMER.CREATE.{reactions}"),
             format!("$KV.{REACTIONS_BUCKET}.>"),
             subject::ALL_REACTIONS_REPLIES.to_owned(),
         ];
-        publish.extend(flow_control_subjects("*", &reactions));
+        publish.extend(ordered_consumer_subjects(&reactions));
         Self {
             publish,
             subscribe: vec![

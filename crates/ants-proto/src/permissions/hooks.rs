@@ -2,7 +2,7 @@
 //! to its [`Destination`]s ([`Permissions::for_webhook`]), and an observer's, reading them
 //! ([`Permissions::for_observer`]).
 
-use super::{Permissions, ack_subjects, flow_control_subjects, kv_stream};
+use super::{Permissions, ack_subjects, kv_stream, ordered_consumer_subjects};
 #[cfg(doc)]
 use crate::StatusUpdate;
 use crate::{
@@ -98,12 +98,8 @@ impl Permissions {
             publish.push(format!("$JS.API.CONSUMER.DELETE.{STREAM}.{consumer}"));
         }
         let colony = kv_stream(COLONY_BUCKET);
-        publish.extend([
-            format!("$JS.API.STREAM.INFO.{colony}"),
-            format!("$JS.API.DIRECT.GET.{colony}.>"),
-            format!("$JS.API.CONSUMER.CREATE.{colony}"),
-        ]);
-        publish.extend(flow_control_subjects("*", &colony));
+        publish.extend([format!("$JS.API.STREAM.INFO.{colony}"), format!("$JS.API.DIRECT.GET.{colony}.>")]);
+        publish.extend(ordered_consumer_subjects(&colony));
         publish.push(subject::renew(observer.as_str()));
         let subscribe = vec![
             format!("{}.>", inbox_prefix(observer)),

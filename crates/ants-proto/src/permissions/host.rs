@@ -1,7 +1,7 @@
 //! What the host credentials of a machine allow ([`Permissions::for_host`]), with which the machine's daemon makes one
 //! connection besides its ants'.
 
-use super::{Permissions, ack_subjects, flow_control_subjects, kv_stream};
+use super::{Permissions, ack_subjects, kv_stream, ordered_consumer_subjects};
 #[cfg(doc)]
 use crate::admin_outcome_key;
 use crate::{
@@ -48,12 +48,8 @@ impl Permissions {
             subject::ALL_ENROLL_REQUESTS.to_owned(),
         ];
         let humans = kv_stream(HUMANS_BUCKET);
-        publish.extend([
-            format!("$JS.API.STREAM.INFO.{humans}"),
-            format!("$JS.API.DIRECT.GET.{humans}.>"),
-            format!("$JS.API.CONSUMER.CREATE.{humans}"),
-        ]);
-        publish.extend(flow_control_subjects("*", &humans));
+        publish.extend([format!("$JS.API.STREAM.INFO.{humans}"), format!("$JS.API.DIRECT.GET.{humans}.>")]);
+        publish.extend(ordered_consumer_subjects(&humans));
         publish.extend(ack_subjects(STREAM, &consumer));
         let subscribe = vec![format!("{}.>", host_inbox_prefix(machine)), subject::ALL_ENROLL_REPLIES.to_owned()];
         Self { publish, subscribe }
