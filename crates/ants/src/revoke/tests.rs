@@ -36,12 +36,11 @@ fn revoking_a_name_takes_all_its_keys_and_drops_revocations_once_expired() {
 
     // A key of credentials that expired needs no revocation: it is dropped on the next change.
     let enrollment = team.join("enroll.creds");
-    auth::issue_enrollment(&team, &"dev-c".parse().unwrap(), Duration::from_secs(1), &enrollment).unwrap();
+    auth::issue_enrollment(&team, &"dev-c".parse().unwrap(), Duration::from_secs(600), &enrollment).unwrap();
     let revoked_now = revoke(&team, Some("enroll-dev-c"), std::slice::from_ref(&laptop)).unwrap();
     assert_eq!(revoked_now.len(), 2);
     assert_eq!(revoked(&team).unwrap().len(), 3, "laptop's revocation is replaced, not repeated");
-    std::thread::sleep(Duration::from_secs(2));
-    apply(&team).unwrap();
+    apply_at(&team, auth::now().unwrap() + 601).unwrap();
     let left: Vec<Option<String>> = revoked(&team).unwrap().into_iter().map(|r| r.name).collect();
     assert_eq!(left, vec![Some("alice".to_owned()); 2]);
     fs::remove_dir_all(dir).unwrap();
