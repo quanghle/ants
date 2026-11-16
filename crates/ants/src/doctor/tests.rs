@@ -1,8 +1,19 @@
-use ants_proto::Role;
+use ants_daemon::config::Ant;
+use ants_daemon::creds::Seed;
+use ants_daemon::keystore::Store as _;
+use ants_daemon::storage::Usage;
+use ants_daemon::{bus, hub, keystore, storage};
+use ants_proto::{Machine, PERMISSIONS_VERSION, Role, STREAM, UserId};
 
+use super::colony::{avatars, drift, harness_versions};
+use super::credentials::{check_key, check_xkey};
+use super::server::{consumer_limit, consumers, storage_check, supported_server};
 use super::*;
+use crate::avatars::{Depth, Faces};
 use crate::members::EnrollApprover;
+use crate::service::{Action, Service};
 use crate::test_support::Server;
+use crate::{backup, bridge, leaf, revoke, versions};
 
 fn setup(server: &Server, creds: Option<PathBuf>) -> Setup {
     Setup {
