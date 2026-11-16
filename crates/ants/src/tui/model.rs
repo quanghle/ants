@@ -19,7 +19,7 @@ use super::react::{self, Pick, Picker};
 use super::reads::{Mark, Read};
 use super::work::{Facts, Filter};
 use super::{
-    ant, cards, catchup, channel, credentials, dm, faces, home, images, memories, nav, people, search, settings,
+    ant, cards, catchup, channel, credentials, dm, faces, held, home, images, memories, nav, people, search, settings,
     snooze, thread, timeline, tree, work,
 };
 use crate::live::{self, State};
@@ -86,6 +86,8 @@ pub enum Action {
     Summarise(catchup::Ask),
     /// Answer a request for credentials, as `ants enroll approve`, `reject` or `renew` does.
     Credentials(credentials::Order),
+    /// Answer an admin order of the human's assistant held for its consent, as `ants assistant confirm` does.
+    Answer(held::Answer),
     /// Read an ant's settings, or send an order changing them, as `ants ant set` does.
     Settings(settings::Ask),
     Quit,
@@ -142,6 +144,8 @@ pub struct Data {
     pub images: images::Images,
     /// The credentials asked for, heard where the team's account key is.
     pub credentials: credentials::Heard,
+    /// The admin orders of the human's assistant held for its consent.
+    pub held: held::Orders,
     /// How the ants look.
     pub looks: faces::Looks,
 }
@@ -204,6 +208,7 @@ pub enum Page {
     Tree(tree::Page),
     Ant(ant::Page),
     Credentials(credentials::Page),
+    Held(held::Page),
 }
 
 impl Page {
@@ -229,6 +234,7 @@ impl Page {
             Self::Tree(_) => "tree",
             Self::Ant(_) => "ant",
             Self::Credentials(_) => "credentials",
+            Self::Held(_) => "held orders",
         }
     }
 }
@@ -260,6 +266,8 @@ pub enum To {
     Digest,
     /// The credentials asked for.
     Credentials,
+    /// The admin orders held for the human's consent.
+    Held,
     /// Not another view: something to do.
     Do(Action),
 }
@@ -307,6 +315,7 @@ impl Model {
             cards: cards::Cards::default(),
             images: images::Images::default(),
             credentials: credentials::Heard::default(),
+            held: held::Orders::default(),
             looks: faces::Looks::default(),
         };
         let nav = nav::Item::Home;
@@ -616,7 +625,8 @@ impl Model {
             | Page::Search(_)
             | Page::Tree(_)
             | Page::Ant(_)
-            | Page::Credentials(_) => None,
+            | Page::Credentials(_)
+            | Page::Held(_) => None,
         }
     }
 
@@ -795,6 +805,7 @@ impl Model {
             Page::Tree(page) => page.key(key, data, now),
             Page::Ant(page) => page.key(key, data),
             Page::Credentials(page) => page.key(key, data),
+            Page::Held(page) => page.key(key, data),
         }?;
         self.go(to, now)
     }
@@ -849,6 +860,14 @@ impl Model {
                 self.data.credentials.busy = Some(order.clone());
                 Some(Action::Credentials(order))
             }
+            To::Held => {
+                self.pages.push(Page::Held(held::Page::default()));
+                None
+            }
+            To::Do(Action::Answer(answer)) => {
+                self.data.held.busy = Some(answer.clone());
+                Some(Action::Answer(answer))
+            }
             To::Digest => self.home_digest(now),
             To::Do(Action::Run(Job::Open(listed), text)) => {
                 self.bar.set_status(format!("opening {}…", listed.attachment.name), Tone::Busy);
@@ -902,6 +921,15 @@ impl Model {
     /// Take in what a gathering of the credentials asked for, or an answer to one, brought.
     pub fn credentials(&mut self, event: credentials::Event, now: DateTime<Utc>) {
         match self.data.credentials.take(event, now) {
+            Some(Ok(done)) => self.notify(done, Level::Info, now),
+            Some(Err(e)) => self.notify(e, Level::Error, now),
+            None => {}
+        }
+    }
+
+    /// Take in what a gathering of the held admin orders, or an answer to one, brought.
+    pub fn held(&mut self, event: held::Event, now: DateTime<Utc>) {
+        match self.data.held.take(event, now) {
             Some(Ok(done)) => self.notify(done, Level::Info, now),
             Some(Err(e)) => self.notify(e, Level::Error, now),
             None => {}

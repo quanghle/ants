@@ -1966,6 +1966,46 @@ async fn what_the_assistant_does_for_its_human_carries_on_behalf_of() {
     assert!(!ok && refused.contains("unknown op retire"), "{refused}");
 }
 
+/// An order to set an ant's settings carries the changes as given, dotted fields split; one without changes is refused.
+#[tokio::test]
+async fn the_assistant_orders_settings_changed_for_its_human() {
+    let (mcp, _sent, humans, device, store) = assistant("assist-set").await;
+    grant(&humans, &device, Some("dev-a"), false);
+    let (url, token) = http_server(&mcp, &ThreadId::generate());
+    let client = http_client(&url, &token).await;
+    let changes = serde_json::json!([
+        {"field": "model", "value": "gpt-5", "expected": "o3"},
+        {"field": "caps.daily", "value": null, "expected": 100},
+    ]);
+    let set = serde_json::json!({"ant": "dev-b", "machine": "m1", "op": "set", "changes": changes});
+    let (ok, ordered) = call(&client, "order_for_human", set).await;
+    assert!(ok && ordered.contains("dev-b/order:set"), "{ordered}");
+    let order = store.orders.locked().pop().unwrap();
+    let change = |field: &[&str], expected, value| ants_proto::FieldChange {
+        field: field.iter().map(|f| (*f).to_owned()).collect(),
+        expected: Some(expected),
+        expected_digest: None,
+        value,
+    };
+    assert_eq!(
+        order.op,
+        ants_proto::AdminOp::Set {
+            changes: vec![
+                change(&["model"], serde_json::json!("o3"), Some(serde_json::json!("gpt-5"))),
+                change(&["caps", "daily"], serde_json::json!(100), None),
+            ]
+        }
+    );
+    for changes in [serde_json::json!(null), serde_json::json!([])] {
+        let set = serde_json::json!({"ant": "dev-b", "machine": "m1", "op": "set", "changes": changes});
+        let (ok, refused) = call(&client, "order_for_human", set).await;
+        assert!(!ok && refused.contains("op set needs changes"), "{refused}");
+    }
+    let set = serde_json::json!({"ant": "dev-b", "machine": "m1", "op": "set", "changes": [{"field": "caps..daily"}]});
+    let (ok, refused) = call(&client, "order_for_human", set).await;
+    assert!(!ok && refused.contains("field caps..daily"), "{refused}");
+}
+
 #[tokio::test]
 async fn the_assistant_posts_in_channels_and_notes_for_its_human() {
     let notes = Arc::new(MemoryNotes::default());

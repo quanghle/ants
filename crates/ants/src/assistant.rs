@@ -27,6 +27,7 @@ use crate::{Nats, auth, devices, humans, revoke, roster};
 mod consent;
 mod dedicated;
 
+pub(crate) use consent::{answer_order, orders_held_for};
 pub use dedicated::{DisableArgs, EnableArgs};
 
 /// How many times storing a record is tried again when another device of the human stored one meanwhile.
@@ -168,8 +169,8 @@ fn is_home(ant: &UserId, workdir: &Path, home: Option<&Path>) -> bool {
     home.is_some_and(|home| home == workdir) || workdir.ends_with(Path::new(".ants").join(ant.as_str()))
 }
 
-/// The credentials of the human the CLI acts as, which sign its grant: a human device's.
-fn signing_creds<'a>(nats: &Nats<'a>) -> Result<&'a Path> {
+/// The credentials of the human the CLI acts as, which sign its grant and its consent records: a human device's.
+pub(crate) fn signing_creds<'a>(nats: &Nats<'a>) -> Result<&'a Path> {
     match nats.creds {
         Some(creds) if nats.me.role.is_human() && nats.device.is_some() => Ok(creds),
         _ => bail!("signing a grant needs a human device's credentials (`ants auth user NAME --human`)"),

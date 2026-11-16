@@ -123,7 +123,8 @@ impl Model {
             | Page::Search(_)
             | Page::Tree(_)
             | Page::Ant(_)
-            | Page::Credentials(_) => None,
+            | Page::Credentials(_)
+            | Page::Held(_) => None,
         };
         let members = channel.and_then(|channel| data.channels.iter().find(|c| c.channel == channel));
         let users: BTreeSet<&UserId> = match members {

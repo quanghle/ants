@@ -150,6 +150,11 @@ impl Registry {
         let _ = loaded.wait_for(|loaded| *loaded).await;
     }
 
+    /// Whether the watch has read the bucket once ([`Registry::loaded`]).
+    pub fn is_loaded(&self) -> bool {
+        *self.assistants.loaded.borrow()
+    }
+
     /// The human who gets what is meant for the owner of a thread that has none.
     pub fn default_human(&self) -> &UserId {
         &self.default
