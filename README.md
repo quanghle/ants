@@ -97,6 +97,27 @@ ants login --hub wss://hub.example/nats --name alice --bootstrap bootstrap.creds
 ants inbox
 ```
 
+Connect a worker machine to a hub through a local store-and-forward leaf node and add a leaf ant ([docs/transport.md](docs/transport.md#leaf-nodes), [docs/auth.md](docs/auth.md#adding-an-ant)):
+
+```sh
+# On the hub / auth machine: issue leaf uplink and one-time enrollment credentials
+ants auth leaf worker-1 --ant dev-b --human alice --js-domain hub
+ants auth enroll dev-b
+# Copy server.conf, leaf-worker-1*.creds, and enroll-dev-b.creds from ~/.config/ants/auth/ to worker-1
+
+# On worker-1: start the local leaf node, enroll dev-b (and host-worker-1), then start the daemon
+mkdir -p ~/.ants && printf 'harness = "copilot"\nmessenger = false\njs_domain = "hub"\n' > ~/.ants/config.toml
+ants leaf config worker-1 --uplink wss://hub.example/nats
+scripts/install-units.sh --no-daemon                # or: nats-server -c ~/.config/ants/leaf.conf &
+ants add dev-b --workdir ~/src/some-repo --enroll ~/.config/ants/auth/enroll-dev-b.creds
+scripts/install-units.sh                            # once approved below (or: ants daemon)
+
+# On the hub / auth machine: approve enrollment, wire the offline outbox, and message @dev-b
+ants enroll approve dev-b --js-domain hub
+ants leaf outbox worker-1 --ant dev-b --human alice --js-domain hub
+ants ask --wait @dev-b "run the test suite"
+```
+
 ## Documentation
 
 | Document | Contents |
