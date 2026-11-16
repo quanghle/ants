@@ -59,11 +59,13 @@ Options: `--ants PATH`, `--nats-server PATH`, `--nats-conf FILE` (default `~/.co
 
 ## Footprint
 
-`scripts/footprint.sh` starts `ants daemon`, samples its resident memory (`ps -o rss=`), and fails at or above `--max-mb` (default `20` MB; `--harness NAME` sets the ant's harness, default `copilot`; `--ask TEXT` measures `ants daemon` again with an active session; `--metrics ADDR` scrapes `/healthz` and `/metrics`):
+`scripts/footprint.sh` starts `ants daemon` serving one ant and fails when its idle private memory is at or above `--max-mb` (default `10` MB; CI runs it on Linux and macOS). Private memory is the memory the daemon alone holds: `RssAnon` of `/proc/PID/status` on Linux (heap, stacks, relocated data), the physical footprint reported by `footprint` on macOS. Resident memory (`ps -o rss=`, and `RssFile` on Linux) is reported too but not gated: most of it is clean, file-backed code pages of the `ants` binary, shared with every other `ants` process and reclaimable by the kernel, so it tracks binary size more than the daemon's own use (Linux maps code in 64 KB fault-around blocks around each touched page). `--harness NAME` sets the ant's harness (default `copilot`); `--ask TEXT` measures `ants daemon` again with an active session, plus the resident memory of its harness processes; `--metrics ADDR` scrapes `/healthz` and `/metrics` before each idle sample.
 
 | `ants daemon` (`ants` 0.1.0 release) | Linux x86_64 | macOS arm64 |
 |---|---|---|
-| Idle (serving 1 ant) | 5.9 MB | 8.5 MB |
-| Active MCP session | — | 10.5 MB |
+| Idle (serving 1 ant), private | TBD | TBD |
+| Idle (serving 1 ant), resident | TBD | TBD |
+| Active MCP session, private | TBD | TBD |
+| Active MCP session, resident | TBD | TBD |
 
-External ACP harness child processes run outside the daemon's own RSS budget. Below `[memory_pressure]` `min_available` (default `1GB`), each ant stops idle harnesses immediately and runs at most `[memory_pressure]` `max_harnesses` (default `1`) until available memory recovers ([config.md](config.md#memory-pressure)).
+External ACP harness child processes run outside the daemon's own memory budget. Below `[memory_pressure]` `min_available` (default `1GB`), each ant stops idle harnesses immediately and runs at most `[memory_pressure]` `max_harnesses` (default `1`) until available memory recovers ([config.md](config.md#memory-pressure)).
