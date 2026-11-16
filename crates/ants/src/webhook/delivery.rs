@@ -69,6 +69,8 @@ pub(crate) struct Delivery<'a> {
     /// The tool rules the thread is narrowed to ([`Envelope::allow`]).
     pub(crate) allow: Option<&'a [String]>,
     /// Its key in [`WEBHOOKS_BUCKET`] ([`webhook_seen_key`]).
+    ///
+    /// [`webhook_seen_key`]: ants_proto::webhook_seen_key
     pub(crate) key: String,
     /// The stream's `Nats-Msg-Id` of the message.
     pub(crate) message_id: String,

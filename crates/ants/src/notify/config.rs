@@ -118,6 +118,8 @@ pub struct Human {
     pub(super) quiet: Option<QuietHours>,
     pub(super) bypass: Vec<Bypass>,
     /// Who gets what waits for the human while it is away, unless an ant names its own stand-in ([`relayed`]).
+    ///
+    /// [`relayed`]: super::notices::relayed
     pub(super) stand_in: Option<UserId>,
     pub(super) digest: bool,
     pub(super) sinks: Vec<Target>,

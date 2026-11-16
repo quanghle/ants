@@ -118,16 +118,26 @@ pub struct Entry {
     pub stuck: Option<UserId>,
     /// The title an inbox message, channel post or notes post that is not forged suggests for its thread
     /// ([`Envelope::title`], [`ChannelPost::title`], [`NotesPost::title`]).
+    ///
+    /// [`Envelope::title`]: ants_proto::Envelope::title
+    /// [`ChannelPost::title`]: ants_proto::ChannelPost::title
+    /// [`NotesPost::title`]: ants_proto::NotesPost::title
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggested_title: Option<String>,
     /// The summary request an inbox message that is not forged carries, or answers ([`Envelope::summary`]).
+    ///
+    /// [`Envelope::summary`]: ants_proto::Envelope::summary
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<SummaryRequest>,
     /// The question an inbox message that is not forged asks, if valid ([`Envelope::asks`]).
+    ///
+    /// [`Envelope::asks`]: ants_proto::Envelope::asks
     #[serde(skip_serializing_if = "Option::is_none")]
     pub question: Option<Question>,
     /// The answer an inbox message that is not forged gives a question read before it, if valid
     /// ([`Envelope::answers`]); an invalid one, or one to a question not read, leaves an ordinary message.
+    ///
+    /// [`Envelope::answers`]: ants_proto::Envelope::answers
     #[serde(skip_serializing_if = "Option::is_none")]
     pub answer: Option<Answer>,
     /// A tool call's details, its title the text and its ant the sender.
@@ -137,9 +147,13 @@ pub struct Entry {
     #[serde(skip)]
     pub turns: Option<u32>,
     /// An inbox message a webhook or schedule sent ([`Envelope::webhook`]).
+    ///
+    /// [`Envelope::webhook`]: ants_proto::Envelope::webhook
     #[serde(skip)]
     pub webhook: bool,
     /// The thread an inbox message's thread was spun off ([`Envelope::origin_thread`]).
+    ///
+    /// [`Envelope::origin_thread`]: ants_proto::Envelope::origin_thread
     #[serde(skip)]
     pub origin: Option<ThreadId>,
 }

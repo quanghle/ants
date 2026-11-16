@@ -62,6 +62,8 @@ pub struct Summary {
     #[serde(skip)]
     pub last_seq: u64,
     /// Opened by a summary request ([`Envelope::summary`]): a message read on it carries one. Left out of every list.
+    ///
+    /// [`Envelope::summary`]: ants_proto::Envelope::summary
     #[serde(skip)]
     pub catch_up: bool,
     /// The stream sequence of its last message, post or note read ([`Kind::reopens`]); 0 for none.

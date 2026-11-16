@@ -83,7 +83,7 @@ pub const APPROVAL_PATH: &str = "/_approval";
 const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 /// The longest `timeout` of a sink, well within [`ACK_WAIT`].
 const MAX_SEND_TIMEOUT: Duration = Duration::from_secs(30);
-/// The version of the JSON notice exec and http sinks get ([`notice_json`]).
+/// The version of the JSON notice exec and http sinks get ([`notice_json`](notices::notice_json)).
 const NOTICE_VERSION: u32 = 1;
 /// Shortest signing secret of an http sink.
 const MIN_SECRET: usize = 16;

@@ -21,6 +21,8 @@ use super::{DIGEST_PENDING, MAX_TEXT, NOTICE_VERSION};
 use crate::tools;
 
 /// What a sink sends, whatever its kind: each kind's form of it is [`Sink::request`]'s.
+///
+/// [`Sink::request`]: super::config::Sink::request
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Notice {
     pub(super) about: About,
