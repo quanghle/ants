@@ -149,63 +149,93 @@ pub async fn connect_retrying_with(
     let shown = redacted(url);
     let attempts = async {
         let options = match creds {
-            Some(path) => {
-                crate::creds::warn(path);
-                let mut delay = RETRY_FIRST;
-                loop {
-                    match authenticate(options.clone(), path, store) {
-                        Ok(options) => break options,
-                        Err(e) if keystore::is_unavailable(&e) => {
-                            tracing::warn!(
-                                creds = %path.display(),
-                                error = format!("{e:#}"),
-                                retry_in = ?delay,
-                                "waiting for the OS credential store to be unlocked"
-                            );
-                            tokio::time::sleep(delay).await;
-                            delay = (delay * 2).min(RETRY_MAX);
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-            }
+            Some(path) => authenticate_retrying(options, path, store).await?,
             None => options,
         };
-        let mut delay = RETRY_FIRST;
-        let client = loop {
-            match options.clone().connect(url).await {
-                Ok(client) => break client,
-                Err(e) if worth_retrying(&e) => {
-                    tracing::warn!(url = %shown, error = %e, retry_in = ?delay, "NATS server not reachable yet");
-                    tokio::time::sleep(delay).await;
-                    delay = (delay * 2).min(RETRY_MAX);
-                }
-                Err(e) => return Err(e).with_context(|| format!("connecting to NATS at {shown}")),
-            }
-        };
+        let client = connect_until_reachable(&options, url, &shown).await?;
         let js = jetstream(client.clone(), js_domain);
-        let mut delay = RETRY_FIRST;
-        loop {
-            let reached = tokio::select! {
-                biased;
-                Some(e) = denied.recv() => return Err(anyhow::anyhow!(e)).context("reaching JetStream"),
-                reached = reach_jetstream(&js, user) => reached,
-            };
-            match reached {
-                // Creating the consumer or the stream it found missing is up to the caller.
-                Ok(()) => return Ok((client, js)),
-                Err(e) if matches!(e.kind(), ConsumerInfoErrorKind::TimedOut | ConsumerInfoErrorKind::NoResponders) => {
-                    tracing::warn!(url = %shown, error = %e, retry_in = ?delay, "JetStream not reachable yet");
-                    tokio::time::sleep(delay).await;
-                    delay = (delay * 2).min(RETRY_MAX);
-                }
-                Err(e) => return Err(e).context("reaching JetStream"),
-            }
-        }
+        reach_jetstream_retrying(&js, user, &mut denied, &shown).await?;
+        Ok((client, js))
     };
     tokio::select! {
         connected = attempts => connected.map(Some),
         () = stop => Ok(None),
+    }
+}
+
+/// `options` with the credentials at `path`, waiting, with backoff, while the OS credential store holding their seed
+/// is locked.
+async fn authenticate_retrying(
+    options: async_nats::ConnectOptions,
+    path: &Path,
+    store: &dyn Store,
+) -> Result<async_nats::ConnectOptions> {
+    crate::creds::warn(path);
+    let mut delay = RETRY_FIRST;
+    loop {
+        match authenticate(options.clone(), path, store) {
+            Ok(options) => return Ok(options),
+            Err(e) if keystore::is_unavailable(&e) => {
+                tracing::warn!(
+                    creds = %path.display(),
+                    error = format!("{e:#}"),
+                    retry_in = ?delay,
+                    "waiting for the OS credential store to be unlocked"
+                );
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(RETRY_MAX);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// A client connected to `url` (`shown` redacted) with `options`, retrying, with backoff, while the server is not
+/// reachable yet.
+async fn connect_until_reachable(
+    options: &async_nats::ConnectOptions,
+    url: &str,
+    shown: &str,
+) -> Result<async_nats::Client> {
+    let mut delay = RETRY_FIRST;
+    loop {
+        match options.clone().connect(url).await {
+            Ok(client) => return Ok(client),
+            Err(e) if worth_retrying(&e) => {
+                tracing::warn!(url = %shown, error = %e, retry_in = ?delay, "NATS server not reachable yet");
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(RETRY_MAX);
+            }
+            Err(e) => return Err(e).with_context(|| format!("connecting to NATS at {shown}")),
+        }
+    }
+}
+
+/// [`reach_jetstream`], retrying, with backoff, while no JetStream answers, unless the server reports a permissions
+/// violation on `denied` first.
+async fn reach_jetstream_retrying(
+    js: &jetstream::Context,
+    user: &UserId,
+    denied: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    shown: &str,
+) -> Result<()> {
+    let mut delay = RETRY_FIRST;
+    loop {
+        let reached = tokio::select! {
+            biased;
+            Some(e) = denied.recv() => return Err(anyhow::anyhow!(e)).context("reaching JetStream"),
+            reached = reach_jetstream(js, user) => reached,
+        };
+        match reached {
+            // Creating the consumer or the stream it found missing is up to the caller.
+            Ok(()) => return Ok(()),
+            Err(e) if matches!(e.kind(), ConsumerInfoErrorKind::TimedOut | ConsumerInfoErrorKind::NoResponders) => {
+                tracing::warn!(url = %shown, error = %e, retry_in = ?delay, "JetStream not reachable yet");
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(RETRY_MAX);
+            }
+            Err(e) => return Err(e).context("reaching JetStream"),
+        }
     }
 }
 

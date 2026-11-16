@@ -1,5 +1,3 @@
-#![allow(clippy::too_many_lines)]
-
 use super::*;
 
 fn manifest_dir() -> PathBuf {
@@ -123,8 +121,11 @@ Review changes for correctness."""
     let chain = Chain { escalate_to, max_hops: 2, after: None, remind: None, stand_in: Some("carol".parse().unwrap()) };
     assert_eq!(config.escalation, chain, "0 waits for the leader for good and never reminds");
     assert_eq!(config.worktrees, Some(true));
+    check_dev_b(ants[1].clone());
+}
 
-    let b = ants[1].clone();
+/// Check dev-b of [`parses_several_ants`], which sets only its connection, human and workdir.
+fn check_dev_b(b: Ant) {
     assert_eq!(b.nats.as_deref(), Some("nats://127.0.0.1:4222"));
     assert_eq!(b.workdir, manifest_dir().join("src").canonicalize().unwrap());
     let defaults = Ant::new(b.name.clone(), b.workdir.clone());

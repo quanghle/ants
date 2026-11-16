@@ -2,8 +2,8 @@ use chrono::Utc;
 
 use super::*;
 use crate::{
-    ANTS_VERSION, AntReply, AntRequest, CancelReply, CancelRequest, ChainEntry, ChannelEntry, ChannelOp, DeviceId,
-    HumanEntry, Humans, QueueRequest, Refusal, SPARE_READERS, Serving, ThreadId, Uuid, assisted_owner_key,
+    ANTS_VERSION, AntReply, AntRequest, AskedAnt, CancelReply, CancelRequest, ChainEntry, ChannelEntry, ChannelOp,
+    DeviceId, HumanEntry, Humans, QueueRequest, Refusal, SPARE_READERS, Serving, ThreadId, Uuid, assisted_owner_key,
     assisted_withdrawal_key, channel_manager_serving_key, p,
 };
 
@@ -56,17 +56,13 @@ fn ants_ask_only_for_their_own_ant_requests_and_the_approver_answers_them() {
         !approver.publish.iter().any(|s| s == subject::ALL_APPROVAL_DECISIONS),
         "only humans and the escalation chain decide"
     );
-    let request = AntRequest::new(
-        lead.clone(),
-        p("lead-w1"),
-        "worker",
-        "{}",
-        "more hands",
-        "t1".parse().unwrap(),
-        "UKEY",
-        "host",
-        Utc::now(),
-    );
+    let asked = AskedAnt {
+        name: p("lead-w1"),
+        template: "worker".to_owned(),
+        request: "{}".to_owned(),
+        reason: "more hands".to_owned(),
+    };
+    let request = AntRequest::new(lead.clone(), asked, "t1".parse().unwrap(), "UKEY", "host", Utc::now());
     assert_eq!(request.subject(), "ants.antreq.lead");
     assert!(request.check_subject("ants.antreq.dev-b").is_err());
     let mut moved = request.clone();

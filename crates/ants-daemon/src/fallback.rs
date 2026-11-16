@@ -231,7 +231,10 @@ pub fn meanwhile(ant: &impl fmt::Display, fallbacks: &[String], back: &str) -> O
 /// The notice to the owner of the thread of `envelope` (a channel post if `post`), else the default human of `humans`,
 /// that `ant` cannot answer with a fallback either while its own harness `own` is `outage`: each of `fallbacks` is
 /// passed over, `last` having turned a message away just now, being `why` (`detail`), until `next`.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the daemon's outage handlers pass these from separate fields of their own; notice_on builds the shared part"
+)]
 pub fn exhausted_notice(
     ant: &UserId,
     envelope: &Envelope,
@@ -259,6 +262,12 @@ pub fn exhausted_notice(
         "[ants] {ant} cannot answer with a fallback either: {turned}.\nMessages to {ant} wait meanwhile, spending no \
          attempts, until harness {own}, {outage}, answers again or a fallback answers when tried again{next}."
     );
+    notice_on(ant, envelope, post, humans, text)
+}
+
+/// The notice `text` of `ant` on the thread of `envelope`, to the thread's human owner, else the default human of
+/// `humans`: a reply to `envelope` unless it stands for a channel post (`post`).
+pub fn notice_on(ant: &UserId, envelope: &Envelope, post: bool, humans: &Registry, text: String) -> Envelope {
     let owner = humans.human_owner(envelope.owner.as_ref());
     let mut notice = Envelope::on_thread(
         envelope.thread_id.clone(),

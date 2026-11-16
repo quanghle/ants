@@ -1302,6 +1302,15 @@ struct Connected<'a> {
     close: bool,
 }
 
+/// How a prompt ended: its response (None when a cancelled prompt did not end within the grace period), why it was
+/// cancelled, and the reply text the harness streamed, with whether all of it read as errors or notices.
+struct Ended {
+    done: Option<Result<PromptResponse, agent_client_protocol::Error>>,
+    cut: Option<String>,
+    text: String,
+    errors_only: bool,
+}
+
 impl Connected<'_> {
     /// Run `turn` in session `id`, or in a new one should the prompt outgrow the context window, and send its reply.
     /// Breaks when the harness is to stop; fails with the error that ends the connection.
@@ -1316,79 +1325,123 @@ impl Connected<'_> {
         let (lines, images) = attached(attachments, self.images).await;
         // Once in a new session when the prompt outgrows the context window, unless it ran in one already.
         let mut retry = rebuild.is_none();
-        let (done, cut, text, errors_only) = loop {
-            let too_many = Arc::new(Notify::new());
-            {
-                let mut observed = self.observed.locked();
-                // A cost reported after the last prompt ended counts now.
-                if let (Some(tx), Some(total)) = (&spend, observed.cost) {
-                    let _ = tx.send(Spend::Cost { session: id.clone(), total });
-                }
-                observed.current = Some(Current {
-                    text: String::new(),
-                    errors_only: true,
-                    notices: 0,
-                    tool_calls: HashMap::new(),
-                    max_tool_calls: limits.max_tool_calls,
-                    too_many: too_many.clone(),
-                    spend: spend.clone(),
-                    progress: progress.clone(),
-                });
-            }
-            let seed = match rebuild {
-                Some(why) => {
-                    let budget = self.launch.harness.history_budget(&self.launch.settings);
-                    crate::history::seed(why, history.take(), budget).await
-                }
-                None => String::new(),
-            };
-            let text = [self.launch.instructions.as_str(), &seed, &text, &lines]
-                .into_iter()
-                .filter(|part| !part.is_empty())
-                .collect::<Vec<_>>()
-                .join("\n\n");
+        let ended = loop {
+            let too_many = self.observe(id, limits, spend.as_ref(), progress.as_ref());
+            let text = self.compose(rebuild, &mut history, &text, &lines).await;
             let content = std::iter::once(ContentBlock::Text(TextContent::new(text))).chain(images.iter().cloned());
             let request = self.cx.send_request(PromptRequest::new(id.clone(), content.collect())).block_task();
             let (done, cut) = bounded(self.cx, id, request, limits, &too_many, &mut stop, self.cancelled).await;
-            let (text, errors_only) = self.observed.locked().current.take().map_or_else(Default::default, |c| {
-                let text =
-                    if c.errors_only { c.text } else { crate::ratelimit::strip_notices(&c.text, c.notices).into() };
-                (text, c.errors_only)
-            });
+            let ended = self.ended(done, cut);
             let overflowed = |e: &agent_client_protocol::Error| overflows(&self.launch.harness, &e.to_string());
-            match &done {
-                Some(Err(e)) if cut.is_none() && retry && overflowed(e) => {
+            match &ended.done {
+                Some(Err(e)) if ended.cut.is_none() && retry && overflowed(e) => {
                     tracing::warn!(session = %id, error = %e, "the prompt outgrew the context window");
-                    // The thread leaves the session for good: what the agent runs for it can stop.
-                    if self.close
-                        && let Err(e) = self.cx.send_request(CloseSessionRequest::new(id.clone())).block_task().await
-                    {
-                        tracing::warn!(session = %id, error = %e, "session/close");
+                    if let Err(e) = self.renew(id).await {
+                        let methods = self.methods.locked();
+                        let _ = reply.send(Err(harness_error(self.launch, "session", &e, &methods)));
+                        return Err(e);
                     }
-                    *id = match new_session(self.cx, self.launch, self.mcp.clone()).await {
-                        Ok(id) => id,
-                        Err(e) => {
-                            let methods = self.methods.locked();
-                            let _ = reply.send(Err(harness_error(self.launch, "session", &e, &methods)));
-                            return Err(e);
-                        }
-                    };
-                    *self.current.locked() = id.clone();
-                    self.observed.locked().cost = None;
                     (rebuild, retry) = (Some(Rebuild::Overflow), false);
                 }
-                Some(Err(e)) if cut.is_none() && overflowed(e) => {
+                Some(Err(e)) if ended.cut.is_none() && overflowed(e) => {
                     let harness = self.launch.harness.name.clone();
                     let _ = reply.send(Err(ContextOverflow { harness, detail: e.to_string() }.into()));
                     return Err(e.clone());
                 }
-                _ => break (done, cut, text, errors_only),
+                _ => break ended,
             }
         };
+        self.reply(id, ended, spend.as_ref(), reply)
+    }
+
+    /// Start observing a prompt in session `id`, reporting a cost left from the last one first. Returns what notifies
+    /// the prompt having started too many tool calls.
+    fn observe(
+        &self,
+        id: &SessionId,
+        limits: PromptLimits,
+        spend: Option<&mpsc::UnboundedSender<Spend>>,
+        progress: Option<&mpsc::Sender<StatusUpdate>>,
+    ) -> Arc<Notify> {
+        let too_many = Arc::new(Notify::new());
+        let mut observed = self.observed.locked();
+        // A cost reported after the last prompt ended counts now.
+        if let (Some(tx), Some(total)) = (spend, observed.cost) {
+            let _ = tx.send(Spend::Cost { session: id.clone(), total });
+        }
+        observed.current = Some(Current {
+            text: String::new(),
+            errors_only: true,
+            notices: 0,
+            tool_calls: HashMap::new(),
+            max_tool_calls: limits.max_tool_calls,
+            too_many: too_many.clone(),
+            spend: spend.cloned(),
+            progress: progress.cloned(),
+        });
+        too_many
+    }
+
+    /// The prompt's text: the instructions, the thread's history when the session is a `rebuild`, the message's
+    /// `text` and the `lines` naming its attachments.
+    async fn compose(
+        &self,
+        rebuild: Option<Rebuild>,
+        history: &mut Option<History>,
+        text: &str,
+        lines: &str,
+    ) -> String {
+        let seed = match rebuild {
+            Some(why) => {
+                let budget = self.launch.harness.history_budget(&self.launch.settings);
+                crate::history::seed(why, history.take(), budget).await
+            }
+            None => String::new(),
+        };
+        [self.launch.instructions.as_str(), &seed, text, lines]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    /// Stop observing the prompt that ended with `done` and `cut`, taking the text it streamed.
+    fn ended(&self, done: Option<Result<PromptResponse, agent_client_protocol::Error>>, cut: Option<String>) -> Ended {
+        let (text, errors_only) = self.observed.locked().current.take().map_or_else(Default::default, |c| {
+            let text = if c.errors_only { c.text } else { crate::ratelimit::strip_notices(&c.text, c.notices).into() };
+            (text, c.errors_only)
+        });
+        Ended { done, cut, text, errors_only }
+    }
+
+    /// Move from session `id`, whose context window the prompt outgrew, to a new one.
+    async fn renew(&self, id: &mut SessionId) -> Result<(), agent_client_protocol::Error> {
+        // The thread leaves the session for good: what the agent runs for it can stop.
+        if self.close
+            && let Err(e) = self.cx.send_request(CloseSessionRequest::new(id.clone())).block_task().await
+        {
+            tracing::warn!(session = %id, error = %e, "session/close");
+        }
+        *id = new_session(self.cx, self.launch, self.mcp.clone()).await?;
+        *self.current.locked() = id.clone();
+        self.observed.locked().cost = None;
+        Ok(())
+    }
+
+    /// Send the reply to the prompt that `ended` in session `id`. Breaks when the harness is to stop; fails with the
+    /// error that ends the connection.
+    fn reply(
+        &self,
+        id: &SessionId,
+        ended: Ended,
+        spend: Option<&mpsc::UnboundedSender<Spend>>,
+        reply: oneshot::Sender<Result<Reply>>,
+    ) -> Result<ControlFlow<()>, agent_client_protocol::Error> {
+        let Ended { done, cut, text, errors_only } = ended;
         match done {
             Some(Ok(done)) => {
                 tracing::debug!(session = %id, stop_reason = ?done.stop_reason, "prompt finished");
-                if let (Some(tx), Some(usage)) = (&spend, &done.usage) {
+                if let (Some(tx), Some(usage)) = (spend, &done.usage) {
                     let _ = tx.send(Spend::Tokens(usage.total_tokens));
                 }
                 // Copilot CLI and Antigravity end a prompt their provider turned away as a reply of error

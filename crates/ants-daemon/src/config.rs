@@ -729,18 +729,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
     let mut file: File = toml::from_str(text).with_context(|| format!("parsing config {}", path.display()))?;
     let base = path.parent().unwrap_or(Path::new("."));
     let harnesses = define(std::mem::take(&mut file.harnesses), path, home)?;
-    if let Some(harness) = &file.harness {
-        harnesses.get(harness).with_context(|| format!("config {}", path.display()))?;
-    }
-    if let Some(url) = &file.cli.nats {
-        crate::bus::check_url(url).with_context(|| format!("config {}: [cli]", path.display()))?;
-    }
-    file.cli.summary().with_context(|| format!("config {}", path.display()))?;
-    file.storage.validate().with_context(|| format!("config {}", path.display()))?;
-    file.memory_pressure.validate().with_context(|| format!("config {}", path.display()))?;
-    if let Some(machine) = &file.machine {
-        check_machine(machine).with_context(|| format!("config {}", path.display()))?;
-    }
+    check_top_level(&file, &harnesses, path)?;
     let host = HostSettings::resolve(&mut file, base, home);
     if file.ants.is_empty() && !file.messenger {
         bail!("config {}: messenger = false and no [[ant]] entries: nothing to serve", path.display());
@@ -753,7 +742,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
     let tables = ant_tables(text)?;
     let mut names = BTreeSet::new();
     let mut ants = Vec::with_capacity(file.ants.len());
-    for (i, mut ant) in file.ants.into_iter().enumerate() {
+    for (i, mut ant) in std::mem::take(&mut file.ants).into_iter().enumerate() {
         if !names.insert(ant.name.clone()) {
             bail!("config {}: ant {} is listed twice", path.display(), ant.name);
         }
@@ -762,37 +751,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
             ant = from_template(ant, table, &templates, base, home)
                 .with_context(|| format!("config {}", path.display()))?;
         }
-        harness::validate_env(&ant.env)?;
-        ant.validate().with_context(|| format!("config {}", path.display()))?;
-        if ant.harness.is_none() {
-            ant.harness.clone_from(&file.harness);
-        }
-        check_harnesses(&ant, &harnesses).with_context(|| format!("config {}: ant {}", path.display(), ant.name))?;
-        if !ant.builtin {
-            let abs = |dir: &Path| resolve(dir, base, home);
-            ant.workdir = abs(&ant.workdir).canonicalize().with_context(|| {
-                format!("config {}: ant {}: workdir {}", path.display(), ant.name, ant.workdir.display())
-            })?;
-            ant.home = ant.home.as_deref().map(abs);
-            ant.creds = ant.creds.as_deref().map(abs);
-        }
-        if ant.nats.is_none() {
-            ant.nats.clone_from(&file.nats);
-        }
-        if let Some(url) = &ant.nats {
-            crate::bus::check_url(url).with_context(|| format!("config {}: ant {}", path.display(), ant.name))?;
-        }
-        if ant.js_domain.is_none() {
-            ant.js_domain.clone_from(&file.js_domain);
-        }
-        if ant.human.is_none() {
-            ant.human.clone_from(&file.human);
-        }
-        ant.redact = file.redact;
-        ant.machine.clone_from(&file.machine);
-        ant.storage = file.storage;
-        ant.memory_pressure = file.memory_pressure;
-        ants.push(ant);
+        ants.push(settle_ant(ant, &file, &harnesses, base, home, path)?);
     }
     let timezone = file
         .timezone
@@ -801,10 +760,81 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
         .transpose()
         .with_context(|| format!("config {}", path.display()))?;
     check_added(&mut ants, &templates).with_context(|| format!("config {}", path.display()))?;
-    let mut schedules: Vec<Schedule> = Vec::with_capacity(file.schedules.len());
-    for entry in file.schedules {
+    let entries = std::mem::take(&mut file.schedules);
+    let schedules = schedules(entries, &file, timezone.as_ref(), &names, base, home, path)?;
+    let (base, home) = (base.to_owned(), home.to_owned());
+    Ok(Loaded { ants, harnesses, templates, schedules, metrics: file.metrics, storage: file.storage, host, base, home })
+}
+
+/// Check the top-level settings of the config `file` at `path`: its `harness` among the `harnesses`, its `[cli]`,
+/// `[storage]`, `[memory_pressure]` and `machine`.
+fn check_top_level(file: &File, harnesses: &Harnesses, path: &Path) -> Result<()> {
+    if let Some(harness) = &file.harness {
+        harnesses.get(harness).with_context(|| format!("config {}", path.display()))?;
+    }
+    if let Some(url) = &file.cli.nats {
+        crate::bus::check_url(url).with_context(|| format!("config {}: [cli]", path.display()))?;
+    }
+    file.cli.summary().with_context(|| format!("config {}", path.display()))?;
+    file.storage.validate().with_context(|| format!("config {}", path.display()))?;
+    file.memory_pressure.validate().with_context(|| format!("config {}", path.display()))?;
+    if let Some(machine) = &file.machine {
+        check_machine(machine).with_context(|| format!("config {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Check `ant` of the config file at `path`, give it the top-level settings of the `file` it sets none of, and
+/// resolve its paths against `base` and `home` unless it is built in.
+fn settle_ant(mut ant: Ant, file: &File, harnesses: &Harnesses, base: &Path, home: &Path, path: &Path) -> Result<Ant> {
+    harness::validate_env(&ant.env)?;
+    ant.validate().with_context(|| format!("config {}", path.display()))?;
+    if ant.harness.is_none() {
+        ant.harness.clone_from(&file.harness);
+    }
+    check_harnesses(&ant, harnesses).with_context(|| format!("config {}: ant {}", path.display(), ant.name))?;
+    if !ant.builtin {
+        let abs = |dir: &Path| resolve(dir, base, home);
+        ant.workdir = abs(&ant.workdir).canonicalize().with_context(|| {
+            format!("config {}: ant {}: workdir {}", path.display(), ant.name, ant.workdir.display())
+        })?;
+        ant.home = ant.home.as_deref().map(abs);
+        ant.creds = ant.creds.as_deref().map(abs);
+    }
+    if ant.nats.is_none() {
+        ant.nats.clone_from(&file.nats);
+    }
+    if let Some(url) = &ant.nats {
+        crate::bus::check_url(url).with_context(|| format!("config {}: ant {}", path.display(), ant.name))?;
+    }
+    if ant.js_domain.is_none() {
+        ant.js_domain.clone_from(&file.js_domain);
+    }
+    if ant.human.is_none() {
+        ant.human.clone_from(&file.human);
+    }
+    ant.redact = file.redact;
+    ant.machine.clone_from(&file.machine);
+    ant.storage = file.storage;
+    ant.memory_pressure = file.memory_pressure;
+    Ok(ant)
+}
+
+/// The schedules of the config file at `path` from their `entries`, each named once and after none of the ants'
+/// `names`, with the top-level `timezone`, and the `nats` and `js_domain` of the `file`, where they set none.
+fn schedules(
+    entries: Vec<schedule::Entry>,
+    file: &File,
+    timezone: Option<&jiff::tz::TimeZone>,
+    names: &BTreeSet<UserId>,
+    base: &Path,
+    home: &Path,
+    path: &Path,
+) -> Result<Vec<Schedule>> {
+    let mut schedules: Vec<Schedule> = Vec::with_capacity(entries.len());
+    for entry in entries {
         let name = entry.name.clone();
-        let mut schedule = Schedule::from_entry(entry, timezone.as_ref(), |p| resolve(p, base, home))
+        let mut schedule = Schedule::from_entry(entry, timezone, |p| resolve(p, base, home))
             .with_context(|| format!("config {}: schedule {name}", path.display()))?;
         let name = &schedule.name;
         if schedules.iter().any(|s| s.name == *name) {
@@ -824,8 +854,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
         }
         schedules.push(schedule);
     }
-    let (base, home) = (base.to_owned(), home.to_owned());
-    Ok(Loaded { ants, harnesses, templates, schedules, metrics: file.metrics, storage: file.storage, host, base, home })
+    Ok(schedules)
 }
 
 /// The most characters of the top-level `machine`.
@@ -1541,10 +1570,15 @@ pub fn signer_templates(path: &Path) -> Result<Vec<AntTemplate>> {
 
 /// The `[[ant]]` table of `ant` for the config file: its name, workdir and the settings that differ from those of
 /// [`Ant::new`], paths as they are.
-#[allow(clippy::too_many_lines)]
 pub fn entry(ant: &Ant) -> Result<String> {
-    let default = Ant::new(ant.name.clone(), ant.workdir.clone());
     let mut out = String::from("[[ant]]\n");
+    entry_settings(ant, &mut out)?;
+    entry_limits(ant, &mut out);
+    Ok(out)
+}
+
+/// Write to `out` the name, connection, paths, harness and permissions of `ant`'s `[[ant]]` table.
+fn entry_settings(ant: &Ant, out: &mut String) -> Result<()> {
     let mut set = |key: &str, value: String| {
         let _ = writeln!(out, "{key} = {value}");
     };
@@ -1607,6 +1641,15 @@ pub fn entry(ant: &Ant) -> Result<String> {
     if let Some(stand_in) = &ant.stand_in {
         set("stand_in", toml_string(stand_in.as_str()));
     }
+    Ok(())
+}
+
+/// Write to `out` the limits and timeouts of `ant`'s `[[ant]]` table that differ from those of [`Ant::new`].
+fn entry_limits(ant: &Ant, out: &mut String) {
+    let default = Ant::new(ant.name.clone(), ant.workdir.clone());
+    let mut set = |key: &str, value: String| {
+        let _ = writeln!(out, "{key} = {value}");
+    };
     let numbers = [
         ("max_harnesses", ant.max_harnesses as u64, default.max_harnesses as u64),
         ("max_tool_calls", ant.max_tool_calls as u64, default.max_tool_calls as u64),
@@ -1651,7 +1694,6 @@ pub fn entry(ant: &Ant) -> Result<String> {
     if ant.publish != default.publish {
         set("publish", toml_string(ant.publish.as_str()));
     }
-    Ok(out)
 }
 
 /// The `[[ant]]` table of an ant named `name` that `manager` adds from `template` as `request` asks, with `creds` as

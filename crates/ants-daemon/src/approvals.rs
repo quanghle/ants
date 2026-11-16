@@ -61,7 +61,7 @@ use async_nats::jetstream;
 use async_nats::jetstream::stream::DirectGetErrorKind;
 use futures::StreamExt as _;
 use futures::future::BoxFuture;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::bus;
 use crate::escalation::Chain;
@@ -91,6 +91,18 @@ struct Held {
 enum Offered {
     Chain(FromChain),
     Held(Held),
+}
+
+/// Where a waiting approval request hears of its decision.
+struct Listening {
+    /// Humans' decisions, on the request's decision subject.
+    decisions: async_nats::Subscriber,
+    /// The ant's live inbox, where the ants of its chain decide: none without a chain, or once it closed.
+    inbox: Option<bus::LiveInbox>,
+    consents: broadcast::Receiver<UserId>,
+    withdrawals: broadcast::Receiver<Withdrawal>,
+    /// The decisions the inbox consumer offers ([`NatsApprover::offer`]).
+    from_chain: mpsc::UnboundedReceiver<Offered>,
 }
 
 /// The requests waiting for a decision, by id, with where a decision offered on each goes.
@@ -295,14 +307,15 @@ impl NatsApprover {
         let request = ApprovalRequest::new(self.ant.clone(), thread, tool, options, self.timeout)
             .for_human(Some(human), self.chain.stand_in.clone());
         // Subscribe first, so a quick answer is not missed.
-        let mut decisions = self.client.subscribe(request.decision_subject()).await?;
-        let mut inbox = if self.chain.escalate_to.is_empty() {
+        let decisions = self.client.subscribe(request.decision_subject()).await?;
+        let inbox = if self.chain.escalate_to.is_empty() {
             None
         } else {
             Some(bus::live_inbox(&self.client, &self.ant).await?)
         };
-        let (mut consents, mut withdrawals) = (self.humans.consents(), self.humans.withdrawals());
-        let (chain_decided, mut from_chain) = mpsc::unbounded_channel();
+        let (consents, withdrawals) = (self.humans.consents(), self.humans.withdrawals());
+        let (chain_decided, from_chain) = mpsc::unbounded_channel();
+        let mut listening = Listening { decisions, inbox, consents, withdrawals, from_chain };
         self.waiting.locked().insert(request.id, (request.clone(), chain_decided));
         // Leaves the waiting map once decided, expired or given up.
         let _pending = DropGuard::new(request.id, |id| {
@@ -313,77 +326,15 @@ impl NatsApprover {
         let waits = StatusUpdate::Approval { request_id: request.id };
         crate::status::publish(&self.client, &self.ant, &request.thread_id, waits);
         crate::status::state(&self.client, &self.ant, &request.thread_id, State::WaitingApproval);
-        // How the request was settled; None once nothing more can be heard.
-        let wait = async {
-            // Whether a decision was heard for the request, and a failure to read the stored one was warned of.
-            let (mut heard, mut warned) = (false, false);
-            // The decisions assistants made for their humans, the latest of each, waiting for the humans' consent.
-            let mut held: Vec<Held> = Vec::new();
-            loop {
-                // Until the stream holds a decision heard, it is asked again every RECHECK.
-                let recheck = heard;
-                let holding = !held.is_empty();
-                let next = tokio::select! {
-                    msg = decisions.next() => msg.map_or(Heard::Closed, Heard::Human),
-                    msg = next_message(&mut inbox) => match msg {
-                        Some(msg) => self.chain_decision(&request, &msg).map_or(Heard::Nothing, Heard::Chain),
-                        None => {
-                            inbox = None;
-                            Heard::Nothing
-                        }
-                    },
-                    Some(offered) = from_chain.recv() => offered.into(),
-                    _ = consents.recv(), if holding => Heard::Consent,
-                    withdrawn = withdrawals.recv(), if holding => Heard::Withdrawn(withdrawn.ok()),
-                    () = tokio::time::sleep(RECHECK), if recheck => Heard::Nothing,
-                };
-                match next {
-                    Heard::Human(msg) => match decided(&request, &msg.payload) {
-                        Some(_) => heard = true,
-                        None => {
-                            tracing::warn!(subject = %msg.subject, "ignoring a malformed decision or one for another request");
-                        }
-                    },
-                    Heard::Chain((from, decision)) => return Some(self.settle_chain(&request, from, decision).await),
-                    Heard::Held(decided) => {
-                        held.retain(|h| (&h.human, &h.assistant) != (&decided.human, &decided.assistant));
-                        held.push(decided);
-                    }
-                    Heard::Withdrawn(Some(withdrawal)) => withdraw(&request, &mut held, &withdrawal),
-                    Heard::Consent | Heard::Withdrawn(None) | Heard::Nothing => {}
-                    Heard::Closed => return None,
+        let decided: Option<Settled> =
+            match tokio::time::timeout(self.timeout, self.wait(&request, &mut listening)).await {
+                Ok(decided) => decided,
+                Err(_) => {
+                    tracing::info!(request = %request.id, "approval request expired; rejecting");
+                    self.tell_expired(&request, &asked).await;
+                    Some((Verdict::Reject, DecidedBy::Expiry, None, None))
                 }
-                if (holding || !held.is_empty())
-                    && let Some(settled) = self.settle_held(&request, &mut held).await
-                {
-                    return Some(settled);
-                }
-                if !heard {
-                    continue;
-                }
-                let decision = match self.stored(&request).await {
-                    Ok(Some(d)) => d,
-                    Ok(None) => continue,
-                    Err(e) => {
-                        if !std::mem::replace(&mut warned, true) {
-                            tracing::warn!(request = %request.id, error = format!("{e:#}"), "reading the stored decision");
-                        }
-                        continue;
-                    }
-                };
-                self.tell_decided(&request, &decision).await;
-                // A verdict the harness did not offer counts as a rejection.
-                return Some((request.decide(decision.verdict).verdict, DecidedBy::Human, decision.by, None));
-            }
-        };
-        let decided: Option<Settled> = match tokio::time::timeout(self.timeout, wait).await {
-            Ok(decided) => decided,
-            Err(_) => {
-                tracing::info!(request = %request.id, "approval request expired; rejecting");
-                self.tell_expired(&request, &asked).await;
-                Some((Verdict::Reject, DecidedBy::Expiry, None, None))
-            }
-        };
+            };
         let verdict = decided.as_ref().map_or(Verdict::Reject, |(verdict, ..)| *verdict);
         if let Some((verdict, by, decider, via)) = decided {
             let decided = StatusUpdate::Decided { request_id: request.id, verdict, by, decider, via };
@@ -391,6 +342,71 @@ impl NatsApprover {
         }
         crate::status::state(&self.client, &self.ant, &request.thread_id, State::Working);
         Ok(verdict)
+    }
+
+    /// How `request` was settled, as heard on `listening`; None once nothing more can be heard.
+    async fn wait(&self, request: &ApprovalRequest, listening: &mut Listening) -> Option<Settled> {
+        let Listening { decisions, inbox, consents, withdrawals, from_chain } = listening;
+        // Whether a decision was heard for the request, and a failure to read the stored one was warned of.
+        let (mut heard, mut warned) = (false, false);
+        // The decisions assistants made for their humans, the latest of each, waiting for the humans' consent.
+        let mut held: Vec<Held> = Vec::new();
+        loop {
+            // Until the stream holds a decision heard, it is asked again every RECHECK.
+            let recheck = heard;
+            let holding = !held.is_empty();
+            let next = tokio::select! {
+                msg = decisions.next() => msg.map_or(Heard::Closed, Heard::Human),
+                msg = next_message(inbox) => match msg {
+                    Some(msg) => self.chain_decision(request, &msg).map_or(Heard::Nothing, Heard::Chain),
+                    None => {
+                        *inbox = None;
+                        Heard::Nothing
+                    }
+                },
+                Some(offered) = from_chain.recv() => offered.into(),
+                _ = consents.recv(), if holding => Heard::Consent,
+                withdrawn = withdrawals.recv(), if holding => Heard::Withdrawn(withdrawn.ok()),
+                () = tokio::time::sleep(RECHECK), if recheck => Heard::Nothing,
+            };
+            match next {
+                Heard::Human(msg) => match decided(request, &msg.payload) {
+                    Some(_) => heard = true,
+                    None => {
+                        tracing::warn!(subject = %msg.subject, "ignoring a malformed decision or one for another request");
+                    }
+                },
+                Heard::Chain((from, decision)) => return Some(self.settle_chain(request, from, decision).await),
+                Heard::Held(decided) => {
+                    held.retain(|h| (&h.human, &h.assistant) != (&decided.human, &decided.assistant));
+                    held.push(decided);
+                }
+                Heard::Withdrawn(Some(withdrawal)) => withdraw(request, &mut held, &withdrawal),
+                Heard::Consent | Heard::Withdrawn(None) | Heard::Nothing => {}
+                Heard::Closed => return None,
+            }
+            if (holding || !held.is_empty())
+                && let Some(settled) = self.settle_held(request, &mut held).await
+            {
+                return Some(settled);
+            }
+            if !heard {
+                continue;
+            }
+            let decision = match self.stored(request).await {
+                Ok(Some(d)) => d,
+                Ok(None) => continue,
+                Err(e) => {
+                    if !std::mem::replace(&mut warned, true) {
+                        tracing::warn!(request = %request.id, error = format!("{e:#}"), "reading the stored decision");
+                    }
+                    continue;
+                }
+            };
+            self.tell_decided(request, &decision).await;
+            // A verdict the harness did not offer counts as a rejection.
+            return Some((request.decide(decision.verdict).verdict, DecidedBy::Human, decision.by, None));
+        }
     }
 
     /// How `request` is settled by `decision` of `from` in its ant's chain, unless a decision of a human stored by now

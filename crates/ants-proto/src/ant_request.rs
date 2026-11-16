@@ -49,26 +49,35 @@ pub struct AntRequest {
     pub retire: bool,
 }
 
+/// The ant an [`AntRequest`] asks for, or asks to retire: its name, its template, the settings asked for and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AskedAnt {
+    pub name: UserId,
+    pub template: String,
+    /// The settings asked for, a JSON object of the keys a template request may set.
+    pub request: String,
+    /// Why the manager wants the ant, shown to a human asked to approve.
+    pub reason: String,
+}
+
 impl AntRequest {
-    /// A request sent now, waiting until `expires_at`, to be completed with the manager's JWT and signatures.
-    #[allow(clippy::too_many_arguments)]
+    /// A request of `manager` on its thread `thread_id` for the `asked` ant with `public_key`, sent now from `host`,
+    /// waiting until `expires_at`, to be completed with the manager's JWT and signatures.
     pub fn new(
         manager: UserId,
-        name: UserId,
-        template: impl Into<String>,
-        request: impl Into<String>,
-        reason: impl Into<String>,
+        asked: AskedAnt,
         thread_id: ThreadId,
         public_key: impl Into<String>,
         host: impl Into<String>,
         expires_at: DateTime<Utc>,
     ) -> Self {
+        let AskedAnt { name, template, request, reason } = asked;
         Self {
             manager,
             name,
-            template: template.into(),
-            request: request.into(),
-            reason: reason.into(),
+            template,
+            request,
+            reason,
             thread_id,
             public_key: public_key.into(),
             host: host.into(),

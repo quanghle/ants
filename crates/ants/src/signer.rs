@@ -32,7 +32,7 @@ use ants_daemon::direct_kv::DirectKv;
 use ants_daemon::reactions;
 use ants_daemon::template::{AntTemplate, Request};
 use ants_proto::{
-    ACCOUNT_HOLDER_KEY, ANTS_VERSION, AccountHolder, AntReply, AntRequest, ApprovalDecision, ApprovalRequest,
+    ACCOUNT_HOLDER_KEY, ANTS_VERSION, AccountHolder, AntReply, AntRequest, ApprovalDecision, ApprovalRequest, AskedAnt,
     ENROLL_REPEAT, EnrollLeaf, JsDomain, MACHINES_BUCKET, Permissions, STREAM, ThreadId, ToolCall, UserId, Verdict,
     subject,
 };
@@ -684,17 +684,13 @@ pub async fn ask(
     let mut replies = client.subscribe(subject::antreq_reply(&manager)).await?;
     let public_key = user.public_key();
     let host = colony::machine().await;
-    let mut asking = AntRequest::new(
-        manager.clone(),
-        name.clone(),
-        template,
-        request,
-        reason,
-        thread.clone(),
-        &public_key,
-        host,
-        until,
-    );
+    let asked = AskedAnt {
+        name: name.clone(),
+        template: template.to_owned(),
+        request: request.to_owned(),
+        reason: reason.to_owned(),
+    };
+    let mut asking = AntRequest::new(manager.clone(), asked, thread.clone(), &public_key, host, until);
     asking.credentials = jwt.to_owned();
     let mut uplink: Option<KeyPair> = None;
     let mut repeats = tokio::time::interval(repeat);
@@ -775,8 +771,9 @@ pub async fn retire(
     let manager: UserId = claims.name.parse().with_context(|| format!("credentials named {}", claims.name))?;
     let mut replies = client.subscribe(subject::antreq_reply(&manager)).await?;
     let host = colony::machine().await;
-    let mut asking =
-        AntRequest::new(manager.clone(), name.clone(), template, "{}", "", thread.clone(), public_key, host, until);
+    let asked =
+        AskedAnt { name: name.clone(), template: template.to_owned(), request: "{}".to_owned(), reason: String::new() };
+    let mut asking = AntRequest::new(manager.clone(), asked, thread.clone(), public_key, host, until);
     asking.retire = true;
     asking.credentials = jwt.to_owned();
     let mut uplink: Option<KeyPair> = None;

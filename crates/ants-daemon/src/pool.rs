@@ -583,7 +583,8 @@ pub(crate) mod fake {
         SessionCapabilities, SessionForkCapabilities, SessionId, SessionNotification, SessionUpdate, StopReason,
         TextContent, ToolCall, Usage, UsageUpdate,
     };
-    use agent_client_protocol::{Agent, DynConnectTo};
+    use agent_client_protocol::v1::{ConnectionTo, Responder};
+    use agent_client_protocol::{Agent, Client, DynConnectTo, Error};
     use tokio::sync::Semaphore;
 
     use crate::sync::MutexExt as _;
@@ -654,185 +655,226 @@ pub(crate) mod fake {
     }
 
     /// [`launch`], with harnesses that load stored `sessions` or not.
-    #[allow(clippy::too_many_lines)]
     pub fn launch_with(sessions: Sessions) -> (Launch, Arc<Mutex<Log>>, Arc<Semaphore>) {
         let log = Arc::new(Mutex::new(Log::default()));
         let gate = Arc::new(Semaphore::new(0));
         let (shared, held) = (log.clone(), gate.clone());
         let connect = Arc::new(move || {
-            let log = shared.clone();
-            log.locked().starts += 1;
-            let (on_init, on_new, on_load, on_fork, on_prompt, gate) =
-                (log.clone(), log.clone(), log.clone(), log.clone(), log, held.clone());
-            let cancels = Arc::new(Semaphore::new(0));
-            let on_cancel = cancels.clone();
+            shared.locked().starts += 1;
+            let fake = Fake { log: shared.clone(), gate: held.clone(), cancels: Arc::new(Semaphore::new(0)), sessions };
+            let (on_cancel, on_init, on_new, on_load, on_fork, on_prompt) =
+                (fake.clone(), fake.clone(), fake.clone(), fake.clone(), fake.clone(), fake);
             DynConnectTo::new(
                 Agent
                     .v1()
                     .name("fake")
                     .on_receive_notification(
                         async move |_: CancelNotification, _cx| {
-                            on_cancel.add_permits(1);
+                            on_cancel.cancels.add_permits(1);
                             Ok(())
                         },
                         agent_client_protocol::on_receive_notification!(),
                     )
                     .on_receive_request(
-                        async move |init: InitializeRequest, responder, _cx| {
-                            let log = on_init.locked();
-                            if log.broken {
-                                return responder.respond_with_internal_error("broken install");
-                            }
-                            let prompts = PromptCapabilities::new().image(log.takes_images);
-                            let fork = log.forks.then(SessionForkCapabilities::new);
-                            drop(log);
-                            responder.respond(
-                                InitializeResponse::new(init.protocol_version)
-                                    .agent_capabilities(
-                                        AgentCapabilities::new()
-                                            .load_session(sessions == Sessions::Loadable)
-                                            .prompt_capabilities(prompts)
-                                            .session_capabilities(SessionCapabilities::new().fork(fork)),
-                                    )
-                                    .agent_info(Implementation::new("fake", "1.0")),
-                            )
-                        },
+                        async move |init: InitializeRequest, responder, _cx| on_init.initialize(init, responder),
                         agent_client_protocol::on_receive_request!(),
                     )
                     .on_receive_request(
-                        async move |new: NewSessionRequest, responder, _cx| {
-                            let mut log = on_new.locked();
-                            if log.signed_out {
-                                return responder.respond_with_error(agent_client_protocol::Error::auth_required());
-                            }
-                            log.new_sessions += 1;
-                            log.cwds.push(new.cwd);
-                            responder.respond(NewSessionResponse::new(format!("s{}", log.new_sessions)))
-                        },
+                        async move |new: NewSessionRequest, responder, _cx| on_new.new_session(new, responder),
                         agent_client_protocol::on_receive_request!(),
                     )
                     .on_receive_request(
-                        async move |load: LoadSessionRequest, responder, cx| {
-                            let mut log = on_load.locked();
-                            if log.signed_out {
-                                return responder.respond_with_error(agent_client_protocol::Error::auth_required());
-                            }
-                            if log.lose_sessions {
-                                return responder.respond_with_internal_error("Session not found");
-                            }
-                            log.loaded.push(load.session_id.to_string());
-                            log.cwds.push(load.cwd.clone());
-                            drop(log);
-                            // Replayed history must not leak into the next reply.
-                            cx.send_notification(chunk(&load.session_id, "old history"))?;
-                            responder.respond(LoadSessionResponse::new())
-                        },
+                        async move |load: LoadSessionRequest, responder, cx| on_load.load_session(load, responder, &cx),
                         agent_client_protocol::on_receive_request!(),
                     )
                     .on_receive_request(
-                        async move |fork: ForkSessionRequest, responder, _cx| {
-                            let mut log = on_fork.locked();
-                            log.forked.push((fork.session_id.to_string(), fork.cwd));
-                            responder.respond(ForkSessionResponse::new(format!("f{}", log.forked.len())))
-                        },
+                        async move |fork: ForkSessionRequest, responder, _cx| on_fork.fork_session(fork, responder),
                         agent_client_protocol::on_receive_request!(),
                     )
                     .on_receive_request(
-                        async move |prompt: PromptRequest, responder, cx| {
-                            let mut log = on_prompt.locked();
-                            if log.signed_out {
-                                return responder.respond_with_error(agent_client_protocol::Error::auth_required());
-                            }
-                            log.prompted += 1;
-                            let ContentBlock::Text(t) = &prompt.prompt[0] else { unreachable!() };
-                            let words: Vec<&str> = t.text.split_whitespace().collect();
-                            let signs_out = words.contains(&"sign-out");
-                            if signs_out || log.limited.is_some() {
-                                // Tools run before the sign-out or the limit is met.
-                                let tools = words.windows(2).find(|w| w[0] == "tools").and_then(|w| w[1].parse().ok());
-                                for i in 0..tools.unwrap_or(0u64) {
-                                    let call = SessionUpdate::ToolCall(ToolCall::new(format!("call-{i}"), "tool"));
-                                    cx.send_notification(SessionNotification::new(prompt.session_id.clone(), call))?;
-                                }
-                            }
-                            if signs_out {
-                                log.signed_out = true;
-                                return responder.respond_with_error(agent_client_protocol::Error::auth_required());
-                            }
-                            if let Some(limited) = &log.limited {
-                                cx.send_notification(chunk(&prompt.session_id, limited))?;
-                                if log.limited_reply {
-                                    return responder.respond(PromptResponse::new(StopReason::EndTurn));
-                                }
-                                let error = agent_client_protocol::Error::internal_error().data(limited.clone());
-                                return responder.respond_with_error(error);
-                            }
-                            log.prompts.push(t.text.clone());
-                            for block in &prompt.prompt[1..] {
-                                let ContentBlock::Image(image) = block else { unreachable!() };
-                                log.images.push((image.mime_type.clone(), image.data.clone()));
-                            }
-                            drop(log);
-                            let (text, gate, sender, log, cancels) =
-                                (t.text.clone(), gate.clone(), cx.clone(), on_prompt.clone(), cancels.clone());
-                            // Answer from a task, so a held prompt does not stall the connection.
-                            cx.spawn(async move {
-                                if text.starts_with("hold") || text.lines().any(|line| line.starts_with("hold:")) {
-                                    gate.acquire().await.unwrap().forget();
-                                }
-                                if text.split_whitespace().any(|w| w == "doomed") {
-                                    log.locked().doomed += 1;
-                                    gate.acquire().await.unwrap().forget();
-                                    log.locked().doomed_failed += 1;
-                                    return responder.respond_with_internal_error("doomed");
-                                }
-                                if text.starts_with("flaky") {
-                                    let mut log = log.locked();
-                                    if !log.flaky_failed.contains(&text) {
-                                        log.flaky_failed.push(text);
-                                        return responder.respond_with_internal_error("flaky");
-                                    }
-                                }
-                                let session = &prompt.session_id;
-                                let words: Vec<&str> = text.split_whitespace().collect();
-                                let rebuilt = text.contains("[ants] The session of this thread outgrew");
-                                if words.contains(&"overflows") || words.contains(&"overflow") && !rebuilt {
-                                    return responder.respond_with_internal_error("Prompt is too long");
-                                }
-                                // A word followed by a number, so prose such as the redelivery warning is no command.
-                                let arg = |word: &str| {
-                                    let i = words.iter().position(|w| *w == word)?;
-                                    words.get(i + 1)?.parse::<f64>().ok()
-                                };
-                                for i in 0..arg("tools").map_or(0, |n| n as u64) {
-                                    let call = SessionUpdate::ToolCall(ToolCall::new(format!("call-{i}"), "tool"));
-                                    sender.send_notification(SessionNotification::new(session.clone(), call))?;
-                                }
-                                if let Some(total) = arg("cost") {
-                                    let cost = Cost::new(total, "USD");
-                                    let usage = SessionUpdate::UsageUpdate(UsageUpdate::new(1, 100).cost(cost));
-                                    sender.send_notification(SessionNotification::new(session.clone(), usage))?;
-                                }
-                                if words.contains(&"stall") {
-                                    sender.send_notification(chunk(session, "partial"))?;
-                                    cancels.acquire().await.unwrap().forget();
-                                    log.locked().cancelled += 1;
-                                    return responder.respond(PromptResponse::new(StopReason::Cancelled));
-                                }
-                                log.locked().answered.push(text.clone());
-                                // In two chunks, as harnesses stream a reply.
-                                sender.send_notification(chunk(session, &format!("{session}: ")))?;
-                                sender.send_notification(chunk(session, &text))?;
-                                let tokens = arg("tokens").map(|n| n as u64);
-                                let usage = tokens.map(|n| Usage::new(n, n, 0));
-                                responder.respond(PromptResponse::new(StopReason::EndTurn).usage(usage))
-                            })
-                        },
+                        async move |prompt: PromptRequest, responder, cx| on_prompt.prompt(prompt, responder, &cx),
                         agent_client_protocol::on_receive_request!(),
                     ),
             )
         });
         (Launch::with_transport(connect, PathBuf::from("/"), Default::default()), log, gate)
+    }
+
+    /// One fake harness "process": the shared log and gate, and the permits its session/cancel notifications leave.
+    #[derive(Clone)]
+    struct Fake {
+        log: Arc<Mutex<Log>>,
+        gate: Arc<Semaphore>,
+        cancels: Arc<Semaphore>,
+        sessions: Sessions,
+    }
+
+    impl Fake {
+        fn initialize(&self, init: InitializeRequest, responder: Responder<InitializeResponse>) -> Result<(), Error> {
+            let log = self.log.locked();
+            if log.broken {
+                return responder.respond_with_internal_error("broken install");
+            }
+            let prompts = PromptCapabilities::new().image(log.takes_images);
+            let fork = log.forks.then(SessionForkCapabilities::new);
+            drop(log);
+            responder.respond(
+                InitializeResponse::new(init.protocol_version)
+                    .agent_capabilities(
+                        AgentCapabilities::new()
+                            .load_session(self.sessions == Sessions::Loadable)
+                            .prompt_capabilities(prompts)
+                            .session_capabilities(SessionCapabilities::new().fork(fork)),
+                    )
+                    .agent_info(Implementation::new("fake", "1.0")),
+            )
+        }
+
+        fn new_session(&self, new: NewSessionRequest, responder: Responder<NewSessionResponse>) -> Result<(), Error> {
+            let mut log = self.log.locked();
+            if log.signed_out {
+                return responder.respond_with_error(Error::auth_required());
+            }
+            log.new_sessions += 1;
+            log.cwds.push(new.cwd);
+            responder.respond(NewSessionResponse::new(format!("s{}", log.new_sessions)))
+        }
+
+        fn load_session(
+            &self,
+            load: LoadSessionRequest,
+            responder: Responder<LoadSessionResponse>,
+            cx: &ConnectionTo<Client>,
+        ) -> Result<(), Error> {
+            let mut log = self.log.locked();
+            if log.signed_out {
+                return responder.respond_with_error(Error::auth_required());
+            }
+            if log.lose_sessions {
+                return responder.respond_with_internal_error("Session not found");
+            }
+            log.loaded.push(load.session_id.to_string());
+            log.cwds.push(load.cwd.clone());
+            drop(log);
+            // Replayed history must not leak into the next reply.
+            cx.send_notification(chunk(&load.session_id, "old history"))?;
+            responder.respond(LoadSessionResponse::new())
+        }
+
+        fn fork_session(
+            &self,
+            fork: ForkSessionRequest,
+            responder: Responder<ForkSessionResponse>,
+        ) -> Result<(), Error> {
+            let mut log = self.log.locked();
+            log.forked.push((fork.session_id.to_string(), fork.cwd));
+            responder.respond(ForkSessionResponse::new(format!("f{}", log.forked.len())))
+        }
+
+        fn prompt(
+            &self,
+            prompt: PromptRequest,
+            responder: Responder<PromptResponse>,
+            cx: &ConnectionTo<Client>,
+        ) -> Result<(), Error> {
+            let mut log = self.log.locked();
+            if log.signed_out {
+                return responder.respond_with_error(Error::auth_required());
+            }
+            log.prompted += 1;
+            let ContentBlock::Text(t) = &prompt.prompt[0] else { unreachable!() };
+            let words: Vec<&str> = t.text.split_whitespace().collect();
+            let signs_out = words.contains(&"sign-out");
+            if signs_out || log.limited.is_some() {
+                // Tools run before the sign-out or the limit is met.
+                let tools = words.windows(2).find(|w| w[0] == "tools").and_then(|w| w[1].parse().ok());
+                for i in 0..tools.unwrap_or(0u64) {
+                    let call = SessionUpdate::ToolCall(ToolCall::new(format!("call-{i}"), "tool"));
+                    cx.send_notification(SessionNotification::new(prompt.session_id.clone(), call))?;
+                }
+            }
+            if signs_out {
+                log.signed_out = true;
+                return responder.respond_with_error(Error::auth_required());
+            }
+            if let Some(limited) = &log.limited {
+                cx.send_notification(chunk(&prompt.session_id, limited))?;
+                if log.limited_reply {
+                    return responder.respond(PromptResponse::new(StopReason::EndTurn));
+                }
+                let error = Error::internal_error().data(limited.clone());
+                return responder.respond_with_error(error);
+            }
+            log.prompts.push(t.text.clone());
+            for block in &prompt.prompt[1..] {
+                let ContentBlock::Image(image) = block else { unreachable!() };
+                log.images.push((image.mime_type.clone(), image.data.clone()));
+            }
+            drop(log);
+            let (fake, text, sender) = (self.clone(), t.text.clone(), cx.clone());
+            // Answer from a task, so a held prompt does not stall the connection.
+            cx.spawn(async move { fake.answer(text, prompt.session_id, responder, sender).await })
+        }
+
+        /// Answer a prompt with `text`, after the waits and failures its words ask for.
+        async fn answer(
+            self,
+            text: String,
+            session: SessionId,
+            responder: Responder<PromptResponse>,
+            sender: ConnectionTo<Client>,
+        ) -> Result<(), Error> {
+            let Fake { log, gate, cancels, .. } = self;
+            if text.starts_with("hold") || text.lines().any(|line| line.starts_with("hold:")) {
+                gate.acquire().await.unwrap().forget();
+            }
+            if text.split_whitespace().any(|w| w == "doomed") {
+                log.locked().doomed += 1;
+                gate.acquire().await.unwrap().forget();
+                log.locked().doomed_failed += 1;
+                return responder.respond_with_internal_error("doomed");
+            }
+            if text.starts_with("flaky") {
+                let mut log = log.locked();
+                if !log.flaky_failed.contains(&text) {
+                    log.flaky_failed.push(text);
+                    return responder.respond_with_internal_error("flaky");
+                }
+            }
+            let session = &session;
+            let words: Vec<&str> = text.split_whitespace().collect();
+            let rebuilt = text.contains("[ants] The session of this thread outgrew");
+            if words.contains(&"overflows") || words.contains(&"overflow") && !rebuilt {
+                return responder.respond_with_internal_error("Prompt is too long");
+            }
+            // A word followed by a number, so prose such as the redelivery warning is no command.
+            let arg = |word: &str| {
+                let i = words.iter().position(|w| *w == word)?;
+                words.get(i + 1)?.parse::<f64>().ok()
+            };
+            for i in 0..arg("tools").map_or(0, |n| n as u64) {
+                let call = SessionUpdate::ToolCall(ToolCall::new(format!("call-{i}"), "tool"));
+                sender.send_notification(SessionNotification::new(session.clone(), call))?;
+            }
+            if let Some(total) = arg("cost") {
+                let cost = Cost::new(total, "USD");
+                let usage = SessionUpdate::UsageUpdate(UsageUpdate::new(1, 100).cost(cost));
+                sender.send_notification(SessionNotification::new(session.clone(), usage))?;
+            }
+            if words.contains(&"stall") {
+                sender.send_notification(chunk(session, "partial"))?;
+                cancels.acquire().await.unwrap().forget();
+                log.locked().cancelled += 1;
+                return responder.respond(PromptResponse::new(StopReason::Cancelled));
+            }
+            log.locked().answered.push(text.clone());
+            // In two chunks, as harnesses stream a reply.
+            sender.send_notification(chunk(session, &format!("{session}: ")))?;
+            sender.send_notification(chunk(session, &text))?;
+            let tokens = arg("tokens").map(|n| n as u64);
+            let usage = tokens.map(|n| Usage::new(n, n, 0));
+            responder.respond(PromptResponse::new(StopReason::EndTurn).usage(usage))
+        }
     }
 
     fn chunk(session: &SessionId, text: &str) -> SessionNotification {
