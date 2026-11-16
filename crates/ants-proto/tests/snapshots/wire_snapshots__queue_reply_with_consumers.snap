@@ -1,0 +1,34 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "request_id": "019a7d2e-0000-7000-8000-000000000001",
+  "ant": "dev-a",
+  "messages": [
+    {
+      "id": "019a7d2e-0000-7000-8000-000000000002",
+      "thread_id": "019a7d2c-0000-7000-8000-000000000001",
+      "from": "alice",
+      "sent_at": "2025-01-01T12:00:00Z",
+      "seq": 4209,
+      "running": false,
+      "ahead": 0,
+      "redelivery": true
+    }
+  ],
+  "delivered": 4211,
+  "undelivered": 3,
+  "inbox": {
+    "acked": 4208,
+    "delivered": 4211,
+    "undelivered": 3,
+    "ack_pending": 2
+  },
+  "posts": {
+    "acked": 4210,
+    "delivered": 4210,
+    "undelivered": 0,
+    "ack_pending": 0
+  }
+}

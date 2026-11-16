@@ -163,9 +163,22 @@ impl QueueRequest {
         Err(Error::ForeignUser { kind: "queue request", user: self.ant.clone(), at: subject.to_owned() })
     }
 
-    /// A daemon's answer: the messages it holds, and where the ant's inbox consumer stands.
-    pub fn answer(&self, messages: Vec<QueuedMessage>, delivered: Option<u64>, undelivered: Option<u64>) -> QueueReply {
-        QueueReply { request_id: self.id, ant: self.ant.clone(), messages, delivered, undelivered }
+    /// A daemon's answer: the messages it holds, and where the ant's inbox and channel consumers stand.
+    pub fn answer(
+        &self,
+        messages: Vec<QueuedMessage>,
+        inbox: Option<ConsumerPlace>,
+        posts: Option<ConsumerPlace>,
+    ) -> QueueReply {
+        QueueReply {
+            request_id: self.id,
+            ant: self.ant.clone(),
+            messages,
+            delivered: inbox.map(|place| place.delivered),
+            undelivered: inbox.map(|place| place.undelivered),
+            inbox,
+            posts,
+        }
     }
 }
 
@@ -183,6 +196,28 @@ pub struct QueueReply {
     /// How many inbox messages wait in the stream, not delivered yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub undelivered: Option<u64>,
+    /// Where the ant's inbox consumer stands, `delivered` and `undelivered` included, which readers older than it
+    /// take instead. None when its info could not be read, or from a daemon older than it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbox: Option<ConsumerPlace>,
+    /// Where the ant's channel consumer, of every channel post, stands. None when the daemon serves no channel posts,
+    /// its info could not be read, or the daemon is older than it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub posts: Option<ConsumerPlace>,
+}
+
+/// Where one of an ant's consumers stands, by stream sequence, as a [`QueueReply`] tells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConsumerPlace {
+    /// Every message up to this one is acked.
+    pub acked: u64,
+    /// The last message delivered: later ones wait in the stream.
+    pub delivered: u64,
+    /// How many wait in the stream, not delivered yet.
+    pub undelivered: u64,
+    /// How many delivered messages are not acked: in a daemon's hands, or back with the server awaiting redelivery
+    /// (after a failed attempt, or from a daemon that stopped).
+    pub ack_pending: u64,
 }
 
 impl QueueReply {
@@ -216,6 +251,9 @@ pub struct QueuedMessage {
     pub running: bool,
     /// How many messages of its thread go before it: 0 for the one running, or next.
     pub ahead: usize,
+    /// Whether it awaits redelivery after a failed attempt, which started it: the rest of its thread waits for it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub redelivery: bool,
 }
 
 /// What became of a message to an ant, in [`ATTEMPTS_BUCKET`] under its [`message_mark_key`]. The daemon creates the

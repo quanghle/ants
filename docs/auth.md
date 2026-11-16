@@ -315,7 +315,7 @@ An assistant's harness sessions get, beside the other [MCP tools](../README.md#m
 | `done_for_human(thread)` | Mark a thread of the human's done (as `ants thread done`). |
 | `decide_for_human(request, verdict)` | Decide a tool request waiting for the human (`allow_once`, `allow_always`, `reject`). |
 | `order_for_human(ant, machine, op, changes?)` | Send an [admin order](#an-assistants-orders) to an ant on a machine (`pause`, `resume`, `restart`, `restart_now`, `read_settings`, `read_memories`, or `set` with `changes`: each a dotted `field`, its new `value` or none to remove it, and the `expected` value, or `expected_digest` of a secret, as `read_settings` shows it), held by the machine's daemon until the human confirms it. |
-| `queue_for_human(ant)` | List the messages waiting for an ant, as `ants queue` does. |
+| `queue_for_human(ant)` | List the messages the ant's daemon holds, a message awaiting a retry after a failed attempt included, as `ants queue` does, and how many more inbox messages wait in the stream. |
 | `cancel_for_human(ant, thread)` | Cancel the prompt an ant runs on a thread, as `ants cancel` does. |
 | `withdraw_for_human(ant, message_id)` | Withdraw a message waiting for an ant before it is prompted with it, as `ants withdraw` does; while no daemon of the ant serves, only a message of the human's to the ant, by a record the daemon honours later. |
 | `mark_for_human(thread, mark)` | Pin, unpin, archive or unarchive a thread for the human (`pin`, `unpin`, `archive`, `unarchive`), as `ants thread pin` and the others do. |

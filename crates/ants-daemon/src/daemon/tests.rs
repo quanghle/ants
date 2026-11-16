@@ -41,6 +41,8 @@ struct Bus {
     restarts: Restarts,
     /// The team's account whose assistants' records the daemon takes; none: no record is taken.
     account: Option<String>,
+    /// How long a failed message waits for its redelivery.
+    retry_delay: Duration,
 }
 
 impl Bus {
@@ -94,6 +96,7 @@ impl Bus {
             publisher: None,
             restarts: Restarts::default(),
             account: None,
+            retry_delay: Duration::from_millis(300),
         };
         (bus, replies)
     }
@@ -218,7 +221,7 @@ impl Bus {
             roster: &self.roster,
             humans: &self.humans,
             behalf: Records::new(self.js.clone(), None, self.account.clone()),
-            retry_delay: Duration::from_millis(300),
+            retry_delay: self.retry_delay,
             progress_every,
             timeline_every: Some(Duration::from_millis(300)),
             sign_in: SignIn::default(),
@@ -1582,6 +1585,49 @@ async fn a_queued_message_is_listed_and_withdrawn_while_the_running_prompt_goes_
     assert_eq!(bus.unacked().await, 0);
     assert!(matches!(mark_of(&bus, &a).await, Some(MessageMark::Finished { .. })));
     assert!(matches!(withdraw(&bus, &c).await, Some(MessageMark::Finished { .. })), "c is answered already");
+}
+
+#[tokio::test]
+async fn a_message_awaiting_its_retry_is_listed_ahead_of_its_thread_and_stays_started() {
+    use ants_proto::MessageMark;
+    let Some((mut bus, _replies)) = Bus::start().await else { return };
+    // Long enough for the listing to find the message between its attempts.
+    bus.retry_delay = Duration::from_secs(10);
+    let (launch, log, gate) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let t1 = ThreadId::generate();
+    let (a, a_seq) = bus.send(&t1, "doomed a").await;
+    let (b, b_seq) = bus.send(&t1, "b").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        until("the first attempt", || log.locked().doomed == 1).await;
+        gate.add_permits(1);
+        until("the first attempt to fail", || log.locked().doomed_failed == 1).await;
+        let listed = timeout(WAIT, async {
+            loop {
+                let answer = queue(&bus).await;
+                if answer.messages.first().is_some_and(|m| m.redelivery) {
+                    return answer;
+                }
+            }
+        })
+        .await
+        .expect("a listed as awaiting its retry");
+        let at = |m: &QueuedMessage| (m.id, m.seq, m.running, m.ahead, m.redelivery);
+        assert_eq!(
+            listed.messages.iter().map(at).collect::<Vec<_>>(),
+            [(a.id, a_seq, false, 0, true), (b.id, b_seq, false, 1, false)]
+        );
+        let inbox = listed.inbox.expect("the inbox consumer's place");
+        assert_eq!((inbox.delivered, inbox.undelivered, inbox.ack_pending), (b_seq, 0, 2), "{inbox:?}");
+        assert!(inbox.acked < a_seq, "{inbox:?}");
+        assert_eq!((listed.delivered, listed.undelivered), (Some(b_seq), Some(0)), "for older readers");
+        assert!(listed.posts.is_some(), "the channel consumer's place");
+        assert!(matches!(withdraw(&bus, &a).await, Some(MessageMark::Started { .. })), "a started already");
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
 }
 
 #[tokio::test]

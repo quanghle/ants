@@ -467,6 +467,8 @@ mod tests {
             running: false,
             ahead,
             delivered: true,
+            redelivery: false,
+            started: false,
             withdrawn_by: None,
             withdrawn_for: None,
         }
