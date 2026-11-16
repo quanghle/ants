@@ -761,16 +761,30 @@ async fn a_fallback_answers_while_the_harness_is_signed_out() {
         assert!(bus.workload.signed_out().is_some(), "the harness itself is still signed out");
         bus.until_acked(seq).await;
 
-        // The fallback turned away too: the message waits, telling nobody again, until one answers.
-        spare_log.locked().signed_out = true;
-        bus.send(&thread, "b").await;
-        let starts = spare_log.locked().starts;
-        until("the fallback tried again", || spare_log.locked().starts > starts).await;
-        assert!(timeout(Duration::from_millis(100), replies.next()).await.is_err(), "told once");
-        spare_log.locked().signed_out = false;
-        let reply = next_envelope(&mut replies).await;
-        assert!(reply.text.contains("b\n\n[ants] Answered by fallback spare"), "{reply:?}");
+        // The fallback turned away too: the message waits, the owner told once, until one answers.
+        let mut passed_over = async |text: &str| {
+            spare_log.locked().signed_out = true;
+            bus.send(&thread, text).await;
+            let notice = next_envelope(&mut replies).await;
+            assert_eq!(notice.thread_id, thread);
+            assert!(
+                notice
+                    .text
+                    .starts_with("[ants] dev-a cannot answer with a fallback either: fallback spare is signed out"),
+                "{}",
+                notice.text
+            );
+            assert!(notice.text.contains("until harness test, signed out, answers again or a fallback"), "{notice:?}");
+            let starts = spare_log.locked().starts;
+            until("the fallback tried again", || spare_log.locked().starts > starts).await;
+            assert!(timeout(Duration::from_millis(100), replies.next()).await.is_err(), "told once");
+            spare_log.locked().signed_out = false;
+            let reply = next_envelope(&mut replies).await;
+            assert!(reply.text.contains(&format!("{text}\n\n[ants] Answered by fallback spare")), "{reply:?}");
+        };
+        passed_over("b").await;
         assert_eq!(bus.workload.fallback().map(|f| f.since), Some(shown.since), "the same outage");
+        passed_over("b2").await;
 
         // Signed in again: the thread goes back to the ant's own harness, rebuilt from its history.
         log.locked().signed_out = false;
@@ -781,7 +795,7 @@ async fn a_fallback_answers_while_the_harness_is_signed_out() {
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    assert_eq!(spare_log.locked().answered, ["a", "b"]);
+    assert_eq!(spare_log.locked().answered, ["a", "b", "b2"]);
     let answered = log.locked().answered.clone();
     let [rebuilt] = answered.as_slice() else { panic!("{answered:?}") };
     assert!(rebuilt.contains("ran in another harness") && rebuilt.ends_with('c'), "{rebuilt}");

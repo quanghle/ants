@@ -981,6 +981,40 @@ fn an_ant_added_from_a_template_is_checked_against_it_on_every_load() {
 }
 
 #[test]
+fn an_ant_added_from_a_template_takes_its_fallbacks_less_its_own_harness_and_model() {
+    let entries = r#"
+            [[ant]]
+            name = "lead-a"
+            template = "worker"
+            added_by = "lead"
+            model = "gpt-5"
+
+            [[ant]]
+            name = "lead-b"
+            template = "worker"
+            added_by = "lead"
+            harness = "claude"
+            model = "gpt-5"
+        "#;
+    let text = with_ants(entries).replace("env = {", "fallback = [\"copilot\", \":gpt-5\", \"claude:gpt-5\"]\nenv = {");
+    let loaded = parse_all(&text).unwrap();
+    let names = |ant: &str| {
+        let ant = loaded.ants.iter().find(|a| a.name.as_str() == ant).unwrap().clone();
+        assert_eq!(ant.fallback, ["copilot", ":gpt-5", "claude:gpt-5"]);
+        let config = ant.into_config("nats://unused", &loaded.harnesses).unwrap();
+        config.fallbacks.iter().map(crate::fallback::Fallback::name).collect::<Vec<_>>()
+    };
+    assert_eq!(names("lead-a"), ["copilot", "claude:gpt-5"], ":gpt-5 is copilot:gpt-5, the ant's own");
+    assert_eq!(names("lead-b"), ["copilot"], "claude:gpt-5, its own, twice");
+
+    let err = format!("{:#}", parse_all(&text.replace("fallback = [\"copilot\"", "fallback = [\"vim\"")).unwrap_err());
+    assert!(err.contains("ant template worker: fallback \"vim\": unknown harness \"vim\""), "{err}");
+    let set = with_ants(entries).replace("harness = \"claude\"", "fallback = [\"claude\"]");
+    let err = format!("{:#}", parse_all(&set).unwrap_err());
+    assert!(err.contains("ant lead-b: fallback comes from template worker"), "{err}");
+}
+
+#[test]
 fn the_signer_reads_only_the_templates_and_checks_requests_against_its_copy() {
     let dir = ants_test_support::scratch_dir("config-signer").canonicalize().unwrap();
     std::fs::create_dir(dir.join("src")).unwrap();

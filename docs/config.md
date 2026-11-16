@@ -175,7 +175,8 @@ whoami = "Implement what the manager assigns." # overridable defaults: whoami, m
 capabilities = ["rust"]
 env = { CARGO_TARGET_DIR = "target" }      # fixed on template: env, worktrees (unset: the ant default),
 worktrees = true                           # worktree_base, publish, idle_timeout, approval_timeout,
-                                           # spend_warn_percent
+                                           # spend_warn_percent, fallback
+fallback = ["copilot", ":claude-haiku-4-5"] # fallbacks of every ant from this template, see below
 ```
 
 Allowed per-ant overrides within template bounds:
@@ -184,6 +185,8 @@ Allowed per-ant overrides within template bounds:
 - `model` (required when `models` is non-empty, forbidden when empty) and `reasoning_effort` (`low` < `medium` < `high` < `xhigh` < `max`, at most the model's ceiling).
 - `whoami`, `memory`, `tasks`, `capabilities`, `paused`.
 - `max_thread_tokens`, `max_thread_cost`, `max_daily_tokens`, `max_daily_cost`, `max_harnesses`, `prompt_timeout`, `max_tool_calls` — each at most the template ceiling (unset caps have no ceiling; `0` for `prompt_timeout` or `max_tool_calls` is allowed only when the template's is `0`).
+
+A template's `fallback` list ([Fallbacks](#fallbacks)) is the fallback list of every ant added from it: a request cannot set or change it, and the template's `harnesses` and `models` bound what a manager picks, not the fallbacks. Its entries must name a known harness, name a model after a colon and appear once; anything else fails config loading. Each ant leaves out an entry naming the harness and model it runs (such as `":claude-haiku-4-5"` for an ant whose manager picked that model) or a fallback an earlier entry names for its harness, and keeps the rest in order.
 
 Removing a manager from `managers` blocks new additions while keeping existing workers.
 
@@ -380,12 +383,12 @@ An ant's optional `fallback` list names harnesses and models tried in order whil
 - `"<harness>:<model>"`: that harness with that model (split at the first `:`), e.g. `"copilot:gpt-5"`.
 - `":<model>"`: the ant's own harness with another model, e.g. `":claude-opus-4-1"`.
 
-Entries must name a known harness (built-in, `[harnesses.NAME]` or `harnesses.d`), name a model after a colon, differ from the ant's own harness and model, and appear once; anything else fails config loading. A fallback runs with only its model and the ant's `history_budget`: the ant's `reasoning_effort` and `context` belong to its own harness. Templated ants take no `fallback`.
+Entries must name a known harness (built-in, `[harnesses.NAME]` or `harnesses.d`), name a model after a colon, differ from the ant's own harness and model, and appear once; anything else fails config loading. A fallback runs with only its model and the ant's `history_budget`: the ant's `reasoning_effort` and `context` belong to its own harness. An ant added from a template takes the template's `fallback` list instead, less an entry naming its own harness and model ([Ant templates](#ant-templates)).
 
 While the ant's own harness cannot serve, each message goes to the first fallback not passed over:
 
 - **Sessions:** a thread whose stored session ran in another harness (recorded beside the session in `ants_sessions`, so across daemon restarts too) starts a new session seeded from the thread's history, as after a failed `session/load`; a `:<model>` fallback resumes the thread's session. A live harness on another backend is replaced once idle.
-- **Turned away:** a fallback that is signed out, limited or fails to start is passed over for 5 min (or its limit's retry hint), spending no attempt and touching none of the own harness's holds; with every fallback passed over, messages wait as without fallbacks.
+- **Turned away:** a fallback that is signed out, limited or fails to start is passed over for 5 min (or its limit's retry hint), spending no attempt and touching none of the own harness's holds; with every fallback passed over, messages wait as without fallbacks, and the owner (else the default human) gets one notice naming the fallbacks, why the last turned a message away and when one is tried again, sent again only after a fallback or the own harness answers.
 - **Shown:** each reply ends with `[ants] Answered by fallback NAME, harness OWN being signed out.` (or `out of quota`, `failing to start`); `ants_roster` publishes `fallback` (`name`, `since`); `ants roster` shows `fallback` as the activity; `ants ask`, `ask_ant` and `route` treat the ant as served (`route` prefers ants answered by their own harness).
 - **Told once:** the owner's sign-in, quota or breaker notice (one per outage, as without fallbacks) says the messages go to the fallbacks meanwhile.
 - **Back:** a successful sign-in check or breaker probe, or after a quota's backoff the next message the own harness answers, sends messages to the own harness again and clears `fallback`; live fallback sessions are replaced as their threads come up.
