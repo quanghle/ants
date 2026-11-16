@@ -562,7 +562,7 @@ impl Dedicated {
             Err(_) => {
                 println!(
                     "no account key in {}: revoke the credentials of {name} where it is, with `ants auth revoke --key \
-                     {}`",
+                     {} --earlier`",
                     dir.display(),
                     self.key
                 );

@@ -352,3 +352,42 @@ fn revoking_a_name_withdraws_its_approval_grants_but_revoking_a_device_does_not(
     rename(&team, "carol", "phone", "Phone").unwrap();
     assert_eq!(standing_approval(&issued(&team).unwrap(), "carol", 7), None, "a relabelled device stays withdrawn");
 }
+
+/// `--earlier` follows a key back through the keys it was renewed from, live ones only, and none of another holder's.
+#[test]
+fn the_keys_a_key_was_renewed_from_are_its_live_predecessors() {
+    let dir = ants_test_support::scratch_dir("renewed-from");
+    let team = dir.join("auth");
+    auth::init(&team).unwrap();
+    let ant = |name: &str| {
+        let out = dir.join(format!("{name}.creds"));
+        auth::issue(&team, &name.parse().unwrap(), ants_proto::Role::Ant, None, &out).unwrap();
+        auth::read_creds(&out).unwrap()
+    };
+    let renewed = |jwt: &str| {
+        let key = nkeys::KeyPair::new_user();
+        (auth::renew(&team, jwt, &key.public_key(), None).unwrap().jwt, key.public_key())
+    };
+    let (jwt, first) = ant("dev-a");
+    let first = first.public_key();
+    let (jwt, second) = renewed(&jwt);
+    let (_, third) = renewed(&jwt);
+    ant("dev-b");
+
+    let mut earlier = renewed_from(&team, std::slice::from_ref(&third)).unwrap();
+    earlier.sort();
+    let mut expected = vec![first.clone(), second.clone()];
+    expected.sort();
+    assert_eq!(earlier, expected);
+    assert!(renewed_from(&team, std::slice::from_ref(&first)).unwrap().is_empty());
+    revoke(&team, None, std::slice::from_ref(&first)).unwrap();
+    assert_eq!(renewed_from(&team, std::slice::from_ref(&third)).unwrap(), [second]);
+
+    let mut keys = vec![third];
+    keys.extend(renewed_from(&team, &keys).unwrap());
+    revoke(&team, None, &keys).unwrap();
+    let live = crate::signer::live(&team).unwrap();
+    assert!(!live.iter().any(|i| i.name == "dev-a"), "{live:?}");
+    assert!(live.iter().any(|i| i.name == "dev-b"));
+    fs::remove_dir_all(dir).unwrap();
+}

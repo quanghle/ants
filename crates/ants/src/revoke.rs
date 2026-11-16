@@ -8,7 +8,7 @@
 //! users' connections at once. The update reaches every leaf node connected to that server through a system account
 //! uplink (`ants leaf config`), which applies it too and keeps it across restarts.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write as _;
 use std::path::Path;
@@ -249,6 +249,28 @@ pub fn device_keys(dir: &Path, name: &str, selectors: &[String]) -> Result<Vec<S
     let mut seen = std::collections::HashSet::new();
     keys.retain(|k| seen.insert(k.clone()));
     Ok(keys)
+}
+
+/// The live keys in `dir` that `keys` were renewed from ([`Issued::renewed_from`]), and those they were renewed from in
+/// turn, back to the first: what `ants auth revoke --key K --earlier` revokes besides K, so that no earlier
+/// credentials of the holder stay valid.
+pub fn renewed_from(dir: &Path, keys: &[String]) -> Result<Vec<String>> {
+    let issued = issued(dir)?;
+    let live: BTreeSet<String> = crate::signer::live(dir)?.into_iter().map(|i| i.key).collect();
+    let mut seen: BTreeSet<&str> = keys.iter().map(String::as_str).collect();
+    let mut todo: Vec<&str> = keys.iter().map(String::as_str).collect();
+    let mut earlier = Vec::new();
+    while let Some(key) = todo.pop() {
+        for from in issued.iter().filter(|i| i.key == key).filter_map(|i| i.renewed_from.as_deref()) {
+            if seen.insert(from) {
+                todo.push(from);
+                if live.contains(from) {
+                    earlier.push(from.to_owned());
+                }
+            }
+        }
+    }
+    Ok(earlier)
 }
 
 /// Label the device of the human `name` that `selector` names ([`select`]) `label`, appending its line to the registry
