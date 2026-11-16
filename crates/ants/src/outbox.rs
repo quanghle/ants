@@ -42,6 +42,8 @@ use async_nats::jetstream::stream::{
 };
 use async_nats::jetstream::{self, Context, ErrorCode, consumer};
 
+use crate::members::{self, Change, Members};
+
 /// How long an outbox and the intake keep messages: as long as the hub's stream.
 const RETENTION: Duration = Duration::from_hours(30 * 24);
 /// How long to wait for the leaf node to answer through the hub.
@@ -279,10 +281,9 @@ pub async fn drop_ant(hub: &Context, machine: &Machine, ant: &UserId) -> Result<
     if !intake.info().await?.config.sources.iter().flatten().any(|s| outbox_of(s, machine)) {
         return Ok(false);
     }
-    let theirs = [true, false].map(|inbox| member_source(machine, ant, Role::Ant, inbox, 0));
     let mut ants = hub.get_stream(STREAM).await.context("looking up the hub's stream")?;
     let mut config = ants.info().await?.config.clone();
-    if drop_sources(&mut config, &theirs) {
+    if drop_sources(&mut config, &ant_sources(machine, ant)) {
         hub.update_stream(&config).await.context("dropping the ant from the hub's stream")?;
     }
     if let Some(mut config) = bucket_config(hub, LINKS_BUCKET).await?
@@ -296,6 +297,37 @@ pub async fn drop_ant(hub: &Context, machine: &Machine, ant: &UserId) -> Result<
         hub.update_stream(&config).await.context("dropping the ant from the attachments' store")?;
     }
     Ok(true)
+}
+
+/// Take out of the ants `change` removes from `kept`, the members of `machine` its uplink credentials carry, those
+/// that left them already ([`Change::left_already`]), and return them: those the registry of the team directory `dir`
+/// ever kept among the members, or the hub's stream still takes from the outbox for. [`admit`] without them drops
+/// what the hub takes for them all the same.
+pub async fn left_already(
+    hub: &Context,
+    machine: &Machine,
+    dir: &Path,
+    change: &mut Change,
+    kept: Option<&Members>,
+) -> Result<Vec<UserId>> {
+    if change.remove.ants.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ever = members::ever(dir, machine)?;
+    let config = stream_config(hub, STREAM).await?.unwrap_or_default();
+    Ok(change.left_already(kept, |ant| ever.contains(ant) || sources_ant(&config, machine, ant)))
+}
+
+/// Whether `config` sources from the outbox of `machine` what `ant` sends.
+fn sources_ant(config: &stream::Config, machine: &Machine, ant: &UserId) -> bool {
+    let theirs = ant_sources(machine, ant);
+    let ours = |s: &Source| theirs.iter().any(|t| s.name == t.name && s.subject_transforms == t.subject_transforms);
+    config.sources.iter().flatten().any(ours)
+}
+
+/// The sources of the hub's stream from the outbox of `machine` for `ant`, with or without its inbox subjects.
+fn ant_sources(machine: &Machine, ant: &UserId) -> [Source; 2] {
+    [true, false].map(|inbox| member_source(machine, ant, Role::Ant, inbox, 0))
 }
 
 /// Drop from the sources of `config` those with the subject transforms of one of `theirs`; whether any was there.
