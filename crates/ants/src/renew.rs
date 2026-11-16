@@ -477,7 +477,7 @@ pub async fn auto(
 pub fn print_renewed(request: &RenewRequest, renewed: &auth::Renewed) {
     println!(
         "{} renewed for {} (host {}); once the new credentials are in use, retire the earlier key: \
-         `ants auth revoke --key {}`, then `ants auth push`",
+         `ants auth revoke --key {} --earlier`, then `ants auth push`",
         renewed.finding.holder(),
         request.public_key,
         request.host,

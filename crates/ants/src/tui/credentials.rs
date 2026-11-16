@@ -469,7 +469,7 @@ impl Io {
                             let (_, renewed) = approver.renew(&dir, name, Some(key)).await?;
                             format!(
                                 "{} renewed; once the new credentials are in use, retire the earlier key: `ants auth \
-                                 revoke --key {}`, then `ants auth push`",
+                                 revoke --key {} --earlier`, then `ants auth push`",
                                 renewed.finding.holder(),
                                 renewed.previous
                             )

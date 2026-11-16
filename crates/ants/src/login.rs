@@ -308,7 +308,7 @@ async fn write(login: &Login<'_>, jwt: &str, key: &KeyPair, xkey: &XKey, store: 
     if let Ok(finding) = Finding::from_creds(&earlier) {
         eprintln!(
             "replaced the earlier credentials of {} (key {}) in {}: they stay valid until they expire, or \
-             `ants auth revoke --key {}` on the machine holding the team keys",
+             `ants auth revoke --key {} --earlier` on the machine holding the team keys",
             finding.holder(),
             finding.key,
             out.display(),

@@ -114,7 +114,8 @@ pub(crate) enum AuthCommand {
         #[arg(long = "key", value_name = "KEY")]
         keys: Vec<String>,
         /// Also revoke the live keys each --key was renewed from (`ants renew`), and those they were renewed from in
-        /// turn, which stay valid until they expire otherwise: what `ants retire` prints, so the ant keeps no live key.
+        /// turn, which stay valid until they expire otherwise: what `ants retire`, `ants keys remove`, `ants login`
+        /// and renewals print for a key retired, so its holder keeps no live key of it.
         #[arg(long, requires = "keys")]
         earlier: bool,
         /// Revoke only this device of the human NAME (repeatable): its id, its label when no other device of NAME
