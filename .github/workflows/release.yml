@@ -2,8 +2,10 @@ name: Release
 
 # A tag vX.Y.Z (X.Y.Z the workspace version in Cargo.toml) builds the `ants` binary for each target and publishes a
 # GitHub Release with the archives, SHA256SUMS and build provenance attestations, once the checks of ci.yml pass. A tag
-# with a pre-release suffix (v0.2.0-rc.1) makes a pre-release. Run by hand (workflow_dispatch), it checks and builds
-# only, keeping the archives as workflow artifacts.
+# with a pre-release suffix (v0.2.0-rc.1) makes a pre-release. The notes come from bd (scripts/release-notes.sh): the
+# work closed and requirements added since the previous release, per the committed .bd/issues.jsonl. Run by hand
+# (workflow_dispatch), it checks and builds only, keeping the archives and notes as workflow artifacts and showing the
+# notes in the run summary.
 on:
   push:
     tags: ["v*"]
@@ -23,9 +25,11 @@ jobs:
     outputs:
       name: ${{ steps.version.outputs.name }}
     steps:
+      # The whole history and its tags, for the previous release and its bd snapshot.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - id: version
         name: Tag matches the workspace version
@@ -45,6 +49,19 @@ jobs:
             name=v$version-${GITHUB_SHA::7}
           fi
           echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - name: Release notes
+        env:
+          REV: ${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
+        run: |
+          scripts/release-notes.sh "$REV" > release-notes.md
+          cat release-notes.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes
+          path: release-notes.md
+          if-no-files-found: error
 
   checks:
     uses: ./.github/workflows/ci.yml
@@ -96,7 +113,7 @@ jobs:
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ${{ matrix.target }}
+          name: build-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
 
@@ -111,8 +128,13 @@ jobs:
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          pattern: build-*
           path: dist
           merge-multiple: true
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-notes
 
       - name: Checksums
         working-directory: dist
@@ -130,4 +152,4 @@ jobs:
           prerelease=
           case "$TAG" in *-*) prerelease=--prerelease ;; esac
           gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --title "ants $TAG" \
-            --generate-notes $prerelease
+            --notes-file release-notes.md $prerelease
