@@ -82,7 +82,7 @@ impl Page {
         self.messages().find(|e| e.id == Some(at)).map(|e| e.seq)
     }
 
-    pub const KEYS: &str = "↑↓ select · i reply · > reply to selected · y copy · o open file · ] next file · + react · p pin · m mute · e archive · d done · z snooze · t tree · S TL;DR · x cancel · a A r answer a tool request · End latest · Esc back";
+    pub const KEYS: &str = "↑↓ select · i reply · > reply to selected · y copy · f forward · o open file · ] next file · + react · p pin · m mute · e archive · d done · z snooze · t tree · S TL;DR · x cancel · a A r answer a tool request · End latest · Esc back";
 
     /// The messages shown, in the order stored.
     fn messages(&self) -> impl DoubleEndedIterator<Item = &Entry> {
@@ -92,6 +92,12 @@ impl Page {
     /// The ids of the messages shown, for the reactions to them.
     pub fn message_ids(&self) -> Vec<Uuid> {
         self.messages().filter_map(|e| e.id).collect()
+    }
+
+    /// The message selected, or the one the thread was opened at; none while the view follows the latest.
+    pub fn chosen(&self) -> Option<&Entry> {
+        let seq = self.selected.or_else(|| self.held())?;
+        self.messages().find(|e| e.seq == seq)
     }
 
     /// The selected message, else the latest.
@@ -207,6 +213,7 @@ impl Page {
             Key::Char('t') => return Some(To::Tree(self.history.thread.clone())),
             Key::Char('z') => return Some(To::Snooze(self.history.thread.clone())),
             Key::Char('S') => return Some(To::Tldr(self.history.thread.clone())),
+            Key::Char('f') => return Some(To::Bar("/forward @".to_owned())),
             Key::Char('o') => {
                 let listed = self.attachment()?.clone();
                 return Some(To::Do(Action::Run(Job::Open(Box::new(listed)), String::new())));
