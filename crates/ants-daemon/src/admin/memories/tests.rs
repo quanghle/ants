@@ -38,6 +38,7 @@ fn env(home: &Path) -> Env {
     Env { home: home.to_owned(), bd: "bd".into(), bd_db: None }
 }
 
+#[cfg(unix)]
 fn paths(memories: &Memories) -> Vec<String> {
     memories.files.iter().map(|f| f.path.clone()).collect()
 }
