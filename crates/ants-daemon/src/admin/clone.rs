@@ -35,7 +35,7 @@ use crate::config::{self, edit::Edit};
 use crate::direct_kv::DirectKv;
 use crate::identity::{self, Identity};
 use crate::pool::{SessionStore, Stored};
-use crate::shared::{self, Found};
+use crate::shared::{self, Bucket, Found};
 use crate::{bus, creds, harness};
 
 /// How long the daemon serving the ant waits for its prompts to end and reads its snapshot: past the default
@@ -51,7 +51,7 @@ const NOT_CLONED: [&str; 8] = ["name", "creds", "paused", "added_by", "template"
 
 pub(super) async fn apply(
     js: &jetstream::Context,
-    identities: &DirectKv,
+    bucket: Bucket<'_>,
     orders: &Orders,
     order: &AdminOrder,
     new: &UserId,
@@ -62,7 +62,7 @@ pub(super) async fn apply(
         return refused(order, "the machine has no host credentials to ask `ants signer` with");
     };
     let mut done = Done::default();
-    let result = clone(js, identities, orders, config, host_creds, order, new, settings, &mut done).await;
+    let result = clone(js, bucket, orders, config, host_creds, order, new, settings, &mut done).await;
     let (paused, key) = (done.paused, done.key.take());
     if result.is_err() {
         done.undo(order).await;
@@ -240,7 +240,7 @@ fn plan(
 #[expect(clippy::too_many_arguments)]
 async fn clone(
     js: &jetstream::Context,
-    identities: &DirectKv,
+    bucket: Bucket<'_>,
     orders: &Orders,
     config: &ConfigFile,
     host_creds: &Path,
@@ -250,7 +250,7 @@ async fn clone(
     done: &mut Done,
 ) -> Result<Option<Value>> {
     let (src, path) = (&order.ant, &config.path);
-    let src_shared = match shared::read(identities, src, &orders.accounts).await? {
+    let src_shared = match config.shared.check(shared::read(bucket, src).await?) {
         Found::Record(record, _) => Some(Some(record.fields)),
         Found::None(_) | Found::Malformed(..) | Found::Unverified(..) => Some(None),
         Found::NoBucket => None,
@@ -321,8 +321,8 @@ async fn clone(
     if let Some(fields) = shared {
         let mut record = SharedSettings::new(new.clone(), fields, orders.machine.clone(), None);
         shared::sign(&mut record, &jwt, &key)?;
-        done.shared = Some((identities.clone(), record.key()));
-        identities.put(record.key(), serde_json::to_vec(&record)?).await?;
+        done.shared = Some((bucket.identities.clone(), record.key()));
+        bucket.identities.put(record.key(), serde_json::to_vec(&record)?).await?;
         config.shared.store(record);
     }
     config::append(path, &table)?;

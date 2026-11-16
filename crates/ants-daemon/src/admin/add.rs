@@ -26,8 +26,8 @@ use super::ask::{SIGNER_WAIT, Uplink, ask};
 use super::{ConfigFile, LeafNode, NO_CONFIG, Orders, applied, refused};
 use crate::config::{self, edit::toml_value};
 use crate::creds;
-use crate::direct_kv::DirectKv;
-use crate::shared::{self, Found, Roles};
+use crate::direct_kv::{DirectKv, Lookup};
+use crate::shared::{self, Roles};
 
 /// Settings an order does not give: what the daemon sets itself, or what an ant added from a template has.
 pub(super) const NOT_GIVEN: [&str; 4] = ["creds", "template", "added_by", "builtin"];
@@ -143,7 +143,7 @@ async fn add(
         None => None,
     };
     if let Some((_, identities)) = assisting
-        && !matches!(shared::read(identities, ant, accounts).await?, Found::NoBucket)
+        && !matches!(identities.lookup(SharedSettings::key_of(ant)).await?, Lookup::NoBucket)
     {
         let mut record =
             SharedSettings::new(ant.clone(), shared_fields, orders.machine.clone(), Some(order.admin.clone()));

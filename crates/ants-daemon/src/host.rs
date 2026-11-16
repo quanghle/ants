@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use ants_proto::{IDENTITIES_BUCKET, JsDomain, MACHINES_BUCKET, Machine, MachineRecord, UserId, host_inbox_prefix};
+use ants_proto::{
+    DEVICES_BUCKET, IDENTITIES_BUCKET, JsDomain, MACHINES_BUCKET, Machine, MachineRecord, UserId, host_inbox_prefix,
+};
 use anyhow::{Context as _, Result, bail};
 use tokio::sync::watch;
 
@@ -162,10 +164,12 @@ async fn keep_shared(
     mut ants: watch::Receiver<Vec<UserId>>,
 ) -> Result<()> {
     let Some(shared) = shared else { return std::future::pending().await };
-    let kv = DirectKv::new(js, host.js_domain.as_ref(), IDENTITIES_BUCKET).await?;
+    let identities = DirectKv::new(js, host.js_domain.as_ref(), IDENTITIES_BUCKET).await?;
+    let devices = DirectKv::new(js, host.js_domain.as_ref(), DEVICES_BUCKET).await?;
+    let bucket = shared::Bucket { identities: &identities, devices: &devices, accounts };
     loop {
         let listed = ants.borrow_and_update().clone();
-        shared::refresh(&kv, Some(machine), &shared, &listed, accounts).await;
+        shared::refresh(bucket, Some(machine), &shared, &listed).await;
         shared.polled();
         tokio::select! {
             () = tokio::time::sleep(shared::POLL_EVERY) => {}
