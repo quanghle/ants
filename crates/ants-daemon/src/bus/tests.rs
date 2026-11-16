@@ -290,7 +290,7 @@ async fn no_client_can_forge_the_sender_of_a_stored_inbox_message() {
     let (human, dev_b) = (UserId::human(), "dev-b".parse::<UserId>().unwrap());
     let (client, js) = connect(&server.url, None, None, &dev_b, "test").await.unwrap();
     ensure_stream(&js).await.unwrap();
-    ensure_roster(&js, Duration::from_secs(60)).await.unwrap();
+    ensure_colony(&js, Duration::from_secs(60)).await.unwrap();
     let mut stored = client.subscribe(subject::stored_inbox(&human)).await.unwrap();
     let mut next = async |what: &str| {
         let delivered = tokio::time::timeout(Duration::from_secs(5), stored.next()).await;
@@ -306,21 +306,21 @@ async fn no_client_can_forge_the_sender_of_a_stored_inbox_message() {
     };
     let payload = || serde_json::to_vec(&forged).unwrap().into();
     let as_dev_a = format!("{}.stored.{}", inbox_prefix(&human), dev());
-    let own_key = format!("$KV.{ROSTER_BUCKET}.{dev_b}");
+    let own_key = format!("$KV.{COLONY_BUCKET}.{dev_b}");
     js.publish_with_headers(own_key.clone(), forged_headers(), payload()).await.unwrap().await.unwrap();
-    let direct_get = format!("$JS.API.DIRECT.GET.KV_{ROSTER_BUCKET}.{own_key}");
+    let direct_get = format!("$JS.API.DIRECT.GET.KV_{COLONY_BUCKET}.{own_key}");
     client.publish_with_reply(direct_get, as_dev_a.clone(), Default::default()).await.unwrap();
     let by_direct_get = next("a direct get").await;
     // The server delivers a push consumer's messages only while a client subscribes to exactly that subject.
     let _exact = client.subscribe(as_dev_a.clone()).await.unwrap();
-    let roster = js.get_stream(format!("KV_{ROSTER_BUCKET}")).await.unwrap();
+    let colony = js.get_stream(format!("KV_{COLONY_BUCKET}")).await.unwrap();
     let push = consumer::push::Config {
         deliver_subject: as_dev_a,
         filter_subject: own_key,
         ack_policy: consumer::AckPolicy::None,
         ..Default::default()
     };
-    roster.create_consumer(push).await.unwrap();
+    colony.create_consumer(push).await.unwrap();
     let by_push_consumer = next("a push consumer").await;
     let own_inbox = subject::inbox(&human, &dev_b);
     js.publish_with_headers(own_inbox, forged_headers(), payload()).await.unwrap().await.unwrap();

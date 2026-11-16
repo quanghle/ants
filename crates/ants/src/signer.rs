@@ -26,10 +26,10 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::time::Duration;
 
+use ants_daemon::colony;
 use ants_daemon::config;
 use ants_daemon::direct_kv::DirectKv;
 use ants_daemon::reactions;
-use ants_daemon::roster;
 use ants_daemon::template::{AntTemplate, Request};
 use ants_proto::{
     ACCOUNT_HOLDER_KEY, ANTS_VERSION, AccountHolder, AntReply, AntRequest, ApprovalDecision, ApprovalRequest,
@@ -208,7 +208,7 @@ pub async fn serve(
 /// The record of this machine holding the account key: its name as the `[host]` table of the config file at `config`
 /// names it, else as its top-level `machine` does if that is a machine name, else the first label of its host name.
 async fn holder(config: &Path) -> AccountHolder {
-    let hostname = roster::machine().await;
+    let hostname = colony::machine().await;
     let host = config::Summary::load(config).map_or_else(|_| config::HostSettings::default(), |summary| summary.host);
     AccountHolder {
         machine: host.machine_or(&hostname),
@@ -683,7 +683,7 @@ pub async fn ask(
     let manager: UserId = claims.name.parse().with_context(|| format!("credentials named {}", claims.name))?;
     let mut replies = client.subscribe(subject::antreq_reply(&manager)).await?;
     let public_key = user.public_key();
-    let host = roster::machine().await;
+    let host = colony::machine().await;
     let mut asking = AntRequest::new(
         manager.clone(),
         name.clone(),
@@ -774,7 +774,7 @@ pub async fn retire(
     let claims = auth::verified(jwt).context("the manager's credentials")?;
     let manager: UserId = claims.name.parse().with_context(|| format!("credentials named {}", claims.name))?;
     let mut replies = client.subscribe(subject::antreq_reply(&manager)).await?;
-    let host = roster::machine().await;
+    let host = colony::machine().await;
     let mut asking =
         AntRequest::new(manager.clone(), name.clone(), template, "{}", "", thread.clone(), public_key, host, until);
     asking.retire = true;
@@ -1001,7 +1001,7 @@ mod tests {
         })
         .await;
         assert_eq!(recorded.machine, "keybox".parse::<ants_proto::Machine>().unwrap());
-        assert_eq!((recorded.hostname, recorded.version), (roster::machine().await, ANTS_VERSION.to_owned()));
+        assert_eq!((recorded.hostname, recorded.version), (colony::machine().await, ANTS_VERSION.to_owned()));
         assert_eq!(crate::machines::list(&h_js).await.unwrap(), [], "the record is no machine's");
         let as_human = DirectKv::new(&h_js, None, MACHINES_BUCKET).await.unwrap();
         assert!(as_human.put(ACCOUNT_HOLDER_KEY, b"{}".to_vec()).await.is_err(), "a human only reads it");

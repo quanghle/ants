@@ -16,6 +16,7 @@ mod bridge;
 mod channel;
 mod cli;
 mod cmd;
+mod colony;
 mod completions;
 mod compose;
 mod dash;
@@ -52,7 +53,6 @@ mod renew;
 mod restart;
 mod retire;
 mod revoke;
-mod roster;
 mod scheduler;
 mod sealed;
 mod search;
@@ -114,7 +114,7 @@ async fn run() -> Result<()> {
             let select = inbox::Select { thread: None, limit, peek, summaries: false };
             Box::pin(cmd::inbox::show(&nats()?, select, thread, Listing { follow, json })).await
         }
-        Command::Roster { json } => roster::show(&nats()?, json).await,
+        Command::Colony { json } => colony::show(&nats()?, json).await,
         Command::Ant(command) => Box::pin(cmd::ant::run(&nats()?, command)).await,
         Command::Machines { ant, json } => machines::show(&nats()?, ant.as_ref(), json).await,
         Command::Spend { ant, thread, days, json, config } => {
@@ -171,8 +171,8 @@ async fn run() -> Result<()> {
         Command::Auth(command) => cmd::auth::run(command, &conn).await,
         Command::Add(args) => add::add(*args, &cli.nats, domain).await,
         Command::Retire(args) => {
-            let roster = retire_roster(&conn, &args.name).await;
-            retire::retire(&args, roster.as_ref(), retire::STOP_WAIT, &cli.nats, domain).await
+            let colony = retire_colony(&conn, &args.name).await;
+            retire::retire(&args, colony.as_ref(), retire::STOP_WAIT, &cli.nats, domain).await
         }
         Command::Login(args) => login::run(args).await,
         Command::Renew(args) => renew::run(args, &cli.nats, cli.creds.as_deref()).await,
@@ -192,8 +192,8 @@ async fn run() -> Result<()> {
     }
 }
 
-/// The roster `ants retire` waits on for `name` to stop, None (said) when it cannot be read.
-async fn retire_roster(conn: &Connection<'_>, name: &impl std::fmt::Display) -> Option<async_nats::jetstream::Context> {
+/// The colony `ants retire` waits on for `name` to stop, None (said) when it cannot be read.
+async fn retire_colony(conn: &Connection<'_>, name: &impl std::fmt::Display) -> Option<async_nats::jetstream::Context> {
     let connected = match conn.nats() {
         Ok(nats) => nats.connect("ants-retire").await,
         Err(e) => Err(e),
@@ -201,7 +201,7 @@ async fn retire_roster(conn: &Connection<'_>, name: &impl std::fmt::Display) -> 
     match connected {
         Ok((_, js)) => Some(js),
         Err(e) => {
-            println!("cannot read the roster ({e:#}): not waiting for {name} to stop");
+            println!("cannot read the colony ({e:#}): not waiting for {name} to stop");
             None
         }
     }
@@ -319,7 +319,7 @@ async fn init_hub(nats: &Nats<'_>) -> Result<Vec<String>> {
     lines.push(format!(
         "stream {}, buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {}, and store {} ready",
         ants_proto::STREAM,
-        ants_proto::ROSTER_BUCKET,
+        ants_proto::COLONY_BUCKET,
         ants_proto::SESSIONS_BUCKET,
         ants_proto::ATTEMPTS_BUCKET,
         ants_proto::CHANNELS_BUCKET,
@@ -435,7 +435,7 @@ mod tests {
             .filter(|o| ![hub::Object::Stream, hub::Object::Presence, hub::Object::Identities].contains(o))
             .collect();
         assert_eq!(created, seen, "every missing bucket a human may look up created");
-        for watched in [hub::Object::Channels, hub::Object::Humans, hub::Object::Roster] {
+        for watched in [hub::Object::Channels, hub::Object::Humans, hub::Object::Colony] {
             let config = h_js.get_stream(watched.stream_name()).await.unwrap().cached_info().config.clone();
             assert_eq!(config.max_consumers, hub::MAX_CONSUMERS, "{watched}");
         }

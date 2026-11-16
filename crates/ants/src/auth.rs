@@ -604,7 +604,7 @@ pub fn webhook_permissions(dir: &Path, webhook: &UserId) -> Result<Permissions> 
 }
 
 /// Issue the credentials of the channel manager, `ants channel serve`, for the hub's JetStream domain if it has one,
-/// and write its `.creds` file to `out`: it hears channel management requests and answers each once, reads the roster
+/// and write its `.creds` file to `out`: it hears channel management requests and answers each once, reads the colony
 /// and the humans, writes the channels bucket and posts in channels as [`UserId::channel_manager`]
 /// ([`Permissions::for_channel_manager`]).
 pub fn issue_channel_manager(dir: &Path, js_domain: Option<&JsDomain>, out: &Path) -> Result<()> {

@@ -13,7 +13,7 @@
 //! An ant of the requester's escalate_to may decide too: its decision travels as an envelope to the requester's inbox,
 //! `ants.inbox.<requester>.<decider>`, where humans read it back. A request such a decision came to first, as the stream
 //! ordered them and before the request expired, is decided too ([`State::DecidedByAnt`]), and a human's later answer
-//! is refused. The chain is the ant's roster entry's, else the one kept in `ants_chains`, as the ant takes a
+//! is refused. The chain is the ant's colony entry's, else the one kept in `ants_chains`, as the ant takes a
 //! decision only from its own chain.
 //!
 //! A human approving the same call of an ant again and again is shown the allow rule that would spare it
@@ -42,8 +42,8 @@ use std::path::Path;
 
 use ants_daemon::{bus, chains, config, permission};
 use ants_proto::{
-    Act, ActAnswer, ApprovalDecision, ApprovalRequest, AssistantGrant, CHAINS_BUCKET, Confirmations, Envelope,
-    Following, HUMANS_BUCKET, PreAllow, ROSTER_BUCKET, RosterEntry, STREAM, UserId, Uuid, Verdict, assistant_grant_key,
+    Act, ActAnswer, ApprovalDecision, ApprovalRequest, AssistantGrant, CHAINS_BUCKET, COLONY_BUCKET, ColonyEntry,
+    Confirmations, Envelope, Following, HUMANS_BUCKET, PreAllow, STREAM, UserId, Uuid, Verdict, assistant_grant_key,
     confirmations_key, pre_allow_key, subject,
 };
 use anyhow::{Context as _, Result, bail};
@@ -115,18 +115,18 @@ pub async fn requests(stream: &Stream) -> Result<Vec<(u64, ApprovalRequest)>> {
     }
 }
 
-/// The escalate_to of `ant`, whose ants may decide its requests: its roster entry's, else the chain kept in
+/// The escalate_to of `ant`, whose ants may decide its requests: its colony entry's, else the chain kept in
 /// `ants_chains`, else none.
 async fn chain_of(js: &jetstream::Context, ant: &UserId) -> Result<Vec<UserId>> {
-    if let Ok(kv) = js.get_key_value(ROSTER_BUCKET).await
-        && let Some(value) = kv.get(ant.as_str()).await.with_context(|| format!("reading {ant} in the roster"))?
+    if let Ok(kv) = js.get_key_value(COLONY_BUCKET).await
+        && let Some(value) = kv.get(ant.as_str()).await.with_context(|| format!("reading {ant} in the colony"))?
     {
-        match serde_json::from_slice::<RosterEntry>(&value).map_err(anyhow::Error::from).and_then(|entry| {
+        match serde_json::from_slice::<ColonyEntry>(&value).map_err(anyhow::Error::from).and_then(|entry| {
             entry.check_key(ant.as_str())?;
             Ok(entry)
         }) {
             Ok(entry) => return Ok(entry.escalate_to),
-            Err(e) => tracing::warn!(%ant, error = %e, "skipping a roster entry"),
+            Err(e) => tracing::warn!(%ant, error = %e, "skipping a colony entry"),
         }
     }
     match js.get_key_value(CHAINS_BUCKET).await {

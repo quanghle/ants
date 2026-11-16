@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use ants_proto::{
-    ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, Envelope, FILES_STREAM, JsDomain, LINKS_BUCKET, ROSTER_BUCKET,
+    ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, COLONY_BUCKET, Envelope, FILES_STREAM, JsDomain, LINKS_BUCKET,
     SESSIONS_BUCKET, STREAM, UserId, inbox_prefix, subject,
 };
 use anyhow::{Context as _, Result, bail};
@@ -320,15 +320,15 @@ pub fn jetstream(client: async_nats::Client, js_domain: Option<&JsDomain>) -> je
     }
 }
 
-/// Open the roster bucket, creating it if missing with entries that expire `ttl` after their last put. Only the
+/// Open the colony bucket, creating it if missing with entries that expire `ttl` after their last put. Only the
 /// human's credentials may create it; an existing bucket keeps its own max age.
-pub async fn ensure_roster(js: &jetstream::Context, ttl: Duration) -> Result<kv::Store> {
-    if let Ok(store) = js.get_key_value(ROSTER_BUCKET).await {
+pub async fn ensure_colony(js: &jetstream::Context, ttl: Duration) -> Result<kv::Store> {
+    if let Ok(store) = js.get_key_value(COLONY_BUCKET).await {
         return Ok(store);
     }
-    js.create_key_value(hub::roster_config(ttl))
+    js.create_key_value(hub::colony_config(ttl))
         .await
-        .context("creating the roster bucket (with credentials, `ants init` as the human creates it)")
+        .context("creating the colony bucket (with credentials, `ants init` as the human creates it)")
 }
 
 /// The `ANTS` stream for `user`, without its info, which no ant's or webhook's credentials allow: with a subjects
@@ -405,7 +405,7 @@ pub async fn ensure_channels(js: &jetstream::Context) -> Result<kv::Store> {
 }
 
 /// The KV bucket of the escalation chains ([`CHAINS_BUCKET`]), created when missing and the credentials allow it (the
-/// human's). Entries never expire: a chain outlives its ant's roster entry.
+/// human's). Entries never expire: a chain outlives its ant's colony entry.
 pub async fn ensure_chains(js: &jetstream::Context) -> Result<kv::Store> {
     if let Ok(store) = js.get_key_value(CHAINS_BUCKET).await {
         return Ok(store);

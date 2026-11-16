@@ -1,4 +1,4 @@
-//! Escalations against a real nats-server: kept in `ants_sessions` across a restart, up the chains the roster
+//! Escalations against a real nats-server: kept in `ants_sessions` across a restart, up the chains the colony
 //! publishes or the chains bucket keeps, and to the human once the chains loop.
 
 use std::sync::Arc;
@@ -8,9 +8,9 @@ use ants_daemon::caps::{Caps, Ledger};
 use ants_daemon::direct_kv::DirectKv;
 use ants_daemon::escalation::{self, Chain, Escalated, Escalator, Stuck};
 use ants_daemon::humans::Registry;
-use ants_daemon::mcp::Roster;
+use ants_daemon::mcp::Colony;
 use ants_daemon::{bus, chains};
-use ants_proto::{Envelope, EscalationReason, Role, RosterEntry, StatusEvent, StatusUpdate, ThreadId, UserId, subject};
+use ants_proto::{ColonyEntry, Envelope, EscalationReason, Role, StatusEvent, StatusUpdate, ThreadId, UserId, subject};
 use ants_test_support::NatsServer as Server;
 use async_nats::jetstream;
 use futures::StreamExt as _;
@@ -22,11 +22,11 @@ fn ant(name: &str) -> UserId {
     name.parse().unwrap()
 }
 
-/// A roster where lead escalates to boss, and boss back to dev-a.
-fn roster() -> Roster {
+/// A colony where lead escalates to boss, and boss back to dev-a.
+fn colony() -> Colony {
     Arc::new(|| {
         let now = chrono::Utc::now();
-        let entry = move |name: &str, chain: &str| RosterEntry {
+        let entry = move |name: &str, chain: &str| ColonyEntry {
             ant: ant(name),
             machine: "test".to_owned(),
             instance: "run-1".to_owned(),
@@ -60,7 +60,7 @@ fn escalator(js: &jetstream::Context, sessions: &DirectKv) -> Escalator {
     let chain = Chain { escalate_to: vec![ant("lead")], after: Some(Duration::from_millis(300)), ..Chain::default() };
     let ledger = Arc::new(Ledger::kv(sessions.clone(), ant("dev-a"), Caps::default()));
     let send = escalation::jetstream_sender(js.clone());
-    Escalator::new(ant("dev-a"), chain, roster(), Registry::default(), ledger, send)
+    Escalator::new(ant("dev-a"), chain, colony(), Registry::default(), ledger, send)
 }
 
 async fn next(subscriber: &mut async_nats::Subscriber) -> Envelope {
@@ -143,7 +143,7 @@ async fn an_escalation_climbs_past_its_deadline_after_a_restart_and_goes_to_the_
 }
 
 #[tokio::test]
-async fn an_escalation_climbs_past_a_leader_gone_from_the_roster_through_the_chain_kept_for_it() {
+async fn an_escalation_climbs_past_a_leader_gone_from_the_colony_through_the_chain_kept_for_it() {
     let Some(server) = Server::start() else { return };
     let (client, js) = bus::connect(&server.url, None, None, &ant("dev-a"), "test").await.unwrap();
     bus::ensure_stream(&js).await.unwrap();
@@ -161,7 +161,7 @@ async fn an_escalation_climbs_past_a_leader_gone_from_the_roster_through_the_cha
     client.flush().await.unwrap();
     let chain = Chain { escalate_to: vec![ant("lead")], after: Some(Duration::from_millis(300)), ..Chain::default() };
     let ledger = Arc::new(Ledger::kv(sessions, ant("dev-a"), Caps::default()));
-    let offline: Roster = Arc::new(|| Box::pin(async { Ok(Vec::new()) }));
+    let offline: Colony = Arc::new(|| Box::pin(async { Ok(Vec::new()) }));
     let escalator = Escalator::new(
         ant("dev-a"),
         chain,
@@ -177,7 +177,7 @@ async fn an_escalation_climbs_past_a_leader_gone_from_the_roster_through_the_cha
     escalator.escalate(stuck).await.unwrap();
     assert_eq!(next(&mut to_lead).await.escalation.as_deref().map(|e| e.level), Some(1));
 
-    // lead never answers and is not in the roster: its kept chain takes the escalation to boss.
+    // lead never answers and is not in the colony: its kept chain takes the escalation to boss.
     let climbed = tokio::select! {
         two = next(&mut to_boss) => two,
         () = escalator.deadlines() => unreachable!(),
@@ -232,7 +232,7 @@ async fn an_escalation_reaching_the_human_is_pushed_and_reminded_after_a_restart
         let chain = Chain { remind: Some(Duration::from_millis(300)), stand_in: Some(ant("bob")), ..Chain::default() };
         let ledger = Arc::new(Ledger::kv(sessions.clone(), ant("dev-a"), Caps::default()));
         let send = escalation::jetstream_sender(js.clone());
-        Escalator::new(ant("dev-a"), chain, roster(), Registry::default(), ledger, send)
+        Escalator::new(ant("dev-a"), chain, colony(), Registry::default(), ledger, send)
     };
     let thread = ThreadId::generate();
     let notice = Envelope::on_thread(thread.clone(), ant("dev-a"), UserId::human(), "Turn budget spent.");
@@ -296,7 +296,7 @@ async fn a_stand_in_s_answer_to_an_escalation_reaching_the_human_without_reminde
     let chain = Chain { remind: None, stand_in: Some(ant("bob")), ..Chain::default() };
     let ledger = Arc::new(Ledger::kv(sessions, ant("dev-a"), Caps::default()));
     let send = escalation::jetstream_sender(js.clone());
-    let escalator = Escalator::new(ant("dev-a"), chain, roster(), Registry::default(), ledger, send);
+    let escalator = Escalator::new(ant("dev-a"), chain, colony(), Registry::default(), ledger, send);
     let thread = ThreadId::generate();
     let escalate = |id: &str| {
         let notice = Envelope::on_thread(thread.clone(), ant("dev-a"), UserId::human(), "Turn budget spent.");

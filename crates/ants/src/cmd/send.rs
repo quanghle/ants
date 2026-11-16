@@ -12,7 +12,7 @@ use futures::StreamExt as _;
 use futures::stream::BoxStream;
 
 use crate::cli::{Replies, Sending};
-use crate::{Nats, assistant, attachments, channel, compose, humans, inbox, progress, reacted, roster, sealed, thread};
+use crate::{Nats, assistant, attachments, channel, colony, compose, humans, inbox, progress, reacted, sealed, thread};
 
 /// Split a leading `@ant` off the words, none when they name no one ([`unaddressed`]); the message is the rest, or
 /// what `input` reads.
@@ -120,7 +120,7 @@ pub(crate) async fn ask(
         bus::live_inbox(&client, &nats.me.id).await?
     };
     // Warned rather than refused: a daemon may start later and take the message, which waits in the stream.
-    let warnings = roster::unserved_warnings(&js, &[&envelope.to]).await;
+    let warnings = colony::unserved_warnings(&js, &[&envelope.to]).await;
     let to_human = to_human
         || !nats.me.role.is_human() && !warnings.is_empty() && humans::load(&js, &nats.me).await.contains(&envelope.to);
     let unserved = !warnings.is_empty() && !to_human;
@@ -204,11 +204,11 @@ pub(crate) async fn ask(
 /// What a send kept in the leaf node's outbox prints.
 pub(crate) const OUTBOX: &str = "kept in this machine's outbox until the hub is reachable";
 
-/// The warnings `ants ask` prints for sending to `to` when no daemon serves it now ([`roster::unserved_warnings`]),
+/// The warnings `ants ask` prints for sending to `to` when no daemon serves it now ([`colony::unserved_warnings`]),
 /// none for a human; and whether `to` is a human, as `me` tells: a human knows the humans, an ant asks only of a
-/// user the roster lacks.
+/// user the colony lacks.
 pub(crate) async fn unserved(js: &jetstream::Context, me: &humans::Me, to: &UserId) -> (Vec<String>, bool) {
-    let warnings = roster::unserved_warnings(js, &[to]).await;
+    let warnings = colony::unserved_warnings(js, &[to]).await;
     let to_human = (me.role.is_human() || !warnings.is_empty()) && humans::load(js, me).await.contains(to);
     (if to_human { Vec::new() } else { warnings }, to_human)
 }

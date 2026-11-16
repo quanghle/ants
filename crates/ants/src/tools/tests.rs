@@ -136,7 +136,7 @@ async fn every_human_sees_every_request_and_the_first_decision_wins() {
     assert_eq!(serde_json::from_slice::<ApprovalDecision>(&stored.payload).unwrap(), first);
 }
 
-/// lead is in dev-a's escalate_to, kept in `ants_chains` as dev-a's roster entry expired; dev-c is not. Each sends
+/// lead is in dev-a's escalate_to, kept in `ants_chains` as dev-a's colony entry expired; dev-c is not. Each sends
 /// decisions with its own credentials to dev-a's inbox.
 #[tokio::test]
 async fn a_request_an_ant_of_the_chain_decided_is_no_longer_pending() {

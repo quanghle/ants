@@ -113,7 +113,7 @@ impl Drop for LogWriter {
 pub enum Stand {
     /// Nothing heard yet.
     Waiting,
-    /// No daemon serves the ant now, as the roster tells.
+    /// No daemon serves the ant now, as the colony tells.
     Unserved,
     /// The message sent waits on the thread behind this many others.
     Queued(usize),
@@ -285,7 +285,7 @@ fn describe(view: &View) -> String {
     };
     match (view.signed_out, &view.stand) {
         (true, Stand::Queued(_)) => format!("{ant}: harness signed out, {stand}"),
-        (true, _) => format!("{ant}: harness signed out: the messages wait for a sign-in (see `ants roster`)"),
+        (true, _) => format!("{ant}: harness signed out: the messages wait for a sign-in (see `ants colony`)"),
         (false, _) => format!("{ant}: {stand}"),
     }
 }

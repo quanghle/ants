@@ -11,15 +11,15 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 
 use super::model::{Focus, Level, Model, Page};
 use super::{approvals, catchup, channel, compact, home, nav, search, thread, work};
+use crate::colony;
 use crate::live::Link;
-use crate::roster;
 
 /// How wide the nav is.
 const NAV_WIDTH: u16 = 24;
 
 /// `then` from `now`, such as `5s ago`.
 pub fn ago(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    format!("{} ago", roster::short(roster::since(then, now)))
+    format!("{} ago", colony::short(colony::since(then, now)))
 }
 
 pub fn dim() -> Style {
@@ -83,7 +83,7 @@ fn header_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
     match data.live.link {
         Link::Connected => spans.push(Span::styled("● connected", Style::new().fg(Color::Green))),
         Link::Down(since) => spans.push(Span::styled(
-            format!("○ disconnected {}, reconnecting", roster::short(roster::since(since, now))),
+            format!("○ disconnected {}, reconnecting", colony::short(colony::since(since, now))),
             Style::new().fg(Color::Red).bold(),
         )),
     }
@@ -186,8 +186,8 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
+    use crate::colony::tests::entry;
     use crate::live::tests::{at, message, user};
-    use crate::roster::tests::entry;
     use crate::tui::model::Key;
     use crate::tui::model::tests::model;
     use crate::tui::people;
@@ -205,7 +205,7 @@ mod tests {
     fn the_screen_shows_who_where_the_nav_the_view_and_its_keys() {
         let thread = ThreadId::generate();
         let mut m = model();
-        m.data.live.roster(vec![entry("dev-a", 60, 5, at(0))], at(0));
+        m.data.live.colony(vec![entry("dev-a", 60, 5, at(0))], at(0));
         m.stored(vec![message(1, &thread, "alice", "dev-a", "deploy the site")], at(1));
         let shown = screen(&m, at(2));
         assert!(shown.contains(" ants · alice@hub:4222 · home · ● connected"), "{shown}");

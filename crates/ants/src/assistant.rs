@@ -12,7 +12,7 @@ use ants_daemon::config::Summary;
 use ants_daemon::creds::{Finding, Kind};
 use ants_daemon::sealing;
 use ants_proto::{
-    AssistantGrant, DeviceId, DeviceKey, HUMANS_BUCKET, RosterEntry, SealingDevice, UserId, VerifiedGrant,
+    AssistantGrant, ColonyEntry, DeviceId, DeviceKey, HUMANS_BUCKET, SealingDevice, UserId, VerifiedGrant,
     assistant_grant_key,
 };
 use anyhow::{Context as _, Result, bail};
@@ -22,7 +22,7 @@ use nkeys::XKey;
 use serde::Deserialize;
 
 use crate::cli::{AssistantCommand, SealCommand};
-use crate::{Nats, auth, devices, humans, revoke, roster};
+use crate::{Nats, auth, colony, devices, humans, revoke};
 
 mod consent;
 mod dedicated;
@@ -88,9 +88,9 @@ impl Local {
     }
 }
 
-/// What `set` has to say of designating `ant`, as `local` and its roster entries `roster` know it: an error for a
+/// What `set` has to say of designating `ant`, as `local` and its colony entries `colony` know it: an error for a
 /// templated ant, else the warnings.
-fn check(ant: &UserId, local: &Local, roster: &[RosterEntry]) -> Result<Vec<String>> {
+fn check(ant: &UserId, local: &Local, colony: &[ColonyEntry]) -> Result<Vec<String>> {
     if let Some(template) = local.template() {
         bail!(
             "{ant} was added from template {template}: a templated ant cannot be an assistant (`ants assistant enable` \
@@ -99,7 +99,7 @@ fn check(ant: &UserId, local: &Local, roster: &[RosterEntry]) -> Result<Vec<Stri
     }
     let mut warnings = Vec::new();
     let home = local.entry.as_ref().and_then(|e| e.home.as_deref());
-    let workdirs = roster.iter().filter_map(|e| e.workdir.clone());
+    let workdirs = colony.iter().filter_map(|e| e.workdir.clone());
     let local_workdir = local.entry.as_ref().and_then(|e| e.workdir.as_ref()).filter(|w| !w.as_os_str().is_empty());
     let mut workdirs: Vec<String> = workdirs
         .chain(local_workdir.map(|w| w.display().to_string()))
@@ -126,9 +126,9 @@ fn check(ant: &UserId, local: &Local, roster: &[RosterEntry]) -> Result<Vec<Stri
             ));
         }
     }
-    if local.entry.is_none() && !local.in_registry && roster.is_empty() {
+    if local.entry.is_none() && !local.in_registry && colony.is_empty() {
         warnings.push(format!(
-            "{ant} is neither in the roster nor known on this machine: whether it was added from a template is not \
+            "{ant} is neither in the colony nor known on this machine: whether it was added from a template is not \
              checked"
         ));
     } else if local.entry.is_none() && !local.in_registry {
@@ -188,16 +188,16 @@ pub async fn set(nats: &Nats<'_>, ant: &UserId) -> Result<()> {
     if humans::load(&js, &nats.me).await.contains(ant) {
         bail!("{ant} is a human: an assistant is an ant");
     }
-    let roster: Vec<RosterEntry> = match roster::list(&js).await {
+    let colony: Vec<ColonyEntry> = match colony::list(&js).await {
         Ok(entries) => entries.into_iter().filter(|e| e.ant == *ant).collect(),
         Err(e) => {
-            tracing::warn!("reading the roster: {e:#}");
+            tracing::warn!("reading the colony: {e:#}");
             Vec::new()
         }
     };
     let team = auth::default_dir().ok().filter(|dir| auth::holds_team(dir));
     let local = Local::read(ant, &crate::defaults::path()?, team.as_deref());
-    for warning in check(ant, &local, &roster)? {
+    for warning in check(ant, &local, &colony)? {
         println!("warning: {warning}");
     }
     let (before, _) = put(&js, creds, human, Some(ant.clone()), Sealing::Keep).await?;

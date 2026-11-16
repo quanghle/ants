@@ -113,14 +113,14 @@ async fn the_versions_check_waits_for_every_component_to_allow_renewal() {
 
     let dev_a = "dev-a".parse::<UserId>().unwrap();
     let (_, a_js) = server.connect_as(&dev_a, Role::Ant).await;
-    let roster = a_js.get_key_value(ants_proto::ROSTER_BUCKET).await.unwrap();
+    let colony = a_js.get_key_value(ants_proto::COLONY_BUCKET).await.unwrap();
     let now = chrono::Utc::now();
     let mut entry = serde_json::json!({
         "ant": "dev-a", "machine": "m1", "instance": "run-1", "harness": "copilot", "capabilities": [],
         "started_at": now, "heartbeat_at": now, "activity": "idle", "handling": 0, "harnesses": 0,
         "version": "0.0.1", "perms": PERMISSIONS_VERSION.0 - 1,
     });
-    roster.put("dev-a", serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
+    colony.put("dev-a", serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
 
     let manager = UserId::channel_manager();
     let creds = server.dir().join("channel-manager.creds");
@@ -157,7 +157,7 @@ async fn the_versions_check_waits_for_every_component_to_allow_renewal() {
 
     entry["version"] = ants_proto::ANTS_VERSION.into();
     entry["perms"] = PERMISSIONS_VERSION.0.into();
-    roster.put("dev-a", serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
+    colony.put("dev-a", serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
     let check = versions().await;
     assert_eq!(check.status, Status::Ok, "{check}");
     assert!(check.detail.starts_with("3 running components"), "{check}");
@@ -175,12 +175,12 @@ async fn an_ants_credentials_skip_the_hub_check() {
 #[test]
 fn ants_looking_alike_are_warned_of() {
     let now = chrono::Utc::now();
-    let entries: Vec<ants_proto::RosterEntry> =
-        ["dev-a", "dev-b"].map(|ant| crate::roster::tests::entry(ant, 60, 2, now)).into();
+    let entries: Vec<ants_proto::ColonyEntry> =
+        ["dev-a", "dev-b"].map(|ant| crate::colony::tests::entry(ant, 60, 2, now)).into();
     let check = avatars(&entries, Faces::new(Default::default(), Depth::Plain, ants_proto::Theme::Dark));
     assert_eq!(
         (check.status, check.detail.as_str()),
-        (Status::Ok, "2 ants in the roster, each with a face of its own")
+        (Status::Ok, "2 ants in the colony, each with a face of its own")
     );
     let mut identities = crate::avatars::Identities::new();
     for e in &entries {
@@ -205,7 +205,7 @@ fn harness_versions_warn_of_drift_across_machines() {
         if let Some(version) = version {
             json["agent"] = serde_json::json!({"name": "copilot", "version": version});
         }
-        serde_json::from_value::<ants_proto::RosterEntry>(json).unwrap()
+        serde_json::from_value::<ants_proto::ColonyEntry>(json).unwrap()
     };
     let check = harness_versions(&[entry("dev-a", "m1", None)], now);
     assert_eq!(check.status, Status::Ok, "{check}");

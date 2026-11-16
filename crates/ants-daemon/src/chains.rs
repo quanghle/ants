@@ -1,4 +1,4 @@
-//! Escalation chains kept past the roster. A roster entry expires [`ants_proto::ROSTER_TTL`] after its daemon stops,
+//! Escalation chains kept past the colony. A colony entry expires [`ants_proto::COLONY_TTL`] after its daemon stops,
 //! so each daemon also puts its ant's `escalate_to` in the KV bucket [`CHAINS_BUCKET`] on start, whose entries
 //! never expire: an escalation climbs past a leader that is offline through the chain kept there.
 

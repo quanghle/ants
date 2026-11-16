@@ -93,7 +93,7 @@ fn a_js_domain_adds_the_domain_form_of_the_jetstream_api() {
         "$JS.hub.API.$KV.ants_sessions.dev-a.>",
         "$JS.hub.API.$KV.ants_chains.dev-a",
         "$JS.hub.API.DIRECT.GET.KV_ants_chains.>",
-        "$JS.hub.API.$KV.ants_roster.dev-a",
+        "$JS.hub.API.$KV.ants_colony.dev-a",
         "$JS.hub.API.CONSUMER.MSG.NEXT.ANTS.notes-dev-a",
         "$JS.ACK.ANTS.inbox-dev-a.>",
         // The v2 form of nats-server 2.16, whatever the domain.
@@ -230,7 +230,7 @@ fn leaf_permissions_cover_each_user_once() {
             "$JS.API.CONSUMER.INFO.ANTS.admin-m1",
             "$JS.API.CONSUMER.CREATE.ANTS.admin-m1.ants.admin.m1.>",
             "$JS.API.CONSUMER.MSG.NEXT.ANTS.admin-m1",
-            "$JS.API.DIRECT.GET.KV_ants_roster.$KV.ants_roster.*",
+            "$JS.API.DIRECT.GET.KV_ants_colony.$KV.ants_colony.*",
             // Asking for a new ant's credentials, its own or on an admin's order.
             "ants.enroll.*",
             "$JS.ACK.ANTS.admin-m1.>",
@@ -267,7 +267,7 @@ fn outboxes_take_inbox_notes_channel_dead_letter_and_timeline_subjects_only() {
     assert_eq!(subject::outbox(&subject::notes(&t, &p("dev-a"))).unwrap(), "ants.out.notes.t1.dev-a");
     assert_eq!(subject::outbox(&subject::chan(&c, &p("dev-a"))).unwrap(), "ants.out.chan.ops.dev-a");
     assert_eq!(subject::outbox(&subject::dead(&p("dev-a"))).unwrap(), "ants.out.dead.dev-a");
-    for other in [subject::approvals(&p("dev-a")), subject::roster(&p("dev-a")), "ants.outbox.x".to_owned()] {
+    for other in [subject::approvals(&p("dev-a")), subject::colony(&p("dev-a")), "ants.outbox.x".to_owned()] {
         assert_eq!(subject::outbox(&other), None, "{other}");
     }
     let a = Permissions::for_user(&p("dev-a"), Role::Ant);
@@ -477,7 +477,7 @@ fn a_webhook_may_post_only_to_its_destinations_and_keep_only_its_own_events() {
 }
 
 #[test]
-fn an_observer_publishes_nothing_but_reads_its_feeds_status_and_the_roster() {
+fn an_observer_publishes_nothing_but_reads_its_feeds_status_and_the_colony() {
     let perms = Permissions::for_observer(&p("audit"));
     let ants: Vec<&String> = perms.publish.iter().filter(|s| s.starts_with("ants.")).collect();
     assert_eq!(ants, ["ants.renew.audit"], "no message, approval decision or cancel request");
@@ -495,12 +495,12 @@ fn an_observer_publishes_nothing_but_reads_its_feeds_status_and_the_roster() {
     assert!(!perms.publish.iter().any(|s| s.contains("STREAM.INFO.ANTS") || s.contains("DIRECT.GET.ANTS")));
     assert!(!perms.publish.iter().any(|s| s.contains("STREAM.MSG.GET")));
     let buckets: Vec<&String> = perms.publish.iter().filter(|s| s.contains("KV_")).collect();
-    assert!(buckets.iter().all(|s| s.contains("KV_ants_roster")), "{buckets:?}");
+    assert!(buckets.iter().all(|s| s.contains("KV_ants_colony")), "{buckets:?}");
     let acks: Vec<&String> = perms.publish.iter().filter(|s| s.starts_with("$JS.ACK.")).collect();
     assert_eq!(acks.len(), 6, "v1 and v2 acks of its own consumers only: {acks:?}");
     assert!(acks.iter().all(|s| s.contains(".ANTS.observe-") && s.ends_with("-audit.>")), "{acks:?}");
     let fc: Vec<&String> = perms.publish.iter().filter(|s| s.starts_with("$JS.FC.")).collect();
-    assert_eq!(fc, ["$JS.FC.KV_ants_roster.>", "$JS.FC.*.*.KV_ants_roster.>"]);
+    assert_eq!(fc, ["$JS.FC.KV_ants_colony.>", "$JS.FC.*.*.KV_ants_colony.>"]);
     assert_eq!(
         perms.subscribe,
         [
@@ -643,7 +643,7 @@ fn the_channel_manager_hears_requests_and_writes_channels_only() {
         "ants.chan.*.channel-manager",
         "$KV.ants_channels.>",
         "$JS.API.DIRECT.GET.KV_ants_channels.>",
-        "$JS.API.DIRECT.GET.KV_ants_roster.>",
+        "$JS.API.DIRECT.GET.KV_ants_colony.>",
         "$JS.API.CONSUMER.CREATE.KV_ants_humans",
     ] {
         assert!(manager.publish.iter().any(|have| have == s), "{s} missing from {:?}", manager.publish);
@@ -1014,15 +1014,15 @@ fn a_host_writes_only_its_own_machine_record_and_takes_only_its_own_orders() {
     assert_eq!(outcomes, ["$JS.API.DIRECT.GET.KV_ants_machines.$KV.ants_machines.m1.>", "$KV.ants_machines.m1.>"]);
     assert!(host.publish.iter().all(|s| !s.starts_with("$KV.ants_devices")), "{:?}", host.publish);
     assert_eq!(subject::admin_outcomes(&m1), "$KV.ants_machines.m1.>");
-    // Past its own subjects, it asks the signer to enroll or retire an ant on an admin's order, and reads the roster.
+    // Past its own subjects, it asks the signer to enroll or retire an ant on an admin's order, and reads the colony.
     let ants: Vec<_> = host.publish.iter().filter(|s| s.starts_with("ants.")).collect();
     assert_eq!(ants, [subject::ALL_ENROLL_REQUESTS]);
     // Of streams' info, it reads only the humans', whose consent to their assistants' orders it watches.
     let infos: Vec<_> = host.publish.iter().filter(|s| s.contains("STREAM.")).collect();
     assert_eq!(infos, ["$JS.API.STREAM.INFO.KV_ants_humans"]);
     assert!(host.publish.iter().all(|s| !s.starts_with("$KV.ants_humans")), "it never writes the humans");
-    assert!(host.publish.iter().any(|s| s == "$JS.API.DIRECT.GET.KV_ants_roster.$KV.ants_roster.*"));
-    assert!(!host.publish.iter().any(|s| s.starts_with("$KV.ants_roster")), "it reads the roster only");
+    assert!(host.publish.iter().any(|s| s == "$JS.API.DIRECT.GET.KV_ants_colony.$KV.ants_colony.*"));
+    assert!(!host.publish.iter().any(|s| s.starts_with("$KV.ants_colony")), "it reads the colony only");
     assert_eq!(host.subscribe, ["_INBOX_HOST.m1.>", subject::ALL_ENROLL_REPLIES]);
     let in_domain = Permissions::for_host(&m1).with_js_domain(Some(&"hub".parse().unwrap()));
     assert!(in_domain.publish.iter().any(|s| s == "$JS.hub.API.$KV.ants_machines.m1"));

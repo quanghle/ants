@@ -91,7 +91,7 @@ fn terminal_check(stdin: bool, stdout: bool) -> Result<()> {
     }
     bail!(
         "`ants chat` needs a terminal on stdin and stdout; without one, `ants inbox` reads the replies, `ants thread \
-         list` and `ants thread show THREAD` the threads, `ants channel read CHANNEL` a channel, `ants roster` the \
+         list` and `ants thread show THREAD` the threads, `ants channel read CHANNEL` a channel, `ants colony` the \
          ants, `ants tools list` the tool requests, and `ants ask` and `ants post` send"
     )
 }

@@ -29,12 +29,12 @@ struct Bus {
     ledger: Arc<Ledger>,
     /// dev-a's escalation chain.
     chain: Chain,
-    workload: roster::Workload,
+    workload: colony::Workload,
     pause: crate::pause::Pause,
     mcp: Option<Mcp>,
     channels: jetstream::kv::Store,
     threads: Threads,
-    roster: Roster,
+    colony: Colony,
     humans: Registry,
     redactor: Redactor,
     publisher: Option<crate::publish::Publisher>,
@@ -66,12 +66,12 @@ impl Bus {
         client.flush().await.unwrap();
         let ledger = Arc::new(Ledger::memory(dev.clone(), Caps::default()));
         let limits = PromptLimits::default();
-        let workload = roster::Workload::default();
+        let workload = colony::Workload::default();
         let channels = bus::ensure_channels(&js).await.unwrap();
         // Before any post: a new channel consumer starts at the posts stored from then on.
         bus::chan_consumer(&stream, &dev, ACK_WAIT, MAX_DELIVER, 4).await.unwrap();
         let threads = Threads::new(js.clone(), dev.clone(), bus::ensure_sessions(&js, js_domain, &dev).await.unwrap());
-        let roster = crate::mcp::jetstream_roster(js.clone());
+        let colony = crate::mcp::jetstream_colony(js.clone());
         let bus = Self {
             _server: server,
             client,
@@ -90,7 +90,7 @@ impl Bus {
             mcp: None,
             channels,
             threads,
-            roster,
+            colony,
             humans: Registry::default(),
             redactor: Redactor::default(),
             publisher: None,
@@ -112,11 +112,11 @@ impl Bus {
         (envelope, seq)
     }
 
-    /// Publish `ant` in the roster with `escalate_to` as its chain.
-    async fn put_roster(&self, ant: &UserId, escalate_to: &[UserId]) {
-        let roster = bus::ensure_roster(&self.js, ants_proto::ROSTER_TTL).await.unwrap();
+    /// Publish `ant` in the colony with `escalate_to` as its chain.
+    async fn put_colony(&self, ant: &UserId, escalate_to: &[UserId]) {
+        let colony = bus::ensure_colony(&self.js, ants_proto::COLONY_TTL).await.unwrap();
         let now = chrono::Utc::now();
-        let entry = ants_proto::RosterEntry {
+        let entry = ants_proto::ColonyEntry {
             ant: ant.clone(),
             machine: "m".to_owned(),
             instance: "run-1".to_owned(),
@@ -142,7 +142,7 @@ impl Bus {
             paused: None,
             drift: Vec::new(),
         };
-        roster.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
+        colony.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
     }
 
     /// Publish `text` from `from` on `thread` with no turns left, carrying `escalation`.
@@ -218,7 +218,7 @@ impl Bus {
             notes: &notes,
             threads: &self.threads,
             webhooks: &Webhooks::new(self.js.clone()),
-            roster: &self.roster,
+            colony: &self.colony,
             humans: &self.humans,
             behalf: Records::new(self.js.clone(), None, self.account.clone()),
             retry_delay: self.retry_delay,
@@ -252,8 +252,8 @@ impl Bus {
 
     fn escalator(&self) -> Escalator {
         let send = escalation::jetstream_sender(self.js.clone());
-        let (dev, chain, roster, humans) = (&self.dev, &self.chain, &self.roster, &self.humans);
-        Escalator::new(dev.clone(), chain.clone(), roster.clone(), humans.clone(), self.ledger.clone(), send)
+        let (dev, chain, colony, humans) = (&self.dev, &self.chain, &self.colony, &self.humans);
+        Escalator::new(dev.clone(), chain.clone(), colony.clone(), humans.clone(), self.ledger.clone(), send)
             .with_notes(escalation::jetstream_notes_sender(self.js.clone()))
     }
 
@@ -394,7 +394,7 @@ async fn a_paused_ant_keeps_its_messages_queued_and_takes_no_prompt_until_resume
     let resume = || bus.pause.replace(&crate::pause::Pause::new(false));
     let pause = || bus.pause.replace(&crate::pause::Pause::new(true));
     let check = async {
-        until("the roster to show the pause", || bus.workload.paused().is_some()).await;
+        until("the colony to show the pause", || bus.workload.paused().is_some()).await;
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(log.locked().prompted, 0, "paused from the start");
         let name = ants_proto::inbox_consumer(&bus.dev);
@@ -415,7 +415,7 @@ async fn a_paused_ant_keeps_its_messages_queued_and_takes_no_prompt_until_resume
         .await
         .expect("c never came in hand");
         pause();
-        until("the roster to show the pause", || bus.workload.paused().is_some()).await;
+        until("the colony to show the pause", || bus.workload.paused().is_some()).await;
         gate.add_permits(1);
         assert_eq!(next_reply(&mut replies).await, (t1.clone(), "hold b".to_owned()), "a running prompt finishes");
         bus.send(&t2, "d").await;
@@ -702,7 +702,7 @@ async fn messages_wait_unspent_while_the_harness_is_signed_out() {
                 break;
             }
         }
-        let shown = bus.workload.signed_out().expect("the roster shows the harness signed out");
+        let shown = bus.workload.signed_out().expect("the colony shows the harness signed out");
         assert_eq!(shown.sign_in, None, "the test harness names no sign-in command");
         // Several checks of the harness pass, telling nobody again and spending no attempt.
         let starts = log.locked().starts;
@@ -718,7 +718,7 @@ async fn messages_wait_unspent_while_the_harness_is_signed_out() {
         answered.sort_by_key(|(_, text)| text.clone());
         let expected = [(t1.clone(), "a"), (t1.clone(), "b"), (t2.clone(), "c")].map(|(t, s)| (t, s.to_owned()));
         assert_eq!(answered, expected, "answered unwarned: no attempt started");
-        assert_eq!(bus.workload.signed_out(), None, "signed in again: the roster no longer shows it");
+        assert_eq!(bus.workload.signed_out(), None, "signed in again: the colony no longer shows it");
 
         // Signed out again once it worked: a live harness turns the prompt away, and a human is told again.
         log.locked().signed_out = true;
@@ -759,7 +759,7 @@ async fn a_fallback_answers_while_the_harness_is_signed_out() {
             reply.text.ends_with("a\n\n[ants] Answered by fallback spare, harness test being signed out."),
             "{reply:?}"
         );
-        let shown = bus.workload.fallback().expect("the roster shows the fallback");
+        let shown = bus.workload.fallback().expect("the colony shows the fallback");
         assert_eq!(shown.name, "spare");
         assert!(bus.workload.signed_out().is_some(), "the harness itself is still signed out");
         bus.until_acked(seq).await;
@@ -825,7 +825,7 @@ async fn messages_wait_unspent_while_the_harness_keeps_failing_to_start() {
         assert!(notice.text.contains("ants harness check --harness test"), "{}", notice.text);
         let escalation = notice.escalation.as_ref().expect("pushed as an escalation");
         assert_eq!((escalation.reason, escalation.level), (EscalationReason::Harness, 0));
-        let shown = bus.workload.failing().expect("the roster shows the harness failing");
+        let shown = bus.workload.failing().expect("the colony shows the harness failing");
         assert!(shown.error.contains("broken install"), "{}", shown.error);
         let redelivered = bus.consumer().await.num_redelivered;
         assert!(redelivered < 3, "{redelivered}");
@@ -841,7 +841,7 @@ async fn messages_wait_unspent_while_the_harness_keeps_failing_to_start() {
         let mut answered = vec![next_reply(&mut replies).await, next_reply(&mut replies).await];
         answered.sort_by_key(|(_, text)| text.clone());
         assert_eq!(answered, [(t1.clone(), "a".to_owned()), (t2.clone(), "c".to_owned())]);
-        assert_eq!(bus.workload.failing(), None, "started again: the roster no longer shows it");
+        assert_eq!(bus.workload.failing(), None, "started again: the colony no longer shows it");
 
         // Once messages get through, a lone failure is tried again as before, holding nothing.
         log.locked().broken = true;
@@ -886,7 +886,7 @@ async fn messages_wait_unspent_through_a_provider_rate_limit() {
             }
         })
         .await
-        .expect("the roster shows the limit");
+        .expect("the colony shows the limit");
         assert_eq!(shown.kind, LimitKind::RateLimit);
         assert!(shown.until > shown.since);
         assert!(timeout(Duration::from_millis(100), replies.next()).await.is_err(), "a rate limit tells nobody");
@@ -1864,7 +1864,7 @@ async fn a_spent_budget_goes_up_the_chain_and_its_leader_renews_it_once_per_leve
     let Some((mut bus, mut to_human)) = Bus::start().await else { return };
     let [lead, dev_b, boss, carol] = ants(["lead", "dev-b", "boss", "carol"]);
     bus.chain = Chain { escalate_to: vec![lead.clone(), dev_b.clone()], after: None, ..Chain::default() };
-    bus.put_roster(&lead, std::slice::from_ref(&boss)).await;
+    bus.put_colony(&lead, std::slice::from_ref(&boss)).await;
     let [mut to_lead, mut to_dev_b, mut to_boss] = inboxes(&bus, &[lead.clone(), dev_b.clone(), boss.clone()]).await;
     let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
@@ -1890,7 +1890,7 @@ async fn a_spent_budget_goes_up_the_chain_and_its_leader_renews_it_once_per_leve
         assert!(reply.text.ends_with(": go on"), "{}", reply.text);
         assert_eq!(reply.escalation.as_deref(), Some(&one), "the answer carries the escalation");
 
-        // The next spend goes one level higher, to the leader's chain in the roster.
+        // The next spend goes one level higher, to the leader's chain in the colony.
         let up = next_envelope(&mut to_boss).await;
         let two = up.escalation.as_deref().expect("the escalation").clone();
         assert_eq!((two.level, &two.leader, &two.stuck), (2, &boss, &bus.dev));
@@ -1963,7 +1963,7 @@ async fn past_the_hop_limit_the_owner_gets_it_and_a_human_starts_the_chain_over(
     let Some((mut bus, mut to_human)) = Bus::start().await else { return };
     let [lead, boss, carol] = ants(["lead", "boss", "carol"]);
     bus.chain = Chain { escalate_to: vec![lead.clone()], max_hops: 1, after: None, ..Chain::default() };
-    bus.put_roster(&lead, &[boss]).await;
+    bus.put_colony(&lead, &[boss]).await;
     let [mut to_lead] = inboxes(&bus, std::slice::from_ref(&lead).try_into().unwrap()).await;
     let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
@@ -2000,7 +2000,7 @@ async fn an_unanswered_escalation_goes_one_level_higher_after_escalate_after() {
     let Some((mut bus, _to_human)) = Bus::start().await else { return };
     let [lead, boss, carol] = ants(["lead", "boss", "carol"]);
     bus.chain = Chain { escalate_to: vec![lead.clone()], after: Some(Duration::from_millis(300)), ..Chain::default() };
-    bus.put_roster(&lead, std::slice::from_ref(&boss)).await;
+    bus.put_colony(&lead, std::slice::from_ref(&boss)).await;
     let [mut to_lead, mut to_boss] = inboxes(&bus, &[lead.clone(), boss.clone()]).await;
     let (launch, _, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
@@ -2045,7 +2045,7 @@ async fn read_notes(bus: &Bus, thread: &ThreadId) -> Vec<ants_proto::NotesPost> 
 async fn only_the_leader_answers_the_stuck_ant_and_members_answer_in_the_thread_notes() {
     let Some((bus, _to_human)) = Bus::start().await else { return };
     let [lead, carol, boss] = ants(["lead", "carol", "boss"]);
-    bus.put_roster(&lead, std::slice::from_ref(&boss)).await;
+    bus.put_colony(&lead, std::slice::from_ref(&boss)).await;
     let [mut to_carol, mut to_lead, mut to_boss] = inboxes(&bus, &[carol.clone(), lead.clone(), boss.clone()]).await;
     let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
@@ -2113,7 +2113,7 @@ async fn a_member_sending_the_escalation_higher_moves_the_stuck_thread_up_with_i
     let [lead, boss, carol] = ants(["lead", "boss", "carol"]);
     let after = Duration::from_secs(600);
     bus.chain = Chain { escalate_to: vec![lead.clone()], after: Some(after), ..Chain::default() };
-    bus.put_roster(&lead, std::slice::from_ref(&boss)).await;
+    bus.put_colony(&lead, std::slice::from_ref(&boss)).await;
     let [mut to_lead, mut to_boss] = inboxes(&bus, &[lead.clone(), boss.clone()]).await;
     let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
@@ -2694,9 +2694,9 @@ async fn the_reply_carries_the_title_suggested_during_its_turn() {
     let home = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/daemon-t/title");
     let _ = std::fs::remove_dir_all(&home);
     std::fs::create_dir_all(&home).unwrap();
-    let (outbox, roster) = (crate::mcp::jetstream_outbox(bus.js.clone()), crate::mcp::jetstream_roster(bus.js.clone()));
+    let (outbox, colony) = (crate::mcp::jetstream_outbox(bus.js.clone()), crate::mcp::jetstream_colony(bus.js.clone()));
     let notes = Arc::new(crate::notes::JetStreamNotes::new(bus.js.clone(), bus.dev.clone()));
-    let mcp = Mcp::start(bus.dev.clone(), &home, outbox, roster, notes, bus.humans.clone(), None).await;
+    let mcp = Mcp::start(bus.dev.clone(), &home, outbox, colony, notes, bus.humans.clone(), None).await;
     bus.mcp = Some(mcp.unwrap());
     let (ops, mut posts) = bus.channel("ops", &["dev-a"]).await;
     let (titled, plain) = (ThreadId::generate(), ThreadId::generate());
@@ -2782,9 +2782,9 @@ async fn the_answer_carries_the_files_attached_during_its_turn() {
     let work = home.join("work");
     std::fs::create_dir_all(&work).unwrap();
     std::fs::write(work.join("report.md"), "# done").unwrap();
-    let (outbox, roster) = (crate::mcp::jetstream_outbox(bus.js.clone()), crate::mcp::jetstream_roster(bus.js.clone()));
+    let (outbox, colony) = (crate::mcp::jetstream_outbox(bus.js.clone()), crate::mcp::jetstream_colony(bus.js.clone()));
     let notes = Arc::new(crate::notes::JetStreamNotes::new(bus.js.clone(), bus.dev.clone()));
-    let mcp = Mcp::start(bus.dev.clone(), &home, outbox, roster, notes, bus.humans.clone(), None).await.unwrap();
+    let mcp = Mcp::start(bus.dev.clone(), &home, outbox, colony, notes, bus.humans.clone(), None).await.unwrap();
     mcp.with_files(crate::mcp::jetstream_files(bus.js.clone()), home.clone());
     bus.mcp = Some(mcp);
     let (ops, mut posts) = bus.channel("ops", &["dev-a"]).await;
@@ -2853,9 +2853,9 @@ async fn the_next_prompt_mentions_late_replies_waiting_on_its_thread() {
     std::fs::create_dir_all(&home).unwrap();
     let stored = serde_json::json!({"asks": asks.iter().map(|a| (a.id, &a.to)).collect::<Vec<_>>(), "late": []});
     std::fs::write(home.join("mcp.json"), stored.to_string()).unwrap();
-    let (outbox, roster) = (crate::mcp::jetstream_outbox(bus.js.clone()), crate::mcp::jetstream_roster(bus.js.clone()));
+    let (outbox, colony) = (crate::mcp::jetstream_outbox(bus.js.clone()), crate::mcp::jetstream_colony(bus.js.clone()));
     let notes = Arc::new(crate::notes::JetStreamNotes::new(bus.js.clone(), bus.dev.clone()));
-    let mcp = Mcp::start(bus.dev.clone(), &home, outbox, roster, notes, bus.humans.clone(), None).await;
+    let mcp = Mcp::start(bus.dev.clone(), &home, outbox, colony, notes, bus.humans.clone(), None).await;
     bus.mcp = Some(mcp.unwrap());
     for ask in &asks {
         let reply = ask.reply(dev_b.clone(), "late", Role::Ant).unwrap();
@@ -3708,9 +3708,9 @@ async fn the_messenger_answers_a_post_mentioning_nobody_with_the_members_it_conc
     bus.channels.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
     let mut replies = bus.client.subscribe(subject::chan(&entry.channel, &bus.dev)).await.unwrap();
     bus.client.flush().await.unwrap();
-    let roster = bus::ensure_roster(&bus.js, ants_proto::ROSTER_TTL).await.unwrap();
+    let colony = bus::ensure_colony(&bus.js, ants_proto::COLONY_TTL).await.unwrap();
     let now = chrono::Utc::now();
-    let dev_b = ants_proto::RosterEntry {
+    let dev_b = ants_proto::ColonyEntry {
         ant: "dev-b".parse().unwrap(),
         machine: "m".to_owned(),
         instance: "run-1".to_owned(),
@@ -3736,7 +3736,7 @@ async fn the_messenger_answers_a_post_mentioning_nobody_with_the_members_it_conc
         paused: None,
         drift: Vec::new(),
     };
-    roster.put(dev_b.key(), serde_json::to_vec(&dev_b).unwrap().into()).await.unwrap();
+    colony.put(dev_b.key(), serde_json::to_vec(&dev_b).unwrap().into()).await.unwrap();
     let post = ChannelPost::new(entry.channel.clone(), UserId::human(), "the build is red");
     let seq = bus.post(&post).await;
 
@@ -3751,7 +3751,7 @@ async fn the_messenger_answers_a_post_mentioning_nobody_with_the_members_it_conc
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
     let prompt = log.locked().answered[0].clone();
     assert!(prompt.contains(channel::TRIAGE_RULES), "{prompt}");
-    let members = "- @dev-b [ci]: Keeps the build green.\n- @dev-c (offline: not in the roster)\n";
+    let members = "- @dev-b [ci]: Keeps the build green.\n- @dev-c (offline: not in the colony)\n";
     assert!(prompt.contains(members), "{prompt}");
 }
 

@@ -156,9 +156,9 @@ impl Data {
     }
 
     /// The face of `user` and a space, to go before its name, when it is an ant: one with an identity record, or in
-    /// the roster, and no human.
+    /// the colony, and no human.
     pub fn face(&self, user: &UserId) -> Option<[Span<'static>; 2]> {
-        let ant = self.looks.known(user) || self.live.roster.iter().any(|e| e.ant == *user);
+        let ant = self.looks.known(user) || self.live.colony.iter().any(|e| e.ant == *user);
         (ant && !self.is_human(user)).then(|| [self.looks.face(user), Span::raw(" ")])
     }
 
@@ -365,8 +365,8 @@ impl Model {
             live::Event::FollowEnded(Err(e)) => {
                 self.notify(format!("following the tool requests: {e:#}"), Level::Error, now);
             }
-            live::Event::Roster(Ok(entries)) => self.data.live.roster(entries, now),
-            live::Event::Roster(Err(e)) => self.notify(format!("reading the roster: {e:#}"), Level::Error, now),
+            live::Event::Colony(Ok(entries)) => self.data.live.colony(entries, now),
+            live::Event::Colony(Err(e)) => self.notify(format!("reading the colony: {e:#}"), Level::Error, now),
             live::Event::History(thread, read) => {
                 let read = read.map(|entries| self.tools(entries));
                 for entry in read.iter().flatten() {

@@ -21,7 +21,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use ants_daemon::{bus, roster};
+use ants_daemon::{bus, colony};
 use ants_proto::{
     Destination, ENROLL_INBOX, ENROLL_REPEAT, EnrollHost, EnrollLeaf, EnrollReply, EnrollRequest, JsDomain, Machine,
     Permissions, Role, UserId, host_user, subject,
@@ -113,7 +113,7 @@ pub async fn request_with(
     let (client, _) = bus::connect_watched(url, Some(creds), None, ant, "ants-enroll", events_tx).await?;
     let mut replies = client.subscribe(subject::enroll_reply(ant)).await?;
     let public_key = user.public_key();
-    let mut request = EnrollRequest::new(ant.clone(), &public_key, roster::machine().await);
+    let mut request = EnrollRequest::new(ant.clone(), &public_key, colony::machine().await);
     request.enrollment = enrollment_jwt;
     // Raced against the expiry, a refusal and `stop`: a flush waits for a reconnect, which the client retries forever,
     // with the server gone or the credentials refused alike.

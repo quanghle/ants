@@ -3,10 +3,10 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, ChannelId, DEVICES_BUCKET, ENROLL_INBOX, FILES_BUCKET,
-    FILES_STREAM, Feed, HUMANS_BUCKET, IDENTITIES_BUCKET, INTAKE_STREAM, JsDomain, LINKS_BUCKET, MACHINES_BUCKET,
-    Machine, NOTIFY_BUCKET, OUTBOX_CONSUMER, OUTBOX_STREAM, OWNERS_BUCKET, PRESENCE_BUCKET, REACTIONS_BUCKET,
-    READ_BUCKET, ROSTER_BUCKET, Role, SESSIONS_BUCKET, STORAGE_WARNING_PREFIX, STREAM, THREADS_BUCKET, UserId,
+    ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, COLONY_BUCKET, ChannelId, DEVICES_BUCKET, ENROLL_INBOX,
+    FILES_BUCKET, FILES_STREAM, Feed, HUMANS_BUCKET, IDENTITIES_BUCKET, INTAKE_STREAM, JsDomain, LINKS_BUCKET,
+    MACHINES_BUCKET, Machine, NOTIFY_BUCKET, OUTBOX_CONSUMER, OUTBOX_STREAM, OWNERS_BUCKET, PRESENCE_BUCKET,
+    REACTIONS_BUCKET, READ_BUCKET, Role, SESSIONS_BUCKET, STORAGE_WARNING_PREFIX, STREAM, THREADS_BUCKET, UserId,
     WEBHOOK_MARKER, WEBHOOKS_BUCKET, admin_consumer, assisted_marks_key, assisted_snoozed_key, chan_consumer,
     chan_reader, channel_manager_serving_subject, dead_reader, host_inbox_prefix, inbox_consumer, inbox_prefix,
     notes_consumer, notify_consumer, sent_reader, spare_readers, subject,
@@ -284,7 +284,7 @@ impl Permissions {
     /// its own [`sent_reader`]), reads only its own inbox
     /// (consumer and its spares, and live), the notes of every thread (live, and from the stream
     /// through its own notes consumer and its spares), every channel (live, and from the stream through its own channel
-    /// consumer, and its reader and the reader's spares), its own replies and the decisions on its own approval requests (live, and as stored), reads the roster
+    /// consumer, and its reader and the reader's spares), its own replies and the decisions on its own approval requests (live, and as stored), reads the colony
     /// to find ants by capability but writes only its own entry, reads every escalation chain by key but writes only
     /// its own, lists the links to a channel thread ants passed on but records only its own ([`LINKS_BUCKET`]), reads
     /// the channels, humans and owners buckets but never writes them, reads which users are webhooks (their
@@ -305,7 +305,7 @@ impl Permissions {
     /// attempts bucket it writes or reads),
     /// reads every ant's thread and daily spend in the
     /// sessions bucket ([`thread_spend_key`], [`daily_spend_key`]) but none of its other keys there, may create the
-    /// stream and the roster, sessions,
+    /// stream and the colony, sessions,
     /// attempts, channels, humans, chains, links and owners buckets, writes the channels, humans and owners buckets
     /// (the owners also in its outbox form, [`owner_outbox`]), reads the version the channel manager runs
     /// ([`channel_manager_serving_key`]), reads the stream's messages by sequence, one at a time or in batches of
@@ -475,7 +475,7 @@ impl Permissions {
         let consumer = inbox_consumer(user);
         let notes = notes_consumer(user);
         let (chan, chan_read) = (chan_consumer(user), chan_reader(user));
-        let roster_stream = kv_stream(ROSTER_BUCKET);
+        let colony_stream = kv_stream(COLONY_BUCKET);
         let channels = kv_stream(CHANNELS_BUCKET);
         let humans = kv_stream(HUMANS_BUCKET);
         let chains = kv_stream(CHAINS_BUCKET);
@@ -487,7 +487,7 @@ impl Permissions {
         let outbox = sendable.iter().map(|s| subject::outbox(s).expect("an outbox subject"));
         let mut publish: Vec<String> = sendable.iter().cloned().chain(outbox).collect();
         publish.extend([
-            format!("$JS.API.STREAM.INFO.{roster_stream}"),
+            format!("$JS.API.STREAM.INFO.{colony_stream}"),
             // The size of every stream, for the storage warnings: a stream list carries no subject stored.
             "$JS.API.STREAM.LIST".to_owned(),
             // Also how its connection finds JetStream, and the stream, whose info it does not get.
@@ -511,11 +511,11 @@ impl Permissions {
             format!("$JS.API.CONSUMER.CREATE.{STREAM}.{chan_read}.{}", subject::ALL_CHANNELS),
             format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{chan_read}"),
             format!("$JS.API.CONSUMER.DELETE.{STREAM}.{chan_read}"),
-            // Reading the roster: single entries, and the ordered consumers behind listing and watching it.
-            format!("$JS.API.DIRECT.GET.{roster_stream}.>"),
-            format!("$JS.API.CONSUMER.CREATE.{roster_stream}"),
+            // Reading the colony: single entries, and the ordered consumers behind listing and watching it.
+            format!("$JS.API.DIRECT.GET.{colony_stream}.>"),
+            format!("$JS.API.CONSUMER.CREATE.{colony_stream}"),
         ]);
-        publish.extend(flow_control_subjects("*", &roster_stream));
+        publish.extend(flow_control_subjects("*", &colony_stream));
         publish.extend([
             // Reading the channels the same way.
             format!("$JS.API.STREAM.INFO.{channels}"),
@@ -551,7 +551,7 @@ impl Permissions {
 
     /// What a human may do besides.
     fn human_rights(user: &UserId, publish: &mut Vec<String>, subscribe: &mut Vec<String>) {
-        let roster_stream = kv_stream(ROSTER_BUCKET);
+        let colony_stream = kv_stream(COLONY_BUCKET);
         let channels = kv_stream(CHANNELS_BUCKET);
         let humans = kv_stream(HUMANS_BUCKET);
         let chains = kv_stream(CHAINS_BUCKET);
@@ -579,10 +579,10 @@ impl Permissions {
             format!("$JS.API.STREAM.CREATE.{STREAM}"),
             // Creating a KV bucket first looks up the account's JetStream limits.
             "$JS.API.INFO".to_owned(),
-            format!("$JS.API.STREAM.CREATE.{roster_stream}"),
+            format!("$JS.API.STREAM.CREATE.{colony_stream}"),
             // Room for the consumers of every daemon watching the bucket, which a KV bucket gets only by an update
             // right after creating it.
-            format!("$JS.API.STREAM.UPDATE.{roster_stream}"),
+            format!("$JS.API.STREAM.UPDATE.{colony_stream}"),
             format!("$JS.API.STREAM.UPDATE.{channels}"),
             format!("$JS.API.STREAM.UPDATE.{humans}"),
             // Stream info lists every key of a bucket, so only a human may ask for it of these three.
@@ -709,8 +709,8 @@ impl Permissions {
             subject::cancelled_of(user),
             subject::queued(user),
             subject::chanadm_from(user),
-            // Put and delete of its own roster entry, and of its own escalation chain.
-            subject::roster(user),
+            // Put and delete of its own colony entry, and of its own escalation chain.
+            subject::colony(user),
             subject::chain(user),
             // Get of every ant's identity record, by direct gets naming no subject, one right shared by every ant
             // behind a leaf's uplink; create and update of its own only.
@@ -934,7 +934,7 @@ impl Permissions {
     /// credentials ([`SharedSettings::verify`](crate::SharedSettings::verify)), which only its machines hold. It hears its own replies under [`host_inbox_prefix`], apart from
     /// every user's. Carrying out an order to add or retire an ant, it asks `ants signer` with an enrollment request
     /// carrying the order ([`subject::enroll`], [`EnrollRequest::order`](crate::EnrollRequest::order)) and hears the
-    /// answers ([`subject::ALL_ENROLL_REPLIES`]), and reads the roster by direct gets to see a retired ant stopped.
+    /// answers ([`subject::ALL_ENROLL_REPLIES`]), and reads the colony by direct gets to see a retired ant stopped.
     /// It reads and watches [`HUMANS_BUCKET`], for the humans' consent to the orders their assistants sent for them.
     /// Nothing else: no other machine's record or outcomes, no ant's identity record, no message to or from an ant. No
     /// ant gets any of it.
@@ -953,7 +953,7 @@ impl Permissions {
             format!("$JS.API.CONSUMER.INFO.{STREAM}.{consumer}"),
             format!("$JS.API.CONSUMER.CREATE.{STREAM}.{consumer}.{}", subject::admin_orders(machine)),
             format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{consumer}"),
-            format!("$JS.API.DIRECT.GET.{}.$KV.{ROSTER_BUCKET}.*", kv_stream(ROSTER_BUCKET)),
+            format!("$JS.API.DIRECT.GET.{}.$KV.{COLONY_BUCKET}.*", kv_stream(COLONY_BUCKET)),
             subject::ALL_ENROLL_REQUESTS.to_owned(),
         ];
         let humans = kv_stream(HUMANS_BUCKET);
@@ -969,14 +969,14 @@ impl Permissions {
     }
 
     /// What the credentials of the channel manager (`ants channel serve`) allow: hearing every channel management
-    /// request, reading the roster and the humans, reading and writing the channels bucket, posting in any channel
+    /// request, reading the colony and the humans, reading and writing the channels bucket, posting in any channel
     /// as [`UserId::channel_manager`], and putting the version it runs ([`channel_manager_serving_key`]). Its JWT also
     /// lets it answer each request it hears once, on the request's reply subject, so it needs no right to publish on
     /// any ant's reply inboxes. It asks for its own renewal ([`subject::renew`]) and hears the answer.
     pub fn for_channel_manager() -> Self {
         let user = UserId::channel_manager();
-        let (roster, channels, humans) =
-            (kv_stream(ROSTER_BUCKET), kv_stream(CHANNELS_BUCKET), kv_stream(HUMANS_BUCKET));
+        let (colony, channels, humans) =
+            (kv_stream(COLONY_BUCKET), kv_stream(CHANNELS_BUCKET), kv_stream(HUMANS_BUCKET));
         let mut publish = vec![
             subject::chan_from(&user),
             format!("$KV.{CHANNELS_BUCKET}.>"),
@@ -984,7 +984,7 @@ impl Permissions {
             // Finding JetStream on connecting, as an ant does, without the stream's info.
             format!("$JS.API.CONSUMER.INFO.{STREAM}.{}", inbox_consumer(&user)),
         ];
-        for stream in [&roster, &channels, &humans] {
+        for stream in [&colony, &channels, &humans] {
             publish.extend([
                 format!("$JS.API.STREAM.INFO.{stream}"),
                 format!("$JS.API.DIRECT.GET.{stream}.>"),
@@ -1056,7 +1056,7 @@ impl Permissions {
     /// (`ants auth user --observer`): reading every approval request, approval decision and dead letter from the
     /// stream through its own consumers ([`Feed::consumer`], each with its filter pinned in the subject that creates
     /// it), and hearing them live; hearing every ant's status ([`subject::status`]), escalations among them
-    /// ([`StatusUpdate::Escalated`]); reading and watching the roster, where each ant's daemon says it serves the ant
+    /// ([`StatusUpdate::Escalated`]); reading and watching the colony, where each ant's daemon says it serves the ant
     /// and how busy it is. It hears its own reply inboxes and asks for its own renewal ([`subject::renew`]).
     ///
     /// Nothing else: it publishes no message, decides no approval, cancels nothing and writes no bucket, so it can
@@ -1077,13 +1077,13 @@ impl Permissions {
             publish.extend(ack_subjects(STREAM, &consumer));
             publish.push(format!("$JS.API.CONSUMER.DELETE.{STREAM}.{consumer}"));
         }
-        let roster = kv_stream(ROSTER_BUCKET);
+        let colony = kv_stream(COLONY_BUCKET);
         publish.extend([
-            format!("$JS.API.STREAM.INFO.{roster}"),
-            format!("$JS.API.DIRECT.GET.{roster}.>"),
-            format!("$JS.API.CONSUMER.CREATE.{roster}"),
+            format!("$JS.API.STREAM.INFO.{colony}"),
+            format!("$JS.API.DIRECT.GET.{colony}.>"),
+            format!("$JS.API.CONSUMER.CREATE.{colony}"),
         ]);
-        publish.extend(flow_control_subjects("*", &roster));
+        publish.extend(flow_control_subjects("*", &colony));
         publish.push(subject::renew(observer.as_str()));
         let subscribe = vec![
             format!("{}.>", inbox_prefix(observer)),

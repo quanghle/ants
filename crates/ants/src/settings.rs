@@ -25,8 +25,8 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::colony::{short, since};
 use crate::orders::{self, Listed};
-use crate::roster::{short, since};
 use crate::{Nats, auth};
 
 /// How long a read of the settings waits for the daemon of the ant's machine before taking the last read.
@@ -628,7 +628,7 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         let taken = crate::serve::configs(vec![own], &Harnesses::builtin(), &server.url, None, None, Some(&standby));
         let taken = taken.unwrap().remove(0);
         assert_eq!((taken.model_settings.model.as_deref(), taken.drift.get()), (Some("o3"), vec!["model".to_owned()]));
-        assert_eq!(ants_daemon::roster::entry(&taken).await.drift, ["model"], "the roster tells the drift");
+        assert_eq!(ants_daemon::colony::entry(&taken).await.drift, ["model"], "the colony tells the drift");
 
         std::fs::write(&path, edited.replace("\"o3\"", "\"o4\"")).unwrap();
         shared.listed(&ants_daemon::config::load(&path).unwrap().ants);

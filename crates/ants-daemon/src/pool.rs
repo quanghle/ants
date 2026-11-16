@@ -23,12 +23,12 @@ use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
+use crate::colony::Workload;
 use crate::direct_kv::DirectKv;
 use crate::fallback::OnFallback;
 use crate::harness::{Launch, Prompt, Reply, Session};
 use crate::history::Rebuild;
 use crate::pressure;
-use crate::roster::Workload;
 use crate::sync::MutexExt as _;
 use crate::worktrees::{Branch, Pruned, Worktrees};
 
@@ -139,7 +139,7 @@ pub struct Pool {
     worktrees: Option<Worktrees>,
     /// Each thread works in its worktree, instead of the shared workdir.
     isolate: bool,
-    /// Told the agent each harness starts with, and whether memory is low, for the roster.
+    /// Told the agent each harness starts with, and whether memory is low, for the colony.
     workload: Option<Arc<Workload>>,
     /// Watches for low memory, with the cap while it is low.
     pressure: Option<(Mutex<pressure::Gauge>, usize)>,
@@ -345,7 +345,7 @@ impl Pool {
         idle.len()
     }
 
-    /// Read the memory, if watched: whether it is low, which the roster is told. Recovering wakes the threads waiting
+    /// Read the memory, if watched: whether it is low, which the colony is told. Recovering wakes the threads waiting
     /// for a harness under the lower cap.
     fn check_memory(&self) -> bool {
         let Some((gauge, cap)) = &self.pressure else { return false };

@@ -331,7 +331,7 @@ impl Page {
         }
         let first = self.messages().next();
         if let Some(at) = summary.map(|s| s.first_at).or(first.map(|e| e.stored_at)) {
-            lines.push(field("AGE", crate::roster::short(crate::roster::since(at, now))));
+            lines.push(field("AGE", crate::colony::short(crate::colony::since(at, now))));
         }
         if let Some(first) = first {
             lines.push(field("FROM", format!("{} {}", origin(first, data), hm(first.stored_at))));
@@ -603,7 +603,7 @@ impl Shown<'_> {
             Some("completed") => (format!("ok {}", took(call)), Style::new().fg(Color::Green)),
             Some("failed") => (format!("failed {}", took(call)), Style::new().fg(Color::Red)),
             _ if self.busy => {
-                let elapsed = crate::roster::short(crate::roster::since(call.started, self.now));
+                let elapsed = crate::colony::short(crate::colony::since(call.started, self.now));
                 let spin = SPINNER[usize::try_from(self.now.timestamp()).unwrap_or(0) % SPINNER.len()];
                 (format!("{spin} running {elapsed}"), busy())
             }
@@ -830,7 +830,7 @@ mod tests {
         page.history.loaded(&thread, Ok(entries[..3].to_vec())).unwrap();
         page.about = Some(About { spend: Some(Vec::new()), ..About::default() });
 
-        m.data.live.roster(vec![crate::roster::tests::entry("dev-a", 3600, 2, at(5))], at(5));
+        m.data.live.colony(vec![crate::colony::tests::entry("dev-a", 3600, 2, at(5))], at(5));
         let shown = screen(&page, &m, 110, at(47));
         assert!(shown.contains("alice → dev-a"), "{shown}");
         let face = format!("{} {{.~.}} dev-a → dev-b", hm(entries[1].stored_at));

@@ -36,12 +36,12 @@ fn home(name: &str) -> PathBuf {
 
 /// An MCP server for `dev-a` whose sent envelopes come out of the receiver.
 async fn start(home: &Path) -> (Mcp, mpsc::UnboundedReceiver<Envelope>) {
-    start_with_roster(home, Vec::new()).await
+    start_with_colony(home, Vec::new()).await
 }
 
-/// Like [`start`], with `roster` as the roster.
-async fn start_with_roster(home: &Path, roster: Vec<RosterEntry>) -> (Mcp, mpsc::UnboundedReceiver<Envelope>) {
-    start_with(home, roster, Arc::default(), Registry::default()).await
+/// Like [`start`], with `colony` as the colony.
+async fn start_with_colony(home: &Path, colony: Vec<ColonyEntry>) -> (Mcp, mpsc::UnboundedReceiver<Envelope>) {
+    start_with(home, colony, Arc::default(), Registry::default()).await
 }
 
 /// Thread notes in memory; a post's sequence is its place in the notes of its thread.
@@ -65,10 +65,10 @@ impl NotesStore for MemoryNotes {
     }
 }
 
-/// Like [`start_with_roster`], with `notes` as the thread notes and `humans` as the humans.
+/// Like [`start_with_colony`], with `notes` as the thread notes and `humans` as the humans.
 async fn start_with(
     home: &Path,
-    roster: Vec<RosterEntry>,
+    colony: Vec<ColonyEntry>,
     notes: Arc<MemoryNotes>,
     humans: Registry,
 ) -> (Mcp, mpsc::UnboundedReceiver<Envelope>) {
@@ -77,16 +77,16 @@ async fn start_with(
         let _ = tx.send(envelope);
         Box::pin(async { Ok(()) })
     });
-    let roster: Roster = Arc::new(move || {
-        let roster = roster.clone();
-        Box::pin(async move { Ok(roster) })
+    let colony: Colony = Arc::new(move || {
+        let colony = colony.clone();
+        Box::pin(async move { Ok(colony) })
     });
-    (Mcp::start(user("dev-a"), home, outbox, roster, notes, humans, None).await.unwrap(), rx)
+    (Mcp::start(user("dev-a"), home, outbox, colony, notes, humans, None).await.unwrap(), rx)
 }
 
-fn listed(name: &str, capabilities: &[&str]) -> RosterEntry {
+fn listed(name: &str, capabilities: &[&str]) -> ColonyEntry {
     let now = chrono::Utc::now();
-    RosterEntry {
+    ColonyEntry {
         ant: user(name),
         machine: "m1".to_owned(),
         instance: "run-1".to_owned(),
@@ -341,7 +341,7 @@ async fn ask_human_asks_the_thread_s_owner_without_spending_a_turn() {
     assert!(out.asks().unwrap().free_text, "typed answers by default");
 }
 
-/// A channel manager in memory: it applies requests to its channels as `ants channel serve` does, roster aside,
+/// A channel manager in memory: it applies requests to its channels as `ants channel serve` does, colony aside,
 /// and records them; with `silent` it answers nothing.
 struct MemoryAdmin {
     channels: StdMutex<Vec<ChannelEntry>>,
@@ -524,7 +524,7 @@ async fn registered_humans_are_humans_to_the_tools() {
 }
 
 #[tokio::test]
-async fn requests_are_routed_by_roster_capabilities() {
+async fn requests_are_routed_by_colony_capabilities() {
     let mut billing = listed("dev-c", &["Rust", "billing"]);
     billing.whoami = Some("Maintain billing services.\nReview invoices.".to_owned());
     let mut docs = listed("docs", &[]);
@@ -540,8 +540,8 @@ async fn requests_are_routed_by_roster_capabilities() {
     let until = "2026-01-01T00:10:00Z".parse().unwrap();
     limited.limited = Some(ants_proto::HarnessLimit { kind: ants_proto::LimitKind::Quota, since, until });
     limited.memory_low = Some(ants_proto::MemoryLow { since, available: 512 << 20, max_harnesses: 1 });
-    let roster = vec![listed("dev-a", &["rust"]), billing, out, busy, docs, limited];
-    let (mcp, mut sent) = start_with_roster(&home("route"), roster).await;
+    let colony = vec![listed("dev-a", &["rust"]), billing, out, busy, docs, limited];
+    let (mcp, mut sent) = start_with_colony(&home("route"), colony).await;
     let current = from_human();
     let _turn = mcp.begin(&current);
     let (url, token) = http_server(&mcp, &current.thread_id);
@@ -597,16 +597,16 @@ async fn requests_are_routed_by_roster_capabilities() {
     assert!(sent.try_recv().is_err(), "nothing is sent without an ant to take it");
 }
 
-/// Looks ants up in `roster`.
-fn lookup_in(roster: Vec<RosterEntry>) -> RosterLookup {
+/// Looks ants up in `colony`.
+fn lookup_in(colony: Vec<ColonyEntry>) -> ColonyLookup {
     Arc::new(move |ant| {
-        let entry = roster.iter().find(|e| e.ant == ant).cloned();
+        let entry = colony.iter().find(|e| e.ant == ant).cloned();
         Box::pin(async move { Ok(entry) })
     })
 }
 
 #[tokio::test]
-async fn request_and_retire_ant_are_offered_to_managers_and_request_returns_once_the_ant_is_in_the_roster() {
+async fn request_and_retire_ant_are_offered_to_managers_and_request_returns_once_the_ant_is_in_the_colony() {
     let (mcp, _sent) = start(&home("request")).await;
     let thread = ThreadId::generate();
     let (url, token) = http_server(&mcp, &thread);
@@ -645,7 +645,7 @@ async fn request_and_retire_ant_are_offered_to_managers_and_request_returns_once
         "overrides": {"model": "gpt-5", "prompt_timeout": "10m"},
     });
     let (ok, text) = call(&client, "request_ant", args).await;
-    assert!(ok && text.starts_with("Added dev-a-docs.") && text.contains("is in the roster"), "{text}");
+    assert!(ok && text.starts_with("Added dev-a-docs.") && text.contains("is in the colony"), "{text}");
     let ask = asked.locked()[0].clone();
     assert_eq!(
         (ask.manager, ask.thread, ask.template, ask.wait),
@@ -713,10 +713,10 @@ async fn messages_to_an_ant_no_daemon_serves_say_so() {
     let mut out = listed("ops", &["billing"]);
     let since = "2026-01-01T00:00:00Z".parse().unwrap();
     out.signed_out = Some(ants_proto::SignInNeeded { since, sign_in: None });
-    let roster = vec![listed("dev-a", &["rust"]), listed("dev-b", &["rust"]), stale, out];
+    let colony = vec![listed("dev-a", &["rust"]), listed("dev-b", &["rust"]), stale, out];
     let humans = Registry::with(UserId::human(), &["alice"]);
-    let (mcp, mut sent) = start_with(&home("unserved"), roster.clone(), Arc::default(), humans).await;
-    mcp.with_lookup(lookup_in(roster));
+    let (mcp, mut sent) = start_with(&home("unserved"), colony.clone(), Arc::default(), humans).await;
+    mcp.with_lookup(lookup_in(colony));
     let current = from_human();
     let _turn = mcp.begin(&current);
     let (url, token) = http_server(&mcp, &current.thread_id);
@@ -727,13 +727,13 @@ async fn messages_to_an_ant_no_daemon_serves_say_so() {
     assert!(!ok, "{text}");
     assert_eq!(
         text,
-        "Not sent, as dev-bb is not in the roster: no daemon serves dev-bb now. Closest names in the roster: \
+        "Not sent, as dev-bb is not in the colony: no daemon serves dev-bb now. Closest names in the colony: \
              dev-b, dev-c. send_message leaves a message waiting in the inbox of dev-bb instead."
     );
     let (ok, text) = call(&client, "ask_ant", ask("zed")).await;
-    assert!(!ok && text.contains("now. In the roster: dev-b, dev-c, ops."), "{text}");
+    assert!(!ok && text.contains("now. In the colony: dev-b, dev-c, ops."), "{text}");
     let (ok, text) = call(&client, "ask_ant", ask("dev-c")).await;
-    assert!(!ok && text.contains("dev-c is stale in the roster: the daemon on m1 last beat 10m"), "{text}");
+    assert!(!ok && text.contains("dev-c is stale in the colony: the daemon on m1 last beat 10m"), "{text}");
     assert!(text.contains("Served ants sharing a capability of dev-c: dev-b."), "{text}");
     let (ok, text) = call(&client, "ask_ant", ask("ops")).await;
     assert!(
@@ -749,8 +749,8 @@ async fn messages_to_an_ant_no_daemon_serves_say_so() {
     assert!(ok, "{text}");
     assert!(
         text.ends_with(
-            "turns left). Warning: the message waits in the inbox of dev-bb, as dev-bb is not in the roster: no \
-                 daemon serves dev-bb now. Closest names in the roster: dev-b, dev-c."
+            "turns left). Warning: the message waits in the inbox of dev-bb, as dev-bb is not in the colony: no \
+                 daemon serves dev-bb now. Closest names in the colony: dev-b, dev-c."
         ),
         "{text}"
     );
@@ -761,9 +761,9 @@ async fn messages_to_an_ant_no_daemon_serves_say_so() {
         assert_eq!(sent.recv().await.unwrap().to, user(to));
     }
 
-    // A roster that cannot be read holds nothing back.
+    // A colony that cannot be read holds nothing back.
     let (mcp, mut sent) = start(&home("unserved-unread")).await;
-    mcp.with_lookup(Arc::new(|_| Box::pin(async { Err(anyhow::anyhow!("no roster")) })));
+    mcp.with_lookup(Arc::new(|_| Box::pin(async { Err(anyhow::anyhow!("no colony")) })));
     let _turn = mcp.begin(&current);
     let (url, token) = http_server(&mcp, &current.thread_id);
     let client = http_client(&url, &token).await;
@@ -832,7 +832,7 @@ async fn start_escalating(home: &Path, escalate_to: &[&str]) -> (Mcp, mpsc::Unbo
 async fn start_escalating_with(
     home: &Path,
     escalate_to: &[&str],
-    roster: Vec<RosterEntry>,
+    colony: Vec<ColonyEntry>,
 ) -> (Mcp, mpsc::UnboundedReceiver<Envelope>) {
     let (tx, rx) = mpsc::unbounded_channel();
     let (outbox_tx, send_tx) = (tx.clone(), tx);
@@ -844,17 +844,17 @@ async fn start_escalating_with(
         let _ = send_tx.send(envelope);
         Box::pin(async { Ok(()) })
     });
-    let roster: Roster = Arc::new(move || {
-        let roster = roster.clone();
-        Box::pin(async move { Ok(roster) })
+    let colony: Colony = Arc::new(move || {
+        let colony = colony.clone();
+        Box::pin(async move { Ok(colony) })
     });
     let chain =
         crate::escalation::Chain { escalate_to: escalate_to.iter().map(|p| user(p)).collect(), ..Default::default() };
     let ledger = Arc::new(crate::caps::Ledger::memory(user("dev-a"), crate::caps::Caps::default()));
     let humans = Registry::default();
-    let escalator = Escalator::new(user("dev-a"), chain, roster.clone(), humans.clone(), ledger, send);
+    let escalator = Escalator::new(user("dev-a"), chain, colony.clone(), humans.clone(), ledger, send);
     let notes = Arc::new(MemoryNotes::default());
-    let mcp = Mcp::start(user("dev-a"), home, outbox, roster, notes, humans, Some(Arc::new(escalator)));
+    let mcp = Mcp::start(user("dev-a"), home, outbox, colony, notes, humans, Some(Arc::new(escalator)));
     (mcp.await.unwrap(), rx)
 }
 
@@ -916,7 +916,7 @@ async fn escalate_goes_up_the_chain_and_only_the_leader_sends_it_higher() {
 
 #[tokio::test]
 async fn escalate_on_a_thread_another_ant_created_goes_up_the_creator_s_chain() {
-    let lead = RosterEntry { escalate_to: vec![user("boss")], ..listed("lead", &[]) };
+    let lead = ColonyEntry { escalate_to: vec![user("boss")], ..listed("lead", &[]) };
     let (mcp, mut sent) = start_escalating_with(&home("escalate-creator"), &["dev-b"], vec![lead]).await;
     let current = Envelope::new(user("lead"), user("dev-a"), "fix it").with_creator(Some(user("lead")));
     let client = {

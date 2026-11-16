@@ -59,7 +59,7 @@ impl Fallback {
         Ok(Self { harness, settings })
     }
 
-    /// As the ant's roster entry and replies name it: `<harness>` or `<harness>:<model>`.
+    /// As the ant's colony entry and replies name it: `<harness>` or `<harness>:<model>`.
     pub fn name(&self) -> String {
         match &self.settings.model {
             Some(model) => format!("{}:{model}", self.harness),

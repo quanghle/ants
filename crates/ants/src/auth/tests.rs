@@ -4,15 +4,15 @@ use std::assert_matches;
 
 use ants_daemon::bus;
 use ants_daemon::channel::{Channels, Earlier, Reading, Threads};
+use ants_daemon::colony::Registration;
 use ants_daemon::daemon::Claims;
 use ants_daemon::dead::{self, Attempt};
 use ants_daemon::direct_kv::DirectKv;
 use ants_daemon::humans::Registry;
-use ants_daemon::roster::Registration;
 use ants_daemon::webhooks::Webhooks;
 use ants_daemon::{notes, owners};
 use ants_proto::{
-    ChannelEntry, ChannelId, ChannelPost, DeadLetter, Destination, Envelope, NotesPost, RosterEntry, STREAM, ThreadId,
+    ChannelEntry, ChannelId, ChannelPost, ColonyEntry, DeadLetter, Destination, Envelope, NotesPost, STREAM, ThreadId,
     attempt_key, chan_consumer, chan_reader, inbox_prefix, link_key, notes_consumer, session_key, subject,
 };
 use ants_test_support::NatsServer;
@@ -920,7 +920,7 @@ async fn every_human_has_the_same_rights_and_reads_only_its_own_inbox() {
     assert!(crate::humans::ensure(&d_js).await.is_err(), "only a human creates the humans bucket");
     bus::ensure_stream(&a_js).await.unwrap();
     let b_stream = bus::ensure_stream(&b_js).await.unwrap();
-    bus::ensure_roster(&b_js, ants_proto::ROSTER_TTL).await.unwrap();
+    bus::ensure_colony(&b_js, ants_proto::COLONY_TTL).await.unwrap();
     bus::init_own_buckets(&a_js).await.unwrap();
     bus::init_own_buckets(&b_js).await.unwrap();
     bus::ensure_channels(&a_js).await.unwrap();
@@ -1299,19 +1299,19 @@ async fn an_ant_reads_back_its_thread_both_ways_and_only_its_own_sent_messages()
 }
 
 #[tokio::test]
-async fn ants_write_their_own_roster_entry_and_everyone_reads_the_roster() {
+async fn ants_write_their_own_colony_entry_and_everyone_reads_the_colony() {
     let Some(server) = Server::start() else { return };
     let (human, dev_a) = (UserId::human(), p("dev-a"));
-    let ttl = ants_proto::ROSTER_TTL;
+    let ttl = ants_proto::COLONY_TTL;
 
     let (_a, a_js) = server.connect(&dev_a).await;
-    assert!(bus::ensure_roster(&a_js, ttl).await.is_err(), "only the human creates the bucket");
+    assert!(bus::ensure_colony(&a_js, ttl).await.is_err(), "only the human creates the bucket");
     let (_h, h_js) = server.connect(&human).await;
-    let h_kv = bus::ensure_roster(&h_js, ttl).await.unwrap();
+    let h_kv = bus::ensure_colony(&h_js, ttl).await.unwrap();
 
-    let a_kv = bus::ensure_roster(&a_js, ttl).await.unwrap();
+    let a_kv = bus::ensure_colony(&a_js, ttl).await.unwrap();
     let now = chrono::Utc::now();
-    let entry = RosterEntry {
+    let entry = ColonyEntry {
         ant: dev_a.clone(),
         machine: "m1".to_owned(),
         instance: "run-1".to_owned(),
@@ -1337,27 +1337,27 @@ async fn ants_write_their_own_roster_entry_and_everyone_reads_the_roster() {
         paused: None,
         drift: Vec::new(),
     };
-    let registration = Registration::start(a_kv.clone(), entry.clone(), ants_proto::ROSTER_HEARTBEAT).await.unwrap();
+    let registration = Registration::start(a_kv.clone(), entry.clone(), ants_proto::COLONY_HEARTBEAT).await.unwrap();
     assert!(a_kv.put("dev-b", "spoof".into()).await.is_err(), "dev-a cannot list dev-b");
-    // Ants read the roster, to route requests by capability.
+    // Ants read the colony, to route requests by capability.
     let (_b, b_js) = server.connect(&p("dev-b")).await;
-    let b_kv = bus::ensure_roster(&b_js, ttl).await.unwrap();
+    let b_kv = bus::ensure_colony(&b_js, ttl).await.unwrap();
     // dev-b may write its own key only, and an entry there naming dev-a is skipped.
-    let forged = RosterEntry { capabilities: vec!["deploy".to_owned()], ..entry.clone() };
+    let forged = ColonyEntry { capabilities: vec!["deploy".to_owned()], ..entry.clone() };
     b_kv.put("dev-b", serde_json::to_vec(&forged).unwrap().into()).await.unwrap();
     for kv in [&b_kv, &h_kv] {
-        assert_eq!(ants_daemon::roster::list_entries(kv).await.unwrap(), std::slice::from_ref(&entry));
+        assert_eq!(ants_daemon::colony::list_entries(kv).await.unwrap(), std::slice::from_ref(&entry));
     }
     b_kv.delete("dev-b").await.unwrap();
 
-    let listed: RosterEntry = serde_json::from_slice(&h_kv.get("dev-a").await.unwrap().unwrap()).unwrap();
+    let listed: ColonyEntry = serde_json::from_slice(&h_kv.get("dev-a").await.unwrap().unwrap()).unwrap();
     assert_eq!(listed, entry);
     let keys: Vec<String> = h_kv.keys().await.unwrap().try_collect().await.unwrap();
     assert_eq!(keys, ["dev-a"]);
     let mut watch = h_kv.watch_with_history(">").await.unwrap();
     let seen = timeout(WAIT, watch.next()).await.unwrap().unwrap().unwrap();
     assert_eq!(seen.key, "dev-a");
-    assert!(h_kv.put("dev-a", "spoof".into()).await.is_err(), "the human does not write the roster");
+    assert!(h_kv.put("dev-a", "spoof".into()).await.is_err(), "the human does not write the colony");
 
     registration.deregister().await;
     assert!(h_kv.get("dev-a").await.unwrap().is_none());
@@ -1821,7 +1821,7 @@ async fn a_webhook_posts_as_itself_to_its_destinations_only_and_reads_no_message
 }
 
 #[tokio::test]
-async fn an_observer_reads_approvals_dead_letters_status_and_the_roster_and_publishes_nothing() {
+async fn an_observer_reads_approvals_dead_letters_status_and_the_colony_and_publishes_nothing() {
     use ants_proto::Feed;
     use async_nats::jetstream::consumer;
     let Some(server) = Server::start() else { return };
@@ -1833,7 +1833,7 @@ async fn an_observer_reads_approvals_dead_letters_status_and_the_roster_and_publ
     assert_eq!(ants_daemon::creds::Finding::from_creds(&text).unwrap().kind, ants_daemon::creds::Kind::Observer);
     let (_, h_js) = server.connect(&UserId::human()).await;
     bus::ensure_stream(&h_js).await.unwrap();
-    bus::ensure_roster(&h_js, Duration::from_secs(60)).await.unwrap();
+    bus::ensure_colony(&h_js, Duration::from_secs(60)).await.unwrap();
     let (a, a_js) = server.connect(&dev_a).await;
     let (_, b_js) = server.connect(&dev_b).await;
     let request = ants_proto::Uuid::now_v7();
@@ -1847,9 +1847,9 @@ async fn an_observer_reads_approvals_dead_letters_status_and_the_roster_and_publ
     for (js, subject) in &stored {
         js.publish(subject.clone(), "event".into()).await.unwrap().await.unwrap();
     }
-    a_js.get_key_value(ants_proto::ROSTER_BUCKET).await.unwrap().put("dev-a", "{}".into()).await.unwrap();
+    a_js.get_key_value(ants_proto::COLONY_BUCKET).await.unwrap().put("dev-a", "{}".into()).await.unwrap();
 
-    // It finds JetStream on connecting, reads each feed through its own consumer and watches the roster.
+    // It finds JetStream on connecting, reads each feed through its own consumer and watches the colony.
     let connecting = bus::connect_retrying(&server.url, Some(&creds), None, &audit, "test", std::future::pending());
     let (o, mut o_js) = timeout(WAIT, connecting).await.expect("audit reaches JetStream").unwrap().unwrap();
     o_js.set_timeout(Duration::from_secs(1));
@@ -1873,11 +1873,11 @@ async fn an_observer_reads_approvals_dead_letters_status_and_the_roster_and_publ
         assert_eq!(again.cached_info().num_ack_pending, 0, "{feed:?}");
         o_js.delete_consumer_from_stream(&name, STREAM).await.unwrap();
     }
-    let roster = o_js.get_key_value(ants_proto::ROSTER_BUCKET).await.unwrap();
-    assert_eq!(roster.get("dev-a").await.unwrap().as_deref(), Some(&b"{}"[..]));
-    let mut watch = roster.watch_all().await.unwrap();
-    a_js.get_key_value(ants_proto::ROSTER_BUCKET).await.unwrap().put("dev-a", "{\"a\":1}".into()).await.unwrap();
-    let entry = timeout(WAIT, watch.next()).await.expect("no roster entry").unwrap().unwrap();
+    let colony = o_js.get_key_value(ants_proto::COLONY_BUCKET).await.unwrap();
+    assert_eq!(colony.get("dev-a").await.unwrap().as_deref(), Some(&b"{}"[..]));
+    let mut watch = colony.watch_all().await.unwrap();
+    a_js.get_key_value(ants_proto::COLONY_BUCKET).await.unwrap().put("dev-a", "{\"a\":1}".into()).await.unwrap();
+    let entry = timeout(WAIT, watch.next()).await.expect("no colony entry").unwrap().unwrap();
     assert_eq!(entry.key, "dev-a");
     let mut status = o.subscribe(subject::ALL_STATUS).await.unwrap();
     o.flush().await.unwrap();
@@ -1902,7 +1902,7 @@ async fn an_observer_reads_approvals_dead_letters_status_and_the_roster_and_publ
         subject::queue(&dev_a),
         format!("$KV.ants_attempts.{}", ants_proto::message_mark_key(&dev_a, &request)),
         subject::renew("dev-a"),
-        "$KV.ants_roster.dev-a".to_owned(),
+        "$KV.ants_colony.dev-a".to_owned(),
         "$KV.ants_humans.audit".to_owned(),
         "$JS.API.STREAM.INFO.ANTS".to_owned(),
         "$JS.API.STREAM.MSG.GET.ANTS".to_owned(),
@@ -2108,14 +2108,14 @@ async fn the_channel_manager_applies_the_owner_s_changes_only_and_announces_them
     let ops: ChannelId = "ops".parse().unwrap();
     let (h_client, h_js) = server.connect(&human).await;
     bus::ensure_stream(&h_js).await.unwrap();
-    let roster = bus::ensure_roster(&h_js, ants_proto::ROSTER_TTL).await.unwrap();
+    let colony = bus::ensure_colony(&h_js, ants_proto::COLONY_TTL).await.unwrap();
     let channels = bus::ensure_channels(&h_js).await.unwrap();
     let mut entry = ChannelEntry::new(ops.clone());
     entry.owner = Some(dev_a.clone());
     h_kv_put(&channels, &entry).await;
     let (_b, b_js) = server.connect(&dev_b).await;
     let now = chrono::Utc::now();
-    let listed = RosterEntry {
+    let listed = ColonyEntry {
         ant: dev_b.clone(),
         machine: "m1".to_owned(),
         instance: "run-1".to_owned(),
@@ -2141,9 +2141,9 @@ async fn the_channel_manager_applies_the_owner_s_changes_only_and_announces_them
         paused: None,
         drift: Vec::new(),
     };
-    let b_roster = bus::ensure_roster(&b_js, ants_proto::ROSTER_TTL).await.unwrap();
-    b_roster.put("dev-b", serde_json::to_vec(&listed).unwrap().into()).await.unwrap();
-    assert!(roster.get("dev-b").await.unwrap().is_some());
+    let b_colony = bus::ensure_colony(&b_js, ants_proto::COLONY_TTL).await.unwrap();
+    b_colony.put("dev-b", serde_json::to_vec(&listed).unwrap().into()).await.unwrap();
+    assert!(colony.get("dev-b").await.unwrap().is_some());
 
     assert!(issue(&server.dir().join("auth"), &manager, Role::Ant, None, &server.dir().join("x")).is_err());
     let creds = server.dir().join("channel-manager.creds");
@@ -2151,8 +2151,8 @@ async fn the_channel_manager_applies_the_owner_s_changes_only_and_announces_them
     let (m_client, m_js) = bus::connect(&server.url, Some(&creds), None, &manager, "test").await.unwrap();
     let humans = ants_daemon::humans::Registry::new(human.clone());
     let _watching = humans.watch(m_js.clone(), ants_daemon::humans::RETRY);
-    let roster_of = ants_daemon::mcp::jetstream_roster(m_js.clone());
-    let serving = tokio::spawn(chanadm::serve(m_client, m_js, roster_of, humans));
+    let colony_of = ants_daemon::mcp::jetstream_colony(m_js.clone());
+    let serving = tokio::spawn(chanadm::serve(m_client, m_js, colony_of, humans));
 
     let mut room = h_client.subscribe(subject::chan_room(&ops)).await.unwrap();
     let (a_client, a_js) = server.connect(&dev_a).await;
@@ -2167,7 +2167,7 @@ async fn the_channel_manager_applies_the_owner_s_changes_only_and_announces_them
         applied => panic!("applied: {applied:?}"),
     };
 
-    // The owner adds an ant in the roster; the change is stored and announced in the channel, mentioning nobody.
+    // The owner adds an ant in the colony; the change is stored and announced in the channel, mentioning nobody.
     let add_b = vec![ChannelOp::AddMember { ant: dev_b.clone() }];
     let first = ChannelAdminRequest::new(ops.clone(), dev_a.clone(), ThreadId::generate(), add_b.clone());
     let answer = a_admin.request(first.clone()).await.unwrap().expect("an answer");
@@ -2185,10 +2185,10 @@ async fn the_channel_manager_applies_the_owner_s_changes_only_and_announces_them
     assert_eq!((post.check_subject(&msg.subject), &post.from), (Ok(()), &manager));
     assert!(post.text.contains("dev-a") && post.text.contains("added dev-b") && post.mentions.is_empty(), "{post:?}");
 
-    // Ants outside the roster, other ants, and the former owner are refused.
+    // Ants outside the colony, other ants, and the former owner are refused.
     let add_c = vec![ChannelOp::AddMember { ant: p("dev-c") }];
-    assert_eq!(refused(ask(&a_admin, &dev_a, add_c).await), Refusal::NotInRoster(p("dev-c")));
-    // A human needs no roster entry to be a member, but is never the messenger.
+    assert_eq!(refused(ask(&a_admin, &dev_a, add_c).await), Refusal::NotInColony(p("dev-c")));
+    // A human needs no colony entry to be a member, but is never the messenger.
     let add_human = vec![ChannelOp::AddMember { ant: human.clone() }];
     let ChannelAdminOutcome::Applied { entry: with_human, changed, .. } = ask(&a_admin, &dev_a, add_human).await else {
         panic!("a human member refused")
@@ -2224,7 +2224,7 @@ async fn the_channel_manager_applies_the_owner_s_changes_only_and_announces_them
 
     // The channel manager writes the channels bucket only, and posts as itself only.
     let (m_raw, mut errors) = server.watched_with(&manager, &creds).await;
-    for denied in [subject::chan(&ops, &dev_a), "$KV.ants_roster.dev-a".to_owned(), subject::inbox_of(&dev_a)] {
+    for denied in [subject::chan(&ops, &dev_a), "$KV.ants_colony.dev-a".to_owned(), subject::inbox_of(&dev_a)] {
         m_raw.publish(denied.clone(), "x".into()).await.unwrap();
         let v = next_violation(&m_raw, &mut errors).await;
         assert!(v.contains(&format!("Publish to \"{denied}\"")), "{v}");

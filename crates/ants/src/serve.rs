@@ -50,7 +50,7 @@ pub struct AntOptions {
     /// The ant's own files (default: ~/.ants/<ant>).
     #[arg(long)]
     home: Option<PathBuf>,
-    /// Role instructions shared in the roster and prepended to every prompt.
+    /// Role instructions shared in the colony and prepended to every prompt.
     #[arg(long)]
     whoami: Option<String>,
     /// Instructions for the memory tool available through the harness; prepended to every prompt.
@@ -126,7 +126,7 @@ pub struct AntOptions {
     /// 0 for never).
     #[arg(long, value_name = "PERCENT")]
     spend_warn_percent: Option<u8>,
-    /// Tag the ant is good for, listed in its roster entry for routing (repeatable, or comma-separated). Replaces
+    /// Tag the ant is good for, listed in its colony entry for routing (repeatable, or comma-separated). Replaces
     /// the file's `capabilities`.
     #[arg(long = "capability", value_name = "TAG", value_delimiter = ',')]
     capabilities: Vec<String>,

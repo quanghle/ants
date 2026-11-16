@@ -1,6 +1,6 @@
 //! `ants dash`: an interactive terminal dashboard of the recent threads (but for those the human archived, by hand
 //! or for having been idle) and their history, the ants' live progress and
-//! the roster, and the pending tool requests, answered as `ants tools approve` and `reject` do; it marks done threads
+//! the colony, and the pending tool requests, answered as `ants tools approve` and `reject` do; it marks done threads
 //! as `ants thread list` does. It reads with the
 //! CLI's own connection, as `ants thread`, `ants watch` and `ants tools list --follow` do, and keeps no service.
 
@@ -35,7 +35,7 @@ fn terminal_check(stdin: bool, stdout: bool) -> Result<()> {
     }
     bail!(
         "`ants dash` needs a terminal on stdin and stdout; without one, `ants thread list` and `ants thread show \
-         THREAD` read the threads, `ants roster` and `ants watch ANT` the ants and their progress, and `ants tools \
+         THREAD` read the threads, `ants colony` and `ants watch ANT` the ants and their progress, and `ants tools \
          list --follow`, `ants tools show ID`, `ants tools approve ID` and `ants tools reject ID` the tool requests"
     )
 }
@@ -141,8 +141,8 @@ impl Dash {
             live::Event::FollowEnded(Err(e)) => {
                 model.notify(format!("following the tool requests: {e:#}"), Level::Error, now);
             }
-            live::Event::Roster(Ok(entries)) => model.live.roster(entries, now),
-            live::Event::Roster(Err(e)) => model.notify(format!("reading the roster: {e:#}"), Level::Error, now),
+            live::Event::Colony(Ok(entries)) => model.live.colony(entries, now),
+            live::Event::Colony(Err(e)) => model.notify(format!("reading the colony: {e:#}"), Level::Error, now),
             live::Event::History(thread, read) => model.history_loaded(&thread, read, now),
             live::Event::Decided(outcome) => model.decided(outcome, now),
         }

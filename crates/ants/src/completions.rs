@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use ants_daemon::config::{CliDefaults, Summary};
 use ants_daemon::keystore::Store;
-use ants_daemon::{bus, dead, roster};
-use ants_proto::{CHANNELS_BUCKET, JsDomain, ROSTER_BUCKET, STREAM, UserId};
+use ants_daemon::{bus, colony, dead};
+use ants_proto::{CHANNELS_BUCKET, COLONY_BUCKET, JsDomain, STREAM, UserId};
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream;
 use clap::CommandFactory as _;
@@ -200,7 +200,7 @@ pub fn answer() {
     CompleteEnv::with_factory(crate::Cli::command).var(VAR).complete();
 }
 
-/// The ants of the config file and the roster, and the messenger.
+/// The ants of the config file and the colony, and the messenger.
 pub fn ants() -> Vec<CompletionCandidate> {
     let mut ants = known_ants();
     ants.sort();
@@ -320,8 +320,8 @@ fn known_ants() -> Vec<String> {
         ants.extend(summary.ants.into_iter().map(|(ant, _)| ant.to_string()));
     }
     ants.extend(lookup(async |js, _| {
-        let kv = js.get_key_value(ROSTER_BUCKET).await?;
-        let entries = roster::list_entries(&kv).await?;
+        let kv = js.get_key_value(COLONY_BUCKET).await?;
+        let entries = colony::list_entries(&kv).await?;
         Ok(entries.into_iter().map(|e| e.ant.to_string()).collect())
     }));
     ants

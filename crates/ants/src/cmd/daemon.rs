@@ -15,7 +15,7 @@ pub(crate) async fn run(args: &serve::DaemonArgs, conn: &Connection<'_>) -> Resu
     let mut triggers = reload::Triggers::new(config.clone(), Some(dropins), reload::CHECK_EVERY)?;
     let edited = ConfigFile::new(config, triggers.edits());
     triggers.watch_shared(edited.shared.subscribe());
-    let hostname = ants_daemon::roster::machine().await;
+    let hostname = ants_daemon::colony::machine().await;
     let served = || {
         let listed = serve::ants(args, &default_path, &hostname)?;
         edited.shared.listed(&listed.ants);

@@ -31,7 +31,7 @@ pub fn counts(items: &[home::Item]) -> Vec<(Why, usize)> {
     counts
 }
 
-/// The ants working, each with what it does: as their progress says, else as the roster does.
+/// The ants working, each with what it does: as their progress says, else as the colony does.
 fn working(data: &Data) -> Vec<String> {
     let mut shown: Vec<String> = data
         .live
@@ -40,7 +40,7 @@ fn working(data: &Data) -> Vec<String> {
         .filter_map(|thread| data.live.progress_of(thread, usize::MAX))
         .flat_map(|(line, _)| line.split(" | ").map(str::to_owned).collect::<Vec<_>>())
         .collect();
-    for entry in &data.live.roster {
+    for entry in &data.live.colony {
         let ant = format!("{}:", entry.ant);
         if entry.activity == ants_proto::Activity::Working && !shown.iter().any(|s| s.starts_with(&ant)) {
             shown.push(entry.ant.to_string());
@@ -179,9 +179,9 @@ mod tests {
             ApprovalRequest { thread_id: asked.clone(), ..request("dev-a", "git push", vec![Verdict::AllowOnce]) };
         m.data.live.approval(&Update::Pending(push));
         m.data.cards.today = Some(vec![(user("dev-a"), Spent { tokens: 10, cost: 4.12 })]);
-        let mut entry = crate::roster::tests::entry("scout", 60, 5, at(0));
+        let mut entry = crate::colony::tests::entry("scout", 60, 5, at(0));
         entry.activity = ants_proto::Activity::Working;
-        m.data.live.roster(vec![entry], at(3));
+        m.data.live.colony(vec![entry], at(3));
         let shown = pane(&m, at(3));
         assert!(shown.starts_with("ants ▸ 1 approve · 1 finished │ ◐ scout │ $4.12 today"), "{shown}");
         assert!(shown.contains("▸ approve "), "{shown}");

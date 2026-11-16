@@ -540,7 +540,7 @@ mod tests {
     #[test]
     fn requests_heard_show_on_home_and_the_ant_and_y_confirms_the_answer() {
         let mut m = model();
-        m.data.live.roster(vec![crate::roster::tests::entry("dev-a", 60, 2, at(2))], at(2));
+        m.data.live.colony(vec![crate::colony::tests::entry("dev-a", 60, 2, at(2))], at(2));
         m.data.credentials.holder = Some(Holder::Here(PathBuf::from("/team")));
         let heard = vec![enrolling("dev-c", "UCKEYOFDEVC00"), renewing("dev-a", "UAKEYOFDEVA00")];
         assert_eq!(m.data.credentials.take(Event::Heard(Ok(heard)), at(3)), None);

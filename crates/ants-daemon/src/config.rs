@@ -9,7 +9,7 @@
 //! metrics = "127.0.0.1:9464"        # serve /healthz and /metrics there (crate::metrics); off without it
 //! timezone = "America/New_York"     # default zone of the schedules' cron, else UTC
 //! redact = true                     # redact secrets from what the ants publish (the default; crate::redact)
-//! machine = "dev-vm1"               # the machine the roster names for the ants, and the host's where [host] and
+//! machine = "dev-vm1"               # the machine the colony names for the ants, and the host's where [host] and
 //!                                   # its credentials name none (default: the host name)
 //!
 //! [cli]                             # the CLI's own connection, where no flag or environment variable sets it
@@ -157,7 +157,7 @@ struct File {
     /// Redact secrets from what the file's ants publish ([`crate::redact`]).
     #[serde(default = "yes")]
     redact: bool,
-    /// The machine the file's ants are served on, as their roster entries name it; the host name when absent.
+    /// The machine the file's ants are served on, as their colony entries name it; the host name when absent.
     machine: Option<String>,
     /// The warnings of JetStream storage filling up ([`crate::storage`]).
     #[serde(default)]
@@ -210,7 +210,7 @@ pub struct Ant {
     pub allow_sets: Vec<String>,
     /// Default: `~/.ants/<name>`.
     pub home: Option<PathBuf>,
-    /// Role instructions shared in the roster and prepended to every prompt.
+    /// Role instructions shared in the colony and prepended to every prompt.
     pub whoami: Option<String>,
     /// Memory and task instructions prepended to every prompt. Tools are provided by the harness.
     pub memory: Option<String>,
@@ -265,7 +265,7 @@ pub struct Ant {
     /// The share of a spend cap, in percent, past which a human is warned once; 0 for never.
     #[serde(default = "default_spend_warn_percent")]
     pub spend_warn_percent: u8,
-    /// Ants the ant's escalations go to before any human, the first one leading; published in the roster.
+    /// Ants the ant's escalations go to before any human, the first one leading; published in the colony.
     #[serde(default)]
     pub escalate_to: Vec<UserId>,
     /// Chain levels an escalation climbs before it goes to the thread's owner.
@@ -291,7 +291,7 @@ pub struct Ant {
     /// until this is unset again (`ants ant resume`). Changing it alone restarts no harness.
     #[serde(default)]
     pub paused: bool,
-    /// The built-in messenger, served only while no other daemon lists a messenger in the roster.
+    /// The built-in messenger, served only while no other daemon lists a messenger in the colony.
     #[serde(skip)]
     pub builtin: bool,
     /// The daily caps it shares with the other ants added from its template, if the template has any.
@@ -300,7 +300,7 @@ pub struct Ant {
     /// Redact secrets from what it publishes: the file's top-level `redact`.
     #[serde(skip, default = "yes")]
     pub redact: bool,
-    /// The machine its roster entry names: the file's top-level `machine`; the host name when absent.
+    /// The machine its colony entry names: the file's top-level `machine`; the host name when absent.
     #[serde(skip)]
     pub machine: Option<String>,
     /// The file's `[storage]` table.

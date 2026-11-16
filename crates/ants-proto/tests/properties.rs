@@ -261,7 +261,7 @@ proptest! {
             (subject::cancelled(&ant, &thread), vec!["ants", "cancelled", a, t]),
             (subject::queue(&ant), vec!["ants", "queue", a]),
             (subject::queued(&ant), vec!["ants", "queued", a]),
-            (subject::roster(&ant), vec!["$KV", ants_proto::ROSTER_BUCKET, a]),
+            (subject::colony(&ant), vec!["$KV", ants_proto::COLONY_BUCKET, a]),
             (subject::chain(&ant), vec!["$KV", ants_proto::CHAINS_BUCKET, a]),
             (subject::human_entry(&ant), vec!["$KV", ants_proto::HUMANS_BUCKET, a]),
             (subject::read_marker(&ant), vec!["$KV", ants_proto::READ_BUCKET, a]),

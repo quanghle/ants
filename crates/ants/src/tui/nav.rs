@@ -1,7 +1,7 @@
 //! The nav: home, work with a count per state, the human's channels with their unread posts and @mentions, the ants
 //! with their state, and the team's other humans, online or not. Each entry selects a view.
 
-use ants_proto::{Activity, ChannelId, Humans, RosterEntry, UserId};
+use ants_proto::{Activity, ChannelId, ColonyEntry, Humans, UserId};
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -13,7 +13,7 @@ use super::frame;
 use super::model::Data;
 use super::work::ThreadState;
 use crate::channel::reads::Unread;
-use crate::roster;
+use crate::colony;
 use crate::thread::Kind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,7 +45,7 @@ pub fn items(data: &Data, _now: DateTime<Utc>) -> Vec<Item> {
     let mut items = vec![Item::Home, Item::Work(None)];
     items.extend(ThreadState::ALL.map(|s| Item::Work(Some(s))));
     items.extend(data.channels.iter().map(|c| Item::Channel(c.channel.clone())));
-    let mut ants: Vec<&UserId> = data.live.roster.iter().map(|e| &e.ant).collect();
+    let mut ants: Vec<&UserId> = data.live.colony.iter().map(|e| &e.ant).collect();
     ants.sort();
     ants.dedup();
     items.extend(ants.into_iter().map(|a| Item::Ant(a.clone())));
@@ -57,9 +57,9 @@ pub fn items(data: &Data, _now: DateTime<Utc>) -> Vec<Item> {
 }
 
 /// The ant's state at a glance: whether its daemon beats, else what holds it back, else whether it is busy.
-pub fn marker(entries: &[&RosterEntry], now: DateTime<Utc>) -> (&'static str, Color) {
-    let live: Vec<&&RosterEntry> =
-        entries.iter().filter(|e| roster::State::of(e, now) == roster::State::Live).collect();
+pub fn marker(entries: &[&ColonyEntry], now: DateTime<Utc>) -> (&'static str, Color) {
+    let live: Vec<&&ColonyEntry> =
+        entries.iter().filter(|e| colony::State::of(e, now) == colony::State::Live).collect();
     let Some(entry) = live.first() else { return ("○", Color::DarkGray) };
     if entry.signed_out.is_some() || entry.failing.is_some() {
         return ("✕", Color::Red);
@@ -120,7 +120,7 @@ fn line(
             Line::from(spans)
         }
         Item::Ant(ant) => {
-            let entries: Vec<&RosterEntry> = data.live.roster.iter().filter(|e| e.ant == *ant).collect();
+            let entries: Vec<&ColonyEntry> = data.live.colony.iter().filter(|e| e.ant == *ant).collect();
             let (mark, color) = marker(&entries, now);
             Line::from(vec![
                 Span::styled(mark, Style::new().fg(color)),
@@ -164,8 +164,8 @@ mod tests {
     use ants_proto::{ChannelEntry, ChannelPost, ChannelReadMarkers, HumanEntry, ThreadId};
 
     use super::*;
+    use crate::colony::tests::entry;
     use crate::live::tests::{at, message, user};
-    use crate::roster::tests::entry;
     use crate::tui::channel::tests::post;
     use crate::tui::model::tests::model;
     use crate::tui::reads::Read;
@@ -176,7 +176,7 @@ mod tests {
         let ops = ChannelEntry { members: vec![user("alice")], ..ChannelEntry::new("ops".parse().unwrap()) };
         let humans = Humans::from_entries(["alice", "carol"].map(|h| (h, HumanEntry::new(user(h)))));
         m.read(Read::Directory(Ok((vec![ops], humans))), at(0));
-        m.data.live.roster(vec![entry("dev-b", 60, 5, at(0)), entry("dev-a", 60, 5, at(0))], at(0));
+        m.data.live.colony(vec![entry("dev-b", 60, 5, at(0)), entry("dev-a", 60, 5, at(0))], at(0));
         let items = items(&m.data, at(0));
         assert_eq!(items[..2], [Item::Home, Item::Work(None)]);
         assert_eq!(

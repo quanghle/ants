@@ -1,7 +1,7 @@
 //! A machine's host connection: one NATS connection per daemon serving a whole config file, with the machine's host
 //! credentials (`ants auth host`), apart from its ants' own. It keeps the machine's [`MachineRecord`] in
 //! [`MACHINES_BUCKET`] current: the ants the daemon serves, put on start and whenever they change, and never deleted,
-//! so an ant stays addressable on its machine after its roster entry expired. It also takes the admin orders to the
+//! so an ant stays addressable on its machine after its colony entry expired. It also takes the admin orders to the
 //! machine's ants and records their outcomes ([`crate::admin`]), reading the humans' consent to their assistants'
 //! orders from [`ants_proto::HUMANS_BUCKET`] ([`crate::admin::held`]), and keeps the shared settings of the machine's ants
 //! ([`crate::shared`]), creating those still missing from the machine's config. Without host credentials, where the ants have their
@@ -20,7 +20,7 @@ use tokio::sync::watch;
 use crate::creds::{self, Kind};
 use crate::direct_kv::DirectKv;
 use crate::shared::{self, Shared};
-use crate::{admin, bus, keystore, roster};
+use crate::{admin, bus, colony, keystore};
 
 const RETRY_FIRST: Duration = Duration::from_secs(1);
 const RETRY_MAX: Duration = Duration::from_secs(30);
@@ -124,7 +124,7 @@ pub fn record(machine: &Machine, hostname: &str, ants: &[UserId]) -> MachineReco
 /// ([`admin::serve`]), until `ants` closes. Fails only on what waiting cannot mend: credentials that do not load or
 /// name another machine.
 pub async fn run(host: Host, ants: watch::Receiver<Vec<UserId>>) -> Result<()> {
-    let hostname = roster::machine().await;
+    let hostname = colony::machine().await;
     let otherwise = host.fallback.clone().unwrap_or_else(|| Machine::from_hostname(&hostname));
     let machine = machine_of(host.machine.as_ref(), host.creds.as_deref(), otherwise)?;
     let accounts: Vec<String> = host.creds.as_deref().map(creds::account).transpose()?.into_iter().collect();

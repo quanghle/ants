@@ -111,7 +111,7 @@ impl Model {
     }
 
     /// The users `@` completes, by name, each an "ant" or a "human": the members of the channel on view, else the
-    /// roster's ants and the registered humans; the human using the UI and the default human are left out.
+    /// colony's ants and the registered humans; the human using the UI and the default human are left out.
     fn users(&self) -> Vec<(UserId, &'static str)> {
         let data = &self.data;
         let channel = match self.page() {
@@ -129,7 +129,7 @@ impl Model {
         let members = channel.and_then(|channel| data.channels.iter().find(|c| c.channel == channel));
         let users: BTreeSet<&UserId> = match members {
             Some(entry) => entry.members.iter().collect(),
-            None => data.live.roster.iter().map(|e| &e.ant).chain(data.humans.iter().flat_map(Humans::iter)).collect(),
+            None => data.live.colony.iter().map(|e| &e.ant).chain(data.humans.iter().flat_map(Humans::iter)).collect(),
         };
         users
             .into_iter()
@@ -193,8 +193,8 @@ mod tests {
     use ants_proto::{ChannelEntry, HumanEntry};
 
     use super::*;
+    use crate::colony::tests::entry;
     use crate::live::tests::{at, user};
-    use crate::roster::tests::entry;
     use crate::tui::channel;
     use crate::tui::model::Key;
     use crate::tui::model::tests::model;
@@ -219,7 +219,7 @@ mod tests {
         let devops = ChannelEntry { members: vec![user("alice")], ..ChannelEntry::new("devops".parse().unwrap()) };
         let humans = Humans::from_entries(["alice", "bob", "carol"].map(|h| (h, HumanEntry::new(user(h)))));
         m.read(Read::Directory(Ok((vec![devops, ops], humans))), at(0));
-        m.data.live.roster(
+        m.data.live.colony(
             vec![entry("dev-b", 60, 5, at(0)), entry("dev-a", 60, 5, at(0)), entry("bobcat", 60, 5, at(0))],
             at(0),
         );

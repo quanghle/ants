@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ants_proto::{
-    ApprovalDecision, ApprovalRequest, DeadLetter, Feed, ROSTER_BUCKET, RosterEntry, STREAM, StatusEvent, StatusUpdate,
+    ApprovalDecision, ApprovalRequest, COLONY_BUCKET, ColonyEntry, DeadLetter, Feed, STREAM, StatusEvent, StatusUpdate,
     UserId, subject,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -35,8 +35,8 @@ pub enum Event {
     Decided,
     /// Every live status update of every ant (a `StatusEvent`).
     Status,
-    /// A roster entry written: an ant starting, stopping or reporting in (a `RosterEntry`).
-    Roster,
+    /// A colony entry written: an ant starting, stopping or reporting in (a `ColonyEntry`).
+    Colony,
 }
 
 impl Event {
@@ -46,11 +46,11 @@ impl Event {
             Self::ApprovalRequest => Some(Feed::ApprovalRequests),
             Self::ApprovalDecision => Some(Feed::ApprovalDecisions),
             Self::DeadLetter => Some(Feed::DeadLetters),
-            Self::Escalation | Self::Question | Self::Decided | Self::Status | Self::Roster => None,
+            Self::Escalation | Self::Question | Self::Decided | Self::Status | Self::Colony => None,
         }
     }
 
-    /// Whether `payload`, read on `subject` (a key for the roster), is an event of this kind to hand on: `Ok(false)`
+    /// Whether `payload`, read on `subject` (a key for the colony), is an event of this kind to hand on: `Ok(false)`
     /// for another kind, an error for one forged or unreadable.
     fn accepts(self, subject: &str, payload: &[u8]) -> Result<bool> {
         match self {
@@ -78,7 +78,7 @@ impl Event {
                 };
                 return Ok(self == kind || self == Self::Status);
             }
-            Self::Roster => serde_json::from_slice::<RosterEntry>(payload)?.check_key(subject)?,
+            Self::Colony => serde_json::from_slice::<ColonyEntry>(payload)?.check_key(subject)?,
         }
         Ok(true)
     }
@@ -136,9 +136,9 @@ impl Hook {
                     drop(slot);
                 });
             }
-        } else if hook.event == Event::Roster {
-            let roster = js.get_key_value(ROSTER_BUCKET).await?;
-            let mut entries = roster.watch_all().await?;
+        } else if hook.event == Event::Colony {
+            let colony = js.get_key_value(COLONY_BUCKET).await?;
+            let mut entries = colony.watch_all().await?;
             while let Some(entry) = entries.next().await {
                 let entry = entry?;
                 if entry.operation != kv::Operation::Put {

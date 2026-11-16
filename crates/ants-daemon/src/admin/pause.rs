@@ -1,6 +1,6 @@
 //! [`AdminOp::Pause`] and [`AdminOp::Resume`]: set `paused = true` in the ant's `[[ant]]` table of the config file
 //! the daemon serves, or remove it, and have the daemon reload the file at once ([`ConfigFile::edited`]), which pauses
-//! or resumes the running ant in place ([`crate::pause`]). The admin whose order paused it is noted for the roster
+//! or resumes the running ant in place ([`crate::pause`]). The admin whose order paused it is noted for the colony
 //! ([`ConfigFile::pausers`]). An ant already paused, or not paused, is left as it is, and the order applied.
 
 #[cfg(doc)]

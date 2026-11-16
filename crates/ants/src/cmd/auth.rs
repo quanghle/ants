@@ -54,7 +54,7 @@ pub(crate) enum AuthCommand {
         out: Option<PathBuf>,
     },
     /// Issue the credentials of the channel manager, `ants channel serve`: it hears channel management requests and
-    /// answers each once, reads the roster and the humans, writes the channels and posts in them.
+    /// answers each once, reads the colony and the humans, writes the channels and posts in them.
     ChannelManager {
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
@@ -217,7 +217,7 @@ pub(crate) struct UserArgs {
     #[arg(long, conflicts_with = "webhook")]
     human: bool,
     /// Issue an observer's read-only credentials, for hooks (`ants hook run`, docs/hooks.md): it reads approval
-    /// requests and decisions, dead letters, every ant's status (escalations among it) and the roster, and
+    /// requests and decisions, dead letters, every ant's status (escalations among it) and the colony, and
     /// publishes nothing.
     #[arg(long, conflicts_with_all = ["human", "webhook", "label"])]
     observer: bool,

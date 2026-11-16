@@ -75,7 +75,7 @@ pub fn key_of(path: &Path) -> Result<String> {
     Ok(Finding::from_creds(&text).with_context(|| format!("credentials {}", path.display()))?.key)
 }
 
-/// Wait up to `wait` for `name` to leave the roster, as the daemon stopping it removes its entry; whether it did.
+/// Wait up to `wait` for `name` to leave the colony, as the daemon stopping it removes its entry; whether it did.
 pub async fn stopped(js: &async_nats::jetstream::Context, name: &UserId, wait: Duration) -> bool {
     let lookup = ants_daemon::mcp::jetstream_lookup(js.clone());
     let deadline = tokio::time::Instant::now() + wait;
@@ -83,7 +83,7 @@ pub async fn stopped(js: &async_nats::jetstream::Context, name: &UserId, wait: D
         match lookup(name.clone()).await {
             Ok(None) => return true,
             Ok(Some(_)) => {}
-            Err(e) => tracing::warn!(ant = %name, error = format!("{e:#}"), "reading the roster"),
+            Err(e) => tracing::warn!(ant = %name, error = format!("{e:#}"), "reading the colony"),
         }
         if tokio::time::Instant::now() >= deadline {
             return false;
@@ -106,7 +106,7 @@ pub fn stop_note(name: &UserId, stopped: bool) -> String {
         format!("{name} stopped, its prompts in flight ended.")
     } else {
         format!(
-            "{name} was still in the roster after {}m, so its prompts in flight, if any, are cut off by the \
+            "{name} was still in the colony after {}m, so its prompts in flight, if any, are cut off by the \
              revocation.",
             STOP_WAIT.as_secs() / 60
         )
@@ -269,12 +269,12 @@ pub struct RetireArgs {
     pub no_push: bool,
 }
 
-/// Retire the ant `args` names, as a human: any ant added from a template, whichever manager added it. `roster`, the
-/// connection to read the roster through, if any, waits up to `wait` for the daemon to stop the ant; `url` is where to
+/// Retire the ant `args` names, as a human: any ant added from a template, whichever manager added it. `colony`, the
+/// connection to read the colony through, if any, waits up to `wait` for the daemon to stop the ant; `url` is where to
 /// push the revocation, and `js_domain` the hub's JetStream domain, if it has one.
 pub async fn retire(
     args: &RetireArgs,
-    roster: Option<&async_nats::jetstream::Context>,
+    colony: Option<&async_nats::jetstream::Context>,
     wait: Duration,
     url: &str,
     js_domain: Option<&ants_proto::JsDomain>,
@@ -303,7 +303,7 @@ pub async fn retire(
         Some(key) => Some(key),
         None => key_of(&creds).ok(),
     };
-    if let Some(js) = roster {
+    if let Some(js) = colony {
         println!("waiting up to {}m for {name} to stop", wait.as_secs().div_ceil(60));
         println!("{}", stop_note(name, stopped(js, name, wait).await));
     }
@@ -317,7 +317,7 @@ pub async fn retire(
             if revoked.is_empty() {
                 println!("no live credentials of {name} to revoke");
             }
-            for line in leave_leaves(&dir, name, roster).await {
+            for line in leave_leaves(&dir, name, colony).await {
                 println!("{line}");
             }
             Some(revoked)

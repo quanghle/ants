@@ -5,9 +5,9 @@ use uuid::Uuid;
 
 #[cfg(doc)]
 use crate::{
-    ATTEMPTS_BUCKET, ApprovalDecision, ApprovalRequest, ChannelPost, ChannelReadMarkers, DeadLetter, Envelope,
-    HeldNotices, LINKS_BUCKET, Machine, MessageMark, NOTIFY_BUCKET, NotifyPrefs, OUTBOX_STREAM, OWNERS_BUCKET,
-    Permissions, REACTIONS_BUCKET, READ_BUCKET, ReadMarker, RosterEntry, SESSIONS_BUCKET, THREADS_BUCKET,
+    ATTEMPTS_BUCKET, ApprovalDecision, ApprovalRequest, ChannelPost, ChannelReadMarkers, ColonyEntry, DeadLetter,
+    Envelope, HeldNotices, LINKS_BUCKET, Machine, MessageMark, NOTIFY_BUCKET, NotifyPrefs, OUTBOX_STREAM,
+    OWNERS_BUCKET, Permissions, REACTIONS_BUCKET, READ_BUCKET, ReadMarker, SESSIONS_BUCKET, THREADS_BUCKET,
 };
 use crate::{PERMISSIONS_VERSION, PermissionsVersion, Reaction, ThreadId, UserId, WEBHOOKS_BUCKET, subject};
 
@@ -343,7 +343,7 @@ pub const SERVING_EVERY: Duration = Duration::from_hours(1);
 
 /// What a process that is no daemon, yet uses credentials `ants auth` issues, publishes of the ants it runs: `ants
 /// webhook serve` and each schedule as the value of their marker ([`webhook_marker_key`]), `ants channel serve` under
-/// [`channel_manager_serving_key`]. Daemons publish the same in their [`RosterEntry`]. Readers should treat unknown
+/// [`channel_manager_serving_key`]. Daemons publish the same in their [`ColonyEntry`]. Readers should treat unknown
 /// fields as additions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Serving {

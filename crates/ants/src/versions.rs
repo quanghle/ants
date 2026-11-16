@@ -1,16 +1,16 @@
-//! The versions of ants that running components publish: each daemon in its roster entry, `ants webhook serve` and
+//! The versions of ants that running components publish: each daemon in its colony entry, `ants webhook serve` and
 //! each schedule in their webhook's marker, `ants channel serve` under its own key of [`WEBHOOKS_BUCKET`]
-//! ([`Serving`]). `ants roster` flags mixed versions and `ants doctor` tells whether every component runs a version
+//! ([`Serving`]). `ants colony` flags mixed versions and `ants doctor` tells whether every component runs a version
 //! that allows renewing credentials to the permissions of this one. Both also flag a harness agent that live ants run
 //! at different versions on different machines ([`harness_drift`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+use ants_daemon::colony;
 use ants_daemon::direct_kv::DirectKv;
-use ants_daemon::roster;
 use ants_proto::{
-    PERMISSIONS_VERSION, PermissionsVersion, ROSTER_BUCKET, RosterEntry, SERVING_EVERY, Serving, WEBHOOKS_BUCKET,
+    COLONY_BUCKET, ColonyEntry, PERMISSIONS_VERSION, PermissionsVersion, SERVING_EVERY, Serving, WEBHOOKS_BUCKET,
     channel_manager_serving_subject,
 };
 use anyhow::{Context as _, Result};
@@ -31,7 +31,7 @@ pub struct Component {
 }
 
 impl Component {
-    pub fn of_entry(entry: &RosterEntry) -> Self {
+    pub fn of_entry(entry: &ColonyEntry) -> Self {
         Self {
             what: format!("the daemon of {} on {}", entry.ant, entry.machine),
             version: entry.version.clone(),
@@ -81,20 +81,20 @@ fn newest_first(a: &str, b: &str) -> std::cmp::Ordering {
     parts(b).cmp(&parts(a)).then_with(|| b.cmp(a))
 }
 
-/// The line `ants roster` adds under its table when the live daemons listed run more than one version at `now`.
-pub fn roster_note(entries: &[RosterEntry], now: DateTime<Utc>) -> Option<String> {
-    let live = entries.iter().filter(|e| roster::is_live(e, now));
+/// The line `ants colony` adds under its table when the live daemons listed run more than one version at `now`.
+pub fn colony_note(entries: &[ColonyEntry], now: DateTime<Utc>) -> Option<String> {
+    let live = entries.iter().filter(|e| colony::is_live(e, now));
     let components: Vec<Component> = live.map(Component::of_entry).collect();
     let versions = mixed(&components)?;
     Some(format!("mixed ants versions: {versions}; `ants doctor` tells whether credentials may be renewed"))
 }
 
 /// One line per harness agent the live ants of `entries` run at more than one version, across more than one machine,
-/// as their roster entries name it ([`RosterEntry::agent`]): `copilot at 1.0.3 (dev-a on m1), 1.0.2 (dev-b on m2)`,
+/// as their colony entries name it ([`ColonyEntry::agent`]): `copilot at 1.0.3 (dev-a on m1), 1.0.2 (dev-b on m2)`,
 /// newest first. Different versions on one machine only are a harness upgraded there while an older one still runs.
-pub fn harness_drift(entries: &[RosterEntry], now: DateTime<Utc>) -> Vec<String> {
-    let mut agents: BTreeMap<&str, BTreeMap<&str, Vec<&RosterEntry>>> = BTreeMap::new();
-    for entry in entries.iter().filter(|e| roster::is_live(e, now)) {
+pub fn harness_drift(entries: &[ColonyEntry], now: DateTime<Utc>) -> Vec<String> {
+    let mut agents: BTreeMap<&str, BTreeMap<&str, Vec<&ColonyEntry>>> = BTreeMap::new();
+    for entry in entries.iter().filter(|e| colony::is_live(e, now)) {
         if let Some(agent) = &entry.agent {
             agents.entry(&agent.name).or_default().entry(&agent.version).or_default().push(entry);
         }
@@ -120,9 +120,9 @@ pub fn harness_drift(entries: &[RosterEntry], now: DateTime<Utc>) -> Vec<String>
         .collect()
 }
 
-/// The line `ants roster` adds under its table when live ants run a harness agent at different versions on different
+/// The line `ants colony` adds under its table when live ants run a harness agent at different versions on different
 /// machines at `now` ([`harness_drift`]).
-pub fn harness_note(entries: &[RosterEntry], now: DateTime<Utc>) -> Option<String> {
+pub fn harness_note(entries: &[ColonyEntry], now: DateTime<Utc>) -> Option<String> {
     let drift = harness_drift(entries, now);
     (!drift.is_empty()).then(|| format!("harness versions differ across machines: {}", drift.join("; ")))
 }
@@ -154,17 +154,17 @@ pub fn renewal(components: &[Component]) -> Renewal {
     Renewal::Allowed
 }
 
-/// What the running components publish, read with a human's credentials, whose rights `may` tells: the live roster
+/// What the running components publish, read with a human's credentials, whose rights `may` tells: the live colony
 /// entries, the markers of webhooks and schedules, and the channel manager's entry, each put within
 /// [`SERVING_STALE_AFTER`] of `now`.
 pub async fn running(js: &jetstream::Context, may: impl Fn(&str) -> bool, now: DateTime<Utc>) -> Result<Running> {
     let mut running = Running::default();
-    match js.get_key_value(ROSTER_BUCKET).await {
-        Ok(roster) => {
-            let entries = roster::list_entries(&roster).await?;
-            running.components.extend(entries.iter().filter(|e| roster::is_live(e, now)).map(Component::of_entry));
+    match js.get_key_value(COLONY_BUCKET).await {
+        Ok(colony) => {
+            let entries = colony::list_entries(&colony).await?;
+            running.components.extend(entries.iter().filter(|e| colony::is_live(e, now)).map(Component::of_entry));
         }
-        Err(e) => running.unseen.push(format!("no roster read ({e}): daemons not looked at")),
+        Err(e) => running.unseen.push(format!("no colony read ({e}): daemons not looked at")),
     }
 
     let stream_name = format!("KV_{WEBHOOKS_BUCKET}");
@@ -242,7 +242,7 @@ fn fresh(at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
 
 /// The [`Serving`] of this process, as stored.
 pub async fn serving() -> Vec<u8> {
-    serde_json::to_vec(&Serving::here(roster::machine().await)).expect("a serving entry serializes")
+    serde_json::to_vec(&Serving::here(colony::machine().await)).expect("a serving entry serializes")
 }
 
 /// Put `value` at `key` of `kv` now and every [`SERVING_EVERY`], calling `put` after each put, until dropped. A put
@@ -281,7 +281,7 @@ mod tests {
     #[test]
     fn a_harness_at_different_versions_across_machines_drifts() {
         let now = Utc::now();
-        let entry = |ant: &str, machine: &str, agent: Option<(&str, &str)>| RosterEntry {
+        let entry = |ant: &str, machine: &str, agent: Option<(&str, &str)>| ColonyEntry {
             ant: ant.parse().unwrap(),
             machine: machine.to_owned(),
             instance: "run-1".to_owned(),

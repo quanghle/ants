@@ -2,7 +2,7 @@
 //! [`IDENTITIES_BUCKET`] so the ant is the same on every machine. A machine's host connection ([`crate::host`]) reads
 //! those of the ants its daemon serves every [`POLL_EVERY`], creating those still missing from the machine's config,
 //! and keeps them in a [`Shared`]; the daemon serves each ant with them in place of its config's ([`Shared::overlaid`])
-//! and reloads when they change. The fields the machine's config sets otherwise are its drift, which the ant's roster
+//! and reloads when they change. The fields the machine's config sets otherwise are its drift, which the ant's colony
 //! entry and the machine's record report. Of an ant added from a template, only the settings a request chooses are
 //! shared ([`shares`]): the others follow the template as the config loads it.
 //!
@@ -87,7 +87,7 @@ impl Roles {
 }
 
 /// The fields of an ant's shared settings its machine's config sets otherwise (its drift); a clone shares it, so the
-/// running ant's roster entry sees it change. Equal to any other, so that a change of drift alone restarts no ant.
+/// running ant's colony entry sees it change. Equal to any other, so that a change of drift alone restarts no ant.
 #[derive(Debug, Clone)]
 pub struct Drift(Arc<watch::Sender<Vec<String>>>);
 
@@ -486,7 +486,7 @@ pub struct Via {
 pub async fn follow(shared: Shared, mut vias: watch::Receiver<Vec<Via>>, machine: Option<Machine>) {
     let machine = match machine {
         Some(machine) => machine,
-        None => Machine::from_hostname(&crate::roster::machine().await),
+        None => Machine::from_hostname(&crate::colony::machine().await),
     };
     let mut connected: Vec<(Via, Reader)> = Vec::new();
     loop {

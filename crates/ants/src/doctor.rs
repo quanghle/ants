@@ -143,7 +143,7 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     checks.extend(check_storage(connected.as_ref(), setup, settings).await);
     checks.extend(ants_checked);
     if let Some(loaded) = &loaded {
-        let hostname = ants_daemon::roster::machine().await;
+        let hostname = ants_daemon::colony::machine().await;
         checks.push(check_host(&loaded.host, ants, &hostname, now));
         checks.extend(check_machine_name(&loaded.host, &hostname));
     }
@@ -718,30 +718,30 @@ async fn check_versions(js: &jetstream::Context, identity: &Identity) -> Check {
     }
 }
 
-/// Whether live ants run the same harness agent at different versions on different machines, as their roster entries
+/// Whether live ants run the same harness agent at different versions on different machines, as their colony entries
 /// name it ([`versions::harness_drift`]).
 async fn check_harness_versions(js: &jetstream::Context) -> Check {
     use anyhow::Context as _;
     let read = async {
-        let kv = js.get_key_value(ants_proto::ROSTER_BUCKET).await.context("opening the roster")?;
-        ants_daemon::roster::list_entries(&kv).await
+        let kv = js.get_key_value(ants_proto::COLONY_BUCKET).await.context("opening the colony")?;
+        ants_daemon::colony::list_entries(&kv).await
     };
     match tokio::time::timeout(NETWORK_TIMEOUT * 2, read).await {
         Ok(Ok(entries)) => harness_versions(&entries, chrono::Utc::now()),
-        Ok(Err(e)) => Check::skip("harness versions", format!("no roster read: {e:#}")),
-        Err(_) => Check::skip("harness versions", "no roster read within 10s"),
+        Ok(Err(e)) => Check::skip("harness versions", format!("no colony read: {e:#}")),
+        Err(_) => Check::skip("harness versions", "no colony read within 10s"),
     }
 }
 
-/// Whether two ants in the roster look alike: the same face in the same colour ([`Faces::collisions`]).
+/// Whether two ants in the colony look alike: the same face in the same colour ([`Faces::collisions`]).
 async fn check_avatars(js: &jetstream::Context, identity: &Identity) -> [Check; 2] {
     let (check, moved_check) = ("avatars", "moved ants");
     if !identity.me.role.is_human() {
-        let why = "checked with a human's credentials, which list the roster";
+        let why = "checked with a human's credentials, which list the colony";
         return [Check::skip(check, why), Check::skip(moved_check, why)];
     }
     let read = async {
-        let entries = crate::roster::list(js).await?;
+        let entries = crate::colony::list(js).await?;
         anyhow::Ok((entries, crate::avatars::read(js).await?))
     };
     match tokio::time::timeout(NETWORK_TIMEOUT * 2, read).await {
@@ -750,11 +750,11 @@ async fn check_avatars(js: &jetstream::Context, identity: &Identity) -> [Check; 
             [avatars(&entries, Faces::new(identities, Depth::Plain, ants_proto::Theme::Dark)), moved]
         }
         Ok(Err(e)) => {
-            let why = format!("no roster or identities read: {e:#}");
+            let why = format!("no colony or identities read: {e:#}");
             [Check::skip(check, why.clone()), Check::skip(moved_check, why)]
         }
         Err(_) => {
-            let why = "no roster or identities read within 10s";
+            let why = "no colony or identities read within 10s";
             [Check::skip(check, why), Check::skip(moved_check, why)]
         }
     }
@@ -806,16 +806,16 @@ fn moved(identities: &crate::avatars::Identities, now: chrono::DateTime<chrono::
     Check::warn(check, format!("{} ants marked moved to another bus, served by no daemon here", lines.len()), lines)
 }
 
-fn avatars(entries: &[ants_proto::RosterEntry], faces: Faces) -> Check {
+fn avatars(entries: &[ants_proto::ColonyEntry], faces: Faces) -> Check {
     let check = "avatars";
     let collisions = faces.collisions(entries.iter().map(|e| &e.ant));
     if collisions.is_empty() {
-        return Check::ok(check, format!("{} ants in the roster, each with a face of its own", entries.len()));
+        return Check::ok(check, format!("{} ants in the colony, each with a face of its own", entries.len()));
     }
     Check::warn(check, "ants look alike", collisions)
 }
 
-fn harness_versions(entries: &[ants_proto::RosterEntry], now: chrono::DateTime<chrono::Utc>) -> Check {
+fn harness_versions(entries: &[ants_proto::ColonyEntry], now: chrono::DateTime<chrono::Utc>) -> Check {
     let check = "harness versions";
     let drift = versions::harness_drift(entries, now);
     if !drift.is_empty() {
@@ -823,14 +823,14 @@ fn harness_versions(entries: &[ants_proto::RosterEntry], now: chrono::DateTime<c
             check,
             format!("different versions across machines: {}", drift.join("; ")),
             vec![
-                "upgrade the older harness agents where they run; an ant's roster entry shows the new version once its \
+                "upgrade the older harness agents where they run; an ant's colony entry shows the new version once its \
                  harness starts again"
                     .to_owned(),
             ],
         );
     }
     let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    let named = entries.iter().filter(|e| ants_daemon::roster::is_live(e, now)).filter_map(|e| e.agent.as_ref());
+    let named = entries.iter().filter(|e| ants_daemon::colony::is_live(e, now)).filter_map(|e| e.agent.as_ref());
     for agent in named {
         *counts.entry(agent.to_string()).or_default() += 1;
     }
@@ -1089,20 +1089,20 @@ fn check_host(host: &config::HostSettings, ants: &[Ant], hostname: &str, now: u6
     }
 }
 
-/// A warning when the config file's top-level `machine`, which names the machine in its ants' roster entries, is no
+/// A warning when the config file's top-level `machine`, which names the machine in its ants' colony entries, is no
 /// machine name ([`Machine`]) and the `[host]` table names none, so that host credentials, the machine's record and
 /// admin orders name the machine as its credentials do, else as `hostname`'s first label.
 fn check_machine_name(host: &config::HostSettings, hostname: &str) -> Option<Check> {
     let top = host.top_machine.as_deref().filter(|_| host.machine.is_none() && host.fallback().is_none())?;
     let detail = format!(
-        "machine {top:?} names the ants' roster entries, but holds characters a machine name cannot, so host \
+        "machine {top:?} names the ants' colony entries, but holds characters a machine name cannot, so host \
          credentials, {MACHINES_BUCKET} and admin orders name the machine {} unless its host credentials name \
          another",
         Machine::from_hostname(hostname)
     );
     let fix = format!(
         "machine = \"{}\" at the top of the config file (letters, digits, '-' and '_', starting with a letter or \
-         digit), or under [host] to keep the roster's name",
+         digit), or under [host] to keep the colony's name",
         Machine::from_hostname(&top.replace('.', "-"))
     );
     Some(Check::warn("machine name", detail, vec![fix]))

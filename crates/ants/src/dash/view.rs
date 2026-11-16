@@ -2,7 +2,7 @@
 //! ants and the pending tool requests on the left, the selected thread's live progress and history on the right, a
 //! footer with the keys or the latest notice, and an opened tool request over it all.
 
-use ants_proto::{ApprovalRequest, RosterEntry, ThreadId, Verdict};
+use ants_proto::{ApprovalRequest, ColonyEntry, ThreadId, Verdict};
 use chrono::{DateTime, TimeDelta, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -12,7 +12,7 @@ use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap}
 
 use super::model::{Detail, Level, Model, Pane};
 use crate::live::Link;
-use crate::{roster, thread, tools};
+use crate::{colony, thread, tools};
 
 /// How old the last read of the stream may be before it shows as stale: a few of the dashboard's periodic reads.
 const STALE: TimeDelta = TimeDelta::seconds(15);
@@ -21,7 +21,7 @@ const MOST_ROWS: u16 = 8;
 
 /// `then` from `now`, such as `5s ago`.
 fn ago(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    format!("{} ago", roster::short(roster::since(then, now)))
+    format!("{} ago", colony::short(colony::since(then, now)))
 }
 
 /// `at` as `ants thread list` shows it, in UTC, without the year and seconds.
@@ -37,7 +37,7 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
     let rows = |n: usize| u16::try_from(n).unwrap_or(u16::MAX).clamp(1, MOST_ROWS) + 2;
     let [threads, ants, approvals] = Layout::vertical([
         Constraint::Min(3),
-        Constraint::Length(rows(model.live.roster.len())),
+        Constraint::Length(rows(model.live.colony.len())),
         Constraint::Length(rows(model.live.approvals.len())),
     ])
     .areas(left);
@@ -51,7 +51,7 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
     }
 }
 
-/// Who the dashboard runs as, the connection, and how fresh the stream and roster read are.
+/// Who the dashboard runs as, the connection, and how fresh the stream and colony read are.
 fn header_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
     let dim = Style::new().add_modifier(Modifier::DIM);
     let mut spans = vec![Span::styled(format!(" ants dash · {} · ", model.live.me), Style::new().bold())];
@@ -60,7 +60,7 @@ fn header_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
         Link::Down(since) => spans.push(Span::styled(
             format!(
                 "○ disconnected {}, reconnecting: what shows may be stale",
-                roster::short(roster::since(since, now))
+                colony::short(colony::since(since, now))
             ),
             Style::new().fg(Color::Red).bold(),
         )),
@@ -74,8 +74,8 @@ fn header_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
         None => Span::styled(" · reading the stream…", dim),
     };
     spans.push(stored);
-    if let Some(at) = model.live.roster_at {
-        spans.push(Span::styled(format!(" · roster read {}", ago(at, now)), dim));
+    if let Some(at) = model.live.colony_at {
+        spans.push(Span::styled(format!(" · colony read {}", ago(at, now)), dim));
     }
     Line::from(spans)
 }
@@ -111,7 +111,7 @@ fn highlight(focused: bool) -> Style {
 fn draw_threads(frame: &mut Frame, model: &Model, area: Rect, now: DateTime<Utc>) {
     let since = match model.live.since.as_secs() {
         0 => "all kept".to_owned(),
-        secs => format!("last {}", roster::short(std::time::Duration::from_secs(secs))),
+        secs => format!("last {}", colony::short(std::time::Duration::from_secs(secs))),
     };
     let focused = model.focus == Pane::Threads && model.detail.is_none();
     let title = format!(" Threads ({}, {since}) ", model.live.order.len());
@@ -145,24 +145,24 @@ fn thread_row(model: &Model, thread: &ThreadId, _now: DateTime<Utc>) -> Line<'st
 }
 
 fn draw_ants(frame: &mut Frame, model: &Model, area: Rect, now: DateTime<Utc>) {
-    let title = format!(" Ants ({}) ", model.live.roster.len());
-    let lines: Vec<Line> = match model.live.roster_at {
-        None => vec![Line::raw("reading the roster…")],
-        Some(_) if model.live.roster.is_empty() => vec![Line::raw("no ants registered")],
-        Some(_) => model.live.roster.iter().map(|e| ant_row(e, now)).collect(),
+    let title = format!(" Ants ({}) ", model.live.colony.len());
+    let lines: Vec<Line> = match model.live.colony_at {
+        None => vec![Line::raw("reading the colony…")],
+        Some(_) if model.live.colony.is_empty() => vec![Line::raw("no ants registered")],
+        Some(_) => model.live.colony.iter().map(|e| ant_row(e, now)).collect(),
     };
     frame.render_widget(Paragraph::new(lines).block(block(title, false)), area);
 }
 
-fn ant_row(entry: &RosterEntry, now: DateTime<Utc>) -> Line<'static> {
-    let (state, color) = match roster::State::of(entry, now) {
-        roster::State::Live => ("live ", Color::Green),
-        roster::State::Stale => ("stale", Color::Yellow),
+fn ant_row(entry: &ColonyEntry, now: DateTime<Utc>) -> Line<'static> {
+    let (state, color) = match colony::State::of(entry, now) {
+        colony::State::Live => ("live ", Color::Green),
+        colony::State::Stale => ("stale", Color::Yellow),
     };
     Line::from(vec![
         Span::raw(format!("{:<12} ", entry.ant)),
         Span::styled(state, Style::new().fg(color)),
-        Span::raw(format!(" {} on {}", roster::activity(entry), entry.machine)),
+        Span::raw(format!(" {} on {}", colony::activity(entry), entry.machine)),
     ])
 }
 

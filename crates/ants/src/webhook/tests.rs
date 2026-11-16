@@ -491,7 +491,7 @@ async fn an_event_reaches_its_ant_once_and_a_refused_one_nothing() {
     let marker =
         seen.get(webhook_marker_key(&github)).await.unwrap().expect("daemons take its messages as a webhook's");
     let marker: ants_proto::Serving = serde_json::from_slice(&marker).unwrap();
-    assert_eq!(marker, ants_proto::Serving::here(ants_daemon::roster::machine().await), "it publishes its version");
+    assert_eq!(marker, ants_proto::Serving::here(ants_daemon::colony::machine().await), "it publishes its version");
 }
 
 #[tokio::test]

@@ -20,7 +20,7 @@ use std::time::Duration;
 use ants_daemon::config::{self, Summary};
 use ants_daemon::creds::{self, Finding, Kind};
 use ants_daemon::keystore::{self, Store};
-use ants_daemon::{bus, roster};
+use ants_daemon::{bus, colony};
 use ants_proto::{DeviceKey, ENROLL_REPEAT, JsDomain, RenewReply, RenewRequest, UserId, subject};
 use anyhow::{Context as _, Result, bail};
 use chrono::Utc;
@@ -158,7 +158,7 @@ pub async fn request(
     let (client, _) = bus::connect_with(url, Some(carrier), store, None, &carrier_user, "ants-renew").await?;
     let mut replies = client.subscribe(subject::renew_reply(&finding.name)).await?;
     let public_key = user.public_key();
-    let mut request = RenewRequest::new(&finding.name, &public_key, roster::machine().await);
+    let mut request = RenewRequest::new(&finding.name, &public_key, colony::machine().await);
     request.current = current_jwt;
     request.xkey = xkey.cloned();
     request.signature = auth::sign(&current_key, &request.signed())?;

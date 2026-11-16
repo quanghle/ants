@@ -41,7 +41,7 @@ pub enum Action {
     LoadHistory(ThreadId),
     /// Store the decision on the request, the first decision winning, as `ants tools approve` and `reject` do.
     Decide(Box<ApprovalRequest>, Verdict),
-    /// Read again what may have missed changes: the tool requests, the roster, the selected thread.
+    /// Read again what may have missed changes: the tool requests, the colony, the selected thread.
     Refresh,
     Quit,
 }

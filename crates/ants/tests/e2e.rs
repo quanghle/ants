@@ -140,13 +140,13 @@ fn exercise_daemon(custom_tools: bool) {
     assert!(stdout.contains(expected), "{stdout}\ndaemon log:\n{}", daemon_log());
     assert!(!home.join(".bd").exists(), "ants must not initialize a tool workspace");
 
-    let roster = run(ants(&["roster", "--json"]));
-    assert!(roster.status.success(), "ants roster: {}", String::from_utf8_lossy(&roster.stderr));
-    let entry: serde_json::Value = serde_json::from_slice(&roster.stdout).unwrap();
+    let colony = run(ants(&["colony", "--json"]));
+    assert!(colony.status.success(), "ants colony: {}", String::from_utf8_lossy(&colony.stderr));
+    let entry: serde_json::Value = serde_json::from_slice(&colony.stdout).unwrap();
     assert_eq!(entry["ant"], "dev-a");
     if custom_tools {
         assert_eq!(entry["whoami"], "Maintain the Rust backend.");
-        assert!(!String::from_utf8_lossy(&roster.stdout).contains("Use the notes tool."));
+        assert!(!String::from_utf8_lossy(&colony.stdout).contains("Use the notes tool."));
     } else {
         assert!(entry.get("whoami").is_none());
     }
@@ -160,12 +160,12 @@ fn exercise_daemon(custom_tools: bool) {
     let shown = run(ants(&["ant", "show", "dev-a", "--json"]));
     assert!(shown.status.success(), "ants ant show: {}", String::from_utf8_lossy(&shown.stderr));
     let shown: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
-    assert_eq!(shown["roster"]["ant"], "dev-a", "{shown}");
+    assert_eq!(shown["colony"]["ant"], "dev-a", "{shown}");
     assert_eq!(shown["queue"], serde_json::json!([]), "{shown}");
     assert_eq!(shown["threads"][0]["thread_id"], thread.as_str(), "{shown}");
     if custom_tools {
         let model = serde_json::json!({"model": "stub-model", "reasoning_effort": "high", "context": "long_context"});
-        assert_eq!(shown["roster"]["model"], model, "{shown}");
+        assert_eq!(shown["colony"]["model"], model, "{shown}");
     }
 
     // dev-a answered the human's thread: finished work waits on the human.
@@ -286,7 +286,7 @@ fn channels_are_managed_posted_to_and_read() {
 
     let (created, warned) = ok(&["channel", "create", "#ops", "--member", "dev-a,dev-b", "--messenger", "triage"]);
     assert_eq!(created, "created #ops: members dev-a,dev-b; messenger triage\n");
-    assert!(warned.contains("dev-a is not in the roster"), "{warned}");
+    assert!(warned.contains("dev-a is not in the colony"), "{warned}");
     let again = run(ants(&["channel", "create", "ops"]));
     assert!(!again.status.success(), "a channel is created once");
     assert!(String::from_utf8_lossy(&again.stderr).contains("exists"));
@@ -389,7 +389,7 @@ fn channels_are_managed_posted_to_and_read() {
     asking.0.stderr.take().unwrap().read_to_string(&mut stderr).unwrap();
     assert_eq!(asking.0.wait().unwrap().code(), Some(1), "{stderr}");
     assert!(stderr.contains(&format!("no reply on thread {thread} within 3s")), "{stderr}");
-    assert!(stderr.contains("messenger is not in the roster: no daemon serves messenger now"), "{stderr}");
+    assert!(stderr.contains("messenger is not in the colony: no daemon serves messenger now"), "{stderr}");
     assert!(stderr.contains("--wait may not end until one does"), "{stderr}");
 
     assert_eq!(ok(&["channel", "delete", "dev"]).0, "deleted #dev; the posts to #dev stay in the stream\n");
@@ -561,8 +561,8 @@ fn the_builtin_messenger_hands_over_to_a_listed_one() {
         }
     };
     let served_from = || {
-        let roster = run(ants(&["roster", "--json"]));
-        let entry: serde_json::Value = serde_json::from_slice(&roster.stdout).unwrap();
+        let colony = run(ants(&["colony", "--json"]));
+        let entry: serde_json::Value = serde_json::from_slice(&colony.stdout).unwrap();
         assert_eq!(entry["ant"], "messenger");
         entry["workdir"].as_str().unwrap().to_owned()
     };
@@ -697,14 +697,14 @@ fn a_configured_adapter_serves_ants_the_messenger_and_the_cli() {
     wait_for("reload failed", 1);
     ask(&["@dev-c", "again"], "dev-c: stub: again");
 
-    // An ant no longer listed stops and leaves the roster.
+    // An ant no longer listed stops and leaves the colony.
     listed("");
     hangup();
     wait_for("config reloaded", 2);
     wait_for("stopping the ant no longer listed", 1);
     let start = Instant::now();
-    while stdout(&run(ants(&["roster", "--json"]))).contains("\"dev-c\"") {
-        assert!(start.elapsed() < WAIT, "dev-c still in the roster\ndaemon log:\n{}", daemon_log());
+    while stdout(&run(ants(&["colony", "--json"]))).contains("\"dev-c\"") {
+        assert!(start.elapsed() < WAIT, "dev-c still in the colony\ndaemon log:\n{}", daemon_log());
         std::thread::sleep(Duration::from_millis(100));
     }
     drop(server);

@@ -385,9 +385,9 @@ pub fn queued(ant: &UserId) -> String {
     format!("ants.queued.{ant}")
 }
 
-/// The roster entry of an ant: the subject its daemon puts [`super::RosterEntry`] on.
-pub fn roster(ant: &UserId) -> String {
-    format!("$KV.{}.{ant}", super::ROSTER_BUCKET)
+/// The colony entry of an ant: the subject its daemon puts [`super::ColonyEntry`] on.
+pub fn colony(ant: &UserId) -> String {
+    format!("$KV.{}.{ant}", super::COLONY_BUCKET)
 }
 
 /// The record of `machine` in [`super::MACHINES_BUCKET`]: the subject its daemon puts [`super::MachineRecord`] on.

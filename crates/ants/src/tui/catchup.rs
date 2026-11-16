@@ -34,7 +34,7 @@ use super::model::{Action, Data, Key, Level, Model};
 use super::work;
 use crate::cmd::send;
 use crate::thread_meta::Meta;
-use crate::{humans, roster, summary};
+use crate::{colony, humans, summary};
 
 /// The file beside the config file that keeps when the last `ants chat` on the device ended.
 pub const STATE_FILE: &str = "chat-state.json";
@@ -494,7 +494,7 @@ impl Ctx {
         let envelope = summary::request_envelope(&self.me.id, config.ant.clone(), text, request);
         // Subscribe first so a fast reply is not missed.
         let mut replies = bus::caught_up_inbox(&self.client, &self.js, &self.me.id, self.me.reading()).await?;
-        warnings.extend(roster::unserved_warnings(&self.js, &[&envelope.to]).await);
+        warnings.extend(colony::unserved_warnings(&self.js, &[&envelope.to]).await);
         if send::deliver(&self.js, self.domain.as_ref(), &envelope).await? == bus::Stored::Outbox {
             warnings.push(send::OUTBOX.to_owned());
         }

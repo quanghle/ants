@@ -4,12 +4,12 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[cfg(doc)]
-use crate::{ANTS_VERSION, MACHINES_BUCKET, ROSTER_BUCKET, subject};
+use crate::{ANTS_VERSION, COLONY_BUCKET, MACHINES_BUCKET, subject};
 use crate::{Machine, UserId};
 
 /// A machine's record in [`MACHINES_BUCKET`], under the key of its name: the ants its daemon serves. The daemon puts
 /// it with the machine's host credentials ([`host_user`]) on start and whenever the ants it serves change, and never
-/// deletes it, so an ant whose daemon stopped, gone from the [`ROSTER_BUCKET`], still has a machine. Readers should
+/// deletes it, so an ant whose daemon stopped, gone from the [`COLONY_BUCKET`], still has a machine. Readers should
 /// treat unknown fields as additions, not errors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MachineRecord {
@@ -17,7 +17,7 @@ pub struct MachineRecord {
     /// The ants the daemon serves, sorted, the built-in messenger left out.
     #[serde(default)]
     pub ants: Vec<UserId>,
-    /// Host name of the machine, as the roster entries of its ants name it.
+    /// Host name of the machine, as the colony entries of its ants name it.
     #[serde(default)]
     pub hostname: String,
     /// The version of ants the daemon runs ([`ANTS_VERSION`]).

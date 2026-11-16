@@ -9,11 +9,11 @@ use std::fmt;
 use std::time::Duration;
 
 use ants_proto::{
-    ATTACHMENT_CHUNK, ATTACHMENT_HEADROOM, ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, DEVICES_BUCKET,
-    FILES_BUCKET, FILES_STREAM, HUMANS_BUCKET, IDENTITIES_BUCKET, LINKS_BUCKET, MACHINES_BUCKET, NOTIFY_BUCKET,
-    OWNERS_BUCKET, PRESENCE_BUCKET, PRESENCE_TTL, REACTIONS_BUCKET, READ_BUCKET, ROSTER_BUCKET, ROSTER_TTL,
-    SESSIONS_BUCKET, STORED_INBOX_DESTINATION, STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, THREADS_BUCKET,
-    WEBHOOK_RETENTION, WEBHOOKS_BUCKET,
+    ATTACHMENT_CHUNK, ATTACHMENT_HEADROOM, ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, COLONY_BUCKET, COLONY_TTL,
+    DEVICES_BUCKET, FILES_BUCKET, FILES_STREAM, HUMANS_BUCKET, IDENTITIES_BUCKET, LINKS_BUCKET, MACHINES_BUCKET,
+    NOTIFY_BUCKET, OWNERS_BUCKET, PRESENCE_BUCKET, PRESENCE_TTL, REACTIONS_BUCKET, READ_BUCKET, SESSIONS_BUCKET,
+    STORED_INBOX_DESTINATION, STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, THREADS_BUCKET, WEBHOOK_RETENTION,
+    WEBHOOKS_BUCKET,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::context::{GetStreamError, GetStreamErrorKind};
@@ -26,7 +26,7 @@ use crate::bus::{DUPLICATE_WINDOW, RETENTION};
 pub enum Object {
     /// The `ANTS` stream.
     Stream,
-    Roster,
+    Colony,
     Sessions,
     Attempts,
     Channels,
@@ -51,7 +51,7 @@ impl Object {
     /// Every object, the stream first.
     pub const ALL: [Self; 19] = [
         Self::Stream,
-        Self::Roster,
+        Self::Colony,
         Self::Sessions,
         Self::Attempts,
         Self::Channels,
@@ -75,7 +75,7 @@ impl Object {
     pub fn bucket(self) -> Option<&'static str> {
         Some(match self {
             Self::Stream | Self::Files => return None,
-            Self::Roster => ROSTER_BUCKET,
+            Self::Colony => COLONY_BUCKET,
             Self::Sessions => SESSIONS_BUCKET,
             Self::Attempts => ATTEMPTS_BUCKET,
             Self::Channels => CHANNELS_BUCKET,
@@ -115,7 +115,7 @@ impl Object {
             Self::Owners => Spec::Stream(Box::new(owners_config())),
             Self::Reactions => Spec::Stream(Box::new(reactions_config())),
             Self::Files => Spec::Stream(Box::new(files_config())),
-            Self::Roster => Spec::Bucket(Box::new(roster_config(ROSTER_TTL))),
+            Self::Colony => Spec::Bucket(Box::new(colony_config(COLONY_TTL))),
             Self::Sessions | Self::Attempts | Self::Links => {
                 Spec::Bucket(Box::new(kept_config(self.bucket().unwrap_or_default())))
             }
@@ -134,10 +134,10 @@ impl Object {
     }
 
     /// Whether a bucket is watched by every daemon, channel manager or standby daemon, each watch an ordered consumer of
-    /// its stream: the roster (each standby daemon's entry), the channels and the humans. Such a bucket needs room for
+    /// its stream: the colony (each standby daemon's entry), the channels and the humans. Such a bucket needs room for
     /// [`MAX_CONSUMERS`] too.
     pub fn watched(self) -> bool {
-        matches!(self, Self::Roster | Self::Channels | Self::Humans)
+        matches!(self, Self::Colony | Self::Channels | Self::Humans)
     }
 
     async fn check(self, js: &jetstream::Context) -> Option<Problem> {
@@ -310,11 +310,11 @@ pub fn stored_inbox() -> stream::Republish {
     }
 }
 
-/// The roster bucket ([`ROSTER_BUCKET`]), whose entries expire `ttl` after their last put, each leaving a marker kept
+/// The colony bucket ([`COLONY_BUCKET`]), whose entries expire `ttl` after their last put, each leaving a marker kept
 /// as long, so watchers see it go.
-pub fn roster_config(ttl: Duration) -> kv::Config {
+pub fn colony_config(ttl: Duration) -> kv::Config {
     kv::Config {
-        bucket: ROSTER_BUCKET.to_owned(),
+        bucket: COLONY_BUCKET.to_owned(),
         description: "Ants being served, refreshed by daemon heartbeats".to_owned(),
         history: 1,
         max_age: ttl,
@@ -352,7 +352,7 @@ pub fn channels_config() -> kv::Config {
     lasting_config(CHANNELS_BUCKET, "Channels: their members and messenger, written by the human")
 }
 
-/// The escalation chains bucket ([`CHAINS_BUCKET`]): a chain outlives its ant's roster entry.
+/// The escalation chains bucket ([`CHAINS_BUCKET`]): a chain outlives its ant's colony entry.
 pub fn chains_config() -> kv::Config {
     lasting_config(CHAINS_BUCKET, "Escalation chains of the ants, each written by its daemon")
 }
@@ -368,7 +368,7 @@ pub fn devices_config() -> kv::Config {
     lasting_config(DEVICES_BUCKET, "User JWTs binding the encryption keys of human devices, and revoked keys")
 }
 
-/// The machines bucket ([`MACHINES_BUCKET`]): a machine's record outlives the roster entries of its ants.
+/// The machines bucket ([`MACHINES_BUCKET`]): a machine's record outlives the colony entries of its ants.
 pub fn machines_config() -> kv::Config {
     lasting_config(MACHINES_BUCKET, "The ants each machine's daemon serves, each record written by its machine")
 }

@@ -76,7 +76,7 @@ pub struct Orders {
     /// The host credentials, which ask `ants signer` to sign an added ant's key or revoke a retired one's, and beside
     /// which an added ant's credentials go; none refuses those orders.
     pub creds: Option<PathBuf>,
-    /// The hub's JetStream domain, where a retirement reads the roster.
+    /// The hub's JetStream domain, where a retirement reads the colony.
     pub js_domain: Option<JsDomain>,
     /// The ants the process serves, which restart their harnesses on an order.
     pub restarts: restart::Restarts,

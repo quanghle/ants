@@ -26,7 +26,7 @@ const WITHIN: Duration = Duration::from_secs(3);
 pub struct Status {
     /// How many home items there are of each kind.
     pub home: Counts,
-    /// The ants working, as the roster says.
+    /// The ants working, as the colony says.
     pub working: Option<Vec<UserId>>,
     /// What the ants spent that UTC day, in dollars.
     pub spend_today: Option<f64>,
@@ -49,7 +49,7 @@ struct Parts {
     marker: Option<ants_proto::ReadMarker>,
     humans: Option<ants_proto::Humans>,
     approvals: Option<Vec<ants_proto::ApprovalRequest>>,
-    roster: Option<Vec<ants_proto::RosterEntry>>,
+    colony: Option<Vec<ants_proto::ColonyEntry>>,
     cards: Option<cards::Read>,
 }
 
@@ -68,8 +68,8 @@ impl Status {
         for request in parts.approvals.unwrap_or_default() {
             model.data.live.approval(&Update::Pending(request));
         }
-        let working = parts.roster.map(|roster| {
-            roster.into_iter().filter(|e| e.activity == Activity::Working).map(|e| e.ant).collect::<Vec<_>>()
+        let working = parts.colony.map(|colony| {
+            colony.into_iter().filter(|e| e.activity == Activity::Working).map(|e| e.ant).collect::<Vec<_>>()
         });
         let (done, today) = parts.cards.as_ref().map_or((false, false), |read| (read.meta.is_ok(), read.today.is_ok()));
         if let Some(read) = parts.cards {
@@ -189,10 +189,10 @@ async fn read(nats: &crate::Nats<'_>, js: &jetstream::Context, deadline: tokio::
         let stream = js.get_stream(STREAM).await?;
         crate::tools::pending(js, &stream, Utc::now()).await
     });
-    let roster = within(deadline, crate::roster::list(js));
-    let ((threads, cards), marker, humans, approvals, roster) =
-        futures::join!(threads_and_cards, marker, humans, approvals, roster);
-    Parts { threads, marker, humans, approvals, roster, cards }
+    let colony = within(deadline, crate::colony::list(js));
+    let ((threads, cards), marker, humans, approvals, colony) =
+        futures::join!(threads_and_cards, marker, humans, approvals, colony);
+    Parts { threads, marker, humans, approvals, colony, cards }
 }
 
 #[cfg(test)]
@@ -208,7 +208,7 @@ mod tests {
         let mut opening = message(1, &thread, "alice", "dev-a", "deploy");
         opening.owner = Some(user("alice"));
         let entries = vec![opening, message(2, &thread, "dev-a", "alice", "deployed")];
-        let mut scout = crate::roster::tests::entry("scout", 60, 5, at(0));
+        let mut scout = crate::colony::tests::entry("scout", 60, 5, at(0));
         scout.activity = Activity::Working;
         let read = cards::Read {
             titles: Ok(Default::default()),
@@ -221,7 +221,7 @@ mod tests {
         let parts = Parts {
             threads: Some((State::new(user("alice"), SINCE), entries)),
             approvals: Some(Vec::new()),
-            roster: Some(vec![scout, crate::roster::tests::entry("dev-a", 60, 5, at(0))]),
+            colony: Some(vec![scout, crate::colony::tests::entry("dev-a", 60, 5, at(0))]),
             cards: Some(read),
             ..Parts::default()
         };

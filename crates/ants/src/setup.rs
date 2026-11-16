@@ -342,7 +342,7 @@ async fn host_creds(report: &mut Report, args: &SetupArgs, connection: &Connecti
     if summary.ants.iter().all(|(_, creds)| creds.is_none()) {
         return report.step(Mark::Skip, step, "the ants connect as no one, and so does the machine's host");
     }
-    let hostname = ants_daemon::roster::machine().await;
+    let hostname = ants_daemon::colony::machine().await;
     let machine = summary.host.machine_or(&hostname);
     let dir = match auth::default_dir() {
         Ok(dir) if auth::holds_team(&dir) => dir,

@@ -557,9 +557,9 @@ fn the_top_level_machine_names_the_host_where_the_host_table_names_none() {
     assert_eq!((top.fallback(), top.machine_or("gen-4f2a.internal")), (Some(m("dev-vm1")), m("dev-vm1")));
     let both = host("machine = \"dev-vm1\"\n[host]\nmachine = \"box\"");
     assert_eq!(both.machine_or("gen-4f2a.internal"), m("box"), "the [host] table's machine comes first");
-    let roster_only = host("machine = \"Dev VM 1\"");
-    assert_eq!(roster_only.top_machine.as_deref(), Some("Dev VM 1"));
-    assert_eq!((roster_only.fallback(), roster_only.machine_or("gen-4f2a.internal")), (None, m("gen-4f2a")));
+    let colony_only = host("machine = \"Dev VM 1\"");
+    assert_eq!(colony_only.top_machine.as_deref(), Some("Dev VM 1"));
+    assert_eq!((colony_only.fallback(), colony_only.machine_or("gen-4f2a.internal")), (None, m("gen-4f2a")));
 
     let auth = home.join(".config/ants/auth");
     std::fs::create_dir_all(&auth).unwrap();

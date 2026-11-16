@@ -315,8 +315,8 @@ pub async fn tell_unserved(nats: &crate::Nats<'_>, js: &jetstream::Context) {
     if !nats.rights.may_publish(&unserved::marker_subject(me)) {
         return;
     }
-    let roster = ants_daemon::mcp::jetstream_roster(js.clone());
-    let mut watch = match unserved::Watch::new(js, nats.domain, me.clone(), Role::Human, roster).await {
+    let colony = ants_daemon::mcp::jetstream_colony(js.clone());
+    let mut watch = match unserved::Watch::new(js, nats.domain, me.clone(), Role::Human, colony).await {
         Ok(watch) => watch,
         Err(e) => return tracing::warn!("not watching the messages sent: {e:#}"),
     };

@@ -15,7 +15,7 @@ use crate::{ant, avatars, completions, export, memories, orders, pause, restart}
 #[derive(Subcommand, Debug)]
 pub(crate) enum AntCommand {
     /// Show ANT as the ant view of `ants chat` does: where and how it runs (machine, harness, agent, model, workdir,
-    /// capabilities, escalation chain, whoami) and what holds it back, as its roster entry tells; the messages waiting
+    /// capabilities, escalation chain, whoami) and what holds it back, as its colony entry tells; the messages waiting
     /// for it (`ants queue`), what it spent that UTC day (`ants spend`), its most recently active threads (`ants
     /// thread list --ant`), its settings as the config file of its machine has them, secrets hidden, and the latest
     /// admin orders to it (`ants ant orders`). Needs a human's credentials, and for the queue a daemon of the ant to
@@ -24,7 +24,7 @@ pub(crate) enum AntCommand {
     Show {
         #[arg(add = ArgValueCandidates::new(completions::ants))]
         ant: UserId,
-        /// One JSON object: the roster entry with its state, holds, queue, spend_today, threads, settings and orders.
+        /// One JSON object: the colony entry with its state, holds, queue, spend_today, threads, settings and orders.
         #[arg(long)]
         json: bool,
         /// Config file with the ants' caps (default: ~/.ants/config.toml, if it exists).
@@ -179,7 +179,7 @@ pub(crate) enum AntCommand {
         /// The file to write (default: ./ANT.ant); never overwritten.
         #[arg(short, long)]
         out: Option<PathBuf>,
-        /// Mark ANT moved once exported: its daemon drains it and leaves the roster, and no daemon starts it until
+        /// Mark ANT moved once exported: its daemon drains it and leaves the colony, and no daemon starts it until
         /// `ants ant unseal`.
         #[arg(long = "move")]
         seal: bool,

@@ -1,24 +1,24 @@
-//! The roster against a real nats-server: entries appear, refresh, leave on a clean stop and expire after a crash.
+//! The colony against a real nats-server: entries appear, refresh, leave on a clean stop and expire after a crash.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use ants_daemon::bus;
-use ants_daemon::roster::{self, Registration, Workload};
-use ants_proto::{Activity, RosterEntry, SignInNeeded, UserId};
+use ants_daemon::colony::{self, Registration, Workload};
+use ants_proto::{Activity, ColonyEntry, SignInNeeded, UserId};
 use ants_test_support::NatsServer as Server;
 use async_nats::jetstream::kv;
 
-fn entry(ant: &str) -> RosterEntry {
+fn entry(ant: &str) -> ColonyEntry {
     entry_on(ant, "test")
 }
 
 /// An entry of a daemon run of its own on `machine`.
-fn entry_on(ant: &str, machine: &str) -> RosterEntry {
+fn entry_on(ant: &str, machine: &str) -> ColonyEntry {
     static RUNS: AtomicUsize = AtomicUsize::new(0);
     let now = chrono::Utc::now();
-    RosterEntry {
+    ColonyEntry {
         ant: ant.parse().unwrap(),
         machine: machine.to_owned(),
         instance: format!("run-{}", RUNS.fetch_add(1, Ordering::Relaxed)),
@@ -46,7 +46,7 @@ fn entry_on(ant: &str, machine: &str) -> RosterEntry {
     }
 }
 
-async fn read(kv: &kv::Store, ant: &str) -> Option<RosterEntry> {
+async fn read(kv: &kv::Store, ant: &str) -> Option<ColonyEntry> {
     kv.get(ant).await.unwrap().map(|v| serde_json::from_slice(&v).unwrap())
 }
 
@@ -65,7 +65,7 @@ async fn entries_refresh_leave_and_expire() {
     let Some(server) = Server::start() else { return };
     let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
     let ttl = Duration::from_secs(2);
-    let kv = bus::ensure_roster(&js, ttl).await.unwrap();
+    let kv = bus::ensure_colony(&js, ttl).await.unwrap();
     let beat = Duration::from_millis(300);
 
     // Heartbeats outlive the TTL, then a clean stop removes the entry at once.
@@ -89,7 +89,7 @@ async fn entries_refresh_leave_and_expire() {
     assert!(gone_after >= ttl - Duration::from_millis(500), "expired too early: {gone_after:?}");
 
     // An existing bucket keeps its max age.
-    let reopened = bus::ensure_roster(&js, Duration::from_secs(60)).await.unwrap();
+    let reopened = bus::ensure_colony(&js, Duration::from_secs(60)).await.unwrap();
     assert_eq!(reopened.status().await.unwrap().max_age(), ttl);
 }
 
@@ -97,19 +97,19 @@ async fn entries_refresh_leave_and_expire() {
 async fn listing_gives_every_entry_by_ant() {
     let Some(server) = Server::start() else { return };
     let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
-    let kv = bus::ensure_roster(&js, Duration::from_secs(30)).await.unwrap();
-    assert!(roster::list_entries(&kv).await.unwrap().is_empty());
+    let kv = bus::ensure_colony(&js, Duration::from_secs(30)).await.unwrap();
+    assert!(colony::list_entries(&kv).await.unwrap().is_empty());
 
     let beat = Duration::from_secs(10);
     let _b = Registration::start(kv.clone(), entry("dev-b"), beat).await.unwrap();
     let _a = Registration::start(kv.clone(), entry("dev-a"), beat).await.unwrap();
     kv.put("junk", "not an entry".into()).await.unwrap();
-    let listed: Vec<_> = roster::list_entries(&kv).await.unwrap().into_iter().map(|e| e.ant.to_string()).collect();
+    let listed: Vec<_> = colony::list_entries(&kv).await.unwrap().into_iter().map(|e| e.ant.to_string()).collect();
     assert_eq!(listed, ["dev-a", "dev-b"]);
 }
 
 /// Poll until `ant`'s entry shows `activity`, or fail after `limit`.
-async fn wait_activity(kv: &kv::Store, ant: &str, activity: Activity, limit: Duration) -> RosterEntry {
+async fn wait_activity(kv: &kv::Store, ant: &str, activity: Activity, limit: Duration) -> ColonyEntry {
     let start = Instant::now();
     loop {
         let entry = read(kv, ant).await.expect("listed");
@@ -125,7 +125,7 @@ async fn wait_activity(kv: &kv::Store, ant: &str, activity: Activity, limit: Dur
 async fn turning_working_or_idle_shows_before_the_next_beat() {
     let Some(server) = Server::start() else { return };
     let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
-    let kv = bus::ensure_roster(&js, Duration::from_secs(30)).await.unwrap();
+    let kv = bus::ensure_colony(&js, Duration::from_secs(30)).await.unwrap();
     let workload = Arc::new(Workload::default());
     workload.set_harnesses(1);
     let beat = Duration::from_secs(60);
@@ -157,7 +157,7 @@ async fn wait_signed_out(kv: &kv::Store, ant: &str, signed_out: Option<&SignInNe
 async fn a_signed_out_harness_shows_until_it_signs_in_before_the_next_beat() {
     let Some(server) = Server::start() else { return };
     let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
-    let kv = bus::ensure_roster(&js, Duration::from_secs(30)).await.unwrap();
+    let kv = bus::ensure_colony(&js, Duration::from_secs(30)).await.unwrap();
     let workload = Arc::new(Workload::default());
     let beat = Duration::from_secs(60);
     let _a = Registration::start_with(kv.clone(), entry("dev-a"), beat, Some(workload.clone())).await.unwrap();
@@ -176,23 +176,23 @@ async fn a_signed_out_harness_shows_until_it_signs_in_before_the_next_beat() {
 async fn the_builtin_messenger_waits_for_another_daemons_messenger() {
     let Some(server) = Server::start() else { return };
     let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
-    let kv = bus::ensure_roster(&js, Duration::from_secs(30)).await.unwrap();
+    let kv = bus::ensure_colony(&js, Duration::from_secs(30)).await.unwrap();
     let every = Duration::from_millis(100);
 
     let mut here = entry_on("messenger", "here");
-    roster::wait_for_turn(&kv, &mut here, every).await.unwrap();
+    colony::wait_for_turn(&kv, &mut here, every).await.unwrap();
     assert_eq!(read(&kv, "messenger").await.map(|e| e.machine).as_deref(), Some("here"), "nobody served it");
-    roster::wait_for_turn(&kv, &mut here, every).await.unwrap();
+    colony::wait_for_turn(&kv, &mut here, every).await.unwrap();
     assert_eq!(read(&kv, "messenger").await.unwrap().instance, here.instance, "its own entry");
     let mut neighbour = entry_on("messenger", "here");
-    let blocked = tokio::time::timeout(every * 5, roster::wait_for_turn(&kv, &mut neighbour, every)).await;
+    let blocked = tokio::time::timeout(every * 5, colony::wait_for_turn(&kv, &mut neighbour, every)).await;
     assert!(blocked.is_err(), "started while another daemon on the same machine serves the messenger");
     kv.delete("messenger").await.unwrap();
 
     let there = Registration::start(kv.clone(), entry_on("messenger", "there"), Duration::from_secs(10)).await.unwrap();
     let waiting = tokio::spawn({
         let kv = kv.clone();
-        async move { roster::wait_for_turn(&kv, &mut here, every).await }
+        async move { colony::wait_for_turn(&kv, &mut here, every).await }
     });
     tokio::time::sleep(every * 5).await;
     assert!(!waiting.is_finished(), "started while another machine serves the messenger");
@@ -204,7 +204,7 @@ async fn the_builtin_messenger_waits_for_another_daemons_messenger() {
 
     let racing = |machine: &str| {
         let (kv, mut entry) = (kv.clone(), entry_on("messenger", machine));
-        tokio::spawn(async move { roster::wait_for_turn(&kv, &mut entry, every).await })
+        tokio::spawn(async move { colony::wait_for_turn(&kv, &mut entry, every).await })
     };
     let (a, b) = (racing("a"), racing("b"));
     tokio::time::sleep(every * 5).await;
@@ -213,21 +213,21 @@ async fn the_builtin_messenger_waits_for_another_daemons_messenger() {
     b.abort();
 }
 
-/// The roster leaves a marker when an entry expires, so a daemon waiting for its turn takes over within about a second
-/// of the expiry, without looking at the roster in between.
+/// The colony leaves a marker when an entry expires, so a daemon waiting for its turn takes over within about a second
+/// of the expiry, without looking at the colony in between.
 #[tokio::test]
 async fn a_waiting_daemon_takes_over_as_soon_as_the_entry_expires() {
     let Some(server) = Server::start() else { return };
     let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
     let ttl = Duration::from_secs(2);
-    let kv = bus::ensure_roster(&js, ttl).await.unwrap();
+    let kv = bus::ensure_colony(&js, ttl).await.unwrap();
 
     let there = Registration::start(kv.clone(), entry_on("messenger", "there"), Duration::from_secs(60)).await;
     let put_at = Instant::now();
     drop(there.unwrap());
     let mut here = entry_on("messenger", "here");
     let every = Duration::from_secs(60);
-    tokio::time::timeout(ttl * 3, roster::wait_for_turn(&kv, &mut here, every)).await.expect("took over").unwrap();
+    tokio::time::timeout(ttl * 3, colony::wait_for_turn(&kv, &mut here, every)).await.expect("took over").unwrap();
     let took = put_at.elapsed();
     assert!(took >= ttl - Duration::from_millis(500), "took over before the entry expired: {took:?}");
     assert!(took <= ttl + Duration::from_millis(1500), "took over {took:?} after the put");
@@ -247,13 +247,13 @@ async fn wait_lost(registration: &Registration, limit: Duration) {
 async fn the_builtin_messenger_hands_over_to_a_messenger_started_later() {
     let Some(server) = Server::start() else { return };
     let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
-    let kv = bus::ensure_roster(&js, Duration::from_secs(30)).await.unwrap();
+    let kv = bus::ensure_colony(&js, Duration::from_secs(30)).await.unwrap();
     let every = Duration::from_millis(100);
     // No heartbeat comes during the test: the watch of the entry does it all.
     let beat = Duration::from_secs(60);
 
     let mut builtin = entry_on("messenger", "here");
-    let revision = roster::wait_for_turn(&kv, &mut builtin, every).await.unwrap();
+    let revision = colony::wait_for_turn(&kv, &mut builtin, every).await.unwrap();
     let held = Registration::hold(kv.clone(), builtin.clone(), revision, beat, None).await.unwrap();
 
     // Deleted under it, the entry is put back at once.
@@ -273,7 +273,7 @@ async fn the_builtin_messenger_hands_over_to_a_messenger_started_later() {
     let mut again = entry_on("messenger", "here");
     let waiting = tokio::spawn({
         let kv = kv.clone();
-        async move { roster::wait_for_turn(&kv, &mut again, every).await.map(|_| again) }
+        async move { colony::wait_for_turn(&kv, &mut again, every).await.map(|_| again) }
     });
     tokio::time::sleep(every * 5).await;
     assert!(!waiting.is_finished(), "started while the listed messenger serves");
@@ -289,14 +289,14 @@ async fn the_builtin_messenger_hands_over_to_a_messenger_started_later() {
 async fn of_two_builtin_messengers_only_the_latest_put_serves() {
     let Some(server) = Server::start() else { return };
     let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
-    let kv = bus::ensure_roster(&js, Duration::from_secs(30)).await.unwrap();
+    let kv = bus::ensure_colony(&js, Duration::from_secs(30)).await.unwrap();
     let (every, beat) = (Duration::from_millis(100), Duration::from_millis(200));
 
     let mut a = entry_on("messenger", "here");
-    let stale = roster::wait_for_turn(&kv, &mut a, every).await.unwrap();
+    let stale = colony::wait_for_turn(&kv, &mut a, every).await.unwrap();
     kv.delete("messenger").await.unwrap();
     let mut b = entry_on("messenger", "here");
-    let revision = roster::wait_for_turn(&kv, &mut b, every).await.unwrap();
+    let revision = colony::wait_for_turn(&kv, &mut b, every).await.unwrap();
     let b_held = Registration::hold(kv.clone(), b.clone(), revision, beat, None).await.unwrap();
 
     let first = read(&kv, "messenger").await.unwrap();

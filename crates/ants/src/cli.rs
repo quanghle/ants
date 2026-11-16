@@ -98,7 +98,7 @@ pub(crate) enum Command {
     },
     /// List the ants being served: harness, machine, capabilities, escalation chain, last heartbeat, and whether it
     /// is recent.
-    Roster {
+    Colony {
         /// One JSON entry per line, with its state.
         #[arg(long)]
         json: bool,
@@ -107,7 +107,7 @@ pub(crate) enum Command {
     #[command(subcommand)]
     Ant(AntCommand),
     /// List the machines whose daemons recorded the ants they serve, with host credentials (`ants auth host`): kept
-    /// when an ant goes offline and its roster entry expires. With ANT, the machine serving it, or that last did.
+    /// when an ant goes offline and its colony entry expires. With ANT, the machine serving it, or that last did.
     Machines {
         /// Only the machines of this ant.
         #[arg(add = ArgValueCandidates::new(completions::ants))]
@@ -269,7 +269,7 @@ pub(crate) enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Interactive terminal dashboard: recent threads and their history, the ants' live progress and the roster, and
+    /// Interactive terminal dashboard: recent threads and their history, the ants' live progress and the colony, and
     /// the pending tool requests, each shown in full and answered after a confirmation. Needs a terminal and a human's
     /// credentials.
     Dash {
@@ -309,7 +309,7 @@ pub(crate) enum Command {
     /// List the messages waiting for ANT, oldest first: those its daemon holds, running or waiting their turn on their
     /// thread, then those awaiting redelivery (one retried after a failed attempt is not withdrawable), then the inbox
     /// messages and the channel posts waking ANT still in the stream, with id, thread, sender, age and place in the
-    /// thread's queue. Without ANT, lists those of every ant live in the roster, with an ANT column, leaving out the
+    /// thread's queue. Without ANT, lists those of every ant live in the colony, with an ANT column, leaving out the
     /// ants with nothing waiting. Needs a human's credentials, and a daemon of the ant to answer.
     Queue {
         #[arg(add = ArgValueCandidates::new(completions::ants))]
@@ -327,7 +327,7 @@ pub(crate) enum Command {
         ant: UserId,
         message: Uuid,
     },
-    /// Create the ANTS stream and the roster, sessions, attempts, channels, humans, chains, links, owners, webhooks,
+    /// Create the ANTS stream and the colony, sessions, attempts, channels, humans, chains, links, owners, webhooks,
     /// reactions, threads, read, presence and notify buckets on the server, those missing; one already there stays as
     /// it is. Needs a human's credentials. Every other command run with them does the same on connecting.
     Init,
@@ -474,7 +474,7 @@ pub(crate) enum Command {
 pub(crate) enum HookCommand {
     /// Run CMD once per event of one kind, with the event's JSON document on its stdin, until stopped. Stored
     /// events (tool requests, verdicts, dead letters) are read through the credentials' own consumer, from where it
-    /// left off, and acked once CMD ends, whatever its exit; live ones (escalations, status, roster) from now on.
+    /// left off, and acked once CMD ends, whatever its exit; live ones (escalations, status, colony) from now on.
     /// Failures and timeouts are logged.
     Run {
         /// The kind of event.

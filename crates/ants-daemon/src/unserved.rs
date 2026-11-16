@@ -1,9 +1,9 @@
 //! Telling the sender of messages that keep waiting for an ant no daemon serves.
 //!
-//! `ants ask` and the MCP tools warn at send time of an ant the roster lists no live daemon for; when the ant's daemon
+//! `ants ask` and the MCP tools warn at send time of an ant the colony lists no live daemon for; when the ant's daemon
 //! goes away later, or never comes, the message waits in the ant's inbox consumer with no word. A [`Watch`] reads back
 //! the messages one user sent ([`subject::inbox_from`]), and finds those still waiting ([`MessageMark`]: none or
-//! started) [`AFTER`] they were sent, for an ant it has seen absent from the roster, or paused, for [`AFTER`] too: the watcher
+//! started) [`AFTER`] they were sent, for an ant it has seen absent from the colony, or paused, for [`AFTER`] too: the watcher
 //! of an ant is its daemon, that of a human `ants webhook serve` or `ants inbox --follow`. Whoever tells of a message
 //! first creates its marker ([`unserved_key`]), so it is told once across watchers and restarts.
 
@@ -13,7 +13,7 @@ use std::ops::ControlFlow;
 use std::time::{Duration, SystemTime};
 
 use ants_proto::{
-    ATTEMPTS_BUCKET, Envelope, JsDomain, MessageMark, Role, RosterEntry, ThreadId, UserId, Uuid, message_mark_key,
+    ATTEMPTS_BUCKET, ColonyEntry, Envelope, JsDomain, MessageMark, Role, ThreadId, UserId, Uuid, message_mark_key,
     sent_reader, subject, unserved_key,
 };
 use anyhow::{Context as _, Result};
@@ -22,10 +22,10 @@ use chrono::{DateTime, TimeDelta, Utc};
 use tokio::time::Instant;
 
 use crate::direct_kv::DirectKv;
-use crate::mcp::Roster;
+use crate::mcp::Colony;
 use crate::reading::{self, Reading};
 
-/// How long a message waits, and its ant stays absent from the roster, before the sender is told.
+/// How long a message waits, and its ant stays absent from the colony, before the sender is told.
 pub const AFTER: Duration = Duration::from_mins(15);
 /// How often a watcher looks.
 pub const CHECK_EVERY: Duration = Duration::from_mins(1);
@@ -83,7 +83,7 @@ pub struct Unserved {
     pub owner: Option<UserId>,
     pub messages: Vec<Waiting>,
     pub absent_since: DateTime<Utc>,
-    /// Whether `ant` is paused, rather than absent from the roster.
+    /// Whether `ant` is paused, rather than absent from the colony.
     pub paused: bool,
     /// The capabilities `ant` advertised when last seen, if it was.
     pub capabilities: Option<Vec<String>>,
@@ -156,11 +156,11 @@ pub struct Watch {
     reading: Reading,
     js: jetstream::Context,
     attempts: DirectKv,
-    roster: Roster,
+    colony: Colony,
     /// The stream sequence to read on from; none before anything was read.
     next: Option<u64>,
     sent: BTreeMap<u64, Sent>,
-    /// When each ant messages wait for was first seen absent from the roster, or paused.
+    /// When each ant messages wait for was first seen absent from the colony, or paused.
     absent_since: HashMap<UserId, DateTime<Utc>>,
     /// The ants seen paused when last looked.
     paused: HashSet<UserId>,
@@ -172,16 +172,16 @@ pub struct Watch {
 
 impl Watch {
     /// The watch of the messages `sender`, in `role`, sends, read as its credentials allow (an ant through its own
-    /// [`sent_reader`], one read at a time; a human by direct gets), with `roster` read for the ants they wait for.
+    /// [`sent_reader`], one read at a time; a human by direct gets), with `colony` read for the ants they wait for.
     pub async fn new(
         js: &jetstream::Context,
         js_domain: Option<&JsDomain>,
         sender: UserId,
         role: Role,
-        roster: Roster,
+        colony: Colony,
     ) -> Result<Self> {
         let attempts = DirectKv::new(js, js_domain, ATTEMPTS_BUCKET).await?;
-        Ok(Self::with(sender, role, js.clone(), attempts, roster))
+        Ok(Self::with(sender, role, js.clone(), attempts, colony))
     }
 
     /// Read the messages sent as `reading` says instead: an assistant's daemon by direct gets
@@ -192,7 +192,7 @@ impl Watch {
         self
     }
 
-    fn with(sender: UserId, role: Role, js: jetstream::Context, attempts: DirectKv, roster: Roster) -> Self {
+    fn with(sender: UserId, role: Role, js: jetstream::Context, attempts: DirectKv, colony: Colony) -> Self {
         let reading = if role.is_human() { Reading::Gets } else { Reading::Consumer };
         Self {
             sender,
@@ -200,7 +200,7 @@ impl Watch {
             reading,
             js,
             attempts,
-            roster,
+            colony,
             next: None,
             sent: BTreeMap::new(),
             absent_since: HashMap::new(),
@@ -271,7 +271,7 @@ impl Watch {
             self.absent_since.clear();
             return Ok(Vec::new());
         }
-        let entries = (self.roster)().await.context("reading the roster")?;
+        let entries = (self.colony)().await.context("reading the colony")?;
         self.observe(&entries, now);
         let after = TimeDelta::from_std(AFTER)?;
         let due: Vec<u64> =
@@ -332,10 +332,10 @@ impl Watch {
         Ok(())
     }
 
-    /// Note which ants messages wait for are absent from `entries`, the roster at `now`, or paused there (since
+    /// Note which ants messages wait for are absent from `entries`, the colony at `now`, or paused there (since
     /// their pause), and the capabilities of those live.
-    fn observe(&mut self, entries: &[RosterEntry], now: DateTime<Utc>) {
-        let live: Vec<&RosterEntry> = entries.iter().filter(|e| crate::roster::is_live(e, now)).collect();
+    fn observe(&mut self, entries: &[ColonyEntry], now: DateTime<Utc>) {
+        let live: Vec<&ColonyEntry> = entries.iter().filter(|e| crate::colony::is_live(e, now)).collect();
         for entry in &live {
             self.capabilities.insert(entry.ant.clone(), entry.capabilities.clone());
         }
@@ -365,7 +365,7 @@ impl Watch {
         ant: UserId,
         owner: Option<UserId>,
         messages: Vec<Waiting>,
-        entries: &[RosterEntry],
+        entries: &[ColonyEntry],
         now: DateTime<Utc>,
     ) -> Unserved {
         let capabilities = self.capabilities.get(&ant).cloned();
@@ -410,13 +410,13 @@ fn sent(
 
 /// The live ants of `entries` but `not`, not paused, advertising some of `capabilities`: the most shared first, then by
 /// id.
-fn peers(capabilities: &[String], entries: &[RosterEntry], not: &[&UserId], now: DateTime<Utc>) -> Vec<Peer> {
+fn peers(capabilities: &[String], entries: &[ColonyEntry], not: &[&UserId], now: DateTime<Utc>) -> Vec<Peer> {
     let mut peers: Vec<Peer> = entries
         .iter()
-        .filter(|e| !not.contains(&&e.ant) && crate::roster::is_live(e, now) && e.paused.is_none())
+        .filter(|e| !not.contains(&&e.ant) && crate::colony::is_live(e, now) && e.paused.is_none())
         .filter_map(|e| {
             let shared: Vec<String> =
-                capabilities.iter().filter(|c| crate::roster::has_capability(e, c)).cloned().collect();
+                capabilities.iter().filter(|c| crate::colony::has_capability(e, c)).cloned().collect();
             (!shared.is_empty()).then(|| Peer { ant: e.ant.clone(), shared })
         })
         .collect();
@@ -440,7 +440,7 @@ mod tests {
         name.parse().unwrap()
     }
 
-    fn entry(ant: &str, capabilities: &[&str], heartbeat_at: DateTime<Utc>) -> RosterEntry {
+    fn entry(ant: &str, capabilities: &[&str], heartbeat_at: DateTime<Utc>) -> ColonyEntry {
         serde_json::from_value(serde_json::json!({
             "ant": ant, "machine": "m1", "instance": "run-1", "harness": "copilot", "capabilities": capabilities,
             "started_at": heartbeat_at, "heartbeat_at": heartbeat_at, "activity": "idle", "handling": 0,
@@ -480,7 +480,7 @@ mod tests {
             entry("dev-d", &["rust", "docs"], now),
             entry("dev-e", &["rust", "docs"], stale),
             entry("dev-f", &["go"], now),
-            RosterEntry { paused: Some(ants_proto::Paused { since: now, by: None }), ..entry("dev-g", &["rust"], now) },
+            ColonyEntry { paused: Some(ants_proto::Paused { since: now, by: None }), ..entry("dev-g", &["rust"], now) },
         ];
         let capabilities = ["rust".to_owned(), "docs".to_owned()];
         let found = peers(&capabilities, &entries, &[&p("dev-a"), &p("dev-b")], now);
@@ -554,10 +554,10 @@ mod tests {
         // dev-b is live at first, then gone; dev-c and dev-d stay, dev-c paused at last.
         let gone = Arc::new(Mutex::new(false));
         let paused = Arc::new(Mutex::new(None));
-        let roster: Roster = {
+        let colony: Colony = {
             let (gone, paused) = (gone.clone(), paused.clone());
             Arc::new(move || {
-                let dev_c = RosterEntry { paused: paused.locked().clone(), ..entry("dev-c", &[], later(60)) };
+                let dev_c = ColonyEntry { paused: paused.locked().clone(), ..entry("dev-c", &[], later(60)) };
                 let mut entries = vec![dev_c, entry("dev-d", &["rust"], later(60))];
                 if !*gone.locked() {
                     entries.push(entry("dev-b", &["rust"], t0));
@@ -575,7 +575,7 @@ mod tests {
         let mark = MessageMark::Finished { thread_id: finished.thread_id.clone(), at: t0 };
         attempts.put(message_mark_key(&dev_b, &finished.id), serde_json::to_vec(&mark).unwrap()).await.unwrap();
         let is_human = |user: &UserId| *user == alice;
-        let new_watch = || async { Watch::new(&js, None, dev_a.clone(), Role::Ant, roster.clone()).await.unwrap() };
+        let new_watch = || async { Watch::new(&js, None, dev_a.clone(), Role::Ant, colony.clone()).await.unwrap() };
 
         let mut watch = new_watch().await;
         assert_eq!(watch.check(&is_human, t0).await.unwrap(), []);

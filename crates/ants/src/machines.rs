@@ -1,5 +1,5 @@
 //! `ants machines`: the machines whose daemons recorded the ants they serve ([`MACHINES_BUCKET`]), which stay there
-//! after an ant's roster entry expired, so that an ant that is offline still has a machine.
+//! after an ant's colony entry expired, so that an ant that is offline still has a machine.
 
 use std::time::Duration;
 
@@ -10,7 +10,7 @@ use chrono::Utc;
 use futures::StreamExt as _;
 use serde_json::json;
 
-use crate::roster::{short, since};
+use crate::colony::{short, since};
 
 /// Records asked for at once.
 const BATCH: usize = 256;

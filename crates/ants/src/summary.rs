@@ -17,7 +17,7 @@ use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
 
 use crate::thread::{self, Entry, Pick};
-use crate::{Nats, inbox, progress, roster, thread_meta};
+use crate::{Nats, colony, inbox, progress, thread_meta};
 
 /// Most bytes of entries a request carries: the newest that fit.
 pub const ENTRIES_MAX: usize = 16 * 1024;
@@ -97,7 +97,7 @@ pub async fn ask(nats: &Nats<'_>, js: &jetstream::Context, envelope: &Envelope) 
     let client = js.client();
     // Subscribe first so a fast reply is not missed.
     let mut replies = bus::caught_up_inbox(&client, js, &me.id, me.reading()).await?;
-    let unserved = roster::unserved_warnings(js, &[&envelope.to]).await;
+    let unserved = colony::unserved_warnings(js, &[&envelope.to]).await;
     for warning in &unserved {
         tracing::warn!("{warning}");
     }

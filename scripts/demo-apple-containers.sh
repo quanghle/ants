@@ -11,7 +11,7 @@ Usage: scripts/demo-apple-containers.sh COMMAND [ARGS...]
   up                    Start the hub and two leaves (build first if needed)
   login NODE            Sign in to Copilot on hub, leaf-a or leaf-b
   ants NODE ARGS...      Run ants on a node, with its demo human credentials
-  status                Show the demo roster
+  status                Show the demo colony
   smoke                 Check three live ants and messages across both leaves
   logs NODE             Show the last 80 lines of a node's logs
   down                  Remove demo containers and network; keep all state
@@ -140,7 +140,7 @@ up() {
         fi
     done
     printf 'Demo ready. Copilot sign-in: %s login NODE\n' "$0"
-    run_ants hub roster
+    run_ants hub colony
 }
 
 down() {
@@ -170,7 +170,7 @@ smoke() {
         owned "$node" >/dev/null || die "node not found: $node"
         ready "$node"
         container exec "$name-$node" test -S /demo/ant/mcp.sock
-        run_ants "$node" roster --json | jq --slurp --exit-status \
+        run_ants "$node" colony --json | jq --slurp --exit-status \
             'map(select(.state == "live" and .harness == "copilot") | .ant) | sort
              == ["hub-ant", "leaf-a-ant", "leaf-b-ant"]' >/dev/null
     done
@@ -192,7 +192,7 @@ case "$command" in
 build) build ;;
 up) up ;;
 down) down ;;
-status) run_ants hub roster ;;
+status) run_ants hub colony ;;
 smoke) smoke ;;
 ants) node=$1; shift; run_ants "$node" "$@" ;;
 login) owned "$1" || die "node not found: $1"; container exec --interactive --tty "$name-$1" copilot login --device-code ;;

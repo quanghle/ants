@@ -24,7 +24,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::roster::{short, since};
+use crate::colony::{short, since};
 use crate::{Nats, auth, machines};
 
 /// How often [`send`] looks for the outcome of the order it sent.
@@ -745,7 +745,7 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), format!("{text}paused = true\n"));
         let reload = tokio::time::timeout(WAIT, triggers.next()).await.expect("a reload at once");
         assert_eq!(reload, crate::reload::Trigger::Edited);
-        assert_eq!(pausers.take(&dev_a), Some(alice), "credited in the roster once reloaded");
+        assert_eq!(pausers.take(&dev_a), Some(alice), "credited in the colony once reloaded");
 
         let line = crate::pause::order(&admin, &js, &dev_a, None, true, WAIT).await.unwrap();
         assert!(line.starts_with("dev-a paused on m1"), "already paused: {line}");

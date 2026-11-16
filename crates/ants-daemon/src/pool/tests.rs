@@ -102,7 +102,7 @@ async fn a_thread_keeps_its_harness_between_messages() {
 }
 
 #[tokio::test]
-async fn a_harness_start_tells_the_roster_its_agent() {
+async fn a_harness_start_tells_the_colony_its_agent() {
     let (launch, _, _) = fake::launch();
     let workload = Arc::new(Workload::default());
     let pool = Pool::new(launch, SessionStore::memory(), 4, IDLE).reporting_to(workload.clone());
@@ -230,7 +230,7 @@ async fn low_memory_stops_idle_harnesses_at_once_and_lowers_the_cap_until_it_rec
     let others = async {
         settle().await;
         assert_eq!(pool.evict_idle(Instant::now()), 2, "idle harnesses stop at once, the busy one stays");
-        let low = workload.memory_low().expect("the roster shows low memory");
+        let low = workload.memory_low().expect("the colony shows low memory");
         assert_eq!((low.available, low.max_harnesses), (512 << 20, 1));
         let waiting = pool.prompt(&t1, "d");
         let release = async {

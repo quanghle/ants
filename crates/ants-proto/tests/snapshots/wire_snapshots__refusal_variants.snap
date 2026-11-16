@@ -20,7 +20,7 @@ expression: value
     "detail": "alice"
   },
   {
-    "refusal": "not_in_roster",
+    "refusal": "not_in_colony",
     "detail": "ghost"
   },
   {

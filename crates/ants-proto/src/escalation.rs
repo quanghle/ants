@@ -7,7 +7,7 @@ use crate::{ApprovalRequest, Error, ThreadId, UserId};
 use crate::{CHAINS_BUCKET, Envelope, storage_warning_key};
 
 /// An ant's escalation chain in the [`CHAINS_BUCKET`], under the key of its id: its `escalate_to`, as the
-/// roster entry publishes it, kept after the entry expires. Its daemon puts it on start; readers skip an entry naming
+/// colony entry publishes it, kept after the entry expires. Its daemon puts it on start; readers skip an entry naming
 /// another ant than its key ([`ChainEntry::check_key`]) and treat unknown fields as additions, not errors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChainEntry {

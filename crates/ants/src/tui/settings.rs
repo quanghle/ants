@@ -406,8 +406,8 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::colony::tests::entry;
     use crate::live::tests::{at, user};
-    use crate::roster::tests::entry;
     use crate::tui::model::Focus;
     use crate::tui::model::tests::model;
     use crate::tui::nav;
@@ -453,7 +453,7 @@ mod tests {
     #[test]
     fn the_settings_pane_shows_what_was_read_and_sends_a_change_expecting_it() {
         let mut m = model();
-        m.data.live.roster(vec![entry("dev-a", 60, 2, at(2))], at(2));
+        m.data.live.colony(vec![entry("dev-a", 60, 2, at(2))], at(2));
         m.select(nav::Item::Ant(user("dev-a")));
         m.focus = Focus::View;
         m.key(Key::Left, at(3));

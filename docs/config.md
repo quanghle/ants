@@ -11,7 +11,7 @@ human = "alice"                            # fallback human for ownerless escala
 metrics = "127.0.0.1:9464"                 # serve /healthz and /metrics (default: off)
 timezone = "America/New_York"              # default IANA time zone for schedule cron (default UTC)
 redact = true                              # redact secrets from daemon publications (default true)
-machine = "dev-vm1"                        # machine named in roster entries, notices and admin orders (default: host name)
+machine = "dev-vm1"                        # machine named in colony entries, notices and admin orders (default: host name)
 
 [cli]                                      # CLI defaults when no flag or env var is set
 creds = "~/.config/ants/auth/alice.creds"  # human credentials (ant credentials are not used here)
@@ -52,14 +52,14 @@ context = "1m"                             # optional key from the harness conte
 history_budget = 131072                    # optional bytes of thread history seeding a rebuilt session
 fallback = ["copilot", ":claude-opus-4-1"] # optional; tried in order while the harness cannot serve
 home = "~/.ants/dev-a"                     # default: ~/.ants/<name>
-whoami = "Maintain Rust backend services." # published in roster and prepended to prompts
+whoami = "Maintain Rust backend services." # published in colony and prepended to prompts
 memory = "Use notes MCP for durable memory."
 tasks = "Use bd for task tracking."
 env = { BD_DB = "/srv/ants/dev-a/bd.db" }  # literal env overrides for harness and subprocesses
 allow = ["read", "search", "execute:cargo test*"]
 allow_tools = false                        # true equals allow = ["*"]
 approval_timeout = "5m"                    # default
-capabilities = ["rust", "backend"]         # routing tags published in roster
+capabilities = ["rust", "backend"]         # routing tags published in colony
 max_harnesses = 4                          # default
 worktrees = true                           # git worktree per thread; default: on for a git workdir
                                            # not ignored by git, with max_harnesses > 1 (see Worktrees);
@@ -102,7 +102,7 @@ text = "Triage the failing nightly tests."
 allow = ["read:*", "execute:cargo test*"]
 ```
 
-`machine` (1–64 characters, no control characters) labels where the file's ants run, such as a VM or container whose host name is generated: `ants roster`, `ants dash`, `list_ants` and the sign-in, quota and failing-harness notices show it in place of the host name. A daemon serving a single ant from CLI flags alone uses the host name. When it is also a machine name (1–64 letters, digits, `-` and `_`, starting with a letter or digit) it names the machine for its [host credentials](auth.md#machine-host-credentials), its record in `ants_machines`, its admin orders (`--on MACHINE`) and the signer's record, where neither the `[host]` table's `machine` nor the host credentials name one; otherwise those use the host name's first label, and `ants doctor` warns.
+`machine` (1–64 characters, no control characters) labels where the file's ants run, such as a VM or container whose host name is generated: `ants colony`, `ants dash`, `list_ants` and the sign-in, quota and failing-harness notices show it in place of the host name. A daemon serving a single ant from CLI flags alone uses the host name. When it is also a machine name (1–64 letters, digits, `-` and `_`, starting with a letter or digit) it names the machine for its [host credentials](auth.md#machine-host-credentials), its record in `ants_machines`, its admin orders (`--on MACHINE`) and the signer's record, where neither the `[host]` table's `machine` nor the host credentials name one; otherwise those use the host name's first label, and `ants doctor` warns.
 
 `~` expands to the home directory; other relative paths resolve against the config file's directory (`env` values stay literal). Unknown keys, duplicate ant/template/schedule names, a schedule named after an ant, or `messenger = false` with no `[[ant]]` fail config loading. Unreachable NATS or JetStream endpoints retry with exponential backoff (`1s` to `30s`); credential or permission errors fail that ant immediately while remaining ants keep running, exiting non-zero only if none start.
 
@@ -125,13 +125,13 @@ allow = ["read:*", "execute:cargo test*"]
 An ant's role settings and core memories are the ant's, the same on whichever machine serves it: `whoami`, `memory`, `capabilities`, `model`, `reasoning_effort`, `context`, `fallback`, `allow` and `escalate_to`. They live in one record on the bus, `<ant>.settings` in `ants_identities`, which admins change with `set` orders (`ants ant set ANT model=o3`, [auth.md](auth.md#admin-orders)). Everything else stays the machine's own, in its `config.toml`: `workdir`, `env`, `harness` and the `[harnesses]` tables, `tasks` (the task database), `creds`, `nats`, caps and limits, worktrees, `paused`. An ant added from a template shares only the settings a request chooses (`whoami`, `memory`, `capabilities`, `model`, `reasoning_effort`, `context`): its `fallback`, `allow` and `escalate_to` follow the template (with its `allow_sets` and `added_by`) as the file loads, so a change of the template reaches the ant on the next reload: its record holds none of them, and its daemon ignores any it finds there.
 
 - Seeding: a daemon serving the whole file with host credentials reads the shared settings of its ants at start (waiting up to 5 s for them before starting the ants) and every 10 s. An ant with no record yet gets one created from the fields its `[[ant]]` table sets, by create-only write signed with the ant's credentials, so the first machine to serve it wins and the others read that record. A record not signed with the ant's credentials, signed with revoked ones, or put back by a host after it was replaced (stored at another stream sequence than the one it was signed for) is ignored and written anew in the same way, a record put back with the settings the daemon kept before it ([auth.md](auth.md#wire-acls-and-verification-invariants)); a machine without the ant's credentials leaves it to one that has them.
-- Serving: once an ant has a record, its daemon serves the record's values for these fields, a field the record leaves out taking its default, and ignores its table's; a change of the record reloads the daemon, restarting the ant as any change of its settings does; a change that only adds or removes drift restarts nothing, the roster entry telling the new drift. Shared settings the machine cannot serve (such as a `fallback` naming a harness it lacks) are logged, and the table's are served instead. A standby daemon taking the ant over serves the same record, so the ant answers alike on every machine; `ants ant memories` reads `whoami` and `memory` from it.
-- Drift: a field the table sets otherwise than the record is drift (never one a template fixes). The daemon lists it in the ant's roster entry (`drift`) and its machine's record in `ants_machines` (`drift`, by ant); `ants roster` notes each drifted ant, and `ants doctor` (**shared settings**) lists each field by ant and machine. `ants ant show` lists the shared settings and marks the table's lines they override `(ignored: shared)`; a record that does not verify as daemons verify it shows marked `NOT VERIFIED` with the reason, and overrides nothing. To mend drift, remove the fields from the table, or set them with `ants ant set`, which also writes a field the serving machine's table sets.
+- Serving: once an ant has a record, its daemon serves the record's values for these fields, a field the record leaves out taking its default, and ignores its table's; a change of the record reloads the daemon, restarting the ant as any change of its settings does; a change that only adds or removes drift restarts nothing, the colony entry telling the new drift. Shared settings the machine cannot serve (such as a `fallback` naming a harness it lacks) are logged, and the table's are served instead. A standby daemon taking the ant over serves the same record, so the ant answers alike on every machine; `ants ant memories` reads `whoami` and `memory` from it.
+- Drift: a field the table sets otherwise than the record is drift (never one a template fixes). The daemon lists it in the ant's colony entry (`drift`) and its machine's record in `ants_machines` (`drift`, by ant); `ants colony` notes each drifted ant, and `ants doctor` (**shared settings**) lists each field by ant and machine. `ants ant show` lists the shared settings and marks the table's lines they override `(ignored: shared)`; a record that does not verify as daemons verify it shows marked `NOT VERIFIED` with the reason, and overrides nothing. To mend drift, remove the fields from the table, or set them with `ants ant set`, which also writes a field the serving machine's table sets.
 - Without host credentials, or with `ants daemon --ant`, a daemon reads the shared settings all the same, at start (waiting up to 5 s) and every 10 s, over a connection as the first of its ants on each server, and serves them as above, but writes none: an ant without a record serves its table's settings until a daemon with host credentials creates one. Over a server without authentication it creates missing records as well. Without the `ants_identities` bucket a daemon shares nothing and serves its table's settings, and `set` orders change them in `config.toml`.
 
 ## Pausing an ant
 
-`paused = true` on an `[[ant]]` pauses it: its daemon stops pulling from the ant's inbox and channel consumers, so the messages to it wait queued in the stream, neither drained nor returned and spending no delivery attempts, and the ant takes no new prompt; prompts already running go on to their end, and messages already in hand stay in hand, unprompted, until it resumes. Its roster entry says `paused` (`{since, by}`: when, and the admin whose order paused it, left out when the file did), which `ants roster`, `ants ant show`, the ant view of `ants chat` (`‖` in the nav), the `list_ants` MCP tool and the warnings at send time show; `route` picks a paused ant last, and a sender whose messages wait 15 min for a paused ant is told so, as for an ant no daemon serves. Removing the key, or `paused = false`, resumes it, and it takes the messages queued for it in turn. A reload that changes `paused` alone pauses or resumes the running ant in place, restarting no harness. Templated ants may set it too.
+`paused = true` on an `[[ant]]` pauses it: its daemon stops pulling from the ant's inbox and channel consumers, so the messages to it wait queued in the stream, neither drained nor returned and spending no delivery attempts, and the ant takes no new prompt; prompts already running go on to their end, and messages already in hand stay in hand, unprompted, until it resumes. Its colony entry says `paused` (`{since, by}`: when, and the admin whose order paused it, left out when the file did), which `ants colony`, `ants ant show`, the ant view of `ants chat` (`‖` in the nav), the `list_ants` MCP tool and the warnings at send time show; `route` picks a paused ant last, and a sender whose messages wait 15 min for a paused ant is told so, as for an ant no daemon serves. Removing the key, or `paused = false`, resumes it, and it takes the messages queued for it in turn. A reload that changes `paused` alone pauses or resumes the running ant in place, restarting no harness. Templated ants may set it too.
 
 `ants ant pause ANT [--machine M] [--wait DUR]` and `ants ant resume ANT` send the admin order (`pause`, `resume`) that has the daemon of the ant's machine set `paused = true`, or remove it, and reload at once ([auth.md](auth.md#admin-orders)); `p` in the ant view of `ants chat` sends the one that flips it.
 
@@ -197,7 +197,7 @@ An ant listed in `managers` (when `ants daemon` serves the whole config file, no
 1. Validates `name`, `overrides` and `max_ants` against the local config's `[[ant_template]]`, refusing out-of-bounds requests immediately.
 2. Generates a local user NKey (`~/.config/ants/auth/<name>.nk`, `0600`; refuses if `<name>.creds` exists).
 3. Publishes signed `AntRequest`s on `ants.antreq.<manager>` every 5 s until `ants signer` answers or `timeout` elapses (default `15m`, max `30m`).
-4. Writes `<name>.creds`, deletes `<name>.nk`, appends `[[ant]]` to `config.toml`, and returns once `<name>` appears in `ants_roster` (or after 60 s noting it is not yet listed).
+4. Writes `<name>.creds`, deletes `<name>.nk`, appends `[[ant]]` to `config.toml`, and returns once `<name>` appears in `ants_colony` (or after 60 s noting it is not yet listed).
 
 Behind a leaf node, `ants signer` also renews the leaf uplink JWT and admits the ant to the outbox (refusing up front if the uplink JWT would exceed 252 KiB; see [transport.md](transport.md#enrollment-behind-a-leaf-node)). The daemon writes the renewed uplink credentials and toggles `./` on the `credentials` path in `leaf.conf` before reloading `ants.nats` / `ants-nats` (`SIGHUP`), reconnecting only the uplink while local clients stay connected.
 
@@ -218,7 +218,7 @@ The signer also answers ants' reactions requests (MCP `react` and `list_reaction
 Managers also get `retire_ant(name)` (`other:retire_ant`) for ants whose `added_by` matches them:
 
 1. Removes the `[[ant]]` table from `config.toml` so the daemon drains and stops the ant.
-2. Waits up to `5m` for `<name>` to leave `ants_roster`.
+2. Waits up to `5m` for `<name>` to leave `ants_colony`.
 3. Requests retirement from `ants signer` on `ants.antreq.<manager>` (every 5 s for up to `2m`); the signer verifies `issued.jsonl` (`template` + `added_by`), revokes `<name>`'s keys, and pushes the account to the hub. Behind a leaf node the request carries the uplink credentials, as `request_ant`'s does, and the signer renews them without `<name>`, drops it from the leaf's members and outbox sourcing, and the manager's machine writes them and reconnects the uplink ([transport.md](transport.md#enrollment-behind-a-leaf-node)); when that fails, the retirement stands and the manager's reply names `ants auth leaf M --remove-ant NAME` and `ants leaf outbox M --remove-ant NAME`.
 4. Deletes `<name>.creds` (and any OS-stored seed).
 
@@ -367,13 +367,13 @@ Without `--harness`, `ants setup` creating a config file chooses the file's top-
 
 When a harness cannot run prompts for an environmental reason, the daemon holds messages in hand with 20 s progress acks (up to `max_harnesses × 2`), spending no attempts, incrementing no delivery count and dead-lettering nothing (if a tool call already started before a sign-out or limit error, `<ant>.<seq>` is kept so the retry prepends the cut-off warning):
 
-- **Signed out** (ACP `auth_required` `-32000`, or auth error text on error/stderr): publishes `signed_out` in `ants_roster` (`since`, `sign_in`) and `ants.status`, notifies the thread owner (else default human) once directly on the thread with the sign-in command and machine, and probes every 60 s (`initialize` + `session/new` in `workdir`) until signed in.
+- **Signed out** (ACP `auth_required` `-32000`, or auth error text on error/stderr): publishes `signed_out` in `ants_colony` (`since`, `sign_in`) and `ants.status`, notifies the thread owner (else default human) once directly on the thread with the sign-in command and machine, and probes every 60 s (`initialize` + `session/new` in `workdir`) until signed in.
 - **Provider limits** (classified from prompt errors, or from Copilot/Antigravity replies ≤ 4096 chars whose streamed chunks all start with `Error:`, `API Error:`, `Info:` or `⚠`):
   - *Rate limit / overload* (HTTP `429`/`529`, `rate limit`, `too many requests`, `overloaded`, `resource_exhausted`, `exhausted your capacity`, `rate_limited`, or a quota resetting within 5 m): backs off `30s` doubling to `10m` (logged only).
   - *Exhausted quota* (`insufficient_quota`, `quota exceeded`, `usage limit`, `spending limit`, `credit balance is too low`, `quota_exhausted`, plus built-in Copilot/Claude/Antigravity quota phrases): notifies the owner once on the thread and backs off `15m` doubling to `2h`.
-  - Explicit retry hints in the error (`retry after 30s`, `resets in 2h27m3s`, `retryDelay`, epoch after `|`) override the delay within the cap. Publishes `limited` (`rate_limit` or `quota`, `since`, `until`) in `ants_roster`.
+  - Explicit retry hints in the error (`retry after 30s`, `resets in 2h27m3s`, `retryDelay`, epoch after `|`) override the delay within the cap. Publishes `limited` (`rate_limit` or `quota`, `since`, `until`) in `ants_colony`.
   - Retry notices the harness streams before an attempt that succeeds (Copilot's `Info: … Retrying...`, Antigravity's `⚠ API error (attempt N): …`) are dropped from the answer when the last of them ends a line, or ends a sentence the answer does not continue on the same line; status updates still show them. An answer whose own first chunk starts like an error line (`Error:` followed by more of the same sentence) is sent whole.
-- **Startup failures** (missing/broken binary, bad flags/mode/model): retried as normal prompt failures on a single thread (dead-lettered after 5 attempts). After **3 startup failures within 10 m across ≥ 2 threads** with no success in between, a breaker opens: holds messages, publishes `failing` (`since`, `error`) in `ants_roster`, sends one direct notice with a level-0 `harness` escalation (`ants harness check --harness NAME`), and probes every 60 s with the ant's settings. After a probe succeeds, one failure before a message completes reopens the breaker immediately without re-notifying.
+- **Startup failures** (missing/broken binary, bad flags/mode/model): retried as normal prompt failures on a single thread (dead-lettered after 5 attempts). After **3 startup failures within 10 m across ≥ 2 threads** with no success in between, a breaker opens: holds messages, publishes `failing` (`since`, `error`) in `ants_colony`, sends one direct notice with a level-0 `harness` escalation (`ants harness check --harness NAME`), and probes every 60 s with the ant's settings. After a probe succeeds, one failure before a message completes reopens the breaker immediately without re-notifying.
 
 ### Fallbacks
 
@@ -389,7 +389,7 @@ While the ant's own harness cannot serve, each message goes to the first fallbac
 
 - **Sessions:** a thread whose stored session ran in another harness (recorded beside the session in `ants_sessions`, so across daemon restarts too) starts a new session seeded from the thread's history, as after a failed `session/load`; a `:<model>` fallback resumes the thread's session. A live harness on another backend is replaced once idle.
 - **Turned away:** a fallback that is signed out, limited or fails to start is passed over for 5 min (or its limit's retry hint), spending no attempt and touching none of the own harness's holds; with every fallback passed over, messages wait as without fallbacks, and the owner (else the default human) gets one notice naming the fallbacks, why the last turned a message away and when one is tried again, sent again only after a fallback or the own harness answers.
-- **Shown:** each reply ends with `[ants] Answered by fallback NAME, harness OWN being signed out.` (or `out of quota`, `failing to start`); `ants_roster` publishes `fallback` (`name`, `since`); `ants roster` shows `fallback` as the activity; `ants ask`, `ask_ant` and `route` treat the ant as served (`route` prefers ants answered by their own harness).
+- **Shown:** each reply ends with `[ants] Answered by fallback NAME, harness OWN being signed out.` (or `out of quota`, `failing to start`); `ants_colony` publishes `fallback` (`name`, `since`); `ants colony` shows `fallback` as the activity; `ants ask`, `ask_ant` and `route` treat the ant as served (`route` prefers ants answered by their own harness).
 - **Told once:** the owner's sign-in, quota or breaker notice (one per outage, as without fallbacks) says the messages go to the fallbacks meanwhile.
 - **Back:** a successful sign-in check or breaker probe, or after a quota's backoff the next message the own harness answers, sends messages to the own harness again and clears `fallback`; live fallback sessions are replaced as their threads come up.
 - **Caps:** prompt limits and spending caps apply to every prompt whichever harness runs it.
@@ -404,7 +404,7 @@ History budget precedence: ant `history_budget` -> selected `context`'s `history
 
 ### Model, reasoning effort and context
 
-`model` is applied before `reasoning_effort` via ACP selectors on new and resumed sessions; unsupported values or mismatched read-backs fail the session and list valid options. The ant's `ants_roster` entry publishes the ones set as `model` (`{model, reasoning_effort, context}`, each left out when unset; the whole field when none is), shown by `ants ant show` and the ant view of `ants chat`.
+`model` is applied before `reasoning_effort` via ACP selectors on new and resumed sessions; unsupported values or mismatched read-backs fail the session and list valid options. The ant's `ants_colony` entry publishes the ones set as `model` (`{model, reasoning_effort, context}`, each left out when unset; the whole field when none is), shown by `ants ant show` and the ant view of `ants chat`.
 
 - **Copilot:** `context` accepts `default` or `long_context` (`--context ...`).
 - **Claude:** `context` accepts `default`, or `1m` with an explicit `model` (selects `<model>[1m]`).
@@ -416,14 +416,14 @@ Each harness process takes hundreds of MB (about 255 MB for Copilot CLI, see REA
 
 - Every idle harness (no prompt in flight) stops at once, least recently used first, instead of after `idle_timeout`; its session resumes via `session/load` on the next message. Busy harnesses finish their prompts.
 - New threads get a harness only while fewer than `max_harnesses` from `[memory_pressure]` run (capped by the ant's own `max_harnesses`); other messages wait in hand as when the pool is full.
-- The daemon logs a warning, sets `memory_low` (`{since, available, max_harnesses}`) in the ant's `ants_roster` entry (shown by `ants roster` and `list_ants`) and `ants_memory_low` to `1` in `/metrics`.
+- The daemon logs a warning, sets `memory_low` (`{since, available, max_harnesses}`) in the ant's `ants_colony` entry (shown by `ants colony` and `list_ants`) and `ants_memory_low` to `1` in `/metrics`.
 
 Memory counts as recovered once available memory reaches 150 % of `min_available`, so the state does not flap; the daemon logs it, clears `memory_low` and admits threads up to `max_harnesses` again. Each ant checks on its own, so the lower cap applies per ant. `[memory_pressure]` applies to every ant in the file; changing it on reload restarts them.
 
 ## Avatars
 
 Every ant has a pixel-art avatar derived from its identity record in `ants_identities` (its avatar seed, else its
-`id`), or from its name while no record is readable. `ants chat`, `ants roster`, `ants watch`, `ants inbox` and
+`id`), or from its name while no record is readable. `ants chat`, `ants colony`, `ants watch`, `ants inbox` and
 `ants ant show` put its one-line face before its name, and the ant view of `ants chat` and `ants ant avatar` draw its
 head. `[cli]` `theme` picks the palette for the terminal's background: `dark`, `light`, or `auto` (the default), which
 asks the terminal for its background colour (OSC 11) and waits up to 200 ms for an answer, then reads `COLORFGBG`,
@@ -459,9 +459,9 @@ for its prompts in flight to end, so the files are packed between prompts. Nothi
 safe, as it may hold sensitive memory.
 
 `--move` then marks the ant moved in its identity record. The daemon serving it drains it as on a stop (it takes no
-new message, hands back those waiting and finishes the prompts in flight) and leaves the roster, every daemon listing
+new message, hands back those waiting and finishes the prompts in flight) and leaves the colony, every daemon listing
 it waits for the mark to go before serving it, and messages to it get the notice of an ant no daemon serves. `ants
-roster`, `ants doctor`, `ants ant show` and the ant view of `ants chat` show it moved. `ants ant unseal ANT` clears
+colony`, `ants doctor`, `ants ant show` and the ant view of `ants chat` show it moved. `ants ant unseal ANT` clears
 the mark; `ants auth revoke ANT` ends the ant on the old bus once the import succeeded
 ([auth.md](auth.md#moving-an-ant-to-another-bus)).
 

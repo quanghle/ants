@@ -4,17 +4,17 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[cfg(doc)]
-use crate::{ANTS_VERSION, PERMISSIONS_VERSION, ROSTER_BUCKET, ROSTER_HEARTBEAT, ROSTER_TTL};
+use crate::{ANTS_VERSION, COLONY_BUCKET, COLONY_HEARTBEAT, COLONY_TTL, PERMISSIONS_VERSION};
 use crate::{Error, PermissionsVersion, UserId};
 
-/// An ant's entry in the [`ROSTER_BUCKET`], under the key of its id.
+/// An ant's entry in the [`COLONY_BUCKET`], under the key of its id.
 ///
-/// The serving daemon puts it on start, re-puts it every [`ROSTER_HEARTBEAT`] and deletes it on a clean stop. The
-/// bucket's max age is [`ROSTER_TTL`], so the entry of a daemon that died expires on its own. A daemon that defers to
+/// The serving daemon puts it on start, re-puts it every [`COLONY_HEARTBEAT`] and deletes it on a clean stop. The
+/// bucket's max age is [`COLONY_TTL`], so the entry of a daemon that died expires on its own. A daemon that defers to
 /// others, as the built-in messenger's does, puts it only over its own entry or none, and stops serving once another
 /// daemon puts it. Readers should treat unknown fields as additions, not errors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RosterEntry {
+pub struct ColonyEntry {
     pub ant: UserId,
     /// The machine the daemon runs on: its config file's `machine`, else its host name.
     pub machine: String,
@@ -86,7 +86,7 @@ pub struct RosterEntry {
     pub drift: Vec<String>,
 }
 
-/// An ant's pause, as its roster entry reports it ([`RosterEntry::paused`]).
+/// An ant's pause, as its colony entry reports it ([`ColonyEntry::paused`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Paused {
     /// When the daemon serving the ant found it paused: the order's or the config's change, or the daemon's start.
@@ -97,7 +97,7 @@ pub struct Paused {
     pub by: Option<UserId>,
 }
 
-/// The model settings of an ant's config, as its roster entry reports them ([`RosterEntry::model`]). A missing
+/// The model settings of an ant's config, as its colony entry reports them ([`ColonyEntry::model`]). A missing
 /// setting keeps the harness's default.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AntModel {
@@ -130,7 +130,7 @@ impl fmt::Display for AntModel {
     }
 }
 
-/// A fallback answering an ant's messages, as its roster entry reports it ([`RosterEntry::fallback`]).
+/// A fallback answering an ant's messages, as its colony entry reports it ([`ColonyEntry::fallback`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServingFallback {
     /// The fallback as the ant's config names it: `<harness>`, or `<harness>:<model>`.
@@ -139,7 +139,7 @@ pub struct ServingFallback {
     pub since: DateTime<Utc>,
 }
 
-/// Low memory on an ant's machine, as its roster entry reports it ([`RosterEntry::memory_low`]).
+/// Low memory on an ant's machine, as its colony entry reports it ([`ColonyEntry::memory_low`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryLow {
     /// When the available memory fell below the daemon's threshold.
@@ -150,7 +150,7 @@ pub struct MemoryLow {
     pub max_harnesses: u32,
 }
 
-/// An ant's harness that keeps failing to start, as its roster entry reports it ([`RosterEntry::failing`]).
+/// An ant's harness that keeps failing to start, as its colony entry reports it ([`ColonyEntry::failing`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessFailing {
     /// When the failures held the messages first since a message last got past the harness's start.
@@ -159,7 +159,7 @@ pub struct HarnessFailing {
     pub error: String,
 }
 
-/// A provider limit an ant's harness ran into, as its roster entry reports it ([`RosterEntry::limited`]).
+/// A provider limit an ant's harness ran into, as its colony entry reports it ([`ColonyEntry::limited`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessLimit {
     pub kind: LimitKind,
@@ -192,7 +192,7 @@ impl LimitKind {
     }
 }
 
-/// The agent behind an ant's harness, as it names itself in ACP `initialize` ([`RosterEntry::agent`]).
+/// The agent behind an ant's harness, as it names itself in ACP `initialize` ([`ColonyEntry::agent`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessAgent {
     pub name: String,
@@ -205,7 +205,7 @@ impl fmt::Display for HarnessAgent {
     }
 }
 
-/// An ant's harness that is signed out, as its roster entry reports it ([`RosterEntry::signed_out`]).
+/// An ant's harness that is signed out, as its colony entry reports it ([`ColonyEntry::signed_out`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignInNeeded {
     /// When the harness first said it is signed out.
@@ -215,7 +215,7 @@ pub struct SignInNeeded {
     pub sign_in: Option<String>,
 }
 
-/// What an ant is doing, as its roster entry reports it.
+/// What an ant is doing, as its colony entry reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Activity {
@@ -238,7 +238,7 @@ impl Activity {
     }
 }
 
-impl RosterEntry {
+impl ColonyEntry {
     /// The KV key of the entry.
     pub fn key(&self) -> &str {
         self.ant.as_str()
@@ -250,7 +250,7 @@ impl RosterEntry {
         if key == self.key() {
             return Ok(());
         }
-        Err(Error::ForeignUser { kind: "roster entry", user: self.ant.clone(), at: format!("key {key}") })
+        Err(Error::ForeignUser { kind: "colony entry", user: self.ant.clone(), at: format!("key {key}") })
     }
 
     /// The leader of the ant's escalation chain, if it has one.
@@ -266,8 +266,8 @@ mod tests {
 
     #[test]
     #[allow(clippy::too_many_lines)]
-    fn roster_entry_round_trips_and_tolerates_additions() {
-        let entry = RosterEntry {
+    fn colony_entry_round_trips_and_tolerates_additions() {
+        let entry = ColonyEntry {
             ant: p("dev-a"),
             machine: "build-1".to_owned(),
             instance: "run-1".to_owned(),
@@ -301,38 +301,38 @@ mod tests {
         assert!(!json.contains("signed_out") && !json.contains("limited") && !json.contains("failing"), "{json}");
         assert!(!json.contains("agent") && !json.contains("fallback") && !json.contains("memory_low"), "{json}");
         assert!(!json.contains("model") && !json.contains("paused"), "{json}");
-        assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), entry);
+        assert_eq!(serde_json::from_str::<ColonyEntry>(&json).unwrap(), entry);
         assert_eq!(entry.leader(), None);
         let agent = HarnessAgent { name: "copilot-agent".to_owned(), version: "1.0.3".to_owned() };
-        let named = RosterEntry { agent: Some(agent.clone()), ..entry.clone() };
+        let named = ColonyEntry { agent: Some(agent.clone()), ..entry.clone() };
         let json = serde_json::to_string(&named).unwrap();
         assert!(json.contains(r#""agent":{"name":"copilot-agent","version":"1.0.3"}"#), "{json}");
-        assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), named);
+        assert_eq!(serde_json::from_str::<ColonyEntry>(&json).unwrap(), named);
         assert_eq!(agent.to_string(), "copilot-agent 1.0.3");
-        let chained = RosterEntry { escalate_to: vec![p("lead"), p("dev-b")], ..entry.clone() };
+        let chained = ColonyEntry { escalate_to: vec![p("lead"), p("dev-b")], ..entry.clone() };
         let json = serde_json::to_string(&chained).unwrap();
         assert!(json.contains(r#""escalate_to":["lead","dev-b"]"#), "{json}");
-        assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), chained);
+        assert_eq!(serde_json::from_str::<ColonyEntry>(&json).unwrap(), chained);
         assert_eq!(chained.leader(), Some(&p("lead")));
-        let busy = RosterEntry { activity: Activity::Working, handling: 2, harnesses: 1, ..entry.clone() };
+        let busy = ColonyEntry { activity: Activity::Working, handling: 2, harnesses: 1, ..entry.clone() };
         let json = serde_json::to_string(&busy).unwrap();
         assert!(json.contains(r#""activity":"working","handling":2,"harnesses":1"#), "{json}");
-        assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), busy);
+        assert_eq!(serde_json::from_str::<ColonyEntry>(&json).unwrap(), busy);
         let since = "2026-01-01T00:00:00Z".parse().unwrap();
-        let out = RosterEntry {
+        let out = ColonyEntry {
             signed_out: Some(SignInNeeded { since, sign_in: Some("copilot login".to_owned()) }),
             ..entry.clone()
         };
         let json = serde_json::to_string(&out).unwrap();
         assert!(json.contains(r#""signed_out":{"since":"2026-01-01T00:00:00Z","sign_in":"copilot login"}"#), "{json}");
-        assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), out);
-        let unknown = RosterEntry { signed_out: Some(SignInNeeded { since, sign_in: None }), ..entry.clone() };
+        assert_eq!(serde_json::from_str::<ColonyEntry>(&json).unwrap(), out);
+        let unknown = ColonyEntry { signed_out: Some(SignInNeeded { since, sign_in: None }), ..entry.clone() };
         let json = serde_json::to_string(&unknown).unwrap();
         assert!(json.contains(r#""signed_out":{"since":"2026-01-01T00:00:00Z"}"#), "{json}");
-        assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), unknown);
+        assert_eq!(serde_json::from_str::<ColonyEntry>(&json).unwrap(), unknown);
         let until = "2026-01-01T00:15:00Z".parse().unwrap();
         let limited =
-            RosterEntry { limited: Some(HarnessLimit { kind: LimitKind::Quota, since, until }), ..entry.clone() };
+            ColonyEntry { limited: Some(HarnessLimit { kind: LimitKind::Quota, since, until }), ..entry.clone() };
         let json = serde_json::to_string(&limited).unwrap();
         assert!(
             json.contains(
@@ -340,22 +340,22 @@ mod tests {
             ),
             "{json}"
         );
-        assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), limited);
-        let failing = RosterEntry {
+        assert_eq!(serde_json::from_str::<ColonyEntry>(&json).unwrap(), limited);
+        let failing = ColonyEntry {
             failing: Some(HarnessFailing { since, error: "copilot: not found".to_owned() }),
             ..entry.clone()
         };
         let json = serde_json::to_string(&failing).unwrap();
         assert!(json.contains(r#""failing":{"since":"2026-01-01T00:00:00Z","error":"copilot: not found"}"#), "{json}");
-        assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), failing);
-        let fallback = RosterEntry {
+        assert_eq!(serde_json::from_str::<ColonyEntry>(&json).unwrap(), failing);
+        let fallback = ColonyEntry {
             fallback: Some(ServingFallback { name: "claude:sonnet".to_owned(), since }),
             ..entry.clone()
         };
         let json = serde_json::to_string(&fallback).unwrap();
         assert!(json.contains(r#""fallback":{"name":"claude:sonnet","since":"2026-01-01T00:00:00Z"}"#), "{json}");
-        assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), fallback);
-        let low = RosterEntry {
+        assert_eq!(serde_json::from_str::<ColonyEntry>(&json).unwrap(), fallback);
+        let low = ColonyEntry {
             memory_low: Some(MemoryLow { since, available: 512 << 20, max_harnesses: 1 }),
             ..entry.clone()
         };
@@ -364,30 +364,30 @@ mod tests {
             json.contains(r#""memory_low":{"since":"2026-01-01T00:00:00Z","available":536870912,"max_harnesses":1}"#),
             "{json}"
         );
-        assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), low);
+        assert_eq!(serde_json::from_str::<ColonyEntry>(&json).unwrap(), low);
         assert_eq!(AntModel::of(None, None, None), None);
         let model = AntModel::of(Some("gpt-5".to_owned()), None, Some("1m".to_owned()));
         assert_eq!(model.as_ref().map(ToString::to_string).as_deref(), Some("gpt-5, context 1m"));
-        let modelled = RosterEntry { model, ..entry.clone() };
+        let modelled = ColonyEntry { model, ..entry.clone() };
         let json = serde_json::to_string(&modelled).unwrap();
         assert!(json.contains(r#""model":{"model":"gpt-5","context":"1m"}"#), "{json}");
-        assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), modelled);
-        let paused = RosterEntry { paused: Some(Paused { since, by: Some(p("alice")) }), ..entry.clone() };
+        assert_eq!(serde_json::from_str::<ColonyEntry>(&json).unwrap(), modelled);
+        let paused = ColonyEntry { paused: Some(Paused { since, by: Some(p("alice")) }), ..entry.clone() };
         let json = serde_json::to_string(&paused).unwrap();
         assert!(json.contains(r#""paused":{"since":"2026-01-01T00:00:00Z","by":"alice"}"#), "{json}");
-        assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), paused);
-        let by_hand = RosterEntry { paused: Some(Paused { since, by: None }), ..entry.clone() };
+        assert_eq!(serde_json::from_str::<ColonyEntry>(&json).unwrap(), paused);
+        let by_hand = ColonyEntry { paused: Some(Paused { since, by: None }), ..entry.clone() };
         let json = serde_json::to_string(&by_hand).unwrap();
         assert!(json.contains(r#""paused":{"since":"2026-01-01T00:00:00Z"}"#), "{json}");
         assert_eq!(entry.key(), "dev-a");
         assert_eq!(entry.check_key("dev-a"), Ok(()));
-        assert_eq!(entry.check_key("dev-b").unwrap_err().to_string(), "roster entry of dev-a found at key dev-b");
-        assert_eq!(subject::roster(&entry.ant), "$KV.ants_roster.dev-a");
+        assert_eq!(entry.check_key("dev-b").unwrap_err().to_string(), "colony entry of dev-a found at key dev-b");
+        assert_eq!(subject::colony(&entry.ant), "$KV.ants_colony.dev-a");
 
         let minimal = r#"{"ant":"dev-b","machine":"m","instance":"run-2","harness":"copilot","capabilities":[],
             "started_at":"2026-01-01T00:00:00Z","heartbeat_at":"2026-01-01T00:00:10Z",
             "activity":"idle","handling":0,"harnesses":0,"version":"0.3.1","perms":1}"#;
-        let entry: RosterEntry = serde_json::from_str(minimal).unwrap();
+        let entry: ColonyEntry = serde_json::from_str(minimal).unwrap();
         assert!(entry.escalate_to.is_empty());
         assert_eq!((entry.agent, entry.whoami, entry.workdir), (None, None, None));
         assert_eq!((entry.signed_out, entry.limited, entry.failing), (None, None, None));
@@ -398,7 +398,7 @@ mod tests {
             "signed_out":{"since":"2026-01-01T00:00:05Z","sign_in":"x login","reason":"expired"},
             "limited":{"kind":"daily_cap","since":"2026-01-01T00:00:05Z","until":"2026-01-01T01:00:00Z"},
             "started_at":"2026-01-01T00:00:00Z","heartbeat_at":"2026-01-01T00:00:10Z"}"#;
-        let entry: RosterEntry = serde_json::from_str(newer).unwrap();
+        let entry: ColonyEntry = serde_json::from_str(newer).unwrap();
         assert_eq!((entry.activity, entry.harnesses), (Activity::Unknown, 3));
         assert_eq!(entry.signed_out.and_then(|s| s.sign_in).as_deref(), Some("x login"));
         assert_eq!(entry.limited.map(|l| l.kind), Some(LimitKind::Unknown));

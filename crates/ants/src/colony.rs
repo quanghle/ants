@@ -1,16 +1,16 @@
-//! `ants roster`: the ants being served, and whether their daemons still beat.
+//! `ants colony`: the ants being served, and whether their daemons still beat.
 
 use std::time::Duration;
 
-use ants_daemon::{bus, chains, roster};
-use ants_proto::{CHAINS_BUCKET, LimitKind, ROSTER_BUCKET, ROSTER_TTL, RosterEntry, UserId};
+use ants_daemon::{bus, chains, colony};
+use ants_proto::{CHAINS_BUCKET, COLONY_BUCKET, COLONY_TTL, ColonyEntry, LimitKind, UserId};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
 
 use crate::avatars::{self, Faces};
 
-/// How fresh an entry is, judged by its last heartbeat ([`roster::is_live`]).
+/// How fresh an entry is, judged by its last heartbeat ([`colony::is_live`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
     Live,
@@ -18,8 +18,8 @@ pub enum State {
 }
 
 impl State {
-    pub fn of(entry: &RosterEntry, now: DateTime<Utc>) -> Self {
-        if roster::is_live(entry, now) { Self::Live } else { Self::Stale }
+    pub fn of(entry: &ColonyEntry, now: DateTime<Utc>) -> Self {
+        if colony::is_live(entry, now) { Self::Live } else { Self::Stale }
     }
 
     pub(crate) fn as_str(self) -> &'static str {
@@ -47,7 +47,7 @@ pub(crate) fn short(duration: Duration) -> String {
 }
 
 /// The ant's escalation chain, leader first, or `-` for none.
-fn chain(entry: &RosterEntry) -> String {
+fn chain(entry: &ColonyEntry) -> String {
     if entry.escalate_to.is_empty() {
         return "-".to_owned();
     }
@@ -58,7 +58,7 @@ fn chain(entry: &RosterEntry) -> String {
 /// harness, `signed-out` while its harness is,
 /// `failing` while its harness keeps failing to start, `rate-limited` or `out-of-quota` while a provider limit holds its
 /// messages, else its activity.
-pub(crate) fn activity(entry: &RosterEntry) -> &'static str {
+pub(crate) fn activity(entry: &ColonyEntry) -> &'static str {
     if entry.paused.is_some() {
         return "paused";
     }
@@ -75,14 +75,14 @@ pub(crate) fn activity(entry: &RosterEntry) -> &'static str {
 
 /// One line per ant paused (since when, by whom, and how to resume it), whose harness is signed out (since when, and how to sign it in), keeps failing to start (since
 /// when, with its last error) or is held back by a provider limit (until when), or a fallback answers for.
-pub fn held(entries: &[RosterEntry], now: DateTime<Utc>) -> Vec<String> {
+pub fn held(entries: &[ColonyEntry], now: DateTime<Utc>) -> Vec<String> {
     entries
         .iter()
         .filter_map(|e| paused_line(e, now).or_else(|| held_line(e, now)).or_else(|| fallback_line(e, now)))
         .collect()
 }
 
-fn paused_line(e: &RosterEntry, now: DateTime<Utc>) -> Option<String> {
+fn paused_line(e: &ColonyEntry, now: DateTime<Utc>) -> Option<String> {
     let paused = e.paused.as_ref()?;
     let by = paused.by.as_ref().map_or_else(|| " by its config".to_owned(), |by| format!(" by {by}"));
     Some(format!(
@@ -94,12 +94,12 @@ fn paused_line(e: &RosterEntry, now: DateTime<Utc>) -> Option<String> {
     ))
 }
 
-fn held_line(e: &RosterEntry, now: DateTime<Utc>) -> Option<String> {
+fn held_line(e: &ColonyEntry, now: DateTime<Utc>) -> Option<String> {
     signed_out_line(e, now).or_else(|| failing_line(e, now)).or_else(|| limited_line(e, now))
 }
 
 /// What becomes of the messages to the ant of `e` meanwhile: `wait`, unless a fallback answers them.
-fn meanwhile(e: &RosterEntry, now: DateTime<Utc>, wait: String) -> String {
+fn meanwhile(e: &ColonyEntry, now: DateTime<Utc>, wait: String) -> String {
     match &e.fallback {
         Some(fallback) => {
             format!(
@@ -113,12 +113,12 @@ fn meanwhile(e: &RosterEntry, now: DateTime<Utc>, wait: String) -> String {
     }
 }
 
-fn fallback_line(e: &RosterEntry, now: DateTime<Utc>) -> Option<String> {
+fn fallback_line(e: &ColonyEntry, now: DateTime<Utc>) -> Option<String> {
     e.fallback.as_ref()?;
     Some(format!("{}: {} until harness {} answers again.", e.ant, meanwhile(e, now, String::new()), e.harness))
 }
 
-fn failing_line(e: &RosterEntry, now: DateTime<Utc>) -> Option<String> {
+fn failing_line(e: &ColonyEntry, now: DateTime<Utc>) -> Option<String> {
     let failing = e.failing.as_ref()?;
     let wait = format!("messages to {} wait, spending no attempts", e.ant);
     Some(format!(
@@ -133,7 +133,7 @@ fn failing_line(e: &RosterEntry, now: DateTime<Utc>) -> Option<String> {
     ))
 }
 
-fn limited_line(e: &RosterEntry, now: DateTime<Utc>) -> Option<String> {
+fn limited_line(e: &ColonyEntry, now: DateTime<Utc>) -> Option<String> {
     let limited = e.limited.as_ref()?;
     let what = match limited.kind {
         LimitKind::Quota => "out of quota",
@@ -152,7 +152,7 @@ fn limited_line(e: &RosterEntry, now: DateTime<Utc>) -> Option<String> {
     ))
 }
 
-fn signed_out_line(e: &RosterEntry, now: DateTime<Utc>) -> Option<String> {
+fn signed_out_line(e: &ColonyEntry, now: DateTime<Utc>) -> Option<String> {
     let out = e.signed_out.as_ref()?;
     let how = match &out.sign_in {
         Some(command) => format!("Run `{command}` on {}", e.machine),
@@ -168,7 +168,7 @@ fn signed_out_line(e: &RosterEntry, now: DateTime<Utc>) -> Option<String> {
 }
 
 /// One line per ant whose machine is low on memory: since when, how much is available and how many harnesses run.
-pub fn memory_low(entries: &[RosterEntry], now: DateTime<Utc>) -> Vec<String> {
+pub fn memory_low(entries: &[ColonyEntry], now: DateTime<Utc>) -> Vec<String> {
     entries
         .iter()
         .filter_map(|e| {
@@ -187,9 +187,9 @@ pub fn memory_low(entries: &[RosterEntry], now: DateTime<Utc>) -> Vec<String> {
         .collect()
 }
 
-/// One line per ant whose machine's config sets some of its shared settings otherwise ([`RosterEntry::drift`]), which
+/// One line per ant whose machine's config sets some of its shared settings otherwise ([`ColonyEntry::drift`]), which
 /// the daemon ignores for the shared ones.
-pub fn drifted(entries: &[RosterEntry]) -> Vec<String> {
+pub fn drifted(entries: &[ColonyEntry]) -> Vec<String> {
     entries
         .iter()
         .filter(|e| !e.drift.is_empty())
@@ -205,17 +205,17 @@ pub fn drifted(entries: &[RosterEntry]) -> Vec<String> {
         .collect()
 }
 
-/// Why no daemon serves `ant` now, given its roster entry, or None when one does: no entry (with no escalation chain
+/// Why no daemon serves `ant` now, given its colony entry, or None when one does: no entry (with no escalation chain
 /// kept for it either, the name may be wrong), a stale entry, a pause, or a harness signed out or held back by a
 /// provider limit with no fallback answering for it.
-pub fn unserved(ant: &UserId, entry: Option<&RosterEntry>, chain_kept: bool, now: DateTime<Utc>) -> Option<String> {
+pub fn unserved(ant: &UserId, entry: Option<&ColonyEntry>, chain_kept: bool, now: DateTime<Utc>) -> Option<String> {
     let Some(entry) = entry else {
-        let hint = if chain_kept { "" } else { " (`ants roster` lists the ants served: check the name)" };
-        return Some(format!("{ant} is not in the roster: no daemon serves {ant} now{hint}"));
+        let hint = if chain_kept { "" } else { " (`ants colony` lists the ants served: check the name)" };
+        return Some(format!("{ant} is not in the colony: no daemon serves {ant} now{hint}"));
     };
     if State::of(entry, now) == State::Stale {
         return Some(format!(
-            "{ant} is stale in the roster: the daemon on {} last beat {} ago and may not serve {ant} now",
+            "{ant} is stale in the colony: the daemon on {} last beat {} ago and may not serve {ant} now",
             entry.machine,
             short(since(entry.heartbeat_at, now))
         ));
@@ -232,8 +232,8 @@ pub fn unserved(ant: &UserId, entry: Option<&RosterEntry>, chain_kept: bool, now
 /// How long [`unserved_warnings`] reads before giving up, so that an unreachable hub does not hold up a command.
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// A warning for each of `ants` no daemon serves now ([`unserved`]), read from the roster and the escalation chains
-/// kept. None when the roster cannot be read: a lookup is advisory, never a reason to fail.
+/// A warning for each of `ants` no daemon serves now ([`unserved`]), read from the colony and the escalation chains
+/// kept. None when the colony cannot be read: a lookup is advisory, never a reason to fail.
 pub async fn unserved_warnings(js: &jetstream::Context, ants: &[&UserId]) -> Vec<String> {
     if ants.is_empty() {
         return Vec::new();
@@ -241,25 +241,25 @@ pub async fn unserved_warnings(js: &jetstream::Context, ants: &[&UserId]) -> Vec
     match tokio::time::timeout(LOOKUP_TIMEOUT, read_unserved(js, ants)).await {
         Ok(Ok(warnings)) => warnings,
         Ok(Err(e)) => {
-            tracing::debug!("not checking the roster: {e:#}");
+            tracing::debug!("not checking the colony: {e:#}");
             Vec::new()
         }
         Err(_) => {
-            tracing::debug!("not checking the roster: no answer within {LOOKUP_TIMEOUT:?}");
+            tracing::debug!("not checking the colony: no answer within {LOOKUP_TIMEOUT:?}");
             Vec::new()
         }
     }
 }
 
 async fn read_unserved(js: &jetstream::Context, ants: &[&UserId]) -> Result<Vec<String>> {
-    let kv = js.get_key_value(ROSTER_BUCKET).await.context("opening the roster")?;
+    let kv = js.get_key_value(COLONY_BUCKET).await.context("opening the colony")?;
     let kept = js.get_key_value(CHAINS_BUCKET).await.ok();
     let now = Utc::now();
     let mut warnings = Vec::new();
     for ant in ants {
-        let entry = match kv.get(ant.as_str()).await.with_context(|| format!("reading {ant} in the roster"))? {
+        let entry = match kv.get(ant.as_str()).await.with_context(|| format!("reading {ant} in the colony"))? {
             Some(value) => {
-                let entry: RosterEntry = serde_json::from_slice(&value).with_context(|| format!("parsing {ant}"))?;
+                let entry: ColonyEntry = serde_json::from_slice(&value).with_context(|| format!("parsing {ant}"))?;
                 entry.check_key(ant.as_str())?;
                 Some(entry)
             }
@@ -275,9 +275,9 @@ async fn read_unserved(js: &jetstream::Context, ants: &[&UserId]) -> Result<Vec<
     Ok(warnings)
 }
 
-/// The roster as a table: one row per ant under a header, columns padded to line up. `-` stands for what an entry
+/// The colony as a table: one row per ant under a header, columns padded to line up. `-` stands for what an entry
 /// leaves out.
-pub fn table(entries: &[RosterEntry], now: DateTime<Utc>) -> String {
+pub fn table(entries: &[ColonyEntry], now: DateTime<Utc>) -> String {
     let header = [
         "ANT",
         "STATE",
@@ -333,7 +333,7 @@ pub fn table(entries: &[RosterEntry], now: DateTime<Utc>) -> String {
 
 /// An entry as one JSON object, with its `state` added, and from the ant's identity record in `faces` when it has one,
 /// its `born` and `prompts`, and its `avatar` (the face) and `color`.
-pub fn json(entry: &RosterEntry, now: DateTime<Utc>, faces: &Faces) -> Result<String> {
+pub fn json(entry: &ColonyEntry, now: DateTime<Utc>, faces: &Faces) -> Result<String> {
     let mut value = serde_json::to_value(entry)?;
     if let Some(object) = value.as_object_mut() {
         object.insert("state".to_owned(), State::of(entry, now).as_str().into());
@@ -348,22 +348,22 @@ pub fn json(entry: &RosterEntry, now: DateTime<Utc>, faces: &Faces) -> Result<St
 }
 
 /// `table` with each ant's face before its row, in its colour, the header indented to line up.
-pub fn faced(table: &str, entries: &[RosterEntry], faces: &Faces) -> String {
+pub fn faced(table: &str, entries: &[ColonyEntry], faces: &Faces) -> String {
     let mut lines = table.lines();
     let header = lines.next().map(|h| format!("{:width$} {h}", "", width = ants_proto::FACE_WIDTH));
     let rows = lines.zip(entries).map(|(line, e)| format!("{} {line}", faces.face(&e.ant)));
     header.into_iter().chain(rows).collect::<Vec<_>>().join("\n")
 }
 
-/// The entries in the roster, read with a human's credentials.
-pub async fn list(js: &jetstream::Context) -> Result<Vec<RosterEntry>> {
-    let kv = bus::ensure_roster(js, ROSTER_TTL).await?;
-    roster::list_entries(&kv).await
+/// The entries in the colony, read with a human's credentials.
+pub async fn list(js: &jetstream::Context) -> Result<Vec<ColonyEntry>> {
+    let kv = bus::ensure_colony(js, COLONY_TTL).await?;
+    colony::list_entries(&kv).await
 }
 
-/// Print the roster: a table, or with `json` one entry per line.
+/// Print the colony: a table, or with `json` one entry per line.
 pub async fn show(nats: &crate::Nats<'_>, json: bool) -> Result<()> {
-    let (_, js) = nats.connect("ants-roster").await?;
+    let (_, js) = nats.connect("ants-colony").await?;
     let entries = list(&js).await?;
     let identities = avatars::read_or_none(&js).await;
     let now = Utc::now();
@@ -383,7 +383,7 @@ pub async fn show(nats: &crate::Nats<'_>, json: bool) -> Result<()> {
         }
     } else {
         println!("{}", faced(&table(&entries, now), &entries, &faces));
-        if let Some(note) = crate::versions::roster_note(&entries, now) {
+        if let Some(note) = crate::versions::colony_note(&entries, now) {
             println!("{note}");
         }
         if let Some(note) = crate::versions::harness_note(&entries, now) {
@@ -400,14 +400,14 @@ pub async fn show(nats: &crate::Nats<'_>, json: bool) -> Result<()> {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use ants_daemon::roster::Registration;
-    use ants_proto::{Activity, HarnessLimit, PermissionsVersion, ROSTER_HEARTBEAT};
+    use ants_daemon::colony::Registration;
+    use ants_proto::{Activity, COLONY_HEARTBEAT, HarnessLimit, PermissionsVersion};
 
     use super::*;
     use crate::auth::tests::Server;
 
-    pub(crate) fn entry(ant: &str, started: i64, beat: i64, now: DateTime<Utc>) -> RosterEntry {
-        RosterEntry {
+    pub(crate) fn entry(ant: &str, started: i64, beat: i64, now: DateTime<Utc>) -> ColonyEntry {
+        ColonyEntry {
             ant: ant.parse().unwrap(),
             machine: "m1".to_owned(),
             instance: "run-1".to_owned(),
@@ -457,12 +457,12 @@ pub(crate) mod tests {
         busy.escalate_to = vec!["lead".parse().unwrap(), "dev-b".parse().unwrap()];
         (busy.version, busy.perms) = ("0.2.0".to_owned(), PermissionsVersion(2));
         busy.agent = Some(ants_proto::HarnessAgent { name: "copilot".to_owned(), version: "1.0.3".to_owned() });
-        let older = RosterEntry { version: "0.1.0".to_owned(), ..entry("dev-c", 60, 4, now) };
+        let older = ColonyEntry { version: "0.1.0".to_owned(), ..entry("dev-c", 60, 4, now) };
         assert_eq!(
-            crate::versions::roster_note(&[busy.clone(), older, quiet.clone()], now).as_deref(),
+            crate::versions::colony_note(&[busy.clone(), older, quiet.clone()], now).as_deref(),
             Some("mixed ants versions: 0.2.0 (1), 0.1.0 (1); `ants doctor` tells whether credentials may be renewed")
         );
-        assert_eq!(crate::versions::roster_note(&[busy.clone(), quiet.clone()], now), None, "a stale one runs nothing");
+        assert_eq!(crate::versions::colony_note(&[busy.clone(), quiet.clone()], now), None, "a stale one runs nothing");
         let table = table(&[busy, quiet], now);
         let rows: Vec<Vec<&str>> = table.lines().map(|l| l.split_whitespace().collect()).collect();
         assert_eq!(
@@ -634,16 +634,16 @@ pub(crate) mod tests {
         assert_eq!(unserved(&dev_a, Some(&entry("dev-a", 60, 2, now)), false, now), None, "a live ant is served");
         assert_eq!(
             unserved(&dev_a, None, true, now).unwrap(),
-            "dev-a is not in the roster: no daemon serves dev-a now"
+            "dev-a is not in the colony: no daemon serves dev-a now"
         );
         assert_eq!(
             unserved(&dev_a, None, false, now).unwrap(),
-            "dev-a is not in the roster: no daemon serves dev-a now (`ants roster` lists the ants served: check the \
+            "dev-a is not in the colony: no daemon serves dev-a now (`ants colony` lists the ants served: check the \
              name)"
         );
         assert_eq!(
             unserved(&dev_a, Some(&entry("dev-a", 600, 300, now)), true, now).unwrap(),
-            "dev-a is stale in the roster: the daemon on m1 last beat 5m ago and may not serve dev-a now"
+            "dev-a is stale in the colony: the daemon on m1 last beat 5m ago and may not serve dev-a now"
         );
         let mut out = entry("dev-a", 600, 2, now);
         out.signed_out = Some(ants_proto::SignInNeeded { since: now, sign_in: None });
@@ -671,39 +671,39 @@ pub(crate) mod tests {
         let (_, human) = server.connect(&UserId::human()).await;
         let ids: Vec<UserId> = ["dev-a", "dev-b", "dev-c"].map(|a| a.parse().unwrap()).into();
         let ants: Vec<&UserId> = ids.iter().collect();
-        assert!(unserved_warnings(&human, &ants).await.is_empty(), "no roster to read, no warning");
+        assert!(unserved_warnings(&human, &ants).await.is_empty(), "no colony to read, no warning");
 
-        bus::ensure_roster(&human, ROSTER_TTL).await.unwrap();
+        bus::ensure_colony(&human, COLONY_TTL).await.unwrap();
         bus::ensure_chains(&human).await.unwrap();
         let (_, js) = server.connect(&ids[0]).await;
-        let kv = bus::ensure_roster(&js, ROSTER_TTL).await.unwrap();
-        let _registration = Registration::start(kv, entry("dev-a", 60, 0, Utc::now()), ROSTER_HEARTBEAT).await.unwrap();
+        let kv = bus::ensure_colony(&js, COLONY_TTL).await.unwrap();
+        let _registration = Registration::start(kv, entry("dev-a", 60, 0, Utc::now()), COLONY_HEARTBEAT).await.unwrap();
         let (_, js) = server.connect(&ids[1]).await;
         ants_daemon::chains::publish(&js, &ids[1], std::slice::from_ref(&ids[0])).await.unwrap();
         assert_eq!(
             unserved_warnings(&human, &ants).await,
             [
-                "dev-b is not in the roster: no daemon serves dev-b now",
-                "dev-c is not in the roster: no daemon serves dev-c now (`ants roster` lists the ants served: check \
+                "dev-b is not in the colony: no daemon serves dev-b now",
+                "dev-c is not in the colony: no daemon serves dev-c now (`ants colony` lists the ants served: check \
                  the name)"
             ]
         );
     }
 
-    /// With the human's credentials, so it also checks that they read the roster.
+    /// With the human's credentials, so it also checks that they read the colony.
     #[tokio::test]
     async fn the_human_lists_registered_ants() {
         let Some(server) = Server::start() else { return };
         let (_, human) = server.connect(&UserId::human()).await;
-        assert!(list(&human).await.unwrap().is_empty(), "an empty roster, created on first use");
+        assert!(list(&human).await.unwrap().is_empty(), "an empty colony, created on first use");
 
         let mut registrations = Vec::new();
         let now = Utc::now();
         for ant in ["dev-b", "dev-a"] {
             let (_, js) = server.connect(&ant.parse().unwrap()).await;
-            let kv = bus::ensure_roster(&js, ROSTER_TTL).await.unwrap();
+            let kv = bus::ensure_colony(&js, COLONY_TTL).await.unwrap();
             let entry = entry(ant, 60, 0, now);
-            registrations.push(Registration::start(kv, entry, ROSTER_HEARTBEAT).await.unwrap());
+            registrations.push(Registration::start(kv, entry, COLONY_HEARTBEAT).await.unwrap());
         }
         let listed = list(&human).await.unwrap();
         let ants: Vec<&str> = listed.iter().map(|e| e.ant.as_str()).collect();

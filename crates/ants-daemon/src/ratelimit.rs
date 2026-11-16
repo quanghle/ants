@@ -263,7 +263,7 @@ struct Period {
 /// How a limit holds the messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hold {
-    /// What the roster entry shows.
+    /// What the colony entry shows.
     pub shown: HarnessLimit,
     /// Whether a human is to be told of it: an exhausted quota, first since a message got past a limit.
     pub tell: bool,

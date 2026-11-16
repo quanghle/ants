@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ants_daemon::reading::{self, Reading};
-use ants_proto::{ApprovalRequest, RosterEntry, STREAM, StatusEvent, ThreadId, ThreadMarks, UserId, Verdict, subject};
+use ants_proto::{ApprovalRequest, ColonyEntry, STREAM, StatusEvent, ThreadId, ThreadMarks, UserId, Verdict, subject};
 use anyhow::{Context as _, Result};
 use async_nats::connection::State as Connection;
 use async_nats::jetstream::{self, consumer};
@@ -25,13 +25,13 @@ pub use self::screen::{Screen, warning};
 pub use self::state::{History, Link, State};
 use crate::thread::{self, Entry, Parser};
 use crate::tools::{self, Update};
-use crate::{roster, thread_meta};
+use crate::{colony, thread_meta};
 
 /// How often the stream is read for what was stored without being heard, such as a leaf node's sourced messages, and
 /// following the tool requests starts again after it ended.
 const REREAD: Duration = Duration::from_secs(5);
-/// How often the roster is read.
-const ROSTER_EVERY: Duration = Duration::from_secs(10);
+/// How often the colony is read.
+const COLONY_EVERY: Duration = Duration::from_secs(10);
 
 /// Connect as `name` for a live view of what `nats`'s human reads in the window `since`: the feed, and the state to
 /// take its events into, with the threads the human archived or left idle to be left out.
@@ -79,8 +79,8 @@ pub enum Event {
     Approval(Update),
     /// Following the tool requests ended, and why if it failed; it starts again after a while.
     FollowEnded(Result<()>),
-    /// The roster read, or why reading it failed.
-    Roster(Result<Vec<RosterEntry>>),
+    /// The colony read, or why reading it failed.
+    Colony(Result<Vec<ColonyEntry>>),
     /// The history of a thread, as [`Feed::load_history`] asked.
     History(ThreadId, Result<Vec<Entry>>),
     /// The outcome of [`Feed::decide`]: the line saying so, or why the decision was not stored.
@@ -172,7 +172,7 @@ pub(crate) async fn maybe<T>(work: &mut Option<LocalBoxFuture<'static, T>>) -> T
 }
 
 /// The live view's connection and its reads in flight, at most one of each kind: the ants traffic heard, the stream
-/// read for what was stored, the tool requests followed, the roster read every while, and the thread history and
+/// read for what was stored, the tool requests followed, the colony read every while, and the thread history and
 /// decision asked for.
 pub struct Feed {
     client: async_nats::Client,
@@ -182,7 +182,7 @@ pub struct Feed {
     updates: mpsc::UnboundedSender<Update>,
     updated: mpsc::UnboundedReceiver<Update>,
     rereads: tokio::time::Interval,
-    rosters: tokio::time::Interval,
+    colonies: tokio::time::Interval,
     /// What opens sealed messages between two humans, for the reads of the stream and of a thread's history.
     keyring: Option<Arc<crate::sealed::Keyring>>,
     /// What checks the `on_behalf_of` of an assistant's messages, for the reads of the stream and of a thread's
@@ -204,7 +204,7 @@ pub struct Feed {
     follow: Option<LocalBoxFuture<'static, Result<()>>>,
     /// When following the tool requests may start again.
     follow_at: Instant,
-    roster: Option<LocalBoxFuture<'static, Result<Vec<RosterEntry>>>>,
+    colony: Option<LocalBoxFuture<'static, Result<Vec<ColonyEntry>>>>,
 }
 
 impl Feed {
@@ -220,7 +220,7 @@ impl Feed {
             updates,
             updated,
             rereads: tokio::time::interval(REREAD),
-            rosters: tokio::time::interval(ROSTER_EVERY),
+            colonies: tokio::time::interval(COLONY_EVERY),
             keyring: None,
             behalf: None,
             _following: None,
@@ -233,7 +233,7 @@ impl Feed {
             decision: None,
             follow: None,
             follow_at: Instant::now(),
-            roster: None,
+            colony: None,
         })
     }
 
@@ -300,7 +300,7 @@ impl Feed {
                 }
                 Some(update) = self.updated.recv() => return Event::Approval(update),
                 _ = self.rereads.tick() => self.tail_wanted = true,
-                _ = self.rosters.tick() => self.read_roster(),
+                _ = self.colonies.tick() => self.read_colony(),
                 (parser, read) = maybe(&mut self.tail) => {
                     self.tail = None;
                     self.parser = Some(parser);
@@ -323,9 +323,9 @@ impl Feed {
                     self.follow_at = Instant::now() + REREAD;
                     return Event::FollowEnded(followed);
                 }
-                read = maybe(&mut self.roster) => {
-                    self.roster = None;
-                    return Event::Roster(read);
+                read = maybe(&mut self.colony) => {
+                    self.colony = None;
+                    return Event::Colony(read);
                 }
             }
         }
@@ -354,10 +354,10 @@ impl Feed {
         self.follow = Some(follow.boxed_local());
     }
 
-    fn read_roster(&mut self) {
-        if self.roster.is_none() {
+    fn read_colony(&mut self) {
+        if self.colony.is_none() {
             let js = self.js.clone();
-            self.roster = Some(async move { roster::list(&js).await }.boxed_local());
+            self.colony = Some(async move { colony::list(&js).await }.boxed_local());
         }
     }
 
@@ -379,12 +379,12 @@ impl Feed {
         self.decision = Some(decide(self.js.clone(), request, verdict, by).boxed_local());
     }
 
-    /// Read again what may have missed changes: the stream, the tool requests and the roster.
+    /// Read again what may have missed changes: the stream, the tool requests and the colony.
     pub fn refresh(&mut self) {
         self.follow = None;
         self.follow_at = Instant::now();
         self.tail_wanted = true;
-        self.roster = None;
-        self.read_roster();
+        self.colony = None;
+        self.read_colony();
     }
 }

@@ -645,7 +645,7 @@ fn kind(name: &str, publish: &[String], subscribe: &[String], leaf_only: bool) -
         let (mut ants, mut humans, mut webhooks) = (Vec::new(), Vec::new(), Vec::new());
         for user in users {
             let user: UserId = user;
-            if has_kv(&subject::roster(&user)) {
+            if has_kv(&subject::colony(&user)) {
                 ants.push(user);
             } else if has_kv(&format!("$KV.{WEBHOOKS_BUCKET}.{user}.>")) {
                 webhooks.push(user);

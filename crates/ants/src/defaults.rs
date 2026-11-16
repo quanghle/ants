@@ -99,15 +99,15 @@ mod tests {
     fn flags_override_the_file_which_overrides_the_built_in_defaults() {
         let dir = ants_test_support::scratch_dir("cli-defaults").canonicalize().unwrap();
         let file = dir.join("config.toml");
-        let none = resolved("roster", &file).unwrap();
+        let none = resolved("colony", &file).unwrap();
         assert_eq!(connection(&none), ("nats://127.0.0.1:4222", None, None), "no file");
 
         std::fs::write(&file, "nats = \"nats://leaf:4222\"\njs_domain = \"hub\"\n[cli]\ncreds = \"alice.creds\"\n")
             .unwrap();
         let creds = dir.join("alice.creds");
-        let from_file = resolved("roster", &file).unwrap();
+        let from_file = resolved("colony", &file).unwrap();
         assert_eq!(connection(&from_file), ("nats://leaf:4222", creds.to_str(), Some("hub")));
-        let flags = resolved("roster --nats nats://hub:4222 --creds bob.creds --js-domain own", &file).unwrap();
+        let flags = resolved("colony --nats nats://hub:4222 --creds bob.creds --js-domain own", &file).unwrap();
         assert_eq!(connection(&flags), ("nats://hub:4222", Some("bob.creds"), Some("own")));
         let before = resolved("--js-domain own thread list", &file).unwrap();
         assert_eq!(connection(&before), ("nats://leaf:4222", creds.to_str(), Some("own")));
@@ -116,9 +116,9 @@ mod tests {
         assert_eq!(connection(&daemon), ("nats://127.0.0.1:4222", None, None), "the daemon reads the file itself");
 
         std::fs::write(&file, "[cli]\nnats = \"nats://leaf:4222\"\ncred = \"alice.creds\"\n").unwrap();
-        let err = format!("{:#}", resolved("roster", &file).err().unwrap());
+        let err = format!("{:#}", resolved("colony", &file).err().unwrap());
         assert!(err.contains("config.toml") && err.contains("cred"), "{err}");
-        assert!(resolved("roster --nats nats://hub:4222 --creds b.creds --js-domain own", &file).is_ok(), "not read");
+        assert!(resolved("colony --nats nats://hub:4222 --creds b.creds --js-domain own", &file).is_ok(), "not read");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

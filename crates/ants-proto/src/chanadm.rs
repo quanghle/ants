@@ -30,7 +30,7 @@ impl ChannelOp {
     }
 
     /// Whether the operation makes [`ChannelOp::ant`] a member or the messenger, so it must be a human or an ant in
-    /// the roster.
+    /// the colony.
     pub fn adds(&self) -> bool {
         matches!(self, Self::AddMember { .. } | Self::SetMessenger { .. })
     }
@@ -133,8 +133,8 @@ pub enum Refusal {
     Unreadable,
     #[error("{0} is a human; the messenger is an ant")]
     Human(UserId),
-    #[error("{0} is neither a human nor in the roster; only humans and ants in the roster may be added")]
-    NotInRoster(UserId),
+    #[error("{0} is neither a human nor in the colony; only humans and ants in the colony may be added")]
+    NotInColony(UserId),
     #[error("the request expired")]
     Expired,
     #[error("the channel kept changing meanwhile; try again")]
@@ -174,12 +174,12 @@ mod tests {
         assert_eq!(serde_json::from_value::<ChannelAdminRequest>(json).unwrap(), request);
         let refused = ChannelAdminReply {
             request_id: request.id,
-            outcome: ChannelAdminOutcome::Refused { refusal: Refusal::NotInRoster(p("dev-z")) },
+            outcome: ChannelAdminOutcome::Refused { refusal: Refusal::NotInColony(p("dev-z")) },
         };
         let json = serde_json::to_value(&refused).unwrap();
         assert_eq!(
             json["outcome"],
-            serde_json::json!({"outcome": "refused", "refusal": {"refusal": "not_in_roster", "detail": "dev-z"}})
+            serde_json::json!({"outcome": "refused", "refusal": {"refusal": "not_in_colony", "detail": "dev-z"}})
         );
         assert_eq!(serde_json::from_value::<ChannelAdminReply>(json).unwrap(), refused);
     }

@@ -1,5 +1,5 @@
 //! MCP tools for the ant's harness sessions: `send_message`, `ask_ant`, `check_inbox`, `list_ants` and
-//! `route` to find ants by their roster capabilities, `post_notes` and `read_notes` for the thread's notes
+//! `route` to find ants by their colony capabilities, `post_notes` and `read_notes` for the thread's notes
 //! (see [`crate::notes`]), and `escalate` to send the thread up the ant's escalation chain (see
 //! [`crate::escalation`]). Memory and task tools are configured separately by each ant.
 //!
@@ -38,10 +38,10 @@ use std::time::Duration;
 
 use agent_client_protocol::v1::schema::{EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerStdio};
 use ants_proto::{
-    ApprovalDecision, Attachment, AttachmentHandle, AttachmentScope, CHANADM_WAIT, CHANNELS_BUCKET,
-    ChannelAdminOutcome, ChannelAdminRequest, ChannelEntry, ChannelId, ChannelOp, ChannelPost, Envelope,
-    EscalationReason, JsDomain, NotesPost, Question, ROSTER_BUCKET, Reaction, ReactionChange, ReactionsOutcome,
-    ReactionsRequest, Role, RosterEntry, ThreadId, ThreadTitle, UserId, Uuid, Verdict,
+    ApprovalDecision, Attachment, AttachmentHandle, AttachmentScope, CHANADM_WAIT, CHANNELS_BUCKET, COLONY_BUCKET,
+    ChannelAdminOutcome, ChannelAdminRequest, ChannelEntry, ChannelId, ChannelOp, ChannelPost, ColonyEntry, Envelope,
+    EscalationReason, JsDomain, NotesPost, Question, Reaction, ReactionChange, ReactionsOutcome, ReactionsRequest,
+    Role, ThreadId, ThreadTitle, UserId, Uuid, Verdict,
 };
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Utc};
@@ -71,7 +71,7 @@ use crate::humans::Registry;
 use crate::notes::NotesStore;
 use crate::redact::Redactor;
 use crate::sync::MutexExt as _;
-use crate::{bus, ipc, links, reactions, roster};
+use crate::{bus, colony, ipc, links, reactions};
 
 mod assist;
 mod attach;
@@ -87,7 +87,7 @@ const DEFAULT_ASK_WAIT: Duration = Duration::from_secs(300);
 const MAX_ASK_WAIT: Duration = Duration::from_mins(30);
 /// How long `request_ant` waits for the new ant's credentials by default, a human's approval included.
 const DEFAULT_REQUEST_WAIT: Duration = Duration::from_mins(15);
-/// How long `request_ant` waits for the new ant to be in the roster once listed; the config file is reread within
+/// How long `request_ant` waits for the new ant to be in the colony once listed; the config file is reread within
 /// seconds of a change.
 const LISTED_WAIT: Duration = Duration::from_secs(60);
 const LISTED_POLL: Duration = Duration::from_secs(1);
@@ -101,9 +101,9 @@ const MAX_ROUTED: usize = 1024;
 const POST_TRIES: usize = 5;
 /// Most recent posts `read_notes` shows.
 const SHOWN_POSTS: usize = 50;
-/// How long a recipient's roster lookup may take before the message goes without it.
+/// How long a recipient's colony lookup may take before the message goes without it.
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
-/// Names of the roster a message to an ant no daemon serves lists at most.
+/// Names of the colony a message to an ant no daemon serves lists at most.
 const SHOWN_NAMES: usize = 10;
 
 /// Publishes an envelope and resolves once JetStream has stored it.
@@ -180,34 +180,34 @@ fn unread(message: Uuid) -> String {
     format!("Message {message} is none this ant reads, or the stream no longer keeps it")
 }
 
-/// Reads the ants in the roster.
-pub type Roster = Arc<dyn Fn() -> BoxFuture<'static, Result<Vec<RosterEntry>>> + Send + Sync>;
+/// Reads the ants in the colony.
+pub type Colony = Arc<dyn Fn() -> BoxFuture<'static, Result<Vec<ColonyEntry>>> + Send + Sync>;
 
-/// Reads the roster bucket.
-pub fn jetstream_roster(js: async_nats::jetstream::Context) -> Roster {
+/// Reads the colony bucket.
+pub fn jetstream_colony(js: async_nats::jetstream::Context) -> Colony {
     Arc::new(move || {
         let js = js.clone();
         Box::pin(async move {
-            let kv = js.get_key_value(ROSTER_BUCKET).await.context("opening the roster")?;
-            roster::list_entries(&kv).await
+            let kv = js.get_key_value(COLONY_BUCKET).await.context("opening the colony")?;
+            colony::list_entries(&kv).await
         })
     })
 }
 
-/// Reads one ant's roster entry, None when the roster lists none.
-pub type RosterLookup = Arc<dyn Fn(UserId) -> BoxFuture<'static, Result<Option<RosterEntry>>> + Send + Sync>;
+/// Reads one ant's colony entry, None when the colony lists none.
+pub type ColonyLookup = Arc<dyn Fn(UserId) -> BoxFuture<'static, Result<Option<ColonyEntry>>> + Send + Sync>;
 
-/// Reads the ant's key in the roster bucket.
-pub fn jetstream_lookup(js: async_nats::jetstream::Context) -> RosterLookup {
+/// Reads the ant's key in the colony bucket.
+pub fn jetstream_lookup(js: async_nats::jetstream::Context) -> ColonyLookup {
     Arc::new(move |ant| {
         let js = js.clone();
         Box::pin(async move {
-            let kv = js.get_key_value(ROSTER_BUCKET).await.context("opening the roster")?;
-            let Some(value) = kv.get(ant.as_str()).await.with_context(|| format!("reading {ant} in the roster"))?
+            let kv = js.get_key_value(COLONY_BUCKET).await.context("opening the colony")?;
+            let Some(value) = kv.get(ant.as_str()).await.with_context(|| format!("reading {ant} in the colony"))?
             else {
                 return Ok(None);
             };
-            let entry: RosterEntry = serde_json::from_slice(&value).with_context(|| format!("parsing {ant}"))?;
+            let entry: ColonyEntry = serde_json::from_slice(&value).with_context(|| format!("parsing {ant}"))?;
             entry.check_key(ant.as_str())?;
             Ok(Some(entry))
         })
@@ -288,7 +288,7 @@ impl Mcp {
         ant: UserId,
         home: &Path,
         outbox: Outbox,
-        roster: Roster,
+        colony: Colony,
         notes: Arc<dyn NotesStore>,
         humans: Registry,
         escalator: Option<Arc<Escalator>>,
@@ -302,7 +302,7 @@ impl Mcp {
         let hub = Arc::new(Hub {
             ant,
             outbox,
-            roster,
+            colony,
             notes,
             humans,
             escalator,
@@ -347,7 +347,7 @@ impl Mcp {
 
     /// Look recipients up through `lookup` before `send_message` and `ask_ant` reach them; without it no
     /// recipient is looked up.
-    pub fn with_lookup(&self, lookup: RosterLookup) {
+    pub fn with_lookup(&self, lookup: ColonyLookup) {
         let _ = self.hub.lookup.set(lookup);
     }
 
@@ -582,12 +582,12 @@ struct Asks {
 struct Hub {
     ant: UserId,
     outbox: Outbox,
-    roster: Roster,
+    colony: Colony,
     notes: Arc<dyn NotesStore>,
     humans: Registry,
     escalator: Option<Arc<Escalator>>,
     channels: std::sync::OnceLock<ChannelAccess>,
-    lookup: OnceLock<RosterLookup>,
+    lookup: OnceLock<ColonyLookup>,
     admin: OnceLock<Arc<dyn Admin>>,
     requester: OnceLock<AntRequester>,
     reaction_asker: OnceLock<ReactionAsker>,
@@ -1076,7 +1076,7 @@ impl Hub {
         ))
     }
 
-    /// The roster without this ant, by id.
+    /// The colony without this ant, by id.
     /// What `manage_channel` does: list the channels the ant owns, show one, or ask the channel manager to change one.
     async fn manage_channel(&self, thread: &ThreadId, args: ManageChannel) -> Result<String, String> {
         let admin = self.admin.get().ok_or("channels cannot be managed from this daemon")?;
@@ -1133,14 +1133,14 @@ impl Hub {
         }
     }
 
-    async fn others(&self) -> Result<Vec<RosterEntry>, String> {
-        let mut entries = (self.roster)().await.map_err(|e| format!("cannot read the roster: {e:#}"))?;
+    async fn others(&self) -> Result<Vec<ColonyEntry>, String> {
+        let mut entries = (self.colony)().await.map_err(|e| format!("cannot read the colony: {e:#}"))?;
         entries.retain(|e| e.ant != self.ant);
         Ok(entries)
     }
 
-    /// Why no daemon serves the ant `to` now, by its roster entry, with names from the roster `to` may stand for; None
-    /// when one does, `to` is a human or the channel manager, or the roster cannot be read, so a lookup never holds a
+    /// Why no daemon serves the ant `to` now, by its colony entry, with names from the colony `to` may stand for; None
+    /// when one does, `to` is a human or the channel manager, or the colony cannot be read, so a lookup never holds a
     /// message back. A provider limit counts only while it holds past `wait` from now.
     async fn unserved(&self, to: &UserId, wait: Duration) -> Option<String> {
         let lookup = self.lookup.get()?;
@@ -1196,11 +1196,11 @@ impl Hub {
         let deadline = tokio::time::Instant::now() + LISTED_WAIT;
         loop {
             if let Ok(Ok(Some(_))) = tokio::time::timeout(LOOKUP_TIMEOUT, lookup(name.clone())).await {
-                return Ok(format!("{added} {name} is in the roster: send_message and ask_ant reach it."));
+                return Ok(format!("{added} {name} is in the colony: send_message and ask_ant reach it."));
             }
             if tokio::time::Instant::now() >= deadline {
                 return Ok(format!(
-                    "{added} {name} is not in the roster yet; messages to it wait in its inbox until it is served."
+                    "{added} {name} is not in the colony yet; messages to it wait in its inbox until it is served."
                 ));
             }
             tokio::time::sleep(LISTED_POLL).await;
@@ -1537,7 +1537,7 @@ struct ListAnts {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct Route {
-    /// Capability the request needs, as ants advertise it in the roster, such as `rust`.
+    /// Capability the request needs, as ants advertise it in the colony, such as `rust`.
     capability: String,
     /// The request.
     text: String,
@@ -1576,13 +1576,13 @@ struct ManageChannel {
     /// The channel, such as `ops`; omitted to list the channels this ant owns.
     #[serde(default)]
     channel: Option<String>,
-    /// Users to make members: ants in the roster, or humans.
+    /// Users to make members: ants in the colony, or humans.
     #[serde(default)]
     add: Vec<String>,
     /// Members to remove.
     #[serde(default)]
     remove: Vec<String>,
-    /// The ant to triage humans' posts that mention nobody; it must be in the roster.
+    /// The ant to triage humans' posts that mention nobody; it must be in the colony.
     #[serde(default)]
     messenger: Option<String>,
     /// Give the channel the default messenger again.
@@ -1718,7 +1718,7 @@ fn ask_wait(timeout: Option<&str>) -> Result<Duration, String> {
 
 /// Ant, capabilities, harness and the agent it runs, machine, activity or a pause or signed-out harness, the fallback
 /// answering for it, and advertised role instructions.
-fn describe(entries: &[&RosterEntry]) -> String {
+fn describe(entries: &[&ColonyEntry]) -> String {
     let lines: Vec<String> = entries
         .iter()
         .map(|e| {
@@ -1811,33 +1811,33 @@ fn describe_channel(entry: &ChannelEntry) -> String {
 }
 
 /// Why nobody matches `capability`, and what there is instead.
-fn nobody_has(capability: &str, entries: &[RosterEntry]) -> String {
+fn nobody_has(capability: &str, entries: &[ColonyEntry]) -> String {
     let mut known: Vec<String> =
         entries.iter().flat_map(|e| e.capabilities.iter().map(|c| c.trim().to_lowercase())).collect();
     known.sort();
     known.dedup();
     if known.is_empty() {
-        return format!("No other ant in the roster has capability {capability:?}; none advertises any.");
+        return format!("No other ant in the colony has capability {capability:?}; none advertises any.");
     }
-    format!("No other ant in the roster has capability {capability:?}. Capabilities there: {}.", known.join(", "))
+    format!("No other ant in the colony has capability {capability:?}. Capabilities there: {}.", known.join(", "))
 }
 
-/// Why no daemon serves `ant` now, given its roster entry, or None when one does: no entry, a stale one (see
-/// [`roster::is_live`]), a pause, a harness signed out or failing to start, or a provider limit holding its messages past `wait`
+/// Why no daemon serves `ant` now, given its colony entry, or None when one does: no entry, a stale one (see
+/// [`colony::is_live`]), a pause, a harness signed out or failing to start, or a provider limit holding its messages past `wait`
 /// from `now`, with no fallback answering for it.
 fn why_unserved(
     ant: &UserId,
-    entry: Option<&RosterEntry>,
+    entry: Option<&ColonyEntry>,
     now: chrono::DateTime<chrono::Utc>,
     wait: Duration,
 ) -> Option<String> {
     let Some(entry) = entry else {
-        return Some(format!("{ant} is not in the roster: no daemon serves {ant} now"));
+        return Some(format!("{ant} is not in the colony: no daemon serves {ant} now"));
     };
-    if !roster::is_live(entry, now) {
+    if !colony::is_live(entry, now) {
         let ago = (now - entry.heartbeat_at).to_std().unwrap_or_default();
         return Some(format!(
-            "{ant} is stale in the roster: the daemon on {} last beat {} ago and may not serve {ant} now",
+            "{ant} is stale in the colony: the daemon on {} last beat {} ago and may not serve {ant} now",
             entry.machine,
             ants_proto::duration::format(Duration::from_secs(ago.as_secs()))
         ));
@@ -1887,32 +1887,32 @@ fn why_unserved(
     ))
 }
 
-/// What to message instead of `ant`, which no daemon serves, from the `others` in the roster: for an ant missing
+/// What to message instead of `ant`, which no daemon serves, from the `others` in the colony: for an ant missing
 /// from it the names closest to `ant` (the name may be misspelt), else the served ants sharing a capability of its
 /// `entry`.
 fn alternatives(
     ant: &UserId,
-    entry: Option<&RosterEntry>,
-    others: &[RosterEntry],
+    entry: Option<&ColonyEntry>,
+    others: &[ColonyEntry],
     now: chrono::DateTime<chrono::Utc>,
 ) -> String {
-    let names = |entries: &[&RosterEntry]| entries.iter().map(|e| e.ant.as_str()).collect::<Vec<_>>().join(", ");
+    let names = |entries: &[&ColonyEntry]| entries.iter().map(|e| e.ant.as_str()).collect::<Vec<_>>().join(", ");
     if let Some(entry) = entry {
-        let sharing: Vec<&RosterEntry> = others
+        let sharing: Vec<&ColonyEntry> = others
             .iter()
-            .filter(|e| e.ant != *ant && roster::is_live(e, now) && e.paused.is_none())
+            .filter(|e| e.ant != *ant && colony::is_live(e, now) && e.paused.is_none())
             .filter(|e| e.fallback.is_some() || e.signed_out.is_none() && e.failing.is_none() && e.limited.is_none())
-            .filter(|e| entry.capabilities.iter().any(|c| roster::has_capability(e, c)))
+            .filter(|e| entry.capabilities.iter().any(|c| colony::has_capability(e, c)))
             .take(SHOWN_NAMES)
             .collect();
         if sharing.is_empty() {
-            return format!("No served ant shares a capability of {ant}; list_ants shows the ants in the roster.");
+            return format!("No served ant shares a capability of {ant}; list_ants shows the ants in the colony.");
         }
         return format!("Served ants sharing a capability of {ant}: {}.", names(&sharing));
     }
     let wanted = ant.as_str().to_lowercase();
     let most = wanted.chars().count().div_ceil(3).max(1);
-    let mut close: Vec<(usize, &RosterEntry)> = others
+    let mut close: Vec<(usize, &ColonyEntry)> = others
         .iter()
         .filter_map(|e| {
             let name = e.ant.as_str().to_lowercase();
@@ -1921,12 +1921,12 @@ fn alternatives(
         })
         .collect();
     close.sort_by(|(a, x), (b, y)| a.cmp(b).then_with(|| x.ant.cmp(&y.ant)));
-    let close: Vec<&RosterEntry> = close.into_iter().map(|(_, e)| e).take(3).collect();
+    let close: Vec<&ColonyEntry> = close.into_iter().map(|(_, e)| e).take(3).collect();
     match others.len() {
-        _ if !close.is_empty() => format!("Closest names in the roster: {}.", names(&close)),
-        0 => "No other ant is in the roster.".to_owned(),
-        n if n <= SHOWN_NAMES => format!("In the roster: {}.", names(&others.iter().collect::<Vec<_>>())),
-        n => format!("No name in the roster is close; list_ants shows the {n} ants there."),
+        _ if !close.is_empty() => format!("Closest names in the colony: {}.", names(&close)),
+        0 => "No other ant is in the colony.".to_owned(),
+        n if n <= SHOWN_NAMES => format!("In the colony: {}.", names(&others.iter().collect::<Vec<_>>())),
+        n => format!("No name in the colony is close; list_ants shows the {n} ants there."),
     }
 }
 
@@ -1979,8 +1979,8 @@ impl Tools {
     #[tool(description = "Send a message to another ant, or to `human`, and return at once. It goes on the \
         current thread unless `thread` says otherwise. A message between ants spends one turn of the thread's \
         budget; with none left it is refused and the thread is its owner's to decide. A reply comes later as a new \
-        message. When no daemon serves the ant now (no roster entry, a stale one, or a harness signed out) the \
-        message still goes and waits, and the result warns so, naming ants from the roster to message instead. \
+        message. When no daemon serves the ant now (no colony entry, a stale one, or a harness signed out) the \
+        message still goes and waits, and the result warns so, naming ants from the colony to message instead. \
         `attach` lists files in the working directory to attach (at most 8 of up to 8 MiB each), secrets in text \
         files replaced with [redacted]; one that cannot be attached fails the call with nothing sent.")]
     async fn send_message(
@@ -2007,8 +2007,8 @@ impl Tools {
 
     #[tool(description = "Ask another ant and wait for its reply, which is returned. The question goes on the \
         current thread and spends one turn of its budget. A reply that arrives after the wait gives up is kept for \
-        check_inbox. When no daemon serves the ant now (no roster entry, a stale one, or a harness signed out) the \
-        call is refused at once with nothing sent, saying why and naming ants from the roster to ask instead. \
+        check_inbox. When no daemon serves the ant now (no colony entry, a stale one, or a harness signed out) the \
+        call is refused at once with nothing sent, saying why and naming ants from the colony to ask instead. \
         `attach` lists files in the working directory to attach, as for send_message.")]
     async fn ask_ant(
         &self,
@@ -2100,7 +2100,7 @@ impl Tools {
         Ok(text(self.hub.decide_approval(&thread, &args.verdict).await))
     }
 
-    #[tool(description = "List the other ants being served, from the roster, with each ant's advertised \
+    #[tool(description = "List the other ants being served, from the colony, with each ant's advertised \
         whoami field, capabilities (such as `rust` or `billing`), harness, machine and whether it is idle or working, \
         or signed out or paused: messages to an ant whose harness is signed out wait unanswered until a human signs \
         it in, and to a paused ant until a human resumes it. \
@@ -2109,11 +2109,11 @@ impl Tools {
         let result = async {
             let entries = self.hub.others().await?;
             let capability = args.capability.as_deref().map(str::trim).filter(|c| !c.is_empty());
-            let shown: Vec<&RosterEntry> =
-                entries.iter().filter(|e| capability.is_none_or(|c| roster::has_capability(e, c))).collect();
+            let shown: Vec<&ColonyEntry> =
+                entries.iter().filter(|e| capability.is_none_or(|c| colony::has_capability(e, c))).collect();
             match (capability, shown.is_empty()) {
                 (Some(c), true) => Err(nobody_has(c, &entries)),
-                (None, true) => Ok("No other ant is in the roster.".to_owned()),
+                (None, true) => Ok("No other ant is in the colony.".to_owned()),
                 (_, false) => Ok(describe(&shown)),
             }
         }
@@ -2121,7 +2121,7 @@ impl Tools {
         Ok(text(result))
     }
 
-    #[tool(description = "Route a request to an ant whose roster capabilities include `capability`, other than \
+    #[tool(description = "Route a request to an ant whose colony capabilities include `capability`, other than \
         this one: an ant not paused before a paused one, then an ant whose harness is signed in before one signed \
         out, then a live ant before a stale one, then \
         an idle ant before a busy one, then the one with the fewest messages in hand, then the first by name. By \
@@ -2138,7 +2138,7 @@ impl Tools {
             let wait = ask_wait(args.timeout.as_deref())?;
             let entries = self.hub.others().await?;
             let capability = args.capability.trim();
-            let to = roster::pick(&entries, capability, &self.hub.ant, chrono::Utc::now())
+            let to = colony::pick(&entries, capability, &self.hub.ant, chrono::Utc::now())
                 .ok_or_else(|| nobody_has(capability, &entries))?
                 .ant
                 .to_string();
@@ -2258,8 +2258,8 @@ impl Tools {
 
     #[tool(description = "Manage a channel this ant owns (a human makes an ant a channel's owner): `add` and \
         `remove` change its members, `messenger` sets the ant that triages humans' posts that mention nobody, and \
-        `clear_messenger` gives it the default messenger again. Members are ants in the roster or humans; the \
-        messenger is an ant in the roster. \
+        `clear_messenger` gives it the default messenger again. Members are ants in the colony or humans; the \
+        messenger is an ant in the colony. \
         The channel manager applies the change, refuses it unless this ant owns the channel, and announces it in \
         the channel. With only `channel` it shows the channel; with nothing it lists the channels this ant owns.")]
     async fn manage_channel(
@@ -2276,7 +2276,7 @@ impl Tools {
         within the template's bounds. It is checked against the template here first and refused at once outside \
         it. Its key is made on this machine and its credentials signed where the team's account key is: at once \
         within the template's policy, else once a human approves, which can take a while. Then it is listed in \
-        the config file and served by this machine's daemon; it returns once the new ant is in the roster, to be \
+        the config file and served by this machine's daemon; it returns once the new ant is in the colony, to be \
         reached with send_message and ask_ant, or says why it was refused. Ants added this way never add ants.")]
     async fn request_ant(
         &self,
@@ -2372,7 +2372,7 @@ fn instructions(ant: &UserId, manager: bool, assisting: Option<&UserId>) -> Stri
     if manager {
         text.push_str(
             " As a manager of ant templates, request_ant adds a worker ant from one when the work needs more hands \
-             than the roster has; give the reason a human would need to approve it. retire_ant retires one it \
+             than the colony has; give the reason a human would need to approve it. retire_ant retires one it \
              added once its work is done, keeping its memory for a later request_ant of the same name.",
         );
     }

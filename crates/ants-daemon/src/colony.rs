@@ -1,12 +1,12 @@
-//! The ant's entry in the roster, kept alive by heartbeats.
+//! The ant's entry in the colony, kept alive by heartbeats.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ants_proto::{
-    ANTS_VERSION, Activity, AntModel, HarnessAgent, HarnessFailing, HarnessLimit, MemoryLow, PERMISSIONS_VERSION,
-    Paused, ROSTER_HEARTBEAT, ROSTER_TTL, RosterEntry, ServingFallback, SignInNeeded, UserId,
+    ANTS_VERSION, Activity, AntModel, COLONY_HEARTBEAT, COLONY_TTL, ColonyEntry, HarnessAgent, HarnessFailing,
+    HarnessLimit, MemoryLow, PERMISSIONS_VERSION, Paused, ServingFallback, SignInNeeded, UserId,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, kv};
@@ -19,7 +19,7 @@ use crate::bus;
 use crate::daemon::Config;
 use crate::sync::MutexExt as _;
 
-/// An ant listed in the roster. Dropping it stops the heartbeats, so the entry expires;
+/// An ant listed in the colony. Dropping it stops the heartbeats, so the entry expires;
 /// [`Registration::deregister`] removes it at once.
 pub struct Registration {
     kv: kv::Store,
@@ -47,7 +47,7 @@ pub struct Workload {
     /// Wakes the heartbeats when the ant turns idle or working, its harness signed out or in or started with another
     /// agent, a provider limit starts or ends, the harness's start failures hold messages or no longer do, a fallback
     /// starts or stops answering, memory turns low or recovers, the ant is paused or resumed, or its drift changes, so
-    /// the roster shows it before the next beat.
+    /// the colony shows it before the next beat.
     changed: Notify,
 }
 
@@ -182,7 +182,7 @@ impl Workload {
     }
 
     /// Write the current workload into `entry`.
-    pub fn stamp(&self, entry: &mut RosterEntry) {
+    pub fn stamp(&self, entry: &mut ColonyEntry) {
         let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
         entry.activity = self.activity();
         entry.handling = count(self.handling());
@@ -209,15 +209,15 @@ impl Drop for Working<'_> {
     }
 }
 
-/// The roster entry of the ant of `config` on this machine, started now, naming the machine as `config` does, else by
+/// The colony entry of the ant of `config` on this machine, started now, naming the machine as `config` does, else by
 /// its host name.
-pub async fn entry(config: &Config) -> RosterEntry {
+pub async fn entry(config: &Config) -> ColonyEntry {
     let now = Utc::now();
     let machine = match &config.machine {
         Some(machine) => machine.clone(),
         None => machine().await,
     };
-    RosterEntry {
+    ColonyEntry {
         ant: config.ant.clone(),
         machine,
         instance: uuid::Uuid::new_v4().to_string(),
@@ -249,26 +249,26 @@ pub async fn entry(config: &Config) -> RosterEntry {
     }
 }
 
-/// List `entry` in the roster and keep it fresh, with its `workload`, until the registration ends.
+/// List `entry` in the colony and keep it fresh, with its `workload`, until the registration ends.
 pub async fn register(
     js: &jetstream::Context,
-    mut entry: RosterEntry,
+    mut entry: ColonyEntry,
     workload: Arc<Workload>,
 ) -> Result<Registration> {
-    let kv = bus::ensure_roster(js, ROSTER_TTL).await?;
+    let kv = bus::ensure_colony(js, COLONY_TTL).await?;
     entry.heartbeat_at = Utc::now();
-    Registration::start_with(kv, entry, ROSTER_HEARTBEAT, Some(workload)).await
+    Registration::start_with(kv, entry, COLONY_HEARTBEAT, Some(workload)).await
 }
 
-/// Whether a daemon may start serving an ant as `ours` without serving it twice, when the ant's roster entry is
-/// `current`: only if the roster lists none, or `ours` itself (a put whose answer was lost). An entry stays in the
-/// roster until its daemon stops or it goes [`ROSTER_TTL`] without a heartbeat, by the server's clock, so no clocks are
-/// compared. Two daemons on one machine are told apart by [`RosterEntry::instance`].
-pub fn may_start(current: Option<&RosterEntry>, ours: &RosterEntry) -> bool {
+/// Whether a daemon may start serving an ant as `ours` without serving it twice, when the ant's colony entry is
+/// `current`: only if the colony lists none, or `ours` itself (a put whose answer was lost). An entry stays in the
+/// colony until its daemon stops or it goes [`COLONY_TTL`] without a heartbeat, by the server's clock, so no clocks are
+/// compared. Two daemons on one machine are told apart by [`ColonyEntry::instance`].
+pub fn may_start(current: Option<&ColonyEntry>, ours: &ColonyEntry) -> bool {
     current.is_none_or(|e| e.instance == ours.instance)
 }
 
-/// What one look at an ant's roster entry came to.
+/// What one look at an ant's colony entry came to.
 enum Claim {
     /// The entry was put, at this revision.
     Put(u64),
@@ -279,13 +279,13 @@ enum Claim {
 }
 
 /// Put `entry` if [`may_start`] allows it, expecting the revision looked at, so of two daemons only one goes ahead.
-async fn claim(kv: &kv::Store, entry: &RosterEntry) -> Result<Claim> {
+async fn claim(kv: &kv::Store, entry: &ColonyEntry) -> Result<Claim> {
     let key = entry.key();
-    let found = kv.entry(key).await.with_context(|| format!("reading {key} in the roster"))?;
+    let found = kv.entry(key).await.with_context(|| format!("reading {key} in the colony"))?;
     let current = found
         .as_ref()
         .filter(|e| e.operation == kv::Operation::Put)
-        .and_then(|e| serde_json::from_slice::<RosterEntry>(&e.value).ok());
+        .and_then(|e| serde_json::from_slice::<ColonyEntry>(&e.value).ok());
     if let Some(other) = current.filter(|c| !may_start(Some(c), entry)) {
         return Ok(Claim::Held { machine: other.machine, instance: other.instance });
     }
@@ -303,11 +303,11 @@ async fn claim(kv: &kv::Store, entry: &RosterEntry) -> Result<Claim> {
     match put {
         Ok(revision) => Ok(Claim::Put(revision)),
         Err((true, _)) => Ok(Claim::Raced),
-        Err((false, e)) => Err(e.context(format!("putting {key} in the roster"))),
+        Err((false, e)) => Err(e.context(format!("putting {key} in the colony"))),
     }
 }
 
-/// How often [`wait_for_turn`] looks at the roster when a watch shows the entry's expiry: only in case the watch
+/// How often [`wait_for_turn`] looks at the colony when a watch shows the entry's expiry: only in case the watch
 /// misses it.
 pub const LOOK_AGAIN: Duration = Duration::from_secs(60);
 
@@ -315,12 +315,12 @@ pub const LOOK_AGAIN: Duration = Duration::from_secs(60);
 /// The put expects the entry it looked at, so of two daemons starting at once only one goes ahead; the other waits on.
 /// It looks again as soon as a watch of the entry shows it deleted or expired (the bucket leaves a marker of an
 /// expired entry), and otherwise only every [`LOOK_AGAIN`]; every `every` when it has no watch.
-pub async fn wait_for_turn(kv: &kv::Store, entry: &mut RosterEntry, every: Duration) -> Result<u64> {
+pub async fn wait_for_turn(kv: &kv::Store, entry: &mut ColonyEntry, every: Duration) -> Result<u64> {
     let key = entry.key().to_owned();
     let mut changes = match kv.watch(&key).await {
         Ok(changes) => Some(changes),
         Err(e) => {
-            tracing::warn!(ant = key, error = %e, "watching the roster entry; looking at the roster every {every:?}");
+            tracing::warn!(ant = key, error = %e, "watching the colony entry; looking at the colony every {every:?}");
             None
         }
     };
@@ -341,10 +341,10 @@ pub async fn wait_for_turn(kv: &kv::Store, entry: &mut RosterEntry, every: Durat
                 }
             }
             Ok(Claim::Raced) => {
-                tracing::info!(ant = key, "roster entry changed; looking again");
+                tracing::info!(ant = key, "colony entry changed; looking again");
                 continue;
             }
-            Err(e) => tracing::warn!(ant = key, error = format!("{e:#}"), "looking at the roster; trying again"),
+            Err(e) => tracing::warn!(ant = key, error = format!("{e:#}"), "looking at the colony; trying again"),
         }
         let look_again = tokio::time::sleep(wait);
         tokio::pin!(look_again);
@@ -361,22 +361,22 @@ pub async fn wait_for_turn(kv: &kv::Store, entry: &mut RosterEntry, every: Durat
     }
 }
 
-/// List `entry` in the roster over `revision`, which [`wait_for_turn`] put, and keep it fresh with its `workload` as
+/// List `entry` in the colony over `revision`, which [`wait_for_turn`] put, and keep it fresh with its `workload` as
 /// [`register`] does, as long as no other daemon puts the entry: then the registration is lost
 /// ([`Registration::lost`]) and puts nothing more.
 pub async fn hold(
     js: &jetstream::Context,
-    entry: RosterEntry,
+    entry: ColonyEntry,
     revision: u64,
     workload: Arc<Workload>,
 ) -> Result<Registration> {
-    let kv = bus::ensure_roster(js, ROSTER_TTL).await?;
-    Registration::hold(kv, entry, revision, ROSTER_HEARTBEAT, Some(workload)).await
+    let kv = bus::ensure_colony(js, COLONY_TTL).await?;
+    Registration::hold(kv, entry, revision, COLONY_HEARTBEAT, Some(workload)).await
 }
 
 /// Put `entry` over `revision`. When another write came in between: put it again if it is gone or ours, and give the
 /// revision put, or `None` if another daemon's entry is there.
-async fn renew(kv: &kv::Store, entry: &RosterEntry, revision: u64) -> Result<Option<u64>> {
+async fn renew(kv: &kv::Store, entry: &ColonyEntry, revision: u64) -> Result<Option<u64>> {
     match kv.update(entry.key(), serde_json::to_vec(entry)?.into(), revision).await {
         Ok(revision) => return Ok(Some(revision)),
         Err(e) if e.kind() == kv::UpdateErrorKind::WrongLastRevision => {}
@@ -393,7 +393,7 @@ async fn renew(kv: &kv::Store, entry: &RosterEntry, revision: u64) -> Result<Opt
 
 /// Wait until `entry` is due for a put: at the next tick of `ticks`, or as soon as `workload` turns idle or working.
 /// Then stamp it with the workload and the time.
-async fn due(ticks: &mut tokio::time::Interval, workload: Option<&Workload>, entry: &mut RosterEntry) {
+async fn due(ticks: &mut tokio::time::Interval, workload: Option<&Workload>, entry: &mut ColonyEntry) {
     loop {
         let changed = async {
             match workload {
@@ -430,7 +430,7 @@ async fn due(ticks: &mut tokio::time::Interval, workload: Option<&Workload>, ent
 /// as a failed put: then `held` turns `None`.
 async fn keep_held(
     kv: kv::Store,
-    mut entry: RosterEntry,
+    mut entry: ColonyEntry,
     every: Duration,
     workload: Option<Arc<Workload>>,
     held: watch::Sender<Option<u64>>,
@@ -448,7 +448,7 @@ async fn keep_held(
                     continue;
                 }
                 if change.operation == kv::Operation::Put {
-                    let ours = serde_json::from_slice::<RosterEntry>(&change.value)
+                    let ours = serde_json::from_slice::<ColonyEntry>(&change.value)
                         .is_ok_and(|e| e.instance == entry.instance);
                     if !ours {
                         break;
@@ -465,10 +465,10 @@ async fn keep_held(
                 held.send_replace(Some(put));
             }
             Ok(None) => break,
-            Err(e) => tracing::warn!(ant = %entry.ant, error = format!("{e:#}"), "roster heartbeat"),
+            Err(e) => tracing::warn!(ant = %entry.ant, error = format!("{e:#}"), "colony heartbeat"),
         }
     }
-    tracing::info!(ant = %entry.ant, "another daemon took over the roster entry");
+    tracing::info!(ant = %entry.ant, "another daemon took over the colony entry");
     held.send_replace(None);
 }
 
@@ -478,7 +478,7 @@ async fn next_change(changes: &mut Option<kv::Watch>) -> Option<kv::Entry> {
     match watch.next().await {
         Some(Ok(change)) => Some(change),
         Some(Err(e)) => {
-            tracing::warn!(error = %e, "watching the roster entry; the heartbeats still notice another daemon");
+            tracing::warn!(error = %e, "watching the colony entry; the heartbeats still notice another daemon");
             *changes = None;
             None
         }
@@ -492,7 +492,7 @@ async fn next_change(changes: &mut Option<kv::Watch>) -> Option<kv::Entry> {
 impl Registration {
     /// Put `entry` now, then again every `every`. The first put must succeed; later failures are logged and retried
     /// on the next beat, so a brief outage costs nothing as long as it is shorter than the bucket's max age.
-    pub async fn start(kv: kv::Store, entry: RosterEntry, every: Duration) -> Result<Self> {
+    pub async fn start(kv: kv::Store, entry: ColonyEntry, every: Duration) -> Result<Self> {
         Self::start_with(kv, entry, every, None).await
     }
 
@@ -500,7 +500,7 @@ impl Registration {
     /// turns idle or working.
     pub async fn start_with(
         kv: kv::Store,
-        mut entry: RosterEntry,
+        mut entry: ColonyEntry,
         every: Duration,
         workload: Option<Arc<Workload>>,
     ) -> Result<Self> {
@@ -508,7 +508,7 @@ impl Registration {
         if let Some(workload) = &workload {
             workload.stamp(&mut entry);
         }
-        put(&kv, &entry).await.with_context(|| format!("registering {key} in the roster"))?;
+        put(&kv, &entry).await.with_context(|| format!("registering {key} in the colony"))?;
         let beat_kv = kv.clone();
         let heartbeat = tokio::spawn(async move {
             let mut ticks = tokio::time::interval(every);
@@ -517,7 +517,7 @@ impl Registration {
             loop {
                 due(&mut ticks, workload.as_deref(), &mut entry).await;
                 if let Err(e) = put(&beat_kv, &entry).await {
-                    tracing::warn!(ant = %entry.ant, error = format!("{e:#}"), "roster heartbeat");
+                    tracing::warn!(ant = %entry.ant, error = format!("{e:#}"), "colony heartbeat");
                 }
             }
         });
@@ -529,7 +529,7 @@ impl Registration {
     /// heartbeat. An entry deleted or expired under it is put again if no other daemon got there first.
     pub async fn hold(
         kv: kv::Store,
-        mut entry: RosterEntry,
+        mut entry: ColonyEntry,
         revision: u64,
         every: Duration,
         workload: Option<Arc<Workload>>,
@@ -538,7 +538,7 @@ impl Registration {
         let changes = match kv.watch(&key).await {
             Ok(changes) => Some(changes),
             Err(e) => {
-                tracing::warn!(ant = key, error = %e, "watching the roster entry; the heartbeats still notice another daemon");
+                tracing::warn!(ant = key, error = %e, "watching the colony entry; the heartbeats still notice another daemon");
                 None
             }
         };
@@ -546,7 +546,7 @@ impl Registration {
             workload.stamp(&mut entry);
         }
         entry.heartbeat_at = Utc::now();
-        let first = renew(&kv, &entry, revision).await.with_context(|| format!("registering {key} in the roster"))?;
+        let first = renew(&kv, &entry, revision).await.with_context(|| format!("registering {key} in the colony"))?;
         let (held, watching) = watch::channel(first);
         let heartbeat = tokio::spawn(keep_held(kv.clone(), entry, every, workload, held, changes));
         Ok(Self { kv, key, heartbeat, held: Some(watching) })
@@ -580,7 +580,7 @@ impl Registration {
             }
         };
         if let Err(e) = deleted {
-            tracing::warn!(ant = %self.key, error = %e, "leaving the roster; the entry expires on its own");
+            tracing::warn!(ant = %self.key, error = %e, "leaving the colony; the entry expires on its own");
         }
     }
 }
@@ -591,37 +591,37 @@ impl Drop for Registration {
     }
 }
 
-/// The entries in the roster, by ant. An entry removed while listing is left out, and a malformed one is skipped
+/// The entries in the colony, by ant. An entry removed while listing is left out, and a malformed one is skipped
 /// with a warning. So is one naming another ant than its key: credentials vouch only for the key.
-pub async fn list_entries(kv: &kv::Store) -> Result<Vec<RosterEntry>> {
-    let mut keys: Vec<String> = kv.keys().await.context("listing the roster")?.try_collect().await?;
+pub async fn list_entries(kv: &kv::Store) -> Result<Vec<ColonyEntry>> {
+    let mut keys: Vec<String> = kv.keys().await.context("listing the colony")?.try_collect().await?;
     keys.sort();
     let mut entries = Vec::with_capacity(keys.len());
     for key in keys {
-        let Some(value) = kv.get(&key).await.with_context(|| format!("reading {key} in the roster"))? else { continue };
-        match serde_json::from_slice::<RosterEntry>(&value) {
+        let Some(value) = kv.get(&key).await.with_context(|| format!("reading {key} in the colony"))? else { continue };
+        match serde_json::from_slice::<ColonyEntry>(&value) {
             Ok(entry) => match entry.check_key(&key) {
                 Ok(()) => entries.push(entry),
-                Err(e) => tracing::warn!(key, error = %e, "skipping a roster entry for another ant"),
+                Err(e) => tracing::warn!(key, error = %e, "skipping a colony entry for another ant"),
             },
-            Err(e) => tracing::warn!(key, error = %e, "skipping a malformed roster entry"),
+            Err(e) => tracing::warn!(key, error = %e, "skipping a malformed colony entry"),
         }
     }
     Ok(entries)
 }
 
 /// Whether `entry` advertises `capability`. Tags compare whole, ignoring case and surrounding space.
-pub fn has_capability(entry: &RosterEntry, capability: &str) -> bool {
+pub fn has_capability(entry: &ColonyEntry, capability: &str) -> bool {
     let capability = capability.trim();
     entry.capabilities.iter().any(|c| c.trim().eq_ignore_ascii_case(capability))
 }
 
 /// An entry not refreshed for this long has missed a heartbeat: its daemon may be gone, and the entry expires once
-/// [`ROSTER_TTL`] has passed.
-pub const STALE_AFTER: Duration = ROSTER_HEARTBEAT.saturating_mul(2);
+/// [`COLONY_TTL`] has passed.
+pub const STALE_AFTER: Duration = COLONY_HEARTBEAT.saturating_mul(2);
 
 /// Whether `entry` was refreshed within [`STALE_AFTER`] of `now`. A heartbeat ahead of `now` counts as fresh.
-pub fn is_live(entry: &RosterEntry, now: DateTime<Utc>) -> bool {
+pub fn is_live(entry: &ColonyEntry, now: DateTime<Utc>) -> bool {
     (now - entry.heartbeat_at).to_std().unwrap_or_default() <= STALE_AFTER
 }
 
@@ -630,13 +630,13 @@ pub fn is_live(entry: &RosterEntry, now: DateTime<Utc>) -> bool {
 /// start, then those held back by no provider limit before limited ones, unless a fallback answers for them, then
 /// those answered by their own harness before those answered by a fallback, then live entries before stale ones, then
 /// idle ants before those of an activity unknown to this daemon (newer daemons) and those working, then the fewest
-/// messages in hand, then the first by id. The same roster at the same time always gives the same answer.
+/// messages in hand, then the first by id. The same colony at the same time always gives the same answer.
 pub fn pick<'a>(
-    entries: &'a [RosterEntry],
+    entries: &'a [ColonyEntry],
     capability: &str,
     asking: &UserId,
     now: DateTime<Utc>,
-) -> Option<&'a RosterEntry> {
+) -> Option<&'a ColonyEntry> {
     entries.iter().filter(|e| &e.ant != asking && has_capability(e, capability)).min_by_key(|e| {
         let busyness = match e.activity {
             Activity::Idle => 0,
@@ -656,7 +656,7 @@ pub fn pick<'a>(
     })
 }
 
-async fn put(kv: &kv::Store, entry: &RosterEntry) -> Result<()> {
+async fn put(kv: &kv::Store, entry: &ColonyEntry) -> Result<()> {
     kv.put(entry.key(), serde_json::to_vec(entry)?.into()).await?;
     Ok(())
 }
@@ -680,13 +680,13 @@ pub async fn machine() -> String {
 mod tests {
     use super::*;
 
-    fn entry(ant: &str, capabilities: &[&str]) -> RosterEntry {
+    fn entry(ant: &str, capabilities: &[&str]) -> ColonyEntry {
         entry_on(ant, "m", capabilities)
     }
 
-    fn entry_on(ant: &str, machine: &str, capabilities: &[&str]) -> RosterEntry {
+    fn entry_on(ant: &str, machine: &str, capabilities: &[&str]) -> ColonyEntry {
         let now = Utc::now();
-        RosterEntry {
+        ColonyEntry {
             ant: ant.parse().unwrap(),
             machine: machine.to_owned(),
             instance: format!("{ant}@{machine}"),
@@ -802,14 +802,14 @@ mod tests {
     #[test]
     fn pick_prefers_live_then_idle_then_least_loaded_ants() {
         let now = Utc::now();
-        let with = |ant, activity, handling, beat_secs_ago| RosterEntry {
+        let with = |ant, activity, handling, beat_secs_ago| ColonyEntry {
             activity,
             handling,
             heartbeat_at: now - chrono::Duration::seconds(beat_secs_ago),
             ..entry(ant, &["rust"])
         };
         let me: UserId = "me".parse().unwrap();
-        let picked = |entries: &[RosterEntry]| pick(entries, "rust", &me, now).map(|e| e.ant.to_string());
+        let picked = |entries: &[ColonyEntry]| pick(entries, "rust", &me, now).map(|e| e.ant.to_string());
         let (idle, working, unknown) = (Activity::Idle, Activity::Working, Activity::Unknown);
 
         let mut entries = vec![
@@ -856,7 +856,7 @@ mod tests {
 
     #[test]
     fn starts_unless_another_daemon_lists_the_ant() {
-        let run = |machine, instance: &str| RosterEntry {
+        let run = |machine, instance: &str| ColonyEntry {
             instance: instance.to_owned(),
             ..entry_on("messenger", machine, &[])
         };

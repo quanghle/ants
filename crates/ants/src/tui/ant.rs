@@ -1,5 +1,5 @@
 //! The ant view: one ant at a glance, as `ants ant show` prints it ([`crate::ant`]). Above, where and how it runs, as
-//! its roster entry tells, beside what holds it back, what it does now on each thread (as `ants watch ANT` follows
+//! its colony entry tells, beside what holds it back, what it does now on each thread (as `ants watch ANT` follows
 //! it) and what it spent that UTC day; below, one pane at a time ([`Pane`]): its threads, the messages waiting for it,
 //! which [`Io`] asks its daemon for every while (as `ants queue` does), its memories ([`super::memories`]), or its
 //! settings and the admin orders to it ([`settings`]).
@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use ants_daemon::caps::Spent;
-use ants_proto::{JsDomain, RosterEntry, ThreadId, UserId, Uuid};
+use ants_proto::{ColonyEntry, JsDomain, ThreadId, UserId, Uuid};
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
 use futures::FutureExt as _;
@@ -165,7 +165,7 @@ impl Page {
             Key::Char('c') => return Some(To::Credentials),
             Key::Char('X') => return Some(To::Bar(format!("/retire {}", self.ant))),
             Key::Char('p') => {
-                let paused = data.live.roster.iter().any(|e| e.ant == self.ant && e.paused.is_some());
+                let paused = data.live.colony.iter().any(|e| e.ant == self.ant && e.paused.is_some());
                 let (ant, verb) = (self.ant.clone(), if paused { "resume" } else { "pause" });
                 let job = Job::Pause { ant, paused: !paused };
                 return Some(To::Do(Action::Run(job, format!("{verb} {}", self.ant))));
@@ -198,7 +198,7 @@ impl Page {
     }
 
     pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
-        let entry = data.live.roster.iter().find(|e| e.ant == self.ant);
+        let entry = data.live.colony.iter().find(|e| e.ant == self.ant);
         let (mark, color) = super::nav::marker(&entry.into_iter().collect::<Vec<_>>(), now);
         let head = data.looks.head(&self.ant);
         let head_width = head.iter().flatten().map(Line::width).max().map_or(0, |w| w + 2);
@@ -302,9 +302,9 @@ impl Page {
 
 /// Where and how the ant runs, its labels lined up, in lines of at most `width` characters but for the whoami, which
 /// wraps.
-fn about(entry: Option<&RosterEntry>, now: DateTime<Utc>, width: usize) -> Vec<Line<'static>> {
+fn about(entry: Option<&ColonyEntry>, now: DateTime<Utc>, width: usize) -> Vec<Line<'static>> {
     let Some(entry) = entry else {
-        return vec![Line::styled("not in the roster: no daemon serves it now", frame::dim())];
+        return vec![Line::styled("not in the colony: no daemon serves it now", frame::dim())];
     };
     let rows = crate::ant::about(entry, now);
     let label = rows.iter().map(|(l, _)| l.len()).max().unwrap_or(0);
@@ -323,7 +323,7 @@ fn about(entry: Option<&RosterEntry>, now: DateTime<Utc>, width: usize) -> Vec<L
 }
 
 /// What holds the ant back, what it does now on each thread, and what it spent that UTC day.
-fn status(ant: &UserId, entry: Option<&RosterEntry>, data: &Data, now: DateTime<Utc>) -> Vec<Line<'static>> {
+fn status(ant: &UserId, entry: Option<&ColonyEntry>, data: &Data, now: DateTime<Utc>) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let moved = data.looks.identity(ant).and_then(|i| i.moved.as_ref());
     let holds = crate::ant::holds(ant, entry, moved, now);
@@ -442,8 +442,8 @@ mod tests {
     use ants_proto::{AntModel, CoreMemories, Memories, MemoryFile, SignInNeeded, StatusEvent, StatusUpdate};
 
     use super::*;
+    use crate::colony::tests::entry;
     use crate::live::tests::{at, message, user};
-    use crate::roster::tests::entry;
     use crate::tui::model::tests::model;
     use crate::tui::model::{Action, Model};
     use crate::tui::nav;
@@ -475,13 +475,13 @@ mod tests {
     }
 
     #[test]
-    fn the_ant_view_shows_the_roster_entry_holds_activity_spend_and_threads() {
+    fn the_ant_view_shows_the_colony_entry_holds_activity_spend_and_threads() {
         let (busy, other) = (ThreadId::generate(), ThreadId::generate());
         let mut m = model();
         let mut dev = entry("dev-a", 3600, 2, at(2));
         dev.model = AntModel::of(Some("gpt-5".to_owned()), Some("high".to_owned()), None);
         dev.signed_out = Some(SignInNeeded { since: at(1), sign_in: Some("copilot login".to_owned()) });
-        m.data.live.roster(vec![dev], at(2));
+        m.data.live.colony(vec![dev], at(2));
         m.stored(
             vec![message(1, &busy, "alice", "dev-a", "deploy the site"), message(2, &other, "alice", "dev-b", "other")],
             at(2),
@@ -537,7 +537,7 @@ mod tests {
     fn p_pauses_the_ant_or_resumes_it_when_paused() {
         let mut m = model();
         let mut dev = entry("dev-a", 60, 2, at(2));
-        m.data.live.roster(vec![dev.clone()], at(2));
+        m.data.live.colony(vec![dev.clone()], at(2));
         m.select(nav::Item::Ant(user("dev-a")));
         m.focus = crate::tui::model::Focus::View;
         let pause = |paused| Some(Action::Run(Job::Pause { ant: user("dev-a"), paused }, String::new()));
@@ -547,7 +547,7 @@ mod tests {
         };
         assert_eq!(sent(m.key(Key::Char('p'), at(3))), pause(true));
         dev.paused = Some(ants_proto::Paused { since: at(3), by: None });
-        m.data.live.roster(vec![dev], at(3));
+        m.data.live.colony(vec![dev], at(3));
         assert_eq!(sent(m.key(Key::Char('p'), at(4))), pause(false));
         assert!(screen(&m, at(4)).contains("paused"), "{}", screen(&m, at(4)));
     }
@@ -556,7 +556,7 @@ mod tests {
     fn the_queue_pane_lists_what_the_daemon_holds_and_opens_its_thread() {
         let thread = ThreadId::generate();
         let mut m = model();
-        m.data.live.roster(vec![entry("dev-a", 60, 2, at(2))], at(2));
+        m.data.live.colony(vec![entry("dev-a", 60, 2, at(2))], at(2));
         m.stored(vec![message(1, &thread, "alice", "dev-a", "deploy the site")], at(2));
         m.select(nav::Item::Ant(user("dev-a")));
         m.key(Key::Right, at(3));
@@ -578,7 +578,7 @@ mod tests {
     #[test]
     fn the_memories_pane_reads_them_once_shown_and_again_on_u() {
         let mut m = model();
-        m.data.live.roster(vec![entry("dev-a", 60, 2, at(2))], at(2));
+        m.data.live.colony(vec![entry("dev-a", 60, 2, at(2))], at(2));
         m.select(nav::Item::Ant(user("dev-a")));
         assert_eq!(m.memories_wanted(), None, "not before the pane shows");
         m.key(Key::Left, at(3));

@@ -1,5 +1,5 @@
 //! `ants ant show`, and what the ant view of `ants chat` shows the same way: one ant at a glance. Where and how it runs
-//! and what holds it back, as its roster entry tells; the messages waiting for it, as `ants queue` lists them; its
+//! and what holds it back, as its colony entry tells; the messages waiting for it, as `ants queue` lists them; its
 //! threads, as `ants thread list --ant` lists them; what it spent that UTC day, as `ants spend` reports it; and its
 //! settings and the admin orders to it ([`crate::settings`]).
 
@@ -7,30 +7,30 @@ use std::collections::BTreeMap;
 
 use ants_daemon::caps::Caps;
 use ants_daemon::direct_kv::DirectKv;
-use ants_proto::{MovedMark, RosterEntry, SESSIONS_BUCKET, UserId};
+use ants_proto::{ColonyEntry, MovedMark, SESSIONS_BUCKET, UserId};
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::roster::{self, State, short, since};
+use crate::colony::{self, State, short, since};
 use crate::{orders, queue, settings, spend, thread};
 
 /// How many of its most recently active threads `ants ant show` lists.
 const THREADS_SHOWN: usize = 10;
 
-/// The ant's state in a few words: `live, working`, `stale, idle`, `not in the roster`, or, `moved` (by `ants ant export
+/// The ant's state in a few words: `live, working`, `stale, idle`, `not in the colony`, or, `moved` (by `ants ant export
 /// --move`), `moved` or `moved, draining` while its daemon still serves it.
-pub fn state(entry: Option<&RosterEntry>, moved: Option<&MovedMark>, now: DateTime<Utc>) -> String {
+pub fn state(entry: Option<&ColonyEntry>, moved: Option<&MovedMark>, now: DateTime<Utc>) -> String {
     match (entry, moved) {
         (Some(_), Some(_)) => "moved, draining".to_owned(),
         (None, Some(_)) => "moved".to_owned(),
-        (Some(e), None) => format!("{}, {}", State::of(e, now).as_str(), roster::activity(e)),
-        (None, None) => "not in the roster".to_owned(),
+        (Some(e), None) => format!("{}, {}", State::of(e, now).as_str(), colony::activity(e)),
+        (None, None) => "not in the colony".to_owned(),
     }
 }
 
-/// Where and how the ant runs, as its roster entry tells: one labelled row each, `-` for what the entry leaves out.
-pub fn about(e: &RosterEntry, now: DateTime<Utc>) -> Vec<(&'static str, String)> {
+/// Where and how the ant runs, as its colony entry tells: one labelled row each, `-` for what the entry leaves out.
+pub fn about(e: &ColonyEntry, now: DateTime<Utc>) -> Vec<(&'static str, String)> {
     let or_none = |list: Vec<String>| if list.is_empty() { "-".to_owned() } else { list.join(", ") };
     vec![
         ("machine", e.machine.clone()),
@@ -49,17 +49,17 @@ pub fn about(e: &RosterEntry, now: DateTime<Utc>) -> Vec<(&'static str, String)>
 /// What holds `ant` back now, one line each: its move to another bus (`moved`), no daemon serving it, a stale entry, a
 /// harness signed out, failing to start or held by a provider limit, a fallback answering for it, low memory on its
 /// machine. Empty when nothing does.
-pub fn holds(ant: &UserId, entry: Option<&RosterEntry>, moved: Option<&MovedMark>, now: DateTime<Utc>) -> Vec<String> {
+pub fn holds(ant: &UserId, entry: Option<&ColonyEntry>, moved: Option<&MovedMark>, now: DateTime<Utc>) -> Vec<String> {
     if let Some(mark) = moved {
         return vec![crate::export::moved_line(ant, mark, now)];
     }
-    let Some(e) = entry else { return roster::unserved(ant, None, true, now).into_iter().collect() };
+    let Some(e) = entry else { return colony::unserved(ant, None, true, now).into_iter().collect() };
     if State::of(e, now) == State::Stale {
-        return roster::unserved(ant, Some(e), true, now).into_iter().collect();
+        return colony::unserved(ant, Some(e), true, now).into_iter().collect();
     }
     let entries = std::slice::from_ref(e);
     let prefix = format!("{ant}: ");
-    [roster::held(entries, now), roster::memory_low(entries, now)]
+    [colony::held(entries, now), colony::memory_low(entries, now)]
         .concat()
         .into_iter()
         .map(|line| line.strip_prefix(&prefix).map_or_else(|| line.clone(), str::to_owned))
@@ -70,8 +70,8 @@ pub fn holds(ant: &UserId, entry: Option<&RosterEntry>, moved: Option<&MovedMark
 #[derive(Serialize)]
 struct Shown {
     ant: UserId,
-    /// The roster entry, with its `state` added; None when the roster lists none.
-    roster: Option<serde_json::Value>,
+    /// The colony entry, with its `state` added; None when the colony lists none.
+    colony: Option<serde_json::Value>,
     holds: Vec<String>,
     /// None when no daemon of the ant answered.
     queue: Option<Vec<queue::Waiting>>,
@@ -125,7 +125,7 @@ pub async fn show(nats: &crate::Nats<'_>, ant: UserId, caps: &BTreeMap<UserId, C
         bail!("the credentials of {me} are an ant's; `ants ant show` reads what a human reads");
     }
     let (_, js) = nats.connect("ants-ant").await?;
-    let entry = roster::list(&js).await?.into_iter().find(|e| e.ant == ant);
+    let entry = colony::list(&js).await?.into_iter().find(|e| e.ant == ant);
     let queue = queue::read(&js, nats.domain, &ant, me).await?;
     let spend = async {
         let kv = DirectKv::new(&js, nats.domain, SESSIONS_BUCKET).await?;
@@ -150,14 +150,14 @@ pub async fn show(nats: &crate::Nats<'_>, ant: UserId, caps: &BTreeMap<UserId, C
     let moved = faces.identity(&ant).and_then(|i| i.moved.as_ref());
     let holds = holds(&ant, entry.as_ref(), moved, now);
     if json {
-        let roster = entry.as_ref().map(|e| roster::json(e, now, &faces)).transpose()?;
-        let roster = roster.map(|r| serde_json::from_str(&r)).transpose()?;
+        let colony = entry.as_ref().map(|e| colony::json(e, now, &faces)).transpose()?;
+        let colony = colony.map(|r| serde_json::from_str(&r)).transpose()?;
         let (queue, queue_unlisted) = queue.map_or((None, 0), |(waiting, more)| (Some(waiting), more));
         let settings::Reading { read, stale, orders, shared } = reading;
         let (shared_settings, shared_settings_unverified) = Unverified::split(shared.map(|s| *s));
         let shown = Shown {
             ant,
-            roster,
+            colony,
             holds,
             queue,
             queue_unlisted,
@@ -229,7 +229,7 @@ mod tests {
     use ants_proto::{AntModel, HarnessAgent, MemoryLow, SignInNeeded};
 
     use super::*;
-    use crate::roster::tests::entry;
+    use crate::colony::tests::entry;
 
     fn now() -> DateTime<Utc> {
         "2026-01-01T12:00:00Z".parse().unwrap()
@@ -251,7 +251,7 @@ mod tests {
         let rows: BTreeMap<&str, String> = about(&e, now()).into_iter().collect();
         assert_eq!(rows["model"], "gpt-5, effort high");
         assert_eq!(state(Some(&e), None, now()), "live, idle");
-        assert_eq!(state(None, None, now()), "not in the roster");
+        assert_eq!(state(None, None, now()), "not in the colony");
         let mark = MovedMark { at: now(), by: "alice".parse().unwrap() };
         assert_eq!(state(Some(&e), Some(&mark), now()), "moved, draining");
         assert_eq!(state(None, Some(&mark), now()), "moved");
@@ -260,9 +260,9 @@ mod tests {
     #[test]
     fn holds_name_what_keeps_the_ant_from_answering() {
         let ant: UserId = "dev-a".parse().unwrap();
-        assert_eq!(holds(&ant, None, None, now()), ["dev-a is not in the roster: no daemon serves dev-a now"]);
+        assert_eq!(holds(&ant, None, None, now()), ["dev-a is not in the colony: no daemon serves dev-a now"]);
         let stale = entry("dev-a", 7200, 600, now());
-        assert!(holds(&ant, Some(&stale), None, now())[0].starts_with("dev-a is stale in the roster"));
+        assert!(holds(&ant, Some(&stale), None, now())[0].starts_with("dev-a is stale in the colony"));
         let mut e = entry("dev-a", 7200, 3, now());
         assert!(holds(&ant, Some(&e), None, now()).is_empty());
         e.signed_out = Some(SignInNeeded { since: now() - chrono::Duration::minutes(5), sign_in: None });

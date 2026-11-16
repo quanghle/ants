@@ -117,7 +117,7 @@ pub(crate) async fn run(command: WebhookCommand, conn: &Connection<'_>) -> Resul
                     bail!("{} lists no human {human}, only {}", path.display(), names.join(", "))
                 }
             };
-            let machine = ants_daemon::roster::machine().await;
+            let machine = ants_daemon::colony::machine().await;
             let results = notify::test(entry, &machine).await;
             for (sink, sent) in &results {
                 match sent {

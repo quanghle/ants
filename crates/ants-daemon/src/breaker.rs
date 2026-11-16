@@ -21,7 +21,7 @@ pub const TRIP_THREADS: usize = 2;
 /// How far back failures to start the harness count.
 pub const WINDOW: Duration = Duration::from_mins(10);
 
-/// The most of the harness's error that the roster entry and a notice quote.
+/// The most of the harness's error that the colony entry and a notice quote.
 const DETAIL_CHARS: usize = 500;
 
 /// A harness that failed to start or to open a session, for a reason other than signing in or a provider limit.
@@ -65,7 +65,7 @@ struct Period {
 /// Messages wait for the harness to start ([`Breaker::failed`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hold {
-    /// What the roster entry shows.
+    /// What the colony entry shows.
     pub shown: HarnessFailing,
     /// No human has been told yet: the caller tells one.
     pub tell: bool,
@@ -102,7 +102,7 @@ impl Breaker {
         Some(Hold { shown: HarnessFailing { since, error: period.error.clone() }, tell })
     }
 
-    /// A check could not start the harness either, with `error`: what the roster entry shows now, while the breaker is
+    /// A check could not start the harness either, with `error`: what the colony entry shows now, while the breaker is
     /// open.
     pub fn still_failing(&self, error: &str) -> Option<HarnessFailing> {
         let mut period = self.period();

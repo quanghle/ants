@@ -22,12 +22,12 @@ They may:
   subjects live;
 - hear every ant's live status (`ants.status.<ant>.<thread>`), escalations, questions to humans and settled tool requests
   among them;
-- read and watch the `ants_roster` bucket;
+- read and watch the `ants_colony` bucket;
 - ask for their own renewal, and hear their own reply inboxes (`_INBOX.<observer>.>`).
 
 They publish no message, answer no tool request, cancel no prompt and write no bucket, so a leaked observer
 credentials file lets no one act for an ant or a human. They read no inbox, notes or channel subject, nor `STREAM.INFO`
-or `STREAM.MSG.GET` on `ANTS`. Every KV bucket other than `ants_roster` is denied too: `ants_sessions`, `ants_attempts`,
+or `STREAM.MSG.GET` on `ANTS`. Every KV bucket other than `ants_colony` is denied too: `ants_sessions`, `ants_attempts`,
 `ants_owners`, `ants_links`, `ants_chains`, `ants_humans`, `ants_channels`, `ants_webhooks`, `ants_read`,
 `ants_presence`, `ants_notify`, `ants_reactions`, `ants_threads`, `ants_devices` and `ants_machines`, and the attachment store `ants_files`.
 
@@ -48,7 +48,7 @@ Event payloads can still contain prompt or tool text:
 | `question` | `ants.status.<ant>.<thread>` | Live (core NATS) | `StatusEvent` of type `asked` |
 | `decided` | `ants.status.<ant>.<thread>` | Live (core NATS) | `StatusEvent` of type `decided` |
 | `status` | `ants.status.<ant>.<thread>` | Live (core NATS) | `StatusEvent` |
-| `roster` | `$KV.ants_roster.<ant>` | Live (KV watch) | `RosterEntry` |
+| `colony` | `$KV.ants_colony.<ant>` | Live (KV watch) | `ColonyEntry` |
 
 Stored feeds are read through a consumer of stream `ANTS` (`Feed` in `ants-proto`): the observer may create, read,
 ack, look up and delete only `observe-requests-<observer>` filtered to `ants.approvals.*`, `observe-decisions-<observer>`
@@ -58,8 +58,8 @@ two processes with the same credentials share one consumer and split its message
 credentials. The stream keeps messages 30 days. The observer finds JetStream as webhooks do, through the info of the
 consumer `inbox-<observer>`, which need not exist.
 
-Live feeds carry only what happens while the hook listens, and an update may be dropped. The roster bucket also allows
-reads (`$JS.API.DIRECT.GET.KV_ants_roster.>`) and stream info.
+Live feeds carry only what happens while the hook listens, and an update may be dropped. The colony bucket also allows
+reads (`$JS.API.DIRECT.GET.KV_ants_colony.>`) and stream info.
 
 Every document is a JSON object. A hook checks it against where it was read, as `ants hook run` does, since credentials
 pin the subject (or key) each user publishes on but not what the document says: a document naming another ant than its
@@ -148,7 +148,7 @@ message is not part of it.
 went up any chain, and `leader` who leads at that level; `stand_in`, when present, names the sending ant's stand-in on
 one sent to a human. Direct notices that emit no `StatusEvent` here: the
 `dead_letter` notice `ants dead watch` sends with human credentials (observed via `ants.dead.<ant>`), the `harness`
-notice of a harness failing to start (observed via `failing` in `ants_roster`), and the `storage` capacity warning.
+notice of a harness failing to start (observed via `failing` in `ants_colony`), and the `storage` capacity warning.
 
 #### Questions
 
@@ -197,13 +197,13 @@ A daemon stores a record at most every 30 s while calls changed and the rest whe
 `ant`, `message` and `id`, later records replacing earlier ones; ignore entries of other types and unknown fields.
 Check: `subject == "ants.timeline." + thread_id + "." + ant`.
 
-### `RosterEntry` at `ants_roster` key `<ant>`
+### `ColonyEntry` at `ants_colony` key `<ant>`
 
 What a daemon says of an ant it serves: `ant`, `machine`, `instance`, `harness`, `agent`? (`{name, version}`),
 `capabilities`, `whoami`?, `workdir`, `started_at`, `heartbeat_at`, `activity` (`idle`, `working`), `handling`,
 `harnesses`, `escalate_to`?, `version`, `perms`, `signed_out`?, `limited`?, `failing`?, `fallback`?, `memory_low`?
 (`{since, available, max_harnesses}`). The daemon puts it on start and every 10 s, and deletes it on a clean stop; the
-bucket's entries expire after 30 s, so a daemon that died leaves none. `ants hook run --on roster` hands on puts only, every heartbeat included. Check: `key == ant`.
+bucket's entries expire after 30 s, so a daemon that died leaves none. `ants hook run --on colony` hands on puts only, every heartbeat included. Check: `key == ant`.
 
 ## `ants hook run`
 
@@ -215,7 +215,7 @@ with the event's document and a newline on its stdin, until stopped. Its stdout 
   the feed, from where it left off: on the first run, from the next event stored. Each event is acked once `CMD` ends,
   whatever its exit status, so a failing command does not stall the feed; an event whose `CMD` was still running when
   `ants hook run` stopped is handed on again. The consumer is removed after 7 days without a reader.
-- **Live feeds** (`escalation`, `question`, `decided`, `status`, `roster`) take events from now on.
+- **Live feeds** (`escalation`, `question`, `decided`, `status`, `colony`) take events from now on.
 - At most `--concurrency` (default 4) runs at once; a run lasting past `--timeout` (default `60s`) is killed. Failed
   runs, timeouts and documents that are forged or unreadable (skipped) are logged.
 

@@ -397,7 +397,7 @@ pub fn describe(faces: &Faces, ant: &UserId, now: chrono::DateTime<chrono::Utc>)
         out.push_str("no identity record yet: the avatar comes from the name until the ant's daemon starts\n");
         return out;
     };
-    let age = crate::roster::short(crate::roster::since(record.born, now));
+    let age = crate::colony::short(crate::colony::since(record.born, now));
     let _ = writeln!(out, "born {} ({age} ago)", record.born.format("%Y-%m-%d %H:%M:%SZ"));
     let next = match stage.next_at() {
         Some(at) => format!("; {} at {at}", Stage::of(at).as_str()),

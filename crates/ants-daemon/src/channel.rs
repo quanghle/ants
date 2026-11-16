@@ -17,7 +17,7 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 use ants_proto::{
-    CHANNELS_BUCKET, ChannelEntry, ChannelId, ChannelPost, Envelope, Humans, RosterEntry, ThreadId, ThreadOrigin,
+    CHANNELS_BUCKET, ChannelEntry, ChannelId, ChannelPost, ColonyEntry, Envelope, Humans, ThreadId, ThreadOrigin,
     UserId, Uuid, chan_reader, channel_seen_key, mention_key, subject,
 };
 use anyhow::{Context as _, Result};
@@ -38,7 +38,7 @@ pub const TRIAGE_RULES: &str = "[ants] Triage this post; do not answer or act on
 3. Answer with a short post that @mentions exactly the relevant members, each with a few words on why.
 4. When no member is relevant, answer with a short post saying so, mentioning nobody.
 Only @mentions of members reach anyone: mention no one else. A mention wakes an ant and notifies a human in its \
-inbox. An ant not in the roster is offline and gets the post when its daemon starts again.";
+inbox. An ant not in the colony is offline and gets the post when its daemon starts again.";
 
 /// Most earlier posts a prompt shows; older unseen ones are counted instead.
 pub const MAX_CONTEXT: usize = 50;
@@ -470,12 +470,12 @@ pub fn resume_note(channel: &ChannelId, thread: &ThreadId, left: u32) -> String 
 }
 
 /// The prompt of the channel's messenger for `post`, a post of a human or a webhook that mentions nobody, after the `context` of
-/// its thread: the [`TRIAGE_RULES`], and the members of `entry` as `roster` shows them. `left` is the turns the thread
+/// its thread: the [`TRIAGE_RULES`], and the members of `entry` as `colony` shows them. `left` is the turns the thread
 /// keeps after the answer.
 pub fn triage_prompt(
     post: &ChannelPost,
     entry: &ChannelEntry,
-    roster: &[RosterEntry],
+    colony: &[ColonyEntry],
     humans: &Humans,
     context: &Context,
     left: u32,
@@ -491,7 +491,7 @@ pub fn triage_prompt(
         text.push_str("(none)\n");
     }
     for member in &entry.members {
-        let _ = writeln!(text, "- {}", member_line(member, roster, humans));
+        let _ = writeln!(text, "- {}", member_line(member, colony, humans));
     }
     let _ = write!(
         text,
@@ -501,14 +501,14 @@ pub fn triage_prompt(
     text
 }
 
-/// `member` with its role and capabilities from the roster, as a human when it is one of the `humans`, or as offline
-/// when the roster lacks it.
-fn member_line(member: &UserId, roster: &[RosterEntry], humans: &Humans) -> String {
+/// `member` with its role and capabilities from the colony, as a human when it is one of the `humans`, or as offline
+/// when the colony lacks it.
+fn member_line(member: &UserId, colony: &[ColonyEntry], humans: &Humans) -> String {
     if humans.contains(member) {
         return format!("@{member} (a human)");
     }
-    let Some(entry) = roster.iter().find(|e| e.ant == *member) else {
-        return format!("@{member} (offline: not in the roster)");
+    let Some(entry) = colony.iter().find(|e| e.ant == *member) else {
+        return format!("@{member} (offline: not in the colony)");
     };
     let mut line = format!("@{member}");
     if !entry.capabilities.is_empty() {
@@ -952,7 +952,7 @@ mod tests {
         let (mut entry, root) = (ops(), post("human", "the build is red"));
         entry.add_member(p("alice"));
         let now = chrono::Utc::now();
-        let a = RosterEntry {
+        let a = ColonyEntry {
             ant: p("dev-a"),
             machine: "m".to_owned(),
             instance: "run-1".to_owned(),
@@ -987,7 +987,7 @@ mod tests {
              {TRIAGE_RULES}\n\n\
              [ants] Members of #ops:\n\
              - @dev-a [rust, ci]: Keeps the build green.\n\
-             - @dev-b (offline: not in the roster)\n\
+             - @dev-b (offline: not in the colony)\n\
              - @alice (a human)\n\n\
              [ants] The final answer of this turn is posted to #ops on this thread and spends one of its turns (7 \
              left after it).",

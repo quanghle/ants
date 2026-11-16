@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use ants_proto::{AntIdentity, Avatar, Frame, Mood, Motion, Palette, Rgb, RosterEntry, Theme, UserId};
+use ants_proto::{AntIdentity, Avatar, ColonyEntry, Frame, Mood, Motion, Palette, Rgb, Theme, UserId};
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
 use futures::FutureExt as _;
@@ -15,9 +15,9 @@ use ratatui::text::{Line, Span};
 
 use super::model::Data;
 use crate::avatars::{Depth, Identities};
+use crate::colony;
 use crate::live::maybe;
 use crate::progress::Stand;
-use crate::roster;
 
 /// How often the identity records are read again, for avatars changed and prompts counted meanwhile.
 const READ_EVERY: Duration = Duration::from_secs(30);
@@ -173,8 +173,8 @@ const NODS_FOR: Duration = Duration::from_secs(4);
 /// provider limit holds it back; waiting on a human for a tool request or a question; nodding a few seconds after a message from it
 /// arrived; chewing on a tool call; thinking; else idle.
 pub fn mood(data: &Data, ant: &UserId, now: DateTime<Utc>) -> Mood {
-    let entries: Vec<&RosterEntry> =
-        data.live.roster.iter().filter(|e| e.ant == *ant && roster::State::of(e, now) == roster::State::Live).collect();
+    let entries: Vec<&ColonyEntry> =
+        data.live.colony.iter().filter(|e| e.ant == *ant && colony::State::of(e, now) == colony::State::Live).collect();
     let stands: Vec<(&Stand, bool)> = data.live.progress.values().filter_map(|p| p.status.stand(ant)).collect();
     if entries.is_empty() || entries.iter().any(|e| e.signed_out.is_some()) || stands.iter().any(|(_, out)| *out) {
         return Mood::Offline;
@@ -288,16 +288,16 @@ mod tests {
     }
 
     #[test]
-    fn the_mood_follows_the_roster_the_threads_and_the_inbox() {
+    fn the_mood_follows_the_colony_the_threads_and_the_inbox() {
         use ants_proto::{SignInNeeded, StatusEvent, StatusUpdate, ThreadId};
 
+        use crate::colony::tests::entry;
         use crate::live::tests::{at, message};
-        use crate::roster::tests::entry;
 
         let (dev, thread) = (user("dev-a"), ThreadId::generate());
         let mut m = crate::tui::model::tests::model();
-        assert_eq!(mood(&m.data, &dev, at(2)), Mood::Offline, "not in the roster");
-        m.data.live.roster(vec![entry("dev-a", 3600, 2, at(2))], at(2));
+        assert_eq!(mood(&m.data, &dev, at(2)), Mood::Offline, "not in the colony");
+        m.data.live.colony(vec![entry("dev-a", 3600, 2, at(2))], at(2));
         assert_eq!(mood(&m.data, &dev, at(2)), Mood::Idle);
         m.stored(vec![message(1, &thread, "dev-a", "alice", "done")], at(2));
         assert_eq!(mood(&m.data, &dev, at(2)), Mood::Message, "a message from it just arrived");
@@ -307,19 +307,19 @@ mod tests {
         assert_eq!(mood(&m.data, &dev, at(9)), Mood::Tool);
         let mut paused = entry("dev-a", 3600, 2, at(2));
         paused.paused = Some(ants_proto::Paused { since: at(8), by: None });
-        m.data.live.roster(vec![paused], at(9));
+        m.data.live.colony(vec![paused], at(9));
         assert_eq!(mood(&m.data, &dev, at(9)), Mood::Paused, "paused by an admin");
         let mut out = entry("dev-a", 3600, 2, at(2));
         out.signed_out = Some(SignInNeeded { since: at(1), sign_in: None });
-        m.data.live.roster(vec![out], at(9));
+        m.data.live.colony(vec![out], at(9));
         assert_eq!(mood(&m.data, &dev, at(9)), Mood::Offline, "signed out");
     }
 
     #[test]
     fn in_colour_the_ant_view_draws_the_head() {
         let mut m = crate::tui::model::tests::model();
-        m.data.live.roster(
-            vec![crate::roster::tests::entry("dev-a", 3600, 2, crate::live::tests::at(2))],
+        m.data.live.colony(
+            vec![crate::colony::tests::entry("dev-a", 3600, 2, crate::live::tests::at(2))],
             crate::live::tests::at(2),
         );
         m.data.looks = Looks::new(Depth::True, Theme::Dark, true);

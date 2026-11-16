@@ -9,7 +9,7 @@
 //! thread, or escalates it further. The leader's answer gives the thread a fresh turn budget and allowance once per
 //! level ([`Escalator::arrived`]); on a channel thread, the ant's answer to it goes back to the channel with that
 //! budget ([`Pending::channel`]). The next escalation goes one level higher, to the leader's own chain, which the
-//! roster publishes and the chains bucket keeps once the leader is offline ([`crate::chains`]). With no chain, a chain
+//! colony publishes and the chains bucket keeps once the leader is offline ([`crate::chains`]). With no chain, a chain
 //! that loops back or past `max_escalation_hops`, it goes to the thread's owner, else the default human, as it did
 //! before chains. Only a human's message ends an escalation.
 //!
@@ -42,7 +42,7 @@ use uuid::Uuid;
 use crate::caps::{Ended, Ledger, Pending, Reminder};
 use crate::chains::Chains;
 use crate::humans::Registry;
-use crate::mcp::Roster;
+use crate::mcp::Colony;
 use crate::{bus, links, status};
 
 /// Default of `escalate_after`: as long as a prompt may run by default.
@@ -165,8 +165,8 @@ impl std::fmt::Display for Escalated {
 pub struct Escalator {
     ant: UserId,
     chain: Chain,
-    roster: Roster,
-    /// The chains kept past the roster, for a leader that is offline.
+    colony: Colony,
+    /// The chains kept past the colony, for a leader that is offline.
     chains: Option<Chains>,
     humans: Registry,
     ledger: Arc<Ledger>,
@@ -180,13 +180,13 @@ pub struct Escalator {
 }
 
 impl Escalator {
-    /// Escalations of `ant` up `chain`, the chains of others read from `roster`, kept in `ledger`.
-    pub fn new(ant: UserId, chain: Chain, roster: Roster, humans: Registry, ledger: Arc<Ledger>, send: Sender) -> Self {
+    /// Escalations of `ant` up `chain`, the chains of others read from `colony`, kept in `ledger`.
+    pub fn new(ant: UserId, chain: Chain, colony: Colony, humans: Registry, ledger: Arc<Ledger>, send: Sender) -> Self {
         let (busy, deadline_set) = (Mutex::default(), Notify::new());
-        Self { ant, chain, roster, chains: None, humans, ledger, send, notes: None, busy, deadline_set }
+        Self { ant, chain, colony, chains: None, humans, ledger, send, notes: None, busy, deadline_set }
     }
 
-    /// Follow the chain of a leader missing from the roster through `chains`.
+    /// Follow the chain of a leader missing from the colony through `chains`.
     #[must_use]
     pub fn with_chains(mut self, chains: Chains) -> Self {
         self.chains = Some(chains);
@@ -561,19 +561,19 @@ impl Escalator {
         Ok((Escalated::Owner(human), because.map(|because| why_text(escalation, &because))))
     }
 
-    /// The escalate_to of `leader`: the ant's own, else what the roster lists, else the chain kept for it once its
-    /// roster entry expired, else none.
+    /// The escalate_to of `leader`: the ant's own, else what the colony lists, else the chain kept for it once its
+    /// colony entry expired, else none.
     async fn chain_of(&self, leader: &UserId) -> Vec<UserId> {
         if *leader == self.ant {
             return self.chain.escalate_to.clone();
         }
-        match (self.roster)().await {
+        match (self.colony)().await {
             Ok(entries) => {
                 if let Some(entry) = entries.into_iter().find(|e| e.ant == *leader) {
                     return entry.escalate_to;
                 }
             }
-            Err(e) => tracing::warn!(%leader, error = format!("{e:#}"), "reading the roster"),
+            Err(e) => tracing::warn!(%leader, error = format!("{e:#}"), "reading the colony"),
         }
         let Some(chains) = &self.chains else { return Vec::new() };
         match chains(leader.clone()).await {

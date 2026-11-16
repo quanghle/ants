@@ -1625,8 +1625,8 @@ async fn unserved_watch(human: &Human, js: &jetstream::Context, js_domain: Optio
         return None;
     }
     let name = &human.name;
-    let roster = ants_daemon::mcp::jetstream_roster(js.clone());
-    Watch::new(js, js_domain, name.clone(), Role::Human, roster)
+    let colony = ants_daemon::mcp::jetstream_colony(js.clone());
+    Watch::new(js, js_domain, name.clone(), Role::Human, colony)
         .await
         .inspect_err(|e| tracing::warn!(human = %name, error = format!("{e:#}"), "watching the messages sent"))
         .ok()

@@ -57,7 +57,7 @@ pub struct EnableArgs {
     /// The ant's own files, also its workdir (default: ~/.ants/<name>).
     #[arg(long)]
     pub home: Option<PathBuf>,
-    /// Role instructions in place of the assistant's default ones (shown in the roster, prepended to every prompt).
+    /// Role instructions in place of the assistant's default ones (shown in the colony, prepended to every prompt).
     #[arg(long)]
     pub whoami: Option<String>,
     /// Agent harness: built in (`copilot`, `claude`, `codex`, `antigravity`) or a name the config file defines under
@@ -529,7 +529,7 @@ impl Dedicated {
         Ok(Some(Self { name: ant.clone(), creds, key: finding.key, home }))
     }
 
-    /// Unlist the ant from the config file at `path`, wait up to `wait` for its daemon to stop it as the roster
+    /// Unlist the ant from the config file at `path`, wait up to `wait` for its daemon to stop it as the colony
     /// `js` shows, revoke its credentials with the account key in `dir` and push the account (unless `no_push`) to
     /// the server of `nats`, and remove their file. Its home stays.
     async fn retire(

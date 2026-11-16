@@ -24,7 +24,7 @@ use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
-use crate::roster::Workload;
+use crate::colony::Workload;
 use crate::sync::MutexExt as _;
 
 /// Content type of the Prometheus text exposition format.

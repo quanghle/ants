@@ -189,7 +189,7 @@ async fn enrolled(
     let plan = HostPlan::new(
         host_settings,
         leaf.as_ref().map(|(_, l)| &l.machine),
-        &ants_daemon::roster::machine().await,
+        &ants_daemon::colony::machine().await,
         auth::default_dir()?.join("host.creds"),
     );
     let host = match plan {

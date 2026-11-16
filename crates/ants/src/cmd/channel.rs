@@ -8,7 +8,7 @@ use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
 
 use crate::channel::reads;
-use crate::{Nats, channel, completions, humans, roster, thread, upgrade};
+use crate::{Nats, channel, colony, completions, humans, thread, upgrade};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum ChannelCommand {
@@ -280,7 +280,7 @@ async fn mark_read(
     }
 }
 
-/// Warn about members, messengers and owners no daemon serves now ([`roster::unserved`]), rather than refuse them:
+/// Warn about members, messengers and owners no daemon serves now ([`colony::unserved`]), rather than refuse them:
 /// one may start later. `humans` need none.
 pub(crate) async fn warn_unserved<'a>(
     js: &async_nats::jetstream::Context,
@@ -288,7 +288,7 @@ pub(crate) async fn warn_unserved<'a>(
     humans: &ants_proto::Humans,
 ) {
     let users: Vec<&UserId> = users.into_iter().filter(|u| !humans.contains(u)).collect();
-    for warning in roster::unserved_warnings(js, &users).await {
+    for warning in colony::unserved_warnings(js, &users).await {
         tracing::warn!("{warning}");
     }
 }

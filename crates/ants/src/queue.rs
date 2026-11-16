@@ -79,7 +79,7 @@ pub fn unanswered(ant: &UserId) -> String {
     format!("no daemon serving {ant} answered within {}s", QUEUE_WAIT.as_secs())
 }
 
-/// Print the messages waiting for `ant`, or without one for every ant live in the roster: a table, or with `json` one
+/// Print the messages waiting for `ant`, or without one for every ant live in the colony: a table, or with `json` one
 /// per line.
 pub async fn list(nats: &crate::Nats<'_>, ant: Option<UserId>, json: bool) -> Result<()> {
     let me = &nats.me.id;
@@ -112,7 +112,7 @@ struct AntWaiting<'a> {
     message: &'a Waiting,
 }
 
-/// Print the messages waiting for every ant live in the roster, asking their daemons at once. An ant whose daemon does
+/// Print the messages waiting for every ant live in the colony, asking their daemons at once. An ant whose daemon does
 /// not answer is told on stderr; only when none answers does the listing fail.
 async fn list_live(
     js: &async_nats::jetstream::Context,
@@ -121,16 +121,16 @@ async fn list_live(
     json: bool,
 ) -> Result<()> {
     let now = Utc::now();
-    let mut ants: Vec<UserId> = crate::roster::list(js)
+    let mut ants: Vec<UserId> = crate::colony::list(js)
         .await?
         .into_iter()
-        .filter(|entry| ants_daemon::roster::is_live(entry, now))
+        .filter(|entry| ants_daemon::colony::is_live(entry, now))
         .map(|entry| entry.ant)
         .collect();
     ants.sort();
     ants.dedup();
     if ants.is_empty() {
-        println!("no live ants in the roster");
+        println!("no live ants in the colony");
         return Ok(());
     }
     let reads = futures::future::join_all(ants.iter().map(|ant| read(js, domain, ant, me))).await;
@@ -545,7 +545,7 @@ fn cells(m: &Waiting, now: DateTime<Utc>) -> Vec<String> {
         Some(channel) => format!("{} in #{channel}", m.from),
         None => m.from.to_string(),
     };
-    let age = crate::roster::short((now - m.sent_at).to_std().unwrap_or_default());
+    let age = crate::colony::short((now - m.sent_at).to_std().unwrap_or_default());
     vec![m.id.to_string(), m.thread_id.to_string(), from, age, state(m)]
 }
 

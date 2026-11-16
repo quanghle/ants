@@ -31,7 +31,7 @@ pub struct AntIdentity {
     #[serde(default)]
     pub prompts: u64,
     /// Set when the ant was moved to another bus, by whom and when; no daemon serves it while set: the daemon serving it
-    /// drains it as on a stop and leaves the roster, and a daemon starting it waits for the mark to go.
+    /// drains it as on a stop and leaves the colony, and a daemon starting it waits for the mark to go.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub moved: Option<MovedMark>,
     /// The ant this one was cloned from, when it was.

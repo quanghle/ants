@@ -35,7 +35,7 @@ use crate::files::Attached;
 use crate::harness::{self, Harness, Launch, ModelSettings, Prompt, PromptLimits, SignedOut, Spend};
 use crate::humans::Registry;
 use crate::identity::Identity;
-use crate::mcp::{Mcp, Roster};
+use crate::mcp::{Colony, Mcp};
 use crate::notes::{self, NotesStore};
 use crate::overflow::ContextOverflow;
 use crate::permission::{Allowlist, PermissionPolicy};
@@ -49,7 +49,7 @@ use crate::status::{self, Status};
 use crate::sync::MutexExt as _;
 use crate::webhooks::Webhooks;
 use crate::worktrees::{Branch, Worktrees};
-use crate::{bus, pause, roster, unserved};
+use crate::{bus, colony, pause, unserved};
 
 /// Period of the progress acks sent for every message in hand, from its arrival to its ack: waiting for its thread,
 /// and prompting, which covers waiting for a harness, starting it and a tool request waiting for the human.
@@ -99,7 +99,7 @@ pub struct Config {
     pub home: PathBuf,
     /// Role, memory and task instructions prepended to every prompt.
     pub instructions: String,
-    /// The ant's role instructions, shared in the roster.
+    /// The ant's role instructions, shared in the colony.
     pub whoami: Option<String>,
     pub env: BTreeMap<String, String>,
     pub harness: std::sync::Arc<Harness>,
@@ -120,7 +120,7 @@ pub struct Config {
     pub worktree_base: crate::worktrees::Base,
     /// A thread's harness stops after this long without a message, and resumes its session on the next one.
     pub idle_timeout: Duration,
-    /// Capabilities the ant advertises in the roster.
+    /// Capabilities the ant advertises in the colony.
     pub capabilities: Vec<String>,
     /// Limits on every prompt.
     pub limits: PromptLimits,
@@ -134,18 +134,18 @@ pub struct Config {
     pub memory_pressure: crate::pressure::Settings,
     /// The daily caps the ant shares with the other ants added from its template, if any.
     pub pool: Option<crate::caps::Pool>,
-    /// Serve the ant only while holding its roster entry, as the built-in messenger does: wait while another
-    /// daemon lists it, and hand over to a daemon that puts it later ([`roster::hold`]).
+    /// Serve the ant only while holding its colony entry, as the built-in messenger does: wait while another
+    /// daemon lists it, and hand over to a daemon that puts it later ([`colony::hold`]).
     pub defer_to_others: bool,
     /// The default human, who gets escalations and notices of threads with no owner.
     pub human: UserId,
-    /// The ant's escalation chain, published in the roster, and its limits.
+    /// The ant's escalation chain, published in the colony, and its limits.
     pub escalation: Chain,
     /// For a manager ant of an `[[ant_template]]`, what adds the ants its `request_ant` tool asks for.
     pub requester: crate::mcp::Requester,
     /// Redact secrets from what the ant publishes ([`crate::redact`]).
     pub redact: bool,
-    /// The machine the ant's roster entry and notices name; the host name when None.
+    /// The machine the ant's colony entry and notices name; the host name when None.
     pub machine: Option<String>,
     /// What becomes of a thread's worktree branch holding new commits ([`crate::publish`]).
     pub publish: crate::publish::Publish,
@@ -153,7 +153,7 @@ pub struct Config {
     /// restarts no harness ([`crate::pause::Pause::replace`]).
     pub pause: crate::pause::Pause,
     /// The ant's settings this machine's config sets otherwise than its shared settings, which the ant runs with
-    /// ([`crate::shared`]), as its roster entry reports them; equal to any other, so that a change of drift alone
+    /// ([`crate::shared`]), as its colony entry reports them; equal to any other, so that a change of drift alone
     /// restarts no harness ([`crate::shared::Drift::replace`]).
     pub drift: crate::shared::Drift,
 }
@@ -223,7 +223,7 @@ async fn settle_worktrees(config: Config) -> Config {
 #[derive(Debug, PartialEq, Eq)]
 enum Served {
     Stopped,
-    /// Another daemon took over the ant's roster entry.
+    /// Another daemon took over the ant's colony entry.
     HandedOver,
     /// The ant's identity record was marked moved ([`ants_proto::AntIdentity::moved`]).
     Moved,
@@ -268,7 +268,7 @@ async fn assistant_sealing(
     Ok(Some(crate::sealing::AssistantSealing::new(config.ant.clone(), xkey, humans.clone(), directory)))
 }
 
-/// Serve the ant's inbox until Ctrl-C or `stop`, or until another daemon takes over its roster entry.
+/// Serve the ant's inbox until Ctrl-C or `stop`, or until another daemon takes over its colony entry.
 #[allow(clippy::too_many_lines)]
 async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Served> {
     let allow = Allowlist::parse(&config.allow)?;
@@ -280,11 +280,11 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         return Ok(Served::Stopped);
     }
     let metrics = crate::metrics::ant(&config.ant);
-    let workload = std::sync::Arc::new(roster::Workload::default());
+    let workload = std::sync::Arc::new(colony::Workload::default());
     workload.set_paused(config.pause.get());
     workload.set_drift(config.drift.get());
     let _connected = metrics.connected(client.clone(), workload.clone());
-    let mut entry = roster::entry(config).await;
+    let mut entry = colony::entry(config).await;
     let mut claimed = None;
     if config.defer_to_others {
         let Some(revision) = wait_for_turn(&js, &mut entry, stop).await? else {
@@ -297,19 +297,19 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
     let redactor = std::sync::Arc::new(redactor(config));
     let (approver, policy) = approval_policy(config, &client, &js, &humans, allow, &redactor);
     let outbox = redacting_outbox(crate::mcp::jetstream_outbox(js.clone()), redactor.clone());
-    let roster = crate::mcp::jetstream_roster(js.clone());
+    let colony = crate::mcp::jetstream_colony(js.clone());
     let reading = Reading::daemon(crate::creds::is_assistant(config.creds.as_deref()));
     let notes = crate::notes::JetStreamNotes::new(js.clone(), config.ant.clone()).reading(reading);
     let notes = std::sync::Arc::new(RedactingNotes { notes, redactor: redactor.clone() });
     let sessions_kv = bus::ensure_sessions(&js, config.js_domain.as_ref(), &config.ant).await?;
     let ledger = ledger(config, &sessions_kv);
-    let escalator = escalator(config, &js, &roster, &humans, &ledger, &redactor);
+    let escalator = escalator(config, &js, &colony, &humans, &ledger, &redactor);
     let identity = ant_records(config, &js).await;
     let mut mcp = Mcp::start(
         config.ant.clone(),
         &config.home,
         outbox,
-        roster.clone(),
+        colony.clone(),
         notes.clone(),
         humans.clone(),
         Some(escalator.clone()),
@@ -328,7 +328,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
     let pool = harness_pool(config, launch, sessions, &workload).await;
     let publisher = publisher(config, &js, &redactor, &pool).await;
     let (messages, channels) = inbox_messages(&js, &stream, config).await?;
-    let registration = enter_roster(&js, entry.clone(), claimed, &workload).await?;
+    let registration = enter_colony(&js, entry.clone(), claimed, &workload).await?;
     log_serving(config);
 
     let inbox = Inbox {
@@ -358,7 +358,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         notes: notes.as_ref(),
         threads: &threads,
         webhooks: &webhooks,
-        roster: &roster,
+        colony: &colony,
         humans: &humans,
         behalf: Records::new(js.clone(), config.js_domain.clone(), crate::humans::account(config.creds.as_deref())),
         retry_delay: RETRY_DELAY,
@@ -399,11 +399,11 @@ async fn unsealed(config: &Config, js: &jetstream::Context, stop: &Stop) -> bool
     }
 }
 
-/// Keep the ant's escalation chain past the roster, and return its identity record, created when absent: None when it
+/// Keep the ant's escalation chain past the colony, and return its identity record, created when absent: None when it
 /// cannot be read, which the warning says.
 async fn ant_records(config: &Config, js: &jetstream::Context) -> Option<Identity> {
     if let Err(e) = crate::chains::publish(js, &config.ant, &config.escalation.escalate_to).await {
-        tracing::warn!(error = format!("{e:#}"), "keeping the escalation chain past the roster");
+        tracing::warn!(error = format!("{e:#}"), "keeping the escalation chain past the colony");
     }
     let identity = Identity::new(js, config.js_domain.as_ref(), &config.ant).await;
     let ensured = match &identity {
@@ -487,16 +487,16 @@ async fn connect(config: &Config, stop: &Stop) -> Result<Option<(async_nats::Cli
     .await
 }
 
-/// Wait until no other daemon serves the ant: the revision of its roster entry claimed, or `None` when `stop` comes
+/// Wait until no other daemon serves the ant: the revision of its colony entry claimed, or `None` when `stop` comes
 /// first.
 async fn wait_for_turn(
     js: &jetstream::Context,
-    entry: &mut ants_proto::RosterEntry,
+    entry: &mut ants_proto::ColonyEntry,
     stop: &Stop,
 ) -> Result<Option<u64>> {
-    let kv = bus::ensure_roster(js, ants_proto::ROSTER_TTL).await?;
+    let kv = bus::ensure_colony(js, ants_proto::COLONY_TTL).await?;
     tokio::select! {
-        revision = roster::wait_for_turn(&kv, entry, ants_proto::ROSTER_HEARTBEAT) => revision.map(Some),
+        revision = colony::wait_for_turn(&kv, entry, ants_proto::COLONY_HEARTBEAT) => revision.map(Some),
         () = stopped(stop) => {
             tracing::info!("stopped before serving");
             Ok(None)
@@ -516,7 +516,7 @@ fn ledger(config: &Config, sessions: &crate::direct_kv::DirectKv) -> std::sync::
 fn escalator(
     config: &Config,
     js: &jetstream::Context,
-    roster: &Roster,
+    colony: &Colony,
     humans: &Registry,
     ledger: &std::sync::Arc<Ledger>,
     redactor: &std::sync::Arc<Redactor>,
@@ -524,7 +524,7 @@ fn escalator(
     let escalator = Escalator::new(
         config.ant.clone(),
         config.escalation.clone(),
-        roster.clone(),
+        colony.clone(),
         humans.clone(),
         ledger.clone(),
         redacting_sender(escalation::jetstream_sender(js.clone()), redactor.clone()),
@@ -604,7 +604,7 @@ async fn harness_pool(
     config: &Config,
     launch: Launch,
     sessions: SessionStore,
-    workload: &std::sync::Arc<roster::Workload>,
+    workload: &std::sync::Arc<colony::Workload>,
 ) -> Pool {
     let fallbacks = config.fallbacks.iter().map(|f| (f.name(), launch.with_fallback(f))).collect();
     let mut pool = Pool::new(launch, sessions, config.max_harnesses, config.idle_timeout)
@@ -697,16 +697,16 @@ async fn open_messages(
     Ok(futures::stream::select(messages, futures::stream::iter(posts).flatten()))
 }
 
-/// Put the ant on the roster, holding its entry from the revision claimed, if any.
-async fn enter_roster(
+/// Put the ant on the colony, holding its entry from the revision claimed, if any.
+async fn enter_colony(
     js: &jetstream::Context,
-    entry: ants_proto::RosterEntry,
+    entry: ants_proto::ColonyEntry,
     claimed: Option<u64>,
-    workload: &std::sync::Arc<roster::Workload>,
-) -> Result<roster::Registration> {
+    workload: &std::sync::Arc<colony::Workload>,
+) -> Result<colony::Registration> {
     Ok(match claimed {
-        Some(revision) => roster::hold(js, entry, revision, workload.clone()).await?,
-        None => roster::register(js, entry, workload.clone()).await?,
+        Some(revision) => colony::hold(js, entry, revision, workload.clone()).await?,
+        None => colony::register(js, entry, workload.clone()).await?,
     })
 }
 
@@ -740,7 +740,7 @@ async fn serve_inbox<S, E>(
     channels: Channels,
     config: &Config,
     stop: &Stop,
-    registration: &roster::Registration,
+    registration: &colony::Registration,
     storage: &crate::storage::Watcher,
 ) -> Result<Served>
 where
@@ -748,7 +748,7 @@ where
     E: Display,
 {
     let mut unserved =
-        unserved::Watch::new(inbox.js, config.js_domain.as_ref(), config.ant.clone(), Role::Ant, inbox.roster.clone())
+        unserved::Watch::new(inbox.js, config.js_domain.as_ref(), config.ant.clone(), Role::Ant, inbox.colony.clone())
             .await?
             .reading(inbox.reading);
     let (stopping, moving, mut asked) = (std::cell::Cell::new(false), std::cell::Cell::new(false), 0);
@@ -1051,7 +1051,7 @@ struct Inbox<'a> {
     ant: &'a UserId,
     /// How the daemon reads through the ant's own readers ([`Reading::daemon`]).
     reading: Reading,
-    /// The machine its notices name, as its roster entry does.
+    /// The machine its notices name, as its colony entry does.
     machine: &'a str,
     pool: &'a Pool,
     /// The prompts running, for `ants cancel`.
@@ -1071,11 +1071,11 @@ struct Inbox<'a> {
     publisher: Option<&'a Publisher>,
     /// Hides secrets in what the harness streams and answers.
     redactor: &'a Redactor,
-    /// Counts the messages being handled and the live harnesses, for the roster.
-    workload: &'a roster::Workload,
+    /// Counts the messages being handled and the live harnesses, for the colony.
+    workload: &'a colony::Workload,
     /// Whether the ant is paused: then no prompt starts, the messages in hand waiting.
     pause: &'a crate::pause::Pause,
-    /// The ant's drift, which its roster entry reports as it changes.
+    /// The ant's drift, which its colony entry reports as it changes.
     drift: &'a crate::shared::Drift,
     /// The ant's counters, for monitoring.
     metrics: std::sync::Arc<crate::metrics::Ant>,
@@ -1088,8 +1088,8 @@ struct Inbox<'a> {
     threads: &'a Threads,
     /// Who of the senders that say so are webhooks.
     webhooks: &'a Webhooks,
-    /// The roster, for the members a triage prompt shows.
-    roster: &'a Roster,
+    /// The colony, for the members a triage prompt shows.
+    colony: &'a Colony,
     /// Who is a human, and who gets the escalations of a thread with no owner.
     humans: &'a Registry,
     /// The assistants' records, against which an `on_behalf_of` is checked with the grants of `humans`.
@@ -2172,7 +2172,7 @@ impl Inbox<'_> {
         self.workload.set_fallback(None);
     }
 
-    /// Hold the messages, `incoming` having found the harness signed out, show that in the roster entry, and tell its
+    /// Hold the messages, `incoming` having found the harness signed out, show that in the colony entry, and tell its
     /// thread's owner, else the default human, how to sign it in, unless told already since the harness last worked.
     /// The notice goes to the human directly: no ant up the chain can sign the harness in.
     async fn wait_for_sign_in(&self, incoming: &Incoming, signed_out: &SignedOut) {
@@ -2207,7 +2207,7 @@ impl Inbox<'_> {
         }
     }
 
-    /// Check the harness every `sign_in_every` until a handshake with it succeeds, then clear the roster entry's
+    /// Check the harness every `sign_in_every` until a handshake with it succeeds, then clear the colony entry's
     /// signed-out state and let the messages go on.
     async fn signed_in(&self) {
         loop {
@@ -2234,7 +2234,7 @@ impl Inbox<'_> {
         }
     }
 
-    /// Hold the messages, `incoming` having met a provider limit, for the backoff, and show that in the roster entry.
+    /// Hold the messages, `incoming` having met a provider limit, for the backoff, and show that in the colony entry.
     /// A rate limit passes quietly; an exhausted quota is told to the thread's owner, else the default human, once
     /// until a message gets past a limit.
     async fn wait_out_limit(&self, incoming: &Incoming, limited: &Limited) {
@@ -2270,7 +2270,7 @@ impl Inbox<'_> {
     }
 
     /// Hold the messages, `incoming` having found the harness failing to start once too often ([`Breaker::failed`]),
-    /// show that in the roster entry, and tell its thread's owner, else the default human, how to check the harness,
+    /// show that in the colony entry, and tell its thread's owner, else the default human, how to check the harness,
     /// unless told already since a message last got past its start. The notice goes to the human directly, carrying a
     /// level-0 escalation so it is pushed: no ant up the chain can mend the harness.
     async fn wait_for_repair(&self, incoming: &Incoming, failed: &StartFailed, hold: breaker::Hold) {
@@ -2303,7 +2303,7 @@ impl Inbox<'_> {
     }
 
     /// Check the harness every `sign_in_every`, starting it as for a thread ([`harness::probe`]), until it starts or
-    /// says it is signed out or limited, then clear the roster entry's failing state and let the messages go on.
+    /// says it is signed out or limited, then clear the colony entry's failing state and let the messages go on.
     async fn repaired(&self) {
         loop {
             tokio::time::sleep(self.sign_in_every).await;
@@ -2328,7 +2328,7 @@ impl Inbox<'_> {
         }
     }
 
-    /// Wait until the backoff of the provider limit passes, then clear the roster entry's limit and let the messages
+    /// Wait until the backoff of the provider limit passes, then clear the colony entry's limit and let the messages
     /// go on.
     async fn limit_passed(&self) {
         while let Some(until) = self.throttle.until() {
@@ -2525,7 +2525,7 @@ impl Inbox<'_> {
         }
     }
 
-    /// Record which backend answered: the roster names a fallback, and the reply's notice says why it answered.
+    /// Record which backend answered: the colony names a fallback, and the reply's notice says why it answered.
     fn served_by(&self, fallback: Option<usize>) -> Option<String> {
         let Some(name) = fallback.and_then(|i| self.pool.fallbacks().into_iter().nth(i)) else {
             self.back_on_own();
@@ -3031,11 +3031,11 @@ impl Inbox<'_> {
         let mut text = match &posted.triage {
             None => channel::prompt(self.ant, post, read, left),
             Some(entry) => {
-                let roster = (self.roster)().await.unwrap_or_else(|e| {
-                    tracing::warn!(error = format!("{e:#}"), "reading the roster; members show as offline");
+                let colony = (self.colony)().await.unwrap_or_else(|e| {
+                    tracing::warn!(error = format!("{e:#}"), "reading the colony; members show as offline");
                     Vec::new()
                 });
-                channel::triage_prompt(post, entry, &roster, humans, read, left)
+                channel::triage_prompt(post, entry, &colony, humans, read, left)
             }
         };
         if posted.owned {

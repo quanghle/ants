@@ -215,10 +215,10 @@ fn serving() {
 }
 
 #[test]
-fn roster() {
+fn colony() {
     snap(
-        "roster_entry",
-        &RosterEntry {
+        "colony_entry",
+        &ColonyEntry {
             ant: user("dev-a"),
             machine: "studio.local".to_owned(),
             instance: "019a7d2b-0000-7000-8000-000000000001".to_owned(),
@@ -533,7 +533,7 @@ fn channels() {
             Refusal::NoSuchChannel,
             Refusal::Unreadable,
             Refusal::Human(user("alice")),
-            Refusal::NotInRoster(user("ghost")),
+            Refusal::NotInColony(user("ghost")),
             Refusal::Expired,
             Refusal::Busy,
             Refusal::Invalid("no change asked for".to_owned()),
@@ -943,15 +943,15 @@ fn hooks_doc_examples_parse() {
 /// `unknown`.
 #[test]
 fn newer_documents_parse() {
-    let roster: RosterEntry = parse(
+    let colony: ColonyEntry = parse(
         r#"{"ant": "dev-a", "machine": "studio.local", "instance": "019a7d2b-0000-7000-8000-000000000001",
             "harness": "copilot", "capabilities": [], "started_at": "2025-01-01T12:00:00Z",
             "heartbeat_at": "2025-01-01T12:01:00Z", "activity": "napping", "handling": 0, "harnesses": 0,
             "version": "9.0.0", "perms": 9, "mood": "great",
             "limited": {"kind": "solar_flare", "since": "2025-01-01T12:00:00Z", "until": "2025-01-01T12:05:00Z"}}"#,
     );
-    assert_eq!(roster.activity, Activity::Unknown);
-    assert_eq!(roster.limited.map(|l| l.kind), Some(LimitKind::Unknown));
+    assert_eq!(colony.activity, Activity::Unknown);
+    assert_eq!(colony.limited.map(|l| l.kind), Some(LimitKind::Unknown));
     let escalation: Escalation = parse(
         r#"{"stuck": "dev-a", "thread_id": "019a7d2c-0000-7000-8000-000000000001", "reason": "moon_phase", "level": 0,
             "leader": "dev-a", "visited": ["dev-a"], "urgency": "high"}"#,

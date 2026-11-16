@@ -14,6 +14,7 @@ mod attachments;
 mod behalf;
 mod chanadm;
 mod channels;
+mod colony;
 mod consent;
 mod dead;
 pub mod duration;
@@ -36,7 +37,6 @@ mod questions;
 mod queue;
 mod reactions;
 mod roles;
-mod roster;
 mod sealed;
 mod shared;
 mod status;
@@ -51,6 +51,7 @@ pub use attachments::*;
 pub use behalf::*;
 pub use chanadm::*;
 pub use channels::*;
+pub use colony::*;
 pub use consent::*;
 pub use dead::*;
 pub use enroll::*;
@@ -72,7 +73,6 @@ pub use questions::*;
 pub use queue::*;
 pub use reactions::*;
 pub use roles::*;
-pub use roster::*;
 pub use sealed::*;
 pub use shared::*;
 pub use status::*;
@@ -112,15 +112,15 @@ pub const INTAKE_STREAM: &str = "ANTS_IN";
 /// Durable consumer on a leaf's [`OUTBOX_STREAM`] through which the hub's [`INTAKE_STREAM`] sources it, delivering on
 /// [`Machine::outbox_delivery`]: nats-server resumes such a source as soon as the leaf node delivers again.
 pub const OUTBOX_CONSUMER: &str = "ANTS_IN";
-/// KV bucket where each daemon registers its ants: one [`RosterEntry`] per ant, keyed by its id.
-pub const ROSTER_BUCKET: &str = "ants_roster";
-/// How often a daemon re-puts its roster entry.
-pub const ROSTER_HEARTBEAT: Duration = Duration::from_secs(10);
-/// Max age of the roster bucket: an entry not refreshed for this long is gone, so an ant whose daemon died drops
-/// out of the roster after at most a few missed heartbeats.
-pub const ROSTER_TTL: Duration = Duration::from_secs(30);
+/// KV bucket where each daemon registers its ants: one [`ColonyEntry`] per ant, keyed by its id.
+pub const COLONY_BUCKET: &str = "ants_colony";
+/// How often a daemon re-puts its colony entry.
+pub const COLONY_HEARTBEAT: Duration = Duration::from_secs(10);
+/// Max age of the colony bucket: an entry not refreshed for this long is gone, so an ant whose daemon died drops
+/// out of the colony after at most a few missed heartbeats.
+pub const COLONY_TTL: Duration = Duration::from_secs(30);
 /// KV bucket of the machines: one [`MachineRecord`] per machine running a daemon, keyed by its name, listing the ants
-/// the daemon serves. Unlike the roster's, records never expire, so an ant whose daemon stopped still has a machine,
+/// the daemon serves. Unlike the colony's, records never expire, so an ant whose daemon stopped still has a machine,
 /// where admin orders to it wait ([`subject::admin_orders`]). Each machine's daemon writes only its own record, with
 /// the machine's host credentials ([`Permissions::for_host`]); humans read them all; ants read none. Beside its record,
 /// under keys starting with its name, the machine's daemon records the outcome of each admin order to its ants
@@ -146,7 +146,7 @@ pub const MAX_CHANNEL_OPS: usize = 32;
 /// it. [`UserId::human`] is a human without an entry.
 pub const HUMANS_BUCKET: &str = "ants_humans";
 /// KV bucket of the escalation chains: one [`ChainEntry`] per ant, keyed by its id, put by its daemon on
-/// start. Unlike the roster's, entries never expire, so a chain can be followed past an ant that is offline. Each
+/// start. Unlike the colony's, entries never expire, so a chain can be followed past an ant that is offline. Each
 /// ant writes only its own; every ant and human reads them.
 pub const CHAINS_BUCKET: &str = "ants_chains";
 /// KV bucket of the links to threads ants passed on ([`link_key`]): an ant whose message carries a link to a thread

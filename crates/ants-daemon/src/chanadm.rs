@@ -23,7 +23,7 @@ use futures::future::BoxFuture;
 use crate::bus;
 use crate::channel::{self, Stored};
 use crate::humans::Registry;
-use crate::mcp::Roster;
+use crate::mcp::Colony;
 
 /// Queue group of the channel managers: one of them takes each request.
 const QUEUE: &str = "chanadm";
@@ -33,14 +33,14 @@ const ATTEMPTS: usize = 10;
 const MAX_ANSWERED: usize = 1024;
 
 /// Serve channel management requests on `client` until its subscription ends. `js` reads and writes the channels
-/// bucket, reads the `roster` and posts the announcements; `humans` should be watched.
-pub async fn serve(client: async_nats::Client, js: jetstream::Context, roster: Roster, humans: Registry) -> Result<()> {
+/// bucket, reads the `colony` and posts the announcements; `humans` should be watched.
+pub async fn serve(client: async_nats::Client, js: jetstream::Context, colony: Colony, humans: Registry) -> Result<()> {
     let kv = js.get_key_value(CHANNELS_BUCKET).await.context(
         "opening the channels bucket; `ants channel create` as a human makes it, then the channel manager can start",
     )?;
     let mut requests =
         client.queue_subscribe(subject::ALL_CHANADM, QUEUE.to_owned()).await.context("subscribing to requests")?;
-    let mut manager = Manager { client, js, kv, roster, humans, answered: VecDeque::new() };
+    let mut manager = Manager { client, js, kv, colony, humans, answered: VecDeque::new() };
     tracing::info!("serving channel management requests");
     while let Some(msg) = requests.next().await {
         manager.handle(msg).await;
@@ -52,7 +52,7 @@ struct Manager {
     client: async_nats::Client,
     js: jetstream::Context,
     kv: kv::Store,
-    roster: Roster,
+    colony: Colony,
     humans: Registry,
     /// Answers sent, by request id and requester, oldest first.
     answered: VecDeque<(ants_proto::Uuid, UserId, Vec<u8>)>,
@@ -147,8 +147,8 @@ impl Manager {
             if changed.is_empty() {
                 return Ok((ChannelAdminOutcome::Applied { entry, revision, changed }, None));
             }
-            if let Some(missing) = self.missing_from_roster(&before, &entry, &humans).await? {
-                return refused(Refusal::NotInRoster(missing));
+            if let Some(missing) = self.missing_from_colony(&before, &entry, &humans).await? {
+                return refused(Refusal::NotInColony(missing));
             }
             let value = serde_json::to_vec(&entry)?;
             match self.kv.update(entry.key(), value.into(), revision).await {
@@ -166,8 +166,8 @@ impl Manager {
     }
 
     /// The first user that `after` makes a member or the messenger and `before` did not, when it is neither one of the
-    /// `humans` nor in the roster.
-    async fn missing_from_roster(
+    /// `humans` nor in the colony.
+    async fn missing_from_colony(
         &self,
         before: &ChannelEntry,
         after: &ChannelEntry,
@@ -179,8 +179,8 @@ impl Manager {
         if added.is_empty() {
             return Ok(None);
         }
-        let roster = (self.roster)().await.context("reading the roster")?;
-        Ok(added.into_iter().find(|ant| !roster.iter().any(|e| e.ant == **ant)).cloned())
+        let colony = (self.colony)().await.context("reading the colony")?;
+        Ok(added.into_iter().find(|ant| !colony.iter().any(|e| e.ant == **ant)).cloned())
     }
 }
 

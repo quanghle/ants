@@ -220,9 +220,9 @@ pub async fn serve(url: &str, creds: Option<&std::path::Path>, domain: Option<&a
     let publishing = crate::versions::keep_putting(published, key, crate::versions::serving().await, || {});
     let humans = ants_daemon::humans::Registry::new(UserId::human());
     let _watching = humans.watch(js.clone(), ants_daemon::humans::RETRY);
-    let roster = ants_daemon::mcp::jetstream_roster(js.clone());
+    let colony = ants_daemon::mcp::jetstream_colony(js.clone());
     tokio::select! {
-        served = ants_daemon::chanadm::serve(client, js, roster, humans) => served,
+        served = ants_daemon::chanadm::serve(client, js, colony, humans) => served,
         () = publishing => unreachable!("it keeps publishing"),
     }
 }

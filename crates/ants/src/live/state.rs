@@ -1,11 +1,11 @@
 //! What a live view knows of the ants, apart from the terminal and the connection: the threads read from the stream,
-//! each thread's live progress, the roster, the pending tool requests and the state of the connection, and a thread's
+//! each thread's live progress, the colony, the pending tool requests and the state of the connection, and a thread's
 //! history as it loads.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
-use ants_proto::{ApprovalRequest, Mark, RosterEntry, StatusEvent, ThreadId, ThreadMarks, UserId, Uuid};
+use ants_proto::{ApprovalRequest, ColonyEntry, Mark, StatusEvent, ThreadId, ThreadMarks, UserId, Uuid};
 use chrono::{DateTime, Utc};
 
 use crate::progress;
@@ -39,8 +39,8 @@ pub struct State {
     /// The threads, most recently active first, but for the archived ones with no message since and the idle ones.
     pub order: Vec<ThreadId>,
     pub progress: HashMap<ThreadId, Progress>,
-    pub roster: Vec<RosterEntry>,
-    pub roster_at: Option<DateTime<Utc>>,
+    pub colony: Vec<ColonyEntry>,
+    pub colony_at: Option<DateTime<Utc>>,
     /// The pending tool requests, oldest first.
     pub approvals: Vec<ApprovalRequest>,
     /// The decisions assistants made on pending requests for their humans, waiting for consent, by ant and request.
@@ -60,8 +60,8 @@ impl State {
             auto_archive: None,
             order: Vec::new(),
             progress: HashMap::new(),
-            roster: Vec::new(),
-            roster_at: None,
+            colony: Vec::new(),
+            colony_at: None,
             approvals: Vec::new(),
             held: HashMap::new(),
             link: Link::Connected,
@@ -116,9 +116,9 @@ impl State {
         Some((progress.status.line(width), progress.at))
     }
 
-    pub fn roster(&mut self, entries: Vec<RosterEntry>, now: DateTime<Utc>) {
-        self.roster = entries;
-        self.roster_at = Some(now);
+    pub fn colony(&mut self, entries: Vec<ColonyEntry>, now: DateTime<Utc>) {
+        self.colony = entries;
+        self.colony_at = Some(now);
     }
 
     /// Take word from following the tool requests ([`crate::tools::follow`]) into the pending ones.

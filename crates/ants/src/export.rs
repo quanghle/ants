@@ -271,7 +271,7 @@ pub async fn export(
         let mark = MovedMark { at: Utc::now(), by: nats.me.id.clone() };
         mark_moved(&kv, ant, Some(mark)).await?;
         println!(
-            "{ant} marked moved: its daemon drains it and leaves the roster, and no daemon starts it; \
+            "{ant} marked moved: its daemon drains it and leaves the colony, and no daemon starts it; \
              `ants ant unseal {ant}` undoes the move, `ants auth revoke {ant}` ends it on this bus once the import \
              succeeded"
         );
@@ -316,14 +316,14 @@ fn home_of(ant: &Ant) -> Result<PathBuf> {
 /// in flight to end when this one does, so its files are packed between prompts.
 async fn wait_between_prompts(js: &async_nats::jetstream::Context, ant: &UserId) {
     let lookup = ants_daemon::mcp::jetstream_lookup(js.clone());
-    let here = ants_daemon::roster::machine().await;
+    let here = ants_daemon::colony::machine().await;
     let deadline = tokio::time::Instant::now() + PACK_WAIT;
     let mut told = false;
     loop {
         let entry = match lookup(ant.clone()).await {
-            Ok(entry) => entry.filter(|e| ants_daemon::roster::is_live(e, Utc::now())),
+            Ok(entry) => entry.filter(|e| ants_daemon::colony::is_live(e, Utc::now())),
             Err(e) => {
-                eprintln!("warning: reading the roster: {e:#}; packing the files of {ant} as they are");
+                eprintln!("warning: reading the colony: {e:#}; packing the files of {ant} as they are");
                 return;
             }
         };
@@ -416,13 +416,13 @@ pub async fn unseal(nats: &crate::Nats<'_>, ant: &UserId) -> Result<()> {
     Ok(())
 }
 
-/// What holds a moved ant back, for the roster, `ants ant show` and the ant view.
+/// What holds a moved ant back, for the colony, `ants ant show` and the ant view.
 pub fn moved_line(ant: &UserId, mark: &MovedMark, now: DateTime<Utc>) -> String {
     format!(
         "{ant} was moved to another bus by {} {} ago: no daemon serves it; `ants ant unseal {ant}` undoes the move, \
          `ants auth revoke {ant}` ends it on this bus",
         mark.by,
-        crate::roster::short(crate::roster::since(mark.at, now))
+        crate::colony::short(crate::colony::since(mark.at, now))
     )
 }
 

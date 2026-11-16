@@ -1,5 +1,5 @@
 //! [`AdminOp::Retire`]: the `ants retire` flow for an ant of the config file the daemon serves, templated or not. Its
-//! `[[ant]]` table goes, so the reload stops it, its prompts in flight ending; once it left the roster, or after
+//! `[[ant]]` table goes, so the reload stops it, its prompts in flight ending; once it left the colony, or after
 //! [`STOP_WAIT`], `ants signer` revokes its key on the order ([`super::ask`]) and its credentials are deleted, with
 //! any seed of theirs in the OS credential store. Its home stays. The order taken again after the table went, its
 //! outcome not stored, finds the credentials left beside the host credentials and goes on from the revocation.
@@ -13,7 +13,7 @@ use std::time::Duration;
 
 #[cfg(doc)]
 use ants_proto::AdminOp;
-use ants_proto::{AdminOrder, AdminOutcome, EnrollReply, ROSTER_BUCKET, UserId};
+use ants_proto::{AdminOrder, AdminOutcome, COLONY_BUCKET, EnrollReply, UserId};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
 use serde_json::json;
@@ -26,7 +26,7 @@ use crate::creds::{self, Finding, Seed};
 use crate::direct_kv::{DirectKv, Lookup};
 use crate::keystore;
 
-/// How long the daemon waits for the ant to leave the roster before revoking its key, as `ants retire` does.
+/// How long the daemon waits for the ant to leave the colony before revoking its key, as `ants retire` does.
 const STOP_WAIT: Duration = Duration::from_mins(5);
 const STOP_POLL: Duration = Duration::from_secs(1);
 
@@ -207,17 +207,17 @@ fn key_of(creds: &Path, ant: &UserId) -> Result<String> {
     Ok(finding.key)
 }
 
-/// Wait up to `wait` for `ant` to leave the roster, as its daemon stopping it removes its entry; whether it did.
+/// Wait up to `wait` for `ant` to leave the colony, as its daemon stopping it removes its entry; whether it did.
 async fn stopped(js: &jetstream::Context, orders: &Orders, ant: &UserId, wait: Duration) -> bool {
     let deadline = tokio::time::Instant::now() + wait;
     loop {
-        match DirectKv::new(js, orders.js_domain.as_ref(), ROSTER_BUCKET).await {
-            Ok(roster) => match roster.lookup(ant.as_str()).await {
+        match DirectKv::new(js, orders.js_domain.as_ref(), COLONY_BUCKET).await {
+            Ok(colony) => match colony.lookup(ant.as_str()).await {
                 Ok(Lookup::NoValue | Lookup::NoBucket) => return true,
                 Ok(Lookup::Value(_)) => {}
-                Err(e) => tracing::warn!(ant = %ant, error = format!("{e:#}"), "reading the roster"),
+                Err(e) => tracing::warn!(ant = %ant, error = format!("{e:#}"), "reading the colony"),
             },
-            Err(e) => tracing::warn!(ant = %ant, error = format!("{e:#}"), "reading the roster"),
+            Err(e) => tracing::warn!(ant = %ant, error = format!("{e:#}"), "reading the colony"),
         }
         if tokio::time::Instant::now() >= deadline {
             return false;
