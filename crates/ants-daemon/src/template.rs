@@ -18,7 +18,8 @@
 //! whoami = "Implement what the manager assigns."   # defaults a request may replace: whoami, memory, tasks,
 //! capabilities = ["rust"]                # capabilities
 //! env = { CARGO_TARGET_DIR = "target" }  # fixed: env, worktrees, worktree_base, publish, idle_timeout,
-//! worktrees = true                       # approval_timeout, spend_warn_percent
+//! worktrees = true                       # approval_timeout, spend_warn_percent, fallback
+//! fallback = ["copilot", ":claude-haiku-4-5"]   # less the entry naming the harness and model an ant runs
 //! ```
 //!
 //! An ant added from a template ([`Request`], [`AntTemplate::resolve`]) is an `[[ant]]` entry carrying
@@ -152,6 +153,9 @@ pub struct AntTemplate {
     pub worktree_base: Base,
     #[serde(default)]
     pub publish: Publish,
+    /// The fallbacks of its ants ([`crate::fallback::inherit`]), whichever harness and model a request picks.
+    #[serde(default)]
+    pub fallback: Vec<String>,
 }
 
 fn default_name_pattern() -> String {
@@ -295,6 +299,7 @@ impl AntTemplate {
         for harness in &self.harnesses {
             known(harness).with_context(at)?;
         }
+        crate::fallback::check(&self.fallback, &known).with_context(at)?;
         if self.name_pattern.trim().is_empty() {
             bail!("{}: name_pattern must not be empty", at());
         }
@@ -384,6 +389,7 @@ impl AntTemplate {
             env: self.env.clone(),
             harness,
             model,
+            fallback: self.fallback.clone(),
             reasoning_effort: request.reasoning_effort.clone(),
             context: request.context.clone(),
             allow,
@@ -603,6 +609,7 @@ mod tests {
             whoami = "Work."
             env = { A = "b" }
             worktrees = true
+            fallback = ["copilot", ":haiku"]
         "#;
         let mut t: AntTemplate = toml::from_str(text).unwrap();
         t.validate(|p| dir().join(p), |_| Ok(())).unwrap();
@@ -637,6 +644,7 @@ mod tests {
         assert_eq!(ant.prompt_timeout, Duration::from_mins(20));
         assert_eq!((ant.allow, ant.escalate_to), (vec!["read".to_owned()], vec![id("lead")]));
         assert_eq!((ant.whoami.as_deref(), ant.worktrees, ant.env.len()), (Some("Work."), Some(true), 1));
+        assert_eq!(ant.fallback, ["copilot", ":haiku"], "whichever harness and model the ant runs");
     }
 
     #[test]
@@ -692,6 +700,20 @@ mod tests {
         }
         let err = t.resolve(&id("lead"), &id("dev-c"), &sonnet).unwrap_err().to_string();
         assert!(err.contains("does not fit name_pattern \"<manager>-*\" of template worker"), "{err}");
+    }
+
+    #[test]
+    fn a_template_s_fallbacks_name_known_harnesses_once() {
+        let known = |name: &str| if name == "vim" { bail!("unknown harness {name:?}") } else { Ok(()) };
+        for (fallback, error) in [
+            (vec!["vim"], "ant template worker: fallback \"vim\": unknown harness \"vim\""),
+            (vec!["claude", "claude"], "ant template worker: fallback \"claude\" is listed twice"),
+            (vec![":"], "names no model"),
+        ] {
+            let t = AntTemplate { fallback: fallback.into_iter().map(str::to_owned).collect(), ..template() };
+            let err = format!("{:#}", t.check(known).unwrap_err());
+            assert!(err.contains(error), "{err}");
+        }
     }
 
     #[test]

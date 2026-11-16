@@ -105,7 +105,7 @@ pub mod registration;
 use crate::caps::{Caps, Members, Pool};
 use crate::daemon::Config;
 use crate::escalation::{self, Chain};
-use crate::fallback;
+use crate::fallback::{self, Fallback};
 use crate::harness::{self, Harness, Harnesses, ModelSettings, PromptLimits};
 use crate::pressure;
 use crate::publish::Publish;
@@ -224,7 +224,8 @@ pub struct Ant {
     /// Bytes of the thread's history a rebuilt session is seeded with, over the harness's and its context's.
     pub history_budget: Option<usize>,
     /// Harnesses and models tried in order while the ant's own harness cannot serve ([`crate::fallback`]):
-    /// `<harness>`, `<harness>:<model>` or `:<model>` for another model of its own harness.
+    /// `<harness>`, `<harness>:<model>` or `:<model>` for another model of its own harness. Of an ant added from a
+    /// template, the template's, less any naming the ant's own harness and model ([`fallback::inherit`]).
     #[serde(default)]
     pub fallback: Vec<String>,
     /// Same as `allow = ["*"]`.
@@ -417,7 +418,7 @@ impl Ant {
             history_budget: self.history_budget,
         };
         model_settings.validate(&harness).with_context(|| format!("ant {}", self.name))?;
-        let fallbacks = fallback::resolve(&self.fallback, &harness, &model_settings, harnesses)
+        let fallbacks = fallbacks(self.template.is_some(), &self.fallback, &harness, &model_settings, harnesses)
             .with_context(|| format!("ant {}", self.name))?;
         if self.builtin {
             std::fs::create_dir_all(&self.workdir)
@@ -818,11 +819,21 @@ fn check_machine(machine: &str) -> Result<()> {
 /// Check that `ant` names a harness, and that it and those of its fallbacks are defined.
 fn check_harnesses(ant: &Ant, harnesses: &Harnesses) -> Result<()> {
     let own = harnesses.named(ant.harness.as_deref())?;
-    if !ant.fallback.is_empty() {
-        let settings = ModelSettings { model: ant.model.clone(), ..ModelSettings::default() };
-        fallback::resolve(&ant.fallback, &own, &settings, harnesses)?;
-    }
-    Ok(())
+    let settings = ModelSettings { model: ant.model.clone(), ..ModelSettings::default() };
+    fallbacks(ant.template.is_some(), &ant.fallback, &own, &settings, harnesses).map(drop)
+}
+
+/// The fallbacks `entries` name for an ant whose own harness is `own` with `settings`: as [`fallback::resolve`] has
+/// them, or, of an ant added from a template (`templated`), as [`fallback::inherit`] does.
+fn fallbacks(
+    templated: bool,
+    entries: &[String],
+    own: &std::sync::Arc<Harness>,
+    settings: &ModelSettings,
+    harnesses: &Harnesses,
+) -> Result<Vec<Fallback>> {
+    let resolve = if templated { fallback::inherit } else { fallback::resolve };
+    resolve(entries, own, settings, harnesses)
 }
 
 /// The file's `templates`, checked, each named once, their workdirs resolved and the harnesses they list defined;

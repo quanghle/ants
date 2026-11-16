@@ -7,6 +7,9 @@
 //! runs the ant's own harness. A fallback that is signed out, limited or fails to start is passed over for a while. The
 //! ant goes back to its own harness once a check finds it signed in or starting, or, after a quota, once the backoff
 //! passes and a message gets through.
+//!
+//! An ant added from a template takes the template's `fallback` list, which no request chooses, less any entry that
+//! names the harness and model the ant runs ([`inherit`]).
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
@@ -35,17 +38,16 @@ pub struct Fallback {
 impl Fallback {
     /// The fallback named by `entry`, of the ant whose own harness is `own` with `settings`, from `harnesses`.
     pub fn parse(entry: &str, own: &Arc<Harness>, settings: &ModelSettings, harnesses: &Harnesses) -> Result<Self> {
-        let (harness, model) = match entry.trim().split_once(':') {
-            Some(("", model)) => (own.clone(), Some(model)),
-            Some((name, model)) => (harnesses.get(name.trim())?, Some(model)),
-            None if entry.trim().is_empty() => bail!("fallback entries must not be blank"),
-            None => (harnesses.get(entry.trim())?, None),
+        let (harness, model) = split(entry)?;
+        let harness = match harness {
+            Some(name) => harnesses.get(name)?,
+            None => own.clone(),
         };
-        let model = match model.map(str::trim) {
-            Some("") => bail!("fallback {entry:?} names no model after the colon"),
-            model => model.map(str::to_owned),
+        let settings = ModelSettings {
+            model: model.map(str::to_owned),
+            history_budget: settings.history_budget,
+            ..ModelSettings::default()
         };
-        let settings = ModelSettings { model, history_budget: settings.history_budget, ..ModelSettings::default() };
         settings.validate(&harness)?;
         Ok(Self { harness, settings })
     }
@@ -65,6 +67,19 @@ impl fmt::Display for Fallback {
     }
 }
 
+/// The harness `entry` names, `None` for the ant's own, and the model it names, if any.
+fn split(entry: &str) -> Result<(Option<&str>, Option<&str>)> {
+    let (harness, model) = match entry.trim().split_once(':') {
+        Some((name, model)) => (Some(name.trim()).filter(|name| !name.is_empty()), Some(model.trim())),
+        None if entry.trim().is_empty() => bail!("fallback entries must not be blank"),
+        None => (Some(entry.trim()), None),
+    };
+    if model == Some("") {
+        bail!("fallback {entry:?} names no model after the colon");
+    }
+    Ok((harness, model))
+}
+
 /// The fallbacks `entries` name, in order, for an ant whose own harness is `own` with `settings`: each names a known
 /// harness, once, and differs from the ant's own harness and model.
 pub fn resolve(
@@ -73,20 +88,60 @@ pub fn resolve(
     settings: &ModelSettings,
     harnesses: &Harnesses,
 ) -> Result<Vec<Fallback>> {
+    resolve_as(entries, own, settings, harnesses, false)
+}
+
+/// The fallbacks an ant added from a template takes from the template's `entries` ([`check`]): those [`resolve`]
+/// gives, leaving out an entry that names the ant's own harness and model, as its manager may have picked them, or a
+/// fallback named before it, as a `:<model>` entry may name one another entry names for the ant's harness.
+pub fn inherit(
+    entries: &[String],
+    own: &Arc<Harness>,
+    settings: &ModelSettings,
+    harnesses: &Harnesses,
+) -> Result<Vec<Fallback>> {
+    resolve_as(entries, own, settings, harnesses, true)
+}
+
+fn resolve_as(
+    entries: &[String],
+    own: &Arc<Harness>,
+    settings: &ModelSettings,
+    harnesses: &Harnesses,
+    inherited: bool,
+) -> Result<Vec<Fallback>> {
     let mut seen = BTreeSet::new();
     let mut fallbacks = Vec::with_capacity(entries.len());
     for entry in entries {
         let fallback =
             Fallback::parse(entry, own, settings, harnesses).map_err(|e| e.context(format!("fallback {entry:?}")))?;
-        if fallback.harness == *own && fallback.settings.model == settings.model {
+        let is_own = fallback.harness == *own && fallback.settings.model == settings.model;
+        let new = !is_own && seen.insert(fallback.name());
+        if new {
+            fallbacks.push(fallback);
+        } else if !inherited && is_own {
             bail!("fallback {entry:?} is the ant's own harness and model");
-        }
-        if !seen.insert(fallback.name()) {
+        } else if !inherited {
             bail!("fallback {} is listed twice", fallback.name());
         }
-        fallbacks.push(fallback);
     }
     Ok(fallbacks)
+}
+
+/// Check the fallback list `entries` of an ant template: each entry names a harness `known` accepts and a model
+/// after any colon, and appears once. Whether one names an ant's own harness and model depends on the ant
+/// ([`inherit`]).
+pub fn check(entries: &[String], known: impl Fn(&str) -> Result<()>) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    for entry in entries {
+        let (harness, model) = split(entry)
+            .and_then(|(harness, model)| harness.map_or(Ok(()), &known).map(|()| (harness, model)))
+            .map_err(|e| e.context(format!("fallback {entry:?}")))?;
+        if !seen.insert((harness, model)) {
+            bail!("fallback {entry:?} is listed twice");
+        }
+    }
+    Ok(())
 }
 
 /// A prompt on fallback `index` failed: the context of its error.
@@ -182,6 +237,36 @@ mod tests {
         assert!(error(&["copilot"], None).contains("own harness and model"));
         assert!(error(&[":gpt-5"], Some("gpt-5")).contains("own harness and model"));
         assert!(error(&["claude", " claude"], None).contains("listed twice"));
+    }
+
+    #[test]
+    fn a_templated_ant_leaves_out_its_own_harness_and_model_and_repeats() {
+        let harnesses = Harnesses::builtin();
+        let entries: Vec<String> =
+            ["copilot", ":gpt-5", "claude", "copilot:gpt-5", " claude"].iter().map(|e| (*e).to_owned()).collect();
+        let known = |name: &str| harnesses.get(name).map(drop);
+        let err = format!("{:#}", check(&entries, known).unwrap_err());
+        assert!(err.contains("fallback \" claude\" is listed twice"), "{err}");
+        let entries = &entries[..4];
+        check(entries, known).unwrap();
+        let inherited = |own: &str, model: Option<&str>| {
+            let own = harnesses.get(own).unwrap();
+            let settings = ModelSettings { model: model.map(str::to_owned), ..ModelSettings::default() };
+            inherit(entries, &own, &settings, &harnesses).unwrap().iter().map(Fallback::name).collect::<Vec<_>>()
+        };
+        assert_eq!(inherited("copilot", None), ["copilot:gpt-5", "claude"], "the later copilot:gpt-5 is a repeat");
+        assert_eq!(inherited("copilot", Some("gpt-5")), ["copilot", "claude"]);
+        assert_eq!(inherited("claude", None), ["copilot", "claude:gpt-5", "copilot:gpt-5"]);
+
+        for (entries, error) in [
+            (&["vim"][..], "fallback \"vim\": unknown harness \"vim\""),
+            (&["claude:"], "names no model"),
+            (&[" "], "must not be blank"),
+        ] {
+            let entries: Vec<String> = entries.iter().map(|e| (*e).to_owned()).collect();
+            let err = format!("{:#}", check(&entries, known).unwrap_err());
+            assert!(err.contains(error), "{err}");
+        }
     }
 
     #[test]
