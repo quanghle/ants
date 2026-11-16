@@ -21,7 +21,7 @@ pub(crate) async fn cancel(nats: &Nats<'_>, ant: UserId, thread: thread::Pick) -
         bail!("the credentials of {me} are an ant's; only a human cancels a prompt");
     }
     let (client, js) = nats.connect("ants-cancel").await?;
-    let thread = thread.resolve(&js, &nats.me).await?;
+    let thread = thread.resolve(nats, &js).await?;
     println!("{}", cancelled(&client, me, ant, thread).await?);
     Ok(())
 }

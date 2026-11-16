@@ -203,7 +203,7 @@ async fn read(
     if channel::get(kv, channel).await?.is_none() {
         tracing::warn!("no channel #{channel}; showing the posts kept for #{channel} anyway");
     }
-    let thread = thread::resolve(thread, js, &nats.me).await?;
+    let thread = thread::resolve(thread, nats, js).await?;
     let posts = channel::read_from(js, &nats.me, channel, 0).await?;
     let mut threads = channel::threads(posts.iter().map(|(_, post)| post.clone()).collect());
     if let Some(thread) = &thread {

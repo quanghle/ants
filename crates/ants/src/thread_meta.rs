@@ -129,7 +129,7 @@ pub async fn of_or_none(
 /// title with `clear`, or with neither print it.
 pub async fn title(nats: &crate::Nats<'_>, pick: Pick, text: &[String], clear: bool) -> Result<()> {
     let js = thread::connect(nats).await?;
-    let thread = &pick.resolve(&js, &nats.me).await?;
+    let thread = &pick.resolve(nats, &js).await?;
     let meta = open(nats, &js).await?;
     let text = text.join(" ");
     if !clear && text.trim().is_empty() {
@@ -209,7 +209,7 @@ pub enum Marking {
 /// human. Unarchiving a thread archived for having been idle keeps it ([`ThreadMarks::keep`]).
 pub async fn mark(nats: &crate::Nats<'_>, pick: Pick, marking: Marking) -> Result<()> {
     let js = thread::connect(nats).await?;
-    let thread = &pick.resolve(&js, &nats.me).await?;
+    let thread = &pick.resolve(nats, &js).await?;
     let meta = open(nats, &js).await?;
     println!("{}", marked(&js, &meta, thread, marking).await?);
     Ok(())
@@ -265,7 +265,7 @@ pub async fn marked(js: &jetstream::Context, meta: &Meta, thread: &ThreadId, mar
 /// message, channel post or note stored on it.
 pub async fn done(nats: &crate::Nats<'_>, pick: Pick, done: bool) -> Result<()> {
     let js = thread::connect(nats).await?;
-    let thread = &pick.resolve(&js, &nats.me).await?;
+    let thread = &pick.resolve(nats, &js).await?;
     let meta = open(nats, &js).await?;
     println!("{}", marked_done(&js, &meta, thread, done).await?);
     Ok(())

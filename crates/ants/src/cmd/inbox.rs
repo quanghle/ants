@@ -38,7 +38,7 @@ pub(crate) async fn show(
         bail!("the credentials of {me} are an ant's, whose inbox its daemon reads; `ants inbox` reads a human's");
     }
     let (client, js) = nats.connect("ants-inbox").await?;
-    select.thread = thread::resolve(thread, &js, &nats.me).await?;
+    select.thread = thread::resolve(thread, nats, &js).await?;
     let select = &select;
     let mut inbox = inbox::Inbox::open(&js, me).await?;
     let keyring = sealed::Keyring::load(nats, &js).await;

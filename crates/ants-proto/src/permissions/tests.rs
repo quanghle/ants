@@ -748,7 +748,7 @@ fn humans_keep_only_their_own_holds_and_held_notices_and_ants_neither() {
 }
 
 #[test]
-fn humans_set_every_title_tldr_and_done_state_but_only_their_own_pins_and_archives_and_ants_neither() {
+fn humans_set_every_title_tldr_and_done_state_but_only_their_own_pins_and_archives_and_ants_only_read_titles() {
     let human = Permissions::for_user(&p("alice"), Role::Human);
     for s in [
         "$KV.ants_threads.title.*",
@@ -770,10 +770,11 @@ fn humans_set_every_title_tldr_and_done_state_but_only_their_own_pins_and_archiv
     assert!(threads.iter().all(|s| !s.contains("snoozed") || s.ends_with("snoozed.alice")), "{threads:?}");
     assert!(!threads.iter().any(|s| s.ends_with("ants_threads.>") || s.contains("CONSUMER")), "{threads:?}");
     let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
+    let threads: Vec<&String> =
+        ant.publish.iter().chain(&ant.subscribe).filter(|s| s.contains("ants_threads")).collect();
+    assert_eq!(threads, ["$JS.API.DIRECT.GET.KV_ants_threads.$KV.ants_threads.title.*"], "an ant only reads titles");
     let observer = Permissions::for_observer(&p("watcher"));
-    for none in [ant, observer] {
-        assert!(!none.publish.iter().chain(&none.subscribe).any(|s| s.contains("ants_threads")));
-    }
+    assert!(!observer.publish.iter().chain(&observer.subscribe).any(|s| s.contains("ants_threads")));
 }
 
 #[test]

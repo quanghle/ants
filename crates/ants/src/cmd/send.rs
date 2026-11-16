@@ -103,7 +103,7 @@ pub(crate) async fn ask(
     let (to, text) = recipient(words, input)?;
     let mut files = attach.read()?;
     let (client, js) = nats.connect("ants-cli").await?;
-    let thread = thread::resolve(thread, &js, &nats.me).await?;
+    let thread = thread::resolve(thread, nats, &js).await?;
     let (to, unaddressed) = addressee(&js, nats, to).await;
     let mut envelope = ask_envelope(&nats.me, thread, to, text);
     envelope.attachments = attachments::references(&files);
@@ -283,7 +283,7 @@ pub(crate) async fn post(
     let text = input.text(words)?;
     let files = attach.read()?;
     let (client, js) = nats.connect("ants-cli").await?;
-    let thread = thread::resolve(thread, &js, &nats.me).await?;
+    let thread = thread::resolve(thread, nats, &js).await?;
     let mut posting = Posting::compose(&js, &nats.me, channel, thread, text).await?;
     posting.post.attachments = attachments::references(&files);
     for warning in &posting.warnings {
@@ -421,7 +421,7 @@ pub(crate) async fn thread_notes(
     }
     let files = attach.read()?;
     let (_, js) = nats.connect("ants-cli").await?;
-    let thread = thread.resolve(&js, &nats.me).await?;
+    let thread = thread.resolve(nats, &js).await?;
     if !text.is_empty() {
         let mut post = NotesPost::new(thread, nats.me.id.clone(), text.join(" "));
         post.attachments = attachments::references(&files);

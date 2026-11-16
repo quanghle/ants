@@ -1166,9 +1166,17 @@ async fn a_thread_branch_with_new_commits_is_pushed_with_a_draft_pull_request() 
     let remote = dir.join("remote.git");
     run(&dir, &["init", "--quiet", "--bare", remote.to_str().unwrap()]);
     run(&repo, &["remote", "add", "origin", remote.to_str().unwrap()]);
-    bus.publisher = Some(crate::publish::Publisher::new(bus.dev.clone()).with_gh(fake_gh(&dir)));
+    bus.js.create_stream(crate::hub::threads_config()).await.unwrap();
+    let titles = crate::direct_kv::DirectKv::new(&bus.js, None, ants_proto::THREADS_BUCKET).await.unwrap();
+    bus.publisher = Some(crate::publish::Publisher::new(bus.dev.clone()).with_gh(fake_gh(&dir)).with_titles(titles));
     let home = dir.join("home");
     let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
+    let mut title = ants_proto::ThreadTitle::new(t1.clone(), "Lunch plans", UserId::human()).unwrap();
+    let sealed =
+        ants_proto::Sealed { v: 1, device: ants_proto::DeviceId::generate(), keys: Vec::new(), body: title.title };
+    (title.title, title.sealed) = (String::new(), Some(Box::new(sealed)));
+    let key = format!("$KV.{}.{}", ants_proto::THREADS_BUCKET, ants_proto::title_key(&t1));
+    bus.js.publish(key, serde_json::to_vec(&title).unwrap().into()).await.unwrap().await.unwrap();
     let setup = Worktrees::find(&bus.dev, &repo, &home).await.unwrap();
     let (w1, w2) = (setup.checkout(&t1).await.unwrap(), setup.checkout(&t2).await.unwrap());
     commit(&w1, "work of t1");
@@ -1189,7 +1197,8 @@ async fn a_thread_branch_with_new_commits_is_pushed_with_a_draft_pull_request() 
         assert_eq!(run(&repo, &["ls-remote", "--heads", "origin"]).matches(&branch).count(), 1);
         let log = std::fs::read_to_string(dir.join("gh.log")).unwrap();
         assert!(log.starts_with(&format!("[pr][list][--head][{branch}][--state][open]")), "{log}");
-        assert!(log.contains("[--draft][--head]") && log.contains("[--title][Fix the build][--body]"), "{log}");
+        let titled = log.contains("[--title][Fix the build][--body]");
+        assert!(log.contains("[--draft][--head]") && titled, "the opening line, as the title is sealed: {log}");
         assert!(log.contains(&format!("thread {t1}, which `ants thread show {t1}` shows")), "{log}");
 
         bus.send(&t1, "nothing new").await;

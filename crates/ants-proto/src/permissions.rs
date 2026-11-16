@@ -312,7 +312,8 @@ impl Permissions {
     /// and its own [`HeldNotices`] there what was held back ([`notify_prefs_rights`]), and it reads every reaction ([`REACTIONS_BUCKET`]), of which it
     /// puts and removes only its own ([`human_reaction_rights`]), while an ant only asks for those ([`subject::reactions`],
     /// [`subject::react`]); it sets every thread's title, TL;DR and done state and its own pinned,
-    /// archived and snoozed threads, no other human's ([`thread_rights`]); it reads every device's encryption key in
+    /// archived and snoozed threads, no other human's ([`thread_rights`]), while an ant only reads a title by its key
+    /// and nothing else of [`THREADS_BUCKET`]; it reads every device's encryption key in
     /// [`DEVICES_BUCKET`] and puts only its own devices' ([`device_directory_rights`]). A human may send under
     /// any sender, to replay a dead letter as it was. An ant gets no `STREAM.MSG.GET`: it takes any sequence, so it
     /// would expose every inbox. So only a human hears the max-deliveries advisories of the stream's consumers and
@@ -710,6 +711,9 @@ impl Permissions {
             // Get of the assistants' records and of the revocations, to check what an assistant does for its human.
             format!("$JS.API.DIRECT.GET.{}.{}", kv_stream(DEVICES_BUCKET), subject::assistant_records()),
             format!("$JS.API.DIRECT.GET.{}.{}", kv_stream(DEVICES_BUCKET), subject::revoked_devices()),
+            // Get of a thread's title, to title the pull request of the thread's branch: one key at a time, which
+            // it must know, as it gets no stream info listing them.
+            format!("$JS.API.DIRECT.GET.{}.$KV.{THREADS_BUCKET}.title.*", kv_stream(THREADS_BUCKET)),
         ]);
         // The spares of its inbox consumer and its notes and channel readers, for the CLI, each with the same
         // filter pinned; no ack, so the spares of the inbox consumer only read it.
