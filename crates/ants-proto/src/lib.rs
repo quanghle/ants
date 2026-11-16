@@ -109,6 +109,9 @@ pub const OUTBOX_SUBJECTS: &str = "ants.out.>";
 /// ([`subject::intake`]), whatever subjects the leaf claims. [`STREAM`] sources from it only the subjects the users of
 /// each machine may publish ([`Machine::admitted`]).
 pub const INTAKE_STREAM: &str = "ANTS_IN";
+/// Durable consumer on a leaf's [`OUTBOX_STREAM`] through which the hub's [`INTAKE_STREAM`] sources it, delivering on
+/// [`Machine::outbox_delivery`]: nats-server resumes such a source as soon as the leaf node delivers again.
+pub const OUTBOX_CONSUMER: &str = "ANTS_IN";
 /// KV bucket where each daemon registers its ants: one [`RosterEntry`] per ant, keyed by its id.
 pub const ROSTER_BUCKET: &str = "ants_roster";
 /// How often a daemon re-puts its roster entry.

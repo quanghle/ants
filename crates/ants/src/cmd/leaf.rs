@@ -49,10 +49,11 @@ pub(crate) enum LeafCommand {
     },
     /// As a human, with the leaf node of the machine up and connected: create the machine's outbox, which keeps
     /// what its ants and humans send while the hub is out of reach, and have the hub's stream take from it what
-    /// they may send once the uplink is back. Run it again when the machine's ants or humans change; without
+    /// they may send once the uplink is back, through the outbox's durable consumer, so the hub goes on within
+    /// seconds of the leaf node or the hub returning. Run it again when the machine's ants or humans change; without
     /// members, it takes those its uplink credentials carry, and to have the hub ask for the outbox at once after it
-    /// stopped hearing from it, as after a restart. Fails if the hub does not hear from the outbox within 10 s, as
-    /// without `feature_flags { js_api_reply_v2: true }` on the hub.
+    /// stopped hearing from it. Fails if the hub does not hear from the outbox within 10 s, as without
+    /// `feature_flags { js_api_reply_v2: true }` on the hub.
     Outbox {
         /// Machine name, as given to `ants leaf config`.
         machine: Machine,
@@ -153,9 +154,17 @@ pub(crate) async fn run(command: LeafCommand, conn: &Connection<'_>) -> Result<(
             let nats = nats()?;
             let (_, js) = nats.connect("ants-cli").await?;
             let leaf = outbox::connect(conn.nats, conn.creds, &nats.me.id, &machine).await?;
-            outbox::admit(&leaf, &js, &machine, &set.roles()).await?;
+            let through = outbox::admit(&leaf, &js, &machine, &set.roles()).await?;
             outbox::sourced(&js, &machine, outbox::SOURCE_WAIT).await?;
             println!("outbox of {machine} ready; the hub takes from it what its members send ({set})");
+            if through == outbox::Through::Ephemeral {
+                eprintln!(
+                    "warning: the leaf node of {machine} does not answer for the outbox's durable consumer, so the hub \
+                     sources the outbox without it and, after a restart, may wait up to 2.5 minutes before taking \
+                     from it again. The uplink credentials, or the human's in use, predate the consumer: renew them (`ants renew \
+                     FILE` on the machine, or `ants auth leaf {machine}` where the team keys are), then run this again"
+                );
+            }
             Ok(())
         }
     }

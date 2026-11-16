@@ -4,7 +4,9 @@
 //! machine's outbox ([`OUTBOX_STREAM`]), and reaches the hub's stream in two hops once the uplink is back:
 //!
 //! 1. The hub's intake ([`INTAKE_STREAM`]) sources each machine's outbox through the machine's JetStream domain and
-//!    stores everything under the machine's prefix ([`subject::intake`]), so a machine cannot pass for another.
+//!    stores everything under the machine's prefix ([`subject::intake`]), so a machine cannot pass for another. It
+//!    takes it through a durable consumer on the outbox ([`OUTBOX_CONSUMER`]), which nats-server resets as soon as the
+//!    leaf node answers again, so the intake goes on within seconds of the leaf node or the hub coming back.
 //! 2. The hub's [`STREAM`] sources from the intake, per machine and user (ant or human), only the subjects the user
 //!    may publish itself ([`Machine::admitted`]), back on their usual subjects. Anything else a machine claims stays in
 //!    the intake.
@@ -29,19 +31,24 @@ use std::path::Path;
 use std::time::Duration;
 
 use ants_proto::{
-    FILES_STREAM, INTAKE_STREAM, LINKS_BUCKET, Machine, OUTBOX_STREAM, OUTBOX_SUBJECTS, OWNERS_BUCKET, Role, STREAM,
-    UserId, subject,
+    FILES_STREAM, INTAKE_STREAM, LINKS_BUCKET, Machine, OUTBOX_CONSUMER, OUTBOX_STREAM, OUTBOX_SUBJECTS, OWNERS_BUCKET,
+    Role, STREAM, UserId, subject,
 };
 use anyhow::{Context as _, Result};
-use async_nats::jetstream::ErrorCode;
-use async_nats::jetstream::context::{GetStreamError, GetStreamErrorKind};
-use async_nats::jetstream::stream::{self, External, Source, SubjectTransform};
-use async_nats::jetstream::{self, Context};
+use async_nats::jetstream::context::{GetStreamError, GetStreamErrorKind, RequestErrorKind};
+use async_nats::jetstream::response::Response;
+use async_nats::jetstream::stream::{
+    self, External, LastRawMessageErrorKind, Source, StreamConsumerSource, SubjectTransform,
+};
+use async_nats::jetstream::{self, Context, ErrorCode, consumer};
 
 /// How long an outbox and the intake keep messages: as long as the hub's stream.
 const RETENTION: Duration = Duration::from_hours(30 * 24);
 /// How long to wait for the leaf node to answer through the hub.
 const LEAF_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long to wait for the leaf node to answer for its outbox's durable consumer, once it answered for the outbox:
+/// uplink credentials from before the consumer never let the request reach it.
+const CONSUMER_TIMEOUT: Duration = Duration::from_secs(3);
 /// How long the hub may take to hear from an outbox it sources: a source that works is active within a second.
 pub const SOURCE_WAIT: Duration = Duration::from_secs(10);
 /// How long a source the hub heard from may stay silent before it counts as stalled: the leaf node sends a heartbeat
@@ -67,19 +74,25 @@ pub async fn connect(url: &str, creds: Option<&Path>, human: &UserId, machine: &
 /// chunks of the attachments they send, once `ants init` created them. Admissions of members no longer listed are
 /// dropped; those already in place are kept as they are.
 ///
+/// The intake sources the outbox through its durable consumer ([`OUTBOX_CONSUMER`]), created here when the leaf node
+/// lacks it to start after the last message the intake took from the outbox, if the outbox still holds it; an intake
+/// that sourced the outbox otherwise moves to it. When
+/// the uplink credentials predate the consumer, so the leaf node does not answer for it, the intake sources the outbox
+/// as before ([`Through::Ephemeral`]).
+///
 /// When the intake sourced the outbox already but has not heard from it lately, its source is restarted
-/// ([`restart_source`]): after nats-server restarts, the hub's first request for the outbox may go out before the leaf
-/// node is back, and the hub then waits up to 2.5 minutes before asking again.
+/// ([`restart_source`]): without the durable consumer, after nats-server restarts, the hub's first request for the
+/// outbox may go out before the leaf node is back, and the hub then waits up to 2.5 minutes before asking again.
 pub async fn admit(
     leaf: &async_nats::Client,
     hub: &Context,
     machine: &Machine,
     members: &[(UserId, Role)],
-) -> Result<()> {
+) -> Result<Through> {
     anyhow::ensure!(!members.is_empty(), "a machine needs at least one ant or human");
     let mut leaf = jetstream::with_domain(leaf.clone(), machine.as_str());
     leaf.set_timeout(LEAF_TIMEOUT);
-    leaf.create_or_update_stream(outbox_config()).await.with_context(|| {
+    let outbox = leaf.create_or_update_stream(outbox_config()).await.with_context(|| {
         format!("setting up the outbox on the leaf node of {machine} (it must be up, with JetStream, and connected)")
     })?;
 
@@ -108,31 +121,134 @@ pub async fn admit(
     }
 
     let mut intake = intake_config(hub).await?;
-    let sources = intake.sources.get_or_insert_default();
-    let sourced = sources.iter().any(|s| outbox_of(s, machine));
-    if !sourced {
-        sources.push(intake_source(machine));
+    let current = intake.sources.iter().flatten().find(|s| outbox_of(s, machine)).cloned();
+    let durable = current.as_ref().is_some_and(|source| source.consumer.is_some());
+    let (through, wanted) = match outbox_consumer(&leaf).await? {
+        Consumer::Found if durable => (Through::Durable, None),
+        Consumer::Found => (Through::Durable, Some(intake_source(machine, Through::Durable))),
+        // Never created, or lost with the leaf node's store.
+        Consumer::Missing => {
+            if current.is_some() {
+                // The intake takes nothing more from the outbox before it finds where it is.
+                drop_source(&mut intake, machine);
+                intake = hub.update_stream(&intake).await.context("dropping the machine's outbox")?.config;
+            }
+            let after = intake_position(hub, machine).await?.filter(|&seq| seq <= outbox.state.last_sequence);
+            create_outbox_consumer(&leaf, machine, after).await?;
+            (Through::Durable, Some(intake_source(machine, Through::Durable)))
+        }
+        Consumer::Unanswered if durable => (Through::Durable, None),
+        Consumer::Unanswered => {
+            (Through::Ephemeral, current.is_none().then(|| intake_source(machine, Through::Ephemeral)))
+        }
+    };
+    let kept = wanted.is_none();
+    if let Some(source) = wanted {
+        drop_source(&mut intake, machine);
+        intake.sources.get_or_insert_default().push(source);
     }
     hub.create_or_update_stream(intake).await.context("sourcing the machine's outbox into the hub's intake")?;
-    if sourced && hearing(&intake_info(hub).await?, machine) != Hearing::Heard {
+    if kept && hearing(&intake_info(hub).await?, machine) != Hearing::Heard {
         restart_source(hub, machine).await?;
     }
+    Ok(through)
+}
+
+/// How the hub's intake sources a machine's outbox ([`admit`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Through {
+    /// Through the outbox's durable consumer ([`OUTBOX_CONSUMER`]): once the leaf node or the hub is back, the hub
+    /// goes on within seconds.
+    Durable,
+    /// Through a consumer the hub creates each time it asks for the outbox, as the uplink credentials predate the
+    /// durable consumer: after a restart, the hub may wait up to 2.5 minutes before asking again.
+    Ephemeral,
+}
+
+/// Whether the outbox's durable consumer is there, as the leaf node answers through `leaf`.
+enum Consumer {
+    Found,
+    Missing,
+    /// No answer: uplink credentials from before the durable consumer do not let the request reach the leaf node.
+    Unanswered,
+}
+
+async fn outbox_consumer(leaf: &Context) -> Result<Consumer> {
+    let subject = format!("CONSUMER.INFO.{OUTBOX_STREAM}.{OUTBOX_CONSUMER}");
+    let mut leaf = leaf.clone();
+    leaf.set_timeout(CONSUMER_TIMEOUT);
+    match leaf.request::<_, _, Response<consumer::Info>>(subject, &serde_json::json!({})).await {
+        Ok(Response::Ok(_)) => Ok(Consumer::Found),
+        Ok(Response::Err { error }) if error.error_code() == ErrorCode::CONSUMER_NOT_FOUND => Ok(Consumer::Missing),
+        Ok(Response::Err { error }) => Err(error).context("looking up the outbox's durable consumer"),
+        Err(e) if matches!(e.kind(), RequestErrorKind::TimedOut | RequestErrorKind::NoResponders) => {
+            Ok(Consumer::Unanswered)
+        }
+        Err(e) => Err(e).context("looking up the outbox's durable consumer"),
+    }
+}
+
+/// Create the outbox's durable consumer, delivering to the hub what follows sequence `after` in the outbox, or all of
+/// it. nats-server's durable sourcing takes a push consumer acked by flow control, with a 1 s heartbeat.
+async fn create_outbox_consumer(leaf: &Context, machine: &Machine, after: Option<u64>) -> Result<()> {
+    let deliver_policy = match after {
+        Some(seq) => consumer::DeliverPolicy::ByStartSequence { start_sequence: seq + 1 },
+        None => consumer::DeliverPolicy::All,
+    };
+    let config = consumer::push::Config {
+        durable_name: Some(OUTBOX_CONSUMER.to_owned()),
+        description: Some("The hub's intake sourcing the outbox".to_owned()),
+        deliver_subject: machine.outbox_delivery(),
+        deliver_policy,
+        ack_policy: consumer::AckPolicy::FlowControl,
+        flow_control: true,
+        idle_heartbeat: Duration::from_secs(1),
+        max_deliver: -1,
+        ..Default::default()
+    };
+    leaf.create_consumer_on_stream(config, OUTBOX_STREAM)
+        .await
+        .context("creating the outbox's durable consumer on the leaf node")?;
     Ok(())
+}
+
+/// The sequence in the outbox of `machine` of the last message the hub's intake took from it, from the
+/// `Nats-Stream-Source` header nats-server gives each message it sources (`<source> <sequence> ...`); `None` when the
+/// intake holds none.
+async fn intake_position(hub: &Context, machine: &Machine) -> Result<Option<u64>> {
+    let intake = hub.get_stream_no_info(INTAKE_STREAM).await.context("looking up the hub's intake")?;
+    let last = match intake.get_last_raw_message_by_subject(&subject::intake(machine)).await {
+        Ok(last) => last,
+        Err(e) => match e.kind() {
+            LastRawMessageErrorKind::NoMessageFound => return Ok(None),
+            LastRawMessageErrorKind::JetStream(e) if e.error_code() == ErrorCode::STREAM_NOT_FOUND => return Ok(None),
+            _ => return Err(e).context("reading the last message the hub's intake took from the outbox"),
+        },
+    };
+    let source = last.headers.get("Nats-Stream-Source").map_or_default(|v| v.as_str().to_owned());
+    let seq = source.split(' ').nth(1).and_then(|seq| seq.parse().ok());
+    seq.map(Some).with_context(|| format!("no outbox sequence in the intake's message {}", last.sequence))
 }
 
 /// Have the hub's intake ask the leaf node of `machine` for its outbox again at once, dropping its source and adding
 /// it back: nats-server has no other way to cut short the wait between its requests. The source added back goes on
-/// after the last message the intake took from it, which the intake finds among its messages.
+/// after the last message the intake took from it, which the intake finds among its messages, or from where its
+/// durable consumer is.
 async fn restart_source(hub: &Context, machine: &Machine) -> Result<()> {
     let mut intake = intake_config(hub).await?;
-    let mut sources = intake.sources.take().unwrap_or_default();
-    let ours: Vec<Source> = sources.extract_if(.., |s| outbox_of(s, machine)).collect();
-    intake.sources = Some(sources.clone());
+    let ours = drop_source(&mut intake, machine);
     hub.update_stream(&intake).await.context("dropping the machine's outbox from the hub's intake")?;
-    sources.extend(ours);
-    intake.sources = Some(sources);
+    intake.sources.get_or_insert_default().extend(ours);
     hub.update_stream(&intake).await.context("sourcing the machine's outbox into the hub's intake again")?;
     Ok(())
+}
+
+/// Take the source of the outbox of `machine` out of the intake's `config`, returning it.
+fn drop_source(config: &mut stream::Config, machine: &Machine) -> Vec<Source> {
+    let mut sources = config.sources.take().unwrap_or_default();
+    let ours = sources.extract_if(.., |s| outbox_of(s, machine)).collect();
+    config.sources = (!sources.is_empty()).then_some(sources);
+    ours
 }
 
 /// The intake's stream info (`STREAM.INFO`), as JSON: async-nats leaves out a source's `external` and `error`.
@@ -281,6 +397,8 @@ pub enum Hearing {
 #[derive(Debug, PartialEq)]
 pub struct Sourcing {
     pub hearing: Hearing,
+    /// Whether the intake sources the outbox through its durable consumer ([`Through::Durable`]).
+    pub durable: bool,
     /// The members the hub's stream, or the attachments' store, takes nothing from the outbox for.
     pub unadmitted: Vec<UserId>,
 }
@@ -290,7 +408,9 @@ pub struct Sourcing {
 /// it for, as [`admit`] would set them up. Reads the intake's, the stream's and the store's info, which only a human's
 /// credentials get; changes nothing.
 pub async fn sourcing(hub: &Context, machine: &Machine, members: &[(UserId, Role)]) -> Result<Sourcing> {
-    let hearing = hearing(&intake_info(hub).await?, machine);
+    let info = intake_info(hub).await?;
+    let hearing = hearing(&info, machine);
+    let durable = durable(&info, machine);
     let mut ants = hub.get_stream(STREAM).await.context("looking up the hub's stream")?;
     let sources = ants.info().await?.config.sources.clone().unwrap_or_default();
     let files = stream_config(hub, FILES_STREAM).await?;
@@ -309,7 +429,17 @@ pub async fn sourcing(hub: &Context, machine: &Machine, members: &[(UserId, Role
         }
         unadmitted.sort();
     }
-    Ok(Sourcing { hearing, unadmitted })
+    Ok(Sourcing { hearing, durable, unadmitted })
+}
+
+/// Whether the intake's configuration, in its stream info (`STREAM.INFO`), sources the outbox of `machine` through its
+/// durable consumer.
+fn durable(info: &serde_json::Value, machine: &Machine) -> bool {
+    let api = machine.api_prefix();
+    let sources = info["config"]["sources"].as_array().map_or_default(Vec::as_slice);
+    sources.iter().any(|s| {
+        s["name"] == OUTBOX_STREAM && s["external"]["api"] == api.as_str() && s["consumer"]["name"] == OUTBOX_CONSUMER
+    })
 }
 
 /// Whether the intake's source for the outbox of `machine`, in the intake's stream info (`STREAM.INFO`), has heard
@@ -336,7 +466,8 @@ fn hearing(info: &serde_json::Value, machine: &Machine) -> Hearing {
     }
 }
 
-/// Stop taking anything from the outbox of `machine`. What its intake already holds stays there.
+/// Stop taking anything from the outbox of `machine`. What its intake already holds stays there, and so does the
+/// outbox's durable consumer, from which [`admit`] goes on.
 pub async fn remove(hub: &Context, machine: &Machine) -> Result<()> {
     let mut ants = hub.get_stream(STREAM).await.context("looking up the hub's stream")?;
     let mut config = ants.info().await?.config.clone();
@@ -355,9 +486,7 @@ pub async fn remove(hub: &Context, machine: &Machine) -> Result<()> {
         hub.update_stream(&config).await.context("dropping the machine from the attachments' store")?;
     }
     let mut intake = intake_config(hub).await?;
-    if let Some(sources) = intake.sources.as_mut() {
-        sources.retain(|s| !outbox_of(s, machine));
-    }
+    drop_source(&mut intake, machine);
     hub.create_or_update_stream(intake).await.context("dropping the machine from the hub's intake")?;
     Ok(())
 }
@@ -418,13 +547,17 @@ async fn intake_config(hub: &Context) -> Result<stream::Config> {
     }
 }
 
-/// The intake's source for the outbox of `machine`: everything in it, under the machine's prefix.
-fn intake_source(machine: &Machine) -> Source {
+/// The intake's source for the outbox of `machine`, `through` its durable consumer or not: everything in it, under the
+/// machine's prefix.
+fn intake_source(machine: &Machine, through: Through) -> Source {
     let prefixed = subject::intake(machine);
+    let consumer = (through == Through::Durable)
+        .then(|| StreamConsumerSource::new(OUTBOX_CONSUMER.to_owned(), machine.outbox_delivery()));
     Source {
         name: OUTBOX_STREAM.to_owned(),
         external: Some(External { api_prefix: machine.api_prefix(), delivery_prefix: Some(machine.deliver_prefix()) }),
         subject_transforms: vec![SubjectTransform { source: ">".to_owned(), destination: prefixed }],
+        consumer,
         ..Default::default()
     }
 }

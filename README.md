@@ -391,7 +391,7 @@ Every 5 m (first check at 30 s), one ant per daemon/server queries hub and local
 
 ## Leaf nodes
 
-Running a local `nats-server` leaf per machine (`127.0.0.1:4222`, `--js-domain hub`) isolates local processes and buffers offline traffic in `ANTS_OUT`, draining through hub `ANTS_IN` on reconnect:
+Running a local `nats-server` leaf per machine (`127.0.0.1:4222`, `--js-domain hub`) isolates local processes and buffers offline traffic in `ANTS_OUT`, draining through hub `ANTS_IN` (by the durable consumer `ANTS_IN` on the leaf, within seconds of a leaf or hub restart) on reconnect:
 
 ```sh
 ants auth leaf macbook --ant dev-a --ant messenger --human alice --js-domain hub   # auth machine
