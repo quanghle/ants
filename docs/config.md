@@ -346,7 +346,7 @@ huge = { model_suffix = "-1m", history_budget = 262144 }
 | `claude` | Claude Code's stream-json (`claude -p --input-format stream-json --output-format stream-json`); planned |
 | `codex` | Codex's JSON-RPC app server (`codex app-server`); planned |
 | `antigravity` | Antigravity's headless stream-json (`agy --input-format stream-json --output-format stream-json`); planned |
-| `copilot-sdk` | Copilot CLI through the GitHub Copilot SDK; planned |
+| `copilot-sdk` | Copilot CLI's JSON-RPC server (`copilot --server --stdio`) through the GitHub Copilot SDK ([below](#copilot-sdk)) |
 
 Any other value fails loading the file defining the harness, naming that file; so does a planned protocol until it is implemented.
 
@@ -361,6 +361,33 @@ Every protocol other than `acp` is native: the daemon runs a translator in its o
 - **Cancel:** a cancelled prompt interrupts the CLI natively where the protocol can, else stops the CLI, the session resuming on the next message.
 
 **Permissions are the CLI's own.** For a native protocol, `mode` names the CLI's own permission mode (each protocol accepts its own values; others fail loading), and `args` carry its other permission settings. The translator sends no tool request to ants and denies, with a logged warning, anything the CLI asks a human to approve, so no prompt waits on an approval. A native-protocol harness therefore runs its tools unasked: allow rules, approvals, `escalate_to` and webhook or schedule narrowing do not reach them, and `ants daemon` and `ants doctor` warn as for the built-ins, naming the definition's native permission settings as the place to restrict tools.
+
+#### copilot-sdk
+
+`protocol = "copilot-sdk"` runs Copilot CLI's JSON-RPC server, `copilot --server --stdio --no-auto-update --disable-client-telemetry` followed by the definition's `args`, one CLI per harness process, and drives it through the GitHub Copilot SDK for Rust (github-copilot-sdk 1.0.29, linked without its features: it neither downloads a CLI nor adds a TLS or HTTP client). The CLI must speak the SDK's protocol version (3, as Copilot CLI 1.0.112 does); another fails the start, naming the CLI's version and protocol and the SDK's.
+
+- **Tools:** the CLI's server ignores tool and permission flags on its command line, so the translator takes `--available-tools` and `--excluded-tools` out of `args` (the definition's and those of its `context` values) and sets them on every session. A tool not available does not exist for the model, so nothing asks about it. The flag is followed by tool names as separate arguments, comma-separated, or after `=` (`--excluded-tools=bash,read_bash`); each tool is named on its own (excluding `bash` leaves `read_bash`, which reads the output of a shell still running); a source-qualified name (`builtin:view`, `mcp:ants-ask_ant`, `mcp:*`, `custom:*`) matches tools of that source only; a bare `*` fails loading, and so do `--allow-tool` and `--deny-tool`. An `--available-tools` list leaves out the ants tools unless it names them (`mcp:*`, or each `ants-<tool>`). A name the CLI does not know is ignored, the CLI noting it in its session events. The other `args` go to the CLI's command line.
+- **Permissions:** every permission request of the CLI (a shell command, a file write, an MCP tool, a path or URL outside the working directory) is approved, the tools left being those the definition enables; one that managed policy reserves to a human is denied, with a logged warning. `mode` fails loading: the SDK has no permission mode to select.
+- **Settings:** the ant's `model` and `reasoning_effort` are set on each session; a `context` value whose `args` hold `--context TIER` (`default`, `long_context`) sets the session's context tier. A model the account cannot use fails the session.
+- **Sessions:** a new session gets an id the translator chooses; `session/load` resumes the CLI's session by id and a cloned thread forks it with the CLI's own fork. Sessions are kept under the CLI's `COPILOT_HOME` (default `~/.copilot`).
+- **MCP:** each session gets the ants MCP server (stdio, or HTTP with its bearer header) in its session configuration, never on the command line; the model sees its tools as `ants-<tool>`, such as `ants-ask_ant`.
+- **Sign-in:** the start asks the CLI whether it is signed in; signed out, the harness is (`sign_in = "copilot login"`).
+- **Cancel:** aborts the CLI's turn, which ends cancelled; the CLI keeps running.
+- **Limits:** the CLI's turn errors are told apart by type: `rate_limit` is a rate limit except the weekly one (`user_weekly_rate_limited`), which counts as an exhausted quota as `quota` does (AI credits or premium requests used up); `context_limit` is a context overflow; `authentication` is signed out.
+- **Updates and spend:** replies, reasoning, tool calls (with the file they work on), the context window's use, each turn's tokens and the session's cost, from the AI credits the CLI counts at US$0.01 each. Images attached to a message go to the CLI as images.
+- **Telemetry:** besides `--disable-client-telemetry`, sessions run with session telemetry off. `--no-auto-update` keeps the CLI from updating itself; `env = { COPILOT_AUTO_UPDATE = "false" }` also stops its plugin updates.
+
+```toml
+[harnesses.copilot-sdk]
+command = "copilot"
+protocol = "copilot-sdk"
+sign_in = "copilot login"
+args = ["--excluded-tools", "bash", "read_bash"]   # no shell; files, search and the ants tools remain
+
+[harnesses.copilot-sdk.context]
+default = { args = ["--context", "default"] }
+long_context = { args = ["--context", "long_context"] }
+```
 
 ### Memory files
 
