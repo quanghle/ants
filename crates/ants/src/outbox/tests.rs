@@ -468,7 +468,7 @@ async fn a_hub_without_js_api_reply_v2_is_reported() {
 }
 
 #[test]
-fn a_source_error_or_a_missing_source_is_a_failure() {
+fn the_intake_hears_from_an_outbox_lately_or_not_since_a_while_or_fails() {
     let m1: Machine = "m1".parse().unwrap();
     let info = |source: serde_json::Value| serde_json::json!({ "sources": [source] });
     let ours = serde_json::json!({ "api": "$JS.m1.API", "deliver": "$JS.S.m1" });
@@ -476,6 +476,10 @@ fn a_source_error_or_a_missing_source_is_a_failure() {
         hearing(&info(serde_json::json!({ "name": OUTBOX_STREAM, "external": ours, "active": 12 })), &m1),
         Hearing::Heard
     );
+    let stale = info(serde_json::json!({ "name": OUTBOX_STREAM, "external": ours, "active": 30_000_000_000_i64 }));
+    assert_eq!(hearing(&stale, &m1), Hearing::Stale(Duration::from_secs(30)));
+    let never = info(serde_json::json!({ "name": OUTBOX_STREAM, "external": ours, "active": -1 }));
+    assert_eq!(hearing(&never, &m1), Hearing::Silent);
     let failed = info(serde_json::json!({
         "name": OUTBOX_STREAM, "external": ours, "active": -1, "error": { "code": 503, "description": "boom" },
     }));
@@ -570,4 +574,87 @@ fn the_attachments_store_takes_the_chunks_of_every_sender_for_one_human_else_eac
         transforms(&with_humans),
         [(alice, "ants.in.m1.ants.out.files.>".to_owned(), "$O.ants_files.C.>".to_owned())]
     );
+}
+
+/// A hub and a leaf node stopped and started again on their files, the leaf node after the hub's first request for
+/// its outbox, which nobody answers: the hub would wait at least 40 s before asking again, and setting up the outbox
+/// again has it ask at once. The intake goes on after what it took before the restart.
+#[tokio::test]
+async fn setting_up_an_outbox_again_restarts_a_source_waiting_since_a_restart() {
+    let leaf_port = free_port();
+    let Some(mut hub) = spawn_hub(leaf_port, "feature_flags { js_api_reply_v2: true }") else {
+        return;
+    };
+    let team = hub.dir().join("auth");
+    let domain: JsDomain = "hub".parse().unwrap();
+    let m1: Machine = "m1".parse().unwrap();
+    let (human, dev_a): (UserId, UserId) = (UserId::human(), "dev-a".parse().unwrap());
+    let creds = |p: &UserId| {
+        let out = hub.dir().join(format!("{p}.creds"));
+        auth::issue(&team, p, Role::by_default(p), Some(&domain), &out).unwrap();
+        out
+    };
+    let (human_creds, a_creds) = (creds(&human), creds(&dev_a));
+    let connect = async |url: &str, p: &UserId, c: &Path| {
+        let (client, mut js) = bus::connect(url, Some(c), Some(&domain), p, "test").await.unwrap();
+        js.set_timeout(Duration::from_secs(2));
+        (client, js)
+    };
+    let (_h, h_js) = connect(&hub.url, &human, &human_creds).await;
+    bus::ensure_stream(&h_js).await.unwrap();
+    let on_m1 = auth::members(&[dev_a.clone(), human.clone()], &[]);
+    let leaf_creds = hub.dir().join("leaf-m1.creds");
+    auth::issue_leaf(&team, &m1, &on_m1, &[], EnrollApprover::Without, Some(&domain), &leaf_creds).unwrap();
+    let (server_conf, listen) = (team.join(auth::SERVER_CONF), format!("127.0.0.1:{}", free_port()));
+    let uplinks = [format!("nats-leaf://127.0.0.1:{leaf_port}")];
+    let mut leaf_node = NatsServer::spawn_with(|dir| {
+        let config = leaf::Leaf {
+            machine: &m1,
+            hub_domain: Some(&domain),
+            uplinks: &uplinks,
+            creds: &leaf_creds,
+            system_creds: None,
+            server_conf: &server_conf,
+            ca_file: None,
+            proxy: None,
+            listen: &listen,
+        };
+        leaf::write(&config, &dir.join("leaf.conf")).unwrap();
+        "include \"leaf.conf\"\n".to_owned()
+    })
+    .unwrap();
+    let setup = super::connect(&hub.url, Some(&human_creds), &human, &m1).await.unwrap();
+    eventually("the leaf reaches the hub", async || admit(&setup, &h_js, &m1, &on_m1).await.is_ok()).await;
+    sourced(&h_js, &m1, SOURCE_WAIT).await.unwrap();
+    let keep = async |js: &Context, text: &str| {
+        let kept = Envelope::new(dev_a.clone(), human.clone(), text);
+        let message =
+            PublishMessage::build().payload(serde_json::to_vec(&kept).unwrap().into()).message_id(kept.id.to_string());
+        js.send_publish(subject::outbox(&kept.subject()).unwrap(), message).await.unwrap().await.unwrap();
+    };
+    let (_a, a_js) = connect(&leaf_node.url, &dev_a, &a_creds).await;
+    keep(&a_js, "before").await;
+    eventually("the intake takes it", async || messages(&h_js, INTAKE_STREAM).await == 1).await;
+
+    leaf_node.stop();
+    hub.stop();
+    hub.start_again();
+    // The hub asks for the outbox as it starts, before the leaf node is back.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    leaf_node.start_again();
+    let (_h, h_js) = connect(&hub.url, &human, &human_creds).await;
+    let (_a, a_js) = connect(&leaf_node.url, &dev_a, &a_creds).await;
+    eventually("the leaf reaches the hub", async || bus::open_stream(&a_js, &dev_a).await.is_ok()).await;
+    keep(&a_js, "after").await;
+    assert_eq!(sourcing(&h_js, &m1, &on_m1).await.unwrap().hearing, Hearing::Silent, "the hub waits");
+
+    let setup = super::connect(&hub.url, Some(&human_creds), &human, &m1).await.unwrap();
+    admit(&setup, &h_js, &m1, &on_m1).await.unwrap();
+    sourced(&h_js, &m1, SOURCE_WAIT).await.unwrap();
+    eventually("the intake takes what the leaf kept", async || messages(&h_js, INTAKE_STREAM).await == 2).await;
+    eventually("and so does the hub's stream", async || messages(&h_js, STREAM).await == 2).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(messages(&h_js, INTAKE_STREAM).await, 2, "nothing taken twice");
+    let intake = h_js.get_stream(INTAKE_STREAM).await.unwrap().info().await.unwrap().config.clone();
+    assert!(intake.subjects.is_empty(), "{:?}", intake.subjects);
 }

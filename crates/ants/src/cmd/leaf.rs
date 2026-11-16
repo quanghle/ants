@@ -50,8 +50,9 @@ pub(crate) enum LeafCommand {
     /// As a human, with the leaf node of the machine up and connected: create the machine's outbox, which keeps
     /// what its ants and humans send while the hub is out of reach, and have the hub's stream take from it what
     /// they may send once the uplink is back. Run it again when the machine's ants or humans change; without
-    /// members, it takes those its uplink credentials carry. Fails if the hub does not hear from the outbox within
-    /// 10 s, as without `feature_flags { js_api_reply_v2: true }` on the hub.
+    /// members, it takes those its uplink credentials carry, and to have the hub ask for the outbox at once after it
+    /// stopped hearing from it, as after a restart. Fails if the hub does not hear from the outbox within 10 s, as
+    /// without `feature_flags { js_api_reply_v2: true }` on the hub.
     Outbox {
         /// Machine name, as given to `ants leaf config`.
         machine: Machine,
