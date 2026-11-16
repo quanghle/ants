@@ -1,8 +1,8 @@
 use ants_proto::Role;
 
 use super::*;
-use crate::auth::tests::Server;
 use crate::members::EnrollApprover;
+use crate::test_support::Server;
 
 fn setup(server: &Server, creds: Option<PathBuf>) -> Setup {
     Setup {

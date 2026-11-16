@@ -4,11 +4,11 @@ use ants_daemon::admin::ConfigFile;
 use ants_proto::{AdminOp, OrderState, Permissions, Role};
 use serde_json::{Value, json};
 
-use crate::auth::tests::Server;
 use crate::auth::{NewDevice, issue_device_with};
 use crate::orders::send;
 use crate::orders::tests::{WAIT, host_of_m1, p};
 use crate::revoke::{self, Kind};
+use crate::test_support::Server;
 
 /// How long an order the signer answers may take: the daemon asks again every 5s.
 pub(crate) const SIGNED: Duration = Duration::from_secs(30);
@@ -170,11 +170,11 @@ async fn an_add_order_on_a_leaf_node_s_machine_renews_its_uplink_to_carry_the_an
     use ants_daemon::admin::restart::Restarts;
     use ants_daemon::host::{self, Host};
     use ants_proto::{JsDomain, Machine};
-    use ants_test_support::NatsServer;
+    use ants_test_support::{NatsServer, free_port};
 
     use crate::auth::{self, issue_host};
     use crate::members::{self, EnrollApprover};
-    use crate::outbox::tests::{eventually, free_port, spawn_hub};
+    use crate::test_support::{eventually, spawn_hub};
     use crate::{bus, leaf};
 
     let leaf_port = free_port();

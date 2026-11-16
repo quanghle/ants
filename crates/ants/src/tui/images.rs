@@ -213,7 +213,7 @@ pub mod tests {
     use image::{DynamicImage, ImageFormat, RgbImage};
 
     use super::*;
-    use crate::auth::tests::Server;
+    use crate::test_support::Server;
 
     /// A PNG `width` by `height` pixels.
     pub fn png(width: u32, height: u32) -> Vec<u8> {

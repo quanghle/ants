@@ -9,11 +9,11 @@ use futures::StreamExt as _;
 use nkeys::KeyPair;
 use serde_json::json;
 
-use crate::auth::tests::Server;
 use crate::auth::{self, NewDevice, issue_device_with, issue_host};
 use crate::members::{self, EnrollApprover};
 use crate::revoke::Kind;
 use crate::signer::{Options, serve};
+use crate::test_support::Server;
 
 const WAIT: Duration = Duration::from_secs(10);
 /// How long a request the signer ignores goes unanswered before the test stops waiting.

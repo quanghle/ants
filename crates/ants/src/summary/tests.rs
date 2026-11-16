@@ -3,7 +3,7 @@ use std::time::Duration;
 use ants_proto::{Role, ThreadMarks};
 
 use super::*;
-use crate::auth::tests::Server;
+use crate::test_support::Server;
 use crate::thread::{Parser, Select, Threads};
 
 fn p(s: &str) -> UserId {

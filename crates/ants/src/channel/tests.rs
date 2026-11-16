@@ -3,7 +3,7 @@ use std::time::Duration;
 use ants_proto::{ChannelReadMarkers, STREAM, chan_reader};
 
 use super::*;
-use crate::auth::tests::Server;
+use crate::test_support::Server;
 
 fn p(s: &str) -> UserId {
     s.parse().unwrap()

@@ -702,7 +702,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_archived_thread_comes_back_flagged_once_a_message_is_stored_on_it() {
-        let Some(server) = crate::auth::tests::Server::start() else { return };
+        let Some(server) = crate::test_support::Server::start() else { return };
         let (alice, dev_a) = ("alice".parse::<UserId>().unwrap(), "dev-a".parse::<UserId>().unwrap());
         let (_, js) = server.connect_as(&alice, Role::Human).await;
         ants_daemon::bus::ensure_stream(&js).await.unwrap();
@@ -754,7 +754,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_thread_done_for_every_human_reopens_once_a_message_is_stored_on_it() {
-        let Some(server) = crate::auth::tests::Server::start() else { return };
+        let Some(server) = crate::test_support::Server::start() else { return };
         let (alice, bob, dev_a) =
             ("alice".parse::<UserId>().unwrap(), "bob".parse().unwrap(), "dev-a".parse().unwrap());
         let (_, js) = server.connect_as(&alice, Role::Human).await;
@@ -790,7 +790,7 @@ mod tests {
 
     #[tokio::test]
     async fn marks_and_titles_of_threads_with_no_message_left_are_forgotten_once_old() {
-        let Some(server) = crate::auth::tests::Server::start() else { return };
+        let Some(server) = crate::test_support::Server::start() else { return };
         let (alice, dev_a) = ("alice".parse::<UserId>().unwrap(), "dev-a".parse::<UserId>().unwrap());
         let (_, js) = server.connect_as(&alice, Role::Human).await;
         ants_daemon::bus::ensure_stream(&js).await.unwrap();
@@ -865,7 +865,7 @@ mod tests {
     /// thread, as a pruned title's does, leaving no key behind.
     #[tokio::test]
     async fn the_markers_of_cleared_and_pruned_titles_go_with_their_threads() {
-        let Some(server) = crate::auth::tests::Server::start() else { return };
+        let Some(server) = crate::test_support::Server::start() else { return };
         let (alice, dev_a) = ("alice".parse::<UserId>().unwrap(), "dev-a".parse::<UserId>().unwrap());
         let (_, js) = server.connect_as(&alice, Role::Human).await;
         js.create_stream(ants_daemon::hub::threads_config()).await.unwrap();
@@ -903,7 +903,7 @@ mod tests {
     /// third human reads `[sealed]` and may not title it, and the thread keeps no ant's suggestion.
     #[tokio::test]
     async fn the_title_of_a_sealed_thread_is_sealed_for_both_humans() {
-        let Some(server) = crate::auth::tests::Server::start() else { return };
+        let Some(server) = crate::test_support::Server::start() else { return };
         let humans: Vec<UserId> = ["alice", "bob", "carol"].iter().map(|h| h.parse().unwrap()).collect();
         let creds: Vec<_> = humans.iter().map(|h| server.creds_as(h, Role::Human)).collect();
         let nats: Vec<_> = creds.iter().map(|c| crate::Nats::new(&server.url, Some(c), None).unwrap()).collect();

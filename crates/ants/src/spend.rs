@@ -378,7 +378,7 @@ mod tests {
     use ants_proto::{Role, daily_spend_key, session_key};
 
     use super::*;
-    use crate::auth::tests::Server;
+    use crate::test_support::Server;
 
     fn p(s: &str) -> UserId {
         s.parse().unwrap()

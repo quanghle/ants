@@ -360,8 +360,8 @@ mod tests {
     use ants_proto::{Machine, Role, UserId};
 
     use super::*;
-    use crate::auth::tests::Server;
     use crate::members::EnrollApprover;
+    use crate::test_support::Server;
 
     fn p(s: &str) -> UserId {
         s.parse().unwrap()

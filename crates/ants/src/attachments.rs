@@ -391,7 +391,7 @@ mod tests {
     use ants_proto::{NotesPost, Role, UserId};
 
     use super::*;
-    use crate::auth::tests::Server;
+    use crate::test_support::Server;
 
     #[test]
     fn media_types_come_from_the_extension() {

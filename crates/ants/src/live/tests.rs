@@ -5,7 +5,7 @@ use ants_proto::{Envelope, StatusUpdate, ToolCall, Uuid};
 use chrono::DateTime;
 
 use super::*;
-use crate::auth::tests::Server;
+use crate::test_support::Server;
 use crate::thread::Kind;
 
 pub fn at(secs: i64) -> DateTime<Utc> {

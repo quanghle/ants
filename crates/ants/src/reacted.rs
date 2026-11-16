@@ -104,7 +104,7 @@ mod tests {
     use ants_proto::Role;
 
     use super::*;
-    use crate::auth::tests::Server;
+    use crate::test_support::Server;
 
     /// A human's credentials follow every reaction; an ant's, which read none, follow none and fail nothing.
     #[tokio::test]

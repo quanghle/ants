@@ -879,7 +879,7 @@ mod tests {
     use tokio::time::timeout;
 
     use super::*;
-    use crate::auth::tests::Server;
+    use crate::test_support::Server;
     use crate::tools;
 
     const WAIT: Duration = Duration::from_secs(20);
@@ -1087,7 +1087,7 @@ mod tests {
         auth::sign_added(&team, &p("lead-x"), None, &KeyPair::new_user().public_key(), "worker", &p("lead")).unwrap();
         let m1: ants_proto::Machine = "m1".parse().unwrap();
         let uplink = server.dir().join("leaf-m1.creds");
-        auth::tests::uplink_for_most_ants(&team, &m1, None, &uplink);
+        crate::test_support::uplink_for_most_ants(&team, &m1, None, &uplink);
         let before = std::fs::read_to_string(&uplink).unwrap();
         let lead = Manager::new(&server).await;
         let leaf = Leaf { machine: m1, creds: uplink.clone() };

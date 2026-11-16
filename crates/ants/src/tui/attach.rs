@@ -279,7 +279,7 @@ mod tests {
     use ants_proto::{Envelope, Role, UserId};
 
     use super::*;
-    use crate::auth::tests::Server;
+    use crate::test_support::Server;
 
     fn listed(name: &str, bytes: &[u8]) -> Listed {
         let message = Envelope::new(UserId::human(), "dev-a".parse().unwrap(), "look");

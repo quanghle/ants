@@ -403,7 +403,7 @@ mod tests {
     use tokio::time::timeout;
 
     use super::*;
-    use crate::auth::tests::Server;
+    use crate::test_support::Server;
 
     fn texts(envelopes: &[Envelope]) -> Vec<&str> {
         envelopes.iter().map(|e| e.text.as_str()).collect()

@@ -5,7 +5,7 @@ use nkeys::KeyPair;
 use serde_json::Value;
 
 use super::*;
-use crate::auth::tests::Server;
+use crate::test_support::Server;
 
 fn p(s: &str) -> UserId {
     s.parse().unwrap()

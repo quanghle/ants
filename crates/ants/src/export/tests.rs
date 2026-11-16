@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use ants_proto::Role;
 
 use super::*;
-use crate::auth::tests::Server;
+use crate::test_support::Server;
 
 fn p(name: &str) -> UserId {
     name.parse().unwrap()

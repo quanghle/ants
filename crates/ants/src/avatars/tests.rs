@@ -2,7 +2,7 @@ use ants_daemon::identity::Identity;
 use chrono::{TimeZone as _, Utc};
 
 use super::*;
-use crate::auth::tests::Server;
+use crate::test_support::Server;
 
 fn p(name: &str) -> UserId {
     name.parse().unwrap()

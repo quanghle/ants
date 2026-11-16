@@ -11,7 +11,8 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use super::*;
-use crate::auth::{issue_with, tests::Server};
+use crate::auth::issue_with;
+use crate::test_support::Server;
 
 fn p(s: &str) -> UserId {
     s.parse().unwrap()

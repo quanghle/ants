@@ -265,7 +265,7 @@ mod tests {
     use tokio::time::timeout;
 
     use super::*;
-    use crate::auth::tests::Server;
+    use crate::test_support::Server;
     use crate::{revoke, serve, tools};
 
     const WAIT: Duration = Duration::from_secs(30);

@@ -415,6 +415,9 @@ fn escalation_note(x: &Escalation) -> String {
 }
 
 #[cfg(test)]
+mod test_support;
+
+#[cfg(test)]
 mod tests {
     use std::time::Duration;
 
@@ -424,7 +427,7 @@ mod tests {
     /// are denied, which would only time out, and create nothing.
     #[tokio::test]
     async fn a_human_creates_what_the_hub_lacks() {
-        let Some(server) = auth::tests::Server::start() else { return };
+        let Some(server) = test_support::Server::start() else { return };
         let connect = async |user: &UserId, role| {
             let creds = server.creds_as(user, role);
             let (_, js) = bus::connect(&server.url, Some(&creds), None, user, "test").await.unwrap();

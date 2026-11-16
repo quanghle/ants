@@ -628,7 +628,7 @@ mod tests {
 
     #[tokio::test]
     async fn where_the_account_key_is_the_io_hears_a_request_and_approves_it() {
-        let Some(server) = crate::auth::tests::Server::start() else { return };
+        let Some(server) = crate::test_support::Server::start() else { return };
         let listen = Duration::from_millis(400);
         let (_, js) = server.connect_as(&user("alice"), ants_proto::Role::Human).await;
         let (mut elsewhere, holder) = Io::new(js.clone(), &server.url, None, Ok(server.dir().to_owned()), listen);

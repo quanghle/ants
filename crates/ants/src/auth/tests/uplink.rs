@@ -1,0 +1,358 @@
+//! A leaf node's uplink credentials: the rights they carry, their size, and what clients on the leaf node reach
+//! with them.
+
+use ants_test_support::{NatsServer, free_port};
+
+use super::*;
+use crate::test_support::uplink_for_most_ants;
+
+#[test]
+fn a_renewed_uplink_keeps_its_key_and_rights_and_a_revoked_one_is_not_renewed() {
+    let dir = ants_test_support::scratch_dir("extend-leaf");
+    let (team, out, m1) = (dir.join("auth"), dir.join("leaf-m1.creds"), "m1".parse::<Machine>().unwrap());
+    init(&team).unwrap();
+    issue_leaf(&team, &m1, &[(p("dev-a"), Role::Ant)], &[], EnrollApprover::Without, None, &out).unwrap();
+    let (jwt, key) = read_creds(&out).unwrap();
+    let renewed = extend_leaf(&team, &jwt, &m1, Permissions::for_leaf(&m1, [(&p("dev-c"), Role::Ant)])).unwrap();
+    assert!(allows_all(&renewed, &jwt).unwrap() && !allows_all(&jwt, &renewed).unwrap());
+    assert_eq!(check_leaf(&account_key(&team).unwrap(), &renewed, &m1).unwrap().sub, key.public_key());
+    let none = || Permissions { publish: vec![], subscribe: vec![] };
+    let ant = sign_user(&team, &p("leaf-m1"), Role::Ant, None, &KeyPair::new_user().public_key()).unwrap();
+    assert!(extend_leaf(&team, &ant, &m1, none()).is_err(), "an ant named leaf-m1 is no leaf");
+    revoke::revoke(&team, Some("leaf-m1"), &[]).unwrap();
+    let err = extend_leaf(&team, &jwt, &m1, none()).unwrap_err().to_string();
+    assert!(err.contains("revoked"), "{err}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// An ant whose credentials make it a human's assistant takes the assistant's rights into a leaf node's uplink, issued
+/// or renewed, and an ant's again once those credentials are revoked.
+#[test]
+fn a_leaf_uplink_carries_an_assistant_s_rights() {
+    use ants_daemon::creds;
+    let dir = ants_test_support::scratch_dir("leaf-assistant");
+    let (team, out, m1) = (dir.join("auth"), dir.join("leaf-m1.creds"), "m1".parse::<Machine>().unwrap());
+    init(&team).unwrap();
+    let (alice, pa, dev_a) = (p("alice"), p("pa"), p("dev-a"));
+    issue(&team, &alice, Role::Human, None, &dir.join("alice.creds")).unwrap();
+    let new = NewDevice { assistant_of: Some(alice.clone()), ..NewDevice::default() };
+    let rights = Permissions::for_assistant(&pa, &alice);
+    issue_device_with(&team, &pa, Kind::Assistant, rights, &new, &dir.join("pa.creds")).unwrap();
+    issue_leaf(
+        &team,
+        &m1,
+        &[(pa.clone(), Role::Ant), (dev_a.clone(), Role::Ant)],
+        &[],
+        EnrollApprover::Without,
+        None,
+        &out,
+    )
+    .unwrap();
+    let sorted = |mut rights: Permissions| {
+        for all in [&mut rights.publish, &mut rights.subscribe] {
+            all.sort();
+            all.dedup();
+        }
+        rights
+    };
+    let carried = |jwt: &str| sorted(allowed(&verified_body(jwt).unwrap().1));
+    let as_assistant = [(&pa, LeafRole::AssistantOf(&alice)), (&dev_a, LeafRole::Ant)];
+    let (jwt, _) = read_creds(&out).unwrap();
+    assert_eq!(carried(&jwt), sorted(Permissions::for_leaf(&m1, as_assistant)));
+    let marker = "$JS.API.DIRECT.GET.KV_ants_read.$KV.ants_read.alice";
+    assert!(carried(&jwt).publish.iter().any(|s| s == marker), "pa reads alice's read marker through the leaf");
+    let finding = creds::Finding::from_jwt(&jwt).unwrap();
+    let creds::Kind::Leaf { ants, humans, .. } = finding.kind else { panic!("{:?}", finding.kind) };
+    assert_eq!((ants, humans), (vec![pa.clone(), dev_a.clone()], vec![]), "an assistant is an ant of the leaf");
+
+    let renewed = renew(&team, &jwt, &KeyPair::new_user().public_key(), None).unwrap();
+    assert_eq!(carried(&renewed.jwt), carried(&jwt));
+    revoke::revoke(&team, Some("pa"), &[]).unwrap();
+    let as_ant = renew(&team, &renewed.jwt, &KeyPair::new_user().public_key(), None).unwrap();
+    assert_eq!(carried(&as_ant.jwt), sorted(Permissions::for_leaf(&m1, [(&pa, Role::Ant), (&dev_a, Role::Ant)])));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A retired ant's rights leave the uplink, renewed for the same key, while those its other members, webhooks and
+/// enrollment approver share with it stay.
+#[test]
+fn a_shrunk_uplink_drops_only_what_the_retired_ant_needed() {
+    let dir = ants_test_support::scratch_dir("shrink-leaf");
+    let (team, out, m1) = (dir.join("auth"), dir.join("leaf-m1.creds"), "m1".parse::<Machine>().unwrap());
+    init(&team).unwrap();
+    let hub: JsDomain = "hub".parse().unwrap();
+    let hook = Permissions::for_webhook(&p("hook"), &[Destination::Ant(p("dev-a"))]);
+    issue_with(&team, &p("hook"), Kind::Webhook, hook, &team.join("hook.creds")).unwrap();
+    let on_m1 = members(&[p("dev-a")], &[p("alice")]);
+    issue_leaf(&team, &m1, &on_m1, &[p("hook")], EnrollApprover::With, Some(&hub), &out).unwrap();
+    let (jwt, key) = read_creds(&out).unwrap();
+    let more = Permissions::for_leaf(&m1, [(&p("dev-c"), Role::Ant)]).with_uplink_js_domain(Some(&hub));
+    let with_c = extend_leaf(&team, &jwt, &m1, more).unwrap();
+
+    let without_c = shrink_leaf(&team, &with_c, &m1, &p("dev-c"), LeafRole::Ant).unwrap().unwrap();
+    assert!(allows_all(&without_c, &jwt).unwrap() && allows_all(&jwt, &without_c).unwrap(), "as issued again");
+    assert_eq!(check_leaf(&account_key(&team).unwrap(), &without_c, &m1).unwrap().sub, key.public_key());
+    assert_eq!(shrink_leaf(&team, &without_c, &m1, &p("dev-c"), LeafRole::Ant).unwrap(), None, "nothing left");
+
+    let without_a = shrink_leaf(&team, &jwt, &m1, &p("dev-a"), LeafRole::Ant).unwrap().unwrap();
+    let finding = ants_daemon::creds::Finding::from_jwt(&without_a).unwrap();
+    let ants_daemon::creds::Kind::Leaf { ants, humans, webhooks, enroll_approver, .. } = finding.kind else {
+        panic!("{finding:?}")
+    };
+    assert!(ants.is_empty(), "{ants:?}");
+    assert!(humans.contains(&p("alice")) && webhooks == [p("hook")] && enroll_approver, "{humans:?} {webhooks:?}");
+    let (_, body) = verified_body(&without_a).unwrap();
+    let publish = allowed(&body).publish;
+    assert!(publish.iter().any(|s| s.starts_with("ants.inbox.dev-a.")), "the webhook's: {publish:?}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn uplink_credentials_a_hub_would_refuse_are_neither_issued_nor_renewed() {
+    let dir = ants_test_support::scratch_dir("uplink-size");
+    let (team, out, m1) = (dir.join("auth"), dir.join("leaf-m1.creds"), "m1".parse::<Machine>().unwrap());
+    init(&team).unwrap();
+    let domain: JsDomain = "hub".parse().unwrap();
+    let (ants, err) = uplink_for_most_ants(&team, &m1, Some(&domain), &out);
+    eprintln!("{} ants fit the uplink of m1 (domain {domain})", ants.len());
+    assert!(ants.len() >= 48, "only {} ants fit", ants.len());
+    assert!(err.contains("max_control_line 16384") && err.contains("another leaf node"), "{err}");
+    let (jwt, _) = read_creds(&out).unwrap();
+    assert!(jwt.len() <= MAX_UPLINK_JWT, "the refused credentials are not written");
+    // As long a name as that of the ant refused.
+    let more = Permissions::for_leaf(&m1, [(&p("dev-xx"), Role::Ant)]).with_uplink_js_domain(Some(&domain));
+    let err = extend_leaf(&team, &jwt, &m1, more).unwrap_err().to_string();
+    assert!(err.contains("the uplink credentials of m1 would take"), "{err}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Each ant added behind a leaf node (`request_ant`, enrollment) grows its uplink JWT by the same amount, about
+/// 4.7 KB for a six-character name, 5 KB with the hub's JetStream domain, whose plain JetStream API and KV forms it
+/// leaves out: no permission is shared between two ants, and none is a pattern matching an ant not yet added.
+#[test]
+fn each_ant_added_grows_the_uplink_by_the_same_measure() {
+    let dir = ants_test_support::scratch_dir("uplink-growth");
+    let (team, out, m1) = (dir.join("auth"), dir.join("leaf-m1.creds"), "m1".parse::<Machine>().unwrap());
+    init(&team).unwrap();
+    let hub: JsDomain = "hub".parse().unwrap();
+    for (domain, least, most) in [(None, 4_200, 5_000), (Some(&hub), 4_800, 5_400)] {
+        issue_leaf(&team, &m1, &members(&[p("dev-00")], &[]), &[], EnrollApprover::Without, domain, &out).unwrap();
+        let (mut jwt, _) = read_creds(&out).unwrap();
+        let mut growth = Vec::new();
+        for i in 1..=5 {
+            let more =
+                Permissions::for_leaf(&m1, [(&p(&format!("dev-{i:02}")), Role::Ant)]).with_uplink_js_domain(domain);
+            let renewed = extend_leaf(&team, &jwt, &m1, more).unwrap();
+            growth.push(renewed.len() - jwt.len());
+            jwt = renewed;
+        }
+        if domain.is_some() {
+            let publish = allowed(&verified_body(&jwt).unwrap().1).publish;
+            let plain = publish.iter().find(|s| s.starts_with("$JS.API.") || s.starts_with("$KV."));
+            assert_eq!(plain, None, "the hub denies the plain forms on a leaf connection of another domain");
+        }
+        let (min, max) = (*growth.iter().min().unwrap(), *growth.iter().max().unwrap());
+        eprintln!("uplink of m1 (domain {domain:?}): {} bytes, each ant adds {growth:?}", jwt.len());
+        assert!(max - min <= 4, "ants of names of one length grow it alike: {growth:?}");
+        assert!((least..=most).contains(&max), "{max} bytes per ant, domain {domain:?}");
+        let room = (MAX_UPLINK_JWT - jwt.len()) / max + 6;
+        assert!(room >= if domain.is_some() { 48 } else { 53 }, "{room} ants fit");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// The longest uplink credentials `ants auth leaf` issues, far over the hub's max_control_line, still connect.
+#[tokio::test]
+async fn the_longest_uplink_credentials_connect() {
+    let leaf_port = free_port();
+    let Some(hub) = Server::start_with(
+        "domain: hub",
+        &format!("leafnodes {{ listen: \"127.0.0.1:{leaf_port}\"\nno_advertise: true }}\n"),
+    ) else {
+        return;
+    };
+    let (domain, human, m1) = ("hub".parse::<JsDomain>().unwrap(), UserId::human(), "m1".parse().unwrap());
+    let team = hub.dir().join("auth");
+    let (_h_client, mut h_js) =
+        bus::connect(&hub.url, Some(&hub.creds_in(&human, Some(&domain))), Some(&domain), &human, "test")
+            .await
+            .unwrap();
+    h_js.set_timeout(Duration::from_secs(1));
+    bus::ensure_stream(&h_js).await.unwrap();
+    let leaf_creds = hub.dir().join("leaf-m1.creds");
+    let (ants, _) = uplink_for_most_ants(&team, &m1, Some(&domain), &leaf_creds);
+    assert!(read_creds(&leaf_creds).unwrap().0.len() > MAX_UPLINK_JWT - 9 * 1024);
+    let account = load(&team.join(ACCOUNT_SEED)).unwrap().public_key();
+    let leaf = NatsServer::spawn_with(|dir| {
+        fs::copy(team.join(SERVER_CONF), dir.join(SERVER_CONF)).unwrap();
+        format!(
+            "include \"{SERVER_CONF}\"\nleafnodes {{ remotes: [{{ url: \"nats-leaf://127.0.0.1:{leaf_port}\"\n\
+                 account: {account}\ncredentials: {leaf_creds:?} }}] }}\n"
+        )
+    })
+    .unwrap();
+    let last = ants.last().unwrap();
+    let js = connect_to(&leaf.url, &hub.creds_in(last, Some(&domain)), Some(&domain), last).await;
+    let mut reached = false;
+    for _ in 0..50 {
+        if bus::open_stream(&js, last).await.is_ok() {
+            reached = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(reached, "{last} on the leaf reaches the hub stream");
+}
+
+/// A hub with a JetStream domain, and a leaf node without JetStream whose uplink uses `ants auth leaf` credentials
+/// for dev-a and the webhook github: dev-a reaches the hub's stream through the domain, and github delivers there
+/// (to dev-b, elsewhere); dev-b and the webhook alerts, also valid on the leaf, get nothing across.
+#[tokio::test]
+async fn clients_on_a_leaf_node_reach_the_hub_stream_through_its_domain() {
+    let leaf_port = free_port();
+    let Some(hub) = Server::start_with(
+        "domain: hub",
+        &format!("leafnodes {{ listen: \"127.0.0.1:{leaf_port}\"\nno_advertise: true }}\n"),
+    ) else {
+        return;
+    };
+    let domain: JsDomain = "hub".parse().unwrap();
+    let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
+    let team = hub.dir().join("auth");
+
+    let (h_client, mut h_js) =
+        bus::connect(&hub.url, Some(&hub.creds_in(&human, Some(&domain))), Some(&domain), &human, "test")
+            .await
+            .unwrap();
+    h_js.set_timeout(Duration::from_secs(1));
+    bus::ensure_stream(&h_js).await.unwrap();
+    bus::init_own_buckets(&h_js).await.unwrap();
+    crate::webhook::ensure_bucket(&h_js).await.unwrap();
+
+    let (github, alerts) = (p("github"), p("alerts"));
+    for hook in [&github, &alerts] {
+        let permissions = Permissions::for_webhook(hook, &[Destination::Ant(dev_b.clone())]);
+        issue_with(
+            &team,
+            hook,
+            crate::revoke::Kind::Webhook,
+            permissions.with_js_domain(Some(&domain)),
+            &team.join(format!("{hook}.creds")),
+        )
+        .unwrap();
+    }
+    let leaf_creds = hub.dir().join("leaf-m1.creds");
+    let m1: Machine = "m1".parse().unwrap();
+    let on_m1 = members(std::slice::from_ref(&dev_a), &[]);
+    let missing =
+        issue_leaf(&team, &m1, &on_m1, &[p("ci")], EnrollApprover::Without, Some(&domain), &leaf_creds).unwrap_err();
+    assert!(format!("{missing:#}").contains("ants auth user ci --webhook"), "{missing:#}");
+    issue(&team, &p("dev-c"), Role::Ant, Some(&domain), &team.join("dev-c.creds")).unwrap();
+    let ant =
+        issue_leaf(&team, &m1, &on_m1, &[p("dev-c")], EnrollApprover::Without, Some(&domain), &leaf_creds).unwrap_err();
+    assert!(format!("{ant:#}").contains("no webhook's"), "{ant:#}");
+    issue_leaf(&team, &m1, &[], std::slice::from_ref(&github), EnrollApprover::Without, None, &leaf_creds).unwrap();
+    issue_leaf(&team, &m1, &on_m1, std::slice::from_ref(&github), EnrollApprover::Without, Some(&domain), &leaf_creds)
+        .unwrap();
+    assert!(
+        async_nats::ConnectOptions::with_credentials_file(&leaf_creds).await.unwrap().connect(&hub.url).await.is_err(),
+        "leaf credentials do not work for clients"
+    );
+    let account = load(&team.join(ACCOUNT_SEED)).unwrap().public_key();
+    let leaf = NatsServer::spawn_with(|dir| {
+        fs::copy(team.join(SERVER_CONF), dir.join(SERVER_CONF)).unwrap();
+        format!(
+            "include \"{SERVER_CONF}\"\nleafnodes {{ remotes: [{{ url: \"nats-leaf://127.0.0.1:{leaf_port}\"\n\
+                 account: {account}\ncredentials: {leaf_creds:?} }}] }}\n"
+        )
+    })
+    .unwrap();
+
+    // Without the domain the JetStream API stays on the leaf, which has none.
+    let a_plain = connect_to(&leaf.url, &hub.creds(&dev_a), None, &dev_a).await;
+    let a_js = connect_to(&leaf.url, &hub.creds_in(&dev_a, Some(&domain)), Some(&domain), &dev_a).await;
+    let mut stream = None;
+    for _ in 0..50 {
+        if let Ok(s) = bus::open_stream(&a_js, &dev_a).await {
+            stream = Some(s);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let stream = stream.expect("dev-a on the leaf reaches the hub stream");
+    assert!(bus::open_stream(&a_plain, &dev_a).await.is_err(), "no JetStream without the domain");
+    let usages = ants_daemon::storage::measure(&a_js, Some(&domain), &Default::default()).await.unwrap();
+    assert!(usages.iter().all(|u| !u.leaf && u.domain.as_deref() == Some("hub")), "{usages:?}");
+
+    // github, as `ants webhook serve` on the leaf, keeps its events in the bucket and delivers to dev-b's inbox.
+    let hook_js = connect_to(&leaf.url, &team.join("github.creds"), Some(&domain), &github).await;
+    let seen = DirectKv::new(&hook_js, Some(&domain), ants_proto::WEBHOOKS_BUCKET).await.unwrap();
+    let mut found = false;
+    for _ in 0..50 {
+        if seen.exists(&github).await.unwrap_or(false) {
+            found = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(found, "github on the leaf reaches the hub's webhooks bucket");
+    assert!(seen.create(ants_proto::webhook_seen_key(&github, "e1"), "{}").await.unwrap());
+    let event = Envelope::new(github.clone(), dev_b.clone(), "build red").from_webhook();
+    let stored = hook_js.publish(event.subject(), serde_json::to_vec(&event).unwrap().into()).await.unwrap();
+    let stored = stored.await.unwrap().sequence;
+    let on_hub = h_js.get_stream(STREAM).await.unwrap().get_raw_message(stored).await.unwrap();
+    assert_eq!(serde_json::from_slice::<Envelope>(&on_hub.payload).unwrap(), event);
+    let alerts_js = connect_to(&leaf.url, &team.join("alerts.creds"), Some(&domain), &alerts).await;
+    let alerts_seen = DirectKv::new(&alerts_js, Some(&domain), ants_proto::WEBHOOKS_BUCKET).await.unwrap();
+    assert!(!alerts_seen.exists(&alerts).await.unwrap_or(false), "alerts is not on the uplink");
+
+    // dev-a serves its inbox from the leaf, keeps its session, and replies.
+    let mut human_inbox = h_client.subscribe(subject::inbox_of(&human)).await.unwrap();
+    h_client.flush().await.unwrap();
+    let ask = Envelope::new(human.clone(), dev_a.clone(), "hi");
+    bus::publish(&h_js, &ask).await.unwrap();
+    let mut inbox = bus::inbox_consumer(&stream, &dev_a, WAIT, 5, 2).await.unwrap();
+    let msg = timeout(WAIT, inbox.next()).await.unwrap().unwrap().unwrap();
+    assert_eq!(serde_json::from_slice::<Envelope>(&msg.payload).unwrap(), ask);
+    let sessions = bus::ensure_sessions(&a_js, Some(&domain), &dev_a).await.unwrap();
+    let key = session_key(&dev_a, &ask.thread_id);
+    sessions.put(&key, "s1").await.unwrap();
+    assert_eq!(sessions.get(&key).await.unwrap().as_deref(), Some(&b"s1"[..]));
+    let attempts = bus::ensure_attempts(&a_js, Some(&domain), &dev_a).await.unwrap();
+    let marker = attempt_key(&dev_a, msg.info().unwrap().stream_sequence);
+    attempts.put(&marker, "started").await.unwrap();
+    assert!(attempts.get(&marker).await.unwrap().is_some());
+    attempts.delete(&marker).await.unwrap();
+    let reply = ask.reply(dev_a.clone(), "hello", Role::Human).unwrap();
+    bus::publish(&a_js, &reply).await.unwrap();
+    msg.double_ack().await.unwrap();
+    let got = timeout(WAIT, human_inbox.next()).await.unwrap().unwrap();
+    assert_eq!(serde_json::from_slice::<Envelope>(&got.payload).unwrap(), reply);
+    // And reads the decision stored on one of its approval requests.
+    let decision = subject::approval_decision(&dev_a, &ants_proto::Uuid::now_v7());
+    h_js.publish(decision.clone(), "allow".into()).await.unwrap().await.unwrap();
+    assert_eq!(&stream.direct_get_last_for_subject(decision).await.unwrap().payload[..], b"allow");
+
+    // The uplink carries only what dev-a may do: the leaf accepts dev-b, but nothing of dev-b crosses either way.
+    let b_js = connect_to(&leaf.url, &hub.creds_in(&dev_b, Some(&domain)), Some(&domain), &dev_b).await;
+    assert!(bus::open_stream(&b_js, &dev_b).await.is_err(), "dev-b's JetStream requests stay on the leaf");
+    let (a_client, b_client) = (a_js.client(), b_js.client());
+    let mut a_live = a_client.subscribe(subject::inbox_of(&dev_a)).await.unwrap();
+    let mut b_live = b_client.subscribe(subject::inbox_of(&dev_b)).await.unwrap();
+    let mut statuses = h_client.subscribe("ants.status.>").await.unwrap();
+    for c in [&a_client, &b_client, &h_client] {
+        c.flush().await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let thread = &ask.thread_id;
+    b_client.publish(subject::status(&dev_b, thread), "b".into()).await.unwrap();
+    b_client.flush().await.unwrap();
+    a_client.publish(subject::status(&dev_a, thread), "a".into()).await.unwrap();
+    let got = timeout(WAIT, statuses.next()).await.unwrap().unwrap();
+    assert_eq!(got.subject.as_str(), subject::status(&dev_a, thread), "dev-b's status stays on the leaf");
+    h_client.publish(subject::inbox(&dev_b, &human), "to b".into()).await.unwrap();
+    h_client.publish(subject::inbox(&dev_a, &human), "to a".into()).await.unwrap();
+    h_client.flush().await.unwrap();
+    assert_eq!(&timeout(WAIT, a_live.next()).await.unwrap().unwrap().payload[..], b"to a");
+    assert!(timeout(Duration::from_millis(300), b_live.next()).await.is_err(), "nothing for dev-b crosses");
+}

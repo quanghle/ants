@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use ants_daemon::{bus, notes};
 use ants_proto::{ChannelPost, Envelope, NotesPost, Permissions, Role, UserId};
-use ants_test_support::{NatsServer, scratch_dir};
+use ants_test_support::{NatsServer, free_port, scratch_dir};
 use async_nats::jetstream;
 use tokio::time::timeout;
 
@@ -179,10 +179,6 @@ fn includes_are_relative_to_the_configuration() {
     assert_eq!(rel("/home/me/.config/ants", "/home/me/.config/ants/auth/server.conf"), Path::new("auth/server.conf"));
     assert_eq!(rel("/home/me/leaf", "/home/me/auth/server.conf"), Path::new("../auth/server.conf"));
     assert_eq!(normalize(Path::new("/a/./b/../c")).unwrap(), Path::new("/a/c"));
-}
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
 
 async fn reaches_hub_stream(js: &jetstream::Context, user: &UserId, expected: bool) -> bool {

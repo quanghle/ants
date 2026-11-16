@@ -582,7 +582,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_human_answers_a_question_asked_of_it_with_an_option_or_typed_text() {
-        let Some(server) = crate::auth::tests::Server::start() else { return };
+        let Some(server) = crate::test_support::Server::start() else { return };
         let (alice, dev_a): (UserId, UserId) = ("alice".parse().unwrap(), "dev-a".parse().unwrap());
         let (_, js) = server.connect_as(&alice, ants_proto::Role::Human).await;
         bus::ensure_stream(&js).await.unwrap();

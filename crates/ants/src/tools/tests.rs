@@ -4,7 +4,7 @@ use ants_daemon::bus;
 use ants_proto::{Role, ThreadId, ToolCall};
 
 use super::*;
-use crate::auth::tests::Server;
+use crate::test_support::Server;
 
 fn request(ant: &UserId, title: &str, offered: Vec<Verdict>, timeout: Duration) -> ApprovalRequest {
     let tool = ToolCall { kind: "execute".into(), title: title.into(), ..Default::default() };

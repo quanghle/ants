@@ -638,7 +638,7 @@ mod tests {
     async fn a_message_sealed_between_two_humans_opens_only_on_their_devices() {
         use ants_proto::Role;
 
-        use crate::auth::tests::Server;
+        use crate::test_support::Server;
 
         let Some(server) = Server::start() else { return };
         let (alice, bob, carol, dave): (UserId, UserId, UserId, UserId) =
@@ -748,7 +748,7 @@ mod tests {
     async fn a_file_attached_to_a_sealed_message_is_saved_only_on_their_devices() {
         use ants_proto::Role;
 
-        use crate::auth::tests::Server;
+        use crate::test_support::Server;
 
         let Some(server) = Server::start() else { return };
         let (alice, bob, carol): (UserId, UserId, UserId) =

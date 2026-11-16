@@ -6,28 +6,15 @@ use std::process::Command;
 use ants_daemon::reading::Reading;
 use ants_daemon::{bus, files, links, notes, owners};
 use ants_proto::{ATTACHMENT_CHUNK, ChannelId, ChannelPost, DeadLetter, Envelope, JsDomain, NotesPost, ThreadId};
-use ants_test_support::NatsServer;
+use ants_test_support::{NatsServer, free_port};
 use async_nats::jetstream::message::{PublishMessage, StreamMessage};
 use futures::StreamExt as _;
 
 use super::*;
 use crate::humans::Me;
 use crate::members::EnrollApprover;
+use crate::test_support::{eventually, spawn_hub};
 use crate::{auth, channel, leaf};
-
-pub(crate) fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
-}
-
-pub(crate) async fn eventually(what: &str, mut check: impl AsyncFnMut() -> bool) {
-    for _ in 0..600 {
-        if check().await {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    panic!("{what}: timed out");
-}
 
 /// The next message a waiter takes.
 async fn next(replies: &mut bus::LiveInbox) -> Envelope {
@@ -417,18 +404,6 @@ async fn a_post_waiter_reads_back_what_never_comes_live() {
     };
     let quiet = tokio::join!(quiet(&mut on_leaf), quiet(&mut ant_on_leaf), quiet(&mut on_hub), quiet(&mut on_kept));
     assert_eq!(quiet, (true, true, true, true), "each once, live or read back");
-}
-
-pub(crate) fn spawn_hub(leaf_port: u16, extra: &str) -> Option<NatsServer> {
-    NatsServer::spawn_with(|dir| {
-        auth::init(&dir.join("auth")).unwrap();
-        format!(
-            "jetstream {{ store_dir: {:?}, domain: hub }}\ninclude \"auth/{}\"\n\
-                 leafnodes {{ listen: \"127.0.0.1:{leaf_port}\", no_advertise: true }}\n{extra}\n",
-            dir.join("js"),
-            auth::SERVER_CONF
-        )
-    })
 }
 
 /// Without `js_api_reply_v2` the hub's intake never hears from a leaf's outbox, and setting it up says so.

@@ -8,8 +8,8 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use super::*;
-use crate::auth::tests::Server;
 use crate::members::EnrollApprover;
+use crate::test_support::Server;
 
 const WAIT: Duration = Duration::from_secs(5);
 const REPEAT: Duration = Duration::from_millis(100);
@@ -272,10 +272,10 @@ async fn an_approval_grants_the_host_credentials_of_the_asking_machine_only() {
 #[tokio::test]
 async fn an_ant_new_to_a_leaf_enrolls_through_it_and_reaches_the_hub() {
     use ants_proto::{JsDomain, STREAM, ThreadId};
-    use ants_test_support::NatsServer;
+    use ants_test_support::{NatsServer, free_port};
 
     use crate::leaf;
-    use crate::outbox::tests::{eventually, free_port, spawn_hub};
+    use crate::test_support::{eventually, spawn_hub};
 
     let Some(hub) = spawn_hub(free_port(), "feature_flags { js_api_reply_v2: true }") else { return };
     let leaf_port = {
@@ -480,7 +480,7 @@ async fn an_ant_the_uplink_has_no_room_for_is_neither_signed_nor_recorded() {
     let creds = enrollment(&server, &dev_x, Duration::from_secs(60));
     let m1: Machine = "m1".parse().unwrap();
     let uplink = server.dir().join("leaf-m1.creds");
-    auth::tests::uplink_for_most_ants(&team, &m1, None, &uplink);
+    crate::test_support::uplink_for_most_ants(&team, &m1, None, &uplink);
     let before = std::fs::read_to_string(&uplink).unwrap();
     let (members_before, issued_before) = (members::issued(&team, &m1).unwrap(), revoke::issued(&team).unwrap().len());
     let approver = Approver::connect(&server.url, &team, None, LISTEN).await.unwrap();

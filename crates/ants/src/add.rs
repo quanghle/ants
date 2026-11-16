@@ -660,7 +660,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_stored_key_never_touches_a_file() {
-        let Some(server) = crate::auth::tests::Server::start() else { return };
+        let Some(server) = crate::test_support::Server::start() else { return };
         let dir = ants_test_support::scratch_dir("ant-add-stored").canonicalize().unwrap();
         let config = dir.join("config.toml");
         std::fs::write(&config, "harness = \"copilot\"\n").unwrap();

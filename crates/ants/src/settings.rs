@@ -340,7 +340,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::auth::tests::Server;
+    use crate::test_support::Server;
     use ants_daemon::Harnesses;
 
     use crate::auth::{NewDevice, issue_device_with, issue_host};

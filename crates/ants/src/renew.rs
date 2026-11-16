@@ -493,9 +493,9 @@ mod tests {
     use tokio::time::timeout;
 
     use super::*;
-    use crate::auth::tests::Server;
     use crate::members::EnrollApprover;
     use crate::revoke;
+    use crate::test_support::Server;
 
     const WAIT: Duration = Duration::from_secs(5);
     const REPEAT: Duration = Duration::from_millis(100);

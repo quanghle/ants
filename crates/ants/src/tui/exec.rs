@@ -458,7 +458,7 @@ mod tests {
     async fn the_bar_seals_messages_to_a_human_their_files_and_titles_on_their_thread() {
         use ants_proto::Role;
 
-        let Some(server) = crate::auth::tests::Server::start() else { return };
+        let Some(server) = crate::test_support::Server::start() else { return };
         let (alice, bob) = (user("alice"), user("bob"));
         let creds = [server.creds_as(&alice, Role::Human), server.creds_as(&bob, Role::Human)];
         let nats: Vec<_> = creds.iter().map(|c| crate::Nats::new(&server.url, Some(c), None).unwrap()).collect();
@@ -535,7 +535,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_ask_from_the_bar_stores_its_files_before_the_message() {
-        let Some(server) = crate::auth::tests::Server::start() else { return };
+        let Some(server) = crate::test_support::Server::start() else { return };
         let creds = server.creds_as(&user("alice"), ants_proto::Role::Human);
         let nats = crate::Nats::new(&server.url, Some(&creds), None).unwrap();
         let (client, js) = nats.connect("test").await.unwrap();

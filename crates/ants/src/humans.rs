@@ -210,7 +210,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::auth::tests::Server;
+    use crate::test_support::Server;
 
     /// A `.creds` file whose user JWT carries `claims`, unsigned: only the claims matter here.
     fn creds_with(claims: Value) -> String {

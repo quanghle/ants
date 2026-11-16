@@ -331,9 +331,9 @@ pub(crate) mod tests {
     use ants_proto::{FieldChange, MACHINES_BUCKET, Permissions, Role};
 
     use super::*;
-    use crate::auth::tests::Server;
     use crate::auth::{NewDevice, issue_device_with, issue_host};
     use crate::revoke::Kind;
+    use crate::test_support::Server;
 
     pub(crate) const WAIT: Duration = Duration::from_secs(5);
 
@@ -492,11 +492,11 @@ pub(crate) mod tests {
         use std::process::Command;
 
         use ants_proto::JsDomain;
-        use ants_test_support::NatsServer;
+        use ants_test_support::{NatsServer, free_port};
 
         use crate::leaf;
         use crate::members::EnrollApprover;
-        use crate::outbox::tests::{eventually, free_port, spawn_hub};
+        use crate::test_support::{eventually, spawn_hub};
 
         let (leaf_port, dead_port) = (free_port(), free_port());
         let Some(hub) = spawn_hub(leaf_port, "feature_flags { js_api_reply_v2: true }") else { return };

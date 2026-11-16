@@ -404,7 +404,7 @@ pub(crate) mod tests {
     use ants_proto::{Activity, COLONY_HEARTBEAT, HarnessLimit, PermissionsVersion};
 
     use super::*;
-    use crate::auth::tests::Server;
+    use crate::test_support::Server;
 
     pub(crate) fn entry(ant: &str, started: i64, beat: i64, now: DateTime<Utc>) -> ColonyEntry {
         ColonyEntry {

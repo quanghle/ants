@@ -331,7 +331,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_human_searches_every_thread_by_sender_recipient_channel_kind_time_and_text() {
-        let Some(server) = crate::auth::tests::Server::start() else { return };
+        let Some(server) = crate::test_support::Server::start() else { return };
         let (alice, dev_a, dev_b, lead) = (p("alice"), p("dev-a"), p("dev-b"), p("lead"));
         let (_, js) = server.connect_as(&alice, Role::Human).await;
         ants_daemon::bus::ensure_stream(&js).await.unwrap();

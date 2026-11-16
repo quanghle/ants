@@ -464,7 +464,7 @@ fn a_start_of_a_time_ordered_id_bounds_when_it_was_made() {
 
 #[tokio::test]
 async fn a_human_picks_its_threads_by_a_start_of_their_id_or_the_last() {
-    let Some(server) = crate::auth::tests::Server::start() else { return };
+    let Some(server) = crate::test_support::Server::start() else { return };
     let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
     let creds = server.creds_as(&alice, ants_proto::Role::Human);
     let nats = crate::Nats::new(&server.url, Some(&creds), None).unwrap();
@@ -522,7 +522,7 @@ async fn a_human_picks_its_threads_by_a_start_of_their_id_or_the_last() {
 
 #[tokio::test]
 async fn a_human_picks_a_message_by_a_start_of_its_id() {
-    let Some(server) = crate::auth::tests::Server::start() else { return };
+    let Some(server) = crate::test_support::Server::start() else { return };
     let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
     let (_, js) = server.connect_as(&alice, ants_proto::Role::Human).await;
     ants_daemon::bus::ensure_stream(&js).await.unwrap();
@@ -581,7 +581,7 @@ async fn a_human_picks_a_message_by_a_start_of_its_id() {
 
 #[tokio::test]
 async fn a_human_reads_threads_back_without_consuming_them() {
-    let Some(server) = crate::auth::tests::Server::start() else { return };
+    let Some(server) = crate::test_support::Server::start() else { return };
     let (alice, dev_a) = (p("alice"), p("dev-a"));
     let (_, js) = server.connect_as(&alice, ants_proto::Role::Human).await;
     ants_daemon::bus::ensure_stream(&js).await.unwrap();
@@ -621,7 +621,7 @@ async fn a_human_reads_threads_back_without_consuming_them() {
 
 #[tokio::test]
 async fn a_thread_shows_its_ants_tool_calls_once_each_as_last_stored() {
-    let Some(server) = crate::auth::tests::Server::start() else { return };
+    let Some(server) = crate::test_support::Server::start() else { return };
     let (alice, dev_a) = (p("alice"), p("dev-a"));
     let (_, js) = server.connect_as(&alice, ants_proto::Role::Human).await;
     let (_, ant_js) = server.connect_as(&dev_a, ants_proto::Role::Ant).await;
@@ -677,7 +677,7 @@ async fn a_thread_shows_its_ants_tool_calls_once_each_as_last_stored() {
 async fn a_sealed_message_from_a_device_enrolled_mid_follow_opens_everywhere_it_is_read() {
     use ants_proto::Role;
 
-    let Some(server) = crate::auth::tests::Server::start() else { return };
+    let Some(server) = crate::test_support::Server::start() else { return };
     let (alice, bob) = (p("alice"), p("bob"));
     let enrolled = |name: &str| {
         let creds = server.dir().join(format!("alice-{name}.creds"));
