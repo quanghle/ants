@@ -188,14 +188,8 @@ pub fn marks_key(human: &UserId) -> String {
     format!("marks.{human}")
 }
 
-/// Key in [`THREADS_BUCKET`] of the threads `human` snoozed on home ([`crate::ThreadSnoozes`]): starting with
-/// `snoozed`, so no thread id or human name collides with a title's key.
-pub fn snoozed_key(human: &UserId) -> String {
-    format!("snoozed.{human}")
-}
-
-/// Key in [`THREADS_BUCKET`] of the reminders `human` set ([`crate::Reminders`]): starting with `reminders`, so no
-/// thread id or human name collides with a title's key.
+/// Key in [`THREADS_BUCKET`] of the reminders `human` set and the threads it snoozed on home ([`crate::Reminders`]):
+/// starting with `reminders`, so no thread id or human name collides with a title's key.
 pub fn reminders_key(human: &UserId) -> String {
     format!("reminders.{human}")
 }
@@ -207,10 +201,10 @@ pub fn assisted_marks_key(human: &UserId, assistant: &UserId) -> String {
     format!("marks.{human}.{assistant}")
 }
 
-/// Key in [`THREADS_BUCKET`] of the threads `assistant` snoozed for `human` ([`crate::ThreadSnoozes`]), as
-/// [`assisted_marks_key`] is of its marks.
-pub fn assisted_snoozed_key(human: &UserId, assistant: &UserId) -> String {
-    format!("snoozed.{human}.{assistant}")
+/// Key in [`THREADS_BUCKET`] of the threads `assistant` snoozed for `human` ([`crate::Reminders::snoozed`]), as
+/// [`assisted_marks_key`] is of its marks: [`reminders_key`] of the human with the assistant after it.
+pub fn assisted_reminders_key(human: &UserId, assistant: &UserId) -> String {
+    format!("reminders.{human}.{assistant}")
 }
 
 /// Key in [`READ_BUCKET`] of the posts `human` read of the channels ([`ChannelReadMarkers`]): its user id with

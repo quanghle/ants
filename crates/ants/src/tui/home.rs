@@ -361,7 +361,7 @@ impl Page {
             _ => None,
         };
         let thread = || selected.map(|i| i.thread.clone());
-        let reminded = selected.and_then(|i| data.cards.reminders.0.get(&i.thread)).and_then(|r| r.message);
+        let reminded = selected.and_then(|i| data.cards.reminders.remind.get(&i.thread)).and_then(|r| r.message);
         let reminder = selected.filter(|i| i.why == Why::Reminder).map(|i| i.thread.clone());
         let to = match key {
             Key::Enter if selected.is_some_and(|i| i.requests.len() > 1) => {

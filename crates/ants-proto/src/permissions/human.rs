@@ -12,8 +12,8 @@ use crate::{
 use {
     super::Permissions,
     crate::{
-        ChannelReadMarkers, HeldNotices, NotifyPrefs, ThreadSummary, assisted_marks_key, assisted_snoozed_key,
-        marks_key, snoozed_key,
+        ChannelReadMarkers, HeldNotices, NotifyPrefs, ThreadSummary, assisted_marks_key, assisted_reminders_key,
+        marks_key, reminders_key,
     },
 };
 
@@ -129,9 +129,9 @@ pub(super) fn human_reaction_rights(human: &UserId) -> Vec<String> {
 /// What a human's credentials need for thread titles, TL;DRs and done states and its pins and archives
 /// ([`THREADS_BUCKET`]): creating the bucket; reading by direct gets, putting and deleting every title, every TL;DR
 /// ([`ThreadSummary`]) and every done state, which any human sets; and reading and writing its own [`ThreadMarks`]
-/// and [`crate::ThreadSnoozes`] only, so no human reads or changes another's, with those its assistants set for it
-/// ([`assisted_marks_key`], [`assisted_snoozed_key`]), which it clears as it marks a thread itself. The keys naming
-/// the human second ([`marks_key`], [`snoozed_key`]) or second of three are all its own, and one pattern each covers
+/// and [`crate::Reminders`] only, so no human reads or changes another's, with those its assistants set for it
+/// ([`assisted_marks_key`], [`assisted_reminders_key`]), which it clears as it marks a thread itself. The keys naming
+/// the human second ([`marks_key`], [`reminders_key`]) or second of three are all its own, and one pattern each covers
 /// them, to keep the credentials short: no other key of the bucket has a user id there.
 pub(super) fn thread_rights(human: &UserId) -> [String; 12] {
     let threads = kv_stream(THREADS_BUCKET);

@@ -324,8 +324,8 @@ async fn an_assistant_s_marks_and_snoozes_count_for_its_human_while_granted() {
     use std::collections::BTreeSet;
 
     use ants_proto::{
-        THREADS_BUCKET, ThreadId, ThreadMarks, ThreadSnoozes, assisted_marks_key, assisted_snoozed_key, marks_key,
-        snoozed_key,
+        Reminders, THREADS_BUCKET, ThreadId, ThreadMarks, ThreadSnoozes, assisted_marks_key, assisted_reminders_key,
+        marks_key, reminders_key,
     };
 
     let Some(server) = Server::start() else { return };
@@ -359,18 +359,18 @@ async fn an_assistant_s_marks_and_snoozes_count_for_its_human_while_granted() {
     let mut marks = ThreadMarks::default();
     assert!(marks.pin(&pinned) && marks.archive(&archived, 1) && marks.archive(&mine, 1));
     kv.put(assisted_marks_key(&alice, &pa), serde_json::to_vec(&marks).unwrap()).await.unwrap();
-    let mut snoozes = ThreadSnoozes::default();
-    snoozes.snooze(&snoozed, now, now + TimeDelta::hours(1));
-    snoozes.snooze(&mine, now, now + TimeDelta::hours(5));
-    kv.put(assisted_snoozed_key(&alice, &pa), serde_json::to_vec(&snoozes).unwrap()).await.unwrap();
+    let mut snoozes = Reminders::default();
+    snoozes.snoozed.snooze(&snoozed, now, now + TimeDelta::hours(1));
+    snoozes.snoozed.snooze(&mine, now, now + TimeDelta::hours(5));
+    kv.put(assisted_reminders_key(&alice, &pa), serde_json::to_vec(&snoozes).unwrap()).await.unwrap();
     for key in [
         marks_key(&alice),
-        snoozed_key(&alice),
+        reminders_key(&alice),
         assisted_marks_key(&alice, &bob),
         marks_key(&bob),
-        assisted_snoozed_key(&bob, &pa),
+        assisted_reminders_key(&bob, &pa),
         marks_key(&pa),
-        snoozed_key(&pa),
+        reminders_key(&pa),
     ] {
         assert!(kv.put(&key, "{}").await.is_err(), "pa puts {key}");
     }
@@ -378,7 +378,7 @@ async fn an_assistant_s_marks_and_snoozes_count_for_its_human_while_granted() {
     let read = meta.marks().await.unwrap();
     assert_eq!(read.pinned.keys().collect::<BTreeSet<_>>(), [&mine, &pinned].into());
     assert_eq!(read.archived.keys().collect::<Vec<_>>(), [&archived], "alice's own pin of hers wins");
-    let read = meta.snoozes().await.unwrap();
+    let read = meta.reminders().await.unwrap().snoozed;
     assert!(read.get(&snoozed, now).is_some());
     assert_eq!(read.get(&mine, now).unwrap().until, now + TimeDelta::hours(1), "as does her own snooze");
     assert!(meta.change_thread_marks(&archived, |m| m.unarchive(&archived)).await.unwrap(), "pa's archive goes");
@@ -394,7 +394,7 @@ async fn an_assistant_s_marks_and_snoozes_count_for_its_human_while_granted() {
         }
     };
     tokio::time::timeout(Duration::from_secs(10), withdrawn).await.expect("withdrawn, pa's marks count no more");
-    assert_eq!(meta.snoozes().await.unwrap().0.keys().collect::<Vec<_>>(), [&mine]);
+    assert_eq!(meta.reminders().await.unwrap().snoozed.0.keys().collect::<Vec<_>>(), [&mine]);
     assert!(meta.change_thread_marks(&pinned, |m| m.pin(&pinned)).await.unwrap(), "alice's own pin");
     assert_eq!(meta.marks().await.unwrap().pinned.len(), 2);
 }

@@ -1,10 +1,11 @@
 //! What humans make of threads, in [`THREADS_BUCKET`]: a title, a TL;DR ([`ThreadSummary`]) and a done state per
-//! thread, each shared by every human, and each human's pinned and archived threads ([`ThreadMarks`]), the threads it
-//! snoozed on home ([`ThreadSnoozes`]) and its reminders ([`Reminders`]), shared by its devices. Read and written by
-//! direct gets and plain publishes ([`DirectKv`]); the marks, snoozes and reminders, one entry each per human, with compare-and-set, so devices marking at once
-//! lose nothing. The human's assistant sets marks and snoozes for it in entries of its own
-//! ([`ants_proto::assisted_marks_key`], [`ants_proto::assisted_snoozed_key`]): they count only while the human's grant
-//! names it ([`crate::behalf::Checker`]), and only on threads the human has no mark or snooze of its own on.
+//! thread, each shared by every human, and each human's pinned and archived threads ([`ThreadMarks`]) and its due
+//! times, its reminders and the threads it snoozed on home ([`Reminders`]), shared by its devices. Read and written by
+//! direct gets and plain publishes ([`DirectKv`]); the marks and due times, one entry each per human, with
+//! compare-and-set, so devices marking at once lose nothing. The human's assistant sets marks and snoozes for it in
+//! entries of its own ([`ants_proto::assisted_marks_key`], [`ants_proto::assisted_reminders_key`]): they count only
+//! while the human's grant names it ([`crate::behalf::Checker`]), and only on threads the human has no mark or snooze
+//! of its own on.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -14,8 +15,8 @@ use std::time::Duration;
 use ants_daemon::direct_kv::{DirectKv, Lookup};
 use ants_proto::{
     JsDomain, Mark, Reminders, STREAM, THREADS_BUCKET, ThreadDone, ThreadId, ThreadMarks, ThreadSnoozes, ThreadSummary,
-    ThreadTitle, UserId, assisted_marks_key, assisted_snoozed_key, done_key, marks_key, reminders_key, snoozed_key,
-    summary_key, title_key,
+    ThreadTitle, UserId, assisted_marks_key, assisted_reminders_key, done_key, marks_key, reminders_key, summary_key,
+    title_key,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
@@ -621,24 +622,26 @@ impl Meta {
         Ok(count)
     }
 
-    /// The threads the human snoozed on home, and the stream sequence of their entry (0 for none).
-    async fn snoozes_last(&self) -> Result<(ThreadSnoozes, u64)> {
-        self.entry_last(&snoozed_key(&self.human), SNOOZES).await
+    /// The human's due times: its reminders and the threads it snoozed on home, with those its assistant snoozed for it
+    /// while it acts for it on the threads it has no snooze of its own in force on ([`ThreadSnoozes::with_assisted`]).
+    pub async fn reminders(&self) -> Result<Reminders> {
+        let mut reminders: Reminders = self.entry_last(&reminders_key(&self.human), REMINDERS).await?.0;
+        let Some(assistant) = self.assistant().await else { return Ok(reminders) };
+        let key = assisted_reminders_key(&self.human, &assistant);
+        let assisted: Reminders = self.entry_last(&key, REMINDERS).await?.0;
+        reminders.snoozed = std::mem::take(&mut reminders.snoozed).with_assisted(&assisted.snoozed, Utc::now());
+        Ok(reminders)
     }
 
-    /// The threads the human snoozed on home, with those its assistant snoozed for it while it acts for it on the
-    /// threads it has no snooze of its own in force on ([`ThreadSnoozes::with_assisted`]).
-    pub async fn snoozes(&self) -> Result<ThreadSnoozes> {
-        let snoozes = self.snoozes_last().await?.0;
-        let Some(assistant) = self.assistant().await else { return Ok(snoozes) };
-        let assisted = self.entry_last(&assisted_snoozed_key(&self.human, &assistant), SNOOZES).await?.0;
-        Ok(snoozes.with_assisted(&assisted, Utc::now()))
+    /// Change the human's due times with `change`, on top of whatever its other devices or notifiers changed
+    /// meanwhile, storing them only if `change` says it changed them. What `change` said.
+    pub async fn change_reminders(&self, change: impl Fn(&mut Reminders) -> bool) -> Result<bool> {
+        self.change_entry(&reminders_key(&self.human), REMINDERS, change).await
     }
 
-    /// Change the human's snoozes with `change`, on top of whatever its other devices changed meanwhile, storing them
-    /// only if `change` says it changed them. What `change` said.
+    /// Change the human's snoozes with `change`, as [`Meta::change_reminders`] does.
     pub async fn change_snoozes(&self, change: impl Fn(&mut ThreadSnoozes) -> bool) -> Result<bool> {
-        self.change_entry(&snoozed_key(&self.human), SNOOZES, change).await
+        self.change_reminders(|r| change(&mut r.snoozed)).await
     }
 
     /// Change the human's snooze of `thread` with `change`, as [`Meta::change_snoozes`] does, ending any snooze its
@@ -651,20 +654,9 @@ impl Meta {
     ) -> Result<bool> {
         let changed = self.change_snoozes(change).await?;
         let Some(assistant) = self.assistant().await else { return Ok(changed) };
-        let key = assisted_snoozed_key(&self.human, &assistant);
-        let woke = self.change_entry(&key, SNOOZES, |s: &mut ThreadSnoozes| s.wake(thread, Utc::now())).await?;
+        let key = assisted_reminders_key(&self.human, &assistant);
+        let woke = self.change_entry(&key, REMINDERS, |r: &mut Reminders| r.snoozed.wake(thread, Utc::now())).await?;
         Ok(changed || woke)
-    }
-
-    /// The human's reminders.
-    pub async fn reminders(&self) -> Result<Reminders> {
-        Ok(self.entry_last(&reminders_key(&self.human), REMINDERS).await?.0)
-    }
-
-    /// Change the human's reminders with `change`, on top of whatever its other devices or notifiers changed meanwhile,
-    /// storing them only if `change` says it changed them. What `change` said.
-    pub async fn change_reminders(&self, change: impl Fn(&mut Reminders) -> bool) -> Result<bool> {
-        self.change_entry(&reminders_key(&self.human), REMINDERS, change).await
     }
 
     /// Change the human's marks with `change`, on top of whatever its other devices changed meanwhile, storing them
@@ -690,10 +682,9 @@ impl Meta {
     }
 }
 
-/// What the marks and snoozes entries hold, as errors name them.
+/// What the marks and due times entries hold, as errors name them.
 const MARKS: &str = "pinned and archived threads";
-const SNOOZES: &str = "snoozed threads";
-const REMINDERS: &str = "reminders";
+const REMINDERS: &str = "reminders and snoozed threads";
 
 #[cfg(test)]
 mod tests;

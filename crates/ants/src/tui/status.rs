@@ -216,7 +216,6 @@ mod tests {
             done_acting: Default::default(),
             spend: Ok(Default::default()),
             today: Err(anyhow::anyhow!("timed out")),
-            snoozed: Ok(Default::default()),
             reminders: Ok(Default::default()),
         };
         let parts = Parts {

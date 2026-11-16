@@ -114,8 +114,8 @@ mod tests {
         let set = Action::Change(thread.clone(), Change::Remind(Some(reminder.clone())), 0);
         assert_eq!(m.key(Key::Enter, at(0)), Some(set));
         assert!(m.snoozing.is_none());
-        assert_eq!(m.data.cards.reminders.0.get(&thread), Some(&reminder), "set at once");
+        assert_eq!(m.data.cards.reminders.remind.get(&thread), Some(&reminder), "set at once");
         assert_eq!(m.set_reminder(thread.clone(), None), Action::Change(thread, Change::Remind(None), 0));
-        assert!(m.data.cards.reminders.0.is_empty(), "cleared at once");
+        assert!(m.data.cards.reminders.remind.is_empty(), "cleared at once");
     }
 }

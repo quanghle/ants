@@ -265,13 +265,19 @@ fn colony() {
 fn reminders() {
     snap(
         "reminders",
-        &Reminders(BTreeMap::from([
-            (
-                thread(),
-                Reminder { at: at(0), due: at(30), message: Some(id(7)), note: "check CI".into(), pushed: true },
-            ),
-            (other_thread(), Reminder { at: at(1), due: at(45), message: None, note: String::new(), pushed: false }),
-        ])),
+        &Reminders {
+            remind: BTreeMap::from([
+                (
+                    thread(),
+                    Reminder { at: at(0), due: at(30), message: Some(id(7)), note: "check CI".into(), pushed: true },
+                ),
+                (
+                    other_thread(),
+                    Reminder { at: at(1), due: at(45), message: None, note: String::new(), pushed: false },
+                ),
+            ]),
+            snoozed: ThreadSnoozes(BTreeMap::from([(thread(), Snooze { at: at(2), until: at(50) })])),
+        },
     );
 }
 

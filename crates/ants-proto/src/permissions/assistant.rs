@@ -5,8 +5,8 @@ use super::human::{notify_prefs_rights, read_marker_rights, thread_rights};
 use super::{Permissions, covers, kv_stream};
 use crate::{
     ATTEMPTS_BUCKET, CHANNELS_BUCKET, FILES_BUCKET, FILES_STREAM, HUMANS_BUCKET, IDENTITIES_BUCKET, INTAKE_STREAM,
-    OUTBOX_STREAM, OWNERS_BUCKET, Role, THREADS_BUCKET, UserId, assisted_marks_key, assisted_snoozed_key, chan_reader,
-    inbox_consumer, inbox_prefix, notes_consumer, notify_consumer, sent_reader, spare_readers, subject,
+    OUTBOX_STREAM, OWNERS_BUCKET, Role, THREADS_BUCKET, UserId, assisted_marks_key, assisted_reminders_key,
+    chan_reader, inbox_consumer, inbox_prefix, notes_consumer, notify_consumer, sent_reader, spare_readers, subject,
 };
 #[cfg(doc)]
 use crate::{AssistantOf, assisted_owner_key, assisted_withdrawal_key, unserved_key};
@@ -20,7 +20,7 @@ impl Permissions {
     /// ([`read_marker_rights`]) and the markers of messages kept waiting ([`unserved_key`]), so it sees what its human
     /// has read and set aside. It keeps no pins, archives or snoozed threads of its own: it reads its human's
     /// ([`thread_rights`]) and writes only those it sets for the human, under keys naming it ([`assisted_marks_key`],
-    /// [`assisted_snoozed_key`]), never the human's own, which readers take in only while the human's grant names it.
+    /// [`assisted_reminders_key`]), never the human's own, which readers take in only while the human's grant names it.
     ///
     /// It reads the stream back by direct gets, as a human does, so it holds none of an ant's reader consumers but its
     /// dead letters' (its inbox and channel consumers still deliver), no spare of one, and no consumer of a human's
@@ -115,7 +115,7 @@ impl Permissions {
         publish.extend(gets_only(&thread_rights(human)));
         // The pins, archives and snoozes it sets for its human, under keys naming it.
         publish.extend(
-            [assisted_marks_key(human, assistant), assisted_snoozed_key(human, assistant)]
+            [assisted_marks_key(human, assistant), assisted_reminders_key(human, assistant)]
                 .map(|k| format!("$KV.{THREADS_BUCKET}.{k}")),
         );
         let attempts = kv_stream(ATTEMPTS_BUCKET);

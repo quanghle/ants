@@ -1,14 +1,14 @@
 //! What humans keep of threads in [`crate::THREADS_BUCKET`]: a thread's [`ThreadTitle`], TL;DR ([`ThreadSummary`]) and
-//! done mark ([`ThreadDone`]), shared by every human, and each human's snoozes ([`ThreadSnoozes`]), reminders
-//! ([`Reminders`]) and pins and archives ([`ThreadMarks`]), shared by its devices.
+//! done mark ([`ThreadDone`]), shared by every human, and each human's due times ([`Reminders`]: its reminders and the
+//! threads it snoozed, [`ThreadSnoozes`]) and pins and archives ([`ThreadMarks`]), shared by its devices.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[cfg(doc)]
 use crate::{
-    Envelope, STREAM, THREADS_BUCKET, assisted_marks_key, assisted_snoozed_key, done_key, marks_key, reminders_key,
-    snoozed_key, summary_key, title_key,
+    Envelope, STREAM, THREADS_BUCKET, assisted_marks_key, assisted_reminders_key, done_key, marks_key, reminders_key,
+    summary_key, title_key,
 };
 use crate::{Error, MAX_TITLE, Sealed, ThreadId, UserId, Uuid};
 
@@ -127,11 +127,10 @@ impl ThreadDone {
 /// Longest a thread stays snoozed on a human's home ([`ThreadSnoozes`]).
 pub const SNOOZE_MAX: chrono::TimeDelta = chrono::TimeDelta::days(7);
 
-/// The threads a human snoozed on home, under its [`snoozed_key`] in [`THREADS_BUCKET`], shared by all its devices,
-/// which update it with compare-and-set. A snooze set `at` hides the thread from home until `until`, at most
-/// [`SNOOZE_MAX`] later, or until an item for the human arrives on the thread after `at`. Snoozing changes no ant's
-/// work, reply or notification. The human's assistant snoozes threads for it under its own key
-/// ([`assisted_snoozed_key`]), which readers take in only while the human's grant names it
+/// The threads a human snoozed on home, kept with its reminders ([`Reminders::snoozed`]). A snooze set `at` hides the
+/// thread from home until `until`, at most [`SNOOZE_MAX`] later, or until an item for the human arrives on the thread
+/// after `at`. Snoozing changes no ant's work, reply or notification. The human's assistant snoozes threads for it
+/// under its own key ([`assisted_reminders_key`]), which readers take in only while the human's grant names it
 /// ([`ThreadSnoozes::with_assisted`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -145,6 +144,10 @@ pub struct Snooze {
 }
 
 impl ThreadSnoozes {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     /// Snooze `thread` from `now` until `until`, cut to [`SNOOZE_MAX`] from now, dropping the snoozes already past.
     pub fn snooze(&mut self, thread: &ThreadId, now: DateTime<Utc>, until: DateTime<Utc>) {
         self.prune(now);
@@ -180,13 +183,18 @@ impl ThreadSnoozes {
     }
 }
 
-/// The reminders a human set, one per thread at most, under its [`reminders_key`] in [`THREADS_BUCKET`], shared by all
-/// its devices, which update it with compare-and-set. A reminder is due from `due` on: then its devices show it on
-/// home and a notifier pushes it once, until the human clears it (done or cancelled). A reminder changes no ant's
-/// work, reply or notification, nor what the human read.
+/// A human's due times on threads, under its [`reminders_key`] in [`THREADS_BUCKET`], shared by all its devices, which
+/// update it with compare-and-set: its reminders, one per thread at most, and the threads it snoozed on home
+/// ([`ThreadSnoozes`]). A reminder is due from `due` on: then its devices show it on home and a notifier pushes it
+/// once, until the human clears it (done or cancelled). A reminder changes no ant's work, reply or notification, nor
+/// what the human read.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Reminders(pub std::collections::BTreeMap<ThreadId, Reminder>);
+pub struct Reminders {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub remind: std::collections::BTreeMap<ThreadId, Reminder>,
+    #[serde(default, skip_serializing_if = "ThreadSnoozes::is_empty")]
+    pub snoozed: ThreadSnoozes,
+}
 
 /// What to be reminded of on a thread, and when.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -209,17 +217,17 @@ pub struct Reminder {
 impl Reminders {
     /// Remind of `thread` with `reminder`, in place of any other reminder of it.
     pub fn remind(&mut self, thread: &ThreadId, reminder: Reminder) {
-        self.0.insert(thread.clone(), reminder);
+        self.remind.insert(thread.clone(), reminder);
     }
 
     /// Clear the reminder of `thread`, done or cancelled. Whether there was one.
     pub fn clear(&mut self, thread: &ThreadId) -> bool {
-        self.0.remove(thread).is_some()
+        self.remind.remove(thread).is_some()
     }
 
     /// The reminders due at `now`, soonest due first.
     pub fn due(&self, now: DateTime<Utc>) -> Vec<(&ThreadId, &Reminder)> {
-        let mut due: Vec<_> = self.0.iter().filter(|(_, r)| r.due <= now).collect();
+        let mut due: Vec<_> = self.remind.iter().filter(|(_, r)| r.due <= now).collect();
         due.sort_by_key(|(_, r)| r.due);
         due
     }
@@ -227,7 +235,7 @@ impl Reminders {
     /// Mark pushed the reminders due at `now` and not pushed yet, returning them.
     pub fn push(&mut self, now: DateTime<Utc>) -> Vec<(ThreadId, Reminder)> {
         let mut pushed = Vec::new();
-        for (thread, reminder) in &mut self.0 {
+        for (thread, reminder) in &mut self.remind {
             if reminder.due <= now && !reminder.pushed {
                 reminder.pushed = true;
                 pushed.push((thread.clone(), reminder.clone()));
@@ -390,7 +398,7 @@ impl ThreadMarks {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{done_key, marks_key, p, snoozed_key, title_key};
+    use crate::{done_key, marks_key, p, reminders_key, title_key};
 
     #[test]
     fn a_thread_is_pinned_or_archived_and_new_messages_show_on_an_archived_one() {
@@ -518,7 +526,10 @@ mod tests {
         assert!(json.starts_with(&format!("{{\"{t1}\":{{\"at\":")), "{json}");
         let read: ThreadSnoozes = serde_json::from_str(&json).unwrap();
         assert!(read.get(&t1, now).is_none(), "longer than seven days holds not");
-        assert_eq!(snoozed_key(&p("alice")), "snoozed.alice");
+        let reminders = Reminders { snoozed: read, ..Reminders::default() };
+        let json = serde_json::to_string(&reminders).unwrap();
+        assert!(json.starts_with("{\"snoozed\":{"), "snoozes kept with the reminders: {json}");
+        assert_eq!(reminders_key(&p("alice")), "reminders.alice");
     }
 
     #[test]

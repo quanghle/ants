@@ -449,8 +449,8 @@ fn only_an_assistant_acts_for_its_human_on_the_subjects_naming_it() {
     }
     // The pins, archives and snoozes it sets for its human under keys naming it, never its human's own, and the
     // withdrawals it records under keys naming it.
-    let own = ["marks", "snoozed"].map(|k| format!("$KV.ants_threads.{k}.alice"));
-    let marks = ["marks", "snoozed"].map(|k| format!("$KV.ants_threads.{k}.alice.pa"));
+    let own = ["marks", "reminders"].map(|k| format!("$KV.ants_threads.{k}.alice"));
+    let marks = ["marks", "reminders"].map(|k| format!("$KV.ants_threads.{k}.alice.pa"));
     let withdrawal = format!("$KV.ants_attempts.{}", assisted_withdrawal_key(&p("dev-a"), &Uuid::now_v7(), &pa));
     for (n, other) in others.iter().enumerate() {
         let held = |s: &String| other.publish.iter().any(|have| covers(have, s));
@@ -459,7 +459,7 @@ fn only_an_assistant_acts_for_its_human_on_the_subjects_naming_it() {
         assert_eq!(held(&withdrawal), n == 1 || n == 4, "credentials {n} record pa's withdrawal");
     }
     assert!(marks.iter().all(|s| assistant.publish.contains(s)));
-    for own in ["marks", "snoozed"].map(|k| format!("ants_threads.{k}.pa")) {
+    for own in ["marks", "reminders"].map(|k| format!("ants_threads.{k}.pa")) {
         assert!(!assistant.publish.iter().any(|s| s.contains(&own)), "keeps {own}");
     }
     for (role, carries) in
@@ -801,7 +801,7 @@ fn humans_set_every_title_tldr_and_done_state_but_only_their_own_pins_and_archiv
         assert!(human.publish.iter().any(|have| have == s), "{s} missing from {:?}", human.publish);
     }
     // Its own marks and snoozes, and those its assistants set for it, and no other human's.
-    for key in ["marks.alice", "snoozed.alice", "marks.alice.pa", "snoozed.alice.pb"] {
+    for key in ["marks.alice", "reminders.alice", "marks.alice.pa", "reminders.alice.pb"] {
         for s in
             [format!("$KV.ants_threads.{key}"), format!("$JS.API.DIRECT.GET.KV_ants_threads.$KV.ants_threads.{key}")]
         {
@@ -1195,7 +1195,7 @@ fn an_assistant_keeps_its_ant_rights_and_a_humans_under_its_own_name() {
     for s in &assistant.publish {
         let key = s.strip_prefix("$JS.API.DIRECT.GET.").and_then(|get| get.split_once('.')).map_or(s.as_str(), |g| g.1);
         let owner = s == "$KV.ants_owners.*.*.alice.pa";
-        let marks = ["$KV.ants_threads.marks.alice.pa", "$KV.ants_threads.snoozed.alice.pa"].contains(&s.as_str());
+        let marks = ["$KV.ants_threads.marks.alice.pa", "$KV.ants_threads.reminders.alice.pa"].contains(&s.as_str());
         assert!(owner || marks || s.starts_with("$JS.API.DIRECT.GET.") || !s.contains(".alice"), "writes {s}");
         assert!(!key.starts_with("$KV.ants_reactions.alice"), "reads {s}");
         for bucket in ["ants_devices", "ants_presence", "ants_notify", "ants_humans"] {

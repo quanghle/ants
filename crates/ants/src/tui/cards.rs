@@ -100,13 +100,12 @@ impl Cards {
             Ok(today) => self.today = Some(today),
             Err(e) => failed.push(format!("reading the spend: {e:#}")),
         }
-        match read.snoozed {
-            Ok(snoozed) => self.snoozed = snoozed,
-            Err(e) => failed.push(format!("reading the snoozes: {e:#}")),
-        }
         match read.reminders {
-            Ok(reminders) => self.reminders = reminders,
-            Err(e) => failed.push(format!("reading the reminders: {e:#}")),
+            Ok(mut reminders) => {
+                self.snoozed = std::mem::take(&mut reminders.snoozed);
+                self.reminders = reminders;
+            }
+            Err(e) => failed.push(format!("reading the reminders and snoozes: {e:#}")),
         }
         failed.dedup();
         if failed == self.failed {
@@ -125,7 +124,7 @@ pub struct Read {
     pub done_acting: HashMap<ThreadId, Acting>,
     pub spend: Result<HashMap<ThreadId, Vec<(UserId, Spent)>>>,
     pub today: Result<Vec<(UserId, Spent)>>,
-    pub snoozed: Result<ThreadSnoozes>,
+    /// The human's due times, its snoozes taken into [`Cards::snoozed`].
     pub reminders: Result<Reminders>,
 }
 
@@ -184,16 +183,14 @@ impl Source {
             let kv = self.sessions.as_ref().map_err(|e| anyhow!("{e}"))?;
             crate::spend::today(&self.js, kv).await.context("of the day")
         };
-        let snoozed = async { self.meta.as_ref().map_err(|e| anyhow!("{e}"))?.snoozes().await };
         let reminders = async { self.meta.as_ref().map_err(|e| anyhow!("{e}"))?.reminders().await };
-        let (titles, meta, spend, today, snoozed, reminders) =
-            futures::join!(titles, meta, spend, today, snoozed, reminders);
+        let (titles, meta, spend, today, reminders) = futures::join!(titles, meta, spend, today, reminders);
         let mut done_acting = HashMap::new();
         for done in meta.iter().flat_map(|(done, _)| done.values()).filter(|d| d.on_behalf_of.is_some()) {
             let acting = self.behalf.check(&done.by, done.on_behalf_of.as_ref()).await;
             done_acting.insert(done.thread_id.clone(), acting);
         }
-        Read { titles, meta, done_acting, spend, today, snoozed, reminders }
+        Read { titles, meta, done_acting, spend, today, reminders }
     }
 }
 
@@ -274,7 +271,6 @@ mod tests {
             done_acting: HashMap::new(),
             spend: Ok([(thread.clone(), vec![(user("dev-a"), spent), (user("dev-b"), spent)])].into()),
             today: Ok(vec![(user("dev-a"), spent)]),
-            snoozed: Ok(ThreadSnoozes::default()),
             reminders: Ok(Reminders::default()),
         };
         assert_eq!(cards.take(ok()), None);

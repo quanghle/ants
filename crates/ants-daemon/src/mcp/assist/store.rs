@@ -1,6 +1,6 @@
 //! The [`HumanStore`] on the hub's JetStream: the human's messages and the tool requests waiting for it read back
-//! from the streams, its threads' titles, done marks, pins, archives and snoozes in the threads bucket, and the
-//! requests to the daemons of an ant answered over core NATS.
+//! from the streams, its threads' titles, done marks, pins, archives and snoozes (kept with its reminders) in the
+//! threads bucket, and the requests to the daemons of an ant answered over core NATS.
 
 use std::collections::{BTreeMap, HashSet};
 use std::ops::ControlFlow;
@@ -10,9 +10,9 @@ use std::time::SystemTime;
 
 use ants_proto::{
     ATTEMPTS_BUCKET, AdminOrder, ApprovalDecision, ApprovalRequest, CancelReply, CancelRequest, Envelope, Humans,
-    JsDomain, QueueReply, QueueRequest, READ_BUCKET, Reaction, ReadMarker, THREADS_BUCKET, ThreadDone, ThreadId,
-    ThreadMarks, ThreadSnoozes, ThreadTitle, UserId, Uuid, assisted_marks_key, assisted_snoozed_key, done_key,
-    marks_key, snoozed_key, subject, title_key,
+    JsDomain, QueueReply, QueueRequest, READ_BUCKET, Reaction, ReadMarker, Reminders, THREADS_BUCKET, ThreadDone,
+    ThreadId, ThreadMarks, ThreadSnoozes, ThreadTitle, UserId, Uuid, assisted_marks_key, assisted_reminders_key,
+    done_key, marks_key, reminders_key, subject, title_key,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, consumer};
@@ -195,7 +195,10 @@ impl HumanStore for JetStreamStore {
     }
 
     fn snoozes(&self, human: UserId) -> BoxFuture<'_, Result<ThreadSnoozes>> {
-        Box::pin(async move { Ok(self.entry(&self.threads().await?, &snoozed_key(&human)).await?.0) })
+        Box::pin(async move {
+            let reminders: Reminders = self.entry(&self.threads().await?, &reminders_key(&human)).await?.0;
+            Ok(reminders.snoozed)
+        })
     }
 
     fn change_marks(
@@ -213,7 +216,8 @@ impl HumanStore for JetStreamStore {
         assistant: UserId,
         change: Change<ThreadSnoozes>,
     ) -> BoxFuture<'_, Result<bool>> {
-        Box::pin(self.change(assisted_snoozed_key(&human, &assistant), change))
+        let change: Change<Reminders> = Box::new(move |r| change(&mut r.snoozed));
+        Box::pin(self.change(assisted_reminders_key(&human, &assistant), change))
     }
 
     fn react(

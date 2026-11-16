@@ -3,7 +3,7 @@
 //! `post_for_human`, `notes_for_human`, `react_for_human`, `title_for_human` and `done_for_human` answer questions,
 //! send messages, post in channels and thread notes, react and title or mark threads done for it; `mark_for_human`
 //! and `snooze_for_human` pin, archive and snooze its threads under keys naming the ant
-//! ([`ants_proto::assisted_marks_key`], [`ants_proto::assisted_snoozed_key`]), never changing the human's own marks
+//! ([`ants_proto::assisted_marks_key`], [`ants_proto::assisted_reminders_key`]), never changing the human's own marks
 //! and snoozes, which its devices take in only while the grant names the ant and only on threads the human marked or
 //! snoozed none of itself; `decide_for_human`
 //! decides a tool request waiting for it, held by the requesting ant's daemon until the human confirms it or a
