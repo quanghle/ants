@@ -92,6 +92,8 @@ pub enum Action {
     Answer(held::Answer),
     /// Read an ant's settings, or send an order changing them, as `ants ant set` does.
     Settings(settings::Ask),
+    /// Keep on the device how the thread view shows tool calls.
+    KeepTools(timeline::Tools),
     Quit,
 }
 
@@ -134,6 +136,8 @@ pub struct Data {
     pub reactions: Reactions,
     /// The tool calls of the threads, heard live or read from their timelines.
     pub calls: timeline::Threads,
+    /// How the thread view shows them, kept on the device.
+    pub tools: timeline::Tools,
     /// The tool requests settled while the UI runs.
     pub settled: approvals::Settled,
     /// Who of the other humans is online, and the messages with each.
@@ -268,6 +272,8 @@ pub enum To {
     Tldr(ThreadId),
     /// The digest of what changed since the last `ants chat` on the device ended.
     Digest,
+    /// Show the thread view's tool calls the next way.
+    Tools,
     /// The credentials asked for.
     Credentials,
     /// The admin orders held for the human's consent.
@@ -313,6 +319,7 @@ impl Model {
             humans: None,
             reactions: Reactions::new(),
             calls: timeline::Threads::default(),
+            tools: timeline::Tools::default(),
             settled: approvals::Settled::default(),
             people: people::People::default(),
             delegations: tree::Delegations::default(),

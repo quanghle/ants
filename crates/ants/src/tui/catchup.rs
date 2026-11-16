@@ -31,12 +31,14 @@ use super::frame::{self, ago};
 use super::home::{self, Why};
 use super::markdown;
 use super::model::{Action, Data, Key, Level, Model};
+use super::timeline::Tools;
 use super::work;
 use crate::cmd::send;
 use crate::thread_meta::Meta;
 use crate::{colony, humans, summary};
 
-/// The file beside the config file that keeps when the last `ants chat` on the device ended.
+/// The file beside the config file that keeps when the last `ants chat` on the device ended, and how its thread view
+/// shows tool calls.
 pub const STATE_FILE: &str = "chat-state.json";
 /// How far back home's first line counts when no `ants chat` ended on the device before.
 const BEFORE: TimeDelta = TimeDelta::hours(24);
@@ -47,9 +49,11 @@ const TLDR_LINES: usize = 3;
 
 /// What [`STATE_FILE`] keeps.
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct ChatState {
+pub struct ChatState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    ended: Option<DateTime<Utc>>,
+    pub ended: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub tools: Tools,
 }
 
 /// [`STATE_FILE`] beside the config file.
@@ -57,24 +61,22 @@ pub fn state_path() -> Result<PathBuf> {
     Ok(crate::defaults::path()?.with_file_name(STATE_FILE))
 }
 
-/// When the last `ants chat` on the device ended, as the file at `path` keeps; None when it keeps nothing readable.
-pub fn ended(path: &Path) -> Option<DateTime<Utc>> {
-    let text = std::fs::read(path).ok()?;
-    match serde_json::from_slice::<ChatState>(&text) {
-        Ok(state) => state.ended,
-        Err(e) => {
-            tracing::debug!("ignoring {}: {e}", path.display());
-            None
-        }
-    }
+/// What the file at `path` keeps; the defaults when it keeps nothing readable.
+pub fn load(path: &Path) -> ChatState {
+    let Ok(text) = std::fs::read(path) else { return ChatState::default() };
+    serde_json::from_slice(&text).unwrap_or_else(|e| {
+        tracing::debug!("ignoring {}: {e}", path.display());
+        ChatState::default()
+    })
 }
 
-/// Keep in the file at `path` that an `ants chat` ended at `now`.
-pub fn end(path: &Path, now: DateTime<Utc>) -> Result<()> {
+/// Change what the file at `path` keeps by `change`.
+pub fn keep(path: &Path, change: impl FnOnce(&mut ChatState)) -> Result<()> {
+    let mut state = load(path);
+    change(&mut state);
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)?;
     }
-    let state = ChatState { ended: Some(now) };
     std::fs::write(path, serde_json::to_vec_pretty(&state)?)?;
     Ok(())
 }
@@ -516,6 +518,19 @@ mod tests {
     use crate::tui::model::Page;
     use crate::tui::model::tests::model;
     use crate::tui::thread;
+
+    #[test]
+    fn the_device_keeps_when_ants_chat_ended_and_how_tool_calls_show_each_without_losing_the_other() {
+        let dir = ants_test_support::scratch_dir("chat-state");
+        let path = dir.join("sub").join(STATE_FILE);
+        assert_eq!((load(&path).ended, load(&path).tools), (None, Tools::Collapsed), "nothing kept yet");
+        keep(&path, |kept| kept.tools = Tools::None).unwrap();
+        keep(&path, |kept| kept.ended = Some(at(5))).unwrap();
+        assert_eq!((load(&path).ended, load(&path).tools), (Some(at(5)), Tools::None));
+        std::fs::write(&path, "not json").unwrap();
+        assert_eq!(load(&path).tools, Tools::Collapsed, "an unreadable file keeps nothing");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     fn shown(m: &Model, now: DateTime<Utc>) -> String {
         let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();

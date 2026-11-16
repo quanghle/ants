@@ -195,7 +195,9 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
     model.compact = compact;
     model.data.credentials.holder = Some(holder);
     let chat_state = catchup::state_path();
-    model.catchup.since = chat_state.as_deref().ok().and_then(catchup::ended);
+    let kept = chat_state.as_deref().map_or_default(catchup::load);
+    model.catchup.since = kept.ended;
+    model.data.tools = kept.tools;
     model.catchup.ahead = summaries.ahead();
     let inline_images = crate::defaults::inline_images()?;
     model.data.images = images::Images::new(inline_images);
@@ -228,7 +230,7 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
             edit: None,
         };
         let ran = Box::pin(chat.run(&mut screen.terminal)).await;
-        if let Err(e) = chat_state.and_then(|path| catchup::end(&path, Utc::now())) {
+        if let Err(e) = chat_state.and_then(|path| catchup::keep(&path, |kept| kept.ended = Some(Utc::now()))) {
             tracing::debug!("not keeping when ants chat ended: {e:#}");
         }
         ran
@@ -529,6 +531,11 @@ impl Chat {
             Action::React(message, reaction, remove) => self.reads.react(message, reaction, remove),
             Action::Send(draft) => self.people.send(draft),
             Action::Settings(ask) => self.settings.ask(ask),
+            Action::KeepTools(tools) => {
+                if let Err(e) = catchup::state_path().and_then(|path| catchup::keep(&path, |kept| kept.tools = tools)) {
+                    self.model.notify(format!("keeping how tool calls show: {e:#}"), Level::Error, Utc::now());
+                }
+            }
             Action::Search(search) => self.searches.start(search),
             Action::Summarise(ask) => self.summaries.ask(ask),
             Action::CancelSubtree(prompts) => {
