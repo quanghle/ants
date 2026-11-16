@@ -8,6 +8,7 @@
 # Options:  --ants PATH     ants binary (default: $ANTS_BIN, else target/release/ants, built when missing)
 #           --port N        nats-server port (default: $FOOTPRINT_PORT or 14722)
 #           --max-mb N      idle RSS limit in MB (default: $FOOTPRINT_MAX_MB or 20)
+#           --harness NAME  harness of the ant (default: $FOOTPRINT_HARNESS or copilot)
 #           --ask TEXT      send TEXT to the ant and measure again with its harness session live
 #           --metrics ADDR  serve health and metrics on ADDR, and scrape both before each idle sample (needs curl)
 # Env:      NATS_SERVER (default: nats-server on PATH), FOOTPRINT_DIR (parent of the scratch directory,
@@ -26,6 +27,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 ants=${ANTS_BIN:-}
 port=${FOOTPRINT_PORT:-14722}
 max_mb=${FOOTPRINT_MAX_MB:-20}
+harness=${FOOTPRINT_HARNESS:-copilot}
 ask=
 metrics=
 samples=${FOOTPRINT_SAMPLES:-5}
@@ -37,6 +39,7 @@ while [ $# -gt 0 ]; do
     --ants) ants=$2; shift 2 ;;
     --port) port=$2; shift 2 ;;
     --max-mb) max_mb=$2; shift 2 ;;
+    --harness) harness=$2; shift 2 ;;
     --ask) ask=$2; shift 2 ;;
     --metrics) metrics=$2; shift 2 ;;
     -h | --help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -126,7 +129,7 @@ nats_pid=$!
 wait_for "$work/nats.log" "Server is ready" 15 "$nats_pid"
 
 url=nats://127.0.0.1:$port
-ANTS_LOG=${ANTS_LOG:-info} "$ants" --nats "$url" daemon --ant footprint \
+ANTS_LOG=${ANTS_LOG:-info} "$ants" --nats "$url" daemon --ant footprint --harness "$harness" \
     --workdir "$work/workdir" --home "$work/home" ${metrics:+--metrics "$metrics"} >"$work/daemon.log" 2>&1 &
 daemon_pid=$!
 wait_for "$work/daemon.log" "serving inbox" 30 "$daemon_pid"

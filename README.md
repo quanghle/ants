@@ -466,7 +466,7 @@ Options: `--ants PATH`, `--nats-server PATH`, `--nats-conf FILE` (default `~/.co
 
 ## Footprint
 
-`scripts/footprint.sh` starts a throwaway `nats-server -js` and `ants daemon`, samples RSS via `ps`, and fails at or above `--max-mb` (default `20` MB; `--ask TEXT` measures a live session; `--metrics ADDR` scrapes `/healthz` and `/metrics`):
+`scripts/footprint.sh` starts a throwaway `nats-server -js` and `ants daemon`, samples RSS via `ps`, and fails at or above `--max-mb` (default `20` MB; `--harness NAME` sets the ant's harness, default `copilot`; `--ask TEXT` measures a live session; `--metrics ADDR` scrapes `/healthz` and `/metrics`):
 
 | Scenario (`ants` 0.1.0 release, `nats-server` 2.15.3) | Linux x86_64 | macOS arm64 |
 |---|---|---|
