@@ -219,8 +219,10 @@ async fn the_signer_signs_on_an_admin_s_order_for_the_machine_asking_only() {
 
 /// On a machine running a leaf node, the signer signs an add order's key only for a request carrying the leaf's
 /// uplink credentials, signed with their key too, and renews them to carry the ant, which it keeps among the leaf's
-/// members; it refuses a request carrying none, or another machine's.
+/// members; it refuses a request carrying none, or another machine's. A retire order's request revokes the ant's key
+/// all the same without them, and with them has the signer renew them without the ant, which leaves the members.
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn on_a_leaf_node_s_machine_the_signer_renews_the_uplink_to_carry_the_ant_an_order_adds() {
     let Some(server) = Server::start() else { return };
     let team = server.dir().join("auth");
@@ -272,6 +274,35 @@ async fn on_a_leaf_node_s_machine_the_signer_renews_the_uplink_to_carry_the_ant_
         let kept = members::issued(&team, &m1).unwrap().unwrap();
         assert_eq!(kept.ants, [p("dev-a"), p("dev-c")], "a later `ants auth leaf m1` keeps dev-c");
         assert_eq!(members::issued(&team, &m2).unwrap().unwrap().ants, [p("dev-a")]);
+
+        let (_, uplink_key) = auth::read_creds(&m1_uplink).unwrap();
+        let seed = uplink_key.seed().unwrap();
+        std::fs::write(&m1_uplink, ants_daemon::creds::text(&renewed, &seed)).unwrap();
+        let bare = order("alice", &admin_creds, "m1", "dev-c", AdminOp::Retire);
+        let reply = ask(&client, &host_creds, "dev-c", &key, &bare, WAIT).await;
+        let Some(EnrollReply::Retired { revoked, leaf_jwt: None, leaf_error: Some(why), .. }) = reply else {
+            panic!("retired, the uplink left as it is: {reply:?}")
+        };
+        assert_eq!(revoked, [key.public_key()]);
+        assert!(why.contains("m1 runs a leaf node"), "{why}");
+        assert_eq!(members::issued(&team, &m1).unwrap().unwrap().ants, [p("dev-a"), p("dev-c")]);
+
+        let retire = order("alice", &admin_creds, "m1", "dev-c", AdminOp::Retire);
+        // Skips late answers to the repeated requests before.
+        let mut reply = None;
+        for _ in 0..10 {
+            reply = ask_through(&client, &host_creds, through_m1, "dev-c", &key, &retire, WAIT).await;
+            if !matches!(reply, Some(EnrollReply::Retired { leaf_jwt: None, .. })) {
+                break;
+            }
+        }
+        let Some(EnrollReply::Retired { revoked, leaf_jwt: Some(shrunk), leaf_error: None, .. }) = reply else {
+            panic!("retired again, the uplink renewed without dev-c: {reply:?}")
+        };
+        assert!(revoked.is_empty(), "the key was already revoked");
+        assert_eq!(ants_proto::verified_jwt(&shrunk).unwrap().0.sub, uplink_key.public_key());
+        assert!(auth::allows_all(&shrunk, &old).unwrap() && auth::allows_all(&old, &shrunk).unwrap());
+        assert_eq!(members::issued(&team, &m1).unwrap().unwrap().ants, [p("dev-a")]);
     };
     tokio::select! {
         r = serving => panic!("the signer stopped: {r:?}"),

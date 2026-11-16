@@ -501,6 +501,53 @@ pub fn extend_leaf(dir: &Path, jwt: &str, machine: &Machine, more: Permissions) 
     Ok(renewed)
 }
 
+/// Renew `jwt`, the uplink user JWT of `machine`'s leaf node issued from the account key in `dir`, for the same key,
+/// without what it allows only for `ant`, retired: what [`Permissions::for_leaf`] gives the ant in `role`, in the
+/// JetStream domain of the uplink, that neither the other members it carries nor its webhooks and enrollment approver
+/// need. Everything else in it stays as it is ([`extend_leaf`]). None when it allows nothing only for `ant`.
+pub fn shrink_leaf(dir: &Path, jwt: &str, machine: &Machine, ant: &UserId, role: LeafRole) -> Result<Option<String>> {
+    let account = load(&dir.join(ACCOUNT_SEED))?;
+    let (claims, body) = leaf_claims(&account.public_key(), jwt, machine)
+        .with_context(|| format!("the uplink credentials of {machine}"))?;
+    if revoke::revoked(dir)?.iter().any(|r| r.key == claims.sub) {
+        bail!("the uplink credentials of {machine} are revoked");
+    }
+    let finding = Finding::from_claims(&body)?;
+    let domain = finding.js_domain.as_ref();
+    let CredsKind::Leaf { ants, humans, webhooks, enroll_approver, .. } = finding.kind else {
+        bail!("the uplink credentials of {machine} carry no members");
+    };
+    let others: Vec<(UserId, Role)> = members(&ants, &humans).into_iter().filter(|(member, _)| member != ant).collect();
+    let assistants = assistants(dir)?;
+    let roles = others.iter().map(|(member, role)| (member, leaf_role(&assistants, member, *role)));
+    let mut kept = Permissions::for_leaf(machine, roles);
+    for webhook in &webhooks {
+        if let Ok(permissions) = webhook_permissions(dir, webhook) {
+            merge(&mut kept, permissions);
+        }
+    }
+    if enroll_approver {
+        merge(&mut kept, signer_permissions());
+    }
+    let kept = kept.with_uplink_js_domain(domain);
+    let only = Permissions::for_leaf(machine, [(ant, role)]).with_uplink_js_domain(domain);
+    let mut permissions = allowed(&body);
+    let before = permissions.publish.len() + permissions.subscribe.len();
+    for (all, only, kept) in [
+        (&mut permissions.publish, &only.publish, &kept.publish),
+        (&mut permissions.subscribe, &only.subscribe, &kept.subscribe),
+    ] {
+        all.retain(|s| !only.contains(s) || kept.contains(s));
+    }
+    if permissions.publish.len() + permissions.subscribe.len() == before {
+        return Ok(None);
+    }
+    let mut nats = body["nats"].clone();
+    nats["pub"]["allow"] = json!(permissions.publish);
+    nats["sub"]["allow"] = json!(permissions.subscribe);
+    self::jwt(&account, &claims.sub, &claims.name, nats, claims.exp).map(Some)
+}
+
 /// Whether the user JWT `jwt` is for the key of `other` and allows everything `other` allows.
 pub fn allows_all(jwt: &str, other: &str) -> Result<bool> {
     let ((claims, body), (other_claims, other_body)) = (verified_body(jwt)?, verified_body(other)?);

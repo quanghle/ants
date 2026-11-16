@@ -641,6 +641,8 @@ fn enrollment() {
                 public_key: "UABC".to_owned(),
                 revoked: vec!["UABC".to_owned()],
                 push_error: None,
+                leaf_jwt: Some("eyJ0eXAiOiJKV1QifQ.leaf".to_owned()),
+                leaf_error: None,
             },
         ],
     );
@@ -757,6 +759,8 @@ fn ant_requests() {
                 public_key: "UGHI".to_owned(),
                 revoked: vec!["UGHI".to_owned()],
                 push_error: Some("hub unreachable".to_owned()),
+                leaf_jwt: None,
+                leaf_error: Some("no uplink of m1".to_owned()),
             },
         ],
     );

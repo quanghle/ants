@@ -149,9 +149,20 @@ fn renew_and_signal(conf: &std::path::Path, renewed: &str) -> anyhow::Result<Opt
     })
 }
 
+/// [`crate::add::shrink_and_reconnect`], reloading the [`LEAF_NODE`] by SIGHUP rather than by its service.
+fn shrink_and_signal(conf: &std::path::Path, asked: &str, shrunk: &str) -> anyhow::Result<Option<String>> {
+    crate::add::shrink_and_apply(conf, Some(asked), shrunk, |_| {
+        let pid = LEAF_NODE.get().expect("the leaf node runs").to_string();
+        let status = std::process::Command::new("kill").arg("-HUP").arg(pid).status().unwrap();
+        assert!(status.success());
+        crate::service::Outcome::Done("kill -HUP".to_owned())
+    })
+}
+
 /// A real hub and a leaf node: an add order to the leaf's machine has its daemon ask across the uplink with the uplink
 /// credentials too, the signer on the hub renew them to carry the ant, and the daemon have the leaf node use them,
-/// so the ant reaches the hub through it; a retire order retires it the same way.
+/// so the ant reaches the hub through it; a retire order retires it the same way, the signer renewing the uplink
+/// without it and dropping it from the leaf's members and the hub's outbox sourcing.
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn an_add_order_on_a_leaf_node_s_machine_renews_its_uplink_to_carry_the_ant() {
@@ -215,7 +226,12 @@ async fn an_add_order_on_a_leaf_node_s_machine_renews_its_uplink_to_carry_the_an
     std::fs::write(&path, &text).unwrap();
     let triggers = crate::reload::Triggers::new(path.clone(), None, Duration::from_secs(3600)).unwrap();
     let config = ConfigFile::new(path.clone(), triggers.edits());
-    let leaf = LeafNode { conf: leaf_node.dir().join("leaf.conf"), uplink: leaf::read_uplink, renew: renew_and_signal };
+    let leaf = LeafNode {
+        conf: leaf_node.dir().join("leaf.conf"),
+        uplink: leaf::read_uplink,
+        renew: renew_and_signal,
+        shrink: shrink_and_signal,
+    };
     let host = Host {
         machine: None,
         nats: leaf_node.url.clone(),
@@ -252,12 +268,18 @@ async fn an_add_order_on_a_leaf_node_s_machine_renews_its_uplink_to_carry_the_an
     let (_b, b_js) = bus::connect(&leaf_node.url, Some(&creds), Some(&domain), &dev_b, "test").await.unwrap();
     eventually("dev-b reaches the hub through the leaf", async || bus::open_stream(&b_js, &dev_b).await.is_ok()).await;
 
-    let retire = Box::pin(send(&admin, &js, Some(m1), &dev_b, AdminOp::Retire, SIGNED));
+    let retire = Box::pin(send(&admin, &js, Some(m1.clone()), &dev_b, AdminOp::Retire, SIGNED));
     let (_, retired) = with_signer_at(&hub.url, hub.dir(), Some(&domain), retire).await.unwrap();
     let retired = retired.expect("the daemon decides once the signer answers");
     assert_eq!((retired.state, retired.reason.as_deref()), (OrderState::Applied, None), "{retired:?}");
     assert!(!creds.exists(), "its credentials go");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "its table goes");
+    let result = retired.result.unwrap();
+    let uplink = result["uplink"].as_str().unwrap_or_else(|| panic!("{result}"));
+    assert!(uplink.contains("renewed without dev-b") && uplink.contains("kill -HUP"), "{uplink}");
+    assert_eq!(members::issued(&team, &m1).unwrap().unwrap().ants, std::slice::from_ref(&dev_a));
+    let carried = members::uplink(&leaf_node.dir().join("leaf.conf"), &m1).unwrap();
+    assert_eq!(carried.ants, std::slice::from_ref(&dev_a), "the uplink credentials no longer carry dev-b: {carried}");
     drop(ants);
     tokio::time::timeout(WAIT, task).await.unwrap().unwrap().unwrap();
 }

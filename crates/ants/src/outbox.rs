@@ -187,6 +187,46 @@ pub async fn admit_ant(hub: &Context, machine: &Machine, ant: &UserId) -> Result
     Ok(true)
 }
 
+/// Drop `ant`, retired from `machine`, from what the hub's stream, the links bucket and the attachments' store take
+/// from the machine's outbox, as [`admit`] would without the ant listed, leaving the other admissions as they are; for
+/// `ants signer`, as [`admit_ant`]. Returns false, changing nothing, when the hub's intake does not source the
+/// machine's outbox.
+pub async fn drop_ant(hub: &Context, machine: &Machine, ant: &UserId) -> Result<bool> {
+    let mut intake = match hub.get_stream(INTAKE_STREAM).await {
+        Ok(intake) => intake,
+        Err(e) if not_found(&e) => return Ok(false),
+        Err(e) => return Err(e).context("looking up the hub's intake"),
+    };
+    if !intake.info().await?.config.sources.iter().flatten().any(|s| outbox_of(s, machine)) {
+        return Ok(false);
+    }
+    let theirs = [true, false].map(|inbox| member_source(machine, ant, Role::Ant, inbox, 0));
+    let mut ants = hub.get_stream(STREAM).await.context("looking up the hub's stream")?;
+    let mut config = ants.info().await?.config.clone();
+    if drop_sources(&mut config, &theirs) {
+        hub.update_stream(&config).await.context("dropping the ant from the hub's stream")?;
+    }
+    if let Some(mut config) = bucket_config(hub, LINKS_BUCKET).await?
+        && drop_sources(&mut config, &[link_source(machine, ant, 0)])
+    {
+        hub.update_stream(&config).await.context("dropping the ant from the links bucket")?;
+    }
+    if let Some(mut config) = stream_config(hub, FILES_STREAM).await?
+        && drop_sources(&mut config, &[file_source(machine, ant, Role::Ant, 0)])
+    {
+        hub.update_stream(&config).await.context("dropping the ant from the attachments' store")?;
+    }
+    Ok(true)
+}
+
+/// Drop from the sources of `config` those with the subject transforms of one of `theirs`; whether any was there.
+fn drop_sources(config: &mut stream::Config, theirs: &[Source]) -> bool {
+    let Some(sources) = config.sources.as_mut() else { return false };
+    let before = sources.len();
+    sources.retain(|s| !theirs.iter().any(|t| s.name == t.name && s.subject_transforms == t.subject_transforms));
+    sources.len() != before
+}
+
 /// Add `source` to `sources` unless one with the same subject transforms is there; whether it was added.
 fn add_source(sources: &mut Vec<Source>, source: Source) -> bool {
     let there = sources.iter().any(|s| s.name == source.name && s.subject_transforms == source.subject_transforms);
