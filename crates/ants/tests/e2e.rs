@@ -168,18 +168,18 @@ fn exercise_daemon(custom_tools: bool) {
         assert_eq!(shown["colony"]["model"], model, "{shown}");
     }
 
-    // dev-a answered the human's thread: finished work waits on the human.
+    // dev-a answered the human's thread, and ask --wait read the answer: nothing waits on the human.
     let status = run(ants(&["status", "--json"]));
     assert!(status.status.success(), "ants status: {}", String::from_utf8_lossy(&status.stderr));
     let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
     assert_eq!(
         status["home"],
-        serde_json::json!({"approve": 0, "question": 0, "stuck": 0, "message": 0, "mention": 0, "finished": 1})
+        serde_json::json!({"approve": 0, "question": 0, "stuck": 0, "message": 0, "mention": 0, "finished": 0})
     );
     assert!(status["working"].is_array() && status["spend_today"].is_number(), "{status}");
     let tmux = run(ants(&["status", "--tmux"]));
     let tmux = String::from_utf8_lossy(&tmux.stdout);
-    assert!(tmux.starts_with("⚑1 ◐") && tmux.contains(" $"), "{tmux}");
+    assert!(tmux.starts_with("⚑0 ◐") && tmux.contains(" $"), "{tmux}");
 
     // A reaction is no message: it wakes no ant.
     let react = |args: &[&str]| {

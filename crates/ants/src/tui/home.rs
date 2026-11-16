@@ -1,9 +1,9 @@
-//! Home, the triage queue: what waits on the human, one item per thread and reason (per tool request for approvals,
-//! as cards answered where they show, [`approvals`]), the most pressing reasons first and the oldest first within
-//! one, each with its one-key actions: answer ([`question`]), grant, reply, follow up, cancel, mark done, snooze ([`super::snooze`])
+//! Home, the triage queue: what waits on the human, one item per thread under its most pressing reason with badges for
+//! the others (per tool request for approvals, as cards answered where they show, [`approvals`]), the most pressing
+//! reasons first and the oldest first within one, each with the one-key actions of its reason: answer ([`question`]), grant, reply, follow up, cancel, mark done, snooze ([`super::snooze`])
 //! or open. A snoozed thread's items stay off home until the snooze ends or an item for the human arrives on it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use ants_proto::{ApprovalRequest, Question, ThreadId, UserId, Uuid, Verdict};
@@ -38,7 +38,7 @@ pub enum Why {
     Message,
     /// An unread post @mentioning the human.
     Mention,
-    /// An ant answered on a thread the human owns.
+    /// An ant answered on a thread the human owns, and the human has not read the answer yet.
     Finished,
 }
 
@@ -74,6 +74,14 @@ impl Why {
         }
     }
 
+    /// The badge of `n` reasons of this kind on a thread listed under another: `question`, `2 mentions`.
+    fn badge(self, n: usize) -> String {
+        match (self, n) {
+            (Self::Message | Self::Mention, 2..) => format!("{n} {}s", self.label()),
+            _ => self.label().to_owned(),
+        }
+    }
+
     pub fn color(self) -> Color {
         match self {
             Self::Approval => Color::Yellow,
@@ -95,18 +103,45 @@ pub struct Item {
     pub text: String,
     /// Who the line starts with, whose face goes before it.
     pub who: Option<UserId>,
-    /// The tool request of an approval, and how it was settled lately, if it was.
+    /// The tool request of an approval, and how it was settled lately, if it was: of a group, its oldest.
     pub request: Option<(ApprovalRequest, Option<State>)>,
+    /// The pending tool requests an approval stands for, oldest first: those of its ant on its thread, a group of
+    /// them when there are several.
+    pub requests: Vec<ApprovalRequest>,
+    /// Whether it heads its group's requests listed one by one.
+    pub expanded: bool,
     /// The question asked.
     pub question: Option<Question>,
+    /// How many of its reason wait on the thread: unread messages or mentions.
+    pub count: usize,
+    /// The thread's other, less pressing reasons, with how many of each: its badges.
+    pub also: Vec<(Why, usize)>,
 }
 
-/// What an item is, whatever else changes on it: its reason and thread, and the id of an approval's tool request.
-pub type Id = (Why, ThreadId, Option<Uuid>);
+/// What an item is, whatever else changes on it: its thread, or an approval's tool request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Id {
+    Thread(ThreadId),
+    Request(UserId, Uuid),
+    /// A group of an ant's tool requests on a thread.
+    Requests(UserId, ThreadId),
+}
 
 impl Item {
     pub fn id(&self) -> Id {
-        (self.why, self.thread.clone(), self.request.as_ref().map(|(r, _)| r.id))
+        match &self.request {
+            Some((request, _)) if self.requests.len() > 1 => Id::Requests(request.ant.clone(), self.thread.clone()),
+            Some((request, _)) => Id::Request(request.ant.clone(), request.id),
+            None => Id::Thread(self.thread.clone()),
+        }
+    }
+
+    /// Whether it stands for a pending tool request of the same ant on the same thread as `other`'s.
+    fn groups(&self, other: &Item) -> bool {
+        fn pending(i: &Item) -> Option<&ApprovalRequest> {
+            i.request.as_ref().filter(|(_, settled)| settled.is_none()).map(|(r, _)| r)
+        }
+        pending(self).zip(pending(other)).is_some_and(|(a, b)| a.ant == b.ant && a.thread_id == b.thread_id)
     }
 }
 
@@ -117,7 +152,43 @@ pub fn items(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
     items.retain(|i| !held.contains_key(&i.thread));
     // The requests waiting for the human before those settled lately.
     items.sort_by_key(|i| (i.why, i.request.as_ref().is_some_and(|(_, settled)| settled.is_some()), i.at));
+    grouped(items)
+}
+
+/// `reasons`, sorted, as one item per thread under its most pressing reason, the others its badges; approvals stay
+/// items of their own, an ant's pending requests on a thread one group.
+fn grouped(reasons: Vec<Item>) -> Vec<Item> {
+    let mut items: Vec<Item> = Vec::new();
+    for reason in reasons {
+        if let Some(group) = items.iter_mut().find(|i| i.groups(&reason)) {
+            group.requests.extend(reason.requests);
+            continue;
+        }
+        let on = |i: &&mut Item| i.why != Why::Approval && i.thread == reason.thread;
+        match items.iter_mut().find(on) {
+            Some(top) if reason.why != Why::Approval => top.also.push((reason.why, reason.count)),
+            _ => items.push(reason),
+        }
+    }
+    for group in items.iter_mut().filter(|i| i.requests.len() > 1) {
+        let oldest = &group.requests[0];
+        let (n, tool) = (group.requests.len(), &oldest.tool);
+        group.text = format!("{} asks to run {n} tools, the oldest {}: {}", oldest.ant, tool.kind, tool.title);
+        group.count = n;
+    }
     items
+}
+
+/// What an ant asks to run with `request`, and what assistants decided on it for their humans, which waits for the
+/// humans' consent.
+fn asks(data: &Data, request: &ApprovalRequest) -> String {
+    let mut text = format!("{} asks to run {}: {}", request.ant, request.tool.kind, request.tool.title);
+    for held in data.live.held.get(&(request.ant.clone(), request.id)).into_iter().flatten() {
+        let (assistant, human, verdict) = (&held.assistant, &held.human, crate::tools::spelling(held.verdict));
+        let id = crate::tools::qualified(request);
+        let _ = write!(text, " · {assistant} chose {verdict} for {human}: ants assistant confirm {id}");
+    }
+    text
 }
 
 /// The threads a snooze keeps off home at `now`, with when each snooze ends.
@@ -144,21 +215,18 @@ fn unsnoozed(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
         .into_iter()
         .map(|card| {
             let request = card.request;
-            let mut text = format!("{} asks to run {}: {}", request.ant, request.tool.kind, request.tool.title);
-            // What assistants decided for their humans, which waits for the humans' consent.
-            for held in data.live.held.get(&(request.ant.clone(), request.id)).into_iter().flatten() {
-                let (assistant, human, verdict) = (&held.assistant, &held.human, crate::tools::spelling(held.verdict));
-                let id = crate::tools::qualified(request);
-                let _ = write!(text, " · {assistant} chose {verdict} for {human}: ants assistant confirm {id}");
-            }
             Item {
                 why: Why::Approval,
                 thread: request.thread_id.clone(),
                 at: request.requested_at,
-                text,
+                text: asks(data, request),
                 who: Some(request.ant.clone()),
                 request: Some((request.clone(), card.settled.cloned())),
+                requests: card.settled.map_or_else(|| vec![request.clone()], |_| Vec::new()),
+                expanded: false,
                 question: None,
+                count: 1,
+                also: Vec::new(),
             }
         })
         .collect();
@@ -169,7 +237,11 @@ fn unsnoozed(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
         text,
         who: Some(who.clone()),
         request: None,
+        requests: Vec::new(),
+        expanded: false,
         question: None,
+        count: 1,
+        also: Vec::new(),
     };
     for thread in &data.live.order {
         if let Some(asked) = data.question(thread) {
@@ -183,17 +255,22 @@ fn unsnoozed(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
             items.push(Item { who: None, ..item(Why::Stuck, thread, alert.at, alert.text.clone(), data.me()) });
         }
         let me = data.me();
-        if let Some(m) =
-            data.unread_on(thread).find(|i| i.kind == Kind::Message && i.from != *me && data.is_human(&i.from))
-        {
-            items.push(item(Why::Message, thread, m.at, format!("{}: {}", m.from, m.text), &m.from));
+        let messages: Vec<_> = data
+            .unread_on(thread)
+            .filter(|i| i.kind == Kind::Message && i.from != *me && data.is_human(&i.from))
+            .collect();
+        if let Some(m) = messages.first() {
+            let text = format!("{}: {}", m.from, m.text);
+            items.push(Item { count: messages.len(), ..item(Why::Message, thread, m.at, text, &m.from) });
         }
-        if let Some(m) = data.unread_on(thread).find(|i| i.kind == Kind::Mention) {
+        let mentions: Vec<_> = data.unread_on(thread).filter(|i| i.kind == Kind::Mention).collect();
+        if let Some(m) = mentions.first() {
             let text = format!("{} in #{}: {}", m.from, m.channel.as_ref().map_or("?", |c| c.as_str()), m.text);
-            items.push(item(Why::Mention, thread, m.at, text, &m.from));
+            items.push(Item { count: mentions.len(), ..item(Why::Mention, thread, m.at, text, &m.from) });
         }
         if data.finished(thread)
             && let Some(latest) = data.facts.get(thread).and_then(|f| f.latest.as_ref())
+            && data.unread(latest.seq)
         {
             items.push(item(Why::Finished, thread, latest.at, format!("{} answered", latest.from), &latest.from));
         }
@@ -210,6 +287,8 @@ pub fn waiting(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
 pub struct Page {
     /// The selected item, kept on it as items arrive and leave.
     selected: Selection<Id>,
+    /// The groups of tool requests listed one by one, by ant and thread.
+    expanded: HashSet<(UserId, ThreadId)>,
 }
 
 impl Page {
@@ -217,8 +296,36 @@ impl Page {
 
     /// The selected item's thread.
     pub fn thread(&self, data: &Data) -> Option<ThreadId> {
-        let items = items(data, Utc::now());
+        let items = self.rows(data, Utc::now());
         items.get(self.at(&items)).map(|i| i.thread.clone())
+    }
+
+    /// The items listed at `now`: each expanded group of tool requests followed by its requests, one by one.
+    fn rows(&self, data: &Data, now: DateTime<Utc>) -> Vec<Item> {
+        let mut rows = Vec::new();
+        for item in items(data, now) {
+            let Some(group) = item.requests.first().filter(|_| item.requests.len() > 1) else {
+                rows.push(item);
+                continue;
+            };
+            if !self.expanded.contains(&(group.ant.clone(), item.thread.clone())) {
+                rows.push(item);
+                continue;
+            }
+            let one = |request: &ApprovalRequest| Item {
+                at: request.requested_at,
+                text: asks(data, request),
+                request: Some((request.clone(), None)),
+                requests: vec![request.clone()],
+                count: 1,
+                ..item.clone()
+            };
+            let ones: Vec<Item> = item.requests.iter().map(one).collect();
+            let text = format!("{} asks to run {} tools", group.ant, item.requests.len());
+            rows.push(Item { text, expanded: true, ..item });
+            rows.extend(ones);
+        }
+        rows
     }
 
     /// Where the selected item is among `items`.
@@ -227,10 +334,14 @@ impl Page {
     }
 
     pub fn key(&mut self, key: Key, data: &Data, now: DateTime<Utc>) -> Option<To> {
-        let items = items(data, now);
+        let items = self.rows(data, now);
         let at = self.at(&items);
         let selected = items.get(at);
-        let pending = selected.and_then(|i| i.request.as_ref()).filter(|(_, s)| s.is_none()).map(|(r, _)| r.clone());
+        let pending = selected
+            .filter(|i| !i.expanded)
+            .and_then(|i| i.request.as_ref())
+            .filter(|(_, s)| s.is_none())
+            .map(|(r, _)| r.clone());
         let verdict = match key {
             Key::Char('a') => Some(Verdict::AllowOnce),
             Key::Char('A') => Some(Verdict::AllowAlways),
@@ -239,6 +350,14 @@ impl Page {
         };
         let thread = || selected.map(|i| i.thread.clone());
         let to = match key {
+            Key::Enter if selected.is_some_and(|i| i.requests.len() > 1) => {
+                let group = selected?;
+                let key = (group.requests[0].ant.clone(), group.thread.clone());
+                if !self.expanded.remove(&key) {
+                    self.expanded.insert(key);
+                }
+                return None;
+            }
             Key::Enter => {
                 return match pending {
                     Some(request) => Some(To::Ask(request, None)),
@@ -280,8 +399,8 @@ impl Page {
 
     pub fn draw(&self, frame: &mut Frame, area: Rect, model: &Model, now: DateTime<Utc>, focused: bool) {
         let data = &model.data;
-        let items = items(data, now);
-        let block = frame::block(format!(" Home ({}) ", items.len()), focused);
+        let block = frame::block(format!(" Home ({}) ", items(data, now).len()), focused);
+        let items = self.rows(data, now);
         let inner = block.inner(area);
         frame.render_widget(block, area);
         let mut first = vec![catchup::since_line(model, now)];
@@ -302,12 +421,17 @@ impl Page {
             .iter()
             .enumerate()
             .map(|(at, i)| {
+                let mut first = vec![
+                    Span::styled(format!("{:<9}", i.why.label()), Style::new().fg(i.why.color())),
+                    Span::raw(data.title(&i.thread)),
+                ];
+                for (why, n) in &i.also {
+                    first.push(Span::styled(" · ", frame::dim()));
+                    first.push(Span::styled(why.badge(*n), Style::new().fg(why.color())));
+                }
+                first.push(Span::styled(format!("  {}", ago(i.at, now)), frame::dim()));
                 let mut lines = vec![
-                    Line::from(vec![
-                        Span::styled(format!("{:<9}", i.why.label()), Style::new().fg(i.why.color())),
-                        Span::raw(data.title(&i.thread)),
-                        Span::styled(format!("  {}", ago(i.at, now)), frame::dim()),
-                    ]),
+                    Line::from(first),
                     Line::from(
                         [Span::raw("         ")]
                             .into_iter()
@@ -319,18 +443,25 @@ impl Page {
                 if let Some(question) = &i.question {
                     lines.push(Line::raw(format!("         {}", crate::excerpt(&question::options(question), 160))));
                 }
-                if i.request.is_none() {
-                    lines.push(Line::styled(format!("         {} · {}", i.why.keys(), i.why.enter()), frame::dim()));
-                }
-                if let Some((request, settled)) = &i.request {
+                if i.expanded {
+                    lines.push(Line::styled("         Enter collapses", frame::dim()));
+                } else if let Some((request, settled)) = &i.request {
                     let card = approvals::Card { request, settled: settled.as_ref() };
                     let card = approvals::lines(card, model.asking.as_ref(), at == selected, now, width);
+                    let enter = format!("Enter lists all {}", i.requests.len());
                     // The tool shows on the line before.
                     lines.extend(card.into_iter().skip(1).map(|line| {
                         let mut spans = vec![Span::raw("         ")];
-                        spans.extend(line.spans);
+                        spans.extend(line.spans.into_iter().map(|mut span| {
+                            if i.requests.len() > 1 {
+                                span.content = span.content.replace("Enter details", &enter).into();
+                            }
+                            span
+                        }));
                         Line::from(spans).style(line.style)
                     }));
+                } else {
+                    lines.push(Line::styled(format!("         {} · {}", i.why.keys(), i.why.enter()), frame::dim()));
                 }
                 ListItem::new(lines)
             })
@@ -379,22 +510,38 @@ mod tests {
             sent_at: at(3),
         };
         m.data.live.approval(&Update::Held(push.clone(), vec![held]));
-        let shown =
-            items(&m.data, at(4)).into_iter().find(|i| i.request.as_ref().is_some_and(|(r, _)| r.id == push.id));
-        let expected = format!("pa chose allow-once for alice: ants assistant confirm dev-a/{}", push.id);
-        assert!(shown.is_some_and(|i| i.text.ends_with(&expected)), "the assistant's decision waits for consent");
         let whys: Vec<(Why, ThreadId)> = items(&m.data, at(4)).into_iter().map(|i| (i.why, i.thread)).collect();
         assert_eq!(
             whys,
-            [
-                (Why::Approval, asked.clone()),
-                (Why::Approval, asked),
-                (Why::Mention, mentioned),
-                (Why::Finished, done.clone())
-            ]
+            [(Why::Approval, asked.clone()), (Why::Mention, mentioned), (Why::Finished, done.clone())],
+            "the ant's two requests on the thread one group"
         );
-        assert_eq!(waiting(&m.data, at(4)).len(), 4);
+        assert_eq!(waiting(&m.data, at(4)).len(), 3);
+        let screen = shown(&m, at(4));
+        assert!(screen.contains("dev-a asks to run 2 tools, the oldest execute: git push"), "{screen}");
+        assert!(screen.contains("a allow · r reject · Enter lists all 2"), "{screen}");
 
+        assert_eq!(m.key(Key::Enter, at(4)), None);
+        assert!(m.asking.is_none(), "Enter lists the group's requests");
+        let screen = shown(&m, at(4));
+        let expected = format!("pa chose allow-once for alice: ants assistant confirm dev-a/{}", push.id);
+        assert!(screen.contains("dev-a asks to run 2 tools") && screen.contains("Enter collapses"), "{screen}");
+        let crate::tui::model::Page::Home(home) = m.page() else { panic!("home") };
+        let rows: Vec<(Id, bool)> =
+            home.rows(&m.data, at(4)).into_iter().map(|i| (i.id(), i.text.ends_with(&expected))).collect();
+        assert_eq!(
+            rows[..3],
+            [
+                (Id::Requests(user("dev-a"), asked), false),
+                (Id::Request(user("dev-a"), push.id), true),
+                (Id::Request(user("dev-a"), second.id), false)
+            ],
+            "the assistant's decision waits for consent"
+        );
+        assert_eq!(m.key(Key::Char('a'), at(4)), None);
+        assert!(m.asking.is_none(), "the group's head answers nothing");
+
+        m.key(Key::Down, at(4));
         m.key(Key::Down, at(4));
         assert_eq!(m.key(Key::Char('r'), at(4)), None);
         assert_eq!(m.key(Key::Char('y'), at(4)), Some(Action::Decide(Box::new(second.clone()), Verdict::Reject)));
@@ -409,6 +556,11 @@ mod tests {
         assert_eq!(m.key(Key::Enter, at(5)), None);
         assert!(m.asking.as_ref().is_some_and(|a| a.full && a.request == push), "Enter shows the request in full");
         m.key(Key::Esc, at(5));
+        let mut decision = ants_proto::ApprovalDecision::new(push.id, push.ant.clone(), Verdict::AllowOnce);
+        decision.by = Some(user("alice"));
+        m.data.settled.deciding(&push);
+        m.take(Event::Approval(Update::Resolved(push, State::Decided(decision))), at(6));
+        assert_eq!(items(&m.data, at(6)).len(), 3, "a request decided here keeps no card");
         m.key(Key::End, at(500));
         assert_eq!(m.key(Key::Enter, at(500)), Some(Action::Open(done)));
     }
@@ -507,6 +659,66 @@ mod tests {
         m.key(Key::End, at(8));
         assert_eq!(m.key(Key::Char('f'), at(8)), Some(Action::Open(done)));
         assert!(m.bar.focused, "the bar open to follow up on the thread");
+    }
+
+    fn mention(seq: u64, thread: &ThreadId, from: &str) -> crate::thread::Entry {
+        let envelope = Envelope {
+            thread_id: thread.clone(),
+            mention: Some(Mention { channel: "ops".parse().unwrap(), post: Uuid::now_v7(), author: None }),
+            ..Envelope::new(user(from), user("alice"), "@alice look")
+        };
+        let subject = subject::inbox(&envelope.to, &envelope.from);
+        Parser::default().entry(seq, at(seq.cast_signed()), &subject, &serde_json::to_vec(&envelope).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_thread_shows_once_under_its_most_pressing_reason_with_badges_for_the_others() {
+        use crate::tui::exec::Job;
+
+        let busy = ThreadId::generate();
+        let mut m = model();
+        let mut question = message(2, &busy, "dev-b", "alice", "Which retry policy?");
+        question.question = Some(
+            ants_proto::Question::new("Which retry policy?", &["fixed".to_owned(), "none".to_owned()], false).unwrap(),
+        );
+        m.stored(
+            vec![
+                escalation(1, &busy, "dev-a", "alice"),
+                question.clone(),
+                mention(3, &busy, "dev-c"),
+                mention(4, &busy, "dev-d"),
+            ],
+            at(4),
+        );
+        let found: Vec<(Why, Vec<(Why, usize)>)> = items(&m.data, at(5)).into_iter().map(|i| (i.why, i.also)).collect();
+        assert_eq!(found, [(Why::Question, vec![(Why::Stuck, 1), (Why::Mention, 2)])]);
+        let screen = shown(&m, at(5));
+        assert!(screen.contains("question help · stuck · 2 mentions"), "{screen}");
+        assert!(screen.contains("1-9 answer · d done · z snooze · Enter open"), "the keys of the top reason: {screen}");
+        let job = Job::Answer { thread: busy.clone(), choice: ants_proto::Choice::Option(1) };
+        assert_eq!(m.key(Key::Char('1'), at(5)), Some(Action::Run(job, String::new())));
+
+        let mut answer = message(5, &busy, "alice", "dev-b", "fixed");
+        answer.answer = Some(ants_proto::Answer { question: question.id.unwrap(), option: Some(1) });
+        m.stored(vec![answer], at(5));
+        let found: Vec<(Why, Vec<(Why, usize)>)> = items(&m.data, at(6)).into_iter().map(|i| (i.why, i.also)).collect();
+        assert_eq!(found, [(Why::Mention, vec![])], "answered, and the human's message ends the escalation");
+    }
+
+    #[test]
+    fn a_finished_thread_leaves_home_once_its_answer_is_read_and_stays_in_work() {
+        let done = ThreadId::generate();
+        let mut m = model();
+        let mut opening = message(1, &done, "alice", "dev-a", "deploy");
+        opening.owner = Some(user("alice"));
+        m.stored(vec![opening, message(2, &done, "dev-a", "alice", "deployed")], at(2));
+        let whys: Vec<Why> = items(&m.data, at(3)).into_iter().map(|i| i.why).collect();
+        assert_eq!(whys, [Why::Finished]);
+
+        m.data.marker = Some(ants_proto::ReadMarker { below: 2, read: [].into() });
+        assert!(items(&m.data, at(3)).is_empty(), "read on any device, it leaves home");
+        assert!(m.data.finished(&done));
+        assert_eq!(m.data.state(&done), crate::tui::work::ThreadState::WaitingOnMe);
     }
 
     #[test]
