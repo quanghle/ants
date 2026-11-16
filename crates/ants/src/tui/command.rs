@@ -190,7 +190,7 @@ impl Model {
                     None => {
                         let thread = self.target()?;
                         let tldr = self.data.cards.tldr.get(&thread).ok_or_else(|| {
-                            format!("no TL;DR of thread {thread} yet: S asks for one, then /forward again")
+                            format!("no TL;DR of thread {thread} yet: S or /tldr asks for one, then /forward again")
                         })?;
                         forward::Source::Thread(Box::new(tldr.clone()))
                     }
@@ -717,7 +717,7 @@ mod tests {
         typed(&mut m, "dev-b");
         assert_eq!(m.key(Key::Enter, at(2)), None, "following the latest, the thread goes, by its TL;DR");
         let refused = &m.bar.status.as_ref().unwrap().text;
-        assert_eq!(*refused, format!("no TL;DR of thread {thread} yet: S asks for one, then /forward again"));
+        assert_eq!(*refused, format!("no TL;DR of thread {thread} yet: S or /tldr asks for one, then /forward again"));
         let tldr = ants_proto::ThreadSummary {
             thread_id: thread.clone(),
             text: "deployed".into(),

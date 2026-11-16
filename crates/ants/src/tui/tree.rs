@@ -241,7 +241,13 @@ impl Tree {
                 node.spun_off = made[*parent].1 != *thread;
                 if first.get(thread) == Some(&at) {
                     let title = data.title(thread);
-                    node.line = if node.spun_off { format!("spin-off: {title}") } else { title };
+                    // A human opens a thread off another only by forwarding to it; an ant, by spinning it off.
+                    let forwarded = on.first().and_then(|(_, s)| s.from.as_ref()).is_some_and(human);
+                    node.line = match (node.spun_off, forwarded) {
+                        (false, _) => title,
+                        (true, false) => format!("spin-off: {title}"),
+                        (true, true) => format!("forwarded: {title}"),
+                    };
                 }
                 node
             })
@@ -726,6 +732,15 @@ mod tests {
         assert_eq!(tree.nodes.iter().map(|n| n.under).collect::<Vec<_>>(), [5, 3, 0, 0, 0, 0]);
         assert_eq!((tree.ants, tree.turns, tree.spend), (5, 3, None), "humans are no ants; 3 messages between ants");
         assert_eq!(tree.elapsed, Some(Duration::from_secs(4)), "from the first message to the last");
+
+        let forwarded = ThreadId::generate();
+        let mut handed = message(6, &forwarded, "alice", "dev-b", "take this over");
+        handed.origin = Some(root.clone());
+        m.stored(vec![handed], at(6));
+        let tree = Tree::build(&root, &m.data, &links, None, at(9));
+        let line = |user: &str| tree.nodes.iter().find(|n| n.user.as_str() == user).map(|n| n.line.clone());
+        assert_eq!(line("dev-b"), Some(format!("forwarded: {}", m.data.title(&forwarded))), "a human forwarded it");
+        assert_eq!(line("tester"), Some(format!("spin-off: {}", m.data.title(&spun))));
 
         let spend = [spent("dev-a", &root, 0.25), spent("tester", &spun, 0.5), spent("tester", &root, 9.0)];
         let tree = Tree::build(&root, &m.data, &links, Some(&spend), at(9));

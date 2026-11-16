@@ -57,7 +57,9 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         return Box::pin(tui::run(&nats()?, tui::SINCE, cli.compact)).await;
     };
     match command {
-        Command::Ask { thread, reply_to, queue, forward, sending, replies, input, attach, words } => {
+        Command::Ask { thread, reply_to, queue, forward, forward_thread, sending, replies, input, attach, words } => {
+            let forward =
+                forward.map(send::Forwarding::Message).or_else(|| forward_thread.map(send::Forwarding::Thread));
             let target = send::Target { thread, reply_to, queue, forward };
             Box::pin(send::ask(&nats()?, target, sending, &replies, &input, &attach, words)).await
         }
