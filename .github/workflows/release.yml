@@ -94,7 +94,7 @@ jobs:
           # Built on Ubuntu 26.04: the binaries need glibc 2.43 or later.
           - { target: x86_64-unknown-linux-gnu, os: ubuntu-26.04 }
           - { target: aarch64-unknown-linux-gnu, os: ubuntu-26.04-arm }
-          - { target: aarch64-apple-darwin, os: xcode-27 }
+          - { target: aarch64-apple-darwin, os: macos-26 }
           - { target: x86_64-pc-windows-msvc, os: windows-latest }
     runs-on: ${{ matrix.os }}
     steps:
