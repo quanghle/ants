@@ -67,20 +67,7 @@ pub async fn confirm(nats: &Nats<'_>, act: Option<&str>, deny: bool) -> Result<(
     if act.matches('/').count() == 2 {
         let order = select_order(orders, act)
             .with_context(|| format!("no order of an assistant {act} waits for {human} to confirm it"))?;
-        let Some(assistant) = designated(&js, nats.account.as_deref(), human).await else {
-            bail!("{human} has no assistant: nothing an assistant ordered takes effect");
-        };
-        if order.admin != assistant {
-            bail!("{} sent order {act}, not {assistant}, the assistant of {human}", order.admin);
-        }
-        let act = Act::Order { machine: order.machine.clone(), ant: order.ant.clone(), id: order.id };
-        let qualified = act.qualified();
-        record(&js, creds, human, &assistant, act, answer, order.sent_at + ORDER_HOLD).await?;
-        let op = order.op.describe();
-        match answer {
-            ActAnswer::Confirm => println!("confirmed: {assistant}'s order {qualified} ({op}) is carried out"),
-            ActAnswer::Deny => println!("denied: {assistant}'s order {qualified} ({op}) is refused"),
-        }
+        println!("{}", answer_order(&js, creds, nats.account.as_deref(), human, &order, answer).await?);
         return Ok(());
     }
     let query = tools::Query::parse(act)?;
@@ -136,8 +123,34 @@ async fn record(
     Ok(())
 }
 
+/// Record `human`'s `answer` to `order`, which a machine's daemon holds for it, signed with the device credentials
+/// `creds` of the team of `account`: refused unless the assistant the grant names now sent it. What was done, in a line.
+pub(crate) async fn answer_order(
+    js: &jetstream::Context,
+    creds: &std::path::Path,
+    account: Option<&str>,
+    human: &UserId,
+    order: &AdminOrder,
+    answer: ActAnswer,
+) -> Result<String> {
+    let act = Act::Order { machine: order.machine.clone(), ant: order.ant.clone(), id: order.id };
+    let qualified = act.qualified();
+    let Some(assistant) = designated(js, account, human).await else {
+        bail!("{human} has no assistant: nothing an assistant ordered takes effect");
+    };
+    if order.admin != assistant {
+        bail!("{} sent order {qualified}, not {assistant}, the assistant of {human}", order.admin);
+    }
+    record(js, creds, human, &assistant, act, answer, order.sent_at + ORDER_HOLD).await?;
+    let op = order.op.describe();
+    Ok(match answer {
+        ActAnswer::Confirm => format!("confirmed: {assistant}'s order {qualified} ({op}) is carried out"),
+        ActAnswer::Deny => format!("denied: {assistant}'s order {qualified} ({op}) is refused"),
+    })
+}
+
 /// The admin orders the machines' daemons hold for `human` to confirm, oldest first.
-async fn orders_held_for(js: &jetstream::Context, human: &UserId) -> Result<Vec<AdminOrder>> {
+pub(crate) async fn orders_held_for(js: &jetstream::Context, human: &UserId) -> Result<Vec<AdminOrder>> {
     let mut orders: Vec<AdminOrder> = crate::machines::latest(js, &format!("$KV.{MACHINES_BUCKET}.*.held"))
         .await?
         .into_iter()

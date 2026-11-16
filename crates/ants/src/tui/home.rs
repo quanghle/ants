@@ -268,6 +268,7 @@ impl Page {
             Key::Char('t') => return thread().map(To::Tree),
             Key::Char('s') => return Some(To::Digest),
             Key::Char('c') => return Some(To::Credentials),
+            Key::Char('o') => return Some(To::Held),
             Key::Up | Key::Char('k') => at.saturating_sub(1),
             Key::Down | Key::Char('j') => at + 1,
             Key::Home => 0,
@@ -286,6 +287,7 @@ impl Page {
         frame.render_widget(block, area);
         let mut first = vec![catchup::since_line(model, now)];
         first.extend(data.credentials.line());
+        first.extend(data.held.line());
         let tall = u16::try_from(first.len() + 1).unwrap_or(u16::MAX);
         let [top, area] = Layout::vertical([Constraint::Length(tall), Constraint::Min(0)]).areas(inner);
         first.push(Line::styled("─".repeat(usize::from(top.width)), frame::dim()));

@@ -21,6 +21,7 @@ mod dm;
 mod exec;
 mod faces;
 mod frame;
+mod held;
 mod home;
 mod images;
 mod interrupt;
@@ -187,6 +188,8 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
     let settings = settings::Io::new(js.clone(), nats.url, nats.creds.map(Path::to_path_buf), nats.domain.cloned());
     let (credentials, holder) =
         credentials::Io::new(js.clone(), nats.url, nats.domain.cloned(), crate::team_dir(None), crate::enroll::LISTEN);
+    let creds = crate::assistant::signing_creds(nats).map(Path::to_path_buf).map_err(|e| format!("{e:#}"));
+    let held = held::Io::new(js.clone(), me.clone(), nats.account.clone(), creds);
     let cards = cards::Io::new(cards::Source::open(nats, &js).await.checking(feed.behalf()));
     let mut model = Model::new(state, host(nats.url).to_owned());
     model.compact = compact;
@@ -215,6 +218,7 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
             memories,
             settings,
             credentials,
+            held,
             cards,
             summaries,
             images,
@@ -282,6 +286,8 @@ struct Chat {
     settings: settings::Io,
     /// The credentials asked for, where the team's account key is.
     credentials: credentials::Io,
+    /// The admin orders of the human's assistant held for its consent.
+    held: held::Io,
     cards: cards::Io,
     summaries: catchup::Io,
     /// The images drawn, with `[cli]` `inline_images` on.
@@ -401,6 +407,10 @@ impl Chat {
                     self.model.credentials(event, Utc::now());
                     Some(Vec::new())
                 }
+                event = self.held.next() => {
+                    self.model.held(event, Utc::now());
+                    Some(Vec::new())
+                }
                 identities = self.looks.next() => {
                     self.model.data.looks.set(identities);
                     Some(Vec::new())
@@ -417,14 +427,19 @@ impl Chat {
                 }
             }
             if let Some(text) = self.edit.take() {
-                self.model.edited(edit(terminal, text).await);
+                self.edit_in(terminal, text).await;
                 dirty = true;
-                if let Some(images) = &mut self.images {
-                    images.reset();
-                    self.model.data.images.clear();
-                }
             }
             self.watch();
+        }
+    }
+
+    /// Edit `text` in the editor, which takes the terminal meanwhile, and take in what it left.
+    async fn edit_in(&mut self, terminal: &mut DefaultTerminal, text: String) {
+        self.model.edited(edit(terminal, text).await);
+        if let Some(images) = &mut self.images {
+            images.reset();
+            self.model.data.images.clear();
         }
     }
 
@@ -520,6 +535,12 @@ impl Chat {
                     self.model.notify("another answer to a request runs", Level::Error, Utc::now());
                 }
             }
+            Action::Answer(answer) => {
+                if !self.held.answer(answer) {
+                    self.model.data.held.busy = None;
+                    self.model.notify("another answer to a held order runs", Level::Error, Utc::now());
+                }
+            }
             Action::Refresh => {
                 self.feed.refresh();
                 self.reads.refresh();
@@ -528,6 +549,7 @@ impl Chat {
                 self.trees.refresh();
                 self.ants.refresh();
                 self.credentials.refresh();
+                self.held.refresh();
                 self.cards.refresh();
                 self.looks.refresh();
                 if let Some(thread) = self.model.open_thread() {

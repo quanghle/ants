@@ -667,7 +667,7 @@ impl Model {
             Page::Channel(page) => page.post(data).map(|p| p.thread.clone()),
             Page::Tree(page) => Some(page.root.clone()),
             Page::Ant(page) => page.thread(data),
-            Page::Dm(_) | Page::Search(_) | Page::Credentials(_) => None,
+            Page::Dm(_) | Page::Search(_) | Page::Credentials(_) | Page::Held(_) => None,
         };
         thread.ok_or_else(|| "no thread open or selected".to_owned())
     }

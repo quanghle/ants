@@ -127,11 +127,14 @@ pub fn held_orders(value: &[u8]) -> Vec<AdminOrder> {
     serde_json::from_slice::<Held>(value).map_or_default(|held| held.orders.into_iter().map(|h| h.order).collect())
 }
 
-/// Decide the held orders whenever something changes, for as long as the connection `js` lasts.
+/// Decide the held orders whenever something changes, for as long as the connection `js` lasts: until the watch of the
+/// humans' bucket has read it, which it never does while the hub has none, only by their age ([`consent`]).
 pub(super) async fn keep(js: &jetstream::Context, js_domain: Option<&JsDomain>, orders: &Orders) {
     let humans = &orders.hold.humans;
     let (mut consents, mut withdrawals) = (humans.consents(), humans.withdrawals());
-    humans.loaded().await;
+    let mut loaded = humans.is_loaded();
+    let read = humans.loaded();
+    tokio::pin!(read);
     loop {
         let reviewed = async {
             let stores = Stores::open(js, js_domain).await?;
@@ -146,6 +149,7 @@ pub(super) async fn keep(js: &jetstream::Context, js_domain: Option<&JsDomain>, 
             _ = withdrawals.recv() => {}
             () = orders.hold.held.notified() => {}
             () = tokio::time::sleep(RECHECK) => {}
+            () = &mut read, if !loaded => loaded = true,
         }
     }
 }
@@ -215,10 +219,18 @@ enum Consent {
     },
 }
 
-/// Where the consent of the human of `held` stands at `now`, by its records `humans` keeps.
+/// Where the consent of the human of `held` stands at `now`, by its records `humans` keeps. Until `humans` has read
+/// them, no grant stands, which does not mean that one was withdrawn: the order then only expires.
 fn consent(humans: &Registry, held: &HeldOrder, now: DateTime<Utc>) -> Consent {
     let order = &held.order;
     let Some(human) = &order.on_behalf_of else { return Consent::Refused("no human named".to_owned()) };
+    let expired = || {
+        (now > order.sent_at + ORDER_HOLD)
+            .then(|| Consent::Refused(format!("{human} did not confirm it within {} days", ORDER_HOLD.num_days())))
+    };
+    if !humans.is_loaded() {
+        return expired().unwrap_or(Consent::Waiting);
+    }
     let assistant = &order.admin;
     if humans.assistant(human).as_ref() != Some(assistant) {
         return Consent::Refused(format!("withdrawn: the grant of {human} no longer names {assistant}"));
@@ -238,10 +250,7 @@ fn consent(humans: &Registry, held: &HeldOrder, now: DateTime<Utc>) -> Consent {
     {
         return Consent::Given { how: format!("pre-allowed by {rule}"), jwt: rules.jwt.clone() };
     }
-    if now > order.sent_at + ORDER_HOLD {
-        return Consent::Refused(format!("{human} did not confirm it within {} days", ORDER_HOLD.num_days()));
-    }
-    Consent::Waiting
+    expired().unwrap_or(Consent::Waiting)
 }
 
 /// Why the consent signed under `jwt` to `held` does not count at `now`, if it does not: the credentials of the human

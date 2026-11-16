@@ -966,9 +966,15 @@ impl Hub {
             "restart_now" => AdminOp::Restart { now: true },
             "read_settings" => AdminOp::ReadSettings,
             "read_memories" => AdminOp::ReadMemories,
+            "set" => match args.changes {
+                Some(changes) if !changes.is_empty() => AdminOp::Set {
+                    changes: changes.into_iter().map(SetChange::into_field_change).collect::<Result<_, _>>()?,
+                },
+                _ => return Err("op set needs changes: the fields to change and the values they hold now".to_owned()),
+            },
             other => {
                 return Err(format!(
-                    "unknown op {other}: pause, resume, restart, restart_now, read_settings or read_memories"
+                    "unknown op {other}: pause, resume, restart, restart_now, read_settings, read_memories or set"
                 ));
             }
         };
@@ -984,7 +990,7 @@ impl Hub {
                 &human,
                 format!(
                     "ordered {what} of {ant} on {machine} for {human}: the daemon of {machine} holds it until {human} \
-                     confirms it (`ants assistant confirm {act}`, or `--deny`)."
+                     confirms it (`o` on the home of ants chat lists it, or `ants assistant confirm {act}`, or `--deny`)."
                 ),
             )
             .await;
@@ -1150,8 +1156,40 @@ pub(super) struct OrderForHuman {
     ant: String,
     /// The machine whose daemon serves the ant, as `ants machines` lists it.
     machine: String,
-    /// pause, resume, restart (once the ant is idle), restart_now, read_settings or read_memories.
+    /// pause, resume, restart (once the ant is idle), restart_now, read_settings, read_memories or set.
     op: String,
+    /// For set, the changes of the ant's settings, all carried out or none.
+    #[serde(default)]
+    changes: Option<Vec<SetChange>>,
+}
+
+/// A change of one field of an ant's settings in an order to set them.
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(super) struct SetChange {
+    /// The field, dotted from the ant's `[[ant]]` table: `model`, `caps.daily`; or from the config file's top level
+    /// under `harnesses`: `harnesses.copilot.command`.
+    field: String,
+    /// The new value; absent or null to remove the field.
+    #[serde(default)]
+    value: Option<serde_json::Value>,
+    /// The value the field holds now, as read_settings shows it, for the change to apply; absent when the field must
+    /// be absent.
+    #[serde(default)]
+    expected: Option<serde_json::Value>,
+    /// In place of `expected`, for a value read_settings hid as a secret: the digest it gave of it.
+    #[serde(default)]
+    expected_digest: Option<String>,
+}
+
+impl SetChange {
+    fn into_field_change(self) -> Result<ants_proto::FieldChange, String> {
+        let field: Vec<String> = self.field.trim().split('.').map(str::to_owned).collect();
+        if field.iter().any(String::is_empty) {
+            return Err(format!("field {}: dotted keys, such as caps.daily", self.field));
+        }
+        let value = self.value.filter(|v| !v.is_null());
+        Ok(ants_proto::FieldChange { field, expected: self.expected, expected_digest: self.expected_digest, value })
+    }
 }
 
 #[tool_router(router = assist_router, vis = "pub(super)")]
@@ -1270,7 +1308,8 @@ impl Tools {
     }
 
     #[tool(description = "As the assistant of a human, send an admin order for it to an ant's machine: pause, \
-        resume, restart, restart_now, read_settings or read_memories. The machine's daemon holds it until the human \
+        resume, restart, restart_now, read_settings, read_memories, or set with `changes` (each a dotted `field`, \
+        the new `value`, or none to remove it, and the `expected` value read_settings shows). The machine's daemon holds it until the human \
         confirms it or a pre-allow rule of the human covers it, then carries it out; the human is told.")]
     async fn order_for_human(&self, Parameters(args): Parameters<OrderForHuman>) -> Result<CallToolResult, ErrorData> {
         Ok(text(self.hub.order_for_human(args).await))

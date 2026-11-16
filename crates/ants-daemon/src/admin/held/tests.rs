@@ -79,3 +79,17 @@ fn a_held_order_waits_for_its_human_to_consent() {
         );
     }
 }
+
+/// Before the humans' bucket is read, as while the hub has none, no grant stands, and an order is not refused as
+/// withdrawn: it waits, and expires once out of time.
+#[test]
+fn a_held_order_expires_before_the_humans_are_read() {
+    let humans = Registry::default();
+    let pause = held(AdminOp::Pause);
+    let now = Utc::now();
+    assert_eq!(consent(&humans, &pause, now), Consent::Waiting);
+    assert_eq!(
+        consent(&humans, &pause, now + ORDER_HOLD + TimeDelta::minutes(1)),
+        Consent::Refused("alice did not confirm it within 7 days".to_owned())
+    );
+}
