@@ -142,7 +142,7 @@ dependencies = [
 
 [[package]]
 name = "ants"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agent-client-protocol",
  "ants-daemon",
@@ -182,7 +182,7 @@ dependencies = [
 
 [[package]]
 name = "ants-daemon"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agent-client-protocol",
  "ants-proto",
@@ -217,7 +217,7 @@ dependencies = [
 
 [[package]]
 name = "ants-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "data-encoding",
@@ -232,7 +232,7 @@ dependencies = [
 
 [[package]]
 name = "ants-test-support"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde_json",
  "tokio",
