@@ -7,7 +7,8 @@ use anyhow::Result;
 use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
 
-use crate::{Connection, completions, tools};
+use crate::connection::Connection;
+use crate::{completions, tools};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum ToolsCommand {
@@ -57,7 +58,7 @@ pub(crate) enum ToolsCommand {
 pub(crate) async fn run(command: ToolsCommand, conn: &Connection<'_>) -> Result<()> {
     let nats = || conn.nats();
     match command {
-        ToolsCommand::List { follow, json } => tools::list(&nats()?, crate::Listing { follow, json }).await,
+        ToolsCommand::List { follow, json } => tools::list(&nats()?, crate::connection::Listing { follow, json }).await,
         ToolsCommand::Show { id, json } => tools::show(&nats()?, &id, json).await,
         ToolsCommand::Approve { id, always, rule, config } => {
             let verdict = if always { Verdict::AllowAlways } else { Verdict::AllowOnce };

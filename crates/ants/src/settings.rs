@@ -25,9 +25,10 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::auth;
 use crate::colony::{short, since};
+use crate::connection::Nats;
 use crate::orders::{self, Listed};
-use crate::{Nats, auth};
 
 /// How long a read of the settings waits for the daemon of the ant's machine before taking the last read.
 pub const READ_WAIT: Duration = Duration::from_secs(5);
@@ -808,7 +809,7 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         let unmarked = ants_daemon::shared::write(&identities, &mut set, &signer, None).await.unwrap_err();
         assert!(format!("{unmarked:#}").contains("ants init"), "{unmarked:#}");
 
-        crate::init_hub(&human, false).await.unwrap();
+        crate::cmd::init::hub(&human, false).await.unwrap();
         refresh().await;
         assert_eq!(
             verified_of(&human, &js, &dev_a).await.and_then(|r| r.fields.get("model").cloned()),
@@ -818,7 +819,7 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         refresh().await;
         assert_eq!(writer.record(&dev_a), Some(set.clone()));
 
-        let lines = crate::init_hub(&human, true).await.unwrap();
+        let lines = crate::cmd::init::hub(&human, true).await.unwrap();
         assert!(lines.last().unwrap().contains("new incarnation"), "{lines:?}");
         let Some(SharedRecord::Unverified(record, why)) = shared_of(&human, &js, &dev_a).await.unwrap() else {
             panic!("a record of the bucket's earlier incarnation verifies")

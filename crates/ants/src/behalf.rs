@@ -44,7 +44,7 @@ pub struct Checker {
 impl Checker {
     /// A checker reading with `js` as the credentials of `nats`: without an account, which verifies grants and
     /// records, every claim is forged.
-    pub fn new(nats: &crate::Nats<'_>, js: &jetstream::Context) -> Self {
+    pub fn new(nats: &crate::connection::Nats<'_>, js: &jetstream::Context) -> Self {
         let records = Records::new(js.clone(), nats.domain.cloned(), nats.account.clone());
         Self {
             js: js.clone(),

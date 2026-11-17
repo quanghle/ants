@@ -8,8 +8,10 @@ use ants_proto::{
 use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
 
+use crate::auth::team_dir;
+use crate::connection::Connection;
 use crate::members::EnrollApprover;
-use crate::{Connection, auth, backup, binding, channel, devices, keys, members, revoke, team_dir};
+use crate::{auth, backup, binding, channel, devices, keys, members, revoke};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum AuthCommand {

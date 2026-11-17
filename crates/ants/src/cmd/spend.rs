@@ -4,7 +4,8 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
-use crate::{Connection, spend};
+use crate::connection::Connection;
+use crate::spend;
 
 pub(crate) async fn run(
     conn: &Connection<'_>,

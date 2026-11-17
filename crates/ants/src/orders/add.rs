@@ -9,7 +9,7 @@ use ants_proto::{AdminOp, Machine, OrderState, UserId};
 use anyhow::{Context as _, Result, bail};
 use serde_json::{Map, Value};
 
-use crate::Nats;
+use crate::connection::Nats;
 use crate::serve::AntOptions;
 
 /// The settings of an `[[ant]]` table named `name` that `options` give, as an add order carries them: no name, and a

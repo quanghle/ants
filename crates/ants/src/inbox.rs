@@ -388,7 +388,7 @@ impl<'a> Shown<'a> {
 
 /// Print, while it runs, the notices of the messages the human of `nats` sent that keep waiting for an ant no daemon
 /// serves ([`unserved`]); none with credentials that may not mark what it was told of.
-pub async fn tell_unserved(nats: &crate::Nats<'_>, js: &jetstream::Context) {
+pub async fn tell_unserved(nats: &crate::connection::Nats<'_>, js: &jetstream::Context) {
     let me = &nats.me.id;
     if !nats.rights.may_publish(&unserved::marker_subject(me)) {
         return;

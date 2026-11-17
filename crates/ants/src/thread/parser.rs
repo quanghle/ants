@@ -112,7 +112,7 @@ impl Parser {
             let text = format!("{} on {}/{}", tools::spelling(d.verdict), d.ant, d.request_id);
             (Kind::Decision, None, text)
         } else if let Some(x) = &e.escalation {
-            (Kind::Escalation, Some(crate::escalation_note(x)), e.text)
+            (Kind::Escalation, Some(crate::text::escalation_note(x)), e.text)
         } else if e.mention.is_some() {
             (Kind::Mention, None, e.text)
         } else if let Some(notice) = e.notice.filter(|_| !forged) {

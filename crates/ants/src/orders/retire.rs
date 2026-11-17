@@ -9,7 +9,7 @@ use anyhow::{Result, bail};
 use async_nats::jetstream;
 
 use super::Admin;
-use crate::Nats;
+use crate::connection::Nats;
 use crate::retire::stop_note;
 
 /// How long `ants ant retire` waits for the outcome by default: the daemon waits up to 5m for the ant to stop, then

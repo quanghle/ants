@@ -489,7 +489,7 @@ async fn a_human_picks_its_threads_by_a_start_of_their_id_or_the_last() {
     let Some(server) = crate::test_support::Server::start() else { return };
     let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
     let creds = server.creds_as(&alice, ants_proto::Role::Human);
-    let nats = crate::Nats::new(&server.url, Some(&creds), None).unwrap();
+    let nats = crate::connection::Nats::new(&server.url, Some(&creds), None).unwrap();
     let js = nats.connect("test").await.unwrap().1;
     ants_daemon::bus::ensure_stream(&js).await.unwrap();
     let _ = js.create_stream(ants_daemon::hub::threads_config()).await;
@@ -537,7 +537,7 @@ async fn a_human_picks_its_threads_by_a_start_of_their_id_or_the_last() {
     assert_eq!(resolve(others.thread_id.as_str()).await.unwrap(), others.thread_id);
 
     let ant_creds = server.creds_as(&dev_a, ants_proto::Role::Ant);
-    let ant = crate::Nats::new(&server.url, Some(&ant_creds), None).unwrap();
+    let ant = crate::connection::Nats::new(&server.url, Some(&ant_creds), None).unwrap();
     let refused = Pick::Last.resolve(&ant, &js).await.unwrap_err().to_string();
     assert!(refused.contains("give the whole thread id"), "{refused}");
 }
@@ -608,7 +608,7 @@ async fn ask_reply_to_answers_the_message_s_author_on_its_thread_quoting_it() {
     let Some(server) = crate::test_support::Server::start() else { return };
     let (alice, dev_a) = (p("alice"), p("dev-a"));
     let creds = server.creds_as(&alice, ants_proto::Role::Human);
-    let nats = crate::Nats::new(&server.url, Some(&creds), None).unwrap();
+    let nats = crate::connection::Nats::new(&server.url, Some(&creds), None).unwrap();
     let (_, js) = nats.connect("test").await.unwrap();
     ants_daemon::bus::ensure_stream(&js).await.unwrap();
     let asked = Envelope::new(alice.clone(), dev_a.clone(), "build it");
@@ -645,7 +645,7 @@ async fn ask_forward_hands_a_message_and_its_files_to_another_ant_on_a_thread_li
     let Some(server) = crate::test_support::Server::start() else { return };
     let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
     let creds = server.creds_as(&alice, ants_proto::Role::Human);
-    let nats = crate::Nats::new(&server.url, Some(&creds), None).unwrap();
+    let nats = crate::connection::Nats::new(&server.url, Some(&creds), None).unwrap();
     let (_, js) = nats.connect("test").await.unwrap();
     ants_daemon::bus::ensure_stream(&js).await.unwrap();
     js.create_stream(ants_daemon::hub::files_config()).await.unwrap();
@@ -682,7 +682,7 @@ async fn ask_forward_thread_hands_its_kept_tldr_to_another_ant_and_refuses_witho
     let Some(server) = crate::test_support::Server::start() else { return };
     let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
     let creds = server.creds_as(&alice, ants_proto::Role::Human);
-    let nats = crate::Nats::new(&server.url, Some(&creds), None).unwrap();
+    let nats = crate::connection::Nats::new(&server.url, Some(&creds), None).unwrap();
     let (_, js) = nats.connect("test").await.unwrap();
     ants_daemon::bus::ensure_stream(&js).await.unwrap();
     js.create_stream(ants_daemon::hub::threads_config()).await.unwrap();
@@ -863,9 +863,9 @@ async fn a_sealed_message_from_a_device_enrolled_mid_follow_opens_everywhere_it_
         creds
     };
     let desk = enrolled("desk");
-    crate::Nats::new(&server.url, Some(&desk), None).unwrap().connect("test").await.unwrap();
+    crate::connection::Nats::new(&server.url, Some(&desk), None).unwrap().connect("test").await.unwrap();
     let bob_creds = server.creds_as(&bob, Role::Human);
-    let bob_nats = crate::Nats::new(&server.url, Some(&bob_creds), None).unwrap();
+    let bob_nats = crate::connection::Nats::new(&server.url, Some(&bob_creds), None).unwrap();
     let (_, bob_js) = bob_nats.connect("test").await.unwrap();
     // One keyring per read, each loaded before the device was enrolled and learning it on its own.
     let load = async || crate::sealed::Keyring::load(&bob_nats, &bob_js).await.map(Arc::new);
@@ -890,7 +890,7 @@ async fn a_sealed_message_from_a_device_enrolled_mid_follow_opens_everywhere_it_
     let asked = async {
         tokio::time::sleep(Duration::from_millis(200)).await;
         let laptop = enrolled("laptop");
-        let alice_nats = crate::Nats::new(&server.url, Some(&laptop), None).unwrap();
+        let alice_nats = crate::connection::Nats::new(&server.url, Some(&laptop), None).unwrap();
         alice_nats.connect("test").await.unwrap();
         let words = vec!["@bob".to_owned(), "lunch at noon?".to_owned()];
         let (sending, replies, input, attach) = Default::default();

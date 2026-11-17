@@ -9,8 +9,9 @@ use ants_proto::UserId;
 use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
 
+use crate::connection::Connection;
 use crate::serve::Ended;
-use crate::{Connection, bridge, notify, reload, upgrade, webhook};
+use crate::{bridge, notify, reload, upgrade, webhook};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum WebhookCommand {

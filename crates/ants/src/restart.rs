@@ -10,7 +10,7 @@ use anyhow::{Result, bail};
 use async_nats::jetstream;
 use serde_json::json;
 
-use crate::Nats;
+use crate::connection::Nats;
 use crate::orders::Admin;
 
 /// How long to wait for the outcome before telling the order is pending.

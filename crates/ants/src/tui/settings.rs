@@ -363,7 +363,7 @@ impl Io {
                 self.reading = Some(ant.clone());
                 let to = ant.clone();
                 let read = async move {
-                    let nats = crate::Nats::new(&url, creds.as_deref(), domain.as_ref())?;
+                    let nats = crate::connection::Nats::new(&url, creds.as_deref(), domain.as_ref())?;
                     settings::read(&nats, &js, &to, settings::READ_WAIT).await
                 };
                 let read = async move { Event::Read(ant, read.await.map_err(|e| format!("{e:#}"))) };
@@ -372,7 +372,7 @@ impl Io {
             Ask::Set(ant, machine, op) => {
                 let to = ant.clone();
                 let sent = async move {
-                    let nats = crate::Nats::new(&url, creds.as_deref(), domain.as_ref())?;
+                    let nats = crate::connection::Nats::new(&url, creds.as_deref(), domain.as_ref())?;
                     if !settings::may_order(&nats) {
                         anyhow::bail!("changing settings needs a human device's admin credentials");
                     }

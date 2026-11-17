@@ -8,7 +8,8 @@ use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
 
 use crate::channel::reads;
-use crate::{Connection, Nats, channel, colony, completions, humans, thread, upgrade};
+use crate::connection::{Connection, Nats};
+use crate::{channel, colony, completions, humans, thread, upgrade};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum ChannelCommand {

@@ -335,7 +335,7 @@ fn about(entry: Option<&ColonyEntry>, now: DateTime<Utc>, width: usize) -> Vec<L
     let label = rows.iter().map(|(l, _)| l.len()).max().unwrap_or(0);
     let mut lines = Vec::new();
     for (name, value) in rows {
-        let text = if name == "whoami" { value } else { crate::excerpt(&value, width.saturating_sub(label + 1)) };
+        let text = if name == "whoami" { value } else { crate::text::excerpt(&value, width.saturating_sub(label + 1)) };
         for (n, part) in text.lines().enumerate() {
             let name = if n == 0 { name } else { "" };
             lines.push(Line::from(vec![

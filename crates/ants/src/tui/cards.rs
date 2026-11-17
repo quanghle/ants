@@ -140,7 +140,7 @@ pub struct Source {
 }
 
 impl Source {
-    pub async fn open(nats: &crate::Nats<'_>, js: &jetstream::Context) -> Self {
+    pub async fn open(nats: &crate::connection::Nats<'_>, js: &jetstream::Context) -> Self {
         let meta = thread_meta::open(nats, js).await.map(Rc::new).map_err(|e| format!("{e:#}"));
         let sessions = DirectKv::new(js, None, SESSIONS_BUCKET).await.map_err(|e| format!("{e:#}"));
         let behalf = Arc::new(crate::behalf::Checker::new(nats, js));

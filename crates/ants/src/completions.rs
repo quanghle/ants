@@ -197,7 +197,7 @@ pub fn bin() -> String {
 
 /// When a script asks for completions, print them and exit; otherwise return. Runs before anything else may print.
 pub fn answer() {
-    CompleteEnv::with_factory(crate::Cli::command).var(VAR).complete();
+    CompleteEnv::with_factory(crate::cli::Cli::command).var(VAR).complete();
 }
 
 /// The ants of the config file and the colony, and the messenger.
@@ -274,7 +274,7 @@ pub fn messages(current: &OsStr) -> Vec<CompletionCandidate> {
             .take(MESSAGES)
             .enumerate()
             .map(|(i, (id, e))| {
-                let help = format!("{}: {}", e.route(), crate::excerpt(&e.text, 60));
+                let help = format!("{}: {}", e.route(), crate::text::excerpt(&e.text, 60));
                 CompletionCandidate::new(id).help(Some(help.into())).display_order(Some(i))
             })
             .collect())

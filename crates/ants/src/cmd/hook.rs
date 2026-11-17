@@ -18,7 +18,7 @@ use futures::StreamExt as _;
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::Semaphore;
 
-use crate::Nats;
+use crate::connection::Nats;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum HookCommand {

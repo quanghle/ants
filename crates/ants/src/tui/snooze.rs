@@ -43,7 +43,7 @@ impl Prompt {
 
     /// The footer: the duration typed so far, and the keys.
     pub fn line(&self, data: &Data) -> Line<'static> {
-        let title = crate::excerpt(&data.title(&self.thread), 40);
+        let title = crate::text::excerpt(&data.title(&self.thread), 40);
         let tail = match (&self.error, self.remind) {
             (Some(error), _) => format!(" · {error}"),
             (None, None) => " · Enter snooze · Esc keep it on home".to_owned(),

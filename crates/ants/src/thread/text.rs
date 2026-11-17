@@ -166,6 +166,6 @@ pub(crate) fn answer_line(by: &Entry, answered: Answered<'_>) -> String {
     let from = by.from.as_ref().map_or("(a human)", UserId::as_str);
     match answered {
         Answered::Option(n, option) => format!("answered by {from}: option {n}, {option}"),
-        Answered::Typed => format!("answered by {from}, typed: {}", crate::excerpt(&by.text, 72)),
+        Answered::Typed => format!("answered by {from}, typed: {}", crate::text::excerpt(&by.text, 72)),
     }
 }

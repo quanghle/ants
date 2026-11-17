@@ -35,14 +35,14 @@ const COLONY_EVERY: Duration = Duration::from_secs(10);
 
 /// Connect as `name` for a live view of what `nats`'s human reads in the window `since`: the feed, and the state to
 /// take its events into, with the threads the human archived or left idle to be left out.
-pub async fn open(nats: &crate::Nats<'_>, name: &str, since: Duration) -> Result<(Feed, State)> {
+pub async fn open(nats: &crate::connection::Nats<'_>, name: &str, since: Duration) -> Result<(Feed, State)> {
     let (client, js) = nats.connect(name).await?;
     start(nats, client, js, since).await
 }
 
 /// [`open`] on the connection `client` and `js` that `nats` made.
 pub async fn start(
-    nats: &crate::Nats<'_>,
+    nats: &crate::connection::Nats<'_>,
     client: async_nats::Client,
     js: jetstream::Context,
     since: Duration,
@@ -54,7 +54,7 @@ pub async fn start(
 }
 
 /// The state of a live view of the window `since`, with the threads the human archived or left idle to be left out.
-pub async fn state(nats: &crate::Nats<'_>, js: &jetstream::Context, since: Duration) -> Result<State> {
+pub async fn state(nats: &crate::connection::Nats<'_>, js: &jetstream::Context, since: Duration) -> Result<State> {
     let auto_archive = crate::defaults::auto_archive()?;
     let marks = async { thread_meta::open(nats, js).await?.marks().await };
     let marks = marks.await.unwrap_or_else(|e| {

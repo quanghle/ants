@@ -12,8 +12,9 @@ use futures::StreamExt as _;
 use futures::stream::BoxStream;
 
 use crate::cli::{Replies, Sending};
+use crate::connection::Nats;
 use crate::{
-    Nats, assistant, attachments, channel, colony, compose, forward, humans, inbox, progress, reacted, sealed, thread,
+    assistant, attachments, channel, colony, compose, forward, humans, inbox, progress, reacted, sealed, thread,
 };
 
 /// Split a leading `@ant` off the words, none when they name no one ([`unaddressed`]); the message is the rest, or

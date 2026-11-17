@@ -28,6 +28,7 @@ use data_encoding::BASE64;
 use nkeys::XKey;
 
 use crate::attachments::{self, File};
+use crate::connection::Nats;
 use crate::devices::{self, Devices, Directory, Lookup, VerifiedDevice};
 
 /// What `ants ask` may do instead of sealing.
@@ -143,7 +144,7 @@ impl Keyring {
     /// The keyring of the human's device of `nats`, reading the directory on `js`: none for others than a human's
     /// credentials binding an encryption key. A directory that cannot be read is warned of, and leaves every
     /// message sealed unreadable.
-    pub async fn load(nats: &crate::Nats<'_>, js: &jetstream::Context) -> Option<Self> {
+    pub async fn load(nats: &Nats<'_>, js: &jetstream::Context) -> Option<Self> {
         let own = own(nats.creds)?;
         let read = async {
             let account = nats.account.as_deref().context("credentials without an account")?;
@@ -399,7 +400,7 @@ impl Sealer {
     /// What seals from the human of `nats` for itself and the human `to`, reading the directory on `js`: refused,
     /// with the fix and then `otherwise`, what else may be done, when the credentials bind no encryption key, the
     /// directory holds no verified key of the sending device or of any device of `to`.
-    pub async fn new(nats: &crate::Nats<'_>, js: &jetstream::Context, to: &UserId, otherwise: &str) -> Result<Self> {
+    pub async fn new(nats: &Nats<'_>, js: &jetstream::Context, to: &UserId, otherwise: &str) -> Result<Self> {
         Sealing::of(nats).sealer(js, to, otherwise).await
     }
 
@@ -467,7 +468,7 @@ impl Sealer {
     }
 }
 
-/// What a view that outlives the [`crate::Nats`] it was opened with seals with ([`Sealer`]): its human, credentials
+/// What a view that outlives the [`crate::connection::Nats`] it was opened with seals with ([`Sealer`]): its human, credentials
 /// and their account.
 #[derive(Debug, Clone)]
 pub struct Sealing {
@@ -477,7 +478,7 @@ pub struct Sealing {
 }
 
 impl Sealing {
-    pub fn of(nats: &crate::Nats<'_>) -> Self {
+    pub fn of(nats: &Nats<'_>) -> Self {
         Self { me: nats.me.id.clone(), creds: nats.creds.map(Path::to_path_buf), account: nats.account.clone() }
     }
 
@@ -646,7 +647,7 @@ mod tests {
         let (alice, bob, carol, dave): (UserId, UserId, UserId, UserId) =
             ("alice".parse().unwrap(), "bob".parse().unwrap(), "carol".parse().unwrap(), "dave".parse().unwrap());
         let creds: Vec<_> = [&alice, &bob, &carol].iter().map(|h| server.creds_as(h, Role::Human)).collect();
-        let nats: Vec<_> = creds.iter().map(|c| crate::Nats::new(&server.url, Some(c), None).unwrap()).collect();
+        let nats: Vec<_> = creds.iter().map(|c| Nats::new(&server.url, Some(c), None).unwrap()).collect();
         let mut js = Vec::new();
         for n in &nats {
             js.push(n.connect("test").await.unwrap().1);
@@ -763,7 +764,7 @@ mod tests {
         let (alice, bob, carol): (UserId, UserId, UserId) =
             ("alice".parse().unwrap(), "bob".parse().unwrap(), "carol".parse().unwrap());
         let creds: Vec<_> = [&alice, &bob, &carol].iter().map(|h| server.creds_as(h, Role::Human)).collect();
-        let nats: Vec<_> = creds.iter().map(|c| crate::Nats::new(&server.url, Some(c), None).unwrap()).collect();
+        let nats: Vec<_> = creds.iter().map(|c| Nats::new(&server.url, Some(c), None).unwrap()).collect();
         let mut js = Vec::new();
         for n in &nats {
             js.push(n.connect("test").await.unwrap().1);

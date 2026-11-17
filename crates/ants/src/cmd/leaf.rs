@@ -6,7 +6,9 @@ use ants_proto::Machine;
 use anyhow::{Context as _, Result};
 use clap::Subcommand;
 
-use crate::{Connection, auth, leaf, members, natsd, outbox, team_dir};
+use crate::auth::team_dir;
+use crate::connection::Connection;
+use crate::{auth, leaf, members, natsd, outbox};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum LeafCommand {

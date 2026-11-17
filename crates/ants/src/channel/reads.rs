@@ -16,7 +16,7 @@ const CONFLICTS: usize = 16;
 
 /// Whether the credentials of `nats` may read and write their human's channel read markers: a human's, never an
 /// ant's.
-pub fn allowed(nats: &crate::Nats<'_>) -> bool {
+pub fn allowed(nats: &crate::connection::Nats<'_>) -> bool {
     nats.me.role.is_human()
 }
 

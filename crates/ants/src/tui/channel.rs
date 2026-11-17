@@ -248,7 +248,7 @@ fn post_lines(post: &Post, data: &Data, now: DateTime<Utc>, marked: Option<usize
     head.extend([
         Span::styled(post.by.clone(), Style::new().fg(Color::Blue).bold()),
         Span::styled(format!(" {} ", ago(post.at, now)), frame::dim()),
-        Span::raw(crate::excerpt(first, 200)),
+        Span::raw(crate::text::excerpt(first, 200)),
     ]);
     let mut lines = vec![Line::from(head)];
     lines.extend(attach::lines(&post.attachments, marked, "  "));

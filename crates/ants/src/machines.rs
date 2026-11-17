@@ -110,7 +110,7 @@ pub(crate) async fn machines_of(js: &jetstream::Context, ant: &UserId) -> Result
 
 /// Print the machines and the ants each serves, a table or with `json` one record per line; or with `ant` the
 /// machines of that ant, one per line or with `json` as one object.
-pub async fn show(nats: &crate::Nats<'_>, ant: Option<&UserId>, json: bool) -> Result<()> {
+pub async fn show(nats: &crate::connection::Nats<'_>, ant: Option<&UserId>, json: bool) -> Result<()> {
     let (_, js) = nats.connect("ants-machines").await?;
     if let Some(ant) = ant {
         let machines = machines_of(&js, ant).await?;

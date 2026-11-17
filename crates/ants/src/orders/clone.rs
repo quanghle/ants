@@ -9,7 +9,7 @@ use anyhow::{Result, bail};
 use serde_json::Value;
 
 use super::Admin;
-use crate::Nats;
+use crate::connection::Nats;
 use crate::serve::AntOptions;
 
 /// `ants ant clone`: send the order and wait up to `wait` for its outcome.

@@ -5,6 +5,7 @@ use ants_daemon::humans::{Registry, Withdrawal};
 use ants_proto::{Acting, Role};
 
 use super::*;
+use crate::connection::Nats;
 use crate::test_support::Server;
 
 fn p(s: &str) -> UserId {
@@ -149,7 +150,7 @@ async fn an_enrolled_assistant_opens_and_seals_for_its_human_until_withdrawn() {
     let Some(server) = Server::start() else { return };
     let (alice, bob, pa) = (p("alice"), p("bob"), p("pa"));
     let creds: Vec<_> = [&alice, &bob].iter().map(|h| server.creds_as(h, Role::Human)).collect();
-    let nats: Vec<_> = creds.iter().map(|c| crate::Nats::new(&server.url, Some(c), None).unwrap()).collect();
+    let nats: Vec<_> = creds.iter().map(|c| Nats::new(&server.url, Some(c), None).unwrap()).collect();
     let (_, alice_js) = nats[0].connect("test").await.unwrap();
     let (_, bob_js) = nats[1].connect("test").await.unwrap();
     humans::ensure(&alice_js).await.unwrap();
@@ -257,7 +258,7 @@ async fn an_assistant_acts_for_its_human_only_while_grant_and_credentials_say_so
     let devices = ants_daemon::direct_kv::DirectKv::new(&ant_js, None, ants_proto::DEVICES_BUCKET).await.unwrap();
     let record = ants_proto::assistant_record_key(&dev_a);
     assert!(devices.put(&record, b"{}".to_vec()).await.is_err(), "an ant keeps no record");
-    let nats = crate::Nats::new(&server.url, Some(&creds), None).unwrap();
+    let nats = Nats::new(&server.url, Some(&creds), None).unwrap();
     let acting =
         async |by: &UserId, claim: Option<&UserId>| crate::behalf::Checker::new(&nats, &js).check(by, claim).await;
 
@@ -290,7 +291,7 @@ async fn a_following_checker_takes_withdrawals_and_revocations() {
     let (_, pa_js) = bus::connect(&server.url, Some(&assistant), None, &pa, "test").await.unwrap();
     ants_daemon::behalf::keep_record(&pa_js, None, &pa, &assistant).await.unwrap();
     put(&js, &creds, &alice, Some(pa.clone()), Sealing::Keep).await.unwrap();
-    let nats = crate::Nats::new(&server.url, Some(&creds), None).unwrap();
+    let nats = Nats::new(&server.url, Some(&creds), None).unwrap();
     let checker = std::sync::Arc::new(crate::behalf::Checker::new(&nats, &js));
     assert_eq!(checker.check(&pa, Some(&alice)).await, Acting::For(alice.clone()));
     let _following = checker.follow();
@@ -346,7 +347,7 @@ async fn an_assistant_s_marks_and_snoozes_count_for_its_human_while_granted() {
 
     let (mine, pinned, archived, snoozed) =
         (ThreadId::generate(), ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
-    let nats = crate::Nats::new(&server.url, Some(&creds), None).unwrap();
+    let nats = Nats::new(&server.url, Some(&creds), None).unwrap();
     let meta = crate::thread_meta::open(&nats, &js).await.unwrap();
     assert!(meta.change_marks(|m| m.pin(&mine)).await.unwrap());
     let now = chrono::Utc::now();
@@ -431,7 +432,7 @@ async fn an_assistant_s_reactions_for_its_human_show_as_hers() {
         js.publish(subject, serde_json::to_vec(&entry).unwrap().into()).await.unwrap().await.unwrap();
     }
     let read = || -> Reactions { [(message, vec![Reacted::new(check.clone(), vec![pa.clone(), bob.clone()])])].into() };
-    let nats = crate::Nats::new(&server.url, Some(&creds), None).unwrap();
+    let nats = Nats::new(&server.url, Some(&creds), None).unwrap();
     let checker = crate::behalf::Checker::new(&nats, &js);
     let mut checked = read();
     checker.reactions(&mut checked).await;
@@ -466,7 +467,7 @@ async fn an_assistant_s_posts_for_its_human_show_as_hers() {
     ants_daemon::behalf::keep_record(&pa_js, None, &pa, &assistant).await.unwrap();
     put(&js, &creds, &alice, Some(pa.clone()), Sealing::Keep).await.unwrap();
 
-    let nats = crate::Nats::new(&server.url, Some(&creds), None).unwrap();
+    let nats = Nats::new(&server.url, Some(&creds), None).unwrap();
     let checker = std::sync::Arc::new(crate::behalf::Checker::new(&nats, &js));
     let mut parser = crate::thread::Parser::default().checking(Some(checker));
     let mut read = async |subject: String, payload: Vec<u8>| {
@@ -590,7 +591,7 @@ async fn a_human_confirms_denies_or_pre_allows_its_assistant_s_decisions() {
     assert_eq!(held.len(), 3, "each waits for alice");
     assert!(held.iter().all(|(_, acts)| acts.len() == 1 && acts[0].assistant == pa && acts[0].human == alice));
 
-    let nats = crate::Nats::new(&server.url, Some(&creds), None).unwrap();
+    let nats = Nats::new(&server.url, Some(&creds), None).unwrap();
     Box::pin(consent::confirm(&nats, Some(&tools::qualified(&push)), false)).await.unwrap();
     Box::pin(consent::confirm(&nats, Some(&tools::qualified(&rm)), true)).await.unwrap();
     let err = consent::allow(&nats, vec!["execute:cargo test*".into()], false, false).await.unwrap_err();
@@ -679,7 +680,7 @@ async fn an_assistant_s_admin_orders_wait_for_its_human_to_consent() {
         .await
         .unwrap_or_else(|_| panic!("{} comes to {state:?}", order.op.describe()))
     };
-    let nats = crate::Nats::new(&server.url, Some(&creds), None).unwrap();
+    let nats = Nats::new(&server.url, Some(&creds), None).unwrap();
     let act = |o: &AdminOrder| format!("m1/dev-a/{}", o.id);
 
     let pause = send(AdminOp::Pause).await;

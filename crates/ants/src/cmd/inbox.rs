@@ -10,7 +10,8 @@ use futures::StreamExt as _;
 
 use crate::avatars::Faces;
 use crate::behalf::Checker;
-use crate::{Listing, Nats, inbox, presence, reacted, sealed, thread, tools};
+use crate::connection::{Listing, Nats};
+use crate::{inbox, presence, reacted, sealed, thread, tools};
 
 /// Prints a message of the inbox, opened as `state` says, from `acting` for its human or not.
 fn print(

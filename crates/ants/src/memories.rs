@@ -11,7 +11,8 @@ use anyhow::{Result, bail};
 use async_nats::jetstream;
 
 use crate::attachments::size;
-use crate::{Nats, orders};
+use crate::connection::Nats;
+use crate::orders;
 
 /// How long the CLI waits for the daemon's answer.
 pub const WAIT: Duration = Duration::from_secs(15);

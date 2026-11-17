@@ -17,6 +17,8 @@ use super::entry::Entry;
 use super::parser::Parser;
 use super::text::time;
 use super::{LATE, LISTED, RECENT, window};
+use crate::connection::Nats;
+use crate::text::excerpt;
 use crate::thread_meta;
 
 /// What a THREAD argument or `--thread` picks: a whole thread id (a UUID), taken as given; a start of one (or a whole
@@ -51,7 +53,7 @@ impl Pick {
     /// The thread this picks for the CLI's user, reading the stream with `js` unless given a whole thread id. Only a
     /// human's credentials get stream messages by sequence, so only a human picks by a start of an id or `last`. The
     /// threads an error lists show their titles where the credentials may read them.
-    pub async fn resolve(self, nats: &crate::Nats<'_>, js: &jetstream::Context) -> Result<ThreadId> {
+    pub async fn resolve(self, nats: &Nats<'_>, js: &jetstream::Context) -> Result<ThreadId> {
         let me = &nats.me;
         let prefix = match self {
             Self::Id(thread) => return Ok(thread),
@@ -79,7 +81,7 @@ impl Pick {
 }
 
 /// [`Pick::resolve`] for an optional pick.
-pub async fn resolve(pick: Option<Pick>, nats: &crate::Nats<'_>, js: &jetstream::Context) -> Result<Option<ThreadId>> {
+pub async fn resolve(pick: Option<Pick>, nats: &Nats<'_>, js: &jetstream::Context) -> Result<Option<ThreadId>> {
     match pick {
         Some(pick) => Ok(Some(pick.resolve(nats, js).await?)),
         None => Ok(None),
@@ -243,7 +245,7 @@ impl<'a> Unpicked<'a> {
 
     /// The same, with the titles of the threads listed, read as `ants thread list` reads them; none where the
     /// credentials may not read them, which a request would only wait on.
-    async fn titled(self, nats: &crate::Nats<'_>, js: &jetstream::Context) -> String {
+    async fn titled(self, nats: &Nats<'_>, js: &jetstream::Context) -> String {
         if self.listed.is_empty() {
             return self.to_string();
         }
@@ -331,9 +333,9 @@ pub(super) fn listing<'a>(
     let mut lines: Vec<String> = threads
         .take(LISTED)
         .map(|e| {
-            let title = titles.get(&e.thread_id).map(|t| format!("\"{}\"  ", crate::excerpt(t, 48)));
+            let title = titles.get(&e.thread_id).map(|t| format!("\"{}\"  ", excerpt(t, 48)));
             let (id, at, route) = (&e.thread_id, time(e.stored_at), e.route());
-            format!("  {id}  {at}  {}{route}: {}", title.unwrap_or_default(), crate::excerpt(&e.text, 48))
+            format!("  {id}  {at}  {}{route}: {}", title.unwrap_or_default(), excerpt(&e.text, 48))
         })
         .collect();
     if more > 0 {

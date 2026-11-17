@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 
-use crate::Connection;
+use crate::connection::Connection;
 use crate::retire::{self, RetireArgs};
 
 pub(crate) async fn run(args: &RetireArgs, conn: &Connection<'_>) -> Result<()> {

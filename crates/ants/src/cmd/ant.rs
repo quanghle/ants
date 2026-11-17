@@ -237,7 +237,7 @@ pub(crate) struct Order {
     wait: Duration,
 }
 
-pub(crate) async fn run(nats: &crate::Nats<'_>, command: AntCommand) -> Result<()> {
+pub(crate) async fn run(nats: &crate::connection::Nats<'_>, command: AntCommand) -> Result<()> {
     match command {
         AntCommand::Show { ant, json, config } => {
             let path = match config {

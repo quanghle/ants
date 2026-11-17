@@ -21,7 +21,8 @@ use chrono::{DateTime, TimeDelta, Utc};
 use nkeys::XKey;
 use serde::Deserialize;
 
-use crate::{Nats, auth, colony, devices, humans, revoke};
+use crate::connection::Nats;
+use crate::{auth, colony, devices, humans, revoke};
 
 pub(crate) mod consent;
 pub(crate) mod dedicated;

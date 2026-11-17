@@ -4,6 +4,7 @@ use ants_proto::{Envelope, Role, Uuid};
 use async_nats::jetstream::consumer::DeliverPolicy;
 
 use super::*;
+use crate::connection::Nats;
 use crate::thread::{Select, Threads, prune, scan};
 
 /// A time-ordered thread id made `days` ago.
@@ -213,7 +214,7 @@ async fn the_title_of_a_sealed_thread_is_sealed_for_both_humans() {
     let Some(server) = crate::test_support::Server::start() else { return };
     let humans: Vec<UserId> = ["alice", "bob", "carol"].iter().map(|h| h.parse().unwrap()).collect();
     let creds: Vec<_> = humans.iter().map(|h| server.creds_as(h, Role::Human)).collect();
-    let nats: Vec<_> = creds.iter().map(|c| crate::Nats::new(&server.url, Some(c), None).unwrap()).collect();
+    let nats: Vec<_> = creds.iter().map(|c| Nats::new(&server.url, Some(c), None).unwrap()).collect();
     let mut js = Vec::new();
     for n in &nats {
         js.push(n.connect("test").await.unwrap().1);

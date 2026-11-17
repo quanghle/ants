@@ -533,7 +533,7 @@ fn card(data: &Data, thread: &ThreadId, now: DateTime<Utc>, width: usize) -> Vec
             let last = data.live.summary(thread).map_or(0, |s| s.last_reopening);
             let stale = if t.is_current(last) { "" } else { ", stale" };
             let about = format!(" ({}, {}{stale})", t.by, ago(t.at, now));
-            let text = crate::excerpt(&t.text, (width * 3).saturating_sub(about.len() + 8));
+            let text = crate::text::excerpt(&t.text, (width * 3).saturating_sub(about.len() + 8));
             vec![Span::raw(text), Span::styled(about, frame::dim())]
         }
         None => vec![Span::styled("none kept: S or /tldr asks for one", frame::dim())],
@@ -586,7 +586,7 @@ pub fn chain(data: &Data, thread: &ThreadId) -> Vec<Vec<UserId>> {
 pub fn why(data: &Data, thread: &ThreadId) -> Line<'static> {
     let state = data.state(thread);
     let why = match state {
-        ThreadState::Stuck => data.stuck(thread).map(|a| crate::excerpt(&a.text, 80)),
+        ThreadState::Stuck => data.stuck(thread).map(|a| crate::text::excerpt(&a.text, 80)),
         ThreadState::WaitingOnMe if data.live.approvals.iter().any(|r| r.thread_id == *thread) => {
             Some("a tool request waits for a decision".to_owned())
         }
@@ -597,7 +597,7 @@ pub fn why(data: &Data, thread: &ThreadId) -> Line<'static> {
     };
     let mut text = state.label().to_owned();
     if let Some(why) = why {
-        text = format!("{text}: {}", crate::excerpt(&why, 100));
+        text = format!("{text}: {}", crate::text::excerpt(&why, 100));
     }
     Line::styled(text, Style::new().fg(state.color()))
 }

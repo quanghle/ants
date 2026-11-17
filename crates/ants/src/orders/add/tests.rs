@@ -45,7 +45,7 @@ async fn an_add_order_adds_an_ant_the_signer_signs_on_it_and_a_retire_order_revo
     let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
     issue_device_with(&team, &alice, Kind::Human, rights, &admin, &admin_creds).unwrap();
-    let admin = crate::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+    let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
     let (_, js) = admin.connect("test").await.unwrap();
 
     let work = server.dir().join("work");
@@ -137,14 +137,15 @@ fn shrink_and_signal(conf: &std::path::Path, asked: &str, shrunk: &str) -> anyho
 async fn an_add_order_on_a_leaf_node_s_machine_renews_its_uplink_to_carry_the_ant() {
     use ants_daemon::admin::LeafNode;
     use ants_daemon::admin::restart::Restarts;
+    use ants_daemon::bus;
     use ants_daemon::host::{self, Host};
     use ants_proto::{JsDomain, Machine};
     use ants_test_support::{NatsServer, free_port};
 
     use crate::auth::{self, issue_host};
+    use crate::leaf;
     use crate::members::{self, EnrollApprover};
     use crate::test_support::{eventually, spawn_hub};
-    use crate::{bus, leaf};
 
     let leaf_port = free_port();
     let Some(hub) = spawn_hub(leaf_port, "feature_flags { js_api_reply_v2: true }") else { return };
@@ -219,7 +220,7 @@ async fn an_add_order_on_a_leaf_node_s_machine_renews_its_uplink_to_carry_the_an
     })
     .await;
 
-    let admin = crate::Nats::new(&hub.url, Some(&admin_creds), Some(&domain)).unwrap();
+    let admin = crate::connection::Nats::new(&hub.url, Some(&admin_creds), Some(&domain)).unwrap();
     let (_, js) = admin.connect("test").await.unwrap();
     let settings = json!({ "workdir": work });
     let Value::Object(settings) = settings else { unreachable!() };

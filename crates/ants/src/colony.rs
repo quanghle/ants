@@ -363,7 +363,7 @@ pub async fn list(js: &jetstream::Context) -> Result<Vec<ColonyEntry>> {
 }
 
 /// Print the colony: a table, or with `json` one entry per line.
-pub async fn show(nats: &crate::Nats<'_>, json: bool) -> Result<()> {
+pub async fn show(nats: &crate::connection::Nats<'_>, json: bool) -> Result<()> {
     let (_, js) = nats.connect("ants-colony").await?;
     let entries = list(&js).await?;
     let identities = avatars::read_or_none(&js).await;

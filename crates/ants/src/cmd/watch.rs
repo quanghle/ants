@@ -9,7 +9,9 @@ use anyhow::{Result, bail};
 use futures::StreamExt as _;
 
 use crate::avatars::Faces;
-use crate::{Nats, escalation_note, thread, tools};
+use crate::connection::Nats;
+use crate::text::escalation_note;
+use crate::{thread, tools};
 
 /// What `ants watch <subject> [thread]` subscribes to: a subject filter as given, or, for an ant (one token), its
 /// status subjects.

@@ -46,7 +46,8 @@ pub(crate) mod webhook;
 use anyhow::Result;
 
 use crate::cli::{Cli, Command, DaemonCommand};
-use crate::{Connection, Listing, add, colony, completions, machines, queue, renew, summary, tui, update};
+use crate::connection::{Connection, Listing};
+use crate::{add, colony, completions, machines, queue, renew, summary, tui, update};
 
 /// Run the command `cli` names, or the terminal UI without one.
 pub(crate) async fn run(cli: Cli) -> Result<()> {

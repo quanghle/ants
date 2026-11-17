@@ -7,7 +7,8 @@ use anyhow::Result;
 use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
 
-use crate::{Nats, completions, quiet, search, summary, thread, thread_meta};
+use crate::connection::Nats;
+use crate::{completions, quiet, search, summary, thread, thread_meta};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum ThreadCommand {

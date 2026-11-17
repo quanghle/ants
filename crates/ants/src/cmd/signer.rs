@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use crate::{Connection, renew, signer, team_dir, upgrade};
+use crate::auth::team_dir;
+use crate::connection::Connection;
+use crate::{renew, signer, upgrade};
 
 pub(crate) async fn run(
     config: Option<PathBuf>,

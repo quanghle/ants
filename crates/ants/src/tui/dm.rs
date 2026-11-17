@@ -121,7 +121,7 @@ fn said(said: &Said, width: usize) -> String {
     };
     let text = unopened(said.sealed).map_or_else(|| said.text.replace('\n', " "), str::to_owned);
     let lock = if said.sealed.is_some() { format!("{LOCK} ") } else { String::new() };
-    crate::excerpt(&format!("{lock}{}:{files} {text}", said.from), width)
+    crate::text::excerpt(&format!("{lock}{}:{files} {text}", said.from), width)
 }
 
 /// The row of a direct thread in the list: its unread badge and title, how many messages it has and when the latest

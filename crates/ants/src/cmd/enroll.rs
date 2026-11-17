@@ -6,7 +6,9 @@ use ants_proto::{ChannelId, Destination, UserId};
 use anyhow::{Context as _, Result};
 use clap::Subcommand;
 
-use crate::{Connection, channel, enroll, renew, team_dir};
+use crate::auth::team_dir;
+use crate::connection::Connection;
+use crate::{channel, enroll, renew};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum EnrollCommand {

@@ -13,6 +13,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::colony::{self, State, short, since};
+use crate::connection::Nats;
 use crate::{orders, queue, settings, spend, thread};
 
 /// How many of its most recently active threads `ants ant show` lists.
@@ -119,7 +120,7 @@ fn is_zero(n: &usize) -> bool {
 
 /// Print what is known of `ant`, as text or with `json` one JSON object; `caps` are the ants' caps the local config
 /// file sets.
-pub async fn show(nats: &crate::Nats<'_>, ant: UserId, caps: &BTreeMap<UserId, Caps>, json: bool) -> Result<()> {
+pub async fn show(nats: &Nats<'_>, ant: UserId, caps: &BTreeMap<UserId, Caps>, json: bool) -> Result<()> {
     let me = &nats.me.id;
     if !nats.me.role.is_human() {
         bail!("the credentials of {me} are an ant's; `ants ant show` reads what a human reads");

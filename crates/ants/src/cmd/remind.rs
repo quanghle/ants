@@ -4,7 +4,8 @@ use anyhow::Result;
 use clap::Subcommand;
 use clap_complete::engine::ArgValueCompleter;
 
-use crate::{Nats, completions, remind};
+use crate::connection::Nats;
+use crate::{completions, remind};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum RemindCommand {

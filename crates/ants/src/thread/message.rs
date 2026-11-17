@@ -159,7 +159,7 @@ fn listing<'a>(messages: impl ExactSizeIterator<Item = &'a Entry>) -> String {
         .take(LISTED)
         .filter_map(|e| {
             let id = e.id?;
-            Some(format!("  {id}  {}  {}: {}", time(e.stored_at), e.route(), crate::excerpt(&e.text, 48)))
+            Some(format!("  {id}  {}  {}: {}", time(e.stored_at), e.route(), crate::text::excerpt(&e.text, 48)))
         })
         .collect();
     if more > 0 {

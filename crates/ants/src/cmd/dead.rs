@@ -9,7 +9,10 @@ use anyhow::{Context as _, Result};
 use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
 
-use crate::{Nats, completions, excerpt, serve_metrics};
+use crate::completions;
+use crate::connection::Nats;
+use crate::serve::serve_metrics;
+use crate::text::excerpt;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum DeadCommand {

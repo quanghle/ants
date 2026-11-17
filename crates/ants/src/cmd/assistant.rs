@@ -6,7 +6,8 @@ use anyhow::Result;
 use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
 
-use crate::{Nats, assistant, completions};
+use crate::connection::Nats;
+use crate::{assistant, completions};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum AssistantCommand {

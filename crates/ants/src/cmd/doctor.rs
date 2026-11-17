@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use crate::{Connection, auth, doctor, team_dir, webhook};
+use crate::auth::team_dir;
+use crate::connection::Connection;
+use crate::{auth, doctor, webhook};
 
 pub(crate) async fn run(
     config: Option<PathBuf>,

@@ -343,7 +343,7 @@ pub struct Wanted {
 }
 
 impl Io {
-    pub fn new(nats: &crate::Nats<'_>, js: jetstream::Context) -> Self {
+    pub fn new(nats: &crate::connection::Nats<'_>, js: jetstream::Context) -> Self {
         let (url, creds, domain) = (nats.url.to_owned(), nats.creds.map(PathBuf::from), nats.domain.cloned());
         Self { js, url, creds, domain, asked: None, read: None, signed: None, sign: None }
     }
@@ -374,7 +374,7 @@ impl Io {
             self.read = Some(
                 async move {
                     let read = async {
-                        let nats = crate::Nats::new(&url, creds.as_deref(), domain.as_ref())?;
+                        let nats = crate::connection::Nats::new(&url, creds.as_deref(), domain.as_ref())?;
                         crate::mcp::read(&nats, &js, None, &ant).await
                     };
                     Event::Read(ant.clone(), asked, read.await.map_err(|e| format!("{e:#}")))
@@ -391,7 +391,7 @@ impl Io {
         self.sign = Some(
             async move {
                 let signed = async {
-                    let nats = crate::Nats::new(&url, creds.as_deref(), domain.as_ref())?;
+                    let nats = crate::connection::Nats::new(&url, creds.as_deref(), domain.as_ref())?;
                     crate::mcp::sign_in(&nats, &js, None, &ant, &server, callback).await
                 };
                 Event::Signed(ant.clone(), sign, signed.await.map_err(|e| format!("{e:#}")))

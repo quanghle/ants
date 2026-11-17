@@ -20,6 +20,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use self::summaries::Done;
+use crate::connection::Nats;
 use crate::{sealed, thread_meta};
 
 pub use self::entry::{Entry, Kind, last_reopening};
@@ -137,7 +138,7 @@ pub async fn scan_opening(
 }
 
 /// Connect as the CLI's human: only a human's credentials get stream messages by sequence.
-pub async fn connect(nats: &crate::Nats<'_>) -> Result<jetstream::Context> {
+pub async fn connect(nats: &Nats<'_>) -> Result<jetstream::Context> {
     if !nats.me.role.is_human() {
         bail!(
             "the credentials of {} are an ant's, which read no other inbox; `ants thread` reads them all with a \
@@ -151,7 +152,7 @@ pub async fn connect(nats: &crate::Nats<'_>) -> Result<jetstream::Context> {
 /// `ants thread list`: the threads with messages stored within `since` (by default [`SINCE`], or for `--pinned` and
 /// `--archived` since the earliest thread marked so started, or all the stream keeps for `--archived` when idle
 /// threads count as archived), as `select` keeps them, with their titles.
-pub async fn list(nats: &crate::Nats<'_>, since: Option<Duration>, select: &Select, json: bool) -> Result<()> {
+pub async fn list(nats: &Nats<'_>, since: Option<Duration>, select: &Select, json: bool) -> Result<()> {
     let (threads, omitted) = listed(nats, since, select).await?;
     if json {
         for thread in &threads {
@@ -169,7 +170,7 @@ pub async fn list(nats: &crate::Nats<'_>, since: Option<Duration>, select: &Sele
 }
 
 /// The threads [`list`] lists, and how many less recently active ones `select`'s limit left out.
-pub async fn listed(nats: &crate::Nats<'_>, since: Option<Duration>, select: &Select) -> Result<(Vec<Summary>, usize)> {
+pub async fn listed(nats: &Nats<'_>, since: Option<Duration>, select: &Select) -> Result<(Vec<Summary>, usize)> {
     let auto_archive = crate::defaults::auto_archive()?;
     let select = &Select { idle_before: idle_before(auto_archive, Utc::now()), ..select.clone() };
     let js = connect(nats).await?;
@@ -411,13 +412,7 @@ pub async fn last_activity(js: &jetstream::Context, thread: &ThreadId) -> Result
 
 /// `ants thread show THREAD`: every message stored on the thread `pick` picks, in the order the stream stored them,
 /// the prompts its ants ended with no reply sent, and unless `no_tools` the tool calls its ants made.
-pub async fn show(
-    nats: &crate::Nats<'_>,
-    pick: Pick,
-    since: Option<Duration>,
-    json: bool,
-    no_tools: bool,
-) -> Result<()> {
+pub async fn show(nats: &Nats<'_>, pick: Pick, since: Option<Duration>, json: bool, no_tools: bool) -> Result<()> {
     let auto_archive = crate::defaults::auto_archive()?;
     let js = connect(nats).await?;
     let thread = &pick.resolve(nats, &js).await?;

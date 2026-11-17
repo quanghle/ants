@@ -10,7 +10,8 @@ use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::{self, kv};
 use chrono::{DateTime, TimeDelta, Utc};
 
-use crate::{Nats, thread};
+use crate::connection::Nats;
+use crate::thread;
 
 /// How long a mute lasts unless given: as long as the stream keeps a thread's messages.
 pub const MUTE_FOR: Duration = ants_daemon::bus::RETENTION;

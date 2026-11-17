@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use ants_daemon::bus;
 use ants_daemon::creds::{Finding, Kind as CredsKind};
 use ants_daemon::keystore;
 use ants_proto::{AntRequest, DeviceKey, LoginReply, Role, UserId, Verdict, subject};
@@ -16,7 +17,7 @@ use super::offboard::{Offboarded, Offboarder};
 use super::*;
 use crate::test_support::Server;
 use crate::test_support::github::fake;
-use crate::{auth, bus, renew, revoke, signer, tools};
+use crate::{auth, renew, revoke, signer, tools};
 
 const WAIT: Duration = Duration::from_secs(20);
 const REPEAT: Duration = Duration::from_millis(200);

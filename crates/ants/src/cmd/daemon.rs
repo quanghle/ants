@@ -5,7 +5,8 @@ use std::path::Path;
 use ants_daemon::admin::ConfigFile;
 use anyhow::Result;
 
-use crate::{Connection, manager, natsd, reload, scheduler, serve, update, upgrade};
+use crate::connection::Connection;
+use crate::{manager, natsd, reload, scheduler, serve, update, upgrade};
 
 pub(crate) async fn run(args: &serve::DaemonArgs, conn: &Connection<'_>) -> Result<()> {
     let domain = conn.js_domain;

@@ -614,6 +614,7 @@ mod tests {
     use ants_proto::{Answer, Question};
 
     use super::*;
+    use crate::connection::Nats;
     use crate::test_support::live::{message, user};
 
     #[test]
@@ -639,7 +640,7 @@ mod tests {
         let Some(server) = crate::test_support::Server::start() else { return };
         let (alice, bob) = (user("alice"), user("bob"));
         let creds = [server.creds_as(&alice, Role::Human), server.creds_as(&bob, Role::Human)];
-        let nats: Vec<_> = creds.iter().map(|c| crate::Nats::new(&server.url, Some(c), None).unwrap()).collect();
+        let nats: Vec<_> = creds.iter().map(|c| Nats::new(&server.url, Some(c), None).unwrap()).collect();
         let (client, js) = nats[0].connect("test").await.unwrap();
         let (_, bob_js) = nats[1].connect("test").await.unwrap();
         for config in [ants_daemon::hub::threads_config(), ants_daemon::hub::files_config()] {
@@ -727,7 +728,7 @@ mod tests {
     async fn an_ask_from_the_bar_stores_its_files_before_the_message() {
         let Some(server) = crate::test_support::Server::start() else { return };
         let creds = server.creds_as(&user("alice"), ants_proto::Role::Human);
-        let nats = crate::Nats::new(&server.url, Some(&creds), None).unwrap();
+        let nats = Nats::new(&server.url, Some(&creds), None).unwrap();
         let (client, js) = nats.connect("test").await.unwrap();
         for config in [ants_daemon::hub::stream_config(), ants_daemon::hub::files_config()] {
             js.create_stream(config).await.unwrap();

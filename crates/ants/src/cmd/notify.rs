@@ -5,7 +5,8 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::Subcommand;
 
-use crate::{Nats, quiet};
+use crate::connection::Nats;
+use crate::quiet;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum NotifyCommand {
