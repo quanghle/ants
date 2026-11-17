@@ -99,8 +99,8 @@ async fn the_answer_carries_the_files_attached_during_its_turn() {
     bus.js.create_stream(crate::hub::files_config()).await.unwrap();
     let (launch, log, gate) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
-    let home = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/daemon-t/reply-files");
-    let _ = std::fs::remove_dir_all(&home);
+    // The server's directory is this run's own: test runs at once delete and attach each other's files otherwise.
+    let home = bus._server.dir().join("reply-files");
     let work = home.join("work");
     std::fs::create_dir_all(&work).unwrap();
     std::fs::write(work.join("report.md"), "# done").unwrap();
