@@ -8,12 +8,12 @@ use ants_proto::{ApprovalRequest, ThreadId, Verdict};
 use chrono::{DateTime, Local, TimeDelta, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
-use super::frame;
 use super::model::{Data, Key};
+use super::style;
 use crate::live;
 use crate::tools::{self, State};
 
@@ -111,14 +111,14 @@ pub fn lines(card: Card, asking: Option<&Asking>, keyed: bool, now: DateTime<Utc
     let tool = format!("{}: {}", request.tool.kind, request.tool.title.replace('\n', " "));
     let mut lines = vec![Line::raw(cut(&tool, width))];
     if let Some(input) = &request.tool.input {
-        lines.push(Line::styled(cut(&format!("input {}", input.replace('\n', " ")), width), frame::dim()));
+        lines.push(Line::styled(cut(&format!("input {}", input.replace('\n', " ")), width), style::dim()));
     } else if !request.tool.locations.is_empty() {
-        lines.push(Line::styled(cut(&format!("files {}", request.tool.locations.join(", ")), width), frame::dim()));
+        lines.push(Line::styled(cut(&format!("files {}", request.tool.locations.join(", ")), width), style::dim()));
     }
-    let prompt = Style::new().fg(Color::Yellow).bold();
+    let prompt = Style::new().fg(style::PENDING).bold();
     let asked = asking.filter(|a| same(&a.request, request));
     let last = match (card.settled, asked) {
-        (Some(state), _) => Line::styled(cut(&how(state, &request.ant), width), frame::dim()),
+        (Some(state), _) => Line::styled(cut(&how(state, &request.ant), width), style::dim()),
         (None, Some(Asking { storing: true, .. })) => Line::styled("storing the decision…", prompt),
         (None, Some(Asking { verdict: Some(v), .. })) => {
             Line::styled(cut(&format!("{}? y confirms · any other key cancels", tools::spelling(*v)), width), prompt)
@@ -127,11 +127,11 @@ pub fn lines(card: Card, asking: Option<&Asking>, keyed: bool, now: DateTime<Utc
             let left = format!("expires in {}", tools::left(request.expires_at, now));
             if keyed {
                 Line::from(vec![
-                    Span::styled(keys(request), Style::new().fg(Color::Yellow)),
-                    Span::styled(format!(" · {left}"), frame::dim()),
+                    Span::styled(keys(request), Style::new().fg(style::PENDING)),
+                    Span::styled(format!(" · {left}"), style::dim()),
                 ])
             } else {
-                Line::styled(left, frame::dim())
+                Line::styled(left, style::dim())
             }
         }
     };
@@ -248,7 +248,7 @@ impl Asking {
             tools::qualified(&self.request),
             tools::spelling(verdict)
         );
-        Some(Line::styled(text, Style::new().fg(Color::Yellow).bold()))
+        Some(Line::styled(text, Style::new().fg(style::PENDING).bold()))
     }
 }
 
@@ -268,7 +268,7 @@ pub fn draw_full(f: &mut Frame, asking: &Asking, now: DateTime<Utc>) {
     }
     lines.push(Line::raw(""));
     let id = tools::qualified(request);
-    let prompt = Style::new().fg(Color::Yellow).bold();
+    let prompt = Style::new().fg(style::PENDING).bold();
     if asking.storing {
         lines.push(Line::styled("storing the decision…", prompt));
     } else if let Some(verdict) = asking.verdict {
@@ -281,7 +281,7 @@ pub fn draw_full(f: &mut Frame, asking: &Asking, now: DateTime<Utc>) {
         lines.push(Line::styled("answered already · Enter open its thread · Esc back", prompt));
     }
     f.render_widget(Clear, area);
-    let block = Block::bordered().title(format!(" Tool request {id} ")).border_style(Style::new().fg(Color::Yellow));
+    let block = Block::bordered().title(format!(" Tool request {id} ")).border_style(Style::new().fg(style::PENDING));
     f.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), area);
 }
 

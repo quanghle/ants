@@ -17,8 +17,8 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
-use super::frame::{self, ago};
 use super::model::{Action, Key, To};
+use super::style::{self, ago};
 use crate::live::maybe;
 use crate::orders::{self, Listed};
 use crate::settings::{self, Assignment, Reading};
@@ -192,12 +192,12 @@ impl Pane {
             Layout::vertical([Constraint::Min(3), Constraint::Length(tall), Constraint::Length(3)]).areas(area);
         self.draw_fields(frame, fields, ant, now, focused);
         let items: Vec<ListItem> = if orders.is_empty() {
-            vec![ListItem::new(Line::styled(format!("no admin orders to {ant}"), frame::dim()))]
+            vec![ListItem::new(Line::styled(format!("no admin orders to {ant}"), style::dim()))]
         } else {
             orders.iter().rev().map(|o| ListItem::new(order_line(o, now))).collect()
         };
         frame.render_widget(
-            List::new(items).block(frame::block(" admin orders, latest first ".to_owned(), false)),
+            List::new(items).block(style::block(" admin orders, latest first ".to_owned(), false)),
             below,
         );
         let (text, style, title) = match (&self.draft, &self.sent) {
@@ -206,13 +206,13 @@ impl Pane {
                 let (text, color) = sent_line(sent);
                 (text, Style::new().fg(color), " last order ")
             }
-            (None, None) => ("Enter changes the field selected".to_owned(), frame::dim(), " change "),
+            (None, None) => ("Enter changes the field selected".to_owned(), style::dim(), " change "),
         };
-        let mut block = frame::block(title.to_owned(), focused && self.draft.is_some());
+        let mut block = style::block(title.to_owned(), focused && self.draft.is_some());
         if self.draft.is_some()
             && let Some(Sent::Failed(e)) = &self.sent
         {
-            block = block.title_bottom(Line::styled(format!(" {e} "), Style::new().fg(Color::Red)));
+            block = block.title_bottom(Line::styled(format!(" {e} "), Style::new().fg(style::ERROR)));
         }
         frame.render_widget(Paragraph::new(Span::styled(text, style)).block(block), input);
     }
@@ -226,7 +226,7 @@ impl Pane {
         let reading = match reading {
             Ok(reading) => reading,
             Err(text) => {
-                let block = frame::block(" settings ".to_owned(), focused);
+                let block = style::block(" settings ".to_owned(), focused);
                 frame.render_widget(Paragraph::new(text).block(block).wrap(Wrap { trim: false }), area);
                 return;
             }
@@ -235,9 +235,9 @@ impl Pane {
             Some(read) => format!(" config.toml on {}, read {} ", read.machine, ago(read.read_at, now)),
             None => " settings never read ".to_owned(),
         };
-        let mut block = frame::block(title, focused && self.draft.is_none());
+        let mut block = style::block(title, focused && self.draft.is_none());
         if let Some(stale) = &reading.stale {
-            block = block.title_bottom(Line::styled(format!(" {stale} "), Style::new().fg(Color::Yellow)));
+            block = block.title_bottom(Line::styled(format!(" {stale} "), Style::new().fg(style::WARNING)));
         }
         let items: Vec<ListItem> = self
             .fields()
@@ -249,12 +249,12 @@ impl Pane {
                     Span::raw(value),
                 ];
                 if secret {
-                    spans.push(Span::styled("  (secret)", frame::dim()));
+                    spans.push(Span::styled("  (secret)", style::dim()));
                 }
                 ListItem::new(Line::from(spans))
             })
             .collect();
-        let list = List::new(items).block(block).highlight_style(frame::highlight(focused && self.draft.is_none()));
+        let list = List::new(items).block(block).highlight_style(style::highlight(focused && self.draft.is_none()));
         let mut state = ListState::default().with_selected(Some(self.at));
         frame.render_stateful_widget(list, area, &mut state);
     }
@@ -263,16 +263,16 @@ impl Pane {
 /// An order on one line: when, who, what, and where it stands, in its colour.
 fn order_line(o: &Listed, now: DateTime<Utc>) -> Line<'static> {
     let color = match o.state {
-        OrderState::Pending | OrderState::Held => Color::Yellow,
-        OrderState::Applied => Color::Green,
-        OrderState::Refused => Color::Red,
+        OrderState::Pending | OrderState::Held => style::PENDING,
+        OrderState::Applied => style::CONNECTED,
+        OrderState::Refused => style::ERROR,
     };
     let state = match &o.reason {
         Some(reason) => format!("{}: {reason}", o.state.as_str()),
         None => o.state.as_str().to_owned(),
     };
     Line::from(vec![
-        Span::styled(o.sent_at.map_or_else(|| "-".to_owned(), |at| ago(at, now)), frame::dim()),
+        Span::styled(o.sent_at.map_or_else(|| "-".to_owned(), |at| ago(at, now)), style::dim()),
         Span::raw(format!(
             "  {} · {} on {}  ",
             o.by(),
@@ -285,13 +285,13 @@ fn order_line(o: &Listed, now: DateTime<Utc>) -> Line<'static> {
 
 fn sent_line(sent: &Sent) -> (String, Color) {
     match sent {
-        Sent::Sending => ("sending…".to_owned(), Color::Yellow),
-        Sent::Applied(id) => (format!("order {id} applied"), Color::Green),
+        Sent::Sending => ("sending…".to_owned(), style::PENDING),
+        Sent::Applied(id) => (format!("order {id} applied"), style::CONNECTED),
         Sent::Pending(id, machine) => {
-            (format!("order {id} pending: the daemon of {machine} has not taken it"), Color::Yellow)
+            (format!("order {id} pending: the daemon of {machine} has not taken it"), style::PENDING)
         }
-        Sent::Refused(id, reason) => (format!("order {id} refused: {reason}"), Color::Red),
-        Sent::Failed(e) => (e.clone(), Color::Red),
+        Sent::Refused(id, reason) => (format!("order {id} refused: {reason}"), style::ERROR),
+        Sent::Failed(e) => (e.clone(), style::ERROR),
     }
 }
 

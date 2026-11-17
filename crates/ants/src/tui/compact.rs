@@ -5,14 +5,14 @@
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use super::frame::{self, ago};
 use super::home::{self, Why};
 use super::model::{Action, Data, Focus, Key, Level, Model};
 use super::nav;
+use super::style::{self, ago};
 use super::work::dollars;
 use crate::live::Link;
 
@@ -53,22 +53,22 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
     let [first, second] = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(frame.area());
     let data = &model.data;
     let items = home::waiting(data, now);
-    let bar = || Span::styled(" │ ", frame::dim());
+    let bar = || Span::styled(" │ ", style::dim());
     let mut spans = vec![Span::styled("ants ▸ ", Style::new().bold())];
     let counts = counts(&items);
     if counts.is_empty() {
-        spans.push(Span::styled("nothing waits", frame::dim()));
+        spans.push(Span::styled("nothing waits", style::dim()));
     }
     for (i, (why, n)) in counts.into_iter().enumerate() {
         if i > 0 {
-            spans.push(Span::styled(" · ", frame::dim()));
+            spans.push(Span::styled(" · ", style::dim()));
         }
         spans.push(Span::styled(format!("{n} {}", why.label()), Style::new().fg(why.color())));
     }
     spans.push(bar());
     let working = working(data);
     if working.is_empty() {
-        spans.push(Span::styled("no ant working", frame::dim()));
+        spans.push(Span::styled("no ant working", style::dim()));
     } else {
         let working: Vec<String> = working.iter().map(|w| format!("◐ {w}")).collect();
         spans.push(Span::raw(working.join(" · ")));
@@ -78,7 +78,7 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
     spans.push(Span::raw(format!("{today} today")));
     if let Link::Down(since) = data.live.link {
         spans.push(bar());
-        spans.push(Span::styled(format!("○ disconnected {}", ago(since, now)), Style::new().fg(Color::Red)));
+        spans.push(Span::styled(format!("○ disconnected {}", ago(since, now)), Style::new().fg(style::ERROR)));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), first);
     frame.render_widget(Paragraph::new(second_line(model, &items, now)), second);
@@ -87,7 +87,7 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
 /// The latest notice, else the top home item with the keys.
 fn second_line(model: &Model, items: &[home::Item], now: DateTime<Utc>) -> Line<'static> {
     if let Some(notice) = model.notice_at(now) {
-        let color = if notice.level == Level::Error { Color::Red } else { Color::Cyan };
+        let color = if notice.level == Level::Error { style::ERROR } else { style::INFO };
         return Line::styled(format!("      {}", notice.text), Style::new().fg(color));
     }
     if let Some(line) = model.asking.as_ref().and_then(super::approvals::Asking::footer) {
@@ -100,12 +100,12 @@ fn second_line(model: &Model, items: &[home::Item], now: DateTime<Utc>) -> Line<
         return prompt.line(&model.data);
     }
     let Some(top) = items.first() else {
-        let keys = Span::styled(format!("   {KEYS}"), frame::dim());
+        let keys = Span::styled(format!("   {KEYS}"), style::dim());
         let what =
             if model.data.live.stored_at.is_some() { "nothing waits on a human" } else { "reading the stream…" };
-        return Line::from(vec![Span::styled(format!("      {what}"), frame::dim()), keys]);
+        return Line::from(vec![Span::styled(format!("      {what}"), style::dim()), keys]);
     };
-    let keys = Span::styled(format!("   {} · {KEYS}", top.why.keys()), frame::dim());
+    let keys = Span::styled(format!("   {} · {KEYS}", top.why.keys()), style::dim());
     let text = crate::excerpt(&top.text, 120);
     Line::from(vec![
         Span::raw("      ▸ "),
@@ -151,7 +151,7 @@ mod tests {
     use crate::tui::test_support::model;
 
     fn pane(m: &Model, now: DateTime<Utc>) -> String {
-        crate::test_support::render::rendered(140, 2, |f| frame::draw(f, m, now))
+        crate::test_support::render::rendered(140, 2, |f| crate::tui::frame::draw(f, m, now))
     }
 
     #[test]

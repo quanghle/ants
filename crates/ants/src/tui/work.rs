@@ -12,9 +12,9 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
 
-use super::frame::{self, ago};
 use super::model::{Data, Key, To};
 use super::select::Selection;
+use super::style::{self, ago};
 use crate::thread::{Entry, Kind};
 
 /// What a thread waits on, as its messages and the ants' progress tell.
@@ -435,7 +435,7 @@ impl Page {
 
     pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
         let rows = self.rows(data);
-        let block = frame::block(format!(" {} ({}) ", self.filter.title(), rows.len()), focused);
+        let block = style::block(format!(" {} ({}) ", self.filter.title(), rows.len()), focused);
         if rows.is_empty() {
             let text = if data.live.stored_at.is_some() { "no threads" } else { "reading the stream…" };
             frame.render_widget(Paragraph::new(text).block(block), area);
@@ -461,13 +461,13 @@ impl Page {
             Constraint::Length(8),
             Constraint::Fill(2),
         ];
-        let header = Row::new(["STATE", "THREAD", "ANTS", "OWNER", "TURNS", "SPEND", "AGE", "NOW"]).style(frame::dim());
+        let header = Row::new(["STATE", "THREAD", "ANTS", "OWNER", "TURNS", "SPEND", "AGE", "NOW"]).style(style::dim());
         let table =
-            Table::new(table, widths).header(header).block(block).row_highlight_style(frame::highlight(focused));
+            Table::new(table, widths).header(header).block(block).row_highlight_style(style::highlight(focused));
         let mut state = TableState::default().with_selected(Some(at));
         frame.render_stateful_widget(table, list, &mut state);
         if let (Some(detail), Some((thread, _))) = (detail, rows.get(at)) {
-            let block = frame::block(" Selected ".to_owned(), false);
+            let block = style::block(" Selected ".to_owned(), false);
             let width = usize::from(detail.width.saturating_sub(2));
             let paragraph = Paragraph::new(card(data, thread, now, width)).block(block).wrap(Wrap { trim: false });
             frame.render_widget(paragraph, detail);
@@ -499,7 +499,7 @@ fn row(data: &Data, thread: &ThreadId, state: ThreadState, snoozed: bool, now: D
     let age = summary.map_or_else(String::new, |s| ago(s.last_at, now));
     let mut title = vec![Span::raw(data.title(thread))];
     if snoozed {
-        title.push(Span::styled(" · snoozed", frame::dim()));
+        title.push(Span::styled(" · snoozed", style::dim()));
     }
     Row::new(vec![
         Cell::from(state.label()).style(Style::new().fg(state.color())),
@@ -527,16 +527,16 @@ pub fn doing(data: &Data, thread: &ThreadId, width: usize) -> String {
 
 /// The selected thread's card, in lines of `width`: its TL;DR, and who delegated to whom on it.
 fn card(data: &Data, thread: &ThreadId, now: DateTime<Utc>, width: usize) -> Vec<Line<'static>> {
-    let label = |text: &'static str| Span::styled(text, frame::dim());
+    let label = |text: &'static str| Span::styled(text, style::dim());
     let tldr = match data.cards.tldr.get(thread) {
         Some(t) => {
             let last = data.live.summary(thread).map_or(0, |s| s.last_reopening);
             let stale = if t.is_current(last) { "" } else { ", stale" };
             let about = format!(" ({}, {}{stale})", t.by, ago(t.at, now));
             let text = crate::excerpt(&t.text, (width * 3).saturating_sub(about.len() + 8));
-            vec![Span::raw(text), Span::styled(about, frame::dim())]
+            vec![Span::raw(text), Span::styled(about, style::dim())]
         }
-        None => vec![Span::styled("none kept: S or /tldr asks for one", frame::dim())],
+        None => vec![Span::styled("none kept: S or /tldr asks for one", style::dim())],
     };
     let chain = chain(data, thread)
         .into_iter()

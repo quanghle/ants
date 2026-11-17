@@ -19,9 +19,9 @@ use super::acts::Change;
 use super::approvals;
 use super::command::GRANT;
 use super::exec::Job;
-use super::frame::{self, ago};
 use super::model::{Action, Data, Key, Model, To};
 use super::select::Selection;
+use super::style::{self, ago};
 use super::{catchup, question};
 use crate::thread::Kind;
 use crate::tools::State;
@@ -418,7 +418,7 @@ impl Page {
 
     pub fn draw(&self, frame: &mut Frame, area: Rect, model: &Model, now: DateTime<Utc>, focused: bool) {
         let data = &model.data;
-        let block = frame::block(format!(" Home ({}) ", items(data, now).len()), focused);
+        let block = style::block(format!(" Home ({}) ", items(data, now).len()), focused);
         let items = self.rows(data, now);
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -427,7 +427,7 @@ impl Page {
         first.extend(data.held.line());
         let tall = u16::try_from(first.len() + 1).unwrap_or(u16::MAX);
         let [top, area] = Layout::vertical([Constraint::Length(tall), Constraint::Min(0)]).areas(inner);
-        first.push(Line::styled("─".repeat(usize::from(top.width)), frame::dim()));
+        first.push(Line::styled("─".repeat(usize::from(top.width)), style::dim()));
         frame.render_widget(Paragraph::new(first), top);
         if items.is_empty() {
             let text = if data.live.stored_at.is_some() { "nothing waits on a human" } else { "reading the stream…" };
@@ -445,17 +445,17 @@ impl Page {
                     Span::raw(data.title(&i.thread)),
                 ];
                 for (why, n) in &i.also {
-                    first.push(Span::styled(" · ", frame::dim()));
+                    first.push(Span::styled(" · ", style::dim()));
                     first.push(Span::styled(why.badge(*n), Style::new().fg(why.color())));
                 }
-                first.push(Span::styled(format!("  {}", ago(i.at, now)), frame::dim()));
+                first.push(Span::styled(format!("  {}", ago(i.at, now)), style::dim()));
                 let mut lines = vec![
                     Line::from(first),
                     Line::from(
                         [Span::raw("         ")]
                             .into_iter()
                             .chain(i.who.as_ref().and_then(|who| data.face(who)).into_iter().flatten())
-                            .chain([Span::styled(crate::excerpt(&i.text, 160), frame::dim())])
+                            .chain([Span::styled(crate::excerpt(&i.text, 160), style::dim())])
                             .collect::<Vec<_>>(),
                     ),
                 ];
@@ -463,7 +463,7 @@ impl Page {
                     lines.push(Line::raw(format!("         {}", crate::excerpt(&question::options(question), 160))));
                 }
                 if i.expanded {
-                    lines.push(Line::styled("         Enter collapses", frame::dim()));
+                    lines.push(Line::styled("         Enter collapses", style::dim()));
                 } else if let Some((request, settled)) = &i.request {
                     let card = approvals::Card { request, settled: settled.as_ref() };
                     let card = approvals::lines(card, model.asking.as_ref(), at == selected, now, width);
@@ -480,12 +480,12 @@ impl Page {
                         Line::from(spans).style(line.style)
                     }));
                 } else {
-                    lines.push(Line::styled(format!("         {} · {}", i.why.keys(), i.why.enter()), frame::dim()));
+                    lines.push(Line::styled(format!("         {} · {}", i.why.keys(), i.why.enter()), style::dim()));
                 }
                 ListItem::new(lines)
             })
             .collect();
-        let list = List::new(rows).highlight_style(frame::highlight(focused));
+        let list = List::new(rows).highlight_style(style::highlight(focused));
         frame.render_stateful_widget(list, area, &mut ListState::default().with_selected(Some(selected)));
     }
 }

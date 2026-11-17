@@ -1,41 +1,20 @@
 //! The frame around the views: a header with the human, the server and the connection, the nav beside the shown view
 //! with the command bar under it, a footer with the view's keys, the latest notice or the command bar's keys, and the
-//! help over it all. Also the styles the views share.
+//! help over it all.
 
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph};
+use ratatui::widgets::{Clear, Paragraph};
 
 use super::model::{Focus, Level, Model, Page};
+use super::style::{self, block, dim};
 use super::{approvals, catchup, channel, compact, home, nav, search, thread, work};
-use crate::colony;
-use crate::live::Link;
 
 /// How wide the nav is.
 const NAV_WIDTH: u16 = 24;
-
-/// `then` from `now`, such as `5s ago`.
-pub fn ago(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    format!("{} ago", colony::short(colony::since(then, now)))
-}
-
-pub fn dim() -> Style {
-    Style::new().add_modifier(Modifier::DIM)
-}
-
-/// A bordered block titled `title`, its border bright when `focused`.
-pub fn block(title: String, focused: bool) -> Block<'static> {
-    let style = if focused { Style::new().fg(Color::Cyan) } else { dim() };
-    Block::bordered().title(title).border_style(style)
-}
-
-/// The selected row's style.
-pub fn highlight(focused: bool) -> Style {
-    if focused { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new().add_modifier(Modifier::BOLD) }
-}
 
 pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
     if model.compact {
@@ -80,13 +59,7 @@ fn header_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
         Span::styled(format!(" ants · {}@{}", data.me(), data.server), Style::new().bold()),
         Span::styled(format!(" · {} · ", model.page().name()), dim()),
     ];
-    match data.live.link {
-        Link::Connected => spans.push(Span::styled("● connected", Style::new().fg(Color::Green))),
-        Link::Down(since) => spans.push(Span::styled(
-            format!("○ disconnected {}, reconnecting", colony::short(colony::since(since, now))),
-            Style::new().fg(Color::Red).bold(),
-        )),
-    }
+    spans.push(style::link(data.live.link, now, ""));
     Line::from(spans)
 }
 
@@ -104,11 +77,7 @@ fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
         return line;
     }
     if let Some(notice) = model.notice_at(now) {
-        let style = match notice.level {
-            Level::Error => Style::new().fg(Color::Red),
-            Level::Info => Style::new().fg(Color::Cyan),
-        };
-        return Line::styled(format!(" {}", notice.text), style);
+        return style::notice(&notice.text, notice.level == Level::Error);
     }
     if model.bar.focused && !model.completions().is_empty() {
         return Line::styled(" ↑↓ select · Tab/Enter complete · Esc close the list", dim());

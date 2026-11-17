@@ -9,8 +9,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use super::frame;
 use super::model::Data;
+use super::style;
 use super::work::ThreadState;
 use crate::channel::reads::Unread;
 use crate::colony;
@@ -68,18 +68,18 @@ pub fn marker(entries: &[&ColonyEntry], now: DateTime<Utc>) -> (&'static str, Co
         entries.iter().filter(|e| colony::State::of(e, now) == colony::State::Live).collect();
     let Some(entry) = live.first() else { return ("○", Color::DarkGray) };
     if entry.signed_out.is_some() || entry.failing.is_some() {
-        return ("✕", Color::Red);
+        return ("✕", style::ERROR);
     }
     if entry.paused.is_some() {
-        return ("‖", Color::Yellow);
+        return ("‖", style::WARNING);
     }
     if entry.limited.is_some() || entry.fallback.is_some() {
-        return ("◌", Color::Yellow);
+        return ("◌", style::WARNING);
     }
     if live.iter().any(|e| e.activity == Activity::Working) {
-        return ("◐", Color::Green);
+        return ("◐", style::CONNECTED);
     }
-    ("●", Color::Green)
+    ("●", style::CONNECTED)
 }
 
 /// The channel's unread posts its notify level counts, @mentions of the human and the other posts among those read,
@@ -111,12 +111,12 @@ fn line(
         Item::Home => Line::raw(format!("Home{}", count(super::home::waiting(data, now).len()))),
         Item::Activity => {
             let days = data.live.order.iter().filter(|t| t.is_activity()).count();
-            Line::styled(format!("  assistant activity{}", count(days)), frame::dim())
+            Line::styled(format!("  assistant activity{}", count(days)), style::dim())
         }
         Item::Work(None) => Line::raw(format!("Work{}", count(data.work().count()))),
         Item::Work(Some(state)) => {
             let n = counts.get(state).copied().unwrap_or(0);
-            let style = if n == 0 { frame::dim() } else { Style::new().fg(state.color()) };
+            let style = if n == 0 { style::dim() } else { Style::new().fg(state.color()) };
             Line::styled(format!("  {}{}", state.label(), count(n)), style)
         }
         Item::Channel(channel) => {
@@ -130,7 +130,7 @@ fn line(
                 spans.push(Span::styled(format!(" @{}", unread.mentions), Style::new().fg(Color::Magenta).bold()));
             }
             if unread.other > 0 {
-                spans.push(Span::styled(format!(" ·{}", unread.other), frame::dim()));
+                spans.push(Span::styled(format!(" ·{}", unread.other), style::dim()));
             }
             Line::from(spans)
         }
@@ -157,19 +157,19 @@ pub fn draw(frame: &mut Frame, area: Rect, data: &Data, selected: &Item, now: Da
         if item.section() != section {
             section = item.section();
             lines.push(Line::raw(""));
-            lines.push(Line::styled(section.unwrap_or_default(), frame::dim().add_modifier(Modifier::BOLD)));
+            lines.push(Line::styled(section.unwrap_or_default(), style::dim().add_modifier(Modifier::BOLD)));
         }
         let mut line = line(&item, data, &counts, now);
         if item == *selected {
             at = lines.len();
-            line = line.patch_style(frame::highlight(focused));
+            line = line.patch_style(style::highlight(focused));
         }
         lines.push(line);
     }
     let height = usize::from(area.height.saturating_sub(2));
     let top = (at + 1).saturating_sub(height);
     let paragraph = Paragraph::new(lines)
-        .block(frame::block(String::new(), focused))
+        .block(style::block(String::new(), focused))
         .scroll((u16::try_from(top).unwrap_or(u16::MAX), 0));
     frame.render_widget(paragraph, area);
 }

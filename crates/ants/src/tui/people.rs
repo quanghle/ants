@@ -15,6 +15,7 @@ use ratatui::text::{Line, Span};
 
 use super::dm::{self, Dms};
 use super::model::{Data, Level};
+use super::style;
 use crate::cmd::send;
 use crate::humans::Me;
 use crate::live::maybe;
@@ -55,7 +56,7 @@ impl People {
 /// How a person shows in the nav: online or not, and how many messages from that person the human has not read.
 pub fn nav_line(data: &Data, person: &UserId) -> Line<'static> {
     let (mark, color) = match data.people.online(person) {
-        Some(true) => ("●", Color::Green),
+        Some(true) => ("●", style::CONNECTED),
         Some(false) => ("○", Color::DarkGray),
         None => ("·", Color::DarkGray),
     };

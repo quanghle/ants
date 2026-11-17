@@ -40,6 +40,7 @@ mod select;
 mod settings;
 mod snooze;
 mod status;
+pub(crate) mod style;
 #[cfg(test)]
 mod test_support;
 mod thread;

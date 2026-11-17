@@ -14,7 +14,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::complete::Candidate;
-use super::frame;
+use super::style;
 use crate::attachments::{self, File, Listed};
 use crate::sealed::Keyring;
 
@@ -71,10 +71,10 @@ pub fn line(listed: &Listed) -> Line<'static> {
     match &listed.unavailable {
         None => Line::from(vec![
             Span::raw(format!("📎 {} ({}) ", attachment.name, attachments::size(listed.size()))),
-            Span::styled(attachment.mime.clone(), frame::dim()),
+            Span::styled(attachment.mime.clone(), style::dim()),
         ]),
         // An invalid name may hold control characters, which are escaped rather than sent to the terminal.
-        Some(reason) => Line::styled(format!("📎 {:?} (unavailable: {reason})", attachment.name), frame::dim()),
+        Some(reason) => Line::styled(format!("📎 {:?} (unavailable: {reason})", attachment.name), style::dim()),
     }
 }
 

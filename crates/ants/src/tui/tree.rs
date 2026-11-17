@@ -27,8 +27,8 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use super::frame;
 use super::model::{Action, Data, Key, Level, To};
+use super::style;
 use super::work::ThreadState;
 use crate::cmd::cancel::{CANCEL_GRACE, CANCEL_WAIT, cancel_outcome};
 use crate::live::maybe;
@@ -138,9 +138,9 @@ impl NodeState {
         match self {
             Self::Thread(state) => Style::new().fg(state.color()),
             Self::Working(_) | Self::WaitingOnMe => Style::new().fg(Color::Yellow),
-            Self::GaveUp => Style::new().fg(Color::Red),
+            Self::GaveUp => Style::new().fg(style::ERROR),
             Self::Queued => Style::new().fg(Color::Cyan),
-            Self::Answered | Self::Linked => frame::dim(),
+            Self::Answered | Self::Linked => style::dim(),
         }
     }
 }
@@ -467,7 +467,7 @@ impl Page {
         let line = width.saturating_sub(name + 2 + 2 + 5 + 2 + 7 + 2 + state).max(8);
         let mut lines = vec![Line::styled(
             format!("{:<name$}  {:<line$}  {:>5}  {:>7}  state", "", "", "turns", "spend"),
-            frame::dim(),
+            style::dim(),
         )];
         let mut selected = 0;
         for (n, node) in tree.nodes.iter().enumerate() {
@@ -484,13 +484,13 @@ impl Page {
                 Span::raw(format!("{who:<name$}  ")),
                 Span::styled(
                     format!("{:<line$}  ", cut(&text, line)),
-                    if n == 0 { frame::dim() } else { Style::new() },
+                    if n == 0 { style::dim() } else { Style::new() },
                 ),
                 Span::raw(format!("{turns:>5}  {spend:>7}  ")),
                 Span::styled(cut(&node.state.label(), state), node.state.style()),
             ]);
             if n == at {
-                row = row.style(frame::highlight(focused));
+                row = row.style(style::highlight(focused));
                 selected = lines.len();
             }
             lines.push(row);
@@ -499,12 +499,12 @@ impl Page {
         let mut total = vec![format!("{} ants", tree.ants), format!("{} turns used", tree.turns)];
         total.extend(tree.spend.map(|s| format!("${:.2}", s.cost)));
         total.extend(tree.elapsed.map(crate::colony::short));
-        lines.push(Line::from(vec![Span::styled("total  ", frame::dim()), Span::raw(total.join(" · "))]));
+        lines.push(Line::from(vec![Span::styled("total  ", style::dim()), Span::raw(total.join(" · "))]));
         let height = usize::from(area.height.saturating_sub(2));
         let top = (selected + 1).saturating_sub(height);
         let title = format!(" delegation tree · {} ", data.title(&self.root));
         let paragraph = Paragraph::new(lines)
-            .block(frame::block(title, focused))
+            .block(style::block(title, focused))
             .scroll((u16::try_from(top).unwrap_or(u16::MAX), 0));
         frame.render_widget(paragraph, area);
     }
@@ -814,7 +814,7 @@ mod tests {
         if let Some(View::Tree(page)) = m.pages.last_mut() {
             page.spend = Some(vec![spent("dev-a", &root, 0.25), spent("tester", &spun, 0.5)]);
         }
-        let shown = crate::test_support::render::rendered(120, 20, |f| frame::draw(f, &m, at(9)));
+        let shown = crate::test_support::render::rendered(120, 20, |f| crate::tui::frame::draw(f, &m, at(9)));
         assert!(shown.contains("delegation tree · fix the login bug"), "{shown}");
         assert!(shown.contains("└─ dev-a        fix the login bug"), "{shown}");
         assert!(shown.contains("$0.25  answered"), "{shown}");

@@ -11,8 +11,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
 use super::command::COMMANDS;
-use super::frame;
 use super::model::{Model, Page};
+use super::style;
 
 /// Most completions shown at once.
 const ROWS: usize = 8;
@@ -175,7 +175,7 @@ pub fn draw(frame: &mut Frame, bar: Rect, candidates: &[Candidate], selected: us
         .map(|(at, c)| {
             let line = Line::from(vec![
                 Span::styled(format!("{:<width$}  ", c.word), Style::new().bold()),
-                Span::styled(c.detail.clone(), frame::dim()),
+                Span::styled(c.detail.clone(), style::dim()),
             ]);
             if at == selected { line.reversed() } else { line }
         })
@@ -185,7 +185,7 @@ pub fn draw(frame: &mut Frame, bar: Rect, candidates: &[Candidate], selected: us
     let title =
         if candidates.len() > ROWS { format!(" {} of {} ", selected + 1, candidates.len()) } else { String::new() };
     frame.render_widget(Clear, area);
-    frame.render_widget(Paragraph::new(lines).block(frame::block(title, true)), area);
+    frame.render_widget(Paragraph::new(lines).block(style::block(title, true)), area);
 }
 
 #[cfg(test)]
