@@ -259,7 +259,8 @@ fn reading(id: &Value) -> Vec<Value> {
 async fn copilot_turns_stream_through_the_translator() {
     let extra = r#"'{"mcpServers": {"github": {"type": "http", "url": "https://api.example/mcp"}, "ants": {"command": "/old"}}}'"#;
     let table = format!(
-        "args = [\"--log-level\", \"debug\", \"--excluded-tools\", \"bash\", \"read_bash,write_bash\", \
+        "entra_client_id = \"00000000-1111-2222-3333-444444444444\"\n\
+         args = [\"--log-level\", \"debug\", \"--excluded-tools\", \"bash\", \"read_bash,write_bash\", \
          \"--additional-mcp-config\", {extra}]\n[harnesses.native.context]\nlong = {{ args = [\"--context=long_context\"] }}"
     );
     let played = Played::new("copilot-prompt", &table, |method, params| {
@@ -309,6 +310,8 @@ async fn copilot_turns_stream_through_the_translator() {
     assert_eq!(spends, [Spend::Cost { session: id.clone(), total: cost }, Spend::Tokens(14_001)]);
 
     assert_eq!(played.args(1), [&SERVER_ARGS[..], &["--log-level", "debug"]].concat(), "no session settings or MCP");
+    let entra = json!({ "clientId": "00000000-1111-2222-3333-444444444444" });
+    assert_eq!(played.requests("connect")[0]["entra"], entra, "no MATS telemetry");
     let created = &played.requests("session.create")[0];
     assert_eq!(created["sessionId"], json!(*id.0));
     let keys = ["model", "reasoningEffort", "contextTier", "excludedTools", "streaming", "enableSessionTelemetry"];
@@ -350,6 +353,7 @@ async fn copilot_sessions_resume_and_fork_by_id_counting_only_their_own_cost() {
     let resumed = Session::start(&launch, Some(SessionId::new("s1"))).await.unwrap();
     assert_eq!(resumed.id(), SessionId::new("s1"));
     resumed.close().await;
+    assert_eq!(played.requests("connect")[0].get("entra"), None, "no Entra app registration");
     let forked = fork(&launch, &SessionId::new("s1")).await.unwrap().expect("the CLI forks");
     assert_eq!(forked, SessionId::new("forked~5000"), "the parent's cost carried in the id");
     assert_eq!(played.requests("sessions.fork"), [json!({ "sessionId": "s1" })]);

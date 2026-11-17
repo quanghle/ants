@@ -283,6 +283,11 @@ impl Cli {
         self.harness.mode.as_deref()
     }
 
+    /// The definition's `entra_client_id`: the Microsoft Entra app registration for MCP servers signing in through Entra.
+    pub(crate) fn entra_client_id(&self) -> Option<&str> {
+        self.harness.entra_client_id.as_deref()
+    }
+
     /// The model the ant runs, if it sets one, its `context`'s suffix included.
     pub(crate) fn model(&self) -> Option<&str> {
         self.model.as_deref()

@@ -166,6 +166,7 @@ impl Launch {
             bypass_permissions: false,
             context: BTreeMap::new(),
             sign_in: None,
+            entra_client_id: None,
             rate_limited: Vec::new(),
             quota_exhausted: Vec::new(),
             context_overflow: Vec::new(),

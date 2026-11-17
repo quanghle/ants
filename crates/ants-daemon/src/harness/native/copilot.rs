@@ -310,7 +310,9 @@ impl Native for Copilot {
         let (stdin, stdout) = process.take_io().ok_or_else(|| failed("no stdio"))?;
         let (closing, closed) = watch::channel(false);
         let cwd = std::env::current_dir().unwrap_or_default();
-        let client = sdk::Client::from_streams(Output { inner: stdout, closing }, stdin, cwd)
+        let entra =
+            cli.entra_client_id().map(|id| sdk::EntraAuthConfig { client_id: id.to_owned(), mats_app_name: None });
+        let client = sdk::Client::from_streams_with_entra(Output { inner: stdout, closing }, stdin, cwd, entra)
             .map_err(|e| failed(format!("{}: {e}", cli.name())))?;
         let shared = Arc::new(Shared { cli, args, mcp, client, process: tokio::sync::Mutex::new(process), closed });
         let version = shared.handshake().await?;
