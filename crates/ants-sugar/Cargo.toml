@@ -10,9 +10,20 @@ description = "sugar, ants' built-in identity, memory and work provider, run ins
 
 [dependencies]
 ants-proto.workspace = true
-serde_json.workspace = true
+chrono = { workspace = true, features = ["clock", "serde"] }
+data-encoding.workspace = true
 # Already in the binary through async-nats: the sanitizer's secret shapes (crate::sanitize).
 regex = "1.13.1"
+serde.workspace = true
+serde_json.workspace = true
+# The version nkeys already brings in, through ed25519-dalek.
+sha2 = { version = "0.10.9", default-features = false }
+thiserror = "2.0.21"
+
+[dev-dependencies]
+ants-test-support.workspace = true
+nkeys = "0.4.5"
+tokio = { workspace = true, features = ["rt", "macros"] }
 
 [lints]
 workspace = true

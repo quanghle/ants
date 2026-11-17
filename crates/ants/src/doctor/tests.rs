@@ -375,6 +375,49 @@ fn ants_sharing_a_git_workdir_with_worktrees_turned_off_are_warned() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+#[test]
+fn a_break_in_an_ant_s_sugar_chain_fails() {
+    use ants_sugar::log::{Break, ChainStatus, write_status};
+
+    let dir = ants_test_support::scratch_dir("doctor-sugar-chain").canonicalize().unwrap();
+    let config = dir.join("config.toml");
+    let ants = ["dev-a", "dev-b", "dev-c"]
+        .map(|name| format!("[[ant]]\nname = \"{name}\"\nworkdir = \".\"\nhome = \"{name}\"\n"));
+    std::fs::write(&config, format!("messenger = false\nharness = \"copilot\"\n{}", ants.concat())).unwrap();
+    let loaded = config::load(&config).unwrap();
+    let checked_at = "2026-01-02T03:04:05Z".parse().unwrap();
+    let status = ChainStatus {
+        sugar: ants_proto::SugarId::new(),
+        incarnation: "i".into(),
+        checked_at,
+        events: 2,
+        seen: None,
+        broken: None,
+    };
+    write_status(&dir.join("dev-a"), &status).unwrap();
+    let broken = Break { index: 3, sequence: Some(7), reason: "not signed by dev-b's credentials".into() };
+    write_status(&dir.join("dev-b"), &ChainStatus { broken: Some(broken), ..status.clone() }).unwrap();
+
+    let checks = check_sugar_chains(&loaded.ants);
+    assert_eq!(
+        checks.iter().map(|c| (c.check.as_str(), c.status, c.detail.as_str())).collect::<Vec<_>>(),
+        [
+            ("ant dev-a sugar chain", Status::Ok, "2 events verified at 2026-01-02 03:04:05 UTC"),
+            (
+                "ant dev-b sugar chain",
+                Status::Fail,
+                &*format!(
+                    "sugar identity {} breaks at event 3 (stream sequence 7): not signed by dev-b's credentials, as \
+                     verified at 2026-01-02 03:04:05 UTC",
+                    status.sugar
+                )
+            ),
+        ],
+        "nothing for an ant whose log was never read"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[tokio::test]
 async fn a_leaf_reports_an_ant_its_uplink_misses_and_a_node_not_listening() {
     let dir = ants_test_support::scratch_dir("doctor-leaf").canonicalize().unwrap();

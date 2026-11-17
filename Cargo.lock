@@ -147,6 +147,7 @@ dependencies = [
  "agent-client-protocol",
  "ants-daemon",
  "ants-proto",
+ "ants-sugar",
  "ants-test-support",
  "anyhow",
  "async-nats",
@@ -236,8 +237,16 @@ name = "ants-sugar"
 version = "0.2.0"
 dependencies = [
  "ants-proto",
+ "ants-test-support",
+ "chrono",
+ "data-encoding",
+ "nkeys",
  "regex",
+ "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]

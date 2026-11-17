@@ -1,6 +1,6 @@
 //! Subject names. Each takes typed ids, so a subject never carries a wildcard or a stray dot.
 
-use crate::{ChannelId, Machine, Role, ThreadId, UserId};
+use crate::{ChannelId, Machine, Role, SugarId, ThreadId, UserId};
 
 /// Durable inbox of `to`, for messages from `from`. The sender is part of the subject because credentials can pin
 /// it there ([`inbox_from`]), while anything in the payload is whatever the publisher wrote.
@@ -531,6 +531,20 @@ pub fn channel_entry(channel: &ChannelId) -> String {
 
 /// Everything, for `ants watch`.
 pub const ALL: &str = "ants.>";
+
+/// The event log of the sugar identity `id` in [`super::SUGAR_STREAM`], which only host credentials append to and read.
+/// It sits outside [`ALL`], which every human hears.
+pub fn sugar(id: &SugarId) -> String {
+    format!("ants_sugar.{id}")
+}
+
+/// Every sugar identity's event log ([`sugar`]).
+pub const ALL_SUGAR: &str = "ants_sugar.*";
+
+/// The sugar identity whose event log `subject` is ([`sugar`]), or `None` when it is none.
+pub fn parse_sugar(subject: &str) -> Option<SugarId> {
+    subject.strip_prefix("ants_sugar.")?.parse().ok()
+}
 
 #[cfg(test)]
 mod tests {

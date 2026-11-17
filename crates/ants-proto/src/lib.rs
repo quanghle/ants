@@ -1,7 +1,8 @@
 //! The ants wire contract: what travels over NATS and where.
 //!
 //! Every subject sits under `ants.`, so one NATS account can grant a user `ants.>` scoped to its own inbox, and a hub
-//! can carry other traffic beside ants.
+//! can carry other traffic beside ants, but for KV buckets' and object stores' own and sugar's event logs
+//! ([`subject::sugar`]), which no human may hear.
 
 use std::time::Duration;
 
@@ -43,6 +44,7 @@ mod sealed;
 mod shared;
 mod status;
 pub mod subject;
+mod sugar;
 #[cfg(test)]
 mod test_support;
 mod threads;
@@ -136,6 +138,7 @@ pub use shared::{
     is_shared_field,
 };
 pub use status::{DecidedBy, MAX_TOOL_PATHS, PlanStep, State, StatusEvent, StatusUpdate};
+pub use sugar::{SUGAR_STREAM, SUGAR_SUBJECTS, SugarId};
 pub use threads::{
     Archived, Mark, Reminder, Reminders, SNOOZE_MAX, SealedTitle, Snooze, ThreadDone, ThreadMarks, ThreadSnoozes,
     ThreadSummary, ThreadTitle,

@@ -47,4 +47,6 @@ pub enum Error {
     TooManyAttachments(usize),
     #[error("invalid attachment handle {0:?}: use <from>.<inbox|notes|chan>.<to, thread or channel>.<id>")]
     InvalidAttachmentHandle(String),
+    #[error("invalid sugar id {0:?}: use a ULID, 26 of uppercase Crockford base32 starting with 0-7")]
+    InvalidSugarId(String),
 }

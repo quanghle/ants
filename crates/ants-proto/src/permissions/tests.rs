@@ -4,7 +4,7 @@ use super::*;
 use crate::{
     ANTS_VERSION, AntReply, AntRequest, AskedAnt, CancelReply, CancelRequest, ChainEntry, ChannelEntry, ChannelId,
     ChannelOp, DeviceId, ENROLL_INBOX, HumanEntry, Humans, JsDomain, Machine, QueueRequest, Refusal, Role,
-    SPARE_READERS, STREAM, Serving, ThreadId, UserId, Uuid, WEBHOOK_MARKER, assisted_owner_key,
+    SPARE_READERS, STREAM, SUGAR_STREAM, Serving, ThreadId, UserId, Uuid, WEBHOOK_MARKER, assisted_owner_key,
     assisted_withdrawal_key, channel_manager_serving_key, p, spare_readers, subject,
 };
 
@@ -126,7 +126,10 @@ fn a_js_domain_adds_the_domain_form_of_the_jetstream_api() {
 }
 
 /// A family's domain wildcard grants nothing through a leaf node, whose uplink checks the domain form unmapped: no
-/// credentials hold a right of the family a human's lack.
+/// credentials hold a right of the family a human's lack, but for creating [`SUGAR_STREAM`], which hosts hold alone. A
+/// human on a leaf node may create it through the uplink, yet only with the config every host creates it with: a host
+/// writes nothing in a stream it could not create with that config itself, which nats-server refuses for a stream of
+/// another config.
 #[test]
 fn no_credentials_hold_a_jetstream_family_right_a_human_lacks() {
     let (human, a, pa) = (UserId::human(), p("dev-a"), p("pa"));
@@ -160,7 +163,8 @@ fn no_credentials_hold_a_jetstream_family_right_a_human_lacks() {
                 Some(rest.split_once(".API.")?.1.to_owned())
             });
             let Some(plain) = plain else { continue };
-            if families.iter().any(|family| covers(family, &plain)) {
+            if families.iter().any(|family| covers(family, &plain)) && plain != format!("STREAM.CREATE.{SUGAR_STREAM}")
+            {
                 assert!(most.contains(&format!("$JS.API.{plain}")), "{kind} holds {s}");
             }
         }
@@ -263,6 +267,11 @@ fn leaf_permissions_cover_each_user_once() {
             "$JS.API.DIRECT.GET.KV_ants_colony.$KV.ants_colony.*",
             // Asking for a new ant's credentials, its own or on an admin's order.
             "ants.enroll.*",
+            // Sugar's event logs, which only hosts reach.
+            "$JS.API.STREAM.CREATE.ANTS_SUGAR",
+            "ants_sugar.*",
+            "$JS.API.DIRECT.GET.ANTS_SUGAR",
+            "$JS.API.DIRECT.GET.ANTS_SUGAR.ants_sugar.*",
             "$JS.ACK.ANTS.admin-m1.>",
             "$JS.ACK.*.*.ANTS.admin-m1.>",
             "$JS.S.m1.>",
@@ -1056,9 +1065,10 @@ fn a_host_writes_only_its_own_machine_record_and_takes_only_its_own_orders() {
     // Past its own subjects, it asks the signer to enroll or retire an ant on an admin's order, and reads the colony.
     let ants: Vec<_> = host.publish.iter().filter(|s| s.starts_with("ants.")).collect();
     assert_eq!(ants, [subject::ALL_ENROLL_REQUESTS]);
-    // Of streams' info, it reads only the humans', whose consent to their assistants' orders it watches.
+    // Of streams' info, it reads only the humans', whose consent to their assistants' orders it watches, and creates
+    // only sugar's.
     let infos: Vec<_> = host.publish.iter().filter(|s| s.contains("STREAM.")).collect();
-    assert_eq!(infos, ["$JS.API.STREAM.INFO.KV_ants_humans"]);
+    assert_eq!(infos, ["$JS.API.STREAM.CREATE.ANTS_SUGAR", "$JS.API.STREAM.INFO.KV_ants_humans"]);
     assert!(host.publish.iter().all(|s| !s.starts_with("$KV.ants_humans")), "it never writes the humans");
     assert!(host.publish.iter().any(|s| s == "$JS.API.DIRECT.GET.KV_ants_colony.$KV.ants_colony.*"));
     assert!(!host.publish.iter().any(|s| s.starts_with("$KV.ants_colony")), "it reads the colony only");
@@ -1216,4 +1226,87 @@ fn an_assistant_keeps_its_ant_rights_and_a_humans_under_its_own_name() {
     assert!(!ant.publish.iter().any(|s| s.starts_with("$KV.ants_devices.")), "an ant keeps no record");
     let unique: std::collections::HashSet<&String> = assistant.publish.iter().collect();
     assert_eq!(unique.len(), assistant.publish.len(), "no subject twice");
+}
+
+/// Sugar's event logs: host credentials, and a leaf node's uplink carrying them, create the stream, append to and read
+/// any identity's subject by direct gets, and nothing more; no other credentials reach any of it, and no human hears
+/// it.
+#[test]
+fn only_hosts_reach_sugar_event_logs() {
+    let (human, a, pa) = (UserId::human(), p("dev-a"), p("pa"));
+    let m1: Machine = "m1".parse().unwrap();
+    let domain: JsDomain = "hub".parse().unwrap();
+    let id: crate::SugarId = "01J9ZQ3C5V8W2X4Y6Z7A8B9C0D".parse().unwrap();
+    let log = subject::sugar(&id);
+    let reaches = |rights: &[String]| -> Vec<String> {
+        rights
+            .iter()
+            .filter(|s| s.contains(SUGAR_STREAM) || covers(s, &log) || covers(s, subject::ALL_SUGAR))
+            .cloned()
+            .collect()
+    };
+    let host = Permissions::for_host(&m1);
+    let want = [
+        "$JS.API.STREAM.CREATE.ANTS_SUGAR",
+        "ants_sugar.*",
+        "$JS.API.DIRECT.GET.ANTS_SUGAR",
+        "$JS.API.DIRECT.GET.ANTS_SUGAR.ants_sugar.*",
+    ];
+    assert_eq!(reaches(&host.publish), want);
+    assert!(reaches(&host.subscribe).is_empty(), "replies come to the host's inbox");
+    let in_domain = Permissions::for_host(&m1).with_js_domain(Some(&domain)).publish;
+    assert!(in_domain.iter().any(|s| s == "$JS.hub.API.DIRECT.GET.ANTS_SUGAR.ants_sugar.*"));
+    assert!(in_domain.iter().any(|s| s == "$JS.hub.API.STREAM.CREATE.ANTS_SUGAR"));
+    let uplink = Permissions::for_leaf(&m1, [(&a, LeafRole::Ant), (&human, LeafRole::Human)])
+        .with_uplink_js_domain(Some(&domain));
+    for s in ["$JS.hub.API.STREAM.CREATE.ANTS_SUGAR", "ants_sugar.*", "$JS.hub.API.DIRECT.GET.ANTS_SUGAR"] {
+        assert!(uplink.publish.iter().any(|have| have == s), "{s} missing from the uplink");
+    }
+    for (kind, rights) in [
+        ("ant", Permissions::for_user(&a, Role::Ant)),
+        ("human", Permissions::for_user(&human, Role::Human)),
+        ("assistant", Permissions::for_assistant(&pa, &human)),
+        ("channel manager", Permissions::for_channel_manager()),
+        ("enrollment", Permissions::for_enrollment(&a)),
+        ("webhook", Permissions::for_webhook(&p("hook"), &[])),
+        ("observer", Permissions::for_observer(&p("watch"))),
+        ("enroll approver", Permissions::for_enroll_approver()),
+        ("reactions responder", Permissions::for_reactions_responder()),
+        ("device revoker", Permissions::for_device_revoker()),
+        ("bootstrap", Permissions::for_bootstrap()),
+        ("registrar", Permissions::for_registrar()),
+    ] {
+        let rights = rights.with_js_domain(Some(&domain));
+        assert_eq!(reaches(&rights.publish), Vec::<String>::new(), "{kind} publishes");
+        assert_eq!(reaches(&rights.subscribe), Vec::<String>::new(), "{kind} subscribes");
+        for s in rights.publish.iter().filter(|s| s.starts_with("$JS.")) {
+            for api in [
+                "STREAM.CREATE",
+                "STREAM.UPDATE",
+                "STREAM.INFO",
+                "STREAM.DELETE",
+                "STREAM.PURGE",
+                "DIRECT.GET",
+                "STREAM.MSG.GET",
+                "CONSUMER.CREATE",
+                "CONSUMER.DURABLE.CREATE",
+            ] {
+                for prefix in ["$JS.API", "$JS.hub.API"] {
+                    // A family's domain wildcard reaches the stream only through a host's rights
+                    // (`no_credentials_hold_a_jetstream_family_right_a_human_lacks`).
+                    if prefix != "$JS.API"
+                        && (api.starts_with("STREAM.")
+                            && !api.contains("DELETE")
+                            && !api.contains("PURGE")
+                            && !api.contains("MSG")
+                            || api == "CONSUMER.CREATE")
+                    {
+                        continue;
+                    }
+                    let right = format!("{prefix}.{api}.{SUGAR_STREAM}");
+                    assert!(!covers(s, &right) && !covers(s, &format!("{right}.{log}")), "{kind} holds {s}");
+                }
+            }
+        }
+    }
 }

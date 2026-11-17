@@ -11,6 +11,7 @@ use ants_proto::provider::{
     Provider, RpcError, ToolCall, ToolList, ToolResult,
 };
 
+pub mod log;
 pub mod sanitize;
 mod tools;
 

@@ -5,8 +5,8 @@ use super::{Permissions, ack_subjects, kv_stream, ordered_consumer_subjects};
 #[cfg(doc)]
 use crate::admin_outcome_key;
 use crate::{
-    COLONY_BUCKET, DEVICES_BUCKET, HUMANS_BUCKET, IDENTITIES_BUCKET, MACHINES_BUCKET, Machine, STREAM, admin_consumer,
-    host_inbox_prefix, subject,
+    COLONY_BUCKET, DEVICES_BUCKET, HUMANS_BUCKET, IDENTITIES_BUCKET, MACHINES_BUCKET, Machine, STREAM, SUGAR_STREAM,
+    admin_consumer, host_inbox_prefix, subject,
 };
 
 impl Permissions {
@@ -25,7 +25,11 @@ impl Permissions {
     /// it asks `ants signer` with an enrollment request carrying the order ([`subject::enroll`],
     /// [`EnrollRequest::order`](crate::EnrollRequest::order)) and hears the answers ([`subject::ALL_ENROLL_REPLIES`]),
     /// and reads the colony by direct gets to see a retired ant stopped. It reads and watches [`HUMANS_BUCKET`], for
-    /// the humans' consent to the orders their assistants sent for them.
+    /// the humans' consent to the orders their assistants sent for them. It keeps the event logs of its ants' sugar
+    /// identities in [`SUGAR_STREAM`]: it creates the stream when missing, its create answering with the stream's info
+    /// as well, appends to any identity's subject ([`subject::ALL_SUGAR`]), each event expecting the subject's last
+    /// sequence, and reads them by direct gets, the last of a subject by its subject or a batch from a sequence by the
+    /// request. Readers verify each event as signed with the ant's own credentials and chained to the one before.
     /// Nothing else: no other machine's record or outcomes, no ant's identity record, no message to or from an ant. No
     /// ant gets any of it.
     pub fn for_host(machine: &Machine) -> Self {
@@ -46,6 +50,10 @@ impl Permissions {
             format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{consumer}"),
             format!("$JS.API.DIRECT.GET.{}.$KV.{COLONY_BUCKET}.*", kv_stream(COLONY_BUCKET)),
             subject::ALL_ENROLL_REQUESTS.to_owned(),
+            format!("$JS.API.STREAM.CREATE.{SUGAR_STREAM}"),
+            subject::ALL_SUGAR.to_owned(),
+            format!("$JS.API.DIRECT.GET.{SUGAR_STREAM}"),
+            format!("$JS.API.DIRECT.GET.{SUGAR_STREAM}.{}", subject::ALL_SUGAR),
         ];
         let humans = kv_stream(HUMANS_BUCKET);
         publish.extend([format!("$JS.API.STREAM.INFO.{humans}"), format!("$JS.API.DIRECT.GET.{humans}.>")]);

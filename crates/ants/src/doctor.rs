@@ -17,7 +17,10 @@ use ants_proto::JsDomain;
 use async_nats::jetstream;
 use serde::Serialize;
 
-use self::ants::{check_ants, check_bypassed, check_host, check_machine_name, check_reactions, check_shared_workdirs};
+use self::ants::{
+    check_ants, check_bypassed, check_host, check_machine_name, check_reactions, check_shared_workdirs,
+    check_sugar_chains,
+};
 use self::credentials::{check_backup, check_cli_creds};
 use self::leaf_node::{Leaf, check_leaf};
 use self::server::{check_resolver, check_storage, reach};
@@ -159,6 +162,7 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
         checks.extend(check_machine_name(&loaded.host, &hostname));
     }
     checks.extend(check_shared_workdirs(ants, &setup.config));
+    checks.extend(check_sugar_chains(ants));
     checks.extend(reactions);
     if let Some(loaded) = &loaded {
         let webhooks = setup.webhooks.exists().then(|| webhook::Config::read(&setup.webhooks).ok()).flatten();

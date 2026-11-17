@@ -192,6 +192,40 @@ pub(super) fn check_shared_workdirs(ants: &[Ant], config: &Path) -> Vec<Check> {
         .collect()
 }
 
+/// The chain of each ant's sugar event log, as the daemon serving it last verified it ([`ants_sugar::log::ChainStatus`]),
+/// kept in the ant's home: the doctor's credentials do not reach the log. Nothing for an ant whose log was never read.
+pub(super) fn check_sugar_chains(ants: &[Ant]) -> Vec<Check> {
+    ants.iter().filter_map(check_sugar_chain).collect()
+}
+
+fn check_sugar_chain(ant: &Ant) -> Option<Check> {
+    let home = match &ant.home {
+        Some(home) => home.clone(),
+        None => std::env::home_dir()?.join(".ants").join(ant.name.as_str()),
+    };
+    let check = format!("ant {} sugar chain", ant.name);
+    let file = ants_sugar::log::status_file(&home);
+    let status = match ants_sugar::log::read_status(&home) {
+        Ok(status) => status?,
+        Err(e) => return Some(Check::warn(check, format!("{}: {e}", file.display()), Vec::new())),
+    };
+    let checked = status.checked_at.format("%Y-%m-%d %H:%M:%S UTC");
+    let Some(broken) = status.broken else {
+        return Some(Check::ok(check, format!("{} events verified at {checked}", status.events)));
+    };
+    let at = broken.sequence.map_or_default(|sequence| format!(" (stream sequence {sequence})"));
+    let detail = format!(
+        "sugar identity {} breaks at event {}{at}: {}, as verified at {checked}",
+        status.sugar, broken.index, broken.reason
+    );
+    let fix = format!(
+        "events of the {} stream were removed, rewritten or written with other credentials than the ant's: restore \
+         the stream from a backup of the hub's JetStream store, or find out which machine's host credentials wrote them",
+        ants_proto::SUGAR_STREAM
+    );
+    Some(Check::fail(check, detail, vec![fix]))
+}
+
 /// Whether something answers each ant's reactions requests, which its MCP list_reactions and react make, and which
 /// kind of process does: asked as the ant, where its daemon connects, about the nil id, which no ant reads, so the
 /// answers are unknown and nothing changes. An ant without credentials, on an open server, asks no one: its daemon
