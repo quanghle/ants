@@ -54,6 +54,10 @@ pub struct CallContext {
     pub model: Option<String>,
     /// The machine serving the ant, as its colony entry names it.
     pub machine: String,
+    /// The thread's repository: the remote of the git repository its session works in (`origin`, else the first
+    /// with a URL), as `host/path`, without scheme, user, port or `.git`. None outside a git repository with a remote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
     pub at: DateTime<Utc>,
 }
 

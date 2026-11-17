@@ -2,8 +2,9 @@
 //! ([`served_name`]), each with the `json` argument ([`with_json_argument`]), so no harness needs configuring for them.
 //! Each call carries who calls, where and when as ants knows it ([`CallContext`]), never as the ant's text claims: the
 //! ant and its identity record's id ([`Callers`]), the thread and where it came from (its [`origin`], kept per thread
-//! as [`settled`] and stored on each change, so it outlasts a restart: [`Mcp::settle_origin`]), the harness and model running the session, the machine serving the ant, and the time; a brief
-//! request takes the same ([`Mcp::caller`], [`Mcp::origin`]).
+//! as [`settled`] and stored on each change, so it outlasts a restart: [`Mcp::settle_origin`]), the harness and model
+//! running the session, the repository it works in ([`crate::provider::context::repository`], read as the session
+//! opens), the machine serving the ant, and the time; a brief request takes the same ([`Mcp::caller`], [`Mcp::origin`]).
 //!
 //! The provider's list is asked for at each `tools/list`, so a provider going down or coming back shows in the lists
 //! taken after it: the HTTP server keeps no session to tell a harness of a change. A provider whose list fails or takes
@@ -99,8 +100,9 @@ impl Hub {
             }
         };
         let sessions = self.sessions.locked();
-        let (harness, model) = sessions.running.get(thread).ok_or("no session of the thread was opened")?;
-        Ok(caller.context(thread.clone(), origin, harness, model.as_deref()))
+        let running = sessions.running.get(thread).ok_or("no session of the thread was opened")?;
+        let (harness, model, repo) = (&running.harness, running.model.as_deref(), running.repo.clone());
+        Ok(caller.context(thread.clone(), origin, harness, model, repo))
     }
 
     async fn settle_origin(&self, envelope: &Envelope, channel: Option<&ChannelId>) -> Result<()> {

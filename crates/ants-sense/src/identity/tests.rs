@@ -58,6 +58,7 @@ fn context(identity: &str, harness: &str, model: Option<&str>, machine: &str) ->
         harness: harness.into(),
         model: model.map(Into::into),
         machine: machine.into(),
+        repo: None,
         at: at("09:00:00"),
     }
 }

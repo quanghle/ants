@@ -66,8 +66,9 @@ pub const TOOLS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "recall",
-        description: "Search the memories of self, the repository (repo) and the thread's people, ranked by relevance, \
-                      recency, importance and votes; or read one in full by id, with its provenance.",
+        description: "Search the memories of self, the thread's repository (and the one repo names) and the thread's \
+                      people, ranked by relevance, recency, importance and votes; or read one in full by id, with its \
+                      provenance.",
         schema: recall,
         handler: crate::memory::recall,
     },
@@ -154,7 +155,7 @@ fn recall() -> Value {
         "query": {"type": "string", "description": "Words to search for; none for the top memories."},
         "id": {"type": "string", "description": "A memory to read in full, with its provenance."},
         "history": {"type": "boolean", "description": "With id: show the chain of memories it superseded."},
-        "repo": {"type": "string", "description": "The git remote of the thread's repository, to include its memories."},
+        "repo": {"type": "string", "description": "The git remote of another repository, to include its memories too."},
         "with": {
             "type": "array",
             "items": {"type": "string"},

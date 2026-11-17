@@ -50,6 +50,7 @@ pub(super) fn context(by: Starter) -> CallContext {
         harness: "copilot".into(),
         model: Some("gpt".into()),
         machine: "studio".into(),
+        repo: None,
         at: "2025-01-01T12:00:00Z".parse().unwrap(),
     }
 }

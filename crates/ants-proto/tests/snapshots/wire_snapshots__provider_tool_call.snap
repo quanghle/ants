@@ -21,6 +21,7 @@ expression: value
     "harness": "copilot",
     "model": "gpt-5",
     "machine": "studio",
+    "repo": "github.com/owner/repo",
     "at": "2025-01-01T12:01:00Z"
   },
   "format": "json"

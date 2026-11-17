@@ -4,11 +4,12 @@
 //! answering within [`BRIEF_TIMEOUT`], or failing, leaves an `[ants]` line in its place.
 
 use std::fmt::Write as _;
+use std::path::Path;
 
 use ants_proto::ThreadId;
 use ants_proto::provider::{BRIEF_BUDGET, BRIEF_TIMEOUT, BriefReason, BriefRequest, Capability, Connected, Origin};
 
-use super::context::Caller;
+use super::context::{Caller, repository};
 
 /// What asks the ant's provider for its brief for a session of a thread.
 #[derive(Clone)]
@@ -28,15 +29,16 @@ impl Briefing {
         provider.has(Capability::Context).then_some(Self { provider, caller, thread, origin, budget: BRIEF_BUDGET })
     }
 
-    /// The brief's part of the first prompt of a session opened for `reason` in `harness` running `model`: the brief
-    /// under its heading, cut to the budget; an `[ants]` line when it is left out; empty for an empty brief.
-    pub async fn section(&self, reason: BriefReason, harness: &str, model: Option<&str>) -> String {
+    /// The brief's part of the first prompt of a session opened for `reason` in `harness` running `model`, working in
+    /// `dir`: the brief under its heading, cut to the budget; an `[ants]` line when it is left out; empty for an empty
+    /// brief.
+    pub async fn section(&self, reason: BriefReason, harness: &str, model: Option<&str>, dir: &Path) -> String {
         let (name, thread) = (self.provider.name(), &self.thread);
         let caller = match &self.caller {
             Ok(caller) => caller,
             Err(why) => return left_out(name, why),
         };
-        let context = caller.context(thread.clone(), self.origin.clone(), harness, model);
+        let context = caller.context(thread.clone(), self.origin.clone(), harness, model, repository(dir));
         let request = BriefRequest { context, budget: self.budget, reason };
         match tokio::time::timeout(BRIEF_TIMEOUT, self.provider.brief(request)).await {
             Ok(Ok(brief)) => shown(name, &brief.text, self.budget as usize),
@@ -153,7 +155,11 @@ mod tests {
     #[tokio::test]
     async fn the_brief_comes_under_its_heading_asked_with_the_session_s_context() {
         let (briefing, fake) = briefing_by(Answer::Text("Working on the parser.\n".to_owned())).await;
-        let section = briefing.unwrap().section(BriefReason::Loaded, "claude", Some("opus")).await;
+        let dir = ants_test_support::scratch_dir("brief");
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(dir.join(".git/config"), "[remote \"origin\"]\n\turl = https://github.com/o/r.git\n").unwrap();
+        let section = briefing.unwrap().section(BriefReason::Loaded, "claude", Some("opus"), &dir).await;
+        std::fs::remove_dir_all(dir).unwrap();
         assert_eq!(section, "[ants brief from fake]\nWorking on the parser.");
         let asked = fake.asked.lock().unwrap();
         let [request] = asked.as_slice() else { panic!("{asked:?}") };
@@ -164,13 +170,14 @@ mod tests {
             (context.harness.as_str(), context.model.as_deref(), context.machine.as_str()),
             ("claude", Some("opus"), "m1")
         );
+        assert_eq!(context.repo.as_deref(), Some("github.com/o/r"), "the repository the session works in");
         assert_eq!(context.origin, origin());
     }
 
     #[tokio::test]
     async fn an_empty_brief_adds_nothing_and_a_provider_without_context_is_not_asked() {
         let (briefing, _) = briefing_by(Answer::Text(" \n".to_owned())).await;
-        assert_eq!(briefing.unwrap().section(BriefReason::Started, "test", None).await, "");
+        assert_eq!(briefing.unwrap().section(BriefReason::Started, "test", None, Path::new("/")).await, "");
         let (provider, _) = connected(Answer::Text("brief".to_owned()), false).await;
         assert!(Briefing::new(provider, caller(), "t1".parse().unwrap(), origin()).is_none());
     }
@@ -179,7 +186,7 @@ mod tests {
     async fn a_brief_over_its_budget_is_cut_on_a_character_boundary() {
         let text = format!("a{}", "é".repeat(4000));
         let (briefing, _) = briefing_by(Answer::Text(text)).await;
-        let section = briefing.unwrap().section(BriefReason::Started, "test", None).await;
+        let section = briefing.unwrap().section(BriefReason::Started, "test", None, Path::new("/")).await;
         let expected = format!(
             "[ants brief from fake]\na{}\n[ants] The brief was cut to its budget of 8000 bytes.",
             "é".repeat(3999)
@@ -191,15 +198,15 @@ mod tests {
     async fn a_brief_not_sent_in_time_is_left_out_with_a_line_saying_so() {
         let (briefing, _) = briefing_by(Answer::Never).await;
         let started = tokio::time::Instant::now();
-        let section = briefing.unwrap().section(BriefReason::Rebuilt, "test", None).await;
+        let section = briefing.unwrap().section(BriefReason::Rebuilt, "test", None, Path::new("/")).await;
         assert_eq!(section, "[ants] The fake brief is left out: no answer within 5s.");
         assert_eq!(started.elapsed(), BRIEF_TIMEOUT);
         let (briefing, _) = briefing_by(Answer::Fail).await;
-        let section = briefing.unwrap().section(BriefReason::Started, "test", None).await;
+        let section = briefing.unwrap().section(BriefReason::Started, "test", None, Path::new("/")).await;
         assert_eq!(section, "[ants] The fake brief is left out: the provider failed (error -32603).");
         let (provider, fake) = connected(Answer::Text("brief".to_owned()), true).await;
         let briefing = Briefing::new(provider, Err(CANNOT_READ.to_owned()), "t1".parse().unwrap(), origin()).unwrap();
-        let section = briefing.section(BriefReason::Started, "test", None).await;
+        let section = briefing.section(BriefReason::Started, "test", None, Path::new("/")).await;
         assert_eq!(section, "[ants] The fake brief is left out: the ant's identity record cannot be read.");
         assert!(fake.asked.lock().unwrap().is_empty());
     }

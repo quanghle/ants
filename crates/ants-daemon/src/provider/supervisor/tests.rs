@@ -133,6 +133,7 @@ fn call(name: &str) -> ToolCall {
             harness: "copilot".into(),
             model: None,
             machine: "studio".into(),
+            repo: None,
             at: chrono::Utc::now(),
         },
         format: Format::Text,

@@ -14,7 +14,7 @@ use serde_json::json;
 use crate::identity::{self, Card};
 use crate::items::ItemId;
 use crate::log::Break;
-use crate::memory::{self, MemoryItem, Ranked, Scope, Status, Trust, framed, participants, snippet};
+use crate::memory::{self, MemoryItem, Ranked, Scope, Status, Trust, framed, participants, snippet, thread_repo};
 use crate::store::{Items, StoreError};
 use crate::thread::{self, Handoff, Register};
 use crate::{Answer, Sense};
@@ -254,6 +254,7 @@ async fn memories_section(
 ) -> Result<Option<Section>, StoreError> {
     let core = memory::core(items).await?;
     let mut scopes = vec![Scope::Own];
+    scopes.extend(thread_repo(context));
     scopes.extend(participants(context));
     let top = memory::top(items, &scopes, TOP_MEMORIES + core.len() + episodes.len(), context.at).await?;
     let shown = |ranked: &Ranked| ranked.found.memory.core || episodes.contains(ranked.found.id());

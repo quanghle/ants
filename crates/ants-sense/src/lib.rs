@@ -183,6 +183,7 @@ mod tests {
                 harness: "copilot".into(),
                 model: None,
                 machine: "studio".into(),
+                repo: None,
                 at: "2025-01-01T12:00:00Z".parse().unwrap(),
             },
             format,

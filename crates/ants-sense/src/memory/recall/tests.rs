@@ -106,7 +106,7 @@ async fn recall_ranks_the_best_match_first() {
 }
 
 #[tokio::test]
-async fn recall_reads_self_the_named_repository_and_the_thread_people() {
+async fn recall_reads_self_the_thread_s_and_the_named_repository_and_the_thread_people() {
     let (sense, _store) = sense().await;
     let scoped = |scope: &str, title: &str| json!({"kind": "fact", "scope": scope, "title": title, "body": title});
     let own = ok(&sense, scoped("self", "deploy own")).await;
@@ -140,6 +140,14 @@ async fn recall_reads_self_the_named_repository_and_the_thread_people() {
     let hook = Starter::Webhook { user: "hook".parse().unwrap() };
     let answer = tool(&sense, recall, json!({"query": "deploy"}), context(hook)).await;
     assert_eq!(ids(&answer), [own.to_string()]);
+
+    let in_repo = CallContext { repo: Some("github.com/o/r".into()), ..context(human()) };
+    let answer = tool(&sense, recall, json!({"query": "deploy"}), in_repo.clone()).await;
+    assert_eq!(found(&answer), sorted(&[&own, &repo, &alice]), "the thread's repository without a repo argument");
+    assert_eq!(answer.json["scopes"], json!(["self", "repo:github.com/o/r", "human:alice"]));
+    assert!(!text(answer).contains("Pass repo"));
+    let answer = tool(&sense, recall, json!({"query": "deploy", "repo": "github.com/o/other"}), in_repo).await;
+    assert_eq!(found(&answer), sorted(&[&own, &repo, &other_repo, &alice]), "and the one the call names");
 }
 
 #[tokio::test]

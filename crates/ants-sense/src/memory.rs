@@ -22,7 +22,7 @@ mod vote;
 
 pub use recall::{
     HALF_LIFE_DAYS, HELPFUL_WEIGHT, MAX_HELPFUL, NEEDS_REVIEW_WEIGHT, NOTE, Ranked, STALE_WEIGHT, framed, participants,
-    recall, score, search, snippet, top,
+    recall, score, search, snippet, thread_repo, top,
 };
 pub use remember::remember;
 pub use vote::{VOTE, Vote, Votes, vote};

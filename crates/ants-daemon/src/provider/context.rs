@@ -1,9 +1,12 @@
 //! The [`CallContext`] of a provider call, as the daemon serving the ant knows it: never taken from the ant's text.
-//! Tool calls and brief requests alike take who calls from [`Callers`] and where the thread came from from [`origin`],
-//! kept per thread by [`settled`].
+//! Tool calls and brief requests alike take who calls from [`Callers`], where the thread came from from [`origin`],
+//! kept per thread by [`settled`], and the repository the session works in from [`repository`].
+
+use std::path::Path;
 
 use ants_proto::provider::{CallContext, Origin, Starter};
 use ants_proto::{ChannelId, Envelope, Humans, ThreadId, UserId};
+use ants_sense::memory::normalize_remote;
 use chrono::Utc;
 
 use crate::profile::identity::Identity;
@@ -68,8 +71,15 @@ pub struct Caller {
 
 impl Caller {
     /// The context of a call now on `thread`, which `origin` started, from a session of `harness` running `model`
-    /// (None for the harness's default).
-    pub fn context(&self, thread: ThreadId, origin: Origin, harness: &str, model: Option<&str>) -> CallContext {
+    /// (None for the harness's default) in the repository `repo` ([`repository`]).
+    pub fn context(
+        &self,
+        thread: ThreadId,
+        origin: Origin,
+        harness: &str,
+        model: Option<&str>,
+        repo: Option<String>,
+    ) -> CallContext {
         CallContext {
             ant: self.ant.clone(),
             identity: self.identity.clone(),
@@ -78,9 +88,56 @@ impl Caller {
             harness: harness.to_owned(),
             model: model.map(str::to_owned),
             machine: self.machine.clone(),
+            repo,
             at: Utc::now(),
         }
     }
+}
+
+/// The repository a session working in `dir` works in: the remote of the git repository holding `dir` (`origin`,
+/// else the first with a URL), normalized ([`normalize_remote`]). Read from the repository's config file without
+/// running git, so `url.<base>.insteadOf` and included files are not applied; None outside a git repository, or one
+/// without a remote.
+pub fn repository(dir: &Path) -> Option<String> {
+    let dir = std::path::absolute(dir).ok()?;
+    let dot_git = dir.ancestors().map(|dir| dir.join(".git")).find(|path| path.exists())?;
+    let git_dir = if dot_git.is_file() {
+        // A linked worktree's or a submodule's `.git` file: `gitdir: <path>`, relative to the file's directory.
+        let text = std::fs::read_to_string(&dot_git).ok()?;
+        dot_git.parent()?.join(text.trim().strip_prefix("gitdir:")?.trim())
+    } else {
+        dot_git
+    };
+    let common = match std::fs::read_to_string(git_dir.join("commondir")) {
+        Ok(text) => git_dir.join(text.trim()),
+        Err(_) => git_dir,
+    };
+    let config = std::fs::read_to_string(common.join("config")).ok()?;
+    remote_url(&config).and_then(normalize_remote)
+}
+
+/// The URL of remote `origin` in `config`, a git config file, else of the first remote with one.
+fn remote_url(config: &str) -> Option<&str> {
+    let (mut remote, mut first) = (None, None);
+    for line in config.lines().map(str::trim) {
+        if let Some(header) = line.strip_prefix('[') {
+            remote = header.split_once(']').and_then(|(header, _)| {
+                let (section, name) = header.split_once(char::is_whitespace)?;
+                section.eq_ignore_ascii_case("remote").then(|| name.trim().trim_matches('"'))
+            });
+            continue;
+        }
+        let (Some(name), Some((key, value))) = (remote, line.split_once('=')) else { continue };
+        let Some(url) = value.split_whitespace().next().map(|url| url.trim_matches('"')) else { continue };
+        if !key.trim().eq_ignore_ascii_case("url") || url.is_empty() {
+            continue;
+        }
+        if name == "origin" {
+            return Some(url);
+        }
+        first.get_or_insert(url);
+    }
+    first
 }
 
 /// Where the thread of `envelope`, a message as the daemon took it on arrival, came from, on `channel` when a post on
@@ -158,6 +215,36 @@ mod tests {
         assert_eq!(by(&narrowed), Starter::Webhook { user: user("dev-b") }, "carrying on a webhook's thread");
         let channel: ChannelId = "ops".parse().unwrap();
         assert_eq!(origin(&message("dev-b"), Some(channel.clone()), &Humans::default()).channel, Some(channel));
+    }
+
+    #[test]
+    fn the_repository_is_the_origin_remote_else_the_first_normalized() {
+        let config = "[core]\n\tbare = false\n[remote \"upstream\"]\n\turl = https://github.com/up/repo.git\n\
+                      [Remote \"origin\"]\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n\tURL = \"git@GitHub.com:o/r.git\"\n";
+        assert_eq!(remote_url(config), Some("git@GitHub.com:o/r.git"));
+        assert_eq!(
+            remote_url("[remote \"fork\"]\nurl = ssh://git@host:22/f/r # mine\n"),
+            Some("ssh://git@host:22/f/r")
+        );
+        assert_eq!(remote_url("[core]\n\turl = https://h/o/r\n[branch \"main\"]\n\tremote = origin\n"), None);
+
+        let dir = ants_test_support::scratch_dir("repository");
+        let main = dir.join("main");
+        std::fs::create_dir_all(main.join(".git/worktrees/w")).unwrap();
+        std::fs::create_dir_all(main.join("src/deep")).unwrap();
+        std::fs::write(main.join(".git/config"), config).unwrap();
+        std::fs::write(main.join(".git/worktrees/w/commondir"), "../..\n").unwrap();
+        assert_eq!(repository(&main.join("src/deep")).as_deref(), Some("github.com/o/r"));
+        let linked = dir.join("linked");
+        std::fs::create_dir_all(&linked).unwrap();
+        std::fs::write(linked.join(".git"), "gitdir: ../main/.git/worktrees/w\n").unwrap();
+        assert_eq!(repository(&linked).as_deref(), Some("github.com/o/r"), "a linked worktree reads the common config");
+        let bare = dir.join("bare");
+        std::fs::create_dir_all(bare.join(".git")).unwrap();
+        std::fs::write(bare.join(".git/config"), "[core]\n\tbare = false\n").unwrap();
+        assert_eq!(repository(&bare), None, "no remote");
+        assert_eq!(repository(Path::new("/")), None, "no repository");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -49,6 +49,7 @@ fn context(thread: &str) -> CallContext {
         harness: "copilot".into(),
         model: Some("gpt".into()),
         machine: "studio".into(),
+        repo: None,
         at: "2025-01-01T12:00:00Z".parse().unwrap(),
     }
 }
@@ -109,6 +110,21 @@ async fn sections_come_in_order_with_memories_framed() {
         assert!(crate::TOOLS.iter().any(|spec| spec.name == *tool), "{tool}");
         position(&brief[at[4]..], &format!("- sense_{tool}: "));
     }
+}
+
+#[tokio::test]
+async fn the_memories_include_those_of_the_thread_s_repository() {
+    let (sense, _) = sense().await;
+    for (scope, title) in [("repo:github.com/o/r", "Run make check"), ("repo:github.com/o/other", "Run npm test")] {
+        let fact = json!({"kind": "fact", "scope": scope, "title": title, "body": title});
+        call(&sense, memory::remember, THREAD, fact).await;
+    }
+    let context = CallContext { repo: Some("github.com/o/r".into()), ..context(THREAD) };
+    let request = BriefRequest { context, budget: 8_000, reason: BriefReason::Started };
+    let brief = sense.brief(request).await.unwrap().text;
+    position(&brief[position(&brief, "## Memories")..], "Run make check");
+    assert!(!brief.contains("Run npm test"), "{brief}");
+    assert!(!session_brief(&sense, 8_000).await.contains("Run make check"), "none outside the repository");
 }
 
 #[tokio::test]

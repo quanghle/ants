@@ -269,7 +269,7 @@ impl Connected<'_> {
         let briefed = match brief {
             Some(brief) => {
                 let model = self.launch.settings.model.as_deref();
-                brief.section(reason, &self.launch.harness.name, model).await
+                brief.section(reason, &self.launch.harness.name, model, &self.launch.cwd).await
             }
             None => String::new(),
         };

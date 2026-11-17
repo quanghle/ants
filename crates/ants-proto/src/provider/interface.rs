@@ -256,6 +256,7 @@ mod tests {
                 harness: "copilot".into(),
                 model: None,
                 machine: "studio".into(),
+                repo: None,
                 at: chrono::Utc::now(),
             },
             format: crate::provider::Format::Text,

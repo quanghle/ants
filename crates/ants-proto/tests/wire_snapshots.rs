@@ -1068,6 +1068,7 @@ fn call_context(by: provider::Starter) -> provider::CallContext {
         harness: "copilot".into(),
         model: Some("gpt-5".into()),
         machine: "studio".into(),
+        repo: Some("github.com/owner/repo".into()),
         at: at(1),
     }
 }

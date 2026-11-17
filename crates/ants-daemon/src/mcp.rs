@@ -54,6 +54,7 @@ use crate::chanadm::Admin;
 use crate::escalation::Escalator;
 use crate::harness::{McpServers, McpSession};
 use crate::people::humans::Registry;
+use crate::provider::context::repository;
 use crate::records::links;
 use crate::secrets::redact::Redactor;
 use crate::stream::notes::NotesStore;
@@ -260,17 +261,21 @@ impl Mcp {
     }
 
     /// The MCP servers each harness session gets: HTTP where the harness takes it, else `ants mcp` over the socket.
-    /// The directory the session works in is where its tools attach and save files, and the harness and model running
-    /// it are those the calls of the provider's tools carry.
+    /// The directory the session works in is where its tools attach and save files; the harness and model running it,
+    /// and the repository of the directory ([`repository`]), are those the calls of the provider's tools carry.
     pub fn servers(&self) -> McpServers {
         let (hub, url, socket) = (self.hub.clone(), self.url.clone(), self.socket.clone());
         let exe = std::env::current_exe().ok();
         Arc::new(move |session: &McpSession<'_>| {
             let thread = session.thread;
+            let running = Running {
+                harness: session.harness.to_owned(),
+                model: session.model.map(str::to_owned),
+                repo: repository(session.dir),
+            };
             {
                 let mut sessions = hub.sessions.locked();
                 sessions.dirs.insert(thread.clone(), session.dir.to_owned());
-                let running = (session.harness.to_owned(), session.model.map(str::to_owned));
                 sessions.running.insert(thread.clone(), running);
             }
             let token = hub.token(thread);
@@ -321,6 +326,14 @@ impl Mcp {
     }
 }
 
+/// A session opened: the harness running it, the model the config sets for it, and the repository it works in
+/// ([`repository`]), read once as it opens.
+struct Running {
+    harness: String,
+    model: Option<String>,
+    repo: Option<String>,
+}
+
 #[derive(Default)]
 struct Sessions {
     tokens: HashMap<String, ThreadId>,
@@ -333,8 +346,8 @@ struct Sessions {
     completed: HashMap<ThreadId, turn::Completed>,
     /// The directory each thread's sessions work in.
     dirs: HashMap<ThreadId, PathBuf>,
-    /// The harness running each thread's last session opened, and the model the config sets for it.
-    running: HashMap<ThreadId, (String, Option<String>)>,
+    /// Each thread's last session opened.
+    running: HashMap<ThreadId, Running>,
     /// Where each thread came from, as the messages it handled tell, settled ([`Mcp::settle_origin`]) or read back.
     origins: HashMap<ThreadId, Origin>,
     /// The paths of the files each thread's session attached to the final answer of its turn.

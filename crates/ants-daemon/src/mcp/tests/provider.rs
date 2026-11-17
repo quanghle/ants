@@ -263,3 +263,22 @@ async fn a_thread_keeps_its_stored_origin_across_a_restart() {
     let downgraded = store.get(&hook.thread_id).await.unwrap().unwrap();
     assert_eq!(downgraded.by, Starter::Webhook { user: user("hook") }, "stored again once downgraded");
 }
+
+#[tokio::test]
+async fn calls_carry_the_repository_the_thread_s_last_session_works_in() {
+    let home = home("repo");
+    let (mcp, _sent) = start(&home).await;
+    mcp.with_callers(Callers::known(user("dev-a"), "m1", "id-1"));
+    let current = from_human();
+    mcp.settle_origin(&current, None).await.unwrap();
+    let open = |dir: &Path| drop(mcp.servers()(&crate::harness::McpSession::test(&current.thread_id, dir, true)));
+
+    open(Path::new("/"));
+    assert_eq!(mcp.call_context(&current.thread_id).await.unwrap().repo, None, "outside a repository");
+    std::fs::create_dir_all(home.join(".git")).unwrap();
+    std::fs::create_dir_all(home.join("sub")).unwrap();
+    std::fs::write(home.join(".git/config"), "[remote \"origin\"]\n\turl = git@github.com:Owner/Repo.git\n").unwrap();
+    open(&home.join("sub"));
+    let context = mcp.call_context(&current.thread_id).await.unwrap();
+    assert_eq!(context.repo.as_deref(), Some("github.com/Owner/Repo"));
+}

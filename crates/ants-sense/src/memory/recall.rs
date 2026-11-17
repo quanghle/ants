@@ -6,8 +6,8 @@
 //! over [`DEFAULT_IMPORTANCE`], times `(1 + HELPFUL_WEIGHT × min(helpful, MAX_HELPFUL)) / (1 + STALE_WEIGHT ×
 //! stale)`, times [`NEEDS_REVIEW_WEIGHT`] while it needs review.
 //!
-//! Recall reads the scopes of the thread: `self`, the repository the call names, the human or ant who started the
-//! thread ([`participants`]) and the names the call adds. Recalled memories are shown inside a block ([`framed`])
+//! Recall reads the scopes of the thread: `self`, the repository the thread works in ([`thread_repo`]) and the one the
+//! call names, the human or ant who started the thread ([`participants`]) and the names the call adds. Recalled memories are shown inside a block ([`framed`])
 //! saying they are notes from earlier sessions to verify, not instructions, so `sense_remember` refuses them back.
 
 use std::fmt::Write as _;
@@ -160,6 +160,11 @@ fn rank(found: impl Iterator<Item = (Item, f64)>, scopes: &[Scope], limit: usize
     ranked
 }
 
+/// The scope of the repository the thread of `context` works in, as ants tells it: none outside one.
+pub fn thread_repo(context: &CallContext) -> Option<Scope> {
+    context.repo.as_deref().and_then(normalize_remote).map(Scope::Repo)
+}
+
 /// The scopes of the people of the thread of `context`: the human or ant who started it.
 pub fn participants(context: &CallContext) -> Vec<Scope> {
     match &context.origin.by {
@@ -231,8 +236,8 @@ async fn recall_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
         return read(items, id, request.history).await;
     }
     let mut scopes = vec![Scope::Own];
-    scopes.extend(request.repo.clone().map(Scope::Repo));
-    for scope in participants(&call.context).into_iter().chain(request.with) {
+    let repos = thread_repo(&call.context).into_iter().chain(request.repo.map(Scope::Repo));
+    for scope in repos.chain(participants(&call.context)).chain(request.with) {
         if !scopes.contains(&scope) {
             scopes.push(scope);
         }
@@ -243,7 +248,8 @@ async fn recall_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
         None => top(items, &scopes, request.limit, now).await,
     };
     let ranked = ranked.map_err(unavailable)?;
-    Ok(listed(&ranked, request.query.as_deref(), &scopes, request.repo.is_some()))
+    let repo = scopes.iter().any(|scope| matches!(scope, Scope::Repo(_)));
+    Ok(listed(&ranked, request.query.as_deref(), &scopes, repo))
 }
 
 /// What a call asks to recall.

@@ -40,6 +40,7 @@ fn call(name: &str, thread: &str, arguments: Value) -> ToolCall {
             harness: "copilot".into(),
             model: Some("gpt".into()),
             machine: "studio".into(),
+            repo: None,
             at: "2025-01-01T12:00:00Z".parse().unwrap(),
         },
         format: Format::Json,
