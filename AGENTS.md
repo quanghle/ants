@@ -31,6 +31,10 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
 - `crates/ants/nats-server.sha256` pins the nats-server release bundled with ants: release archives, `ants setup`
   downloads and CI's tests all take it from there.
 - Comment only code that needs clarification.
+- Modules are `x.rs` with submodules in `x/`, never `x/mod.rs`. Unit tests of `x.rs` start inline
+  (`#[cfg(test)] mod tests { … }` at its end); once they outgrow the code they test, they move to `x/tests.rs`
+  (`#[cfg(test)] mod tests;`); once that grows too large, `x/tests.rs` keeps the shared helpers and declares
+  submodules in `x/tests/`, one per behaviour (`x/tests/routing.rs`, …).
 
 ## Checks
 
