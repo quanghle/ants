@@ -349,7 +349,7 @@ fn pack_ant(
 }
 
 /// The home of `ant`, as its daemon resolves it.
-fn home_of(ant: &Ant) -> Result<PathBuf> {
+pub(crate) fn home_of(ant: &Ant) -> Result<PathBuf> {
     match &ant.home {
         Some(home) => Ok(home.clone()),
         None => Ok(std::env::home_dir().context("no home directory")?.join(".ants").join(ant.name.as_str())),

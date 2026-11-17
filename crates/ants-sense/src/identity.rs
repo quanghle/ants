@@ -2,7 +2,9 @@
 //! ([`ID_FILE`]) and in its card ([`Card`]), the item sense alone writes, from the ant's lifecycle events
 //! ([`record_event`]) and the start of each of its sessions ([`record_session`]). The id never changes: not on a
 //! rename, a change of harness or model, a move, a retirement or a revival; a clone gets its own. A renamed ant's home
-//! lists its earlier names ([`NAMES_FILE`]), whose events in its log are its own ([`crate::log::Chain`]).
+//! lists its earlier names ([`NAMES_FILE`]), whose events in its log are its own ([`crate::log::Chain`]): an import
+//! under another name lists the name before ([`note_renamed`]), and so does an ant added under another name with the
+//! home of an earlier one ([`take_over`]). A card made anew, as on another bus, starts with the names listed.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -16,7 +18,7 @@ use uuid::Uuid;
 
 use crate::cache::CacheError;
 use crate::items::{Item, Values};
-use crate::log::{APPEND_TRIES, SENSE_DIR};
+use crate::log::{APPEND_TRIES, SENSE_DIR, read_status};
 use crate::store::{Items, StoreError};
 
 /// The file of [`SENSE_DIR`] holding the ant's sense id.
@@ -94,6 +96,21 @@ pub fn note_renamed(home: &Path, from: &UserId) -> io::Result<()> {
     std::fs::rename(&beside, &file)
 }
 
+/// Let `ant` take over `home`, as when an ant is added under a new name with the home of an earlier one: the name the
+/// home's sense log was last read under, as its chain status tells ([`crate::log::ChainStatus::ant`]), listed among the
+/// earlier names of `ant` ([`note_renamed`]) and returned when it differs; none when the home holds no sense data.
+pub fn take_over(home: &Path, ant: &UserId) -> io::Result<Option<UserId>> {
+    let Some(sense) = read_id(home)? else { return Ok(None) };
+    let named = read_status(home)?.filter(|status| status.sense == sense).and_then(|status| status.ant);
+    match named {
+        Some(named) if named != *ant => {
+            note_renamed(home, &named)?;
+            Ok(Some(named))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// The ant's identity card, as sense keeps it: never written by the ant. Its revisions and their times are the item's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Card {
@@ -146,12 +163,18 @@ pub struct ClonedFrom {
 }
 
 impl Card {
-    /// The card of `sense`, the identity of `ant`, made at `at`, linked to no ants identity yet.
-    fn new(sense: SenseId, ant: UserId, at: DateTime<Utc>) -> Self {
+    /// The card of `sense`, the identity of `ant`, once named `earlier`, made at `at`, linked to no ants identity yet.
+    fn new(sense: SenseId, ant: UserId, earlier: Vec<UserId>, at: DateTime<Utc>) -> Self {
+        let mut earlier_names = Vec::new();
+        for name in earlier {
+            if name != ant && !earlier_names.contains(&name) {
+                earlier_names.push(name);
+            }
+        }
         Self {
             sense,
             name: ant,
-            earlier_names: Vec::new(),
+            earlier_names,
             identity: String::new(),
             identities: Vec::new(),
             born: at,
@@ -291,8 +314,8 @@ pub async fn returned_told(items: &dyn Items, ant: &UserId) -> Result<Card, Stor
     update(items, ant, Utc::now(), |card| card.returned_at = None).await
 }
 
-/// The card in `items` after `change`, made for `ant` at `at` first when there is none. A change made by another
-/// writer in between is changed again.
+/// The card in `items` after `change`, made for `ant` at `at` first when there is none, with the earlier names of the
+/// ant's log. A change made by another writer in between is changed again.
 async fn update(
     items: &dyn Items,
     ant: &UserId,
@@ -301,7 +324,7 @@ async fn update(
 ) -> Result<Card, StoreError> {
     for _ in 0..APPEND_TRIES {
         let Some(item) = items.list(CARD, 1).await?.pop() else {
-            let mut card = Card::new(items.sense().await, ant.clone(), at);
+            let mut card = Card::new(items.sense().await, ant.clone(), items.earlier_names().await, at);
             change(&mut card);
             let (item, created) = items.single(CARD, card.values()?, BY).await?;
             if created {

@@ -25,7 +25,7 @@ async fn items(log: &'static MemoryLog, sense: &SenseId) -> Arc<dyn Items> {
     Arc::new(tokio::sync::Mutex::new(store))
 }
 
-/// The items of `sense` in `log` for `ant`, once named `earlier`, cached in `home`.
+/// The items of `sense` in `log` for `ant`, once named `earlier`, cached in `home`, where its chain status is kept.
 async fn items_in(
     log: &'static MemoryLog,
     sense: &SenseId,
@@ -35,7 +35,8 @@ async fn items_in(
 ) -> Arc<dyn Items> {
     let verifier = AccountVerifier::new(vec![], NoRevocations);
     let ant = ant.parse().unwrap();
-    let log = AntLog::new(log, Unsigned, verifier, sense.clone(), ant, "m1".parse().unwrap(), None).unwrap();
+    let log =
+        AntLog::new(log, Unsigned, verifier, sense.clone(), ant, "m1".parse().unwrap(), Some(home.to_owned())).unwrap();
     let store = Store::open(log.with_earlier_names(earlier), Cache::open(home).unwrap()).await.unwrap();
     Arc::new(tokio::sync::Mutex::new(store))
 }
@@ -229,6 +230,47 @@ async fn a_renamed_ant_keeps_its_card_under_its_new_name_with_its_earlier_one() 
         assert_eq!(new.list(CARD, 5).await.unwrap().len(), 1, "no second card");
     }
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn an_ant_added_under_a_new_name_with_an_old_home_keeps_its_card() {
+    let log: &'static MemoryLog = Box::leak(Box::default());
+    let home = ants_test_support::scratch_dir("sense-taken-over");
+    let dev_b: UserId = "dev-b".parse().unwrap();
+    assert_eq!(take_over(&home, &dev_b).unwrap(), None, "no sense data");
+    let sense = sense_id(&home).unwrap();
+    assert_eq!(take_over(&home, &dev_b).unwrap(), None, "a sense id, its log never read");
+    let old = items_in(log, &sense, "dev-a", vec![], &home).await;
+    let before = record_event(&*old, &event("dev-a", "id1", "10:00:00", EventKind::AntAdded)).await.unwrap();
+    drop(old);
+    assert_eq!(take_over(&home, &dev_a()).unwrap(), None, "added again under its name");
+    assert_eq!(earlier_names(&home).unwrap(), []);
+
+    assert_eq!(take_over(&home, &dev_b).unwrap(), Some(dev_a()));
+    assert_eq!(take_over(&home, &dev_b).unwrap(), Some(dev_a()));
+    assert_eq!(earlier_names(&home).unwrap(), [dev_a()], "listed once");
+    let new = items_in(log, &sense, "dev-b", earlier_names(&home).unwrap(), &home).await;
+    let card = record_event(&*new, &event("dev-b", "id2", "11:00:00", EventKind::AntAdded)).await.unwrap();
+    assert_eq!((&card.name, &card.earlier_names, card.born), (&dev_b, &vec![dev_a()], before.born));
+    assert_eq!((&card.identities[..], card.returned()), (&["id1".to_owned(), "id2".to_owned()][..], true));
+    assert_eq!(new.broken().await, None);
+    drop(new);
+    assert_eq!(take_over(&home, &dev_b).unwrap(), None, "its log read under its new name");
+    std::fs::remove_dir_all(&home).unwrap();
+}
+
+#[tokio::test]
+async fn a_card_made_anew_starts_with_the_earlier_names_of_the_home() {
+    let log: &'static MemoryLog = Box::leak(Box::default());
+    let home = ants_test_support::scratch_dir("sense-new-bus");
+    let (zeta, dev_b): (UserId, UserId) = ("zeta".parse().unwrap(), "dev-b".parse().unwrap());
+    let earlier = vec![zeta.clone(), dev_a(), dev_b.clone()];
+    let items = items_in(log, &SenseId::new(), "dev-b", earlier, &home).await;
+    record_event(&*items, &event("dev-b", "id1", "11:00:00", EventKind::AntMoved)).await.unwrap();
+    let renamed = EventKind::AntRenamed { from: dev_a() };
+    let card = record_event(&*items, &event("dev-b", "id1", "11:00:01", renamed)).await.unwrap();
+    assert_eq!((&card.name, &card.earlier_names), (&dev_b, &vec![zeta, dev_a()]));
+    std::fs::remove_dir_all(&home).unwrap();
 }
 
 /// The items of dev-a, the same each time.

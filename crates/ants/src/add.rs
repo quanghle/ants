@@ -113,7 +113,8 @@ pub(crate) fn listing(args: &AddArgs, base: Ant, nats: &str, js_domain: Option<&
     Ok(Listing { path, out, entry, harness, host: summary.host })
 }
 
-/// Give the ant of `listing` its credentials, then list it in the config file if new there.
+/// Give the ant of `listing` its credentials, then list it in the config file if new there, taking over its home's
+/// sense data when an ant of another name left it there.
 pub(crate) async fn credentials(args: &AddArgs, listing: &Listing, nats: &str, store: &dyn Store) -> Result<()> {
     let (name, path, out) = (&args.name, &listing.path, &listing.out);
     let (user, stored) = user_key(out, store, args.store_key)?;
@@ -137,7 +138,8 @@ pub(crate) async fn credentials(args: &AddArgs, listing: &Listing, nats: &str, s
     if let Some(jwt) = &jwt {
         complete(args, out, jwt, &user, store, stored, url).await?;
     }
-    if let Some((_, entry)) = &listing.entry {
+    if let Some((ant, entry)) = &listing.entry {
+        take_over_home(ant)?;
         config::append(path, entry)?;
         println!("{name} listed in {}", path.display());
     }
@@ -151,6 +153,23 @@ pub(crate) async fn credentials(args: &AddArgs, listing: &Listing, nats: &str, s
              over NATS: run `ants auth enroll {name}` where the account key is, copy the file here, run \
              `ants add {name} --enroll <FILE>` and approve with `ants enroll approve {name}` there"
         ),
+    }
+    Ok(())
+}
+
+/// List among the earlier names of `ant`, new to the config file, the name its home's sense data was last of, when
+/// another, so the ant keeps that data ([`ants_sense::identity::take_over`]).
+fn take_over_home(ant: &Ant) -> Result<()> {
+    let home = crate::export::home_of(ant)?;
+    let earlier = ants_sense::identity::take_over(&home, &ant.name).with_context(|| {
+        format!("listing the earlier name of {} in {}", ant.name, ants_sense::identity::names_file(&home).display())
+    })?;
+    if let Some(earlier) = earlier {
+        println!(
+            "the home {} holds the sense data of {earlier}: {} keeps it, {earlier} listed among its earlier names",
+            home.display(),
+            ant.name
+        );
     }
     Ok(())
 }
@@ -704,6 +723,43 @@ mod tests {
         assert_eq!(creds::seed_of(&text), Some(Seed::Stored(&user.public_key())));
         assert!(!seed_path(&out).exists());
         assert_eq!(store.keys().len(), 2);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_ant_added_with_the_home_of_another_lists_its_name_among_its_earlier_ones() {
+        use ants_sense::log::{ChainStatus, Mark};
+
+        let dir = ants_test_support::scratch_dir("ant-add-home").canonicalize().unwrap();
+        let config = dir.join("config.toml");
+        std::fs::write(&config, "harness = \"copilot\"\n").unwrap();
+        let home = dir.join("home");
+        let sense = ants_sense::identity::sense_id(&home).unwrap();
+        let status = ChainStatus {
+            sense,
+            incarnation: "i".into(),
+            checked_at: chrono::Utc::now(),
+            events: 1,
+            seen: Some(Mark { index: 1, sha256: "00".into() }),
+            broken: None,
+            ant: Some("dev-a".parse().unwrap()),
+        };
+        ants_sense::log::write_status(&home, &status).unwrap();
+        let (config_arg, home_arg, workdir) = (config.to_str().unwrap(), home.to_str().unwrap(), dir.to_str().unwrap());
+        run(&[
+            "dev-b",
+            "--config",
+            config_arg,
+            "--out",
+            &format!("{workdir}/dev-b.creds"),
+            "--workdir",
+            workdir,
+            "--home",
+            home_arg,
+        ])
+        .await
+        .unwrap();
+        assert_eq!(ants_sense::identity::earlier_names(&home).unwrap(), ["dev-a".parse::<UserId>().unwrap()]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

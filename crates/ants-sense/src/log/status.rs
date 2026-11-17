@@ -4,7 +4,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use ants_proto::SenseId;
+use ants_proto::{SenseId, UserId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +31,10 @@ pub struct ChainStatus {
     pub seen: Option<Mark>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub broken: Option<Break>,
+    /// The name of the ant the log's events are of by then ([`Chain::named`]): an ant added under another name with
+    /// this home lists it among its earlier names ([`crate::identity::take_over`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ant: Option<UserId>,
 }
 
 impl ChainStatus {
@@ -43,6 +47,7 @@ impl ChainStatus {
             events: chain.events(),
             seen: chain.seen().cloned(),
             broken: chain.broken().cloned(),
+            ant: chain.named().cloned(),
         }
     }
 }

@@ -6,7 +6,8 @@
 //! the ant twice; the key waits in `<ant>.nk` beside the credentials until they are written, so that the signer is
 //! asked about the same key again. On a machine running a leaf node ([`LeafNode`]), the uplink credentials sign the
 //! request too, and the signer renews them to carry the ant, which the daemon has the leaf node use before listing the
-//! ant. An order adding the assistant of a human (`assistant_of`, as `ants assistant enable --on` sends) has the
+//! ant. The ant takes over the sense data an ant of another name left in its home ([`ants_sense::identity::take_over`]).
+//! An order adding the assistant of a human (`assistant_of`, as `ants assistant enable --on` sends) has the
 //! credentials checked as that human's assistant's, and, where the hub keeps shared settings ([`crate::profile::shared`]), the
 //! order's shared settings written as the ant's record in place of any an earlier ant of the name left, so that the
 //! assistant runs with the role and tool rules it was added with.
@@ -103,14 +104,12 @@ async fn add(
     let dir = host_creds.parent().context("the host credentials are in no directory")?;
     let creds_path = dir.join(format!("{ant}.creds"));
     let (base, home) = (path.parent().unwrap_or(Path::new(".")), config::home_dir()?);
+    let home_set = settings.get("home").map(|h| h.as_str().context("home is no string")).transpose()?;
+    let ant_home =
+        home_set.map_or_else(|| home.join(".ants").join(ant.as_str()), |h| config::resolve(Path::new(h), base, &home));
     let workdir = match settings.get("workdir") {
         Some(_) => None,
-        None => {
-            let home_set = settings.get("home").map(|h| h.as_str().context("home is no string")).transpose()?;
-            let ant_home = home_set
-                .map_or_else(|| home.join(".ants").join(ant.as_str()), |h| config::resolve(Path::new(h), base, &home));
-            Some(ant_home)
-        }
+        None => Some(ant_home.clone()),
     };
     let table = entry(ant, &creds_path, workdir.as_deref(), settings, &mark)?;
     // Before any key is asked for: the file must load with the entry, a workdir to create aside.
@@ -150,6 +149,9 @@ async fn add(
         shared::write(identities, &mut record, &shared::Signer::new(&jwt, key.clone()), None).await?;
         config.shared.store(record);
     }
+    ants_sense::identity::take_over(&ant_home, ant).with_context(|| {
+        format!("listing the earlier name of {ant} in {}", ants_sense::identity::names_file(&ant_home).display())
+    })?;
     config::append(path, &table)?;
     if let Err(e) = std::fs::remove_file(&seed_path)
         && e.kind() != std::io::ErrorKind::NotFound

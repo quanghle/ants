@@ -357,6 +357,8 @@ pub trait Items: Send + Sync {
     fn sense(&self) -> BoxFuture<'_, SenseId>;
     /// The first break of the log read so far ([`crate::log::Chain::broken`]).
     fn broken(&self) -> BoxFuture<'_, Option<Break>>;
+    /// The ant's earlier names, whose events in the log are its own ([`crate::log::Chain::earlier`]).
+    fn earlier_names(&self) -> BoxFuture<'_, Vec<UserId>>;
 }
 
 impl<L, S, V> Items for tokio::sync::Mutex<Store<L, S, V>>
@@ -448,6 +450,10 @@ where
 
     fn broken(&self) -> BoxFuture<'_, Option<Break>> {
         Box::pin(async move { self.lock().await.log().chain().broken().cloned() })
+    }
+
+    fn earlier_names(&self) -> BoxFuture<'_, Vec<UserId>> {
+        Box::pin(async move { self.lock().await.log().chain().earlier().to_vec() })
     }
 }
 

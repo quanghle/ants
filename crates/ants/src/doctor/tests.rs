@@ -393,6 +393,7 @@ fn a_break_in_an_ant_s_sense_chain_fails() {
         events: 2,
         seen: None,
         broken: None,
+        ant: None,
     };
     write_status(&dir.join("dev-a"), &status).unwrap();
     let broken = Break { index: 3, sequence: Some(7), reason: "not signed by dev-b's credentials".into() };

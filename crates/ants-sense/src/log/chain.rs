@@ -82,6 +82,11 @@ impl Chain {
         &self.ant
     }
 
+    /// The ant's earlier names, whose events are its own too.
+    pub fn earlier(&self) -> &[UserId] {
+        &self.earlier
+    }
+
     /// The name of the ant the log's events are of by now: of the last event that verified; none before any.
     pub fn named(&self) -> Option<&UserId> {
         self.named.as_ref()
