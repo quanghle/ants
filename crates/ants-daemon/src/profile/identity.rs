@@ -5,6 +5,7 @@
 //! mark: the daemon serving it drains it as on a stop, and a daemon starting it waits ([`Identity::moved`],
 //! [`Identity::unsealed`]).
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ants_proto::{AntIdentity, IDENTITIES_BUCKET, JsDomain, UserId};
@@ -15,6 +16,7 @@ use data_encoding::HEXLOWER;
 use ring::rand::{SecureRandom as _, SystemRandom};
 
 use crate::records::direct_kv::{DirectKv, Lookup};
+use crate::sync::MutexExt as _;
 
 /// How often a compare-and-set is tried again when another writer changed the record in between.
 const ATTEMPTS: usize = 5;
@@ -27,11 +29,25 @@ pub const MOVED_EVERY: Duration = Duration::from_secs(30);
 pub struct Identity {
     kv: DirectKv,
     ant: UserId,
+    /// The record's id once read ([`Identity::id`]), shared by clones.
+    id: Arc<Mutex<Option<String>>>,
 }
 
 impl Identity {
     pub async fn new(js: &jetstream::Context, js_domain: Option<&JsDomain>, ant: &UserId) -> Result<Self> {
-        Ok(Self { kv: DirectKv::whole(js, js_domain, IDENTITIES_BUCKET).await?, ant: ant.clone() })
+        let kv = DirectKv::whole(js, js_domain, IDENTITIES_BUCKET).await?;
+        Ok(Self { kv, ant: ant.clone(), id: Arc::default() })
+    }
+
+    /// The id of the ant's record ([`AntIdentity::id`]), read once and kept until the record is replaced or deleted
+    /// here: it stays while a daemon serves the ant. None while the record is absent.
+    pub async fn id(&self) -> Result<Option<String>> {
+        if let Some(id) = self.id.locked().clone() {
+            return Ok(Some(id));
+        }
+        let id = self.read().await?.map(|record| record.id);
+        self.id.locked().clone_from(&id);
+        Ok(id)
     }
 
     /// The ant's record, created first when absent: None when the bucket is missing (`ants init` creates it).
@@ -57,11 +73,13 @@ impl Identity {
     /// Store `record` as the ant's, in place of any: a clone's, made by its clone order ([`crate::clone`]).
     pub async fn replace(&self, record: &AntIdentity) -> Result<()> {
         record.check_key(self.ant.as_str())?;
+        self.id.locked().take();
         self.kv.put(self.ant.as_str(), serde_json::to_vec(record)?).await
     }
 
     /// Delete the ant's record, as a failed clone order does with the one it stored.
     pub async fn delete(&self) -> Result<()> {
+        self.id.locked().take();
         self.kv.delete(self.ant.as_str()).await
     }
 

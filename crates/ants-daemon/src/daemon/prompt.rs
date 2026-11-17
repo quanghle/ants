@@ -23,6 +23,9 @@ use crate::limits::fallback::OnFallback;
 use crate::limits::overflow::ContextOverflow;
 use crate::limits::ratelimit::Limited;
 use crate::monitoring::status::{self, Status};
+use crate::profile::identity::Identity;
+use crate::provider::brief::Briefing;
+use crate::provider::context::Caller;
 use crate::sync::MutexExt as _;
 
 use super::control::Cancel;
@@ -550,6 +553,25 @@ impl Inbox<'_> {
         }
     }
 
+    /// What asks the ant's provider for its brief, should the prompt for `incoming` be the first of a session: none
+    /// without a provider taking brief requests.
+    async fn briefing(&self, incoming: &Incoming) -> Option<Briefing> {
+        let provider = self.mcp?.provider()?.clone();
+        let identity = match self.identity.map(Identity::id) {
+            Some(id) => id.await.unwrap_or_else(|e| {
+                tracing::warn!(error = format!("{e:#}"), "reading the ant's identity for its brief");
+                None
+            }),
+            None => None,
+        };
+        let (ant, machine) = (self.ant.clone(), self.machine.to_owned());
+        let caller = identity.map(|identity| Caller { ant, identity, machine });
+        let envelope = &incoming.envelope;
+        let channel = incoming.post.as_ref().map(|posted| posted.post.channel.clone()).or(incoming.resume.clone());
+        let origin = crate::provider::context::origin(envelope, channel, &self.humans.humans());
+        Briefing::new(provider, caller, envelope.thread_id.clone(), origin)
+    }
+
     /// Run the prompt `text` for `incoming`, streaming its status, recording its spend, renewing the message's ack wait
     /// and cancelling it on request or at a cap.
     async fn run_prompt(
@@ -573,6 +595,7 @@ impl Inbox<'_> {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut calls = crate::monitoring::timeline::Collector::new(self.ant, thread, envelope.id, self.redactor);
         let history = self.history_of(incoming, seq);
+        let brief = self.briefing(incoming).await;
         let (ready_tx, ready) = tokio::sync::oneshot::channel();
         let (steer_tx, steers) = tokio::sync::mpsc::channel(STEERS);
         let prompt = Prompt {
@@ -584,6 +607,7 @@ impl Inbox<'_> {
             history: Some(history.history()),
             attachments: Attached::new(self.js.clone(), incoming.attached(), crate::files::stored(msg)),
             steering: Some(Steering { ready: ready_tx, steers }),
+            brief,
         };
         let mut ready = futures::FutureExt::fuse(ready);
         let mut joins = None;

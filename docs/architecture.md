@@ -133,11 +133,12 @@ Per-ant prompt instructions and state isolation:
 
 - `whoami` (`--whoami TEXT`): role description prepended to every prompt and published in `ants_colony` (keep secrets out; `route` matches `capabilities`, not `whoami`).
 - `memory` and `tasks` (`--memory`, `--tasks`): private instructions prepended to every prompt.
+- The provider's brief: in the first prompt of a session, after these instructions ([Briefs](#briefs)).
 - `env` (`--env NAME=VALUE`): literal environment overrides passed to the harness and tool subprocesses (e.g. `BD_DB = "/srv/ants/dev-a/.bd/bd.db"`).
 
 ## Providers
 
-An ant's provider holds its identity, memories and work. Every ant has built-in sugar (crate `ants-sugar`), run inside the daemon: one `Sugar` serves all the ants of a daemon process, each call naming its ant. The daemon connects it on first use and hands it to each ant's MCP server. Sugar's tools are not served to sessions yet, and nothing else calls it yet.
+An ant's provider holds its identity, memories and work. Every ant has built-in sugar (crate `ants-sugar`), run inside the daemon: one `Sugar` serves all the ants of a daemon process, each call naming its ant. The daemon connects it on first use and hands it to each ant's MCP server. Sugar's tools are not served to sessions yet; the daemon asks it only for briefs.
 
 Built-in sugar implements the same interface (`ants_proto::provider::Provider`) that an external provider serves over the provider protocol, so switching an ant between providers changes nothing else in ants. A provider never reads an ant's messages, prompts or replies. It sees only:
 
@@ -216,6 +217,34 @@ Calls and events:
 | `-32001` | The method's capability was not agreed at initialize |
 | `-32002` | No common protocol version (`data.supported` lists the provider's) |
 | `-32003` | Unavailable for now |
+
+### Briefs
+
+When a session of a thread starts, is loaded (resumed after an idle stop or a restart) or is rebuilt (after a failed `session/load`, a clone, a session that ran in another harness or a [context-window overflow](config.md#lost-sessions-and-context-window)), the daemon asks the ant's provider for its brief, `reason` telling which, when the provider agreed the `context` capability. The first prompt of the session then reads:
+
+```text
+[ants role dev-a]
+Maintain the Rust backend.
+
+[ants memory]
+Use notes.
+
+[ants tasks]
+Use tickets.
+
+[ants brief from sugar]
+The brief's text.
+
+[ants] The earlier session of this thread could not be resumed, … (a rebuilt session only)
+The thread's history (a rebuilt session only)
+
+The message.
+```
+
+- The brief follows the configured instructions (`whoami`, `memory`, `tasks`), whichever of them the ant has, and comes before the history that seeds a rebuilt session. Later prompts of the session carry the instructions without it.
+- A brief over its budget of 8000 bytes is cut on a character boundary, followed by `[ants] The brief was cut to its budget of 8000 bytes.` An empty brief adds nothing.
+- A provider not answering within 5 s leaves the brief out, with `[ants] The sugar brief is left out: no answer within 5s.` in its place; one failing leaves `… the provider failed (error <code>).`, and an identity record the daemon cannot read `… the ant's identity record cannot be read.` The prompt goes on either way. The wait runs alongside the reading of the message's attachments and does not count toward `prompt_timeout`.
+- The brief's `origin` comes from the message prompting: a webhook's message is the webhook's; a thread an ant started with a channel post is that ant's; one a human started is that human's, as is a message an assistant sends on a human's behalf; anything else is the sender's. A post's `channel` is its channel.
 
 ## MCP tools
 

@@ -52,6 +52,8 @@ struct Bus {
     workload: colony::Workload,
     pause: crate::pause::Pause,
     mcp: Option<Mcp>,
+    /// The ant's identity record; none: it cannot be read.
+    identity: Option<crate::profile::identity::Identity>,
     channels: jetstream::kv::Store,
     threads: Threads,
     colony: Colony,
@@ -108,6 +110,7 @@ impl Bus {
             workload,
             pause: crate::pause::Pause::new(false),
             mcp: None,
+            identity: None,
             channels,
             threads,
             colony,
@@ -270,7 +273,7 @@ impl Bus {
             },
             failover: crate::limits::fallback::Failover::default(),
             fallback_retry: Duration::from_millis(300),
-            identity: None,
+            identity: self.identity.as_ref(),
             home: &home,
         };
         let stop = || {

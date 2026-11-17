@@ -14,6 +14,7 @@ use agent_client_protocol::v1::schema::{
     SessionId, SessionNotification, TextContent,
 };
 use agent_client_protocol::{Agent, Client};
+use ants_proto::provider::BriefReason;
 use ants_proto::{HarnessAgent, StatusUpdate};
 use anyhow::Result;
 use data_encoding::BASE64;
@@ -30,6 +31,7 @@ use super::steer::{self, SteerRequest};
 use super::{Launch, Prompt, PromptLimits, Reply, Spend, Steer};
 use crate::files::Attached;
 use crate::limits::overflow::{ContextOverflow, overflows};
+use crate::provider::brief::Briefing;
 use crate::stream::history::{History, Rebuild};
 use crate::sync::MutexExt as _;
 
@@ -89,6 +91,7 @@ pub(super) async fn serve(
             let mcp = launch.mcp_servers(caps.mcp_capabilities.http);
             let mut id = open(&cx, &launch, resume.clone(), caps.load_session, mcp.clone()).await?;
             *current.locked() = id.clone();
+            let resumed = resume.is_some();
             if let Some(tx) = opened.take() {
                 let agent = init
                     .agent_info
@@ -103,6 +106,12 @@ pub(super) async fn serve(
                     Rebuild::Lost
                 })
                 .or(rebuild);
+            // Why the session opened, which the first prompt's brief tells the provider.
+            let mut briefing = Some(match &lost {
+                Some(_) => BriefReason::Rebuilt,
+                None if resumed => BriefReason::Loaded,
+                None => BriefReason::Started,
+            });
             let connected = Connected {
                 cx: &cx,
                 launch: &launch,
@@ -116,7 +125,7 @@ pub(super) async fn serve(
                 steers: steer::advertised(caps),
             };
             while let Some(turn) = turns.recv().await {
-                if connected.run(turn, &mut id, lost.take()).await?.is_break() {
+                if connected.run(turn, &mut id, lost.take(), briefing.take()).await?.is_break() {
                     return Ok(());
                 }
             }
@@ -171,17 +180,20 @@ struct Ended {
 }
 
 impl Connected<'_> {
-    /// Run `turn` in session `id`, or in a new one should the prompt outgrow the context window, and send its reply.
-    /// Breaks when the harness is to stop; fails with the error that ends the connection.
+    /// Run `turn` in session `id`, or in a new one should the prompt outgrow the context window, and send its reply;
+    /// the first turn of a session gets the ant's brief for why it `opened`. Breaks when the harness is to stop; fails
+    /// with the error that ends the connection.
     async fn run(
         &self,
         turn: Turn,
         id: &mut SessionId,
         mut rebuild: Option<Rebuild>,
+        opened: Option<BriefReason>,
     ) -> Result<ControlFlow<()>, agent_client_protocol::Error> {
         let Turn { prompt, reply } = turn;
-        let Prompt { text, limits, spend, mut stop, progress, mut history, attachments, steering } = prompt;
-        let (lines, images) = attached(attachments, self.images).await;
+        let Prompt { text, limits, spend, mut stop, progress, mut history, attachments, steering, brief } = prompt;
+        let ((lines, images), mut briefed) =
+            tokio::join!(attached(attachments, self.images), self.brief(brief.as_ref(), opened));
         // Without steering by the agent, the steering is dropped unready: steers stop the prompt instead.
         let mut steers = steering.filter(|_| self.steers).map(|steering| {
             let _ = steering.ready.send(());
@@ -191,7 +203,7 @@ impl Connected<'_> {
         let mut retry = rebuild.is_none();
         let ended = loop {
             let too_many = self.observe(id, limits, spend.as_ref(), progress.as_ref());
-            let text = self.compose(rebuild, &mut history, &text, &lines).await;
+            let text = self.compose(rebuild, &briefed, &mut history, &text, &lines).await;
             let content = std::iter::once(ContentBlock::Text(TextContent::new(text))).chain(images.iter().cloned());
             let request = self.cx.send_request(PromptRequest::new(id.clone(), content.collect())).block_task();
             let bounds = Bounds { limits, too_many: &too_many, stop: &mut stop, steers: &mut steers };
@@ -207,6 +219,7 @@ impl Connected<'_> {
                         return Err(e);
                     }
                     (rebuild, retry) = (Some(Rebuild::Overflow), false);
+                    briefed = self.brief(brief.as_ref(), Some(BriefReason::Rebuilt)).await;
                 }
                 Some(Err(e)) if ended.cut.is_none() && overflowed(e) => {
                     let harness = self.launch.harness.name.clone();
@@ -247,11 +260,23 @@ impl Connected<'_> {
         too_many
     }
 
-    /// The prompt's text: the instructions, the thread's history when the session is a `rebuild`, the message's
-    /// `text` and the `lines` naming its attachments.
+    /// The part of a prompt `brief` adds when the prompt is the first of a session that opened for `reason`.
+    async fn brief(&self, brief: Option<&Briefing>, reason: Option<BriefReason>) -> String {
+        match (brief, reason) {
+            (Some(brief), Some(reason)) => {
+                let model = self.launch.settings.model.as_deref();
+                brief.section(reason, &self.launch.harness.name, model).await
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// The prompt's text: the instructions, the ant's brief when `briefed`, the thread's history when the session is a
+    /// `rebuild`, the message's `text` and the `lines` naming its attachments.
     async fn compose(
         &self,
         rebuild: Option<Rebuild>,
+        briefed: &str,
         history: &mut Option<History>,
         text: &str,
         lines: &str,
@@ -263,7 +288,7 @@ impl Connected<'_> {
             }
             None => String::new(),
         };
-        [self.launch.instructions.as_str(), &seed, text, lines]
+        [self.launch.instructions.as_str(), briefed, &seed, text, lines]
             .into_iter()
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()

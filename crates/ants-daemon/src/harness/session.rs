@@ -16,6 +16,7 @@ use super::sign_in::HANDSHAKE_TIMEOUT;
 use super::{Launch, SignedOut};
 use crate::files::Attached;
 use crate::limits::breaker::StartFailed;
+use crate::provider::brief::Briefing;
 use crate::stream::history::{History, Rebuild};
 use crate::sync::MutexExt as _;
 
@@ -67,6 +68,9 @@ pub struct Prompt {
     pub attachments: Option<Attached>,
     /// Steers the prompt with more messages while it runs, should the harness take them ([`Steering`]).
     pub steering: Option<Steering>,
+    /// Asks the ant's provider for its brief, only when the prompt is the first of a session that started, was loaded
+    /// or was rebuilt ([`Briefing`]).
+    pub brief: Option<Briefing>,
 }
 
 /// Messages added to a running prompt, for a harness that takes them into its turn (`_ants/steer`).
@@ -95,6 +99,7 @@ impl Prompt {
             history: None,
             attachments: None,
             steering: None,
+            brief: None,
         }
     }
 }

@@ -598,3 +598,43 @@ fn an_unnarrowing_harness_is_warned_of_once_per_sender_within_a_bounded_set() {
     assert_eq!(unnarrowed.0.locked().len(), 1);
     assert!(unnarrowed.first(&nightly), "forgotten when the set started over");
 }
+
+#[tokio::test]
+async fn the_first_prompt_of_a_session_carries_the_provider_s_brief_asked_with_the_ant_s_context() {
+    use ants_proto::provider::{BriefReason, Origin, Starter};
+
+    let Some((mut bus, mut replies)) = Bus::start().await else { return };
+    crate::hub::create_identities(&bus.js).await.unwrap();
+    let identity = crate::profile::identity::Identity::new(&bus.js, None, &bus.dev).await.unwrap();
+    let born = identity.ensure().await.unwrap().unwrap();
+    bus.identity = Some(identity);
+    let home = bus._server.dir().join("briefed");
+    std::fs::create_dir_all(&home).unwrap();
+    let (outbox, colony) = (crate::mcp::jetstream_outbox(bus.js.clone()), crate::mcp::jetstream_colony(bus.js.clone()));
+    let notes = Arc::new(crate::stream::notes::JetStreamNotes::new(bus.js.clone(), bus.dev.clone()));
+    let mcp = Mcp::start(bus.dev.clone(), &home, outbox, colony, notes, bus.humans.clone(), None).await.unwrap();
+    let answer = crate::provider::brief::fake::Answer::Text("Working on the parser.".to_owned());
+    let (provider, fake) = crate::provider::brief::fake::connected(answer, true).await;
+    mcp.with_provider(provider);
+    bus.mcp = Some(mcp);
+    let (launch, _, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let t1 = ThreadId::generate();
+    bus.send(&t1, "a").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let briefed = "[ants brief from fake]\nWorking on the parser.\n\na".to_owned();
+        assert_eq!(next_reply(&mut replies).await, (t1.clone(), briefed));
+        bus.send(&t1, "b").await;
+        assert_eq!(next_reply(&mut replies).await, (t1.clone(), "b".to_owned()), "only the first prompt");
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    let asked = fake.asked.lock().unwrap();
+    let [request] = asked.as_slice() else { panic!("{asked:?}") };
+    let context = &request.context;
+    assert_eq!((request.reason, &context.ant, &context.identity), (BriefReason::Started, &bus.dev, &born.id));
+    assert_eq!((&context.thread, context.harness.as_str(), context.machine.as_str()), (&t1, "test", "test-machine"));
+    assert_eq!(context.origin, Origin { by: Starter::Human { user: UserId::human() }, channel: None });
+}
