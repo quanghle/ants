@@ -286,7 +286,8 @@ async fn a_post_on_a_thread_an_ant_started_as_a_webhook_counts_it_as_the_ant_s()
     crate::auth::issue_with(&server.dir().join("auth"), &hook, crate::revoke::Kind::Webhook, permissions, &creds)
         .unwrap();
     let (_, h_js) = bus::connect(&server.url, Some(&creds), None, &hook, "test").await.unwrap();
-    let markers = ants_daemon::direct_kv::DirectKv::new(&h_js, None, ants_proto::WEBHOOKS_BUCKET).await.unwrap();
+    let markers =
+        ants_daemon::records::direct_kv::DirectKv::new(&h_js, None, ants_proto::WEBHOOKS_BUCKET).await.unwrap();
     markers.put(ants_proto::webhook_marker_key(&hook), crate::versions::serving().await).await.unwrap();
     let (_, d_js) = server.connect(&dev_a).await;
 

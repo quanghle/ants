@@ -116,8 +116,8 @@ pub(crate) async fn run(conn: &Connection<'_>, command: LeafCommand) -> Result<(
             };
             let old = std::fs::read_to_string(&out).ok();
             leaf::write(&config, &out)?;
-            ants_daemon::creds::warn(&creds);
-            system_creds.as_deref().map(ants_daemon::creds::warn);
+            ants_daemon::secrets::creds::warn(&creds);
+            system_creds.as_deref().map(ants_daemon::secrets::creds::warn);
             let new = std::fs::read_to_string(&out).with_context(|| format!("reading {}", out.display()))?;
             let taken = leaf::take(&out, old.as_deref(), &new, |action| natsd::apply(&out, action));
             println!(

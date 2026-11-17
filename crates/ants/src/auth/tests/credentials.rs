@@ -47,7 +47,7 @@ fn no_user_device_or_enrollment_takes_a_reserved_name() {
 
 #[test]
 fn renewed_credentials_keep_what_they_are_for_a_new_key() {
-    use ants_daemon::creds;
+    use ants_daemon::secrets::creds;
     let dir = ants_test_support::scratch_dir("renew");
     let team = dir.join("auth");
     init(&team).unwrap();
@@ -121,7 +121,7 @@ fn renewed_credentials_keep_what_they_are_for_a_new_key() {
 
 #[test]
 fn a_human_device_binds_its_encryption_key_and_renewal_keeps_it_or_adds_one() {
-    use ants_daemon::{creds, keystore};
+    use ants_daemon::secrets::{creds, keystore};
     let dir = ants_test_support::scratch_dir("renew-xkey");
     let team = dir.join("auth");
     init(&team).unwrap();
@@ -162,7 +162,7 @@ fn a_human_device_binds_its_encryption_key_and_renewal_keeps_it_or_adds_one() {
 
 #[test]
 fn an_admin_s_device_carries_the_role_through_renewal_until_revoked() {
-    use ants_daemon::creds;
+    use ants_daemon::secrets::creds;
     let dir = ants_test_support::scratch_dir("admin");
     let team = dir.join("auth");
     init(&team).unwrap();
@@ -206,7 +206,7 @@ fn an_admin_s_device_carries_the_role_through_renewal_until_revoked() {
 
 #[test]
 fn an_ant_becomes_a_human_s_only_assistant_through_its_user_jwt() {
-    use ants_daemon::creds;
+    use ants_daemon::secrets::creds;
     let dir = ants_test_support::scratch_dir("assistant");
     let team = dir.join("auth");
     init(&team).unwrap();
@@ -331,7 +331,7 @@ fn credentials_expired_revoked_foreign_or_of_no_renewable_kind_are_not_renewed()
 
 #[test]
 fn issued_credentials_carry_the_current_permissions_version_and_name_their_renewal() {
-    use ants_daemon::creds::{self, VersionStatus};
+    use ants_daemon::secrets::creds::{self, VersionStatus};
     let dir = ants_test_support::scratch_dir("creds-check");
     let team = dir.join("auth");
     init(&team).unwrap();

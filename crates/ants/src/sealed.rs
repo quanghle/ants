@@ -8,13 +8,14 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use ants_daemon::keystore::{self, Store};
+use ants_daemon::secrets::keystore::{self, Store};
 use std::ops::ControlFlow;
 
-use ants_daemon::reading::{self, Reading};
-use ants_daemon::sealing::{NONCE_LEN, open_message, open_plain, seal_envelope, seal_title};
-pub use ants_daemon::sealing::{Opening, State};
-use ants_daemon::{creds, files};
+use ants_daemon::files;
+use ants_daemon::secrets::creds;
+use ants_daemon::secrets::sealing::{NONCE_LEN, open_message, open_plain, seal_envelope, seal_title};
+pub use ants_daemon::secrets::sealing::{Opening, State};
+use ants_daemon::stream::reading::{self, Reading};
 use ants_proto::{
     Attachment, AttachmentHandle, DEVICES_BUCKET, DeviceId, DeviceKey, Envelope, MAX_ATTACHMENT_SIZE, Sealed,
     SealedAttachment, SealedBody, SealedTitle, ThreadTitle, UserId,

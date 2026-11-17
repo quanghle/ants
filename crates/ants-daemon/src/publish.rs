@@ -16,9 +16,9 @@ use anyhow::{Context as _, Result};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::direct_kv::{DirectKv, Lookup};
 use crate::permission::PermissionPolicy;
-use crate::redact::Redactor;
+use crate::records::direct_kv::{DirectKv, Lookup};
+use crate::secrets::redact::Redactor;
 use crate::worktrees::{self, Branch, Worktrees};
 
 /// Longest a push may take.
@@ -96,6 +96,7 @@ impl Publisher {
     }
 
     /// The same, running `gh` for gh.
+    #[cfg(all(test, unix))]
     #[must_use]
     pub fn with_gh(self, gh: impl Into<OsString>) -> Self {
         Self { gh: gh.into(), ..self }

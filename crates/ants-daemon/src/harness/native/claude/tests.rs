@@ -17,8 +17,8 @@ use crate::harness::{
     Harnesses, Launch, ModelSettings, PlanStep, Prompt, Readiness, Session, SignedOut, Spend, StartFailed, Steer,
     Steering, fork, handshake, parse_definitions,
 };
+use crate::limits::ratelimit::Limited;
 use crate::permission::{Allowlist, PermissionPolicy};
-use crate::ratelimit::Limited;
 
 const VERSION: &str = "2.1.325 (Claude Code)";
 
@@ -546,7 +546,7 @@ async fn an_api_key_refused_at_a_prompt_keeps_claude_signed_out_until_it_changes
 #[test]
 fn claude_errors_reach_the_daemons_classifiers() {
     let harness = define("command = \"claude\"").unwrap();
-    let classify = |error: &Error| crate::ratelimit::classify(&harness, &error.to_string()).map(|l| l.kind);
+    let classify = |error: &Error| crate::limits::ratelimit::classify(&harness, &error.to_string()).map(|l| l.kind);
     let failed = |message: &str, status: Option<u16>, terminal: &str, kind: Option<&str>| {
         let result =
             json!({ "is_error": true, "result": message, "api_error_status": status, "terminal_reason": terminal });
@@ -561,7 +561,7 @@ fn claude_errors_reach_the_daemons_classifiers() {
     let capacity = "API Error: Request rejected (429) · this may be a temporary capacity issue";
     assert_eq!(classify(&failed(capacity, Some(429), "api_error", Some("rate_limit"))), Some(LimitKind::RateLimit));
     let too_long = failed("Prompt is too long", Some(400), "prompt_too_long", Some("invalid_request"));
-    assert!(crate::overflow::overflows(&harness, &too_long.to_string()));
+    assert!(crate::limits::overflow::overflows(&harness, &too_long.to_string()));
     let unknown = json!({ "is_error": true, "errors": ["No conversation found with session ID: x"] });
     let other = error(&unknown, None, None, None);
     assert_eq!(

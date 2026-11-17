@@ -79,8 +79,8 @@ async fn credentials_confine_each_user_to_its_role() {
     let (sent, all) = (subject::inbox_from(&dev_a), jetstream::consumer::DeliverPolicy::All);
     let read_sent = async |ant: &UserId, filter: &str| {
         let (reader, mut read) = (ants_proto::sent_reader(ant), Vec::new());
-        let reading = ants_daemon::reading::Reading::Consumer;
-        ants_daemon::reading::read_back(&a_js, &reader, reading, filter, all, |seq, _, _, _| {
+        let reading = ants_daemon::stream::reading::Reading::Consumer;
+        ants_daemon::stream::reading::read_back(&a_js, &reader, reading, filter, all, |seq, _, _, _| {
             read.push(seq);
             std::ops::ControlFlow::Continue(())
         })
@@ -391,7 +391,7 @@ async fn an_assistant_reads_its_human_s_marker_but_writes_only_its_own() {
     let thread = to_pa.thread_id.clone();
     bus::publish(&pa_js, &Envelope::on_thread(thread.clone(), pa.clone(), alice.clone(), "hi")).await.unwrap();
     notes::publish(&pa_js, &NotesPost::new(thread.clone(), pa.clone(), "noted"), None).await.unwrap();
-    let read = |reading| ants_daemon::history::Thread {
+    let read = |reading| ants_daemon::stream::history::Thread {
         js: pa_js.clone(),
         ant: pa.clone(),
         thread: thread.clone(),
@@ -400,16 +400,16 @@ async fn an_assistant_reads_its_human_s_marker_but_writes_only_its_own() {
         reading,
         home: None,
     };
-    let history = read(Reading::daemon(true)).history()(ants_daemon::history::DEFAULT_BUDGET).await;
+    let history = read(Reading::daemon(true)).history()(ants_daemon::stream::history::DEFAULT_BUDGET).await;
     for said in ["hello", "hi", "noted"] {
         assert!(history.contains(said), "{said} missing from {history}");
     }
-    let history = read(Reading::Consumer).history()(ants_daemon::history::DEFAULT_BUDGET).await;
+    let history = read(Reading::Consumer).history()(ants_daemon::stream::history::DEFAULT_BUDGET).await;
     assert!(history.contains("could not be read back"), "{history}");
 
     // While no daemon of an ant answers, it withdraws a message for its human under a key naming it, which the ant's
     // daemon reads and honours before taking the message up.
-    use ants_daemon::attempts::{Attempts, Recorded, TakenUp, record_withdrawal};
+    use ants_daemon::delivery::attempts::{Attempts, Recorded, TakenUp, record_withdrawal};
     let dev_a = p("dev-a");
     let message = Envelope::new(alice.clone(), dev_a.clone(), "later");
     let pa_attempts = DirectKv::new(&pa_js, None, ants_proto::ATTEMPTS_BUCKET).await.unwrap();

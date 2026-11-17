@@ -9,7 +9,7 @@
 //! thread, or escalates it further. The leader's answer gives the thread a fresh turn budget and allowance once per
 //! level ([`Escalator::arrived`]); on a channel thread, the ant's answer to it goes back to the channel with that
 //! budget ([`Pending::channel`]). The next escalation goes one level higher, to the leader's own chain, which the
-//! colony publishes and the chains bucket keeps once the leader is offline ([`crate::chains`]). With no chain, a chain
+//! colony publishes and the chains bucket keeps once the leader is offline ([`crate::records::chains`]). With no chain, a chain
 //! that loops back or past `max_escalation_hops`, it goes to the thread's owner, else the default human, as it did
 //! before chains. Only a human's message ends an escalation.
 //!
@@ -37,7 +37,7 @@
 //! too, then a day later and three days after that, the last ([`Reminder`]). The reminder is kept with the
 //! thread's spend and its due time in the deadlines, so the daemon serving the ant sends it, once, across restarts.
 //! No more go out once the human marked the thread done after the latest, read the escalation or a reminder, or muted
-//! the thread; while the human snoozed the thread, the next one waits for the snooze to end ([`crate::heed`]).
+//! the thread; while the human snoozed the thread, the next one waits for the snooze to end ([`crate::records::heed`]).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -51,13 +51,15 @@ use futures::future::BoxFuture;
 use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 
-use crate::assistant_first::AssistantFirst;
-use crate::caps::{Ended, Ledger, Pending, Reminder};
-use crate::chains::Chains;
-use crate::heed::{Heed, Heeded};
-use crate::humans::Registry;
+use crate::bus;
+use crate::limits::caps::{Ended, Ledger, Pending, Reminder};
 use crate::mcp::Colony;
-use crate::{bus, links, status};
+use crate::monitoring::status;
+use crate::people::assistant_first::AssistantFirst;
+use crate::people::humans::Registry;
+use crate::records::chains::Chains;
+use crate::records::heed::{Heed, Heeded};
+use crate::records::links;
 
 mod route;
 mod step;

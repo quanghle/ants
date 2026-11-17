@@ -30,7 +30,7 @@ pub(crate) use steer::{SteerRequest, SteerResponse, advertise as advertise_steer
 
 // The tests of the native translators take these through this module.
 #[cfg(all(test, unix))]
-use crate::breaker::StartFailed;
+use crate::limits::breaker::StartFailed;
 #[cfg(all(test, unix))]
 use ants_proto::PlanStep;
 

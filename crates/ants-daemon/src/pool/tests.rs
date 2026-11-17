@@ -5,7 +5,7 @@ use tokio::sync::{Semaphore, mpsc, oneshot};
 use super::fake::Sessions;
 use super::*;
 use crate::harness::{PromptLimits, Spend};
-use crate::overflow::ContextOverflow;
+use crate::limits::overflow::ContextOverflow;
 
 const IDLE: Duration = Duration::from_secs(60);
 
@@ -270,7 +270,7 @@ async fn a_restarted_pool_resumes_the_stored_session() {
 }
 
 fn with_history(text: &str) -> Prompt {
-    let history = crate::history::from_fn(|budget| async move { format!("HISTORY {budget}") });
+    let history = crate::stream::history::from_fn(|budget| async move { format!("HISTORY {budget}") });
     Prompt { history: Some(history), ..Prompt::new(text) }
 }
 

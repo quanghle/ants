@@ -1,7 +1,7 @@
 //! [`AdminOp::Set`]: change fields of the ant's settings, all or none, each only if it holds the value the order
 //! expects ([`Edit::change`]).
 //!
-//! - The ant's shared settings ([`SHARED_FIELDS`]) change in their record ([`crate::shared`]), by compare-and-set, each
+//! - The ant's shared settings ([`SHARED_FIELDS`]) change in their record ([`crate::profile::shared`]), by compare-and-set, each
 //!   set whole: a field the record leaves out holds what the machine's config gives it while the ant has no record.
 //!   Where the machine's config sets such a field too, it gets the new value as well, so the machine shows no drift.
 //! - Every other field changes in the ant's `[[ant]]` table of the config file the daemon serves, as do all of them
@@ -10,11 +10,11 @@
 //! For an ant added from a template, a change of its shared settings is held to the template's bounds as its table in
 //! the config is: only what the template lets it choose changes, and its model, reasoning effort and context stay
 //! within the template's ([`AntTemplate::model_for`]). Its record holds only those ([`shared::shares`]): the others
-//! follow the template. The record written is signed with the ant's credentials ([`crate::shared::write`]).
+//! follow the template. The record written is signed with the ant's credentials ([`crate::profile::shared::write`]).
 //!
 //! The file as edited, served with the shared settings as changed, must load before either is written; the file is
 //! written over the old one after the record ([`Edit::save`]), and the daemon reloads at once ([`ConfigFile::edited`],
-//! [`crate::shared::Shared::subscribe`]). An order taken again after its changes were written, its outcome not stored,
+//! [`crate::profile::shared::Shared::subscribe`]). An order taken again after its changes were written, its outcome not stored,
 //! finds its fields holding their new values and is applied without writing again.
 
 #[cfg(doc)]
@@ -25,8 +25,8 @@ use serde_json::{Map, Value};
 
 use super::{ConfigFile, NO_CONFIG, Orders, applied, refused};
 use crate::config::edit::{Edit, needed};
-use crate::shared::{self, Bucket, Found, Roles, Signer};
-use crate::template::{AntTemplate, REQUEST_KEYS};
+use crate::profile::shared::{self, Bucket, Found, Roles, Signer};
+use crate::profile::template::{AntTemplate, REQUEST_KEYS};
 
 /// How often a change of the shared settings is tried while they keep changing meanwhile.
 const TRIES: usize = 3;

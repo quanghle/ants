@@ -18,8 +18,8 @@ use crate::harness::{
     Harnesses, Launch, ModelSettings, Prompt, Readiness, Session, SignedOut, Spend, Steer, Steering, fork, handshake,
     parse_definitions,
 };
+use crate::limits::ratelimit::Limited;
 use crate::permission::{Allowlist, PermissionPolicy};
-use crate::ratelimit::Limited;
 
 const THREAD: &str = "01a1e32e-45fc-75d2-9997-0d34d7ac8d3d";
 const TURN: &str = "01a1e32e-653e-78f2-aed1-059df0817cf7";

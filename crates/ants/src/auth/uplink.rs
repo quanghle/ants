@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ants_daemon::creds::{Finding, Kind as CredsKind};
+use ants_daemon::secrets::creds::{Finding, Kind as CredsKind};
 use ants_proto::{JsDomain, LeafRole, Machine, Permissions, Role, UserId};
 use anyhow::{Context as _, Result, bail};
 use nkeys::KeyPair;

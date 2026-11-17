@@ -28,9 +28,9 @@ use std::time::Duration;
 
 use ants_daemon::colony;
 use ants_daemon::config;
-use ants_daemon::direct_kv::DirectKv;
-use ants_daemon::reactions;
-use ants_daemon::template::{AntTemplate, Request};
+use ants_daemon::profile::template::{AntTemplate, Request};
+use ants_daemon::records::direct_kv::DirectKv;
+use ants_daemon::records::reactions;
 use ants_proto::{
     ACCOUNT_HOLDER_KEY, ANTS_VERSION, AccountHolder, AntReply, AntRequest, ApprovalDecision, ApprovalRequest,
     ENROLL_REPEAT, JsDomain, MACHINES_BUCKET, Permissions, STREAM, ThreadId, ToolCall, UserId, Verdict, subject,
@@ -376,7 +376,7 @@ impl Signer<'_> {
     /// would not take it.
     fn uplink(&self, request: &AntRequest) -> Result<Option<String>> {
         let Some(leaf) = &request.leaf else { return Ok(None) };
-        let domain = ants_daemon::creds::Finding::from_jwt(&request.credentials)?.js_domain;
+        let domain = ants_daemon::secrets::creds::Finding::from_jwt(&request.credentials)?.js_domain;
         let name = &request.name;
         let more = Permissions::for_leaf(&leaf.machine, [(name, ants_proto::Role::Ant)])
             .with_uplink_js_domain(domain.as_ref());
@@ -387,7 +387,7 @@ impl Signer<'_> {
 
     async fn signed(&self, approver: &Approver, request: &AntRequest) -> Result<(String, Option<String>)> {
         // The ant runs where its manager does, so it reaches JetStream the same way.
-        let manager = ants_daemon::creds::Finding::from_jwt(&request.credentials)?;
+        let manager = ants_daemon::secrets::creds::Finding::from_jwt(&request.credentials)?;
         let (name, domain) = (&request.name, manager.js_domain.as_ref());
         // First, as it records nothing: an uplink the hub would refuse leaves no ant signed.
         let renewed = self.uplink(request)?;

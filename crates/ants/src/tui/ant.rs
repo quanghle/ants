@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use ants_daemon::caps::Spent;
+use ants_daemon::limits::caps::Spent;
 use ants_proto::{ColonyEntry, JsDomain, ThreadId, UserId, Uuid};
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};

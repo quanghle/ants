@@ -5,9 +5,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ants_daemon::config::{self, Ant};
-use ants_daemon::creds::{self, Kind};
 use ants_daemon::harness::{self, Harnesses, Readiness};
-use ants_daemon::{Launch, PermissionPolicy, keystore, reactions};
+use ants_daemon::records::reactions;
+use ants_daemon::secrets::creds::{self, Kind};
+use ants_daemon::secrets::keystore;
+use ants_daemon::{Launch, PermissionPolicy};
 use ants_proto::{MACHINES_BUCKET, Machine, ReactionChange, ReactionsRequest, ReactionsResponder, Uuid};
 
 use super::credentials::{check_creds, check_key};

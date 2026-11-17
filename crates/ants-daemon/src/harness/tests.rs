@@ -19,8 +19,8 @@ use serde_json::json;
 
 use super::launch::Connector;
 use super::*;
+use crate::limits::ratelimit::Limited;
 use crate::permission::{Allowlist, PermissionPolicy};
-use crate::ratelimit::Limited;
 use crate::sync::MutexExt as _;
 use ants_proto::LimitKind;
 
@@ -357,7 +357,7 @@ fn the_history_budget_follows_the_ant_then_its_context_then_the_harness() {
     let context = |value: &str| ModelSettings { context: Some(value.to_owned()), ..Default::default() };
     let own = |budget| ModelSettings { history_budget: Some(budget), ..context("1m") };
     let claude = builtin("claude");
-    assert_eq!(builtin("copilot").history_budget(&ModelSettings::default()), crate::history::DEFAULT_BUDGET);
+    assert_eq!(builtin("copilot").history_budget(&ModelSettings::default()), crate::stream::history::DEFAULT_BUDGET);
     assert_eq!(claude.history_budget(&context("default")), 66_666, "from the harness's window");
     assert_eq!(claude.history_budget(&context("1m")), 333_333, "from the 1m context's window");
     assert_eq!(claude.history_budget(&own(4096)), 4096);

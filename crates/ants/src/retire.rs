@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ants_daemon::config;
-use ants_daemon::creds::Finding;
-use ants_daemon::keystore;
+use ants_daemon::secrets::creds::Finding;
+use ants_daemon::secrets::keystore;
 use ants_proto::{LeafRole, Machine, UserId};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::Context;

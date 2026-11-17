@@ -76,7 +76,7 @@ async fn any_human_titles_a_thread_and_keeps_its_tldr_but_each_marks_only_its_ow
 
 #[tokio::test]
 async fn an_ant_s_daemon_reads_what_a_human_did_about_an_escalation() {
-    use ants_daemon::heed::{Heeded, jetstream_heed};
+    use ants_daemon::records::heed::{Heeded, jetstream_heed};
     use ants_proto::{NotifyPrefs, ReadMarker, Reminders, Snooze, ThreadSnoozes};
 
     let Some(server) = Server::start() else { return };

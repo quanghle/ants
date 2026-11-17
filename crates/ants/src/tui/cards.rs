@@ -7,8 +7,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ants_daemon::caps::Spent;
-use ants_daemon::direct_kv::DirectKv;
+use ants_daemon::limits::caps::Spent;
+use ants_daemon::records::direct_kv::DirectKv;
 use ants_proto::{Acting, Reminders, SESSIONS_BUCKET, ThreadDone, ThreadId, ThreadSnoozes, ThreadSummary, UserId};
 use anyhow::{Context as _, Result, anyhow};
 use async_nats::jetstream;

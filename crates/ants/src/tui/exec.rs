@@ -7,7 +7,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ants_daemon::{bus, reactions};
+use ants_daemon::bus;
+use ants_daemon::records::reactions;
 use ants_proto::{
     ChannelId, ChannelNotify, Choice, EscalationReason, JsDomain, Quote, Reaction, ThreadId, UserId, Uuid,
 };

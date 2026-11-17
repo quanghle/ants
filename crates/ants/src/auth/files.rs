@@ -4,13 +4,13 @@ use std::fs;
 use std::io::Write as _;
 use std::path::Path;
 
-use ants_daemon::creds::Seed;
+use ants_daemon::secrets::creds::Seed;
 use anyhow::{Context as _, Result, anyhow};
 use nkeys::{KeyPair, XKey};
 
 /// The user JWT and key of the `.creds` file at `path`, whose seed is in the file or in the OS credential store.
 pub fn read_creds(path: &Path) -> Result<(String, KeyPair)> {
-    ants_daemon::creds::load(path, ants_daemon::keystore::os())
+    ants_daemon::secrets::creds::load(path, ants_daemon::secrets::keystore::os())
 }
 
 /// The user JWT of a `.creds` file's text: the line after the `BEGIN NATS USER JWT` marker.
@@ -41,14 +41,14 @@ pub fn read_seed(path: &Path) -> Result<KeyPair> {
 }
 
 pub(super) fn creds(jwt: &str, seed: &str) -> String {
-    ants_daemon::creds::text(jwt, seed)
+    ants_daemon::secrets::creds::text(jwt, seed)
 }
 
 /// The text of a `.creds` file holding `jwt` and `seed`, and the seed of the encryption key `xkey` if given.
 pub(crate) fn creds_with(jwt: &str, seed: &str, xkey: Option<&XKey>) -> Result<String> {
     let mut text = creds(jwt, seed);
     if let Some(xkey) = xkey {
-        text += &ants_daemon::creds::xkey_block(Seed::File(&xseed(xkey)?));
+        text += &ants_daemon::secrets::creds::xkey_block(Seed::File(&xseed(xkey)?));
     }
     Ok(text)
 }

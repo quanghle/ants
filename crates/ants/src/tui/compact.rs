@@ -156,7 +156,7 @@ mod tests {
 
     #[test]
     fn the_pane_counts_what_waits_names_the_working_ants_and_opens_the_top_item() {
-        use ants_daemon::caps::Spent;
+        use ants_daemon::limits::caps::Spent;
 
         let (asked, done) = (ThreadId::generate(), ThreadId::generate());
         let mut m = model();

@@ -4,9 +4,9 @@ use std::sync::{Arc, Mutex};
 use ants_daemon::admin::ConfigFile;
 use ants_daemon::admin::restart::Restarts;
 use ants_daemon::config::edit::Edit;
-use ants_daemon::direct_kv::DirectKv;
-use ants_daemon::identity::{self, Identity};
 use ants_daemon::pool::{SessionStore, Stored};
+use ants_daemon::profile::identity::{self, Identity};
+use ants_daemon::records::direct_kv::DirectKv;
 use ants_proto::{
     AdminOp, Envelope, IDENTITIES_BUCKET, MovedMark, OrderState, Permissions, Role, SharedSettings, ThreadId, UserId,
 };
@@ -115,8 +115,8 @@ async fn a_clone_order_copies_an_ant_under_a_new_name_and_undoes_a_failed_one() 
     };
     let mut shared = SharedSettings::new(dev_a.clone(), fields, m1.clone(), Some(alice.clone()));
     let a_creds = server.dir().join("dev-a-Ant.creds");
-    let signer = ants_daemon::shared::Signer::load(&dev_a, Some(&a_creds), &[]).unwrap();
-    assert!(ants_daemon::shared::write(&host_kv, &mut shared, &signer, None).await.unwrap());
+    let signer = ants_daemon::profile::shared::Signer::load(&dev_a, Some(&a_creds), &[]).unwrap();
+    assert!(ants_daemon::profile::shared::write(&host_kv, &mut shared, &signer, None).await.unwrap());
 
     let _served = restarts.serve(&dev_a);
     let mut listening = restarts.listen_clones(&dev_a);
@@ -133,7 +133,7 @@ async fn a_clone_order_copies_an_ant_under_a_new_name_and_undoes_a_failed_one() 
                 store: &store,
                 identity: Some(&identity),
                 launch: None,
-                reading: ants_daemon::reading::Reading::Consumer,
+                reading: ants_daemon::stream::reading::Reading::Consumer,
             };
             _ = request.done.send(source.snapshot(&request.new, async |_| None).await);
         }

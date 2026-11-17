@@ -21,7 +21,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use ants_daemon::creds::{Finding, Kind as CredsKind};
+use ants_daemon::secrets::creds::{Finding, Kind as CredsKind};
 use ants_proto::{
     AdminOp, AdminOrder, EnrollLeaf, EnrollReply, EnrollRequest, LeafRole, Machine, ORDER_CLOCK_SKEW, Permissions,
     UserId, Uuid, host_user,

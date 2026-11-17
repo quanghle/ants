@@ -12,8 +12,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ants_daemon::creds::{self, Finding, Kind, Seed};
-use ants_daemon::keystore::{self, Store};
+use ants_daemon::secrets::creds::{self, Finding, Kind, Seed};
+use ants_daemon::secrets::keystore::{self, Store};
 use ants_daemon::{bus, config};
 use ants_proto::{BOOTSTRAP_USER, LOGIN_REPEAT, LoginAnswer, LoginReply, LoginRequest, UserId, subject};
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -347,7 +347,7 @@ mod tests {
     use std::future::pending;
     use std::sync::{Arc, Mutex};
 
-    use ants_daemon::keystore::Memory;
+    use ants_daemon::secrets::keystore::Memory;
     use ants_proto::AntRequest;
     use tokio::time::timeout;
 

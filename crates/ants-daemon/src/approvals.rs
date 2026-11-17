@@ -63,10 +63,10 @@ use futures::StreamExt as _;
 use futures::future::BoxFuture;
 use tokio::sync::{broadcast, mpsc};
 
-use crate::assistant_first::AssistantFirst;
 use crate::bus;
 use crate::escalation::Chain;
-use crate::humans::{Registry, Withdrawal};
+use crate::people::assistant_first::AssistantFirst;
+use crate::people::humans::{Registry, Withdrawal};
 use crate::permission::Approver;
 use crate::sync::MutexExt as _;
 
@@ -210,7 +210,7 @@ impl NatsApprover {
         for (told, id) in std::iter::once((notice, id)).chain(members) {
             match bus::store(&self.js, told.subject(), &told, &id).await {
                 Ok(_) => {
-                    crate::status::escalated(&self.client, &told);
+                    crate::monitoring::status::escalated(&self.client, &told);
                     tracing::info!(request = %request.id, to = %told.to, "told of the expired approval request");
                 }
                 Err(e) => tracing::warn!(
@@ -276,7 +276,7 @@ impl NatsApprover {
                     .with_allow(answering.clone().flatten());
             let id = format!("approval-{}-{}-{member}", self.ant, request.id);
             bus::store(&self.js, envelope.subject(), &envelope, &id).await?;
-            crate::status::escalated(&self.client, &envelope);
+            crate::monitoring::status::escalated(&self.client, &envelope);
         }
         Ok(to)
     }
@@ -299,7 +299,7 @@ impl NatsApprover {
         let id = format!("approval-{}-{}-{assistant}", self.ant, request.id);
         match bus::store(&self.js, envelope.subject(), &envelope, &id).await {
             Ok(_) => {
-                crate::status::escalated(&self.client, &envelope);
+                crate::monitoring::status::escalated(&self.client, &envelope);
                 tracing::info!(request = %request.id, %assistant, %human, "asked the human's assistant too");
                 Some(assistant)
             }
@@ -363,8 +363,8 @@ impl NatsApprover {
         let mut asked = self.ask_chain_logged(&request).await;
         asked.extend(self.ask_assistant(&request, &human).await);
         let waits = StatusUpdate::Approval { request_id: request.id };
-        crate::status::publish(&self.client, &self.ant, &request.thread_id, waits);
-        crate::status::state(&self.client, &self.ant, &request.thread_id, State::WaitingApproval);
+        crate::monitoring::status::publish(&self.client, &self.ant, &request.thread_id, waits);
+        crate::monitoring::status::state(&self.client, &self.ant, &request.thread_id, State::WaitingApproval);
         let decided: Option<Settled> =
             match tokio::time::timeout(self.timeout, self.wait(&request, &mut listening)).await {
                 Ok(decided) => decided,
@@ -377,9 +377,9 @@ impl NatsApprover {
         let verdict = decided.as_ref().map_or(Verdict::Reject, |(verdict, ..)| *verdict);
         if let Some((verdict, by, decider, via)) = decided {
             let decided = StatusUpdate::Decided { request_id: request.id, verdict, by, decider, via };
-            crate::status::publish(&self.client, &self.ant, &request.thread_id, decided);
+            crate::monitoring::status::publish(&self.client, &self.ant, &request.thread_id, decided);
         }
-        crate::status::state(&self.client, &self.ant, &request.thread_id, State::Working);
+        crate::monitoring::status::state(&self.client, &self.ant, &request.thread_id, State::Working);
         Ok(verdict)
     }
 

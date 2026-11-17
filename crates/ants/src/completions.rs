@@ -10,8 +10,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ants_daemon::config::{CliDefaults, Summary};
-use ants_daemon::keystore::Store;
-use ants_daemon::{bus, colony, dead};
+use ants_daemon::delivery::dead;
+use ants_daemon::secrets::keystore::Store;
+use ants_daemon::{bus, colony};
 use ants_proto::{CHANNELS_BUCKET, COLONY_BUCKET, JsDomain, STREAM, UserId};
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream;
@@ -281,9 +282,9 @@ pub fn messages(current: &OsStr) -> Vec<CompletionCandidate> {
     })
 }
 
-/// The reactions suggested ([`ants_daemon::reactions::SUGGESTED`]); any other of the same syntax is taken too.
+/// The reactions suggested ([`ants_daemon::records::reactions::SUGGESTED`]); any other of the same syntax is taken too.
 pub fn reactions() -> Vec<CompletionCandidate> {
-    ants_daemon::reactions::SUGGESTED.into_iter().map(CompletionCandidate::new).collect()
+    ants_daemon::records::reactions::SUGGESTED.into_iter().map(CompletionCandidate::new).collect()
 }
 
 /// The pending tool requests, as `<ant>/<id>`.

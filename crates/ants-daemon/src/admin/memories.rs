@@ -1,6 +1,6 @@
 //! [`AdminOp::ReadMemories`]: read the ant's memories ([`Memories`]) for the outcome's `result`.
 //!
-//! - Core memories ([`core_memories`]): the `whoami` and `memory` of the ant's shared settings ([`crate::shared`]),
+//! - Core memories ([`core_memories`]): the `whoami` and `memory` of the ant's shared settings ([`crate::profile::shared`]),
 //!   else of its `[[ant]]` table in the config file the daemon serves while it has none, and the `tasks` of that
 //!   table, which a set order edits.
 //! - Harness memories: the files matching the `memory_files` globs of the ant's harness, relative to its workdir or
@@ -74,7 +74,7 @@ pub(super) async fn apply(orders: &Orders, order: &AdminOrder, stored_at: DateTi
     }
 }
 
-/// The core memories of `ant`, as served: overlaid with its shared settings ([`crate::shared::Shared::overlaid`]).
+/// The core memories of `ant`, as served: overlaid with its shared settings ([`crate::profile::shared::Shared::overlaid`]).
 pub fn core_memories(ant: &Ant) -> CoreMemories {
     CoreMemories { whoami: ant.whoami.clone(), memory: ant.memory.clone(), tasks: ant.tasks.clone() }
 }

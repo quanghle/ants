@@ -5,13 +5,13 @@ use std::time::Duration;
 
 use ants_proto::State;
 
-use crate::breaker::{self, StartFailed};
 use crate::bus;
-use crate::fallback::{OnFallback, OutageNotice};
 use crate::harness::{self, SignedOut};
-use crate::ratelimit::{self, Limited};
-use crate::signin;
-use crate::status;
+use crate::limits::breaker::{self, StartFailed};
+use crate::limits::fallback::{OnFallback, OutageNotice};
+use crate::limits::ratelimit::{self, Limited};
+use crate::limits::signin;
+use crate::monitoring::status;
 
 use super::{Inbox, Incoming};
 
@@ -250,7 +250,7 @@ impl Inbox<'_> {
         let own = self.pool.launch().harness_name();
         let fallbacks = self.pool.fallbacks();
         let to = self.outage_notice(arrived, &fallbacks);
-        let notice = crate::fallback::exhausted_notice(&to, (own, outage), (&on.name, why, &detail), next);
+        let notice = crate::limits::fallback::exhausted_notice(&to, (own, outage), (&on.name, why, &detail), next);
         let id = format!("fallbacks-{}-{}", self.ant, chrono::Utc::now().timestamp_millis());
         if let Err(e) = bus::publish_json(self.js, notice.subject(), &notice, Some(&id)).await {
             tracing::warn!(%thread, error = format!("{e:#}"), "telling a human every fallback is turned away");

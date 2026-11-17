@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 
 use ants_daemon::config::registration::{GithubAccount, Grant};
-use ants_daemon::creds::Kind as CredsKind;
+use ants_daemon::secrets::creds::Kind as CredsKind;
 use ants_proto::{
     ADMIN_TAG, AssistantOf, DeviceId, DeviceKey, JsDomain, Machine, Permissions, REGISTERED_TAG, Role, UserId,
 };

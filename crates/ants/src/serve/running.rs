@@ -5,8 +5,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use ants_daemon::host::{self, Host};
+use ants_daemon::profile::shared::{self, Shared, Via};
 use ants_daemon::schedule::Schedule;
-use ants_daemon::shared::{self, Shared, Via};
 use ants_daemon::{Config, Stop};
 use ants_proto::{Machine, UserId};
 use tokio::sync::watch;

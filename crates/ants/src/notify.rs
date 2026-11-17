@@ -33,7 +33,7 @@
 //!
 //! Each human's connection also answers ants asking for the reactions to a message, in one queue group across every
 //! process and human: only humans' credentials read the reactions bucket, and the answer lists them only for a message
-//! the ant reads ([`ants_daemon::reactions::serve`]).
+//! the ant reads ([`ants_daemon::records::reactions::serve`]).
 //!
 //! A notice a snooze or quiet hours hold back is dropped. With `digest = true`, it is counted first in the human's
 //! [`HeldNotices`] in [`NOTIFY_BUCKET`], with compare-and-set, by whichever process took it; once neither holds any
@@ -52,10 +52,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ants_daemon::bus;
-use ants_daemon::direct_kv::{DirectKv, Lookup};
-use ants_daemon::humans::{Registry, Watching};
+use ants_daemon::delivery::unserved::Watch;
+use ants_daemon::people::humans::{Registry, Watching};
+use ants_daemon::records::direct_kv::{DirectKv, Lookup};
 use ants_daemon::sync::MutexExt as _;
-use ants_daemon::unserved::Watch;
 use ants_proto::{
     ApprovalRequest, Envelope, Following, HeldNotices, JsDomain, NOTIFY_BUCKET, NotifyPrefs, Role, STREAM, UserId,
     Uuid, held_key, notify_consumer, subject,
@@ -156,7 +156,7 @@ impl Notified {
 
     /// Whether its connection is made and up.
     pub fn connected(&self) -> bool {
-        self.bus.get().is_some_and(|bus| ants_daemon::metrics::connected(&bus.client))
+        self.bus.get().is_some_and(|bus| ants_daemon::monitoring::metrics::connected(&bus.client))
     }
 
     /// Whether the message at `seq` was notified, recording it if not.
@@ -210,8 +210,8 @@ pub async fn run(
     let held = bucket.ok().filter(|_| human.config.digest);
     let prefs = DirectKv::new(&js, js_domain.as_ref(), NOTIFY_BUCKET).await?;
     let unserved = unserved_watch(&human.config, &js, js_domain.as_ref()).await;
-    let humans = Registry::new(name.clone()).verifying_grants(ants_daemon::humans::account(creds));
-    let _watching = humans.watch(js.clone(), ants_daemon::humans::RETRY);
+    let humans = Registry::new(name.clone()).verifying_grants(ants_daemon::people::humans::account(creds));
+    let _watching = humans.watch(js.clone(), ants_daemon::people::humans::RETRY);
     let _ = human.bus.set(HumanBus { client, js, stream, present, prefs, humans, _watching, held });
     let bus = human.bus.get().expect("just set");
     tracing::info!(human = %name, sinks = ?human.config.sinks, "notifying");
@@ -436,8 +436,10 @@ async fn tell_unserved(human: &Human, bus: &HumanBus, watch: Option<Watch>) -> s
 async fn answer_reactions(human: &UserId, bus: &HumanBus) -> std::convert::Infallible {
     let mut delay = Duration::from_secs(1);
     loop {
-        let answering = ants_daemon::reactions::Answering::Lists;
-        if let Err(e) = ants_daemon::reactions::serve(bus.client.clone(), bus.js.clone(), None, answering).await {
+        let answering = ants_daemon::records::reactions::Answering::Lists;
+        if let Err(e) =
+            ants_daemon::records::reactions::serve(bus.client.clone(), bus.js.clone(), None, answering).await
+        {
             tracing::warn!(human = %human, retry_in = ?delay, "answering reactions requests: {e:#}");
         }
         tokio::time::sleep(delay).await;

@@ -11,8 +11,8 @@ use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
 use ants_daemon::config::edit;
-use ants_daemon::direct_kv::DirectKv;
-use ants_daemon::shared::{Bucket, Found};
+use ants_daemon::profile::shared::{Bucket, Found};
+use ants_daemon::records::direct_kv::DirectKv;
 #[cfg(doc)]
 use ants_proto::SHARED_FIELDS;
 use ants_proto::{
@@ -135,13 +135,13 @@ impl SharedRecord {
 }
 
 /// The shared settings of `ant`, read with a human's credentials and verified against their team account as daemons
-/// verify them ([`ants_daemon::shared::read`]); none while it has no record of them.
+/// verify them ([`ants_daemon::profile::shared::read`]); none while it has no record of them.
 pub async fn shared_of(nats: &Nats<'_>, js: &jetstream::Context, ant: &UserId) -> Result<Option<SharedRecord>> {
     let identities = DirectKv::whole(js, nats.domain, IDENTITIES_BUCKET).await?;
     let devices = DirectKv::new(js, nats.domain, DEVICES_BUCKET).await?;
     let accounts: Vec<String> = nats.account.iter().cloned().collect();
     let bucket = Bucket { identities: &identities, devices: &devices, accounts: &accounts };
-    Ok(match ants_daemon::shared::read(bucket, ant).await.context("reading the ant's shared settings")? {
+    Ok(match ants_daemon::profile::shared::read(bucket, ant).await.context("reading the ant's shared settings")? {
         Found::Record(record, _) => Some(SharedRecord::Verified(record)),
         Found::Unverified(record, why, _) => Some(SharedRecord::Unverified(*record, why.to_string())),
         Found::Malformed(why, _) => bail!("the ant's shared settings: {why}"),
@@ -581,7 +581,7 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
             json!({ "model": "gpt-5", "whoami": "a tester" })
         );
         assert_eq!((created.machine.as_str(), created.by.as_ref()), ("m1", None));
-        let accounts = vec![ants_daemon::creds::account(&a_creds).unwrap()];
+        let accounts = vec![ants_daemon::secrets::creds::account(&a_creds).unwrap()];
 
         let reading = read(&admin, &js, &dev_a, WAIT).await.unwrap();
         assert_eq!(reading.verified_shared(), Some(&created));
@@ -618,7 +618,7 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
             "the core memories are the shared ones"
         );
 
-        let standby = ants_daemon::shared::Shared::default();
+        let standby = ants_daemon::profile::shared::Shared::default();
         let mut own = ants_daemon::config::Ant::new(dev_a.clone(), server.dir().to_path_buf());
         (own.model, own.harness) = (Some("gpt-4".to_owned()), Some("copilot".to_owned()));
         standby.listed(std::slice::from_ref(&own));
@@ -627,7 +627,7 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         let m2_kv = DirectKv::new(&m2_js, None, IDENTITIES_BUCKET).await.unwrap();
         let m2_devices = DirectKv::new(&m2_js, None, DEVICES_BUCKET).await.unwrap();
         let m2_bucket = Bucket { identities: &m2_kv, devices: &m2_devices, accounts: &accounts };
-        ants_daemon::shared::refresh(m2_bucket, Some(&m2), &standby, std::slice::from_ref(&dev_a)).await;
+        ants_daemon::profile::shared::refresh(m2_bucket, Some(&m2), &standby, std::slice::from_ref(&dev_a)).await;
         assert_eq!(verified_of(&admin, &js, &dev_a).await, Some(changed), "the first record stays");
         let taken = crate::serve::configs(vec![own], &Harnesses::builtin(), &server.url, None, None, Some(&standby));
         let taken = taken.unwrap().remove(0);
@@ -656,7 +656,7 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         let forged =
             SharedSettings::new(dev_a.clone(), serde_json::Map::from_iter([("model".into(), json!("evil"))]), m2, None);
         m2_kv.put(forged.key(), serde_json::to_vec(&forged).unwrap()).await.unwrap();
-        ants_daemon::shared::refresh(m2_bucket, None, &standby, std::slice::from_ref(&dev_a)).await;
+        ants_daemon::profile::shared::refresh(m2_bucket, None, &standby, std::slice::from_ref(&dev_a)).await;
         // m1 may have mended the record already; the forged one is never applied.
         let applied = standby.record(&dev_a);
         assert!(applied.is_none_or(|r| r.fields.get("model") != Some(&json!("evil"))), "not applied");
@@ -674,11 +674,11 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         assert_eq!(verified_of(&admin, &js, &dev_a).await, Some(mended.clone()));
 
         // A daemon without host credentials reads the record as the ant, and writes none.
-        let follower = ants_daemon::shared::Shared::default();
+        let follower = ants_daemon::profile::shared::Shared::default();
         let mut own = ants_daemon::config::Ant::new(dev_a.clone(), server.dir().to_path_buf());
         own.creds = Some(a_creds.clone());
         follower.listed(std::slice::from_ref(&own));
-        let via = ants_daemon::shared::Via {
+        let via = ants_daemon::profile::shared::Via {
             nats: server.url.clone(),
             creds: Some(a_creds.clone()),
             js_domain: None,
@@ -686,7 +686,7 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
             ants: vec![dev_a.clone()],
         };
         let (vias, watched) = tokio::sync::watch::channel(vec![via]);
-        let following = tokio::spawn(ants_daemon::shared::follow(follower.clone(), watched, None));
+        let following = tokio::spawn(ants_daemon::profile::shared::follow(follower.clone(), watched, None));
         assert!(follower.wait_polled(WAIT).await, "the follower reads the shared settings");
         assert_eq!(follower.record(&dev_a), Some(mended));
         drop(vias);
@@ -711,17 +711,18 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         let human = Nats::new(&server.url, Some(&alice_creds), None).unwrap();
         let (_, js) = human.connect("test").await.unwrap();
         let a_creds = server.creds_as(&dev_a, Role::Ant);
-        let accounts = vec![ants_daemon::creds::account(&a_creds).unwrap()];
+        let accounts = vec![ants_daemon::secrets::creds::account(&a_creds).unwrap()];
         let m1: Machine = "m1".parse().unwrap();
         let m1_js = host_js(&server, &m1).await;
         let identities = DirectKv::new(&m1_js, None, IDENTITIES_BUCKET).await.unwrap();
         let devices = DirectKv::new(&m1_js, None, DEVICES_BUCKET).await.unwrap();
         let bucket = Bucket { identities: &identities, devices: &devices, accounts: &accounts };
-        let writer = ants_daemon::shared::Shared::default();
+        let writer = ants_daemon::profile::shared::Shared::default();
         let mut own = ants_daemon::config::Ant::new(dev_a.clone(), server.dir().to_path_buf());
         (own.model, own.creds) = (Some("gpt-5".to_owned()), Some(a_creds.clone()));
         writer.listed(std::slice::from_ref(&own));
-        let refresh = || ants_daemon::shared::refresh(bucket, Some(&m1), &writer, std::slice::from_ref(&dev_a));
+        let refresh =
+            || ants_daemon::profile::shared::refresh(bucket, Some(&m1), &writer, std::slice::from_ref(&dev_a));
         let put = |record: &SharedSettings| identities.put(record.key(), serde_json::to_vec(record).unwrap());
         let model_of = |record: &SharedSettings| record.fields.get("model").cloned();
 
@@ -729,8 +730,8 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         let first = verified_of(&human, &js, &dev_a).await.expect("created from the config");
         let fields = serde_json::Map::from_iter([("model".into(), json!("o3"))]);
         let mut second = SharedSettings::new(dev_a.clone(), fields, m1.clone(), Some(alice.clone()));
-        let signer = ants_daemon::shared::Signer::load(&dev_a, Some(&a_creds), &accounts).unwrap();
-        assert!(ants_daemon::shared::write(&identities, &mut second, &signer, None).await.unwrap());
+        let signer = ants_daemon::profile::shared::Signer::load(&dev_a, Some(&a_creds), &accounts).unwrap();
+        assert!(ants_daemon::profile::shared::write(&identities, &mut second, &signer, None).await.unwrap());
         assert_eq!(verified_of(&human, &js, &dev_a).await.as_ref(), Some(&second));
         refresh().await;
         assert_eq!(writer.record(&dev_a), Some(second.clone()));
@@ -741,8 +742,8 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         };
         assert_eq!(record, first);
         assert!(why.contains("put back"), "{why}");
-        let starting = ants_daemon::shared::Shared::default();
-        ants_daemon::shared::refresh(bucket, None, &starting, std::slice::from_ref(&dev_a)).await;
+        let starting = ants_daemon::profile::shared::Shared::default();
+        ants_daemon::profile::shared::refresh(bucket, None, &starting, std::slice::from_ref(&dev_a)).await;
         assert_eq!(starting.record(&dev_a), None, "a daemon starting does not apply it either");
         let shared = Some(Box::new(SharedRecord::Unverified(record, why)));
         let reading = Reading { read: None, stale: None, orders: Vec::new(), shared };
@@ -788,25 +789,26 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         let human = Nats::new(&server.url, Some(&alice_creds), None).unwrap();
         let (_, js) = human.connect("test").await.unwrap();
         let a_creds = server.creds_as(&dev_a, Role::Ant);
-        let accounts = vec![ants_daemon::creds::account(&a_creds).unwrap()];
+        let accounts = vec![ants_daemon::secrets::creds::account(&a_creds).unwrap()];
         let m1: Machine = "m1".parse().unwrap();
         let m1_js = host_js(&server, &m1).await;
         let identities = DirectKv::new(&m1_js, None, IDENTITIES_BUCKET).await.unwrap();
         let devices = DirectKv::new(&m1_js, None, DEVICES_BUCKET).await.unwrap();
         let bucket = Bucket { identities: &identities, devices: &devices, accounts: &accounts };
-        let writer = ants_daemon::shared::Shared::default();
+        let writer = ants_daemon::profile::shared::Shared::default();
         let mut own = ants_daemon::config::Ant::new(dev_a.clone(), server.dir().to_path_buf());
         (own.model, own.creds) = (Some("gpt-5".to_owned()), Some(a_creds.clone()));
         writer.listed(std::slice::from_ref(&own));
-        let refresh = || ants_daemon::shared::refresh(bucket, Some(&m1), &writer, std::slice::from_ref(&dev_a));
-        let signer = ants_daemon::shared::Signer::load(&dev_a, Some(&a_creds), &accounts).unwrap();
+        let refresh =
+            || ants_daemon::profile::shared::refresh(bucket, Some(&m1), &writer, std::slice::from_ref(&dev_a));
+        let signer = ants_daemon::profile::shared::Signer::load(&dev_a, Some(&a_creds), &accounts).unwrap();
         let sequence = || async { identities.lookup_stored(SharedSettings::key_of(&dev_a)).await.unwrap().1 };
 
         refresh().await;
         assert_eq!((writer.record(&dev_a), sequence().await), (None, 0), "none written");
         let fields = serde_json::Map::from_iter([("model".into(), json!("o3"))]);
         let mut set = SharedSettings::new(dev_a.clone(), fields, m1.clone(), Some(alice.clone()));
-        let unmarked = ants_daemon::shared::write(&identities, &mut set, &signer, None).await.unwrap_err();
+        let unmarked = ants_daemon::profile::shared::write(&identities, &mut set, &signer, None).await.unwrap_err();
         assert!(format!("{unmarked:#}").contains("ants init"), "{unmarked:#}");
 
         crate::cmd::init::hub(&human, false).await.unwrap();
@@ -815,7 +817,7 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
             verified_of(&human, &js, &dev_a).await.and_then(|r| r.fields.get("model").cloned()),
             Some(json!("gpt-5"))
         );
-        assert!(ants_daemon::shared::write(&identities, &mut set, &signer, None).await.unwrap());
+        assert!(ants_daemon::profile::shared::write(&identities, &mut set, &signer, None).await.unwrap());
         refresh().await;
         assert_eq!(writer.record(&dev_a), Some(set.clone()));
 

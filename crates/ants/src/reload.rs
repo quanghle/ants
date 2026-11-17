@@ -101,7 +101,7 @@ pub enum Trigger {
     Changed,
     /// An admin order edited the config file.
     Edited,
-    /// The shared settings of an ant changed ([`ants_daemon::shared`]).
+    /// The shared settings of an ant changed ([`ants_daemon::profile::shared`]).
     Shared,
 }
 
@@ -145,7 +145,7 @@ impl Triggers {
         Arc::clone(&self.edited)
     }
 
-    /// Reload as well once the shared settings `changes` tells of change ([`ants_daemon::shared::Shared::subscribe`]).
+    /// Reload as well once the shared settings `changes` tells of change ([`ants_daemon::profile::shared::Shared::subscribe`]).
     pub fn watch_shared(&mut self, mut changes: watch::Receiver<u64>) {
         changes.mark_unchanged();
         self.shared = Some(changes);

@@ -148,7 +148,7 @@ async fn reminders_back_off_and_stop_after_the_third() {
     });
     let colony: Colony = Arc::new(|| Box::pin(async { Ok(Vec::new()) }));
     let humans = Registry::with(UserId::human(), &["alice"]);
-    let ledger = Arc::new(Ledger::memory(p("dev-a"), crate::caps::Caps::default()));
+    let ledger = Arc::new(Ledger::memory(p("dev-a"), crate::limits::caps::Caps::default()));
     let chain = Chain { remind: Some(Duration::from_millis(1)), ..Default::default() };
     let escalator = Escalator::new(p("dev-a"), chain, colony, humans, ledger, send);
     let notice = Envelope::on_thread(t(), p("dev-a"), p("alice"), "stuck").with_owner(Some(p("alice")));
@@ -179,7 +179,7 @@ async fn a_snooze_holds_the_reminder_back_and_a_read_escalation_ends_them() {
     });
     let colony: Colony = Arc::new(|| Box::pin(async { Ok(Vec::new()) }));
     let humans = Registry::with(UserId::human(), &["alice"]);
-    let ledger = Arc::new(Ledger::memory(p("dev-a"), crate::caps::Caps::default()));
+    let ledger = Arc::new(Ledger::memory(p("dev-a"), crate::limits::caps::Caps::default()));
     let chain = Chain { remind: Some(Duration::from_millis(1)), ..Default::default() };
     let until = chrono::Utc::now() + chrono::TimeDelta::hours(1);
     let state = Arc::new(std::sync::Mutex::new((Heeded::Snoozed(until), Vec::new())));
@@ -219,12 +219,12 @@ mod assistant_first {
     use ants_proto::{AssistantGrant, ColonyEntry, Question};
 
     use super::*;
-    use crate::humans::TestDevice;
+    use crate::people::humans::TestDevice;
 
     type Sent = Arc<StdMutex<Vec<Envelope>>>;
 
     fn entry(ant: &str) -> ColonyEntry {
-        crate::assistant_first::live(&p(ant))
+        crate::people::assistant_first::live(&p(ant))
     }
 
     /// alice's grant naming `assistant`, or withdrawing the one standing with None.
@@ -246,10 +246,10 @@ mod assistant_first {
             let colony = colony.clone();
             Box::pin(async move { Ok(colony) })
         });
-        let record: crate::assistant_first::RecordOf = Arc::new(|_| Box::pin(async { Some(p("alice")) }));
+        let record: crate::people::assistant_first::RecordOf = Arc::new(|_| Box::pin(async { Some(p("alice")) }));
         let assistants = AssistantFirst::new(humans.clone(), colony.clone(), record);
         let chain = Chain { after, ..Default::default() };
-        let ledger = Arc::new(Ledger::memory(p("dev-a"), crate::caps::Caps::default()));
+        let ledger = Arc::new(Ledger::memory(p("dev-a"), crate::limits::caps::Caps::default()));
         let escalator = Escalator::new(p("dev-a"), chain, colony, humans.clone(), ledger, send);
         (escalator.with_assistants(assistants), sent)
     }

@@ -6,7 +6,7 @@ use std::ops::ControlFlow;
 use std::time::{Duration, SystemTime};
 
 use ants_daemon::channel::CLOCK_SLACK;
-use ants_daemon::reading::{self, Reading};
+use ants_daemon::stream::reading::{self, Reading};
 use ants_proto::{ThreadId, UserId, Uuid, subject};
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream::stream::LastRawMessageErrorKind;

@@ -5,9 +5,9 @@ use std::path::PathBuf;
 use ants_proto::{AdminOrder, ThreadId};
 
 use super::worktrees::git;
-use crate::direct_kv::DirectKv;
-use crate::identity::Identity;
 use crate::pool::SessionStore;
+use crate::profile::identity::Identity;
+use crate::records::direct_kv::DirectKv;
 
 /// What a clone did so far, to undo on a failure.
 #[derive(Default)]

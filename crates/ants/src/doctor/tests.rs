@@ -1,8 +1,10 @@
 use ants_daemon::config::Ant;
-use ants_daemon::creds::Seed;
-use ants_daemon::keystore::Store as _;
-use ants_daemon::storage::Usage;
-use ants_daemon::{bus, hub, keystore, storage};
+use ants_daemon::monitoring::storage;
+use ants_daemon::monitoring::storage::Usage;
+use ants_daemon::secrets::creds::Seed;
+use ants_daemon::secrets::keystore;
+use ants_daemon::secrets::keystore::Store as _;
+use ants_daemon::{bus, hub};
 use ants_proto::{Machine, PERMISSIONS_VERSION, Role, STREAM, UserId};
 
 use super::colony::{avatars, drift, harness_versions};
@@ -140,7 +142,8 @@ async fn the_versions_check_waits_for_every_component_to_allow_renewal() {
     let creds = server.dir().join("channel-manager.creds");
     auth::issue_channel_manager(&server.dir().join("auth"), None, &creds).unwrap();
     let (_, m_js) = bus::connect(&server.url, Some(&creds), None, &manager, "test").await.unwrap();
-    let published = ants_daemon::direct_kv::DirectKv::new(&m_js, None, ants_proto::WEBHOOKS_BUCKET).await.unwrap();
+    let published =
+        ants_daemon::records::direct_kv::DirectKv::new(&m_js, None, ants_proto::WEBHOOKS_BUCKET).await.unwrap();
     let key = ants_proto::channel_manager_serving_key();
     published.put(&key, versions::serving().await).await.expect("the channel manager publishes its version");
 
@@ -294,7 +297,7 @@ async fn a_missing_harness_fails_with_its_fix() {
 /// by `ants signer`; an ant without credentials asks no one.
 #[tokio::test]
 async fn the_reactions_check_names_who_answers_an_ants_requests() {
-    use ants_daemon::reactions::{Answering, serve};
+    use ants_daemon::records::reactions::{Answering, serve};
     let Some(server) = Server::start() else { return };
     let dev_a: UserId = "dev-a".parse().unwrap();
     let creds = server.creds_as(&dev_a, Role::Ant);

@@ -18,30 +18,31 @@ use futures::stream::{Stream, StreamExt as _};
 
 use crate::admin::restart::Restarts;
 use crate::approvals::NatsApprover;
-use crate::assistant_first::AssistantFirst;
-use crate::attempts::{Answered, Attempts};
-use crate::behalf::Records;
-use crate::breaker::Breaker;
-use crate::caps::{Caps, Ledger};
 use crate::channel::{Channels, Threads};
-use crate::dead::Buried;
+use crate::delivery::attempts::{Answered, Attempts};
+use crate::delivery::dead::Buried;
+use crate::delivery::unserved;
 use crate::escalation::{self, Chain, Escalator};
-use crate::fallback::Failover;
 use crate::harness::{Harness, Launch, ModelSettings, PromptLimits};
-use crate::humans::Registry;
-use crate::identity::Identity;
+use crate::limits::breaker::Breaker;
+use crate::limits::caps::{Caps, Ledger};
+use crate::limits::fallback::Failover;
+use crate::limits::ratelimit::{self, Backoffs, Throttle};
+use crate::limits::signin::{self, SignIn};
 use crate::mcp::{Colony, Mcp};
-use crate::notes::{self, NotesStore};
+use crate::people::assistant_first::AssistantFirst;
+use crate::people::behalf::Records;
+use crate::people::humans::Registry;
 use crate::permission::{Allowlist, PermissionPolicy};
 use crate::pool::{Pool, SessionStore};
+use crate::profile::identity::Identity;
 use crate::publish::{Publish, Publisher};
-use crate::ratelimit::{self, Backoffs, Throttle};
-use crate::reading::Reading;
-use crate::redact::Redactor;
-use crate::signin::{self, SignIn};
-use crate::webhooks::Webhooks;
+use crate::records::webhooks::Webhooks;
+use crate::secrets::redact::Redactor;
+use crate::stream::notes::{self, NotesStore};
+use crate::stream::reading::Reading;
 use crate::worktrees::{Branch, Worktrees};
-use crate::{bus, colony, pause, unserved};
+use crate::{bus, colony, pause};
 
 mod admission;
 mod burial;
@@ -112,9 +113,9 @@ pub struct Config {
     /// restarts no harness ([`crate::pause::Pause::replace`]).
     pub pause: crate::pause::Pause,
     /// The ant's settings this machine's config sets otherwise than its shared settings, which the ant runs with
-    /// ([`crate::shared`]), as its colony entry reports them; equal to any other, so that a change of drift alone
-    /// restarts no harness ([`crate::shared::Drift::replace`]).
-    pub drift: crate::shared::Drift,
+    /// ([`crate::profile::shared`]), as its colony entry reports them; equal to any other, so that a change of drift alone
+    /// restarts no harness ([`crate::profile::shared::Drift::replace`]).
+    pub drift: crate::profile::shared::Drift,
 }
 
 /// How the daemon reaches the bus.
@@ -147,7 +148,7 @@ pub struct HarnessSettings {
     pub harness: std::sync::Arc<Harness>,
     pub model_settings: ModelSettings,
     /// Harnesses and models tried in order while the ant's own harness cannot serve.
-    pub fallbacks: Vec<crate::fallback::Fallback>,
+    pub fallbacks: Vec<crate::limits::fallback::Fallback>,
     /// Directory the harness works in.
     pub workdir: PathBuf,
     pub env: BTreeMap<String, String>,
@@ -164,8 +165,8 @@ pub struct Pooling {
     pub max_harnesses: usize,
     /// A thread's harness stops after this long without a message, and resumes its session on the next one.
     pub idle_timeout: Duration,
-    /// When memory is low, and the harnesses run at most while it is ([`crate::pressure`]).
-    pub memory_pressure: crate::pressure::Settings,
+    /// When memory is low, and the harnesses run at most while it is ([`crate::limits::pressure`]).
+    pub memory_pressure: crate::limits::pressure::Settings,
 }
 
 /// Whether each thread works in its own git worktree, and what becomes of its branch.
@@ -192,7 +193,7 @@ pub struct Policy {
     pub approval_timeout: Duration,
     /// The ant's escalation chain, published in the colony, and its limits.
     pub escalation: Chain,
-    /// Redact secrets from what the ant publishes ([`crate::redact`]).
+    /// Redact secrets from what the ant publishes ([`crate::secrets::redact`]).
     pub redact: bool,
 }
 
@@ -204,7 +205,7 @@ pub struct Spending {
     /// The share of a cap, in percent, past which a human is warned once; 0 for never.
     pub warn_percent: u8,
     /// The daily caps the ant shares with the other ants added from its template, if any.
-    pub pool: Option<crate::caps::Pool>,
+    pub pool: Option<crate::limits::caps::Pool>,
 }
 
 /// Where the ant keeps its files, and when the bus's storage filling up is told.
@@ -213,7 +214,7 @@ pub struct Storage {
     /// The ant's own files (usually `~/.ants/<ant>`).
     pub home: PathBuf,
     /// When to warn a human of JetStream storage filling up.
-    pub jetstream: crate::storage::Settings,
+    pub jetstream: crate::monitoring::storage::Settings,
 }
 
 /// Serve the ant's inbox until Ctrl-C. Prompts in flight are finished first; a second Ctrl-C stops at once. Until
@@ -238,7 +239,7 @@ impl Stop {
 /// [`run`], also stopping on `stop`'s request, and restarting the ant's harnesses on the admin orders `restarts`
 /// passes on.
 pub async fn run_until(config: Config, stop: &Stop, restarts: &Restarts) -> Result<()> {
-    let _serving = crate::metrics::ant(&config.ant).serving();
+    let _serving = crate::monitoring::metrics::ant(&config.ant).serving();
     let _served = restarts.serve(&config.ant);
     let harness = &config.harness.harness;
     if let Some(detail) = harness.unenforced(&config.policy.allow, !config.policy.escalation.escalate_to.is_empty()) {
@@ -293,11 +294,11 @@ enum Served {
 
 /// For an assistant's credentials, keeps their record for readers of what it does for its human and lets its tools
 /// act for the human ([`Mcp::with_assisting`]), opening and sealing the human's sealed messages with the ant's sealing
-/// key when it has one ([`crate::sealing::AssistantSealing`]).
+/// key when it has one ([`crate::secrets::sealing::AssistantSealing`]).
 async fn assist(mcp: &Mcp, config: &Config, js: &async_nats::jetstream::Context, humans: &Registry) {
     let Some(creds) = &config.connection.creds else { return };
     let js_domain = &config.connection.js_domain;
-    let human = match crate::behalf::keep_record(js, js_domain.as_ref(), &config.ant, creds).await {
+    let human = match crate::people::behalf::keep_record(js, js_domain.as_ref(), &config.ant, creds).await {
         Ok(Some(human)) => human,
         Ok(None) => return,
         Err(e) => {
@@ -324,11 +325,11 @@ async fn assistant_sealing(
     creds: &std::path::Path,
     js: &async_nats::jetstream::Context,
     humans: &Registry,
-) -> Result<Option<crate::sealing::AssistantSealing>> {
-    let Some(xkey) = crate::sealing::load_key(creds)? else { return Ok(None) };
-    let Some(account) = crate::humans::account(Some(creds)) else { return Ok(None) };
-    let directory = crate::devices::Directory::open(js, &account).await?;
-    Ok(Some(crate::sealing::AssistantSealing::new(ant.clone(), xkey, humans.clone(), directory)))
+) -> Result<Option<crate::secrets::sealing::AssistantSealing>> {
+    let Some(xkey) = crate::secrets::sealing::load_key(creds)? else { return Ok(None) };
+    let Some(account) = crate::people::humans::account(Some(creds)) else { return Ok(None) };
+    let directory = crate::people::devices::Directory::open(js, &account).await?;
+    Ok(Some(crate::secrets::sealing::AssistantSealing::new(ant.clone(), xkey, humans.clone(), directory)))
 }
 
 /// Serve the ant's inbox until Ctrl-C or `stop`, or until another daemon takes over its colony entry.
@@ -341,7 +342,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
     if !unsealed(config, &js, stop).await {
         return Ok(Served::Stopped);
     }
-    let metrics = crate::metrics::ant(&config.ant);
+    let metrics = crate::monitoring::metrics::ant(&config.ant);
     let workload = std::sync::Arc::new(colony::Workload::default());
     workload.set_paused(config.pause.get());
     workload.set_drift(config.drift.get());
@@ -349,9 +350,9 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
     let Some((entry, claimed)) = take_turn(config, &js, stop).await? else {
         return Ok(Served::Stopped);
     };
-    let account = || crate::humans::account(config.connection.creds.as_deref());
+    let account = || crate::people::humans::account(config.connection.creds.as_deref());
     let humans = Registry::new(config.policy.human.clone()).verifying_grants(account());
-    let _watching = humans.watch(js.clone(), crate::humans::RETRY);
+    let _watching = humans.watch(js.clone(), crate::people::humans::RETRY);
     let Services { redactor, approver, colony, reading, notes, sessions_kv, ledger, escalator, identity, mcp, launch } =
         services(config, &client, &js, &humans, allow).await?;
     let js_domain = config.connection.js_domain.as_ref();
@@ -408,7 +409,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         throttle: Throttle::default(),
         backoffs: ratelimit::BACKOFFS,
         failover: Failover::default(),
-        fallback_retry: crate::fallback::RETRY_AFTER,
+        fallback_retry: crate::limits::fallback::RETRY_AFTER,
         identity: identity.as_ref(),
         home: &config.storage.home,
     };
@@ -444,8 +445,8 @@ struct Services {
     approver: NatsApprover,
     colony: Colony,
     reading: Reading,
-    notes: std::sync::Arc<RedactingNotes<crate::notes::JetStreamNotes>>,
-    sessions_kv: crate::direct_kv::DirectKv,
+    notes: std::sync::Arc<RedactingNotes<crate::stream::notes::JetStreamNotes>>,
+    sessions_kv: crate::records::direct_kv::DirectKv,
     ledger: std::sync::Arc<Ledger>,
     escalator: std::sync::Arc<Escalator>,
     identity: Option<Identity>,
@@ -464,15 +465,15 @@ async fn services(
 ) -> Result<Services> {
     let redactor = std::sync::Arc::new(redactor(config.policy.redact, &config.harness));
     let colony = crate::mcp::jetstream_colony(js.clone());
-    let account = crate::humans::account(config.connection.creds.as_deref());
+    let account = crate::people::humans::account(config.connection.creds.as_deref());
     let records = Records::new(js.clone(), config.connection.js_domain.clone(), account);
     let assistants = AssistantFirst::with_records(humans.clone(), colony.clone(), records);
     let approver = approver(&config.ant, &config.policy, client, js, humans).with_assistants(assistants.clone());
     let policy =
         PermissionPolicy::new(allow, Some(std::sync::Arc::new(approver.clone()))).with_redactor(redactor.clone());
     let outbox = redacting_outbox(crate::mcp::jetstream_outbox(js.clone()), redactor.clone());
-    let reading = Reading::daemon(crate::creds::is_assistant(config.connection.creds.as_deref()));
-    let notes = crate::notes::JetStreamNotes::new(js.clone(), config.ant.clone()).reading(reading);
+    let reading = Reading::daemon(crate::secrets::creds::is_assistant(config.connection.creds.as_deref()));
+    let notes = crate::stream::notes::JetStreamNotes::new(js.clone(), config.ant.clone()).reading(reading);
     let notes = std::sync::Arc::new(RedactingNotes { notes, redactor: redactor.clone() });
     let sessions_kv = bus::ensure_sessions(js, config.connection.js_domain.as_ref(), &config.ant).await?;
     let ledger = ledger(&config.ant, &config.spending, &sessions_kv);
@@ -504,7 +505,7 @@ async fn unsealed(config: &Config, js: &jetstream::Context, stop: &Stop) -> bool
         }
     };
     tokio::select! {
-        () = identity.unsealed(crate::identity::MOVED_EVERY) => true,
+        () = identity.unsealed(crate::profile::identity::MOVED_EVERY) => true,
         () = stopped(stop) => false,
     }
 }
@@ -512,7 +513,7 @@ async fn unsealed(config: &Config, js: &jetstream::Context, stop: &Stop) -> bool
 /// Keep the ant's escalation chain past the colony, and return its identity record, created when absent: None when it
 /// cannot be read, which the warning says.
 async fn ant_records(config: &Config, js: &jetstream::Context) -> Option<Identity> {
-    if let Err(e) = crate::chains::publish(js, &config.ant, &config.policy.escalation.escalate_to).await {
+    if let Err(e) = crate::records::chains::publish(js, &config.ant, &config.policy.escalation.escalate_to).await {
         tracing::warn!(error = format!("{e:#}"), "keeping the escalation chain past the colony");
     }
     let identity = Identity::new(js, config.connection.js_domain.as_ref(), &config.ant).await;
@@ -576,7 +577,7 @@ async fn wait_for_turn(
 }
 
 /// The ledger of the ant's spending, against its caps and its pool's.
-fn ledger(ant: &UserId, spending: &Spending, sessions: &crate::direct_kv::DirectKv) -> std::sync::Arc<Ledger> {
+fn ledger(ant: &UserId, spending: &Spending, sessions: &crate::records::direct_kv::DirectKv) -> std::sync::Arc<Ledger> {
     let ledger = Ledger::kv(sessions.clone(), ant.clone(), spending.caps)
         .warn_at(spending.warn_percent)
         .with_pool(spending.pool.clone());
@@ -601,9 +602,9 @@ fn escalator(
         ledger.clone(),
         redacting_sender(escalation::jetstream_sender(js.clone()), redactor.clone()),
     )
-    .with_chains(crate::chains::jetstream_chains(js.clone()))
+    .with_chains(crate::records::chains::jetstream_chains(js.clone()))
     .with_notes(redacting_notes_sender(escalation::jetstream_notes_sender(js.clone()), redactor.clone()))
-    .with_heed(crate::heed::jetstream_heed(js.clone(), config.connection.js_domain.clone()))
+    .with_heed(crate::records::heed::jetstream_heed(js.clone(), config.connection.js_domain.clone()))
     .with_assistants(assistants);
     std::sync::Arc::new(escalator)
 }
@@ -651,10 +652,10 @@ fn launch(harness: &HarnessSettings, policy: PermissionPolicy, mcp: &Mcp) -> Lau
 fn storage_watcher(
     config: &Config,
     js: &jetstream::Context,
-    sessions: &crate::direct_kv::DirectKv,
-) -> crate::storage::Watcher {
+    sessions: &crate::records::direct_kv::DirectKv,
+) -> crate::monitoring::storage::Watcher {
     let connection = &config.connection;
-    crate::storage::Watcher {
+    crate::monitoring::storage::Watcher {
         js: js.clone(),
         hub_domain: connection.js_domain.clone(),
         notes: sessions.clone(),
@@ -686,7 +687,7 @@ async fn harness_pool(
     let mut pool = Pool::new(launch, sessions, pooling.max_harnesses, pooling.idle_timeout)
         .with_fallbacks(fallbacks)
         .reporting_to(workload.clone())
-        .with_memory_pressure(pooling.memory_pressure, crate::pressure::system_probe());
+        .with_memory_pressure(pooling.memory_pressure, crate::limits::pressure::system_probe());
     let isolating = if config.worktrees.per_thread == Some(true) {
         Worktrees::find(&config.ant, &config.harness.workdir, home).await
     } else {
@@ -717,7 +718,7 @@ async fn publisher(
     }
     let publisher = Publisher::new(config.ant.clone()).with_redactor(redactor.clone());
     let js_domain = config.connection.js_domain.as_ref();
-    Some(match crate::direct_kv::DirectKv::new(js, js_domain, ants_proto::THREADS_BUCKET).await {
+    Some(match crate::records::direct_kv::DirectKv::new(js, js_domain, ants_proto::THREADS_BUCKET).await {
         Ok(titles) => publisher.with_titles(titles),
         Err(e) => {
             tracing::info!(error = format!("{e:#}"), "pull requests take the opening line, not the thread's title");
@@ -818,7 +819,7 @@ async fn serve_inbox<S, E>(
     config: &Config,
     stop: &Stop,
     registration: &colony::Registration,
-    storage: &crate::storage::Watcher,
+    storage: &crate::monitoring::storage::Watcher,
 ) -> Result<Served>
 where
     S: Stream<Item = Result<jetstream::Message, E>> + Unpin,
@@ -842,7 +843,7 @@ where
         async move {
             let moved = async {
                 match inbox.identity {
-                    Some(identity) => identity.moved(crate::identity::MOVED_EVERY).await,
+                    Some(identity) => identity.moved(crate::profile::identity::MOVED_EVERY).await,
                     None => std::future::pending().await,
                 }
             };
@@ -868,8 +869,8 @@ where
         () = inbox.hear_restarts() => {}
         () = inbox.hear_clones() => {}
         () = inbox.hear_mcp() => {}
-        () = crate::creds::recheck(config.connection.creds.as_deref()) => {}
-        () = storage.watch(crate::storage::CHECK_EVERY) => {}
+        () = crate::secrets::creds::recheck(config.connection.creds.as_deref()) => {}
+        () = storage.watch(crate::monitoring::storage::CHECK_EVERY) => {}
         () = tell_unserved(inbox.js, inbox.humans, &mut unserved) => {}
     }
     Ok(if stopping.get() {
@@ -1012,9 +1013,9 @@ struct Inbox<'a> {
     /// Whether the ant is paused: then no prompt starts, the messages in hand waiting.
     pause: &'a crate::pause::Pause,
     /// The ant's drift, which its colony entry reports as it changes.
-    drift: &'a crate::shared::Drift,
+    drift: &'a crate::profile::shared::Drift,
     /// The ant's counters, for monitoring.
-    metrics: std::sync::Arc<crate::metrics::Ant>,
+    metrics: std::sync::Arc<crate::monitoring::metrics::Ant>,
     limits: PromptLimits,
     ledger: &'a Ledger,
     /// Sends what the ant cannot settle up its chain, and notes the answers.
@@ -1049,7 +1050,7 @@ struct Inbox<'a> {
     fallback_retry: Duration,
     /// The ant's identity record, which counts each prompt completed; None when it cannot be read.
     identity: Option<&'a Identity>,
-    /// The ant's home, where a clone's copy of its threads' history is ([`crate::history::cloned`]).
+    /// The ant's home, where a clone's copy of its threads' history is ([`crate::stream::history::cloned`]).
     home: &'a std::path::Path,
 }
 

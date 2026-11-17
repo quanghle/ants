@@ -8,8 +8,9 @@ use std::collections::HashSet;
 use std::ops::ControlFlow;
 use std::time::Duration;
 
-use ants_daemon::reading::{self, Reading};
-use ants_daemon::{bus, owners};
+use ants_daemon::bus;
+use ants_daemon::records::owners;
+use ants_daemon::stream::reading::{self, Reading};
 use ants_proto::{Envelope, SummaryRequest, ThreadId, ThreadSummary, UserId, subject};
 use anyhow::{Result, bail};
 use async_nats::jetstream::{self, consumer};

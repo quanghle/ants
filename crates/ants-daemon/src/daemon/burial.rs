@@ -5,7 +5,7 @@ use ants_proto::DeadLetter;
 use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
 
-use crate::dead::{self, Burial};
+use crate::delivery::dead::{self, Burial};
 
 use super::{Inbox, Incoming, MAX_DELIVER};
 

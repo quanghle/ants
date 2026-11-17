@@ -1,7 +1,8 @@
 use std::process::Command;
 use std::time::Duration;
 
-use ants_daemon::{bus, notes};
+use ants_daemon::bus;
+use ants_daemon::stream::notes;
 use ants_proto::{ChannelPost, Envelope, NotesPost, Permissions, Role, UserId};
 use ants_test_support::{NatsServer, free_port, scratch_dir};
 use async_nats::jetstream;

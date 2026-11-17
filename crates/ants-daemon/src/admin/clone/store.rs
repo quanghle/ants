@@ -13,9 +13,10 @@ use super::plan::Plan;
 use super::undo::Done;
 use super::worktrees::Tree;
 use crate::clone::{Snapshot, ThreadCopy};
-use crate::identity::{self, Identity};
 use crate::pool::{SessionStore, Stored};
-use crate::{bus, harness, shared};
+use crate::profile::identity::{self, Identity};
+use crate::profile::shared;
+use crate::{bus, harness};
 
 impl Cloning<'_> {
     /// Store the clone's sessions ([`store_sessions`]) and its identity record, with its credentials: the threads

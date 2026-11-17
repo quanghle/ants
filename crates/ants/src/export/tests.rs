@@ -145,9 +145,9 @@ async fn an_ant_moves_to_another_bus_with_its_identity_and_memories() {
     let exported: Export = serde_json::from_slice(&std::fs::read(&unsigned).unwrap()).unwrap();
     assert_eq!(exported.settings.whoami.as_deref(), Some("Reviewer"), "an unverified record is left out");
     let a_creds = server.creds_as(&p("dev-a"), Role::Ant);
-    let accounts = [ants_daemon::creds::account(&a_creds).unwrap()];
-    let signer = ants_daemon::shared::Signer::load(&p("dev-a"), Some(&a_creds), &accounts).unwrap();
-    assert!(ants_daemon::shared::write(&host_kv, &mut shared, &signer, None).await.unwrap());
+    let accounts = [ants_daemon::secrets::creds::account(&a_creds).unwrap()];
+    let signer = ants_daemon::profile::shared::Signer::load(&p("dev-a"), Some(&a_creds), &accounts).unwrap();
+    assert!(ants_daemon::profile::shared::write(&host_kv, &mut shared, &signer, None).await.unwrap());
 
     let file = dir.join("dev-a.ant");
     export(&nats, &p("dev-a"), Some(file.clone()), true, Some(config.clone())).await.unwrap();

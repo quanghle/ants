@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use ants_daemon::colony;
-use ants_daemon::direct_kv::DirectKv;
+use ants_daemon::records::direct_kv::DirectKv;
 use ants_proto::{
     COLONY_BUCKET, ColonyEntry, PERMISSIONS_VERSION, PermissionsVersion, SERVING_EVERY, Serving, WEBHOOKS_BUCKET,
     channel_manager_serving_subject,

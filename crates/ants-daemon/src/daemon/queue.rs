@@ -13,7 +13,7 @@ use futures::future::{FusedFuture as _, FutureExt as _};
 use futures::stream::{FuturesUnordered, Stream, StreamExt as _};
 
 use crate::channel::Channels;
-use crate::status;
+use crate::monitoring::status;
 
 use super::control::{Cancel, Why};
 use super::handling::Handled;

@@ -247,7 +247,7 @@ async fn an_ant_names_an_owner_only_as_recorded_for_the_thread_or_the_one_it_was
     let [asked, stuck, unrecorded] = [(); 3].map(|()| ThreadId::generate());
     bus::ensure_owners(&bus.js).await.unwrap();
     for (thread, to) in [(&asked, &bus.dev), (&asked, &dev_b), (&stuck, &bus.dev)] {
-        crate::owners::record(&bus.js, None, thread, to, &alice).await.unwrap();
+        crate::records::owners::record(&bus.js, None, thread, to, &alice).await.unwrap();
     }
     // dev-b names the default human as the owner of each, and links spin-offs to `asked`, `unrecorded` and
     // `stuck`, where nobody messaged it.
@@ -324,7 +324,7 @@ async fn a_human_s_message_from_an_outbox_waits_for_its_thread_s_owner_to_be_rec
     let check = async {
         assert_eq!(next_envelope(&mut to_human).await.in_reply_to, Some(direct.id), "no record to wait for");
         assert!(timeout(Duration::from_millis(700), to_human.next()).await.is_err(), "waiting for the record");
-        crate::owners::record(&bus.js, None, &sourced.thread_id, &bus.dev, &human).await.unwrap();
+        crate::records::owners::record(&bus.js, None, &sourced.thread_id, &bus.dev, &human).await.unwrap();
         assert_eq!(next_envelope(&mut to_human).await.in_reply_to, Some(sourced.id));
         bus.until_acked(seq).await;
         ctrl_c.add_permits(1);
@@ -396,7 +396,7 @@ async fn a_link_passed_on_from_an_ant_taking_part_carries_the_creator_further() 
     // dev-b, woken on lead's thread, passes the link on to dev-x, which passes it on to dev-y. eve passes it on
     // to itself and gets it from mallory, neither with a link of its own.
     for (from, to) in [(&dev_b, &dev_x), (&dev_x, &dev_y), (&eve, &eve), (&mallory, &eve)] {
-        crate::links::pass_on(&bus.js, &spin(from, to, "")).await.unwrap();
+        crate::records::links::pass_on(&bus.js, &spin(from, to, "")).await.unwrap();
     }
     let passed = spin(&dev_y, &bus.dev, "two hops away");
     let forged = spin(&eve, &bus.dev, "no link");
@@ -428,7 +428,7 @@ async fn a_link_to_a_message_thread_passed_on_from_an_ant_messaged_on_it_carries
     let [dev_b, dev_x, dev_y, dev_z, eve, mallory] = ants(["dev-b", "dev-x", "dev-y", "dev-z", "eve", "mallory"]);
     let [mut to_dev_y, mut to_dev_z, mut to_eve] = inboxes(&bus, &[dev_y.clone(), dev_z.clone(), eve.clone()]).await;
     let asked = ThreadId::generate();
-    crate::owners::record(&bus.js, None, &asked, &dev_b, &human).await.unwrap();
+    crate::records::owners::record(&bus.js, None, &asked, &dev_b, &human).await.unwrap();
     let on_asked = |from: &UserId, to: &UserId, text: &str| {
         Envelope::on_thread(asked.clone(), from.clone(), to.clone(), text).with_owner(Some(human.clone()))
     };
@@ -442,7 +442,7 @@ async fn a_link_to_a_message_thread_passed_on_from_an_ant_messaged_on_it_carries
         spin(&eve, &eve, ""),
         spin(&mallory, &eve, ""),
     ] {
-        crate::links::pass_on(&bus.js, &passed).await.unwrap();
+        crate::records::links::pass_on(&bus.js, &passed).await.unwrap();
     }
     let passed = spin(&dev_y, &bus.dev, "two hops away");
     let on_thread = spin(&dev_z, &bus.dev, "messaged on the thread by dev-b");

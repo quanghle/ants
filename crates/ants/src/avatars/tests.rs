@@ -1,4 +1,4 @@
-use ants_daemon::identity::Identity;
+use ants_daemon::profile::identity::Identity;
 use chrono::{TimeZone as _, Utc};
 
 use super::*;

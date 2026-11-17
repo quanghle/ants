@@ -22,8 +22,8 @@ use futures::future::BoxFuture;
 
 use crate::bus;
 use crate::channel::{self, Stored};
-use crate::humans::Registry;
 use crate::mcp::Colony;
+use crate::people::humans::Registry;
 
 /// Queue group of the channel managers: one of them takes each request.
 const QUEUE: &str = "chanadm";

@@ -2,16 +2,16 @@
 //! user JWT of its device, which binds the device's encryption key ([`ants_proto::DeviceKey`]), on connecting ([`publish_or_warn`]);
 //! `ants auth revoke` and `ants auth push` put a record of each revoked key of a human's credentials
 //! ([`record_revocations`]); and a sender finds there the keys of the devices it seals for ([`Directory`]), taking each
-//! only from a JWT it verifies itself ([`ants_daemon::devices::verify`]), so no human puts a key for another's device, besides the assistants
+//! only from a JWT it verifies itself ([`ants_daemon::people::devices::verify`]), so no human puts a key for another's device, besides the assistants
 //! the humans enrolled as devices by their grants.
 
 use std::path::Path;
 use std::time::Duration;
 
 use ants_daemon::bus;
-use ants_daemon::creds::{Finding, Kind};
-pub use ants_daemon::devices::{Devices, Directory, Lookup, VerifiedDevice};
-use ants_daemon::direct_kv::DirectKv;
+pub use ants_daemon::people::devices::{Devices, Directory, Lookup, VerifiedDevice};
+use ants_daemon::records::direct_kv::DirectKv;
+use ants_daemon::secrets::creds::{Finding, Kind};
 use ants_proto::{
     DEVICES_BUCKET, DeviceId, DeviceRevocation, ENROLL_INBOX, IDENTITIES_BUCKET, JsDomain, UserId, device_entry_key,
     revoked_device_key,

@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ants_daemon::bus;
-use ants_daemon::creds::{Finding, Kind as CredsKind};
-use ants_daemon::keystore;
+use ants_daemon::secrets::creds::{Finding, Kind as CredsKind};
+use ants_daemon::secrets::keystore;
 use ants_proto::{AntRequest, DeviceKey, LoginReply, Role, UserId, Verdict, subject};
 use async_nats::jetstream::stream::Stream;
 use data_encoding::BASE64URL_NOPAD;

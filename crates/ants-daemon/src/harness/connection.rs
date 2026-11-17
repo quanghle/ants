@@ -29,8 +29,8 @@ use super::sign_in::harness_error;
 use super::steer::{self, SteerRequest};
 use super::{Launch, Prompt, PromptLimits, Reply, Spend, Steer};
 use crate::files::Attached;
-use crate::history::{History, Rebuild};
-use crate::overflow::{ContextOverflow, overflows};
+use crate::limits::overflow::{ContextOverflow, overflows};
+use crate::stream::history::{History, Rebuild};
 use crate::sync::MutexExt as _;
 
 /// How long a harness has to end a cancelled prompt before it is stopped.
@@ -259,7 +259,7 @@ impl Connected<'_> {
         let seed = match rebuild {
             Some(why) => {
                 let budget = self.launch.harness.history_budget(&self.launch.settings);
-                crate::history::seed(why, history.take(), budget).await
+                crate::stream::history::seed(why, history.take(), budget).await
             }
             None => String::new(),
         };
@@ -273,7 +273,8 @@ impl Connected<'_> {
     /// Stop observing the prompt that ended with `done` and `cut`, taking the text it streamed.
     fn ended(&self, done: Option<Result<PromptResponse, agent_client_protocol::Error>>, cut: Option<String>) -> Ended {
         let (text, errors_only) = self.observed.locked().current.take().map_or_else(Default::default, |c| {
-            let text = if c.errors_only { c.text } else { crate::ratelimit::strip_notices(&c.text, c.notices).into() };
+            let text =
+                if c.errors_only { c.text } else { crate::limits::ratelimit::strip_notices(&c.text, c.notices).into() };
             (text, c.errors_only)
         });
         Ended { done, cut, text, errors_only }
@@ -312,7 +313,7 @@ impl Connected<'_> {
                 // Copilot CLI and Antigravity end a prompt their provider turned away as a reply of error
                 // lines, which is no answer.
                 let limited = (errors_only && cut.is_none())
-                    .then(|| crate::ratelimit::classify(&self.launch.harness, &text))
+                    .then(|| crate::limits::ratelimit::classify(&self.launch.harness, &text))
                     .flatten();
                 let _ = reply.send(match limited {
                     Some(limited) => Err(limited.into()),

@@ -7,7 +7,7 @@ use std::io::IsTerminal as _;
 use std::time::Duration;
 
 use ants_daemon::config::Theme as ThemeSetting;
-use ants_daemon::direct_kv::{DirectKv, Lookup};
+use ants_daemon::records::direct_kv::{DirectKv, Lookup};
 use ants_proto::{
     AntIdentity, Avatar, Frame, IDENTITIES_BUCKET, INCARNATION_KEY, JsDomain, Palette, Rgb, Stage, Theme, UserId,
     hue_named,

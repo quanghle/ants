@@ -4,8 +4,8 @@
 use std::fmt::Write as _;
 use std::sync::OnceLock;
 
-use ants_daemon::redact::Redactor;
-use ants_daemon::unserved::Unserved;
+use ants_daemon::delivery::unserved::Unserved;
+use ants_daemon::secrets::redact::Redactor;
 use ants_proto::{
     ApprovalRequest, Away, Envelope, Escalation, EscalationReason, HeldNotices, NoticeKind, NotifyPrefs, Question,
     Reminder, ThreadId, UserId, Uuid, Verdict,

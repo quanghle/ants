@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use ants_daemon::reactions::{self, Change};
+use ants_daemon::records::reactions::{self, Change};
 use ants_proto::{REACTIONS_BUCKET, UserId, Uuid};
 use anyhow::Result;
 use futures::stream::BoxStream;

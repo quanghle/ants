@@ -9,12 +9,12 @@ use ants_proto::{
 use anyhow::Result;
 use async_nats::jetstream;
 
-use crate::attempts::Reply;
 use crate::bus;
 use crate::channel::{Context, Earlier};
+use crate::delivery::attempts::Reply;
 use crate::escalation::{self, Route};
-use crate::notes;
-use crate::status;
+use crate::monitoring::status;
+use crate::stream::notes;
 
 use super::{Inbox, Incoming};
 
@@ -77,7 +77,7 @@ impl Inbox<'_> {
         tracing::info!(%thread, from = %envelope.from, ?why, "ending the turn with no reply");
         let entry = TimelineEntry::NoReply { why, reason, text };
         let record = Timeline::new(self.ant.clone(), thread.clone(), envelope.id, vec![entry], 0);
-        crate::timeline::publish(self.js, &record).await;
+        crate::monitoring::timeline::publish(self.js, &record).await;
         if let Some(limit) = limit {
             self.escalate(incoming, limit, EscalationReason::Cap, seq, None).await?;
         }

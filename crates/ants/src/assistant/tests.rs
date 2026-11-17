@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use ants_daemon::bus;
-use ants_daemon::humans::{Registry, Withdrawal};
+use ants_daemon::people::humans::{Registry, Withdrawal};
 use ants_proto::{Acting, Role};
 
 use super::*;
@@ -95,7 +95,7 @@ async fn a_human_grants_and_withdraws_its_assistant() {
 
     let reader = Registry::new(alice.clone()).verifying_grants(account);
     let mut withdrawals = reader.withdrawals();
-    let _watching = reader.watch(js.clone(), ants_daemon::humans::RETRY);
+    let _watching = reader.watch(js.clone(), ants_daemon::people::humans::RETRY);
     let honoured = async |assistant: Option<&str>| {
         let wanted = assistant.map(p);
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -139,8 +139,8 @@ async fn a_human_grants_and_withdraws_its_assistant() {
 /// Alice; `seal off` ends both at once.
 #[tokio::test]
 async fn an_enrolled_assistant_opens_and_seals_for_its_human_until_withdrawn() {
-    use ants_daemon::devices::Directory;
-    use ants_daemon::sealing::{AssistantSealing, Opening, seal_envelope};
+    use ants_daemon::people::devices::Directory;
+    use ants_daemon::secrets::sealing::{AssistantSealing, Opening, seal_envelope};
     use ants_proto::Envelope;
     use crypto_secretbox::XSalsa20Poly1305;
     use crypto_secretbox::aead::{KeyInit as _, OsRng};
@@ -167,7 +167,7 @@ async fn an_enrolled_assistant_opens_and_seals_for_its_human_until_withdrawn() {
     // The assistant's daemon; its credentials reading the directory are Alice's here.
     let (_, pa_js) = server.connect_as(&pa, Role::Ant).await;
     let registry = Registry::new(alice.clone()).verifying_grants(Some(account.clone()));
-    let _watching = registry.watch(pa_js, ants_daemon::humans::RETRY);
+    let _watching = registry.watch(pa_js, ants_daemon::people::humans::RETRY);
     let directory = Directory::open(&alice_js, &account).await.unwrap();
     let assistant = AssistantSealing::new(pa.clone(), xkey.clone(), registry, directory);
     let enrolled_now = async |wanted: Option<DeviceId>| {
@@ -249,13 +249,14 @@ async fn an_assistant_acts_for_its_human_only_while_grant_and_credentials_say_so
         auth::issue_device_with(&server.dir().join("auth"), ant, revoke::Kind::Assistant, rights, &new, &assistant)
             .unwrap();
         let (_, ant_js) = bus::connect(&server.url, Some(&assistant), None, ant, "test").await.unwrap();
-        let kept = ants_daemon::behalf::keep_record(&ant_js, None, ant, &assistant).await.unwrap();
+        let kept = ants_daemon::people::behalf::keep_record(&ant_js, None, ant, &assistant).await.unwrap();
         assert_eq!(kept, Some(alice.clone()));
     }
     let ant_creds = server.creds_as(&dev_a, Role::Ant);
     let (_, ant_js) = bus::connect(&server.url, Some(&ant_creds), None, &dev_a, "test").await.unwrap();
-    assert_eq!(ants_daemon::behalf::keep_record(&ant_js, None, &dev_a, &ant_creds).await.unwrap(), None);
-    let devices = ants_daemon::direct_kv::DirectKv::new(&ant_js, None, ants_proto::DEVICES_BUCKET).await.unwrap();
+    assert_eq!(ants_daemon::people::behalf::keep_record(&ant_js, None, &dev_a, &ant_creds).await.unwrap(), None);
+    let devices =
+        ants_daemon::records::direct_kv::DirectKv::new(&ant_js, None, ants_proto::DEVICES_BUCKET).await.unwrap();
     let record = ants_proto::assistant_record_key(&dev_a);
     assert!(devices.put(&record, b"{}".to_vec()).await.is_err(), "an ant keeps no record");
     let nats = Nats::new(&server.url, Some(&creds), None).unwrap();
@@ -289,7 +290,7 @@ async fn a_following_checker_takes_withdrawals_and_revocations() {
     let team = server.dir().join("auth");
     auth::issue_device_with(&team, &pa, revoke::Kind::Assistant, rights, &new, &assistant).unwrap();
     let (_, pa_js) = bus::connect(&server.url, Some(&assistant), None, &pa, "test").await.unwrap();
-    ants_daemon::behalf::keep_record(&pa_js, None, &pa, &assistant).await.unwrap();
+    ants_daemon::people::behalf::keep_record(&pa_js, None, &pa, &assistant).await.unwrap();
     put(&js, &creds, &alice, Some(pa.clone()), Sealing::Keep).await.unwrap();
     let nats = Nats::new(&server.url, Some(&creds), None).unwrap();
     let checker = std::sync::Arc::new(crate::behalf::Checker::new(&nats, &js));
@@ -321,7 +322,7 @@ async fn a_following_checker_takes_withdrawals_and_revocations() {
 /// withdrawing the grant. Her own unarchiving drops pa's archive. pa keeps none of its own, nor touches bob's.
 #[tokio::test]
 async fn an_assistant_s_marks_and_snoozes_count_for_its_human_while_granted() {
-    use ants_daemon::direct_kv::DirectKv;
+    use ants_daemon::records::direct_kv::DirectKv;
     use std::collections::BTreeSet;
 
     use ants_proto::{
@@ -342,7 +343,7 @@ async fn an_assistant_s_marks_and_snoozes_count_for_its_human_while_granted() {
     auth::issue_device_with(&server.dir().join("auth"), &pa, revoke::Kind::Assistant, rights, &new, &assistant)
         .unwrap();
     let (_, pa_js) = bus::connect(&server.url, Some(&assistant), None, &pa, "test").await.unwrap();
-    ants_daemon::behalf::keep_record(&pa_js, None, &pa, &assistant).await.unwrap();
+    ants_daemon::people::behalf::keep_record(&pa_js, None, &pa, &assistant).await.unwrap();
     put(&js, &creds, &alice, Some(pa.clone()), Sealing::Keep).await.unwrap();
 
     let (mine, pinned, archived, snoozed) =
@@ -404,7 +405,7 @@ async fn an_assistant_s_marks_and_snoozes_count_for_its_human_while_granted() {
 /// and pa's reaction once alice withdraws the grant is pa's own, its claim forged.
 #[tokio::test]
 async fn an_assistant_s_reactions_for_its_human_show_as_hers() {
-    use ants_daemon::reactions::{Change, Reactions};
+    use ants_daemon::records::reactions::{Change, Reactions};
     use ants_proto::{REACTIONS_BUCKET, Reacted, Reaction, ReactionEntry};
 
     let Some(server) = Server::start() else { return };
@@ -420,7 +421,7 @@ async fn an_assistant_s_reactions_for_its_human_show_as_hers() {
     auth::issue_device_with(&server.dir().join("auth"), &pa, revoke::Kind::Assistant, rights, &new, &assistant)
         .unwrap();
     let (_, pa_js) = bus::connect(&server.url, Some(&assistant), None, &pa, "test").await.unwrap();
-    ants_daemon::behalf::keep_record(&pa_js, None, &pa, &assistant).await.unwrap();
+    ants_daemon::people::behalf::keep_record(&pa_js, None, &pa, &assistant).await.unwrap();
     put(&js, &creds, &alice, Some(pa.clone()), Sealing::Keep).await.unwrap();
 
     let message = ants_proto::Uuid::now_v7();
@@ -464,7 +465,7 @@ async fn an_assistant_s_posts_for_its_human_show_as_hers() {
     auth::issue_device_with(&server.dir().join("auth"), &pa, revoke::Kind::Assistant, rights, &new, &assistant)
         .unwrap();
     let (_, pa_js) = bus::connect(&server.url, Some(&assistant), None, &pa, "test").await.unwrap();
-    ants_daemon::behalf::keep_record(&pa_js, None, &pa, &assistant).await.unwrap();
+    ants_daemon::people::behalf::keep_record(&pa_js, None, &pa, &assistant).await.unwrap();
     put(&js, &creds, &alice, Some(pa.clone()), Sealing::Keep).await.unwrap();
 
     let nats = Nats::new(&server.url, Some(&creds), None).unwrap();
@@ -550,7 +551,7 @@ async fn an_assistant_s_credentials_reach_what_its_tools_act_on_for_its_human() 
     assert!(store.react(pa.clone(), asked.id, check.clone(), false, alice.clone()).await.unwrap());
     assert!(store.react(pa.clone(), asked.id, check, true, alice.clone()).await.unwrap());
     let account = devices::account_of(Some(&creds)).unwrap().unwrap();
-    ants_daemon::devices::Directory::open(&pa_js, &account).await.expect("its sealing reads the directory");
+    ants_daemon::people::devices::Directory::open(&pa_js, &account).await.expect("its sealing reads the directory");
 }
 
 /// pa decides three of dev-a's requests for alice: alice confirms one, denies one, and pre-allows the third, so
@@ -571,7 +572,7 @@ async fn a_human_confirms_denies_or_pre_allows_its_assistant_s_decisions() {
     let stream = bus::ensure_stream(&human).await.unwrap();
     put(&js, &creds, &alice, Some(pa.clone()), Sealing::Keep).await.unwrap();
     let reader = Registry::new(alice.clone()).verifying_grants(account);
-    let _watching = reader.watch(js.clone(), ants_daemon::humans::RETRY);
+    let _watching = reader.watch(js.clone(), ants_daemon::people::humans::RETRY);
 
     let (_, ant_js) = server.connect(&dev_a).await;
     let (_, pa_js) = server.connect(&pa).await;

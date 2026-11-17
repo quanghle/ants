@@ -5,8 +5,8 @@
 
 use std::collections::BTreeMap;
 
-use ants_daemon::caps::Caps;
-use ants_daemon::direct_kv::DirectKv;
+use ants_daemon::limits::caps::Caps;
+use ants_daemon::records::direct_kv::DirectKv;
 use ants_proto::{ColonyEntry, MovedMark, SESSIONS_BUCKET, UserId};
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};

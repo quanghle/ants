@@ -7,7 +7,7 @@
 //! asked about the same key again. On a machine running a leaf node ([`LeafNode`]), the uplink credentials sign the
 //! request too, and the signer renews them to carry the ant, which the daemon has the leaf node use before listing the
 //! ant. An order adding the assistant of a human (`assistant_of`, as `ants assistant enable --on` sends) has the
-//! credentials checked as that human's assistant's, and, where the hub keeps shared settings ([`crate::shared`]), the
+//! credentials checked as that human's assistant's, and, where the hub keeps shared settings ([`crate::profile::shared`]), the
 //! order's shared settings written as the ant's record in place of any an earlier ant of the name left, so that the
 //! assistant runs with the role and tool rules it was added with.
 
@@ -25,9 +25,9 @@ use toml_edit::{ArrayOfTables, DocumentMut, Item, Table};
 use super::ask::{SIGNER_WAIT, Uplink, ask};
 use super::{ConfigFile, LeafNode, NO_CONFIG, Orders, applied, refused};
 use crate::config::{self, edit::toml_value};
-use crate::creds;
-use crate::direct_kv::{DirectKv, Lookup};
-use crate::shared::{self, Roles};
+use crate::profile::shared::{self, Roles};
+use crate::records::direct_kv::{DirectKv, Lookup};
+use crate::secrets::creds;
 
 /// Settings an order does not give: what the daemon sets itself, or what an ant added from a template has.
 pub(super) const NOT_GIVEN: [&str; 4] = ["creds", "template", "added_by", "builtin"];
@@ -233,7 +233,7 @@ pub(super) fn check_uplink(jwt: &str, accounts: &[String], uplink: &Uplink) -> R
             claims.iss
         );
     }
-    let key = creds::load(&uplink.creds, crate::keystore::os())?.1.public_key();
+    let key = creds::load(&uplink.creds, crate::secrets::keystore::os())?.1.public_key();
     let name = format!("leaf-{}", uplink.machine);
     if claims.sub != key || claims.name != name {
         bail!("the renewed uplink credentials are of {} ({}), not of {name} ({key})", claims.name, claims.sub);
@@ -276,7 +276,7 @@ pub(super) fn key_for(creds: &Path, seed: &Path, ant: &UserId) -> Result<KeyPair
         if finding.name != ant.as_str() {
             bail!("{} are the credentials of {}, not of {ant}", creds.display(), finding.name);
         }
-        return Ok(creds::load(creds, crate::keystore::os())?.1);
+        return Ok(creds::load(creds, crate::secrets::keystore::os())?.1);
     }
     match std::fs::read_to_string(seed) {
         Ok(text) => KeyPair::from_seed(text.trim()).map_err(|e| anyhow!("the key in {}: {e}", seed.display())),

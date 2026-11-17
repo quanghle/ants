@@ -11,7 +11,7 @@ use super::undo::Done;
 use crate::admin::LeafNode;
 use crate::admin::add::{Renewal, key_for, sign, write_secret};
 use crate::admin::ask::Uplink;
-use crate::creds;
+use crate::secrets::creds;
 
 /// The clone's key, signed by `ants signer`.
 pub(super) struct Signed<'a> {

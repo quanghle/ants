@@ -11,7 +11,7 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ants_daemon::reading::{self, Reading};
+use ants_daemon::stream::reading::{self, Reading};
 use ants_proto::{ApprovalRequest, ColonyEntry, STREAM, StatusEvent, ThreadId, ThreadMarks, UserId, Verdict, subject};
 use anyhow::{Context as _, Result};
 use async_nats::connection::State as Connection;

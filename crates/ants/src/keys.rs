@@ -16,8 +16,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use ants_daemon::bus;
-use ants_daemon::creds::{self, Finding, Kind, Seed};
-use ants_daemon::keystore::{self, Store};
+use ants_daemon::secrets::creds::{self, Finding, Kind, Seed};
+use ants_daemon::secrets::keystore::{self, Store};
 use anyhow::{Context as _, Result, bail};
 use nkeys::{KeyPair, XKey};
 
@@ -304,7 +304,7 @@ fn beside(path: &Path) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use ants_daemon::keystore::Memory;
+    use ants_daemon::secrets::keystore::Memory;
     use ants_proto::{Machine, Role, UserId};
 
     use super::*;

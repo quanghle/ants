@@ -6,9 +6,9 @@
 //! nats = "wss://hub.example/nats"   # default server for every ant
 //! js_domain = "hub"                 # JetStream domain of the hub, if it has one; also per ant
 //! human = "alice"                   # default human, for escalations of threads with no owner; also per ant
-//! metrics = "127.0.0.1:9464"        # serve /healthz and /metrics there (crate::metrics); off without it
+//! metrics = "127.0.0.1:9464"        # serve /healthz and /metrics there (crate::monitoring::metrics); off without it
 //! timezone = "America/New_York"     # default zone of the schedules' cron, else UTC
-//! redact = true                     # redact secrets from what the ants publish (the default; crate::redact)
+//! redact = true                     # redact secrets from what the ants publish (the default; crate::secrets::redact)
 //! machine = "dev-vm1"               # the machine the colony names for the ants, and the host's where [host] and
 //!                                   # its credentials name none (default: the host name)
 //!
@@ -24,12 +24,12 @@
 //! theme = "auto"                    # the avatars' colours: "auto" (ask the terminal, the default), "dark" or "light"
 //! animate = true                    # move the avatars in `ants chat` with their ants' states (the default)
 //!
-//! [storage]                         # warnings of JetStream storage filling up (crate::storage)
+//! [storage]                         # warnings of JetStream storage filling up (crate::monitoring::storage)
 //! warn_percent = 80                 # warn a human past this share of a store's limit; 0 never
 //! max_file_store = "10GB"           # the hub's limits, which its account's JetStream info does not tell
 //! max_memory_store = "1GB"
 //!
-//! [memory_pressure]                 # while memory is low (crate::pressure)
+//! [memory_pressure]                 # while memory is low (crate::limits::pressure)
 //! min_available = "1GB"             # below this much memory available, or a share such as "10%"; "0" never
 //! max_harnesses = 1                 # the most harnesses each ant runs while memory is low
 //!
@@ -60,7 +60,7 @@
 //! worktree_base = "upstream"        # start its branch from the fetched remote default branch, not HEAD
 //! publish = "draft-pr"              # push a branch with new commits and open a draft pull request with gh
 //! harness = "my-agent"
-//! fallback = ["claude", "copilot:gpt-5"]  # tried in order while my-agent cannot serve (crate::fallback)
+//! fallback = ["claude", "copilot:gpt-5"]  # tried in order while my-agent cannot serve (crate::limits::fallback)
 //!
 //! [harnesses.my-agent]              # an ACP adapter on stdio, besides the built-in ones (harnesses.toml)
 //! command = "~/bin/my-agent-acp"     # a path, or a bare name looked up on PATH
@@ -69,7 +69,7 @@
 //! env = { MY_AGENT_LOG = "warn" }   # under the ant's own env
 //! mode = "default"                  # ACP session mode every session must run in
 //!
-//! [[ant_template]]                  # what a manager ant may add worker ants as; see crate::template
+//! [[ant_template]]                  # what a manager ant may add worker ants as; see crate::profile::template
 //! name = "worker"
 //! managers = ["lead"]
 //! max_ants = 3
@@ -132,10 +132,10 @@ pub use templated::signer_templates;
 
 use crate::escalation;
 use crate::harness::{self, Harness, Harnesses};
-use crate::pressure;
+use crate::limits::pressure;
+use crate::monitoring::storage;
+use crate::profile::template::AntTemplate;
 use crate::schedule::{self, Schedule};
-use crate::storage;
-use crate::template::AntTemplate;
 use cli::CliSection;
 use dropin::define;
 use host::{AdminSection, HostSection};
@@ -177,11 +177,11 @@ struct File {
     nats: Option<String>,
     js_domain: Option<JsDomain>,
     human: Option<UserId>,
-    /// Where to serve health and metrics ([`crate::metrics`]).
+    /// Where to serve health and metrics ([`crate::monitoring::metrics`]).
     metrics: Option<SocketAddr>,
     /// Default time zone of the schedules' cron timetables.
     timezone: Option<String>,
-    /// Redact secrets from what the file's ants publish ([`crate::redact`]).
+    /// Redact secrets from what the file's ants publish ([`crate::secrets::redact`]).
     #[serde(default = "yes")]
     redact: bool,
     /// The machine the file's ants are served on, as their colony entries name it; the host name when absent.
@@ -189,10 +189,10 @@ struct File {
     /// Whether the daemon keeps ants current from the GitHub releases ([`AutoUpdate`]).
     #[serde(default)]
     auto_update: AutoUpdate,
-    /// The warnings of JetStream storage filling up ([`crate::storage`]).
+    /// The warnings of JetStream storage filling up ([`crate::monitoring::storage`]).
     #[serde(default)]
     storage: storage::Settings,
-    /// What the ants do while memory is low ([`crate::pressure`]).
+    /// What the ants do while memory is low ([`crate::limits::pressure`]).
     #[serde(default)]
     memory_pressure: pressure::Settings,
     #[serde(default)]

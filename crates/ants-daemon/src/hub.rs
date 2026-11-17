@@ -484,7 +484,7 @@ pub fn webhooks_config() -> kv::Config {
 /// machine's outbox.
 pub fn owners_config() -> stream::Config {
     stream::Config {
-        name: crate::owners::owners_stream(),
+        name: crate::records::owners::owners_stream(),
         description: Some("The owner of each thread humans and webhooks message ants on, first record kept".into()),
         subjects: vec![format!("$KV.{OWNERS_BUCKET}.>")],
         max_age: RETENTION,
@@ -610,8 +610,8 @@ mod tests {
     async fn the_identities_bucket_carries_an_incarnation_marker_that_init_writes() {
         let Some(server) = NatsServer::start() else { return };
         let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
-        let identities = crate::direct_kv::DirectKv::new(&js, None, IDENTITIES_BUCKET).await.unwrap();
-        let incarnation = || crate::shared::incarnation(&identities);
+        let identities = crate::records::direct_kv::DirectKv::new(&js, None, IDENTITIES_BUCKET).await.unwrap();
+        let incarnation = || crate::profile::shared::incarnation(&identities);
 
         js.create_key_value(identities_config()).await.unwrap();
         assert_eq!(incarnation().await.unwrap(), None, "as `nats kv add` creates it");

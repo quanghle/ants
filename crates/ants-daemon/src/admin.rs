@@ -7,7 +7,7 @@
 //!
 //! An order an admin signed it carries out ([`apply`]) with the module of its op: [`set`] edits the ant's settings in
 //! the config file the daemon serves ([`ConfigFile`]), which the daemon reloads at once, and its shared settings in
-//! their record ([`crate::shared`]); [`settings`] reads them;
+//! their record ([`crate::profile::shared`]); [`settings`] reads them;
 //! [`pause`] pauses or resumes the ant there; [`restart`] has the daemon serving the ant restart its harnesses;
 //! [`memories`] reads the ant's memories, only while online; [`add`] adds an ant to the config, its credentials signed
 //! by `ants signer` on the order, and [`retire`] removes one, its credentials revoked so; [`clone`] adds a copy of one.
@@ -29,7 +29,7 @@ use serde_json::Value;
 use tokio::sync::Notify;
 
 use crate::bus;
-use crate::direct_kv::{DirectKv, Lookup};
+use crate::records::direct_kv::{DirectKv, Lookup};
 
 mod add;
 mod ask;
@@ -132,12 +132,17 @@ pub struct ConfigFile {
     /// The admins whose orders paused ants, for the reloaded config to credit ([`crate::pause::Pause::credit`]).
     pub pausers: crate::pause::Pausers,
     /// The shared settings of the file's ants, which the host connection keeps and settings orders change.
-    pub shared: crate::shared::Shared,
+    pub shared: crate::profile::shared::Shared,
 }
 
 impl ConfigFile {
     pub fn new(path: PathBuf, edited: Arc<Notify>) -> Self {
-        Self { path, edited, pausers: crate::pause::Pausers::default(), shared: crate::shared::Shared::default() }
+        Self {
+            path,
+            edited,
+            pausers: crate::pause::Pausers::default(),
+            shared: crate::profile::shared::Shared::default(),
+        }
     }
 }
 
@@ -366,8 +371,12 @@ impl Stores {
     }
 
     /// Where the shared settings are read and checked, against the accounts of `orders`.
-    fn shared<'a>(&'a self, orders: &'a Orders) -> crate::shared::Bucket<'a> {
-        crate::shared::Bucket { identities: &self.identities, devices: &self.devices, accounts: &orders.accounts }
+    fn shared<'a>(&'a self, orders: &'a Orders) -> crate::profile::shared::Bucket<'a> {
+        crate::profile::shared::Bucket {
+            identities: &self.identities,
+            devices: &self.devices,
+            accounts: &orders.accounts,
+        }
     }
 }
 

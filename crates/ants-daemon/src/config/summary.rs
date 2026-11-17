@@ -9,9 +9,9 @@ use anyhow::{Context as _, Result};
 
 use super::dropin::define;
 use super::{Ant, File, HostSettings, home_dir, resolve};
-use crate::caps::Caps;
 use crate::harness::{Harness, Harnesses};
-use crate::template::AntTemplate;
+use crate::limits::caps::Caps;
+use crate::profile::template::AntTemplate;
 
 /// What adding an ant, running a harness directly or reporting spend needs to know of a config file: its top-level
 /// `nats`, `js_domain` and `harness`, its harnesses, and the ants it lists with their credentials, resolved as

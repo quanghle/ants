@@ -17,7 +17,7 @@ use std::time::{Duration, SystemTime};
 use ants_daemon::bus;
 pub use ants_daemon::channel::list;
 use ants_daemon::channel::{CLOCK_SLACK, OriginFold, Stored, load, read_back};
-use ants_daemon::webhooks::Webhooks;
+use ants_daemon::records::webhooks::Webhooks;
 use ants_proto::{ChannelEntry, ChannelId, ChannelPost, Humans, ThreadId, ThreadOrigin, UserId, Uuid, subject};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::kv::{self, UpdateErrorKind};
@@ -222,11 +222,11 @@ pub async fn serve(url: &str, creds: Option<&std::path::Path>, domain: Option<&a
     let me = UserId::channel_manager();
     let connecting = bus::connect_retrying(url, creds, domain, &me, "ants-channel-manager", std::future::pending());
     let (client, js) = connecting.await?.context("connecting")?;
-    let published = ants_daemon::direct_kv::DirectKv::new(&js, domain, ants_proto::WEBHOOKS_BUCKET).await?;
+    let published = ants_daemon::records::direct_kv::DirectKv::new(&js, domain, ants_proto::WEBHOOKS_BUCKET).await?;
     let key = ants_proto::channel_manager_serving_key();
     let publishing = crate::versions::keep_putting(published, key, crate::versions::serving().await, || {});
-    let humans = ants_daemon::humans::Registry::new(UserId::human());
-    let _watching = humans.watch(js.clone(), ants_daemon::humans::RETRY);
+    let humans = ants_daemon::people::humans::Registry::new(UserId::human());
+    let _watching = humans.watch(js.clone(), ants_daemon::people::humans::RETRY);
     let colony = ants_daemon::mcp::jetstream_colony(js.clone());
     tokio::select! {
         served = ants_daemon::chanadm::serve(client, js, colony, humans) => served,

@@ -5,7 +5,7 @@ use std::time::Duration;
 use ants_proto::{DEFAULT_TURN_BUDGET, Envelope, Escalation, EscalationReason, OwnerBecause, UserId};
 
 use super::route::{Route, members_at, route};
-use crate::caps::Pending;
+use crate::limits::caps::Pending;
 
 /// What an assistant passes on of `pending`: the question or the escalation.
 pub(super) fn what_passes(pending: &Pending) -> &'static str {

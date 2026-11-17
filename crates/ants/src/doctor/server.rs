@@ -4,8 +4,8 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use ants_daemon::keystore;
-use ants_daemon::storage::{self, Usage};
+use ants_daemon::monitoring::storage::{self, Usage};
+use ants_daemon::secrets::keystore;
 use ants_daemon::{bus, hub};
 use ants_proto::{STREAM, UserId, inbox_consumer};
 use async_nats::jetstream;

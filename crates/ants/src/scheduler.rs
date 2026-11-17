@@ -150,7 +150,7 @@ async fn fire(bus: &Bus, schedule: &Schedule, due: DateTime<Utc>, late: bool) ->
 #[cfg(test)]
 mod tests {
     use ants_daemon::bus;
-    use ants_daemon::owners::Owners;
+    use ants_daemon::records::owners::Owners;
     use ants_daemon::schedule::{Mentions, When};
     use ants_proto::{ChannelId, ChannelPost, Destination, Envelope, UserId, WEBHOOKS_BUCKET, subject};
     use ants_proto::{webhook_marker_key, webhook_seen_key};
@@ -263,7 +263,7 @@ mod tests {
 
         // Within the stream's duplicate window, its Nats-Msg-Id keeps it once even if the bucket forgot it.
         let (_, own) = bus::connect(&server.url, Some(&creds), None, &nightly, "test").await.unwrap();
-        let seen = ants_daemon::direct_kv::DirectKv::new(&own, None, WEBHOOKS_BUCKET).await.unwrap();
+        let seen = ants_daemon::records::direct_kv::DirectKv::new(&own, None, WEBHOOKS_BUCKET).await.unwrap();
         seen.delete(webhook_seen_key(&nightly, "1800000000")).await.unwrap();
         assert!(fire(&b, &schedule, due, false).await.unwrap().duplicate);
 

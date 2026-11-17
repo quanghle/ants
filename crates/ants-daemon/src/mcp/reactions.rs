@@ -1,5 +1,5 @@
 //! `react`, adding or removing a reaction of the ant to a message, and `list_reactions`, listing those to a message
-//! the ant reads, both asked of whatever answers the ant's reactions requests (see [`crate::reactions`]).
+//! the ant reads, both asked of whatever answers the ant's reactions requests (see [`crate::records::reactions`]).
 
 use std::sync::Arc;
 
@@ -14,7 +14,7 @@ use serde::Deserialize;
 
 use super::Hub;
 use super::tools::{Tools, text};
-use crate::reactions;
+use crate::records::reactions;
 use crate::sync::MutexExt as _;
 
 /// Answers the ant's reactions requests, to list the reactions to a message or change its own; None when nothing

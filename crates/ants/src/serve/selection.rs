@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ants_daemon::config::{self, Ant, HostSettings, Summary};
+use ants_daemon::profile::shared::{Drift, Shared};
 use ants_daemon::schedule::Schedule;
-use ants_daemon::shared::{Drift, Shared};
 use ants_daemon::{Config, Harnesses};
 use ants_proto::{JsDomain, Machine, UserId};
 use anyhow::{Context as _, Result, bail};

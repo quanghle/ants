@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use ants_daemon::reading::Reading;
+use ants_daemon::stream::reading::Reading;
 use ants_proto::{DeviceId, HUMANS_BUCKET, HumanEntry, Humans, Role, UserId, subject};
 use anyhow::{Context as _, Result, anyhow};
 use async_nats::jetstream::stream::DirectGetErrorKind;

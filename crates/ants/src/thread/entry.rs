@@ -1,6 +1,6 @@
 //! One stored message on a thread, an [`Entry`], with its [`Kind`].
 
-use ants_daemon::reactions::Reacted;
+use ants_daemon::records::reactions::Reacted;
 use ants_proto::{
     Acting, Answer, Answered, ChannelId, EscalationReason, NoticeKind, Question, Quote, SummaryRequest, ThreadId,
     UserId, Uuid,

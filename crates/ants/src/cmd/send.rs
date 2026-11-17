@@ -1,7 +1,9 @@
 //! `ants ask`, `ants post`, `ants notes`, `ants react` and `ants answer`: what the CLI's human sends.
 
-use ants_daemon::reading::Reading;
-use ants_daemon::{bus, notes, owners, questions, reactions};
+use ants_daemon::bus;
+use ants_daemon::records::{owners, reactions};
+use ants_daemon::stream::reading::Reading;
+use ants_daemon::stream::{notes, questions};
 use ants_proto::{
     ChannelEntry, ChannelId, ChannelPost, Choice, Envelope, Humans, JsDomain, NotesPost, Quote, Reaction,
     ReactionChange, ReactionsOutcome, ReactionsRequest, Role, ThreadId, UserId, Uuid, subject,

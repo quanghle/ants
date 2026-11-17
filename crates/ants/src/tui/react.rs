@@ -3,7 +3,7 @@
 //! [`COMMON`] names and any valid one typed, which reacts as `ants react` does, or takes the reaction back when the
 //! human already reacted so.
 
-use ants_daemon::reactions::Reacted;
+use ants_daemon::records::reactions::Reacted;
 use ants_proto::{Reaction, UserId, Uuid};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};

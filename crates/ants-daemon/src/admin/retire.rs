@@ -22,9 +22,9 @@ use super::add::{check_uplink, leaf_uplink};
 use super::ask::{SIGNER_WAIT, Uplink, ask};
 use super::{LeafNode, NO_CONFIG, Orders, applied, refused};
 use crate::config;
-use crate::creds::{self, Finding, Seed};
-use crate::direct_kv::{DirectKv, Lookup};
-use crate::keystore;
+use crate::records::direct_kv::{DirectKv, Lookup};
+use crate::secrets::creds::{self, Finding, Seed};
+use crate::secrets::keystore;
 
 /// How long the daemon waits for the ant to leave the colony before revoking its key, as `ants retire` does.
 const STOP_WAIT: Duration = Duration::from_mins(5);

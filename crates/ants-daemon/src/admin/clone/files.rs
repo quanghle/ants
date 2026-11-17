@@ -37,7 +37,7 @@ pub(super) async fn copy_files(
 /// Write the history of each thread of `copies` in `home`, the clone's.
 fn write_histories(home: &Path, copies: &[ThreadCopy]) -> Result<()> {
     for copy in copies {
-        let file = crate::history::cloned::path(home, &copy.thread);
+        let file = crate::stream::history::cloned::path(home, &copy.thread);
         if let Some(dir) = file.parent() {
             std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }

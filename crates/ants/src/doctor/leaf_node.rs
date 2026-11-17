@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use ants_daemon::config::Ant;
-use ants_daemon::creds::{self, Kind};
+use ants_daemon::secrets::creds::{self, Kind};
 use ants_proto::{INTAKE_STREAM, JsDomain, Machine, Role, STREAM, UserId};
 
 use super::credentials::check_creds;

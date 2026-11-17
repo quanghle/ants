@@ -41,7 +41,8 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::connection::Nats;
-use ants_daemon::{bus, chains, config, permission};
+use ants_daemon::records::chains;
+use ants_daemon::{bus, config, permission};
 use ants_proto::{
     Act, ActAnswer, ApprovalDecision, ApprovalRequest, AssistantGrant, CHAINS_BUCKET, COLONY_BUCKET, ColonyEntry,
     Confirmations, Envelope, Following, HUMANS_BUCKET, PreAllow, STREAM, UserId, Uuid, Verdict, assistant_grant_key,

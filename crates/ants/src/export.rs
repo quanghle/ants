@@ -17,9 +17,9 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use ants_daemon::config::{self, Ant};
-use ants_daemon::direct_kv::{DirectKv, Lookup};
 use ants_daemon::harness::Harness;
-use ants_daemon::keystore::{self, Store};
+use ants_daemon::records::direct_kv::{DirectKv, Lookup};
+use ants_daemon::secrets::keystore::{self, Store};
 use ants_proto::{AntIdentity, IDENTITIES_BUCKET, MovedMark, SharedSettings, UserId};
 use anyhow::{Context as _, Result, bail};
 use chrono::{DateTime, Utc};
@@ -102,7 +102,7 @@ pub fn settings_of(ant: &Ant, shared: Option<&SharedSettings>) -> Result<Setting
     let overlaid;
     let ant = match shared {
         Some(record) => {
-            let roles = ants_daemon::shared::Roles::of(&record.fields)
+            let roles = ants_daemon::profile::shared::Roles::of(&record.fields)
                 .with_context(|| format!("reading the shared settings of {}", ant.name))?;
             overlaid = roles.overlay(ant.clone());
             &overlaid
@@ -517,7 +517,7 @@ async fn import_with(nats: &crate::connection::Nats<'_>, args: ImportArgs, store
         .await
         .inspect_err(|e| tracing::debug!("not comparing the shared settings: {e:#}"));
     if let Some(SharedRecord::Verified(shared)) = shared.ok().flatten() {
-        let drift = shared.drift(&ants_daemon::shared::local_fields(ant));
+        let drift = shared.drift(&ants_daemon::profile::shared::local_fields(ant));
         if !drift.is_empty() {
             eprintln!(
                 "warning: the bus holds shared settings of {name} already, which serve in place of the imported {}: \

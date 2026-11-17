@@ -13,7 +13,7 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use ants_daemon::reading::{self, Reading};
+use ants_daemon::stream::reading::{self, Reading};
 use ants_proto::{ChannelId, UserId};
 use anyhow::{Result, bail};
 use async_nats::jetstream::{self, consumer};

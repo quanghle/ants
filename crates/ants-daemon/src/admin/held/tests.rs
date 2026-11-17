@@ -3,7 +3,7 @@ use ants_proto::{AdminOp, AssistantGrant, Confirmations, PreAllow, UserId, confi
 use chrono::TimeDelta;
 
 use super::*;
-use crate::humans::TestDevice;
+use crate::people::humans::TestDevice;
 
 fn user(name: &str) -> UserId {
     name.parse().unwrap()

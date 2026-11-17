@@ -17,7 +17,7 @@ struct MemoryHuman {
     /// The messages the ants' daemons hold, those awaiting redelivery or still in the stream, and the requests they
     /// answered.
     held: StdMutex<Vec<ants_proto::QueuedMessage>>,
-    unheld: StdMutex<Vec<crate::queue::Waiting>>,
+    unheld: StdMutex<Vec<crate::delivery::queue::Waiting>>,
     cancels: StdMutex<Vec<ants_proto::CancelRequest>>,
     queues: StdMutex<Vec<ants_proto::QueueRequest>>,
     /// Whether no daemon of the ants serves, and the withdrawals recorded meanwhile, with the mark each one found.
@@ -163,8 +163,9 @@ impl HumanStore for MemoryHuman {
         request: ants_proto::QueueRequest,
         _: ants_proto::Humans,
         _: usize,
-    ) -> BoxFuture<'_, Result<Option<crate::queue::Listed>>> {
-        let mut waiting: Vec<_> = self.held.locked().iter().cloned().map(crate::queue::held_waiting).collect();
+    ) -> BoxFuture<'_, Result<Option<crate::delivery::queue::Listed>>> {
+        let mut waiting: Vec<_> =
+            self.held.locked().iter().cloned().map(crate::delivery::queue::held_waiting).collect();
         waiting.extend(self.unheld.locked().iter().cloned());
         self.queues.locked().push(request);
         let listed = (!*self.unserved.locked()).then_some((waiting, 2));
@@ -177,10 +178,12 @@ impl HumanStore for MemoryHuman {
         message: Uuid,
         human: UserId,
         assistant: UserId,
-    ) -> BoxFuture<'_, Result<crate::attempts::Recorded>> {
+    ) -> BoxFuture<'_, Result<crate::delivery::attempts::Recorded>> {
         self.withdrawals.locked().push((ant, message, human, assistant));
         let found = self.found_mark.locked().clone();
-        Box::pin(async move { Ok(found.map_or(crate::attempts::Recorded::Holds, crate::attempts::Recorded::Marked)) })
+        Box::pin(async move {
+            Ok(found.map_or(crate::delivery::attempts::Recorded::Holds, crate::delivery::attempts::Recorded::Marked))
+        })
     }
 
     fn send_order(&self, order: ants_proto::AdminOrder) -> BoxFuture<'_, Result<ants_proto::AdminOrder>> {
@@ -189,7 +192,7 @@ impl HumanStore for MemoryHuman {
     }
 }
 
-/// Opens and seals as [`crate::sealing::AssistantSealing`] does as far as enrollment goes: only while the grant
+/// Opens and seals as [`crate::secrets::sealing::AssistantSealing`] does as far as enrollment goes: only while the grant
 /// standing enrolls the ant as a device of its human. The sealed body is the text itself.
 struct EnrolledSealing(Registry);
 
@@ -200,8 +203,12 @@ impl EnrolledSealing {
 }
 
 impl HumanSealing for EnrolledSealing {
-    fn open<'a>(&'a self, human: &'a UserId, envelope: &'a Envelope) -> BoxFuture<'a, Result<crate::sealing::Opening>> {
-        use crate::sealing::Opening;
+    fn open<'a>(
+        &'a self,
+        human: &'a UserId,
+        envelope: &'a Envelope,
+    ) -> BoxFuture<'a, Result<crate::secrets::sealing::Opening>> {
+        use crate::secrets::sealing::Opening;
         let opening = match (self.enrolled(human), &envelope.sealed) {
             (Some(_), Some(sealed)) => Opening::Opened(ants_proto::SealedBody {
                 from: envelope.from.clone(),
@@ -241,7 +248,7 @@ impl HumanSealing for EnrolledSealing {
 }
 
 /// Alice's grant naming `assistant`, or withdrawing hers with none, enrolling it as a device with `sealing`.
-fn grant(humans: &Registry, device: &crate::humans::TestDevice, assistant: Option<&str>, sealing: bool) {
+fn grant(humans: &Registry, device: &crate::people::humans::TestDevice, assistant: Option<&str>, sealing: bool) {
     let alice = user("alice");
     let sealing = sealing.then(|| ants_proto::SealingDevice {
         device: ants_proto::DeviceId::generate(),
@@ -257,7 +264,7 @@ fn grant(humans: &Registry, device: &crate::humans::TestDevice, assistant: Optio
 /// `dev-a` as the assistant of alice, its tools acting for her through the store and sealing returned.
 async fn assistant(
     home: &Path,
-) -> (Mcp, mpsc::UnboundedReceiver<Envelope>, Registry, crate::humans::TestDevice, Arc<MemoryHuman>) {
+) -> (Mcp, mpsc::UnboundedReceiver<Envelope>, Registry, crate::people::humans::TestDevice, Arc<MemoryHuman>) {
     assistant_with(home, Arc::default()).await
 }
 
@@ -265,8 +272,8 @@ async fn assistant(
 async fn assistant_with(
     home: &Path,
     notes: Arc<MemoryNotes>,
-) -> (Mcp, mpsc::UnboundedReceiver<Envelope>, Registry, crate::humans::TestDevice, Arc<MemoryHuman>) {
-    let device = crate::humans::TestDevice::default();
+) -> (Mcp, mpsc::UnboundedReceiver<Envelope>, Registry, crate::people::humans::TestDevice, Arc<MemoryHuman>) {
+    let device = crate::people::humans::TestDevice::default();
     let humans = Registry::with(UserId::human(), &["alice", "bob"]).verifying_grants(Some(device.account()));
     let (mcp, sent) = start_with(home, Vec::new(), notes, humans.clone()).await;
     let store = Arc::new(MemoryHuman::default());
@@ -616,14 +623,14 @@ async fn the_assistant_lists_cancels_and_withdraws_for_its_human_on_requests_nam
     store.held.locked().extend([prompted.clone(), queued.clone()]);
     // Messages awaiting redelivery: started already in an attempt that did not end, awaiting a retry after a failed
     // attempt, or neither; and a channel post still in the stream.
-    let unheld = |seq, channel: Option<&str>| crate::queue::Waiting {
+    let unheld = |seq, channel: Option<&str>| crate::delivery::queue::Waiting {
         delivered: false,
         channel: channel.map(|c| c.parse().unwrap()),
-        ..crate::queue::held_waiting(held(&ThreadId::generate(), seq, false))
+        ..crate::delivery::queue::held_waiting(held(&ThreadId::generate(), seq, false))
     };
-    let crashed = crate::queue::Waiting { redelivery: true, started: true, ..unheld(3, None) };
-    let retried = crate::queue::Waiting { redelivery: true, retry: true, ..unheld(4, None) };
-    let redelivered = crate::queue::Waiting { redelivery: true, ..unheld(5, None) };
+    let crashed = crate::delivery::queue::Waiting { redelivery: true, started: true, ..unheld(3, None) };
+    let retried = crate::delivery::queue::Waiting { redelivery: true, retry: true, ..unheld(4, None) };
+    let redelivered = crate::delivery::queue::Waiting { redelivery: true, ..unheld(5, None) };
     let posted = unheld(6, Some("ops"));
     store.unheld.locked().extend([crashed.clone(), retried.clone(), redelivered.clone(), posted.clone()]);
     let (url, token) = http_server(&mcp, &ThreadId::generate());

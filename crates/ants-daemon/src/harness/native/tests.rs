@@ -15,8 +15,8 @@ use crate::harness::{
     Harnesses, Launch, Prompt, Readiness, Session, SignedOut, Spend, Steer, Steering, fork, handshake,
     parse_definitions,
 };
+use crate::limits::ratelimit::Limited;
 use crate::permission::{Allowlist, PermissionPolicy};
-use crate::ratelimit::Limited;
 
 /// A response of the stub CLI to request `id`.
 fn ok(id: u64, result: Value) -> String {
@@ -398,15 +398,16 @@ async fn json_rpc_matches_responses_and_routes_what_the_cli_sends() {
 #[test]
 fn native_errors_reach_the_daemons_classifiers() {
     let harness = Harnesses::builtin().get("copilot").unwrap();
-    let classify =
-        |error: Error| crate::ratelimit::classify(&harness, &error.to_string()).map(|l| (l.kind, l.retry_after));
+    let classify = |error: Error| {
+        crate::limits::ratelimit::classify(&harness, &error.to_string()).map(|l| (l.kind, l.retry_after))
+    };
     let minutes = |n| Some(Duration::from_mins(n));
     assert_eq!(classify(rate_limited(Some(529), minutes(2), "Overloaded")), Some((LimitKind::RateLimit, minutes(2))));
     assert_eq!(classify(rate_limited(None, None, "slow down")), Some((LimitKind::RateLimit, None)));
     assert_eq!(classify(quota_exhausted(None, "plan exhausted")), Some((LimitKind::Quota, None)));
     assert_eq!(classify(quota_exhausted(minutes(1), "plan exhausted")), Some((LimitKind::RateLimit, minutes(1))));
     assert_eq!(classify(failed("tool failed")), None);
-    assert!(crate::overflow::overflows(&harness, &context_overflow("2M tokens").to_string()));
+    assert!(crate::limits::overflow::overflows(&harness, &context_overflow("2M tokens").to_string()));
     assert_eq!(signed_out("token expired").code, ErrorCode::AUTH_REQUIRED);
 
     let http = McpServerHttp::new("ants", "http://127.0.0.1:1/mcp")

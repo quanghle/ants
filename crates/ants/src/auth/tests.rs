@@ -1,16 +1,18 @@
 use std::assert_matches;
 use std::time::Duration;
 
+use ants_daemon::bus;
 use ants_daemon::channel::{Channels, Earlier, Reading, Threads};
 use ants_daemon::colony::Registration;
 use ants_daemon::config::registration::{GithubAccount, Grant};
-use ants_daemon::creds::{Finding, Kind as CredsKind};
 use ants_daemon::daemon::Claims;
-use ants_daemon::dead::{self, Attempt};
-use ants_daemon::direct_kv::DirectKv;
-use ants_daemon::humans::Registry;
-use ants_daemon::webhooks::Webhooks;
-use ants_daemon::{bus, notes, owners};
+use ants_daemon::delivery::dead::{self, Attempt};
+use ants_daemon::people::humans::Registry;
+use ants_daemon::records::direct_kv::DirectKv;
+use ants_daemon::records::owners;
+use ants_daemon::records::webhooks::Webhooks;
+use ants_daemon::secrets::creds::{Finding, Kind as CredsKind};
+use ants_daemon::stream::notes;
 use ants_proto::{
     ChannelEntry, ChannelId, ChannelPost, ColonyEntry, DeadLetter, Destination, Envelope, JsDomain, Machine, NotesPost,
     PERMISSIONS_VERSION, STREAM, ThreadId, attempt_key, chan_consumer, chan_reader, inbox_prefix, link_key,

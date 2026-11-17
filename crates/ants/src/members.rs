@@ -11,7 +11,7 @@
 use std::fmt;
 use std::path::Path;
 
-use ants_daemon::creds::{self, Finding};
+use ants_daemon::secrets::creds::{self, Finding};
 use ants_proto::{Machine, Role, UserId};
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};

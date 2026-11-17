@@ -1,67 +1,48 @@
 //! Ant daemon: consumes an ant's durable inbox and answers each message through an ACP harness.
 
-pub mod admin;
-pub mod approvals;
-pub mod assistant_first;
-pub mod attempts;
-pub mod behalf;
-pub mod breaker;
-pub mod bus;
-pub mod caps;
-pub mod chains;
-pub mod chanadm;
-pub mod channel;
-pub mod clone;
-pub mod colony;
-pub mod config;
-pub mod creds;
+// An ant served: its inbox loop, the harness sessions it prompts and the worktrees they work in, the tools of those
+// harnesses, and what a thread committed.
 pub mod daemon;
-pub mod dead;
-pub mod devices;
-pub mod direct_kv;
-pub mod escalation;
-pub mod fallback;
-pub mod files;
 pub mod harness;
-pub mod heed;
-pub mod history;
-pub mod host;
-pub mod hub;
-pub mod humans;
-pub mod identity;
-pub mod ipc;
-pub mod keystore;
-pub mod links;
+mod ipc;
 pub mod mcp;
-pub mod metrics;
-pub mod notes;
-pub mod overflow;
-pub mod owners;
-pub mod pause;
 pub mod permission;
 pub mod pool;
-pub mod pressure;
-pub mod publish;
-pub mod questions;
-pub mod queue;
-pub mod ratelimit;
-pub mod reactions;
-pub mod reading;
-pub mod redact;
+mod publish;
+pub mod worktrees;
+
+// The config file and what it sets up.
+pub mod config;
 pub mod schedule;
-pub mod sealing;
-pub mod shared;
-pub mod signin;
-pub mod status;
-pub mod storage;
+
+// The hub, the machine and the colony, and the admin orders to a machine's ants.
+pub mod admin;
+pub mod bus;
+pub mod clone;
+pub mod colony;
+pub mod files;
+pub mod host;
+pub mod hub;
+mod pause;
+
+// Beyond one ant: escalations, tool requests escalated to humans, and channels.
+mod approvals;
+pub mod chanadm;
+pub mod channel;
+pub mod escalation;
+
+pub mod delivery;
+pub mod limits;
+pub mod monitoring;
+pub mod people;
+pub mod profile;
+pub mod records;
+pub mod secrets;
+pub mod stream;
+
 pub mod sync;
-pub mod template;
 #[cfg(test)]
 mod test_support;
-pub mod timeline;
-pub mod unserved;
-pub mod webhooks;
-pub mod worktrees;
 
 pub use daemon::{Config, Stop, run, run_until};
 pub use harness::{Harness, Harnesses, Launch};

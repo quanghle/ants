@@ -86,9 +86,9 @@ async fn start_with_colony(home: &Path, colony: Vec<ColonyEntry>) -> (Mcp, mpsc:
 struct MemoryNotes(StdMutex<HashMap<ThreadId, Vec<NotesPost>>>);
 
 impl NotesStore for MemoryNotes {
-    fn read<'a>(&'a self, thread: &'a ThreadId) -> BoxFuture<'a, Result<crate::notes::Notes>> {
+    fn read<'a>(&'a self, thread: &'a ThreadId) -> BoxFuture<'a, Result<crate::stream::notes::Notes>> {
         let posts = self.0.locked().get(thread).cloned().unwrap_or_default();
-        Box::pin(async move { Ok(crate::notes::Notes { last_seq: posts.len() as u64, posts }) })
+        Box::pin(async move { Ok(crate::stream::notes::Notes { last_seq: posts.len() as u64, posts }) })
     }
 
     fn post<'a>(&'a self, post: &'a NotesPost, last_seq: u64) -> BoxFuture<'a, Result<bool>> {

@@ -1,6 +1,6 @@
 //! MCP tools for the ant's harness sessions: `send_message`, `ask_ant`, `check_inbox`, `list_ants` and
 //! `route` to find ants by their colony capabilities, `post_notes` and `read_notes` for the thread's notes
-//! (see [`crate::notes`]), and `escalate` to send the thread up the ant's escalation chain (see
+//! (see [`crate::stream::notes`]), and `escalate` to send the thread up the ant's escalation chain (see
 //! [`crate::escalation`]). Memory and task tools are configured separately by each ant.
 //!
 //! `decide_approval` answers another ant's tool request that came up its chain (see [`crate::approvals`]).
@@ -9,7 +9,7 @@
 //! gets stuck on it (see [`ants_proto::Escalation::new_from`]).
 //! `manage_channel` asks the channel manager to change a channel the ant owns (see [`crate::chanadm`]).
 //! `react` adds or removes the ant's reaction to a message, by default the one being handled, and `list_reactions`
-//! lists the reactions to a message the ant reads (see [`crate::reactions`]).
+//! lists the reactions to a message the ant reads (see [`crate::records::reactions`]).
 //! `suggest_thread_title` has the turn's reply on the thread suggest a title for it ([`Envelope::title`],
 //! [`ants_proto::ChannelPost::title`], [`ants_proto::NotesPost::title`]).
 //! `complete` ends the turn with no reply to the message being handled, which gets a `check` reaction
@@ -50,11 +50,12 @@ use tokio::task::JoinHandle;
 use crate::chanadm::Admin;
 use crate::escalation::Escalator;
 use crate::harness::McpServers;
-use crate::humans::Registry;
-use crate::notes::NotesStore;
-use crate::redact::Redactor;
+use crate::people::humans::Registry;
+use crate::records::links;
+use crate::secrets::redact::Redactor;
+use crate::stream::notes::NotesStore;
 use crate::sync::MutexExt as _;
-use crate::{bus, ipc, links};
+use crate::{bus, ipc};
 
 mod asks;
 mod assist;

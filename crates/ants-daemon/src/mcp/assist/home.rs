@@ -16,12 +16,12 @@ use rmcp::{ErrorData, schemars, tool, tool_router};
 use serde::Deserialize;
 
 use super::{HumanMessage, HumanStore, LOOKBACK};
-use crate::behalf;
 use crate::mcp::Hub;
 use crate::mcp::messages::shown;
 use crate::mcp::notes::POST_TRIES;
 use crate::mcp::tools::{Tools, text};
-use crate::sealing::Opening;
+use crate::people::behalf;
+use crate::secrets::sealing::Opening;
 
 /// The most entries of each kind `human_queue` lists, the latest ones.
 const SHOWN: usize = 30;

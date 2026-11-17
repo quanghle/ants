@@ -26,8 +26,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Notify};
 
 use super::{Orders, Stores, refused};
-use crate::direct_kv::{DirectKv, Lookup};
-use crate::humans::Registry;
+use crate::people::humans::Registry;
+use crate::records::direct_kv::{DirectKv, Lookup};
 
 /// How often the held orders are looked at besides when something changes: for those whose hold ran out.
 pub const RECHECK: Duration = Duration::from_secs(60);

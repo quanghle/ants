@@ -829,7 +829,7 @@ mod tests {
 
     #[test]
     fn reactions_show_under_each_message_and_plus_reacts_or_takes_one_back() {
-        use ants_daemon::reactions::Reacted;
+        use ants_daemon::records::reactions::Reacted;
 
         let thread = ThreadId::generate();
         let mut m = model();

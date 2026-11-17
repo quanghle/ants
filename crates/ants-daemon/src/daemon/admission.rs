@@ -7,8 +7,8 @@ use async_nats::jetstream::{self, AckKind};
 
 use crate::bus;
 use crate::channel::{self, Channels, Threads, Wake};
-use crate::humans::Registry;
-use crate::webhooks::Webhooks;
+use crate::people::humans::Registry;
+use crate::records::webhooks::Webhooks;
 
 use super::{Inbox, Incoming, OWNER_LANDS_WITHIN, Posted, STREAM_SOURCE, Steered, nak, stream_seq};
 
@@ -211,8 +211,8 @@ impl Inbox<'_> {
                 return;
             }
             Acting::For(human) => match envelope.approval.as_deref() {
-                Some(decision) => crate::behalf::held_notice(envelope, decision, human),
-                None => crate::behalf::sent_notice(envelope, human),
+                Some(decision) => crate::people::behalf::held_notice(envelope, decision, human),
+                None => crate::people::behalf::sent_notice(envelope, human),
             },
         };
         let id = format!("on-behalf-{}", envelope.id);

@@ -15,10 +15,11 @@ use super::delivery::reply_id;
 use super::prompt::prompt_text;
 use super::*;
 use crate::admin::restart::Restarted;
-use crate::attempts::Reply;
+use crate::channel;
+use crate::delivery::attempts::Reply;
+use crate::delivery::dead;
 use crate::pool::fake;
 use crate::sync::MutexExt as _;
-use crate::{channel, dead};
 
 mod admission;
 mod control;
@@ -42,7 +43,7 @@ struct Bus {
     attempts: Attempts,
     answered: Answered,
     buried: Buried,
-    markers: crate::direct_kv::DirectKv,
+    markers: crate::records::direct_kv::DirectKv,
     dev: UserId,
     limits: PromptLimits,
     ledger: Arc<Ledger>,
@@ -223,13 +224,13 @@ impl Bus {
         let messages = Box::pin(pause::pausable(self.pause.subscribe(), None, open));
         let channels = Channels::watch(self.channels.clone()).await.unwrap();
         let escalator = self.escalator();
-        let notes = crate::notes::JetStreamNotes::new(self.js.clone(), self.dev.clone());
+        let notes = crate::stream::notes::JetStreamNotes::new(self.js.clone(), self.dev.clone());
         let home = self._server.dir().join("dev-a");
         let inbox = Inbox {
             client: &self.client,
             js: &self.js,
             ant: &self.dev,
-            reading: crate::reading::Reading::Consumer,
+            reading: crate::stream::reading::Reading::Consumer,
             machine: "test-machine",
             pool,
             cancels: Cancels::default(),
@@ -245,8 +246,8 @@ impl Bus {
             redactor: &self.redactor,
             workload: &self.workload,
             pause: &self.pause,
-            drift: &crate::shared::Drift::default(),
-            metrics: crate::metrics::ant(&self.dev),
+            drift: &crate::profile::shared::Drift::default(),
+            metrics: crate::monitoring::metrics::ant(&self.dev),
             limits: self.limits,
             ledger: &self.ledger,
             escalator: &escalator,
@@ -267,7 +268,7 @@ impl Bus {
                 rate_limit: ratelimit::Backoff { first: Duration::from_millis(100), max: Duration::from_millis(300) },
                 quota: ratelimit::Backoff { first: Duration::from_millis(200), max: Duration::from_millis(400) },
             },
-            failover: crate::fallback::Failover::default(),
+            failover: crate::limits::fallback::Failover::default(),
             fallback_retry: Duration::from_millis(300),
             identity: None,
             home: &home,
@@ -461,7 +462,7 @@ fn escalated(stuck: &UserId, thread: &ThreadId, chains: &[&[UserId]]) -> ants_pr
 }
 
 async fn read_notes(bus: &Bus, thread: &ThreadId) -> Vec<ants_proto::NotesPost> {
-    crate::notes::read(&bus.js, &"reader".parse().unwrap(), crate::reading::Reading::Consumer, thread)
+    crate::stream::notes::read(&bus.js, &"reader".parse().unwrap(), crate::stream::reading::Reading::Consumer, thread)
         .await
         .unwrap()
         .posts

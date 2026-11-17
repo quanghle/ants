@@ -14,16 +14,16 @@ use super::{
     DEFAULT_APPROVAL_TIMEOUT, DEFAULT_ESCALATE_AFTER, DEFAULT_ESCALATION_REMINDER, DEFAULT_IDLE_TIMEOUT,
     DEFAULT_MAX_HARNESSES, DEFAULT_MAX_TOOL_CALLS, DEFAULT_PROMPT_TIMEOUT, DEFAULT_SPEND_WARN_PERCENT, home_dir,
 };
-use crate::caps::{Caps, Pool};
 use crate::daemon::{
     Config, Connection, HarnessSettings, Policy, Pooling, Presence, Spending, Storage, WorktreeSettings,
 };
 use crate::escalation::Chain;
-use crate::fallback::{self, Fallback};
 use crate::harness::{self, Harness, Harnesses, ModelSettings, PromptLimits};
-use crate::pressure;
+use crate::limits::caps::{Caps, Pool};
+use crate::limits::fallback::{self, Fallback};
+use crate::limits::pressure;
+use crate::monitoring::storage;
 use crate::publish::Publish;
-use crate::storage;
 use crate::worktrees::Base;
 
 /// One ant the daemon serves, as the config file (or the command line) describes it.
@@ -66,7 +66,7 @@ pub struct Ant {
     pub context: Option<String>,
     /// Bytes of the thread's history a rebuilt session is seeded with, over the harness's and its context's.
     pub history_budget: Option<usize>,
-    /// Harnesses and models tried in order while the ant's own harness cannot serve ([`crate::fallback`]):
+    /// Harnesses and models tried in order while the ant's own harness cannot serve ([`crate::limits::fallback`]):
     /// `<harness>`, `<harness>:<model>` or `:<model>` for another model of its own harness. Of an ant added from a
     /// template, the template's, less any naming the ant's own harness and model ([`fallback::inherit`]).
     #[serde(default)]
@@ -317,7 +317,7 @@ impl Ant {
             storage: Storage { home, jetstream: self.storage },
             requester: crate::mcp::Requester::default(),
             pause: crate::pause::Pause::new(self.paused),
-            drift: crate::shared::Drift::default(),
+            drift: crate::profile::shared::Drift::default(),
         })
     }
 

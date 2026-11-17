@@ -1,7 +1,7 @@
 use std::assert_matches;
 
 use ants_daemon::channel::CLOCK_SLACK;
-use ants_daemon::reactions::Reacted;
+use ants_daemon::records::reactions::Reacted;
 use ants_proto::{
     Acting, Answered, ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, Envelope, Escalation,
     EscalationReason, Humans, NotesPost, SummaryRequest, ToolCall, Verdict,

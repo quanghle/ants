@@ -814,7 +814,7 @@ mod tests {
 
     #[test]
     fn the_work_view_shows_turns_spend_and_the_selected_card() {
-        use ants_daemon::caps::Spent;
+        use ants_daemon::limits::caps::Spent;
         use ants_proto::ThreadSummary;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;

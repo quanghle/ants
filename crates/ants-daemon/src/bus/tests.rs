@@ -119,7 +119,7 @@ async fn waits_for_a_locked_credential_store_but_not_for_a_seed_it_lacks() {
     let claims = serde_json::json!({ "name": "dev-a", "sub": key.public_key(), "nats": { "tags": tags } });
     let jwt = format!("e30.{}.sig", data_encoding::BASE64URL_NOPAD.encode(claims.to_string().as_bytes()));
     let creds = server.dir().join("dev-a.creds");
-    std::fs::write(&creds, crate::creds::stored_text(&jwt, &key.public_key())).unwrap();
+    std::fs::write(&creds, crate::secrets::creds::stored_text(&jwt, &key.public_key())).unwrap();
     let (store, dev) = (keystore::Memory::default(), dev());
     let connect =
         || connect_retrying_with(&server.url, Some(&creds), &store, None, &dev, "test", std::future::pending());

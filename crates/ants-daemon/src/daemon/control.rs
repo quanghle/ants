@@ -186,7 +186,7 @@ impl Inbox<'_> {
             }
         };
         if let Some(text) = text {
-            let notice = crate::behalf::report(ant.clone(), human, text);
+            let notice = crate::people::behalf::report(ant.clone(), human, text);
             let id = format!("on-behalf-{}", request.id);
             if let Err(e) = bus::store(self.js, notice.subject(), &notice, &id).await {
                 tracing::warn!(%human, error = format!("{e:#}"), "telling the human of its assistant's act");

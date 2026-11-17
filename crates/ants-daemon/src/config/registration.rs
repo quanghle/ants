@@ -230,7 +230,7 @@ impl Registration {
             }
             std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?
         } else if let Some(entry) = &self.token_store {
-            crate::keystore::os()
+            crate::secrets::keystore::os()
                 .get(entry)?
                 .with_context(|| format!("no entry {entry} in the OS credential store (service ants)"))?
         } else {

@@ -160,7 +160,7 @@ async fn attach_redacts_secrets_in_text_files_only() {
     let (mcp, mut sent) = start(&home).await;
     let stored = MemoryFiles::default();
     mcp.with_files(memory_files(stored.clone()), home.to_path_buf());
-    mcp.with_redactor(Arc::new(crate::redact::Redactor::default()));
+    mcp.with_redactor(Arc::new(crate::secrets::redact::Redactor::default()));
     let work = home.join("work");
     std::fs::create_dir_all(&work).unwrap();
     let token = format!("ghp_{}", "a1B2".repeat(9));

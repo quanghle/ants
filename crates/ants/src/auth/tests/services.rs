@@ -99,7 +99,10 @@ async fn an_observer_reads_approvals_dead_letters_status_and_the_colony_and_publ
     let team = server.dir().join("auth");
     issue_with(&team, &audit, crate::revoke::Kind::Observer, Permissions::for_observer(&audit), &creds).unwrap();
     let text = std::fs::read_to_string(&creds).unwrap();
-    assert_eq!(ants_daemon::creds::Finding::from_creds(&text).unwrap().kind, ants_daemon::creds::Kind::Observer);
+    assert_eq!(
+        ants_daemon::secrets::creds::Finding::from_creds(&text).unwrap().kind,
+        ants_daemon::secrets::creds::Kind::Observer
+    );
     let (_, h_js) = server.connect(&UserId::human()).await;
     bus::ensure_stream(&h_js).await.unwrap();
     bus::ensure_colony(&h_js, Duration::from_secs(60)).await.unwrap();

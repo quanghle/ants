@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use ants_daemon::metrics::{self, Exposition, Kind};
+use ants_daemon::monitoring::metrics::{self, Exposition, Kind};
 use ants_daemon::sync::MutexExt as _;
 use anyhow::{Context as _, Result, anyhow, bail};
 use data_encoding::{BASE64, HEXLOWER};

@@ -7,10 +7,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ants_daemon::config;
-use ants_daemon::creds;
-use ants_daemon::keystore;
 use ants_daemon::mcp::{AntAsk, AntRequester, ManagerAsk, RetireAsk};
-use ants_daemon::template::{AntTemplate, Request};
+use ants_daemon::profile::template::{AntTemplate, Request};
+use ants_daemon::secrets::creds;
+use ants_daemon::secrets::keystore;
 use ants_proto::{ENROLL_REPEAT, JsDomain, UserId};
 use anyhow::{Context as _, Result, bail};
 use chrono::Utc;

@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 
-use ants_daemon::reactions::{self, Change, Reactions};
+use ants_daemon::records::reactions::{self, Change, Reactions};
 use ants_proto::{
     ChannelEntry, ChannelId, ChannelNotify, ChannelReadMarkers, Humans, JsDomain, Reaction, ReadMarker, ThreadId,
     UserId, Uuid,

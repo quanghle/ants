@@ -9,8 +9,8 @@ use ants_daemon::admin::restart::Restarts;
 use ants_daemon::admin::{ConfigFile, LeafNode};
 use ants_daemon::config::HostSettings;
 use ants_daemon::host::Host;
+use ants_daemon::profile::shared::{Shared, Via};
 use ants_daemon::schedule::Schedule;
-use ants_daemon::shared::{Shared, Via};
 use ants_daemon::{Config, Stop};
 use ants_proto::{JsDomain, Machine, UserId};
 use anyhow::{Result, bail};
@@ -38,7 +38,7 @@ pub struct Served {
     /// The shared settings `configs` were overlaid with: kept current by the host connection, else, without one, by
     /// reading them as the ants ([`shared::follow`]).
     ///
-    /// [`shared::follow`]: ants_daemon::shared::follow
+    /// [`shared::follow`]: ants_daemon::profile::shared::follow
     pub shared: Option<Shared>,
     /// The machine's name, which shared settings created without a host connection name as their writer; None for
     /// the first label of the host name.
@@ -131,7 +131,7 @@ pub async fn run(
     shutdown: impl Future<Output = ()>,
 ) -> Result<Ended> {
     let metrics = served.metrics;
-    let _metrics = serve_metrics(metrics, Arc::new(ants_daemon::metrics::Daemon)).await?;
+    let _metrics = serve_metrics(metrics, Arc::new(ants_daemon::monitoring::metrics::Daemon)).await?;
     let mut running = HashMap::new();
     // The ants served, which the host connection's admin orders restart.
     let restarts = Restarts::default();
@@ -272,10 +272,10 @@ fn run_schedule(schedule: Schedule) -> JoinHandle<()> {
 /// Serve health and metrics from `source` on `addr`, if given, for as long as the result is kept.
 pub async fn serve_metrics(
     addr: Option<SocketAddr>,
-    source: Arc<dyn ants_daemon::metrics::Source>,
-) -> Result<Option<ants_daemon::metrics::Listening>> {
+    source: Arc<dyn ants_daemon::monitoring::metrics::Source>,
+) -> Result<Option<ants_daemon::monitoring::metrics::Listening>> {
     match addr {
-        Some(addr) => Ok(Some(ants_daemon::metrics::start(addr, source).await?)),
+        Some(addr) => Ok(Some(ants_daemon::monitoring::metrics::start(addr, source).await?)),
         None => Ok(None),
     }
 }

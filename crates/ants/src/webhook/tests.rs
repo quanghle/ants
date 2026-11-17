@@ -4,8 +4,8 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::time::SystemTime;
 
-use ants_daemon::direct_kv::DirectKv;
-use ants_daemon::owners;
+use ants_daemon::records::direct_kv::DirectKv;
+use ants_daemon::records::owners;
 use ants_daemon::schedule::Mentions;
 use ants_proto::{ChannelId, ChannelPost, Destination, Envelope, STREAM, WEBHOOKS_BUCKET, subject, webhook_marker_key};
 use async_nats::jetstream;

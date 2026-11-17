@@ -18,10 +18,10 @@ use async_nats::jetstream::{self, kv, stream};
 use async_nats::{ConnectErrorKind, Event};
 use futures::{Stream, StreamExt as _};
 
-use crate::direct_kv::DirectKv;
 use crate::hub;
-use crate::keystore::{self, Store};
-use crate::reading::{self, Reading};
+use crate::records::direct_kv::DirectKv;
+use crate::secrets::keystore::{self, Store};
+use crate::stream::reading::{self, Reading};
 use crate::sync::MutexExt as _;
 
 /// How long the stream keeps messages, the sessions bucket a thread's session, and the attempts bucket a marker: a
@@ -41,7 +41,7 @@ const PING_INTERVAL: Duration = Duration::from_secs(20);
 /// Connect to NATS as `user`. `url` may be `nats://`, `tls://`, `ws://` or `wss://`, so the same binary works over a
 /// dev tunnel, a reverse proxy or a direct WebSocket endpoint. `creds` is a `.creds` file from `ants auth user`, and
 /// `js_domain` the hub's JetStream domain, if it has one (see [`jetstream`]). Credentials outdated or expiring soon
-/// get a warning naming the command that renews them ([`crate::creds::warn`]).
+/// get a warning naming the command that renews them ([`crate::secrets::creds::warn`]).
 pub async fn connect(
     url: &str,
     creds: Option<&Path>,
@@ -170,7 +170,7 @@ async fn authenticate_retrying(
     path: &Path,
     store: &dyn Store,
 ) -> Result<async_nats::ConnectOptions> {
-    crate::creds::warn(path);
+    crate::secrets::creds::warn(path);
     let mut delay = RETRY_FIRST;
     loop {
         match authenticate(options.clone(), path, store) {
@@ -265,7 +265,7 @@ pub async fn reach_jetstream(
 }
 
 /// The options of a connection as `user`, named `name`, with the credentials file `creds`, after warning about what
-/// [`crate::creds::warn`] finds in it.
+/// [`crate::secrets::creds::warn`] finds in it.
 fn options(creds: Option<&Path>, store: &dyn Store, user: &UserId, name: &str) -> Result<async_nats::ConnectOptions> {
     let options = async_nats::ConnectOptions::new()
         .name(name)
@@ -274,7 +274,7 @@ fn options(creds: Option<&Path>, store: &dyn Store, user: &UserId, name: &str) -
         .event_callback(|event| async move { log_event(event) });
     match creds {
         Some(path) => {
-            crate::creds::warn(path);
+            crate::secrets::creds::warn(path);
             authenticate(options, path, store)
         }
         None => Ok(options),
@@ -282,14 +282,14 @@ fn options(creds: Option<&Path>, store: &dyn Store, user: &UserId, name: &str) -
 }
 
 /// `options` authenticating with the credentials file at `path`: its user JWT, and the server's challenge signed with
-/// its key, read once from the file or from `store` ([`crate::creds::load`]) and kept in memory to sign again on
+/// its key, read once from the file or from `store` ([`crate::secrets::creds::load`]) and kept in memory to sign again on
 /// every reconnect.
 pub fn authenticate(
     options: async_nats::ConnectOptions,
     path: &Path,
     store: &dyn Store,
 ) -> Result<async_nats::ConnectOptions> {
-    let (jwt, key) = crate::creds::load(path, store)?;
+    let (jwt, key) = crate::secrets::creds::load(path, store)?;
     let key = std::sync::Arc::new(key);
     Ok(options.jwt(jwt, move |nonce| {
         let key = key.clone();
@@ -454,7 +454,7 @@ pub async fn ensure_links(js: &jetstream::Context) -> Result<kv::Store> {
 /// The bucket of the owners of message threads ([`OWNERS_BUCKET`]), created when missing and the credentials allow it
 /// (the human's), as [`hub::owners_config`] describes it.
 pub async fn ensure_owners(js: &jetstream::Context) -> Result<()> {
-    if js.get_stream(crate::owners::owners_stream()).await.is_ok() {
+    if js.get_stream(crate::records::owners::owners_stream()).await.is_ok() {
         return Ok(());
     }
     let created = js.create_stream(hub::owners_config()).await;

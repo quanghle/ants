@@ -3,9 +3,9 @@
 
 use std::time::Duration;
 
-use ants_daemon::direct_kv::DirectKv;
-pub use ants_daemon::queue::{Waiting, state};
-use ants_daemon::queue::{mark, waiting, withdrawals, withdrawer};
+pub use ants_daemon::delivery::queue::{Waiting, state};
+use ants_daemon::delivery::queue::{mark, waiting, withdrawals, withdrawer};
+use ants_daemon::records::direct_kv::DirectKv;
 use ants_proto::{ATTEMPTS_BUCKET, MessageMark, QueueReply, QueueRequest, UserId, Uuid};
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
@@ -174,7 +174,7 @@ pub async fn withdrawn(
         }
         _ => String::new(),
     };
-    match ants_daemon::attempts::withdraw(&kv, &ant, &message, me, None).await? {
+    match ants_daemon::delivery::attempts::withdraw(&kv, &ant, &message, me, None).await? {
         Some(found) => refused(&ant, &message, found, false),
         None if answered.is_none() => Ok(format!(
             "withdrew message {message} from the queue of {ant}; no daemon serving {ant} answered, so none checked \

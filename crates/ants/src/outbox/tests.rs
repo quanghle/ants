@@ -1,8 +1,10 @@
 use std::assert_matches;
 use std::process::Command;
 
-use ants_daemon::reading::Reading;
-use ants_daemon::{bus, files, links, notes, owners};
+use ants_daemon::records::{links, owners};
+use ants_daemon::stream::notes;
+use ants_daemon::stream::reading::Reading;
+use ants_daemon::{bus, files};
 use ants_proto::{ATTACHMENT_CHUNK, ChannelId, ChannelPost, DeadLetter, Envelope, JsDomain, NotesPost, ThreadId};
 use ants_test_support::{NatsServer, free_port};
 use async_nats::jetstream::message::{PublishMessage, StreamMessage};

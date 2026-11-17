@@ -32,7 +32,7 @@ pub struct AntAsk {
     pub thread: ThreadId,
     pub name: UserId,
     pub template: String,
-    pub request: crate::template::Request,
+    pub request: crate::profile::template::Request,
     pub reason: String,
     pub wait: Duration,
 }
@@ -109,7 +109,7 @@ impl Hub {
             Some(overrides) => {
                 serde_json::from_value(serde_json::Value::Object(overrides)).map_err(|e| format!("overrides: {e}"))?
             }
-            None => crate::template::Request::default(),
+            None => crate::profile::template::Request::default(),
         };
         let wait = match args.timeout.as_deref() {
             None => DEFAULT_REQUEST_WAIT,

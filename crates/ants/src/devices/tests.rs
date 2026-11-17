@@ -1,4 +1,4 @@
-use ants_daemon::devices::verify;
+use ants_daemon::people::devices::verify;
 use ants_proto::{DeviceKey, Permissions, Role};
 use data_encoding::BASE64URL_NOPAD;
 use nkeys::KeyPair;

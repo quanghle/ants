@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ants_daemon::config::{self, Ant, Summary};
-use ants_daemon::creds::{Finding, Kind};
-use ants_daemon::sealing;
+use ants_daemon::secrets::creds::{Finding, Kind};
+use ants_daemon::secrets::sealing;
 use ants_proto::{AdminOp, JsDomain, JwtError, Machine, OrderState, Permissions, UserId};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
@@ -781,7 +781,7 @@ mod tests {
         assert_eq!((ant.workdir, ant.model.as_deref()), (home.canonicalize().unwrap(), Some("gpt-5")));
         assert_eq!(ant.allow, ["read", "search", "think"]);
         assert!(ant.whoami.as_deref().unwrap().starts_with("Personal assistant of alice."));
-        let shared = ants_daemon::direct_kv::DirectKv::whole(&js, None, IDENTITIES_BUCKET).await.unwrap();
+        let shared = ants_daemon::records::direct_kv::DirectKv::whole(&js, None, IDENTITIES_BUCKET).await.unwrap();
         let record = shared.get(SharedSettings::key_of(&pa)).await.unwrap().expect("its shared settings");
         let record: SharedSettings = serde_json::from_slice(&record).unwrap();
         assert_eq!((record.fields["model"].as_str(), record.by.as_ref()), (Some("gpt-5"), Some(&alice)));

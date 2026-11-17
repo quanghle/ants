@@ -78,7 +78,7 @@ async fn start_escalating_with(
     });
     let chain =
         crate::escalation::Chain { escalate_to: escalate_to.iter().map(|p| user(p)).collect(), ..Default::default() };
-    let ledger = Arc::new(crate::caps::Ledger::memory(user("dev-a"), crate::caps::Caps::default()));
+    let ledger = Arc::new(crate::limits::caps::Ledger::memory(user("dev-a"), crate::limits::caps::Caps::default()));
     let humans = Registry::default();
     let escalator = Escalator::new(user("dev-a"), chain, colony.clone(), humans.clone(), ledger, send);
     let notes = Arc::new(MemoryNotes::default());

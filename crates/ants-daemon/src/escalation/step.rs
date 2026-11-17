@@ -4,7 +4,7 @@ use ants_proto::{Envelope, Escalation, EscalationReason, ThreadId, UserId};
 use uuid::Uuid;
 
 use super::{Escalated, SUMMARY_CHARS, Stuck};
-use crate::caps::Pending;
+use crate::limits::caps::Pending;
 
 /// What an escalation does next.
 #[derive(Debug, Clone, PartialEq)]

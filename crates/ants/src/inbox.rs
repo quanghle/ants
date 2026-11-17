@@ -12,10 +12,10 @@ use std::ops::ControlFlow;
 use std::time::Duration;
 
 use ants_daemon::bus;
-use ants_daemon::humans::Registry;
-use ants_daemon::reactions::{self, Reacted};
-use ants_daemon::reading::{self, Reading};
-use ants_daemon::unserved;
+use ants_daemon::delivery::unserved;
+use ants_daemon::people::humans::Registry;
+use ants_daemon::records::reactions::{self, Reacted};
+use ants_daemon::stream::reading::{self, Reading};
 use ants_proto::{Acting, Envelope, Question, READ_BUCKET, ReadMarker, Role, ThreadId, UserId, Uuid, subject};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
@@ -399,7 +399,7 @@ pub async fn tell_unserved(nats: &crate::connection::Nats<'_>, js: &jetstream::C
         Err(e) => return tracing::warn!("not watching the messages sent: {e:#}"),
     };
     let humans = Registry::new(me.clone());
-    let _watching = humans.watch(js.clone(), ants_daemon::humans::RETRY);
+    let _watching = humans.watch(js.clone(), ants_daemon::people::humans::RETRY);
     loop {
         for found in watch.next(|user| humans.is_human(user)).await {
             if let Some(found) = watch.claim(found).await {

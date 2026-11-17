@@ -29,7 +29,7 @@ fn a_renewed_uplink_keeps_its_key_and_rights_and_a_revoked_one_is_not_renewed() 
 /// or renewed, and an ant's again once those credentials are revoked.
 #[test]
 fn a_leaf_uplink_carries_an_assistant_s_rights() {
-    use ants_daemon::creds;
+    use ants_daemon::secrets::creds;
     let dir = ants_test_support::scratch_dir("leaf-assistant");
     let (team, out, m1) = (dir.join("auth"), dir.join("leaf-m1.creds"), "m1".parse::<Machine>().unwrap());
     init(&team).unwrap();
@@ -95,8 +95,8 @@ fn a_shrunk_uplink_drops_only_what_the_retired_ant_needed() {
     assert_eq!(shrink_leaf(&team, &without_c, &m1, &p("dev-c"), LeafRole::Ant).unwrap(), None, "nothing left");
 
     let without_a = shrink_leaf(&team, &jwt, &m1, &p("dev-a"), LeafRole::Ant).unwrap().unwrap();
-    let finding = ants_daemon::creds::Finding::from_jwt(&without_a).unwrap();
-    let ants_daemon::creds::Kind::Leaf { ants, humans, webhooks, enroll_approver, .. } = finding.kind else {
+    let finding = ants_daemon::secrets::creds::Finding::from_jwt(&without_a).unwrap();
+    let ants_daemon::secrets::creds::Kind::Leaf { ants, humans, webhooks, enroll_approver, .. } = finding.kind else {
         panic!("{finding:?}")
     };
     assert!(ants.is_empty(), "{ants:?}");
@@ -282,7 +282,7 @@ async fn clients_on_a_leaf_node_reach_the_hub_stream_through_its_domain() {
     }
     let stream = stream.expect("dev-a on the leaf reaches the hub stream");
     assert!(bus::open_stream(&a_plain, &dev_a).await.is_err(), "no JetStream without the domain");
-    let usages = ants_daemon::storage::measure(&a_js, Some(&domain), &Default::default()).await.unwrap();
+    let usages = ants_daemon::monitoring::storage::measure(&a_js, Some(&domain), &Default::default()).await.unwrap();
     assert!(usages.iter().all(|u| !u.leaf && u.domain.as_deref() == Some("hub")), "{usages:?}");
 
     // github, as `ants webhook serve` on the leaf, keeps its events in the bucket and delivers to dev-b's inbox.

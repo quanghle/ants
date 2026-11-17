@@ -22,7 +22,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use super::Hub;
 use super::tools::{Tools, text};
-use crate::redact::Redactor;
+use crate::secrets::redact::Redactor;
 use crate::sync::MutexExt as _;
 
 /// Most bytes of a text attachment `read_attachment` returns as text; a longer one is saved as a file.

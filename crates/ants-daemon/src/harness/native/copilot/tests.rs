@@ -20,8 +20,8 @@ use crate::harness::{
     Harnesses, Launch, ModelSettings, Prompt, Readiness, Session, SignedOut, Spend, Steer, Steering, fork, handshake,
     parse_definitions,
 };
+use crate::limits::ratelimit::Limited;
 use crate::permission::{Allowlist, PermissionPolicy};
-use crate::ratelimit::Limited;
 
 /// How the played server answers a request: its result or error message, the notifications it sends next, and whether
 /// it then closes its output, as a CLI exiting does.

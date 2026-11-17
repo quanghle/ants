@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use ants_daemon::bus;
-use ants_daemon::metrics::{self, Exposition, Kind};
+use ants_daemon::monitoring::metrics::{self, Exposition, Kind};
 use ants_daemon::sync::{MutexExt as _, RwLockExt as _};
 use ants_proto::{JsDomain, ThreadId, UserId, webhook_seen_key};
 use anyhow::Result;

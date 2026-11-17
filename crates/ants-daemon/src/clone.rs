@@ -19,9 +19,9 @@ use chrono::Utc;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::harness::Launch;
-use crate::identity::Identity;
 use crate::pool::{SessionStore, Stored};
-use crate::reading::{self, Reading};
+use crate::profile::identity::Identity;
+use crate::stream::reading::{self, Reading};
 
 /// A snapshot asked of the daemon serving the ant to clone.
 pub struct Request {
@@ -46,7 +46,7 @@ pub struct Snapshot {
 pub struct ThreadCopy {
     pub thread: ThreadId,
     pub stored: Stored,
-    /// The thread's history, as the lines of the clone's copy ([`crate::history::cloned`]).
+    /// The thread's history, as the lines of the clone's copy ([`crate::stream::history::cloned`]).
     pub history: String,
 }
 
@@ -78,7 +78,7 @@ pub struct Source<'a> {
     pub identity: Option<&'a Identity>,
     pub launch: Option<Launch>,
     /// How the daemon reads through the ant's own readers.
-    pub reading: crate::reading::Reading,
+    pub reading: crate::stream::reading::Reading,
 }
 
 impl Source<'_> {
@@ -92,7 +92,7 @@ impl Source<'_> {
         let mut threads = Vec::new();
         for thread in self.threads().await? {
             let Some(stored) = self.store.get(&thread).await? else { continue };
-            let history = crate::history::Thread {
+            let history = crate::stream::history::Thread {
                 js: self.js.clone(),
                 ant: self.ant.clone(),
                 thread: thread.clone(),
@@ -123,7 +123,7 @@ impl Source<'_> {
             .await
             .context("reading back the messages received")?;
         {
-            let _one = crate::history::SENT_READS.lock().await;
+            let _one = crate::stream::history::SENT_READS.lock().await;
             let (reader, filter) = (sent_reader(self.ant), subject::inbox_from(self.ant));
             reading::read_back(self.js, &reader, Reading::Consumer, &filter, DeliverPolicy::All, &mut take)
                 .await

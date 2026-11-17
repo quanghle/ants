@@ -2,8 +2,8 @@
 
 use std::path::Path;
 
-use ants_daemon::creds::{self, Expiry, Kind, Seed, VersionStatus};
-use ants_daemon::keystore::{self, Store};
+use ants_daemon::secrets::creds::{self, Expiry, Kind, Seed, VersionStatus};
+use ants_daemon::secrets::keystore::{self, Store};
 use ants_proto::PERMISSIONS_VERSION;
 
 use super::{Check, Identity, Setup, Status};

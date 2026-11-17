@@ -2,9 +2,9 @@
 //!
 //! Threads run concurrently, each in its own harness. A harness with a prompt in flight is never stopped, so when the
 //! cap is reached and every live harness is busy, a new thread waits for one to finish. While memory is low
-//! ([`crate::pressure`]) idle harnesses stop at once and the cap is lowered.
+//! ([`crate::limits::pressure`]) idle harnesses stop at once and the cap is lowered.
 //!
-//! A prompt runs on the ant's own harness or on one of its fallbacks ([`crate::fallback`]). A thread whose live
+//! A prompt runs on the ant's own harness or on one of its fallbacks ([`crate::limits::fallback`]). A thread whose live
 //! harness is another one's moves to a new harness once that one is idle, and a session that last ran in another
 //! harness, as stored beside it, is not resumed: the new one starts over from the thread's history.
 //!
@@ -24,11 +24,11 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use crate::colony::Workload;
-use crate::direct_kv::DirectKv;
-use crate::fallback::OnFallback;
 use crate::harness::{Launch, Prompt, Reply, Session};
-use crate::history::Rebuild;
-use crate::pressure;
+use crate::limits::fallback::OnFallback;
+use crate::limits::pressure;
+use crate::records::direct_kv::DirectKv;
+use crate::stream::history::Rebuild;
 use crate::sync::MutexExt as _;
 use crate::worktrees::{Branch, Pruned, Worktrees};
 

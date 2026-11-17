@@ -562,7 +562,7 @@ pub fn list(dir: &Path) -> Result<()> {
 }
 
 fn time(secs: u64) -> String {
-    ants_daemon::creds::time(secs)
+    ants_daemon::secrets::creds::time(secs)
 }
 
 /// One key of the registry, as `ants auth issued` lists it.
@@ -577,11 +577,11 @@ pub struct Listed {
     pub reissued: bool,
     /// Its permissions version is not [`PERMISSIONS_VERSION`].
     pub outdated: bool,
-    /// It expires within [`ants_daemon::creds::EXPIRY_WARNING`].
+    /// It expires within [`ants_daemon::secrets::creds::EXPIRY_WARNING`].
     pub expiring: bool,
     /// The commands that renew it, when it is in use (neither revoked, reissued, expired nor an enrollment's) and
     /// outdated or expiring: from its `.creds` file in the team directory when there is one
-    /// ([`ants_daemon::creds::Finding::renew`]), else with placeholders for what only that file tells.
+    /// ([`ants_daemon::secrets::creds::Finding::renew`]), else with placeholders for what only that file tells.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub renew: Vec<String>,
 }
@@ -598,8 +598,8 @@ pub fn listing(dir: &Path, now: u64) -> Result<Vec<Listed>> {
             latest[n + 1..].iter().any(|later| later.name == one.name && later.kind == one.kind && device(later));
         let revoked = revoked.iter().any(|r| r.key == one.key);
         let expired = one.expires_at.is_some_and(|exp| exp <= now);
-        let expiring =
-            !expired && one.expires_at.is_some_and(|exp| exp - now <= ants_daemon::creds::EXPIRY_WARNING.as_secs());
+        let expiring = !expired
+            && one.expires_at.is_some_and(|exp| exp - now <= ants_daemon::secrets::creds::EXPIRY_WARNING.as_secs());
         let outdated = one.perms != PERMISSIONS_VERSION;
         let in_use = !revoked && !reissued && !expired && one.kind != Kind::Enrollment;
         let renew = match (in_use && (outdated || expiring), files.iter().find(|f| f.key == one.key)) {
@@ -635,8 +635,8 @@ fn renew_without_file(issued: &Issued) -> Vec<String> {
     }]
 }
 
-/// What [`ants_daemon::creds`] finds in the `.creds` files in `dir` that the team's account signed.
-fn team_findings(dir: &Path) -> Result<Vec<ants_daemon::creds::Finding>> {
+/// What [`ants_daemon::secrets::creds`] finds in the `.creds` files in `dir` that the team's account signed.
+fn team_findings(dir: &Path) -> Result<Vec<ants_daemon::secrets::creds::Finding>> {
     let account = auth::account_key(dir)?;
     let entries = fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;
     let mut found = Vec::new();
@@ -648,7 +648,7 @@ fn team_findings(dir: &Path) -> Result<Vec<ants_daemon::creds::Finding>> {
         let Ok(text) = fs::read_to_string(&path) else { continue };
         let Some(jwt) = auth::creds_jwt(&text) else { continue };
         if auth::verified(jwt).is_ok_and(|claims| claims.iss == account)
-            && let Ok(finding) = ants_daemon::creds::Finding::from_jwt(jwt)
+            && let Ok(finding) = ants_daemon::secrets::creds::Finding::from_jwt(jwt)
         {
             found.push(finding);
         }

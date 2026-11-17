@@ -98,7 +98,8 @@ async fn messages_jetstream_stops_delivering_become_one_dead_letter() {
     let mut human_inbox = h_client.subscribe(subject::inbox_of(&human)).await.unwrap();
 
     // Metrics served as `ants dead watch --metrics` serves them.
-    let backstop = std::sync::Arc::new(ants_daemon::metrics::Backstop::new(human.clone(), h_client.clone()));
+    let backstop =
+        std::sync::Arc::new(ants_daemon::monitoring::metrics::Backstop::new(human.clone(), h_client.clone()));
     let served = crate::serve::serve_metrics(Some("127.0.0.1:0".parse().unwrap()), backstop).await.unwrap().unwrap();
     let metrics = served.local_addr();
     assert_eq!(scrape(metrics, "/healthz").await, (200, "ok\n".to_owned()));
@@ -161,7 +162,7 @@ async fn messages_jetstream_stops_delivering_become_one_dead_letter() {
         assert_eq!(dead::bury_undelivered(&h_js, &stream, &advisory, &claims).await.unwrap(), None);
         tokio::time::sleep(Duration::from_secs(1)).await;
         assert!(buried.try_recv().is_err(), "one watcher reports the dead letter");
-        assert_eq!(ants_daemon::metrics::ant(&dev_a).dead_letters(), 1, "and counts it");
+        assert_eq!(ants_daemon::monitoring::metrics::ant(&dev_a).dead_letters(), 1, "and counts it");
         let (_, exposition) = scrape(metrics, "/metrics").await;
         let line = "ants_dead_letters_total{ant=\"dev-backstop\"} 1";
         assert!(exposition.lines().any(|l| l == line), "{exposition}");

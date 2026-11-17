@@ -16,7 +16,7 @@ async fn the_reply_carries_the_title_suggested_during_its_turn() {
     let home = bus._server.dir().join("title");
     std::fs::create_dir_all(&home).unwrap();
     let (outbox, colony) = (crate::mcp::jetstream_outbox(bus.js.clone()), crate::mcp::jetstream_colony(bus.js.clone()));
-    let notes = Arc::new(crate::notes::JetStreamNotes::new(bus.js.clone(), bus.dev.clone()));
+    let notes = Arc::new(crate::stream::notes::JetStreamNotes::new(bus.js.clone(), bus.dev.clone()));
     let mcp = Mcp::start(bus.dev.clone(), &home, outbox, colony, notes, bus.humans.clone(), None).await;
     bus.mcp = Some(mcp.unwrap());
     let (ops, mut posts) = bus.channel("ops", &["dev-a"]).await;
@@ -104,7 +104,7 @@ async fn the_answer_carries_the_files_attached_during_its_turn() {
     std::fs::create_dir_all(&work).unwrap();
     std::fs::write(work.join("report.md"), "# done").unwrap();
     let (outbox, colony) = (crate::mcp::jetstream_outbox(bus.js.clone()), crate::mcp::jetstream_colony(bus.js.clone()));
-    let notes = Arc::new(crate::notes::JetStreamNotes::new(bus.js.clone(), bus.dev.clone()));
+    let notes = Arc::new(crate::stream::notes::JetStreamNotes::new(bus.js.clone(), bus.dev.clone()));
     let mcp = Mcp::start(bus.dev.clone(), &home, outbox, colony, notes, bus.humans.clone(), None).await.unwrap();
     mcp.with_files(crate::mcp::jetstream_files(bus.js.clone()), home.clone());
     bus.mcp = Some(mcp);
@@ -364,7 +364,7 @@ async fn complete_ends_the_turn_on_an_ant_s_message_with_no_reply_but_not_on_a_h
     let home = bus._server.dir().join("complete");
     std::fs::create_dir_all(&home).unwrap();
     let (outbox, colony) = (crate::mcp::jetstream_outbox(bus.js.clone()), crate::mcp::jetstream_colony(bus.js.clone()));
-    let notes = Arc::new(crate::notes::JetStreamNotes::new(bus.js.clone(), bus.dev.clone()));
+    let notes = Arc::new(crate::stream::notes::JetStreamNotes::new(bus.js.clone(), bus.dev.clone()));
     let mcp = Mcp::start(bus.dev.clone(), &home, outbox, colony, notes, bus.humans.clone(), None).await;
     bus.mcp = Some(mcp.unwrap());
     let [dev_b] = ants(["dev-b"]);

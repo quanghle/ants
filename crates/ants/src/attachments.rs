@@ -9,7 +9,7 @@ use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use ants_daemon::files;
-use ants_daemon::reading::{self, Reading};
+use ants_daemon::stream::reading::{self, Reading};
 use ants_proto::{
     Attachment, AttachmentHandle, AttachmentScope, Envelope, MAX_ATTACHMENT_SIZE, MAX_ATTACHMENTS, SealedAttachment,
     Uuid, chan_reader, guess_mime, inbox_consumer, notes_consumer,

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use ants_daemon::config::registration::{GithubAccount, Grant};
-use ants_daemon::creds::{Finding, Kind as CredsKind};
+use ants_daemon::secrets::creds::{Finding, Kind as CredsKind};
 use ants_proto::{ADMIN_TAG, AssistantOf, Destination, DeviceId, DeviceKey, Permissions, REGISTERED_TAG, Role, UserId};
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use serde_json::{Value, json};

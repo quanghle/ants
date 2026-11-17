@@ -22,11 +22,11 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::{ANSWER_GRACE, ANSWER_WAIT, Change, HumanMessage, HumanStore};
-use crate::attempts::{self, Recorded};
-use crate::direct_kv::DirectKv;
-use crate::queue;
-use crate::reading::{self, Reading};
-use crate::{owners, reactions};
+use crate::delivery::attempts::{self, Recorded};
+use crate::delivery::queue;
+use crate::records::direct_kv::DirectKv;
+use crate::records::{owners, reactions};
+use crate::stream::reading::{self, Reading};
 
 /// How many times a change of the human's marks or snoozes is tried again when its devices changed them meanwhile.
 const CONFLICTS: usize = 16;
@@ -60,9 +60,9 @@ impl JetStreamStore {
     /// The entry under `key` of [`THREADS_BUCKET`], and its stream sequence (0 for none).
     async fn entry<T: Default + DeserializeOwned>(&self, threads: &DirectKv, key: &str) -> Result<(T, u64)> {
         Ok(match threads.lookup_last(key).await? {
-            (crate::direct_kv::Lookup::NoBucket, _) => anyhow::bail!("there is no bucket {THREADS_BUCKET}"),
-            (crate::direct_kv::Lookup::NoValue, last) => (T::default(), last),
-            (crate::direct_kv::Lookup::Value(value), last) => {
+            (crate::records::direct_kv::Lookup::NoBucket, _) => anyhow::bail!("there is no bucket {THREADS_BUCKET}"),
+            (crate::records::direct_kv::Lookup::NoValue, last) => (T::default(), last),
+            (crate::records::direct_kv::Lookup::Value(value), last) => {
                 (serde_json::from_slice(&value).unwrap_or_default(), last)
             }
         })
@@ -159,7 +159,7 @@ impl HumanStore for JetStreamStore {
         Box::pin(async move {
             let read = DirectKv::new(&self.js, self.js_domain.as_ref(), READ_BUCKET).await?;
             match read.lookup(human.as_str()).await? {
-                crate::direct_kv::Lookup::Value(value) => {
+                crate::records::direct_kv::Lookup::Value(value) => {
                     serde_json::from_slice(&value).with_context(|| format!("reading the read marker of {human}"))
                 }
                 _ => Ok(ReadMarker::default()),
@@ -170,7 +170,7 @@ impl HumanStore for JetStreamStore {
     fn done(&self, thread: ThreadId) -> BoxFuture<'_, Result<Option<ThreadDone>>> {
         Box::pin(async move {
             match self.threads().await?.lookup(done_key(&thread)).await? {
-                crate::direct_kv::Lookup::Value(value) => Ok(serde_json::from_slice(&value).ok()),
+                crate::records::direct_kv::Lookup::Value(value) => Ok(serde_json::from_slice(&value).ok()),
                 _ => Ok(None),
             }
         })
@@ -292,7 +292,7 @@ impl HumanStore for JetStreamStore {
 
     fn send_order(&self, mut order: AdminOrder) -> BoxFuture<'_, Result<AdminOrder>> {
         Box::pin(async move {
-            let (jwt, key) = crate::creds::load(&self.creds, crate::keystore::os())?;
+            let (jwt, key) = crate::secrets::creds::load(&self.creds, crate::secrets::keystore::os())?;
             order.credentials = jwt;
             order.signature = data_encoding::BASE64URL_NOPAD.encode(&key.sign(&order.signed())?);
             let message = jetstream::message::PublishMessage::build()

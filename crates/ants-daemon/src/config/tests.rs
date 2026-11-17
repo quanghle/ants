@@ -3,12 +3,12 @@ use ants_proto::Machine;
 use super::cli::cli_login_text;
 use super::host::hostname;
 use super::*;
-use crate::caps::Caps;
 use crate::daemon::Config;
 use crate::escalation::Chain;
 use crate::harness::{ModelSettings, PromptLimits};
+use crate::limits::caps::Caps;
+use crate::profile::template::Request;
 use crate::publish::Publish;
-use crate::template::Request;
 use crate::worktrees::Base;
 
 fn manifest_dir() -> PathBuf {
@@ -452,7 +452,7 @@ fn fallbacks_name_known_harnesses_and_models() {
     };
     let (ants, harnesses) = parse_with_harnesses(&ant(r#"["claude", "copilot:gpt-5", ":m2"]"#)).unwrap();
     let config = ants.into_iter().next().unwrap().into_config("nats://unused", &harnesses).unwrap();
-    let names: Vec<_> = config.harness.fallbacks.iter().map(crate::fallback::Fallback::name).collect();
+    let names: Vec<_> = config.harness.fallbacks.iter().map(crate::limits::fallback::Fallback::name).collect();
     assert_eq!(names, ["claude", "copilot:gpt-5", "my-agent:m2"]);
     assert_eq!(config.harness.fallbacks[2].harness, config.harness.harness, "another model of the ant's own harness");
 
@@ -1085,7 +1085,7 @@ fn an_ant_added_from_a_template_takes_its_fallbacks_less_its_own_harness_and_mod
         let ant = loaded.ants.iter().find(|a| a.name.as_str() == ant).unwrap().clone();
         assert_eq!(ant.fallback, ["copilot", ":gpt-5", "claude:gpt-5"]);
         let config = ant.into_config("nats://unused", &loaded.harnesses).unwrap();
-        config.harness.fallbacks.iter().map(crate::fallback::Fallback::name).collect::<Vec<_>>()
+        config.harness.fallbacks.iter().map(crate::limits::fallback::Fallback::name).collect::<Vec<_>>()
     };
     assert_eq!(names("lead-a"), ["copilot", "claude:gpt-5"], ":gpt-5 is copilot:gpt-5, the ant's own");
     assert_eq!(names("lead-b"), ["copilot"], "claude:gpt-5, its own, twice");

@@ -45,19 +45,19 @@ pub struct Harness {
     /// The command a human runs to sign the harness in, named when it reports it is signed out.
     pub(crate) sign_in: Option<String>,
     /// Phrases of its errors that mean a provider rate limit or overload, besides the common ones
-    /// ([`crate::ratelimit`]).
+    /// ([`crate::limits::ratelimit`]).
     #[serde(default)]
     pub(crate) rate_limited: Vec<String>,
     /// Phrases of its errors that mean an exhausted provider quota, besides the common ones.
     #[serde(default)]
     pub(crate) quota_exhausted: Vec<String>,
     /// Phrases of its prompt errors that mean the session outgrew the model's context window, besides the ones every
-    /// harness shares ([`crate::overflow`]).
+    /// harness shares ([`crate::limits::overflow`]).
     #[serde(default)]
     pub(crate) context_overflow: Vec<String>,
     /// Tokens of the model's context window, when known: sizes the history a rebuilt session is seeded with.
     pub(crate) window: Option<u64>,
-    /// Bytes of the thread's history a rebuilt session is seeded with ([`crate::history::budget`]).
+    /// Bytes of the thread's history a rebuilt session is seeded with ([`crate::stream::history::budget`]).
     pub(crate) history_budget: Option<usize>,
     /// Globs of the files it keeps memories in, which an admin's read of the ant's memories shows
     /// ([`crate::admin`]): relative to the ant's workdir, or under `~`. Unset, a table replacing a built-in harness
@@ -214,7 +214,7 @@ impl Harness {
 
     /// Bytes of the thread's history a session rebuilt for an ant with `settings` is seeded with: the ant's
     /// `history_budget`, else the one of its `context` value or one derived from that value's window, else the
-    /// harness's, else one derived from the harness's window ([`crate::history::budget`]).
+    /// harness's, else one derived from the harness's window ([`crate::stream::history::budget`]).
     pub(crate) fn history_budget(&self, settings: &ModelSettings) -> usize {
         let selected = settings.context.as_ref().and_then(|value| self.context.get(value));
         let window = selected.and_then(|value| value.window).or(self.window);
@@ -222,7 +222,7 @@ impl Harness {
             Some(value) if value.history_budget.is_some() || value.window.is_some() => value.history_budget,
             _ => self.history_budget,
         };
-        crate::history::budget(settings.history_budget.or(set), window)
+        crate::stream::history::budget(settings.history_budget.or(set), window)
     }
 }
 

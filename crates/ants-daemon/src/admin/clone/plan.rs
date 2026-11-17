@@ -9,7 +9,7 @@ use serde_json::{Map, Value, json};
 
 use crate::admin::add::{NOT_GIVEN, entry, entry_text};
 use crate::config::{self, edit::Edit};
-use crate::shared;
+use crate::profile::shared;
 
 /// Keys of the ant's table a clone does not copy: those naming it or set for it alone.
 const NOT_CLONED: [&str; 8] = ["name", "creds", "paused", "added_by", "template", "builtin", "home", "allow_sets"];

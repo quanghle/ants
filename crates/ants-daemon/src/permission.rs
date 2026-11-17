@@ -34,7 +34,7 @@ use anyhow::{Result, bail};
 use futures::future::BoxFuture;
 use serde_json::Value;
 
-use crate::redact::Redactor;
+use crate::secrets::redact::Redactor;
 use crate::sync::MutexExt as _;
 
 const KINDS: [&str; 10] =

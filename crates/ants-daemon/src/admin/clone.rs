@@ -2,11 +2,11 @@
 //! history, to the config file the daemon serves. The ant cloned is paused (unless it was already), and the daemon
 //! serving its inbox reads a [`Snapshot`] once its last prompt ended; then its home is copied (no worktrees, no thread
 //! history, no answered or buried messages), each thread's history written into the clone's home
-//! ([`crate::history::cloned`]), each worktree added again on the branch `ants/<new>/<thread>` from the same commit,
+//! ([`crate::stream::history::cloned`]), each worktree added again on the branch `ants/<new>/<thread>` from the same commit,
 //! with its uncommitted changes and untracked files, the clone's key signed by `ants signer` on the order, each session
-//! forked when the harness can (else marked to start over, [`crate::history::Rebuild::Cloned`]) and stored under the
+//! forked when the harness can (else marked to start over, [`crate::stream::history::Rebuild::Cloned`]) and stored under the
 //! clone's keys, and its identity record written: a new id and birth, the prompts of the ant cloned and where it came
-//! from ([`ants_proto::ClonedFrom`]). Where the hub keeps shared settings ([`crate::shared`]), the clone gets its own
+//! from ([`ants_proto::ClonedFrom`]). Where the hub keeps shared settings ([`crate::profile::shared`]), the clone gets its own
 //! record of them: those of the ant cloned, with the order's settings over them. Its `[[ant]]` table, a copy of the
 //! cloned ant's with its shared settings and the order's settings over it, goes last, which starts it on the reload,
 //! and the ant cloned resumes. A failure undoes what was done, the signed
@@ -29,7 +29,7 @@ use super::{ConfigFile, NO_CONFIG, Orders, applied, refused};
 #[cfg(doc)]
 use crate::clone::Snapshot;
 use crate::config;
-use crate::shared::{self, Bucket, Found};
+use crate::profile::shared::{self, Bucket, Found};
 
 mod files;
 mod keys;

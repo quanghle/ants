@@ -64,7 +64,7 @@ fn needs_sign_in(e: &agent_client_protocol::Error) -> bool {
 }
 
 /// `e`, from the harness of `launch` while doing `what`, as an error: a [`SignedOut`] one when it says the harness
-/// needs signing in, given the auth methods the harness offered, else a [`crate::ratelimit::Limited`] one when it
+/// needs signing in, given the auth methods the harness offered, else a [`crate::limits::ratelimit::Limited`] one when it
 /// reports a provider limit.
 pub(super) fn harness_error(
     launch: &Launch,
@@ -81,7 +81,7 @@ pub(super) fn harness_error(
         };
         return signed_out.into();
     }
-    if let Some(limited) = crate::ratelimit::classify(&launch.harness, &e.to_string()) {
+    if let Some(limited) = crate::limits::ratelimit::classify(&launch.harness, &e.to_string()) {
         return limited.into();
     }
     anyhow!("{} {what}: {e}", launch.harness)

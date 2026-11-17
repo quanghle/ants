@@ -5,13 +5,13 @@ use ants_proto::{Envelope, Hold, Role, State, ThreadId, UserId, WEBHOOK_ALLOW};
 use anyhow::Result;
 use async_nats::jetstream;
 
-use crate::attempts::{Marker, TakenUp};
-use crate::breaker::StartFailed;
 use crate::bus;
-use crate::dead::Attempt;
+use crate::delivery::attempts::{Marker, TakenUp};
+use crate::delivery::dead::Attempt;
 use crate::harness::SignedOut;
-use crate::ratelimit::Limited;
-use crate::status;
+use crate::limits::breaker::StartFailed;
+use crate::limits::ratelimit::Limited;
+use crate::monitoring::status;
 
 use super::burial::Letter;
 use super::delivery::reply_id;
@@ -203,7 +203,7 @@ impl Inbox<'_> {
     /// Mark `envelope` as started right before handling it ([`Attempts::take_up`]), unless it was withdrawn first: by
     /// a human (`ants withdraw`), by an assistant for its human through a daemon of the ant ([`Self::cancel_for`]), or
     /// by the assistant of the message's human, its sender or the one it was sent for, under a key of the assistant's
-    /// own while no daemon answered ([`crate::attempts::record_withdrawal`]), honoured as a cancel request is: while the
+    /// own while no daemon answered ([`crate::delivery::attempts::record_withdrawal`]), honoured as a cancel request is: while the
     /// human's grant names the assistant.
     async fn take_up(&self, envelope: &Envelope) -> Result<Option<Withdrawal>> {
         let held = match self.attempts.take_up(envelope).await? {

@@ -1,6 +1,6 @@
 //! `ants watch`: follow what ants do, as it happens.
 
-use ants_daemon::reactions;
+use ants_daemon::records::reactions;
 use ants_proto::{
     Acting, ApprovalDecision, ApprovalRequest, CancelReply, CancelRequest, ChannelPost, DeadLetter, DecidedBy,
     Envelope, NotesPost, StatusEvent, StatusUpdate, ThreadId, UserId, subject,

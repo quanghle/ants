@@ -139,8 +139,8 @@ async fn the_channel_manager_applies_the_owner_s_changes_only_and_announces_them
     let creds = server.dir().join("channel-manager.creds");
     issue_channel_manager(&server.dir().join("auth"), None, &creds).unwrap();
     let (m_client, m_js) = bus::connect(&server.url, Some(&creds), None, &manager, "test").await.unwrap();
-    let humans = ants_daemon::humans::Registry::new(human.clone());
-    let _watching = humans.watch(m_js.clone(), ants_daemon::humans::RETRY);
+    let humans = ants_daemon::people::humans::Registry::new(human.clone());
+    let _watching = humans.watch(m_js.clone(), ants_daemon::people::humans::RETRY);
     let colony_of = ants_daemon::mcp::jetstream_colony(m_js.clone());
     let serving = tokio::spawn(chanadm::serve(m_client, m_js, colony_of, humans));
 

@@ -13,7 +13,7 @@ use chrono::Utc;
 use data_encoding::BASE64URL_NOPAD;
 use futures::StreamExt as _;
 
-use crate::{creds, keystore};
+use crate::secrets::{creds, keystore};
 
 /// How long the daemon waits for `ants signer` to answer.
 pub(super) const SIGNER_WAIT: Duration = Duration::from_mins(2);

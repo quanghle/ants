@@ -1,4 +1,4 @@
-//! The tools of the notes of a thread (see [`crate::notes`]): `post_notes`, which spends a turn of the notes' budget
+//! The tools of the notes of a thread (see [`crate::stream::notes`]): `post_notes`, which spends a turn of the notes' budget
 //! and escalates the thread with the last, and `read_notes`.
 
 use std::fmt::Write as _;

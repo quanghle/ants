@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use ants_daemon::direct_kv::{DirectKv, Lookup};
+use ants_daemon::records::direct_kv::{DirectKv, Lookup};
 use ants_proto::{
     JsDomain, Mark, Reminders, STREAM, THREADS_BUCKET, ThreadDone, ThreadId, ThreadMarks, ThreadSnoozes, ThreadSummary,
     ThreadTitle, UserId, assisted_marks_key, assisted_reminders_key, done_key, marks_key, reminders_key, summary_key,
@@ -63,7 +63,7 @@ pub async fn open(nats: &crate::connection::Nats<'_>, js: &jetstream::Context) -
     let mut meta =
         Meta::open(js, nats.domain, me).await?.checking(Some(Arc::new(crate::behalf::Checker::new(nats, js))));
     meta.follows = true;
-    meta.keyring = Keyring::lazy(nats.creds, ants_daemon::keystore::os(), js).map(Arc::new);
+    meta.keyring = Keyring::lazy(nats.creds, ants_daemon::secrets::keystore::os(), js).map(Arc::new);
     Ok(meta)
 }
 

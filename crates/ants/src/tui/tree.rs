@@ -11,9 +11,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use ants_daemon::caps::Spent;
-use ants_daemon::direct_kv::DirectKv;
-use ants_daemon::links::{self, Passed};
+use ants_daemon::limits::caps::Spent;
+use ants_daemon::records::direct_kv::DirectKv;
+use ants_daemon::records::links::{self, Passed};
 use ants_proto::{CancelRequest, JsDomain, SESSIONS_BUCKET, ThreadId, UserId};
 use anyhow::Result;
 use async_nats::jetstream;

@@ -14,9 +14,9 @@ use tokio::sync::{mpsc, oneshot};
 use super::connection::serve;
 use super::sign_in::HANDSHAKE_TIMEOUT;
 use super::{Launch, SignedOut};
-use crate::breaker::StartFailed;
 use crate::files::Attached;
-use crate::history::{History, Rebuild};
+use crate::limits::breaker::StartFailed;
+use crate::stream::history::{History, Rebuild};
 use crate::sync::MutexExt as _;
 
 /// Wall-clock time a prompt may run by default.
@@ -39,7 +39,7 @@ impl Default for PromptLimits {
     }
 }
 
-/// Spend a harness reports, for the caps in [`crate::caps`].
+/// Spend a harness reports, for the caps in [`crate::limits::caps`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum Spend {
     /// Cumulative cost of the session so far, from ACP `usage_update`.
@@ -144,7 +144,7 @@ impl Session {
             opened.await.unwrap_or_else(|_| Err(anyhow!("{} exited before opening a session", launch.harness)));
         abort.0 = None;
         let agent = opened.map_err(|e| {
-            if e.is::<SignedOut>() || e.is::<crate::ratelimit::Limited>() {
+            if e.is::<SignedOut>() || e.is::<crate::limits::ratelimit::Limited>() {
                 return e;
             }
             StartFailed { harness: launch.harness.name.clone(), detail: format!("{e:#}") }.into()

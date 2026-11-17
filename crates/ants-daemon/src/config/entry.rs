@@ -8,7 +8,7 @@ use ants_proto::UserId;
 use anyhow::{Context as _, Result};
 
 use super::Ant;
-use crate::template::Request;
+use crate::profile::template::Request;
 
 /// The `[[ant]]` table of `ant` for the config file: its name, workdir and the settings that differ from those of
 /// [`Ant::new`], paths as they are.

@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use ants_daemon::keystore;
+use ants_daemon::secrets::keystore;
 use anyhow::{Result, bail};
 
 use crate::connection::Connection;

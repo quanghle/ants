@@ -86,7 +86,7 @@ async fn escalations_go_to_the_owner_and_a_registered_human_renews_the_allowance
     bus::ensure_owners(&bus.js).await.unwrap();
     // alice asked both on the thread.
     for to in [&bus.dev, &dev_b] {
-        crate::owners::record(&bus.js, None, &t1, to, &alice).await.unwrap();
+        crate::records::owners::record(&bus.js, None, &t1, to, &alice).await.unwrap();
     }
     let mut go_on = Envelope::on_thread(t1.clone(), alice.clone(), bus.dev.clone(), "go on");
     go_on.turn_budget = 0;
@@ -296,7 +296,7 @@ async fn only_the_leader_answers_the_stuck_ant_and_members_answer_in_the_thread_
     let leader = escalated(&carol, &t2, &[std::slice::from_ref(&lead), std::slice::from_ref(&bus.dev)]);
     let spent = escalated(&carol, &t3, &[&[lead.clone(), bus.dev.clone()]]);
     let full = ants_proto::NotesPost::spend(t3.clone(), lead.clone(), "last turn", 1, None).unwrap();
-    crate::notes::publish(&bus.js, &full, None).await.unwrap();
+    crate::stream::notes::publish(&bus.js, &full, None).await.unwrap();
     for (from, thread, text, escalation) in
         [(&carol, &t1, "help", member), (&lead, &t2, "help more", leader.clone()), (&carol, &t3, "x", spent)]
     {

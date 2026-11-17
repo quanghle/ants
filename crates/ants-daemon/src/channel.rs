@@ -8,7 +8,7 @@
 //!
 //! A post of a human or a webhook that @mentions nobody goes to the channel's messenger instead, to triage: its answer @mentions
 //! the members the post is relevant to, which wakes them ([`triage_prompt`]). Who is a human is the daemon's
-//! [`crate::humans::Registry`]'s to say.
+//! [`crate::people::humans::Registry`]'s to say.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
@@ -24,12 +24,12 @@ use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, consumer, kv};
 use futures::{StreamExt as _, TryStreamExt as _};
 
-use crate::direct_kv::DirectKv;
-use crate::links;
-use crate::owners::Owners;
-pub use crate::reading::Reading;
+use crate::records::direct_kv::DirectKv;
+use crate::records::links;
+use crate::records::owners::Owners;
+use crate::records::webhooks::Webhooks;
+pub use crate::stream::reading::Reading;
 use crate::sync::MutexExt as _;
-use crate::webhooks::Webhooks;
 
 /// What ants tells a channel's messenger about triaging a post; the messenger's own instructions add to it.
 pub const TRIAGE_RULES: &str = "[ants] Triage this post; do not answer or act on the request itself.
@@ -948,9 +948,14 @@ pub async fn read_back(
     start: consumer::DeliverPolicy,
     mut take: impl FnMut(u64, SystemTime, &str, Result<ChannelPost, String>) -> ControlFlow<()>,
 ) -> Result<()> {
-    crate::reading::read_back(js, &chan_reader(reader), reading, filter, start, |seq, stored, subject, payload| {
-        take(seq, stored, subject, parse_post(subject, payload))
-    })
+    crate::stream::reading::read_back(
+        js,
+        &chan_reader(reader),
+        reading,
+        filter,
+        start,
+        |seq, stored, subject, payload| take(seq, stored, subject, parse_post(subject, payload)),
+    )
     .await
 }
 

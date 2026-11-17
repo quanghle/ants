@@ -3,7 +3,8 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use ants_daemon::{dead, metrics};
+use ants_daemon::delivery::dead;
+use ants_daemon::monitoring::metrics;
 use ants_proto::DeadLetter;
 use anyhow::{Context as _, Result};
 use clap::Subcommand;

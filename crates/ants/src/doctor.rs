@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ants_daemon::config;
-use ants_daemon::creds;
 use ants_daemon::harness::{self, Harnesses};
+use ants_daemon::secrets::creds;
 use ants_proto::JsDomain;
 use async_nats::jetstream;
 use serde::Serialize;

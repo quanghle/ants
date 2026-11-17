@@ -4,12 +4,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ants_daemon::caps::{Caps, Ledger};
-use ants_daemon::direct_kv::DirectKv;
+use ants_daemon::bus;
 use ants_daemon::escalation::{self, Chain, Escalated, Escalator, Stuck};
-use ants_daemon::humans::Registry;
+use ants_daemon::limits::caps::{Caps, Ledger};
 use ants_daemon::mcp::Colony;
-use ants_daemon::{bus, chains};
+use ants_daemon::people::humans::Registry;
+use ants_daemon::records::chains;
+use ants_daemon::records::direct_kv::DirectKv;
 use ants_proto::{ColonyEntry, Envelope, EscalationReason, Role, StatusEvent, StatusUpdate, ThreadId, UserId, subject};
 use ants_test_support::NatsServer as Server;
 use async_nats::jetstream;
@@ -210,7 +211,7 @@ async fn an_escalation_on_a_thread_spun_off_a_channel_thread_passes_the_link_on(
     let linked = |e: &Envelope| (e.thread_id.clone(), e.creator.clone(), e.origin_thread.clone());
     let expected = (thread.clone(), Some(ant("lead")), Some(channel_thread.clone()));
     assert_eq!(linked(&next(&mut to_boss).await), expected);
-    let passed = ants_daemon::links::passed_on(&js, &channel_thread).await.unwrap();
+    let passed = ants_daemon::records::links::passed_on(&js, &channel_thread).await.unwrap();
     assert!(passed.contains(&(ant("dev-a"), ant("boss"))), "{passed:?}");
 
     // Past the deadline, boss's chain loops back to dev-a: the human's notice keeps the link the escalation kept.

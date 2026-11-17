@@ -2,7 +2,8 @@
 
 use std::time::Duration;
 
-use ants_daemon::{bus, chains, colony};
+use ants_daemon::records::chains;
+use ants_daemon::{bus, colony};
 use ants_proto::{CHAINS_BUCKET, COLONY_BUCKET, COLONY_TTL, ColonyEntry, LimitKind, UserId};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream;
@@ -180,7 +181,7 @@ pub fn memory_low(entries: &[ColonyEntry], now: DateTime<Utc>) -> Vec<String> {
                 e.ant,
                 e.machine,
                 short(since(low.since, now)),
-                ants_daemon::storage::show_size(low.available),
+                ants_daemon::monitoring::storage::show_size(low.available),
                 low.max_harnesses
             ))
         })
@@ -652,7 +653,7 @@ mod tests {
         let kv = bus::ensure_colony(&js, COLONY_TTL).await.unwrap();
         let _registration = Registration::start(kv, entry("dev-a", 60, 0, Utc::now()), COLONY_HEARTBEAT).await.unwrap();
         let (_, js) = server.connect(&ids[1]).await;
-        ants_daemon::chains::publish(&js, &ids[1], std::slice::from_ref(&ids[0])).await.unwrap();
+        ants_daemon::records::chains::publish(&js, &ids[1], std::slice::from_ref(&ids[0])).await.unwrap();
         assert_eq!(
             unserved_warnings(&human, &ants).await,
             [

@@ -587,19 +587,19 @@ pub(crate) fn signed_out(detail: impl fmt::Display) -> Error {
 }
 
 /// The provider rate limited or is overloaded, with the HTTP status it answered and how long it says to wait, if
-/// known: a message [`crate::ratelimit::classify`] reads as a rate limit and its retry hint.
+/// known: a message [`crate::limits::ratelimit::classify`] reads as a rate limit and its retry hint.
 pub(crate) fn rate_limited(status: Option<u16>, retry_after: Option<Duration>, detail: impl fmt::Display) -> Error {
     let status = status.map_or_default(|status| format!(" (status {status})"));
     failed(format!("rate limit{status}: {detail}{}", hint(retry_after)))
 }
 
 /// The provider's quota or usage allowance is exhausted, until `retry_after` if known: a message
-/// [`crate::ratelimit::classify`] reads as an exhausted quota (or, back within 5 minutes, as a rate limit).
+/// [`crate::limits::ratelimit::classify`] reads as an exhausted quota (or, back within 5 minutes, as a rate limit).
 pub(crate) fn quota_exhausted(retry_after: Option<Duration>, detail: impl fmt::Display) -> Error {
     failed(format!("quota exceeded: {detail}{}", hint(retry_after)))
 }
 
-/// The session outgrew the model's context window: a message [`crate::overflow`] recognizes, so the daemon retries
+/// The session outgrew the model's context window: a message [`crate::limits::overflow`] recognizes, so the daemon retries
 /// the prompt once in a new session seeded with the thread's history.
 pub(crate) fn context_overflow(detail: impl fmt::Display) -> Error {
     failed(format!("context window exceeded: {detail}"))

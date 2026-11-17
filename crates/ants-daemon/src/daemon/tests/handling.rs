@@ -31,7 +31,7 @@ async fn queue(bus: &Bus) -> ants_proto::QueueReply {
 
 /// Withdraw `message` as the human, returning the mark found instead if the withdrawal lost.
 async fn withdraw(bus: &Bus, message: &Envelope) -> Option<ants_proto::MessageMark> {
-    crate::attempts::withdraw(&bus.markers, &bus.dev, &message.id, &UserId::human(), None).await.unwrap()
+    crate::delivery::attempts::withdraw(&bus.markers, &bus.dev, &message.id, &UserId::human(), None).await.unwrap()
 }
 
 const WITHDRAWN: &str = "[ants] Withdrawn by human before dev-a was prompted with it (ants withdraw).";
@@ -449,13 +449,13 @@ async fn a_reply_recorded_before_a_crash_is_stored_once_without_a_prompt() {
 /// human; one recorded by an ant the grant does not name, or after the message was taken up, withdraws nothing.
 #[tokio::test]
 async fn a_withdrawal_an_assistant_records_while_no_daemon_serves_is_honoured_before_the_prompt() {
-    use crate::attempts::{Recorded, record_withdrawal};
+    use crate::delivery::attempts::{Recorded, record_withdrawal};
     use ants_proto::{AssistantRecord, MessageMark};
     let Some((mut bus, _)) = Bus::start().await else { return };
     let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let [alice, pa, pb] = ants(["alice", "pa", "pb"]);
-    let device = crate::humans::TestDevice::default();
+    let device = crate::people::humans::TestDevice::default();
     bus.humans = Registry::with(UserId::human(), &["alice"]).verifying_grants(Some(device.account()));
     bus.account = Some(device.account());
     let mut grant =
@@ -484,7 +484,11 @@ async fn a_withdrawal_an_assistant_records_while_no_daemon_serves_is_honoured_be
     assert_eq!(record(&a, &pa).await.unwrap(), Recorded::Holds);
     assert_eq!(record(&for_alice, &pa).await.unwrap(), Recorded::Holds);
     assert_eq!(record(&b, &pb).await.unwrap(), Recorded::Holds, "stored, but pb is not alice's assistant");
-    assert_eq!(bus.attempts.take_up(&c).await.unwrap(), crate::attempts::TakenUp::Started(None), "c is taken up");
+    assert_eq!(
+        bus.attempts.take_up(&c).await.unwrap(),
+        crate::delivery::attempts::TakenUp::Started(None),
+        "c is taken up"
+    );
     assert!(matches!(record(&c, &pa).await.unwrap(), Recorded::Marked(MessageMark::Started { .. })), "too late");
 
     let ctrl_c = Arc::new(Semaphore::new(0));

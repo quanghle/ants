@@ -71,7 +71,7 @@ async fn ants_write_their_own_colony_entry_and_everyone_reads_the_colony() {
 
 #[tokio::test]
 async fn ants_warn_a_human_once_per_crossing_of_a_storage_limit() {
-    use ants_daemon::storage::{self, Settings, Watcher};
+    use ants_daemon::monitoring::storage::{self, Settings, Watcher};
     let Some(server) = Server::start() else { return };
     let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
     let (h_client, h_js) = server.connect(&human).await;
@@ -122,16 +122,16 @@ async fn ants_keep_their_own_escalation_chain_and_read_everyone_s() {
     let h_kv = bus::ensure_chains(&h_js).await.unwrap();
 
     let (_l, l_js) = server.connect(&lead).await;
-    ants_daemon::chains::publish(&l_js, &lead, std::slice::from_ref(&dev_a)).await.unwrap();
+    ants_daemon::records::chains::publish(&l_js, &lead, std::slice::from_ref(&dev_a)).await.unwrap();
     let a_kv = bus::ensure_chains(&a_js).await.unwrap();
-    assert_eq!(ants_daemon::chains::read(&a_kv, &lead).await.unwrap(), Some(vec![dev_a.clone()]));
-    assert_eq!(ants_daemon::chains::read(&h_kv, &lead).await.unwrap(), Some(vec![dev_a.clone()]));
+    assert_eq!(ants_daemon::records::chains::read(&a_kv, &lead).await.unwrap(), Some(vec![dev_a.clone()]));
+    assert_eq!(ants_daemon::records::chains::read(&h_kv, &lead).await.unwrap(), Some(vec![dev_a.clone()]));
 
     // dev-a writes its own key only, and an entry there naming lead is skipped.
     assert!(a_kv.put("lead", "spoof".into()).await.is_err(), "dev-a cannot rewrite lead's chain");
     let forged = ants_proto::ChainEntry::new(lead.clone(), vec![human.clone()]);
     a_kv.put("dev-a", serde_json::to_vec(&forged).unwrap().into()).await.unwrap();
-    assert_eq!(ants_daemon::chains::read(&h_kv, &dev_a).await.unwrap(), None);
+    assert_eq!(ants_daemon::records::chains::read(&h_kv, &dev_a).await.unwrap(), None);
     assert!(h_kv.put("lead", "spoof".into()).await.is_err(), "the human does not write chains");
 }
 
@@ -151,7 +151,7 @@ async fn ants_record_the_links_they_pass_on_and_read_everyone_s() {
             .spun_off(ThreadId::generate())
     };
     let spun = spin(&dev_a, &dev_b);
-    ants_daemon::links::pass_on(&a_js, &spun).await.unwrap();
+    ants_daemon::records::links::pass_on(&a_js, &spun).await.unwrap();
     let a_kv = a_js.get_key_value(ants_proto::LINKS_BUCKET).await.unwrap();
     for forged in [link_key(&lead, &origin, &dev_b), link_key(&dev_b, &origin, &dev_a)] {
         assert!(a_kv.put(forged, "spoof".into()).await.is_err(), "dev-a records its own links only");
@@ -160,11 +160,18 @@ async fn ants_record_the_links_they_pass_on_and_read_everyone_s() {
 
     let (_b, b_js) = server.connect(&dev_b).await;
     for js in [&a_js, &b_js, &h_js] {
-        assert_eq!(ants_daemon::links::passed_on(js, &origin).await.unwrap(), [(dev_a.clone(), dev_b.clone())]);
+        assert_eq!(
+            ants_daemon::records::links::passed_on(js, &origin).await.unwrap(),
+            [(dev_a.clone(), dev_b.clone())]
+        );
     }
-    assert!(ants_daemon::links::passed_on(&b_js, &ThreadId::generate()).await.unwrap().is_empty());
-    let passed = ants_daemon::links::Passed { from: dev_a, to: dev_b, on: Some(spun.thread_id) };
-    assert_eq!(ants_daemon::links::passed(&h_js, &origin).await.unwrap(), [passed], "with the thread it went on");
+    assert!(ants_daemon::records::links::passed_on(&b_js, &ThreadId::generate()).await.unwrap().is_empty());
+    let passed = ants_daemon::records::links::Passed { from: dev_a, to: dev_b, on: Some(spun.thread_id) };
+    assert_eq!(
+        ants_daemon::records::links::passed(&h_js, &origin).await.unwrap(),
+        [passed],
+        "with the thread it went on"
+    );
 }
 
 #[tokio::test]
@@ -209,7 +216,7 @@ async fn senders_store_their_own_attachments_and_ants_read_those_of_the_messages
 
 #[tokio::test]
 async fn humans_write_only_their_own_reactions_and_ants_change_theirs_through_ants_signer() {
-    use ants_daemon::reactions::{self, Answering, Reacted};
+    use ants_daemon::records::reactions::{self, Answering, Reacted};
     use ants_proto::{ReactionChange, ReactionsOutcome, ReactionsRequest};
 
     let Some(server) = Server::start() else { return };

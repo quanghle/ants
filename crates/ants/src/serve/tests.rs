@@ -167,7 +167,7 @@ fn a_reload_starts_new_ants_and_stops_or_restarts_the_others() {
 
 #[test]
 fn a_reload_hands_a_running_ant_its_pool_s_new_members_without_a_restart() {
-    use ants_daemon::caps::{Members, Pool};
+    use ants_daemon::limits::caps::{Members, Pool};
     let member = |name: &str| name.parse::<UserId>().unwrap();
     let config = |members: &[&str]| {
         let pool = Pool {

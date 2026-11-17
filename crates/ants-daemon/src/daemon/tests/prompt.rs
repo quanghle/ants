@@ -288,7 +288,7 @@ async fn a_thread_branch_with_new_commits_is_pushed_with_a_draft_pull_request() 
     run(&dir, &["init", "--quiet", "--bare", remote.to_str().unwrap()]);
     run(&repo, &["remote", "add", "origin", remote.to_str().unwrap()]);
     bus.js.create_stream(crate::hub::threads_config()).await.unwrap();
-    let titles = crate::direct_kv::DirectKv::new(&bus.js, None, ants_proto::THREADS_BUCKET).await.unwrap();
+    let titles = crate::records::direct_kv::DirectKv::new(&bus.js, None, ants_proto::THREADS_BUCKET).await.unwrap();
     bus.publisher = Some(crate::publish::Publisher::new(bus.dev.clone()).with_gh(fake_gh(&dir)).with_titles(titles));
     let home = dir.join("home");
     let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
@@ -382,7 +382,7 @@ async fn the_next_prompt_mentions_late_replies_waiting_on_its_thread() {
     let stored = serde_json::json!({"asks": asks.iter().map(|a| (a.id, &a.to)).collect::<Vec<_>>(), "late": []});
     std::fs::write(home.join("mcp.json"), stored.to_string()).unwrap();
     let (outbox, colony) = (crate::mcp::jetstream_outbox(bus.js.clone()), crate::mcp::jetstream_colony(bus.js.clone()));
-    let notes = Arc::new(crate::notes::JetStreamNotes::new(bus.js.clone(), bus.dev.clone()));
+    let notes = Arc::new(crate::stream::notes::JetStreamNotes::new(bus.js.clone(), bus.dev.clone()));
     let mcp = Mcp::start(bus.dev.clone(), &home, outbox, colony, notes, bus.humans.clone(), None).await;
     bus.mcp = Some(mcp.unwrap());
     for ask in &asks {

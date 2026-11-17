@@ -66,7 +66,7 @@ impl Launch {
 
     /// The same launch, running `fallback` instead of the ant's own harness and model.
     #[must_use]
-    pub fn with_fallback(&self, fallback: &crate::fallback::Fallback) -> Self {
+    pub fn with_fallback(&self, fallback: &crate::limits::fallback::Fallback) -> Self {
         let (process, settings) = (fallback.harness.clone(), fallback.settings.clone());
         let env = self.process_env.clone().unwrap_or_default();
         let connect: Connector = Arc::new(move || process.agent(&env, &settings));

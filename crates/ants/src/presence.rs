@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use ants_daemon::direct_kv::{DirectKv, Lookup};
+use ants_daemon::records::direct_kv::{DirectKv, Lookup};
 use ants_proto::{DeviceId, Following, JsDomain, PRESENCE_BUCKET, PRESENCE_HEARTBEAT, Presence, UserId, presence_key};
 use anyhow::{Context as _, Result, anyhow};
 use async_nats::jetstream::stream::ConsumerErrorKind;

@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 use std::time::Duration;
 
-use ants_daemon::direct_kv::DirectKv;
+use ants_daemon::records::direct_kv::DirectKv;
 use ants_proto::{JsDomain, Reminder, SESSIONS_BUCKET, ThreadDone, ThreadId, ThreadMarks, UserId};
 use anyhow::Result;
 use async_nats::jetstream;

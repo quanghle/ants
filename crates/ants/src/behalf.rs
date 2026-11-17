@@ -1,5 +1,5 @@
 //! What the CLI makes of an act's `on_behalf_of` ([`Acting`]): honoured only while the human's grant names the
-//! publisher and the publisher's record names the human ([`ants_daemon::behalf::Records`]), else forged, the act then
+//! publisher and the publisher's record names the human ([`ants_daemon::people::behalf::Records`]), else forged, the act then
 //! being the publisher's own. Each human's grant and each assistant's record is read once, when first needed, and
 //! again on a change of a grant or a revocation while a long-running reader follows them ([`Checker::follow`]).
 
@@ -7,9 +7,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ants_daemon::behalf::Records;
-use ants_daemon::direct_kv::{DirectKv, Lookup};
-use ants_daemon::reactions::{Change, Reactions};
+use ants_daemon::people::behalf::Records;
+use ants_daemon::records::direct_kv::{DirectKv, Lookup};
+use ants_daemon::records::reactions::{Change, Reactions};
 use ants_daemon::sync::MutexExt as _;
 use ants_proto::{
     ASSISTANT_GRANT, Acting, DEVICES_BUCKET, Envelope, Grants, HUMANS_BUCKET, JsDomain, REACTIONS_BUCKET,

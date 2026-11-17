@@ -282,7 +282,7 @@ async fn on_a_leaf_node_s_machine_the_signer_renews_the_uplink_to_carry_the_ant_
 
         let (_, uplink_key) = auth::read_creds(&m1_uplink).unwrap();
         let seed = uplink_key.seed().unwrap();
-        std::fs::write(&m1_uplink, ants_daemon::creds::text(&renewed, &seed)).unwrap();
+        std::fs::write(&m1_uplink, ants_daemon::secrets::creds::text(&renewed, &seed)).unwrap();
         let bare = order("alice", &admin_creds, "m1", "dev-c", AdminOp::Retire);
         let reply = ask(&client, &host_creds, "dev-c", &key, &bare, WAIT).await;
         let Some(EnrollReply::Retired { revoked, leaf_jwt: None, leaf_error: Some(why), .. }) = reply else {

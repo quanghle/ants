@@ -12,13 +12,13 @@ use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 
 use super::*;
-use crate::breaker::StartFailed;
 use crate::harness::{
     Harnesses, Launch, ModelSettings, Prompt, Readiness, Session, SignedOut, Spend, handshake, parse_definitions,
 };
-use crate::overflow::ContextOverflow;
+use crate::limits::breaker::StartFailed;
+use crate::limits::overflow::ContextOverflow;
+use crate::limits::ratelimit::Limited;
 use crate::permission::{Allowlist, PermissionPolicy};
-use crate::ratelimit::Limited;
 
 const RATE_LIMITED: &str = "agent executor error: generating and executing: Error 429, Message: Resource has been \
                             exhausted (e.g. check quota)., Status: RESOURCE_EXHAUSTED, Details: []";

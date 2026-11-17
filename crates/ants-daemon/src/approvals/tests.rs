@@ -365,7 +365,7 @@ async fn the_first_decision_wins_whoever_makes_it() {
 async fn an_assistant_s_decision_takes_effect_only_with_its_human_s_consent() {
     use ants_proto::{Confirmations, ConfirmedAct, PreAllow};
 
-    use crate::humans::TestDevice;
+    use crate::people::humans::TestDevice;
 
     let Some(server) = Server::start() else { return };
     let [ant, alice, pa]: [UserId; 3] = ["dev-a", "alice", "pa"].map(|u| u.parse().unwrap());
@@ -471,7 +471,7 @@ async fn an_assistant_s_decision_takes_effect_only_with_its_human_s_consent() {
 
 #[tokio::test]
 async fn a_request_goes_to_the_human_s_assistant_too_while_it_can_act() {
-    use crate::humans::TestDevice;
+    use crate::people::humans::TestDevice;
 
     let Some(server) = Server::start() else { return };
     let [ant, alice, pa]: [UserId; 3] = ["dev-a", "alice", "pa"].map(|u| u.parse().unwrap());
@@ -489,7 +489,7 @@ async fn a_request_goes_to_the_human_s_assistant_too_while_it_can_act() {
         ants_proto::AssistantGrant::new(alice.clone(), Some(pa.clone()), chrono::Utc::now(), device.jwt(&alice));
     grant.signature = device.sign(&grant.signed());
     humans.put_record(&grant.key(), Some(&serde_json::to_vec(&grant).unwrap()));
-    let listed = Arc::new(Mutex::new(vec![crate::assistant_first::live(&pa)]));
+    let listed = Arc::new(Mutex::new(vec![crate::people::assistant_first::live(&pa)]));
     let colony: crate::mcp::Colony = {
         let listed = listed.clone();
         Arc::new(move || {
@@ -497,7 +497,7 @@ async fn a_request_goes_to_the_human_s_assistant_too_while_it_can_act() {
             Box::pin(async move { Ok(colony) })
         })
     };
-    let record: crate::assistant_first::RecordOf = {
+    let record: crate::people::assistant_first::RecordOf = {
         let alice = alice.clone();
         Arc::new(move |_| {
             let alice = alice.clone();

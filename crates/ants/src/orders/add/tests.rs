@@ -67,7 +67,7 @@ async fn an_add_order_adds_an_ant_the_signer_signs_on_it_and_a_retire_order_revo
     let added = added.expect("the daemon decides once the signer answers");
     assert_eq!((added.state, added.reason.as_deref()), (OrderState::Applied, None));
     let creds = server.dir().join("dev-b.creds");
-    let finding = ants_daemon::creds::check(&creds).unwrap();
+    let finding = ants_daemon::secrets::creds::check(&creds).unwrap();
     let result = added.result.unwrap();
     assert_eq!((finding.name.as_str(), Some(finding.key.as_str())), ("dev-b", result["key"].as_str()));
     assert!(!server.dir().join("dev-b.nk").exists(), "the waiting key goes once the credentials hold it");

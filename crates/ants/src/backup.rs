@@ -101,7 +101,7 @@ pub fn run_restore(dir: &Path, file: &Path, passphrase_file: Option<&Path>, forc
          revocations made since are not in it: revoke any such key again, and push the account with `ants auth push`",
         record.account,
         dir.display(),
-        ants_daemon::creds::time(record.at),
+        ants_daemon::secrets::creds::time(record.at),
         record.issued
     );
     Ok(())

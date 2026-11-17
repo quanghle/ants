@@ -1,6 +1,7 @@
 //! `ants inbox`: the messages to the CLI's human.
 
-use ants_daemon::{dead, reactions};
+use ants_daemon::delivery::dead;
+use ants_daemon::records::reactions;
 use std::collections::BTreeMap;
 
 use ants_proto::{Envelope, Following, ThreadId, Uuid};

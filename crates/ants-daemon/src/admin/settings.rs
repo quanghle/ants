@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use super::{NO_CONFIG, Orders, applied, refused};
 use crate::config::edit::{Edit, digest};
-use crate::redact::Redactor;
+use crate::secrets::redact::Redactor;
 
 pub(super) fn apply(orders: &Orders, order: &AdminOrder) -> AdminOutcome {
     let Some(config) = &orders.config else { return refused(order, NO_CONFIG) };

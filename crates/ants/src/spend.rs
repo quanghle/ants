@@ -1,13 +1,13 @@
 //! `ants spend`: the tokens and cost each ant spent, as its daemon keeps them in [`SESSIONS_BUCKET`]
-//! ([`ants_daemon::caps`]): per UTC day under `<ant>.day.<YYYY-MM-DD>`, and per thread since a human's last message on
+//! ([`ants_daemon::limits::caps`]): per UTC day under `<ant>.day.<YYYY-MM-DD>`, and per thread since a human's last message on
 //! it under `<ant>.<thread>.spend`. Caps come from the local config file, for the ants it lists: the CLI has no other
 //! way to know the caps of ants served elsewhere.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::connection::Nats;
-use ants_daemon::caps::{self, Caps, Spent};
-use ants_daemon::direct_kv::DirectKv;
+use ants_daemon::limits::caps::{self, Caps, Spent};
+use ants_daemon::records::direct_kv::DirectKv;
 use ants_proto::{SESSIONS_BUCKET, ThreadId, UserId};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream;
@@ -374,8 +374,8 @@ pub async fn show(nats: &Nats<'_>, select: &Select, caps: &BTreeMap<UserId, Caps
 #[cfg(test)]
 mod tests {
     use ants_daemon::bus;
-    use ants_daemon::caps::Ledger;
     use ants_daemon::harness::Spend;
+    use ants_daemon::limits::caps::Ledger;
     use ants_proto::{Role, daily_spend_key, session_key};
 
     use super::*;

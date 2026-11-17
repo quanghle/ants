@@ -11,18 +11,18 @@ use ants_proto::{
 use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
 
-use crate::attempts::{Marker, Reply};
-use crate::breaker::StartFailed;
 use crate::bus;
-use crate::caps::{Recorded, Warning};
 use crate::channel::{self, Context, Earlier};
+use crate::delivery::attempts::{Marker, Reply};
 use crate::escalation::{self, Stuck};
-use crate::fallback::OnFallback;
 use crate::files::Attached;
 use crate::harness::{Prompt, SignedOut, Spend, Steer, Steering};
-use crate::overflow::ContextOverflow;
-use crate::ratelimit::Limited;
-use crate::status::{self, Status};
+use crate::limits::breaker::StartFailed;
+use crate::limits::caps::{Recorded, Warning};
+use crate::limits::fallback::OnFallback;
+use crate::limits::overflow::ContextOverflow;
+use crate::limits::ratelimit::Limited;
+use crate::monitoring::status::{self, Status};
 use crate::sync::MutexExt as _;
 
 use super::control::Cancel;
@@ -533,15 +533,15 @@ impl Inbox<'_> {
     }
 
     /// The `[ants]` line telling that `envelope`, a human's message or one an assistant sent for its human, verified
-    /// on arrival, answers a question the ant asked on the thread ([`crate::questions::answer_line`]); none for any
+    /// on arrival, answers a question the ant asked on the thread ([`crate::stream::questions::answer_line`]); none for any
     /// other message, which is prompted as an ordinary one.
     async fn answer_line(&self, envelope: &Envelope, humans: &Humans) -> Option<String> {
         let human = envelope.on_behalf_of.is_some() || envelope.sender_role(humans).is_human();
         if envelope.answer.is_none() || !human {
             return None;
         }
-        match crate::questions::asked(self.js, self.ant, self.reading, envelope).await {
-            Ok(question) => crate::questions::answer_line(envelope, question.as_ref()?),
+        match crate::stream::questions::asked(self.js, self.ant, self.reading, envelope).await {
+            Ok(question) => crate::stream::questions::answer_line(envelope, question.as_ref()?),
             Err(e) => {
                 let thread = &envelope.thread_id;
                 tracing::warn!(%thread, error = format!("{e:#}"), "reading back the question a message answers");
@@ -571,7 +571,7 @@ impl Inbox<'_> {
         let every = self.timeline_every;
         let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut calls = crate::timeline::Collector::new(self.ant, thread, envelope.id, self.redactor);
+        let mut calls = crate::monitoring::timeline::Collector::new(self.ant, thread, envelope.id, self.redactor);
         let history = self.history_of(incoming, seq);
         let (ready_tx, ready) = tokio::sync::oneshot::channel();
         let (steer_tx, steers) = tokio::sync::mpsc::channel(STEERS);
@@ -613,7 +613,7 @@ impl Inbox<'_> {
                 _ = flush.tick() => status.flush_settled(),
                 () = stored_every(&calls, &mut tick) => {
                     if let Some(record) = calls.take() {
-                        crate::timeline::store(self.js, record);
+                        crate::monitoring::timeline::store(self.js, record);
                     }
                 }
                 Ok(()) = &mut ready => joins = Some(self.steers.register(thread)),
@@ -650,7 +650,7 @@ impl Inbox<'_> {
         }
         status.flush();
         while let Some(record) = calls.take() {
-            crate::timeline::store(self.js, record);
+            crate::monitoring::timeline::store(self.js, record);
         }
         drop(steer_tx);
         self.joins_ended(joins, taking, &mut joined).await;
@@ -659,8 +659,8 @@ impl Inbox<'_> {
     }
 
     /// The history of the thread of `incoming` before stream sequence `seq`, for a harness rebuilding a lost session.
-    fn history_of(&self, incoming: &Incoming, seq: u64) -> crate::history::Thread {
-        crate::history::Thread {
+    fn history_of(&self, incoming: &Incoming, seq: u64) -> crate::stream::history::Thread {
+        crate::stream::history::Thread {
             js: self.js.clone(),
             ant: self.ant.clone(),
             thread: incoming.envelope.thread_id.clone(),
@@ -882,7 +882,7 @@ pub(super) fn prompt_text(text: &str, cut_off: bool, late: usize) -> String {
 }
 
 /// When the next record of a prompt's tool-call timeline is due: at its next tick once something changed.
-async fn stored_every(calls: &crate::timeline::Collector<'_>, tick: &mut tokio::time::Interval) {
+async fn stored_every(calls: &crate::monitoring::timeline::Collector<'_>, tick: &mut tokio::time::Interval) {
     if calls.pending() {
         tick.tick().await;
     } else {

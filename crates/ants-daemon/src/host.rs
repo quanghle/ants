@@ -4,7 +4,7 @@
 //! so an ant stays addressable on its machine after its colony entry expired. It also takes the admin orders to the
 //! machine's ants and records their outcomes ([`crate::admin`]), reading the humans' consent to their assistants'
 //! orders from [`ants_proto::HUMANS_BUCKET`] ([`crate::admin::held`]), and keeps the shared settings of the machine's ants
-//! ([`crate::shared`]), creating those still missing from the machine's config. Without host credentials, where the ants have their
+//! ([`crate::profile::shared`]), creating those still missing from the machine's config. Without host credentials, where the ants have their
 //! own, the connection stays off and the daemon serves its ants as before.
 
 use std::path::{Path, PathBuf};
@@ -17,10 +17,11 @@ use ants_proto::{
 use anyhow::{Context as _, Result, bail};
 use tokio::sync::watch;
 
-use crate::creds::{self, Kind};
-use crate::direct_kv::DirectKv;
-use crate::shared::{self, Shared};
-use crate::{admin, bus, colony, keystore};
+use crate::profile::shared::{self, Shared};
+use crate::records::direct_kv::DirectKv;
+use crate::secrets::creds::{self, Kind};
+use crate::secrets::keystore;
+use crate::{admin, bus, colony};
 
 const RETRY_FIRST: Duration = Duration::from_secs(1);
 const RETRY_MAX: Duration = Duration::from_secs(30);
@@ -129,9 +130,9 @@ pub async fn run(host: Host, ants: watch::Receiver<Vec<UserId>>) -> Result<()> {
     let machine = machine_of(host.machine.as_ref(), host.creds.as_deref(), otherwise)?;
     let accounts: Vec<String> = host.creds.as_deref().map(creds::account).transpose()?.into_iter().collect();
     let Some(js) = connect(&host, &machine).await? else { return Ok(()) };
-    let humans =
-        crate::humans::Registry::new(UserId::human()).verifying_grants(crate::humans::account(host.creds.as_deref()));
-    let _watching = humans.watch(js.clone(), crate::humans::RETRY);
+    let humans = crate::people::humans::Registry::new(UserId::human())
+        .verifying_grants(crate::people::humans::account(host.creds.as_deref()));
+    let _watching = humans.watch(js.clone(), crate::people::humans::RETRY);
     let orders = admin::Orders {
         machine: machine.clone(),
         nats: host.nats.clone(),

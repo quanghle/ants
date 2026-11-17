@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use ants_daemon::reactions::Reactions;
+use ants_daemon::records::reactions::Reactions;
 use ants_proto::{
     ApprovalRequest, ChannelEntry, ChannelId, ChannelNotify, ChannelReadMarkers, Humans, Reaction, ReadMarker,
     ThreadId, UserId, Uuid, Verdict,

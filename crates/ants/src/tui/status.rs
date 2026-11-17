@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use ants_daemon::caps::Spent;
+use ants_daemon::limits::caps::Spent;
 use ants_proto::{Activity, STREAM, UserId};
 use anyhow::{Result, bail};
 use async_nats::jetstream;

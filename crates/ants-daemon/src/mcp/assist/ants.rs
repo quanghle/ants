@@ -11,10 +11,10 @@ use rmcp::{ErrorData, schemars, tool, tool_router};
 use serde::Deserialize;
 
 use super::{ANSWER_WAIT, HumanStore};
-use crate::attempts::Recorded;
+use crate::delivery::attempts::Recorded;
+use crate::delivery::queue;
 use crate::mcp::Hub;
 use crate::mcp::tools::{Tools, text};
-use crate::queue;
 
 /// The most messages `queue_for_human` lists of those the ant's daemons have not taken from the stream yet.
 const QUEUE_SHOWN: usize = 50;

@@ -12,16 +12,16 @@
 //! `withdraw_for_human` list an ant's queue, cancel its prompt on a thread and withdraw a message waiting for it,
 //! asking the ant's daemons on subjects naming the ant ([`ants_proto::CancelRequest::for_human`]); while none
 //! answers, `withdraw_for_human` records the withdrawal of a message of the human's under a key naming the ant instead
-//! ([`crate::attempts::record_withdrawal`]), which the ant's daemon honours before taking the message up.
+//! ([`crate::delivery::attempts::record_withdrawal`]), which the ant's daemon honours before taking the message up.
 //!
 //! The tools are offered only while the human's grant names the ant ([`Hub::acting_for`]), and each call checks it
 //! again, so a withdrawal ends them at once. Everything they publish is the ant's own, carrying `on_behalf_of` naming
 //! the human, which readers verify against the grant. The human hears of each act in its inbox, on its activity thread of
-//! the day ([`crate::behalf::report`]): from the recipient's daemon for a message to an ant, a decision, a cancel or a
-//! withdrawal ([`crate::behalf`]), else from the ant itself, as for a post, which every daemon sees. Before a message to an ant, the ant records the human as the thread's owner
-//! for that ant ([`crate::owners::record_for_human`]). Sealed messages open,
+//! the day ([`crate::people::behalf::report`]): from the recipient's daemon for a message to an ant, a decision, a cancel or a
+//! withdrawal ([`crate::people::behalf`]), else from the ant itself, as for a post, which every daemon sees. Before a message to an ant, the ant records the human as the thread's owner
+//! for that ant ([`crate::records::owners::record_for_human`]). Sealed messages open,
 //! and messages to humans are sealed, only while the human enrolled the ant as one of its devices
-//! ([`crate::sealing::AssistantSealing`]).
+//! ([`crate::secrets::sealing::AssistantSealing`]).
 
 use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
@@ -36,9 +36,9 @@ use rmcp::handler::server::router::tool::ToolRouter;
 
 use super::Hub;
 use super::tools::Tools;
-use crate::attempts::Recorded;
-use crate::queue;
-use crate::sealing::{AssistantSealing, Opening};
+use crate::delivery::attempts::Recorded;
+use crate::delivery::queue;
+use crate::secrets::sealing::{AssistantSealing, Opening};
 
 mod ants;
 mod home;
@@ -127,7 +127,7 @@ pub trait HumanStore: Send + Sync {
         shown: usize,
     ) -> BoxFuture<'_, Result<Option<queue::Listed>>>;
     /// Record the withdrawal of `message` from the queue of `ant` by `assistant` for `human`, while no daemon of the
-    /// ant answers ([`crate::attempts::record_withdrawal`]).
+    /// ant answers ([`crate::delivery::attempts::record_withdrawal`]).
     fn record_withdrawal(
         &self,
         ant: UserId,
@@ -236,10 +236,10 @@ impl Hub {
     }
 
     /// Tell `human` in its inbox of an act the ant did for it that no recipient's daemon reports, in a
-    /// [`crate::behalf::report`]. Failing to, the result says so.
+    /// [`crate::people::behalf::report`]. Failing to, the result says so.
     async fn tell(&self, human: &UserId, act: String) -> String {
         let text = format!("[ants] {}, as the assistant of {human}, {act}", self.ant);
-        let notice = crate::behalf::report(self.ant.clone(), human, text);
+        let notice = crate::people::behalf::report(self.ant.clone(), human, text);
         match self.send(&notice).await {
             Ok(()) => format!(" {human} is told in its inbox."),
             Err(e) => format!(" Telling {human} failed: {e}."),

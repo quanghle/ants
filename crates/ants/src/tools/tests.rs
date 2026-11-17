@@ -147,7 +147,7 @@ async fn a_request_an_ant_of_the_chain_decided_is_no_longer_pending() {
     let stream = bus::ensure_stream(&human).await.unwrap();
     bus::ensure_chains(&human).await.unwrap();
     let (_, ant_js) = server.connect(&dev_a).await;
-    ants_daemon::chains::publish(&ant_js, &dev_a, std::slice::from_ref(&lead)).await.unwrap();
+    ants_daemon::records::chains::publish(&ant_js, &dev_a, std::slice::from_ref(&lead)).await.unwrap();
     let minute = Duration::from_secs(60);
     let offered = || vec![Verdict::AllowOnce, Verdict::Reject];
     let [push, rm, cat] = ["git push", "rm -rf build", "cat secrets"].map(|t| request(&dev_a, t, offered(), minute));
@@ -227,7 +227,7 @@ async fn following_reports_new_requests_and_how_each_ends() {
     let stream = bus::ensure_stream(&human).await.unwrap();
     bus::ensure_chains(&human).await.unwrap();
     let (_, ant_js) = server.connect(&dev_a).await;
-    ants_daemon::chains::publish(&ant_js, &dev_a, std::slice::from_ref(&lead)).await.unwrap();
+    ants_daemon::records::chains::publish(&ant_js, &dev_a, std::slice::from_ref(&lead)).await.unwrap();
     let (_, lead_js) = server.connect(&lead).await;
     let offered = || vec![Verdict::AllowOnce, Verdict::Reject];
     let minute = Duration::from_secs(60);

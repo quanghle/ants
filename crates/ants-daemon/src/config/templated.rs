@@ -10,9 +10,9 @@ use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 
 use super::{Ant, Loaded, home_dir, resolve};
-use crate::caps::{Members, Pool};
 use crate::harness::{self, Harnesses};
-use crate::template::{AntTemplate, REQUEST_KEYS, Request};
+use crate::limits::caps::{Members, Pool};
+use crate::profile::template::{AntTemplate, REQUEST_KEYS, Request};
 
 /// The keys of an `[[ant]]` entry added from a template besides those of a [`Request`].
 const TEMPLATED_KEYS: [&str; 7] = ["name", "template", "added_by", "creds", "nats", "js_domain", "paused"];

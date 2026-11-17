@@ -2,15 +2,15 @@
 //! grant its device signs ([`AssistantGrant`]), kept in [`HUMANS_BUCKET`] under the human's own name. See
 //! [`ants_proto::Grants`] for how readers honour it. `ants assistant seal on|off` enrolls the assistant as a device of
 //! the human by the same grant, or ends it, so the assistant opens and seals the human's sealed messages
-//! ([`ants_daemon::sealing`]), with a key whose seed waits beside its credentials (`ants assistant key`).
+//! ([`ants_daemon::secrets::sealing`]), with a key whose seed waits beside its credentials (`ants assistant key`).
 //! `enable` and `disable` ([`dedicated`]) create and retire a dedicated assistant ant around the grant. `confirm` and
 //! `allow` ([`consent`]) sign the human's consent to what the assistant decides for it.
 
 use std::path::{Path, PathBuf};
 
 use ants_daemon::config::Summary;
-use ants_daemon::creds::{Finding, Kind};
-use ants_daemon::sealing;
+use ants_daemon::secrets::creds::{Finding, Kind};
+use ants_daemon::secrets::sealing;
 use ants_proto::{
     AssistantGrant, ColonyEntry, DeviceId, DeviceKey, HUMANS_BUCKET, SealingDevice, UserId, VerifiedGrant,
     assistant_grant_key,

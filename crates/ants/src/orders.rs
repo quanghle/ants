@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use ants_daemon::bus;
-use ants_daemon::reading::{self, Reading};
+use ants_daemon::stream::reading::{self, Reading};
 use ants_proto::{
     ADMIN_TAG, AdminOp, AdminOrder, AdminOutcome, MACHINES_BUCKET, Machine, OrderState, UserId, Uuid, admin_outcome_of,
     subject,
@@ -327,8 +327,8 @@ pub(crate) fn table(orders: &[Listed], now: DateTime<Utc>) -> String {
 mod tests {
     use ants_daemon::admin::ConfigFile;
     use ants_daemon::admin::restart::{Restarted, Restarts};
-    use ants_daemon::direct_kv::DirectKv;
     use ants_daemon::host::{self, Host};
+    use ants_daemon::records::direct_kv::DirectKv;
     use ants_proto::{FieldChange, MACHINES_BUCKET, Permissions, Role};
 
     use super::*;

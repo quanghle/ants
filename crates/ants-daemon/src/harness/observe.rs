@@ -15,10 +15,10 @@ use super::Spend;
 pub(super) struct Current {
     pub(super) text: String,
     /// Whether every piece of the text so far reads as the harness's error or notice
-    /// ([`crate::ratelimit::is_error_chunk`]).
+    /// ([`crate::limits::ratelimit::is_error_chunk`]).
     pub(super) errors_only: bool,
     /// Where the last of the pieces read as errors or notices ends in the text, while no other piece came: the end of
-    /// the retry notices a harness may stream before the answer ([`crate::ratelimit::strip_notices`]).
+    /// the retry notices a harness may stream before the answer ([`crate::limits::ratelimit::strip_notices`]).
     pub(super) notices: usize,
     /// What the session reported of each tool call, without its content or output.
     pub(super) tool_calls: HashMap<ToolCallId, ToolCall>,
@@ -57,7 +57,7 @@ impl Observed {
         match n.update {
             SessionUpdate::AgentMessageChunk(chunk) => {
                 if let ContentBlock::Text(t) = chunk.content {
-                    let error = crate::ratelimit::is_error_chunk(&t.text);
+                    let error = crate::limits::ratelimit::is_error_chunk(&t.text);
                     if !t.text.trim().is_empty() && !error {
                         current.errors_only = false;
                     }

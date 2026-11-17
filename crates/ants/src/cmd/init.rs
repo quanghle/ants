@@ -53,7 +53,7 @@ pub(crate) async fn hub(nats: &Nats<'_>, identities_restored: bool) -> Result<Ve
             "bucket {} in a new incarnation: no shared settings record signed before verifies; each daemon holding an \
              ant's credentials signs the ant's settings anew within {} s",
             ants_proto::IDENTITIES_BUCKET,
-            ants_daemon::shared::POLL_EVERY.as_secs()
+            ants_daemon::profile::shared::POLL_EVERY.as_secs()
         ));
     }
     Ok(lines)

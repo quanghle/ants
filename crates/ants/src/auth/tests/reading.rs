@@ -96,7 +96,7 @@ async fn an_ant_cli_reads_back_only_its_own_inbox_through_spares_of_its_inbox_co
     let reads = (0..2 * ants_proto::SPARE_READERS).map(|_| async {
         let mut got = Vec::new();
         let all = jetstream::consumer::DeliverPolicy::All;
-        ants_daemon::reading::read_back_messages(&a_js, &inbox, Reading::Spare, &filter, all, |_, _, msg| {
+        ants_daemon::stream::reading::read_back_messages(&a_js, &inbox, Reading::Spare, &filter, all, |_, _, msg| {
             got.push(msg);
             std::ops::ControlFlow::Continue(())
         })
@@ -144,7 +144,7 @@ async fn an_ant_reads_back_its_thread_both_ways_and_only_its_own_sent_messages()
     let post = ChannelPost::on_thread(ops.clone(), thread.clone(), dev_b.clone(), "shipped");
     bus::publish_json(&b_js, subject::chan(&ops, &dev_b), &post, None).await.unwrap();
 
-    let read = ants_daemon::history::Thread {
+    let read = ants_daemon::stream::history::Thread {
         js: a_js.clone(),
         ant: dev_a.clone(),
         thread: thread.clone(),
@@ -154,7 +154,7 @@ async fn an_ant_reads_back_its_thread_both_ways_and_only_its_own_sent_messages()
         home: None,
     };
     assert_eq!(
-        read.history()(ants_daemon::history::DEFAULT_BUDGET).await,
+        read.history()(ants_daemon::stream::history::DEFAULT_BUDGET).await,
         "[ants] The thread's history, read back from ants, oldest first:\n\ndev-b to dev-a:\nstatus?\n\n\
              dev-a to dev-b:\ngreen\n\ndev-b in the thread notes:\nnoted\n\ndev-b in channel ops:\nshipped\n\n\
              [ants] End of the thread's history."

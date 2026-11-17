@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ants_daemon::config::{self, Summary};
-use ants_daemon::creds::{self, Finding, Kind};
-use ants_daemon::keystore::{self, Store};
+use ants_daemon::secrets::creds::{self, Finding, Kind};
+use ants_daemon::secrets::keystore::{self, Store};
 use ants_daemon::{bus, colony};
 use ants_proto::{DeviceKey, ENROLL_REPEAT, JsDomain, RenewReply, RenewRequest, UserId, subject};
 use anyhow::{Context as _, Result, bail};

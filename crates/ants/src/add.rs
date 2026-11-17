@@ -8,8 +8,8 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use ants_daemon::config::{self, Ant, HostSettings, Summary};
-use ants_daemon::creds::{self, Seed};
-use ants_daemon::keystore::{self, Store};
+use ants_daemon::secrets::creds::{self, Seed};
+use ants_daemon::secrets::keystore::{self, Store};
 use ants_proto::{ENROLL_REPEAT, JsDomain, Machine, UserId};
 use anyhow::{Context as _, Result, bail};
 use nkeys::KeyPair;
