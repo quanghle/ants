@@ -42,8 +42,9 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
 
 Before finishing, run `scripts/check.sh`: the checks of CI's (`.github/workflows/ci.yml`) check and deny jobs, stopping
 at the first failure. The check job's release build and footprint check (`scripts/footprint.sh`, idle `ants daemon`
-under 10 MB of private memory) run only with `scripts/check.sh --footprint`, as the fat-LTO release build is slow: pass
-it for changes that may grow the daemon's memory or binary. The summary lists the skipped checks.
+with its ant's sugar data open under 10 MB of private memory) run only with `scripts/check.sh --footprint`, as the
+fat-LTO release build is slow: pass it for changes that may grow the daemon's memory or binary. The summary lists the
+skipped checks.
 
 - `cargo fmt --all --check`, `cargo clippy --all-targets`, `cargo test`, all with `CARGO_BUILD_WARNINGS=deny` as in
   CI, so any lint warning fails.

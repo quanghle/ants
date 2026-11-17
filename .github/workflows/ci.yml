@@ -66,7 +66,7 @@ jobs:
           ANTS_TEST_JS_ACK_FC_V2: "1"
       - run: cargo build --release
 
-      - name: Footprint (idle antsd under 10 MB of private memory)
+      - name: Footprint (idle daemon with its ant's sugar data open under 10 MB of private memory)
         run: scripts/footprint.sh --ants target/release/ants --port 14722 --max-mb 10
 
   # Windows: lints and a release build, and the MCP named pipe, which replaces the Unix socket there. The rest of the
