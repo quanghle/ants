@@ -884,9 +884,7 @@ mod tests {
                 service::Ran { ok: true, stdout: stdout.to_owned(), stderr: String::new() }
             })
         };
-        let free = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let free_listen = free.local_addr().unwrap().to_string();
-        drop(free);
+        let free_listen = format!("127.0.0.1:{}", ants_test_support::free_port());
         let busy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let busy_listen = busy.local_addr().unwrap().to_string();
         let args = managed_args(Some("/bin/sh"));

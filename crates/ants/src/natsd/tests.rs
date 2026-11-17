@@ -1,10 +1,9 @@
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::Duration;
 
 use ants_daemon::config::NatsServer;
-use ants_test_support::{have, scratch_dir};
+use ants_test_support::{free_port, have, scratch_dir};
 use anyhow::{Result, bail};
 
 use super::managed::{Managed, address, alive, lock_path, probe, recorded, signal};
@@ -31,28 +30,6 @@ fn server_conf(dir: &Path, port: u16) -> PathBuf {
     )
     .unwrap();
     conf
-}
-
-/// A free port of 127.0.0.1 that no other test here got, as their servers stop and start again on theirs. It
-/// lies below the ephemeral ports, which a connection could take while its server is stopped.
-fn port() -> u16 {
-    static NEXT: Mutex<u16> = Mutex::new(0);
-    let mut next = NEXT.lock().unwrap();
-    if *next == 0 {
-        use std::hash::{BuildHasher as _, Hasher as _};
-        // Random, away from the ports of a run just before, whose servers may still be stopping.
-        let random = std::hash::RandomState::new().build_hasher().finish();
-        *next = 20_000 + u16::try_from(random % 12_000).unwrap();
-    }
-    loop {
-        let port = *next;
-        *next = if port >= 31_999 { 20_000 } else { port + 1 };
-        // A listener bound to a wildcard address does not keep another from binding 127.0.0.1 alone.
-        let refused = std::net::TcpStream::connect(("127.0.0.1", port)).is_err();
-        if refused && std::net::TcpListener::bind(("0.0.0.0", port)).is_ok() {
-            return port;
-        }
-    }
 }
 
 fn settings(command: impl Into<PathBuf>, config: &Path) -> NatsServer {
@@ -146,7 +123,7 @@ async fn a_server_starts_ready_and_stops_reaped() {
         return;
     }
     let dir = scratch_dir("natsd-start");
-    let port = port();
+    let port = free_port();
     let conf = server_conf(&dir, port);
     let (managed, pid) = started(&settings("nats-server", &conf), port).await;
     assert!(probe("127.0.0.1", port).await);
@@ -166,7 +143,7 @@ async fn jetstream_data_survives_a_restart() {
         return;
     }
     let dir = scratch_dir("natsd-persist");
-    let port = port();
+    let port = free_port();
     let conf = server_conf(&dir, port);
     let settings = settings("nats-server", &conf);
     let (managed, _) = started(&settings, port).await;
@@ -195,7 +172,7 @@ async fn a_second_owner_starts_nothing() {
         return;
     }
     let dir = scratch_dir("natsd-twice");
-    let port = port();
+    let port = free_port();
     let conf = server_conf(&dir, port);
     let (managed, _) = started(&settings("nats-server", &conf), port).await;
     let ran = dir.join("ran");
@@ -228,7 +205,7 @@ async fn an_occupied_port_starts_nothing() {
 #[tokio::test]
 async fn a_missing_executable_is_named() {
     let dir = scratch_dir("natsd-missing");
-    let port = port();
+    let port = free_port();
     let conf = server_conf(&dir, port);
     let missing = dir.join("no-nats-server");
     let e = starting(&settings(&missing, &conf), port).await.err().unwrap();
@@ -247,7 +224,7 @@ async fn an_invalid_configuration_fails_with_the_exit_status() {
         return;
     }
     let dir = scratch_dir("natsd-invalid");
-    let port = port();
+    let port = free_port();
     let conf = dir.join("nats.conf");
     std::fs::write(&conf, "listen: {{{\n").unwrap();
     let e = starting(&settings("nats-server", &conf), port).await.err().unwrap();
@@ -261,7 +238,7 @@ async fn an_invalid_configuration_fails_with_the_exit_status() {
 #[tokio::test]
 async fn a_server_not_ready_in_time_is_stopped() {
     let dir = scratch_dir("natsd-timeout");
-    let port = port();
+    let port = free_port();
     let conf = server_conf(&dir, port);
     let pid_file = dir.join("pid");
     let stub = script(&dir, "stub", &format!("echo $$ > {pid_file:?}\nexec sleep 30"));
@@ -283,7 +260,7 @@ async fn an_unexpected_exit_restarts_the_server() {
         return;
     }
     let dir = scratch_dir("natsd-restart");
-    let port = port();
+    let port = free_port();
     let conf = server_conf(&dir, port);
     let (mut managed, first) = started(&settings("nats-server", &conf), port).await;
     signal(first, libc::SIGKILL).unwrap();
@@ -309,7 +286,7 @@ async fn a_server_exiting_again_and_again_is_given_up() {
         return;
     }
     let dir = scratch_dir("natsd-give-up");
-    let port = port();
+    let port = free_port();
     let conf = server_conf(&dir, port);
     let (runs, once) = (dir.join("runs"), dir.join("once"));
     let stub = script(
@@ -334,7 +311,7 @@ async fn the_server_stops_after_serving() {
         return;
     }
     let dir = scratch_dir("natsd-order");
-    let port = port();
+    let port = free_port();
     let conf = server_conf(&dir, port);
     let (managed, pid) = started(&settings("nats-server", &conf), port).await;
     let serving = async {
@@ -362,7 +339,7 @@ async fn leaf_reloads_reach_the_managed_server() {
         return;
     }
     let dir = scratch_dir("natsd-apply");
-    let port = port();
+    let port = free_port();
     let conf = server_conf(&dir, port);
     let (mut managed, first) = started(&settings("nats-server", &conf), port).await;
     let done = format!("kill -HUP {first} (the nats-server ants daemon runs)");
@@ -393,7 +370,7 @@ async fn a_server_left_running_is_stopped_first() {
         return;
     }
     let dir = scratch_dir("natsd-orphan");
-    let port = port();
+    let port = free_port();
     let conf = server_conf(&dir, port);
     let settings = settings("nats-server", &conf);
 
