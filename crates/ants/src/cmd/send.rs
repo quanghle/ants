@@ -248,7 +248,11 @@ pub(crate) async fn ask(
     let (to_human, unserved) = warn_unserved(&js, &nats.me, &envelope.to, to_human, replies).await;
     let changes = followed_reactions(nats, &js, replies).await;
     let status = if (replies.wait || replies.follow) && !to_human && progress::wanted(nats.me.role.is_human()) {
-        client.subscribe(subject::status(&envelope.to, &envelope.thread_id)).await.ok()
+        client
+            .subscribe(subject::status(&envelope.to, &envelope.thread_id))
+            .await
+            .inspect_err(|e| tracing::debug!("showing no progress: {e}"))
+            .ok()
     } else {
         None
     };
@@ -466,7 +470,11 @@ pub(crate) async fn post(
     };
     let changes = followed_reactions(nats, &js, replies).await;
     let status = if room.is_some() && progress::wanted(nats.me.role.is_human()) {
-        client.subscribe(subject::status_on(&post.thread_id)).await.ok()
+        client
+            .subscribe(subject::status_on(&post.thread_id))
+            .await
+            .inspect_err(|e| tracing::debug!("showing no progress: {e}"))
+            .ok()
     } else {
         None
     };

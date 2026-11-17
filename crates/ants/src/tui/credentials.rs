@@ -417,8 +417,15 @@ impl Io {
     fn start_gather(&mut self) {
         let Some(dir) = self.dir.clone() else {
             let js = self.js.clone();
-            self.gather =
-                Some(async move { Event::Recorded(machines::holder(&js).await.ok().flatten()) }.boxed_local());
+            self.gather = Some(
+                async move {
+                    let holder = machines::holder(&js)
+                        .await
+                        .inspect_err(|e| tracing::debug!("reading the account key's holder: {e:#}"));
+                    Event::Recorded(holder.ok().flatten())
+                }
+                .boxed_local(),
+            );
             return;
         };
         let approver = self.approver(dir);

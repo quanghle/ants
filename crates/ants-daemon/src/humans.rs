@@ -282,6 +282,7 @@ impl Registry {
         }
         if let Some(assistant) = applied.withdrawn() {
             tracing::info!(human = %applied.human, %assistant, "assistant withdrawn");
+            // Fails only with no one listening.
             let _ = self
                 .assistants
                 .withdrawals
@@ -297,6 +298,7 @@ impl Registry {
         if let Some(refused) = &applied.refused {
             tracing::warn!(key, error = %refused, "not honouring a human's consent to its assistant's acts");
         }
+        // Fails only with no one listening.
         let _ = self.assistants.consented.send(applied.human);
     }
 

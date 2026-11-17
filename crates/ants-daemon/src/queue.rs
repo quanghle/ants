@@ -327,7 +327,11 @@ impl Wakes {
         Self {
             ant: ant.clone(),
             humans,
-            channels: js.get_key_value(CHANNELS_BUCKET).await.ok(),
+            channels: js
+                .get_key_value(CHANNELS_BUCKET)
+                .await
+                .inspect_err(|e| tracing::debug!("channel posts wake by default, {CHANNELS_BUCKET} unread: {e}"))
+                .ok(),
             entries: HashMap::new(),
             webhooks: Webhooks::new(js.clone()),
             checked: HashMap::new(),

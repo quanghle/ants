@@ -253,7 +253,8 @@ pub async fn unserved_warnings(js: &jetstream::Context, ants: &[&UserId]) -> Vec
 
 async fn read_unserved(js: &jetstream::Context, ants: &[&UserId]) -> Result<Vec<String>> {
     let kv = js.get_key_value(COLONY_BUCKET).await.context("opening the colony")?;
-    let kept = js.get_key_value(CHAINS_BUCKET).await.ok();
+    let kept =
+        js.get_key_value(CHAINS_BUCKET).await.inspect_err(|e| tracing::debug!("{CHAINS_BUCKET} unread: {e}")).ok();
     let now = Utc::now();
     let mut warnings = Vec::new();
     for ant in ants {

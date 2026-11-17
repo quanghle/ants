@@ -157,6 +157,7 @@ pub(super) async fn save(dir: &Path, attachment: &Attachment, bytes: &[u8]) -> R
                     file.flush().await
                 };
                 if let Err(e) = written.await {
+                    // Not to leave a part written; the write's error is the one to report.
                     let _ = tokio::fs::remove_file(&path).await;
                     return Err(format!("cannot write {}: {e}", path.display()));
                 }

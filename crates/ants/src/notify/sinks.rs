@@ -177,6 +177,7 @@ pub(super) async fn run_command(command: &[String], input: Vec<u8>, wait: Durati
             Ok(())
         }
         Err(_) => {
+            // Fails only for a command already exited.
             let _ = child.kill().await;
             bail!("no exit within {}s: killed", wait.as_secs())
         }

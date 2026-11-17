@@ -189,7 +189,8 @@ pub async fn allow(nats: &Nats<'_>, rules: Vec<String>, remove: bool, clear: boo
     let assistant = designated(&js, account, human).await;
     let record_key = pre_allow_key(human);
     if rules.is_empty() && !clear {
-        let kv = js.get_key_value(HUMANS_BUCKET).await.ok();
+        let kv =
+            js.get_key_value(HUMANS_BUCKET).await.inspect_err(|e| tracing::debug!("{HUMANS_BUCKET} unread: {e}")).ok();
         let stored = match &kv {
             Some(kv) => tools::record::<PreAllow>(kv, &record_key).await?,
             None => None,

@@ -358,7 +358,12 @@ impl Watcher {
             }
             tracing::warn!("{usage}; warning {}", self.human);
             if let Err(e) = self.warn(usage).await {
-                let _ = self.notes.delete(&key).await;
+                if let Err(deleting) = self.notes.delete(&key).await {
+                    tracing::warn!(
+                        error = format!("{deleting:#}"),
+                        "{usage}; {key} not deleted, so no human is warned while it stays"
+                    );
+                }
                 return Err(e);
             }
         } else if usage.under(percent) && matches!(self.notes.lookup(&key).await?, Lookup::Value(_)) {

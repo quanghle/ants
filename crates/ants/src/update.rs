@@ -476,7 +476,9 @@ fn replace(staged: &Path, exe: &Path) -> Result<()> {
         }
         std::fs::rename(exe, &old).with_context(|| format!("renaming {} aside", exe.display()))?;
         if let Err(e) = std::fs::rename(staged, exe) {
-            let _ = std::fs::rename(&old, exe);
+            if let Err(restoring) = std::fs::rename(&old, exe) {
+                tracing::warn!(error = %restoring, "restoring {} from {}", exe.display(), old.display());
+            }
             return Err(e).with_context(|| format!("replacing {}", exe.display()));
         }
         return Ok(());
@@ -494,6 +496,7 @@ fn old_path(exe: &Path) -> PathBuf {
 #[cfg(windows)]
 pub(crate) fn remove_old() {
     if let Ok(exe) = std::env::current_exe() {
+        // Each fails while it still runs, or when none is left; the next start tries again.
         let _ = std::fs::remove_file(old_path(&exe));
         let _ = std::fs::remove_file(old_path(&exe.with_file_name(bundled::EXE)));
     }

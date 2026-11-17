@@ -193,6 +193,7 @@ impl Shared {
     /// Wait for the CLI's output to end.
     async fn ended(&self) {
         let mut closed = self.closed.clone();
+        // Fails only once the reader is gone, which ends the output too.
         let _ = closed.wait_for(|closed| *closed).await;
     }
 
@@ -580,7 +581,7 @@ async fn route(mut events: EventSubscription, current: Current) {
         match events.recv().await {
             Ok(event) => {
                 if let Some(prompt) = current.locked().as_ref() {
-                    let _ = prompt.send(event);
+                    super::io::forward(prompt, event);
                 }
             }
             Err(e) if matches!(e.kind(), RecvErrorKind::Lagged(_)) => {

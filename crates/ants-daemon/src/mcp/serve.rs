@@ -123,7 +123,9 @@ pub(super) async fn serve_socket(mut listener: ipc::Listener, hub: Arc<Hub>) {
             };
             match Tools::new(hub, Some(thread)).serve((read, write)).await {
                 Ok(service) => {
-                    let _ = service.waiting().await;
+                    if let Err(e) = service.waiting().await {
+                        tracing::debug!(error = %e, "MCP socket session");
+                    }
                 }
                 Err(e) => tracing::debug!(error = %e, "MCP socket session"),
             }

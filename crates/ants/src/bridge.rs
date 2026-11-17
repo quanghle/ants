@@ -735,7 +735,10 @@ async fn carry(remote: &Remote, local: TcpStream) -> Result<()> {
         r = take_down(&mut down, &path, writer) => r,
     };
     remote.traffic.closed();
-    let _ = Http::new(remote).once(&Method::DELETE, &path, &Bytes::new(), Duration::from_secs(5)).await;
+    // A session not closed here expires once idle.
+    if let Err(e) = Http::new(remote).once(&Method::DELETE, &path, &Bytes::new(), Duration::from_secs(5)).await {
+        tracing::debug!(session = %id, "closing the bridge session: {e:#}");
+    }
     result
 }
 

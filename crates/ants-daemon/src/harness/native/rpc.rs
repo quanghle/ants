@@ -165,11 +165,9 @@ fn route(
     let params = message.remove("params").unwrap_or(Value::Null);
     match (message.remove("id"), message.remove("method")) {
         (Some(id), Some(Value::String(method))) => {
-            let _ = incoming.send(Incoming::Request { id, method, params });
+            super::io::forward(incoming, Incoming::Request { id, method, params })
         }
-        (None, Some(Value::String(method))) => {
-            let _ = incoming.send(Incoming::Notification { method, params });
-        }
+        (None, Some(Value::String(method))) => super::io::forward(incoming, Incoming::Notification { method, params }),
         (Some(id), None) => {
             let waiting = id.as_u64().and_then(|id| pending.locked().as_mut()?.remove(&id));
             let Some(waiting) = waiting else {

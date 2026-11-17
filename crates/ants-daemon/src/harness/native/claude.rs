@@ -411,9 +411,7 @@ async fn read(mut lines: JsonLines<ChildStdout>, shared: Arc<Shared>, events: mp
             }
             Some("control_request") => shared.answer(&message).await,
             Some("control_cancel_request") => {}
-            _ => {
-                let _ = events.send(message);
-            }
+            _ => super::io::forward(&events, message),
         }
     }
     shared.pending.locked().take();
@@ -468,6 +466,7 @@ impl Drop for ClaudeSession {
         let running = self.running.borrow().is_some();
         // Claude Code writes its cost totals to the transcript as it exits, which resuming restores: let it.
         runtime.spawn(async move {
+            // Writing fails only once the CLI is gone.
             if running {
                 let interrupt = json!({ "type": "control_request", "request_id": "ants-close", "request": { "subtype": "interrupt" } });
                 let _ = shared.writer.send(&interrupt).await;

@@ -107,7 +107,7 @@ impl Shared {
         }
         let Some(thread) = params["threadId"].as_str() else { return };
         if let Some(tx) = self.threads.locked().get(thread) {
-            let _ = tx.send((method.to_owned(), params));
+            super::io::forward(tx, (method.to_owned(), params));
         }
     }
 

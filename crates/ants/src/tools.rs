@@ -282,7 +282,7 @@ async fn consented(
     if held.is_empty() {
         return Ok((None, Vec::new()));
     }
-    let kv = js.get_key_value(HUMANS_BUCKET).await.ok();
+    let kv = js.get_key_value(HUMANS_BUCKET).await.inspect_err(|e| tracing::debug!("{HUMANS_BUCKET} unread: {e}")).ok();
     let mut waiting = Vec::new();
     for act in held {
         match Consent::read(kv.as_ref(), &act.human).await?.answer(request, act) {

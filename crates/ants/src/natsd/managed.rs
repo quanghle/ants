@@ -250,6 +250,7 @@ impl Managed {
         let Some(child) = self.child.as_mut() else { return };
         let pid = child.id();
         tracing::info!(pid, "stopping nats-server");
+        // A signal or kill fails only for a server already exited, which the wait reaps.
         if let Some(pid) = pid {
             let _ = signal(pid, libc::SIGTERM);
         }
@@ -455,6 +456,7 @@ async fn stop_orphan(pid: u32, conf: &Path, grace: Duration) {
         return;
     }
     tracing::warn!(pid, config = %conf.display(), "stopping the nats-server a previous ants daemon left running");
+    // A signal fails only for a server already gone, which `gone` sees.
     let _ = signal(pid, libc::SIGTERM);
     if gone(pid, grace).await {
         return;

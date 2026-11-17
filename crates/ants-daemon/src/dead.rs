@@ -302,7 +302,7 @@ pub async fn finish(js: &jetstream::Context, kept: &Kept, humans: &Registry) -> 
 pub async fn stored(js: &jetstream::Context, dead: &DeadLetter) -> Result<Vec<(u64, DeadLetter)>> {
     let _one = READING.lock().await;
     let name = dead_reader(&dead.ant);
-    // A consumer left by an interrupted read would carry on where it stopped.
+    // A consumer left by an interrupted read would carry on where it stopped; as a rule none is left to delete.
     let _ = js.delete_consumer_from_stream(&name, STREAM).await;
     let config = consumer::pull::Config {
         name: Some(name.clone()),
