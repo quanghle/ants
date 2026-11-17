@@ -86,7 +86,10 @@ impl Provider for Sugar {
         let Some(spec) = TOOLS.iter().find(|spec| spec.name == call.name) else {
             return ready(Err(RpcError::invalid_params(&format!("sugar has no tool {:?}", call.name))));
         };
-        ready(Ok((spec.handler)(self, &call).render(call.format)))
+        Box::pin(async move {
+            let format = call.format;
+            Ok((spec.handler)(self, &call).await.render(format))
+        })
     }
 
     fn brief(&self, _request: BriefRequest) -> BoxFuture<'_, Result<Brief, RpcError>> {

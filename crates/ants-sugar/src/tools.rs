@@ -1,6 +1,6 @@
 //! sugar's tools: one [`ToolSpec`] each, in [`TOOLS`].
 
-use ants_proto::provider::{Format, Output, Tool, ToolCall, ToolResult, served_name};
+use ants_proto::provider::{BoxFuture, Format, Output, Tool, ToolCall, ToolResult, served_name};
 use serde_json::{Value, json};
 
 use crate::{NAME, Sugar};
@@ -15,8 +15,11 @@ pub struct ToolSpec {
     pub description: &'static str,
     /// The JSON Schema of its arguments.
     pub schema: fn() -> Value,
-    pub handler: fn(&Sugar, &ToolCall) -> Answer,
+    pub handler: Handler,
 }
+
+/// What answers a tool's calls, given the ant's call ([`ToolCall::context`] tells whose).
+pub type Handler = for<'a> fn(&'a Sugar, &'a ToolCall) -> BoxFuture<'a, Answer>;
 
 impl ToolSpec {
     pub fn tool(&self) -> Tool {
@@ -150,9 +153,9 @@ fn handoff() -> Value {
     }))
 }
 
-fn not_available(_sugar: &Sugar, call: &ToolCall) -> Answer {
+fn not_available<'a>(_sugar: &'a Sugar, call: &'a ToolCall) -> BoxFuture<'a, Answer> {
     let name = served_name(NAME, &call.name);
-    Answer::error("not_available", format!("{name} is not available yet."))
+    Box::pin(std::future::ready(Answer::error("not_available", format!("{name} is not available yet."))))
 }
 
 #[cfg(test)]
