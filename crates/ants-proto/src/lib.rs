@@ -53,7 +53,7 @@ pub use admin::{
     admin_outcome_of, canonical_json, covers_order, held_orders_key,
 };
 pub use ant_request::{AntReply, AntRequest, AskedAnt};
-pub use approvals::{ApprovalDecision, ApprovalRequest, ToolCall, Verdict};
+pub use approvals::{ApprovalDecision, ApprovalRequest, MAX_LABEL, ToolCall, Verdict};
 pub use attachments::{
     ATTACHMENT_CHUNK, ATTACHMENT_HEADER, ATTACHMENT_HEADROOM, Attachment, AttachmentHandle, AttachmentScope,
     FILES_BUCKET, FILES_STREAM, IMAGE_MIMES, MAX_ATTACHMENT_NAME, MAX_ATTACHMENT_SIZE, MAX_ATTACHMENTS,

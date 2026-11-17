@@ -67,7 +67,7 @@ use crate::bus;
 use crate::escalation::Chain;
 use crate::people::assistant_first::AssistantFirst;
 use crate::people::humans::{Registry, Withdrawal};
-use crate::permission::Approver;
+use crate::permission::{Approver, Offer};
 use crate::sync::MutexExt as _;
 
 /// How long a tool request waits for a human by default.
@@ -337,12 +337,13 @@ impl NatsApprover {
         Ok(())
     }
 
-    async fn ask(&self, thread: ThreadId, tool: ToolCall, options: Vec<Verdict>) -> Result<Verdict> {
+    async fn ask(&self, thread: ThreadId, tool: ToolCall, (options, labels): Offer) -> Result<Verdict> {
         let human = {
             let answering = self.answering.locked();
             self.humans.owner_or_default(answering.get(&thread).and_then(|e| e.owner.as_ref()))
         };
         let request = ApprovalRequest::new(self.ant.clone(), thread, tool, options, self.timeout)
+            .labelled(labels)
             .for_human(Some(human.clone()), self.chain.stand_in.clone());
         // Subscribe first, so a quick answer is not missed.
         let decisions = self.client.subscribe(request.decision_subject()).await?;
@@ -712,6 +713,9 @@ fn tool_lines(text: &mut String, request: &ApprovalRequest) {
     if let Some(input) = &request.tool.input {
         let _ = write!(text, "\nInput: {input}");
     }
+    if let Some(always) = request.label(Verdict::AllowAlways) {
+        let _ = write!(text, "\nallow_always: {always}");
+    }
 }
 
 /// Drop from `held` the decisions of an assistant `withdrawal` withdrew, which never take effect now.
@@ -733,7 +737,7 @@ fn decided(request: &ApprovalRequest, payload: &[u8]) -> Option<ApprovalDecision
 }
 
 impl Approver for NatsApprover {
-    fn decide(&self, thread: ThreadId, tool: ToolCall, options: Vec<Verdict>) -> BoxFuture<'static, Verdict> {
+    fn decide(&self, thread: ThreadId, tool: ToolCall, options: Offer) -> BoxFuture<'static, Verdict> {
         let this = self.clone();
         Box::pin(async move {
             this.ask(thread, tool, options).await.unwrap_or_else(|e| {

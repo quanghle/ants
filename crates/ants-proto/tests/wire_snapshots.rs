@@ -631,12 +631,15 @@ fn approvals() {
         thread_id: thread(),
         tool: tool_call(),
         options: vec![Verdict::AllowOnce, Verdict::AllowAlways, Verdict::Reject],
+        labels: BTreeMap::new(),
         requested_at: at(0),
         expires_at: at(5),
         human: None,
         stand_in: None,
     };
     snap("approval_request", &request);
+    let always = "Yes, and don't ask again for git push commands in /work";
+    snap("approval_request_labelled", &request.clone().labelled([(Verdict::AllowAlways, always.to_owned())].into()));
     snap("approval_request_for_human", &request.for_human(Some(user("alice")), Some(user("bob"))));
     snap("approval_decision", &decision());
     snap("approval_decision_by", &decision().by(Some(user("bob"))));
@@ -967,9 +970,11 @@ fn hooks_doc_examples_parse() {
             "tool": {"kind": "execute", "title": "rm -rf target", "locations": ["/src/app"],
                      "input": "{\"command\":\"rm -rf target\"}"},
             "options": ["allow_once", "allow_always", "reject"],
+            "labels": {"allow_always": "Yes, and don't ask again for rm commands in /src/app"},
             "requested_at": "2025-01-01T12:00:00Z", "expires_at": "2025-01-01T12:05:00Z"}"#,
     );
     assert_eq!(request.tool, tool_call());
+    assert_eq!(request.label(Verdict::AllowAlways), Some("Yes, and don't ask again for rm commands in /src/app"));
     let approval: ApprovalDecision = parse(
         r#"{"request_id": "019a7d2e-0000-7000-8000-00000000000a", "ant": "dev-a", "verdict": "allow_once",
             "decided_at": "2025-01-01T12:01:00Z"}"#,

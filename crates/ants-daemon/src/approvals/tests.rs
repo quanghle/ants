@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use ants_proto::{EscalationReason, subject};
 use ants_test_support::NatsServer as Server;
 use tokio::time::timeout;
@@ -53,11 +55,14 @@ async fn the_human_decides_and_silence_rejects() {
 
     let approver = NatsApprover::new(client.clone(), js.clone(), ant.clone(), Duration::from_secs(10));
     let options = vec![Verdict::AllowOnce, Verdict::AllowAlways];
-    let decided = tokio::spawn(approver.decide(thread.clone(), tool(), options));
+    let always = "Yes, and don't ask again for git push commands in /work";
+    let labels = [(Verdict::AllowAlways, always.to_owned())].into();
+    let decided = tokio::spawn(approver.decide(thread.clone(), tool(), (options, labels)));
     let msg = timeout(WAIT, requests.next()).await.unwrap().unwrap();
     let request: ApprovalRequest = serde_json::from_slice(&msg.payload).unwrap();
     assert_eq!((&request.ant, &request.thread_id, &request.tool), (&ant, &thread, &tool()));
     assert_eq!(request.options, [Verdict::AllowOnce, Verdict::AllowAlways, Verdict::Reject]);
+    assert_eq!(request.label(Verdict::AllowAlways), Some(always), "the harness's name, stored with the request");
     for expected in [
         ants_proto::StatusUpdate::Approval { request_id: request.id },
         ants_proto::StatusUpdate::State { state: State::WaitingApproval },
@@ -83,7 +88,10 @@ async fn the_human_decides_and_silence_rejects() {
     let impatient = NatsApprover::new(client, js, ant.clone(), Duration::from_millis(300)).with_humans(humans.clone());
     let asked = Envelope::on_thread(thread.clone(), alice.clone(), ant.clone(), "push").with_owner(Some(alice.clone()));
     let turn = impatient.begin(&asked);
-    assert_eq!(impatient.decide(thread.clone(), tool(), vec![Verdict::AllowOnce]).await, Verdict::Reject);
+    assert_eq!(
+        impatient.decide(thread.clone(), tool(), (vec![Verdict::AllowOnce], BTreeMap::new())).await,
+        Verdict::Reject
+    );
     assert_eq!(decided_update(&mut statuses).await, (Verdict::Reject, DecidedBy::Expiry, None));
     let stored = stream.direct_get_last_for_subject(subject::inbox(&alice, &ant)).await.unwrap();
     let told: Envelope = serde_json::from_slice(&stored.payload).unwrap();
@@ -95,7 +103,7 @@ async fn the_human_decides_and_silence_rejects() {
 
     // With the turn over, the default human is told.
     drop(turn);
-    assert_eq!(impatient.decide(thread, tool(), vec![Verdict::AllowOnce]).await, Verdict::Reject);
+    assert_eq!(impatient.decide(thread, tool(), (vec![Verdict::AllowOnce], BTreeMap::new())).await, Verdict::Reject);
     let stored = stream.direct_get_last_for_subject(subject::inbox(&UserId::human(), &ant)).await.unwrap();
     let told: Envelope = serde_json::from_slice(&stored.payload).unwrap();
     assert_eq!((&told.to, &told.owner), (&UserId::human(), &None));
@@ -119,7 +127,7 @@ async fn a_request_names_its_human_and_stand_in_who_is_told_of_another_human_dec
         NatsApprover::new(client, js, ant.clone(), Duration::from_secs(10)).with_chain(chain).with_humans(humans);
     let asked = Envelope::on_thread(thread.clone(), alice.clone(), ant.clone(), "push").with_owner(Some(alice.clone()));
     let _turn = approver.begin(&asked);
-    let decided = tokio::spawn(approver.decide(thread.clone(), tool(), vec![Verdict::AllowOnce]));
+    let decided = tokio::spawn(approver.decide(thread.clone(), tool(), (vec![Verdict::AllowOnce], BTreeMap::new())));
     let msg = timeout(WAIT, requests.next()).await.unwrap().unwrap();
     let request: ApprovalRequest = serde_json::from_slice(&msg.payload).unwrap();
     assert_eq!((&request.human, &request.stand_in), (&Some(alice.clone()), &Some(bob.clone())));
@@ -196,7 +204,7 @@ async fn the_ant_acts_on_the_stored_decision_not_the_first_heard() {
 
     let approver = NatsApprover::new(client.clone(), js.clone(), ant.clone(), WAIT);
     let options = vec![Verdict::AllowOnce, Verdict::AllowAlways];
-    let decided = tokio::spawn(approver.decide(thread.clone(), tool(), options.clone()));
+    let decided = tokio::spawn(approver.decide(thread.clone(), tool(), (options.clone(), BTreeMap::new())));
     let request = next_request().await;
     let mut heard = client.subscribe(request.decision_subject()).await.unwrap();
     subscribed(&js).await;
@@ -212,7 +220,7 @@ async fn the_ant_acts_on_the_stored_decision_not_the_first_heard() {
 
     // A decision that is never stored leaves the request to expire.
     let impatient = NatsApprover::new(client.clone(), js.clone(), ant.clone(), Duration::from_secs(1));
-    let decided = tokio::spawn(impatient.decide(thread, tool(), options));
+    let decided = tokio::spawn(impatient.decide(thread, tool(), (options, BTreeMap::new())));
     publish_refused(&human, &next_request().await.decide(Verdict::AllowOnce)).await;
     assert_eq!(timeout(WAIT, decided).await.unwrap().unwrap(), Verdict::Reject);
 }
@@ -241,7 +249,7 @@ async fn the_chain_hears_the_request_and_only_its_decision_counts() {
     subscribed(&human_js).await;
 
     let approver = NatsApprover::new(client, js, ant.clone(), WAIT).with_chain(chain(&[&lead]));
-    let decided = tokio::spawn(approver.decide(thread.clone(), tool(), vec![Verdict::AllowOnce]));
+    let decided = tokio::spawn(approver.decide(thread.clone(), tool(), (vec![Verdict::AllowOnce], BTreeMap::new())));
     let msg = timeout(WAIT, requests.next()).await.unwrap().unwrap();
     let request: ApprovalRequest = serde_json::from_slice(&msg.payload).unwrap();
     let msg = timeout(WAIT, asked.next()).await.unwrap().unwrap();
@@ -287,7 +295,10 @@ async fn an_expired_request_is_told_to_the_chain_asked_and_pushed_to_the_human_o
     let human = UserId::human();
     let approver =
         NatsApprover::new(client, js, ant.clone(), Duration::from_millis(300)).with_chain(chain(&[&lead, &human]));
-    assert_eq!(approver.decide(thread.clone(), tool(), vec![Verdict::AllowOnce]).await, Verdict::Reject);
+    assert_eq!(
+        approver.decide(thread.clone(), tool(), (vec![Verdict::AllowOnce], BTreeMap::new())).await,
+        Verdict::Reject
+    );
 
     let stored = stream.direct_get_last_for_subject(subject::inbox(&lead, &ant)).await.unwrap();
     let told: Envelope = serde_json::from_slice(&stored.payload).unwrap();
@@ -326,7 +337,7 @@ async fn the_first_decision_wins_whoever_makes_it() {
         |request: &ApprovalRequest, verdict| Envelope::decision(thread.clone(), lead.clone(), request.decide(verdict));
 
     // The inbox consumer hands over the lead's decision, and a human's comes after it.
-    let decided = tokio::spawn(approver.decide(thread.clone(), tool(), options.clone()));
+    let decided = tokio::spawn(approver.decide(thread.clone(), tool(), (options.clone(), BTreeMap::new())));
     let msg = timeout(WAIT, requests.next()).await.unwrap().unwrap();
     let request: ApprovalRequest = serde_json::from_slice(&msg.payload).unwrap();
     approver.offer(&Envelope::decision(thread.clone(), "dev-c".parse().unwrap(), request.decide(Verdict::AllowAlways)));
@@ -338,7 +349,7 @@ async fn the_first_decision_wins_whoever_makes_it() {
 
     // A human's decision stored by the time the lead's arrives wins. The runtime is blocked while another stores
     // it, so the approver gets both at once.
-    let decided = tokio::spawn(approver.decide(thread.clone(), tool(), options));
+    let decided = tokio::spawn(approver.decide(thread.clone(), tool(), (options, BTreeMap::new())));
     let msg = timeout(WAIT, requests.next()).await.unwrap().unwrap();
     let request: ApprovalRequest = serde_json::from_slice(&msg.payload).unwrap();
     let (url, human_says) = (server.url.clone(), request.decide(Verdict::AllowAlways));
@@ -396,7 +407,7 @@ async fn an_assistant_s_decision_takes_effect_only_with_its_human_s_consent() {
     let options = vec![Verdict::AllowOnce, Verdict::AllowAlways];
     let ask = async |requests: &mut async_nats::Subscriber| {
         let pushing = ToolCall { input: Some(r#"{"command":"git push"}"#.into()), ..tool() };
-        let decided = tokio::spawn(approver.decide(thread.clone(), pushing, options.clone()));
+        let decided = tokio::spawn(approver.decide(thread.clone(), pushing, (options.clone(), BTreeMap::new())));
         let msg = timeout(WAIT, requests.next()).await.unwrap().unwrap();
         (decided, serde_json::from_slice::<ApprovalRequest>(&msg.payload).unwrap())
     };
@@ -508,7 +519,8 @@ async fn a_request_goes_to_the_human_s_assistant_too_while_it_can_act() {
     let approver =
         NatsApprover::new(client, js, ant.clone(), WAIT).with_humans(humans.clone()).with_assistants(assistants);
     let ask = async |requests: &mut async_nats::Subscriber| {
-        let decided = tokio::spawn(approver.decide(thread.clone(), tool(), vec![Verdict::AllowOnce]));
+        let decided =
+            tokio::spawn(approver.decide(thread.clone(), tool(), (vec![Verdict::AllowOnce], BTreeMap::new())));
         let msg = timeout(WAIT, requests.next()).await.unwrap().unwrap();
         (decided, serde_json::from_slice::<ApprovalRequest>(&msg.payload).unwrap())
     };

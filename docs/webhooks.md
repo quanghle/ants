@@ -137,7 +137,7 @@ The stand-in answers with the same rights any human has: the first stored decisi
 
 ### Approve and reject links
 
-With `public_url` and `action_secret_*`, approval notices include `<public_url>/_approval?ant=&id=&seq=&verdict=&by=&exp=&sig=` per offered verdict (`Approve`, `Always allow`, `Reject`). `GET` renders a confirmation page (safe against link previews); `POST` verifies HMAC-SHA256 and expiry, then writes the `ApprovalDecision` using the human's credentials (`200` ok, `400` malformed, `403` bad signature, `404` unknown human/request, `405` method, `409` already decided/expired, `410` expired link, `503` hub unreachable). Keep sink channels private (ntfy topics are public unless token-gated).
+With `public_url` and `action_secret_*`, approval notices include `<public_url>/_approval?ant=&id=&seq=&verdict=&by=&exp=&sig=` per offered verdict (`Approve`, `Always allow`, `Reject`). `GET` renders a confirmation page (safe against link previews, naming what `Always allow` allows when the harness says); `POST` verifies HMAC-SHA256 and expiry, then writes the `ApprovalDecision` using the human's credentials (`200` ok, `400` malformed, `403` bad signature, `404` unknown human/request, `405` method, `409` already decided/expired, `410` expired link, `503` hub unreachable). Keep sink channels private (ntfy topics are public unless token-gated).
 
 ### JSON notice
 
@@ -152,7 +152,7 @@ With `public_url` and `action_secret_*`, approval notices include `<public_url>/
 | `ant`, `thread` | `approval`, `escalation`, `question`, `completion`, `notice` | Source ant and thread ID to answer on |
 | `replies` | `completion` | How many replies on the thread the notice folds (the latest is `id`) |
 | `notice` | `notice` | The daemon notice's kind: `signed_out`, `quota`, `failing`, `no_fallback` or `gave_up` |
-| `request`, `seq`, `tool`, `options`, `expires_at` | `approval` | `<ant>/<id>`, `ANTS` sequence, `{kind, title, locations?, input?}`, verdicts offered, RFC 3339 expiry |
+| `request`, `seq`, `tool`, `options`, `labels`, `expires_at` | `approval` | `<ant>/<id>`, `ANTS` sequence, `{kind, title, locations?, input?}`, verdicts offered, the harness's names of the offered verdicts it names (`{verdict: label}`, redacted, possibly empty; the notice's text gives the `allow-always` one), RFC 3339 expiry |
 | `reason`, `stuck`, `level` | `escalation` | Escalation reason, stuck ant, chain level (`0` = direct) |
 | `stand_in_for` | `escalation` | Present on a [stand-in](#stand-in) relay: the human away; `ant` is then the ant to answer |
 | `question`, `options`, `free_text` | `question` | The question (redacted), its options in order (`ants answer <id> N` picks the `N`th, from 1), whether a typed answer is taken |

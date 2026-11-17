@@ -733,7 +733,7 @@ Tool calls a harness asks about are checked against `allow` (the [built-in harne
 | `fetch:https://docs.rs/*` | URL glob (falls back to title) |
 | `other:send_message` / `other:bd-*` | MCP and `other` tools by title, or by `<tool>` in `mcp__<server>__<tool>` (Claude) and `mcp.<server>.<tool>` (Codex) |
 
-Matched calls auto-approve (`allow_once`). Unmatched calls publish an `ApprovalRequest` on `ants.approvals.<ant>` and wait `approval_timeout` (default `5m`) for `allow_once`, `allow_always` or `reject`:
+Matched calls auto-approve (`allow_once`). Unmatched calls publish an `ApprovalRequest` on `ants.approvals.<ant>` and wait `approval_timeout` (default `5m`) for `allow_once`, `allow_always` or `reject`. The request carries the harness's names of the options it offers (`labels`: one line of up to 200 characters each, redacted as the input is), so cards, `ants tools show`, `ants dash`, notices and chain notices say what `allow_always` allows from then on, such as Claude Code's `Yes, and don't ask again for git push commands in /path`; the answer still picks the harness's option by kind, never by name:
 
 - **Humans and push links:** `ants tools approve|reject <ant>/<id>`, `ants dash`, or signed `/_approval` links from `ants webhook serve` store an `ApprovalDecision` on `ants.approvals.<ant>.<id>` (`Nats-Expected-Last-Subject-Sequence` ensures first answer wins; verified by direct get).
 - **Chain members:** ants in `escalate_to` receive an `approval` escalation notice on the thread and may answer via MCP `decide_approval(verdict)` (`escalate` is refused on approval notices). Earliest decision wins (human or chain).

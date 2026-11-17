@@ -248,6 +248,9 @@ pub(super) fn details(request: &ApprovalRequest) -> String {
     if let Some(input) = &tool.input {
         let _ = write!(out, "<pre>{}</pre>", html(&cut(input, MAX_TEXT)));
     }
+    if let Some(always) = request.label(Verdict::AllowAlways) {
+        let _ = write!(out, "<p>Allow always: {}</p>", html(always));
+    }
     out
 }
 

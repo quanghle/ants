@@ -106,7 +106,16 @@ fn second_line(model: &Model, items: &[home::Item], now: DateTime<Utc>) -> Line<
         return Line::from(vec![Span::styled(format!("      {what}"), style::dim()), keys]);
     };
     let keys = Span::styled(format!("   {} · {KEYS}", top.why.keys()), style::dim());
-    let text = crate::text::excerpt(&top.text, 120);
+    let mut text = top.text.clone();
+    if let Some(always) = top
+        .request
+        .as_ref()
+        .filter(|(_, settled)| settled.is_none())
+        .and_then(|(request, _)| request.label(ants_proto::Verdict::AllowAlways))
+    {
+        text = format!("{text} · A always: {always}");
+    }
+    let text = crate::text::excerpt(&text, 120);
     Line::from(vec![
         Span::raw("      ▸ "),
         Span::styled(format!("{} ", top.why.label()), Style::new().fg(top.why.color())),
@@ -190,5 +199,16 @@ mod tests {
         assert!(!m.compact && m.asking.as_ref().is_some_and(|a| a.full), "the request in full in the full view");
         assert_eq!(m.key(Key::Enter, at(3)), Some(Action::Open(asked.clone())), "its thread");
         assert!(matches!(m.page(), Page::Thread(page) if page.history.thread == asked));
+    }
+
+    #[test]
+    fn a_top_tool_request_names_what_allow_always_allows() {
+        let mut m = model();
+        m.compact = true;
+        let push = request("dev-a", "git push", vec![Verdict::AllowAlways])
+            .labelled([(Verdict::AllowAlways, "Yes, and don't ask again".to_owned())].into());
+        m.data.live.approval(&Update::Pending(push));
+        let shown = pane(&m, at(3));
+        assert!(shown.contains("dev-a asks to run execute: git push · A always: Yes, and don't ask again"), "{shown}");
     }
 }

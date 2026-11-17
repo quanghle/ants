@@ -149,6 +149,11 @@ pub(super) fn notice_json(notice: &Notice, now: DateTime<Utc>) -> Value {
             "seq": seq,
             "tool": request.tool,
             "options": request.options.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+            "labels": request
+                .options
+                .iter()
+                .filter_map(|&v| Some((v.as_str(), request.label(v)?)))
+                .collect::<std::collections::BTreeMap<_, _>>(),
             "expires_at": request.expires_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         }),
         About::Escalation { id, from, escalation } => {
@@ -258,6 +263,7 @@ pub(super) fn redactor() -> &'static Redactor {
 pub(super) fn redacted(request: &ApprovalRequest) -> ApprovalRequest {
     let mut request = request.clone();
     redactor().redact_tool(&mut request.tool);
+    request.labels.values_mut().for_each(|label| redactor().redact_string(label));
     request
 }
 
@@ -279,6 +285,9 @@ pub(super) fn approval_notice(
     }
     if let Some(input) = &tool.input {
         let _ = write!(text, "\ninput: {}", cut(input, MAX_TEXT));
+    }
+    if let Some(always) = request.label(Verdict::AllowAlways) {
+        let _ = write!(text, "\nallow-always: {always}");
     }
     let id = tools::qualified(request);
     let _ = write!(

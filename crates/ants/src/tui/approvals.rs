@@ -115,6 +115,9 @@ pub fn lines(card: Card, asking: Option<&Asking>, keyed: bool, now: DateTime<Utc
     } else if !request.tool.locations.is_empty() {
         lines.push(Line::styled(cut(&format!("files {}", request.tool.locations.join(", ")), width), style::dim()));
     }
+    if let Some(always) = request.label(Verdict::AllowAlways).filter(|_| card.settled.is_none()) {
+        lines.push(Line::styled(cut(&format!("A always: {always}"), width), style::dim()));
+    }
     let storing = asking.is_some_and(|a| a.storing && same(&a.request, request));
     let last = match card.settled {
         Some(state) => Line::styled(cut(&how(state, &request.ant), width), style::dim()),
@@ -346,5 +349,22 @@ mod tests {
         assert!(settled[1].starts_with("rejected by bob at "), "{settled:?}");
         let asking = Asking::decide(push, Verdict::AllowOnce).unwrap();
         assert_eq!(text(&lines(shown[0], Some(&asking), true, at(10), 60))[1], "storing the decision…");
+    }
+
+    #[test]
+    fn a_pending_card_and_the_request_in_full_name_what_allow_always_allows() {
+        let always = "Yes, and don't ask again for git push commands in /work";
+        let push = request("dev-a", "git push", vec![Verdict::AllowOnce, Verdict::AllowAlways])
+            .labelled([(Verdict::AllowAlways, always.to_owned())].into());
+        let card = Card { request: &push, settled: None };
+        let shown = text(&lines(card, None, true, at(10), 80));
+        assert_eq!(shown[1], format!("A always: {always}"), "{shown:?}");
+        assert!(shown[2].starts_with("a allow · A always · r reject"), "{shown:?}");
+        assert_eq!(text(&lines(card, None, true, at(10), 20))[1], "A always: Yes, and …");
+        let full = tools::details(&push, &State::Pending, at(10));
+        assert!(full.contains(&format!("\nalways   {always}\n")), "{full}");
+
+        let expired = Card { request: &push, settled: Some(&State::Expired) };
+        assert!(!text(&lines(expired, None, false, at(10), 80)).iter().any(|l| l.contains(always)), "settled");
     }
 }

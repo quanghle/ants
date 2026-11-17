@@ -675,6 +675,9 @@ pub(crate) fn details(request: &ApprovalRequest, state: &State, now: DateTime<Ut
     if let Some(input) = &request.tool.input {
         let _ = writeln!(out, "input    {input}");
     }
+    if let Some(always) = request.label(Verdict::AllowAlways) {
+        let _ = writeln!(out, "always   {always}");
+    }
     let _ = writeln!(out, "asked    {}", request.requested_at.format("%Y-%m-%d %H:%M:%S"));
     let _ = match state {
         State::Pending => write!(out, "expires  in {}\nanswer   {}", left(request.expires_at, now), commands(request)),

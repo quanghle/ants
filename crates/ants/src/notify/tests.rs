@@ -551,6 +551,19 @@ fn notices_are_redacted() {
 }
 
 #[test]
+fn an_approval_notice_names_what_allow_always_allows_redacted() {
+    let secret = "ghp_0123456789abcdefghijABCDEFGHIJ";
+    let always = format!("Yes, and don't ask again for git push https://x:{secret}@github.com");
+    let request = request().labelled([(Verdict::AllowAlways, always)].into());
+    let notice = approval_notice(&request, 9, &p("alice"), None, None, Utc::now());
+    let shown = "Yes, and don't ask again for git push https://x:[redacted]@github.com";
+    assert!(notice.text.contains(&format!("\nallow-always: {shown}\n")), "{}", notice.text);
+    let json = notice_json(&notice, Utc::now());
+    assert_eq!(json["labels"], json!({ "allow_always": shown }));
+    assert!(details(&request).contains(&format!("<p>Allow always: {}</p>", html(shown))));
+}
+
+#[test]
 fn a_notice_carries_a_button_per_verdict_offered_in_each_sink_s_form() {
     let (request, links) = (request(), links());
     let notice = approval_notice(&request, 9, &p("alice"), Some(&links), None, Utc::now());
@@ -778,6 +791,7 @@ fn exec_and_http_sinks_get_the_notice_as_versioned_json() {
                 "input": "{\"command\":\"rm -rf build\"}"
             },
             "options": ["allow_once", "allow_always", "reject"],
+            "labels": {},
             "expires_at": expires,
             "links": [
                 { "verdict": "allow_once", "label": "Approve", "url": notice.buttons[0].url },

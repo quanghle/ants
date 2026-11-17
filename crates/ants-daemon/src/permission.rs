@@ -19,15 +19,15 @@
 //!   `mcp__<server>__<tool>` and Codex `mcp.<server>.<tool>`; the pattern may match that or just the tool. Codex
 //!   reports MCP tool calls as `execute`; they count as `other`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::v1::schema::{
-    PermissionOptionKind, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, ToolCallUpdateFields,
+    PermissionOption, PermissionOptionKind, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, SelectedPermissionOutcome, ToolCallUpdateFields,
 };
 use ants_proto::{ThreadId, ToolCall, Verdict};
 use anyhow::{Result, bail};
@@ -192,10 +192,14 @@ pub fn covers(rule: &str, tool: &ToolCall) -> bool {
 
 /// The humans and the ant's chain, or whoever stands in: decide tool requests outside the allowlist.
 pub trait Approver: Send + Sync {
-    /// The decision on `tool`, requested on `thread`, among the `options` the harness offers. Never fails: anything
-    /// that goes wrong, a timeout included, is [`Verdict::Reject`].
-    fn decide(&self, thread: ThreadId, tool: ToolCall, options: Vec<Verdict>) -> BoxFuture<'static, Verdict>;
+    /// The decision on `tool`, requested on `thread`, among the `options` the harness offers, which it names
+    /// `labels` (redacted, for showing only). Never fails: anything that goes wrong, a timeout included, is
+    /// [`Verdict::Reject`].
+    fn decide(&self, thread: ThreadId, tool: ToolCall, options: Offer) -> BoxFuture<'static, Verdict>;
 }
+
+/// The verdicts a harness offers, with its names of those it names.
+pub type Offer = (Vec<Verdict>, BTreeMap<Verdict, String>);
 
 /// Threads being answered under narrowed tool rules ([`PermissionPolicy::narrow`]), with how many answers narrow each.
 type Narrowed = Arc<Mutex<HashMap<ThreadId, (Allowlist, usize)>>>;
@@ -287,7 +291,8 @@ impl PermissionPolicy {
     /// Decide on `fields`, a tool call the daemon itself makes for the ant on `thread`, in `workdir`, as on a harness's
     /// request offering to allow it once or reject it.
     pub async fn decide(&self, fields: &ToolCallUpdateFields, thread: &ThreadId, workdir: &Path) -> Verdict {
-        self.verdict(fields, || vec![Verdict::AllowOnce, Verdict::Reject], Some(thread), workdir).await
+        let options = || (vec![Verdict::AllowOnce, Verdict::Reject], BTreeMap::new());
+        self.verdict(fields, options, Some(thread), workdir).await
     }
 
     /// The allowlist's verdict on `fields`, unless the thread's narrowed rules leave it out, else the approver's among
@@ -295,7 +300,7 @@ impl PermissionPolicy {
     async fn verdict(
         &self,
         fields: &ToolCallUpdateFields,
-        options: impl FnOnce() -> Vec<Verdict>,
+        options: impl FnOnce() -> Offer,
         thread: Option<&ThreadId>,
         workdir: &Path,
     ) -> Verdict {
@@ -310,7 +315,9 @@ impl PermissionPolicy {
         }
         match (&self.approver, thread) {
             (Some(approver), Some(thread)) => {
-                let verdict = approver.decide(thread.clone(), summary(&tool, &self.redactor), options()).await;
+                let (options, mut labels) = options();
+                labels.values_mut().for_each(|label| self.redactor.redact_string(label));
+                let verdict = approver.decide(thread.clone(), summary(&tool, &self.redactor), (options, labels)).await;
                 tracing::info!(kind = %tool.kind, title = ?fields.title, ?verdict, "tool request decided");
                 verdict
             }
@@ -347,23 +354,26 @@ fn kind_name(fields: &ToolCallUpdateFields) -> String {
         .unwrap_or_else(|| "other".to_owned())
 }
 
-/// The ACP option for `verdict`, picked by option kind, never by position or label.
-fn select(request: &RequestPermissionRequest, verdict: Verdict) -> RequestPermissionResponse {
+/// The ACP option `verdict` picks, by option kind, never by position or label.
+fn option_for(request: &RequestPermissionRequest, verdict: Verdict) -> Option<&PermissionOption> {
     let preferred: &[PermissionOptionKind] = match verdict {
         Verdict::AllowOnce => &[PermissionOptionKind::AllowOnce],
         Verdict::AllowAlways => &[PermissionOptionKind::AllowAlways, PermissionOptionKind::AllowOnce],
         Verdict::Reject => &[PermissionOptionKind::RejectOnce, PermissionOptionKind::RejectAlways],
     };
-    let chosen =
-        preferred.iter().find_map(|kind| request.options.iter().find(|o| o.kind == *kind).map(|o| o.option_id.clone()));
-    RequestPermissionResponse::new(match chosen {
-        Some(id) => RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(id)),
+    preferred.iter().find_map(|kind| request.options.iter().find(|o| o.kind == *kind))
+}
+
+fn select(request: &RequestPermissionRequest, verdict: Verdict) -> RequestPermissionResponse {
+    RequestPermissionResponse::new(match option_for(request, verdict) {
+        Some(option) => RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option.option_id.clone())),
         None => RequestPermissionOutcome::Cancelled,
     })
 }
 
-/// The verdicts a request's options make possible. Rejecting is always possible, by cancelling if nothing else.
-fn offered(request: &RequestPermissionRequest) -> Vec<Verdict> {
+/// The verdicts a request's options make possible, with the names of the options they pick. Rejecting is always
+/// possible, by cancelling if nothing else.
+fn offered(request: &RequestPermissionRequest) -> Offer {
     let mut verdicts = Vec::new();
     for (kind, verdict) in [
         (PermissionOptionKind::AllowOnce, Verdict::AllowOnce),
@@ -374,7 +384,11 @@ fn offered(request: &RequestPermissionRequest) -> Vec<Verdict> {
         }
     }
     verdicts.push(Verdict::Reject);
-    verdicts
+    let labels = verdicts
+        .iter()
+        .filter_map(|&verdict| option_for(request, verdict).map(|option| (verdict, option.name.clone())))
+        .collect();
+    (verdicts, labels)
 }
 
 /// What the approver is shown of `tool`, redacted before the input is shortened, so no secret is cut in two.
@@ -661,10 +675,10 @@ mod tests {
     }
 
     /// Answers every request with a fixed verdict, recording what it was asked.
-    struct Fake(Verdict, Mutex<Vec<(ThreadId, ToolCall, Vec<Verdict>)>>);
+    struct Fake(Verdict, Mutex<Vec<(ThreadId, ToolCall, Offer)>>);
 
     impl Approver for Fake {
-        fn decide(&self, thread: ThreadId, tool: ToolCall, options: Vec<Verdict>) -> BoxFuture<'static, Verdict> {
+        fn decide(&self, thread: ThreadId, tool: ToolCall, options: Offer) -> BoxFuture<'static, Verdict> {
             self.1.locked().push((thread, tool, options));
             let verdict = self.0;
             Box::pin(async move { verdict })
@@ -688,7 +702,9 @@ mod tests {
         assert_eq!(asked.0, thread);
         assert_eq!((asked.1.kind.as_str(), asked.1.title.as_str()), ("execute", "Run shell command"));
         assert_eq!(asked.1.input.as_deref(), Some(r#"{"command":"git push"}"#));
-        assert_eq!(asked.2, [Verdict::AllowOnce, Verdict::AllowAlways, Verdict::Reject]);
+        assert_eq!(asked.2.0, [Verdict::AllowOnce, Verdict::AllowAlways, Verdict::Reject]);
+        let names = [(Verdict::AllowOnce, "Allow"), (Verdict::AllowAlways, "Always"), (Verdict::Reject, "Reject")];
+        assert_eq!(asked.2.1, names.map(|(v, name)| (v, name.to_owned())).into(), "the harness's names, by kind");
 
         let no = PermissionPolicy::new(Allowlist::default(), Some(Arc::new(Fake(Verdict::Reject, Mutex::default()))));
         assert_eq!(chosen(&no.answer(&push, Some(&thread), workdir).await), Some("no"));
@@ -698,7 +714,8 @@ mod tests {
 
         let own = &shell("git push origin ants/dev-a/t1").tool_call.fields;
         assert_eq!(policy.decide(own, &thread, workdir).await, Verdict::AllowAlways);
-        assert_eq!(fake.1.locked().pop().unwrap().2, [Verdict::AllowOnce, Verdict::Reject], "the daemon's own call");
+        let own_call = fake.1.locked().pop().unwrap().2;
+        assert_eq!(own_call, (vec![Verdict::AllowOnce, Verdict::Reject], BTreeMap::new()), "the daemon's own call");
         let allowed = PermissionPolicy::new(Allowlist::parse(&["execute:git push origin ants/*"]).unwrap(), None);
         assert_eq!(allowed.decide(own, &thread, workdir).await, Verdict::AllowOnce);
     }
@@ -735,9 +752,11 @@ mod tests {
         let policy = PermissionPolicy::new(Allowlist::default(), Some(fake.clone())).with_redactor(Arc::new(redactor));
         let command = format!("{}deploy --key d3pl0y-s3cret", " ".repeat(MAX_INPUT - 37));
         let thread: ThreadId = "t1".parse().unwrap();
-        let deploy = request(ToolKind::Execute, "deploy --key d3pl0y-s3cret", json!({ "command": command }), &[]);
+        let mut deploy = request(ToolKind::Execute, "deploy --key d3pl0y-s3cret", json!({ "command": command }), &[]);
+        deploy.options[1].name = "Always allow deploy --key d3pl0y-s3cret".to_owned();
         policy.answer(&deploy, Some(&thread), Path::new(WORKDIR)).await;
-        let (_, tool, _) = fake.1.locked().pop().unwrap();
+        let (_, tool, (_, labels)) = fake.1.locked().pop().unwrap();
+        assert_eq!(labels[&Verdict::AllowAlways], "Always allow deploy --key [redacted]");
         assert_eq!(tool.title, "deploy --key [redacted]");
         let input = tool.input.unwrap();
         assert!(input.ends_with("deploy --key [redacted]\"}") && !input.contains("d3pl0y"), "{input}");

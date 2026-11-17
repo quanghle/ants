@@ -74,11 +74,14 @@ the ant rejects it; no decision is stored for an expired request.
 {"id": "019a7d2e-…", "ant": "dev-a", "thread_id": "019a7d2c-…",
  "tool": {"kind": "execute", "title": "rm -rf target", "locations": ["/src/app"], "input": "{\"command\":\"…\"}"},
  "options": ["allow_once", "allow_always", "reject"],
+ "labels": {"allow_always": "Yes, and don't ask again for rm commands in /src/app"},
  "requested_at": "2025-01-01T12:00:00Z", "expires_at": "2025-01-01T12:05:00Z"}
 ```
 
 `tool.kind` is an ACP tool kind (`read`, `edit`, `delete`, `move`, `search`, `execute`, `think`, `fetch`,
-`switch_mode`, `other`); `locations` and `input` may be absent. `human` names the human the request waits for and
+`switch_mode`, `other`); `locations` and `input` may be absent. `labels`, absent when empty, maps offered verdicts to
+the harness's names of them, for showing only (Claude Code names `allow_always` `Yes, and don't ask again for git push
+commands in /path`): each one line of 1-200 characters, redacted as the input is; readers drop any other. `human` names the human the request waits for and
 `stand_in` the ant's stand-in, each absent when there is none (see [webhooks.md](webhooks.md#stand-in)). Check:
 `subject == "ants.approvals." + ant`.
 

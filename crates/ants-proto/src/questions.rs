@@ -167,7 +167,7 @@ impl Question {
     }
 }
 
-fn breaks_line(c: char) -> bool {
+pub(crate) fn breaks_line(c: char) -> bool {
     c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')
 }
 
