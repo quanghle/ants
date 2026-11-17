@@ -9,7 +9,7 @@ use crate::tui::approvals::{Answer, Asking};
 use crate::tui::command::{Note, Tone};
 use crate::tui::exec::Job;
 use crate::tui::react::{self, Pick, Picker};
-use crate::tui::{credentials, held, nav, thread, work};
+use crate::tui::{channel, credentials, held, nav, thread, work};
 
 impl Model {
     pub fn key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
@@ -343,6 +343,10 @@ impl Model {
             To::Do(Action::Run(Job::Withdraw { edit: Some(_), .. }, _)) if !self.bar.is_empty() => {
                 self.bar.set_status("the bar holds a draft: send or clear it before editing a message", Tone::Error);
                 None
+            }
+            To::Do(Action::KeepChannelTab(channel, tab)) => {
+                channel::keep_tab(&mut self.data.channel_tabs, channel.clone(), tab);
+                Some(Action::KeepChannelTab(channel, tab))
             }
             To::Do(Action::Run(Job::ChannelNotify { channel, level }, _)) => {
                 self.bar.set_status("running…", Tone::Busy);

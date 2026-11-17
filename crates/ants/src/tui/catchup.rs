@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use ants_daemon::bus;
 use ants_daemon::config::{Summaries, SummaryConfig};
-use ants_proto::{JsDomain, SummaryRequest, ThreadId, ThreadSummary, UserId};
+use ants_proto::{ChannelId, JsDomain, SummaryRequest, ThreadId, ThreadSummary, UserId};
 use anyhow::{Result, anyhow};
 use async_nats::jetstream;
 use chrono::{DateTime, NaiveDate, TimeDelta, Utc};
@@ -39,8 +39,8 @@ use crate::people::humans;
 use crate::threads::summary;
 use crate::threads::thread_meta::Meta;
 
-/// The file beside the config file that keeps when the last `ants chat` on the device ended, and how its thread view
-/// shows tool calls.
+/// The file beside the config file that keeps when the last `ants chat` on the device ended, how its thread view
+/// shows tool calls, and the tab chosen in each channel's view.
 pub const STATE_FILE: &str = "chat-state.json";
 /// How far back home's first line counts when no `ants chat` ended on the device before.
 const BEFORE: TimeDelta = TimeDelta::hours(24);
@@ -56,6 +56,8 @@ pub struct ChatState {
     pub ended: Option<DateTime<Utc>>,
     #[serde(default)]
     pub tools: Tools,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty", deserialize_with = "super::channel::kept_tabs")]
+    pub channel_tabs: HashMap<ChannelId, super::channel::Tab>,
 }
 
 /// [`STATE_FILE`] beside the config file.

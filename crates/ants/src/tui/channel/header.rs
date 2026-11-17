@@ -241,7 +241,7 @@ mod tests {
         assert!(lines[1].contains("Deploys, outages and the on-call"), "{shown}");
         assert!(lines[3].contains("owner dev-a · messenger dev-m"), "{shown}");
         assert!(shown.contains("1m bob new thread the site is down"), "{shown}");
-        assert!(lines[5].contains("#ops (1 posts · notify humans)"), "the feed under it: {shown}");
+        assert!(lines[5].starts_with("‹ all 1 · waiting on me 0"), "the tabs under it: {shown}");
     }
 
     #[test]
@@ -251,7 +251,7 @@ mod tests {
             let shown = shown(&m, width, height);
             let first = shown.lines().next().unwrap();
             assert_eq!(first, "#ops · notify humans · 4 members · 1m bob new thread the site is down", "{shown}");
-            assert!(shown.lines().nth(1).unwrap().contains("#ops (1 posts"), "{shown}");
+            assert!(shown.lines().nth(1).unwrap().starts_with("‹ all 1"), "{shown}");
         }
     }
 

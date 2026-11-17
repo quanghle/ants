@@ -1,7 +1,7 @@
 //! A channel's view: a header with the channel, its members and its latest activity ([`header`], [`activity`]) over
-//! its feed: its top-level posts, newest first, each with its replies' count and latest time and the reactions to it,
-//! as `ants channel read` shows them, but for those of the threads the human archived or left idle; and which of the
-//! channels' posts the human has not read.
+//! its threads under tabs by state ([`tabs`]): their top-level posts, newest first, each with its thread's state, its
+//! replies' count and latest time and the reactions to it, as `ants channel read` shows them, those of the threads
+//! the human archived or left idle under their own tab; and which of the channels' posts the human has not read.
 
 use std::collections::HashMap;
 
@@ -18,15 +18,16 @@ use super::exec::Job;
 use super::model::{Action, Data, Key, To};
 use super::select::Selection;
 use super::style::{self, ago};
-use super::work::Filter;
 use crate::channel::reads::Unread;
 use crate::messages::attachments::Listed;
 use crate::threads::thread::{Entry, Kind};
 
 mod activity;
 mod header;
+mod tabs;
 
 pub use activity::Activity;
+pub use tabs::{Tab, keep as keep_tab, kept as kept_tabs};
 
 /// The most posts of a channel whose reactions are read.
 const WATCHED: usize = 200;
@@ -170,11 +171,18 @@ impl Page {
         Self { channel, selected: Selection::default(), mark: attach::Mark::default() }
     }
 
-    pub const KEYS: &str = "↑↓ post · Enter open its thread · w its threads in work · n notify level · o open file · ] next file · Esc nav";
+    pub const KEYS: &str =
+        "↑↓ post · Enter open its thread · ←→ tab · n notify level · o open file · ] next file · Esc nav";
 
-    /// The channel's top-level posts shown, newest first: those of archived and idle threads are left out.
+    /// The tab chosen, as kept on the device.
+    pub fn tab(&self, data: &Data) -> Tab {
+        data.channel_tabs.get(&self.channel).copied().unwrap_or_default()
+    }
+
+    /// The channel's top-level posts shown, newest first: those of the threads the tab chosen lists.
     fn posts<'d>(&self, data: &'d Data) -> impl Iterator<Item = &'d Post> {
-        data.feeds.posts(&self.channel).filter(|p| !data.live.hidden(&p.thread))
+        let tab = self.tab(data);
+        data.feeds.posts(&self.channel).filter(move |p| tab.lists(&p.thread, data))
     }
 
     /// The selected post.
@@ -210,8 +218,10 @@ impl Page {
                 return None;
             }
             Key::Enter => return self.post(data).map(|p| To::Thread(p.thread.clone())),
-            Key::Char('w') => {
-                return Some(To::Work(Filter { channel: Some(self.channel.clone()), ..Filter::default() }));
+            Key::Left | Key::Right => {
+                let tab = self.tab(data).moved(if key == Key::Left { -1 } else { 1 });
+                self.selected = Selection::default();
+                return Some(To::Do(Action::KeepChannelTab(self.channel.clone(), tab)));
             }
             Key::Char('n') => {
                 let level = next_level(data.level(&self.channel));
@@ -234,19 +244,22 @@ impl Page {
 
     pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
         let rows = header::rows(frame.area());
-        let [head, area] = Layout::vertical([Constraint::Length(rows), Constraint::Min(1)]).areas(area);
+        let [head, tabs_row, area] =
+            Layout::vertical([Constraint::Length(rows), Constraint::Length(1), Constraint::Min(1)]).areas(area);
         header::draw(frame, head, data, &self.channel, now);
+        let tab = self.tab(data);
+        let counts = tabs::counts(data.feeds.posts(&self.channel).map(|p| &p.thread), data);
+        frame.render_widget(Paragraph::new(tabs::line(tab, &counts, usize::from(tabs_row.width), focused)), tabs_row);
         let posts: Vec<&Post> = self.posts(data).collect();
-        let archived = data.feeds.posts(&self.channel).count() - posts.len();
-        let level = data.level(&self.channel);
-        let archived_note = if archived == 0 { String::new() } else { format!(" · {archived} archived") };
-        let title = format!(" #{} ({} posts{archived_note} · notify {level}) ", self.channel, posts.len());
-        let block = style::block(title, focused);
+        let block = style::block(format!(" #{} · {} ", self.channel, tab.label()), focused);
         if posts.is_empty() {
-            let text = match (data.live.stored_at, archived) {
-                (None, _) => "reading the stream…",
-                (Some(_), 0) => "no posts read",
-                (Some(_), _) => "only posts on archived threads",
+            let text = match (data.live.stored_at, tab) {
+                (None, _) => "reading the stream…".to_owned(),
+                (Some(_), Tab::All) if counts.contains_key(&Tab::Archived) => {
+                    "only posts on archived threads".to_owned()
+                }
+                (Some(_), Tab::All) => "no posts read".to_owned(),
+                (Some(_), tab) => format!("no thread is {}", tab.label()),
             };
             frame.render_widget(Paragraph::new(text).block(block), area);
             return;
@@ -271,8 +284,8 @@ fn next_level(level: ChannelNotify) -> ChannelNotify {
     ChannelNotify::ALL[(at + 1) % ChannelNotify::ALL.len()]
 }
 
-/// A post: its author and age, its first line, its attachments, `marked` the one `o` opens, then its replies and
-/// reactions.
+/// A post: its author and age, its first line, its attachments, `marked` the one `o` opens, then its thread's state,
+/// its replies and reactions.
 fn post_lines(post: &Post, data: &Data, now: DateTime<Utc>, marked: Option<usize>) -> Vec<Line<'static>> {
     let first = post.text.lines().next().unwrap_or_default();
     let face = post.from.parse().ok().and_then(|from| data.face(&from));
@@ -284,6 +297,7 @@ fn post_lines(post: &Post, data: &Data, now: DateTime<Utc>, marked: Option<usize
     ]);
     let mut lines = vec![Line::from(head)];
     lines.extend(attach::lines(&post.attachments, marked, "  "));
+    let state = data.state(&post.thread);
     let mut under = Vec::new();
     if let Some(r) = data.feeds.replies(&post.thread) {
         let replies = if r.count == 1 { "reply" } else { "replies" };
@@ -292,9 +306,11 @@ fn post_lines(post: &Post, data: &Data, now: DateTime<Utc>, marked: Option<usize
     for r in data.reactions.get(&post.id).into_iter().flatten() {
         under.push(format!("{} {}", super::react::glyph(r.reaction.as_str()), r.by.len()));
     }
+    let mut badge = vec![Span::raw("  "), Span::styled(state.label(), Style::new().fg(state.color()))];
     if !under.is_empty() {
-        lines.push(Line::styled(format!("  {}", under.join("  ")), style::dim()));
+        badge.push(Span::styled(format!("  {}", under.join("  ")), style::dim()));
     }
+    lines.push(Line::from(badge));
     lines
 }
 
@@ -303,11 +319,13 @@ mod tests {
     use ants_proto::{ChannelPost, Envelope, Reacted, subject};
 
     use super::*;
-    use crate::test_support::live::{at, user};
+    use crate::test_support::live::{at, message, user};
+    use crate::test_support::render::rendered;
     use crate::threads::thread::Parser;
-    use crate::tui::model::{Action, Key, Page as View};
+    use crate::tui::model::{Action, Key, Model, Page as View};
     use crate::tui::nav;
     use crate::tui::test_support::{model, post};
+    use crate::tui::work::ThreadState;
 
     #[test]
     fn the_feed_lists_top_level_posts_newest_first_with_their_replies_and_reactions() {
@@ -339,16 +357,73 @@ mod tests {
             .collect();
         assert_eq!(
             shown,
-            ["bob 1m ago the site is down", "  ↳ 2 replies · last 1m ago", "alice 1m ago deploy at noon", "  👀 1"]
+            [
+                "bob 1m ago the site is down",
+                "  idle  ↳ 2 replies · last 1m ago",
+                "alice 1m ago deploy at noon",
+                "  idle  👀 1"
+            ]
         );
         assert_eq!(page.channel, ops);
 
-        m.key(super::super::model::Key::Down, at(5));
-        assert_eq!(m.key(super::super::model::Key::Enter, at(5)), Some(Action::Open(first.thread_id)));
-        m.key(super::super::model::Key::Esc, at(5));
-        m.key(super::super::model::Key::Char('w'), at(5));
-        let View::Work(work) = m.page() else { panic!("not the work view") };
-        assert_eq!(work.filter, Filter { channel: Some(ops), ..Filter::default() });
+        m.key(Key::Down, at(5));
+        assert_eq!(m.key(Key::Enter, at(5)), Some(Action::Open(first.thread_id)));
+        m.key(Key::Esc, at(5));
+        assert_eq!(m.key(Key::Char('w'), at(5)), None);
+        assert!(matches!(m.page(), View::Channel(_)), "w no longer leads to work");
+    }
+
+    #[test]
+    fn left_and_right_cycle_the_tabs_by_state_each_counted_and_the_archived_threads_under_their_own() {
+        let ops: ChannelId = "ops".parse().unwrap();
+        let idle = ChannelPost::new(ops.clone(), user("bob"), "lunch?");
+        let asked = ChannelPost::new(ops.clone(), user("bob"), "deploy at noon");
+        let archived = ChannelPost::new(ops.clone(), user("bob"), "fixed");
+        let answer = message(4, &asked.thread_id, "dev-a", "alice", "deployed");
+        let mut m = model();
+        m.data.live.marks.archive(&archived.thread_id, 3);
+        m.stored(vec![post(1, &idle), post(2, &asked), post(3, &archived), answer], at(4));
+        m.select(nav::Item::Channel(ops.clone()));
+        let page = |m: &Model| {
+            let View::Channel(page) = m.page() else { panic!("not the channel") };
+            (page.tab(&m.data), page.posts(&m.data).map(|p| p.thread.clone()).collect::<Vec<_>>())
+        };
+        let screen = |m: &Model| {
+            let View::Channel(page) = m.page() else { panic!("not the channel") };
+            rendered(130, 30, |f| page.draw(f, f.area(), &m.data, at(4), true))
+        };
+        assert_eq!(page(&m), (Tab::All, vec![asked.thread_id.clone(), idle.thread_id]));
+        let shown = screen(&m);
+        let tabs =
+            "‹ all 2 · waiting on me 1 · working 0 · waiting on ant 0 · stuck 0 · idle 1 · done 0 · archived 1 ›";
+        assert!(shown.lines().any(|l| l.trim_end() == tabs), "{shown}");
+        assert!(shown.contains("#ops · all"), "{shown}");
+
+        let kept = |tab| Some(Action::KeepChannelTab(ops.clone(), tab));
+        assert_eq!(m.key(Key::Right, at(4)), kept(Tab::WaitingOnMe));
+        assert_eq!(page(&m), (Tab::WaitingOnMe, vec![asked.thread_id]));
+        let badge = post_lines(m.data.feeds.posts(&ops).nth(1).unwrap(), &m.data, at(4), None).remove(1);
+        assert_eq!(badge.to_string(), "  waiting on me  ↳ 1 reply · last 0s ago");
+        assert_eq!(badge.spans[1].style.fg, Some(ThreadState::WaitingOnMe.color()), "coloured by its state");
+
+        assert_eq!(m.key(Key::Left, at(4)), kept(Tab::All));
+        assert!(m.data.channel_tabs.is_empty(), "the default is kept as none");
+        assert_eq!(m.key(Key::Left, at(4)), kept(Tab::Archived), "round from the first tab to the last");
+        assert_eq!(page(&m), (Tab::Archived, vec![archived.thread_id.clone()]));
+        m.select(nav::Item::Home);
+        m.select(nav::Item::Channel(ops.clone()));
+        assert_eq!(page(&m).0, Tab::Archived, "kept for the channel");
+        assert!(screen(&m).contains("fixed"));
+        assert_eq!(m.key(Key::Left, at(4)), kept(Tab::Done));
+        assert!(screen(&m).contains("no thread is done"));
+        assert_eq!(m.key(Key::Right, at(4)), kept(Tab::Archived));
+        assert_eq!(m.key(Key::Right, at(4)), kept(Tab::All), "round from the last tab to the first");
+        let counts = tabs::counts(m.data.feeds.posts(&ops).map(|p| &p.thread), &m.data);
+        let narrow = tabs::line(Tab::Stuck, &counts, 60, true).to_string();
+        assert_eq!(
+            narrow, "‹ all 2 · waiting on me 1 · stuck 0 · idle 1 · archived 1 ›",
+            "those listing nothing left out"
+        );
     }
 
     #[test]

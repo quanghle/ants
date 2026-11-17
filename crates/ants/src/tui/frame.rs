@@ -111,7 +111,7 @@ const HELP: &[(&str, &str)] = &[
     ("PgUp PgDn Home End", "move further"),
     ("Enter", "open the selection"),
     ("Esc", "back to the previous view, else to the nav"),
-    ("w ←→ a", "in a channel or on an ant: its threads in work; on an ant: pane, ask"),
+    ("w ←→ a", "on an ant: its threads in work, pane, ask; in a channel: ←→ its state tab"),
     ("[ ] \\", "on an ant: scroll its about or now column up, down; switch between the two"),
     ("Ctrl-K @ #", "the command bar: @ant asks, #channel posts, else reply"),
     ("/command", "in the bar: a command on the selection (Ctrl-K lists them)"),

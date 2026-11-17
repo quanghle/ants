@@ -347,8 +347,6 @@ pub struct Filter {
     pub state: Option<ThreadState>,
     /// Only threads where a human reaches this ant ([`Data::reaches`]).
     pub user: Option<UserId>,
-    /// Only threads posted in this channel.
-    pub channel: Option<ChannelId>,
     /// Only the reports of an assistant's acts to the human ([`ThreadId::is_activity`]), which no other list shows.
     pub activity: bool,
 }
@@ -358,7 +356,6 @@ impl Filter {
         let all = if self.activity { "assistant activity" } else { "work" };
         let mut parts = vec![self.state.map_or(all, ThreadState::label).to_owned()];
         parts.extend(self.user.as_ref().map(|u| format!("with {u}")));
-        parts.extend(self.channel.as_ref().map(|c| format!("in #{c}")));
         parts.join(" ")
     }
 }
@@ -383,10 +380,8 @@ impl Page {
             .iter()
             .filter(|t| t.is_activity() == self.filter.activity)
             .filter(|t| {
-                let summary = data.live.summary(t);
                 let on = |user: &UserId| data.reaches(t, user);
-                let posted = |channel: &ChannelId| summary.is_some_and(|s| s.channels.contains(channel));
-                self.filter.user.as_ref().is_none_or(on) && self.filter.channel.as_ref().is_none_or(posted)
+                self.filter.user.as_ref().is_none_or(on)
             })
             .map(|t| (t.clone(), data.state(t)))
             .filter(|(_, s)| self.filter.state.is_none_or(|f| f == *s))

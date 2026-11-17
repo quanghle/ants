@@ -208,6 +208,7 @@ pub async fn run(nats: &crate::connection::Nats<'_>, since: Duration, compact: b
     let kept = chat_state.as_deref().map_or_default(catchup::load);
     model.catchup.since = kept.ended;
     model.data.tools = kept.tools;
+    model.data.channel_tabs = kept.channel_tabs;
     model.catchup.ahead = summaries.ahead();
     let inline_images = crate::defaults::inline_images()?;
     model.data.images = images::Images::new(inline_images);
@@ -561,6 +562,12 @@ impl Chat {
             Action::KeepTools(tools) => {
                 if let Err(e) = catchup::state_path().and_then(|path| catchup::keep(&path, |kept| kept.tools = tools)) {
                     self.model.notify(format!("keeping how tool calls show: {e:#}"), Level::Error, Utc::now());
+                }
+            }
+            Action::KeepChannelTab(channel, tab) => {
+                let kept = |kept: &mut catchup::ChatState| channel::keep_tab(&mut kept.channel_tabs, channel, tab);
+                if let Err(e) = catchup::state_path().and_then(|path| catchup::keep(&path, kept)) {
+                    self.model.notify(format!("keeping the channel's tab: {e:#}"), Level::Error, Utc::now());
                 }
             }
             Action::Search(search) => self.searches.start(search),

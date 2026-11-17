@@ -2,7 +2,7 @@
 //! is known of the ants ([`Data`]), the nav's selection, the views opened from it, the focus, the help and the latest
 //! notice. Keys and changes return the [`Action`]s the UI then performs.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use ants_daemon::records::reactions::Reactions;
 use ants_proto::{
@@ -100,6 +100,8 @@ pub enum Action {
     Settings(settings::Ask),
     /// Keep on the device how the thread view shows tool calls.
     KeepTools(timeline::Tools),
+    /// Keep on the device the tab chosen in the channel's view.
+    KeepChannelTab(ChannelId, channel::Tab),
     Quit,
 }
 
@@ -148,6 +150,8 @@ pub struct Data {
     pub calls: timeline::Threads,
     /// How the thread view shows them, kept on the device.
     pub tools: timeline::Tools,
+    /// The tab chosen in each channel's view, but the default, kept on the device.
+    pub channel_tabs: HashMap<ChannelId, channel::Tab>,
     /// The tool requests settled while the UI runs.
     pub settled: approvals::Settled,
     /// Who of the other humans is online, and the messages with each.
@@ -350,6 +354,7 @@ impl Model {
             reactions: Reactions::new(),
             calls: timeline::Threads::default(),
             tools: timeline::Tools::default(),
+            channel_tabs: HashMap::new(),
             settled: approvals::Settled::default(),
             people: people::People::default(),
             delegations: tree::Delegations::default(),
