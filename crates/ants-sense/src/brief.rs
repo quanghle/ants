@@ -1,7 +1,8 @@
 //! The brief (requirements ants-x39hk.8.1 and ants-x39hk.8.2): what an ant reads first in each session, and again on
 //! demand with `sense_brief`. Its sections come in a fixed order ([`sections`]): a warning when the ant's log is
-//! broken, the identity, the thread's resume register, the unacknowledged handoffs, open commitments, fired and upcoming
-//! reminders, claimed and ready tasks, the core and top memories, and the core loop of tools.
+//! broken, the identity, the self-model, the thread's resume register, the unacknowledged handoffs, open commitments,
+//! fired and upcoming reminders, claimed and ready tasks, the relationship records of the thread's participants, the
+//! core and top memories, and the core loop of tools.
 //!
 //! The brief stays within its byte budget ([`fit`]): memories are shortened to their titles first, then the longest
 //! section is cut, again and again, each cut ending with a line naming the tool call that shows the rest.
@@ -16,6 +17,7 @@ use crate::identity::{self, Card};
 use crate::items::ItemId;
 use crate::log::Break;
 use crate::memory::{self, MemoryItem, Ranked, Scope, Status, Trust, framed, participants, snippet, thread_repo};
+use crate::records::{self, RecordItem};
 use crate::store::{Items, StoreError};
 use crate::thread::{self, Handoff, Register};
 use crate::{Answer, Sense, promise, remind, task};
@@ -39,7 +41,11 @@ const CORE_LOOP: &[(&str, &str)] = &[
     ("promise", "record commitments with promisees and due times; keep, break, release or renegotiate commitments"),
     ("remind", "set, acknowledge, postpone or drop time and condition reminders"),
     ("recall", "before deciding, search the memories; with an id, read one in full"),
-    ("remember", "keep a fact, lesson, decision, preference or gotcha worth knowing later"),
+    (
+        "remember",
+        "keep a fact, lesson, decision, preference or gotcha worth knowing later; replace the self-model or a \
+         relationship record from the revision shown",
+    ),
     ("vote", "say whether a recalled memory helped, is stale or is wrong"),
     ("handoff", "hand the work over as the thread's last write"),
     ("brief", "show this brief again"),
@@ -169,11 +175,12 @@ pub async fn compose(
     Ok(text)
 }
 
-/// The sections of the brief, in order. Relationship notes and the skills index follow once sense keeps them.
+/// The sections of the brief, in order. The skills index follows once sense keeps skills.
 async fn sections(items: &dyn Items, context: &CallContext, card: Option<&Card>) -> Result<Vec<Section>, StoreError> {
     let mut sections = Vec::new();
     sections.extend(items.broken().await.as_ref().map(warning));
     sections.push(identity_section(card, context));
+    sections.push(self_model_section(records::self_model(items).await?.as_ref()));
     sections.push(register_section(thread::register(items, &context.thread).await?.as_ref()));
     let mut handoffs = thread::unacknowledged(items, MAX_HANDOFFS + 1).await?;
     let more = handoffs.len() > MAX_HANDOFFS;
@@ -182,6 +189,7 @@ async fn sections(items: &dyn Items, context: &CallContext, card: Option<&Card>)
     sections.extend(commitments_section(items, context.at).await?);
     sections.extend(reminders_sections(items, context.at).await?);
     sections.extend(tasks_sections(items, context).await?);
+    sections.extend(relationships_section(&records::relationships(items, &participants(context)).await?));
     let episodes: Vec<_> = handoffs.into_iter().filter_map(|handoff| handoff.episode).collect();
     sections.extend(memories_section(items, context, &episodes).await?);
     sections.push(core_loop());
@@ -228,6 +236,29 @@ fn identity_section(card: Option<&Card>, context: &CallContext) -> Section {
         );
     }
     Section::whole(heading, body)
+}
+
+fn self_model_section(found: Option<&RecordItem>) -> Section {
+    let Some(found) = found else {
+        let body = "No self-model yet: write one with sense_remember, kind self_model, without a revision.";
+        return Section::whole("## Self-model".to_owned(), body.to_owned());
+    };
+    let more = format!("sense_recall id={}", found.id());
+    let mut section = Section::cut_with("## Self-model", found.text(), &more);
+    (section.framed, section.titles) = (true, Some(found.head()));
+    section
+}
+
+/// The relationship records of the thread's participants.
+fn relationships_section(found: &[RecordItem]) -> Option<Section> {
+    if found.is_empty() {
+        return None;
+    }
+    let body: Vec<_> = found.iter().map(RecordItem::text).collect();
+    let titles: Vec<_> = found.iter().map(RecordItem::head).collect();
+    let mut section = Section::cut_with("## Relationships", body.join("\n"), "sense_recall id=<id>");
+    (section.framed, section.titles) = (true, Some(titles.join("\n")));
+    Some(section)
 }
 
 fn register_section(register: Option<&Register>) -> Section {

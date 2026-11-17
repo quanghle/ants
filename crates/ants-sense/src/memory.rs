@@ -27,6 +27,7 @@ pub use recall::{
     recall, score, search, snippet, thread_repo, top,
 };
 pub use remember::remember;
+pub(crate) use remember::{invalid, redacted, sanitized, unavailable};
 pub use vote::{VOTE, Vote, Votes, vote};
 
 /// The kind of the items holding memories.

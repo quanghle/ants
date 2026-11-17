@@ -7,8 +7,10 @@
 //! stale)`, times [`NEEDS_REVIEW_WEIGHT`] while it needs review.
 //!
 //! Recall reads the scopes of the thread: `self`, the repository the thread works in ([`thread_repo`]) and the one the
-//! call names, the human or ant who started the thread ([`participants`]) and the names the call adds. Recalled memories are shown inside a block ([`framed`])
-//! saying they are notes from earlier sessions to verify, not instructions, so `sense_remember` refuses them back.
+//! call names, the human or ant who started the thread ([`participants`]) and the names the call adds; with the memories
+//! come the relationship records of the people among those scopes ([`crate::records`]). Recalled memories are shown
+//! inside a block ([`framed`]) saying they are notes from earlier sessions to verify, not instructions, so
+//! `sense_remember` refuses them back. An id reads one memory, or the self-model or a relationship record, in full.
 
 use std::fmt::Write as _;
 
@@ -24,6 +26,7 @@ use super::{
 };
 use crate::Sense;
 use crate::items::{Item, ItemId};
+use crate::records::{self, RecordItem};
 use crate::store::{Items, StoreError};
 use crate::tools::Answer;
 
@@ -254,8 +257,9 @@ async fn recall_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
         None => top(items, &scopes, request.limit, now).await,
     };
     let ranked = ranked.map_err(unavailable)?;
+    let relationships = records::relationships(items, &scopes).await.map_err(unavailable)?;
     let repo = scopes.iter().any(|scope| matches!(scope, Scope::Repo(_)));
-    Ok(listed(&ranked, request.query.as_deref(), &scopes, repo))
+    Ok(listed(&ranked, &relationships, request.query.as_deref(), &scopes, repo))
 }
 
 /// What a call asks to recall.
@@ -338,9 +342,16 @@ fn people(name: &str) -> Result<Vec<Scope>, Answer> {
     }
 }
 
-/// Memory `id` in full, with the chain of memories it superseded when `history`.
+/// Memory `id` in full, with the chain of memories it superseded when `history`; or record `id` in full.
 async fn read(items: &dyn Items, id: &ItemId, history: bool) -> Result<Answer, Answer> {
     let not_found = || Answer::error("not_found", format!("No memory {id}."));
+    if let Some(found) = items.get(id).await.map_err(unavailable)?.and_then(RecordItem::of) {
+        if history {
+            return Err(invalid(format!("{id} is a record, replaced in place: history needs the id of a memory.")));
+        }
+        let json = json!({"note": NOTE, "record": found.json()});
+        return Ok(Answer { text: framed(&found.full()), json, is_error: false });
+    }
     let chain = if history {
         chain(items, id).await.map_err(|e| match e {
             StoreError::NotFound(_) => not_found(),
@@ -463,7 +474,13 @@ fn starter(by: &Starter) -> String {
     }
 }
 
-fn listed(ranked: &[Ranked], query: Option<&str>, scopes: &[Scope], repo: bool) -> Answer {
+fn listed(
+    ranked: &[Ranked],
+    relationships: &[RecordItem],
+    query: Option<&str>,
+    scopes: &[Scope],
+    repo: bool,
+) -> Answer {
     let names: Vec<_> = scopes.iter().map(ToString::to_string).collect();
     let mut text = if ranked.is_empty() {
         let matching = query.map_or_else(String::new, |query| format!(" matching {query:?}"));
@@ -476,10 +493,15 @@ fn listed(ranked: &[Ranked], query: Option<&str>, scopes: &[Scope], repo: bool) 
     if !repo {
         text.push_str(" Pass repo, the git remote, to include the repository's memories.");
     }
+    if !relationships.is_empty() {
+        let records: Vec<_> = relationships.iter().map(RecordItem::text).collect();
+        let _ = write!(text, "\nRelationships:\n{}", framed(&records.join("\n")));
+    }
     let json = json!({
         "note": NOTE,
         "scopes": names,
         "memories": ranked.iter().map(|ranked| ranked.json(query)).collect::<Vec<_>>(),
+        "relationships": relationships.iter().map(RecordItem::json).collect::<Vec<_>>(),
     });
     Answer { text, json, is_error: false }
 }

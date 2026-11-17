@@ -20,6 +20,7 @@ pub mod items;
 pub mod log;
 pub mod memory;
 pub mod promise;
+pub mod records;
 pub mod remind;
 pub mod sanitize;
 pub mod store;
