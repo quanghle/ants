@@ -19,8 +19,20 @@ fn valid_token(s: &str) -> bool {
         && !s.starts_with('-')
 }
 
+/// Whether `s` is a machine's name: 1-64 of ASCII letters, digits, `-` and `_`, starting with a letter or digit.
+fn valid_machine(s: &str) -> bool {
+    (1..=64).contains(&s.len())
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        && s.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric())
+}
+
+/// A string id type: `$valid` tells the strings it takes, `$invalid` makes the error for any other.
 macro_rules! token_id {
     ($name:ident, $kind:literal) => {
+        token_id!($name, valid_token, |value| Error::InvalidId { kind: $kind, value });
+    };
+    ($(#[$meta:meta])* $name:ident, $valid:expr, $invalid:expr) => {
+        $(#[$meta])*
         #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
         #[serde(try_from = "String", into = "String")]
         pub struct $name(String);
@@ -34,11 +46,7 @@ macro_rules! token_id {
         impl FromStr for $name {
             type Err = Error;
             fn from_str(s: &str) -> Result<Self, Error> {
-                if valid_token(s) {
-                    Ok(Self(s.to_owned()))
-                } else {
-                    Err(Error::InvalidId { kind: $kind, value: s.to_owned() })
-                }
+                if $valid(s) { Ok(Self(s.to_owned())) } else { Err($invalid(s.to_owned())) }
             }
         }
 
@@ -123,17 +131,15 @@ impl Role {
     }
 }
 
-/// A machine's name: the `server_name` and JetStream domain of its leaf node, which keeps the machine's outbox
-/// ([`OUTBOX_STREAM`]), and the name of its uplink credentials. One subject token, so it can name a domain.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct Machine(String);
+token_id!(
+    /// A machine's name: the `server_name` and JetStream domain of its leaf node, which keeps the machine's outbox
+    /// ([`OUTBOX_STREAM`]), and the name of its uplink credentials. One subject token, so it can name a domain.
+    Machine,
+    valid_machine,
+    Error::InvalidMachine
+);
 
 impl Machine {
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
     /// The JetStream API prefix of the machine's leaf node, as the hub reaches it.
     pub fn api_prefix(&self) -> String {
         format!("$JS.{self}.API")
@@ -232,35 +238,6 @@ impl Machine {
             .take(64)
             .collect();
         name.parse().unwrap_or_else(|_| Self("machine".to_owned()))
-    }
-}
-
-impl FromStr for Machine {
-    type Err = Error;
-    fn from_str(s: &str) -> Result<Self, Error> {
-        let valid = (1..=64).contains(&s.len())
-            && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-            && s.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric());
-        if valid { Ok(Self(s.to_owned())) } else { Err(Error::InvalidMachine(s.to_owned())) }
-    }
-}
-
-impl TryFrom<String> for Machine {
-    type Error = Error;
-    fn try_from(s: String) -> Result<Self, Error> {
-        s.parse()
-    }
-}
-
-impl From<Machine> for String {
-    fn from(machine: Machine) -> String {
-        machine.0
-    }
-}
-
-impl fmt::Display for Machine {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
     }
 }
 
