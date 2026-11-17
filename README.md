@@ -144,7 +144,8 @@ Workspace crates: `ants-proto` (wire types and NATS permissions, no I/O), `ants-
 Run the full CI check suite locally before submitting changes (`rust-toolchain.toml` pins Rust 1.100):
 
 ```sh
-scripts/check.sh        # fmt, clippy, test (v1 + JS ack/FC v2), and cargo-deny with warnings denied
+scripts/check.sh               # fmt, clippy, test (v1 + JS ack/FC v2), and cargo-deny with warnings denied
+scripts/check.sh --footprint   # also the release build and the idle footprint check (slow: fat LTO)
 ```
 
 - **Dependencies:** `.cargo/config.toml` enforces a 7-day minimum publish age; `deny.toml` governs allowed permissive licenses and advisories.
