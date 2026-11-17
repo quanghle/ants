@@ -213,7 +213,7 @@ mod tests {
     use ants_proto::ThreadId;
 
     use super::*;
-    use crate::live::tests::{at, message, user};
+    use crate::test_support::live::{at, message, user};
 
     #[test]
     fn a_query_takes_filter_words_and_the_rest_as_text() {
@@ -250,7 +250,7 @@ mod tests {
         let first = message(1, &thread, "alice", "dev-a", "Please\ndeploy the API");
         let second = message(2, &other, "dev-a", "alice", "deployed");
         page.found(Ok((vec![first.clone(), second.clone()], 0)));
-        let data = &super::super::model::tests::model().data;
+        let data = &crate::tui::test_support::model().data;
         let row = page.row(&page.matches()[1], data, at(70)).to_string();
         assert!(row.starts_with(&format!("{:<24} alice", thread.to_string()[..23].to_owned() + "…")), "{row}");
         assert!(row.ends_with("1m ago  deploy the API"), "{row}");

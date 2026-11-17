@@ -514,9 +514,9 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
-    use crate::live::tests::{at, message, user};
+    use crate::test_support::live::{at, message, user};
     use crate::tui::model::Page;
-    use crate::tui::model::tests::model;
+    use crate::tui::test_support::model;
     use crate::tui::thread;
 
     #[test]

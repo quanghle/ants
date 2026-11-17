@@ -521,11 +521,11 @@ mod tests {
 
     use super::conversation::body;
     use super::*;
-    use crate::live::tests::{at, message};
     use crate::sealed;
-    use crate::tui::model::tests::model;
+    use crate::test_support::live::{at, message};
+    use crate::tui::test_support::model;
+    use crate::tui::test_support::tool;
     use crate::tui::timeline::Tools;
-    use crate::tui::timeline::tests::tool;
 
     /// A thread where alice asks dev-a, which asks dev-b, which answers it, then answers alice; each ant making a
     /// call before it speaks, dev-a one more after hearing back.
@@ -596,7 +596,7 @@ mod tests {
             reason: None,
             text: "\nThanks, noted.\nMore.".to_owned(),
         };
-        let user = crate::live::tests::user;
+        let user = crate::test_support::live::user;
         let record = ants_proto::Timeline {
             at: at(4),
             ..ants_proto::Timeline::new(user("dev-a"), thread.clone(), entries[1].id.unwrap(), vec![end], 0)
@@ -624,7 +624,7 @@ mod tests {
         let mut page = Page::new(thread.clone());
         page.history.loaded(&thread, Ok(entries.clone())).unwrap();
         let queued = ants_proto::StatusUpdate::Queued { message: entries[1].id.unwrap(), ahead: 1 };
-        let event = ants_proto::StatusEvent::new(crate::live::tests::user("dev-a"), thread.clone(), queued);
+        let event = ants_proto::StatusEvent::new(crate::test_support::live::user("dev-a"), thread.clone(), queued);
         m.data.live.status(&event, at(3));
         let shown = screen(&page, &m, 100, at(4));
         let line = shown.lines().find(|l| l.contains("queued")).unwrap_or_default();
@@ -648,7 +648,7 @@ mod tests {
         page.history.loaded(&thread, Ok(entries.clone())).unwrap();
         let withdraw = |edit| {
             Some(To::Do(Action::Run(
-                Job::Withdraw { ants: vec![crate::live::tests::user("dev-a")], message: last, edit },
+                Job::Withdraw { ants: vec![crate::test_support::live::user("dev-a")], message: last, edit },
                 String::new(),
             )))
         };
@@ -684,7 +684,7 @@ mod tests {
     #[test]
     fn w_and_e_withdraw_a_channel_post_of_the_human_from_the_ants_it_woke_that_have_not_started() {
         use ants_proto::{ChannelEntry, ChannelPost, Humans, NoticeKind};
-        let user = crate::live::tests::user;
+        let user = crate::test_support::live::user;
         let (ops, mut m) = ("ops".parse::<ants_proto::ChannelId>().unwrap(), model());
         let mut channel = ChannelEntry::new(ops.clone());
         channel.members = ["alice", "dev-a", "dev-b"].map(user).to_vec();
@@ -765,14 +765,15 @@ mod tests {
         m.stored(entries[..3].to_vec(), at(5));
         calls.iter().for_each(|c| m.data.calls.status(c));
         let busy = ants_proto::StatusUpdate::State { state: ants_proto::State::Working };
-        m.data
-            .live
-            .status(&ants_proto::StatusEvent::new(crate::live::tests::user("dev-a"), thread.clone(), busy), at(6));
+        m.data.live.status(
+            &ants_proto::StatusEvent::new(crate::test_support::live::user("dev-a"), thread.clone(), busy),
+            at(6),
+        );
         let mut page = Page::new(thread.clone());
         page.history.loaded(&thread, Ok(entries[..3].to_vec())).unwrap();
         page.about = Some(About { spend: Some(Vec::new()), ..About::default() });
 
-        m.data.live.colony(vec![crate::colony::tests::entry("dev-a", 3600, 2, at(5))], at(5));
+        m.data.live.colony(vec![crate::test_support::colony::entry("dev-a", 3600, 2, at(5))], at(5));
         let shown = screen(&page, &m, 110, at(47));
         assert!(shown.contains("alice → dev-a"), "{shown}");
         let face = format!("{} {{.~.}} dev-a → dev-b", hm(entries[1].stored_at));
@@ -809,11 +810,11 @@ mod tests {
         let mut page = Page::new(thread.clone());
         page.history.loaded(&thread, Ok(entries)).unwrap();
         let request = |command| {
-            let request = crate::live::tests::request("dev-a", command, vec![Verdict::AllowOnce]);
+            let request = crate::test_support::live::request("dev-a", command, vec![Verdict::AllowOnce]);
             ants_proto::ApprovalRequest { thread_id: thread.clone(), ..request }
         };
         let (push, tag) = (request("git push"), request("git tag v1"));
-        m.data.live.approvals = vec![push.clone(), tag, crate::live::tests::request("dev-b", "ls", vec![])];
+        m.data.live.approvals = vec![push.clone(), tag, crate::test_support::live::request("dev-b", "ls", vec![])];
         assert_eq!(page.key(Key::Char('A'), &m.data, at(2)), Some(To::Ask(push.clone(), Some(Verdict::AllowAlways))));
         assert_eq!(page.key(Key::Enter, &m.data, at(2)), Some(To::Ask(push.clone(), None)));
 
@@ -845,7 +846,7 @@ mod tests {
         let mut page = Page::new(thread.clone());
         page.history.loaded(&thread, Ok(entries)).unwrap();
         let reacted = |name: &str, by: &[&str]| {
-            Reacted::new(name.parse().unwrap(), by.iter().map(|b| crate::live::tests::user(b)).collect())
+            Reacted::new(name.parse().unwrap(), by.iter().map(|b| crate::test_support::live::user(b)).collect())
         };
         m.data.reactions.insert(first, vec![reacted("eyes", &["alice", "bob"]), reacted("shipit", &["dev-a"])]);
         m.data.reactions.insert(nested, vec![reacted("check", &["alice"])]);
@@ -923,7 +924,7 @@ mod tests {
         let thread = ThreadId::generate();
         let m = model();
         let mut reply = message(2, &thread, "alice", "dev-b", "why **that** one?");
-        reply.quote = Some(Quote::new(crate::live::tests::user("dev-a"), "picked dev-b for the deploy"));
+        reply.quote = Some(Quote::new(crate::test_support::live::user("dev-a"), "picked dev-b for the deploy"));
         let entries = vec![message(1, &thread, "dev-a", "alice", "picked dev-b for the deploy"), reply];
         let mut page = Page::new(thread.clone());
         page.history.loaded(&thread, Ok(entries)).unwrap();
@@ -1006,7 +1007,7 @@ mod tests {
         data.live.marks.pin(&thread);
         page.about = Some(About {
             muted: Some(at(100)),
-            done: Some(ThreadDone::new(thread.clone(), crate::live::tests::user("bob"), 7)),
+            done: Some(ThreadDone::new(thread.clone(), crate::test_support::live::user("bob"), 7)),
             ..About::default()
         });
         assert_eq!(page.key(Key::Char('p'), data, at(8)), change(Change::Pin(false)), "pressed again, undone");
@@ -1023,8 +1024,11 @@ mod tests {
         let m = model();
         let mut sent = message(1, &thread, "dev-a", "alice", "the screenshots");
         let shot = |name: &str| ants_daemon::files::reference(name, "image/png", &[0; 1536]).unwrap();
-        let envelope =
-            ants_proto::Envelope::new(crate::live::tests::user("dev-a"), crate::live::tests::user("alice"), "x");
+        let envelope = ants_proto::Envelope::new(
+            crate::test_support::live::user("dev-a"),
+            crate::test_support::live::user("alice"),
+            "x",
+        );
         sent.attachments =
             crate::attachments::listed(&[shot("before.png"), shot("after.png")], |id| envelope.attachment_handle(id));
         let entries = vec![sent, message(2, &thread, "alice", "dev-a", "thanks")];
@@ -1055,11 +1059,14 @@ mod tests {
         let thread = ThreadId::generate();
         let mut m = model();
         let mut sent = message(1, &thread, "dev-a", "alice", "the screenshot");
-        let png = crate::tui::images::tests::png(40, 40);
+        let png = crate::tui::test_support::png(40, 40);
         let shot = ants_daemon::files::reference("shot.png", "image/png", &png).unwrap();
         let log = ants_daemon::files::reference("build.log", "text/plain", b"ok").unwrap();
-        let envelope =
-            ants_proto::Envelope::new(crate::live::tests::user("dev-a"), crate::live::tests::user("alice"), "x");
+        let envelope = ants_proto::Envelope::new(
+            crate::test_support::live::user("dev-a"),
+            crate::test_support::live::user("alice"),
+            "x",
+        );
         sent.attachments = crate::attachments::listed(&[shot, log], |id| envelope.attachment_handle(id));
         let mut page = Page::new(thread.clone());
         page.history.loaded(&thread, Ok(vec![sent.clone()])).unwrap();
@@ -1067,7 +1074,7 @@ mod tests {
 
         m.data.images = images::Images::new(true);
         assert_eq!(images::wanted(&m), Vec::new(), "only for the open thread");
-        let image = crate::tui::images::tests::halfblocks(&png);
+        let image = crate::tui::test_support::halfblocks(&png);
         m.data.images.insert(sent.attachments[0].handle.clone(), Some(image));
         let shown = screen(&page, &m, 80, at(3));
         let rows: Vec<&str> = shown.lines().collect();

@@ -262,47 +262,10 @@ fn one_line(text: &str) -> String {
 }
 
 #[cfg(test)]
-pub mod tests {
+mod tests {
     use super::*;
-    use crate::live::tests::{at, user};
-    use crate::thread::ToolCall;
-
-    pub fn tool(thread: &ThreadId, ant: &str, id: &str, title: Option<&str>, status: &str, secs: i64) -> StatusEvent {
-        let update = StatusUpdate::Tool {
-            id: id.to_owned(),
-            title: title.map(str::to_owned),
-            tool_kind: Some("execute".to_owned()),
-            status: Some(status.to_owned()),
-            paths: (status == "in_progress").then(|| vec![format!("src/{id}.rs")]),
-        };
-        StatusEvent { at: at(secs), ..StatusEvent::new(user(ant), thread.clone(), update) }
-    }
-
-    /// The entry of a call stored on `ant`'s timeline for `message`, started at second `started`.
-    pub fn stored(
-        seq: u64,
-        thread: &ThreadId,
-        ant: &str,
-        message: Uuid,
-        id: &str,
-        status: &str,
-        started: i64,
-    ) -> Entry {
-        let mut entry = crate::live::tests::message(seq, thread, ant, "alice", "cargo test");
-        entry.kind = Kind::Tool;
-        entry.id = None;
-        entry.to = None;
-        entry.stored_at = at(started);
-        entry.tool = Some(ToolCall {
-            call_id: id.to_owned(),
-            message,
-            tool_kind: Some("execute".to_owned()),
-            status: Some(status.to_owned()),
-            duration_ms: Some(3100),
-            paths: vec!["Cargo.toml".to_owned()],
-        });
-        entry
-    }
+    use crate::test_support::live::at;
+    use crate::tui::test_support::{stored, tool};
 
     #[test]
     fn a_call_heard_live_runs_until_it_ends_and_keeps_its_title_and_paths() {

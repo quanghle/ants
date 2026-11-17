@@ -52,4 +52,4 @@ pub async fn run(nats: &Nats<'_>, name: &UserId, machine: Machine, options: &Ant
 }
 
 #[cfg(test)]
-pub(crate) mod tests;
+mod tests;

@@ -200,7 +200,7 @@ mod tests {
     use ants_proto::ThreadId;
 
     use super::*;
-    use crate::live::tests::{at, message, user};
+    use crate::test_support::live::{at, message, user};
 
     #[test]
     fn what_was_not_read_in_time_shows_as_unknown() {
@@ -208,7 +208,7 @@ mod tests {
         let mut opening = message(1, &thread, "alice", "dev-a", "deploy");
         opening.owner = Some(user("alice"));
         let entries = vec![opening, message(2, &thread, "dev-a", "alice", "deployed")];
-        let mut scout = crate::colony::tests::entry("scout", 60, 5, at(0));
+        let mut scout = crate::test_support::colony::entry("scout", 60, 5, at(0));
         scout.activity = Activity::Working;
         let read = cards::Read {
             titles: Ok(Default::default()),
@@ -221,7 +221,7 @@ mod tests {
         let parts = Parts {
             threads: Some((State::new(user("alice"), SINCE), entries)),
             approvals: Some(Vec::new()),
-            colony: Some(vec![scout, crate::colony::tests::entry("dev-a", 60, 5, at(0))]),
+            colony: Some(vec![scout, crate::test_support::colony::entry("dev-a", 60, 5, at(0))]),
             cards: Some(read),
             ..Parts::default()
         };

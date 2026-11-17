@@ -406,11 +406,11 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::colony::tests::entry;
-    use crate::live::tests::{at, user};
+    use crate::test_support::colony::entry;
+    use crate::test_support::live::{at, user};
     use crate::tui::model::Focus;
-    use crate::tui::model::tests::model;
     use crate::tui::nav;
+    use crate::tui::test_support::model;
 
     fn screen(m: &super::super::model::Model) -> String {
         let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 36)).unwrap();

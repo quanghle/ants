@@ -56,6 +56,8 @@ pub mod status;
 pub mod storage;
 pub mod sync;
 pub mod template;
+#[cfg(test)]
+mod test_support;
 pub mod timeline;
 pub mod unserved;
 pub mod webhooks;

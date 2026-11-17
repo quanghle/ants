@@ -323,7 +323,7 @@ pub(crate) fn table(orders: &[Listed], now: DateTime<Utc>) -> String {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use ants_daemon::admin::ConfigFile;
     use ants_daemon::admin::restart::{Restarted, Restarts};
     use ants_daemon::direct_kv::DirectKv;
@@ -334,57 +334,7 @@ pub(crate) mod tests {
     use crate::auth::{NewDevice, issue_device_with, issue_host};
     use crate::revoke::Kind;
     use crate::test_support::Server;
-
-    pub(crate) const WAIT: Duration = Duration::from_secs(5);
-
-    pub(super) fn p(s: &str) -> UserId {
-        s.parse().unwrap()
-    }
-
-    /// The host connection of m1 serving dev-a, as a daemon whose config sets `[admin] remote` to `remote` runs it,
-    /// serving the file `config`, once it recorded its ants; dropping the sender stops it.
-    pub(crate) async fn host_of_m1(
-        server: &Server,
-        js: &jetstream::Context,
-        remote: bool,
-        config: Option<ConfigFile>,
-    ) -> (tokio::sync::watch::Sender<Vec<UserId>>, tokio::task::JoinHandle<Result<()>>) {
-        host_of_m1_serving(server, js, remote, config, Restarts::default()).await
-    }
-
-    /// [`host_of_m1`], of a process serving the ants `restarts` holds.
-    pub(crate) async fn host_of_m1_serving(
-        server: &Server,
-        js: &jetstream::Context,
-        remote: bool,
-        config: Option<ConfigFile>,
-        restarts: Restarts,
-    ) -> (tokio::sync::watch::Sender<Vec<UserId>>, tokio::task::JoinHandle<Result<()>>) {
-        let creds = server.dir().join("host-m1.creds");
-        issue_host(&server.dir().join("auth"), &"m1".parse().unwrap(), None, &creds).unwrap();
-        let (url, creds) = (server.url.clone(), Some(creds));
-        let host = Host {
-            machine: None,
-            fallback: None,
-            nats: url,
-            creds,
-            js_domain: None,
-            remote_admin: remote,
-            config,
-            restarts,
-            leaf: None,
-        };
-        let (ants, watched) = tokio::sync::watch::channel(vec![p("dev-a")]);
-        let task = tokio::spawn(host::run(host, watched));
-        tokio::time::timeout(WAIT, async {
-            while machines::machines_of(js, &p("dev-a")).await.unwrap_or_default().is_empty() {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("the host records its ants");
-        (ants, task)
-    }
+    use crate::test_support::orders::{WAIT, host_of_m1, host_of_m1_serving, p};
 
     /// An admin's order reaches the daemon of the ant's machine, which records its outcome; one a human without the
     /// role signed, it refuses with the reason, and every order while its config says `[admin] remote = false`. An

@@ -40,6 +40,8 @@ mod select;
 mod settings;
 mod snooze;
 mod status;
+#[cfg(test)]
+mod test_support;
 mod thread;
 mod timeline;
 mod tree;

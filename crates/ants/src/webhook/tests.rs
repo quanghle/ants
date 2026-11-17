@@ -7,13 +7,9 @@ use std::time::SystemTime;
 use ants_daemon::direct_kv::DirectKv;
 use ants_daemon::owners;
 use ants_daemon::schedule::Mentions;
-use ants_proto::{
-    ChannelEntry, ChannelId, ChannelPost, Destination, Envelope, Permissions, STREAM, WEBHOOKS_BUCKET, subject,
-    webhook_marker_key,
-};
+use ants_proto::{ChannelId, ChannelPost, Destination, Envelope, STREAM, WEBHOOKS_BUCKET, subject, webhook_marker_key};
 use async_nats::jetstream;
 use data_encoding::HEXLOWER;
-use futures::TryStreamExt as _;
 use hyper::http::HeaderMap;
 use ring::{digest, hmac};
 use serde_json::Value;
@@ -26,8 +22,7 @@ use tokio::time::timeout;
 use super::config::IdSource;
 use super::requests::recent;
 use super::*;
-use crate::auth::issue_with;
-use crate::test_support::Server;
+use crate::test_support::webhook::{creds, hub, stored};
 
 fn p(s: &str) -> UserId {
     s.parse().unwrap()
@@ -382,65 +377,6 @@ async fn deliver(addr: SocketAddr, path: &str, headers: &[(&str, &str)], body: &
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!("{path} never connected");
-}
-
-/// The hub with its stream and buckets, as `ants init` leaves it, with #ops of dev-a and dev-b, and a private
-/// secret file.
-pub(crate) async fn hub() -> Option<(Server, jetstream::Context, PathBuf)> {
-    let server = Server::start()?;
-    let (_, js) = server.connect(&UserId::human()).await;
-    bus::ensure_stream(&js).await.unwrap();
-    ensure_bucket(&js).await.unwrap();
-    bus::ensure_owners(&js).await.unwrap();
-    let channels = bus::ensure_channels(&js).await.unwrap();
-    let mut ops = ChannelEntry::new("ops".parse().unwrap());
-    ops.add_member(p("dev-a"));
-    ops.add_member(p("dev-b"));
-    channels.put(ops.key(), serde_json::to_vec(&ops).unwrap().into()).await.unwrap();
-    let secret = server.dir().join("hooks.secret");
-    std::fs::write(&secret, "s3cret").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
-    }
-    Some((server, js, secret))
-}
-
-pub(crate) fn creds(server: &Server, webhook: &UserId, to: Destination) -> PathBuf {
-    let out = server.dir().join(format!("{webhook}.creds"));
-    issue_with(
-        &server.dir().join("auth"),
-        webhook,
-        crate::revoke::Kind::Webhook,
-        Permissions::for_webhook(webhook, &[to]),
-        &out,
-    )
-    .unwrap();
-    out
-}
-
-/// The messages stored on `subject`, oldest first.
-pub(crate) async fn stored<T: serde::de::DeserializeOwned>(js: &jetstream::Context, subject: &str) -> Vec<T> {
-    let stream = js.get_stream(STREAM).await.unwrap();
-    let count: usize = stream
-        .info_with_subjects(subject)
-        .await
-        .unwrap()
-        .try_fold(0, |n, (_, c)| async move { Ok(n + c) })
-        .await
-        .unwrap();
-    let mut found = Vec::new();
-    let mut seq = 1;
-    while found.len() < count {
-        if let Ok(msg) = stream.get_raw_message(seq).await
-            && msg.subject.as_str() == subject
-        {
-            found.push(serde_json::from_slice(&msg.payload).unwrap());
-        }
-        seq += 1;
-    }
-    found
 }
 
 #[tokio::test]
@@ -891,7 +827,8 @@ async fn topics(posts: &mut mpsc::UnboundedReceiver<(String, Value)>, n: usize) 
 
 #[tokio::test]
 async fn a_device_following_what_a_notice_is_about_gets_no_push_and_the_others_do() {
-    use crate::presence::{self, tests::device};
+    use crate::presence;
+    use crate::test_support::presence::device;
     use ants_proto::Following;
 
     let Some((server, _, _)) = hub().await else { return };

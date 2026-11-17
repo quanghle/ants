@@ -193,12 +193,12 @@ mod tests {
     use ants_proto::{ChannelEntry, HumanEntry};
 
     use super::*;
-    use crate::colony::tests::entry;
-    use crate::live::tests::{at, user};
+    use crate::test_support::colony::entry;
+    use crate::test_support::live::{at, user};
     use crate::tui::channel;
     use crate::tui::model::Key;
-    use crate::tui::model::tests::model;
     use crate::tui::reads::Read;
+    use crate::tui::test_support::model;
 
     fn words(m: &Model) -> Vec<String> {
         m.completions().into_iter().map(|c| c.word).collect()

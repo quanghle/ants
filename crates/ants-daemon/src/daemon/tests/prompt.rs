@@ -229,13 +229,13 @@ async fn a_prompt_past_its_limit_is_cancelled_and_the_human_told() {
 
 #[tokio::test]
 async fn a_reply_names_the_thread_branch_holding_new_commits() {
-    let Some(repo) = crate::worktrees::tests::repo("daemon-branch-ahead") else { return };
+    let Some(repo) = crate::test_support::repo("daemon-branch-ahead") else { return };
     let Some((bus, mut replies)) = Bus::start().await else { return };
     let home = repo.parent().unwrap().join("home");
     let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
     let setup = Worktrees::find(&bus.dev, &repo, &home).await.unwrap();
     let worktree = setup.checkout(&t1).await.unwrap();
-    crate::worktrees::tests::commit(&worktree, "work of t1");
+    crate::test_support::commit(&worktree, "work of t1");
     let (launch, _, _) = fake::launch();
     let worktrees = Worktrees::find(&bus.dev, &repo, &home).await.unwrap();
     let pool = Pool::new(launch.in_dir(repo.clone()), SessionStore::memory(), 2, IDLE).with_worktrees(worktrees);
@@ -280,8 +280,8 @@ esac
 #[cfg(unix)]
 #[tokio::test]
 async fn a_thread_branch_with_new_commits_is_pushed_with_a_draft_pull_request() {
-    use crate::worktrees::tests::{commit, run};
-    let Some(repo) = crate::worktrees::tests::repo("daemon-publish") else { return };
+    use crate::test_support::{commit, run};
+    let Some(repo) = crate::test_support::repo("daemon-publish") else { return };
     let Some((mut bus, mut replies)) = Bus::start().await else { return };
     let dir = repo.parent().unwrap().to_owned();
     let remote = dir.join("remote.git");

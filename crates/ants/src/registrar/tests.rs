@@ -14,8 +14,8 @@ use tokio::time::timeout;
 
 use super::offboard::{Offboarded, Offboarder};
 use super::*;
-use crate::github::tests::fake;
 use crate::test_support::Server;
+use crate::test_support::github::fake;
 use crate::{auth, bus, renew, revoke, signer, tools};
 
 const WAIT: Duration = Duration::from_secs(20);

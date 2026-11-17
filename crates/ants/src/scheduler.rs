@@ -158,7 +158,7 @@ mod tests {
     use chrono::Timelike as _;
 
     use super::*;
-    use crate::webhook::tests::{creds, hub, stored};
+    use crate::test_support::webhook::{creds, hub, stored};
 
     fn p(s: &str) -> UserId {
         s.parse().unwrap()

@@ -737,8 +737,8 @@ mod tests {
     async fn enable_on_a_machine_adds_the_assistant_by_order() {
         use ants_proto::{IDENTITIES_BUCKET, SharedSettings};
 
-        use crate::orders::add::tests::{SIGNED, with_signer};
-        use crate::orders::tests::host_of_m1;
+        use crate::test_support::orders::host_of_m1;
+        use crate::test_support::orders::{SIGNED, with_signer};
 
         let Some(server) = Server::start() else { return };
         let (alice, bob, pa) = (p("alice"), p("bob"), p("alice-assistant"));

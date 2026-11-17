@@ -284,7 +284,7 @@ mod tests {
     use super::*;
     use crate::cmd::dash::model::{Action, Key};
     use crate::live::State;
-    use crate::live::tests::{at, message, request, user};
+    use crate::test_support::live::{at, message, request, user};
 
     fn screen(model: &Model, now: DateTime<Utc>) -> String {
         let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();

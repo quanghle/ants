@@ -278,4 +278,4 @@ fn account_jwt(operator: &KeyPair, account: &KeyPair, revocations: &BTreeMap<Str
 }
 
 #[cfg(test)]
-pub(crate) mod tests;
+mod tests;

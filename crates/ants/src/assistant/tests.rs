@@ -634,7 +634,7 @@ async fn an_assistant_s_admin_orders_wait_for_its_human_to_consent() {
     use ants_daemon::admin::ConfigFile;
     use ants_proto::{AdminOp, AdminOrder, OrderState};
 
-    use crate::orders::tests::{WAIT, host_of_m1};
+    use crate::test_support::orders::{WAIT, host_of_m1};
 
     let Some(server) = Server::start() else { return };
     let (alice, pa, dev_a) = (p("alice"), p("pa"), p("dev-a"));

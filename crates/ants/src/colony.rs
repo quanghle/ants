@@ -399,42 +399,13 @@ pub async fn show(nats: &crate::Nats<'_>, json: bool) -> Result<()> {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use ants_daemon::colony::Registration;
     use ants_proto::{Activity, COLONY_HEARTBEAT, HarnessLimit, PermissionsVersion};
 
     use super::*;
     use crate::test_support::Server;
-
-    pub(crate) fn entry(ant: &str, started: i64, beat: i64, now: DateTime<Utc>) -> ColonyEntry {
-        ColonyEntry {
-            ant: ant.parse().unwrap(),
-            machine: "m1".to_owned(),
-            instance: "run-1".to_owned(),
-            harness: "copilot".to_owned(),
-            agent: None,
-            capabilities: vec!["rust".to_owned(), "review".to_owned()],
-            whoami: None,
-            workdir: Some("/src/app".to_owned()),
-            started_at: now - chrono::Duration::seconds(started),
-            heartbeat_at: now - chrono::Duration::seconds(beat),
-            activity: ants_proto::Activity::Idle,
-            handling: 0,
-            harnesses: 0,
-            escalate_to: Vec::new(),
-            version: ants_proto::ANTS_VERSION.to_owned(),
-            perms: ants_proto::PERMISSIONS_VERSION,
-            signed_out: None,
-            limited: None,
-            failing: None,
-            fallback: None,
-            memory_low: None,
-            model: None,
-            paused: None,
-            drift: Vec::new(),
-            mcp: false,
-        }
-    }
+    use crate::test_support::colony::entry;
 
     #[test]
     fn a_drifted_ant_is_noted_with_its_machine_and_fields() {

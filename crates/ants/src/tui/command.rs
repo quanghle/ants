@@ -459,11 +459,11 @@ mod tests {
 
     use super::bar::Status;
     use super::*;
-    use crate::live::tests::{at, message, request, user};
+    use crate::test_support::live::{at, message, request, user};
     use crate::tui::acts::Change;
     use crate::tui::exec::Done;
-    use crate::tui::model::tests::model;
     use crate::tui::reads::Read;
+    use crate::tui::test_support::model;
 
     fn typed(m: &mut Model, text: &str) {
         for c in text.chars() {

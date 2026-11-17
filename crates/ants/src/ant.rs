@@ -229,7 +229,7 @@ mod tests {
     use ants_proto::{AntModel, HarnessAgent, MemoryLow, SignInNeeded};
 
     use super::*;
-    use crate::colony::tests::entry;
+    use crate::test_support::colony::entry;
 
     fn now() -> DateTime<Utc> {
         "2026-01-01T12:00:00Z".parse().unwrap()

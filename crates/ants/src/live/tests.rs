@@ -1,33 +1,12 @@
 use std::time::Duration;
 
 use ants_daemon::bus;
-use ants_proto::{Envelope, StatusUpdate, ToolCall, Uuid};
-use chrono::DateTime;
+use ants_proto::{Envelope, StatusUpdate, Uuid};
 
 use super::*;
 use crate::test_support::Server;
+use crate::test_support::live::{request, user};
 use crate::thread::Kind;
-
-pub fn at(secs: i64) -> DateTime<Utc> {
-    DateTime::from_timestamp(1_800_000_000 + secs, 0).unwrap()
-}
-
-pub fn user(name: &str) -> UserId {
-    name.parse().unwrap()
-}
-
-/// The entry of a message from `from` to `to` on `thread`, stored at sequence `seq`.
-pub fn message(seq: u64, thread: &ThreadId, from: &str, to: &str, text: &str) -> Entry {
-    let envelope = Envelope { thread_id: thread.clone(), ..Envelope::new(user(from), user(to), text) };
-    let subject = subject::inbox(&envelope.to, &envelope.from);
-    let payload = serde_json::to_vec(&envelope).unwrap();
-    Parser::default().entry(seq, at(seq.cast_signed()), &subject, &payload).unwrap()
-}
-
-pub fn request(ant: &str, title: &str, options: Vec<Verdict>) -> ApprovalRequest {
-    let tool = ToolCall { kind: "execute".into(), title: title.into(), ..Default::default() };
-    ApprovalRequest::new(user(ant), ThreadId::generate(), tool, options, Duration::from_mins(5))
-}
 
 #[test]
 fn a_verdict_answers_only_a_pending_request_offering_it() {

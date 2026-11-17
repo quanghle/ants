@@ -1,5 +1,13 @@
 //! Test helpers shared by the test suites of this crate that need its own code: a nats-server trusting a fresh team,
 //! a hub for leaf nodes and uplink credentials. Those needing none of it are in `ants_test_support`.
+//! Its submodules hold the fixtures the tests of several modules share.
+
+pub(crate) mod colony;
+pub(crate) mod github;
+pub(crate) mod live;
+pub(crate) mod orders;
+pub(crate) mod presence;
+pub(crate) mod webhook;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

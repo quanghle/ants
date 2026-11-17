@@ -193,7 +193,7 @@ pub async fn clear(nats: &Nats<'_>, target_text: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::live::tests::at;
+    use crate::test_support::live::at;
 
     #[test]
     fn a_reminder_is_due_after_a_duration_at_the_next_time_of_day_or_at_a_date() {

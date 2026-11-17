@@ -245,10 +245,10 @@ mod tests {
     use ants_proto::ReadMarker;
 
     use super::*;
-    use crate::live::tests::{at, message, user};
-    use crate::tui::model::tests::model;
+    use crate::test_support::live::{at, message, user};
     use crate::tui::model::{Focus, Page as View};
     use crate::tui::nav;
+    use crate::tui::test_support::model;
 
     #[test]
     fn a_dm_lists_the_threads_between_the_two_humans_newest_first_with_unread_counted() {

@@ -291,11 +291,11 @@ mod tests {
     fn the_mood_follows_the_colony_the_threads_and_the_inbox() {
         use ants_proto::{SignInNeeded, StatusEvent, StatusUpdate, ThreadId};
 
-        use crate::colony::tests::entry;
-        use crate::live::tests::{at, message};
+        use crate::test_support::colony::entry;
+        use crate::test_support::live::{at, message};
 
         let (dev, thread) = (user("dev-a"), ThreadId::generate());
-        let mut m = crate::tui::model::tests::model();
+        let mut m = crate::tui::test_support::model();
         assert_eq!(mood(&m.data, &dev, at(2)), Mood::Offline, "not in the colony");
         m.data.live.colony(vec![entry("dev-a", 3600, 2, at(2))], at(2));
         assert_eq!(mood(&m.data, &dev, at(2)), Mood::Idle);
@@ -317,15 +317,15 @@ mod tests {
 
     #[test]
     fn in_colour_the_ant_view_draws_the_head() {
-        let mut m = crate::tui::model::tests::model();
+        let mut m = crate::tui::test_support::model();
         m.data.live.colony(
-            vec![crate::colony::tests::entry("dev-a", 3600, 2, crate::live::tests::at(2))],
-            crate::live::tests::at(2),
+            vec![crate::test_support::colony::entry("dev-a", 3600, 2, crate::test_support::live::at(2))],
+            crate::test_support::live::at(2),
         );
         m.data.looks = Looks::new(Depth::True, Theme::Dark, true);
         m.select(crate::tui::nav::Item::Ant(user("dev-a")));
         let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 36)).unwrap();
-        terminal.draw(|f| crate::tui::frame::draw(f, &m, crate::live::tests::at(3))).unwrap();
+        terminal.draw(|f| crate::tui::frame::draw(f, &m, crate::test_support::live::at(3))).unwrap();
         let cells = terminal.backend().buffer().content.iter().filter(|c| matches!(c.symbol(), "▀" | "▄")).count();
         assert!(cells > 20, "{cells} half-blocks");
     }

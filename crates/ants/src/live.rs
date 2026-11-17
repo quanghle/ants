@@ -5,7 +5,7 @@
 mod screen;
 mod state;
 #[cfg(test)]
-pub(crate) mod tests;
+mod tests;
 
 use std::ops::ControlFlow;
 use std::sync::Arc;

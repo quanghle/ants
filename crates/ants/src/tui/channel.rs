@@ -267,22 +267,15 @@ fn post_lines(post: &Post, data: &Data, now: DateTime<Utc>, marked: Option<usize
 }
 
 #[cfg(test)]
-pub mod tests {
+mod tests {
     use ants_proto::{ChannelPost, Envelope, Reacted, subject};
 
     use super::*;
-    use crate::live::tests::{at, user};
+    use crate::test_support::live::{at, user};
     use crate::thread::Parser;
-    use crate::tui::model::tests::model;
     use crate::tui::model::{Action, Key, Page as View};
     use crate::tui::nav;
-
-    /// The entry of `post`, stored at sequence `seq`.
-    pub fn post(seq: u64, post: &ChannelPost) -> Entry {
-        let payload = serde_json::to_vec(post).unwrap();
-        let subject = subject::chan(&post.channel, &post.from);
-        Parser::default().entry(seq, at(seq.cast_signed()), &subject, &payload).unwrap()
-    }
+    use crate::tui::test_support::{model, post};
 
     #[test]
     fn the_feed_lists_top_level_posts_newest_first_with_their_replies_and_reactions() {

@@ -508,10 +508,10 @@ impl Io {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::live::tests::{at, user};
-    use crate::tui::model::tests::model;
+    use crate::test_support::live::{at, user};
     use crate::tui::model::{Focus, Model};
     use crate::tui::nav;
+    use crate::tui::test_support::model;
 
     fn screen(m: &Model, now: DateTime<Utc>) -> String {
         let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
@@ -542,7 +542,7 @@ mod tests {
     #[test]
     fn requests_heard_show_on_home_and_the_ant_and_y_confirms_the_answer() {
         let mut m = model();
-        m.data.live.colony(vec![crate::colony::tests::entry("dev-a", 60, 2, at(2))], at(2));
+        m.data.live.colony(vec![crate::test_support::colony::entry("dev-a", 60, 2, at(2))], at(2));
         m.data.credentials.holder = Some(Holder::Here(PathBuf::from("/team")));
         let heard = vec![enrolling("dev-c", "UCKEYOFDEVC00"), renewing("dev-a", "UAKEYOFDEVA00")];
         assert_eq!(m.data.credentials.take(Event::Heard(Ok(heard)), at(3)), None);

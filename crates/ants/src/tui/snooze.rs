@@ -147,8 +147,8 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::live::tests::at;
-    use crate::tui::model::tests::model;
+    use crate::test_support::live::at;
+    use crate::tui::test_support::model;
 
     #[test]
     fn z_asks_how_long_one_hour_unless_edited_and_refuses_over_seven_days() {

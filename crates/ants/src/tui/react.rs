@@ -171,7 +171,7 @@ impl Picker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::live::tests::user;
+    use crate::test_support::live::user;
 
     fn reacted(reaction: &str, by: &[&str]) -> Reacted {
         Reacted::new(reaction.parse().unwrap(), by.iter().map(|b| user(b)).collect())

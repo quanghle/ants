@@ -47,9 +47,9 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::live::tests::at;
+    use crate::test_support::live::at;
     use crate::tui::model::Key;
-    use crate::tui::model::tests::model;
+    use crate::tui::test_support::model;
 
     #[test]
     fn b_asks_when_and_sets_the_reminder_with_its_note_at_once() {

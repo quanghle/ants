@@ -101,8 +101,8 @@ mod tests {
     use ants_proto::Answer;
 
     use super::*;
-    use crate::live::tests::{at, message};
-    use crate::tui::model::tests::model;
+    use crate::test_support::live::{at, message};
+    use crate::tui::test_support::model;
 
     #[test]
     fn a_card_numbers_the_options_answers_by_number_and_shows_who_answered() {

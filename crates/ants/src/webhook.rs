@@ -661,4 +661,4 @@ fn reply(status: StatusCode, text: &str) -> Response<Full<Bytes>> {
 }
 
 #[cfg(test)]
-pub(crate) mod tests;
+mod tests;
