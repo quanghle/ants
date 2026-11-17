@@ -1,5 +1,7 @@
 //! The active daemon owns sense's durable schedule. A firing is stored before its wake, and confirmed only after
-//! delivery; a replacement daemon therefore resumes pending work with the same wake id.
+//! delivery; a replacement daemon therefore resumes pending work with the same wake id. Nothing fires while the ant's
+//! sense identity is dormant ([`ants_sense::identity::Card::active`]); its revival changes the card, which wakes the
+//! scheduler.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -119,6 +121,10 @@ async fn cycle(
     settings: &Settings,
     now: DateTime<Utc>,
 ) -> Result<Option<DateTime<Utc>>> {
+    if ants_sense::identity::card(items).await?.is_some_and(|card| !card.active) {
+        // A dormant ant's reminders wait for its revival, which changes the card.
+        return Ok(None);
+    }
     let started = tokio::time::Instant::now();
     for firing in remind::pending_work(items).await? {
         deliver(items, host, &settings.ant, &firing).await?;

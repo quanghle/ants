@@ -6,6 +6,7 @@ use uuid::Uuid;
 use super::*;
 use crate::Sense;
 use crate::cache::Cache;
+use crate::items::ItemId;
 use crate::log::{AccountVerifier, AntLog, MemoryLog, NoRevocations, Unsigned};
 use crate::store::{Store, Stores};
 
@@ -108,11 +109,11 @@ async fn an_ant_added_again_under_a_new_identity_is_linked_to_it_and_active_agai
 
     let back = record_event(&*items, &event("dev-a", "id2", "12:00:00", EventKind::AntAdded)).await.unwrap();
     assert_eq!((back.identity.as_str(), &back.identities[..]), ("id2", &["id1".to_owned(), "id2".to_owned()][..]));
-    assert!(back.active && back.retired_at.is_none());
+    assert!(back.active && back.retired_at == Some(at("11:00:00")), "the dormancy kept until the brief tells it");
     assert_eq!((back.returned_at, back.born), (Some(at("12:00:00")), at("10:00:00")));
 
     let told = returned_told(&*items, &dev_a()).await.unwrap();
-    assert!(!told.returned());
+    assert!(!told.returned() && told.retired_at.is_none());
     assert!(!items.list(CARD, 1).await.unwrap()[0].values.contains_key("returned_at"), "removed, not left null");
 }
 
@@ -135,8 +136,40 @@ async fn renames_clones_moves_retirements_and_revivals_are_written_on_the_card()
     let card = record_event(&*items, &event("dev-c", "id1", "14:00:00", EventKind::AntRetired)).await.unwrap();
     assert!(!card.active);
     let card = record_event(&*items, &event("dev-c", "id1", "15:00:00", EventKind::AntRevived)).await.unwrap();
-    assert!(card.active && card.retired_at.is_none() && !card.returned());
+    assert!(card.active && card.returned());
+    assert_eq!((card.retired_at, card.returned_at), (Some(at("14:00:00")), Some(at("15:00:00"))));
     assert_eq!(card.identities, ["id1"]);
+    let card = record_event(&*items, &event("dev-c", "id1", "16:00:00", EventKind::AntRevived)).await.unwrap();
+    assert_eq!(card.returned_at, Some(at("15:00:00")), "a revival of an active ant is no return");
+}
+
+/// The reminders of a dormant ant are paused: its revival puts off the expiry of each still active when it retired by
+/// the time it was dormant, once, so a long dormancy expires none of them.
+#[tokio::test]
+async fn a_revival_puts_off_the_expiry_of_the_reminders_paused() {
+    let items = fresh().await;
+    let reminder = |status: &str, expires: &str| {
+        let values = serde_json::json!({"title": "check", "status": status, "expires": at(expires)});
+        Write::Create { id: ItemId::new(), kind: remind::KIND.into(), values: remind::values(values) }
+    };
+    let writes = [reminder("active", "12:00:00"), reminder("active", "10:30:00"), reminder("done", "12:00:00")];
+    items.write(&writes, "test").await.unwrap();
+    let expires = async || {
+        let mut all = Vec::new();
+        for write in &writes {
+            all.push(remind::date(&items.get(write.id()).await.unwrap().unwrap(), "expires").unwrap());
+        }
+        all
+    };
+    record_event(&*items, &event("dev-a", "id1", "10:00:00", EventKind::AntAdded)).await.unwrap();
+    record_event(&*items, &event("dev-a", "id1", "11:00:00", EventKind::AntRetired)).await.unwrap();
+    let revived = event("dev-a", "id1", "14:00:00", EventKind::AntRevived);
+    record_event(&*items, &revived).await.unwrap();
+    let shifted = [at("15:00:00"), at("10:30:00"), at("12:00:00")];
+    assert_eq!(expires().await, shifted, "only the active one unexpired at the retirement");
+    record_event(&*items, &revived).await.unwrap();
+    record_event(&*items, &event("dev-a", "id1", "15:00:00", EventKind::AntRevived)).await.unwrap();
+    assert_eq!(expires().await, shifted, "put off once");
 }
 
 #[tokio::test]

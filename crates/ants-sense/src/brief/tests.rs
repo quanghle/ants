@@ -297,6 +297,49 @@ async fn a_return_is_told_once() {
     assert!(!session_brief(&sense, 8_000).await.contains(RETURNED));
 }
 
+/// A lifecycle event of the ant of the briefs at `at`.
+fn lifecycle(kind: EventKind, at: &str) -> Event {
+    Event {
+        id: Uuid::now_v7(),
+        ant: "dev-a".parse().unwrap(),
+        identity: "0f1e".into(),
+        thread: None,
+        at: at.parse().unwrap(),
+        kind,
+    }
+}
+
+/// A dormant ant's brief says so; once revived, its next brief tells of its dormancy, its last handoff, acknowledged
+/// before it retired, and its overdue commitment, once.
+#[tokio::test]
+async fn a_revival_is_told_with_the_last_handoff_and_the_open_commitments() {
+    let (sense, _) = sense().await;
+    session_brief(&sense, 8_000).await;
+    call(&sense, thread::handoff, OTHER, json!({"done": ["Lexer"], "next": ["Parser"]})).await;
+    call(&sense, thread::checkpoint, OTHER, json!({"goal": "Ship the parser"})).await;
+    let due = "2025-01-01T10:00:00Z";
+    call(&sense, promise::promise, OTHER, json!({"title": "Deliver the parser", "promisee": "alice", "due": due}))
+        .await;
+    sense.event(lifecycle(EventKind::AntRetired, "2025-01-02T12:00:00Z")).await.unwrap();
+    let dormant = session_brief(&sense, 8_000).await;
+    position(
+        &dormant,
+        "Dormant since 2025-01-02: retired, its reminders paused and its commitments open until revived.",
+    );
+    assert!(!dormant.contains("## Last handoff") && !dormant.contains("## Unacknowledged handoffs"), "{dormant}");
+
+    sense.event(lifecycle(EventKind::AntRevived, "2025-02-01T12:00:00Z")).await.unwrap();
+    let brief = session_brief(&sense, 8_000).await;
+    position(&brief, "Returned 2025-02-01, dormant since 2025-01-02: back after a retirement.");
+    assert!(!brief.contains("Dormant since"), "{brief}");
+    let last = position(&brief, "## Last handoff");
+    assert!(last < position(&brief, "- Lexer") && last < position(&brief, "## Open commitments"), "{brief}");
+    position(&brief, "Deliver the parser — to alice, due 2025-01-01T10:00:00Z");
+    position(&brief, ", overdue)");
+    let next = session_brief(&sense, 8_000).await;
+    assert!(!next.contains(RETURNED) && !next.contains("## Last handoff") && !next.contains("dormant"), "{next}");
+}
+
 #[tokio::test]
 async fn a_broken_log_is_warned_of_first() {
     let (log, id) = (MemoryLog::default(), SenseId::new());

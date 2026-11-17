@@ -48,6 +48,8 @@ const CALL_WAIT: Duration = Duration::from_secs(30);
 /// The backoff after a first failure, doubling with each next one up to [`LAST_RETRY`].
 const FIRST_RETRY: Duration = Duration::from_secs(1);
 const LAST_RETRY: Duration = Duration::from_mins(5);
+/// How long a stopping daemon waits for the provider to ack an ant's retirement before the ant leaves the colony.
+pub const RETIRED_WAIT: Duration = Duration::from_secs(10);
 
 /// What connects the provider of an ant: [`super::of`] in the daemon.
 pub type Resolve = Arc<dyn Fn(UserId) -> BoxFuture<'static, Option<Connected>> + Send + Sync>;
@@ -66,6 +68,8 @@ struct Inner {
     resolve: Resolve,
     queues: tokio::sync::Mutex<HashMap<UserId, Queue>>,
     wake: Notify,
+    /// Notified each time a sent event settles ([`Inner::settle`]).
+    settled: Notify,
     task: std::sync::Mutex<Option<JoinHandle<()>>>,
     retry: (Duration, Duration),
 }
@@ -100,6 +104,7 @@ impl Outbox {
             resolve,
             queues: tokio::sync::Mutex::default(),
             wake: Notify::new(),
+            settled: Notify::new(),
             task: std::sync::Mutex::default(),
             retry: (first, last),
         }))
@@ -151,6 +156,24 @@ impl Outbox {
     /// The events of `ant` not yet acked.
     pub async fn pending(&self, ant: &UserId) -> Vec<Event> {
         self.0.queues.lock().await.get(ant).map_or_else(Vec::new, |queue| queue.events.iter().cloned().collect())
+    }
+
+    /// Wait up to `wait` for `ant`'s event `id` to leave its queue, acked or dropped: whether it did.
+    pub async fn delivered(&self, ant: &UserId, id: Uuid, wait: Duration) -> bool {
+        let waiting = async {
+            loop {
+                let settled = self.0.settled.notified();
+                let mut settled = std::pin::pin!(settled);
+                settled.as_mut().enable();
+                let queues = self.0.queues.lock().await;
+                if !queues.get(ant).is_some_and(|queue| queue.events.iter().any(|event| event.id == id)) {
+                    return;
+                }
+                drop(queues);
+                settled.await;
+            }
+        };
+        tokio::time::timeout(wait, waiting).await.is_ok()
     }
 
     /// Wake the delivering task, starting it when not running: on the first event, or after the runtime it ran on
@@ -210,6 +233,11 @@ impl Inner {
 
     /// Take what came of sending `ant`'s event `id`: drop it once acked, else retry it after the backoff.
     async fn settle(&self, ant: &UserId, id: Uuid, sent: Sent) {
+        self.settle_queue(ant, id, sent).await;
+        self.settled.notify_waiters();
+    }
+
+    async fn settle_queue(&self, ant: &UserId, id: Uuid, sent: Sent) {
         let mut queues = self.queues.lock().await;
         let Some(queue) = queues.get_mut(ant) else { return };
         queue.sending = false;
@@ -419,13 +447,17 @@ impl Lifecycle {
     }
 
     /// Tell of a retirement once the daemon stopped serving the ant: when its home is marked retired
-    /// ([`mark_retired`]) and that was not told yet.
-    pub async fn stopped(&self) {
+    /// ([`mark_retired`]) and that was not told yet. Waits up to `wait` for the provider's ack, so it records the
+    /// retirement before the ant leaves the colony and its credentials are revoked.
+    pub async fn stopped(&self, wait: Duration) {
         let Some(retired) = read_retired(&self.home).await.filter(|retired| !retired.told) else { return };
         self.retired(&retired).await;
         let told = Retired { told: true, ..retired };
         if let Err(e) = write_retired(&self.home, &told) {
             tracing::warn!(error = format!("{e:#}"), "noting the retirement of the ant told");
+        }
+        if !self.outbox.delivered(&self.ant, told.id, wait).await {
+            tracing::warn!(waited = wait.as_secs_f64(), "the provider has not acked the retirement of the ant yet");
         }
     }
 

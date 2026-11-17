@@ -47,6 +47,25 @@ async fn nothing_is_kept_without_a_host_connection_and_nothing_reached_while_it_
     std::fs::remove_dir_all(&home).unwrap();
 }
 
+/// An ant served again with credentials changed in place, as after a revoke and re-add, opens its items anew to sign
+/// with them; served again with the same, it keeps them.
+#[test]
+fn new_credentials_open_the_items_again() {
+    let stores = SenseStores::new();
+    let home = scratch_dir("sense-stores-creds");
+    let creds = home.join("dev-a.creds");
+    std::fs::write(&creds, "first").unwrap();
+    let items = |stores: &SenseStores| stores.state().ants[&dev_a()].items.clone();
+    stores.serve(&dev_a(), &home, Some(creds.clone()));
+    let first = items(&stores);
+    stores.serve(&dev_a(), &home, Some(creds.clone()));
+    assert!(Arc::ptr_eq(&first, &items(&stores)), "the same credentials keep the items");
+    std::fs::write(&creds, "second").unwrap();
+    stores.serve(&dev_a(), &home, Some(creds));
+    assert!(!Arc::ptr_eq(&first, &items(&stores)), "new credentials open them again");
+    std::fs::remove_dir_all(&home).unwrap();
+}
+
 #[tokio::test]
 async fn an_ant_s_items_open_on_first_use_with_its_sense_id_and_log() {
     let Some(server) = NatsServer::start() else { return };

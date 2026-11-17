@@ -433,6 +433,26 @@ pub(crate) async fn write_creations(
     Err(busy())
 }
 
+/// The changes resuming the reminders paused while the ant was dormant, from `since` to `until`: each active one
+/// unexpired at `since` expiring that much later, so a dormancy uses up none of its life.
+pub(crate) async fn resumed(
+    items: &dyn Items,
+    since: DateTime<Utc>,
+    until: DateTime<Utc>,
+) -> Result<Vec<Write>, StoreError> {
+    let paused = until - since;
+    if paused <= Duration::zero() {
+        return Ok(Vec::new());
+    }
+    let mut writes = Vec::new();
+    for item in items.list_by(KIND, "status", Some(&json!("active")), usize::MAX).await? {
+        let Some(expires) = date(&item, "expires").filter(|at| *at > since) else { continue };
+        let values = values(json!({"expires": add(expires, paused)?}));
+        writes.push(Write::Change { id: item.id, values, expected: Some(item.revision) });
+    }
+    Ok(writes)
+}
+
 pub(crate) async fn get(items: &dyn Items, id: &ItemId) -> Result<Item, StoreError> {
     items.get(id).await?.filter(|item| item.kind == KIND).ok_or_else(|| StoreError::NotFound(id.clone()))
 }

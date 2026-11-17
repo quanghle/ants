@@ -201,6 +201,12 @@ pub async fn unacknowledged(items: &dyn Items, limit: usize) -> Result<Vec<Hando
     Ok(items.list_by(HANDOFF, ACKNOWLEDGED, None, limit).await?.iter().filter_map(Handoff::of).collect())
 }
 
+/// The ant's last handoff, acknowledged or not; none before its first.
+pub async fn last_handoff(items: &dyn Items) -> Result<Option<Handoff>, StoreError> {
+    let handoffs = items.list(HANDOFF, usize::MAX).await?;
+    Ok(handoffs.iter().filter_map(Handoff::of).max_by(|a, b| (a.created.at, &a.id).cmp(&(b.created.at, &b.id))))
+}
+
 fn register_id(thread: &ThreadId) -> ItemId {
     ItemId::named(CHECKPOINT, thread.as_str())
 }
