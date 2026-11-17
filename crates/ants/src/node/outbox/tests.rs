@@ -118,11 +118,11 @@ async fn the_hub_takes_what_a_leaf_kept_while_its_uplink_was_down() {
     assert_eq!(found, Sourcing { hearing: Hearing::Heard, unadmitted: Vec::new() });
     let more = [on_m1.clone(), vec![(dev_b.clone(), Role::Ant)]].concat();
     assert_eq!(sourcing(&h_js, &m1, &more).await.unwrap().unadmitted, std::slice::from_ref(&dev_b));
-    // Any human on the machine may set it up again.
+    // Any human on the machine may set it up again, on the machine, through its leaf node.
     let alice_creds = hub.dir().join("alice.creds");
     auth::issue(&team, &alice, Role::Human, Some(&domain), &alice_creds).unwrap();
     let (_alice, alice_js) = bus::connect(&hub.url, Some(&alice_creds), Some(&domain), &alice, "test").await.unwrap();
-    let setup = super::connect(&hub.url, Some(&alice_creds), &alice, &m1).await.unwrap();
+    let setup = super::connect(&leaf_node.url, Some(&alice_creds), &alice, &m1).await.unwrap();
     admit(&setup, &alice_js, &m1, &on_m1).await.unwrap();
 
     // Stored directly, and a copy of it in the outbox is dropped as a duplicate.

@@ -178,7 +178,7 @@ ants enroll approve dev-c --js-domain hub                         # account-key 
 
 ## Store and forward
 
-Run `ants leaf outbox` as a human while the leaf is connected to the hub (and rerun when ants or humans on the machine change). Without `--ant` or `--human`, it admits those the uplink credentials of the machine's `leaf.conf` carry (`--leaf-config FILE`), changed by `--add-ant`, `--add-human`, `--remove-ant` and `--remove-human` (`--remove-ant` also taking an ant the uplink credentials no longer carry, as after `ants auth leaf M --remove-ant ANT`, when the hub still takes from the outbox for it or the team directory, `~/.config/ants/auth`, kept it among the members once; the hub then takes nothing more of it):
+Run `ants leaf outbox` as a human while the leaf is connected to the hub, on the machine (through its leaf node) or off it (and rerun when ants or humans on the machine change). Without `--ant` or `--human`, it admits those the uplink credentials of the machine's `leaf.conf` carry (`--leaf-config FILE`), changed by `--add-ant`, `--add-human`, `--remove-ant` and `--remove-human` (`--remove-ant` also taking an ant the uplink credentials no longer carry, as after `ants auth leaf M --remove-ant ANT`, when the hub still takes from the outbox for it or the team directory, `~/.config/ants/auth`, kept it among the members once; the hub then takes nothing more of it):
 
 ```sh
 ants leaf outbox worker-1 --ant dev-a --ant dev-b --ant messenger --human human --human alice

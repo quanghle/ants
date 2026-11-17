@@ -264,8 +264,10 @@ pub(super) fn outbox_setup_rights() -> Vec<String> {
         publish.push(format!("$JS.API.STREAM.{op}.{OUTBOX_STREAM}"));
         publish.push(format!("$JS.*.API.STREAM.{op}.{OUTBOX_STREAM}"));
     }
-    // The outbox's durable consumer, in a leaf's domain only: the uplink carries no more of it than its creation,
-    // lookup, reset and deletion ([`Permissions::for_leaf`]).
+    // The outbox's durable consumer: the uplink carries no more of it than its creation, lookup, reset and deletion
+    // ([`Permissions::for_leaf`]); a leaf node maps its own domain to the plain form for a CLI connected to it, and
+    // checks both forms.
     publish.push(format!("$JS.*.API.CONSUMER.*.{OUTBOX_STREAM}.{OUTBOX_CONSUMER}"));
+    publish.push(format!("$JS.API.CONSUMER.*.{OUTBOX_STREAM}.{OUTBOX_CONSUMER}"));
     publish
 }

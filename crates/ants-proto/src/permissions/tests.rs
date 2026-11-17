@@ -108,6 +108,8 @@ fn a_js_domain_adds_the_domain_form_of_the_jetstream_api() {
     assert_eq!(in_domain[..human.publish.len()], human.publish);
     assert!(in_domain.iter().any(|s| s == "$JS.*.API.STREAM.INFO.ANTS_OUT"));
     assert!(in_domain.iter().any(|s| s == "$JS.*.API.CONSUMER.*.ANTS_OUT.ANTS_IN"));
+    // What a leaf node maps its own domain to, for the CLI run on the machine.
+    assert!(in_domain.iter().any(|s| s == "$JS.API.CONSUMER.*.ANTS_OUT.ANTS_IN"));
     for family in ["STREAM.INFO.*", "STREAM.CREATE.*", "STREAM.UPDATE.*", "CONSUMER.CREATE.*"] {
         assert!(in_domain.iter().any(|s| *s == format!("$JS.hub.API.{family}")), "{family}");
     }
