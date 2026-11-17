@@ -5,7 +5,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde_json::{Value, json};
 
 use super::*;
-use crate::memory::tests::{context, human, id_of, lesson, ok, sense, tool};
+use crate::memory::tests::{context, human, id_of, lesson, memory, ok, sense, tool};
 use crate::memory::{Memory, MemoryKind, Trust, Votes, remember, vote};
 
 fn at(days_before: i64) -> DateTime<Utc> {
@@ -242,6 +242,25 @@ async fn an_id_reads_the_memory_in_full_with_its_provenance_and_history() {
     assert!(full.contains(&oldest), "{full}");
     let alone = text(recall_json(&sense, json!({"id": first, "history": true})).await);
     assert!(alone.contains("History: it superseded no memory."), "{alone}");
+}
+
+#[tokio::test]
+async fn reading_a_memory_in_full_counts_once_a_day_and_never_from_a_webhook_thread() {
+    let (sense, store) = sense().await;
+    let id = remember_at(&sense, lesson("Port", "Deploy uses 8080"), 3).await;
+    let read = |context: CallContext| tool(&sense, recall, json!({"id": id}), context);
+    let answer = read(context_at(2)).await;
+    assert_eq!(answer.json["memory"]["access"], json!({"days": 1, "last": at(2)}));
+    read(CallContext { at: at(2) + Duration::hours(1), ..context(human()) }).await;
+    read(context_at(1)).await;
+    let webhook = Starter::Webhook { user: "hook".parse().unwrap() };
+    read(CallContext { at: at(0), ..context(webhook) }).await;
+    let read = memory(&store, &id).await;
+    assert_eq!(read.access, Some(Access { days: 2, last: at(1) }));
+    assert_eq!((read.uses(), read.last_used()), (2, at(1)));
+    let listed = recall_json(&sense, json!({})).await;
+    assert_eq!(ids(&listed), [id.to_string()]);
+    assert_eq!(memory(&store, &id).await.access, read.access, "a listing is no read in full");
 }
 
 #[tokio::test]
