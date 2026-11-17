@@ -33,7 +33,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 use tokio::sync::watch;
 
-use crate::config::Ant;
+use crate::config::{Ant, Sage};
 use crate::profile::template::REQUEST_KEYS;
 use crate::records::direct_kv::{DirectKv, Lookup};
 use crate::sync::MutexExt as _;
@@ -58,6 +58,7 @@ pub struct Roles {
     pub allow: Vec<String>,
     #[serde(default)]
     pub escalate_to: Vec<UserId>,
+    pub sage: Option<Sage>,
 }
 
 impl Roles {
@@ -72,6 +73,7 @@ impl Roles {
         let fallback = shared("fallback").then_some(self.fallback);
         let allow = shared("allow").then_some(self.allow);
         let escalate_to = shared("escalate_to").then_some(self.escalate_to);
+        let sage = if shared("sage") { self.sage } else { ant.sage.clone() };
         Ant {
             whoami: self.whoami,
             memory: self.memory,
@@ -82,6 +84,7 @@ impl Roles {
             fallback: fallback.unwrap_or(ant.fallback),
             allow: allow.unwrap_or(ant.allow),
             escalate_to: escalate_to.unwrap_or(ant.escalate_to),
+            sage,
             ..ant
         }
     }
@@ -151,6 +154,9 @@ pub fn local_fields(ant: &Ant) -> Map<String, Value> {
         if let Some(text) = text {
             fields.insert(key.to_owned(), Value::from(text.as_str()));
         }
+    }
+    if let Some(sage) = &ant.sage {
+        fields.insert("sage".to_owned(), Value::from(sage.to_string()));
     }
     let escalate_to: Vec<String> = ant.escalate_to.iter().map(ToString::to_string).collect();
     for (key, list) in [
@@ -224,7 +230,7 @@ impl Shared {
         }
     }
 
-    /// Note the shared settings of `ants`, as the machine's config lists them, the built-in messenger left out: those
+    /// Note the shared settings of `ants`, as the machine's config lists them, the built-in ants left out: those
     /// the host connection creates missing records with, and tells drift by.
     pub fn listed(&self, ants: &[Ant]) {
         let ants = || ants.iter().filter(|ant| !ant.builtin);
@@ -675,6 +681,29 @@ mod tests {
         assert_eq!((overlaid.allow, overlaid.fallback), (changed.allow, changed.fallback), "the template's, as loaded");
         assert_eq!(overlaid.escalate_to, changed.escalate_to);
         assert_eq!(drift, ["model"], "what the template fixes is no drift");
+    }
+
+    #[test]
+    fn the_sage_is_shared_but_an_ant_added_from_a_template_takes_the_file_s() {
+        let mut dev_a = ant("dev-a");
+        dev_a.sage = Some(Sage::None);
+        assert_eq!(Value::Object(local_fields(&dev_a)), json!({ "sage": "none" }));
+        let mut worker = ant("lead-a");
+        worker.template = Some("worker".to_owned());
+        let shared = Shared::default();
+        shared.listed(&[dev_a.clone(), worker.clone()]);
+
+        shared.store(record("dev-a", json!({ "sage": "lead" })));
+        let (overlaid, drift) = shared.overlaid(&dev_a).unwrap();
+        assert_eq!((overlaid.reviewed_by(), drift), (Some("lead".parse().unwrap()), vec!["sage".to_owned()]));
+        shared.store(record("dev-a", json!({})));
+        let (overlaid, _) = shared.overlaid(&dev_a).unwrap();
+        assert_eq!(overlaid.reviewed_by(), Some(UserId::sage()), "the default, the file's top-level one");
+        shared.store(record("dev-a", json!({ "sage": "" })));
+        assert!(shared.overlaid(&dev_a).is_none(), "a sage that does not parse is ignored");
+
+        shared.store(record("lead-a", json!({ "sage": "lead" })));
+        assert_eq!(shared.overlaid(&worker).unwrap().0.reviewed_by(), Some(UserId::sage()));
     }
 
     #[tokio::test]

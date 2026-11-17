@@ -1,6 +1,6 @@
 //! One `[[ant]]` entry of the config file ([`Ant`]): its keys and their defaults, the checks of its own settings, and
-//! the daemon config it becomes ([`Ant::into_config`]); also the built-in messenger a file serves unless told
-//! otherwise ([`builtin_messenger`]).
+//! the daemon config it becomes ([`Ant::into_config`]); also the built-in ants a file serves: the messenger unless told
+//! otherwise ([`builtin_messenger`]), and the sage while an ant names it ([`builtin_sage`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -10,6 +10,7 @@ use ants_proto::{JsDomain, UserId};
 use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 
+use super::sage::Sage;
 use super::{
     DEFAULT_APPROVAL_TIMEOUT, DEFAULT_ESCALATE_AFTER, DEFAULT_ESCALATION_REMINDER, DEFAULT_IDLE_TIMEOUT,
     DEFAULT_MAX_HARNESSES, DEFAULT_MAX_TOOL_CALLS, DEFAULT_PROMPT_TIMEOUT, DEFAULT_SPEND_WARN_PERCENT, home_dir,
@@ -131,13 +132,21 @@ pub struct Ant {
     /// What becomes of a thread's worktree branch holding new commits.
     #[serde(default)]
     pub publish: Publish,
+    /// The ant reviewing it ([`Sage`]); the file's top-level `sage` when absent ([`Ant::reviewed_by`]).
+    pub sage: Option<Sage>,
     /// Paused: the daemon takes no new message and starts no new prompt for the ant, its messages waiting queued,
     /// until this is unset again (`ants ant resume`). Changing it alone restarts no harness.
     #[serde(default)]
     pub paused: bool,
-    /// The built-in messenger, served only while no other daemon lists a messenger in the colony.
+    /// The built-in messenger or sage, served only while no other daemon lists an ant of its name in the colony.
     #[serde(skip)]
     pub builtin: bool,
+    /// The file's top-level `sage`.
+    #[serde(skip)]
+    pub file_sage: Sage,
+    /// Whether another ant of the file names it as its sage ([`super::sage::settle`]), so it has none of its own.
+    #[serde(skip)]
+    pub is_sage: bool,
     /// The daily caps it shares with the other ants added from its template, if the template has any.
     #[serde(skip)]
     pub pool: Option<Pool>,
@@ -240,8 +249,11 @@ impl Ant {
             stand_in: None,
             worktree_base: Base::Head,
             publish: Publish::Off,
+            sage: None,
             paused: false,
             builtin: false,
+            file_sage: Sage::default(),
+            is_sage: false,
             pool: None,
             redact: true,
             machine: None,
@@ -257,6 +269,7 @@ impl Ant {
         self.validate()?;
         let instructions = self.prompt_instructions();
         let caps = self.caps();
+        let sage = self.reviewed_by();
         let harness = harnesses.named(self.harness.as_deref()).with_context(|| format!("ant {}", self.name))?;
         let model_settings = ModelSettings {
             model: self.model,
@@ -320,6 +333,7 @@ impl Ant {
                     stand_in: self.stand_in,
                 },
                 redact: self.redact,
+                sage,
             },
             spending: Spending { caps, warn_percent: self.spend_warn_percent, pool: self.pool },
             storage: Storage { home, jetstream: self.storage },
@@ -361,6 +375,19 @@ impl Ant {
         Ok(())
     }
 
+    /// The ant reviewing this one: its `sage` setting, else the file's top-level one; none where that is none or
+    /// names the ant itself, and for a sage, which has none of its own: a built-in ant, or one another ant of the file
+    /// names as its sage.
+    pub fn reviewed_by(&self) -> Option<UserId> {
+        if self.builtin || self.is_sage {
+            return None;
+        }
+        match self.sage.as_ref().unwrap_or(&self.file_sage) {
+            Sage::Ant(sage) if *sage != self.name => Some(sage.clone()),
+            _ => None,
+        }
+    }
+
     pub(super) fn prompt_instructions(&self) -> String {
         [
             (format!("role {}", self.name), self.whoami.as_deref()),
@@ -381,7 +408,17 @@ impl Ant {
 /// nothing. Its home and workdir are `~/.ants/messenger`, created when it starts, and its credentials
 /// `~/.config/ants/auth/messenger.creds` (where `ants auth user messenger` writes them) if that file exists.
 pub fn builtin_messenger(harness: Option<&str>, home: &Path) -> Ant {
-    let name = UserId::messenger();
+    builtin(UserId::messenger(), harness, home)
+}
+
+/// The ant a file serves while one of its ants names `sage` as its sage and it lists no ant of the name
+/// ([`super::sage::settle`]), set up as the built-in messenger is ([`builtin_messenger`]), in `~/.ants/sage`, with
+/// `~/.config/ants/auth/sage.creds`. Its shared settings, such as its model and reasoning effort, change as any ant's.
+pub fn builtin_sage(harness: Option<&str>, home: &Path) -> Ant {
+    builtin(UserId::sage(), harness, home)
+}
+
+fn builtin(name: UserId, harness: Option<&str>, home: &Path) -> Ant {
     let dir = home.join(".ants").join(name.as_str());
     let creds = home.join(".config/ants/auth").join(format!("{name}.creds"));
     Ant {

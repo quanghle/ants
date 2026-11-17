@@ -268,7 +268,7 @@ async fn a_missing_harness_fails_with_its_fix() {
     let config = dir.join("config.toml");
     std::fs::write(
         &config,
-        "messenger = false\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nharness = \"ghost\"\n\
+        "messenger = false\nsage = \"none\"\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nharness = \"ghost\"\n\
              [harnesses.ghost]\ncommand = \"/nonexistent-ants-bin/acp\"\n",
     )
     .unwrap();
@@ -383,7 +383,8 @@ fn a_break_in_an_ant_s_sense_chain_fails_and_a_log_over_its_size_limit_warns() {
     let config = dir.join("config.toml");
     let ants = ["dev-a", "dev-b", "dev-c"]
         .map(|name| format!("[[ant]]\nname = \"{name}\"\nworkdir = \".\"\nhome = \"{name}\"\n"));
-    std::fs::write(&config, format!("messenger = false\nharness = \"copilot\"\n{}", ants.concat())).unwrap();
+    std::fs::write(&config, format!("messenger = false\nsage = \"none\"\nharness = \"copilot\"\n{}", ants.concat()))
+        .unwrap();
     let loaded = config::load(&config).unwrap();
     let checked_at = "2026-01-02T03:04:05Z".parse().unwrap();
     let status = ChainStatus {

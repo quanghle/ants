@@ -93,6 +93,11 @@ impl UserId {
         Self("messenger".to_owned())
     }
 
+    /// The reviewing ant every ant names as its sage unless its config names another or none.
+    pub fn sage() -> Self {
+        Self("sage".to_owned())
+    }
+
     /// The channel manager (`ants channel serve`), which posts in a channel what it changed there. A reserved name:
     /// no ant may take it.
     pub fn channel_manager() -> Self {

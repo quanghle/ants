@@ -173,7 +173,7 @@ if [ -n "$bare" ]; then
 else
     "$ants" --nats "$url" init >"$work/init.log" 2>&1 || { cat "$work/init.log" >&2; die "ants init failed"; }
     {
-        printf 'messenger = false\nharness = "%s"\n' "$harness"
+        printf 'messenger = false\nsage = "none"\nharness = "%s"\n' "$harness"
         [ -z "$metrics" ] || printf 'metrics = "%s"\n' "$metrics"
         printf '\n[[ant]]\nname = "footprint"\nworkdir = "%s"\nhome = "%s"\n' "$work/workdir" "$work/home"
     } >"$work/config.toml"

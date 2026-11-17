@@ -18,7 +18,7 @@ use crate::{Machine, UserId};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MachineRecord {
     pub machine: Machine,
-    /// The ants the daemon serves, sorted, the built-in messenger left out.
+    /// The ants the daemon serves, sorted, the built-in messenger and sage left out.
     #[serde(default)]
     pub ants: Vec<UserId>,
     /// Host name of the machine, as the colony entries of its ants name it.

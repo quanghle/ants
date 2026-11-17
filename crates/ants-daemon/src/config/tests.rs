@@ -276,17 +276,17 @@ fn auto_update_is_off_unless_set() {
 fn redaction_is_on_unless_turned_off() {
     let ant = "[[ant]]\nname = \"dev-a\"\nworkdir = \".\"";
     let redact = |text: &str| parse_here(text).unwrap().iter().map(|ant| ant.redact).collect::<Vec<_>>();
-    assert_eq!(redact(ant), [true, true]);
-    assert_eq!(redact(&format!("redact = false\n{ant}")), [false, false], "the messenger too");
+    assert_eq!(redact(ant), [true, true, true]);
+    assert_eq!(redact(&format!("redact = false\n{ant}")), [false, false, false], "the messenger and the sage too");
 }
 
 #[test]
 fn names_the_machine_as_the_file_does() {
     let ant = "[[ant]]\nname = \"dev-a\"\nworkdir = \".\"";
     let machines = |text: &str| parse_here(text).unwrap().into_iter().map(|ant| ant.machine).collect::<Vec<_>>();
-    assert_eq!(machines(ant), [None, None], "the host name");
+    assert_eq!(machines(ant), [None, None, None], "the host name");
     let named = machines(&format!("machine = \"dev-vm1\"\n{ant}"));
-    assert_eq!(named, [Some("dev-vm1".to_owned()), Some("dev-vm1".to_owned())], "the messenger too");
+    assert_eq!(named, vec![Some("dev-vm1".to_owned()); 3], "the messenger and the sage too");
     let mut ants = parse_here(&format!("machine = \"dev-vm1\"\n{ant}")).unwrap();
     assert_eq!(config(ants.remove(0)).unwrap().presence.machine.as_deref(), Some("dev-vm1"));
     let long = "m".repeat(65);
@@ -306,7 +306,7 @@ fn ants_are_served_by_sense_unless_the_file_or_the_ant_names_another_provider() 
     let settings = |text: &str| -> Vec<Setting> {
         parse_here(text).unwrap().into_iter().map(|ant| config(ant).unwrap().provider).collect()
     };
-    assert_eq!(settings(ants), [Setting::Sense, Setting::Sense, Setting::Sense], "the messenger too");
+    assert_eq!(settings(ants), vec![Setting::Sense; 4], "the messenger and the sage too");
 
     let named = settings(&format!("provider = \"memo\"\n{ants}\nprovider = \"none\"\n{providers}"));
     let Setting::External(memo) = &named[0] else { panic!("{named:?}") };
@@ -358,7 +358,12 @@ fn the_top_level_harness_is_the_default_one_and_runs_the_builtin_messenger() {
     let harnesses: Vec<_> = ants.iter().map(|ant| (ant.name.as_str(), ant.harness.as_deref(), ant.builtin)).collect();
     assert_eq!(
         harnesses,
-        [("dev-a", Some("claude"), false), ("dev-b", Some("antigravity"), false), ("messenger", Some("claude"), true),]
+        [
+            ("dev-a", Some("claude"), false),
+            ("dev-b", Some("antigravity"), false),
+            ("messenger", Some("claude"), true),
+            ("sage", Some("claude"), true),
+        ]
     );
     let root = manifest_dir().parent().unwrap().parent().unwrap().to_owned();
     let messenger = &ants[2];
@@ -388,10 +393,11 @@ fn the_builtin_messenger_is_on_unless_turned_off() {
 
     let ants = parse_here("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"").unwrap();
     let names: Vec<_> = ants.iter().map(|ant| ant.name.as_str()).collect();
-    assert_eq!(names, ["dev-a", "messenger"]);
+    assert_eq!(names, ["dev-a", "messenger", "sage"]);
 
     let ants = parse_here("messenger = false\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"").unwrap();
-    assert_eq!((ants.len(), ants[0].name.as_str()), (1, "dev-a"));
+    let names: Vec<_> = ants.iter().map(|ant| ant.name.as_str()).collect();
+    assert_eq!(names, ["dev-a", "sage"]);
 
     let err = format!("{:#}", parse_here("messenger = false\nharness = \"claude\"").unwrap_err());
     assert!(err.contains("nothing to serve"), "{err}");
@@ -400,7 +406,7 @@ fn the_builtin_messenger_is_on_unless_turned_off() {
 #[test]
 fn a_listed_messenger_replaces_the_builtin_one() {
     let ants = parse_here("harness = \"claude\"\n[[ant]]\nname = \"messenger\"\nworkdir = \".\"").unwrap();
-    assert_eq!(ants.len(), 1);
+    assert_eq!((ants.len(), ants[1].name.as_str()), (2, "sage"), "the listed messenger names the sage");
     assert_eq!((ants[0].harness.as_deref(), ants[0].builtin), (Some("claude"), false));
     assert_eq!(ants[0].workdir, manifest_dir().canonicalize().unwrap());
 }
@@ -448,7 +454,8 @@ fn harnesses_defined_in_the_file_run_ants_and_the_builtin_messenger() {
     assert_eq!(harness("antigravity"), Harnesses::builtin().get("antigravity").unwrap());
 
     let named: Vec<_> = ants.iter().map(|ant| (ant.name.as_str(), ant.harness.as_deref())).collect();
-    assert_eq!(named, [("dev-a", Some("my-agent")), ("dev-b", Some("claude")), ("messenger", Some("my-agent"))]);
+    let builtins = [("messenger", Some("my-agent")), ("sage", Some("my-agent"))];
+    assert_eq!(named, [[("dev-a", Some("my-agent")), ("dev-b", Some("claude"))].as_slice(), &builtins].concat());
     let configs: Vec<_> = ants.into_iter().map(|ant| ant.into_config("nats://unused", &harnesses).unwrap()).collect();
     assert_eq!(configs[0].harness.harness, harness("my-agent"));
     assert_eq!(configs[0].harness.harness.mode.as_deref(), Some("default"));
@@ -520,7 +527,7 @@ fn dropin_files_define_harnesses_the_ants_may_name() {
     let config = dir.join("config.toml");
     let dropins = dir.join("harnesses.d");
     std::fs::create_dir(&dropins).unwrap();
-    let text = "messenger = false\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nharness = \"codex\"\n\
+    let text = "messenger = false\nsage = \"none\"\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nharness = \"codex\"\n\
                     [[ant]]\nname = \"dev-b\"\nworkdir = \".\"\nharness = \"mine\"\n\
                     [harnesses.mine]\ncommand = \"mine-acp\"\n";
     std::fs::write(&config, text).unwrap();
@@ -589,8 +596,11 @@ fn without_a_top_level_harness_each_ant_and_template_names_its_own() {
     let e = unset(template);
     assert!(e.contains(": ant template worker lists no harnesses: no harness set"), "{e}");
 
-    let ants =
-        parse_as_is("messenger = false\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nharness = \"codex\"").unwrap().ants;
+    let ants = parse_as_is(
+        "messenger = false\nsage = \"none\"\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nharness = \"codex\"",
+    )
+    .unwrap()
+    .ants;
     let codex = config(ants[0].clone()).unwrap();
     assert_eq!((codex.harness.harness.name(), codex.presence.defer_to_others), ("codex", false));
     let e = config(Ant::new("dev-a".parse().unwrap(), manifest_dir())).unwrap_err();
@@ -700,7 +710,7 @@ fn the_storage_table_reaches_every_ant() {
     .unwrap();
     let settings = storage::Settings { warn_percent: 90, max_file_store: Some(10 << 30), max_memory_store: Some(1024) };
     assert_eq!(loaded.storage, settings);
-    assert_eq!(loaded.ants.len(), 2, "dev-a and the messenger");
+    assert_eq!(loaded.ants.len(), 3, "dev-a, the messenger and the sage");
     assert!(loaded.ants.iter().all(|ant| ant.storage == settings));
     assert_eq!(config(loaded.ants[0].clone()).unwrap().storage.jetstream, settings);
     let err = |text: &str| format!("{:#}", parse_here(text).unwrap_err());
@@ -870,7 +880,7 @@ fn entries_read_back_as_written() {
     let text = entry(&plain).unwrap();
     assert_eq!(text, format!("[[ant]]\nname = \"dev-a\"\nworkdir = {:?}\n", workdir.to_str().unwrap()));
     let read = parse_here(&format!("messenger = false\n{text}")).unwrap();
-    assert_eq!(read, [Ant { harness: Some("copilot".to_owned()), ..plain }], "the file's harness");
+    assert_eq!(read[0], Ant { harness: Some("copilot".to_owned()), ..plain }, "the file's harness");
 
     let mut full = Ant::new("dev-b".parse().unwrap(), workdir);
     full.nats = Some("wss://hub.example/nats".to_owned());
@@ -922,7 +932,7 @@ fn appending_keeps_the_file_as_it_was_and_checks_it() {
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.starts_with(&format!("{old}\n\n[[ant]]\nname = \"dev-b\"")), "{text}");
     let names: Vec<_> = load(&path).unwrap().ants.into_iter().map(|ant| ant.name.to_string()).collect();
-    assert_eq!(names, ["dev-a", "dev-b", "messenger"]);
+    assert_eq!(names, ["dev-a", "dev-b", "messenger", "sage"]);
 
     let err = format!("{:#}", add("dev-a").unwrap_err());
     assert!(err.contains("ant dev-a is listed twice"), "{err}");

@@ -28,11 +28,22 @@ pub fn incarnation(sequence: u64, stored: DateTime<Utc>) -> String {
 }
 
 /// The keys of an ant's `[[ant]]` table that are the ant's own rather than its machine's: its role and core memories
-/// (`whoami`, `memory`), which [`SharedSettings`] holds for every machine serving it. The rest (workdir, env, harness,
-/// `tasks` and the others) stays the machine's config. Of an ant added from a template, [`SharedSettings`] holds only
-/// those a request to the template chooses: `fallback`, `allow` and `escalate_to` follow the template.
-pub const SHARED_FIELDS: [&str; 9] =
-    ["whoami", "memory", "capabilities", "model", "reasoning_effort", "context", "fallback", "allow", "escalate_to"];
+/// (`whoami`, `memory`) and the ant reviewing it (`sage`), which [`SharedSettings`] holds for every machine serving it.
+/// The rest (workdir, env, harness, `tasks` and the others) stays the machine's config. Of an ant added from a
+/// template, [`SharedSettings`] holds only those a request to the template chooses: `fallback`, `allow` and
+/// `escalate_to` follow the template, and `sage` the config's top-level one.
+pub const SHARED_FIELDS: [&str; 10] = [
+    "whoami",
+    "memory",
+    "capabilities",
+    "model",
+    "reasoning_effort",
+    "context",
+    "fallback",
+    "allow",
+    "escalate_to",
+    "sage",
+];
 
 /// Whether `key`, the first key of a field of an ant's table, is one of [`SHARED_FIELDS`].
 pub fn is_shared_field(key: &str) -> bool {

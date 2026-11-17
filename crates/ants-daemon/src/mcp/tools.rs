@@ -196,6 +196,14 @@ fn instructions(ant: &UserId, manager: bool, assisting: Option<&UserId>, provide
              human's request starts a thread, suggest a short title for it with suggest_thread_title.",
         );
     }
+    if *ant == UserId::sage() {
+        text.push_str(
+            " As the sage, review the ants that name it as their sage: a review arrives as a message from the ant \
+             reviewed. Check what it carries against its evidence and answer with findings, each citing that \
+             evidence and suggesting an action, for the ant to verify and act on. Only suggest: change nothing, \
+             leaving the ant's memories to the ant.",
+        );
+    }
     text
 }
 

@@ -207,6 +207,7 @@ mod tests {
         let path = dir.join("config.toml");
         let text = r#"
             messenger = false
+            sage = "none"
 
             [[ant_template]]
             name = "worker"
