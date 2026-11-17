@@ -7,8 +7,8 @@ use chrono::Utc;
 use serde_json::{Value, json};
 
 use super::{
-    AppendError, Chain, ChainStatus, Event, EventLog, LogError, Position, RENAMED, Signer, Stored, Verifier,
-    VerifyError,
+    Anchor, AppendError, Chain, ChainStatus, Event, EventLog, IMPORTED, LogError, Position, RENAMED, Signer, Stored,
+    Verdict, Verifier, VerifyError,
 };
 
 /// Messages read at once.
@@ -97,14 +97,61 @@ impl<L: EventLog, S: Signer, V: Verifier> AntLog<L, S, V> {
         }
         let mut checked = Vec::new();
         for stored in read {
-            let event = self.chain.check(&stored, &self.verifier).await.map_err(|e| match e {
-                VerifyError::Invalid(e) | VerifyError::Unavailable(e) => LogError(format!("verifying: {e}")),
-            })?;
-            if let Some(event) = event {
-                checked.push(Checked { stored, event });
+            loop {
+                match self.chain.check(&stored, &self.verifier).await.map_err(verifying)? {
+                    Verdict::Verified(event) => checked.push(Checked { stored, event }),
+                    Verdict::Broken => {}
+                    Verdict::Unanchored { index } => {
+                        let anchor = self.find_anchor(index).await?;
+                        self.chain.anchored(anchor);
+                        continue;
+                    }
+                }
+                break;
             }
         }
         Ok(Some(checked))
+    }
+
+    /// The first [`Anchor`] past the last read, signed for the bus by the ant, that vouches for the event at `index`.
+    async fn find_anchor(&self, index: u64) -> Result<Option<Anchor>, LogError> {
+        let sense = self.chain.sense();
+        let mut after = self.chain.last_sequence();
+        loop {
+            let read = self.log.read_after(sense, after, READ_BATCH).await?;
+            let Some(last) = read.last() else { return Ok(None) };
+            after = last.sequence;
+            for stored in &read {
+                let Ok(event) = stored.event() else { continue };
+                if event.kind != IMPORTED || event.sense != *sense || !self.chain.knows(&event.ant) {
+                    continue;
+                }
+                let Ok(anchor) = serde_json::from_value::<Anchor>(event.data.clone()) else { continue };
+                if anchor.through.index < index || anchor.through.index >= event.index {
+                    continue;
+                }
+                match self.verifier.verify(&event, stored.stored_at).await {
+                    Ok(()) => return Ok(Some(anchor)),
+                    Err(VerifyError::Invalid(_)) => {}
+                    Err(e @ VerifyError::Unavailable(_)) => return Err(verifying(e)),
+                }
+            }
+        }
+    }
+
+    /// The messages of the log up to the last read, in order, as stored.
+    pub async fn messages(&self) -> Result<Vec<Stored>, LogError> {
+        let (sense, last) = (self.chain.sense(), self.chain.last_sequence());
+        let (mut messages, mut after) = (Vec::new(), 0);
+        while after < last {
+            let read = self.log.read_after(sense, after, READ_BATCH).await?;
+            let Some(read_last) = read.last() else {
+                return Err(LogError(format!("the log ends before message {last}, read before")));
+            };
+            after = read_last.sequence;
+            messages.extend(read.into_iter().filter(|stored| stored.sequence <= last));
+        }
+        Ok(messages)
     }
 
     /// Go on reading from `position`, as read before, or with none from the log's start ([`Chain::resume`]).
@@ -178,5 +225,11 @@ impl<L: EventLog, S: Signer, V: Verifier> AntLog<L, S, V> {
     fn keep_status(&self) -> Result<(), LogError> {
         let Some(home) = &self.home else { return Ok(()) };
         super::write_status(home, &self.status()).map_err(|e| LogError(format!("keeping the chain status: {e}")))
+    }
+}
+
+fn verifying(e: VerifyError) -> LogError {
+    match e {
+        VerifyError::Invalid(e) | VerifyError::Unavailable(e) => LogError(format!("verifying: {e}")),
     }
 }

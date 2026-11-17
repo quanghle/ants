@@ -13,6 +13,9 @@ pub const EVENT_SIGNING_CONTEXT: &str = "ants-sense-event-v1";
 /// The kind of the event starting the events of an ant's new name in its log, its data `{"from": <the name before>}`:
 /// written by the daemon serving the ant under its new name before its first event ([`super::AntLog::try_append`]).
 pub const RENAMED: &str = "ant_renamed";
+/// The kind of the event an import appends after the events it brought from another bus, its data an
+/// [`super::Anchor`]: signed on this bus, it vouches for them ([`super::Chain`]).
+pub const IMPORTED: &str = "log_imported";
 
 /// An event of the log of the sense identity `sense`, as stored, JSON-encoded, in its message. Its position in the log
 /// (`index`) and the hash of the message before it (`prev`) chain it to the events before; neither the stream's

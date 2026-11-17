@@ -1,7 +1,9 @@
 //! The data sense keeps of the ants a process serves ([`SenseStores`]): each ant's items, opened on first use from the
 //! sense id in its home ([`ants_sense::identity`]), its event log in [`ants_proto::SENSE_STREAM`] over the machine's
 //! host connection and its cache in its home. Existing caches remain available while disconnected, including after
-//! process restart. One retry worker per host connection drains durable local outboxes after reconnect.
+//! process restart. One retry worker per host connection drains durable local outboxes after reconnect. An ant's sense
+//! data travel to another bus by export and import ([`ants_sense::export`]); a home awaiting the import opens none of
+//! them until it lands.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -11,6 +13,7 @@ use std::time::Duration;
 use ants_proto::provider::BoxFuture;
 use ants_proto::{JsDomain, Machine, SenseId, UserId};
 use ants_sense::cache::Cache;
+use ants_sense::export::{self, SenseExport};
 use ants_sense::identity;
 use ants_sense::log::{
     AccountVerifier, AntLog, AppendError, Event, EventLog, LogError, Revocations, Signature, Signer, Stored, Verifier,
@@ -221,18 +224,39 @@ pub fn stores() -> &'static Arc<SenseStores> {
     STORES.get_or_init(SenseStores::new)
 }
 
+/// What [`SenseStores`] holds of an ant served.
+struct Of {
+    items: Arc<tokio::sync::Mutex<Option<Opened>>>,
+    home: PathBuf,
+    creds: Option<PathBuf>,
+    link: Option<Arc<Link>>,
+    route: Route,
+}
+
+impl SenseStores {
+    fn of(&self, ant: &UserId) -> Result<Of, StoreError> {
+        let state = self.state();
+        let served = state.ants.get(ant).ok_or_else(|| StoreError::NotKept(format!("{ant} is not served")))?;
+        let link = match &state.host {
+            Host::Off | Host::Connecting => None,
+            Host::Up(link) => Some(link.clone()),
+        };
+        let (items, home, creds) = (served.items.clone(), served.home.clone(), served.creds.clone());
+        Ok(Of { items, home, creds, link, route: state.route.clone() })
+    }
+}
+
 impl Stores for SenseStores {
     fn items<'a>(&'a self, ant: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
         Box::pin(async move {
-            let (items, home, creds, link, route) = {
-                let state = self.state();
-                let served = state.ants.get(ant).ok_or_else(|| StoreError::NotKept(format!("{ant} is not served")))?;
-                let link = match &state.host {
-                    Host::Off | Host::Connecting => None,
-                    Host::Up(link) => Some(link.clone()),
-                };
-                (served.items.clone(), served.home.clone(), served.creds.clone(), link, state.route.clone())
-            };
+            let Of { items, home, creds, link, route } = self.of(ant)?;
+            if export::importing(&home) {
+                return Err(StoreError::Unavailable(format!(
+                    "the sense data of {ant} await their import: `ants ant import FILE --provider-only` imports them, \
+                     removing {} starts afresh",
+                    export::importing_file(&home).display()
+                )));
+            }
             let mut opened = items.lock().await;
             if let Some(current) = opened.as_ref() {
                 match current.sync().await {
@@ -259,6 +283,72 @@ impl Stores for SenseStores {
             Ok(items)
         })
     }
+
+    fn export<'a>(&'a self, ant: &'a UserId) -> BoxFuture<'a, Result<SenseExport, StoreError>> {
+        Box::pin(async move {
+            let items = self.items(ant).await?;
+            let Of { home, link, .. } = self.of(ant)?;
+            let link = link.ok_or_else(|| StoreError::Unavailable("no host connection".into()))?;
+            let messages = items.messages().await?;
+            let skills = export::skill_files(&home)
+                .map_err(|e| StoreError::Unavailable(format!("reading the skill files of {ant}: {e}")))?;
+            Ok(export::pack(items.sense().await, ant.clone(), &messages, &link.accounts, skills)?)
+        })
+    }
+
+    fn import<'a>(&'a self, ant: &'a UserId, export: SenseExport) -> BoxFuture<'a, Result<(), StoreError>> {
+        Box::pin(async move {
+            let Of { items, home, creds, link, route } = self.of(ant)?;
+            let link = link.ok_or_else(|| StoreError::Unavailable("no host connection".into()))?;
+            let mut opened = items.lock().await;
+            *opened = None;
+            import(ant, &home, creds.as_deref(), &link, route, &export).await?;
+            drop(opened);
+            self.items(ant).await.map(drop)
+        })
+    }
+}
+
+/// Take `export` in as the sense data of `ant`, whose home is `home`, signed with its credentials at `creds`, over
+/// `link`: under the export's sense id, which the home keeps unless it keeps another, refused then.
+async fn import(
+    ant: &UserId,
+    home: &Path,
+    creds: Option<&Path>,
+    link: &Link,
+    route: Route,
+    export: &SenseExport,
+) -> Result<(), StoreError> {
+    let unavailable = |e: anyhow::Error| StoreError::Unavailable(format!("{e:#}"));
+    let sense = &export.manifest.sense;
+    match identity::read_id(home).map_err(|e| unavailable(e.into()))? {
+        Some(id) if id != *sense => {
+            return Err(StoreError::Unavailable(format!(
+                "the home of {ant} keeps sense identity {id}, and the export is of {sense}"
+            )));
+        }
+        Some(_) => {}
+        None => identity::keep_id(home, sense).map_err(|e| unavailable(e.into()))?,
+    }
+    if ants_sense::cache::cache_file(home).with_extension("pending").exists() {
+        return Err(StoreError::Unavailable(format!("changes of {ant} wait to be appended to its log here")));
+    }
+    let earlier = identity::earlier_names(home).map_err(|e| unavailable(e.into()))?;
+    let log = link.log.get_or_try_init(|| JetStreamLog::open(&link.js)).await.map_err(unavailable)?;
+    let signer = HostSigner {
+        signer: AntSigner::load(ant, creds, &link.accounts).map_err(unavailable)?,
+        ant: ant.clone(),
+        accounts: link.accounts.clone(),
+    };
+    let incarnation = log.incarnation().to_owned();
+    let log = HostLog { route: route.clone(), incarnation, accounts: link.accounts.clone() };
+    let machine = link.machine.clone();
+    let mut log =
+        AntLog::new(log, signer, HostVerifier(route), sense.clone(), ant.clone(), machine, Some(home.into()))?
+            .with_earlier_names(earlier);
+    let imported = export::import(&mut log, export).await?;
+    imported.write_skills(home).map_err(|e| unavailable(e.into()))?;
+    export::import_done(home).map_err(|e| unavailable(e.into()))
 }
 
 /// The items of `ant`, whose home is `home`, its sense id minted there first if it has none, signed with its

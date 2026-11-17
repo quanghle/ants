@@ -62,6 +62,7 @@ fn an_export_packs_the_home_s_memories_and_leaves_out_its_work() {
         (".sense/names", "dev-x\n"),
         (".sense/cache.db", "cache"),
         (".sense/chain.json", "chain"),
+        (".sense/skills/review/SKILL.md", "in sense's part"),
     ] {
         write(&home.join(path), text);
     }
@@ -258,7 +259,9 @@ async fn an_ant_moves_to_another_bus_with_its_identity_and_memories() {
         "gpt-5",
     ];
     Box::pin(import_as(&nats, &args)).await.unwrap();
-    assert_eq!(tree(&home_c), BTreeMap::from([("notes.md".to_owned(), "remember".to_owned())]));
+    let awaiting = (".sense/importing".to_owned(), String::new());
+    let restored = BTreeMap::from([("notes.md".to_owned(), "remember".to_owned()), awaiting]);
+    assert_eq!(tree(&home_c), restored, "the home awaits sense's part");
     assert_eq!(told(&home_c), [ants_proto::provider::EventKind::AntMoved], "not renamed");
     let loaded = config::load(&config_c).unwrap();
     let dev_a = &loaded.ants.iter().find(|a| a.name == p("dev-a")).unwrap();

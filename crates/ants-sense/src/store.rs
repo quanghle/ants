@@ -9,8 +9,9 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::cache::{Cache, CacheError, Hit, Pending};
+use crate::export::SenseExport;
 use crate::items::{Batch, Change, ITEM_EVENT, ITEMS_EVENT, Item, ItemId, Revision, Values};
-use crate::log::{APPEND_TRIES, AntLog, Break, Checked, EventLog, LogError, Position, Signer, Verifier};
+use crate::log::{APPEND_TRIES, AntLog, Break, Checked, EventLog, LogError, Position, Signer, Stored, Verifier};
 
 /// Why a store did not answer.
 #[derive(Debug, thiserror::Error)]
@@ -29,6 +30,8 @@ pub enum StoreError {
     Log(#[from] LogError),
     #[error("the cache: {0}")]
     Cache(#[from] CacheError),
+    #[error("{0}")]
+    Import(#[from] crate::export::ImportError),
 }
 
 /// The items of an ant's sense identity, projected from its verified log into a cache. Normally the log accepts a
@@ -181,6 +184,17 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
         self.sync().await?;
         self.check_integrity()?;
         self.commit_inner(|cache| writes.iter().map(|write| write.decide(cache, by)).collect(), false).await
+    }
+
+    /// Every message of the log, as stored, for an export ([`crate::export`]): once caught up, with no change waiting to
+    /// be appended and the chain whole.
+    pub async fn messages(&mut self) -> Result<Vec<Stored>, StoreError> {
+        self.sync().await?;
+        if self.pending()? > 0 {
+            return Err(StoreError::Unavailable("changes wait to be appended to the log".into()));
+        }
+        self.check_chain()?;
+        Ok(self.log.messages().await?)
     }
 
     pub fn pending(&self) -> Result<usize, StoreError> {
@@ -566,6 +580,8 @@ pub trait Items: Send + Sync {
     fn log_bytes(&self) -> BoxFuture<'_, u64>;
     /// The ant's earlier names, whose events in the log are its own ([`crate::log::Chain::earlier`]).
     fn earlier_names(&self) -> BoxFuture<'_, Vec<UserId>>;
+    /// [`Store::messages`].
+    fn messages(&self) -> BoxFuture<'_, Result<Vec<Stored>, StoreError>>;
 }
 
 impl<L, S, V> Items for tokio::sync::Mutex<Store<L, S, V>>
@@ -706,12 +722,27 @@ where
     fn earlier_names(&self) -> BoxFuture<'_, Vec<UserId>> {
         Box::pin(async move { self.lock().await.log().chain().earlier().to_vec() })
     }
+
+    fn messages(&self) -> BoxFuture<'_, Result<Vec<Stored>, StoreError>> {
+        Box::pin(async move { self.lock().await.messages().await })
+    }
 }
 
 /// What finds the items of each ant a daemon serves, opening the ant's [`Store`] on first use: the daemon provides it
 /// ([`crate::Sense::with_stores`]), as it holds the ant's home, credentials and connection.
 pub trait Stores: Send + Sync {
     fn items<'a>(&'a self, ant: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>>;
+
+    /// The export of `ant`'s sense data, to take to another bus ([`crate::export`]).
+    fn export<'a>(&'a self, ant: &'a UserId) -> BoxFuture<'a, Result<SenseExport, StoreError>> {
+        Box::pin(std::future::ready(Err(StoreError::NotKept(format!("no export of {ant}")))))
+    }
+
+    /// Take in `export` as `ant`'s sense data ([`crate::export::import`]).
+    fn import<'a>(&'a self, ant: &'a UserId, export: SenseExport) -> BoxFuture<'a, Result<(), StoreError>> {
+        drop(export);
+        Box::pin(std::future::ready(Err(StoreError::NotKept(format!("no import of {ant}")))))
+    }
 }
 
 #[cfg(test)]
