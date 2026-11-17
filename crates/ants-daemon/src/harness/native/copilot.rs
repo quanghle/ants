@@ -401,15 +401,10 @@ impl<R: AsyncRead + Unpin> AsyncRead for Output<R> {
 /// An MCP server as the CLI's `session.mcp.list` reports it.
 fn mcp_server(server: &Value) -> McpServerState {
     let status = match server["status"].as_str() {
-        Some("connected") => McpStatus::Connected,
-        Some("pending") => McpStatus::Pending,
-        Some("needs-auth") => McpStatus::NeedsAuth,
-        Some("failed") => McpStatus::Failed,
-        Some("disabled" | "stopped" | "not_configured") => McpStatus::Disabled,
-        _ => McpStatus::Unknown,
+        Some("stopped" | "not_configured") => McpStatus::Disabled,
+        word => super::mcp_status(word),
     };
-    let name = server["name"].as_str().unwrap_or_default();
-    McpServerState::new(name, status, server["error"].as_str(), server["source"].as_str())
+    super::mcp_server_state(server, status, server["error"].as_str(), server["source"].as_str(), None)
 }
 
 /// Where a session's events go: the prompt running, if any.

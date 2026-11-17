@@ -401,7 +401,7 @@ fn mcp_server(server: &Value) -> McpServerState {
     };
     let error = server["toolsError"].as_str().or(runtime.filter(|&r| r == "cancelled"));
     let tools = server["tools"].as_object().map(Map::len);
-    McpServerState::new(server["name"].as_str().unwrap_or_default(), status, error, None).with_tools(tools)
+    super::mcp_server_state(server, status, error, None, tools)
 }
 
 /// Stop routing a thread's notifications to its prompt.
