@@ -95,7 +95,11 @@ mod tests {
 
     use super::*;
 
-    fn write(path: &Path, content: &str, #[cfg_attr(not(unix), expect(unused_variables))] mode: u32) {
+    fn write(
+        path: &Path,
+        content: &str,
+        #[cfg_attr(not(unix), expect(unused_variables, reason = "only Unix sets a mode"))] mode: u32,
+    ) {
         std::fs::write(path, content).unwrap();
         #[cfg(unix)]
         {

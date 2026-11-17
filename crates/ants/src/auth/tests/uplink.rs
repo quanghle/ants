@@ -208,6 +208,7 @@ async fn the_longest_uplink_credentials_connect() {
 /// for dev-a and the webhook github: dev-a reaches the hub's stream through the domain, and github delivers there
 /// (to dev-b, elsewhere); dev-b and the webhook alerts, also valid on the leaf, get nothing across.
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "a hub and its leaf node set up, then each client checked across")]
 async fn clients_on_a_leaf_node_reach_the_hub_stream_through_its_domain() {
     let leaf_port = free_port();
     let Some(hub) = Server::start_with(

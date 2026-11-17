@@ -174,7 +174,7 @@ pub fn system() -> Option<Memory> {
 }
 
 /// The memory `/proc/meminfo` tells of: its `MemAvailable` and `MemTotal`, in kB.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg(any(target_os = "linux", test))]
 fn meminfo(text: &str) -> Option<Memory> {
     let field = |name: &str| {
         let line = text.lines().find_map(|l| l.strip_prefix(name)?.strip_prefix(':'))?;

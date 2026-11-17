@@ -34,6 +34,9 @@ uuid = "1.29.2"
 unused_dependencies = "warn"
 
 [workspace.lints.clippy]
+# Lint suppressions are `#[expect(lint, reason = "...")]`, which fails once the lint no longer fires.
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
 duration_suboptimal_units = "warn"
 format_push_string = "warn"
 large_futures = "warn"

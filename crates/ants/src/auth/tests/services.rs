@@ -86,6 +86,10 @@ async fn a_webhook_posts_as_itself_to_its_destinations_only_and_reads_no_message
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "every feed the observer reads, then what it may not publish, against one server"
+)]
 async fn an_observer_reads_approvals_dead_letters_status_and_the_colony_and_publishes_nothing() {
     use ants_proto::Feed;
     use async_nats::jetstream::consumer;

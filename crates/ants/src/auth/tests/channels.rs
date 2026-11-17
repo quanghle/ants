@@ -87,6 +87,7 @@ async fn ants_post_to_channels_as_themselves_and_read_but_never_write_the_channe
 }
 
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "one scenario against one server, each step building on the ones before")]
 async fn the_channel_manager_applies_the_owner_s_changes_only_and_announces_them() {
     use ants_daemon::chanadm;
     use ants_proto::{ChannelAdminOutcome, ChannelAdminRequest, ChannelOp, Refusal};
