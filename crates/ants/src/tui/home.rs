@@ -117,8 +117,8 @@ pub struct Item {
     pub requests: Vec<ApprovalRequest>,
     /// Whether it heads its group's requests listed one by one.
     pub expanded: bool,
-    /// The question asked.
-    pub question: Option<Question>,
+    /// The question asked, and the id of the message asking it, which its keys answer.
+    pub question: Option<(Uuid, Question)>,
     /// How many of its reason wait on the thread: unread messages or mentions.
     pub count: usize,
     /// The thread's other, less pressing reasons, with how many of each: its badges.
@@ -254,7 +254,7 @@ fn unsnoozed(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
         if let Some(asked) = data.question(thread) {
             let text = format!("{}: {}", asked.from, asked.question.text);
             items.push(Item {
-                question: Some(asked.question.clone()),
+                question: Some((asked.id, asked.question.clone())),
                 ..item(Why::Question, thread, asked.at, text, &asked.from)
             });
         }
@@ -386,7 +386,8 @@ impl Page {
             Key::Char('r') if pending.is_some() => return pending.map(|request| To::Ask(request, verdict)),
             Key::Char('1'..='9' | 'r') if selected.is_some_and(|i| i.question.is_some()) => {
                 let item = selected?;
-                return question::key(key, &item.thread, item.question.as_ref()?);
+                let (id, asked) = item.question.as_ref()?;
+                return question::key(key, &item.thread, *id, asked);
             }
             Key::Char('r') => return thread().map(To::Reply),
             Key::Char('f') => return thread().map(|_| To::Bar("/forward @".to_owned())),
@@ -460,7 +461,7 @@ impl Page {
                             .collect::<Vec<_>>(),
                     ),
                 ];
-                if let Some(question) = &i.question {
+                if let Some((_, question)) = &i.question {
                     lines.push(Line::raw(format!("         {}", excerpt(&question::options(question), 160))));
                 }
                 if i.expanded {
@@ -639,7 +640,11 @@ mod tests {
         assert!(screen.contains("1-9 answer · d done · z snooze · Enter open"), "{screen}");
 
         assert_eq!(m.key(Key::Char('3'), at(3)), None, "no third option");
-        let job = Job::Answer { thread: asked.clone(), choice: ants_proto::Choice::Option(2) };
+        let job = Job::Answer {
+            thread: asked.clone(),
+            question: question.id.unwrap(),
+            choice: ants_proto::Choice::Option(2),
+        };
         assert_eq!(m.key(Key::Char('2'), at(3)), Some(Action::Run(job, String::new())));
         assert_eq!(m.key(Key::Char('r'), at(3)), None);
         assert!(m.bar.focused && m.bar.text() == "/answer ", "r types an answer in the bar");
@@ -749,7 +754,8 @@ mod tests {
         let screen = shown(&m, at(5));
         assert!(screen.contains("question help · stuck · 2 mentions"), "{screen}");
         assert!(screen.contains("1-9 answer · d done · z snooze · Enter open"), "the keys of the top reason: {screen}");
-        let job = Job::Answer { thread: busy.clone(), choice: ants_proto::Choice::Option(1) };
+        let job =
+            Job::Answer { thread: busy.clone(), question: question.id.unwrap(), choice: ants_proto::Choice::Option(1) };
         assert_eq!(m.key(Key::Char('1'), at(5)), Some(Action::Run(job, String::new())));
 
         let mut answer = message(5, &busy, "alice", "dev-b", "fixed");

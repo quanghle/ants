@@ -111,9 +111,11 @@ pub enum Job {
         thread: ThreadId,
         ants: Vec<UserId>,
     },
-    /// Answer the question asked of the human on `thread` ([`open_question`]), as `ants answer` does.
+    /// Answer the question asked of the human on `thread` in the message `question`, as `ants answer` does: refused
+    /// when it is gone from the thread or answered already ([`waiting`]).
     Answer {
         thread: ThreadId,
+        question: Uuid,
         choice: Choice,
     },
     Done {
@@ -306,10 +308,9 @@ impl Job {
                 Ok(Done::line(crate::admin::restart::told(&order, outcome)?))
             }
             Self::Cancel { thread, ants } => cancel_all(ctx, &thread, ants).await,
-            Self::Answer { thread, choice } => {
+            Self::Answer { thread, question, choice } => {
                 let entries = thread::history(&ctx.js, &thread, None, thread::Activity::None, None).await?;
-                let question = open_question(&entries, me)
-                    .ok_or_else(|| anyhow!("no question to {me} waits for an answer on thread {thread}"))?;
+                waiting(&entries, me, &thread, question)?;
                 let envelope = send::answering(&ctx.js, me, question, choice).await?;
                 let stored = send::deliver(&ctx.js, ctx.domain.as_ref(), &envelope).await?;
                 Ok(Done {
@@ -591,17 +592,16 @@ pub fn stuck(entries: &[Entry]) -> Option<UserId> {
     })
 }
 
-/// The latest question asked of `me` among `entries` that no later message of `me` answered.
-pub fn open_question(entries: &[Entry], me: &UserId) -> Option<Uuid> {
-    let answered = |id: Uuid| {
-        entries.iter().any(|e| e.from.as_ref() == Some(me) && e.answer.as_ref().is_some_and(|a| a.question == id))
-    };
-    entries
-        .iter()
-        .rev()
-        .filter(|e| e.question.is_some() && e.to.as_ref() == Some(me))
-        .filter_map(|e| e.id)
-        .find(|id| !answered(*id))
+/// Whether the question asked of `me` in the message `id` on `thread`, whose `entries` are these, waits for an answer:
+/// an error when it is gone from the thread or a message of `me` answered it already.
+fn waiting(entries: &[Entry], me: &UserId, thread: &ThreadId, id: Uuid) -> Result<()> {
+    if !entries.iter().any(|e| e.id == Some(id) && e.question.is_some() && e.to.as_ref() == Some(me) && !e.forged) {
+        bail!("question {id} to {me} is gone from thread {thread}");
+    }
+    if entries.iter().any(|e| e.from.as_ref() == Some(me) && e.answer.as_ref().is_some_and(|a| a.question == id)) {
+        bail!("question {id} on thread {thread} is answered already");
+    }
+    Ok(())
 }
 
 /// The latest message or post among `entries` not from `me`, to react to.
@@ -615,7 +615,7 @@ pub fn latest(entries: &[Entry], me: &UserId) -> Option<Uuid> {
 
 #[cfg(test)]
 mod tests {
-    use ants_proto::{Answer, Question};
+    use ants_proto::Question;
 
     use super::*;
     use crate::connection::Nats;
@@ -722,16 +722,57 @@ mod tests {
     }
 
     #[test]
-    fn the_question_to_answer_is_the_latest_unanswered_and_the_message_to_react_to_the_latest_of_another() {
+    fn the_message_to_react_to_is_the_latest_of_another() {
         let (thread, me) = (ThreadId::generate(), user("alice"));
         let question = Question { text: "which?".into(), options: vec!["a".into(), "b".into()], free_text: true };
         let mut asked = message(1, &thread, "dev-a", "alice", "which?");
         asked.question = Some(question);
-        let mut answered = message(2, &thread, "alice", "dev-a", "a");
-        answered.answer = Some(Answer { question: asked.id.unwrap(), option: Some(1) });
-        assert_eq!(open_question(std::slice::from_ref(&asked), &me), asked.id);
-        assert_eq!(open_question(&[asked.clone(), answered.clone()], &me), None);
+        let answered = message(2, &thread, "alice", "dev-a", "a");
         assert_eq!(latest(&[asked.clone(), answered], &me), asked.id);
+    }
+
+    /// A digit on a question card answers that question, though a later one was stored before the answer went out;
+    /// once answered, the same key is refused, as is a question the thread does not hold.
+    #[tokio::test]
+    async fn a_key_answers_the_question_its_card_shows_not_a_later_one() {
+        use crate::tui::model::{Action, Key, To};
+
+        let Some(server) = crate::test_support::Server::start() else { return };
+        let creds = server.creds_as(&user("alice"), ants_proto::Role::Human);
+        let nats = Nats::new(&server.url, Some(&creds), None).unwrap();
+        let (client, js) = nats.connect("test").await.unwrap();
+        js.create_stream(ants_daemon::hub::stream_config()).await.unwrap();
+        let thread = ThreadId::generate();
+        let ask = |text: &str| {
+            let question = Question::new(text, &["yes".to_owned(), "no".to_owned()], false).unwrap();
+            ants_proto::Envelope::asking(thread.clone(), user("dev-a"), user("alice"), question)
+        };
+        let (first, second) = (ask("Ship it?"), ask("Tag it?"));
+        let store = async |e: &ants_proto::Envelope| {
+            js.publish(e.subject(), serde_json::to_vec(e).unwrap().into()).await.unwrap().await.unwrap();
+        };
+        store(&first).await;
+        let shown = thread::history(&js, &thread, None, thread::Activity::None, None).await.unwrap();
+        let m = crate::tui::test_support::model();
+        let key = super::super::question::thread_key(Key::Char('2'), &m.data, &thread, &shown, chrono::Utc::now());
+        let Some(To::Do(Action::Run(job, _))) = key else { panic!("{key:?}") };
+        store(&second).await;
+
+        let (me, sealing) = (nats.me.clone(), Sealing::of(&nats));
+        let (meta, admin) = (Err("unused".into()), Err("unused".into()));
+        let ctx = Ctx { client, js: js.clone(), me, domain: None, meta, sealing, account: None, keyring: None, admin };
+        let done = job.clone().run(&ctx).await.unwrap();
+        assert_eq!(done.line, format!("answered dev-a on thread {thread}"));
+        let entries = thread::history(&js, &thread, None, thread::Activity::None, None).await.unwrap();
+        let answers: Vec<(Uuid, &str)> =
+            entries.iter().filter_map(|e| Some((e.answer.as_ref()?.question, e.text.as_str()))).collect();
+        assert_eq!(answers, [(first.id, "no")], "the question shown, not the later one");
+
+        let again = job.run(&ctx).await.unwrap_err().to_string();
+        assert_eq!(again, format!("question {} on thread {thread} is answered already", first.id));
+        let gone = Job::Answer { thread: thread.clone(), question: Uuid::now_v7(), choice: Choice::Option(1) };
+        let gone = gone.run(&ctx).await.unwrap_err().to_string();
+        assert!(gone.contains("is gone from thread"), "{gone}");
     }
 
     #[tokio::test]

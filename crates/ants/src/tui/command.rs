@@ -5,12 +5,12 @@
 //! command over the CLI's verbs, acting on the selected item or open thread ([`COMMANDS`]). Sends run in the background
 //! ([`super::exec`]); the bar's status line tells how they went, and a failed send's text, with the message it quoted, comes back into the bar.
 
-use ants_proto::{ApprovalRequest, ChannelId, ChannelNotify, ThreadId, UserId, Verdict};
+use ants_proto::{ApprovalRequest, ChannelId, ChannelNotify, ThreadId, UserId, Uuid, Verdict};
 use chrono::{DateTime, Utc};
 
 use super::exec::{Job, Outcome, Quoted};
 use super::model::{Action, Focus, Key, Model, Page};
-use super::{attach, complete, nav, snooze, thread};
+use super::{attach, complete, nav, question, snooze, thread};
 use crate::messages::{attachments, forward};
 use crate::people::quiet;
 use crate::{live, tools};
@@ -148,7 +148,10 @@ impl Model {
                 }
                 run(Job::Cancel { thread, ants })
             }
-            Slash::Answer(choice) => run(Job::Answer { thread: self.target()?, choice }),
+            Slash::Answer(choice) => {
+                let (thread, question) = self.question(now)?;
+                run(Job::Answer { thread, question, choice })
+            }
             Slash::Done(done) => run(Job::Done { thread: self.target()?, done }),
             Slash::Mark(marking) => run(Job::Mark { thread: self.target()?, marking }),
             Slash::Mute(hold) => run(Job::Mute { thread: self.target()?, hold: hold.unwrap_or(quiet::MUTE_FOR) }),
@@ -339,6 +342,19 @@ impl Model {
             Page::Dm(_) | Page::Search(_) | Page::Credentials(_) | Page::Held(_) => None,
         };
         thread.ok_or_else(|| "no thread open or selected".to_owned())
+    }
+
+    /// The question `/answer` answers at `now`, and its thread: on an open thread, that of the card the keys answer;
+    /// else the latest to the human with no answer read on the thread selected, the one its keys answer on home.
+    fn question(&self, now: DateTime<Utc>) -> Result<(ThreadId, Uuid), String> {
+        let thread = self.target()?;
+        let id = match self.page() {
+            Page::Thread(page) => question::keyed(&self.data, &page.history.entries, now).map(|(id, _)| id),
+            _ => self.data.question(&thread).map(|asked| asked.id),
+        };
+        let me = self.data.me();
+        id.map(|id| (thread.clone(), id))
+            .ok_or_else(|| format!("no question to {me} waits for an answer on thread {thread}"))
     }
 
     /// The ants at work on `thread` now, as their progress tells.
@@ -618,6 +634,33 @@ mod tests {
         assert_eq!(run(&mut m, "/nope"), None);
         assert!(m.bar.list, "an unknown command shows the list");
         assert_eq!(run(&mut m, "/quit"), Some(Action::Quit));
+    }
+
+    #[test]
+    fn answer_answers_the_question_of_the_card_the_keys_answer() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let ask = |seq, text: &str| {
+            let mut asked = message(seq, &thread, "dev-a", "alice", text);
+            let options = ["yes".to_owned(), "no".to_owned()];
+            asked.question = Some(ants_proto::Question::new(text, &options, true).unwrap());
+            asked
+        };
+        let (first, second) = (ask(1, "Ship it?"), ask(2, "Tag it?"));
+        let mut page = thread::Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(vec![first.clone()])).unwrap();
+        m.pages.push(Page::Thread(page));
+        let answer = |m: &mut Model| {
+            m.bar.focused = true;
+            m.bar.set_text("/answer after lunch");
+            match m.key(Key::Enter, at(2)) {
+                Some(Action::Run(Job::Answer { question, .. }, _)) => question,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(answer(&mut m), first.id.unwrap());
+        m.stored(vec![second.clone()], at(2));
+        assert_eq!(answer(&mut m), second.id.unwrap(), "the keys go to the latest card shown");
     }
 
     #[test]
