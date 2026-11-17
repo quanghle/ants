@@ -87,7 +87,7 @@ pub(crate) enum EnrollCommand {
     },
 }
 
-pub(crate) async fn run(command: EnrollCommand, conn: &Connection<'_>) -> Result<()> {
+pub(crate) async fn run(conn: &Connection<'_>, command: EnrollCommand) -> Result<()> {
     let domain = conn.js_domain;
     let dir = |dir| team_dir(dir);
     match command {

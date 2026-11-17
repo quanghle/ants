@@ -49,7 +49,7 @@ pub(crate) enum WebhookCommand {
     Add(Box<add::AddArgs>),
 }
 
-pub(crate) async fn run(command: WebhookCommand, conn: &Connection<'_>) -> Result<()> {
+pub(crate) async fn run(conn: &Connection<'_>, command: WebhookCommand) -> Result<()> {
     let domain = conn.js_domain;
     match command {
         WebhookCommand::Add(args) => add::add(*args, conn.nats, domain).await,

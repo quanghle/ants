@@ -8,7 +8,8 @@ use anyhow::Result;
 use crate::connection::Connection;
 use crate::{manager, natsd, reload, scheduler, serve, update, upgrade};
 
-pub(crate) async fn run(args: &serve::DaemonArgs, conn: &Connection<'_>) -> Result<()> {
+pub(crate) async fn run(conn: &Connection<'_>, args: serve::DaemonArgs) -> Result<()> {
+    let args = &args;
     let domain = conn.js_domain;
     let default_path = ants_daemon::config::default_path()?;
     let config = std::path::absolute(serve::config_file(args, &default_path)?)?;

@@ -777,10 +777,8 @@ mod tests {
 
         let attach = attachments::Attach { paths: vec![dir.join("plan.md")] };
         let words = vec!["@bob".to_owned(), "the plan".to_owned()];
-        let (sending, replies, input) = (Default::default(), Default::default(), Default::default());
-        Box::pin(crate::cmd::send::ask(&nats[0], Default::default(), sending, &replies, &input, &attach, words))
-            .await
-            .unwrap();
+        let args = crate::cmd::send::AskArgs { attach, words, ..Default::default() };
+        Box::pin(crate::cmd::send::ask(&nats[0], args)).await.unwrap();
 
         let unread = crate::inbox::Inbox::open(&js[1], &bob).await.unwrap().unread(&Default::default()).await.unwrap();
         let [got] = unread.as_slice() else { panic!("not one message: {unread:?}") };

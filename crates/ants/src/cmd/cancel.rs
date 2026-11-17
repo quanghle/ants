@@ -16,7 +16,7 @@ pub(crate) const CANCEL_WAIT: Duration = Duration::from_secs(5);
 /// same ant that may run it.
 pub(crate) const CANCEL_GRACE: Duration = Duration::from_millis(500);
 
-pub(crate) async fn cancel(nats: &Nats<'_>, ant: UserId, thread: thread::Pick) -> Result<()> {
+pub(crate) async fn run(nats: &Nats<'_>, ant: UserId, thread: thread::Pick) -> Result<()> {
     let me = &nats.me.id;
     if !nats.me.role.is_human() {
         bail!("the credentials of {me} are an ant's; only a human cancels a prompt");

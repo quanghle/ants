@@ -9,13 +9,26 @@ use crate::auth::team_dir;
 use crate::connection::Connection;
 use crate::{renew, signer, upgrade};
 
-pub(crate) async fn run(
-    config: Option<PathBuf>,
-    approval_timeout: Duration,
-    dir: Option<PathBuf>,
-    upgrade: upgrade::UpgradeArgs,
-    conn: &Connection<'_>,
-) -> Result<()> {
+/// `ants signer`.
+#[derive(clap::Args, Debug)]
+pub(crate) struct SignerArgs {
+    /// Config file whose [[ant_template]] tables are the policy; the rest of it is ignored
+    /// (default: ~/.ants/config.toml).
+    #[arg(long, env = "ANTS_CONFIG")]
+    pub(crate) config: Option<PathBuf>,
+    /// How long a human has to decide on a request outside the policy, at most until the manager stops waiting,
+    /// or on a registration (`ants login`) outside the [registration] table, at most until its request expires.
+    #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse, default_value = "15m")]
+    pub(crate) approval_timeout: Duration,
+    /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+    #[arg(long, env = "ANTS_AUTH_DIR")]
+    pub(crate) dir: Option<PathBuf>,
+    #[command(flatten)]
+    pub(crate) upgrade: upgrade::UpgradeArgs,
+}
+
+pub(crate) async fn run(conn: &Connection<'_>, args: SignerArgs) -> Result<()> {
+    let SignerArgs { config, approval_timeout, dir, upgrade } = args;
     let domain = conn.js_domain;
     let dir = team_dir(dir)?;
     let config = match config {

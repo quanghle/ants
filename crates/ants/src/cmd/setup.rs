@@ -116,7 +116,8 @@ impl Report {
 }
 
 /// Run the steps of `ants setup`, then `ants doctor`; fail when a step or a check fails.
-pub async fn run(args: &SetupArgs, connection: &Connection<'_>) -> Result<()> {
+pub async fn run(connection: &Connection<'_>, args: SetupArgs) -> Result<()> {
+    let args = &args;
     let home = std::env::home_dir().context("no home directory")?;
     let config_path = match &args.config {
         Some(path) => std::path::absolute(path)?,

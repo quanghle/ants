@@ -8,15 +8,32 @@ use crate::auth::team_dir;
 use crate::connection::Connection;
 use crate::{auth, doctor, webhook};
 
-pub(crate) async fn run(
-    config: Option<PathBuf>,
-    leaf_config: Option<PathBuf>,
-    no_harness: bool,
-    json: bool,
-    team: Option<PathBuf>,
-    webhook_config: Option<PathBuf>,
-    conn: &Connection<'_>,
-) -> Result<()> {
+/// `ants doctor`.
+#[derive(clap::Args, Debug)]
+pub(crate) struct DoctorArgs {
+    /// Config file of the machine's ants (default: ~/.ants/config.toml).
+    #[arg(long, env = "ANTS_CONFIG")]
+    pub(crate) config: Option<PathBuf>,
+    /// Leaf node configuration (default: the one `ants leaf config` writes, ~/.config/ants/leaf.conf).
+    #[arg(long)]
+    pub(crate) leaf_config: Option<PathBuf>,
+    /// Skip starting each ant's harness for an ACP handshake, which may take up to a minute.
+    #[arg(long)]
+    pub(crate) no_harness: bool,
+    /// Print one JSON object per check.
+    #[arg(long)]
+    pub(crate) json: bool,
+    /// Team directory of `ants auth` (default: ~/.config/ants/auth); where it holds the team keys, the hub is asked
+    /// whether it keeps pushed accounts across restarts.
+    #[arg(long = "dir", env = "ANTS_AUTH_DIR")]
+    pub(crate) team: Option<PathBuf>,
+    /// Config file of `ants webhook serve` (default: ~/.ants/webhooks.toml), checked when it is there.
+    #[arg(long)]
+    pub(crate) webhook_config: Option<PathBuf>,
+}
+
+pub(crate) async fn run(conn: &Connection<'_>, args: DoctorArgs) -> Result<()> {
+    let DoctorArgs { config, leaf_config, no_harness, json, team, webhook_config } = args;
     let setup = doctor::Setup {
         nats: conn.nats.to_owned(),
         creds: conn.creds.map(Path::to_path_buf),

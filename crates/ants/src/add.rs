@@ -15,6 +15,7 @@ use anyhow::{Context as _, Result, bail};
 use nkeys::KeyPair;
 
 use crate::auth;
+use crate::connection::Connection;
 use crate::enroll;
 use crate::keys;
 use crate::leaf;
@@ -62,8 +63,8 @@ pub struct AddArgs {
 }
 
 /// Run `ants add` with the global `--nats` and `--js-domain`.
-pub async fn add(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>) -> Result<()> {
-    add_with(args, nats, js_domain, keystore::os()).await
+pub async fn add(conn: &Connection<'_>, args: AddArgs) -> Result<()> {
+    add_with(args, conn.nats, conn.js_domain, keystore::os()).await
 }
 
 /// [`add`], keeping a seed of the OS credential store in `store`.

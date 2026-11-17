@@ -27,6 +27,7 @@ use chrono::Utc;
 use futures::StreamExt as _;
 use nkeys::{KeyPair, XKey};
 
+use crate::connection::Connection;
 use crate::enroll::Approver;
 use crate::service::{Action, Outcome, Service, Services, failure};
 use crate::{auth, keys, leaf, natsd, revoke};
@@ -47,7 +48,8 @@ pub struct RenewArgs {
 
 /// Run `ants renew` with the global `--nats` and `--creds`: ask for the credentials of the file renewed, wait for
 /// the approval, replace the file and reload the daemon or the leaf node using it.
-pub async fn run(args: RenewArgs, nats: &str, cli_creds: Option<&Path>) -> Result<()> {
+pub async fn run(conn: &Connection<'_>, args: RenewArgs) -> Result<()> {
+    let (nats, cli_creds) = (conn.nats, conn.creds);
     let path = match (&args.file, cli_creds) {
         (Some(file), _) => std::path::absolute(file)?,
         (None, Some(creds)) => std::path::absolute(creds)?,

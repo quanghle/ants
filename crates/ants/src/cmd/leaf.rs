@@ -71,7 +71,7 @@ pub(crate) enum LeafCommand {
     },
 }
 
-pub(crate) async fn run(command: LeafCommand, conn: &Connection<'_>) -> Result<()> {
+pub(crate) async fn run(conn: &Connection<'_>, command: LeafCommand) -> Result<()> {
     let domain = conn.js_domain;
     let nats = || conn.nats();
     match command {

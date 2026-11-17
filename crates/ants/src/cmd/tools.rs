@@ -55,7 +55,7 @@ pub(crate) enum ToolsCommand {
     },
 }
 
-pub(crate) async fn run(command: ToolsCommand, conn: &Connection<'_>) -> Result<()> {
+pub(crate) async fn run(conn: &Connection<'_>, command: ToolsCommand) -> Result<()> {
     let nats = || conn.nats();
     match command {
         ToolsCommand::List { follow, json } => tools::list(&nats()?, crate::connection::Listing { follow, json }).await,

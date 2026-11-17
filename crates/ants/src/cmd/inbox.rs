@@ -8,10 +8,58 @@ use anyhow::{Result, bail};
 use async_nats::jetstream::consumer::DeliverPolicy;
 use futures::StreamExt as _;
 
+use clap_complete::engine::{ArgValueCandidates, ArgValueCompleter};
+
 use crate::avatars::Faces;
 use crate::behalf::Checker;
 use crate::connection::{Listing, Nats};
-use crate::{inbox, presence, reacted, sealed, thread, tools};
+use crate::{completions, inbox, presence, reacted, sealed, thread, tools};
+
+/// `ants inbox`.
+#[derive(clap::Args, Debug)]
+pub(crate) struct InboxArgs {
+    /// Show without marking read.
+    #[arg(long)]
+    pub(crate) peek: bool,
+    /// Only replies on this thread (its id, a unique start of one, or `last`); the others stay unread.
+    #[arg(long, value_name = "THREAD")]
+    #[arg(add = ArgValueCandidates::new(completions::threads))]
+    pub(crate) thread: Option<thread::Pick>,
+    /// At most this many replies; the rest stay unread.
+    #[arg(long)]
+    pub(crate) limit: Option<usize>,
+    /// Keep waiting for new replies until Ctrl-C, meanwhile dead-lettering the messages JetStream stops
+    /// delivering without the daemon having stored them as dead letters (as `ants dead watch` does) and printing
+    /// the reactions added to or removed from the replies shown. Without --thread and --json, also print the
+    /// pending tool requests, new ones and how each ends.
+    #[arg(long, short)]
+    pub(crate) follow: bool,
+    /// One JSON envelope per line; following, a reaction added or removed as one of message, by, reaction and
+    /// removed.
+    #[arg(long)]
+    pub(crate) json: bool,
+    /// Also list an assistant's reports of its acts for the human, one by one. Without it (and without --thread
+    /// naming an activity thread), they are marked read (unless --peek) and summed up in a line per activity
+    /// thread, none with --json.
+    #[arg(long)]
+    pub(crate) activity: bool,
+    /// Mark unread again, on all the human's devices, a message to the human and the later ones on its thread
+    /// (a message id or a unique start of one), or the latest message to the human on a thread (its id, a unique
+    /// start of one, or `last`); prints nothing else.
+    #[arg(long, value_name = "MESSAGE|THREAD", conflicts_with_all = ["peek", "thread", "limit", "follow", "json", "activity"])]
+    #[arg(add = ArgValueCompleter::new(completions::messages))]
+    pub(crate) unread: Option<String>,
+}
+
+/// `ants inbox`: mark a message unread with `--unread`, else show the messages to the CLI's human.
+pub(crate) async fn run(nats: &Nats<'_>, args: InboxArgs) -> Result<()> {
+    let InboxArgs { peek, thread, limit, follow, json, activity, unread } = args;
+    if let Some(target) = unread {
+        return mark_unread(nats, &target).await;
+    }
+    let select = inbox::Select { thread: None, limit, peek, summaries: false, activity };
+    show(nats, select, thread, Listing { follow, json }).await
+}
 
 /// Prints a message of the inbox, opened as `state` says, from `acting` for its human or not.
 fn print(
@@ -30,7 +78,7 @@ fn print(
     Ok(())
 }
 
-pub(crate) async fn show(
+async fn show(
     nats: &Nats<'_>,
     mut select: inbox::Select,
     thread: Option<thread::Pick>,
@@ -127,7 +175,7 @@ fn report_line(thread: &ThreadId, n: usize) -> String {
 
 /// `ants inbox --unread TARGET`: mark unread again on all the human's devices the message TARGET names to the human and
 /// the later ones on its thread, else the latest message to the human on the thread it names.
-pub(crate) async fn mark_unread(nats: &Nats<'_>, target: &str) -> Result<()> {
+async fn mark_unread(nats: &Nats<'_>, target: &str) -> Result<()> {
     let me = &nats.me.id;
     if !nats.me.role.is_human() {
         bail!("the credentials of {me} are an ant's, whose inbox its daemon reads; `ants inbox` reads a human's");

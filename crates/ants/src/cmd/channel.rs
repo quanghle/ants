@@ -119,11 +119,19 @@ pub(crate) enum ChannelCommand {
 }
 
 /// `ants channel serve`, which runs as the channel manager rather than as a human.
-pub(crate) async fn serve(conn: &Connection<'_>, upgrade: &upgrade::UpgradeArgs) -> Result<()> {
+async fn serve(conn: &Connection<'_>, upgrade: &upgrade::UpgradeArgs) -> Result<()> {
     Box::pin(upgrade::or_exit(channel::serve(conn.nats, conn.creds, conn.js_domain), upgrade)).await
 }
 
-pub(crate) async fn run(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
+pub(crate) async fn run(conn: &Connection<'_>, command: ChannelCommand) -> Result<()> {
+    match command {
+        ChannelCommand::Serve { upgrade } => serve(conn, &upgrade).await,
+        command => manage(&conn.nats()?, command).await,
+    }
+}
+
+/// Every `ants channel` subcommand but `serve`, as the CLI's user.
+async fn manage(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
     let (_, js) = nats.connect("ants-cli").await?;
     let kv = channel::open(&js).await?;
     let humans = humans::load(&js, &nats.me).await;

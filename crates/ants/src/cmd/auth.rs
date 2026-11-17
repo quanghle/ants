@@ -314,7 +314,7 @@ pub(crate) enum AdminCommand {
     },
 }
 
-pub(crate) async fn run(command: AuthCommand, conn: &Connection<'_>) -> Result<()> {
+pub(crate) async fn run(conn: &Connection<'_>, command: AuthCommand) -> Result<()> {
     let domain = conn.js_domain;
     match command {
         AuthCommand::Init { dir } => init(dir),

@@ -603,7 +603,7 @@ async fn a_human_picks_a_message_by_a_start_of_its_id() {
 
 #[tokio::test]
 async fn ask_reply_to_answers_the_message_s_author_on_its_thread_quoting_it() {
-    use crate::cmd::send::{Target, ask, post};
+    use crate::cmd::send::{AskArgs, PostArgs, ask, post};
 
     let Some(server) = crate::test_support::Server::start() else { return };
     let (alice, dev_a) = (p("alice"), p("dev-a"));
@@ -617,18 +617,24 @@ async fn ask_reply_to_answers_the_message_s_author_on_its_thread_quoting_it() {
         js.publish(e.subject(), json(e).into()).await.unwrap().await.unwrap();
     }
 
-    let (replies, input, attach) = Default::default();
     let send = |reply_to: Uuid, thread: Option<Pick>, words: &[&str]| {
-        let target = Target { thread, reply_to: Some(MessagePick::Id(reply_to)), queue: false, forward: None };
         let words = words.iter().map(|w| (*w).to_owned()).collect();
-        Box::pin(ask(&nats, target, Default::default(), &replies, &input, &attach, words))
+        Box::pin(ask(&nats, AskArgs { thread, reply_to: Some(MessagePick::Id(reply_to)), words, ..Default::default() }))
     };
     send(built.id, None, &["ship", "it"]).await.unwrap();
     let elsewhere = send(built.id, Some(Pick::Id(ThreadId::generate())), &["ship"]).await.unwrap_err().to_string();
     assert!(elsewhere.contains(&format!("is on thread {}, not ", asked.thread_id)), "{elsewhere}");
-    let target = Target { thread: None, reply_to: Some(MessagePick::Id(built.id)), queue: false, forward: None };
-    let words = vec!["deploy?".to_owned()];
-    Box::pin(post(&nats, "ops".parse().unwrap(), target, &replies, &input, &attach, words)).await.unwrap();
+    let args = PostArgs {
+        channel: "ops".parse().unwrap(),
+        thread: None,
+        reply_to: Some(MessagePick::Id(built.id)),
+        queue: false,
+        replies: Default::default(),
+        input: Default::default(),
+        attach: Default::default(),
+        words: vec!["deploy?".to_owned()],
+    };
+    Box::pin(post(&nats, args)).await.unwrap();
 
     let shown = history(&js, &asked.thread_id, None, Activity::None, None).await.unwrap();
     let replied: Vec<_> = shown[2..].iter().map(|e| (e.to.clone(), e.channel.clone(), e.text.as_str())).collect();
@@ -640,7 +646,7 @@ async fn ask_reply_to_answers_the_message_s_author_on_its_thread_quoting_it() {
 
 #[tokio::test]
 async fn ask_forward_hands_a_message_and_its_files_to_another_ant_on_a_thread_linked_to_its_own() {
-    use crate::cmd::send::{Forwarding, Target, ask};
+    use crate::cmd::send::{AskArgs, ask};
 
     let Some(server) = crate::test_support::Server::start() else { return };
     let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
@@ -658,10 +664,10 @@ async fn ask_forward_hands_a_message_and_its_files_to_another_ant_on_a_thread_li
         js.publish(e.subject(), json(e).into()).await.unwrap().await.unwrap();
     }
 
-    let (replies, input, attach) = Default::default();
-    let target = Target { forward: Some(Forwarding::Message(MessagePick::Id(built.id))), ..Default::default() };
     let words = ["@dev-b", "ship", "it"].map(str::to_owned).to_vec();
-    Box::pin(ask(&nats, target, Default::default(), &replies, &input, &attach, words)).await.unwrap();
+    Box::pin(ask(&nats, AskArgs { forward: Some(MessagePick::Id(built.id)), words, ..Default::default() }))
+        .await
+        .unwrap();
 
     let sent = recent_messages(&js, &alice).await.unwrap().into_iter().find(|e| e.to.as_ref() == Some(&dev_b));
     let sent = sent.expect("a message to dev-b");
@@ -677,7 +683,7 @@ async fn ask_forward_hands_a_message_and_its_files_to_another_ant_on_a_thread_li
 
 #[tokio::test]
 async fn ask_forward_thread_hands_its_kept_tldr_to_another_ant_and_refuses_without_one() {
-    use crate::cmd::send::{Forwarding, Target, ask};
+    use crate::cmd::send::{AskArgs, ask};
 
     let Some(server) = crate::test_support::Server::start() else { return };
     let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
@@ -689,12 +695,10 @@ async fn ask_forward_thread_hands_its_kept_tldr_to_another_ant_and_refuses_witho
     let asked = Envelope::new(alice.clone(), dev_a.clone(), "fix the flaky test");
     js.publish(asked.subject(), json(&asked).into()).await.unwrap().await.unwrap();
 
-    let (replies, input, attach) = Default::default();
     let send = || {
-        let target =
-            Target { forward: Some(Forwarding::Thread(Pick::Id(asked.thread_id.clone()))), ..Default::default() };
+        let forward_thread = Some(Pick::Id(asked.thread_id.clone()));
         let words = ["@dev-b", "follow", "up"].map(str::to_owned).to_vec();
-        Box::pin(ask(&nats, target, Default::default(), &replies, &input, &attach, words))
+        Box::pin(ask(&nats, AskArgs { forward_thread, words, ..Default::default() }))
     };
     let refused = send().await.unwrap_err().to_string();
     assert!(refused.starts_with(&format!("no TL;DR of thread {} is kept", asked.thread_id)), "{refused}");
@@ -893,10 +897,8 @@ async fn a_sealed_message_from_a_device_enrolled_mid_follow_opens_everywhere_it_
         let alice_nats = crate::connection::Nats::new(&server.url, Some(&laptop), None).unwrap();
         alice_nats.connect("test").await.unwrap();
         let words = vec!["@bob".to_owned(), "lunch at noon?".to_owned()];
-        let (sending, replies, input, attach) = Default::default();
-        Box::pin(crate::cmd::send::ask(&alice_nats, Default::default(), sending, &replies, &input, &attach, words))
-            .await
-            .unwrap();
+        let args = crate::cmd::send::AskArgs { words, ..Default::default() };
+        Box::pin(crate::cmd::send::ask(&alice_nats, args)).await.unwrap();
     };
     let (follow, ()) = tokio::join!(follow, asked);
     follow.unwrap();

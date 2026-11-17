@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use ants_proto::{ChannelId, JsDomain, Reaction, ThreadId, UserId, Uuid, subject};
+use ants_proto::{JsDomain, Reaction, ThreadId, UserId, Uuid, subject};
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use clap_complete::engine::{ArgValueCandidates, ArgValueCompleter};
@@ -11,13 +11,12 @@ use futures::StreamExt as _;
 
 use crate::cmd::{
     ant::AntCommand, assistant::AssistantCommand, attachment::AttachmentCommand, auth::AuthCommand,
-    bridge::BridgeCommand, channel::ChannelCommand, dead::DeadCommand, enroll::EnrollCommand, harness::HarnessCommand,
-    hook::HookCommand, keys::KeysCommand, leaf::LeafCommand, login, notify::NotifyCommand, remind::RemindCommand,
-    setup, thread::ThreadCommand, tools::ToolsCommand, webhook::WebhookCommand,
+    bridge::BridgeCommand, channel::ChannelCommand, dead::DeadCommand, doctor, enroll::EnrollCommand,
+    harness::HarnessCommand, hook::HookCommand, inbox, keys::KeysCommand, leaf::LeafCommand, login,
+    notify::NotifyCommand, remind::RemindCommand, send, setup, signer, spend::SpendArgs, thread::ThreadCommand,
+    tools::ToolsCommand, webhook::WebhookCommand,
 };
-use crate::{
-    add, attachments, channel, completions, compose, progress, renew, retire, serve, spend, thread, update, upgrade,
-};
+use crate::{add, attachments, completions, progress, renew, retire, serve, thread, update};
 
 /// The whole command line.
 pub(crate) type Cli = Ants<Command>;
@@ -59,82 +58,10 @@ pub(crate) enum Command {
     /// Send a message as the CLI's human, who owns the thread. Starts with @ant to pick the recipient; otherwise the
     /// human's assistant gets it while its grant stands, else the messenger. With --wait or --follow, print the
     /// replies to the CLI's human on the thread and mark them read.
-    Ask {
-        /// Continue an existing thread: its id, a unique start of one, or `last`. The message still prompts only
-        /// its recipient (@ant, else the human's assistant or the messenger), not the thread's other ants.
-        /// A human's message steers a running prompt on that thread, joining it where the harness takes steers,
-        /// else interrupting it and prompting the same session next, unless sent with --queue.
-        #[arg(long, value_name = "THREAD")]
-        #[arg(add = ArgValueCandidates::new(completions::threads))]
-        thread: Option<thread::Pick>,
-        /// Reply to this message or post, quoting its author and an excerpt of it: its id, or with a human's
-        /// credentials a unique start of one, as `ants react` takes. The message goes on that message's thread and,
-        /// without @ant, to its author unless the CLI's human wrote it.
-        #[arg(long, value_name = "MESSAGE", add = ArgValueCompleter::new(completions::messages))]
-        reply_to: Option<thread::MessagePick>,
-        /// On an existing thread (--thread or --reply-to), wait behind the prompt running there rather than
-        /// steering it, as a human's message does by default.
-        #[arg(long)]
-        queue: bool,
-        /// Hand this message or post on to @ant (else the human's assistant or the messenger) on a new thread: its
-        /// id, or a unique start of one, as --reply-to takes. The new message quotes it with its author and the
-        /// thread it is on, carries its attachments, and the words, if any, as a note before it; the new thread
-        /// links to the source thread, as a spin-off does. Needs human credentials.
-        #[arg(long, value_name = "MESSAGE", conflicts_with_all = ["thread", "reply_to"])]
-        #[arg(add = ArgValueCompleter::new(completions::messages))]
-        forward: Option<thread::MessagePick>,
-        /// Hand this thread on as --forward hands a message: its TL;DR kept (`ants thread tldr` keeps one), quoted
-        /// with who wrote it; its id, a unique start of one, or `last`, as --thread takes.
-        #[arg(long, value_name = "THREAD", conflicts_with_all = ["thread", "reply_to", "forward"])]
-        #[arg(add = ArgValueCandidates::new(completions::threads))]
-        forward_thread: Option<thread::Pick>,
-        #[command(flatten)]
-        sending: Sending,
-        #[command(flatten)]
-        replies: Replies,
-        #[command(flatten)]
-        input: compose::Input,
-        #[command(flatten)]
-        attach: attachments::Attach,
-        /// `@ant` (optional), then the message, unless --file or --edit gives it.
-        #[arg(num_args = 1.., add = ArgValueCandidates::new(completions::mentions))]
-        words: Vec<String>,
-    },
+    Ask(send::AskArgs),
     /// Print the replies to the CLI's human not read yet, including those that arrived while no CLI was running, and
     /// mark them read.
-    Inbox {
-        /// Show without marking read.
-        #[arg(long)]
-        peek: bool,
-        /// Only replies on this thread (its id, a unique start of one, or `last`); the others stay unread.
-        #[arg(long, value_name = "THREAD")]
-        #[arg(add = ArgValueCandidates::new(completions::threads))]
-        thread: Option<thread::Pick>,
-        /// At most this many replies; the rest stay unread.
-        #[arg(long)]
-        limit: Option<usize>,
-        /// Keep waiting for new replies until Ctrl-C, meanwhile dead-lettering the messages JetStream stops
-        /// delivering without the daemon having stored them as dead letters (as `ants dead watch` does) and printing
-        /// the reactions added to or removed from the replies shown. Without --thread and --json, also print the
-        /// pending tool requests, new ones and how each ends.
-        #[arg(long, short)]
-        follow: bool,
-        /// One JSON envelope per line; following, a reaction added or removed as one of message, by, reaction and
-        /// removed.
-        #[arg(long)]
-        json: bool,
-        /// Also list an assistant's reports of its acts for the human, one by one. Without it (and without --thread
-        /// naming an activity thread), they are marked read (unless --peek) and summed up in a line per activity
-        /// thread, none with --json.
-        #[arg(long)]
-        activity: bool,
-        /// Mark unread again, on all the human's devices, a message to the human and the later ones on its thread
-        /// (a message id or a unique start of one), or the latest message to the human on a thread (its id, a unique
-        /// start of one, or `last`); prints nothing else.
-        #[arg(long, value_name = "MESSAGE|THREAD", conflicts_with_all = ["peek", "thread", "limit", "follow", "json", "activity"])]
-        #[arg(add = ArgValueCompleter::new(completions::messages))]
-        unread: Option<String>,
-    },
+    Inbox(inbox::InboxArgs),
     /// List the ants being served: harness, machine, capabilities, escalation chain, last heartbeat, and whether it
     /// is recent.
     Colony {
@@ -158,60 +85,13 @@ pub(crate) enum Command {
     /// Report the tokens and cost ants spent, as their daemons keep them: per ant, today and over the last --days UTC
     /// days; for one ANT, each day and each thread since a human's last message on it; with --thread, that thread.
     /// Caps come from the local config file for the ants it lists. Needs human credentials.
-    Spend {
-        /// Only this ant.
-        #[arg(add = ArgValueCandidates::new(completions::ants))]
-        ant: Option<UserId>,
-        /// What the ant, or each ant on the thread, spent on it since a human's last message there: its id, a unique
-        /// start of one, or `last`.
-        #[arg(long, value_name = "THREAD")]
-        #[arg(add = ArgValueCandidates::new(completions::threads))]
-        thread: Option<thread::Pick>,
-        /// UTC days to report, today included.
-        #[arg(long, default_value_t = spend::DEFAULT_DAYS, value_parser = clap::value_parser!(u32).range(1..=366),
-              conflicts_with = "thread")]
-        days: u32,
-        /// One JSON object per line: per ant, or with --thread per ant on the thread.
-        #[arg(long)]
-        json: bool,
-        /// Config file with the ants' caps (default: ~/.ants/config.toml, if it exists).
-        #[arg(long, env = "ANTS_CONFIG")]
-        config: Option<PathBuf>,
-    },
+    Spend(SpendArgs),
     /// Post to a channel as the CLI's human. An @mention in the text wakes only that member, if an ant, or puts a
     /// notice in the member's inbox, if a human; a post that @mentions nobody goes to the channel's messenger, which
     /// wakes the members the post concerns. A new thread belongs to the
     /// human who posts it, and the turn budget it runs out of comes back to that human. With --wait, the first post
     /// on the thread by someone other than the poster ends the wait; --follow prints every later post on it.
-    Post {
-        /// The channel: `ops` or `'#ops'` (quoted, as shells take an unquoted `#` for a comment).
-        #[arg(value_parser = channel::parse_channel)]
-        #[arg(add = ArgValueCandidates::new(completions::channels))]
-        channel: ChannelId,
-        /// Post on an existing thread of the channel instead of starting one (its id, a unique start of one, or
-        /// `last`); the thread keeps its owner.
-        #[arg(long, value_name = "THREAD")]
-        #[arg(add = ArgValueCandidates::new(completions::threads))]
-        thread: Option<thread::Pick>,
-        /// Reply to this post or message on a thread of the channel, quoting its author and an excerpt of it: its id,
-        /// or with a human's credentials a unique start of one, as `ants react` takes. The post goes on that thread;
-        /// an @mention in the text still picks whom it wakes.
-        #[arg(long, value_name = "MESSAGE", add = ArgValueCompleter::new(completions::messages))]
-        reply_to: Option<thread::MessagePick>,
-        /// On an existing thread (--thread or --reply-to), wait behind the prompt running there rather than
-        /// steering it, as a human's post does by default.
-        #[arg(long)]
-        queue: bool,
-        #[command(flatten)]
-        replies: Replies,
-        #[command(flatten)]
-        input: compose::Input,
-        #[command(flatten)]
-        attach: attachments::Attach,
-        /// The post, unless --file or --edit gives it; each @ant mention wakes that member.
-        #[arg(num_args = 1.., add = ArgValueCandidates::new(completions::mentions))]
-        words: Vec<String>,
-    },
+    Post(send::PostArgs),
     /// Channels: named groups of ants that humans post to with `ants post`.
     #[command(subcommand)]
     Channel(ChannelCommand),
@@ -408,21 +288,7 @@ pub(crate) enum Command {
     /// messages each ant reads, and the renewal requests (`ants renew`) of devices registered with `ants login`,
     /// renewing them while their grant holds; every [registration] sweep, revokes those whose GitHub users left the
     /// policy's organizations and teams.
-    Signer {
-        /// Config file whose [[ant_template]] tables are the policy; the rest of it is ignored
-        /// (default: ~/.ants/config.toml).
-        #[arg(long, env = "ANTS_CONFIG")]
-        config: Option<PathBuf>,
-        /// How long a human has to decide on a request outside the policy, at most until the manager stops waiting,
-        /// or on a registration (`ants login`) outside the [registration] table, at most until its request expires.
-        #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse, default_value = "15m")]
-        approval_timeout: Duration,
-        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
-        #[arg(long, env = "ANTS_AUTH_DIR")]
-        dir: Option<PathBuf>,
-        #[command(flatten)]
-        upgrade: upgrade::UpgradeArgs,
-    },
+    Signer(signer::SignerArgs),
     /// Register a device of a human with a GitHub sign-in: generate its NKey here, ask `ants signer` on the hub with
     /// the team's bootstrap credentials, show GitHub's device login page and the code to enter there, and wait for
     /// the credentials or a refusal (repeating the request every 5 s, for up to 15 min, until Ctrl-C). Then write
@@ -456,27 +322,7 @@ pub(crate) enum Command {
     /// keys), the leaf node and its outbox, the installed services, the webhooks' config file and its secrets, and the
     /// Dev Tunnel and HTTPS bridge services installed. Prints one line per check (ok, warn, fail or skip) with the
     /// command fixing each warning or failure, and exits with status 1 when one fails. Changes nothing.
-    Doctor {
-        /// Config file of the machine's ants (default: ~/.ants/config.toml).
-        #[arg(long, env = "ANTS_CONFIG")]
-        config: Option<PathBuf>,
-        /// Leaf node configuration (default: the one `ants leaf config` writes, ~/.config/ants/leaf.conf).
-        #[arg(long)]
-        leaf_config: Option<PathBuf>,
-        /// Skip starting each ant's harness for an ACP handshake, which may take up to a minute.
-        #[arg(long)]
-        no_harness: bool,
-        /// Print one JSON object per check.
-        #[arg(long)]
-        json: bool,
-        /// Team directory of `ants auth` (default: ~/.config/ants/auth); where it holds the team keys, the hub is asked
-        /// whether it keeps pushed accounts across restarts.
-        #[arg(long = "dir", env = "ANTS_AUTH_DIR")]
-        team: Option<PathBuf>,
-        /// Config file of `ants webhook serve` (default: ~/.ants/webhooks.toml), checked when it is there.
-        #[arg(long)]
-        webhook_config: Option<PathBuf>,
-    },
+    Doctor(doctor::DoctorArgs),
     /// Bring up ants on this machine, each step skipped when already done: write a local nats-server configuration
     /// with JetStream (~/.config/ants/nats.conf) and install its service, run `ants init`, write the config file with
     /// the messenger and the ant of --ant, check the harness, install the daemon service and the shell completions,
@@ -614,7 +460,7 @@ mod tests {
         let cli = Cli::try_parse_from(["ants", "watch", "dev-a", "0199"]).unwrap();
         assert_matches!(cli.command.unwrap(), Command::Watch { thread, .. } if thread == start);
         let cli = Cli::try_parse_from(["ants", "spend", "--thread", "0199"]).unwrap();
-        assert_matches!(cli.command.unwrap(), Command::Spend { thread, .. } if thread == start);
+        assert_matches!(cli.command.unwrap(), Command::Spend(SpendArgs { thread, .. }) if thread == start);
         let cli = Cli::try_parse_from(["ants", "channel", "read", "ops", "--thread", "last"]).unwrap();
         let Command::Channel(ChannelCommand::Read { thread, .. }) = cli.command.unwrap() else {
             panic!("not channel read")
@@ -640,7 +486,7 @@ mod tests {
     #[test]
     fn ask_on_a_thread_needs_no_steering_command() {
         let cli = Cli::try_parse_from(["ants", "ask", "--thread", "last", "@dev-a", "go"]).unwrap();
-        assert_matches!(cli.command, Some(Command::Ask { thread: Some(thread::Pick::Last), .. }));
+        assert_matches!(cli.command, Some(Command::Ask(send::AskArgs { thread: Some(thread::Pick::Last), .. })));
         assert!(Cli::try_parse_from(["ants", "ask", "--steer", "--thread", "last", "@dev-a", "go"]).is_err());
         assert!(Cli::try_parse_from(["ants", "steer", "dev-a", "last", "go"]).is_err());
     }
@@ -648,9 +494,9 @@ mod tests {
     #[test]
     fn ask_and_post_queue_behind_a_running_prompt() {
         let cli = Cli::try_parse_from(["ants", "ask", "--queue", "--thread", "last", "@dev-a", "then"]).unwrap();
-        assert_matches!(cli.command, Some(Command::Ask { queue: true, .. }));
+        assert_matches!(cli.command, Some(Command::Ask(send::AskArgs { queue: true, .. })));
         let cli = Cli::try_parse_from(["ants", "post", "ops", "--queue", "--thread", "last", "then"]).unwrap();
-        assert_matches!(cli.command, Some(Command::Post { queue: true, .. }));
+        assert_matches!(cli.command, Some(Command::Post(send::PostArgs { queue: true, .. })));
     }
 
     #[test]
@@ -668,9 +514,9 @@ mod tests {
     fn ask_and_post_reply_to_a_message() {
         let id = Uuid::now_v7();
         let cli = Cli::try_parse_from(["ants", "ask", "--reply-to", &id.to_string(), "ship", "it"]).unwrap();
-        assert_matches!(cli.command.unwrap(), Command::Ask { reply_to: Some(thread::MessagePick::Id(m)), .. } if m == id);
+        assert_matches!(cli.command.unwrap(), Command::Ask(send::AskArgs { reply_to: Some(thread::MessagePick::Id(m)), .. }) if m == id);
         let cli = Cli::try_parse_from(["ants", "post", "--reply-to", "019a-", "ops", "deploy?"]).unwrap();
-        assert_matches!(cli.command.unwrap(), Command::Post { reply_to: Some(thread::MessagePick::Prefix(p)), .. }
+        assert_matches!(cli.command.unwrap(), Command::Post(send::PostArgs { reply_to: Some(thread::MessagePick::Prefix(p)), .. })
             if p == "019a-");
         assert!(Cli::try_parse_from(["ants", "ask", "--reply-to", "t1", "hi"]).is_err(), "no message id");
     }
@@ -740,7 +586,7 @@ mod tests {
     fn wait_and_follow_conflict_and_a_timeout_needs_one_of_them() {
         let parse = |args: &str| Cli::try_parse_from(["ants"].into_iter().chain(args.split(' ')));
         let replies = |args: &str| match parse(args).unwrap().command.unwrap() {
-            Command::Ask { replies, .. } | Command::Post { replies, .. } => replies,
+            Command::Ask(send::AskArgs { replies, .. }) | Command::Post(send::PostArgs { replies, .. }) => replies,
             _ => panic!("{args}"),
         };
         let r = replies("ask --wait --timeout 1h30m hi");
