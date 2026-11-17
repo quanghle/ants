@@ -44,6 +44,8 @@ pub struct Workload {
     memory_low: Mutex<Option<MemoryLow>>,
     paused: Mutex<Option<Paused>>,
     drift: Mutex<Vec<String>>,
+    /// When the last message handled ended.
+    worked: Mutex<Option<DateTime<Utc>>>,
     /// Wakes the heartbeats when the ant turns idle or working, its harness signed out or in or started with another
     /// agent, a provider limit starts or ends, the harness's start failures hold messages or no longer do, a fallback
     /// starts or stops answering, memory turns low or recovers, the ant is paused or resumed, or its drift changes, so
@@ -173,6 +175,11 @@ impl Workload {
         self.handling.load(Ordering::Relaxed)
     }
 
+    /// When the last message handled ended; none before the first.
+    pub fn worked(&self) -> Option<DateTime<Utc>> {
+        *self.worked.locked()
+    }
+
     pub fn harnesses(&self) -> usize {
         self.harnesses.load(Ordering::Relaxed)
     }
@@ -203,6 +210,7 @@ pub struct Working<'a>(&'a Workload);
 
 impl Drop for Working<'_> {
     fn drop(&mut self) {
+        *self.0.worked.locked() = Some(Utc::now());
         if self.0.handling.fetch_sub(1, Ordering::Relaxed) == 1 {
             self.0.changed.notify_one();
         }

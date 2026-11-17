@@ -250,6 +250,67 @@ impl Thread {
     }
 }
 
+/// The threads of `ant` active from `since` to `until`, the most recently active first, each with what the ant received
+/// and sent on it and its notes from `since` on, as a prompt shows a history within `budget` bytes. Read as its daemon
+/// reads ([`Reading::daemon`]).
+pub(crate) async fn active(
+    js: &jetstream::Context,
+    ant: &UserId,
+    reading: Reading,
+    since: SystemTime,
+    until: SystemTime,
+    budget: usize,
+) -> Result<Vec<(ThreadId, String)>> {
+    let start = || consumer::DeliverPolicy::ByStartTime { start_time: since.into() };
+    let mut threads: BTreeMap<ThreadId, BTreeMap<u64, Entry>> = BTreeMap::new();
+    let mut take = |seq, at, subject: &str, payload: &[u8]| {
+        if at > until {
+            return ControlFlow::Break(());
+        }
+        if let Ok(envelope) = serde_json::from_slice::<Envelope>(payload)
+            && envelope.check_subject(subject).is_ok()
+        {
+            let attachments = earlier_lines(&envelope.attachments, |id| envelope.attachment_handle(id));
+            let entry =
+                Entry { from: envelope.from, place: Place::Inbox(envelope.to), text: envelope.text, attachments, at };
+            threads.entry(envelope.thread_id).or_default().insert(seq, entry);
+        }
+        ControlFlow::Continue(())
+    };
+    let (reader, filter) = (inbox_consumer(ant), subject::inbox_of(ant));
+    reading::read_back(js, &reader, reading.beside(), &filter, start(), &mut take)
+        .await
+        .context("reading back the messages received")?;
+    {
+        let _one = if reading == Reading::Consumer { Some(SENT_READS.lock().await) } else { None };
+        let (reader, filter) = (sent_reader(ant), subject::inbox_from(ant));
+        reading::read_back(js, &reader, reading, &filter, start(), &mut take)
+            .await
+            .context("reading back the messages sent")?;
+    }
+    let reader = notes_consumer(ant);
+    for (thread, entries) in &mut threads {
+        let filter = subject::notes_of(thread);
+        reading::read_back(js, &reader, reading.beside(), &filter, start(), |seq, at, subject, payload| {
+            if at > until {
+                return ControlFlow::Break(());
+            }
+            if let Ok(post) = serde_json::from_slice::<NotesPost>(payload)
+                && post.check_subject(subject).is_ok()
+            {
+                let attachments = earlier_lines(&post.attachments, |id| post.attachment_handle(id));
+                entries.insert(seq, Entry { from: post.from, place: Place::Notes, text: post.text, attachments, at });
+            }
+            ControlFlow::Continue(())
+        })
+        .await
+        .with_context(|| format!("reading back the notes of thread {thread}"))?;
+    }
+    let mut threads: Vec<_> = threads.into_iter().collect();
+    threads.sort_by_key(|(_, entries)| std::cmp::Reverse(entries.values().map(|entry| entry.at).max()));
+    Ok(threads.into_iter().map(|(thread, entries)| (thread, format(entries.into_values().collect(), budget))).collect())
+}
+
 #[derive(Debug, Clone, Copy)]
 enum Source {
     Received,
@@ -419,6 +480,39 @@ mod tests {
                     dev-b, between 2026-11-14 09:00 and 2026-11-14 10:10 UTC.";
         assert!(format(entries, 0).contains(none));
         assert_eq!(format(Vec::new(), DEFAULT_BUDGET), "[ants] The thread's history holds no earlier messages.");
+    }
+
+    #[tokio::test]
+    async fn the_threads_active_since_a_time_come_most_recent_first_with_their_notes() {
+        let Some(server) = ants_test_support::NatsServer::start() else { return };
+        let js = async_nats::jetstream::new(async_nats::connect(&server.url).await.unwrap());
+        js.create_stream(crate::hub::stream_config()).await.unwrap();
+        let (one, two): (ThreadId, ThreadId) = ("t1".parse().unwrap(), "t2".parse().unwrap());
+        let publish = async |subject: String, payload: Vec<u8>| {
+            js.publish(subject, payload.into()).await.unwrap().await.unwrap();
+        };
+        let message = async |thread: &ThreadId, from: &str, to: &str, text: &str| {
+            let envelope = Envelope::on_thread(thread.clone(), p(from), p(to), text);
+            publish(envelope.subject(), serde_json::to_vec(&envelope).unwrap()).await;
+        };
+        message(&one, "alice", "dev-a", "long ago").await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let since = SystemTime::now();
+        message(&one, "alice", "dev-a", "fix the build").await;
+        let note = NotesPost::new(one.clone(), p("dev-a"), "the plan");
+        publish(note.subject(), serde_json::to_vec(&note).unwrap()).await;
+        message(&two, "dev-a", "bob", "a question").await;
+        message(&one, "alice", "bob", "not to dev-a").await;
+        let until = SystemTime::now();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        message(&two, "bob", "dev-a", "too late").await;
+
+        let threads = active(&js, &p("dev-a"), Reading::Gets, since, until, DEFAULT_BUDGET).await.unwrap();
+        assert_eq!(threads.iter().map(|(thread, _)| thread.clone()).collect::<Vec<_>>(), [two, one]);
+        assert!(threads[0].1.contains("a question") && !threads[0].1.contains("too late"));
+        let first = &threads[1].1;
+        assert!(first.contains("fix the build") && first.contains("the plan"), "{first}");
+        assert!(!first.contains("long ago") && !first.contains("not to dev-a"), "{first}");
     }
 
     #[test]

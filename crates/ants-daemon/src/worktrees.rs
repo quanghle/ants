@@ -327,7 +327,7 @@ impl Worktrees {
     }
 
     fn branch(&self, thread: &ThreadId) -> String {
-        format!("ants/{}/{thread}", self.ant)
+        branch_name(&self.ant, thread)
     }
 
     async fn add(&self, thread: &ThreadId, path: &Path) -> Result<()> {
@@ -439,6 +439,11 @@ fn threads_in(dir: &Path) -> Vec<ThreadId> {
 /// `ref_name` without its `refs/remotes/` or `refs/heads/` prefix, as git shows it.
 fn shorten(ref_name: &str) -> &str {
     ref_name.strip_prefix("refs/remotes/").or_else(|| ref_name.strip_prefix("refs/heads/")).unwrap_or(ref_name)
+}
+
+/// The branch of `ant`'s worktree of `thread`.
+pub(crate) fn branch_name(ant: &UserId, thread: &ThreadId) -> String {
+    format!("ants/{ant}/{thread}")
 }
 
 /// Run git in `dir` and return what it printed, or fail with what it printed on stderr.

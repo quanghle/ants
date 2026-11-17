@@ -119,6 +119,14 @@ pub const TOOLS: &[ToolSpec] = &[
         schema: crate::remind::schema,
         handler: crate::remind::remind,
     },
+    ToolSpec {
+        name: "dream",
+        description: "On a dream thread: answer each finding of the dream as applied (naming the items written), \
+                      rejected or deferred, with a reason, and finish the dream with done. Without arguments, show \
+                      the dream's findings and verdicts.",
+        schema: crate::dream::schema,
+        handler: crate::dream::dream,
+    },
 ];
 
 const _: () = assert!(TOOLS.len() <= MAX_TOOLS, "sense serves at most 12 tools");

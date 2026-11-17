@@ -1,8 +1,8 @@
 //! The active daemon owns sense's durable schedule. A firing is stored before its wake, and confirmed only after
 //! delivery; a replacement daemon therefore resumes pending work with the same wake id. Nothing fires while the ant's
 //! sense identity is dormant ([`ants_sense::identity::Card::active`]); its revival changes the card, which wakes the
-//! scheduler. It also runs sense's daily memory maintenance, whose last run is kept in sense data, so a replacement
-//! daemon runs it no sooner either.
+//! scheduler. It also runs sense's daily memory maintenance and begins the ant's dreams ([`dreams`]), whose last ones
+//! are kept in sense data, so a replacement daemon runs them no sooner either.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -21,6 +21,9 @@ use tokio::sync::{Mutex, watch};
 use tokio::task::JoinHandle;
 
 mod conditions;
+mod dreams;
+
+pub(crate) use dreams::{Daemon, Dreaming};
 
 const RETRY: Duration = Duration::from_secs(60);
 
@@ -30,6 +33,8 @@ struct Settings {
     machine: String,
     env: BTreeMap<String, String>,
     allow: Vec<String>,
+    /// None in tests that leave dreams out.
+    dreams: Option<dreams::Dreams>,
 }
 
 /// Dropping the active daemon's guard cancels its scheduler, including an in-flight probe.
@@ -55,7 +60,7 @@ impl Drop for Serving {
 }
 
 /// Start only after the ant holds its colony registration and its wake service is installed.
-pub(crate) fn serve(config: &crate::daemon::Config, machine: &str) -> Option<Serving> {
+pub(crate) fn serve(config: &crate::daemon::Config, machine: &str, dreaming: Arc<dyn Dreaming>) -> Option<Serving> {
     if !matches!(config.provider, super::Setting::Sense) {
         return None;
     }
@@ -67,6 +72,7 @@ pub(crate) fn serve(config: &crate::daemon::Config, machine: &str) -> Option<Ser
         machine: machine.to_owned(),
         env: config.harness.env.clone(),
         allow: config.policy.allow.clone(),
+        dreams: Some(dreams::Dreams::new(dreaming)),
     };
     Some(start(super::built_in().clone(), Arc::new(host), settings))
 }
@@ -139,11 +145,15 @@ async fn cycle(
         let changes = run.changes.len();
         tracing::info!(ant = %settings.ant, changes, clusters = run.duplicates.len(), "sense maintenance ran");
     }
-    let maintenance = memory::next_maintenance(items).await?;
-    let next = match remind::next_due(items, now).await? {
-        Some(next) => Some(maintenance.map_or(next, |maintenance| next.min(maintenance))),
-        None => maintenance,
+    let dream = match &settings.dreams {
+        Some(dreams) => Some(dreams::step(items, host, settings, dreams, now).await.unwrap_or_else(|error| {
+            tracing::warn!(ant = %settings.ant, error = format!("{error:#}"), "retrying the dream in a minute");
+            now
+        })),
+        None => None,
     };
+    let next = [memory::next_maintenance(items).await?, remind::next_due(items, now).await?, dream];
+    let next = next.into_iter().flatten().min();
     // A concurrent schedule update or a stale reservation must not turn a due record into a busy loop.
     Ok(next
         .map(|next| if next <= now { now + chrono::Duration::from_std(RETRY).expect("a bounded delay") } else { next }))

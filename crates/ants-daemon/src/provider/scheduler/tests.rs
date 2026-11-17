@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use super::*;
 use crate::sync::MutexExt as _;
 
+mod dreaming;
 mod probes;
 
 const DAY: Duration = Duration::from_hours(24);
@@ -83,6 +84,7 @@ fn settings() -> Settings {
         machine: "m1".into(),
         env: BTreeMap::new(),
         allow: Vec::new(),
+        dreams: None,
     }
 }
 
@@ -183,7 +185,7 @@ async fn a_dormant_ant_s_reminders_wait_for_its_revival() {
     let host = Arc::new(Wakes::default());
     let scheduler = start(sense.clone(), host.clone(), settings());
     settle().await;
-    tokio::time::advance(MAINTENANCE).await;
+    tokio::time::advance(DAY).await;
     settle().await;
     assert!(host.requests.locked().is_empty(), "nothing fires while dormant");
     sense.event(lifecycle(EventKind::AntRevived)).await.unwrap();
