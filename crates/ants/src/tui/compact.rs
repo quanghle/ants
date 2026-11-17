@@ -143,8 +143,6 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use ants_proto::{ApprovalRequest, ThreadId, Verdict};
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
 
     use super::*;
     use crate::test_support::live::{at, message, request, user};
@@ -153,11 +151,7 @@ mod tests {
     use crate::tui::test_support::model;
 
     fn pane(m: &Model, now: DateTime<Utc>) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(140, 2)).unwrap();
-        terminal.draw(|f| frame::draw(f, m, now)).unwrap();
-        let buffer = terminal.backend().buffer();
-        let cells: Vec<&str> = buffer.content.iter().map(ratatui::buffer::Cell::symbol).collect();
-        cells.chunks(140).map(|row| row.concat().trim_end().to_owned()).collect::<Vec<_>>().join("\n")
+        crate::test_support::render::rendered(140, 2, |f| frame::draw(f, m, now))
     }
 
     #[test]

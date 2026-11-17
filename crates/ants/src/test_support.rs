@@ -7,6 +7,7 @@ pub(crate) mod github;
 pub(crate) mod live;
 pub(crate) mod orders;
 pub(crate) mod presence;
+pub(crate) mod render;
 pub(crate) mod webhook;
 
 use std::path::{Path, PathBuf};

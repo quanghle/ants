@@ -545,11 +545,7 @@ mod tests {
     }
 
     fn screen(page: &Page, m: &Model, width: u16, now: DateTime<Utc>) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
-        terminal.draw(|f| page.draw(f, f.area(), m, now, true)).unwrap();
-        let buffer = terminal.backend().buffer();
-        let cells: Vec<&str> = buffer.content.iter().map(ratatui::buffer::Cell::symbol).collect();
-        cells.chunks(usize::from(width)).map(|row| row.concat().trim_end().to_owned()).collect::<Vec<_>>().join("\n")
+        crate::test_support::render::rendered(width, 24, |f| page.draw(f, f.area(), m, now, true))
     }
 
     #[test]

@@ -510,8 +510,6 @@ impl Ctx {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
 
     use super::*;
     use crate::test_support::live::{at, message, user};
@@ -533,15 +531,7 @@ mod tests {
     }
 
     fn shown(m: &Model, now: DateTime<Utc>) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
-        terminal.draw(|f| crate::tui::frame::draw(f, m, now)).unwrap();
-        let buffer = terminal.backend().buffer();
-        let cells: Vec<&str> = buffer.content.iter().map(ratatui::buffer::Cell::symbol).collect();
-        cells
-            .chunks(usize::from(buffer.area.width))
-            .map(|row| row.concat().trim_end().to_owned())
-            .collect::<Vec<_>>()
-            .join("\n")
+        crate::test_support::render::rendered(140, 30, |f| crate::tui::frame::draw(f, m, now))
     }
 
     /// A thread alice gave dev-a, which dev-a answered at `seq` + 1.

@@ -477,11 +477,7 @@ mod tests {
     use crate::tui::test_support::model;
 
     fn screen(m: &Model, now: DateTime<Utc>) -> String {
-        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 36)).unwrap();
-        terminal.draw(|f| crate::tui::frame::draw(f, m, now)).unwrap();
-        let buffer = terminal.backend().buffer();
-        let cells: Vec<&str> = buffer.content.iter().map(ratatui::buffer::Cell::symbol).collect();
-        cells.chunks(140).map(|row| row.concat().trim_end().to_owned()).collect::<Vec<_>>().join("\n")
+        crate::test_support::render::rendered(140, 36, |f| crate::tui::frame::draw(f, m, now))
     }
 
     fn waiting(thread: &ThreadId, from: &str, ahead: usize) -> Waiting {

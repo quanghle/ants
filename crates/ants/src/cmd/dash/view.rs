@@ -278,22 +278,13 @@ fn draw_detail(frame: &mut Frame, detail: &Detail, now: DateTime<Utc>) {
 mod tests {
     use std::time::Duration;
 
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-
     use super::*;
     use crate::cmd::dash::model::{Action, Key};
     use crate::live::State;
     use crate::test_support::live::{at, message, request, user};
 
     fn screen(model: &Model, now: DateTime<Utc>) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
-        terminal.draw(|frame| draw(frame, model, now)).unwrap();
-        let buffer = terminal.backend().buffer();
-        let rows = (0..buffer.area.height).map(|y| {
-            (0..buffer.area.width).map(|x| buffer[(x, y)].symbol().to_owned()).collect::<String>().trim_end().to_owned()
-        });
-        rows.collect::<Vec<_>>().join("\n")
+        crate::test_support::render::rendered(140, 30, |frame| draw(frame, model, now))
     }
 
     #[test]

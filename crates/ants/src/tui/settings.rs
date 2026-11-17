@@ -413,11 +413,7 @@ mod tests {
     use crate::tui::test_support::model;
 
     fn screen(m: &super::super::model::Model) -> String {
-        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 36)).unwrap();
-        terminal.draw(|f| crate::tui::frame::draw(f, m, at(3))).unwrap();
-        let buffer = terminal.backend().buffer();
-        let cells: Vec<&str> = buffer.content.iter().map(ratatui::buffer::Cell::symbol).collect();
-        cells.chunks(140).map(|row| row.concat().trim_end().to_owned()).collect::<Vec<_>>().join("\n")
+        crate::test_support::render::rendered(140, 36, |f| crate::tui::frame::draw(f, m, at(3)))
     }
 
     fn reading() -> Reading {

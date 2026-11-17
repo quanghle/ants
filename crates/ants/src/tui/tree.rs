@@ -814,11 +814,7 @@ mod tests {
         if let Some(View::Tree(page)) = m.pages.last_mut() {
             page.spend = Some(vec![spent("dev-a", &root, 0.25), spent("tester", &spun, 0.5)]);
         }
-        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 20)).unwrap();
-        terminal.draw(|f| frame::draw(f, &m, at(9))).unwrap();
-        let buffer = terminal.backend().buffer();
-        let cells: Vec<&str> = buffer.content.iter().map(ratatui::buffer::Cell::symbol).collect();
-        let shown = cells.chunks(120).map(|row| row.concat().trim_end().to_owned()).collect::<Vec<_>>().join("\n");
+        let shown = crate::test_support::render::rendered(120, 20, |f| frame::draw(f, &m, at(9)));
         assert!(shown.contains("delegation tree · fix the login bug"), "{shown}");
         assert!(shown.contains("└─ dev-a        fix the login bug"), "{shown}");
         assert!(shown.contains("$0.25  answered"), "{shown}");
