@@ -1,0 +1,267 @@
+use std::sync::Arc;
+
+use ants_proto::provider::{CallContext, Format, Output, Provider as _, ToolCall};
+use serde_json::json;
+
+use super::*;
+use crate::memory::tests::{Kept, context, human, memory, sense, tool};
+use crate::memory::{Memory, Votes};
+
+fn on(thread: u8) -> CallContext {
+    let thread = format!("019a7d2c-0000-7000-8000-0000000000{thread:02}").parse().unwrap();
+    CallContext { thread, ..context(human()) }
+}
+
+fn start(at: DateTime<Utc>, writer: &CallContext) -> Start<'_> {
+    Start { at, recipient: Recipient::Ant, threads: Vec::new(), commits: Vec::new(), writer }
+}
+
+async fn store(kept: &Arc<Kept>, memory: &Memory) -> ItemId {
+    let id = ItemId::new();
+    let items: Arc<dyn Items> = kept.clone();
+    items.write(&[memory.create(id.clone())], "test").await.unwrap();
+    id
+}
+
+fn lesson(title: &str) -> Memory {
+    Memory::new(MemoryKind::Lesson, Scope::Own, title.into(), format!("{title}, in a body."), &context(human()))
+}
+
+async fn answer(sense: &Sense, thread: u8, arguments: serde_json::Value) -> Answer {
+    tool(sense, dream, arguments, on(thread)).await
+}
+
+fn error(answer: &Answer) -> &str {
+    assert!(answer.is_error, "{answer:?}");
+    answer.json["error"].as_str().unwrap()
+}
+
+#[tokio::test]
+async fn a_dream_begins_at_most_once_a_day_and_the_next_closes_it_with_its_diary() {
+    let (_sense, kept) = sense().await;
+    let items: Arc<dyn Items> = kept.clone();
+    let writer = on(9);
+    let now = Utc::now();
+
+    let first = begin(&*items, start(now, &writer)).await.unwrap().unwrap();
+    assert_eq!((first.number, first.state, first.since), (1, State::Fallback, now - Duration::hours(24)));
+    assert!(first.wake_due(now) && first.deadline().is_none());
+    assert_eq!(begin(&*items, start(now + Duration::hours(23), &writer)).await.unwrap(), None);
+    let woken = woken(&*items, 1, &on(1).thread).await.unwrap();
+    assert!(!woken.wake_due(now));
+
+    let later = now + Duration::hours(24);
+    let second = begin(&*items, start(later, &writer)).await.unwrap().unwrap();
+    assert_eq!((second.number, second.since), (2, now));
+    let (first, _) = get(&*items, 1).await.unwrap().unwrap();
+    assert_eq!(first.state, State::Done, "the ant left it unfinished");
+    let diary = memory(&kept, first.diary.as_ref().unwrap()).await;
+    assert_eq!((diary.kind, diary.writer.at), (MemoryKind::Episode, later));
+    assert!(diary.title.starts_with("Dream 1: 0 findings"), "{}", diary.title);
+    assert_eq!(last(&*items).await.unwrap().unwrap().0.number, 2);
+}
+
+#[tokio::test]
+async fn a_review_the_sage_leaves_unanswered_falls_back_to_the_ant_after_six_hours() {
+    let (_sense, kept) = sense().await;
+    let items: Arc<dyn Items> = kept.clone();
+    let writer = on(9);
+    let now = Utc::now();
+    let sage: UserId = "sage".parse().unwrap();
+    assert_eq!(recipient(Some(sage.clone())), Recipient::Sage(sage.clone()));
+    assert_eq!(recipient(None), Recipient::Ant);
+
+    let start = Start { recipient: Recipient::Sage(sage.clone()), ..start(now, &writer) };
+    let sent = begin(&*items, start).await.unwrap().unwrap();
+    assert_eq!((sent.state, sent.sage.as_ref()), (State::Sent, Some(&sage)));
+    let timeout = now + Duration::hours(SAGE_TIMEOUT_HOURS);
+    assert_eq!(sent.deadline(), Some(timeout));
+    assert!(!sent.wake_due(timeout - Duration::seconds(1)) && sent.wake_due(timeout));
+
+    let woken = woken(&*items, 1, &on(1).thread).await.unwrap();
+    assert_eq!((woken.state, woken.deadline()), (State::Fallback, None));
+    assert_eq!(get(&*items, 1).await.unwrap().unwrap().0, woken);
+}
+
+#[tokio::test]
+async fn findings_gather_what_needs_judging_and_the_open_ones_come_again() {
+    let (sense, kept) = sense().await;
+    let items: Arc<dyn Items> = kept.clone();
+    let writer = on(9);
+    let votes = Votes { helpful: 1, stale: 1, ..Votes::default() };
+    let disputed = store(&kept, &Memory { votes, ..lesson("Disputed") }).await;
+    let doubted = store(&kept, &Memory { status: Status::NeedsReview, ..lesson("Doubted") }).await;
+    let episode = Memory { kind: MemoryKind::Episode, ..lesson("Shipped the parser") };
+    let episode = store(&kept, &episode).await;
+    let untrusted = Memory { trust: memory::Trust::Untrusted, status: Status::NeedsReview, ..lesson("Relayed") };
+    let untrusted = store(&kept, &untrusted).await;
+    let now = Utc::now();
+
+    let first = begin(&*items, start(now, &writer)).await.unwrap().unwrap();
+    let found: Vec<_> =
+        first.findings.iter().map(|f| (f.id.as_str(), f.kind, f.items[0].clone(), f.untrusted)).collect();
+    assert_eq!(
+        found,
+        [
+            ("1.1", FindingKind::Contradiction, disputed.clone(), false),
+            ("1.2", FindingKind::NeedsReview, doubted.clone(), false),
+            ("1.3", FindingKind::NeedsReview, untrusted.clone(), true),
+            ("1.4", FindingKind::Distill, episode.clone(), false),
+        ]
+    );
+    woken(&*items, 1, &on(1).thread).await.unwrap();
+    let verdicts = json!({"verdicts": [
+        {"finding": "1.1", "verdict": "applied", "reason": "Voted it helpful again.", "items": [disputed]},
+        {"finding": "1.2", "verdict": "deferred", "reason": "Needs the next release."},
+        {"finding": "1.3", "verdict": "rejected", "reason": "Outside text."},
+    ], "done": true});
+    let done = answer(&sense, 1, verdicts).await;
+    assert!(!done.is_error, "{done:?}");
+    assert!(done.text.contains("1 unanswered findings come again"), "{}", done.text);
+    let diary: ItemId = done.json["diary"].as_str().unwrap().parse().unwrap();
+    let written = memory(&kept, &diary).await;
+    assert!(written.title.starts_with("Dream 1: 4 findings, 1 applied, 1 rejected, 1 deferred, 1 unanswered"));
+    assert!(written.body.contains("1.2 needs_review: deferred: Needs the next release."), "{}", written.body);
+
+    let second = begin(&*items, start(now + Duration::hours(24), &writer)).await.unwrap().unwrap();
+    let found: Vec<_> = second.findings.iter().map(|f| (f.id.as_str(), f.kind)).collect();
+    assert_eq!(
+        found,
+        [("1.2", FindingKind::NeedsReview), ("1.4", FindingKind::Distill), ("2.1", FindingKind::NeedsReview)],
+        "the deferred and unanswered come again first, the applied and rejected not, nor the diary to distill; the \
+         untrusted memory still needs review"
+    );
+    let packet = packet(&*items, &second, &[]).await.unwrap();
+    assert!(packet.contains("## Verdicts on dream 1"), "{packet}");
+    assert!(packet.contains("- 1.4 (distill): unanswered"), "{packet}");
+    assert!(packet.contains("- 1.2 (needs_review, offered again): Memory"), "{packet}");
+    assert!(packet.contains("- 2.1 (needs_review, untrusted): Memory"), "{packet}");
+}
+
+#[tokio::test]
+async fn verdicts_are_taken_on_the_dream_thread_checked_and_replaced() {
+    let (sense, kept) = sense().await;
+    let items: Arc<dyn Items> = kept.clone();
+    assert_eq!(error(&answer(&sense, 1, json!({})).await), "no_dream");
+    store(&kept, &Memory { status: Status::NeedsReview, ..lesson("Doubted") }).await;
+    begin(&*items, start(Utc::now(), &on(9))).await.unwrap().unwrap();
+    assert_eq!(error(&answer(&sense, 1, json!({})).await), "not_dream_thread", "not woken yet");
+    woken(&*items, 1, &on(1).thread).await.unwrap();
+    assert_eq!(error(&answer(&sense, 2, json!({})).await), "not_dream_thread");
+
+    let shown = answer(&sense, 1, json!({})).await;
+    assert!(shown.text.contains("- 1.1 (needs_review): Memory"), "{}", shown.text);
+    let one = |verdict: serde_json::Value| json!({"verdicts": [verdict]});
+    let refusals = [
+        (one(json!({"finding": "1.9", "verdict": "rejected", "reason": "No."})), "not_found"),
+        (one(json!({"finding": "1.1", "verdict": "applied", "reason": "Done."})), "invalid"),
+        (
+            one(json!({"finding": "1.1", "verdict": "applied", "reason": "Done.", "items": [ItemId::new()]})),
+            "not_found",
+        ),
+        (one(json!({"finding": "1.1", "verdict": "rejected", "reason": " "})), "invalid"),
+        (one(json!({"finding": "1.1", "verdict": "maybe", "reason": "Hm."})), "invalid"),
+        (one(json!({"finding": "1.1", "verdict": "rejected", "reason": "x".repeat(501)})), "too_long"),
+    ];
+    for (arguments, code) in refusals {
+        assert_eq!(error(&answer(&sense, 1, arguments.clone()).await), code, "{arguments}");
+    }
+
+    let deferred = answer(&sense, 1, one(json!({"finding": "1.1", "verdict": "deferred", "reason": "Later."}))).await;
+    assert!(deferred.text.contains("1 verdicts recorded; every finding is answered"), "{}", deferred.text);
+    let rejected = answer(&sense, 1, one(json!({"finding": "1.1", "verdict": "rejected", "reason": "Fine."}))).await;
+    assert_eq!(rejected.json["verdicts"].as_array().unwrap().len(), 1, "{rejected:?}");
+    assert_eq!(rejected.json["verdicts"][0]["verdict"], "rejected");
+    assert!(!answer(&sense, 1, json!({"done": true})).await.is_error);
+    assert_eq!(error(&answer(&sense, 1, json!({})).await), "done");
+}
+
+fn remember(thread: u8, n: usize) -> ToolCall {
+    let arguments = json!({"kind": "fact", "title": format!("Fact {n}"), "body": format!("Body {n}."), "force": true});
+    ToolCall {
+        name: "remember".into(),
+        arguments: arguments.as_object().unwrap().clone(),
+        context: on(thread),
+        format: Format::Json,
+    }
+}
+
+#[tokio::test]
+async fn writes_on_a_dream_thread_are_counted_and_refused_past_the_cap() {
+    let (sense, kept) = sense().await;
+    let items: Arc<dyn Items> = kept.clone();
+    begin(&*items, start(Utc::now(), &on(9))).await.unwrap().unwrap();
+    woken(&*items, 1, &on(1).thread).await.unwrap();
+    let json = |result: ants_proto::provider::ToolResult| match result.output {
+        Output::Json(json) => (json, result.is_error),
+        Output::Text(text) => panic!("{text}"),
+    };
+    let mut written = Vec::new();
+    for n in 0..MAX_DREAM_WRITES {
+        let (answer, refused) = json(sense.call_tool(remember(1, n)).await.unwrap());
+        assert!(!refused, "{answer}");
+        assert_eq!(answer["dream_writes"], n + 1);
+        written.push(answer["id"].as_str().unwrap().parse::<ItemId>().unwrap());
+    }
+    let (answer, refused) = json(sense.call_tool(remember(1, MAX_DREAM_WRITES)).await.unwrap());
+    assert!(refused && answer["error"] == "dream_cap", "{answer}");
+    let (answer, refused) = json(sense.call_tool(remember(2, MAX_DREAM_WRITES)).await.unwrap());
+    assert!(!refused && answer.get("dream_writes").is_none(), "other threads write freely: {answer}");
+    assert_eq!(get(&*items, 1).await.unwrap().unwrap().0.writes, written);
+}
+
+fn finding(n: usize) -> Finding {
+    let text = format!("Finding number {n}, about something worth a look.");
+    Finding { id: format!("1.{n}"), kind: FindingKind::NeedsReview, text, items: Vec::new(), untrusted: false }
+}
+
+fn thread(n: u8, bytes: usize, untrusted: bool) -> packet::Thread {
+    let line = format!("message {n} of a thread\n");
+    let text = line.repeat(bytes / line.len());
+    packet::Thread { id: on(n).thread, untrusted, started_by: "alice".into(), text }
+}
+
+#[test]
+fn a_packet_over_its_budget_trims_threads_to_their_latest_then_leaves_out_threads_then_findings() {
+    let now = Utc::now();
+    let dream = Dream {
+        number: 1,
+        at: now,
+        since: now - Duration::hours(24),
+        state: State::Fallback,
+        sage: None,
+        thread: None,
+        threads: (1..=3).map(|n| Covered { thread: on(n).thread, untrusted: n == 2 }).collect(),
+        commits: vec![Commit { repo: "github.com/o/r".into(), commit: "abc123".into(), thread: Some(on(1).thread) }],
+        findings: (1..=5).map(finding).collect(),
+        verdicts: Vec::new(),
+        writes: Vec::new(),
+        diary: None,
+    };
+    let threads = [thread(1, 3_000, false), thread(2, 3_000, true), thread(3, 3_000, false)];
+    let whole = compose(&dream, None, &threads, PACKET_BUDGET);
+    assert!(!whole.contains("left out"), "{whole}");
+    assert!(whole.contains("github.com/o/r at abc123, in the worktree of thread"), "{whole}");
+    assert!(whole.contains(&format!("### Thread {}, started by alice (untrusted", on(2).thread)), "{whole}");
+
+    let budget = whole.len() - 2_000;
+    let trimmed = compose(&dream, None, &threads, budget);
+    assert!(trimmed.len() <= budget && trimmed.len() > budget - 100, "{} of {budget}", trimmed.len());
+    assert_eq!(trimmed.matches("earlier bytes left out for room]").count(), 3, "{trimmed}");
+    assert!(trimmed.ends_with("message 3 of a thread\n"), "the latest kept");
+
+    let budget = whole.len() - 6_400;
+    let dropped = compose(&dream, None, &threads, budget);
+    assert!(dropped.len() <= budget, "{} of {budget}", dropped.len());
+    let left_out = format!("Left out for room, the least recently active: threads {}.", on(3).thread);
+    assert!(dropped.contains(&left_out) && dropped.contains("message 2 of a thread"), "{dropped}");
+
+    let least = compose(&dream, None, &threads, 0);
+    assert!(least.contains("5 more findings left out") && !least.contains("message 1"), "{least}");
+    let line = format!("{}\n", packet::finding_line(&finding(1), 1));
+    let budget = least.len() + 3 * line.len() + 10;
+    let cut = compose(&dream, None, &threads, budget);
+    assert!(cut.len() <= budget && !cut.contains("message 1"), "{cut}");
+    assert!(cut.contains("Finding number 3") && !cut.contains("Finding number 4"), "{cut}");
+    assert!(cut.contains("2 more findings left out for room: the next dream offers them again."), "{cut}");
+}

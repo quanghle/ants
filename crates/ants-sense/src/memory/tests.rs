@@ -14,7 +14,7 @@ use crate::tools::{Answer, Handler};
 
 mod citations;
 
-pub(super) type Kept = tokio::sync::Mutex<Store<MemoryLog, Unsigned, AccountVerifier<NoRevocations>>>;
+pub(crate) type Kept = tokio::sync::Mutex<Store<MemoryLog, Unsigned, AccountVerifier<NoRevocations>>>;
 
 /// The one store of every ant.
 struct One(Arc<Kept>);
@@ -26,7 +26,7 @@ impl Stores for One {
     }
 }
 
-pub(super) async fn sense() -> (Sense, Arc<Kept>) {
+pub(crate) async fn sense() -> (Sense, Arc<Kept>) {
     let verifier = AccountVerifier::new(vec![], NoRevocations);
     let ant = "dev-a".parse().unwrap();
     let log = AntLog::new(MemoryLog::default(), Unsigned, verifier, SenseId::new(), ant, "m1".parse().unwrap(), None);
@@ -43,7 +43,7 @@ async fn events(store: &Kept) -> Vec<Event> {
     stored.iter().map(|stored| stored.event().unwrap()).collect()
 }
 
-pub(super) fn context(by: Starter) -> CallContext {
+pub(crate) fn context(by: Starter) -> CallContext {
     CallContext {
         ant: "dev-a".parse().unwrap(),
         identity: "0f1e".into(),
@@ -57,7 +57,7 @@ pub(super) fn context(by: Starter) -> CallContext {
     }
 }
 
-pub(super) fn human() -> Starter {
+pub(crate) fn human() -> Starter {
     Starter::Human { user: "alice".parse().unwrap() }
 }
 
@@ -66,13 +66,13 @@ async fn call(sense: &Sense, by: Starter, arguments: Value) -> Answer {
 }
 
 /// The answer of `handler`, as JSON, to a call of `context` with `arguments`.
-pub(super) async fn tool(sense: &Sense, handler: Handler, arguments: Value, context: CallContext) -> Answer {
+pub(crate) async fn tool(sense: &Sense, handler: Handler, arguments: Value, context: CallContext) -> Answer {
     let arguments = arguments.as_object().unwrap().clone();
     let call = ToolCall { name: "tool".into(), arguments, context, format: Format::Json };
     handler(sense, &call).await
 }
 
-pub(super) fn id_of(answer: &Answer) -> ItemId {
+pub(crate) fn id_of(answer: &Answer) -> ItemId {
     assert!(!answer.is_error, "{answer:?}");
     answer.json["id"].as_str().unwrap().parse().unwrap()
 }
@@ -87,7 +87,7 @@ async fn refused(sense: &Sense, arguments: Value) -> Answer {
     answer
 }
 
-pub(super) async fn memory(store: &Kept, id: &ItemId) -> Memory {
+pub(crate) async fn memory(store: &Kept, id: &ItemId) -> Memory {
     Memory::of(&store.lock().await.get(id).unwrap().unwrap()).unwrap()
 }
 

@@ -49,7 +49,7 @@ struct Bus {
     ledger: Arc<Ledger>,
     /// dev-a's escalation chain.
     chain: Chain,
-    workload: colony::Workload,
+    workload: Arc<colony::Workload>,
     pause: crate::pause::Pause,
     mcp: Option<Mcp>,
     /// The ant's identity record; none: it cannot be read.
@@ -89,7 +89,7 @@ impl Bus {
         client.flush().await.unwrap();
         let ledger = Arc::new(Ledger::memory(dev.clone(), Caps::default()));
         let limits = PromptLimits::default();
-        let workload = colony::Workload::default();
+        let workload = Arc::new(colony::Workload::default());
         let channels = bus::ensure_channels(&js).await.unwrap();
         // Before any post: a new channel consumer starts at the posts stored from then on.
         bus::chan_consumer(&stream, &dev, ACK_WAIT, MAX_DELIVER, 4).await.unwrap();

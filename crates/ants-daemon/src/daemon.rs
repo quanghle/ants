@@ -948,7 +948,16 @@ where
     .await?
     .reading(inbox.reading);
     let _sense_workdirs = sense_workdirs(inbox, config);
-    let scheduler = crate::provider::scheduler::serve(config, inbox.machine);
+    let dreaming = crate::provider::scheduler::Daemon {
+        js: inbox.js.clone(),
+        ant: config.ant.clone(),
+        reading: inbox.reading,
+        origins: inbox.mcp.and_then(crate::mcp::Mcp::origin_store).cloned(),
+        workload: inbox.workload.clone(),
+        started: chrono::Utc::now(),
+        workdir: config.harness.workdir.clone(),
+    };
+    let scheduler = crate::provider::scheduler::serve(config, inbox.machine, std::sync::Arc::new(dreaming));
     let (stopping, moving, mut asked) = (std::cell::Cell::new(false), std::cell::Cell::new(false), 0);
     // The first stop is Ctrl-C, a stop request, the hand-over or the move, after which the prompts in flight finish;
     // the second only Ctrl-C or a stop request.
@@ -1142,7 +1151,7 @@ struct Inbox<'a> {
     /// Hides secrets in what the harness streams and answers.
     redactor: &'a Redactor,
     /// Counts the messages being handled and the live harnesses, for the colony.
-    workload: &'a colony::Workload,
+    workload: &'a std::sync::Arc<colony::Workload>,
     /// Whether the ant is paused: then no prompt starts, the messages in hand waiting.
     pause: &'a crate::pause::Pause,
     /// The ant's drift, which its colony entry reports as it changes.

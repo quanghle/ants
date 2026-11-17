@@ -488,4 +488,4 @@ pub async fn chain(items: &dyn Items, id: &ItemId) -> Result<Vec<MemoryItem>, St
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

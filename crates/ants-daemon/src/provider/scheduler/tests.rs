@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use super::*;
 use crate::sync::MutexExt as _;
 
+mod dreaming;
 mod probes;
 
 const DAY: Duration = Duration::from_hours(24);
@@ -83,6 +84,7 @@ fn settings() -> Settings {
         machine: "m1".into(),
         env: BTreeMap::new(),
         allow: Vec::new(),
+        dreams: None,
     }
 }
 

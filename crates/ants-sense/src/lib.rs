@@ -16,6 +16,7 @@ use ants_proto::provider::{
 
 pub mod brief;
 pub mod cache;
+pub mod dream;
 pub mod export;
 pub mod fork;
 pub mod identity;
@@ -51,6 +52,8 @@ pub struct Sense {
     stores: Option<Arc<dyn Stores>>,
     workdirs: Option<Arc<dyn Workdirs>>,
     changed: tokio::sync::watch::Sender<()>,
+    /// Taken by each write on a dream thread, counted toward [`dream::MAX_DREAM_WRITES`].
+    dream_writes: tokio::sync::Mutex<()>,
 }
 
 /// Directories supplied by the daemon, never taken from a tool's arguments.
@@ -60,7 +63,12 @@ pub trait Workdirs: Send + Sync {
 
 impl Default for Sense {
     fn default() -> Self {
-        Self { stores: None, workdirs: None, changed: tokio::sync::watch::channel(()).0 }
+        Self {
+            stores: None,
+            workdirs: None,
+            changed: tokio::sync::watch::channel(()).0,
+            dream_writes: tokio::sync::Mutex::new(()),
+        }
     }
 }
 
@@ -219,7 +227,11 @@ impl Provider for Sense {
         };
         Box::pin(async move {
             let format = call.format;
-            let answer = (spec.handler)(self, &call).await;
+            let answer = if dream::COUNTED.contains(&spec.name) {
+                dream::counted(self, spec.handler, &call).await
+            } else {
+                (spec.handler)(self, &call).await
+            };
             if !answer.is_error {
                 self.changed.send_replace(());
             }
@@ -304,7 +316,7 @@ mod tests {
         let names: Vec<_> = tools.iter().map(|tool| tool.name.as_str()).collect();
         assert_eq!(
             names,
-            ["brief", "remember", "recall", "vote", "checkpoint", "handoff", "task", "promise", "remind"]
+            ["brief", "remember", "recall", "vote", "checkpoint", "handoff", "task", "promise", "remind", "dream"]
         );
         let request = BriefRequest {
             context: call("brief", Format::Text).context,
