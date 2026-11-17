@@ -31,11 +31,17 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
 - `crates/ants/nats-server.sha256` pins the nats-server release bundled with ants: release archives, `ants setup`
   downloads and CI's tests all take it from there.
 - Comment only code that needs clarification.
+- Modules are `x.rs` with submodules in `x/`, never `x/mod.rs`. Unit tests of `x.rs` start inline
+  (`#[cfg(test)] mod tests { … }` at its end); once they outgrow the code they test, they move to `x/tests.rs`
+  (`#[cfg(test)] mod tests;`); once that grows too large, `x/tests.rs` keeps the shared helpers and declares
+  submodules in `x/tests/`, one per behaviour (`x/tests/routing.rs`, …).
 
 ## Checks
 
 Before finishing, run `scripts/check.sh`: the checks of CI's (`.github/workflows/ci.yml`) check and deny jobs, stopping
-at the first failure.
+at the first failure. The check job's release build and footprint check (`scripts/footprint.sh`, idle `ants daemon`
+under 10 MB of private memory) run only with `scripts/check.sh --footprint`, as the fat-LTO release build is slow: pass
+it for changes that may grow the daemon's memory or binary. The summary lists the skipped checks.
 
 - `cargo fmt --all --check`, `cargo clippy --all-targets`, `cargo test`, all with `CARGO_BUILD_WARNINGS=deny` as in
   CI, so any lint warning fails.
@@ -43,6 +49,9 @@ at the first failure.
   sets it when `nats-server` is on PATH.
 - `ANTS_TEST_JS_ACK_FC_V2=1` runs the test servers with nats-server 2.16's v2 ack and flow control subjects; CI and
   the script run `cargo test` both ways.
+- `cargo build --release` and `scripts/footprint.sh --ants target/release/ants --port 14722 --max-mb 10` with
+  `--footprint`; the footprint check skips where `scripts/footprint.sh` cannot measure (Linux and macOS only, needs
+  `nats-server`, and `footprint` on macOS).
 - `cargo deny --locked check` (skipped without cargo-deny). A new license goes into `deny.toml`'s allow-list only if
   permissive.
 - Dependency cooldown: `cargo update` and `cargo add` take only versions published at least 7 days ago, and a

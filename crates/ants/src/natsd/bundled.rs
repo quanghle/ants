@@ -19,6 +19,7 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_mins(10);
 const VERSION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The default nats-server command, a bare name [`find`] looks up.
+#[cfg(unix)]
 pub(crate) const DEFAULT: &str = "nats-server";
 /// The file name of the nats-server executable.
 pub(crate) const EXE: &str = if cfg!(windows) { "nats-server.exe" } else { "nats-server" };
@@ -77,6 +78,7 @@ fn search(dirs: &[Option<PathBuf>], path: Option<&OsStr>) -> Option<PathBuf> {
 
 /// The program to run for the nats-server command `command`: the default one as [`find`] finds it, any other as
 /// given.
+#[cfg(unix)]
 pub(crate) fn resolve(command: &Path) -> PathBuf {
     if command != Path::new(DEFAULT) {
         return command.to_owned();

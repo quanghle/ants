@@ -17,7 +17,7 @@ use ants_proto::McpServerState;
 use anyhow::bail;
 use serde_json::{Value, json};
 use tokio::process::ChildStdin;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use super::{
     Cli, Harness, Incoming, Info, Native, NativeSession, Open, Process, Rpc, RpcError, Updates, context_overflow,
@@ -37,6 +37,8 @@ struct Shared {
     process: tokio::sync::Mutex<Process>,
     /// Where the CLI's updates go: the prompt running.
     current: Mutex<Option<Updates>>,
+    /// Asks of the router to tell once it routed what the CLI sent before ([`Shared::routed`]).
+    flushes: mpsc::UnboundedSender<oneshot::Sender<()>>,
 }
 
 impl Drop for Stub {
@@ -52,6 +54,15 @@ impl Shared {
             Ok(result) => Ok(result),
             Err(e) if e.is_closed() => Err(self.process.lock().await.exited().await),
             Err(e) => Err(mapped(&e)),
+        }
+    }
+
+    /// Wait for the router to have routed what the CLI sent before the last response read: the updates of a prompt
+    /// come before its response, and must reach the prompt before it ends.
+    async fn routed(&self) {
+        let (flushed, done) = oneshot::channel();
+        if self.flushes.send(flushed).is_ok() {
+            let _ = done.await;
         }
     }
 }
@@ -74,8 +85,24 @@ fn mapped(e: &RpcError) -> Error {
 }
 
 /// Send the CLI's updates to the prompt running, and deny what it asks.
-async fn route(mut incoming: mpsc::UnboundedReceiver<Incoming>, shared: Arc<Shared>) {
-    while let Some(message) = incoming.recv().await {
+async fn route(
+    mut incoming: mpsc::UnboundedReceiver<Incoming>,
+    mut flushes: mpsc::UnboundedReceiver<oneshot::Sender<()>>,
+    shared: Arc<Shared>,
+) {
+    loop {
+        // What the CLI sent first, then the flushes: a flush answers once all the CLI sent before is routed.
+        let message = tokio::select! {
+            biased;
+            message = incoming.recv() => match message {
+                Some(message) => message,
+                None => break,
+            },
+            Some(flushed) = flushes.recv() => {
+                let _ = flushed.send(());
+                continue;
+            }
+        };
         match message {
             Incoming::Notification { method, params } if method == "update" => {
                 let Some(updates) = shared.current.locked().clone() else { continue };
@@ -115,9 +142,15 @@ impl Native for Stub {
         let (stdin, stdout) = process.take_io().ok_or_else(|| failed("no stdio"))?;
         let (rpc, incoming) = Rpc::new(stdout, stdin, true);
         let mode = cli.mode().map(str::to_owned);
-        let shared =
-            Arc::new(Shared { cli, rpc, process: tokio::sync::Mutex::new(process), current: Mutex::default() });
-        let router = tokio::spawn(route(incoming, shared.clone()));
+        let (flush_tx, flushes) = mpsc::unbounded_channel();
+        let shared = Arc::new(Shared {
+            cli,
+            rpc,
+            process: tokio::sync::Mutex::new(process),
+            current: Mutex::default(),
+            flushes: flush_tx,
+        });
+        let router = tokio::spawn(route(incoming, flushes, shared.clone()));
         let stub = |hello: &Value| Info {
             name: hello["name"].as_str().unwrap_or("stub").to_owned(),
             version: hello["version"].as_str().unwrap_or("0").to_owned(),
@@ -186,6 +219,7 @@ impl NativeSession for StubSession {
         *self.shared.current.locked() = Some(updates);
         let params = json!({ "session": self.id, "text": prompt_text(&prompt) });
         let done = self.shared.request("prompt", params).await;
+        self.shared.routed().await;
         self.shared.current.locked().take();
         let done = done?;
         let stop = if done["stop"] == "cancelled" { StopReason::Cancelled } else { StopReason::EndTurn };

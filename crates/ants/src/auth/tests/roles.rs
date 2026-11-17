@@ -3,6 +3,7 @@
 use super::*;
 
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "every role checked in turn against one server")]
 async fn credentials_confine_each_user_to_its_role() {
     let Some(server) = Server::start() else { return };
     let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));

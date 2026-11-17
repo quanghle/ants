@@ -17,7 +17,7 @@ pub use managed::{run_serving, start};
 
 /// The timing of a managed nats-server's supervision.
 #[derive(Clone, Copy, Debug)]
-#[cfg_attr(not(unix), allow(dead_code))]
+#[cfg_attr(not(unix), expect(dead_code, reason = "a platform without a managed nats-server reads no field"))]
 pub struct Policy {
     /// The wait before restarting the server after an exit, doubled for each restart in a row.
     pub backoff: Duration,

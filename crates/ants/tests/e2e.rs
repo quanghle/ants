@@ -4,8 +4,6 @@
 //! `stub-adapter` one a config file defines as a harness, it serves ACP on stdio and answers every prompt with
 //! `stub: <prompt>`.
 
-#![allow(clippy::too_many_lines)]
-
 use std::fmt::Write as _;
 use std::io::{Read as _, Write as _};
 use std::path::Path;
@@ -72,6 +70,7 @@ fn custom_whoami_and_tools_reach_the_harness() {
     exercise_daemon(true);
 }
 
+#[expect(clippy::too_many_lines, reason = "one scenario against one server, each step building on the ones before")]
 fn exercise_daemon(custom_tools: bool) {
     let Some(server) = NatsServer::start() else { return };
     let dir = scratch_dir("e2e");
@@ -281,6 +280,7 @@ fn exercise_daemon(custom_tools: bool) {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[expect(clippy::too_many_lines, reason = "one scenario against one server, each step building on the ones before")]
 fn channels_are_managed_posted_to_and_read() {
     use std::io::BufRead as _;
 
@@ -605,6 +605,7 @@ fn the_builtin_messenger_hands_over_to_a_listed_one() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[expect(clippy::too_many_lines, reason = "one scenario against one server, each step building on the ones before")]
 fn a_configured_adapter_serves_ants_the_messenger_and_the_cli() {
     let Some(server) = NatsServer::start() else { return };
     let dir = scratch_dir("adapter");
@@ -867,6 +868,7 @@ impl Drop for Killed {
 }
 
 /// ACP over stdio: every prompt is answered with `stub: <prompt>`.
+#[expect(clippy::too_many_lines, reason = "the whole stub ACP agent: one handler per request")]
 fn stub_harness() {
     let options = std::sync::Arc::new(std::sync::Mutex::new(vec![
         SessionConfigOption::select(

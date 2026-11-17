@@ -154,7 +154,10 @@ mod secret_service {
     }
 
     impl SecretTool {
-        #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+        #[cfg_attr(
+            not(target_os = "linux"),
+            expect(dead_code, reason = "secret-tool runs on Linux alone; elsewhere only the tests build it")
+        )]
         pub fn os() -> Self {
             Self {
                 program: "secret-tool".into(),
