@@ -24,6 +24,7 @@ use anyhow::{Context as _, Result, bail};
 use serde_json::{Map, Value};
 
 use super::{ConfigFile, NO_CONFIG, Orders, applied, refused};
+use crate::config::Sage;
 use crate::config::edit::{Edit, needed};
 use crate::profile::shared::{self, Bucket, Found, Roles, Signer};
 use crate::profile::template::{AntTemplate, REQUEST_KEYS};
@@ -166,6 +167,10 @@ fn prepare(
         within_template(t, &start, &fields)?;
     }
     let roles = Roles::of(&fields)?;
+    let names_sage = matches!(roles.sage, Some(Sage::Ant(_))) && start.get("sage") != fields.get("sage");
+    if names_sage && (listed.builtin || listed.is_sage) {
+        bail!("{ant} is built in or another ant's sage, and a sage has no sage of its own: set sage to \"none\"");
+    }
     let creds = listed.creds.clone();
     roles.overlay(listed).into_config(ANY_NATS, &loaded.harnesses)?;
     let record = if before.as_ref() == Some(&fields) {

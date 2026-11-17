@@ -94,7 +94,7 @@ fn exercise_daemon(custom_tools: bool) {
         std::fs::write(
             &config,
             format!(
-                "messenger = false\nharness = \"copilot\"\nmetrics = {metrics:?}\n\
+                "messenger = false\nsage = \"none\"\nharness = \"copilot\"\nmetrics = {metrics:?}\n\
                  [[ant]]\nname = \"dev-a\"\nworkdir = {dir:?}\nhome = {home:?}\n\
                  whoami = \"Maintain the Rust backend.\"\n\
                  model = \"stub-model\"\nreasoning_effort = \"high\"\ncontext = \"long_context\"\n\
@@ -595,8 +595,10 @@ fn the_builtin_messenger_hands_over_to_a_listed_one() {
 
     let _builtin = daemon("builtin", "harness = \"copilot\"\n");
     wait_for("builtin", "serving inbox", 1);
-    let listed =
-        daemon("listed", &format!("[[ant]]\nname = \"messenger\"\nworkdir = {dir:?}\nharness = \"copilot\"\n"));
+    let listed = daemon(
+        "listed",
+        &format!("sage = \"none\"\n[[ant]]\nname = \"messenger\"\nworkdir = {dir:?}\nharness = \"copilot\"\n"),
+    );
     wait_for("listed", "serving inbox", 1);
     wait_for("builtin", "another daemon took over the ant", 1);
     assert_eq!(served_from(), dir.canonicalize().unwrap().display().to_string(), "{}", logs());
@@ -623,7 +625,7 @@ fn a_configured_adapter_serves_ants_the_messenger_and_the_cli() {
     std::fs::create_dir_all(&user_home).unwrap();
     let config = dir.join("config.toml");
     let original = format!(
-        "harness = \"stubby\"\n\
+        "harness = \"stubby\"\nsage = \"none\"\n\
          [harnesses.stubby]\ncommand = \"bin/stub-adapter\"\nargs = [\"--flag\", \"two words\"]\n\
          env = {{ ANTS_TEST_ADAPTER = \"1\", OVERRIDDEN = \"definition\" }}\n\
          [harnesses.strict]\ncommand = \"bin/stub-adapter\"\nmode = \"default\"\n\

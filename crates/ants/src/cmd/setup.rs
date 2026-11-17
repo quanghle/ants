@@ -609,7 +609,7 @@ fn config_file(
             text.push_str(entry);
         }
         let listed = match &entry {
-            Some((name, _)) => format!("the messenger and {name}"),
+            Some((name, _)) => format!("the messenger, {name} and the sage"),
             None => "the messenger".to_owned(),
         };
         let written = if report.dry_run { Ok(()) } else { write_new(path, &text) };

@@ -200,6 +200,9 @@ pub struct Policy {
     pub escalation: Chain,
     /// Redact secrets from what the ant publishes ([`crate::secrets::redact`]).
     pub redact: bool,
+    /// The ant reviewing this one, its sage ([`crate::config::Ant::reviewed_by`]); none for a sage, which has none of
+    /// its own, or where reviews are off.
+    pub sage: Option<UserId>,
 }
 
 /// What the ant may spend.

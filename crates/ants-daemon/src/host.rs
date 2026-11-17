@@ -107,9 +107,10 @@ pub fn machine_of(machine: Option<&Machine>, creds: Option<&Path>, otherwise: Ma
     }
 }
 
-/// The record of `machine` serving `ants`, the built-in messenger left out.
+/// The record of `machine` serving `ants`, the built-in messenger and sage left out.
 pub fn record(machine: &Machine, hostname: &str, ants: &[UserId]) -> MachineRecord {
-    let mut ants: Vec<UserId> = ants.iter().filter(|ant| **ant != UserId::messenger()).cloned().collect();
+    let builtin = [UserId::messenger(), UserId::sage()];
+    let mut ants: Vec<UserId> = ants.iter().filter(|ant| !builtin.contains(ant)).cloned().collect();
     ants.sort();
     ants.dedup();
     MachineRecord {
@@ -301,9 +302,9 @@ mod tests {
     }
 
     #[test]
-    fn the_record_lists_the_served_ants_once_and_sorted_without_the_messenger() {
+    fn the_record_lists_the_served_ants_once_and_sorted_without_the_builtin_ones() {
         let ants: Vec<UserId> = ["dev-b", "dev-a", "dev-b"].iter().map(|a| a.parse().unwrap()).collect();
-        let record = record(&m("box"), "box.local", &[ants, vec![UserId::messenger()]].concat());
+        let record = record(&m("box"), "box.local", &[ants, vec![UserId::messenger(), UserId::sage()]].concat());
         assert_eq!(record.ants, ["dev-a".parse::<UserId>().unwrap(), "dev-b".parse().unwrap()]);
         assert_eq!((record.key(), record.hostname.as_str()), ("box", "box.local"));
     }

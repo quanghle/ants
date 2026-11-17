@@ -1,8 +1,10 @@
 //! The daemon config file, `~/.ants/config.toml`: the ants one daemon process serves.
 //!
 //! ```toml
-//! harness = "claude"                # harness of every ant naming none and of the built-in messenger; no default
+//! harness = "claude"                # harness of every ant naming none and of the built-in ants; no default
 //! messenger = true                  # serve the built-in messenger (the default)
+//! sage = "sage"                     # the ant reviewing every ant naming none: the built-in sage (the default),
+//!                                   # another ant, or "none" (crate::config::Sage)
 //! nats = "wss://hub.example/nats"   # default server for every ant
 //! js_domain = "hub"                 # JetStream domain of the hub, if it has one; also per ant
 //! human = "alice"                   # default human, for escalations of threads with no owner; also per ant
@@ -70,6 +72,7 @@
 //! harness = "my-agent"
 //! fallback = ["claude", "copilot:gpt-5"]  # tried in order while my-agent cannot serve (crate::limits::fallback)
 //! provider = "memo"                 # overrides the top-level provider
+//! sage = "lead"                     # overrides the top-level sage; lead, a sage now, has none of its own
 //!
 //! [harnesses.my-agent]              # an ACP adapter on stdio, besides the built-in ones (harnesses.toml)
 //! command = "~/bin/my-agent-acp"     # a path, or a bare name looked up on PATH
@@ -105,7 +108,8 @@
 //! command being relative to `harnesses.d`. A name is defined once across this file and those.
 //!
 //! A file also serves the built-in messenger ([`builtin_messenger`]) unless it sets `messenger = false` or lists an
-//! ant named `messenger`; an empty file is a complete one.
+//! ant named `messenger`; an empty file is a complete one. It serves the built-in sage ([`builtin_sage`]) while one of
+//! its other ants names `sage` as its sage, as each does by default, and it lists no ant named `sage`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
@@ -125,17 +129,19 @@ mod entry;
 mod host;
 mod nats_server;
 pub mod registration;
+mod sage;
 mod settle;
 mod summary;
 mod templated;
 
 pub use amend::{append, template_of, with_allow_rule, without_ant, write};
-pub use ant::{Ant, builtin_messenger};
+pub use ant::{Ant, builtin_messenger, builtin_sage};
 pub use cli::{CliDefaults, Summaries, SummaryConfig, Theme, with_cli_login};
 pub use dropin::{dropin_dir, dropin_files};
 pub use entry::{entry, template_entry, toml_string};
 pub use host::HostSettings;
 pub use nats_server::{DEFAULT_READY_TIMEOUT, NatsServer};
+pub use sage::Sage;
 pub use summary::Summary;
 pub use templated::signer_templates;
 
@@ -188,6 +194,8 @@ struct File {
     /// Whether to serve the built-in messenger, unless an ant is named `messenger`.
     #[serde(default = "yes")]
     messenger: bool,
+    /// The ant reviewing each of the file's ants that names none ([`Sage`]): the built-in sage when absent.
+    sage: Option<Sage>,
     nats: Option<String>,
     js_domain: Option<JsDomain>,
     human: Option<UserId>,
@@ -287,7 +295,8 @@ pub fn load(path: &Path) -> Result<Loaded> {
 /// Parse the text of the config file at `path`: expand `~` to `home`, resolve relative paths against the file's
 /// directory, apply the top-level `harness`, `nats`, `js_domain` and `human`, check that names are unique, workdirs
 /// exist and every harness named is defined, add the built-in messenger unless `messenger = false` or an ant is
-/// named `messenger`, and check the schedules, each named once and after no ant, with the top-level `nats`,
+/// named `messenger`, settle each ant's sage and add the built-in sage while an ant names it ([`sage::settle`]), and
+/// check the schedules, each named once and after no ant, with the top-level `nats`,
 /// `js_domain` and `timezone` where they set none.
 pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
     let mut file: File = toml::from_str(text).with_context(|| format!("parsing config {}", path.display()))?;
@@ -332,6 +341,13 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
         .transpose()
         .with_context(|| format!("config {}", path.display()))?;
     check_added(&mut ants, &templates).with_context(|| format!("config {}", path.display()))?;
+    let file_sage = file.sage.clone().unwrap_or_default();
+    if sage::settle(&mut ants, &file_sage).with_context(|| format!("config {}", path.display()))? {
+        let sage = builtin_sage(file.harness.as_deref(), home);
+        names.insert(sage.name.clone());
+        let sage = settle_ant(sage, &file, (&harnesses, &providers), base, home, path)?;
+        ants.push(Ant { file_sage, is_sage: true, ..sage });
+    }
     let entries = std::mem::take(&mut file.schedules);
     let schedules = schedules(entries, &file, timezone.as_ref(), &names, base, home, path)?;
     let (base, home) = (base.to_owned(), home.to_owned());
