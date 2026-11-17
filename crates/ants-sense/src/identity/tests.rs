@@ -25,6 +25,21 @@ async fn items(log: &'static MemoryLog, sense: &SenseId) -> Arc<dyn Items> {
     Arc::new(tokio::sync::Mutex::new(store))
 }
 
+/// The items of `sense` in `log` for `ant`, once named `earlier`, cached in `home`.
+async fn items_in(
+    log: &'static MemoryLog,
+    sense: &SenseId,
+    ant: &str,
+    earlier: Vec<UserId>,
+    home: &Path,
+) -> Arc<dyn Items> {
+    let verifier = AccountVerifier::new(vec![], NoRevocations);
+    let ant = ant.parse().unwrap();
+    let log = AntLog::new(log, Unsigned, verifier, sense.clone(), ant, "m1".parse().unwrap(), None).unwrap();
+    let store = Store::open(log.with_earlier_names(earlier), Cache::open(home).unwrap()).await.unwrap();
+    Arc::new(tokio::sync::Mutex::new(store))
+}
+
 /// The items of a new sense identity, in a log of their own.
 async fn fresh() -> Arc<dyn Items> {
     items(Box::leak(Box::default()), &SenseId::new()).await
@@ -172,6 +187,47 @@ async fn two_writers_sharing_a_log_keep_one_card() {
     assert_eq!(two.list(CARD, 5).await.unwrap().len(), 1);
     one.sync().await.unwrap();
     assert_eq!(super::card(&*one).await.unwrap(), Some(card));
+}
+
+#[tokio::test]
+async fn a_renamed_ant_keeps_its_card_under_its_new_name_with_its_earlier_one() {
+    let (log, sense): (&'static MemoryLog, _) = (Box::leak(Box::default()), SenseId::new());
+    let dir = ants_test_support::scratch_dir("sense-renamed");
+    let (home_a, home_b) = (dir.join("dev-a"), dir.join("dev-b"));
+    let old = items_in(log, &sense, "dev-a", vec![], &home_a).await;
+    record_event(&*old, &event("dev-a", "id1", "10:00:00", EventKind::AntAdded)).await.unwrap();
+    let before = record_session(&*old, &context("id1", "copilot", None, "studio")).await.unwrap();
+    drop(old);
+
+    note_renamed(&home_b, &dev_a()).unwrap();
+    note_renamed(&home_b, &dev_a()).unwrap();
+    assert_eq!(earlier_names(&home_b).unwrap(), [dev_a()], "listed once");
+    let dev_b: UserId = "dev-b".parse().unwrap();
+    let in_b = CallContext { ant: dev_b.clone(), ..context("id1", "claude", None, "laptop") };
+    for reopened in 0..3 {
+        if reopened == 2 {
+            std::fs::remove_file(home_b.join(SENSE_DIR).join("cache.db")).unwrap();
+        }
+        let new = items_in(log, &sense, "dev-b", earlier_names(&home_b).unwrap(), &home_b).await;
+        let card = match reopened {
+            0 => {
+                assert_eq!(super::card(&*new).await.unwrap(), Some(before.clone()), "the card before the rename");
+                let card = record_session(&*new, &in_b).await.unwrap();
+                record_event(&*new, &event("dev-b", "id1", "11:00:00", EventKind::AntMoved)).await.unwrap();
+                let renamed = EventKind::AntRenamed { from: dev_a() };
+                let after = record_event(&*new, &event("dev-b", "id1", "11:00:01", renamed)).await.unwrap();
+                assert_eq!((&after.name, &after.earlier_names), (&card.name, &card.earlier_names));
+                after
+            }
+            _ => super::card(&*new).await.unwrap().expect("kept"),
+        };
+        assert_eq!((&card.sense, &card.name, &card.earlier_names), (&sense, &dev_b, &vec![dev_a()]));
+        assert_eq!((card.born, &card.identities[..]), (before.born, &["id1".to_owned()][..]));
+        assert_eq!(card.harnesses, ["copilot", "claude"]);
+        assert_eq!(new.broken().await, None);
+        assert_eq!(new.list(CARD, 5).await.unwrap().len(), 1, "no second card");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// The items of dev-a, the same each time.

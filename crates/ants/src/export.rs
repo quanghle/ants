@@ -18,7 +18,8 @@
 //! both pass that check.
 //!
 //! An import queues, in the ant's new home, the lifecycle events telling its provider it moved, and was renamed when
-//! imported under another name ([`ants_daemon::provider::events::arrived`]).
+//! imported under another name ([`ants_daemon::provider::events::arrived`]), its old name then listed among its earlier
+//! names in the home, whose events in its sense log stay its own ([`ants_sense::identity::note_renamed`]).
 
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
@@ -48,8 +49,8 @@ const MAX_BYTES: u64 = 64 << 20;
 const PACK_WAIT: Duration = Duration::from_mins(2);
 const PACK_POLL: Duration = Duration::from_secs(1);
 /// What of an ant's home is not its memory, relative to the home: its worktrees, the daemon's delivery notes, MCP state
-/// and lifecycle events, a git repository's history and a bd task database. sense's files but its id are left out too
-/// ([`sense_left_out`]).
+/// and lifecycle events, a git repository's history and a bd task database. sense's files but its id and the ant's
+/// earlier names are left out too ([`sense_left_out`]).
 const LEFT_OUT: [&str; 9] = [
     "worktrees",
     "answered",
@@ -200,11 +201,13 @@ pub fn core_files_of(ant: &Ant, home: &Path, harness: &[PathBuf]) -> Result<Vec<
     Ok(files)
 }
 
-/// Whether `rel`, relative to the home, is of sense's files left out: all but the sense id, which the ant keeps wherever
-/// it goes ([`ants_sense::identity`]); the cache and chain status are of the log on this machine's bus.
+/// Whether `rel`, relative to the home, is of sense's files left out: all but the sense id and the earlier names, which
+/// the ant keeps wherever it goes ([`ants_sense::identity`]); the cache and chain status are of the log on this
+/// machine's bus.
 fn sense_left_out(rel: &Path) -> bool {
     let sense = Path::new(ants_sense::log::SENSE_DIR);
-    rel.parent() == Some(sense) && rel != sense.join(ants_sense::identity::ID_FILE)
+    let kept = [ants_sense::identity::ID_FILE, ants_sense::identity::NAMES_FILE];
+    rel.parent() == Some(sense) && !kept.iter().any(|file| rel == sense.join(file))
 }
 
 /// The files `paths` of the home `home`, read, as `kind`.
@@ -575,6 +578,8 @@ async fn import_with(nats: &crate::connection::Nats<'_>, args: ImportArgs, store
         let dropped = restore(&home, &export.files, harness_kept)?;
         let mut arrived = vec![EventKind::AntMoved];
         if name != export.identity.ant {
+            ants_sense::identity::note_renamed(&home, &export.identity.ant)
+                .with_context(|| format!("listing {} among the earlier names of {name}", export.identity.ant))?;
             arrived.push(EventKind::AntRenamed { from: export.identity.ant.clone() });
         }
         ants_daemon::provider::events::arrived(&home, &name, &identity.id, arrived)?;

@@ -92,3 +92,43 @@ async fn an_ant_s_items_open_on_first_use_with_its_sense_id_and_log() {
     assert_eq!(messages, 2);
     std::fs::remove_dir_all(&home).unwrap();
 }
+
+/// An ant imported under another name on the same bus, its home holding its sense id and listing its old name, keeps
+/// its card, as read again from its log alone.
+#[tokio::test]
+async fn a_renamed_ant_keeps_its_card() {
+    let Some(server) = NatsServer::start() else { return };
+    let (home_a, home_b) = (scratch_dir("sense-stores-a"), scratch_dir("sense-stores-b"));
+    let dev_b: UserId = "dev-b".parse().unwrap();
+    let stores = SenseStores::new();
+    stores.serve(&dev_a(), &home_a, None);
+    let hosting = stores.hosting();
+    hosting.up(link(&server).await);
+    Sense::with_stores(stores.clone()).event(added("id1")).await.unwrap();
+    let id = identity::read_id(&home_a).unwrap().expect("minted");
+    drop(hosting);
+
+    std::fs::create_dir_all(identity::id_file(&home_b).parent().unwrap()).unwrap();
+    std::fs::copy(identity::id_file(&home_a), identity::id_file(&home_b)).unwrap();
+    identity::note_renamed(&home_b, &dev_a()).unwrap();
+    for reopened in [false, true] {
+        let stores = SenseStores::new();
+        stores.serve(&dev_b, &home_b, None);
+        let hosting = stores.hosting();
+        hosting.up(link(&server).await);
+        let sense = Sense::with_stores(stores.clone());
+        if !reopened {
+            let moved = Event { ant: dev_b.clone(), kind: EventKind::AntMoved, ..added("id1") };
+            sense.event(moved).await.unwrap();
+            let renamed = Event { ant: dev_b.clone(), kind: EventKind::AntRenamed { from: dev_a() }, ..added("id1") };
+            sense.event(renamed).await.unwrap();
+            std::fs::remove_file(home_b.join(".sense/cache.db")).unwrap();
+        }
+        let card = sense.card(&dev_b).await.unwrap().unwrap();
+        assert_eq!((&card.sense, &card.name, &card.earlier_names[..]), (&id, &dev_b, &[dev_a()][..]));
+        assert!(card.moved_at.is_some() && card.identities == ["id1"]);
+        assert_eq!(stores.items(&dev_b).await.unwrap().broken().await, None);
+    }
+    std::fs::remove_dir_all(&home_a).unwrap();
+    std::fs::remove_dir_all(&home_b).unwrap();
+}

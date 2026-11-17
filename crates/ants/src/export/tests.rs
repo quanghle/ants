@@ -59,6 +59,7 @@ fn an_export_packs_the_home_s_memories_and_leaves_out_its_work() {
         ("tasks.db-wal", "wal"),
         ("tasks.dbx", "not the db"),
         (".sense/id", "01J0000000000000000000000"),
+        (".sense/names", "dev-x\n"),
         (".sense/cache.db", "cache"),
         (".sense/chain.json", "chain"),
     ] {
@@ -72,7 +73,7 @@ fn an_export_packs_the_home_s_memories_and_leaves_out_its_work() {
     assert_eq!(harness, [PathBuf::from(".claude/CLAUDE.md"), PathBuf::from("CLAUDE.md")]);
     let core = core_files_of(&ant, &home, &harness).unwrap();
     let core: Vec<&str> = core.iter().map(|p| p.to_str().unwrap()).collect();
-    assert_eq!(core, [".sense/id", "memory/deep/fact.md", "notes.md", "tasks.dbx"]);
+    assert_eq!(core, [".sense/id", ".sense/names", "memory/deep/fact.md", "notes.md", "tasks.dbx"]);
     assert!(harness_files_of(None, &home).is_empty());
     assert!(core_files_of(&ant, &dir.join("none"), &[]).unwrap().is_empty(), "no home, no files");
 
@@ -81,7 +82,8 @@ fn an_export_packs_the_home_s_memories_and_leaves_out_its_work() {
     let restored = dir.join("restored");
     assert_eq!(restore(&restored, &export.files, false).unwrap(), [".claude/CLAUDE.md", "CLAUDE.md"]);
     let files = tree(&restored);
-    assert_eq!(files.keys().collect::<Vec<_>>(), [".sense/id", "memory/deep/fact.md", "notes.md", "tasks.dbx"]);
+    let kept = [".sense/id", ".sense/names", "memory/deep/fact.md", "notes.md", "tasks.dbx"];
+    assert_eq!(files.keys().collect::<Vec<_>>(), kept);
     assert_eq!(files["memory/deep/fact.md"], "deep");
 
     let outside = Packed { path: "../escape".to_owned(), kind: Kind::Core, data: BASE64.encode(b"x") };
@@ -214,8 +216,10 @@ async fn an_ant_moves_to_another_bus_with_its_identity_and_memories() {
         tree(&home_b),
         BTreeMap::from([
             ("notes.md".to_owned(), "remember".to_owned()),
-            ("CLAUDE.md".to_owned(), "be brief".to_owned())
-        ])
+            ("CLAUDE.md".to_owned(), "be brief".to_owned()),
+            (".sense/names".to_owned(), "dev-a\n".to_owned()),
+        ]),
+        "its old name listed among its earlier ones"
     );
     let renamed = ants_proto::provider::EventKind::AntRenamed { from: p("dev-a") };
     assert_eq!(told(&home_b), [ants_proto::provider::EventKind::AntMoved, renamed]);

@@ -698,10 +698,10 @@ The file is `{"ants_ant": 1, "created_at", "bus", "identity", "settings", "files
   the export, naming `--no-provider`.
 
 Left out: the home's `worktrees`, `answered`, `buried`, `mcp.json`, `mcp.sock`, `lifecycle`, `.git`, `.beads` and `.bd`, the
-files of `.sense` but the sense id (`.sense/id`, which the ant keeps on its new bus; its cache and chain status are not), the task
-database `BD_DB` names when it lies in the home, the rest of the ant's settings (its role on the bus: `capabilities`,
-`escalate_to`, `allow`, `memory`, `tasks`; its machine's: `workdir`, `env`, caps and limits), its credentials,
-sessions, threads and history. A templated ant imports as a plain `[[ant]]`.
+files of `.sense` but the sense id and earlier names (`.sense/id` and `.sense/names`, which the ant keeps on its new
+bus; its cache and chain status are not), the task database `BD_DB` names when it lies in the home, the rest of the
+ant's settings (its role on the bus: `capabilities`, `escalate_to`, `allow`, `memory`, `tasks`; its machine's:
+`workdir`, `env`, caps and limits), its credentials, sessions, threads and history. A templated ant imports as a plain `[[ant]]`.
 
 The export runs on the machine whose config file lists the ant, with a human's credentials. While another machine
 serves the ant it warns that the home here may be behind; while this one serves it working, it waits up to 2 minutes
@@ -724,7 +724,8 @@ the mark; `ants auth revoke ANT` ends the ant on the old bus once the import suc
 3. Restores its files into its home, leaving out its harness memory files, with a warning, when the ant runs another
    harness here (`--harness`, else the exported one, else the file's top-level `harness`), and queues there the
    lifecycle events `ant_moved`, and `ant_renamed` under `--as`, for its provider
-   ([architecture.md](architecture.md#lifecycle-events)).
+   ([architecture.md](architecture.md#lifecycle-events)). Under `--as`, it lists the old name among the ant's earlier
+   names in `.sense/names`, so the ant keeps its sense data ([architecture.md](architecture.md#sense-identity)).
 4. Lists it in `config.toml` with the exported settings, the flags given winning, and gives it a new key, as `ants
    add` does: with `--jwt` or `--enroll` its credentials complete at once, else `ants add NAME --jwt ...` completes
    them later. The first daemon serving it creates its shared settings on the new bus from that table; when the bus

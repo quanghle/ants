@@ -4,10 +4,11 @@ use std::path::PathBuf;
 
 use ants_proto::{Machine, SenseId, UserId};
 use chrono::Utc;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::{
-    AppendError, Chain, ChainStatus, Event, EventLog, LogError, Position, Signer, Stored, Verifier, VerifyError,
+    AppendError, Chain, ChainStatus, Event, EventLog, LogError, Position, RENAMED, Signer, Stored, Verifier,
+    VerifyError,
 };
 
 /// Messages read at once.
@@ -53,6 +54,13 @@ impl<L: EventLog, S: Signer, V: Verifier> AntLog<L, S, V> {
         let seen = kept.filter(|status| status.sense == sense).and_then(|status| status.seen);
         let chain = Chain::new(sense, ant, seen);
         Ok(Self { log, signer, verifier, machine, chain, home })
+    }
+
+    /// The log of an ant once named `earlier` too, whose events under those names it reads as its own
+    /// ([`Chain::with_earlier_names`]).
+    #[must_use]
+    pub fn with_earlier_names(self, earlier: Vec<UserId>) -> Self {
+        Self { chain: self.chain.with_earlier_names(earlier), ..self }
     }
 
     pub fn log(&self) -> &L {
@@ -119,8 +127,21 @@ impl<L: EventLog, S: Signer, V: Verifier> AntLog<L, S, V> {
     }
 
     /// Append an event of `kind` holding `data`, after the last event of the log, once: on finding another writer
-    /// appended since the last read, read what it appended and return it instead, for the caller to decide again.
+    /// appended since the last read, read what it appended and return it instead, for the caller to decide again. When
+    /// the log's events are of an earlier name of the ant, it appends the ant's rename ([`RENAMED`]) instead and returns
+    /// that as read, for the caller to decide again.
     pub async fn try_append(&mut self, kind: &str, data: Value) -> Result<Result<Checked, Vec<Checked>>, LogError> {
+        if let Some(from) = self.chain.named().filter(|named| *named != self.chain.ant()) {
+            let renamed = json!({ "from": from });
+            return Ok(Err(match self.append_once(RENAMED, renamed).await? {
+                Ok(renamed) => vec![renamed],
+                Err(missed) => missed,
+            }));
+        }
+        self.append_once(kind, data).await
+    }
+
+    async fn append_once(&mut self, kind: &str, data: Value) -> Result<Result<Checked, Vec<Checked>>, LogError> {
         let tip = self.chain.tip();
         let mut event = Event {
             sense: self.chain.sense().clone(),

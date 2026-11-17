@@ -175,15 +175,18 @@ impl Stores for SenseStores {
 }
 
 /// The items of `ant`, whose home is `home`, its sense id minted there first if it has none, signed with its
-/// credentials at `creds`, over `link`.
+/// credentials at `creds`, over `link`; its events under the earlier names its home lists are its own.
 async fn open(ant: &UserId, home: &Path, creds: Option<&Path>, link: &Link) -> Result<Arc<dyn Items>> {
     let sense = identity::sense_id(home).with_context(|| format!("reading {}", identity::id_file(home).display()))?;
+    let earlier =
+        identity::earlier_names(home).with_context(|| format!("reading {}", identity::names_file(home).display()))?;
     let log = link.log.get_or_try_init(|| JetStreamLog::open(&link.js)).await?.clone();
     let signer = AntSigner::load(ant, creds, &link.accounts)?;
     let revocations = DeviceRevocations::new(&link.js, link.js_domain.as_ref()).await?;
     let verifier = AccountVerifier::new(link.accounts.clone(), revocations);
     let log = AntLog::new(log, signer, verifier, sense, ant.clone(), link.machine.clone(), Some(home.to_owned()))
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .with_earlier_names(earlier);
     let store = Store::open(log, Cache::open(home)?).await?;
     Ok(Arc::new(tokio::sync::Mutex::new(store)))
 }

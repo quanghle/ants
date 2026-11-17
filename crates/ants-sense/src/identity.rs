@@ -1,7 +1,8 @@
 //! An ant's sense identity: its id ([`SenseId`]), minted when the ant first uses sense and kept in its home
 //! ([`ID_FILE`]) and in its card ([`Card`]), the item sense alone writes, from the ant's lifecycle events
 //! ([`record_event`]) and the start of each of its sessions ([`record_session`]). The id never changes: not on a
-//! rename, a change of harness or model, a move, a retirement or a revival; a clone gets its own.
+//! rename, a change of harness or model, a move, a retirement or a revival; a clone gets its own. A renamed ant's home
+//! lists its earlier names ([`NAMES_FILE`]), whose events in its log are its own ([`crate::log::Chain`]).
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -20,6 +21,8 @@ use crate::store::{Items, StoreError};
 
 /// The file of [`SENSE_DIR`] holding the ant's sense id.
 pub const ID_FILE: &str = "id";
+/// The file of [`SENSE_DIR`] listing the ant's earlier names, one a line, the oldest first.
+pub const NAMES_FILE: &str = "names";
 /// The kind of the card's item; an ant has one.
 pub const CARD: &str = "card";
 /// Whom sense's own changes are made for ([`crate::items::Stamp::by`]): the card's only writer.
@@ -55,6 +58,40 @@ pub fn sense_id(home: &Path) -> io::Result<SenseId> {
     std::fs::write(&beside, format!("{id}\n"))?;
     std::fs::rename(&beside, &file)?;
     Ok(id)
+}
+
+/// Where the earlier names of the ant whose home is `home` are listed.
+pub fn names_file(home: &Path) -> PathBuf {
+    home.join(SENSE_DIR).join(NAMES_FILE)
+}
+
+/// The earlier names listed in `home`, the oldest first; none when it lists none.
+pub fn earlier_names(home: &Path) -> io::Result<Vec<UserId>> {
+    let text = match std::fs::read_to_string(names_file(home)) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.trim().parse().map_err(io::Error::other))
+        .collect()
+}
+
+/// List `from` among the earlier names in `home`, the home of an ant renamed from it, unless listed already: the file
+/// written whole.
+pub fn note_renamed(home: &Path, from: &UserId) -> io::Result<()> {
+    let mut names = earlier_names(home)?;
+    if names.contains(from) {
+        return Ok(());
+    }
+    names.push(from.clone());
+    let file = names_file(home);
+    let dir = file.parent().expect("a file in a directory");
+    std::fs::create_dir_all(dir)?;
+    let beside = dir.join(format!("{NAMES_FILE}.new"));
+    std::fs::write(&beside, names.iter().map(|name| format!("{name}\n")).collect::<String>())?;
+    std::fs::rename(&beside, &file)
 }
 
 /// The ant's identity card, as sense keeps it: never written by the ant. Its revisions and their times are the item's.
@@ -164,6 +201,18 @@ impl Card {
         add(&mut self.identities, identity);
     }
 
+    /// Note that the ant is named `ant` now, its name before an earlier one when it differs.
+    fn named(&mut self, ant: &UserId) {
+        if self.name == *ant {
+            return;
+        }
+        let before = std::mem::replace(&mut self.name, ant.clone());
+        if !self.earlier_names.contains(&before) {
+            self.earlier_names.push(before);
+        }
+        self.earlier_names.retain(|name| name != ant);
+    }
+
     /// Apply the lifecycle event `event`, unless applied already.
     fn apply(&mut self, event: &Event) {
         if self.events.contains(&event.id) {
@@ -175,14 +224,7 @@ impl Card {
                 (self.active, self.retired_at, self.returned_at) = (true, None, Some(event.at));
             }
             EventKind::AntAdded => {}
-            EventKind::AntRenamed { from } => {
-                for name in [&self.name, from] {
-                    if *name != event.ant && !self.earlier_names.contains(name) {
-                        self.earlier_names.push(name.clone());
-                    }
-                }
-                self.name = event.ant.clone();
-            }
+            EventKind::AntRenamed { from } => self.named(from),
             EventKind::AntMoved => self.moved_at = Some(event.at),
             EventKind::AntCloned { from, from_identity } => {
                 self.cloned_from = Some(ClonedFrom { ant: from.clone(), identity: from_identity.clone() });
@@ -191,6 +233,7 @@ impl Card {
             EventKind::AntRevived => (self.active, self.retired_at) = (true, None),
             _ => return,
         }
+        self.named(&event.ant);
         self.link(&event.identity);
         self.events.push(event.id);
         let over = self.events.len().saturating_sub(EVENTS_KEPT);
@@ -199,6 +242,7 @@ impl Card {
 
     /// Note a session started as `context` says: its identity, harness, model and machine.
     fn session(&mut self, context: &CallContext) {
+        self.named(&context.ant);
         self.link(&context.identity);
         add(&mut self.harnesses, &context.harness);
         if let Some(model) = &context.model {

@@ -253,3 +253,49 @@ async fn a_log_ending_before_or_differing_from_what_was_verified_is_broken() {
     }
     assert_eq!(read_status(Path::new("/nonexistent")).unwrap(), None);
 }
+
+#[tokio::test]
+async fn a_renamed_ant_goes_on_with_its_log_under_its_new_name() {
+    let (team, log, sense) = (Team::new(), MemoryLog::default(), SenseId::new());
+    let dev_b: UserId = "dev-b".parse().unwrap();
+    let mut old = ant_log(&log, team.signer("dev-a"), team.verifier(), &sense, None);
+    old.append("note", json!(1)).await.unwrap();
+    old.append("note", json!(2)).await.unwrap();
+    let renamed = |signer: KeySigner, earlier: Vec<UserId>| {
+        AntLog::new(&log, signer, team.verifier(), sense.clone(), dev_b.clone(), m1(), None)
+            .unwrap()
+            .with_earlier_names(earlier)
+    };
+
+    let mut new = renamed(team.signer("dev-b"), vec![dev_a()]);
+    assert_eq!(kinds(&new.catch_up().await.unwrap()), [(1, "note"), (2, "note")]);
+    assert_eq!(new.chain().named(), Some(&dev_a()));
+    let (third, read) = new.append("note", json!(3)).await.unwrap();
+    assert_eq!((kinds(&read), third.event.index), (vec![(3, RENAMED)], 4), "the rename first");
+    assert_eq!((&read[0].event.ant, &read[0].event.data), (&dev_b, &json!({ "from": "dev-a" })));
+    assert_eq!(new.chain().named(), Some(&dev_b));
+
+    let mut reader = renamed(team.signer("dev-b"), vec![dev_a()]);
+    assert_eq!(reader.catch_up().await.unwrap().len(), 4);
+    assert_eq!(reader.chain().broken(), None);
+    let mut unaware = renamed(team.signer("dev-b"), vec![]);
+    unaware.catch_up().await.unwrap();
+    let broken = unaware.chain().broken().unwrap();
+    assert_eq!(broken.index, 1, "events of a name its home does not list are not its own");
+    assert!(broken.reason.contains("an event of dev-a, not of dev-b nor of an earlier name"), "{}", broken.reason);
+
+    // The old name signs no event past the rename, nor does another ant rename itself into the log.
+    old.append("note", json!("stale")).await.unwrap();
+    reader.catch_up().await.unwrap();
+    let broken = reader.chain().broken().unwrap();
+    assert_eq!(broken.index, 5);
+    assert!(broken.reason.contains("an event of dev-a, not of dev-b"), "{}", broken.reason);
+    let mut other =
+        AntLog::new(&log, team.signer("dev-c"), team.verifier(), sense.clone(), "dev-c".parse().unwrap(), m1(), None)
+            .unwrap()
+            .with_earlier_names(vec![dev_b.clone()]);
+    other.append("note", json!("taken")).await.unwrap();
+    let mut reader = renamed(team.signer("dev-b"), vec![dev_a()]);
+    let checked = reader.catch_up().await.unwrap();
+    assert_eq!(checked.len(), 4, "nothing past the stale event verifies: {:?}", kinds(&checked));
+}

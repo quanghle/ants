@@ -10,6 +10,9 @@ use sha2::{Digest as _, Sha256};
 /// The first line of what an event's signature signs ([`Event::signed`]), so that no signature over other bytes of the
 /// ant's key passes for an event's.
 pub const EVENT_SIGNING_CONTEXT: &str = "ants-sense-event-v1";
+/// The kind of the event starting the events of an ant's new name in its log, its data `{"from": <the name before>}`:
+/// written by the daemon serving the ant under its new name before its first event ([`super::AntLog::try_append`]).
+pub const RENAMED: &str = "ant_renamed";
 
 /// An event of the log of the sense identity `sense`, as stored, JSON-encoded, in its message. Its position in the log
 /// (`index`) and the hash of the message before it (`prev`) chain it to the events before; neither the stream's

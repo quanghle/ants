@@ -3,7 +3,7 @@
 use ants_proto::{SenseId, UserId};
 use serde::{Deserialize, Serialize};
 
-use super::{Event, Stored, Verifier, VerifyError};
+use super::{Event, RENAMED, Stored, Verifier, VerifyError};
 
 /// An event of a log, by its position and the SHA-256 of its message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,6 +33,9 @@ pub struct Position {
     pub events: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub broken: Option<Break>,
+    /// The name of the ant whose events the log holds by then: of the last event that verified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ant: Option<UserId>,
 }
 
 /// The verified part of a sense identity's log, read in order ([`Chain::check`]): each message must be an event of the
@@ -40,10 +43,17 @@ pub struct Position {
 /// credentials. The first break is kept; reading goes on from the message that broke the chain, as the log has no
 /// other. A log that ends before, or differs at, the furthest event seen before ([`Chain::seen`]), as recorded in the
 /// ant's home, is broken too: events were removed or rewritten.
+///
+/// An ant renamed keeps its log: its events are of the ant under its current name or one of its earlier names, as its
+/// home tells ([`Chain::with_earlier_names`]). The log's events are of one name at a time ([`Chain::named`]): the
+/// first event's, until a [`RENAMED`] event of the ant's new name, naming the one before as `from`.
 #[derive(Debug, Clone)]
 pub struct Chain {
     sense: SenseId,
     ant: UserId,
+    earlier: Vec<UserId>,
+    /// The name the log's events are of: of the last event that verified.
+    named: Option<UserId>,
     /// The last message read: its sequence and mark.
     tip: Option<(u64, Mark)>,
     seen: Option<Mark>,
@@ -54,15 +64,27 @@ pub struct Chain {
 impl Chain {
     /// The chain of `sense`, the identity of `ant`, of which `seen`, the furthest event verified before, is expected.
     pub fn new(sense: SenseId, ant: UserId, seen: Option<Mark>) -> Self {
-        Self { sense, ant, tip: None, seen, broken: None, events: 0 }
+        Self { sense, ant, earlier: Vec::new(), named: None, tip: None, seen, broken: None, events: 0 }
+    }
+
+    /// The chain of an ant once named `earlier` too, as well as by its current name.
+    #[must_use]
+    pub fn with_earlier_names(self, earlier: Vec<UserId>) -> Self {
+        Self { earlier, ..self }
     }
 
     pub fn sense(&self) -> &SenseId {
         &self.sense
     }
 
+    /// The ant reading and writing the log, by its current name.
     pub fn ant(&self) -> &UserId {
         &self.ant
+    }
+
+    /// The name of the ant the log's events are of by now: of the last event that verified; none before any.
+    pub fn named(&self) -> Option<&UserId> {
+        self.named.as_ref()
     }
 
     /// The sequence of the last message read; 0 before any.
@@ -93,20 +115,20 @@ impl Chain {
     /// How far the chain was read; none before any message.
     pub fn position(&self) -> Option<Position> {
         let (sequence, tip) = self.tip.clone()?;
-        Some(Position { sequence, tip, events: self.events, broken: self.broken.clone() })
+        Some(Position { sequence, tip, events: self.events, broken: self.broken.clone(), ant: self.named.clone() })
     }
 
     /// Go on reading from `position`, as read before, or with none from the log's start, as if nothing was read. The
     /// furthest event seen stays expected.
     pub fn resume(&mut self, position: Option<Position>) {
-        let Some(Position { sequence, tip, events, broken }) = position else {
-            (self.tip, self.events, self.broken) = (None, 0, None);
+        let Some(Position { sequence, tip, events, broken, ant }) = position else {
+            (self.tip, self.events, self.broken, self.named) = (None, 0, None, None);
             return;
         };
         if self.seen.as_ref().is_none_or(|seen| seen.index <= tip.index) {
             self.seen = Some(tip.clone());
         }
-        (self.tip, self.events, self.broken) = (Some((sequence, tip)), events, broken);
+        (self.tip, self.events, self.broken, self.named) = (Some((sequence, tip)), events, broken, ant);
     }
 
     /// Check `stored`, the message after the last read, with `verifier`, and move past it: its event if it verified,
@@ -142,6 +164,7 @@ impl Chain {
                 if self.seen.as_ref().is_none_or(|seen| seen.index <= mark.index) {
                     self.seen = Some(mark.clone());
                 }
+                self.named = Some(event.ant.clone());
                 Some(event)
             }
         };
@@ -161,13 +184,38 @@ impl Chain {
         if event.prev.as_deref() != prev {
             return Some(format!("chained to {}, not to the event before", event.prev.as_deref().unwrap_or("nothing")));
         }
-        if event.ant != self.ant {
-            return Some(format!("an event of {}, not of {}", event.ant, self.ant));
+        if let Some(problem) = self.name_problem(event) {
+            return Some(problem);
         }
         match &self.seen {
             Some(seen) if seen.index == mark.index && seen.sha256 != mark.sha256 => {
                 Some(format!("differs from event {} as verified before", seen.index))
             }
+            _ => None,
+        }
+    }
+
+    /// What is wrong with the name of `event`'s ant: none when it is the name the log's events are of by then, or, for
+    /// a [`RENAMED`] event, the ant's next name, renamed from that one.
+    fn name_problem(&self, event: &Event) -> Option<String> {
+        let known = |name: &UserId| *name == self.ant || self.earlier.contains(name);
+        if !known(&event.ant) {
+            return Some(format!("an event of {}, not of {} nor of an earlier name of it", event.ant, self.ant));
+        }
+        if event.kind == RENAMED {
+            let from = event.data.get("from").and_then(|from| from.as_str()?.parse::<UserId>().ok());
+            return match (from, &self.named) {
+                (None, _) => Some("a rename from no name".to_owned()),
+                (Some(from), _) if from == event.ant => Some(format!("a rename of {from} to the same name")),
+                (Some(from), Some(named)) if from != *named => {
+                    Some(format!("a rename from {from}, where the events before are of {named}"))
+                }
+                (Some(from), None) if !known(&from) => Some(format!("a rename from {from}, no earlier name of it")),
+                _ => None,
+            };
+        }
+        match &self.named {
+            Some(named) if event.ant != *named => Some(format!("an event of {}, not of {named}", event.ant)),
             _ => None,
         }
     }
@@ -191,6 +239,7 @@ impl Chain {
         if self.seen.as_ref().is_none_or(|seen| seen.index <= mark.index) {
             self.seen = Some(mark.clone());
         }
+        self.named = Some(event.ant.clone());
         self.tip = Some((stored.sequence, mark));
     }
 }
