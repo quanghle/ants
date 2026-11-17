@@ -28,6 +28,7 @@ mod unix {
         pub fn bind(home: &Path) -> Result<(Self, PathBuf)> {
             use std::os::unix::fs::PermissionsExt as _;
             let path = home.join("mcp.sock");
+            // A socket left behind, as a rule none; one that stays fails the bind.
             let _ = std::fs::remove_file(&path);
             let listener = UnixListener::bind(&path).with_context(|| format!("binding {}", path.display()))?;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
@@ -41,6 +42,7 @@ mod unix {
 
     /// Remove what a listener on `address` leaves behind.
     pub fn remove(address: &Path) {
+        // One that stays is replaced by the next listener.
         let _ = std::fs::remove_file(address);
     }
 

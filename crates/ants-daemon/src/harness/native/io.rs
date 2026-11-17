@@ -163,6 +163,7 @@ impl Process {
             None => None,
         };
         if let Some((_, task)) = self.stderr.as_mut() {
+            // What the stderr reader kept so far serves when it does not finish in time.
             let _ = tokio::time::timeout(EXIT_GRACE, task).await;
         }
         let how = match status {
@@ -212,7 +213,7 @@ impl Drop for Process {
     }
 }
 
-/// Kill `child` and, on Unix, the process group it leads.
+/// Kill `child` and, on Unix, the process group it leads; either is already gone when a kill fails.
 fn kill(pid: Option<u32>, child: &mut Child) {
     #[cfg(unix)]
     if let Some(pid) = pid.and_then(|pid| rustix::process::Pid::from_raw(pid.cast_signed())) {
@@ -221,6 +222,14 @@ fn kill(pid: Option<u32>, child: &mut Child) {
     #[cfg(not(unix))]
     let _ = pid;
     let _ = child.start_kill();
+}
+
+/// Pass `event`, read of a CLI, on to its reader: the session or prompt it is for. A reader gone means that ended, so
+/// what the CLI still prints for it is dropped, as every translator does.
+pub(crate) fn forward<T>(events: &tokio::sync::mpsc::UnboundedSender<T>, event: T) {
+    if events.send(event).is_err() {
+        tracing::debug!("dropping a CLI event: the session or prompt it is for ended");
+    }
 }
 
 /// JSON values read one per line.

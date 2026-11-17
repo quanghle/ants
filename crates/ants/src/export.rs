@@ -513,7 +513,10 @@ async fn import_with(nats: &crate::Nats<'_>, args: ImportArgs, store: &dyn Store
     let kv = DirectKv::whole(&js, nats.domain, IDENTITIES_BUCKET).await?;
     let identity = AntIdentity { ant: name.clone(), moved: None, ..export.identity.clone() };
     create(&js, &kv, &identity).await?;
-    if let Some(SharedRecord::Verified(shared)) = crate::settings::shared_of(nats, &js, &name).await.ok().flatten() {
+    let shared = crate::settings::shared_of(nats, &js, &name)
+        .await
+        .inspect_err(|e| tracing::debug!("not comparing the shared settings: {e:#}"));
+    if let Some(SharedRecord::Verified(shared)) = shared.ok().flatten() {
         let drift = shared.drift(&ants_daemon::shared::local_fields(ant));
         if !drift.is_empty() {
             eprintln!(

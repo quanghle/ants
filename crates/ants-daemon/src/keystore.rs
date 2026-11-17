@@ -280,6 +280,7 @@ mod secret_service {
             && let Err(e) = stdin.write_all(input.as_bytes())
             && e.kind() != std::io::ErrorKind::BrokenPipe
         {
+            // Killing and reaping fail only for a program already exited and reaped.
             let _ = child.kill();
             let _ = child.wait();
             return Err(e);

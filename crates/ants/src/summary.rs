@@ -105,7 +105,11 @@ pub async fn ask(nats: &Nats<'_>, js: &jetstream::Context, envelope: &Envelope) 
         tracing::warn!("{warning}");
     }
     let status = if progress::wanted(me.role.is_human()) {
-        client.subscribe(subject::status(&envelope.to, &envelope.thread_id)).await.ok()
+        client
+            .subscribe(subject::status(&envelope.to, &envelope.thread_id))
+            .await
+            .inspect_err(|e| tracing::debug!("showing no progress: {e}"))
+            .ok()
     } else {
         None
     };

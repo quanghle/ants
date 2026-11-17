@@ -126,7 +126,9 @@ pub fn draw(frame: &mut Frame, images: &Images, placed: &[Placed], top: usize, a
 pub fn picker() -> Picker {
     let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
     // The query puts the terminal back as it found it; the screen needs it raw.
-    let _ = ratatui::crossterm::terminal::enable_raw_mode();
+    if let Err(e) = ratatui::crossterm::terminal::enable_raw_mode() {
+        tracing::warn!("putting the terminal back in raw mode: {e}");
+    }
     picker
 }
 
@@ -157,7 +159,10 @@ impl Io {
                 let keyring = self.keyring.clone();
                 self.jobs.push(
                     async move {
-                        let image = encoded(&js, keyring.as_deref(), picker, &listed).await.ok();
+                        let image = encoded(&js, keyring.as_deref(), picker, &listed)
+                            .await
+                            .inspect_err(|e| tracing::debug!(handle = %listed.handle, "showing an image: {e:#}"))
+                            .ok();
                         (listed.handle, image)
                     }
                     .boxed_local(),

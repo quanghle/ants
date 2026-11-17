@@ -156,7 +156,8 @@ impl Bus {
             Err(e) => return Err(bus::explain(&self.js, &subject, e).await).context("waiting for the hub to store it"),
         };
         if ack.duplicate {
-            let thread = self.seen(&key).await.ok().flatten().map(|seen| seen.thread);
+            let seen = self.seen(&key).await.inspect_err(|e| tracing::debug!("the duplicate's thread unknown: {e:#}"));
+            let thread = seen.ok().flatten().map(|seen| seen.thread);
             return Ok(Delivered { thread, duplicate: true });
         }
         let seen = serde_json::to_vec(&Seen { thread: thread.clone(), seq: ack.sequence })?;

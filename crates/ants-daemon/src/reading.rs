@@ -146,7 +146,7 @@ async fn read_back_with(
     let (name, consumer) = match reading {
         Reading::Gets => return read_by_gets(js, filter, start, take).await,
         Reading::Consumer => {
-            // A consumer left by an interrupted read would carry on where it stopped.
+            // A consumer left by an interrupted read would carry on where it stopped; as a rule none is left to delete.
             let _ = js.delete_consumer_from_stream(reader, STREAM).await;
             let config = consumer::pull::Config { name: Some(reader.to_owned()), ..config };
             (reader.to_owned(), js.create_consumer_on_stream(config, STREAM).await?)
@@ -185,6 +185,7 @@ pub async fn last_sequence(js: &jetstream::Context, reader: &str, reading: Readi
             return Ok(stream.cached_info().state.last_sequence);
         }
         Reading::Consumer => {
+            // A consumer left by an interrupted read; as a rule none is left to delete.
             let _ = js.delete_consumer_from_stream(reader, STREAM).await;
             let config = consumer::pull::Config { name: Some(reader.to_owned()), ..config };
             (reader.to_owned(), js.create_consumer_on_stream(config, STREAM).await?)

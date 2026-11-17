@@ -349,7 +349,9 @@ pub(crate) fn read_hidden(label: &str, what: &str, otherwise: &str) -> Result<St
             }
         }
     })();
-    let _ = terminal::disable_raw_mode();
+    if let Err(e) = terminal::disable_raw_mode() {
+        tracing::warn!("restoring the terminal: {e}");
+    }
     eprintln!();
     match read {
         Ok(Some(line)) => Ok(line),

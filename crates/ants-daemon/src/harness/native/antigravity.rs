@@ -419,6 +419,7 @@ async fn run(cli: &Cli, launch: &[String], cwd: &Path, resume: Option<&str>) -> 
             }
             // A failure to start: not signed in, an unknown model or agent.
             Some("result") => {
+                // Waited on for all of its stderr, which the failure is classified by.
                 let _ = process.exited().await;
                 return Err(failure(event["result"]["error"].as_str().unwrap_or_default(), &process.stderr()));
             }

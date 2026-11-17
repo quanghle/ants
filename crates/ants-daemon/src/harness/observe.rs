@@ -51,6 +51,7 @@ impl Observed {
         if let Some(tx) = &current.progress
             && let Some(update) = progress(&n.update)
         {
+            // Progress is a hint: one the prompt is too far behind to take is dropped.
             let _ = tx.try_send(update);
         }
         match n.update {

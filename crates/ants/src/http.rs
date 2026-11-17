@@ -145,6 +145,7 @@ async fn request(
     };
     let (mut send, connection) = hyper::client::conn::http1::handshake(TokioIo::new(io)).await?;
     tokio::spawn(async move {
+        // A connection failing fails the request on it, which reports it.
         let _ = connection.await;
     });
     let path = uri.path_and_query().map_or("/", |p| p.as_str());
