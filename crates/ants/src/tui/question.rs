@@ -10,6 +10,7 @@ use ratatui::text::Line;
 use super::exec::Job;
 use super::frame;
 use super::model::{Action, Data, Key, To};
+use crate::text::excerpt;
 use crate::thread::{Entry, answer_line, answers_to};
 
 /// How long a card stays at the bottom of its thread once answered.
@@ -59,15 +60,12 @@ impl Card<'_> {
 
     /// The question, its options, then its answers or the keys, each at most `width` wide.
     pub fn lines(&self, width: usize) -> Vec<Line<'static>> {
-        let mut lines = vec![
-            Line::raw(crate::excerpt(&self.question.text, width)),
-            Line::raw(crate::excerpt(&options(self.question), width)),
-        ];
+        let mut lines =
+            vec![Line::raw(excerpt(&self.question.text, width)), Line::raw(excerpt(&options(self.question), width))];
         if self.answers.is_empty() {
             lines.push(Line::styled("1-9 answer", frame::dim()));
         }
-        lines
-            .extend(self.answers.iter().map(|a| Line::styled(crate::excerpt(a, width), Style::new().fg(Color::Green))));
+        lines.extend(self.answers.iter().map(|a| Line::styled(excerpt(a, width), Style::new().fg(Color::Green))));
         lines
     }
 }

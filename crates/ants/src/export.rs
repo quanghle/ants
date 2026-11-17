@@ -219,7 +219,7 @@ pub fn restore(home: &Path, files: &[Packed], harness_kept: bool) -> Result<Vec<
 
 /// `ants ant export`.
 pub async fn export(
-    nats: &crate::Nats<'_>,
+    nats: &crate::connection::Nats<'_>,
     ant: &UserId,
     out: Option<PathBuf>,
     seal: bool,
@@ -405,7 +405,7 @@ async fn mark_moved(kv: &DirectKv, ant: &UserId, mark: Option<MovedMark>) -> Res
 }
 
 /// `ants ant unseal`.
-pub async fn unseal(nats: &crate::Nats<'_>, ant: &UserId) -> Result<()> {
+pub async fn unseal(nats: &crate::connection::Nats<'_>, ant: &UserId) -> Result<()> {
     let (_, js) = nats.connect("ants-unseal").await?;
     let kv = DirectKv::whole(&js, nats.domain, IDENTITIES_BUCKET).await?;
     if mark_moved(&kv, ant, None).await? {
@@ -463,12 +463,12 @@ pub struct ImportArgs {
 }
 
 /// `ants ant import`.
-pub async fn import(nats: &crate::Nats<'_>, args: ImportArgs) -> Result<()> {
+pub async fn import(nats: &crate::connection::Nats<'_>, args: ImportArgs) -> Result<()> {
     Box::pin(import_with(nats, args, keystore::os())).await
 }
 
 /// [`import`], keeping a seed of the OS credential store in `store`.
-async fn import_with(nats: &crate::Nats<'_>, args: ImportArgs, store: &dyn Store) -> Result<()> {
+async fn import_with(nats: &crate::connection::Nats<'_>, args: ImportArgs, store: &dyn Store) -> Result<()> {
     if !nats.me.role.is_human() {
         bail!("the credentials of {} are an ant's; an import runs as a human", nats.me.id);
     }

@@ -11,10 +11,90 @@ use async_nats::jetstream;
 use futures::StreamExt as _;
 use futures::stream::BoxStream;
 
+use clap_complete::engine::{ArgValueCandidates, ArgValueCompleter};
+
 use crate::cli::{Replies, Sending};
+use crate::connection::Nats;
 use crate::{
-    Nats, assistant, attachments, channel, colony, compose, forward, humans, inbox, progress, reacted, sealed, thread,
+    assistant, attachments, channel, colony, completions, compose, forward, humans, inbox, progress, reacted, sealed,
+    thread,
 };
+
+/// `ants ask`.
+#[derive(clap::Args, Debug, Default)]
+pub(crate) struct AskArgs {
+    /// Continue an existing thread: its id, a unique start of one, or `last`. The message still prompts only
+    /// its recipient (@ant, else the human's assistant or the messenger), not the thread's other ants.
+    /// A human's message steers a running prompt on that thread, joining it where the harness takes steers,
+    /// else interrupting it and prompting the same session next, unless sent with --queue.
+    #[arg(long, value_name = "THREAD")]
+    #[arg(add = ArgValueCandidates::new(completions::threads))]
+    pub(crate) thread: Option<thread::Pick>,
+    /// Reply to this message or post, quoting its author and an excerpt of it: its id, or with a human's
+    /// credentials a unique start of one, as `ants react` takes. The message goes on that message's thread and,
+    /// without @ant, to its author unless the CLI's human wrote it.
+    #[arg(long, value_name = "MESSAGE", add = ArgValueCompleter::new(completions::messages))]
+    pub(crate) reply_to: Option<thread::MessagePick>,
+    /// On an existing thread (--thread or --reply-to), wait behind the prompt running there rather than
+    /// steering it, as a human's message does by default.
+    #[arg(long)]
+    pub(crate) queue: bool,
+    /// Hand this message or post on to @ant (else the human's assistant or the messenger) on a new thread: its
+    /// id, or a unique start of one, as --reply-to takes. The new message quotes it with its author and the
+    /// thread it is on, carries its attachments, and the words, if any, as a note before it; the new thread
+    /// links to the source thread, as a spin-off does. Needs human credentials.
+    #[arg(long, value_name = "MESSAGE", conflicts_with_all = ["thread", "reply_to"])]
+    #[arg(add = ArgValueCompleter::new(completions::messages))]
+    pub(crate) forward: Option<thread::MessagePick>,
+    /// Hand this thread on as --forward hands a message: its TL;DR kept (`ants thread tldr` keeps one), quoted
+    /// with who wrote it; its id, a unique start of one, or `last`, as --thread takes.
+    #[arg(long, value_name = "THREAD", conflicts_with_all = ["thread", "reply_to", "forward"])]
+    #[arg(add = ArgValueCandidates::new(completions::threads))]
+    pub(crate) forward_thread: Option<thread::Pick>,
+    #[command(flatten)]
+    pub(crate) sending: Sending,
+    #[command(flatten)]
+    pub(crate) replies: Replies,
+    #[command(flatten)]
+    pub(crate) input: compose::Input,
+    #[command(flatten)]
+    pub(crate) attach: attachments::Attach,
+    /// `@ant` (optional), then the message, unless --file or --edit gives it.
+    #[arg(num_args = 1.., add = ArgValueCandidates::new(completions::mentions))]
+    pub(crate) words: Vec<String>,
+}
+
+/// `ants post`.
+#[derive(clap::Args, Debug)]
+pub(crate) struct PostArgs {
+    /// The channel: `ops` or `'#ops'` (quoted, as shells take an unquoted `#` for a comment).
+    #[arg(value_parser = channel::parse_channel)]
+    #[arg(add = ArgValueCandidates::new(completions::channels))]
+    pub(crate) channel: ChannelId,
+    /// Post on an existing thread of the channel instead of starting one (its id, a unique start of one, or
+    /// `last`); the thread keeps its owner.
+    #[arg(long, value_name = "THREAD")]
+    #[arg(add = ArgValueCandidates::new(completions::threads))]
+    pub(crate) thread: Option<thread::Pick>,
+    /// Reply to this post or message on a thread of the channel, quoting its author and an excerpt of it: its id,
+    /// or with a human's credentials a unique start of one, as `ants react` takes. The post goes on that thread;
+    /// an @mention in the text still picks whom it wakes.
+    #[arg(long, value_name = "MESSAGE", add = ArgValueCompleter::new(completions::messages))]
+    pub(crate) reply_to: Option<thread::MessagePick>,
+    /// On an existing thread (--thread or --reply-to), wait behind the prompt running there rather than
+    /// steering it, as a human's post does by default.
+    #[arg(long)]
+    pub(crate) queue: bool,
+    #[command(flatten)]
+    pub(crate) replies: Replies,
+    #[command(flatten)]
+    pub(crate) input: compose::Input,
+    #[command(flatten)]
+    pub(crate) attach: attachments::Attach,
+    /// The post, unless --file or --edit gives it; each @ant mention wakes that member.
+    #[arg(num_args = 1.., add = ArgValueCandidates::new(completions::mentions))]
+    pub(crate) words: Vec<String>,
+}
 
 /// Split a leading `@ant` off the words, none when they name no one ([`unaddressed`]); the message is the rest, or
 /// what `input` reads.
@@ -192,15 +272,12 @@ impl Replied {
     }
 }
 
-pub(crate) async fn ask(
-    nats: &Nats<'_>,
-    mut target: Target,
-    Sending { plaintext }: Sending,
-    replies: &Replies,
-    input: &compose::Input,
-    attach: &attachments::Attach,
-    words: Vec<String>,
-) -> Result<()> {
+pub(crate) async fn ask(nats: &Nats<'_>, args: AskArgs) -> Result<()> {
+    let AskArgs { thread, reply_to, queue, forward, forward_thread, sending, replies, input, attach, words } = args;
+    let Sending { plaintext } = sending;
+    let (replies, input, attach) = (&replies, &input, &attach);
+    let forward = forward.map(Forwarding::Message).or_else(|| forward_thread.map(Forwarding::Thread));
+    let mut target = Target { thread, reply_to, queue, forward };
     // Refuse a message with nothing to send, or a file that cannot be attached, before connecting.
     target.check_queue()?;
     let forward = target.forward.take();
@@ -434,15 +511,10 @@ pub(crate) async fn deliver(
     bus::publish(js, envelope).await
 }
 
-pub(crate) async fn post(
-    nats: &Nats<'_>,
-    channel: ChannelId,
-    target: Target,
-    replies: &Replies,
-    input: &compose::Input,
-    attach: &attachments::Attach,
-    words: Vec<String>,
-) -> Result<()> {
+pub(crate) async fn post(nats: &Nats<'_>, args: PostArgs) -> Result<()> {
+    let PostArgs { channel, thread, reply_to, queue, replies, input, attach, words } = args;
+    let (replies, input, attach) = (&replies, &input, &attach);
+    let target = Target { thread, reply_to, queue, forward: None };
     target.check_queue()?;
     let text = input.text(words)?;
     let files = attach.read()?;
@@ -586,10 +658,10 @@ async fn with_reactions(
     }
 }
 
-pub(crate) async fn thread_notes(
+pub(crate) async fn notes(
     nats: &Nats<'_>,
     thread: thread::Pick,
-    attach: &attachments::Attach,
+    attach: attachments::Attach,
     text: Vec<String>,
 ) -> Result<()> {
     if text.is_empty() && !attach.paths.is_empty() {

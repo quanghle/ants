@@ -106,7 +106,7 @@ fn second_line(model: &Model, items: &[home::Item], now: DateTime<Utc>) -> Line<
         return Line::from(vec![Span::styled(format!("      {what}"), frame::dim()), keys]);
     };
     let keys = Span::styled(format!("   {} · {KEYS}", top.why.keys()), frame::dim());
-    let text = crate::excerpt(&top.text, 120);
+    let text = crate::text::excerpt(&top.text, 120);
     Line::from(vec![
         Span::raw("      ▸ "),
         Span::styled(format!("{} ", top.why.label()), Style::new().fg(top.why.color())),

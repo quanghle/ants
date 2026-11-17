@@ -40,6 +40,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
+use crate::connection::Nats;
 use ants_daemon::{bus, chains, config, permission};
 use ants_proto::{
     Act, ActAnswer, ApprovalDecision, ApprovalRequest, AssistantGrant, CHAINS_BUCKET, COLONY_BUCKET, ColonyEntry,
@@ -689,8 +690,8 @@ pub(crate) fn details(request: &ApprovalRequest, state: &State, now: DateTime<Ut
 }
 
 /// `ants tools list`: the pending requests, then with `follow` new ones as they come, until interrupted.
-pub async fn list(nats: &crate::Nats<'_>, listing: crate::Listing) -> Result<()> {
-    let crate::Listing { follow, json } = listing;
+pub async fn list(nats: &Nats<'_>, listing: crate::connection::Listing) -> Result<()> {
+    let crate::connection::Listing { follow, json } = listing;
     let (client, js) = nats.connect("ants-tools").await?;
     let print = |request: &ApprovalRequest| -> Result<()> {
         if json {
@@ -724,7 +725,7 @@ pub async fn list(nats: &crate::Nats<'_>, listing: crate::Listing) -> Result<()>
 }
 
 /// `ants tools show ID`: one request in full, with where it stands.
-pub async fn show(nats: &crate::Nats<'_>, id: &str, json: bool) -> Result<()> {
+pub async fn show(nats: &Nats<'_>, id: &str, json: bool) -> Result<()> {
     let (_, js) = nats.connect("ants-tools").await?;
     let stream = js.get_stream(STREAM).await.context("opening the ANTS stream")?;
     let (seq, request) = find(&stream, id).await?;
@@ -741,7 +742,7 @@ pub async fn show(nats: &crate::Nats<'_>, id: &str, json: bool) -> Result<()> {
 /// `ants tools approve ID [--always] [--rule]` and `ants tools reject ID`: answer one request with `verdict`. With
 /// `rule`, the config file there, also add the allow rule fitting the request to its ant's allow list, then reload
 /// the daemon serving the file; for an ant added from a template, whose entry may set no allow list, only answer.
-pub async fn decide_request(nats: &crate::Nats<'_>, id: &str, verdict: Verdict, rule: Option<&Path>) -> Result<()> {
+pub async fn decide_request(nats: &Nats<'_>, id: &str, verdict: Verdict, rule: Option<&Path>) -> Result<()> {
     let (_, js) = nats.connect("ants-tools").await?;
     let stream = js.get_stream(STREAM).await.context("opening the ANTS stream")?;
     let (seq, request) = find(&stream, id).await?;

@@ -22,8 +22,9 @@ use async_nats::jetstream;
 use serde_json::{Map, Value, json};
 
 use super::{Local, Sealing, check, ended_sealing, put, read, replaced, risky, signing_creds};
+use crate::connection::Nats;
 use crate::service::{Action, Outcome, Service, Services, failure, manual};
-use crate::{Nats, add, auth, humans, keys, orders, retire, revoke};
+use crate::{add, auth, humans, keys, orders, retire, revoke};
 
 /// Tool rules a dedicated assistant runs without asking: reading and searching within its own home, and thinking.
 const ALLOW: [&str; 3] = ["read", "search", "think"];
@@ -151,7 +152,7 @@ pub async fn enable(nats: &Nats<'_>, args: EnableArgs) -> Result<()> {
     if let Some(machine) = args.on.clone() {
         return enable_on(nats, &args, &name, machine).await;
     }
-    let dir = crate::team_dir(args.dir.clone())?;
+    let dir = crate::auth::team_dir(args.dir.clone())?;
     if auth::account_key(&dir).is_err() {
         bail!(
             "creating an assistant ant needs the team's account key, which signs its credentials, and {} holds none: \
@@ -552,7 +553,7 @@ impl Dedicated {
         );
         println!("waiting up to {}m for {name} to stop", wait.as_secs().div_ceil(60));
         println!("{}", retire::stop_note(name, retire::stopped(js, name, wait).await));
-        let dir = crate::team_dir(dir)?;
+        let dir = crate::auth::team_dir(dir)?;
         let revoked = match auth::account_key(&dir) {
             Ok(_) => {
                 let known = revoke::issued(&dir)?.iter().any(|i| i.name == name.as_str());

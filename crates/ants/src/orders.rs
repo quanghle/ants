@@ -25,7 +25,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::colony::{short, since};
-use crate::{Nats, auth, machines};
+use crate::connection::Nats;
+use crate::{auth, machines};
 
 /// How often [`send`] looks for the outcome of the order it sent.
 const POLL: Duration = Duration::from_millis(250);
@@ -352,7 +353,7 @@ mod tests {
         let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
         let rights = Permissions::for_user(&alice, Role::Human);
         issue_device_with(&server.dir().join("auth"), &alice, Kind::Human, rights, &admin, &admin_creds).unwrap();
-        let admin = crate::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+        let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
         let (_, js) = admin.connect("test").await.unwrap();
         let (ants, task) = host_of_m1(&server, &js, true, None).await;
 
@@ -368,7 +369,7 @@ mod tests {
         );
 
         let bob_creds = server.creds_as(&bob, Role::Human);
-        let bob_nats = crate::Nats::new(&server.url, Some(&bob_creds), None).unwrap();
+        let bob_nats = crate::connection::Nats::new(&server.url, Some(&bob_creds), None).unwrap();
         let refused = send(&bob_nats, &js, None, &dev_a, AdminOp::Resume, WAIT).await.unwrap_err();
         assert!(refused.to_string().contains("no admin role"), "{refused:#}");
         let (jwt, key) = auth::read_creds(&bob_creds).unwrap();
@@ -515,7 +516,7 @@ mod tests {
         })
         .await;
 
-        let on_leaf = crate::Nats::new(&leaf_node.url, Some(&admin_creds), Some(&domain)).unwrap();
+        let on_leaf = crate::connection::Nats::new(&leaf_node.url, Some(&admin_creds), Some(&domain)).unwrap();
         let (_, js) = on_leaf.connect("test").await.unwrap();
         let (pause, paused) = send(&on_leaf, &js, None, &dev_a, AdminOp::Pause, WAIT * 4).await.unwrap();
         let paused = paused.expect("m1's daemon decides it");
@@ -533,7 +534,7 @@ mod tests {
         assert!(started.elapsed() < WAIT, "it fails at once");
         let said = format!("{down:#}");
         assert!(said.contains("the hub is out of reach") && said.contains("no outbox keeps"), "{said}");
-        let on_hub = crate::Nats::new(&hub.url, Some(&admin_creds), Some(&domain)).unwrap();
+        let on_hub = crate::connection::Nats::new(&hub.url, Some(&admin_creds), Some(&domain)).unwrap();
         let (_, hub_js) = on_hub.connect("test").await.unwrap();
         let (waiting, none) = send(&on_hub, &hub_js, None, &dev_a, AdminOp::Resume, Duration::ZERO).await.unwrap();
         assert_eq!(none, None, "m1's daemon is out of reach");
@@ -573,7 +574,7 @@ mod tests {
         let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
         let rights = Permissions::for_user(&alice, Role::Human);
         issue_device_with(&server.dir().join("auth"), &alice, Kind::Human, rights, &admin, &admin_creds).unwrap();
-        let admin = crate::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+        let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
         let (_, js) = admin.connect("test").await.unwrap();
         let restarts = Restarts::default();
         let (ants, task) = host_of_m1_serving(&server, &js, true, None, restarts.clone()).await;
@@ -621,7 +622,7 @@ mod tests {
         let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
         let rights = Permissions::for_user(&alice, Role::Human);
         issue_device_with(&server.dir().join("auth"), &alice, Kind::Human, rights, &admin, &admin_creds).unwrap();
-        let admin = crate::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+        let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
         let (_, js) = admin.connect("test").await.unwrap();
 
         let path = server.dir().join("config.toml");
@@ -678,7 +679,7 @@ mod tests {
         let device = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
         let rights = Permissions::for_user(&alice, Role::Human);
         issue_device_with(&server.dir().join("auth"), &alice, Kind::Human, rights, &device, &admin_creds).unwrap();
-        let nats = crate::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+        let nats = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
         let (_, js) = nats.connect("test").await.unwrap();
         let admin = Admin::of(&nats).unwrap();
 
@@ -725,7 +726,7 @@ mod tests {
         let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
         let rights = Permissions::for_user(&alice, Role::Human);
         issue_device_with(&server.dir().join("auth"), &alice, Kind::Human, rights, &admin, &admin_creds).unwrap();
-        let admin = crate::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+        let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
         let (_, js) = admin.connect("test").await.unwrap();
 
         let workdir = server.dir().join("work");

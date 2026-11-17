@@ -9,7 +9,9 @@ use anyhow::{Result, bail};
 use futures::StreamExt as _;
 
 use crate::avatars::Faces;
-use crate::{Nats, escalation_note, thread, tools};
+use crate::connection::Nats;
+use crate::text::escalation_note;
+use crate::{thread, tools};
 
 /// What `ants watch <subject> [thread]` subscribes to: a subject filter as given, or, for an ant (one token), its
 /// status subjects.
@@ -28,9 +30,10 @@ pub(crate) fn watched_ant(target: &str, thread: bool) -> Result<Option<UserId>> 
     }
 }
 
-pub(crate) async fn watch(nats: &Nats<'_>, target: &str, thread: Option<thread::Pick>) -> Result<()> {
+pub(crate) async fn run(nats: &Nats<'_>, target: String, thread: Option<thread::Pick>) -> Result<()> {
     use std::io::Write as _;
 
+    let target = target.as_str();
     watched_ant(target, thread.is_some())?;
     let (client, js) = nats.connect("ants-watch").await?;
     let filter = watch_filter(target, thread::resolve(thread, nats, &js).await?.as_ref())?;

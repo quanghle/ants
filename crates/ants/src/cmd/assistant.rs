@@ -6,7 +6,8 @@ use anyhow::Result;
 use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
 
-use crate::{Nats, assistant, completions};
+use crate::connection::Connection;
+use crate::{assistant, completions};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum AssistantCommand {
@@ -81,8 +82,9 @@ pub(crate) enum SealCommand {
     Off,
 }
 
-/// `ants assistant`, with the connection `nats` gives.
-pub(crate) async fn run<'a>(command: AssistantCommand, nats: impl Fn() -> Result<Nats<'a>>) -> Result<()> {
+/// `ants assistant`, connecting through `conn` for the subcommands that need it.
+pub(crate) async fn run(conn: &Connection<'_>, command: AssistantCommand) -> Result<()> {
+    let nats = || conn.nats();
     match command {
         AssistantCommand::Enable(args) => assistant::dedicated::enable(&nats()?, *args).await,
         AssistantCommand::Disable(args) => assistant::dedicated::disable(&nats()?, args).await,

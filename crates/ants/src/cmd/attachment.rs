@@ -6,7 +6,8 @@ use ants_proto::AttachmentHandle;
 use anyhow::Result;
 use clap::Subcommand;
 
-use crate::{Nats, attachments};
+use crate::attachments;
+use crate::connection::Nats;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum AttachmentCommand {

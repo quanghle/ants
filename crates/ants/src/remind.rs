@@ -10,7 +10,8 @@ use anyhow::{Result, bail};
 use async_nats::jetstream;
 use chrono::{DateTime, Local, NaiveDateTime, NaiveTime, TimeDelta, TimeZone, Utc};
 
-use crate::{Nats, thread, thread_meta};
+use crate::connection::Nats;
+use crate::{thread, thread_meta};
 
 /// When `text`, `DURATION|TIME [NOTE]`, says to be reminded from `now`, and the note: a duration such as `1h30m`
 /// from now, a time of day `HH:MM` (the next one) or a date and time `YYYY-MM-DDTHH:MM`, both in `zone`.

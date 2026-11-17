@@ -211,7 +211,7 @@ pub fn render(entries: &[Entry], grep: Option<&str>) -> String {
             e.thread_id,
             e.kind.as_str(),
             e.route(),
-            crate::excerpt(line.trim(), LINE)
+            crate::text::excerpt(line.trim(), LINE)
         );
     }
     out
@@ -234,7 +234,7 @@ pub fn bounds(since: Option<When>, until: Option<When>, now: DateTime<Utc>) -> R
 
 /// `ants thread search`: the latest messages matching `search`, its bounds being `since` and `until` from now.
 pub async fn search(
-    nats: &crate::Nats<'_>,
+    nats: &crate::connection::Nats<'_>,
     mut search: Search,
     since: Option<When>,
     until: Option<When>,

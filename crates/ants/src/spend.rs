@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use crate::connection::Nats;
 use ants_daemon::caps::{self, Caps, Spent};
 use ants_daemon::direct_kv::DirectKv;
 use ants_proto::{SESSIONS_BUCKET, ThreadId, UserId};
@@ -331,7 +332,7 @@ fn in_days(days: u32) -> String {
 
 /// Print what `select` asks for: tables, or with `json` one JSON object per ant (per ant on the thread, with
 /// `--thread`) per line.
-pub async fn show(nats: &crate::Nats<'_>, select: &Select, caps: &BTreeMap<UserId, Caps>, json: bool) -> Result<()> {
+pub async fn show(nats: &Nats<'_>, select: &Select, caps: &BTreeMap<UserId, Caps>, json: bool) -> Result<()> {
     let (_, js) = nats.connect("ants-spend").await?;
     let kv = DirectKv::new(&js, None, SESSIONS_BUCKET).await?;
     let ant = select.ant.as_ref();

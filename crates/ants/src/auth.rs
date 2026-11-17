@@ -68,6 +68,14 @@ pub fn default_dir() -> Result<PathBuf> {
     Ok(std::env::home_dir().context("no home directory")?.join(".config/ants/auth"))
 }
 
+/// `dir`, else [`default_dir`].
+pub fn team_dir(dir: Option<PathBuf>) -> Result<PathBuf> {
+    match dir {
+        Some(dir) => Ok(dir),
+        None => default_dir(),
+    }
+}
+
 /// Create the operator and account in `dir` and write the `server.conf` that trusts them.
 pub fn init(dir: &Path) -> Result<()> {
     if dir.join(ACCOUNT_SEED).exists() {

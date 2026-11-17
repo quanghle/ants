@@ -131,7 +131,7 @@ fn or_unknown(n: Option<usize>) -> String {
 }
 
 /// `ants status`: read for at most [`WITHIN`], then print what was read in time.
-pub async fn run(nats: &crate::Nats<'_>, tmux: bool, json: bool) -> Result<()> {
+pub async fn run(nats: &crate::connection::Nats<'_>, tmux: bool, json: bool) -> Result<()> {
     let me = &nats.me.id;
     if !nats.me.role.is_human() {
         bail!("the credentials of {me} are an ant's; `ants status` tells what waits on a human");
@@ -170,7 +170,7 @@ async fn within<T>(deadline: tokio::time::Instant, work: impl Future<Output = Re
 }
 
 /// Read each part at once, keeping those read by `deadline`.
-async fn read(nats: &crate::Nats<'_>, js: &jetstream::Context, deadline: tokio::time::Instant) -> Parts {
+async fn read(nats: &crate::connection::Nats<'_>, js: &jetstream::Context, deadline: tokio::time::Instant) -> Parts {
     let me = nats.me.id.clone();
     let threads_and_cards = async {
         let threads = within(deadline, async {

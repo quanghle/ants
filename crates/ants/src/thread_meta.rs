@@ -52,7 +52,7 @@ pub fn titles_right() -> String {
 
 /// The titles, TL;DRs, done states and the marks of the CLI's human, unless its credentials are no human's: a request
 /// they deny would only time out.
-pub async fn open(nats: &crate::Nats<'_>, js: &jetstream::Context) -> Result<Meta> {
+pub async fn open(nats: &crate::connection::Nats<'_>, js: &jetstream::Context) -> Result<Meta> {
     let me = &nats.me.id;
     if !nats.rights.may_publish(&own_right(me)) {
         bail!(
@@ -81,7 +81,7 @@ pub struct About {
 /// included, and its done state while it holds; none on any error, warned of. A thread that never had a title gets
 /// the one an ant `suggested`, if any ([`Meta::adopt_title`]).
 pub async fn of_or_none(
-    nats: &crate::Nats<'_>,
+    nats: &crate::connection::Nats<'_>,
     js: &jetstream::Context,
     thread: &ThreadId,
     entries: &[Entry],
@@ -113,7 +113,7 @@ pub async fn of_or_none(
 
 /// `ants thread title THREAD [TEXT...]`: title the thread `pick` picks `text`, words joined by spaces, clear its
 /// title with `clear`, or with neither print it.
-pub async fn title(nats: &crate::Nats<'_>, pick: Pick, text: &[String], clear: bool) -> Result<()> {
+pub async fn title(nats: &crate::connection::Nats<'_>, pick: Pick, text: &[String], clear: bool) -> Result<()> {
     let js = thread::connect(nats).await?;
     let thread = &pick.resolve(nats, &js).await?;
     let meta = open(nats, &js).await?;
@@ -193,7 +193,7 @@ pub enum Marking {
 
 /// `ants thread pin|unpin|archive|unarchive THREAD`: mark the thread `pick` picks so, for every device of the CLI's
 /// human. Unarchiving a thread archived for having been idle keeps it ([`ThreadMarks::keep`]).
-pub async fn mark(nats: &crate::Nats<'_>, pick: Pick, marking: Marking) -> Result<()> {
+pub async fn mark(nats: &crate::connection::Nats<'_>, pick: Pick, marking: Marking) -> Result<()> {
     let js = thread::connect(nats).await?;
     let thread = &pick.resolve(nats, &js).await?;
     let meta = open(nats, &js).await?;
@@ -249,7 +249,7 @@ pub async fn marked(js: &jetstream::Context, meta: &Meta, thread: &ThreadId, mar
 
 /// `ants thread done|undone THREAD`: mark the thread `pick` picks done, or not, for every human, as of the last
 /// message, channel post or note stored on it.
-pub async fn done(nats: &crate::Nats<'_>, pick: Pick, done: bool) -> Result<()> {
+pub async fn done(nats: &crate::connection::Nats<'_>, pick: Pick, done: bool) -> Result<()> {
     let js = thread::connect(nats).await?;
     let thread = &pick.resolve(nats, &js).await?;
     let meta = open(nats, &js).await?;

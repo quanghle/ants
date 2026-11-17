@@ -8,8 +8,10 @@ use ants_proto::{
 use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
 
+use crate::auth::team_dir;
+use crate::connection::Connection;
 use crate::members::EnrollApprover;
-use crate::{Connection, auth, backup, binding, channel, devices, keys, members, revoke, team_dir};
+use crate::{auth, backup, binding, channel, devices, keys, members, revoke};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum AuthCommand {
@@ -312,7 +314,7 @@ pub(crate) enum AdminCommand {
     },
 }
 
-pub(crate) async fn run(command: AuthCommand, conn: &Connection<'_>) -> Result<()> {
+pub(crate) async fn run(conn: &Connection<'_>, command: AuthCommand) -> Result<()> {
     let domain = conn.js_domain;
     match command {
         AuthCommand::Init { dir } => init(dir),

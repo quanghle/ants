@@ -16,8 +16,9 @@ use async_nats::jetstream::{self, consumer};
 use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
 
+use crate::connection::Nats;
 use crate::thread::{self, Entry, Pick};
-use crate::{Nats, colony, inbox, progress, thread_meta};
+use crate::{colony, inbox, progress, thread_meta};
 
 /// Most bytes of entries a request carries: the newest that fit.
 pub const ENTRIES_MAX: usize = 16 * 1024;

@@ -22,9 +22,10 @@ use anyhow::{Context as _, Result, bail};
 
 use crate::cmd::harness::HarnessPick;
 use crate::completions::{self, Shell};
+use crate::connection::{Connection, Nats};
 use crate::natsd::bundled;
 use crate::service::{self, Action, Installed, Outcome, Service, Services, State, Values};
-use crate::{Connection, Nats, auth, doctor};
+use crate::{auth, doctor};
 
 /// How to get nats-server, when not found and not downloaded.
 const NATS_INSTALL: &str =
@@ -115,7 +116,8 @@ impl Report {
 }
 
 /// Run the steps of `ants setup`, then `ants doctor`; fail when a step or a check fails.
-pub async fn run(args: &SetupArgs, connection: &Connection<'_>) -> Result<()> {
+pub async fn run(connection: &Connection<'_>, args: SetupArgs) -> Result<()> {
+    let args = &args;
     let home = std::env::home_dir().context("no home directory")?;
     let config_path = match &args.config {
         Some(path) => std::path::absolute(path)?,
@@ -510,7 +512,7 @@ async fn init(
     }
     let done = async {
         let nats = Nats::new(connection.nats, connection.creds, connection.js_domain)?;
-        crate::init_hub(&nats, false).await
+        crate::cmd::init::hub(&nats, false).await
     };
     match done.await {
         Ok(lines) => report.step(Mark::Done, step, lines.join("\n       ")),

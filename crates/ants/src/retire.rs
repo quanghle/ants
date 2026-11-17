@@ -307,7 +307,7 @@ pub async fn retire(
         println!("waiting up to {}m for {name} to stop", wait.as_secs().div_ceil(60));
         println!("{}", stop_note(name, stopped(js, name, wait).await));
     }
-    let dir = crate::team_dir(args.dir.clone())?;
+    let dir = crate::auth::team_dir(args.dir.clone())?;
     let revoked = match crate::auth::account_key(&dir) {
         Ok(_) => {
             let revoked = crate::signer::revoke_added(&dir, name, None, key.as_deref())?;

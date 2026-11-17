@@ -17,7 +17,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::{CONFLICTS, after, designated, device_creds, signing_creds};
-use crate::{Nats, auth, humans, tools};
+use crate::connection::Nats;
+use crate::{auth, humans, tools};
 
 /// `ants assistant confirm [ACT] [--deny]`.
 pub async fn confirm(nats: &Nats<'_>, act: Option<&str>, deny: bool) -> Result<()> {

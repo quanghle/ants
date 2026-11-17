@@ -15,7 +15,7 @@ pub(crate) const WAIT: Duration = Duration::from_secs(10);
 
 /// Pause `ant`, or resume it, on `machine` or the machine serving it, and print how it went.
 pub(crate) async fn run(
-    nats: &crate::Nats<'_>,
+    nats: &crate::connection::Nats<'_>,
     ant: &UserId,
     machine: Option<Machine>,
     paused: bool,

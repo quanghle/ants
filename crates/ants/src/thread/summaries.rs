@@ -134,7 +134,7 @@ impl Threads {
             first_at: entry.stored_at,
             last_at: entry.stored_at,
             messages: 0,
-            opening: crate::excerpt(&entry.text, OPENING),
+            opening: crate::text::excerpt(&entry.text, OPENING),
             matched: None,
             escalated: None,
             title: None,
@@ -171,7 +171,7 @@ impl Threads {
         if let (Some(grep), None, true) = (&self.grep, &summary.matched, entry.matchable()) {
             summary.matched = entry.text.lines().find(|line| line.to_lowercase().contains(grep.as_str())).map(|line| {
                 let from = entry.from.as_ref().map_or("(a human)", UserId::as_str);
-                format!("{from}: {}", crate::excerpt(line.trim(), OPENING))
+                format!("{from}: {}", crate::text::excerpt(line.trim(), OPENING))
             });
         }
         if let Some(humans) = self.humans.as_ref().filter(|_| !entry.forged) {

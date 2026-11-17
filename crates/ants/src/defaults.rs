@@ -10,7 +10,7 @@ use clap::parser::ValueSource;
 use clap::{ArgMatches, CommandFactory as _, FromArgMatches as _, Parser as _};
 
 use crate::cli::{Ants, DaemonCommand};
-use crate::{Cli, Command};
+use crate::cli::{Cli, Command};
 
 /// Parse the command line, then fill in the connection it leaves to the config file.
 pub fn parse() -> Result<Cli> {

@@ -66,6 +66,7 @@ use self::exec::Exec;
 use self::model::{Action, Key, Level, Model};
 use self::reads::Reads;
 use self::search::Searches;
+use crate::auth::team_dir;
 use crate::live::{self, Feed, Screen};
 use crate::{compose, presence, progress, sealed, thread_meta};
 
@@ -83,7 +84,7 @@ const REDRAW: Duration = Duration::from_secs(1);
 /// For bare `ants` without a terminal on stdin and stdout: print the usage and exit 2, as a missing command does.
 pub fn usage_without_terminal() {
     if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
-        eprint!("{}", crate::Cli::command().render_help());
+        eprint!("{}", crate::cli::Cli::command().render_help());
         std::process::exit(2);
     }
 }
@@ -144,7 +145,7 @@ fn host(url: &str) -> &str {
 }
 
 /// `ants chat`, as the two-line pane when `compact`.
-pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Result<()> {
+pub async fn run(nats: &crate::connection::Nats<'_>, since: Duration, compact: bool) -> Result<()> {
     terminal_check(std::io::stdin().is_terminal(), std::io::stdout().is_terminal())?;
     let me = &nats.me.id;
     if !nats.me.role.is_human() {
@@ -192,7 +193,7 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
     let mcp = mcp::Io::new(nats, js.clone());
     let settings = settings::Io::new(js.clone(), nats.url, nats.creds.map(Path::to_path_buf), nats.domain.cloned());
     let (credentials, holder) =
-        credentials::Io::new(js.clone(), nats.url, nats.domain.cloned(), crate::team_dir(None), crate::enroll::LISTEN);
+        credentials::Io::new(js.clone(), nats.url, nats.domain.cloned(), team_dir(None), crate::enroll::LISTEN);
     let creds = crate::assistant::signing_creds(nats).map(Path::to_path_buf).map_err(|e| format!("{e:#}"));
     let held = held::Io::new(js.clone(), me.clone(), nats.account.clone(), creds);
     let cards = cards::Io::new(cards::Source::open(nats, &js).await.checking(feed.behalf()));

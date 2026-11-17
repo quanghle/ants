@@ -6,7 +6,9 @@ use ants_proto::Machine;
 use anyhow::{Context as _, Result};
 use clap::Subcommand;
 
-use crate::{Connection, auth, leaf, members, natsd, outbox, team_dir};
+use crate::auth::team_dir;
+use crate::connection::Connection;
+use crate::{auth, leaf, members, natsd, outbox};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum LeafCommand {
@@ -69,7 +71,7 @@ pub(crate) enum LeafCommand {
     },
 }
 
-pub(crate) async fn run(command: LeafCommand, conn: &Connection<'_>) -> Result<()> {
+pub(crate) async fn run(conn: &Connection<'_>, command: LeafCommand) -> Result<()> {
     let domain = conn.js_domain;
     let nats = || conn.nats();
     match command {

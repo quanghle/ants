@@ -164,10 +164,10 @@ impl Page {
         let from = e.from.as_ref().map_or_else(|| "(a human)".to_owned(), ToString::to_string);
         let line = self.grep.as_deref().and_then(|grep| search::matched(&e.text, grep)).unwrap_or(&e.text);
         Line::from(vec![
-            Span::styled(format!("{:<PLACE$} ", crate::excerpt(&place, PLACE - 1)), Style::new().bold()),
-            Span::styled(format!("{:<SENDER$} ", crate::excerpt(&from, SENDER)), Style::new().fg(Color::Blue)),
+            Span::styled(format!("{:<PLACE$} ", crate::text::excerpt(&place, PLACE - 1)), Style::new().bold()),
+            Span::styled(format!("{:<SENDER$} ", crate::text::excerpt(&from, SENDER)), Style::new().fg(Color::Blue)),
             Span::styled(format!("{:>8}  ", ago(e.stored_at, now)), frame::dim()),
-            Span::raw(crate::excerpt(line.trim(), 200)),
+            Span::raw(crate::text::excerpt(line.trim(), 200)),
         ])
     }
 }

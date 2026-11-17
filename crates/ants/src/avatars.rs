@@ -358,7 +358,7 @@ pub struct Change {
 }
 
 /// `ants ant avatar`: print the avatar of `ant`, its birth and growth, after making `change` to its identity record.
-pub async fn show(nats: &crate::Nats<'_>, ant: &UserId, change: Change) -> Result<()> {
+pub async fn show(nats: &crate::connection::Nats<'_>, ant: &UserId, change: Change) -> Result<()> {
     let (_, js) = nats.connect("ants-ant-avatar").await?;
     let changed = if change.seed.is_some() || change.color.is_some() {
         Some(update(&js, nats.domain, ant, change.seed, change.color).await?)

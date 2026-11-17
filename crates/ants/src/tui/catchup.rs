@@ -413,7 +413,7 @@ pub struct Io {
 }
 
 impl Io {
-    pub async fn open(nats: &crate::Nats<'_>, client: async_nats::Client, js: jetstream::Context) -> Self {
+    pub async fn open(nats: &crate::connection::Nats<'_>, client: async_nats::Client, js: jetstream::Context) -> Self {
         let config = crate::defaults::summaries().map_err(|e| format!("{e:#}"));
         let meta = crate::thread_meta::open(nats, &js)
             .await

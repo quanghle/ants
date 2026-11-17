@@ -25,6 +25,7 @@ use super::{
     settings, snooze, thread, timeline, tree, work,
 };
 use crate::live::{self, State};
+use crate::text::excerpt;
 use crate::thread::Entry;
 use crate::tools::Update;
 
@@ -545,8 +546,7 @@ impl Model {
             }
             Acted::About(thread, Err(e)) => tracing::debug!(%thread, "reading the thread's marks: {e:#}"),
             Acted::Changed(thread, change, Ok(changed)) => {
-                let line =
-                    format!("thread {} {}", crate::excerpt(&self.data.title(&thread), 40), change.done_line(changed));
+                let line = format!("thread {} {}", excerpt(&self.data.title(&thread), 40), change.done_line(changed));
                 self.notify(line, Level::Info, now);
             }
             Acted::Changed(thread, _, Err(e)) => {
@@ -579,7 +579,7 @@ impl Model {
             Read::Levels(levels) => data.channel_levels = levels,
             Read::Marked(_, Ok(())) => {}
             Read::Unmarked(thread, Ok(())) => {
-                let line = format!("thread {} marked unread", crate::excerpt(&self.data.title(&thread), 40));
+                let line = format!("thread {} marked unread", excerpt(&self.data.title(&thread), 40));
                 self.notify(line, Level::Info, now);
             }
             Read::Unmarked(thread, Err(e)) => {

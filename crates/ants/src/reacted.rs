@@ -12,8 +12,8 @@ use anyhow::Result;
 use futures::stream::BoxStream;
 use futures::{Stream, StreamExt as _};
 
-use crate::Nats;
 use crate::behalf::Checker;
+use crate::connection::Nats;
 
 /// How many characters of a message's first line name it beside a reaction.
 const OPENING: usize = 40;
@@ -57,7 +57,7 @@ pub struct Shown(RefCell<HashMap<Uuid, String>>);
 
 impl Shown {
     pub fn add(&self, id: Uuid, from: &UserId, text: &str) {
-        self.0.borrow_mut().insert(id, format!("{from}: {}", crate::excerpt(text.trim(), OPENING)));
+        self.0.borrow_mut().insert(id, format!("{from}: {}", crate::text::excerpt(text.trim(), OPENING)));
     }
 
     /// Hand each change to a message shown to `print` with the message's name, until printing fails.

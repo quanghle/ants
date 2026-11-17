@@ -51,7 +51,7 @@ async fn a_clone_order_copies_an_ant_under_a_new_name_and_undoes_a_failed_one() 
     let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
     issue_device_with(&team, &alice, Kind::Human, rights, &admin, &admin_creds).unwrap();
-    let admin = crate::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+    let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
     let (_, js) = admin.connect("test").await.unwrap();
 
     let repo = server.dir().join("repo");

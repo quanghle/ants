@@ -42,7 +42,7 @@ pub fn unanswered(ant: &UserId) -> String {
 
 /// Print the messages waiting for `ant`, or without one for every ant live in the colony: a table, or with `json` one
 /// per line.
-pub async fn list(nats: &crate::Nats<'_>, ant: Option<UserId>, json: bool) -> Result<()> {
+pub async fn list(nats: &crate::connection::Nats<'_>, ant: Option<UserId>, json: bool) -> Result<()> {
     let me = &nats.me.id;
     if !nats.me.role.is_human() {
         bail!("the credentials of {me} are an ant's; only a human lists an ant's queue");
@@ -124,7 +124,7 @@ async fn list_live(
 }
 
 /// Withdraw `message` from the queue of `ant`, so that the ant is never prompted with it.
-pub async fn withdraw(nats: &crate::Nats<'_>, ant: UserId, message: Uuid) -> Result<()> {
+pub async fn withdraw(nats: &crate::connection::Nats<'_>, ant: UserId, message: Uuid) -> Result<()> {
     let me = &nats.me.id;
     if !nats.me.role.is_human() {
         bail!("the credentials of {me} are an ant's; only a human withdraws a message");

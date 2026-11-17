@@ -10,7 +10,8 @@ use anyhow::{Result, bail};
 use async_nats::jetstream;
 use serde::de::DeserializeOwned;
 
-use crate::{Nats, orders};
+use crate::connection::Nats;
+use crate::orders;
 
 /// How long the CLI waits for the daemon's answer: the harness starts, and its servers have some seconds to.
 pub const WAIT: Duration = Duration::from_secs(90);
@@ -122,7 +123,7 @@ pub fn render(ant: &UserId, report: &McpReport) -> String {
         out.push_str(line.trim_end());
         out.push('\n');
         if let Some(error) = &server.error {
-            _ = writeln!(out, "  {:width$}  {}", "", crate::excerpt(error, 200));
+            _ = writeln!(out, "  {:width$}  {}", "", crate::text::excerpt(error, 200));
         }
     }
     if report.truncated {

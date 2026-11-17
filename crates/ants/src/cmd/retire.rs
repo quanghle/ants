@@ -2,10 +2,11 @@
 
 use anyhow::Result;
 
-use crate::Connection;
+use crate::connection::Connection;
 use crate::retire::{self, RetireArgs};
 
-pub(crate) async fn run(args: &RetireArgs, conn: &Connection<'_>) -> Result<()> {
+pub(crate) async fn run(conn: &Connection<'_>, args: RetireArgs) -> Result<()> {
+    let args = &args;
     let colony = colony(conn, &args.name).await;
     retire::retire(args, colony.as_ref(), retire::STOP_WAIT, conn.nats, conn.js_domain).await
 }

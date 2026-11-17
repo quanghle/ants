@@ -84,7 +84,7 @@ struct Cmd {
     args: ImportArgs,
 }
 
-async fn import_as(nats: &crate::Nats<'_>, args: &[&str]) -> Result<()> {
+async fn import_as(nats: &crate::connection::Nats<'_>, args: &[&str]) -> Result<()> {
     let args = <Cmd as clap::Parser>::try_parse_from(std::iter::once("import").chain(args.iter().copied()))?.args;
     Box::pin(import_with(nats, args, &keystore::Memory::default())).await
 }
@@ -99,7 +99,7 @@ async fn an_ant_moves_to_another_bus_with_its_identity_and_memories() {
     let dir = ants_test_support::scratch_dir("export-move").canonicalize().unwrap();
     let alice = p("alice");
     let creds = server.creds_as(&alice, Role::Human);
-    let nats = crate::Nats::new(&server.url, Some(&creds), None).unwrap();
+    let nats = crate::connection::Nats::new(&server.url, Some(&creds), None).unwrap();
     let (_, js) = nats.connect("test").await.unwrap();
     ants_daemon::hub::create_identities(&js).await.unwrap();
     let kv = DirectKv::whole(&js, None, IDENTITIES_BUCKET).await.unwrap();

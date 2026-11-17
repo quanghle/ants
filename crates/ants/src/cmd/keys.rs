@@ -1,11 +1,12 @@
 //! `ants keys`: move the NKey seeds of credentials files into the OS credential store and back, or remove
 //! credentials from the machine ([`crate::keys`]).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use ants_daemon::keystore;
 use anyhow::{Result, bail};
 
+use crate::connection::Connection;
 use crate::keys::{self, Moved};
 
 #[derive(clap::Subcommand, Debug)]
@@ -26,7 +27,8 @@ pub(crate) enum KeysCommand {
 }
 
 /// Run `ants keys` with the global `--nats` and `--creds`.
-pub(crate) async fn run(command: KeysCommand, nats: &str, cli_creds: Option<&Path>) -> Result<()> {
+pub(crate) async fn run(conn: &Connection<'_>, command: KeysCommand) -> Result<()> {
+    let (nats, cli_creds) = (conn.nats, conn.creds);
     let store = keystore::os();
     let files = |files: Vec<PathBuf>| match (files.is_empty(), cli_creds) {
         (false, _) => Ok(files),

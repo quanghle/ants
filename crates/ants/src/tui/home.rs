@@ -23,6 +23,7 @@ use super::frame::{self, ago};
 use super::model::{Action, Data, Key, Model, To};
 use super::select::Selection;
 use super::{catchup, question};
+use crate::text::excerpt;
 use crate::thread::Kind;
 use crate::tools::State;
 
@@ -455,12 +456,12 @@ impl Page {
                         [Span::raw("         ")]
                             .into_iter()
                             .chain(i.who.as_ref().and_then(|who| data.face(who)).into_iter().flatten())
-                            .chain([Span::styled(crate::excerpt(&i.text, 160), frame::dim())])
+                            .chain([Span::styled(excerpt(&i.text, 160), frame::dim())])
                             .collect::<Vec<_>>(),
                     ),
                 ];
                 if let Some(question) = &i.question {
-                    lines.push(Line::raw(format!("         {}", crate::excerpt(&question::options(question), 160))));
+                    lines.push(Line::raw(format!("         {}", excerpt(&question::options(question), 160))));
                 }
                 if i.expanded {
                     lines.push(Line::styled("         Enter collapses", frame::dim()));

@@ -99,7 +99,7 @@ async fn messages_jetstream_stops_delivering_become_one_dead_letter() {
 
     // Metrics served as `ants dead watch --metrics` serves them.
     let backstop = std::sync::Arc::new(ants_daemon::metrics::Backstop::new(human.clone(), h_client.clone()));
-    let served = crate::serve_metrics(Some("127.0.0.1:0".parse().unwrap()), backstop).await.unwrap().unwrap();
+    let served = crate::serve::serve_metrics(Some("127.0.0.1:0".parse().unwrap()), backstop).await.unwrap().unwrap();
     let metrics = served.local_addr();
     assert_eq!(scrape(metrics, "/healthz").await, (200, "ok\n".to_owned()));
     let (_, exposition) = scrape(metrics, "/metrics").await;

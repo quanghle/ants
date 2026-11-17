@@ -131,7 +131,7 @@ pub async fn run(
     shutdown: impl Future<Output = ()>,
 ) -> Result<Ended> {
     let metrics = served.metrics;
-    let _metrics = crate::serve_metrics(metrics, Arc::new(ants_daemon::metrics::Daemon)).await?;
+    let _metrics = serve_metrics(metrics, Arc::new(ants_daemon::metrics::Daemon)).await?;
     let mut running = HashMap::new();
     // The ants served, which the host connection's admin orders restart.
     let restarts = Restarts::default();
@@ -267,6 +267,17 @@ fn run_schedule(schedule: Schedule) -> JoinHandle<()> {
         }
         .instrument(span),
     )
+}
+
+/// Serve health and metrics from `source` on `addr`, if given, for as long as the result is kept.
+pub async fn serve_metrics(
+    addr: Option<SocketAddr>,
+    source: Arc<dyn ants_daemon::metrics::Source>,
+) -> Result<Option<ants_daemon::metrics::Listening>> {
+    match addr {
+        Some(addr) => Ok(Some(ants_daemon::metrics::start(addr, source).await?)),
+        None => Ok(None),
+    }
 }
 
 #[cfg(test)]

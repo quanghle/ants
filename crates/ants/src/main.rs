@@ -17,6 +17,7 @@ mod cmd;
 mod colony;
 mod completions;
 mod compose;
+mod connection;
 mod defaults;
 mod devices;
 mod doctor;
@@ -61,6 +62,7 @@ mod settings;
 mod signer;
 mod spend;
 mod summary;
+mod text;
 mod thread;
 mod thread_meta;
 mod tools;
@@ -70,16 +72,10 @@ mod upgrade;
 mod versions;
 mod webhook;
 
-use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
+mod test_support;
 
-use ants_daemon::{bus, hub};
-use ants_proto::{DeviceId, Escalation, JsDomain, UserId};
-use anyhow::{Context as _, Result};
-
-use crate::cli::{Cli, Command};
+use anyhow::Result;
 
 fn main() -> Result<()> {
     completions::answer();
@@ -97,253 +93,4 @@ async fn run() -> Result<()> {
     #[cfg(windows)]
     update::remove_old();
     cmd::run(defaults::parse()?).await
-}
-
-/// How the CLI reaches NATS.
-pub struct Connection<'a> {
-    pub nats: &'a str,
-    pub creds: Option<&'a Path>,
-    pub js_domain: Option<&'a JsDomain>,
-}
-
-impl<'a> Connection<'a> {
-    fn nats(&self) -> Result<Nats<'a>> {
-        Nats::new(self.nats, self.creds, self.js_domain)
-    }
-}
-
-/// How a listing command prints: once or following new entries until interrupted, as text or one JSON value a line.
-#[derive(Debug, Clone, Copy)]
-pub struct Listing {
-    pub follow: bool,
-    pub json: bool,
-}
-
-pub struct Nats<'a> {
-    url: &'a str,
-    creds: Option<&'a Path>,
-    domain: Option<&'a JsDomain>,
-    pub me: humans::Me,
-    /// The device of the human the credentials were issued for; none for an ant's, and without credentials.
-    pub device: Option<DeviceId>,
-    rights: humans::Rights,
-    /// The account that signed the credentials, whose devices' keys alone the CLI takes from the directory
-    /// ([`devices::Directory`]); none without credentials.
-    pub account: Option<String>,
-    /// The human's device of the credentials, if they bind an encryption key, which a connection puts in the directory.
-    own_device: Option<devices::Own>,
-    /// Whether a connection checked the hub's stream and buckets already ([`create_missing`]).
-    hub_checked: AtomicBool,
-    /// Whether a connection put [`Nats::own_device`] in the directory already.
-    device_published: AtomicBool,
-}
-
-impl<'a> Nats<'a> {
-    fn new(url: &'a str, creds: Option<&'a Path>, domain: Option<&'a JsDomain>) -> Result<Self> {
-        let me = humans::Me::from_creds(creds)?;
-        let device = humans::device(creds)?;
-        let rights = humans::Rights::from_creds(creds)?;
-        let account = devices::account_of(creds)?;
-        let own_device = devices::Own::from_creds(creds)?;
-        Ok(Self {
-            url,
-            creds,
-            domain,
-            me,
-            device,
-            rights,
-            account,
-            own_device,
-            hub_checked: AtomicBool::new(false),
-            device_published: AtomicBool::new(false),
-        })
-    }
-
-    /// Connect as [`Nats::me`], and register it in the humans bucket ([`humans::register_or_warn`]). The first
-    /// connection of a human also creates the hub's stream and buckets that are missing ([`create_missing`]), and puts
-    /// the user JWT of its device in the directory of encryption keys when it differs ([`devices::publish_or_warn`]).
-    pub async fn connect(&self, name: &str) -> Result<(async_nats::Client, async_nats::jetstream::Context)> {
-        let (client, js) = self.connect_only(name).await?;
-        self.prepare(&js).await;
-        Ok((client, js))
-    }
-
-    /// What [`Nats::connect`] does once connected: register [`Nats::me`], create what the hub lacks, and put the
-    /// device's user JWT in the directory of encryption keys.
-    async fn prepare(&self, js: &async_nats::jetstream::Context) {
-        let create = async {
-            if self.me.role.is_human() && !self.hub_checked.swap(true, Ordering::Relaxed) {
-                create_missing(js, &self.rights).await;
-            }
-        };
-        let publish = async {
-            if let Some(own) = &self.own_device
-                && !self.device_published.swap(true, Ordering::Relaxed)
-            {
-                devices::publish_or_warn(js, own).await;
-            }
-        };
-        tokio::join!(humans::register_or_warn(js, &self.me), create, publish);
-    }
-
-    /// Connect as [`Nats::me`] without registering it, naming the connection after its device, if any, too.
-    async fn connect_only(&self, name: &str) -> Result<(async_nats::Client, async_nats::jetstream::Context)> {
-        let name = match &self.device {
-            Some(device) => format!("{name} {device}"),
-            None => name.to_owned(),
-        };
-        bus::connect(self.url, self.creds, self.domain, &self.me.id, &name).await
-    }
-}
-
-/// `ants init`: create the hub's stream and buckets that are missing, register the human of the credentials and put
-/// the user JWT of its device in the directory of encryption keys.
-/// Returns what was done, a line each.
-async fn init_hub(nats: &Nats<'_>, identities_restored: bool) -> Result<Vec<String>> {
-    let (_, js) = nats.connect_only("ants-cli").await?;
-    let fixed = hub::init(&js, |subject| nats.rights.may_publish(subject)).await;
-    let fixed = fixed.context("`ants init` needs a human's credentials (`ants auth user NAME --human`)")?;
-    let mut lines: Vec<String> = fixed.iter().map(hub::Finding::fixed).collect();
-    humans::register_or_warn(&js, &nats.me).await;
-    if let Some(own) = &nats.own_device {
-        devices::publish_or_warn(&js, own).await;
-    }
-    lines.push(format!(
-        "stream {}, buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {}, and store {} ready",
-        ants_proto::STREAM,
-        ants_proto::COLONY_BUCKET,
-        ants_proto::SESSIONS_BUCKET,
-        ants_proto::ATTEMPTS_BUCKET,
-        ants_proto::CHANNELS_BUCKET,
-        ants_proto::HUMANS_BUCKET,
-        ants_proto::CHAINS_BUCKET,
-        ants_proto::LINKS_BUCKET,
-        ants_proto::OWNERS_BUCKET,
-        ants_proto::WEBHOOKS_BUCKET,
-        ants_proto::REACTIONS_BUCKET,
-        ants_proto::THREADS_BUCKET,
-        ants_proto::READ_BUCKET,
-        ants_proto::PRESENCE_BUCKET,
-        ants_proto::NOTIFY_BUCKET,
-        ants_proto::DEVICES_BUCKET,
-        ants_proto::MACHINES_BUCKET,
-        ants_proto::IDENTITIES_BUCKET,
-        ants_proto::FILES_BUCKET
-    ));
-    if identities_restored {
-        hub::new_incarnation(&js).await?;
-        lines.push(format!(
-            "bucket {} in a new incarnation: no shared settings record signed before verifies; each daemon holding an \
-             ant's credentials signs the ant's settings anew within {} s",
-            ants_proto::IDENTITIES_BUCKET,
-            ants_daemon::shared::POLL_EVERY.as_secs()
-        ));
-    }
-    Ok(lines)
-}
-
-/// Serve health and metrics from `source` on `addr`, if given, for as long as the result is kept.
-async fn serve_metrics(
-    addr: Option<SocketAddr>,
-    source: Arc<dyn ants_daemon::metrics::Source>,
-) -> Result<Option<ants_daemon::metrics::Listening>> {
-    match addr {
-        Some(addr) => Ok(Some(ants_daemon::metrics::start(addr, source).await?)),
-        None => Ok(None),
-    }
-}
-
-/// Create the hub's stream and buckets that are missing, as `ants init` does ([`hub::check`]), saying what was created;
-/// an object already there stays as it is. Those the credentials may not create are reported as needing `ants init`;
-/// those whose stream info the credentials do not get, or that cannot be checked (the hub out of reach), are left
-/// alone. Returns what was created.
-async fn create_missing(js: &async_nats::jetstream::Context, rights: &humans::Rights) -> Vec<hub::Finding> {
-    let mut created = Vec::new();
-    for finding in hub::check(js, |subject| rights.may_publish(subject)).await {
-        if let hub::Problem::Unchecked(_) = finding.problem {
-            tracing::debug!("{finding}");
-        } else if !finding.rights().iter().all(|subject| rights.may_publish(subject)) {
-            tracing::warn!("{finding}; `ants init` with a human's current credentials (`ants auth user`) fixes it");
-        } else {
-            match hub::apply(js, &finding).await {
-                Ok(()) => {
-                    tracing::info!("{}", finding.fixed());
-                    created.push(finding);
-                }
-                Err(e) => tracing::warn!("{finding}; `ants init` as a human fixes it: {e:#}"),
-            }
-        }
-    }
-    created
-}
-
-fn team_dir(dir: Option<PathBuf>) -> Result<PathBuf> {
-    match dir {
-        Some(dir) => Ok(dir),
-        None => auth::default_dir(),
-    }
-}
-
-/// The first line of `text`, cut to `max` characters.
-fn excerpt(text: &str, max: usize) -> String {
-    let line = text.lines().next().unwrap_or("");
-    let mut out: String = line.chars().take(max).collect();
-    if out.len() < text.len() {
-        out.push('…');
-    }
-    out
-}
-
-/// An escalation in one line: `escalation level 1, turn_budget: dev-a stuck on t1, leader lead, visited dev-a > lead`.
-fn escalation_note(x: &Escalation) -> String {
-    let reason = match x.request_id {
-        Some(id) => format!("{} {}/{id}", x.reason.as_str(), x.stuck),
-        None => x.reason.as_str().to_owned(),
-    };
-    let visited = x.visited.iter().map(UserId::as_str).collect::<Vec<_>>().join(" > ");
-    let (level, stuck, thread, leader) = (x.level, &x.stuck, &x.thread_id, &x.leader);
-    let away = x.away.as_ref().map_or_default(|a| format!(", relayed while {} is away: answer {}", a.human, a.ant));
-    format!("escalation level {level}, {reason}: {stuck} stuck on {thread}, leader {leader}, visited {visited}{away}")
-}
-
-#[cfg(test)]
-mod test_support;
-
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use super::*;
-
-    /// A human's credentials create what the hub lacks, leaving what is there as it is; an ant's ask for nothing they
-    /// are denied, which would only time out, and create nothing.
-    #[tokio::test]
-    async fn a_human_creates_what_the_hub_lacks() {
-        let Some(server) = test_support::Server::start() else { return };
-        let connect = async |user: &UserId, role| {
-            let creds = server.creds_as(user, role);
-            let (_, js) = bus::connect(&server.url, Some(&creds), None, user, "test").await.unwrap();
-            (js, humans::Rights::from_creds(Some(&creds)).unwrap())
-        };
-        let (a_js, a_rights) = connect(&"dev-a".parse().unwrap(), ants_proto::Role::Ant).await;
-        assert!(!a_rights.may_publish(&hub::Object::Sessions.info_subject()));
-        let started = tokio::time::Instant::now();
-        assert!(create_missing(&a_js, &a_rights).await.is_empty());
-        assert!(started.elapsed() < Duration::from_secs(2), "no request was denied");
-
-        let (h_js, h_rights) = connect(&"alice".parse().unwrap(), ants_proto::Role::Human).await;
-        bus::ensure_stream(&h_js).await.unwrap();
-        let created: Vec<_> = create_missing(&h_js, &h_rights).await.into_iter().map(|f| f.object).collect();
-        let seen: Vec<_> = hub::Object::ALL
-            .into_iter()
-            .filter(|o| ![hub::Object::Stream, hub::Object::Presence, hub::Object::Identities].contains(o))
-            .collect();
-        assert_eq!(created, seen, "every missing bucket a human may look up created");
-        for watched in [hub::Object::Channels, hub::Object::Humans, hub::Object::Colony] {
-            let config = h_js.get_stream(watched.stream_name()).await.unwrap().cached_info().config.clone();
-            assert_eq!(config.max_consumers, hub::MAX_CONSUMERS, "{watched}");
-        }
-        assert!(hub::check(&h_js, |s| h_rights.may_publish(s)).await.is_empty());
-        assert!(create_missing(&h_js, &h_rights).await.is_empty());
-    }
 }

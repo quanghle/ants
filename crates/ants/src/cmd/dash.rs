@@ -40,7 +40,7 @@ fn terminal_check(stdin: bool, stdout: bool) -> Result<()> {
     )
 }
 
-pub async fn run(nats: &crate::Nats<'_>, since: Duration) -> Result<()> {
+pub async fn run(nats: &crate::connection::Nats<'_>, since: Duration) -> Result<()> {
     terminal_check(std::io::stdin().is_terminal(), std::io::stdout().is_terminal())?;
     let me = &nats.me.id;
     if !nats.me.role.is_human() {

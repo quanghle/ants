@@ -125,7 +125,7 @@ pub struct Io {
 }
 
 impl Io {
-    pub fn new(nats: &crate::Nats<'_>, js: jetstream::Context) -> Self {
+    pub fn new(nats: &crate::connection::Nats<'_>, js: jetstream::Context) -> Self {
         let (url, creds, domain) = (nats.url.to_owned(), nats.creds.map(PathBuf::from), nats.domain.cloned());
         Self { js, url, creds, domain, asked: None, read: None }
     }
@@ -148,7 +148,7 @@ impl Io {
         self.read = Some(
             async move {
                 let read = async {
-                    let nats = crate::Nats::new(&url, creds.as_deref(), domain.as_ref())?;
+                    let nats = crate::connection::Nats::new(&url, creds.as_deref(), domain.as_ref())?;
                     crate::memories::read(&nats, &js, None, &ant).await
                 };
                 Event(ant.clone(), asked, read.await.map_err(|e| format!("{e:#}")))

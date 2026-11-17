@@ -308,7 +308,7 @@ pub async fn save(
 }
 
 /// `ants attachment get HANDLE [-o PATH]`.
-pub async fn get(nats: &crate::Nats<'_>, handle: &AttachmentHandle, out: Option<&Path>) -> Result<()> {
+pub async fn get(nats: &crate::connection::Nats<'_>, handle: &AttachmentHandle, out: Option<&Path>) -> Result<()> {
     let (_, js) = nats.connect("ants-cli").await?;
     let keyring = if nats.me.role.is_human() { sealed::Keyring::load(nats, &js).await } else { None };
     let (attachment, bytes, path) = save_handle(&js, &nats.me, keyring.as_ref(), handle, out).await?;
