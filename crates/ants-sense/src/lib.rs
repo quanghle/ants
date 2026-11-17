@@ -107,7 +107,12 @@ impl Sense {
             Err(e) => Err(e),
         };
         match recorded {
-            Ok(()) | Err(StoreError::NotKept(_)) => Ok(Ack {}),
+            Ok(()) => {
+                // A dormancy starting or ending pauses or resumes the ant's reminders.
+                self.changed.send_replace(());
+                Ok(Ack {})
+            }
+            Err(StoreError::NotKept(_)) => Ok(Ack {}),
             Err(e) => Err(RpcError::unavailable(&e.to_string())),
         }
     }

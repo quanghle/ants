@@ -181,6 +181,12 @@ async fn sections(items: &dyn Items, context: &CallContext, card: Option<&Card>)
     let more = handoffs.len() > MAX_HANDOFFS;
     handoffs.truncate(MAX_HANDOFFS);
     sections.extend(handoffs_section(&handoffs, more));
+    if card.is_some_and(Card::returned)
+        && let Some(last) = thread::last_handoff(items).await?
+        && !handoffs.iter().any(|handoff| handoff.id == last.id)
+    {
+        sections.push(Section::cut_with("## Last handoff", last.text().trim_end().to_owned(), thread::READ));
+    }
     sections.extend(commitments_section(items, context.at).await?);
     sections.extend(reminders_sections(items, context.at).await?);
     sections.extend(tasks_sections(items, context).await?);
@@ -233,14 +239,24 @@ fn identity_section(card: Option<&Card>, context: &CallContext) -> Section {
             let _ = write!(body, "\n{label}: {}.", values.join(", "));
         }
     }
-    if let Some(at) = card.retired_at {
-        let _ = write!(body, "\nRetired since {}.", at.format("%Y-%m-%d"));
-    }
-    if let Some(at) = card.returned_at {
+    if !card.active
+        && let Some(at) = card.retired_at
+    {
         let _ = write!(
             body,
-            "\n{RETURNED}{}: added again under a new ants identity, as after a revoke and re-add. The register and \
-             handoffs below tell where the work stood.",
+            "\nDormant since {}: retired, its reminders paused and its commitments open until revived.",
+            at.format("%Y-%m-%d")
+        );
+    }
+    if let Some(at) = card.returned_at {
+        let how = match card.retired_at {
+            Some(since) => format!(", dormant since {}: back after a retirement", since.format("%Y-%m-%d")),
+            None => ": added again under a new ants identity, as after a revoke and re-add".to_owned(),
+        };
+        let _ = write!(
+            body,
+            "\n{RETURNED}{}{how}. The register, the last handoff and the open commitments below, overdue ones marked, \
+             tell where the work stood.",
             at.format("%Y-%m-%d")
         );
     }

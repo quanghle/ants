@@ -467,16 +467,20 @@ async fn forget_if_retired(
 }
 
 /// Leave the colony and end the harness sessions once [`serve`] ended; on a stop, tell the ant's provider of its
-/// retirement when that stop retired it ([`Lifecycle::stopped`]).
+/// retirement when that stop retired it ([`Lifecycle::stopped`]), before leaving the colony: a retirement revokes the
+/// ant's credentials once it left, and the provider may sign what it records with them.
 async fn wind_down(served: &Served, registration: colony::Registration, pool: Pool, lifecycle: Option<&Lifecycle>) {
-    registration.deregister().await;
-    pool.shutdown().await;
-    if *served == Served::Stopped {
-        if let Some(lifecycle) = lifecycle {
-            lifecycle.stopped().await;
-        }
-        tracing::info!("stopped");
+    if *served != Served::Stopped {
+        registration.deregister().await;
+        pool.shutdown().await;
+        return;
     }
+    pool.shutdown().await;
+    if let Some(lifecycle) = lifecycle {
+        lifecycle.stopped(events::RETIRED_WAIT).await;
+    }
+    registration.deregister().await;
+    tracing::info!("stopped");
 }
 
 /// The ant's colony entry, and the revision of it claimed when the daemon defers to others ([`wait_for_turn`]):

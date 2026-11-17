@@ -195,14 +195,15 @@ async fn an_ant_is_told_added_once_retired_once_stopped_and_revived_once_served_
     let outbox = outbox_to(provider.clone()).await;
     let ant = p("dev-a");
     let lifecycle = Lifecycle::open(&outbox, &ant, "ida", &dir).await.unwrap();
-    lifecycle.stopped().await;
+    lifecycle.stopped(RETIRED_WAIT).await;
     Lifecycle::open(&outbox, &ant, "ida", &dir).await.unwrap();
     took(&provider, 1).await;
     assert_eq!(provider.kinds(), [EventKind::AntAdded], "added once; no retirement unmarked");
 
     mark_retired(&dir).unwrap();
-    lifecycle.stopped().await;
-    lifecycle.stopped().await;
+    lifecycle.stopped(RETIRED_WAIT).await;
+    assert_eq!(provider.kinds()[1..], [EventKind::AntRetired], "acked before the stop ends");
+    lifecycle.stopped(RETIRED_WAIT).await;
     Lifecycle::open(&outbox, &ant, "ida", &dir).await.unwrap();
     took(&provider, 3).await;
     assert_eq!(provider.kinds(), [EventKind::AntAdded, EventKind::AntRetired, EventKind::AntRevived]);
@@ -219,6 +220,21 @@ async fn an_ant_is_told_added_once_retired_once_stopped_and_revived_once_served_
     Lifecycle::open(&outbox, &ant, "idb", &dir).await.unwrap();
     took(&provider, 6).await;
     assert_eq!(provider.got.locked()[5].kind, EventKind::AntAdded);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A stop waits a bounded time for an unreachable provider to take the retirement, which stays queued.
+#[tokio::test]
+async fn a_stop_waits_a_bounded_time_for_the_retirement_to_be_acked() {
+    let dir = ants_test_support::scratch_dir("events-retired-wait");
+    let ant = p("dev-a");
+    let lifecycle =
+        Lifecycle { ant: ant.clone(), identity: "ida".to_owned(), home: dir.clone(), outbox: outbox_to_none() };
+    mark_retired(&dir).unwrap();
+    let started = Instant::now();
+    lifecycle.stopped(Duration::from_millis(50)).await;
+    assert!(started.elapsed() >= Duration::from_millis(50));
+    assert_eq!(queued(&dir).iter().map(|e| e.kind.clone()).collect::<Vec<_>>(), [EventKind::AntRetired]);
     std::fs::remove_dir_all(dir).unwrap();
 }
 

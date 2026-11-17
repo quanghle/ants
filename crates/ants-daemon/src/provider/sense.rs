@@ -51,6 +51,8 @@ enum Host {
 struct Served {
     home: PathBuf,
     creds: Option<PathBuf>,
+    /// A digest of the credentials as they were when served: the items, signed with them, open again once they change.
+    signer: Option<u64>,
     items: Arc<tokio::sync::Mutex<Option<Opened>>>,
 }
 
@@ -164,17 +166,20 @@ impl SenseStores {
     }
 
     /// The process serves `ant`, whose home is `home` and whose credentials are at `creds`, if any. An ant served from
-    /// the same home before under another name is no longer.
+    /// the same home before under another name is no longer; one served again with other credentials, as after a
+    /// revoke and re-add, signs with the new ones.
     pub fn serve(&self, ant: &UserId, home: &Path, creds: Option<PathBuf>) {
+        let signer = creds.as_deref().and_then(digest);
         let mut state = self.state();
         state.ants.retain(|other, served| other == ant || served.home != home);
         if let Some(served) = state.ants.get(ant)
             && served.home == home
             && served.creds == creds
+            && served.signer == signer
         {
             return;
         }
-        let served = Served { home: home.to_owned(), creds, items: Arc::default() };
+        let served = Served { home: home.to_owned(), creds, signer, items: Arc::default() };
         state.ants.insert(ant.clone(), served);
         self.changed.notify_one();
     }
@@ -202,6 +207,12 @@ impl SenseStores {
             }
         }
     }
+}
+
+fn digest(file: &Path) -> Option<u64> {
+    let mut hasher = std::hash::DefaultHasher::new();
+    std::hash::Hash::hash(&std::fs::read(file).ok()?, &mut hasher);
+    Some(std::hash::Hasher::finish(&hasher))
 }
 
 /// The stores of the daemon's process.

@@ -5,6 +5,10 @@
 //! lists its earlier names ([`NAMES_FILE`]), whose events in its log are its own ([`crate::log::Chain`]): an import
 //! under another name lists the name before ([`note_renamed`]), and so does an ant added under another name with the
 //! home of an earlier one ([`take_over`]). A card made anew, as on another bus, starts with the names listed.
+//!
+//! A retirement makes the identity dormant ([`Card::active`] false), keeping all its data: its commitments stay open
+//! and its reminders paused, the daemon firing none, until a revival or an addition under another ants identity
+//! makes it active again, its reminders' expiry put off by the time it was dormant.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -19,7 +23,8 @@ use uuid::Uuid;
 use crate::cache::CacheError;
 use crate::items::{Item, Values};
 use crate::log::{APPEND_TRIES, SENSE_DIR, read_status};
-use crate::store::{Items, StoreError};
+use crate::remind;
+use crate::store::{Items, StoreError, Write};
 
 /// The file of [`SENSE_DIR`] holding the ant's sense id.
 pub const ID_FILE: &str = "id";
@@ -139,12 +144,13 @@ pub struct Card {
     pub machines: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloned_from: Option<ClonedFrom>,
-    /// False from its retirement to its revival or addition again.
+    /// False while dormant: from its retirement to its revival or addition again.
     pub active: bool,
+    /// When its dormancy started: kept past its return until the brief told it so ([`returned_told`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retired_at: Option<DateTime<Utc>>,
-    /// When it was added again with another ants identity, as after a revoke and re-add: until the brief told it so
-    /// ([`returned_told`]).
+    /// When it came back from dormancy, or was added again with another ants identity, as after a revoke and re-add:
+    /// until the brief told it so ([`returned_told`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub returned_at: Option<DateTime<Utc>>,
     /// When it last moved to another machine or bus.
@@ -190,7 +196,7 @@ impl Card {
         }
     }
 
-    /// Whether the ant came back under another ants identity and the brief has not told it yet.
+    /// Whether the ant came back from dormancy or under another ants identity and the brief has not told it yet.
     pub fn returned(&self) -> bool {
         self.returned_at.is_some()
     }
@@ -243,17 +249,16 @@ impl Card {
         }
         let others = self.identities.iter().any(|linked| *linked != event.identity);
         match &event.kind {
-            EventKind::AntAdded if others => {
-                (self.active, self.retired_at, self.returned_at) = (true, None, Some(event.at));
-            }
+            EventKind::AntAdded if others => (self.active, self.returned_at) = (true, Some(event.at)),
             EventKind::AntAdded => {}
             EventKind::AntRenamed { from } => self.named(from),
             EventKind::AntMoved => self.moved_at = Some(event.at),
             EventKind::AntCloned { from, from_identity } => {
                 self.cloned_from = Some(ClonedFrom { ant: from.clone(), identity: from_identity.clone() });
             }
-            EventKind::AntRetired => (self.active, self.retired_at) = (false, Some(event.at)),
-            EventKind::AntRevived => (self.active, self.retired_at) = (true, None),
+            EventKind::AntRetired => (self.active, self.retired_at, self.returned_at) = (false, Some(event.at), None),
+            EventKind::AntRevived if !self.active => (self.active, self.returned_at) = (true, Some(event.at)),
+            EventKind::AntRevived => {}
             _ => return,
         }
         self.named(&event.ant);
@@ -300,8 +305,32 @@ pub async fn card(items: &dyn Items) -> Result<Option<Card>, StoreError> {
 }
 
 /// Apply the lifecycle event `event` to the card in `items`, made first when there is none: the card as it is then.
+/// An event ending the ant's dormancy resumes its reminders in the same write ([`remind::resumed`]).
 pub async fn record_event(items: &dyn Items, event: &Event) -> Result<Card, StoreError> {
-    update(items, &event.ant, event.at, |card| card.apply(event)).await
+    let apply = |card: &mut Card| card.apply(event);
+    for _ in 0..APPEND_TRIES {
+        let Some(item) = items.list(CARD, 1).await?.pop() else {
+            return update(items, &event.ant, event.at, apply).await;
+        };
+        let current = Card::of(&item)?;
+        let mut card = current.clone();
+        card.apply(event);
+        let Some(since) = current.retired_at.filter(|_| !current.active && card.active) else {
+            return update(items, &event.ant, event.at, apply).await;
+        };
+        let mut writes = remind::resumed(items, since, event.at).await?;
+        writes.push(Write::Change {
+            id: item.id.clone(),
+            values: card.patch(&item.values)?,
+            expected: Some(item.revision),
+        });
+        match items.write(&writes, BY).await {
+            Ok(mut written) => return Card::of(&written.pop().expect("the card written last")),
+            Err(StoreError::Conflict { .. }) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Err(kept_changing())
 }
 
 /// Note on the card in `items`, made first when there is none, the session starting as `context` says.
@@ -309,9 +338,15 @@ pub async fn record_session(items: &dyn Items, context: &CallContext) -> Result<
     update(items, &context.ant, context.at, |card| card.session(context)).await
 }
 
-/// Note that the brief told the ant of its return ([`Card::returned`]).
+/// Note that the brief told the ant of its return ([`Card::returned`]), and so of its dormancy when it is active.
 pub async fn returned_told(items: &dyn Items, ant: &UserId) -> Result<Card, StoreError> {
-    update(items, ant, Utc::now(), |card| card.returned_at = None).await
+    update(items, ant, Utc::now(), |card| {
+        card.returned_at = None;
+        if card.active {
+            card.retired_at = None;
+        }
+    })
+    .await
 }
 
 /// The card in `items` after `change`, made for `ant` at `at` first when there is none, with the earlier names of the
@@ -344,7 +379,11 @@ async fn update(
             Err(e) => return Err(e),
         }
     }
-    Err(StoreError::Unavailable("other writers kept changing the card".into()))
+    Err(kept_changing())
+}
+
+fn kept_changing() -> StoreError {
+    StoreError::Unavailable("other writers kept changing the card".into())
 }
 
 #[cfg(test)]

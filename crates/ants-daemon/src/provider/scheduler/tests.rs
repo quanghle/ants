@@ -159,6 +159,38 @@ async fn an_empty_schedule_sleeps_until_maintenance_or_a_tool_changes_it() {
     assert_eq!(host.requests.locked().len(), 1);
 }
 
+fn lifecycle(kind: ants_proto::provider::EventKind) -> ants_proto::provider::Event {
+    ants_proto::provider::Event {
+        id: uuid::Uuid::new_v4(),
+        ant: ant(),
+        identity: "0f1e".into(),
+        thread: None,
+        at: Utc::now(),
+        kind,
+    }
+}
+
+/// A retired ant's reminders fire nothing while it is dormant; its revival fires those due meanwhile.
+#[tokio::test(start_paused = true)]
+async fn a_dormant_ant_s_reminders_wait_for_its_revival() {
+    use ants_proto::provider::EventKind;
+    let (sense, _stores) = setup().await;
+    sense.event(lifecycle(EventKind::AntAdded)).await.unwrap();
+    sense.event(lifecycle(EventKind::AntRetired)).await.unwrap();
+    let id = create(&sense, json!({"kind":"at","at":Utc::now()})).await;
+    let host = Arc::new(Wakes::default());
+    let scheduler = start(sense.clone(), host.clone(), settings());
+    settle().await;
+    tokio::time::advance(MAINTENANCE).await;
+    settle().await;
+    assert!(host.requests.locked().is_empty(), "nothing fires while dormant");
+    sense.event(lifecycle(EventKind::AntRevived)).await.unwrap();
+    settle().await;
+    let requests = host.requests.locked().clone();
+    assert_eq!(requests.iter().map(|request| request.id.clone()).collect::<Vec<_>>(), [format!("{id}:1")]);
+    scheduler.stop().await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn failed_and_throttled_deliveries_retry_without_advancing_or_spinning() {
     let (sense, stores) = setup().await;
