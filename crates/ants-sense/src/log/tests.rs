@@ -9,23 +9,23 @@ use serde_json::{Value, json};
 
 use super::*;
 
-fn jwt(signer: &KeyPair, body: &Value) -> String {
+pub(crate) fn jwt(signer: &KeyPair, body: &Value) -> String {
     let header = BASE64URL_NOPAD.encode(br#"{"typ":"JWT","alg":"ed25519-nkey"}"#);
     let signed = format!("{header}.{}", BASE64URL_NOPAD.encode(body.to_string().as_bytes()));
     format!("{signed}.{}", BASE64URL_NOPAD.encode(&signer.sign(signed.as_bytes()).unwrap()))
 }
 
 /// A team account and credentials of its ants, each signing with its own key.
-struct Team {
-    account: KeyPair,
+pub(crate) struct Team {
+    pub(crate) account: KeyPair,
 }
 
 impl Team {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { account: KeyPair::new_account() }
     }
 
-    fn signer(&self, name: &str) -> KeySigner {
+    pub(crate) fn signer(&self, name: &str) -> KeySigner {
         let key = KeyPair::new_user();
         let body = json!({
             "iss": self.account.public_key(),
@@ -37,12 +37,12 @@ impl Team {
         KeySigner(jwt(&self.account, &body), key)
     }
 
-    fn verifier(&self) -> AccountVerifier<NoRevocations> {
+    pub(crate) fn verifier(&self) -> AccountVerifier<NoRevocations> {
         AccountVerifier::new(vec![self.account.public_key()], NoRevocations)
     }
 }
 
-struct KeySigner(String, KeyPair);
+pub(crate) struct KeySigner(String, KeyPair);
 
 impl Signer for KeySigner {
     fn sign(&self, bytes: &[u8]) -> Result<Option<Signature>, String> {

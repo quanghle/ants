@@ -20,6 +20,10 @@
 //! An import queues, in the ant's new home, the lifecycle events telling its provider it moved, and was renamed when
 //! imported under another name ([`ants_daemon::provider::events::arrived`]), its old name then listed among its earlier
 //! names in the home, whose events in its sense log stay its own ([`ants_sense::identity::note_renamed`]).
+//!
+//! sense's part ([`ants_sense::export`]) carries the ant's sense log and skill files, which the home's files leave out.
+//! An import carrying it marks the new home as awaiting it ([`ants_sense::export::expect_import`]), so the daemon
+//! serving the ant writes nothing to the ant's log on the new bus before the log arrives.
 
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
@@ -203,11 +207,11 @@ pub fn core_files_of(ant: &Ant, home: &Path, harness: &[PathBuf]) -> Result<Vec<
 
 /// Whether `rel`, relative to the home, is of sense's files left out: all but the sense id and the earlier names, which
 /// the ant keeps wherever it goes ([`ants_sense::identity`]); the cache and chain status are of the log on this
-/// machine's bus.
+/// machine's bus, and the skill files travel in sense's part, with the log ([`ants_sense::export`]).
 fn sense_left_out(rel: &Path) -> bool {
     let sense = Path::new(ants_sense::log::SENSE_DIR);
     let kept = [ants_sense::identity::ID_FILE, ants_sense::identity::NAMES_FILE];
-    rel.parent() == Some(sense) && !kept.iter().any(|file| rel == sense.join(file))
+    rel != sense && rel.starts_with(sense) && !kept.iter().any(|file| rel == sense.join(file))
 }
 
 /// The files `paths` of the home `home`, read, as `kind`.
@@ -576,6 +580,9 @@ async fn import_with(nats: &crate::connection::Nats<'_>, args: ImportArgs, store
     let done = async {
         let harness_kept = listing.harness == export.settings.harness;
         let dropped = restore(&home, &export.files, harness_kept)?;
+        if !no_provider && export.provider.as_ref().is_some_and(|part| part.provider == ants_sense::NAME) {
+            ants_sense::export::expect_import(&home).context("marking the home as awaiting the sense data")?;
+        }
         let mut arrived = vec![EventKind::AntMoved];
         if name != export.identity.ant {
             ants_sense::identity::note_renamed(&home, &export.identity.ant)
@@ -668,7 +675,9 @@ async fn import_provider(
     if strict {
         bail!(why);
     }
-    eprintln!("warning: {why}; `ants ant import FILE --provider-only` tries again");
+    let closed =
+        if part.provider == ants_sense::NAME { ", sense keeping the ant's data closed until then" } else { "" };
+    eprintln!("warning: {why}; `ants ant import FILE --provider-only` tries again{closed}");
     Ok(())
 }
 

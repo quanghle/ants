@@ -700,11 +700,12 @@ The file is `{"ants_ant": 1, "created_at", "bus", "identity", "settings", "files
   reaches its provider, so the export sends this machine's daemon an `export_provider` admin order
   ([auth.md](auth.md#admin-orders)), which needs a human device's admin credentials and the daemon online: the daemon
   stores the provider's export in `ants_files` (at most 64 MiB), where the export reads it. A provider failing fails
-  the export, naming `--no-provider`.
+  the export, naming `--no-provider`. The built-in sense's part carries the ant's sense log and skill files
+  ([sense's part](#senses-part)).
 
 Left out: the home's `worktrees`, `answered`, `buried`, `mcp.json`, `mcp.sock`, `lifecycle`, `.git`, `.beads` and `.bd`, the
 files of `.sense` but the sense id and earlier names (`.sense/id` and `.sense/names`, which the ant keeps on its new
-bus; its cache and chain status are not), the task database `BD_DB` names when it lies in the home, the rest of the
+bus; its cache and chain status are not, and its skill files, `.sense/skills`, travel in sense's part with its log), the task database `BD_DB` names when it lies in the home, the rest of the
 ant's settings (its role on the bus: `capabilities`, `escalate_to`, `allow`, `memory`, `tasks`; its machine's:
 `workdir`, `env`, caps and limits), its credentials, sessions, threads and history. A templated ant imports as a plain `[[ant]]`.
 
@@ -731,6 +732,9 @@ the mark; `ants auth revoke ANT` ends the ant on the old bus once the import suc
    lifecycle events `ant_moved`, and `ant_renamed` under `--as`, for its provider
    ([architecture.md](architecture.md#lifecycle-events)). Under `--as`, it lists the old name among the ant's earlier
    names in `.sense/names`, so the ant keeps its sense data ([architecture.md](architecture.md#sense-identity)).
+   When the file carries sense's part, and without `--no-provider`, it marks the home as awaiting it
+   (`.sense/importing`): until sense's part lands, sense opens none of the ant's data, so nothing is written to the
+   ant's log on the new bus before the log arrives, and the lifecycle events wait.
 4. Lists it in `config.toml` with the exported settings, the flags given winning, and gives it a new key, as `ants
    add` does: with `--jwt` or `--enroll` its credentials complete at once, else `ants add NAME --jwt ...` completes
    them later. The first daemon serving it creates its shared settings on the new bus from that table; when the bus
@@ -745,6 +749,35 @@ the mark; `ants auth revoke ANT` ends the ant on the old bus once the import suc
 
 A failed import takes back the record it created and the files it restored. `--as NEW` imports the ant under another
 name, keeping its id, birth, avatar and prompts. The ant starts with no tasks.
+
+### sense's part
+
+The built-in sense exports an ant's sense log, as stream `ANTS_SENSE` stores it
+([architecture.md](architecture.md#stores-and-subjects)), and its skill files, `.sense/skills/**` in its home, as
+`{manifest, files}`:
+
+- `manifest`: `{version, sense, ant, events, tip, accounts, files}`: the version (1), the sense id, the ant's name,
+  the log's number of events and its last one (`tip`, `{index, sha256}`, left out for an empty log), the public keys
+  of the team accounts whose ants' credentials signed the events (the bus exported from, and the buses before it the
+  log came from; empty for a server without authentication), and each file as `{path, sha256, size}`.
+- `files`: each file as `{path, data}`, `data` in base64: `log.jsonl`, each event as stored, one a line, then each
+  skill file under `skills/`, its path relative to `.sense/skills`.
+
+The export needs the daemon connected to its bus, and refuses while changes of the ant wait in its cache to be
+appended. The import, under the export's sense id, which the home keeps (refused when it keeps another), takes in
+nothing unless every file matches its size and hash, no file is missing or unlisted, skill paths stay under `skills/`,
+and the log's chain verifies: each event at its position, chained to the one before, of the ant under its name or
+the earlier names the home lists, and signed with credentials an account of `accounts` issued, valid when the event
+was made, up to the `tip`. Revocations of the bus exported from are not seen on the new one, and nothing signs the
+export: the checks find a file damaged or edited, not a log made anew with other credentials of the account.
+
+The events are appended to the ant's log on the new bus as they were stored, so their hashes and signatures stay
+whole, followed by an `ant_renamed` event when the ant is imported under another name, and a `log_imported` event
+signed on the new bus vouching for them ([architecture.md](architecture.md#stores-and-subjects)). The log on the new
+bus must be empty or hold the export's first events, as an import cut short leaves it: the import appends the rest.
+A log holding the export already takes nothing more, and one holding other events refuses the import, merging
+nothing. The skill files are then written into `.sense/skills`, the home stops awaiting the import, and the ant's
+cache is built anew from its log.
 
 ## Catch-up summaries
 

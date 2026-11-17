@@ -9,12 +9,13 @@ use std::sync::Arc;
 
 use ants_proto::UserId;
 use ants_proto::provider::{
-    Ack, BoxFuture, Brief, BriefRequest, CallContext, Capabilities, Event, Host, Info, InitializeParams,
-    InitializeResult, PROTOCOL_VERSION, Provider, RpcError, ToolCall, ToolList, ToolResult,
+    Ack, AntRef, BoxFuture, Brief, BriefRequest, CallContext, Capabilities, Event, Export, Host, ImportRequest, Info,
+    InitializeParams, InitializeResult, PROTOCOL_VERSION, Provider, RpcError, ToolCall, ToolList, ToolResult,
 };
 
 pub mod brief;
 pub mod cache;
+pub mod export;
 pub mod identity;
 pub mod items;
 pub mod log;
@@ -37,9 +38,10 @@ pub const NAME: &str = "sense";
 /// The protocol versions sense speaks.
 pub const VERSIONS: &[u32] = &[PROTOCOL_VERSION];
 
-/// What sense implements: its tools, the brief and lifecycle events, which write each ant's card.
+/// What sense implements: its tools, the brief, lifecycle events, which write each ant's card, and exports, which take
+/// each ant's log and skill files to another bus ([`export`]).
 pub const CAPABILITIES: Capabilities =
-    Capabilities { tools: true, context: true, events: true, wake: true, ..Capabilities::NONE };
+    Capabilities { tools: true, context: true, events: true, wake: true, export: true, ..Capabilities::NONE };
 
 /// The built-in provider. One serves every ant of a daemon, each call naming its ant.
 pub struct Sense {
@@ -112,6 +114,32 @@ impl Sense {
         }
     }
 
+    async fn export_of(&self, ant: AntRef) -> Result<Export, RpcError> {
+        let stores = self.stores.as_ref().ok_or_else(|| RpcError::unavailable("sense keeps no data here"))?;
+        let export = stores.export(&ant.ant).await.map_err(|e| RpcError::unavailable(&e.to_string()))?;
+        let data = serde_json::to_value(export).map_err(|e| RpcError::internal(&e.to_string()))?;
+        Ok(Export { provider: NAME.to_owned(), data })
+    }
+
+    async fn import_into(&self, request: ImportRequest) -> Result<Ack, RpcError> {
+        if request.export.provider != NAME {
+            return Err(RpcError::invalid_params(&format!("an export of {}, not of sense", request.export.provider)));
+        }
+        let export: export::SenseExport = serde_json::from_value(request.export.data)
+            .map_err(|e| RpcError::invalid_params(&format!("not an export of sense: {e}")))?;
+        let stores = self.stores.as_ref().ok_or_else(|| RpcError::unavailable("sense keeps no data here"))?;
+        match stores.import(&request.ant, export).await {
+            Ok(()) => {
+                self.changed.send_replace(());
+                Ok(Ack {})
+            }
+            Err(StoreError::Import(e @ export::ImportError::Invalid(_))) => {
+                Err(RpcError::invalid_params(&e.to_string()))
+            }
+            Err(e) => Err(RpcError::unavailable(&e.to_string())),
+        }
+    }
+
     /// The brief of the session starting as `request` tells, noting the session on the ant's card first; empty when
     /// sense keeps no data of the ant.
     async fn brief_for(&self, request: BriefRequest) -> Result<Brief, RpcError> {
@@ -177,6 +205,14 @@ impl Provider for Sense {
     fn event(&self, event: Event) -> BoxFuture<'_, Result<Ack, RpcError>> {
         Box::pin(self.record_event(event))
     }
+
+    fn export(&self, ant: AntRef) -> BoxFuture<'_, Result<Export, RpcError>> {
+        Box::pin(self.export_of(ant))
+    }
+
+    fn import(&self, request: ImportRequest) -> BoxFuture<'_, Result<Ack, RpcError>> {
+        Box::pin(self.import_into(request))
+    }
 }
 
 #[cfg(test)]
@@ -234,7 +270,7 @@ mod tests {
         let sense = connect();
         assert_eq!(sense.name(), NAME);
         assert!(sense.has(Capability::Tools) && sense.has(Capability::Context) && sense.has(Capability::Events));
-        assert!(sense.has(Capability::Wake));
+        assert!(sense.has(Capability::Wake) && sense.has(Capability::Export));
         let tools = ready(sense.list_tools()).unwrap().tools;
         let names: Vec<_> = tools.iter().map(|tool| tool.name.as_str()).collect();
         assert_eq!(

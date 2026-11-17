@@ -1,5 +1,7 @@
 use ants_proto::SENSE_STREAM;
-use ants_proto::provider::{BriefReason, BriefRequest, CallContext, Event, EventKind, Origin, Provider, Starter};
+use ants_proto::provider::{
+    AntRef, BriefReason, BriefRequest, CallContext, Event, EventKind, Export, ImportRequest, Origin, Provider, Starter,
+};
 use ants_sense::Sense;
 use ants_test_support::{NatsServer, eventually, free_port, scratch_dir};
 use serde_json::json;
@@ -139,6 +141,73 @@ async fn a_renamed_ant_keeps_its_card() {
     }
     std::fs::remove_dir_all(&home_a).unwrap();
     std::fs::remove_dir_all(&home_b).unwrap();
+}
+
+/// An ant's sense data, exported on one bus, land on another under the same sense id once the home stops awaiting them;
+/// a home of another sense id, or a log holding other events, refuses them.
+#[tokio::test]
+async fn an_export_moves_the_sense_data_to_another_bus() {
+    let (Some(bus_a), Some(bus_b)) = (NatsServer::start(), NatsServer::start()) else { return };
+    let (home_a, home_b) = (scratch_dir("sense-export-a"), scratch_dir("sense-export-b"));
+    let stores = SenseStores::new();
+    stores.serve(&dev_a(), &home_a, None);
+    let hosting = stores.hosting();
+    hosting.up(link(&bus_a).await);
+    let sense = Sense::with_stores(stores.clone());
+    sense.event(added("id1")).await.unwrap();
+    std::fs::create_dir_all(export::skills_dir(&home_a).join("review")).unwrap();
+    std::fs::write(export::skills_dir(&home_a).join("review/SKILL.md"), "review well").unwrap();
+    let exported = sense.export(AntRef { ant: dev_a(), identity: "id1".into() }).await.unwrap();
+    let id = identity::read_id(&home_a).unwrap().unwrap();
+    drop(hosting);
+
+    let stores = SenseStores::new();
+    stores.serve(&dev_a(), &home_b, None);
+    let hosting = stores.hosting();
+    hosting.up(link(&bus_b).await);
+    let sense = Sense::with_stores(stores.clone());
+    export::expect_import(&home_b).unwrap();
+    let awaiting = stores.items(&dev_a()).await.err().unwrap();
+    assert!(awaiting.to_string().contains("await their import"), "{awaiting}");
+    let request = |export: &Export| ImportRequest { ant: dev_a(), identity: "id1".into(), export: export.clone() };
+    sense.import(request(&exported)).await.unwrap();
+    assert!(!export::importing(&home_b), "the home no longer awaits them");
+    assert_eq!(identity::read_id(&home_b).unwrap(), Some(id.clone()));
+    assert_eq!(std::fs::read_to_string(export::skills_dir(&home_b).join("review/SKILL.md")).unwrap(), "review well");
+    let card = sense.card(&dev_a()).await.unwrap().unwrap();
+    assert_eq!((&card.sense, card.identities.as_slice()), (&id, &["id1".to_owned()][..]));
+    let js = bus::connect(&bus_b.url, None, None, &UserId::human(), "test").await.unwrap().1;
+    let messages = js.get_stream(SENSE_STREAM).await.unwrap().info().await.unwrap().state.messages;
+    assert_eq!(messages, 2, "the event and the anchor");
+    sense.import(request(&exported)).await.unwrap();
+    assert_eq!(js.get_stream(SENSE_STREAM).await.unwrap().info().await.unwrap().state.messages, 2, "taken in already");
+    drop(hosting);
+
+    let home_c = scratch_dir("sense-export-c");
+    identity::keep_id(&home_c, &SenseId::new()).unwrap();
+    let stores = SenseStores::new();
+    stores.serve(&dev_a(), &home_c, None);
+    let hosting = stores.hosting();
+    hosting.up(link(&bus_b).await);
+    let refused = Sense::with_stores(stores.clone()).import(request(&exported)).await.unwrap_err();
+    assert!(refused.message.contains("keeps sense identity"), "{}", refused.message);
+    drop(hosting);
+
+    let Some(bus_c) = NatsServer::start() else { return };
+    let home_d = scratch_dir("sense-export-d");
+    identity::keep_id(&home_d, &id).unwrap();
+    let stores = SenseStores::new();
+    stores.serve(&dev_a(), &home_d, None);
+    let hosting = stores.hosting();
+    hosting.up(link(&bus_c).await);
+    let sense = Sense::with_stores(stores.clone());
+    sense.event(added("id2")).await.unwrap();
+    let refused = sense.import(request(&exported)).await.unwrap_err();
+    assert!(refused.message.contains("holds other events"), "{}", refused.message);
+    drop(hosting);
+    for home in [home_a, home_b, home_c, home_d] {
+        std::fs::remove_dir_all(home).unwrap();
+    }
 }
 
 fn brief_request() -> BriefRequest {

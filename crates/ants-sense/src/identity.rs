@@ -53,13 +53,18 @@ pub fn sense_id(home: &Path) -> io::Result<SenseId> {
         return Ok(id);
     }
     let id = SenseId::new();
+    keep_id(home, &id)?;
+    Ok(id)
+}
+
+/// Keep `id` as the sense id in `home`, written whole.
+pub fn keep_id(home: &Path, id: &SenseId) -> io::Result<()> {
     let file = id_file(home);
     let dir = file.parent().expect("a file in a directory");
     std::fs::create_dir_all(dir)?;
     let beside = dir.join(format!("{ID_FILE}.new"));
     std::fs::write(&beside, format!("{id}\n"))?;
-    std::fs::rename(&beside, &file)?;
-    Ok(id)
+    std::fs::rename(&beside, &file)
 }
 
 /// Where the earlier names of the ant whose home is `home` are listed.

@@ -3,7 +3,7 @@
 use ants_proto::{SenseId, UserId};
 use serde::{Deserialize, Serialize};
 
-use super::{Event, RENAMED, Stored, Verifier, VerifyError};
+use super::{AccountVerifier, Event, NoRevocations, RENAMED, Stored, Verifier, VerifyError};
 
 /// An event of a log, by its position and the SHA-256 of its message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -21,6 +21,40 @@ pub struct Break {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequence: Option<u64>,
     pub reason: String,
+}
+
+/// What an event of kind [`super::IMPORTED`] tells: the log's events up to `through` came from another bus, where
+/// credentials of `accounts`, its team account's keys, signed them. Signed on this bus, it lets a reader verify those
+/// events against `accounts` ([`Chain::anchored`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Anchor {
+    /// The keys of the other bus's account (`A...`); none for a server without authentication.
+    pub accounts: Vec<String>,
+    /// The last event imported.
+    pub through: Mark,
+}
+
+/// What [`Chain::check`] made of a message.
+#[derive(Debug, Clone, PartialEq)]
+#[expect(clippy::large_enum_variant, reason = "matched as soon as returned, never kept")]
+pub enum Verdict {
+    /// Its event verified.
+    Verified(Event),
+    /// It breaks the chain ([`Chain::broken`]).
+    Broken,
+    /// Its event at `index` is not signed for this bus and no [`Anchor`] covers it yet: the reader looks ahead for one
+    /// ([`Chain::anchored`]) and checks the message again.
+    Unanchored { index: u64 },
+}
+
+/// Whether a [`Chain`] looks ahead for an [`Anchor`] of events not signed for its bus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lookahead {
+    Ready,
+    /// Looked and found none for the events past the last read.
+    Done,
+    /// Never, as when verifying an export.
+    Off,
 }
 
 /// How far a [`Chain`] was read: the last message read, the events that verified and the first break, kept with what
@@ -47,6 +81,10 @@ pub struct Position {
 /// An ant renamed keeps its log: its events are of the ant under its current name or one of its earlier names, as its
 /// home tells ([`Chain::with_earlier_names`]). The log's events are of one name at a time ([`Chain::named`]): the
 /// first event's, until a [`RENAMED`] event of the ant's new name, naming the one before as `from`.
+///
+/// A log imported from another bus holds events its credentials there signed: an [`Anchor`] signed on this bus, after
+/// them, vouches for them. Their signatures verify against the anchor's accounts, as of when each event was made, and
+/// the last of them must be the one the anchor names.
 #[derive(Debug, Clone)]
 pub struct Chain {
     sense: SenseId,
@@ -59,12 +97,31 @@ pub struct Chain {
     seen: Option<Mark>,
     broken: Option<Break>,
     events: u64,
+    anchor: Option<Anchor>,
+    lookahead: Lookahead,
 }
 
 impl Chain {
     /// The chain of `sense`, the identity of `ant`, of which `seen`, the furthest event verified before, is expected.
     pub fn new(sense: SenseId, ant: UserId, seen: Option<Mark>) -> Self {
-        Self { sense, ant, earlier: Vec::new(), named: None, tip: None, seen, broken: None, events: 0 }
+        Self {
+            sense,
+            ant,
+            earlier: Vec::new(),
+            named: None,
+            tip: None,
+            seen,
+            broken: None,
+            events: 0,
+            anchor: None,
+            lookahead: Lookahead::Ready,
+        }
+    }
+
+    /// The chain verifying every event against the bus's credentials alone, never asking for an [`Anchor`].
+    #[must_use]
+    pub fn without_anchors(self) -> Self {
+        Self { lookahead: Lookahead::Off, ..self }
     }
 
     /// The chain of an ant once named `earlier` too, as well as by its current name.
@@ -80,6 +137,11 @@ impl Chain {
     /// The ant reading and writing the log, by its current name.
     pub fn ant(&self) -> &UserId {
         &self.ant
+    }
+
+    /// Whether `name` is one of the ant's names, current or earlier.
+    pub fn knows(&self, name: &UserId) -> bool {
+        *name == self.ant || self.earlier.contains(name)
     }
 
     /// The ant's earlier names, whose events are its own too.
@@ -126,6 +188,10 @@ impl Chain {
     /// Go on reading from `position`, as read before, or with none from the log's start, as if nothing was read. The
     /// furthest event seen stays expected.
     pub fn resume(&mut self, position: Option<Position>) {
+        self.anchor = None;
+        if self.lookahead == Lookahead::Done {
+            self.lookahead = Lookahead::Ready;
+        }
         let Some(Position { sequence, tip, events, broken, ant }) = position else {
             (self.tip, self.events, self.broken, self.named) = (None, 0, None, None);
             return;
@@ -136,9 +202,19 @@ impl Chain {
         (self.tip, self.events, self.broken, self.named) = (Some((sequence, tip)), events, broken, ant);
     }
 
+    /// Go on checking with `anchor`, found ahead in the log after [`Verdict::Unanchored`]; with none, events not signed
+    /// for the bus break the chain until [`Chain::resume`].
+    pub fn anchored(&mut self, anchor: Option<Anchor>) {
+        match anchor {
+            Some(anchor) => self.anchor = Some(anchor),
+            None => self.lookahead = Lookahead::Done,
+        }
+    }
+
     /// Check `stored`, the message after the last read, with `verifier`, and move past it: its event if it verified,
-    /// none if it breaks the chain. Fails, without moving, only when the verifier cannot tell now.
-    pub async fn check(&mut self, stored: &Stored, verifier: &impl Verifier) -> Result<Option<Event>, VerifyError> {
+    /// none if it breaks the chain. Fails, without moving, only when the verifier cannot tell now; asks for an
+    /// [`Anchor`], without moving, when the event is not signed for the bus.
+    pub async fn check(&mut self, stored: &Stored, verifier: &impl Verifier) -> Result<Verdict, VerifyError> {
         let mark = Mark { index: self.tip().map_or(1, |tip| tip.index + 1), sha256: stored.sha256() };
         let event = match stored.event() {
             Ok(event) => event,
@@ -146,23 +222,38 @@ impl Chain {
                 let reason = format!("not an event: {e}");
                 self.broken.get_or_insert(Break { index: mark.index, sequence: Some(stored.sequence), reason });
                 self.tip = Some((stored.sequence, mark));
-                return Ok(None);
+                return Ok(Verdict::Broken);
             }
         };
         let problem = match self.problem(&event, &mark) {
             Some(problem) => Some(problem),
-            None => match verifier.verify(&event, stored.stored_at).await {
-                Ok(()) => None,
-                Err(VerifyError::Invalid(e)) => Some(e),
-                Err(e @ VerifyError::Unavailable(_)) => return Err(e),
+            None => match self.anchor.clone().filter(|anchor| event.index <= anchor.through.index) {
+                Some(anchor) => {
+                    let through = &anchor.through;
+                    match AccountVerifier::new(anchor.accounts, NoRevocations).verify(&event, event.at).await {
+                        Err(e) => Some(format!("imported: {e}")),
+                        Ok(()) if through.index == mark.index && through.sha256 != mark.sha256 => {
+                            Some(format!("differs from event {} as imported", through.index))
+                        }
+                        Ok(()) => None,
+                    }
+                }
+                None => match verifier.verify(&event, stored.stored_at).await {
+                    Ok(()) => None,
+                    Err(VerifyError::Invalid(_)) if self.lookahead == Lookahead::Ready => {
+                        return Ok(Verdict::Unanchored { index: mark.index });
+                    }
+                    Err(VerifyError::Invalid(e)) => Some(e),
+                    Err(e @ VerifyError::Unavailable(_)) => return Err(e),
+                },
             },
         };
         let expected = mark.index;
         let mark = Mark { index: event.index, ..mark };
-        let verified = match problem {
+        let verdict = match problem {
             Some(reason) => {
                 self.broken.get_or_insert(Break { index: expected, sequence: Some(stored.sequence), reason });
-                None
+                Verdict::Broken
             }
             None => {
                 self.events += 1;
@@ -170,11 +261,11 @@ impl Chain {
                     self.seen = Some(mark.clone());
                 }
                 self.named = Some(event.ant.clone());
-                Some(event)
+                Verdict::Verified(event)
             }
         };
         self.tip = Some((stored.sequence, mark));
-        Ok(verified)
+        Ok(verdict)
     }
 
     /// What is wrong with `event`, stored as `mark` says, past its signature.
@@ -203,7 +294,7 @@ impl Chain {
     /// What is wrong with the name of `event`'s ant: none when it is the name the log's events are of by then, or, for
     /// a [`RENAMED`] event, the ant's next name, renamed from that one.
     fn name_problem(&self, event: &Event) -> Option<String> {
-        let known = |name: &UserId| *name == self.ant || self.earlier.contains(name);
+        let known = |name: &UserId| self.knows(name);
         if !known(&event.ant) {
             return Some(format!("an event of {}, not of {} nor of an earlier name of it", event.ant, self.ant));
         }
