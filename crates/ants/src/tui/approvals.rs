@@ -1,8 +1,8 @@
 //! Tool request cards: the pending tool requests, on home and on their thread, with the ant, the tool and its input,
 //! answered at once with a, A or r through the path of `ants tools approve` and `reject`, the first decision winning
-//! ([`crate::live::Feed::decide`]); Enter shows a request in full as `ants dash` does, where a, A or r answer it too. A request settled while the UI
-//! runs keeps its card a while ([`SETTLED_FOR`]), saying how it was settled and by whom, unless the human decided it
-//! here.
+//! ([`crate::live::Feed::decide`]); Enter shows a request in full as `ants dash` does, where a, A or r answer it
+//! too. A request settled while the UI runs keeps its card a while ([`SETTLED_FOR`]), saying how it was settled and by
+//! whom, unless the human decided it here.
 
 use ants_proto::{ApprovalRequest, ThreadId, Verdict};
 use chrono::{DateTime, Local, TimeDelta, Utc};
@@ -235,6 +235,7 @@ impl Asking {
         })
     }
 }
+
 /// The request being answered in full over the screen, as `ants dash` shows it.
 pub fn draw_full(f: &mut Frame, asking: &Asking, now: DateTime<Utc>) {
     let [_, area, _] =
