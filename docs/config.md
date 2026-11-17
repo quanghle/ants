@@ -286,7 +286,7 @@ The signer also answers ants' reactions requests (MCP `react` and `list_reaction
 
 Managers also get `retire_ant(name)` (`other:retire_ant`) for ants whose `added_by` matches them:
 
-1. Removes the `[[ant]]` table from `config.toml` so the daemon drains and stops the ant.
+1. Removes the `[[ant]]` table from `config.toml` so the daemon drains and stops the ant, deleting its durable consumers `chan-<ant>` and `done-<ant>` ([lifecycle events](architecture.md#lifecycle-events)).
 2. Waits up to `5m` for `<name>` to leave `ants_colony`.
 3. Requests retirement from `ants signer` on `ants.antreq.<manager>` (every 5 s for up to `2m`); the signer verifies `issued.jsonl` (`template` + `added_by`), revokes `<name>`'s keys, and pushes the account to the hub. Behind a leaf node the request carries the uplink credentials, as `request_ant`'s does, and the signer renews them without `<name>`, drops it from the leaf's members and outbox sourcing, and the manager's machine writes them and reconnects the uplink ([transport.md](transport.md#enrollment-behind-a-leaf-node)); when that fails, the retirement stands and the manager's reply names `ants auth leaf M --remove-ant NAME` and `ants leaf outbox M --remove-ant NAME`.
 4. Deletes `<name>.creds` (and any OS-stored seed).

@@ -445,6 +445,11 @@ pub fn mark_retired(home: &Path) -> Result<()> {
     write_retired(home, &Retired { id: Uuid::new_v4(), at: Utc::now(), told: false })
 }
 
+/// The retirement the ant whose home is `home` is marked with ([`mark_retired`]), if any: each marks it anew.
+pub async fn retirement(home: &Path) -> Option<Uuid> {
+    read_retired(home).await.map(|retired| retired.id)
+}
+
 /// Take back [`mark_retired`]: for a retirement that failed, or an ant served again.
 pub fn unmark_retired(home: &Path) {
     if let Err(e) = std::fs::remove_file(home.join(DIR).join(RETIRED))

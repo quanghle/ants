@@ -94,7 +94,8 @@ impl Permissions {
     /// [`subject::react`]); it sets every thread's title, TL;DR and done state and its own pinned,
     /// archived and snoozed threads, no other human's ([`thread_rights`]), while an ant only reads, one key at a time,
     /// a thread's title and done state and a human's own [`Reminders`](crate::Reminders) entry (its snoozes and reminder notes), and
-    /// hears of every done state set through its own consumer ([`done_reader`]), nothing else of [`THREADS_BUCKET`], and of
+    /// hears of every done state set through its own consumer ([`done_reader`]), which it deletes, with its channel
+    /// consumer ([`chan_consumer`]), as its retirement stops it, nothing else of [`THREADS_BUCKET`], and of
     /// [`READ_BUCKET`] and [`NOTIFY_BUCKET`] only a human's inbox [`ReadMarker`] and [`NotifyPrefs`], to stop reminding
     /// a human of an escalation it heeded; it reads every device's encryption key in
     /// [`DEVICES_BUCKET`] and puts only its own devices' ([`device_directory_rights`]). A human may send under
@@ -305,6 +306,11 @@ impl Permissions {
             format!("$JS.API.CONSUMER.MSG.NEXT.{threads}.{done}"),
         ]);
         publish.extend(ack_subjects(&threads, &done));
+        // Deleting that consumer and its channel consumer as its retirement stops it, so neither keeps piling up.
+        publish.extend([
+            format!("$JS.API.CONSUMER.DELETE.{threads}.{done}"),
+            format!("$JS.API.CONSUMER.DELETE.{STREAM}.{}", chan_consumer(user)),
+        ]);
         // The spares of its inbox consumer and its notes and channel readers, for the CLI, each with the same
         // filter pinned; no ack, so the spares of the inbox consumer only read it.
         let own_inbox = subject::inbox_of(user);

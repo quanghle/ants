@@ -9,12 +9,13 @@ use std::time::Duration;
 
 use ants_proto::{
     ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, COLONY_BUCKET, Envelope, FILES_STREAM, JsDomain, LINKS_BUCKET,
-    SESSIONS_BUCKET, STREAM, UserId, inbox_prefix, subject,
+    SESSIONS_BUCKET, STREAM, THREADS_BUCKET, UserId, inbox_prefix, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::consumer::{self, PullConsumer, pull};
 use async_nats::jetstream::context::{ConsumerInfoErrorKind, PublishErrorKind};
-use async_nats::jetstream::{self, kv, stream};
+use async_nats::jetstream::stream::ConsumerErrorKind;
+use async_nats::jetstream::{self, ErrorCode, kv, stream};
 use async_nats::{ConnectErrorKind, Event};
 use futures::{Stream, StreamExt as _};
 
@@ -526,6 +527,23 @@ pub async fn chan_consumer<I>(
         .await
         .with_context(|| format!("creating consumer {name}"))?;
     Ok(consumer.messages().await?)
+}
+
+/// Delete the durable consumers that keep for `ant` what reaches it while no daemon serves it, but its inbox's: its
+/// channel posts' ([`ants_proto::chan_consumer`]) and the done states' ([`ants_proto::done_reader`]), as its
+/// retirement stops it, so neither piles up for an ant that may never be served again. Serving it again creates them
+/// anew, starting with what is stored from then on.
+pub async fn forget_retired(js: &jetstream::Context, ant: &UserId) {
+    let threads = format!("KV_{THREADS_BUCKET}");
+    for (stream, name) in [(STREAM, ants_proto::chan_consumer(ant)), (threads.as_str(), ants_proto::done_reader(ant))] {
+        match js.delete_consumer_from_stream(&name, stream).await {
+            Ok(_) => tracing::info!(consumer = name, "deleted the consumer of the retired ant"),
+            Err(e)
+                if matches!(e.kind(), ConsumerErrorKind::JetStream(e)
+                if [ErrorCode::CONSUMER_NOT_FOUND, ErrorCode::STREAM_NOT_FOUND].contains(&e.error_code())) => {}
+            Err(e) => tracing::warn!(consumer = name, error = %e, "deleting a consumer of the retired ant"),
+        }
+    }
 }
 
 /// Where [`store`] put a message.

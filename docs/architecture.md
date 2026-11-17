@@ -340,14 +340,14 @@ ants sends an ant's provider its lifecycle events only when both declared `event
 | Kind | Sent when |
 |---|---|
 | `ant_added` | A daemon first serves the ant with a given identity id: a new ant, or a home given an ant of another id. |
-| `ant_retired` | A retirement (`ants retire`, a manager's `retire_ant`, an admin order) marks the home `lifecycle/retired` before unlisting the ant; the daemon serving it sends the event once it stopped the ant, or, when none was serving it, the daemon serving it again sends it first. An ant dropped by editing `config.toml` is not told retired. |
+| `ant_retired` | A retirement (`ants retire`, a manager's `retire_ant`, an admin order) marks the home `lifecycle/retired` before unlisting the ant; the daemon serving it sends the event once it stopped the ant, or, when none was serving it, the daemon serving it again sends it first. Stopping an ant so retired, the daemon deletes its durable consumers `chan-<ant>` and `done-<ant>` before the ant leaves the colony, so neither keeps channel posts or done states for it; serving it again creates them anew, from what is stored from then on, so a thread marked done while it was retired is not told. An ant dropped by editing `config.toml` is not told retired. |
 | `ant_revived` | A daemon serves an ant whose home is marked retired. |
 | `ant_cloned` | A clone order queues it in the clone's home, with the source ant and its identity id; the clone gets no `ant_added`. |
 | `ant_moved`, `ant_renamed` | `ants ant import` queues `ant_moved`, then `ant_renamed` under `--as`, in the new home; the ant gets no `ant_added`. No other rename exists, and a daemon of the same bus taking an ant over is not a move. |
 | `thread_started` | A message comes on a thread the ant holds no session of, with the message's `origin`. |
 | `thread_expired` | A thread's worktree goes because its session expired (threads in worktrees only). |
 | `session_lost`, `session_rebuilt` | A stored session fails to resume and a new one starts (`lost`); the harness moves to a new session on a full context window (`overflow`). |
-| `thread_done` | A thread the ant holds a session of is marked done (`ants thread done`, an assistant's `done_for_human`), at the time it was marked. The daemon hears each done state put in `ants_threads` through the ant's durable consumer `done-<ant>`, filtered on `done.*`, one at a time, and acks it once the event is queued, so a thread marked done while no daemon served the ant is told once one does; a repeat carries the same id. A done state cleared (`ants thread undone`) tells nothing. |
+| `thread_done` | A thread the ant holds a session of is marked done (`ants thread done`, an assistant's `done_for_human`), at the time it was marked. The daemon hears each done state put in `ants_threads` through the ant's durable consumer `done-<ant>`, filtered on `done.*`, one at a time, and acks it once the event is queued, so a thread marked done while no daemon served the ant is told once one does, unless the ant was retired meanwhile; a repeat carries the same id. A done state cleared (`ants thread undone`) tells nothing. |
 
 Delivery:
 
@@ -426,7 +426,7 @@ Channels (`ants.chan.<channel>.<from>`, metadata in `ants_channels`) group ants 
 - **Ownership & budget:** human starters/posters or webhook `owner` set thread `owner`; ant starters set `creator` (propagated across spin-offs via `origin_thread` and `ants_links`). Ant posts share the thread's turn budget (minimum remaining across later posts), escalating `turn_budget` when exhausted. A member's answer to an ant's post replying to the member's own post, or a turn ended by `complete`, is not posted.
 - **Channel owners:** `--owner ANT` lets that ant call `manage_channel` via `ants.chanadm.<channel>.<ant>` to `ants channel serve` (`ants auth channel-manager` creds), which validates ownership/colony and announces changes on `ants.chan.<channel>.channel-manager`.
 - **Description:** a channel may carry a description of up to 1000 characters, set by a human (`ants channel create|set --description`, `--no-description`) or by its assistant for it (`describe_channel_for_human`, a request to the channel manager carrying `on_behalf_of`, honoured only while the human's grant names the assistant and announced on the channel), never by an owner ant's `manage_channel`. The daemon adds it, after the provider's brief, to the first prompt of each session of a member ant on a thread of the channel (started, loaded, or rebuilt after a context overflow), so a running session keeps the description it started with and a change reaches new sessions only.
-- **Delivery:** ants read `ants.chan.>` via durable consumer `chan-<ant>`, prepending up to 50 unseen thread posts (`<ant>.<thread>.seen` in `ants_sessions`).
+- **Delivery:** ants read `ants.chan.>` via durable consumer `chan-<ant>` (deleted on the ant's [retirement](#lifecycle-events), so posts made while it is retired never reach it), prepending up to 50 unseen thread posts (`<ant>.<thread>.seen` in `ants_sessions`).
 
 ## Escalations, dead letters and storage
 

@@ -336,9 +336,13 @@ async fn assistant_sealing(
     Ok(Some(crate::secrets::sealing::AssistantSealing::new(ant.clone(), xkey, humans.clone(), directory)))
 }
 
-/// Serve the ant's inbox until Ctrl-C or `stop`, or until another daemon takes over its colony entry.
+/// Serve the ant's inbox until Ctrl-C or `stop`, or until another daemon takes over its colony entry. A stop by a
+/// retirement marked while served ([`events::mark_retired`]) deletes the ant's channel and done consumers
+/// ([`bus::forget_retired`]) before it leaves the colony, which the retirement waits for to revoke its credentials.
 async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Served> {
     let allow = Allowlist::parse(&config.policy.allow)?;
+    // A mark left by an earlier retirement the ant was served again after, which a provider taking no events keeps.
+    let retired_before = events::retirement(&config.storage.home).await;
     let Some((client, js)) = connect(&config.connection, &config.ant, stop).await? else {
         tracing::info!("stopped before connecting");
         return Ok(Served::Stopped);
@@ -371,13 +375,12 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         mcp,
         launch,
     } = services(config, &client, &js, &humans, allow, &entry.machine).await?;
-    let js_domain = config.connection.js_domain.as_ref();
     let stream = bus::open_stream(&js, &config.ant).await?;
     let threads = Threads::new(js.clone(), config.ant.clone(), sessions_kv.clone()).reading(reading);
     let webhooks = Webhooks::new(js.clone());
     let storage = storage_watcher(config, &js, &sessions_kv);
     let sessions = SessionStore::kv(sessions_kv, config.ant.clone());
-    let attempts_kv = bus::ensure_attempts(&js, js_domain, &config.ant).await?;
+    let attempts_kv = bus::ensure_attempts(&js, config.connection.js_domain.as_ref(), &config.ant).await?;
     let attempts = Attempts::new(attempts_kv.clone(), config.ant.clone());
     let outbox = redacting_outbox(crate::mcp::jetstream_outbox(js.clone()), redactor.clone());
     let _waking = crate::provider::wake::serve(&config.ant, &js, outbox, sessions.clone(), attempts_kv).await;
@@ -434,8 +437,24 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         lifecycle: lifecycle.as_ref(),
     };
     let served = Box::pin(serve_inbox(&inbox, messages, channels, config, stop, &registration, &storage)).await?;
+    forget_if_retired(&served, config, &js, retired_before).await;
     wind_down(&served, registration, pool, lifecycle.as_ref()).await;
     Ok(served)
+}
+
+/// Delete the ant's channel and done consumers when [`serve`] stopped as a retirement other than `retired_before` is
+/// marked.
+async fn forget_if_retired(
+    served: &Served,
+    config: &Config,
+    js: &jetstream::Context,
+    retired_before: Option<uuid::Uuid>,
+) {
+    if *served == Served::Stopped
+        && events::retirement(&config.storage.home).await.is_some_and(|r| Some(r) != retired_before)
+    {
+        bus::forget_retired(js, &config.ant).await;
+    }
 }
 
 /// Leave the colony and end the harness sessions once [`serve`] ended; on a stop, tell the ant's provider of its

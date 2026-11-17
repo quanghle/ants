@@ -147,6 +147,53 @@ async fn an_ant_s_daemon_hears_the_threads_marked_done_through_its_own_consumer_
     message.ack().await.unwrap();
 }
 
+/// As its retirement stops it, an ant's daemon deletes its own done and channel consumers, no other ant's, so a done
+/// state put while it is retired is not told once it is served again, which creates them anew.
+#[tokio::test]
+async fn an_ant_s_daemon_deletes_its_own_done_and_channel_consumers_on_its_retirement() {
+    use ants_daemon::provider::events::done;
+    use async_nats::jetstream::ErrorCode;
+    use async_nats::jetstream::stream::ConsumerErrorKind;
+
+    let Some(server) = Server::start() else { return };
+    let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
+    let (_, a_js) = server.connect_as(&alice, Role::Human).await;
+    let (_, d_js) = server.connect(&dev_a).await;
+    let (_, b_js) = server.connect(&dev_b).await;
+    bus::ensure_stream(&a_js).await.unwrap();
+    a_js.create_stream(ants_daemon::hub::threads_config()).await.unwrap();
+    let threads = format!("KV_{}", ants_proto::THREADS_BUCKET);
+    let serve = async |js: &jetstream::Context, ant: &UserId| {
+        let stream = bus::open_stream(js, ant).await.unwrap();
+        drop(bus::chan_consumer(&stream, ant, WAIT, 5, 1).await.unwrap());
+        done::consumer(js, ant).await.unwrap()
+    };
+    drop(serve(&d_js, &dev_a).await);
+    drop(serve(&b_js, &dev_b).await);
+
+    bus::forget_retired(&d_js, &dev_a).await;
+    for (name, stream) in [(chan_consumer(&dev_a), STREAM), (ants_proto::done_reader(&dev_a), threads.as_str())] {
+        let Err(gone) = d_js.delete_consumer_from_stream(&name, stream).await else { panic!("{name} left") };
+        assert!(
+            matches!(gone.kind(), ConsumerErrorKind::JetStream(e) if e.error_code() == ErrorCode::CONSUMER_NOT_FOUND),
+            "{name} deleted: {gone}"
+        );
+    }
+    for (name, stream) in [(chan_consumer(&dev_b), STREAM), (ants_proto::done_reader(&dev_b), threads.as_str())] {
+        assert!(d_js.delete_consumer_from_stream(&name, stream).await.is_err(), "{name} is not dev-a's to delete");
+        b_js.delete_consumer_from_stream(&name, stream).await.expect("dev-b's own stays");
+    }
+
+    let meta = crate::threads::thread_meta::Meta::open(&a_js, None, &alice).await.unwrap();
+    let (while_retired, revived) = (ThreadId::generate(), ThreadId::generate());
+    meta.set_done(&while_retired, 4).await.unwrap();
+    let mut dones = serve(&d_js, &dev_a).await;
+    meta.set_done(&revived, 5).await.unwrap();
+    let message = timeout(WAIT, dones.next()).await.unwrap().unwrap().unwrap();
+    let done = format!("$KV.{}.{}", ants_proto::THREADS_BUCKET, ants_proto::done_key(&revived));
+    assert_eq!(message.subject.as_str(), done, "only what is marked done once it is served again");
+}
+
 #[tokio::test]
 async fn a_human_adopts_an_ant_s_title_only_on_a_thread_never_titled() {
     use crate::threads::thread_meta::Meta;

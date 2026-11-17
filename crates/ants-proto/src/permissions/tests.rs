@@ -596,6 +596,7 @@ fn channels_are_readable_by_ants_and_written_by_humans_only() {
         "$JS.API.CONSUMER.CREATE.ANTS.chanread-dev-a.ants.chan.>",
         "$JS.ACK.ANTS.chan-dev-a.>",
         "$JS.ACK.*.*.ANTS.chan-dev-a.>",
+        "$JS.API.CONSUMER.DELETE.ANTS.chan-dev-a",
     ] {
         assert!(a.publish.iter().any(|have| have == s), "{s} missing from {:?}", a.publish);
     }
@@ -869,10 +870,12 @@ fn humans_set_every_title_tldr_and_done_state_but_only_their_own_pins_and_archiv
         "$JS.API.CONSUMER.MSG.NEXT.KV_ants_threads.done-dev-a".to_owned(),
     ]);
     reads.extend(ack_subjects("KV_ants_threads", "done-dev-a"));
+    reads.push("$JS.API.CONSUMER.DELETE.KV_ants_threads.done-dev-a".to_owned());
     assert_eq!(
         threads,
         reads.iter().collect::<Vec<_>>(),
-        "an ant only reads titles, done states and own reminders, and hears of done states through its own consumer"
+        "an ant only reads titles, done states and own reminders, and hears of done states through its own consumer, \
+         which it deletes on its retirement"
     );
     let assisted = "$JS.API.DIRECT.GET.KV_ants_threads.$KV.ants_threads.reminders.alice.pa";
     assert!(!threads.iter().any(|s| covers(s, assisted)), "nor snoozes an assistant set");
