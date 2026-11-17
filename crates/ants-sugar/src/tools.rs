@@ -92,15 +92,17 @@ pub const TOOLS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "checkpoint",
-        description: "Replace this thread's resume register: goal, current step, next action, blockers.",
+        description: "Replace this thread's resume register (goal, current step, next action, blockers, branch, open \
+                      questions) from the revision read, acknowledging this thread's handoffs.",
         schema: checkpoint,
-        handler: not_available,
+        handler: crate::thread::checkpoint,
     },
     ToolSpec {
         name: "handoff",
-        description: "Hand the work over: what was done, is in flight and comes next, promises, decisions, files.",
+        description: "Hand the work over as the thread's last write: what was done, is in flight and comes next, \
+                      promises, decisions, files.",
         schema: handoff,
-        handler: not_available,
+        handler: crate::thread::handoff,
     },
 ];
 
@@ -138,7 +140,16 @@ fn checkpoint() -> Value {
         "blockers": strings(),
         "branch": {"type": "string"},
         "questions": strings(),
-        "revision": {"type": "integer", "description": "The revision this replaces, from the brief."},
+        "revision": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "The revision this replaces, from the brief or the last checkpoint; none for the first.",
+        },
+        "acknowledges": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Handoffs of other threads to acknowledge, by id.",
+        },
     }))
 }
 

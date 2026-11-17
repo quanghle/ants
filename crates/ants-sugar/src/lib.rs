@@ -17,6 +17,7 @@ pub mod items;
 pub mod log;
 pub mod sanitize;
 pub mod store;
+pub mod thread;
 mod tools;
 
 pub use tools::{Answer, MAX_TOOLS, TOOLS, ToolSpec};

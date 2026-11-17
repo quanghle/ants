@@ -150,6 +150,40 @@ async fn a_change_raced_by_another_writer_is_decided_again_on_what_it_wrote() {
 }
 
 #[tokio::test]
+async fn an_item_of_a_known_id_is_created_once_then_changed_from_the_revision_expected() {
+    let (log, sugar) = (MemoryLog::default(), SugarId::new());
+    let (mut a, mut b) = (open(&log, &sugar, None).await, open(&log, &sugar, None).await);
+    let id = ItemId::named("note", "only");
+    let missing = a.put(&id, "note", note("one"), Some(1), "a").await.unwrap_err();
+    assert!(matches!(missing, StoreError::NotFound(_)), "{missing:?}");
+    let created = a.put(&id, "note", note("one"), Some(0), "a").await.unwrap();
+    assert_eq!((&created.id, created.revision, created.kind.as_str()), (&id, 1, "note"));
+
+    // b has not read a's creation: it finds the item when the log refuses its append.
+    let refused = b.put(&id, "note", note("two"), Some(0), "b").await.unwrap_err();
+    let StoreError::Conflict { expected: 0, current } = refused else { panic!("{refused:?}") };
+    assert_eq!(*current, created);
+    let changed = b.put(&id, "note", note("two"), Some(1), "b").await.unwrap();
+    assert_eq!((changed.revision, changed.text("title")), (2, "two"));
+    let anyway = a.put(&id, "note", values(json!({ "body": null })), None, "a").await.unwrap();
+    assert_eq!((anyway.revision, anyway.values.get("body")), (3, None));
+}
+
+#[tokio::test]
+async fn items_are_listed_by_a_text_value_or_its_absence() {
+    let log = MemoryLog::default();
+    let mut store = open(&log, &SugarId::new(), None).await;
+    let one = store.create("note", values(json!({ "thread": "t1" })), "t").await.unwrap();
+    let two = store.create("note", values(json!({ "thread": "t2", "done": true })), "t").await.unwrap();
+    store.create("other", values(json!({ "thread": "t1" })), "t").await.unwrap();
+    let ids = |items: Vec<Item>| items.into_iter().map(|item| item.id).collect::<Vec<_>>();
+    assert_eq!(ids(store.list_by("note", "thread", Some("t1"), 10).unwrap()), std::slice::from_ref(&one.id));
+    assert_eq!(ids(store.list_by("note", "done", None, 10).unwrap()), [one.id]);
+    assert_eq!(ids(store.list_by("note", "thread\"", Some("t2"), 10).unwrap()), [two.id]);
+    assert_eq!(store.list_by("note", "thread", Some("t3"), 10).unwrap(), []);
+}
+
+#[tokio::test]
 async fn the_cache_is_built_again_unless_built_from_this_log_where_it_catches_up() {
     let (log, sugar) = (MemoryLog::default(), SugarId::new());
     let home = ants_test_support::scratch_dir("sugar-cache");

@@ -106,6 +106,30 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
         .await
     }
 
+    /// Set `values` of item `id`, creating it of `kind` with them when missing, for `by`: refused when `expected` is
+    /// given and the item is at another revision, 0 standing for no item ([`StoreError::Conflict`] with the item, or
+    /// [`StoreError::NotFound`] for an item expected but missing). For an item of a known id ([`ItemId::named`]).
+    pub async fn put(
+        &mut self,
+        id: &ItemId,
+        kind: &str,
+        values: Values,
+        expected: Option<u64>,
+        by: &str,
+    ) -> Result<Item, StoreError> {
+        self.commit(|cache| match cache.get(id)? {
+            None if expected.unwrap_or_default() == 0 => {
+                Ok(Ok(Change { id: id.clone(), ..Change::create(kind, values.clone(), by) }))
+            }
+            None => Err(StoreError::NotFound(id.clone())),
+            Some(current) if expected.is_some_and(|expected| expected != current.revision) => {
+                Err(StoreError::Conflict { expected: expected.unwrap_or_default(), current: Box::new(current) })
+            }
+            Some(current) => Ok(Change::of(&current, values.clone(), by).ok_or(current)),
+        })
+        .await
+    }
+
     pub fn get(&self, id: &ItemId) -> Result<Option<Item>, StoreError> {
         Ok(self.cache.get(id)?)
     }
@@ -113,6 +137,12 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
     /// The items of `kind`, the last changed first, up to `limit`.
     pub fn list(&self, kind: &str, limit: usize) -> Result<Vec<Item>, StoreError> {
         Ok(self.cache.list(kind, limit)?)
+    }
+
+    /// The items of `kind` whose value `name` is the text `value`, or which have no value `name` when `value` is none,
+    /// the last changed first, up to `limit`.
+    pub fn list_by(&self, kind: &str, name: &str, value: Option<&str>, limit: usize) -> Result<Vec<Item>, StoreError> {
+        Ok(self.cache.list_by(kind, name, value, limit)?)
     }
 
     /// The items matching `text` best ([`Cache::search`]).
@@ -202,9 +232,26 @@ pub trait Items: Send + Sync {
         expected: Option<u64>,
         by: &'a str,
     ) -> BoxFuture<'a, Result<Item, StoreError>>;
+    /// [`Store::put`].
+    fn put<'a>(
+        &'a self,
+        id: &'a ItemId,
+        kind: &'a str,
+        values: Values,
+        expected: Option<u64>,
+        by: &'a str,
+    ) -> BoxFuture<'a, Result<Item, StoreError>>;
     fn get<'a>(&'a self, id: &'a ItemId) -> BoxFuture<'a, Result<Option<Item>, StoreError>>;
     /// [`Store::list`].
     fn list<'a>(&'a self, kind: &'a str, limit: usize) -> BoxFuture<'a, Result<Vec<Item>, StoreError>>;
+    /// [`Store::list_by`].
+    fn list_by<'a>(
+        &'a self,
+        kind: &'a str,
+        name: &'a str,
+        value: Option<&'a str>,
+        limit: usize,
+    ) -> BoxFuture<'a, Result<Vec<Item>, StoreError>>;
     /// [`Store::search`].
     fn search<'a>(
         &'a self,
@@ -240,12 +287,33 @@ where
         Box::pin(async move { self.lock().await.change(id, values, expected, by).await })
     }
 
+    fn put<'a>(
+        &'a self,
+        id: &'a ItemId,
+        kind: &'a str,
+        values: Values,
+        expected: Option<u64>,
+        by: &'a str,
+    ) -> BoxFuture<'a, Result<Item, StoreError>> {
+        Box::pin(async move { self.lock().await.put(id, kind, values, expected, by).await })
+    }
+
     fn get<'a>(&'a self, id: &'a ItemId) -> BoxFuture<'a, Result<Option<Item>, StoreError>> {
         Box::pin(async move { self.lock().await.get(id) })
     }
 
     fn list<'a>(&'a self, kind: &'a str, limit: usize) -> BoxFuture<'a, Result<Vec<Item>, StoreError>> {
         Box::pin(async move { self.lock().await.list(kind, limit) })
+    }
+
+    fn list_by<'a>(
+        &'a self,
+        kind: &'a str,
+        name: &'a str,
+        value: Option<&'a str>,
+        limit: usize,
+    ) -> BoxFuture<'a, Result<Vec<Item>, StoreError>> {
+        Box::pin(async move { self.lock().await.list_by(kind, name, value, limit) })
     }
 
     fn search<'a>(

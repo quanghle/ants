@@ -182,6 +182,17 @@ impl Cache {
         rows.map(|item| Ok(serde_json::from_str(&item?)?)).collect()
     }
 
+    /// The items of `kind` whose value `name` is the text `value`, or which have no value `name` when `value` is none,
+    /// the last changed first, up to `limit`.
+    pub fn list_by(&self, kind: &str, name: &str, value: Option<&str>, limit: usize) -> Result<Vec<Item>, CacheError> {
+        let path = format!("$.values.\"{}\"", name.replace('"', ""));
+        let mut query = self.db.prepare(
+            "SELECT item FROM items WHERE kind = ?1 AND json_extract(item, ?2) IS ?3 ORDER BY updated_at DESC LIMIT ?4",
+        )?;
+        let rows = query.query_map(params![kind, path, value, limit_of(limit)], |row| row.get::<_, String>(0))?;
+        rows.map(|item| Ok(serde_json::from_str(&item?)?)).collect()
+    }
+
     /// The items, of `kind` if given, whose title or body holds any word of `text`, the best matches first (BM25, a
     /// title's words weighing more), up to `limit`. `text` is taken as words only, never as an FTS5 query.
     pub fn search(&self, text: &str, kind: Option<&str>, limit: usize) -> Result<Vec<Hit>, CacheError> {

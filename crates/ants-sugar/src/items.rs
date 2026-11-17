@@ -10,6 +10,7 @@ use ants_proto::Machine;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 /// The kind of the log events changing an item, whose data is a [`Change`].
@@ -33,7 +34,17 @@ pub struct ItemId(String);
 impl ItemId {
     /// A new id: a ULID of the time now, with the random bits of a UUID v7.
     pub fn new() -> Self {
-        let value = Uuid::now_v7().as_u128();
+        Self::of(Uuid::now_v7().as_u128())
+    }
+
+    /// The id of the item of `kind` named `name`, the same for every writer: for an item there is one of per name,
+    /// such as a thread's resume register, so writers creating it at once create the same item.
+    pub fn named(kind: &str, name: &str) -> Self {
+        let digest = Sha256::new().chain_update(kind).chain_update([0]).chain_update(name).finalize();
+        Self::of(u128::from_be_bytes(digest[..16].try_into().expect("16 bytes")))
+    }
+
+    fn of(value: u128) -> Self {
         Self((0..26).map(|i| char::from(CROCKFORD[((value >> (125 - 5 * i)) & 31) as usize])).collect())
     }
 
@@ -233,6 +244,11 @@ mod tests {
         assert_eq!(serde_json::from_value::<ItemId>(json!(id.as_str())).unwrap(), id);
         assert!("8ZZZZZZZZZZZZZZZZZZZZZZZZZ".parse::<ItemId>().is_err());
         assert!("01ARZ3NDEKTSV4RRFFQ69G5FAI".parse::<ItemId>().is_err(), "I is no Crockford digit");
+        let named = ItemId::named("checkpoint", "t1");
+        assert_eq!(named.as_str().parse::<ItemId>(), Ok(named.clone()));
+        assert_eq!(named, ItemId::named("checkpoint", "t1"));
+        assert_ne!(named, ItemId::named("checkpoint", "t2"));
+        assert_ne!(named, ItemId::named("handoff", "t1"));
     }
 
     #[test]
