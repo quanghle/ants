@@ -19,6 +19,9 @@ mod parse;
 pub use bar::{Bar, Edited, Tone};
 pub use parse::{COMMANDS, Command, Goto, Slash, parse};
 
+/// A paste of more bytes than this is staged as a text file rather than put in the bar.
+const PASTE_ATTACH: usize = 64 * 1024;
+
 /// What `/grant` without a text sends the stuck ant.
 pub const GRANT: &str = "Carry on: fresh turns granted.";
 
@@ -227,6 +230,29 @@ impl Model {
         self.bar.set_status(line, Tone::Done);
     }
 
+    /// Take `text` pasted into the bar, focusing it: image files dropped on the terminal, or a paste of over
+    /// [`PASTE_ATTACH`] bytes as a text file, staged as `/attach` does; else the text at the cursor.
+    pub(super) fn paste_in_bar(&mut self, text: &str) {
+        self.bar.focused = true;
+        let staged = if let Some(paths) = attach::dropped_images(text) {
+            paths
+                .iter()
+                .map(|path| self.bar.staged.add_path(path))
+                .collect::<anyhow::Result<Vec<_>>>()
+                .map(|l| l.join(" · "))
+        } else if text.len() > PASTE_ATTACH {
+            self.bar.staged.add_paste(text)
+        } else {
+            self.bar.paste(text);
+            self.bar.pick = complete::Pick::default();
+            return;
+        };
+        match staged {
+            Ok(line) => self.bar.set_status(line, Tone::Done),
+            Err(e) => self.bar.set_status(format!("{e:#}"), Tone::Error),
+        }
+    }
+
     /// The marked attachment of the message selected in the view, if any.
     pub fn attachment(&self) -> Option<attachments::Listed> {
         match self.page() {
@@ -253,13 +279,13 @@ impl Model {
     /// Open the bar to reply on `thread` to the message `quoted`, its text begun with an @mention of `mention` in
     /// place of any it began with.
     pub(super) fn quote(&mut self, thread: ThreadId, quoted: Quoted, mention: Option<&UserId>) {
-        let text = self.bar.text();
+        let text = self.bar.raw();
         let rest = match text.strip_prefix('@') {
             Some(after) => after.split_once(char::is_whitespace).map_or("", |(_, rest)| rest.trim_start()),
             None => &text,
         };
         let mention = mention.map_or_default(|m| format!("@{m} "));
-        self.bar.set_text(&format!("{mention}{rest}"));
+        self.bar.set_raw(&format!("{mention}{rest}"));
         self.bar.quoting = Some((thread, quoted));
         self.bar.focused = true;
     }
@@ -443,6 +469,46 @@ mod tests {
         for c in text.chars() {
             m.key(if c == '\n' { Key::Newline } else { Key::Char(c) }, at(0));
         }
+    }
+
+    #[test]
+    fn a_paste_goes_into_the_bar_whole_its_line_breaks_new_lines_rather_than_enter() {
+        let mut m = model();
+        m.paste("q\r\nnow\tplease\x1b\rdone", at(0));
+        assert!(m.bar.focused, "a paste where nothing is typed focuses the bar");
+        assert_eq!(m.bar.text(), "q\nnow    please\ndone");
+        m.key(Key::Home, at(0));
+        m.paste("so\n", at(0));
+        assert_eq!(m.bar.text(), "so\nq\nnow    please\ndone", "pasted at the cursor");
+        m.key(Key::Esc, at(0));
+        m.help = true;
+        m.paste("q", at(0));
+        assert!(m.help && !m.bar.focused, "help takes no paste");
+    }
+
+    #[test]
+    fn a_paste_too_long_for_the_bar_or_of_dropped_images_is_attached() {
+        let mut m = model();
+        let log = "a\tlog line\n".repeat(7000);
+        m.paste(&log, at(0));
+        assert!(m.bar.focused && m.bar.is_empty());
+        assert_eq!(m.bar.staged.names(), ["paste-1.txt"]);
+        assert_eq!(m.bar.status.as_ref().unwrap().text, "attached paste-1.txt (75 KiB): sent with the next message");
+        let files = m.bar.staged.take("see").unwrap();
+        assert_eq!((files[0].bytes.as_slice(), files[0].attachment.mime.as_str()), (log.as_bytes(), "text/plain"));
+
+        let dir = ants_test_support::scratch_dir("pasted");
+        let shot = dir.join("shot.png");
+        std::fs::write(&shot, b"png").unwrap();
+        m.paste(&format!("'{}' ", shot.display()), at(0));
+        assert!(m.bar.is_empty());
+        assert_eq!(m.bar.staged.names(), ["shot.png"]);
+        m.paste(&format!("{} ", shot.display()), at(0));
+        assert_eq!(m.bar.staged.names(), ["shot.png", "shot.png"]);
+        m.paste(&"x".repeat(9 << 20), at(0));
+        let status = m.bar.status.as_ref().unwrap();
+        assert!(status.tone == Tone::Error && status.text.contains("an attachment is at most"), "{status:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

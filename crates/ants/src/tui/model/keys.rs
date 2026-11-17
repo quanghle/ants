@@ -94,6 +94,38 @@ impl Model {
         }
     }
 
+    /// Take `text` pasted: into the prompt or the draft being typed, on one line, else into the bar, focused for it,
+    /// line breaks and all; dropped where only keys are answered (help, the digest, a tool request, a confirmation) and
+    /// in the compact view, rather than taken as keys.
+    pub fn paste(&mut self, text: &str, now: DateTime<Utc>) {
+        let text = pasted(text);
+        if text.is_empty()
+            || self.compact
+            || self.help
+            || self.catchup.shown()
+            || self.interrupting.is_some()
+            || self.asking.as_ref().is_some_and(Asking::takes_keys)
+        {
+            return;
+        }
+        let line = text.replace(['\n', '\t'], " ");
+        if self.snoozing.is_some() {
+            line.chars().for_each(|c| _ = self.snooze_key(Key::Char(c), now));
+            return;
+        }
+        if let Some(picker) = &mut self.picking {
+            line.chars().for_each(|c| _ = picker.key(Key::Char(c)));
+            return;
+        }
+        if !self.bar.focused
+            && self.focus == Focus::View
+            && self.pages.last_mut().is_some_and(|page| write(page, &line))
+        {
+            return;
+        }
+        self.paste_in_bar(&text);
+    }
+
     /// Take `key` while a tool request is being answered.
     fn answer(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
         let asking = self.asking.as_mut()?;
@@ -262,4 +294,21 @@ impl Model {
             }
         }
     }
+}
+
+/// `text` as pasted: its line breaks `\n` whichever the terminal sent, and no control characters but those and tabs,
+/// nor the private-use ones the bar's placeholders take.
+fn pasted(text: &str) -> String {
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    let kept = |c: &char| matches!(c, '\n' | '\t') || !(c.is_control() || ('\u{F0000}'..='\u{FFFFD}').contains(c));
+    text.chars().filter(kept).collect()
+}
+
+/// Type `line` into the draft `page` is writing, if any: whether it took it.
+fn write(page: &mut Page, line: &str) -> bool {
+    line.chars().all(|c| match page {
+        Page::Dm(page) => page.write(Key::Char(c)).is_some(),
+        Page::Ant(page) => page.write(Key::Char(c)).is_some(),
+        _ => false,
+    })
 }

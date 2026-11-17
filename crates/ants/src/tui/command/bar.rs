@@ -17,6 +17,13 @@ use crate::tui::{attach, complete, frame};
 const MAX_LINES: usize = 6;
 /// What the empty bar shows.
 const HINT: &str = "Ctrl-K commands · @ ant · # channel";
+/// A paste of more characters than this, or of more lines than `PASTE_LINES`, shows as a placeholder.
+const PASTE_CHARS: usize = 800;
+const PASTE_LINES: usize = 3;
+/// The first of the private-use characters standing in the text for the pastes shown as placeholders.
+const PASTED: u32 = 0xF_0000;
+/// How many pastes there may be placeholders for: the characters of the Supplementary Private Use Area-A.
+const PASTES: usize = 0xFFFE;
 
 /// How the bar's status line reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +59,8 @@ pub struct Bar {
     /// Whether keys go to the bar.
     pub focused: bool,
     chars: Vec<char>,
+    /// The pastes shown as placeholders, each standing in `chars` as the character `PASTED` plus its index.
+    pastes: Vec<String>,
     /// Where the cursor is, in characters.
     cursor: usize,
     pub status: Option<Status>,
@@ -66,8 +75,27 @@ pub struct Bar {
 }
 
 impl Bar {
+    /// The text, its pastes in full.
     pub fn text(&self) -> String {
+        let mut text = String::with_capacity(self.chars.len());
+        for c in &self.chars {
+            match self.pasted(*c) {
+                Some(paste) => text.push_str(paste),
+                None => text.push(*c),
+            }
+        }
+        text
+    }
+
+    /// The text with its pastes as the characters standing for them, which `set_raw` takes back.
+    pub fn raw(&self) -> String {
         self.chars.iter().collect()
+    }
+
+    /// The paste `c` stands for, if any.
+    fn pasted(&self, c: char) -> Option<&str> {
+        let at = u32::from(c).checked_sub(PASTED)?;
+        self.pastes.get(usize::try_from(at).ok()?).map(String::as_str)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -76,7 +104,13 @@ impl Bar {
 
     /// Replace the text with `text`, the cursor at its end.
     pub fn set_text(&mut self, text: &str) {
-        self.chars = text.chars().collect();
+        self.pastes.clear();
+        self.set_raw(text);
+    }
+
+    /// Replace the text with `raw`, as `raw` gave it, keeping the pastes.
+    pub fn set_raw(&mut self, raw: &str) {
+        self.chars = raw.chars().collect();
         self.cursor = self.chars.len();
     }
 
@@ -85,9 +119,33 @@ impl Bar {
         self.cursor += 1;
     }
 
+    /// Put `text` at the cursor, the cursor after it: as is when short, else as a placeholder that the cursor and
+    /// deleting take as one character and that sending puts back.
+    pub fn paste(&mut self, text: &str) {
+        let long = text.chars().count() > PASTE_CHARS || text.lines().count() > PASTE_LINES;
+        if long && self.pastes.len() < PASTES {
+            let c = u32::try_from(self.pastes.len()).ok().and_then(|at| char::from_u32(PASTED + at));
+            if let Some(c) = c {
+                self.pastes.push(text.to_owned());
+                self.insert(c);
+                return;
+            }
+        }
+        // Shown as spaces, since the bar counts a character a column.
+        let text = text.replace('\t', "    ");
+        let at = self.cursor;
+        self.chars.splice(at..at, text.chars());
+        self.cursor = at + text.chars().count();
+    }
+
+    /// Whether `c` ends a word: whitespace, or a paste's placeholder.
+    fn breaks(&self, c: char) -> bool {
+        c.is_whitespace() || self.pasted(c).is_some()
+    }
+
     /// Where the word at the cursor starts, and its text up to the cursor.
     pub fn word(&self) -> (usize, String) {
-        let start = self.chars[..self.cursor].iter().rposition(|c| c.is_whitespace()).map_or(0, |at| at + 1);
+        let start = self.chars[..self.cursor].iter().rposition(|c| self.breaks(*c)).map_or(0, |at| at + 1);
         (start, self.chars[start..self.cursor].iter().collect())
     }
 
@@ -96,7 +154,7 @@ impl Bar {
         let (start, _) = self.word();
         let end = self.chars[self.cursor..]
             .iter()
-            .position(|c| c.is_whitespace())
+            .position(|c| self.breaks(*c))
             .map_or(self.chars.len(), |at| self.cursor + at);
         let spaced = self.chars.get(end).is_some_and(|c| *c == ' ');
         let mut put: Vec<char> = word.chars().collect();
@@ -167,15 +225,20 @@ impl Bar {
                 column = 0;
                 continue;
             }
-            if column == width {
-                lines.push(std::mem::take(&mut line));
-                column = 0;
-                if at == self.cursor {
-                    cursor = (lines.len(), 0);
+            let mut one = [0; 4];
+            let label = self.pasted(*c).map(|paste| placeholder(u32::from(*c) - PASTED + 1, paste));
+            let shown = label.as_deref().unwrap_or_else(|| c.encode_utf8(&mut one));
+            for (nth, c) in shown.chars().enumerate() {
+                if column == width {
+                    lines.push(std::mem::take(&mut line));
+                    column = 0;
+                    if at == self.cursor && nth == 0 {
+                        cursor = (lines.len(), 0);
+                    }
                 }
+                line.push(c);
+                column += 1;
             }
-            line.push(*c);
-            column += 1;
         }
         if self.cursor == self.chars.len() {
             if column == width {
@@ -242,6 +305,14 @@ impl Bar {
     }
 }
 
+/// How the bar shows the `nth` paste, `paste`.
+fn placeholder(nth: u32, paste: &str) -> String {
+    match paste.lines().count() {
+        0 | 1 => format!("[Pasted text #{nth} {} chars]", paste.chars().count()),
+        lines => format!("[Pasted text #{nth} +{lines} lines]"),
+    }
+}
+
 /// The slash commands, over the view just above the bar at `bar`.
 fn draw_list(frame: &mut Frame, bar: Rect) {
     let lines: Vec<Line> = COMMANDS
@@ -284,6 +355,30 @@ mod tests {
         assert_eq!(bar.key(Key::Ctrl('e')), Edited::Editor("say Xi\n!".into()));
         bar.key(Key::Ctrl('u'));
         assert_eq!(bar.key(Key::Enter), Edited::Done, "nothing to send");
+    }
+
+    #[test]
+    fn a_long_paste_shows_as_a_placeholder_taken_as_one_character_and_sent_in_full() {
+        let mut bar = Bar::default();
+        bar.paste("a\nb\nc");
+        assert_eq!(bar.text(), "a\nb\nc", "a short paste goes in as is");
+        bar.set_text("see ");
+        let log = "line\n".repeat(120);
+        bar.paste(&log);
+        bar.paste(&"x".repeat(801));
+        bar.insert('!');
+        assert_eq!(bar.lines(80).0, vec!["see [Pasted text #1 +120 lines][Pasted text #2 801 chars]!".to_owned()]);
+        assert_eq!(bar.lines(80).1, (0, 58));
+        assert_eq!(bar.text(), format!("see {log}{}!", "x".repeat(801)));
+        assert_eq!(bar.key(Key::Ctrl('e')), Edited::Editor(bar.text()));
+        bar.key(Key::Left);
+        bar.key(Key::Backspace);
+        assert_eq!(bar.key(Key::Enter), Edited::Submit(format!("see {log}!")), "deleted whole");
+        bar.set_raw(&format!("@dev-a {}", bar.raw()));
+        assert_eq!(bar.text(), format!("@dev-a see {log}!"), "the raw text keeps its pastes");
+        bar.set_text("");
+        bar.paste(&log);
+        assert_eq!(bar.lines(80).0, vec!["[Pasted text #1 +120 lines]".to_owned()], "numbered afresh");
     }
 
     #[test]

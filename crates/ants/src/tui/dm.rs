@@ -320,6 +320,10 @@ mod tests {
 
         m.key(Key::Char('n'), at(3));
         assert_eq!(m.key(Key::Enter, at(3)), None, "nothing to send");
+        m.paste("see\r\nyou", at(3));
+        let draft = Draft { to: user("bob"), text: "see you".to_owned() };
+        assert_eq!(m.key(Key::Enter, at(3)), Some(Action::Send(draft)), "a paste is written on one line");
+        m.key(Key::Char('n'), at(3));
         m.key(Key::Esc, at(3));
         assert_eq!(m.key(Key::Char('q'), at(3)), Some(Action::Quit), "Esc dropped the message");
     }

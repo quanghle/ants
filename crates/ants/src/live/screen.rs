@@ -2,6 +2,8 @@
 
 use anyhow::{Context as _, Result};
 use ratatui::DefaultTerminal;
+use ratatui::crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
+use ratatui::crossterm::execute;
 
 use crate::progress;
 
@@ -14,7 +16,10 @@ impl Screen {
     pub fn open() -> Result<Self> {
         progress::hold_logs();
         match ratatui::try_init() {
-            Ok(terminal) => Ok(Self { terminal }),
+            Ok(terminal) => {
+                bracket_pastes(true);
+                Ok(Self { terminal })
+            }
             Err(e) => {
                 ratatui::restore();
                 release_logs();
@@ -26,8 +31,26 @@ impl Screen {
 
 impl Drop for Screen {
     fn drop(&mut self) {
+        bracket_pastes(false);
         ratatui::restore();
         release_logs();
+    }
+}
+
+/// Have the terminal mark what is pasted, so that a paste comes as one, rather than as keys with Enter at each line
+/// break; a terminal that cannot leaves pastes as keys. Not on Windows, whose console input crossterm reads as key
+/// records with no pastes among them, so that the markers would come as keys.
+pub fn bracket_pastes(on: bool) {
+    if cfg!(windows) {
+        return;
+    }
+    let set = if on {
+        execute!(std::io::stdout(), EnableBracketedPaste)
+    } else {
+        execute!(std::io::stdout(), DisableBracketedPaste)
+    };
+    if let Err(e) = set {
+        tracing::debug!("bracketed paste: {e}");
     }
 }
 

@@ -225,6 +225,75 @@ pub fn expand(path: &str) -> PathBuf {
     }
 }
 
+/// The image files `text` names, as a terminal pastes files dropped on it: absolute paths (or from `~`) quoted or with
+/// their spaces escaped with `\` (not on Windows, where it separates a path's parts), or `file://` URLs, separated by
+/// whitespace; none unless every one is an image file.
+pub fn dropped_images(text: &str) -> Option<Vec<PathBuf>> {
+    // A dropped path is short: a longer paste is text.
+    if text.len() > 4096 {
+        return None;
+    }
+    let words = words(text.trim(), !cfg!(windows))?;
+    if words.is_empty() {
+        return None;
+    }
+    words
+        .iter()
+        .map(|word| {
+            let path = file_url(word).unwrap_or_else(|| expand(word));
+            let name = path.file_name()?.to_str()?;
+            let image = ants_proto::guess_mime(name).starts_with("image/");
+            (image && path.is_absolute() && path.is_file()).then_some(path)
+        })
+        .collect()
+}
+
+/// The words of `text` as a shell splits them, quotes and, with `escapes`, `\` taken off; none when a quote is left
+/// open.
+fn words(text: &str, escapes: bool) -> Option<Vec<String>> {
+    let (mut words, mut word, mut quote, mut started) = (Vec::new(), String::new(), None, false);
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (None, c) if c.is_whitespace() => {
+                if std::mem::take(&mut started) {
+                    words.push(std::mem::take(&mut word));
+                }
+                continue;
+            }
+            (None, '\'' | '"') => quote = Some(c),
+            (Some(q), c) if c == q => quote = None,
+            (None | Some('"'), '\\') if escapes => word.push(chars.next()?),
+            (_, c) => word.push(c),
+        }
+        started = true;
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if started {
+        words.push(word);
+    }
+    Some(words)
+}
+
+/// The path a `file://` URL names, its `%XX` escapes decoded.
+fn file_url(word: &str) -> Option<PathBuf> {
+    let rest = word.strip_prefix("file://")?;
+    let path = rest.strip_prefix("localhost").unwrap_or(rest);
+    let mut bytes = Vec::with_capacity(path.len());
+    let mut raw = path.bytes();
+    while let Some(b) = raw.next() {
+        if b == b'%' {
+            let hex = [raw.next()?, raw.next()?];
+            bytes.push(u8::from_str_radix(std::str::from_utf8(&hex).ok()?, 16).ok()?);
+        } else {
+            bytes.push(b);
+        }
+    }
+    Some(PathBuf::from(String::from_utf8(bytes).ok()?))
+}
+
 /// The files `/attach` staged for the next message the bar sends, and those of the messages being sent, to stage
 /// again when the send fails.
 #[derive(Default)]
@@ -247,19 +316,42 @@ impl Staged {
         self.files.iter().map(|f| f.attachment.name.as_str()).collect()
     }
 
-    /// Stage the file at `path`, within the limits of `--attach`: the line telling so, or why it is not staged.
+    /// Stage the file at `path`, `~` its owner's home, within the limits of `--attach`: the line telling so, or why it
+    /// is not staged.
     pub fn add(&mut self, path: &str) -> Result<String> {
+        self.add_path(&expand(path))
+    }
+
+    /// Stage the file at `path`, as [`Self::add`] does.
+    pub fn add_path(&mut self, path: &Path) -> Result<String> {
+        self.room()?;
+        let file = attachments::read(path)?;
+        Ok(self.push(file))
+    }
+
+    /// Stage `text` pasted as the text file `paste-N.txt`, numbered after those staged already.
+    pub fn add_paste(&mut self, text: &str) -> Result<String> {
+        self.room()?;
+        let pastes = self.files.iter().filter(|f| f.attachment.name.starts_with("paste-")).count();
+        let file = attachments::text(&format!("paste-{}.txt", pastes + 1), text)?;
+        Ok(self.push(file))
+    }
+
+    fn room(&self) -> Result<()> {
         if self.files.len() >= MAX_ATTACHMENTS {
             bail!("{MAX_ATTACHMENTS} files attached already: a message carries at most {MAX_ATTACHMENTS}");
         }
-        let file = attachments::read(&expand(path))?;
+        Ok(())
+    }
+
+    fn push(&mut self, file: File) -> String {
         let line = format!(
             "attached {} ({}): sent with the next message",
             file.attachment.name,
             attachments::size(file.attachment.size)
         );
         self.files.push(file);
-        Ok(line)
+        line
     }
 
     /// Drop the files staged: how many there were.
@@ -390,6 +482,35 @@ mod tests {
         }
         assert!(staged.add(&path).unwrap_err().to_string().contains("at most 8"));
         assert_eq!(staged.clear(), MAX_ATTACHMENTS);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn image_files_dropped_on_the_terminal_are_known_from_their_paths_however_quoted() {
+        let dir = ants_test_support::scratch_dir("dropped");
+        for name in ["my shot.png", "b.JPG", "notes.txt"] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        let both = vec![dir.join("my shot.png"), dir.join("b.JPG")];
+        let (shot, b) = (&both[0], &both[1]);
+        let quoted = format!("'{}' \"{}\"\n", shot.display(), b.display());
+        assert_eq!(dropped_images(&quoted).as_ref(), Some(&both));
+        #[cfg(not(windows))]
+        {
+            let escaped = format!("{}  {}", shot.display().to_string().replace(' ', "\\ "), b.display());
+            assert_eq!(dropped_images(&escaped).as_ref(), Some(&both));
+            let url = format!("file://{}", shot.display().to_string().replace(' ', "%20"));
+            assert_eq!(dropped_images(&url), Some(vec![shot.clone()]));
+        }
+        let some_text = format!("'{}' '{}'", shot.display(), dir.join("notes.txt").display());
+        assert_eq!(dropped_images(&some_text), None, "every one an image");
+        assert_eq!(dropped_images(&format!("'{}'", dir.join("gone.png").display())), None);
+        assert_eq!(dropped_images(&format!("'{}", shot.display())), None, "a quote left open");
+        assert_eq!(dropped_images("look at this"), None);
+        let relative =
+            shot.strip_prefix(std::env::current_dir().unwrap()).unwrap_or(shot.file_name().unwrap().as_ref());
+        assert_eq!(dropped_images(&format!("'{}'", relative.display())), None, "a word, not a dropped file");
+        assert_eq!(dropped_images(" \n"), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

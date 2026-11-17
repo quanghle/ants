@@ -80,7 +80,7 @@ impl Model {
             return Vec::new();
         }
         let (start, typed) = self.bar.word();
-        if self.bar.text().chars().take(start).eq("/attach ".chars()) {
+        if self.bar.raw().chars().take(start).eq("/attach ".chars()) {
             return super::attach::paths(&typed);
         }
         let Some(word) = Word::of(&typed, start == 0) else {

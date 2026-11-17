@@ -504,6 +504,10 @@ impl Chat {
                         return Ok(ControlFlow::Break(()));
                     }
                 }
+                Event::Paste(text) => {
+                    *dirty = true;
+                    self.model.paste(&text, Utc::now());
+                }
                 Event::Resize(..) => *dirty = true,
                 _ => {}
             }
@@ -602,10 +606,12 @@ async fn next_image(
 
 /// Edit `text` in the editor, as `ants ask --edit` does, the terminal handed over to it meanwhile.
 async fn edit(terminal: &mut DefaultTerminal, text: String) -> Result<String> {
+    live::bracket_pastes(false);
     ratatui::restore();
     let edited = tokio::task::spawn_blocking(move || compose::edit_text(&text)).await;
     terminal::enable_raw_mode().context("setting up the terminal")?;
     execute!(std::io::stdout(), terminal::EnterAlternateScreen).context("setting up the terminal")?;
+    live::bracket_pastes(true);
     terminal.clear().context("drawing")?;
     edited.context("running the editor")?
 }

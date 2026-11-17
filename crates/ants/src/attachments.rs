@@ -74,6 +74,20 @@ pub fn read(path: &Path) -> Result<File> {
     Ok(File { attachment, bytes })
 }
 
+/// `text` to attach as the file `name`, of at most [`MAX_ATTACHMENT_SIZE`] bytes, of the media type its name gives.
+pub fn text(name: &str, text: &str) -> Result<File> {
+    let len = text.len() as u64;
+    ensure!(
+        len <= MAX_ATTACHMENT_SIZE,
+        "{name} would be {}: an attachment is at most {}",
+        size(len),
+        size(MAX_ATTACHMENT_SIZE)
+    );
+    let bytes = text.as_bytes().to_vec();
+    let attachment = files::reference(name, guess_mime(name), &bytes).with_context(|| format!("attaching {name}"))?;
+    Ok(File { attachment, bytes })
+}
+
 /// The references of `files`, as the message carrying them holds them.
 pub fn references(files: &[File]) -> Vec<Attachment> {
     files.iter().map(|file| file.attachment.clone()).collect()
