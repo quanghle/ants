@@ -43,7 +43,7 @@ flowchart LR
 | Stream `ANTS` | File, 30d | Captures `ants.inbox.>`, `ants.notes.>`, `ants.approvals.>`, `ants.dead.>`, `ants.chan.>`, `ants.timeline.>`, `ants.admin.>`; direct gets enabled; republishes `ants.inbox.*.*` to `_INBOX.<to>.stored.<from>`; `max_consumers` 10000. |
 | KV `ants_colony` | Memory, 30s | Live `ColonyEntry` per ant (`<ant>`), refreshed every 10s; expiry markers enabled; `max_consumers` 10000. |
 | KV `ants_sessions` | File, 30d | Thread ACP session IDs with the harness each ran in (`<ant>.<thread>`), spend/escalation/narrowing state, channel seen cursors, mention markers, `_storage.*.*.warned` notes. |
-| KV `ants_attempts` | File, 30d | Started delivery markers and saved replies (`<ant>.<seq>`), message marks (`<ant>.msg.<id>`), withdrawals an assistant recorded for its human while no daemon of the ant answered (`<ant>.msg.<id>.<assistant>`), unserved-ant markers (`<sender>.unserved.<id>`). |
+| KV `ants_attempts` | File, 30d | Started delivery markers and saved replies (`<ant>.<seq>`), message marks (`<ant>.msg.<id>`), withdrawals an assistant recorded for its human while no daemon of the ant answered (`<ant>.msg.<id>.<assistant>`), unserved-ant markers (`<sender>.unserved.<id>`), wake marks (`<ant>.wake.<hash>`, kept 7 d, see [Wake requests](#wake-requests)). |
 | KV `ants_channels` | File, none | `ChannelEntry` (`<channel>`): members, optional messenger, optional owner ant; `max_consumers` 10000. |
 | KV `ants_humans` | File, none | Registered humans (`<human>`), written on CLI connection, each human's signed assistant grant (`<human>.assistant`), enrolling the assistant as a device when `ants assistant seal on` did, and signed consent to the assistant's decisions and orders (`<human>.confirmed`, `<human>.preallow`), written only by that human; `max_consumers` 10000. |
 | KV `ants_chains` | File, none | Persistent `escalate_to` chains (`<ant>`), readable after colony expiry. |
@@ -174,7 +174,7 @@ The provider answers with:
 - `provider`: `{name, version}`;
 - `capabilities`: what it implements.
 
-Without a common version, the provider answers with error `-32002`. Both sides then use only the capabilities both declared. ants declares every capability except `wake` until it serves wake requests. Sugar declares `tools` and `context`.
+Without a common version, the provider answers with error `-32002`. Both sides then use only the capabilities both declared. ants declares every capability, `wake` included. Sugar declares `tools` and `context`.
 
 | Method | Direction | Capability | Params | Result |
 |---|---|---|---|---|
@@ -200,8 +200,8 @@ Calls and events:
 
 - A tool call's and a brief's `context` is what ants knows of the call, never taken from the ant's text: `ant`, `identity` (the id of the ant's identity record), `thread`, `origin`, `harness`, `model`, `machine` and `at`.
   - `origin` is `{by, channel?}`, where `by` is `{kind: "human" | "ant" | "webhook", user}` or `{kind: "provider", name}`.
-  - The daemon keeps each thread's origin from the messages it handles on it, taking for each, in this order: a webhook's or schedule's message, or one on a thread a webhook or schedule narrowed, as the webhook's (the ant passing such a thread on standing for it); a thread an ant started with a channel post as that ant's; one a human started as that human's, as is a message an assistant sends on a human's behalf; anything else as the sender's. A post's, or a resumed channel thread's, `channel` is its channel.
-  - The first message's origin stays, except that a message from a webhook or schedule makes a thread untrusted for good: a human's message later does not make it trusted again. Origins live in the daemon's memory, so after a restart the first message handled sets them again.
+  - The daemon keeps each thread's origin from the messages it handles on it, taking for each, in this order: a provider's [wake request](#wake-requests) as the provider's; a webhook's or schedule's message, or one on a thread a webhook or schedule narrowed, as the webhook's (the ant passing such a thread on standing for it); a thread an ant started with a channel post as that ant's; one a human started as that human's, as is a message an assistant sends on a human's behalf; anything else as the sender's. A post's, or a resumed channel thread's, `channel` is its channel.
+  - The first message's origin stays, except that a message from a webhook or schedule makes a thread untrusted for good: a human's message or a wake later does not make it trusted again. So a thread a wake starts is the provider's, and a wake on an existing thread leaves its origin as it was. Origins live in the daemon's memory, so after a restart the first message handled sets them again.
 - `brief.budget` is in bytes of UTF-8, 8000 by default. `reason` is `started`, `loaded` or `rebuilt`.
 - Event `kind`s, with what each adds:
   - `ant_added`, `ant_moved`, `ant_retired`, `ant_revived`;
@@ -271,6 +271,15 @@ Delivery:
 - One task per daemon process delivers every ant's queue, one event in flight per ant, in queue order, waiting 30 s for each ack. While the provider is not connected or fails, the event is sent again, with the same `id`, after a backoff doubling from 1 s to 5 min. A provider answering `-32001` (events not agreed) gets none of the ant's queued events.
 - A daemon starting picks up the events left in the home's queue. `lifecycle/identity` holds the identity id last told as added, and events a crash could repeat carry ids derived from what they tell (the ant and its identity, the thread and its first message), so the provider can drop the repeats.
 - Clones and exports leave `lifecycle` out of the home they copy.
+
+### Wake requests
+
+A provider's `wake` becomes a message to the ant, as a scheduled reminder or a trigger needs:
+
+- **Who:** the ant's daemon serves the request only for an ant it serves whose provider is the caller. An ant this process does not serve (a standby, another machine's, or none) is `-32003`; another provider's ant, a `thread` with no session of the ant, an empty `id`, and blank text or text over 256 KiB are `-32602`.
+- **The message:** sent as the ant to its own inbox (`ants.inbox.<ant>.<ant>`, which the ant's credentials publish already) with `provider` set to the provider's name, on the named thread or a new one, carrying the thread's recorded owner. Like a `handoff` it waits its turn rather than steering a running prompt, and the answer goes to the thread's owner, else to the default human. `provider` holds only on a message from the ant to itself: the CLI and the thread's `origin` ([calls and events](#provider-protocol)) ignore it on any other. `ants thread show` and `ants chat` mark it `wake from <provider>`.
+- **Idempotency:** the daemon records `<ant>.wake.<hash>` in `ants_attempts`, the hash a SHA-256 of provider and `id`, holding the thread and message id, before sending; a repeat within 7 days returns the same `{thread}` without sending again. A record not yet marked sent is sent again under the same message id, which the stream's 24 h duplicate window drops if it was stored. The record lives on the hub, so it outlasts restarts and a standby's takeover.
+- **Turns:** a wake carries a fresh turn budget and spends none of the thread's: it is prompted on a thread out of turns without an escalation, and its answer goes to a human, spending nothing. Spending caps, narrowed tools and holds still apply, and the daemon takes at most 60 new wakes per ant per hour (`-32003` past that; repeats are free).
 
 ## MCP tools
 

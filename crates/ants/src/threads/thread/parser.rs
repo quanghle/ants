@@ -110,6 +110,7 @@ impl Parser {
         let (e, sealed) = sealed::read(e, self.keyring.as_deref());
         let (question, answer) = self.question_and_answer(&e, forged || sealed == Some(sealed::State::Forged));
         let acting = self.acting(&e.from, e.on_behalf_of.as_ref());
+        let provider = e.wake_provider().filter(|_| !forged).map(str::to_owned);
         let (kind, note, text) = if let Some(d) = &e.approval {
             let text = format!("{} on {}/{}", tools::spelling(d.verdict), d.ant, d.request_id);
             (Kind::Decision, None, text)
@@ -119,6 +120,8 @@ impl Parser {
             (Kind::Mention, None, e.text)
         } else if let Some(notice) = e.notice.filter(|_| !forged) {
             (Kind::Message, Some(format!("notice: {}", notice.as_str())), e.text)
+        } else if let Some(provider) = &provider {
+            (Kind::Message, Some(format!("wake from {provider}")), e.text)
         } else {
             (Kind::Message, None, e.text)
         };
@@ -147,6 +150,7 @@ impl Parser {
             answer,
             turns: Some(e.turn_budget),
             webhook: e.webhook,
+            provider,
             origin: e.origin_thread,
             in_reply_to: e.in_reply_to,
             notice,

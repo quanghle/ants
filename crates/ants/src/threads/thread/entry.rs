@@ -171,6 +171,11 @@ pub struct Entry {
     /// [`Envelope::webhook`]: ants_proto::Envelope::webhook
     #[serde(skip)]
     pub webhook: bool,
+    /// The provider whose wake request an inbox message that is not forged is ([`Envelope::wake_provider`]).
+    ///
+    /// [`Envelope::wake_provider`]: ants_proto::Envelope::wake_provider
+    #[serde(skip)]
+    pub provider: Option<String>,
     /// The thread an inbox message's thread was spun off ([`Envelope::origin_thread`]).
     ///
     /// [`Envelope::origin_thread`]: ants_proto::Envelope::origin_thread
@@ -222,6 +227,7 @@ impl Entry {
             no_reply: None,
             turns: None,
             webhook: false,
+            provider: None,
             origin: None,
             in_reply_to: None,
             notice: None,

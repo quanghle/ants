@@ -37,6 +37,7 @@ expression: value
   },
   "on_behalf_of": "alice",
   "webhook": true,
+  "provider": "sugar",
   "queue": true,
   "allow": [
     "read:*",

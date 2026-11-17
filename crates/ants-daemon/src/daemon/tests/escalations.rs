@@ -477,3 +477,29 @@ async fn the_leader_s_reply_carrying_the_escalation_is_answered_though_it_answer
     assert_eq!(log.locked().answered, ["go on"], "prompted as an ordinary message");
     assert!(timeout(Duration::from_millis(200), to_human.next()).await.is_err(), "nothing went to the human");
 }
+
+/// A provider's wake brings turns of its own: prompted on a thread out of turns, and answered to the human.
+#[tokio::test]
+async fn a_provider_s_wake_is_prompted_on_a_thread_out_of_turns_and_answered_to_the_human() {
+    let Some((bus, mut to_human)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let [dev_b] = ants(["dev-b"]);
+    let t1 = ThreadId::generate();
+    bus.send_spent(&dev_b, &t1, "no turns", None).await;
+    let wake = Envelope::on_thread(t1.clone(), bus.dev.clone(), bus.dev.clone(), "standup").woken_by("sugar");
+    bus::publish_json(&bus.js, wake.subject(), &wake, None).await.unwrap();
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let escalation = next_envelope(&mut to_human).await;
+        assert!(escalation.text.contains("Turn budget spent"), "{}", escalation.text);
+        let answer = next_envelope(&mut to_human).await;
+        assert_eq!((&answer.thread_id, answer.in_reply_to, &answer.provider), (&t1, Some(wake.id), &None));
+        assert!(answer.text.ends_with(": standup"), "{}", answer.text);
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(bus.unacked().await, 0);
+    assert_eq!(log.locked().answered, ["standup"]);
+}

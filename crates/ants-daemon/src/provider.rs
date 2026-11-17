@@ -1,21 +1,21 @@
 //! Each ant's provider, what holds its identity, memories and work ([`ants_proto::provider`]): built-in sugar for
-//! every ant. One provider serves all the ants of a process, connected on first use; each call names its ant.
+//! every ant. One provider serves all the ants of a process, connected on first use; each call names its ant, and
+//! so does each wake request it makes of ants ([`wake`]).
 
 use std::sync::Arc;
 
 use ants_proto::UserId;
-use ants_proto::provider::{
-    BoxFuture, Capabilities, Connected, Host, Info, InitializeParams, Provider, RpcError, WakeRequest, Woken,
-};
+use ants_proto::provider::{Capabilities, Connected, Info, InitializeParams, Provider};
 use ants_sugar::Sugar;
 use tokio::sync::OnceCell;
 
 pub mod brief;
 pub mod context;
 pub mod events;
+pub mod wake;
 
-/// The capabilities ants declares at initialize: those it calls. Wake, which ants serves, waits for its server.
-pub const USES: Capabilities = Capabilities { wake: false, ..Capabilities::ALL };
+/// The capabilities ants declares at initialize: those it calls, and wake, which it serves ([`wake`]).
+pub const USES: Capabilities = Capabilities::ALL;
 
 /// How ants names itself at initialize.
 pub fn client() -> Info {
@@ -32,8 +32,10 @@ pub async fn of(_ant: &UserId) -> Option<Connected> {
 /// Initialize `provider` and agree with it on what both sides use.
 pub async fn connect(provider: Arc<dyn Provider>) -> Option<Connected> {
     let params = InitializeParams::new(client(), USES);
-    match Connected::connect(provider, params, Arc::new(Ants)).await {
+    let host = Arc::new(wake::Ants::default());
+    match Connected::connect(provider, params, host.clone()).await {
         Ok(connected) => {
+            host.named(connected.name());
             tracing::debug!(provider = connected.name(), capabilities = ?connected.capabilities(), "provider connected");
             Some(connected)
         }
@@ -41,15 +43,6 @@ pub async fn connect(provider: Arc<dyn Provider>) -> Option<Connected> {
             tracing::warn!(error = %e, "no provider: connecting it failed");
             None
         }
-    }
-}
-
-/// What ants serves its providers.
-struct Ants;
-
-impl Host for Ants {
-    fn wake(&self, _request: WakeRequest) -> BoxFuture<'_, Result<Woken, RpcError>> {
-        Box::pin(std::future::ready(Err(RpcError::unavailable("ants does not wake ants for providers yet"))))
     }
 }
 

@@ -54,6 +54,9 @@ pub const BRIEF_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long ants remembers a wake request's id, a repeat within it waking the ant once.
 pub const WAKE_DEDUP: Duration = Duration::from_hours(7 * 24);
 
+/// The most bytes the text of a wake request may have, as a webhook's body: well within a bus message.
+pub const MAX_WAKE_TEXT: usize = 256 * 1024;
+
 /// The argument ants adds to every provider tool it serves: `true` asks for the answer as JSON, else it comes as
 /// brief text ([`take_format`]).
 pub const JSON_ARGUMENT: &str = "json";

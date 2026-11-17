@@ -123,6 +123,18 @@ fn a_message_on_another_sender_s_subject_is_marked_forged() {
 }
 
 #[test]
+fn a_provider_s_wake_shows_as_one_only_on_the_ant_s_own_inbox() {
+    let (dev_a, dev_b) = (p("dev-a"), p("dev-b"));
+    let wake = Envelope::on_thread(t("t1"), dev_a.clone(), dev_a.clone(), "standup").woken_by("sugar");
+    let claimed = Envelope::on_thread(t("t1"), dev_b, dev_a, "standup").woken_by("sugar");
+    let entries = entries(&[(wake.subject(), json(&wake)), (claimed.subject(), json(&claimed))]);
+    assert_eq!((entries[0].provider.as_deref(), entries[1].provider.as_deref()), (Some("sugar"), None));
+    let shown = render(&entries);
+    assert!(shown.contains(&format!("dev-a -> dev-a [wake from sugar] (message {}): standup", wake.id)), "{shown}");
+    assert!(shown.contains(&format!("dev-b -> dev-a (message {}): standup", claimed.id)), "{shown}");
+}
+
+#[test]
 fn a_question_shows_its_options_and_the_valid_answers_to_it() {
     let alice = p("alice");
     let options = ["yes".to_owned(), "not yet".to_owned()];

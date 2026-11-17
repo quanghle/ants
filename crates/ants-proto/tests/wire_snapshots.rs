@@ -130,6 +130,7 @@ fn envelope() -> Envelope {
         approval: Some(Box::new(decision())),
         on_behalf_of: Some(user("alice")),
         webhook: true,
+        provider: Some("sugar".to_owned()),
         queue: true,
         allow: Some(vec!["read:*".to_owned(), "other:send_message".to_owned()]),
         mention: Some(mention()),
@@ -182,6 +183,7 @@ fn plain_envelope() -> Envelope {
         approval: None,
         on_behalf_of: None,
         webhook: false,
+        provider: None,
         queue: false,
         allow: None,
         mention: None,
@@ -444,6 +446,10 @@ fn envelopes() {
             allow: Some(WEBHOOK_ALLOW.iter().map(|rule| (*rule).to_owned()).collect()),
             ..message.clone()
         },
+    );
+    snap(
+        "envelope_wake",
+        &Envelope { from: user("dev-a"), to: user("dev-a"), provider: Some("sugar".to_owned()), ..message.clone() },
     );
     snap(
         "envelope_mention_notice",

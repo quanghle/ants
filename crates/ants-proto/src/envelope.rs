@@ -80,6 +80,12 @@ pub struct Envelope {
     /// sends an answer to the owner it names.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub webhook: bool,
+    /// The provider, by name, whose wake request the message is ([`crate::provider::method::WAKE`]): the ant's daemon
+    /// sends it as the ant to the ant itself, and an answer to it goes to the thread's owner, else to the default
+    /// human, as for any message the ant sends itself. It holds only on a message from the ant to itself
+    /// ([`Envelope::wake_provider`]). Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     /// A message that waits its turn behind the prompt running on its thread rather than steering it, as
     /// `ants ask --queue` and the chat's `/later` send it. Never copied by [`Envelope::reply`] or
     /// [`Envelope::follow_up`].
@@ -320,6 +326,7 @@ impl Envelope {
             approval: None,
             on_behalf_of: None,
             webhook: false,
+            provider: None,
             queue: false,
             allow: None,
             mention: None,
@@ -362,6 +369,17 @@ impl Envelope {
     #[must_use]
     pub fn from_webhook(self) -> Self {
         Self { webhook: true, ..self }
+    }
+
+    /// The envelope as provider `name`'s wake request ([`Envelope::provider`]).
+    #[must_use]
+    pub fn woken_by(self, name: impl Into<String>) -> Self {
+        Self { provider: Some(name.into()), ..self }
+    }
+
+    /// The provider whose wake request the envelope is: none unless it is a message from the ant to itself.
+    pub fn wake_provider(&self) -> Option<&str> {
+        self.provider.as_deref().filter(|_| self.from == self.to)
     }
 
     /// The role of the sender, given the `humans`: an ant's for a webhook's message, else as `humans` says.
@@ -480,6 +498,7 @@ impl Envelope {
             approval: None,
             on_behalf_of: None,
             webhook: false,
+            provider: None,
             queue: false,
             allow: self.allow.clone(),
             mention: None,
@@ -626,6 +645,16 @@ pub fn parse_mentions(text: &str) -> Vec<UserId> {
 mod tests {
     use super::*;
     use crate::{ChannelPost, p};
+
+    #[test]
+    fn a_wake_is_the_provider_s_only_on_the_ant_s_own_inbox_and_never_copied() {
+        let wake = Envelope::new(p("dev-a"), p("dev-a"), "standup").woken_by("sugar");
+        assert_eq!(wake.wake_provider(), Some("sugar"));
+        let claimed = Envelope::new(p("dev-b"), p("dev-a"), "standup").woken_by("sugar");
+        assert_eq!(claimed.wake_provider(), None);
+        assert_eq!(wake.reply(p("dev-a"), "done", Role::Human).unwrap().provider, None);
+        assert_eq!(wake.follow_up(p("dev-a"), p("dev-b"), "on").provider, None);
+    }
 
     #[test]
     fn a_notice_is_never_copied_into_a_reply_or_follow_up() {

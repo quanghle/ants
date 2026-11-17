@@ -375,7 +375,10 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
     let webhooks = Webhooks::new(js.clone());
     let storage = storage_watcher(config, &js, &sessions_kv);
     let sessions = SessionStore::kv(sessions_kv, config.ant.clone());
-    let attempts = Attempts::new(bus::ensure_attempts(&js, js_domain, &config.ant).await?, config.ant.clone());
+    let attempts_kv = bus::ensure_attempts(&js, js_domain, &config.ant).await?;
+    let attempts = Attempts::new(attempts_kv.clone(), config.ant.clone());
+    let outbox = redacting_outbox(crate::mcp::jetstream_outbox(js.clone()), redactor.clone());
+    let _waking = crate::provider::wake::serve(&config.ant, &js, outbox, sessions.clone(), attempts_kv).await;
     let (answered, buried) = delivery_marks(&config.storage.home).await;
     let pool = harness_pool(config, launch, sessions, &workload).await.with_lifecycle(lifecycle.clone());
     let publisher = publisher(config, &js, &redactor, &pool).await;

@@ -527,12 +527,13 @@ struct Flags {
 }
 
 /// Where the thread came from, as `first`, its first message read, tells: a channel post, a webhook or schedule
-/// (which send alike), a human's ask, or an ant.
+/// (which send alike), a provider's wake, a human's ask, or an ant.
 fn origin(first: &Entry, data: &Data) -> String {
     let from = first.acting.label(first.from.as_ref().map_or("a human", UserId::as_str));
     match (&first.channel, first.kind) {
         (Some(channel), Kind::Post | Kind::Mention) => format!("#{channel} post"),
         _ if first.webhook => format!("webhook {from}"),
+        _ if let Some(provider) = &first.provider => format!("{provider} wake"),
         _ if first.from.as_ref().is_none_or(|u| data.is_human(u)) => format!("ask by {from}"),
         _ => from,
     }

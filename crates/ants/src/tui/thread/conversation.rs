@@ -311,6 +311,7 @@ impl Shown<'_> {
             Kind::Approval => ("tool request".to_owned(), Style::new().fg(style::PENDING)),
             Kind::Dead => (format!("gave up: {}", e.note.as_deref().unwrap_or("")), Style::new().fg(style::ERROR)),
             _ if e.question.is_some() => ("asks".to_owned(), Style::new().fg(Color::Yellow)),
+            _ if let Some(provider) = &e.provider => (format!("wake from {provider}"), style::dim()),
             _ => (String::new(), Style::new()),
         };
         if !what.is_empty() {

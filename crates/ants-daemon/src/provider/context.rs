@@ -85,13 +85,17 @@ impl Caller {
 
 /// Where the thread of `envelope`, a message as the daemon took it on arrival, came from, on `channel` when a post on
 /// it is the message, in this order:
+/// - a provider's wake request ([`Envelope::wake_provider`]): the provider's, as a thread the wake starts is; a wake on
+///   an existing thread leaves it the origin [`settled`] kept;
 /// - a webhook's or schedule's message, or one on a thread narrowed to tool rules ([`Envelope::allow`]), which only
 ///   those start and only ants carry on: the webhook's, the sender standing for a webhook it passes on;
 /// - the ant that started the thread with a channel post (its creator);
 /// - the human who started it (its owner), or the human an assistant acts for;
 /// - else the message's sender, a human or an ant.
 pub fn origin(envelope: &Envelope, channel: Option<ChannelId>, humans: &Humans) -> Origin {
-    let by = if envelope.webhook || envelope.allow.is_some() {
+    let by = if let Some(name) = envelope.wake_provider() {
+        Starter::Provider { name: name.to_owned() }
+    } else if envelope.webhook || envelope.allow.is_some() {
         Starter::Webhook { user: envelope.from.clone() }
     } else if let Some(creator) = &envelope.creator {
         Starter::Ant { user: creator.clone() }
@@ -135,7 +139,10 @@ mod tests {
     }
 
     #[test]
-    fn the_origin_is_the_webhook_then_the_creator_then_the_owner_then_the_sender() {
+    fn the_origin_is_the_provider_then_the_webhook_then_the_creator_then_the_owner_then_the_sender() {
+        let wake = Envelope { owner: Some(UserId::human()), ..message("dev-a").woken_by("sugar") };
+        assert_eq!(by(&wake), Starter::Provider { name: "sugar".to_owned() });
+        assert_eq!(by(&message("dev-b").woken_by("sugar")), Starter::Ant { user: user("dev-b") }, "no wake");
         let webhook = Envelope { owner: Some(UserId::human()), ..message("hook").from_webhook() };
         assert_eq!(by(&webhook), Starter::Webhook { user: user("hook") });
         assert!(!origin(&webhook, None, &Humans::default()).trusted());
@@ -163,6 +170,11 @@ mod tests {
         assert_eq!(settled(Some(human.clone()), ant.clone()), Origin { channel: Some(ops.clone()), ..human.clone() });
         let untrusted = settled(Some(ant), hook.clone());
         assert_eq!(untrusted, Origin { channel: Some(ops), ..hook.clone() });
-        assert_eq!(settled(Some(hook.clone()), human), hook, "a human's message keeps it untrusted");
+        assert_eq!(settled(Some(hook.clone()), human.clone()), hook, "a human's message keeps it untrusted");
+        let woken = Origin { by: Starter::Provider { name: "sugar".to_owned() }, channel: None };
+        assert_eq!(settled(None, woken.clone()), woken, "a thread a wake starts is the provider's");
+        assert_eq!(settled(Some(human.clone()), woken.clone()), human, "a wake on a thread leaves its origin");
+        assert_eq!(settled(Some(hook.clone()), woken.clone()), hook, "and leaves it untrusted");
+        assert_eq!(settled(Some(woken), hook.clone()), hook);
     }
 }
