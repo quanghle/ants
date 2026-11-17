@@ -405,9 +405,10 @@ fn full(found: &MemoryItem) -> String {
     }
     let writer = &memory.writer;
     let model = writer.model.as_ref().map_or_else(String::new, |model| format!(", model {model}"));
+    let repo = writer.repo.as_ref().map_or_else(String::new, |repo| format!(", in repository {repo}"));
     let _ = write!(
         text,
-        "\nWritten {} by {} (identity {}) in thread {}, started by {}, with {}{model}, on {}.",
+        "\nWritten {} by {} (identity {}) in thread {}, started by {}, with {}{model}, on {}{repo}.",
         writer.at.to_rfc3339_opts(SecondsFormat::Secs, true),
         writer.ant,
         writer.identity,

@@ -245,6 +245,15 @@ async fn an_id_reads_the_memory_in_full_with_its_provenance_and_history() {
 }
 
 #[tokio::test]
+async fn the_full_memory_names_the_repository_it_was_written_in() {
+    let (sense, _store) = sense().await;
+    let in_repo = CallContext { repo: Some("github.com/o/r".into()), ..context(human()) };
+    let id = id_of(&tool(&sense, remember, lesson("Port", "Deploy uses 8080"), in_repo).await);
+    let full = text(recall_json(&sense, json!({"id": id})).await);
+    assert!(full.contains("with copilot, model gpt, on studio, in repository github.com/o/r."), "{full}");
+}
+
+#[tokio::test]
 async fn recall_refuses_what_it_cannot_read() {
     let (sense, _store) = sense().await;
     let id = ok(&sense, lesson("Port", "Deploy uses 8080")).await;
