@@ -350,8 +350,7 @@ impl Inbox<'_> {
         if self.pool.has_session(&envelope.thread_id).await {
             return;
         }
-        let channel = incoming.post.as_ref().map(|posted| posted.post.channel.clone());
-        let origin = crate::provider::context::origin(envelope, channel, &self.humans.humans());
+        let origin = crate::provider::context::origin(envelope, incoming.channel().cloned(), &self.humans.humans());
         lifecycle.thread_started(&envelope.thread_id, &envelope.id.to_string(), origin).await;
     }
 

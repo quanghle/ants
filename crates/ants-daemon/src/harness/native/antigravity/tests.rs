@@ -156,8 +156,8 @@ async fn an_agy_turn_streams_its_steps_and_runs_with_the_ant_settings() {
     };
     let launch = agy
         .launch(settings)
-        .with_mcp(Arc::new(move |_, _, http| {
-            assert!(http, "agy takes HTTP MCP servers");
+        .with_mcp(Arc::new(move |session: &crate::harness::McpSession<'_>| {
+            assert!(session.http, "agy takes HTTP MCP servers");
             servers.clone()
         }))
         .for_thread(&thread);

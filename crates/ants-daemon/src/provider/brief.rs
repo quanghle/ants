@@ -14,8 +14,8 @@ use super::context::Caller;
 #[derive(Clone)]
 pub struct Briefing {
     provider: Connected,
-    /// None when the ant's identity record cannot be read.
-    caller: Option<Caller>,
+    /// Why there is none when the ant's identity record is absent or cannot be read.
+    caller: Result<Caller, String>,
     thread: ThreadId,
     origin: Origin,
     budget: u32,
@@ -24,7 +24,7 @@ pub struct Briefing {
 impl Briefing {
     /// The briefing of sessions of `thread`, which `origin` started, by `provider`: none when the provider takes no
     /// brief requests, its context capability not agreed.
-    pub fn new(provider: Connected, caller: Option<Caller>, thread: ThreadId, origin: Origin) -> Option<Self> {
+    pub fn new(provider: Connected, caller: Result<Caller, String>, thread: ThreadId, origin: Origin) -> Option<Self> {
         provider.has(Capability::Context).then_some(Self { provider, caller, thread, origin, budget: BRIEF_BUDGET })
     }
 
@@ -32,8 +32,9 @@ impl Briefing {
     /// under its heading, cut to the budget; an `[ants]` line when it is left out; empty for an empty brief.
     pub async fn section(&self, reason: BriefReason, harness: &str, model: Option<&str>) -> String {
         let (name, thread) = (self.provider.name(), &self.thread);
-        let Some(caller) = &self.caller else {
-            return left_out(name, "the ant's identity record cannot be read");
+        let caller = match &self.caller {
+            Ok(caller) => caller,
+            Err(why) => return left_out(name, why),
         };
         let context = caller.context(thread.clone(), self.origin.clone(), harness, model);
         let request = BriefRequest { context, budget: self.budget, reason };
@@ -134,9 +135,10 @@ mod tests {
 
     use super::fake::{Answer, connected};
     use super::*;
+    use crate::provider::context::CANNOT_READ;
 
-    fn caller() -> Option<Caller> {
-        Some(Caller { ant: "dev-a".parse().unwrap(), identity: "id-a".to_owned(), machine: "m1".to_owned() })
+    fn caller() -> Result<Caller, String> {
+        Ok(Caller { ant: "dev-a".parse().unwrap(), identity: "id-a".to_owned(), machine: "m1".to_owned() })
     }
 
     fn origin() -> Origin {
@@ -196,7 +198,7 @@ mod tests {
         let section = briefing.unwrap().section(BriefReason::Started, "test", None).await;
         assert_eq!(section, "[ants] The fake brief is left out: the provider failed (error -32603).");
         let (provider, fake) = connected(Answer::Text("brief".to_owned()), true).await;
-        let briefing = Briefing::new(provider, None, "t1".parse().unwrap(), origin()).unwrap();
+        let briefing = Briefing::new(provider, Err(CANNOT_READ.to_owned()), "t1".parse().unwrap(), origin()).unwrap();
         let section = briefing.section(BriefReason::Started, "test", None).await;
         assert_eq!(section, "[ants] The fake brief is left out: the ant's identity record cannot be read.");
         assert!(fake.asked.lock().unwrap().is_empty());

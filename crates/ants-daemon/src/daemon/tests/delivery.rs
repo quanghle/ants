@@ -24,7 +24,11 @@ async fn the_reply_carries_the_title_suggested_during_its_turn() {
     bus.send(&titled, "hold on").await;
 
     let suggest = async |thread: &ThreadId, title: &str| {
-        let servers = bus.mcp.as_ref().unwrap().servers()(thread, std::path::Path::new("/"), true);
+        let servers = bus.mcp.as_ref().unwrap().servers()(&crate::harness::McpSession::test(
+            thread,
+            std::path::Path::new("/"),
+            true,
+        ));
         let [McpServer::Http(server)] = &servers[..] else { panic!("one HTTP server") };
         let token = server.headers[0].value.strip_prefix("Bearer ").unwrap();
         let config = StreamableHttpClientTransportConfig::with_uri(server.url.as_str()).auth_header(token);
@@ -113,7 +117,7 @@ async fn the_answer_carries_the_files_attached_during_its_turn() {
     bus.send(&thread, "hold on").await;
 
     let attach_to_reply = async |thread: &ThreadId, files: &[&str]| {
-        let servers = bus.mcp.as_ref().unwrap().servers()(thread, &work, true);
+        let servers = bus.mcp.as_ref().unwrap().servers()(&crate::harness::McpSession::test(thread, &work, true));
         let [McpServer::Http(server)] = &servers[..] else { panic!("one HTTP server") };
         let token = server.headers[0].value.strip_prefix("Bearer ").unwrap();
         let config = StreamableHttpClientTransportConfig::with_uri(server.url.as_str()).auth_header(token);

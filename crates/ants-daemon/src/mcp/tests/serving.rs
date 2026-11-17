@@ -18,7 +18,9 @@ async fn the_socket_serves_the_tools_after_the_token() {
     let (mcp, mut sent) = start(&home).await;
     let current = from_human();
     let _turn = mcp.begin(&current);
-    let [McpServer::Stdio(server)] = &mcp.servers()(&current.thread_id, Path::new("/"), false)[..] else {
+    let [McpServer::Stdio(server)] =
+        &mcp.servers()(&crate::harness::McpSession::test(&current.thread_id, Path::new("/"), false))[..]
+    else {
         panic!("stdio")
     };
     assert_eq!(server.args[..2], ["mcp", "--socket"]);

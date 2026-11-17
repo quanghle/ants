@@ -23,9 +23,7 @@ use crate::limits::fallback::OnFallback;
 use crate::limits::overflow::ContextOverflow;
 use crate::limits::ratelimit::Limited;
 use crate::monitoring::status::{self, Status};
-use crate::profile::identity::Identity;
 use crate::provider::brief::Briefing;
-use crate::provider::context::Caller;
 use crate::sync::MutexExt as _;
 
 use super::control::Cancel;
@@ -81,6 +79,12 @@ impl Unnarrowed {
         }
         warned.insert(sender.clone())
     }
+}
+
+/// The turn of `incoming`, the message its thread handles now, on the ant's MCP server ([`crate::mcp::Mcp::begin`]).
+fn begin_turn(mcp: &crate::mcp::Mcp, incoming: &Incoming, msg: &jetstream::Message) -> crate::mcp::Turn {
+    let carried = incoming.attached().into_iter().map(|(handle, _)| handle).collect();
+    mcp.begin(&incoming.envelope).carrying(carried, crate::files::stored(msg)).posted_in(incoming.channel())
 }
 
 impl Inbox<'_> {
@@ -168,9 +172,7 @@ impl Inbox<'_> {
             self.warn_unnarrowed(envelope, launch);
         }
         let _narrowed = (!joining).then(|| launch.policy().narrow(thread, envelope.allow.as_deref()));
-        let carried = incoming.attached().into_iter().map(|(handle, _)| handle).collect();
-        let _turn =
-            self.mcp.filter(|_| !joining).map(|mcp| mcp.begin(envelope).carrying(carried, crate::files::stored(msg)));
+        let _turn = self.mcp.filter(|_| !joining).map(|mcp| begin_turn(mcp, incoming, msg));
         let _asking = self.approvals.filter(|_| !joining).map(|approvals| approvals.begin(envelope));
         let text = self.prompt_for(incoming, read.as_ref(), &humans, cut_off, own.then_some(spent)).await;
         // The answer of a prompt a message joined is sent while the turn of the one it started with lasts.
@@ -554,22 +556,14 @@ impl Inbox<'_> {
     }
 
     /// What asks the ant's provider for its brief, should the prompt for `incoming` be the first of a session: none
-    /// without a provider taking brief requests.
+    /// without a provider taking brief requests. Asked as the provider's tools are called ([`crate::mcp::Mcp::caller`],
+    /// the thread's origin noted as the turn began).
     async fn briefing(&self, incoming: &Incoming) -> Option<Briefing> {
-        let provider = self.mcp?.provider()?.clone();
-        let identity = match self.identity.map(Identity::id) {
-            Some(id) => id.await.unwrap_or_else(|e| {
-                tracing::warn!(error = format!("{e:#}"), "reading the ant's identity for its brief");
-                None
-            }),
-            None => None,
-        };
-        let (ant, machine) = (self.ant.clone(), self.machine.to_owned());
-        let caller = identity.map(|identity| Caller { ant, identity, machine });
-        let envelope = &incoming.envelope;
-        let channel = incoming.post.as_ref().map(|posted| posted.post.channel.clone()).or(incoming.resume.clone());
-        let origin = crate::provider::context::origin(envelope, channel, &self.humans.humans());
-        Briefing::new(provider, caller, envelope.thread_id.clone(), origin)
+        let mcp = self.mcp?;
+        let provider = mcp.provider()?.clone();
+        let thread = &incoming.envelope.thread_id;
+        let origin = mcp.origin(thread)?;
+        Briefing::new(provider, mcp.caller().await, thread.clone(), origin)
     }
 
     /// Run the prompt `text` for `incoming`, streaming its status, recording its spend, renewing the message's ack wait

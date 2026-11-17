@@ -33,6 +33,7 @@ mod attachments;
 mod channels;
 mod escalation;
 mod messages;
+mod provider;
 mod replies;
 mod routing;
 mod serving;
@@ -164,7 +165,10 @@ async fn http_client(url: &str, token: &str) -> Client {
 
 /// The URL and token the sessions of `thread` get over HTTP.
 fn http_server(mcp: &Mcp, thread: &ThreadId) -> (String, String) {
-    let [McpServer::Http(server)] = &mcp.servers()(thread, Path::new("/"), true)[..] else { panic!("one HTTP server") };
+    let [McpServer::Http(server)] = &mcp.servers()(&crate::harness::McpSession::test(thread, Path::new("/"), true))[..]
+    else {
+        panic!("one HTTP server")
+    };
     let token = server.headers[0].value.strip_prefix("Bearer ").unwrap().to_owned();
     (server.url.clone(), token)
 }

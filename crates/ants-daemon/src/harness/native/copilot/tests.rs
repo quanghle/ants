@@ -276,7 +276,10 @@ async fn copilot_turns_stream_through_the_translator() {
         ..Default::default()
     };
     let thread: ThreadId = "t1".parse().unwrap();
-    let launch = played.launch(settings).with_mcp(Arc::new(move |_, _, _| servers.clone())).for_thread(&thread);
+    let launch = played
+        .launch(settings)
+        .with_mcp(Arc::new(move |_: &crate::harness::McpSession<'_>| servers.clone()))
+        .for_thread(&thread);
 
     let session = Session::start(&launch, None).await.unwrap();
     let agent = session.agent().unwrap();

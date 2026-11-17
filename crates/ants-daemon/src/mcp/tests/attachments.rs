@@ -21,7 +21,9 @@ fn memory_files(stored: MemoryFiles) -> FileAccess {
 
 /// A client for the sessions of `thread`, working in `dir`.
 async fn client_in(mcp: &Mcp, thread: &ThreadId, dir: &Path) -> Client {
-    let [McpServer::Http(server)] = &mcp.servers()(thread, dir, true)[..] else { panic!("one HTTP server") };
+    let [McpServer::Http(server)] = &mcp.servers()(&crate::harness::McpSession::test(thread, dir, true))[..] else {
+        panic!("one HTTP server")
+    };
     let token = server.headers[0].value.strip_prefix("Bearer ").unwrap();
     http_client(&server.url, token).await
 }

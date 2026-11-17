@@ -607,7 +607,7 @@ async fn the_first_prompt_of_a_session_carries_the_provider_s_brief_asked_with_t
     crate::hub::create_identities(&bus.js).await.unwrap();
     let identity = crate::profile::identity::Identity::new(&bus.js, None, &bus.dev).await.unwrap();
     let born = identity.ensure().await.unwrap().unwrap();
-    bus.identity = Some(identity);
+    bus.identity = Some(identity.clone());
     let home = bus._server.dir().join("briefed");
     std::fs::create_dir_all(&home).unwrap();
     let (outbox, colony) = (crate::mcp::jetstream_outbox(bus.js.clone()), crate::mcp::jetstream_colony(bus.js.clone()));
@@ -616,6 +616,7 @@ async fn the_first_prompt_of_a_session_carries_the_provider_s_brief_asked_with_t
     let answer = crate::provider::brief::fake::Answer::Text("Working on the parser.".to_owned());
     let (provider, fake) = crate::provider::brief::fake::connected(answer, true).await;
     mcp.with_provider(provider);
+    mcp.with_callers(crate::provider::context::Callers::new(bus.dev.clone(), "test-machine".to_owned(), identity));
     bus.mcp = Some(mcp);
     let (launch, _, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);

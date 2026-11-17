@@ -1,7 +1,9 @@
 //! MCP tools for the ant's harness sessions: `send_message`, `ask_ant`, `check_inbox`, `list_ants` and
 //! `route` to find ants by their colony capabilities, `post_notes` and `read_notes` for the thread's notes
 //! (see [`crate::stream::notes`]), and `escalate` to send the thread up the ant's escalation chain (see
-//! [`crate::escalation`]). Memory and task tools are configured separately by each ant.
+//! [`crate::escalation`]). The tools of the ant's provider, what holds its identity, memory and work, come beside them,
+//! named with the provider's name as prefix (`sugar_recall`), each call carrying the ant, its identity, the thread and
+//! where the thread came from (see [`provider`]).
 //!
 //! `decide_approval` answers another ant's tool request that came up its chain (see [`crate::approvals`]).
 //!
@@ -38,7 +40,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use agent_client_protocol::v1::schema::{EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerStdio};
-use ants_proto::provider::Connected;
+use ants_proto::provider::{Connected, Origin};
 use ants_proto::{AttachmentHandle, Envelope, ThreadId, UserId, Uuid};
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Utc};
@@ -50,7 +52,7 @@ use tokio::task::JoinHandle;
 
 use crate::chanadm::Admin;
 use crate::escalation::Escalator;
-use crate::harness::McpServers;
+use crate::harness::{McpServers, McpSession};
 use crate::people::humans::Registry;
 use crate::records::links;
 use crate::secrets::redact::Redactor;
@@ -66,6 +68,7 @@ mod escalation;
 mod managers;
 mod messages;
 mod notes;
+mod provider;
 mod reactions;
 mod routing;
 mod serve;
@@ -159,6 +162,8 @@ impl Mcp {
             files: OnceLock::new(),
             redactor: OnceLock::new(),
             provider: OnceLock::new(),
+            served: Mutex::default(),
+            callers: OnceLock::new(),
             state_path,
             sessions: Mutex::default(),
             asks: tokio::sync::Mutex::new(Asks { stored, waiting: HashMap::new() }),
@@ -252,14 +257,21 @@ impl Mcp {
     }
 
     /// The MCP servers each harness session gets: HTTP where the harness takes it, else `ants mcp` over the socket.
-    /// The directory the session works in is where its tools attach and save files.
+    /// The directory the session works in is where its tools attach and save files, and the harness and model running
+    /// it are those the calls of the provider's tools carry.
     pub fn servers(&self) -> McpServers {
         let (hub, url, socket) = (self.hub.clone(), self.url.clone(), self.socket.clone());
         let exe = std::env::current_exe().ok();
-        Arc::new(move |thread, dir, http| {
-            hub.sessions.locked().dirs.insert(thread.clone(), dir.to_owned());
+        Arc::new(move |session: &McpSession<'_>| {
+            let thread = session.thread;
+            {
+                let mut sessions = hub.sessions.locked();
+                sessions.dirs.insert(thread.clone(), session.dir.to_owned());
+                let running = (session.harness.to_owned(), session.model.map(str::to_owned));
+                sessions.running.insert(thread.clone(), running);
+            }
             let token = hub.token(thread);
-            if http {
+            if session.http {
                 let auth = HttpHeader::new(header::AUTHORIZATION.as_str(), format!("Bearer {token}"));
                 return vec![McpServer::Http(McpServerHttp::new(SERVER_NAME, &url).headers(vec![auth]))];
             }
@@ -318,6 +330,10 @@ struct Sessions {
     completed: HashMap<ThreadId, turn::Completed>,
     /// The directory each thread's sessions work in.
     dirs: HashMap<ThreadId, PathBuf>,
+    /// The harness running each thread's last session opened, and the model the config sets for it.
+    running: HashMap<ThreadId, (String, Option<String>)>,
+    /// Where each thread came from, as the messages it handled tell ([`Hub::note_origin`]).
+    origins: HashMap<ThreadId, Origin>,
     /// The paths of the files each thread's session attached to the final answer of its turn.
     reply_files: HashMap<ThreadId, Vec<String>>,
     /// The handles of the files attached to the message each thread is handling, and when the hub stored it.
@@ -348,6 +364,10 @@ struct Hub {
     redactor: OnceLock<Arc<Redactor>>,
     /// The ant's provider ([`crate::provider`]).
     provider: OnceLock<Connected>,
+    /// The provider's tools as listed last.
+    served: Mutex<provider::Served>,
+    /// Who the provider calls are for ([`Mcp::with_callers`]).
+    callers: OnceLock<crate::provider::context::Callers>,
     state_path: PathBuf,
     sessions: Mutex<Sessions>,
     asks: tokio::sync::Mutex<Asks>,

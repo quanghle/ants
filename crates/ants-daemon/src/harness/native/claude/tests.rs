@@ -250,8 +250,8 @@ async fn a_claude_session_streams_its_turn_and_reports_spend() {
     };
     let launch = native
         .launch(settings)
-        .with_mcp(Arc::new(move |_, _, http| {
-            assert!(http, "Claude Code takes HTTP MCP servers");
+        .with_mcp(Arc::new(move |session: &crate::harness::McpSession<'_>| {
+            assert!(session.http, "Claude Code takes HTTP MCP servers");
             servers.clone()
         }))
         .for_thread(&thread);

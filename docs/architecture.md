@@ -138,7 +138,7 @@ Per-ant prompt instructions and state isolation:
 
 ## Providers
 
-An ant's provider holds its identity, memories and work. Every ant has built-in sugar (crate `ants-sugar`), run inside the daemon: one `Sugar` serves all the ants of a daemon process, each call naming its ant. The daemon connects it on first use and hands it to each ant's MCP server. Sugar's tools are not served to sessions yet; the daemon asks it only for briefs.
+An ant's provider holds its identity, memories and work. Every ant has built-in sugar (crate `ants-sugar`), run inside the daemon: one `Sugar` serves all the ants of a daemon process, each call naming its ant. The daemon connects it on first use and hands it to each ant's MCP server, which serves its tools to every session of the ant ([MCP tools](#mcp-tools)); no harness needs configuring for them. The daemon also asks it for briefs.
 
 Built-in sugar implements the same interface (`ants_proto::provider::Provider`) that an external provider serves over the provider protocol, so switching an ant between providers changes nothing else in ants. A provider never reads an ant's messages, prompts or replies. It sees only:
 
@@ -192,13 +192,16 @@ Tools:
 
 - A provider names its tools without a prefix: 1-32 characters of `a-z`, `0-9` and `_`. Its own name is 1-32 characters of `a-z`, `0-9` and `-`.
 - ants serves each tool as `<provider>_<tool>` (`sugar_recall`), adding a boolean `json` argument to its schema. `json: true` sets the call's `format` to `json`; otherwise the answer comes as brief text.
+- The ants MCP server asks the provider for its tools at each `tools/list` (5 s bound), so a session listing them again sees a provider's tools come and go. A failing list leaves the provider's tools out and ants' own in place. A tool whose name is invalid, whose schema is not an object, or whose served name is one of ants' own tools is left out, logged once.
+- A call answers within 30 s. One that does not reach the tool (the provider down or the capability not agreed), times out, or has no context yet (no message on the thread handled since the daemon started, or the ant's identity record absent or unreadable) fails with an `[ants]` line saying why. A refusal (`is_error`) fails with the provider's text; a `json` answer comes as structured content beside its JSON text.
 - Sugar serves at most 12 tools. It declares `brief`, `remember`, `recall`, `vote`, `checkpoint` and `handoff`, each answering `sugar_<tool> is not available yet.` with `is_error` for now, and its briefs are empty.
 
 Calls and events:
 
 - A tool call's and a brief's `context` is what ants knows of the call, never taken from the ant's text: `ant`, `identity` (the id of the ant's identity record), `thread`, `origin`, `harness`, `model`, `machine` and `at`.
   - `origin` is `{by, channel?}`, where `by` is `{kind: "human" | "ant" | "webhook", user}` or `{kind: "provider", name}`.
-  - A thread a webhook or schedule started is untrusted.
+  - The daemon keeps each thread's origin from the messages it handles on it, taking for each, in this order: a webhook's or schedule's message, or one on a thread a webhook or schedule narrowed, as the webhook's (the ant passing such a thread on standing for it); a thread an ant started with a channel post as that ant's; one a human started as that human's, as is a message an assistant sends on a human's behalf; anything else as the sender's. A post's, or a resumed channel thread's, `channel` is its channel.
+  - The first message's origin stays, except that a message from a webhook or schedule makes a thread untrusted for good: a human's message later does not make it trusted again. Origins live in the daemon's memory, so after a restart the first message handled sets them again.
 - `brief.budget` is in bytes of UTF-8, 8000 by default. `reason` is `started`, `loaded` or `rebuilt`.
 - Event `kind`s, with what each adds:
   - `ant_added`, `ant_moved`, `ant_retired`, `ant_revived`;
@@ -244,7 +247,7 @@ The message.
 - The brief follows the configured instructions (`whoami`, `memory`, `tasks`), whichever of them the ant has, and comes before the history that seeds a rebuilt session. Later prompts of the session carry the instructions without it.
 - A brief over its budget of 8000 bytes is cut on a character boundary, followed by `[ants] The brief was cut to its budget of 8000 bytes.` An empty brief adds nothing.
 - A provider not answering within 5 s leaves the brief out, with `[ants] The sugar brief is left out: no answer within 5s.` in its place; one failing leaves `… the provider failed (error <code>).`, and an identity record the daemon cannot read `… the ant's identity record cannot be read.` The prompt goes on either way. The wait runs alongside the reading of the message's attachments and does not count toward `prompt_timeout`.
-- The brief's `origin` comes from the message prompting: a webhook's message is the webhook's; a thread an ant started with a channel post is that ant's; one a human started is that human's, as is a message an assistant sends on a human's behalf; anything else is the sender's. A post's `channel` is its channel.
+- The brief's `context` is the one the provider's tool calls carry on the thread ([calls and events](#provider-protocol)).
 
 ### Lifecycle events
 
@@ -295,6 +298,7 @@ Each session gets the `ants` MCP server over streamable HTTP (`127.0.0.1:<port>/
 | `complete(reason?)` | End the turn with no reply: its final answer goes to nobody (no message, channel post, or notes post), the message gets a `check` reaction (best effort), and `reason` (one line, 1–500 chars) is kept on the thread's timeline; 0 turns, wakes nobody. Refused for a human's message (or an assistant's on behalf of one), a webhook's, an escalation, or an approval request, which are always answered. |
 | `human_queue`, `answer_for_human`, `send_for_human`, `post_for_human`, `notes_for_human`, `react_for_human`, `title_for_human`, `done_for_human`, `decide_for_human`, `order_for_human`, `queue_for_human`, `cancel_for_human`, `withdraw_for_human`, `mark_for_human`, `snooze_for_human` | Assistants only, while the human's grant names the ant: read the human's home queue and act for it, each act carrying `on_behalf_of` ([auth.md](auth.md#tools-acting-for-its-human)). |
 | `request_ant(...)` / `retire_ant(name)` | Template managers only: add or retire a templated worker ant via `ants signer` ([config.md](config.md#manager-ants)). |
+| `<provider>_<tool>(..., json?)` | The tools of the ant's [provider](#providers), such as `sugar_recall`, called with the ant, its identity, the thread, the thread's origin, the harness, model and machine ([tools](#provider-protocol)). |
 
 `attach` lists up to 8 files of up to 8 MiB each, by path relative to the directory the thread's session works in (the ant's `workdir`, or the thread's worktree): a path whose real location (symlinks and `..` resolved) leaves it, a non-regular file, or a file too big fails the call with nothing sent. Each file goes to `ants_files` under the message's handle, named by its base name, with a media type guessed from its extension; UTF-8 text files have secrets replaced with `[redacted]` first, as message text does ([config.md](config.md#redaction)). Replies, `check_inbox`, and `read_notes` list a message's attachments with their handles.
 

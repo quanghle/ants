@@ -114,8 +114,8 @@ async fn a_native_cli_answers_prompts_through_the_translator() {
     let servers = vec![McpServer::Stdio(stdio)];
     let launch = native
         .launch(ModelSettings::default())
-        .with_mcp(Arc::new(move |_, _, http| {
-            assert!(!http, "the stub CLI takes no HTTP MCP servers");
+        .with_mcp(Arc::new(move |session: &crate::harness::McpSession<'_>| {
+            assert!(!session.http, "the stub CLI takes no HTTP MCP servers");
             servers.clone()
         }))
         .for_thread(&thread);
@@ -454,7 +454,7 @@ async fn a_native_cli_reports_its_mcp_servers_and_signs_them_in_on_the_loopback(
     let stdio = McpServer::Stdio(McpServerStdio::new("ants", "/bin/ants"));
     let launch = native
         .launch(ModelSettings::default())
-        .with_mcp(Arc::new(move |_, _, _| vec![stdio.clone()]))
+        .with_mcp(Arc::new(move |_: &crate::harness::McpSession<'_>| vec![stdio.clone()]))
         .for_thread(&thread);
 
     let host = crate::harness::open_mcp(&launch).await.unwrap().unwrap();

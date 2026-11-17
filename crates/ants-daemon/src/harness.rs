@@ -16,7 +16,7 @@ mod steer;
 pub use catalog::{BUILTIN_HARNESSES, Harnesses, Unset, parse_definitions};
 pub(crate) use definition::validate_env;
 pub use definition::{ContextValue, Harness, allows_all};
-pub use launch::{Launch, McpServers};
+pub use launch::{Launch, McpServers, McpSession};
 pub use mcp::{McpHost, open_mcp, unreported_mcp};
 pub use native::Protocol;
 use process::one_of;

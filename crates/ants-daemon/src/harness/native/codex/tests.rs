@@ -155,8 +155,8 @@ impl Fixture {
         let servers = vec![McpServer::Stdio(stdio)];
         let thread: ThreadId = "t1".parse().unwrap();
         launch
-            .with_mcp(Arc::new(move |_, _, http| {
-                assert!(!http, "codex is given stdio MCP servers");
+            .with_mcp(Arc::new(move |session: &crate::harness::McpSession<'_>| {
+                assert!(!session.http, "codex is given stdio MCP servers");
                 servers.clone()
             }))
             .for_thread(&thread)

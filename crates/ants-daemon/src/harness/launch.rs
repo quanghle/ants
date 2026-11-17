@@ -18,9 +18,30 @@ use crate::permission::PermissionPolicy;
 /// Makes the transport to a fresh harness: a process, or an in-process agent in tests.
 pub(super) type Connector = Arc<dyn Fn() -> DynConnectTo<Client> + Send + Sync>;
 
-/// The MCP servers a session of a thread working in a directory gets; the flag tells whether the harness takes HTTP
-/// ones.
-pub type McpServers = Arc<dyn Fn(&ThreadId, &Path, bool) -> Vec<McpServer> + Send + Sync>;
+/// The MCP servers a session gets.
+pub type McpServers = Arc<dyn Fn(&McpSession<'_>) -> Vec<McpServer> + Send + Sync>;
+
+/// A session MCP servers are made for.
+#[derive(Debug, Clone, Copy)]
+pub struct McpSession<'a> {
+    pub thread: &'a ThreadId,
+    /// The directory the session works in.
+    pub dir: &'a Path,
+    /// The harness running it, by its name in the config.
+    pub harness: &'a str,
+    /// The model the config sets for it, if any.
+    pub model: Option<&'a str>,
+    /// Whether the harness takes HTTP MCP servers.
+    pub http: bool,
+}
+
+impl<'a> McpSession<'a> {
+    /// A session of `thread` working in `dir`, of a harness taking HTTP MCP servers when `http`.
+    #[cfg(test)]
+    pub(crate) fn test(thread: &'a ThreadId, dir: &'a Path, http: bool) -> Self {
+        Self { thread, dir, harness: "test", model: None, http }
+    }
+}
 
 /// How to start a harness and open sessions in it.
 #[derive(Clone)]
@@ -109,7 +130,13 @@ impl Launch {
 
     pub(super) fn mcp_servers(&self, http: bool) -> Vec<McpServer> {
         match (&self.mcp, &self.thread) {
-            (Some(mcp), Some(thread)) => mcp(thread, &self.cwd, http),
+            (Some(mcp), Some(thread)) => mcp(&McpSession {
+                thread,
+                dir: &self.cwd,
+                harness: &self.harness.name,
+                model: self.settings.model.as_deref(),
+                http,
+            }),
             _ => Vec::new(),
         }
     }

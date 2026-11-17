@@ -36,6 +36,7 @@ use crate::people::humans::Registry;
 use crate::permission::{Allowlist, PermissionPolicy};
 use crate::pool::{Pool, SessionStore};
 use crate::profile::identity::Identity;
+use crate::provider::context::Callers;
 use crate::provider::events::{self, Lifecycle};
 use crate::publish::{Publish, Publisher};
 use crate::records::webhooks::Webhooks;
@@ -367,7 +368,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         lifecycle,
         mcp,
         launch,
-    } = services(config, &client, &js, &humans, allow).await?;
+    } = services(config, &client, &js, &humans, allow, &entry.machine).await?;
     let js_domain = config.connection.js_domain.as_ref();
     let stream = bus::open_stream(&js, &config.ant).await?;
     let threads = Threads::new(js.clone(), config.ant.clone(), sessions_kv.clone()).reading(reading);
@@ -480,13 +481,15 @@ struct Services {
     launch: Launch,
 }
 
-/// Set up the ant's redactor, approvals, notes, spending ledger, escalator and records, and start its MCP server.
+/// Set up the ant's redactor, approvals, notes, spending ledger, escalator and records, and start its MCP server, its
+/// provider's tool calls naming `machine` for the machine serving the ant.
 async fn services(
     config: &Config,
     client: &async_nats::Client,
     js: &jetstream::Context,
     humans: &Registry,
     allow: Allowlist,
+    machine: &str,
 ) -> Result<Services> {
     let redactor = std::sync::Arc::new(redactor(config.policy.redact, &config.harness));
     let colony = crate::mcp::jetstream_colony(js.clone());
@@ -519,6 +522,9 @@ async fn services(
     )
     .await?;
     connect_mcp(&mut mcp, config, client, js, &redactor, humans).await?;
+    if let Some(identity) = &identity {
+        mcp.with_callers(Callers::new(config.ant.clone(), machine.to_owned(), identity.clone()));
+    }
     let launch = launch(&config.harness, policy, &mcp);
     Ok(Services {
         redactor,
@@ -1006,6 +1012,12 @@ enum Steered {
 }
 
 impl Incoming {
+    /// The channel of the thread the message came on, as its origin names it: a post's, or the channel of a thread it
+    /// renewed ([`Incoming::resume`]).
+    fn channel(&self) -> Option<&ChannelId> {
+        self.post.as_ref().map(|posted| &posted.post.channel).or(self.resume.as_ref())
+    }
+
     /// The files attached to the message, each with its handle: a channel post's under the post's channel, as the
     /// envelope made of it carries none ([`channel::as_envelope`]).
     fn attached(&self) -> Vec<(AttachmentHandle, Attachment)> {

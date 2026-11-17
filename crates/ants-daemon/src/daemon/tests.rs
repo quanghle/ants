@@ -501,7 +501,7 @@ async fn call_tool(mcp: &Mcp, thread: &ThreadId, name: &'static str, args: serde
     use rmcp::transport::StreamableHttpClientTransport;
     use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 
-    let servers = mcp.servers()(thread, std::path::Path::new("/"), true);
+    let servers = mcp.servers()(&crate::harness::McpSession::test(thread, std::path::Path::new("/"), true));
     let [McpServer::Http(server)] = &servers[..] else { panic!("one HTTP server") };
     let token = server.headers[0].value.strip_prefix("Bearer ").unwrap();
     let config = StreamableHttpClientTransportConfig::with_uri(server.url.as_str()).auth_header(token);

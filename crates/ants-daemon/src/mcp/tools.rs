@@ -1,13 +1,20 @@
 //! The tools one MCP connection is served, gathered from the routers of the tools' areas, and what the server tells
 //! the harness about them: its info, its instructions, and the tools offered now. `request_ant` and `retire_ant` are
-//! offered to a manager ant only, and the tools acting for a human only while the human's grant names the ant.
+//! offered to a manager ant only, and the tools acting for a human only while the human's grant names the ant. The
+//! tools of the ant's provider come after ants' own ([`super::provider`]).
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
+use ants_proto::provider::{Capability, Connected};
 use ants_proto::{ThreadId, UserId};
 use rmcp::handler::server::router::tool::ToolRouter;
-use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig};
+use rmcp::handler::server::tool::ToolCallContext;
+use rmcp::model::{
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation, ServerCapabilities,
+    ServerConfig,
+};
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, tool_handler};
 
@@ -52,6 +59,24 @@ impl Tools {
     }
 }
 
+/// The names of all of ants' own tools, whichever an ant is offered: no provider's tool takes one.
+pub(super) fn own_names() -> &'static HashSet<String> {
+    static NAMES: LazyLock<HashSet<String>> = LazyLock::new(|| {
+        let all = Tools::messages_router()
+            + Tools::routing_router()
+            + Tools::reactions_router()
+            + Tools::turn_router()
+            + Tools::notes_router()
+            + Tools::attach_router()
+            + Tools::channels_router()
+            + Tools::escalation_router()
+            + Tools::managers_router()
+            + Tools::assist_router();
+        all.list_all().into_iter().map(|tool| tool.name.into_owned()).collect()
+    });
+    &NAMES
+}
+
 impl Tools {
     /// The tools offered now: those acting for the human the ant assists only while its grant names the ant.
     fn offered(&self) -> Vec<rmcp::model::Tool> {
@@ -68,9 +93,24 @@ impl Tools {
 impl ServerHandler for Tools {
     fn get_info(&self) -> ServerConfig {
         let assisting = self.hub.assisting_now();
+        let provider = self.hub.provider.get().filter(|p| p.has(Capability::Tools)).map(Connected::name);
+        let ant = &self.hub.ant;
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new(SERVER_NAME, env!("CARGO_PKG_VERSION")))
-            .with_instructions(instructions(&self.hub.ant, self.hub.requester.get().is_some(), assisting.as_ref()))
+            .with_instructions(instructions(ant, self.hub.requester.get().is_some(), assisting.as_ref(), provider))
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        if let Some((provider, tool)) = self.provider_of(&request.name) {
+            let thread = self.thread(&context)?;
+            let arguments = request.arguments.unwrap_or_default();
+            return Ok(self.call_provider(provider, &request.name, tool, arguments, &thread).await.into());
+        }
+        self.tool_router.call(ToolCallContext::new(self, request, context)).await
     }
 
     async fn list_tools(
@@ -80,9 +120,11 @@ impl ServerHandler for Tools {
     ) -> Result<rmcp::model::ListToolsResult, ErrorData> {
         // As the generated one does, but with what is offered now, never to be cached.
         let hints = context.protocol_version().is_some_and(|v| v >= rmcp::model::ProtocolVersion::V_2026_07_28);
+        let mut tools = self.offered();
+        tools.extend(self.provider_tools().await);
         Ok(rmcp::model::ListToolsResult {
             result_type: Some(rmcp::model::ResultType::COMPLETE),
-            tools: self.offered(),
+            tools,
             meta: None,
             next_cursor: None,
             ttl_ms: hints.then_some(0),
@@ -91,11 +133,11 @@ impl ServerHandler for Tools {
     }
 
     fn get_tool(&self, name: &str) -> Option<rmcp::model::Tool> {
-        self.offered().into_iter().find(|t| t.name == name)
+        self.offered().into_iter().find(|t| t.name == name).or_else(|| self.provider_tool(name))
     }
 }
 
-fn instructions(ant: &UserId, manager: bool, assisting: Option<&UserId>) -> String {
+fn instructions(ant: &UserId, manager: bool, assisting: Option<&UserId>, provider: Option<&str>) -> String {
     let mut text = format!(
         "Messaging between ants; this session speaks as {ant}. send_message and ask_ant reach other \
          ants, check_inbox collects late replies, list_ants shows ants with the advertised whoami field \
@@ -119,6 +161,13 @@ fn instructions(ant: &UserId, manager: bool, assisting: Option<&UserId>) -> Stri
          read_attachment reads a file attached to a message by the handle listed with it. Memory and task tools \
          follow the ant's configured instructions."
     );
+    if let Some(provider) = provider {
+        let _ = write!(
+            text,
+            " The tools named {provider}_* come from {provider}, this ant's provider of identity, memory and work; \
+             each answers as brief text, or as JSON when called with json set to true."
+        );
+    }
     if manager {
         text.push_str(
             " As a manager of ant templates, request_ant adds a worker ant from one when the work needs more hands \
