@@ -306,4 +306,47 @@ mod tests {
         assert!(parse("/mute forever").is_err());
         assert!(parse("/react Thumbs Up").is_err());
     }
+
+    /// A sample of an argument [`COMMANDS`] names; a new placeholder needs one here.
+    fn sample(arg: &str) -> &str {
+        match arg {
+            "ID" | "THREAD" => "019a",
+            "TEXT" | "NOTE" | "QUERY" => "ship it",
+            "N" => "2",
+            "DURATION" => "2h",
+            "TIME" => "17:00",
+            "SINCE" => "1d",
+            "NAME" => "eyes",
+            "#channel" => "#ops",
+            "@user" | "@ANT" => "@dev-b",
+            "ANT" => "dev-a",
+            "PATH" => "notes.txt",
+            literal if literal.starts_with("--") || literal.chars().all(|c| c.is_ascii_lowercase()) => literal,
+            other => panic!("no sample for {other}"),
+        }
+    }
+
+    #[test]
+    fn every_listed_command_parses_with_its_arguments() {
+        for (name, args, _) in COMMANDS {
+            let mut lines = vec![format!("/{name}")];
+            for arg in args.split_whitespace() {
+                let (alternatives, optional) = match arg.strip_prefix('[').and_then(|a| a.strip_suffix(']')) {
+                    Some(arg) => (arg, true),
+                    None => (arg, false),
+                };
+                let samples: Vec<_> = alternatives.split('|').map(sample).collect();
+                lines = lines
+                    .iter()
+                    .flat_map(|line| {
+                        let given = samples.iter().map(move |sample| format!("{line} {sample}"));
+                        optional.then(|| line.clone()).into_iter().chain(given)
+                    })
+                    .collect();
+            }
+            for line in lines {
+                assert!(parse(&line).is_ok(), "{line}: {:?}", parse(&line));
+            }
+        }
+    }
 }
