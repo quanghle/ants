@@ -52,6 +52,7 @@ mod control;
 mod delivery;
 mod handling;
 mod holds;
+mod mcp_sign_in;
 mod prompt;
 mod queue;
 mod steering;
@@ -351,9 +352,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         return Ok(Served::Stopped);
     }
     let metrics = crate::monitoring::metrics::ant(&config.ant);
-    let workload = std::sync::Arc::new(colony::Workload::default());
-    workload.set_paused(config.pause.get());
-    workload.set_drift(config.drift.get());
+    let workload = workload(config);
     let _connected = metrics.connected(client.clone(), workload.clone());
     let Some((entry, claimed)) = take_turn(config, &js, stop).await? else {
         return Ok(Served::Stopped);
@@ -374,6 +373,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         lifecycle,
         mcp,
         launch,
+        mcp_sign_ins,
     } = services(config, &client, &js, &humans, allow, &entry.machine).await?;
     let stream = bus::open_stream(&js, &config.ant).await?;
     let threads = Threads::new(js.clone(), config.ant.clone(), sessions_kv.clone()).reading(reading);
@@ -427,6 +427,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         timeline_every: TIMELINE_EVERY,
         sign_in: SignIn::default(),
         sign_in_every: signin::CHECK_EVERY,
+        mcp_sign_ins,
         breaker: Breaker::default(),
         throttle: Throttle::default(),
         backoffs: ratelimit::BACKOFFS,
@@ -440,6 +441,14 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
     forget_if_retired(&served, config, &js, retired_before).await;
     wind_down(&served, registration, pool, lifecycle.as_ref()).await;
     Ok(served)
+}
+
+/// The ant's workload, paused and drifting as the config says at start.
+fn workload(config: &Config) -> std::sync::Arc<colony::Workload> {
+    let workload = std::sync::Arc::new(colony::Workload::default());
+    workload.set_paused(config.pause.get());
+    workload.set_drift(config.drift.get());
+    workload
 }
 
 /// Delete the ant's channel and done consumers when [`serve`] stopped as a retirement other than `retired_before` is
@@ -501,8 +510,10 @@ struct Services {
     /// Where the ant's lifecycle events go, when its provider takes them and its identity record could be read.
     lifecycle: Option<Lifecycle>,
     mcp: Mcp,
-    /// How the harnesses start, with the ant's MCP server and its tool requests going to `approver`.
+    /// How the harnesses start, with the ant's MCP server and its tool requests going to `approver`, and the
+    /// sign-ins to MCP servers of their sessions going to `mcp_sign_ins`.
     launch: Launch,
+    mcp_sign_ins: mcp_sign_in::Untold,
 }
 
 /// Set up the ant's redactor, approvals, notes, spending ledger, escalator and records, and start its MCP server, its
@@ -553,7 +564,8 @@ async fn services(
     if let Some(identity) = &identity {
         mcp.with_callers(Callers::new(config.ant.clone(), machine.to_owned(), identity.clone()));
     }
-    let launch = launch(&config.harness, policy, &mcp);
+    let mcp_sign_ins = mcp_sign_in::Untold::default();
+    let launch = launch(&config.harness, policy, &mcp).with_mcp_sign_ins(mcp_sign_ins.sink());
     Ok(Services {
         redactor,
         approver,
@@ -567,6 +579,7 @@ async fn services(
         lifecycle,
         mcp,
         launch,
+        mcp_sign_ins,
     })
 }
 
@@ -1152,6 +1165,8 @@ struct Inbox<'a> {
     sign_in: SignIn,
     /// How often a signed-out harness, or one failing to start, is checked.
     sign_in_every: Duration,
+    /// The sign-ins to MCP servers the harness's sessions made as they opened, until told.
+    mcp_sign_ins: mcp_sign_in::Untold,
     /// Whether the harness keeps failing to start, holding the messages.
     breaker: Breaker,
     /// Whether messages wait out a provider limit.

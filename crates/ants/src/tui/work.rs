@@ -156,9 +156,12 @@ impl Facts {
         let fact = self.0.entry(entry.thread_id.clone()).or_default();
         let alert = || Alert { seq: entry.seq, at: entry.stored_at, text: entry.text.clone() };
         if let Some(notice) = entry.notice {
-            // A daemon's notice answers nothing: only one a human has to act on counts, as what the thread is stuck on.
+            // A daemon's notice answers nothing: only one a human has to act on reaches the inbox, and only one holding
+            // the thread counts, as what the thread is stuck on.
             if let (true, Some(to)) = (notice.needs_action(), &entry.to) {
-                fact.escalated.insert(to.clone(), alert());
+                if notice.holds_thread() {
+                    fact.escalated.insert(to.clone(), alert());
+                }
                 if let (true, Some(from)) = (to == me, &entry.from) {
                     fact.inbox.push(Inboxed {
                         seq: entry.seq,
@@ -679,9 +682,11 @@ mod tests {
         m.stored(vec![notice(2, ants_proto::NoticeKind::Spend)], at(2));
         assert_eq!(state(&m, &thread), ThreadState::WaitingOnAnt);
         assert!(!m.data.finished(&thread) && m.data.unread_on(&thread).next().is_none());
-        m.stored(vec![notice(3, ants_proto::NoticeKind::SignedOut)], at(3));
+        m.stored(vec![notice(3, ants_proto::NoticeKind::McpSignIn)], at(3));
+        assert_eq!(state(&m, &thread), ThreadState::WaitingOnMe, "a sign-in to act on; the ant answers without it");
+        m.stored(vec![notice(4, ants_proto::NoticeKind::SignedOut)], at(4));
         assert_eq!(state(&m, &thread), ThreadState::Stuck);
-        assert_eq!(m.data.stuck(&thread).map(|a| a.seq), Some(3));
+        assert_eq!(m.data.stuck(&thread).map(|a| a.seq), Some(4));
     }
 
     #[test]

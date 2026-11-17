@@ -44,6 +44,13 @@ pub struct Harness {
     pub(crate) context: BTreeMap<String, ContextValue>,
     /// The command a human runs to sign the harness in, named when it reports it is signed out.
     pub(crate) sign_in: Option<String>,
+    /// For protocol copilot-sdk, the Application (client) ID of a Microsoft Entra app registration, sent on the SDK's
+    /// handshake so the CLI can sign in to MCP servers authenticating through Entra.
+    pub(crate) entra_client_id: Option<String>,
+    /// For protocol copilot-sdk, the MCP servers a session serving a thread signs in to with OAuth whenever one needs
+    /// it, by the names the session gives them.
+    #[serde(default)]
+    pub(crate) mcp_sign_in: Vec<String>,
     /// Phrases of its errors that mean a provider rate limit or overload, besides the common ones
     /// ([`crate::limits::ratelimit`]).
     #[serde(default)]
@@ -180,6 +187,28 @@ impl Harness {
         }
         if self.sign_in.as_ref().is_some_and(|command| command.trim().is_empty()) {
             bail!("harness {name}: sign_in must not be blank; omit it when the harness names no sign-in command");
+        }
+        if let Some(id) = &self.entra_client_id {
+            if self.protocol != Protocol::CopilotSdk {
+                bail!("harness {name}: entra_client_id applies only to protocol copilot-sdk, not {}", self.protocol);
+            }
+            if id.trim().is_empty() {
+                bail!(
+                    "harness {name}: entra_client_id must not be blank; omit it when no Microsoft Entra app \
+                     registration signs MCP servers in"
+                );
+            }
+        }
+        if !self.mcp_sign_in.is_empty() && self.protocol != Protocol::CopilotSdk {
+            bail!("harness {name}: mcp_sign_in applies only to protocol copilot-sdk, not {}", self.protocol);
+        }
+        for (i, server) in self.mcp_sign_in.iter().enumerate() {
+            if server.trim().is_empty() {
+                bail!("harness {name}: mcp_sign_in names must not be blank");
+            }
+            if self.mcp_sign_in[..i].contains(server) {
+                bail!("harness {name}: mcp_sign_in names {server} twice");
+            }
         }
         if self.rate_limited.iter().chain(&self.quota_exhausted).any(|phrase| phrase.trim().is_empty()) {
             bail!("harness {name}: rate_limited and quota_exhausted phrases must not be blank");

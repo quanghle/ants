@@ -462,6 +462,7 @@ pub(super) fn action_notice(envelope: &Envelope) -> Option<Notice> {
         NoticeKind::Quota => "out of quota",
         NoticeKind::Failing => "failing",
         NoticeKind::NoFallback => "no fallback left",
+        NoticeKind::McpSignIn => "MCP sign-in needed",
         _ => "gave up",
     };
     Some(Notice {

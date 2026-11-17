@@ -383,6 +383,18 @@ fn definitions_are_checked_and_replace_builtins_whole() {
     assert!(err("[harnesses.custom]\ncommand = \"x\"\nargs = [\"a\\u0000\"]").contains("must not contain NUL"));
     assert!(err("[harnesses.custom]\ncommand = \"x\"\nmode = \" \"").contains("mode must not be blank"));
     assert!(err("[harnesses.custom]\ncommand = \"x\"\nsign_in = \"\"").contains("sign_in must not be blank"));
+    let entra = |protocol: &str, id: &str| {
+        err(&format!("[harnesses.custom]\ncommand = \"x\"\nprotocol = \"{protocol}\"\nentra_client_id = \"{id}\""))
+    };
+    assert!(entra("copilot-sdk", " ").contains("harness custom: entra_client_id must not be blank"));
+    let elsewhere = entra("acp", "00000000-1111-2222-3333-444444444444");
+    assert!(elsewhere.contains("harness custom: entra_client_id applies only to protocol copilot-sdk, not acp"));
+    let sign_in = |protocol: &str, names: &str| {
+        err(&format!("[harnesses.custom]\ncommand = \"x\"\nprotocol = \"{protocol}\"\nmcp_sign_in = {names}"))
+    };
+    assert!(sign_in("acp", r#"["icm"]"#).contains("harness custom: mcp_sign_in applies only to protocol copilot-sdk"));
+    assert!(sign_in("copilot-sdk", r#"["icm", ""]"#).contains("harness custom: mcp_sign_in names must not be blank"));
+    assert!(sign_in("copilot-sdk", r#"["icm", "icm"]"#).contains("harness custom: mcp_sign_in names icm twice"));
     assert_eq!(builtin("copilot").sign_in(), Some("copilot login"));
     let env = err("[harnesses.custom]\ncommand = \"x\"\nenv = { 'A=B' = \"secret\" }");
     assert!(env.contains("harness custom") && env.contains("invalid harness environment variable"), "{env}");

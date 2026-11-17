@@ -45,7 +45,7 @@ impl Inbox<'_> {
     }
 
     /// Where a notice of an outage `incoming` met goes, naming `fallbacks`.
-    fn outage_notice<'a>(&'a self, incoming: &'a Incoming, fallbacks: &'a [String]) -> OutageNotice<'a> {
+    pub(super) fn outage_notice<'a>(&'a self, incoming: &'a Incoming, fallbacks: &'a [String]) -> OutageNotice<'a> {
         OutageNotice {
             ant: self.ant,
             envelope: &incoming.envelope,
