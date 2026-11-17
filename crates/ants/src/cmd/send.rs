@@ -92,7 +92,7 @@ pub(crate) struct Target {
     pub thread: Option<thread::Pick>,
     pub reply_to: Option<thread::MessagePick>,
     pub forward: Option<Forwarding>,
-    /// Wait behind the prompt running on the thread rather than interrupting it ([`Envelope::queue`]).
+    /// Wait behind the prompt running on the thread rather than steering it ([`Envelope::queue`]).
     pub queue: bool,
 }
 

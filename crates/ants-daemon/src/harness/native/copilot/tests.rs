@@ -17,7 +17,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::*;
 use crate::harness::{
-    Harnesses, Launch, ModelSettings, Prompt, Readiness, Session, SignedOut, Spend, fork, handshake, parse_definitions,
+    Harnesses, Launch, ModelSettings, Prompt, Readiness, Session, SignedOut, Spend, Steer, Steering, fork, handshake,
+    parse_definitions,
 };
 use crate::permission::{Allowlist, PermissionPolicy};
 use crate::ratelimit::Limited;
@@ -396,6 +397,45 @@ async fn a_cancelled_copilot_turn_is_aborted() {
     assert!(session.is_alive(), "the CLI ended the turn itself");
     session.close().await;
     assert_eq!(played.requests("session.abort").len(), 1);
+}
+
+#[tokio::test]
+async fn a_copilot_prompt_takes_steers_and_ends_at_the_idle_after_the_last() {
+    let played = Played::new("copilot-steer", "", |method, params| {
+        let id = &params["sessionId"];
+        let said = |message: &str, text: &str| {
+            event(id, "assistant.message_delta", json!({ "messageId": message, "deltaContent": text }))
+        };
+        let user = |message: &str| event(id, "user.message", json!({ "messageId": message, "content": "" }));
+        match (method, params["mode"].as_str()) {
+            ("session.send", Some("immediate")) => {
+                // The steer comes as the first turn ends and runs as a turn of its own.
+                let mut events = idle(id, false);
+                events.extend([user("u2"), said("a2", "On both")]);
+                events.extend(idle(id, false));
+                Some(Answer::ok(json!({ "messageId": "u2" })).then(events))
+            }
+            ("session.send", _) => Some(default_answer(method, params).then(vec![user("u1"), said("a1", "Working")])),
+            _ => None,
+        }
+    });
+    let session = Session::start(&played.launch(ModelSettings::default()), None).await.unwrap();
+    let (ready, started) = oneshot::channel();
+    let (steer_tx, steers) = mpsc::channel(1);
+    let (progress, mut status) = mpsc::channel(16);
+    let prompt = Prompt { progress: Some(progress), steering: Some(Steering { ready, steers }), ..Prompt::new("go") };
+    let steer = async {
+        started.await.expect("the Copilot CLI takes steers");
+        status.recv().await;
+        let (accepted, took) = oneshot::channel();
+        steer_tx.send(Steer { text: "and this".to_owned(), accepted }).await.unwrap();
+        took.await.unwrap()
+    };
+    let (reply, took) = tokio::join!(session.run(prompt), steer);
+    let reply = reply.unwrap();
+    assert_eq!((reply.text.as_str(), reply.cut, took), ("Working\n\nOn both", None, true));
+    session.close().await;
+    assert_eq!(played.requests("session.send")[1]["prompt"], "and this");
 }
 
 #[tokio::test]

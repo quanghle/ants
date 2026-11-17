@@ -1,8 +1,9 @@
 //! A test protocol over JSON-RPC, for the stub CLI of `ants-test-support` ([`ants_test_support::StubCli`]) to script:
 //! it runs one CLI per connection, as `codex app-server` does, and uses the helpers every protocol has.
 //!
-//! The CLI answers `initialize` with `{name, version, fork}`, `new` and `fork` with `{id}`, `load` with anything and
-//! `prompt` with `{stop, tokens}`, failing as [`mapped`] reads. It notifies `update` with `{kind, text}` (`message`,
+//! The CLI answers `initialize` with `{name, version, fork, steer}`, `new` and `fork` with `{id}`, `load` with anything,
+//! `prompt` with `{stop, tokens}` and `steer`, which adds `{session, text}` to the running prompt, with `{accepted}`,
+//! failing as [`mapped`] reads. It notifies `update` with `{kind, text}` (`message`,
 //! `thought`), `{kind: "tool", id, title}` or `{kind: "cost", usd}`, and may ask `approve`, which is denied. `cancel`
 //! and `close` are notified to it. `mcp` is answered with `{servers}`, each an [`McpServerState`], and `mcp_sign_in`
 //! with `{url}`, the address to sign in at, if any; the browser's return is requested on the loopback.
@@ -124,6 +125,7 @@ impl Native for Stub {
             fork: hello["fork"].as_bool().unwrap_or_default(),
             images: false,
             http_mcp: false,
+            steer: hello["steer"].as_bool().unwrap_or_default(),
         };
         match shared.request("initialize", json!({ "mode": mode })).await {
             Ok(hello) => Ok(Self { info: stub(&hello), shared, router }),
@@ -199,6 +201,12 @@ impl NativeSession for StubSession {
     async fn mcp_sign_in(&self, server: &str) -> Result<Option<String>, Error> {
         let started = self.shared.request("mcp_sign_in", json!({ "session": self.id, "server": server })).await?;
         Ok(started["url"].as_str().map(str::to_owned))
+    }
+
+    async fn steer(&self, prompt: Vec<ContentBlock>) -> Result<bool, Error> {
+        let params = json!({ "session": self.id, "text": prompt_text(&prompt) });
+        let steered = self.shared.request("steer", params).await?;
+        Ok(steered["accepted"].as_bool().unwrap_or_default())
     }
 
     async fn cancel(&self) {

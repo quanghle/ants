@@ -5,8 +5,8 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 
 use ants_proto::{
-    Envelope, Error as ProtoError, EscalationReason, Hold, Humans, NoReplyWhy, State, StatusUpdate, SummaryOf,
-    SummaryRequest, UserId,
+    Envelope, Error as ProtoError, EscalationReason, Hold, Humans, NoReplyWhy, NoticeKind, State, StatusUpdate,
+    SummaryOf, SummaryRequest, UserId, Uuid,
 };
 use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
@@ -19,14 +19,18 @@ use crate::channel::{self, Context, Earlier};
 use crate::escalation::{self, Stuck};
 use crate::fallback::OnFallback;
 use crate::files::Attached;
-use crate::harness::{Prompt, SignedOut, Spend};
+use crate::harness::{Prompt, SignedOut, Spend, Steer, Steering};
 use crate::overflow::ContextOverflow;
 use crate::ratelimit::Limited;
 use crate::status::{self, Status};
 use crate::sync::MutexExt as _;
 
 use super::control::Cancel;
+use super::steering::{Join, Joined, Requeue};
 use super::{Inbox, Incoming, Posted, Steered};
+
+/// How many steers wait at most for the harness to take them into the running prompt.
+const STEERS: usize = 8;
 
 /// Put before the text of a message whose earlier attempt started and stored no reply.
 const CUT_OFF: &str = "[ants] An earlier attempt at this message was cut off before its reply was stored, so tools it \
@@ -34,7 +38,7 @@ ran may already have taken effect. The session history may show what ran. Check 
 any action.";
 
 /// What came of running a prompt.
-struct Ran {
+pub(super) struct Ran {
     reply: Result<crate::harness::Reply>,
     /// The human's cancel of the prompt, if one came.
     cancelled_by: Option<Cancel>,
@@ -50,6 +54,8 @@ struct Ran {
     fallback: Option<usize>,
     /// The tokens the prompt spent so far, as the harness reported them.
     tokens: u64,
+    /// The messages that joined the prompt, in order: the last one gets its answer.
+    joined: Vec<Join>,
 }
 
 /// The senders of the narrowed messages warned of, so a harness running its tools unasked is warned of once per webhook
@@ -152,27 +158,36 @@ impl Inbox<'_> {
         tracing::info!(%thread, from = %envelope.from, cut_off, own, "prompting");
         status::state(self.client, self.ant, thread, State::Working);
 
+        // A message joining a running prompt takes over the turn of the message it started with.
+        let joining = incoming.steered == Steered::Joining;
         let launch = self.pool.launch();
-        if envelope.allow.as_deref().is_some_and(|allow| !crate::harness::allows_all(allow))
-            && launch.bypasses_permissions()
-            && self.unnarrowed.first(&envelope.from)
-        {
-            tracing::warn!(
-                %thread,
-                from = %envelope.from,
-                harness = launch.harness_name(),
-                "the thread's tool rules are narrowed, but the harness runs its tools unasked: the narrowing does not \
-                 apply to them (warned once per sender)"
-            );
+        if !joining {
+            self.warn_unnarrowed(envelope, launch);
         }
-        let _narrowed = launch.policy().narrow(thread, envelope.allow.as_deref());
+        let _narrowed = (!joining).then(|| launch.policy().narrow(thread, envelope.allow.as_deref()));
         let carried = incoming.attached().into_iter().map(|(handle, _)| handle).collect();
-        let _turn = self.mcp.map(|mcp| mcp.begin(envelope).carrying(carried, crate::files::stored(msg)));
-        let _asking = self.approvals.map(|approvals| approvals.begin(envelope));
-        let flush = tokio::time::interval_at(tokio::time::Instant::now() + status::FLUSH_EVERY, status::FLUSH_EVERY);
+        let _turn =
+            self.mcp.filter(|_| !joining).map(|mcp| mcp.begin(envelope).carrying(carried, crate::files::stored(msg)));
+        let _asking = self.approvals.filter(|_| !joining).map(|approvals| approvals.begin(envelope));
         let text = self.prompt_for(incoming, read.as_ref(), &humans, cut_off, own.then_some(spent)).await;
-        let Ran { reply, cancelled_by, cut_by_cancel, worked, mut reached, spend, fallback, tokens } =
-            self.run_prompt(incoming, msg, seq, text, flush).await;
+        // The answer of a prompt a message joined is sent while the turn of the one it started with lasts.
+        let mut _answering = None;
+        let ran = if joining {
+            let Some((ran, answering)) = self.joined(incoming, own, msg, seq, cut_off, text).await? else {
+                return Ok(());
+            };
+            _answering = Some(answering);
+            ran
+        } else {
+            let flush =
+                tokio::time::interval_at(tokio::time::Instant::now() + status::FLUSH_EVERY, status::FLUSH_EVERY);
+            let ran = self.run_prompt(incoming, msg, seq, text, flush).await;
+            if !ran.joined.is_empty() {
+                return self.hand_on(incoming, own, ran, msg, seq, cut_off).await;
+            }
+            ran
+        };
+        let Ran { reply, cancelled_by, cut_by_cancel, worked, mut reached, spend, fallback, tokens, joined: _ } = ran;
         // While the turn lasts: it ends with `_turn`.
         let completed = self.completed(incoming);
         let reply = match reply {
@@ -225,6 +240,146 @@ impl Inbox<'_> {
         // prompted again.
         if let Err(e) = self.attempts.replied(seq, envelope, &reply).await {
             tracing::warn!(%thread, error = format!("{e:#}"), "recording the reply");
+        }
+        self.deliver(incoming, &reply, msg, seq).await
+    }
+
+    /// Warn, once per sender, that the tool rules `envelope` narrows the thread to do not reach a harness running its
+    /// tools unasked.
+    fn warn_unnarrowed(&self, envelope: &Envelope, launch: &crate::harness::Launch) {
+        if envelope.allow.as_deref().is_some_and(|allow| !crate::harness::allows_all(allow))
+            && launch.bypasses_permissions()
+            && self.unnarrowed.first(&envelope.from)
+        {
+            tracing::warn!(
+                thread = %envelope.thread_id,
+                from = %envelope.from,
+                harness = launch.harness_name(),
+                "the thread's tool rules are narrowed, but the harness runs its tools unasked: the narrowing does not \
+                 apply to them (warned once per sender)"
+            );
+        }
+    }
+
+    /// Join the prompt running on the thread of `incoming` with `text`: the prompt's answer to send, with the turn to
+    /// hold while sending it, or None when `incoming` was settled as superseded ([`Inbox::superseded`]). A prompt that
+    /// refused it or failed hands it back to wait ([`Requeue`]).
+    async fn joined(
+        &self,
+        incoming: &Incoming,
+        own: bool,
+        msg: &jetstream::Message,
+        seq: u64,
+        cut_off: bool,
+        text: String,
+    ) -> Result<Option<(Ran, tokio::sync::oneshot::Sender<()>)>> {
+        let envelope = &incoming.envelope;
+        match self.join(incoming, msg, text).await {
+            Some(Joined::Answer(ran, answering)) => Ok(Some((*ran, answering))),
+            Some(Joined::Superseded(by, id)) => {
+                self.superseded(incoming, own, (&by, id), msg, seq).await.map(|()| None)
+            }
+            Some(Joined::Refused) => {
+                if !cut_off {
+                    self.attempts.forget(seq).await;
+                }
+                self.attempts.release(envelope).await;
+                Err(Requeue.into())
+            }
+            // The prompt failed: the retry is warned it was cut off.
+            None => {
+                self.attempts.retrying(envelope, None).await;
+                Err(Requeue.into())
+            }
+        }
+    }
+
+    /// Join the prompt running on the thread of `incoming` with `text`: what came of it, None when the prompt failed.
+    async fn join(&self, incoming: &Incoming, msg: &jetstream::Message, text: String) -> Option<Joined> {
+        let envelope = &incoming.envelope;
+        let stored = crate::files::stored(msg);
+        let text = match Attached::new(self.js.clone(), incoming.attached(), stored) {
+            Some(attached) => format!("{text}\n\n{}", attached.show(false).await.lines),
+            None => text,
+        };
+        let carried = incoming.attached().into_iter().map(|(handle, _)| handle).collect();
+        let (joined, outcome) = tokio::sync::oneshot::channel();
+        let join = Join { envelope: envelope.clone(), carried, stored, text, joined };
+        if !self.steers.join(join) {
+            return Some(Joined::Refused);
+        }
+        self.acking(msg, outcome).await.ok()
+    }
+
+    /// Hand what came of the prompt run for `incoming` to the messages that joined it ([`Ran::joined`]): its answer to
+    /// the last, and to each before it, `incoming` first, the next one it went towards ([`Inbox::superseded`]). The
+    /// turn of `incoming` lasts until the answer is sent. A failed prompt is settled as for `incoming` alone, the
+    /// messages that joined it waiting again.
+    async fn hand_on(
+        &self,
+        incoming: &Incoming,
+        own: bool,
+        mut ran: Ran,
+        msg: &jetstream::Message,
+        seq: u64,
+        cut_off: bool,
+    ) -> Result<()> {
+        let mut joined = std::mem::take(&mut ran.joined);
+        if ran.cancelled_by.is_none()
+            && let Err(e) = ran.reply
+        {
+            drop(joined);
+            return self.prompt_failed(e, incoming, msg, seq, cut_off, ran.worked).await;
+        }
+        let spend = std::mem::replace(&mut ran.spend, tokio::sync::mpsc::unbounded_channel().1);
+        ran.tokens += self.record_ended(&incoming.envelope, spend, &mut ran.reached).await;
+        let last = joined.pop().expect("a message joined");
+        let mut by = (last.envelope.from.clone(), last.envelope.id);
+        for join in joined.into_iter().rev() {
+            let next = (join.envelope.from.clone(), join.envelope.id);
+            let _ = join.joined.send(Joined::Superseded(by.0, by.1));
+            by = next;
+        }
+        let (answering, answered) = tokio::sync::oneshot::channel();
+        let _ = last.joined.send(Joined::Answer(Box::new(ran), answering));
+        let superseded = self.superseded(incoming, own, (&by.0, by.1), msg, seq).await;
+        let _ = answered.await;
+        superseded
+    }
+
+    /// Settle `incoming`, the message at stream sequence `seq`, whose prompt `by`'s message `id` steered and took the
+    /// answer of. Its sender is told so, unless it is a post, another ant's reply to the ant's own message, or a
+    /// message whose answer goes elsewhere than its sender, or the thread has no turns left: those end with no reply
+    /// ([`NoReplyWhy::Steered`]).
+    async fn superseded(
+        &self,
+        incoming: &Incoming,
+        own: bool,
+        (by, id): (&UserId, Uuid),
+        msg: &jetstream::Message,
+        seq: u64,
+    ) -> Result<()> {
+        let envelope = &incoming.envelope;
+        tracing::info!(thread = %envelope.thread_id, %by, steered_by = %id, "a later message took the answer");
+        let tells = incoming.post.is_none()
+            && incoming.resume.is_none()
+            && !own
+            && !envelope.webhook
+            && envelope.from != *self.ant
+            && envelope.escalation.is_none();
+        let text = format!(
+            "[ants] {by} steered the prompt answering this message with message {id}; the answer goes in reply to it."
+        );
+        let notice = tells.then(|| envelope.reply(self.ant.clone(), text, self.humans.sender_role(envelope)).ok());
+        let Some(notice) = notice.flatten() else {
+            let reason = format!("message {id} from {by} took the answer");
+            return self
+                .end_unanswered(incoming, (NoReplyWhy::Steered, Some(reason)), String::new(), None, msg, seq)
+                .await;
+        };
+        let reply = Reply::Message(Box::new(notice.as_notice(NoticeKind::Steered)));
+        if let Err(e) = self.attempts.replied(seq, envelope, &reply).await {
+            tracing::warn!(thread = %envelope.thread_id, error = format!("{e:#}"), "recording the reply");
         }
         self.deliver(incoming, &reply, msg, seq).await
     }
@@ -372,6 +527,7 @@ impl Inbox<'_> {
         let text = prompt_text(&text, cut_off, late);
         match incoming.steered {
             Steered::Interrupted => format!("{}\n\n{text}", steer_note(&envelope.from)),
+            Steered::Joining => format!("{}\n\n{text}", join_note(&envelope.from)),
             Steered::No | Steered::Ahead => text,
         }
     }
@@ -416,15 +572,9 @@ impl Inbox<'_> {
         let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut calls = crate::timeline::Collector::new(self.ant, thread, envelope.id, self.redactor);
-        let history = crate::history::Thread {
-            js: self.js.clone(),
-            ant: self.ant.clone(),
-            thread: thread.clone(),
-            channel: incoming.post.as_ref().map(|posted| posted.post.channel.clone()).or(incoming.resume.clone()),
-            before: seq,
-            reading: self.reading,
-            home: Some(self.home.to_owned()),
-        };
+        let history = self.history_of(incoming, seq);
+        let (ready_tx, ready) = tokio::sync::oneshot::channel();
+        let (steer_tx, steers) = tokio::sync::mpsc::channel(STEERS);
         let prompt = Prompt {
             text,
             limits: self.limits,
@@ -433,7 +583,12 @@ impl Inbox<'_> {
             progress: Some(progress_tx),
             history: Some(history.history()),
             attachments: Attached::new(self.js.clone(), incoming.attached(), crate::files::stored(msg)),
+            steering: Some(Steering { ready: ready_tx, steers }),
         };
+        let mut ready = futures::FutureExt::fuse(ready);
+        let mut joins = None;
+        let mut taking = futures::stream::FuturesUnordered::new();
+        let mut joined = Vec::new();
         let (cancellable, mut cancel) = self.cancels.register(thread);
         let (mut cancelled_by, mut cut_by_cancel) = (None, false);
         let prompting = self.metrics.prompting();
@@ -461,6 +616,9 @@ impl Inbox<'_> {
                         crate::timeline::store(self.js, record);
                     }
                 }
+                Ok(()) = &mut ready => joins = Some(self.steers.register(thread)),
+                Some(join) = next_join(&mut joins) => taking.extend(steer(&steer_tx, join)),
+                Some((took, join)) = futures::StreamExt::next(&mut taking) => self.took(took, join, &mut joined),
                 Some(by) = cancel.recv(), if cancelled_by.is_none() => {
                     tracing::info!(%thread, by = %by.by, why = ?by.why, "cancelling the prompt");
                     if let Some(stop) = stop_tx.take() {
@@ -494,8 +652,56 @@ impl Inbox<'_> {
         while let Some(record) = calls.take() {
             crate::timeline::store(self.js, record);
         }
+        drop(steer_tx);
+        self.joins_ended(joins, taking, &mut joined).await;
         drop((cancellable, prompting));
-        Ran { reply, cancelled_by, cut_by_cancel, worked, reached, spend, fallback, tokens }
+        Ran { reply, cancelled_by, cut_by_cancel, worked, reached, spend, fallback, tokens, joined }
+    }
+
+    /// The history of the thread of `incoming` before stream sequence `seq`, for a harness rebuilding a lost session.
+    fn history_of(&self, incoming: &Incoming, seq: u64) -> crate::history::Thread {
+        crate::history::Thread {
+            js: self.js.clone(),
+            ant: self.ant.clone(),
+            thread: incoming.envelope.thread_id.clone(),
+            channel: incoming.post.as_ref().map(|posted| posted.post.channel.clone()).or(incoming.resume.clone()),
+            before: seq,
+            reading: self.reading,
+            home: Some(self.home.to_owned()),
+        }
+    }
+
+    /// Once the prompt ended: turn away the messages still to join it, and note what came of those handed to it.
+    async fn joins_ended(
+        &self,
+        joins: Option<(super::steering::Joinable<'_>, tokio::sync::mpsc::UnboundedReceiver<Join>)>,
+        mut taking: futures::stream::FuturesUnordered<impl Future<Output = (bool, Join)>>,
+        joined: &mut Vec<Join>,
+    ) {
+        if let Some((joinable, mut rx)) = joins {
+            drop(joinable);
+            rx.close();
+            while let Ok(join) = rx.try_recv() {
+                let _ = join.joined.send(Joined::Refused);
+            }
+        }
+        while let Some((took, join)) = futures::StreamExt::next(&mut taking).await {
+            self.took(took, join, joined);
+        }
+    }
+
+    /// Note that the running prompt `took` the message of `join`, or turned it away.
+    fn took(&self, took: bool, join: Join, joined: &mut Vec<Join>) {
+        let envelope = &join.envelope;
+        tracing::info!(thread = %envelope.thread_id, from = %envelope.from, took, "steering the running prompt");
+        if !took {
+            let _ = join.joined.send(Joined::Refused);
+            return;
+        }
+        if let Some(mcp) = self.mcp {
+            mcp.steer_to(envelope, join.carried.clone(), join.stored);
+        }
+        joined.push(join);
     }
 
     /// The prompt for a channel post, with what was read of its thread: the posts not shown before, and the turns left,
@@ -645,11 +851,19 @@ pub(super) fn own_reply_note(from: &UserId, post: bool, spent: bool) -> String {
     )
 }
 
-/// The line starting the prompt of a human's steer message that interrupted the prompt running on its thread.
+/// The line starting the prompt of a steering message that interrupted the prompt running on its thread.
 fn steer_note(by: &UserId) -> String {
     format!(
         "[ants] {by} interrupted the previous prompt on this thread with this message; tool calls it had in flight \
          were cancelled, so check what they left before repeating any."
+    )
+}
+
+/// The line starting a steering message that joined the prompt running on its thread.
+fn join_note(by: &UserId) -> String {
+    format!(
+        "[ants] {by} sent this message while the prompt ran, to steer it. The final answer goes in reply to this \
+         message, so it answers this message together with what came before it."
     )
 }
 
@@ -673,5 +887,26 @@ async fn stored_every(calls: &crate::timeline::Collector<'_>, tick: &mut tokio::
         tick.tick().await;
     } else {
         std::future::pending::<()>().await;
+    }
+}
+
+/// The next message joining the running prompt, once it takes them.
+/// Hand `join` to the running prompt through `steers`: what the harness made of it, or None when the prompt takes no
+/// more, `join` then turned away.
+fn steer(steers: &tokio::sync::mpsc::Sender<Steer>, join: Join) -> Option<impl Future<Output = (bool, Join)> + use<>> {
+    let (accepted, took) = tokio::sync::oneshot::channel();
+    if steers.try_send(Steer { text: join.text.clone(), accepted }).is_err() {
+        let _ = join.joined.send(Joined::Refused);
+        return None;
+    }
+    Some(async move { (took.await.unwrap_or(false), join) })
+}
+
+async fn next_join(
+    joins: &mut Option<(super::steering::Joinable<'_>, tokio::sync::mpsc::UnboundedReceiver<Join>)>,
+) -> Option<Join> {
+    match joins {
+        Some((_, rx)) => rx.recv().await,
+        None => std::future::pending().await,
     }
 }

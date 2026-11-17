@@ -10,7 +10,7 @@ async fn send_message_follows_on_from_the_current_message() {
     let (url, token) = http_server(&mcp, &current.thread_id);
     let client = http_client(&url, &token).await;
     let tools: Vec<_> = client.list_all_tools().await.unwrap().into_iter().map(|t| t.name).collect();
-    assert_eq!(tools.len(), 18, "{tools:?}");
+    assert_eq!(tools.len(), 19, "{tools:?}");
 
     let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "dev-b", "text": "hi"})).await;
     assert!(!ok && text.contains("no message is being handled"), "{text}");
@@ -31,6 +31,33 @@ async fn send_message_follows_on_from_the_current_message() {
     drop(turn);
     let (ok, _) = call(&client, "send_message", serde_json::json!({"to": "dev-b", "text": "late"})).await;
     assert!(!ok, "nothing goes out once the message is handled");
+}
+
+#[tokio::test]
+async fn handoff_sends_to_the_ant_itself_on_another_thread() {
+    let home = home("handoff");
+    let (mcp, mut sent) = start(&home).await;
+    let mut current = Envelope::new(user("dev-b"), user("dev-a"), "go").with_owner(Some(UserId::human()));
+    current.turn_budget = 4;
+    let (url, token) = http_server(&mcp, &current.thread_id);
+    let client = http_client(&url, &token).await;
+    let _turn = mcp.begin(&current);
+
+    let (ok, text) = call(&client, "handoff", serde_json::json!({"text": "split this out"})).await;
+    assert!(ok, "{text}");
+    let out = sent.recv().await.unwrap();
+    assert_eq!((&out.from, &out.to), (&user("dev-a"), &user("dev-a")));
+    assert_ne!(out.thread_id, current.thread_id);
+    assert_eq!((out.turn_budget, out.owner.as_ref()), (3, Some(&UserId::human())), "one turn, the owner kept");
+
+    let other = ants_proto::ThreadId::generate();
+    let (ok, _) = call(&client, "handoff", serde_json::json!({"text": "x", "thread": other.to_string()})).await;
+    assert!(ok);
+    assert_eq!(sent.recv().await.unwrap().thread_id, other);
+
+    let here = current.thread_id.to_string();
+    let (ok, text) = call(&client, "handoff", serde_json::json!({"text": "x", "thread": here})).await;
+    assert!(!ok && text.contains("current one"), "{text}");
 }
 
 #[tokio::test]

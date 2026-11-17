@@ -62,8 +62,8 @@ pub(crate) enum Command {
     Ask {
         /// Continue an existing thread: its id, a unique start of one, or `last`. The message still prompts only
         /// its recipient (@ant, else the human's assistant or the messenger), not the thread's other ants.
-        /// A human's message interrupts a running prompt on that thread and prompts the same session next, unless
-        /// sent with --queue.
+        /// A human's message steers a running prompt on that thread, joining it where the harness takes steers,
+        /// else interrupting it and prompting the same session next, unless sent with --queue.
         #[arg(long, value_name = "THREAD")]
         #[arg(add = ArgValueCandidates::new(completions::threads))]
         thread: Option<thread::Pick>,
@@ -73,7 +73,7 @@ pub(crate) enum Command {
         #[arg(long, value_name = "MESSAGE", add = ArgValueCompleter::new(completions::messages))]
         reply_to: Option<thread::MessagePick>,
         /// On an existing thread (--thread or --reply-to), wait behind the prompt running there rather than
-        /// interrupting it, as a human's message does by default.
+        /// steering it, as a human's message does by default.
         #[arg(long)]
         queue: bool,
         /// Hand this message or post on to @ant (else the human's assistant or the messenger) on a new thread: its
@@ -199,7 +199,7 @@ pub(crate) enum Command {
         #[arg(long, value_name = "MESSAGE", add = ArgValueCompleter::new(completions::messages))]
         reply_to: Option<thread::MessagePick>,
         /// On an existing thread (--thread or --reply-to), wait behind the prompt running there rather than
-        /// interrupting it, as a human's post does by default.
+        /// steering it, as a human's post does by default.
         #[arg(long)]
         queue: bool,
         #[command(flatten)]

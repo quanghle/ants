@@ -26,7 +26,7 @@ use github_copilot_sdk as sdk;
 use sdk::session::Session;
 use sdk::subscription::{EventSubscription, RecvErrorKind};
 use sdk::{
-    Attachment, ErrorKind, MessageOptions, PermissionRequestData, ProtocolErrorKind, ResumeSessionConfig,
+    Attachment, DeliveryMode, ErrorKind, MessageOptions, PermissionRequestData, ProtocolErrorKind, ResumeSessionConfig,
     SessionConfig, SessionEvent, SessionId, SetModelOptions,
 };
 use serde_json::{Map, Value, json};
@@ -324,6 +324,7 @@ impl Native for Copilot {
             fork: true,
             images: true,
             http_mcp: true,
+            steer: true,
         }
     }
 
@@ -425,6 +426,50 @@ pub(crate) struct CopilotSession {
     usage: Mutex<(u64, u64, Option<f64>)>,
     /// The cost in US dollars the CLI carried over from the session's parent, which its totals include.
     base: f64,
+    steers: Steers,
+}
+
+/// The messages steering the prompt running ([`NativeSession::steer`]), sent with immediate delivery. The prompt ends
+/// at a `session.idle` only once the CLI took each into its loop, as its `user.message` tells: one sent as a turn ended
+/// starts another, whose answer is the prompt's.
+#[derive(Default)]
+struct Steers {
+    state: Mutex<SteerState>,
+    /// Wakes the prompt when a send is answered or fails, which may leave a `session.idle` nothing more to wait for.
+    settled: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct SteerState {
+    /// Whether a prompt runs that takes steers: until it ends.
+    open: bool,
+    /// Sends not yet answered.
+    sending: usize,
+    /// Messages sent whose `user.message` has not come.
+    pending: HashSet<String>,
+    /// Messages whose `user.message` came before their send was answered.
+    delivered: HashSet<String>,
+}
+
+impl Steers {
+    fn open(&self) {
+        *self.state.locked() = SteerState { open: true, ..SteerState::default() };
+    }
+
+    /// Note the `user.message` of message `id`.
+    fn delivered(&self, id: &str) {
+        let mut state = self.state.locked();
+        if !state.pending.remove(id) {
+            state.delivered.insert(id.to_owned());
+        }
+    }
+
+    /// At a `session.idle`, whether the prompt ends, taking no more steers; else a steer is yet to come.
+    fn close(&self) -> bool {
+        let mut state = self.state.locked();
+        state.open = state.sending > 0 || !state.pending.is_empty();
+        !state.open
+    }
 }
 
 impl Drop for CopilotSession {
@@ -456,6 +501,7 @@ impl CopilotSession {
             effort: Mutex::new(effort),
             usage: Mutex::default(),
             base,
+            steers: Steers::default(),
         }
     }
 
@@ -511,8 +557,16 @@ impl CopilotSession {
                     self.usage(updates, |usage| usage.2 = Some(cost));
                 }
             }
+            "user.message" if main => {
+                // The CLI works on: an idle before it ended an earlier turn.
+                turn.idle = None;
+                self.steers.delivered(text(data, "messageId"));
+            }
             "session.error" => turn.failed(data),
-            "session.idle" => return Some(turn.end(data["aborted"] == true)),
+            "session.idle" => {
+                turn.idle = Some(data["aborted"] == true);
+                return self.steers.close().then(|| turn.end());
+            }
             _ => {}
         }
         None
@@ -572,7 +626,9 @@ impl NativeSession for CopilotSession {
         let (sender, mut events) = mpsc::unbounded_channel();
         *self.current.locked() = Some(sender);
         let _running = Running(&self.current);
+        self.steers.open();
         if let Err(e) = self.session.send(message(prompt)).await {
+            self.steers.state.locked().open = false;
             return Err(self.shared.error(&e).await);
         }
         let mut turn = Turn::default();
@@ -580,12 +636,43 @@ impl NativeSession for CopilotSession {
             let event = tokio::select! {
                 biased;
                 event = events.recv() => event,
+                () = self.steers.settled.notified() => {
+                    if turn.idle.is_some() && self.steers.close() {
+                        return turn.end();
+                    }
+                    continue;
+                }
                 () = self.shared.ended() => None,
             };
             let Some(event) = event else { return Err(self.shared.process.lock().await.exited().await) };
             if let Some(done) = self.translate(&mut turn, &event, &updates) {
                 return done;
             }
+        }
+    }
+
+    async fn steer(&self, prompt: Vec<ContentBlock>) -> Result<bool, Error> {
+        {
+            let mut state = self.steers.state.locked();
+            if !state.open {
+                return Ok(false);
+            }
+            state.sending += 1;
+        }
+        let sent = self.session.send(message(prompt).with_mode(DeliveryMode::Immediate)).await;
+        let sent = {
+            let mut state = self.steers.state.locked();
+            state.sending -= 1;
+            sent.map(|id| {
+                if !state.delivered.remove(&id) {
+                    state.pending.insert(id);
+                }
+            })
+        };
+        self.steers.settled.notify_one();
+        match sent {
+            Ok(()) => Ok(true),
+            Err(e) => Err(self.shared.error(&e).await),
         }
     }
 
@@ -716,6 +803,8 @@ struct Turn {
     error: Option<Error>,
     /// The last error of a model call the CLI retries.
     retried: Option<Error>,
+    /// Whether the last `session.idle` said the turn was aborted, once one came.
+    idle: Option<bool>,
 }
 
 impl Turn {
@@ -744,10 +833,10 @@ impl Turn {
         }
     }
 
-    /// What the prompt comes to at `session.idle`: cancelled if aborted, else the error that ended the turn, or the
-    /// last failed model call of a turn that ended without a reply.
-    fn end(&mut self, aborted: bool) -> Result<PromptResponse, Error> {
-        let stop = if aborted {
+    /// What the prompt comes to at its last `session.idle`: cancelled if aborted, else the error that ended the turn,
+    /// or the last failed model call of a turn that ended without a reply.
+    fn end(&mut self) -> Result<PromptResponse, Error> {
+        let stop = if self.idle == Some(true) {
             StopReason::Cancelled
         } else if let Some(error) = self.error.take() {
             return Err(error);

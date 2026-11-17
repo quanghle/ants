@@ -247,6 +247,30 @@ async fn an_answer_to_a_webhook_goes_to_the_thread_s_owner_or_nowhere() {
 }
 
 #[tokio::test]
+async fn the_answer_to_work_an_ant_handed_itself_goes_to_a_human() {
+    let Some((bus, mut to_human)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let mut to_self = bus.client.subscribe(subject::inbox_of(&bus.dev)).await.unwrap();
+    bus.client.flush().await.unwrap();
+    let handed = Envelope::new(bus.dev.clone(), bus.dev.clone(), "split this out");
+    let seq = bus::publish_json(&bus.js, handed.subject(), &handed, None).await.unwrap();
+    let _ = to_self.next().await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let reply = next_envelope(&mut to_human).await;
+        assert_eq!((&reply.from, &reply.to, reply.in_reply_to), (&bus.dev, &UserId::human(), Some(handed.id)));
+        bus.until_acked(seq).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(log.locked().answered.len(), 1);
+    let quiet = Duration::from_millis(200);
+    assert!(timeout(quiet, to_self.next()).await.is_err(), "nothing goes back to the ant's own inbox");
+}
+
+#[tokio::test]
 async fn members_woken_by_one_post_spend_the_thread_s_turns_together() {
     let Some((bus, mut human)) = Bus::start().await else { return };
     let (launch, log, _) = fake::launch();

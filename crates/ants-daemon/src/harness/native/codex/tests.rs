@@ -15,7 +15,8 @@ use tokio::sync::{mpsc, oneshot};
 use super::*;
 use crate::harness::native::Protocol;
 use crate::harness::{
-    Harnesses, Launch, ModelSettings, Prompt, Readiness, Session, SignedOut, Spend, fork, handshake, parse_definitions,
+    Harnesses, Launch, ModelSettings, Prompt, Readiness, Session, SignedOut, Spend, Steer, Steering, fork, handshake,
+    parse_definitions,
 };
 use crate::permission::{Allowlist, PermissionPolicy};
 use crate::ratelimit::Limited;
@@ -500,6 +501,34 @@ async fn a_cancelled_codex_turn_is_interrupted() {
     session.close().await;
     let interrupt = json!({ "id": 5, "method": "turn/interrupt", "params": { "threadId": THREAD, "turnId": TURN } });
     assert_eq!(codex.received(1)[5], interrupt);
+}
+
+#[tokio::test]
+async fn a_codex_turn_takes_steers_while_it_runs() {
+    let codex = Fixture::new("codex-steer", "");
+    let working = [turn_started(4, TURN), vec![delta("a1", "Working")]].concat();
+    let steered =
+        vec![ok(5, json!({ "turnId": TURN })), delta("a1", " on both"), turn_completed(TURN, "completed", Value::Null)];
+    codex.script(None, &[signed_in(), vec![vec![opened(3, THREAD)], working, steered]].concat());
+    let session = Session::start(&codex.launch(ModelSettings::default()), None).await.unwrap();
+    let (ready, started) = oneshot::channel();
+    let (steer_tx, steers) = mpsc::channel(1);
+    let (progress, mut status) = mpsc::channel(16);
+    let steering = Some(Steering { ready, steers });
+    let prompt = Prompt { progress: Some(progress), steering, ..Prompt::new("go") };
+    let steer = async {
+        started.await.unwrap();
+        status.recv().await;
+        let (accepted, took) = oneshot::channel();
+        steer_tx.send(Steer { text: "and this".to_owned(), accepted }).await.unwrap();
+        took.await.unwrap()
+    };
+    let (reply, took) = tokio::join!(session.run(prompt), steer);
+    assert_eq!((reply.unwrap().text, took), ("Working on both".to_owned(), true));
+    session.close().await;
+    let input = json!([{ "type": "text", "text": "and this", "text_elements": [] }]);
+    let steer = json!({ "id": 5, "method": "turn/steer", "params": { "threadId": THREAD, "expectedTurnId": TURN, "input": input } });
+    assert_eq!(codex.received(1)[5], steer);
 }
 
 #[tokio::test]

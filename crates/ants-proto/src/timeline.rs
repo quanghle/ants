@@ -80,6 +80,8 @@ pub enum NoReplyWhy {
     ReplyToOwn,
     /// The ant ended the turn with the `complete` tool.
     Completed,
+    /// A later message steered the prompt, whose answer went to that one; `reason` names it.
+    Steered,
 }
 
 /// A tool call as a [`Timeline`] record holds it.

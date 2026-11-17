@@ -117,9 +117,12 @@ impl Inbox<'_> {
                 let post = post.with_owner(envelope.owner.clone()).with_creator(envelope.creator.clone());
                 Reply::Post(post.spend(envelope.turn_budget)?)
             }
-            _ if envelope.webhook => {
-                // Nobody reads a webhook's inbox: the answer goes to the thread's owner, else only to the log.
-                let Some(owner) = self.humans.human_owner(envelope.owner.as_ref()) else {
+            _ if envelope.webhook || envelope.from == *self.ant => {
+                // Nobody reads a webhook's inbox, nor the ant's own for work it handed itself: the answer goes to the
+                // thread's owner, else only to the log for a webhook and to the default human for a handoff.
+                let owner = self.humans.human_owner(envelope.owner.as_ref());
+                let owner = owner.or_else(|| (!envelope.webhook).then(|| self.humans.default_human().clone()));
+                let Some(owner) = owner else {
                     if let Some(limit) = limit {
                         self.escalate(incoming, limit, EscalationReason::Cap, seq, None).await?;
                     }

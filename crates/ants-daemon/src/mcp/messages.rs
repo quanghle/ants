@@ -1,6 +1,6 @@
 //! The tools messaging other ants and humans: `send_message`, `ask_ant`, which waits for the reply (see
-//! [`super::asks`]), `check_inbox` for the replies that came too late, and `ask_human`. A message follows on from the
-//! one its thread is handling ([`Hub::outgoing`]).
+//! [`super::asks`]), `check_inbox` for the replies that came too late, and `ask_human`; and `handoff`, which hands work
+//! to the ant itself on another thread. A message follows on from the one its thread is handling ([`Hub::outgoing`]).
 
 use std::time::Duration;
 
@@ -32,6 +32,15 @@ struct SendMessage {
     /// redacted.
     #[serde(default)]
     attach: Vec<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct Handoff {
+    /// The work to hand off: the message that starts it, saying all it needs, as the new thread does not see this one.
+    text: String,
+    /// Thread to hand off to: omitted or `new` for a fresh one, or the id of another thread.
+    #[serde(default)]
+    thread: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -74,8 +83,15 @@ impl Hub {
     fn outgoing(&self, thread: &ThreadId, to: &str, text: String, on: Option<&str>) -> Result<Envelope, String> {
         let to: UserId = to.trim().trim_start_matches('@').parse().map_err(|e| format!("{e}"))?;
         if to == self.ant {
-            return Err(format!("{to} is this ant; message another one"));
+            return Err(format!(
+                "{to} is this ant; message another one, or call handoff to start work on another thread"
+            ));
         }
+        self.follow_on(thread, to, text, on)
+    }
+
+    /// A message from the ant to `to` as [`Hub::outgoing`] makes it, `to` being any user, the ant itself included.
+    fn follow_on(&self, thread: &ThreadId, to: UserId, text: String, on: Option<&str>) -> Result<Envelope, String> {
         let current = self.sessions.locked().current.get(thread).cloned();
         let current = current.ok_or("no message is being handled on this thread; messages go out only while one is")?;
         let role = if self.humans.is_human(&to) { Role::Human } else { self.humans.sender_role(&current) };
@@ -141,6 +157,22 @@ impl Hub {
 }
 
 impl Tools {
+    /// Hand `text` to the ant itself on thread `on`, a fresh one unless it names another than `thread`, as `handoff`
+    /// does.
+    async fn hand_off(&self, thread: &ThreadId, text: String, on: Option<&str>) -> Result<String, String> {
+        let on = on.map(str::trim).filter(|on| !on.is_empty()).unwrap_or("new");
+        if on != "new" && on.parse::<ThreadId>().is_ok_and(|on| on == *thread) {
+            return Err(format!("thread {thread} is the current one; hand off to `new` or another thread"));
+        }
+        let envelope = self.hub.follow_on(thread, self.hub.ant.clone(), text, Some(on))?;
+        self.hub.send(&envelope).await?;
+        Ok(format!(
+            "Handed off on thread {} as message {} ({} turns left). The work runs there as its own prompt, its answer \
+             going to the thread's owner; this prompt goes on.",
+            envelope.thread_id, envelope.id, envelope.turn_budget
+        ))
+    }
+
     /// Send `text` to `to` as `send_message` does, noting when no daemon serves `to` now: the message waits for one.
     pub(super) async fn send_to(
         &self,
@@ -213,6 +245,20 @@ impl Tools {
     ) -> Result<CallToolResult, ErrorData> {
         let thread = self.thread(&cx)?;
         Ok(text(self.send_to(&thread, &args.to, args.text, args.thread.as_deref(), &args.attach).await))
+    }
+
+    #[tool(description = "Hand work off to this ant itself on another thread, to run there as its own prompt \
+        while this one goes on, as for a separate task that came up. `thread` is `new` (the default) for a fresh \
+        thread, or the id of another thread of this ant; never the current one. The message keeps the thread's owner, \
+        spends one turn of the current thread's budget unless it answers a human, and carries the turns left; the \
+        answer goes to the thread's owner. The new thread does not see this one: the text says all the work needs.")]
+    async fn handoff(
+        &self,
+        Parameters(args): Parameters<Handoff>,
+        cx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let thread = self.thread(&cx)?;
+        Ok(text(self.hand_off(&thread, args.text, args.thread.as_deref()).await))
     }
 
     #[tool(description = "Ask the thread's owner, else the default human, a question with 2-9 options to pick from \

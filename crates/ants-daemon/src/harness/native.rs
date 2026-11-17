@@ -50,7 +50,7 @@ pub(crate) use io::{JsonLines, JsonWriter, Process};
 pub(crate) use rpc::RpcError;
 pub(crate) use rpc::{Incoming, Rpc};
 
-use super::{Harness, ModelSettings};
+use super::{Harness, ModelSettings, SteerRequest, SteerResponse, advertise_steering};
 use crate::sync::MutexExt as _;
 
 /// The protocol a harness definition's CLI speaks on stdio: its `protocol` key.
@@ -308,6 +308,8 @@ pub(crate) struct Info {
     pub images: bool,
     /// Whether it takes HTTP MCP servers, else only stdio ones.
     pub http_mcp: bool,
+    /// Whether a running prompt takes more input ([`NativeSession::steer`]).
+    pub steer: bool,
 }
 
 /// Where a session works and the MCP servers it gets ([`mcp_servers_json`]).
@@ -412,6 +414,14 @@ pub(crate) trait NativeSession: Send + Sync + 'static {
         prompt: Vec<ContentBlock>,
         updates: Updates,
     ) -> impl Future<Output = Result<PromptResponse, Error>> + Send;
+
+    /// Add `prompt` to the running prompt as the user's next input to its turn, whose answer then answers it too;
+    /// called only when [`Info::steer`]. `false` when the CLI cannot take it now, as with no turn running or one
+    /// ending, the daemon then prompting it after the turn.
+    fn steer(&self, prompt: Vec<ContentBlock>) -> impl Future<Output = Result<bool, Error>> + Send {
+        let _ = prompt;
+        async { Ok(false) }
+    }
 
     /// Interrupt the running prompt: with the CLI's own interrupt, else by stopping it ([`Process::stop`]), the
     /// session resuming later. The daemon stops the connection if the prompt does not end within its grace.
@@ -631,7 +641,7 @@ struct Translator<N: Native> {
 fn connect<N: Native>(cli: Cli) -> DynConnectTo<Client> {
     let name = cli.name().to_owned();
     let t = Arc::new(Translator::<N> { cli, native: tokio::sync::OnceCell::new(), sessions: Mutex::default() });
-    let [t1, t2, t3, t4, t5, t6, t7, t8, t9] = [(); 9].map(|()| t.clone());
+    let [t1, t2, t3, t4, t5, t6, t7, t8, t9, t10] = [(); 10].map(|()| t.clone());
     DynConnectTo::new(
         Agent
             .v1()
@@ -685,6 +695,10 @@ fn connect<N: Native>(cli: Cli) -> DynConnectTo<Client> {
                     answer(&cx, responder, t8.clone().set_option(r))
                 },
                 agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |r: SteerRequest, responder, cx| answer(&cx, responder, t10.clone().steer(r)),
+                agent_client_protocol::on_receive_request!(),
             ),
     )
 }
@@ -714,6 +728,7 @@ impl<N: Native> Translator<N> {
             .session_capabilities(sessions)
             .prompt_capabilities(PromptCapabilities::new().image(info.images))
             .mcp_capabilities(McpCapabilities::new().http(info.http_mcp));
+        let capabilities = if info.steer { advertise_steering(capabilities) } else { capabilities };
         let methods = self.cli.harness.sign_in().map(|command| {
             AuthMethod::Agent(AuthMethodAgent::new("sign_in", "Sign in").description(command.to_owned()))
         });
@@ -816,6 +831,14 @@ impl<N: Native> Translator<N> {
             self.refused(e);
         }
         done
+    }
+
+    async fn steer(self: Arc<Self>, request: SteerRequest) -> Result<SteerResponse, Error> {
+        let live = self.live(&request.session_id)?;
+        let accepted = self.native()?.info().steer
+            && live.prompts.load(Ordering::Relaxed) > 0
+            && live.session.steer(request.prompt).await?;
+        Ok(SteerResponse { accepted })
     }
 
     /// Forget a session the daemon abandoned, as on a context overflow, cancelling its prompt if one runs: dropped, it

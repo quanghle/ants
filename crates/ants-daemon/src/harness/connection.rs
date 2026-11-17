@@ -17,13 +17,17 @@ use agent_client_protocol::{Agent, Client};
 use ants_proto::{HarnessAgent, StatusUpdate};
 use anyhow::Result;
 use data_encoding::BASE64;
+use futures::FutureExt as _;
+use futures::future::FusedFuture as _;
+use futures::stream::{FuturesUnordered, StreamExt as _};
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 
 use super::configure::{new_session, open};
 use super::observe::{Current, Observed};
 use super::session::Turn;
 use super::sign_in::harness_error;
-use super::{Launch, Prompt, PromptLimits, Reply, Spend};
+use super::steer::{self, SteerRequest};
+use super::{Launch, Prompt, PromptLimits, Reply, Spend, Steer};
 use crate::files::Attached;
 use crate::history::{History, Rebuild};
 use crate::overflow::{ContextOverflow, overflows};
@@ -31,6 +35,8 @@ use crate::sync::MutexExt as _;
 
 /// How long a harness has to end a cancelled prompt before it is stopped.
 const CANCEL_GRACE: Duration = Duration::from_secs(30);
+/// How long a harness has to answer the steers sent to a prompt that ended.
+const STEER_GRACE: Duration = Duration::from_secs(10);
 
 /// Own the harness connection: open the session, then run turns until the session is dropped or a prompt fails.
 pub(super) async fn serve(
@@ -107,6 +113,7 @@ pub(super) async fn serve(
                 mcp: &mcp,
                 images: caps.prompt_capabilities.image,
                 close: caps.session_capabilities.close.is_some(),
+                steers: steer::advertised(caps),
             };
             while let Some(turn) = turns.recv().await {
                 if connected.run(turn, &mut id, lost.take()).await?.is_break() {
@@ -150,6 +157,8 @@ struct Connected<'a> {
     images: bool,
     /// Whether the agent closes sessions (`session/close`), which a native protocol's translator does.
     close: bool,
+    /// Whether the agent takes steers into a running prompt (`_ants/steer`).
+    steers: bool,
 }
 
 /// How a prompt ended: its response (None when a cancelled prompt did not end within the grace period), why it was
@@ -171,8 +180,13 @@ impl Connected<'_> {
         mut rebuild: Option<Rebuild>,
     ) -> Result<ControlFlow<()>, agent_client_protocol::Error> {
         let Turn { prompt, reply } = turn;
-        let Prompt { text, limits, spend, mut stop, progress, mut history, attachments } = prompt;
+        let Prompt { text, limits, spend, mut stop, progress, mut history, attachments, steering } = prompt;
         let (lines, images) = attached(attachments, self.images).await;
+        // Without steering by the agent, the steering is dropped unready: steers stop the prompt instead.
+        let mut steers = steering.filter(|_| self.steers).map(|steering| {
+            let _ = steering.ready.send(());
+            steering.steers
+        });
         // Once in a new session when the prompt outgrows the context window, unless it ran in one already.
         let mut retry = rebuild.is_none();
         let ended = loop {
@@ -180,7 +194,8 @@ impl Connected<'_> {
             let text = self.compose(rebuild, &mut history, &text, &lines).await;
             let content = std::iter::once(ContentBlock::Text(TextContent::new(text))).chain(images.iter().cloned());
             let request = self.cx.send_request(PromptRequest::new(id.clone(), content.collect())).block_task();
-            let (done, cut) = bounded(self.cx, id, request, limits, &too_many, &mut stop, self.cancelled).await;
+            let bounds = Bounds { limits, too_many: &too_many, stop: &mut stop, steers: &mut steers };
+            let (done, cut) = bounded(self.cx, id, request, bounds, self.cancelled).await;
             let ended = self.ended(done, cut);
             let overflowed = |e: &agent_client_protocol::Error| overflows(&self.launch.harness, &e.to_string());
             match &ended.done {
@@ -320,17 +335,26 @@ impl Connected<'_> {
     }
 }
 
-/// Wait for a prompt's response, cancelling the prompt with `session/cancel` when it reaches a limit or `stop` fires.
-/// Returns the response, None when a cancelled prompt did not end within the grace period, and why it was cancelled.
+/// What bounds a running prompt: its limits, what notifies it started too many tool calls, the human's cancel, and
+/// the steers to send it.
+struct Bounds<'a> {
+    limits: PromptLimits,
+    too_many: &'a Notify,
+    stop: &'a mut Option<oneshot::Receiver<String>>,
+    steers: &'a mut Option<mpsc::Receiver<Steer>>,
+}
+
+/// Wait for a prompt's response, cancelling the prompt with `session/cancel` when it reaches a limit or `stop` fires,
+/// and sending it the steers that arrive meanwhile with `_ants/steer`. Returns the response, None when a cancelled
+/// prompt did not end within the grace period, and why it was cancelled.
 async fn bounded(
     cx: &ConnectionTo<Agent>,
     id: &SessionId,
     request: impl Future<Output = Result<PromptResponse, agent_client_protocol::Error>>,
-    limits: PromptLimits,
-    too_many: &Notify,
-    stop: &mut Option<oneshot::Receiver<String>>,
+    bounds: Bounds<'_>,
     cancelled: &watch::Sender<u64>,
 ) -> (Option<Result<PromptResponse, agent_client_protocol::Error>>, Option<String>) {
+    let Bounds { limits, too_many, stop, steers } = bounds;
     tokio::pin!(request);
     let timeout = async {
         match limits.timeout {
@@ -338,7 +362,7 @@ async fn bounded(
             None => std::future::pending().await,
         }
     };
-    let stop = async {
+    let stopped = async {
         let reason = match stop.as_mut() {
             Some(rx) => rx.await.ok(),
             None => None,
@@ -346,21 +370,61 @@ async fn bounded(
         // Spent: a prompt retried in a new session must not wait on it again.
         *stop = None;
         reason
-    };
-    let cut = tokio::select! {
-        biased;
-        done = &mut request => return (Some(done), None),
-        () = timeout => format!("Prompt time limit reached ({:?})", limits.timeout.unwrap_or_default()),
-        () = too_many.notified() => format!(
-            "Tool call limit reached ({} tool calls in one prompt)",
-            limits.max_tool_calls.unwrap_or_default()
-        ),
-        Some(reason) = stop => reason,
+    }
+    .fuse();
+    let too_many = too_many.notified();
+    tokio::pin!(timeout, stopped, too_many);
+    let mut sending = FuturesUnordered::new();
+    let cut = loop {
+        tokio::select! {
+            biased;
+            done = &mut request => {
+                // A steer the agent took before the prompt ended is answered so.
+                let _ = tokio::time::timeout(STEER_GRACE, async { while sending.next().await.is_some() {} }).await;
+                return (Some(done), None);
+            }
+            () = &mut timeout => break format!("Prompt time limit reached ({:?})", limits.timeout.unwrap_or_default()),
+            () = &mut too_many => break format!(
+                "Tool call limit reached ({} tool calls in one prompt)",
+                limits.max_tool_calls.unwrap_or_default()
+            ),
+            reason = &mut stopped, if !stopped.is_terminated() => if let Some(reason) = reason {
+                break reason;
+            },
+            Some(steer) = next_steer(steers) => sending.push(send_steer(cx, id, steer)),
+            Some(()) = sending.next(), if !sending.is_empty() => {}
+        }
     };
     tracing::warn!(session = %id, reason = %cut, "cancelling the prompt");
+    if let Some(steers) = steers.as_mut() {
+        steers.close();
+    }
     if let Err(e) = cx.send_notification(CancelNotification::new(id.clone())) {
         tracing::warn!(error = %e, "session/cancel");
     }
     cancelled.send_modify(|n| *n += 1);
     (tokio::time::timeout(CANCEL_GRACE, request).await.ok(), Some(cut))
+}
+
+/// The next steer for the running prompt, if it takes any.
+async fn next_steer(steers: &mut Option<mpsc::Receiver<Steer>>) -> Option<Steer> {
+    match steers {
+        Some(steers) => steers.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Send `steer` to the prompt running in session `id`, answering whether the agent took it.
+async fn send_steer(cx: &ConnectionTo<Agent>, id: &SessionId, steer: Steer) {
+    let Steer { text, accepted } = steer;
+    let prompt = vec![ContentBlock::Text(TextContent::new(text))];
+    let took = match cx.send_request(SteerRequest { session_id: id.clone(), prompt }).block_task().await {
+        Ok(response) => response.accepted,
+        Err(e) => {
+            tracing::warn!(session = %id, error = %e, "_ants/steer");
+            false
+        }
+    };
+    tracing::info!(session = %id, took, "steered the running prompt");
+    let _ = accepted.send(took);
 }

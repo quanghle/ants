@@ -51,6 +51,7 @@ mod handling;
 mod holds;
 mod prompt;
 mod queue;
+mod steering;
 
 pub use admission::Claims;
 use control::Cancels;
@@ -375,6 +376,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         machine: &entry.machine,
         pool: &pool,
         cancels: Cancels::default(),
+        steers: steering::Steers::default(),
         unnarrowed: Unnarrowed::default(),
         restarts,
         attempts: &attempts,
@@ -931,7 +933,7 @@ struct Incoming {
     /// The channel the answer goes to instead of the sender's inbox: that of the thread, when the message is the
     /// escalation leader's reply that renewed it ([`Inbox::arrived`]).
     resume: Option<ChannelId>,
-    /// How a human's message interrupted its thread.
+    /// How the message steered its thread.
     steered: Steered,
 }
 
@@ -944,8 +946,11 @@ enum Steered {
     No,
     /// It cancelled the prompt running on its thread as it arrived.
     Interrupted,
-    /// It arrived behind another steer that cancelled the running prompt already.
+    /// It arrived behind another steer that cancelled the running prompt already, or the prompt it was to join ended
+    /// before taking it.
     Ahead,
+    /// It joins the prompt running on its thread, whose harness takes it into its turn ([`steering`]).
+    Joining,
 }
 
 impl Incoming {
@@ -985,6 +990,8 @@ struct Inbox<'a> {
     pool: &'a Pool,
     /// The prompts running, for `ants cancel`.
     cancels: Cancels,
+    /// The prompts running that take messages joining them.
+    steers: steering::Steers,
     /// The senders whose narrowing the harness, running its tools unasked, was warned not to apply.
     unnarrowed: Unnarrowed,
     /// Where admin orders to restart the ant's harnesses arrive.

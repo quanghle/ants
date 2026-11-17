@@ -80,9 +80,9 @@ pub struct Envelope {
     /// sends an answer to the owner it names.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub webhook: bool,
-    /// A human's reply that waits its turn behind the prompt running on its thread rather than interrupting it, as
-    /// `ants ask --queue` and the chat's `/later` send it. A daemon honours it only from a human; from an ant, which
-    /// never interrupts, it changes nothing. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
+    /// A message that waits its turn behind the prompt running on its thread rather than steering it, as
+    /// `ants ask --queue` and the chat's `/later` send it. Never copied by [`Envelope::reply`] or
+    /// [`Envelope::follow_up`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub queue: bool,
     /// The tool rules the thread is narrowed to, as a webhook or schedule that started it, or the message it follows on
@@ -169,6 +169,8 @@ pub enum NoticeKind {
     InPlace,
     /// A tool request an ant of the chain was asked to decide expired unanswered.
     RequestExpired,
+    /// A later message steered the prompt answering a message, so the answer goes to that one.
+    Steered,
 }
 
 impl NoticeKind {
@@ -186,6 +188,7 @@ impl NoticeKind {
             Self::Assistant => "assistant",
             Self::InPlace => "in_place",
             Self::RequestExpired => "request_expired",
+            Self::Steered => "steered",
         }
     }
 

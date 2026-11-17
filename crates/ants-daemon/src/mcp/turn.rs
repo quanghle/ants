@@ -59,6 +59,22 @@ impl Mcp {
         self.hub.sessions.locked().current.insert(envelope.thread_id.clone(), envelope.clone());
         Turn { hub: self.hub.clone(), thread: envelope.thread_id.clone() }
     }
+
+    /// Make `envelope`, a message that joined the prompt running on its thread, the message the thread handles, as
+    /// [`Mcp::begin`] does, while the turn of the message the prompt started with lasts; the session may read the
+    /// files attached to either, which the hub stored at `stored`.
+    pub fn steer_to(&self, envelope: &Envelope, handles: Vec<AttachmentHandle>, stored: Option<DateTime<Utc>>) {
+        let thread = &envelope.thread_id;
+        let mut sessions = self.hub.sessions.locked();
+        if !sessions.current.contains_key(thread) {
+            return;
+        }
+        sessions.current.insert(thread.clone(), envelope.clone());
+        let Some(stored) = stored.filter(|_| !handles.is_empty()) else { return };
+        let carried = sessions.carried.entry(thread.clone()).or_insert_with(|| (Vec::new(), stored));
+        carried.0.extend(handles);
+        carried.1 = carried.1.max(stored);
+    }
 }
 
 /// See [`Mcp::begin`].

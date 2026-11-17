@@ -65,6 +65,22 @@ pub struct Prompt {
     /// The files attached to the message prompted with, read as the prompt runs: as images after the text for a
     /// harness taking them, else named at the end of the text ([`Attached::show`]).
     pub attachments: Option<Attached>,
+    /// Steers the prompt with more messages while it runs, should the harness take them ([`Steering`]).
+    pub steering: Option<Steering>,
+}
+
+/// Messages added to a running prompt, for a harness that takes them into its turn (`_ants/steer`).
+pub struct Steering {
+    /// Fires as the prompt starts in a session whose harness takes steers; with none, `steers` is never read.
+    pub ready: oneshot::Sender<()>,
+    pub steers: mpsc::Receiver<Steer>,
+}
+
+/// A message to add to the running prompt, and where to answer whether the prompt took it: refused once the prompt
+/// ends or is cancelled, as when the harness turns it away.
+pub struct Steer {
+    pub text: String,
+    pub accepted: oneshot::Sender<bool>,
 }
 
 impl Prompt {
@@ -78,6 +94,7 @@ impl Prompt {
             progress: None,
             history: None,
             attachments: None,
+            steering: None,
         }
     }
 }

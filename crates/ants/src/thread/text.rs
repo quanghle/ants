@@ -149,6 +149,8 @@ fn no_reply(end: &NoReply, text: &str) -> String {
         (NoReplyWhy::ReplyToOwn, _) => "reply to own message, answer not sent".to_owned(),
         (NoReplyWhy::Completed, Some(reason)) => format!("completed ({reason})"),
         (NoReplyWhy::Completed, None) => "completed".to_owned(),
+        (NoReplyWhy::Steered, Some(reason)) => format!("steered ({reason})"),
+        (NoReplyWhy::Steered, None) => "steered".to_owned(),
     };
     if text.is_empty() { why } else { format!("{why}: {text}") }
 }

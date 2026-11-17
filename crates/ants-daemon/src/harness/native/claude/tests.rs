@@ -14,8 +14,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::*;
 use crate::harness::{
-    Harnesses, Launch, ModelSettings, PlanStep, Prompt, Readiness, Session, SignedOut, Spend, StartFailed, fork,
-    handshake, parse_definitions,
+    Harnesses, Launch, ModelSettings, PlanStep, Prompt, Readiness, Session, SignedOut, Spend, StartFailed, Steer,
+    Steering, fork, handshake, parse_definitions,
 };
 use crate::permission::{Allowlist, PermissionPolicy};
 use crate::ratelimit::Limited;
@@ -181,7 +181,7 @@ async fn run(session: &Session, prompt: Prompt) -> (anyhow::Result<String>, Vec<
 }
 
 /// The arguments every session's CLI gets first.
-const FIRST_ARGS: [&str; 12] = [
+const FIRST_ARGS: [&str; 13] = [
     "-p",
     "--input-format",
     "stream-json",
@@ -189,6 +189,7 @@ const FIRST_ARGS: [&str; 12] = [
     "stream-json",
     "--verbose",
     "--include-partial-messages",
+    "--replay-user-messages",
     "--thinking-display",
     "summarized",
     "--permission-prompts",
@@ -309,6 +310,51 @@ async fn a_claude_session_streams_its_turn_and_reports_spend() {
 }
 
 #[tokio::test]
+async fn a_claude_turn_takes_steers_and_ends_once_idle_with_each_replayed() {
+    let native = Fixture::new("claude-steer", "");
+    let state = |state: &str| event(json!({ "type": "system", "subtype": "session_state_changed", "state": state }));
+    let replay = "!echo {\"isReplay\":true,";
+    native.script(None, &[]);
+    native.script(
+        Some(2),
+        &[
+            vec![signed_in()],
+            vec![replay.to_owned(), state("running"), init(), text("Working")],
+            vec![result(0.1, json!({})), replay.to_owned(), text("On both"), result(0.2, json!({})), state("idle")],
+        ],
+    );
+    let session = Session::start(&native.launch(ModelSettings::default()), None).await.unwrap();
+    let (ready, started) = oneshot::channel();
+    let (steer_tx, steers) = mpsc::channel(1);
+    let (progress, mut status) = mpsc::channel(16);
+    let (spend, mut spent) = mpsc::unbounded_channel();
+    let prompt = Prompt {
+        progress: Some(progress),
+        spend: Some(spend),
+        steering: Some(Steering { ready, steers }),
+        ..Prompt::new("go")
+    };
+    let steer = async {
+        started.await.expect("Claude Code takes steers");
+        status.recv().await;
+        let (accepted, took) = oneshot::channel();
+        steer_tx.send(Steer { text: "and this".to_owned(), accepted }).await.unwrap();
+        took.await.unwrap()
+    };
+    let (reply, took) = tokio::join!(session.run(prompt), steer);
+    assert_eq!((reply.unwrap().text, took), ("Working\n\nOn both".to_owned(), true), "one answer, both results");
+    session.close().await;
+    let mut spends = Vec::new();
+    while let Ok(spend) = spent.try_recv() {
+        spends.push(spend);
+    }
+    assert!(spends.contains(&Spend::Tokens(2 * 1154)), "the usage of both results: {spends:?}");
+    let received = native.received(2);
+    assert_eq!(received[2]["message"]["content"], json!([{ "type": "text", "text": "and this" }]));
+    assert_ne!(received[1]["uuid"], received[2]["uuid"]);
+}
+
+#[tokio::test]
 async fn claude_sessions_resume_and_fork_counting_only_their_own_cost() {
     let native = Fixture::new("claude-fork", "");
     let launch = native.launch(ModelSettings::default());
@@ -323,13 +369,13 @@ async fn claude_sessions_resume_and_fork_counting_only_their_own_cost() {
     assert_eq!(resumed.id(), SessionId::new("p1"));
     assert_eq!(run(&resumed, Prompt::new("again")).await.0.unwrap(), "Back");
     resumed.close().await;
-    assert_eq!(native.cli.args(2)[12..14], ["--resume", "p1"]);
+    assert_eq!(native.cli.args(2)[13..15], ["--resume", "p1"]);
 
     let forked = fork(&launch, &SessionId::new("p1")).await.unwrap().expect("Claude Code forks");
     let args = native.cli.args(4);
-    assert_eq!(args[12..16], ["--resume", "p1", "--fork-session", "--session-id"]);
+    assert_eq!(args[13..17], ["--resume", "p1", "--fork-session", "--session-id"]);
     let (fork_id, base) = cost_base(&forked.0);
-    assert_eq!(args[16], fork_id, "the fork's id chosen up front");
+    assert_eq!(args[17], fork_id, "the fork's id chosen up front");
     assert!(uuid::Uuid::parse_str(fork_id).is_ok(), "{forked}");
     assert_eq!((forked.to_string(), base), (format!("{fork_id}~1500000"), 1.5), "the parent's cost carried in the id");
     let written = json!({ "type": "user", "message": { "role": "user", "content": [] }, "shouldQuery": false });
@@ -340,7 +386,7 @@ async fn claude_sessions_resume_and_fork_counting_only_their_own_cost() {
     assert_eq!(reply.unwrap(), "Forked");
     assert_eq!(spends[0], Spend::Cost { session: forked.clone(), total: 0.25 }, "not the parent's cost again");
     clone.close().await;
-    assert_eq!(native.cli.args(6)[12..14], ["--resume", fork_id]);
+    assert_eq!(native.cli.args(6)[13..15], ["--resume", fork_id]);
 
     // A daemon started afresh knows the fork's base from its stored id alone.
     let stored = SessionId::new("6e2dbd29-0bc6-45cb-b047-9e7ca523eb90~1500000");
@@ -349,7 +395,7 @@ async fn claude_sessions_resume_and_fork_counting_only_their_own_cost() {
     assert_eq!(reply.unwrap(), "Restarted");
     assert_eq!(spends[0], Spend::Cost { session: stored, total: 1.0 });
     restarted.close().await;
-    assert_eq!(native.cli.args(8)[12..14], ["--resume", "6e2dbd29-0bc6-45cb-b047-9e7ca523eb90"]);
+    assert_eq!(native.cli.args(8)[13..15], ["--resume", "6e2dbd29-0bc6-45cb-b047-9e7ca523eb90"]);
 }
 
 #[tokio::test]

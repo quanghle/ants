@@ -114,6 +114,7 @@ impl Native for Antigravity {
             fork: false,
             images: false,
             http_mcp: true,
+            steer: false,
         }
     }
 

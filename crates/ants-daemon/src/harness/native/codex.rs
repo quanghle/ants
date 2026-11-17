@@ -5,9 +5,9 @@
 //! Sessions are threads (`thread/start`, `thread/resume`, `thread/fork`), each opened with the definition's mode as an
 //! approval policy and sandbox, the ant's model and reasoning effort, and the session's MCP servers as per-thread
 //! config (`mcp_servers.<name>`), none of which a thread keeps when resumed or forked. A prompt is a turn
-//! (`turn/start`, `turn/interrupt` to cancel) whose item and token-usage notifications stream as ACP updates until
-//! `turn/completed`. Approval requests of the server are declined at once. A closed session unsubscribes from its thread
-//! (`thread/unsubscribe`), which the server then unloads.
+//! (`turn/start`, `turn/steer` to add a message to it, `turn/interrupt` to cancel) whose item and token-usage
+//! notifications stream as ACP updates until `turn/completed`. Approval requests of the server are declined at once. A
+//! closed session unsubscribes from its thread (`thread/unsubscribe`), which the server then unloads.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -263,6 +263,7 @@ impl Native for Codex {
             fork: true,
             images: true,
             http_mcp: false,
+            steer: true,
         };
         let mut codex = Self { shared, info, home: None, router };
         (codex.info.version, codex.home) = codex.handshake().await?;
@@ -486,6 +487,23 @@ impl NativeSession for CodexSession {
             _ => StopReason::EndTurn,
         };
         Ok(PromptResponse::new(stop).usage(turn.usage()))
+    }
+
+    async fn steer(&self, prompt: Vec<ContentBlock>) -> Result<bool, Error> {
+        let turn = {
+            let running = self.turn.locked();
+            running.id.clone().filter(|_| !running.cancelled)
+        };
+        let Some(turn) = turn else { return Ok(false) };
+        let params = json!({ "threadId": self.id, "expectedTurnId": turn, "input": input(&prompt) });
+        match self.shared.rpc.request("turn/steer", params).await {
+            Ok(_) => Ok(true),
+            Err(e) if e.is_closed() => Err(self.shared.process.lock().await.exited().await),
+            Err(e) => {
+                tracing::debug!(error = %e, "codex refused a steer, as of a turn ending");
+                Ok(false)
+            }
+        }
     }
 
     async fn cancel(&self) {

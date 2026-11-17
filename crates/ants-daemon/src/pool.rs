@@ -573,6 +573,7 @@ impl Drop for Starting<'_> {
 
 #[cfg(test)]
 pub(crate) mod fake {
+    use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
@@ -589,7 +590,7 @@ pub(crate) mod fake {
 
     use crate::sync::MutexExt as _;
 
-    use crate::harness::Launch;
+    use crate::harness::{Launch, SteerRequest, SteerResponse, advertise_steering};
 
     /// What the fake harnesses were asked to do, across all their "processes".
     #[derive(Default, Debug)]
@@ -630,6 +631,10 @@ pub(crate) mod fake {
         pub forks: bool,
         /// The sessions forked, each with the working directory of its fork, in order; fork `n` is session `f<n>`.
         pub forked: Vec<(String, PathBuf)>,
+        /// While set, harnesses starting advertise `_ants/steer`.
+        pub steers: bool,
+        /// The texts running prompts took as steers, in order.
+        pub steered: Vec<String>,
     }
 
     /// In-process fake harnesses that answer each prompt with `<session>: <text>`. A prompt starting with `hold`, or
@@ -642,7 +647,8 @@ pub(crate) mod fake {
     /// in, and a prompt with the word `sign-out` starts its `tools N`, then sets it and fails so; while
     /// [`Log::limited`] is, prompts start their `tools N`, then stream its text and fail with it, or end with it as
     /// their reply; while [`Log::broken`] is, the handshake fails; while [`Log::takes_images`] is, harnesses starting
-    /// take images, which they log. They can load stored sessions.
+    /// take images, which they log; while [`Log::steers`] is, harnesses starting take steers into a running prompt,
+    /// whose reply ends with a line `+ <steer>` for each, though they refuse a steer ending with `refused`. They can load stored sessions.
     pub fn launch() -> (Launch, Arc<Mutex<Log>>, Arc<Semaphore>) {
         launch_with(Sessions::Loadable)
     }
@@ -661,9 +667,15 @@ pub(crate) mod fake {
         let (shared, held) = (log.clone(), gate.clone());
         let connect = Arc::new(move || {
             shared.locked().starts += 1;
-            let fake = Fake { log: shared.clone(), gate: held.clone(), cancels: Arc::new(Semaphore::new(0)), sessions };
-            let (on_cancel, on_init, on_new, on_load, on_fork, on_prompt) =
-                (fake.clone(), fake.clone(), fake.clone(), fake.clone(), fake.clone(), fake);
+            let fake = Fake {
+                log: shared.clone(),
+                gate: held.clone(),
+                cancels: Arc::new(Semaphore::new(0)),
+                sessions,
+                running: Arc::default(),
+            };
+            let (on_cancel, on_init, on_new, on_load, on_fork, on_steer, on_prompt) =
+                (fake.clone(), fake.clone(), fake.clone(), fake.clone(), fake.clone(), fake.clone(), fake);
             DynConnectTo::new(
                 Agent
                     .v1()
@@ -692,6 +704,10 @@ pub(crate) mod fake {
                         agent_client_protocol::on_receive_request!(),
                     )
                     .on_receive_request(
+                        async move |steer: SteerRequest, responder, _cx| on_steer.steer(steer, responder),
+                        agent_client_protocol::on_receive_request!(),
+                    )
+                    .on_receive_request(
                         async move |prompt: PromptRequest, responder, cx| on_prompt.prompt(prompt, responder, &cx),
                         agent_client_protocol::on_receive_request!(),
                     ),
@@ -707,6 +723,8 @@ pub(crate) mod fake {
         gate: Arc<Semaphore>,
         cancels: Arc<Semaphore>,
         sessions: Sessions,
+        /// The sessions running a prompt, with the steers it took.
+        running: Arc<Mutex<HashMap<SessionId, Vec<String>>>>,
     }
 
     impl Fake {
@@ -717,17 +735,34 @@ pub(crate) mod fake {
             }
             let prompts = PromptCapabilities::new().image(log.takes_images);
             let fork = log.forks.then(SessionForkCapabilities::new);
+            let steers = log.steers;
             drop(log);
+            let capabilities = AgentCapabilities::new()
+                .load_session(self.sessions == Sessions::Loadable)
+                .prompt_capabilities(prompts)
+                .session_capabilities(SessionCapabilities::new().fork(fork));
+            let capabilities = if steers { advertise_steering(capabilities) } else { capabilities };
             responder.respond(
                 InitializeResponse::new(init.protocol_version)
-                    .agent_capabilities(
-                        AgentCapabilities::new()
-                            .load_session(self.sessions == Sessions::Loadable)
-                            .prompt_capabilities(prompts)
-                            .session_capabilities(SessionCapabilities::new().fork(fork)),
-                    )
+                    .agent_capabilities(capabilities)
                     .agent_info(Implementation::new("fake", "1.0")),
             )
+        }
+
+        /// Take a steer into the prompt running in its session, if one is.
+        fn steer(&self, steer: SteerRequest, responder: Responder<SteerResponse>) -> Result<(), Error> {
+            let ContentBlock::Text(t) = &steer.prompt[0] else { unreachable!() };
+            let mut running = self.running.locked();
+            let accepted = match running.get_mut(&steer.session_id) {
+                Some(_) if t.text.ends_with("refused") => false,
+                Some(steers) => {
+                    steers.push(t.text.clone());
+                    self.log.locked().steered.push(t.text.clone());
+                    true
+                }
+                None => false,
+            };
+            responder.respond(SteerResponse { accepted })
         }
 
         fn new_session(&self, new: NewSessionRequest, responder: Responder<NewSessionResponse>) -> Result<(), Error> {
@@ -811,6 +846,7 @@ pub(crate) mod fake {
                 log.images.push((image.mime_type.clone(), image.data.clone()));
             }
             drop(log);
+            self.running.locked().insert(prompt.session_id.clone(), Vec::new());
             let (fake, text, sender) = (self.clone(), t.text.clone(), cx.clone());
             // Answer from a task, so a held prompt does not stall the connection.
             cx.spawn(async move { fake.answer(text, prompt.session_id, responder, sender).await })
@@ -824,10 +860,12 @@ pub(crate) mod fake {
             responder: Responder<PromptResponse>,
             sender: ConnectionTo<Client>,
         ) -> Result<(), Error> {
-            let Fake { log, gate, cancels, .. } = self;
+            let Fake { log, gate, cancels, running, .. } = self;
             if text.starts_with("hold") || text.lines().any(|line| line.starts_with("hold:")) {
                 gate.acquire().await.unwrap().forget();
             }
+            let steered = running.locked().remove(&session).unwrap_or_default();
+            let text = steered.iter().fold(text, |text, steer| format!("{text}\n+ {steer}"));
             if text.split_whitespace().any(|w| w == "doomed") {
                 log.locked().doomed += 1;
                 gate.acquire().await.unwrap().forget();

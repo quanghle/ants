@@ -12,7 +12,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::*;
 use crate::harness::{
-    Harnesses, Launch, Prompt, Readiness, Session, SignedOut, Spend, fork, handshake, parse_definitions,
+    Harnesses, Launch, Prompt, Readiness, Session, SignedOut, Spend, Steer, Steering, fork, handshake,
+    parse_definitions,
 };
 use crate::permission::{Allowlist, PermissionPolicy};
 use crate::ratelimit::Limited;
@@ -158,6 +159,33 @@ async fn a_native_cli_answers_prompts_through_the_translator() {
     let checked = handshake(&launch).await;
     assert_eq!(checked.readiness, Readiness::Ready { agent: "stub-cli 1.2.3".to_owned() });
     assert_eq!(checked.sign_in.as_deref(), Some("stub-cli login"));
+}
+
+#[tokio::test]
+async fn a_native_cli_that_steers_takes_messages_into_the_running_prompt() {
+    let native = Fixture::new("native-steer", "");
+    let hello = ok(1, json!({ "name": "stub-cli", "version": "1.2.3", "steer": true }));
+    let steered = vec![ok(4, json!({ "accepted": true })), message("both"), end_turn(3, 7)];
+    script(&native, None, &[vec![], vec![hello], vec![opened("n1")], vec![], steered]);
+    let session = Session::start(&native.launch(ModelSettings::default()), None).await.unwrap();
+
+    let (ready, started) = oneshot::channel();
+    let (steer_tx, steers) = mpsc::channel(1);
+    let prompt = Prompt { steering: Some(Steering { ready, steers }), ..Prompt::new("go") };
+    let steer = async {
+        started.await.expect("the harness advertises steering");
+        let (accepted, took) = oneshot::channel();
+        steer_tx.send(Steer { text: "and this".to_owned(), accepted }).await.unwrap();
+        took.await.unwrap()
+    };
+    let (ran, took) = tokio::join!(session.run(prompt), steer);
+    assert_eq!((ran.unwrap().text, took), ("both".to_owned(), true));
+    session.close().await;
+    let received = native.received(1);
+    assert_eq!(
+        (&received[3]["method"], &received[3]["params"]),
+        (&json!("steer"), &json!({ "session": "n1", "text": "and this" }))
+    );
 }
 
 #[tokio::test]

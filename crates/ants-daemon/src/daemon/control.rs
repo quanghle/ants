@@ -17,7 +17,7 @@ use super::{CLONE_WAIT_CHECK, Inbox};
 #[derive(Default)]
 pub(super) struct Cancels(std::sync::Mutex<HashMap<ThreadId, tokio::sync::mpsc::Sender<Cancel>>>);
 
-/// A human's cancel of a running prompt.
+/// A cancel of a running prompt: a human's, or a steering message's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Cancel {
     pub(super) by: UserId,
@@ -31,7 +31,7 @@ pub(super) enum Why {
     Cancel,
     /// A cancel request of an assistant for this human, whose grant names it.
     CancelFor(UserId),
-    /// A human's message, which the thread takes next.
+    /// A message steering the thread, which it takes next.
     Steer,
     /// An admin's order to restart the ant's harnesses now ([`crate::admin::restart`]).
     Restart,

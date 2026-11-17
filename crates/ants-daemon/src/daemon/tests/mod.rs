@@ -125,8 +125,12 @@ impl Bus {
         self.send_from(UserId::human(), thread, text).await
     }
 
+    /// Send `text` from ant dev-b, marked to wait its turn rather than steer the prompt running on the thread.
     async fn send_ant(&self, thread: &ThreadId, text: &str) -> (Envelope, u64) {
-        self.send_from("dev-b".parse().unwrap(), thread, text).await
+        let envelope = Envelope::on_thread(thread.clone(), "dev-b".parse().unwrap(), self.dev.clone(), text);
+        let envelope = Envelope { queue: true, ..envelope };
+        let seq = bus::publish_json(&self.js, envelope.subject(), &envelope, None).await.unwrap();
+        (envelope, seq)
     }
 
     async fn replies(&self) -> async_nats::Subscriber {
@@ -229,6 +233,7 @@ impl Bus {
             machine: "test-machine",
             pool,
             cancels: Cancels::default(),
+            steers: Default::default(),
             unnarrowed: Unnarrowed::default(),
             restarts: &self.restarts,
             attempts: &self.attempts,

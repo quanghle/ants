@@ -19,11 +19,14 @@ use super::control::{Cancel, Why};
 use super::handling::Handled;
 use super::{EVICT_EVERY, InHand, Inbox, Incoming, Steered, is_post, nak, sleep_until, stream_seq};
 
-/// The messages of one thread in hand: one in flight at most, the rest waiting their turn.
+/// The messages of one thread in hand: one in flight at most, and those joining its prompt, the rest waiting their
+/// turn.
 #[derive(Default)]
 pub(super) struct Thread {
     waiting: VecDeque<InHand>,
     busy: bool,
+    /// The messages joining the prompt in flight ([`Steered::Joining`]), until they are answered or wait again.
+    joining: Vec<Joiner>,
     /// Stream sequence of the message in flight.
     in_flight: Option<u64>,
     /// The message in flight, as `ants queue` lists it.
@@ -33,6 +36,14 @@ pub(super) struct Thread {
     retry: Option<Retry>,
     /// The messages told they wait behind others ([`StatusUpdate::Queued`]), to tell when their turn comes.
     queued: HashSet<Uuid>,
+}
+
+/// A message joining the prompt in flight on its thread.
+struct Joiner {
+    id: Uuid,
+    seq: Option<u64>,
+    /// The message, as `ants queue` lists it.
+    queued: Option<QueuedMessage>,
 }
 
 pub(super) struct Retry {
@@ -53,12 +64,23 @@ impl Thread {
     /// Whether the message with stream sequence `seq` is in flight or waiting. The server redelivers one whose progress
     /// acks were lost, as on a link that went silent for longer than the ack wait.
     fn holds(&self, seq: Option<u64>) -> bool {
-        seq.is_some() && (self.in_flight == seq || self.waiting.iter().any(|(_, msg)| stream_seq(msg) == seq))
+        seq.is_some()
+            && (self.in_flight == seq
+                || self.joining.iter().any(|joiner| joiner.seq == seq)
+                || self.waiting.iter().any(|(_, msg)| stream_seq(msg) == seq))
     }
 
-    /// How many messages one arriving now waits behind: the one in flight or to be redelivered, and those waiting.
+    /// How many messages one arriving now waits behind: the one in flight or to be redelivered, those joining it and
+    /// those waiting.
     fn ahead(&self) -> usize {
-        usize::from(self.busy) + usize::from(self.retry.is_some()) + self.waiting.len()
+        usize::from(self.busy) + usize::from(self.retry.is_some()) + self.joining.len() + self.waiting.len()
+    }
+
+    /// Where a message steering the thread goes among those waiting: after those that steered it before, which `seq`
+    /// follows.
+    fn steered_at(&self, seq: Option<u64>) -> usize {
+        let before = |msg| seq.is_none() || stream_seq(msg) < seq;
+        self.waiting.iter().take_while(|(waiting, msg)| waiting.steered != Steered::No && before(msg)).count()
     }
 }
 
@@ -146,8 +168,8 @@ impl Inbox<'_> {
                     }
                 }
                 Some(()) = answering.next(), if !answering.is_empty() => {}
-                Some((thread, handled)) = running.next(), if !running.is_empty() => {
-                    match handed_back(&mut threads, &thread, handled) {
+                Some((thread, handled, joiner)) = running.next(), if !running.is_empty() => {
+                    match handed_back(&mut threads, &thread, handled, joiner) {
                         Some(Wait::SignIn) if signing_in.is_terminated() => signing_in.set(self.signed_in().fuse()),
                         Some(Wait::Limit) if lifting.is_terminated() => lifting.set(self.limit_passed().fuse()),
                         Some(Wait::Repair) if repairing.is_terminated() => repairing.set(self.repaired().fuse()),
@@ -174,11 +196,12 @@ impl Inbox<'_> {
                 || self.outage().is_some() && self.fallback(now).is_none();
             self.workload.set_paused(pause);
             for thread in ready.into_iter().flatten().filter(|_| !held) {
-                if let Some((incoming, msg)) = next_turn(&mut threads, thread.clone()) {
+                while let Some((incoming, msg)) = next_turn(&mut threads, thread.clone()) {
                     if let Some(t) = threads.get_mut(&thread) {
                         self.queue_moved(&thread, t, incoming.envelope.id);
                     }
-                    running.push(self.handle(incoming, msg));
+                    let joiner = (incoming.steered == Steered::Joining).then_some(incoming.envelope.id);
+                    running.push(self.handle(incoming, msg).map(move |(thread, handled)| (thread, handled, joiner)));
                 }
             }
             self.workload.set_harnesses(self.pool.live());
@@ -221,8 +244,9 @@ impl Inbox<'_> {
             t.retry = None;
             t.waiting.push_front((incoming, msg));
         } else if let Some(steered) = self.steer(&incoming, &thread, t) {
-            let at = t.waiting.iter().take_while(|(waiting, _)| waiting.steered != Steered::No).count();
-            tracing::info!(%thread, by = %incoming.envelope.from, ahead = at, "a human steers the thread");
+            let at = t.steered_at(None);
+            let joins = steered == Steered::Joining;
+            tracing::info!(%thread, by = %incoming.envelope.from, ahead = at, joins, "a message steers the thread");
             t.waiting.insert(at, (Incoming { steered, ..incoming }, msg));
             let behind = t.waiting.iter().map(|(waiting, _)| waiting.envelope.id).enumerate().skip(at + 1);
             for (before, message) in behind.filter(|(_, message)| t.queued.contains(message)) {
@@ -242,18 +266,44 @@ impl Inbox<'_> {
         Some(thread)
     }
 
-    /// A human's message interrupts the prompt on its thread, unless an earlier human message already did or it is
-    /// to wait its turn ([`ants_proto::Envelope::queue`]).
+    /// A message that steers ([`Inbox::steers`]) joins the prompt on its thread when the harness takes it into its
+    /// turn, else interrupts it, unless an earlier one already did.
     fn steer(&self, incoming: &Incoming, thread: &ThreadId, t: &Thread) -> Option<Steered> {
         let envelope = &incoming.envelope;
-        if !self.humans.sender_role(envelope).is_human() || !t.busy || envelope.queue {
+        if !t.busy || !self.steers(incoming) {
             return None;
         }
-        if t.waiting.front().is_some_and(|(waiting, _)| waiting.steered != Steered::No) {
+        let first = t.waiting.front().map(|(waiting, _)| waiting.steered);
+        if matches!(first, Some(Steered::Interrupted | Steered::Ahead)) {
             return Some(Steered::Ahead);
+        }
+        if self.steers.takes(thread) {
+            return Some(Steered::Joining);
         }
         let cancel = Cancel { by: envelope.from.clone(), why: Why::Steer };
         self.cancels.cancel(thread, cancel).then_some(Steered::Interrupted)
+    }
+
+    /// Whether `incoming` steers the prompt running on its thread rather than wait its turn: a human's message, or
+    /// another ant's that starts something rather than answers (no reply, escalation, notice, triage or webhook),
+    /// unless marked to wait ([`ants_proto::Envelope::queue`]).
+    fn steers(&self, incoming: &Incoming) -> bool {
+        let envelope = &incoming.envelope;
+        if envelope.queue {
+            return false;
+        }
+        if self.humans.sender_role(envelope).is_human() {
+            return true;
+        }
+        let answers = match &incoming.post {
+            Some(posted) => posted.post.in_reply_to.is_some() || posted.triage.is_some(),
+            None => envelope.in_reply_to.is_some(),
+        };
+        !answers
+            && !envelope.webhook
+            && envelope.escalation.is_none()
+            && envelope.notice.is_none()
+            && envelope.from != *self.ant
     }
 
     /// Tell the messages waiting on `thread` where they stand now that `started` left the queue, and `started` that
@@ -321,18 +371,34 @@ fn give_up_retries(threads: &mut HashMap<ThreadId, Thread>) {
     }
 }
 
-/// Note how handling the message in flight on `thread` ended. Returns what it waits for, first on its thread, if it
-/// was handed back.
-fn handed_back(threads: &mut HashMap<ThreadId, Thread>, thread: &ThreadId, handled: Handled) -> Option<Wait> {
+/// Note how handling the message in flight on `thread`, or the `joiner` of its prompt, ended. Returns what it waits
+/// for, first on its thread, if it was handed back.
+fn handed_back(
+    threads: &mut HashMap<ThreadId, Thread>,
+    thread: &ThreadId,
+    handled: Handled,
+    joiner: Option<Uuid>,
+) -> Option<Wait> {
     let t = threads.entry(thread.clone()).or_default();
-    t.busy = false;
-    t.in_flight = None;
-    t.running = None;
-    t.retry = None;
+    match joiner {
+        Some(id) => t.joining.retain(|joiner| joiner.id != id),
+        None => {
+            t.busy = false;
+            t.in_flight = None;
+            t.running = None;
+            t.retry = None;
+        }
+    }
     match handled {
         Handled::Done => None,
         Handled::Retry(retry) => {
-            t.retry = Some(retry);
+            t.retry.get_or_insert(retry);
+            None
+        }
+        Handled::Requeued(held) => {
+            let (incoming, msg) = *held;
+            let at = t.steered_at(stream_seq(&msg));
+            t.waiting.insert(at, (Incoming { steered: Steered::Ahead, ..incoming }, msg));
             None
         }
         Handled::SignedOut(held) => {
@@ -354,26 +420,40 @@ fn handed_back(threads: &mut HashMap<ThreadId, Thread>, thread: &ThreadId, handl
     }
 }
 
-/// The thread's next message to prompt, unless one is in flight or it waits for a redelivery. Forgets a thread with
-/// nothing left in hand.
+/// The thread's next message to prompt, unless one is in flight, being answered by the prompt it joined, or waiting
+/// for a redelivery; a message joining the prompt in flight starts at once. Forgets a thread with nothing left in hand.
 fn next_turn(threads: &mut HashMap<ThreadId, Thread>, thread: ThreadId) -> Option<InHand> {
     let Entry::Occupied(mut entry) = threads.entry(thread) else { return None };
     let t = entry.get_mut();
-    if t.busy || t.retry.is_some() {
+    if t.retry.is_some() {
+        return None;
+    }
+    let joins = t.waiting.front().is_some_and(|(waiting, _)| waiting.steered == Steered::Joining);
+    if t.busy && joins {
+        let (incoming, msg) = t.waiting.pop_front()?;
+        let queued = queued_message(&incoming, &msg, Place::Running);
+        t.joining.push(Joiner { id: incoming.envelope.id, seq: stream_seq(&msg), queued });
+        return Some((incoming, msg));
+    }
+    if t.busy || !t.joining.is_empty() {
         return None;
     }
     let next = t.waiting.pop_front();
-    match &next {
+    match next {
         Some((incoming, msg)) => {
+            // The prompt it was to join ended before it started.
+            let steered = if incoming.steered == Steered::Joining { Steered::Ahead } else { incoming.steered };
+            let incoming = Incoming { steered, ..incoming };
             t.busy = true;
-            t.in_flight = stream_seq(msg);
-            t.running = queued_message(incoming, msg, Place::Running);
+            t.in_flight = stream_seq(&msg);
+            t.running = queued_message(&incoming, &msg, Place::Running);
+            Some((incoming, msg))
         }
         None => {
             entry.remove();
+            None
         }
     }
-    next
 }
 
 /// The messages in hand on every thread, as `ants queue` lists them, by stream sequence.
@@ -381,14 +461,15 @@ fn in_hand(threads: &HashMap<ThreadId, Thread>) -> Vec<QueuedMessage> {
     let mut messages: Vec<_> = threads
         .values()
         .flat_map(|t| {
-            let before = usize::from(t.busy) + usize::from(t.retry.is_some());
+            let before = usize::from(t.busy) + usize::from(t.retry.is_some()) + t.joining.len();
             let waiting = t.waiting.iter().enumerate();
             let waiting = waiting.filter_map(move |(at, (incoming, msg))| {
                 queued_message(incoming, msg, Place::Waiting { ahead: before + at })
             });
             let retry = t.retry.as_ref().and_then(|r| r.queued.clone());
             let retry = retry.map(|queued| QueuedMessage { ahead: usize::from(t.busy), ..queued });
-            t.running.clone().into_iter().chain(retry).chain(waiting)
+            let joining = t.joining.iter().filter_map(|joiner| joiner.queued.clone());
+            t.running.clone().into_iter().chain(joining).chain(retry).chain(waiting)
         })
         .collect();
     messages.sort_by_key(|m| m.seq);

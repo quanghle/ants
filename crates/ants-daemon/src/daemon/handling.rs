@@ -16,6 +16,7 @@ use crate::status;
 use super::burial::Letter;
 use super::delivery::reply_id;
 use super::queue::{Place, Retry, queued_message};
+use super::steering::Requeue;
 use super::{InHand, Inbox, Incoming, MAX_ATTEMPTS, MAX_DELIVER, nak};
 
 /// Who withdrew a message before the ant was prompted with it.
@@ -43,6 +44,9 @@ pub(super) enum Handled {
     Broken(Box<InHand>),
     /// A fallback turned the message away: it goes, as it arrived, to the next one, or waits like the others.
     Failover(Box<InHand>),
+    /// The message steered its thread's prompt, which did not take it or failed: it waits, as it arrived, for a
+    /// prompt of its own, ahead of the others.
+    Requeued(Box<InHand>),
 }
 
 impl Inbox<'_> {
@@ -64,32 +68,10 @@ impl Inbox<'_> {
         self.thread_origin(&mut incoming, seq).await;
         self.sender_claims(&mut incoming, seq).await;
         self.owner_landed(&incoming, &msg).await;
+        if self.settled_before(&incoming, &msg, seq).await {
+            return (thread, Handled::Done);
+        }
         let envelope = &incoming.envelope;
-        if self.answered.has(envelope).await {
-            // Its ack failed, as while a leaf node's uplink is down; its reply is in the stream or on its way there.
-            tracing::info!(%thread, "acking a message whose reply is stored already");
-            match bus::double_ack(self.client, &msg).await {
-                Ok(()) => {
-                    self.attempts.forget(seq).await;
-                    self.attempts.finish(envelope).await;
-                    self.answered.forget(envelope).await;
-                }
-                Err(e) => tracing::warn!(%thread, error = %e, "acking a message whose reply is stored"),
-            }
-            return (thread, Handled::Done);
-        }
-        if let Some(kept) = self.buried.get(envelope).await {
-            // Its dead letter went to the machine's outbox while the hub was out of reach; the redelivery finishes it.
-            tracing::info!(%thread, "burying a message whose dead letter is in the outbox");
-            match self.bury_letter(&incoming, &msg, &kept.dead, Letter::Kept).await {
-                Ok(()) => {
-                    self.attempts.forget(seq).await;
-                    self.attempts.finish(envelope).await;
-                }
-                Err(e) => tracing::error!(%thread, error = format!("{e:#}"), "dead-lettering"),
-            }
-            return (thread, Handled::Done);
-        }
         let attempt = Attempt::of(delivered, MAX_ATTEMPTS);
         // Taken up before anything is done for it, unless a human withdrew it first (`ants withdraw`).
         let result = match self.take_up(envelope).await {
@@ -103,6 +85,9 @@ impl Inbox<'_> {
             self.breaker.settled();
             return (thread, Handled::Done);
         };
+        if e.is::<Requeue>() {
+            return (thread, Handled::Requeued(Box::new((arrived, msg))));
+        }
         if self.passed_over(&e, &arrived).await {
             return (thread, Handled::Failover(Box::new((arrived, msg))));
         }
@@ -157,6 +142,37 @@ impl Inbox<'_> {
         (thread, retry.map_or(Handled::Done, Handled::Retry))
     }
 
+    /// Finish `incoming`, the message at stream sequence `seq`, if an earlier delivery of it settled it already: its
+    /// reply or dead letter is stored. True if so.
+    async fn settled_before(&self, incoming: &Incoming, msg: &jetstream::Message, seq: u64) -> bool {
+        let envelope = &incoming.envelope;
+        let thread = &envelope.thread_id;
+        if self.answered.has(envelope).await {
+            // Its ack failed, as while a leaf node's uplink is down; its reply is in the stream or on its way there.
+            tracing::info!(%thread, "acking a message whose reply is stored already");
+            match bus::double_ack(self.client, msg).await {
+                Ok(()) => {
+                    self.attempts.forget(seq).await;
+                    self.attempts.finish(envelope).await;
+                    self.answered.forget(envelope).await;
+                }
+                Err(e) => tracing::warn!(%thread, error = %e, "acking a message whose reply is stored"),
+            }
+            return true;
+        }
+        let Some(kept) = self.buried.get(envelope).await else { return false };
+        // Its dead letter went to the machine's outbox while the hub was out of reach; the redelivery finishes it.
+        tracing::info!(%thread, "burying a message whose dead letter is in the outbox");
+        match self.bury_letter(incoming, msg, &kept.dead, Letter::Kept).await {
+            Ok(()) => {
+                self.attempts.forget(seq).await;
+                self.attempts.finish(envelope).await;
+            }
+            Err(e) => tracing::error!(%thread, error = format!("{e:#}"), "dead-lettering"),
+        }
+        true
+    }
+
     /// Handle the message at stream sequence `seq`, taken up: answer it, or bury it when overdue. Marks it finished
     /// once it is acked or buried.
     async fn take(&self, incoming: &mut Incoming, msg: &jetstream::Message, seq: u64, attempt: Attempt) -> Result<()> {
@@ -176,7 +192,7 @@ impl Inbox<'_> {
             return Ok(());
         }
         if self.arrived(incoming).await? {
-            self.answer(incoming, msg, seq, marker).await?;
+            Box::pin(self.answer(incoming, msg, seq, marker)).await?;
         } else {
             self.done(msg, seq).await?;
         }

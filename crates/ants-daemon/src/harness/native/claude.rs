@@ -65,6 +65,7 @@ const ENV: &[(&str, &str)] = &[
     ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
     ("CLAUDE_CODE_ENABLE_TODO_TOOLS", "1"),
     ("CLAUDE_CODE_ENABLE_TASKS", "0"),
+    ("CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS", "1"),
 ];
 
 /// The environment variables Claude Code reads an API key or a token from.
@@ -147,6 +148,7 @@ impl Native for Claude {
             fork: true,
             images: true,
             http_mcp: true,
+            steer: true,
         }
     }
 
@@ -259,6 +261,7 @@ impl Claude {
             turns: AtomicU64::new(0),
             interrupted: AtomicBool::new(false),
             spent: Mutex::new(Spent { base, ..Spent::default() }),
+            steers: Mutex::default(),
         };
         let hello = session.shared.control(json!({ "subtype": "initialize", "hooks": null })).await?;
         if no_credentials(&hello["account"]) {
@@ -286,6 +289,7 @@ impl Claude {
             "stream-json",
             "--verbose",
             "--include-partial-messages",
+            "--replay-user-messages",
             "--thinking-display",
             "summarized",
             "--permission-prompts",
@@ -426,6 +430,19 @@ pub(crate) struct ClaudeSession {
     turns: AtomicU64,
     interrupted: AtomicBool,
     spent: Mutex<Spent>,
+    steers: Mutex<Steers>,
+}
+
+/// The messages steering the turn running ([`NativeSession::steer`]), written to stdin as it runs. Claude Code takes
+/// one between model calls, or after the turn's `result` as a turn of its own, replaying it as it does
+/// (`--replay-user-messages`). The prompt ends once the session is idle (`session_state_changed`), or at a `result`
+/// from a Claude Code that does not report its state, and only once each steer was replayed.
+#[derive(Debug, Default)]
+struct Steers {
+    /// Whether a turn runs that takes steers: until it ends.
+    open: bool,
+    /// The uuids of the messages written but not replayed.
+    pending: HashSet<String>,
 }
 
 /// What the session reports of its context window and cost.
@@ -488,29 +505,60 @@ impl ClaudeSession {
         Ok(())
     }
 
+    /// The user message of `prompt`, as `uuid`.
+    fn message(&self, prompt: &[ContentBlock], uuid: &str) -> Value {
+        json!({
+            "type": "user",
+            "message": { "role": "user", "content": content(prompt) },
+            "parent_tool_use_id": null,
+            "session_id": self.id,
+            "uuid": uuid,
+            "client_composed": true,
+        })
+    }
+
     async fn turn(
         &self,
         events: &mut mpsc::UnboundedReceiver<Value>,
         prompt: &[ContentBlock],
         updates: &Updates,
     ) -> Result<PromptResponse, Error> {
-        let message = json!({
-            "type": "user",
-            "message": { "role": "user", "content": content(prompt) },
-            "parent_tool_use_id": null,
-            "session_id": self.id,
-            "uuid": uuid::Uuid::new_v4().to_string(),
-            "client_composed": true,
-        });
+        let message = self.message(prompt, &uuid::Uuid::new_v4().to_string());
         if self.shared.writer.send(&message).await.is_err() {
             return Err(self.shared.exited().await);
         }
+        self.steers.locked().open = true;
         let mut turn = Turn::new(&self.shared.cli, &self.cwd, updates);
+        let (mut counts, mut last, mut states) = ([0; 5], None, false);
         let result = loop {
             let Some(event) = events.recv().await else { return Err(self.shared.exited().await) };
-            if let Some(result) = turn.event(event) {
+            let idle = match (event["type"].as_str(), event["subtype"].as_str()) {
+                (Some("user"), _) if event["isReplay"] == true => {
+                    self.steers.locked().pending.remove(event["uuid"].as_str().unwrap_or_default());
+                    continue;
+                }
+                (Some("system"), Some("session_state_changed")) => {
+                    states = true;
+                    event["state"] == "idle"
+                }
+                _ => {
+                    let Some(result) = turn.event(event) else { continue };
+                    counts = std::array::from_fn(|i| counts[i] + token_counts(&result)[i]);
+                    last = Some(result);
+                    turn.parted = true;
+                    !states
+                }
+            };
+            if !idle {
+                continue;
+            }
+            let Some(result) = last.take() else { continue };
+            let mut steers = self.steers.locked();
+            if steers.pending.is_empty() || self.interrupted.load(Ordering::Relaxed) {
+                steers.open = false;
                 break result;
             }
+            last = Some(result);
         };
         let (used, size, cost) = {
             let mut spent = self.spent.locked();
@@ -524,7 +572,7 @@ impl ClaudeSession {
         };
         updates.usage(used, size, Some(cost));
         let stop = ended(&result, &turn, self.interrupted.load(Ordering::Relaxed))?;
-        Ok(PromptResponse::new(stop).usage(tokens(&result)))
+        Ok(PromptResponse::new(stop).usage(tokens(counts)))
     }
 }
 
@@ -555,10 +603,28 @@ impl NativeSession for ClaudeSession {
         while events.try_recv().is_ok() {}
         let turn = self.turns.fetch_add(1, Ordering::Relaxed) + 1;
         self.interrupted.store(false, Ordering::Relaxed);
+        *self.steers.locked() = Steers::default();
         self.running.send_replace(Some(turn));
         let done = self.turn(&mut events, &prompt, &updates).await;
+        self.steers.locked().open = false;
         self.running.send_replace(None);
         done
+    }
+
+    async fn steer(&self, prompt: Vec<ContentBlock>) -> Result<bool, Error> {
+        let uuid = uuid::Uuid::new_v4().to_string();
+        {
+            let mut steers = self.steers.locked();
+            if !steers.open || self.interrupted.load(Ordering::Relaxed) {
+                return Ok(false);
+            }
+            steers.pending.insert(uuid.clone());
+        }
+        if self.shared.writer.send(&self.message(&prompt, &uuid)).await.is_err() {
+            self.steers.locked().pending.remove(&uuid);
+            return Err(self.shared.exited().await);
+        }
+        Ok(true)
     }
 
     async fn cancel(&self) {
@@ -633,6 +699,10 @@ struct Turn<'a> {
     synthetic: Option<String>,
     /// The last rate limit state reported.
     limit: Option<Value>,
+    /// Whether the reply said anything yet.
+    said: bool,
+    /// Whether a steer's turn followed a `result`, its reply then parted from what came before by a blank line.
+    parted: bool,
 }
 
 impl<'a> Turn<'a> {
@@ -648,6 +718,8 @@ impl<'a> Turn<'a> {
             error: None,
             synthetic: None,
             limit: None,
+            said: false,
+            parted: false,
         }
     }
 
@@ -679,7 +751,7 @@ impl<'a> Turn<'a> {
             Some("content_block_delta") => {
                 let delta = &event["delta"];
                 match (delta["type"].as_str(), delta["text"].as_str(), delta["thinking"].as_str()) {
-                    (Some("text_delta"), Some(text), _) if !text.is_empty() => self.updates.message(text),
+                    (Some("text_delta"), Some(text), _) if !text.is_empty() => self.say(text),
                     (Some("thinking_delta"), _, Some(thinking)) if !thinking.is_empty() => {
                         self.updates.thought(thinking);
                     }
@@ -706,7 +778,7 @@ impl<'a> Turn<'a> {
         for block in message["content"].as_array().into_iter().flatten() {
             match (block["type"].as_str(), block["text"].as_str()) {
                 (Some("text"), Some(text)) if synthetic => self.synthetic = Some(text.to_owned()),
-                (Some("text"), Some(text)) if !streamed && !text.is_empty() => self.updates.message(text),
+                (Some("text"), Some(text)) if !streamed && !text.is_empty() => self.say(text),
                 (Some("thinking"), _) if !streamed => {
                     if let Some(thinking) = block["thinking"].as_str().filter(|thinking| !thinking.is_empty()) {
                         self.updates.thought(thinking);
@@ -716,6 +788,14 @@ impl<'a> Turn<'a> {
                 _ => {}
             }
         }
+    }
+
+    fn say(&mut self, text: &str) {
+        if std::mem::take(&mut self.parted) && self.said {
+            self.updates.message("\n\n");
+        }
+        self.said = true;
+        self.updates.message(text);
     }
 
     fn tool_use(&mut self, block: &Value) {
@@ -812,8 +892,9 @@ fn window(result: &Value, model: Option<&str>) -> Option<u64> {
     own.or_else(|| usage.values().filter_map(|usage| usage["contextWindow"].as_u64()).max())
 }
 
-/// The tokens the turn used, every model's: what changed since the last result, else the turn's main calls.
-fn tokens(result: &Value) -> Usage {
+/// The tokens a turn used, every model's: what changed since the last result, else the turn's main calls; as input,
+/// output, cache read, cache write and thought tokens.
+fn token_counts(result: &Value) -> [u64; 5] {
     let per_model = result["model_usage_since_last_result"].as_object().filter(|models| !models.is_empty());
     let [input, output, read, write, thought] = match per_model {
         Some(models) => {
@@ -827,6 +908,11 @@ fn tokens(result: &Value) -> Usage {
             [input, output, read, write, usage["output_tokens_details"]["thinking_tokens"].as_u64().unwrap_or_default()]
         }
     };
+    [input, output, read, write, thought]
+}
+
+/// The usage of [`token_counts`] `counts`.
+fn tokens([input, output, read, write, thought]: [u64; 5]) -> Usage {
     Usage::new(input + output + read + write, input, output)
         .cached_read_tokens(read)
         .cached_write_tokens(write)
