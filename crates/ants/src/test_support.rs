@@ -21,7 +21,7 @@ use async_nats::{Client, Event, jetstream};
 use tokio::sync::mpsc;
 
 use crate::auth::{SERVER_CONF, init, issue, issue_leaf, members, role};
-use crate::members::EnrollApprover;
+use crate::node::members::EnrollApprover;
 
 /// A nats-server trusting a fresh team, whose keys are in its directory.
 pub(crate) struct Server(NatsServer);

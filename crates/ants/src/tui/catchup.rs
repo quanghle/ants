@@ -1,4 +1,4 @@
-//! Catch-up summaries in `ants chat` ([`crate::summary`]): home's first line, counting what changed since the
+//! Catch-up summaries in `ants chat` ([`crate::threads::summary`]): home's first line, counting what changed since the
 //! previous `ants chat` on the device ended (kept in [`STATE_FILE`] beside the config file), whose `s` opens the
 //! digest of that span in an overlay, as `/digest [SINCE]` does of another; and the TL;DRs that `S` and `/tldr` ask
 //! for, which the thread and work views show. With `[cli]` `summaries = "ahead"`, the TL;DRs of the threads work lists
@@ -34,8 +34,10 @@ use super::style::{self, ago};
 use super::timeline::Tools;
 use super::work;
 use crate::cmd::send;
-use crate::thread_meta::Meta;
-use crate::{colony, humans, summary};
+use crate::colony;
+use crate::people::humans;
+use crate::threads::summary;
+use crate::threads::thread_meta::Meta;
 
 /// The file beside the config file that keeps when the last `ants chat` on the device ended, and how its thread view
 /// shows tool calls.
@@ -357,7 +359,7 @@ impl Model {
                 };
                 digest.got = Some(match result {
                     Ok(Got::Digest { by, text, tokens }) => Ok((by, text, tokens)),
-                    Ok(Got::Empty) => Err(format!("no entries since {}", crate::thread::time(since))),
+                    Ok(Got::Empty) => Err(format!("no entries since {}", crate::threads::thread::time(since))),
                     Ok(_) => Err("no digest came".to_owned()),
                     Err(e) => Err(format!("{e:#}")),
                 });
@@ -417,7 +419,7 @@ pub struct Io {
 impl Io {
     pub async fn open(nats: &crate::connection::Nats<'_>, client: async_nats::Client, js: jetstream::Context) -> Self {
         let config = crate::defaults::summaries().map_err(|e| format!("{e:#}"));
-        let meta = crate::thread_meta::open(nats, &js)
+        let meta = crate::threads::thread_meta::open(nats, &js)
             .await
             .inspect_err(|e| tracing::debug!("not keeping TL;DRs: {e:#}"))
             .ok();

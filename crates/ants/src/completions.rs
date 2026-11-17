@@ -21,7 +21,9 @@ use clap_complete::engine::CompletionCandidate;
 use clap_complete::env::{CompleteEnv, Shells};
 use futures::TryStreamExt as _;
 
-use crate::{defaults, humans, thread, thread_meta, tools};
+use crate::people::humans;
+use crate::threads::{thread, thread_meta};
+use crate::{defaults, tools};
 
 /// The environment variable the scripts set to ask `ants` for completions.
 pub const VAR: &str = "ANTS_COMPLETE";
@@ -238,7 +240,9 @@ pub fn threads() -> Vec<CompletionCandidate> {
         let mut titles = if titled {
             match thread_meta::Meta::open(js, None, me).await {
                 Ok(meta) => meta
-                    .opening(crate::sealed::Keyring::lazy(creds.as_deref(), &NoStore, js).map(std::sync::Arc::new))
+                    .opening(
+                        crate::people::sealed::Keyring::lazy(creds.as_deref(), &NoStore, js).map(std::sync::Arc::new),
+                    )
                     .titles(entries.iter().map(|e| &e.thread_id))
                     .await
                     .unwrap_or_default(),

@@ -24,9 +24,9 @@ use self::server::{check_resolver, check_storage, reach};
 use self::services::{check_services, check_webhooks};
 use self::transports::{check_transports, installed_transports, same_address};
 use crate::auth;
-use crate::humans::{Me, Rights};
+use crate::people::humans::{Me, Rights};
+use crate::release::update;
 use crate::service::Services;
-use crate::update;
 use crate::webhook;
 
 mod ants;

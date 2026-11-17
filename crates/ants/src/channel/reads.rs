@@ -9,7 +9,7 @@ use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
 use async_nats::jetstream::kv::{self, Operation, UpdateErrorKind};
 
-use crate::humans::Me;
+use crate::people::humans::Me;
 
 /// How many times a change is tried again after another device moved the markers first.
 const CONFLICTS: usize = 16;
@@ -29,7 +29,7 @@ pub struct ChannelReads {
 impl ChannelReads {
     /// The channel read markers of `human`, creating the read bucket when missing.
     pub async fn open(js: &jetstream::Context, human: &UserId) -> Result<Self> {
-        Ok(Self { kv: crate::inbox::ensure_bucket(js).await?, key: channel_reads_key(human) })
+        Ok(Self { kv: crate::messages::inbox::ensure_bucket(js).await?, key: channel_reads_key(human) })
     }
 
     /// The markers and their revision, 0 when there are none.

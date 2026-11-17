@@ -15,8 +15,8 @@ use ratatui::text::{Line, Span};
 
 use super::complete::Candidate;
 use super::style;
-use crate::attachments::{self, File, Listed};
-use crate::sealed::Keyring;
+use crate::messages::attachments::{self, File, Listed};
+use crate::people::sealed::Keyring;
 
 /// Most paths `/attach` completes.
 const MAX_PATHS: usize = 200;

@@ -16,8 +16,8 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use super::model::{Action, Data, Key, To};
 use super::select::Selection;
 use super::style::{self, ago};
-use crate::sealed::State;
-use crate::thread::{Entry, Kind};
+use crate::people::sealed::State;
+use crate::threads::thread::{Entry, Kind};
 
 /// The lock marking a sealed message between two humans, and a thread with one.
 pub const LOCK: &str = "🔒";

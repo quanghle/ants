@@ -7,8 +7,9 @@ use ants_daemon::secrets::keystore::{self, Store};
 use ants_proto::PERMISSIONS_VERSION;
 
 use super::{Check, Identity, Setup, Status};
-use crate::humans::{Me, Rights};
-use crate::{auth, backup};
+use crate::auth;
+use crate::credentials::backup;
+use crate::people::humans::{Me, Rights};
 
 pub(super) fn check_cli_creds(setup: &Setup, now: u64, checks: &mut Vec<Check>) -> Option<Identity> {
     let check = "credentials";

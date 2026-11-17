@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use super::services::private_file;
 use super::{Check, NETWORK_TIMEOUT, Status};
-use crate::bridge::{self, Probe};
+use crate::node::bridge::{self, Probe};
 use crate::service::{Action, Service, Services, State, Unit};
 
 /// A Dev Tunnel or HTTPS bridge service installed, read before any check waits.

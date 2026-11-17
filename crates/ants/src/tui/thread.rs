@@ -30,9 +30,9 @@ use super::model::{Action, Data, Key, Model, To};
 use super::style::{self, ago};
 use super::timeline::Call;
 use super::{approvals, attach, catchup, images, question, work};
-use crate::attachments::Listed;
 use crate::live::History;
-use crate::thread::{Entry, Kind};
+use crate::messages::attachments::Listed;
+use crate::threads::thread::{Entry, Kind};
 
 mod conversation;
 
@@ -196,7 +196,7 @@ impl Page {
     fn flags(&self, data: &Data, now: DateTime<Utc>) -> Flags {
         let thread = &self.history.thread;
         let marks = &data.live.marks;
-        let idle_before = crate::thread::idle_before(data.live.auto_archive, now);
+        let idle_before = crate::threads::thread::idle_before(data.live.auto_archive, now);
         let idle = data
             .live
             .summary(thread)
@@ -521,7 +521,7 @@ mod tests {
 
     use super::conversation::body;
     use super::*;
-    use crate::sealed;
+    use crate::people::sealed;
     use crate::test_support::live::{at, message};
     use crate::tui::test_support::model;
     use crate::tui::test_support::tool;
@@ -597,7 +597,8 @@ mod tests {
             at: at(4),
             ..ants_proto::Timeline::new(user("dev-a"), thread.clone(), entries[1].id.unwrap(), vec![end], 0)
         };
-        let ended = crate::thread::timeline_entries(9, &record.subject(), &serde_json::to_vec(&record).unwrap());
+        let ended =
+            crate::threads::thread::timeline_entries(9, &record.subject(), &serde_json::to_vec(&record).unwrap());
         m.stored(entries.iter().cloned().chain(ended).collect(), at(5));
         let mut page = Page::new(thread.clone());
         page.history.loaded(&thread, Ok(entries)).unwrap();
@@ -688,7 +689,9 @@ mod tests {
         m.data.channels.push(channel);
         let parse = |seq: u64, post: &ChannelPost| {
             let payload = serde_json::to_vec(post).unwrap();
-            crate::thread::Parser::default().entry(seq, at(seq.cast_signed()), &post.subject(), &payload).unwrap()
+            crate::threads::thread::Parser::default()
+                .entry(seq, at(seq.cast_signed()), &post.subject(), &payload)
+                .unwrap()
         };
         let top = ChannelPost::new(ops.clone(), user("alice"), "@dev-a @dev-b @bob ship it");
         let thread = top.thread_id.clone();
@@ -1025,8 +1028,9 @@ mod tests {
             crate::test_support::live::user("alice"),
             "x",
         );
-        sent.attachments =
-            crate::attachments::listed(&[shot("before.png"), shot("after.png")], |id| envelope.attachment_handle(id));
+        sent.attachments = crate::messages::attachments::listed(&[shot("before.png"), shot("after.png")], |id| {
+            envelope.attachment_handle(id)
+        });
         let entries = vec![sent, message(2, &thread, "alice", "dev-a", "thanks")];
         let mut page = Page::new(thread.clone());
         page.history.loaded(&thread, Ok(entries)).unwrap();
@@ -1063,7 +1067,7 @@ mod tests {
             crate::test_support::live::user("alice"),
             "x",
         );
-        sent.attachments = crate::attachments::listed(&[shot, log], |id| envelope.attachment_handle(id));
+        sent.attachments = crate::messages::attachments::listed(&[shot, log], |id| envelope.attachment_handle(id));
         let mut page = Page::new(thread.clone());
         page.history.loaded(&thread, Ok(vec![sent.clone()])).unwrap();
         let before = screen(&page, &m, 80, at(3));

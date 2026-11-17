@@ -6,7 +6,7 @@ use ants_proto::{Envelope, StatusUpdate, Uuid};
 use super::*;
 use crate::test_support::Server;
 use crate::test_support::live::{request, user};
-use crate::thread::Kind;
+use crate::threads::thread::Kind;
 
 #[test]
 fn a_verdict_answers_only_a_pending_request_offering_it() {
@@ -168,7 +168,7 @@ async fn the_feed_opens_a_sealed_message_from_a_device_added_since_its_keyring_w
     let bob_creds = server.creds_as(&bob, Role::Human);
     let bob_nats = crate::connection::Nats::new(&server.url, Some(&bob_creds), None).unwrap();
     let (_, bob_js) = bob_nats.connect("test").await.unwrap();
-    let keyring = crate::sealed::Keyring::load(&bob_nats, &bob_js).await.map(Arc::new);
+    let keyring = crate::people::sealed::Keyring::load(&bob_nats, &bob_js).await.map(Arc::new);
     assert!(keyring.is_some());
 
     // A device of alice's registered after bob's keyring was loaded.
@@ -183,5 +183,5 @@ async fn the_feed_opens_a_sealed_message_from_a_device_added_since_its_keyring_w
     let (_, read) = tail(bob_js, Parser::opening(keyring), None, Duration::from_hours(1), false).await;
     let entries = read.unwrap().0;
     let [entry] = entries.as_slice() else { panic!("not one message: {entries:?}") };
-    assert_eq!((entry.text.as_str(), entry.sealed), ("lunch at noon?", Some(crate::sealed::State::Opened)));
+    assert_eq!((entry.text.as_str(), entry.sealed), ("lunch at noon?", Some(crate::people::sealed::State::Opened)));
 }

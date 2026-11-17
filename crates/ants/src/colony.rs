@@ -385,10 +385,10 @@ pub async fn show(nats: &crate::connection::Nats<'_>, json: bool) -> Result<()> 
         }
     } else {
         println!("{}", faced(&table(&entries, now), &entries, &faces));
-        if let Some(note) = crate::versions::colony_note(&entries, now) {
+        if let Some(note) = crate::release::versions::colony_note(&entries, now) {
             println!("{note}");
         }
-        if let Some(note) = crate::versions::harness_note(&entries, now) {
+        if let Some(note) = crate::release::versions::harness_note(&entries, now) {
             println!("{note}");
         }
         let collisions = faces.collisions(entries.iter().map(|e| &e.ant));
@@ -433,10 +433,14 @@ mod tests {
         busy.agent = Some(ants_proto::HarnessAgent { name: "copilot".to_owned(), version: "1.0.3".to_owned() });
         let older = ColonyEntry { version: "0.1.0".to_owned(), ..entry("dev-c", 60, 4, now) };
         assert_eq!(
-            crate::versions::colony_note(&[busy.clone(), older, quiet.clone()], now).as_deref(),
+            crate::release::versions::colony_note(&[busy.clone(), older, quiet.clone()], now).as_deref(),
             Some("mixed ants versions: 0.2.0 (1), 0.1.0 (1); `ants doctor` tells whether credentials may be renewed")
         );
-        assert_eq!(crate::versions::colony_note(&[busy.clone(), quiet.clone()], now), None, "a stale one runs nothing");
+        assert_eq!(
+            crate::release::versions::colony_note(&[busy.clone(), quiet.clone()], now),
+            None,
+            "a stale one runs nothing"
+        );
         let table = table(&[busy, quiet], now);
         let rows: Vec<Vec<&str>> = table.lines().map(|l| l.split_whitespace().collect()).collect();
         assert_eq!(

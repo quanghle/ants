@@ -17,7 +17,7 @@ fn tls() -> Result<TlsConnector> {
     if let Some(tls) = TLS.get() {
         return Ok(tls.clone());
     }
-    let tls = crate::bridge::tls_connector()?;
+    let tls = crate::node::bridge::tls_connector()?;
     Ok(TLS.get_or_init(|| tls).clone())
 }
 
@@ -61,7 +61,7 @@ pub(crate) async fn download(url: &str, headers: &[(&str, String)], limit: usize
     let proxy = env_var(&["HTTPS_PROXY", "https_proxy"])
         .map(|proxy| {
             let proxy = if proxy.contains("://") { proxy } else { format!("http://{proxy}") };
-            crate::bridge::parse_proxy(&proxy).context("HTTPS_PROXY")
+            crate::node::bridge::parse_proxy(&proxy).context("HTTPS_PROXY")
         })
         .transpose()?;
     let no_proxy = env_var(&["NO_PROXY", "no_proxy"]).unwrap_or_default();
@@ -128,7 +128,7 @@ async fn request(
     let io: Box<dyn Io> = match proxy {
         Some((dial, auth)) if https => {
             let mut tcp = TcpStream::connect(dial.as_str()).await.with_context(|| format!("connecting to {dial}"))?;
-            crate::bridge::tunnel(&mut tcp, &format!("{host}:{port}"), auth.as_deref()).await?;
+            crate::node::bridge::tunnel(&mut tcp, &format!("{host}:{port}"), auth.as_deref()).await?;
             let name = ServerName::try_from(bare_host.to_owned()).context("the URL's host name")?;
             Box::new(tls()?.connect(name, tcp).await.context("TLS handshake")?)
         }

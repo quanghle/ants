@@ -7,7 +7,7 @@ use ants_proto::{ChannelId, ChannelNotify, Choice, Reaction, ThreadId, UserId};
 use chrono::TimeDelta;
 
 use super::snooze;
-use crate::thread_meta::Marking;
+use crate::threads::thread_meta::Marking;
 
 /// The slash commands: name, arguments and what each does, as the list shows them.
 pub const COMMANDS: &[(&str, &str, &str)] = &[

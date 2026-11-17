@@ -8,7 +8,7 @@ use ants_daemon::{bus, hub};
 use ants_proto::{DeviceId, JsDomain};
 use anyhow::Result;
 
-use crate::{devices, humans};
+use crate::people::{devices, humans};
 
 /// How the CLI reaches NATS.
 pub struct Connection<'a> {

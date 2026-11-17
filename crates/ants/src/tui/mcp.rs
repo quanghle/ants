@@ -1,4 +1,4 @@
-//! The MCP pane of the ant view: the MCP servers of the ant's harness as `ants ant mcp` shows them ([`crate::mcp`]),
+//! The MCP pane of the ant view: the MCP servers of the ant's harness as `ants ant mcp` shows them ([`crate::admin::mcp`]),
 //! which [`Io`] asks the daemon of its machine for with an admin order when the pane first shows and on `u`, and their
 //! OAuth sign-in: `s` asks the harness to sign in to the selected server, which brings the address to open in a
 //! browser, and `v` hands over the address a browser on another machine came back to.
@@ -375,7 +375,7 @@ impl Io {
                 async move {
                     let read = async {
                         let nats = crate::connection::Nats::new(&url, creds.as_deref(), domain.as_ref())?;
-                        crate::mcp::read(&nats, &js, None, &ant).await
+                        crate::admin::mcp::read(&nats, &js, None, &ant).await
                     };
                     Event::Read(ant.clone(), asked, read.await.map_err(|e| format!("{e:#}")))
                 }
@@ -392,7 +392,7 @@ impl Io {
             async move {
                 let signed = async {
                     let nats = crate::connection::Nats::new(&url, creds.as_deref(), domain.as_ref())?;
-                    crate::mcp::sign_in(&nats, &js, None, &ant, &server, callback).await
+                    crate::admin::mcp::sign_in(&nats, &js, None, &ant, &server, callback).await
                 };
                 Event::Signed(ant.clone(), sign, signed.await.map_err(|e| format!("{e:#}")))
             }

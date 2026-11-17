@@ -12,9 +12,12 @@ use futures::StreamExt as _;
 use clap_complete::engine::{ArgValueCandidates, ArgValueCompleter};
 
 use crate::avatars::Faces;
-use crate::behalf::Checker;
 use crate::connection::{Listing, Nats};
-use crate::{completions, inbox, presence, reacted, sealed, thread, tools};
+use crate::messages::{inbox, reacted};
+use crate::people::behalf::Checker;
+use crate::people::{presence, sealed};
+use crate::threads::thread;
+use crate::{completions, tools};
 
 /// `ants inbox`.
 #[derive(clap::Args, Debug)]

@@ -15,7 +15,8 @@ use super::leaf_node::Leaf;
 use super::services::start_server;
 use super::transports::same_address;
 use super::{Check, Connected, Identity, NETWORK_TIMEOUT, Setup, Status};
-use crate::{auth, revoke};
+use crate::auth;
+use crate::credentials::revoke;
 
 /// Connect, then check JetStream and the hub's stream and buckets. `managed` is the nats-server configuration the
 /// daemon runs itself ([`start_server`]).

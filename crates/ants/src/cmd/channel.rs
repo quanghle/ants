@@ -9,7 +9,10 @@ use clap_complete::engine::ArgValueCandidates;
 
 use crate::channel::reads;
 use crate::connection::{Connection, Nats};
-use crate::{channel, colony, completions, humans, thread, upgrade};
+use crate::people::{humans, quiet};
+use crate::release::upgrade;
+use crate::threads::thread;
+use crate::{channel, colony, completions};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum ChannelCommand {
@@ -211,9 +214,9 @@ async fn manage(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
                 tracing::warn!("no channel #{channel}");
             }
             match level {
-                Some(level) => println!("{}", crate::quiet::channel_notify(&js, &nats.me.id, &channel, level).await?),
+                Some(level) => println!("{}", quiet::channel_notify(&js, &nats.me.id, &channel, level).await?),
                 None => {
-                    let level = crate::quiet::prefs(&js, &nats.me.id).await?.channel(&channel);
+                    let level = quiet::prefs(&js, &nats.me.id).await?.channel(&channel);
                     println!("#{channel} notifies {}: {level} ({})", nats.me.id, level.describe());
                 }
             }
@@ -258,7 +261,7 @@ async fn read(
             None => println!("no posts in #{channel}"),
         }
     }
-    let behalf = crate::behalf::Checker::new(nats, js);
+    let behalf = crate::people::behalf::Checker::new(nats, js);
     let mut by = std::collections::HashMap::new();
     for post in threads.iter().flat_map(|t| &t.posts) {
         by.insert(post.id, behalf.label(&post.from, post.on_behalf_of.as_ref()).await);
@@ -283,8 +286,8 @@ async fn unread(
     let me = &nats.me;
     let counted = async {
         let (markers, _) = reads::ChannelReads::open(js, &me.id).await?.markers().await?;
-        let humans = crate::humans::read(js).await?;
-        let prefs = crate::quiet::prefs(js, &me.id).await?;
+        let humans = crate::people::humans::read(js).await?;
+        let prefs = quiet::prefs(js, &me.id).await?;
         let mut unread = HashMap::new();
         for entry in entries.iter().filter(|e| e.is_member(&me.id)) {
             let level = prefs.channel(&entry.channel);

@@ -23,7 +23,7 @@ use anyhow::{Context as _, Result, bail};
 use crate::cmd::harness::HarnessPick;
 use crate::completions::{self, Shell};
 use crate::connection::{Connection, Nats};
-use crate::natsd::bundled;
+use crate::node::natsd::bundled;
 use crate::service::{self, Action, Installed, Outcome, Service, Services, State, Values};
 use crate::{auth, doctor};
 

@@ -1,5 +1,5 @@
 //! `ants keys`: move the NKey seeds of credentials files into the OS credential store and back, or remove
-//! credentials from the machine ([`crate::keys`]).
+//! credentials from the machine ([`crate::credentials::keys`]).
 
 use std::path::PathBuf;
 
@@ -7,7 +7,7 @@ use ants_daemon::secrets::keystore;
 use anyhow::{Result, bail};
 
 use crate::connection::Connection;
-use crate::keys::{self, Moved};
+use crate::credentials::keys::{self, Moved};
 
 #[derive(clap::Subcommand, Debug)]
 pub(crate) enum KeysCommand {

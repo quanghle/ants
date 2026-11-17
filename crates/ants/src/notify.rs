@@ -71,7 +71,7 @@ use self::notices::{
     question_notice, relayed, reminder_notice, unserved_notice,
 };
 use self::sinks::send;
-use crate::presence::Present;
+use crate::people::presence::Present;
 use crate::tools;
 
 pub use self::config::{Human, HumanEntry, resolve_program};
@@ -200,13 +200,13 @@ pub async fn run(
     };
     // Through a leaf node, a direct get of a missing bucket goes unanswered rather than finding none.
     if human.config.devices().next().is_some()
-        && let Err(e) = crate::presence::ensure_bucket(&js).await
+        && let Err(e) = crate::people::presence::ensure_bucket(&js).await
     {
         tracing::warn!(human = %name, "sinks of a device get every notice: {e:#}");
     }
     let present = Present::new(&js, js_domain.as_ref()).await?;
     // Through a leaf node, a direct get of a missing bucket goes unanswered rather than finding none.
-    let bucket = crate::quiet::ensure_bucket(&js).await.inspect_err(|e| tracing::warn!(human = %name, "{e:#}"));
+    let bucket = crate::people::quiet::ensure_bucket(&js).await.inspect_err(|e| tracing::warn!(human = %name, "{e:#}"));
     let held = bucket.ok().filter(|_| human.config.digest);
     let prefs = DirectKv::new(&js, js_domain.as_ref(), NOTIFY_BUCKET).await?;
     let unserved = unserved_watch(&human.config, &js, js_domain.as_ref()).await;
@@ -552,7 +552,7 @@ async fn digests(human: &Human, bus: &HumanBus) -> std::convert::Infallible {
 /// compare-and-set marks it pushed sends it, so one of those notifying the human does, at most once. Neither a snooze
 /// nor quiet hours hold one back, as the human set it for then.
 async fn remind(human: &Human, bus: &HumanBus, js_domain: Option<&JsDomain>) -> std::convert::Infallible {
-    let meta = crate::thread_meta::Meta::open(&bus.js, js_domain, &human.name)
+    let meta = crate::threads::thread_meta::Meta::open(&bus.js, js_domain, &human.name)
         .await
         .inspect_err(|e| tracing::warn!(human = %human.name, "no reminders pushed: {e:#}"));
     if let Ok(meta) = meta {

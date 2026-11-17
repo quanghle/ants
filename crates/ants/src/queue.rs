@@ -29,7 +29,7 @@ pub async fn read(
 ) -> Result<Option<(Vec<Waiting>, usize)>> {
     let Some(answers) = ask(&js.client(), ant, me).await? else { return Ok(None) };
     let kv = DirectKv::new(js, domain, ATTEMPTS_BUCKET).await?;
-    let humans = crate::humans::read(js).await?;
+    let humans = crate::people::humans::read(js).await?;
     let (mut waiting, more) = waiting(js, &kv, ant, humans, &answers, UNDELIVERED_SHOWN).await?;
     withdrawals(&kv, ant, &mut waiting).await?;
     Ok(Some((waiting, more)))
@@ -154,7 +154,7 @@ pub async fn withdrawn(
     let answered = ask(&client, &ant, me).await?;
     let listed = match &answered {
         Some(answers) => {
-            let humans = crate::humans::read(js).await?;
+            let humans = crate::people::humans::read(js).await?;
             let (waiting, _) = waiting(js, &kv, &ant, humans, answers, usize::MAX).await?;
             waiting.into_iter().find(|m| m.id == message)
         }

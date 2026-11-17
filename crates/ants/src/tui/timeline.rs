@@ -10,7 +10,7 @@ use ants_proto::{StatusEvent, StatusUpdate, ThreadId, UserId, Uuid};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::thread::{Entry, Kind};
+use crate::threads::thread::{Entry, Kind};
 
 /// How many calls of a thread are kept, the oldest dropped first.
 const MAX_CALLS: usize = 1000;

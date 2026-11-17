@@ -19,8 +19,8 @@ use futures::{FutureExt as _, StreamExt as _};
 
 use super::model::Action;
 use crate::channel::reads::ChannelReads;
-use crate::inbox::{Inbox, Select};
 use crate::live::maybe;
+use crate::messages::inbox::{Inbox, Select};
 
 /// How often the read markers are read, for what other devices of the human marked read.
 const MARKER_EVERY: Duration = Duration::from_secs(5);
@@ -242,7 +242,7 @@ impl Reads {
             return;
         }
         let (js, me) = (self.js.clone(), self.me.clone());
-        self.levels = Some(async move { Ok(crate::quiet::prefs(&js, &me).await?.channels) }.boxed_local());
+        self.levels = Some(async move { Ok(crate::people::quiet::prefs(&js, &me).await?.channels) }.boxed_local());
     }
 
     fn read_reactions(&mut self) {
@@ -321,7 +321,7 @@ async fn react(
 
 async fn directory(js: jetstream::Context) -> Result<Directory> {
     let channels = ants_daemon::channel::list(&crate::channel::open(&js).await?).await?;
-    Ok((channels, crate::humans::read(&js).await?))
+    Ok((channels, crate::people::humans::read(&js).await?))
 }
 
 /// Mark the inbox messages of `me` on `thread` read, as `ants inbox --thread THREAD` does.

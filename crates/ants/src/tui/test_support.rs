@@ -12,7 +12,7 @@ use super::images::encode;
 use super::model::Model;
 use crate::live::State;
 use crate::test_support::live::{at, message, user};
-use crate::thread::{Entry, Kind, Parser, ToolCall};
+use crate::threads::thread::{Entry, Kind, Parser, ToolCall};
 
 /// The model of alice, with bob a human too and nothing read yet.
 pub(super) fn model() -> Model {

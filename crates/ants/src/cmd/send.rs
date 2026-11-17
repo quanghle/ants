@@ -17,10 +17,10 @@ use clap_complete::engine::{ArgValueCandidates, ArgValueCompleter};
 
 use crate::cli::{Replies, Sending};
 use crate::connection::Nats;
-use crate::{
-    assistant, attachments, channel, colony, completions, compose, forward, humans, inbox, progress, reacted, sealed,
-    thread,
-};
+use crate::messages::{attachments, compose, forward, inbox, progress, reacted};
+use crate::people::{assistant, humans, sealed};
+use crate::threads::thread;
+use crate::{channel, colony, completions};
 
 /// `ants ask`.
 #[derive(clap::Args, Debug, Default)]
@@ -198,7 +198,7 @@ impl Forwarding {
             }
             Self::Thread(pick) => {
                 let thread = pick.resolve(nats, js).await?;
-                let tldr = crate::thread_meta::open(nats, js).await?.summary(&thread).await?;
+                let tldr = crate::threads::thread_meta::open(nats, js).await?.summary(&thread).await?;
                 let tldr = tldr.ok_or_else(|| {
                     anyhow!("no TL;DR of thread {thread} is kept: `ants thread tldr {thread}` asks for one")
                 })?;
@@ -572,7 +572,7 @@ pub(crate) async fn post(nats: &Nats<'_>, args: PostArgs) -> Result<()> {
     let on_thread = channel::thread_posts(posts, post, replies.wait);
     let shown = reacted::Shown::default();
     shown.add(post.id, &post.from, &post.text);
-    let behalf = crate::behalf::Checker::new(nats, &js);
+    let behalf = crate::people::behalf::Checker::new(nats, &js);
     let shown_replies = replies.show(&post.thread_id, on_thread, async |reply: ChannelPost| {
         let by = behalf.label(&reply.from, reply.on_behalf_of.as_ref()).await;
         progress::clear();
@@ -645,7 +645,7 @@ async fn followed_reactions(
     if !replies.follow {
         return futures::stream::pending().boxed();
     }
-    reacted::changes(nats, js, &std::sync::Arc::new(crate::behalf::Checker::new(nats, js))).await
+    reacted::changes(nats, js, &std::sync::Arc::new(crate::people::behalf::Checker::new(nats, js))).await
 }
 
 /// Show the replies, printing meanwhile the reactions to the message sent and the replies shown.
@@ -685,7 +685,7 @@ pub(crate) async fn notes(
     if read.posts.is_empty() {
         println!("thread {thread} has no notes");
     }
-    let behalf = crate::behalf::Checker::new(nats, &js);
+    let behalf = crate::people::behalf::Checker::new(nats, &js);
     for post in &read.posts {
         let time = post.sent_at.format("%Y-%m-%d %H:%M:%S");
         let by = behalf.label(&post.from, post.on_behalf_of.as_ref()).await;

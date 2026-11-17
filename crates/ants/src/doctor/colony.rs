@@ -6,7 +6,7 @@ use async_nats::jetstream;
 
 use super::{Check, Identity, NETWORK_TIMEOUT};
 use crate::avatars::{Depth, Faces};
-use crate::versions;
+use crate::release::versions;
 
 /// The versions of ants every daemon, webhook, schedule and channel manager runs ([`versions::running`]), and whether
 /// credentials renewed with this ants suit them all.

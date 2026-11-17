@@ -26,7 +26,7 @@ use super::{
 };
 use crate::live::{self, State};
 use crate::text::excerpt;
-use crate::thread::Entry;
+use crate::threads::thread::Entry;
 use crate::tools::Update;
 
 mod keys;
@@ -87,7 +87,7 @@ pub enum Action {
     /// React to the message so, or with true take the reaction back, as `ants react` does.
     React(Uuid, Reaction, bool),
     /// Find the messages matching the search, replacing any search running.
-    Search(crate::search::Search),
+    Search(crate::threads::search::Search),
     /// Cancel the prompt each ant runs on its thread, as `ants cancel` does.
     CancelSubtree(Vec<(UserId, ThreadId)>),
     /// Ask for a catch-up summary.
@@ -475,7 +475,7 @@ impl Model {
         let me = self.data.live.me.clone();
         for tool in &tools {
             self.data.calls.stored(tool);
-            if tool.kind == crate::thread::Kind::NoReply {
+            if tool.kind == crate::threads::thread::Kind::NoReply {
                 self.data.facts.add(tool, &me);
             }
         }

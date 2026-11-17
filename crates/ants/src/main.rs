@@ -1,76 +1,50 @@
 //! `ants`: talk to agent teams over NATS from the terminal, and run the ant daemon.
 
-mod add;
-mod age;
-mod ant;
-mod assistant;
-mod attachments;
-mod auth;
-mod avatars;
-mod backup;
-mod behalf;
-mod binding;
-mod bridge;
-mod channel;
+// The command line, and how it reaches NATS.
 mod cli;
 mod cmd;
-mod colony;
 mod completions;
-mod compose;
 mod connection;
 mod defaults;
-mod devices;
-mod doctor;
-mod enroll;
-mod export;
-mod forward;
-mod github;
 mod http;
-mod humans;
-mod inbox;
-mod keys;
-mod leaf;
-mod live;
+mod text;
+
+// Ants, channels and the colony.
+mod add;
+mod ant;
+mod channel;
+mod colony;
+mod export;
 mod machines;
-mod manager;
-mod mcp;
-mod members;
-mod memories;
-mod natsd;
-mod notify;
-mod orders;
-mod outbox;
-mod pause;
-mod presence;
-mod progress;
 mod queue;
-mod quiet;
-mod reacted;
-mod registrar;
+mod spend;
+mod tools;
+
+// The full-screen views.
+mod avatars;
+mod live;
+mod tui;
+
+// Services: `ants daemon` and its schedules, the services' units and reloads, webhooks and notifications.
+mod notify;
 mod reload;
-mod remind;
-mod renew;
-mod restart;
-mod retire;
-mod revoke;
 mod scheduler;
-mod sealed;
-mod search;
 mod serve;
 mod service;
-mod settings;
-mod signer;
-mod spend;
-mod summary;
-mod text;
-mod thread;
-mod thread_meta;
-mod tools;
-mod tui;
-mod update;
-mod upgrade;
-mod versions;
 mod webhook;
+
+// Setting up and checking a team.
+mod auth;
+mod doctor;
+
+mod admin;
+mod credentials;
+mod messages;
+mod node;
+mod people;
+mod release;
+mod signing;
+mod threads;
 
 #[cfg(test)]
 mod test_support;
@@ -88,9 +62,9 @@ async fn run() -> Result<()> {
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("ANTS_LOG").unwrap_or_else(|_| "info,rmcp=warn".into()),
         )
-        .with_writer(progress::log_writer)
+        .with_writer(messages::progress::log_writer)
         .init();
     #[cfg(windows)]
-    update::remove_old();
+    release::update::remove_old();
     cmd::run(defaults::parse()?).await
 }

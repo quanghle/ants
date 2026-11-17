@@ -10,8 +10,12 @@ use clap::Subcommand;
 
 use crate::auth::team_dir;
 use crate::connection::Connection;
-use crate::members::EnrollApprover;
-use crate::{auth, backup, binding, channel, devices, keys, members, revoke};
+use crate::credentials::{backup, keys, revoke};
+use crate::node::members;
+use crate::node::members::EnrollApprover;
+use crate::people::devices;
+use crate::signing::binding;
+use crate::{auth, channel};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum AuthCommand {
@@ -545,7 +549,7 @@ async fn github_binding(
         Some(config) => ants_daemon::config::registration::signer_registration(&config)?,
         None => None,
     };
-    let account = crate::github::Github::new(registration.as_ref())?.user_by_login(login).await?;
+    let account = crate::signing::github::Github::new(registration.as_ref())?.user_by_login(login).await?;
     if binding::check_in(dir, user, &account, binding::Binder::Operator)? {
         eprintln!("{user} is bound to GitHub user {} ({}): adding a device", account.login, account.id);
     } else {
@@ -652,7 +656,7 @@ pub(crate) async fn revoke_credentials(
         None => None,
     };
     for ant in &retired {
-        for line in crate::retire::leave_leaves(&dir, ant, hub.as_ref()).await {
+        for line in crate::signing::retire::leave_leaves(&dir, ant, hub.as_ref()).await {
             println!("{line}");
         }
     }
@@ -677,7 +681,7 @@ pub(crate) async fn revoke_credentials(
 /// The ants among the names of `revoked` that hold no live key in the team directory `dir` any more: retired.
 fn retired_ants(dir: &Path, revoked: &[revoke::Revoked]) -> Result<Vec<UserId>> {
     let issued = revoke::issued(dir)?;
-    let live = crate::signer::live(dir)?;
+    let live = crate::signing::signer::live(dir)?;
     let mut ants: Vec<UserId> = Vec::new();
     for r in revoked {
         let of_ant =

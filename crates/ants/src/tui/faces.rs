@@ -17,7 +17,7 @@ use super::model::Data;
 use crate::avatars::{Depth, Identities};
 use crate::colony;
 use crate::live::maybe;
-use crate::progress::Stand;
+use crate::messages::progress::Stand;
 
 /// How often the identity records are read again, for avatars changed and prompts counted meanwhile.
 const READ_EVERY: Duration = Duration::from_secs(30);

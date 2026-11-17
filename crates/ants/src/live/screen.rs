@@ -5,7 +5,7 @@ use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use ratatui::crossterm::execute;
 
-use crate::progress;
+use crate::messages::progress;
 
 /// The terminal, drawn on full screen while this lives; log lines are kept meanwhile and written once it is restored.
 pub struct Screen {

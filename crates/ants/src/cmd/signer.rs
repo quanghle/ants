@@ -7,7 +7,9 @@ use anyhow::Result;
 
 use crate::auth::team_dir;
 use crate::connection::Connection;
-use crate::{renew, signer, upgrade};
+use crate::credentials::renew;
+use crate::release::upgrade;
+use crate::signing::signer;
 
 /// `ants signer`.
 #[derive(clap::Args, Debug)]

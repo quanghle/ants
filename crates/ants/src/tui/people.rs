@@ -17,10 +17,10 @@ use super::dm::{self, Dms};
 use super::model::{Data, Level};
 use super::style;
 use crate::cmd::send;
-use crate::humans::Me;
 use crate::live::maybe;
-use crate::presence;
-use crate::sealed::Sealing;
+use crate::people::humans::Me;
+use crate::people::presence;
+use crate::people::sealed::Sealing;
 
 /// What is known of the other humans.
 #[derive(Debug, Default)]

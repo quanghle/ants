@@ -16,10 +16,10 @@ use nkeys::KeyPair;
 
 use crate::auth;
 use crate::connection::Connection;
-use crate::enroll;
-use crate::keys;
-use crate::leaf;
-use crate::natsd;
+use crate::credentials::enroll;
+use crate::credentials::keys;
+use crate::node::leaf;
+use crate::node::natsd;
 use crate::serve::AntOptions;
 use crate::service::{Action, Outcome, Service, Services, failure};
 

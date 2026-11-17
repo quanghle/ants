@@ -396,7 +396,8 @@ impl Webhook {
 pub(crate) fn check_creds(kind: &str, name: &UserId, path: Option<&Path>, destination: &Destination) -> Result<()> {
     let Some(path) = path else { return Ok(()) };
     let text = std::fs::read_to_string(path).with_context(|| format!("reading credentials {}", path.display()))?;
-    let claims = crate::humans::creds_claims(&text).with_context(|| format!("credentials {}", path.display()))?;
+    let claims =
+        crate::people::humans::creds_claims(&text).with_context(|| format!("credentials {}", path.display()))?;
     let issue = |what: &str| {
         let to = match destination {
             Destination::Ant(ant) => format!("--to {ant}"),
@@ -407,10 +408,10 @@ pub(crate) fn check_creds(kind: &str, name: &UserId, path: Option<&Path>, destin
     if claims["name"].as_str() != Some(name.as_str()) {
         return Err(issue(&format!("are not {kind} {name}'s")));
     }
-    if crate::humans::writes_humans(&claims) {
+    if crate::people::humans::writes_humans(&claims) {
         return Err(issue("are a human's"));
     }
-    if !crate::humans::may_publish(&claims, &destination.subject(name)) {
+    if !crate::people::humans::may_publish(&claims, &destination.subject(name)) {
         return Err(issue("do not allow this destination"));
     }
     Ok(())

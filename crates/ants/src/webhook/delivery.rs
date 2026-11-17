@@ -109,12 +109,12 @@ impl Bus {
             tokio::time::sleep(delay).await;
             delay = (delay * 2).min(Duration::from_secs(30));
         }
-        let (marker, marked) = (crate::versions::serving().await, Arc::new(Mutex::new(None)));
+        let (marker, marked) = (crate::release::versions::serving().await, Arc::new(Mutex::new(None)));
         let keeping = (seen.clone(), webhook_marker_key(name), marker.clone(), marked.clone());
         let keeper = tokio::spawn(async move {
             let (seen, key, marker, marked) = keeping;
             let put = move || *marked.locked() = Some(Instant::now());
-            crate::versions::keep_putting(seen, key, marker, put).await;
+            crate::release::versions::keep_putting(seen, key, marker, put).await;
         });
         Ok(Self { client, js, js_domain: js_domain.cloned(), seen, marker, marked, keeper })
     }

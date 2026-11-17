@@ -1,5 +1,5 @@
 //! The settings pane of the ant view: the ant's settings as the config file of its machine has them, read with an
-//! admin order as `ants ant show` reads them ([`crate::settings`]), and the admin orders to it, each with where it
+//! admin order as `ants ant show` reads them ([`crate::admin::settings`]), and the admin orders to it, each with where it
 //! stands, pending ones included while its daemon is away. Enter on a field writes a change to it, `n` one to another
 //! field, sent as `ants ant set` sends it, expecting the value read; its outcome shows below.
 
@@ -19,9 +19,9 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
 use super::model::{Action, Key, To};
 use super::style::{self, ago};
+use crate::admin::orders::{self, Listed};
+use crate::admin::settings::{self, Assignment, Reading};
 use crate::live::maybe;
-use crate::orders::{self, Listed};
-use crate::settings::{self, Assignment, Reading};
 
 /// How often the orders to the shown ant are listed again.
 const LIST_EVERY: Duration = Duration::from_secs(10);

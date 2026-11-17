@@ -281,8 +281,10 @@ impl Io {
     pub fn refresh(&mut self) {
         let (js, me) = (self.js.clone(), self.me.clone());
         self.gather = Some(
-            async move { Event::Read(crate::assistant::orders_held_for(&js, &me).await.map_err(|e| format!("{e:#}"))) }
-                .boxed_local(),
+            async move {
+                Event::Read(crate::people::assistant::orders_held_for(&js, &me).await.map_err(|e| format!("{e:#}")))
+            }
+            .boxed_local(),
         );
     }
 
@@ -295,7 +297,7 @@ impl Io {
         self.answer = Some(
             async move {
                 let done = match creds {
-                    Ok(creds) => crate::assistant::answer_order(
+                    Ok(creds) => crate::people::assistant::answer_order(
                         &js,
                         &creds,
                         account.as_deref(),

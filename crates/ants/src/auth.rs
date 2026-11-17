@@ -22,7 +22,7 @@ use serde_json::json;
 use self::claims::{jwt, user_jwt};
 use self::files::{creds, load};
 use self::short_lived::APPROVER_TTL;
-use crate::revoke::{self, Issued, Kind};
+use crate::credentials::revoke::{self, Issued, Kind};
 
 pub(crate) use self::claims::now;
 #[cfg(test)]

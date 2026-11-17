@@ -20,8 +20,8 @@ use ratatui_image::protocol::Protocol;
 use ratatui_image::{FilterType, Image, Resize};
 
 use super::model::{Model, Page};
-use crate::attachments::{self, Listed};
-use crate::sealed::Keyring;
+use crate::messages::attachments::{self, Listed};
+use crate::people::sealed::Keyring;
 
 /// Widest an image is drawn, in cells.
 pub const MAX_COLS: u16 = 48;

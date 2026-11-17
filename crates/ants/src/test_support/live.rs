@@ -5,7 +5,7 @@ use std::time::Duration;
 use ants_proto::{ApprovalRequest, Envelope, ThreadId, ToolCall, UserId, Verdict, subject};
 use chrono::{DateTime, Utc};
 
-use crate::thread::{Entry, Parser};
+use crate::threads::thread::{Entry, Parser};
 
 pub(crate) fn at(secs: i64) -> DateTime<Utc> {
     DateTime::from_timestamp(1_800_000_000 + secs, 0).unwrap()

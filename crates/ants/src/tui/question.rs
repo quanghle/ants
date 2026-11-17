@@ -11,7 +11,7 @@ use super::exec::Job;
 use super::model::{Action, Data, Key, To};
 use super::style;
 use crate::text::excerpt;
-use crate::thread::{Entry, answer_line, answers_to};
+use crate::threads::thread::{Entry, answer_line, answers_to};
 
 /// How long a card stays at the bottom of its thread once answered.
 const ANSWERED_FOR: TimeDelta = TimeDelta::minutes(2);

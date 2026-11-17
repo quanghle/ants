@@ -12,13 +12,15 @@ use super::credentials::{check_key, check_xkey};
 use super::server::{consumer_limit, consumers, storage_check, supported_server};
 use super::*;
 use crate::avatars::{Depth, Faces};
+use crate::credentials::{backup, revoke};
 #[cfg(unix)]
-use crate::bridge;
-use crate::members::EnrollApprover;
+use crate::node::bridge;
+use crate::node::leaf;
+use crate::node::members::EnrollApprover;
+use crate::release::versions;
 #[cfg(unix)]
 use crate::service::{Action, Service};
 use crate::test_support::Server;
-use crate::{backup, leaf, revoke, versions};
 
 fn setup(server: &Server, creds: Option<PathBuf>) -> Setup {
     Setup {
@@ -151,7 +153,8 @@ async fn the_versions_check_waits_for_every_component_to_allow_renewal() {
     let creds = server.dir().join("github.creds");
     let to = [ants_proto::Destination::Ant(dev_a.clone())];
     let permissions = ants_proto::Permissions::for_webhook(&hook, &to);
-    auth::issue_with(&server.dir().join("auth"), &hook, crate::revoke::Kind::Webhook, permissions, &creds).unwrap();
+    auth::issue_with(&server.dir().join("auth"), &hook, crate::credentials::revoke::Kind::Webhook, permissions, &creds)
+        .unwrap();
     let _bus = crate::webhook::Bus::connect(&hook, Some(&creds), &server.url, None, "test").await.unwrap();
 
     let may = |s: &str| rights.may_publish(s);
@@ -337,7 +340,9 @@ async fn the_reactions_check_names_who_answers_an_ants_requests() {
     webhook.abort();
 
     let approver =
-        crate::enroll::Approver::connect_signer(&server.url, &server.dir().join("auth"), None, wait).await.unwrap();
+        crate::credentials::enroll::Approver::connect_signer(&server.url, &server.dir().join("auth"), None, wait)
+            .await
+            .unwrap();
     let signer = tokio::spawn(serve(approver.client.clone(), approver.hub().clone(), None, Answering::ListsAndChanges));
     let checks = checked().await;
     let both = named(&checks, "ant dev-a reactions")[0];

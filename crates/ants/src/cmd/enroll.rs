@@ -7,8 +7,9 @@ use anyhow::{Context as _, Result};
 use clap::Subcommand;
 
 use crate::auth::team_dir;
+use crate::channel;
 use crate::connection::Connection;
-use crate::{channel, enroll, renew};
+use crate::credentials::{enroll, renew};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum EnrollCommand {

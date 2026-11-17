@@ -21,7 +21,9 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, Ke
 use self::dones::Dones;
 use self::model::{Action, Key, Level, Model};
 use crate::live::{self, Feed, Screen};
-use crate::{presence, progress, thread_meta};
+use crate::messages::progress;
+use crate::people::presence;
+use crate::threads::thread_meta;
 
 /// How often keys are read and the screen redrawn when something changed.
 const TICK: Duration = Duration::from_millis(50);

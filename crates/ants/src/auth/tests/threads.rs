@@ -4,7 +4,7 @@ use super::*;
 
 #[tokio::test]
 async fn any_human_titles_a_thread_and_keeps_its_tldr_but_each_marks_only_its_own_threads() {
-    use crate::thread_meta::{MISSING, Meta};
+    use crate::threads::thread_meta::{MISSING, Meta};
 
     let Some(server) = Server::start() else { return };
     let (alice, bob, dev_a) = (p("alice"), p("bob"), p("dev-a"));
@@ -96,7 +96,7 @@ async fn an_ant_s_daemon_reads_what_a_human_did_about_an_escalation() {
         let kv = kv.clone();
         async move { kv.put(key, value.into()).await.unwrap() }
     };
-    crate::thread_meta::Meta::open(&a_js, None, &alice).await.unwrap().set_done(&done, 20).await.unwrap();
+    crate::threads::thread_meta::Meta::open(&a_js, None, &alice).await.unwrap().set_done(&done, 20).await.unwrap();
     let marker = ReadMarker { below: 10, ..ReadMarker::default() };
     put(&reads, alice.to_string(), serde_json::to_vec(&marker).unwrap()).await;
     let mut prefs = NotifyPrefs::default();
@@ -117,7 +117,7 @@ async fn an_ant_s_daemon_reads_what_a_human_did_about_an_escalation() {
 
 #[tokio::test]
 async fn a_human_adopts_an_ant_s_title_only_on_a_thread_never_titled() {
-    use crate::thread_meta::Meta;
+    use crate::threads::thread_meta::Meta;
 
     let Some(server) = Server::start() else { return };
     let (alice, dev_a) = (p("alice"), p("dev-a"));
@@ -159,7 +159,7 @@ async fn only_humans_and_webhooks_to_ants_record_a_thread_s_owner_and_the_first_
         issue_with(
             &server.dir().join("auth"),
             webhook,
-            crate::revoke::Kind::Webhook,
+            crate::credentials::revoke::Kind::Webhook,
             Permissions::for_webhook(webhook, &[to]),
             &creds,
         )

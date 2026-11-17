@@ -384,9 +384,10 @@ impl Human {
     pub fn check_creds(&self) -> Result<()> {
         let Some(path) = &self.creds else { return Ok(()) };
         let text = std::fs::read_to_string(path).with_context(|| format!("reading credentials {}", path.display()))?;
-        let claims = crate::humans::creds_claims(&text).with_context(|| format!("credentials {}", path.display()))?;
+        let claims =
+            crate::people::humans::creds_claims(&text).with_context(|| format!("credentials {}", path.display()))?;
         let name = &self.name;
-        let human = crate::humans::writes_humans(&claims);
+        let human = crate::people::humans::writes_humans(&claims);
         if claims["name"].as_str() != Some(name.as_str()) || !human {
             bail!(
                 "credentials {} are not human {name}'s; issue them with `ants auth user {name} --human`",

@@ -22,8 +22,9 @@ use data_encoding::BASE64URL_NOPAD;
 use futures::StreamExt as _;
 use nkeys::{KeyPair, XKey};
 
-use crate::keys::{self, Proven};
-use crate::{auth, defaults, revoke};
+use crate::credentials::keys::{self, Proven};
+use crate::credentials::revoke;
+use crate::{auth, defaults};
 
 /// The GitHub whose device login page `ants login` shows by default.
 pub const GITHUB_URL: &str = "https://github.com";
@@ -352,7 +353,7 @@ mod tests {
     use tokio::time::timeout;
 
     use super::*;
-    use crate::signer;
+    use crate::signing::signer;
     use crate::test_support::Server;
     use crate::test_support::github::fake;
 

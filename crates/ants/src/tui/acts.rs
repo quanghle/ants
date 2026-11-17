@@ -15,9 +15,10 @@ use futures::FutureExt as _;
 use futures::future::LocalBoxFuture;
 
 use crate::live::maybe;
+use crate::people::quiet;
+use crate::spend;
 use crate::spend::ThreadReport;
-use crate::thread_meta::{self, Meta};
-use crate::{quiet, spend};
+use crate::threads::thread_meta::{self, Meta};
 
 /// How often the open thread's marks and spend are read.
 const ABOUT_EVERY: Duration = Duration::from_secs(10);

@@ -10,8 +10,8 @@ use chrono::{DateTime, Local, TimeDelta, Utc};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
-use crate::sealed;
-use crate::thread::{Entry, Kind};
+use crate::people::sealed;
+use crate::threads::thread::{Entry, Kind};
 use crate::tui::model::Data;
 use crate::tui::timeline::{Call, End, Tools};
 use crate::tui::{attach, images, markdown, react, style};
@@ -354,7 +354,7 @@ impl Shown<'_> {
             n => format!("{n} tool calls"),
         };
         if let Some(took) = turn.took().and_then(|d| u64::try_from(d.num_milliseconds()).ok()) {
-            let _ = write!(said, ", {}", crate::thread::took(took));
+            let _ = write!(said, ", {}", crate::threads::thread::took(took));
         }
         let failed = turn.calls.iter().filter(|c| c.status.as_deref() == Some("failed")).count();
         let mut ended = String::new();
@@ -433,9 +433,9 @@ pub(super) fn body(e: &Entry, entries: &[Entry]) -> String {
     if question.free_text {
         text.push_str("\nor type an answer");
     }
-    for (by, answered) in crate::thread::answers_to(e, entries) {
+    for (by, answered) in crate::threads::thread::answers_to(e, entries) {
         text.push('\n');
-        text.push_str(&crate::thread::answer_line(by, answered));
+        text.push_str(&crate::threads::thread::answer_line(by, answered));
     }
     text
 }
@@ -481,7 +481,7 @@ pub(super) fn busy() -> Style {
 
 /// How long a call that ended took.
 fn took(call: &Call) -> String {
-    call.duration.and_then(|d| u64::try_from(d.num_milliseconds()).ok()).map_or_default(crate::thread::took)
+    call.duration.and_then(|d| u64::try_from(d.num_milliseconds()).ok()).map_or_default(crate::threads::thread::took)
 }
 
 /// The local hour and minute of `at`.

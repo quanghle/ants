@@ -827,7 +827,7 @@ async fn topics(posts: &mut mpsc::UnboundedReceiver<(String, Value)>, n: usize) 
 
 #[tokio::test]
 async fn a_device_following_what_a_notice_is_about_gets_no_push_and_the_others_do() {
-    use crate::presence;
+    use crate::people::presence;
     use crate::test_support::presence::device;
     use ants_proto::Following;
 
@@ -962,7 +962,7 @@ async fn held_notices_are_dropped_unread_and_undecided_and_each_reply_is_notifie
     };
     let replied = |text: &str| ("dev-a replied".to_owned(), text.to_owned());
     let hold = async |change: &(dyn Fn(&mut ants_proto::NotifyPrefs, chrono::DateTime<chrono::Utc>) + Sync)| {
-        crate::quiet::update(&own, &alice, change).await.unwrap();
+        crate::people::quiet::update(&own, &alice, change).await.unwrap();
     };
     let (thread, muted) = (ThreadId::generate(), ThreadId::generate());
 
@@ -1084,7 +1084,7 @@ async fn one_digest_of_what_a_snooze_held_back_follows_its_end_across_services()
     }
     let (_, ant) = server.connect(&dev_a).await;
     let hold = async |change: &(dyn Fn(&mut ants_proto::NotifyPrefs, chrono::DateTime<chrono::Utc>) + Sync)| {
-        crate::quiet::update(&own, &alice, change).await.unwrap();
+        crate::people::quiet::update(&own, &alice, change).await.unwrap();
     };
     let thread = ThreadId::generate();
     hold(&|prefs, now| prefs.snoozed_until = Some(now + chrono::TimeDelta::hours(1))).await;

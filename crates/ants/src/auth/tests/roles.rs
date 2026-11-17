@@ -241,22 +241,22 @@ async fn every_human_has_the_same_rights_and_reads_only_its_own_inbox() {
 
     // Either human creates the stream and the buckets; a name issued without --human does not.
     assert!(bus::ensure_stream(&carol_js).await.is_err(), "carol is no human");
-    assert!(crate::humans::ensure(&d_js).await.is_err(), "only a human creates the humans bucket");
+    assert!(crate::people::humans::ensure(&d_js).await.is_err(), "only a human creates the humans bucket");
     bus::ensure_stream(&a_js).await.unwrap();
     let b_stream = bus::ensure_stream(&b_js).await.unwrap();
     bus::ensure_colony(&b_js, ants_proto::COLONY_TTL).await.unwrap();
     bus::init_own_buckets(&a_js).await.unwrap();
     bus::init_own_buckets(&b_js).await.unwrap();
     bus::ensure_channels(&a_js).await.unwrap();
-    let a_humans = crate::humans::ensure(&a_js).await.unwrap();
-    let b_humans = crate::humans::ensure(&b_js).await.unwrap();
+    let a_humans = crate::people::humans::ensure(&a_js).await.unwrap();
+    let b_humans = crate::people::humans::ensure(&b_js).await.unwrap();
 
     // Each human writes the humans bucket; ants read it, but never write it.
     for (kv, human) in [(&a_humans, &alice), (&b_humans, &bob)] {
         let entry = ants_proto::HumanEntry::new(human.clone());
         kv.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
     }
-    let d_humans = crate::humans::ensure(&d_js).await.unwrap();
+    let d_humans = crate::people::humans::ensure(&d_js).await.unwrap();
     let listed: ants_proto::HumanEntry = serde_json::from_slice(&d_humans.get("bob").await.unwrap().unwrap()).unwrap();
     assert_eq!((listed.check_key("bob"), listed.human), (Ok(()), bob.clone()));
     let keys: Vec<String> = d_humans.keys().await.unwrap().try_collect().await.unwrap();
@@ -282,10 +282,10 @@ async fn every_human_has_the_same_rights_and_reads_only_its_own_inbox() {
         assert_eq!(timeout(WAIT, all.next()).await.unwrap().unwrap().subject.as_str(), to_alice.subject());
     }
     for (js, human, other, sent) in [(&a_js, &alice, &bob, &to_alice), (&b_js, &bob, &alice, &to_bob)] {
-        let theirs = async { crate::inbox::Inbox::open(js, other).await?.unread(&Default::default()).await };
+        let theirs = async { crate::messages::inbox::Inbox::open(js, other).await?.unread(&Default::default()).await };
         assert!(theirs.await.is_err(), "{human} reads {other}'s inbox");
-        let mut inbox = crate::inbox::Inbox::open(js, human).await.unwrap();
-        let unread = inbox.unread(&crate::inbox::Select::default()).await.unwrap();
+        let mut inbox = crate::messages::inbox::Inbox::open(js, human).await.unwrap();
+        let unread = inbox.unread(&crate::messages::inbox::Select::default()).await.unwrap();
         assert_eq!(unread.as_slice(), std::slice::from_ref(sent));
     }
 
@@ -362,13 +362,18 @@ async fn an_assistant_reads_its_human_s_marker_but_writes_only_its_own() {
     bus::init_own_buckets(&a_js).await.unwrap();
 
     let marker = |n: &str| serde_json::to_vec(&json!({ "seq": n })).unwrap();
-    let a_read = crate::inbox::ensure_bucket(&a_js).await.unwrap();
+    let a_read = crate::messages::inbox::ensure_bucket(&a_js).await.unwrap();
     a_read.put(alice.as_str(), marker("1").into()).await.unwrap();
-    crate::inbox::ensure_bucket(&b_js).await.unwrap().put(bob.as_str(), marker("2").into()).await.unwrap();
-    let pa_read = crate::inbox::ensure_bucket(&pa_js).await.unwrap();
+    crate::messages::inbox::ensure_bucket(&b_js).await.unwrap().put(bob.as_str(), marker("2").into()).await.unwrap();
+    let pa_read = crate::messages::inbox::ensure_bucket(&pa_js).await.unwrap();
     assert_eq!(pa_read.get(alice.as_str()).await.unwrap().unwrap(), marker("1"), "it reads its human's marker");
     assert_eq!(pa_read.get(bob.as_str()).await.unwrap().unwrap(), marker("2"), "another's inbox marker, as an ant");
-    crate::inbox::ensure_bucket(&b_js).await.unwrap().put(format!("{bob}.chan"), marker("5").into()).await.unwrap();
+    crate::messages::inbox::ensure_bucket(&b_js)
+        .await
+        .unwrap()
+        .put(format!("{bob}.chan"), marker("5").into())
+        .await
+        .unwrap();
     assert!(pa_read.get(&format!("{bob}.chan")).await.is_err(), "but no other marker of another human");
     assert!(pa_read.put(alice.as_str(), marker("3").into()).await.is_err(), "nor moves it");
     pa_read.put(pa.as_str(), marker("4").into()).await.unwrap();
@@ -380,11 +385,12 @@ async fn an_assistant_reads_its_human_s_marker_but_writes_only_its_own() {
     let to_pa = Envelope::new(alice.clone(), pa.clone(), "hello");
     bus::publish(&a_js, &to_pa).await.unwrap();
     assert_eq!(timeout(WAIT, all.next()).await.unwrap().unwrap().subject.as_str(), to_pa.subject());
-    let mut inbox = crate::inbox::Inbox::open(&pa_js, &pa).await.unwrap();
-    assert!(inbox.unread(&crate::inbox::Select::default()).await.is_ok());
+    let mut inbox = crate::messages::inbox::Inbox::open(&pa_js, &pa).await.unwrap();
+    assert!(inbox.unread(&crate::messages::inbox::Select::default()).await.is_ok());
     assert!(bus::publish(&pa_js, &Envelope::new(alice.clone(), bob.clone(), "as alice")).await.is_err());
     bus::publish(&pa_js, &Envelope::new(pa.clone(), alice.clone(), "as itself")).await.unwrap();
-    let alice_s = async { crate::inbox::Inbox::open(&pa_js, &alice).await?.unread(&Default::default()).await };
+    let alice_s =
+        async { crate::messages::inbox::Inbox::open(&pa_js, &alice).await?.unread(&Default::default()).await };
     assert!(alice_s.await.is_err(), "it reads no human's inbox");
 
     // Its daemon reads a thread back by direct gets, holding none of an ant's readers.

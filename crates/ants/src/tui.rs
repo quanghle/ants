@@ -68,8 +68,11 @@ use self::model::{Action, Key, Level, Model};
 use self::reads::Reads;
 use self::search::Searches;
 use crate::auth::team_dir;
+use crate::credentials::enroll;
 use crate::live::{self, Feed, Screen};
-use crate::{compose, presence, progress, sealed, thread_meta};
+use crate::messages::{compose, progress};
+use crate::people::{presence, sealed};
+use crate::threads::thread_meta;
 
 pub use self::status::run as status;
 
@@ -175,7 +178,7 @@ pub async fn run(nats: &crate::connection::Nats<'_>, since: Duration, compact: b
         sealing: sealing.clone(),
         account: nats.account.clone(),
         keyring: feed.keyring(),
-        admin: crate::orders::Admin::of(nats).map_err(|e| format!("{e:#}")),
+        admin: crate::admin::orders::Admin::of(nats).map_err(|e| format!("{e:#}")),
     };
     let feed = feed.with_timelines();
     let reads = Reads::new(js.clone(), nats.domain.cloned(), me.clone(), crate::channel::reads::allowed(nats));
@@ -194,8 +197,8 @@ pub async fn run(nats: &crate::connection::Nats<'_>, since: Duration, compact: b
     let mcp = mcp::Io::new(nats, js.clone());
     let settings = settings::Io::new(js.clone(), nats.url, nats.creds.map(Path::to_path_buf), nats.domain.cloned());
     let (credentials, holder) =
-        credentials::Io::new(js.clone(), nats.url, nats.domain.cloned(), team_dir(None), crate::enroll::LISTEN);
-    let creds = crate::assistant::signing_creds(nats).map(Path::to_path_buf).map_err(|e| format!("{e:#}"));
+        credentials::Io::new(js.clone(), nats.url, nats.domain.cloned(), team_dir(None), enroll::LISTEN);
+    let creds = crate::people::assistant::signing_creds(nats).map(Path::to_path_buf).map_err(|e| format!("{e:#}"));
     let held = held::Io::new(js.clone(), me.clone(), nats.account.clone(), creds);
     let cards = cards::Io::new(cards::Source::open(nats, &js).await.checking(feed.behalf()));
     let mut model = Model::new(state, host(nats.url).to_owned());

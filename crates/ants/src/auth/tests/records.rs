@@ -260,7 +260,9 @@ async fn humans_write_only_their_own_reactions_and_ants_change_theirs_through_an
 
     // `ants signer`'s credentials answer an ant's requests, for the messages it reads only.
     let approver =
-        crate::enroll::Approver::connect_signer(&server.url, &server.dir().join("auth"), None, WAIT).await.unwrap();
+        crate::credentials::enroll::Approver::connect_signer(&server.url, &server.dir().join("auth"), None, WAIT)
+            .await
+            .unwrap();
     let serving = tokio::spawn(reactions::serve(
         approver.client.clone(),
         approver.hub().clone(),

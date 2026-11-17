@@ -170,12 +170,12 @@ async fn messages_jetstream_stops_delivering_become_one_dead_letter() {
         assert_eq!(letters.iter().map(|(s, _)| *s).collect::<Vec<_>>(), [dead_seq]);
         let notices = stream.get_last_raw_message_by_subject(&subject::inbox(&human, &dev_a)).await.unwrap();
         assert_eq!(notices.sequence, dead_seq + 1, "one notice, right after the dead letter");
-        let mut listed = crate::thread::Threads::new(None).escalated(ants_proto::Humans::default());
-        let entry = crate::thread::Parser::default()
+        let mut listed = crate::threads::thread::Threads::new(None).escalated(ants_proto::Humans::default());
+        let entry = crate::threads::thread::Parser::default()
             .entry(notices.sequence, chrono::Utc::now(), &notices.subject, &notices.payload)
             .unwrap();
         listed.add(&entry);
-        let select = crate::thread::Select { escalated: true, ..Default::default() };
+        let select = crate::threads::thread::Select { escalated: true, ..Default::default() };
         let (open, _) = listed.finish(&select, &ants_proto::ThreadMarks::default());
         assert_eq!(open.iter().map(|t| &t.thread_id).collect::<Vec<_>>(), [&ask.thread_id], "listed escalated");
         pulling.abort();

@@ -58,7 +58,10 @@ use anyhow::Result;
 
 use crate::cli::{Cli, Command, DaemonCommand};
 use crate::connection::Connection;
-use crate::{add, colony, completions, machines, queue, renew, summary, tui, update};
+use crate::credentials::renew;
+use crate::release::update;
+use crate::threads::summary;
+use crate::{add, colony, completions, machines, queue, tui};
 
 /// Run the command `cli` names, or the terminal UI without one.
 pub(crate) async fn run(cli: Cli) -> Result<()> {

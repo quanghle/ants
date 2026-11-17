@@ -236,7 +236,7 @@ async fn clients_on_a_leaf_node_reach_the_hub_stream_through_its_domain() {
         issue_with(
             &team,
             hook,
-            crate::revoke::Kind::Webhook,
+            crate::credentials::revoke::Kind::Webhook,
             permissions.with_js_domain(Some(&domain)),
             &team.join(format!("{hook}.creds")),
         )

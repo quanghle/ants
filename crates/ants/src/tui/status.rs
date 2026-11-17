@@ -15,7 +15,7 @@ use super::home::{self, Why};
 use super::model::Model;
 use super::{SINCE, cards};
 use crate::live::{self, State};
-use crate::thread::{Entry, Parser};
+use crate::threads::thread::{Entry, Parser};
 use crate::tools::Update;
 
 /// How long `ants status` reads.
@@ -183,8 +183,8 @@ async fn read(nats: &crate::connection::Nats<'_>, js: &jetstream::Context, deadl
         let cards = Box::pin(within(deadline, async { Ok(cards::Source::open(nats, js).await.read(ids).await) })).await;
         (threads, cards)
     };
-    let marker = within(deadline, async { Ok(crate::inbox::Inbox::open(js, &me).await?.marker().await?.0) });
-    let humans = within(deadline, crate::humans::read(js));
+    let marker = within(deadline, async { Ok(crate::messages::inbox::Inbox::open(js, &me).await?.marker().await?.0) });
+    let humans = within(deadline, crate::people::humans::read(js));
     let approvals = within(deadline, async {
         let stream = js.get_stream(STREAM).await?;
         crate::tools::pending(js, &stream, Utc::now()).await

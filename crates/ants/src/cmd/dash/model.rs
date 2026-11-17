@@ -8,7 +8,7 @@ use ants_proto::{ApprovalRequest, ThreadDone, ThreadId, Verdict};
 use chrono::{DateTime, TimeDelta, Utc};
 
 use crate::live::{self, History, State};
-use crate::thread::Entry;
+use crate::threads::thread::Entry;
 use crate::tools::{self, Update};
 
 /// The list keys move in.

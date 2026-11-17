@@ -27,7 +27,7 @@ impl Model {
         text: &str,
         now: DateTime<Utc>,
     ) -> Result<Action, String> {
-        let (due, note) = crate::remind::parse(text, now, &Local)?;
+        let (due, note) = crate::threads::remind::parse(text, now, &Local)?;
         let reminder = Reminder { at: now, due, message, note, pushed: false };
         Ok(self.set_reminder(thread, Some(reminder)))
     }

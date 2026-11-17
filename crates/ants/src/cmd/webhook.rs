@@ -10,8 +10,10 @@ use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
 
 use crate::connection::Connection;
+use crate::node::bridge;
+use crate::release::upgrade;
 use crate::serve::Ended;
-use crate::{bridge, notify, reload, upgrade, webhook};
+use crate::{notify, reload, webhook};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum WebhookCommand {

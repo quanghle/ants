@@ -17,7 +17,7 @@ use super::claims::{check_user_key, user_jwt, verified_body};
 use super::files::{creds, creds_jwt, creds_with, load, seed, write_secret};
 use super::uplink::allowed;
 use super::{ACCOUNT_SEED, check_not_reserved};
-use crate::revoke::{self, Issued, Kind};
+use crate::credentials::revoke::{self, Issued, Kind};
 
 /// Issue a new NATS user for `user`, an ant or a human, in `role`, for the hub's JetStream domain if it has one, and
 /// write its `.creds` file to `out`. Earlier credentials stay valid.
@@ -51,7 +51,7 @@ pub fn issue_device(
 #[derive(Debug, Clone, Default)]
 pub struct NewDevice<'a> {
     pub label: Option<&'a str>,
-    /// The GitHub user the human's name is bound to ([`crate::binding`]).
+    /// The GitHub user the human's name is bound to ([`crate::signing::binding`]).
     pub github: Option<GithubAccount>,
     /// Why `ants signer` signed it.
     pub grant: Option<Grant>,

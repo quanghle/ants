@@ -1,7 +1,7 @@
 //! `ants ant show`, and what the ant view of `ants chat` shows the same way: one ant at a glance. Where and how it runs
 //! and what holds it back, as its colony entry tells; the messages waiting for it, as `ants queue` lists them; its
 //! threads, as `ants thread list --ant` lists them; what it spent that UTC day, as `ants spend` reports it; and its
-//! settings and the admin orders to it ([`crate::settings`]).
+//! settings and the admin orders to it ([`crate::admin::settings`]).
 
 use std::collections::BTreeMap;
 
@@ -12,9 +12,11 @@ use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
+use crate::admin::{orders, settings};
 use crate::colony::{self, State, short, since};
 use crate::connection::Nats;
-use crate::{orders, queue, settings, spend, thread};
+use crate::threads::thread;
+use crate::{queue, spend};
 
 /// How many of its most recently active threads `ants ant show` lists.
 const THREADS_SHOWN: usize = 10;

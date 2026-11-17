@@ -19,13 +19,15 @@ use futures::stream::FuturesUnordered;
 use futures::{FutureExt as _, StreamExt as _};
 
 use super::attach;
-use crate::attachments::{self, File, Listed};
+use crate::admin::orders;
+use crate::admin::pause;
 use crate::cmd::{cancel, send};
-use crate::orders;
-use crate::sealed::{Keyring, Sealing};
-use crate::thread::{self, Entry, Kind};
-use crate::thread_meta::{self, Marking, Meta};
-use crate::{forward, humans, pause, quiet};
+use crate::messages::attachments::{self, File, Listed};
+use crate::messages::forward;
+use crate::people::sealed::{Keyring, Sealing};
+use crate::people::{humans, quiet};
+use crate::threads::thread::{self, Entry, Kind};
+use crate::threads::thread_meta::{self, Marking, Meta};
 
 /// What a job needs: the UI's connection and its human.
 pub struct Ctx {
@@ -300,8 +302,8 @@ impl Job {
             }
             Self::Restart { ant, now } => {
                 let admin = ctx.admin.as_ref().map_err(|e| anyhow!("{e}"))?;
-                let (order, outcome) = crate::restart::send(admin, &ctx.js, None, &ant, now).await?;
-                Ok(Done::line(crate::restart::told(&order, outcome)?))
+                let (order, outcome) = crate::admin::restart::send(admin, &ctx.js, None, &ant, now).await?;
+                Ok(Done::line(crate::admin::restart::told(&order, outcome)?))
             }
             Self::Cancel { thread, ants } => cancel_all(ctx, &thread, ants).await,
             Self::Answer { thread, choice } => {
@@ -441,7 +443,8 @@ async fn forward(ctx: &Ctx, to: UserId, source: &forward::Source, note: &str, fi
 /// Retire `ant` by admin order, as `ants ant retire` does.
 async fn retire(ctx: &Ctx, ant: &UserId) -> Result<Done> {
     let admin = ctx.admin.as_ref().map_err(|e| anyhow!("{e}"))?;
-    let said = crate::orders::retire::retire(admin, &ctx.js, ant, None, crate::orders::retire::WAIT).await?;
+    let said =
+        crate::admin::orders::retire::retire(admin, &ctx.js, ant, None, crate::admin::orders::retire::WAIT).await?;
     Ok(Done::line(said.replace('\n', " ")))
 }
 
@@ -672,10 +675,16 @@ mod tests {
         };
         Box::pin(to_ant.run(&ctx)).await.unwrap();
 
-        let unread = crate::inbox::Inbox::open(&bob_js, &bob).await.unwrap().unread(&Default::default()).await.unwrap();
+        let unread = crate::messages::inbox::Inbox::open(&bob_js, &bob)
+            .await
+            .unwrap()
+            .unread(&Default::default())
+            .await
+            .unwrap();
         assert!(unread.iter().all(|e| e.sealed.is_some() && e.text.is_empty() && e.quote.is_none()), "{unread:?}");
-        let keyring = crate::sealed::Keyring::load(&nats[1], &bob_js).await.unwrap();
-        let texts: Vec<String> = unread.into_iter().map(|e| crate::sealed::read(e, Some(&keyring)).0.text).collect();
+        let keyring = crate::people::sealed::Keyring::load(&nats[1], &bob_js).await.unwrap();
+        let texts: Vec<String> =
+            unread.into_iter().map(|e| crate::people::sealed::read(e, Some(&keyring)).0.text).collect();
         assert_eq!(texts, ["lunch?", "at noon"]);
         let keyring = Arc::new(keyring);
         let entries =

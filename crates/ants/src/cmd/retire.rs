@@ -3,7 +3,7 @@
 use anyhow::Result;
 
 use crate::connection::Connection;
-use crate::retire::{self, RetireArgs};
+use crate::signing::retire::{self, RetireArgs};
 
 pub(crate) async fn run(conn: &Connection<'_>, args: RetireArgs) -> Result<()> {
     let args = &args;

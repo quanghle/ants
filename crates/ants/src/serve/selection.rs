@@ -27,7 +27,7 @@ pub struct DaemonArgs {
     #[command(flatten)]
     pub(super) options: AntOptions,
     #[command(flatten)]
-    pub upgrade: crate::upgrade::UpgradeArgs,
+    pub upgrade: crate::release::upgrade::UpgradeArgs,
 }
 
 /// The settings of an ant on the command line, of `ants daemon` and `ants add`.
@@ -310,7 +310,7 @@ pub fn ants(args: &DaemonArgs, default_path: &Path, hostname: &str) -> Result<Li
             let managers = loaded
                 .ants
                 .iter()
-                .filter(|a| crate::manager::manages(&loaded.templates, &a.name, a.template.is_some()))
+                .filter(|a| crate::signing::manager::manages(&loaded.templates, &a.name, a.template.is_some()))
                 .map(|a| a.name.clone())
                 .collect();
             let managers = whole.then(|| (managers, path.clone()));

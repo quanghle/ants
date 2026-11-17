@@ -8,9 +8,10 @@ use anyhow::Result;
 use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
 
+use crate::admin::settings::{self, Assignment};
+use crate::admin::{mcp, memories, orders, pause, restart};
 use crate::serve::AntOptions;
-use crate::settings::{self, Assignment};
-use crate::{ant, avatars, completions, export, mcp, memories, orders, pause, restart};
+use crate::{ant, avatars, completions, export};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum AntCommand {

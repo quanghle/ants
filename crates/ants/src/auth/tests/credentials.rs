@@ -102,10 +102,10 @@ fn renewed_credentials_keep_what_they_are_for_a_new_key() {
     let uplink = allowed(&verified_body(&leaf.jwt).unwrap().1);
     let react = subject::ALL_REACT_REQUESTS.to_owned();
     assert!(uplink.subscribe.contains(&react), "`ants signer` on the machine answers ants' reactions requests");
-    let kept = crate::members::issued(&team, &m1).unwrap().unwrap();
+    let kept = crate::node::members::issued(&team, &m1).unwrap().unwrap();
     assert_eq!(
         kept,
-        crate::members::Members::new(&members, &[p("hook")], EnrollApprover::With),
+        crate::node::members::Members::new(&members, &[p("hook")], EnrollApprover::With),
         "the registry keeps its members"
     );
 

@@ -24,7 +24,7 @@ use async_nats::jetstream::kv::{self, UpdateErrorKind};
 use async_nats::jetstream::{self, consumer};
 use futures::StreamExt as _;
 
-use crate::humans::Me;
+use crate::people::humans::Me;
 
 /// Attempts at a compare-and-set update before giving up on a channel that keeps changing.
 const ATTEMPTS: usize = 10;
@@ -224,7 +224,8 @@ pub async fn serve(url: &str, creds: Option<&std::path::Path>, domain: Option<&a
     let (client, js) = connecting.await?.context("connecting")?;
     let published = ants_daemon::records::direct_kv::DirectKv::new(&js, domain, ants_proto::WEBHOOKS_BUCKET).await?;
     let key = ants_proto::channel_manager_serving_key();
-    let publishing = crate::versions::keep_putting(published, key, crate::versions::serving().await, || {});
+    let publishing =
+        crate::release::versions::keep_putting(published, key, crate::release::versions::serving().await, || {});
     let humans = ants_daemon::people::humans::Registry::new(UserId::human());
     let _watching = humans.watch(js.clone(), ants_daemon::people::humans::RETRY);
     let colony = ants_daemon::mcp::jetstream_colony(js.clone());
@@ -529,8 +530,8 @@ fn render_post(out: &mut String, post: &ChannelPost, by: &dyn Fn(&ChannelPost) -
     for line in lines {
         let _ = writeln!(out, "{indent}    {line}");
     }
-    let attached = crate::attachments::listed(&post.attachments, |id| post.attachment_handle(id));
-    out.push_str(&crate::attachments::render(&attached, &format!("{indent}    ")));
+    let attached = crate::messages::attachments::listed(&post.attachments, |id| post.attachment_handle(id));
+    out.push_str(&crate::messages::attachments::render(&attached, &format!("{indent}    ")));
 }
 
 /// Threads as `ants channel read` prints them: a header line with the thread id, the post that started it, then the

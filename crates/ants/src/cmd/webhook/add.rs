@@ -11,9 +11,10 @@ use anyhow::{Context as _, Result, bail};
 use data_encoding::HEXLOWER;
 use nkeys::KeyPair;
 
+use crate::auth;
+use crate::credentials::{enroll, revoke};
 use crate::service::{Action, Outcome, Service, Services, failure};
 use crate::webhook::{self, Config, Listing};
-use crate::{auth, enroll, revoke};
 
 /// The senders `ants webhook add --preset` sets a webhook up for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -241,7 +242,7 @@ fn given_secret(args: &AddArgs, url: &str) -> Result<Option<String>> {
             eprintln!(
                 "in GitLab (Settings > Webhooks > Add new webhook), set URL {url} and select Generate signing token"
             );
-            crate::backup::read_hidden(
+            crate::credentials::backup::read_hidden(
                 "GitLab's signing token",
                 "signing token",
                 "give --secret-file FILE ('-' for standard input) or --secret-env VAR",

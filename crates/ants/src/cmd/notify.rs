@@ -6,7 +6,7 @@ use anyhow::Result;
 use clap::Subcommand;
 
 use crate::connection::Nats;
-use crate::quiet;
+use crate::people::quiet;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum NotifyCommand {

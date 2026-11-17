@@ -82,14 +82,14 @@ pub(crate) async fn with_signer_at<T>(
 ) -> T {
     let config = dir.join("signer.toml");
     std::fs::write(&config, "").unwrap();
-    let options = crate::signer::Options {
+    let options = crate::signing::signer::Options {
         config: &config,
         approval_timeout: SIGNED,
         reconnect: SIGNED * 3,
         tick: Duration::from_millis(200),
     };
     let team = dir.join("auth");
-    let serving = crate::signer::serve(url, &team, js_domain, &options, |_, _| {}, std::future::pending());
+    let serving = crate::signing::signer::serve(url, &team, js_domain, &options, |_, _| {}, std::future::pending());
     tokio::select! {
         r = serving => panic!("the signer stopped: {r:?}"),
         out = async { Box::pin(signer_listens(url, &team, js_domain)).await; body.await } => out,

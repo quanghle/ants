@@ -184,15 +184,16 @@ async fn the_human_manages_channels_and_reads_them_back() {
 async fn a_human_posts_under_its_own_name_and_keeps_the_thread_it_started() {
     let Some(server) = Server::start() else { return };
     let (alice, bob, dev_a) = (p("alice"), p("bob"), p("dev-a"));
-    let me = |id: &UserId| crate::humans::Me { id: id.clone(), role: ants_proto::Role::Human, assistant_of: None };
+    let me =
+        |id: &UserId| crate::people::humans::Me { id: id.clone(), role: ants_proto::Role::Human, assistant_of: None };
     let (a_client, a_js) = server.connect_as(&alice, ants_proto::Role::Human).await;
     let (_, b_js) = server.connect_as(&bob, ants_proto::Role::Human).await;
     bus::ensure_stream(&a_js).await.unwrap();
-    crate::humans::ensure(&a_js).await.unwrap();
+    crate::people::humans::ensure(&a_js).await.unwrap();
     for (js, human) in [(&a_js, &alice), (&b_js, &bob)] {
-        crate::humans::register(js, &me(human)).await.unwrap();
+        crate::people::humans::register(js, &me(human)).await.unwrap();
     }
-    let humans = crate::humans::load(&b_js, &me(&bob)).await;
+    let humans = crate::people::humans::load(&b_js, &me(&bob)).await;
     assert!(humans.contains(&alice) && humans.contains(&bob) && humans.contains(&UserId::human()));
 
     let mut sub = a_client.subscribe(subject::chan_room(&ops())).await.unwrap();
@@ -240,7 +241,7 @@ async fn a_human_posts_under_its_own_name_and_keeps_the_thread_it_started() {
     // channel, and the read of dev-a's daemon, through the reader itself, carries on.
     let daemon: consumer::PullConsumer = d_js.create_consumer_on_stream(reader(&dev_a), STREAM).await.unwrap();
     assert_eq!(post(next(&daemon).await), top);
-    let as_dev_a = crate::humans::Me { id: dev_a.clone(), role: ants_proto::Role::Ant, assistant_of: None };
+    let as_dev_a = crate::people::humans::Me { id: dev_a.clone(), role: ants_proto::Role::Ant, assistant_of: None };
     let reads = futures::future::join_all((0..8).map(|_| read(&d_js, &as_dev_a, &room))).await;
     for posts in reads {
         assert_eq!(posts.unwrap(), [top.clone(), answer.clone(), on.clone()]);
@@ -255,7 +256,7 @@ async fn a_human_posts_under_its_own_name_and_keeps_the_thread_it_started() {
     }
 
     // An ant creates the thread it starts, and owns none; a human's post on it keeps the creator.
-    let ant = crate::humans::Me { id: dev_a.clone(), role: ants_proto::Role::Ant, assistant_of: None };
+    let ant = crate::people::humans::Me { id: dev_a.clone(), role: ants_proto::Role::Ant, assistant_of: None };
     let started = compose(&d_js, &ant, &humans, ops(), None, "@dev-b look".to_owned()).await;
     assert_eq!((&started.creator, &started.owner), (&Some(dev_a.clone()), &None));
     bus::publish_json(&d_js, started.subject(), &started, None).await.unwrap();
@@ -270,25 +271,32 @@ async fn a_human_posts_under_its_own_name_and_keeps_the_thread_it_started() {
 async fn a_post_on_a_thread_an_ant_started_as_a_webhook_counts_it_as_the_ant_s() {
     let Some(server) = Server::start() else { return };
     let (alice, bob, dev_a, hook) = (p("alice"), p("bob"), p("dev-a"), p("github"));
-    let me = |id: &UserId| crate::humans::Me { id: id.clone(), role: ants_proto::Role::Human, assistant_of: None };
+    let me =
+        |id: &UserId| crate::people::humans::Me { id: id.clone(), role: ants_proto::Role::Human, assistant_of: None };
     let (_, a_js) = server.connect_as(&alice, ants_proto::Role::Human).await;
     let (_, b_js) = server.connect_as(&bob, ants_proto::Role::Human).await;
     bus::ensure_stream(&a_js).await.unwrap();
-    crate::humans::ensure(&a_js).await.unwrap();
+    crate::people::humans::ensure(&a_js).await.unwrap();
     crate::webhook::ensure_bucket(&a_js).await.unwrap();
     for (js, human) in [(&a_js, &alice), (&b_js, &bob)] {
-        crate::humans::register(js, &me(human)).await.unwrap();
+        crate::people::humans::register(js, &me(human)).await.unwrap();
     }
-    let humans = crate::humans::load(&b_js, &me(&bob)).await;
+    let humans = crate::people::humans::load(&b_js, &me(&bob)).await;
 
     let creds = server.dir().join("github.creds");
     let permissions = ants_proto::Permissions::for_webhook(&hook, &[ants_proto::Destination::Channel(ops())]);
-    crate::auth::issue_with(&server.dir().join("auth"), &hook, crate::revoke::Kind::Webhook, permissions, &creds)
-        .unwrap();
+    crate::auth::issue_with(
+        &server.dir().join("auth"),
+        &hook,
+        crate::credentials::revoke::Kind::Webhook,
+        permissions,
+        &creds,
+    )
+    .unwrap();
     let (_, h_js) = bus::connect(&server.url, Some(&creds), None, &hook, "test").await.unwrap();
     let markers =
         ants_daemon::records::direct_kv::DirectKv::new(&h_js, None, ants_proto::WEBHOOKS_BUCKET).await.unwrap();
-    markers.put(ants_proto::webhook_marker_key(&hook), crate::versions::serving().await).await.unwrap();
+    markers.put(ants_proto::webhook_marker_key(&hook), crate::release::versions::serving().await).await.unwrap();
     let (_, d_js) = server.connect(&dev_a).await;
 
     let owner = Some(alice.clone());
@@ -311,15 +319,16 @@ async fn a_post_on_a_thread_an_ant_started_as_a_webhook_counts_it_as_the_ant_s()
 async fn a_mention_of_a_human_member_reaches_its_inbox_once() {
     let Some(server) = Server::start() else { return };
     let (alice, bob, dev_a) = (p("alice"), p("bob"), p("dev-a"));
-    let me = |id: &UserId| crate::humans::Me { id: id.clone(), role: ants_proto::Role::Human, assistant_of: None };
+    let me =
+        |id: &UserId| crate::people::humans::Me { id: id.clone(), role: ants_proto::Role::Human, assistant_of: None };
     let (_, a_js) = server.connect_as(&alice, ants_proto::Role::Human).await;
     let (_, b_js) = server.connect_as(&bob, ants_proto::Role::Human).await;
     bus::ensure_stream(&a_js).await.unwrap();
-    crate::humans::ensure(&a_js).await.unwrap();
+    crate::people::humans::ensure(&a_js).await.unwrap();
     for (js, human) in [(&a_js, &alice), (&b_js, &bob)] {
-        crate::humans::register(js, &me(human)).await.unwrap();
+        crate::people::humans::register(js, &me(human)).await.unwrap();
     }
-    let humans = crate::humans::load(&a_js, &me(&alice)).await;
+    let humans = crate::people::humans::load(&a_js, &me(&alice)).await;
     let mut entry = ChannelEntry::new(ops());
     let (_, d_js) = server.connect(&dev_a).await;
     let post = compose(&a_js, &me(&alice), &humans, ops(), None, "@bob @alice @dev-a look".to_owned()).await;
@@ -336,11 +345,11 @@ async fn a_mention_of_a_human_member_reaches_its_inbox_once() {
         bus::store(&d_js, notice.subject(), &notice, &ant_post.mention_msg_id(&bob)).await.unwrap();
     }
 
-    let mut inbox = crate::inbox::Inbox::open(&b_js, &bob).await.unwrap();
-    let unread = inbox.unread(&crate::inbox::Select::default()).await.unwrap();
+    let mut inbox = crate::messages::inbox::Inbox::open(&b_js, &bob).await.unwrap();
+    let unread = inbox.unread(&crate::messages::inbox::Select::default()).await.unwrap();
     let got: Vec<_> = unread.iter().map(|e| (e.from.clone(), e.mention.as_ref().map(|m| m.post))).collect();
     assert_eq!(got, [(alice.clone(), Some(post.id)), (dev_a.clone(), Some(ant_post.id))]);
-    let shown = crate::inbox::render(&unread[1], &ants_proto::Acting::Own, &[], None);
+    let shown = crate::messages::inbox::render(&unread[1], &ants_proto::Acting::Own, &[], None);
     assert!(shown.contains(&format!("dev-a mentioned bob in #ops on thread {}", ant_post.thread_id)), "{shown}");
     assert!(shown.contains(&format!("`ants post ops --thread {} ...`", ant_post.thread_id)), "{shown}");
 }

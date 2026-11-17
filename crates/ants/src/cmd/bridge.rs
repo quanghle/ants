@@ -6,8 +6,9 @@ use std::path::PathBuf;
 use anyhow::{Context as _, Result};
 use clap::Subcommand;
 
+use crate::node::bridge;
+use crate::release::upgrade;
 use crate::serve::serve_metrics;
-use crate::{bridge, upgrade};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum BridgeCommand {

@@ -14,7 +14,7 @@ use super::claims::{now, user_jwt};
 use super::files::{creds, load, seed, write_secret};
 use super::uplink::merge;
 use super::{ACCOUNT_SEED, check_not_reserved};
-use crate::revoke::{self, Issued, Kind};
+use crate::credentials::revoke::{self, Issued, Kind};
 
 /// Issue the enrollment credentials of `ant`, valid for `ttl` (zero: with no expiry), and write their `.creds` file
 /// to `out`: they may only ask for the ant's credentials and hear the answer ([`Permissions::for_enrollment`]).

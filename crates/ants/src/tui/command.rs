@@ -11,7 +11,9 @@ use chrono::{DateTime, Utc};
 use super::exec::{Job, Outcome, Quoted};
 use super::model::{Action, Focus, Key, Model, Page};
 use super::{attach, complete, nav, snooze, thread};
-use crate::{attachments, forward, live, quiet, tools};
+use crate::messages::{attachments, forward};
+use crate::people::quiet;
+use crate::{live, tools};
 
 mod bar;
 mod parse;
@@ -547,7 +549,7 @@ mod tests {
         let reply = Job::Reply { thread: thread.clone(), text: "go on".into(), quote: None };
         assert_eq!(m.key(Key::Enter, at(0)), Some(Action::Run(reply, "go on".into())));
         let mut post = message(1, &thread, "dev-a", "ops", "hi");
-        (post.kind, post.channel) = (crate::thread::Kind::Post, Some("ops".parse().unwrap()));
+        (post.kind, post.channel) = (crate::threads::thread::Kind::Post, Some("ops".parse().unwrap()));
         m.stored(vec![post], at(1));
         typed(&mut m, "go on");
         let post = Job::Post {
@@ -919,7 +921,7 @@ mod tests {
         let mut sent = message(1, &thread, "dev-a", "alice", "the log");
         let envelope = ants_proto::Envelope::new(user("dev-a"), user("alice"), "x");
         let log = ants_daemon::files::reference("build.log", "text/plain", b"ok").unwrap();
-        sent.attachments = crate::attachments::listed(&[log], |id| envelope.attachment_handle(id));
+        sent.attachments = crate::messages::attachments::listed(&[log], |id| envelope.attachment_handle(id));
         let Page::Thread(page) = m.pages.last_mut().unwrap() else { panic!() };
         page.history.loaded(&thread, Ok(vec![sent.clone()])).unwrap();
         let saved = m.command(parse("/save ~/logs").unwrap(), at(0)).unwrap();

@@ -27,8 +27,8 @@ use data_encoding::BASE64;
 use serde::{Deserialize, Serialize};
 
 use crate::add::{self, AddArgs};
+use crate::admin::settings::SharedRecord;
 use crate::serve::AntOptions;
-use crate::settings::SharedRecord;
 
 /// The version of [`Export`] this build writes and reads.
 pub const VERSION: u32 = 1;
@@ -243,7 +243,7 @@ pub async fn export(
     let identity =
         identity.with_context(|| format!("{ant} has no identity record: its daemon creates one when it starts"))?;
     wait_between_prompts(&js, ant).await;
-    let shared = match crate::settings::shared_of(nats, &js, ant).await? {
+    let shared = match crate::admin::settings::shared_of(nats, &js, ant).await? {
         Some(SharedRecord::Verified(record)) => Some(record),
         Some(SharedRecord::Unverified(_, why)) => {
             eprintln!(
@@ -513,7 +513,7 @@ async fn import_with(nats: &crate::connection::Nats<'_>, args: ImportArgs, store
     let kv = DirectKv::whole(&js, nats.domain, IDENTITIES_BUCKET).await?;
     let identity = AntIdentity { ant: name.clone(), moved: None, ..export.identity.clone() };
     create(&js, &kv, &identity).await?;
-    let shared = crate::settings::shared_of(nats, &js, &name)
+    let shared = crate::admin::settings::shared_of(nats, &js, &name)
         .await
         .inspect_err(|e| tracing::debug!("not comparing the shared settings: {e:#}"));
     if let Some(SharedRecord::Verified(shared)) = shared.ok().flatten() {

@@ -25,9 +25,10 @@ use tokio::time::Instant;
 use super::model::{Action, Data, Key, To};
 use super::select::Selection;
 use super::style::{self, ago};
-use crate::enroll::{self, Approver};
+use crate::credentials::enroll::{self, Approver};
+use crate::credentials::renew;
 use crate::live::maybe;
-use crate::{auth, machines, renew};
+use crate::{auth, machines};
 
 /// How often the requests are gathered; each gathering listens [`enroll::LISTEN`], as machines repeat theirs.
 const GATHER_EVERY: Duration = Duration::from_secs(15);

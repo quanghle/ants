@@ -16,7 +16,12 @@ use crate::cmd::{
     notify::NotifyCommand, remind::RemindCommand, send, setup, signer, spend::SpendArgs, thread::ThreadCommand,
     tools::ToolsCommand, webhook::WebhookCommand,
 };
-use crate::{add, attachments, completions, progress, renew, retire, serve, thread, update};
+use crate::credentials::renew;
+use crate::messages::{attachments, progress};
+use crate::release::update;
+use crate::signing::retire;
+use crate::threads::thread;
+use crate::{add, completions, serve};
 
 /// The whole command line.
 pub(crate) type Cli = Ants<Command>;

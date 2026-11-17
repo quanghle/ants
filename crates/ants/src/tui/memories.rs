@@ -1,4 +1,4 @@
-//! The memories pane of the ant view: the ant's memories as `ants ant memories` shows them ([`crate::memories`]),
+//! The memories pane of the ant view: the ant's memories as `ants ant memories` shows them ([`crate::admin::memories`]),
 //! read-only, which [`Io`] asks the daemon of its machine for with an admin order when the pane first shows and on
 //! `u`.
 
@@ -62,7 +62,7 @@ impl Page {
         self.state = match read {
             Ok(memories) => {
                 let held = memories.files.len() + memories.bd.as_ref().map_or(0, |bd| bd.memories.len());
-                State::Read(crate::memories::render(ant, memories), held)
+                State::Read(crate::admin::memories::render(ant, memories), held)
             }
             Err(e) => State::Failed(e.clone()),
         };
@@ -149,7 +149,7 @@ impl Io {
             async move {
                 let read = async {
                     let nats = crate::connection::Nats::new(&url, creds.as_deref(), domain.as_ref())?;
-                    crate::memories::read(&nats, &js, None, &ant).await
+                    crate::admin::memories::read(&nats, &js, None, &ant).await
                 };
                 Event(ant.clone(), asked, read.await.map_err(|e| format!("{e:#}")))
             }

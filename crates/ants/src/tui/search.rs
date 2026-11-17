@@ -1,7 +1,7 @@
 //! Search from `ants chat`: `/search` in the command bar (`/` opens it on that) takes words `from:`, `to:`, `channel:`,
 //! `type:`, `since:` and `until:` as the filters of `ants thread search` and the other words as its text; it runs as
 //! `ants thread search` does
-//! ([`crate::search::Search`]) and lists the latest matches newest first, each with where, who, how long ago and its
+//! ([`crate::threads::search::Search`]) and lists the latest matches newest first, each with where, who, how long ago and its
 //! matching line. Enter on a match opens its thread at it; Esc closes the list.
 
 use std::sync::Arc;
@@ -22,9 +22,9 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use super::model::{Data, Key, To};
 use super::style::{self, ago};
 use crate::live::maybe;
-use crate::sealed::Keyring;
-use crate::search::{self, Search};
-use crate::thread::{Entry, Kind, Parser};
+use crate::people::sealed::Keyring;
+use crate::threads::search::{self, Search};
+use crate::threads::thread::{Entry, Kind, Parser};
 
 /// How many matches a search lists, the latest.
 pub const LIMIT: usize = 50;
@@ -181,7 +181,7 @@ pub struct Searches {
     /// What opens the sealed messages searched, so their text is matched and shown.
     keyring: Option<Arc<Keyring>>,
     /// What checks the claims of the messages searched that an assistant sent for its human.
-    behalf: Option<Arc<crate::behalf::Checker>>,
+    behalf: Option<Arc<crate::people::behalf::Checker>>,
     running: Option<LocalBoxFuture<'static, Found>>,
 }
 
@@ -189,7 +189,7 @@ impl Searches {
     pub fn new(
         js: jetstream::Context,
         keyring: Option<Arc<Keyring>>,
-        behalf: Option<Arc<crate::behalf::Checker>>,
+        behalf: Option<Arc<crate::people::behalf::Checker>>,
     ) -> Self {
         Self { js, keyring, behalf, running: None }
     }

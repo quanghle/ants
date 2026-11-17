@@ -16,8 +16,8 @@ use super::short_lived::signer_permissions;
 use super::{
     ACCOUNT_SEED, MAX_CONTROL_LINE, MAX_UPLINK_JWT, SYSTEM_SEED, assistants, check_not_reserved, leaf_role, members,
 };
-use crate::members::EnrollApprover;
-use crate::revoke::{self, Issued, Kind};
+use crate::credentials::revoke::{self, Issued, Kind};
+use crate::node::members::EnrollApprover;
 
 /// Issue the uplink user of `machine`'s leaf node and write its `.creds` file to `out`. It may carry only what
 /// `members`, ants and humans each in its role ([`members`]), an ant the registry makes a human's assistant as one
@@ -65,7 +65,7 @@ pub fn issue_leaf(
     check_uplink_size(&jwt, machine)?;
     write_secret(out, &creds(&jwt, &seed(&user)?))?;
     let issued = Issued::new(&user.public_key(), &name, Kind::Leaf, None)?;
-    let members = crate::members::Members::new(members, webhooks, approver);
+    let members = crate::node::members::Members::new(members, webhooks, approver);
     revoke::record(dir, &Issued { members: Some(members), ..issued })?;
     issue_leaf_system(dir, machine, &account.public_key(), &leaf_system_creds(out))
 }

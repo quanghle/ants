@@ -15,7 +15,7 @@ use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
 use super::model::{Data, Key, To};
 use super::select::Selection;
 use super::style::{self, ago};
-use crate::thread::{Entry, Kind};
+use crate::threads::thread::{Entry, Kind};
 
 /// What a thread waits on, as its messages and the ants' progress tell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -608,7 +608,7 @@ mod tests {
 
     use super::*;
     use crate::test_support::live::{at, message, request, user};
-    use crate::thread::Parser;
+    use crate::threads::thread::Parser;
     use crate::tui::model::{Model, Page as View};
     use crate::tui::test_support::model;
 
@@ -659,7 +659,7 @@ mod tests {
             let why = ants_proto::NoReplyWhy::ReplyToOwn;
             let end = ants_proto::TimelineEntry::NoReply { why, reason: None, text: "noted".to_owned() };
             let record = ants_proto::Timeline::new(user("dev-a"), thread.clone(), message.id.unwrap(), vec![end], 0);
-            crate::thread::timeline_entries(seq, &record.subject(), &serde_json::to_vec(&record).unwrap())
+            crate::threads::thread::timeline_entries(seq, &record.subject(), &serde_json::to_vec(&record).unwrap())
         };
         m.stored(ended(3, &asked), at(3));
         assert_eq!(state(&m, &thread), ThreadState::WaitingOnAnt, "an end of another message's prompt");

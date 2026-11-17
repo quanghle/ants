@@ -722,7 +722,7 @@ pub async fn list(nats: &Nats<'_>, listing: crate::connection::Listing) -> Resul
         }
     };
     let (me, device) = (&nats.me.id, nats.device);
-    crate::presence::while_following(&js, nats.domain, me, device, Following::Approvals, follow).await
+    crate::people::presence::while_following(&js, nats.domain, me, device, Following::Approvals, follow).await
 }
 
 /// `ants tools show ID`: one request in full, with where it stands.

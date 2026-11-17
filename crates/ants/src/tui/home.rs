@@ -24,7 +24,7 @@ use super::select::Selection;
 use super::style::{self, ago};
 use super::{catchup, question};
 use crate::text::excerpt;
-use crate::thread::Kind;
+use crate::threads::thread::Kind;
 use crate::tools::State;
 
 /// Why a thread is on home, in the order home lists them.
@@ -498,7 +498,7 @@ mod tests {
     use super::*;
     use crate::live::Event;
     use crate::test_support::live::{at, message, request, user};
-    use crate::thread::Parser;
+    use crate::threads::thread::Parser;
     use crate::tools::{State, Update};
     use crate::tui::model::Action;
     use crate::tui::test_support::model;
@@ -603,7 +603,7 @@ mod tests {
         assert_eq!(m.key(Key::Enter, at(500)), Some(Action::Open(done)));
     }
 
-    fn escalation(seq: u64, thread: &ThreadId, from: &str, to: &str) -> crate::thread::Entry {
+    fn escalation(seq: u64, thread: &ThreadId, from: &str, to: &str) -> crate::threads::thread::Entry {
         let x = ants_proto::Escalation::new(user(from), thread.clone(), ants_proto::EscalationReason::TurnBudget);
         let envelope = Envelope {
             thread_id: thread.clone(),
@@ -712,7 +712,7 @@ mod tests {
         assert!(refused.starts_with(&format!("no TL;DR of thread {thread} yet")), "{refused}");
     }
 
-    fn mention(seq: u64, thread: &ThreadId, from: &str) -> crate::thread::Entry {
+    fn mention(seq: u64, thread: &ThreadId, from: &str) -> crate::threads::thread::Entry {
         let envelope = Envelope {
             thread_id: thread.clone(),
             mention: Some(Mention { channel: "ops".parse().unwrap(), post: Uuid::now_v7(), author: None }),

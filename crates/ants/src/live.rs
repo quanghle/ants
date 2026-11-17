@@ -23,9 +23,10 @@ use tokio::sync::mpsc;
 
 pub use self::screen::{Screen, bracket_pastes, warning};
 pub use self::state::{History, Link, State};
-use crate::thread::{self, Entry, Kind, Parser};
+use crate::colony;
+use crate::threads::thread::{self, Entry, Kind, Parser};
+use crate::threads::thread_meta;
 use crate::tools::{self, Update};
-use crate::{colony, thread_meta};
 
 /// How often the stream is read for what was stored without being heard, such as a leaf node's sourced messages, and
 /// following the tool requests starts again after it ended.
@@ -48,8 +49,8 @@ pub async fn start(
     since: Duration,
 ) -> Result<(Feed, State)> {
     let state = state(nats, &js, since).await?;
-    let keyring = crate::sealed::Keyring::load(nats, &js).await.map(Arc::new);
-    let behalf = Arc::new(crate::behalf::Checker::new(nats, &js));
+    let keyring = crate::people::sealed::Keyring::load(nats, &js).await.map(Arc::new);
+    let behalf = Arc::new(crate::people::behalf::Checker::new(nats, &js));
     Ok((Feed::new(client, js, since).await?.opening(keyring).checking(behalf), state))
 }
 
@@ -191,12 +192,12 @@ pub struct Feed {
     rereads: tokio::time::Interval,
     colonies: tokio::time::Interval,
     /// What opens sealed messages between two humans, for the reads of the stream and of a thread's history.
-    keyring: Option<Arc<crate::sealed::Keyring>>,
+    keyring: Option<Arc<crate::people::sealed::Keyring>>,
     /// What checks the `on_behalf_of` of an assistant's messages, for the reads of the stream and of a thread's
     /// history; without it, every such claim is forged.
-    behalf: Option<Arc<crate::behalf::Checker>>,
-    /// Keeps `behalf`'s checks fresh while the feed lives ([`crate::behalf::Checker::follow`]).
-    _following: Option<crate::behalf::Following>,
+    behalf: Option<Arc<crate::people::behalf::Checker>>,
+    /// Keeps `behalf`'s checks fresh while the feed lives ([`crate::people::behalf::Checker::follow`]).
+    _following: Option<crate::people::behalf::Following>,
     /// The parser for the next read of the stream, None while one is in flight.
     parser: Option<Parser>,
     tail: Option<Tail>,
@@ -252,14 +253,14 @@ impl Feed {
     }
 
     /// Open sealed messages between two humans with `keyring`.
-    pub fn opening(mut self, keyring: Option<Arc<crate::sealed::Keyring>>) -> Self {
+    pub fn opening(mut self, keyring: Option<Arc<crate::people::sealed::Keyring>>) -> Self {
         self.parser = Some(Parser::opening(keyring.clone()).checking(self.behalf.clone()));
         self.keyring = keyring;
         self
     }
 
     /// Check the `on_behalf_of` of an assistant's messages with `behalf`, kept fresh while the feed lives.
-    pub fn checking(mut self, behalf: Arc<crate::behalf::Checker>) -> Self {
+    pub fn checking(mut self, behalf: Arc<crate::people::behalf::Checker>) -> Self {
         self.parser = Some(Parser::opening(self.keyring.clone()).checking(Some(behalf.clone())));
         self._following = Some(behalf.follow());
         self.behalf = Some(behalf);
@@ -267,12 +268,12 @@ impl Feed {
     }
 
     /// What checks the `on_behalf_of` of an assistant's messages, if anything.
-    pub fn behalf(&self) -> Option<Arc<crate::behalf::Checker>> {
+    pub fn behalf(&self) -> Option<Arc<crate::people::behalf::Checker>> {
         self.behalf.clone()
     }
 
     /// What opens sealed messages, if anything.
-    pub fn keyring(&self) -> Option<Arc<crate::sealed::Keyring>> {
+    pub fn keyring(&self) -> Option<Arc<crate::people::sealed::Keyring>> {
         self.keyring.clone()
     }
 

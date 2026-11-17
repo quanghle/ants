@@ -4,7 +4,7 @@ use ants_daemon::hub;
 use anyhow::{Context as _, Result};
 
 use crate::connection::Nats;
-use crate::{devices, humans};
+use crate::people::{devices, humans};
 
 pub(crate) async fn run(nats: &Nats<'_>, identities_restored: bool) -> Result<()> {
     for line in self::hub(nats, identities_restored).await? {

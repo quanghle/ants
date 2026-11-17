@@ -39,7 +39,7 @@ pub(crate) fn creds(server: &Server, webhook: &UserId, to: Destination) -> PathB
     issue_with(
         &server.dir().join("auth"),
         webhook,
-        crate::revoke::Kind::Webhook,
+        crate::credentials::revoke::Kind::Webhook,
         Permissions::for_webhook(webhook, &[to]),
         &out,
     )

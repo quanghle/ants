@@ -33,7 +33,7 @@ use super::work::ThreadState;
 use crate::cmd::cancel::{CANCEL_GRACE, CANCEL_WAIT, cancel_outcome};
 use crate::live::maybe;
 use crate::spend::{self, ThreadReport};
-use crate::thread::{Entry, Kind};
+use crate::threads::thread::{Entry, Kind};
 
 /// How often the shown tree's links and spend are read.
 const READ_EVERY: Duration = Duration::from_secs(10);

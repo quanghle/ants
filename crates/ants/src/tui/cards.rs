@@ -16,7 +16,7 @@ use futures::future::LocalBoxFuture;
 use futures::{FutureExt as _, StreamExt as _};
 
 use crate::live::maybe;
-use crate::thread_meta::{self, Meta};
+use crate::threads::thread_meta::{self, Meta};
 
 /// How often the titles, done states, TL;DRs and spend are read.
 const EVERY: Duration = Duration::from_secs(10);
@@ -28,7 +28,7 @@ pub struct Cards {
     pub titles: HashMap<ThreadId, String>,
     /// Each thread's done state, whether or not a message since reopened it.
     pub done: HashMap<ThreadId, ThreadDone>,
-    /// What the `on_behalf_of` of each done state claiming one came to ([`crate::behalf::Checker`]).
+    /// What the `on_behalf_of` of each done state claiming one came to ([`crate::people::behalf::Checker`]).
     pub done_acting: HashMap<ThreadId, Acting>,
     pub tldr: HashMap<ThreadId, ThreadSummary>,
     /// Whether the TL;DRs were read once.
@@ -136,19 +136,19 @@ pub struct Source {
     meta: Result<Rc<Meta>, String>,
     sessions: Result<DirectKv, String>,
     /// What checks the claims of the done states, marks and snoozes an assistant set for its human.
-    behalf: Arc<crate::behalf::Checker>,
+    behalf: Arc<crate::people::behalf::Checker>,
 }
 
 impl Source {
     pub async fn open(nats: &crate::connection::Nats<'_>, js: &jetstream::Context) -> Self {
         let meta = thread_meta::open(nats, js).await.map(Rc::new).map_err(|e| format!("{e:#}"));
         let sessions = DirectKv::new(js, None, SESSIONS_BUCKET).await.map_err(|e| format!("{e:#}"));
-        let behalf = Arc::new(crate::behalf::Checker::new(nats, js));
+        let behalf = Arc::new(crate::people::behalf::Checker::new(nats, js));
         Self { js: js.clone(), meta, sessions, behalf }
     }
 
     /// The source, checking claims with `behalf` rather than a checker of its own.
-    pub fn checking(self, behalf: Option<Arc<crate::behalf::Checker>>) -> Self {
+    pub fn checking(self, behalf: Option<Arc<crate::people::behalf::Checker>>) -> Self {
         let behalf = behalf.unwrap_or(self.behalf);
         let meta =
             self.meta.map(|m| Rc::try_unwrap(m).map_or_else(|m| m, |m| Rc::new(m.checking(Some(behalf.clone())))));

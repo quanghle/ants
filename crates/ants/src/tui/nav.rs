@@ -14,7 +14,7 @@ use super::style;
 use super::work::ThreadState;
 use crate::channel::reads::Unread;
 use crate::colony;
-use crate::thread::Kind;
+use crate::threads::thread::Kind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {

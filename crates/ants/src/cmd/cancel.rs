@@ -7,7 +7,7 @@ use anyhow::{Result, bail};
 use futures::StreamExt as _;
 
 use crate::connection::Nats;
-use crate::thread;
+use crate::threads::thread;
 
 /// How long `ants cancel` waits for a daemon of the ant to answer.
 pub(crate) const CANCEL_WAIT: Duration = Duration::from_secs(5);

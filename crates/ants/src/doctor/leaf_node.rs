@@ -11,8 +11,9 @@ use super::credentials::check_creds;
 use super::services::start_server;
 use super::transports::same_address;
 use super::{Check, Connected, NETWORK_TIMEOUT, Setup};
-use crate::humans::Me;
-use crate::{auth, leaf, outbox};
+use crate::auth;
+use crate::node::{leaf, outbox};
+use crate::people::humans::Me;
 
 /// The machine's leaf node, as `ants leaf config` wrote its configuration.
 pub(super) struct Leaf {

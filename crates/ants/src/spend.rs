@@ -23,7 +23,7 @@ pub const DEFAULT_DAYS: u32 = 7;
 /// What to report: one ant or all, one thread or the days up to today.
 pub struct Select {
     pub ant: Option<UserId>,
-    pub thread: Option<crate::thread::Pick>,
+    pub thread: Option<crate::threads::thread::Pick>,
     pub days: u32,
 }
 
@@ -114,7 +114,7 @@ async fn keys(js: &jetstream::Context, filter: &str) -> Result<Vec<String>> {
     let prefix = format!("$KV.{SESSIONS_BUCKET}.");
     let stream = match js.get_stream(format!("KV_{SESSIONS_BUCKET}")).await {
         Ok(stream) => stream,
-        Err(e) if crate::outbox::not_found(&e) => return Ok(Vec::new()),
+        Err(e) if crate::node::outbox::not_found(&e) => return Ok(Vec::new()),
         Err(e) => return Err(e).context(format!("looking up {SESSIONS_BUCKET}, which needs human credentials")),
     };
     let subjects: Vec<(String, usize)> = stream
@@ -336,7 +336,7 @@ pub async fn show(nats: &Nats<'_>, select: &Select, caps: &BTreeMap<UserId, Caps
     let (_, js) = nats.connect("ants-spend").await?;
     let kv = DirectKv::new(&js, None, SESSIONS_BUCKET).await?;
     let ant = select.ant.as_ref();
-    if let Some(id) = &crate::thread::resolve(select.thread.clone(), nats, &js).await? {
+    if let Some(id) = &crate::threads::thread::resolve(select.thread.clone(), nats, &js).await? {
         let reports = thread(&js, &kv, ant, id, caps).await?;
         if json {
             for report in &reports {

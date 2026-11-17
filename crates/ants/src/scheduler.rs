@@ -187,8 +187,14 @@ mod tests {
         let to = Destination::Ant(p("dev-a"));
         crate::auth::init(&dir.join("auth")).unwrap();
         let permissions = ants_proto::Permissions::for_webhook(&p("other"), std::slice::from_ref(&to));
-        crate::auth::issue_with(&dir.join("auth"), &p("other"), crate::revoke::Kind::Webhook, permissions, &out)
-            .unwrap();
+        crate::auth::issue_with(
+            &dir.join("auth"),
+            &p("other"),
+            crate::credentials::revoke::Kind::Webhook,
+            permissions,
+            &out,
+        )
+        .unwrap();
         let err = format!("{:#}", resolve(vec![schedule("nightly", Some(out), to)], "nats://hub", None).unwrap_err());
         assert!(err.contains("schedule nightly") && err.contains("are not schedule nightly's"), "{err}");
         assert!(err.contains("ants auth user nightly --webhook --to dev-a"), "{err}");

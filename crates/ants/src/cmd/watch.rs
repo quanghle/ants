@@ -11,7 +11,8 @@ use futures::StreamExt as _;
 use crate::avatars::Faces;
 use crate::connection::Nats;
 use crate::text::escalation_note;
-use crate::{thread, tools};
+use crate::threads::thread;
+use crate::tools;
 
 /// What `ants watch <subject> [thread]` subscribes to: a subject filter as given, or, for an ant (one token), its
 /// status subjects.
@@ -40,7 +41,7 @@ pub(crate) async fn run(nats: &Nats<'_>, target: String, thread: Option<thread::
     let mut sub = client.subscribe(filter).await?;
     let faces = crate::avatars::Faces::stdout(crate::avatars::read_or_none(&js).await);
     let mut printer = Printer { faces: Some(faces), ..Printer::default() };
-    let behalf = std::sync::Arc::new(crate::behalf::Checker::new(nats, &js));
+    let behalf = std::sync::Arc::new(crate::people::behalf::Checker::new(nats, &js));
     let _following = behalf.follow();
     let mut reacted = watched_reactions(&js, target, nats.me.role.is_human(), &behalf).await;
     loop {
@@ -120,14 +121,14 @@ pub(crate) async fn watched_reactions(
     js: &async_nats::jetstream::Context,
     target: &str,
     human: bool,
-    behalf: &std::sync::Arc<crate::behalf::Checker>,
+    behalf: &std::sync::Arc<crate::people::behalf::Checker>,
 ) -> futures::stream::BoxStream<'static, reactions::Change> {
     let none = || futures::stream::pending().boxed();
     if !human || ![subject::ALL, ">"].contains(&target) {
         return none();
     }
     match reactions::watch(js).await {
-        Ok(changes) => crate::reacted::checked(changes, behalf).chain(futures::stream::pending()).boxed(),
+        Ok(changes) => crate::messages::reacted::checked(changes, behalf).chain(futures::stream::pending()).boxed(),
         Err(e) => {
             tracing::warn!("not showing reactions: {e:#}");
             none()
@@ -152,7 +153,7 @@ pub(crate) fn envelope_line(e: &Envelope, acting: &Acting, forged: &str, faces: 
         return format!("{head} decides {} on approval request {}/{}", tools::spelling(d.verdict), d.ant, d.request_id);
     }
     if let Some(sealed) = &e.sealed {
-        return format!("{head}: {}", crate::sealed::size_note(sealed));
+        return format!("{head}: {}", crate::people::sealed::size_note(sealed));
     }
     match &e.escalation {
         Some(x) => format!("{head} [{}]: {}", escalation_note(x), e.text),

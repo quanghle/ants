@@ -12,8 +12,9 @@ use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap}
 
 use super::model::{Detail, Level, Model, Pane};
 use crate::live::Link;
+use crate::threads::thread;
 use crate::tui::style::{self, ago, block, dim, highlight};
-use crate::{colony, thread, tools};
+use crate::{colony, tools};
 
 /// How old the last read of the stream may be before it shows as stale: a few of the dashboard's periodic reads.
 const STALE: TimeDelta = TimeDelta::seconds(15);

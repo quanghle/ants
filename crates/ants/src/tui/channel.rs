@@ -17,9 +17,9 @@ use super::model::{Action, Data, Key, To};
 use super::select::Selection;
 use super::style::{self, ago};
 use super::work::Filter;
-use crate::attachments::Listed;
 use crate::channel::reads::Unread;
-use crate::thread::{Entry, Kind};
+use crate::messages::attachments::Listed;
+use crate::threads::thread::{Entry, Kind};
 
 /// The most posts of a channel whose reactions are read.
 const WATCHED: usize = 200;
@@ -272,7 +272,7 @@ mod tests {
 
     use super::*;
     use crate::test_support::live::{at, user};
-    use crate::thread::Parser;
+    use crate::threads::thread::Parser;
     use crate::tui::model::{Action, Key, Page as View};
     use crate::tui::nav;
     use crate::tui::test_support::{model, post};

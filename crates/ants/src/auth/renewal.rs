@@ -16,7 +16,7 @@ use super::issuing::in_domain;
 use super::short_lived::signer_permissions;
 use super::uplink::{LEAF_CONNECTIONS, allowed, check_uplink_size, dedup, merge};
 use super::{ACCOUNT_SEED, assistants, leaf_role, members};
-use crate::revoke::{self, Issued, Kind};
+use crate::credentials::revoke::{self, Issued, Kind};
 
 /// Credentials renewed by [`renew`].
 #[derive(Debug)]
@@ -34,7 +34,7 @@ pub struct Renewed {
 /// domain, permissions as this version of ants gives them (so an upgrade applies), and as long a lifetime as `current`
 /// had, if it had an expiry. A human's credentials without an encryption key bind `xkey`, generated on the device,
 /// when given; credentials of others, or with a key already, refuse one. Recorded in the registry as renewed from the earlier key ([`Issued::renewed_from`]), with a leaf node's
-/// members ([`crate::members`]), so a later `ants auth leaf` keeps them.
+/// members ([`crate::node::members`]), so a later `ants auth leaf` keeps them.
 ///
 /// Refused for credentials of another account, expired or revoked ones, enrollment and leaf system credentials, and
 /// for a new key revoked or already issued to other credentials. Proving that the holder has the seed of `current` is
@@ -125,7 +125,8 @@ pub(super) fn renew_as(
     }
     if let CredsKind::Leaf { ants, humans, webhooks, enroll_approver, .. } = &renewed.kind {
         let (ants, humans, webhooks) = (ants.clone(), humans.clone(), webhooks.clone());
-        record.members = Some(crate::members::Members { ants, humans, webhooks, enroll_approver: *enroll_approver });
+        record.members =
+            Some(crate::node::members::Members { ants, humans, webhooks, enroll_approver: *enroll_approver });
     }
     revoke::record(dir, &record)?;
     Ok(Renewed { jwt, finding: renewed, previous: claims.sub })

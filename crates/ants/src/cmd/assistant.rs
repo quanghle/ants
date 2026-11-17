@@ -1,13 +1,14 @@
 //! `ants assistant`: designate, withdraw, enable and disable the human's assistant, enroll it for sealed messages,
-//! and sign the human's consent to its decisions ([`crate::assistant`]).
+//! and sign the human's consent to its decisions ([`crate::people::assistant`]).
 
 use ants_proto::UserId;
 use anyhow::Result;
 use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
 
+use crate::completions;
 use crate::connection::Connection;
-use crate::{assistant, completions};
+use crate::people::assistant;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum AssistantCommand {

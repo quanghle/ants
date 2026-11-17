@@ -8,8 +8,8 @@ use std::time::Duration;
 use ants_proto::{ApprovalRequest, ColonyEntry, Mark, StatusEvent, StatusUpdate, ThreadId, ThreadMarks, UserId, Uuid};
 use chrono::{DateTime, Utc};
 
-use crate::progress;
-use crate::thread::{self, Entry, Summary, Threads};
+use crate::messages::progress;
+use crate::threads::thread::{self, Entry, Summary, Threads};
 use crate::tools::{HeldAct, Update};
 
 /// The ants' live progress on a thread.

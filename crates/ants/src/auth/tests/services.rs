@@ -11,7 +11,7 @@ async fn a_webhook_posts_as_itself_to_its_destinations_only_and_reads_no_message
     issue_with(
         &server.dir().join("auth"),
         &hook,
-        crate::revoke::Kind::Webhook,
+        crate::credentials::revoke::Kind::Webhook,
         Permissions::for_webhook(&hook, &destinations),
         &creds,
     )
@@ -97,7 +97,8 @@ async fn an_observer_reads_approvals_dead_letters_status_and_the_colony_and_publ
     let (audit, dev_a, dev_b) = (p("audit"), p("dev-a"), p("dev-b"));
     let creds = server.dir().join("audit.creds");
     let team = server.dir().join("auth");
-    issue_with(&team, &audit, crate::revoke::Kind::Observer, Permissions::for_observer(&audit), &creds).unwrap();
+    issue_with(&team, &audit, crate::credentials::revoke::Kind::Observer, Permissions::for_observer(&audit), &creds)
+        .unwrap();
     let text = std::fs::read_to_string(&creds).unwrap();
     assert_eq!(
         ants_daemon::secrets::creds::Finding::from_creds(&text).unwrap().kind,
@@ -214,7 +215,7 @@ async fn a_hook_runs_once_per_dead_letter_from_where_its_consumer_left_off() {
     issue_with(
         &server.dir().join("auth"),
         &audit,
-        crate::revoke::Kind::Observer,
+        crate::credentials::revoke::Kind::Observer,
         Permissions::for_observer(&audit),
         &creds,
     )

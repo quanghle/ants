@@ -11,7 +11,7 @@ use futures::FutureExt as _;
 use futures::future::LocalBoxFuture;
 
 use crate::live::maybe;
-use crate::thread_meta::Meta;
+use crate::threads::thread_meta::Meta;
 
 /// How often the done states are read.
 const EVERY: Duration = Duration::from_secs(10);

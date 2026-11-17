@@ -6,7 +6,10 @@ use ants_daemon::admin::ConfigFile;
 use anyhow::Result;
 
 use crate::connection::Connection;
-use crate::{manager, natsd, reload, scheduler, serve, update, upgrade};
+use crate::node::natsd;
+use crate::release::{update, upgrade};
+use crate::signing::manager;
+use crate::{reload, scheduler, serve};
 
 pub(crate) async fn run(conn: &Connection<'_>, args: serve::DaemonArgs) -> Result<()> {
     let args = &args;
