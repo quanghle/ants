@@ -112,6 +112,7 @@ const HELP: &[(&str, &str)] = &[
     ("Enter", "open the selection"),
     ("Esc", "back to the previous view, else to the nav"),
     ("w ←→ a", "in a channel or on an ant: its threads in work; on an ant: pane, ask"),
+    ("[ ] \\", "on an ant: scroll its about or now column up, down; switch between the two"),
     ("Ctrl-K @ #", "the command bar: @ant asks, #channel posts, else reply"),
     ("/command", "in the bar: a command on the selection (Ctrl-K lists them)"),
     ("Alt-Enter Ctrl-E", "in the bar: a new line, the text in the editor"),
@@ -163,7 +164,7 @@ mod tests {
     use crate::tui::test_support::model;
 
     fn screen(m: &Model, now: DateTime<Utc>) -> String {
-        crate::test_support::render::rendered(120, 30, |f| draw(f, m, now))
+        crate::test_support::render::rendered(120, 32, |f| draw(f, m, now))
     }
 
     #[test]

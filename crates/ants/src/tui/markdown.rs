@@ -447,7 +447,7 @@ fn words(text: &str) -> Vec<&str> {
 }
 
 /// `spans`, one line, wrapped at word boundaries into rows at most `width` columns wide, a word wider than that cut.
-fn wrap(spans: &[Span<'static>], width: usize) -> Vec<Vec<Span<'static>>> {
+pub fn wrap(spans: &[Span<'static>], width: usize) -> Vec<Vec<Span<'static>>> {
     let mut rows: Vec<Vec<Span<'static>>> = vec![Vec::new()];
     let mut used = 0;
     for span in spans {

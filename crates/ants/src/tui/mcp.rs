@@ -65,10 +65,10 @@ pub struct Page {
 }
 
 impl Page {
-    pub const KEYS: &str = "↑↓ server · s sign in · u read again · ←→ pane · a ask · w work · r restart · \
-         p (un)pause · X retire · Esc back";
+    pub const KEYS: &str = "↑↓ server · s sign in · u read again · ←→ pane · [ ] \\ scroll about/now · a ask · \
+         w work · r restart · p (un)pause · X retire · Esc back";
     pub const SIGNING_KEYS: &str = "↑↓ server · y copy the address · v hand back where the browser came back to · \
-         s sign in again · u read again · ←→ pane · Esc back";
+         s sign in again · u read again · ←→ pane · [ ] \\ scroll about/now · Esc back";
     pub const DRAFT_KEYS: &str =
         "type or paste the address the browser came back to · Enter hand it over · Esc drop it";
 

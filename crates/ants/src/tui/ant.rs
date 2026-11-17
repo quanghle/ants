@@ -1,8 +1,9 @@
-//! The ant view: one ant at a glance, as `ants ant show` prints it ([`crate::ant`]). Above, where and how it runs, as
-//! its colony entry tells, beside what holds it back, what it does now on each thread (as `ants watch ANT` follows
-//! it) and what it spent that UTC day; below, one pane at a time ([`Pane`]): its threads, the messages waiting for it,
-//! which [`Io`] asks its daemon for every while (as `ants queue` does), its memories ([`super::memories`]), its MCP
-//! servers ([`super::mcp`]), or its settings and the admin orders to it ([`settings`]).
+//! The ant view: one ant at a glance, as `ants ant show` prints it ([`crate::ant`]). Above, in a box as high as its
+//! avatar head whose two columns scroll apart ([`Column`]), where and how it runs, as its colony entry tells, beside
+//! what holds it back, what it does now on each thread (as `ants watch ANT` follows it) and what it spent that UTC
+//! day; below, one pane at a time ([`Pane`]): its threads, the messages waiting for it, which [`Io`] asks its daemon
+//! for every while (as `ants queue` does), its memories ([`super::memories`]), its MCP servers ([`super::mcp`]), or
+//! its settings and the admin orders to it ([`settings`]).
 
 use std::time::Duration;
 
@@ -16,9 +17,10 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, TableState, Wrap};
 
 use super::exec::Job;
+use super::markdown;
 use super::mcp;
 use super::memories;
 use super::model::{Action, Data, Key, To};
@@ -68,6 +70,15 @@ impl Pane {
     }
 }
 
+/// A column of the box atop the view: `\` switches the one `[` and `]` scroll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Column {
+    /// Where and how the ant runs.
+    About,
+    /// What holds it back, what it does now and what it spent.
+    Now,
+}
+
 /// The messages waiting for the ant, as last asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Queue {
@@ -92,13 +103,19 @@ pub struct Page {
     pub settings: settings::Pane,
     /// Whether `r` asked to restart the ant's harnesses, which the next key confirms.
     armed: bool,
+    /// The column of the box atop `[` and `]` scroll.
+    column: Column,
+    /// How far each column of the box is scrolled, about first, kept within what was last drawn.
+    scrolled: std::cell::Cell<[usize; 2]>,
+    /// How far each column of the box could scroll when last drawn.
+    scrollable: std::cell::Cell<[usize; 2]>,
 }
 
 impl Page {
     pub const THREADS_KEYS: &str = "↑↓ thread · Enter open · x cancel · z snooze · S TL;DR · ←→ pane · \
-         a ask · w work · r restart · p (un)pause · X retire · Esc back";
-    pub const QUEUE_KEYS: &str =
-        "↑↓ message · Enter open its thread · ←→ pane · a ask · w work · r restart · p (un)pause · X retire · Esc back";
+         [ ] \\ scroll about/now · a ask · w work · r restart · p (un)pause · X retire · Esc back";
+    pub const QUEUE_KEYS: &str = "↑↓ message · Enter open its thread · ←→ pane · [ ] \\ scroll about/now · a ask · \
+         w work · r restart · p (un)pause · X retire · Esc back";
     pub const ARMED_KEYS: &str = "y restart the ant's harnesses after their prompts · ! restart now, \
          cancelling the prompts · any other key keeps them";
 
@@ -107,7 +124,20 @@ impl Page {
         let (message, queue, memories) = (Selection::default(), Queue::Asking, memories::Page::new());
         let settings = settings::Pane::default();
         let mcp = Box::new(mcp::Page::new());
-        Self { ant, pane: Pane::Threads, threads, message, queue, memories, mcp, settings, armed: false }
+        Self {
+            ant,
+            pane: Pane::Threads,
+            threads,
+            message,
+            queue,
+            memories,
+            mcp,
+            settings,
+            armed: false,
+            column: Column::About,
+            scrolled: std::cell::Cell::new([0; 2]),
+            scrollable: std::cell::Cell::new([0; 2]),
+        }
     }
 
     pub fn keys(&self) -> &'static str {
@@ -170,6 +200,20 @@ impl Page {
                 }
                 return None;
             }
+            Key::Char('\\') => {
+                self.column = if self.column == Column::About { Column::Now } else { Column::About };
+                return None;
+            }
+            Key::Char(c @ ('[' | ']')) => {
+                let (mut scrolled, at) = (self.scrolled.get(), self.column as usize);
+                scrolled[at] = if c == '[' {
+                    scrolled[at].saturating_sub(1)
+                } else {
+                    (scrolled[at] + 1).min(self.scrollable.get()[at])
+                };
+                self.scrolled.set(scrolled);
+                return None;
+            }
             Key::Char('w') => return Some(To::Work(Filter { user: Some(self.ant.clone()), ..Filter::default() })),
             Key::Char('a') => return Some(To::Bar(format!("@{} ", self.ant))),
             Key::Char('c') => return Some(To::Credentials),
@@ -213,11 +257,8 @@ impl Page {
         let (mark, color) = super::nav::marker(&entry.into_iter().collect::<Vec<_>>(), now);
         let head = data.looks.head(&self.ant);
         let head_width = head.iter().flatten().map(Line::width).max().map_or(0, |w| w + 2);
-        let width = (usize::from(area.width).saturating_sub(head_width) / 2).saturating_sub(2);
-        let about = about(entry, now, width);
-        let status = status(&self.ant, entry, data, now);
-        let tall = about.len().max(status.len()).max(head.as_ref().map_or(0, Vec::len));
-        let tall = u16::try_from(tall + 2).unwrap_or(u16::MAX);
+        let rows = entry.map_or(1, |e| crate::ant::about(e, now).len());
+        let tall = u16::try_from(head.as_ref().map_or(rows, Vec::len) + 2).unwrap_or(u16::MAX);
         let [top, tabs, pane] =
             Layout::vertical([Constraint::Max(tall.min(area.height / 2)), Constraint::Length(1), Constraint::Min(3)])
                 .areas(area);
@@ -238,10 +279,14 @@ impl Page {
             ),
         };
 
-        let block = style::block(title, focused).title_style(Style::new().fg(color));
-        frame.render_widget(Paragraph::new(about).block(block).wrap(Wrap { trim: false }), left);
-        let block = style::block(" now ".to_owned(), false);
-        frame.render_widget(Paragraph::new(status).block(block).wrap(Wrap { trim: false }), right);
+        let inner = |r: Rect| (usize::from(r.width.saturating_sub(2)), usize::from(r.height.saturating_sub(2)));
+        let (width, height) = inner(left);
+        let block = style::block(title, focused && self.column == Column::About).title_style(Style::new().fg(color));
+        frame.render_widget(self.scroll(Column::About, about(entry, now, width), height, block), left);
+        let (width, height) = inner(right);
+        let block = style::block(" now ".to_owned(), focused && self.column == Column::Now);
+        let status = wrapped(status(&self.ant, entry, data, now), width);
+        frame.render_widget(self.scroll(Column::Now, status, height, block), right);
         let threads = self.threads.rows(data).len();
         let mut spans = vec![Span::raw(" ")];
         for pane in self.panes(data) {
@@ -265,6 +310,31 @@ impl Page {
             Pane::Mcp => self.mcp.draw(frame, pane, &self.ant, focused),
             Pane::Settings => self.settings.draw(frame, pane, &self.ant, now, focused),
         }
+    }
+
+    /// The `lines` of `column` in `block`, `height` of them shown from as far down as the column is scrolled, kept
+    /// within them, and on the block's bottom border how many lie past those shown.
+    fn scroll(
+        &self,
+        column: Column,
+        lines: Vec<Line<'static>>,
+        height: usize,
+        block: Block<'static>,
+    ) -> Paragraph<'static> {
+        let at = column as usize;
+        let (mut scrolled, mut scrollable) = (self.scrolled.get(), self.scrollable.get());
+        scrollable[at] = lines.len().saturating_sub(height);
+        scrolled[at] = scrolled[at].min(scrollable[at]);
+        self.scrolled.set(scrolled);
+        self.scrollable.set(scrollable);
+        let (top, below) = (scrolled[at], scrollable[at] - scrolled[at]);
+        let s = |n: usize| if n == 1 { "" } else { "s" };
+        let block = match (top, below) {
+            (_, 1..) => block.title_bottom(format!(" [ ] {below} more line{} ", s(below))),
+            (1.., 0) => block.title_bottom(format!(" [ ] {top} line{} above ", s(top))),
+            _ => block,
+        };
+        Paragraph::new(lines.into_iter().skip(top).collect::<Vec<_>>()).block(block)
     }
 
     /// The panes the view offers: the MCP one only while the ant's colony entry tells that its harness reports its
@@ -325,26 +395,39 @@ impl Page {
     }
 }
 
-/// Where and how the ant runs, its labels lined up, in lines of at most `width` characters but for the whoami, which
-/// wraps.
+/// Where and how the ant runs, its labels lined up, in lines of at most `width` characters: the whoami wrapped, under
+/// its label, the other values cut.
 fn about(entry: Option<&ColonyEntry>, now: DateTime<Utc>, width: usize) -> Vec<Line<'static>> {
     let Some(entry) = entry else {
-        return vec![Line::styled("not in the colony: no daemon serves it now", style::dim())];
+        return wrapped(vec![Line::styled("not in the colony: no daemon serves it now", style::dim())], width);
     };
     let rows = crate::ant::about(entry, now);
     let label = rows.iter().map(|(l, _)| l.len()).max().unwrap_or(0);
+    let room = width.saturating_sub(label + 1);
     let mut lines = Vec::new();
     for (name, value) in rows {
-        let text = if name == "whoami" { value } else { crate::text::excerpt(&value, width.saturating_sub(label + 1)) };
-        for (n, part) in text.lines().enumerate() {
+        let parts = if name == "whoami" {
+            value.lines().flat_map(|line| markdown::wrap(&[Span::raw(line.to_owned())], room.max(1))).collect()
+        } else {
+            vec![vec![Span::raw(crate::text::excerpt(&value, room))]]
+        };
+        for (n, part) in parts.into_iter().enumerate() {
             let name = if n == 0 { name } else { "" };
-            lines.push(Line::from(vec![
-                Span::styled(format!("{name:<label$} "), style::dim()),
-                Span::raw(part.to_owned()),
-            ]));
+            let mut spans = vec![Span::styled(format!("{name:<label$} "), style::dim())];
+            spans.extend(part);
+            lines.push(Line::from(spans));
         }
     }
     lines
+}
+
+/// `lines` wrapped between words into lines at most `width` wide.
+fn wrapped(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
+    let rows = |line: Line<'static>| {
+        let style = line.style;
+        markdown::wrap(&line.spans, width.max(1)).into_iter().map(move |spans| Line::from(spans).style(style))
+    };
+    lines.into_iter().flat_map(rows).collect()
 }
 
 /// What holds the ant back, what it does now on each thread, and what it spent that UTC day.
@@ -477,7 +560,7 @@ mod tests {
     use crate::tui::test_support::model;
 
     fn screen(m: &Model, now: DateTime<Utc>) -> String {
-        crate::test_support::render::rendered(140, 36, |f| crate::tui::frame::draw(f, m, now))
+        crate::test_support::render::rendered(160, 36, |f| crate::tui::frame::draw(f, m, now))
     }
 
     fn waiting(thread: &ThreadId, from: &str, ahead: usize) -> Waiting {
@@ -553,6 +636,54 @@ mod tests {
         m.key(Key::Char('r'), at(3));
         assert_eq!(m.key(Key::Char('n'), at(3)), None);
         assert_eq!(m.key(Key::Char('y'), at(3)), None, "any other key keeps the harnesses");
+    }
+
+    #[test]
+    fn a_long_whoami_keeps_the_box_as_high_and_its_columns_scroll_apart() {
+        let mut m = model();
+        let mut dev = entry("dev-a", 60, 2, at(2));
+        dev.whoami = Some((1..=40).map(|n| format!("word{n:02}")).collect::<Vec<_>>().join(" "));
+        m.data.live.colony(vec![dev], at(2));
+        for n in 0..14 {
+            let tool = StatusUpdate::Tool {
+                id: format!("t{n}"),
+                title: Some(format!("step {n:02}")),
+                tool_kind: None,
+                status: None,
+                paths: None,
+            };
+            let event = StatusEvent::new(user("dev-a"), ThreadId::generate(), tool);
+            m.take(crate::live::Event::Status(StatusEvent { at: at(n), ..event }), at(2));
+        }
+        m.select(nav::Item::Ant(user("dev-a")));
+        m.focus = crate::tui::model::Focus::View;
+        let tabs = |shown: &str| shown.lines().position(|l| l.contains("threads (0)")).unwrap();
+        let shown = screen(&m, at(3));
+        assert_eq!(tabs(&shown), 13, "the box keeps the 10 rows of the about column: {shown}");
+        assert!(shown.contains("whoami       word01") && !shown.contains("word40"), "{shown}");
+        assert!(shown.contains("[ ] 5 more lines") && shown.contains("[ ] 6 more lines"), "{shown}");
+
+        m.key(Key::Char(']'), at(3));
+        let shown = screen(&m, at(3));
+        assert!(!shown.contains("machine      m1") && shown.contains("[ ] 4 more lines"), "{shown}");
+        assert!(shown.contains("nothing holds dev-a back") && shown.contains("[ ] 6 more lines"), "{shown}");
+        (0..10).for_each(|_| _ = m.key(Key::Char(']'), at(3)));
+        let shown = screen(&m, at(3));
+        assert!(shown.contains("word40") && shown.contains("[ ] 5 lines above"), "kept within: {shown}");
+        m.key(Key::Char('['), at(3));
+        assert!(screen(&m, at(3)).contains("[ ] 1 more line "), "{}", screen(&m, at(3)));
+
+        m.key(Key::Char('\\'), at(3));
+        m.key(Key::Char(']'), at(3));
+        let shown = screen(&m, at(3));
+        assert!(!shown.contains("nothing holds dev-a back") && shown.contains("[ ] 5 more lines"), "{shown}");
+        assert!(shown.contains("[ ] 1 more line "), "the about column stays: {shown}");
+        assert_eq!(tabs(&shown), 13);
+
+        m.select(nav::Item::Ant(user("dev-b")));
+        m.select(nav::Item::Ant(user("dev-a")));
+        let shown = screen(&m, at(3));
+        assert!(shown.contains("[ ] 5 more lines") && shown.contains("[ ] 6 more lines"), "scrolled back: {shown}");
     }
 
     fn restart(now: bool) -> Job {

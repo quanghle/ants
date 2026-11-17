@@ -72,8 +72,8 @@ pub struct Pane {
 }
 
 impl Pane {
-    pub const KEYS: &str = "↑↓ field · Enter change · n new field · u read again · ←→ pane · a ask · w work · r \
-                            restart · p (un)pause · X retire · Esc back";
+    pub const KEYS: &str = "↑↓ field · Enter change · n new field · u read again · ←→ pane · [ ] \\ scroll \
+                            about/now · a ask · w work · r restart · p (un)pause · X retire · Esc back";
     pub const DRAFT_KEYS: &str = "KEY = VALUE, a TOML value or a word; KEY = removes · Enter send · Esc cancel";
 
     fn read(&self) -> Option<&settings::Read> {
@@ -413,7 +413,7 @@ mod tests {
     use crate::tui::test_support::model;
 
     fn screen(m: &super::super::model::Model) -> String {
-        crate::test_support::render::rendered(140, 36, |f| crate::tui::frame::draw(f, m, at(3)))
+        crate::test_support::render::rendered(160, 36, |f| crate::tui::frame::draw(f, m, at(3)))
     }
 
     fn reading() -> Reading {
