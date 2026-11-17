@@ -89,7 +89,8 @@ pub const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "checkpoint",
         description: "Replace this thread's resume register (goal, current step, next action, blockers, branch, open \
-                      questions) from the revision read, acknowledging this thread's handoffs.",
+                      questions) from the revision read, acknowledging this thread's handoffs. Without arguments, \
+                      show the whole register and every unacknowledged handoff.",
         schema: checkpoint,
         handler: crate::thread::checkpoint,
     },

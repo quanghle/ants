@@ -175,10 +175,41 @@ async fn the_longest_section_is_cut_naming_the_tool_call_showing_the_rest() {
     assert!(brief.len() <= budget, "{} > {budget}", brief.len());
     let this = &brief[position(&brief, "## This thread")..position(&brief, "## Unacknowledged")];
     position(this, "Goal: Ship the parser");
-    let hint = "… more: sense_checkpoint without a revision is refused with the whole register";
+    let hint = "… more: sense_checkpoint without arguments";
     assert!(this.trim_end().ends_with(hint), "{this}");
     position(&brief, "- Lexer");
     position(&brief, "- sense_brief: ");
+
+    let read = call(&sense, thread::checkpoint, THREAD, json!({})).await;
+    assert_eq!(read.json["register"]["blockers"].as_array().unwrap().len(), 20, "the whole register");
+    assert!(read.text.contains(blockers[19].trim_end()), "{}", read.text);
+    let after = session_brief(&sense, u32::try_from(budget).unwrap()).await;
+    assert_eq!(after, brief, "reading changes nothing");
+}
+
+#[tokio::test]
+async fn handoffs_past_the_brief_s_are_named_with_the_tool_call_showing_them_all() {
+    let (sense, _) = filled().await;
+    let mut episodes = Vec::new();
+    for i in 0..MAX_HANDOFFS {
+        let answer = call(&sense, thread::handoff, OTHER, json!({"next": [format!("Step {i}")]})).await;
+        episodes.push(answer.json["handoff"]["episode"].as_str().unwrap().to_owned());
+    }
+    let brief = session_brief(&sense, 8_000).await;
+    let handoffs = &brief[position(&brief, "## Unacknowledged")..position(&brief, "## Memories")];
+    assert!(!handoffs.contains("- Lexer"), "the oldest is past the brief's: {handoffs}");
+    assert!(handoffs.trim_end().ends_with("… more: sense_checkpoint without arguments"), "{handoffs}");
+
+    let read = call(&sense, thread::checkpoint, THREAD, json!({})).await;
+    let shown = read.json["handoffs"].as_array().unwrap();
+    assert_eq!(shown.len(), MAX_HANDOFFS + 1);
+    position(&read.text, "- Lexer");
+    position(&read.text, "Goal: Ship the parser");
+    for episode in &episodes {
+        position(&read.text, &format!("Episode memory: {episode}"));
+    }
+    let first = session_brief(&sense, 8_000).await;
+    assert_eq!(first, brief, "reading acknowledges nothing");
 }
 
 #[test]

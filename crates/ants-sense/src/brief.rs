@@ -173,8 +173,10 @@ async fn sections(items: &dyn Items, context: &CallContext, card: Option<&Card>)
     sections.extend(items.broken().await.as_ref().map(warning));
     sections.push(identity_section(card, context));
     sections.push(register_section(thread::register(items, &context.thread).await?.as_ref()));
-    let handoffs = thread::unacknowledged(items, MAX_HANDOFFS).await?;
-    sections.extend(handoffs_section(&handoffs));
+    let mut handoffs = thread::unacknowledged(items, MAX_HANDOFFS + 1).await?;
+    let more = handoffs.len() > MAX_HANDOFFS;
+    handoffs.truncate(MAX_HANDOFFS);
+    sections.extend(handoffs_section(&handoffs, more));
     let episodes: Vec<_> = handoffs.into_iter().filter_map(|handoff| handoff.episode).collect();
     sections.extend(memories_section(items, context, &episodes).await?);
     sections.push(core_loop());
@@ -228,22 +230,19 @@ fn register_section(register: Option<&Register>) -> Section {
         Some(register) => register.text().trim_end().to_owned(),
         None => "No resume register yet: start one with sense_checkpoint, without a revision.".to_owned(),
     };
-    Section::cut_with("## This thread", body, "sense_checkpoint without a revision is refused with the whole register")
+    Section::cut_with("## This thread", body, thread::READ)
 }
 
-fn handoffs_section(handoffs: &[Handoff]) -> Option<Section> {
+/// The section of `handoffs`, ending with the tool call showing the rest when there are `more`.
+fn handoffs_section(handoffs: &[Handoff], more: bool) -> Option<Section> {
     if handoffs.is_empty() {
         return None;
     }
-    let texts: Vec<_> = handoffs
-        .iter()
-        .map(|handoff| match &handoff.episode {
-            Some(episode) => format!("{}Episode memory: {episode}", handoff.text()),
-            None => handoff.text().trim_end().to_owned(),
-        })
-        .collect();
+    let texts: Vec<_> = handoffs.iter().map(|handoff| handoff.text().trim_end().to_owned()).collect();
     let heading = "## Unacknowledged handoffs (a checkpoint acknowledges them)";
-    Some(Section::cut_with(heading, texts.join("\n"), "sense_recall query=\"Handoff of thread\""))
+    let mut section = Section::cut_with(heading, texts.join("\n"), thread::READ);
+    section.cut = more;
+    Some(section)
 }
 
 /// The core memories, then the top memories of the thread's scopes but the `episodes` of the handoffs shown.

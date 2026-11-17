@@ -176,6 +176,35 @@ async fn handoffs_show_until_a_checkpoint_on_their_thread_or_naming_them_acknowl
 }
 
 #[tokio::test]
+async fn a_checkpoint_changing_nothing_shows_the_register_and_every_unacknowledged_handoff() {
+    let (sense, items) = sense().await;
+    let empty = checkpointed(&sense, "t1", json!({})).await;
+    assert!(!empty.is_error, "{empty:?}");
+    assert_eq!((&empty.json["register"], &empty.json["handoffs"]), (&Value::Null, &json!([])));
+    assert!(empty.text.contains("No unacknowledged handoffs."), "{}", empty.text);
+    assert_eq!(register(&*items, &thread("t1")).await.unwrap(), None, "nothing written");
+
+    checkpointed(&sense, "t1", json!({"goal": "ship", "blockers": ["ci"]})).await;
+    let mut episodes = Vec::new();
+    for thread in ["t1", "t2"] {
+        let answer = handed_over(&sense, thread, json!({"next": [format!("finish {thread}")]})).await;
+        episodes.push(answer.json["handoff"]["episode"].as_str().unwrap().to_owned());
+    }
+    for arguments in [json!({}), json!({"revision": 1, "goal": " ", "acknowledges": []})] {
+        let read = checkpointed(&sense, "t1", arguments).await;
+        assert!(!read.is_error, "{read:?}");
+        assert_eq!((&read.json["register"]["goal"], &read.json["register"]["revision"]), (&json!("ship"), &json!(1)));
+        assert_eq!(read.json["handoffs"].as_array().unwrap().len(), 2);
+        assert!(read.text.starts_with("Resume register, revision 1") && read.text.contains("- ci"), "{}", read.text);
+        for episode in &episodes {
+            assert!(read.text.contains(&format!("Episode memory: {episode}")), "{}", read.text);
+        }
+    }
+    assert_eq!(unacknowledged(&*items, 10).await.unwrap().len(), 2, "nothing acknowledged");
+    assert_eq!(register(&*items, &thread("t1")).await.unwrap().unwrap().revision, 1, "nothing written");
+}
+
+#[tokio::test]
 async fn texts_pass_the_sanitizer_and_their_limits() {
     let (sense, items) = sense().await;
     let token = format!("ghp_{}", "a1B2c3D4e5".repeat(4).get(..36).unwrap());

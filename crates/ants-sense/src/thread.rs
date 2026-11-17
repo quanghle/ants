@@ -10,6 +10,9 @@
 //! stays unacknowledged, shown in every brief of the ant ([`unacknowledged`]), until a later checkpoint on its thread,
 //! or a checkpoint on another thread naming it in `acknowledges`, sets its [`ACKNOWLEDGED`] value.
 //!
+//! A checkpoint changing nothing ([`READ`]) writes nothing: it shows the whole register and every unacknowledged
+//! handoff, what the brief cuts when over its budget.
+//!
 //! Every text passes the sanitizer, and each item carries its writer, taken from the call's context, never from text.
 
 use std::fmt::Write as _;
@@ -36,6 +39,8 @@ pub const THREAD: &str = "thread";
 pub const EPISODE: &str = "episode";
 /// The value of an acknowledged handoff: the thread and time of the checkpoint acknowledging it.
 pub const ACKNOWLEDGED: &str = "acknowledged";
+/// The tool call showing the thread's whole resume register and every unacknowledged handoff.
+pub const READ: &str = "sense_checkpoint without arguments";
 
 /// The most characters of the goal, the step, the next action, and of each entry of a list.
 const TEXT_MAX: usize = 2_000;
@@ -174,11 +179,14 @@ impl Handoff {
         })
     }
 
-    /// The handoff as brief text.
+    /// The handoff as brief text, with its episode memory's id.
     pub fn text(&self) -> String {
         let at = self.created.at.to_rfc3339_opts(SecondsFormat::Secs, true);
         let mut out = format!("Handoff {} of thread {} ({at}):\n", self.id, self.thread);
         out.push_str(&self.work.text());
+        if let Some(episode) = &self.episode {
+            let _ = writeln!(out, "Episode memory: {episode}");
+        }
         out
     }
 }
@@ -198,7 +206,7 @@ fn register_id(thread: &ThreadId) -> ItemId {
 }
 
 /// `sense_checkpoint`: replace the thread's resume register, then acknowledge the unacknowledged handoffs of the
-/// thread and those named in `acknowledges`.
+/// thread and those named in `acknowledges`; changing nothing, show the register and every unacknowledged handoff.
 pub fn checkpoint<'a>(sense: &'a Sense, call: &'a ToolCall) -> BoxFuture<'a, Answer> {
     Box::pin(async move { checkpoint_call(sense, call).await.unwrap_or_else(|refusal| refusal) })
 }
@@ -218,6 +226,9 @@ async fn checkpoint_call(sense: &Sense, call: &ToolCall) -> Result<Answer, Answe
     };
     let named = args.ids("acknowledges")?;
     let context = &call.context;
+    if named.is_empty() && values.values().all(Value::is_null) {
+        return read(sense, context).await;
+    }
     values.insert(THREAD.into(), context.thread.as_str().into());
     values.insert(WRITER.into(), writer(context));
 
@@ -268,6 +279,32 @@ async fn checkpoint_call(sense: &Sense, call: &ToolCall) -> Result<Answer, Answe
     text.push_str(&args.redactions());
     let json = json!({"register": register, "acknowledged": ids, "redacted": args.redacted});
     Ok(Answer { text, json, is_error: false })
+}
+
+/// The answer of a checkpoint changing nothing: the thread's resume register and every unacknowledged handoff, the
+/// last first.
+async fn read(sense: &Sense, context: &CallContext) -> Result<Answer, Answer> {
+    let items = sense.items(&context.ant).await.map_err(refused)?;
+    let register = register(&*items, &context.thread).await.map_err(refused)?;
+    let handoffs = unacknowledged(&*items, usize::MAX).await.map_err(refused)?;
+    let mut text = match &register {
+        Some(register) => register.text(),
+        None => "This thread has no resume register yet: checkpoint without a revision to start one.\n".to_owned(),
+    };
+    if handoffs.is_empty() {
+        text.push_str("\nNo unacknowledged handoffs.");
+    } else {
+        let _ = write!(
+            text,
+            "\n{} unacknowledged handoffs, the last first (a checkpoint acknowledges them):",
+            handoffs.len()
+        );
+        for handoff in &handoffs {
+            let _ = write!(text, "\n{}", handoff.text());
+        }
+    }
+    let json = json!({"register": register, "handoffs": handoffs});
+    Ok(Answer { text: text.trim_end().to_owned(), json, is_error: false })
 }
 
 /// The refusal of a checkpoint from `revision` of the register, at another: the current register comes with it.
