@@ -1,0 +1,5 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: line
+---
+{"jsonrpc":"2.0","id":1,"result":{"thread":"019a7d2c-0000-7000-8000-000000000001"}}

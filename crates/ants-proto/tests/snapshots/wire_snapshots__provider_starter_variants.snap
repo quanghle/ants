@@ -1,0 +1,22 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+[
+  {
+    "kind": "human",
+    "user": "alice"
+  },
+  {
+    "kind": "ant",
+    "user": "dev-b"
+  },
+  {
+    "kind": "webhook",
+    "user": "github"
+  },
+  {
+    "kind": "provider",
+    "name": "sugar"
+  }
+]

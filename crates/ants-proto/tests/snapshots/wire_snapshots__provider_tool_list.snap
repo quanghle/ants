@@ -1,0 +1,20 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "tools": [
+    {
+      "name": "recall",
+      "description": "Search memories.",
+      "input_schema": {
+        "properties": {
+          "query": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    }
+  ]
+}

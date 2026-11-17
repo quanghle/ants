@@ -1,0 +1,19 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "protocol_version": 1,
+  "provider": {
+    "name": "sugar",
+    "version": "0.2.0"
+  },
+  "capabilities": {
+    "tools": true,
+    "context": true,
+    "events": true,
+    "wake": true,
+    "memories": true,
+    "export": true
+  }
+}

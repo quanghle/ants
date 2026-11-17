@@ -1,0 +1,17 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "error": {
+    "code": -32002,
+    "message": "no common protocol version: offered [2]",
+    "data": {
+      "supported": [
+        1
+      ]
+    }
+  }
+}

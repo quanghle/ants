@@ -1,0 +1,7 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "thread": "019a7d2c-0000-7000-8000-000000000002"
+}

@@ -1023,3 +1023,126 @@ fn newer_documents_parse() {
     );
     assert_eq!(escalation.reason, EscalationReason::Unknown);
 }
+
+fn call_context(by: provider::Starter) -> provider::CallContext {
+    provider::CallContext {
+        ant: user("dev-a"),
+        identity: "0f1e2d3c4b5a69788796a5b4c3d2e1f0".into(),
+        thread: thread(),
+        origin: provider::Origin { by, channel: Some(channel()) },
+        harness: "copilot".into(),
+        model: Some("gpt-5".into()),
+        machine: "studio".into(),
+        at: at(1),
+    }
+}
+
+#[test]
+fn provider_protocol() {
+    use provider::jsonrpc::{Message, Notification, Request, RequestId, Response};
+    use provider::*;
+    use serde_json::json;
+
+    let info = |name: &str| Info { name: name.into(), version: "0.2.0".into() };
+    let params = InitializeParams::new(info("ants"), Capabilities { tools: true, wake: true, ..Capabilities::NONE });
+    snap("provider_initialize_params", &params);
+    let result = params.accept(&[PROTOCOL_VERSION], info("sugar"), Capabilities::ALL).unwrap();
+    snap("provider_initialize_result", &result);
+
+    // Params are kept as JSON, whose keys keep their order only where serde_json preserves it: these are sorted.
+    let ant = AntRef { ant: user("dev-a"), identity: "0f1e".into() };
+    snap("provider_request", &Request::new(RequestId::Number(7), method::MEMORIES, &ant).unwrap());
+    snap(
+        "provider_request_string_id",
+        &Request::new(RequestId::String("w-1".into()), method::TOOLS_LIST, &()).unwrap(),
+    );
+    snap("provider_notification", &Notification::new("log", &json!({"level": "info"})).unwrap());
+    snap("provider_response_result", &Response::new(RequestId::Number(7), Ok(Ack {})));
+    let refused = RpcError::unsupported_version(&[2], &[PROTOCOL_VERSION]);
+    snap("provider_response_error", &Response::new(RequestId::Number(7), Err::<Ack, _>(refused)));
+    snap("provider_response_unread", &Response::unread(RpcError::parse_error("expected value")));
+    let line = Message::Response(Response::new(RequestId::Number(1), Ok(Woken { thread: thread() }))).to_line();
+    insta::assert_snapshot!("provider_message_line", line);
+
+    let tools = ToolList {
+        tools: vec![Tool {
+            name: "recall".into(),
+            description: "Search memories.".into(),
+            input_schema: json!({"properties": {"query": {"type": "string"}}, "type": "object"}),
+        }],
+    };
+    snap("provider_tool_list", &tools);
+    let call = ToolCall {
+        name: "recall".into(),
+        arguments: json!({"query": "deploy"}).as_object().unwrap().clone(),
+        context: call_context(Starter::Human { user: user("alice") }),
+        format: Format::Json,
+    };
+    snap("provider_tool_call", &call);
+    let starters = vec![
+        Starter::Human { user: user("alice") },
+        Starter::Ant { user: user("dev-b") },
+        Starter::Webhook { user: user("github") },
+        Starter::Provider { name: "sugar".into() },
+    ];
+    snap("provider_starter_variants", &starters);
+    snap("provider_tool_result_text", &ToolResult { output: Output::Text("2 memories".into()), is_error: false });
+    snap("provider_tool_result_json", &ToolResult { output: Output::Json(json!({"memories": []})), is_error: false });
+    snap("provider_tool_result_error", &ToolResult { output: Output::Text("no such memory".into()), is_error: true });
+
+    let brief = BriefRequest {
+        context: call_context(Starter::Webhook { user: user("github") }),
+        budget: BRIEF_BUDGET,
+        reason: BriefReason::Rebuilt,
+    };
+    snap("provider_brief_request", &brief);
+    snap("provider_brief", &Brief { text: "Goal: ship the release.".into() });
+
+    let kinds = vec![
+        EventKind::AntAdded,
+        EventKind::AntRenamed { from: user("dev-old") },
+        EventKind::AntMoved,
+        EventKind::AntCloned { from: user("dev-b"), from_identity: "a1b2".into() },
+        EventKind::AntRetired,
+        EventKind::AntRevived,
+        EventKind::ThreadStarted {
+            origin: provider::Origin { by: Starter::Ant { user: user("dev-b") }, channel: None },
+        },
+        EventKind::ThreadDone,
+        EventKind::ThreadExpired,
+        EventKind::SessionLost,
+        EventKind::SessionRebuilt { reason: Rebuilt::Overflow },
+    ];
+    let events: Vec<Event> = kinds
+        .into_iter()
+        .zip(1..)
+        .map(|(kind, n)| Event {
+            id: id(n),
+            ant: user("dev-a"),
+            identity: "0f1e".into(),
+            thread: Some(thread()),
+            at: at(2),
+            kind,
+        })
+        .collect();
+    snap("provider_event_variants", &events);
+    snap("provider_ack", &Ack {});
+
+    snap(
+        "provider_wake_request",
+        &WakeRequest {
+            ant: user("dev-a"),
+            thread: Some(thread()),
+            text: "The reminder is due.".into(),
+            id: "rem-1".into(),
+        },
+    );
+    snap("provider_woken", &Woken { thread: other_thread() });
+    snap("provider_ant_ref", &ant);
+    let memories =
+        MemoriesView { memories: vec![MemoryEntry { key: "lesson/deploy".into(), content: "Tag first.".into() }] };
+    snap("provider_memories_view", &memories);
+    let export = Export { provider: "sugar".into(), data: json!({"memories": 1}) };
+    snap("provider_export", &export);
+    snap("provider_import_request", &ImportRequest { ant: ant.ant, identity: ant.identity, export });
+}

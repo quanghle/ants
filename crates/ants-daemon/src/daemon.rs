@@ -632,6 +632,9 @@ async fn connect_mcp(
         mcp.with_requester(requester.clone());
     }
     mcp.manage_channels(crate::chanadm::nats_admin(client.clone(), js.clone()));
+    if let Some(provider) = crate::provider::of(&config.ant).await {
+        mcp.with_provider(provider);
+    }
     assist(mcp, config, js, humans).await;
     Ok(())
 }

@@ -34,6 +34,7 @@ mod mcp;
 mod memories;
 mod permissions;
 mod presence;
+pub mod provider;
 mod questions;
 mod queue;
 mod reactions;

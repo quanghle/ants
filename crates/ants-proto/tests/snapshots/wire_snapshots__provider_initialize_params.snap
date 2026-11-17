@@ -1,0 +1,21 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "protocol_versions": [
+    1
+  ],
+  "capabilities": {
+    "tools": true,
+    "context": false,
+    "events": false,
+    "wake": true,
+    "memories": false,
+    "export": false
+  },
+  "client": {
+    "name": "ants",
+    "version": "0.2.0"
+  }
+}

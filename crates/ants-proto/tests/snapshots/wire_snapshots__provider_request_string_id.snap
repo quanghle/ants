@@ -1,0 +1,9 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "jsonrpc": "2.0",
+  "id": "w-1",
+  "method": "tools/list"
+}

@@ -38,6 +38,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use agent_client_protocol::v1::schema::{EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerStdio};
+use ants_proto::provider::Connected;
 use ants_proto::{AttachmentHandle, Envelope, ThreadId, UserId, Uuid};
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Utc};
@@ -157,6 +158,7 @@ impl Mcp {
             sealing: OnceLock::new(),
             files: OnceLock::new(),
             redactor: OnceLock::new(),
+            provider: OnceLock::new(),
             state_path,
             sessions: Mutex::default(),
             asks: tokio::sync::Mutex::new(Asks { stored, waiting: HashMap::new() }),
@@ -237,6 +239,16 @@ impl Mcp {
     /// Redact with `redactor` the files the tools attach whose bytes are UTF-8 text, before they are stored.
     pub fn with_redactor(&self, redactor: Arc<Redactor>) {
         let _ = self.hub.redactor.set(redactor);
+    }
+
+    /// Take `provider` for the ant's provider, which [`Mcp::provider`] gives.
+    pub fn with_provider(&self, provider: Connected) {
+        let _ = self.hub.provider.set(provider);
+    }
+
+    /// The ant's provider, connected: none when the ant has none.
+    pub fn provider(&self) -> Option<&Connected> {
+        self.hub.provider.get()
     }
 
     /// The MCP servers each harness session gets: HTTP where the harness takes it, else `ants mcp` over the socket.
@@ -334,6 +346,8 @@ struct Hub {
     files: OnceLock<(FileAccess, PathBuf)>,
     /// What redacts the text files the tools attach; none redacts nothing.
     redactor: OnceLock<Arc<Redactor>>,
+    /// The ant's provider ([`crate::provider`]).
+    provider: OnceLock<Connected>,
     state_path: PathBuf,
     sessions: Mutex<Sessions>,
     asks: tokio::sync::Mutex<Asks>,

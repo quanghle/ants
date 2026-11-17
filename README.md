@@ -139,7 +139,7 @@ ants ask --wait @dev-b "run the test suite"
 
 ## Contributing
 
-Workspace crates: `ants-proto` (wire types and NATS permissions, no I/O), `ants-daemon` (bus, ACP pool, delivery, approvals, MCP server), `ants` (CLI and service binary), and `ants-test-support` (test helpers).
+Workspace crates: `ants-proto` (wire types and NATS permissions, no I/O), `ants-sugar` (built-in identity, memory and work provider), `ants-daemon` (bus, ACP pool, delivery, approvals, MCP server), `ants` (CLI and service binary), and `ants-test-support` (test helpers).
 
 Run the full CI check suite locally before submitting changes (`rust-toolchain.toml` pins Rust 1.100):
 

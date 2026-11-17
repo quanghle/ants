@@ -134,6 +134,82 @@ Per-ant prompt instructions and state isolation:
 - `memory` and `tasks` (`--memory`, `--tasks`): private instructions prepended to every prompt.
 - `env` (`--env NAME=VALUE`): literal environment overrides passed to the harness and tool subprocesses (e.g. `BD_DB = "/srv/ants/dev-a/.bd/bd.db"`).
 
+## Providers
+
+An ant's provider holds its identity, memories and work. Every ant has built-in sugar (crate `ants-sugar`), run inside the daemon: one `Sugar` serves all the ants of a daemon process, each call naming its ant. The daemon connects it on first use and hands it to each ant's MCP server. Sugar's tools are not served to sessions yet, and nothing else calls it yet.
+
+Built-in sugar implements the same interface (`ants_proto::provider::Provider`) that an external provider serves over the provider protocol, so switching an ant between providers changes nothing else in ants. A provider never reads an ant's messages, prompts or replies. It sees only:
+
+- its own tool calls;
+- the lifecycle events;
+- what the ant passes it.
+
+Sugar asks nothing of humans: no approvals, gates, review queues or notifications.
+
+### Provider protocol
+
+The protocol is JSON-RPC 2.0 over the provider process's standard input and output. Its types are in `ants_proto::provider`, pinned by the wire snapshots:
+
+- Each message is one line: a compact JSON object in UTF-8 followed by `\n`.
+- There are no batches.
+- The provider writes its logs to standard error.
+
+ants opens with `initialize`, whose params are:
+
+- `protocol_versions`: the versions ants speaks, currently `[1]`;
+- `capabilities`: what ants uses;
+- `client`: `{name, version}`.
+
+The provider answers with:
+
+- `protocol_version`: one of those offered, the highest it speaks;
+- `provider`: `{name, version}`;
+- `capabilities`: what it implements.
+
+Without a common version, the provider answers with error `-32002`. Both sides then use only the capabilities both declared. ants declares every capability except `wake` until it serves wake requests. Sugar declares `tools` and `context`.
+
+| Method | Direction | Capability | Params | Result |
+|---|---|---|---|---|
+| `initialize` | ants → provider | | `{protocol_versions, capabilities, client}` | `{protocol_version, provider, capabilities}` |
+| `tools/list` | ants → provider | `tools` | none | `{tools: [{name, description, input_schema}]}` |
+| `tools/call` | ants → provider | `tools` | `{name, arguments, context, format}` | `{text}` or `{json}`, with `is_error: true` for a refusal |
+| `brief` | ants → provider | `context` | `{context, budget, reason}` | `{text}` |
+| `event` | ants → provider | `events` | `{id, ant, identity, thread?, at, kind, …}` | `{}` |
+| `memories` | ants → provider | `memories` | `{ant, identity}` | `{memories: [{key, content}]}` |
+| `export` | ants → provider | `export` | `{ant, identity}` | `{provider, data}` |
+| `import` | ants → provider | `export` | `{ant, identity, export}` | `{}` |
+| `wake` | provider → ants | `wake` | `{ant, thread?, text, id}` | `{thread}` |
+
+Tools:
+
+- A provider names its tools without a prefix: 1-32 characters of `a-z`, `0-9` and `_`. Its own name is 1-32 characters of `a-z`, `0-9` and `-`.
+- ants serves each tool as `<provider>_<tool>` (`sugar_recall`), adding a boolean `json` argument to its schema. `json: true` sets the call's `format` to `json`; otherwise the answer comes as brief text.
+- Sugar serves at most 12 tools. It declares `brief`, `remember`, `recall`, `vote`, `checkpoint` and `handoff`, each answering `sugar_<tool> is not available yet.` with `is_error` for now, and its briefs are empty.
+
+Calls and events:
+
+- A tool call's and a brief's `context` is what ants knows of the call, never taken from the ant's text: `ant`, `identity` (the id of the ant's identity record), `thread`, `origin`, `harness`, `model`, `machine` and `at`.
+  - `origin` is `{by, channel?}`, where `by` is `{kind: "human" | "ant" | "webhook", user}` or `{kind: "provider", name}`.
+  - A thread a webhook or schedule started is untrusted.
+- `brief.budget` is in bytes of UTF-8, 8000 by default. `reason` is `started`, `loaded` or `rebuilt`.
+- Event `kind`s, with what each adds:
+  - `ant_added`, `ant_moved`, `ant_retired`, `ant_revived`;
+  - `ant_renamed` (`from`);
+  - `ant_cloned` (`from`, `from_identity`);
+  - `thread_started` (`origin`);
+  - `thread_done`, `thread_expired`;
+  - `session_lost`;
+  - `session_rebuilt` (`reason`: `lost` or `overflow`).
+- Events are sent in order per ant and at least once; a repeat carries the same `id`. A provider acks a kind it does not know.
+- A wake request's `id` makes it idempotent; it names a thread, or none for a new one.
+
+| Error code | Meaning |
+|---|---|
+| `-32700`, `-32600`, `-32601`, `-32602`, `-32603` | JSON-RPC's parse error, invalid request, method not found (a method of a capability not implemented), invalid params (such as an unknown tool), internal error |
+| `-32001` | The method's capability was not agreed at initialize |
+| `-32002` | No common protocol version (`data.supported` lists the provider's) |
+| `-32003` | Unavailable for now |
+
 ## MCP tools
 
 Each session gets the `ants` MCP server over streamable HTTP (`127.0.0.1:<port>/mcp` with per-thread bearer token) or via `ants mcp --socket <home>/mcp.sock` (`0600`, `ANTS_MCP_TOKEN`; current-user named pipe on Windows). Allowlist rules match `other:<tool>`:

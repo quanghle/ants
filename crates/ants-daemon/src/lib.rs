@@ -36,6 +36,7 @@ pub mod limits;
 pub mod monitoring;
 pub mod people;
 pub mod profile;
+pub mod provider;
 pub mod records;
 pub mod secrets;
 pub mod stream;

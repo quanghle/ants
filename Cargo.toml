@@ -13,6 +13,7 @@ publish = false
 [workspace.dependencies]
 agent-client-protocol = "5.2.0"
 ants-proto = { path = "crates/ants-proto" }
+ants-sugar = { path = "crates/ants-sugar" }
 ants-test-support = { path = "crates/ants-test-support" }
 anyhow = "1.0.104"
 async-nats = { version = "0.52.0", default-features = false }

@@ -1,0 +1,10 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "provider": "sugar",
+  "data": {
+    "memories": 1
+  }
+}

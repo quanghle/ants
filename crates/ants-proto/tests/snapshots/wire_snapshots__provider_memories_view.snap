@@ -1,0 +1,12 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "memories": [
+    {
+      "key": "lesson/deploy",
+      "content": "Tag first."
+    }
+  ]
+}

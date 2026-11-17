@@ -1,0 +1,10 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "ant": "dev-a",
+  "thread": "019a7d2c-0000-7000-8000-000000000001",
+  "text": "The reminder is due.",
+  "id": "rem-1"
+}

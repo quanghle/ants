@@ -1,0 +1,24 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "context": {
+    "ant": "dev-a",
+    "identity": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+    "thread": "019a7d2c-0000-7000-8000-000000000001",
+    "origin": {
+      "by": {
+        "kind": "webhook",
+        "user": "github"
+      },
+      "channel": "backend"
+    },
+    "harness": "copilot",
+    "model": "gpt-5",
+    "machine": "studio",
+    "at": "2025-01-01T12:01:00Z"
+  },
+  "budget": 8000,
+  "reason": "rebuilt"
+}
