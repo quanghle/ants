@@ -6,12 +6,14 @@ use ants_proto::{Machine, SugarId, UserId};
 use chrono::Utc;
 use serde_json::Value;
 
-use super::{AppendError, Chain, ChainStatus, Event, EventLog, LogError, Signer, Stored, Verifier, VerifyError};
+use super::{
+    AppendError, Chain, ChainStatus, Event, EventLog, LogError, Position, Signer, Stored, Verifier, VerifyError,
+};
 
 /// Messages read at once.
 const READ_BATCH: usize = 256;
 /// How often [`AntLog::append`] tries while other writers keep appending.
-const APPEND_TRIES: usize = 10;
+pub const APPEND_TRIES: usize = 10;
 
 /// A message of the log and the event it holds, verified.
 #[derive(Debug, Clone, PartialEq)]
@@ -69,23 +71,37 @@ impl<L: EventLog, S: Signer, V: Verifier> AntLog<L, S, V> {
     /// that verified, in order, those breaking the chain left out ([`Chain::broken`]).
     pub async fn catch_up(&mut self) -> Result<Vec<Checked>, LogError> {
         let mut checked = Vec::new();
-        loop {
-            let read = self.log.read_after(self.chain.sugar(), self.chain.last_sequence(), READ_BATCH).await?;
-            if read.is_empty() {
-                break;
-            }
-            for stored in read {
-                let event = self.chain.check(&stored, &self.verifier).await.map_err(|e| match e {
-                    VerifyError::Invalid(e) | VerifyError::Unavailable(e) => LogError(format!("verifying: {e}")),
-                })?;
-                if let Some(event) = event {
-                    checked.push(Checked { stored, event });
-                }
+        while let Some(read) = self.read_next().await? {
+            checked.extend(read);
+        }
+        Ok(checked)
+    }
+
+    /// Read and verify the next messages since the last read, a batch at a time: the events that verified, in order,
+    /// or none at the log's end, where the status is kept. On failing, the events of the batch verified before are
+    /// lost: [`AntLog::resume`] reads them again.
+    pub async fn read_next(&mut self) -> Result<Option<Vec<Checked>>, LogError> {
+        let read = self.log.read_after(self.chain.sugar(), self.chain.last_sequence(), READ_BATCH).await?;
+        if read.is_empty() {
+            self.chain.end();
+            self.keep_status()?;
+            return Ok(None);
+        }
+        let mut checked = Vec::new();
+        for stored in read {
+            let event = self.chain.check(&stored, &self.verifier).await.map_err(|e| match e {
+                VerifyError::Invalid(e) | VerifyError::Unavailable(e) => LogError(format!("verifying: {e}")),
+            })?;
+            if let Some(event) = event {
+                checked.push(Checked { stored, event });
             }
         }
-        self.chain.end();
-        self.keep_status()?;
-        Ok(checked)
+        Ok(Some(checked))
+    }
+
+    /// Go on reading from `position`, as read before, or with none from the log's start ([`Chain::resume`]).
+    pub fn resume(&mut self, position: Option<Position>) {
+        self.chain.resume(position);
     }
 
     /// Append an event of `kind` holding `data`, after the last event of the log: on finding another writer appended
@@ -94,35 +110,48 @@ impl<L: EventLog, S: Signer, V: Verifier> AntLog<L, S, V> {
     pub async fn append(&mut self, kind: &str, data: Value) -> Result<(Checked, Vec<Checked>), LogError> {
         let mut read = Vec::new();
         for _ in 0..APPEND_TRIES {
-            let tip = self.chain.tip();
-            let mut event = Event {
-                sugar: self.chain.sugar().clone(),
-                index: tip.map_or(1, |tip| tip.index + 1),
-                prev: tip.map(|tip| tip.sha256.clone()),
-                at: Utc::now(),
-                ant: self.chain.ant().clone(),
-                machine: self.machine.clone(),
-                kind: kind.to_owned(),
-                data: data.clone(),
-                credentials: None,
-                signature: None,
-            };
-            if let Some(signature) = self.signer.sign(&event.signed()).map_err(|e| LogError(format!("signing: {e}")))? {
-                (event.credentials, event.signature) = (Some(signature.credentials), Some(signature.signature));
-            }
-            let payload = serde_json::to_vec(&event).map_err(|e| LogError(e.to_string()))?;
-            match self.log.append(self.chain.sugar(), payload.clone(), self.chain.last_sequence()).await {
-                Ok(sequence) => {
-                    let stored = Stored { sequence, stored_at: Utc::now(), payload };
-                    self.chain.appended(&stored, &event);
-                    self.keep_status()?;
-                    return Ok((Checked { stored, event }, read));
-                }
-                Err(AppendError::Conflict { .. }) => read.extend(self.catch_up().await?),
-                Err(AppendError::Failed(e)) => return Err(e),
+            match self.try_append(kind, data.clone()).await? {
+                Ok(appended) => return Ok((appended, read)),
+                Err(missed) => read.extend(missed),
             }
         }
-        Err(LogError(format!("other writers kept appending to sugar identity {}", self.chain.sugar())))
+        Err(self.kept_appending())
+    }
+
+    /// Append an event of `kind` holding `data`, after the last event of the log, once: on finding another writer
+    /// appended since the last read, read what it appended and return it instead, for the caller to decide again.
+    pub async fn try_append(&mut self, kind: &str, data: Value) -> Result<Result<Checked, Vec<Checked>>, LogError> {
+        let tip = self.chain.tip();
+        let mut event = Event {
+            sugar: self.chain.sugar().clone(),
+            index: tip.map_or(1, |tip| tip.index + 1),
+            prev: tip.map(|tip| tip.sha256.clone()),
+            at: Utc::now(),
+            ant: self.chain.ant().clone(),
+            machine: self.machine.clone(),
+            kind: kind.to_owned(),
+            data,
+            credentials: None,
+            signature: None,
+        };
+        if let Some(signature) = self.signer.sign(&event.signed()).map_err(|e| LogError(format!("signing: {e}")))? {
+            (event.credentials, event.signature) = (Some(signature.credentials), Some(signature.signature));
+        }
+        let payload = serde_json::to_vec(&event).map_err(|e| LogError(e.to_string()))?;
+        match self.log.append(self.chain.sugar(), payload.clone(), self.chain.last_sequence()).await {
+            Ok(sequence) => {
+                let stored = Stored { sequence, stored_at: Utc::now(), payload };
+                self.chain.appended(&stored, &event);
+                self.keep_status()?;
+                Ok(Ok(Checked { stored, event }))
+            }
+            Err(AppendError::Conflict { .. }) => Ok(Err(self.catch_up().await?)),
+            Err(AppendError::Failed(e)) => Err(e),
+        }
+    }
+
+    fn kept_appending(&self) -> LogError {
+        LogError(format!("other writers kept appending to sugar identity {}", self.chain.sugar()))
     }
 
     fn keep_status(&self) -> Result<(), LogError> {

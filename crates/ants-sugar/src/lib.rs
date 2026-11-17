@@ -6,16 +6,22 @@
 
 use std::sync::Arc;
 
+use ants_proto::UserId;
 use ants_proto::provider::{
     BoxFuture, Brief, BriefRequest, Capabilities, Host, Info, InitializeParams, InitializeResult, PROTOCOL_VERSION,
     Provider, RpcError, ToolCall, ToolList, ToolResult,
 };
 
+pub mod cache;
+pub mod items;
 pub mod log;
 pub mod sanitize;
+pub mod store;
 mod tools;
 
 pub use tools::{Answer, MAX_TOOLS, TOOLS, ToolSpec};
+
+use store::{Items, StoreError, Stores};
 
 /// The provider name sugar answers initialize with, the prefix of its tools' names (`sugar_recall`).
 pub const NAME: &str = "sugar";
@@ -27,12 +33,34 @@ pub const VERSIONS: &[u32] = &[PROTOCOL_VERSION];
 pub const CAPABILITIES: Capabilities = Capabilities { tools: true, context: true, ..Capabilities::NONE };
 
 /// The built-in provider. One serves every ant of a daemon, each call naming its ant.
-#[derive(Debug, Default)]
-pub struct Sugar {}
+#[derive(Default)]
+pub struct Sugar {
+    stores: Option<Arc<dyn Stores>>,
+}
 
 impl Sugar {
+    /// sugar keeping no data: its tools that need some refuse.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// sugar reaching each ant's data through `stores`.
+    pub fn with_stores(stores: Arc<dyn Stores>) -> Self {
+        Self { stores: Some(stores) }
+    }
+
+    /// The items of `ant`.
+    pub async fn items(&self, ant: &UserId) -> Result<Arc<dyn Items>, StoreError> {
+        match &self.stores {
+            Some(stores) => stores.items(ant).await,
+            None => Err(StoreError::Unavailable("sugar keeps no data here".into())),
+        }
+    }
+}
+
+impl std::fmt::Debug for Sugar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sugar").field("stores", &self.stores.is_some()).finish()
     }
 }
 

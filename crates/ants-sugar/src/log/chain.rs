@@ -23,6 +23,18 @@ pub struct Break {
     pub reason: String,
 }
 
+/// How far a [`Chain`] was read: the last message read, the events that verified and the first break, kept with what
+/// was built from them (the cache) to go on reading from there later ([`Chain::resume`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Position {
+    /// The stream sequence of the last message read.
+    pub sequence: u64,
+    pub tip: Mark,
+    pub events: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broken: Option<Break>,
+}
+
 /// The verified part of a sugar identity's log, read in order ([`Chain::check`]): each message must be an event of the
 /// identity and of its ant, at the next position, holding the hash of the message before and signed by the ant's
 /// credentials. The first break is kept; reading goes on from the message that broke the chain, as the log has no
@@ -76,6 +88,25 @@ impl Chain {
     /// The events read that verified.
     pub fn events(&self) -> u64 {
         self.events
+    }
+
+    /// How far the chain was read; none before any message.
+    pub fn position(&self) -> Option<Position> {
+        let (sequence, tip) = self.tip.clone()?;
+        Some(Position { sequence, tip, events: self.events, broken: self.broken.clone() })
+    }
+
+    /// Go on reading from `position`, as read before, or with none from the log's start, as if nothing was read. The
+    /// furthest event seen stays expected.
+    pub fn resume(&mut self, position: Option<Position>) {
+        let Some(Position { sequence, tip, events, broken }) = position else {
+            (self.tip, self.events, self.broken) = (None, 0, None);
+            return;
+        };
+        if self.seen.as_ref().is_none_or(|seen| seen.index <= tip.index) {
+            self.seen = Some(tip.clone());
+        }
+        (self.tip, self.events, self.broken) = (Some((sequence, tip)), events, broken);
     }
 
     /// Check `stored`, the message after the last read, with `verifier`, and move past it: its event if it verified,
