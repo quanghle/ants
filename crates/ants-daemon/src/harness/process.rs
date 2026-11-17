@@ -36,8 +36,13 @@ impl Harness {
     }
 
     /// What the daemon's ACP client connects to: the harness process, or a translator of its protocol.
-    pub(super) fn agent(&self, env: &[(String, String)], settings: &ModelSettings) -> DynConnectTo<Client> {
-        native::agent(self, env, settings)
+    pub(super) fn agent(
+        &self,
+        env: &[(String, String)],
+        settings: &ModelSettings,
+        report: Option<super::mcp_sign_in::Report>,
+    ) -> DynConnectTo<Client> {
+        native::agent(self, env, settings, report)
     }
 
     /// Where the harness's executable is, with the ant's `env` over the definition's over the daemon's: the path its

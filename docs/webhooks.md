@@ -151,7 +151,7 @@ With `public_url` and `action_secret_*`, approval notices include `<public_url>/
 | `human`, `title`, `text`, `urgent`, `sent_at`, `links` | all | Target human, formatted notice, urgency (`true` for `approval`), RFC 3339 UTC timestamp, `{verdict, label, url}[]` |
 | `ant`, `thread` | `approval`, `escalation`, `question`, `completion`, `notice` | Source ant and thread ID to answer on |
 | `replies` | `completion` | How many replies on the thread the notice folds (the latest is `id`) |
-| `notice` | `notice` | The daemon notice's kind: `signed_out`, `quota`, `failing`, `no_fallback` or `gave_up` |
+| `notice` | `notice` | The daemon notice's kind: `signed_out`, `quota`, `failing`, `no_fallback`, `gave_up` or `mcp_sign_in` |
 | `request`, `seq`, `tool`, `options`, `labels`, `expires_at` | `approval` | `<ant>/<id>`, `ANTS` sequence, `{kind, title, locations?, input?}`, verdicts offered, the harness's names of the offered verdicts it names (`{verdict: label}`, redacted, possibly empty; the notice's text gives the `allow-always` one), RFC 3339 expiry |
 | `reason`, `stuck`, `level` | `escalation` | Escalation reason, stuck ant, chain level (`0` = direct) |
 | `stand_in_for` | `escalation` | Present on a [stand-in](#stand-in) relay: the human away; `ant` is then the ant to answer |

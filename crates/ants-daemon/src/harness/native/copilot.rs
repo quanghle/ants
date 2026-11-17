@@ -37,7 +37,10 @@ use super::{
     Cli, Harness, Info, Native, NativeSession, Open, Process, Setting, Updates, based_id, context_overflow, cost_base,
     deny_approval, failed, mcp_servers_json, prompt_text, quota_exhausted, rate_limited, signed_out, unsupported,
 };
+use crate::harness::mcp_sign_in::Report;
 use crate::sync::MutexExt as _;
+
+mod mcp_sign_in;
 
 /// The release of github-copilot-sdk linked, as pinned in ants-daemon's Cargo.toml: the CLI must speak its protocol.
 const SDK_VERSION: &str = "1.0.29";
@@ -336,11 +339,12 @@ impl Native for Copilot {
     async fn new_session(&self, open: Open) -> Result<CopilotSession, Error> {
         let shared = &self.shared;
         let id = uuid::Uuid::new_v4().to_string();
+        let sign_ins = open.sign_ins.clone();
         let config = settings!(SessionConfig::default().with_session_id(id), shared, open);
         let prepared = shared.client.prepare_session(config).map_err(failed)?;
         let events = prepared.subscribe();
         match prepared.start().await {
-            Ok(session) => Ok(CopilotSession::new(shared.clone(), session, events, 0.0)),
+            Ok(session) => Ok(CopilotSession::open(shared.clone(), session, events, 0.0, sign_ins).await),
             Err(e) => Err(shared.error(&e).await),
         }
     }
@@ -371,11 +375,12 @@ impl Copilot {
     /// Resume the CLI's session `id`, whose totals start at `base` US dollars.
     async fn resume(&self, id: &str, open: Open, base: f64) -> Result<CopilotSession, Error> {
         let shared = &self.shared;
+        let sign_ins = open.sign_ins.clone();
         let config = settings!(ResumeSessionConfig::new(SessionId::from(id)), shared, open);
         let prepared = shared.client.prepare_resume_session(config).map_err(failed)?;
         let events = prepared.subscribe();
         match prepared.start().await {
-            Ok(session) => Ok(CopilotSession::new(shared.clone(), session, events, base)),
+            Ok(session) => Ok(CopilotSession::open(shared.clone(), session, events, base, sign_ins).await),
             Err(e) => Err(shared.error(&e).await),
         }
     }
@@ -425,6 +430,10 @@ pub(crate) struct CopilotSession {
     /// The cost in US dollars the CLI carried over from the session's parent, which its totals include.
     base: f64,
     steers: Steers,
+    /// The session, for sign-ins to MCP servers.
+    opened: Arc<mcp_sign_in::Opened>,
+    /// Signs it in to the definition's `mcp_sign_in` servers as they need it, if it serves a thread.
+    watcher: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// The messages steering the prompt running ([`NativeSession::steer`]), sent with immediate delivery. The prompt ends
@@ -473,6 +482,9 @@ impl Steers {
 impl Drop for CopilotSession {
     fn drop(&mut self) {
         self.router.abort();
+        if let Some(watcher) = &self.watcher {
+            watcher.abort();
+        }
     }
 }
 
@@ -486,11 +498,31 @@ impl CopilotSession {
         }
     }
 
-    fn new(shared: Arc<Shared>, session: Session, events: EventSubscription, base: f64) -> Self {
+    /// The session started, once signed in to the definition's `mcp_sign_in` servers needing it if it reports its
+    /// sign-ins to `sign_ins` ([`mcp_sign_in`]).
+    async fn open(
+        shared: Arc<Shared>,
+        session: Session,
+        events: EventSubscription,
+        base: f64,
+        sign_ins: Option<Report>,
+    ) -> Self {
         let current = Current::default();
-        let router = tokio::spawn(route(events, current.clone()));
+        let opened = Arc::new(mcp_sign_in::Opened { shared: shared.clone(), session: session.id().clone() });
+        let servers = shared.cli.mcp_sign_in().to_vec();
+        let (watched, watching) = mpsc::unbounded_channel();
+        let watched = sign_ins.as_ref().filter(|_| !servers.is_empty()).map(|_| watched);
+        let router = tokio::spawn(route(events, current.clone(), Arc::downgrade(&opened), watched));
+        let (watcher, ready) = match sign_ins.filter(|_| !servers.is_empty()) {
+            Some(report) => {
+                let (ready, opening) = tokio::sync::oneshot::channel();
+                let watch = mcp_sign_in::watch(opened.clone(), servers, report, watching, ready);
+                (Some(tokio::spawn(watch)), Some(opening))
+            }
+            None => (None, None),
+        };
         let (model, effort) = (shared.cli.model().map(str::to_owned), shared.cli.effort().map(str::to_owned));
-        Self {
+        let opened = Self {
             shared,
             session,
             current,
@@ -500,7 +532,13 @@ impl CopilotSession {
             usage: Mutex::default(),
             base,
             steers: Steers::default(),
+            opened,
+            watcher,
+        };
+        if let Some(ready) = ready {
+            let _ = ready.await;
         }
+        opened
     }
 
     /// Report the context window's use and the session's cost, as `change` updates them.
@@ -572,11 +610,25 @@ impl CopilotSession {
 }
 
 /// Send the session's events to the prompt running; those coming between prompts, such as a resumed session's, are
-/// dropped.
-async fn route(mut events: EventSubscription, current: Current) {
+/// dropped. Those of its MCP servers also go to `watched`, the watcher signing it in, if any, and may end a sign-in
+/// waiting for a browser ([`mcp_sign_in::observe`]).
+async fn route(
+    mut events: EventSubscription,
+    current: Current,
+    opened: std::sync::Weak<mcp_sign_in::Opened>,
+    watched: Option<mpsc::UnboundedSender<SessionEvent>>,
+) {
     loop {
         match events.recv().await {
             Ok(event) => {
+                if event.event_type.starts_with("session.mcp_") {
+                    if let Some(opened) = opened.upgrade() {
+                        mcp_sign_in::observe(&opened, &event);
+                    }
+                    if let Some(watched) = &watched {
+                        let _ = watched.send(event.clone());
+                    }
+                }
                 if let Some(prompt) = current.locked().as_ref() {
                     super::io::forward(prompt, event);
                 }
@@ -610,7 +662,11 @@ impl NativeSession for CopilotSession {
 
     async fn mcp_sign_in(&self, server: &str) -> Result<Option<String>, Error> {
         let login = self.call("session.mcp.oauth.login", json!({ "serverName": server })).await?;
-        Ok(login["authorizationUrl"].as_str().filter(|url| !url.is_empty()).map(str::to_owned))
+        let url = mcp_sign_in::browser_url(&login);
+        if let Some(url) = &url {
+            mcp_sign_in::waiting(&self.opened, server, url);
+        }
+        Ok(url)
     }
 
     async fn discard(&self) {

@@ -353,6 +353,8 @@ fn a_reply_is_a_completion_and_nothing_else_is() {
     assert!(completion_notice(&hooked).is_none());
     let spent = done.clone().as_notice(ants_proto::NoticeKind::Spend);
     assert!(completion_notice(&spent).is_none() && action_notice(&spent).is_none(), "a notice is no reply");
+    let mcp = done.clone().as_notice(ants_proto::NoticeKind::McpSignIn);
+    assert_eq!(action_notice(&mcp).unwrap().title, "dev-a: MCP sign-in needed");
     let signed_out = done.as_notice(ants_proto::NoticeKind::SignedOut);
     let notice = action_notice(&signed_out).unwrap();
     assert_eq!(notice.title, "dev-a: signed out");
