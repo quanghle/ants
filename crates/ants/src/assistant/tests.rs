@@ -304,7 +304,7 @@ async fn a_following_checker_takes_withdrawals_and_revocations() {
         panic!("still {:?}, not {expected:?}", checker.acting(&pa, Some(&alice)));
     };
     // The watches start in the background: a change made before them is missed until the next refresh.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    checker.watching().await;
 
     put(&js, &creds, &alice, None, Sealing::Keep).await.unwrap();
     comes_to(Acting::Forged(alice.clone())).await;

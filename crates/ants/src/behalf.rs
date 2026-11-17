@@ -39,6 +39,8 @@ pub struct Checker {
     read: Mutex<HashSet<UserId>>,
     /// What each publisher's claim for each human came to.
     known: Mutex<HashMap<(UserId, UserId), Acting>>,
+    /// Whether a following checker started its watches, or found them refused: a change from then on is delivered.
+    watching: tokio::sync::watch::Sender<bool>,
 }
 
 impl Checker {
@@ -55,6 +57,7 @@ impl Checker {
             grants: Mutex::default(),
             read: Mutex::default(),
             known: Mutex::default(),
+            watching: tokio::sync::watch::Sender::new(false),
         }
     }
 
@@ -171,12 +174,19 @@ impl Checker {
         Following(tokio::spawn(Arc::clone(self).keep_fresh(REFRESH)))
     }
 
+    /// Wait until following started its watches ([`Checker::follow`]).
+    #[cfg(test)]
+    pub async fn watching(&self) {
+        let _ = self.watching.subscribe().wait_for(|watching| *watching).await;
+    }
+
     async fn keep_fresh(self: Arc<Self>, period: Duration) {
         let mut tick = tokio::time::interval(period);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         tick.tick().await;
         let mut grants = self.watch(HUMANS_BUCKET, &format!("*.{ASSISTANT_GRANT}")).await;
         let mut revoked = self.watch(DEVICES_BUCKET, &format!("{REVOKED_DEVICES}.*")).await;
+        self.watching.send_replace(true);
         loop {
             tokio::select! {
                 change = next(&mut grants) => if !matches!(change, Some(Ok(_))) { grants = None },

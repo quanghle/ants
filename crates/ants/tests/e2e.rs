@@ -194,12 +194,22 @@ fn exercise_daemon(custom_tools: bool) {
     let shown = run(ants(&["thread", "show", &thread]));
     let shown = String::from_utf8_lossy(&shown.stdout);
     assert!(shown.contains(&format!("(message {message}): hello there\n    reacted eyes: human\n")), "{shown}");
-    std::thread::sleep(Duration::from_millis(500));
 
     let (status, health) = get(&metrics, "/healthz");
     assert_eq!((status, health.as_str()), (200, "ok\n"), "daemon log:\n{}", daemon_log());
-    let (status, exposition) = get(&metrics, "/metrics");
-    assert_eq!(status, 200);
+    // A prompt leaves the in-flight gauge as it ends, which may be after its answer was read.
+    let start = Instant::now();
+    let exposition = loop {
+        let (status, exposition) = get(&metrics, "/metrics");
+        assert_eq!(status, 200);
+        let settled = ["ants_prompts_total{ant=\"dev-a\"} 1", "ants_prompts_in_flight{ant=\"dev-a\"} 0"]
+            .iter()
+            .all(|line| exposition.lines().any(|l| l == *line));
+        if settled || start.elapsed() > WAIT {
+            break exposition;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
     for line in [
         "# TYPE ants_nats_connected gauge",
         "ants_nats_connected{ant=\"dev-a\"} 1",
