@@ -9,12 +9,13 @@ use std::sync::Arc;
 
 use ants_proto::UserId;
 use ants_proto::provider::{
-    Ack, BoxFuture, Brief, BriefRequest, CallContext, Capabilities, Event, Host, Info, InitializeParams,
+    Ack, BoxFuture, Brief, BriefRequest, CallContext, Capabilities, Event, EventKind, Host, Info, InitializeParams,
     InitializeResult, PROTOCOL_VERSION, Provider, RpcError, ToolCall, ToolList, ToolResult,
 };
 
 pub mod brief;
 pub mod cache;
+pub mod fork;
 pub mod identity;
 pub mod items;
 pub mod log;
@@ -103,14 +104,35 @@ impl Sense {
         if !identity::touches_card(&event.kind) {
             return Ok(Ack {});
         }
-        let recorded = match self.items(&event.ant).await {
-            Ok(items) => identity::record_event(&*items, &event).await.map(drop),
-            Err(e) => Err(e),
+        let recorded = async {
+            let items = self.items(&event.ant).await?;
+            if let EventKind::AntCloned { from, .. } = &event.kind {
+                self.fork(&*items, from, &event).await?;
+            }
+            identity::record_event(&*items, &event).await.map(drop)
         };
-        match recorded {
+        match recorded.await {
             Ok(()) | Err(StoreError::NotKept(_)) => Ok(Ack {}),
             Err(e) => Err(RpcError::unavailable(&e.to_string())),
         }
+    }
+
+    /// Fork the identity of `from`, which `event` cloned, into `clone`'s: before the card notes the event, so the
+    /// event delivered again after a failed fork forks again, and not once it has. Nothing to fork when sense keeps no
+    /// data of `from`.
+    async fn fork(&self, clone: &dyn Items, from: &UserId, event: &Event) -> Result<(), StoreError> {
+        if identity::card(clone).await?.is_some_and(|card| card.events.contains(&event.id)) {
+            return Ok(());
+        }
+        let source = match self.items(from).await {
+            Ok(source) => source,
+            Err(StoreError::NotKept(_)) => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        if source.sense().await == clone.sense().await {
+            return Ok(());
+        }
+        fork::fork(&*source, clone, event.at).await.map(drop)
     }
 
     /// The brief of the session starting as `request` tells, noting the session on the ant's card first; empty when

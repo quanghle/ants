@@ -445,6 +445,9 @@ fn full(found: &MemoryItem) -> String {
     if !votes.is_empty() {
         let _ = write!(text, "\nVotes: {} helpful, {} stale, {} wrong.", votes.helpful, votes.stale, votes.wrong);
     }
+    if let Some(from) = &memory.inherited {
+        let _ = write!(text, "\nInherited from sense identity {from} on clone.");
+    }
     text
 }
 

@@ -10,6 +10,7 @@
 
 use std::fmt::Write as _;
 
+use ants_proto::SenseId;
 use ants_proto::provider::{CallContext, ToolCall};
 use chrono::SecondsFormat;
 use serde::{Deserialize, Serialize};
@@ -44,6 +45,9 @@ pub struct Record {
     /// Who wrote this revision, where and when, as ants told for the call: never taken from the ant's text.
     pub writer: CallContext,
     pub trust: Trust,
+    /// The sense identity a clone inherited it from ([`crate::fork`]), until the clone writes it anew.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited: Option<SenseId>,
 }
 
 /// A record and the item holding it.
@@ -89,7 +93,7 @@ impl RecordItem {
         let record = &self.record;
         let writer = &record.writer;
         let model = writer.model.as_ref().map_or_else(String::new, |model| format!(", model {model}"));
-        format!(
+        let mut text = format!(
             "{} ({}, {}), trust {}, revision {}\n{}\n{}\nWritten {} by {} (identity {}) in thread {}, with {}{model}, \
              on {}.",
             self.id(),
@@ -105,7 +109,11 @@ impl RecordItem {
             writer.thread,
             writer.harness,
             writer.machine
-        )
+        );
+        if let Some(from) = &record.inherited {
+            let _ = write!(text, "\nInherited from sense identity {from} on clone.");
+        }
+        text
     }
 
     /// Its values with its id, kind, revision and times.
@@ -196,11 +204,13 @@ pub(crate) async fn remember(sense: &Sense, call: &ToolCall, kind: &str) -> Resu
         body: body.text,
         writer: context.clone(),
         trust: if untrusted.is_some() { Trust::Untrusted } else { Trust::Own },
+        inherited: None,
     };
-    let values = match serde_json::to_value(&record) {
+    let mut values = match serde_json::to_value(&record) {
         Ok(Value::Object(values)) => values,
         _ => unreachable!("a record is an object"),
     };
+    values.insert(crate::fork::INHERITED.into(), Value::Null);
 
     let items = sense.items(&context.ant).await.map_err(unavailable)?;
     let id = record_id(&record.scope).expect("a record's scope");

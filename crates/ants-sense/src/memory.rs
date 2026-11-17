@@ -8,8 +8,8 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
 
-use ants_proto::UserId;
 use ants_proto::provider::CallContext;
+use ants_proto::{SenseId, UserId};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -295,6 +295,9 @@ pub struct Memory {
     pub digest: String,
     #[serde(default, skip_serializing_if = "Votes::is_empty")]
     pub votes: Votes,
+    /// The sense identity a clone inherited it from ([`crate::fork`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited: Option<SenseId>,
 }
 
 impl Memory {
@@ -317,6 +320,7 @@ impl Memory {
             supersedes: None,
             superseded_by: None,
             votes: Votes::default(),
+            inherited: None,
         }
     }
 
