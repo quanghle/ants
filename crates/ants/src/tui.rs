@@ -341,6 +341,7 @@ impl Chat {
         self.cards.threads(&self.model.data.live.order);
         *dirty |= self.animate(started);
         if *dirty || drawn.elapsed() >= REDRAW {
+            self.model.look(Utc::now());
             terminal.draw(|f| frame::draw(f, &self.model, Utc::now())).context("drawing")?;
             (*dirty, *drawn) = (false, Instant::now());
         }

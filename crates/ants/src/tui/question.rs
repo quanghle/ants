@@ -393,7 +393,7 @@ fn rows(question: &Question, tab: &Tab, focused: bool, width: usize) -> Vec<Line
 }
 
 /// `text` in lines at most `width` wide, broken between words where it can be.
-fn wrap(text: &str, width: usize) -> Vec<String> {
+pub(super) fn wrap(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut lines = Vec::new();
     let mut line = String::new();

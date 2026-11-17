@@ -130,6 +130,8 @@ pub struct Data {
     pub facts: Facts,
     /// The top-level posts of each channel, and the replies on their threads.
     pub feeds: channel::Feeds,
+    /// What happened lately in each channel.
+    pub activity: channel::Activity,
     /// Which of the human's inbox messages are read, once read.
     pub marker: Option<ReadMarker>,
     /// Which channel posts the human has read, once read; never without the credentials to.
@@ -339,6 +341,7 @@ impl Model {
             server,
             facts: Facts::default(),
             feeds: channel::Feeds::default(),
+            activity: channel::Activity::default(),
             marker: None,
             channel_reads: None,
             channel_levels: Levels::new(),
@@ -449,6 +452,7 @@ impl Model {
             data.facts.add(entry, &me);
             data.people.dms.add(entry, &me);
             posted |= data.feeds.add(entry);
+            data.activity.stored(entry, &data.feeds);
             data.delegations.add(entry);
         }
         let mut actions = Vec::new();
@@ -596,7 +600,9 @@ impl Model {
             }
             Read::Directory(Ok((channels, humans))) => {
                 let me = data.me().clone();
-                data.channels = channels.into_iter().filter(|c| c.members.contains(&me)).collect();
+                let channels: Vec<ChannelEntry> = channels.into_iter().filter(|c| c.members.contains(&me)).collect();
+                data.activity.directory(&data.channels, &channels, now);
+                data.channels = channels;
                 data.humans = Some(humans);
             }
             Read::Directory(Err(e)) => self.notify(format!("reading the channels: {e:#}"), Level::Error, now),
@@ -612,7 +618,10 @@ impl Model {
             Read::Marked(thread, Err(e)) => {
                 self.notify(format!("marking thread {thread} read: {e:#}"), Level::Error, now);
             }
-            Read::Reactions(reactions) => data.reactions = reactions,
+            Read::Reactions(watched, reactions) => {
+                data.activity.reactions(&watched, &reactions, &data.feeds, now);
+                data.reactions = reactions;
+            }
             Read::Reacted(message, reaction, remove, Ok(changed)) => {
                 self.notify(react::done_line(message, &reaction, remove, changed), Level::Info, now);
             }
@@ -620,6 +629,13 @@ impl Model {
                 self.notify(format!("reacting {reaction} to message {message}: {e:#}"), Level::Error, now);
             }
         }
+    }
+
+    /// Look at `now` at the states of the threads of the human's channels, for their activity.
+    pub fn look(&mut self, now: DateTime<Utc>) {
+        let mut activity = std::mem::take(&mut self.data.activity);
+        activity.look(&self.data, now);
+        self.data.activity = activity;
     }
 
     /// Take what was read of the threads besides their messages.

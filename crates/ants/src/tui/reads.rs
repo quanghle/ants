@@ -55,7 +55,8 @@ pub enum Read {
     Marked(ThreadId, Result<()>),
     /// The thread's messages were marked unread again, or not.
     Unmarked(ThreadId, Result<()>),
-    Reactions(Reactions),
+    /// The reactions to the messages watched, as read.
+    Reactions(Vec<Uuid>, Reactions),
     /// The human reacted to the message so, or took the reaction back: whether that changed anything.
     Reacted(Uuid, Reaction, bool, Result<bool>),
 }
@@ -86,7 +87,7 @@ pub struct Reads {
     marking_channel: Option<LocalBoxFuture<'static, (ChannelId, Result<ChannelReadMarkers>)>>,
     /// The messages whose reactions are read.
     watched: Vec<Uuid>,
-    reactions: Option<LocalBoxFuture<'static, Result<Reactions>>>,
+    reactions: Option<LocalBoxFuture<'static, (Vec<Uuid>, Result<Reactions>)>>,
     /// Every reaction added or removed, to read again those to the messages watched.
     changes: LocalBoxStream<'static, Change>,
     /// The reactions to make, after the one in flight.
@@ -212,10 +213,10 @@ impl Reads {
                     self.read_reactions();
                     return Read::Reacted(message, reaction, remove, changed);
                 }
-                read = maybe(&mut self.reactions) => {
+                (watched, read) = maybe(&mut self.reactions) => {
                     self.reactions = None;
                     match read {
-                        Ok(reactions) => return Read::Reactions(reactions),
+                        Ok(reactions) => return Read::Reactions(watched, reactions),
                         Err(e) => tracing::debug!("reading the reactions: {e:#}"),
                     }
                 }
@@ -247,7 +248,13 @@ impl Reads {
 
     fn read_reactions(&mut self) {
         let (js, watched) = (self.js.clone(), self.watched.clone());
-        self.reactions = Some(async move { reactions::load(&js, &watched).await }.boxed_local());
+        self.reactions = Some(
+            async move {
+                let read = reactions::load(&js, &watched).await;
+                (watched, read)
+            }
+            .boxed_local(),
+        );
     }
 
     /// Mark the human's inbox messages on `thread` read, after those asked for before.

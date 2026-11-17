@@ -1,13 +1,14 @@
-//! A channel's feed: its top-level posts, newest first, each with its replies' count and latest time and the reactions
-//! to it, as `ants channel read` shows them, but for those of the threads the human archived or left idle; and which of
-//! the channels' posts the human has not read.
+//! A channel's view: a header with the channel, its members and its latest activity ([`header`], [`activity`]) over
+//! its feed: its top-level posts, newest first, each with its replies' count and latest time and the reactions to it,
+//! as `ants channel read` shows them, but for those of the threads the human archived or left idle; and which of the
+//! channels' posts the human has not read.
 
 use std::collections::HashMap;
 
 use ants_proto::{ChannelId, ChannelNotify, ReadMarker, ThreadId, UserId, Uuid};
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
@@ -21,6 +22,11 @@ use super::work::Filter;
 use crate::channel::reads::Unread;
 use crate::messages::attachments::Listed;
 use crate::threads::thread::{Entry, Kind};
+
+mod activity;
+mod header;
+
+pub use activity::Activity;
 
 /// The most posts of a channel whose reactions are read.
 const WATCHED: usize = 200;
@@ -75,8 +81,7 @@ impl Feeds {
             self.seen.entry(channel.clone()).or_default().push(seen);
             self.channels.insert(thread, channel.clone());
         }
-        let top = entry.kind == Kind::Post && entry.id.is_some_and(|id| id.to_string() == entry.thread_id.as_str());
-        if let (true, Some(id), Some(channel)) = (top, entry.id, &entry.channel) {
+        if let (true, Some(id), Some(channel)) = (Self::opens(entry), entry.id, &entry.channel) {
             let from = entry.from.as_ref().map_or_else(String::new, ToString::to_string);
             let post = Post {
                 id,
@@ -97,6 +102,16 @@ impl Feeds {
             replies.last_at = entry.stored_at;
         }
         false
+    }
+
+    /// Whether `entry` is the top-level post opening its thread.
+    fn opens(entry: &Entry) -> bool {
+        entry.kind == Kind::Post && entry.id.is_some_and(|id| id.to_string() == entry.thread_id.as_str())
+    }
+
+    /// The channel of the posts on `thread`.
+    pub fn channel(&self, thread: &ThreadId) -> Option<&ChannelId> {
+        self.channels.get(thread)
     }
 
     /// The channel's top-level posts, newest first.
@@ -218,6 +233,9 @@ impl Page {
     }
 
     pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
+        let rows = header::rows(frame.area());
+        let [head, area] = Layout::vertical([Constraint::Length(rows), Constraint::Min(1)]).areas(area);
+        header::draw(frame, head, data, &self.channel, now);
         let posts: Vec<&Post> = self.posts(data).collect();
         let archived = data.feeds.posts(&self.channel).count() - posts.len();
         let level = data.level(&self.channel);
@@ -311,7 +329,8 @@ mod tests {
         assert_eq!(m.data.feeds.replies(&first.thread_id), Some(Replies { count: 2, last_at: at(4) }));
         assert_eq!(m.data.feeds.replies(&second.thread_id), None);
         let reacted = Reacted::new("eyes".parse().unwrap(), vec![user("bob")]);
-        m.read(super::super::reads::Read::Reactions([(second.id, vec![reacted])].into()), at(4));
+        let watched = vec![second.id, first.id];
+        m.read(super::super::reads::Read::Reactions(watched, [(second.id, vec![reacted])].into()), at(4));
         let View::Channel(page) = m.page() else { panic!("not the channel") };
         let shown: Vec<String> = post_lines(m.data.feeds.posts(&ops).nth(1).unwrap(), &m.data, at(64), None)
             .into_iter()
