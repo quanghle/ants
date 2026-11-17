@@ -24,6 +24,45 @@ async fn a_failed_message_is_retried_before_the_rest_of_its_thread() {
     assert_eq!(bus.unacked().await, 0);
 }
 
+#[tokio::test]
+async fn a_thread_is_told_started_by_its_first_message_only() {
+    use ants_proto::provider::{EventKind, Origin, Starter};
+
+    use crate::provider::events::{Lifecycle, tests};
+    let Some((mut bus, _)) = Bus::start().await else { return };
+    let provider = tests::Recording::taking_events();
+    let outbox = tests::outbox_to(provider.clone()).await;
+    let home = ants_test_support::scratch_dir("handling-lifecycle");
+    bus.lifecycle = Lifecycle::open(&outbox, &bus.dev, "id-1", &home).await;
+    let mut replies = bus.replies().await;
+    let (launch, _, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
+    bus.send(&t1, "a").await;
+    bus.send_ant(&t1, "b").await;
+    bus.send_ant(&t2, "c").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        for _ in 0..3 {
+            next_reply(&mut replies).await;
+        }
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    tests::took(&provider, 3).await;
+    let started = |thread: &ThreadId, user: &str| {
+        let user = user.parse().unwrap();
+        let by = if thread == &t1 { Starter::Human { user } } else { Starter::Ant { user } };
+        (Some(thread.clone()), EventKind::ThreadStarted { origin: Origin { by, channel: None } })
+    };
+    let mut told: Vec<_> =
+        provider.got.locked().iter().map(|event| (event.thread.clone(), event.kind.clone())).collect();
+    told.sort_by_key(|(thread, _)| thread.as_ref().map(|thread| u8::from(thread == &t2)));
+    assert_eq!(told, [(None, EventKind::AntAdded), started(&t1, "human"), started(&t2, "dev-b")]);
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 /// Ask the daemon which messages it holds until it answers, as the daemon may not listen yet.
 async fn queue(bus: &Bus) -> ants_proto::QueueReply {
     queue_with(bus, QueueRequest::new(bus.dev.clone(), UserId::human())).await

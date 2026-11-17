@@ -1,17 +1,18 @@
 //! [`AdminOp::Clone`]: add an ant under a new name, a copy of the order's ant with its home, sessions and thread
 //! history, to the config file the daemon serves. The ant cloned is paused (unless it was already), and the daemon
 //! serving its inbox reads a [`Snapshot`] once its last prompt ended; then its home is copied (no worktrees, no thread
-//! history, no answered or buried messages), each thread's history written into the clone's home
+//! history, no answered or buried messages, no lifecycle events), each thread's history written into the clone's home
 //! ([`crate::stream::history::cloned`]), each worktree added again on the branch `ants/<new>/<thread>` from the same commit,
 //! with its uncommitted changes and untracked files, the clone's key signed by `ants signer` on the order, each session
 //! forked when the harness can (else marked to start over, [`crate::stream::history::Rebuild::Cloned`]) and stored under the
 //! clone's keys, and its identity record written: a new id and birth, the prompts of the ant cloned and where it came
-//! from ([`ants_proto::ClonedFrom`]). Where the hub keeps shared settings ([`crate::profile::shared`]), the clone gets its own
-//! record of them: those of the ant cloned, with the order's settings over them. Its `[[ant]]` table, a copy of the
-//! cloned ant's with its shared settings and the order's settings over it, goes last, which starts it on the reload,
-//! and the ant cloned resumes. A failure undoes what was done, the signed
-//! key aside, which no one holds once the credentials are deleted. A comment above the table names the order, so that
-//! the order taken again after the table was written is applied without cloning twice.
+//! from ([`ants_proto::ClonedFrom`]), and the clone's provider is to be told it was cloned ([`events::arrived`]). Where
+//! the hub keeps shared settings ([`crate::profile::shared`]), the clone gets its own record of them: those of the ant
+//! cloned, with the order's settings over them. Its `[[ant]]` table, a copy of the cloned ant's with its shared
+//! settings and the order's settings over it, goes last, which starts it on the reload, and the ant cloned resumes. A
+//! failure undoes what was done, the signed key aside, which no one holds once the credentials are deleted. A comment
+//! above the table names the order, so that the order taken again after the table was written is applied without
+//! cloning twice.
 //!
 //! Not cloned: the messages queued for the ant, its channel memberships, references and spend counters.
 
@@ -19,6 +20,7 @@ use std::path::Path;
 
 #[cfg(doc)]
 use ants_proto::AdminOp;
+use ants_proto::provider::EventKind;
 use ants_proto::{AdminOrder, AdminOutcome, UserId};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
@@ -30,6 +32,7 @@ use super::{ConfigFile, NO_CONFIG, Orders, applied, refused};
 use crate::clone::Snapshot;
 use crate::config;
 use crate::profile::shared::{self, Bucket, Found};
+use crate::provider::events;
 
 mod files;
 mod keys;
@@ -120,6 +123,10 @@ impl Cloning<'_> {
         let (trees, branches) = copy_files(&plan, &snapshot, new, done).await?;
         let signed = self.sign(leaf, &plan, done).await?;
         let (forked, restart, record) = self.store(&plan, &snapshot, &trees, done).await?;
+        if let Some(from) = &record.cloned_from {
+            let cloned = EventKind::AntCloned { from: from.ant.clone(), from_identity: from.id.clone() };
+            events::arrived(&plan.new_home, new, &record.id, vec![cloned])?;
+        }
 
         let Plan { table, workdir, new_home, creds_path, shared, .. } = plan;
         if workdir.starts_with(&new_home) {

@@ -15,12 +15,16 @@ fn write(path: &Path, text: &str) {
 }
 
 /// The files under `dir`, relative to it, with their text.
+/// The files under `dir`, its lifecycle events ([`told`]) aside.
 fn tree(dir: &Path) -> BTreeMap<String, String> {
     let mut files = BTreeMap::new();
     let mut dirs = vec![dir.to_owned()];
     while let Some(d) = dirs.pop() {
         for entry in std::fs::read_dir(&d).unwrap() {
             let path = entry.unwrap().path();
+            if path == dir.join(ants_daemon::provider::events::DIR) {
+                continue;
+            }
             if path.is_dir() {
                 dirs.push(path);
             } else {
@@ -30,6 +34,13 @@ fn tree(dir: &Path) -> BTreeMap<String, String> {
         }
     }
     files
+}
+
+/// The lifecycle events queued in `home` for the ant's provider.
+fn told(home: &Path) -> Vec<ants_proto::provider::EventKind> {
+    let queue = home.join(ants_daemon::provider::events::DIR).join(ants_daemon::provider::events::QUEUE);
+    let lines = std::fs::read_to_string(queue).unwrap();
+    lines.lines().map(|line| serde_json::from_str::<ants_proto::provider::Event>(line).unwrap().kind).collect()
 }
 
 #[test]
@@ -203,6 +214,8 @@ async fn an_ant_moves_to_another_bus_with_its_identity_and_memories() {
             ("CLAUDE.md".to_owned(), "be brief".to_owned())
         ])
     );
+    let renamed = ants_proto::provider::EventKind::AntRenamed { from: p("dev-a") };
+    assert_eq!(told(&home_b), [ants_proto::provider::EventKind::AntMoved, renamed]);
     let loaded = config::load(&config_b).unwrap();
     let dev_b = loaded.ants.iter().find(|a| a.name == p("dev-b")).unwrap();
     assert_eq!(settings_of(dev_b, None).unwrap(), settings, "the shared settings, which seed the new bus's");
@@ -232,6 +245,7 @@ async fn an_ant_moves_to_another_bus_with_its_identity_and_memories() {
     ];
     Box::pin(import_as(&nats, &args)).await.unwrap();
     assert_eq!(tree(&home_c), BTreeMap::from([("notes.md".to_owned(), "remember".to_owned())]));
+    assert_eq!(told(&home_c), [ants_proto::provider::EventKind::AntMoved], "not renamed");
     let loaded = config::load(&config_c).unwrap();
     let dev_a = &loaded.ants.iter().find(|a| a.name == p("dev-a")).unwrap();
     assert_eq!((dev_a.harness.as_deref(), dev_a.model.as_deref()), (Some("codex"), Some("gpt-5")), "the flags win");

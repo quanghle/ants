@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use agent_client_protocol::v1::schema::SessionId;
+use ants_proto::provider::{EventKind, Rebuilt};
 use ants_proto::{ThreadId, UserId, session_key};
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
@@ -27,6 +28,7 @@ use crate::colony::Workload;
 use crate::harness::{Launch, Prompt, Reply, Session};
 use crate::limits::fallback::OnFallback;
 use crate::limits::pressure;
+use crate::provider::events::Lifecycle;
 use crate::records::direct_kv::DirectKv;
 use crate::stream::history::Rebuild;
 use crate::sync::MutexExt as _;
@@ -147,6 +149,8 @@ pub struct Pool {
     memory_low: AtomicBool,
     /// How many restarts were asked for ([`Pool::restart`]).
     restarts: AtomicU64,
+    /// Told of the sessions lost and rebuilt, and of the threads whose session expired.
+    lifecycle: Option<Lifecycle>,
 }
 
 /// What a [`Pool::restart`] did.
@@ -186,6 +190,7 @@ impl Pool {
             pressure: None,
             memory_low: AtomicBool::new(false),
             restarts: AtomicU64::new(0),
+            lifecycle: None,
         }
     }
 
@@ -219,6 +224,13 @@ impl Pool {
     #[must_use]
     pub fn reporting_to(self, workload: Arc<Workload>) -> Self {
         Self { workload: Some(workload), ..self }
+    }
+
+    /// Tell `lifecycle` of the sessions lost and rebuilt, and of the threads whose worktree goes as their session
+    /// expired.
+    #[must_use]
+    pub fn with_lifecycle(self, lifecycle: Option<Lifecycle>) -> Self {
+        Self { lifecycle, ..self }
     }
 
     /// Each thread works in its own git worktree ([`Worktrees`]).
@@ -262,7 +274,13 @@ impl Pool {
                     return false;
                 }
                 match self.store.get(thread).await {
-                    Ok(session) => session.is_none(),
+                    Ok(Some(_)) => false,
+                    Ok(None) => {
+                        if let Some(lifecycle) = &self.lifecycle {
+                            lifecycle.emit(EventKind::ThreadExpired, Some(thread)).await;
+                        }
+                        true
+                    }
                     Err(e) => {
                         tracing::warn!(%thread, error = format!("{e:#}"), "keeping the thread's git worktree");
                         false
@@ -270,6 +288,11 @@ impl Pool {
                 }
             })
             .await
+    }
+
+    /// Whether the thread has a session: a live harness or one stored. A store that cannot be read counts as one.
+    pub async fn has_session(&self, thread: &ThreadId) -> bool {
+        self.slots().contains_key(thread) || !matches!(self.store.get(thread).await, Ok(None))
     }
 
     /// The thread's branch, when the thread works in its own worktree and the branch holds commits not in the
@@ -306,6 +329,9 @@ impl Pool {
         let after = lease.session.id();
         if after != before {
             tracing::info!(%thread, session = %after, "the harness moved to a new session");
+            if let Some(lifecycle) = &self.lifecycle {
+                lifecycle.emit(EventKind::SessionRebuilt { reason: Rebuilt::Overflow }, Some(thread)).await;
+            }
             let harness = self.launch_on(fallback)?.harness_name().to_owned();
             if let Err(e) = self.store.put(thread, Stored { session: after, harness, cloned: false }).await {
                 tracing::warn!(%thread, error = format!("{e:#}"), "storing the session of the thread");
@@ -495,6 +521,11 @@ impl Pool {
         match &resume {
             Some(old) if *old == session.id() => tracing::info!(%thread, session = %old, "resumed harness session"),
             _ => tracing::info!(%thread, session = %session.id(), "started harness session"),
+        }
+        let lost = resume.as_ref().is_some_and(|old| *old != session.id());
+        if let Some(lifecycle) = self.lifecycle.as_ref().filter(|_| lost) {
+            lifecycle.emit(EventKind::SessionLost, Some(thread)).await;
+            lifecycle.emit(EventKind::SessionRebuilt { reason: Rebuilt::Lost }, Some(thread)).await;
         }
         // Stored on every start, so the key of a thread still in use does not age out. Losing it only costs the
         // thread its history after the next stop, so the prompt goes ahead.

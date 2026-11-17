@@ -254,7 +254,7 @@ An admin's `ants ant clone SRC NEW [settings]` has the daemon serving SRC start 
 
 - **Table:** SRC's `[[ant]]` table (for an ant added from a template, the settings the template gave it, so NEW's table stands alone), below the comment `# cloned from SRC by <admin>'s order <id>`, without `name`, `creds`, `paused`, `added_by`, `template`, `builtin`, `home` and `allow_sets`, with SRC's [shared settings](#shared-settings), where the hub keeps them, in place of its table's, and the settings flags of `ants add` over it; its whoami, memory, tasks, harness, model, permissions and escalation chain are SRC's unless given. A workdir in SRC's home moves into NEW's.
 - **Shared settings:** where the hub keeps them, a record of NEW's own (`NEW.settings`), written before its table, in place of any left from an earlier ant of the name: SRC's with the order's settings over them, so NEW's table and record agree and no drift shows.
-- **Home:** a copy of SRC's (`--home`, default `~/.ants/NEW`; it must be empty), memory files, task DB and repositories included, but not `worktrees`, `answered`, `buried` and the MCP config and socket.
+- **Home:** a copy of SRC's (`--home`, default `~/.ants/NEW`; it must be empty), memory files, task DB and repositories included, but not `worktrees`, `answered`, `buried`, `lifecycle` and the MCP config and socket. The clone's provider is told `ant_cloned` ([architecture.md](architecture.md#lifecycle-events)).
 - **Threads:** each thread SRC holds a session of, with its worktree, if any, at `<home>/worktrees/<thread>` on branch `ants/NEW/<thread>` from SRC's commit, SRC's uncommitted changes and untracked files on it. Its session is a fork of SRC's when the harness offers ACP `session/fork`; otherwise NEW's first prompt on the thread starts a new session seeded from the thread's history, as after a failed `session/load` ([Lost sessions](#lost-sessions-and-context-window)), its notice saying the session could not be forked.
 - **History:** what SRC had on each thread, kept in `<home>/history/<thread>.jsonl`; NEW reads a thread's history back with this copy first, then what came to it after.
 
@@ -644,7 +644,7 @@ The file is `{"ants_ant": 1, "created_at", "bus", "identity", "settings", "files
   relative to the home (`~/` globs are left out), and `core` for every other regular file of the home, symbolic
   links not followed.
 
-Left out: the home's `worktrees`, `answered`, `buried`, `mcp.json`, `mcp.sock`, `.git`, `.beads` and `.bd`, the task
+Left out: the home's `worktrees`, `answered`, `buried`, `mcp.json`, `mcp.sock`, `lifecycle`, `.git`, `.beads` and `.bd`, the task
 database `BD_DB` names when it lies in the home, the rest of the ant's settings (its role on the bus: `capabilities`,
 `escalate_to`, `allow`, `memory`, `tasks`; its machine's: `workdir`, `env`, caps and limits), its credentials,
 sessions, threads and history. A templated ant imports as a plain `[[ant]]`.
@@ -668,7 +668,9 @@ the mark; `ants auth revoke ANT` ends the ant on the old bus once the import suc
    name, so no bus holds two copies of one ant. The id is looked up by reading the whole `ants_identities` bucket, one
    record per ant.
 3. Restores its files into its home, leaving out its harness memory files, with a warning, when the ant runs another
-   harness here (`--harness`, else the exported one, else the file's top-level `harness`).
+   harness here (`--harness`, else the exported one, else the file's top-level `harness`), and queues there the
+   lifecycle events `ant_moved`, and `ant_renamed` under `--as`, for its provider
+   ([architecture.md](architecture.md#lifecycle-events)).
 4. Lists it in `config.toml` with the exported settings, the flags given winning, and gives it a new key, as `ants
    add` does: with `--jwt` or `--enroll` its credentials complete at once, else `ants add NAME --jwt ...` completes
    them later. The first daemon serving it creates its shared settings on the new bus from that table; when the bus

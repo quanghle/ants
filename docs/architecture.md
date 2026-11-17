@@ -246,6 +246,29 @@ The message.
 - A provider not answering within 5 s leaves the brief out, with `[ants] The sugar brief is left out: no answer within 5s.` in its place; one failing leaves `… the provider failed (error <code>).`, and an identity record the daemon cannot read `… the ant's identity record cannot be read.` The prompt goes on either way. The wait runs alongside the reading of the message's attachments and does not count toward `prompt_timeout`.
 - The brief's `origin` comes from the message prompting: a webhook's message is the webhook's; a thread an ant started with a channel post is that ant's; one a human started is that human's, as is a message an assistant sends on a human's behalf; anything else is the sender's. A post's `channel` is its channel.
 
+### Lifecycle events
+
+ants sends an ant's provider its lifecycle events only when both declared `events` at initialize; sugar does not yet, so with sugar no event is queued. Each event carries the ant, the id of its identity record, the thread when there is one and the time, never a message, prompt or reply.
+
+| Kind | Sent when |
+|---|---|
+| `ant_added` | A daemon first serves the ant with a given identity id: a new ant, or a home given an ant of another id. |
+| `ant_retired` | A retirement (`ants retire`, a manager's `retire_ant`, an admin order) marks the home `lifecycle/retired` before unlisting the ant; the daemon serving it sends the event once it stopped the ant, or, when none was serving it, the daemon serving it again sends it first. An ant dropped by editing `config.toml` is not told retired. |
+| `ant_revived` | A daemon serves an ant whose home is marked retired. |
+| `ant_cloned` | A clone order queues it in the clone's home, with the source ant and its identity id; the clone gets no `ant_added`. |
+| `ant_moved`, `ant_renamed` | `ants ant import` queues `ant_moved`, then `ant_renamed` under `--as`, in the new home; the ant gets no `ant_added`. No other rename exists, and a daemon of the same bus taking an ant over is not a move. |
+| `thread_started` | A message comes on a thread the ant holds no session of, with the message's `origin`. |
+| `thread_expired` | A thread's worktree goes because its session expired (threads in worktrees only). |
+| `session_lost`, `session_rebuilt` | A stored session fails to resume and a new one starts (`lost`); the harness moves to a new session on a full context window (`overflow`). |
+| `thread_done` | Never yet: a thread marked done is kept in `ants_threads`, which no daemon watches. |
+
+Delivery:
+
+- The daemon queues each event in the ant's home, `<home>/lifecycle/events.jsonl`, one JSON event per line, appended and synced before the event counts as sent. The file is rewritten without an event once the provider acked it, and removed when empty. Past 1,000 events, the oldest are dropped with a warning.
+- One task per daemon process delivers every ant's queue, one event in flight per ant, in queue order, waiting 30 s for each ack. While the provider is not connected or fails, the event is sent again, with the same `id`, after a backoff doubling from 1 s to 5 min. A provider answering `-32001` (events not agreed) gets none of the ant's queued events.
+- A daemon starting picks up the events left in the home's queue. `lifecycle/identity` holds the identity id last told as added, and events a crash could repeat carry ids derived from what they tell (the ant and its identity, the thread and its first message), so the provider can drop the repeats.
+- Clones and exports leave `lifecycle` out of the home they copy.
+
 ## MCP tools
 
 Each session gets the `ants` MCP server over streamable HTTP (`127.0.0.1:<port>/mcp` with per-thread bearer token) or via `ants mcp --socket <home>/mcp.sock` (`0600`, `ANTS_MCP_TOKEN`; current-user named pipe on Windows). Allowlist rules match `other:<tool>`:

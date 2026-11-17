@@ -36,6 +36,7 @@ use crate::people::humans::Registry;
 use crate::permission::{Allowlist, PermissionPolicy};
 use crate::pool::{Pool, SessionStore};
 use crate::profile::identity::Identity;
+use crate::provider::events::{self, Lifecycle};
 use crate::publish::{Publish, Publisher};
 use crate::records::webhooks::Webhooks;
 use crate::secrets::redact::Redactor;
@@ -353,8 +354,20 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
     let account = || crate::people::humans::account(config.connection.creds.as_deref());
     let humans = Registry::new(config.policy.human.clone()).verifying_grants(account());
     let _watching = humans.watch(js.clone(), crate::people::humans::RETRY);
-    let Services { redactor, approver, colony, reading, notes, sessions_kv, ledger, escalator, identity, mcp, launch } =
-        services(config, &client, &js, &humans, allow).await?;
+    let Services {
+        redactor,
+        approver,
+        colony,
+        reading,
+        notes,
+        sessions_kv,
+        ledger,
+        escalator,
+        identity,
+        lifecycle,
+        mcp,
+        launch,
+    } = services(config, &client, &js, &humans, allow).await?;
     let js_domain = config.connection.js_domain.as_ref();
     let stream = bus::open_stream(&js, &config.ant).await?;
     let threads = Threads::new(js.clone(), config.ant.clone(), sessions_kv.clone()).reading(reading);
@@ -363,7 +376,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
     let sessions = SessionStore::kv(sessions_kv, config.ant.clone());
     let attempts = Attempts::new(bus::ensure_attempts(&js, js_domain, &config.ant).await?, config.ant.clone());
     let (answered, buried) = delivery_marks(&config.storage.home).await;
-    let pool = harness_pool(config, launch, sessions, &workload).await;
+    let pool = harness_pool(config, launch, sessions, &workload).await.with_lifecycle(lifecycle.clone());
     let publisher = publisher(config, &js, &redactor, &pool).await;
     let (messages, channels) = inbox_messages(&js, &stream, config).await?;
     let registration = enter_colony(&js, entry.clone(), claimed, &workload).await?;
@@ -412,14 +425,24 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         fallback_retry: crate::limits::fallback::RETRY_AFTER,
         identity: identity.as_ref(),
         home: &config.storage.home,
+        lifecycle: lifecycle.as_ref(),
     };
     let served = Box::pin(serve_inbox(&inbox, messages, channels, config, stop, &registration, &storage)).await?;
+    wind_down(&served, registration, pool, lifecycle.as_ref()).await;
+    Ok(served)
+}
+
+/// Leave the colony and end the harness sessions once [`serve`] ended; on a stop, tell the ant's provider of its
+/// retirement when that stop retired it ([`Lifecycle::stopped`]).
+async fn wind_down(served: &Served, registration: colony::Registration, pool: Pool, lifecycle: Option<&Lifecycle>) {
     registration.deregister().await;
     pool.shutdown().await;
-    if served == Served::Stopped {
+    if *served == Served::Stopped {
+        if let Some(lifecycle) = lifecycle {
+            lifecycle.stopped().await;
+        }
         tracing::info!("stopped");
     }
-    Ok(served)
 }
 
 /// The ant's colony entry, and the revision of it claimed when the daemon defers to others ([`wait_for_turn`]):
@@ -450,6 +473,8 @@ struct Services {
     ledger: std::sync::Arc<Ledger>,
     escalator: std::sync::Arc<Escalator>,
     identity: Option<Identity>,
+    /// Where the ant's lifecycle events go, when its provider takes them and its identity record could be read.
+    lifecycle: Option<Lifecycle>,
     mcp: Mcp,
     /// How the harnesses start, with the ant's MCP server and its tool requests going to `approver`.
     launch: Launch,
@@ -478,7 +503,11 @@ async fn services(
     let sessions_kv = bus::ensure_sessions(js, config.connection.js_domain.as_ref(), &config.ant).await?;
     let ledger = ledger(&config.ant, &config.spending, &sessions_kv);
     let escalator = escalator(config, js, &colony, humans, &ledger, &redactor, assistants);
-    let identity = ant_records(config, js).await;
+    let (identity, identity_id) = ant_records(config, js).await;
+    let lifecycle = match &identity_id {
+        Some(id) => Lifecycle::open(events::outbox(), &config.ant, id, &config.storage.home).await,
+        None => None,
+    };
     let mut mcp = Mcp::start(
         config.ant.clone(),
         &config.storage.home,
@@ -491,7 +520,20 @@ async fn services(
     .await?;
     connect_mcp(&mut mcp, config, client, js, &redactor, humans).await?;
     let launch = launch(&config.harness, policy, &mcp);
-    Ok(Services { redactor, approver, colony, reading, notes, sessions_kv, ledger, escalator, identity, mcp, launch })
+    Ok(Services {
+        redactor,
+        approver,
+        colony,
+        reading,
+        notes,
+        sessions_kv,
+        ledger,
+        escalator,
+        identity,
+        lifecycle,
+        mcp,
+        launch,
+    })
 }
 
 /// Wait while the ant's identity record is marked moved, so no daemon starts a moved ant: false when `stop` comes
@@ -510,9 +552,9 @@ async fn unsealed(config: &Config, js: &jetstream::Context, stop: &Stop) -> bool
     }
 }
 
-/// Keep the ant's escalation chain past the colony, and return its identity record, created when absent: None when it
-/// cannot be read, which the warning says.
-async fn ant_records(config: &Config, js: &jetstream::Context) -> Option<Identity> {
+/// Keep the ant's escalation chain past the colony, and return its identity record, created when absent, with its id:
+/// None when it cannot be read, which the warning says.
+async fn ant_records(config: &Config, js: &jetstream::Context) -> (Option<Identity>, Option<String>) {
     if let Err(e) = crate::records::chains::publish(js, &config.ant, &config.policy.escalation.escalate_to).await {
         tracing::warn!(error = format!("{e:#}"), "keeping the escalation chain past the colony");
     }
@@ -521,12 +563,18 @@ async fn ant_records(config: &Config, js: &jetstream::Context) -> Option<Identit
         Ok(identity) => identity.ensure().await,
         Err(e) => Err(anyhow::anyhow!("{e:#}")),
     };
-    match ensured {
-        Ok(Some(_)) => {}
-        Ok(None) => tracing::warn!("no identities bucket: `ants init` creates it; the ant's prompts go uncounted"),
-        Err(e) => tracing::warn!(error = format!("{e:#}"), "reading the ant's identity; its prompts go uncounted"),
-    }
-    identity.ok()
+    let id = match ensured {
+        Ok(Some(record)) => Some(record.id),
+        Ok(None) => {
+            tracing::warn!("no identities bucket: `ants init` creates it; the ant's prompts go uncounted");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(error = format!("{e:#}"), "reading the ant's identity; its prompts go uncounted");
+            None
+        }
+    };
+    (identity.ok(), id)
 }
 
 /// The ant's approver of tool requests, which the permission policy asks for calls its allowlist does not cover.
@@ -1055,6 +1103,8 @@ struct Inbox<'a> {
     identity: Option<&'a Identity>,
     /// The ant's home, where a clone's copy of its threads' history is ([`crate::stream::history::cloned`]).
     home: &'a std::path::Path,
+    /// Told of the threads the ant starts ([`Inbox::thread_started`]); None when its provider takes no events.
+    lifecycle: Option<&'a Lifecycle>,
 }
 
 impl Inbox<'_> {

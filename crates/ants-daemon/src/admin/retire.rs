@@ -170,11 +170,16 @@ fn unlist(path: &Path, host_creds: &Path, ant: &UserId) -> Result<Unlisted> {
         bail!("{ant} is built in: it is turned off in the config, not retired");
     }
     let key = entry.creds.as_deref().map(|creds| key_of(creds, ant)).transpose()?;
-    config::write(path, &without_mark(&config::without_ant(path, ant)?))?;
     let home = match entry.home {
         Some(home) => home,
         None => default_home()?,
     };
+    crate::provider::events::mark_retired(&home)?;
+    let unlisted = config::without_ant(path, ant).and_then(|text| config::write(path, &without_mark(&text)));
+    if let Err(e) = unlisted {
+        crate::provider::events::unmark_retired(&home);
+        return Err(e);
+    }
     Ok(Unlisted { listed: true, creds: entry.creds, key, home })
 }
 

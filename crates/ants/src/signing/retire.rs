@@ -2,7 +2,8 @@
 //! by a human (`ants retire`): its `[[ant]]` entry leaves the config file, the daemon stops it as on any reload (its
 //! prompts in flight end first), its credentials are revoked where the account key is and their file removed. Its
 //! home stays, so a later `request_ant` of the same name from the same template brings it back with its memory,
-//! task database and worktrees.
+//! task database and worktrees. The home is marked retired first ([`ants_daemon::provider::events::mark_retired`]): the
+//! daemon tells the ant's provider of the retirement once the ant stopped, and of its revival once served again.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -66,9 +67,12 @@ pub fn unlist(path: &Path, name: &UserId, manager: Option<&UserId>) -> Result<Un
         Some(home) => home.clone(),
         None => std::env::home_dir().context("no home directory")?.join(".ants").join(name.as_str()),
     };
-    let unlisted = Unlisted { template, creds: ant.creds.clone(), key, home };
-    config::write(path, &config::without_ant(path, name)?)?;
-    Ok(unlisted)
+    ants_daemon::provider::events::mark_retired(&home)?;
+    if let Err(e) = config::without_ant(path, name).and_then(|text| config::write(path, &text)) {
+        ants_daemon::provider::events::unmark_retired(&home);
+        return Err(e);
+    }
+    Ok(Unlisted { template, creds: ant.creds.clone(), key, home })
 }
 
 /// The public key of the credentials at `path`.

@@ -65,6 +65,7 @@ struct Bus {
     account: Option<String>,
     /// How long a failed message waits for its redelivery.
     retry_delay: Duration,
+    lifecycle: Option<crate::provider::events::Lifecycle>,
 }
 
 impl Bus {
@@ -120,6 +121,7 @@ impl Bus {
             restarts: Restarts::default(),
             account: None,
             retry_delay: Duration::from_millis(300),
+            lifecycle: None,
         };
         (bus, replies)
     }
@@ -275,6 +277,7 @@ impl Bus {
             fallback_retry: Duration::from_millis(300),
             identity: self.identity.as_ref(),
             home: &home,
+            lifecycle: self.lifecycle.as_ref(),
         };
         let stop = || {
             let ctrl_c = ctrl_c.clone();

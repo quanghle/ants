@@ -192,6 +192,7 @@ impl Inbox<'_> {
             return Ok(());
         }
         if self.arrived(incoming).await? {
+            self.thread_started(incoming).await;
             Box::pin(self.answer(incoming, msg, seq, marker)).await?;
         } else {
             self.done(msg, seq).await?;
@@ -339,6 +340,19 @@ impl Inbox<'_> {
             posted.post.allow.clone_from(&envelope.allow);
         }
         Ok(())
+    }
+
+    /// Tell the ant's provider of the thread of `incoming` when it has no session yet: a thread new to the ant, or one
+    /// whose session expired. Told again, with the same id, when the message is handled again.
+    async fn thread_started(&self, incoming: &Incoming) {
+        let Some(lifecycle) = self.lifecycle else { return };
+        let envelope = &incoming.envelope;
+        if self.pool.has_session(&envelope.thread_id).await {
+            return;
+        }
+        let channel = incoming.post.as_ref().map(|posted| posted.post.channel.clone());
+        let origin = crate::provider::context::origin(envelope, channel, &self.humans.humans());
+        lifecycle.thread_started(&envelope.thread_id, &envelope.id.to_string(), origin).await;
     }
 
     /// Ack the message at stream sequence `seq`, which needs no reply.

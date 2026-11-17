@@ -296,6 +296,30 @@ async fn a_session_that_cannot_be_resumed_starts_over_from_the_thread_history() 
     assert_eq!(log.locked().prompts, ["a", seeded, "c"], "a session started anew is not seeded");
 }
 
+#[tokio::test]
+async fn a_session_lost_is_told_lost_then_rebuilt() {
+    use crate::provider::events::{Lifecycle, tests};
+    let provider = tests::Recording::taking_events();
+    let outbox = tests::outbox_to(provider.clone()).await;
+    let home = ants_test_support::scratch_dir("pool-lifecycle");
+    let ant: UserId = "ant".parse().unwrap();
+    let lifecycle = Lifecycle::open(&outbox, &ant, "id-1", &home).await;
+    let (launch, log, _) = fake::launch();
+    let store = SessionStore::memory();
+    let pool = Pool::new(launch.clone(), store.clone(), 4, IDLE).with_lifecycle(lifecycle.clone());
+    pool.prompt(&thread(1), "a").await.unwrap();
+    pool.shutdown().await;
+    log.locked().lose_sessions = true;
+
+    let pool = Pool::new(launch, store, 4, IDLE).with_lifecycle(lifecycle);
+    pool.prompt(&thread(1), "b").await.unwrap();
+    tests::took(&provider, 3).await;
+    let lost = [EventKind::AntAdded, EventKind::SessionLost, EventKind::SessionRebuilt { reason: Rebuilt::Lost }];
+    assert_eq!(provider.kinds(), lost, "a new session is not one lost");
+    assert!(provider.got.locked()[1..].iter().all(|event| event.thread == Some(thread(1))));
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 /// A clone's session is forked in its working directory where the harness advertises session/fork; one stored as
 /// not forked starts over, seeded from the thread's history.
 #[tokio::test]

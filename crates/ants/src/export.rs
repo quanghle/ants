@@ -12,6 +12,9 @@
 //! holds its name, and refused first when one holds its id. The id is looked up by reading the whole identities bucket,
 //! one record per ant, which suits a team's bus; two imports of one ant under different names at the same moment could
 //! both pass that check.
+//!
+//! An import queues, in the ant's new home, the lifecycle events telling its provider it moved, and was renamed when
+//! imported under another name ([`ants_daemon::provider::events::arrived`]).
 
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
@@ -20,6 +23,7 @@ use ants_daemon::config::{self, Ant};
 use ants_daemon::harness::Harness;
 use ants_daemon::records::direct_kv::{DirectKv, Lookup};
 use ants_daemon::secrets::keystore::{self, Store};
+use ants_proto::provider::EventKind;
 use ants_proto::{AntIdentity, IDENTITIES_BUCKET, MovedMark, SharedSettings, UserId};
 use anyhow::{Context as _, Result, bail};
 use chrono::{DateTime, Utc};
@@ -37,9 +41,19 @@ const MAX_BYTES: u64 = 64 << 20;
 /// How long an export waits for the ant's prompts in flight to end before packing its files anyway.
 const PACK_WAIT: Duration = Duration::from_mins(2);
 const PACK_POLL: Duration = Duration::from_secs(1);
-/// What of an ant's home is not its memory, relative to the home: its worktrees, the daemon's delivery notes and MCP
-/// state, a git repository's history and a bd task database.
-const LEFT_OUT: [&str; 8] = ["worktrees", "answered", "buried", "mcp.json", "mcp.sock", ".git", ".beads", ".bd"];
+/// What of an ant's home is not its memory, relative to the home: its worktrees, the daemon's delivery notes, MCP state
+/// and lifecycle events, a git repository's history and a bd task database.
+const LEFT_OUT: [&str; 9] = [
+    "worktrees",
+    "answered",
+    "buried",
+    "mcp.json",
+    "mcp.sock",
+    ".git",
+    ".beads",
+    ".bd",
+    ants_daemon::provider::events::DIR,
+];
 /// How often a compare-and-set of the identity record is tried again when another writer changed it in between.
 const ATTEMPTS: usize = 5;
 
@@ -529,6 +543,11 @@ async fn import_with(nats: &crate::connection::Nats<'_>, args: ImportArgs, store
     let done = async {
         let harness_kept = listing.harness == export.settings.harness;
         let dropped = restore(&home, &export.files, harness_kept)?;
+        let mut arrived = vec![EventKind::AntMoved];
+        if name != export.identity.ant {
+            arrived.push(EventKind::AntRenamed { from: export.identity.ant.clone() });
+        }
+        ants_daemon::provider::events::arrived(&home, &name, &identity.id, arrived)?;
         if !dropped.is_empty() {
             eprintln!(
                 "warning: {name} runs {} here, not {}: its harness memory files are left out: {}",
