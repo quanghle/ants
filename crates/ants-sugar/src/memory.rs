@@ -2,7 +2,7 @@
 //! is never overwritten or deleted: a new one supersedes it ([`Status::Superseded`], linked both ways), so its chain
 //! can be read back ([`chain`]). Core memories ([`core`]) appear in every brief, within [`CORE_BUDGET`].
 //!
-//! [`remember`] answers `sugar_remember`.
+//! [`remember`] answers `sugar_remember`, [`recall`] `sugar_recall` (ranked by [`score`]) and [`vote`] `sugar_vote`.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -16,9 +16,16 @@ use serde_json::{Value, json};
 use crate::items::{Item, ItemId, Values};
 use crate::store::{Items, StoreError, Write};
 
+mod recall;
 mod remember;
+mod vote;
 
+pub use recall::{
+    HALF_LIFE_DAYS, HELPFUL_WEIGHT, MAX_HELPFUL, NEEDS_REVIEW_WEIGHT, NOTE, Ranked, STALE_WEIGHT, framed, participants,
+    recall, score, search, snippet, top,
+};
 pub use remember::remember;
+pub use vote::{VOTE, Vote, Votes, vote};
 
 /// The kind of the items holding memories.
 pub const MEMORY: &str = "memory";
@@ -201,11 +208,20 @@ pub enum Status {
     Superseded,
     /// Voted wrong.
     Wrong,
-    /// Its citations changed since it was written: to check again.
+    /// Voted stale, or its citations changed since it was written: to check again.
     NeedsReview,
 }
 
 impl Status {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Superseded => "superseded",
+            Self::Wrong => "wrong",
+            Self::NeedsReview => "needs_review",
+        }
+    }
+
     /// Whether the memory still counts: recalled, in briefs, compared with new ones.
     pub const fn live(self) -> bool {
         matches!(self, Self::Active | Self::NeedsReview)
@@ -271,6 +287,8 @@ pub struct Memory {
     /// The [`digest`] of its body.
     #[serde(default)]
     pub digest: String,
+    #[serde(default, skip_serializing_if = "Votes::is_empty")]
+    pub votes: Votes,
 }
 
 impl Memory {
@@ -291,6 +309,7 @@ impl Memory {
             status: Status::Active,
             supersedes: None,
             superseded_by: None,
+            votes: Votes::default(),
         }
     }
 

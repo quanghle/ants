@@ -87,11 +87,11 @@ async fn sugar_tools_are_served_with_its_prefix_and_the_json_argument() {
     assert!(served.iter().all(|t| t.input_schema["properties"]["json"]["type"] == "boolean"));
     assert!(tools.iter().any(|t| t.name == "send_message" && !t.input_schema["properties"].get("json").is_some()));
 
-    let (ok, text) = call(&client, "sugar_recall", json!({"query": "x"})).await;
+    let (ok, text) = call(&client, "sugar_brief", json!({})).await;
     assert!(!ok, "{text}");
-    assert_eq!(text, "sugar_recall is not available yet.");
+    assert_eq!(text, "sugar_brief is not available yet.");
     let result =
-        client.call_tool(CallToolRequestParams::new("sugar_recall").with_arguments(json_object(json!({"json": true}))));
+        client.call_tool(CallToolRequestParams::new("sugar_brief").with_arguments(json_object(json!({"json": true}))));
     let result = result.await.unwrap();
     assert_eq!(result.is_error, Some(true));
     assert_eq!(result.structured_content.unwrap()["error"], "not_available");

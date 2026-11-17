@@ -10,9 +10,9 @@ use crate::cache::Cache;
 use crate::items::ITEMS_EVENT;
 use crate::log::{AccountVerifier, AntLog, Event, EventLog, MemoryLog, NoRevocations, Unsigned};
 use crate::store::{Store, Stores};
-use crate::tools::Answer;
+use crate::tools::{Answer, Handler};
 
-type Kept = tokio::sync::Mutex<Store<MemoryLog, Unsigned, AccountVerifier<NoRevocations>>>;
+pub(super) type Kept = tokio::sync::Mutex<Store<MemoryLog, Unsigned, AccountVerifier<NoRevocations>>>;
 
 /// The one store of every ant.
 struct One(Arc<Kept>);
@@ -24,7 +24,7 @@ impl Stores for One {
     }
 }
 
-async fn sugar() -> (Sugar, Arc<Kept>) {
+pub(super) async fn sugar() -> (Sugar, Arc<Kept>) {
     let verifier = AccountVerifier::new(vec![], NoRevocations);
     let ant = "dev-a".parse().unwrap();
     let log = AntLog::new(MemoryLog::default(), Unsigned, verifier, SugarId::new(), ant, "m1".parse().unwrap(), None);
@@ -41,7 +41,7 @@ async fn events(store: &Kept) -> Vec<Event> {
     stored.iter().map(|stored| stored.event().unwrap()).collect()
 }
 
-fn context(by: Starter) -> CallContext {
+pub(super) fn context(by: Starter) -> CallContext {
     CallContext {
         ant: "dev-a".parse().unwrap(),
         identity: "0f1e".into(),
@@ -54,22 +54,27 @@ fn context(by: Starter) -> CallContext {
     }
 }
 
-fn human() -> Starter {
+pub(super) fn human() -> Starter {
     Starter::Human { user: "alice".parse().unwrap() }
 }
 
 async fn call(sugar: &Sugar, by: Starter, arguments: Value) -> Answer {
-    let arguments = arguments.as_object().unwrap().clone();
-    let call = ToolCall { name: "remember".into(), arguments, context: context(by), format: Format::Json };
-    remember(sugar, &call).await
+    tool(sugar, remember, arguments, context(by)).await
 }
 
-fn id_of(answer: &Answer) -> ItemId {
+/// The answer of `handler`, as JSON, to a call of `context` with `arguments`.
+pub(super) async fn tool(sugar: &Sugar, handler: Handler, arguments: Value, context: CallContext) -> Answer {
+    let arguments = arguments.as_object().unwrap().clone();
+    let call = ToolCall { name: "tool".into(), arguments, context, format: Format::Json };
+    handler(sugar, &call).await
+}
+
+pub(super) fn id_of(answer: &Answer) -> ItemId {
     assert!(!answer.is_error, "{answer:?}");
     answer.json["id"].as_str().unwrap().parse().unwrap()
 }
 
-async fn ok(sugar: &Sugar, arguments: Value) -> ItemId {
+pub(super) async fn ok(sugar: &Sugar, arguments: Value) -> ItemId {
     id_of(&call(sugar, human(), arguments).await)
 }
 
@@ -79,11 +84,11 @@ async fn refused(sugar: &Sugar, arguments: Value) -> Answer {
     answer
 }
 
-async fn memory(store: &Kept, id: &ItemId) -> Memory {
+pub(super) async fn memory(store: &Kept, id: &ItemId) -> Memory {
     Memory::of(&store.lock().await.get(id).unwrap().unwrap()).unwrap()
 }
 
-fn lesson(title: &str, body: &str) -> Value {
+pub(super) fn lesson(title: &str, body: &str) -> Value {
     json!({"kind": "lesson", "title": title, "body": body})
 }
 

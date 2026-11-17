@@ -305,11 +305,11 @@ async fn superseded(items: &dyn Items, id: &ItemId) -> Result<MemoryItem, Answer
     Ok(found)
 }
 
-fn invalid(message: String) -> Answer {
+pub(super) fn invalid(message: String) -> Answer {
     Answer::error("invalid", message)
 }
 
-fn unavailable(e: StoreError) -> Answer {
+pub(super) fn unavailable(e: StoreError) -> Answer {
     Answer::error("unavailable", format!("Memories are not available: {e}."))
 }
 

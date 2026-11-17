@@ -66,29 +66,24 @@ pub const TOOLS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "recall",
-        description: "Search memories by query, or read one in full by id.",
-        schema: || {
-            object(&json!({
-                "query": {"type": "string", "description": "Words to search for."},
-                "id": {"type": "string", "description": "A memory to read in full, with its provenance."},
-                "history": {"type": "boolean", "description": "Show the chain of memories it superseded."},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
-            }))
-        },
-        handler: not_available,
+        description: "Search the memories of self, the repository (repo) and the thread's people, ranked by relevance, \
+                      recency, importance and votes; or read one in full by id, with its provenance.",
+        schema: recall,
+        handler: crate::memory::recall,
     },
     ToolSpec {
         name: "vote",
-        description: "Say whether a memory helped, is stale or is wrong.",
+        description: "Say whether a memory helped, is stale (to review) or is wrong (retired).",
         schema: || {
             let mut schema = object(&json!({
                 "id": {"type": "string"},
                 "vote": {"enum": ["helpful", "stale", "wrong"]},
+                "reason": {"type": "string", "maxLength": 500},
             }));
             schema["required"] = json!(["id", "vote"]);
             schema
         },
-        handler: not_available,
+        handler: crate::memory::vote,
     },
     ToolSpec {
         name: "checkpoint",
@@ -152,6 +147,22 @@ fn remember() -> Value {
     }));
     schema["required"] = json!(["kind", "title", "body"]);
     schema
+}
+
+fn recall() -> Value {
+    object(&json!({
+        "query": {"type": "string", "description": "Words to search for; none for the top memories."},
+        "id": {"type": "string", "description": "A memory to read in full, with its provenance."},
+        "history": {"type": "boolean", "description": "With id: show the chain of memories it superseded."},
+        "repo": {"type": "string", "description": "The git remote of the thread's repository, to include its memories."},
+        "with": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 20,
+            "description": "More people of the thread, to include their memories: name, human:<name> or ant:<name>.",
+        },
+        "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": "10 by default."},
+    }))
 }
 
 fn checkpoint() -> Value {

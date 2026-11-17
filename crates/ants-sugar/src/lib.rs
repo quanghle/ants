@@ -203,10 +203,10 @@ mod tests {
     #[test]
     fn tools_not_built_yet_say_so_as_text_or_json() {
         let sugar = connect();
-        let text = ready(sugar.call_tool(call("recall", Format::Text))).unwrap();
+        let text = ready(sugar.call_tool(call("brief", Format::Text))).unwrap();
         assert!(text.is_error);
-        assert_eq!(text.output, Output::Text("sugar_recall is not available yet.".into()));
-        let json = ready(sugar.call_tool(call("recall", Format::Json))).unwrap();
+        assert_eq!(text.output, Output::Text("sugar_brief is not available yet.".into()));
+        let json = ready(sugar.call_tool(call("brief", Format::Json))).unwrap();
         assert!(json.is_error);
         let Output::Json(json) = json.output else { panic!("asked for JSON") };
         assert_eq!(json["error"], "not_available");
