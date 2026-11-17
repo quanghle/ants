@@ -52,6 +52,12 @@ pub fn channel_seen_key(ant: &UserId, thread: &ThreadId) -> String {
     format!("{ant}.{thread}.seen")
 }
 
+/// Key of where a thread came from as the ant's daemon settled it ([`crate::provider::Origin`]), in
+/// [`SESSIONS_BUCKET`] beside the thread's session, so a restarted daemon carries on with it.
+pub fn thread_origin_key(ant: &UserId, thread: &ThreadId) -> String {
+    format!("{ant}.{thread}.origin")
+}
+
 /// Key of the marker that the mention notice of the ant's own channel post at stream sequence `seq` reached `human`,
 /// in [`SESSIONS_BUCKET`] ([`ChannelPost::mention_notice`]).
 pub fn mention_key(ant: &UserId, seq: u64, human: &UserId) -> String {

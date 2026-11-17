@@ -2,11 +2,11 @@
 //! follows on from, and what the final answer of the turn carries besides its text: the title `suggest_thread_title`
 //! suggests for the thread ([`Mcp::take_title`]) and the files `attach_to_reply` attaches ([`Mcp::reply_files`]).
 //! `complete` ends the turn with no reply at all ([`Mcp::take_completed`]). The messages a thread handles tell where it
-//! came from, which the calls of the provider's tools carry ([`super::provider`]).
+//! came from, which the calls of the provider's tools carry, settled before they are handled ([`Mcp::settle_origin`]).
 
 use std::sync::Arc;
 
-use ants_proto::{Attachment, AttachmentHandle, ChannelId, Envelope, ThreadId, ThreadTitle, Uuid};
+use ants_proto::{Attachment, AttachmentHandle, Envelope, ThreadId, ThreadTitle, Uuid};
 use chrono::{DateTime, Utc};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -57,10 +57,7 @@ impl Mcp {
     /// Mark `envelope` as the message its thread is handling until the guard drops. Messages the thread's session
     /// sends meanwhile follow on from it, and spend its turn budget.
     pub fn begin(&self, envelope: &Envelope) -> Turn {
-        let mut sessions = self.hub.sessions.locked();
-        self.hub.note_origin(&mut sessions, envelope);
-        sessions.current.insert(envelope.thread_id.clone(), envelope.clone());
-        drop(sessions);
+        self.hub.sessions.locked().current.insert(envelope.thread_id.clone(), envelope.clone());
         Turn { hub: self.hub.clone(), thread: envelope.thread_id.clone() }
     }
 
@@ -73,7 +70,6 @@ impl Mcp {
         if !sessions.current.contains_key(thread) {
             return;
         }
-        self.hub.note_origin(&mut sessions, envelope);
         sessions.current.insert(thread.clone(), envelope.clone());
         let Some(stored) = stored.filter(|_| !handles.is_empty()) else { return };
         let carried = sessions.carried.entry(thread.clone()).or_insert_with(|| (Vec::new(), stored));
@@ -95,15 +91,6 @@ impl Turn {
     pub fn carrying(self, handles: Vec<AttachmentHandle>, stored: Option<DateTime<Utc>>) -> Self {
         if let Some(stored) = stored.filter(|_| !handles.is_empty()) {
             self.hub.sessions.locked().carried.insert(self.thread.clone(), (handles, stored));
-        }
-        self
-    }
-
-    /// On a thread of `channel`, when the message is a channel post: the channel the thread came from.
-    #[must_use]
-    pub fn posted_in(self, channel: Option<&ChannelId>) -> Self {
-        if let Some(channel) = channel {
-            super::provider::note_channel(&mut self.hub.sessions.locked(), &self.thread, channel);
         }
         self
     }

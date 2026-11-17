@@ -19,6 +19,7 @@ pub mod events;
 mod external;
 mod link;
 mod mcp;
+pub mod origins;
 mod process;
 pub mod sense;
 mod supervisor;

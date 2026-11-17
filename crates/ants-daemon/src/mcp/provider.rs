@@ -2,7 +2,7 @@
 //! ([`served_name`]), each with the `json` argument ([`with_json_argument`]), so no harness needs configuring for them.
 //! Each call carries who calls, where and when as ants knows it ([`CallContext`]), never as the ant's text claims: the
 //! ant and its identity record's id ([`Callers`]), the thread and where it came from (its [`origin`], kept per thread
-//! as [`settled`]), the harness and model running the session, the machine serving the ant, and the time; a brief
+//! as [`settled`] and stored on each change, so it outlasts a restart: [`Mcp::settle_origin`]), the harness and model running the session, the machine serving the ant, and the time; a brief
 //! request takes the same ([`Mcp::caller`], [`Mcp::origin`]).
 //!
 //! The provider's list is asked for at each `tools/list`, so a provider going down or coming back shows in the lists
@@ -18,11 +18,13 @@ use ants_proto::provider::{
     valid_tool_name, with_json_argument,
 };
 use ants_proto::{ChannelId, Envelope, ThreadId};
+use anyhow::Result;
 use rmcp::model::{CallToolResult, ContentBlock, JsonObject};
 
 use super::tools::{Tools, own_names, text};
-use super::{Hub, Mcp, Sessions};
+use super::{Hub, Mcp};
 use crate::provider::context::{CANNOT_READ, Caller, Callers, origin, settled};
+use crate::provider::origins::OriginStore;
 use crate::sync::MutexExt as _;
 
 /// How long a `tools/list` waits for the provider's tools before listing ants' own alone.
@@ -52,14 +54,27 @@ impl Mcp {
         self.hub.who_calls().await
     }
 
-    /// Where `thread` came from, as its messages handled since the daemon started tell ([`Mcp::begin`]).
+    /// Keep the threads' origins in `store`, read back for a thread whose origin this process has not settled yet;
+    /// without one they live in memory only.
+    pub fn with_origins(&self, store: OriginStore) {
+        let _ = self.hub.origin_store.set(store);
+    }
+
+    /// Settle where the thread of `envelope`, a message it is about to handle, posted in `channel` when it is a
+    /// channel post, came from ([`origin`], [`settled`]), with the origin stored earlier when this process has none
+    /// yet. A changed origin is stored before it is kept: fails, keeping nothing, when it cannot be read or stored.
+    pub async fn settle_origin(&self, envelope: &Envelope, channel: Option<&ChannelId>) -> Result<()> {
+        self.hub.settle_origin(envelope, channel).await
+    }
+
+    /// Where `thread` came from, as settled for the messages handled on it ([`Mcp::settle_origin`]).
     pub fn origin(&self, thread: &ThreadId) -> Option<Origin> {
         self.hub.sessions.locked().origins.get(thread).cloned()
     }
 
     /// Who calls the provider on `thread` now, where and when, as a call of one of its tools carries it: an error
-    /// saying why when ants does not know it all, as when the ant's identity record cannot be read or with no turn on
-    /// the thread since the daemon started.
+    /// saying why when ants does not know it all, as when the ant's identity record cannot be read or with no message
+    /// handled on the thread.
     pub async fn call_context(&self, thread: &ThreadId) -> Result<CallContext, String> {
         self.hub.call_context(thread).await
     }
@@ -75,24 +90,56 @@ impl Hub {
 
     async fn call_context(&self, thread: &ThreadId) -> Result<CallContext, String> {
         let caller = self.who_calls().await?;
+        let origin = match self.origin_of(thread).await {
+            Ok(Some(origin)) => origin,
+            Ok(None) => return Err("no message on the thread was handled".to_owned()),
+            Err(e) => {
+                tracing::warn!(%thread, error = format!("{e:#}"), "reading the thread's origin for a provider call");
+                return Err("the thread's origin cannot be read".to_owned());
+            }
+        };
         let sessions = self.sessions.locked();
-        let origin = sessions.origins.get(thread).ok_or("no message on the thread was handled since ants started")?;
         let (harness, model) = sessions.running.get(thread).ok_or("no session of the thread was opened")?;
-        Ok(caller.context(thread.clone(), origin.clone(), harness, model.as_deref()))
+        Ok(caller.context(thread.clone(), origin, harness, model.as_deref()))
     }
 
-    /// Keep where the thread of `envelope`, a message it handles, came from ([`origin`], [`settled`]).
-    pub(super) fn note_origin(&self, sessions: &mut Sessions, envelope: &Envelope) {
-        let now = origin(envelope, None, &self.humans.humans());
-        let earlier = sessions.origins.remove(&envelope.thread_id);
-        sessions.origins.insert(envelope.thread_id.clone(), settled(earlier, now));
+    async fn settle_origin(&self, envelope: &Envelope, channel: Option<&ChannelId>) -> Result<()> {
+        let thread = &envelope.thread_id;
+        let now = origin(envelope, channel.cloned(), &self.humans.humans());
+        let _settling = self.settling.lock().await;
+        let earlier = self.read_origin(thread).await?;
+        let kept = settled(earlier.clone(), now);
+        if earlier.as_ref() != Some(&kept)
+            && let Some(store) = self.origin_store.get()
+        {
+            store.put(thread, &kept).await?;
+        }
+        self.sessions.locked().origins.insert(thread.clone(), kept);
+        Ok(())
     }
-}
 
-/// Keep `channel` as the channel of `thread`, a channel thread, unless it has one.
-pub(super) fn note_channel(sessions: &mut Sessions, thread: &ThreadId, channel: &ChannelId) {
-    if let Some(origin) = sessions.origins.get_mut(thread) {
-        origin.channel.get_or_insert_with(|| channel.clone());
+    /// Where `thread` came from: as kept, else as stored, then kept.
+    async fn origin_of(&self, thread: &ThreadId) -> Result<Option<Origin>> {
+        if let Some(origin) = self.sessions.locked().origins.get(thread) {
+            return Ok(Some(origin.clone()));
+        }
+        let _settling = self.settling.lock().await;
+        let origin = self.read_origin(thread).await?;
+        if let Some(origin) = &origin {
+            self.sessions.locked().origins.insert(thread.clone(), origin.clone());
+        }
+        Ok(origin)
+    }
+
+    /// Where `thread` came from, as kept, else as stored; held under [`Hub::settling`].
+    async fn read_origin(&self, thread: &ThreadId) -> Result<Option<Origin>> {
+        if let Some(origin) = self.sessions.locked().origins.get(thread) {
+            return Ok(Some(origin.clone()));
+        }
+        match self.origin_store.get() {
+            Some(store) => store.get(thread).await,
+            None => Ok(None),
+        }
     }
 }
 

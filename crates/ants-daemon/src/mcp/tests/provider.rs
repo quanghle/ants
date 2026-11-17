@@ -10,6 +10,7 @@ use serde_json::json;
 
 use super::*;
 use crate::provider::context::Callers;
+use crate::provider::origins::OriginStore;
 
 /// A provider named `send` noting the calls of its tools, whose list fails while `down`: `note` answers the arguments
 /// back, `message` would be served as ants' own `send_message`, `Bad` has an invalid name.
@@ -76,6 +77,7 @@ async fn sense_tools_are_served_with_its_prefix_and_the_json_argument() {
     let current = from_human();
     let (url, token) = http_server(&mcp, &current.thread_id);
     let client = http_client(&url, &token).await;
+    mcp.settle_origin(&current, None).await.unwrap();
     let _turn = mcp.begin(&current);
 
     let tools = client.list_all_tools().await.unwrap();
@@ -121,6 +123,7 @@ async fn calls_carry_who_calls_where_and_when() {
     assert!(!ok && text.starts_with("[ants] send_note was not called: no message"), "{text}");
     assert!(fake.calls.locked().is_empty());
 
+    mcp.settle_origin(&current, None).await.unwrap();
     let _turn = mcp.begin(&current);
     let before = chrono::Utc::now();
     let result = client
@@ -156,6 +159,7 @@ async fn a_provider_down_lists_no_tools_and_answers_calls_with_why() {
     let current = from_human();
     let (url, token) = http_server(&mcp, &current.thread_id);
     let client = http_client(&url, &token).await;
+    mcp.settle_origin(&current, None).await.unwrap();
     let _turn = mcp.begin(&current);
 
     fake.down.store(true, Ordering::Relaxed);
@@ -177,6 +181,7 @@ async fn calls_wait_for_the_ants_identity() {
     let current = from_human();
     let (url, token) = http_server(&mcp, &current.thread_id);
     let client = http_client(&url, &token).await;
+    mcp.settle_origin(&current, None).await.unwrap();
     let _turn = mcp.begin(&current);
     let (ok, text) = call(&client, "send_note", json!({})).await;
     assert!(!ok);
@@ -195,17 +200,17 @@ async fn a_thread_keeps_its_origin_and_stays_untrusted_once_a_webhook_reached_it
     let asked = Envelope::new(user("dev-b"), user("dev-a"), "help");
     session(&asked.thread_id);
     let channel: ants_proto::ChannelId = "ops".parse().unwrap();
-    drop(mcp.begin(&asked).posted_in(Some(&channel)));
+    mcp.settle_origin(&asked, Some(&channel)).await.unwrap();
     let mut human = Envelope::new(UserId::human(), user("dev-a"), "look");
     human.thread_id = asked.thread_id.clone();
-    drop(mcp.begin(&human));
+    mcp.settle_origin(&human, None).await.unwrap();
     let origin = mcp.call_context(&asked.thread_id).await.unwrap().origin;
     assert_eq!((origin.by, origin.channel), (Starter::Ant { user: user("dev-b") }, Some(channel.clone())));
 
     let mut hook = Envelope::new(user("hook"), user("dev-a"), "build failed").from_webhook();
     hook.thread_id = asked.thread_id.clone();
-    drop(mcp.begin(&hook));
-    drop(mcp.begin(&human));
+    mcp.settle_origin(&hook, None).await.unwrap();
+    mcp.settle_origin(&human, None).await.unwrap();
     let context = mcp.call_context(&asked.thread_id).await.unwrap();
     assert_eq!(
         (&context.origin.by, context.origin.channel.as_ref()),
@@ -215,7 +220,46 @@ async fn a_thread_keeps_its_origin_and_stays_untrusted_once_a_webhook_reached_it
     assert_eq!(mcp.origin(&asked.thread_id), Some(context.origin));
 
     let unopened = from_human();
-    drop(mcp.begin(&unopened));
+    mcp.settle_origin(&unopened, None).await.unwrap();
     let why = mcp.call_context(&unopened.thread_id).await.unwrap_err();
     assert_eq!(why, "no session of the thread was opened");
+}
+
+#[tokio::test]
+async fn a_thread_keeps_its_stored_origin_across_a_restart() {
+    let home = home("restart");
+    let store = OriginStore::memory();
+    let (mcp, _sent) = start(&home).await;
+    mcp.with_origins(store.clone());
+    let mut hook = Envelope::new(user("hook"), user("dev-a"), "build failed").from_webhook();
+    let thread = hook.thread_id.clone();
+    mcp.settle_origin(&hook, None).await.unwrap();
+    let stored = store.get(&thread).await.unwrap().expect("stored once settled");
+    assert_eq!(stored.by, Starter::Webhook { user: user("hook") });
+    drop(mcp);
+
+    let (mcp, _sent) = start(&home).await;
+    mcp.with_origins(store.clone());
+    mcp.with_callers(Callers::known(user("dev-a"), "m1", "id-1"));
+    drop(mcp.servers()(&crate::harness::McpSession::test(&thread, Path::new("/"), true)));
+    let context = mcp.call_context(&thread).await.unwrap();
+    assert_eq!(context.origin, stored, "a call before the thread's next message");
+    assert!(!context.trusted());
+
+    drop(mcp);
+    let (mcp, _sent) = start(&home).await;
+    mcp.with_origins(store.clone());
+    let mut human = Envelope::new(UserId::human(), user("dev-a"), "look");
+    human.thread_id = thread.clone();
+    mcp.settle_origin(&human, None).await.unwrap();
+    assert_eq!(mcp.origin(&thread), Some(stored.clone()), "a human's message keeps it untrusted");
+    assert_eq!(store.get(&thread).await.unwrap(), Some(stored));
+
+    hook.thread_id = from_human().thread_id;
+    let mut human = Envelope::new(UserId::human(), user("dev-a"), "look");
+    human.thread_id = hook.thread_id.clone();
+    mcp.settle_origin(&human, None).await.unwrap();
+    mcp.settle_origin(&hook, None).await.unwrap();
+    let downgraded = store.get(&hook.thread_id).await.unwrap().unwrap();
+    assert_eq!(downgraded.by, Starter::Webhook { user: user("hook") }, "stored again once downgraded");
 }

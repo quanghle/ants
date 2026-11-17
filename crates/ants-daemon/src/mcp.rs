@@ -165,6 +165,8 @@ impl Mcp {
             provider: OnceLock::new(),
             served: Mutex::default(),
             callers: OnceLock::new(),
+            origin_store: OnceLock::new(),
+            settling: tokio::sync::Mutex::default(),
             state_path,
             sessions: Mutex::default(),
             asks: tokio::sync::Mutex::new(Asks { stored, waiting: HashMap::new() }),
@@ -333,7 +335,7 @@ struct Sessions {
     dirs: HashMap<ThreadId, PathBuf>,
     /// The harness running each thread's last session opened, and the model the config sets for it.
     running: HashMap<ThreadId, (String, Option<String>)>,
-    /// Where each thread came from, as the messages it handled tell ([`Hub::note_origin`]).
+    /// Where each thread came from, as the messages it handled tell, settled ([`Mcp::settle_origin`]) or read back.
     origins: HashMap<ThreadId, Origin>,
     /// The paths of the files each thread's session attached to the final answer of its turn.
     reply_files: HashMap<ThreadId, Vec<String>>,
@@ -369,6 +371,10 @@ struct Hub {
     served: Mutex<provider::Served>,
     /// Who the provider calls are for ([`Mcp::with_callers`]).
     callers: OnceLock<crate::provider::context::Callers>,
+    /// Where the threads' origins are kept ([`Mcp::with_origins`]).
+    origin_store: OnceLock<crate::provider::origins::OriginStore>,
+    /// Held while a thread's origin is settled or read back, so none is lost to another.
+    settling: tokio::sync::Mutex<()>,
     state_path: PathBuf,
     sessions: Mutex<Sessions>,
     asks: tokio::sync::Mutex<Asks>,

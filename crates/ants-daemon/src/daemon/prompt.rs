@@ -84,10 +84,19 @@ impl Unnarrowed {
 /// The turn of `incoming`, the message its thread handles now, on the ant's MCP server ([`crate::mcp::Mcp::begin`]).
 fn begin_turn(mcp: &crate::mcp::Mcp, incoming: &Incoming, msg: &jetstream::Message) -> crate::mcp::Turn {
     let carried = incoming.attached().into_iter().map(|(handle, _)| handle).collect();
-    mcp.begin(&incoming.envelope).carrying(carried, crate::files::stored(msg)).posted_in(incoming.channel())
+    mcp.begin(&incoming.envelope).carrying(carried, crate::files::stored(msg))
 }
 
 impl Inbox<'_> {
+    /// Settle where the thread of `incoming` came from, stored before its session can call the provider's tools,
+    /// whether it starts a prompt or joins one ([`crate::mcp::Mcp::settle_origin`]).
+    async fn settle_origin(&self, incoming: &Incoming) -> Result<()> {
+        match self.mcp {
+            Some(mcp) => mcp.settle_origin(&incoming.envelope, incoming.channel()).await,
+            None => Ok(()),
+        }
+    }
+
     /// The `[ants]` lines for the thread's branch holding new commits, and for publishing it.
     async fn branch_notices(
         &self,
@@ -157,6 +166,7 @@ impl Inbox<'_> {
         if self.out_of_turns(incoming, spent && !own, msg, seq).await? {
             return Ok(());
         }
+        self.settle_origin(incoming).await?;
         if !cut_off {
             // Durable before the harness can run anything.
             self.attempts.start(seq, envelope).await?;
