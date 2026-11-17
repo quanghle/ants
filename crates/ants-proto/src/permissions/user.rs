@@ -9,15 +9,15 @@ use super::human::{
 use super::{Permissions, ack_subjects, kv_stream, ordered_consumer_subjects};
 use crate::{
     ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, COLONY_BUCKET, DEVICES_BUCKET, FILES_BUCKET, FILES_STREAM,
-    HUMANS_BUCKET, IDENTITIES_BUCKET, LINKS_BUCKET, OWNERS_BUCKET, Role, SESSIONS_BUCKET, STORAGE_WARNING_PREFIX,
-    STREAM, THREADS_BUCKET, UserId, WEBHOOK_MARKER, WEBHOOKS_BUCKET, chan_consumer, chan_reader, dead_reader,
-    inbox_consumer, inbox_prefix, notes_consumer, sent_reader, spare_readers, subject,
+    HUMANS_BUCKET, IDENTITIES_BUCKET, LINKS_BUCKET, NOTIFY_BUCKET, OWNERS_BUCKET, READ_BUCKET, Role, SESSIONS_BUCKET,
+    STORAGE_WARNING_PREFIX, STREAM, THREADS_BUCKET, UserId, WEBHOOK_MARKER, WEBHOOKS_BUCKET, chan_consumer,
+    chan_reader, dead_reader, inbox_consumer, inbox_prefix, notes_consumer, sent_reader, spare_readers, subject,
 };
 #[cfg(doc)]
 use crate::{
-    AttachmentHandle, HeldNotices, NOTIFY_BUCKET, NotifyPrefs, PRESENCE_BUCKET, QueueRequest, REACTIONS_BUCKET,
-    READ_BUCKET, channel_manager_serving_key, daily_spend_key, link_outbox, message_mark_key, owner_outbox,
-    storage_warning_key, thread_spend_key, unserved_key,
+    AttachmentHandle, HeldNotices, NotifyPrefs, PRESENCE_BUCKET, QueueRequest, REACTIONS_BUCKET, ReadMarker,
+    channel_manager_serving_key, daily_spend_key, link_outbox, message_mark_key, owner_outbox, storage_warning_key,
+    thread_spend_key, unserved_key,
 };
 
 /// What a user's credentials need for attachments ([`FILES_BUCKET`]): writing the chunks of those of the messages it
@@ -91,8 +91,11 @@ impl Permissions {
     /// and its own [`HeldNotices`] there what was held back ([`notify_prefs_rights`]), and it reads every reaction ([`REACTIONS_BUCKET`]), of which it
     /// puts and removes only its own ([`human_reaction_rights`]), while an ant only asks for those ([`subject::reactions`],
     /// [`subject::react`]); it sets every thread's title, TL;DR and done state and its own pinned,
-    /// archived and snoozed threads, no other human's ([`thread_rights`]), while an ant only reads a title by its key
-    /// and nothing else of [`THREADS_BUCKET`]; it reads every device's encryption key in
+    /// archived and snoozed threads, no other human's ([`thread_rights`]), while an ant only reads, one key at a time,
+    /// a thread's title and done state and a human's own [`Reminders`](crate::Reminders) entry (its snoozes and reminder notes), nothing
+    /// else of [`THREADS_BUCKET`], and of
+    /// [`READ_BUCKET`] and [`NOTIFY_BUCKET`] only a human's inbox [`ReadMarker`] and [`NotifyPrefs`], to stop reminding
+    /// a human of an escalation it heeded; it reads every device's encryption key in
     /// [`DEVICES_BUCKET`] and puts only its own devices' ([`device_directory_rights`]). A human may send under
     /// any sender, to replay a dead letter as it was. An ant gets no `STREAM.MSG.GET`: it takes any sequence, so it
     /// would expose every inbox. So only a human hears the max-deliveries advisories of the stream's consumers and
@@ -284,6 +287,14 @@ impl Permissions {
             // Get of a thread's title, to title the pull request of the thread's branch: one key at a time, which
             // it must know, as it gets no stream info listing them.
             format!("$JS.API.DIRECT.GET.{}.$KV.{THREADS_BUCKET}.title.*", kv_stream(THREADS_BUCKET)),
+            // Get of what tells whether the human an escalation reached heeded it, to stop reminding it: a thread's
+            // done state, a human's own reminders entry with its snoozes (not those its assistant set, a key deeper),
+            // its inbox read marker (not its channel reads) and the notifications it holds back (not those held). One
+            // key at a time, as for titles.
+            format!("$JS.API.DIRECT.GET.{}.$KV.{THREADS_BUCKET}.done.*", kv_stream(THREADS_BUCKET)),
+            format!("$JS.API.DIRECT.GET.{}.$KV.{THREADS_BUCKET}.reminders.*", kv_stream(THREADS_BUCKET)),
+            format!("$JS.API.DIRECT.GET.{}.$KV.{READ_BUCKET}.*", kv_stream(READ_BUCKET)),
+            format!("$JS.API.DIRECT.GET.{}.$KV.{NOTIFY_BUCKET}.*", kv_stream(NOTIFY_BUCKET)),
         ]);
         // The spares of its inbox consumer and its notes and channel readers, for the CLI, each with the same
         // filter pinned; no ack, so the spares of the inbox consumer only read it.

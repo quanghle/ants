@@ -6,6 +6,34 @@
 - **Windows:** build with MSVC or cross-build `--target x86_64-pc-windows-gnu` (mingw-w64 on `PATH`). Stdio MCP uses a current-user named pipe (`\\.\pipe\ants-mcp-<random>`); bare harness names resolve `.exe`/`.cmd`/`.bat` on `PATH`; `ants daemon` handles Ctrl-C/Ctrl-Break/close/shutdown as `SIGTERM` and auto-reloads edited config files (`webhooks.toml` included). `scripts/install-units.sh` and automatic service reloads in `ants setup`, `ants add`, `ants webhook add`, `ants renew`, `ants leaf config`, `request_ant`, and `ants tools approve --rule` cover launchd and systemd only (printing manual commands on Windows; pass `--upgrade-check 0` under Task Scheduler). Secret files inherit `%USERPROFILE%` ACLs instead of Unix `0600`.
 - **Binary upgrades:** `ants daemon`, `ants channel serve`, `ants webhook serve`, `ants signer`, `ants bridge serve`, and `ants bridge connect` check every `30s` (`--upgrade-check DURATION` / `ANTS_UPGRADE_CHECK`, `0` disables) whether their executable on disk was replaced by a settled, non-empty executable file, then exit with status `75` (`ants daemon` drains prompts in flight first and `ants webhook serve` finishes in-flight requests, as on `SIGTERM`). Installed launchd and systemd units restart automatically on status `75`.
 
+### Updating from a release
+
+`ants update` replaces the running `ants` executable with a [GitHub release](https://github.com/quanghle/ants/releases):
+
+```sh
+ants update --check            # exit 0: up to date; exit 10: a newer release is out
+ants update                    # install the latest release when newer
+ants update --version v0.2.0   # install this release, even when not newer
+ants update --pre              # consider pre-releases too
+```
+
+- **What it does:** resolves the release through the GitHub API, downloads the archive for the compiled target (`x86_64`/`aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`; other targets are refused) and the release's `SHA256SUMS`, checks the archive's SHA-256 digest, unpacks it with the system `tar` (Windows 10+ ships one that reads zip), runs the new binary with `--version`, then renames it over the real path of the executable in one step. A failed download, a missing asset, a digest mismatch or a failed `--version` leaves the executable untouched. On Windows the running `ants.exe` is first renamed aside to `ants.exe.old`, deleted by a later run of `ants`.
+- **Network:** the requests go through the HTTP CONNECT proxy `HTTPS_PROXY` names (`http://[user:password@]host:port`), except to hosts `NO_PROXY` lists.
+- **Refusals:** an executable under `$CARGO_HOME/bin` (`~/.cargo/bin`) is left to `cargo install --locked --git https://github.com/quanghle/ants ants`; a directory not writable makes it print the command to rerun with `sudo` (an administrator's prompt on Windows).
+- **Services:** running services pick the new executable up through their upgrade check (above); `ants update` prints the restart command of an installed unit whose check is off.
+
+### Automatic updates
+
+The top-level `auto_update` of `~/.ants/config.toml` ([config.md](config.md)) lets `ants daemon`, serving the whole file (no `--ant`), keep the machine current, opt-in:
+
+| `auto_update` | Effect |
+|---|---|
+| `"off"` (default) | No polling. |
+| `"check"` | Logs a warning naming a newer stable release; `ants doctor` reports it as the `update` check (`warn`, fix `ants update`). |
+| `"install"` | Installs a newer stable release as `ants update` does; the daemon's upgrade check then drains prompts in flight and exits with status `75` for its service to start the new executable (with `--upgrade-check 0` it keeps running the old one until restarted). |
+
+The first poll comes within 10 minutes of the start, then about every 24 hours (± 1 hour, at random, so a team's machines do not poll together). Only stable releases count and an older release is never installed. A failed poll or install logs a warning and is retried after 1 hour, doubling up to 24 hours. A change to `auto_update` takes effect on a daemon restart. With `auto_update` on, `ants doctor` asks GitHub for the latest release too.
+
 ## Services
 
 `ants setup` installs single-machine `nats` and `daemon` units (the `daemon` unit alone with `--managed-nats`). For multi-machine hubs, workers, and tunnels, `scripts/install-units.sh` renders and starts `contrib/launchd/` (`~/Library/LaunchAgents`) or `contrib/systemd/` (`~/.config/systemd/user`) units:

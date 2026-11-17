@@ -65,7 +65,7 @@ impl Why {
             Self::Question => "1-9 answer · d done · z snooze",
             Self::Stuck => "g grant · x cancel · d done · z snooze",
             Self::Message | Self::Mention => "r reply · d done · z snooze",
-            Self::Finished => "f follow up · d mark done · z snooze",
+            Self::Finished => "r follow up · d mark done · z snooze",
             Self::Reminder => "d done · b remind again",
         }
     }
@@ -249,7 +249,7 @@ fn unsnoozed(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
         count: 1,
         also: Vec::new(),
     };
-    for thread in &data.live.order {
+    for thread in data.work() {
         if let Some(asked) = data.question(thread) {
             let text = format!("{}: {}", asked.from, asked.question.text);
             items.push(Item {
@@ -304,7 +304,7 @@ pub struct Page {
 
 impl Page {
     pub const KEYS: &str =
-        "j/k move · Enter open · d done · z snooze · u unread · b remind · t tree · s digest · c creds";
+        "j/k move · Enter open · f forward · d done · z snooze · u unread · b remind · t tree · s digest · c creds";
 
     /// The selected item's thread.
     pub fn thread(&self, data: &Data) -> Option<ThreadId> {
@@ -387,7 +387,8 @@ impl Page {
                 let item = selected?;
                 return question::key(key, &item.thread, item.question.as_ref()?);
             }
-            Key::Char('r' | 'f') => return thread().map(To::Reply),
+            Key::Char('r') => return thread().map(To::Reply),
+            Key::Char('f') => return thread().map(|_| To::Bar("/forward @".to_owned())),
             Key::Char('g') => {
                 let stuck = selected.filter(|i| i.why == Why::Stuck)?;
                 let job = Job::Grant { thread: stuck.thread.clone(), text: GRANT.to_owned() };
@@ -673,7 +674,7 @@ mod tests {
         assert_eq!(whys, [Why::Stuck, Why::Finished]);
         let screen = shown(&m, at(5));
         assert!(screen.contains("g grant · x cancel · d done · z snooze · Enter open"), "{screen}");
-        assert!(screen.contains("f follow up · d mark done · z snooze · Enter review"), "{screen}");
+        assert!(screen.contains("r follow up · d mark done · z snooze · Enter review"), "{screen}");
 
         let grant = Job::Grant { thread: stuck.clone(), text: GRANT.into() };
         assert_eq!(m.key(Key::Char('g'), at(5)), Some(Action::Run(grant, String::new())));
@@ -693,8 +694,25 @@ mod tests {
         assert_eq!(items(&m.data, at(8)).len(), 2, "or a new item arrives on the thread");
 
         m.key(Key::End, at(8));
-        assert_eq!(m.key(Key::Char('f'), at(8)), Some(Action::Open(done)));
+        assert_eq!(m.key(Key::Char('r'), at(8)), Some(Action::Open(done)));
         assert!(m.bar.focused, "the bar open to follow up on the thread");
+    }
+
+    #[test]
+    fn f_opens_the_bar_to_forward_the_selected_item_s_thread() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let mut opening = message(1, &thread, "alice", "dev-a", "deploy");
+        opening.owner = Some(user("alice"));
+        m.stored(vec![opening, message(2, &thread, "dev-a", "alice", "deployed")], at(2));
+        assert_eq!(m.key(Key::Char('f'), at(3)), None);
+        assert_eq!((m.bar.text(), m.bar.focused, m.page().name()), ("/forward @".to_owned(), true, "home"));
+        for c in "dev-b".chars() {
+            m.key(Key::Char(c), at(3));
+        }
+        assert_eq!(m.key(Key::Enter, at(3)), None, "no TL;DR kept yet");
+        let refused = &m.bar.status.as_ref().unwrap().text;
+        assert!(refused.starts_with(&format!("no TL;DR of thread {thread} yet")), "{refused}");
     }
 
     fn mention(seq: u64, thread: &ThreadId, from: &str) -> crate::thread::Entry {
@@ -770,7 +788,7 @@ mod tests {
         m.stored(vec![opening, message(2, &done, "dev-a", "alice", "deployed")], at(2));
         m.stored(vec![message(3, &stuck, "alice", "dev-b", "review"), escalation(4, &stuck, "dev-b", "alice")], at(4));
         m.key(Key::End, at(5));
-        assert!(shown(&m, at(5)).contains("f follow up · d mark done"), "the finished thread selected");
+        assert!(shown(&m, at(5)).contains("r follow up · d mark done"), "the finished thread selected");
 
         m.stored(vec![message(6, &other, "alice", "dev-c", "build"), escalation(7, &other, "dev-c", "alice")], at(7));
         let whys: Vec<Why> = items(&m.data, at(8)).into_iter().map(|i| i.why).collect();

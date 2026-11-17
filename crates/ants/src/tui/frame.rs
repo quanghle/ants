@@ -147,14 +147,14 @@ const HELP: &[(&str, &str)] = &[
     ("y p m e d z", "in a thread: copy, pin, mute, archive, done, snooze (again to undo)"),
     ("a A r, y", "on a tool request: allow once, always or reject, then confirm"),
     ("1-9 r", "on a question: answer with that option, or type an answer"),
-    ("g r f x d z s c o", "on home: grant, reply, follow up, cancel, done, snooze, digest, credentials, held orders"),
-    ("+", "in a thread: react to the selected message, or take a reaction back"),
-    ("i t S", "in a thread: the bar to reply, its delegation tree, a new TL;DR"),
+    ("g r f x d z s c o", "on home: grant, reply, forward, cancel, done, snooze, digest, credentials, held orders"),
+    ("i > t S", "in a thread: reply, quote the selected, delegation tree, TL;DR"),
+    ("+ f u b T", "in a thread: react, forward, unread from, remind; tool calls"),
     ("o ]", "in a thread or channel: open the marked attachment, mark the next"),
     ("x Ctrl-X", "in a thread or work: cancel the prompt running there"),
-    ("W E", "in a thread: withdraw the selected message still waiting, or withdraw it to edit in the bar"),
+    ("W E", "in a thread: withdraw a waiting message or post, or to edit it"),
     ("x y", "in a delegation tree: cancel every prompt in the selected subtree"),
-    ("n", "with a person: write a message, starting a thread"),
+    ("n", "with a person: write a message; in a channel: its next notify level"),
     ("/", "the bar on /search, as in: /search deploy from:dev-a"),
     ("R ?", "read everything again, this help"),
     ("q Ctrl-C", "quit"),
@@ -202,6 +202,14 @@ mod tests {
     }
 
     #[test]
+    fn the_help_covers_every_key_of_the_thread_view() {
+        for key in thread::Page::KEYS.split(" · ").filter_map(|hint| hint.split(' ').next()) {
+            let covered = HELP.iter().any(|(keys, _)| keys.split(' ').any(|k| k.trim_end_matches(',') == key));
+            assert!(covered, "the help lacks {key}");
+        }
+    }
+
+    #[test]
     fn the_screen_shows_who_where_the_nav_the_view_and_its_keys() {
         let thread = ThreadId::generate();
         let mut m = model();
@@ -213,8 +221,8 @@ mod tests {
         assert!(shown.contains("waiting on ant 1"), "{shown}");
         assert!(shown.contains("● {.~.} dev-a") && shown.contains("PEOPLE") && shown.contains("bob"), "{shown}");
         assert!(shown.contains("nothing waits on a human"), "{shown}");
-        let keys = "j/k move · Enter open · d done · z snooze · u unread · b remind · t tree · s digest · c creds · Tab \
-                    nav/view · / search";
+        let keys = "j/k move · Enter open · f forward · d done · z snooze · u unread · b remind · t tree · s digest · c \
+                    creds · Tab";
         assert!(shown.contains(keys), "{shown}");
 
         m.select(nav::Item::Work(None));

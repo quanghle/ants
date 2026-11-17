@@ -91,8 +91,8 @@ pub fn describe(entry: &ChannelEntry) -> String {
 }
 
 /// The channels as a table: one row per channel under a header, columns padded to line up. With `unread`, an UNREAD
-/// column shows the unread posts by humans or @mentioning the human of each channel it has, how many of them
-/// @mention the human, and the other unread posts by ants, `-` for the channels it lacks.
+/// column shows the unread posts the human's notify level of each channel it has counts, how many of them
+/// @mention the human, and the other unread posts, `-` for the channels it lacks.
 pub fn table(entries: &[ChannelEntry], unread: Option<&HashMap<ChannelId, reads::Unread>>) -> String {
     let mut header = ["CHANNEL", "MEMBERS", "MESSENGER", "OWNER"].map(str::to_owned).to_vec();
     if unread.is_some() {
@@ -105,8 +105,8 @@ pub fn table(entries: &[ChannelEntry], unread: Option<&HashMap<ChannelId, reads:
         if u.mentions > 0 {
             label = format!("{label} (@{})", u.mentions);
         }
-        if u.ants > 0 {
-            label = format!("{label} +{} by ants", u.ants);
+        if u.other > 0 {
+            label = format!("{label} +{} other", u.other);
         }
         Some(label)
     };

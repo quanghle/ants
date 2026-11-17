@@ -188,6 +188,27 @@ pub(super) fn withdrawn(data: &Data, entries: &[Entry], id: Uuid) -> bool {
         || entries.iter().any(|e| e.in_reply_to == Some(id) && e.notice == Some(NoticeKind::Withdrawn))
 }
 
+/// Whether the ant `ant` withdrew message `id`, as its daemon's notice answering it among `entries` tells.
+pub(super) fn withdrawn_from(entries: &[Entry], ant: &UserId, id: Uuid) -> bool {
+    entries
+        .iter()
+        .any(|e| e.in_reply_to == Some(id) && e.from.as_ref() == Some(ant) && e.notice == Some(NoticeKind::Withdrawn))
+}
+
+/// The ants channel post `e` woke, as [`ChannelEntry::woken`] tells by the channel as the human knows it now: the
+/// members it @mentions other than humans, or, mentioning nobody, the channel's messenger. Of a channel unknown, the
+/// ants it @mentions.
+///
+/// [`ChannelEntry::woken`]: ants_proto::ChannelEntry::woken
+pub(super) fn woken(data: &Data, e: &Entry) -> Vec<UserId> {
+    let channel = data.channels.iter().find(|c| Some(&c.channel) == e.channel.as_ref());
+    if e.mentions.is_empty() {
+        return channel.map(ants_proto::ChannelEntry::messenger).into_iter().collect();
+    }
+    let ant = |m: &&UserId| Some(*m) != e.from.as_ref() && !data.is_human(m) && channel.is_none_or(|c| c.is_member(m));
+    e.mentions.iter().filter(ant).cloned().collect()
+}
+
 /// Whether the ant `ant` started on message `id`: a reply to it from the ant, other than a withdrawal's notice, is on
 /// `entries`.
 pub(super) fn started(entries: &[Entry], ant: &UserId, id: Uuid) -> bool {

@@ -46,7 +46,7 @@ pub(crate) mod webhook;
 use anyhow::Result;
 
 use crate::cli::{Cli, Command, DaemonCommand};
-use crate::{Connection, Listing, add, colony, completions, machines, queue, renew, summary, tui};
+use crate::{Connection, Listing, add, colony, completions, machines, queue, renew, summary, tui, update};
 
 /// Run the command `cli` names, or the terminal UI without one.
 pub(crate) async fn run(cli: Cli) -> Result<()> {
@@ -58,13 +58,15 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         return Box::pin(tui::run(&nats()?, tui::SINCE, cli.compact)).await;
     };
     match command {
-        Command::Ask { thread, reply_to, queue, forward, sending, replies, input, attach, words } => {
+        Command::Ask { thread, reply_to, queue, forward, forward_thread, sending, replies, input, attach, words } => {
+            let forward =
+                forward.map(send::Forwarding::Message).or_else(|| forward_thread.map(send::Forwarding::Thread));
             let target = send::Target { thread, reply_to, queue, forward };
             Box::pin(send::ask(&nats()?, target, sending, &replies, &input, &attach, words)).await
         }
         Command::Inbox { unread: Some(target), .. } => inbox::mark_unread(&nats()?, &target).await,
-        Command::Inbox { peek, thread, limit, follow, json, unread: None } => {
-            let select = crate::inbox::Select { thread: None, limit, peek, summaries: false };
+        Command::Inbox { peek, thread, limit, follow, json, activity, unread: None } => {
+            let select = crate::inbox::Select { thread: None, limit, peek, summaries: false, activity };
             Box::pin(inbox::show(&nats()?, select, thread, Listing { follow, json })).await
         }
         Command::Colony { json } => colony::show(&nats()?, json).await,
@@ -98,6 +100,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         Command::Init { identities_restored } => init::run(&nats()?, identities_restored).await,
         Command::Setup(args) => Box::pin(setup::run(&args, &conn)).await,
         Command::Completions { shell, install } => completions::run(shell, install),
+        Command::Update(args) => update::run(args).await,
         Command::Tools(command) => tools::run(command, &conn).await,
         Command::Dead(command) => Box::pin(dead::run(&nats()?, command)).await,
         Command::Daemon(DaemonCommand::Daemon(args)) => daemon::run(&args, &conn).await,

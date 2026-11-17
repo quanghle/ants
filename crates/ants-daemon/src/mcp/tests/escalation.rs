@@ -70,7 +70,7 @@ async fn start_escalating_with(
     });
     let send: crate::escalation::Sender = Arc::new(move |envelope, _id| {
         let _ = send_tx.send(envelope);
-        Box::pin(async { Ok(()) })
+        Box::pin(async { Ok(None) })
     });
     let colony: Colony = Arc::new(move || {
         let colony = colony.clone();

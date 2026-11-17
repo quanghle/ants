@@ -1,9 +1,9 @@
-//! A minimal HTTP/1.1 client over rustls, for the few calls ants makes to web services: notification sinks and
-//! GitHub.
+//! A minimal HTTP/1.1 client over rustls, for the few calls ants makes to web services: notification sinks, GitHub,
+//! and the downloads of `ants update` ([`download`]).
 
 use std::sync::OnceLock;
 
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Context as _, Result, anyhow, bail};
 use http_body_util::{BodyExt as _, Full, Limited};
 use hyper::body::Bytes;
 use hyper::http::{HeaderMap, Method, Request, StatusCode, Uri, header};
@@ -47,19 +47,101 @@ pub(crate) async fn fetch_with_headers(
     limit: usize,
 ) -> Result<(StatusCode, HeaderMap, Bytes)> {
     let uri: Uri = url.parse().map_err(|_| anyhow!("a malformed URL"))?;
+    let (status, answer_headers, answer) = request(method, &uri, headers, body, limit, None).await?;
+    Ok((status, answer_headers, answer.unwrap_or_default()))
+}
+
+/// Most redirects [`download`] follows.
+const MAX_REDIRECTS: usize = 5;
+
+/// `GET` `url` (https:// only), following redirects, through the HTTP CONNECT proxy `HTTPS_PROXY` names unless
+/// `NO_PROXY` exempts the host: the body of the successful answer. Fails on another status and on a body longer than
+/// `limit` bytes.
+pub(crate) async fn download(url: &str, headers: &[(&str, String)], limit: usize) -> Result<Bytes> {
+    let proxy = env_var(&["HTTPS_PROXY", "https_proxy"])
+        .map(|proxy| {
+            let proxy = if proxy.contains("://") { proxy } else { format!("http://{proxy}") };
+            crate::bridge::parse_proxy(&proxy).context("HTTPS_PROXY")
+        })
+        .transpose()?;
+    let no_proxy = env_var(&["NO_PROXY", "no_proxy"]).unwrap_or_default();
+    let mut uri: Uri = url.parse().map_err(|_| anyhow!("a malformed URL: {url}"))?;
+    for _ in 0..=MAX_REDIRECTS {
+        if uri.scheme_str() != Some("https") {
+            bail!("not an https:// URL: {uri}");
+        }
+        let host = uri.host().context("a URL without a host")?;
+        let proxy = proxy.as_ref().filter(|_| !bypasses(host, &no_proxy));
+        let (status, answer_headers, body) = request(Method::GET, &uri, headers, None, limit, proxy).await?;
+        if status.is_redirection() {
+            let location = answer_headers.get(header::LOCATION).and_then(|l| l.to_str().ok());
+            let location = location.with_context(|| format!("{status} without a location from {host}"))?;
+            uri = redirected(&uri, location)?;
+            continue;
+        }
+        if !status.is_success() {
+            bail!("{status} from {host} for {}", uri.path());
+        }
+        return body.with_context(|| format!("the answer from {host} broke off or is longer than {limit} bytes"));
+    }
+    bail!("more than {MAX_REDIRECTS} redirects")
+}
+
+fn env_var(names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| std::env::var(name).ok().filter(|v| !v.trim().is_empty()))
+}
+
+/// Whether `NO_PROXY`, a comma-separated list of host names and domains (`*`: all), exempts `host` from the proxy.
+fn bypasses(host: &str, no_proxy: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
+    no_proxy.split(',').map(|entry| entry.trim().to_ascii_lowercase()).filter(|entry| !entry.is_empty()).any(|entry| {
+        let domain = entry.trim_start_matches("*.").trim_start_matches('.');
+        entry == "*" || host == domain || host.strip_suffix(domain).is_some_and(|rest| rest.ends_with('.'))
+    })
+}
+
+/// Where the redirect to `location` from `from` leads.
+fn redirected(from: &Uri, location: &str) -> Result<Uri> {
+    if location.starts_with('/') {
+        let authority = from.authority().context("a URL without a host")?;
+        let scheme = from.scheme_str().unwrap_or("https");
+        return format!("{scheme}://{authority}{location}").parse().map_err(|_| anyhow!("a malformed redirect"));
+    }
+    location.parse().map_err(|_| anyhow!("a malformed redirect"))
+}
+
+/// One request: the status, the headers and the body of the answer, none when it is longer than `limit` bytes or
+/// breaks off. Through `proxy` (its `host:port` and Proxy-Authorization), a CONNECT tunnel, for an https:// `uri`.
+async fn request(
+    method: Method,
+    uri: &Uri,
+    headers: &[(&str, String)],
+    body: Option<(&str, Vec<u8>)>,
+    limit: usize,
+    proxy: Option<&(String, Option<String>)>,
+) -> Result<(StatusCode, HeaderMap, Option<Bytes>)> {
     let https = uri.scheme_str() == Some("https");
     let host = uri.host().context("a URL without a host")?;
+    let bare_host = host.trim_start_matches('[').trim_end_matches(']');
     let port = uri.port_u16().unwrap_or(if https { 443 } else { 80 });
     let authority = uri.authority().context("a URL without a host")?.as_str().to_owned();
-    let tcp = TcpStream::connect((host.trim_start_matches('[').trim_end_matches(']'), port))
-        .await
-        .with_context(|| format!("connecting to {host}:{port}"))?;
-    let io: Box<dyn Io> = if https {
-        let name = ServerName::try_from(host.trim_start_matches('[').trim_end_matches(']').to_owned())
-            .context("the URL's host name")?;
-        Box::new(tls()?.connect(name, tcp).await.context("TLS handshake")?)
-    } else {
-        Box::new(tcp)
+    let io: Box<dyn Io> = match proxy {
+        Some((dial, auth)) if https => {
+            let mut tcp = TcpStream::connect(dial.as_str()).await.with_context(|| format!("connecting to {dial}"))?;
+            crate::bridge::tunnel(&mut tcp, &format!("{host}:{port}"), auth.as_deref()).await?;
+            let name = ServerName::try_from(bare_host.to_owned()).context("the URL's host name")?;
+            Box::new(tls()?.connect(name, tcp).await.context("TLS handshake")?)
+        }
+        _ => {
+            let tcp =
+                TcpStream::connect((bare_host, port)).await.with_context(|| format!("connecting to {host}:{port}"))?;
+            if https {
+                let name = ServerName::try_from(bare_host.to_owned()).context("the URL's host name")?;
+                Box::new(tls()?.connect(name, tcp).await.context("TLS handshake")?)
+            } else {
+                Box::new(tcp)
+            }
+        }
     };
     let (mut send, connection) = hyper::client::conn::http1::handshake(TokioIo::new(io)).await?;
     tokio::spawn(async move {
@@ -80,5 +162,31 @@ pub(crate) async fn fetch_with_headers(
         .context("sending")?;
     let (status, answer_headers) = (response.status(), response.headers().clone());
     let answer = Limited::new(response.into_body(), limit).collect().await;
-    Ok((status, answer_headers, answer.map_or_default(http_body_util::Collected::to_bytes)))
+    Ok((status, answer_headers, answer.ok().map(http_body_util::Collected::to_bytes)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_proxy_exempts_hosts_and_their_subdomains() {
+        let list = "localhost, .internal.example,github.com";
+        assert!(bypasses("localhost", list));
+        assert!(bypasses("api.github.com", list));
+        assert!(bypasses("GitHub.com", list));
+        assert!(bypasses("a.internal.example", list));
+        assert!(!bypasses("notgithub.com", list));
+        assert!(!bypasses("objects.githubusercontent.com", list));
+        assert!(bypasses("anything", "*"));
+        assert!(!bypasses("github.com", ""));
+    }
+
+    #[test]
+    fn a_relative_redirect_stays_on_the_host() {
+        let from: Uri = "https://github.com/o/r/releases/download/v1/a.tar.gz".parse().unwrap();
+        assert_eq!(redirected(&from, "/x?y=1").unwrap().to_string(), "https://github.com/x?y=1");
+        let to = redirected(&from, "https://objects.example/a?sig=1").unwrap();
+        assert_eq!(to.host(), Some("objects.example"));
+    }
 }

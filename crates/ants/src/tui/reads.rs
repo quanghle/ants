@@ -1,14 +1,15 @@
 //! What `ants chat` reads besides the live feed ([`crate::live::Feed`]), every while and on demand: which of the
-//! human's inbox messages and channel posts are read, the channels and the humans, and the reactions to the messages
+//! human's inbox messages and channel posts are read, the channels, their notify levels and the humans, and the reactions to the messages
 //! shown, again at once as any of them changes; and marking a thread's messages and a channel's posts read, and
 //! reacting to a message as `ants react` does.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 
 use ants_daemon::reactions::{self, Change, Reactions};
 use ants_proto::{
-    ChannelEntry, ChannelId, ChannelReadMarkers, Humans, JsDomain, Reaction, ReadMarker, ThreadId, UserId, Uuid,
+    ChannelEntry, ChannelId, ChannelNotify, ChannelReadMarkers, Humans, JsDomain, Reaction, ReadMarker, ThreadId,
+    UserId, Uuid,
 };
 use anyhow::Result;
 use async_nats::jetstream;
@@ -23,10 +24,12 @@ use crate::live::maybe;
 
 /// How often the read markers are read, for what other devices of the human marked read.
 const MARKER_EVERY: Duration = Duration::from_secs(5);
-/// How often the channels, the humans and the reactions are read.
+/// How often the channels, their notify levels, the humans and the reactions are read.
 const DIRECTORY_EVERY: Duration = Duration::from_secs(10);
 
 type Directory = (Vec<ChannelEntry>, Humans);
+/// The notify level of each channel not at the default.
+pub type Levels = BTreeMap<ChannelId, ChannelNotify>;
 
 /// Which posts of a channel to mark read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +49,8 @@ pub enum Read {
     ChannelMarked(ChannelId, Result<ChannelReadMarkers>),
     /// Every channel, and the team's humans.
     Directory(Result<Directory>),
+    /// The human's notify levels of the channels.
+    Levels(Levels),
     /// The thread's messages were marked read, or not.
     Marked(ThreadId, Result<()>),
     /// The thread's messages were marked unread again, or not.
@@ -75,6 +80,7 @@ pub struct Reads {
     /// Whether the human's credentials may read and mark its channel read markers.
     channels: bool,
     channel_marker: Option<LocalBoxFuture<'static, Result<ChannelReadMarkers>>>,
+    levels: Option<LocalBoxFuture<'static, Result<Levels>>>,
     /// The channel posts to mark read, after those in flight.
     channels_to_mark: VecDeque<(ChannelId, Mark)>,
     marking_channel: Option<LocalBoxFuture<'static, (ChannelId, Result<ChannelReadMarkers>)>>,
@@ -108,6 +114,7 @@ impl Reads {
             unmarking: None,
             channels,
             channel_marker: None,
+            levels: None,
             channels_to_mark: VecDeque::new(),
             marking_channel: None,
             watched: Vec::new(),
@@ -154,6 +161,9 @@ impl Reads {
                         let js = self.js.clone();
                         self.directory = Some(directory(js).boxed_local());
                     }
+                    if self.levels.is_none() {
+                        self.read_levels();
+                    }
                     if self.reactions.is_none() {
                         self.read_reactions();
                     }
@@ -173,6 +183,13 @@ impl Reads {
                 read = maybe(&mut self.directory) => {
                     self.directory = None;
                     return Read::Directory(read);
+                }
+                read = maybe(&mut self.levels) => {
+                    self.levels = None;
+                    match read {
+                        Ok(levels) => return Read::Levels(levels),
+                        Err(e) => tracing::debug!("reading the channels' notify levels: {e:#}"),
+                    }
                 }
                 (thread, marked) = maybe(&mut self.marking) => {
                     self.marking = None;
@@ -220,6 +237,14 @@ impl Reads {
             Some(async move { Ok(ChannelReads::open(&js, &me).await?.markers().await?.0) }.boxed_local());
     }
 
+    fn read_levels(&mut self) {
+        if !self.channels {
+            return;
+        }
+        let (js, me) = (self.js.clone(), self.me.clone());
+        self.levels = Some(async move { Ok(crate::quiet::prefs(&js, &me).await?.channels) }.boxed_local());
+    }
+
     fn read_reactions(&mut self) {
         let (js, watched) = (self.js.clone(), self.watched.clone());
         self.reactions = Some(async move { reactions::load(&js, &watched).await }.boxed_local());
@@ -264,6 +289,7 @@ impl Reads {
         self.marker = None;
         self.channel_marker = None;
         self.directory = None;
+        self.levels = None;
         self.reactions = None;
     }
 }
@@ -300,7 +326,7 @@ async fn directory(js: jetstream::Context) -> Result<Directory> {
 
 /// Mark the inbox messages of `me` on `thread` read, as `ants inbox --thread THREAD` does.
 async fn mark(js: jetstream::Context, me: UserId, thread: ThreadId) -> (ThreadId, Result<()>) {
-    let select = Select { thread: Some(thread.clone()), limit: None, peek: false, summaries: false };
+    let select = Select { thread: Some(thread.clone()), ..Select::default() };
     let marked = async { Inbox::open(&js, &me).await?.unread(&select).await.map(drop) }.await;
     (thread, marked)
 }

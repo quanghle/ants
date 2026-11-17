@@ -370,7 +370,9 @@ fn kv_entries() {
             (other_thread(), Snooze { at: at(1), until: at(45) }),
         ])),
     );
-    snap("notify_prefs", &NotifyPrefs { snoozed_until: Some(at(30)), muted: BTreeMap::from([(thread(), at(45))]) });
+    let channels = BTreeMap::from([("ops".parse().unwrap(), ChannelNotify::Mentions)]);
+    let muted = BTreeMap::from([(thread(), at(45))]);
+    snap("notify_prefs", &NotifyPrefs { snoozed_until: Some(at(30)), muted, channels });
     snap(
         "held_notices",
         &HeldNotices {

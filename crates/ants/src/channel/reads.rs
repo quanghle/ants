@@ -1,9 +1,10 @@
 //! Which channel posts a human has read, on any of its devices: its [`ChannelReadMarkers`] under
 //! [`channel_reads_key`] in [`READ_BUCKET`], beside its inbox's read marker, updated with compare-and-set so devices
 //! marking at the same time each keep the other's marks. `ants channel read` marks the posts it prints, `ants channel
-//! list` counts the unread ones, and `ants chat` does both as its views show them.
+//! list` counts the unread ones, and `ants chat` does both as its views show them; each channel's notify level
+//! ([`ChannelNotify`]) says which unread posts count.
 
-use ants_proto::{ChannelId, ChannelReadMarkers, Humans, ReadMarker, UserId, channel_reads_key};
+use ants_proto::{ChannelId, ChannelNotify, ChannelReadMarkers, Humans, ReadMarker, UserId, channel_reads_key};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
 use async_nats::jetstream::kv::{self, Operation, UpdateErrorKind};
@@ -66,24 +67,26 @@ impl ChannelReads {
     }
 }
 
-/// A channel's unread posts: those by humans or that @mention the human apart from the other ants' chatter.
+/// A channel's unread posts: those its notify level counts apart from the others, ants' chatter by default.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Unread {
-    /// Those by a human, or that @mention the human.
+    /// Those the channel's notify level counts: by default, those by a human or that @mention the human.
     pub posts: usize,
     /// Those of them that @mention the human.
     pub mentions: usize,
-    /// Those by an ant that do not @mention the human.
-    pub ants: usize,
+    /// The others, shown apart and dim.
+    pub other: usize,
 }
 
 impl Unread {
     /// The unread ones of `posts`, each its sequence, author and the users it @mentions, by `marker` (none: nothing
-    /// read), for `me`, with `is_human` telling a human author from an ant. Its own posts are read.
+    /// read), for `me` at notify level `level`, with `is_human` telling a human author from an ant. Its own posts are
+    /// read.
     pub fn of<'a>(
         posts: impl IntoIterator<Item = (u64, &'a UserId, &'a [UserId])>,
         marker: Option<&ReadMarker>,
         me: &UserId,
+        level: ChannelNotify,
         is_human: impl Fn(&UserId) -> bool,
     ) -> Self {
         let mut unread = Self::default();
@@ -91,31 +94,31 @@ impl Unread {
             if from == me || marker.is_some_and(|m| m.is_read(seq)) {
                 continue;
             }
-            if mentions.contains(me) {
+            let mentioned = mentions.contains(me);
+            if level.counts(is_human(from), mentioned) {
                 unread.posts += 1;
-                unread.mentions += 1;
-            } else if is_human(from) {
-                unread.posts += 1;
+                unread.mentions += usize::from(mentioned);
             } else {
-                unread.ants += 1;
+                unread.other += 1;
             }
         }
         unread
     }
 }
 
-/// The unread posts of `channel` by `markers`, for `reader`, the team's humans being `humans`: only those after what
-/// the marker has read up to are read from the stream.
+/// The unread posts of `channel` by `markers`, for `reader` at notify level `level`, the team's humans being
+/// `humans`: only those after what the marker has read up to are read from the stream.
 pub async fn unread(
     js: &jetstream::Context,
     reader: &Me,
     humans: &Humans,
     markers: &ChannelReadMarkers,
     channel: &ChannelId,
+    level: ChannelNotify,
 ) -> Result<Unread> {
     let marker = markers.channels.get(channel);
     let from = marker.map_or(0, |m| m.below + 1);
     let posts = super::read_from(js, reader, channel, from).await?;
     let posts = posts.iter().map(|(seq, post)| (*seq, &post.from, post.mentions.as_slice()));
-    Ok(Unread::of(posts, marker, &reader.id, |u| humans.contains(u)))
+    Ok(Unread::of(posts, marker, &reader.id, level, |u| humans.contains(u)))
 }

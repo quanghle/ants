@@ -91,10 +91,11 @@ fn breaks_title(c: char) -> bool {
 }
 
 /// A thread marked done, under its [`done_key`] in [`THREADS_BUCKET`]: one state per thread, shared by every human,
-/// which any human sets or clears and no ant reads or writes. `by` is the human that marked it, `after` the [`STREAM`]
+/// which any human sets or clears and no ant writes. `by` is the human that marked it, `after` the [`STREAM`]
 /// sequence of the last message, channel post or note on the thread it saw: one stored above it reopens the thread
 /// ([`ThreadDone::holds`]) without a write, as new activity shows on an archived thread. Being done changes no ant's
-/// work, reply or notification.
+/// work, reply or notification, but ends the reminders of an escalation it came after, which an ant's daemon reads it
+/// for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadDone {
     pub thread_id: ThreadId,
@@ -129,8 +130,9 @@ pub const SNOOZE_MAX: chrono::TimeDelta = chrono::TimeDelta::days(7);
 
 /// The threads a human snoozed on home, kept with its reminders ([`Reminders::snoozed`]). A snooze set `at` hides the
 /// thread from home until `until`, at most [`SNOOZE_MAX`] later, or until an item for the human arrives on the thread
-/// after `at`. Snoozing changes no ant's work, reply or notification. The human's assistant snoozes threads for it
-/// under its own key ([`assisted_reminders_key`]), which readers take in only while the human's grant names it
+/// after `at`. Snoozing changes no ant's work, reply or notification, but holds back the reminders of an escalation
+/// until it ends, which an ant's daemon reads the human's own reminders entry for. The human's assistant snoozes
+/// threads for it under its own key ([`assisted_reminders_key`]), which readers take in only while the human's grant names it
 /// ([`ThreadSnoozes::with_assisted`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]

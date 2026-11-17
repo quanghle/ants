@@ -26,6 +26,7 @@ use self::transports::{check_transports, installed_transports, same_address};
 use crate::auth;
 use crate::humans::{Me, Rights};
 use crate::service::Services;
+use crate::update;
 use crate::webhook;
 
 mod ants;
@@ -144,8 +145,10 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
         leaf.as_ref().and_then(|l| l.as_ref().ok()).is_some_and(|l| same_address(&setup.nats, &l.listen));
     let resolver = check_resolver(setup, through_leaf);
     let reactions = check_reactions(ants, setup, NETWORK_TIMEOUT);
-    let ((reached, connected), ants_checked, resolver, reactions) =
-        tokio::join!(reach, ants_checked, resolver, reactions);
+    let update = check_update(loaded.as_ref().map_or_default(|l| l.auto_update));
+    let ((reached, connected), ants_checked, resolver, reactions, update) =
+        tokio::join!(reach, ants_checked, resolver, reactions, update);
+    checks.extend(update);
     checks.extend(reached);
     let settings = loaded.as_ref().map_or_default(|l| l.storage);
     checks.extend(check_storage(connected.as_ref(), setup, settings).await);
@@ -225,6 +228,28 @@ fn check_config(path: &Path, checks: &mut Vec<Check>) -> Option<config::Loaded> 
             None
         }
     }
+}
+
+/// Whether a release newer than this ants is out, asked of GitHub only when the config file's `auto_update` is on.
+async fn check_update(mode: config::AutoUpdate) -> Option<Check> {
+    if mode == config::AutoUpdate::Off {
+        return None;
+    }
+    let running = update::Version::running();
+    let latest = tokio::time::timeout(NETWORK_TIMEOUT * 2, update::resolve(None, false)).await;
+    let release = match latest {
+        Err(_) => return Some(Check::skip("update", "GitHub did not answer in time")),
+        Ok(Err(e)) => return Some(Check::skip("update", format!("finding the latest release: {e:#}"))),
+        Ok(Ok(release)) => release,
+    };
+    Some(match release.version().filter(|latest| *latest > running) {
+        Some(latest) => Check::warn(
+            "update",
+            format!("ants {latest} is available (running {running}; auto_update = \"{}\")", mode.as_str()),
+            vec!["ants update".to_owned()],
+        ),
+        None => Check::ok("update", format!("ants {running} is the latest release")),
+    })
 }
 
 #[cfg(test)]

@@ -15,7 +15,9 @@ use crate::cmd::{
     hook::HookCommand, keys::KeysCommand, leaf::LeafCommand, login, notify::NotifyCommand, remind::RemindCommand,
     setup, thread::ThreadCommand, tools::ToolsCommand, webhook::WebhookCommand,
 };
-use crate::{add, attachments, channel, completions, compose, progress, renew, retire, serve, spend, thread, upgrade};
+use crate::{
+    add, attachments, channel, completions, compose, progress, renew, retire, serve, spend, thread, update, upgrade,
+};
 
 /// The whole command line.
 pub(crate) type Cli = Ants<Command>;
@@ -81,6 +83,11 @@ pub(crate) enum Command {
         #[arg(long, value_name = "MESSAGE", conflicts_with_all = ["thread", "reply_to"])]
         #[arg(add = ArgValueCompleter::new(completions::messages))]
         forward: Option<thread::MessagePick>,
+        /// Hand this thread on as --forward hands a message: its TL;DR kept (`ants thread tldr` keeps one), quoted
+        /// with who wrote it; its id, a unique start of one, or `last`, as --thread takes.
+        #[arg(long, value_name = "THREAD", conflicts_with_all = ["thread", "reply_to", "forward"])]
+        #[arg(add = ArgValueCandidates::new(completions::threads))]
+        forward_thread: Option<thread::Pick>,
         #[command(flatten)]
         sending: Sending,
         #[command(flatten)]
@@ -116,10 +123,15 @@ pub(crate) enum Command {
         /// removed.
         #[arg(long)]
         json: bool,
+        /// Also list an assistant's reports of its acts for the human, one by one. Without it (and without --thread
+        /// naming an activity thread), they are marked read (unless --peek) and summed up in a line per activity
+        /// thread, none with --json.
+        #[arg(long)]
+        activity: bool,
         /// Mark unread again, on all the human's devices, a message to the human and the later ones on its thread
         /// (a message id or a unique start of one), or the latest message to the human on a thread (its id, a unique
         /// start of one, or `last`); prints nothing else.
-        #[arg(long, value_name = "MESSAGE|THREAD", conflicts_with_all = ["peek", "thread", "limit", "follow", "json"])]
+        #[arg(long, value_name = "MESSAGE|THREAD", conflicts_with_all = ["peek", "thread", "limit", "follow", "json", "activity"])]
         #[arg(add = ArgValueCompleter::new(completions::messages))]
         unread: Option<String>,
     },
@@ -484,6 +496,11 @@ pub(crate) enum Command {
         #[arg(long)]
         install: bool,
     },
+    /// Replace this ants executable with a release published on GitHub: the latest, when newer than this one, or the
+    /// one of --version. Checks the archive against the release's SHA256SUMS, runs the new binary with --version, then
+    /// renames it over the executable at once; services running ants restart onto it through their upgrade check.
+    /// Refuses an executable installed by cargo install, or in a directory not writable, printing the command to run.
+    Update(update::UpdateArgs),
     /// Issue NATS credentials: one operator and account for the team, one user per ant or human.
     #[command(subcommand)]
     Auth(AuthCommand),

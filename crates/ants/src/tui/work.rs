@@ -1,5 +1,6 @@
 //! The work view: every thread read, with the state the messages on it tell, those waiting on the human first.
-//! What each thread's messages tell ([`Facts`]) also feeds home and the nav's counts.
+//! What each thread's messages tell ([`Facts`]) also feeds home and the nav's counts. An assistant's activity threads
+//! ([`ThreadId::is_activity`]) are listed apart, in their own view, and left out of the counts.
 
 use std::collections::{HashMap, HashSet};
 
@@ -325,10 +326,15 @@ impl Data {
         ThreadState::Idle
     }
 
-    /// The number of threads in each state.
+    /// The threads read but an assistant's activity threads: the work.
+    pub fn work(&self) -> impl Iterator<Item = &ThreadId> {
+        self.live.order.iter().filter(|t| !t.is_activity())
+    }
+
+    /// The number of threads in each state, but an assistant's activity threads.
     pub fn counts(&self) -> HashMap<ThreadState, usize> {
         let mut counts = HashMap::new();
-        for thread in &self.live.order {
+        for thread in self.work() {
             *counts.entry(self.state(thread)).or_default() += 1;
         }
         counts
@@ -343,11 +349,14 @@ pub struct Filter {
     pub user: Option<UserId>,
     /// Only threads posted in this channel.
     pub channel: Option<ChannelId>,
+    /// Only the reports of an assistant's acts to the human ([`ThreadId::is_activity`]), which no other list shows.
+    pub activity: bool,
 }
 
 impl Filter {
     fn title(&self) -> String {
-        let mut parts = vec![self.state.map_or("work", ThreadState::label).to_owned()];
+        let all = if self.activity { "assistant activity" } else { "work" };
+        let mut parts = vec![self.state.map_or(all, ThreadState::label).to_owned()];
         parts.extend(self.user.as_ref().map(|u| format!("with {u}")));
         parts.extend(self.channel.as_ref().map(|c| format!("in #{c}")));
         parts.join(" ")
@@ -372,6 +381,7 @@ impl Page {
             .live
             .order
             .iter()
+            .filter(|t| t.is_activity() == self.filter.activity)
             .filter(|t| {
                 let summary = data.live.summary(t);
                 let on = |user: &UserId| data.reaches(t, user);
@@ -401,6 +411,7 @@ impl Page {
         let to = match key {
             Key::Enter => return rows.get(at).map(|(t, _)| To::Thread(t.clone())),
             Key::Char('S') => return rows.get(at).map(|(t, _)| To::Tldr(t.clone())),
+            Key::Char('f') => return rows.get(at).map(|_| To::Bar("/forward @".to_owned())),
             Key::Char('z') => return rows.get(at).map(|(t, _)| To::Snooze(t.clone())),
             Key::Char('u') => return rows.get(at).map(|(t, _)| To::Unread(t.clone(), None)),
             Key::Char('b') => return rows.get(at).map(|(t, _)| To::Remind(t.clone(), None)),
@@ -419,7 +430,8 @@ impl Page {
         None
     }
 
-    pub const KEYS: &str = "↑↓ thread · Enter open · x cancel · z snooze · u unread · b remind · S TL;DR · Esc back";
+    pub const KEYS: &str =
+        "↑↓ thread · Enter open · x cancel · z snooze · u unread · b remind · S TL;DR · f forward · Esc back";
 
     pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
         let rows = self.rows(data);
@@ -675,6 +687,31 @@ mod tests {
         m.stored(vec![notice(3, ants_proto::NoticeKind::SignedOut)], at(3));
         assert_eq!(state(&m, &thread), ThreadState::Stuck);
         assert_eq!(m.data.stuck(&thread).map(|a| a.seq), Some(3));
+    }
+
+    #[test]
+    fn assistant_activity_is_listed_apart_from_the_work_and_its_counts() {
+        use super::super::nav;
+        let (work, acts) = (ThreadId::generate(), ThreadId::activity(&user("alice"), at(0).date_naive()));
+        let mut m = model();
+        let report = Envelope {
+            thread_id: acts.clone(),
+            ..Envelope::new(user("bob"), user("alice"), "[ants] dev-a sent bob a message")
+                .as_notice(ants_proto::NoticeKind::Assistant)
+        };
+        let payload = serde_json::to_vec(&report).unwrap();
+        let reported = Parser::default().entry(2, at(2), &subject::inbox(&user("alice"), &user("bob")), &payload);
+        m.stored(vec![message(1, &work, "bob", "alice", "lunch?"), reported.unwrap()], at(2));
+        assert!(m.data.live.order.contains(&acts));
+        assert_eq!(m.data.work().collect::<Vec<_>>(), [&work]);
+        assert_eq!(m.data.counts().values().sum::<usize>(), 1);
+        assert!(super::super::home::items(&m.data, at(2)).iter().all(|i| i.thread == work));
+        assert_eq!(Page::new(Filter::default()).rows(&m.data).len(), 1, "out of the work list");
+        let items = nav::items(&m.data, at(2));
+        assert_eq!(items[..3], [nav::Item::Home, nav::Item::Activity, nav::Item::Work(None)]);
+        m.select(nav::Item::Activity);
+        let View::Work(page) = m.page() else { panic!("not the work view") };
+        assert_eq!(page.rows(&m.data).into_iter().map(|(t, _)| t).collect::<Vec<_>>(), [acts]);
     }
 
     #[test]

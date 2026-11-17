@@ -276,6 +276,10 @@ pub struct Reminder {
     /// Reminders sent so far.
     #[serde(default)]
     pub sent: u32,
+    /// The hub stream's sequences of the escalation and the reminders as they reached the human, oldest first: what
+    /// the human's read marker and the thread's done state are checked against ([`crate::heed`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seqs: Vec<u64>,
 }
 
 /// What a human's message ended on a thread ([`Ledger::reset`]).
@@ -469,18 +473,56 @@ impl Ledger {
         .await
     }
 
-    /// A reminder of the thread's escalation was sent: the next one is due `next`, or none is for None. A thread whose
-    /// escalation a human ended meanwhile stays without one.
-    pub async fn reminded(&self, thread: &ThreadId, next: Option<i64>) -> Result<()> {
+    /// A reminder of the thread's escalation was sent, stored at hub stream sequence `seq` if known: the next one is
+    /// due `next`, or none is for None. A thread whose escalation a human ended meanwhile stays without one.
+    pub async fn reminded(&self, thread: &ThreadId, next: Option<i64>, seq: Option<u64>) -> Result<()> {
         self.update(thread, |spent| match next {
             Some(at) => match &mut spent.reminder {
                 Some(r) => {
                     (r.sent, r.at) = (r.sent + 1, at);
+                    r.seqs.extend(seq);
                     (true, ())
                 }
                 None => (false, ()),
             },
             None => (spent.reminder.take().is_some(), ()),
+        })
+        .await
+    }
+
+    /// The escalation the thread's reminder is of reached the human at hub stream sequence `seq`.
+    pub async fn reached_at(&self, thread: &ThreadId, seq: u64) -> Result<()> {
+        self.update(thread, |spent| match &mut spent.reminder {
+            Some(r) if !r.seqs.contains(&seq) => {
+                r.seqs.push(seq);
+                (true, ())
+            }
+            _ => (false, ()),
+        })
+        .await
+    }
+
+    /// Hold the thread's next reminder back until `at`, without counting one sent.
+    pub async fn postpone_reminder(&self, thread: &ThreadId, at: i64) -> Result<()> {
+        self.update(thread, |spent| match &mut spent.reminder {
+            Some(r) if r.at != at => {
+                r.at = at;
+                (true, ())
+            }
+            _ => (false, ()),
+        })
+        .await
+    }
+
+    /// Send no more reminders of the thread's escalation, keeping whom it reached until a human's message, as
+    /// [`Ledger::reached_human`] does.
+    pub async fn end_reminder(&self, thread: &ThreadId) -> Result<()> {
+        self.update(thread, |spent| match spent.reminder.take() {
+            Some(r) => {
+                spent.reached = Some(r.to);
+                (true, ())
+            }
+            None => (false, ()),
         })
         .await
     }
@@ -1057,11 +1099,12 @@ mod tests {
             since,
             at,
             sent: 0,
+            seqs: Vec::new(),
         };
         ledger.set_pending(&t, Some(pending.clone())).await.unwrap();
         ledger.arm_reminder(&t, reminder(1, 5)).await.unwrap();
         assert_eq!(ledger.deadlines().await.unwrap(), BTreeMap::from([(t.clone(), 5)]), "the earlier one");
-        ledger.reminded(&t, Some(20)).await.unwrap();
+        ledger.reminded(&t, Some(20), None).await.unwrap();
         assert_eq!(ledger.deadlines().await.unwrap(), BTreeMap::from([(t.clone(), 9)]));
 
         // Reaching a human again postpones the reminder, still counting from the first time.
@@ -1072,7 +1115,37 @@ mod tests {
         assert!(ledger.reset(&t).await.unwrap().reminder.is_some(), "a human ends it");
         assert_eq!(ledger.reminder(&t).await.unwrap(), None);
         assert!(ledger.deadlines().await.unwrap().is_empty());
-        ledger.reminded(&t, Some(40)).await.unwrap();
+        ledger.reminded(&t, Some(40), None).await.unwrap();
         assert_eq!(ledger.reminder(&t).await.unwrap(), None, "a reminder sent meanwhile does not bring it back");
+    }
+
+    #[tokio::test]
+    async fn a_reminder_postponed_keeps_its_count_and_one_ended_keeps_whom_it_reached() {
+        let ledger = Ledger::memory(ant(), Caps::default());
+        let t = thread(1);
+        let reminder = Reminder {
+            escalation: escalated(&[], None).escalation,
+            to: UserId::human(),
+            owner: None,
+            creator: None,
+            origin_thread: None,
+            summary: String::new(),
+            since: 1,
+            at: 5,
+            sent: 0,
+            seqs: Vec::new(),
+        };
+        ledger.arm_reminder(&t, reminder).await.unwrap();
+        ledger.reached_at(&t, 7).await.unwrap();
+        ledger.reminded(&t, Some(10), Some(9)).await.unwrap();
+        ledger.postpone_reminder(&t, 50).await.unwrap();
+        let armed = ledger.reminder(&t).await.unwrap().unwrap();
+        assert_eq!((armed.at, armed.sent, armed.seqs), (50, 1, vec![7, 9]));
+        assert_eq!(ledger.deadlines().await.unwrap(), BTreeMap::from([(t.clone(), 50)]));
+
+        ledger.end_reminder(&t).await.unwrap();
+        assert_eq!(ledger.reminder(&t).await.unwrap(), None);
+        assert!(ledger.deadlines().await.unwrap().is_empty());
+        assert_eq!(ledger.reset(&t).await.unwrap().reached, Some(UserId::human()), "for telling of another's answer");
     }
 }

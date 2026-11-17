@@ -23,6 +23,7 @@ pub mod escalation;
 pub mod fallback;
 pub mod files;
 pub mod harness;
+pub mod heed;
 pub mod history;
 pub mod host;
 pub mod hub;

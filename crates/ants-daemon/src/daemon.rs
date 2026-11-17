@@ -601,6 +601,7 @@ fn escalator(
     )
     .with_chains(crate::chains::jetstream_chains(js.clone()))
     .with_notes(redacting_notes_sender(escalation::jetstream_notes_sender(js.clone()), redactor.clone()))
+    .with_heed(crate::heed::jetstream_heed(js.clone(), config.connection.js_domain.clone()))
     .with_assistants(assistants);
     std::sync::Arc::new(escalator)
 }

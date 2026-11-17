@@ -175,9 +175,11 @@ pub struct Entry {
     /// [`Envelope::origin_thread`]: ants_proto::Envelope::origin_thread
     #[serde(skip)]
     pub origin: Option<ThreadId>,
-    /// The message an inbox message answers ([`Envelope::in_reply_to`]).
+    /// The message an inbox message, or the post a channel post, answers ([`Envelope::in_reply_to`],
+    /// [`ChannelPost::in_reply_to`]).
     ///
     /// [`Envelope::in_reply_to`]: ants_proto::Envelope::in_reply_to
+    /// [`ChannelPost::in_reply_to`]: ants_proto::ChannelPost::in_reply_to
     #[serde(skip)]
     pub in_reply_to: Option<Uuid>,
     /// The daemon notice an inbox message that is not forged is ([`Envelope::notice`]): a line of the system's, not an

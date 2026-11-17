@@ -43,8 +43,10 @@ async fn any_human_titles_a_thread_and_keeps_its_tldr_but_each_marks_only_its_ow
     assert!(ant.summary(&thread).await.is_err(), "an ant reads no TL;DR");
     assert!(alice_meta.set_done(&thread, 1).await.unwrap());
     assert!(bob_meta.clear_done(&thread).await.unwrap().is_some_and(|d| d.by == alice), "bob clears alice's done");
-    assert!(ant.done(&thread).await.is_err(), "an ant reads no done state");
-    assert!(ant.set_done(&thread, 1).await.is_err(), "nor marks a thread done");
+    assert!(alice_meta.set_done(&thread, 2).await.unwrap());
+    assert_eq!(ant.done(&thread).await.unwrap().map(|d| d.by), Some(alice.clone()), "an ant reads a done state");
+    assert!(ant.set_done(&thread, 3).await.is_err(), "but marks no thread done");
+    assert!(ant.clear_done(&thread).await.is_err(), "nor clears one");
 
     assert!(alice_meta.change_marks(|m| m.pin(&thread)).await.unwrap());
     assert!(!alice_meta.change_marks(|m| m.pin(&thread)).await.unwrap(), "pinned already");
@@ -70,6 +72,47 @@ async fn any_human_titles_a_thread_and_keeps_its_tldr_but_each_marks_only_its_ow
     let done = format!("$KV.{}.{}", ants_proto::THREADS_BUCKET, ants_proto::done_key(&thread));
     raw.publish(done.clone(), "{}".into()).await.unwrap();
     assert!(next_violation(&raw, &mut errors).await.contains(&done), "an ant's done state is denied");
+}
+
+#[tokio::test]
+async fn an_ant_s_daemon_reads_what_a_human_did_about_an_escalation() {
+    use ants_daemon::heed::{Heeded, jetstream_heed};
+    use ants_proto::{NotifyPrefs, ReadMarker, Reminders, Snooze, ThreadSnoozes};
+
+    let Some(server) = Server::start() else { return };
+    let (alice, dev_a) = (p("alice"), p("dev-a"));
+    let (_, a_js) = server.connect_as(&alice, Role::Human).await;
+    let (_, d_js) = server.connect(&dev_a).await;
+    let heed = jetstream_heed(d_js, None);
+    let [done, read, muted, snoozed] = std::array::from_fn(|_| ThreadId::generate());
+    assert_eq!(heed(alice.clone(), done.clone(), vec![5]).await.unwrap(), Heeded::No, "no bucket holds nothing");
+
+    a_js.create_stream(ants_daemon::hub::threads_config()).await.unwrap();
+    let reads = a_js.create_key_value(ants_daemon::hub::read_config()).await.unwrap();
+    let notify = a_js.create_key_value(ants_daemon::hub::notify_config()).await.unwrap();
+    let threads = a_js.get_key_value(ants_proto::THREADS_BUCKET).await.unwrap();
+    let now = chrono::Utc::now();
+    let put = |kv: &async_nats::jetstream::kv::Store, key: String, value: Vec<u8>| {
+        let kv = kv.clone();
+        async move { kv.put(key, value.into()).await.unwrap() }
+    };
+    crate::thread_meta::Meta::open(&a_js, None, &alice).await.unwrap().set_done(&done, 20).await.unwrap();
+    let marker = ReadMarker { below: 10, ..ReadMarker::default() };
+    put(&reads, alice.to_string(), serde_json::to_vec(&marker).unwrap()).await;
+    let mut prefs = NotifyPrefs::default();
+    prefs.muted.insert(muted.clone(), now + chrono::TimeDelta::days(1));
+    put(&notify, alice.to_string(), serde_json::to_vec(&prefs).unwrap()).await;
+    let until = now + chrono::TimeDelta::hours(1);
+    let snoozed_threads = ThreadSnoozes([(snoozed.clone(), Snooze { at: now, until })].into());
+    let reminders = Reminders { snoozed: snoozed_threads, ..Reminders::default() };
+    put(&threads, ants_proto::reminders_key(&alice), serde_json::to_vec(&reminders).unwrap()).await;
+
+    let heeded = |thread: &ThreadId, seq| heed(alice.clone(), thread.clone(), vec![seq]);
+    assert_eq!(heeded(&done, 15).await.unwrap(), Heeded::Done);
+    assert_eq!(heeded(&read, 5).await.unwrap(), Heeded::Read);
+    assert_eq!(heeded(&read, 50).await.unwrap(), Heeded::No);
+    assert_eq!(heeded(&muted, 50).await.unwrap(), Heeded::Muted);
+    assert_eq!(heeded(&snoozed, 50).await.unwrap(), Heeded::Snoozed(until));
 }
 
 #[tokio::test]

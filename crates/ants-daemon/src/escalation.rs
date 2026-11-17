@@ -36,6 +36,8 @@
 //! human's message on the thread by `escalation_reminder` the same human gets a reminder on the thread, carrying it
 //! too, then a day later and three days after that, the last ([`Reminder`]). The reminder is kept with the
 //! thread's spend and its due time in the deadlines, so the daemon serving the ant sends it, once, across restarts.
+//! No more go out once the human marked the thread done after the latest, read the escalation or a reminder, or muted
+//! the thread; while the human snoozed the thread, the next one waits for the snooze to end ([`crate::heed`]).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,6 +54,7 @@ use uuid::Uuid;
 use crate::assistant_first::AssistantFirst;
 use crate::caps::{Ended, Ledger, Pending, Reminder};
 use crate::chains::Chains;
+use crate::heed::{Heed, Heeded};
 use crate::humans::Registry;
 use crate::mcp::Colony;
 use crate::{bus, links, status};
@@ -67,20 +70,24 @@ const REMIND_AGAIN: [Duration; 2] = [Duration::from_hours(24), Duration::from_ho
 const RETRY: Duration = Duration::from_secs(30);
 /// Most of an escalation's text kept for the escalations that follow it up.
 const SUMMARY_CHARS: usize = 4000;
+/// Longest a look at what the human did about an escalation may take before its reminder goes out regardless.
+const HEED_WAIT: Duration = Duration::from_secs(10);
 
-/// Stores an envelope under a message id, resolving once JetStream has it.
-pub type Sender = Arc<dyn Fn(Envelope, String) -> BoxFuture<'static, Result<()>> + Send + Sync>;
+/// Stores an envelope under a message id, resolving once JetStream has it, with the hub stream's sequence of it when
+/// the hub stored it rather than the machine's outbox.
+pub type Sender = Arc<dyn Fn(Envelope, String) -> BoxFuture<'static, Result<Option<u64>>> + Send + Sync>;
 
-/// Stores through JetStream ([`bus::store`]), first recording the link to a channel thread the envelope passes on, if
-/// any ([`links::pass_on`]), then tells of the escalation or question on the ant's status ([`status::escalated`]).
+/// Stores through JetStream ([`bus::store_acked`]), first recording the link to a channel thread the envelope passes
+/// on, if any ([`links::pass_on`]), then tells of the escalation or question on the ant's status
+/// ([`status::escalated`]).
 pub fn jetstream_sender(js: async_nats::jetstream::Context) -> Sender {
     Arc::new(move |envelope, id| {
         let js = js.clone();
         Box::pin(async move {
             links::passing_on(&js, &envelope).await;
-            bus::store(&js, envelope.subject(), &envelope, &id).await?;
+            let ack = bus::store_acked(&js, envelope.subject(), &envelope, &id).await?;
             status::escalated(&js.client(), &envelope);
-            Ok(())
+            Ok(ack.map(|ack| ack.sequence))
         })
     })
 }
@@ -187,6 +194,8 @@ pub struct Escalator {
     notes: Option<NotesSender>,
     /// Finds the assistant that gets first what would reach a human; None sends it to the human.
     assistants: Option<AssistantFirst>,
+    /// Looks up what the human an escalation reached did about it, before each reminder; None reminds regardless.
+    heed: Option<Heed>,
     /// Held while an escalation is decided and stored, so two on one thread do not climb from the same level.
     busy: Mutex<()>,
     /// A deadline was set.
@@ -207,6 +216,7 @@ impl Escalator {
             send,
             notes: None,
             assistants: None,
+            heed: None,
             busy,
             deadline_set,
         }
@@ -216,6 +226,13 @@ impl Escalator {
     #[must_use]
     pub fn with_assistants(self, assistants: AssistantFirst) -> Self {
         Self { assistants: Some(assistants), ..self }
+    }
+
+    /// Look up through `heed`, before each reminder, what the human did about the escalation: one marked done, read or
+    /// muted sends no more; one snoozed waits for the snooze to end.
+    #[must_use]
+    pub fn with_heed(self, heed: Heed) -> Self {
+        Self { heed: Some(heed), ..self }
     }
 
     /// Follow the chain of a leader missing from the colony through `chains`.
@@ -335,7 +352,7 @@ impl Escalator {
             .as_notice(ants_proto::NoticeKind::InPlace);
         let to = notice.to.clone();
         match (self.send)(notice, format!("answered-{ant}-{}", envelope.id)).await {
-            Ok(()) => tracing::info!(%thread, %to, %from, "told of the answer of another human"),
+            Ok(_) => tracing::info!(%thread, %to, %from, "told of the answer of another human"),
             Err(e) => tracing::warn!(%thread, %to, error = format!("{e:#}"), "telling of the answer of another human"),
         }
     }
@@ -640,7 +657,20 @@ impl Escalator {
 
     /// Remind the human `reminder` names of the thread's escalation, on the thread, carrying it, under a message id
     /// of its own, then schedule the next reminder, backing off, unless this one is the last ([`REMIND_AGAIN`]).
+    /// Unless the human heeded it ([`Escalator::heeded`]): one marked done, read or muted ends the reminders, one
+    /// snoozed holds the next back until the snooze ends.
     async fn remind(&self, thread: &ThreadId, reminder: Reminder, now: i64) -> Result<()> {
+        match self.heeded(thread, &reminder).await {
+            Heeded::No => {}
+            Heeded::Snoozed(until) => {
+                tracing::info!(%thread, human = %reminder.to, %until, "holding the reminder back while snoozed");
+                return self.ledger.postpone_reminder(thread, until.timestamp_millis().max(now + 1)).await;
+            }
+            heeded => {
+                tracing::info!(%thread, human = %reminder.to, ?heeded, "the human heeded the escalation; no more reminders");
+                return self.ledger.end_reminder(thread).await;
+            }
+        }
         let Reminder { escalation, to, owner, creator, origin_thread, summary, since, sent, .. } = reminder;
         let (ant, stuck) = (&self.ant, &escalation.stuck);
         let waited = chrono::DateTime::from_timestamp_millis(since)
@@ -660,10 +690,28 @@ impl Escalator {
             .with_origin_thread(origin_thread)
             .with_escalation(Some(escalation));
         let human = notice.to.clone();
-        (self.send)(notice, format!("remind-{ant}-{thread}-{since}-{}", sent + 1)).await?;
-        self.ledger.reminded(thread, again.map(|after| now + millis(*after))).await?;
+        let seq = (self.send)(notice, format!("remind-{ant}-{thread}-{since}-{}", sent + 1)).await?;
+        self.ledger.reminded(thread, again.map(|after| now + millis(*after)), seq).await?;
         tracing::info!(%thread, %human, sent = sent + 1, "reminded of the escalation");
         Ok(())
+    }
+
+    /// What the human `reminder` is for did about the thread's escalation; [`Heeded::No`] without a way to look, or
+    /// when looking fails, so a reminder too many beats one missed.
+    async fn heeded(&self, thread: &ThreadId, reminder: &Reminder) -> Heeded {
+        let Some(heed) = &self.heed else { return Heeded::No };
+        let look = heed(reminder.to.clone(), thread.clone(), reminder.seqs.clone());
+        match tokio::time::timeout(HEED_WAIT, look).await {
+            Ok(Ok(heeded)) => heeded,
+            Ok(Err(e)) => {
+                tracing::warn!(%thread, error = format!("{e:#}"), "looking up what the human did; reminding");
+                Heeded::No
+            }
+            Err(_) => {
+                tracing::warn!(%thread, "no answer in time looking up what the human did; reminding");
+                Heeded::No
+            }
+        }
     }
 
     /// Send `escalation` to every ant of `to`, with `summary`. Another ant's escalation goes to it as well, first,
@@ -728,7 +776,8 @@ impl Escalator {
             return Ok((Escalated::Owner(human), why));
         }
         let notice = notice.with_escalation(Some(escalation.clone()));
-        if let Some(remind) = self.chain.remind.filter(|_| escalation.reason != EscalationReason::Approval) {
+        let remind = self.chain.remind.filter(|_| escalation.reason != EscalationReason::Approval);
+        if let Some(remind) = remind {
             let now = now_ms();
             let reminder = Reminder {
                 escalation: escalation.clone(),
@@ -740,13 +789,17 @@ impl Escalator {
                 since: now,
                 at: now + millis(remind),
                 sent: 0,
+                seqs: Vec::new(),
             };
             self.ledger.arm_reminder(&notice.thread_id, reminder).await?;
             self.deadline_set.notify_one();
         } else if escalation.reason != EscalationReason::Approval {
             self.ledger.reached_human(&notice.thread_id, human.clone()).await?;
         }
-        (self.send)(notice, stuck.id.clone()).await?;
+        let thread = notice.thread_id.clone();
+        if let Some(seq) = (self.send)(notice, stuck.id.clone()).await?.filter(|_| remind.is_some()) {
+            self.ledger.reached_at(&thread, seq).await?;
+        }
         Ok((Escalated::Owner(human), why))
     }
 
@@ -1199,7 +1252,7 @@ mod tests {
         let into = sent.clone();
         let send: Sender = Arc::new(move |envelope, _id| {
             into.lock().unwrap().push(envelope);
-            Box::pin(async { Ok(()) })
+            Box::pin(async { Ok(None) })
         });
         let colony: Colony = Arc::new(|| Box::pin(async { Ok(Vec::new()) }));
         let humans = Registry::with(UserId::human(), &["alice"]);
@@ -1222,6 +1275,50 @@ mod tests {
         assert_eq!(reminders.len(), 3);
         assert!(reminders[2].text.contains("This is the last reminder."), "{}", reminders[2].text);
         assert!(!reminders[1].text.contains("last reminder"), "{}", reminders[1].text);
+    }
+
+    #[tokio::test]
+    async fn a_snooze_holds_the_reminder_back_and_a_read_escalation_ends_them() {
+        let stored = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let next = stored.clone();
+        let send: Sender = Arc::new(move |_envelope, _id| {
+            let seq = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            Box::pin(async move { Ok(Some(seq)) })
+        });
+        let colony: Colony = Arc::new(|| Box::pin(async { Ok(Vec::new()) }));
+        let humans = Registry::with(UserId::human(), &["alice"]);
+        let ledger = Arc::new(Ledger::memory(p("dev-a"), crate::caps::Caps::default()));
+        let chain = Chain { remind: Some(Duration::from_millis(1)), ..Default::default() };
+        let until = chrono::Utc::now() + chrono::TimeDelta::hours(1);
+        let state = Arc::new(std::sync::Mutex::new((Heeded::Snoozed(until), Vec::new())));
+        let looked = state.clone();
+        let heed: Heed = Arc::new(move |human, _thread, seqs| {
+            let mut looked = looked.lock().unwrap();
+            assert_eq!(human, p("alice"));
+            looked.1.push(seqs);
+            let heeded = looked.0;
+            Box::pin(async move { Ok(heeded) })
+        });
+        let escalator = Escalator::new(p("dev-a"), chain, colony, humans, ledger, send).with_heed(heed);
+        let notice = Envelope::on_thread(t(), p("dev-a"), p("alice"), "stuck").with_owner(Some(p("alice")));
+        escalator.escalate(Stuck::new(EscalationReason::Cap, notice, "s-1".to_owned(), None)).await.unwrap();
+
+        let reminder = escalator.ledger.reminder(&t()).await.unwrap().unwrap();
+        escalator.remind(&t(), reminder.clone(), reminder.at).await.unwrap();
+        let held = escalator.ledger.reminder(&t()).await.unwrap().unwrap();
+        assert_eq!((held.at, held.sent), (until.timestamp_millis(), 0), "held back until the snooze ends, uncounted");
+        assert_eq!(stored.load(std::sync::atomic::Ordering::Relaxed), 1, "only the escalation went out");
+
+        state.lock().unwrap().0 = Heeded::No;
+        escalator.remind(&t(), held.clone(), held.at).await.unwrap();
+        state.lock().unwrap().0 = Heeded::Read;
+        let reminder = escalator.ledger.reminder(&t()).await.unwrap().unwrap();
+        escalator.remind(&t(), reminder.clone(), reminder.at).await.unwrap();
+        assert_eq!(escalator.ledger.reminder(&t()).await.unwrap(), None, "no more reminders");
+        assert_eq!(stored.load(std::sync::atomic::Ordering::Relaxed), 2, "one reminder went out");
+        assert_eq!(state.lock().unwrap().1, [vec![1], vec![1], vec![1, 2]], "checked against what reached alice");
+        let ended = escalator.ledger.reset(&t()).await.unwrap();
+        assert_eq!(ended.reached, Some(p("alice")), "still telling alice of another human's answer");
     }
 
     mod assistant_first {
@@ -1252,7 +1349,7 @@ mod tests {
             let into = sent.clone();
             let send: Sender = Arc::new(move |envelope, _id| {
                 into.lock().unwrap().push(envelope);
-                Box::pin(async { Ok(()) })
+                Box::pin(async { Ok(None) })
             });
             let colony: Colony = Arc::new(move || {
                 let colony = colony.clone();

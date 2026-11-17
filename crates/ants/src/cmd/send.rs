@@ -86,14 +86,44 @@ async fn addressee(js: &jetstream::Context, nats: &Nats<'_>, to: Option<UserId>)
 }
 
 /// Where `ants ask` or `ants post` sends: on the thread `thread` picks, else a new one, or replying to the message
-/// `reply_to` picks; for `ants ask`, on a new thread forwarding the message `forward` picks ([`forward`]).
+/// `reply_to` picks; for `ants ask`, on a new thread forwarding what `forward` picks ([`forward`]).
 #[derive(Default)]
 pub(crate) struct Target {
     pub thread: Option<thread::Pick>,
     pub reply_to: Option<thread::MessagePick>,
-    pub forward: Option<thread::MessagePick>,
+    pub forward: Option<Forwarding>,
     /// Wait behind the prompt running on the thread rather than interrupting it ([`Envelope::queue`]).
     pub queue: bool,
+}
+
+/// What `ants ask` forwards: a message, or a thread by its kept TL;DR.
+pub(crate) enum Forwarding {
+    Message(thread::MessagePick),
+    Thread(thread::Pick),
+}
+
+impl Forwarding {
+    /// The source picked, read as the CLI's human reads it, with `keyring` opening a sealed message.
+    async fn source(
+        self,
+        nats: &Nats<'_>,
+        js: &jetstream::Context,
+        keyring: Option<std::sync::Arc<sealed::Keyring>>,
+    ) -> Result<forward::Source> {
+        match self {
+            Self::Message(pick) => {
+                Ok(forward::Source::Message(Box::new(message(nats, js, pick, keyring, "forward").await?)))
+            }
+            Self::Thread(pick) => {
+                let thread = pick.resolve(nats, js).await?;
+                let tldr = crate::thread_meta::open(nats, js).await?.summary(&thread).await?;
+                let tldr = tldr.ok_or_else(|| {
+                    anyhow!("no TL;DR of thread {thread} is kept: `ants thread tldr {thread}` asks for one")
+                })?;
+                Ok(forward::Source::Thread(Box::new(tldr)))
+            }
+        }
+    }
 }
 
 impl Target {
@@ -179,10 +209,9 @@ pub(crate) async fn ask(
     let (client, js) = nats.connect("ants-cli").await?;
     let queue = target.queue;
     let forwarded = match forward {
-        Some(pick) => {
+        Some(forwarding) => {
             let keyring = sealed::Keyring::load(nats, &js).await.map(std::sync::Arc::new);
-            let source =
-                forward::Source::Message(Box::new(message(nats, &js, pick, keyring.clone(), "forward").await?));
+            let source = forwarding.source(nats, &js, keyring.clone()).await?;
             source.check()?;
             files = source.files(&js, keyring.as_deref(), files).await?;
             Some(source)

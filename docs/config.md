@@ -12,6 +12,7 @@ metrics = "127.0.0.1:9464"                 # serve /healthz and /metrics (defaul
 timezone = "America/New_York"              # default IANA time zone for schedule cron (default UTC)
 redact = true                              # redact secrets from daemon publications (default true)
 machine = "dev-vm1"                        # machine named in colony entries, notices and admin orders (default: host name)
+auto_update = "check"                      # "off" (default), "check" or "install" newer GitHub releases (docs/operations.md)
 
 [cli]                                      # CLI defaults when no flag or env var is set
 creds = "~/.config/ants/auth/alice.creds"  # human credentials (ant credentials are not used here)
@@ -123,7 +124,7 @@ allow = ["read:*", "execute:cargo test*"]
 - Added ants (and previously failed ants still listed) start; removed ants drain prompts in flight and return waiting messages for redelivery; ants whose resolved settings changed (including via top-level defaults, `[harnesses.NAME]`, or `[[ant_template]]`) drain and restart; unchanged ants continue uninterrupted (pool membership changes alone do not restart members, nor does `paused` alone: see [Pausing an ant](#pausing-an-ant)).
 - Added schedules start; removed schedules stop immediately; changed or stopped schedules restart.
 - The machine's record of its ants in `ants_machines` follows the ants listed; a changed `[host]` or `[admin]` table, top-level `machine` or host credentials file reconnects the host. With `[admin] remote = false`, the host refuses every admin order to the machine's ants, recording `this machine's config sets [admin] remote = false` as its outcome; otherwise an admin's `set` order (`ants ant set`) edits the ant's `[[ant]]` table, or the `[harnesses]` table, in place, comments kept, refused naming the field when the field no longer holds the value the order expects, or with the loader's error when the file would not load, and changing nothing then. Only a daemon serving the whole file (no `--ant`) runs the host, with the top-level `nats` and `js_domain`, else `--nats` and `--js-domain`.
-- Invalid reloads log an error and keep running the previous config. `metrics` and `[nats_server]` require a process restart (a changed `[nats_server]` table logs a warning).
+- Invalid reloads log an error and keep running the previous config. `metrics`, `auto_update` and `[nats_server]` require a process restart (a changed `[nats_server]` table logs a warning).
 
 ## Managed nats-server
 

@@ -596,7 +596,7 @@ fn client_config(roots: rustls::RootCertStore) -> Result<TlsConnector> {
 }
 
 /// `host:port` and the Proxy-Authorization of a CONNECT proxy URL.
-fn parse_proxy(proxy: &str) -> Result<(String, Option<String>)> {
+pub(crate) fn parse_proxy(proxy: &str) -> Result<(String, Option<String>)> {
     let rest =
         proxy.strip_prefix("http://").with_context(|| format!("--proxy {proxy:?}: expected http://host:port"))?;
     let authority = rest.trim_end_matches('/');
@@ -616,7 +616,7 @@ fn parse_proxy(proxy: &str) -> Result<(String, Option<String>)> {
 }
 
 /// Ask the proxy on `tcp` for a tunnel to `authority`.
-async fn tunnel(tcp: &mut TcpStream, authority: &str, auth: Option<&str>) -> Result<()> {
+pub(crate) async fn tunnel(tcp: &mut TcpStream, authority: &str, auth: Option<&str>) -> Result<()> {
     let mut head = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n");
     if let Some(auth) = auth {
         let _ = write!(head, "Proxy-Authorization: {auth}\r\n");

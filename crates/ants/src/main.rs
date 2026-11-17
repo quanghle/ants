@@ -65,6 +65,7 @@ mod thread;
 mod thread_meta;
 mod tools;
 mod tui;
+mod update;
 mod upgrade;
 mod versions;
 mod webhook;
@@ -93,6 +94,8 @@ async fn run() -> Result<()> {
         )
         .with_writer(progress::log_writer)
         .init();
+    #[cfg(windows)]
+    update::remove_old();
     cmd::run(defaults::parse()?).await
 }
 

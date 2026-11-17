@@ -178,7 +178,8 @@ pub const WEBHOOKS_BUCKET: &str = "ants_webhooks";
 pub const WEBHOOK_RETENTION: Duration = Duration::from_hours(7 * 24);
 /// KV bucket of each human's [`ReadMarker`], keyed by its user id: which inbox messages the human has read, on any
 /// of its devices; and of its [`ChannelReadMarkers`], keyed by [`channel_reads_key`]: which channel posts it has read.
-/// Each human reads and writes only its own keys ([`Permissions::for_user`]); entries never expire.
+/// Each human reads and writes only its own keys ([`Permissions::for_user`]); an ant's daemon reads a human's
+/// [`ReadMarker`] alone, by key, to stop reminding it of an escalation it read. Entries never expire.
 pub const READ_BUCKET: &str = "ants_read";
 /// KV bucket of where each human is reading: one [`Presence`] per device of a human following its inbox or the tool
 /// requests, keyed by [`presence_key`], put when the following starts, renewed every [`PRESENCE_HEARTBEAT`] and
@@ -199,7 +200,8 @@ pub const DEVICES_BUCKET: &str = "ants_devices";
 /// snooze and the muted threads, set with `ants notify` and `ants thread mute` on any of its devices and read by `ants
 /// webhook serve` before each notice; and of what a snooze or quiet hours held back from it ([`HeldNotices`]), keyed by
 /// [`held_key`], for the digest `ants webhook serve` sends when they end. Each human reads and writes only its own keys
-/// ([`Permissions::for_user`]); entries never expire, what they hold ends at the deadlines it carries.
+/// ([`Permissions::for_user`]); an ant's daemon reads a human's [`NotifyPrefs`] alone, by key, to stop reminding it of
+/// an escalation on a thread it muted. Entries never expire, what they hold ends at the deadlines it carries.
 pub const NOTIFY_BUCKET: &str = "ants_notify";
 /// KV bucket of the reactions to messages: one [`ReactionEntry`] per reactor, message and reaction, keyed by
 /// [`reaction_key`]. Each user writes, and deletes, only its own keys ([`Permissions::for_user`]), a human's devices sharing
@@ -220,7 +222,8 @@ pub const REACTIONS_WAIT: Duration = Duration::from_secs(10);
 /// ([`Reminders`], keyed by [`reminders_key`]), each shared by its devices and read and written by that human alone
 /// ([`Permissions::for_user`]), with the marks and snoozes its assistant sets for it under keys naming the assistant
 /// ([`assisted_marks_key`], [`assisted_reminders_key`]), and the TL;DR of each thread a human's CLI asked an ant for ([`ThreadSummary`], keyed
-/// by [`summary_key`]), which any human puts or deletes. Ants read and write none of it: a title an ant suggests
+/// by [`summary_key`]), which any human puts or deletes. Ants write none of it and read, by key, only titles, done
+/// states and a human's own reminders entry, the last two to stop reminding a human of an escalation: a title an ant suggests
 /// ([`Envelope::title`], [`ChannelPost::title`], [`NotesPost::title`]) and a TL;DR an ant replies with
 /// ([`Envelope::summary`]) get there through a human's CLI. Entries never expire.
 pub const THREADS_BUCKET: &str = "ants_threads";

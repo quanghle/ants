@@ -343,7 +343,8 @@ async fn an_assistant_takes_no_act_readers_could_not_tell_from_its_human_s() {
 }
 
 /// An assistant watches the team's traffic and keeps its own state as a human does, under its own name, and reads
-/// its human's read marker but never moves it, nor sends as anyone else.
+/// its human's read markers but never moves them, nor sends as anyone else. Of another human it reads only the inbox
+/// marker, as any ant does.
 #[tokio::test]
 async fn an_assistant_reads_its_human_s_marker_but_writes_only_its_own() {
     let Some(server) = Server::start() else { return };
@@ -365,7 +366,9 @@ async fn an_assistant_reads_its_human_s_marker_but_writes_only_its_own() {
     crate::inbox::ensure_bucket(&b_js).await.unwrap().put(bob.as_str(), marker("2").into()).await.unwrap();
     let pa_read = crate::inbox::ensure_bucket(&pa_js).await.unwrap();
     assert_eq!(pa_read.get(alice.as_str()).await.unwrap().unwrap(), marker("1"), "it reads its human's marker");
-    assert!(pa_read.get(bob.as_str()).await.is_err(), "and no other human's");
+    assert_eq!(pa_read.get(bob.as_str()).await.unwrap().unwrap(), marker("2"), "another's inbox marker, as an ant");
+    crate::inbox::ensure_bucket(&b_js).await.unwrap().put(format!("{bob}.chan"), marker("5").into()).await.unwrap();
+    assert!(pa_read.get(&format!("{bob}.chan")).await.is_err(), "but no other marker of another human");
     assert!(pa_read.put(alice.as_str(), marker("3").into()).await.is_err(), "nor moves it");
     pa_read.put(pa.as_str(), marker("4").into()).await.unwrap();
     assert_eq!(a_read.get(alice.as_str()).await.unwrap().unwrap(), marker("1"));
