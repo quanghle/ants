@@ -8,11 +8,12 @@ use std::sync::Arc;
 
 use ants_proto::UserId;
 use ants_proto::provider::{
-    BoxFuture, Brief, BriefRequest, Capabilities, Host, Info, InitializeParams, InitializeResult, PROTOCOL_VERSION,
-    Provider, RpcError, ToolCall, ToolList, ToolResult,
+    Ack, BoxFuture, Brief, BriefRequest, Capabilities, Event, Host, Info, InitializeParams, InitializeResult,
+    PROTOCOL_VERSION, Provider, RpcError, ToolCall, ToolList, ToolResult,
 };
 
 pub mod cache;
+pub mod identity;
 pub mod items;
 pub mod log;
 pub mod sanitize;
@@ -30,8 +31,8 @@ pub const NAME: &str = "sugar";
 /// The protocol versions sugar speaks.
 pub const VERSIONS: &[u32] = &[PROTOCOL_VERSION];
 
-/// What sugar implements: its tools and the brief.
-pub const CAPABILITIES: Capabilities = Capabilities { tools: true, context: true, ..Capabilities::NONE };
+/// What sugar implements: its tools, the brief and lifecycle events, which write each ant's card.
+pub const CAPABILITIES: Capabilities = Capabilities { tools: true, context: true, events: true, ..Capabilities::NONE };
 
 /// The built-in provider. One serves every ant of a daemon, each call naming its ant.
 #[derive(Default)]
@@ -54,7 +55,37 @@ impl Sugar {
     pub async fn items(&self, ant: &UserId) -> Result<Arc<dyn Items>, StoreError> {
         match &self.stores {
             Some(stores) => stores.items(ant).await,
-            None => Err(StoreError::Unavailable("sugar keeps no data here".into())),
+            None => Err(StoreError::NotKept("no stores".into())),
+        }
+    }
+
+    /// The identity card of `ant`; none before its first use of sugar.
+    pub async fn card(&self, ant: &UserId) -> Result<Option<identity::Card>, StoreError> {
+        identity::card(&*self.items(ant).await?).await
+    }
+
+    async fn record_event(&self, event: Event) -> Result<Ack, RpcError> {
+        if !identity::touches_card(&event.kind) {
+            return Ok(Ack {});
+        }
+        let recorded = match self.items(&event.ant).await {
+            Ok(items) => identity::record_event(&*items, &event).await.map(drop),
+            Err(e) => Err(e),
+        };
+        match recorded {
+            Ok(()) | Err(StoreError::NotKept(_)) => Ok(Ack {}),
+            Err(e) => Err(RpcError::unavailable(&e.to_string())),
+        }
+    }
+
+    async fn brief_for(&self, request: BriefRequest) -> Result<Brief, RpcError> {
+        let recorded = match self.items(&request.context.ant).await {
+            Ok(items) => identity::record_session(&*items, &request.context).await.map(drop),
+            Err(e) => Err(e),
+        };
+        match recorded {
+            Ok(()) | Err(StoreError::NotKept(_)) => Ok(Brief::default()),
+            Err(e) => Err(RpcError::unavailable(&e.to_string())),
         }
     }
 }
@@ -93,8 +124,12 @@ impl Provider for Sugar {
         })
     }
 
-    fn brief(&self, _request: BriefRequest) -> BoxFuture<'_, Result<Brief, RpcError>> {
-        ready(Ok(Brief::default()))
+    fn brief(&self, request: BriefRequest) -> BoxFuture<'_, Result<Brief, RpcError>> {
+        Box::pin(self.brief_for(request))
+    }
+
+    fn event(&self, event: Event) -> BoxFuture<'_, Result<Ack, RpcError>> {
+        Box::pin(self.record_event(event))
     }
 }
 
@@ -148,11 +183,11 @@ mod tests {
     }
 
     #[test]
-    fn sugar_agrees_on_its_tools_and_brief() {
+    fn sugar_agrees_on_its_tools_brief_and_events() {
         let sugar = connect();
         assert_eq!(sugar.name(), NAME);
-        assert!(sugar.has(Capability::Tools) && sugar.has(Capability::Context));
-        assert!(!sugar.has(Capability::Wake) && !sugar.has(Capability::Events));
+        assert!(sugar.has(Capability::Tools) && sugar.has(Capability::Context) && sugar.has(Capability::Events));
+        assert!(!sugar.has(Capability::Wake));
         let tools = ready(sugar.list_tools()).unwrap().tools;
         let names: Vec<_> = tools.iter().map(|tool| tool.name.as_str()).collect();
         assert_eq!(names, ["brief", "remember", "recall", "vote", "checkpoint", "handoff"]);

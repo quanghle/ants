@@ -11,9 +11,18 @@ use super::worktrees::{Tree, worktrees};
 use crate::clone::{Snapshot, ThreadCopy};
 
 /// What of a home a clone does not copy: its worktrees and history are made again, its answered and buried messages,
-/// its MCP endpoint and its lifecycle events ([`crate::provider::events`]) are its own.
-const NOT_COPIED: [&str; 7] =
-    ["worktrees", "history", "answered", "buried", "mcp.json", "mcp.sock", crate::provider::events::DIR];
+/// its MCP endpoint, its lifecycle events ([`crate::provider::events`]) and its sugar identity
+/// ([`ants_sugar::identity`]) are its own.
+const NOT_COPIED: [&str; 8] = [
+    "worktrees",
+    "history",
+    "answered",
+    "buried",
+    "mcp.json",
+    "mcp.sock",
+    crate::provider::events::DIR,
+    ants_sugar::log::SUGAR_DIR,
+];
 
 /// Copy the home of the ant cloned to the clone's, with the history of each thread of `snapshot`, and add its
 /// worktrees again for `new`: the worktrees, and the branches added.

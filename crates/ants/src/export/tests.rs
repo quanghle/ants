@@ -58,6 +58,9 @@ fn an_export_packs_the_home_s_memories_and_leaves_out_its_work() {
         ("tasks.db", "db"),
         ("tasks.db-wal", "wal"),
         ("tasks.dbx", "not the db"),
+        (".sugar/id", "01J0000000000000000000000"),
+        (".sugar/cache.db", "cache"),
+        (".sugar/chain.json", "chain"),
     ] {
         write(&home.join(path), text);
     }
@@ -69,7 +72,7 @@ fn an_export_packs_the_home_s_memories_and_leaves_out_its_work() {
     assert_eq!(harness, [PathBuf::from(".claude/CLAUDE.md"), PathBuf::from("CLAUDE.md")]);
     let core = core_files_of(&ant, &home, &harness).unwrap();
     let core: Vec<&str> = core.iter().map(|p| p.to_str().unwrap()).collect();
-    assert_eq!(core, ["memory/deep/fact.md", "notes.md", "tasks.dbx"]);
+    assert_eq!(core, [".sugar/id", "memory/deep/fact.md", "notes.md", "tasks.dbx"]);
     assert!(harness_files_of(None, &home).is_empty());
     assert!(core_files_of(&ant, &dir.join("none"), &[]).unwrap().is_empty(), "no home, no files");
 
@@ -78,7 +81,7 @@ fn an_export_packs_the_home_s_memories_and_leaves_out_its_work() {
     let restored = dir.join("restored");
     assert_eq!(restore(&restored, &export.files, false).unwrap(), [".claude/CLAUDE.md", "CLAUDE.md"]);
     let files = tree(&restored);
-    assert_eq!(files.keys().collect::<Vec<_>>(), ["memory/deep/fact.md", "notes.md", "tasks.dbx"]);
+    assert_eq!(files.keys().collect::<Vec<_>>(), [".sugar/id", "memory/deep/fact.md", "notes.md", "tasks.dbx"]);
     assert_eq!(files["memory/deep/fact.md"], "deep");
 
     let outside = Packed { path: "../escape".to_owned(), kind: Kind::Core, data: BASE64.encode(b"x") };

@@ -138,7 +138,7 @@ Per-ant prompt instructions and state isolation:
 
 ## Providers
 
-An ant's provider holds its identity, memories and work. Every ant has built-in sugar (crate `ants-sugar`), run inside the daemon: one `Sugar` serves all the ants of a daemon process, each call naming its ant. The daemon connects it on first use and hands it to each ant's MCP server, which serves its tools to every session of the ant ([MCP tools](#mcp-tools)); no harness needs configuring for them. The daemon also asks it for briefs.
+An ant's provider holds its identity, memories and work. Every ant has built-in sugar (crate `ants-sugar`), run inside the daemon: one `Sugar` serves all the ants of a daemon process, each call naming its ant. The daemon connects it on first use and hands it to each ant's MCP server, which serves its tools to every session of the ant ([MCP tools](#mcp-tools)); no harness needs configuring for them. The daemon also asks it for briefs and sends it lifecycle events.
 
 Built-in sugar implements the same interface (`ants_proto::provider::Provider`) that an external provider serves over the provider protocol, so switching an ant between providers changes nothing else in ants. A provider never reads an ant's messages, prompts or replies. It sees only:
 
@@ -152,7 +152,25 @@ Sugar asks nothing of humans: no approvals, gates, review queues or notification
 
 Sugar's data are items: memories, the identity card, checkpoints and the like. Each item has an id (a ULID the writer mints), a kind, a revision (1 on creation, one more on each change) and JSON values, of which `title` and `body` are searched. Each change is an event of kind `item` in the ant's sugar log ([Stores and subjects](#stores-and-subjects)), with data `{id, kind, revision, by, before, after}`: the changed values as they were (`before`, absent on creation, null for a value not set) and as they became (`after`, null for a value removed). An item's state at a past time is rebuilt from its kept changes: those before the first change stamped after that time, in log order, so a writer's clock stepping back never mixes later changes in. A change given an expected revision is refused when the item is at another, with the current item. A change is decided on the items caught up with the log; when another writer appended first, the log refuses the append (expected last sequence) and the change is decided again on what that writer appended. An event whose revision does not follow the item's last changes nothing, for every reader alike.
 
-Each ant's items are cached in SQLite in the ant's home (`.sugar/cache.db`; bundled SQLite with FTS5, a 512 KiB page cache, no memory mapping): the items, their changes, an FTS5 index over titles and bodies (BM25, a title's words weighing more, Porter stemming; search text is taken as words only, never as FTS5 syntax), and what the cache was built from: the sugar id, the stream's incarnation, and the sequence, hash, verified count and first break of the last message read. The cache is never the source of truth: a change is appended to the log first, then applied to the cache with that position in one transaction. On opening, a cache that is missing, unreadable, corrupt, of another schema, sugar identity or incarnation, or whose last message the log no longer holds unchanged is emptied and built again from the log, a batch at a time; otherwise only the messages past it are read and verified. Sugar reaches an ant's items through the stores the daemon hands it (`Sugar::with_stores`); the daemon hands none yet, so no cache is opened.
+Each ant's items are cached in SQLite in the ant's home (`.sugar/cache.db`; bundled SQLite with FTS5, a 512 KiB page cache, no memory mapping): the items, their changes, an FTS5 index over titles and bodies (BM25, a title's words weighing more, Porter stemming; search text is taken as words only, never as FTS5 syntax), and what the cache was built from: the sugar id, the stream's incarnation, and the sequence, hash, verified count and first break of the last message read. The cache is never the source of truth: a change is appended to the log first, then applied to the cache with that position in one transaction. On opening, a cache that is missing, unreadable, corrupt, of another schema, sugar identity or incarnation, or whose last message the log no longer holds unchanged is emptied and built again from the log, a batch at a time; otherwise only the messages past it are read and verified. Sugar reaches an ant's items through the stores the daemon hands it (`Sugar::with_stores`). The daemon opens an ant's items on their first use, never at start: it reads the ant's sugar id from its home, minting it first ([Sugar identity](#sugar-identity)), and opens the log over the machine's host connection and the cache in the home, then keeps them open while the process runs, opening them again over a new host connection. Without a host connection (no host credentials, or ones that fail) sugar keeps no data: its events are acked with no effect and its briefs are empty. While the host connection is not up yet, an ant's items are unavailable: its events wait in its queue and its briefs fail.
+
+### Sugar identity
+
+Each ant's sugar identity has an id, a ULID minted when the ant first uses sugar, kept in its home (`.sugar/id`, written whole) and on its card. The id stays the same across renames, harness and model changes, moves to other machines and buses (an export carries `.sugar/id`, though not the cache or `.sugar/chain.json`), retirement and revival. A clone leaves `.sugar` out of the home it copies, so the clone mints its own id.
+
+The identity card is the ant's item of kind `card`, written by sugar alone (stamped `sugar`); no tool writes it. Its revisions are its history. It holds:
+
+- `sugar`, the id; `name`, the current name, and `earlier_names`;
+- `identity`, the current ants identity id, and `identities`, every one linked to it, in the order they were;
+- `born`: the time of the event that made the card (its addition or cloning), else of its first brief;
+- `harnesses`, `models` and `machines` its sessions ran under, from the context of each brief at a session's start;
+- `cloned_from` (`{ant, identity}`), from `ant_cloned`;
+- `active`, false from `ant_retired` (`retired_at`) to `ant_revived`, or to an `ant_added` under another identity id;
+- `returned_at`: set by an `ant_added` under an identity id other than those linked, as after a revoke and re-add, which links the new id and marks the ant active again; it stays until the brief tells the ant;
+- `moved_at`, from `ant_moved`;
+- `events`, the ids of the last 16 lifecycle events applied, so a repeat changes nothing.
+
+Thread and session events change nothing on the card; sugar acks them at once.
 
 ### Sugar resume registers and handoffs
 
@@ -182,7 +200,7 @@ The provider answers with:
 - `provider`: `{name, version}`;
 - `capabilities`: what it implements.
 
-Without a common version, the provider answers with error `-32002`. Both sides then use only the capabilities both declared. ants declares every capability, `wake` included. Sugar declares `tools` and `context`.
+Without a common version, the provider answers with error `-32002`. Both sides then use only the capabilities both declared. ants declares every capability, `wake` included. Sugar declares `tools`, `context` and `events`.
 
 | Method | Direction | Capability | Params | Result |
 |---|---|---|---|---|
@@ -202,7 +220,7 @@ Tools:
 - ants serves each tool as `<provider>_<tool>` (`sugar_recall`), adding a boolean `json` argument to its schema. `json: true` sets the call's `format` to `json`; otherwise the answer comes as brief text.
 - The ants MCP server asks the provider for its tools at each `tools/list` (5 s bound), so a session listing them again sees a provider's tools come and go. A failing list leaves the provider's tools out and ants' own in place. A tool whose name is invalid, whose schema is not an object, or whose served name is one of ants' own tools is left out, logged once.
 - A call answers within 30 s. One that does not reach the tool (the provider down or the capability not agreed), times out, or has no context yet (no message on the thread handled since the daemon started, or the ant's identity record absent or unreadable) fails with an `[ants]` line saying why. A refusal (`is_error`) fails with the provider's text; a `json` answer comes as structured content beside its JSON text.
-- Sugar serves at most 12 tools. It declares `brief`, `remember`, `recall`, `vote`, `checkpoint` and `handoff`. `checkpoint` and `handoff` work as [Sugar resume registers and handoffs](#sugar-resume-registers-and-handoffs) describes; the others answer `sugar_<tool> is not available yet.` with `is_error` for now, and its briefs are empty.
+- Sugar serves at most 12 tools. It declares `brief`, `remember`, `recall`, `vote`, `checkpoint` and `handoff`. `checkpoint` and `handoff` work as [Sugar resume registers and handoffs](#sugar-resume-registers-and-handoffs) describes; the others answer `sugar_<tool> is not available yet.` with `is_error` for now, and its briefs are empty; each brief notes the session's harness, model and machine on the ant's card.
 
 Calls and events:
 
@@ -259,7 +277,7 @@ The message.
 
 ### Lifecycle events
 
-ants sends an ant's provider its lifecycle events only when both declared `events` at initialize; sugar does not yet, so with sugar no event is queued. Each event carries the ant, the id of its identity record, the thread when there is one and the time, never a message, prompt or reply.
+ants sends an ant's provider its lifecycle events only when both declared `events` at initialize, as sugar does: it writes them on the ant's card ([Sugar identity](#sugar-identity)). Each event carries the ant, the id of its identity record, the thread when there is one and the time, never a message, prompt or reply.
 
 | Kind | Sent when |
 |---|---|
@@ -278,7 +296,7 @@ Delivery:
 - The daemon queues each event in the ant's home, `<home>/lifecycle/events.jsonl`, one JSON event per line, appended and synced before the event counts as sent. The file is rewritten without an event once the provider acked it, and removed when empty. Past 1,000 events, the oldest are dropped with a warning.
 - One task per daemon process delivers every ant's queue, one event in flight per ant, in queue order, waiting 30 s for each ack. While the provider is not connected or fails, the event is sent again, with the same `id`, after a backoff doubling from 1 s to 5 min. A provider answering `-32001` (events not agreed) gets none of the ant's queued events.
 - A daemon starting picks up the events left in the home's queue. `lifecycle/identity` holds the identity id last told as added, and events a crash could repeat carry ids derived from what they tell (the ant and its identity, the thread and its first message), so the provider can drop the repeats.
-- Clones and exports leave `lifecycle` out of the home they copy.
+- Clones and exports leave `lifecycle` out of the home they copy; clones leave `.sugar` out too, exports keep only `.sugar/id` of it.
 
 ### Wake requests
 

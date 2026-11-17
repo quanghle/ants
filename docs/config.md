@@ -254,7 +254,7 @@ An admin's `ants ant clone SRC NEW [settings]` has the daemon serving SRC start 
 
 - **Table:** SRC's `[[ant]]` table (for an ant added from a template, the settings the template gave it, so NEW's table stands alone), below the comment `# cloned from SRC by <admin>'s order <id>`, without `name`, `creds`, `paused`, `added_by`, `template`, `builtin`, `home` and `allow_sets`, with SRC's [shared settings](#shared-settings), where the hub keeps them, in place of its table's, and the settings flags of `ants add` over it; its whoami, memory, tasks, harness, model, permissions and escalation chain are SRC's unless given. A workdir in SRC's home moves into NEW's.
 - **Shared settings:** where the hub keeps them, a record of NEW's own (`NEW.settings`), written before its table, in place of any left from an earlier ant of the name: SRC's with the order's settings over them, so NEW's table and record agree and no drift shows.
-- **Home:** a copy of SRC's (`--home`, default `~/.ants/NEW`; it must be empty), memory files, task DB and repositories included, but not `worktrees`, `answered`, `buried`, `lifecycle` and the MCP config and socket. The clone's provider is told `ant_cloned` ([architecture.md](architecture.md#lifecycle-events)).
+- **Home:** a copy of SRC's (`--home`, default `~/.ants/NEW`; it must be empty), memory files, task DB and repositories included, but not `worktrees`, `answered`, `buried`, `lifecycle`, `.sugar` (the clone mints its own sugar id) and the MCP config and socket. The clone's provider is told `ant_cloned` ([architecture.md](architecture.md#lifecycle-events)).
 - **Threads:** each thread SRC holds a session of, with its worktree, if any, at `<home>/worktrees/<thread>` on branch `ants/NEW/<thread>` from SRC's commit, SRC's uncommitted changes and untracked files on it. Its session is a fork of SRC's when the harness offers ACP `session/fork`; otherwise NEW's first prompt on the thread starts a new session seeded from the thread's history, as after a failed `session/load` ([Lost sessions](#lost-sessions-and-context-window)), its notice saying the session could not be forked.
 - **History:** what SRC had on each thread, kept in `<home>/history/<thread>.jsonl`; NEW reads a thread's history back with this copy first, then what came to it after.
 
@@ -650,7 +650,8 @@ The file is `{"ants_ant": 1, "created_at", "bus", "identity", "settings", "files
   stores the provider's export in `ants_files` (at most 64 MiB), where the export reads it. A provider failing fails
   the export, naming `--no-provider`.
 
-Left out: the home's `worktrees`, `answered`, `buried`, `mcp.json`, `mcp.sock`, `lifecycle`, `.git`, `.beads` and `.bd`, the task
+Left out: the home's `worktrees`, `answered`, `buried`, `mcp.json`, `mcp.sock`, `lifecycle`, `.git`, `.beads` and `.bd`, the
+files of `.sugar` but the sugar id (`.sugar/id`, which the ant keeps on its new bus; its cache and chain status are not), the task
 database `BD_DB` names when it lies in the home, the rest of the ant's settings (its role on the bus: `capabilities`,
 `escalate_to`, `allow`, `memory`, `tasks`; its machine's: `workdir`, `env`, caps and limits), its credentials,
 sessions, threads and history. A templated ant imports as a plain `[[ant]]`.

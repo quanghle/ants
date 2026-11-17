@@ -283,7 +283,7 @@ impl Stores for Memory {
 #[tokio::test]
 async fn sugar_reaches_an_ant_s_items_through_the_stores_it_is_given() {
     let none = crate::Sugar::new().items(&dev_a()).await.err().unwrap();
-    assert!(matches!(none, StoreError::Unavailable(_)), "{none:?}");
+    assert!(matches!(none, StoreError::NotKept(_)), "{none:?}");
     let sugar = crate::Sugar::with_stores(Arc::new(Memory));
     let items = sugar.items(&dev_a()).await.unwrap();
     let item = items.create("note", note("one"), "t").await.unwrap();

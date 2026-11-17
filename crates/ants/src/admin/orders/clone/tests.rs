@@ -65,6 +65,7 @@ async fn a_clone_order_copies_an_ant_under_a_new_name_and_undoes_a_failed_one() 
     std::fs::create_dir_all(home_a.join("answered")).unwrap();
     std::fs::write(home_a.join("memory").join("core.md"), "the build runs with cargo\n").unwrap();
     std::fs::write(home_a.join("answered").join("x"), "").unwrap();
+    ants_sugar::identity::sugar_id(&home_a).unwrap();
 
     let (_, a_js) = server.connect_as(&dev_a, Role::Ant).await;
     let asked = Envelope::new(bob.clone(), dev_a.clone(), "port the parser");
@@ -155,6 +156,7 @@ async fn a_clone_order_copies_an_ant_under_a_new_name_and_undoes_a_failed_one() 
         let core = std::fs::read_to_string(home_c.join("memory").join("core.md")).unwrap();
         assert_eq!(core, "the build runs with cargo\n");
         assert!(!home_c.join("answered").exists(), "answered messages stay dev-a's");
+        assert!(!home_c.join(".sugar").exists(), "the clone's sugar identity is its own");
         let history = std::fs::read_to_string(home_c.join("history").join(format!("{talked}.jsonl"))).unwrap();
         assert!(history.contains("port the parser") && history.contains("\"cloned_from\""), "{history}");
         let copy = home_c.join("worktrees").join(worked.as_str());

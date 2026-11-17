@@ -48,7 +48,8 @@ const MAX_BYTES: u64 = 64 << 20;
 const PACK_WAIT: Duration = Duration::from_mins(2);
 const PACK_POLL: Duration = Duration::from_secs(1);
 /// What of an ant's home is not its memory, relative to the home: its worktrees, the daemon's delivery notes, MCP state
-/// and lifecycle events, a git repository's history and a bd task database.
+/// and lifecycle events, a git repository's history and a bd task database. sugar's files but its id are left out too
+/// ([`sugar_left_out`]).
 const LEFT_OUT: [&str; 9] = [
     "worktrees",
     "answered",
@@ -183,7 +184,7 @@ pub fn core_files_of(ant: &Ant, home: &Path, harness: &[PathBuf]) -> Result<Vec<
         for entry in entries {
             let entry = entry?;
             let rel = dir.join(entry.file_name());
-            let left_out = dir.as_os_str().is_empty() && LEFT_OUT.iter().any(|left| rel == Path::new(left));
+            let left_out = LEFT_OUT.iter().any(|left| rel == Path::new(left)) || sugar_left_out(&rel);
             if left_out || task_db.contains(&rel) {
                 continue;
             }
@@ -197,6 +198,13 @@ pub fn core_files_of(ant: &Ant, home: &Path, harness: &[PathBuf]) -> Result<Vec<
     }
     files.sort();
     Ok(files)
+}
+
+/// Whether `rel`, relative to the home, is of sugar's files left out: all but the sugar id, which the ant keeps wherever
+/// it goes ([`ants_sugar::identity`]); the cache and chain status are of the log on this machine's bus.
+fn sugar_left_out(rel: &Path) -> bool {
+    let sugar = Path::new(ants_sugar::log::SUGAR_DIR);
+    rel.parent() == Some(sugar) && rel != sugar.join(ants_sugar::identity::ID_FILE)
 }
 
 /// The files `paths` of the home `home`, read, as `kind`.

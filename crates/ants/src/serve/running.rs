@@ -110,9 +110,10 @@ impl HostRun {
         }
         let (sender, receiver) = watch::channel(ants);
         let started = wanted.clone();
+        let sugar = ants_daemon::provider::sugar::stores().hosting();
         let task = tokio::spawn(
             async move {
-                if let Err(e) = Box::pin(host::run(started, receiver)).await {
+                if let Err(e) = Box::pin(host::run_keeping(started, receiver, Some(sugar))).await {
                     tracing::error!(error = format!("{e:#}"), "host connection stopped");
                 }
             }

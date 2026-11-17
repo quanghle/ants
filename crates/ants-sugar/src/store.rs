@@ -3,8 +3,8 @@
 
 use std::sync::Arc;
 
-use ants_proto::UserId;
 use ants_proto::provider::BoxFuture;
+use ants_proto::{SugarId, UserId};
 use chrono::{DateTime, Utc};
 
 use crate::cache::{Cache, CacheError, Hit};
@@ -21,6 +21,9 @@ pub enum StoreError {
     Conflict { expected: u64, current: Box<Item> },
     #[error("sugar's data is not available: {0}")]
     Unavailable(String),
+    /// sugar keeps no data of the ant here, as no daemon connection reaches its log: nothing is to be written.
+    #[error("sugar keeps no data here: {0}")]
+    NotKept(String),
     #[error("the log: {0}")]
     Log(#[from] LogError),
     #[error("the cache: {0}")]
@@ -83,6 +86,20 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
     pub async fn create(&mut self, kind: &str, values: Values, by: &str) -> Result<Item, StoreError> {
         let change = Change::create(kind, values, by);
         self.commit(|_| Ok(Ok(change.clone()))).await
+    }
+
+    /// The item of `kind`, created with `values` for `by` when there is none, with whether it was: for kinds of which
+    /// an ant has one, such as its card. Two writers creating it at once create one, the second finding the first's.
+    pub async fn single(&mut self, kind: &str, values: Values, by: &str) -> Result<(Item, bool), StoreError> {
+        let change = Change::create(kind, values, by);
+        let item = self
+            .commit(|cache| match cache.list(kind, 1)?.pop() {
+                Some(item) => Ok(Err(item)),
+                None => Ok(Ok(change.clone())),
+            })
+            .await?;
+        let created = item.id == change.id;
+        Ok((item, created))
     }
 
     /// Set `values` of item `id`, null removing one, for `by`: refused when `expected` is given and the item is at
@@ -190,7 +207,7 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
         Err(StoreError::Unavailable(format!("other writers kept appending to sugar identity {}", self.sugar())))
     }
 
-    fn sugar(&self) -> &ants_proto::SugarId {
+    fn sugar(&self) -> &SugarId {
         self.log.chain().sugar()
     }
 
@@ -224,6 +241,13 @@ async fn holds(log: &impl EventLog, built: &crate::cache::Built) -> Result<bool,
 pub trait Items: Send + Sync {
     /// [`Store::create`].
     fn create<'a>(&'a self, kind: &'a str, values: Values, by: &'a str) -> BoxFuture<'a, Result<Item, StoreError>>;
+    /// [`Store::single`].
+    fn single<'a>(
+        &'a self,
+        kind: &'a str,
+        values: Values,
+        by: &'a str,
+    ) -> BoxFuture<'a, Result<(Item, bool), StoreError>>;
     /// [`Store::change`].
     fn change<'a>(
         &'a self,
@@ -265,6 +289,8 @@ pub trait Items: Send + Sync {
     fn at<'a>(&'a self, id: &'a ItemId, at: DateTime<Utc>) -> BoxFuture<'a, Result<Option<Item>, StoreError>>;
     /// [`Store::sync`].
     fn sync(&self) -> BoxFuture<'_, Result<(), StoreError>>;
+    /// The sugar identity whose items these are.
+    fn sugar(&self) -> BoxFuture<'_, SugarId>;
 }
 
 impl<L, S, V> Items for tokio::sync::Mutex<Store<L, S, V>>
@@ -275,6 +301,15 @@ where
 {
     fn create<'a>(&'a self, kind: &'a str, values: Values, by: &'a str) -> BoxFuture<'a, Result<Item, StoreError>> {
         Box::pin(async move { self.lock().await.create(kind, values, by).await })
+    }
+
+    fn single<'a>(
+        &'a self,
+        kind: &'a str,
+        values: Values,
+        by: &'a str,
+    ) -> BoxFuture<'a, Result<(Item, bool), StoreError>> {
+        Box::pin(async move { self.lock().await.single(kind, values, by).await })
     }
 
     fn change<'a>(
@@ -335,6 +370,10 @@ where
 
     fn sync(&self) -> BoxFuture<'_, Result<(), StoreError>> {
         Box::pin(async move { self.lock().await.sync().await })
+    }
+
+    fn sugar(&self) -> BoxFuture<'_, SugarId> {
+        Box::pin(async move { self.lock().await.sugar().clone() })
     }
 }
 
