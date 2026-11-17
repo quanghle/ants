@@ -179,6 +179,16 @@ async fn a_revival_puts_off_the_expiry_of_the_reminders_paused() {
 }
 
 #[tokio::test]
+async fn a_retirement_of_a_dormant_ant_keeps_the_start_of_its_dormancy() {
+    let items = fresh().await;
+    record_event(&*items, &event("dev-a", "id1", "10:00:00", EventKind::AntRetired)).await.unwrap();
+    let card = record_event(&*items, &event("dev-a", "id1", "11:00:00", EventKind::AntRetired)).await.unwrap();
+    assert_eq!(card.retired_at, Some(at("10:00:00")));
+    let card = record_event(&*items, &event("dev-a", "id1", "12:00:00", EventKind::AntRevived)).await.unwrap();
+    assert_eq!(card.dormancies, [Dormancy { from: at("10:00:00"), to: at("12:00:00") }]);
+}
+
+#[tokio::test]
 async fn an_event_delivered_again_changes_nothing() {
     let items = fresh().await;
     let retired = event("dev-a", "id1", "10:00:00", EventKind::AntRetired);

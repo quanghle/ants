@@ -282,7 +282,10 @@ impl Card {
             EventKind::AntCloned { from, from_identity } => {
                 self.cloned_from = Some(ClonedFrom { ant: from.clone(), identity: from_identity.clone() });
             }
-            EventKind::AntRetired => (self.active, self.retired_at, self.returned_at) = (false, Some(event.at), None),
+            EventKind::AntRetired if self.active => {
+                (self.active, self.retired_at, self.returned_at) = (false, Some(event.at), None);
+            }
+            EventKind::AntRetired => {}
             EventKind::AntRevived if !self.active => self.wake(event.at),
             EventKind::AntRevived => {}
             _ => return,
