@@ -50,6 +50,7 @@ pub(crate) use io::{JsonLines, JsonWriter, Process};
 pub(crate) use rpc::RpcError;
 pub(crate) use rpc::{Incoming, Rpc};
 
+use super::mcp_sign_in::Report;
 use super::{Harness, ModelSettings, SteerRequest, SteerResponse, advertise_steering};
 use crate::sync::MutexExt as _;
 
@@ -143,10 +144,16 @@ pub(crate) fn validate(harness: &Harness) -> anyhow::Result<()> {
 
 /// What the daemon's ACP client connects to for `harness`, with the ant's `env` and `settings`: the harness process
 /// itself for ACP, else an in-process ACP agent that starts the CLI and translates its protocol.
-pub(crate) fn agent(harness: &Harness, env: &[(String, String)], settings: &ModelSettings) -> DynConnectTo<Client> {
+/// The sessions of a native CLI report their sign-ins to MCP servers to `report`, if any.
+pub(crate) fn agent(
+    harness: &Harness,
+    env: &[(String, String)],
+    settings: &ModelSettings,
+    report: Option<Report>,
+) -> DynConnectTo<Client> {
     match registration(harness.protocol) {
         Ok(None) => DynConnectTo::new(AcpAgent::new(harness.process(env, settings))),
-        Ok(Some(registration)) => (registration.connect)(Cli::new(harness, env, settings)),
+        Ok(Some(registration)) => (registration.connect)(Cli { report, ..Cli::new(harness, env, settings) }),
         Err(e) => refusing(format!("harness {harness}: {e}")),
     }
 }
@@ -178,7 +185,7 @@ fn open_host<N: Native>(
     Box::pin(async move {
         let native = N::start(cli).await?;
         let mcp_servers = servers(native.info().http_mcp);
-        let session = native.new_session(Open { cwd, mcp_servers }).await?;
+        let session = native.new_session(Open { cwd, mcp_servers, sign_ins: None }).await?;
         Ok(Box::new(Host { _native: native, session }) as Box<dyn McpHost>)
     })
 }
@@ -237,6 +244,8 @@ pub(crate) struct Cli {
     /// The ant's model, with the suffix its `context` selects.
     model: Option<String>,
     effort: Option<String>,
+    /// Where its sessions serving a thread report their sign-ins to MCP servers.
+    report: Option<Report>,
 }
 
 impl Cli {
@@ -248,6 +257,7 @@ impl Cli {
             env: harness.launch_env(env),
             model: settings.model_id(harness),
             effort: settings.reasoning_effort.clone(),
+            report: None,
         }
     }
 
@@ -281,6 +291,16 @@ impl Cli {
     /// The definition's `mode`: for a native protocol, the CLI's own permission mode.
     pub(crate) fn mode(&self) -> Option<&str> {
         self.harness.mode.as_deref()
+    }
+
+    /// The definition's `mcp_sign_in`: the MCP servers a session serving a thread signs in to as they need it.
+    pub(crate) fn mcp_sign_in(&self) -> &[String] {
+        &self.harness.mcp_sign_in
+    }
+
+    /// The definition's `entra_client_id`: the Microsoft Entra app registration for MCP servers signing in through Entra.
+    pub(crate) fn entra_client_id(&self) -> Option<&str> {
+        self.harness.entra_client_id.as_deref()
     }
 
     /// The model the ant runs, if it sets one, its `context`'s suffix included.
@@ -317,6 +337,10 @@ pub(crate) struct Info {
 pub(crate) struct Open {
     pub cwd: PathBuf,
     pub mcp_servers: Vec<McpServer>,
+    /// Where it reports its sign-ins to the definition's `mcp_sign_in` servers, signing in to them only then: a session
+    /// serving a thread, not one opened to read them ([`mcp_host`]), to probe the harness or to fork (the session/load
+    /// following it signs in).
+    pub sign_ins: Option<Report>,
 }
 
 /// A setting the daemon selects on a session.
@@ -817,14 +841,14 @@ impl<N: Native> Translator<N> {
     }
 
     async fn new_session(self: Arc<Self>, request: NewSessionRequest) -> Result<NewSessionResponse, Error> {
-        let open = Open { cwd: request.cwd, mcp_servers: request.mcp_servers };
+        let open = Open { cwd: request.cwd, mcp_servers: request.mcp_servers, sign_ins: self.cli.report.clone() };
         let session = self.opening()?.new_session(open).await?;
         let (id, modes, options) = self.opened(SessionId::new(session.id()), session);
         Ok(NewSessionResponse::new(id).modes(modes).config_options(options))
     }
 
     async fn load_session(self: Arc<Self>, request: LoadSessionRequest) -> Result<LoadSessionResponse, Error> {
-        let open = Open { cwd: request.cwd, mcp_servers: request.mcp_servers };
+        let open = Open { cwd: request.cwd, mcp_servers: request.mcp_servers, sign_ins: self.cli.report.clone() };
         let session = self.opening()?.load_session(&request.session_id.0, open).await?;
         let (_, modes, options) = self.opened(request.session_id, session);
         Ok(LoadSessionResponse::new().modes(modes).config_options(options))
@@ -835,7 +859,7 @@ impl<N: Native> Translator<N> {
         if !native.info().fork {
             return Err(unsupported("session/fork"));
         }
-        let open = Open { cwd: request.cwd, mcp_servers: request.mcp_servers };
+        let open = Open { cwd: request.cwd, mcp_servers: request.mcp_servers, sign_ins: None };
         let session = native.fork_session(&request.session_id.0, open).await?;
         let (id, modes, options) = self.opened(SessionId::new(session.id()), session);
         Ok(ForkSessionResponse::new(id).modes(modes).config_options(options))

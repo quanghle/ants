@@ -196,7 +196,7 @@ impl Inbox<'_> {
         } else {
             let flush =
                 tokio::time::interval_at(tokio::time::Instant::now() + status::FLUSH_EVERY, status::FLUSH_EVERY);
-            let ran = self.run_prompt(incoming, msg, seq, text, flush).await;
+            let ran = Box::pin(self.run_prompt(incoming, msg, seq, text, flush)).await;
             if !ran.joined.is_empty() {
                 return self.hand_on(incoming, own, ran, msg, seq, cut_off).await;
             }
@@ -650,7 +650,7 @@ impl Inbox<'_> {
         if let Some(i) = fallback {
             tracing::info!(%thread, fallback = self.pool.fallbacks().get(i).map(String::as_str), "prompting a fallback");
         }
-        let prompt = self.pool.run_on(thread, prompt, fallback);
+        let prompt = self.telling_mcp_sign_ins(incoming, self.pool.run_on(thread, prompt, fallback));
         tokio::pin!(prompt);
         let mut progress = self.progress();
         // Whether a tool call started, so tools may have run; streamed text, such as a harness's error, runs nothing.

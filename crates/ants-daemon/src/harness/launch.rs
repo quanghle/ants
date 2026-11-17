@@ -12,7 +12,8 @@ use ants_proto::ThreadId;
 
 #[cfg(test)]
 use super::Protocol;
-use super::{Harness, ModelSettings};
+use super::mcp_sign_in::Report;
+use super::{Harness, McpSignIns, ModelSettings};
 use crate::permission::PermissionPolicy;
 
 /// Makes the transport to a fresh harness: a process, or an in-process agent in tests.
@@ -54,6 +55,8 @@ pub struct Launch {
     /// The thread the sessions serve, so a permission request can be escalated on it.
     pub(super) thread: Option<ThreadId>,
     pub(super) mcp: Option<McpServers>,
+    /// Where the sign-ins to MCP servers of the thread's sessions go.
+    pub(super) mcp_sign_ins: Option<McpSignIns>,
     pub(super) instructions: String,
     /// The environment the harness process gets over the daemon's, to find its executable; None for an in-process
     /// agent.
@@ -69,8 +72,7 @@ impl Launch {
         policy: PermissionPolicy,
         settings: ModelSettings,
     ) -> Self {
-        let (process, process_settings, process_env) = (harness.clone(), settings.clone(), env.clone());
-        let connect: Connector = Arc::new(move || process.agent(&process_env, &process_settings));
+        let connect = connector(&harness, &settings, env.clone(), None);
         let process_env = Some(env);
         Self {
             harness,
@@ -80,6 +82,7 @@ impl Launch {
             policy,
             thread: None,
             mcp: None,
+            mcp_sign_ins: None,
             instructions: String::new(),
             process_env,
         }
@@ -88,9 +91,8 @@ impl Launch {
     /// The same launch, running `fallback` instead of the ant's own harness and model.
     #[must_use]
     pub fn with_fallback(&self, fallback: &crate::limits::fallback::Fallback) -> Self {
-        let (process, settings) = (fallback.harness.clone(), fallback.settings.clone());
         let env = self.process_env.clone().unwrap_or_default();
-        let connect: Connector = Arc::new(move || process.agent(&env, &settings));
+        let connect = connector(&fallback.harness, &fallback.settings, env, self.report());
         Self { harness: fallback.harness.clone(), settings: fallback.settings.clone(), connect, ..self.clone() }
     }
 
@@ -107,7 +109,7 @@ impl Launch {
     /// The same launch, for sessions serving `thread`.
     #[must_use]
     pub fn for_thread(&self, thread: &ThreadId) -> Self {
-        Self { thread: Some(thread.clone()), ..self.clone() }
+        Self { thread: Some(thread.clone()), ..self.clone() }.reporting()
     }
 
     /// The same launch, with sessions working in `cwd`.
@@ -120,6 +122,24 @@ impl Launch {
     #[must_use]
     pub fn with_mcp(self, mcp: McpServers) -> Self {
         Self { mcp: Some(mcp), ..self }
+    }
+
+    /// The same launch, sending the sign-ins to MCP servers its sessions serving a thread make to `sign_ins`.
+    #[must_use]
+    pub fn with_mcp_sign_ins(self, sign_ins: McpSignIns) -> Self {
+        Self { mcp_sign_ins: Some(sign_ins), ..self }.reporting()
+    }
+
+    /// Where the sign-ins to MCP servers of the thread's sessions go, once both are known: sessions of no thread, such
+    /// as the probes of a harness, sign in to none.
+    fn report(&self) -> Option<Report> {
+        Some(Report::new(self.thread.clone()?, self.mcp_sign_ins.clone()?))
+    }
+
+    /// The same launch, its harness processes reporting the sign-ins to MCP servers of their sessions ([`Self::report`]).
+    fn reporting(self) -> Self {
+        let Some(env) = self.process_env.clone() else { return self };
+        Self { connect: connector(&self.harness, &self.settings, env, self.report()), ..self }
     }
 
     /// Prepend the ant's instructions to every prompt, including after session/load.
@@ -166,6 +186,8 @@ impl Launch {
             bypass_permissions: false,
             context: BTreeMap::new(),
             sign_in: None,
+            entra_client_id: None,
+            mcp_sign_in: Vec::new(),
             rate_limited: Vec::new(),
             quota_exhausted: Vec::new(),
             context_overflow: Vec::new(),
@@ -181,6 +203,7 @@ impl Launch {
             policy,
             thread: None,
             mcp: None,
+            mcp_sign_ins: None,
             instructions: String::new(),
             process_env: None,
         }
@@ -209,4 +232,15 @@ impl fmt::Debug for Launch {
             .field("thread", &self.thread)
             .finish()
     }
+}
+
+/// A connector starting `harness` with the ant's `env` and `settings`, reporting sign-ins to MCP servers to `report`.
+fn connector(
+    harness: &Arc<Harness>,
+    settings: &ModelSettings,
+    env: Vec<(String, String)>,
+    report: Option<Report>,
+) -> Connector {
+    let (harness, settings) = (harness.clone(), settings.clone());
+    Arc::new(move || harness.agent(&env, &settings, report.clone()))
 }

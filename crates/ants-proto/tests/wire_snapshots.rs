@@ -412,6 +412,7 @@ fn kv_entries() {
 #[test]
 fn envelopes() {
     snap("envelope_full", &envelope());
+    snap("notice_kind_mcp_sign_in", &NoticeKind::McpSignIn);
     let message = plain_envelope();
     snap("envelope_message", &message);
     snap(

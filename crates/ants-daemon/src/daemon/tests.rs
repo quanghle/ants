@@ -267,6 +267,7 @@ impl Bus {
             timeline_every: Duration::from_millis(300),
             sign_in: SignIn::default(),
             sign_in_every: Duration::from_millis(300),
+            mcp_sign_ins: super::mcp_sign_in::Untold::default(),
             breaker: Breaker::default(),
             throttle: Throttle::default(),
             backoffs: Backoffs {

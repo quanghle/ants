@@ -177,6 +177,9 @@ pub enum NoticeKind {
     RequestExpired,
     /// A later message steered the prompt answering a message, so the answer goes to that one.
     Steered,
+    /// An MCP server the ant's harness signs in to as its sessions open needs a browser sign-in, or failed to sign
+    /// in: the ant answers without the server meanwhile.
+    McpSignIn,
 }
 
 impl NoticeKind {
@@ -195,12 +198,19 @@ impl NoticeKind {
             Self::InPlace => "in_place",
             Self::RequestExpired => "request_expired",
             Self::Steered => "steered",
+            Self::McpSignIn => "mcp_sign_in",
         }
     }
 
-    /// Whether it needs a human to act: the ant answers nothing on the thread until a human signs its harness in,
-    /// waits for or raises its quota, mends its harness or replays the message given up on.
+    /// Whether it needs a human to act: to sign the ant's harness or one of its MCP servers in, wait for or raise its
+    /// quota, mend its harness or replay the message given up on.
     pub fn needs_action(self) -> bool {
+        self.holds_thread() || self == Self::McpSignIn
+    }
+
+    /// Whether the ant answers nothing on the thread until a human acts ([`NoticeKind::needs_action`]): what the
+    /// thread is stuck on. An MCP server to sign in to holds nothing: the ant answers without it.
+    pub fn holds_thread(self) -> bool {
         matches!(self, Self::SignedOut | Self::Quota | Self::Failing | Self::NoFallback | Self::GaveUp)
     }
 }
