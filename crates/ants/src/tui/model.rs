@@ -268,7 +268,7 @@ pub enum To {
     /// A thread, shown at a message on it.
     Message(ThreadId, Uuid),
     Work(Filter),
-    /// Answer a pending tool request: with the verdict, once confirmed; without, shown in full.
+    /// Answer a pending tool request: with the verdict, at once; without, shown in full.
     Ask(ApprovalRequest, Option<Verdict>),
     /// Pick a reaction to the message.
     React(Uuid),
@@ -506,7 +506,6 @@ impl Model {
             return self.decided(outcome);
         };
         asking.storing = false;
-        asking.verdict = None;
         if outcome.is_ok() || !asking.full {
             self.asking = None;
         }

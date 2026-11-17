@@ -581,8 +581,11 @@ mod tests {
 
         m.key(Key::Down, at(4));
         m.key(Key::Down, at(4));
-        assert_eq!(m.key(Key::Char('r'), at(4)), None);
-        assert_eq!(m.key(Key::Char('y'), at(4)), Some(Action::Decide(Box::new(second.clone()), Verdict::Reject)));
+        assert_eq!(m.key(Key::Char('r'), at(4)), Some(Action::Decide(Box::new(second.clone()), Verdict::Reject)));
+        assert!(shown(&m, at(4)).contains("storing the decision…"), "the card says so until stored");
+        m.key(Key::Up, at(4));
+        assert_eq!(m.key(Key::Char('a'), at(4)), None, "one decision stored at a time");
+        assert!(m.notice_at(at(4)).is_some_and(|n| n.text.contains("answer again once it is stored")));
         m.take(Event::Decided(Ok("rejected".to_owned())), at(5));
         assert!(m.asking.is_none(), "the decision stored ends the answering");
         m.take(Event::Approval(Update::Resolved(second, State::Expired)), at(5));

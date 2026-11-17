@@ -211,7 +211,8 @@ fn wrap(line: &str, width: usize) -> Vec<String> {
     out
 }
 
-/// An opened tool request: all of it as `ants tools show` prints it, and the keys deciding it or its confirmation.
+/// An opened tool request: all of it as `ants tools show` prints it, and the keys deciding it or that its decision is
+/// being stored.
 fn draw_detail(frame: &mut Frame, detail: &Detail, now: DateTime<Utc>) {
     let area = frame.area();
     let [_, area, _] =
@@ -228,9 +229,6 @@ fn draw_detail(frame: &mut Frame, detail: &Detail, now: DateTime<Utc>) {
     let prompt = Style::new().fg(style::PENDING).bold();
     if detail.deciding {
         lines.push(Line::styled("storing the decision…", prompt));
-    } else if let Some(verdict) = detail.confirm {
-        let verdict = tools::spelling(verdict);
-        lines.push(Line::styled(format!("Answer {id} with {verdict}? y confirms, any other key cancels"), prompt));
     } else if detail.state == tools::State::Pending {
         let keys: Vec<&str> = [(Verdict::AllowOnce, "a allow once"), (Verdict::AllowAlways, "A allow always")]
             .into_iter()
@@ -317,8 +315,8 @@ mod tests {
         let shown = screen(&m, at(30));
         assert!(shown.contains("tool     execute: git push"), "{shown}");
         assert!(shown.contains("a allow once · r reject · Esc back"), "{shown}");
-        m.key(Key::Char('a'), at(30));
+        assert!(matches!(m.key(Key::Char('a'), at(30)), Some(Action::Decide(_, Verdict::AllowOnce))));
         let shown = screen(&m, at(30));
-        assert!(shown.contains("with allow-once? y confirms, any other key cancels"), "{shown}");
+        assert!(shown.contains("storing the decision…"), "{shown}");
     }
 }

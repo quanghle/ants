@@ -1,6 +1,6 @@
 //! Tool request cards: the pending tool requests, on home and on their thread, with the ant, the tool and its input,
-//! answered with a, A or r then y through the path of `ants tools approve` and `reject`, the first decision winning
-//! ([`crate::live::Feed::decide`]); Enter shows a request in full as `ants dash` does. A request settled while the UI
+//! answered at once with a, A or r through the path of `ants tools approve` and `reject`, the first decision winning
+//! ([`crate::live::Feed::decide`]); Enter shows a request in full as `ants dash` does, where a, A or r answer it too. A request settled while the UI
 //! runs keeps its card a while ([`SETTLED_FOR`]), saying how it was settled and by whom, unless the human decided it
 //! here.
 
@@ -105,7 +105,7 @@ fn keys(request: &ApprovalRequest) -> String {
 }
 
 /// The lines of `card`, at most `width` wide: the tool, its input if any, and its keys (with `keyed`, the card the
-/// keys answer), the answer being asked or stored, or how it was settled.
+/// keys answer), that its answer is being stored, or how it was settled.
 pub fn lines(card: Card, asking: Option<&Asking>, keyed: bool, now: DateTime<Utc>, width: usize) -> Vec<Line<'static>> {
     let request = card.request;
     let tool = format!("{}: {}", request.tool.kind, request.tool.title.replace('\n', " "));
@@ -115,15 +115,11 @@ pub fn lines(card: Card, asking: Option<&Asking>, keyed: bool, now: DateTime<Utc
     } else if !request.tool.locations.is_empty() {
         lines.push(Line::styled(cut(&format!("files {}", request.tool.locations.join(", ")), width), style::dim()));
     }
-    let prompt = Style::new().fg(style::PENDING).bold();
-    let asked = asking.filter(|a| same(&a.request, request));
-    let last = match (card.settled, asked) {
-        (Some(state), _) => Line::styled(cut(&how(state, &request.ant), width), style::dim()),
-        (None, Some(Asking { storing: true, .. })) => Line::styled("storing the decision…", prompt),
-        (None, Some(Asking { verdict: Some(v), .. })) => {
-            Line::styled(cut(&format!("{}? y confirms · any other key cancels", tools::spelling(*v)), width), prompt)
-        }
-        (None, _) => {
+    let storing = asking.is_some_and(|a| a.storing && same(&a.request, request));
+    let last = match card.settled {
+        Some(state) => Line::styled(cut(&how(state, &request.ant), width), style::dim()),
+        None if storing => Line::styled("storing the decision…", Style::new().fg(style::PENDING).bold()),
+        None => {
             let left = format!("expires in {}", tools::left(request.expires_at, now));
             if keyed {
                 Line::from(vec![
@@ -147,14 +143,12 @@ pub fn title(card: Card) -> String {
     }
 }
 
-/// A request being answered: its verdict waiting for y, or the request shown in full over the view.
+/// A request being answered: its decision being stored, or the request shown in full over the view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Asking {
     pub request: ApprovalRequest,
     /// Where the request stands, as last known.
     pub state: State,
-    /// The verdict asked for, waiting for its confirmation.
-    pub verdict: Option<Verdict>,
     /// Whether the request shows in full over the view.
     pub full: bool,
     /// Whether the decision is being stored.
@@ -166,10 +160,8 @@ pub struct Asking {
 pub enum Answer {
     /// Nothing more, the request still being answered.
     Keep,
-    /// The answering ends, with a notice saying so if any.
-    Close(Option<String>),
-    /// A notice to show, the request still shown in full.
-    Note(String),
+    /// The answering ends.
+    Close,
     /// The verdict is refused, and why.
     Refused(String),
     /// Store the decision on the request.
@@ -179,19 +171,24 @@ pub enum Answer {
 }
 
 impl Asking {
-    /// Answer the pending `request`: with `verdict`, waiting for y; without, shown in full. Refused for a verdict the
-    /// request does not offer.
-    pub fn new(request: ApprovalRequest, verdict: Option<Verdict>) -> Result<Self, String> {
-        let state = State::Pending;
-        if let Some(refusal) = verdict.and_then(|v| live::refusal(&request, &state, v)) {
-            return Err(refusal);
-        }
-        Ok(Self { full: verdict.is_none(), request, state, verdict, storing: false })
+    /// Show the pending `request` in full.
+    pub fn full(request: ApprovalRequest) -> Self {
+        Self { request, state: State::Pending, full: true, storing: false }
     }
 
-    /// Whether keys go to it rather than to the view: while shown in full or waiting for y.
+    /// Answer the pending `request` with `verdict` at once, its decision then being stored. Refused for a verdict the
+    /// request does not offer.
+    pub fn decide(request: ApprovalRequest, verdict: Verdict) -> Result<Self, String> {
+        let state = State::Pending;
+        if let Some(refusal) = live::refusal(&request, &state, verdict) {
+            return Err(refusal);
+        }
+        Ok(Self { request, state, full: false, storing: true })
+    }
+
+    /// Whether keys go to it rather than to the view: while shown in full.
     pub fn takes_keys(&self) -> bool {
-        self.full || (self.verdict.is_some() && !self.storing)
+        self.full
     }
 
     pub fn key(&mut self, key: Key) -> Answer {
@@ -201,18 +198,8 @@ impl Asking {
             }
             return Answer::Keep;
         }
-        let id = tools::qualified(&self.request);
-        if let Some(verdict) = self.verdict.take() {
-            if key == Key::Char('y') {
-                self.verdict = Some(verdict);
-                self.storing = true;
-                return Answer::Decide(verdict);
-            }
-            let line = format!("request {id} not answered");
-            return if self.full { Answer::Note(line) } else { Answer::Close(Some(line)) };
-        }
         let verdict = match key {
-            Key::Esc | Key::Char('q') => return Answer::Close(None),
+            Key::Esc | Key::Char('q') => return Answer::Close,
             Key::Enter => return Answer::Open(self.request.thread_id.clone()),
             Key::Char('a') => Verdict::AllowOnce,
             Key::Char('A') => Verdict::AllowAlways,
@@ -222,8 +209,8 @@ impl Asking {
         match live::refusal(&self.request, &self.state, verdict) {
             Some(refusal) => Answer::Refused(refusal),
             None => {
-                self.verdict = Some(verdict);
-                Answer::Keep
+                self.storing = true;
+                Answer::Decide(verdict)
             }
         }
     }
@@ -234,24 +221,17 @@ impl Asking {
             return true;
         }
         self.state = state.clone();
-        if !self.storing {
-            self.verdict = None;
-        }
         self.full || self.storing
     }
 
-    /// The footer while it waits for y, not shown in full.
-    pub fn footer(&self) -> Option<Line<'static>> {
-        let verdict = self.verdict.filter(|_| !self.full && !self.storing)?;
-        let text = format!(
-            " Answer {} with {}? y confirms, any other key cancels",
-            tools::qualified(&self.request),
-            tools::spelling(verdict)
-        );
-        Some(Line::styled(text, Style::new().fg(style::PENDING).bold()))
+    /// The line saying its decision is being stored, not shown in full: for the compact pane, which shows no card.
+    pub fn status(&self) -> Option<Line<'static>> {
+        (self.storing && !self.full).then(|| {
+            let text = format!(" storing the decision on request {}…", tools::qualified(&self.request));
+            Line::styled(text, Style::new().fg(style::PENDING).bold())
+        })
     }
 }
-
 /// The request being answered in full over the screen, as `ants dash` shows it.
 pub fn draw_full(f: &mut Frame, asking: &Asking, now: DateTime<Utc>) {
     let [_, area, _] =
@@ -271,9 +251,6 @@ pub fn draw_full(f: &mut Frame, asking: &Asking, now: DateTime<Utc>) {
     let prompt = Style::new().fg(style::PENDING).bold();
     if asking.storing {
         lines.push(Line::styled("storing the decision…", prompt));
-    } else if let Some(verdict) = asking.verdict {
-        let verdict = tools::spelling(verdict);
-        lines.push(Line::styled(format!("Answer {id} with {verdict}? y confirms, any other key cancels"), prompt));
     } else if asking.state == State::Pending {
         let keys = keys(request).replace("Enter details", "Enter open its thread · Esc back");
         lines.push(Line::styled(keys, prompt));
@@ -308,43 +285,41 @@ mod tests {
     }
 
     #[test]
-    fn a_verdict_waits_for_y_and_any_other_key_cancels_it() {
+    fn a_verdict_offered_is_stored_at_once() {
         let push = request("dev-a", "git push", vec![Verdict::AllowOnce]);
         let id = tools::qualified(&push);
         assert_eq!(
-            Asking::new(push.clone(), Some(Verdict::AllowAlways)),
+            Asking::decide(push.clone(), Verdict::AllowAlways),
             Err(format!("allow-always is not offered for request {id}"))
         );
-        let mut asking = Asking::new(push.clone(), Some(Verdict::AllowOnce)).unwrap();
-        assert!(asking.takes_keys() && !asking.full);
-        assert!(asking.footer().is_some_and(|l| l.to_string().contains("with allow-once? y confirms")));
-        assert_eq!(asking.key(Key::Char('n')), Answer::Close(Some(format!("request {id} not answered"))));
+        let asking = Asking::decide(push, Verdict::AllowOnce).unwrap();
+        assert!(asking.storing && !asking.full && !asking.takes_keys(), "keys stay with the view while it is stored");
+        assert!(asking.status().is_some_and(|l| l.to_string() == format!(" storing the decision on request {id}…")));
 
-        let mut asking = Asking::new(push, Some(Verdict::Reject)).unwrap();
-        assert_eq!(asking.key(Key::Char('y')), Answer::Decide(Verdict::Reject));
-        assert!(asking.storing && !asking.takes_keys(), "keys go back to the view while it is stored");
+        let always = request("dev-a", "git push", vec![Verdict::AllowOnce, Verdict::AllowAlways]);
+        let mut asking = Asking::full(always);
+        assert_eq!(asking.key(Key::Char('A')), Answer::Decide(Verdict::AllowAlways), "allow always needs no more");
+        assert!(asking.storing && asking.full && asking.status().is_none());
+        assert_eq!(asking.key(Key::Char('r')), Answer::Keep, "one decision at a time");
     }
 
     #[test]
     fn shown_in_full_it_answers_opens_the_thread_and_follows_word_of_a_decision() {
         let push = request("dev-a", "git push", vec![Verdict::AllowOnce]);
-        let mut asking = Asking::new(push.clone(), None).unwrap();
+        let mut asking = Asking::full(push.clone());
         assert!(asking.full && asking.takes_keys());
         assert_eq!(asking.key(Key::Char('x')), Answer::Keep);
         assert_eq!(asking.key(Key::Enter), Answer::Open(push.thread_id.clone()));
-        assert_eq!(asking.key(Key::Char('a')), Answer::Keep);
-        assert_eq!(asking.verdict, Some(Verdict::AllowOnce));
-        assert!(matches!(asking.key(Key::Char('n')), Answer::Note(_)), "it stays shown");
-        asking.key(Key::Char('a'));
+        assert!(matches!(asking.key(Key::Char('A')), Answer::Refused(e) if e.contains("not offered")));
         let decision = ApprovalDecision::new(push.id, push.ant.clone(), Verdict::Reject);
         let state = State::DecidedByAnt(user("lead"), decision);
         assert!(asking.settled(&push, &state), "shown in full, it stays");
-        assert_eq!((&asking.state, asking.verdict), (&state, None));
+        assert_eq!(asking.state, state);
         assert!(matches!(asking.key(Key::Char('a')), Answer::Refused(e) if e.contains("answered already")));
-        assert_eq!(asking.key(Key::Esc), Answer::Close(None));
+        assert_eq!(asking.key(Key::Esc), Answer::Close);
 
-        let mut asking = Asking::new(push.clone(), Some(Verdict::AllowOnce)).unwrap();
-        assert!(!asking.settled(&push, &State::Expired), "waiting for y, it ends");
+        let mut asking = Asking::decide(push.clone(), Verdict::AllowOnce).unwrap();
+        assert!(asking.settled(&push, &State::Expired), "storing, it waits for the outcome");
     }
 
     #[test]
@@ -369,10 +344,7 @@ mod tests {
         assert!(pending[1].starts_with("a allow · r reject · Enter details · expires in "), "{pending:?}");
         let settled = text(&lines(shown[1], None, false, at(10), 60));
         assert!(settled[1].starts_with("rejected by bob at "), "{settled:?}");
-        let asking = Asking::new(push, Some(Verdict::AllowOnce)).unwrap();
-        assert_eq!(
-            text(&lines(shown[0], Some(&asking), true, at(10), 60))[1],
-            "allow-once? y confirms · any other key cancels"
-        );
+        let asking = Asking::decide(push, Verdict::AllowOnce).unwrap();
+        assert_eq!(text(&lines(shown[0], Some(&asking), true, at(10), 60))[1], "storing the decision…");
     }
 }

@@ -1,6 +1,7 @@
 //! How a key changes the model: which of the prompts, the bar, the nav or the shown view takes it, and where a view's
 //! key leads ([`To`]).
 
+use ants_proto::{ApprovalRequest, Verdict};
 use chrono::{DateTime, Utc};
 
 use super::{Action, Focus, Key, Level, Model, Page, To};
@@ -131,13 +132,7 @@ impl Model {
         let asking = self.asking.as_mut()?;
         match asking.key(key) {
             Answer::Keep => {}
-            Answer::Close(line) => {
-                self.asking = None;
-                if let Some(line) = line {
-                    self.notify(line, Level::Info, now);
-                }
-            }
-            Answer::Note(line) => self.notify(line, Level::Info, now),
+            Answer::Close => self.asking = None,
             Answer::Refused(refusal) => self.notify(refusal, Level::Error, now),
             Answer::Decide(verdict) => {
                 return self.asking.as_ref().map(|a| Action::Decide(Box::new(a.request.clone()), verdict));
@@ -151,6 +146,30 @@ impl Model {
             }
         }
         None
+    }
+
+    /// Answer `request` with `verdict` at once, unless another decision is still being stored.
+    fn decide(&mut self, request: ApprovalRequest, verdict: Verdict, now: DateTime<Utc>) -> Option<Action> {
+        if let Some(storing) = self.asking.as_ref().filter(|a| a.storing) {
+            let id = crate::tools::qualified(&storing.request);
+            self.notify(
+                format!("storing the decision on request {id}: answer again once it is stored"),
+                Level::Error,
+                now,
+            );
+            return None;
+        }
+        match Asking::decide(request, verdict) {
+            Ok(asking) => {
+                let action = Action::Decide(Box::new(asking.request.clone()), verdict);
+                self.asking = Some(asking);
+                Some(action)
+            }
+            Err(refusal) => {
+                self.notify(refusal, Level::Error, now);
+                None
+            }
+        }
     }
 
     fn nav_key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
@@ -219,13 +238,11 @@ impl Model {
                 self.picking = Some(Picker::new(message));
                 None
             }
-            To::Ask(request, verdict) => {
-                match Asking::new(request, verdict) {
-                    Ok(asking) => self.asking = Some(asking),
-                    Err(refusal) => self.notify(refusal, Level::Error, now),
-                }
+            To::Ask(request, None) => {
+                self.asking = Some(Asking::full(request));
                 None
             }
+            To::Ask(request, Some(verdict)) => self.decide(request, verdict, now),
             To::Tree(thread) => {
                 self.tree(thread);
                 None

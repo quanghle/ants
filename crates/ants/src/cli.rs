@@ -207,7 +207,7 @@ pub(crate) enum Command {
         json: bool,
     },
     /// Interactive terminal dashboard: recent threads and their history, the ants' live progress and the colony, and
-    /// the pending tool requests, each shown in full and answered after a confirmation. Needs a terminal and a human's
+    /// the pending tool requests, each shown in full and answered at once with a key. Needs a terminal and a human's
     /// credentials.
     Dash {
         /// How far back to read threads, such as 90m, 24h or 7d; 0 for everything the stream keeps.

@@ -51,8 +51,6 @@ pub enum Action {
 pub struct Detail {
     pub request: ApprovalRequest,
     pub state: tools::State,
-    /// The verdict asked for, waiting for its confirmation.
-    pub confirm: Option<Verdict>,
     /// A decision is being stored.
     pub deciding: bool,
 }
@@ -179,7 +177,6 @@ impl Model {
             self.approval = self.approval.min(self.live.approvals.len().saturating_sub(1));
             if let Some(detail) = self.detail.as_mut().filter(|d| d.request == request) {
                 detail.state = state;
-                detail.confirm = None;
             }
         }
     }
@@ -252,7 +249,7 @@ impl Model {
                     if let Some(request) = self.live.approvals.get(self.approval) {
                         let request = request.clone();
                         let state = tools::State::Pending;
-                        self.detail = Some(Detail { request, state, confirm: None, deciding: false });
+                        self.detail = Some(Detail { request, state, deciding: false });
                     }
                     None
                 }
@@ -283,15 +280,6 @@ impl Model {
         if detail.deciding {
             return None;
         }
-        if let Some(verdict) = detail.confirm.take() {
-            if key == Key::Char('y') {
-                detail.deciding = true;
-                return Some(Action::Decide(Box::new(detail.request.clone()), verdict));
-            }
-            let id = tools::qualified(&detail.request);
-            self.notify(format!("request {id} not answered"), Level::Info, now);
-            return None;
-        }
         let verdict = match key {
             Key::Esc | Key::Char('q') => {
                 self.detail = None;
@@ -302,11 +290,12 @@ impl Model {
             Key::Char('r') => Verdict::Reject,
             _ => return None,
         };
-        match live::refusal(&detail.request, &detail.state, verdict) {
-            Some(refusal) => self.notify(refusal, Level::Error, now),
-            None => detail.confirm = Some(verdict),
+        if let Some(refusal) = live::refusal(&detail.request, &detail.state, verdict) {
+            self.notify(refusal, Level::Error, now);
+            return None;
         }
-        None
+        detail.deciding = true;
+        Some(Action::Decide(Box::new(detail.request.clone()), verdict))
     }
 }
 
@@ -362,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn a_decision_needs_details_shown_an_offered_verdict_and_a_confirmation() {
+    fn a_decision_needs_details_shown_and_an_offered_verdict_and_is_stored_at_once() {
         let mut m = model();
         let push = request("dev-a", "git push", vec![Verdict::AllowOnce]);
         m.approval(Update::Pending(push.clone()));
@@ -377,18 +366,13 @@ mod tests {
             m.notice_at(at(1))
                 .is_some_and(|n| n.level == Level::Error && n.text.contains("allow-always is not offered"))
         );
-        assert_eq!(m.detail.as_ref().unwrap().confirm, None);
-        // Any key but y cancels.
-        m.key(Key::Char('a'), at(2));
+        assert!(!m.detail.as_ref().unwrap().deciding);
         assert_eq!(m.key(Key::Char('n'), at(2)), None);
-        assert!(m.notice_at(at(2)).is_some_and(|n| n.text.contains("not answered")));
-        m.key(Key::Char('r'), at(3));
-        assert_eq!(m.key(Key::Char('y'), at(3)), Some(Action::Decide(Box::new(push), Verdict::Reject)));
-        assert_eq!(m.key(Key::Char('y'), at(3)), None, "one decision at a time");
+        assert_eq!(m.key(Key::Char('r'), at(3)), Some(Action::Decide(Box::new(push.clone()), Verdict::Reject)));
+        assert_eq!(m.key(Key::Char('a'), at(3)), None, "one decision at a time");
         m.decided(Err(anyhow::anyhow!("request was already answered: allow-once")), at(4));
         assert!(m.detail.is_some(), "a refused decision leaves the request open");
-        m.key(Key::Char('a'), at(5));
-        m.key(Key::Char('y'), at(5));
+        assert_eq!(m.key(Key::Char('a'), at(5)), Some(Action::Decide(Box::new(push), Verdict::AllowOnce)));
         m.decided(Ok("answered".into()), at(6));
         assert!(m.detail.is_none());
     }
@@ -400,13 +384,12 @@ mod tests {
         m.approval(Update::Pending(push.clone()));
         m.focus = Pane::Approvals;
         m.key(Key::Enter, at(0));
-        m.key(Key::Char('a'), at(0));
         let decision = ApprovalDecision::new(push.id, push.ant.clone(), Verdict::Reject);
         let state = tools::State::DecidedByAnt(user("lead"), decision);
         m.approval(Update::Resolved(push, state.clone()));
         assert!(m.live.approvals.is_empty());
         let detail = m.detail.as_ref().unwrap();
-        assert_eq!((&detail.state, detail.confirm), (&state, None));
+        assert_eq!(detail.state, state);
         assert_eq!(m.key(Key::Char('a'), at(1)), None);
         assert!(m.notice_at(at(1)).is_some_and(|n| n.text.contains("answered already")));
         assert!(m.notice_at(at(30)).is_none(), "notices fade");

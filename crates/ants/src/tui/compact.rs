@@ -90,7 +90,7 @@ fn second_line(model: &Model, items: &[home::Item], now: DateTime<Utc>) -> Line<
         let color = if notice.level == Level::Error { style::ERROR } else { style::INFO };
         return Line::styled(format!("      {}", notice.text), Style::new().fg(color));
     }
-    if let Some(line) = model.asking.as_ref().and_then(super::approvals::Asking::footer) {
+    if let Some(line) = model.asking.as_ref().and_then(super::approvals::Asking::status) {
         return line;
     }
     if let Some(confirm) = &model.interrupting {
@@ -171,7 +171,7 @@ mod tests {
 
         let push =
             ApprovalRequest { thread_id: asked.clone(), ..request("dev-a", "git push", vec![Verdict::AllowOnce]) };
-        m.data.live.approval(&Update::Pending(push));
+        m.data.live.approval(&Update::Pending(push.clone()));
         m.data.cards.today = Some(vec![(user("dev-a"), Spent { tokens: 10, cost: 4.12 })]);
         let mut entry = crate::test_support::colony::entry("scout", 60, 5, at(0));
         entry.activity = ants_proto::Activity::Working;
@@ -181,9 +181,11 @@ mod tests {
         assert!(shown.contains("▸ approve "), "{shown}");
 
         assert_eq!(m.key(Key::Down, at(3)), None);
-        assert_eq!(m.key(Key::Char('r'), at(3)), None);
-        assert!(pane(&m, at(3)).contains("with reject? y confirms"), "the top request is answered in the pane");
-        m.key(Key::Esc, at(3));
+        assert_eq!(m.key(Key::Char('r'), at(3)), Some(Action::Decide(Box::new(push.clone()), Verdict::Reject)));
+        let storing = format!("storing the decision on request {}…", crate::tools::qualified(&push));
+        assert!(pane(&m, at(3)).contains(&storing), "the top request is answered in the pane");
+        m.take(crate::live::Event::Decided(Err(anyhow::anyhow!("request was already answered"))), at(3));
+        assert!(m.asking.is_none() && pane(&m, at(3)).contains("request was already answered"));
         assert_eq!(m.key(Key::Enter, at(3)), None);
         assert!(!m.compact && m.asking.as_ref().is_some_and(|a| a.full), "the request in full in the full view");
         assert_eq!(m.key(Key::Enter, at(3)), Some(Action::Open(asked.clone())), "its thread");

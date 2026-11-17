@@ -73,9 +73,6 @@ fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
     if let Some(prompt) = &model.snoozing {
         return prompt.line(&model.data);
     }
-    if let Some(line) = model.asking.as_ref().and_then(approvals::Asking::footer) {
-        return line;
-    }
     if let Some(notice) = model.notice_at(now) {
         return style::notice(&notice.text, notice.level == Level::Error);
     }
@@ -114,7 +111,7 @@ const HELP: &[(&str, &str)] = &[
     ("Alt-Enter Ctrl-E", "in the bar: a new line, the text in the editor"),
     ("↑↓ Tab", "in the bar: pick and complete an @ant, #channel or /command"),
     ("y p m e d z", "in a thread: copy, pin, mute, archive, done, snooze (again to undo)"),
-    ("a A r, y", "on a tool request: allow once, always or reject, then confirm"),
+    ("a A r", "on a tool request: allow once, always or reject, at once"),
     ("1-9 r", "on a question: answer with that option, or type an answer"),
     ("g r f x d z s c o", "on home: grant, reply, forward, cancel, done, snooze, digest, credentials, held orders"),
     ("i > t S", "in a thread: reply, quote the selected, delegation tree, TL;DR"),
@@ -201,7 +198,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_request_shows_in_full_over_the_view_and_its_verdict_waits_in_the_footer() {
+    fn a_tool_request_shows_in_full_over_the_view_and_its_card_says_its_decision_is_being_stored() {
         let mut m = model();
         let push = crate::test_support::live::request("dev-a", "git push", vec![ants_proto::Verdict::AllowOnce]);
         m.data.live.approvals = vec![push.clone()];
@@ -212,9 +209,10 @@ mod tests {
         assert!(shown.contains(&format!(" Tool request {} ", crate::tools::qualified(&push))), "{shown}");
         assert!(shown.contains("a allow · r reject · Enter open its thread · Esc back"), "{shown}");
         m.key(Key::Esc, at(0));
-        m.key(Key::Char('a'), at(0));
+        let decide = crate::tui::model::Action::Decide(Box::new(push), ants_proto::Verdict::AllowOnce);
+        assert_eq!(m.key(Key::Char('a'), at(0)), Some(decide));
         let shown = screen(&m, at(0));
-        assert!(shown.contains("with allow-once? y confirms, any other key cancels"), "{shown}");
+        assert!(shown.contains("storing the decision…"), "{shown}");
     }
 
     #[test]
