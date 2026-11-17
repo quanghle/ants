@@ -2,20 +2,23 @@
 //! new one with its own id, takes a copy of what its source knew as the clone was made. It keeps the items of the
 //! kinds in [`KEPT`], each under its own id, so links between them hold, and each marked [`INHERITED`] from the
 //! source's identity; it drops every other kind: tasks, commitments, reminders, relationship records, resume
-//! registers, handoffs, votes and the card, the clone's own being made from the clone event.
+//! registers, handoffs, votes, persona and skill proposals, dreams and the card, the clone's own being made from the
+//! clone event.
 
 use chrono::{DateTime, Utc};
 use serde_json::json;
 
 use crate::identity;
 use crate::memory::MEMORY;
+use crate::persona::PERSONA;
 use crate::records::SELF_MODEL;
+use crate::skill::SKILL;
 use crate::store::{Items, StoreError, Write};
 
 /// The value of an item a clone inherited: the sense id of the identity it was copied from.
 pub const INHERITED: &str = "inherited";
-/// The kinds of items a clone inherits; persona and skills join them once sense keeps them.
-pub const KEPT: &[&str] = &[MEMORY, SELF_MODEL];
+/// The kinds of items a clone inherits: memories, self-model, persona and skills.
+pub const KEPT: &[&str] = &[MEMORY, SELF_MODEL, PERSONA, SKILL];
 
 /// The most items one event of the clone's log copies.
 const BATCH_ITEMS: usize = 100;

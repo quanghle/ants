@@ -738,6 +738,12 @@ pub trait Stores: Send + Sync {
         Box::pin(std::future::ready(Err(StoreError::NotKept(format!("no export of {ant}")))))
     }
 
+    /// The home of `ant`, where its skill files are kept ([`crate::skill::materialize`]); none when not known.
+    fn home(&self, ant: &UserId) -> Option<std::path::PathBuf> {
+        let _ = ant;
+        None
+    }
+
     /// Take in `export` as `ant`'s sense data ([`crate::export::import`]).
     fn import<'a>(&'a self, ant: &'a UserId, export: SenseExport) -> BoxFuture<'a, Result<(), StoreError>> {
         drop(export);

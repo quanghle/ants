@@ -1,5 +1,6 @@
 use ants_proto::ThreadId;
 use ants_sense::dream::{self, Commit, Thread};
+use ants_sense::proposal;
 use chrono::DateTime;
 
 use super::super::dreams::Dreams;
@@ -147,4 +148,36 @@ async fn a_takeover_wakes_a_dream_begun_but_not_woken_and_begins_none_again() {
     *fake.idle.locked() = Some(now + chrono::Duration::hours(1));
     cycle(&Sense::new(), &*takeover, &host, &dreaming(&fake), hours_later).await.unwrap();
     assert_eq!(host.requests.locked().len(), 2, "no second dream within a day");
+}
+
+#[tokio::test]
+async fn a_proposal_ripe_for_confirmation_calls_for_a_dream_without_new_work() {
+    let items = open(SharedLog::default(), SenseId::new()).await;
+    let fake = Arc::new(Fake::default());
+    let settings = dreaming(&fake);
+    let host = Wakes::default();
+    let now = Utc::now();
+    fake.set(Some(now - chrono::Duration::hours(1)), &[]);
+    cycle(&Sense::new(), &*items, &host, &settings, now).await.unwrap();
+    assert!(last(&*items).await.is_none(), "no activity, no dream");
+
+    let writer = CallContext { at: now - chrono::Duration::hours(13), ..call(json!({})).context };
+    let made = proposal::Proposal {
+        target: ants_sense::persona::persona_id(),
+        kind: ants_sense::persona::PERSONA.into(),
+        summary: "Voice: plain.".into(),
+        version: serde_json::Map::new(),
+        base: 0,
+        reason: "Users skim.".into(),
+        status: proposal::Status::Pending,
+        writer,
+        finding: None,
+        superseded_by: None,
+        decided: None,
+    };
+    proposal::propose(&*items, made).await.unwrap();
+    cycle(&Sense::new(), &*items, &host, &settings, now + chrono::Duration::minutes(1)).await.unwrap();
+    let requests = host.requests.locked().clone();
+    assert_eq!(requests.len(), 1, "a quiet ant dreams for its proposal");
+    assert!(requests[0].text.contains("Voice: plain."), "{}", requests[0].text);
 }

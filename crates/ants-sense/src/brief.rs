@@ -1,8 +1,9 @@
 //! The brief (requirements ants-x39hk.8.1 and ants-x39hk.8.2): what an ant reads first in each session, and again on
 //! demand with `sense_brief`. Its sections come in a fixed order ([`sections`]): warnings when the ant's log is
-//! broken or over its size limit ([`SIZE_LIMIT`]), the identity, the self-model, the thread's resume register, the
-//! unacknowledged handoffs, open commitments, fired and upcoming reminders, claimed and ready tasks, the relationship
-//! records of the thread's participants, the core and top memories, and the core loop of tools.
+//! broken or over its size limit ([`SIZE_LIMIT`]), the identity, the persona, the self-model, the thread's resume
+//! register, the unacknowledged handoffs, open commitments, fired and upcoming reminders, claimed and ready tasks, the
+//! relationship records of the thread's participants, the core and top memories, the skills index, and the core loop
+//! of tools.
 //!
 //! The brief stays within its byte budget ([`fit`]): memories are shortened to their titles first, then the longest
 //! section is cut, again and again, each cut ending with a line naming the tool call that shows the rest.
@@ -14,13 +15,14 @@ use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 
 use crate::identity::{self, Card};
-use crate::items::ItemId;
+use crate::items::{Item, ItemId};
 use crate::log::{Break, SIZE_LIMIT, mib};
 use crate::memory::{self, MemoryItem, Ranked, Scope, Status, Trust, framed, participants, snippet, thread_repo};
 use crate::records::{self, RecordItem};
+use crate::skill::{self, Skill};
 use crate::store::{Items, StoreError};
 use crate::thread::{self, Handoff, Register};
-use crate::{Answer, Sense, promise, remind, task};
+use crate::{Answer, Sense, persona, promise, remind, task};
 
 /// The most unacknowledged handoffs a brief shows.
 pub const MAX_HANDOFFS: usize = 5;
@@ -47,6 +49,8 @@ const CORE_LOOP: &[(&str, &str)] = &[
          relationship record from the revision shown",
     ),
     ("vote", "say whether a recalled memory helped, is stale or is wrong"),
+    ("persona", "propose a change of values, voice, boundaries or working style, which a later dream confirms"),
+    ("skill", "read a skill; propose a new, changed or removed one, which a later dream confirms"),
     ("handoff", "hand the work over as the thread's last write"),
     ("brief", "show this brief again"),
 ];
@@ -175,12 +179,13 @@ pub async fn compose(
     Ok(text)
 }
 
-/// The sections of the brief, in order. The skills index follows once sense keeps skills.
+/// The sections of the brief, in order.
 async fn sections(items: &dyn Items, context: &CallContext, card: Option<&Card>) -> Result<Vec<Section>, StoreError> {
     let mut sections = Vec::new();
     sections.extend(items.broken().await.as_ref().map(warning));
     sections.extend(size_warning(items.log_bytes().await));
     sections.push(identity_section(card, context));
+    sections.push(persona_section(persona::current(items).await?.as_ref()));
     sections.push(self_model_section(records::self_model(items).await?.as_ref()));
     sections.push(register_section(thread::register(items, &context.thread).await?.as_ref()));
     let mut handoffs = thread::unacknowledged(items, MAX_HANDOFFS + 1).await?;
@@ -199,6 +204,7 @@ async fn sections(items: &dyn Items, context: &CallContext, card: Option<&Card>)
     sections.extend(relationships_section(&records::relationships(items, &participants(context)).await?));
     let episodes: Vec<_> = handoffs.into_iter().filter_map(|handoff| handoff.episode).collect();
     sections.extend(memories_section(items, context, &episodes).await?);
+    sections.extend(skills_section(&skill::skills(items).await?));
     sections.push(core_loop());
     Ok(sections)
 }
@@ -268,6 +274,29 @@ fn identity_section(card: Option<&Card>, context: &CallContext) -> Section {
         );
     }
     Section::whole(heading, body)
+}
+
+fn persona_section(found: Option<&Item>) -> Section {
+    match found {
+        Some(found) => Section::cut_with("## Persona", persona::text(&found.values), "sense_persona"),
+        None => {
+            let body = "No persona yet: propose values, voice, boundaries or working style with sense_persona.";
+            Section::whole("## Persona".to_owned(), body.to_owned())
+        }
+    }
+}
+
+/// The skills by name and description.
+fn skills_section(skills: &[Skill]) -> Option<Section> {
+    if skills.is_empty() {
+        return None;
+    }
+    let lines: Vec<_> = skills.iter().map(|skill| format!("- {}: {}", skill.name, skill.description)).collect();
+    let names: Vec<_> = skills.iter().map(|skill| format!("- {}", skill.name)).collect();
+    let mut section =
+        Section::cut_with("## Skills (sense_skill name=<name> reads one)", lines.join("\n"), "sense_skill");
+    section.titles = Some(names.join("\n"));
+    Some(section)
 }
 
 fn self_model_section(found: Option<&RecordItem>) -> Section {
@@ -496,6 +525,8 @@ pub fn brief<'a>(sense: &'a Sense, call: &'a ToolCall) -> BoxFuture<'a, Answer> 
             if let Some(workdir) = sense.workdir(context) {
                 memory::recheck_citations(&*items, &workdir).await?;
             }
+            // Files failing to be written are written again at the next brief.
+            let _ = crate::skill::materialize_for(sense, &context.ant).await;
             let card = identity::card(&*items).await?;
             compose(&*items, context, card.as_ref(), BRIEF_BUDGET as usize).await
         };

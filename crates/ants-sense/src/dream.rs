@@ -8,9 +8,11 @@
 //! kind [`DREAM`], numbered, the last one named by a record of kind [`DREAMS`], so a daemon taking over dreams no sooner.
 //! Its findings, each with an id the ant answers by (`<dream>.<n>`), are the sage's when it answered, and otherwise
 //! the packet's own: contradicting votes, memories needing review, near duplicates, episodes to distill and pending
-//! persona and skill proposals ([`proposals`]). The ant answers each with `sense_dream` ([`dream`]) as applied (naming
-//! the items it wrote), rejected or deferred, with a reason; the deferred and unanswered come again in the next dream
-//! while they still hold. Writes on the dream thread through the tools that change memories count toward
+//! persona and skill proposals made [`proposal::CONFIRM_AFTER_HOURS`] or more before ([`proposals`], [`crate::proposal`]). The ant
+//! answers each with `sense_dream` ([`dream`]) as applied (naming the items it wrote), rejected or deferred, with a
+//! reason, applied confirming a proposal and rejected discarding it; the deferred and unanswered come again in the next
+//! dream while they still hold. A ripe proposal no dream offered makes a dream due ([`proposal_due`]); what the ant
+//! writes on untrusted ground is told by [`untrusted`]. Writes on the dream thread through the tools that change memories count toward
 //! [`MAX_DREAM_WRITES`] ([`counted`]). Finishing a dream, or beginning the next one, writes its diary: an episode
 //! memory summarizing its verdicts.
 
@@ -26,6 +28,7 @@ use serde_json::{Value, json};
 use crate::Sense;
 use crate::items::{ItemId, Values};
 use crate::memory::{self, MAX_BODY_BYTES, MAX_TITLE_CHARS, MEMORY, Memory, MemoryItem, MemoryKind, Scope, Status};
+use crate::proposal;
 use crate::store::{Items, StoreError, Write};
 use crate::tools::{Answer, Handler};
 
@@ -55,7 +58,7 @@ pub const COUNTED: &[&str] = &["remember", "vote"];
 pub const MAX_REASON_CHARS: usize = 500;
 
 /// Who sense changes dream items for ([`crate::items::Stamp::by`]).
-const BY: &str = "sense:dream";
+pub(crate) const BY: &str = "sense:dream";
 /// The name of the record of the last dream ([`ItemId::named`]).
 const RECORD: &str = "last";
 /// How many times a write of a dream is tried again on items changed meanwhile.
@@ -342,7 +345,8 @@ pub async fn begin(items: &dyn Items, start: Start<'_>) -> Result<Option<Dream>,
         }
         let number = record.map_or(1, |(number, _)| number + 1);
         let since = since(previous.as_ref().map(|(previous, _)| previous), start.at);
-        let findings = findings(items, previous.as_ref().map(|(previous, _)| previous), number, since).await?;
+        let findings =
+            findings(items, previous.as_ref().map(|(previous, _)| previous), number, since, start.at).await?;
         let mut writes = Vec::new();
         if let Some((previous, revision)) = previous
             && previous.state != State::Done
@@ -419,26 +423,77 @@ pub struct Proposal {
     pub untrusted: bool,
 }
 
-/// The pending persona and skill proposals, each offered as a finding until the ant answers it: none while
-/// `sense_persona` and `sense_skill` keep none.
-async fn proposals(_items: &dyn Items) -> Result<Vec<Proposal>, StoreError> {
-    Ok(Vec::new())
+/// The pending persona and skill proposals a dream beginning at `at` offers: those made [`proposal::CONFIRM_AFTER_HOURS`] or
+/// more before, each offered as a finding until the ant answers it.
+async fn proposals(items: &dyn Items, at: DateTime<Utc>) -> Result<Vec<Proposal>, StoreError> {
+    Ok(proposal::pending(items)
+        .await?
+        .into_iter()
+        .filter(|found| found.proposal.ripe() <= at)
+        .map(|found| Proposal { text: found.finding(), untrusted: !found.proposal.writer.trusted(), id: found.item.id })
+        .collect())
 }
 
-/// The findings of dream `number`, reviewing from `since`: the open findings of `previous` that still hold, then the
-/// packet's own on what they do not cover yet, up to [`MAX_FINDINGS`].
+/// Whether a pending proposal ripe at `now` awaits a dream: one the `last` dream did not offer, so a dream is due for
+/// it even when no thread was active.
+pub async fn proposal_due(items: &dyn Items, last: Option<&Dream>, now: DateTime<Utc>) -> Result<bool, StoreError> {
+    let offered = |id: &ItemId| last.is_some_and(|last| last.findings.iter().any(|finding| finding.items.contains(id)));
+    Ok(proposal::pending(items).await?.iter().any(|found| found.proposal.ripe() <= now && !offered(found.id())))
+}
+
+/// Finding `id` (`<dream>.<n>`) of the dream that offered it; none when no dream has it.
+pub async fn finding(items: &dyn Items, id: &str) -> Result<Option<Finding>, StoreError> {
+    let Some(number) = id.split_once('.').and_then(|(number, _)| number.parse().ok()) else { return Ok(None) };
+    let Some((dream, _)) = get(items, number).await? else { return Ok(None) };
+    Ok(dream.findings.into_iter().find(|finding| finding.id == id))
+}
+
+/// Why what the ant writes in `context`, in answer to `finding` if it names one, rests on untrusted text; none when it
+/// does not (requirements ants-x39hk.6.5 and ants-x39hk.12.5). It does when the thread came from a webhook, the
+/// finding is untrusted ([`Finding::untrusted`]), or the call is on the thread of a dream whose packet held untrusted
+/// text, an untrusted finding or the history of an untrusted thread: the ant may answer any of them without naming
+/// it. `sense_persona` and `sense_skill` refuse their proposals then.
+pub async fn untrusted(
+    items: &dyn Items,
+    context: &CallContext,
+    finding: Option<&str>,
+) -> Result<Option<String>, StoreError> {
+    if !context.trusted() {
+        return Ok(Some("the thread came from a webhook".into()));
+    }
+    if let Some(id) = finding
+        && self::finding(items, id).await?.is_some_and(|finding| finding.untrusted)
+    {
+        return Ok(Some(format!("finding {id} rests on untrusted text")));
+    }
+    let on = items.list_by(DREAM, "thread", Some(&json!(context.thread)), 1).await?;
+    let Some(dream) = on.first().map(Dream::of).transpose()? else { return Ok(None) };
+    if let Some(finding) = dream.findings.iter().find(|finding| finding.untrusted) {
+        return Ok(Some(format!("dream {} offers untrusted finding {}", dream.number, finding.id)));
+    }
+    if dream.threads.iter().any(|covered| covered.untrusted) {
+        return Ok(Some(format!("the packet of dream {} holds the history of an untrusted thread", dream.number)));
+    }
+    Ok(None)
+}
+
+/// The findings of dream `number`, beginning at `at` and reviewing from `since`: the open findings of `previous` that
+/// still hold, then the packet's own on what they do not cover yet, up to [`MAX_FINDINGS`].
 async fn findings(
     items: &dyn Items,
     previous: Option<&Dream>,
     number: u64,
     since: DateTime<Utc>,
+    at: DateTime<Utc>,
 ) -> Result<Vec<Finding>, StoreError> {
+    let proposals = proposals(items, at).await?;
     let memories: Vec<_> = items.list(MEMORY, usize::MAX).await?.into_iter().filter_map(MemoryItem::of).collect();
     let live = |id: &ItemId| memories.iter().find(|found| found.id() == id).filter(|f| f.memory.status.live());
     let mut found: Vec<Finding> = Vec::new();
     for open in previous.into_iter().flat_map(Dream::open) {
         let holds = match open.kind {
-            FindingKind::Sage | FindingKind::Proposal => true,
+            FindingKind::Sage => true,
+            FindingKind::Proposal => open.items.iter().all(|id| proposals.iter().any(|proposal| &proposal.id == id)),
             FindingKind::NeedsReview => {
                 open.items.iter().all(|id| live(id).is_some_and(|f| f.memory.status == Status::NeedsReview))
             }
@@ -501,7 +556,7 @@ async fn findings(
         );
         fresh.push((FindingKind::Distill, vec![found.id().clone()], text, mine(found)));
     }
-    for proposal in proposals(items).await? {
+    for proposal in proposals {
         fresh.push((FindingKind::Proposal, vec![proposal.id], proposal.text, proposal.untrusted));
     }
     let covered: BTreeSet<_> = found.iter().map(|finding| (finding.kind, finding.items.clone())).collect();

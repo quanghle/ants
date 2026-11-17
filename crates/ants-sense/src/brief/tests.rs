@@ -15,6 +15,7 @@ use crate::store::{Store, Stores};
 use crate::tools::Handler;
 
 mod citations;
+mod persona;
 mod records;
 mod work;
 

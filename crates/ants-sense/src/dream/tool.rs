@@ -1,4 +1,5 @@
-//! `sense_dream`: the ant's verdicts on the findings of its dream, on the dream thread, and finishing the dream.
+//! `sense_dream`: the ant's verdicts on the findings of its dream, on the dream thread, and finishing the dream. A
+//! verdict on a proposal decides it ([`proposal::decide`]): applied confirms it, rejected discards it.
 
 use std::fmt::Write as _;
 
@@ -7,13 +8,15 @@ use chrono::Utc;
 use serde_json::{Value, json};
 
 use super::{
-    BY, Dream, Judgement, MAX_DREAM_WRITES, MAX_FINDINGS, MAX_REASON_CHARS, State, TRIES, Verdict, close, get,
+    BY, Dream, FindingKind, Judgement, MAX_DREAM_WRITES, MAX_FINDINGS, MAX_REASON_CHARS, State, TRIES, Verdict, close,
+    get,
 };
-use crate::Sense;
 use crate::items::{ItemId, Values};
+use crate::proposal::{self, Status};
 use crate::sanitize::{Limit, sanitize_title};
 use crate::store::{Items, StoreError, Write};
 use crate::tools::Answer;
+use crate::{Sense, skill};
 
 /// The JSON Schema of `sense_dream`'s arguments.
 pub fn schema() -> Value {
@@ -32,7 +35,8 @@ pub fn schema() -> Value {
                         "items": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "With applied: the ids of the memories written or voted on.",
+                            "description": "With applied: the ids of the memories written or voted on; none for a \
+                                            proposal, which applied confirms.",
                         },
                     },
                     "required": ["finding", "verdict", "reason"],
@@ -73,6 +77,20 @@ async fn dream_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
     if verdicts.is_empty() && !done {
         return Ok(show(&dream));
     }
+    let now = Utc::now();
+    let mut decided = Vec::new();
+    for verdict in &verdicts {
+        let Some(finding) = dream.findings.iter().find(|finding| finding.id == verdict.finding) else { continue };
+        if finding.kind == FindingKind::Proposal && verdict.verdict != Judgement::Deferred {
+            decided.push(proposal::decide(&*items, dream.number, finding, verdict, now).await?);
+        }
+    }
+    let mut warning = String::new();
+    if decided.iter().any(|found| found.proposal.kind == skill::SKILL && found.proposal.status == Status::Confirmed)
+        && let Err(e) = skill::materialize_for(sense, &context.ant).await
+    {
+        let _ = write!(warning, "\nWarning: the skill files were not written, the next brief tries again: {e}.");
+    }
     for _ in 0..TRIES {
         let gone = || unavailable(StoreError::NotFound(Dream::id(dream.number)));
         let (mut current, revision) = get(&*items, dream.number).await.map_err(unavailable)?.ok_or_else(gone)?;
@@ -96,7 +114,12 @@ async fn dream_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
                     current.state = State::Done;
                     current.diary = written.first().map(|diary| diary.id.clone());
                 }
-                return Ok(answered(&current, verdicts.len()));
+                let mut answer = answered(&current, verdicts.len());
+                for found in &decided {
+                    let _ = write!(answer.text, "\n{}", found.line());
+                }
+                answer.text.push_str(&warning);
+                return Ok(answer);
             }
             Err(StoreError::Conflict { .. }) => {}
             Err(e) => return Err(unavailable(e)),
@@ -144,7 +167,10 @@ async fn verdicts(
             }
             written.push(id);
         }
-        if verdict == Judgement::Applied && written.is_empty() {
+        let known = dream.findings.iter().find(|known| known.id == finding);
+        if known.is_some_and(|known| known.kind == FindingKind::Proposal) {
+            written = known.map_or_else(Vec::new, |known| known.items.clone());
+        } else if verdict == Judgement::Applied && written.is_empty() {
             return Err(invalid(format!("Finding {finding}: applied names the items written or voted on.")));
         }
         verdicts.retain(|earlier| earlier.finding != finding);
