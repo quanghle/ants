@@ -34,11 +34,13 @@ use crate::records::direct_kv::{DirectKv, Lookup};
 mod add;
 mod ask;
 mod clone;
+mod export;
 pub mod held;
 pub mod mcp;
 mod memories;
 pub use memories::files_under;
 mod pause;
+pub mod payload;
 pub mod restart;
 mod retire;
 mod set;
@@ -436,7 +438,9 @@ async fn apply(
         AdminOp::Clone { new, settings } => {
             Box::pin(clone::apply(js, stores.shared(orders), orders, order, new, settings)).await
         }
-        AdminOp::ReadMemories => memories::apply(orders, order, stored_at).await,
+        AdminOp::ReadMemories { identity } => memories::apply(orders, order, identity.as_deref(), stored_at).await,
+        AdminOp::ExportProvider { identity } => export::export(js, orders, order, identity, stored_at).await,
+        AdminOp::ImportProvider { identity, payload } => export::import(js, orders, order, identity, payload).await,
         AdminOp::ReadSettings => settings::apply(orders, order),
         AdminOp::ReadMcp => mcp::apply(orders, order, None, stored_at).await,
         AdminOp::McpSignIn { server, callback } => {

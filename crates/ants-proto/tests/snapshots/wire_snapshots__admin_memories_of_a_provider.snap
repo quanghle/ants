@@ -1,0 +1,26 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "core": {
+    "whoami": "A reviewer."
+  },
+  "provider": {
+    "provider": "sugar",
+    "memories": [
+      {
+        "key": "lesson/deploy",
+        "content": "Tag first.",
+        "truncated": true
+      }
+    ],
+    "error": "provider sugar did not answer within 10s"
+  },
+  "skipped": [
+    {
+      "what": "provider memory big",
+      "why": "over 64 KiB"
+    }
+  ]
+}

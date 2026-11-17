@@ -4,6 +4,8 @@
 //!   sets them, which an admin edits with a set order.
 //! - Harness memories: the files of the ant's harness's `memory_files` globs ([`MemoryFile`]), and the bd memories of
 //!   the database `BD_DB` names in the ant's environment ([`BdMemories`]), read-only.
+//! - Provider memories ([`ProviderMemories`]): the memories view of the ant's provider, when it serves one and the
+//!   order names the ant's identity, read-only.
 //!
 //! A machine's daemon answers such an order only while it is online: one that waited longer than [`MEMORIES_FRESH`]
 //! in the stream for it is refused as stale. The outcome stays in a KV bucket, so what it carries is capped: each
@@ -40,6 +42,9 @@ pub struct Memories {
     /// The bd memories, when `BD_DB` is set in the ant's environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bd: Option<BdMemories>,
+    /// The memories view of the ant's provider, when it serves one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderMemories>,
     /// What was found but left out or cut short, and why.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<Skipped>,
@@ -81,12 +86,25 @@ pub struct BdMemories {
     pub error: Option<String>,
 }
 
+/// A memory of bd or of a provider, by its key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BdMemory {
     pub key: String,
     pub content: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
+}
+
+/// The memories view of an ant's provider.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderMemories {
+    /// The provider's name.
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memories: Vec<BdMemory>,
+    /// Why the provider's view could not be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// A memory found but left out, or cut short: its path, key or name, and why.

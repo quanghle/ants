@@ -51,9 +51,10 @@ mod threads;
 mod timeline;
 
 pub use admin::{
-    ASSISTANT_ORDER_KINDS, AdminOp, AdminOrder, AdminOutcome, FieldChange, HARNESSES_FIELD, Hidden, ORDER_CLOCK_SKEW,
-    ORDER_HOLD, ORDER_RULE, ORDER_SIGNING_CONTEXT, OrderError, OrderState, Settings, admin_outcome_key,
-    admin_outcome_of, canonical_json, covers_order, held_orders_key,
+    ADMIN_PAYLOADS, ASSISTANT_ORDER_KINDS, AdminOp, AdminOrder, AdminOutcome, AdminPayload, FieldChange,
+    HARNESSES_FIELD, Hidden, MAX_ADMIN_PAYLOAD, ORDER_CLOCK_SKEW, ORDER_HOLD, ORDER_RULE, ORDER_SIGNING_CONTEXT,
+    OrderError, OrderState, ProviderExport, Settings, admin_outcome_key, admin_outcome_of, canonical_json,
+    covers_order, held_orders_key,
 };
 pub use ant_request::{AntReply, AntRequest, AskedAnt};
 pub use approvals::{ApprovalDecision, ApprovalRequest, MAX_LABEL, ToolCall, Verdict};
@@ -114,7 +115,8 @@ pub use mcp::{
     MCP_FRESH, MCP_SERVERS_CAP, MCP_SIGN_IN_FOR, MCP_TEXT_CAP, McpReport, McpServerState, McpSignIn, McpStatus,
 };
 pub use memories::{
-    BdMemories, BdMemory, CoreMemories, MEMORIES_CAP, MEMORIES_FRESH, MEMORY_FILE_CAP, Memories, MemoryFile, Skipped,
+    BdMemories, BdMemory, CoreMemories, MEMORIES_CAP, MEMORIES_FRESH, MEMORY_FILE_CAP, Memories, MemoryFile,
+    ProviderMemories, Skipped,
 };
 pub use permissions::{Destination, LeafRole, PERMISSIONS_VERSION, Permissions, PermissionsVersion};
 pub use presence::{

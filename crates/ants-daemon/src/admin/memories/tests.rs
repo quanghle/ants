@@ -1,12 +1,82 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use ants_proto::provider::{
+    Ack, BoxFuture, Capabilities, Export, Host, ImportRequest, Info, InitializeParams, InitializeResult, MemoriesView,
+    MemoryEntry, Provider, RpcError,
+};
 use ants_proto::{AdminOp, OrderState};
+use serde_json::Value;
 use tokio::sync::Notify;
 
 use super::*;
 use crate::admin::ConfigFile;
 use crate::admin::restart::Restarts;
 use crate::harness::{Harnesses, parse_definitions};
+
+/// A provider named `name` declaring `capabilities`, which shows `memories`, exports `data` and keeps what it is asked
+/// for, or fails every call with `fail`.
+pub(crate) struct Fake {
+    pub name: &'static str,
+    pub capabilities: Capabilities,
+    pub memories: Vec<MemoryEntry>,
+    pub data: Value,
+    pub fail: Option<RpcError>,
+    pub asked: Mutex<Vec<AntRef>>,
+    pub imported: Mutex<Vec<ImportRequest>>,
+}
+
+impl Fake {
+    pub fn new(name: &'static str, capabilities: Capabilities) -> Self {
+        Self {
+            name,
+            capabilities,
+            memories: Vec::new(),
+            data: Value::Null,
+            fail: None,
+            asked: Mutex::default(),
+            imported: Mutex::default(),
+        }
+    }
+
+    pub async fn connect(self) -> (Arc<Self>, Connected) {
+        let fake = Arc::new(self);
+        let connected = crate::provider::connect(fake.clone()).await.expect("the fake connects");
+        (fake, connected)
+    }
+
+    fn answer<T: Send + 'static>(&self, answer: T) -> BoxFuture<'_, Result<T, RpcError>> {
+        Box::pin(std::future::ready(self.fail.clone().map_or(Ok(answer), Err)))
+    }
+}
+
+impl Provider for Fake {
+    fn initialize(
+        &self,
+        params: InitializeParams,
+        _host: Arc<dyn Host>,
+    ) -> BoxFuture<'_, Result<InitializeResult, RpcError>> {
+        let info = Info { name: self.name.to_owned(), version: "1".to_owned() };
+        Box::pin(std::future::ready(params.accept(&[1], info, self.capabilities)))
+    }
+
+    fn memories(&self, ant: AntRef) -> BoxFuture<'_, Result<MemoriesView, RpcError>> {
+        self.asked.lock().unwrap().push(ant);
+        self.answer(MemoriesView { memories: self.memories.clone() })
+    }
+
+    fn export(&self, ant: AntRef) -> BoxFuture<'_, Result<Export, RpcError>> {
+        self.asked.lock().unwrap().push(ant);
+        self.answer(Export { provider: self.name.to_owned(), data: self.data.clone() })
+    }
+
+    fn import(&self, request: ImportRequest) -> BoxFuture<'_, Result<Ack, RpcError>> {
+        self.imported.lock().unwrap().push(request);
+        self.answer(Ack {})
+    }
+}
+
+pub(crate) const MEMORIES_AND_EXPORT: Capabilities =
+    Capabilities { memories: true, export: true, ..Capabilities::NONE };
 
 fn write(path: &Path, text: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -75,7 +145,7 @@ async fn reads_only_the_files_of_the_globs_within_the_workdir_and_homes() {
     let globs = ["AGENTS.md", "CLAUDE.md", "GEMINI.md", "docs/**/*.md", "~/.claude/CLAUDE.md"];
     let outside_glob = outside.join("*.md").display().to_string();
     let harness = harness(&[&globs[..], &[outside_glob.as_str()]].concat());
-    let memories = read(&ant, Some(&harness), &env(&home)).await;
+    let memories = read(&ant, Some(&harness), &env(&home), None).await;
 
     assert_eq!(memories.core.whoami.as_deref(), Some("reviewer"));
     assert_eq!((memories.core.memory.as_deref(), memories.core.tasks.as_deref()), (Some("notes in NOTES.md"), None));
@@ -102,7 +172,7 @@ async fn memories_are_cut_at_each_file_s_cap_and_at_the_total_cap() {
         write(&workdir.join(format!("m{n}.md")), &big);
     }
     let ant = Ant::new("dev-a".parse().unwrap(), workdir.clone());
-    let memories = read(&ant, Some(&harness(&["*.md"])), &env(&home)).await;
+    let memories = read(&ant, Some(&harness(&["*.md"])), &env(&home), None).await;
     let first = &memories.files[0];
     assert_eq!((first.text.len(), first.size, first.truncated), (MEMORY_FILE_CAP, big.len() as u64, true));
     let shown: usize = memories.files.iter().map(|f| f.text.len()).sum();
@@ -117,6 +187,60 @@ async fn memories_are_cut_at_each_file_s_cap_and_at_the_total_cap() {
     assert_eq!(budget.take("a\"b", false), Some(("a\"b".to_owned(), false)), "6 bytes as JSON");
     assert_eq!(budget.take("\n\n\n", false), Some(("\n".to_owned(), true)), "4 bytes left");
     assert_eq!(budget.take("more", false), None);
+}
+
+/// The memories view of the ant's provider, asked by the ant's name and identity, comes right after the core memories
+/// within the same caps, what is left out being named.
+#[tokio::test]
+async fn the_provider_s_memories_are_shown_within_the_caps() {
+    let (home, workdir, _) = dirs("memories-provider");
+    write(&workdir.join("AGENTS.md"), "be brief");
+    let mut fake = Fake::new("brain", MEMORIES_AND_EXPORT);
+    let big = "y".repeat(MEMORY_FILE_CAP + 1);
+    fake.memories = (0..8).map(|n| MemoryEntry { key: format!("k{n}"), content: big.clone() }).collect();
+    fake.memories.insert(0, MemoryEntry { key: "style".to_owned(), content: "terse".to_owned() });
+    let (fake, connected) = fake.connect().await;
+    let ant = Ant::new("dev-a".parse().unwrap(), workdir.clone());
+    let of = Of { connected: &connected, identity: Some("1f") };
+    let memories = read(&ant, Some(&harness(&["AGENTS.md"])), &env(&home), Some(of)).await;
+
+    let asked = fake.asked.lock().unwrap().clone();
+    assert_eq!(asked, [AntRef { ant: ant.name.clone(), identity: "1f".to_owned() }]);
+    let provider = memories.provider.expect("the provider shows memories");
+    assert_eq!((provider.provider.as_str(), provider.error), ("brain", None));
+    let style = BdMemory { key: "style".to_owned(), content: "terse".to_owned(), truncated: false };
+    assert_eq!(provider.memories[0], style);
+    assert_eq!((provider.memories[1].content.len(), provider.memories[1].truncated), (MEMORY_FILE_CAP, true));
+    assert!(provider.memories.len() < 9, "the total cap leaves some out");
+    let skipped: Vec<&str> = memories.skipped.iter().map(|s| s.what.as_str()).collect();
+    assert!(skipped.contains(&"provider memory k7"), "{skipped:?}");
+    let agents = workdir.join("AGENTS.md").display().to_string();
+    assert!(skipped.contains(&agents.as_str()), "the harness's files come after the provider's: {skipped:?}");
+    assert!(serde_json::to_vec(&provider.memories).unwrap().len() < MEMORIES_CAP + 1024);
+}
+
+/// A provider failing, or not asked as the order names no identity, is noted, the rest read all the same; one
+/// showing no memories shows nothing.
+#[tokio::test]
+async fn a_provider_failing_is_noted_not_fatal() {
+    let (home, workdir, _) = dirs("memories-provider-fails");
+    let mut ant = Ant::new("dev-a".parse().unwrap(), workdir);
+    ant.tasks = Some("triage".to_owned());
+    let mut fake = Fake::new("brain", MEMORIES_AND_EXPORT);
+    fake.fail = Some(RpcError::unavailable("the brain sleeps"));
+    let (_, failing) = fake.connect().await;
+    let memories = read(&ant, None, &env(&home), Some(Of { connected: &failing, identity: Some("1f") })).await;
+    assert_eq!(memories.core.tasks.as_deref(), Some("triage"));
+    let provider = memories.provider.unwrap();
+    assert!(provider.memories.is_empty());
+    assert!(provider.error.unwrap().contains("the brain sleeps"));
+
+    let (_, fine) = Fake::new("brain", MEMORIES_AND_EXPORT).connect().await;
+    let unnamed = read(&ant, None, &env(&home), Some(Of { connected: &fine, identity: None })).await;
+    assert!(unnamed.provider.unwrap().error.unwrap().contains("names no identity"));
+    let (_, none) = Fake::new("tools", Capabilities { tools: true, ..Capabilities::NONE }).connect().await;
+    let without = read(&ant, None, &env(&home), Some(Of { connected: &none, identity: Some("1f") })).await;
+    assert_eq!(without.provider, None);
 }
 
 /// The built-in harnesses name their memory files; a config table replacing one keeps them unless it sets its own.
@@ -153,14 +277,14 @@ async fn bd_memories_are_listed_when_the_ant_s_environment_names_a_database() {
     let mut ant = Ant::new("dev-a".parse().unwrap(), workdir.clone());
     ant.env.insert("BD_DB".to_owned(), "/srv/bd.db".to_owned());
     let env = Env { home, bd: bd.into(), bd_db: Some("/daemon/bd.db".to_owned()) };
-    let memories = read(&ant, None, &env).await;
+    let memories = read(&ant, None, &env, None).await;
     let bd = memories.bd.expect("BD_DB is set");
     assert_eq!(bd.db, "/srv/bd.db", "the ant's own env wins");
     assert_eq!(bd.memories, [BdMemory { key: "k1".to_owned(), content: "/srv/bd.db".to_owned(), truncated: false }]);
     assert_eq!(bd.error, None);
 
     let env = Env { bd: "no-such-bd-command".into(), ..env };
-    let failed = read(&ant, None, &env).await.bd.unwrap();
+    let failed = read(&ant, None, &env, None).await.bd.unwrap();
     assert!(failed.error.unwrap().starts_with("running bd"), "a failure is told, not fatal");
 }
 
@@ -191,19 +315,20 @@ async fn a_read_is_answered_from_the_config_only_while_fresh() {
             "alice".parse().unwrap(),
             "m1".parse().unwrap(),
             ant.parse().unwrap(),
-            AdminOp::ReadMemories,
+            AdminOp::ReadMemories { identity: None },
             "",
         )
     };
 
-    let fresh = apply(&orders, &order("dev-a"), Utc::now()).await;
+    let fresh = apply(&orders, &order("dev-a"), None, Utc::now()).await;
     assert_eq!(fresh.state, OrderState::Applied, "{fresh:?}");
     let memories: Memories = serde_json::from_value(fresh.result.unwrap()).unwrap();
     assert_eq!((memories.core.tasks.as_deref(), memories.harness.as_deref()), (Some("triage"), Some("claude")));
 
-    let stale = apply(&orders, &order("dev-a"), Utc::now() - MEMORIES_FRESH - chrono::TimeDelta::seconds(1)).await;
+    let stale =
+        apply(&orders, &order("dev-a"), None, Utc::now() - MEMORIES_FRESH - chrono::TimeDelta::seconds(1)).await;
     assert_eq!(stale.state, OrderState::Refused);
     assert!(stale.reason.unwrap().starts_with("stale"));
-    let unknown = apply(&orders, &order("dev-z"), Utc::now()).await;
+    let unknown = apply(&orders, &order("dev-z"), None, Utc::now()).await;
     assert!(unknown.reason.unwrap().contains("lists no ant dev-z"));
 }

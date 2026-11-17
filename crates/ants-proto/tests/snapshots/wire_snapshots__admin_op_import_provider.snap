@@ -1,0 +1,14 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "kind": "import_provider",
+  "identity": "0f1e",
+  "payload": {
+    "id": "019a7d2e-0000-7000-8000-000000000009",
+    "machine": "studio",
+    "size": 300000,
+    "sha256": "abababababababababababababababababababababababababababababababab"
+  }
+}

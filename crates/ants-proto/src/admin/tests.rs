@@ -184,7 +184,7 @@ fn an_assistant_signs_an_order_for_its_human() {
 fn an_order_rule_covers_an_op_of_its_kind() {
     assert!(covers_order("order:*", &AdminOp::Retire));
     assert!(covers_order("order:pause", &AdminOp::Pause));
-    assert!(covers_order("order:read_memories", &AdminOp::ReadMemories));
+    assert!(covers_order("order:read_memories", &AdminOp::ReadMemories { identity: None }));
     for (rule, op) in [("order:resume", AdminOp::Pause), ("pause", AdminOp::Pause), ("execute:*", AdminOp::Pause)] {
         assert!(!covers_order(rule, &op), "{rule}");
     }
@@ -195,11 +195,16 @@ fn an_order_rule_covers_an_op_of_its_kind() {
         AdminOp::Restart { now: true },
         AdminOp::Add { settings: Map::new(), assistant_of: None },
         AdminOp::Retire,
-        AdminOp::ReadMemories,
+        AdminOp::ReadMemories { identity: None },
         AdminOp::ReadSettings,
         AdminOp::ReadMcp,
         AdminOp::McpSignIn { server: "github".to_owned(), callback: None },
         AdminOp::Clone { new: p("dev-b"), settings: Map::new() },
+        AdminOp::ExportProvider { identity: "1f".to_owned() },
+        AdminOp::ImportProvider {
+            identity: "1f".to_owned(),
+            payload: AdminPayload { id: Uuid::now_v7(), machine: m("box"), size: 2, sha256: "ab".to_owned() },
+        },
     ];
     for op in ops {
         assert_eq!(op.for_assistant(), ASSISTANT_ORDER_KINDS.contains(&op.kind()), "{}", op.kind());
@@ -210,7 +215,7 @@ fn an_order_rule_covers_an_op_of_its_kind() {
 #[test]
 fn an_outcome_names_what_was_ordered() {
     let team = Team::new();
-    let order = team.order(AdminOp::ReadMemories, team.jwt("alice", &[ADMIN_TAG], None));
+    let order = team.order(AdminOp::ReadMemories { identity: None }, team.jwt("alice", &[ADMIN_TAG], None));
     let outcome = AdminOutcome::of(&order, OrderState::Applied, None, Some(json!({ "whoami": "x" })));
     assert_eq!(outcome.key(), order.outcome_key());
     let json = serde_json::to_value(&outcome).unwrap();

@@ -5,8 +5,8 @@ use super::{Permissions, ack_subjects, kv_stream, ordered_consumer_subjects};
 #[cfg(doc)]
 use crate::admin_outcome_key;
 use crate::{
-    COLONY_BUCKET, DEVICES_BUCKET, HUMANS_BUCKET, IDENTITIES_BUCKET, MACHINES_BUCKET, Machine, STREAM, SUGAR_STREAM,
-    admin_consumer, host_inbox_prefix, subject,
+    AdminPayload, COLONY_BUCKET, DEVICES_BUCKET, FILES_STREAM, HUMANS_BUCKET, IDENTITIES_BUCKET, MACHINES_BUCKET,
+    Machine, STREAM, SUGAR_STREAM, admin_consumer, host_inbox_prefix, subject,
 };
 
 impl Permissions {
@@ -29,7 +29,9 @@ impl Permissions {
     /// identities in [`SUGAR_STREAM`]: it creates the stream when missing, its create answering with the stream's info
     /// as well, appends to any identity's subject ([`subject::ALL_SUGAR`]), each event expecting the subject's last
     /// sequence, and reads them by direct gets, the last of a subject by its subject or a batch from a sequence by the
-    /// request. Readers verify each event as signed with the ant's own credentials and chained to the one before.
+    /// request. Readers verify each event as signed with the ant's own credentials and chained to the one before. It
+    /// stores and reads the payloads of the machine's admin orders in [`FILES_STREAM`] ([`AdminPayload::chunks_of`]):
+    /// the exports of its ants' providers.
     /// Nothing else: no other machine's record or outcomes, no ant's identity record, no message to or from an ant. No
     /// ant gets any of it.
     pub fn for_host(machine: &Machine) -> Self {
@@ -54,6 +56,8 @@ impl Permissions {
             subject::ALL_SUGAR.to_owned(),
             format!("$JS.API.DIRECT.GET.{SUGAR_STREAM}"),
             format!("$JS.API.DIRECT.GET.{SUGAR_STREAM}.{}", subject::ALL_SUGAR),
+            AdminPayload::chunks_of(machine),
+            format!("$JS.API.DIRECT.GET.{FILES_STREAM}.{}", AdminPayload::chunks_of(machine)),
         ];
         let humans = kv_stream(HUMANS_BUCKET);
         publish.extend([format!("$JS.API.STREAM.INFO.{humans}"), format!("$JS.API.DIRECT.GET.{humans}.>")]);

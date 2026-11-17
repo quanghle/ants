@@ -1146,3 +1146,24 @@ fn provider_protocol() {
     snap("provider_export", &export);
     snap("provider_import_request", &ImportRequest { ant: ant.ant, identity: ant.identity, export });
 }
+
+#[test]
+fn admin_orders_of_providers() {
+    snap("admin_op_read_memories", &AdminOp::ReadMemories { identity: Some("0f1e".into()) });
+    let payload = AdminPayload { id: id(9), machine: machine(), size: 300_000, sha256: "ab".repeat(32) };
+    snap("admin_op_export_provider", &AdminOp::ExportProvider { identity: "0f1e".into() });
+    snap("admin_op_import_provider", &AdminOp::ImportProvider { identity: "0f1e".into(), payload: payload.clone() });
+    snap("admin_provider_export", &ProviderExport { provider: Some("sugar".into()), payload: Some(payload) });
+    let provider = ProviderMemories {
+        provider: "sugar".into(),
+        memories: vec![BdMemory { key: "lesson/deploy".into(), content: "Tag first.".into(), truncated: true }],
+        error: Some("provider sugar did not answer within 10s".into()),
+    };
+    let memories = Memories {
+        core: CoreMemories { whoami: Some("A reviewer.".into()), ..CoreMemories::default() },
+        provider: Some(provider),
+        skipped: vec![Skipped { what: "provider memory big".into(), why: "over 64 KiB".into() }],
+        ..Memories::default()
+    };
+    snap("admin_memories_of_a_provider", &memories);
+}

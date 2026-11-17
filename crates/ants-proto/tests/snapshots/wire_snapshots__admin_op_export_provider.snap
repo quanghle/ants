@@ -1,0 +1,8 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "kind": "export_provider",
+  "identity": "0f1e"
+}

@@ -195,9 +195,10 @@ pub(crate) enum AntCommand {
     },
     /// Export ANT to a file another bus imports it from (`ants ant import`): its identity record (id, birth, avatar,
     /// prompts), the settings that make it (whoami, harness, model, reasoning_effort, context, fallback) and its
-    /// home's memory files, packed between prompts. Leaves out its task database, other settings, credentials,
-    /// environment, workdir, worktrees, sessions and history. Plain JSON, not encrypted. Runs on the machine whose
-    /// config file lists ANT, with a human's credentials.
+    /// home's memory files, packed between prompts, and the part of its provider when the provider exports one, which
+    /// an admin order asks the daemon of this machine for (admin credentials; --no-provider leaves it out). Leaves out
+    /// its task database, other settings, credentials, environment, workdir, worktrees, sessions and history. Plain
+    /// JSON, not encrypted. Runs on the machine whose config file lists ANT, with a human's credentials.
     Export {
         #[arg(add = ArgValueCandidates::new(completions::ants))]
         ant: UserId,
@@ -211,12 +212,17 @@ pub(crate) enum AntCommand {
         /// Config file listing ANT (default: ~/.ants/config.toml).
         #[arg(long, env = "ANTS_CONFIG")]
         config: Option<PathBuf>,
+        /// Leave out the part of ANT's provider, which otherwise the daemon of this machine asks the provider for.
+        #[arg(long)]
+        no_provider: bool,
     },
     /// Import an ant from a file `ants ant export` wrote, as `ants add` adds one: create its identity record on this
     /// bus, refused when an ant there holds its name or its id, list it in the config file with the exported settings
     /// (the flags given win), give it a new key and restore its memories into its empty home, with no tasks. Harness
-    /// memory files are left out, with a warning, when the ant runs another harness here. Needs a human's
-    /// credentials.
+    /// memory files are left out, with a warning, when the ant runs another harness here. The part of a provider the
+    /// export carries goes to the ant's provider here by an admin order to the daemon of this machine, of a provider
+    /// of the same name only; when it cannot, a warning says why and --provider-only tries again. Needs a human's
+    /// credentials, admin ones for the provider's part.
     Import(Box<crate::export::ImportArgs>),
     /// Clear the moved mark `ants ant export --move` set on ANT, so a daemon listing it serves it again.
     Unseal {
@@ -274,7 +280,9 @@ pub(crate) async fn run(nats: &crate::connection::Nats<'_>, command: AntCommand)
         AntCommand::Resume { order: Order { ant, machine, wait } } => {
             pause::run(nats, &ant, machine, false, wait).await
         }
-        AntCommand::Export { ant, out, seal, config } => export::export(nats, &ant, out, seal, config).await,
+        AntCommand::Export { ant, out, seal, config, no_provider } => {
+            Box::pin(export::export(nats, &ant, out, seal, config, !no_provider)).await
+        }
         AntCommand::Import(args) => Box::pin(export::import(nats, *args)).await,
         AntCommand::Unseal { ant } => export::unseal(nats, &ant).await,
     }

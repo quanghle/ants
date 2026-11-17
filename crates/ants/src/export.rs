@@ -8,6 +8,10 @@
 //! writes them back through [`with_settings`] and [`restore`]. It lists the settings in the ant's `[[ant]]` table, from
 //! which the first daemon serving the ant creates its shared settings on the new bus.
 //!
+//! When the ant's provider exports what it holds of the ant, the export carries that too ([`Export::provider`]), which
+//! only the daemon serving the ant asks the provider for, and an import hands it to the ant's provider on the new bus
+//! through the daemon there ([`provider`]).
+//!
 //! No bus holds two copies of one ant: an import creates the ant's identity record by a KV create, refused when a record
 //! holds its name, and refused first when one holds its id. The id is looked up by reading the whole identities bucket,
 //! one record per ant, which suits a team's bus; two imports of one ant under different names at the same moment could
@@ -33,6 +37,8 @@ use serde::{Deserialize, Serialize};
 use crate::add::{self, AddArgs};
 use crate::admin::settings::SharedRecord;
 use crate::serve::AntOptions;
+
+mod provider;
 
 /// The version of [`Export`] this build writes and reads.
 pub const VERSION: u32 = 1;
@@ -71,6 +77,9 @@ pub struct Export {
     pub settings: Settings,
     #[serde(default)]
     pub files: Vec<Packed>,
+    /// What the ant's provider holds of it, as the provider exported it, for a provider of the same name only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ants_proto::provider::Export>,
 }
 
 /// What makes the ant, of its `[[ant]]` table. Its role on a bus (capabilities, escalate_to, allow, memory, tasks) and
@@ -231,13 +240,14 @@ pub fn restore(home: &Path, files: &[Packed], harness_kept: bool) -> Result<Vec<
     Ok(dropped)
 }
 
-/// `ants ant export`.
+/// `ants ant export`; `with_provider` asks the ant's provider for its part through the daemon of this machine.
 pub async fn export(
     nats: &crate::connection::Nats<'_>,
     ant: &UserId,
     out: Option<PathBuf>,
     seal: bool,
     config: Option<PathBuf>,
+    with_provider: bool,
 ) -> Result<()> {
     if !nats.me.role.is_human() {
         bail!("the credentials of {} are an ant's; an export runs as a human", nats.me.id);
@@ -270,12 +280,20 @@ pub async fn export(
         None => None,
     };
     let harness = listed.harness.as_deref().and_then(|name| loaded.harnesses.get(name).ok());
+    let part = if with_provider {
+        let machine = provider::machine(&path).await?;
+        Box::pin(provider::export(nats, &js, machine, ant, &identity.id)).await?
+    } else {
+        None
+    };
 
-    let export = pack_ant(listed, harness.as_deref(), shared.as_ref(), identity, nats.account.clone())?;
+    let mut export = pack_ant(listed, harness.as_deref(), shared.as_ref(), identity, nats.account.clone())?;
+    export.provider = part;
     write_new(&out, &serde_json::to_vec_pretty(&export)?)?;
     let count = |kind| export.files.iter().filter(|f| f.kind == kind).count();
+    let part = export.provider.as_ref().map_or_else(String::new, |p| format!(", the part of provider {}", p.provider));
     println!(
-        "{ant} exported to {}: its identity, settings, {} core and {} harness memory files; the file is not \
+        "{ant} exported to {}: its identity, settings, {} core and {} harness memory files{part}; the file is not \
          encrypted and may hold sensitive memory: keep it safe",
         out.display(),
         count(Kind::Core),
@@ -315,6 +333,7 @@ fn pack_ant(
         identity: AntIdentity { moved: None, ..identity },
         settings: settings_of(ant, shared)?,
         files,
+        provider: None,
     })
 }
 
@@ -472,6 +491,13 @@ pub struct ImportArgs {
     /// Configuration of the machine's leaf node (default: ~/.config/ants/leaf.conf, when it exists).
     #[arg(long, value_name = "FILE", requires = "enroll")]
     pub leaf_config: Option<PathBuf>,
+    /// Leave out the part of the ant's provider the export carries.
+    #[arg(long, conflicts_with = "provider_only")]
+    pub no_provider: bool,
+    /// Only hand the part of the ant's provider to the provider of the ant imported already, through the daemon of
+    /// this machine, as when the import could not.
+    #[arg(long)]
+    pub provider_only: bool,
     #[command(flatten)]
     pub options: AntOptions,
 }
@@ -494,6 +520,7 @@ async fn import_with(nats: &crate::connection::Nats<'_>, args: ImportArgs, store
         bail!("{} is an export of version {}, and this ants reads version {VERSION}", file.display(), export.ants_ant);
     }
     let name = args.rename.unwrap_or_else(|| export.identity.ant.clone());
+    let (no_provider, provider_only) = (args.no_provider, args.provider_only);
     let add = AddArgs {
         name: name.clone(),
         config: args.config,
@@ -509,6 +536,13 @@ async fn import_with(nats: &crate::connection::Nats<'_>, args: ImportArgs, store
         Some(path) => path.clone(),
         None => config::default_path()?,
     };
+    if provider_only {
+        if !config::load(&path)?.ants.iter().any(|ant| ant.name == name) {
+            bail!("{} lists no ant {name}: --provider-only is for an ant imported already", path.display());
+        }
+        let (_, js) = nats.connect("ants-import").await?;
+        return import_provider(nats, &js, &export, &name, &path, true).await;
+    }
     if config::Summary::load(&path)?.creds_of(&name).is_some() {
         bail!("{} lists {name} already: --as NEW imports it under another name", path.display());
     }
@@ -527,19 +561,7 @@ async fn import_with(nats: &crate::connection::Nats<'_>, args: ImportArgs, store
     let kv = DirectKv::whole(&js, nats.domain, IDENTITIES_BUCKET).await?;
     let identity = AntIdentity { ant: name.clone(), moved: None, ..export.identity.clone() };
     create(&js, &kv, &identity).await?;
-    let shared = crate::admin::settings::shared_of(nats, &js, &name)
-        .await
-        .inspect_err(|e| tracing::debug!("not comparing the shared settings: {e:#}"));
-    if let Some(SharedRecord::Verified(shared)) = shared.ok().flatten() {
-        let drift = shared.drift(&ants_daemon::profile::shared::local_fields(ant));
-        if !drift.is_empty() {
-            eprintln!(
-                "warning: the bus holds shared settings of {name} already, which serve in place of the imported {}: \
-                 `ants ant set {name} FIELD=VALUE` changes them",
-                drift.join(", ")
-            );
-        }
-    }
+    warn_shared_drift(nats, &js, &name, ant).await;
     let done = async {
         let harness_kept = listing.harness == export.settings.harness;
         let dropped = restore(&home, &export.files, harness_kept)?;
@@ -569,6 +591,71 @@ async fn import_with(nats: &crate::connection::Nats<'_>, args: ImportArgs, store
         identity.prompts,
         home.display()
     );
+    match &export.provider {
+        Some(part) if no_provider => eprintln!("note: the part of provider {} is left out", part.provider),
+        _ => import_provider(nats, &js, &export, &name, &listing.path, false).await?,
+    }
+    Ok(())
+}
+
+/// Warn when the bus holds shared settings of `name` that differ from the imported `ant`'s, as they serve in its place.
+async fn warn_shared_drift(
+    nats: &crate::connection::Nats<'_>,
+    js: &async_nats::jetstream::Context,
+    name: &UserId,
+    ant: &Ant,
+) {
+    let shared = crate::admin::settings::shared_of(nats, js, name)
+        .await
+        .inspect_err(|e| tracing::debug!("not comparing the shared settings: {e:#}"));
+    if let Some(SharedRecord::Verified(shared)) = shared.ok().flatten() {
+        let drift = shared.drift(&ants_daemon::profile::shared::local_fields(ant));
+        if !drift.is_empty() {
+            eprintln!(
+                "warning: the bus holds shared settings of {name} already, which serve in place of the imported {}: \
+                 `ants ant set {name} FIELD=VALUE` changes them",
+                drift.join(", ")
+            );
+        }
+    }
+}
+
+/// Hand the provider of `name`, which the config file at `path` lists, its part of `export`, if any, telling how it
+/// went. Unless `strict`, a failure is a warning, the rest of the ant imported already.
+async fn import_provider(
+    nats: &crate::connection::Nats<'_>,
+    js: &async_nats::jetstream::Context,
+    export: &Export,
+    name: &UserId,
+    path: &Path,
+    strict: bool,
+) -> Result<()> {
+    let Some(part) = &export.provider else {
+        if strict {
+            bail!("the export carries no part of a provider");
+        }
+        return Ok(());
+    };
+    let imported = async {
+        let machine = provider::machine(path).await?;
+        Box::pin(provider::import(nats, js, machine, name, &export.identity.id, part)).await
+    };
+    let why = match imported.await {
+        Ok(provider::Imported::Done) => {
+            println!("provider {} took its part of {name}", part.provider);
+            return Ok(());
+        }
+        Ok(provider::Imported::Pending(note)) => {
+            eprintln!("note: {note}; it hands provider {} its part of {name} once it takes it", part.provider);
+            return Ok(());
+        }
+        Ok(provider::Imported::Refused(why)) => why,
+        Err(e) => format!("the part of provider {} of {name} is not imported: {e:#}", part.provider),
+    };
+    if strict {
+        bail!(why);
+    }
+    eprintln!("warning: {why}; `ants ant import FILE --provider-only` tries again");
     Ok(())
 }
 

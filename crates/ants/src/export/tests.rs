@@ -152,7 +152,7 @@ async fn an_ant_moves_to_another_bus_with_its_identity_and_memories() {
     let mut shared = SharedSettings::new(p("dev-a"), fields, m1, None);
     assert!(host_kv.create(&shared.key(), serde_json::to_vec(&shared).unwrap()).await.unwrap());
     let unsigned = dir.join("unsigned.ant");
-    export(&nats, &p("dev-a"), Some(unsigned.clone()), false, Some(config.clone())).await.unwrap();
+    export(&nats, &p("dev-a"), Some(unsigned.clone()), false, Some(config.clone()), false).await.unwrap();
     let exported: Export = serde_json::from_slice(&std::fs::read(&unsigned).unwrap()).unwrap();
     assert_eq!(exported.settings.whoami.as_deref(), Some("Reviewer"), "an unverified record is left out");
     let a_creds = server.creds_as(&p("dev-a"), Role::Ant);
@@ -161,8 +161,8 @@ async fn an_ant_moves_to_another_bus_with_its_identity_and_memories() {
     assert!(ants_daemon::profile::shared::write(&host_kv, &mut shared, &signer, None).await.unwrap());
 
     let file = dir.join("dev-a.ant");
-    export(&nats, &p("dev-a"), Some(file.clone()), true, Some(config.clone())).await.unwrap();
-    let err = export(&nats, &p("dev-a"), Some(file.clone()), false, Some(config.clone())).await.unwrap_err();
+    export(&nats, &p("dev-a"), Some(file.clone()), true, Some(config.clone()), false).await.unwrap();
+    let err = export(&nats, &p("dev-a"), Some(file.clone()), false, Some(config.clone()), false).await.unwrap_err();
     assert!(err.to_string().contains("not overwriting"), "{err}");
     let (record, _) = read(&kv, &p("dev-a")).await.unwrap();
     let mark = record.unwrap().moved.expect("--move marks the ant moved");
@@ -223,13 +223,20 @@ async fn an_ant_moves_to_another_bus_with_its_identity_and_memories() {
     let err = import(&["--as", "dev-b"]).await.unwrap_err().to_string();
     assert!(err.contains("lists dev-b already"), "{err}");
 
-    // On another harness, the harness memory stays behind.
+    // On another harness, the harness memory stays behind. The provider's part, which needs admin credentials, is
+    // only warned about, and --provider-only, which tries it alone, fails.
     kv.delete("dev-b").await.unwrap();
+    let with_part = dir.join("with-part.ant");
+    let part = ants_proto::provider::Export { provider: "sugar".to_owned(), data: serde_json::json!({ "log": [1] }) };
+    let exported = Export { provider: Some(part.clone()), ..exported };
+    std::fs::write(&with_part, serde_json::to_vec(&exported).unwrap()).unwrap();
+    let read_back: Export = serde_json::from_slice(&std::fs::read(&with_part).unwrap()).unwrap();
+    assert_eq!(read_back.provider, Some(part));
     let config_c = dir.join("config-c.toml");
     std::fs::write(&config_c, "harness = \"copilot\"\n").unwrap();
     let (home_c, out_c) = (dir.join("home-c"), dir.join("keys/dev-a.creds"));
     let args = [
-        file_arg,
+        with_part.to_str().unwrap(),
         "--config",
         config_c.to_str().unwrap(),
         "--workdir",
@@ -250,6 +257,9 @@ async fn an_ant_moves_to_another_bus_with_its_identity_and_memories() {
     let dev_a = &loaded.ants.iter().find(|a| a.name == p("dev-a")).unwrap();
     assert_eq!((dev_a.harness.as_deref(), dev_a.model.as_deref()), (Some("codex"), Some("gpt-5")), "the flags win");
     assert_eq!(dev_a.whoami.as_deref(), Some("Lead"));
+    let args = [with_part.to_str().unwrap(), "--config", config_c.to_str().unwrap(), "--provider-only"];
+    let err = Box::pin(import_as(&nats, &args)).await.unwrap_err().to_string();
+    assert!(err.contains("no admin role"), "{err}");
 
     // Unseal clears the mark of a moved ant, and only that.
     let moved = AntIdentity { moved: Some(mark), ..identity.clone() };

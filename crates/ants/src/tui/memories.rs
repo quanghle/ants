@@ -22,7 +22,7 @@ pub enum State {
     Unasked,
     Asking,
     Failed(String),
-    /// The memories as text, and how many files and bd memories they hold.
+    /// The memories as text, and how many files, bd and provider memories they hold.
     Read(String, usize),
 }
 
@@ -61,7 +61,9 @@ impl Page {
         }
         self.state = match read {
             Ok(memories) => {
-                let held = memories.files.len() + memories.bd.as_ref().map_or(0, |bd| bd.memories.len());
+                let held = memories.files.len()
+                    + memories.bd.as_ref().map_or(0, |bd| bd.memories.len())
+                    + memories.provider.as_ref().map_or(0, |provider| provider.memories.len());
                 State::Read(crate::admin::memories::render(ant, memories), held)
             }
             Err(e) => State::Failed(e.clone()),
@@ -69,7 +71,7 @@ impl Page {
         self.scroll = 0;
     }
 
-    /// How many files and bd memories the tab counts.
+    /// How many files, bd and provider memories the tab counts.
     pub fn count(&self) -> String {
         match &self.state {
             State::Read(_, held) => held.to_string(),

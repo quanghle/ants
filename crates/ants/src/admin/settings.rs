@@ -610,7 +610,8 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
             (served.harness.model_settings.model.as_deref(), served.drift.get()),
             (Some("o3"), Vec::<String>::new())
         );
-        let (_, read_memories) = orders::send(&admin, &js, None, &dev_a, AdminOp::ReadMemories, WAIT).await.unwrap();
+        let (_, read_memories) =
+            orders::send(&admin, &js, None, &dev_a, AdminOp::ReadMemories { identity: None }, WAIT).await.unwrap();
         let memories: ants_proto::Memories = serde_json::from_value(read_memories.unwrap().result.unwrap()).unwrap();
         assert_eq!(
             (memories.core.whoami.as_deref(), memories.core.memory.as_deref()),

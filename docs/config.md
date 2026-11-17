@@ -631,7 +631,7 @@ again only when its frame changes.
 
 `ants ant export ANT` writes the ant to one plain JSON file (default `./ANT.ant`, mode `0600`, never overwritten) for
 another bus, as for a new job; `ants ant import FILE` there adds it from the file, as `ants add` does, with a new key.
-The file is `{"ants_ant": 1, "created_at", "bus", "identity", "settings", "files"}`:
+The file is `{"ants_ant": 1, "created_at", "bus", "identity", "settings", "files", "provider"}`:
 
 - `bus`: the public key of the account of the bus exported from.
 - `identity`: the ant's identity record, unmarked: its `id`, `born`, `avatar`, `color`, `prompts` and `cloned_from`.
@@ -643,6 +643,12 @@ The file is `{"ants_ant": 1, "created_at", "bus", "identity", "settings", "files
   most 64 MiB in all. `kind` is `harness` for the files of its harness's [memory files](#memory-files) globs, taken
   relative to the home (`~/` globs are left out), and `core` for every other regular file of the home, symbolic
   links not followed.
+- `provider`: what the ant's provider holds of it, `{provider, data}`, as the provider exported it, `data` its own
+  form; left out when the ant's provider exports nothing, or with `--no-provider`. Only the daemon serving the ant
+  reaches its provider, so the export sends this machine's daemon an `export_provider` admin order
+  ([auth.md](auth.md#admin-orders)), which needs a human device's admin credentials and the daemon online: the daemon
+  stores the provider's export in `ants_files` (at most 64 MiB), where the export reads it. A provider failing fails
+  the export, naming `--no-provider`.
 
 Left out: the home's `worktrees`, `answered`, `buried`, `mcp.json`, `mcp.sock`, `lifecycle`, `.git`, `.beads` and `.bd`, the task
 database `BD_DB` names when it lies in the home, the rest of the ant's settings (its role on the bus: `capabilities`,
@@ -676,6 +682,12 @@ the mark; `ants auth revoke ANT` ends the ant on the old bus once the import suc
    them later. The first daemon serving it creates its shared settings on the new bus from that table; when the bus
    holds shared settings of the name already, those serve instead, and the import warns which imported fields they
    set otherwise.
+5. Hands the file's `provider` to the ant's provider through an `import_provider` admin order to this machine's
+   daemon, the export stored in `ants_files` for it, which the daemon carries out once it reads its config file
+   listing the ant: only to a provider of the same name, which takes exports. Whatever stops it (credentials
+   without the admin role, the daemon offline, another provider) is only a warning, the rest imported:
+   `--provider-only` hands that part again, alone, to the ant the config file lists already. `--no-provider` leaves it
+   out.
 
 A failed import takes back the record it created and the files it restored. `--as NEW` imports the ant under another
 name, keeping its id, birth, avatar and prompts. The ant starts with no tasks.

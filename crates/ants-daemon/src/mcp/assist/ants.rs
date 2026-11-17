@@ -260,7 +260,7 @@ impl Hub {
             "restart" => AdminOp::Restart { now: false },
             "restart_now" => AdminOp::Restart { now: true },
             "read_settings" => AdminOp::ReadSettings,
-            "read_memories" => AdminOp::ReadMemories,
+            "read_memories" => AdminOp::ReadMemories { identity: None },
             "set" => match args.changes {
                 Some(changes) if !changes.is_empty() => AdminOp::Set {
                     changes: changes.into_iter().map(SetChange::into_field_change).collect::<Result<_, _>>()?,

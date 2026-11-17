@@ -6,6 +6,9 @@
 //! - Harness memories: the files matching the `memory_files` globs of the ant's harness, relative to its workdir or
 //!   under `~`, and the bd memories of the database `BD_DB` names in its environment (its `env`, its harness's, the
 //!   daemon's), as `bd memories --json` lists them.
+//! - Provider memories: the memories view of the ant's provider ([`crate::provider::of`]), when it serves one and the
+//!   order names the ant's identity, read after the core memories, so they come before the harness's in the caps. A
+//!   provider failing or slower than [`PROVIDER_TIMEOUT`] is noted in [`ProviderMemories::error`], not a refusal.
 //!
 //! A file is read only if, its symbolic links resolved, it still matches one of the globs, their own links resolved,
 //! and lies under the ant's workdir, its home or the home directory: a link out of those paths is named in
@@ -24,9 +27,10 @@ use std::time::Duration;
 
 #[cfg(doc)]
 use ants_proto::AdminOp;
+use ants_proto::provider::{AntRef, Capability, Connected};
 use ants_proto::{
     AdminOrder, AdminOutcome, BdMemories, BdMemory, CoreMemories, MEMORIES_CAP, MEMORIES_FRESH, MEMORY_FILE_CAP,
-    Memories, MemoryFile, Skipped,
+    Memories, MemoryFile, ProviderMemories, Skipped,
 };
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -41,20 +45,22 @@ const MAX_FILES: usize = 64;
 const MAX_ENTRIES: usize = 10_000;
 /// How long `bd memories` may take.
 const BD_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the ant's provider may take to show its memories.
+pub(super) const PROVIDER_TIMEOUT: Duration = Duration::from_secs(10);
+/// The most characters of a provider's error shown.
+const MAX_ERROR: usize = 300;
 
 const OVER_CAP: &str = "over the size cap of a memories read";
 const OUTSIDE: &str = "links outside the memory files configured and the ant's workdir and home";
 
-pub(super) async fn apply(orders: &Orders, order: &AdminOrder, stored_at: DateTime<Utc>) -> AdminOutcome {
-    let waited = Utc::now() - stored_at;
-    if waited > MEMORIES_FRESH {
-        return refused(
-            order,
-            &format!(
-                "stale: it waited {}s for the machine's daemon, which reads memories only while online; ask again",
-                waited.num_seconds()
-            ),
-        );
+pub(super) async fn apply(
+    orders: &Orders,
+    order: &AdminOrder,
+    identity: Option<&str>,
+    stored_at: DateTime<Utc>,
+) -> AdminOutcome {
+    if let Some(stale) = stale(stored_at, "reads memories") {
+        return refused(order, &stale);
     }
     let Some(file) = &orders.config else { return refused(order, NO_CONFIG) };
     let loaded = match config::load(&file.path) {
@@ -67,11 +73,36 @@ pub(super) async fn apply(orders: &Orders, order: &AdminOrder, stored_at: DateTi
     let ant = file.shared.overlaid(ant).map_or_else(|| ant.clone(), |(overlaid, _)| overlaid);
     let harness = ant.harness.as_deref().and_then(|name| loaded.harnesses.get(name).ok());
     let Some(env) = Env::current() else { return refused(order, "no home directory") };
-    let memories = read(&ant, harness.as_deref(), &env).await;
+    let provider = crate::provider::of(&order.ant).await;
+    let provider = provider.as_ref().map(|connected| Of { connected, identity });
+    let memories = read(&ant, harness.as_deref(), &env, provider).await;
     match serde_json::to_value(&memories) {
         Ok(result) => applied(order, Some(result)),
         Err(e) => refused(order, &format!("writing the memories read: {e}")),
     }
+}
+
+/// Why an order the stream stored at `stored_at` is refused as stale, its daemon doing `what` only while online.
+pub(super) fn stale(stored_at: DateTime<Utc>, what: &str) -> Option<String> {
+    let waited = Utc::now() - stored_at;
+    (waited > MEMORIES_FRESH).then(|| {
+        format!(
+            "stale: it waited {}s for the machine's daemon, which {what} only while online; ask again",
+            waited.num_seconds()
+        )
+    })
+}
+
+/// The provider of an ant, and the id of the ant's identity record, which the order names.
+#[derive(Clone, Copy)]
+pub(crate) struct Of<'a> {
+    pub connected: &'a Connected,
+    pub identity: Option<&'a str>,
+}
+
+/// A provider's error, cut short for an outcome.
+pub(super) fn cut_error(e: impl std::fmt::Display) -> String {
+    e.to_string().chars().take(MAX_ERROR).collect()
 }
 
 /// The core memories of `ant`, as served: overlaid with its shared settings ([`crate::profile::shared::Shared::overlaid`]).
@@ -97,8 +128,8 @@ impl Env {
     }
 }
 
-/// The memories of `ant`, whose harness is `harness`.
-pub(crate) async fn read(ant: &Ant, harness: Option<&Harness>, env: &Env) -> Memories {
+/// The memories of `ant`, whose harness is `harness` and whose provider `provider`.
+pub(crate) async fn read(ant: &Ant, harness: Option<&Harness>, env: &Env, provider: Option<Of<'_>>) -> Memories {
     let mut budget = Budget(MEMORIES_CAP);
     let mut skipped = Vec::new();
     let core = core_memories(ant);
@@ -113,6 +144,10 @@ pub(crate) async fn read(ant: &Ant, harness: Option<&Harness>, env: &Env) -> Mem
         whoami: cap("whoami", core.whoami),
         memory: cap("memory", core.memory),
         tasks: cap("tasks", core.tasks),
+    };
+    let provider = match provider {
+        Some(of) => provider_memories(&ant.name, of, &mut budget, &mut skipped).await,
+        None => None,
     };
     let ant_home = ant.home.clone().unwrap_or_else(|| env.home.join(".ants").join(ant.name.as_str()));
     let globs = harness.map_or_default(Harness::memory_files);
@@ -129,8 +164,46 @@ pub(crate) async fn read(ant: &Ant, harness: Option<&Harness>, env: &Env) -> Mem
         workdir: Some(ant.workdir.display().to_string()),
         files,
         bd,
+        provider,
         skipped,
     }
+}
+
+/// The memories view of the provider `of`, of `ant`: none when it shows none.
+async fn provider_memories(
+    ant: &ants_proto::UserId,
+    of: Of<'_>,
+    budget: &mut Budget,
+    skipped: &mut Vec<Skipped>,
+) -> Option<ProviderMemories> {
+    let Of { connected, identity } = of;
+    if !connected.has(Capability::Memories) {
+        return None;
+    }
+    let mut memories = ProviderMemories { provider: connected.name().to_owned(), ..ProviderMemories::default() };
+    let Some(identity) = identity else {
+        memories.error = Some("the order names no identity of the ant, which its provider knows it by".to_owned());
+        return Some(memories);
+    };
+    let read = connected.memories(AntRef { ant: ant.clone(), identity: identity.to_owned() });
+    let view = match tokio::time::timeout(PROVIDER_TIMEOUT, read).await {
+        Err(_) => Err(format!("{} took over {}s", connected.name(), PROVIDER_TIMEOUT.as_secs())),
+        Ok(Err(e)) => Err(cut_error(e)),
+        Ok(Ok(view)) => Ok(view),
+    };
+    match view {
+        Ok(view) => {
+            for entry in view.memories {
+                let key = entry.key.chars().take(MAX_ERROR).collect::<String>();
+                match budget.take(&entry.content, false) {
+                    Some((content, truncated)) => memories.memories.push(BdMemory { key, content, truncated }),
+                    None => skipped.push(Skipped { what: format!("provider memory {key}"), why: OVER_CAP.to_owned() }),
+                }
+            }
+        }
+        Err(e) => memories.error = Some(e),
+    }
+    Some(memories)
 }
 
 /// What is left of [`MEMORIES_CAP`]: bytes of the texts as JSON strings.
@@ -422,4 +495,4 @@ async fn bd_memories(
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

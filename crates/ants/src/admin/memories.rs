@@ -1,12 +1,13 @@
 //! `ants ant memories`: an ant's memories, which an admin order asks the daemon of its machine to read
 //! ([`AdminOp::ReadMemories`]): its core memories (whoami, memory, tasks), which a set order edits, and its harness's
-//! memory files and bd memories, read-only.
+//! memory files and bd memories, read-only, and what its provider remembers of it, when the provider shows that.
 
 use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Duration;
 
-use ants_proto::{AdminOp, Machine, Memories, OrderState, UserId};
+use ants_daemon::records::direct_kv::{DirectKv, Lookup};
+use ants_proto::{AdminOp, AntIdentity, IDENTITIES_BUCKET, Machine, Memories, OrderState, UserId};
 use anyhow::{Result, bail};
 use async_nats::jetstream;
 
@@ -25,7 +26,8 @@ pub async fn read(
     machine: Option<Machine>,
     ant: &UserId,
 ) -> Result<Memories> {
-    let (order, outcome) = orders::send(nats, js, machine, ant, AdminOp::ReadMemories, WAIT).await?;
+    let op = AdminOp::ReadMemories { identity: identity_of(nats, js, ant).await };
+    let (order, outcome) = orders::send(nats, js, machine, ant, op, WAIT).await?;
     let Some(outcome) = outcome else {
         bail!(
             "the daemon of {} did not answer within {}s: memories are read only while it is online, and the order is \
@@ -46,6 +48,16 @@ pub async fn read(
     }
 }
 
+/// The id of the identity record of `ant`, which its provider knows it by and only humans read: None, the daemon
+/// noting the provider's memories unread, when it cannot be read.
+async fn identity_of(nats: &Nats<'_>, js: &jetstream::Context, ant: &UserId) -> Option<String> {
+    let kv = DirectKv::whole(js, nats.domain, IDENTITIES_BUCKET).await.ok()?;
+    match kv.lookup_last(ant.as_str()).await.ok()?.0 {
+        Lookup::Value(value) => serde_json::from_slice::<AntIdentity>(&value).ok().map(|record| record.id),
+        Lookup::NoBucket | Lookup::NoValue => None,
+    }
+}
+
 /// `ants ant memories ANT`: the memories of `ant` as text, or with `json` as one JSON object.
 pub async fn show(nats: &Nats<'_>, ant: &UserId, machine: Option<Machine>, json: bool) -> Result<()> {
     let (_, js) = nats.connect("ants-memories").await?;
@@ -58,7 +70,8 @@ pub async fn show(nats: &Nats<'_>, ant: &UserId, machine: Option<Machine>, json:
     Ok(())
 }
 
-/// The memories of `ant` as text: the core ones, the harness's files, the bd memories and what was left out.
+/// The memories of `ant` as text: the core ones, the harness's files, the bd memories, its provider's and what was
+/// left out.
 pub fn render(ant: &UserId, memories: &Memories) -> String {
     let mut out = format!("core memories of {ant} (a set order of whoami, memory or tasks edits them)\n");
     let core = &memories.core;
@@ -90,6 +103,18 @@ pub fn render(ant: &UserId, memories: &Memories) -> String {
             out.push_str("  none\n");
         }
         for memory in &bd.memories {
+            let cut = if memory.truncated { " (cut short)" } else { "" };
+            _ = write!(out, "── {}{cut}\n{}", memory.key, indent(&memory.content));
+        }
+    }
+    if let Some(provider) = &memories.provider {
+        _ = writeln!(out, "\nmemories of provider {}", provider.provider);
+        if let Some(error) = &provider.error {
+            _ = writeln!(out, "  {error}");
+        } else if provider.memories.is_empty() {
+            out.push_str("  none\n");
+        }
+        for memory in &provider.memories {
             let cut = if memory.truncated { " (cut short)" } else { "" };
             _ = write!(out, "── {}{cut}\n{}", memory.key, indent(&memory.content));
         }

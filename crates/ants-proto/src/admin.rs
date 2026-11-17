@@ -35,8 +35,11 @@ use serde_json::{Map, Value};
 use uuid::Uuid;
 
 #[cfg(doc)]
-use crate::{ADMIN_TAG, MACHINES_BUCKET, admin_consumer};
+use crate::{ADMIN_TAG, MACHINES_BUCKET, Memories, admin_consumer};
 use crate::{JwtError, Machine, UserId, VerifiedUser, subject, verified_jwt, verify_admin, verify_assistant_of};
+
+mod payload;
+pub use payload::{ADMIN_PAYLOADS, AdminPayload, MAX_ADMIN_PAYLOAD, ProviderExport};
 
 /// How far ahead of the time the stream stored it an order may say it was sent.
 pub const ORDER_CLOCK_SKEW: TimeDelta = TimeDelta::minutes(5);
@@ -104,8 +107,23 @@ pub enum AdminOp {
     },
     /// Drain the ant, revoke and delete its credentials, keeping its home.
     Retire,
-    /// Read the ant's core and harness memories, which the outcome's `result` carries.
-    ReadMemories,
+    /// Read the ant's core and harness memories and, given `identity`, the id of its identity record, the memories view
+    /// of its provider, which the outcome's `result` carries ([`Memories`]).
+    ReadMemories {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity: Option<String>,
+    },
+    /// Export the ant, whose identity record's id is `identity`, from its provider, which stores the export for the
+    /// admin to read: the outcome's `result` says where ([`ProviderExport`]).
+    ExportProvider {
+        identity: String,
+    },
+    /// Hand the ant's provider the export of an ant ([`crate::provider::Export`]) stored at `payload`, for the ant
+    /// whose identity record's id is `identity`.
+    ImportProvider {
+        identity: String,
+        payload: AdminPayload,
+    },
     /// Read the ant's settings as the machine's config file has them, which the outcome's `result` carries
     /// ([`Settings`]).
     ReadSettings,
@@ -139,7 +157,9 @@ impl AdminOp {
             Self::Restart { .. } => "restart",
             Self::Add { .. } => "add",
             Self::Retire => "retire",
-            Self::ReadMemories => "read_memories",
+            Self::ReadMemories { .. } => "read_memories",
+            Self::ExportProvider { .. } => "export_provider",
+            Self::ImportProvider { .. } => "import_provider",
             Self::ReadSettings => "read_settings",
             Self::ReadMcp => "read_mcp",
             Self::McpSignIn { .. } => "mcp_sign_in",
@@ -147,10 +167,20 @@ impl AdminOp {
         }
     }
 
-    /// Whether an assistant may order it for its human: anything but adding, retiring or cloning an ant, or reading or
-    /// signing in its MCP servers, which `ants signer` signs for an admin's own order only.
+    /// Whether an assistant may order it for its human: anything but adding, retiring or cloning an ant, reading or
+    /// signing in its MCP servers, which `ants signer` signs for an admin's own order only, or exporting or importing
+    /// what its provider holds of it.
     pub fn for_assistant(&self) -> bool {
-        !matches!(self, Self::Add { .. } | Self::Retire | Self::Clone { .. } | Self::ReadMcp | Self::McpSignIn { .. })
+        !matches!(
+            self,
+            Self::Add { .. }
+                | Self::Retire
+                | Self::Clone { .. }
+                | Self::ReadMcp
+                | Self::McpSignIn { .. }
+                | Self::ExportProvider { .. }
+                | Self::ImportProvider { .. }
+        )
     }
 
     /// The op in a few words, as an ant's orders list it.
@@ -167,7 +197,11 @@ impl AdminOp {
             Self::Add { assistant_of: None, .. } => "add".to_owned(),
             Self::Add { assistant_of: Some(human), .. } => format!("add as the assistant of {human}"),
             Self::Retire => "retire".to_owned(),
-            Self::ReadMemories => "read memories".to_owned(),
+            Self::ReadMemories { .. } => "read memories".to_owned(),
+            Self::ExportProvider { .. } => "export from its provider".to_owned(),
+            Self::ImportProvider { payload, .. } => {
+                format!("import an export of {} bytes into its provider", payload.size)
+            }
             Self::ReadSettings => "read settings".to_owned(),
             Self::ReadMcp => "read MCP servers".to_owned(),
             Self::McpSignIn { server, callback: None } => format!("sign in to MCP server {server}"),

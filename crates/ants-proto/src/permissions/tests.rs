@@ -2,10 +2,10 @@ use chrono::Utc;
 
 use super::*;
 use crate::{
-    ANTS_VERSION, AntReply, AntRequest, AskedAnt, CancelReply, CancelRequest, ChainEntry, ChannelEntry, ChannelId,
-    ChannelOp, DeviceId, ENROLL_INBOX, HumanEntry, Humans, JsDomain, Machine, QueueRequest, Refusal, Role,
-    SPARE_READERS, STREAM, SUGAR_STREAM, Serving, ThreadId, UserId, Uuid, WEBHOOK_MARKER, assisted_owner_key,
-    assisted_withdrawal_key, channel_manager_serving_key, p, spare_readers, subject,
+    ANTS_VERSION, AdminPayload, AntReply, AntRequest, AskedAnt, CancelReply, CancelRequest, ChainEntry, ChannelEntry,
+    ChannelId, ChannelOp, DeviceId, ENROLL_INBOX, FILES_STREAM, HumanEntry, Humans, JsDomain, Machine, QueueRequest,
+    Refusal, Role, SPARE_READERS, STREAM, SUGAR_STREAM, Serving, ThreadId, UserId, Uuid, WEBHOOK_MARKER,
+    assisted_owner_key, assisted_withdrawal_key, channel_manager_serving_key, p, spare_readers, subject,
 };
 
 #[test]
@@ -272,6 +272,9 @@ fn leaf_permissions_cover_each_user_once() {
             "ants_sugar.*",
             "$JS.API.DIRECT.GET.ANTS_SUGAR",
             "$JS.API.DIRECT.GET.ANTS_SUGAR.ants_sugar.*",
+            // The payloads of its admin orders.
+            "$O.ants_files.C._admin.*.m1.>",
+            "$JS.API.DIRECT.GET.OBJ_ants_files.$O.ants_files.C._admin.*.m1.>",
             "$JS.ACK.ANTS.admin-m1.>",
             "$JS.ACK.*.*.ANTS.admin-m1.>",
             "$JS.S.m1.>",
@@ -1096,6 +1099,31 @@ fn a_host_writes_only_its_own_machine_record_and_takes_only_its_own_orders() {
     assert!(!ant.publish.iter().any(|s| s.starts_with("ants.admin") || s == ">"), "{:?}", ant.publish);
     assert_eq!(subject::machine_record(&m1), "$KV.ants_machines.m1");
     assert_eq!(subject::admin_orders(&m1), "ants.admin.m1.>");
+}
+
+#[test]
+fn a_host_stores_and_reads_only_its_own_admin_payloads_which_no_ant_reaches() {
+    let (m1, m2): (Machine, Machine) = ("m1".parse().unwrap(), "m2".parse().unwrap());
+    let payload = |machine: &Machine| AdminPayload {
+        id: Uuid::now_v7(),
+        machine: machine.clone(),
+        size: 1,
+        sha256: String::new(),
+    };
+    let (own, other) = (payload(&m1).chunk_subject(0), payload(&m2).chunk_subject(0));
+    let get = |chunk: &str| format!("$JS.API.DIRECT.GET.{FILES_STREAM}.{chunk}");
+    let can = |rights: &Permissions, s: &str| rights.publish.iter().any(|have| covers(have, s));
+    let host = Permissions::for_host(&m1);
+    assert!(can(&host, &own) && can(&host, &get(&own)), "{:?}", host.publish);
+    assert!(!can(&host, &other) && !can(&host, &get(&other)));
+    assert!(!can(&host, "$O.ants_files.C.dev-a.inbox.alice.x.0"), "no attachment of an ant's");
+    // A human stores and reads any; no ant does either, though an ant may be named like a machine.
+    let human = Permissions::for_user(&p("alice"), Role::Human);
+    assert!(can(&human, &own) && can(&human, &get(&own)));
+    for ant in [p("dev-a"), p("m1")] {
+        let ant = Permissions::for_user(&ant, Role::Ant);
+        assert!(!can(&ant, &own) && !can(&ant, &get(&own)), "{:?}", ant.publish);
+    }
 }
 
 #[test]
