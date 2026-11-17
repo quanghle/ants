@@ -514,9 +514,14 @@ mod tests {
         assert_eq!(headers.get(async_nats::header::NATS_MESSAGE_ID).unwrap().as_str(), "id-0", "at {seq}");
         let names: Vec<&str> = headers.iter().map(|(name, _)| name.as_ref()).collect();
         assert_eq!(names, ["Nats-Msg-Id"], "as published");
-        watcher.flush().await.unwrap();
+        let batches = sent.len().div_ceil(DIRECT_BATCH);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while requests() < batches {
+            assert!(tokio::time::Instant::now() < deadline, "{} of {batches} requests seen", requests());
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(requests(), sent.len().div_ceil(DIRECT_BATCH), "one request per batch");
+        assert_eq!(requests(), batches, "one request per batch");
 
         // From a sequence, from a time, and up to where the taker stops.
         let from = consumer::DeliverPolicy::ByStartSequence { start_sequence: sent[700].0 };
