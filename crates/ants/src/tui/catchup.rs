@@ -455,7 +455,7 @@ impl Ctx {
         match ask {
             Ask::Tldr { thread, ahead } => {
                 if *ahead {
-                    let spent = summary::spent_today(&self.js, &self.me.id).await?;
+                    let spent = summary::spent_today(&self.js, &self.me.id, Utc::now()).await?;
                     if spent >= config.daily_tokens {
                         return Ok(Got::Spent(spent));
                     }

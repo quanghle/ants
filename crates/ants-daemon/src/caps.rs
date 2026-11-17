@@ -648,8 +648,9 @@ impl Ledger {
         Ok(self.pool_spent(daily, today).await.and_then(|(pool, spent, _)| check_pool(pool, spent)))
     }
 
-    /// Counted whether or not the ant has caps, so `ants spend` reports it.
-    async fn record_on(&self, thread: &ThreadId, spend: &Spend, today: &str) -> Result<Recorded> {
+    /// [`Ledger::record`] on the UTC day `today` (`YYYY-MM-DD`). Counted whether or not the ant has caps, so
+    /// `ants spend` reports it.
+    pub async fn record_on(&self, thread: &ThreadId, spend: &Spend, today: &str) -> Result<Recorded> {
         let caps = self.caps;
         let (spent, tokens, cost, mut warnings) = self
             .update(thread, |spent| {

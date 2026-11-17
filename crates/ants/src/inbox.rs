@@ -639,9 +639,11 @@ mod tests {
         let asks = [Envelope::new(alice.clone(), dev_a.clone(), "a"), Envelope::new(alice.clone(), dev_a.clone(), "b")];
 
         // Both devices follow the inbox; each shows the reply, and the first to show it marks it read for both.
+        let opened = tokio::sync::Barrier::new(3);
         let follow = async |js: &jetstream::Context| {
             let mut inbox = Inbox::open(js, &alice).await.unwrap();
             assert!(inbox.unread(&Select::default()).await.unwrap().is_empty());
+            opened.wait().await;
             let mut shown = Vec::new();
             let select = Select { limit: Some(1), ..Default::default() };
             let follow = inbox.follow(
@@ -659,7 +661,7 @@ mod tests {
             shown
         };
         let send = async {
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            opened.wait().await;
             bus::publish(&ant_js, &asks[0].reply(dev_a.clone(), "one", Role::Human).unwrap()).await.unwrap();
         };
         let (on_laptop, on_phone, ()) = tokio::join!(follow(&laptop), follow(&phone), send);

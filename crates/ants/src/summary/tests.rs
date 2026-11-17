@@ -38,6 +38,7 @@ async fn a_tldr_is_asked_kept_while_current_and_its_thread_left_out() {
     let Some(server) = Server::start() else { return };
     let (alice, dev_a) = (p("alice"), p("dev-a"));
     let (_, js) = server.connect_as(&alice, Role::Human).await;
+    let started = Utc::now();
     bus::ensure_stream(&js).await.unwrap();
     js.create_stream(ants_daemon::hub::threads_config()).await.unwrap();
     let (ant, ant_js) = server.connect(&dev_a).await;
@@ -85,5 +86,5 @@ async fn a_tldr_is_asked_kept_while_current_and_its_thread_left_out() {
     assert!(recent.iter().all(|e| e.thread_id == work.thread_id), "{recent:?}");
     let unread = inbox::Inbox::open(&js, &alice).await.unwrap().unread(&inbox::Select::default()).await.unwrap();
     assert_eq!(unread.iter().map(|e| e.id).collect::<Vec<_>>(), [done.id], "the TL;DR reply is read");
-    assert_eq!(spent_today(&js, &alice).await.unwrap(), 42);
+    assert_eq!(spent_today(&js, &alice, started).await.unwrap(), 42);
 }
