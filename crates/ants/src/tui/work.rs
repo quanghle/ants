@@ -607,10 +607,10 @@ mod tests {
     use ants_proto::{Envelope, Escalation, StatusEvent, StatusUpdate, Verdict, subject};
 
     use super::*;
-    use crate::live::tests::{at, message, request, user};
+    use crate::test_support::live::{at, message, request, user};
     use crate::thread::Parser;
-    use crate::tui::model::tests::model;
     use crate::tui::model::{Model, Page as View};
+    use crate::tui::test_support::model;
 
     fn escalation(seq: u64, thread: &ThreadId, from: &str, to: &str, reason: EscalationReason) -> Entry {
         let x = Escalation::new(user(from), thread.clone(), reason);

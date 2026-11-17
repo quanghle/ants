@@ -300,8 +300,8 @@ mod tests {
     use ants_proto::ApprovalDecision;
 
     use super::*;
-    use crate::live::tests::{at, request, user};
-    use crate::tui::model::tests::model;
+    use crate::test_support::live::{at, request, user};
+    use crate::tui::test_support::model;
 
     fn text(lines: &[Line]) -> Vec<String> {
         lines.iter().map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect()).collect()

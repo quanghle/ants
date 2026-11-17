@@ -147,10 +147,10 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
-    use crate::live::tests::{at, message, request, user};
+    use crate::test_support::live::{at, message, request, user};
     use crate::tools::Update;
     use crate::tui::model::Page;
-    use crate::tui::model::tests::model;
+    use crate::tui::test_support::model;
 
     fn pane(m: &Model, now: DateTime<Utc>) -> String {
         let mut terminal = Terminal::new(TestBackend::new(140, 2)).unwrap();
@@ -179,7 +179,7 @@ mod tests {
             ApprovalRequest { thread_id: asked.clone(), ..request("dev-a", "git push", vec![Verdict::AllowOnce]) };
         m.data.live.approval(&Update::Pending(push));
         m.data.cards.today = Some(vec![(user("dev-a"), Spent { tokens: 10, cost: 4.12 })]);
-        let mut entry = crate::colony::tests::entry("scout", 60, 5, at(0));
+        let mut entry = crate::test_support::colony::entry("scout", 60, 5, at(0));
         entry.activity = ants_proto::Activity::Working;
         m.data.live.colony(vec![entry], at(3));
         let shown = pane(&m, at(3));

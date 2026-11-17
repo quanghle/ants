@@ -258,7 +258,7 @@ impl Io {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::live::tests::user;
+    use crate::test_support::live::user;
 
     #[test]
     fn a_failed_read_keeps_what_was_read_and_tells_once() {

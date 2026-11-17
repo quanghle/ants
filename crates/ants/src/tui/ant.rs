@@ -470,11 +470,11 @@ mod tests {
     };
 
     use super::*;
-    use crate::colony::tests::entry;
-    use crate::live::tests::{at, message, user};
-    use crate::tui::model::tests::model;
+    use crate::test_support::colony::entry;
+    use crate::test_support::live::{at, message, user};
     use crate::tui::model::{Action, Model};
     use crate::tui::nav;
+    use crate::tui::test_support::model;
 
     fn screen(m: &Model, now: DateTime<Utc>) -> String {
         let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 36)).unwrap();

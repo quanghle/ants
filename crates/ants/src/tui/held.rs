@@ -321,9 +321,9 @@ mod tests {
     use ants_proto::AdminOp;
 
     use super::*;
-    use crate::live::tests::{at, user};
+    use crate::test_support::live::{at, user};
     use crate::tui::model::Focus;
-    use crate::tui::model::tests::model;
+    use crate::tui::test_support::model;
 
     fn screen(m: &crate::tui::model::Model, now: DateTime<Utc>) -> String {
         let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();

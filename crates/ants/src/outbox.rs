@@ -644,4 +644,4 @@ fn from_machine(source: &Source, machine: &Machine) -> bool {
 }
 
 #[cfg(test)]
-pub(crate) mod tests;
+mod tests;

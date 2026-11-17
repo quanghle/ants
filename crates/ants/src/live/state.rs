@@ -216,7 +216,7 @@ mod tests {
     use ants_proto::{ApprovalDecision, Verdict};
 
     use super::*;
-    use crate::live::tests::{at, message, request, user};
+    use crate::test_support::live::{at, message, request, user};
     use crate::tools;
 
     fn state() -> State {

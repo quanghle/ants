@@ -496,11 +496,11 @@ mod tests {
 
     use super::*;
     use crate::live::Event;
-    use crate::live::tests::{at, message, request, user};
+    use crate::test_support::live::{at, message, request, user};
     use crate::thread::Parser;
     use crate::tools::{State, Update};
     use crate::tui::model::Action;
-    use crate::tui::model::tests::model;
+    use crate::tui::test_support::model;
 
     #[test]
     fn a_due_reminder_is_a_home_item_opening_its_message_until_done() {

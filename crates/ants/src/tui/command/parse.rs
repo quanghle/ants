@@ -249,7 +249,7 @@ fn goto(to: &str) -> Result<Goto, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::live::tests::user;
+    use crate::test_support::live::user;
 
     #[test]
     fn text_asks_a_user_posts_to_a_channel_or_is_said_on_the_thread() {

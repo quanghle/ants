@@ -27,7 +27,7 @@ async fn settle() {
 
 #[tokio::test]
 async fn each_thread_works_in_its_own_worktree_until_its_session_expires() {
-    let Some(repo) = crate::worktrees::tests::repo("pool-worktrees") else { return };
+    let Some(repo) = crate::test_support::repo("pool-worktrees") else { return };
     let home = repo.parent().unwrap().join("home");
     let (launch, log, _) = fake::launch();
     let store = SessionStore::memory();
@@ -39,7 +39,7 @@ async fn each_thread_works_in_its_own_worktree_until_its_session_expires() {
     pool.prompt(&thread(1), "c").await.unwrap();
     let (t1, t2) = (home.join("worktrees/t1"), home.join("worktrees/t2"));
     assert_eq!(log.locked().cwds, [t1.clone(), t2.clone(), t1.clone()], "session/load in the same worktree");
-    crate::worktrees::tests::commit(&t2, "work of t2");
+    crate::test_support::commit(&t2, "work of t2");
     assert_eq!(pool.branch_ahead(&thread(1)).await, None);
     assert_eq!(pool.branch_ahead(&thread(2)).await.map(|b| (b.name, b.commits)), Some(("ants/dev-a/t2".to_owned(), 1)));
     assert_eq!(pool.prune_worktrees().await.removed, 0, "sessions still stored");
@@ -54,7 +54,7 @@ async fn each_thread_works_in_its_own_worktree_until_its_session_expires() {
 
 #[tokio::test]
 async fn worktrees_left_behind_are_pruned_while_threads_share_the_workdir() {
-    let Some(repo) = crate::worktrees::tests::repo("pool-worktrees-off") else { return };
+    let Some(repo) = crate::test_support::repo("pool-worktrees-off") else { return };
     let home = repo.parent().unwrap().join("home");
     let worktrees = Worktrees::find(&"dev-a".parse().unwrap(), &repo, &home).await.unwrap();
     worktrees.checkout(&thread(1)).await.unwrap();
@@ -66,7 +66,7 @@ async fn worktrees_left_behind_are_pruned_while_threads_share_the_workdir() {
     pool.prompt(&thread(1), "a").await.unwrap();
     pool.prompt(&thread(3), "b").await.unwrap();
     assert_eq!(log.locked().cwds, [repo.clone(), repo.clone()], "threads share the workdir");
-    crate::worktrees::tests::commit(&home.join("worktrees/t1"), "work of t1");
+    crate::test_support::commit(&home.join("worktrees/t1"), "work of t1");
     assert_eq!(pool.branch_ahead(&thread(1)).await, None, "the thread works in the workdir");
     assert_eq!(pool.prune_worktrees().await.removed, 1, "only the thread with no session and no live harness");
     let SessionStore::Memory(sessions) = &store else { unreachable!() };
@@ -79,12 +79,12 @@ async fn worktrees_left_behind_are_pruned_while_threads_share_the_workdir() {
 
 #[tokio::test]
 async fn a_thread_whose_worktree_fails_shares_the_workdir() {
-    let Some(repo) = crate::worktrees::tests::repo("pool-worktrees-fail") else { return };
+    let Some(repo) = crate::test_support::repo("pool-worktrees-fail") else { return };
     let home = repo.parent().unwrap().join("home");
     let (launch, log, _) = fake::launch();
     let worktrees = Worktrees::find(&"dev-a".parse().unwrap(), &repo, &home).await.unwrap();
-    crate::worktrees::tests::run(&repo, &["branch", "ants/dev-a/t1"]);
-    crate::worktrees::tests::run(&repo, &["switch", "--quiet", "ants/dev-a/t1"]);
+    crate::test_support::run(&repo, &["branch", "ants/dev-a/t1"]);
+    crate::test_support::run(&repo, &["switch", "--quiet", "ants/dev-a/t1"]);
     let pool = Pool::new(launch.in_dir(repo.clone()), SessionStore::memory(), 4, IDLE).with_worktrees(worktrees);
     assert_eq!(pool.prompt(&thread(1), "a").await.unwrap(), "s1: a", "its branch is checked out elsewhere");
     assert_eq!(log.locked().cwds, std::slice::from_ref(&repo));

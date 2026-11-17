@@ -664,9 +664,9 @@ async fn cancel(client: &async_nats::Client, me: &UserId, ant: &UserId, thread: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::live::tests::{at, message, user};
-    use crate::tui::model::tests::model;
+    use crate::test_support::live::{at, message, user};
     use crate::tui::model::{Focus, Model, Page as View};
+    use crate::tui::test_support::model;
 
     fn link(from: &str, to: &str, on: Option<&ThreadId>) -> Passed {
         Passed { from: user(from), to: user(to), on: on.cloned() }

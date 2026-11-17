@@ -186,11 +186,11 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
-    use crate::colony::tests::entry;
-    use crate::live::tests::{at, message, user};
+    use crate::test_support::colony::entry;
+    use crate::test_support::live::{at, message, user};
     use crate::tui::model::Key;
-    use crate::tui::model::tests::model;
     use crate::tui::people;
+    use crate::tui::test_support::model;
 
     fn screen(m: &Model, now: DateTime<Utc>) -> String {
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
@@ -241,7 +241,7 @@ mod tests {
     #[test]
     fn a_tool_request_shows_in_full_over_the_view_and_its_verdict_waits_in_the_footer() {
         let mut m = model();
-        let push = crate::live::tests::request("dev-a", "git push", vec![ants_proto::Verdict::AllowOnce]);
+        let push = crate::test_support::live::request("dev-a", "git push", vec![ants_proto::Verdict::AllowOnce]);
         m.data.live.approvals = vec![push.clone()];
         let shown = screen(&m, at(0));
         assert!(shown.contains("approve") && shown.contains("asks to run execute: git push"), "{shown}");

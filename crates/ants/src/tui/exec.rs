@@ -614,7 +614,7 @@ mod tests {
     use ants_proto::{Answer, Question};
 
     use super::*;
-    use crate::live::tests::{message, user};
+    use crate::test_support::live::{message, user};
 
     #[test]
     fn a_reply_goes_to_the_ant_that_last_wrote_else_the_one_last_written_to() {

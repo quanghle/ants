@@ -76,12 +76,12 @@ mod tests {
 
     use super::*;
     use crate::live;
-    use crate::live::tests::{at, message, user};
+    use crate::test_support::live::{at, message, user};
     use crate::tui::exec::Outcome;
     use crate::tui::model::Focus;
-    use crate::tui::model::tests::model;
     use crate::tui::nav;
-    use crate::tui::timeline::tests::tool;
+    use crate::tui::test_support::model;
+    use crate::tui::test_support::tool;
 
     #[test]
     fn x_cancels_at_once_unless_an_ant_runs_a_tool_call_then_y_confirms() {

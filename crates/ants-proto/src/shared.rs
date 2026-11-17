@@ -271,7 +271,7 @@ mod tests {
             record.credentials = Some(jwt);
             record.signature = Some(BASE64URL_NOPAD.encode(&key.sign(&record.signed()).unwrap()));
         };
-        sign(&mut record, crate::roles::tests::user_jwt(&account, &dev_a, "dev-a", &[], None), &dev_a);
+        sign(&mut record, crate::test_support::user_jwt(&account, &dev_a, "dev-a", &[], None), &dev_a);
         assert_eq!(record.verify(accounts(), |_| false, now, 7, Some(INCARNATION)).unwrap().id, record.ant);
 
         let mut changed = record.clone();
@@ -282,7 +282,7 @@ mod tests {
         ));
 
         let mut other = record.clone();
-        sign(&mut other, crate::roles::tests::user_jwt(&account, &dev_b, "dev-b", &[], None), &dev_b);
+        sign(&mut other, crate::test_support::user_jwt(&account, &dev_b, "dev-b", &[], None), &dev_b);
         assert!(
             matches!(
                 other.verify(accounts(), |_| false, now, 7, Some(INCARNATION)),
@@ -293,7 +293,7 @@ mod tests {
 
         let foreign = KeyPair::new_account();
         let mut forged = record.clone();
-        sign(&mut forged, crate::roles::tests::user_jwt(&foreign, &dev_a, "dev-a", &[], None), &dev_a);
+        sign(&mut forged, crate::test_support::user_jwt(&foreign, &dev_a, "dev-a", &[], None), &dev_a);
         assert!(matches!(
             forged.verify(accounts(), |_| false, now, 7, Some(INCARNATION)),
             Err(SettingsError::Credentials(JwtError::ForeignAccount(_)))
@@ -301,7 +301,7 @@ mod tests {
 
         let mut expired = record;
         expired.updated_at = DateTime::from_timestamp(999, 0).unwrap();
-        sign(&mut expired, crate::roles::tests::user_jwt(&account, &dev_a, "dev-a", &[], Some(1_000)), &dev_a);
+        sign(&mut expired, crate::test_support::user_jwt(&account, &dev_a, "dev-a", &[], Some(1_000)), &dev_a);
         assert!(expired.verify(accounts(), |_| false, now, 7, Some(INCARNATION)).is_err());
         let then = DateTime::from_timestamp(999, 0).unwrap();
         assert!(
@@ -319,7 +319,7 @@ mod tests {
         let mut record = SharedSettings {
             sequence: 41,
             incarnation: INCARNATION.to_owned(),
-            credentials: Some(crate::roles::tests::user_jwt(&account, &dev_a, "dev-a", &[], None)),
+            credentials: Some(crate::test_support::user_jwt(&account, &dev_a, "dev-a", &[], None)),
             ..SharedSettings::new("dev-a".parse().unwrap(), Map::new(), "m1".parse().unwrap(), None)
         };
         record.signature = Some(BASE64URL_NOPAD.encode(&dev_a.sign(&record.signed()).unwrap()));
@@ -352,7 +352,7 @@ mod tests {
         let mut record = SharedSettings {
             sequence: 41,
             incarnation: incarnation(3, restored),
-            credentials: Some(crate::roles::tests::user_jwt(&account, &dev_a, "dev-a", &[], None)),
+            credentials: Some(crate::test_support::user_jwt(&account, &dev_a, "dev-a", &[], None)),
             ..SharedSettings::new("dev-a".parse().unwrap(), Map::new(), "m1".parse().unwrap(), None)
         };
         record.signature = Some(BASE64URL_NOPAD.encode(&dev_a.sign(&record.signed()).unwrap()));

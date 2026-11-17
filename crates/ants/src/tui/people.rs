@@ -200,7 +200,7 @@ fn send_draft(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::live::tests::user;
+    use crate::test_support::live::user;
 
     #[test]
     fn presences_are_unknown_until_read_and_a_failure_is_told_once() {

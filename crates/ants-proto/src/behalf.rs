@@ -114,7 +114,8 @@ mod tests {
     use nkeys::KeyPair;
 
     use super::*;
-    use crate::{AssistantOf, roles::tests::user_jwt};
+    use crate::AssistantOf;
+    use crate::test_support::user_jwt;
 
     const NOW: u64 = 1_800_000_000;
 

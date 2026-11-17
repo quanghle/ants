@@ -201,7 +201,7 @@ async fn encoded(
 }
 
 /// The image in `bytes`, decoded within [`MAX_DECODED`] and fit in [`MAX_COLS`] by [`MAX_ROWS`] cells.
-fn encode(picker: &Picker, bytes: &[u8]) -> Result<Protocol> {
+pub(super) fn encode(picker: &Picker, bytes: &[u8]) -> Result<Protocol> {
     let mut reader = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
     let mut limits = image::Limits::default();
     limits.max_alloc = Some(MAX_DECODED);
@@ -212,26 +212,13 @@ fn encode(picker: &Picker, bytes: &[u8]) -> Result<Protocol> {
 }
 
 #[cfg(test)]
-pub mod tests {
+mod tests {
     use ants_daemon::files;
     use ants_proto::{Envelope, Role, UserId};
-    use image::{DynamicImage, ImageFormat, RgbImage};
 
     use super::*;
     use crate::test_support::Server;
-
-    /// A PNG `width` by `height` pixels.
-    pub fn png(width: u32, height: u32) -> Vec<u8> {
-        let mut bytes = Cursor::new(Vec::new());
-        let image = DynamicImage::from(RgbImage::from_pixel(width, height, image::Rgb([200, 40, 40])));
-        image.write_to(&mut bytes, ImageFormat::Png).unwrap();
-        bytes.into_inner()
-    }
-
-    /// The image in `bytes` encoded as halfblocks, at 10 by 20 pixels a cell.
-    pub fn halfblocks(bytes: &[u8]) -> Protocol {
-        encode(&Picker::halfblocks(), bytes).unwrap()
-    }
+    use crate::tui::test_support::{halfblocks, png};
 
     #[test]
     fn an_image_fits_in_the_cells_allowed_and_keeps_its_shape() {

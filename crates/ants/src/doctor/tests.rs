@@ -190,7 +190,7 @@ async fn an_ants_credentials_skip_the_hub_check() {
 fn ants_looking_alike_are_warned_of() {
     let now = chrono::Utc::now();
     let entries: Vec<ants_proto::ColonyEntry> =
-        ["dev-a", "dev-b"].map(|ant| crate::colony::tests::entry(ant, 60, 2, now)).into();
+        ["dev-a", "dev-b"].map(|ant| crate::test_support::colony::entry(ant, 60, 2, now)).into();
     let check = avatars(&entries, Faces::new(Default::default(), Depth::Plain, ants_proto::Theme::Dark));
     assert_eq!(
         (check.status, check.detail.as_str()),

@@ -179,11 +179,11 @@ mod tests {
     use ants_proto::{ChannelEntry, ChannelPost, ChannelReadMarkers, HumanEntry, ThreadId};
 
     use super::*;
-    use crate::colony::tests::entry;
-    use crate::live::tests::{at, message, user};
-    use crate::tui::channel::tests::post;
-    use crate::tui::model::tests::model;
+    use crate::test_support::colony::entry;
+    use crate::test_support::live::{at, message, user};
     use crate::tui::reads::Read;
+    use crate::tui::test_support::model;
+    use crate::tui::test_support::post;
 
     #[test]
     fn the_nav_lists_states_channels_ants_and_other_humans() {

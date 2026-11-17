@@ -318,7 +318,7 @@ mod tests {
 
     use super::*;
     use crate::live::Link;
-    use crate::live::tests::{at, message, request, user};
+    use crate::test_support::live::{at, message, request, user};
 
     fn model() -> Model {
         Model::new(State::new(user("alice"), Duration::from_hours(24)))

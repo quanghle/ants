@@ -155,29 +155,17 @@ pub async fn online(js: &jetstream::Context) -> Result<HashSet<UserId>> {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use std::time::Duration;
 
-    use ants_daemon::bus;
     use ants_proto::Role;
 
     use super::*;
     use crate::test_support::Server;
+    use crate::test_support::presence::device;
 
     fn p(s: &str) -> UserId {
         s.parse().unwrap()
-    }
-
-    /// A connection of a new device of `human`, with credentials of its own, and the device's id.
-    pub(crate) async fn device(server: &Server, human: &UserId, label: &str) -> (jetstream::Context, DeviceId) {
-        let creds = server.dir().join(format!("{human}-{label}.creds"));
-        let permissions = ants_proto::Permissions::for_user(human, Role::Human);
-        let team = server.dir().join("auth");
-        let device = crate::auth::issue_device(&team, human, Role::Human.into(), permissions, Some(label), &creds);
-        let device = device.unwrap().expect("a human's device");
-        let (_, mut js) = bus::connect(&server.url, Some(&creds), None, human, "test").await.unwrap();
-        js.set_timeout(Duration::from_secs(1));
-        (js, device)
     }
 
     /// Runs as two devices of alice and one of bob, with their own credentials, so it also checks their permissions.

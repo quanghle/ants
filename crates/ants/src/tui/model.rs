@@ -836,24 +836,13 @@ impl Model {
 }
 
 #[cfg(test)]
-pub mod tests {
-    use std::time::Duration;
-
-    use ants_proto::{ChannelPost, HumanEntry, Verdict};
+mod tests {
+    use ants_proto::{ChannelPost, Verdict};
 
     use super::*;
     use crate::live::Link;
-    use crate::live::tests::{at, message, request, user};
-    use crate::tui::channel::tests::post;
-
-    /// The model of alice, with bob a human too and nothing read yet.
-    pub fn model() -> Model {
-        let mut m = Model::new(State::new(user("alice"), Duration::from_hours(24)), "hub:4222".to_owned());
-        m.data.marker = Some(ReadMarker::default());
-        let humans = ["alice", "bob"].map(|h| (h, HumanEntry::new(user(h))));
-        m.data.humans = Some(Humans::from_entries(humans));
-        m
-    }
+    use crate::test_support::live::{at, message, request, user};
+    use crate::tui::test_support::{model, post};
 
     #[test]
     fn tab_moves_between_nav_and_view_and_esc_goes_back() {
@@ -941,7 +930,7 @@ pub mod tests {
         let mut m = model();
         m.stored(vec![message(1, &thread, "alice", "dev-a", "deploy")], at(1));
         m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
-        let call = crate::tui::timeline::tests::stored(2, &thread, "dev-a", Uuid::new_v4(), "c1", "completed", 1);
+        let call = crate::tui::test_support::stored(2, &thread, "dev-a", Uuid::new_v4(), "c1", "completed", 1);
         let loaded = vec![message(1, &thread, "alice", "dev-a", "deploy"), call.clone()];
         m.take(live::Event::History(thread.clone(), Ok(loaded)), at(2));
         m.stored(vec![call, message(3, &thread, "dev-a", "alice", "done")], at(3));

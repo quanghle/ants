@@ -13,11 +13,11 @@ use ants_proto::{
 use serde_json::{Value, json};
 
 use crate::auth::{NewDevice, issue_device_with};
-use crate::orders::add::tests::{SIGNED, with_signer};
 use crate::orders::send;
-use crate::orders::tests::{WAIT, host_of_m1_serving, p};
 use crate::revoke::Kind;
 use crate::test_support::Server;
+use crate::test_support::orders::{SIGNED, with_signer};
+use crate::test_support::orders::{WAIT, host_of_m1_serving, p};
 
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git").args(args).current_dir(dir).output().unwrap();
