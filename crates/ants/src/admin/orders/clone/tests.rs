@@ -6,7 +6,9 @@ use ants_daemon::admin::restart::Restarts;
 use ants_daemon::config::edit::Edit;
 use ants_daemon::pool::{SessionStore, Stored};
 use ants_daemon::profile::identity::{self, Identity};
+use ants_daemon::provider::origins::OriginStore;
 use ants_daemon::records::direct_kv::DirectKv;
+use ants_proto::provider::{Origin, Starter};
 use ants_proto::{
     AdminOp, Envelope, IDENTITIES_BUCKET, MovedMark, OrderState, Permissions, Role, SharedSettings, ThreadId, UserId,
 };
@@ -32,8 +34,8 @@ fn clone_as(new: &str, settings: Value) -> AdminOp {
 
 /// A clone order pauses the ant, copies its home, writes each thread's history into the clone's home, adds each
 /// worktree again on the clone's branch with its uncommitted changes, has `ants signer` sign the clone's key, stores
-/// the sessions marked to start over (the ant's daemon runs no harness that forks), writes the clone's identity with
-/// where it came from and the prompts, appends its table with the settings over the ant's, and resumes the ant. A
+/// the sessions marked to start over (the ant's daemon runs no harness that forks) and the threads' origins, writes the
+/// clone's identity with where it came from and the prompts, appends its table with the settings over the ant's, and resumes the ant. A
 /// failure undoes it all; a clone into a listed name or one with an identity record, of a moved ant or of one served
 /// elsewhere, is refused, the ant resumed.
 #[tokio::test]
@@ -79,7 +81,11 @@ async fn a_clone_order_copies_an_ant_under_a_new_name_and_undoes_a_failed_one() 
     std::fs::write(tree.join("a.txt"), "one, changed\n").unwrap();
     std::fs::write(tree.join("new.txt"), "untracked\n").unwrap();
     let head = git(&tree, &["rev-parse", "HEAD"]);
-    let store = SessionStore::kv(ants_daemon::bus::ensure_sessions(&a_js, None, &dev_a).await.unwrap(), dev_a.clone());
+    let a_kv = ants_daemon::bus::ensure_sessions(&a_js, None, &dev_a).await.unwrap();
+    let store = SessionStore::kv(a_kv.clone(), dev_a.clone());
+    let origins = OriginStore::kv(a_kv, dev_a.clone());
+    let hooked = Origin { by: Starter::Webhook { user: p("gh-hook") }, channel: None };
+    origins.put(&talked, &hooked).await.unwrap();
     for (thread, session) in [(&talked, "s-talk"), (&worked, "s-work")] {
         let stored = Stored { session: session.to_owned().into(), harness: "copilot".to_owned(), cloned: false };
         store.put(thread, stored).await.unwrap();
@@ -132,6 +138,7 @@ async fn a_clone_order_copies_an_ant_under_a_new_name_and_undoes_a_failed_one() 
                 ant: &dev_a,
                 home: &home_a,
                 store: &store,
+                origins: Some(&origins),
                 identity: Some(&identity),
                 launch: None,
                 reading: ants_daemon::stream::reading::Reading::Consumer,
@@ -168,10 +175,13 @@ async fn a_clone_order_copies_an_ant_under_a_new_name_and_undoes_a_failed_one() 
 
         let creds = server.dir().join("dev-c.creds");
         let (_, c_js) = ants_daemon::bus::connect(&server.url, Some(&creds), None, &dev_c, "test").await.unwrap();
-        let c_store =
-            SessionStore::kv(ants_daemon::bus::ensure_sessions(&c_js, None, &dev_c).await.unwrap(), dev_c.clone());
+        let c_kv = ants_daemon::bus::ensure_sessions(&c_js, None, &dev_c).await.unwrap();
+        let c_store = SessionStore::kv(c_kv.clone(), dev_c.clone());
         let stored = c_store.get(&worked).await.unwrap().expect("the session is stored for dev-c");
         assert_eq!((stored.session.to_string().as_str(), stored.cloned), ("s-work", true));
+        let c_origins = OriginStore::kv(c_kv, dev_c.clone());
+        assert_eq!(c_origins.get(&talked).await.unwrap(), Some(hooked), "the thread stays the webhook's");
+        assert_eq!(c_origins.get(&worked).await.unwrap(), None);
         let record = Identity::new(&c_js, None, &dev_c).await.unwrap().of(&dev_c).await.unwrap().unwrap();
         let from = record.cloned_from.as_ref().expect("where dev-c came from");
         assert_eq!((from.ant.as_str(), from.id.as_str(), record.prompts), ("dev-a", born.id.as_str(), 7));

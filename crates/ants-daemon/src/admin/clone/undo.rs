@@ -7,6 +7,7 @@ use ants_proto::{AdminOrder, ThreadId};
 use super::worktrees::git;
 use crate::pool::SessionStore;
 use crate::profile::identity::Identity;
+use crate::provider::origins::OriginStore;
 use crate::records::direct_kv::DirectKv;
 
 /// What a clone did so far, to undo on a failure.
@@ -22,6 +23,7 @@ pub(super) struct Done {
     /// The key `ants signer` signed.
     pub(super) key: Option<String>,
     pub(super) sessions: Option<(SessionStore, Vec<ThreadId>)>,
+    pub(super) origins: Option<(OriginStore, Vec<ThreadId>)>,
     pub(super) identity: Option<Identity>,
     /// The bucket the clone's shared settings were written to.
     pub(super) shared: Option<(DirectKv, String)>,
@@ -46,6 +48,13 @@ impl Done {
             for thread in threads {
                 if let Err(e) = store.delete(&thread).await {
                     warn("deleting a session", e);
+                }
+            }
+        }
+        if let Some((store, threads)) = self.origins {
+            for thread in threads {
+                if let Err(e) = store.delete(&thread).await {
+                    warn("deleting a thread's origin", e);
                 }
             }
         }

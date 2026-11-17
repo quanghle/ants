@@ -245,6 +245,7 @@ impl Inbox<'_> {
                     ant: self.ant,
                     home: self.home,
                     store: self.pool.store(),
+                    origins: self.mcp.and_then(crate::mcp::Mcp::origin_store),
                     identity: self.identity,
                     launch: Some(self.pool.launch().clone()),
                     reading: self.reading,

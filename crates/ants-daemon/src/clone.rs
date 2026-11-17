@@ -1,6 +1,7 @@
 //! What the daemon serving an ant hands over to a clone of it ([`AdminOp::Clone`], carried out by the host connection
 //! in `admin::clone`): once the ant is paused and its last prompt ended, a [`Snapshot`] of its identity record, how
-//! its harness starts, and each thread it has a session of, with that session and the thread's history read back.
+//! its harness starts, each thread it has a session of, with that session and the thread's history read back, and the
+//! origin each of its threads settled on.
 //!
 //! An ant cannot list its keys of [`ants_proto::SESSIONS_BUCKET`], so its threads are those of the messages it
 //! received and sent that the ANTS stream still holds, and those it has a worktree of; a thread it only posted in
@@ -12,6 +13,7 @@ use std::path::Path;
 
 #[cfg(doc)]
 use ants_proto::AdminOp;
+use ants_proto::provider::Origin;
 use ants_proto::{AntIdentity, ChannelId, Envelope, ThreadId, UserId, inbox_consumer, sent_reader, subject};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, consumer::DeliverPolicy};
@@ -21,6 +23,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::harness::Launch;
 use crate::pool::{SessionStore, Stored};
 use crate::profile::identity::Identity;
+use crate::provider::origins::OriginStore;
 use crate::stream::reading::{self, Reading};
 
 /// A snapshot asked of the daemon serving the ant to clone.
@@ -39,6 +42,8 @@ pub struct Snapshot {
     /// How the ant starts its harness, to fork its sessions with; none for a daemon running no harness.
     pub launch: Option<Launch>,
     pub threads: Vec<ThreadCopy>,
+    /// Where each of the ant's threads came from, as its daemon settled it, for the clone to carry on with.
+    pub origins: Vec<(ThreadId, Origin)>,
 }
 
 /// A thread the ant has a session of.
@@ -75,6 +80,8 @@ pub struct Source<'a> {
     pub ant: &'a UserId,
     pub home: &'a Path,
     pub store: &'a SessionStore,
+    /// Where the ant's daemon keeps its threads' origins; none when it keeps them nowhere.
+    pub origins: Option<&'a OriginStore>,
     pub identity: Option<&'a Identity>,
     pub launch: Option<Launch>,
     /// How the daemon reads through the ant's own readers.
@@ -89,8 +96,13 @@ impl Source<'_> {
             None => (None, None),
         };
         let at = Utc::now();
-        let mut threads = Vec::new();
+        let (mut threads, mut origins) = (Vec::new(), Vec::new());
         for thread in self.threads().await? {
+            if let Some(store) = self.origins
+                && let Some(origin) = store.get(&thread).await?
+            {
+                origins.push((thread.clone(), origin));
+            }
             let Some(stored) = self.store.get(&thread).await? else { continue };
             let history = crate::stream::history::Thread {
                 js: self.js.clone(),
@@ -104,7 +116,7 @@ impl Source<'_> {
             let history = history.snapshot(at).await?;
             threads.push(ThreadCopy { thread, stored, history });
         }
-        Ok(Snapshot { identity, new_identity, launch: self.launch, threads })
+        Ok(Snapshot { identity, new_identity, launch: self.launch, threads, origins })
     }
 
     /// The threads of the messages the ant received and sent that the stream holds, and of its worktrees.

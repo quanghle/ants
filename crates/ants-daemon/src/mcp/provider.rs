@@ -61,6 +61,11 @@ impl Mcp {
         let _ = self.hub.origin_store.set(store);
     }
 
+    /// Where the threads' origins are kept ([`Mcp::with_origins`]), if anywhere.
+    pub fn origin_store(&self) -> Option<&OriginStore> {
+        self.hub.origin_store.get()
+    }
+
     /// Settle where the thread of `envelope`, a message it is about to handle, posted in `channel` when it is a
     /// channel post, came from ([`origin`], [`settled`]), with the origin stored earlier when this process has none
     /// yet. A changed origin is stored before it is kept: fails, keeping nothing, when it cannot be read or stored.

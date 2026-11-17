@@ -1,4 +1,4 @@
-//! The clone's records on the bus: its sessions, its identity record and its shared settings.
+//! The clone's records on the bus: its sessions, its threads' origins, its identity record and its shared settings.
 
 use std::path::{Path, PathBuf};
 
@@ -16,11 +16,12 @@ use crate::clone::{Snapshot, ThreadCopy};
 use crate::pool::{SessionStore, Stored};
 use crate::profile::identity::{self, Identity};
 use crate::profile::shared;
+use crate::provider::origins::OriginStore;
 use crate::{bus, harness};
 
 impl Cloning<'_> {
-    /// Store the clone's sessions ([`store_sessions`]) and its identity record, with its credentials: the threads
-    /// forked, those that start over, and the record.
+    /// Store the clone's sessions ([`store_sessions`]), its threads' origins and its identity record, with its
+    /// credentials: the threads forked, those that start over, and the record.
     pub(super) async fn store(
         &self,
         plan: &Plan,
@@ -30,8 +31,10 @@ impl Cloning<'_> {
     ) -> Result<(Vec<String>, Vec<String>, AntIdentity)> {
         let (new, domain) = (self.new, self.orders.js_domain.as_ref());
         let (_client, new_js) = bus::connect(&self.orders.nats, Some(&plan.creds_path), domain, new, "clone").await?;
-        let store = SessionStore::kv(bus::ensure_sessions(&new_js, domain, new).await?, new.clone());
+        let kv = bus::ensure_sessions(&new_js, domain, new).await?;
+        let store = SessionStore::kv(kv.clone(), new.clone());
         let (forked, restart) = store_sessions(&store, snapshot, trees, &plan.new_home, &plan.workdir, done).await?;
+        store_origins(&OriginStore::kv(kv, new.clone()), snapshot, done).await?;
 
         let identity = Identity::new(&new_js, domain, new).await?;
         let record = born(new, &self.order.ant, snapshot.identity.as_ref())?;
@@ -82,6 +85,16 @@ async fn store_sessions(
         store.put(&copy.thread, stored).await?;
     }
     Ok((forked, restart))
+}
+
+/// Store in `store`, the clone's, where each thread of `snapshot` came from, so that the clone carries on with the
+/// origin each thread settled on rather than settling it again from its first message there.
+async fn store_origins(store: &OriginStore, snapshot: &Snapshot, done: &mut Done) -> Result<()> {
+    for (thread, origin) in &snapshot.origins {
+        done.origins.get_or_insert_with(|| (store.clone(), Vec::new())).1.push(thread.clone());
+        store.put(thread, origin).await?;
+    }
+    Ok(())
 }
 
 /// The identity record of `new`, a clone of `src`, whose record is `src_identity`.

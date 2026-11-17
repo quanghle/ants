@@ -5,7 +5,7 @@
 //! ([`crate::stream::history::cloned`]), each worktree added again on the branch `ants/<new>/<thread>` from the same commit,
 //! with its uncommitted changes and untracked files, the clone's key signed by `ants signer` on the order, each session
 //! forked when the harness can (else marked to start over, [`crate::stream::history::Rebuild::Cloned`]) and stored under the
-//! clone's keys, and its identity record written: a new id and birth, the prompts of the ant cloned and where it came
+//! clone's keys, as is each thread's origin, and its identity record written: a new id and birth, the prompts of the ant cloned and where it came
 //! from ([`ants_proto::ClonedFrom`]), and the clone's provider is to be told it was cloned ([`events::arrived`]). Where
 //! the hub keeps shared settings ([`crate::profile::shared`]), the clone gets its own record of them: those of the ant
 //! cloned, with the order's settings over them. Its `[[ant]]` table, a copy of the cloned ant's with its shared

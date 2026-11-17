@@ -57,4 +57,15 @@ impl OriginStore {
             }
         }
     }
+
+    /// Forget the thread's origin, as a failed clone order does with those it stored.
+    pub async fn delete(&self, thread: &ThreadId) -> Result<()> {
+        match self {
+            Self::Kv { kv, ant } => kv.delete(thread_origin_key(ant, thread)).await,
+            Self::Memory(map) => {
+                map.locked().remove(thread);
+                Ok(())
+            }
+        }
+    }
 }
