@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 
 use super::{Action, Focus, Key, Level, Model, Page, To};
 use crate::tui::approvals::{Answer, Asking};
-use crate::tui::command::Tone;
+use crate::tui::command::{Note, Tone};
 use crate::tui::exec::Job;
 use crate::tui::react::{self, Pick, Picker};
 use crate::tui::{credentials, held, nav, thread, work};
@@ -164,6 +164,10 @@ impl Model {
             Answer::Decide(verdict) => {
                 return self.asking.as_ref().map(|a| Action::Decide(Box::new(a.request.clone()), verdict));
             }
+            Answer::Note => {
+                let request = self.asking.take()?.request;
+                return self.note_on(request, now);
+            }
             Answer::Open(thread) => {
                 self.asking = None;
                 if self.open() != Some(&thread) {
@@ -172,6 +176,22 @@ impl Model {
                 }
             }
         }
+        None
+    }
+
+    /// Open the bar on a note rejecting `request`, unless it holds a draft or `request` can no longer be rejected.
+    fn note_on(&mut self, request: ApprovalRequest, now: DateTime<Utc>) -> Option<Action> {
+        if let Some(refusal) = crate::live::refusal(&request, &crate::tools::State::Pending, Verdict::Reject) {
+            self.notify(refusal, Level::Error, now);
+            return None;
+        }
+        if !self.bar.is_empty() && self.bar.noting.as_ref().is_none_or(|note| note.request() != &request) {
+            self.bar.set_status("the bar holds a draft: send or clear it before writing a note", Tone::Error);
+            return None;
+        }
+        self.bar.noting = Some(Note::Reject(Box::new(request)));
+        self.bar.quoting = None;
+        self.bar.focused = true;
         None
     }
 
@@ -270,6 +290,7 @@ impl Model {
                 None
             }
             To::Ask(request, Some(verdict)) => self.decide(request, verdict, now),
+            To::Note(request) => self.note_on(request, now),
             To::Tree(thread) => {
                 self.tree(thread);
                 None

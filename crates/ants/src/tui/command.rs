@@ -4,10 +4,12 @@
 //! posts a new thread on the channel on view, or asks the human's assistant, else the messenger; `/` starts a slash
 //! command over the CLI's verbs, acting on the selected item or open thread ([`COMMANDS`]). Sends run in the background
 //! ([`super::exec`]); the bar's status line tells how they went, and a failed send's text, with the message it quoted, comes back into the bar.
+//! n on a tool request opens the bar on a note ([`Note`]): Enter rejects the request, then sends the note to its ant.
 
 use ants_proto::{ApprovalRequest, ChannelId, ChannelNotify, ThreadId, UserId, Uuid, Verdict};
 use chrono::{DateTime, Utc};
 
+use super::approvals::Asking;
 use super::exec::{Job, Outcome, Quoted};
 use super::model::{Action, Focus, Key, Model, Page};
 use super::{attach, complete, nav, question, snooze, thread};
@@ -18,7 +20,7 @@ use crate::{live, tools};
 mod bar;
 mod parse;
 
-pub use bar::{Bar, Edited, Tone};
+pub use bar::{Bar, Edited, Note, Tone};
 pub use parse::{COMMANDS, Command, Goto, Slash, parse};
 
 /// A paste of more bytes than this is staged as a text file rather than put in the bar.
@@ -26,6 +28,12 @@ const PASTE_ATTACH: usize = 64 * 1024;
 
 /// What `/grant` without a text sends the stuck ant.
 pub const GRANT: &str = "Carry on: fresh turns granted.";
+
+/// Send the note `text` on `request` to its ant on its thread, as any message of the human's there.
+pub fn note_job(request: &ApprovalRequest, text: &str) -> Job {
+    let (to, thread) = (request.ant.clone(), Some(request.thread_id.clone()));
+    Job::Ask { to, thread, text: text.trim().to_owned(), quote: None }
+}
 
 impl Model {
     /// Take `key` for the bar when it is focused or `key` focuses it: Ctrl-K, or @ or # in a view. Returns None when
@@ -50,9 +58,10 @@ impl Model {
         if self.bar.text() != before {
             self.bar.pick = complete::Pick::default();
         }
-        // Leaving the bar empty drops the reply `>` set up.
+        // Leaving the bar empty drops the reply `>` or the note set up.
         if key == Key::Esc && self.bar.is_empty() {
             self.bar.quoting = None;
+            self.bar.noting = None;
         }
         Some(match edited {
             Edited::Done => None,
@@ -63,6 +72,9 @@ impl Model {
 
     /// Do what the bar's `text` says, emptying the bar; else keep it and tell why on its status line.
     fn submit(&mut self, text: String, now: DateTime<Utc>) -> Option<Action> {
+        if let Some(note) = self.bar.noting.clone() {
+            return self.note(note, text);
+        }
         let command = match self.channel_on_view() {
             Some(_) if text.trim_start().starts_with('@') => Ok(Command::Say(text.trim().to_owned())),
             _ => parse(&text),
@@ -90,27 +102,67 @@ impl Model {
             self.bar.quoting = None;
         }
         match action {
-            Some(Action::Run(job, _)) => {
-                let job = match job.sends().then(|| self.bar.staged.take(&text)).flatten() {
-                    Some(files) => {
-                        let count =
-                            if files.len() == 1 { "1 file".to_owned() } else { format!("{} files", files.len()) };
-                        self.bar.set_status(format!("sending with {count}…"), Tone::Busy);
-                        Job::Attached { job: Box::new(job), files }
-                    }
-                    None => {
-                        self.bar.set_status(if slash { "running…" } else { "sending…" }, Tone::Busy);
-                        job
-                    }
-                };
-                Some(Action::Run(job, text))
-            }
+            Some(Action::Run(job, _)) => Some(self.run_job(job, text, slash)),
             Some(Action::Decide(request, verdict)) => {
                 self.bar.set_status(format!("answering request {}…", tools::qualified(&request)), Tone::Busy);
                 Some(Action::Decide(request, verdict))
             }
             other => other,
         }
+    }
+
+    /// Run `job`, which the bar's `text` asked for, with the files staged if it sends a message.
+    fn run_job(&mut self, job: Job, text: String, slash: bool) -> Action {
+        let job = match job.sends().then(|| self.bar.staged.take(&text)).flatten() {
+            Some(files) => {
+                let count = if files.len() == 1 { "1 file".to_owned() } else { format!("{} files", files.len()) };
+                self.bar.set_status(format!("sending with {count}…"), Tone::Busy);
+                Job::Attached { job: Box::new(job), files }
+            }
+            None => {
+                self.bar.set_status(if slash { "running…" } else { "sending…" }, Tone::Busy);
+                job
+            }
+        };
+        Action::Run(job, text)
+    }
+
+    /// Take Enter on the note `text` about a tool request: reject the request, the note to be sent once the rejection
+    /// is stored ([`Model::answered`]); or, the rejection refused, send the note as a reply on the request's thread.
+    fn note(&mut self, note: Note, text: String) -> Option<Action> {
+        let request = match note {
+            Note::Reply(request) => {
+                self.bar.sending_note(&text, request.clone());
+                self.bar.set_text("");
+                self.bar.noting = None;
+                return Some(self.run_job(note_job(&request, &text), text, false));
+            }
+            Note::Reject(request) => request,
+        };
+        if let Some(storing) = self.asking.as_ref().filter(|a| a.storing) {
+            let id = tools::qualified(&storing.request);
+            self.bar.set_status(
+                format!("storing the decision on request {id}: send the note once it is stored"),
+                Tone::Error,
+            );
+            return None;
+        }
+        let mut asking = match Asking::decide((*request).clone(), Verdict::Reject) {
+            Ok(asking) => asking,
+            Err(refusal) => {
+                let ant = &request.ant;
+                self.bar.set_status(format!("{refusal}: Enter sends the note to {ant} as a reply"), Tone::Error);
+                self.bar.noting = Some(Note::Reply(request));
+                return None;
+            }
+        };
+        asking.note = Some(text);
+        self.asking = Some(asking);
+        self.bar.set_text("");
+        self.bar.noting = None;
+        self.bar.focused = false;
+        self.bar.set_status(format!("rejecting request {}…", tools::qualified(&request)), Tone::Busy);
+        Some(Action::Decide(request, Verdict::Reject))
     }
 
     /// The action `command` takes, or why it cannot be taken.
@@ -417,6 +469,7 @@ impl Model {
     /// back into the bar if empty.
     pub fn outcome(&mut self, outcome: Outcome) -> Option<Action> {
         self.bar.staged.sent(&outcome.text, outcome.result.is_err());
+        let note = self.bar.note_sent(&outcome.text);
         match outcome.result {
             Ok(mut done) => {
                 self.data.withdrawn.extend(done.withdrew);
@@ -444,6 +497,7 @@ impl Model {
                 if self.bar.is_empty() && !outcome.text.is_empty() {
                     self.bar.set_text(&outcome.text);
                     self.bar.quoting = outcome.quoting;
+                    self.bar.noting = note.map(Note::Reply);
                     self.bar.focused = true;
                 }
                 None
@@ -687,6 +741,57 @@ mod tests {
         assert_eq!(m.bar.status, Some(Status { text: "answered request".into(), tone: Tone::Done }));
         assert_eq!(run(&mut m, "/reject 0000"), None);
         assert_eq!(m.bar.status.as_ref().unwrap().text, "no tool request 0000");
+    }
+
+    #[test]
+    fn n_rejects_a_tool_request_then_sends_the_note_to_its_ant_on_its_thread() {
+        let mut m = model();
+        let push = request("dev-a", "git push", vec![Verdict::AllowOnce, Verdict::Reject]);
+        m.take(live::Event::Approval(tools::Update::Pending(push.clone())), at(0));
+        m.bar.set_text("draft");
+        assert_eq!(m.key(Key::Char('n'), at(0)), None);
+        assert!(m.bar.noting.is_none() && m.bar.status.as_ref().unwrap().text.starts_with("the bar holds a draft"));
+        m.bar.set_text("");
+
+        m.compact = true;
+        assert_eq!(m.key(Key::Char('n'), at(0)), None, "the top request");
+        assert!(m.bar.focused && m.bar.noting == Some(Note::Reject(Box::new(push.clone()))));
+        assert!(!m.compact, "the note written in the full view");
+        let note = "open a pull request instead";
+        typed(&mut m, note);
+        assert_eq!(m.key(Key::Enter, at(0)), Some(Action::Decide(Box::new(push.clone()), Verdict::Reject)));
+        assert!(m.bar.is_empty() && m.bar.noting.is_none() && !m.bar.focused);
+        assert!(m.asking.as_ref().is_some_and(|a| a.storing && a.note.as_deref() == Some(note)));
+        assert!(m.asking.as_ref().and_then(Asking::status).unwrap().to_string().contains("then sending the note"));
+
+        let sent = m.take(live::Event::Decided(Ok("rejected".into())), at(1));
+        let ask =
+            Job::Ask { to: push.ant.clone(), thread: Some(push.thread_id.clone()), text: note.into(), quote: None };
+        assert_eq!(sent, [Action::Run(ask.clone(), note.into())], "the note goes once the rejection is stored");
+        assert!(m.asking.is_none());
+        m.outcome(Outcome { result: Err(anyhow::anyhow!("no route")), text: note.into(), quoting: None });
+        assert_eq!((m.bar.text(), &m.bar.noting), (note.to_owned(), &Some(Note::Reply(Box::new(push)))));
+        assert_eq!(m.key(Key::Enter, at(1)), Some(Action::Run(ask, note.into())), "sent again as a reply");
+    }
+
+    #[test]
+    fn a_refused_rejection_sends_no_note_and_puts_it_back_in_the_bar() {
+        let mut m = model();
+        let push = request("dev-a", "git push", vec![Verdict::AllowOnce, Verdict::Reject]);
+        m.take(live::Event::Approval(tools::Update::Pending(push.clone())), at(0));
+        m.key(Key::Char('n'), at(0));
+        let note = "open a pull request instead";
+        typed(&mut m, note);
+        assert!(matches!(m.key(Key::Enter, at(0)), Some(Action::Decide(_, Verdict::Reject))));
+        let refused = anyhow::anyhow!("request dev-a/{} was already answered by bob: allow-once", push.id);
+        assert_eq!(m.take(live::Event::Decided(Err(refused)), at(1)), [], "no note sent");
+        assert_eq!((m.bar.text(), &m.bar.noting), (note.to_owned(), &Some(Note::Reply(Box::new(push.clone())))));
+        let status = m.bar.status.as_ref().unwrap();
+        assert!(status.text.contains("by bob") && status.text.contains("the note was not sent"), "{}", status.text);
+        assert!(m.bar.focused && m.asking.is_none());
+        let ask = Job::Ask { to: push.ant.clone(), thread: Some(push.thread_id), text: note.into(), quote: None };
+        assert_eq!(m.key(Key::Enter, at(1)), Some(Action::Run(ask, note.into())), "Enter sends it as a reply");
+        assert!(m.bar.is_empty() && m.bar.noting.is_none());
     }
 
     #[test]

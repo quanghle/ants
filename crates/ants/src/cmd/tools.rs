@@ -47,11 +47,15 @@ pub(crate) enum ToolsCommand {
         #[arg(long, env = "ANTS_CONFIG")]
         config: Option<PathBuf>,
     },
-    /// Reject the tool call of a pending request.
+    /// Reject the tool call of a pending request, with --note telling the ant what to do instead.
     Reject {
         /// Request as `<ant>/<id>`, or a bare id when only one ant has it; a unique start of the id will do.
         #[arg(add = ArgValueCandidates::new(completions::tool_requests))]
         id: String,
+        /// Once the rejection is stored, send this to the ant on the request's thread as the human's message, which
+        /// steers its running prompt and renews the thread's turn budget. Not sent when the rejection is refused.
+        #[arg(long, value_name = "TEXT")]
+        note: Option<String>,
     },
 }
 
@@ -67,8 +71,8 @@ pub(crate) async fn run(conn: &Connection<'_>, command: ToolsCommand) -> Result<
                 (true, Some(path)) => Some(path),
                 (true, None) => Some(ants_daemon::config::default_path()?),
             };
-            tools::decide_request(&nats()?, &id, verdict, config.as_deref()).await
+            tools::decide_request(&nats()?, &id, verdict, config.as_deref(), None).await
         }
-        ToolsCommand::Reject { id } => tools::decide_request(&nats()?, &id, Verdict::Reject, None).await,
+        ToolsCommand::Reject { id, note } => tools::decide_request(&nats()?, &id, Verdict::Reject, None, note).await,
     }
 }

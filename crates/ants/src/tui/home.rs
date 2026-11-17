@@ -62,7 +62,7 @@ impl Why {
     /// The item's one-key actions but Enter, as home and the compact pane show them.
     pub fn keys(self) -> &'static str {
         match self {
-            Self::Approval => "a A r answer · z snooze",
+            Self::Approval => "a A r answer · n reject with a note · z snooze",
             Self::Question => "1-9 answer · r reply · d done · z snooze",
             Self::Stuck => "g grant · x cancel · d done · z snooze",
             Self::Message | Self::Mention => "r reply · d done · z snooze",
@@ -415,6 +415,7 @@ impl Page {
             Key::Char('b') => return thread().map(|t| To::Remind(t, reminded)),
             Key::Char('a' | 'A') => return pending.map(|request| To::Ask(request, verdict)),
             Key::Char('r') if pending.is_some() => return pending.map(|request| To::Ask(request, verdict)),
+            Key::Char('n') => return pending.map(To::Note),
             Key::Char('1'..='9') if selected.is_some_and(|i| i.question.is_some()) => {
                 let item = selected?;
                 let (id, asked) = item.question.as_ref()?;
@@ -598,7 +599,7 @@ mod tests {
         assert_eq!(waiting(&m.data, at(4)).len(), 3);
         let screen = shown(&m, at(4));
         assert!(screen.contains("dev-a asks to run 2 tools, the oldest execute: git push"), "{screen}");
-        assert!(screen.contains("a allow · r reject · Enter lists all 2"), "{screen}");
+        assert!(screen.contains("a allow · r reject · n reject with a note · Enter lists all 2"), "{screen}");
 
         assert_eq!(m.key(Key::Enter, at(4)), None);
         assert!(m.asking.is_none(), "Enter lists the group's requests");

@@ -14,7 +14,7 @@ use ratatui::text::Span;
 
 use super::acts::{Acted, Change};
 use super::approvals::{self, Asking};
-use super::command::Bar;
+use super::command::{self, Bar, Tone};
 use super::exec::{Job, Quoted};
 use super::interrupt::Confirm;
 use super::react::{self, Picker};
@@ -270,6 +270,8 @@ pub enum To {
     Work(Filter),
     /// Answer a pending tool request: with the verdict, at once; without, shown in full.
     Ask(ApprovalRequest, Option<Verdict>),
+    /// The command bar open on a note rejecting a pending tool request.
+    Note(ApprovalRequest),
     /// Pick a reaction to the message.
     React(Uuid),
     /// A thread's delegation tree.
@@ -397,7 +399,7 @@ impl Model {
             }
             live::Event::Following => self.data.live.approvals_reset(),
             live::Event::Approval(update) => self.approval(update, now),
-            live::Event::Decided(outcome) => self.answered(outcome, now),
+            live::Event::Decided(outcome) => return self.answered(outcome, now).into_iter().collect(),
             live::Event::FollowEnded(Ok(())) => {}
             live::Event::FollowEnded(Err(e)) => {
                 self.notify(format!("following the tool requests: {e:#}"), Level::Error, now);
@@ -500,19 +502,42 @@ impl Model {
     }
 
     /// Take the outcome of storing a decision: the line saying so, or why it was not stored, the first decision
-    /// winning.
-    fn answered(&mut self, outcome: anyhow::Result<String>, now: DateTime<Utc>) {
+    /// winning. A rejection with a note sends the note once stored; refused, the note comes back into the bar, to go as
+    /// a reply on the request's thread if wanted.
+    fn answered(&mut self, outcome: anyhow::Result<String>, now: DateTime<Utc>) -> Option<Action> {
         let Some(asking) = self.asking.as_mut().filter(|a| a.storing) else {
-            return self.decided(outcome);
+            self.decided(outcome);
+            return None;
         };
         asking.storing = false;
+        let note = asking.note.take().map(|note| (note, Box::new(asking.request.clone())));
         if outcome.is_ok() || !asking.full {
             self.asking = None;
         }
-        match outcome {
-            Ok(line) => self.notify(line, Level::Info, now),
-            Err(e) => self.notify(format!("{e:#}"), Level::Error, now),
+        match (outcome, note) {
+            (Ok(line), None) => self.notify(line, Level::Info, now),
+            (Err(e), None) => self.notify(format!("{e:#}"), Level::Error, now),
+            (Ok(line), Some((note, request))) => {
+                self.notify(line, Level::Info, now);
+                self.bar.set_status(format!("sending the note to {}…", request.ant), Tone::Busy);
+                let job = command::note_job(&request, &note);
+                self.bar.sending_note(&note, request);
+                return Some(Action::Run(job, note));
+            }
+            (Err(e), Some((note, request))) => {
+                self.notify(format!("{e:#}"), Level::Error, now);
+                let why = format!("{e:#}; the note was not sent");
+                if !self.bar.is_empty() {
+                    self.bar.set_status(why, Tone::Error);
+                    return None;
+                }
+                self.bar.set_status(format!("{why}: Enter sends it to {} as a reply", request.ant), Tone::Error);
+                self.bar.set_text(&note);
+                self.bar.noting = Some(command::Note::Reply(request));
+                self.bar.focused = true;
+            }
         }
+        None
     }
 
     /// The thread shown, if one is.

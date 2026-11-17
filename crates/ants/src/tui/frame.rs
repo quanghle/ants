@@ -117,7 +117,7 @@ const HELP: &[(&str, &str)] = &[
     ("Alt-Enter Ctrl-E", "in the bar: a new line, the text in the editor"),
     ("↑↓ Tab", "in the bar: pick and complete an @ant, #channel or /command"),
     ("y p m e d z", "in a thread: copy, pin, mute, archive, done, snooze (again to undo)"),
-    ("a A r", "on a tool request: allow once, always or reject, at once"),
+    ("a A r n", "on a tool request: allow once, always, reject at once, or reject with a note to the ant"),
     ("1-9 Enter", "on a question: answer by number, or focus its card: ↑↓ Enter Esc"),
     ("g r f x d z s c o", "on home: grant, reply, forward, cancel, done, snooze, digest, credentials, held orders"),
     ("i > t S", "in a thread: reply, quote the selected, delegation tree, TL;DR"),
@@ -213,7 +213,10 @@ mod tests {
         m.key(Key::Enter, at(0));
         let shown = screen(&m, at(0));
         assert!(shown.contains(&format!(" Tool request {} ", crate::tools::qualified(&push))), "{shown}");
-        assert!(shown.contains("a allow · r reject · Enter open its thread · Esc back"), "{shown}");
+        assert!(
+            shown.contains("a allow · r reject · n reject with a note · Enter open its thread · Esc back"),
+            "{shown}"
+        );
         m.key(Key::Esc, at(0));
         let decide = crate::tui::model::Action::Decide(Box::new(push), ants_proto::Verdict::AllowOnce);
         assert_eq!(m.key(Key::Char('a'), at(0)), Some(decide));

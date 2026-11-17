@@ -6,7 +6,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
-use ants_proto::ThreadId;
+use ants_proto::{ApprovalRequest, ThreadId};
 
 use super::COMMANDS;
 use crate::tui::exec::Quoted;
@@ -72,9 +72,41 @@ pub struct Bar {
     pub staged: attach::Staged,
     /// The message `>` picked on a thread for the next message there to reply to, quoting it.
     pub quoting: Option<(ThreadId, Quoted)>,
+    /// The tool request the text is a note about, n on its card having opened the bar.
+    pub noting: Option<Note>,
+    /// The notes being sent, by their text, each with its request, to come back as a reply if sending fails.
+    notes: Vec<(String, Box<ApprovalRequest>)>,
+}
+
+/// What Enter does with the note in the bar on a tool request.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Note {
+    /// Reject the request, then send the note to its ant on its thread once the rejection is stored.
+    Reject(Box<ApprovalRequest>),
+    /// Send the note to the request's ant on its thread, the rejection having been refused.
+    Reply(Box<ApprovalRequest>),
+}
+
+impl Note {
+    pub fn request(&self) -> &ApprovalRequest {
+        match self {
+            Self::Reject(request) | Self::Reply(request) => request,
+        }
+    }
 }
 
 impl Bar {
+    /// Remember that `text` being sent is the note on `request`.
+    pub fn sending_note(&mut self, text: &str, request: Box<ApprovalRequest>) {
+        self.notes.push((text.to_owned(), request));
+    }
+
+    /// Take that `text` was sent or failed: the request it was the note on, if it was one.
+    pub fn note_sent(&mut self, text: &str) -> Option<Box<ApprovalRequest>> {
+        let at = self.notes.iter().position(|(sent, _)| sent == text)?;
+        Some(self.notes.remove(at).1)
+    }
+
     /// The text, its pastes in full.
     pub fn text(&self) -> String {
         let mut text = String::with_capacity(self.chars.len());
@@ -271,6 +303,13 @@ impl Bar {
             let room = usize::from(area.width.saturating_sub(4)).saturating_sub(title.chars().count());
             let line: String = quoted.quote.line().chars().take(room.saturating_sub(1)).collect();
             title = format!("{title}{line} ");
+        }
+        match &self.noting {
+            Some(Note::Reject(request)) => {
+                title = format!("{title}reject {} with a note to {} ", crate::tools::qualified(request), request.ant);
+            }
+            Some(Note::Reply(request)) => title = format!("{title}to {} on the request's thread ", request.ant),
+            None => {}
         }
         let mut block = style::block(title, self.focused);
         if let Some(status) = &self.status {

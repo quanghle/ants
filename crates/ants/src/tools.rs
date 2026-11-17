@@ -33,6 +33,9 @@
 //! pending, with its held decisions ([`held`]). The human's records are read as stored: only the human's credentials
 //! write them, and the requester's daemon verifies them before it applies anything.
 //!
+//! `ants tools reject --note` sends the ant a note on the request's thread once the rejection is stored
+//! ([`send_note`]), as ACP's answer to a permission request carries no message.
+//!
 //! `ants tools list --follow` and `ants inbox --follow` follow the requests alike ([`follow`]); the inbox also shows
 //! how each ends.
 
@@ -536,7 +539,8 @@ pub async fn answer_request(
 }
 
 fn answered(request: &ApprovalRequest, decision: &ApprovalDecision) -> anyhow::Error {
-    anyhow::anyhow!("request {} was already answered: {}", qualified(request), spelling(decision.verdict))
+    let by = decision.by.as_ref().map_or_default(|by| format!(" by {by}"));
+    anyhow::anyhow!("request {} was already answered{by}: {}", qualified(request), spelling(decision.verdict))
 }
 
 /// Check that `request`, stored at stream sequence `seq`, is pending and offers `verdict`. Returns the sequence of the
@@ -743,10 +747,38 @@ pub async fn show(nats: &Nats<'_>, id: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// `ants tools approve ID [--always] [--rule]` and `ants tools reject ID`: answer one request with `verdict`. With
-/// `rule`, the config file there, also add the allow rule fitting the request to its ant's allow list, then reload
-/// the daemon serving the file; for an ant added from a template, whose entry may set no allow list, only answer.
-pub async fn decide_request(nats: &Nats<'_>, id: &str, verdict: Verdict, rule: Option<&Path>) -> Result<()> {
+/// Send `note` on the thread of `request` to its ant as `me`'s message, as `ants ask --thread` does: as any human
+/// message there, it steers the prompt running and renews the thread's turn budget. Returns the message, where it
+/// was stored, and the warnings for an ant no daemon serves now.
+pub async fn send_note(
+    js: &jetstream::Context,
+    domain: Option<&ants_proto::JsDomain>,
+    me: &crate::people::humans::Me,
+    request: &ApprovalRequest,
+    note: String,
+) -> Result<(Envelope, bus::Stored, Vec<String>)> {
+    use crate::cmd::send;
+    let envelope = send::ask_envelope(me, Some(request.thread_id.clone()), request.ant.clone(), note);
+    let (warnings, _) = send::unserved(js, me, &envelope.to).await;
+    let stored = send::deliver(js, domain, &envelope).await?;
+    Ok((envelope, stored, warnings))
+}
+
+/// `ants tools approve ID [--always] [--rule]` and `ants tools reject ID [--note TEXT]`: answer one request with
+/// `verdict`. With `rule`, the config file there, also add the allow rule fitting the request to its ant's allow list,
+/// then reload the daemon serving the file; for an ant added from a template, whose entry may set no allow list, only
+/// answer. With `note`, send it to the ant on the request's thread once the answer is stored ([`send_note`]); not when
+/// the answer is refused.
+pub async fn decide_request(
+    nats: &Nats<'_>,
+    id: &str,
+    verdict: Verdict,
+    rule: Option<&Path>,
+    note: Option<String>,
+) -> Result<()> {
+    if note.as_deref().is_some_and(|n| n.trim().is_empty()) {
+        bail!("the note is empty: give its text, or reject without --note");
+    }
     let (_, js) = nats.connect("ants-tools").await?;
     let stream = js.get_stream(STREAM).await.context("opening the ANTS stream")?;
     let (seq, request) = find(&stream, id).await?;
@@ -772,9 +804,23 @@ pub async fn decide_request(nats: &Nats<'_>, id: &str, verdict: Verdict, rule: O
         }
         None => None,
     };
-    let decision = answer_request(&js, &stream, seq, &request, verdict, &nats.me.id, Utc::now()).await?;
+    let decision = match answer_request(&js, &stream, seq, &request, verdict, &nats.me.id, Utc::now()).await {
+        Ok(decision) => decision,
+        Err(e) if note.is_some() => bail!("{e:#}; the note was not sent"),
+        Err(e) => return Err(e),
+    };
     println!("answered request {}/{}: {}", decision.ant, decision.request_id, spelling(decision.verdict));
     let ant = &request.ant;
+    if let Some(note) = note {
+        let (envelope, stored, warnings) = send_note(&js, nats.domain, &nats.me, &request, note)
+            .await
+            .with_context(|| format!("request {} is rejected, but the note was not sent", qualified(&request)))?;
+        warnings.iter().for_each(|w| tracing::warn!("{w}"));
+        if stored == bus::Stored::Outbox {
+            println!("{}", crate::cmd::send::OUTBOX);
+        }
+        println!("sent the note to {ant} on thread {} (message {})", envelope.thread_id, envelope.id);
+    }
     match edit {
         Some((path, rule, None)) => println!("{rule:?} is in the allow list of {ant} already in {}", path.display()),
         Some((path, rule, Some(text))) => {

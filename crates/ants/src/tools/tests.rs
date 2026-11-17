@@ -50,7 +50,7 @@ async fn pending_requests_are_listed_and_answered() {
     assert_eq!(titles(&pending(&human, &stream, Utc::now()).await.unwrap()), ["rm -rf build"]);
 
     let again = answer(&human, &stream, &id, Verdict::Reject, Utc::now()).await.unwrap_err();
-    assert!(again.to_string().contains("already answered: allow-always"), "{again:#}");
+    assert!(again.to_string().contains("already answered by human: allow-always"), "{again:#}");
     let expired = answer(&human, &stream, &late.id.to_string(), Verdict::AllowOnce, Utc::now()).await.unwrap_err();
     assert!(expired.to_string().contains("expired"), "{expired:#}");
     let unoffered = answer(&human, &stream, &rm.id.to_string(), Verdict::AllowAlways, Utc::now()).await.unwrap_err();
@@ -135,6 +135,43 @@ async fn every_human_sees_every_request_and_the_first_decision_wins() {
     let ant_stream = ant_js.get_stream_no_info(STREAM).await.unwrap();
     let stored = ant_stream.direct_get_last_for_subject(push.decision_subject()).await.unwrap();
     assert_eq!(serde_json::from_slice::<ApprovalDecision>(&stored.payload).unwrap(), first);
+}
+
+/// alice rejects dev-a's request with a note, which reaches dev-a on the request's thread after the rejection is
+/// stored; bob, rejecting it too with a note, is told alice decided it, and his note is not sent.
+#[tokio::test]
+async fn a_rejection_with_a_note_sends_it_only_once_stored() {
+    let Some(server) = Server::start() else { return };
+    let [alice, bob, dev_a]: [UserId; 3] = ["alice", "bob", "dev-a"].map(|p| p.parse().unwrap());
+    let creds = [&alice, &bob].map(|human| server.creds_as(human, Role::Human));
+    let [a, b] = creds.each_ref().map(|c| Nats::new(&server.url, Some(c), None).unwrap());
+    let (_, a_js) = a.connect("test").await.unwrap();
+    let stream = a_js.get_stream(STREAM).await.unwrap();
+    let (_, ant_js) = server.connect(&dev_a).await;
+    let push = request(&dev_a, "git push", vec![Verdict::AllowOnce, Verdict::Reject], Duration::from_secs(60));
+    bus::publish_json(&ant_js, push.subject(), &push, None).await.unwrap();
+    let id = qualified(&push);
+    let empty = decide_request(&a, &id, Verdict::Reject, None, Some(" ".to_owned())).await.unwrap_err();
+    assert!(empty.to_string().contains("the note is empty"), "{empty:#}");
+    assert_eq!(super::decision(&stream, &push).await.unwrap(), None);
+
+    let note = "push to a branch and open a pull request instead";
+    decide_request(&a, &id, Verdict::Reject, None, Some(note.to_owned())).await.unwrap();
+    let decided = stream.get_last_raw_message_by_subject(&push.decision_subject()).await.unwrap();
+    let decision: ApprovalDecision = serde_json::from_slice(&decided.payload).unwrap();
+    assert_eq!((decision.verdict, decision.by), (Verdict::Reject, Some(alice.clone())));
+    let sent = stream.get_last_raw_message_by_subject(&subject::inbox(&dev_a, &alice)).await.unwrap();
+    assert!(sent.sequence > decided.sequence, "the note goes once the rejection is stored");
+    let sent: Envelope = serde_json::from_slice(&sent.payload).unwrap();
+    assert_eq!((sent.text.as_str(), &sent.thread_id, sent.owner), (note, &push.thread_id, Some(alice.clone())));
+
+    let refused = decide_request(&b, &id, Verdict::Reject, None, Some("stop".to_owned())).await.unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        format!("request {id} was already answered by alice: reject; the note was not sent")
+    );
+    let unsent = stream.get_last_raw_message_by_subject(&subject::inbox(&dev_a, &bob)).await.unwrap_err();
+    assert_eq!(unsent.kind(), LastRawMessageErrorKind::NoMessageFound, "bob's note is not sent");
 }
 
 /// lead is in dev-a's escalate_to, kept in `ants_chains` as dev-a's colony entry expired; dev-c is not. Each sends

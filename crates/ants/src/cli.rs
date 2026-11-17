@@ -259,8 +259,9 @@ pub(crate) enum Command {
         #[arg(long)]
         identities_restored: bool,
     },
-    /// Tool requests ants escalate to humans: list the pending ones, show one, approve or reject it. Every human
-    /// sees every request; the first decision wins, a human's or that of an ant of the ant's escalation chain.
+    /// Tool requests ants escalate to humans: list the pending ones, show one, approve or reject it, a rejection with
+    /// a note to the ant if wanted. Every human sees every request; the first decision wins, a human's or that of an
+    /// ant of the ant's escalation chain.
     #[command(subcommand)]
     Tools(ToolsCommand),
     /// Messages ants gave up on: inspect, replay or drop them.
@@ -567,7 +568,14 @@ mod tests {
             parse("ants tools approve 019a --rule"),
             Ok(Command::Tools(ToolsCommand::Approve { id, always: false, rule: true, .. })) if id == "019a"
         );
-        assert_matches!(parse("ants tools reject 019a"), Ok(Command::Tools(ToolsCommand::Reject { id })) if id == "019a");
+        assert_matches!(
+            parse("ants tools reject 019a"),
+            Ok(Command::Tools(ToolsCommand::Reject { id, note: None })) if id == "019a"
+        );
+        assert_matches!(
+            Cli::try_parse_from(["ants", "tools", "reject", "019a", "--note", "use git push --dry-run"]).map(|c| c.command),
+            Ok(Some(Command::Tools(ToolsCommand::Reject { note: Some(note), .. }))) if note == "use git push --dry-run"
+        );
         assert_matches!(
             parse("ants tools show 019a --json"),
             Ok(Command::Tools(ToolsCommand::Show { id, json: true })) if id == "019a"

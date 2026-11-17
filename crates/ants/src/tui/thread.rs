@@ -86,7 +86,7 @@ impl Page {
         self.messages().find(|e| e.id == Some(at)).map(|e| e.seq)
     }
 
-    pub const KEYS: &str = "↑↓ select · i reply · > reply to selected · y copy · f forward · o open file · ] next file · + react · p pin · m mute · e archive · d done · u unread from selected · b remind of selected · z snooze · t tree · T tool calls · S TL;DR · x cancel · W withdraw · E withdraw to edit · a A r answer a tool request · 1-9 Enter answer a question · End latest · Esc back";
+    pub const KEYS: &str = "↑↓ select · i reply · > reply to selected · y copy · f forward · o open file · ] next file · + react · p pin · m mute · e archive · d done · u unread from selected · b remind of selected · z snooze · t tree · T tool calls · S TL;DR · x cancel · W withdraw · E withdraw to edit · a A r answer a tool request · n reject it with a note · 1-9 Enter answer a question · End latest · Esc back";
 
     /// The messages shown, in the order stored.
     fn messages(&self) -> impl DoubleEndedIterator<Item = &Entry> {
@@ -281,6 +281,10 @@ impl Page {
                     return None;
                 };
                 return Some(To::Ask(oldest.clone(), verdict));
+            }
+            Key::Char('n') => {
+                let pending = data.live.approvals.iter().filter(|r| r.thread_id == self.history.thread);
+                return pending.min_by_key(|r| r.requested_at).cloned().map(To::Note);
             }
             Key::Char('1'..='9') => {
                 return question::thread_key(key, data, &self.history.thread, &self.history.entries, now);
@@ -850,11 +854,15 @@ mod tests {
         m.data.live.approvals = vec![push.clone(), tag, crate::test_support::live::request("dev-b", "ls", vec![])];
         assert_eq!(page.key(Key::Char('A'), &m.data, at(2)), Some(To::Ask(push.clone(), Some(Verdict::AllowAlways))));
         assert_eq!(page.key(Key::Enter, &m.data, at(2)), Some(To::Ask(push.clone(), None)));
+        assert_eq!(page.key(Key::Char('n'), &m.data, at(2)), Some(To::Note(push.clone())), "a note on the oldest");
 
         let shown = screen(&page, &m, 100, at(2));
         assert!(shown.contains("deploy the site"), "{shown}");
         assert!(shown.contains("dev-a asks to run a tool") && shown.contains("execute: git push"), "{shown}");
-        assert!(shown.contains("a allow · r reject · Enter details"), "the oldest takes the keys: {shown}");
+        assert!(
+            shown.contains("a allow · r reject · n reject with a note · Enter details"),
+            "the oldest takes the keys: {shown}"
+        );
         assert!(shown.contains("execute: git tag v1") && !shown.contains("execute: ls"), "{shown}");
 
         m.data.live.approvals.clear();
