@@ -169,10 +169,10 @@ pub fn tldr_of(request: &SummaryRequest, reply: &Envelope, asker: &UserId) -> Op
     })
 }
 
-/// The tokens the summaries of `human` spent this UTC day: those the replies to its summary requests stored since
-/// midnight carry.
-pub async fn spent_today(js: &jetstream::Context, human: &UserId) -> Result<u64> {
-    let midnight = Utc::now().date_naive().and_time(chrono::NaiveTime::MIN).and_utc();
+/// The tokens the summaries of `human` spent the UTC day of `now`: those the replies to its summary requests stored
+/// since midnight carry.
+pub async fn spent_today(js: &jetstream::Context, human: &UserId, now: DateTime<Utc>) -> Result<u64> {
+    let midnight = now.date_naive().and_time(chrono::NaiveTime::MIN).and_utc();
     let start = consumer::DeliverPolicy::ByStartTime { start_time: std::time::SystemTime::from(midnight).into() };
     let mut spent = 0;
     let filter = subject::inbox_of(human);
@@ -262,7 +262,7 @@ async fn spent_note(js: &jetstream::Context, human: &UserId, json: bool) {
     if json {
         return;
     }
-    match spent_today(js, human).await {
+    match spent_today(js, human, Utc::now()).await {
         Ok(spent) => eprintln!("summaries spent {spent} tokens today (UTC)"),
         Err(e) => tracing::debug!("not reading the tokens summaries spent today: {e:#}"),
     }

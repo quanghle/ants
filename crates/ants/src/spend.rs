@@ -470,7 +470,8 @@ mod tests {
         let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
         let (_, h_js) = server.connect_as(&human, Role::Human).await;
         let kv = DirectKv::new(&h_js, None, SESSIONS_BUCKET).await.unwrap();
-        let days = window(Utc::now().date_naive(), 7);
+        let today = date("2026-11-14");
+        let days = window(today, 7);
         let none = BTreeMap::new();
         assert!(ants(&h_js, &kv, None, &days, &none).await.unwrap().is_empty(), "no bucket yet");
         bus::init_own_buckets(&h_js).await.unwrap();
@@ -481,13 +482,14 @@ mod tests {
         let a_kv = bus::ensure_sessions(&a_js, None, &dev_a).await.unwrap();
         // An ant without caps still keeps what it spends.
         let ledger = Ledger::kv(a_kv.clone(), dev_a.clone(), Caps::default());
-        ledger.record(&t1, &Spend::Tokens(100)).await.unwrap();
+        ledger.record_on(&t1, &Spend::Tokens(100), &days[0]).await.unwrap();
         a_kv.put(daily_spend_key(&dev_a, &days[3]), serde_json::to_vec(&spent(50, 0.5)).unwrap()).await.unwrap();
         a_kv.put(session_key(&dev_a, &t1), "session-1").await.unwrap();
         let (_, b_js) = server.connect(&dev_b).await;
         let b_kv = bus::ensure_sessions(&b_js, None, &dev_b).await.unwrap();
-        Ledger::kv(b_kv.clone(), dev_b.clone(), Caps::default()).record(&t1, &Spend::Tokens(7)).await.unwrap();
-        let long_ago = window(Utc::now().date_naive(), 20).pop().unwrap();
+        let b_ledger = Ledger::kv(b_kv.clone(), dev_b.clone(), Caps::default());
+        b_ledger.record_on(&t1, &Spend::Tokens(7), &days[0]).await.unwrap();
+        let long_ago = window(today, 20).pop().unwrap();
         b_kv.put(daily_spend_key(&dev_b, &long_ago), serde_json::to_vec(&spent(1, 9.0)).unwrap()).await.unwrap();
 
         let caps = BTreeMap::from([(dev_a.clone(), Caps { daily_tokens: Some(1000), ..Caps::default() })]);
@@ -501,7 +503,7 @@ mod tests {
         assert_eq!(one.len(), 1);
         let threads = one[0].threads.clone().unwrap();
         assert_eq!(threads, [ThreadSpent { thread: t1.clone(), spent: spent(100, 0.0) }]);
-        let month = window(Utc::now().date_naive(), 30);
+        let month = window(today, 30);
         let b = ants(&h_js, &kv, Some(&dev_b), &month, &caps).await.unwrap();
         assert_eq!(b[0].total, spent(8, 9.0));
         let nobody = ants(&h_js, &kv, Some(&p("dev-c")), &days, &caps).await.unwrap();
