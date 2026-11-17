@@ -199,7 +199,7 @@ fn exercise_daemon(custom_tools: bool) {
     assert_eq!(react(&[&message, "--remove", "check"]), format!("removed check from message {message}\n"));
     let shown = run(ants(&["thread", "show", &thread]));
     let shown = String::from_utf8_lossy(&shown.stdout);
-    assert!(shown.contains(&format!("(message {message}): hello there\n    reacted eyes: human\n")), "{shown}");
+    assert!(shown.contains(&format!(" · message {message}\n  hello there\n  reacted eyes: human\n")), "{shown}");
 
     let (status, health) = get(&metrics, "/healthz");
     assert_eq!((status, health.as_str()), (200, "ok\n"), "daemon log:\n{}", daemon_log());
@@ -453,8 +453,8 @@ fn files_are_attached_listed_and_saved() {
     assert_eq!(handles.len(), 2, "{asked}");
     assert!(handles.iter().all(|h| h.starts_with("human.inbox.dev-a.")), "{asked}");
     let shown = ok(&["thread", "show", thread]);
-    assert!(shown.contains(&format!("\n    📎 shot.png (293 KiB) {}\n", handles[0])), "{shown}");
-    assert!(shown.contains(&format!("\n    📎 notes.txt (5 B) {}\n", handles[1])), "{shown}");
+    assert!(shown.contains(&format!("\n  📎 shot.png (293 KiB) {}\n", handles[0])), "{shown}");
+    assert!(shown.contains(&format!("\n  📎 notes.txt (5 B) {}\n", handles[1])), "{shown}");
     let json: serde_json::Value = serde_json::from_str(ok(&["thread", "show", thread, "--json"]).trim()).unwrap();
     let listed = &json["attachments"][0];
     assert_eq!(

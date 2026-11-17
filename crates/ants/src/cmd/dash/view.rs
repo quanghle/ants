@@ -302,7 +302,7 @@ mod tests {
         assert!(shown.contains("Threads (1, last 1d)"), "{shown}");
         assert!(shown.contains(&format!("Thread {thread}")), "{shown}");
         assert!(shown.contains("alice -> dev-a"), "{shown}");
-        assert!(shown.contains("): deploy the site"), "{shown}");
+        assert!(shown.contains("│  deploy the site "), "{shown}");
         assert!(shown.contains("Tool requests (1)"), "{shown}");
         assert!(shown.contains("dev-a/") && shown.contains(" execute: git push ("), "{shown}");
 

@@ -29,7 +29,7 @@ pub use self::parser::Parser;
 pub use self::pick::{Pick, recent_threads, resolve};
 pub use self::summaries::Summary;
 pub(crate) use self::summaries::{Select, Threads};
-pub(crate) use self::text::{answer_line, time, took};
+pub(crate) use self::text::{answer_line, call_label, time, took};
 pub use self::text::{answers_to, render, table};
 pub use message::{MessagePick, find as find_message, recent_messages};
 

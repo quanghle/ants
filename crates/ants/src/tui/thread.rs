@@ -621,7 +621,7 @@ mod tests {
         ];
         assert_eq!(shown, expected.map(|(t, d)| (t.to_owned(), d)));
         let first: Vec<String> = glyphs(&rows).into_iter().map(|(first, _)| first).collect();
-        assert_eq!(first, ["", "  ├ ", "  ├ ", "  │ ├ ", "  │ └ ", "  └ ", ""]);
+        assert_eq!(first, ["", "  ⎿ ", "    ", "      ⎿ ", "        ", "    ", ""]);
     }
 
     #[test]
@@ -649,8 +649,10 @@ mod tests {
         page.history.loaded(&thread, Ok(entries)).unwrap();
         assert_eq!(page.messages().count(), 2, "an end is no message");
 
-        let shown = screen(&page, &m, 100, at(6));
-        assert!(shown.contains(&format!("{} dev-a ended without a reply: Thanks, noted.", hm(at(4)))), "{shown}");
+        let shown = screen(&page, &m, 120, at(6));
+        let ended =
+            shown.lines().find(|l| l.contains("● dev-a  ended without a reply: Thanks, noted.")).unwrap_or_default();
+        assert!(ended.split('│').nth(1).is_some_and(|l| l.ends_with(&hm(at(4)))), "{shown}");
         assert!(!shown.contains("More."), "{shown}");
     }
 
@@ -787,18 +789,54 @@ mod tests {
             Some(super::super::model::Page::Thread(page)) => screen(page, m, 100, at(40)),
             _ => unreachable!(),
         };
-        let turn = format!("{} dev-a 2 tool calls, 10.0s, 1 failed", hm(at(10)));
-        assert!(shown(&m).contains(&turn), "{}", shown(&m));
+        assert!(shown(&m).contains("  ⎿ ● dev-a  Ran 2 commands · 10.0s · 1 failed"), "{}", shown(&m));
 
         assert_eq!(m.key(Key::Char('T'), at(40)), Some(Action::KeepTools(Tools::None)));
         assert_eq!(m.notice_at(at(40)).map(|n| n.text.as_str()), Some("tool calls: none"));
         let none = shown(&m);
-        assert!(!none.contains(" c1 ") && !none.contains("tool call") && none.contains("two pass"), "{none}");
+        assert!(!none.contains("Run(c1)") && !none.contains("Ran 2") && none.contains("two pass"), "{none}");
 
         assert_eq!(m.key(Key::Char('T'), at(40)), Some(Action::KeepTools(Tools::All)));
         let all = shown(&m);
-        assert!(all.contains("failed 4.0s") && all.contains("ok 5.0s") && !all.contains("tool calls"), "{all}");
+        assert!(all.contains("  ⎿ ● Run(c1) · failed after 4.0s") && all.contains("    ● Run(c2) · 5.0s"), "{all}");
+        assert!(!all.contains("Ran 2"), "{all}");
         assert_eq!(m.key(Key::Char('T'), at(40)), Some(Action::KeepTools(Tools::Collapsed)));
+    }
+
+    #[test]
+    fn a_running_turn_sums_its_calls_by_kind_and_lists_only_its_latest_three() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let entries = vec![message(1, &thread, "alice", "dev-a", "fix the build")];
+        m.stored(entries.clone(), at(1));
+        let calls = [
+            ("c1", "read", "src/a.rs", "completed", 2),
+            ("c2", "execute", "cargo build", "completed", 3),
+            ("c3", "other", "browser_snapshot", "completed", 4),
+            ("c4", "read", "Read src/b.rs", "completed", 5),
+            ("c5", "execute", "Run `cargo test`", "in_progress", 6),
+        ];
+        for (id, kind, title, status, secs) in calls {
+            let mut event = tool(&thread, "dev-a", id, Some(title), status, secs);
+            if let ants_proto::StatusUpdate::Tool { tool_kind, .. } = &mut event.update {
+                *tool_kind = Some(kind.to_owned());
+            }
+            m.data.calls.status(&event);
+        }
+        let busy = ants_proto::StatusUpdate::State { state: ants_proto::State::Working };
+        m.data.live.status(
+            &ants_proto::StatusEvent::new(crate::test_support::live::user("dev-a"), thread.clone(), busy),
+            at(6),
+        );
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(entries)).unwrap();
+
+        let shown = screen(&page, &m, 80, at(10));
+        assert!(shown.contains("dev-a  Read 2 files, ran 2 commands, used 1 other tool · 8s"), "{shown}");
+        assert!(shown.contains("      ⎿ ● browser_snapshot · "), "{shown}");
+        assert!(shown.contains("        ● Read(src/b.rs) · "), "{shown}");
+        assert!(shown.contains("Run(cargo test) · running 4s"), "{shown}");
+        assert!(!shown.contains("src/a.rs") && !shown.contains("cargo build"), "only the latest three: {shown}");
     }
 
     #[test]
@@ -820,21 +858,19 @@ mod tests {
         m.data.live.colony(vec![crate::test_support::colony::entry("dev-a", 3600, 2, at(5))], at(5));
         let shown = screen(&page, &m, 110, at(47));
         assert!(shown.contains("alice → dev-a"), "{shown}");
-        let face = format!("{} {{.~.}} dev-a → dev-b", hm(entries[1].stored_at));
-        assert!(shown.contains(&face), "an ant's face before its name: {shown}");
+        assert!(shown.contains("    ● {.~.} dev-a → dev-b"), "an ant's face before its name: {shown}");
         assert!(shown.contains("  deploy the site"), "{shown}");
         assert!(shown.contains("dev-a → dev-b  is jobs.retries read anywhere?"), "{shown}");
-        assert!(shown.contains("running 41s"), "a call not ended runs while its ant is busy: {shown}");
-        let turn = format!("│ ├ {} dev-b 1 tool call, 0ms ", hm(calls[1].at));
-        assert!(shown.contains(&turn), "a finished turn on a line: {shown}");
+        assert!(shown.contains("dev-a  Ran 1 command · 41s"), "the running turn on a line: {shown}");
+        assert!(shown.contains("Run(cargo test) · running 41s"), "its latest call under it: {shown}");
+        assert!(shown.contains("      ⎿ ● dev-b  Ran 1 command · 0ms "), "a finished turn on a line: {shown}");
         assert!(!shown.contains("read migrations"), "{shown}");
         m.data.tools = Tools::All;
         let shown = screen(&page, &m, 110, at(47));
-        assert!(shown.contains("read    read migrations") || shown.contains("execute read migrations"), "{shown}");
-        assert!(shown.contains("ok 0ms"), "{shown}");
+        assert!(shown.contains("  ⎿ ● Run(read migrations) · 0ms "), "{shown}");
         m.data.tools = Tools::None;
         let shown = screen(&page, &m, 110, at(47));
-        assert!(!shown.contains("tool call") && !shown.contains("running 41s"), "{shown}");
+        assert!(!shown.contains("Ran 1") && !shown.contains("running 41s"), "{shown}");
         assert!(shown.contains("only in worker/retry.rs"), "{shown}");
         m.data.tools = Tools::Collapsed;
         for field in ["STATE", "OWNER", "ANTS", "dev-a ◐", "dev-b", "SPEND  $0.00 · 0 tokens", "FROM   ask by alice"]
@@ -947,7 +983,7 @@ mod tests {
         let shown = screen(&page, &m, 100, at(2));
         // A wide glyph's second cell shows as a space on the test screen.
         assert!(shown.contains("│  👀  2  :shipit: 1"), "{shown}");
-        assert!(shown.contains("          ✅  1"), "under a nested message too: {shown}");
+        assert!(shown.contains("│      ✅  1"), "under a nested message too: {shown}");
 
         m.pages.push(super::super::model::Page::Thread(page));
         m.key(Key::Home, at(2));
@@ -982,7 +1018,7 @@ mod tests {
         page.history.loaded(&thread, Ok(entries)).unwrap();
         let rows = |page: &Page| screen(page, &m, 80, at(40)).lines().map(str::to_owned).collect::<Vec<_>>();
         let shown = rows(&page);
-        assert!(shown[1].starts_with("│alice → dev-a"), "{shown:#?}");
+        assert!(shown[1].starts_with("│❯ alice → dev-a"), "{shown:#?}");
         assert_eq!(shown[2].trim_end_matches('│').trim_end(), "│  line 5");
         assert_eq!(page.key(Key::Char('y'), &m.data, at(40)), Some(To::Do(Action::Copy("line 5".to_owned()))));
         assert_eq!(rows(&page)[2], shown[2], "held until moved");
@@ -1008,9 +1044,9 @@ mod tests {
         let shown: Vec<&str> = shown.lines().map(|l| l.trim_end_matches('│').trim_end()).collect();
         let from = shown.iter().position(|l| l.contains("alice → dev-a")).unwrap();
         assert_eq!(shown[from + 1..from + 5], ["│  done:", "│", "│  • one", "│  • two"], "{shown:#?}");
-        assert!(shown[from + 5].ends_with("dev-a → dev-b  check retry.rs"), "one line on its heading");
-        assert!(shown[from + 6].ends_with("dev-b → notes"), "{shown:#?}");
-        assert_eq!(shown[from + 7..from + 10], ["│            Found", "│", "│            in two places"]);
+        assert!(shown[from + 5].starts_with("│  ⎿ ● dev-a → dev-b  check retry.rs  "), "one line on its heading");
+        assert!(shown[from + 6].starts_with("│      ⎿ ● dev-b → notes  "), "{shown:#?}");
+        assert_eq!(shown[from + 7..from + 10], ["│          Found", "│", "│          in two places"]);
     }
 
     #[test]
@@ -1048,11 +1084,11 @@ mod tests {
         let shown = screen(&page, &m, 80, at(40));
         let shown: Vec<&str> = shown.lines().map(|l| l.trim_end_matches('│').trim_end()).collect();
         let from = shown.iter().position(|l| l.contains("alice → bob")).unwrap();
-        assert!(shown[from].ends_with("🔒"), "{shown:#?}");
+        assert!(shown[from].contains("alice → bob  🔒 "), "{shown:#?}");
         assert_eq!(shown[from + 1], "│  lunch at noon?");
-        assert!(shown[from + 3].ends_with("🔒") && !shown[from + 3].contains("forged"), "{shown:#?}");
+        assert!(shown[from + 3].contains("🔒") && !shown[from + 3].contains("forged"), "{shown:#?}");
         assert_eq!(shown[from + 4], "│  [sealed] sent before this device had a key");
-        assert!(shown[from + 6].contains("🔒") && shown[from + 6].ends_with("forged"), "{shown:#?}");
+        assert!(shown[from + 6].contains("🔒") && shown[from + 6].contains("  forged  "), "{shown:#?}");
         assert!(shown[from + 7].starts_with("│  [forged] "), "{shown:#?}");
     }
 

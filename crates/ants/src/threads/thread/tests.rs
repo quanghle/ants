@@ -96,8 +96,9 @@ fn every_kind_of_stored_message_lands_on_its_thread() {
     let eyes = Reacted::new("eyes".parse().unwrap(), vec![p("alice"), p("dev-a")]);
     entries[1].reactions = vec![eyes];
     let shown = render(&entries[..2]);
-    assert!(shown.contains(&format!("message     alice -> dev-a (message {}): fix it\n", ask.id)), "{shown}");
-    assert!(shown.ends_with(": done\n    see the diff\n    reacted eyes: alice, dev-a\n"), "{shown}");
+    assert!(shown.starts_with("● alice -> dev-a · "), "{shown}");
+    assert!(shown.contains(&format!(" · message {}\n  fix it\n\n● dev-a -> alice · ", ask.id)), "{shown}");
+    assert!(shown.ends_with("\n  done\n  see the diff\n  reacted eyes: alice, dev-a\n"), "{shown}");
 }
 
 #[test]
@@ -110,8 +111,8 @@ fn a_quoted_reply_shows_the_message_it_replies_to_before_its_text() {
     let entries = entries(&[(why.subject(), json(&why)), (post.subject(), json(&post))]);
     assert!(entries.iter().all(|e| e.quote == why.quote), "{entries:?}");
     let shown = render(&entries);
-    assert!(shown.contains(": ↪ replying to dev-a: done, see the diff\n    why?\n"), "{shown}");
-    assert!(shown.contains(": ↪ replying to dev-a: done, see the diff\n    @dev-a and?\n"), "{shown}");
+    assert!(shown.contains("\n  ↪ replying to dev-a: done, see the diff\n  why?\n"), "{shown}");
+    assert!(shown.contains("\n  ↪ replying to dev-a: done, see the diff\n  @dev-a and?\n"), "{shown}");
 }
 
 #[test]
@@ -119,7 +120,9 @@ fn a_message_on_another_sender_s_subject_is_marked_forged() {
     let e = Envelope::on_thread(t("t1"), p("alice"), p("dev-a"), "hi");
     let entries = entries(&[("ants.inbox.dev-a.mallory".to_owned(), json(&e))]);
     assert!(entries[0].forged);
-    assert!(render(&entries).contains(&format!("alice -> dev-a (forged) (message {}): hi", e.id)));
+    let shown = render(&entries);
+    assert!(shown.starts_with("● alice -> dev-a (forged) · "), "{shown}");
+    assert!(shown.ends_with(&format!(" · message {}\n  hi\n", e.id)), "{shown}");
 }
 
 #[test]
@@ -130,8 +133,8 @@ fn a_provider_s_wake_shows_as_one_only_on_the_ant_s_own_inbox() {
     let entries = entries(&[(wake.subject(), json(&wake)), (claimed.subject(), json(&claimed))]);
     assert_eq!((entries[0].provider.as_deref(), entries[1].provider.as_deref()), (Some("sense"), None));
     let shown = render(&entries);
-    assert!(shown.contains(&format!("dev-a -> dev-a [wake from sense] (message {}): standup", wake.id)), "{shown}");
-    assert!(shown.contains(&format!("dev-b -> dev-a (message {}): standup", claimed.id)), "{shown}");
+    assert!(shown.starts_with("● dev-a -> dev-a [wake from sense] · "), "{shown}");
+    assert!(shown.contains(&format!(" · message {}\n  standup\n\n● dev-b -> dev-a · ", wake.id)), "{shown}");
 }
 
 #[test]
@@ -162,17 +165,17 @@ fn a_question_shows_its_options_and_the_valid_answers_to_it() {
     assert_eq!(by, [picked.id, typed.id]);
 
     let shown = render(&read);
-    assert!(shown.contains(&format!("dev-a -> alice (message {}): Ship it?\n", asked.id)), "{shown}");
-    assert!(shown.contains("\n    1. yes\n    2. not yet\n"), "{shown}");
-    assert!(shown.contains("\n    Answer with an option's number or in own words.\n"), "{shown}");
-    assert!(shown.contains("\n    answered by alice: option 2, not yet\n"), "{shown}");
-    assert!(shown.contains("\n    answered by alice, typed: after lunch\n"), "{shown}");
+    assert!(shown.contains(&format!(" · message {}\n  Ship it?\n", asked.id)), "{shown}");
+    assert!(shown.contains("\n  1. yes\n  2. not yet\n"), "{shown}");
+    assert!(shown.contains("\n  Answer with an option's number or in own words.\n"), "{shown}");
+    assert!(shown.contains("\n  answered by alice: option 2, not yet\n"), "{shown}");
+    assert!(shown.contains("\n  answered by alice, typed: after lunch\n"), "{shown}");
     assert!(!shown.contains("ants answer"), "answered: {shown}");
-    let line = format!("alice -> dev-a [answers {} with option 2] (message {}): not yet", asked.id, picked.id);
-    assert!(shown.contains(&line), "{shown}");
+    assert!(shown.contains(&format!("● alice -> dev-a [answers {} with option 2] · ", asked.id)), "{shown}");
+    assert!(shown.contains(&format!(" · message {}\n  not yet\n", picked.id)), "{shown}");
     assert!(shown.contains(&format!("[answers {} as typed]", asked.id)), "{shown}");
     let unanswered = render(&read[..1]);
-    assert!(unanswered.contains(&format!("\n    (`ants answer {} N|TEXT` answers it)\n", asked.id)), "{unanswered}");
+    assert!(unanswered.contains(&format!("\n  (`ants answer {} N|TEXT` answers it)\n", asked.id)), "{unanswered}");
     let json = serde_json::to_value(&read[0]).unwrap();
     assert_eq!(json["question"]["questions"][0]["options"][1]["label"], "not yet");
 }
@@ -190,7 +193,7 @@ fn an_answer_to_several_questions_shows_a_pick_for_each() {
     let read = entries(&[(asked.subject(), json(&asked)), (answer.subject(), json(&answer))]);
     let shown = render(&read);
     assert!(
-        shown.contains("\n    answered by alice: Regions options 1, eu and 3, ap; Q2 typed: after lunch\n"),
+        shown.contains("\n  answered by alice: Regions options 1, eu and 3, ap; Q2 typed: after lunch\n"),
         "{shown}"
     );
     assert!(shown.contains(&format!("[answers {} with options 1, 3; typed]", asked.id)), "{shown}");
@@ -846,8 +849,10 @@ async fn a_thread_shows_its_ants_tool_calls_once_each_as_last_stored() {
             (Kind::NoReply, "noted"),
         ]
     );
-    let rendered = render(&shown[1..2]);
-    assert!(rendered.contains("tool        dev-a [execute, completed, 2.1s]: cargo build"), "{rendered}");
+    let rendered = render(&shown[..3]);
+    assert!(rendered.contains(" dev-a  Run(cargo build) · 2.1s\n    "), "{rendered}");
+    assert!(rendered.contains("\n  build it\n  ⎿ "), "{rendered}");
+    assert!(rendered.ends_with(" dev-a  Run(cargo test) · failed after 840ms\n"), "{rendered}");
     let line = serde_json::to_value(&shown[2]).unwrap();
     assert_eq!(line["tool"]["status"], "failed");
     assert_eq!(line["tool"]["duration_ms"], 840);
@@ -875,11 +880,11 @@ fn a_prompt_ended_with_no_reply_shows_why_and_its_final_text() {
     let own = entries(&record(ReplyToOwn, None, "Thanks, noted.\nNothing else."));
     assert_eq!(
         render(&own),
-        "2026-11-16 07:50:43  no reply    dev-a: reply to own message, answer not sent: Thanks, noted.\n    Nothing \
-         else.\n"
+        "  ⎿ 2026-11-16 07:50:43 dev-a  no reply: reply to own message, answer not sent: Thanks, noted.\n      \
+         Nothing else.\n"
     );
     let completed = entries(&record(Completed, Some("nothing to add"), ""));
-    assert_eq!(render(&completed), "2026-11-16 07:50:43  no reply    dev-a: completed (nothing to add)\n");
+    assert_eq!(render(&completed), "  ⎿ 2026-11-16 07:50:43 dev-a  no reply: completed (nothing to add)\n");
     let line = serde_json::to_value(&completed[0]).unwrap();
     assert_eq!((&line["kind"], &line["seq"]), (&"no_reply".into(), &7.into()));
     assert_eq!(
@@ -947,4 +952,18 @@ async fn a_sealed_message_from_a_device_enrolled_mid_follow_opens_everywhere_it_
     let search = crate::threads::search::Search { grep: Some("lunch".into()), limit: 10, ..Default::default() };
     let (found, _) = search.run(&bob_js, Parser::opening(for_search)).await.unwrap();
     assert_eq!(found.iter().map(|e| e.text.as_str()).collect::<Vec<_>>(), ["lunch at noon?"]);
+}
+
+#[test]
+fn a_tool_call_shows_as_its_name_and_arguments() {
+    let named = |name: &str, args: Option<&str>| (name.to_owned(), args.map(str::to_owned));
+    assert_eq!(call_label(Some("execute"), "Run `cargo test`"), named("Run", Some("cargo test")));
+    assert_eq!(call_label(Some("execute"), "ls -la"), named("Run", Some("ls -la")));
+    assert_eq!(call_label(Some("execute"), ""), named("Run", None));
+    assert_eq!(call_label(Some("read"), "Read src/x.rs"), named("Read", Some("src/x.rs")));
+    assert_eq!(call_label(Some("read"), "src/x.rs"), named("Read", Some("src/x.rs")), "the kind names it");
+    assert_eq!(call_label(Some("search"), "Grep TODO"), named("Grep", Some("TODO")));
+    assert_eq!(call_label(Some("think"), "Think"), named("Think", None));
+    assert_eq!(call_label(Some("other"), "browser_snapshot"), named("browser_snapshot", None));
+    assert_eq!(call_label(None, "Read src/x.rs"), named("Read src/x.rs", None), "no kind: its title as it is");
 }

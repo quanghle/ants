@@ -53,9 +53,9 @@ pub(crate) enum ThreadCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Show a thread's whole history in the order the stream stored it: kind, time, sender and recipient, and text.
-    /// The tool calls its ants made show among them by when each started, as entries of kind tool: the ant, the
-    /// call's title and, in brackets, its kind, status and duration.
+    /// Show a thread's whole history in the order the stream stored it: a `●` line per message with its sender and
+    /// recipient, kind, time and id, its text indented under it. The tool calls its ants made show under the message
+    /// before them by when each started, as `⎿` lines: time, ant, the call as Name(args), and how it ended.
     Show {
         /// The thread: its id, a unique start of one, or `last`.
         #[arg(add = ArgValueCandidates::new(completions::threads))]

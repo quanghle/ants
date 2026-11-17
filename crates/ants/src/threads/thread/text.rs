@@ -6,9 +6,9 @@ use std::time::Duration;
 use ants_proto::{Answered, NoReplyWhy, Pick, UserId};
 use chrono::{DateTime, Utc};
 
-use super::NoReply;
-use super::entry::Entry;
+use super::entry::{Entry, Kind};
 use super::summaries::Summary;
+use super::{NoReply, ToolCall};
 use crate::messages::attachments;
 
 pub(crate) fn time(at: DateTime<Utc>) -> String {
@@ -79,24 +79,65 @@ pub(super) fn state(thread: &Summary) -> Option<&'static str> {
     }
 }
 
-/// The entries of a thread as `ants thread show` prints them: time, kind, route, note, id and text, one entry per
-/// line, its text's further lines, its attachments and the reactions to it indented under it. A question shows its options numbered,
-/// whether a typed answer is taken, and the answers to it among `entries` or how to answer it; an answer, the question
-/// and the option it picks.
+/// The entries of a thread as `ants thread show` prints them: each message a block, its heading ([`heading`]) then
+/// its text, attachments and the reactions to it indented under it, a blank line between blocks; the tool calls and
+/// the prompts ended with no reply sent after a message as compact lines under it, the first joined to it by `⎿`:
+/// time, of day only on the day of the line before, ant, the call as `Name(args)` and how it ended, or why no reply
+/// was sent. A question shows its options numbered, whether a typed answer is taken, and the answers to it among
+/// `entries` or how to answer it; an answer, the question and the option it picks.
 pub fn render(entries: &[Entry]) -> String {
     let mut out = String::new();
+    let (mut under, mut day) = (false, None);
     for e in entries {
         let text = body(e, entries);
         let mut lines = text.lines();
         let first = lines.next().unwrap_or("");
-        let _ = writeln!(out, "{}: {first}", heading(e));
-        for line in lines {
-            let _ = writeln!(out, "    {line}");
+        let at = match day {
+            Some(day) if day == e.stored_at.date_naive() => e.stored_at.format("%H:%M:%S").to_string(),
+            _ => time(e.stored_at),
+        };
+        day = Some(e.stored_at.date_naive());
+        let ant = e.from.as_ref().map_or("(an ant)", UserId::as_str);
+        let lead = if under { "    " } else { "  ⎿ " };
+        if let Some(tool) = &e.tool {
+            under = true;
+            let (name, args) = call_label(tool.tool_kind.as_deref(), first);
+            let args = args.map_or_default(|args| format!("({args})"));
+            let _ = writeln!(out, "{lead}{at} {ant}  {name}{args}{}", ended(tool));
+            continue;
         }
-        out.push_str(&attachments::render(&e.attachments, "    "));
-        out.push_str(&crate::messages::inbox::render_reactions(&e.reactions, "    "));
+        if e.no_reply.is_some() {
+            under = true;
+            let _ = writeln!(out, "{lead}{at} {ant}  no reply: {first}");
+            for line in lines {
+                let _ = writeln!(out, "{}", format!("      {line}").trim_end());
+            }
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        under = false;
+        let _ = writeln!(out, "{}", heading(e));
+        for line in text.lines() {
+            let _ = writeln!(out, "{}", format!("  {line}").trim_end());
+        }
+        out.push_str(&attachments::render(&e.attachments, "  "));
+        out.push_str(&crate::messages::inbox::render_reactions(&e.reactions, "  "));
     }
     out
+}
+
+/// How a tool call ended after its label: ` · 35ms`, ` · failed after 4.0s`, ` · in progress`.
+fn ended(tool: &ToolCall) -> String {
+    let took = tool.duration_ms.map(took);
+    match (tool.status.as_deref(), took) {
+        (Some("completed"), Some(took)) => format!(" · {took}"),
+        (Some("completed"), None) => String::new(),
+        (Some("failed"), Some(took)) => format!(" · failed after {took}"),
+        (Some(status), _) => format!(" · {}", status.replace('_', " ")),
+        (None, _) => " · started".to_owned(),
+    }
 }
 
 /// How long a tool call took: `840ms`, `2.1s`, `3m`.
@@ -108,7 +149,41 @@ pub(crate) fn took(ms: u64) -> String {
     }
 }
 
-/// What [`render`] shows of an entry before its text: time, kind, route, note, answer and id.
+/// A tool call of ACP kind `kind` titled `title` as a name and what it takes, shown `Name(args)`: `Run` and the
+/// command for one running a command, the verb its title starts with and the rest, else the name of its kind and its
+/// title; a call of no kind named so, only its title.
+pub(crate) fn call_label(kind: Option<&str>, title: &str) -> (String, Option<String>) {
+    const VERBS: [&str; 16] = [
+        "Read", "View", "Edit", "Write", "Create", "Delete", "Remove", "Move", "Rename", "Find", "Search", "Grep",
+        "Glob", "List", "Fetch", "Think",
+    ];
+    let title = title.trim();
+    let name = match kind {
+        Some("execute") => {
+            let command = title.strip_prefix("Run ").unwrap_or(title);
+            let command = command.strip_prefix('`').and_then(|c| c.strip_suffix('`')).unwrap_or(command);
+            return ("Run".to_owned(), (!command.is_empty()).then(|| command.to_owned()));
+        }
+        Some("read") => "Read",
+        Some("edit") => "Edit",
+        Some("delete") => "Delete",
+        Some("move") => "Move",
+        Some("search") => "Search",
+        Some("think") => "Think",
+        Some("fetch") => "Fetch",
+        Some("switch_mode") => "Mode",
+        _ => return (title.to_owned(), None),
+    };
+    let (name, args) = match title.split_once(' ') {
+        Some((verb, args)) if VERBS.contains(&verb) => (verb, args.trim()),
+        None if VERBS.contains(&title) => (title, ""),
+        _ => (name, title),
+    };
+    (name.to_owned(), (!args.is_empty()).then(|| args.to_owned()))
+}
+
+/// What [`render`] shows of a message before its text: a bullet, its route, whether forged, its kind unless a
+/// message, post or note, its note, what it answers, its time and its id.
 pub fn heading(e: &Entry) -> String {
     let forged = if e.forged { " (forged)" } else { "" };
     let note = e.note.as_ref().map_or_default(|n| format!(" [{n}]"));
@@ -130,9 +205,12 @@ pub fn heading(e: &Entry) -> String {
             _ => format!(" [answers {} with {}]", a.question, picks.join("; ")),
         }
     });
-    let kind = e.kind.as_str();
-    let id = e.id.map_or_default(|id| format!(" (message {id})"));
-    format!("{}  {kind:<10}  {}{forged}{note}{answering}{id}", time(e.stored_at), e.route())
+    let kind = match e.kind {
+        Kind::Message | Kind::Post | Kind::Note => String::new(),
+        kind => format!(" · {}", kind.as_str()),
+    };
+    let id = e.id.map_or_default(|id| format!(" · message {id}"));
+    format!("● {}{forged}{kind}{note}{answering} · {}{id}", e.route(), time(e.stored_at))
 }
 
 /// The text [`render`] shows of an entry among `entries`: a question with its options and its answers among them, why

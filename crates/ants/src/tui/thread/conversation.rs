@@ -1,5 +1,6 @@
 //! The conversation of an open thread, row by row: its messages, its ants' tool calls and the prompts they ended with
-//! no reply in the order stored, how deep each nests, the tree drawn before them and the lines each row draws as.
+//! no reply in the order stored, how deep each nests, the indent and `⎿` drawn before them and the lines each row
+//! draws as.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -9,6 +10,7 @@ use ants_proto::{NoticeKind, UserId, Uuid};
 use chrono::{DateTime, Local, TimeDelta, Utc};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthChar as _;
 
 use crate::people::sealed;
 use crate::threads::thread::{Entry, Kind};
@@ -19,6 +21,18 @@ use crate::tui::{attach, images, markdown, react, style};
 /// How deep delegations nest, deeper ones shown at this depth.
 const MAX_DEPTH: usize = 4;
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// Before a message, a turn or a tool call.
+const BULLET: &str = "●";
+/// Before a human's message at the top level.
+const PROMPT: &str = "❯";
+/// Joins the first of rows nested deeper to the row above them.
+const UNDER: &str = "⎿ ";
+/// How many of a running turn's latest calls show under it.
+const LATEST: usize = 3;
+/// The columns a time at the right edge takes, with the gap before it.
+const STAMP: usize = 7;
+/// The narrowest a line goes to leave room for its time.
+const STAMPED_FROM: usize = 24;
 
 /// What a row of the conversation is.
 #[derive(Debug, Clone)]
@@ -36,6 +50,8 @@ pub(super) struct Turn<'a> {
     pub(super) ant: &'a UserId,
     pub(super) calls: Vec<&'a Call>,
     pub(super) ends: Vec<&'a End>,
+    /// Whether it runs: after the last message, while an ant is busy on the thread, not ended.
+    pub(super) running: bool,
 }
 
 impl Turn<'_> {
@@ -62,7 +78,7 @@ pub(super) struct Row<'a> {
 
 /// The conversation of `entries`, in the order stored, with `calls`, by when they started, and `ends`, by when they
 /// ended, each before the first message stored after it, shown as `tools` has them; `busy` tells whether an ant runs
-/// a prompt on the thread, the calls after the last message then the running turn's, and `human` tells the humans.
+/// a prompt on the thread, the turns after the last message then running, and `human` tells the humans.
 pub(super) fn rows<'a>(
     entries: &'a [Entry],
     calls: &'a [Call],
@@ -83,7 +99,7 @@ pub(super) fn rows<'a>(
     for entry in entries.iter().filter(|e| !e.kind.on_timeline()) {
         let stretch = std::iter::from_fn(|| timeline.next_if(|(at, ..)| *at < entry.stored_at));
         let stretch: Vec<_> = stretch.map(|(_, ant, item)| (ant, item)).collect();
-        timed(&mut rows, &levels, stretch, tools == Tools::Collapsed);
+        timed(&mut rows, &levels, stretch, tools == Tools::Collapsed, false);
         let ant = |user: &&UserId| !human(user);
         let depth = match (entry.kind, entry.from.as_ref(), entry.to.as_ref()) {
             // A daemon's notice nests nothing: it shows where its ant does.
@@ -108,9 +124,7 @@ pub(super) fn rows<'a>(
         rows.push(Row { item: Item::Message(entry), depth });
     }
     let stretch: Vec<_> = timeline.map(|(_, ant, item)| (ant, item)).collect();
-    // The running turn shows in full.
-    let collapse = tools == Tools::Collapsed && !busy;
-    timed(&mut rows, &levels, stretch, collapse);
+    timed(&mut rows, &levels, stretch, tools == Tools::Collapsed, busy);
     rows
 }
 
@@ -119,12 +133,13 @@ fn level(levels: &HashMap<&UserId, usize>, user: &UserId) -> usize {
 }
 
 /// Add the rows of the calls and ends of `stretch`, between two messages: each on its own, or with `collapse` one
-/// [`Turn`] for each ant, where its first one was.
+/// [`Turn`] for each ant, where its first one was, `running` when the stretch is the last one and an ant is busy.
 fn timed<'a>(
     rows: &mut Vec<Row<'a>>,
     levels: &HashMap<&UserId, usize>,
     stretch: Vec<(&'a UserId, Item<'a>)>,
     collapse: bool,
+    running: bool,
 ) {
     if !collapse {
         rows.extend(stretch.into_iter().map(|(ant, item)| Row { item, depth: level(levels, ant) }));
@@ -133,7 +148,7 @@ fn timed<'a>(
     let mut turns: Vec<Turn> = Vec::new();
     for (ant, item) in stretch {
         let at = turns.iter().position(|t| t.ant == ant).unwrap_or_else(|| {
-            turns.push(Turn { ant, calls: Vec::new(), ends: Vec::new() });
+            turns.push(Turn { ant, calls: Vec::new(), ends: Vec::new(), running: false });
             turns.len() - 1
         });
         match item {
@@ -142,31 +157,28 @@ fn timed<'a>(
             Item::Message(_) | Item::Turn(_) => {}
         }
     }
-    rows.extend(turns.into_iter().map(|turn| Row { depth: level(levels, turn.ant), item: Item::Turn(turn) }));
+    rows.extend(turns.into_iter().map(|mut turn| {
+        turn.running = running && turn.ends.is_empty();
+        Row { depth: level(levels, turn.ant), item: Item::Turn(turn) }
+    }));
 }
 
-/// The tree drawn before each of `rows`: before its first line, and before the others.
+/// What goes before each of `rows`: before its first line its bullet's indent, `⎿` joining it to the row above when
+/// that one nests less deep; before its others the indent of its text.
 pub(super) fn glyphs(rows: &[Row]) -> Vec<(String, String)> {
-    // Whether a row at each depth comes later, before any shallower one.
-    let mut open = [false; MAX_DEPTH + 1];
-    let mut out = vec![(String::new(), String::new()); rows.len()];
-    for (at, row) in rows.iter().enumerate().rev() {
-        let depth = row.depth.min(MAX_DEPTH);
-        if depth > 0 {
-            let (mut first, mut rest) = ("  ".to_owned(), "  ".to_owned());
-            for on in &open[1..depth] {
-                let bar = if *on { "│ " } else { "  " };
-                first.push_str(bar);
-                rest.push_str(bar);
-            }
-            first.push_str(if open[depth] { "├ " } else { "└ " });
-            rest.push_str(if open[depth] { "│ " } else { "  " });
-            out[at] = (first, rest);
-        }
-        open[depth] = true;
-        open[depth + 1..].fill(false);
-    }
-    out
+    let mut above = None;
+    rows.iter()
+        .map(|row| {
+            let depth = row.depth.min(MAX_DEPTH);
+            let first = match depth {
+                0 => String::new(),
+                _ if above.is_some_and(|above| above < depth) => format!("{}{UNDER}", " ".repeat(4 * depth - 2)),
+                _ => " ".repeat(4 * depth),
+            };
+            above = Some(depth);
+            (first, " ".repeat(4 * depth + 2))
+        })
+        .collect()
 }
 
 /// What the rows are drawn with.
@@ -228,51 +240,24 @@ impl Shown<'_> {
         Some(Span::styled(format!("  queued · {ahead} ahead"), Style::new().fg(Color::Cyan)))
     }
 
-    /// Add the lines of `row`, which `first` and `rest` begin; `entries` are the thread's, for a question's answers.
+    /// Add the lines of `row`: `first` begins its first, `rest`, the indent of its text, the others; `entries` are the
+    /// thread's, for a question's answers.
     pub(super) fn row(&self, lines: &mut Vec<Line<'static>>, row: &Row, entries: &[Entry], first: &str, rest: &str) {
         match &row.item {
-            Item::Call(call) => self.call(lines, call, first),
+            Item::Call(call) => {
+                let mut line = Line::raw(first.to_owned());
+                line.spans.extend(self.call(call, true));
+                lines.push(self.stamped(line, call.started));
+            }
             Item::End(end) => {
                 let why = end.why.as_ref().map_or_default(|why| format!(": {why}"));
-                let line = format!("{first}{} {} ended without a reply{why}", hm(end.at), end.ant);
-                lines.push(Line::styled(cut(&line, self.width), style::dim()));
+                let said = format!("{first}{BULLET} {}  ended without a reply{why}", end.ant);
+                lines.push(self.stamped(Line::from(Span::styled(said, style::dim())), end.at));
             }
-            Item::Message(e) if e.notice.is_some() => {
-                let from = e.from.as_ref().map_or("ants", UserId::as_str);
-                let text = e.text.strip_prefix("[ants] ").unwrap_or(&e.text).replace('\n', " ");
-                let style = if e.notice.is_some_and(ants_proto::NoticeKind::needs_action) {
-                    Style::new().fg(Color::Yellow)
-                } else {
-                    style::dim()
-                };
-                let line = format!("{first}{} {from} · {text}", hm(e.stored_at));
-                push(lines, &line, &format!("{rest}      "), style, self.width);
-            }
-            Item::Turn(turn) => self.turn(lines, turn, first),
+            Item::Message(e) if e.notice.is_some() => self.notice(lines, e, first, rest),
+            Item::Turn(turn) => self.turn(lines, turn, first, rest),
             Item::Message(e) if row.depth == 0 => self.block(lines, e, entries),
-            Item::Message(e) => {
-                let (head, style) = nested(e);
-                let face = e.from.as_ref().filter(|_| e.kind != Kind::Dead).and_then(|from| self.data.face(from));
-                let mut first = Line::styled(format!("{first}{} ", hm(e.stored_at)), style);
-                first.spans.extend(face.into_iter().flatten());
-                first.spans.push(Span::styled(head, style));
-                first.spans.extend(self.waiting(e, entries));
-                let under = format!("{rest}      ");
-                let mut text = text(e, entries, self.width.saturating_sub(under.chars().count()));
-                let room = self.width.saturating_sub(first.width() + 2);
-                // A text of one line short enough goes on the line of the heading.
-                if let [line] = &mut text[..]
-                    && line.width() <= room
-                {
-                    first.spans.push(Span::raw("  "));
-                    first.spans.append(&mut line.spans);
-                    text.clear();
-                }
-                lines.push(first);
-                lines.extend(text.into_iter().map(|line| indented(&under, line).patch_style(style)));
-                self.attachments(lines, e, &under);
-                lines.extend(self.reactions(e).map(|line| indented(&under, line)));
-            }
+            Item::Message(e) => self.nested(lines, e, entries, first, rest),
         }
     }
 
@@ -282,8 +267,9 @@ impl Shown<'_> {
         react::line(reacted, self.data.me())
     }
 
-    /// A message at the top level: who sent it to whom and when, then its text under it.
-    fn block(&self, lines: &mut Vec<Line<'static>>, e: &Entry, entries: &[Entry]) {
+    /// The heading of message `e`: its bullet, a prompt for a human's at the `top` level, its sender's face, who sent
+    /// it to whom, what it is and what became of it.
+    fn heading(&self, e: &Entry, entries: &[Entry], top: bool) -> Vec<Span<'static>> {
         let from = e.acting.label(e.from.as_ref().map_or("a human", UserId::as_str));
         let to = match (e.kind, &e.channel, &e.to) {
             (Kind::Post, Some(channel), _) => format!(" → #{channel}"),
@@ -292,28 +278,30 @@ impl Shown<'_> {
             (_, _, Some(to)) => format!(" → {to}"),
             _ => String::new(),
         };
-        let from_style = if self.data.is_human(e.from.as_ref().unwrap_or(&UserId::human())) {
-            Style::new().fg(Color::Cyan).bold()
-        } else {
-            Style::new().fg(Color::Magenta).bold()
-        };
-        let face = e.from.as_ref().and_then(|from| self.data.face(from));
-        let mut head: Vec<Span<'static>> = face.into_iter().flatten().collect();
-        head.extend([
-            Span::styled(format!("{from}{to}"), from_style),
-            Span::styled(format!("  {}", hm(e.stored_at)), style::dim()),
-        ]);
+        let human = self.data.is_human(e.from.as_ref().unwrap_or(&UserId::human()));
+        let who = Style::new().fg(if human { Color::Cyan } else { Color::Magenta });
         let (what, style) = match e.kind {
             Kind::Escalation => {
                 (format!("escalation: {}", e.note.as_deref().unwrap_or("")), Style::new().fg(Color::Red))
             }
             Kind::Mention => ("mention".to_owned(), style::dim()),
             Kind::Approval => ("tool request".to_owned(), Style::new().fg(style::PENDING)),
+            Kind::Decision => ("decision".to_owned(), style::dim()),
             Kind::Dead => (format!("gave up: {}", e.note.as_deref().unwrap_or("")), Style::new().fg(style::ERROR)),
             _ if e.question.is_some() => ("asks".to_owned(), Style::new().fg(Color::Yellow)),
             _ if let Some(provider) = &e.provider => (format!("wake from {provider}"), style::dim()),
             _ => (String::new(), Style::new()),
         };
+        let tone = match e.kind {
+            Kind::Escalation | Kind::Approval | Kind::Decision | Kind::Dead => style,
+            _ if e.question.is_some() => style,
+            _ => who,
+        };
+        let bullet = if top && human { PROMPT } else { BULLET };
+        let face = e.from.as_ref().filter(|_| e.kind != Kind::Dead).and_then(|from| self.data.face(from));
+        let mut head = vec![Span::styled(format!("{bullet} "), tone)];
+        head.extend(face.into_iter().flatten());
+        head.push(Span::styled(format!("{from}{to}"), who.bold()));
         if !what.is_empty() {
             head.push(Span::styled(format!("  {what}"), style));
         }
@@ -324,10 +312,61 @@ impl Shown<'_> {
         if e.forged || e.sealed == Some(sealed::State::Forged) {
             head.push(Span::styled("  forged", Style::new().fg(Color::Red).bold()));
         }
-        lines.push(Line::from(head));
+        head
+    }
+
+    /// A message at the top level: its heading and time, then its text under it.
+    fn block(&self, lines: &mut Vec<Line<'static>>, e: &Entry, entries: &[Entry]) {
+        lines.push(self.stamped(Line::from(self.heading(e, entries, true)), e.stored_at));
         lines.extend(text(e, entries, self.width.saturating_sub(2)).into_iter().map(|line| indented("  ", line)));
         self.attachments(lines, e, "  ");
         lines.extend(self.reactions(e).map(|line| indented("  ", line)));
+    }
+
+    /// A message nested under another: its heading after `first` and its time, and its text on the heading's line
+    /// when one line short enough, else under it at `rest`.
+    fn nested(&self, lines: &mut Vec<Line<'static>>, e: &Entry, entries: &[Entry], first: &str, rest: &str) {
+        let tone = match e.kind {
+            Kind::Approval => Style::new().fg(style::PENDING),
+            Kind::Decision => style::dim(),
+            Kind::Dead => Style::new().fg(style::ERROR),
+            Kind::Escalation => Style::new().fg(Color::Red),
+            _ => Style::new(),
+        };
+        let mut head = Line::raw(first.to_owned());
+        head.spans.extend(self.heading(e, entries, false));
+        let mut text = text(e, entries, self.width.saturating_sub(rest.chars().count()));
+        let room = self.width.saturating_sub(head.width() + 2 + STAMP);
+        if let [line] = &mut text[..]
+            && line.width() <= room
+        {
+            head.spans.push(Span::raw("  "));
+            head.spans.extend(line.spans.drain(..).map(|mut span| {
+                span.style = tone.patch(span.style);
+                span
+            }));
+            text.clear();
+        }
+        lines.push(self.stamped(head, e.stored_at));
+        lines.extend(text.into_iter().map(|line| indented(rest, line).patch_style(tone)));
+        self.attachments(lines, e, rest);
+        lines.extend(self.reactions(e).map(|line| indented(rest, line)));
+    }
+
+    /// A daemon's notice where its ant is, dim, or yellow when the human has to act on it: on the line of its
+    /// heading when short enough, else under it at `rest`.
+    fn notice(&self, lines: &mut Vec<Line<'static>>, e: &Entry, first: &str, rest: &str) {
+        let from = e.from.as_ref().map_or("ants", UserId::as_str);
+        let text = e.text.strip_prefix("[ants] ").unwrap_or(&e.text).replace('\n', " ");
+        let style =
+            if e.notice.is_some_and(NoticeKind::needs_action) { Style::new().fg(Color::Yellow) } else { style::dim() };
+        let head = format!("{first}{BULLET} {from}");
+        if head.chars().count() + 2 + text.chars().count() + STAMP <= self.width {
+            lines.push(self.stamped(Line::from(Span::styled(format!("{head}  {text}"), style)), e.stored_at));
+        } else {
+            lines.push(self.stamped(Line::from(Span::styled(head, style)), e.stored_at));
+            push(lines, &format!("{rest}{text}"), rest, style, self.width);
+        }
     }
 
     /// The lines of `e`'s attachments, begun with `indent`, each image's drawn under its line.
@@ -345,75 +384,143 @@ impl Shown<'_> {
         self.marked.filter(|(seq, _)| *seq == e.seq).map(|(_, at)| at)
     }
 
-    /// A turn collapsed: when it started, its ant, how many tool calls it made, how long they took and how many
-    /// failed, and why it ended with no reply if it did.
-    fn turn(&self, lines: &mut Vec<Line<'static>>, turn: &Turn, first: &str) {
-        let at = turn.started().map_or_default(hm);
-        let mut said = match turn.calls.len() {
-            0 => String::new(),
-            1 => "1 tool call".to_owned(),
-            n => format!("{n} tool calls"),
-        };
-        if let Some(took) = turn.took().and_then(|d| u64::try_from(d.num_milliseconds()).ok()) {
-            let _ = write!(said, ", {}", crate::threads::thread::took(took));
-        }
+    /// A turn collapsed: its ant, what its calls did and how long they took, how many failed and why it ended with no
+    /// reply if it did; a running one after a spinner, its latest calls under it at `rest`.
+    fn turn(&self, lines: &mut Vec<Line<'static>>, turn: &Turn, first: &str, rest: &str) {
         let failed = turn.calls.iter().filter(|c| c.status.as_deref() == Some("failed")).count();
-        let mut ended = String::new();
+        let (bullet, tone) = if turn.running {
+            (self.spinner(), busy())
+        } else if failed > 0 {
+            (BULLET, Style::new().fg(style::ERROR))
+        } else if turn.calls.is_empty() {
+            (BULLET, style::dim())
+        } else {
+            (BULLET, Style::new().fg(style::CONNECTED))
+        };
+        let mut said = Vec::new();
+        if !turn.calls.is_empty() {
+            let took = if turn.running {
+                turn.started().map(|at| crate::colony::short(crate::colony::since(at, self.now)))
+            } else {
+                turn.took().and_then(|d| u64::try_from(d.num_milliseconds()).ok()).map(crate::threads::thread::took)
+            };
+            let took = took.map_or_default(|took| format!(" · {took}"));
+            said.push(Span::styled(format!("{}{took}", summary(&turn.calls)), style::dim()));
+        }
+        if failed > 0 {
+            said.push(Span::styled(format!("{failed} failed"), Style::new().fg(style::ERROR)));
+        }
         if let Some(end) = turn.ends.last() {
-            ended = if said.is_empty() { "ended without a reply" } else { ", ended without a reply" }.to_owned();
-            if let Some(why) = &end.why {
-                let _ = write!(ended, ": {why}");
+            let why = end.why.as_ref().map_or_default(|why| format!(": {why}"));
+            said.push(Span::styled(format!("ended without a reply{why}"), style::dim()));
+        }
+        let mut line = Line::from(vec![
+            Span::raw(first.to_owned()),
+            Span::styled(format!("{bullet} "), tone),
+            Span::styled(turn.ant.to_string(), Style::new().fg(Color::Magenta)),
+            Span::raw("  "),
+        ]);
+        for (n, span) in said.into_iter().enumerate() {
+            if n > 0 {
+                line.spans.push(Span::styled(" · ", style::dim()));
+            }
+            line.spans.push(span);
+        }
+        lines.push(match turn.started() {
+            Some(at) => self.stamped(line, at),
+            None => clip(line, self.width),
+        });
+        if turn.running {
+            let latest = &turn.calls[turn.calls.len().saturating_sub(LATEST)..];
+            for (n, call) in latest.iter().enumerate() {
+                let mut line = Line::raw(if n == 0 { format!("{rest}{UNDER}") } else { format!("{rest}  ") });
+                line.spans.extend(self.call(call, false));
+                lines.push(clip(line, self.width));
             }
         }
-        let head = format!("{first}{at} {} {said}", turn.ant);
-        let failed = if failed > 0 { format!(", {failed} failed") } else { String::new() };
-        let room = self.width.saturating_sub(head.chars().count() + failed.chars().count());
-        lines.push(Line::from(vec![
-            Span::styled(cut(&head, self.width), style::dim()),
-            Span::styled(cut(&failed, self.width.saturating_sub(head.chars().count())), Style::new().fg(style::ERROR)),
-            Span::styled(cut(&ended, room), style::dim()),
-        ]));
     }
 
-    /// A tool call: when it started, its kind, its title, and how it ended or how long it has run.
-    fn call(&self, lines: &mut Vec<Line<'static>>, call: &Call, first: &str) {
-        let kind = call.kind.as_deref().unwrap_or("tool");
-        let (status, style) = match call.status.as_deref() {
-            Some("completed") => (format!("ok {}", took(call)), Style::new().fg(style::CONNECTED)),
-            Some("failed") => (format!("failed {}", took(call)), Style::new().fg(style::ERROR)),
+    /// A tool call as `Name(args)` and how it ended or how long it has run: after its bullet when `bullet`, and a
+    /// running one after its spinner always.
+    fn call(&self, call: &Call, bold: bool) -> Vec<Span<'static>> {
+        let took = took(call);
+        let (glyph, tone, status) = match call.status.as_deref() {
+            Some("completed") => (BULLET, Style::new().fg(style::CONNECTED), (!took.is_empty()).then_some(took)),
+            Some("failed") if took.is_empty() => (BULLET, Style::new().fg(style::ERROR), Some("failed".to_owned())),
+            Some("failed") => (BULLET, Style::new().fg(style::ERROR), Some(format!("failed after {took}"))),
             _ if self.busy => {
                 let elapsed = crate::colony::short(crate::colony::since(call.started, self.now));
-                let spin = SPINNER[usize::try_from(self.now.timestamp()).unwrap_or(0) % SPINNER.len()];
-                (format!("{spin} running {elapsed}"), busy())
+                (self.spinner(), busy(), Some(format!("running {elapsed}")))
             }
-            Some(status) => (status.replace('_', " "), style::dim()),
-            None => ("started".to_owned(), style::dim()),
+            Some(status) => (BULLET, style::dim(), Some(status.replace('_', " "))),
+            None => (BULLET, style::dim(), Some("started".to_owned())),
         };
-        let head = format!("{first}{} {kind:<7} ", hm(call.started));
-        let room = self.width.saturating_sub(head.chars().count() + status.chars().count() + 2);
-        lines.push(Line::from(vec![
-            Span::styled(head, style::dim()),
-            Span::raw(format!("{:<room$}  ", cut(&call.title, room))),
-            Span::styled(status, style),
-        ]));
+        let mut spans = vec![Span::styled(format!("{glyph} "), tone)];
+        let (name, args) = crate::threads::thread::call_label(call.kind.as_deref(), &call.title);
+        spans.push(Span::styled(name, if bold { Style::new().bold() } else { Style::new() }));
+        spans.extend(args.map(|args| Span::raw(format!("({args})"))));
+        if let Some(status) = status {
+            // A call that ended well shows how long it took dim; one that failed or runs, in its colour.
+            let style = if call.status.as_deref() == Some("completed") { style::dim() } else { tone };
+            spans.push(Span::styled(format!(" · {status}"), style));
+        }
+        spans
+    }
+
+    /// `line` with the local time of `at` dim at its right edge, cut to leave room for it; on a narrow view only cut.
+    fn stamped(&self, line: Line<'static>, at: DateTime<Utc>) -> Line<'static> {
+        if self.width < STAMPED_FROM + STAMP {
+            return clip(line, self.width);
+        }
+        let mut line = clip(line, self.width - STAMP);
+        let time = hm(at);
+        let pad = self.width.saturating_sub(line.width() + time.chars().count());
+        line.spans.push(Span::raw(" ".repeat(pad)));
+        line.spans.push(Span::styled(time, style::dim()));
+        line
+    }
+
+    fn spinner(&self) -> &'static str {
+        SPINNER[usize::try_from(self.now.timestamp()).unwrap_or(0) % SPINNER.len()]
     }
 }
 
-/// How a message nested under another shows after its time: its route and what it is, and its style.
-fn nested(e: &Entry) -> (String, Style) {
-    let from = e.acting.label(e.from.as_ref().map_or("a human", UserId::as_str));
-    let to = e.to.as_ref().map_or("", UserId::as_str);
-    let lock = if e.sealed.is_some() { format!(" {}", crate::tui::dm::LOCK) } else { String::new() };
-    let forged = if e.forged || e.sealed == Some(sealed::State::Forged) { " (forged)" } else { "" };
-    let forged = format!("{lock}{forged}");
-    match e.kind {
-        Kind::Note => (format!("{from} → notes{forged}"), Style::new()),
-        Kind::Approval => (format!("{from} asks to run{forged}"), Style::new().fg(style::PENDING)),
-        Kind::Decision => (format!("{from} decided for {to}"), style::dim()),
-        Kind::Dead => (format!("{to} gave up"), Style::new().fg(style::ERROR)),
-        Kind::Escalation => (format!("{from} → {to} escalation{forged}"), Style::new().fg(Color::Red)),
-        _ => (format!("{from} → {to}{forged}"), Style::new()),
+/// What `calls` did, by kind in the order each first came, other tools last: `Read 2 files, ran 1 command`.
+pub(super) fn summary(calls: &[&Call]) -> String {
+    const DID: [(&str, &str, &str); 7] = [
+        ("read", "read", "file"),
+        ("edit", "edited", "file"),
+        ("delete", "deleted", "file"),
+        ("move", "moved", "file"),
+        ("search", "searched for", "pattern"),
+        ("execute", "ran", "command"),
+        ("fetch", "fetched", "page"),
+    ];
+    let mut counts: Vec<(Option<usize>, usize)> = Vec::new();
+    for call in calls {
+        let kind = DID.iter().position(|(kind, ..)| call.kind.as_deref() == Some(*kind));
+        match counts.iter_mut().find(|(k, _)| *k == kind) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((kind, 1)),
+        }
     }
+    counts.sort_by_key(|(kind, _)| kind.is_none());
+    let alone = counts.len() == 1;
+    let said: Vec<String> = counts
+        .iter()
+        .map(|&(kind, n)| {
+            let (verb, what) = match kind {
+                Some(at) => (DID[at].1, DID[at].2),
+                None if alone => ("used", "tool"),
+                None => ("used", "other tool"),
+            };
+            let s = if n == 1 { "" } else { "s" };
+            format!("{verb} {n} {what}{s}")
+        })
+        .collect();
+    let said = said.join(", ");
+    let mut chars = said.chars();
+    chars.next().map_or_default(|c| c.to_uppercase().chain(chars).collect())
 }
 
 /// A message's text: a question's with its options numbered and its answers.
@@ -511,4 +618,35 @@ pub(super) fn cut(text: &str, width: usize) -> String {
     let mut cut: String = text.chars().take(width.saturating_sub(1)).collect();
     cut.push('…');
     cut
+}
+
+/// `line` in at most `width` columns, an ellipsis ending it when cut.
+fn clip(line: Line<'static>, width: usize) -> Line<'static> {
+    if line.width() <= width {
+        return line;
+    }
+    let style = line.style;
+    let mut left = width.saturating_sub(1);
+    let mut spans = Vec::new();
+    for span in line.spans {
+        let wide = span.width();
+        if wide <= left {
+            left -= wide;
+            spans.push(span);
+            continue;
+        }
+        let mut kept = String::new();
+        for c in span.content.chars() {
+            let wide = c.width().unwrap_or(0);
+            if wide > left {
+                break;
+            }
+            left -= wide;
+            kept.push(c);
+        }
+        kept.push('…');
+        spans.push(Span::styled(kept, span.style));
+        break;
+    }
+    Line::from(spans).style(style)
 }
