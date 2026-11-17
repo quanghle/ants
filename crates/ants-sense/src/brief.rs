@@ -1,7 +1,8 @@
 //! The brief (requirements ants-x39hk.8.1 and ants-x39hk.8.2): what an ant reads first in each session, and again on
-//! demand with `sense_brief`. Its sections come in a fixed order ([`sections`]): a warning when the ant's log is
-//! broken, the identity, the thread's resume register, the unacknowledged handoffs, open commitments, fired and upcoming
-//! reminders, claimed and ready tasks, the core and top memories, and the core loop of tools.
+//! demand with `sense_brief`. Its sections come in a fixed order ([`sections`]): warnings when the ant's log is
+//! broken or over its size limit ([`SIZE_LIMIT`]), the identity, the thread's resume register, the unacknowledged
+//! handoffs, open commitments, fired and upcoming reminders, claimed and ready tasks, the core and top memories, and the
+//! core loop of tools.
 //!
 //! The brief stays within its byte budget ([`fit`]): memories are shortened to their titles first, then the longest
 //! section is cut, again and again, each cut ending with a line naming the tool call that shows the rest.
@@ -14,7 +15,7 @@ use serde_json::{Value, json};
 
 use crate::identity::{self, Card};
 use crate::items::ItemId;
-use crate::log::Break;
+use crate::log::{Break, SIZE_LIMIT, mib};
 use crate::memory::{self, MemoryItem, Ranked, Scope, Status, Trust, framed, participants, snippet, thread_repo};
 use crate::store::{Items, StoreError};
 use crate::thread::{self, Handoff, Register};
@@ -173,6 +174,7 @@ pub async fn compose(
 async fn sections(items: &dyn Items, context: &CallContext, card: Option<&Card>) -> Result<Vec<Section>, StoreError> {
     let mut sections = Vec::new();
     sections.extend(items.broken().await.as_ref().map(warning));
+    sections.extend(size_warning(items.log_bytes().await));
     sections.push(identity_section(card, context));
     sections.push(register_section(thread::register(items, &context.thread).await?.as_ref()));
     let mut handoffs = thread::unacknowledged(items, MAX_HANDOFFS + 1).await?;
@@ -196,6 +198,21 @@ fn warning(broken: &Break) -> Section {
         broken.index
     );
     Section::whole(line, String::new())
+}
+
+/// A warning when the log holds over [`SIZE_LIMIT`] bytes.
+fn size_warning(bytes: u64) -> Option<Section> {
+    if bytes <= SIZE_LIMIT {
+        return None;
+    }
+    let line = format!(
+        "Warning: this ant's sense log holds {}, over the {} MiB limit, and keeps every change for good. Write less: \
+         supersede or vote on memories rather than remembering near duplicates, and checkpoint only when the register \
+         changes. `ants doctor` reports the size.",
+        mib(bytes),
+        SIZE_LIMIT >> 20
+    );
+    Some(Section::whole(line, String::new()))
 }
 
 fn identity_section(card: Option<&Card>, context: &CallContext) -> Section {

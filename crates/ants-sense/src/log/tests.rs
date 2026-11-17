@@ -255,6 +255,33 @@ async fn a_log_ending_before_or_differing_from_what_was_verified_is_broken() {
 }
 
 #[tokio::test]
+async fn the_log_s_size_counts_each_message_of_the_identity_read_or_appended() {
+    let (team, log, sense, other) = (Team::new(), MemoryLog::default(), SenseId::new(), SenseId::new());
+    let home = ants_test_support::scratch_dir("sense-size");
+    let mut writer = ant_log(&log, team.signer("dev-a"), team.verifier(), &sense, Some(&home));
+    writer.append("note", json!(1)).await.unwrap();
+    log.append(&other, b"another identity's".to_vec(), 0).await.unwrap();
+    writer.append("note", json!(2)).await.unwrap();
+    let total: u64 = log.read_after(&sense, 0, 10).await.unwrap().iter().map(|m| m.payload.len() as u64).sum();
+    assert_eq!(writer.chain().bytes(), total);
+    assert_eq!(read_status(&home).unwrap().unwrap().bytes, total);
+
+    let mut reader = ant_log(&log, Unsigned, team.verifier(), &sense, None);
+    reader.catch_up().await.unwrap();
+    assert_eq!(reader.chain().bytes(), total);
+    let position = reader.chain().position();
+    log.append(&sense, b"not an event".to_vec(), 3).await.unwrap();
+    let mut resumed = ant_log(&log, Unsigned, team.verifier(), &sense, None);
+    resumed.resume(position);
+    resumed.catch_up().await.unwrap();
+    assert!(resumed.chain().broken().is_some());
+    assert_eq!(resumed.chain().bytes(), total + 12, "a message breaking the chain takes room too");
+    resumed.resume(None);
+    assert_eq!(resumed.chain().bytes(), 0);
+    std::fs::remove_dir_all(&home).unwrap();
+}
+
+#[tokio::test]
 async fn a_renamed_ant_goes_on_with_its_log_under_its_new_name() {
     let (team, log, sense) = (Team::new(), MemoryLog::default(), SenseId::new());
     let dev_b: UserId = "dev-b".parse().unwrap();

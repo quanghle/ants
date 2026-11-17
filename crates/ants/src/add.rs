@@ -740,6 +740,7 @@ mod tests {
             incarnation: "i".into(),
             checked_at: chrono::Utc::now(),
             events: 1,
+            bytes: 1,
             seen: Some(Mark { index: 1, sha256: "00".into() }),
             broken: None,
             ant: Some("dev-a".parse().unwrap()),

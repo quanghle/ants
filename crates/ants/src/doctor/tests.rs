@@ -376,8 +376,8 @@ fn ants_sharing_a_git_workdir_with_worktrees_turned_off_are_warned() {
 }
 
 #[test]
-fn a_break_in_an_ant_s_sense_chain_fails() {
-    use ants_sense::log::{Break, ChainStatus, write_status};
+fn a_break_in_an_ant_s_sense_chain_fails_and_a_log_over_its_size_limit_warns() {
+    use ants_sense::log::{Break, ChainStatus, SIZE_LIMIT, write_status};
 
     let dir = ants_test_support::scratch_dir("doctor-sense-chain").canonicalize().unwrap();
     let config = dir.join("config.toml");
@@ -391,19 +391,22 @@ fn a_break_in_an_ant_s_sense_chain_fails() {
         incarnation: "i".into(),
         checked_at,
         events: 2,
+        bytes: SIZE_LIMIT,
         seen: None,
         broken: None,
         ant: None,
     };
     write_status(&dir.join("dev-a"), &status).unwrap();
     let broken = Break { index: 3, sequence: Some(7), reason: "not signed by dev-b's credentials".into() };
-    write_status(&dir.join("dev-b"), &ChainStatus { broken: Some(broken), ..status.clone() }).unwrap();
+    write_status(&dir.join("dev-b"), &ChainStatus { broken: Some(broken), bytes: SIZE_LIMIT + 1, ..status.clone() })
+        .unwrap();
 
-    let checks = check_sense_chains(&loaded.ants);
+    let checks = check_sense_logs(&loaded.ants);
     assert_eq!(
         checks.iter().map(|c| (c.check.as_str(), c.status, c.detail.as_str())).collect::<Vec<_>>(),
         [
             ("ant dev-a sense chain", Status::Ok, "2 events verified at 2026-01-02 03:04:05 UTC"),
+            ("ant dev-a sense size", Status::Ok, "32.0 MiB (33554432 bytes) of sense data, within the 32 MiB limit"),
             (
                 "ant dev-b sense chain",
                 Status::Fail,
@@ -413,9 +416,18 @@ fn a_break_in_an_ant_s_sense_chain_fails() {
                     status.sense
                 )
             ),
+            (
+                "ant dev-b sense size",
+                Status::Warn,
+                &*format!(
+                    "32.0 MiB (33554433 bytes) of sense data in sense identity {}, over the 32 MiB limit",
+                    status.sense
+                )
+            ),
         ],
         "nothing for an ant whose log was never read"
     );
+    assert!(checks[3].fix[0].contains("`ants ant memories dev-b`"), "{}", checks[3]);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

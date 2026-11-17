@@ -15,9 +15,16 @@ use super::{Break, Chain, Mark};
 pub const SENSE_DIR: &str = ".sense";
 /// The file of [`SENSE_DIR`] holding the [`ChainStatus`].
 pub const CHAIN_FILE: &str = "chain.json";
+/// The bytes of an ant's sense log past which `ants doctor` and the brief warn: 32 MiB.
+pub const SIZE_LIMIT: u64 = 32 << 20;
+
+/// `bytes` for people, in MiB with one decimal, and exactly.
+pub fn mib(bytes: u64) -> String {
+    format!("{:.1} MiB ({bytes} bytes)", bytes as f64 / f64::from(1 << 20))
+}
 
 /// What the daemon serving an ant last verified of its sense log: the furthest event, which a later read expects to
-/// find unchanged, and the first break, if any.
+/// find unchanged, the first break, if any, and the log's size.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChainStatus {
     pub sense: SenseId,
@@ -26,6 +33,9 @@ pub struct ChainStatus {
     pub checked_at: DateTime<Utc>,
     /// The events read that verified.
     pub events: u64,
+    /// The bytes of the messages read ([`Chain::bytes`]).
+    #[serde(default)]
+    pub bytes: u64,
     /// The furthest event verified, now or before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seen: Option<Mark>,
@@ -45,6 +55,7 @@ impl ChainStatus {
             incarnation: incarnation.to_owned(),
             checked_at: Utc::now(),
             events: chain.events(),
+            bytes: chain.bytes(),
             seen: chain.seen().cloned(),
             broken: chain.broken().cloned(),
             ant: chain.named().cloned(),
