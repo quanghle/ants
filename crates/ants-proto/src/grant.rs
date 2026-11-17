@@ -151,7 +151,7 @@ pub(crate) fn device_signed(
     issued_at: DateTime<Utc>,
     account: &str,
 ) -> Result<(DeviceId, String), GrantError> {
-    let jwt = UserJwt::verify(jwt).map_err(GrantError::Signer)?;
+    let jwt = UserJwt::verify(jwt).map_err(|e| GrantError::Signer(e.to_string()))?;
     let signer = |reason: String| Err(GrantError::Signer(reason));
     if jwt.iss != account {
         return signer(format!("signed by {}, not by the team's account {account}", jwt.iss));
@@ -226,26 +226,49 @@ pub struct UserJwt {
     pub claims: Value,
 }
 
+/// Why [`UserJwt::verify`] refuses a user JWT.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum UserJwtError {
+    #[error("not a JWT")]
+    Malformed,
+    #[error("no {0}")]
+    Missing(&'static str),
+    #[error("issuer {issuer}: {reason}")]
+    InvalidIssuer { issuer: String, reason: String },
+    #[error("not signed by its issuer {0}")]
+    NotSignedByIssuer(String),
+    #[error("not a user JWT")]
+    NotUser,
+    #[error("public key {key}: {reason}")]
+    InvalidKey { key: String, reason: String },
+    #[error("{0} is not the public key of a user")]
+    NotUserKey(String),
+}
+
 impl UserJwt {
     /// Decode `jwt`, a user JWT, checking that its issuer signed it; else why not.
-    pub fn verify(jwt: &str) -> Result<Self, String> {
-        let malformed = || "not a JWT".to_owned();
-        let (signed, signature) = jwt.trim().rsplit_once('.').ok_or_else(malformed)?;
-        let (_, body) = signed.split_once('.').ok_or_else(malformed)?;
-        let decode =
-            |part: &str| BASE64URL_NOPAD.decode(part.trim_end_matches('=').as_bytes()).map_err(|_| malformed());
-        let claims: Value = serde_json::from_slice(&decode(body)?).map_err(|_| malformed())?;
-        let text = |field: &str| claims[field].as_str().map(str::to_owned).ok_or_else(|| format!("no {field}"));
+    pub fn verify(jwt: &str) -> Result<Self, UserJwtError> {
+        let (signed, signature) = jwt.trim().rsplit_once('.').ok_or(UserJwtError::Malformed)?;
+        let (_, body) = signed.split_once('.').ok_or(UserJwtError::Malformed)?;
+        let decode = |part: &str| {
+            BASE64URL_NOPAD.decode(part.trim_end_matches('=').as_bytes()).map_err(|_| UserJwtError::Malformed)
+        };
+        let claims: Value = serde_json::from_slice(&decode(body)?).map_err(|_| UserJwtError::Malformed)?;
+        let text = |field: &'static str| claims[field].as_str().map(str::to_owned).ok_or(UserJwtError::Missing(field));
         let iss = text("iss")?;
-        let issuer = KeyPair::from_public_key(&iss).map_err(|e| format!("issuer {iss}: {e}"))?;
-        issuer.verify(signed.as_bytes(), &decode(signature)?).map_err(|_| format!("not signed by its issuer {iss}"))?;
+        let issuer = KeyPair::from_public_key(&iss)
+            .map_err(|e| UserJwtError::InvalidIssuer { issuer: iss.clone(), reason: e.to_string() })?;
+        issuer
+            .verify(signed.as_bytes(), &decode(signature)?)
+            .map_err(|_| UserJwtError::NotSignedByIssuer(iss.clone()))?;
         if claims["nats"]["type"] != "user" {
-            return Err("not a user JWT".to_owned());
+            return Err(UserJwtError::NotUser);
         }
         let sub = text("sub")?;
-        let user = KeyPair::from_public_key(&sub).map_err(|e| format!("public key {sub}: {e}"))?;
+        let user = KeyPair::from_public_key(&sub)
+            .map_err(|e| UserJwtError::InvalidKey { key: sub.clone(), reason: e.to_string() })?;
         if user.key_pair_type() != KeyPairType::User {
-            return Err(format!("{sub} is not the public key of a user"));
+            return Err(UserJwtError::NotUserKey(sub));
         }
         let tags = claims["nats"]["tags"].as_array().into_iter().flatten().filter_map(Value::as_str);
         let tags = tags.map(str::to_owned).collect();

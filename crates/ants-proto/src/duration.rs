@@ -9,14 +9,40 @@ use serde::{Deserialize, Deserializer};
 
 const UNITS: [(char, u64); 4] = [('d', 86_400), ('h', 3_600), ('m', 60), ('s', 1)];
 
+/// Why [`parse`] refuses a duration.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("invalid duration {text:?}: {why} (such as 90s, 10m, 1h30m or 0)")]
+pub struct ParseError {
+    /// The text refused.
+    pub text: String,
+    pub why: Invalid,
+}
+
+/// What is wrong with a duration [`parse`] refuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum Invalid {
+    #[error("empty")]
+    Empty,
+    #[error("unknown unit {0:?}")]
+    UnknownUnit(char),
+    #[error("a unit without a number")]
+    UnitWithoutNumber,
+    #[error("units out of order or repeated")]
+    OutOfOrder,
+    #[error("too long")]
+    TooLong,
+    #[error("a number without a unit")]
+    NumberWithoutUnit,
+}
+
 /// Parse a duration such as `90s`, `10m`, `1h30m` or `0`.
-pub fn parse(text: &str) -> Result<Duration, String> {
-    let invalid = |why: &str| format!("invalid duration {text:?}: {why} (such as 90s, 10m, 1h30m or 0)");
+pub fn parse(text: &str) -> Result<Duration, ParseError> {
+    let invalid = |why| ParseError { text: text.to_owned(), why };
     if text == "0" {
         return Ok(Duration::ZERO);
     }
     if text.is_empty() {
-        return Err(invalid("empty"));
+        return Err(invalid(Invalid::Empty));
     }
     let mut secs: u64 = 0;
     let mut digits = String::new();
@@ -27,21 +53,24 @@ pub fn parse(text: &str) -> Result<Duration, String> {
             continue;
         }
         let Some(at) = UNITS.iter().position(|(unit, _)| *unit == c) else {
-            return Err(invalid(&format!("unknown unit {c:?}")));
+            return Err(invalid(Invalid::UnknownUnit(c)));
         };
         if digits.is_empty() {
-            return Err(invalid("a unit without a number"));
+            return Err(invalid(Invalid::UnitWithoutNumber));
         }
         if at < next_unit {
-            return Err(invalid("units out of order or repeated"));
+            return Err(invalid(Invalid::OutOfOrder));
         }
-        let count: u64 = digits.parse().map_err(|_| invalid("too long"))?;
-        secs = count.checked_mul(UNITS[at].1).and_then(|s| secs.checked_add(s)).ok_or_else(|| invalid("too long"))?;
+        let count: u64 = digits.parse().map_err(|_| invalid(Invalid::TooLong))?;
+        secs = count
+            .checked_mul(UNITS[at].1)
+            .and_then(|s| secs.checked_add(s))
+            .ok_or_else(|| invalid(Invalid::TooLong))?;
         digits.clear();
         next_unit = at + 1;
     }
     if !digits.is_empty() {
-        return Err(invalid("a number without a unit"));
+        return Err(invalid(Invalid::NumberWithoutUnit));
     }
     Ok(Duration::from_secs(secs))
 }
@@ -91,7 +120,12 @@ mod tests {
         {
             assert!(parse(bad).is_err(), "{bad:?} parsed");
         }
-        assert!(parse("600").unwrap_err().contains("a number without a unit"));
+        let refused = parse("600").unwrap_err();
+        assert_eq!(refused.why, Invalid::NumberWithoutUnit);
+        assert_eq!(
+            refused.to_string(),
+            "invalid duration \"600\": a number without a unit (such as 90s, 10m, 1h30m or 0)"
+        );
     }
 
     #[test]

@@ -201,7 +201,7 @@ fn slash(text: &str) -> Result<Slash, String> {
         "archive" => bare(Slash::Mark(Marking::Archive)),
         "unarchive" => bare(Slash::Mark(Marking::Unarchive)),
         "mute" if args.is_empty() => Ok(Slash::Mute(None)),
-        "mute" => ants_proto::duration::parse(args).map(|hold| Slash::Mute(Some(hold))),
+        "mute" => ants_proto::duration::parse(args).map(|hold| Slash::Mute(Some(hold))).map_err(|e| e.to_string()),
         "unmute" => bare(Slash::Unmute),
         "notify" => text()?.parse().map(Slash::Notify),
         "snooze" => snooze::duration(args).map(Slash::Snooze),
