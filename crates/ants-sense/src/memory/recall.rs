@@ -19,7 +19,7 @@ use serde_json::{Map, Value, json};
 
 use super::remember::{invalid, unavailable};
 use super::{
-    DEFAULT_IMPORTANCE, MEMORY, Memory, MemoryItem, RECALLED_BEGIN, RECALLED_END, Scope, Status, chain,
+    Access, DEFAULT_IMPORTANCE, MEMORY, Memory, MemoryItem, RECALLED_BEGIN, RECALLED_END, Scope, Status, chain,
     normalize_remote,
 };
 use crate::Sense;
@@ -239,7 +239,7 @@ async fn recall_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
         super::recheck_citations(items, &workdir).await.map_err(unavailable)?;
     }
     if let Some(id) = &request.id {
-        return read(items, id, request.history).await;
+        return read(items, id, request.history, &call.context).await;
     }
     let mut scopes = vec![Scope::Own];
     let repos = thread_repo(&call.context).into_iter().chain(request.repo.map(Scope::Repo));
@@ -338,8 +338,9 @@ fn people(name: &str) -> Result<Vec<Scope>, Answer> {
     }
 }
 
-/// Memory `id` in full, with the chain of memories it superseded when `history`.
-async fn read(items: &dyn Items, id: &ItemId, history: bool) -> Result<Answer, Answer> {
+/// Memory `id` in full, with the chain of memories it superseded when `history`, the read counted as its use
+/// ([`record_access`]).
+async fn read(items: &dyn Items, id: &ItemId, history: bool, context: &CallContext) -> Result<Answer, Answer> {
     let not_found = || Answer::error("not_found", format!("No memory {id}."));
     let chain = if history {
         chain(items, id).await.map_err(|e| match e {
@@ -351,6 +352,8 @@ async fn read(items: &dyn Items, id: &ItemId, history: bool) -> Result<Answer, A
         vec![found.ok_or_else(not_found)?]
     };
     let (found, older) = chain.split_first().expect("a chain starts with its memory");
+    let read = record_access(items, found, context).await;
+    let found = read.as_ref().unwrap_or(found);
     let mut text = full(found);
     let mut json = json!({"note": NOTE, "memory": full_json(found)});
     if history {
@@ -387,6 +390,20 @@ async fn read(items: &dyn Items, id: &ItemId, history: bool) -> Result<Answer, A
             .collect();
     }
     Ok(Answer { text: framed(&text), json, is_error: false })
+}
+
+/// Count a read of `found` in full by the thread of `context` in its [`Access`], once a day: maintenance weighs it as
+/// use. A thread a webhook started counts no read, nor does a memory no longer live. Returns the memory as recorded;
+/// none when nothing was, a failure only costing the count.
+async fn record_access(items: &dyn Items, found: &MemoryItem, context: &CallContext) -> Option<MemoryItem> {
+    if !context.trusted() || !found.memory.status.live() {
+        return None;
+    }
+    let access = Access::read(found.memory.access, context.at)?;
+    let mut values = Map::new();
+    values.insert("access".into(), json!(access));
+    let item = items.change(found.id(), values, Some(found.item.revision), context.thread.as_str()).await.ok()?;
+    MemoryItem::of(item)
 }
 
 /// `found` in full: what it is, its text, citations, provenance, links and votes.
