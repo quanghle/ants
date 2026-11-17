@@ -185,6 +185,9 @@ struct File {
     redact: bool,
     /// The machine the file's ants are served on, as their colony entries name it; the host name when absent.
     machine: Option<String>,
+    /// Whether the daemon keeps ants current from the GitHub releases ([`AutoUpdate`]).
+    #[serde(default)]
+    auto_update: AutoUpdate,
     /// The warnings of JetStream storage filling up ([`crate::storage`]).
     #[serde(default)]
     storage: storage::Settings,
@@ -214,6 +217,28 @@ fn yes() -> bool {
     true
 }
 
+/// What a daemon serving the whole file does about newer releases of ants, polling GitHub about daily: nothing
+/// (`off`, the default), warn of one (`check`), or install it (`install`, as `ants update` does), its upgrade check
+/// then restarting it onto the new executable.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AutoUpdate {
+    #[default]
+    Off,
+    Check,
+    Install,
+}
+
+impl AutoUpdate {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AutoUpdate::Off => "off",
+            AutoUpdate::Check => "check",
+            AutoUpdate::Install => "install",
+        }
+    }
+}
+
 /// What a config file lists, checked.
 #[derive(Debug)]
 pub struct Loaded {
@@ -231,6 +256,8 @@ pub struct Loaded {
     pub host: HostSettings,
     /// The `[nats_server]` table: the nats-server a daemon serving the whole file starts and supervises.
     pub nats_server: Option<NatsServer>,
+    /// The top-level `auto_update`.
+    pub auto_update: AutoUpdate,
     /// The file's directory, which relative paths are relative to, and the home directory `~` stands for.
     base: PathBuf,
     home: PathBuf,
@@ -300,6 +327,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
         storage: file.storage,
         host,
         nats_server,
+        auto_update: file.auto_update,
         base,
         home,
     })
