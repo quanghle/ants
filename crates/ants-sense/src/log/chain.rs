@@ -23,14 +23,16 @@ pub struct Break {
     pub reason: String,
 }
 
-/// How far a [`Chain`] was read: the last message read, the events that verified and the first break, kept with what
-/// was built from them (the cache) to go on reading from there later ([`Chain::resume`]).
+/// How far a [`Chain`] was read: the last message read, the events that verified, the bytes read and the first break,
+/// kept with what was built from them (the cache) to go on reading from there later ([`Chain::resume`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Position {
     /// The stream sequence of the last message read.
     pub sequence: u64,
     pub tip: Mark,
     pub events: u64,
+    /// The bytes of the messages read ([`Chain::bytes`]).
+    pub bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub broken: Option<Break>,
     /// The name of the ant whose events the log holds by then: of the last event that verified.
@@ -59,12 +61,13 @@ pub struct Chain {
     seen: Option<Mark>,
     broken: Option<Break>,
     events: u64,
+    bytes: u64,
 }
 
 impl Chain {
     /// The chain of `sense`, the identity of `ant`, of which `seen`, the furthest event verified before, is expected.
     pub fn new(sense: SenseId, ant: UserId, seen: Option<Mark>) -> Self {
-        Self { sense, ant, earlier: Vec::new(), named: None, tip: None, seen, broken: None, events: 0 }
+        Self { sense, ant, earlier: Vec::new(), named: None, tip: None, seen, broken: None, events: 0, bytes: 0 }
     }
 
     /// The chain of an ant once named `earlier` too, as well as by its current name.
@@ -117,23 +120,31 @@ impl Chain {
         self.events
     }
 
+    /// The bytes of the messages read, those breaking the chain too: the size of the log's payloads up to the last
+    /// message read, as the store holds them.
+    pub fn bytes(&self) -> u64 {
+        self.bytes
+    }
+
     /// How far the chain was read; none before any message.
     pub fn position(&self) -> Option<Position> {
         let (sequence, tip) = self.tip.clone()?;
-        Some(Position { sequence, tip, events: self.events, broken: self.broken.clone(), ant: self.named.clone() })
+        let (events, bytes, broken, ant) = (self.events, self.bytes, self.broken.clone(), self.named.clone());
+        Some(Position { sequence, tip, events, bytes, broken, ant })
     }
 
     /// Go on reading from `position`, as read before, or with none from the log's start, as if nothing was read. The
     /// furthest event seen stays expected.
     pub fn resume(&mut self, position: Option<Position>) {
-        let Some(Position { sequence, tip, events, broken, ant }) = position else {
-            (self.tip, self.events, self.broken, self.named) = (None, 0, None, None);
+        let Some(Position { sequence, tip, events, bytes, broken, ant }) = position else {
+            (self.tip, self.events, self.bytes, self.broken, self.named) = (None, 0, 0, None, None);
             return;
         };
         if self.seen.as_ref().is_none_or(|seen| seen.index <= tip.index) {
             self.seen = Some(tip.clone());
         }
-        (self.tip, self.events, self.broken, self.named) = (Some((sequence, tip)), events, broken, ant);
+        (self.tip, self.events, self.bytes, self.broken, self.named) =
+            (Some((sequence, tip)), events, bytes, broken, ant);
     }
 
     /// Check `stored`, the message after the last read, with `verifier`, and move past it: its event if it verified,
@@ -145,6 +156,7 @@ impl Chain {
             Err(e) => {
                 let reason = format!("not an event: {e}");
                 self.broken.get_or_insert(Break { index: mark.index, sequence: Some(stored.sequence), reason });
+                self.bytes += stored.payload.len() as u64;
                 self.tip = Some((stored.sequence, mark));
                 return Ok(None);
             }
@@ -173,6 +185,7 @@ impl Chain {
                 Some(event)
             }
         };
+        self.bytes += stored.payload.len() as u64;
         self.tip = Some((stored.sequence, mark));
         Ok(verified)
     }
@@ -241,6 +254,7 @@ impl Chain {
     pub(super) fn appended(&mut self, stored: &Stored, event: &Event) {
         let mark = Mark { index: event.index, sha256: stored.sha256() };
         self.events += 1;
+        self.bytes += stored.payload.len() as u64;
         if self.seen.as_ref().is_none_or(|seen| seen.index <= mark.index) {
             self.seen = Some(mark.clone());
         }

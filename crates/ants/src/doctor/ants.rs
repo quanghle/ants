@@ -11,6 +11,7 @@ use ants_daemon::secrets::creds::{self, Kind};
 use ants_daemon::secrets::keystore;
 use ants_daemon::{Launch, PermissionPolicy};
 use ants_proto::{MACHINES_BUCKET, Machine, ReactionChange, ReactionsRequest, ReactionsResponder, Uuid};
+use ants_sense::log::{ChainStatus, SIZE_LIMIT};
 
 use super::credentials::{check_creds, check_key};
 use super::server::{Unreached, connect};
@@ -192,26 +193,38 @@ pub(super) fn check_shared_workdirs(ants: &[Ant], config: &Path) -> Vec<Check> {
         .collect()
 }
 
-/// The chain of each ant's sense event log, as the daemon serving it last verified it ([`ants_sense::log::ChainStatus`]),
-/// kept in the ant's home: the doctor's credentials do not reach the log. Nothing for an ant whose log was never read.
-pub(super) fn check_sense_chains(ants: &[Ant]) -> Vec<Check> {
-    ants.iter().filter_map(check_sense_chain).collect()
+/// The chain and size of each ant's sense event log, as the daemon serving it last verified it
+/// ([`ants_sense::log::ChainStatus`]), kept in the ant's home: the doctor's credentials do not reach the log. Nothing
+/// for an ant whose log was never read.
+pub(super) fn check_sense_logs(ants: &[Ant]) -> Vec<Check> {
+    ants.iter().flat_map(check_sense_log).collect()
 }
 
-fn check_sense_chain(ant: &Ant) -> Option<Check> {
+fn check_sense_log(ant: &Ant) -> Vec<Check> {
     let home = match &ant.home {
         Some(home) => home.clone(),
-        None => std::env::home_dir()?.join(".ants").join(ant.name.as_str()),
+        None => match std::env::home_dir() {
+            Some(dir) => dir.join(".ants").join(ant.name.as_str()),
+            None => return Vec::new(),
+        },
     };
-    let check = format!("ant {} sense chain", ant.name);
-    let file = ants_sense::log::status_file(&home);
     let status = match ants_sense::log::read_status(&home) {
-        Ok(status) => status?,
-        Err(e) => return Some(Check::warn(check, format!("{}: {e}", file.display()), Vec::new())),
+        Ok(Some(status)) => status,
+        Ok(None) => return Vec::new(),
+        Err(e) => {
+            let file = ants_sense::log::status_file(&home);
+            let check = format!("ant {} sense chain", ant.name);
+            return vec![Check::warn(check, format!("{}: {e}", file.display()), Vec::new())];
+        }
     };
+    vec![check_sense_chain(ant, &status), check_sense_size(ant, &status)]
+}
+
+fn check_sense_chain(ant: &Ant, status: &ChainStatus) -> Check {
+    let check = format!("ant {} sense chain", ant.name);
     let checked = status.checked_at.format("%Y-%m-%d %H:%M:%S UTC");
-    let Some(broken) = status.broken else {
-        return Some(Check::ok(check, format!("{} events verified at {checked}", status.events)));
+    let Some(broken) = &status.broken else {
+        return Check::ok(check, format!("{} events verified at {checked}", status.events));
     };
     let at = broken.sequence.map_or_default(|sequence| format!(" (stream sequence {sequence})"));
     let detail = format!(
@@ -223,7 +236,27 @@ fn check_sense_chain(ant: &Ant) -> Option<Check> {
          the stream from a backup of the hub's JetStream store, or find out which machine's host credentials wrote them",
         ants_proto::SENSE_STREAM
     );
-    Some(Check::fail(check, detail, vec![fix]))
+    Check::fail(check, detail, vec![fix])
+}
+
+/// The bytes of the ant's sense log, warning over [`SIZE_LIMIT`].
+fn check_sense_size(ant: &Ant, status: &ChainStatus) -> Check {
+    let check = format!("ant {} sense size", ant.name);
+    let limit = SIZE_LIMIT >> 20;
+    let size = ants_sense::log::mib(status.bytes);
+    if status.bytes <= SIZE_LIMIT {
+        return Check::ok(check, format!("{size} of sense data, within the {limit} MiB limit"));
+    }
+    let detail = format!("{size} of sense data in sense identity {}, over the {limit} MiB limit", status.sense);
+    let fix = format!(
+        "nothing trims a sense log, which keeps every change for good: see what the ant keeps writing with `ants ant \
+         memories {}`, and have it write less (superseding or voting on memories rather than remembering near \
+         duplicates, checkpointing only when its register changes); the {} stream grows with it in the hub's JetStream \
+         storage",
+        ant.name,
+        ants_proto::SENSE_STREAM
+    );
+    Check::warn(check, detail, vec![fix])
 }
 
 /// Whether something answers each ant's reactions requests, which its MCP list_reactions and react make, and which

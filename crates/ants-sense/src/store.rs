@@ -562,6 +562,8 @@ pub trait Items: Send + Sync {
     fn sense(&self) -> BoxFuture<'_, SenseId>;
     /// The first break of the log read so far ([`crate::log::Chain::broken`]).
     fn broken(&self) -> BoxFuture<'_, Option<Break>>;
+    /// The bytes of the log read so far ([`crate::log::Chain::bytes`]).
+    fn log_bytes(&self) -> BoxFuture<'_, u64>;
     /// The ant's earlier names, whose events in the log are its own ([`crate::log::Chain::earlier`]).
     fn earlier_names(&self) -> BoxFuture<'_, Vec<UserId>>;
 }
@@ -695,6 +697,10 @@ where
 
     fn broken(&self) -> BoxFuture<'_, Option<Break>> {
         Box::pin(async move { self.lock().await.log().chain().broken().cloned() })
+    }
+
+    fn log_bytes(&self) -> BoxFuture<'_, u64> {
+        Box::pin(async move { self.lock().await.log().chain().bytes() })
     }
 
     fn earlier_names(&self) -> BoxFuture<'_, Vec<UserId>> {

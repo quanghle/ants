@@ -307,3 +307,21 @@ async fn a_broken_log_is_warned_of_first() {
     assert!(first.starts_with("Warning: this ant's sense log breaks at event 1 (not an event"), "{brief}");
     assert!(first.ends_with("`ants doctor` reports the break."), "{first}");
 }
+
+#[tokio::test]
+async fn a_log_over_its_size_limit_is_warned_of() {
+    assert!(size_warning(SIZE_LIMIT).is_none());
+    let line = size_warning(SIZE_LIMIT + 1).unwrap().render();
+    assert!(line.starts_with("Warning: this ant's sense log holds 32.0 MiB (33554433 bytes), over the 32 MiB limit"));
+
+    let (log, id) = (MemoryLog::default(), SenseId::new());
+    let verifier = AccountVerifier::new(vec![], NoRevocations);
+    let ant = "dev-a".parse().unwrap();
+    let mut writer = AntLog::new(&log, Unsigned, verifier, id.clone(), ant, "m1".parse().unwrap(), None).unwrap();
+    writer.append("padding", json!("a".repeat(usize::try_from(SIZE_LIMIT).unwrap()))).await.unwrap();
+    let (sense, _) = sense_on(log, id).await;
+    let brief = session_brief(&sense, 8_000).await;
+    let first = brief.lines().next().unwrap();
+    assert!(first.starts_with("Warning: this ant's sense log holds 32.0 MiB ("), "{first}");
+    assert!(first.ends_with("`ants doctor` reports the size."), "{first}");
+}
