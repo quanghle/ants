@@ -297,6 +297,45 @@ fn names_the_machine_as_the_file_does() {
 }
 
 #[test]
+fn ants_are_served_by_sugar_unless_the_file_or_the_ant_names_another_provider() {
+    use crate::provider::{Protocol, Setting};
+
+    let ants = "[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\n[[ant]]\nname = \"dev-b\"\nworkdir = \".\"";
+    let providers = "[providers.memo]\ncommand = \"bin/memo\"\nargs = [\"--stdio\"]\nenv = { MEMO_DB = \"~/memo.db\" }\n\
+                     [providers.github]\ncommand = \"github-mcp-server\"\nprotocol = \"mcp\"";
+    let settings = |text: &str| -> Vec<Setting> {
+        parse_here(text).unwrap().into_iter().map(|ant| config(ant).unwrap().provider).collect()
+    };
+    assert_eq!(settings(ants), [Setting::Sugar, Setting::Sugar, Setting::Sugar], "the messenger too");
+
+    let named = settings(&format!("provider = \"memo\"\n{ants}\nprovider = \"none\"\n{providers}"));
+    let Setting::External(memo) = &named[0] else { panic!("{named:?}") };
+    assert_eq!(
+        (named[1].clone(), named[2].name()),
+        (Setting::None, "memo"),
+        "dev-b's own, and the messenger the file's"
+    );
+    assert_eq!((memo.name.as_str(), memo.command.as_path()), ("memo", manifest_dir().join("bin/memo").as_path()));
+    assert_eq!((memo.args.as_slice(), memo.env["MEMO_DB"].as_str()), (["--stdio".to_owned()].as_slice(), "~/memo.db"));
+    assert_eq!(memo.protocol, Protocol::Provider);
+    let github = settings(&format!("provider = \"github\"\n{ants}\n{providers}")).remove(0);
+    let Setting::External(github) = github else { panic!("{github:?}") };
+    assert_eq!((github.command.as_path(), github.protocol), (Path::new("github-mcp-server"), Protocol::Mcp));
+
+    for (text, why) in [
+        (format!("provider = \"other\"\n{ants}\n{providers}"), "provider \"other\" is not defined"),
+        (format!("{ants}\nprovider = \"other\""), "ant dev-b: provider \"other\" is not defined"),
+        ("[providers.sugar]\ncommand = \"x\"".to_owned(), "reserved"),
+        ("[providers.send]\ncommand = \"x\"".to_owned(), "read like ants' own send_"),
+        ("[providers.x]\ncommand = \"x\"\nprotocol = \"grpc\"".to_owned(), "unknown variant"),
+        ("[providers.x]\nargs = []".to_owned(), "missing field `command`"),
+    ] {
+        let err = format!("{:#}", parse_here(&text).unwrap_err());
+        assert!(err.contains(why), "{why}: {err}");
+    }
+}
+
+#[test]
 fn refuses_a_server_with_a_user_and_password() {
     let ant = "[[ant]]\nname = \"dev-a\"\nworkdir = \".\"";
     for text in [format!("nats = \"nats://dev:secret@hub\"\n{ant}"), format!("{ant}\nnats = \"wss://secret@hub\"")] {
@@ -638,7 +677,7 @@ fn rejects_bad_files() {
     let missing = err("[[ant]]\nname = \"dev-a\"\nworkdir = \"no/such/dir\"");
     assert!(missing.contains("workdir no/such/dir"), "{missing}");
     assert!(err("harness = \"vim\"").contains("unknown harness"));
-    assert!(err("provider = \"copilot\"").contains("unknown field `provider`"));
+    assert!(err("provider = \"copilot\"").contains("provider \"copilot\" is not defined"));
     assert!(err("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nharness = \"vim\"").contains("unknown harness"));
     assert!(err("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nworkdirs = 1").contains("unknown field"));
     assert!(err("[[ant]]\nname = \"Dev.A\"\nworkdir = \".\"").contains("parsing config"));

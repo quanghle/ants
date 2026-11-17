@@ -109,6 +109,8 @@ pub struct Config {
     pub spending: Spending,
     /// Where the ant keeps its files, and when the bus's storage filling up is told.
     pub storage: Storage,
+    /// What serves the ant's identity, memories and work.
+    pub provider: crate::provider::Setting,
     /// For a manager ant of an `[[ant_template]]`, what adds the ants its `request_ant` tool asks for.
     pub requester: crate::mcp::Requester,
     /// Whether the ant is paused, and since when and by whom; equal to any other, so that pausing or resuming alone
@@ -510,7 +512,9 @@ async fn services(
     let ledger = ledger(&config.ant, &config.spending, &sessions_kv);
     let escalator = escalator(config, js, &colony, humans, &ledger, &redactor, assistants);
     let (identity, identity_id) = ant_records(config, js).await;
-    crate::provider::sugar::stores().serve(&config.ant, &config.storage.home, config.connection.creds.clone());
+    if matches!(config.provider, crate::provider::Setting::Sugar) {
+        crate::provider::sugar::stores().serve(&config.ant, &config.storage.home, config.connection.creds.clone());
+    }
     let lifecycle = match &identity_id {
         Some(id) => Lifecycle::open(events::outbox(), &config.ant, id, &config.storage.home).await,
         None => None,
@@ -690,6 +694,7 @@ async fn connect_mcp(
         mcp.with_requester(requester.clone());
     }
     mcp.manage_channels(crate::chanadm::nats_admin(client.clone(), js.clone()));
+    crate::provider::assign(&config.ant, &config.provider);
     if let Some(provider) = crate::provider::of(&config.ant).await {
         mcp.with_provider(provider);
     }

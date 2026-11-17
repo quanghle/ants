@@ -1,8 +1,9 @@
 //! The checks of a parsed config file's top-level settings, and its `[[ant]]` and `[[schedule]]` entries settled
 //! ([`super::parse`]): each given the top-level settings it sets none of, its paths resolved.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::Arc;
 
 use ants_proto::UserId;
 use anyhow::{Context as _, Result, bail};
@@ -10,13 +11,22 @@ use anyhow::{Context as _, Result, bail};
 use super::ant::fallbacks;
 use super::{Ant, File, resolve};
 use crate::harness::{self, Harnesses, ModelSettings};
+use crate::provider::{Definition, Setting};
 use crate::schedule::{self, Schedule};
 
-/// Check the top-level settings of the config `file` at `path`: its `harness` among the `harnesses`, its `[cli]`,
-/// `[storage]`, `[memory_pressure]` and `machine`.
-pub(super) fn check_top_level(file: &File, harnesses: &Harnesses, path: &Path) -> Result<()> {
+/// Check the top-level settings of the config `file` at `path`: its `harness` among the `harnesses`, its `provider`
+/// among the `providers`, its `[cli]`, `[storage]`, `[memory_pressure]` and `machine`.
+pub(super) fn check_top_level(
+    file: &File,
+    harnesses: &Harnesses,
+    providers: &BTreeMap<String, Arc<Definition>>,
+    path: &Path,
+) -> Result<()> {
     if let Some(harness) = &file.harness {
         harnesses.get(harness).with_context(|| format!("config {}", path.display()))?;
+    }
+    if let Some(provider) = &file.provider {
+        Setting::named(provider, providers).with_context(|| format!("config {}", path.display()))?;
     }
     if let Some(url) = &file.cli.nats {
         crate::bus::check_url(url).with_context(|| format!("config {}: [cli]", path.display()))?;
@@ -30,12 +40,12 @@ pub(super) fn check_top_level(file: &File, harnesses: &Harnesses, path: &Path) -
     Ok(())
 }
 
-/// Check `ant` of the config file at `path`, give it the top-level settings of the `file` it sets none of, and
-/// resolve its paths against `base` and `home` unless it is built in.
+/// Check `ant` of the config file at `path`, give it the top-level settings of the `file` it sets none of, its
+/// harness and provider among those defined, and resolve its paths against `base` and `home` unless it is built in.
 pub(super) fn settle_ant(
     mut ant: Ant,
     file: &File,
-    harnesses: &Harnesses,
+    (harnesses, providers): (&Harnesses, &BTreeMap<String, Arc<Definition>>),
     base: &Path,
     home: &Path,
     path: &Path,
@@ -46,6 +56,13 @@ pub(super) fn settle_ant(
         ant.harness.clone_from(&file.harness);
     }
     check_harnesses(&ant, harnesses).with_context(|| format!("config {}: ant {}", path.display(), ant.name))?;
+    if ant.provider.is_none() {
+        ant.provider.clone_from(&file.provider);
+    }
+    if let Some(provider) = &ant.provider {
+        ant.provider_setting = Setting::named(provider, providers)
+            .with_context(|| format!("config {}: ant {}", path.display(), ant.name))?;
+    }
     if !ant.builtin {
         let abs = |dir: &Path| resolve(dir, base, home);
         ant.workdir = abs(&ant.workdir).canonicalize().with_context(|| {

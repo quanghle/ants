@@ -23,6 +23,7 @@ use crate::limits::caps::{Caps, Pool};
 use crate::limits::fallback::{self, Fallback};
 use crate::limits::pressure;
 use crate::monitoring::storage;
+use crate::provider::Setting;
 use crate::publish::Publish;
 use crate::worktrees::Base;
 
@@ -61,6 +62,8 @@ pub struct Ant {
     pub env: BTreeMap<String, String>,
     /// A harness name ([`Harnesses`]); the file's top-level `harness` when absent, which one of them must set.
     pub harness: Option<String>,
+    /// The provider it is served with ([`Setting::named`]); the file's top-level `provider` when absent.
+    pub provider: Option<String>,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub context: Option<String>,
@@ -150,6 +153,9 @@ pub struct Ant {
     /// The file's `[memory_pressure]` table.
     #[serde(skip)]
     pub memory_pressure: pressure::Settings,
+    /// What `provider` names among the file's providers; sugar while it names none.
+    #[serde(skip)]
+    pub provider_setting: Setting,
 }
 
 fn default_max_harnesses() -> usize {
@@ -207,6 +213,7 @@ impl Ant {
             tasks: None,
             env: BTreeMap::new(),
             harness: None,
+            provider: None,
             model: None,
             reasoning_effort: None,
             context: None,
@@ -240,6 +247,7 @@ impl Ant {
             machine: None,
             storage: storage::Settings::default(),
             memory_pressure: pressure::Settings::default(),
+            provider_setting: Setting::Sugar,
         }
     }
 
@@ -315,6 +323,7 @@ impl Ant {
             },
             spending: Spending { caps, warn_percent: self.spend_warn_percent, pool: self.pool },
             storage: Storage { home, jetstream: self.storage },
+            provider: self.provider_setting,
             requester: crate::mcp::Requester::default(),
             pause: crate::pause::Pause::new(self.paused),
             drift: crate::profile::shared::Drift::default(),

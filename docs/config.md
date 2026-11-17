@@ -13,6 +13,7 @@ timezone = "America/New_York"              # default IANA time zone for schedule
 redact = true                              # redact secrets from daemon publications (default true)
 machine = "dev-vm1"                        # machine named in colony entries, notices and admin orders (default: host name)
 auto_update = "check"                      # "off" (default), "check" or "install" newer GitHub releases (docs/operations.md)
+provider = "sugar"                         # default provider of every ant: "sugar" (default), "none" or a [providers] name (see Providers)
 
 [cli]                                      # CLI defaults when no flag or env var is set
 creds = "~/.config/ants/auth/alice.creds"  # human credentials (ant credentials are not used here)
@@ -47,11 +48,18 @@ config = "~/.config/ants/leaf.conf"        # its configuration, run as nats-serv
 command = "nats-server"                    # default, found beside ants, in ~/.ants/bin or on PATH; a path, or a bare name looked up on PATH
 ready_timeout = "30s"                      # default; how long each start may take to accept connections
 
+[providers.memo]                           # an external provider, which provider settings name (see Providers)
+command = "memo-provider"                  # a path, or a bare name looked up on PATH; required
+args = ["--stdio"]
+env = { MEMO_DB = "/srv/memo.db" }         # added to the daemon's environment
+protocol = "provider"                      # default: speaks the provider protocol; "mcp": an MCP server, its tools alone
+
 [[ant]]
 name = "dev-a"
 workdir = "~/src/repo-a"                   # must exist
 creds = "~/.config/ants/auth/dev-a.creds"
 harness = "claude"                         # overrides top-level harness
+provider = "memo"                          # overrides top-level provider
 model = "claude-sonnet-4-5"                # optional exact ACP model ID
 reasoning_effort = "high"                  # optional effort ID offered by the model
 context = "1m"                             # optional key from the harness context table
@@ -124,6 +132,7 @@ allow = ["read:*", "execute:cargo test*"]
 - Added ants (and previously failed ants still listed) start; removed ants drain prompts in flight and return waiting messages for redelivery; ants whose resolved settings changed (including via top-level defaults, `[harnesses.NAME]`, or `[[ant_template]]`) drain and restart; unchanged ants continue uninterrupted (pool membership changes alone do not restart members, nor does `paused` alone: see [Pausing an ant](#pausing-an-ant)).
 - Added schedules start; removed schedules stop immediately; changed or stopped schedules restart.
 - The machine's record of its ants in `ants_machines` follows the ants listed; a changed `[host]` or `[admin]` table, top-level `machine` or host credentials file reconnects the host. With `[admin] remote = false`, the host refuses every admin order to the machine's ants, recording `this machine's config sets [admin] remote = false` as its outcome; otherwise an admin's `set` order (`ants ant set`) edits the ant's `[[ant]]` table, or the `[harnesses]` table, in place, comments kept, refused naming the field when the field no longer holds the value the order expects, or with the loader's error when the file would not load, and changing nothing then. Only a daemon serving the whole file (no `--ant`) runs the host, with the top-level `nats` and `js_domain`, else `--nats` and `--js-domain`.
+- Providers follow the ants: one no ant names any more stops, one whose `[providers.NAME]` table changed restarts, and the ants it serves restart with it.
 - Invalid reloads log an error and keep running the previous config. `metrics`, `auto_update` and `[nats_server]` require a process restart (a changed `[nats_server]` table logs a warning).
 
 ## Managed nats-server
@@ -140,6 +149,44 @@ With a `[nats_server]` table, `ants daemon` serving the whole file starts one lo
 - An unknown key, an empty `config` or `command`, or a `ready_timeout` of `0` fails config loading.
 - macOS and Linux (WSL included) only: on Windows `ants daemon` refuses to start with a `[nats_server]` table.
 - Run the server under exactly one owner: either the daemon with `[nats_server]` (`ants setup --managed-nats`, `scripts/install-units.sh --managed-nats`) or the `ants.nats` / `ants-nats` service, never both.
+
+## Providers
+
+An ant's provider holds its identity, memories and work ([architecture.md](architecture.md#providers)). The `provider` setting, top-level for every ant (the built-in messenger and templated ants included) or per `[[ant]]`, picks it:
+
+- `"sugar"` (the default): ants' built-in provider.
+- `"none"`: no provider. The ant gets no provider tools and no brief; its harness's own tools serve memory and tasks, installed and configured through the harness, as its `memory` and `tasks` instructions say.
+- The name of a `[providers.NAME]` table: an external provider. With `protocol = "provider"` (the default) its command speaks the provider protocol; with `protocol = "mcp"` it is an MCP server over stdio, whose tools serve as a provider of tools alone, without brief, events, memories or export.
+
+```toml
+provider = "memo"                          # every ant of the file
+
+[providers.memo]
+command = "~/bin/memo-provider"
+
+[providers.github]
+command = "github-mcp-server"
+args = ["stdio"]
+env = { GITHUB_PERSONAL_ACCESS_TOKEN = "ghp_..." }
+protocol = "mcp"
+
+[[ant]]
+name = "dev-a"
+workdir = "~/src/repo-a"
+provider = "github"                        # GitHub's tools, served as github_<tool>
+
+[[ant]]
+name = "dev-b"
+workdir = "~/src/repo-b"
+provider = "none"                          # the harness's own tools alone
+memory = "Use the notes MCP server for durable memory."
+```
+
+A provider name is 1-32 characters of `a-z`, `0-9` and `-`, starting with a letter; `sugar` and `none` are reserved, and so is the first word of an ants tool (`send`, `read`, `notes`, …), as ants serves each provider tool as `<provider>_<tool>`. The command, when a path, resolves like other paths; `env` values stay literal. Naming an undefined provider fails config loading.
+
+A daemon process starts each external provider an ant names once, for all the ants naming it, in the daemon's directory, and logs its standard error. When it exits, or fails to start or initialize, the daemon starts it again after 1 s, doubling the wait up to 60 s; a run that lasted a minute resets the wait to 1 s. Its tools are offered only while it is up; a call meanwhile fails with an `[ants]` line saying why, such as `memo is down: exited with exit status: 1; restarting in 4 s`. MCP server tool names are lowercased, other characters than `a-z`, `0-9` and `_` becoming `_`; a tool whose name still does not fit is skipped.
+
+The `provider` setting and `[providers]` are this machine's: not shared settings, and not copied by `ants ant clone`.
 
 ## Shared settings
 

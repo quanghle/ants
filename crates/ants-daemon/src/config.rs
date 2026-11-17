@@ -11,6 +11,8 @@
 //! redact = true                     # redact secrets from what the ants publish (the default; crate::secrets::redact)
 //! machine = "dev-vm1"               # the machine the colony names for the ants, and the host's where [host] and
 //!                                   # its credentials name none (default: the host name)
+//! provider = "sugar"               # provider of every ant naming none: "sugar" (the default), "none" or one of
+//!                                   # [providers] (crate::provider::Setting)
 //!
 //! [cli]                             # the CLI's own connection, where no flag or environment variable sets it
 //! creds = "~/.config/ants/auth/alice.creds"
@@ -47,6 +49,12 @@
 //!                                   # ants executable, then in ~/.ants/bin, then on PATH
 //! ready_timeout = "30s"             # how long to wait for it to accept connections (the default)
 //!
+//! [providers.memo]                  # an external provider (crate::provider::Definition)
+//! command = "memo-provider"         # a path, or a bare name looked up on PATH
+//! args = ["--stdio"]
+//! env = { MEMO_DB = "/srv/memo.db" }
+//! protocol = "provider"             # the default; "mcp" for an MCP server, its tools alone
+//!
 //! [[ant]]
 //! name = "dev-a"
 //! workdir = "~/src/repo-a"
@@ -61,6 +69,7 @@
 //! publish = "draft-pr"              # push a branch with new commits and open a draft pull request with gh
 //! harness = "my-agent"
 //! fallback = ["claude", "copilot:gpt-5"]  # tried in order while my-agent cannot serve (crate::limits::fallback)
+//! provider = "memo"                 # overrides the top-level provider
 //!
 //! [harnesses.my-agent]              # an ACP adapter on stdio, besides the built-in ones (harnesses.toml)
 //! command = "~/bin/my-agent-acp"     # a path, or a bare name looked up on PATH
@@ -171,6 +180,11 @@ struct File {
     /// Harness definitions, added to the built-in ones or replacing them by name.
     #[serde(default)]
     harnesses: BTreeMap<String, Harness>,
+    /// Default provider of the file's ants ([`crate::provider::Setting`]): sugar when absent.
+    provider: Option<String>,
+    /// External provider definitions, which provider settings name.
+    #[serde(default)]
+    providers: BTreeMap<String, crate::provider::Definition>,
     /// Whether to serve the built-in messenger, unless an ant is named `messenger`.
     #[serde(default = "yes")]
     messenger: bool,
@@ -279,7 +293,9 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
     let mut file: File = toml::from_str(text).with_context(|| format!("parsing config {}", path.display()))?;
     let base = path.parent().unwrap_or(Path::new("."));
     let harnesses = define(std::mem::take(&mut file.harnesses), path, home)?;
-    check_top_level(&file, &harnesses, path)?;
+    let providers = crate::provider::define(std::mem::take(&mut file.providers), |p| resolve(p, base, home))
+        .with_context(|| format!("config {}", path.display()))?;
+    check_top_level(&file, &harnesses, &providers, path)?;
     let host = HostSettings::resolve(&mut file, base, home);
     let nats_server = file
         .nats_server
@@ -307,7 +323,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
             ant = from_template(ant, table, &templates, base, home)
                 .with_context(|| format!("config {}", path.display()))?;
         }
-        ants.push(settle_ant(ant, &file, &harnesses, base, home, path)?);
+        ants.push(settle_ant(ant, &file, (&harnesses, &providers), base, home, path)?);
     }
     let timezone = file
         .timezone

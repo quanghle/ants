@@ -139,6 +139,7 @@ pub async fn run(
     let mut links = Links::default();
     links.reconcile(with_restarts(served.host.clone(), &restarts), Some(&served));
     let served = after_first_read(served, &reload, &mut links, &restarts).await;
+    ants_daemon::provider::reconcile(served.configs.iter().map(|c| (&c.ant, &c.provider)));
     let mut tasks: FuturesUnordered<_> = reconcile(&mut running, served.configs).into_iter().map(serve).collect();
     let mut schedules = Schedules::default();
     schedules.reconcile(served.schedules, run_schedule);
@@ -182,6 +183,7 @@ pub async fn run(
                         tracing::warn!("the metrics address changed; it takes effect on a restart");
                     }
                     links.reconcile(with_restarts(served.host.clone(), &restarts), Some(&served));
+                    ants_daemon::provider::reconcile(served.configs.iter().map(|c| (&c.ant, &c.provider)));
                     tasks.extend(reconcile(&mut running, served.configs).into_iter().map(serve));
                     schedules.reconcile(served.schedules, run_schedule);
                 }

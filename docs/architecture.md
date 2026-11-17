@@ -138,7 +138,7 @@ Per-ant prompt instructions and state isolation:
 
 ## Providers
 
-An ant's provider holds its identity, memories and work. Every ant has built-in sugar (crate `ants-sugar`), run inside the daemon: one `Sugar` serves all the ants of a daemon process, each call naming its ant. The daemon connects it on first use and hands it to each ant's MCP server, which serves its tools to every session of the ant ([MCP tools](#mcp-tools)); no harness needs configuring for them. The daemon also asks it for briefs and sends it lifecycle events.
+An ant's provider holds its identity, memories and work. Its `provider` setting ([config.md](config.md#providers)) names built-in sugar (crate `ants-sugar`, the default), an external provider, an MCP server serving its tools alone, or none. Sugar runs inside the daemon: one `Sugar` serves all the ants of a daemon process, each call naming its ant. The daemon connects the ant's provider when the ant starts and hands it to the ant's MCP server, which serves its tools to every session of the ant ([MCP tools](#mcp-tools)); no harness needs configuring for them. The daemon also asks it for briefs and sends it lifecycle events. An ant served by another provider never reaches sugar, so no sugar id is minted in its home. An ant with none has no provider, its harness's own tools serving its memory and tasks.
 
 Built-in sugar implements the same interface (`ants_proto::provider::Provider`) that an external provider serves over the provider protocol, so switching an ant between providers changes nothing else in ants. A provider never reads an ant's messages, prompts or replies. It sees only:
 
@@ -332,6 +332,19 @@ A provider's `wake` becomes a message to the ant, as a scheduled reminder or a t
 - **The message:** sent as the ant to its own inbox (`ants.inbox.<ant>.<ant>`, which the ant's credentials publish already) with `provider` set to the provider's name, on the named thread or a new one, carrying the thread's recorded owner. Like a `handoff` it waits its turn rather than steering a running prompt, and the answer goes to the thread's owner, else to the default human. `provider` holds only on a message from the ant to itself: the CLI and the thread's `origin` ([calls and events](#provider-protocol)) ignore it on any other. `ants thread show` and `ants chat` mark it `wake from <provider>`.
 - **Idempotency:** the daemon records `<ant>.wake.<hash>` in `ants_attempts`, the hash a SHA-256 of provider and `id`, holding the thread and message id, before sending; a repeat within 7 days returns the same `{thread}` without sending again. A record not yet marked sent is sent again under the same message id, which the stream's 24 h duplicate window drops if it was stored. The record lives on the hub, so it outlasts restarts and a standby's takeover.
 - **Turns:** a wake carries a fresh turn budget and spends none of the thread's: it is prompted on a thread out of turns without an escalation, and its answer goes to a human, spending nothing. Spending caps, narrowed tools and holds still apply, and the daemon takes at most 60 new wakes per ant per hour (`-32003` past that; repeats are free).
+
+### External providers
+
+A daemon process runs each external provider once, for all its ants naming it, and connects each of those ants to it, each call naming its ant:
+
+- The provider's command starts with piped standard input and output, in a process group of its own; its standard error goes to the daemon log, a line at most 1 KiB, and its last line says why it ended.
+- ants initializes each run. A run whose output closes has 1 s to exit before its process group is killed; stopping a provider closes its input likewise.
+- When a run ends, or fails to start or initialize, the next starts after a backoff from 1 s, doubling to 60 s, and back to 1 s after a run that lasted 60 s.
+- While no run is up, the provider lists no tools, and calls fail with error `-32003`, `provider unavailable: <name> is down: <why>; restarting in <n> s` (or `is starting`, `is stopped`). An ant connecting while it is starting waits up to 5 s for it; past that the ant agrees on every capability the provider may declare, the calls of those the run does not declare failing with `-32001`.
+- Its wake requests reach ants as any provider's do, named by its name in the config.
+- A config reload stops the providers no ant names any more and restarts those whose definition changed.
+
+With `protocol = "mcp"`, the command is an MCP server over stdio (newline-delimited JSON-RPC). ants sends `initialize` (protocol version `2025-06-18`) and `notifications/initialized`, then `tools/list`, following `nextCursor`, and `tools/call`; it answers the server's `ping`. The server serves as a provider of `tools` alone (none if it declares no tools): each tool's name is lowercased, other characters than `a-z`, `0-9` and `_` becoming `_`, a name still invalid or taken skipped. A call's result is its text content, other content shown as `[<type> content]`, or its `structuredContent` when the call asked for `json`; `isError` becomes `is_error`.
 
 ## MCP tools
 
