@@ -284,6 +284,10 @@ impl Stores for SenseStores {
         })
     }
 
+    fn home(&self, ant: &UserId) -> Option<PathBuf> {
+        self.of(ant).ok().map(|of| of.home)
+    }
+
     fn export<'a>(&'a self, ant: &'a UserId) -> BoxFuture<'a, Result<SenseExport, StoreError>> {
         Box::pin(async move {
             let items = self.items(ant).await?;

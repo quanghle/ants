@@ -122,6 +122,22 @@ pub const TOOLS: &[ToolSpec] = &[
         handler: crate::remind::remind,
     },
     ToolSpec {
+        name: "persona",
+        description: "Propose a change of the persona (values, voice, boundaries, working style) with its reason: a \
+                      dream at least 12 hours later confirms or rejects it. Without fields, show the persona and its \
+                      pending proposal; with history, every version and its reason.",
+        schema: persona,
+        handler: crate::persona::persona,
+    },
+    ToolSpec {
+        name: "skill",
+        description: "Propose a new, changed or removed skill (SKILL.md with name and description, plus files) with \
+                      its reason: a later dream confirms or rejects it. Without a name, list the skills; with a name \
+                      alone, read one.",
+        schema: skill,
+        handler: crate::skill::skill,
+    },
+    ToolSpec {
         name: "dream",
         description: "On a dream thread: answer each finding of the dream as applied (naming the items written), \
                       rejected or deferred, with a reason, and finish the dream with done. Without arguments, show \
@@ -200,6 +216,40 @@ fn recall() -> Value {
             "description": "More people of the thread, to include their memories: name, human:<name> or ant:<name>.",
         },
         "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": "10 by default."},
+    }))
+}
+
+fn persona() -> Value {
+    let field = |what: &str| json!({"type": "string", "description": format!("{what}, at most 500 bytes; empty clears it, none keeps it.")});
+    object(&json!({
+        "values": field("What the ant holds important"),
+        "voice": field("How it speaks"),
+        "boundaries": field("What it will not do"),
+        "working_style": field("How it works"),
+        "reason": {"type": "string", "maxLength": 500, "description": "Why: kept with the version."},
+        "finding": {"type": "string", "description": "The dream finding this answers, such as 3.1."},
+        "history": {"type": "boolean", "description": "Show every version and its reason."},
+    }))
+}
+
+fn skill() -> Value {
+    object(&json!({
+        "name": {"type": "string", "description": "The skill's name: lowercase letters, digits and hyphens."},
+        "content": {
+            "type": "string",
+            "description": "The whole SKILL.md: front matter (--- name: and description: ---), then instructions.",
+        },
+        "files": {
+            "type": "object",
+            "additionalProperties": {"type": ["string", "null"]},
+            "description": "Other files by relative path, null removing one; files not named are kept.",
+        },
+        "remove": {"type": "boolean", "description": "Propose removing the skill."},
+        "reason": {"type": "string", "maxLength": 500, "description": "Why: kept with the version."},
+        "finding": {"type": "string", "description": "The dream finding this answers, such as 3.1."},
+        "path": {"type": "string", "description": "With name or proposal: read this file."},
+        "proposal": {"type": "string", "description": "Show this proposal in full."},
+        "history": {"type": "boolean", "description": "With name: show every version and its reason."},
     }))
 }
 

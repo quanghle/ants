@@ -23,10 +23,13 @@ pub mod identity;
 pub mod items;
 pub mod log;
 pub mod memory;
+pub mod persona;
 pub mod promise;
+pub mod proposal;
 pub mod records;
 pub mod remind;
 pub mod sanitize;
+pub mod skill;
 pub mod store;
 pub mod task;
 pub mod thread;
@@ -93,6 +96,11 @@ impl Sense {
         self.workdirs.as_ref()?.workdir(context)
     }
 
+    /// The home of `ant`, where its skill files are kept ([`skill::materialize`]); none when the stores know none.
+    pub fn home(&self, ant: &UserId) -> Option<PathBuf> {
+        self.stores.as_ref()?.home(ant)
+    }
+
     /// Subscribe before reading triggers, so a change during the read cannot be missed.
     pub fn changes(&self) -> tokio::sync::watch::Receiver<()> {
         self.changed.subscribe()
@@ -153,6 +161,9 @@ impl Sense {
 
     async fn export_of(&self, ant: AntRef) -> Result<Export, RpcError> {
         let stores = self.stores.as_ref().ok_or_else(|| RpcError::unavailable("sense keeps no data here"))?;
+        skill::materialize_for(self, &ant.ant)
+            .await
+            .map_err(|e| RpcError::unavailable(&format!("writing the skill files: {e}")))?;
         let export = stores.export(&ant.ant).await.map_err(|e| RpcError::unavailable(&e.to_string()))?;
         let data = serde_json::to_value(export).map_err(|e| RpcError::internal(&e.to_string()))?;
         Ok(Export { provider: NAME.to_owned(), data })
@@ -187,6 +198,8 @@ impl Sense {
             if let Some(workdir) = self.workdir(context) {
                 memory::recheck_citations(&*items, &workdir).await?;
             }
+            // Files failing to be written are written again at the next brief.
+            let _ = skill::materialize_for(self, &context.ant).await;
             brief::compose(&*items, context, Some(&card), request.budget as usize).await
         };
         match composed.await {
@@ -316,7 +329,20 @@ mod tests {
         let names: Vec<_> = tools.iter().map(|tool| tool.name.as_str()).collect();
         assert_eq!(
             names,
-            ["brief", "remember", "recall", "vote", "checkpoint", "handoff", "task", "promise", "remind", "dream"]
+            [
+                "brief",
+                "remember",
+                "recall",
+                "vote",
+                "checkpoint",
+                "handoff",
+                "task",
+                "promise",
+                "remind",
+                "persona",
+                "skill",
+                "dream"
+            ]
         );
         let request = BriefRequest {
             context: call("brief", Format::Text).context,

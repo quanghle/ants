@@ -75,14 +75,16 @@ pub(super) async fn step(
     if idle_since + idle > now {
         return Ok(idle_since + idle);
     }
-    if *dreams.quiet.locked() == Some(idle_since) {
+    // A proposal ripe for confirmation calls for a dream even without new work.
+    let due = dream::proposal_due(items, last.as_ref(), now).await?;
+    if !due && *dreams.quiet.locked() == Some(idle_since) {
         return Ok(now + idle);
     }
     let since = dream::since(last.as_ref(), now);
     let mut threads = dreams.daemon.threads(since, now).await?;
     // The last dream's own thread is no work to review.
     threads.retain(|thread| last.as_ref().and_then(|last| last.thread.as_ref()) != Some(&thread.id));
-    if threads.is_empty() {
+    if threads.is_empty() && !due {
         *dreams.quiet.locked() = Some(idle_since);
         return Ok(now + idle);
     }

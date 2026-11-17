@@ -174,9 +174,16 @@ async fn an_export_moves_the_sense_data_to_another_bus() {
     hosting.up(link(&bus_a).await);
     let sense = Sense::with_stores(stores.clone());
     sense.event(added("id1")).await.unwrap();
-    std::fs::create_dir_all(export::skills_dir(&home_a).join("review")).unwrap();
-    std::fs::write(export::skills_dir(&home_a).join("review/SKILL.md"), "review well").unwrap();
+    let mut skill = serde_json::Map::new();
+    skill.insert("name".into(), json!("review"));
+    skill.insert("description".into(), json!("Review well."));
+    skill.insert("files".into(), json!({"SKILL.md": "review well"}));
+    let kind = ants_sense::skill::SKILL.into();
+    let write = ants_sense::store::Write::Create { id: ants_sense::skill::skill_id("review"), kind, values: skill };
+    stores.items(&dev_a()).await.unwrap().write(&[write], "test").await.unwrap();
+    std::fs::create_dir_all(export::skills_dir(&home_a).join("stray")).unwrap();
     let exported = sense.export(AntRef { ant: dev_a(), identity: "id1".into() }).await.unwrap();
+    assert!(!export::skills_dir(&home_a).join("stray").exists(), "the skill files are those of the log");
     let id = identity::read_id(&home_a).unwrap().unwrap();
     drop(hosting);
 
@@ -197,9 +204,9 @@ async fn an_export_moves_the_sense_data_to_another_bus() {
     assert_eq!((&card.sense, card.identities.as_slice()), (&id, &["id1".to_owned()][..]));
     let js = bus::connect(&bus_b.url, None, None, &UserId::human(), "test").await.unwrap().1;
     let messages = js.get_stream(SENSE_STREAM).await.unwrap().info().await.unwrap().state.messages;
-    assert_eq!(messages, 2, "the event and the anchor");
+    assert_eq!(messages, 3, "the events and the anchor");
     sense.import(request(&exported)).await.unwrap();
-    assert_eq!(js.get_stream(SENSE_STREAM).await.unwrap().info().await.unwrap().state.messages, 2, "taken in already");
+    assert_eq!(js.get_stream(SENSE_STREAM).await.unwrap().info().await.unwrap().state.messages, 3, "taken in already");
     drop(hosting);
 
     let home_c = scratch_dir("sense-export-c");

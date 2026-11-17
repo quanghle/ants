@@ -10,7 +10,7 @@ use uuid::Uuid;
 use super::*;
 use crate::Sense;
 use crate::cache::Cache;
-use crate::items::ItemId;
+use crate::items::{ItemId, Values};
 use crate::log::{AccountVerifier, AntLog, MemoryLog, NoRevocations, Unsigned};
 use crate::memory::{Memory, VOTE};
 use crate::records::RELATIONSHIP;
@@ -196,4 +196,31 @@ async fn a_record_the_clone_writes_anew_is_no_longer_inherited() {
     call_as(&sense, CLONE, "remember", bolder).await;
     let model = crate::records::self_model(&*clone).await.unwrap().unwrap();
     assert_eq!((model.item.revision, model.record.inherited), (2, None));
+}
+
+#[tokio::test]
+async fn a_clone_keeps_the_persona_and_the_skills_but_not_their_proposals() {
+    let (sense, source, clone) = sense().await;
+    let mut persona = Values::new();
+    persona.insert("voice".into(), json!("Plain."));
+    let mut skill = Values::new();
+    skill.insert("name".into(), json!("release"));
+    skill.insert("description".into(), json!("Cut a release."));
+    skill.insert("files".into(), json!({"SKILL.md": "---\nname: release\ndescription: Cut a release.\n---\n"}));
+    let writes = [
+        Write::Create { id: crate::persona::persona_id(), kind: PERSONA.into(), values: persona },
+        Write::Create { id: crate::skill::skill_id("release"), kind: SKILL.into(), values: skill },
+    ];
+    source.write(&writes, "test").await.unwrap();
+    call(&sense, "persona", json!({"voice": "Loud.", "reason": "Why not."})).await;
+
+    sense.event(cloned(SOURCE, Utc::now())).await.unwrap();
+
+    let from = source.sense().await;
+    let persona = crate::persona::current(&*clone).await.unwrap().unwrap();
+    assert_eq!((persona.text("voice"), &persona.values[INHERITED]), ("Plain.", &json!(from)));
+    let skills = crate::skill::skills(&*clone).await.unwrap();
+    assert_eq!(skills.iter().map(|skill| skill.name.as_str()).collect::<Vec<_>>(), ["release"]);
+    assert_eq!(count(&*source, crate::proposal::PROPOSAL).await, 1);
+    assert_eq!(count(&*clone, crate::proposal::PROPOSAL).await, 0, "proposals are the source's");
 }

@@ -1,0 +1,248 @@
+//! The ant's persona (requirement ants-x39hk.6.5): its values, voice, boundaries and working style, one item of kind
+//! [`PERSONA`]. Only `sense_persona` changes it, and only through a proposal ([`crate::proposal`]) the ant confirms in a
+//! dream [`crate::proposal::CONFIRM_AFTER_HOURS`] or more later, at most once in [`PERSONA_EVERY_HOURS`]; each
+//! revision keeps the reason of its proposal. The brief shows it after the identity.
+
+use std::fmt::Write as _;
+
+use ants_proto::provider::{BoxFuture, ToolCall};
+use serde_json::{Map, Value, json};
+
+use crate::Sense;
+use crate::items::{Item, ItemId, Values};
+use crate::memory::{holds_recalled_marker, invalid, redacted, sanitized};
+use crate::proposal::{self, Proposal, ProposalItem, Status, time};
+use crate::sanitize::{Limit, Redaction, sanitize_body};
+use crate::store::{Items, StoreError};
+use crate::tools::Answer;
+
+/// The kind of the persona's item; an ant has one.
+pub const PERSONA: &str = "persona";
+/// The hours from one change of the persona to the next, at least.
+pub const PERSONA_EVERY_HOURS: i64 = 24;
+/// The most bytes of each field of the persona: all of them show in every brief.
+pub const MAX_FIELD_BYTES: usize = 500;
+/// The persona's fields, in the order shown, with their headings.
+pub const FIELDS: &[(&str, &str)] =
+    &[("values", "Values"), ("voice", "Voice"), ("boundaries", "Boundaries"), ("working_style", "Working style")];
+
+/// The id of the persona's item.
+pub fn persona_id() -> ItemId {
+    ItemId::named(PERSONA, "self")
+}
+
+/// The persona in `items`; none before the ant confirmed one.
+pub async fn current(items: &dyn Items) -> Result<Option<Item>, StoreError> {
+    items.get(&persona_id()).await
+}
+
+/// The fields of the persona `values` holds, one paragraph each under its heading.
+pub fn text(values: &Values) -> String {
+    let mut text = String::new();
+    for (field, heading) in FIELDS {
+        if let Some(value) = values.get(*field).and_then(Value::as_str) {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            let _ = write!(text, "{heading}: {}", value.replace('\n', "\n  "));
+        }
+    }
+    text
+}
+
+/// Answers a `sense_persona` call: without fields, show the persona and its pending proposal, or with `history`
+/// every version; with fields and a reason, propose the persona they make with the current one.
+pub fn persona<'a>(sense: &'a Sense, call: &'a ToolCall) -> BoxFuture<'a, Answer> {
+    Box::pin(async move { answer(sense, call).await.unwrap_or_else(|refused| refused) })
+}
+
+async fn answer(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
+    let arguments = &call.arguments;
+    let context = &call.context;
+    let items = sense.items(&context.ant).await.map_err(proposal::unavailable)?;
+    let history = match arguments.get("history") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(history)) => *history,
+        Some(_) => return Err(invalid("history must be true or false.".into())),
+    };
+    let mut redactions = Vec::new();
+    let fields = fields(arguments, &mut redactions)?;
+    if fields.is_empty() {
+        if arguments.contains_key("reason") {
+            return Err(invalid("Name the fields to change: values, voice, boundaries or working_style.".into()));
+        }
+        return if history { show_history(&*items).await } else { show(&*items).await };
+    }
+    if history {
+        return Err(invalid("history shows the versions: pass it without fields.".into()));
+    }
+    let reason = proposal::reason(arguments)?;
+    let finding = proposal::finding(arguments)?;
+    proposal::refuse_untrusted(&*items, context, finding.as_deref()).await?;
+
+    let current = current(&*items).await.map_err(proposal::unavailable)?;
+    let mut version = current.as_ref().map_or_else(Values::new, |current| proposal::content(&current.values));
+    for (field, value) in fields {
+        match value {
+            Some(value) => version.insert(field.to_owned(), json!(value)),
+            None => version.remove(field),
+        };
+    }
+    if version.is_empty() {
+        return Err(invalid("A persona holds at least one of values, voice, boundaries and working_style.".into()));
+    }
+    if current.as_ref().is_some_and(|current| proposal::content(&current.values) == version) {
+        return Err(Answer::error("unchanged", "The persona is that already: nothing to propose.".into()));
+    }
+    let changed: Vec<_> = FIELDS
+        .iter()
+        .filter(|(field, _)| current.as_ref().and_then(|current| current.values.get(*field)) != version.get(*field))
+        .map(|(field, _)| *field)
+        .collect();
+    let summary = format!("Persona change ({}), proposed in full:\n{}\n", changed.join(", "), text(&version));
+    for (field, _) in FIELDS {
+        version.entry((*field).to_owned()).or_insert(Value::Null);
+    }
+    version.insert("reason".into(), json!(reason));
+    let made = Proposal {
+        target: persona_id(),
+        kind: PERSONA.into(),
+        summary,
+        version,
+        base: current.as_ref().map_or(0, |current| current.revision),
+        reason,
+        status: Status::Pending,
+        writer: context.clone(),
+        finding,
+        superseded_by: None,
+        decided: None,
+    };
+    let (made, superseded) = proposal::propose(&*items, made).await.map_err(proposal::unavailable)?;
+    let mut text = format!(
+        "Proposed persona change {}: a dream from {} offers it, applied confirming it.",
+        made.id(),
+        time(made.proposal.ripe())
+    );
+    if let Some(superseded) = &superseded {
+        let _ = write!(text, " It supersedes proposal {superseded}.");
+    }
+    let (redacted_text, redacted_json) = redacted(&redactions);
+    text.push_str(&redacted_text);
+    let json = json!({"proposal": made.json(), "superseded": superseded, "redactions": redacted_json});
+    Ok(Answer { text, json, is_error: false })
+}
+
+/// The fields `arguments` give, sanitized: an empty text clearing its field.
+fn fields(
+    arguments: &Map<String, Value>,
+    redactions: &mut Vec<Redaction>,
+) -> Result<Vec<(&'static str, Option<String>)>, Answer> {
+    let mut fields = Vec::new();
+    for (field, _) in FIELDS {
+        let given = match arguments.get(*field) {
+            None | Some(Value::Null) => continue,
+            Some(Value::String(text)) => text.trim(),
+            Some(_) => return Err(invalid(format!("{field} must be a string."))),
+        };
+        if given.is_empty() {
+            fields.push((*field, None));
+            continue;
+        }
+        let text = sanitized(field, Some(given), sanitize_body(given, Limit::Bytes(MAX_FIELD_BYTES)))?;
+        if holds_recalled_marker(&text.text) {
+            let message = format!("The {field} quotes recalled memories: write the persona in new words.");
+            return Err(Answer::error("recalled_block", message));
+        }
+        redactions.extend(text.redactions.iter().copied());
+        fields.push((*field, Some(text.text)));
+    }
+    Ok(fields)
+}
+
+/// The persona, its revision and the reason of its last change, then its pending proposal.
+async fn show(items: &dyn Items) -> Result<Answer, Answer> {
+    let current = current(items).await.map_err(proposal::unavailable)?;
+    let pending = proposal::pending_for(items, &persona_id()).await.map_err(proposal::unavailable)?;
+    let mut text = match &current {
+        Some(current) => format!(
+            "Persona, revision {}, confirmed {}: {}\n{}",
+            current.revision,
+            current.text("confirmed"),
+            current.text("reason"),
+            self::text(&current.values)
+        ),
+        None => "No persona yet: propose one with sense_persona, giving values, voice, boundaries or working_style \
+                 and a reason."
+            .to_owned(),
+    };
+    if let Some(pending) = &pending {
+        let _ = write!(text, "\n{}\n{}", pending.line(), self::text(&pending.proposal.version));
+    }
+    let json = json!({
+        "persona": current.as_ref().map(item_json),
+        "pending": pending.as_ref().map(ProposalItem::json),
+    });
+    Ok(Answer { text, json, is_error: false })
+}
+
+/// Every version of the persona, the newest first, each with the reason it was confirmed for.
+async fn show_history(items: &dyn Items) -> Result<Answer, Answer> {
+    let versions = proposal::versions(items, &persona_id()).await.map_err(proposal::unavailable)?;
+    if versions.is_empty() {
+        return Ok(Answer { text: "No persona yet.".into(), json: json!({"versions": []}), is_error: false });
+    }
+    let mut text = format!("{} versions of the persona, the newest first:", versions.len());
+    let mut json = Vec::new();
+    for (revision, at, values) in versions.iter().rev() {
+        let reason = values.get("reason").and_then(Value::as_str).unwrap_or_default();
+        let _ = write!(
+            text,
+            "\n- Revision {revision}, {}: {reason}\n  {}",
+            time(*at),
+            self::text(values).replace('\n', "\n  ")
+        );
+        let mut version = Value::Object(values.clone());
+        version["revision"] = json!(revision);
+        json.push(version);
+    }
+    Ok(Answer { text, json: json!({"versions": json}), is_error: false })
+}
+
+fn item_json(item: &Item) -> Value {
+    let mut json = Value::Object(item.values.clone());
+    json["revision"] = json!(item.revision);
+    json
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::memory::tests::{context, human, sense, tool};
+    use crate::proposal::tests::error;
+
+    #[tokio::test]
+    async fn a_proposal_is_checked_and_shown_with_the_persona() {
+        let (sense, _) = sense().await;
+        let call = |arguments| tool(&sense, persona, arguments, context(human()));
+        let shown = call(json!({})).await;
+        assert!(shown.text.starts_with("No persona yet"), "{}", shown.text);
+        let refusals = [
+            (json!({"voice": "Plain."}), "invalid"),
+            (json!({"reason": "Why."}), "invalid"),
+            (json!({"voice": 1, "reason": "Why."}), "invalid"),
+            (json!({"voice": "x".repeat(MAX_FIELD_BYTES + 1), "reason": "Why."}), "too_long"),
+            (json!({"voice": "", "reason": "Why."}), "invalid"),
+            (json!({"voice": "Plain.", "reason": "Why.", "history": true}), "invalid"),
+        ];
+        for (arguments, code) in refusals {
+            assert_eq!(error(&call(arguments.clone()).await), code, "{arguments}");
+        }
+        let made = call(json!({"voice": "Plain.", "boundaries": "No force pushes.", "reason": "Why."})).await;
+        assert!(!made.is_error, "{made:?}");
+        let shown = call(json!({})).await;
+        assert!(shown.text.contains("(pending, made 2025-01-01T12:00:00Z"), "{}", shown.text);
+        assert!(shown.text.contains("Voice: Plain.\nBoundaries: No force pushes."), "{}", shown.text);
+    }
+}
