@@ -377,8 +377,7 @@ async fn the_next_prompt_mentions_late_replies_waiting_on_its_thread() {
     let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
     // Two ask_ant calls on t1 that gave up, remembered across a restart.
     let asks = [1, 2].map(|_| Envelope::on_thread(t1.clone(), bus.dev.clone(), dev_b.clone(), "?"));
-    let home = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/daemon-t/late");
-    let _ = std::fs::remove_dir_all(&home);
+    let home = bus._server.dir().join("late");
     std::fs::create_dir_all(&home).unwrap();
     let stored = serde_json::json!({"asks": asks.iter().map(|a| (a.id, &a.to)).collect::<Vec<_>>(), "late": []});
     std::fs::write(home.join("mcp.json"), stored.to_string()).unwrap();
