@@ -193,7 +193,8 @@ The identity card is the ant's item of kind `card`, written by sense alone (stam
 - `retired_at`: the start of the dormancy, kept after its end until the brief tells the ant of its return;
 - `returned_at`: set by the end of a dormancy, or by an `ant_added` under an identity id other than those linked, as after a revoke and re-add, which links the new id and marks the ant active again; it stays until the brief tells the ant;
 - `moved_at`, from `ant_moved`;
-- `events`, the ids of the last 16 lifecycle events applied, so a repeat changes nothing.
+- `events`, the ids of the last 16 lifecycle events applied, so a repeat changes nothing;
+- `dormancies`, the last 16 dormancies ended (`{from, to}`, from the retirement to the event ending it), kept after the brief tells the ant of its return, so [maintenance](#sense-memory-maintenance) counts only active time.
 
 Thread and session events change nothing on the card; sense acks them at once.
 
@@ -246,10 +247,10 @@ Once a day, the active daemon maintains its ant's memories, needing no ant: it r
 3. a core memory unused for 90 days stops being core;
 4. an `active` memory of scope `self`, trusted and no episode, used at least 5 times and within 90 days, becomes core, the most used first, while the live core memories stay within 2,000 bytes.
 
-A memory is used when written, voted helpful or read in full: its uses are its helpful votes plus its days of `access`, its last use the latest of its writer's time, `confirmed` and `access.last`. Its salience is:
+A memory is used when written, voted helpful or read in full: its uses are its helpful votes plus its days of `access`, its last use the latest of its writer's time, `confirmed` and `access.last`. A dormant ant uses no memory, so its days since a memory's last use or last change, in the steps above, the salience and the reasons recorded, count only active time: the time but the card's `dormancies` and, while dormant, the current dormancy, overlapping ones counted once. A clone's inherited memories count only the clone's dormancies, none of its source's. Its salience is:
 
 ```text
-importance / 3 × 0.5^(days since last used / 30) × (1 + 0.5 × min(helpful, 4) + 0.25 × min(access days, 8)) / (1 + stale)
+importance / 3 × 0.5^(active days since last used / 30) × (1 + 0.5 × min(helpful, 4) + 0.25 × min(access days, 8)) / (1 + stale)
 ```
 
 so a memory of importance 3, neither voted on nor read again, decays 90 days after it was written (one of importance 5 after about 112 days, of importance 1 after about 42). The run also clusters near duplicates: live memories but episodes, of one scope, with the same digest or sharing at least 60% of the words of their title and body, up to 50 clusters. Its record, an item of kind `maintenance` named `daily`, holds `{ran, changes: [{memory, action, reason}], left, duplicates, citations_checked, citations_marked}`, `action` being `decayed`, `retired`, `promoted` or `demoted`; each run replaces it, its history keeping the earlier runs, and each memory's history keeps its value before the change. The next run is due 24 hours after `ran`, so a standby taking the ant over keeps the schedule.

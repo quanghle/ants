@@ -26,7 +26,7 @@ mod vote;
 
 pub use citations::{CitationProblem, CitationRecheck, CitationWarning, recheck_citations};
 pub use maintain::{
-    ACCESS_WEIGHT, Action, CORE_IDLE_DAYS, CORE_USES, DECAY_FLOOR, MAINTENANCE, MAINTENANCE_EVERY_HOURS,
+    ACCESS_WEIGHT, Action, Ages, CORE_IDLE_DAYS, CORE_USES, DECAY_FLOOR, MAINTENANCE, MAINTENANCE_EVERY_HOURS,
     MAX_ACCESS_DAYS, MAX_CHANGES, MAX_CLUSTERS, Maintained, Maintenance, RETIRE_AFTER_DAYS, duplicates,
     last_maintenance, maintain, needs_review, next_maintenance, salience,
 };

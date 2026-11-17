@@ -10,7 +10,8 @@
 //!    [`CORE_USES`] times and last within [`CORE_IDLE_DAYS`], the most used first, while the core memories stay within
 //!    [`CORE_BUDGET`].
 //!
-//! A memory is used when written, voted helpful or read in full ([`Memory::last_used`], [`Memory::uses`]).
+//! A memory is used when written, voted helpful or read in full ([`Memory::last_used`], [`Memory::uses`]). Its ages,
+//! since its last use or change, count only the ant's active time ([`Ages`]): a dormant ant uses no memory.
 //! Maintenance also clusters near duplicates: live memories but episodes, of one scope, alike from [`NEAR_DUPLICATE`]
 //! ([`super::similarity`] of their titles and bodies) or with the same digest. The record keeps when it ran, each change with
 //! its action and reason, and the clusters; its event keeps what they were before, so every run can be read back.
@@ -30,6 +31,7 @@ use super::{
     CORE_BUDGET, DEFAULT_IMPORTANCE, MEMORY, Memory, MemoryItem, MemoryKind, NEAR_DUPLICATE, Scope, Status, Trust,
     jaccard, recheck_citations, words,
 };
+use crate::identity::{self, Dormancy};
 use crate::items::{ItemId, Values};
 use crate::store::{Items, StoreError, Write};
 
@@ -123,11 +125,46 @@ impl Maintenance {
     }
 }
 
-/// The weight of `memory` at `now` against which it decays: its importance over [`DEFAULT_IMPORTANCE`], times
-/// `0.5^(days since last used / HALF_LIFE_DAYS)`, times `(1 + HELPFUL_WEIGHT × min(helpful, MAX_HELPFUL) +
-/// ACCESS_WEIGHT × min(days read, MAX_ACCESS_DAYS)) / (1 + STALE_WEIGHT × stale)`.
-pub fn salience(memory: &Memory, now: DateTime<Utc>) -> f64 {
-    let idle = days(now - memory.last_used());
+/// Ages up to a time in an ant's active time: the time but its dormancies ([`identity::Card::dormant`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ages {
+    now: DateTime<Utc>,
+    /// The dormancies up to `now`, sorted, apart from each other.
+    dormant: Vec<Dormancy>,
+}
+
+impl Ages {
+    /// Ages up to `now`, without `dormancies`, which may overlap or go on past `now`.
+    pub fn new(now: DateTime<Utc>, dormancies: impl IntoIterator<Item = Dormancy>) -> Self {
+        let mut spans: Vec<_> = dormancies
+            .into_iter()
+            .map(|span| Dormancy { to: span.to.min(now), ..span })
+            .filter(|span| span.from < span.to)
+            .collect();
+        spans.sort_by_key(|span| span.from);
+        let mut dormant: Vec<Dormancy> = Vec::with_capacity(spans.len());
+        for span in spans {
+            match dormant.last_mut() {
+                Some(last) if span.from <= last.to => last.to = last.to.max(span.to),
+                _ => dormant.push(span),
+            }
+        }
+        Self { now, dormant }
+    }
+
+    /// The active time from `since` to now; none when `since` is later.
+    pub fn since(&self, since: DateTime<Utc>) -> Duration {
+        let dormant: Duration =
+            self.dormant.iter().map(|span| (span.to - span.from.max(since)).max(Duration::zero())).sum();
+        (self.now - since - dormant).max(Duration::zero())
+    }
+}
+
+/// The weight of `memory` against which it decays, its age taken from `ages`: its importance over
+/// [`DEFAULT_IMPORTANCE`], times `0.5^(active days since last used / HALF_LIFE_DAYS)`, times `(1 + HELPFUL_WEIGHT ×
+/// min(helpful, MAX_HELPFUL) + ACCESS_WEIGHT × min(days read, MAX_ACCESS_DAYS)) / (1 + STALE_WEIGHT × stale)`.
+pub fn salience(memory: &Memory, ages: &Ages) -> f64 {
+    let idle = days(ages.since(memory.last_used()));
     let importance = f64::from(memory.importance) / f64::from(DEFAULT_IMPORTANCE);
     let helpful = HELPFUL_WEIGHT * f64::from(memory.votes.helpful.min(MAX_HELPFUL));
     let read = ACCESS_WEIGHT * f64::from(memory.access.map_or(0, |access| access.days).min(MAX_ACCESS_DAYS));
@@ -207,7 +244,9 @@ pub async fn maintain(
     for _ in 0..TRIES {
         let Some(revision) = due_revision(items, now).await? else { return Ok(None) };
         let memories: Vec<_> = items.list(MEMORY, usize::MAX).await?.into_iter().filter_map(MemoryItem::of).collect();
-        let (changes, writes, left) = decide(&memories, now);
+        let card = identity::card(items).await?;
+        let ages = Ages::new(now, card.iter().flat_map(|card| card.dormant(now)));
+        let (changes, writes, left) = decide(&memories, &ages);
         let run = Maintenance {
             ran: now,
             changes,
@@ -240,14 +279,15 @@ async fn due_revision(items: &dyn Items, now: DateTime<Utc>) -> Result<Option<u6
     })
 }
 
-/// The changes of `memories` due at `now`, each with its write, and how many are left past [`MAX_CHANGES`].
-fn decide(memories: &[MemoryItem], now: DateTime<Utc>) -> (Vec<Maintained>, Vec<Write>, usize) {
+/// The changes of `memories` due at the time of `ages`, each with its write, and how many are left past
+/// [`MAX_CHANGES`].
+fn decide(memories: &[MemoryItem], ages: &Ages) -> (Vec<Maintained>, Vec<Write>, usize) {
     let mut due: Vec<(&MemoryItem, Action, String)> = Vec::new();
-    let idle_days = |memory: &Memory| (now - memory.last_used()).num_days();
+    let idle_days = |memory: &Memory| ages.since(memory.last_used()).num_days();
     for found in memories {
         let memory = &found.memory;
         if memory.status == Status::NeedsReview {
-            let untouched = (now - found.item.updated.at).num_days();
+            let untouched = ages.since(found.item.updated.at).num_days();
             if untouched >= RETIRE_AFTER_DAYS {
                 due.push((found, Action::Retired, format!("needed review, untouched for {untouched} days")));
             }
@@ -256,7 +296,7 @@ fn decide(memories: &[MemoryItem], now: DateTime<Utc>) -> (Vec<Maintained>, Vec<
     for found in memories {
         let memory = &found.memory;
         if memory.status == Status::Active && !memory.core {
-            let salience = salience(memory, now);
+            let salience = salience(memory, ages);
             if salience < DECAY_FLOOR {
                 let reason =
                     format!("salience {salience:.3} fell below {DECAY_FLOOR}: unused for {} days", idle_days(memory));

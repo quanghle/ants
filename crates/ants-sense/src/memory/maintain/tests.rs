@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ants_proto::provider::CallContext;
+use ants_proto::provider::{CallContext, Event, EventKind};
 use chrono::{DateTime, Duration, Utc};
 
 use super::*;
@@ -31,16 +31,88 @@ fn salience_fades_with_disuse_and_rises_with_use() {
     let at: DateTime<Utc> = "2025-01-01T00:00:00Z".parse().unwrap();
     let close = |a: f64, b: f64| assert!((a - b).abs() < 1e-9, "{a} != {b}");
     let mut memory = new("Port", "Deploy uses 8080", at);
-    close(salience(&memory, at), 1.0);
-    close(salience(&memory, at + Duration::days(90)), DECAY_FLOOR);
+    let ages = |days: i64| Ages::new(at + Duration::days(days), []);
+    close(salience(&memory, &ages(0)), 1.0);
+    close(salience(&memory, &ages(90)), DECAY_FLOOR);
     memory.importance = 5;
-    close(salience(&memory, at + Duration::days(30)), 5.0 / 3.0 / 2.0);
+    close(salience(&memory, &ages(30)), 5.0 / 3.0 / 2.0);
     memory.importance = DEFAULT_IMPORTANCE;
     memory.access = Some(Access { days: 20, last: at + Duration::days(30) });
-    close(salience(&memory, at + Duration::days(60)), 0.5 * (1.0 + ACCESS_WEIGHT * f64::from(MAX_ACCESS_DAYS)));
+    close(salience(&memory, &ages(60)), 0.5 * (1.0 + ACCESS_WEIGHT * f64::from(MAX_ACCESS_DAYS)));
     memory.votes = Votes { helpful: 1, stale: 1, ..Votes::default() };
     memory.access = None;
-    close(salience(&memory, at), (1.0 + HELPFUL_WEIGHT) / (1.0 + STALE_WEIGHT));
+    close(salience(&memory, &ages(0)), (1.0 + HELPFUL_WEIGHT) / (1.0 + STALE_WEIGHT));
+}
+
+#[test]
+fn ages_count_no_dormant_time() {
+    let day = |n: i64| "2025-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap() + Duration::days(n);
+    let span = |from: i64, to: i64| Dormancy { from: day(from), to: day(to) };
+    let ages = Ages::new(day(100), [span(60, 70), span(20, 30), span(25, 40), span(90, 150), span(50, 50)]);
+    let days = |since: i64| ages.since(day(since)).num_days();
+    assert_eq!(days(0), 100 - 20 - 10 - 10, "overlapping spans counted once, the ongoing one up to now");
+    assert_eq!(days(35), 65 - 5 - 10 - 10, "a span begun before counted from the start");
+    assert_eq!(days(95), 0);
+    assert_eq!(days(120), 0, "a start past now");
+    assert_eq!(Ages::new(day(100), []).since(day(10)).num_days(), 90);
+}
+
+/// A dormant ant used no memory: maintenance after its revival counts only the days it was active in the ages of its
+/// memories, over its dormancies kept on its card.
+#[tokio::test]
+async fn memories_age_only_while_the_ant_is_active() {
+    let (_sense, kept) = sense().await;
+    let items: Arc<dyn Items> = kept.clone();
+    // The store's clock stamps every write now.
+    let start = Utc::now();
+    let day = |n: i64| start + Duration::days(n);
+    let lifecycle = |n: i64, kind: EventKind| Event {
+        id: uuid::Uuid::now_v7(),
+        ant: "dev-a".parse().unwrap(),
+        identity: "id1".into(),
+        thread: None,
+        at: day(n),
+        kind,
+    };
+    for (n, kind) in [
+        (-50, EventKind::AntAdded),
+        (-35, EventKind::AntRetired),
+        (-30, EventKind::AntRevived),
+        (60, EventKind::AntRetired),
+        (260, EventKind::AntRevived),
+    ] {
+        identity::record_event(&*items, &lifecycle(n, kind)).await.unwrap();
+    }
+    identity::returned_told(&*items, &"dev-a".parse().unwrap()).await.unwrap();
+
+    let rested = store(&kept, &new("Rested", "Deploy uses 8080", day(0))).await;
+    let core = store(&kept, &Memory { core: true, ..new("Core", "Answer briefly", day(0)) }).await;
+    let review = Memory { status: Status::NeedsReview, ..new("Review", "Tests take long", day(0)) };
+    let review = store(&kept, &review).await;
+    let disused = store(&kept, &new("Disused", "Builds need the cache", day(-45))).await;
+    let core_disused = store(&kept, &Memory { core: true, ..new("Idle", "Lint first", day(-45)) }).await;
+
+    let now = day(261) + Duration::hours(1);
+    let run = maintain(&*items, None, now).await.unwrap().unwrap();
+    assert_eq!(actions(&run), [(disused.clone(), Action::Decayed), (core_disused.clone(), Action::Demoted)]);
+    assert!(run.changes[0].reason.ends_with("unused for 101 days"), "{run:?}");
+    assert_eq!(run.changes[1].reason, "core, unused for 101 days", "5 dormant days before, 200 since");
+    assert_eq!(memory(&kept, &rested).await.status, Status::Active, "61 active days idle");
+    assert_eq!(memory(&kept, &review).await.status, Status::NeedsReview, "untouched for 61 active days");
+    assert!(memory(&kept, &core).await.core);
+
+    let later = maintain(&*items, None, day(291) + Duration::hours(1)).await.unwrap().unwrap();
+    let mut changed = actions(&later);
+    changed.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut expected = vec![
+        (rested, Action::Decayed),
+        (core, Action::Demoted),
+        (review, Action::Retired),
+        (disused, Action::Retired),
+        (core_disused, Action::Decayed),
+    ];
+    expected.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(changed, expected, "91 active days on");
 }
 
 #[tokio::test]

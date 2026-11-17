@@ -8,7 +8,8 @@
 //!
 //! A retirement makes the identity dormant ([`Card::active`] false), keeping all its data: its commitments stay open
 //! and its reminders paused, the daemon firing none, until a revival or an addition under another ants identity
-//! makes it active again, its reminders' expiry put off by the time it was dormant.
+//! makes it active again, its reminders' expiry put off by the time it was dormant. The card keeps its last
+//! dormancies ([`Card::dormancies`]), so maintenance counts only its active time in the ages of its memories.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -36,6 +37,8 @@ pub const CARD: &str = "card";
 pub const BY: &str = "sense";
 /// How many ids of the lifecycle events last applied the card keeps, so a repeated event changes nothing.
 const EVENTS_KEPT: usize = 16;
+/// How many of its last dormancies the card keeps.
+const DORMANCIES_KEPT: usize = 16;
 
 /// Where the sense id of the ant whose home is `home` is kept.
 pub fn id_file(home: &Path) -> PathBuf {
@@ -164,6 +167,17 @@ pub struct Card {
     /// The ids of the lifecycle events last applied, the latest last.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<Uuid>,
+    /// The dormancies it came back from, the latest last, up to [`DORMANCIES_KEPT`]: unlike [`Card::retired_at`],
+    /// kept after the brief told it of its return.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dormancies: Vec<Dormancy>,
+}
+
+/// A time an identity was dormant: from its retirement to the event ending its dormancy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Dormancy {
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
 }
 
 /// The ant a clone was made of, and its ants identity id then.
@@ -198,7 +212,14 @@ impl Card {
             returned_at: None,
             moved_at: None,
             events: Vec::new(),
+            dormancies: Vec::new(),
         }
+    }
+
+    /// Its dormancies until `now`: those it came back from and, while dormant, the current one.
+    pub fn dormant(&self, now: DateTime<Utc>) -> impl Iterator<Item = Dormancy> {
+        let current = self.retired_at.filter(|_| !self.active).map(|from| Dormancy { from, to: now });
+        self.dormancies.iter().copied().chain(current)
     }
 
     /// Whether the ant came back from dormancy or under another ants identity and the brief has not told it yet.
@@ -254,7 +275,7 @@ impl Card {
         }
         let others = self.identities.iter().any(|linked| *linked != event.identity);
         match &event.kind {
-            EventKind::AntAdded if others => (self.active, self.returned_at) = (true, Some(event.at)),
+            EventKind::AntAdded if others => self.wake(event.at),
             EventKind::AntAdded => {}
             EventKind::AntRenamed { from } => self.named(from),
             EventKind::AntMoved => self.moved_at = Some(event.at),
@@ -262,7 +283,7 @@ impl Card {
                 self.cloned_from = Some(ClonedFrom { ant: from.clone(), identity: from_identity.clone() });
             }
             EventKind::AntRetired => (self.active, self.retired_at, self.returned_at) = (false, Some(event.at), None),
-            EventKind::AntRevived if !self.active => (self.active, self.returned_at) = (true, Some(event.at)),
+            EventKind::AntRevived if !self.active => self.wake(event.at),
             EventKind::AntRevived => {}
             _ => return,
         }
@@ -271,6 +292,16 @@ impl Card {
         self.events.push(event.id);
         let over = self.events.len().saturating_sub(EVENTS_KEPT);
         self.events.drain(..over);
+    }
+
+    /// Make the identity active again at `at`, its dormancy, if any, ended then.
+    fn wake(&mut self, at: DateTime<Utc>) {
+        if let Some(from) = self.retired_at.filter(|_| !self.active) {
+            self.dormancies.push(Dormancy { from, to: at });
+            let over = self.dormancies.len().saturating_sub(DORMANCIES_KEPT);
+            self.dormancies.drain(..over);
+        }
+        (self.active, self.returned_at) = (true, Some(at));
     }
 
     /// Note a session started as `context` says: its identity, harness, model and machine.

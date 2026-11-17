@@ -114,6 +114,8 @@ async fn an_ant_added_again_under_a_new_identity_is_linked_to_it_and_active_agai
 
     let told = returned_told(&*items, &dev_a()).await.unwrap();
     assert!(!told.returned() && told.retired_at.is_none());
+    let dormancy = Dormancy { from: at("11:00:00"), to: at("12:00:00") };
+    assert_eq!(told.dormancies, [dormancy], "kept after the brief told it");
     assert!(!items.list(CARD, 1).await.unwrap()[0].values.contains_key("returned_at"), "removed, not left null");
 }
 
@@ -135,12 +137,16 @@ async fn renames_clones_moves_retirements_and_revivals_are_written_on_the_card()
     assert_eq!(card.moved_at, Some(at("13:00:00")));
     let card = record_event(&*items, &event("dev-c", "id1", "14:00:00", EventKind::AntRetired)).await.unwrap();
     assert!(!card.active);
+    let dormant = Dormancy { from: at("14:00:00"), to: at("14:30:00") };
+    assert_eq!(card.dormant(at("14:30:00")).collect::<Vec<_>>(), [dormant], "the current dormancy");
     let card = record_event(&*items, &event("dev-c", "id1", "15:00:00", EventKind::AntRevived)).await.unwrap();
     assert!(card.active && card.returned());
     assert_eq!((card.retired_at, card.returned_at), (Some(at("14:00:00")), Some(at("15:00:00"))));
     assert_eq!(card.identities, ["id1"]);
     let card = record_event(&*items, &event("dev-c", "id1", "16:00:00", EventKind::AntRevived)).await.unwrap();
     assert_eq!(card.returned_at, Some(at("15:00:00")), "a revival of an active ant is no return");
+    let dormant = Dormancy { from: at("14:00:00"), to: at("15:00:00") };
+    assert_eq!(card.dormant(at("17:00:00")).collect::<Vec<_>>(), [dormant], "ended once");
 }
 
 /// The reminders of a dormant ant are paused: its revival puts off the expiry of each still active when it retired by
