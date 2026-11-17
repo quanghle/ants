@@ -16,10 +16,12 @@ use serde_json::{Value, json};
 use crate::items::{Item, ItemId, Values};
 use crate::store::{Items, StoreError, Write};
 
+mod citations;
 mod recall;
 mod remember;
 mod vote;
 
+pub use citations::{CitationProblem, CitationRecheck, CitationWarning, recheck_citations};
 pub use recall::{
     HALF_LIFE_DAYS, HELPFUL_WEIGHT, MAX_HELPFUL, NEEDS_REVIEW_WEIGHT, NOTE, Ranked, STALE_WEIGHT, framed, participants,
     recall, score, search, snippet, thread_repo, top,
@@ -271,6 +273,9 @@ pub struct Memory {
     pub importance: u8,
     #[serde(default)]
     pub citations: Vec<Citation>,
+    /// What a citation recheck could not verify; the original hashes remain unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub citation_warnings: Vec<CitationWarning>,
     /// Who wrote it, where and when, as ants told for the call writing it: never taken from the ant's text.
     pub writer: CallContext,
     pub trust: Trust,
@@ -303,6 +308,7 @@ impl Memory {
             body,
             importance: DEFAULT_IMPORTANCE,
             citations: Vec::new(),
+            citation_warnings: Vec::new(),
             writer: context.clone(),
             trust: if context.trusted() { Trust::Own } else { Trust::Untrusted },
             core: false,

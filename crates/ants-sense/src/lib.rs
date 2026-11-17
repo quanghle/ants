@@ -4,12 +4,13 @@
 //!
 //! sense asks nothing of humans: no approvals, gates, review queues or notifications.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use ants_proto::UserId;
 use ants_proto::provider::{
-    Ack, BoxFuture, Brief, BriefRequest, Capabilities, Event, Host, Info, InitializeParams, InitializeResult,
-    PROTOCOL_VERSION, Provider, RpcError, ToolCall, ToolList, ToolResult,
+    Ack, BoxFuture, Brief, BriefRequest, CallContext, Capabilities, Event, Host, Info, InitializeParams,
+    InitializeResult, PROTOCOL_VERSION, Provider, RpcError, ToolCall, ToolList, ToolResult,
 };
 
 pub mod brief;
@@ -18,8 +19,11 @@ pub mod identity;
 pub mod items;
 pub mod log;
 pub mod memory;
+pub mod promise;
+pub mod remind;
 pub mod sanitize;
 pub mod store;
+pub mod task;
 pub mod thread;
 mod tools;
 
@@ -34,12 +38,25 @@ pub const NAME: &str = "sense";
 pub const VERSIONS: &[u32] = &[PROTOCOL_VERSION];
 
 /// What sense implements: its tools, the brief and lifecycle events, which write each ant's card.
-pub const CAPABILITIES: Capabilities = Capabilities { tools: true, context: true, events: true, ..Capabilities::NONE };
+pub const CAPABILITIES: Capabilities =
+    Capabilities { tools: true, context: true, events: true, wake: true, ..Capabilities::NONE };
 
 /// The built-in provider. One serves every ant of a daemon, each call naming its ant.
-#[derive(Default)]
 pub struct Sense {
     stores: Option<Arc<dyn Stores>>,
+    workdirs: Option<Arc<dyn Workdirs>>,
+    changed: tokio::sync::watch::Sender<()>,
+}
+
+/// Directories supplied by the daemon, never taken from a tool's arguments.
+pub trait Workdirs: Send + Sync {
+    fn workdir(&self, context: &CallContext) -> Option<PathBuf>;
+}
+
+impl Default for Sense {
+    fn default() -> Self {
+        Self { stores: None, workdirs: None, changed: tokio::sync::watch::channel(()).0 }
+    }
 }
 
 impl Sense {
@@ -50,7 +67,22 @@ impl Sense {
 
     /// sense reaching each ant's data through `stores`.
     pub fn with_stores(stores: Arc<dyn Stores>) -> Self {
-        Self { stores: Some(stores) }
+        Self { stores: Some(stores), ..Self::default() }
+    }
+
+    #[must_use]
+    pub fn with_workdirs(mut self, workdirs: Arc<dyn Workdirs>) -> Self {
+        self.workdirs = Some(workdirs);
+        self
+    }
+
+    pub fn workdir(&self, context: &CallContext) -> Option<PathBuf> {
+        self.workdirs.as_ref()?.workdir(context)
+    }
+
+    /// Subscribe before reading triggers, so a change during the read cannot be missed.
+    pub fn changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.changed.subscribe()
     }
 
     /// The items of `ant`.
@@ -87,6 +119,9 @@ impl Sense {
         let composed = async {
             let items = self.items(&context.ant).await?;
             let card = identity::record_session(&*items, context).await?;
+            if let Some(workdir) = self.workdir(context) {
+                memory::recheck_citations(&*items, &workdir).await?;
+            }
             brief::compose(&*items, context, Some(&card), request.budget as usize).await
         };
         match composed.await {
@@ -127,7 +162,11 @@ impl Provider for Sense {
         };
         Box::pin(async move {
             let format = call.format;
-            Ok((spec.handler)(self, &call).await.render(format))
+            let answer = (spec.handler)(self, &call).await;
+            if !answer.is_error {
+                self.changed.send_replace(());
+            }
+            Ok(answer.render(format))
         })
     }
 
@@ -195,10 +234,13 @@ mod tests {
         let sense = connect();
         assert_eq!(sense.name(), NAME);
         assert!(sense.has(Capability::Tools) && sense.has(Capability::Context) && sense.has(Capability::Events));
-        assert!(!sense.has(Capability::Wake));
+        assert!(sense.has(Capability::Wake));
         let tools = ready(sense.list_tools()).unwrap().tools;
         let names: Vec<_> = tools.iter().map(|tool| tool.name.as_str()).collect();
-        assert_eq!(names, ["brief", "remember", "recall", "vote", "checkpoint", "handoff"]);
+        assert_eq!(
+            names,
+            ["brief", "remember", "recall", "vote", "checkpoint", "handoff", "task", "promise", "remind"]
+        );
         let request = BriefRequest {
             context: call("brief", Format::Text).context,
             budget: 8_000,

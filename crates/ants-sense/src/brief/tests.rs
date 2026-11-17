@@ -14,6 +14,9 @@ use crate::memory::{NOTE, RECALLED_BEGIN, RECALLED_END};
 use crate::store::{Store, Stores};
 use crate::tools::Handler;
 
+mod citations;
+mod work;
+
 /// The items of one ant, the same at each call.
 struct One(Arc<dyn Items>);
 
@@ -133,6 +136,11 @@ async fn an_empty_ant_is_told_to_start_a_register_and_the_tool_shows_the_brief_a
     let brief = session_brief(&sense, 8_000).await;
     position(&brief, "No resume register yet");
     assert!(!brief.contains("## Memories") && !brief.contains("handoffs"), "{brief}");
+    for heading in
+        ["## Open commitments", "## Fired reminders", "## Upcoming reminders", "## Claimed tasks", "## Ready tasks"]
+    {
+        assert!(!brief.contains(heading), "{brief}");
+    }
     let (sense, _) = filled().await;
     let brief = session_brief(&sense, 8_000).await;
     let call = ToolCall {
@@ -144,6 +152,27 @@ async fn an_empty_ant_is_told_to_start_a_register_and_the_tool_shows_the_brief_a
     let ToolResult { output, is_error } = sense.call_tool(call).await.unwrap();
     assert!(!is_error);
     assert_eq!(output, Output::Text(brief));
+}
+
+#[tokio::test]
+async fn successful_provider_calls_notify_the_sleeping_scheduler() {
+    let (sense, _) = sense().await;
+    let mut changes = sense.changes();
+    let call = ToolCall {
+        name: "remember".into(),
+        arguments: json!({"kind":"fact","title":"Parser spans","body":"Tokens carry byte spans."})
+            .as_object()
+            .unwrap()
+            .clone(),
+        context: context(THREAD),
+        format: Format::Json,
+    };
+    assert!(!changes.has_changed().unwrap());
+    assert!(!sense.call_tool(call.clone()).await.unwrap().is_error);
+    assert!(changes.has_changed().unwrap());
+    changes.borrow_and_update();
+    assert!(sense.call_tool(call).await.unwrap().is_error, "duplicate memory");
+    assert!(!changes.has_changed().unwrap(), "refused calls do not change the schedule");
 }
 
 #[tokio::test]

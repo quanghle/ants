@@ -1,20 +1,25 @@
 //! The data sense keeps of the ants a process serves ([`SenseStores`]): each ant's items, opened on first use from the
 //! sense id in its home ([`ants_sense::identity`]), its event log in [`ants_proto::SENSE_STREAM`] over the machine's
-//! host connection and its cache in its home. Without a host connection sense keeps nothing; while one connects, its
-//! data is unavailable.
+//! host connection and its cache in its home. Existing caches remain available while disconnected, including after
+//! process restart. One retry worker per host connection drains durable local outboxes after reconnect.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use ants_proto::provider::BoxFuture;
-use ants_proto::{JsDomain, Machine, UserId};
+use ants_proto::{JsDomain, Machine, SenseId, UserId};
 use ants_sense::cache::Cache;
 use ants_sense::identity;
-use ants_sense::log::{AccountVerifier, AntLog};
-use ants_sense::store::{Items, Store, StoreError, Stores};
+use ants_sense::log::{
+    AccountVerifier, AntLog, AppendError, Event, EventLog, LogError, Revocations, Signature, Signer, Stored, Verifier,
+    VerifyError,
+};
+use ants_sense::store::{Items, Store, StoreError, Stores, is_offline};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream;
+use serde::{Deserialize, Serialize};
 
 use crate::sense_log::{AntSigner, DeviceRevocations, JetStreamLog};
 
@@ -22,6 +27,7 @@ use crate::sense_log::{AntSigner, DeviceRevocations, JetStreamLog};
 #[derive(Default)]
 pub struct SenseStores {
     state: Mutex<State>,
+    changed: tokio::sync::Notify,
 }
 
 #[derive(Default)]
@@ -30,6 +36,7 @@ struct State {
     /// Counts the host connections started, so one that ended after the next started leaves the next's state alone.
     generation: u64,
     ants: HashMap<UserId, Served>,
+    route: Route,
 }
 
 #[derive(Default)]
@@ -47,9 +54,13 @@ struct Served {
     items: Arc<tokio::sync::Mutex<Option<Opened>>>,
 }
 
-struct Opened {
-    link: Arc<Link>,
-    items: Arc<dyn Items>,
+type Opened = Arc<dyn Items>;
+type Route = Arc<Mutex<Option<Arc<Link>>>>;
+
+#[derive(Serialize, Deserialize)]
+struct Context {
+    machine: Machine,
+    accounts: Vec<String>,
 }
 
 /// A host connection, over which sense reaches its logs.
@@ -60,20 +71,29 @@ pub struct Link {
     accounts: Vec<String>,
     machine: Machine,
     log: tokio::sync::OnceCell<JetStreamLog>,
+    revocations: tokio::sync::OnceCell<DeviceRevocations>,
 }
 
 impl Link {
     /// The host connection `js`, made for `js_domain`, of `machine`, whose credentials are of `accounts`.
     pub fn new(js: jetstream::Context, js_domain: Option<JsDomain>, accounts: Vec<String>, machine: Machine) -> Self {
-        Self { js, js_domain, accounts, machine, log: tokio::sync::OnceCell::new() }
+        Self {
+            js,
+            js_domain,
+            accounts,
+            machine,
+            log: tokio::sync::OnceCell::new(),
+            revocations: tokio::sync::OnceCell::new(),
+        }
     }
 }
 
-/// A host connection starting, from [`SenseStores::hosting`] until dropped: sense's data is unavailable until it is
-/// [`Hosting::up`], then reached over it.
+/// A host connection starting, from [`SenseStores::hosting`] until dropped. Existing stores keep serving their
+/// caches until [`Hosting::up`] supplies a connection, then follow that connection without losing queued writes.
 pub struct Hosting {
     stores: Arc<SenseStores>,
     generation: u64,
+    retry: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Hosting {
@@ -81,26 +101,23 @@ impl Hosting {
     pub fn up(&self, link: Link) {
         let mut state = self.stores.state();
         if state.generation == self.generation {
-            state.host = Host::Up(Arc::new(link));
+            let link = Arc::new(link);
+            *route(&state.route) = Some(link.clone());
+            state.host = Host::Up(link);
+            self.stores.changed.notify_one();
         }
     }
 }
 
 impl Drop for Hosting {
     fn drop(&mut self) {
+        if let Some(retry) = &self.retry {
+            retry.abort();
+        }
         let mut state = self.stores.state();
         if state.generation == self.generation {
             state.host = Host::Off;
-            state.close();
-        }
-    }
-}
-
-impl State {
-    /// Let go of the items opened, and of the host connection they hold.
-    fn close(&mut self) {
-        for served in self.ants.values_mut() {
-            served.items = Arc::default();
+            *route(&state.route) = None;
         }
     }
 }
@@ -119,8 +136,31 @@ impl SenseStores {
         let mut state = self.state();
         state.generation += 1;
         state.host = Host::Connecting;
-        state.close();
-        Hosting { stores: self.clone(), generation: state.generation }
+        *route(&state.route) = None;
+        let generation = state.generation;
+        drop(state);
+        let weak = Arc::downgrade(self);
+        let retry = tokio::runtime::Handle::try_current().ok().map(|runtime| {
+            runtime.spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_secs(1));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    let Some(stores) = weak.upgrade() else { break };
+                    if stores.state().generation != generation {
+                        break;
+                    }
+                    tokio::select! {
+                        _ = tick.tick() => {}
+                        _ = stores.changed.notified() => {}
+                    }
+                    if stores.state().generation != generation {
+                        break;
+                    }
+                    stores.retry_pending().await;
+                }
+            })
+        });
+        Hosting { stores: self.clone(), generation, retry }
     }
 
     /// The process serves `ant`, whose home is `home` and whose credentials are at `creds`, if any. An ant served from
@@ -136,6 +176,31 @@ impl SenseStores {
         }
         let served = Served { home: home.to_owned(), creds, items: Arc::default() };
         state.ants.insert(ant.clone(), served);
+        self.changed.notify_one();
+    }
+
+    /// The ants whose homes this process serves, including while its host connection is down.
+    pub fn served(&self) -> Vec<UserId> {
+        self.state().ants.keys().cloned().collect()
+    }
+
+    async fn retry_pending(&self) {
+        let served: Vec<_> = self
+            .state()
+            .ants
+            .iter()
+            .map(|(ant, served)| (ant.clone(), served.home.clone(), served.items.clone()))
+            .collect();
+        for (ant, home, opened) in served {
+            let items = opened.lock().await.clone();
+            if let Some(items) = items {
+                if items.pending().await.is_ok_and(|count| count > 0) {
+                    let _ = tokio::time::timeout(Duration::from_secs(15), items.sync()).await;
+                }
+            } else if ants_sense::cache::cache_file(&home).with_extension("pending").exists() {
+                let _ = tokio::time::timeout(Duration::from_secs(15), self.items(&ant)).await;
+            }
+        }
     }
 }
 
@@ -148,27 +213,38 @@ pub fn stores() -> &'static Arc<SenseStores> {
 impl Stores for SenseStores {
     fn items<'a>(&'a self, ant: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
         Box::pin(async move {
-            let (items, home, creds, link) = {
+            let (items, home, creds, link, route) = {
                 let state = self.state();
                 let served = state.ants.get(ant).ok_or_else(|| StoreError::NotKept(format!("{ant} is not served")))?;
                 let link = match &state.host {
-                    Host::Off => return Err(StoreError::NotKept("no host connection".into())),
-                    Host::Connecting => {
-                        return Err(StoreError::Unavailable("the host connection is not up yet".into()));
-                    }
-                    Host::Up(link) => link.clone(),
+                    Host::Off | Host::Connecting => None,
+                    Host::Up(link) => Some(link.clone()),
                 };
-                (served.items.clone(), served.home.clone(), served.creds.clone(), link)
+                (served.items.clone(), served.home.clone(), served.creds.clone(), link, state.route.clone())
             };
             let mut opened = items.lock().await;
-            if let Some(opened) = opened.as_ref().filter(|opened| Arc::ptr_eq(&opened.link, &link)) {
-                return Ok(opened.items.clone());
+            if let Some(current) = opened.as_ref() {
+                match current.sync().await {
+                    Err(StoreError::Log(error))
+                        if error.0.contains("stream incarnation changed") && current.pending().await? == 0 =>
+                    {
+                        *opened = None;
+                    }
+                    // The items remain readable, including when a conflict requires explicit reconciliation.
+                    Ok(()) | Err(StoreError::Log(_)) | Err(StoreError::Unavailable(_)) => return Ok(current.clone()),
+                    Err(error) => return Err(error),
+                }
             }
-            *opened = None;
-            let items = open(ant, &home, creds.as_deref(), &link)
+            if link.is_none() && !ants_sense::cache::cache_file(&home).exists() {
+                return Err(match self.state().host {
+                    Host::Connecting => StoreError::Unavailable("the host connection is not up yet".into()),
+                    _ => StoreError::NotKept("no host connection".into()),
+                });
+            }
+            let items = open(ant, &home, creds.as_deref(), link.as_deref(), route)
                 .await
                 .map_err(|e| StoreError::Unavailable(format!("opening the sense data of {ant}: {e:#}")))?;
-            *opened = Some(Opened { link, items: items.clone() });
+            *opened = Some(items.clone());
             Ok(items)
         })
     }
@@ -176,19 +252,160 @@ impl Stores for SenseStores {
 
 /// The items of `ant`, whose home is `home`, its sense id minted there first if it has none, signed with its
 /// credentials at `creds`, over `link`; its events under the earlier names its home lists are its own.
-async fn open(ant: &UserId, home: &Path, creds: Option<&Path>, link: &Link) -> Result<Arc<dyn Items>> {
-    let sense = identity::sense_id(home).with_context(|| format!("reading {}", identity::id_file(home).display()))?;
+async fn open(
+    ant: &UserId,
+    home: &Path,
+    creds: Option<&Path>,
+    link: Option<&Link>,
+    route: Route,
+) -> Result<Arc<dyn Items>> {
+    let sense = match identity::read_id(home)? {
+        Some(sense) => sense,
+        None if ants_sense::cache::cache_file(home).with_extension("pending").exists() => {
+            anyhow::bail!("sense identity missing while pending writes remain; cache left untouched");
+        }
+        None => identity::sense_id(home)?,
+    };
     let earlier =
         identity::earlier_names(home).with_context(|| format!("reading {}", identity::names_file(home).display()))?;
-    let log = link.log.get_or_try_init(|| JetStreamLog::open(&link.js)).await?.clone();
-    let signer = AntSigner::load(ant, creds, &link.accounts)?;
-    let revocations = DeviceRevocations::new(&link.js, link.js_domain.as_ref()).await?;
-    let verifier = AccountVerifier::new(link.accounts.clone(), revocations);
-    let log = AntLog::new(log, signer, verifier, sense, ant.clone(), link.machine.clone(), Some(home.to_owned()))
+    let cache = Cache::open(home)?;
+    let remote = match link {
+        Some(link) if link.js.client().connection_state() == async_nats::connection::State::Connected => {
+            match link.log.get_or_try_init(|| JetStreamLog::open(&link.js)).await {
+                Ok(log) => Some(log.incarnation().to_owned()),
+                Err(error) if is_offline(&LogError(format!("{error:#}"))) => None,
+                Err(error) => return Err(error),
+            }
+        }
+        _ => None,
+    };
+    let (context, incarnation) = match (link, remote) {
+        (Some(link), Some(incarnation)) => {
+            let context = Context { machine: link.machine.clone(), accounts: link.accounts.clone() };
+            (context, incarnation)
+        }
+        _ => {
+            let context = cache.context()?.context("no cached sense connection context")?;
+            let context: Context = serde_json::from_value(context)?;
+            let built = cache.built()?.context("sense cache has not been built from a log")?;
+            (context, built.incarnation)
+        }
+    };
+    let saved_context = serde_json::to_value(&context)?;
+    let signer = HostSigner {
+        signer: AntSigner::load(ant, creds, &context.accounts)?,
+        ant: ant.clone(),
+        accounts: context.accounts.clone(),
+    };
+    let log = HostLog { route: route.clone(), incarnation, accounts: context.accounts };
+    let verifier = HostVerifier(route);
+    let log = AntLog::new(log, signer, verifier, sense, ant.clone(), context.machine.clone(), Some(home.to_owned()))
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .with_earlier_names(earlier);
-    let store = Store::open(log, Cache::open(home)?).await?;
+    let store = Store::open(log, cache).await?.with_machine(context.machine);
+    store.cache().set_context(&saved_context)?;
     Ok(Arc::new(tokio::sync::Mutex::new(store)))
+}
+
+fn route(route: &Route) -> std::sync::MutexGuard<'_, Option<Arc<Link>>> {
+    route.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn connected(route_: &Route) -> Result<Arc<Link>, LogError> {
+    let link = route(route_).clone().ok_or_else(|| LogError("hub unavailable: no host connection".into()))?;
+    if link.js.client().connection_state() != async_nats::connection::State::Connected {
+        return Err(LogError("hub unavailable: host disconnected".into()));
+    }
+    Ok(link)
+}
+
+struct HostLog {
+    route: Route,
+    incarnation: String,
+    accounts: Vec<String>,
+}
+
+impl HostLog {
+    async fn log(&self) -> Result<JetStreamLog, LogError> {
+        let link = connected(&self.route)?;
+        if link.accounts != self.accounts {
+            return Err(LogError("host authentication accounts changed; cached sense writes retained".into()));
+        }
+        let log = link
+            .log
+            .get_or_try_init(|| JetStreamLog::open(&link.js))
+            .await
+            .map_err(|error| LogError(format!("{error:#}")))?;
+        if log.incarnation() != self.incarnation {
+            return Err(LogError("sense stream incarnation changed; cached sense writes retained".into()));
+        }
+        Ok(log.clone())
+    }
+}
+
+impl EventLog for HostLog {
+    async fn append(&self, sense: &SenseId, payload: Vec<u8>, expected_last: u64) -> Result<u64, AppendError> {
+        self.log().await?.append(sense, payload, expected_last).await
+    }
+
+    async fn read_after(&self, sense: &SenseId, after: u64, limit: usize) -> Result<Vec<Stored>, LogError> {
+        self.log().await?.read_after(sense, after, limit).await
+    }
+
+    async fn last_sequence(&self, sense: &SenseId) -> Result<u64, LogError> {
+        self.log().await?.last_sequence(sense).await
+    }
+
+    fn incarnation(&self) -> &str {
+        &self.incarnation
+    }
+}
+
+struct HostSigner {
+    signer: AntSigner,
+    ant: UserId,
+    accounts: Vec<String>,
+}
+
+impl Signer for HostSigner {
+    fn sign(&self, bytes: &[u8]) -> Result<Option<Signature>, String> {
+        let signature = self.signer.sign(bytes)?;
+        if self.accounts.is_empty() {
+            return Ok(signature);
+        }
+        let signature = signature.ok_or("no signing credentials")?;
+        let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default();
+        let user = ants_proto::verify_user_jwt(&signature.credentials, self.accounts.iter().map(String::as_str), now)
+            .map_err(|error| error.to_string())?;
+        if user.id != self.ant {
+            return Err(format!("credentials belong to {}, not {}", user.id, self.ant));
+        }
+        user.check_signature(bytes, &signature.signature).map_err(|error| error.to_string())?;
+        Ok(Some(signature))
+    }
+}
+
+struct HostVerifier(Route);
+
+impl Verifier for HostVerifier {
+    async fn verify(&self, event: &Event, stored_at: chrono::DateTime<chrono::Utc>) -> Result<(), VerifyError> {
+        let link = connected(&self.0).map_err(|error| VerifyError::Unavailable(error.to_string()))?;
+        AccountVerifier::new(link.accounts.clone(), HostRevocations(link)).verify(event, stored_at).await
+    }
+}
+
+struct HostRevocations(Arc<Link>);
+
+impl Revocations for HostRevocations {
+    async fn revoked_at(&self, key: &str) -> Result<Option<u64>, String> {
+        self.0
+            .revocations
+            .get_or_try_init(|| DeviceRevocations::new(&self.0.js, self.0.js_domain.as_ref()))
+            .await
+            .map_err(|error| format!("{error:#}"))?
+            .revoked_at(key)
+            .await
+    }
 }
 
 #[cfg(test)]

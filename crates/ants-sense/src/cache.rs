@@ -1,13 +1,14 @@
 //! An ant's items as its log left them, kept in SQLite in the ant's home ([`CACHE_FILE`] of [`SENSE_DIR`]), with
 //! FTS5 over their titles and bodies ([`Cache::search`]), so reading them reads no log. The cache is never the source
 //! of truth: it holds what was built from the log of one sense identity in one incarnation of its store, up to a
-//! position ([`Built`]), and is emptied and built again from the log ([`crate::store::Store::open`]) whenever it is
-//! missing, unreadable, of another identity or incarnation, or does not match the log.
+//! position ([`Built`]). An offline outbox also keeps accepted local writes durably until the log acknowledges them.
+//! Its pending projection is separate from the confirmed projection; a conflicting remote revision never discards
+//! a local write. A pending marker prevents replacing an unreadable cache that may hold unacknowledged writes.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
-use ants_proto::SenseId;
+use ants_proto::{Machine, SenseId};
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::Value;
@@ -19,7 +20,7 @@ use crate::log::{Checked, Position, SENSE_DIR};
 pub const CACHE_FILE: &str = "cache.db";
 
 /// The schema's version, in `PRAGMA user_version`: a cache of another is built again.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 /// SQLite's page cache, in KiB: the cache is small and read little.
 const PAGE_CACHE_KIB: i64 = 512;
 /// The words of a search looked for, at most.
@@ -43,6 +44,8 @@ CREATE TABLE changes (
     PRIMARY KEY (sequence, item)
 ) WITHOUT ROWID;
 CREATE INDEX changes_by_item ON changes (item, sequence);
+CREATE TABLE outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, operation TEXT NOT NULL UNIQUE, entry TEXT NOT NULL);
+CREATE TABLE confirmed_items (id TEXT PRIMARY KEY, item TEXT NOT NULL) WITHOUT ROWID;
 CREATE VIRTUAL TABLE items_text USING fts5 (
     title, body, content = '', contentless_delete = 1, tokenize = 'porter unicode61 remove_diacritics 2'
 );
@@ -80,7 +83,11 @@ pub struct Hit {
 /// An ant's items, as built from its log.
 pub struct Cache {
     db: Connection,
+    pending_file: Option<PathBuf>,
 }
+
+mod outbox;
+pub(crate) use outbox::Pending;
 
 /// Where the cache of the ant whose home is `home` is kept.
 pub fn cache_file(home: &Path) -> PathBuf {
@@ -88,13 +95,23 @@ pub fn cache_file(home: &Path) -> PathBuf {
 }
 
 impl Cache {
-    /// The cache kept in `home`, created empty when missing; one that cannot be read, is corrupt or of another schema
-    /// is replaced with an empty one.
+    /// The cache kept in `home`, created empty when missing. Unreadable caches are replaced only when no pending
+    /// marker protects local writes; otherwise opening fails and leaves the files untouched.
     pub fn open(home: &Path) -> Result<Self, CacheError> {
         let file = cache_file(home);
+        if !file.exists() && file.with_extension("pending").exists() {
+            return Err(CacheError::Unusable("cache missing while pending sense writes may remain".into()));
+        }
         std::fs::create_dir_all(file.parent().expect("a file in a directory"))?;
         match Connection::open(&file).map_err(CacheError::from).and_then(Self::ready) {
-            Ok(cache) => Ok(cache),
+            Ok(mut cache) => {
+                cache.pending_file = Some(file.with_extension("pending"));
+                Ok(cache)
+            }
+            Err(error) if file.with_extension("pending").exists() => Err(CacheError::Unusable(format!(
+                "{error}; pending sense writes may remain in {}; cache left untouched",
+                file.display()
+            ))),
             Err(_) => {
                 for suffix in ["", "-journal", "-wal", "-shm"] {
                     match std::fs::remove_file(format!("{}{suffix}", file.display())) {
@@ -102,7 +119,9 @@ impl Cache {
                         _ => {}
                     }
                 }
-                Self::ready(Connection::open(&file)?)
+                let mut cache = Self::ready(Connection::open(&file)?)?;
+                cache.pending_file = Some(file.with_extension("pending"));
+                Ok(cache)
             }
         }
     }
@@ -114,11 +133,18 @@ impl Cache {
 
     fn ready(db: Connection) -> Result<Self, CacheError> {
         db.pragma_update(None, "cache_size", -PAGE_CACHE_KIB)?;
-        db.pragma_update(None, "synchronous", "NORMAL")?;
+        db.pragma_update(None, "synchronous", "FULL")?;
         let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
         match version {
             0 => {
                 db.execute_batch(&format!("BEGIN; {SCHEMA} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"))?;
+            }
+            2 => {
+                db.execute_batch(
+                    "BEGIN; CREATE TABLE outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, operation TEXT NOT NULL UNIQUE, entry TEXT NOT NULL);
+                     CREATE TABLE confirmed_items (id TEXT PRIMARY KEY, item TEXT NOT NULL) WITHOUT ROWID;
+                     PRAGMA user_version = 3; COMMIT;",
+                )?;
             }
             SCHEMA_VERSION => {
                 let check: String = db.pragma_query_value(None, "quick_check", |row| row.get(0))?;
@@ -128,7 +154,7 @@ impl Cache {
             }
             other => return Err(CacheError::Unusable(format!("schema version {other}"))),
         }
-        Ok(Self { db })
+        Ok(Self { db, pending_file: None })
     }
 
     /// What the cache was built from; none when it was never built.
@@ -141,10 +167,28 @@ impl Cache {
         Ok(Some(Built { sense, incarnation, position }))
     }
 
+    /// Opaque connection context retained with the cache, for opening it before the hub is reachable.
+    pub fn context(&self) -> Result<Option<Value>, CacheError> {
+        meta(&self.db, "connection")?.map(|value| Ok(serde_json::from_str(&value)?)).transpose()
+    }
+
+    pub fn set_context(&self, value: &Value) -> Result<(), CacheError> {
+        self.db.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('connection', ?1)",
+            [serde_json::to_string(value)?],
+        )?;
+        Ok(())
+    }
+
     /// Empty the cache, to build it again from the start of the log of `sense` in the store's `incarnation`.
     pub fn reset(&mut self, sense: &SenseId, incarnation: &str) -> Result<(), CacheError> {
+        if !self.pending()?.is_empty() {
+            return Err(CacheError::Unusable("pending sense writes prevent replacing the cache's log".into()));
+        }
         let tx = self.db.transaction()?;
-        tx.execute_batch("DELETE FROM meta; DELETE FROM items; DELETE FROM changes; DELETE FROM items_text;")?;
+        tx.execute_batch(
+            "DELETE FROM meta WHERE key != 'connection'; DELETE FROM items; DELETE FROM changes; DELETE FROM items_text;",
+        )?;
         set_meta(&tx, "sense", Some(sense.as_str()))?;
         set_meta(&tx, "incarnation", Some(incarnation))?;
         tx.commit()?;
@@ -156,6 +200,10 @@ impl Cache {
     /// does a batch ([`ITEMS_EVENT`]) of which one change does not, or which changes an item twice.
     pub fn apply(&mut self, events: &[Checked], position: Option<&Position>) -> Result<(), CacheError> {
         let tx = self.db.transaction()?;
+        let pending = outbox::pending(&tx)?;
+        if !pending.is_empty() {
+            outbox::restore(&tx)?;
+        }
         for checked in events {
             let changes = match checked.event.kind.as_str() {
                 ITEM_EVENT => serde_json::from_value::<Change>(checked.event.data.clone()).map(|change| vec![change]),
@@ -163,16 +211,37 @@ impl Cache {
                 _ => continue,
             };
             let Ok(changes) = changes else { continue };
+            let at = checked
+                .event
+                .data
+                .get(outbox::AT)
+                .and_then(Value::as_str)
+                .and_then(|at| at.parse::<DateTime<Utc>>().ok())
+                .unwrap_or(checked.event.at);
             let revisions = changes.into_iter().map(|change| Revision {
                 sequence: checked.stored.sequence,
-                at: checked.event.at,
+                at,
                 machine: checked.event.machine.clone(),
                 change,
             });
             apply(&tx, revisions.collect())?;
+            if let Some(operation) = checked.event.data.get(outbox::OPERATION).and_then(Value::as_str)
+                && let Some(entry) = pending.iter().find(|entry| entry.operation == operation)
+            {
+                if entry.kind != checked.event.kind || entry.data != checked.event.data {
+                    return Err(CacheError::Unusable(format!(
+                        "remote event differs from pending sense write {operation}; local write retained"
+                    )));
+                }
+                tx.execute("DELETE FROM outbox WHERE operation = ?1", [operation])?;
+            }
+        }
+        if !pending.is_empty() {
+            outbox::overlay(&tx)?;
         }
         set_meta(&tx, "position", position.map(serde_json::to_string).transpose()?.as_deref())?;
         tx.commit()?;
+        self.clear_pending_marker()?;
         Ok(())
     }
 
@@ -226,11 +295,17 @@ impl Cache {
         .collect()
     }
 
-    /// The changes of item `id` kept, in log order.
+    /// The changes of item `id`, confirmed first and pending after them with sequence 0.
     pub fn history(&self, id: &ItemId) -> Result<Vec<Revision>, CacheError> {
         let mut query = self.db.prepare("SELECT entry FROM changes WHERE item = ?1 ORDER BY sequence")?;
         let rows = query.query_map([id.as_str()], |row| row.get::<_, String>(0))?;
-        rows.map(|revision| Ok(serde_json::from_str(&revision?)?)).collect()
+        let mut revisions: Vec<Revision> =
+            rows.map(|revision| Ok(serde_json::from_str(&revision?)?)).collect::<Result<_, CacheError>>()?;
+        let applied = meta(&self.db, "pending_applied")?.and_then(|value| value.parse::<usize>().ok());
+        for pending in self.pending()?.into_iter().take(applied.unwrap_or(usize::MAX)) {
+            revisions.extend(pending.revisions()?.into_iter().filter(|revision| &revision.change.id == id));
+        }
+        Ok(revisions)
     }
 
     /// Item `id` as it was at time `at` ([`state_at`]); none when it did not exist yet.
@@ -284,6 +359,15 @@ fn apply(tx: &Transaction<'_>, revisions: Vec<Revision>) -> Result<(), CacheErro
 }
 
 fn put(tx: &Transaction<'_>, item: &Item, revision: &Revision) -> Result<(), CacheError> {
+    put_item(tx, item)?;
+    tx.execute(
+        "INSERT INTO changes (sequence, item, entry) VALUES (?1, ?2, ?3)",
+        params![sequence_of(revision.sequence)?, item.id.as_str(), serde_json::to_string(revision)?],
+    )?;
+    Ok(())
+}
+
+fn put_item(tx: &Transaction<'_>, item: &Item) -> Result<(), CacheError> {
     let updated_at = item.updated.at.to_rfc3339_opts(SecondsFormat::Micros, true);
     let rowid: i64 = tx.query_row(
         "INSERT INTO items (id, kind, revision, updated_at, item) VALUES (?1, ?2, ?3, ?4, ?5)
@@ -296,10 +380,6 @@ fn put(tx: &Transaction<'_>, item: &Item, revision: &Revision) -> Result<(), Cac
     tx.execute(
         "INSERT INTO items_text (rowid, title, body) VALUES (?1, ?2, ?3)",
         params![rowid, item.text(TITLE), item.text(BODY)],
-    )?;
-    tx.execute(
-        "INSERT INTO changes (sequence, item, entry) VALUES (?1, ?2, ?3)",
-        params![sequence_of(revision.sequence)?, item.id.as_str(), serde_json::to_string(revision)?],
     )?;
     Ok(())
 }

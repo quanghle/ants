@@ -7,6 +7,8 @@ use serde_json::{Value, json};
 use super::*;
 use crate::log::{AccountVerifier, MemoryLog, NoRevocations, Stored, Unsigned};
 
+mod offline;
+
 /// A log counting the messages read from it.
 struct Counted<'a>(&'a MemoryLog, AtomicUsize);
 

@@ -73,7 +73,7 @@ impl Ranked {
         if memory.trust == super::Trust::Untrusted {
             flags.push_str(", untrusted");
         }
-        format!(
+        let mut line = format!(
             "- {} ({}, {}, importance {}{flags}): {}\n  {}",
             self.found.id(),
             memory.kind,
@@ -81,7 +81,9 @@ impl Ranked {
             memory.importance,
             memory.title,
             snippet(&memory.body, query)
-        )
+        );
+        warnings(&mut line, memory);
+        line
     }
 
     fn json(&self, query: Option<&str>) -> Value {
@@ -97,6 +99,7 @@ impl Ranked {
             "trust": memory.trust,
             "core": memory.core,
             "score": self.score,
+            "citation_warnings": memory.citation_warnings,
         })
     }
 }
@@ -232,6 +235,9 @@ async fn recall_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
     let request = Request::parse(&call.arguments)?;
     let items = sense.items(&call.context.ant).await.map_err(unavailable)?;
     let items = items.as_ref();
+    if let Some(workdir) = sense.workdir(&call.context) {
+        super::recheck_citations(items, &workdir).await.map_err(unavailable)?;
+    }
     if let Some(id) = &request.id {
         return read(items, id, request.history).await;
     }
@@ -403,6 +409,7 @@ fn full(found: &MemoryItem) -> String {
         let citations: Vec<_> = memory.citations.iter().map(ToString::to_string).collect();
         let _ = write!(text, "\nCitations: {}.", citations.join(", "));
     }
+    warnings(&mut text, memory);
     let writer = &memory.writer;
     let model = writer.model.as_ref().map_or_else(String::new, |model| format!(", model {model}"));
     let repo = writer.repo.as_ref().map_or_else(String::new, |repo| format!(", in repository {repo}"));
@@ -428,6 +435,14 @@ fn full(found: &MemoryItem) -> String {
         let _ = write!(text, "\nVotes: {} helpful, {} stale, {} wrong.", votes.helpful, votes.stale, votes.wrong);
     }
     text
+}
+
+fn warnings(text: &mut String, memory: &Memory) {
+    for warning in &memory.citation_warnings {
+        if let Some(citation) = memory.citations.get(warning.citation) {
+            let _ = write!(text, "\nWarning: {citation}: {}.", warning.reason);
+        }
+    }
 }
 
 fn full_json(found: &MemoryItem) -> Value {

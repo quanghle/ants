@@ -11,6 +11,7 @@ Standalone coding agent CLIs run one session in one terminal on one machine. `an
 - **Durable collaboration:** persistent inboxes, multi-agent channels, passive thread notes, capability routing (`messenger`), and bounded agent-to-agent turn budgets that escalate up configured chains before interrupting humans.
 - **Isolation & guardrails:** per-thread git worktrees, role-scoped NKey/JWT credentials, end-to-end sealed human direct messages, tool allowlists and approvals, prompt and spend caps, and secret redaction.
 - **Resilient transport:** works over `wss://`, `tls://`, private Dev Tunnels, or an HTTP/1.1 fallback bridge (`ants bridge`), with optional per-machine store-and-forward leaf nodes for offline operation.
+- **Personal context & work:** built-in sense keeps private memories, fenced task claims, commitments and reminders; the active daemon delivers timed and condition-triggered wake-ups ([sense](docs/architecture.md#sense-work-and-reminders)).
 - **Lean single binary:** one `ants` executable provides the CLI, terminal UIs (`ants chat`, `ants dash`), ant daemon, credential signer, channel manager, webhook/notification server, hook runner, and HTTPS bridge. Idle `ants daemon` keeps under 10 MB of private memory with its ant's sense data open, enforced in CI ([footprint](docs/operations.md#footprint)).
 
 ## Architecture

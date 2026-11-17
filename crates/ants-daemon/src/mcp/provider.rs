@@ -44,6 +44,20 @@ pub(super) struct Served {
 }
 
 impl Mcp {
+    pub(crate) fn workdirs(&self) -> std::sync::Arc<dyn ants_sense::Workdirs> {
+        struct Directories(std::sync::Weak<Hub>);
+        impl ants_sense::Workdirs for Directories {
+            fn workdir(&self, context: &CallContext) -> Option<std::path::PathBuf> {
+                let hub = self.0.upgrade()?;
+                if hub.ant != context.ant {
+                    return None;
+                }
+                hub.sessions.locked().dirs.get(&context.thread).cloned()
+            }
+        }
+        std::sync::Arc::new(Directories(std::sync::Arc::downgrade(&self.hub)))
+    }
+
     /// Take `callers` for who the calls of the provider's tools and its brief requests are for; until then those calls
     /// are refused, the identity record taken as one that cannot be read.
     pub fn with_callers(&self, callers: Callers) {

@@ -1,7 +1,7 @@
 //! The brief (requirements ants-x39hk.8.1 and ants-x39hk.8.2): what an ant reads first in each session, and again on
 //! demand with `sense_brief`. Its sections come in a fixed order ([`sections`]): a warning when the ant's log is
-//! broken, the identity, the thread's resume register, the unacknowledged handoffs, the core and top memories, and the
-//! core loop of tools.
+//! broken, the identity, the thread's resume register, the unacknowledged handoffs, open commitments, fired and upcoming
+//! reminders, claimed and ready tasks, the core and top memories, and the core loop of tools.
 //!
 //! The brief stays within its byte budget ([`fit`]): memories are shortened to their titles first, then the longest
 //! section is cut, again and again, each cut ending with a line naming the tool call that shows the rest.
@@ -9,7 +9,8 @@
 use std::fmt::Write as _;
 
 use ants_proto::provider::{BRIEF_BUDGET, BoxFuture, CallContext, ToolCall};
-use serde_json::json;
+use chrono::{DateTime, Utc};
+use serde_json::{Value, json};
 
 use crate::identity::{self, Card};
 use crate::items::ItemId;
@@ -17,7 +18,7 @@ use crate::log::Break;
 use crate::memory::{self, MemoryItem, Ranked, Scope, Status, Trust, framed, participants, snippet, thread_repo};
 use crate::store::{Items, StoreError};
 use crate::thread::{self, Handoff, Register};
-use crate::{Answer, Sense};
+use crate::{Answer, Sense, promise, remind, task};
 
 /// The most unacknowledged handoffs a brief shows.
 pub const MAX_HANDOFFS: usize = 5;
@@ -34,6 +35,9 @@ const REASON_CHARS: usize = 160;
 /// The core loop of tools: each tool and when to use it.
 const CORE_LOOP: &[(&str, &str)] = &[
     ("checkpoint", "after each step, replace this thread's resume register from the revision shown"),
+    ("task", "list ready tasks; claim a task, then heartbeat, close or release using the claim token"),
+    ("promise", "record commitments with promisees and due times; keep, break, release or renegotiate commitments"),
+    ("remind", "set, acknowledge, postpone or drop time and condition reminders"),
     ("recall", "before deciding, search the memories; with an id, read one in full"),
     ("remember", "keep a fact, lesson, decision, preference or gotcha worth knowing later"),
     ("vote", "say whether a recalled memory helped, is stale or is wrong"),
@@ -165,9 +169,7 @@ pub async fn compose(
     Ok(text)
 }
 
-/// The sections of the brief, in order. The commitments (overdue first), the reminders (fired and upcoming), the
-/// claimed and ready tasks and the relationship notes of the thread's participants come after the handoffs once sense
-/// keeps them, and the skills index after the memories.
+/// The sections of the brief, in order. Relationship notes and the skills index follow once sense keeps them.
 async fn sections(items: &dyn Items, context: &CallContext, card: Option<&Card>) -> Result<Vec<Section>, StoreError> {
     let mut sections = Vec::new();
     sections.extend(items.broken().await.as_ref().map(warning));
@@ -177,6 +179,9 @@ async fn sections(items: &dyn Items, context: &CallContext, card: Option<&Card>)
     let more = handoffs.len() > MAX_HANDOFFS;
     handoffs.truncate(MAX_HANDOFFS);
     sections.extend(handoffs_section(&handoffs, more));
+    sections.extend(commitments_section(items, context.at).await?);
+    sections.extend(reminders_sections(items, context.at).await?);
+    sections.extend(tasks_sections(items, context).await?);
     let episodes: Vec<_> = handoffs.into_iter().filter_map(|handoff| handoff.episode).collect();
     sections.extend(memories_section(items, context, &episodes).await?);
     sections.push(core_loop());
@@ -245,6 +250,109 @@ fn handoffs_section(handoffs: &[Handoff], more: bool) -> Option<Section> {
     Some(section)
 }
 
+async fn commitments_section(items: &dyn Items, now: DateTime<Utc>) -> Result<Option<Section>, StoreError> {
+    let promises = promise::open(items, now).await?;
+    let lines = promises
+        .iter()
+        .map(|item| {
+            let overdue =
+                if item.text("due").parse::<DateTime<Utc>>().is_ok_and(|due| due <= now) { ", overdue" } else { "" };
+            format!(
+                "- {} (revision {}, open{overdue}): {} — to {}, due {}; source thread {}",
+                item.id,
+                item.revision,
+                item.text("title"),
+                item.text("promisee"),
+                item.text("due"),
+                item.text("source_thread")
+            )
+        })
+        .collect();
+    Ok(work_section("## Open commitments", lines, "sense_promise action=list"))
+}
+
+async fn reminders_sections(items: &dyn Items, now: DateTime<Utc>) -> Result<Vec<Section>, StoreError> {
+    let (mut fired, mut upcoming) = (Vec::new(), Vec::new());
+    for item in remind::active(items, now).await? {
+        let is_fired = item.values.get("occurrence_firings").and_then(Value::as_u64).unwrap_or(0) > 0;
+        let mut line = format!(
+            "- {} (revision {}, {}): {}",
+            item.id,
+            item.revision,
+            if is_fired { "fired" } else { "upcoming" },
+            item.text("title")
+        );
+        if is_fired {
+            let pending = item.values.get("pending");
+            let firing = pending.or_else(|| item.values.get("delivered"));
+            if let Some(firing) = firing {
+                let _ = write!(
+                    line,
+                    "; firing {} at {}",
+                    firing["id"].as_str().unwrap_or_default(),
+                    firing["at"].as_str().unwrap_or_default()
+                );
+            }
+            line.push_str(if pending.is_some() { "; delivery pending" } else { "; awaiting acknowledgement" });
+        }
+        if let Some(next) = item.values.get("next_due").and_then(Value::as_str) {
+            let _ = write!(line, "; next {next}");
+        }
+        if !is_fired && let Some(trigger) = item.values.get("trigger") {
+            let _ = write!(line, "; trigger {trigger}");
+        }
+        let _ = write!(line, "; thread {}", item.text("thread"));
+        if let Some(promise) = item.values.get("promise").and_then(Value::as_str) {
+            let _ = write!(line, "; commitment {promise}");
+        }
+        if is_fired {
+            fired.push(line);
+        } else {
+            upcoming.push(line);
+        }
+    }
+    Ok([
+        work_section("## Fired reminders", fired, "sense_remind action=list"),
+        work_section("## Upcoming reminders", upcoming, "sense_remind action=list"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect())
+}
+
+async fn tasks_sections(items: &dyn Items, context: &CallContext) -> Result<Vec<Section>, StoreError> {
+    let mut claimed = Vec::new();
+    for found in task::claimed(items, &context.thread, usize::MAX).await? {
+        let mut line = task_line(&found);
+        if found.task.lease.as_ref().is_some_and(|lease| lease.expires_at <= context.at) {
+            let _ = write!(line, "; lease expired; claim again: sense_task action=claim id={}", found.id());
+        } else if let Some(token) = task::fencing_token(items, &found).await? {
+            let _ = write!(line, "; claim token {token}");
+        }
+        claimed.push(line);
+    }
+    let ready = task::ready(items, usize::MAX).await?.iter().map(task_line).collect();
+    Ok([
+        work_section("## Claimed tasks (this thread)", claimed, "sense_task action=list limit=100"),
+        work_section("## Ready tasks", ready, "sense_task action=ready limit=100"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect())
+}
+
+fn task_line(found: &task::TaskItem) -> String {
+    let mut line = format!("- {}", found.text());
+    if let Some(reference) = &found.task.external_ref {
+        let _ = write!(line, "; external {reference}");
+    }
+    line
+}
+
+fn work_section(heading: &str, lines: Vec<String>, more: &str) -> Option<Section> {
+    (!lines.is_empty()).then(|| Section::cut_with(heading, lines.join("\n"), more))
+}
+
 /// The core memories, then the top memories of the thread's scopes but the `episodes` of the handoffs shown.
 async fn memories_section(
     items: &dyn Items,
@@ -295,14 +403,20 @@ fn head(found: &MemoryItem) -> String {
     if memory.trust == Trust::Untrusted {
         flags.push_str(", untrusted");
     }
-    format!(
+    let mut head = format!(
         "- {} ({}, {}, importance {}{flags}): {}",
         found.id(),
         memory.kind,
         memory.scope,
         memory.importance,
         memory.title
-    )
+    );
+    for warning in &memory.citation_warnings {
+        if let Some(citation) = memory.citations.get(warning.citation) {
+            let _ = write!(head, "\n  Warning: {citation}: {}.", warning.reason);
+        }
+    }
+    head
 }
 
 fn core_loop() -> Section {
@@ -316,6 +430,9 @@ pub fn brief<'a>(sense: &'a Sense, call: &'a ToolCall) -> BoxFuture<'a, Answer> 
         let context = &call.context;
         let composed = async {
             let items = sense.items(&context.ant).await?;
+            if let Some(workdir) = sense.workdir(context) {
+                memory::recheck_citations(&*items, &workdir).await?;
+            }
             let card = identity::card(&*items).await?;
             compose(&*items, context, card.as_ref(), BRIEF_BUDGET as usize).await
         };

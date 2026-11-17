@@ -152,7 +152,29 @@ Sense asks nothing of humans: no approvals, gates, review queues or notification
 
 Sense's data are items: memories, the identity card, checkpoints and the like. Each item has an id (a ULID the writer mints), a kind, a revision (1 on creation, one more on each change) and JSON values, of which `title` and `body` are searched. Each change is an event of kind `item` in the ant's sense log ([Stores and subjects](#stores-and-subjects)), with data `{id, kind, revision, by, before, after}`: the changed values as they were (`before`, absent on creation, null for a value not set) and as they became (`after`, null for a value removed). An item's state at a past time is rebuilt from its kept changes: those before the first change stamped after that time, in log order, so a writer's clock stepping back never mixes later changes in. Changes of several items made at once are one event of kind `items`, with data `{changes: [...]}`, each of another item: all of them apply or, when one does not follow its item's last change, none does. A change given an expected revision is refused when the item is at another, with the current item. A change is decided on the items caught up with the log; when another writer appended first, the log refuses the append (expected last sequence) and the change is decided again on what that writer appended. An event whose revision does not follow the item's last changes nothing, for every reader alike.
 
-Each ant's items are cached in SQLite in the ant's home (`.sense/cache.db`; bundled SQLite with FTS5, a 512 KiB page cache, no memory mapping): the items, their changes, an FTS5 index over titles and bodies (BM25, a title's words weighing more, Porter stemming; search text is taken as words only, never as FTS5 syntax), and what the cache was built from: the sense id, the stream's incarnation, and the sequence, hash, verified count and first break of the last message read. The cache is never the source of truth: a change is appended to the log first, then applied to the cache with that position in one transaction. On opening, a cache that is missing, unreadable, corrupt, of another schema, sense identity or incarnation, or whose last message the log no longer holds unchanged is emptied and built again from the log, a batch at a time; otherwise only the messages past it are read and verified. Sense reaches an ant's items through the stores the daemon hands it (`Sense::with_stores`). The daemon opens an ant's items on their first use, never at start: it reads the ant's sense id from its home, minting it first ([Sense identity](#sense-identity)), and opens the log over the machine's host connection and the cache in the home, then keeps them open while the process runs, opening them again over a new host connection. Without a host connection (no host credentials, or ones that fail) sense keeps no data: its events are acked with no effect, its briefs are empty and `sense_brief` answers `unavailable`. While the host connection is not up yet, an ant's items are unavailable: its events wait in its queue and its briefs fail.
+Each ant's items are cached in SQLite in the ant's home (`.sense/cache.db`; bundled SQLite with FTS5, a 512 KiB page
+cache, no memory mapping): the items, their changes, an FTS5 index over titles and bodies (BM25, a title's words weighing
+more, Porter stemming; search text is taken as words only, never as FTS5 syntax), and what the cache was built from:
+the sense id, the stream's incarnation, and the sequence, hash, verified count and first break of the last message read.
+Normally a change is appended to the log first, then applied to the cache with that position in one transaction.
+During connectivity failures, a durable ordered outbox accepts local changes and atomic batches, overlaying them on
+the confirmed projection so reads and briefs remain available. Reconnect appends those writes in order; an operation
+id prevents an uncertain acknowledgment from appending a change twice. Remote revision conflicts remain visible and
+retain the affected write and later writes rather than overwriting either side. Pending history entries have sequence
+0, never fencing tokens; task lease mutations and condition-check reservations require a confirmed log write.
+
+On opening, a cache that is missing, unreadable, corrupt, of an unsupported schema, sense identity or incarnation, or
+whose last message the log no longer holds unchanged is built again from the log, a batch at a time; otherwise only
+the messages past it are read and verified. A pending-write marker prevents replacing a cache that may hold
+unacknowledged writes, and changing the identity or incarnation while writes remain is refused.
+Sense reaches an ant's items through the stores the daemon hands it (`Sense::with_stores`). The daemon normally opens
+an ant's items on first use: it reads the ant's sense id from the home, minting it first ([Sense identity](#sense-identity)),
+and opens the log over the machine's shared host connection and the cache in the home. Existing stores follow a new
+host connection without losing cached data or queued writes. A retry worker per host connection drains pending writes
+after reconnect, also reopening pending caches after process restart without waiting for a tool call.
+An existing cache remains available before the host connects, including after process restart. Without a host connection
+and without an existing cache, sense keeps no data: events are acked with no effect, briefs are empty and `sense_brief`
+answers `unavailable`. During the initial connection without a cache, events wait in the queue and briefs fail.
 
 ### Sense identity
 
@@ -181,6 +203,7 @@ A memory is an item of kind `memory` with values:
 - `title` (at most 200 characters) and `body` (at most 4 KiB), both passed through the sanitizer;
 - `importance`: 1 to 5;
 - `citations`: `{path, start?, end?, remote?, hash?}`, the hash being the SHA-256 of the cited lines in hex;
+- `citation_warnings`: the citation's zero-based index and the verification problem, such as changed lines, a missing file or an unsafe path;
 - `writer`: the call's context (`{ant, identity, thread, origin, harness, model?, machine, repo?, at}`), as ants gives it;
 - `trust`: `self` or `untrusted`;
 - `core`;
@@ -188,7 +211,7 @@ A memory is an item of kind `memory` with values:
 - `digest`: the SHA-256 of the body's words in lower case, one space apart;
 - `votes`: `{helpful?, stale?, wrong?, confirmed?}`, the counts of the threads' votes and the time of the last helpful one (`sense_vote`).
 
-`sense_remember` takes `kind`, `title` and `body`, and optionally `scope` (`self` unless it supersedes a memory, whose scope it then takes), `importance` (3), `citations` (`path`, `path:line`, `path:start-end` or objects; a repository-scoped memory's citations take its remote when they name none; the hash is stored as given, not checked yet), `core`, `supersedes`, `quotes` (`recalled` or `external`) and `force`. Arguments it does not know, such as a writer or a trust, are ignored. In order, it refuses:
+`sense_remember` takes `kind`, `title` and `body`, and optionally `scope` (`self` unless it supersedes a memory, whose scope it then takes), `importance` (3), `citations` (`path`, `path:line`, `path:start-end` or objects), `core`, `supersedes`, `quotes` (`recalled` or `external`) and `force`. Available citations in the calling session's repository acquire the actual remote, line range and SHA-256 of the exact UTF-8 bytes, including line endings. A supplied hash remains the baseline rather than being replaced; a mismatch records a warning and `needs_review`. Paths stay relative to the repository, with traversal and out-of-repository symlinks refused. A citation in another repository is left unverified; repository-scoped citations without an explicit remote inherit that scope's remote. Recall, briefs and daily daemon maintenance recheck local citations; changed or missing content marks the memory `needs_review` with the reason, without replacing the baseline or automatically restoring `active`. Arguments it does not know, such as a writer or a trust, are ignored. In order, it refuses:
 
 - invalid arguments (`invalid`) and a title or body over its limit (`too_long`);
 - a title or body holding a whole block of recalled memories, `<recalled-memories>` then `</recalled-memories>` in any case, as recall shows them (`recalled_block`);
@@ -217,6 +240,38 @@ Each thread has one resume register: an item of kind `checkpoint` with values `g
 
 Every text passes the sanitizer: secrets are redacted (the answer counts them), hidden characters stripped, and a text over its limit refused with `too_long`: 2,000 characters for the goal, the step, the next action and each entry of a list, 500 for the branch and each file, 50 entries a list. The `writer` value (identity, ant, thread, origin, harness, model, machine, repository and time) and the change's `by` (the thread) come from the call's context, never from its text. Answers are brief text, or JSON with the call's `json` argument; refusals carry a stable `error` code (`revision_required`, `conflict`, `not_found`, `empty`, `too_long`, `invalid`, `unavailable`).
 
+### Sense work and reminders
+
+Sense keeps an ant's personal backlog, not a team queue. `sense_task` manages only items of kind `task`: `open`, `in_progress`, `blocked`, `deferred` or `closed`, priority 0 through 4, typed dependencies (`blocks`, `parent-child`, `related`, `discovered-from`), and an optional external tracker reference. Ready work consists only of unblocked open tasks, priority first and then oldest first. Memories, commitments, reminders, handoffs, registers and identity records never enter the ready list.
+
+A task claim belongs to the calling thread for five minutes. Its fencing token is the claim event's stream sequence; heartbeat, release and close require that token. Another thread can reclaim only after the lease has been expired for more than ten minutes. Expected revisions prevent stale edits from replacing current state.
+
+All three work tools use `action`. `sense_task` defaults to `ready`; `list` shows every task and `show` reads one by `id`. `create` accepts `title`, optional `body`, `priority` (2 by default), `status` (`open`, `blocked` or `deferred`), `dependencies` and `external_ref`. `update` requires the revision last read and replaces only the supplied fields; `dependencies` replaces the whole list, with `{"kind":"blocks","id":"<prerequisite>"}` naming a prerequisite and `parent-child` naming the parent. `claim` accepts `id` and an optional expected revision. Its answer returns `task` and a top-level `token`; `heartbeat`, `release` and `close` take that token, as does updating a claimed task. A repeated live same-thread claim returns the same token without renewing; heartbeat renews it. Expired claims stay `in_progress` until reclaimed and never enter `ready` automatically. Fenced mutations require confirmation from the log and are refused offline rather than queued.
+
+`sense_promise` records a commitment's terms, promisee, due time and source thread. Commitments stay open until kept, broken, released or renegotiated; renegotiation retains the earlier terms in history. Open commitments appear in every brief, overdue first, and a commitment's due time raises a reminder.
+
+For example, `{"action":"create","title":"Ship parser","promisee":"alice","due":"2026-12-01T12:00:00Z"}` creates a commitment with an automatic reminder. Empty arguments or `{"action":"list"}` list open commitments; `show`, `keep`, `break` and `release` take `id`. `renegotiate` takes `id`, changed terms and an optional `reason`, inherits omitted terms, and returns a replacement commitment. A positive `revision` supplies an optional compare-and-set guard; a conflict returns the current item.
+
+`sense_remind` records a time or condition trigger and supports acknowledgment, postponement, renewal and dropping. Time triggers accept an absolute time, a relative delay, or a recurring daily or weekly UTC time. Each firing has an id made from the reminder id and firing number. Delivery retries and daemon takeover reuse the same id; postponement or a later firing gets a new one. An unacknowledged firing refires at most three times, an hour apart.
+
+For example, `{"action":"create","title":"Check CI","trigger":{"kind":"after","seconds":600}}` creates a relative reminder. Other triggers are `{"kind":"at","at":"2026-12-01T12:00:00Z"}`, `{"kind":"daily","time":"09:30","timezone":"UTC"}`, `{"kind":"weekly","weekday":"mon","time":"09:30","timezone":"UTC"}`, or `{"kind":"condition","condition":{...}}` using a condition below. Empty arguments or `action=list` list reminders; `show`, `ack`, `drop` and `renew` take `id`. `postpone` takes `id` and exactly one of `after_seconds` or a future RFC 3339 `at`. Optional positive `revision` guards mutations. Acknowledging a recurring reminder advances to the next occurrence. Weekdays are `mon` through `sun`; delays are 1 through 31,536,000 seconds.
+
+The active daemon sleeps until the next due trigger or a sense tool changes the schedule. A standby starts the scheduler only after taking the ant over and reads the persisted schedule and any pending firing. A firing is stored before requesting a wake and marked delivered afterward, so interruption retries the same deduplicated wake. Wake messages carry the reminder's text and the reason it fired, on the source thread or a new thread when no source thread remains.
+
+Condition triggers use the following objects:
+
+| `kind` | Fields | Fires when |
+|---|---|---|
+| `gh_pr` | `repo`, `number`, `state` (`merged`, `closed`, `reviewed`) | The pull request reaches that state, checked through `gh`. |
+| `gh_workflow` | `repo`, `run` | The workflow run finishes, checked through `gh`. |
+| `bd` | `id`, `state` (`closed`, `ready`) | The tracker issue closes or becomes ready, checked through `bd`. |
+| `git` | `commit`, `reference` | The commit is an ancestor of the local git reference. |
+| `file` | `path`, `event` (`appeared`, `changed`) | A workdir-relative file appears or its fingerprint changes. |
+| `command` | `command` | The allowed command exits successfully. |
+| `sense` | `event` (`commitment_overdue`, `lease_expired`), optional `id` | A matching commitment becomes overdue or task lease expires. |
+
+Checks run no more than once a minute, or once every five minutes for `gh` and `bd`; ten unchanged checks increase the interval to thirty minutes. An ant holds at most fifty active triggers, including automatic promise reminders. Ordinary reminders expire after thirty days unless renewed; automatic commitment reminders remain valid until thirty days after the later of creation or renewal and the commitment's due time, so a distant due date cannot expire before firing. Command conditions run only under the ant's tool allow rules, in its workdir and environment, with a thirty-second timeout; stdout and stderr are discarded. Webhook threads cannot create or change command triggers. Sense opens no network connection: outside checks use only `gh`, `bd` and `git`.
+
 ### Sense brief
 
 Sense's brief ([Briefs](#briefs)) holds, in order, the sections it has something for:
@@ -225,14 +280,18 @@ Sense's brief ([Briefs](#briefs)) holds, in order, the sections it has something
 2. `## Identity`: the card's name, sense id and birth, earlier names, the ant it was cloned from, its harnesses, models and machines, and when it was retired; after a return (`returned_at`), a line `Returned <date>: added again under a new ants identity, …`, shown once: once a brief shows it, sense clears `returned_at`;
 3. `## This thread`: the thread's resume register, its revision first, or how to start one;
 4. `## Unacknowledged handoffs`: the last 5 of any thread, newest first, each with its episode memory's id, ending with `… more: sense_checkpoint without arguments` when there are more;
-5. `## Memories`: the live core memories, title and body, then the 10 best of the other live memories of `self`, the repository the thread's session works in (`repo:<remote>`) and the human or ant who started the thread, as `sense_recall` ranks them without a query, title and snippet, leaving out the episodes of the handoffs above. They come inside the block of recalled memories, after its note, as recall shows them;
-6. `## Core loop`: each sense tool and when to use it.
-
-The commitments (overdue first), reminders (fired and upcoming), claimed and ready tasks and the relationship notes of the thread's participants will come between the handoffs and the memories, and the skills index between the memories and the core loop, once sense keeps them.
+5. `## Open commitments`: all open commitments across the ant's threads, overdue first;
+6. `## Fired reminders`, then `## Upcoming reminders`: pending or unacknowledged firings before future triggers;
+7. `## Claimed tasks (this thread)`, then `## Ready tasks`: current-thread claims with fencing tokens and expiry guidance, followed by unblocked open tasks in priority and age order;
+8. `## Memories`: the live core memories, title and body, then the 10 best of the other live memories of `self`, the repository the thread's session works in (`repo:<remote>`) and the human or ant who started the thread, as `sense_recall` ranks them without a query, title and snippet, leaving out the episodes of the handoffs above. They come inside the block of recalled memories, after its note, as recall shows them;
+9. `## Core loop`: each sense tool and when to use it.
 
 The brief stays within the request's `budget`. Over it, memories are shortened to their titles first; then the longest section other than the warning, the identity and the core loop is cut to the next longest, or by what is over when that is enough, again and again, at a line break in the second half of what is kept or else on a character boundary. Each shortening or cut ends its section with a line naming the tool call that shows the rest:
 
 - `… more: sense_checkpoint without arguments`, for the register and the handoffs;
+- `… more: sense_promise action=list`, for commitments;
+- `… more: sense_remind action=list`, for reminders;
+- `… more: sense_task action=list limit=100` or `sense_task action=ready limit=100`, for claimed or ready tasks;
 - `… more: sense_recall, or sense_recall id=<id> for one in full`.
 
 A brief whose uncut sections alone exceed the budget is cut on a character boundary. `sense_brief` answers the same brief again on demand, within 8000 bytes; as JSON, `{brief}`.
@@ -257,7 +316,7 @@ The provider answers with:
 - `provider`: `{name, version}`;
 - `capabilities`: what it implements.
 
-Without a common version, the provider answers with error `-32002`. Both sides then use only the capabilities both declared. ants declares every capability, `wake` included. Sense declares `tools`, `context` and `events`.
+Without a common version, the provider answers with error `-32002`. Both sides then use only the capabilities both declared. ants declares every capability, `wake` included. Sense declares `tools`, `context`, `events` and `wake`.
 
 | Method | Direction | Capability | Params | Result |
 |---|---|---|---|---|
@@ -277,7 +336,7 @@ Tools:
 - ants serves each tool as `<provider>_<tool>` (`sense_recall`), adding a boolean `json` argument to its schema. `json: true` sets the call's `format` to `json`; otherwise the answer comes as brief text.
 - The ants MCP server asks the provider for its tools at each `tools/list` (5 s bound), so a session listing them again sees a provider's tools come and go. A failing list leaves the provider's tools out and ants' own in place. A tool whose name is invalid, whose schema is not an object, or whose served name is one of ants' own tools is left out, logged once.
 - A call answers within 30 s. One that does not reach the tool (the provider down or the capability not agreed), times out, or has no context yet (no message on the thread handled since the daemon started, or the ant's identity record absent or unreadable) fails with an `[ants]` line saying why. A refusal (`is_error`) fails with the provider's text; a `json` answer comes as structured content beside its JSON text.
-- Sense serves at most 12 tools. It declares `brief`, `remember`, `recall`, `vote`, `checkpoint` and `handoff`. `remember`, `recall` and `vote` work as [Sense memories](#sense-memories) describes; `checkpoint` and `handoff` as [Sense resume registers and handoffs](#sense-resume-registers-and-handoffs) describes; `brief` as [Sense brief](#sense-brief) describes. Each brief of a session notes the session's harness, model and machine on the ant's card.
+- Sense serves at most 12 tools. It declares `brief`, `remember`, `recall`, `vote`, `checkpoint`, `handoff`, `task`, `promise` and `remind`. `remember`, `recall` and `vote` work as [Sense memories](#sense-memories) describes; `checkpoint` and `handoff` as [Sense resume registers and handoffs](#sense-resume-registers-and-handoffs) describes; `task`, `promise` and `remind` as [Sense work and reminders](#sense-work-and-reminders) describes; `brief` as [Sense brief](#sense-brief) describes. Each brief of a session notes the session's harness, model and machine on the ant's card.
 
 Calls and events:
 

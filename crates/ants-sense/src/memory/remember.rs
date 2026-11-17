@@ -59,8 +59,12 @@ async fn remember_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
     } else {
         None
     };
-    let citations = request
-        .citations
+    let mut citations = request.citations;
+    let citation_warnings = match sense.workdir(context) {
+        Some(workdir) => super::citations::record(&mut citations, &workdir).await,
+        None => Vec::new(),
+    };
+    let citations = citations
         .into_iter()
         .map(|citation| match (&scope, &citation.remote) {
             (Scope::Repo(remote), None) => Citation { remote: Some(remote.clone()), ..citation },
@@ -70,6 +74,8 @@ async fn remember_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
     let memory = Memory {
         importance: request.importance,
         citations,
+        status: if citation_warnings.is_empty() { Status::Active } else { Status::NeedsReview },
+        citation_warnings,
         trust: if untrusted.is_some() { Trust::Untrusted } else { Trust::Own },
         core: request.core,
         supersedes: old.as_ref().map(|old| old.id().clone()),
@@ -267,7 +273,9 @@ fn parse_citation(given: &Value, redactions: &mut Vec<Redaction>) -> Result<Cita
         }
         _ => return Err(bad("not a path or an object")),
     };
-    let path = sanitize_title(citation.path.trim(), Limit::Chars(MAX_PATH_CHARS)).map_err(|_| bad("path too long"))?;
+    let path = super::citations::safe_path(citation.path.trim())
+        .ok_or_else(|| bad("path must be a safe repository-relative path"))?;
+    let path = sanitize_title(&path, Limit::Chars(MAX_PATH_CHARS)).map_err(|_| bad("path too long"))?;
     if path.text.is_empty() {
         return Err(bad("no path"));
     }
@@ -374,6 +382,10 @@ fn remembered(
     if let Some(why) = untrusted {
         let _ = write!(text, "\nStored as untrusted: {why}.");
     }
+    for warning in &memory.citation_warnings {
+        let _ =
+            write!(text, "\nWarning: {}: {}; marked needs_review.", memory.citations[warning.citation], warning.reason);
+    }
     let mut redacted = Values::new();
     for redaction in redactions {
         let count = redacted.get(redaction.kind.name()).and_then(Value::as_u64).unwrap_or_default();
@@ -391,6 +403,9 @@ fn remembered(
         "importance": memory.importance,
         "core": memory.core,
         "trust": memory.trust,
+        "status": memory.status,
+        "citations": memory.citations,
+        "citation_warnings": memory.citation_warnings,
         "supersedes": memory.supersedes,
         "redactions": redacted,
     });

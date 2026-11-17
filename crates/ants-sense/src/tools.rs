@@ -101,6 +101,24 @@ pub const TOOLS: &[ToolSpec] = &[
         schema: handoff,
         handler: crate::thread::handoff,
     },
+    ToolSpec {
+        name: "task",
+        description: "Keep personal tasks, list ready work and claim a task for this thread under a fenced lease.",
+        schema: crate::task::schema,
+        handler: crate::task::task,
+    },
+    ToolSpec {
+        name: "promise",
+        description: "Record a commitment, its promisee and due time; keep, break, release or renegotiate it.",
+        schema: crate::promise::schema,
+        handler: crate::promise::promise,
+    },
+    ToolSpec {
+        name: "remind",
+        description: "Set a timed or conditional reminder; acknowledge, postpone, renew or drop it.",
+        schema: crate::remind::schema,
+        handler: crate::remind::remind,
+    },
 ];
 
 const _: () = assert!(TOOLS.len() <= MAX_TOOLS, "sense serves at most 12 tools");

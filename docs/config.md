@@ -154,7 +154,7 @@ With a `[nats_server]` table, `ants daemon` serving the whole file starts one lo
 
 An ant's provider holds its identity, memories and work ([architecture.md](architecture.md#providers)). The `provider` setting, top-level for every ant (the built-in messenger and templated ants included) or per `[[ant]]`, picks it:
 
-- `"sense"` (the default): ants' built-in provider.
+- `"sense"` (the default): ants' built-in provider, including private memories, personal tasks and commitments, and daemon-scheduled reminders ([work and reminders](architecture.md#sense-work-and-reminders)). Command conditions use the ant's `workdir`, `env` and `allow` rules; no approval request is raised for a disallowed condition.
 - `"none"`: no provider. The ant gets no provider tools and no brief; its harness's own tools serve memory and tasks, installed and configured through the harness, as its `memory` and `tasks` instructions say.
 - The name of a `[providers.NAME]` table: an external provider. With `protocol = "provider"` (the default) its command speaks the provider protocol; with `protocol = "mcp"` it is an MCP server over stdio, whose tools serve as a provider of tools alone, without brief, events, memories or export.
 

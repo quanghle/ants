@@ -281,4 +281,12 @@ async fn calls_carry_the_repository_the_thread_s_last_session_works_in() {
     open(&home.join("sub"));
     let context = mcp.call_context(&current.thread_id).await.unwrap();
     assert_eq!(context.repo.as_deref(), Some("github.com/Owner/Repo"));
+    let directories = mcp.workdirs();
+    assert_eq!(directories.workdir(&context), Some(home.join("sub")));
+    let other_ant = ants_proto::provider::CallContext { ant: user("dev-b"), ..context.clone() };
+    assert_eq!(directories.workdir(&other_ant), None);
+    let other_thread = ants_proto::provider::CallContext { thread: "unknown".parse().unwrap(), ..context };
+    assert_eq!(directories.workdir(&other_thread), None);
+    drop(mcp);
+    assert_eq!(directories.workdir(&other_thread), None);
 }

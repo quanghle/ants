@@ -12,6 +12,8 @@ use crate::log::{AccountVerifier, AntLog, Event, EventLog, MemoryLog, NoRevocati
 use crate::store::{Store, Stores};
 use crate::tools::{Answer, Handler};
 
+mod citations;
+
 pub(super) type Kept = tokio::sync::Mutex<Store<MemoryLog, Unsigned, AccountVerifier<NoRevocations>>>;
 
 /// The one store of every ant.

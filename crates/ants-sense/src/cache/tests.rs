@@ -30,3 +30,38 @@ fn a_cache_of_another_schema_or_unreadable_is_replaced_with_an_empty_one() {
     assert_eq!(Cache::open(&home).unwrap().built().unwrap(), None);
     std::fs::remove_dir_all(&home).unwrap();
 }
+
+#[test]
+fn pending_writes_prevent_replacing_a_corrupt_missing_or_different_log_cache() {
+    let home = ants_test_support::scratch_dir("sense-cache-pending");
+    let mut cache = Cache::open(&home).unwrap();
+    let sense = SenseId::new();
+    cache.reset(&sense, "one").unwrap();
+    let change = Change::create("note", serde_json::json!({"title":"local"}).as_object().unwrap().clone(), "t");
+    let pending = Pending::new(ITEM_EVENT, serde_json::to_value(change).unwrap(), "m1".parse().unwrap());
+    cache.enqueue(&pending).unwrap();
+    assert!(cache.reset(&sense, "two").is_err());
+    drop(cache);
+    let file = cache_file(&home);
+    std::fs::write(&file, b"corrupt with pending writes").unwrap();
+    assert!(Cache::open(&home).is_err());
+    assert_eq!(std::fs::read(&file).unwrap(), b"corrupt with pending writes");
+    std::fs::remove_file(&file).unwrap();
+    assert!(Cache::open(&home).is_err());
+    assert!(!file.exists(), "a pending cache is not silently replaced");
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn the_previous_cache_schema_is_migrated_without_losing_its_built_position() {
+    let home = ants_test_support::scratch_dir("sense-cache-migrate");
+    let mut cache = Cache::open(&home).unwrap();
+    cache.reset(&SenseId::new(), "one").unwrap();
+    let built = cache.built().unwrap();
+    cache.db.execute_batch("DROP TABLE outbox; DROP TABLE confirmed_items; PRAGMA user_version = 2;").unwrap();
+    drop(cache);
+    let cache = Cache::open(&home).unwrap();
+    assert_eq!(cache.built().unwrap(), built);
+    assert_eq!(cache.pending().unwrap().len(), 0);
+    std::fs::remove_dir_all(home).unwrap();
+}

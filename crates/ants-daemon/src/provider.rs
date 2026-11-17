@@ -21,9 +21,11 @@ mod link;
 mod mcp;
 pub mod origins;
 mod process;
+pub(crate) mod scheduler;
 pub mod sense;
 mod supervisor;
 pub mod wake;
+pub(crate) mod workdirs;
 
 pub use definition::{Definition, NONE, Protocol, SENSE, Setting, define};
 pub use supervisor::Supervised;
@@ -39,6 +41,13 @@ pub fn client() -> Info {
 }
 
 static SENSE_PROVIDER: OnceCell<Option<Connected>> = OnceCell::const_new();
+static BUILT_IN: LazyLock<Arc<Sense>> = LazyLock::new(|| {
+    Arc::new(Sense::with_stores(sense::stores().clone()).with_workdirs(Arc::new(workdirs::Directories)))
+});
+
+pub(crate) fn built_in() -> &'static Arc<Sense> {
+    &BUILT_IN
+}
 
 static PROVIDERS: LazyLock<Providers> = LazyLock::new(Providers::default);
 
@@ -111,10 +120,7 @@ impl Providers {
     async fn of(&self, ant: &UserId) -> Option<Connected> {
         let setting = self.0.locked().settings.get(ant).cloned().unwrap_or_default();
         match setting {
-            Setting::Sense => SENSE_PROVIDER
-                .get_or_init(|| connect(Arc::new(Sense::with_stores(sense::stores().clone()))))
-                .await
-                .clone(),
+            Setting::Sense => SENSE_PROVIDER.get_or_init(|| connect(built_in().clone())).await.clone(),
             Setting::None => None,
             Setting::External(definition) => {
                 let supervised = self.0.locked().run(&definition);

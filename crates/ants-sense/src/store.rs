@@ -4,11 +4,11 @@
 use std::sync::Arc;
 
 use ants_proto::provider::BoxFuture;
-use ants_proto::{SenseId, UserId};
+use ants_proto::{Machine, SenseId, UserId};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use crate::cache::{Cache, CacheError, Hit};
+use crate::cache::{Cache, CacheError, Hit, Pending};
 use crate::items::{Batch, Change, ITEM_EVENT, ITEMS_EVENT, Item, ItemId, Revision, Values};
 use crate::log::{APPEND_TRIES, AntLog, Break, Checked, EventLog, LogError, Position, Signer, Verifier};
 
@@ -22,7 +22,7 @@ pub enum StoreError {
     Conflict { expected: u64, current: Box<Item> },
     #[error("sense's data is not available: {0}")]
     Unavailable(String),
-    /// sense keeps no data of the ant here, as no daemon connection reaches its log: nothing is to be written.
+    /// No daemon connection has opened the ant's log here, and no existing cache can serve it.
     #[error("sense keeps no data here: {0}")]
     NotKept(String),
     #[error("the log: {0}")]
@@ -31,12 +31,14 @@ pub enum StoreError {
     Cache(#[from] CacheError),
 }
 
-/// The items of an ant's sense identity: each change appended to its log first ([`AntLog`]), then applied to its
-/// cache ([`Cache`]), which every read reads. A change is decided on the cache caught up with the log: when another
-/// writer appended since, the log refuses the append, and the change is decided again on what that writer appended.
+/// The items of an ant's sense identity, projected from its verified log into a cache. Normally the log accepts a
+/// change before the cache applies it. During a connectivity failure, a durable outbox accepts decided changes and
+/// overlays them on the cached projection; reconnect appends them in order, preserving each batch and revision.
+/// Concurrent remote changes that invalidate queued changes are reported and the affected writes remain queued.
 pub struct Store<L, S, V> {
     log: AntLog<L, S, V>,
     cache: Cache,
+    machine: Machine,
 }
 
 impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
@@ -48,16 +50,35 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
         let built =
             cache.built().ok().flatten().filter(|built| built.sense == sense && built.incarnation == incarnation);
         let position = match built {
-            Some(built) if holds(log.log(), &built).await? => built.position,
+            Some(built) => match holds(log.log(), &built).await {
+                Ok(true) => built.position,
+                Err(error) if is_offline(&error) => built.position,
+                Err(error) => return Err(error.into()),
+                Ok(false) => {
+                    cache.reset(&sense, &incarnation)?;
+                    None
+                }
+            },
             _ => {
                 cache.reset(&sense, &incarnation)?;
                 None
             }
         };
         log.resume(position);
-        let mut store = Self { log, cache };
-        store.sync().await?;
+        let mut store = Self { log, cache, machine: "offline".parse().expect("a machine name") };
+        match store.sync().await {
+            Err(StoreError::Log(error)) if is_offline(&error) => {}
+            Err(StoreError::Unavailable(_)) if store.cache.pending_conflict()?.is_some() => {}
+            result => result?,
+        }
         Ok(store)
+    }
+
+    /// Identify locally queued changes before the hub supplies their event stamps.
+    #[must_use]
+    pub fn with_machine(mut self, machine: Machine) -> Self {
+        self.machine = machine;
+        self
     }
 
     pub fn log(&self) -> &AntLog<L, S, V> {
@@ -68,8 +89,14 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
         &self.cache
     }
 
-    /// Apply to the cache what the log holds past what the cache was built from.
+    /// Catch up with the verified log, then append queued local changes in order. A conflict retains the affected
+    /// write and those after it, returning an error rather than overwriting either side.
     pub async fn sync(&mut self) -> Result<(), StoreError> {
+        self.catch_up().await?;
+        self.flush().await
+    }
+
+    async fn catch_up(&mut self) -> Result<(), StoreError> {
         loop {
             let read = match self.log.read_next().await {
                 Ok(read) => read,
@@ -144,6 +171,22 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
         self.commit(|cache| writes.iter().map(|write| write.decide(cache, by)).collect()).await
     }
 
+    /// A write requiring a hub acknowledgment, never accepted into the offline outbox.
+    pub async fn write_confirmed(&mut self, writes: &[Write], by: &str) -> Result<Vec<Item>, StoreError> {
+        for (index, write) in writes.iter().enumerate() {
+            if writes[..index].iter().any(|other| other.id() == write.id()) {
+                return Err(StoreError::Unavailable(format!("item {} written twice at once", write.id())));
+            }
+        }
+        self.sync().await?;
+        self.check_integrity()?;
+        self.commit_inner(|cache| writes.iter().map(|write| write.decide(cache, by)).collect(), false).await
+    }
+
+    pub fn pending(&self) -> Result<usize, StoreError> {
+        Ok(self.cache.pending_count()?)
+    }
+
     pub fn get(&self, id: &ItemId) -> Result<Option<Item>, StoreError> {
         Ok(self.cache.get(id)?)
     }
@@ -170,7 +213,7 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
         Ok(self.cache.search(text, kind, limit)?)
     }
 
-    /// The changes of item `id`, in log order.
+    /// The changes of item `id`, in order. Unacknowledged local changes have sequence 0, never a fencing token.
     pub fn history(&self, id: &ItemId) -> Result<Vec<Revision>, StoreError> {
         Ok(self.cache.history(id)?)
     }
@@ -184,8 +227,28 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
     /// and return the items they leave; decided again on what another writer appended first.
     async fn commit(
         &mut self,
-        mut next: impl FnMut(&Cache) -> Result<Vec<Result<Change, Item>>, StoreError>,
+        next: impl FnMut(&Cache) -> Result<Vec<Result<Change, Item>>, StoreError>,
     ) -> Result<Vec<Item>, StoreError> {
+        self.commit_inner(next, true).await
+    }
+
+    async fn commit_inner(
+        &mut self,
+        mut next: impl FnMut(&Cache) -> Result<Vec<Result<Change, Item>>, StoreError>,
+        queue: bool,
+    ) -> Result<Vec<Item>, StoreError> {
+        if self.pending()? > 0 {
+            match self.sync().await {
+                Err(StoreError::Log(error)) if queue && is_offline(&error) => {
+                    // Trying the oldest write preserves order and rechecks the signer before accepting more.
+                    match self.flush().await {
+                        Err(StoreError::Log(error)) if is_offline(&error) => {}
+                        result => result?,
+                    }
+                }
+                result => result?,
+            }
+        }
         for _ in 0..APPEND_TRIES {
             let decided = next(&self.cache)?;
             let changes: Vec<&Change> = decided.iter().filter_map(|decided| decided.as_ref().ok()).collect();
@@ -194,19 +257,95 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
                 [change] => (ITEM_EVENT, serde_json::to_value(change)),
                 _ => (ITEMS_EVENT, serde_json::to_value(Batch { changes: changes.into_iter().cloned().collect() })),
             };
-            match self.log.try_append(kind, data.map_err(CacheError::from)?).await {
+            let mut pending = Pending::new(kind, data.map_err(CacheError::from)?, self.machine.clone());
+            pending.guards = decided
+                .iter()
+                .filter_map(|item| item.as_ref().err())
+                .map(|item| (item.id.clone(), item.revision))
+                .collect();
+            if self.pending()? > 0 {
+                self.check_integrity()?;
+                self.cache.enqueue(&pending)?;
+                return decided.into_iter().map(|decided| self.applied(decided)).collect();
+            }
+            match self.log.try_append(kind, pending.data.clone()).await {
                 Ok(Ok(appended)) => {
                     self.apply(std::slice::from_ref(&appended))?;
                     return decided.into_iter().map(|decided| self.applied(decided)).collect();
                 }
-                Ok(Err(missed)) => self.apply(&missed)?,
+                Ok(Err(missed)) => {
+                    self.apply(&missed)?;
+                }
                 Err(e) => {
                     self.realign();
+                    if queue && is_offline(&e) {
+                        self.check_integrity()?;
+                        self.cache.enqueue(&pending)?;
+                        return decided.into_iter().map(|decided| self.applied(decided)).collect();
+                    }
                     return Err(e.into());
                 }
             }
         }
         Err(StoreError::Unavailable(format!("other writers kept appending to sense identity {}", self.sense())))
+    }
+
+    async fn flush(&mut self) -> Result<(), StoreError> {
+        if self.pending()? == 0 {
+            return Ok(());
+        }
+        self.check_chain()?;
+        let mut conflicts = 0;
+        while let Some(pending) = self.cache.pending()?.first().cloned() {
+            if self.cache.pending_ready()? == 0
+                && let Some(reason) = self.cache.pending_conflict()?
+            {
+                return Err(StoreError::Unavailable(reason));
+            }
+            match self.log.try_append(&pending.kind, pending.data.clone()).await {
+                Ok(Ok(appended)) => self.apply(std::slice::from_ref(&appended))?,
+                Ok(Err(missed)) => {
+                    self.apply(&missed)?;
+                    self.check_chain()?;
+                    conflicts += 1;
+                    if conflicts >= APPEND_TRIES {
+                        return Err(StoreError::Unavailable(
+                            "other writers kept appending; pending writes retained".into(),
+                        ));
+                    }
+                }
+                Err(error) => {
+                    self.realign();
+                    return Err(error.into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn refresh(&mut self) -> Result<(), StoreError> {
+        match self.sync().await {
+            Err(StoreError::Log(error)) if is_offline(&error) => Ok(()),
+            result => result,
+        }
+    }
+
+    fn check_integrity(&self) -> Result<(), StoreError> {
+        self.check_chain()?;
+        if let Some(reason) = self.cache.pending_conflict()? {
+            return Err(StoreError::Unavailable(reason));
+        }
+        Ok(())
+    }
+
+    fn check_chain(&self) -> Result<(), StoreError> {
+        if let Some(broken) = self.log.chain().broken() {
+            return Err(StoreError::Unavailable(format!(
+                "sense log chain is broken at event {}: {}",
+                broken.index, broken.reason
+            )));
+        }
+        Ok(())
     }
 
     /// The item `decided` leaves, as the cache has it once applied.
@@ -237,6 +376,48 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
         let position = self.cache.built().ok().flatten().and_then(|built| built.position);
         self.log.resume(position);
     }
+}
+
+/// Only connectivity failures permit accepting a local write. Other failures must remain visible.
+pub fn is_offline(error: &LogError) -> bool {
+    let message = error.0.to_ascii_lowercase();
+    if [
+        "signing:",
+        "verifying:",
+        "permission",
+        "authorization",
+        "authentication",
+        "signature",
+        "credentials",
+        "revoked",
+        "incarnation",
+        "integrity",
+        "chain",
+        "keeping the",
+    ]
+    .iter()
+    .any(|reason| message.contains(reason))
+    {
+        return false;
+    }
+    [
+        "unavailable",
+        "offline",
+        "unreachable",
+        "disconnected",
+        "not connected",
+        "connection closed",
+        "connection reset",
+        "connection refused",
+        "broken pipe",
+        "connection aborted",
+        "timed out",
+        "timeout",
+        "no responders",
+        "no answer to a direct get",
+    ]
+    .iter()
+    .any(|reason| message.contains(reason))
 }
 
 /// One change of a [`Store::write`].
@@ -329,6 +510,29 @@ pub trait Items: Send + Sync {
     ) -> BoxFuture<'a, Result<Item, StoreError>>;
     /// [`Store::write`].
     fn write<'a>(&'a self, writes: &'a [Write], by: &'a str) -> BoxFuture<'a, Result<Vec<Item>, StoreError>>;
+    /// Like [`Items::write`], but never queue a write without a hub acknowledgment.
+    fn write_confirmed<'a>(&'a self, writes: &'a [Write], by: &'a str) -> BoxFuture<'a, Result<Vec<Item>, StoreError>> {
+        self.write(writes, by)
+    }
+    /// Accepted local writes that have not yet been acknowledged by the hub.
+    fn pending(&self) -> BoxFuture<'_, Result<usize, StoreError>> {
+        Box::pin(async { Ok(0) })
+    }
+    /// The acknowledged stream sequence of an exact revision, never an offline placeholder.
+    fn confirmed_sequence<'a>(
+        &'a self,
+        id: &'a ItemId,
+        revision: u64,
+    ) -> BoxFuture<'a, Result<Option<u64>, StoreError>> {
+        Box::pin(async move {
+            Ok(self
+                .history(id)
+                .await?
+                .iter()
+                .find(|entry| entry.change.revision == revision && entry.sequence != 0)
+                .map(|entry| entry.sequence))
+        })
+    }
     fn get<'a>(&'a self, id: &'a ItemId) -> BoxFuture<'a, Result<Option<Item>, StoreError>>;
     /// [`Store::list`].
     fn list<'a>(&'a self, kind: &'a str, limit: usize) -> BoxFuture<'a, Result<Vec<Item>, StoreError>>;
@@ -348,6 +552,7 @@ pub trait Items: Send + Sync {
         limit: usize,
     ) -> BoxFuture<'a, Result<Vec<Hit>, StoreError>>;
     /// [`Store::history`].
+    /// Cached history, including pending revisions with sequence 0; never requires another network round trip.
     fn history<'a>(&'a self, id: &'a ItemId) -> BoxFuture<'a, Result<Vec<Revision>, StoreError>>;
     /// [`Store::at`].
     fn at<'a>(&'a self, id: &'a ItemId, at: DateTime<Utc>) -> BoxFuture<'a, Result<Option<Item>, StoreError>>;
@@ -405,12 +610,44 @@ where
         Box::pin(async move { self.lock().await.write(writes, by).await })
     }
 
+    fn write_confirmed<'a>(&'a self, writes: &'a [Write], by: &'a str) -> BoxFuture<'a, Result<Vec<Item>, StoreError>> {
+        Box::pin(async move { self.lock().await.write_confirmed(writes, by).await })
+    }
+
+    fn pending(&self) -> BoxFuture<'_, Result<usize, StoreError>> {
+        Box::pin(async move { self.lock().await.pending() })
+    }
+
+    fn confirmed_sequence<'a>(
+        &'a self,
+        id: &'a ItemId,
+        revision: u64,
+    ) -> BoxFuture<'a, Result<Option<u64>, StoreError>> {
+        Box::pin(async move {
+            Ok(self
+                .lock()
+                .await
+                .history(id)?
+                .iter()
+                .find(|entry| entry.change.revision == revision && entry.sequence != 0)
+                .map(|entry| entry.sequence))
+        })
+    }
+
     fn get<'a>(&'a self, id: &'a ItemId) -> BoxFuture<'a, Result<Option<Item>, StoreError>> {
-        Box::pin(async move { self.lock().await.get(id) })
+        Box::pin(async move {
+            let mut store = self.lock().await;
+            store.refresh().await?;
+            store.get(id)
+        })
     }
 
     fn list<'a>(&'a self, kind: &'a str, limit: usize) -> BoxFuture<'a, Result<Vec<Item>, StoreError>> {
-        Box::pin(async move { self.lock().await.list(kind, limit) })
+        Box::pin(async move {
+            let mut store = self.lock().await;
+            store.refresh().await?;
+            store.list(kind, limit)
+        })
     }
 
     fn list_by<'a>(
@@ -420,7 +657,11 @@ where
         value: Option<&'a Value>,
         limit: usize,
     ) -> BoxFuture<'a, Result<Vec<Item>, StoreError>> {
-        Box::pin(async move { self.lock().await.list_by(kind, name, value, limit) })
+        Box::pin(async move {
+            let mut store = self.lock().await;
+            store.refresh().await?;
+            store.list_by(kind, name, value, limit)
+        })
     }
 
     fn search<'a>(
@@ -429,7 +670,11 @@ where
         kind: Option<&'a str>,
         limit: usize,
     ) -> BoxFuture<'a, Result<Vec<Hit>, StoreError>> {
-        Box::pin(async move { self.lock().await.search(text, kind, limit) })
+        Box::pin(async move {
+            let mut store = self.lock().await;
+            store.refresh().await?;
+            store.search(text, kind, limit)
+        })
     }
 
     fn history<'a>(&'a self, id: &'a ItemId) -> BoxFuture<'a, Result<Vec<Revision>, StoreError>> {

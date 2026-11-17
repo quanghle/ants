@@ -896,6 +896,13 @@ fn log_serving(config: &Config) {
     );
 }
 
+fn sense_workdirs(inbox: &Inbox<'_>, config: &Config) -> Option<crate::provider::workdirs::Serving> {
+    if !matches!(config.provider, crate::provider::Setting::Sense) {
+        return None;
+    }
+    Some(crate::provider::workdirs::serve(&config.ant, inbox.mcp?.workdirs()))
+}
+
 /// Serve the inbox, and the ant's watches beside it, until a stop, the hand-over or the move: which one ended it. A
 /// hand-over or a move drains the ant as a first stop does.
 async fn serve_inbox<S, E>(
@@ -920,12 +927,15 @@ where
     )
     .await?
     .reading(inbox.reading);
+    let _sense_workdirs = sense_workdirs(inbox, config);
+    let scheduler = crate::provider::scheduler::serve(config, inbox.machine);
     let (stopping, moving, mut asked) = (std::cell::Cell::new(false), std::cell::Cell::new(false), 0);
     // The first stop is Ctrl-C, a stop request, the hand-over or the move, after which the prompts in flight finish;
     // the second only Ctrl-C or a stop request.
     let stop_or_hand_over = || {
         asked += 1;
         let (first, stopping, moving) = (asked == 1, &stopping, &moving);
+        let scheduler = scheduler.as_ref();
         async move {
             let moved = async {
                 match inbox.identity {
@@ -942,6 +952,9 @@ where
                     tracing::info!("the ant was moved to another bus; taking no more messages");
                     moving.set(true);
                 }
+            }
+            if let Some(scheduler) = scheduler {
+                scheduler.stop().await;
             }
         }
     };
@@ -961,6 +974,9 @@ where
         () = events::done::hear(inbox.js, inbox.ant, inbox.lifecycle, async |thread| {
             inbox.pool.has_session(thread).await
         }) => {}
+    }
+    if let Some(scheduler) = &scheduler {
+        scheduler.stop().await;
     }
     Ok(if stopping.get() {
         Served::Stopped
