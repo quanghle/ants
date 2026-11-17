@@ -6,8 +6,8 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Duration;
 
-use ants_daemon::records::direct_kv::{DirectKv, Lookup};
-use ants_proto::{AdminOp, AntIdentity, IDENTITIES_BUCKET, Machine, Memories, OrderState, UserId};
+use ants_daemon::profile::identity;
+use ants_proto::{AdminOp, Machine, Memories, OrderState, UserId};
 use anyhow::{Result, bail};
 use async_nats::jetstream;
 
@@ -26,7 +26,7 @@ pub async fn read(
     machine: Option<Machine>,
     ant: &UserId,
 ) -> Result<Memories> {
-    let op = AdminOp::ReadMemories { identity: identity_of(nats, js, ant).await };
+    let op = AdminOp::ReadMemories { identity: identity::id_of(js, nats.domain, ant).await };
     let (order, outcome) = orders::send(nats, js, machine, ant, op, WAIT).await?;
     let Some(outcome) = outcome else {
         bail!(
@@ -45,16 +45,6 @@ pub async fn read(
             order.machine,
             outcome.reason.as_deref().unwrap_or("no reason given")
         ),
-    }
-}
-
-/// The id of the identity record of `ant`, which its provider knows it by and only humans read: None, the daemon
-/// noting the provider's memories unread, when it cannot be read.
-async fn identity_of(nats: &Nats<'_>, js: &jetstream::Context, ant: &UserId) -> Option<String> {
-    let kv = DirectKv::whole(js, nats.domain, IDENTITIES_BUCKET).await.ok()?;
-    match kv.lookup_last(ant.as_str()).await.ok()?.0 {
-        Lookup::Value(value) => serde_json::from_slice::<AntIdentity>(&value).ok().map(|record| record.id),
-        Lookup::NoBucket | Lookup::NoValue => None,
     }
 }
 

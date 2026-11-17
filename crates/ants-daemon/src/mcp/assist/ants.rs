@@ -254,13 +254,14 @@ impl Hub {
 
     async fn order_for_human(&self, args: OrderForHuman) -> Result<String, String> {
         let (human, store) = self.acting_for()?;
+        let ant: UserId = args.ant.trim().parse().map_err(|e| format!("ant: {e}"))?;
         let op = match args.op.trim().replace('-', "_").as_str() {
             "pause" => AdminOp::Pause,
             "resume" => AdminOp::Resume,
             "restart" => AdminOp::Restart { now: false },
             "restart_now" => AdminOp::Restart { now: true },
             "read_settings" => AdminOp::ReadSettings,
-            "read_memories" => AdminOp::ReadMemories { identity: None },
+            "read_memories" => AdminOp::ReadMemories { identity: store.identity_id(ant.clone()).await },
             "set" => match args.changes {
                 Some(changes) if !changes.is_empty() => AdminOp::Set {
                     changes: changes.into_iter().map(SetChange::into_field_change).collect::<Result<_, _>>()?,
@@ -273,7 +274,6 @@ impl Hub {
                 ));
             }
         };
-        let ant: UserId = args.ant.trim().parse().map_err(|e| format!("ant: {e}"))?;
         let machine: Machine = args.machine.trim().parse().map_err(|e| format!("machine: {e}"))?;
         let (kind, what) = (op.kind(), op.describe());
         let order =

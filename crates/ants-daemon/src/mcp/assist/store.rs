@@ -304,4 +304,8 @@ impl HumanStore for JetStreamStore {
             Ok(order)
         })
     }
+
+    fn identity_id(&self, ant: UserId) -> BoxFuture<'_, Option<String>> {
+        Box::pin(async move { crate::profile::identity::id_of(&self.js, self.js_domain.as_ref(), &ant).await })
+    }
 }

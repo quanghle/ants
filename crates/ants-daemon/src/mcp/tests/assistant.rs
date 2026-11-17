@@ -25,6 +25,8 @@ struct MemoryHuman {
     withdrawals: StdMutex<Vec<(UserId, Uuid, UserId, UserId)>>,
     found_mark: StdMutex<Option<ants_proto::MessageMark>>,
     orders: StdMutex<Vec<ants_proto::AdminOrder>>,
+    /// The ids of the ants' identity records.
+    identities: StdMutex<Vec<(UserId, String)>>,
     /// The human's own marks and snoozes, and those its assistant set for it.
     own_marks: StdMutex<ants_proto::ThreadMarks>,
     own_snoozes: StdMutex<ants_proto::ThreadSnoozes>,
@@ -189,6 +191,11 @@ impl HumanStore for MemoryHuman {
     fn send_order(&self, order: ants_proto::AdminOrder) -> BoxFuture<'_, Result<ants_proto::AdminOrder>> {
         self.orders.locked().push(order.clone());
         Box::pin(async { Ok(order) })
+    }
+
+    fn identity_id(&self, ant: UserId) -> BoxFuture<'_, Option<String>> {
+        let id = self.identities.locked().iter().find(|(a, _)| *a == ant).map(|(_, id)| id.clone());
+        Box::pin(async move { id })
     }
 }
 
@@ -505,6 +512,26 @@ async fn what_the_assistant_does_for_its_human_carries_on_behalf_of() {
     let (ok, refused) =
         call(&client, "order_for_human", serde_json::json!({"ant": "dev-b", "machine": "m1", "op": "retire"})).await;
     assert!(!ok && refused.contains("unknown op retire"), "{refused}");
+}
+
+/// A read of an ant's memories carries the id of its identity record, which its provider knows it by.
+#[tokio::test]
+async fn the_assistant_reads_memories_naming_the_ant_s_identity() {
+    let home = home("assist-memories");
+    let (mcp, _sent, humans, device, store) = assistant(&home).await;
+    grant(&humans, &device, Some("dev-a"), false);
+    let (url, token) = http_server(&mcp, &ThreadId::generate());
+    let client = http_client(&url, &token).await;
+    store.identities.locked().push((user("dev-b"), "0f1e".to_owned()));
+    let read = |ant: &str| serde_json::json!({"ant": ant, "machine": "m1", "op": "read-memories"});
+    let (ok, ordered) = call(&client, "order_for_human", read("dev-b")).await;
+    assert!(ok, "{ordered}");
+    let order = store.orders.locked().pop().unwrap();
+    assert_eq!(order.op, ants_proto::AdminOp::ReadMemories { identity: Some("0f1e".to_owned()) });
+    let (ok, ordered) = call(&client, "order_for_human", read("dev-c")).await;
+    assert!(ok, "{ordered}");
+    let order = store.orders.locked().pop().unwrap();
+    assert_eq!(order.op, ants_proto::AdminOp::ReadMemories { identity: None });
 }
 
 /// An order to set an ant's settings carries the changes as given, dotted fields split; one without changes is refused.

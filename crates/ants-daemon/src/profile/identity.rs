@@ -23,6 +23,14 @@ const ATTEMPTS: usize = 5;
 /// How often a daemon reads the ant's record for the moved mark, while serving it or waiting for the mark to go.
 pub const MOVED_EVERY: Duration = Duration::from_secs(30);
 
+/// The id of the identity record of `ant` ([`AntIdentity::id`]), which its provider knows it by: what a read of its
+/// memories ([`ants_proto::AdminOp::ReadMemories`]) carries. None, the daemon noting the provider's memories unread,
+/// when it cannot be read.
+pub async fn id_of(js: &jetstream::Context, js_domain: Option<&JsDomain>, ant: &UserId) -> Option<String> {
+    let identity = Identity::new(js, js_domain, ant).await.ok()?;
+    identity.read().await.ok()?.map(|record| record.id)
+}
+
 /// One ant's identity record, read and written by the credentials of the ant, which read every ant's record by direct
 /// gets naming no subject and write only its own.
 #[derive(Clone)]

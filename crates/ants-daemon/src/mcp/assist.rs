@@ -139,6 +139,9 @@ pub trait HumanStore: Send + Sync {
     ) -> BoxFuture<'_, Result<Recorded>>;
     /// Sign `order` with the ant's credentials and send it to the hub's stream, once stored: the order as sent.
     fn send_order(&self, order: AdminOrder) -> BoxFuture<'_, Result<AdminOrder>>;
+    /// The id of the identity record of `ant`, which a read of its memories carries to its provider
+    /// ([`crate::profile::identity::id_of`]): None when it cannot be read.
+    fn identity_id(&self, ant: UserId) -> BoxFuture<'_, Option<String>>;
 }
 
 /// What opens the human's sealed messages and seals those sent for it: [`AssistantSealing`].
