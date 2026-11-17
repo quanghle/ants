@@ -28,7 +28,7 @@ pub fn parse<Z: TimeZone>(text: &str, now: DateTime<Utc>, zone: &Z) -> Result<(D
     } else if let Ok(at) = NaiveDateTime::parse_from_str(when, "%Y-%m-%dT%H:%M") {
         utc(zone, at, when)?
     } else {
-        let duration = ants_proto::duration::parse(when)?;
+        let duration = ants_proto::duration::parse(when).map_err(|e| e.to_string())?;
         now + TimeDelta::from_std(duration).map_err(|_| format!("too long: {when}"))?
     };
     if at <= now {

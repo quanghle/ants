@@ -281,7 +281,7 @@ impl Model {
     pub fn digest(&mut self, since: Option<&str>, now: DateTime<Utc>) -> Result<Action, String> {
         let since = match since {
             None => self.catchup.from(now),
-            Some(text) => match ants_proto::duration::parse(text)? {
+            Some(text) => match ants_proto::duration::parse(text).map_err(|e| e.to_string())? {
                 d if d.is_zero() => DateTime::<Utc>::UNIX_EPOCH,
                 d => now - TimeDelta::from_std(d).map_err(|e| format!("invalid duration {text:?}: {e}"))?,
             },

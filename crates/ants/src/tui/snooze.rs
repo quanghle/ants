@@ -72,7 +72,7 @@ pub fn duration(text: &str) -> Result<TimeDelta, String> {
         "" => DEFAULT,
         text => text,
     };
-    let duration = ants_proto::duration::parse(text)?;
+    let duration = ants_proto::duration::parse(text).map_err(|e| e.to_string())?;
     let duration = TimeDelta::from_std(duration).map_err(|_| "too long: at most 7d".to_owned())?;
     if duration <= TimeDelta::zero() {
         return Err("a snooze lasts longer than 0".to_owned());

@@ -78,7 +78,7 @@ pub use error::Error;
 pub use escalation::{Away, ChainEntry, Escalation, EscalationReason, Hop, OwnerBecause};
 pub use grant::{
     ASSISTANT_GRANT, Applied, AssistantGrant, GRANT_CLOCK_SKEW, GrantError, Grants, SealingDevice, UserJwt,
-    VerifiedGrant, assistant_grant_key, assistant_grant_of,
+    UserJwtError, VerifiedGrant, assistant_grant_key, assistant_grant_of,
 };
 pub use humans::{HumanEntry, Humans, writes_human_entries};
 pub use identity::{
