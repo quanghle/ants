@@ -167,7 +167,7 @@ mod tests {
             .filter(|o| ![hub::Object::Stream, hub::Object::Presence, hub::Object::Identities].contains(o))
             .collect();
         assert_eq!(created, seen, "every missing bucket a human may look up created");
-        for watched in [hub::Object::Channels, hub::Object::Humans, hub::Object::Colony] {
+        for watched in hub::Object::ALL.into_iter().filter(|o| o.watched()) {
             let config = h_js.get_stream(watched.stream_name()).await.unwrap().cached_info().config.clone();
             assert_eq!(config.max_consumers, hub::MAX_CONSUMERS, "{watched}");
         }

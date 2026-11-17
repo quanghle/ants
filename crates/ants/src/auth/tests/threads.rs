@@ -116,6 +116,38 @@ async fn an_ant_s_daemon_reads_what_a_human_did_about_an_escalation() {
 }
 
 #[tokio::test]
+async fn an_ant_s_daemon_hears_the_threads_marked_done_through_its_own_consumer_only() {
+    use ants_daemon::provider::events::done;
+
+    let Some(server) = Server::start() else { return };
+    let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
+    let (_, a_js) = server.connect_as(&alice, Role::Human).await;
+    let (_, d_js) = server.connect(&dev_a).await;
+    a_js.create_stream(ants_daemon::hub::threads_config()).await.unwrap();
+    let stream = d_js.get_stream_no_info(format!("KV_{}", ants_proto::THREADS_BUCKET)).await.unwrap();
+    let reader = |name: String, filter: String| jetstream::consumer::pull::Config {
+        durable_name: Some(name),
+        filter_subject: filter,
+        ..Default::default()
+    };
+    let marks = reader(ants_proto::done_reader(&dev_a), format!("$KV.{}.>", ants_proto::THREADS_BUCKET));
+    assert!(stream.create_consumer(marks).await.is_err(), "an ant's consumer reads no other key");
+    let filter = format!("$KV.{}.done.*", ants_proto::THREADS_BUCKET);
+    let not_its_own = reader(ants_proto::done_reader(&dev_b), filter);
+    assert!(stream.create_consumer(not_its_own).await.is_err(), "nor is dev-b's dev-a's to use");
+
+    let mut dones = done::consumer(&d_js, &dev_a).await.unwrap();
+    let thread = ThreadId::generate();
+    let meta = crate::threads::thread_meta::Meta::open(&a_js, None, &alice).await.unwrap();
+    meta.change_marks(|m| m.pin(&thread)).await.unwrap();
+    meta.set_done(&thread, 4).await.unwrap();
+    let message = timeout(Duration::from_secs(5), dones.next()).await.unwrap().unwrap().unwrap();
+    let done = format!("$KV.{}.{}", ants_proto::THREADS_BUCKET, ants_proto::done_key(&thread));
+    assert_eq!(message.subject.as_str(), done, "its own hears the done state, not the marks");
+    message.ack().await.unwrap();
+}
+
+#[tokio::test]
 async fn a_human_adopts_an_ant_s_title_only_on_a_thread_never_titled() {
     use crate::threads::thread_meta::Meta;
 

@@ -261,6 +261,12 @@ pub fn chan_consumer(ant: &UserId) -> String {
     format!("chan-{ant}")
 }
 
+/// Durable JetStream consumer of [`THREADS_BUCKET`]'s stream an ant's daemon hears of the threads marked done through,
+/// to tell the ant's provider. Its filter is pinned to the done states ([`done_key`]), so it reads no other key.
+pub fn done_reader(ant: &UserId) -> String {
+    format!("done-{ant}")
+}
+
 /// JetStream consumer an ant's daemon reads a channel (or a thread of it) back through, one read at a time, like
 /// [`notes_consumer`]. Its filter is pinned under [`subject::ALL_CHANNELS`] too. The CLI with the ant's credentials
 /// reads through one of its [`spare_readers`], and a human gets the posts by message gets, so no read

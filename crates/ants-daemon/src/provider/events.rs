@@ -31,6 +31,8 @@ use uuid::Uuid;
 
 use crate::sync::MutexExt as _;
 
+pub mod done;
+
 /// The directory of an ant's home holding its lifecycle files, which neither a clone nor an export copies.
 pub const DIR: &str = "lifecycle";
 /// The queue of an ant's events not yet acked, under [`DIR`].
@@ -125,6 +127,14 @@ impl Outbox {
 
     /// Queue `event` for its ant, whose home is `home`, stored before it returns, and deliver it.
     pub async fn push(&self, home: &Path, event: Event) {
+        if let Err(e) = self.store(home, event).await {
+            tracing::warn!(error = format!("{e:#}"), "storing a lifecycle event");
+        }
+    }
+
+    /// [`Outbox::push`], failing when the event could not be stored: it is delivered all the same while the process
+    /// runs.
+    pub async fn store(&self, home: &Path, event: Event) -> Result<()> {
         let mut queues = self.0.queues.lock().await;
         let queue = match queues.entry(event.ant.clone()) {
             std::collections::hash_map::Entry::Occupied(queue) => queue.into_mut(),
@@ -132,9 +142,10 @@ impl Outbox {
                 entry.insert(Queue::read(queue_file(home), self.0.retry.0).await)
             }
         };
-        queue.push(event).await;
+        let stored = queue.push(event).await;
         drop(queues);
         self.wake();
+        stored
     }
 
     /// The events of `ant` not yet acked.
@@ -254,18 +265,15 @@ impl Queue {
     }
 
     /// Add `event`, appended to the file, or the file written again when the oldest went past [`CAP`].
-    async fn push(&mut self, event: Event) {
-        let line = match serde_json::to_string(&event) {
-            Ok(line) => line + "\n",
-            Err(e) => return tracing::warn!(error = %e, "writing a lifecycle event"),
-        };
+    async fn push(&mut self, event: Event) -> Result<()> {
+        let line = serde_json::to_string(&event).context("writing a lifecycle event")? + "\n";
         self.events.push_back(event);
         if self.trim() > 0 {
-            return self.store().await;
+            let file = self.file.display();
+            return rewrite(&self.file, &self.events).await.with_context(|| format!("writing {file}"));
         }
-        if let Err(e) = append(&self.file, line.as_bytes()).await {
-            tracing::warn!(file = %self.file.display(), error = format!("{e:#}"), "storing a lifecycle event");
-        }
+        let file = self.file.display();
+        append(&self.file, line.as_bytes()).await.with_context(|| format!("appending to {file}"))
     }
 
     /// Drop the oldest events past [`CAP`]: how many.
@@ -399,6 +407,15 @@ impl Lifecycle {
     pub async fn thread_started(&self, thread: &ThreadId, message: &str, origin: Origin) {
         let id = derived(&[self.ant.as_str(), thread.as_str(), message, "thread_started"]);
         self.push(event(id, &self.ant, &self.identity, Some(thread), EventKind::ThreadStarted { origin })).await;
+    }
+
+    /// Tell of `thread` marked done at `at`, by the done state stored at sequence `seq` of the stream of
+    /// [`ants_proto::THREADS_BUCKET`]: told again with the same id when that one is. Fails when the event could not be
+    /// stored.
+    pub async fn thread_done(&self, thread: &ThreadId, seq: u64, at: DateTime<Utc>) -> Result<()> {
+        let id = derived(&[self.ant.as_str(), thread.as_str(), &seq.to_string(), "thread_done"]);
+        let told = event(id, &self.ant, &self.identity, Some(thread), EventKind::ThreadDone);
+        self.outbox.store(&self.home, Event { at, ..told }).await
     }
 
     /// Tell of a retirement once the daemon stopped serving the ant: when its home is marked retired

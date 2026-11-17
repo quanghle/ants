@@ -136,10 +136,11 @@ impl Object {
     }
 
     /// Whether a bucket is watched by every daemon, channel manager or standby daemon, each watch an ordered consumer of
-    /// its stream: the colony (each standby daemon's entry), the channels and the humans. Such a bucket needs room for
+    /// its stream: the colony (each standby daemon's entry), the channels and the humans; or, the threads, read by
+    /// every ant's durable consumer of the done states ([`ants_proto::done_reader`]). Such a bucket needs room for
     /// [`MAX_CONSUMERS`] too.
     pub fn watched(self) -> bool {
-        matches!(self, Self::Colony | Self::Channels | Self::Humans)
+        matches!(self, Self::Colony | Self::Channels | Self::Humans | Self::Threads)
     }
 
     async fn check(self, js: &jetstream::Context) -> Option<Problem> {
@@ -428,7 +429,8 @@ pub fn read_config() -> kv::Config {
 
 /// The stream of the bucket of thread titles and each human's pinned and archived threads ([`THREADS_BUCKET`]): a KV
 /// bucket of history 1 whose entries never expire, but which takes per-message TTLs, so the delete markers of titles
-/// `ants thread list` prunes go too. It places no markers of its own when one expires.
+/// `ants thread list` prunes go too. It places no markers of its own when one expires. It has room for
+/// [`MAX_CONSUMERS`], one for each ant's done states ([`ants_proto::done_reader`]).
 pub fn threads_config() -> stream::Config {
     stream::Config {
         name: format!("KV_{THREADS_BUCKET}"),
@@ -442,6 +444,7 @@ pub fn threads_config() -> stream::Config {
         allow_rollup: true,
         deny_delete: true,
         allow_message_ttl: true,
+        max_consumers: MAX_CONSUMERS,
         ..Default::default()
     }
 }

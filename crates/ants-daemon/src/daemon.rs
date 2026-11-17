@@ -939,6 +939,9 @@ where
         () = crate::secrets::creds::recheck(config.connection.creds.as_deref()) => {}
         () = storage.watch(crate::monitoring::storage::CHECK_EVERY) => {}
         () = tell_unserved(inbox.js, inbox.humans, &mut unserved) => {}
+        () = events::done::hear(inbox.js, inbox.ant, inbox.lifecycle, async |thread| {
+            inbox.pool.has_session(thread).await
+        }) => {}
     }
     Ok(if stopping.get() {
         Served::Stopped

@@ -861,9 +861,19 @@ fn humans_set_every_title_tldr_and_done_state_but_only_their_own_pins_and_archiv
     let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
     let threads: Vec<&String> =
         ant.publish.iter().chain(&ant.subscribe).filter(|s| s.contains("ants_threads")).collect();
-    let gets = ["title.*", "done.*", "reminders.*"]
-        .map(|k| format!("$JS.API.DIRECT.GET.KV_ants_threads.$KV.ants_threads.{k}"));
-    assert_eq!(threads, gets.iter().collect::<Vec<_>>(), "an ant only reads titles, done states and own reminders");
+    let mut reads: Vec<String> = ["title.*", "done.*", "reminders.*"]
+        .map(|k| format!("$JS.API.DIRECT.GET.KV_ants_threads.$KV.ants_threads.{k}"))
+        .into();
+    reads.extend([
+        "$JS.API.CONSUMER.CREATE.KV_ants_threads.done-dev-a.$KV.ants_threads.done.*".to_owned(),
+        "$JS.API.CONSUMER.MSG.NEXT.KV_ants_threads.done-dev-a".to_owned(),
+    ]);
+    reads.extend(ack_subjects("KV_ants_threads", "done-dev-a"));
+    assert_eq!(
+        threads,
+        reads.iter().collect::<Vec<_>>(),
+        "an ant only reads titles, done states and own reminders, and hears of done states through its own consumer"
+    );
     let assisted = "$JS.API.DIRECT.GET.KV_ants_threads.$KV.ants_threads.reminders.alice.pa";
     assert!(!threads.iter().any(|s| covers(s, assisted)), "nor snoozes an assistant set");
     let observer = Permissions::for_observer(&p("watcher"));
