@@ -186,6 +186,13 @@ async fn progress_acks_keep_messages_in_hand_past_the_ack_wait() {
     let check = async {
         until("the prompt to start", || log.locked().starts == 1).await;
         assert_eq!(bus.consumer().await.config.ack_wait, ack_wait);
+        timeout(WAIT, async {
+            while bus.consumer().await.num_ack_pending < 2 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("both messages in hand");
         tokio::time::sleep(ack_wait * 4).await;
         let consumer = bus.consumer().await;
         assert_eq!((consumer.num_redelivered, consumer.num_ack_pending), (0, 2), "neither message came back");

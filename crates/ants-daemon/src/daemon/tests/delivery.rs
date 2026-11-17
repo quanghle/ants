@@ -13,8 +13,7 @@ async fn the_reply_carries_the_title_suggested_during_its_turn() {
     let Some((mut bus, mut replies)) = Bus::start().await else { return };
     let (launch, log, gate) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
-    let home = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/daemon-t/title");
-    let _ = std::fs::remove_dir_all(&home);
+    let home = bus._server.dir().join("title");
     std::fs::create_dir_all(&home).unwrap();
     let (outbox, colony) = (crate::mcp::jetstream_outbox(bus.js.clone()), crate::mcp::jetstream_colony(bus.js.clone()));
     let notes = Arc::new(crate::notes::JetStreamNotes::new(bus.js.clone(), bus.dev.clone()));
@@ -99,8 +98,8 @@ async fn the_answer_carries_the_files_attached_during_its_turn() {
     bus.js.create_stream(crate::hub::files_config()).await.unwrap();
     let (launch, log, gate) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
-    let home = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/daemon-t/reply-files");
-    let _ = std::fs::remove_dir_all(&home);
+    // The server's directory is this run's own: test runs at once delete and attach each other's files otherwise.
+    let home = bus._server.dir().join("reply-files");
     let work = home.join("work");
     std::fs::create_dir_all(&work).unwrap();
     std::fs::write(work.join("report.md"), "# done").unwrap();
@@ -362,8 +361,7 @@ async fn complete_ends_the_turn_on_an_ant_s_message_with_no_reply_but_not_on_a_h
     let Some((mut bus, mut to_human)) = Bus::start().await else { return };
     let (launch, log, gate) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
-    let home = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/daemon-t/complete");
-    let _ = std::fs::remove_dir_all(&home);
+    let home = bus._server.dir().join("complete");
     std::fs::create_dir_all(&home).unwrap();
     let (outbox, colony) = (crate::mcp::jetstream_outbox(bus.js.clone()), crate::mcp::jetstream_colony(bus.js.clone()));
     let notes = Arc::new(crate::notes::JetStreamNotes::new(bus.js.clone(), bus.dev.clone()));
