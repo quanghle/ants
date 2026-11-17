@@ -105,8 +105,9 @@ impl Permissions {
     /// attachments of the messages it sends only, under its own name, and an ant reads only those of the messages it
     /// reads, by direct gets; a human reads them all and may create their store ([`attachment_rights`]).
     ///
-    /// An ant stores the tool-call timeline of its own work ([`subject::timeline_from`]) and reads none back; a human
-    /// reads every timeline by message gets.
+    /// An ant stores the tool-call timeline of its own work ([`subject::timeline_from`]) and reads back its own only,
+    /// through its own [`sent_reader`] filtering only those, for its dreams' review packets; a human reads every
+    /// timeline by message gets.
     ///
     /// An ant creates and updates its own identity record in [`IDENTITIES_BUCKET`] ([`subject::identity`]), no other's,
     /// and reads every ant's, which say nothing secret; a human reads every ant's and sets their avatars and colours
@@ -250,9 +251,12 @@ impl Permissions {
             format!("$JS.API.DIRECT.GET.{STREAM}.{}.*", subject::approvals(user)),
             subject::dead(user),
             subject::outbox(&subject::dead(user)).expect("an outbox subject"),
-            // Storing the timeline of its own work, which no ant reads back.
+            // Storing the timeline of its own work.
             subject::timeline_from(user),
             subject::outbox(&subject::timeline_from(user)).expect("an outbox subject"),
+            // Reading it back, for its dreams, through its sent reader filtering only its own timeline, of every
+            // thread or of one (the `*` of the filter allows both).
+            format!("$JS.API.CONSUMER.CREATE.{STREAM}.{sent_read}.{}", subject::timeline_from(user)),
             // Reading its own dead letters back, through its own consumer filtering only those.
             format!("$JS.API.CONSUMER.CREATE.{STREAM}.{dead_read}.{}", subject::dead(user)),
             format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{dead_read}"),

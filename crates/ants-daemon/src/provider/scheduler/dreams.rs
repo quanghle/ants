@@ -1,6 +1,6 @@
 //! The daemon's part of the ant's dreams ([`ants_sense::dream`]): when one is due, the ant has had no prompt running
-//! for [`IDLE_MINUTES`] and its threads were active since the last dream, it gathers them and the commits they left,
-//! begins the dream and wakes the ant on a new thread with its packet.
+//! for [`IDLE_MINUTES`] and its threads were active since the last dream, it gathers them, with the timeline the ant
+//! stored on them, and the commits they left, begins the dream and wakes the ant on a new thread with its packet.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -159,7 +159,7 @@ impl Dreaming for Daemon {
             let (from, to) = (SystemTime::from(since), SystemTime::from(until));
             let active = history::active(&self.js, &self.ant, self.reading, from, to, PACKET_BUDGET).await?;
             let mut threads = Vec::with_capacity(active.len());
-            for (id, text) in active {
+            for history::Active { thread: id, history: text, timeline } in active {
                 let origin = match &self.origins {
                     Some(origins) => origins.get(&id).await.unwrap_or_else(|e| {
                         tracing::warn!(thread = %id, error = format!("{e:#}"), "reading the origin of a thread");
@@ -169,7 +169,7 @@ impl Dreaming for Daemon {
                 };
                 let untrusted = origin.as_ref().is_some_and(|origin| !origin.trusted());
                 let started_by = origin.map_or_else(|| "someone not known".to_owned(), |origin| starter(&origin.by));
-                threads.push(Thread { id, untrusted, started_by, text });
+                threads.push(Thread { id, untrusted, started_by, text, timeline });
             }
             Ok(threads)
         })

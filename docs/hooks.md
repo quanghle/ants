@@ -190,7 +190,9 @@ the human in `decider` and the assistant in `via`; no `ApprovalDecision` is stor
 
 Stored in `ANTS`: part of the tool-call timeline of an ant's prompt on a thread, so a thread's history shows the calls
 after their live status updates are gone, and whether the prompt ended with no reply sent. Humans read it back by
-message gets (`ants thread show`); no ant reads it.
+message gets (`ants thread show`). An ant's daemon reads back the ant's own records alone, through its sent reader
+`sentread-<ant>` filtered to `ants.timeline.*.<ant>`, only for its [dreams](architecture.md#sense-dreams)' packets; no
+ant reads another's.
 `ant`, `thread_id`, `message` (the id of the message whose prompt it covers), `at`, `omitted`? (calls of the prompt
 left out past 200) and 1 to 50 `entries`, each named by `type`:
 

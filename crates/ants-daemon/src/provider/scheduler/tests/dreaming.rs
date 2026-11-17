@@ -39,6 +39,7 @@ impl Fake {
                 untrusted: *untrusted,
                 started_by: "human alice".into(),
                 text: format!("the work of {id}"),
+                timeline: format!("the calls of {id}"),
             })
             .collect();
     }
@@ -84,7 +85,8 @@ async fn a_dream_waits_for_an_idle_ant_with_activity_and_comes_once_a_day() {
     assert_eq!(requests.len(), 1);
     assert!(requests[0].thread.is_none(), "a dream has a thread of its own");
     assert!(requests[0].id.starts_with("dream-1-"), "{}", requests[0].id);
-    for part in ["# Dream 1", "the work of worked-thread", "### Thread hooked-thread", "untrusted", "c0ffee"] {
+    let parts = ["# Dream 1", "the work of worked-thread", "the calls of worked-thread", "### Thread hooked-thread"];
+    for part in parts.into_iter().chain(["untrusted", "c0ffee"]) {
         assert!(requests[0].text.contains(part), "{part} in {}", requests[0].text);
     }
     let first = last(&*items).await.unwrap();

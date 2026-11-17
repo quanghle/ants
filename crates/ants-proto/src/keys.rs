@@ -281,9 +281,10 @@ pub fn dead_reader(ant: &UserId) -> String {
     format!("deadread-{ant}")
 }
 
-/// JetStream consumer an ant's daemon reads back the messages the ant sent through, one read at a time, like
-/// [`notes_consumer`], to rebuild the context of a thread and to find those that keep waiting for an ant no daemon
-/// serves ([`unserved_key`]). Its filter is pinned to [`subject::inbox_from`] of the ant.
+/// JetStream consumer an ant's daemon reads back what the ant stored through, one read at a time, like
+/// [`notes_consumer`]: the messages it sent, to rebuild the context of a thread and to find those that keep waiting for
+/// an ant no daemon serves ([`unserved_key`]), and its own tool-call timeline, to show its threads in its dreams' review
+/// packets. Its filter is pinned to [`subject::inbox_from`] or [`subject::timeline_from`] of the ant.
 pub fn sent_reader(ant: &UserId) -> String {
     format!("sentread-{ant}")
 }

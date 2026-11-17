@@ -1173,11 +1173,18 @@ fn a_host_stores_and_reads_only_its_own_admin_payloads_which_no_ant_reaches() {
 }
 
 #[test]
-fn ants_store_only_their_own_timeline_and_read_none() {
+fn ants_store_and_read_back_only_their_own_timeline() {
     let timeline =
         |list: &[String]| -> Vec<String> { list.iter().filter(|s| s.contains("timeline")).cloned().collect() };
     let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
-    assert_eq!(timeline(&ant.publish), ["ants.timeline.*.dev-a", "ants.out.timeline.*.dev-a"]);
+    assert_eq!(
+        timeline(&ant.publish),
+        [
+            "ants.timeline.*.dev-a",
+            "ants.out.timeline.*.dev-a",
+            "$JS.API.CONSUMER.CREATE.ANTS.sentread-dev-a.ants.timeline.*.dev-a",
+        ]
+    );
     assert!(timeline(&ant.subscribe).is_empty());
     assert!(!ant.subscribe.iter().any(|s| s == subject::ALL || s == ">"));
     // A human stores none, and reads them all as it reads every stored message.
