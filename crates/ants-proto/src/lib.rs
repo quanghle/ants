@@ -45,41 +45,102 @@ pub mod subject;
 mod threads;
 mod timeline;
 
-pub use admin::*;
-pub use ant_request::*;
-pub use approvals::*;
-pub use attachments::*;
-pub use behalf::*;
-pub use chanadm::*;
-pub use channels::*;
-pub use colony::*;
-pub use consent::*;
-pub use dead::*;
-pub use enroll::*;
-pub use envelope::*;
-pub use error::*;
-pub use escalation::*;
-pub use grant::*;
-pub use humans::*;
-pub use identity::*;
-pub use ids::*;
-pub use inbox::*;
-pub use keys::*;
-pub use login::*;
-pub use machines::*;
-pub use mcp::*;
-pub use memories::*;
-pub use permissions::*;
-pub use presence::*;
-pub use questions::*;
-pub use queue::*;
-pub use reactions::*;
-pub use roles::*;
-pub use sealed::*;
-pub use shared::*;
-pub use status::*;
-pub use threads::*;
-pub use timeline::*;
+pub use admin::{
+    ASSISTANT_ORDER_KINDS, AdminOp, AdminOrder, AdminOutcome, FieldChange, HARNESSES_FIELD, Hidden, ORDER_CLOCK_SKEW,
+    ORDER_HOLD, ORDER_RULE, ORDER_SIGNING_CONTEXT, OrderError, OrderState, Settings, admin_outcome_key,
+    admin_outcome_of, canonical_json, covers_order, held_orders_key,
+};
+pub use ant_request::{AntReply, AntRequest, AskedAnt};
+pub use approvals::{ApprovalDecision, ApprovalRequest, ToolCall, Verdict};
+pub use attachments::{
+    ATTACHMENT_CHUNK, ATTACHMENT_HEADER, ATTACHMENT_HEADROOM, Attachment, AttachmentHandle, AttachmentScope,
+    FILES_BUCKET, FILES_STREAM, IMAGE_MIMES, MAX_ATTACHMENT_NAME, MAX_ATTACHMENT_SIZE, MAX_ATTACHMENTS,
+    SealedAttachment, check_attachments, guess_mime,
+};
+pub use behalf::{ASSISTANT_RECORD, Acting, AssistantRecord, RecordError, assistant_record_key};
+pub use chanadm::{ChannelAdminOutcome, ChannelAdminReply, ChannelAdminRequest, ChannelOp, Refusal};
+pub use channels::{ChannelEntry, ChannelPost, ThreadOrigin};
+pub use colony::{
+    Activity, AntModel, ColonyEntry, HarnessAgent, HarnessFailing, HarnessLimit, LimitKind, MemoryLow, Paused,
+    ServingFallback, SignInNeeded,
+};
+pub use consent::{
+    Act, ActAnswer, CONFIRMATIONS, Confirmations, ConfirmedAct, ConsentApplied, ConsentError, ConsentKey, Consents,
+    MAX_CONFIRMED, MAX_PRE_ALLOW, PRE_ALLOW, PreAllow, confirmations_key, pre_allow_key, pre_allow_rule,
+};
+pub use dead::DeadLetter;
+pub use enroll::{
+    ENROLL_INBOX, ENROLL_REPEAT, EnrollHost, EnrollLeaf, EnrollReply, EnrollRequest, RenewReply, RenewRequest,
+    enrollment_user,
+};
+pub use envelope::{Envelope, Mention, NotesPost, NoticeKind, Quote, SummaryOf, SummaryRequest, parse_mentions};
+pub use error::Error;
+pub use escalation::{Away, ChainEntry, Escalation, EscalationReason, Hop, OwnerBecause};
+pub use grant::{
+    ASSISTANT_GRANT, Applied, AssistantGrant, GRANT_CLOCK_SKEW, GrantError, Grants, SealingDevice, UserJwt,
+    VerifiedGrant, assistant_grant_key, assistant_grant_of,
+};
+pub use humans::{HumanEntry, Humans, writes_human_entries};
+pub use identity::{
+    AntIdentity, Avatar, Cell, ClonedFrom, FACE_WIDTH, Frame, Grid, HEAD_COLUMNS, HEAD_ROWS, HUE_NAMES, Mood, Motion,
+    MovedMark, Palette, Pixel, Rgb, Side, Stage, Theme, hue_named,
+};
+pub use ids::{ChannelId, JsDomain, Machine, Reaction, Role, ThreadId, UserId};
+pub use inbox::{ChannelNotify, ChannelReadMarkers, HeldNotices, NotifyPrefs, ReadMarker};
+pub use keys::{
+    ANTS_VERSION, Feed, SERVING_EVERY, SPARE_READERS, Serving, assisted_marks_key, assisted_owner_key,
+    assisted_reminders_key, assisted_withdrawal_key, attempt_key, chan_consumer, chan_reader,
+    channel_manager_serving_key, channel_manager_serving_subject, channel_reads_key, channel_seen_key, daily_spend_key,
+    dead_reader, done_key, escalation_deadlines_key, held_key, inbox_consumer, inbox_prefix, link_key, link_outbox,
+    links_to, marks_key, mention_key, message_mark_key, notes_consumer, notify_consumer, owner_key, owner_outbox,
+    owner_record_id, parse_link_key, parse_reaction_key, reaction_key, reactions_to, reminders_key, sent_reader,
+    session_key, spare_readers, storage_warning_key, summary_key, thread_spend_key, title_key, unserved_key,
+    webhook_marker_key, webhook_marker_subject, webhook_seen_key,
+};
+pub(crate) use keys::{STORAGE_WARNING_PREFIX, WEBHOOK_MARKER};
+pub use login::{
+    BOOTSTRAP_MAX_PAYLOAD, BOOTSTRAP_USER, LOGIN_REPEAT, LOGIN_TTL, LoginAnswer, LoginReply, LoginRequest,
+    MAX_REGISTRATIONS, REGISTERED_TAG, tagged_registered,
+};
+pub use machines::{
+    ACCOUNT_HOLDER_KEY, AccountHolder, MachineRecord, admin_consumer, host_inbox_prefix, host_user, machines_of,
+};
+pub use mcp::{
+    MCP_FRESH, MCP_SERVERS_CAP, MCP_SIGN_IN_FOR, MCP_TEXT_CAP, McpReport, McpServerState, McpSignIn, McpStatus,
+};
+pub use memories::{
+    BdMemories, BdMemory, CoreMemories, MEMORIES_CAP, MEMORIES_FRESH, MEMORY_FILE_CAP, Memories, MemoryFile, Skipped,
+};
+pub use permissions::{Destination, LeafRole, PERMISSIONS_VERSION, Permissions, PermissionsVersion};
+pub use presence::{
+    DeviceId, DeviceKey, DeviceRevocation, Following, Presence, REVOKED_DEVICES, device_entry_key, device_entry_of,
+    presence_key, revoked_device_key,
+};
+pub use questions::{Answer, Answered, Choice, MAX_OPTION, MAX_OPTIONS, MAX_QUESTION, MIN_OPTIONS, Question};
+pub use queue::{
+    CancelReply, CancelRequest, ConsumerPlace, Hold, MessageMark, QueueReply, QueueRequest, QueuedMessage,
+};
+pub use reactions::{
+    Reacted, ReactionChange, ReactionEntry, ReactionsOutcome, ReactionsReply, ReactionsRequest, ReactionsResponder,
+};
+pub use roles::{
+    ADMIN_TAG, AdminRole, AssistantOf, JwtClaims, JwtError, VerifiedUser, is_admin, verified_jwt, verify_admin,
+    verify_assistant_of, verify_user_jwt,
+};
+pub use sealed::{SEALED_VERSION, Sealed, SealedBody, SealedKey};
+pub use shared::{
+    INCARNATION_KEY, SETTINGS_SIGNING_CONTEXT, SHARED_FIELDS, SettingsError, SharedSettings, incarnation,
+    is_shared_field,
+};
+pub use status::{DecidedBy, MAX_TOOL_PATHS, PlanStep, State, StatusEvent, StatusUpdate};
+pub use threads::{
+    Archived, Mark, Reminder, Reminders, SNOOZE_MAX, SealedTitle, Snooze, ThreadDone, ThreadMarks, ThreadSnoozes,
+    ThreadSummary, ThreadTitle,
+};
+pub use timeline::{
+    MAX_TIMELINE_CALLS, MAX_TIMELINE_ENTRIES, MAX_TIMELINE_PATH, MAX_TIMELINE_STEPS, MAX_TIMELINE_TITLE, MergedCall,
+    MergedNoReply, NoReplyWhy, TIMELINE_EVERY, Timeline, TimelineCall, TimelineEntry, Timelines,
+};
 
 /// JetStream stream holding every durable ants message.
 pub const STREAM: &str = "ANTS";
