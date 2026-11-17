@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use ants_proto::{Envelope, Question, Role, ThreadId, UserId};
+use ants_proto::{Envelope, Question, QuestionOption, Questions, Role, ThreadId, UserId};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
 use rmcp::service::RequestContext;
@@ -67,13 +67,64 @@ struct CheckInbox {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct AskHuman {
+    /// 1-4 questions, answered together in one message.
+    questions: Vec<AskedQuestion>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct AskedQuestion {
     /// The question: 1-500 characters.
     question: String,
-    /// 2-9 options to pick from by number, each one line of 1-200 characters.
-    options: Vec<String>,
-    /// Whether the human may type an answer instead of picking an option (default true).
+    /// A short label naming the question on its tab, such as `Database`: one line of at most 12 characters.
+    #[serde(default)]
+    header: Option<String>,
+    /// 2-9 options to pick from by number: each a label, one line of 1-200 characters, or an object with the label
+    /// and a description saying what picking it means, one line of at most 300 characters.
+    options: Vec<AskedOption>,
+    /// Whether the human may pick several options (default false).
+    #[serde(default)]
+    multi_select: bool,
+    /// Whether the human may type an answer instead of picking options (default true).
     #[serde(default)]
     free_text: Option<bool>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(untagged)]
+enum AskedOption {
+    Label(String),
+    Described {
+        label: String,
+        #[serde(default)]
+        description: Option<String>,
+    },
+}
+
+impl AskHuman {
+    /// The questions asked, checked as [`Questions::new`] does.
+    fn questions(self) -> Result<Questions, String> {
+        let questions = self
+            .questions
+            .into_iter()
+            .map(|q| Question {
+                text: q.question,
+                header: q.header,
+                options: q
+                    .options
+                    .into_iter()
+                    .map(|o| match o {
+                        AskedOption::Label(label) => QuestionOption::new(&label),
+                        AskedOption::Described { label, description } => {
+                            QuestionOption::described(&label, description.as_deref().unwrap_or_default())
+                        }
+                    })
+                    .collect(),
+                multi_select: q.multi_select,
+                free_text: q.free_text.unwrap_or(true),
+            })
+            .collect();
+        Questions::new(questions).map_err(|e| e.to_string())
+    }
 }
 
 impl Hub {
@@ -119,11 +170,10 @@ impl Hub {
         Ok(envelope.with_escalation(escalation))
     }
 
-    /// Ask the owner of the thread `thread` is handling a message on, else the default human, `args`'s question on
-    /// the thread, without waiting: the answer comes later as a message. Spends no turn.
+    /// Ask the owner of the thread `thread` is handling a message on, else the default human, `args`'s questions on
+    /// the thread, without waiting: the answer to all of them comes later as one message. Spends no turn.
     async fn ask_human(&self, thread: &ThreadId, args: AskHuman) -> Result<String, String> {
-        let question =
-            Question::new(&args.question, &args.options, args.free_text.unwrap_or(true)).map_err(|e| e.to_string())?;
+        let question = args.questions()?;
         let human = {
             let sessions = self.sessions.locked();
             let current = sessions.current.get(thread);
@@ -141,16 +191,16 @@ impl Hub {
                 return Ok(format!(
                     "Asked {assistant}, the assistant of {human}, first, on thread {}. The answer comes later as a \
                      message from {assistant}, or {assistant} passes the question on to {human}, as happens without \
-                     its answer after escalate_after; {human}'s answer then names the question and the option picked, \
-                     or says the answer is typed.",
+                     its answer after escalate_after; {human}'s answer then names each question and the options \
+                     picked, or the answer typed.",
                     envelope.thread_id
                 ));
             }
         }
         self.send(&envelope).await?;
         Ok(format!(
-            "Asked {human} on thread {} as message {}. The answer comes later as a message from {human} naming the \
-             question and the option picked, or saying the answer is typed.",
+            "Asked {human} on thread {} as message {}. The answer comes later as one message from {human} naming \
+             each question and the options picked, or the answer typed.",
             envelope.thread_id, envelope.id
         ))
     }
@@ -261,11 +311,15 @@ impl Tools {
         Ok(text(self.hand_off(&thread, args.text, args.thread.as_deref()).await))
     }
 
-    #[tool(description = "Ask the thread's owner, else the default human, a question with 2-9 options to pick from \
-        by number, and return the question's message id at once without waiting. `free_text` (default true) lets the \
-        human type an answer instead. The answer arrives later as a new message on this thread, naming the question \
-        and the option picked or saying the answer is typed. A human with an assistant that can act gets the question \
-        through it: the assistant answers, or passes it on to the human. Spends no turn.")]
+    #[tool(description = "Ask the thread's owner, else the default human, 1-4 questions in one message, each \
+        with 2-9 options to pick from by number, and return the message id at once without waiting. Ask related \
+        decisions together rather than one call each: the human answers them all, then sends one answer. Each \
+        question may have a short `header` naming its tab, options with a `description`, `multi_select` (default \
+        false) to let the human pick several options, and `free_text` (default true) to let the human type an answer \
+        instead. One question: {\"questions\": [{\"question\": \"Ship it?\", \"options\": [\"yes\", \"no\"]}]}. The \
+        answer arrives later as one new message on this thread, with a line for each question naming the options \
+        picked or the answer typed. A human with an assistant that can act gets the questions through it: the \
+        assistant answers, or passes them on to the human. Spends no turn.")]
     async fn ask_human(
         &self,
         Parameters(args): Parameters<AskHuman>,

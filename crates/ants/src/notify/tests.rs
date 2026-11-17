@@ -388,6 +388,30 @@ fn replies_on_a_thread_fold_into_one_notice_once_it_is_quiet_or_has_waited_five_
 }
 
 #[test]
+fn a_notice_of_several_questions_lists_them_all_and_how_to_answer_each() {
+    let (alice, dev_a) = (p("alice"), p("dev-a"));
+    let options = ["eu".to_owned(), "us".to_owned()];
+    let regions = ants_proto::Question::new("Which regions?", &options, false).unwrap().multi().headed("Regions");
+    let ship = ants_proto::Question::new("Ship it?", &["yes".to_owned(), "no".to_owned()], true).unwrap();
+    let questions = ants_proto::Questions::new(vec![regions, ship]).unwrap();
+    let asking = Envelope::asking(ThreadId::generate(), dev_a, alice, questions);
+    let notice = question_notice(&asking).unwrap();
+    assert_eq!(notice.title, "dev-a asks 2 questions: Which regions?");
+    assert!(notice.text.contains("Question 2 of 2: Ship it?"), "{}", notice.text);
+    assert!(
+        notice.text.contains(&format!("ants answer {} and an answer for each of the 2", asking.id)),
+        "{}",
+        notice.text
+    );
+    let json = notice_json(&notice, at("2026-03-10T12:00:00Z"));
+    assert_eq!(
+        (&json["questions"][0]["header"], &json["questions"][0]["multi_select"]),
+        (&json!("Regions"), &json!(true))
+    );
+    assert_eq!(json["questions"][1]["question"], "Ship it?");
+}
+
+#[test]
 fn a_question_is_its_own_notice_held_back_like_a_completion_unless_bypass_lists_it() {
     let (alice, dev_a) = (p("alice"), p("dev-a"));
     let options = ["Postgres".to_owned(), "SQLite".to_owned()];
@@ -411,10 +435,15 @@ fn a_question_is_its_own_notice_held_back_like_a_completion_unless_bypass_lists_
     assert!(notice.text.contains("1. Postgres") && !notice.text.contains("ghp_"), "{}", notice.text);
     let json = notice_json(&notice, at("2026-03-10T12:00:00Z"));
     assert_eq!(
-        (&json["kind"], &json["id"], &json["ant"], &json["thread"], &json["options"], &json["free_text"]),
-        (&json!("question"), &json!(id), &json!("dev-a"), &json!(thread), &json!(options), &json!(false))
+        (&json["kind"], &json["id"], &json["ant"], &json["thread"]),
+        (&json!("question"), &json!(id), &json!("dev-a"), &json!(thread))
     );
-    assert!(!json["question"].as_str().unwrap().contains("ghp_"), "{json}");
+    let asked = &json["questions"][0];
+    assert_eq!(
+        (&asked["options"][0], &asked["multi_select"], &asked["free_text"]),
+        (&json!({"label": "Postgres", "description": null}), &json!(false), &json!(false))
+    );
+    assert!(!asked["question"].as_str().unwrap().contains("ghp_"), "{json}");
     assert!(completion_notice(&asking).is_none() && question_notice(&Envelope::new(dev_a, alice, "hi")).is_none());
     assert_eq!(counted("question", 2), "2 questions");
 

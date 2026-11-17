@@ -9,12 +9,21 @@ expression: value
   "to": "alice",
   "message": "019a7d2e-0000-7000-8000-00000000000b",
   "question": {
-    "text": "Ship it?",
-    "options": [
-      "yes",
-      "not yet"
-    ],
-    "free_text": false
+    "questions": [
+      {
+        "text": "Ship it?",
+        "options": [
+          {
+            "label": "yes"
+          },
+          {
+            "label": "not yet"
+          }
+        ],
+        "multi_select": false,
+        "free_text": false
+      }
+    ]
   },
   "at": "2025-01-01T12:00:00Z"
 }

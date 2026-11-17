@@ -54,16 +54,50 @@ expression: value
     "tokens": 1834
   },
   "question": {
-    "text": "Ship the fix?",
-    "options": [
-      "yes",
-      "not yet"
-    ],
-    "free_text": false
+    "questions": [
+      {
+        "text": "Ship the fix?",
+        "header": "Ship",
+        "options": [
+          {
+            "label": "yes",
+            "description": "tag and release"
+          },
+          {
+            "label": "not yet"
+          }
+        ],
+        "multi_select": false,
+        "free_text": false
+      },
+      {
+        "text": "Which regions?",
+        "options": [
+          {
+            "label": "eu"
+          },
+          {
+            "label": "us"
+          }
+        ],
+        "multi_select": true,
+        "free_text": true
+      }
+    ]
   },
   "answer": {
     "question": "019a7d2e-0000-7000-8000-000000000004",
-    "option": 2
+    "picks": [
+      {
+        "options": [
+          1,
+          2
+        ]
+      },
+      {
+        "typed": "ap only"
+      }
+    ]
   },
   "attachments": [
     {

@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use ants_proto::{Answered, NoReplyWhy, UserId};
+use ants_proto::{Answered, NoReplyWhy, Pick, UserId};
 use chrono::{DateTime, Utc};
 
 use super::NoReply;
@@ -112,9 +112,23 @@ pub(crate) fn took(ms: u64) -> String {
 pub fn heading(e: &Entry) -> String {
     let forged = if e.forged { " (forged)" } else { "" };
     let note = e.note.as_ref().map_or_default(|n| format!(" [{n}]"));
-    let answering = e.answer.as_ref().map_or_default(|a| match a.option {
-        Some(n) => format!(" [answers {} with option {n}]", a.question),
-        None => format!(" [answers {} as typed]", a.question),
+    let answering = e.answer.as_ref().map_or_default(|a| {
+        let picks: Vec<String> = a
+            .picks
+            .iter()
+            .map(|p| match p {
+                Pick::Options(numbers) if numbers.len() == 1 => format!("option {}", numbers[0]),
+                Pick::Options(numbers) => {
+                    let numbers: Vec<String> = numbers.iter().map(u32::to_string).collect();
+                    format!("options {}", numbers.join(", "))
+                }
+                Pick::Typed(_) => "typed".to_owned(),
+            })
+            .collect();
+        match picks.as_slice() {
+            [typed] if typed == "typed" => format!(" [answers {} as typed]", a.question),
+            _ => format!(" [answers {} with {}]", a.question, picks.join("; ")),
+        }
     });
     let kind = e.kind.as_str();
     let id = e.id.map_or_default(|id| format!(" (message {id})"));
@@ -155,17 +169,30 @@ fn no_reply(end: &NoReply, text: &str) -> String {
     if text.is_empty() { why } else { format!("{why}: {text}") }
 }
 
-/// The answers among `entries` to `question`, an entry asking one, oldest first, each with who answered: an option
-/// picked or a typed answer, the answer's text.
-pub fn answers_to<'a>(question: &'a Entry, entries: &'a [Entry]) -> impl Iterator<Item = (&'a Entry, Answered<'a>)> {
+/// The answers among `entries` to `question`, an entry asking questions, oldest first, each with who answered and
+/// its pick for each question: options picked or a typed answer.
+pub fn answers_to<'a>(
+    question: &'a Entry,
+    entries: &'a [Entry],
+) -> impl Iterator<Item = (&'a Entry, Vec<Answered<'a>>)> {
     entries.iter().filter_map(move |e| Some((e, e.answers(question)?)))
 }
 
-/// How a question's answer is shown beneath it: who answered with which option, or typed what.
-pub(crate) fn answer_line(by: &Entry, answered: Answered<'_>) -> String {
+/// How an answer is shown beneath the questions it answers: who answered with which options, or typed what; among
+/// several questions, each named by its header, else its number.
+pub(crate) fn answer_line(by: &Entry, answered: Vec<Answered<'_>>) -> String {
     let from = by.from.as_ref().map_or("(a human)", UserId::as_str);
-    match answered {
-        Answered::Option(n, option) => format!("answered by {from}: option {n}, {option}"),
-        Answered::Typed => format!("answered by {from}, typed: {}", crate::text::excerpt(&by.text, 72)),
+    let picked = |a: &Answered<'_>| match a.pick {
+        Pick::Typed(text) => format!("typed: {}", crate::text::excerpt(text, 72)),
+        Pick::Options(_) => a.picked(),
+    };
+    match answered.as_slice() {
+        [one] if matches!(one.pick, Pick::Typed(_)) => format!("answered by {from}, {}", picked(one)),
+        [one] => format!("answered by {from}: {}", picked(one)),
+        several => {
+            let each: Vec<String> =
+                (1..).zip(several).map(|(n, a)| format!("{} {}", a.question.title(n), picked(a))).collect();
+            format!("answered by {from}: {}", each.join("; "))
+        }
     }
 }

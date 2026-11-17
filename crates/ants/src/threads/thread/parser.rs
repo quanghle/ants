@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use ants_proto::{
-    Acting, Answer, ApprovalDecision, ApprovalRequest, ChannelPost, DeadLetter, Envelope, NotesPost, Question,
+    Acting, Answer, ApprovalDecision, ApprovalRequest, ChannelPost, DeadLetter, Envelope, NotesPost, Questions,
     ThreadId, UserId, Uuid, subject,
 };
 use chrono::{DateTime, Utc};
@@ -80,7 +80,7 @@ impl Parser {
 
     /// The valid question `e` asks, kept to check later answers against, and its valid answer to a question read
     /// earlier; none of either for a forged message.
-    fn question_and_answer(&mut self, e: &Envelope, forged: bool) -> (Option<Question>, Option<Answer>) {
+    fn question_and_answer(&mut self, e: &Envelope, forged: bool) -> (Option<Questions>, Option<Answer>) {
         if forged {
             return (None, None);
         }

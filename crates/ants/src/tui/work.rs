@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use ants_proto::{ChannelId, EscalationReason, Question, ThreadDone, ThreadId, UserId, Uuid};
+use ants_proto::{ChannelId, EscalationReason, Questions, ThreadDone, ThreadId, UserId, Uuid};
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -90,14 +90,14 @@ pub struct Said {
     pub to: UserId,
 }
 
-/// A question to the human no answer was read to yet.
+/// Questions to the human, asked in one message, no answer was read to yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Asked {
-    /// The id of the question's envelope, which an answer names.
+    /// The id of the questions' envelope, which an answer names.
     pub id: Uuid,
     pub at: DateTime<Utc>,
     pub from: UserId,
-    pub question: Question,
+    pub question: Questions,
 }
 
 /// A message to the human, in its inbox.
@@ -774,13 +774,15 @@ mod tests {
         let thread = ThreadId::generate();
         let mut m = model();
         let mut asked = message(1, &thread, "dev-a", "alice", "Which policy?");
-        asked.question = Some(ants_proto::Question::new("Which policy?", &["a".into(), "b".into()], true).unwrap());
+        asked.question =
+            Some(ants_proto::Question::new("Which policy?", &["a".into(), "b".into()], true).unwrap().into());
         m.stored(vec![asked.clone()], at(1));
         m.data.marker.as_mut().unwrap().mark(1);
         assert_eq!(state(&m, &thread), ThreadState::WaitingOnMe, "read, but not answered");
         assert_eq!(doing(&m.data, &thread, 60), "question");
         let mut answer = message(2, &thread, "alice", "dev-a", "a");
-        answer.answer = Some(ants_proto::Answer { question: asked.id.unwrap(), option: Some(1) });
+        answer.answer =
+            Some(ants_proto::Answer { question: asked.id.unwrap(), picks: vec![ants_proto::Pick::option(1)] });
         m.stored(vec![answer], at(2));
         assert_eq!(state(&m, &thread), ThreadState::WaitingOnAnt);
         assert_eq!(doing(&m.data, &thread, 60), "");

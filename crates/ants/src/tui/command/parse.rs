@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use ants_proto::{ChannelId, ChannelNotify, Choice, Reaction, ThreadId, UserId};
+use ants_proto::{ChannelId, ChannelNotify, Reaction, ThreadId, UserId};
 use chrono::TimeDelta;
 
 use super::snooze;
@@ -16,7 +16,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("grant", "[TEXT]", "fresh turns for the stuck ant"),
     ("cancel", "", "stop the prompt an ant runs"),
     ("later", "TEXT", "reply without interrupting the ant at work"),
-    ("answer", "N|TEXT", "answer the question asked"),
+    ("answer", "PICK...", "answer the questions asked: N, N,M or TEXT, one each"),
     ("done", "", "mark the thread done"),
     ("undone", "", "mark the thread not done"),
     ("pin", "", "pin the thread"),
@@ -81,7 +81,8 @@ pub enum Slash {
     },
     Grant(Option<String>),
     Cancel,
-    Answer(Choice),
+    /// The text answering the questions asked: a pick, or one per question ([`quoted_words`]).
+    Answer(String),
     Done(bool),
     Mark(Marking),
     Mute(Option<Duration>),
@@ -131,6 +132,27 @@ fn first_word(text: &str) -> (&str, &str) {
 }
 
 /// What the bar's `text` says to do, or why it says nothing that can be done.
+/// `text` split at whitespace into words, a run quoted with `'` or `"` at the start of a word, up to its closing quote,
+/// being one word without its quotes; a quote with none closing it is kept as typed.
+pub fn quoted_words(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut rest = text.trim_start();
+    while !rest.is_empty() {
+        let quoted = rest.strip_prefix(['\'', '"']).and_then(|inner| {
+            let quote = rest.chars().next()?;
+            let end = inner.find(quote)?;
+            Some((inner[..end].to_owned(), &inner[end + 1..]))
+        });
+        let (word, after) = quoted.unwrap_or_else(|| {
+            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            (rest[..end].to_owned(), &rest[end..])
+        });
+        words.push(word);
+        rest = after.trim_start();
+    }
+    words
+}
+
 pub fn parse(text: &str) -> Result<Command, String> {
     let text = text.trim();
     if text.is_empty() {
@@ -193,7 +215,7 @@ fn slash(text: &str) -> Result<Slash, String> {
         }
         "grant" => Ok(Slash::Grant(optional())),
         "cancel" => bare(Slash::Cancel),
-        "answer" => text().map(|answer| Slash::Answer(Choice::parse(&answer))),
+        "answer" => text().map(Slash::Answer),
         "done" => bare(Slash::Done(true)),
         "undone" => bare(Slash::Done(false)),
         "pin" => bare(Slash::Mark(Marking::Pin)),
@@ -269,6 +291,14 @@ mod tests {
     }
 
     #[test]
+    fn quoted_words_keep_a_quoted_run_together() {
+        assert_eq!(
+            quoted_words(" 2  1,3 'after lunch' \"it's\" don't 'open"),
+            ["2", "1,3", "after lunch", "it's", "don't", "'open"]
+        );
+    }
+
+    #[test]
     fn slash_commands_take_their_arguments_and_refuse_others() {
         let ok = |text: &str| match parse(text) {
             Ok(Command::Slash(slash)) => slash,
@@ -278,8 +308,7 @@ mod tests {
         assert_eq!(ok("/APPROVE dev-a/019a --always"), Slash::Approve { id: Some("dev-a/019a".into()), always: true });
         assert_eq!(ok("/reject 019a"), Slash::Reject { id: Some("019a".into()) });
         assert_eq!(ok("/grant"), Slash::Grant(None));
-        assert_eq!(ok("/answer 2"), Slash::Answer(Choice::Option(2)));
-        assert_eq!(ok("/answer ship it"), Slash::Answer(Choice::Typed("ship it".into())));
+        assert_eq!(ok("/answer ship it"), Slash::Answer("ship it".into()));
         assert_eq!(ok("/mute 2h"), Slash::Mute(Some(Duration::from_hours(2))));
         assert_eq!(ok("/notify mentions"), Slash::Notify(ChannelNotify::Mentions));
         assert!(parse("/notify").unwrap_err().starts_with("usage: /notify all|humans|mentions"));
@@ -313,6 +342,7 @@ mod tests {
             "ID" | "THREAD" => "019a",
             "TEXT" | "NOTE" | "QUERY" => "ship it",
             "N" => "2",
+            "PICK..." => "2 'after lunch'",
             "DURATION" => "2h",
             "TIME" => "17:00",
             "SINCE" => "1d",

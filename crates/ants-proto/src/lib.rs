@@ -123,7 +123,10 @@ pub use presence::{
     DeviceId, DeviceKey, DeviceRevocation, Following, Presence, REVOKED_DEVICES, device_entry_key, device_entry_of,
     presence_key, revoked_device_key,
 };
-pub use questions::{Answer, Answered, Choice, MAX_OPTION, MAX_OPTIONS, MAX_QUESTION, MIN_OPTIONS, Question};
+pub use questions::{
+    Answer, Answered, MAX_DESCRIPTION, MAX_HEADER, MAX_OPTION, MAX_OPTIONS, MAX_QUESTION, MAX_QUESTIONS, MAX_TYPED,
+    MIN_OPTIONS, Pick, Question, QuestionOption, Questions,
+};
 pub use queue::{
     CancelReply, CancelRequest, ConsumerPlace, Hold, MessageMark, QueueReply, QueueRequest, QueuedMessage,
 };

@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
-use ants_proto::{ApprovalRequest, Question, ThreadId, UserId, Uuid, Verdict};
+use ants_proto::{ApprovalRequest, Questions, ThreadId, UserId, Uuid, Verdict};
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -119,7 +119,7 @@ pub struct Item {
     /// Whether it heads its group's requests listed one by one.
     pub expanded: bool,
     /// The question asked, and the id of the message asking it, which its keys answer.
-    pub question: Option<(Uuid, Question)>,
+    pub question: Option<(Uuid, Questions)>,
     /// How many of its reason wait on the thread: unread messages or mentions.
     pub count: usize,
     /// The thread's other, less pressing reasons, with how many of each: its badges.
@@ -253,7 +253,7 @@ fn unsnoozed(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
     };
     for thread in data.work() {
         if let Some(asked) = data.question(thread) {
-            let text = format!("{}: {}", asked.from, asked.question.text);
+            let text = format!("{}: {}", asked.from, question::asking(&asked.question));
             items.push(Item {
                 question: Some((asked.id, asked.question.clone())),
                 ..item(Why::Question, thread, asked.at, text, &asked.from)
@@ -419,7 +419,13 @@ impl Page {
             Key::Char('1'..='9') if selected.is_some_and(|i| i.question.is_some()) => {
                 let item = selected?;
                 let (id, asked) = item.question.as_ref()?;
-                return question::key(key, &item.thread, *id, asked);
+                return match question::key(key, &item.thread, *id, asked)? {
+                    question::Keyed::To(to) => Some(*to),
+                    question::Keyed::Focus(cursor) => {
+                        self.answering = Some(cursor);
+                        None
+                    }
+                };
             }
             Key::Char('r') => return thread().map(To::Reply),
             Key::Char('f') => return thread().map(|_| To::Bar("/forward @".to_owned())),
@@ -495,12 +501,12 @@ impl Page {
                     ),
                 ];
                 let cursor = cursor.filter(|_| at == selected);
-                if let Some((_, question)) = &i.question {
+                if let Some((id, question)) = &i.question {
                     if cursor.is_some() {
-                        let rows = question::rows(question, cursor, width);
+                        let rows = question::body(question, *id, cursor, width);
                         lines.extend(rows.into_iter().map(|l| Line::styled(format!("         {l}"), l.style)));
                     } else {
-                        lines.push(Line::raw(format!("         {}", excerpt(&question::numbered(question), 160))));
+                        lines.push(Line::raw(format!("         {}", excerpt(&question::summary(question), 160))));
                     }
                 }
                 if let Some(cursor) = cursor {
@@ -671,7 +677,7 @@ mod tests {
         let mut m = model();
         let mut question = message(2, &asked, "dev-b", "alice", "Which retry policy?");
         let options = ["exponential".to_owned(), "fixed 5s".to_owned()];
-        question.question = Some(ants_proto::Question::new("Which retry policy?", &options, true).unwrap());
+        question.question = Some(ants_proto::Question::new("Which retry policy?", &options, true).unwrap().into());
         m.stored(vec![escalation(1, &stuck, "dev-a", "alice"), question.clone()], at(2));
         let whys: Vec<Why> = items(&m.data, at(3)).into_iter().map(|i| i.why).collect();
         assert_eq!(whys, [Why::Question, Why::Stuck]);
@@ -681,8 +687,8 @@ mod tests {
         assert!(screen.contains("1-9 answer · r reply · d done · z snooze · Enter choose"), "{screen}");
 
         assert_eq!(m.key(Key::Char('3'), at(3)), None, "no third option");
-        let answer = |choice| Job::Answer { thread: asked.clone(), question: question.id.unwrap(), choice };
-        let option = |n| Some(Action::Run(answer(ants_proto::Choice::Option(n)), String::new()));
+        let answer = |pick| Job::Answer { thread: asked.clone(), question: question.id.unwrap(), picks: vec![pick] };
+        let option = |n| Some(Action::Run(answer(ants_proto::Pick::option(n)), String::new()));
         assert_eq!(m.key(Key::Char('2'), at(3)), option(2), "a digit answers at once");
 
         assert_eq!(m.key(Key::Enter, at(3)), None);
@@ -708,7 +714,7 @@ mod tests {
         assert_eq!(m.key(Key::Char('q'), at(3)), None, "q types rather than quits");
         m.paste("/later", at(3));
         assert!(shown(&m, at(3)).contains("› type an answer: q/later▏"), "keys and pastes type on the last row");
-        let typed = Some(Action::Run(answer(ants_proto::Choice::Typed("q/later".into())), String::new()));
+        let typed = Some(Action::Run(answer(ants_proto::Pick::Typed("q/later".into())), String::new()));
         assert_eq!(m.key(Key::Enter, at(3)), typed);
         m.key(Key::Enter, at(3));
         m.key(Key::Down, at(3));
@@ -723,10 +729,38 @@ mod tests {
         m.key(Key::Esc, at(3));
 
         let mut answer = message(3, &asked, "alice", "dev-b", "fixed 5s");
-        answer.answer = Some(ants_proto::Answer { question: question.id.unwrap(), option: Some(2) });
+        answer.answer =
+            Some(ants_proto::Answer { question: question.id.unwrap(), picks: vec![ants_proto::Pick::option(2)] });
         m.stored(vec![answer], at(3));
         let whys: Vec<Why> = items(&m.data, at(4)).into_iter().map(|i| i.why).collect();
         assert_eq!(whys, [Why::Stuck], "answered");
+    }
+
+    #[test]
+    fn a_digit_on_several_questions_focuses_their_card_and_enter_on_its_last_tab_sends_every_pick() {
+        use ants_proto::{Pick, Question, Questions};
+
+        use crate::tui::exec::Job;
+
+        let asked = ThreadId::generate();
+        let mut m = model();
+        let mut question = message(1, &asked, "dev-b", "alice", "two questions");
+        let options = ["yes".to_owned(), "no".to_owned()];
+        let (ship, tag) = (Question::new("Ship it?", &options, false), Question::new("Tag it?", &options, true));
+        question.question = Some(Questions::new(vec![ship.unwrap().headed("Ship"), tag.unwrap()]).unwrap());
+        m.stored(vec![question.clone()], at(1));
+        let screen = shown(&m, at(2));
+        assert!(screen.contains("dev-b: Ship it? (+1 more)"), "{screen}");
+        assert!(screen.contains("         Ship: 1 yes  2 no · Q2: 1 yes  2 no"), "{screen}");
+
+        assert_eq!(m.key(Key::Char('2'), at(2)), None, "a digit picks for the first question");
+        let screen = shown(&m, at(2));
+        assert!(screen.contains("Ship ✓  [Q2]  Submit") && screen.contains("Tag it?"), "{screen}");
+        assert_eq!(m.key(Key::Char('1'), at(2)), None, "and for the next");
+        assert!(shown(&m, at(2)).contains("  Q2: yes"), "the last tab shows every pick");
+        let picks = vec![Pick::option(2), Pick::option(1)];
+        let job = Job::Answer { thread: asked, question: question.id.unwrap(), picks };
+        assert_eq!(m.key(Key::Enter, at(2)), Some(Action::Run(job, String::new())), "one answer to both");
     }
 
     #[test]
@@ -810,7 +844,9 @@ mod tests {
         let mut m = model();
         let mut question = message(2, &busy, "dev-b", "alice", "Which retry policy?");
         question.question = Some(
-            ants_proto::Question::new("Which retry policy?", &["fixed".to_owned(), "none".to_owned()], false).unwrap(),
+            ants_proto::Question::new("Which retry policy?", &["fixed".to_owned(), "none".to_owned()], false)
+                .unwrap()
+                .into(),
         );
         m.stored(
             vec![
@@ -829,12 +865,13 @@ mod tests {
             screen.contains("1-9 answer · r reply · d done · z snooze · Enter choose"),
             "the top reason's: {screen}"
         );
-        let job =
-            Job::Answer { thread: busy.clone(), question: question.id.unwrap(), choice: ants_proto::Choice::Option(1) };
+        let picks = vec![ants_proto::Pick::option(1)];
+        let job = Job::Answer { thread: busy.clone(), question: question.id.unwrap(), picks };
         assert_eq!(m.key(Key::Char('1'), at(5)), Some(Action::Run(job, String::new())));
 
         let mut answer = message(5, &busy, "alice", "dev-b", "fixed");
-        answer.answer = Some(ants_proto::Answer { question: question.id.unwrap(), option: Some(1) });
+        answer.answer =
+            Some(ants_proto::Answer { question: question.id.unwrap(), picks: vec![ants_proto::Pick::option(1)] });
         m.stored(vec![answer], at(5));
         let found: Vec<(Why, Vec<(Why, usize)>)> = items(&m.data, at(6)).into_iter().map(|i| (i.why, i.also)).collect();
         assert_eq!(found, [(Why::Mention, vec![])], "answered, and the human's message ends the escalation");

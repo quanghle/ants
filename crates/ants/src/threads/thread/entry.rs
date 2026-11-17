@@ -2,7 +2,7 @@
 
 use ants_daemon::records::reactions::Reacted;
 use ants_proto::{
-    Acting, Answer, Answered, ChannelId, EscalationReason, NoticeKind, Question, Quote, SummaryRequest, ThreadId,
+    Acting, Answer, Answered, ChannelId, EscalationReason, NoticeKind, Questions, Quote, SummaryRequest, ThreadId,
     UserId, Uuid,
 };
 use chrono::{DateTime, Utc};
@@ -146,11 +146,11 @@ pub struct Entry {
     /// [`Envelope::summary`]: ants_proto::Envelope::summary
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<SummaryRequest>,
-    /// The question an inbox message that is not forged asks, if valid ([`Envelope::asks`]).
+    /// The questions an inbox message that is not forged asks, if valid ([`Envelope::asks`]).
     ///
     /// [`Envelope::asks`]: ants_proto::Envelope::asks
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub question: Option<Question>,
+    pub question: Option<Questions>,
     /// The answer an inbox message that is not forged gives a question read before it, if valid
     /// ([`Envelope::answers`]); an invalid one, or one to a question not read, leaves an ordinary message.
     ///
@@ -266,9 +266,9 @@ impl Entry {
         }
     }
 
-    /// What this entry answers `question`, an entry asking one, with: set only on a valid answer
-    /// ([`Entry::answer`]).
-    pub fn answers<'q>(&self, question: &'q Entry) -> Option<Answered<'q>> {
+    /// What this entry answers `question`'s questions, an entry asking them, with, one per question: set only on a
+    /// valid answer ([`Entry::answer`]).
+    pub fn answers<'q>(&'q self, question: &'q Entry) -> Option<Vec<Answered<'q>>> {
         let answer = self.answer.as_ref()?;
         (question.id == Some(answer.question)).then_some(())?;
         question.question.as_ref()?.answered(answer)

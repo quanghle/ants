@@ -311,7 +311,7 @@ An assistant's harness sessions get, beside the other [MCP tools](architecture.m
 | Tool | What it does for the human |
 |---|---|
 | `human_queue(thread?)` | Read what the human's home in `ants chat` shows from the last 7 days: questions ants asked it not yet answered, tool requests waiting for its decision or its stand-in's (`<ant>/<id>`, the tool, its options and expiry, and whether the assistant's decision on it is held), and messages to it, not from the assistant, after its read marker, leaving out threads marked done since their last message, at most 30 of each, with their message ids and threads. With `thread`, the messages to and from the human on that thread. |
-| `answer_for_human(message_id, answer)` | Answer a question to the human with an option's number or typed text, on the question's thread. |
+| `answer_for_human(message_id, answers)` | Answer the questions of a message to the human, an answer for each in order (an option's number, numbers joined by commas where several may be picked, or typed text), on the questions' thread. |
 | `send_for_human(to, text, thread?, plaintext?)` | Send a message to an ant or another human, on `thread` or a new one; no attachments. |
 | `post_for_human(channel, text, thread?)` | Post in a channel the human is a member of, on `thread` or starting a new one, with a human's fresh turn budget. |
 | `notes_for_human(thread, text)` | Post to the notes of a thread, with the fresh turn budget a human's post gives them (as `ants notes THREAD TEXT`). |

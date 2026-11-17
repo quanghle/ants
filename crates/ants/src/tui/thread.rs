@@ -287,7 +287,13 @@ impl Page {
                 return pending.min_by_key(|r| r.requested_at).cloned().map(To::Note);
             }
             Key::Char('1'..='9') => {
-                return question::thread_key(key, data, &self.history.thread, &self.history.entries, now);
+                return match question::thread_key(key, data, &self.history.thread, &self.history.entries, now)? {
+                    question::Keyed::To(to) => Some(*to),
+                    question::Keyed::Focus(cursor) => {
+                        self.answering = Some(cursor);
+                        None
+                    }
+                };
             }
             Key::Char('t') => return Some(To::Tree(self.history.thread.clone())),
             Key::Char('z') => return Some(To::Snooze(self.history.thread.clone())),
@@ -553,7 +559,7 @@ fn count(n: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use ants_proto::{Answer, Choice, Question, ThreadDone};
+    use ants_proto::{Answer, Pick, Question, ThreadDone};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -878,7 +884,7 @@ mod tests {
         let mut m = model();
         let mut asks = message(1, &thread, "dev-a", "alice", "Backfill?");
         let options = ["default every missing row to zero first".to_owned(), "skip".to_owned()];
-        asks.question = Some(Question::new("Backfill?", &options, false).unwrap());
+        asks.question = Some(Question::new("Backfill?", &options, false).unwrap().into());
         let entries = vec![asks.clone()];
         m.stored(entries.clone(), at(1));
         let mut page = Page::new(thread.clone());
@@ -914,7 +920,7 @@ mod tests {
         m.key(Key::Enter, at(2));
         m.key(Key::Down, at(2));
         m.key(Key::Down, at(2));
-        let job = Job::Answer { thread: thread.clone(), question: asks.id.unwrap(), choice: Choice::Option(2) };
+        let job = Job::Answer { thread: thread.clone(), question: asks.id.unwrap(), picks: vec![Pick::option(2)] };
         assert_eq!(m.key(Key::Enter, at(2)), Some(Action::Run(job, String::new())), "no typed row below the last");
     }
 
@@ -1053,17 +1059,24 @@ mod tests {
     fn a_question_shows_its_options_and_answers() {
         let thread = ThreadId::generate();
         let mut asks = message(1, &thread, "dev-a", "alice", "Backfill strategy?");
-        asks.question = Some(Question {
-            text: "Backfill strategy?".to_owned(),
-            options: vec!["default 0".to_owned(), "skip".to_owned()],
-            free_text: true,
-        });
+        let options = ["default 0".to_owned(), "skip".to_owned()];
+        asks.question = Some(Question::new("Backfill strategy?", &options, true).unwrap().into());
         let mut answer = message(2, &thread, "alice", "dev-a", "skip");
-        answer.answer = Some(Answer { question: asks.id.unwrap(), option: Some(2) });
+        answer.answer = Some(Answer { question: asks.id.unwrap(), picks: vec![Pick::option(2)] });
         let entries = [asks, answer];
         assert_eq!(
             body(&entries[0], &entries),
             "Backfill strategy?\n1 default 0\n2 skip\nor type an answer\nanswered by alice: option 2, skip"
+        );
+
+        let mut asks = message(3, &thread, "dev-a", "alice", "two questions");
+        let regions = ["eu".to_owned(), "us".to_owned()];
+        let regions = Question::new("Which regions?", &regions, false).unwrap().multi().headed("Regions");
+        let ship = Question::new("Ship it?", &options, false).unwrap();
+        asks.question = Some(ants_proto::Questions::new(vec![regions, ship]).unwrap());
+        assert_eq!(
+            body(&asks, &[]),
+            "Regions: Which regions?\n1 eu\n2 us\npick one or more\n\nQ2: Ship it?\n1 default 0\n2 skip"
         );
     }
 

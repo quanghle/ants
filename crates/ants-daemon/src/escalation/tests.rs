@@ -333,7 +333,7 @@ mod assistant_first {
         let (humans, _device) = humans();
         let (escalator, sent) = escalator(&humans, vec![entry("pa")], Some(Duration::from_millis(1)));
         let mut notice = Envelope::on_thread(t(), p("dev-a"), p("alice"), "which one?");
-        notice.question = Some(Question::new("which one?", &["a".to_owned(), "b".to_owned()], true).unwrap());
+        notice.question = Some(Question::new("which one?", &["a".to_owned(), "b".to_owned()], true).unwrap().into());
         assert_eq!(escalator.ask_first(&notice).await.unwrap(), Some(p("pa")));
         let [asked] = take(&sent).try_into().unwrap();
         assert_eq!((&asked.to, &asked.question), (&p("pa"), &None));
@@ -352,7 +352,7 @@ mod assistant_first {
         let (humans, _device) = humans();
         let (escalator, sent) = escalator(&humans, vec![entry("pa")], Some(Duration::from_millis(1)));
         let mut notice = Envelope::on_thread(t(), p("dev-a"), p("alice"), "which one?");
-        notice.question = Some(Question::new("which one?", &["a".to_owned(), "b".to_owned()], true).unwrap());
+        notice.question = Some(Question::new("which one?", &["a".to_owned(), "b".to_owned()], true).unwrap().into());
         escalator.ask_first(&notice).await.unwrap();
         take(&sent);
 

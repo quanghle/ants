@@ -6,7 +6,7 @@
 //! ([`super::exec`]); the bar's status line tells how they went, and a failed send's text, with the message it quoted, comes back into the bar.
 //! n on a tool request opens the bar on a note ([`Note`]): Enter rejects the request, then sends the note to its ant.
 
-use ants_proto::{ApprovalRequest, ChannelId, ChannelNotify, ThreadId, UserId, Uuid, Verdict};
+use ants_proto::{ApprovalRequest, ChannelId, ChannelNotify, Questions, ThreadId, UserId, Uuid, Verdict};
 use chrono::{DateTime, Utc};
 
 use super::approvals::Asking;
@@ -165,6 +165,19 @@ impl Model {
         Some(Action::Decide(request, Verdict::Reject))
     }
 
+    /// The answer `/answer TEXT` gives the card the keys answer: its question alone takes all of `text`, several a
+    /// word each, quotes holding a typed answer together.
+    fn answering(&self, text: &str, now: DateTime<Utc>) -> Result<Job, String> {
+        let (thread, question, asked) = self.question(now)?;
+        let words = match asked.questions.len() {
+            1 => vec![text.to_owned()],
+            _ => parse::quoted_words(text),
+        };
+        let picks = asked.picks(&words).map_err(|e| e.to_string())?;
+        let (answer, _) = asked.answer(question, picks).map_err(|e| e.to_string())?;
+        Ok(Job::Answer { thread, question, picks: answer.picks })
+    }
+
     /// The action `command` takes, or why it cannot be taken.
     fn command(&mut self, command: Command, now: DateTime<Utc>) -> Result<Option<Action>, String> {
         let run = |job| Ok(Some(Action::Run(job, String::new())));
@@ -200,10 +213,7 @@ impl Model {
                 }
                 run(Job::Cancel { thread, ants })
             }
-            Slash::Answer(choice) => {
-                let (thread, question) = self.question(now)?;
-                run(Job::Answer { thread, question, choice })
-            }
+            Slash::Answer(text) => run(self.answering(&text, now)?),
             Slash::Done(done) => run(Job::Done { thread: self.target()?, done }),
             Slash::Mark(marking) => run(Job::Mark { thread: self.target()?, marking }),
             Slash::Mute(hold) => run(Job::Mute { thread: self.target()?, hold: hold.unwrap_or(quiet::MUTE_FOR) }),
@@ -396,16 +406,20 @@ impl Model {
         thread.ok_or_else(|| "no thread open or selected".to_owned())
     }
 
-    /// The question `/answer` answers at `now`, and its thread: on an open thread, that of the card the keys answer;
-    /// else the latest to the human with no answer read on the thread selected, the one its keys answer on home.
-    fn question(&self, now: DateTime<Utc>) -> Result<(ThreadId, Uuid), String> {
+    /// The questions `/answer` answers at `now`, the message asking them and its thread: on an open thread, those of
+    /// the card the keys answer; else the latest to the human with no answer read on the thread selected, those its
+    /// keys answer on home.
+    fn question(&self, now: DateTime<Utc>) -> Result<(ThreadId, Uuid, Questions), String> {
         let thread = self.target()?;
-        let id = match self.page() {
-            Page::Thread(page) => question::keyed(&self.data, &page.history.entries, now).map(|(id, _)| id),
-            _ => self.data.question(&thread).map(|asked| asked.id),
+        let asked = match self.page() {
+            Page::Thread(page) => {
+                question::keyed(&self.data, &page.history.entries, now).map(|(id, asked)| (id, asked.clone()))
+            }
+            _ => self.data.question(&thread).map(|asked| (asked.id, asked.question.clone())),
         };
         let me = self.data.me();
-        id.map(|id| (thread.clone(), id))
+        asked
+            .map(|(id, asked)| (thread.clone(), id, asked))
             .ok_or_else(|| format!("no question to {me} waits for an answer on thread {thread}"))
     }
 
@@ -697,7 +711,7 @@ mod tests {
         let ask = |seq, text: &str| {
             let mut asked = message(seq, &thread, "dev-a", "alice", text);
             let options = ["yes".to_owned(), "no".to_owned()];
-            asked.question = Some(ants_proto::Question::new(text, &options, true).unwrap());
+            asked.question = Some(ants_proto::Question::new(text, &options, true).unwrap().into());
             asked
         };
         let (first, second) = (ask(1, "Ship it?"), ask(2, "Tag it?"));
@@ -715,6 +729,35 @@ mod tests {
         assert_eq!(answer(&mut m), first.id.unwrap());
         m.stored(vec![second.clone()], at(2));
         assert_eq!(answer(&mut m), second.id.unwrap(), "the keys go to the latest card shown");
+    }
+
+    #[test]
+    fn answer_takes_a_pick_for_each_of_several_questions() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let mut asked = message(1, &thread, "dev-a", "alice", "two questions");
+        let options = ["eu".to_owned(), "us".to_owned(), "ap".to_owned()];
+        let regions = ants_proto::Question::new("Which regions?", &options, false).unwrap().multi();
+        let ship = ants_proto::Question::new("Ship it?", &["yes".to_owned(), "no".to_owned()], true).unwrap();
+        asked.question = Some(Questions::new(vec![regions, ship]).unwrap());
+        let mut page = thread::Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(vec![asked.clone()])).unwrap();
+        m.pages.push(Page::Thread(page));
+        let answer = |m: &mut Model, text: &str| {
+            m.bar.focused = true;
+            m.bar.set_text(text);
+            m.key(Key::Enter, at(2))
+        };
+        let picks = vec![ants_proto::Pick::Options(vec![1, 3]), ants_proto::Pick::Typed("after lunch".into())];
+        let job = Job::Answer { thread: thread.clone(), question: asked.id.unwrap(), picks };
+        let sent = answer(&mut m, "/answer 3,1 'after lunch'");
+        assert!(matches!(sent, Some(Action::Run(ref sent, _)) if *sent == job), "{sent:?}");
+        assert_eq!(answer(&mut m, "/answer 1"), None);
+        let status = &m.bar.status.as_ref().unwrap().text;
+        assert!(status.contains("1 answers to 2 questions"), "{status}");
+        assert_eq!(answer(&mut m, "/answer 4 no"), None);
+        let status = &m.bar.status.as_ref().unwrap().text;
+        assert!(status.contains("question 1: no option 4"), "{status}");
     }
 
     #[test]

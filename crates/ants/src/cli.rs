@@ -129,17 +129,21 @@ pub(crate) enum Command {
         #[arg(long)]
         remove: bool,
     },
-    /// Answer a question an ant asked the CLI's human (with ask_human), shown with its options numbered in `ants inbox`
-    /// and `ants thread show`: a number picks that option, any other text is a typed answer, which only a question
-    /// taking one accepts. The answer goes to the asking ant on the question's thread, as a message from the human.
-    /// Needs a human's credentials.
+    /// Answer the questions an ant asked the CLI's human in one message (with ask_human), shown with their options
+    /// numbered in `ants inbox` and `ants thread show`, all at once. A message asking one question takes one answer,
+    /// all words: a number picks that option, numbers joined by commas (`1,3`) pick several where the question allows
+    /// it, any other text is a typed answer, which only a question taking one accepts. A message asking several takes
+    /// one argument for each, in their order, quoting a typed answer of several words: `ants answer ID 2 1,3 'after
+    /// lunch'`. The answer goes to the asking ant on the question's thread, as a message from the human. Needs a
+    /// human's credentials.
     Answer {
         /// The question's message id, or a unique start of one among the messages to or from the CLI's human stored in
         /// the last 7 days, else any stored then.
         #[arg(add = ArgValueCompleter::new(completions::messages))]
         message: thread::MessagePick,
-        /// An option's number, or the typed answer.
-        #[arg(value_name = "N|TEXT", required = true, num_args = 1..)]
+        /// An option's number, numbers joined by commas, or the typed answer; one for each question when the message
+        /// asks several.
+        #[arg(value_name = "PICK", required = true, num_args = 1..)]
         answer: Vec<String>,
     },
     /// Threads read back from the stream across inboxes (both ways), channel posts, notes, escalations, tool requests

@@ -3,7 +3,7 @@ use std::assert_matches;
 use ants_daemon::channel::CLOCK_SLACK;
 use ants_daemon::records::reactions::Reacted;
 use ants_proto::{
-    Acting, Answered, ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, Envelope, Escalation,
+    Acting, ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, Envelope, Escalation,
     EscalationReason, Humans, NotesPost, SummaryRequest, ToolCall, Verdict,
 };
 use serde::Serialize;
@@ -128,12 +128,12 @@ fn a_question_shows_its_options_and_the_valid_answers_to_it() {
     let options = ["yes".to_owned(), "not yet".to_owned()];
     let question = ants_proto::Question::new("Ship it?", &options, true).unwrap();
     let asked = Envelope::asking(t("t1"), p("dev-a"), alice.clone(), question.clone());
-    let answer = |choice| Envelope::answering(&asked, alice.clone(), choice).unwrap();
-    let picked = answer(ants_proto::Choice::Option(2));
-    let typed = answer(ants_proto::Choice::Typed("after lunch".to_owned()));
-    let mut wrong = answer(ants_proto::Choice::Option(1));
-    wrong.answer.as_mut().unwrap().option = Some(3);
-    let forged = answer(ants_proto::Choice::Option(1));
+    let answer = |pick| Envelope::answering(&asked, alice.clone(), vec![pick]).unwrap();
+    let picked = answer(ants_proto::Pick::option(2));
+    let typed = answer(ants_proto::Pick::Typed("after lunch".to_owned()));
+    let mut wrong = answer(ants_proto::Pick::option(1));
+    wrong.answer.as_mut().unwrap().picks[0] = ants_proto::Pick::option(3);
+    let forged = answer(ants_proto::Pick::option(1));
     let read = entries(&[
         (asked.subject(), json(&asked)),
         (picked.subject(), json(&picked)),
@@ -141,9 +141,10 @@ fn a_question_shows_its_options_and_the_valid_answers_to_it() {
         (wrong.subject(), json(&wrong)),
         ("ants.inbox.dev-a.mallory".to_owned(), json(&forged)),
     ]);
-    assert_eq!(read[0].question.as_ref(), Some(&question));
-    assert_eq!(read[1].answers(&read[0]), Some(Answered::Option(2, "not yet")));
-    assert_eq!(read[2].answers(&read[0]), Some(Answered::Typed));
+    assert_eq!(read[0].question.as_ref(), Some(&question.into()));
+    let pick = |e: &Entry| e.answers(&read[0]).map(|a| a[0].pick.clone());
+    assert_eq!(pick(&read[1]), Some(ants_proto::Pick::option(2)));
+    assert_eq!(pick(&read[2]), Some(ants_proto::Pick::Typed("after lunch".to_owned())));
     assert_eq!((&read[3].answer, &read[4].answer), (&None, &None), "invalid or forged: ordinary messages");
     let by: Vec<Uuid> = answers_to(&read[0], &read).filter_map(|(e, _)| e.id).collect();
     assert_eq!(by, [picked.id, typed.id]);
@@ -161,7 +162,28 @@ fn a_question_shows_its_options_and_the_valid_answers_to_it() {
     let unanswered = render(&read[..1]);
     assert!(unanswered.contains(&format!("\n    (`ants answer {} N|TEXT` answers it)\n", asked.id)), "{unanswered}");
     let json = serde_json::to_value(&read[0]).unwrap();
-    assert_eq!(json["question"]["options"][1], "not yet");
+    assert_eq!(json["question"]["questions"][0]["options"][1]["label"], "not yet");
+}
+
+#[test]
+fn an_answer_to_several_questions_shows_a_pick_for_each() {
+    let alice = p("alice");
+    let regions = ["eu".to_owned(), "us".to_owned(), "ap".to_owned()];
+    let regions = ants_proto::Question::new("Which regions?", &regions, false).unwrap().multi().headed("Regions");
+    let ship = ants_proto::Question::new("Ship it?", &["yes".to_owned(), "no".to_owned()], true).unwrap();
+    let questions = ants_proto::Questions::new(vec![regions, ship]).unwrap();
+    let asked = Envelope::asking(t("t1"), p("dev-a"), alice.clone(), questions);
+    let picks = vec![ants_proto::Pick::Options(vec![1, 3]), ants_proto::Pick::Typed("after lunch".to_owned())];
+    let answer = Envelope::answering(&asked, alice, picks).unwrap();
+    let read = entries(&[(asked.subject(), json(&asked)), (answer.subject(), json(&answer))]);
+    let shown = render(&read);
+    assert!(
+        shown.contains("\n    answered by alice: Regions options 1, eu and 3, ap; Q2 typed: after lunch\n"),
+        "{shown}"
+    );
+    assert!(shown.contains(&format!("[answers {} with options 1, 3; typed]", asked.id)), "{shown}");
+    let unanswered = render(&read[..1]);
+    assert!(unanswered.contains(&format!("(`ants answer {} N,M N|'TEXT'` answers them)", asked.id)), "{unanswered}");
 }
 
 #[test]

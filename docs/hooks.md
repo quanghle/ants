@@ -127,7 +127,7 @@ Live progress of an ant on a thread, from its daemon: `ant`, `thread_id`, `at`, 
 | `queued` | `message` (id), `ahead` | A message waits behind `ahead` others |
 | `approval` | `request_id` | A tool request waits for a decision |
 | `escalated` | `to`, `escalation` | An escalation was sent (below) |
-| `asked` | `to`, `message` (id), `question`: `{text, options, free_text}` | A question was asked of a human (below) |
+| `asked` | `to`, `message` (id), `question`: `{questions: [{text, header?, options: [{label, description?}], multi_select, free_text}]}` | Questions were asked of a human (below) |
 | `decided` | `request_id`, `verdict`, `by`, `decider`?, `via`? | A tool request was settled (below) |
 
 Check: `subject == "ants.status." + ant + "." + thread_id`.
@@ -155,14 +155,16 @@ notice of a harness failing to start (observed via `failing` in `ants_colony`), 
 
 #### Questions
 
-Each question an ant asks a human with `ask_human`, once stored, is told as an `asked` update on the status of the
-ant, on the question's thread: `to` is the human asked, `message` the id of the message carrying the question (the
-question's id, which `ants answer` takes), and `question` the question with its options and whether a typed answer is
-taken. The text of the message, which repeats the question and its numbered options, is not part of it.
+Each message an ant asks a human 1-4 questions in with `ask_human`, once stored, is told as an `asked` update on the
+status of the ant, on the questions' thread: `to` is the human asked, `message` the id of the message carrying them
+(the id `ants answer` takes), and `question.questions` the questions in order, each with its header (if any), options
+(a `label` and an optional `description`), whether several may be picked and whether a typed answer is taken. The text
+of the message, which repeats the questions and their numbered options, is not part of it.
 
 ```json
 {"ant": "dev-a", "thread_id": "019a7d2c-…", "type": "asked", "to": "alice", "message": "019a7d2e-…",
- "question": {"text": "Ship it?", "options": ["yes", "not yet"], "free_text": false},
+ "question": {"questions": [{"text": "Ship it?", "header": "Ship", "options": [{"label": "yes"}, {"label": "not yet"}],
+                             "multi_select": false, "free_text": false}]},
  "at": "2025-01-01T12:00:00Z"}
 ```
 

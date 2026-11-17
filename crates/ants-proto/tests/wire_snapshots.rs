@@ -135,12 +135,34 @@ fn envelope() -> Envelope {
         mention: Some(mention()),
         title: Some("Fix the build".to_owned()),
         summary: Some(SummaryRequest { tokens: Some(1834), ..SummaryRequest::thread(other_thread(), 4211) }),
-        question: Some(Question {
-            text: "Ship the fix?".to_owned(),
-            options: vec!["yes".to_owned(), "not yet".to_owned()],
-            free_text: false,
+        question: Some(Questions {
+            questions: vec![
+                Question {
+                    text: "Ship the fix?".to_owned(),
+                    header: Some("Ship".to_owned()),
+                    options: vec![
+                        QuestionOption { label: "yes".to_owned(), description: Some("tag and release".to_owned()) },
+                        QuestionOption { label: "not yet".to_owned(), description: None },
+                    ],
+                    multi_select: false,
+                    free_text: false,
+                },
+                Question {
+                    text: "Which regions?".to_owned(),
+                    header: None,
+                    options: vec![
+                        QuestionOption { label: "eu".to_owned(), description: None },
+                        QuestionOption { label: "us".to_owned(), description: None },
+                    ],
+                    multi_select: true,
+                    free_text: true,
+                },
+            ],
         }),
-        answer: Some(Answer { question: id(4), option: Some(2) }),
+        answer: Some(Answer {
+            question: id(4),
+            picks: vec![Pick::Options(vec![1, 2]), Pick::Typed("ap only".to_owned())],
+        }),
         attachments: vec![attachment()],
         sealed: Some(Box::new(sealed())),
         notice: Some(NoticeKind::SignedOut),
@@ -848,7 +870,7 @@ fn status() {
             StatusUpdate::Asked {
                 to: user("alice"),
                 message: id(11),
-                question: Question::new("Ship it?", &["yes".to_owned(), "not yet".to_owned()], false).unwrap(),
+                question: Question::new("Ship it?", &["yes".to_owned(), "not yet".to_owned()], false).unwrap().into(),
             },
         ),
         (

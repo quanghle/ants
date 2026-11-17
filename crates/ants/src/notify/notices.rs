@@ -8,7 +8,7 @@ use ants_daemon::delivery::unserved::Unserved;
 use ants_daemon::secrets::redact::Redactor;
 use ants_proto::{
     ApprovalRequest, Away, Envelope, Escalation, EscalationReason, HeldNotices, NoticeKind, NotifyPrefs, Question,
-    Reminder, ThreadId, UserId, Uuid, Verdict,
+    Questions, Reminder, ThreadId, UserId, Uuid, Verdict,
 };
 use chrono::{DateTime, Utc};
 use jiff::tz::TimeZone;
@@ -47,8 +47,8 @@ pub(super) enum About {
     /// A daemon's notice `kind` that a human has to act on ([`NoticeKind::needs_action`]), in the message `id` from
     /// `from` on `thread`.
     Notice { id: Uuid, from: UserId, thread: ThreadId, kind: NoticeKind },
-    /// The question `question` that `from` asks the human on `thread`, in the message `id`.
-    Question { id: Uuid, from: UserId, thread: ThreadId, question: Box<Question> },
+    /// The questions `questions` that `from` asks the human on `thread`, in the message `id`.
+    Question { id: Uuid, from: UserId, thread: ThreadId, questions: Box<Questions> },
     /// A test notice of `ants webhook notify-test`.
     Test { id: Uuid },
     /// The messages `messages` the human sent, waiting for `ant`, which no daemon serves.
@@ -186,14 +186,12 @@ pub(super) fn notice_json(notice: &Notice, now: DateTime<Utc>) -> Value {
             "thread": thread,
             "notice": kind.as_str(),
         }),
-        About::Question { id, from, thread, question } => json!({
+        About::Question { id, from, thread, questions } => json!({
             "kind": "question",
             "id": id,
             "ant": from,
             "thread": thread,
-            "question": redactor().redact(&question.text),
-            "options": question.options.iter().map(|o| redactor().redact(o)).collect::<Vec<_>>(),
-            "free_text": question.free_text,
+            "questions": questions.questions.iter().map(question_facts).collect::<Vec<_>>(),
         }),
         About::Test { id } => json!({ "kind": "test", "id": id }),
         About::Unserved { ant, messages } => {
@@ -476,24 +474,60 @@ pub(super) fn action_notice(envelope: &Envelope) -> Option<Notice> {
     })
 }
 
-/// The notice of a question an ant asks (ask_human) in `envelope`, if it carries one: its text numbers the options,
-/// and says how `ants answer` picks one or types an answer.
+/// A question of a question notice's JSON, redacted.
+fn question_facts(question: &Question) -> serde_json::Value {
+    let redact = |text: &str| redactor().redact(text).into_owned();
+    let options: Vec<_> = question
+        .options
+        .iter()
+        .map(|o| json!({ "label": redact(&o.label), "description": o.description.as_deref().map(redact) }))
+        .collect();
+    json!({
+        "question": redact(&question.text),
+        "header": question.header.as_deref().map(redact),
+        "options": options,
+        "multi_select": question.multi_select,
+        "free_text": question.free_text,
+    })
+}
+
+/// The notice of the questions an ant asks (ask_human) in `envelope`, if it carries any: its text numbers their
+/// options, and says how `ants answer` picks them or types answers.
 pub(super) fn question_notice(envelope: &Envelope) -> Option<Notice> {
-    let question = envelope.question.as_ref()?;
+    let questions = envelope.question.as_ref()?;
     let (id, thread) = (envelope.id, &envelope.thread_id);
-    let typed = if question.free_text { " (an option's number, or a typed answer)" } else { "" };
-    let text =
-        format!("{}\n\nthread {thread}; answer with ants answer {id} NUMBER{typed}", notice_text(envelope, MAX_TEXT));
-    let asked = cut(&redactor().redact(&question.text.split_whitespace().collect::<Vec<_>>().join(" ")), 100);
+    let how = match questions.questions.as_slice() {
+        [one] => {
+            let numbers = if one.multi_select { "options' numbers joined by commas" } else { "an option's number" };
+            let note = match (one.multi_select, one.free_text) {
+                (false, false) => String::new(),
+                (_, true) => format!(" ({numbers}, or a typed answer)"),
+                (true, false) => format!(" ({numbers})"),
+            };
+            format!("ants answer {id} NUMBER{note}")
+        }
+        several => format!(
+            "ants answer {id} and an answer for each of the {} questions, in order: an option's number, numbers \
+             joined by commas where several may be picked, or a quoted typed answer where one is taken",
+            several.len()
+        ),
+    };
+    let text = format!("{}\n\nthread {thread}; answer with {how}", notice_text(envelope, MAX_TEXT));
+    let first = &questions.questions[0].text;
+    let asked = cut(&redactor().redact(&first.split_whitespace().collect::<Vec<_>>().join(" ")), 100);
+    let asks = match questions.questions.len() {
+        1 => "asks".to_owned(),
+        n => format!("asks {n} questions"),
+    };
     Some(Notice {
         about: About::Question {
             id,
             from: envelope.from.clone(),
             thread: thread.clone(),
-            question: Box::new(question.clone()),
+            questions: Box::new(questions.clone()),
         },
         human: envelope.to.clone(),
-        title: format!("{} asks: {asked}", envelope.from),
+        title: format!("{} {asks}: {asked}", envelope.from),
         text,
         buttons: Vec::new(),
         urgent: false,

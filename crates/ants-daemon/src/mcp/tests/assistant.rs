@@ -426,11 +426,12 @@ async fn what_the_assistant_does_for_its_human_carries_on_behalf_of() {
     assert!(queue.contains("Tool requests (1)") && queue.contains("dev-b/"), "bob's is not hers: {queue}");
 
     let (ok, answered) =
-        call(&client, "answer_for_human", serde_json::json!({"message_id": asked.id.to_string(), "answer": "1"})).await;
+        call(&client, "answer_for_human", serde_json::json!({"message_id": asked.id.to_string(), "answers": ["1"]}))
+            .await;
     assert!(ok, "{answered}");
     let answer = sent.try_recv().unwrap();
     assert_eq!((&answer.from, &answer.to, answer.on_behalf_of.as_ref()), (&dev_a, &dev_b, Some(&alice)));
-    assert_eq!(answer.answers_as(&asked, &alice), Some(ants_proto::Answered::Option(1, "yes")), "an answer for alice");
+    assert_eq!(answer.answers_as(&asked, &alice).expect("an answer for alice")[0].pick, &ants_proto::Pick::option(1));
     assert!(humans.honours_assistant(&alice, &answer.from, Some(&alice)), "readers verify it against the grant");
     store.store(answer);
     let (_, queue) = call(&client, "human_queue", serde_json::json!({})).await;

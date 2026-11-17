@@ -299,7 +299,8 @@ mod tests {
         assert!(!Event::Question.accepts(&working.subject(), &decided).unwrap());
         let options = ["yes".to_owned(), "no".to_owned()];
         let question = ants_proto::Question::new("Ship it?", &options, true).unwrap();
-        let asked = StatusUpdate::Asked { to: "alice".parse().unwrap(), message: ants_proto::Uuid::now_v7(), question };
+        let (to, message) = ("alice".parse().unwrap(), ants_proto::Uuid::now_v7());
+        let asked = StatusUpdate::Asked { to, message, question: question.into() };
         let asked = serde_json::to_vec(&StatusEvent::new(working.ant.clone(), thread.clone(), asked)).unwrap();
         assert!(Event::Question.accepts(&working.subject(), &asked).unwrap());
         assert!(Event::Status.accepts(&working.subject(), &asked).unwrap());

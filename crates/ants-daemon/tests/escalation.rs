@@ -342,6 +342,6 @@ async fn a_stored_question_is_told_on_the_ant_s_status_without_the_message_s_tex
     escalation::jetstream_sender(js)(asking.clone(), asking.id.to_string()).await.unwrap();
     let told = timeout(WAIT, status.next()).await.expect("no status").unwrap();
     let told: StatusEvent = serde_json::from_slice(&told.payload).unwrap();
-    assert_eq!(told.update, StatusUpdate::Asked { to: UserId::human(), message: asking.id, question });
+    assert_eq!(told.update, StatusUpdate::Asked { to: UserId::human(), message: asking.id, question: question.into() });
     assert!(!String::from_utf8_lossy(&serde_json::to_vec(&told).unwrap()).contains("1. yes"));
 }

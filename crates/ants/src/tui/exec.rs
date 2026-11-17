@@ -9,9 +9,7 @@ use std::time::Duration;
 
 use ants_daemon::bus;
 use ants_daemon::records::reactions;
-use ants_proto::{
-    ChannelId, ChannelNotify, Choice, EscalationReason, JsDomain, Quote, Reaction, ThreadId, UserId, Uuid,
-};
+use ants_proto::{ChannelId, ChannelNotify, EscalationReason, JsDomain, Pick, Quote, Reaction, ThreadId, UserId, Uuid};
 use anyhow::{Result, anyhow, bail};
 use async_nats::jetstream;
 use futures::future::LocalBoxFuture;
@@ -111,12 +109,12 @@ pub enum Job {
         thread: ThreadId,
         ants: Vec<UserId>,
     },
-    /// Answer the question asked of the human on `thread` in the message `question`, as `ants answer` does: refused
-    /// when it is gone from the thread or answered already ([`waiting`]).
+    /// Answer the questions asked of the human on `thread` in the message `question` with `picks`, one per question,
+    /// as `ants answer` does: refused when the message is gone from the thread or answered already ([`waiting`]).
     Answer {
         thread: ThreadId,
         question: Uuid,
-        choice: Choice,
+        picks: Vec<Pick>,
     },
     Done {
         thread: ThreadId,
@@ -308,10 +306,10 @@ impl Job {
                 Ok(Done::line(crate::admin::restart::told(&order, outcome)?))
             }
             Self::Cancel { thread, ants } => cancel_all(ctx, &thread, ants).await,
-            Self::Answer { thread, question, choice } => {
+            Self::Answer { thread, question, picks } => {
                 let entries = thread::history(&ctx.js, &thread, None, thread::Activity::None, None).await?;
                 waiting(&entries, me, &thread, question)?;
-                let envelope = send::answering(&ctx.js, me, question, choice).await?;
+                let envelope = send::answering(&ctx.js, me, question, send::Picks::Made(picks)).await?;
                 let stored = send::deliver(&ctx.js, ctx.domain.as_ref(), &envelope).await?;
                 Ok(Done {
                     line: format!("answered {} on thread {thread}", envelope.to),
@@ -724,9 +722,9 @@ mod tests {
     #[test]
     fn the_message_to_react_to_is_the_latest_of_another() {
         let (thread, me) = (ThreadId::generate(), user("alice"));
-        let question = Question { text: "which?".into(), options: vec!["a".into(), "b".into()], free_text: true };
+        let question = Question::new("which?", &["a".into(), "b".into()], true).unwrap();
         let mut asked = message(1, &thread, "dev-a", "alice", "which?");
-        asked.question = Some(question);
+        asked.question = Some(question.into());
         let answered = message(2, &thread, "alice", "dev-a", "a");
         assert_eq!(latest(&[asked.clone(), answered], &me), asked.id);
     }
@@ -736,6 +734,7 @@ mod tests {
     #[tokio::test]
     async fn a_key_answers_the_question_its_card_shows_not_a_later_one() {
         use crate::tui::model::{Action, Key, To};
+        use crate::tui::question::Keyed;
 
         let Some(server) = crate::test_support::Server::start() else { return };
         let creds = server.creds_as(&user("alice"), ants_proto::Role::Human);
@@ -755,7 +754,8 @@ mod tests {
         let shown = thread::history(&js, &thread, None, thread::Activity::None, None).await.unwrap();
         let m = crate::tui::test_support::model();
         let key = super::super::question::thread_key(Key::Char('2'), &m.data, &thread, &shown, chrono::Utc::now());
-        let Some(To::Do(Action::Run(job, _))) = key else { panic!("{key:?}") };
+        let Some(Keyed::To(to)) = key else { panic!("{key:?}") };
+        let To::Do(Action::Run(job, _)) = *to else { panic!("{to:?}") };
         store(&second).await;
 
         let (me, sealing) = (nats.me.clone(), Sealing::of(&nats));
@@ -770,7 +770,7 @@ mod tests {
 
         let again = job.run(&ctx).await.unwrap_err().to_string();
         assert_eq!(again, format!("question {} on thread {thread} is answered already", first.id));
-        let gone = Job::Answer { thread: thread.clone(), question: Uuid::now_v7(), choice: Choice::Option(1) };
+        let gone = Job::Answer { thread: thread.clone(), question: Uuid::now_v7(), picks: vec![Pick::option(1)] };
         let gone = gone.run(&ctx).await.unwrap_err().to_string();
         assert!(gone.contains("is gone from thread"), "{gone}");
     }

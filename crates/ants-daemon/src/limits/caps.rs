@@ -243,7 +243,7 @@ pub struct Pending {
     /// The ask_human question the escalation is, asked of the human's assistant first: asked of the human when it
     /// goes on ([`ants_proto::EscalationReason::Question`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub question: Option<Box<ants_proto::Question>>,
+    pub question: Option<Box<ants_proto::Questions>>,
 }
 
 impl Pending {

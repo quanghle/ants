@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use ants_proto::{
-    ChannelEntry, ChannelId, DEFAULT_TURN_BUDGET, EscalationReason, Hold, Humans, LimitKind, QueueRequest,
+    ChannelEntry, ChannelId, DEFAULT_TURN_BUDGET, EscalationReason, Hold, Humans, LimitKind, Pick, QueueRequest,
     QueuedMessage, Role, State, StatusEvent, StatusUpdate, Uuid, WEBHOOK_ALLOW,
 };
 use ants_test_support::{NatsServer as Server, free_port};

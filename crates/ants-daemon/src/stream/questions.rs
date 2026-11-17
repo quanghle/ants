@@ -5,7 +5,7 @@
 use std::ops::ControlFlow;
 use std::time::{Duration, SystemTime};
 
-use ants_proto::{Acting, Answered, Envelope, UserId, Uuid, sent_reader, subject};
+use ants_proto::{Acting, Envelope, Pick, UserId, Uuid, sent_reader, subject};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, consumer};
 
@@ -76,21 +76,33 @@ pub fn answerer(envelope: &Envelope) -> &UserId {
     envelope.on_behalf_of.as_ref().unwrap_or(&envelope.from)
 }
 
-/// The `[ants]` line a prompt with `answer`, a valid answer to `question`, starts with: who answers which question,
-/// and with what option, or that the answer is typed.
+/// The `[ants]` lines a prompt with `answer`, a valid answer to `question`, starts with, one for each question asked:
+/// who answers which question, and with what options, or what typed answer.
 pub fn answer_line(answer: &Envelope, question: &Envelope) -> Option<String> {
     let answered = answer.answers_as(question, answerer(answer))?;
-    let asked = question.asks()?;
-    let quoted = quote(&asked.text);
-    let with = match answered {
-        Answered::Option(n, option) => format!("option {n}, {option:?}; the message is that option's text"),
-        Answered::Typed => "a typed answer, the message".to_owned(),
-    };
-    Some(format!(
-        "[ants] {} answers the question asked with ask_human as message {} ({quoted:?}) with {with}.",
-        by(answer),
-        question.id
-    ))
+    let (by, count) = (by(answer), answered.len());
+    let lines: Vec<String> = (1..)
+        .zip(&answered)
+        .map(|(n, a)| {
+            let which = if count == 1 { "the question".to_owned() } else { format!("question {n} of {count}") };
+            let with = match a.pick {
+                Pick::Options(numbers) => {
+                    let options: Vec<String> = numbers
+                        .iter()
+                        .filter_map(|&k| Some(format!("option {k}, {:?}", a.question.option(k)?.label)))
+                        .collect();
+                    options.join(" and ")
+                }
+                Pick::Typed(text) => format!("a typed answer, {text:?}"),
+            };
+            let quoted = quote(&a.question.text);
+            format!(
+                "[ants] {by} answers {which} asked with ask_human as message {} ({quoted:?}) with {with}.",
+                question.id
+            )
+        })
+        .collect();
+    Some(lines.join("\n"))
 }
 
 /// Who answered with `answer`, as the `[ants]` line names it: `alice via pa` for an assistant answering for its human.
@@ -113,7 +125,7 @@ fn quote(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use ants_proto::{Choice, Question};
+    use ants_proto::{Question, Questions};
 
     use super::*;
 
@@ -130,25 +142,45 @@ mod tests {
     #[test]
     fn the_answer_line_names_the_question_and_the_option_or_a_typed_answer() {
         let asked = question("Ship it?", true);
-        let picked = Envelope::answering(&asked, user("alice"), Choice::Option(2)).unwrap();
+        let picked = Envelope::answering(&asked, user("alice"), vec![Pick::option(2)]).unwrap();
         assert_eq!(
             answer_line(&picked, &asked).unwrap(),
             format!(
                 "[ants] alice answers the question asked with ask_human as message {} (\"Ship it?\") with option 2, \
-                 \"not yet\"; the message is that option's text.",
+                 \"not yet\".",
                 asked.id
             )
         );
-        let typed = Envelope::answering(&asked, user("alice"), Choice::Typed("after lunch".to_owned())).unwrap();
-        assert!(answer_line(&typed, &asked).unwrap().ends_with("with a typed answer, the message."));
+        let typed = Envelope::answering(&asked, user("alice"), vec![Pick::Typed("after lunch".to_owned())]).unwrap();
+        assert!(answer_line(&typed, &asked).unwrap().ends_with("with a typed answer, \"after lunch\"."));
         let plain = Envelope::on_thread(asked.thread_id.clone(), user("alice"), user("dev-a"), "2");
         assert_eq!(answer_line(&plain, &asked), None);
     }
 
     #[test]
+    fn an_answer_to_several_questions_has_a_line_for_each() {
+        let options = ["eu".to_owned(), "us".to_owned()];
+        let regions = Question::new("Which regions?", &options, false).unwrap().multi();
+        let ship = Question::new("Ship it?", &["yes".to_owned(), "no".to_owned()], true).unwrap();
+        let questions = Questions::new(vec![regions, ship]).unwrap();
+        let asked = Envelope::asking("t1".parse().unwrap(), user("dev-a"), user("alice"), questions);
+        let picks = vec![Pick::Options(vec![1, 2]), Pick::Typed("after lunch".to_owned())];
+        let answer = Envelope::answering(&asked, user("alice"), picks).unwrap();
+        let id = asked.id;
+        assert_eq!(
+            answer_line(&answer, &asked).unwrap(),
+            format!(
+                "[ants] alice answers question 1 of 2 asked with ask_human as message {id} (\"Which regions?\") with \
+                 option 1, \"eu\" and option 2, \"us\".\n[ants] alice answers question 2 of 2 asked with ask_human as \
+                 message {id} (\"Ship it?\") with a typed answer, \"after lunch\"."
+            )
+        );
+    }
+
+    #[test]
     fn an_assistant_answers_for_the_human_asked_only() {
         let asked = question("Ship it?", true);
-        let by_pa = Envelope::answering(&asked, user("pa"), Choice::Option(1)).unwrap();
+        let by_pa = Envelope::answering(&asked, user("pa"), vec![Pick::option(1)]).unwrap();
         assert_eq!(answer_line(&by_pa, &asked), None, "pa was not asked");
         let line = answer_line(&by_pa.clone().on_behalf(Some(user("alice"))), &asked).unwrap();
         assert!(line.starts_with("[ants] alice via pa answers the question"), "{line}");

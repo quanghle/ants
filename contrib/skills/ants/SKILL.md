@@ -105,15 +105,16 @@ A reaction is 1-64 of lowercase letters, digits and `-`, such as `eyes`, `check`
 
 ## Answer a question
 
-An ant may ask the human a question with numbered options; `ants inbox` and `ants thread show` print it with
-its options and, until answered, an `ants answer` hint.
+An ant may ask the human 1-4 questions with numbered options in one message; `ants inbox` and `ants thread show`
+print them with their options and, until answered, an `ants answer` hint.
 
 ```sh
-ants answer <message> 2              # pick option 2
-ants answer <message> after lunch    # answer in own words, if the question takes them
+ants answer <message> 2                  # one question: pick option 2
+ants answer <message> after lunch        # one question: answer in own words, if it takes them
+ants answer <message> 2 1,3 'next week'  # three questions: a pick each, in order (1,3 where several may be picked)
 ```
 
-The answer goes back on the question's thread. Answer only with what the user chose.
+The answers go back together on the questions' thread. Answer only with what the user chose.
 
 ## Channels
 

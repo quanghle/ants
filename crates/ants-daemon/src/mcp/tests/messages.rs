@@ -313,21 +313,22 @@ async fn ask_human_asks_the_thread_s_owner_without_spending_a_turn() {
         http_client(&url, &token).await
     };
     let ask = |args: serde_json::Value| call(&client, "ask_human", args);
-    let (ok, text) = ask(serde_json::json!({"question": "Ship?", "options": ["yes", "no"]})).await;
+    let one = |question: serde_json::Value| serde_json::json!({"questions": [question]});
+    let (ok, text) = ask(one(serde_json::json!({"question": "Ship?", "options": ["yes", "no"]}))).await;
     assert!(!ok && text.contains("no message is being handled"), "{text}");
 
     let _turn = mcp.begin(&current);
-    let (ok, text) = ask(serde_json::json!({"question": "Ship?", "options": ["yes"]})).await;
+    let (ok, text) = ask(one(serde_json::json!({"question": "Ship?", "options": ["yes"]}))).await;
     assert!(!ok && text.contains("invalid question"), "{text}");
     let (ok, text) =
-        ask(serde_json::json!({"question": " Ship? ", "options": ["yes", "not yet"], "free_text": false})).await;
+        ask(one(serde_json::json!({"question": " Ship? ", "options": ["yes", "not yet"], "free_text": false}))).await;
     assert!(ok, "{text}");
     let out = sent.recv().await.unwrap();
     assert!(text.contains(&out.id.to_string()) && text.contains("alice"), "{text}");
     assert_eq!((&out.to, &out.thread_id, out.turn_budget), (&user("alice"), &current.thread_id, 0));
-    let question = out.asks().unwrap();
+    let question = &out.asks().unwrap().questions[0];
     assert_eq!((question.text.as_str(), question.free_text), ("Ship?", false));
-    assert_eq!(out.text, question.render());
+    assert_eq!(out.text, out.asks().unwrap().render());
     assert_eq!(out.in_reply_to, None);
 
     let plain = Envelope::new(user("dev-b"), user("dev-a"), "q");
@@ -337,11 +338,47 @@ async fn ask_human_asks_the_thread_s_owner_without_spending_a_turn() {
         http_client(&url, &token).await
     };
     let (ok, text) =
-        call(&client, "ask_human", serde_json::json!({"question": "Ship?", "options": ["yes", "no"]})).await;
+        call(&client, "ask_human", one(serde_json::json!({"question": "Ship?", "options": ["yes", "no"]}))).await;
     assert!(ok, "{text}");
     let out = sent.recv().await.unwrap();
     assert_eq!(out.to, UserId::human(), "no owner: the default human");
-    assert!(out.asks().unwrap().free_text, "typed answers by default");
+    assert!(out.asks().unwrap().questions[0].free_text, "typed answers by default");
+}
+
+#[tokio::test]
+async fn ask_human_asks_several_questions_in_one_message() {
+    let home = home("ask-several");
+    let (mcp, mut sent) = start(&home).await;
+    let current = Envelope::new(user("dev-b"), user("dev-a"), "q");
+    let _turn = mcp.begin(&current);
+    let client = {
+        let (url, token) = http_server(&mcp, &current.thread_id);
+        http_client(&url, &token).await
+    };
+    let regions = serde_json::json!({
+        "question": "Which regions?",
+        "header": "Regions",
+        "options": [{"label": "eu", "description": "Frankfurt"}, "us"],
+        "multi_select": true,
+    });
+    let ship = serde_json::json!({"question": "Ship it?", "options": ["yes", "no"], "free_text": false});
+    let (ok, text) = call(&client, "ask_human", serde_json::json!({"questions": [regions, ship]})).await;
+    assert!(ok, "{text}");
+    let out = sent.recv().await.unwrap();
+    let asked = &out.asks().unwrap().questions;
+    assert_eq!(asked.len(), 2);
+    assert_eq!((asked[0].header.as_deref(), asked[0].multi_select, asked[0].free_text), (Some("Regions"), true, true));
+    assert_eq!(asked[0].options[0].description.as_deref(), Some("Frankfurt"));
+    assert_eq!((asked[1].multi_select, asked[1].free_text), (false, false));
+    assert!(out.text.contains("Question 1 of 2, Regions: Which regions?") && out.text.contains("Question 2 of 2"));
+
+    let five = serde_json::json!({"questions": vec![ship.clone(); 5]});
+    let (ok, text) = call(&client, "ask_human", five).await;
+    assert!(!ok && text.contains("invalid question"), "{text}");
+    let long = serde_json::json!({"question": "Ship?", "header": "Thirteen char", "options": ["yes", "no"]});
+    let (ok, text) = call(&client, "ask_human", serde_json::json!({"questions": [long]})).await;
+    assert!(!ok && text.contains("header"), "{text}");
+    assert!(sent.try_recv().is_err(), "nothing more is sent");
 }
 
 #[tokio::test]

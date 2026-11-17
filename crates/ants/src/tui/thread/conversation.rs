@@ -426,12 +426,25 @@ pub(super) fn body(e: &Entry, entries: &[Entry]) -> String {
             _ => e.text.clone(),
         };
     };
-    let mut text = question.text.clone();
-    for (n, option) in question.options.iter().enumerate() {
-        let _ = write!(text, "\n{} {option}", n + 1);
-    }
-    if question.free_text {
-        text.push_str("\nor type an answer");
+    let several = question.questions.len() > 1;
+    let mut text = String::new();
+    for (n, asked) in (1..).zip(&question.questions) {
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        if several {
+            let _ = write!(text, "{}: ", asked.title(n));
+        }
+        text.push_str(&asked.text);
+        for (n, option) in (1..).zip(&asked.options) {
+            let _ = write!(text, "\n{n} {}", option.line());
+        }
+        match (asked.multi_select, asked.free_text) {
+            (true, true) => text.push_str("\npick one or more, or type an answer"),
+            (true, false) => text.push_str("\npick one or more"),
+            (false, true) => text.push_str("\nor type an answer"),
+            (false, false) => {}
+        }
     }
     for (by, answered) in crate::threads::thread::answers_to(e, entries) {
         text.push('\n');

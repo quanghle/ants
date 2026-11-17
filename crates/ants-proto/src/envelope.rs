@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     Answer, ApprovalDecision, ApprovalRequest, Attachment, ChannelId, DEFAULT_TURN_BUDGET, Error, Escalation, Humans,
-    Question, Role, Sealed, ThreadId, UserId, subject,
+    Questions, Role, Sealed, ThreadId, UserId, subject,
 };
 #[cfg(doc)]
 use crate::{
@@ -111,14 +111,14 @@ pub struct Envelope {
     /// either as an ordinary message. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<SummaryRequest>,
-    /// A question the sender asks the recipient, a human, to answer by picking one of its options or typing an answer
-    /// ([`Envelope::asking`]). The envelope's id is the question's, and its text repeats the question with the options
-    /// numbered. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
+    /// 1 to 4 questions the sender asks the recipient, a human, to answer together, picking options of each or typing
+    /// an answer ([`Envelope::asking`]). The envelope's id is the question's, and its text repeats each question with
+    /// its options numbered. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub question: Option<Question>,
-    /// The answer to a question the recipient asked the sender on the thread ([`Envelope::answering`]); the text is the
-    /// option picked or the typed answer. A reader takes an invalid answer ([`Envelope::answers`]) as an ordinary
-    /// message. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
+    pub question: Option<Questions>,
+    /// The answer to questions the recipient asked the sender on the thread, a pick for each ([`Envelope::answering`]);
+    /// the text is the answer in words ([`Questions::answer_text`]). A reader takes an invalid answer
+    /// ([`Envelope::answers`]) as an ordinary message. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<Answer>,
     /// The files attached to the message, stored before it under its [`Envelope::attachment_handle`]s. Never copied

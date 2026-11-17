@@ -118,7 +118,7 @@ const HELP: &[(&str, &str)] = &[
     ("↑↓ Tab", "in the bar: pick and complete an @ant, #channel or /command"),
     ("y p m e d z", "in a thread: copy, pin, mute, archive, done, snooze (again to undo)"),
     ("a A r n", "on a tool request: allow once, always, reject at once, or reject with a note to the ant"),
-    ("1-9 Enter", "on a question: answer by number, or focus its card: ↑↓ Enter Esc"),
+    ("1-9 Enter", "on a question: answer by number, or focus its card: ↑↓ ←→ Space Enter Esc"),
     ("g r f x d z s c o", "on home: grant, reply, forward, cancel, done, snooze, digest, credentials, held orders"),
     ("i > t S", "in a thread: reply, quote the selected, delegation tree, TL;DR"),
     ("+ f u b T", "in a thread: react, forward, unread from, remind; tool calls"),

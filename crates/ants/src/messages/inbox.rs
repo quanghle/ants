@@ -16,7 +16,9 @@ use ants_daemon::delivery::unserved;
 use ants_daemon::people::humans::Registry;
 use ants_daemon::records::reactions::{self, Reacted};
 use ants_daemon::stream::reading::{self, Reading};
-use ants_proto::{Acting, Envelope, Question, READ_BUCKET, ReadMarker, Role, ThreadId, UserId, Uuid, subject};
+use ants_proto::{
+    Acting, Envelope, Question, Questions, READ_BUCKET, ReadMarker, Role, ThreadId, UserId, Uuid, subject,
+};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
 use async_nats::jetstream::consumer::DeliverPolicy;
@@ -428,19 +430,33 @@ pub fn render_reactions(reactions: &[Reacted], indent: &str) -> String {
         .collect()
 }
 
-/// A question for the terminal ([`Envelope::question`]): its text, its options numbered, whether a typed answer is
-/// taken, then the `answers` given, a line each, or with none how to answer it.
-pub fn render_question(id: Uuid, question: &Question, answers: Vec<String>) -> String {
-    let mut text = question.render();
+/// Questions for the terminal ([`Envelope::question`]): each question's text, its options numbered, whether several
+/// may be picked and whether a typed answer is taken, then the `answers` given, a line each, or with none how to
+/// answer them.
+pub fn render_question(id: Uuid, questions: &Questions, answers: Vec<String>) -> String {
+    let mut text = questions.render();
     if answers.is_empty() {
-        let how = if question.free_text { "N|TEXT" } else { "N" };
-        let _ = write!(text, "\n(`ants answer {id} {how}` answers it)");
+        let several = questions.questions.len() > 1;
+        let how: Vec<String> = questions.questions.iter().map(|q| answer_hint(q, several)).collect();
+        let them = if several { "them" } else { "it" };
+        let _ = write!(text, "\n(`ants answer {id} {}` answers {them})", how.join(" "));
     }
     for answer in answers {
         text.push('\n');
         text.push_str(&answer);
     }
     text
+}
+
+/// How `ants answer` answers `question`: with an option's number, numbers joined by commas where several may be
+/// picked, or text where a typed answer is taken, quoted when it is one of `several` questions.
+fn answer_hint(question: &Question, several: bool) -> String {
+    let numbers = if question.multi_select { "N,M" } else { "N" };
+    match (question.free_text, several) {
+        (false, _) => numbers.to_owned(),
+        (true, false) => format!("{numbers}|TEXT"),
+        (true, true) => format!("{numbers}|'TEXT'"),
+    }
 }
 
 /// A message for the terminal: a header line with its id, then the text indented, its attachments and the reactions to
@@ -532,6 +548,19 @@ mod tests {
         assert!(shown.contains("\n  1. yes\n  2. not yet\n"), "{shown}");
         assert!(shown.contains("\n  Answer with an option's number.\n"), "{shown}");
         assert!(shown.contains(&format!("\n  (`ants answer {} N` answers it)\n", asked.id)), "{shown}");
+    }
+
+    #[test]
+    fn several_questions_show_how_to_answer_them_with_a_pick_each() {
+        let options = ["eu".to_owned(), "us".to_owned()];
+        let regions = Question::new("Which regions?", &options, false).unwrap().multi().headed("Regions");
+        let ship = Question::new("Ship it?", &["yes".to_owned(), "no".to_owned()], true).unwrap();
+        let questions = ants_proto::Questions::new(vec![regions, ship]).unwrap();
+        let asked = Envelope::asking("t1".parse().unwrap(), "dev-a".parse().unwrap(), UserId::human(), questions);
+        let shown = render(&asked, &Acting::Own, &[], None);
+        assert!(shown.contains("\n  Question 1 of 2, Regions: Which regions?\n  \n  1. eu\n"), "{shown}");
+        assert!(shown.contains("\n  Question 2 of 2: Ship it?\n"), "{shown}");
+        assert!(shown.contains(&format!("\n  (`ants answer {} N,M N|'TEXT'` answers them)\n", asked.id)), "{shown}");
     }
 
     #[test]

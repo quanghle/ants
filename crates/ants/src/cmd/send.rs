@@ -5,8 +5,8 @@ use ants_daemon::records::{owners, reactions};
 use ants_daemon::stream::reading::Reading;
 use ants_daemon::stream::{notes, questions};
 use ants_proto::{
-    ChannelEntry, ChannelId, ChannelPost, Choice, Envelope, Humans, JsDomain, NotesPost, Quote, Reaction,
-    ReactionChange, ReactionsOutcome, ReactionsRequest, Role, ThreadId, UserId, Uuid, subject,
+    ChannelEntry, ChannelId, ChannelPost, Envelope, Humans, JsDomain, NotesPost, Pick, Quote, Reaction, ReactionChange,
+    ReactionsOutcome, ReactionsRequest, Role, ThreadId, UserId, Uuid, subject,
 };
 use anyhow::{Result, anyhow, bail};
 use async_nats::jetstream;
@@ -746,17 +746,17 @@ pub(crate) fn reacted_line(reaction: &Reaction, message: Uuid, remove: bool, cha
     }
 }
 
-/// Answer the question `message` asks the CLI's human with `words`: an option's number, else a typed answer. The
-/// answer goes to the asking ant on the question's thread, as the human's message on it.
+/// Answer the questions `message` asks the CLI's human with `words`, one pick per question in their order (all of
+/// them one pick when it asks one): an option's number, numbers joined by commas where several may be picked, else a
+/// typed answer. The answer goes to the asking ant on the question's thread, as the human's message on it.
 pub(crate) async fn answer(nats: &Nats<'_>, message: thread::MessagePick, words: Vec<String>) -> Result<()> {
     let me = &nats.me;
     if !me.role.is_human() {
         bail!("the credentials of {} are an ant's: only the human an ant asked answers its question", me.id);
     }
-    let choice = Choice::parse(&words.join(" "));
     let (_, js) = nats.connect("ants-cli").await?;
     let id = message.resolve(&js, me).await?;
-    let envelope = answering(&js, &me.id, id, choice).await?;
+    let envelope = answering(&js, &me.id, id, Picks::Words(words)).await?;
     if deliver(&js, nats.domain, &envelope).await? == bus::Stored::Outbox {
         println!("{OUTBOX}");
     }
@@ -765,11 +765,17 @@ pub(crate) async fn answer(nats: &Nats<'_>, message: thread::MessagePick, words:
     Ok(())
 }
 
-/// `human`'s answer `choice` to the question message `id`, read back from those to `human`, asks: a message `human`
+/// An answer's picks: made already, one per question, or words to read them from ([`ants_proto::Questions::picks`]).
+pub(crate) enum Picks {
+    Words(Vec<String>),
+    Made(Vec<Pick>),
+}
+
+/// `human`'s answer `picks` to the questions message `id`, read back from those to `human`, asks: a message `human`
 /// owns the thread of, as `ants ask` sends. Fails when no such message is kept, it asks no question, a human asked it,
-/// or `choice` is no answer to it. Only ants ask questions (`ask_human`), so an answer goes to an ant, in the clear
+/// or `picks` is no answer to it. Only ants ask questions (`ask_human`), so an answer goes to an ant, in the clear
 /// like any message to one; a question from a human, which no CLI sends, is refused rather than answered unsealed.
-pub(crate) async fn answering(js: &jetstream::Context, human: &UserId, id: Uuid, choice: Choice) -> Result<Envelope> {
+pub(crate) async fn answering(js: &jetstream::Context, human: &UserId, id: Uuid, picks: Picks) -> Result<Envelope> {
     let question = questions::find(js, "", Reading::Gets, &subject::inbox_of(human), id)
         .await?
         .ok_or_else(|| anyhow!("no message {id} to {human} is kept"))?;
@@ -780,7 +786,12 @@ pub(crate) async fn answering(js: &jetstream::Context, human: &UserId, id: Uuid,
             "message {id} is from {asker}, a human, and only an ant's question takes an answer: `ants ask @{asker}` replies"
         );
     }
-    Ok(Envelope::answering(&question, human.clone(), choice)?.with_owner(Some(human.clone())))
+    let picks = match (picks, question.asks()) {
+        (Picks::Made(picks), _) => picks,
+        (Picks::Words(words), Some(asked)) => asked.picks(&words)?,
+        (Picks::Words(_), None) => Vec::new(),
+    };
+    Ok(Envelope::answering(&question, human.clone(), picks)?.with_owner(Some(human.clone())))
 }
 
 #[cfg(test)]
@@ -830,6 +841,10 @@ mod tests {
         assert!(recipient(words("@dev-b more"), &file).unwrap_err().to_string().contains("not both"));
     }
 
+    fn picked(words: &[&str]) -> Picks {
+        Picks::Words(words.iter().map(|w| (*w).to_owned()).collect())
+    }
+
     #[tokio::test]
     async fn a_human_answers_a_question_asked_of_it_with_an_option_or_typed_text() {
         let Some(server) = crate::test_support::Server::start() else { return };
@@ -850,18 +865,18 @@ mod tests {
             js.publish(subject, serde_json::to_vec(envelope).unwrap().into()).await.unwrap().await.unwrap();
         }
 
-        let answer = answering(&js, &alice, asked.id, Choice::Option(2)).await.unwrap();
+        let answer = answering(&js, &alice, asked.id, picked(&["2"])).await.unwrap();
         assert_eq!((&answer.to, &answer.thread_id, answer.text.as_str()), (&dev_a, &asked.thread_id, "not yet"));
         assert_eq!((answer.owner.as_ref(), answer.in_reply_to), (Some(&alice), None));
         assert!(answer.answers(&asked).is_some());
-        let refused = |choice| answering(&js, &alice, asked.id, choice);
-        let wrong = refused(Choice::Option(3)).await.unwrap_err().to_string();
+        let refused = |picks| answering(&js, &alice, asked.id, picks);
+        let wrong = refused(picked(&["3"])).await.unwrap_err().to_string();
         assert!(wrong.contains("no option 3; pick 1-2"), "{wrong}");
-        let typed = refused(Choice::parse("after lunch")).await.unwrap_err().to_string();
-        assert!(typed.contains("takes only an option's number"), "{typed}");
-        let none = answering(&js, &alice, plain.id, Choice::Option(1)).await.unwrap_err().to_string();
+        let typed = refused(picked(&["after", "lunch"])).await.unwrap_err().to_string();
+        assert!(typed.contains("takes only"), "{typed}");
+        let none = answering(&js, &alice, plain.id, picked(&["1"])).await.unwrap_err().to_string();
         assert!(none.contains("asks no question"), "{none}");
-        let unknown = answering(&js, &alice, forged.id, Choice::Option(1)).await.unwrap_err().to_string();
+        let unknown = answering(&js, &alice, forged.id, picked(&["1"])).await.unwrap_err().to_string();
         assert!(unknown.contains("is kept"), "a forged question is none: {unknown}");
 
         // A question from a human, which only a hand-made message carries, is not answered in the clear.
@@ -874,7 +889,33 @@ mod tests {
         let question = ants_proto::Question::new("Lunch?", &options, true).unwrap();
         let by_bob = Envelope::asking(ThreadId::generate(), bob.clone(), alice.clone(), question);
         bob_js.publish(by_bob.subject(), serde_json::to_vec(&by_bob).unwrap().into()).await.unwrap().await.unwrap();
-        let human = answering(&js, &alice, by_bob.id, Choice::Option(1)).await.unwrap_err().to_string();
+        let human = answering(&js, &alice, by_bob.id, picked(&["1"])).await.unwrap_err().to_string();
         assert!(human.contains("from bob, a human") && human.contains("`ants ask @bob`"), "{human}");
+    }
+
+    #[tokio::test]
+    async fn a_human_answers_several_questions_with_a_pick_for_each() {
+        let Some(server) = crate::test_support::Server::start() else { return };
+        let (alice, dev_a): (UserId, UserId) = ("alice".parse().unwrap(), "dev-a".parse().unwrap());
+        let (_, js) = server.connect_as(&alice, ants_proto::Role::Human).await;
+        bus::ensure_stream(&js).await.unwrap();
+        let regions = ["eu".to_owned(), "us".to_owned(), "ap".to_owned()];
+        let regions = ants_proto::Question::new("Which regions?", &regions, false).unwrap().multi().headed("Regions");
+        let ship = ants_proto::Question::new("Ship it?", &["yes".to_owned(), "no".to_owned()], true).unwrap();
+        let questions = ants_proto::Questions::new(vec![regions, ship]).unwrap();
+        let asked = Envelope::asking(ThreadId::generate(), dev_a.clone(), alice.clone(), questions);
+        js.publish(asked.subject(), serde_json::to_vec(&asked).unwrap().into()).await.unwrap().await.unwrap();
+
+        let answer = answering(&js, &alice, asked.id, picked(&["3,1", "after lunch"])).await.unwrap();
+        let picks = &answer.answer.as_ref().unwrap().picks;
+        assert_eq!(picks, &[Pick::Options(vec![1, 3]), Pick::Typed("after lunch".to_owned())]);
+        assert_eq!(answer.text, "Regions: eu, ap\nQ2: after lunch");
+        let refused = |words| answering(&js, &alice, asked.id, picked(words));
+        let short = refused(&["1"]).await.unwrap_err().to_string();
+        assert!(short.contains("1 answers to 2 questions"), "{short}");
+        let wrong = refused(&["1", "3"]).await.unwrap_err().to_string();
+        assert!(wrong.contains("question 2: no option 3"), "{wrong}");
+        let made = answering(&js, &alice, asked.id, Picks::Made(vec![Pick::option(2), Pick::option(1)])).await;
+        assert_eq!(made.unwrap().text, "Regions: us\nQ2: yes");
     }
 }

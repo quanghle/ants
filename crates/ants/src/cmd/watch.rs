@@ -236,8 +236,16 @@ impl Printer {
                     .line(&format!("[{thread}] {named}{forged} escalated {stuck}'s {reason} to {to} (level {level})"));
             }
             StatusUpdate::Asked { to, message, question } => {
-                let question = question.text.split_whitespace().collect::<Vec<_>>().join(" ");
-                return self.line(&format!("[{thread}] {named}{forged} asked {to} {question:?} (message {message})"));
+                let first = question
+                    .questions
+                    .first()
+                    .map_or_default(|q| q.text.split_whitespace().collect::<Vec<_>>().join(" "));
+                let more = match question.questions.len() {
+                    0 | 1 => String::new(),
+                    n => format!(" and {} more", n - 1),
+                };
+                return self
+                    .line(&format!("[{thread}] {named}{forged} asked {to} {first:?}{more} (message {message})"));
             }
             StatusUpdate::Decided { request_id, verdict, by, decider, via } => {
                 let verdict = tools::spelling(*verdict);

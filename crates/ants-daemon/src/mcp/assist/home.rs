@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 use std::time::SystemTime;
 
 use ants_proto::{
-    ApprovalRequest, ChannelId, ChannelPost, Choice, Envelope, NotesPost, Reaction, ThreadId, UserId, Uuid, Verdict,
+    ApprovalRequest, ChannelId, ChannelPost, Envelope, NotesPost, Pick, Reaction, ThreadId, UserId, Uuid, Verdict,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -37,8 +37,9 @@ pub(super) struct HumanQueue {
 pub(super) struct AnswerForHuman {
     /// The id of the question's message, as human_queue lists it.
     message_id: String,
-    /// The number of the option picked, or a typed answer where the question takes one.
-    answer: String,
+    /// One answer for each question of the message, in their order: the number of the option picked, numbers
+    /// joined by commas (`1,3`) where the question takes several, or a typed answer where it takes one.
+    answers: Vec<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -138,10 +139,16 @@ impl Hub {
         let shown = self.shown_text(human, e).await;
         let shown = if whole { shown } else { behalf::excerpt(&shown) };
         let mut line = format!("- message {} on thread {}, {} to {}: {shown}", e.id, e.thread_id, self.sender(e), e.to);
-        if let Some(q) = e.asks() {
-            let options: Vec<String> = q.options.iter().enumerate().map(|(n, o)| format!("{}. {o}", n + 1)).collect();
-            let typed = if q.free_text { "; a typed answer is taken" } else { "" };
-            let _ = write!(line, " [options: {}{typed}]", options.join(", "));
+        if let Some(asked) = e.asks() {
+            let several = asked.questions.len() > 1;
+            for (n, q) in (1..).zip(&asked.questions) {
+                let options: Vec<String> = q.option_lines().collect();
+                let multi = if q.multi_select { "; several may be picked" } else { "" };
+                let typed = if q.free_text { "; a typed answer is taken" } else { "" };
+                let which =
+                    if several { format!("question {n}, {}: ", behalf::excerpt(&q.text)) } else { String::new() };
+                let _ = write!(line, " [{which}options: {}{multi}{typed}]", options.join(", "));
+            }
         }
         line
     }
@@ -234,7 +241,8 @@ impl Hub {
                 format!("no question to {human} waits as message {id}; human_queue lists those that do")
             })?;
         let question = &question.envelope;
-        let answer = Envelope::answering(question, self.ant.clone(), Choice::parse(&args.answer))
+        let picks = args.answers.iter().map(|a| Pick::parse(a)).collect();
+        let answer = Envelope::answering(question, self.ant.clone(), picks)
             .map_err(|e| format!("{e}"))?
             .on_behalf(Some(human.clone()))
             .with_owner(question.owner.clone());
@@ -405,9 +413,11 @@ impl Tools {
         Ok(text(self.hub.human_queue(args.thread.as_deref()).await))
     }
 
-    #[tool(description = "As the assistant of a human, answer a question an ant asked it (human_queue lists \
-        them) for it: `answer` is the number of the option picked, or a typed answer where the question takes one. \
-        The answer goes as this ant's, for the human, and the asking ant's daemon tells the human.")]
+    #[tool(description = "As the assistant of a human, answer a message of questions an ant asked it \
+        (human_queue lists them) for it, all at once: `answers` has one answer for each question, in their order, \
+        each the number of the option picked, numbers joined by commas where the question takes several, or a typed \
+        answer where it takes one. The answer goes as this ant's, for the human, and the asking ant's daemon tells \
+        the human.")]
     async fn answer_for_human(
         &self,
         Parameters(args): Parameters<AnswerForHuman>,

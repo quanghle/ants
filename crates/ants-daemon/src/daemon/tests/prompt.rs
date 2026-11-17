@@ -406,33 +406,37 @@ async fn the_next_prompt_mentions_late_replies_waiting_on_its_thread() {
 }
 
 #[tokio::test]
-async fn a_human_s_answer_to_the_ant_s_question_is_prompted_with_an_ants_line() {
+async fn a_human_s_answer_to_the_ant_s_questions_is_prompted_once_with_an_ants_line_for_each() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
     let (launch, _log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let thread = ThreadId::generate();
-    let options = ["yes".to_owned(), "not yet".to_owned()];
-    let question = ants_proto::Question::new("Ship it?", &options, false).unwrap();
-    let asked = Envelope::asking(thread.clone(), bus.dev.clone(), UserId::human(), question);
+    let ship = ants_proto::Question::new("Ship it?", &["yes".to_owned(), "not yet".to_owned()], false).unwrap();
+    let regions = ants_proto::Question::new("Which regions?", &["eu".to_owned(), "us".to_owned()], false).unwrap();
+    let questions = ants_proto::Questions::new(vec![ship.headed("Ship"), regions.multi()]).unwrap();
+    let asked = Envelope::asking(thread.clone(), bus.dev.clone(), UserId::human(), questions);
     bus::publish_json(&bus.js, asked.subject(), &asked, None).await.unwrap();
     timeout(WAIT, replies.next()).await.expect("the question").unwrap();
-    let picked = Envelope::answering(&asked, UserId::human(), ants_proto::Choice::Option(2)).unwrap();
+    let picks = vec![Pick::option(2), Pick::Options(vec![1, 2])];
+    let picked = Envelope::answering(&asked, UserId::human(), picks).unwrap();
     bus::publish_json(&bus.js, picked.subject(), &picked, None).await.unwrap();
     // No such option: an ordinary message.
     let mut wrong = picked.clone();
     wrong.id = Uuid::now_v7();
-    wrong.answer.as_mut().unwrap().option = Some(3);
+    wrong.answer.as_mut().unwrap().picks[0] = Pick::option(3);
     bus::publish_json(&bus.js, wrong.subject(), &wrong, None).await.unwrap();
 
     let ctrl_c = Arc::new(Semaphore::new(0));
     let check = async {
-        let line = format!(
-            "[ants] human answers the question asked with ask_human as message {} (\"Ship it?\") with option 2, \
-             \"not yet\"; the message is that option's text.",
-            asked.id
+        let id = asked.id;
+        let lines = format!(
+            "[ants] human answers question 1 of 2 asked with ask_human as message {id} (\"Ship it?\") with option 2, \
+             \"not yet\".\n[ants] human answers question 2 of 2 asked with ask_human as message {id} (\"Which \
+             regions?\") with option 1, \"eu\" and option 2, \"us\"."
         );
-        assert_eq!(next_reply(&mut replies).await, (thread.clone(), format!("{line}\n\nnot yet")));
-        assert_eq!(next_reply(&mut replies).await, (thread.clone(), "not yet".to_owned()));
+        let text = "Ship: not yet\nQ2: eu, us";
+        assert_eq!(next_reply(&mut replies).await, (thread.clone(), format!("{lines}\n\n{text}")));
+        assert_eq!(next_reply(&mut replies).await, (thread.clone(), text.to_owned()));
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
