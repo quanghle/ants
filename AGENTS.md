@@ -9,7 +9,7 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
 - Record discovered work with `bd create ... --dep discovered-from:<id>`.
 - Specs: `bd spec list`, `bd spec show <area>`. Areas: wire, transport, daemon, harness, memory, cli, efficiency,
   messenger, channels, webhooks, admin, assistant, sense (with sense/identity, sense/memory, sense/brief, sense/work,
-  sense/triggers, sense/store).
+  sense/triggers, sense/store, sense/dreams).
 - Link every piece of work to the requirement it serves (`bd spec link <id> <requirement>`) or mark it
   `bd spec none <id> -r "<why>"`. `bd spec drift` must report 0 problems.
 - A behaviour change that contradicts a requirement goes through `bd spec change`, not a silent edit.
