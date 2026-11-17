@@ -5,9 +5,11 @@
 //! (CI sets it), where it fails instead, so a broken install cannot pass as skipped tests. Under [`JS_ACK_FC_V2`]`=1`
 //! every test nats-server uses the JetStream ack and flow control subjects nats-server 2.16 uses by default.
 
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 /// Environment variable that turns a missing tool into a test failure.
@@ -28,21 +30,58 @@ pub fn have(tool: &str) -> bool {
     false
 }
 
+/// The directory under `target/` holding the files of tests.
+fn test_tmp() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-tmp")
+}
+
 /// A fresh directory under `target/`, unique to this process and call. The caller removes it.
 pub fn scratch_dir(name: &str) -> PathBuf {
     static DIRS: AtomicUsize = AtomicUsize::new(0);
     let n = DIRS.fetch_add(1, Ordering::Relaxed);
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/test-tmp")
-        .join(format!("{name}-{}-{n}", std::process::id()));
+    let dir = test_tmp().join(format!("{name}-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
 
-/// A TCP port of 127.0.0.1 that was free a moment ago, for a server that must start after its client.
+/// The ports [`free_port`] hands out: below the ephemeral ports of Linux (from 32768) and macOS (from 49152), which
+/// port-0 binds and nats-servers listening on port -1 take.
+const RESERVED_PORTS: std::ops::Range<u16> = 20_000..32_000;
+
+/// A TCP port of 127.0.0.1 nothing listens on, for a server that must start after its client or for an address
+/// where nothing answers. No other call, in this test process or another, gets it until this process exits: each
+/// port handed out stays locked by a file under `target/test-tmp/ports`. Port-0 binds, taking ephemeral ports, miss it too.
 pub fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    static PORTS: Mutex<(u16, Vec<File>)> = Mutex::new((0, Vec::new()));
+    let mut ports = PORTS.lock().unwrap_or_else(PoisonError::into_inner);
+    let (next, held) = &mut *ports;
+    let span = RESERVED_PORTS.end - RESERVED_PORTS.start;
+    if *next == 0 {
+        use std::hash::{BuildHasher as _, Hasher as _};
+        // Random, away from the ports of other test processes and of a run just before, whose servers may still be
+        // stopping.
+        let random = std::hash::RandomState::new().build_hasher().finish();
+        *next = RESERVED_PORTS.start + u16::try_from(random % u64::from(span)).unwrap();
+    }
+    let locks = test_tmp().join("ports");
+    std::fs::create_dir_all(&locks).unwrap();
+    for _ in 0..span {
+        let port = *next;
+        *next = if port + 1 == RESERVED_PORTS.end { RESERVED_PORTS.start } else { port + 1 };
+        let lock = File::options().create(true).truncate(false).write(true).open(locks.join(port.to_string())).unwrap();
+        // Held by another test process, or by this one through another handle.
+        if lock.try_lock().is_err() {
+            continue;
+        }
+        // A listener bound to a wildcard address does not keep another from binding 127.0.0.1 alone.
+        let refused = std::net::TcpStream::connect(("127.0.0.1", port)).is_err();
+        if refused && std::net::TcpListener::bind(("0.0.0.0", port)).is_ok() {
+            held.push(lock);
+            return port;
+        }
+    }
+    panic!("no free port left in {RESERVED_PORTS:?}");
 }
 
 /// Whether [`JS_ACK_FC_V2`] asks for v2 ack and flow control subjects.
@@ -326,6 +365,15 @@ mod tests {
         assert_eq!(stub.env(1, "STUB_VAR").as_deref(), Some("set"));
         assert_eq!(stub.cwd(1).canonicalize().unwrap(), dir.canonicalize().unwrap());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_free_port_is_handed_out_once_and_locked_against_other_processes() {
+        let (a, b) = (free_port(), free_port());
+        assert_ne!(a, b);
+        assert!(RESERVED_PORTS.contains(&a) && RESERVED_PORTS.contains(&b), "{a} {b}");
+        let lock = File::open(test_tmp().join("ports").join(a.to_string())).unwrap();
+        assert!(lock.try_lock().is_err(), "another process cannot take port {a}");
     }
 
     #[test]
