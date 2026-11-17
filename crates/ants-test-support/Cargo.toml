@@ -10,6 +10,7 @@ description = "Test helpers shared by the ants crates: external tools and a thro
 
 [dependencies]
 serde_json.workspace = true
+tokio = { workspace = true, features = ["time"] }
 
 [lints]
 workspace = true

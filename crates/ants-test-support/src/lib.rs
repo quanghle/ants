@@ -1,5 +1,5 @@
-//! Test helpers shared by the ants crates (dev-dependency only): external tools, a throwaway nats-server and a scripted
-//! stub CLI ([`StubCli`]).
+//! Test helpers shared by the ants crates (dev-dependency only): external tools, a throwaway nats-server, a scripted
+//! stub CLI ([`StubCli`]) and waits for a condition ([`eventually`]).
 //!
 //! A test that needs `nats-server` skips when the tool is not on PATH, unless [`REQUIRE_TOOLS`] is set to `1`
 //! (CI sets it), where it fails instead, so a broken install cannot pass as skipped tests. Under [`JS_ACK_FC_V2`]`=1`
@@ -43,6 +43,20 @@ pub fn scratch_dir(name: &str) -> PathBuf {
 /// A TCP port of 127.0.0.1 that was free a moment ago, for a server that must start after its client.
 pub fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+}
+
+/// Wait until `check` holds, for up to a minute; panics naming `what` otherwise.
+pub async fn eventually(what: &str, check: impl AsyncFnMut() -> bool) {
+    eventually_within(Duration::from_secs(60), what, check).await;
+}
+
+/// Wait until `check` holds, polling every 100 ms for up to `limit`; panics naming `what` otherwise.
+pub async fn eventually_within(limit: Duration, what: &str, mut check: impl AsyncFnMut() -> bool) {
+    let start = tokio::time::Instant::now();
+    while !check().await {
+        assert!(start.elapsed() < limit, "{what}: timed out after {limit:?}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// Whether [`JS_ACK_FC_V2`] asks for v2 ack and flow control subjects.

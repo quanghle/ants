@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use ants_daemon::bus;
 use ants_daemon::colony::{self, Registration, Workload};
 use ants_proto::{Activity, ColonyEntry, SignInNeeded, UserId};
-use ants_test_support::NatsServer as Server;
+use ants_test_support::{NatsServer as Server, eventually_within};
 use async_nats::jetstream::kv;
 
 fn entry(ant: &str) -> ColonyEntry {
@@ -51,16 +51,6 @@ async fn read(kv: &kv::Store, ant: &str) -> Option<ColonyEntry> {
     kv.get(ant).await.unwrap().map(|v| serde_json::from_slice(&v).unwrap())
 }
 
-/// Poll until `ant`'s entry is gone, or fail after `limit`.
-async fn wait_gone(kv: &kv::Store, ant: &str, limit: Duration) -> Duration {
-    let start = Instant::now();
-    while read(kv, ant).await.is_some() {
-        assert!(start.elapsed() < limit, "{ant} still listed after {limit:?}");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    start.elapsed()
-}
-
 #[tokio::test]
 async fn entries_refresh_leave_and_expire() {
     let Some(server) = Server::start() else { return };
@@ -86,7 +76,9 @@ async fn entries_refresh_leave_and_expire() {
     let b = Registration::start(kv.clone(), entry("dev-b"), beat).await.unwrap();
     drop(b);
     assert!(read(&kv, "dev-b").await.is_some());
-    let gone_after = wait_gone(&kv, "dev-b", ttl * 3).await;
+    let start = Instant::now();
+    eventually_within(ttl * 3, "dev-b unlisted", async || read(&kv, "dev-b").await.is_none()).await;
+    let gone_after = start.elapsed();
     assert!(gone_after >= ttl - Duration::from_millis(500), "expired too early: {gone_after:?}");
 
     // An existing bucket keeps its max age.
@@ -111,15 +103,13 @@ async fn listing_gives_every_entry_by_ant() {
 
 /// Poll until `ant`'s entry shows `activity`, or fail after `limit`.
 async fn wait_activity(kv: &kv::Store, ant: &str, activity: Activity, limit: Duration) -> ColonyEntry {
-    let start = Instant::now();
-    loop {
-        let entry = read(kv, ant).await.expect("listed");
-        if entry.activity == activity {
-            return entry;
-        }
-        assert!(start.elapsed() < limit, "{ant} not {activity:?} after {limit:?}: {entry:?}");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let mut entry = None;
+    let shows = async || {
+        let read = read(kv, ant).await.expect("listed");
+        entry.insert(read).activity == activity
+    };
+    eventually_within(limit, &format!("{ant} {activity:?}"), shows).await;
+    entry.expect("read")
 }
 
 #[tokio::test]
@@ -143,15 +133,9 @@ async fn turning_working_or_idle_shows_before_the_next_beat() {
 
 /// Poll until `ant`'s entry shows `signed_out`, or fail after `limit`.
 async fn wait_signed_out(kv: &kv::Store, ant: &str, signed_out: Option<&SignInNeeded>, limit: Duration) {
-    let start = Instant::now();
-    loop {
-        let entry = read(kv, ant).await.expect("listed");
-        if entry.signed_out.as_ref() == signed_out {
-            return;
-        }
-        assert!(start.elapsed() < limit, "{ant} not signed out as {signed_out:?} after {limit:?}: {entry:?}");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let what = format!("{ant} signed out as {signed_out:?}");
+    let shows = async || read(kv, ant).await.expect("listed").signed_out.as_ref() == signed_out;
+    eventually_within(limit, &what, shows).await;
 }
 
 #[tokio::test]
@@ -259,8 +243,8 @@ async fn the_builtin_messenger_hands_over_to_a_messenger_started_later() {
 
     // Deleted under it, the entry is put back at once.
     kv.delete("messenger").await.unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(read(&kv, "messenger").await.map(|e| e.instance), Some(builtin.instance.clone()));
+    let put_back = async || read(&kv, "messenger").await.is_some_and(|e| e.instance == builtin.instance);
+    eventually_within(Duration::from_millis(500), "messenger entry put back", put_back).await;
     assert!(!held.is_lost());
 
     // A listed messenger, here on the same machine, puts its entry regardless.

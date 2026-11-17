@@ -15,6 +15,7 @@ use std::time::Duration;
 use ants_daemon::bus;
 use ants_proto::{JsDomain, Machine, Role, UserId, inbox_prefix};
 use ants_test_support::NatsServer;
+pub(crate) use ants_test_support::eventually;
 use async_nats::{Client, Event, jetstream};
 use tokio::sync::mpsc;
 
@@ -119,17 +120,6 @@ pub(crate) fn spawn_hub(leaf_port: u16, extra: &str) -> Option<NatsServer> {
             SERVER_CONF
         )
     })
-}
-
-/// Wait until `check` holds, for up to a minute; panics naming `what` otherwise.
-pub(crate) async fn eventually(what: &str, mut check: impl AsyncFnMut() -> bool) {
-    for _ in 0..600 {
-        if check().await {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    panic!("{what}: timed out");
 }
 
 /// Issue `out`, uplink credentials of `machine` for the hub's `domain`, for as many ants as they may carry; returns
