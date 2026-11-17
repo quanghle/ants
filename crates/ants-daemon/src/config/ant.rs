@@ -153,7 +153,7 @@ pub struct Ant {
     /// The file's `[memory_pressure]` table.
     #[serde(skip)]
     pub memory_pressure: pressure::Settings,
-    /// What `provider` names among the file's providers; sugar while it names none.
+    /// What `provider` names among the file's providers; sense while it names none.
     #[serde(skip)]
     pub provider_setting: Setting,
 }
@@ -247,7 +247,7 @@ impl Ant {
             machine: None,
             storage: storage::Settings::default(),
             memory_pressure: pressure::Settings::default(),
-            provider_setting: Setting::Sugar,
+            provider_setting: Setting::Sense,
         }
     }
 

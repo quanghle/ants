@@ -147,7 +147,7 @@ dependencies = [
  "agent-client-protocol",
  "ants-daemon",
  "ants-proto",
- "ants-sugar",
+ "ants-sense",
  "ants-test-support",
  "anyhow",
  "async-nats",
@@ -187,7 +187,7 @@ version = "0.2.0"
 dependencies = [
  "agent-client-protocol",
  "ants-proto",
- "ants-sugar",
+ "ants-sense",
  "ants-test-support",
  "anyhow",
  "async-nats",
@@ -233,7 +233,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ants-sugar"
+name = "ants-sense"
 version = "0.2.0"
 dependencies = [
  "ants-proto",

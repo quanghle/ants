@@ -9,6 +9,6 @@ expression: value
   "to": "dev-a",
   "text": "fix the build",
   "turn_budget": 8,
-  "provider": "sugar",
+  "provider": "sense",
   "sent_at": "2025-01-01T12:00:00Z"
 }

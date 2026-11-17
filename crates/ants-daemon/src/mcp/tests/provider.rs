@@ -68,10 +68,10 @@ async fn names(client: &Client) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn sugar_tools_are_served_with_its_prefix_and_the_json_argument() {
-    let home = home("sugar");
+async fn sense_tools_are_served_with_its_prefix_and_the_json_argument() {
+    let home = home("sense");
     let (mcp, _sent) = start(&home).await;
-    mcp.with_provider(crate::provider::connect(Arc::new(ants_sugar::Sugar::new())).await.unwrap());
+    mcp.with_provider(crate::provider::connect(Arc::new(ants_sense::Sense::new())).await.unwrap());
     mcp.with_callers(Callers::known(user("dev-a"), "m1", "id-1"));
     let current = from_human();
     let (url, token) = http_server(&mcp, &current.thread_id);
@@ -79,19 +79,19 @@ async fn sugar_tools_are_served_with_its_prefix_and_the_json_argument() {
     let _turn = mcp.begin(&current);
 
     let tools = client.list_all_tools().await.unwrap();
-    let served: Vec<_> = tools.iter().filter(|t| t.name.starts_with("sugar_")).collect();
+    let served: Vec<_> = tools.iter().filter(|t| t.name.starts_with("sense_")).collect();
     let names: Vec<_> = served.iter().map(|t| t.name.as_ref()).collect();
-    for name in ["sugar_brief", "sugar_remember", "sugar_recall", "sugar_handoff"] {
+    for name in ["sense_brief", "sense_remember", "sense_recall", "sense_handoff"] {
         assert!(names.contains(&name), "{names:?}");
     }
     assert!(served.iter().all(|t| t.input_schema["properties"]["json"]["type"] == "boolean"));
     assert!(tools.iter().any(|t| t.name == "send_message" && !t.input_schema["properties"].get("json").is_some()));
 
-    let (ok, text) = call(&client, "sugar_brief", json!({})).await;
+    let (ok, text) = call(&client, "sense_brief", json!({})).await;
     assert!(!ok, "{text}");
-    assert!(text.starts_with("The brief is not available: sugar keeps no data here"), "{text}");
+    assert!(text.starts_with("The brief is not available: sense keeps no data here"), "{text}");
     let result =
-        client.call_tool(CallToolRequestParams::new("sugar_brief").with_arguments(json_object(json!({"json": true}))));
+        client.call_tool(CallToolRequestParams::new("sense_brief").with_arguments(json_object(json!({"json": true}))));
     let result = result.await.unwrap();
     assert_eq!(result.is_error, Some(true));
     assert_eq!(result.structured_content.unwrap()["error"], "unavailable");

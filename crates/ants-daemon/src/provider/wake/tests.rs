@@ -140,7 +140,7 @@ async fn a_wake_the_ant_does_not_take_is_refused() {
         async move { waker.wake(provider, request).await.unwrap_err().code }
     };
     let invalid = RpcError::INVALID_PARAMS;
-    assert_eq!(refused(request(&ant, None, "r1"), "sugar").await, invalid, "another provider's ant");
+    assert_eq!(refused(request(&ant, None, "r1"), "sense").await, invalid, "another provider's ant");
     let foreign = ThreadId::generate();
     assert_eq!(refused(request(&ant, Some(&foreign), "r1"), "clock").await, invalid, "no thread of the ant");
     assert_eq!(refused(WakeRequest { text: " \n".to_owned(), ..request(&ant, None, "r1") }, "clock").await, invalid);

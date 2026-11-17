@@ -3,7 +3,7 @@ source: crates/ants-proto/tests/wire_snapshots.rs
 expression: value
 ---
 {
-  "provider": "sugar",
+  "provider": "sense",
   "data": {
     "memories": 1
   }

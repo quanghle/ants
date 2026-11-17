@@ -4,7 +4,7 @@ use super::*;
 use crate::{
     ANTS_VERSION, AdminPayload, AntReply, AntRequest, AskedAnt, CancelReply, CancelRequest, ChainEntry, ChannelEntry,
     ChannelId, ChannelOp, DeviceId, ENROLL_INBOX, FILES_STREAM, HumanEntry, Humans, JsDomain, MAX_CHANNEL_DESCRIPTION,
-    Machine, QueueRequest, Refusal, Role, SPARE_READERS, STREAM, SUGAR_STREAM, Serving, ThreadId, UserId, Uuid,
+    Machine, QueueRequest, Refusal, Role, SENSE_STREAM, SPARE_READERS, STREAM, Serving, ThreadId, UserId, Uuid,
     WEBHOOK_MARKER, assisted_owner_key, assisted_withdrawal_key, channel_manager_serving_key, p, spare_readers,
     subject,
 };
@@ -129,7 +129,7 @@ fn a_js_domain_adds_the_domain_form_of_the_jetstream_api() {
 }
 
 /// A family's domain wildcard grants nothing through a leaf node, whose uplink checks the domain form unmapped: no
-/// credentials hold a right of the family a human's lack, but for creating [`SUGAR_STREAM`], which hosts hold alone. A
+/// credentials hold a right of the family a human's lack, but for creating [`SENSE_STREAM`], which hosts hold alone. A
 /// human on a leaf node may create it through the uplink, yet only with the config every host creates it with: a host
 /// writes nothing in a stream it could not create with that config itself, which nats-server refuses for a stream of
 /// another config.
@@ -166,7 +166,7 @@ fn no_credentials_hold_a_jetstream_family_right_a_human_lacks() {
                 Some(rest.split_once(".API.")?.1.to_owned())
             });
             let Some(plain) = plain else { continue };
-            if families.iter().any(|family| covers(family, &plain)) && plain != format!("STREAM.CREATE.{SUGAR_STREAM}")
+            if families.iter().any(|family| covers(family, &plain)) && plain != format!("STREAM.CREATE.{SENSE_STREAM}")
             {
                 assert!(most.contains(&format!("$JS.API.{plain}")), "{kind} holds {s}");
             }
@@ -270,11 +270,11 @@ fn leaf_permissions_cover_each_user_once() {
             "$JS.API.DIRECT.GET.KV_ants_colony.$KV.ants_colony.*",
             // Asking for a new ant's credentials, its own or on an admin's order.
             "ants.enroll.*",
-            // Sugar's event logs, which only hosts reach.
-            "$JS.API.STREAM.CREATE.ANTS_SUGAR",
-            "ants_sugar.*",
-            "$JS.API.DIRECT.GET.ANTS_SUGAR",
-            "$JS.API.DIRECT.GET.ANTS_SUGAR.ants_sugar.*",
+            // Sense's event logs, which only hosts reach.
+            "$JS.API.STREAM.CREATE.ANTS_SENSE",
+            "ants_sense.*",
+            "$JS.API.DIRECT.GET.ANTS_SENSE",
+            "$JS.API.DIRECT.GET.ANTS_SENSE.ants_sense.*",
             // The payloads of its admin orders.
             "$O.ants_files.C._admin.*.m1.>",
             "$JS.API.DIRECT.GET.OBJ_ants_files.$O.ants_files.C._admin.*.m1.>",
@@ -1102,9 +1102,9 @@ fn a_host_writes_only_its_own_machine_record_and_takes_only_its_own_orders() {
     let ants: Vec<_> = host.publish.iter().filter(|s| s.starts_with("ants.")).collect();
     assert_eq!(ants, [subject::ALL_ENROLL_REQUESTS]);
     // Of streams' info, it reads only the humans', whose consent to their assistants' orders it watches, and creates
-    // only sugar's.
+    // only sense's.
     let infos: Vec<_> = host.publish.iter().filter(|s| s.contains("STREAM.")).collect();
-    assert_eq!(infos, ["$JS.API.STREAM.CREATE.ANTS_SUGAR", "$JS.API.STREAM.INFO.KV_ants_humans"]);
+    assert_eq!(infos, ["$JS.API.STREAM.CREATE.ANTS_SENSE", "$JS.API.STREAM.INFO.KV_ants_humans"]);
     assert!(host.publish.iter().all(|s| !s.starts_with("$KV.ants_humans")), "it never writes the humans");
     assert!(host.publish.iter().any(|s| s == "$JS.API.DIRECT.GET.KV_ants_colony.$KV.ants_colony.*"));
     assert!(!host.publish.iter().any(|s| s.starts_with("$KV.ants_colony")), "it reads the colony only");
@@ -1289,38 +1289,38 @@ fn an_assistant_keeps_its_ant_rights_and_a_humans_under_its_own_name() {
     assert_eq!(unique.len(), assistant.publish.len(), "no subject twice");
 }
 
-/// Sugar's event logs: host credentials, and a leaf node's uplink carrying them, create the stream, append to and read
+/// Sense's event logs: host credentials, and a leaf node's uplink carrying them, create the stream, append to and read
 /// any identity's subject by direct gets, and nothing more; no other credentials reach any of it, and no human hears
 /// it.
 #[test]
-fn only_hosts_reach_sugar_event_logs() {
+fn only_hosts_reach_sense_event_logs() {
     let (human, a, pa) = (UserId::human(), p("dev-a"), p("pa"));
     let m1: Machine = "m1".parse().unwrap();
     let domain: JsDomain = "hub".parse().unwrap();
-    let id: crate::SugarId = "01J9ZQ3C5V8W2X4Y6Z7A8B9C0D".parse().unwrap();
-    let log = subject::sugar(&id);
+    let id: crate::SenseId = "01J9ZQ3C5V8W2X4Y6Z7A8B9C0D".parse().unwrap();
+    let log = subject::sense(&id);
     let reaches = |rights: &[String]| -> Vec<String> {
         rights
             .iter()
-            .filter(|s| s.contains(SUGAR_STREAM) || covers(s, &log) || covers(s, subject::ALL_SUGAR))
+            .filter(|s| s.contains(SENSE_STREAM) || covers(s, &log) || covers(s, subject::ALL_SENSE))
             .cloned()
             .collect()
     };
     let host = Permissions::for_host(&m1);
     let want = [
-        "$JS.API.STREAM.CREATE.ANTS_SUGAR",
-        "ants_sugar.*",
-        "$JS.API.DIRECT.GET.ANTS_SUGAR",
-        "$JS.API.DIRECT.GET.ANTS_SUGAR.ants_sugar.*",
+        "$JS.API.STREAM.CREATE.ANTS_SENSE",
+        "ants_sense.*",
+        "$JS.API.DIRECT.GET.ANTS_SENSE",
+        "$JS.API.DIRECT.GET.ANTS_SENSE.ants_sense.*",
     ];
     assert_eq!(reaches(&host.publish), want);
     assert!(reaches(&host.subscribe).is_empty(), "replies come to the host's inbox");
     let in_domain = Permissions::for_host(&m1).with_js_domain(Some(&domain)).publish;
-    assert!(in_domain.iter().any(|s| s == "$JS.hub.API.DIRECT.GET.ANTS_SUGAR.ants_sugar.*"));
-    assert!(in_domain.iter().any(|s| s == "$JS.hub.API.STREAM.CREATE.ANTS_SUGAR"));
+    assert!(in_domain.iter().any(|s| s == "$JS.hub.API.DIRECT.GET.ANTS_SENSE.ants_sense.*"));
+    assert!(in_domain.iter().any(|s| s == "$JS.hub.API.STREAM.CREATE.ANTS_SENSE"));
     let uplink = Permissions::for_leaf(&m1, [(&a, LeafRole::Ant), (&human, LeafRole::Human)])
         .with_uplink_js_domain(Some(&domain));
-    for s in ["$JS.hub.API.STREAM.CREATE.ANTS_SUGAR", "ants_sugar.*", "$JS.hub.API.DIRECT.GET.ANTS_SUGAR"] {
+    for s in ["$JS.hub.API.STREAM.CREATE.ANTS_SENSE", "ants_sense.*", "$JS.hub.API.DIRECT.GET.ANTS_SENSE"] {
         assert!(uplink.publish.iter().any(|have| have == s), "{s} missing from the uplink");
     }
     for (kind, rights) in [
@@ -1364,7 +1364,7 @@ fn only_hosts_reach_sugar_event_logs() {
                     {
                         continue;
                     }
-                    let right = format!("{prefix}.{api}.{SUGAR_STREAM}");
+                    let right = format!("{prefix}.{api}.{SENSE_STREAM}");
                     assert!(!covers(s, &right) && !covers(s, &format!("{right}.{log}")), "{kind} holds {s}");
                 }
             }

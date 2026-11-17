@@ -5,7 +5,7 @@ expression: value
 {
   "protocol_version": 1,
   "provider": {
-    "name": "sugar",
+    "name": "sense",
     "version": "0.2.0"
   },
   "capabilities": {

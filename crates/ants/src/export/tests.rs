@@ -58,9 +58,9 @@ fn an_export_packs_the_home_s_memories_and_leaves_out_its_work() {
         ("tasks.db", "db"),
         ("tasks.db-wal", "wal"),
         ("tasks.dbx", "not the db"),
-        (".sugar/id", "01J0000000000000000000000"),
-        (".sugar/cache.db", "cache"),
-        (".sugar/chain.json", "chain"),
+        (".sense/id", "01J0000000000000000000000"),
+        (".sense/cache.db", "cache"),
+        (".sense/chain.json", "chain"),
     ] {
         write(&home.join(path), text);
     }
@@ -72,7 +72,7 @@ fn an_export_packs_the_home_s_memories_and_leaves_out_its_work() {
     assert_eq!(harness, [PathBuf::from(".claude/CLAUDE.md"), PathBuf::from("CLAUDE.md")]);
     let core = core_files_of(&ant, &home, &harness).unwrap();
     let core: Vec<&str> = core.iter().map(|p| p.to_str().unwrap()).collect();
-    assert_eq!(core, [".sugar/id", "memory/deep/fact.md", "notes.md", "tasks.dbx"]);
+    assert_eq!(core, [".sense/id", "memory/deep/fact.md", "notes.md", "tasks.dbx"]);
     assert!(harness_files_of(None, &home).is_empty());
     assert!(core_files_of(&ant, &dir.join("none"), &[]).unwrap().is_empty(), "no home, no files");
 
@@ -81,7 +81,7 @@ fn an_export_packs_the_home_s_memories_and_leaves_out_its_work() {
     let restored = dir.join("restored");
     assert_eq!(restore(&restored, &export.files, false).unwrap(), [".claude/CLAUDE.md", "CLAUDE.md"]);
     let files = tree(&restored);
-    assert_eq!(files.keys().collect::<Vec<_>>(), [".sugar/id", "memory/deep/fact.md", "notes.md", "tasks.dbx"]);
+    assert_eq!(files.keys().collect::<Vec<_>>(), [".sense/id", "memory/deep/fact.md", "notes.md", "tasks.dbx"]);
     assert_eq!(files["memory/deep/fact.md"], "deep");
 
     let outside = Packed { path: "../escape".to_owned(), kind: Kind::Core, data: BASE64.encode(b"x") };
@@ -230,7 +230,7 @@ async fn an_ant_moves_to_another_bus_with_its_identity_and_memories() {
     // only warned about, and --provider-only, which tries it alone, fails.
     kv.delete("dev-b").await.unwrap();
     let with_part = dir.join("with-part.ant");
-    let part = ants_proto::provider::Export { provider: "sugar".to_owned(), data: serde_json::json!({ "log": [1] }) };
+    let part = ants_proto::provider::Export { provider: "sense".to_owned(), data: serde_json::json!({ "log": [1] }) };
     let exported = Export { provider: Some(part.clone()), ..exported };
     std::fs::write(&with_part, serde_json::to_vec(&exported).unwrap()).unwrap();
     let read_back: Export = serde_json::from_slice(&std::fs::read(&with_part).unwrap()).unwrap();

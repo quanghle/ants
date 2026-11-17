@@ -7,7 +7,7 @@ expression: value
     "whoami": "A reviewer."
   },
   "provider": {
-    "provider": "sugar",
+    "provider": "sense",
     "memories": [
       {
         "key": "lesson/deploy",
@@ -15,7 +15,7 @@ expression: value
         "truncated": true
       }
     ],
-    "error": "provider sugar did not answer within 10s"
+    "error": "provider sense did not answer within 10s"
   },
   "skipped": [
     {

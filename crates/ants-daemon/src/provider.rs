@@ -1,5 +1,5 @@
 //! Each ant's provider, what holds its identity, memories and work ([`ants_proto::provider`]), as its provider setting
-//! names it ([`Setting`]): built-in sugar unless the setting names an external provider of the config file or none.
+//! names it ([`Setting`]): built-in sense unless the setting names an external provider of the config file or none.
 //! One provider serves all the ants of a process that name it, connected on first use; each call names its ant, and
 //! so does each wake request it makes of ants ([`wake`]). An external provider runs once for them all, supervised
 //! ([`Supervised`]).
@@ -9,7 +9,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use ants_proto::UserId;
 use ants_proto::provider::{Capabilities, Connected, Info, InitializeParams, Provider};
-use ants_sugar::Sugar;
+use ants_sense::Sense;
 use tokio::sync::OnceCell;
 
 pub mod brief;
@@ -20,11 +20,11 @@ mod external;
 mod link;
 mod mcp;
 mod process;
-pub mod sugar;
+pub mod sense;
 mod supervisor;
 pub mod wake;
 
-pub use definition::{Definition, NONE, Protocol, SUGAR, Setting, define};
+pub use definition::{Definition, NONE, Protocol, SENSE, Setting, define};
 pub use supervisor::Supervised;
 
 use crate::sync::MutexExt as _;
@@ -37,12 +37,12 @@ pub fn client() -> Info {
     Info { name: "ants".to_owned(), version: env!("CARGO_PKG_VERSION").to_owned() }
 }
 
-static SUGAR_PROVIDER: OnceCell<Option<Connected>> = OnceCell::const_new();
+static SENSE_PROVIDER: OnceCell<Option<Connected>> = OnceCell::const_new();
 
 static PROVIDERS: LazyLock<Providers> = LazyLock::new(Providers::default);
 
 /// The provider of `ant`, connected: none when its setting is [`NONE`] or when it cannot be connected, the ant then
-/// going without one. An ant never [`assign`]ed has sugar.
+/// going without one. An ant never [`assign`]ed has sense.
 pub async fn of(ant: &UserId) -> Option<Connected> {
     PROVIDERS.of(ant).await
 }
@@ -110,8 +110,8 @@ impl Providers {
     async fn of(&self, ant: &UserId) -> Option<Connected> {
         let setting = self.0.locked().settings.get(ant).cloned().unwrap_or_default();
         match setting {
-            Setting::Sugar => SUGAR_PROVIDER
-                .get_or_init(|| connect(Arc::new(Sugar::with_stores(sugar::stores().clone()))))
+            Setting::Sense => SENSE_PROVIDER
+                .get_or_init(|| connect(Arc::new(Sense::with_stores(sense::stores().clone()))))
                 .await
                 .clone(),
             Setting::None => None,
@@ -162,10 +162,10 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn every_ant_gets_sugar_with_its_tools_and_brief() {
-        let provider = of(&"dev-a".parse().unwrap()).await.expect("sugar connects");
-        assert_eq!(provider.name(), ants_sugar::NAME);
-        assert_eq!(provider.capabilities(), ants_sugar::CAPABILITIES);
+    async fn every_ant_gets_sense_with_its_tools_and_brief() {
+        let provider = of(&"dev-a".parse().unwrap()).await.expect("sense connects");
+        assert_eq!(provider.name(), ants_sense::NAME);
+        assert_eq!(provider.capabilities(), ants_sense::CAPABILITIES);
         assert!(provider.has(Capability::Tools) && provider.has(Capability::Context));
         let other = of(&"dev-b".parse().unwrap()).await.unwrap();
         assert_eq!(other.agreed(), provider.agreed());
@@ -188,7 +188,7 @@ mod tests {
         providers.assign(&c, &external);
         assert_eq!(providers.of(&a).await.expect("connected while down").name(), "memo");
         assert!(providers.of(&b).await.is_none());
-        assert_eq!(providers.of(&"dev-d".parse().unwrap()).await.unwrap().name(), ants_sugar::NAME);
+        assert_eq!(providers.of(&"dev-d".parse().unwrap()).await.unwrap().name(), ants_sense::NAME);
         assert_eq!(providers.0.locked().running.len(), 1, "one run for both ants");
 
         let moved = Setting::External(Arc::new(Definition { command: "/nonexistent/memo2".into(), ..(*memo).clone() }));
@@ -197,6 +197,6 @@ mod tests {
         assert_eq!(running.command, std::path::Path::new("/nonexistent/memo2"));
         providers.reconcile([]);
         assert!(providers.0.locked().running.is_empty());
-        assert_eq!(providers.of(&a).await.unwrap().name(), ants_sugar::NAME, "unlisted, back to sugar");
+        assert_eq!(providers.of(&a).await.unwrap().name(), ants_sense::NAME, "unlisted, back to sense");
     }
 }

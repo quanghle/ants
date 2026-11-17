@@ -297,7 +297,7 @@ fn names_the_machine_as_the_file_does() {
 }
 
 #[test]
-fn ants_are_served_by_sugar_unless_the_file_or_the_ant_names_another_provider() {
+fn ants_are_served_by_sense_unless_the_file_or_the_ant_names_another_provider() {
     use crate::provider::{Protocol, Setting};
 
     let ants = "[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\n[[ant]]\nname = \"dev-b\"\nworkdir = \".\"";
@@ -306,7 +306,7 @@ fn ants_are_served_by_sugar_unless_the_file_or_the_ant_names_another_provider() 
     let settings = |text: &str| -> Vec<Setting> {
         parse_here(text).unwrap().into_iter().map(|ant| config(ant).unwrap().provider).collect()
     };
-    assert_eq!(settings(ants), [Setting::Sugar, Setting::Sugar, Setting::Sugar], "the messenger too");
+    assert_eq!(settings(ants), [Setting::Sense, Setting::Sense, Setting::Sense], "the messenger too");
 
     let named = settings(&format!("provider = \"memo\"\n{ants}\nprovider = \"none\"\n{providers}"));
     let Setting::External(memo) = &named[0] else { panic!("{named:?}") };
@@ -325,7 +325,7 @@ fn ants_are_served_by_sugar_unless_the_file_or_the_ant_names_another_provider() 
     for (text, why) in [
         (format!("provider = \"other\"\n{ants}\n{providers}"), "provider \"other\" is not defined"),
         (format!("{ants}\nprovider = \"other\""), "ant dev-b: provider \"other\" is not defined"),
-        ("[providers.sugar]\ncommand = \"x\"".to_owned(), "reserved"),
+        ("[providers.sense]\ncommand = \"x\"".to_owned(), "reserved"),
         ("[providers.send]\ncommand = \"x\"".to_owned(), "read like ants' own send_"),
         ("[providers.x]\ncommand = \"x\"\nprotocol = \"grpc\"".to_owned(), "unknown variant"),
         ("[providers.x]\nargs = []".to_owned(), "missing field `command`"),

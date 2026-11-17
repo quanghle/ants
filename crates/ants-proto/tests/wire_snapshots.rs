@@ -130,7 +130,7 @@ fn envelope() -> Envelope {
         approval: Some(Box::new(decision())),
         on_behalf_of: Some(user("alice")),
         webhook: true,
-        provider: Some("sugar".to_owned()),
+        provider: Some("sense".to_owned()),
         queue: true,
         allow: Some(vec!["read:*".to_owned(), "other:send_message".to_owned()]),
         mention: Some(mention()),
@@ -450,7 +450,7 @@ fn envelopes() {
     );
     snap(
         "envelope_wake",
-        &Envelope { from: user("dev-a"), to: user("dev-a"), provider: Some("sugar".to_owned()), ..message.clone() },
+        &Envelope { from: user("dev-a"), to: user("dev-a"), provider: Some("sense".to_owned()), ..message.clone() },
     );
     snap(
         "envelope_mention_notice",
@@ -1081,7 +1081,7 @@ fn provider_protocol() {
     let info = |name: &str| Info { name: name.into(), version: "0.2.0".into() };
     let params = InitializeParams::new(info("ants"), Capabilities { tools: true, wake: true, ..Capabilities::NONE });
     snap("provider_initialize_params", &params);
-    let result = params.accept(&[PROTOCOL_VERSION], info("sugar"), Capabilities::ALL).unwrap();
+    let result = params.accept(&[PROTOCOL_VERSION], info("sense"), Capabilities::ALL).unwrap();
     snap("provider_initialize_result", &result);
 
     // Params are kept as JSON, whose keys keep their order only where serde_json preserves it: these are sorted.
@@ -1118,7 +1118,7 @@ fn provider_protocol() {
         Starter::Human { user: user("alice") },
         Starter::Ant { user: user("dev-b") },
         Starter::Webhook { user: user("github") },
-        Starter::Provider { name: "sugar".into() },
+        Starter::Provider { name: "sense".into() },
     ];
     snap("provider_starter_variants", &starters);
     snap("provider_tool_result_text", &ToolResult { output: Output::Text("2 memories".into()), is_error: false });
@@ -1177,7 +1177,7 @@ fn provider_protocol() {
     let memories =
         MemoriesView { memories: vec![MemoryEntry { key: "lesson/deploy".into(), content: "Tag first.".into() }] };
     snap("provider_memories_view", &memories);
-    let export = Export { provider: "sugar".into(), data: json!({"memories": 1}) };
+    let export = Export { provider: "sense".into(), data: json!({"memories": 1}) };
     snap("provider_export", &export);
     snap("provider_import_request", &ImportRequest { ant: ant.ant, identity: ant.identity, export });
 }
@@ -1188,11 +1188,11 @@ fn admin_orders_of_providers() {
     let payload = AdminPayload { id: id(9), machine: machine(), size: 300_000, sha256: "ab".repeat(32) };
     snap("admin_op_export_provider", &AdminOp::ExportProvider { identity: "0f1e".into() });
     snap("admin_op_import_provider", &AdminOp::ImportProvider { identity: "0f1e".into(), payload: payload.clone() });
-    snap("admin_provider_export", &ProviderExport { provider: Some("sugar".into()), payload: Some(payload) });
+    snap("admin_provider_export", &ProviderExport { provider: Some("sense".into()), payload: Some(payload) });
     let provider = ProviderMemories {
-        provider: "sugar".into(),
+        provider: "sense".into(),
         memories: vec![BdMemory { key: "lesson/deploy".into(), content: "Tag first.".into(), truncated: true }],
-        error: Some("provider sugar did not answer within 10s".into()),
+        error: Some("provider sense did not answer within 10s".into()),
     };
     let memories = Memories {
         core: CoreMemories { whoami: Some("A reviewer.".into()), ..CoreMemories::default() },

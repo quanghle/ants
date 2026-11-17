@@ -17,6 +17,6 @@ expression: value
   },
   {
     "kind": "provider",
-    "name": "sugar"
+    "name": "sense"
   }
 ]

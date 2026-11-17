@@ -7,7 +7,7 @@ use crate::{JsDomain, Role, UserId};
 /// Families of JetStream API rights naming no user, by the pattern of their plain form after `$JS.API.`: looking up,
 /// creating and updating streams, and creating the ordered consumers of a stream, whose name and filter its subject
 /// leaves out. No credentials hold a right of these a human lacks, so a human's take each family's domain forms as one
-/// wildcard ([`Permissions::with_js_domain`]), but for host credentials creating [`crate::SUGAR_STREAM`].
+/// wildcard ([`Permissions::with_js_domain`]), but for host credentials creating [`crate::SENSE_STREAM`].
 const DOMAIN_FAMILIES: [&str; 4] = ["STREAM.INFO.*", "STREAM.CREATE.*", "STREAM.UPDATE.*", "CONSUMER.CREATE.*"];
 
 impl Permissions {
@@ -21,7 +21,7 @@ impl Permissions {
     /// take the domain forms of the family as one wildcard (`$JS.<domain>.API.STREAM.CREATE.*`), keeping a human's JWT
     /// well within `max_control_line`. The wildcard grants nothing more: the hub checks the mapped plain subject against
     /// the plain rights, and a leaf node's uplink, which a request through a leaf crosses unmapped, holds no right of
-    /// the family that such credentials lack ([`Self::for_leaf`]), but its host's creating [`crate::SUGAR_STREAM`]: a
+    /// the family that such credentials lack ([`Self::for_leaf`]), but its host's creating [`crate::SENSE_STREAM`]: a
     /// human on a leaf node may create that stream, yet a host writes in it only once its own create, with the one
     /// config hosts create it with, succeeded, which nats-server refuses for a stream of another config. Without a
     /// domain the permissions are unchanged.

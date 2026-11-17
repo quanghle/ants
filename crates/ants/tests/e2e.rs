@@ -128,13 +128,13 @@ fn exercise_daemon(custom_tools: bool) {
     let mut said = stdout.lines();
     let thread = said.next().and_then(|l| l.strip_prefix("thread ")).expect(&stdout).to_owned();
     let message = said.next().and_then(|l| l.strip_prefix("message ")).expect(&stdout).to_owned();
-    // The sugar brief, naming the ant's sugar id and today, comes between the instructions and the message.
+    // The sense brief, naming the ant's sense id and today, comes between the instructions and the message.
     let expected = if custom_tools {
         [
             "dev-a: stub: [ants role dev-a]\nMaintain the Rust backend.\n\n\
              [ants memory]\nUse the notes tool.\n\n[ants tasks]\nUse the ticket tool.\n\n\
-             [ants brief from sugar]\n## Identity\ndev-a (sugar identity ",
-            "- sugar_brief: show this brief again.\n\n\
+             [ants brief from sense]\n## Identity\ndev-a (sense identity ",
+            "- sense_brief: show this brief again.\n\n\
              hello there\ncustom.db; BD_DB=unmanaged.db; BD_REMOTE=\n\
              model=stub-model; effort=high; context=long_context\n",
         ]
@@ -852,10 +852,10 @@ fn get(addr: &str, path: &str) -> (u16, String) {
     (head.split(' ').nth(1).unwrap().parse().unwrap(), body.to_owned())
 }
 
-/// The text without the sugar brief that the first prompt of a session carries.
+/// The text without the sense brief that the first prompt of a session carries.
 fn unbriefed(text: &str) -> String {
-    const START: &str = "[ants brief from sugar]\n";
-    const END: &str = "- sugar_brief: show this brief again.\n\n";
+    const START: &str = "[ants brief from sense]\n";
+    const END: &str = "- sense_brief: show this brief again.\n\n";
     match text.find(START).and_then(|at| text[at..].find(END).map(|len| (at, at + len + END.len()))) {
         Some((start, end)) => format!("{}{}", &text[..start], &text[end..]),
         None => text.to_owned(),

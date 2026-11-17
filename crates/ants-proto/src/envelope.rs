@@ -648,9 +648,9 @@ mod tests {
 
     #[test]
     fn a_wake_is_the_provider_s_only_on_the_ant_s_own_inbox_and_never_copied() {
-        let wake = Envelope::new(p("dev-a"), p("dev-a"), "standup").woken_by("sugar");
-        assert_eq!(wake.wake_provider(), Some("sugar"));
-        let claimed = Envelope::new(p("dev-b"), p("dev-a"), "standup").woken_by("sugar");
+        let wake = Envelope::new(p("dev-a"), p("dev-a"), "standup").woken_by("sense");
+        assert_eq!(wake.wake_provider(), Some("sense"));
+        let claimed = Envelope::new(p("dev-b"), p("dev-a"), "standup").woken_by("sense");
         assert_eq!(claimed.wake_provider(), None);
         assert_eq!(wake.reply(p("dev-a"), "done", Role::Human).unwrap().provider, None);
         assert_eq!(wake.follow_up(p("dev-a"), p("dev-b"), "on").provider, None);

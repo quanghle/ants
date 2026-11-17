@@ -6,7 +6,7 @@ expression: value
   "ant": "dev-a",
   "identity": "0f1e",
   "export": {
-    "provider": "sugar",
+    "provider": "sense",
     "data": {
       "memories": 1
     }

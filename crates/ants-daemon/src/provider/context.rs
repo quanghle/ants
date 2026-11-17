@@ -140,9 +140,9 @@ mod tests {
 
     #[test]
     fn the_origin_is_the_provider_then_the_webhook_then_the_creator_then_the_owner_then_the_sender() {
-        let wake = Envelope { owner: Some(UserId::human()), ..message("dev-a").woken_by("sugar") };
-        assert_eq!(by(&wake), Starter::Provider { name: "sugar".to_owned() });
-        assert_eq!(by(&message("dev-b").woken_by("sugar")), Starter::Ant { user: user("dev-b") }, "no wake");
+        let wake = Envelope { owner: Some(UserId::human()), ..message("dev-a").woken_by("sense") };
+        assert_eq!(by(&wake), Starter::Provider { name: "sense".to_owned() });
+        assert_eq!(by(&message("dev-b").woken_by("sense")), Starter::Ant { user: user("dev-b") }, "no wake");
         let webhook = Envelope { owner: Some(UserId::human()), ..message("hook").from_webhook() };
         assert_eq!(by(&webhook), Starter::Webhook { user: user("hook") });
         assert!(!origin(&webhook, None, &Humans::default()).trusted());
@@ -171,7 +171,7 @@ mod tests {
         let untrusted = settled(Some(ant), hook.clone());
         assert_eq!(untrusted, Origin { channel: Some(ops), ..hook.clone() });
         assert_eq!(settled(Some(hook.clone()), human.clone()), hook, "a human's message keeps it untrusted");
-        let woken = Origin { by: Starter::Provider { name: "sugar".to_owned() }, channel: None };
+        let woken = Origin { by: Starter::Provider { name: "sense".to_owned() }, channel: None };
         assert_eq!(settled(None, woken.clone()), woken, "a thread a wake starts is the provider's");
         assert_eq!(settled(Some(human.clone()), woken.clone()), human, "a wake on a thread leaves its origin");
         assert_eq!(settled(Some(hook.clone()), woken.clone()), hook, "and leaves it untrusted");

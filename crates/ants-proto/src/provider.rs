@@ -2,7 +2,7 @@
 //!
 //! An external provider is a process speaking JSON-RPC 2.0 ([`jsonrpc`]) over its standard input and output, one
 //! message per line: each line is one JSON object, UTF-8, without a newline inside it (the compact form of
-//! `serde_json` never has one), and no batches. The provider writes its logs to its standard error. Built-in sugar
+//! `serde_json` never has one), and no batches. The provider writes its logs to its standard error. Built-in sense
 //! implements the same [`Provider`] interface in process, so switching an ant between providers changes nothing else.
 //!
 //! ants opens with [`method::INITIALIZE`]: it offers the protocol versions it speaks and the [`Capabilities`] it
@@ -99,7 +99,7 @@ pub fn valid_tool_name(name: &str) -> bool {
         && name.starts_with(|c: char| c.is_ascii_lowercase())
 }
 
-/// The name ants serves `tool` of `provider` under: the provider's name, `_`, the tool's (`sugar_recall`).
+/// The name ants serves `tool` of `provider` under: the provider's name, `_`, the tool's (`sense_recall`).
 pub fn served_name(provider: &str, tool: &str) -> String {
     format!("{provider}_{tool}")
 }
@@ -135,12 +135,12 @@ mod tests {
 
     #[test]
     fn names_are_checked_and_prefixed() {
-        assert!(valid_provider_name("sugar") && valid_provider_name("my-notes2"));
-        assert!(!valid_provider_name("") && !valid_provider_name("Sugar") && !valid_provider_name("2x"));
+        assert!(valid_provider_name("sense") && valid_provider_name("my-notes2"));
+        assert!(!valid_provider_name("") && !valid_provider_name("Sense") && !valid_provider_name("2x"));
         assert!(!valid_provider_name("a_b") && !valid_provider_name(&"a".repeat(33)));
         assert!(valid_tool_name("recall") && valid_tool_name("check_point2"));
         assert!(!valid_tool_name("_x") && !valid_tool_name("re-call") && !valid_tool_name(""));
-        assert_eq!(served_name("sugar", "recall"), "sugar_recall");
+        assert_eq!(served_name("sense", "recall"), "sense_recall");
     }
 
     #[test]

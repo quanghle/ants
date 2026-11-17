@@ -124,9 +124,9 @@ async fn a_host_records_only_its_own_machine_s_ants_and_humans_read_where_each_a
 }
 
 #[tokio::test]
-async fn only_a_host_reaches_the_sugar_event_logs() {
-    use ants_daemon::sugar_log::{AntSigner, DeviceRevocations, JetStreamLog};
-    use ants_sugar::log::{AccountVerifier, AntLog, EventLog as _};
+async fn only_a_host_reaches_the_sense_event_logs() {
+    use ants_daemon::sense_log::{AntSigner, DeviceRevocations, JetStreamLog};
+    use ants_sense::log::{AccountVerifier, AntLog, EventLog as _};
 
     let Some(server) = Server::start() else { return };
     let (human, dev_a) = (UserId::human(), p("dev-a"));
@@ -152,22 +152,22 @@ async fn only_a_host_reaches_the_sugar_event_logs() {
     let accounts = vec![ants_daemon::secrets::creds::account(&host_creds).unwrap()];
     let signer = AntSigner::load(&dev_a, Some(&server.creds(&dev_a)), &accounts).unwrap();
     let verifier = async || AccountVerifier::new(accounts.clone(), DeviceRevocations::new(&m_js, None).await.unwrap());
-    let sugar = ants_proto::SugarId::new();
+    let sense = ants_proto::SenseId::new();
     let new =
-        async |signer| AntLog::new(&log, signer, verifier().await, sugar.clone(), dev_a.clone(), m1.clone(), None);
+        async |signer| AntLog::new(&log, signer, verifier().await, sense.clone(), dev_a.clone(), m1.clone(), None);
     let (appended, _) = new(signer).await.unwrap().append("noted", serde_json::json!({})).await.unwrap();
     let mut reader = new(AntSigner::load(&dev_a, None, &[]).unwrap()).await.unwrap();
     let read = reader.catch_up().await.unwrap();
     assert_eq!(read.iter().map(|c| &c.event).collect::<Vec<_>>(), [&appended.event], "the host reads it back");
     assert_eq!(reader.chain().broken(), None);
-    assert_eq!(log.last_sequence(&sugar).await.unwrap(), appended.stored.sequence);
+    assert_eq!(log.last_sequence(&sense).await.unwrap(), appended.stored.sequence);
 
     for (who, js) in [("an ant", &a_js), ("a human", &h_js)] {
-        let ack = js.publish(subject::sugar(&sugar), "forged".into()).await;
+        let ack = js.publish(subject::sense(&sense), "forged".into()).await;
         assert!(ack.is_err() || ack.unwrap().await.is_err(), "{who} may not append");
-        let stream = js.get_stream_no_info(ants_proto::SUGAR_STREAM).await.unwrap();
-        assert!(stream.direct_get_last_for_subject(subject::sugar(&sugar)).await.is_err(), "{who} may not read");
-        assert!(js.get_stream(ants_proto::SUGAR_STREAM).await.is_err(), "{who} may not look it up");
+        let stream = js.get_stream_no_info(ants_proto::SENSE_STREAM).await.unwrap();
+        assert!(stream.direct_get_last_for_subject(subject::sense(&sense)).await.is_err(), "{who} may not read");
+        assert!(js.get_stream(ants_proto::SENSE_STREAM).await.is_err(), "{who} may not look it up");
     }
-    assert_eq!(log.last_sequence(&sugar).await.unwrap(), appended.stored.sequence);
+    assert_eq!(log.last_sequence(&sense).await.unwrap(), appended.stored.sequence);
 }

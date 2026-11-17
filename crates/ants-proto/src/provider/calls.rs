@@ -276,7 +276,7 @@ mod tests {
         let user = || "x".parse::<UserId>().unwrap();
         assert!(by(Starter::Human { user: user() }).trusted());
         assert!(by(Starter::Ant { user: user() }).trusted());
-        assert!(by(Starter::Provider { name: "sugar".to_owned() }).trusted());
+        assert!(by(Starter::Provider { name: "sense".to_owned() }).trusted());
         assert!(!by(Starter::Webhook { user: user() }).trusted());
     }
 

@@ -11,7 +11,7 @@
 //! redact = true                     # redact secrets from what the ants publish (the default; crate::secrets::redact)
 //! machine = "dev-vm1"               # the machine the colony names for the ants, and the host's where [host] and
 //!                                   # its credentials name none (default: the host name)
-//! provider = "sugar"               # provider of every ant naming none: "sugar" (the default), "none" or one of
+//! provider = "sense"               # provider of every ant naming none: "sense" (the default), "none" or one of
 //!                                   # [providers] (crate::provider::Setting)
 //!
 //! [cli]                             # the CLI's own connection, where no flag or environment variable sets it
@@ -180,7 +180,7 @@ struct File {
     /// Harness definitions, added to the built-in ones or replacing them by name.
     #[serde(default)]
     harnesses: BTreeMap<String, Harness>,
-    /// Default provider of the file's ants ([`crate::provider::Setting`]): sugar when absent.
+    /// Default provider of the file's ants ([`crate::provider::Setting`]): sense when absent.
     provider: Option<String>,
     /// External provider definitions, which provider settings name.
     #[serde(default)]

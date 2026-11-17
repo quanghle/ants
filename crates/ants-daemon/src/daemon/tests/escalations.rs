@@ -487,7 +487,7 @@ async fn a_provider_s_wake_is_prompted_on_a_thread_out_of_turns_and_answered_to_
     let [dev_b] = ants(["dev-b"]);
     let t1 = ThreadId::generate();
     bus.send_spent(&dev_b, &t1, "no turns", None).await;
-    let wake = Envelope::on_thread(t1.clone(), bus.dev.clone(), bus.dev.clone(), "standup").woken_by("sugar");
+    let wake = Envelope::on_thread(t1.clone(), bus.dev.clone(), bus.dev.clone(), "standup").woken_by("sense");
     bus::publish_json(&bus.js, wake.subject(), &wake, None).await.unwrap();
 
     let ctrl_c = Arc::new(Semaphore::new(0));

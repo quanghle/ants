@@ -6,7 +6,7 @@ use super::{Permissions, ack_subjects, kv_stream, ordered_consumer_subjects};
 use crate::admin_outcome_key;
 use crate::{
     AdminPayload, COLONY_BUCKET, DEVICES_BUCKET, FILES_STREAM, HUMANS_BUCKET, IDENTITIES_BUCKET, MACHINES_BUCKET,
-    Machine, STREAM, SUGAR_STREAM, admin_consumer, host_inbox_prefix, subject,
+    Machine, SENSE_STREAM, STREAM, admin_consumer, host_inbox_prefix, subject,
 };
 
 impl Permissions {
@@ -25,9 +25,9 @@ impl Permissions {
     /// it asks `ants signer` with an enrollment request carrying the order ([`subject::enroll`],
     /// [`EnrollRequest::order`](crate::EnrollRequest::order)) and hears the answers ([`subject::ALL_ENROLL_REPLIES`]),
     /// and reads the colony by direct gets to see a retired ant stopped. It reads and watches [`HUMANS_BUCKET`], for
-    /// the humans' consent to the orders their assistants sent for them. It keeps the event logs of its ants' sugar
-    /// identities in [`SUGAR_STREAM`]: it creates the stream when missing, its create answering with the stream's info
-    /// as well, appends to any identity's subject ([`subject::ALL_SUGAR`]), each event expecting the subject's last
+    /// the humans' consent to the orders their assistants sent for them. It keeps the event logs of its ants' sense
+    /// identities in [`SENSE_STREAM`]: it creates the stream when missing, its create answering with the stream's info
+    /// as well, appends to any identity's subject ([`subject::ALL_SENSE`]), each event expecting the subject's last
     /// sequence, and reads them by direct gets, the last of a subject by its subject or a batch from a sequence by the
     /// request. Readers verify each event as signed with the ant's own credentials and chained to the one before. It
     /// stores and reads the payloads of the machine's admin orders in [`FILES_STREAM`] ([`AdminPayload::chunks_of`]):
@@ -52,10 +52,10 @@ impl Permissions {
             format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{consumer}"),
             format!("$JS.API.DIRECT.GET.{}.$KV.{COLONY_BUCKET}.*", kv_stream(COLONY_BUCKET)),
             subject::ALL_ENROLL_REQUESTS.to_owned(),
-            format!("$JS.API.STREAM.CREATE.{SUGAR_STREAM}"),
-            subject::ALL_SUGAR.to_owned(),
-            format!("$JS.API.DIRECT.GET.{SUGAR_STREAM}"),
-            format!("$JS.API.DIRECT.GET.{SUGAR_STREAM}.{}", subject::ALL_SUGAR),
+            format!("$JS.API.STREAM.CREATE.{SENSE_STREAM}"),
+            subject::ALL_SENSE.to_owned(),
+            format!("$JS.API.DIRECT.GET.{SENSE_STREAM}"),
+            format!("$JS.API.DIRECT.GET.{SENSE_STREAM}.{}", subject::ALL_SENSE),
             AdminPayload::chunks_of(machine),
             format!("$JS.API.DIRECT.GET.{FILES_STREAM}.{}", AdminPayload::chunks_of(machine)),
         ];

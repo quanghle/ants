@@ -13,7 +13,7 @@ timezone = "America/New_York"              # default IANA time zone for schedule
 redact = true                              # redact secrets from daemon publications (default true)
 machine = "dev-vm1"                        # machine named in colony entries, notices and admin orders (default: host name)
 auto_update = "check"                      # "off" (default), "check" or "install" newer GitHub releases (docs/operations.md)
-provider = "sugar"                         # default provider of every ant: "sugar" (default), "none" or a [providers] name (see Providers)
+provider = "sense"                         # default provider of every ant: "sense" (default), "none" or a [providers] name (see Providers)
 
 [cli]                                      # CLI defaults when no flag or env var is set
 creds = "~/.config/ants/auth/alice.creds"  # human credentials (ant credentials are not used here)
@@ -154,7 +154,7 @@ With a `[nats_server]` table, `ants daemon` serving the whole file starts one lo
 
 An ant's provider holds its identity, memories and work ([architecture.md](architecture.md#providers)). The `provider` setting, top-level for every ant (the built-in messenger and templated ants included) or per `[[ant]]`, picks it:
 
-- `"sugar"` (the default): ants' built-in provider.
+- `"sense"` (the default): ants' built-in provider.
 - `"none"`: no provider. The ant gets no provider tools and no brief; its harness's own tools serve memory and tasks, installed and configured through the harness, as its `memory` and `tasks` instructions say.
 - The name of a `[providers.NAME]` table: an external provider. With `protocol = "provider"` (the default) its command speaks the provider protocol; with `protocol = "mcp"` it is an MCP server over stdio, whose tools serve as a provider of tools alone, without brief, events, memories or export.
 
@@ -182,7 +182,7 @@ provider = "none"                          # the harness's own tools alone
 memory = "Use the notes MCP server for durable memory."
 ```
 
-A provider name is 1-32 characters of `a-z`, `0-9` and `-`, starting with a letter; `sugar` and `none` are reserved, and so is the first word of an ants tool (`send`, `read`, `notes`, …), as ants serves each provider tool as `<provider>_<tool>`. The command, when a path, resolves like other paths; `env` values stay literal. Naming an undefined provider fails config loading.
+A provider name is 1-32 characters of `a-z`, `0-9` and `-`, starting with a letter; `sense` and `none` are reserved, and so is the first word of an ants tool (`send`, `read`, `notes`, …), as ants serves each provider tool as `<provider>_<tool>`. The command, when a path, resolves like other paths; `env` values stay literal. Naming an undefined provider fails config loading.
 
 A daemon process starts each external provider an ant names once, for all the ants naming it, in the daemon's directory, and logs its standard error. When it exits, or fails to start or initialize, the daemon starts it again after 1 s, doubling the wait up to 60 s; a run that lasted a minute resets the wait to 1 s. Its tools are offered only while it is up; a call meanwhile fails with an `[ants]` line saying why, such as `memo is down: exited with exit status: 1; restarting in 4 s`. MCP server tool names are lowercased, other characters than `a-z`, `0-9` and `_` becoming `_`; a tool whose name still does not fit is skipped.
 
@@ -301,7 +301,7 @@ An admin's `ants ant clone SRC NEW [settings]` has the daemon serving SRC start 
 
 - **Table:** SRC's `[[ant]]` table (for an ant added from a template, the settings the template gave it, so NEW's table stands alone), below the comment `# cloned from SRC by <admin>'s order <id>`, without `name`, `creds`, `paused`, `added_by`, `template`, `builtin`, `home` and `allow_sets`, with SRC's [shared settings](#shared-settings), where the hub keeps them, in place of its table's, and the settings flags of `ants add` over it; its whoami, memory, tasks, harness, model, permissions and escalation chain are SRC's unless given. A workdir in SRC's home moves into NEW's.
 - **Shared settings:** where the hub keeps them, a record of NEW's own (`NEW.settings`), written before its table, in place of any left from an earlier ant of the name: SRC's with the order's settings over them, so NEW's table and record agree and no drift shows.
-- **Home:** a copy of SRC's (`--home`, default `~/.ants/NEW`; it must be empty), memory files, task DB and repositories included, but not `worktrees`, `answered`, `buried`, `lifecycle`, `.sugar` (the clone mints its own sugar id) and the MCP config and socket. The clone's provider is told `ant_cloned` ([architecture.md](architecture.md#lifecycle-events)).
+- **Home:** a copy of SRC's (`--home`, default `~/.ants/NEW`; it must be empty), memory files, task DB and repositories included, but not `worktrees`, `answered`, `buried`, `lifecycle`, `.sense` (the clone mints its own sense id) and the MCP config and socket. The clone's provider is told `ant_cloned` ([architecture.md](architecture.md#lifecycle-events)).
 - **Threads:** each thread SRC holds a session of, with its worktree, if any, at `<home>/worktrees/<thread>` on branch `ants/NEW/<thread>` from SRC's commit, SRC's uncommitted changes and untracked files on it. Its session is a fork of SRC's when the harness offers ACP `session/fork`; otherwise NEW's first prompt on the thread starts a new session seeded from the thread's history, as after a failed `session/load` ([Lost sessions](#lost-sessions-and-context-window)), its notice saying the session could not be forked.
 - **History:** what SRC had on each thread, kept in `<home>/history/<thread>.jsonl`; NEW reads a thread's history back with this copy first, then what came to it after.
 
@@ -698,7 +698,7 @@ The file is `{"ants_ant": 1, "created_at", "bus", "identity", "settings", "files
   the export, naming `--no-provider`.
 
 Left out: the home's `worktrees`, `answered`, `buried`, `mcp.json`, `mcp.sock`, `lifecycle`, `.git`, `.beads` and `.bd`, the
-files of `.sugar` but the sugar id (`.sugar/id`, which the ant keeps on its new bus; its cache and chain status are not), the task
+files of `.sense` but the sense id (`.sense/id`, which the ant keeps on its new bus; its cache and chain status are not), the task
 database `BD_DB` names when it lies in the home, the rest of the ant's settings (its role on the bus: `capabilities`,
 `escalate_to`, `allow`, `memory`, `tasks`; its machine's: `workdir`, `env`, caps and limits), its credentials,
 sessions, threads and history. A templated ant imports as a plain `[[ant]]`.

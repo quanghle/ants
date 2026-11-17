@@ -3,7 +3,7 @@ source: crates/ants-proto/tests/wire_snapshots.rs
 expression: value
 ---
 {
-  "provider": "sugar",
+  "provider": "sense",
   "payload": {
     "id": "019a7d2e-0000-7000-8000-000000000009",
     "machine": "studio",

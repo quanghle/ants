@@ -1,4 +1,4 @@
-//! The provider interface in process: [`Provider`], which built-in sugar implements and an external provider's client
+//! The provider interface in process: [`Provider`], which built-in sense implements and an external provider's client
 //! serves over the protocol, and [`Host`], what ants serves a provider. [`Connected`] is a provider past initialize,
 //! calling it only for the capabilities agreed.
 

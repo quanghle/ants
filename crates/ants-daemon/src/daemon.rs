@@ -512,8 +512,8 @@ async fn services(
     let ledger = ledger(&config.ant, &config.spending, &sessions_kv);
     let escalator = escalator(config, js, &colony, humans, &ledger, &redactor, assistants);
     let (identity, identity_id) = ant_records(config, js).await;
-    if matches!(config.provider, crate::provider::Setting::Sugar) {
-        crate::provider::sugar::stores().serve(&config.ant, &config.storage.home, config.connection.creds.clone());
+    if matches!(config.provider, crate::provider::Setting::Sense) {
+        crate::provider::sense::stores().serve(&config.ant, &config.storage.home, config.connection.creds.clone());
     }
     let lifecycle = match &identity_id {
         Some(id) => Lifecycle::open(events::outbox(), &config.ant, id, &config.storage.home).await,

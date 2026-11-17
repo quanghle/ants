@@ -2,7 +2,7 @@
 //! `route` to find ants by their colony capabilities, `post_notes` and `read_notes` for the thread's notes
 //! (see [`crate::stream::notes`]), and `escalate` to send the thread up the ant's escalation chain (see
 //! [`crate::escalation`]). The tools of the ant's provider, what holds its identity, memory and work, come beside them,
-//! named with the provider's name as prefix (`sugar_recall`), each call carrying the ant, its identity, the thread and
+//! named with the provider's name as prefix (`sense_recall`), each call carrying the ant, its identity, the thread and
 //! where the thread came from (see [`provider`]).
 //!
 //! `decide_approval` answers another ant's tool request that came up its chain (see [`crate::approvals`]).

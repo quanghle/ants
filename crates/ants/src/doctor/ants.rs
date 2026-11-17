@@ -192,20 +192,20 @@ pub(super) fn check_shared_workdirs(ants: &[Ant], config: &Path) -> Vec<Check> {
         .collect()
 }
 
-/// The chain of each ant's sugar event log, as the daemon serving it last verified it ([`ants_sugar::log::ChainStatus`]),
+/// The chain of each ant's sense event log, as the daemon serving it last verified it ([`ants_sense::log::ChainStatus`]),
 /// kept in the ant's home: the doctor's credentials do not reach the log. Nothing for an ant whose log was never read.
-pub(super) fn check_sugar_chains(ants: &[Ant]) -> Vec<Check> {
-    ants.iter().filter_map(check_sugar_chain).collect()
+pub(super) fn check_sense_chains(ants: &[Ant]) -> Vec<Check> {
+    ants.iter().filter_map(check_sense_chain).collect()
 }
 
-fn check_sugar_chain(ant: &Ant) -> Option<Check> {
+fn check_sense_chain(ant: &Ant) -> Option<Check> {
     let home = match &ant.home {
         Some(home) => home.clone(),
         None => std::env::home_dir()?.join(".ants").join(ant.name.as_str()),
     };
-    let check = format!("ant {} sugar chain", ant.name);
-    let file = ants_sugar::log::status_file(&home);
-    let status = match ants_sugar::log::read_status(&home) {
+    let check = format!("ant {} sense chain", ant.name);
+    let file = ants_sense::log::status_file(&home);
+    let status = match ants_sense::log::read_status(&home) {
         Ok(status) => status?,
         Err(e) => return Some(Check::warn(check, format!("{}: {e}", file.display()), Vec::new())),
     };
@@ -215,13 +215,13 @@ fn check_sugar_chain(ant: &Ant) -> Option<Check> {
     };
     let at = broken.sequence.map_or_default(|sequence| format!(" (stream sequence {sequence})"));
     let detail = format!(
-        "sugar identity {} breaks at event {}{at}: {}, as verified at {checked}",
-        status.sugar, broken.index, broken.reason
+        "sense identity {} breaks at event {}{at}: {}, as verified at {checked}",
+        status.sense, broken.index, broken.reason
     );
     let fix = format!(
         "events of the {} stream were removed, rewritten or written with other credentials than the ant's: restore \
          the stream from a backup of the hub's JetStream store, or find out which machine's host credentials wrote them",
-        ants_proto::SUGAR_STREAM
+        ants_proto::SENSE_STREAM
     );
     Some(Check::fail(check, detail, vec![fix]))
 }

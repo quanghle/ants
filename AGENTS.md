@@ -8,8 +8,8 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
 - `bd show <id>` shows details; `bd close <id> -r "<what was done>"` closes it.
 - Record discovered work with `bd create ... --dep discovered-from:<id>`.
 - Specs: `bd spec list`, `bd spec show <area>`. Areas: wire, transport, daemon, harness, memory, cli, efficiency,
-  messenger, channels, webhooks, admin, assistant, sugar (with sugar/identity, sugar/memory, sugar/brief, sugar/work,
-  sugar/triggers, sugar/store).
+  messenger, channels, webhooks, admin, assistant, sense (with sense/identity, sense/memory, sense/brief, sense/work,
+  sense/triggers, sense/store).
 - Link every piece of work to the requirement it serves (`bd spec link <id> <requirement>`) or mark it
   `bd spec none <id> -r "<why>"`. `bd spec drift` must report 0 problems.
 - A behaviour change that contradicts a requirement goes through `bd spec change`, not a silent edit.
@@ -19,7 +19,7 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
 
 ## Code
 
-- Rust 2024, one workspace: `ants-proto` (wire contract, no I/O), `ants-sugar` (built-in identity, memory and work
+- Rust 2024, one workspace: `ants-proto` (wire contract, no I/O), `ants-sense` (built-in identity, memory and work
   provider, no daemon dependency), `ants-daemon` (NATS + ACP), `ants` (binary), `ants-test-support` (dev-only test
   helpers: tools on PATH, throwaway nats-server).
 - Keep the footprint small: tokio current-thread, minimal features, no per-session helper processes.
@@ -42,7 +42,7 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
 
 Before finishing, run `scripts/check.sh`: the checks of CI's (`.github/workflows/ci.yml`) check and deny jobs, stopping
 at the first failure. The check job's release build and footprint check (`scripts/footprint.sh`, idle `ants daemon`
-with its ant's sugar data open under 10 MB of private memory) run only with `scripts/check.sh --footprint`, as the
+with its ant's sense data open under 10 MB of private memory) run only with `scripts/check.sh --footprint`, as the
 fat-LTO release build is slow: pass it for changes that may grow the daemon's memory or binary. The summary lists the
 skipped checks.
 

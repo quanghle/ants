@@ -18,7 +18,7 @@ use anyhow::{Context as _, Result, bail};
 use tokio::sync::watch;
 
 use crate::profile::shared::{self, Shared};
-use crate::provider::sugar::{Hosting, Link};
+use crate::provider::sense::{Hosting, Link};
 use crate::records::direct_kv::DirectKv;
 use crate::secrets::creds::{self, Kind};
 use crate::secrets::keystore;
@@ -129,16 +129,16 @@ pub async fn run(host: Host, ants: watch::Receiver<Vec<UserId>>) -> Result<()> {
     Box::pin(run_keeping(host, ants, None)).await
 }
 
-/// [`run`], sugar reaching the data of the process's ants over the connection once up, when `sugar` is given
-/// ([`crate::provider::sugar`]).
-pub async fn run_keeping(host: Host, ants: watch::Receiver<Vec<UserId>>, sugar: Option<Hosting>) -> Result<()> {
+/// [`run`], sense reaching the data of the process's ants over the connection once up, when `sense` is given
+/// ([`crate::provider::sense`]).
+pub async fn run_keeping(host: Host, ants: watch::Receiver<Vec<UserId>>, sense: Option<Hosting>) -> Result<()> {
     let hostname = colony::machine().await;
     let otherwise = host.fallback.clone().unwrap_or_else(|| Machine::from_hostname(&hostname));
     let machine = machine_of(host.machine.as_ref(), host.creds.as_deref(), otherwise)?;
     let accounts: Vec<String> = host.creds.as_deref().map(creds::account).transpose()?.into_iter().collect();
     let Some(js) = connect(&host, &machine).await? else { return Ok(()) };
-    if let Some(sugar) = &sugar {
-        sugar.up(Link::new(js.clone(), host.js_domain.clone(), accounts.clone(), machine.clone()));
+    if let Some(sense) = &sense {
+        sense.up(Link::new(js.clone(), host.js_domain.clone(), accounts.clone(), machine.clone()));
     }
     let humans = crate::people::humans::Registry::new(UserId::human())
         .verifying_grants(crate::people::humans::account(host.creds.as_deref()));

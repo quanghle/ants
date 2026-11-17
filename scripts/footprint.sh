@@ -1,22 +1,22 @@
 #!/bin/sh
-# Private memory of an idle `ants daemon` serving one ant with its sugar data open, against a throwaway
+# Private memory of an idle `ants daemon` serving one ant with its sense data open, against a throwaway
 # nats-server.
 #
 #   scripts/footprint.sh                          # idle private memory; fails at or above 10 MB
-#   scripts/footprint.sh --bare                   # idle without the host connection, sugar keeping nothing
+#   scripts/footprint.sh --bare                   # idle without the host connection, sense keeping nothing
 #   scripts/footprint.sh --ask "reply with ok"    # also one harness session (runs the real harness)
 #   scripts/footprint.sh --metrics 127.0.0.1:9464 # idle, with health and metrics served and scraped
 #
-# By default the daemon serves a config file whose one ant has sugar as its provider (the default), over the host
-# connection the file gives the machine, after `ants init`: telling sugar of the ant added opens the ant's sugar data
-# (its event log in the ANTS_SUGAR stream and its cache in <home>/.sugar/cache.db) and records its card. The idle
+# By default the daemon serves a config file whose one ant has sense as its provider (the default), over the host
+# connection the file gives the machine, after `ants init`: telling sense of the ant added opens the ant's sense data
+# (its event log in the ANTS_SENSE stream and its cache in <home>/.sense/cache.db) and records its card. The idle
 # samples start once that is done, with no harness session and no trigger due.
 #
 # Options:  --ants PATH     ants binary (default: $ANTS_BIN, else target/release/ants, built when missing)
 #           --port N        nats-server port (default: $FOOTPRINT_PORT or 14722)
 #           --max-mb N      idle private memory limit in MB (default: $FOOTPRINT_MAX_MB or 10)
 #           --harness NAME  harness of the ant (default: $FOOTPRINT_HARNESS or copilot)
-#           --bare          serve the ant described by flags (`ants daemon --ant`): no host connection, no sugar data
+#           --bare          serve the ant described by flags (`ants daemon --ant`): no host connection, no sense data
 #           --ask TEXT      send TEXT to the ant and measure again with its harness session live
 #           --metrics ADDR  serve health and metrics on ADDR, and scrape both before each idle sample (needs curl)
 # Env:      NATS_SERVER (default: nats-server on PATH), FOOTPRINT_DIR (parent of the scratch directory,
@@ -180,17 +180,17 @@ else
     ANTS_LOG=${ANTS_LOG:-info} "$ants" --nats "$url" daemon --config "$work/config.toml" >"$work/daemon.log" 2>&1 &
     daemon_pid=$!
     wait_for "$work/daemon.log" "serving inbox" 30 "$daemon_pid"
-    # Sugar acked the ant added once its data is open and the ant's card recorded: the lifecycle queue is gone.
+    # Sense acked the ant added once its data is open and the ant's card recorded: the lifecycle queue is gone.
     i=0
     until [ -f "$work/home/lifecycle/identity" ] && [ ! -e "$work/home/lifecycle/events.jsonl" ] &&
-        [ -f "$work/home/.sugar/cache.db" ]; do
+        [ -f "$work/home/.sense/cache.db" ]; do
         if ! kill -0 "$daemon_pid" 2>/dev/null; then
             cat "$work/daemon.log" >&2
-            die "process exited before sugar opened the ant's data"
+            die "process exited before sense opened the ant's data"
         fi
         if [ $i -ge 150 ]; then
             cat "$work/daemon.log" >&2
-            die "timed out waiting for sugar to open the ant's data"
+            die "timed out waiting for sense to open the ant's data"
         fi
         sleep 0.2
         i=$((i + 1))
@@ -221,9 +221,9 @@ done
 
 printf 'ants       %s (%s)\n' "$("$ants" --version)" "$(uname -sm)"
 if [ -n "$bare" ]; then
-    printf 'serving    one ant described by flags, no host connection, sugar keeping nothing\n'
+    printf 'serving    one ant described by flags, no host connection, sense keeping nothing\n'
 else
-    printf 'serving    one ant of a config file, host connection up, its sugar data open\n'
+    printf 'serving    one ant of a config file, host connection up, its sense data open\n'
 fi
 printf 'private    %s (%s KB), limit %s MB\n' "$(mb "$idle")" "$idle" "$max_mb"
 printf 'resident   %s (%s KB), mostly shared code pages\n' "$(mb "$idle_rss")" "$idle_rss"

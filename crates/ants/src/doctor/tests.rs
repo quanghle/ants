@@ -376,10 +376,10 @@ fn ants_sharing_a_git_workdir_with_worktrees_turned_off_are_warned() {
 }
 
 #[test]
-fn a_break_in_an_ant_s_sugar_chain_fails() {
-    use ants_sugar::log::{Break, ChainStatus, write_status};
+fn a_break_in_an_ant_s_sense_chain_fails() {
+    use ants_sense::log::{Break, ChainStatus, write_status};
 
-    let dir = ants_test_support::scratch_dir("doctor-sugar-chain").canonicalize().unwrap();
+    let dir = ants_test_support::scratch_dir("doctor-sense-chain").canonicalize().unwrap();
     let config = dir.join("config.toml");
     let ants = ["dev-a", "dev-b", "dev-c"]
         .map(|name| format!("[[ant]]\nname = \"{name}\"\nworkdir = \".\"\nhome = \"{name}\"\n"));
@@ -387,7 +387,7 @@ fn a_break_in_an_ant_s_sugar_chain_fails() {
     let loaded = config::load(&config).unwrap();
     let checked_at = "2026-01-02T03:04:05Z".parse().unwrap();
     let status = ChainStatus {
-        sugar: ants_proto::SugarId::new(),
+        sense: ants_proto::SenseId::new(),
         incarnation: "i".into(),
         checked_at,
         events: 2,
@@ -398,18 +398,18 @@ fn a_break_in_an_ant_s_sugar_chain_fails() {
     let broken = Break { index: 3, sequence: Some(7), reason: "not signed by dev-b's credentials".into() };
     write_status(&dir.join("dev-b"), &ChainStatus { broken: Some(broken), ..status.clone() }).unwrap();
 
-    let checks = check_sugar_chains(&loaded.ants);
+    let checks = check_sense_chains(&loaded.ants);
     assert_eq!(
         checks.iter().map(|c| (c.check.as_str(), c.status, c.detail.as_str())).collect::<Vec<_>>(),
         [
-            ("ant dev-a sugar chain", Status::Ok, "2 events verified at 2026-01-02 03:04:05 UTC"),
+            ("ant dev-a sense chain", Status::Ok, "2 events verified at 2026-01-02 03:04:05 UTC"),
             (
-                "ant dev-b sugar chain",
+                "ant dev-b sense chain",
                 Status::Fail,
                 &*format!(
-                    "sugar identity {} breaks at event 3 (stream sequence 7): not signed by dev-b's credentials, as \
+                    "sense identity {} breaks at event 3 (stream sequence 7): not signed by dev-b's credentials, as \
                      verified at 2026-01-02 03:04:05 UTC",
-                    status.sugar
+                    status.sense
                 )
             ),
         ],

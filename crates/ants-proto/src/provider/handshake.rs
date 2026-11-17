@@ -193,10 +193,10 @@ mod tests {
         let ants = Capabilities { tools: true, context: true, wake: true, export: true, ..Capabilities::NONE };
         let provider = Capabilities { tools: true, events: true, wake: true, memories: true, ..Capabilities::NONE };
         let offered = params(&[1], ants);
-        let result = offered.accept(&[1], info("sugar"), provider).unwrap();
+        let result = offered.accept(&[1], info("sense"), provider).unwrap();
         let agreed = negotiate(&offered, result).unwrap();
         assert_eq!(agreed.version, 1);
-        assert_eq!(agreed.provider.name, "sugar");
+        assert_eq!(agreed.provider.name, "sense");
         assert_eq!(agreed.capabilities, Capabilities { tools: true, wake: true, ..Capabilities::NONE });
         assert!(agreed.capabilities.has(Capability::Wake) && !agreed.capabilities.has(Capability::Events));
         assert_eq!(Capabilities::ALL.both(ants), ants);
@@ -205,12 +205,12 @@ mod tests {
     #[test]
     fn no_common_version_fails_on_either_side() {
         let offered = params(&[1], Capabilities::ALL);
-        let refused = offered.accept(&[2, 3], info("sugar"), Capabilities::ALL).unwrap_err();
+        let refused = offered.accept(&[2, 3], info("sense"), Capabilities::ALL).unwrap_err();
         assert_eq!(refused.code, RpcError::UNSUPPORTED_VERSION);
         assert_eq!(refused.data, Some(serde_json::json!({"supported": [2, 3]})));
 
         let chosen_anyway =
-            InitializeResult { protocol_version: 2, provider: info("sugar"), capabilities: Capabilities::ALL };
+            InitializeResult { protocol_version: 2, provider: info("sense"), capabilities: Capabilities::ALL };
         assert_eq!(
             negotiate(&offered, chosen_anyway),
             Err(NegotiationError::NoCommonVersion { offered: vec![1], chosen: 2 })
