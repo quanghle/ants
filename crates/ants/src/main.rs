@@ -1,5 +1,10 @@
 //! `ants`: talk to agent teams over NATS from the terminal, and run the ant daemon.
 
+#![cfg_attr(
+    all(test, target_os = "macos"),
+    allow(linker_messages, reason = "the test binary's unwind tables outgrow what ld64 encodes compactly (16 MB)")
+)]
+
 // The command line, and how it reaches NATS.
 mod cli;
 mod cmd;
