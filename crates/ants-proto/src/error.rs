@@ -4,7 +4,7 @@
 
 #[cfg(doc)]
 use crate::subject;
-use crate::{ChannelId, MAX_TITLE, ThreadId, UserId};
+use crate::{ChannelId, MAX_CHANNEL_DESCRIPTION, MAX_TITLE, ThreadId, UserId};
 
 /// Errors from parsing ants identifiers and building replies.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -29,6 +29,8 @@ pub enum Error {
     InvalidMachine(String),
     #[error("invalid thread title {0:?}: use one line of 1-{MAX_TITLE} characters")]
     InvalidTitle(String),
+    #[error("a channel's description of {0} characters is too long: at most {MAX_CHANNEL_DESCRIPTION}")]
+    LongDescription(usize),
     #[error("invalid question: {0}")]
     InvalidQuestion(String),
     #[error("invalid answer: {0}")]

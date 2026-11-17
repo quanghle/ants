@@ -6,6 +6,7 @@ expression: value
   "id": "019a7d2e-0000-7000-8000-000000000001",
   "channel": "backend",
   "ant": "lead",
+  "on_behalf_of": "alice",
   "thread_id": "019a7d2c-0000-7000-8000-000000000001",
   "ops": [
     {
@@ -22,6 +23,13 @@ expression: value
     },
     {
       "op": "clear_messenger"
+    },
+    {
+      "op": "set_description",
+      "description": "Incidents and deploys of the shop"
+    },
+    {
+      "op": "clear_description"
     }
   ],
   "requested_at": "2025-01-01T12:00:00Z",

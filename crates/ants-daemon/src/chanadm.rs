@@ -1,8 +1,12 @@
-//! The channel manager (`ants channel serve`): it applies the changes the owner of a channel asks for.
+//! The channel manager (`ants channel serve`): it applies the changes the owner of a channel asks for, and those a
+//! human's assistant asks for it.
 //!
 //! Only humans and the channel manager write the channels bucket. An ant that owns a channel ([`ChannelEntry::owner`],
 //! set by a human) asks for changes to its members and messenger with a [`ChannelAdminRequest`] on
-//! [`subject::chanadm`], core NATS, from its MCP tool `manage_channel` ([`Admin`]). The manager answers only on the
+//! [`subject::chanadm`], core NATS, from its MCP tool `manage_channel` ([`Admin`]). A human's assistant asks, from its
+//! tool `describe_channel_for_human`, to set or clear the description of any channel for its human
+//! ([`ChannelAdminRequest::on_behalf_of`]), which the manager honours only while the human's grant names the ant and
+//! the ant's record names the human ([`Records::acting`]); no owner sets a description. The manager answers only on the
 //! requester's own reply inboxes, and applies the change by compare-and-swap, checking the owner again on every
 //! attempt, so a request racing a human's transfer of the channel is refused rather than applied to the new owner's
 //! channel. Each change applied is announced in the channel by [`UserId::channel_manager`], mentioning nobody.
@@ -11,7 +15,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use ants_proto::{
-    CHANADM_REPEAT, CHANADM_WAIT, CHANNELS_BUCKET, ChannelAdminOutcome, ChannelAdminReply, ChannelAdminRequest,
+    Acting, CHANADM_REPEAT, CHANADM_WAIT, CHANNELS_BUCKET, ChannelAdminOutcome, ChannelAdminReply, ChannelAdminRequest,
     ChannelEntry, ChannelPost, Humans, Refusal, UserId, subject,
 };
 use anyhow::{Context as _, Result, bail};
@@ -23,6 +27,7 @@ use futures::future::BoxFuture;
 use crate::bus;
 use crate::channel::{self, Stored};
 use crate::mcp::Colony;
+use crate::people::behalf::Records;
 use crate::people::humans::Registry;
 
 /// Queue group of the channel managers: one of them takes each request.
@@ -33,14 +38,21 @@ const ATTEMPTS: usize = 10;
 const MAX_ANSWERED: usize = 1024;
 
 /// Serve channel management requests on `client` until its subscription ends. `js` reads and writes the channels
-/// bucket, reads the `colony` and posts the announcements; `humans` should be watched.
-pub async fn serve(client: async_nats::Client, js: jetstream::Context, colony: Colony, humans: Registry) -> Result<()> {
+/// bucket, reads the `colony` and posts the announcements; `humans` should be watched, verifying the assistant grants,
+/// which `behalf` checks an assistant's request for its human against.
+pub async fn serve(
+    client: async_nats::Client,
+    js: jetstream::Context,
+    colony: Colony,
+    humans: Registry,
+    behalf: Records,
+) -> Result<()> {
     let kv = js.get_key_value(CHANNELS_BUCKET).await.context(
         "opening the channels bucket; `ants channel create` as a human makes it, then the channel manager can start",
     )?;
     let mut requests =
         client.queue_subscribe(subject::ALL_CHANADM, QUEUE.to_owned()).await.context("subscribing to requests")?;
-    let mut manager = Manager { client, js, kv, colony, humans, answered: VecDeque::new() };
+    let mut manager = Manager { client, js, kv, colony, humans, behalf, answered: VecDeque::new() };
     tracing::info!("serving channel management requests");
     while let Some(msg) = requests.next().await {
         manager.handle(msg).await;
@@ -54,6 +66,7 @@ struct Manager {
     kv: kv::Store,
     colony: Colony,
     humans: Registry,
+    behalf: Records,
     /// Answers sent, by request id and requester, oldest first.
     answered: VecDeque<(ants_proto::Uuid, UserId, Vec<u8>)>,
 }
@@ -132,6 +145,13 @@ impl Manager {
             return refused(refusal);
         }
         let (ant, channel) = (&request.ant, &request.channel);
+        let for_human = match &request.on_behalf_of {
+            None => None,
+            Some(human) => match self.behalf.acting(&self.humans, ant, Some(human)).await {
+                Acting::For(human) => Some(human),
+                Acting::Own | Acting::Forged(_) => return refused(Refusal::NotAssistant(human.clone())),
+            },
+        };
         let humans = self.humans.humans();
         for _ in 0..ATTEMPTS {
             let (mut entry, revision) = match channel::load(&self.kv, channel).await? {
@@ -140,7 +160,11 @@ impl Manager {
                 Stored::Entry(entry, revision) => (entry, revision),
             };
             let before = entry.clone();
-            let changed = match entry.apply(ant, &request.ops, &humans) {
+            let applied = match &for_human {
+                Some(_) => entry.apply_for_human(&request.ops),
+                None => entry.apply(ant, &request.ops, &humans),
+            };
+            let changed = match applied {
                 Ok(changed) => changed,
                 Err(refusal) => return refused(refusal),
             };
@@ -153,7 +177,7 @@ impl Manager {
             let value = serde_json::to_vec(&entry)?;
             match self.kv.update(entry.key(), value.into(), revision).await {
                 Ok(revision) => {
-                    let post = announcement(ant, &entry, &changed);
+                    let post = announcement(&changer(ant, for_human.as_ref()), &entry, &changed);
                     return Ok((ChannelAdminOutcome::Applied { entry, revision, changed }, Some(post)));
                 }
                 Err(e) if e.kind() == kv::UpdateErrorKind::WrongLastRevision => {
@@ -184,10 +208,18 @@ impl Manager {
     }
 }
 
-/// The post announcing that `owner` made the `changed` changes to `entry`'s channel: top-level, by the channel manager,
-/// naming ants without `@` so it mentions, and wakes, nobody.
-pub fn announcement(owner: &UserId, entry: &ChannelEntry, changed: &[String]) -> ChannelPost {
-    let text = format!("{owner}, the channel's owner, changed #{}: {}.", entry.channel, changed.join("; "));
+/// Who made a change, as its announcement names it: `ant`, the channel's owner, or the assistant of `for_human`.
+fn changer(ant: &UserId, for_human: Option<&UserId>) -> String {
+    match for_human {
+        Some(human) => format!("{ant}, as the assistant of {human},"),
+        None => format!("{ant}, the channel's owner,"),
+    }
+}
+
+/// The post announcing that `by` ([`changer`]) made the `changed` changes to `entry`'s channel: top-level, by the
+/// channel manager, naming users without `@` so it mentions, and wakes, nobody.
+pub fn announcement(by: &str, entry: &ChannelEntry, changed: &[String]) -> ChannelPost {
+    let text = format!("{by} changed #{}: {}.", entry.channel, changed.join("; "));
     let mut post = ChannelPost::new(entry.channel.clone(), UserId::channel_manager(), text);
     post.mentions.clear();
     post
@@ -242,3 +274,6 @@ impl Admin for NatsAdmin {
         })
     }
 }
+
+#[cfg(test)]
+mod tests;

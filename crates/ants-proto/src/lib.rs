@@ -216,6 +216,8 @@ pub const CHANADM_REPEAT: Duration = Duration::from_secs(2);
 pub const CHANADM_WAIT: Duration = Duration::from_secs(10);
 /// Most operations one [`ChannelAdminRequest`] may carry.
 pub const MAX_CHANNEL_OPS: usize = 32;
+/// Most characters a channel's description ([`ChannelEntry::description`]) has.
+pub const MAX_CHANNEL_DESCRIPTION: usize = 1000;
 /// KV bucket of the humans: one [`HumanEntry`] per human, keyed by its user id. Only humans write it; ants read
 /// it. [`UserId::human`] is a human without an entry.
 pub const HUMANS_BUCKET: &str = "ants_humans";

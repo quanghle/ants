@@ -71,6 +71,9 @@ pub struct Prompt {
     /// Asks the ant's provider for its brief, only when the prompt is the first of a session that started, was loaded
     /// or was rebuilt ([`Briefing`]).
     pub brief: Option<Briefing>,
+    /// What the channel of the prompt's thread is for, added to the prompt only when it is the first of a session
+    /// that started, was loaded or was rebuilt, as the brief is: a session keeps the description it started with.
+    pub channel: Option<String>,
 }
 
 /// Messages added to a running prompt, for a harness that takes them into its turn (`_ants/steer`).
@@ -100,6 +103,7 @@ impl Prompt {
             attachments: None,
             steering: None,
             brief: None,
+            channel: None,
         }
     }
 }

@@ -566,6 +566,31 @@ impl Inbox<'_> {
         Briefing::new(provider, mcp.caller().await, thread.clone(), origin)
     }
 
+    /// What the prompt for `incoming`, on a channel's thread, adds should it be the first of a session: the channel's
+    /// description, as the post's entry said, or as stored now for the escalation leader's answer.
+    async fn channel_note(&self, incoming: &Incoming) -> Option<String> {
+        let (channel, description) = match (&incoming.post, &incoming.resume) {
+            (Some(posted), _) => (&posted.post.channel, posted.description.clone()),
+            (None, Some(channel)) => (channel, self.stored_description(channel).await),
+            (None, None) => return None,
+        };
+        description.map(|description| channel::description_note(channel, &description))
+    }
+
+    async fn stored_description(&self, channel: &ants_proto::ChannelId) -> Option<String> {
+        let read = async {
+            let kv = self.js.get_key_value(ants_proto::CHANNELS_BUCKET).await?;
+            anyhow::Ok(match channel::load(&kv, channel).await? {
+                channel::Stored::Entry(entry, _) => entry.description,
+                _ => None,
+            })
+        };
+        read.await.unwrap_or_else(|e| {
+            tracing::warn!(%channel, error = format!("{e:#}"), "reading the description of a channel");
+            None
+        })
+    }
+
     /// Run the prompt `text` for `incoming`, streaming its status, recording its spend, renewing the message's ack wait
     /// and cancelling it on request or at a cap.
     async fn run_prompt(
@@ -589,7 +614,7 @@ impl Inbox<'_> {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut calls = crate::monitoring::timeline::Collector::new(self.ant, thread, envelope.id, self.redactor);
         let history = self.history_of(incoming, seq);
-        let brief = self.briefing(incoming).await;
+        let (brief, channel) = tokio::join!(self.briefing(incoming), self.channel_note(incoming));
         let (ready_tx, ready) = tokio::sync::oneshot::channel();
         let (steer_tx, steers) = tokio::sync::mpsc::channel(STEERS);
         let prompt = Prompt {
@@ -602,6 +627,7 @@ impl Inbox<'_> {
             attachments: Attached::new(self.js.clone(), incoming.attached(), crate::files::stored(msg)),
             steering: Some(Steering { ready: ready_tx, steers }),
             brief,
+            channel,
         };
         let mut ready = futures::FutureExt::fuse(ready);
         let mut joins = None;

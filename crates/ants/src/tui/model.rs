@@ -1070,6 +1070,7 @@ mod tests {
             members: members.iter().map(|m| user(m)).collect(),
             messenger: None,
             owner: None,
+            description: None,
         };
         let channels = vec![channel("ops", &["alice", "dev-a"]), channel("sales", &["bob"])];
         m.read(Read::Directory(Ok((channels, Humans::default()))), at(0));

@@ -41,7 +41,7 @@ impl Permissions {
     /// the ant (`on_behalf_of`), which waits for its human's confirmation, as readers ignore a stored decision carrying
     /// `on_behalf_of` and one stored there would keep its human's own from being stored. It sends admin orders for its
     /// human (`on_behalf_of`), which daemons hold for the human's confirmation. Nor does it change the team: no entry of [`HUMANS_BUCKET`] (where its human's grant stands) or [`CHANNELS_BUCKET`],
-    /// no stream created, updated or purged of a message. It puts no device encryption key, no presence and no
+    /// whose description of a channel it asks the channel manager to change for its human instead, no stream created, updated or purged of a message. It puts no device encryption key, no presence and no
     /// notification holds, which only a human's devices have, and it gets no power of the account key: it signs no
     /// credentials and records no revocation.
     pub fn for_assistant(assistant: &UserId, human: &UserId) -> Self {

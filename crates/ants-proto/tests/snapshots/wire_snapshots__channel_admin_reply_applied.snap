@@ -13,7 +13,8 @@ expression: value
         "alice"
       ],
       "messenger": "triage",
-      "owner": "lead"
+      "owner": "lead",
+      "description": "Incidents and deploys of the shop"
     },
     "revision": 12,
     "changed": [

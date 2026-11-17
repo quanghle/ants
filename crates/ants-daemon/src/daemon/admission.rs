@@ -284,10 +284,11 @@ impl Inbox<'_> {
         }
         let triage = (wake == Wake::Triage).then(|| channels.get(&post.channel).cloned()).flatten();
         let owned = channels.get(&post.channel).is_some_and(|e| e.owner.as_ref() == Some(self.ant));
+        let description = channels.get(&post.channel).and_then(|e| e.description.clone());
         let origin = if post.starts_thread() { ThreadOrigin::of_root(&post, &humans) } else { ThreadOrigin::default() };
         origin.apply(&mut post);
         let envelope = channel::as_envelope(&post, self.ant);
-        let posted = Some(Box::new(Posted { post, triage, owned }));
+        let posted = Some(Box::new(Posted { post, triage, owned, description }));
         Some(Incoming { envelope, post: posted, resume: None, steered: Steered::No })
     }
 

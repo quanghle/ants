@@ -214,6 +214,38 @@ async fn a_mentioned_member_answers_on_the_thread_after_the_posts_it_missed() {
 }
 
 #[tokio::test]
+async fn a_member_s_session_on_a_channel_thread_starts_with_the_channel_s_description() {
+    let Some((bus, _)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let (ops, mut replies) = bus.channel("ops", &["dev-a"]).await;
+    let mut entry: ChannelEntry = serde_json::from_slice(&bus.channels.get("ops").await.unwrap().unwrap()).unwrap();
+    entry.set_description(Some("Incidents and deploys of the shop.")).unwrap();
+    bus.channels.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
+    let root = ChannelPost::new(ops.clone(), UserId::human(), "@dev-a deploy friday?");
+    bus.post(&root).await;
+    let again = root.reply(UserId::human(), "@dev-a and now?", &[], &Humans::default()).unwrap();
+    let again_seq = bus.post(&again).await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        next_post(&mut replies).await;
+        next_post(&mut replies).await;
+        bus.until_posts_acked(again_seq).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    let answered = log.locked().answered.clone();
+    let note = channel::description_note(&ops, "Incidents and deploys of the shop.");
+    assert_eq!(
+        note,
+        "[ants] #ops, the channel of this thread, is described by a human as:\nIncidents and deploys of the shop."
+    );
+    assert!(answered[0].starts_with(&format!("{note}\n\n")), "{}", answered[0]);
+    assert!(!answered[1].contains("described by a human"), "only the first prompt of a session: {}", answered[1]);
+}
+
+#[tokio::test]
 async fn an_answer_to_a_webhook_goes_to_the_thread_s_owner_or_nowhere() {
     let Some((bus, mut to_human)) = Bus::start().await else { return };
     let (launch, log, _) = fake::launch();

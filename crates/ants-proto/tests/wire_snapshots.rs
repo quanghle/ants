@@ -213,6 +213,7 @@ fn channel_entry() -> ChannelEntry {
         members: vec![user("dev-a"), user("alice")],
         messenger: Some(user("triage")),
         owner: Some(user("lead")),
+        description: Some("Incidents and deploys of the shop".to_owned()),
     }
 }
 
@@ -563,6 +564,8 @@ fn channels() {
         ChannelOp::RemoveMember { ant: user("dev-c") },
         ChannelOp::SetMessenger { ant: user("triage") },
         ChannelOp::ClearMessenger,
+        ChannelOp::SetDescription { description: "Incidents and deploys of the shop".to_owned() },
+        ChannelOp::ClearDescription,
     ];
     snap("channel_op_variants", &ops);
     snap(
@@ -575,6 +578,7 @@ fn channels() {
             ops,
             requested_at: at(0),
             expires_at: at(1),
+            on_behalf_of: Some(user("alice")),
         },
     );
     snap(
@@ -606,6 +610,9 @@ fn channels() {
             Refusal::Expired,
             Refusal::Busy,
             Refusal::Invalid("no change asked for".to_owned()),
+            Refusal::Description,
+            Refusal::NotForHuman,
+            Refusal::NotAssistant(user("alice")),
         ],
     );
     snap(

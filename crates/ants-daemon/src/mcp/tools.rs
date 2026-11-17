@@ -182,7 +182,8 @@ fn instructions(ant: &UserId, manager: bool, assisting: Option<&UserId>, provide
              for {human} in its home (questions, tool requests, unread messages) or one of its threads, \
              answer_for_human answers a question asked of it, send_for_human messages an ant or human for it, \
              post_for_human and notes_for_human post for it in a channel or a thread's notes, react_for_human, title_for_human and done_for_human react to its messages and title or close its \
-             threads, and decide_for_human decides a tool request waiting for it, held until {human} confirms it. \
+             threads, describe_channel_for_human sets a channel's description for it, and decide_for_human decides \
+             a tool request waiting for it, held until {human} confirms it. \
              Each act goes out as this ant's, marked as for {human}, and {human} is told of it. Act for {human} only \
              as it asked; the tools stop the moment {human} withdraws its grant."
         );

@@ -84,20 +84,34 @@ fn members_label(entry: &ChannelEntry) -> String {
     }
 }
 
-/// One line describing a channel, as `ants channel` prints it after a change.
+/// A channel as `ants channel` prints it after a change: one line, then its description should it have one.
 pub fn describe(entry: &ChannelEntry) -> String {
     let owner = entry.owner.as_ref().map_or_default(|o| format!("; owner {o}"));
-    format!("#{}: members {}; messenger {}{owner}", entry.channel, members_label(entry), messenger_label(entry))
+    let description = entry.description.as_ref().map_or_default(|d| format!("\ndescription: {d}"));
+    format!(
+        "#{}: members {}; messenger {}{owner}{description}",
+        entry.channel,
+        members_label(entry),
+        messenger_label(entry)
+    )
 }
 
 /// The channels as a table: one row per channel under a header, columns padded to line up. With `unread`, an UNREAD
 /// column shows the unread posts the human's notify level of each channel it has counts, how many of them
-/// @mention the human, and the other unread posts, `-` for the channels it lacks.
+/// @mention the human, and the other unread posts, `-` for the channels it lacks. A DESCRIPTION column, last, shows the
+/// start of each channel's description, when any channel has one.
 pub fn table(entries: &[ChannelEntry], unread: Option<&HashMap<ChannelId, reads::Unread>>) -> String {
     let mut header = ["CHANNEL", "MEMBERS", "MESSENGER", "OWNER"].map(str::to_owned).to_vec();
     if unread.is_some() {
         header.push("UNREAD".to_owned());
     }
+    let described = entries.iter().any(|e| e.description.is_some());
+    if described {
+        header.push("DESCRIPTION".to_owned());
+    }
+    let description = |e: &ChannelEntry| {
+        described.then(|| e.description.as_deref().map_or_else(|| "-".to_owned(), |d| crate::text::excerpt(d, 40)))
+    };
     let owner = |e: &ChannelEntry| e.owner.as_ref().map_or_else(|| "-".to_owned(), UserId::to_string);
     let unread_label = |e: &ChannelEntry| {
         let Some(u) = unread?.get(&e.channel) else { return Some("-".to_owned()) };
@@ -113,7 +127,7 @@ pub fn table(entries: &[ChannelEntry], unread: Option<&HashMap<ChannelId, reads:
     let rows: Vec<Vec<String>> = std::iter::once(header)
         .chain(entries.iter().map(|e| {
             let row = [format!("#{}", e.channel), members_label(e), messenger_label(e), owner(e)];
-            row.into_iter().chain(unread_label(e)).collect()
+            row.into_iter().chain(unread_label(e)).chain(description(e)).collect()
         }))
         .collect();
     let mut widths = vec![0; rows[0].len()];
@@ -216,7 +230,7 @@ pub async fn update<T>(
 }
 
 /// Run the channel manager until it fails: connect with `creds`, the channel manager's, retrying until the hub
-/// answers, and apply the changes owners ask for ([`ants_daemon::chanadm::serve`]). Meanwhile, publish the version of
+/// answers, and apply the changes owners, and humans' assistants for them, ask for ([`ants_daemon::chanadm::serve`]). Meanwhile, publish the version of
 /// ants it runs ([`ants_proto::channel_manager_serving_key`]).
 pub async fn serve(url: &str, creds: Option<&std::path::Path>, domain: Option<&ants_proto::JsDomain>) -> Result<()> {
     let me = UserId::channel_manager();
@@ -226,11 +240,13 @@ pub async fn serve(url: &str, creds: Option<&std::path::Path>, domain: Option<&a
     let key = ants_proto::channel_manager_serving_key();
     let publishing =
         crate::release::versions::keep_putting(published, key, crate::release::versions::serving().await, || {});
-    let humans = ants_daemon::people::humans::Registry::new(UserId::human());
+    let account = ants_daemon::people::humans::account(creds);
+    let humans = ants_daemon::people::humans::Registry::new(UserId::human()).verifying_grants(account.clone());
     let _watching = humans.watch(js.clone(), ants_daemon::people::humans::RETRY);
     let colony = ants_daemon::mcp::jetstream_colony(js.clone());
+    let behalf = ants_daemon::people::behalf::Records::new(js.clone(), domain.cloned(), account);
     tokio::select! {
-        served = ants_daemon::chanadm::serve(client, js, colony, humans) => served,
+        served = ants_daemon::chanadm::serve(client, js, colony, humans, behalf) => served,
         () = publishing => unreachable!("it keeps publishing"),
     }
 }

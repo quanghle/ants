@@ -22,6 +22,10 @@ pub enum ChannelOp {
     SetMessenger { ant: UserId },
     /// Give the channel the default messenger again.
     ClearMessenger,
+    /// Set the channel's description; only an assistant asks, for its human ([`ChannelAdminRequest::on_behalf_of`]).
+    SetDescription { description: String },
+    /// Clear the channel's description, likewise.
+    ClearDescription,
 }
 
 impl ChannelOp {
@@ -29,8 +33,13 @@ impl ChannelOp {
     pub fn ant(&self) -> Option<&UserId> {
         match self {
             Self::AddMember { ant } | Self::RemoveMember { ant } | Self::SetMessenger { ant } => Some(ant),
-            Self::ClearMessenger => None,
+            Self::ClearMessenger | Self::SetDescription { .. } | Self::ClearDescription => None,
         }
+    }
+
+    /// Whether the operation sets or clears the description, which only a human's assistant asks for.
+    pub fn describes(&self) -> bool {
+        matches!(self, Self::SetDescription { .. } | Self::ClearDescription)
     }
 
     /// Whether the operation makes [`ChannelOp::ant`] a member or the messenger, so it must be a human or an ant in
@@ -40,15 +49,20 @@ impl ChannelOp {
     }
 }
 
-/// An ant's request to the channel manager for changes to a channel it owns, on [`subject::chanadm`]: core NATS, not
+/// An ant's request to the channel manager for changes to a channel it owns, or to the description of any channel for
+/// the human it is the assistant of ([`ChannelAdminRequest::on_behalf_of`]), on [`subject::chanadm`]: core NATS, not
 /// stored. The ant repeats it with the same id while no answer arrives ([`CHANADM_REPEAT`]); the manager answers a
 /// repeat with its first answer. Only the requester's reply inboxes get the answer ([`ChannelAdminRequest::answers_on`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelAdminRequest {
     pub id: Uuid,
     pub channel: ChannelId,
-    /// The ant asking, which must own the channel.
+    /// The ant asking, which must own the channel unless it asks for its human.
     pub ant: UserId,
+    /// The human the ant asks for as its assistant, which the manager checks against the human's grant and the ant's
+    /// record: such a request only sets or clears the description ([`ChannelEntry::apply_for_human`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_behalf_of: Option<UserId>,
     /// The thread the ant was handling when it asked, for the record.
     pub thread_id: ThreadId,
     /// What to change, in order: 1 to [`MAX_CHANNEL_OPS`] operations.
@@ -62,7 +76,13 @@ impl ChannelAdminRequest {
     pub fn new(channel: ChannelId, ant: UserId, thread_id: ThreadId, ops: Vec<ChannelOp>) -> Self {
         let requested_at = Utc::now();
         let expires_at = requested_at + chrono::TimeDelta::from_std(CHANADM_TTL).expect("a short duration");
-        Self { id: Uuid::now_v7(), channel, ant, thread_id, ops, requested_at, expires_at }
+        Self { id: Uuid::now_v7(), channel, ant, on_behalf_of: None, thread_id, ops, requested_at, expires_at }
+    }
+
+    /// The same, asked for `human` by its assistant ([`ChannelAdminRequest::on_behalf_of`]).
+    #[must_use]
+    pub fn on_behalf(self, human: Option<UserId>) -> Self {
+        Self { on_behalf_of: human, ..self }
     }
 
     pub fn subject(&self) -> String {
@@ -145,6 +165,12 @@ pub enum Refusal {
     Busy,
     #[error("invalid request: {0}")]
     Invalid(String),
+    #[error("only a human, or its assistant for it, sets a channel's description")]
+    Description,
+    #[error("an assistant changes only the description of a channel for its human")]
+    NotForHuman,
+    #[error("the asking ant does not act for {0} now: the grant of {0} names another assistant, or none")]
+    NotAssistant(UserId),
 }
 
 #[cfg(test)]

@@ -519,6 +519,23 @@ async fn a_session_rebuilt_after_a_context_overflow_is_briefed_again() {
     assert_eq!(reasons(&fake), [BriefReason::Rebuilt], "the first session was not opened by this prompt");
 }
 
+#[tokio::test]
+async fn a_channel_s_description_opens_each_session_of_its_thread_after_the_brief() {
+    let (pool, _, _) = fake_pool(4, Sessions::Loadable);
+    let described =
+        |text: &str, description: &str| Prompt { channel: Some(description.to_owned()), ..with_history(text) };
+    assert_eq!(pool.run(&thread(1), described("a", "Ops.")).await.unwrap().text, "s1: Ops.\n\na");
+    let reply = pool.run(&thread(1), described("b", "Ops, changed.")).await.unwrap().text;
+    assert_eq!(reply, "s1: b", "a running session keeps the description it started with");
+    pool.evict_idle(Instant::now() + IDLE * 2);
+    let reply = pool.run(&thread(1), described("c", "Ops, changed.")).await.unwrap().text;
+    assert_eq!(reply, "s1: Ops, changed.\n\nc", "a loaded session takes the description of now");
+    let (prompt, _) = briefed(Answer::Text("Brief.".to_owned()), "overflow").await;
+    let reply = pool.run(&thread(1), Prompt { channel: Some("Ops.".to_owned()), ..prompt }).await.unwrap().text;
+    let opening = "[ants brief from fake]\nBrief.\n\nOps.";
+    assert!(reply.starts_with(&format!("s2: {opening}\n\n[ants] The session of this thread outgrew")), "{reply}");
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_brief_not_sent_in_time_leaves_a_line_and_the_prompt_goes_on() {
     let (pool, _, _) = fake_pool(1, Sessions::Loadable);

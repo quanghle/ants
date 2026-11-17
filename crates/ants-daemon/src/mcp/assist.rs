@@ -5,7 +5,8 @@
 //! and `snooze_for_human` pin, archive and snooze its threads under keys naming the ant
 //! ([`ants_proto::assisted_marks_key`], [`ants_proto::assisted_reminders_key`]), never changing the human's own marks
 //! and snoozes, which its devices take in only while the grant names the ant and only on threads the human marked or
-//! snoozed none of itself; `decide_for_human`
+//! snoozed none of itself; `describe_channel_for_human` sets or clears a channel's description for it, asking the
+//! channel manager ([`crate::chanadm`]); `decide_for_human`
 //! decides a tool request waiting for it, held by the requesting ant's daemon until the human confirms it or a
 //! pre-allow rule of the human covers it ([`crate::approvals`]); `order_for_human` sends an admin order for it, held
 //! likewise by the daemon of the ant's machine ([`crate::admin::held`]); `queue_for_human`, `cancel_for_human` and
@@ -41,6 +42,7 @@ use crate::delivery::queue;
 use crate::secrets::sealing::{AssistantSealing, Opening};
 
 mod ants;
+mod channels;
 mod home;
 mod store;
 mod threads;
@@ -250,6 +252,9 @@ impl Hub {
 impl Tools {
     /// The tools acting for the human the ant assists.
     pub(super) fn assist_router() -> ToolRouter<Self> {
-        Self::assist_home_router() + Self::assist_threads_router() + Self::assist_ants_router()
+        Self::assist_home_router()
+            + Self::assist_threads_router()
+            + Self::assist_ants_router()
+            + Self::assist_channels_router()
     }
 }

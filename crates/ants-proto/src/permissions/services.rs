@@ -13,7 +13,8 @@ use crate::{
 
 impl Permissions {
     /// What the credentials of the channel manager (`ants channel serve`) allow: hearing every channel management
-    /// request, reading the colony and the humans, reading and writing the channels bucket, posting in any channel
+    /// request, reading the colony and the humans, the assistants' records and the revocations (to check what an
+    /// assistant asks for its human), reading and writing the channels bucket, posting in any channel
     /// as [`UserId::channel_manager`], and putting the version it runs ([`channel_manager_serving_key`]). Its JWT also
     /// lets it answer each request it hears once, on the request's reply subject, so it needs no right to publish on
     /// any ant's reply inboxes. It asks for its own renewal ([`subject::renew`]) and hears the answer.
@@ -32,6 +33,12 @@ impl Permissions {
             publish.extend([format!("$JS.API.STREAM.INFO.{stream}"), format!("$JS.API.DIRECT.GET.{stream}.>")]);
             publish.extend(ordered_consumer_subjects(stream));
         }
+        // Get of the assistants' records and of the revocations, to check a request an assistant makes for its human.
+        let devices = kv_stream(DEVICES_BUCKET);
+        publish.extend([
+            format!("$JS.API.DIRECT.GET.{devices}.{}", subject::assistant_records()),
+            format!("$JS.API.DIRECT.GET.{devices}.{}", subject::revoked_devices()),
+        ]);
         publish.push(subject::renew(user.as_str()));
         let subscribe = vec![
             subject::ALL_CHANADM.to_owned(),

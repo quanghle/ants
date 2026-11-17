@@ -226,8 +226,8 @@ impl Tools {
     }
 }
 
-/// A channel's members, messenger and owner.
-fn describe_channel(entry: &ChannelEntry) -> String {
+/// A channel's members, messenger, owner and description.
+pub(super) fn describe_channel(entry: &ChannelEntry) -> String {
     let members = if entry.members.is_empty() {
         "none".to_owned()
     } else {
@@ -238,5 +238,9 @@ fn describe_channel(entry: &ChannelEntry) -> String {
         None => format!("{} (default)", UserId::messenger()),
     };
     let owner = entry.owner.as_ref().map_or_else(|| "none".to_owned(), UserId::to_string);
-    format!("#{}: members {members}; messenger {messenger}; owner {owner}.", entry.channel)
+    let described = format!("#{}: members {members}; messenger {messenger}; owner {owner}.", entry.channel);
+    match &entry.description {
+        Some(description) => format!("{described}\nDescription: {description}"),
+        None => described,
+    }
 }

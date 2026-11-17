@@ -56,6 +56,19 @@ fn the_table_shows_members_and_the_messenger_or_its_default() {
     );
     assert_eq!(describe(&quiet), "#dev: members -; messenger messenger (default)");
     assert_eq!(describe(&busy), "#ops: members dev-a,dev-b; messenger triage; owner lead");
+
+    busy.set_description(Some("Incidents and deploys of the shop, on call around the clock")).unwrap();
+    assert_eq!(
+        table(&[quiet, busy.clone()], None),
+        "CHANNEL  MEMBERS      MESSENGER            OWNER  DESCRIPTION\n\
+         #dev     -            messenger (default)  -      -\n\
+         #ops     dev-a,dev-b  triage               lead   Incidents and deploys of the shop, on ca…"
+    );
+    assert_eq!(
+        describe(&busy),
+        "#ops: members dev-a,dev-b; messenger triage; owner lead\n\
+         description: Incidents and deploys of the shop, on call around the clock"
+    );
 }
 
 #[test]

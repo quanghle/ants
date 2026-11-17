@@ -32,5 +32,15 @@ expression: value
   {
     "refusal": "invalid",
     "detail": "no change asked for"
+  },
+  {
+    "refusal": "description"
+  },
+  {
+    "refusal": "not_for_human"
+  },
+  {
+    "refusal": "not_assistant",
+    "detail": "alice"
   }
 ]

@@ -1050,6 +1050,8 @@ struct Posted {
     triage: Option<ChannelEntry>,
     /// Whether the ant owns the channel.
     owned: bool,
+    /// What the channel is for, as its entry said when the post arrived.
+    description: Option<String>,
 }
 
 struct Inbox<'a> {

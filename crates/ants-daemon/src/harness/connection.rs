@@ -181,7 +181,7 @@ struct Ended {
 
 impl Connected<'_> {
     /// Run `turn` in session `id`, or in a new one should the prompt outgrow the context window, and send its reply;
-    /// the first turn of a session gets the ant's brief for why it `opened`. Breaks when the harness is to stop; fails
+    /// the first turn of a session gets the ant's brief for why it `opened`, and its channel's description. Breaks when the harness is to stop; fails
     /// with the error that ends the connection.
     async fn run(
         &self,
@@ -191,9 +191,11 @@ impl Connected<'_> {
         opened: Option<BriefReason>,
     ) -> Result<ControlFlow<()>, agent_client_protocol::Error> {
         let Turn { prompt, reply } = turn;
-        let Prompt { text, limits, spend, mut stop, progress, mut history, attachments, steering, brief } = prompt;
+        let Prompt { text, limits, spend, mut stop, progress, mut history, attachments, steering, brief, channel } =
+            prompt;
+        let channel = channel.as_deref();
         let ((lines, images), mut briefed) =
-            tokio::join!(attached(attachments, self.images), self.brief(brief.as_ref(), opened));
+            tokio::join!(attached(attachments, self.images), self.brief(brief.as_ref(), channel, opened));
         // Without steering by the agent, the steering is dropped unready: steers stop the prompt instead.
         let mut steers = steering.filter(|_| self.steers).map(|steering| {
             let _ = steering.ready.send(());
@@ -219,7 +221,7 @@ impl Connected<'_> {
                         return Err(e);
                     }
                     (rebuild, retry) = (Some(Rebuild::Overflow), false);
-                    briefed = self.brief(brief.as_ref(), Some(BriefReason::Rebuilt)).await;
+                    briefed = self.brief(brief.as_ref(), channel, Some(BriefReason::Rebuilt)).await;
                 }
                 Some(Err(e)) if ended.cut.is_none() && overflowed(e) => {
                     let harness = self.launch.harness.name.clone();
@@ -260,18 +262,25 @@ impl Connected<'_> {
         too_many
     }
 
-    /// The part of a prompt `brief` adds when the prompt is the first of a session that opened for `reason`.
-    async fn brief(&self, brief: Option<&Briefing>, reason: Option<BriefReason>) -> String {
-        match (brief, reason) {
-            (Some(brief), Some(reason)) => {
+    /// The part of a prompt `brief` and the `channel`'s description add when the prompt is the first of a session
+    /// that opened for `reason`.
+    async fn brief(&self, brief: Option<&Briefing>, channel: Option<&str>, reason: Option<BriefReason>) -> String {
+        let Some(reason) = reason else { return String::new() };
+        let briefed = match brief {
+            Some(brief) => {
                 let model = self.launch.settings.model.as_deref();
                 brief.section(reason, &self.launch.harness.name, model).await
             }
-            _ => String::new(),
-        }
+            None => String::new(),
+        };
+        [briefed.as_str(), channel.unwrap_or_default()]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n")
     }
 
-    /// The prompt's text: the instructions, the ant's brief when `briefed`, the thread's history when the session is a
+    /// The prompt's text: the instructions, the ant's brief and its channel's description when `briefed`, the thread's history when the session is a
     /// `rebuild`, the message's `text` and the `lines` naming its attachments.
     async fn compose(
         &self,

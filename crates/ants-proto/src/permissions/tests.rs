@@ -3,9 +3,10 @@ use chrono::Utc;
 use super::*;
 use crate::{
     ANTS_VERSION, AdminPayload, AntReply, AntRequest, AskedAnt, CancelReply, CancelRequest, ChainEntry, ChannelEntry,
-    ChannelId, ChannelOp, DeviceId, ENROLL_INBOX, FILES_STREAM, HumanEntry, Humans, JsDomain, Machine, QueueRequest,
-    Refusal, Role, SPARE_READERS, STREAM, SUGAR_STREAM, Serving, ThreadId, UserId, Uuid, WEBHOOK_MARKER,
-    assisted_owner_key, assisted_withdrawal_key, channel_manager_serving_key, p, spare_readers, subject,
+    ChannelId, ChannelOp, DeviceId, ENROLL_INBOX, FILES_STREAM, HumanEntry, Humans, JsDomain, MAX_CHANNEL_DESCRIPTION,
+    Machine, QueueRequest, Refusal, Role, SPARE_READERS, STREAM, SUGAR_STREAM, Serving, ThreadId, UserId, Uuid,
+    WEBHOOK_MARKER, assisted_owner_key, assisted_withdrawal_key, channel_manager_serving_key, p, spare_readers,
+    subject,
 };
 
 #[test]
@@ -677,6 +678,30 @@ fn only_the_owner_changes_members_and_messenger_and_never_the_owner() {
 }
 
 #[test]
+fn only_a_human_or_its_assistant_describes_a_channel_and_never_with_other_changes() {
+    let humans = Humans::default();
+    let mut entry = ChannelEntry::new("ops".parse().unwrap());
+    entry.owner = Some(p("lead"));
+    let describe = [ChannelOp::SetDescription { description: "  Incidents of the shop\n".to_owned() }];
+    assert_eq!(entry.apply(&p("lead"), &describe, &humans), Err(Refusal::Description), "not even the owner");
+    let mixed = [describe[0].clone(), ChannelOp::AddMember { ant: p("dev-a") }];
+    assert_eq!(entry.apply(&p("lead"), &mixed, &humans), Err(Refusal::Description));
+    assert_eq!(entry.apply_for_human(&mixed), Err(Refusal::NotForHuman));
+    assert_eq!(entry.description, None, "a refusal changes nothing");
+
+    assert_eq!(entry.apply_for_human(&describe).unwrap(), [r#"description set to "Incidents of the shop""#]);
+    assert_eq!(entry.description.as_deref(), Some("Incidents of the shop"));
+    assert!(entry.apply_for_human(&describe).unwrap().is_empty(), "nothing to change");
+    let long = [ChannelOp::SetDescription { description: "x".repeat(MAX_CHANNEL_DESCRIPTION + 1) }];
+    assert!(matches!(entry.apply_for_human(&long), Err(Refusal::Invalid(_))));
+    let blank = [ChannelOp::SetDescription { description: " ".to_owned() }];
+    assert_eq!(entry.apply_for_human(&blank).unwrap(), ["description cleared"], "a blank one clears it");
+    assert_eq!(entry.description, None);
+    assert!(entry.apply_for_human(&[ChannelOp::ClearDescription]).unwrap().is_empty());
+    assert!(!serde_json::to_string(&entry).unwrap().contains("description"));
+}
+
+#[test]
 fn the_channel_manager_hears_requests_and_writes_channels_only() {
     let manager = Permissions::for_channel_manager();
     assert_eq!(manager.subscribe, ["ants.chanadm.*.*", "_INBOX.channel-manager.>", "ants.renew.channel-manager.reply"]);
@@ -686,6 +711,9 @@ fn the_channel_manager_hears_requests_and_writes_channels_only() {
         "$JS.API.DIRECT.GET.KV_ants_channels.>",
         "$JS.API.DIRECT.GET.KV_ants_colony.>",
         "$JS.API.CONSUMER.CREATE.KV_ants_humans",
+        // The records it checks an assistant's request for its human against.
+        "$JS.API.DIRECT.GET.KV_ants_devices.$KV.ants_devices.*.assistant",
+        "$JS.API.DIRECT.GET.KV_ants_devices.$KV.ants_devices.revoked.*",
     ] {
         assert!(manager.publish.iter().any(|have| have == s), "{s} missing from {:?}", manager.publish);
     }
@@ -910,15 +938,18 @@ fn humans_read_every_device_key_put_only_their_own_and_only_the_revoker_records_
     let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
     let observer = Permissions::for_observer(&p("watcher"));
     let webhook = Permissions::for_webhook(&p("hook"), &[Destination::Ant(p("dev-a"))]);
-    // An ant reads only the assistants' records and the revocations, to check what an assistant does for its human.
-    assert_eq!(
-        devices(&ant),
-        [
-            "$JS.API.DIRECT.GET.KV_ants_devices.$KV.ants_devices.*.assistant",
-            "$JS.API.DIRECT.GET.KV_ants_devices.$KV.ants_devices.revoked.*",
-        ]
-    );
-    for none in [observer, webhook, Permissions::for_channel_manager(), Permissions::for_reactions_responder()] {
+    // An ant and the channel manager read only the assistants' records and the revocations, to check what an
+    // assistant does for its human.
+    for checker in [ant, Permissions::for_channel_manager()] {
+        assert_eq!(
+            devices(&checker),
+            [
+                "$JS.API.DIRECT.GET.KV_ants_devices.$KV.ants_devices.*.assistant",
+                "$JS.API.DIRECT.GET.KV_ants_devices.$KV.ants_devices.revoked.*",
+            ]
+        );
+    }
+    for none in [observer, webhook, Permissions::for_reactions_responder()] {
         assert_eq!(devices(&none), Vec::<String>::new());
     }
 

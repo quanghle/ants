@@ -142,7 +142,8 @@ async fn the_channel_manager_applies_the_owner_s_changes_only_and_announces_them
     let humans = ants_daemon::people::humans::Registry::new(human.clone());
     let _watching = humans.watch(m_js.clone(), ants_daemon::people::humans::RETRY);
     let colony_of = ants_daemon::mcp::jetstream_colony(m_js.clone());
-    let serving = tokio::spawn(chanadm::serve(m_client, m_js, colony_of, humans));
+    let behalf = ants_daemon::people::behalf::Records::new(m_js.clone(), None, None);
+    let serving = tokio::spawn(chanadm::serve(m_client, m_js, colony_of, humans, behalf));
 
     let mut room = h_client.subscribe(subject::chan_room(&ops)).await.unwrap();
     subscribed(&h_js, &human).await;

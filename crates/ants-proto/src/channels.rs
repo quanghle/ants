@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    Attachment, ChannelId, ChannelOp, DEFAULT_TURN_BUDGET, Envelope, Error, Humans, Mention, Quote, Refusal, ThreadId,
-    UserId, parse_mentions, subject,
+    Attachment, ChannelId, ChannelOp, DEFAULT_TURN_BUDGET, Envelope, Error, Humans, MAX_CHANNEL_DESCRIPTION, Mention,
+    Quote, Refusal, ThreadId, UserId, parse_mentions, subject,
 };
 #[cfg(doc)]
 use crate::{CHANNELS_BUCKET, HUMANS_BUCKET, WEBHOOK_ALLOW, WEBHOOKS_BUCKET, webhook_marker_key};
@@ -30,12 +30,32 @@ pub struct ChannelEntry {
     /// The ant that may change the members and the messenger through the channel manager. Only a human sets it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<UserId>,
+    /// What the channel is for, up to [`MAX_CHANNEL_DESCRIPTION`] characters, which an ant's daemon adds to the first
+    /// prompt of each session on a thread of the channel. Only a human sets it, or its assistant for it through the
+    /// channel manager ([`ChannelEntry::apply_for_human`]); never the owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 impl ChannelEntry {
-    /// A channel without members, messenger or owner.
+    /// A channel without members, messenger, owner or description.
     pub fn new(channel: ChannelId) -> Self {
-        Self { channel, members: Vec::new(), messenger: None, owner: None }
+        Self { channel, members: Vec::new(), messenger: None, owner: None, description: None }
+    }
+
+    /// Set the description to `text`, trimmed; none or a blank one clears it. Returns whether it changed; one longer
+    /// than [`MAX_CHANNEL_DESCRIPTION`] is refused, changing nothing.
+    pub fn set_description(&mut self, text: Option<&str>) -> Result<bool, Error> {
+        let text = text.map(str::trim).filter(|t| !t.is_empty());
+        if let Some(count) = text.map(|t| t.chars().count()).filter(|n| *n > MAX_CHANNEL_DESCRIPTION) {
+            return Err(Error::LongDescription(count));
+        }
+        let text = text.map(str::to_owned);
+        if self.description == text {
+            return Ok(false);
+        }
+        self.description = text;
+        Ok(true)
     }
 
     /// The KV key of the entry.
@@ -108,10 +128,14 @@ impl ChannelEntry {
         post.mentions.iter().filter(|m| self.is_member(m) && **m != post.from && humans.contains(m)).cloned().collect()
     }
 
-    /// Apply the `ops` of `requester`, which must be the channel's owner, leaving the owner as it is. Members may be
+    /// Apply the `ops` of `requester`, which must be the channel's owner, leaving the owner and the description as they
+    /// are: only a human or its assistant sets the description ([`ChannelEntry::apply_for_human`]). Members may be
     /// ants or `humans`, but none may make a human the messenger: it is an ant. Returns what changed, in order, empty
     /// when nothing did; on a refusal the entry is unchanged.
     pub fn apply(&mut self, requester: &UserId, ops: &[ChannelOp], humans: &Humans) -> Result<Vec<String>, Refusal> {
+        if ops.iter().any(ChannelOp::describes) {
+            return Err(Refusal::Description);
+        }
         if self.owner.as_ref() != Some(requester) {
             return Err(Refusal::NotOwner { owner: self.owner.clone() });
         }
@@ -145,9 +169,37 @@ impl ChannelEntry {
                         changed.push(format!("messenger back to the default {}", UserId::messenger()));
                     }
                 }
+                ChannelOp::SetDescription { .. } | ChannelOp::ClearDescription => {
+                    unreachable!("refused above")
+                }
             }
         }
         Ok(changed)
+    }
+
+    /// Apply `ops` asked by the assistant of a human for it, its claim verified by the caller: they may only set or
+    /// clear the description, as the human would. Returns what changed, in order, empty when nothing did; on a
+    /// refusal the entry is unchanged.
+    pub fn apply_for_human(&mut self, ops: &[ChannelOp]) -> Result<Vec<String>, Refusal> {
+        if !ops.iter().all(ChannelOp::describes) {
+            return Err(Refusal::NotForHuman);
+        }
+        let mut changed = self.clone();
+        let mut done = Vec::new();
+        for op in ops {
+            let text = match op {
+                ChannelOp::SetDescription { description } => Some(description.as_str()),
+                _ => None,
+            };
+            if changed.set_description(text).map_err(|e| Refusal::Invalid(e.to_string()))? {
+                done.push(match &changed.description {
+                    Some(description) => format!("description set to {description:?}"),
+                    None => "description cleared".to_owned(),
+                });
+            }
+        }
+        *self = changed;
+        Ok(done)
     }
 }
 

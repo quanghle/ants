@@ -283,7 +283,7 @@ async fn assistant_with(
     (mcp, sent, humans, device, store)
 }
 
-const ASSIST_TOOLS: [&str; 15] = [
+const ASSIST_TOOLS: [&str; 16] = [
     "human_queue",
     "answer_for_human",
     "send_for_human",
@@ -299,6 +299,7 @@ const ASSIST_TOOLS: [&str; 15] = [
     "cancel_for_human",
     "withdraw_for_human",
     "order_for_human",
+    "describe_channel_for_human",
 ];
 
 #[tokio::test]
@@ -319,7 +320,7 @@ async fn the_assistant_tools_stand_only_while_the_grant_names_the_ant() {
 
     grant(&humans, &device, Some("dev-a"), false);
     let granted = tools().await;
-    assert_eq!((granted.len(), offered(&granted)), (34, 15), "{granted:?}");
+    assert_eq!((granted.len(), offered(&granted)), (35, 16), "{granted:?}");
     assert_eq!(call(&client, "human_queue", serde_json::json!({})).await, (true, "Nothing waits for alice.".into()));
 
     // The same connection loses them at once.

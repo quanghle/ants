@@ -17,5 +17,12 @@ expression: value
   },
   {
     "op": "clear_messenger"
+  },
+  {
+    "op": "set_description",
+    "description": "Incidents and deploys of the shop"
+  },
+  {
+    "op": "clear_description"
   }
 ]

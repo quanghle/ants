@@ -847,6 +847,7 @@ mod tests {
             members: vec![user("alice")],
             messenger: None,
             owner: None,
+            description: None,
         };
         m.read(Read::Directory(Ok((vec![ops], ants_proto::Humans::default()))), at(1));
         let run = |m: &mut Model, text: &str| {

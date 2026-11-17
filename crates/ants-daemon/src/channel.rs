@@ -182,6 +182,11 @@ pub fn owner_note(channel: &ChannelId) -> String {
     )
 }
 
+/// What the first prompt of a session on a thread of `channel` adds: the `description` a human gave the channel.
+pub fn description_note(channel: &ChannelId, description: &str) -> String {
+    format!("[ants] #{channel}, the channel of this thread, is described by a human as:\n{description}")
+}
+
 /// What a channel post asks of an ant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Wake {
