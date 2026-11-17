@@ -43,7 +43,8 @@
 //!
 //! [nats_server]                     # start and supervise the local nats-server (NatsServer); off without it
 //! config = "~/.config/ants/leaf.conf"  # its configuration, run as nats-server -c; required
-//! command = "nats-server"           # a path, or a bare name looked up on PATH (the default)
+//! command = "nats-server"           # a path, or a bare name looked up on PATH; the default is found beside the
+//!                                   # ants executable, then in ~/.ants/bin, then on PATH
 //! ready_timeout = "30s"             # how long to wait for it to accept connections (the default)
 //!
 //! [[ant]]

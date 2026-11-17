@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use crate::service::{Action, Outcome, Service, Services};
 
+pub(crate) mod bundled;
 #[cfg(unix)]
 mod managed;
 

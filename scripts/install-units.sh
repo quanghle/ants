@@ -18,7 +18,8 @@
 #   scripts/install-units.sh --managed-nats          # the daemon only; it runs nats-server from [nats_server]
 #
 # Options:  --ants PATH              ants binary (default: ants on PATH)
-#           --nats-server PATH       nats-server binary (default: nats-server on PATH)
+#           --nats-server PATH       nats-server binary (default: the one beside the ants binary, in ~/.ants/bin
+#                                    or on PATH)
 #           --nats-conf FILE         nats-server configuration (default: ~/.config/ants/leaf.conf)
 #           --config FILE            daemon config file (default: ~/.ants/config.toml)
 #           --managed-nats           no nats-server service: the daemon starts nats-server itself, from the
@@ -62,6 +63,24 @@ absolute() {
     /*) printf '%s\n' "$1" ;;
     *) printf '%s/%s\n' "$(pwd)" "$1" ;;
     esac
+}
+
+# The nats-server bundled with ants: beside the ants binary (--ants, else on PATH, its real path), else the one
+# `ants setup` downloads into ~/.ants/bin, else on PATH.
+find_nats_server() {
+    bin=${ants:-$(command -v ants)}
+    if [ -n "$bin" ]; then
+        bin=$(realpath "$bin" 2>/dev/null || printf '%s\n' "$bin")
+        if [ -x "$(dirname "$bin")/nats-server" ]; then
+            printf '%s\n' "$(dirname "$bin")/nats-server"
+            return
+        fi
+    fi
+    if [ -x "$HOME/.ants/bin/nats-server" ]; then
+        printf '%s\n' "$HOME/.ants/bin/nats-server"
+        return
+    fi
+    command -v nats-server
 }
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -109,7 +128,7 @@ while [ $# -gt 0 ]; do
     --webhook) webhook=1; shift ;;
     --webhook-config) webhook_config=$2; shift 2 ;;
     --out) out=$2; shift 2 ;;
-    -h | --help) sed -n '2,51p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown argument: $1" ;;
     esac
 done
@@ -119,7 +138,8 @@ if [ -n "$managed" ]; then
     [ -z "$nats_server" ] || die "--managed-nats takes no --nats-server; set command in [nats_server] of the daemon config"
     [ -n "$daemon" ] || die "--managed-nats needs the daemon service; drop --no-daemon"
 else
-    [ -n "$nats_server" ] || nats_server=$(command -v nats-server) || die "nats-server not found (give --nats-server)"
+    [ -n "$nats_server" ] || nats_server=$(find_nats_server) ||
+        die "nats-server not found beside ants, in ~/.ants/bin or on PATH (give --nats-server, or run ants setup)"
     nats_server=$(absolute "$nats_server")
     [ -x "$nats_server" ] || die "no nats-server binary at $nats_server"
     nats_conf=$(absolute "$nats_conf")

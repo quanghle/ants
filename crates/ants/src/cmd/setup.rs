@@ -22,10 +22,11 @@ use anyhow::{Context as _, Result, bail};
 
 use crate::cmd::harness::HarnessPick;
 use crate::completions::{self, Shell};
+use crate::natsd::bundled;
 use crate::service::{self, Action, Installed, Outcome, Service, Services, State, Values};
 use crate::{Connection, Nats, auth, doctor};
 
-/// How to get nats-server, when not found.
+/// How to get nats-server, when not found and not downloaded.
 const NATS_INSTALL: &str =
     "install it: https://docs.nats.io/running-a-nats-service/introduction/installation, or give --nats-server";
 
@@ -48,8 +49,8 @@ pub struct SetupArgs {
     /// Config file of the machine's ants (default: ~/.ants/config.toml).
     #[arg(long, env = "ANTS_CONFIG")]
     pub config: Option<PathBuf>,
-    /// nats-server binary for its service, or with --managed-nats the `command` of `[nats_server]` (default:
-    /// nats-server on PATH).
+    /// nats-server binary for its service, or with --managed-nats the `command` of `[nats_server]` (default: the one
+    /// beside the ants executable, in ~/.ants/bin or on PATH, else the pinned release downloaded into ~/.ants/bin).
     #[arg(long, value_name = "PATH")]
     pub nats_server: Option<PathBuf>,
     /// Have `ants daemon` run the local nats-server: the new config file gets a `[nats_server]` table naming its
@@ -128,7 +129,7 @@ pub async fn run(args: &SetupArgs, connection: &Connection<'_>) -> Result<()> {
     let values = || -> Result<Values> {
         let nats_server = match &args.nats_server {
             Some(path) => std::path::absolute(path)?,
-            None => on_path("nats-server").unwrap_or_default(),
+            None => bundled::find().unwrap_or_default(),
         };
         let path = std::env::var("PATH").unwrap_or_default();
         Ok(Values { ants: std::env::current_exe()?, nats_server, path })
@@ -324,12 +325,11 @@ async fn nats_service(
         );
         return false;
     }
+    let Some(nats_server) = nats_server_binary(report, args).await else {
+        return false;
+    };
     let values = match values() {
-        Ok(values) if values.nats_server.as_os_str().is_empty() => {
-            report.step(Mark::Fail, step, format!("nats-server not found on PATH ({NATS_INSTALL})"));
-            return false;
-        }
-        Ok(values) => values,
+        Ok(values) => Values { nats_server, ..values },
         Err(e) => {
             report.step(Mark::Fail, step, format!("{e:#}"));
             return false;
@@ -403,9 +403,7 @@ async fn managed_nats(
         );
         bail!("--managed-nats: a server listens on {listen} already");
     }
-    if args.nats_server.is_none() && on_path("nats-server").is_none() {
-        report.step(Mark::Fail, step, format!("nats-server not found on PATH, for the daemon to run ({NATS_INSTALL})"));
-    }
+    nats_server_binary(report, args).await;
     let how = if args.no_services {
         format!("--no-services; `ants daemon --config {config_shown}` runs nats-server -c {shown} ([nats_server])")
     } else {
@@ -413,6 +411,37 @@ async fn managed_nats(
     };
     report.step(Mark::Skip, step, how);
     Ok(Managed::New(conf.to_owned()))
+}
+
+/// The nats-server executable: --nats-server, else the one found ([`bundled::find`]), else the pinned release
+/// downloaded into ~/.ants/bin; none when the download failed.
+async fn nats_server_binary(report: &mut Report, args: &SetupArgs) -> Option<PathBuf> {
+    let step = "nats-server binary";
+    if let Some(path) = &args.nats_server {
+        return std::path::absolute(path).ok();
+    }
+    if let Some(found) = bundled::find() {
+        return Some(found);
+    }
+    let version = bundled::version();
+    let downloaded = async {
+        let dir = bundled::dir()?;
+        if report.dry_run {
+            return Ok(dir.join(bundled::EXE));
+        }
+        bundled::download(&dir).await
+    };
+    match downloaded.await {
+        Ok(exe) => {
+            report.step(Mark::Done, step, format!("nats-server {version} into {}", exe.display()));
+            Some(exe)
+        }
+        Err(e) => {
+            let how = format!("none found {}, and the download failed: {e:#} ({NATS_INSTALL})", bundled::LOOKED_UP);
+            report.step(Mark::Fail, step, how);
+            None
+        }
+    }
 }
 
 /// Report what [`Services::install`] did; returns whether it started the service.
@@ -768,11 +797,6 @@ async fn wait_listening(listen: &str) {
     while !listening(listen).await && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-}
-
-/// The first file named `name` on PATH.
-fn on_path(name: &str) -> Option<PathBuf> {
-    std::env::split_paths(&std::env::var_os("PATH")?).map(|dir| dir.join(name)).find(|p| p.is_file())
 }
 
 /// `text` as a quoted string, for nats-server configuration and TOML alike.

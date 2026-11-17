@@ -50,21 +50,21 @@ See [docs/architecture.md](docs/architecture.md) for the store/subject model, de
 
 ## Install a release
 
-Each `v*` tag publishes [release](https://github.com/quanghle/ants/releases) archives of the `ants` binary for Linux x86_64 and arm64 (glibc 2.43+), macOS arm64 and Windows x86_64, with `SHA256SUMS` and build provenance attestations:
+Each `v*` tag publishes [release](https://github.com/quanghle/ants/releases) archives of the `ants` binary for Linux x86_64 and arm64 (glibc 2.43+), macOS arm64 and Windows x86_64, with `SHA256SUMS` and build provenance attestations. Each archive also holds the [nats-server](https://github.com/nats-io/nats-server) release ants is tested with (pinned in [`crates/ants/nats-server.sha256`](crates/ants/nats-server.sha256)) and its license, `LICENSE-nats-server`:
 
 ```sh
 tag=v0.1.0 target=aarch64-apple-darwin   # or x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
 curl -fLO "https://github.com/quanghle/ants/releases/download/$tag/ants-$tag-$target.tar.gz"
 gh attestation verify "ants-$tag-$target.tar.gz" --repo quanghle/ants   # optional
 tar -xzf "ants-$tag-$target.tar.gz"
-install "ants-$tag-$target/ants" ~/.local/bin/
+install "ants-$tag-$target/ants" "ants-$tag-$target/nats-server" ~/.local/bin/
 ```
 
-Windows takes `ants-$tag-x86_64-pc-windows-msvc.zip`. Once installed, `ants update` replaces the binary with the latest release (`ants update --check` only tells whether one is out; see [docs/operations.md](docs/operations.md#updating-from-a-release)). A release needs the same nats-server and harness CLIs as a build from source (below). To cut a release, set `version` in `Cargo.toml`, merge, then push the tag `v<version>` (a suffix such as `-rc.1` makes a pre-release). The Release workflow reruns CI's checks unless CI already passed on that commit pushed to main; running it by hand only checks and builds. Release notes list the bd work closed and the requirements added since the previous release, from the committed `.bd/issues.jsonl`; `scripts/release-notes.sh v<version>` previews them.
+Windows takes `ants-$tag-x86_64-pc-windows-msvc.zip`. Once installed, `ants update` replaces the binary, and the nats-server beside it, with the latest release (`ants update --check` only tells whether one is out; see [docs/operations.md](docs/operations.md#updating-from-a-release)). A release needs the same harness CLIs as a build from source (below). To cut a release, set `version` in `Cargo.toml`, merge, then push the tag `v<version>` (a suffix such as `-rc.1` makes a pre-release). The Release workflow reruns CI's checks unless CI already passed on that commit pushed to main; running it by hand only checks and builds. Release notes list the bd work closed and the requirements added since the previous release, from the committed `.bd/issues.jsonl`; `scripts/release-notes.sh v<version>` previews them.
 
 ## Install from source
 
-Requirements: Rust 1.100+, [nats-server](https://github.com/nats-io/nats-server/releases) 2.15+, and at least one ACP harness CLI (`copilot`, `claude-agent-acp`, `codex-acp`, `agy`, or a custom command) on machines running `ants daemon`.
+Requirements: Rust 1.100+, [nats-server](https://github.com/nats-io/nats-server/releases) 2.15+, and at least one ACP harness CLI (`copilot`, `claude-agent-acp`, `codex-acp`, `agy`, or a custom command) on machines running `ants daemon`. Without a nats-server beside `ants`, in `~/.ants/bin` or on `PATH`, `ants setup` downloads the pinned release into `~/.ants/bin`, checked against its pinned SHA-256 digest.
 
 ```sh
 # From GitHub:

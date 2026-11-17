@@ -11,6 +11,7 @@ use ants_daemon::config::AutoUpdate;
 use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 
+use crate::natsd::bundled;
 use crate::service::{Action, Service, Services};
 
 /// The repository publishing the releases, `owner/name`.
@@ -200,7 +201,7 @@ fn expected_digest(sums: &str, name: &str) -> Result<Vec<u8>> {
 }
 
 /// Check `bytes`, the file `name`, against the digest `sums` lists for it.
-fn verify(bytes: &[u8], name: &str, sums: &str) -> Result<()> {
+pub(crate) fn verify(bytes: &[u8], name: &str, sums: &str) -> Result<()> {
     let expected = expected_digest(sums, name)?;
     let actual = ring::digest::digest(&ring::digest::SHA256, bytes);
     if actual.as_ref() != expected.as_slice() {
@@ -281,16 +282,27 @@ pub(crate) fn executable() -> Result<PathBuf> {
     Ok(exe)
 }
 
-/// A directory beside the executable for the update's files, removed when dropped.
-struct Scratch(PathBuf);
+/// A directory for the files of an update or download, removed when dropped.
+pub(crate) struct Scratch(PathBuf);
 
 impl Scratch {
+    /// A new, empty directory at `path`, anything there before removed.
+    pub(crate) fn create(path: PathBuf) -> std::io::Result<Self> {
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir(&path)?;
+        Ok(Self(path))
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
+
+    /// One beside the executable `exe`, for an update.
     fn beside(exe: &Path) -> Result<Self> {
         let dir = exe.parent().context("the executable's directory")?;
         let scratch = dir.join(format!(".ants-update-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&scratch);
-        match std::fs::create_dir(&scratch) {
-            Ok(()) => Ok(Self(scratch)),
+        match Self::create(scratch.clone()) {
+            Ok(scratch) => Ok(scratch),
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                 let command: Vec<String> =
                     std::iter::once(exe.display().to_string()).chain(std::env::args().skip(1)).collect();
@@ -309,8 +321,9 @@ impl Drop for Scratch {
 }
 
 /// Install `release` in place of `exe`: download its archive for this target, check it against `SHA256SUMS`, unpack
-/// it, run the binary with `--version`, then rename it over `exe`. Leaves `exe` as it was on any failure.
-pub(crate) async fn install(release: &Release, exe: &Path) -> Result<()> {
+/// it, run the binary with `--version`, then rename it over `exe`. Leaves `exe` as it was on any failure. The
+/// nats-server the archive holds goes beside `exe` first, unless one as new is there: returned when it went.
+pub(crate) async fn install(release: &Release, exe: &Path) -> Result<Option<NatsServer>> {
     let target = target().context("no release is built for this platform")?;
     let (archive, sums) = assets(release, target)?;
     let scratch = Scratch::beside(exe)?;
@@ -331,7 +344,62 @@ pub(crate) async fn install(release: &Release, exe: &Path) -> Result<()> {
     std::fs::rename(&binary, &staged).with_context(|| format!("{} holds no {}", archive.name, exe_name()))?;
     prepare(&staged, exe)?;
     smoke_test(&staged, release).await?;
-    replace(&staged, exe)
+    let nats_server = stage_nats_server(&unpacked, &scratch.0, exe).await?;
+    if let Some(nats_server) = &nats_server {
+        replace(&nats_server.staged, &nats_server.path)?;
+    }
+    replace(&staged, exe)?;
+    Ok(nats_server)
+}
+
+/// The nats-server of a release, put beside the ants executable.
+#[derive(Debug)]
+pub(crate) struct NatsServer {
+    staged: PathBuf,
+    /// Where it went.
+    pub(crate) path: PathBuf,
+    /// The version of the one it replaced, none when there was none.
+    was: Option<Version>,
+    version: Version,
+}
+
+impl fmt::Display for NatsServer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "nats-server {} at {}", self.version, self.path.display())?;
+        match &self.was {
+            Some(was) => write!(f, " (was {was})"),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Stage in `scratch` the nats-server of the release unpacked in `unpacked`, to go beside `exe`: none when the
+/// archive holds none, or the one there is as new or does not tell its version.
+async fn stage_nats_server(unpacked: &Path, scratch: &Path, exe: &Path) -> Result<Option<NatsServer>> {
+    let bundled = unpacked.join(bundled::EXE);
+    if !bundled.is_file() {
+        return Ok(None);
+    }
+    let path = exe.with_file_name(bundled::EXE);
+    let was = if path.exists() {
+        match bundled::installed_version(&path).await {
+            Ok(was) => Some(was),
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "keeping the nats-server beside ants");
+                return Ok(None);
+            }
+        }
+    } else {
+        None
+    };
+    let staged = scratch.join(bundled::EXE);
+    std::fs::rename(&bundled, &staged).with_context(|| format!("staging {}", staged.display()))?;
+    prepare(&staged, &path)?;
+    let version = bundled::installed_version(&staged).await.context("the release's nats-server failed its check")?;
+    if was.as_ref().is_some_and(|was| *was >= version) {
+        return Ok(None);
+    }
+    Ok(Some(NatsServer { staged, path, was, version }))
 }
 
 fn exe_name() -> &'static str {
@@ -340,7 +408,7 @@ fn exe_name() -> &'static str {
 
 /// Unpack the archive `packed` into `into` with the system's `tar` (bsdtar on Windows, which reads zip too): the
 /// directory holding its files.
-async fn unpack(packed: &Path, into: &Path) -> Result<PathBuf> {
+pub(crate) async fn unpack(packed: &Path, into: &Path) -> Result<PathBuf> {
     let output = tokio::process::Command::new("tar")
         .arg(if cfg!(windows) { "-xf" } else { "-xzf" })
         .arg(packed)
@@ -363,7 +431,7 @@ async fn unpack(packed: &Path, into: &Path) -> Result<PathBuf> {
 }
 
 /// Give `staged` the permissions of `exe`, executable, and flush it to disk.
-fn prepare(staged: &Path, exe: &Path) -> Result<()> {
+pub(crate) fn prepare(staged: &Path, exe: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -396,10 +464,10 @@ async fn smoke_test(staged: &Path, release: &Release) -> Result<()> {
     Ok(())
 }
 
-/// Rename `staged` over `exe` in one step. Windows does not replace a running executable, so it is first renamed
-/// aside to `ants.exe.old`, which [`remove_old`] deletes on a later run.
+/// Rename `staged` over `exe` in one step. Windows does not replace a running executable, so one there is first
+/// renamed aside to `<exe>.old`, which [`remove_old`] deletes on a later run.
 fn replace(staged: &Path, exe: &Path) -> Result<()> {
-    if cfg!(windows) {
+    if cfg!(windows) && exe.exists() {
         let old = old_path(exe);
         match std::fs::remove_file(&old) {
             Ok(()) => {}
@@ -422,11 +490,12 @@ fn old_path(exe: &Path) -> PathBuf {
     PathBuf::from(old)
 }
 
-/// Delete the executable an earlier update renamed aside, once nothing runs it.
+/// Delete the executables an earlier update renamed aside, ants and nats-server, once nothing runs them.
 #[cfg(windows)]
 pub(crate) fn remove_old() {
     if let Ok(exe) = std::env::current_exe() {
         let _ = std::fs::remove_file(old_path(&exe));
+        let _ = std::fs::remove_file(old_path(&exe.with_file_name(bundled::EXE)));
     }
 }
 
@@ -485,8 +554,11 @@ async fn poll(mode: AutoUpdate, upgrade_check: Duration) -> Result<bool> {
         }
         AutoUpdate::Install => {
             let exe = executable()?;
-            install(&release, &exe).await?;
+            let nats_server = install(&release, &exe).await?;
             tracing::info!(executable = %exe.display(), "installed ants {version} (was {running})");
+            if let Some(nats_server) = nats_server {
+                tracing::info!("installed {nats_server}");
+            }
             if upgrade_check.is_zero() {
                 tracing::warn!("--upgrade-check is 0: the daemon runs ants {running} until restarted");
             }
@@ -521,17 +593,22 @@ pub(crate) async fn run(args: UpdateArgs) -> Result<()> {
         return Ok(());
     }
     let exe = executable()?;
-    install(&release, &exe).await?;
+    let nats_server = install(&release, &exe).await?;
     println!("installed ants {version} at {} (was {running})", exe.display());
-    for line in services_note(&mut Services::local()) {
+    if let Some(nats_server) = &nats_server {
+        println!("installed {nats_server}");
+    }
+    let nats_server = nats_server.map(|n| n.path);
+    for line in services_note(&mut Services::local(), nats_server.as_deref()) {
         println!("{line}");
     }
     Ok(())
 }
 
 /// What becomes of the services running ants: each installed one restarts onto the new executable through its upgrade
-/// check, or, with the check off, by hand with the command given.
-fn services_note(services: &mut Services) -> Vec<String> {
+/// check, or, with the check off, by hand with the command given; and of the nats-server service running
+/// `nats_server`, the nats-server just installed, which runs the old one until restarted.
+fn services_note(services: &mut Services, nats_server: Option<&Path>) -> Vec<String> {
     let mut lines = vec![
         "services running ants (ants daemon, webhook serve, bridge, channel serve, signer) restart onto it within \
          their --upgrade-check interval (30s by default); restart any started by hand or with --upgrade-check 0"
@@ -544,6 +621,17 @@ fn services_note(services: &mut Services) -> Vec<String> {
         if off && let Some(restart) = services.by_hand(service, Action::Restart) {
             lines.push(format!("an installed service checks for no upgrade; restart it: {restart}"));
         }
+    }
+    let runs = |unit: &crate::service::Unit| {
+        unit.args
+            .first()
+            .zip(nats_server)
+            .is_some_and(|(program, new)| crate::doctor::same_file(Path::new(program), new))
+    };
+    if services.unit(Service::Nats).is_some_and(|unit| runs(&unit))
+        && let Some(restart) = services.by_hand(Service::Nats, Action::Restart)
+    {
+        lines.push(format!("the nats-server service runs the old nats-server until restarted: {restart}"));
     }
     lines
 }
@@ -692,6 +780,43 @@ mod tests {
                 assert!(refused.contains("is not writable") && refused.contains("sudo"), "{refused}");
             }
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_bundled_nats_server_goes_beside_ants_unless_one_as_new_is_there() {
+        let dir = ants_test_support::scratch_dir("update-nats-server");
+        let (unpacked, scratch, bin) = (dir.join("unpacked"), dir.join("scratch"), dir.join("bin"));
+        for d in [&unpacked, &scratch, &bin] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let exe = bin.join("ants");
+        let fake = |path: &Path, version: &str| {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::write(path, format!("#!/bin/sh\necho 'nats-server: {version}'\n")).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let staged = async || {
+            fake(&unpacked.join("nats-server"), "v2.15.3");
+            stage_nats_server(&unpacked, &scratch, &exe).await.unwrap()
+        };
+
+        let new = staged().await.unwrap();
+        assert_eq!(
+            (new.path.clone(), new.was.clone(), new.version.to_string()),
+            (bin.join("nats-server"), None, "v2.15.3".into())
+        );
+        fake(&bin.join("nats-server"), "v2.14.9");
+        assert_eq!(staged().await.unwrap().was, Some(v("v2.14.9")), "an older one is replaced");
+        fake(&bin.join("nats-server"), "v2.15.3");
+        assert!(staged().await.is_none(), "one as new stays");
+        fake(&bin.join("nats-server"), "v2.16.0");
+        assert!(staged().await.is_none(), "a newer one stays");
+        std::fs::write(bin.join("nats-server"), "#!/bin/sh\nexit 1\n").unwrap();
+        assert!(staged().await.is_none(), "one not telling its version stays");
+        std::fs::remove_file(unpacked.join("nats-server")).unwrap();
+        assert!(stage_nats_server(&unpacked, &scratch, &exe).await.unwrap().is_none(), "an archive without one");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

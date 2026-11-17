@@ -30,8 +30,8 @@ fn optional_duration<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Du
 /// finished: one process, running an existing nats-server configuration (the machine's leaf node, or the hub).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NatsServer {
-    /// The nats-server executable: a path, resolved like the file's other paths, or a bare name looked up on PATH
-    /// (default `nats-server`).
+    /// The nats-server executable: a path, resolved like the file's other paths, or a bare name looked up on PATH;
+    /// the default `nats-server` is looked up beside the ants executable, then in `~/.ants/bin`, then on PATH.
     pub command: PathBuf,
     /// Its configuration file, run as `nats-server -c FILE`, resolved like the file's other paths.
     pub config: PathBuf,

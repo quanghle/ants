@@ -1,0 +1,8 @@
+# The nats-server release bundled with ants: packed into each release archive beside ants (.github/workflows/release.yml),
+# downloaded by `ants setup` when none is found (crates/ants/src/natsd/bundled.rs), and run by CI's tests. The SHA-256
+# digests, from the release's SHA256SUMS, of https://github.com/nats-io/nats-server/releases/download/VERSION/ARCHIVE.
+a7e25e32247024449e32dcb7129ff416dca3a2cd569fe3c205603ecf8fe5f810  nats-server-v2.15.3-darwin-arm64.tar.gz
+d274cfb9d6e26ffbb04007bfe744d46a8b4f4e5d218741f8ee89aa687c658bc1  nats-server-v2.15.3-darwin-amd64.tar.gz
+32e18c1e78d7ef4f86e483070eef3abb2647c3d4d67e29668077c7ad81da0797  nats-server-v2.15.3-linux-amd64.tar.gz
+4a2088b3ec7103bf79d6484f55e80ab5d10204811d9ae6f7a33e8544d98dd45d  nats-server-v2.15.3-linux-arm64.tar.gz
+b202c46689a56b17e88939b6c53a25294021b000b9c7225209bcb1bbda347bad  nats-server-v2.15.3-windows-amd64.zip

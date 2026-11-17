@@ -273,7 +273,7 @@ impl Managed {
 /// `nats-server -c CONF`, in a process group of its own so Ctrl-C at a terminal reaches the daemon alone, which stops
 /// it once the ants are drained.
 fn spawn(settings: &NatsServer) -> Result<Child> {
-    let mut command = Command::new(&settings.command);
+    let mut command = Command::new(super::bundled::resolve(&settings.command));
     command.arg("-c").arg(&settings.config).stdin(Stdio::null()).process_group(0).kill_on_drop(true);
     #[cfg(target_os = "linux")]
     {
@@ -294,6 +294,10 @@ fn spawn(settings: &NatsServer) -> Result<Child> {
         }
     }
     command.spawn().map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound if settings.command == Path::new(super::bundled::DEFAULT) => anyhow!(
+            "nats-server not found {}: `ants setup` downloads it, or set [nats_server] command to its path",
+            super::bundled::LOOKED_UP
+        ),
         std::io::ErrorKind::NotFound => anyhow!(
             "{} not found: install nats-server, or set [nats_server] command to its path",
             settings.command.display()

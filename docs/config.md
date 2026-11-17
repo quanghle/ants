@@ -44,7 +44,7 @@ remote = false                             # refuse every order (default true: t
 
 [nats_server]                              # ants daemon starts and supervises the local nats-server (see Managed nats-server)
 config = "~/.config/ants/leaf.conf"        # its configuration, run as nats-server -c FILE; required
-command = "nats-server"                    # default; a path, or a bare name looked up on PATH
+command = "nats-server"                    # default, found beside ants, in ~/.ants/bin or on PATH; a path, or a bare name looked up on PATH
 ready_timeout = "30s"                      # default; how long each start may take to accept connections
 
 [[ant]]
@@ -133,7 +133,7 @@ With a `[nats_server]` table, `ants daemon` serving the whole file starts one lo
 | Key | Default | Meaning |
 |---|---|---|
 | `config` | required | The server's existing configuration (`leaf.conf` of `ants leaf config`, or `nats.conf` of `ants setup`), resolved like the file's other paths. Its own `store_dir` holds the JetStream data, kept across restarts. |
-| `command` | `nats-server` | The executable: a path, resolved like the file's other paths, or a bare name looked up on the daemon's `PATH` (the `PATH` its service unit sets). |
+| `command` | `nats-server` | The executable: a path, resolved like the file's other paths, or a bare name looked up on the daemon's `PATH` (the `PATH` its service unit sets). The default is looked up first beside the `ants` executable (its real path), then in `~/.ants/bin`, then on `PATH` ([operations.md](operations.md#bundled-nats-server)). |
 | `ready_timeout` | `30s` | How long each start may take until the server accepts connections; above `0`. |
 
 - The daemon checks readiness at the URL its ants connect to: the file's top-level `nats`, else its `--nats` URL (`ANTS_NATS_URL`, default `nats://127.0.0.1:4222`); that must be a `nats://` or `tls://` URL (or one without a scheme) on `localhost`, `127.0.0.0/8` or `::1`; any other fails `ants daemon` at start. The server must listen there and send its `INFO` line first: a listener with TLS `handshake_first` never reports ready.

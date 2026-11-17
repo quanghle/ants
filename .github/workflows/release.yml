@@ -1,7 +1,8 @@
 name: Release
 
 # A tag vX.Y.Z (X.Y.Z the workspace version in Cargo.toml) builds the `ants` binary for each target and publishes a
-# GitHub Release with the archives, SHA256SUMS and build provenance attestations, once the checks of ci.yml pass. They
+# GitHub Release with the archives, SHA256SUMS and build provenance attestations, once the checks of ci.yml pass. Each
+# archive holds the nats-server pinned in crates/ants/nats-server.sha256 beside ants, with its license. They
 # rerun here unless CI already passed on the same commit pushed to main. A tag with a pre-release suffix (v0.2.0-rc.1)
 # makes a pre-release. The notes come from bd (scripts/release-notes.sh): the
 # work closed and requirements added since the previous release, per the committed .bd/issues.jsonl. Run by hand
@@ -91,11 +92,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Built on Ubuntu 26.04: the binaries need glibc 2.43 or later.
-          - { target: x86_64-unknown-linux-gnu, os: ubuntu-26.04 }
-          - { target: aarch64-unknown-linux-gnu, os: ubuntu-26.04-arm }
-          - { target: aarch64-apple-darwin, os: macos-26 }
-          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+          # Built on Ubuntu 26.04: the binaries need glibc 2.43 or later. `nats` is the platform of the nats-server
+          # packed with ants, as its releases name it.
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-26.04, nats: linux-amd64 }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-26.04-arm, nats: linux-arm64 }
+          - { target: aarch64-apple-darwin, os: macos-26, nats: darwin-arm64 }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest, nats: windows-amd64 }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -115,13 +117,16 @@ jobs:
         env:
           NAME: ${{ needs.version.outputs.name }}
           TARGET: ${{ matrix.target }}
+          NATS: ${{ matrix.nats }}
         run: |
-          exe=ants
-          [ "$RUNNER_OS" != Windows ] || exe=ants.exe
+          exe=ants nats=nats-server
+          [ "$RUNNER_OS" != Windows ] || exe=ants.exe nats=nats-server.exe
           "target/$TARGET/release/$exe" --version
           dir=ants-$NAME-$TARGET
           mkdir -p "dist/$dir"
           cp "target/$TARGET/release/$exe" LICENSE README.md "dist/$dir/"
+          scripts/nats-server.sh "$NATS" "dist/$dir"
+          "dist/$dir/$nats" --version
           cd dist
           if [ "$RUNNER_OS" = Windows ]; then
             7z a -tzip -bso0 "$dir.zip" "$dir"
