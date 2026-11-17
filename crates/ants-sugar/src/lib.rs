@@ -16,6 +16,7 @@ pub mod cache;
 pub mod identity;
 pub mod items;
 pub mod log;
+pub mod memory;
 pub mod sanitize;
 pub mod store;
 pub mod thread;

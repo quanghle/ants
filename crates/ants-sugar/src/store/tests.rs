@@ -170,17 +170,20 @@ async fn an_item_of_a_known_id_is_created_once_then_changed_from_the_revision_ex
 }
 
 #[tokio::test]
-async fn items_are_listed_by_a_text_value_or_its_absence() {
+async fn items_are_listed_by_a_value_or_its_absence() {
     let log = MemoryLog::default();
     let mut store = open(&log, &SugarId::new(), None).await;
     let one = store.create("note", values(json!({ "thread": "t1" })), "t").await.unwrap();
     let two = store.create("note", values(json!({ "thread": "t2", "done": true })), "t").await.unwrap();
     store.create("other", values(json!({ "thread": "t1" })), "t").await.unwrap();
     let ids = |items: Vec<Item>| items.into_iter().map(|item| item.id).collect::<Vec<_>>();
-    assert_eq!(ids(store.list_by("note", "thread", Some("t1"), 10).unwrap()), std::slice::from_ref(&one.id));
-    assert_eq!(ids(store.list_by("note", "done", None, 10).unwrap()), [one.id]);
-    assert_eq!(ids(store.list_by("note", "thread\"", Some("t2"), 10).unwrap()), [two.id]);
-    assert_eq!(store.list_by("note", "thread", Some("t3"), 10).unwrap(), []);
+    let list = |name, value: Value| store.list_by("note", name, Some(&value), 10).unwrap();
+    assert_eq!(ids(list("thread", json!("t1"))), std::slice::from_ref(&one.id));
+    assert_eq!(ids(store.list_by("note", "done", None, 10).unwrap()), std::slice::from_ref(&one.id));
+    assert_eq!(ids(list("thread\"", json!("t2"))), std::slice::from_ref(&two.id));
+    assert_eq!(ids(list("done", json!(true))), [two.id]);
+    assert_eq!(list("done", json!("true")), []);
+    assert_eq!(list("thread", json!("t3")), []);
 }
 
 #[tokio::test]
@@ -290,4 +293,40 @@ async fn sugar_reaches_an_ant_s_items_through_the_stores_it_is_given() {
     assert_eq!(items.get(&item.id).await.unwrap(), Some(item.clone()));
     assert_eq!(items.search("one", None, 5).await.unwrap()[0].item, item);
     assert!(sugar.items(&"dev-b".parse().unwrap()).await.is_err());
+}
+
+#[tokio::test]
+async fn a_write_changes_several_items_in_one_event_all_or_none() {
+    let (log, sugar) = (MemoryLog::default(), SugarId::new());
+    let mut store = open(&log, &sugar, None).await;
+    let one = store.create("note", note("one"), "t").await.unwrap();
+    let two = ItemId::new();
+    let link = values(json!({ "next": two }));
+    let writes = [
+        Write::Create { id: two.clone(), kind: "note".into(), values: note("two") },
+        Write::Change { id: one.id.clone(), values: link.clone(), expected: Some(1) },
+    ];
+    let written = store.write(&writes, "t").await.unwrap();
+    assert_eq!((&written[0].id, written[1].revision, log.last_sequence(&sugar).await.unwrap()), (&two, 2, 2));
+    let stored = log.read_after(&sugar, 1, 1).await.unwrap().remove(0).event().unwrap();
+    assert_eq!((stored.kind.as_str(), stored.data["changes"].as_array().unwrap().len()), (ITEMS_EVENT, 2));
+    assert_eq!(store.list_by("note", "next", Some(&json!(two)), 10).unwrap(), [written[1].clone()]);
+    assert_eq!(store.history(&one.id).unwrap()[1].sequence, store.history(&two).unwrap()[0].sequence);
+
+    let stale = [
+        Write::Create { id: ItemId::new(), kind: "note".into(), values: note("three") },
+        Write::Change { id: one.id.clone(), values: note("stale"), expected: Some(1) },
+    ];
+    let refused = store.write(&stale, "t").await.unwrap_err();
+    assert!(matches!(refused, StoreError::Conflict { expected: 1, .. }), "{refused:?}");
+    assert_eq!((titles(&store), log.last_sequence(&sugar).await.unwrap()), (vec!["one".into(), "two".into()], 2));
+
+    // A batch of which one change does not follow on its item changes nothing, for every reader.
+    let mut other = ant_log(&log, &sugar);
+    let three = Change::create("note", note("three"), "t");
+    let skipping =
+        Change { revision: 5, before: Some(Values::new()), ..Change::of(&written[1], note("x"), "t").unwrap() };
+    other.append(ITEMS_EVENT, json!({ "changes": [three, skipping] })).await.unwrap();
+    store.sync().await.unwrap();
+    assert_eq!(titles(&store), ["one", "two"]);
 }

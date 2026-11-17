@@ -15,6 +15,9 @@ use uuid::Uuid;
 
 /// The kind of the log events changing an item, whose data is a [`Change`].
 pub const ITEM_EVENT: &str = "item";
+/// The kind of the log events changing several items at once, whose data is a [`Batch`]: all its changes apply, or,
+/// when one does not follow on its item, none.
+pub const ITEMS_EVENT: &str = "items";
 /// The value of an item searched first ([`crate::cache::Cache::search`]).
 pub const TITLE: &str = "title";
 /// The value of an item searched after its title.
@@ -195,6 +198,12 @@ impl Change {
         item.updated = stamp;
         Ok(item)
     }
+}
+
+/// The changes of several items made at once, the data of an [`ITEMS_EVENT`]: each of another item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Batch {
+    pub changes: Vec<Change>,
 }
 
 /// A change of an item, as its event in the log has it.

@@ -10,15 +10,16 @@ use std::path::{Path, PathBuf};
 use ants_proto::SugarId;
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use serde_json::Value;
 
-use crate::items::{BODY, Change, ITEM_EVENT, Item, ItemId, Revision, TITLE, state_at};
+use crate::items::{BODY, Batch, Change, ITEM_EVENT, ITEMS_EVENT, Item, ItemId, Revision, TITLE, state_at};
 use crate::log::{Checked, Position, SUGAR_DIR};
 
 /// The file of [`SUGAR_DIR`] holding the cache.
 pub const CACHE_FILE: &str = "cache.db";
 
 /// The schema's version, in `PRAGMA user_version`: a cache of another is built again.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 /// SQLite's page cache, in KiB: the cache is small and read little.
 const PAGE_CACHE_KIB: i64 = 512;
 /// The words of a search looked for, at most.
@@ -36,10 +37,11 @@ CREATE TABLE items (
 );
 CREATE INDEX items_by_kind ON items (kind, updated_at);
 CREATE TABLE changes (
-    sequence INTEGER PRIMARY KEY,
+    sequence INTEGER NOT NULL,
     item TEXT NOT NULL,
-    entry TEXT NOT NULL
-);
+    entry TEXT NOT NULL,
+    PRIMARY KEY (sequence, item)
+) WITHOUT ROWID;
 CREATE INDEX changes_by_item ON changes (item, sequence);
 CREATE VIRTUAL TABLE items_text USING fts5 (
     title, body, content = '', contentless_delete = 1, tokenize = 'porter unicode61 remove_diacritics 2'
@@ -150,21 +152,24 @@ impl Cache {
     }
 
     /// Apply `events`, read from the log in order, and record that the log was read up to `position`, at once. An
-    /// event that is no item's change, or does not follow on the item's last ([`Change::apply`]), changes nothing.
+    /// event that is no item's change, or does not follow on the item's last ([`Change::apply`]), changes nothing; nor
+    /// does a batch ([`ITEMS_EVENT`]) of which one change does not, or which changes an item twice.
     pub fn apply(&mut self, events: &[Checked], position: Option<&Position>) -> Result<(), CacheError> {
         let tx = self.db.transaction()?;
         for checked in events {
-            if checked.event.kind == ITEM_EVENT
-                && let Ok(change) = serde_json::from_value::<Change>(checked.event.data.clone())
-            {
-                let revision = Revision {
-                    sequence: checked.stored.sequence,
-                    at: checked.event.at,
-                    machine: checked.event.machine.clone(),
-                    change,
-                };
-                apply(&tx, revision)?;
-            }
+            let changes = match checked.event.kind.as_str() {
+                ITEM_EVENT => serde_json::from_value::<Change>(checked.event.data.clone()).map(|change| vec![change]),
+                ITEMS_EVENT => serde_json::from_value::<Batch>(checked.event.data.clone()).map(|batch| batch.changes),
+                _ => continue,
+            };
+            let Ok(changes) = changes else { continue };
+            let revisions = changes.into_iter().map(|change| Revision {
+                sequence: checked.stored.sequence,
+                at: checked.event.at,
+                machine: checked.event.machine.clone(),
+                change,
+            });
+            apply(&tx, revisions.collect())?;
         }
         set_meta(&tx, "position", position.map(serde_json::to_string).transpose()?.as_deref())?;
         tx.commit()?;
@@ -182,13 +187,21 @@ impl Cache {
         rows.map(|item| Ok(serde_json::from_str(&item?)?)).collect()
     }
 
-    /// The items of `kind` whose value `name` is the text `value`, or which have no value `name` when `value` is none,
-    /// the last changed first, up to `limit`.
-    pub fn list_by(&self, kind: &str, name: &str, value: Option<&str>, limit: usize) -> Result<Vec<Item>, CacheError> {
+    /// The items of `kind` whose value `name` is `value`, or which have no value `name` when `value` is none, the last
+    /// changed first, up to `limit`.
+    pub fn list_by(
+        &self,
+        kind: &str,
+        name: &str,
+        value: Option<&Value>,
+        limit: usize,
+    ) -> Result<Vec<Item>, CacheError> {
         let path = format!("$.values.\"{}\"", name.replace('"', ""));
         let mut query = self.db.prepare(
-            "SELECT item FROM items WHERE kind = ?1 AND json_extract(item, ?2) IS ?3 ORDER BY updated_at DESC LIMIT ?4",
+            "SELECT item FROM items WHERE kind = ?1 AND json_extract(item, ?2) IS json_extract(?3, '$')
+             ORDER BY updated_at DESC LIMIT ?4",
         )?;
+        let value = value.map(Value::to_string);
         let rows = query.query_map(params![kind, path, value, limit_of(limit)], |row| row.get::<_, String>(0))?;
         rows.map(|item| Ok(serde_json::from_str(&item?)?)).collect()
     }
@@ -252,17 +265,31 @@ fn get(db: &Connection, id: &ItemId) -> Result<Option<Item>, CacheError> {
     Ok(item.map(|item| serde_json::from_str(&item)).transpose()?)
 }
 
-/// Apply `revision`'s change to its item, keeping it in the item's history; nothing when it does not follow on the
-/// item's last change.
-fn apply(tx: &Transaction<'_>, revision: Revision) -> Result<(), CacheError> {
-    let current = get(tx, &revision.change.id)?;
-    let Ok(item) = revision.change.apply(current.as_ref(), revision.stamp()) else { return Ok(()) };
+/// Apply the changes of `revisions`, of one event, to their items, keeping them in the items' histories: none when one
+/// does not follow on its item's last change or two change the same item.
+fn apply(tx: &Transaction<'_>, revisions: Vec<Revision>) -> Result<(), CacheError> {
+    let mut items = Vec::with_capacity(revisions.len());
+    for revision in &revisions {
+        if revisions.iter().filter(|other| other.change.id == revision.change.id).count() > 1 {
+            return Ok(());
+        }
+        let current = get(tx, &revision.change.id)?;
+        let Ok(item) = revision.change.apply(current.as_ref(), revision.stamp()) else { return Ok(()) };
+        items.push(item);
+    }
+    for (item, revision) in items.into_iter().zip(revisions) {
+        put(tx, &item, &revision)?;
+    }
+    Ok(())
+}
+
+fn put(tx: &Transaction<'_>, item: &Item, revision: &Revision) -> Result<(), CacheError> {
     let updated_at = item.updated.at.to_rfc3339_opts(SecondsFormat::Micros, true);
     let rowid: i64 = tx.query_row(
         "INSERT INTO items (id, kind, revision, updated_at, item) VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT (id) DO UPDATE SET revision = ?3, updated_at = ?4, item = ?5
          RETURNING rowid",
-        params![item.id.as_str(), item.kind, sequence_of(item.revision)?, updated_at, serde_json::to_string(&item)?],
+        params![item.id.as_str(), item.kind, sequence_of(item.revision)?, updated_at, serde_json::to_string(item)?],
         |row| row.get(0),
     )?;
     tx.execute("DELETE FROM items_text WHERE rowid = ?1", [rowid])?;
@@ -272,7 +299,7 @@ fn apply(tx: &Transaction<'_>, revision: Revision) -> Result<(), CacheError> {
     )?;
     tx.execute(
         "INSERT INTO changes (sequence, item, entry) VALUES (?1, ?2, ?3)",
-        params![sequence_of(revision.sequence)?, item.id.as_str(), serde_json::to_string(&revision)?],
+        params![sequence_of(revision.sequence)?, item.id.as_str(), serde_json::to_string(revision)?],
     )?;
     Ok(())
 }

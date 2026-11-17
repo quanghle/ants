@@ -5,6 +5,7 @@ use ants_proto::{SugarId, UserId};
 
 use super::*;
 use crate::cache::Cache;
+use crate::items::{BODY, TITLE};
 use crate::log::{AccountVerifier, AntLog, MemoryLog, NoRevocations, Unsigned};
 use crate::store::{Store, Stores};
 
@@ -129,6 +130,10 @@ async fn a_handoff_keeps_the_work_and_an_episode_memory_written_by_the_call_s_co
     assert_eq!(episode.text(TITLE), "Handoff of thread t1: wrote the parser");
     assert!(episode.text(BODY).contains("In flight:\n- the lexer\n"), "{}", episode.text(BODY));
     assert_eq!((&episode.values[WRITER], &episode.values["status"]), (writer, &json!("active")));
+    let memory = crate::memory::Memory::of(&episode).unwrap();
+    assert_eq!((memory.scope.to_string(), memory.importance, memory.core), ("self".into(), 3, false));
+    let (episode, handoff) = (items.history(&episode.id).await.unwrap(), items.history(&item.id).await.unwrap());
+    assert_eq!(episode[0].sequence, handoff[0].sequence, "one event writes both");
 
     let empty = handed_over(&sugar, "t1", json!({"done": [" "]})).await;
     assert_eq!(empty.json["error"], "empty");

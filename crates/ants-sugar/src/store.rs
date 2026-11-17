@@ -6,9 +6,10 @@ use std::sync::Arc;
 use ants_proto::provider::BoxFuture;
 use ants_proto::{SugarId, UserId};
 use chrono::{DateTime, Utc};
+use serde_json::Value;
 
 use crate::cache::{Cache, CacheError, Hit};
-use crate::items::{Change, ITEM_EVENT, Item, ItemId, Revision, Values};
+use crate::items::{Batch, Change, ITEM_EVENT, ITEMS_EVENT, Item, ItemId, Revision, Values};
 use crate::log::{APPEND_TRIES, AntLog, Checked, EventLog, LogError, Position, Signer, Verifier};
 
 /// Why a store did not answer.
@@ -84,8 +85,8 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
 
     /// Create an item of `kind` with `values`, for `by` ([`crate::items::Stamp::by`]).
     pub async fn create(&mut self, kind: &str, values: Values, by: &str) -> Result<Item, StoreError> {
-        let change = Change::create(kind, values, by);
-        self.commit(|_| Ok(Ok(change.clone()))).await
+        let write = Write::Create { id: ItemId::new(), kind: kind.to_owned(), values };
+        Ok(self.write(std::slice::from_ref(&write), by).await?.remove(0))
     }
 
     /// The item of `kind`, created with `values` for `by` when there is none, with whether it was: for kinds of which
@@ -94,10 +95,11 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
         let change = Change::create(kind, values, by);
         let item = self
             .commit(|cache| match cache.list(kind, 1)?.pop() {
-                Some(item) => Ok(Err(item)),
-                None => Ok(Ok(change.clone())),
+                Some(item) => Ok(vec![Err(item)]),
+                None => Ok(vec![Ok(change.clone())]),
             })
-            .await?;
+            .await?
+            .remove(0);
         let created = item.id == change.id;
         Ok((item, created))
     }
@@ -111,16 +113,8 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
         expected: Option<u64>,
         by: &str,
     ) -> Result<Item, StoreError> {
-        self.commit(|cache| {
-            let current = cache.get(id)?.ok_or_else(|| StoreError::NotFound(id.clone()))?;
-            if let Some(expected) = expected
-                && expected != current.revision
-            {
-                return Err(StoreError::Conflict { expected, current: Box::new(current) });
-            }
-            Ok(Change::of(&current, values.clone(), by).ok_or(current))
-        })
-        .await
+        let write = Write::Change { id: id.clone(), values, expected };
+        Ok(self.write(std::slice::from_ref(&write), by).await?.remove(0))
     }
 
     /// Set `values` of item `id`, creating it of `kind` with them when missing, for `by`: refused when `expected` is
@@ -134,17 +128,20 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
         expected: Option<u64>,
         by: &str,
     ) -> Result<Item, StoreError> {
-        self.commit(|cache| match cache.get(id)? {
-            None if expected.unwrap_or_default() == 0 => {
-                Ok(Ok(Change { id: id.clone(), ..Change::create(kind, values.clone(), by) }))
+        let write = Write::Put { id: id.clone(), kind: kind.to_owned(), values, expected };
+        Ok(self.write(std::slice::from_ref(&write), by).await?.remove(0))
+    }
+
+    /// Make `writes`, each of another item, at once, for `by`: one event of the log, so all of them apply or none
+    /// does. Refused as a whole when one is ([`Store::change`]); a change changing nothing appends nothing. Returns
+    /// the items as the writes leave them, in order.
+    pub async fn write(&mut self, writes: &[Write], by: &str) -> Result<Vec<Item>, StoreError> {
+        for (i, write) in writes.iter().enumerate() {
+            if writes[..i].iter().any(|other| other.id() == write.id()) {
+                return Err(StoreError::Unavailable(format!("item {} written twice at once", write.id())));
             }
-            None => Err(StoreError::NotFound(id.clone())),
-            Some(current) if expected.is_some_and(|expected| expected != current.revision) => {
-                Err(StoreError::Conflict { expected: expected.unwrap_or_default(), current: Box::new(current) })
-            }
-            Some(current) => Ok(Change::of(&current, values.clone(), by).ok_or(current)),
-        })
-        .await
+        }
+        self.commit(|cache| writes.iter().map(|write| write.decide(cache, by)).collect()).await
     }
 
     pub fn get(&self, id: &ItemId) -> Result<Option<Item>, StoreError> {
@@ -156,9 +153,15 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
         Ok(self.cache.list(kind, limit)?)
     }
 
-    /// The items of `kind` whose value `name` is the text `value`, or which have no value `name` when `value` is none,
-    /// the last changed first, up to `limit`.
-    pub fn list_by(&self, kind: &str, name: &str, value: Option<&str>, limit: usize) -> Result<Vec<Item>, StoreError> {
+    /// The items of `kind` whose value `name` is `value`, or which have no value `name` when `value` is none, the last
+    /// changed first, up to `limit`.
+    pub fn list_by(
+        &self,
+        kind: &str,
+        name: &str,
+        value: Option<&Value>,
+        limit: usize,
+    ) -> Result<Vec<Item>, StoreError> {
         Ok(self.cache.list_by(kind, name, value, limit)?)
     }
 
@@ -177,25 +180,24 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
         Ok(self.cache.at(id, at)?)
     }
 
-    /// Append the change `next` decides on the cache, or return the item it leaves unchanged; decided again on what
-    /// another writer appended first.
+    /// Append the changes `next` decides on the cache, each a change or the item it leaves unchanged, as one event,
+    /// and return the items they leave; decided again on what another writer appended first.
     async fn commit(
         &mut self,
-        mut next: impl FnMut(&Cache) -> Result<Result<Change, Item>, StoreError>,
-    ) -> Result<Item, StoreError> {
+        mut next: impl FnMut(&Cache) -> Result<Vec<Result<Change, Item>>, StoreError>,
+    ) -> Result<Vec<Item>, StoreError> {
         for _ in 0..APPEND_TRIES {
-            let change = match next(&self.cache)? {
-                Ok(change) => change,
-                Err(unchanged) => return Ok(unchanged),
+            let decided = next(&self.cache)?;
+            let changes: Vec<&Change> = decided.iter().filter_map(|decided| decided.as_ref().ok()).collect();
+            let (kind, data) = match changes[..] {
+                [] => return Ok(decided.into_iter().filter_map(Result::err).collect()),
+                [change] => (ITEM_EVENT, serde_json::to_value(change)),
+                _ => (ITEMS_EVENT, serde_json::to_value(Batch { changes: changes.into_iter().cloned().collect() })),
             };
-            let data = serde_json::to_value(&change).map_err(CacheError::from)?;
-            match self.log.try_append(ITEM_EVENT, data).await {
+            match self.log.try_append(kind, data.map_err(CacheError::from)?).await {
                 Ok(Ok(appended)) => {
                     self.apply(std::slice::from_ref(&appended))?;
-                    let item = self.cache.get(&change.id)?.filter(|item| item.revision == change.revision);
-                    let unapplied =
-                        || StoreError::Unavailable(format!("the change of item {} did not apply", change.id));
-                    return item.ok_or_else(unapplied);
+                    return decided.into_iter().map(|decided| self.applied(decided)).collect();
                 }
                 Ok(Err(missed)) => self.apply(&missed)?,
                 Err(e) => {
@@ -205,6 +207,16 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
             }
         }
         Err(StoreError::Unavailable(format!("other writers kept appending to sugar identity {}", self.sugar())))
+    }
+
+    /// The item `decided` leaves, as the cache has it once applied.
+    fn applied(&self, decided: Result<Change, Item>) -> Result<Item, StoreError> {
+        let change = match decided {
+            Ok(change) => change,
+            Err(unchanged) => return Ok(unchanged),
+        };
+        let item = self.cache.get(&change.id)?.filter(|item| item.revision == change.revision);
+        item.ok_or_else(|| StoreError::Unavailable(format!("the change of item {} did not apply", change.id)))
     }
 
     fn sugar(&self) -> &SugarId {
@@ -224,6 +236,56 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
     fn realign(&mut self) {
         let position = self.cache.built().ok().flatten().and_then(|built| built.position);
         self.log.resume(position);
+    }
+}
+
+/// One change of a [`Store::write`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum Write {
+    /// Create item `id`, a new id ([`ItemId::new`]) minted by the caller, so other writes can name it.
+    Create { id: ItemId, kind: String, values: Values },
+    /// [`Store::change`].
+    Change { id: ItemId, values: Values, expected: Option<u64> },
+    /// [`Store::put`].
+    Put { id: ItemId, kind: String, values: Values, expected: Option<u64> },
+}
+
+impl Write {
+    pub fn id(&self) -> &ItemId {
+        match self {
+            Self::Create { id, .. } | Self::Change { id, .. } | Self::Put { id, .. } => id,
+        }
+    }
+
+    /// Its change, decided on `cache`, or the item it leaves unchanged.
+    fn decide(&self, cache: &Cache, by: &str) -> Result<Result<Change, Item>, StoreError> {
+        match self {
+            Self::Create { id, kind, values } => {
+                if cache.get(id)?.is_some() {
+                    return Err(StoreError::Unavailable(format!("item {id} exists already")));
+                }
+                Ok(Ok(Change { id: id.clone(), ..Change::create(kind, values.clone(), by) }))
+            }
+            Self::Change { id, values, expected } => {
+                let current = cache.get(id)?.ok_or_else(|| StoreError::NotFound(id.clone()))?;
+                if let Some(expected) = expected
+                    && *expected != current.revision
+                {
+                    return Err(StoreError::Conflict { expected: *expected, current: Box::new(current) });
+                }
+                Ok(Change::of(&current, values.clone(), by).ok_or(current))
+            }
+            Self::Put { id, kind, values, expected } => match cache.get(id)? {
+                None if expected.unwrap_or_default() == 0 => {
+                    Ok(Ok(Change { id: id.clone(), ..Change::create(kind, values.clone(), by) }))
+                }
+                None => Err(StoreError::NotFound(id.clone())),
+                Some(current) if expected.is_some_and(|expected| expected != current.revision) => {
+                    Err(StoreError::Conflict { expected: expected.unwrap_or_default(), current: Box::new(current) })
+                }
+                Some(current) => Ok(Change::of(&current, values.clone(), by).ok_or(current)),
+            },
+        }
     }
 }
 
@@ -265,6 +327,8 @@ pub trait Items: Send + Sync {
         expected: Option<u64>,
         by: &'a str,
     ) -> BoxFuture<'a, Result<Item, StoreError>>;
+    /// [`Store::write`].
+    fn write<'a>(&'a self, writes: &'a [Write], by: &'a str) -> BoxFuture<'a, Result<Vec<Item>, StoreError>>;
     fn get<'a>(&'a self, id: &'a ItemId) -> BoxFuture<'a, Result<Option<Item>, StoreError>>;
     /// [`Store::list`].
     fn list<'a>(&'a self, kind: &'a str, limit: usize) -> BoxFuture<'a, Result<Vec<Item>, StoreError>>;
@@ -273,7 +337,7 @@ pub trait Items: Send + Sync {
         &'a self,
         kind: &'a str,
         name: &'a str,
-        value: Option<&'a str>,
+        value: Option<&'a Value>,
         limit: usize,
     ) -> BoxFuture<'a, Result<Vec<Item>, StoreError>>;
     /// [`Store::search`].
@@ -333,6 +397,10 @@ where
         Box::pin(async move { self.lock().await.put(id, kind, values, expected, by).await })
     }
 
+    fn write<'a>(&'a self, writes: &'a [Write], by: &'a str) -> BoxFuture<'a, Result<Vec<Item>, StoreError>> {
+        Box::pin(async move { self.lock().await.write(writes, by).await })
+    }
+
     fn get<'a>(&'a self, id: &'a ItemId) -> BoxFuture<'a, Result<Option<Item>, StoreError>> {
         Box::pin(async move { self.lock().await.get(id) })
     }
@@ -345,7 +413,7 @@ where
         &'a self,
         kind: &'a str,
         name: &'a str,
-        value: Option<&'a str>,
+        value: Option<&'a Value>,
         limit: usize,
     ) -> BoxFuture<'a, Result<Vec<Item>, StoreError>> {
         Box::pin(async move { self.lock().await.list_by(kind, name, value, limit) })

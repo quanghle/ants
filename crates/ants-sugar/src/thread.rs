@@ -6,13 +6,13 @@
 //! by compare-and-set on its revision: the ant passes the revision it read (none for the thread's first), and a
 //! checkpoint from another revision is refused with the current register.
 //!
-//! A handoff is an item of kind [`HANDOFF`], written after an episode memory it links ([`EPISODE`]). It stays
-//! unacknowledged, shown in every brief of the ant ([`unacknowledged`]), until a later checkpoint on its thread, or a
-//! checkpoint on another thread naming it in `acknowledges`, sets its [`ACKNOWLEDGED`] value.
+//! A handoff is an item of kind [`HANDOFF`], written in one event with the episode memory it links ([`EPISODE`]). It
+//! stays unacknowledged, shown in every brief of the ant ([`unacknowledged`]), until a later checkpoint on its thread,
+//! or a checkpoint on another thread naming it in `acknowledges`, sets its [`ACKNOWLEDGED`] value.
 //!
 //! Every text passes the sanitizer, and each item carries its writer, taken from the call's context, never from text.
 
-use std::fmt::Write;
+use std::fmt::Write as _;
 
 use ants_proto::ThreadId;
 use ants_proto::provider::{BoxFuture, CallContext, ToolCall};
@@ -20,9 +20,10 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::items::{BODY, Item, ItemId, Stamp, TITLE, Values};
+use crate::items::{Item, ItemId, Stamp, Values};
+use crate::memory::{MAX_BODY_BYTES, MAX_TITLE_CHARS, Memory, MemoryKind, Scope, WRITER, writer};
 use crate::sanitize::{Limit, Lines, sanitize};
-use crate::store::{Items, StoreError};
+use crate::store::{Items, StoreError, Write};
 use crate::{Answer, Sugar};
 
 /// The kind of a thread's resume register.
@@ -35,8 +36,6 @@ pub const THREAD: &str = "thread";
 pub const EPISODE: &str = "episode";
 /// The value of an acknowledged handoff: the thread and time of the checkpoint acknowledging it.
 pub const ACKNOWLEDGED: &str = "acknowledged";
-/// The value of an item telling who wrote it ([`writer`]).
-pub const WRITER: &str = "writer";
 
 /// The most characters of the goal, the step, the next action, and of each entry of a list.
 const TEXT_MAX: usize = 2_000;
@@ -44,10 +43,6 @@ const TEXT_MAX: usize = 2_000;
 const LINE_MAX: usize = 500;
 /// The most entries of a list.
 const ENTRIES_MAX: usize = 50;
-/// The most characters of a memory's title.
-const MEMORY_TITLE_MAX: usize = 200;
-/// The most bytes of a memory's body.
-const MEMORY_BODY_MAX: usize = 4 * 1024;
 
 /// A thread's resume register, as its last checkpoint left it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -202,21 +197,6 @@ fn register_id(thread: &ThreadId) -> ItemId {
     ItemId::named(CHECKPOINT, thread.as_str())
 }
 
-/// Who wrote an item, from the call's context.
-// The memory item's `writer` value (ants-vrzol.16): one shape for every item sugar writes.
-pub fn writer(context: &CallContext) -> Value {
-    json!({
-        "identity": context.identity,
-        "ant": context.ant,
-        "thread": context.thread,
-        "origin": context.origin,
-        "harness": context.harness,
-        "model": context.model,
-        "machine": context.machine,
-        "at": context.at,
-    })
-}
-
 /// `sugar_checkpoint`: replace the thread's resume register, then acknowledge the unacknowledged handoffs of the
 /// thread and those named in `acknowledges`.
 pub fn checkpoint<'a>(sugar: &'a Sugar, call: &'a ToolCall) -> BoxFuture<'a, Answer> {
@@ -262,7 +242,7 @@ async fn checkpoint_call(sugar: &Sugar, call: &ToolCall) -> Result<Answer, Answe
     };
     let register = Register::of(&item).ok_or_else(|| refused(StoreError::Unavailable("unreadable register".into())))?;
 
-    acknowledge.extend(items.list_by(HANDOFF, THREAD, Some(by), usize::MAX).await.map_err(refused)?);
+    acknowledge.extend(items.list_by(HANDOFF, THREAD, Some(&Value::from(by)), usize::MAX).await.map_err(refused)?);
     acknowledge.retain(|handoff| !handoff.values.contains_key(ACKNOWLEDGED));
     acknowledge.sort_by(|a, b| a.id.cmp(&b.id));
     acknowledge.dedup_by(|a, b| a.id == b.id);
@@ -339,55 +319,45 @@ async fn handoff_call(sugar: &Sugar, call: &ToolCall) -> Result<Answer, Answer> 
 
     let items = sugar.items(&context.ant).await.map_err(refused)?;
     let by = context.thread.as_str();
-    let episode = remember_episode(&*items, context, &work).await.map_err(refused)?;
+    let episode = ItemId::new();
     let mut values = Values::new();
     for (name, entries) in Work::NAMES.into_iter().zip(work.lists()) {
         values.insert(name.into(), listed(entries.clone()));
     }
     values.insert(THREAD.into(), by.into());
-    values.insert(EPISODE.into(), episode.id.as_str().into());
+    values.insert(EPISODE.into(), episode.as_str().into());
     values.insert(WRITER.into(), writer(context));
-    let item = items.create(HANDOFF, values, by).await.map_err(refused)?;
+    let writes = [
+        episode_memory(context, &work).create(episode.clone()),
+        Write::Create { id: ItemId::new(), kind: HANDOFF.into(), values },
+    ];
+    let item = items.write(&writes, by).await.map_err(refused)?.remove(1);
     let handoff = Handoff::of(&item).ok_or_else(|| refused(StoreError::Unavailable("unreadable handoff".into())))?;
 
     let mut text = format!(
         "Handoff {} recorded, with episode memory {}. Every brief shows the handoff until a checkpoint on this \
          thread, or one naming the handoff in acknowledges, acknowledges it.",
-        handoff.id, episode.id
+        handoff.id, episode
     );
     text.push_str(&args.redactions());
     let json = json!({"handoff": handoff, "redacted": args.redacted});
     Ok(Answer { text, json, is_error: false })
 }
 
-/// Write the episode memory of the handoff of `work`, before the handoff.
-// The memory item's shape is the memories module's (ants-vrzol.16): this writes one directly until that module
-// offers a write to call instead.
-async fn remember_episode(items: &dyn Items, context: &CallContext, work: &Work) -> Result<Item, StoreError> {
+/// The episode memory of the handoff of `work`, written with it. Unlike `sugar_remember`, it is not checked for
+/// duplicates: each handoff keeps its own.
+fn episode_memory(context: &CallContext, work: &Work) -> Memory {
     let summary = [&work.done, &work.next, &work.in_flight, &work.promises, &work.decisions]
         .into_iter()
         .flatten()
         .next()
         .map_or("files touched", String::as_str);
-    let title = truncate_chars(&format!("Handoff of thread {}: {summary}", context.thread), MEMORY_TITLE_MAX);
-    let body = truncate_bytes(&work.text(), MEMORY_BODY_MAX);
+    let title = truncate_chars(&format!("Handoff of thread {}: {summary}", context.thread), MAX_TITLE_CHARS);
+    let body = truncate_bytes(&work.text(), MAX_BODY_BYTES);
     let clean = |text: &str, lines, limit| sanitize(text, lines, limit).map(|clean| clean.text);
-    let title = clean(&title, Lines::Single, Limit::Chars(MEMORY_TITLE_MAX)).unwrap_or(title);
-    let body = clean(&body, Lines::Multi, Limit::Bytes(MEMORY_BODY_MAX)).unwrap_or(body);
-    let values = json!({
-        TITLE: title,
-        BODY: body,
-        "type": "episode",
-        "scope": "self",
-        "importance": 3,
-        "citations": [],
-        WRITER: writer(context),
-        "trust": if context.trusted() { "self" } else { "untrusted" },
-        "core": false,
-        "status": "active",
-    });
-    let Value::Object(values) = values else { unreachable!("an object") };
-    items.create("memory", values, context.thread.as_str()).await
+    let title = clean(&title, Lines::Single, Limit::Chars(MAX_TITLE_CHARS)).unwrap_or(title);
+    let body = clean(&body, Lines::Multi, Limit::Bytes(MAX_BODY_BYTES)).unwrap_or(body);
+    Memory::new(MemoryKind::Episode, Scope::Own, title, body, context)
 }
 
 /// A tool's arguments as sanitized texts, counting the secrets redacted.

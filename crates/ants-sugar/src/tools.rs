@@ -62,7 +62,7 @@ pub const TOOLS: &[ToolSpec] = &[
         name: "remember",
         description: "Store a memory: a fact, lesson, decision, preference, gotcha or episode, with citations.",
         schema: remember,
-        handler: not_available,
+        handler: crate::memory::remember,
     },
     ToolSpec {
         name: "recall",
@@ -117,15 +117,37 @@ fn strings() -> Value {
 }
 
 fn remember() -> Value {
+    let citation = json!({
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "start": {"type": "integer", "minimum": 1},
+            "end": {"type": "integer", "minimum": 1},
+            "remote": {"type": "string", "description": "The repository's git remote."},
+            "hash": {"type": "string", "description": "The SHA-256 of the cited lines, in hex."},
+        },
+        "required": ["path"],
+    });
     let mut schema = object(&json!({
         "kind": {"enum": ["fact", "lesson", "decision", "preference", "gotcha", "episode"]},
-        "scope": {"type": "string", "description": "Whom it is for: self, a repository or the colony."},
+        "scope": {
+            "type": "string",
+            "description": "Whom it is about: self (default), repo:<git remote>, human:<name> or ant:<name>.",
+        },
         "title": {"type": "string", "maxLength": 200},
-        "body": {"type": "string"},
-        "importance": {"type": "integer", "minimum": 1, "maximum": 5},
-        "citations": strings(),
-        "core": {"type": "boolean", "description": "Part of the identity, in every brief."},
+        "body": {"type": "string", "description": "At most 4 KiB."},
+        "importance": {"type": "integer", "minimum": 1, "maximum": 5, "description": "3 by default."},
+        "citations": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {"anyOf": [{"type": "string", "description": "path, path:line or path:start-end"}, citation]},
+        },
+        "core": {"type": "boolean", "description": "Part of the identity, in every brief (2,000 bytes for all)."},
         "supersedes": {"type": "string", "description": "The id of the memory this one replaces."},
+        "quotes": {
+            "enum": ["recalled", "external"],
+            "description": "Set when the text quotes recalled memories or outside content: stored as untrusted.",
+        },
         "force": {"type": "boolean", "description": "Store it even when a near duplicate exists."},
     }));
     schema["required"] = json!(["kind", "title", "body"]);
