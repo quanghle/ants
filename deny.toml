@@ -8,7 +8,11 @@ all-features = true
 # here, with a reason, only after review.
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+    # chrono is unmaintained, no fix or replacement release. rmcp (3.10) and schemars need it unconditionally, so
+    # moving ants' own crates to jiff or time would not drop it; tracked by ants-no9u1 until rmcp moves.
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained; required by rmcp and schemars, no alternative yet" },
+]
 
 [licenses]
 version = 2
