@@ -19,6 +19,7 @@ use crate::files::earlier_lines;
 use crate::stream::reading::{self, Reading};
 
 pub mod cloned;
+mod timeline;
 
 /// The history of a thread as a prompt shows it, read when the prompt needs it and shown within the bytes given.
 pub type History = Box<dyn FnOnce(usize) -> Pin<Box<dyn Future<Output = String> + Send>> + Send>;
@@ -67,8 +68,8 @@ pub fn budget(set: Option<usize>, window: Option<u64>) -> usize {
     bytes(WINDOW_CAP).map_or(budget, |cap| budget.min(cap))
 }
 
-/// One read through an ant's sent reader at a time, of a thread's history or of the messages that keep waiting
-/// ([`crate::delivery::unserved`]): each deletes the consumer a read before left.
+/// One read through an ant's sent reader at a time, of a thread's history, of the messages that keep waiting
+/// ([`crate::delivery::unserved`]) or of the ant's timeline: each deletes the consumer a read before left.
 pub(crate) static SENT_READS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// What a prompt in a session rebuilt for `why` starts with: why, and the thread's history within `budget` bytes, or
@@ -250,9 +251,19 @@ impl Thread {
     }
 }
 
+/// A thread of an ant active over a time, as [`active`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Active {
+    pub thread: ThreadId,
+    /// What the ant received and sent on it and its notes, as a prompt shows a history.
+    pub history: String,
+    /// The tool-call timeline the ant stored on it, oldest first: empty when it stored none, or it could not be read.
+    pub timeline: String,
+}
+
 /// The threads of `ant` active from `since` to `until`, the most recently active first, each with what the ant received
-/// and sent on it and its notes from `since` on, as a prompt shows a history within `budget` bytes. Read as its daemon
-/// reads ([`Reading::daemon`]).
+/// and sent on it and its notes from `since` on, as a prompt shows a history within `budget` bytes, and the timeline it
+/// stored on it meanwhile. Read as its daemon reads ([`Reading::daemon`]).
 pub(crate) async fn active(
     js: &jetstream::Context,
     ant: &UserId,
@@ -260,7 +271,7 @@ pub(crate) async fn active(
     since: SystemTime,
     until: SystemTime,
     budget: usize,
-) -> Result<Vec<(ThreadId, String)>> {
+) -> Result<Vec<Active>> {
     let start = || consumer::DeliverPolicy::ByStartTime { start_time: since.into() };
     let mut threads: BTreeMap<ThreadId, BTreeMap<u64, Entry>> = BTreeMap::new();
     let mut take = |seq, at, subject: &str, payload: &[u8]| {
@@ -306,9 +317,20 @@ pub(crate) async fn active(
         .await
         .with_context(|| format!("reading back the notes of thread {thread}"))?;
     }
+    // Timeline records are best effort, so a thread is shown without them rather than not at all.
+    let mut timelines = timeline::read(js, ant, reading, start(), until, |thread| threads.contains_key(thread))
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(%ant, error = format!("{e:#}"), "reading back the timeline of the active threads");
+            BTreeMap::new()
+        });
     let mut threads: Vec<_> = threads.into_iter().collect();
     threads.sort_by_key(|(_, entries)| std::cmp::Reverse(entries.values().map(|entry| entry.at).max()));
-    Ok(threads.into_iter().map(|(thread, entries)| (thread, format(entries.into_values().collect(), budget))).collect())
+    let active = threads.into_iter().map(|(thread, entries)| {
+        let timeline = timelines.remove(&thread).map_or_default(|timeline| timeline.show(ant, budget / ENTRY_SHARE));
+        Active { history: format(entries.into_values().collect(), budget), timeline, thread }
+    });
+    Ok(active.collect())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -483,7 +505,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_threads_active_since_a_time_come_most_recent_first_with_their_notes() {
+    async fn the_threads_active_since_a_time_come_most_recent_first_with_their_notes_and_timeline() {
         let Some(server) = ants_test_support::NatsServer::start() else { return };
         let js = async_nats::jetstream::new(async_nats::connect(&server.url).await.unwrap());
         js.create_stream(crate::hub::stream_config()).await.unwrap();
@@ -503,16 +525,39 @@ mod tests {
         publish(note.subject(), serde_json::to_vec(&note).unwrap()).await;
         message(&two, "dev-a", "bob", "a question").await;
         message(&one, "alice", "bob", "not to dev-a").await;
+        let call = |title: &str| {
+            let call = ants_proto::TimelineCall {
+                id: title.to_owned(),
+                tool_kind: Some("execute".to_owned()),
+                title: title.to_owned(),
+                status: Some("completed".to_owned()),
+                started: chrono::Utc::now(),
+                duration_ms: None,
+                paths: Vec::new(),
+            };
+            vec![ants_proto::TimelineEntry::Tool(call)]
+        };
+        let record = async |thread: &ThreadId, ant: &str, title: &str| {
+            let record = ants_proto::Timeline::new(p(ant), thread.clone(), ants_proto::Uuid::nil(), call(title), 0);
+            publish(record.subject(), serde_json::to_vec(&record).unwrap()).await;
+        };
+        record(&one, "dev-a", "cargo build").await;
+        record(&one, "bob", "not dev-a's").await;
+        record(&"t3".parse().unwrap(), "dev-a", "no thread active").await;
         let until = SystemTime::now();
         tokio::time::sleep(Duration::from_millis(50)).await;
         message(&two, "bob", "dev-a", "too late").await;
+        record(&two, "dev-a", "cargo late").await;
 
         let threads = active(&js, &p("dev-a"), Reading::Gets, since, until, DEFAULT_BUDGET).await.unwrap();
-        assert_eq!(threads.iter().map(|(thread, _)| thread.clone()).collect::<Vec<_>>(), [two, one]);
-        assert!(threads[0].1.contains("a question") && !threads[0].1.contains("too late"));
-        let first = &threads[1].1;
+        assert_eq!(threads.iter().map(|active| active.thread.clone()).collect::<Vec<_>>(), [two, one]);
+        assert!(threads[0].history.contains("a question") && !threads[0].history.contains("too late"));
+        assert_eq!(threads[0].timeline, "", "{threads:?}");
+        let first = &threads[1].history;
         assert!(first.contains("fix the build") && first.contains("the plan"), "{first}");
         assert!(!first.contains("long ago") && !first.contains("not to dev-a"), "{first}");
+        let timeline = &threads[1].timeline;
+        assert!(timeline.contains("execute: cargo build (completed)\n") && !timeline.contains("dev-a's"), "{timeline}");
     }
 
     #[test]

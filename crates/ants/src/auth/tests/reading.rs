@@ -170,3 +170,40 @@ async fn an_ant_reads_back_its_thread_both_ways_and_only_its_own_sent_messages()
     assert!(a_js.create_consumer_on_stream(reader(sent.clone(), subject::inbox_of(&dev_b)), STREAM).await.is_err());
     assert!(b_js.create_consumer_on_stream(reader(sent, subject::inbox_from(&dev_a)), STREAM).await.is_err());
 }
+
+#[tokio::test]
+async fn an_ants_daemon_reads_back_its_own_timeline_only() {
+    let Some(server) = Server::start() else { return };
+    let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
+    let (_h, h_js) = server.connect(&human).await;
+    bus::ensure_stream(&h_js).await.unwrap();
+    let (_a, a_js) = server.connect(&dev_a).await;
+    let (_b, b_js) = server.connect(&dev_b).await;
+    let (one, two): (ThreadId, ThreadId) = (ThreadId::generate(), ThreadId::generate());
+    for (js, ant, thread) in [(&a_js, &dev_a, &one), (&a_js, &dev_a, &two), (&b_js, &dev_b, &one)] {
+        let record = ants_proto::Timeline::new(ant.clone(), thread.clone(), ants_proto::Uuid::now_v7(), Vec::new(), 0);
+        bus::publish_json(js, record.subject(), &record, None).await.unwrap();
+    }
+
+    let read = async |js: &jetstream::Context, ant: &UserId, filter: String| {
+        let (reader, mut read) = (ants_proto::sent_reader(ant), Vec::new());
+        let all = jetstream::consumer::DeliverPolicy::All;
+        ants_daemon::stream::reading::read_back(js, &reader, Reading::Consumer, &filter, all, |_, _, subject, _| {
+            read.push(subject.to_owned());
+            std::ops::ControlFlow::Continue(())
+        })
+        .await
+        .map(|()| read)
+    };
+    let own = read(&a_js, &dev_a, subject::timeline_from(&dev_a)).await.unwrap();
+    assert_eq!(own, [subject::timeline(&one, &dev_a), subject::timeline(&two, &dev_a)]);
+    let of_one = read(&a_js, &dev_a, subject::timeline(&one, &dev_a)).await.unwrap();
+    assert_eq!(of_one, [subject::timeline(&one, &dev_a)]);
+    // Not dev-b's timeline, of any thread or of one they share, nor every ant's, nor through dev-b's reader.
+    for filter in [subject::timeline_from(&dev_b), subject::timeline(&one, &dev_b), subject::ALL_TIMELINE.to_owned()] {
+        assert!(read(&a_js, &dev_a, filter.clone()).await.is_err(), "{filter}");
+    }
+    assert!(read(&a_js, &dev_b, subject::timeline_from(&dev_b)).await.is_err());
+    // Nor does its reader read anything but timelines.
+    assert!(read(&a_js, &dev_a, subject::inbox_of(&dev_b)).await.is_err());
+}

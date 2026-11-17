@@ -218,26 +218,31 @@ fn finding(n: usize) -> Finding {
 fn thread(n: u8, bytes: usize, untrusted: bool) -> packet::Thread {
     let line = format!("message {n} of a thread\n");
     let text = line.repeat(bytes / line.len());
-    packet::Thread { id: on(n).thread, untrusted, started_by: "alice".into(), text }
+    packet::Thread { id: on(n).thread, untrusted, started_by: "alice".into(), text, timeline: String::new() }
 }
 
-#[test]
-fn a_packet_over_its_budget_trims_threads_to_their_latest_then_leaves_out_threads_then_findings() {
+/// The first dream, covering threads 1 to `threads` (2 untrusted), with `findings` findings.
+fn reviewing(threads: u8, findings: usize) -> Dream {
     let now = Utc::now();
-    let dream = Dream {
+    Dream {
         number: 1,
         at: now,
         since: now - Duration::hours(24),
         state: State::Fallback,
         sage: None,
         thread: None,
-        threads: (1..=3).map(|n| Covered { thread: on(n).thread, untrusted: n == 2 }).collect(),
+        threads: (1..=threads).map(|n| Covered { thread: on(n).thread, untrusted: n == 2 }).collect(),
         commits: vec![Commit { repo: "github.com/o/r".into(), commit: "abc123".into(), thread: Some(on(1).thread) }],
-        findings: (1..=5).map(finding).collect(),
+        findings: (1..=findings).map(finding).collect(),
         verdicts: Vec::new(),
         writes: Vec::new(),
         diary: None,
-    };
+    }
+}
+
+#[test]
+fn a_packet_over_its_budget_trims_threads_to_their_latest_then_leaves_out_threads_then_findings() {
+    let dream = reviewing(3, 5);
     let threads = [thread(1, 3_000, false), thread(2, 3_000, true), thread(3, 3_000, false)];
     let whole = compose(&dream, None, &threads, PACKET_BUDGET);
     assert!(!whole.contains("left out"), "{whole}");
@@ -264,4 +269,49 @@ fn a_packet_over_its_budget_trims_threads_to_their_latest_then_leaves_out_thread
     assert!(cut.len() <= budget && !cut.contains("message 1"), "{cut}");
     assert!(cut.contains("Finding number 3") && !cut.contains("Finding number 4"), "{cut}");
     assert!(cut.contains("2 more findings left out for room: the next dream offers them again."), "{cut}");
+}
+
+#[test]
+fn a_thread_shows_its_timeline_after_its_history_the_latest_of_both_kept_for_room() {
+    let dream = reviewing(2, 0);
+    let lines =
+        |what: &str, n: u8, count: usize| (0..count).map(|i| format!("{what} {i:03} of thread {n}\n")).collect();
+    let threads: Vec<_> = (1..=2)
+        .map(|n| packet::Thread {
+            text: lines("message", n, 100),
+            timeline: lines("call", n, 100),
+            ..thread(n, 0, n == 2)
+        })
+        .collect();
+    let long = compose(&dream, None, &threads, PACKET_BUDGET);
+    assert!(!long.contains("left out"), "{long}");
+    let untrusted = format!("### Thread {}, started by alice (untrusted", on(2).thread);
+    let (first, second) = long.split_once(&untrusted).unwrap();
+    for (section, n) in [(first, 1), (second, 2)] {
+        let (history, timeline) = section.split_once("\n#### Timeline\n\n").unwrap();
+        assert!(history.contains(&format!("message 099 of thread {n}")) && !history.contains("call 0"), "{section}");
+        assert!(timeline.starts_with(&format!("call 000 of thread {n}\n")), "{section}");
+        assert!(timeline.contains(&format!("call 099 of thread {n}")), "{section}");
+    }
+    let bare = packet::Thread { timeline: String::new(), ..threads[0].clone() };
+    assert!(!compose(&dream, None, &[bare], PACKET_BUDGET).contains("#### Timeline"), "no section without one");
+
+    // A shorter timeline stays whole while the history gives way.
+    let short: Vec<_> =
+        threads.iter().map(|t| packet::Thread { timeline: lines("call", 0, 30), ..t.clone() }).collect();
+    let whole = compose(&dream, None, &short, PACKET_BUDGET);
+    let budget = whole.len() - 2_000;
+    let trimmed = compose(&dream, None, &short, budget);
+    assert!(trimmed.len() <= budget, "{} of {budget}", trimmed.len());
+    assert_eq!(trimmed.matches("earlier bytes left out for room]\nmessage").count(), 2, "{trimmed}");
+    assert_eq!(trimmed.matches("call 000 of thread 0").count(), 2, "{trimmed}");
+
+    // Both long, each keeps its latest half.
+    let budget = long.len() - 6_000;
+    let trimmed = compose(&dream, None, &threads, budget);
+    assert!(trimmed.len() <= budget, "{} of {budget}", trimmed.len());
+    assert_eq!(trimmed.matches("earlier bytes left out for room]").count(), 4, "{trimmed}");
+    assert!(!trimmed.contains("call 000 of thread 1") && !trimmed.contains("message 000 of thread 1"), "{trimmed}");
+    assert!(trimmed.contains("message 099 of thread 1\n\n#### Timeline"), "{trimmed}");
+    assert!(trimmed.ends_with("call 099 of thread 2\n"), "the latest kept: {trimmed}");
 }
