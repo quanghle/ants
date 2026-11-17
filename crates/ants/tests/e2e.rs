@@ -128,15 +128,22 @@ fn exercise_daemon(custom_tools: bool) {
     let mut said = stdout.lines();
     let thread = said.next().and_then(|l| l.strip_prefix("thread ")).expect(&stdout).to_owned();
     let message = said.next().and_then(|l| l.strip_prefix("message ")).expect(&stdout).to_owned();
+    // The sugar brief, naming the ant's sugar id and today, comes between the instructions and the message.
     let expected = if custom_tools {
-        "dev-a: stub: [ants role dev-a]\nMaintain the Rust backend.\n\n\
-         [ants memory]\nUse the notes tool.\n\n[ants tasks]\nUse the ticket tool.\n\n\
-         hello there\ncustom.db; BD_DB=unmanaged.db; BD_REMOTE=\n\
-         model=stub-model; effort=high; context=long_context\n"
+        [
+            "dev-a: stub: [ants role dev-a]\nMaintain the Rust backend.\n\n\
+             [ants memory]\nUse the notes tool.\n\n[ants tasks]\nUse the ticket tool.\n\n\
+             [ants brief from sugar]\n## Identity\ndev-a (sugar identity ",
+            "- sugar_brief: show this brief again.\n\n\
+             hello there\ncustom.db; BD_DB=unmanaged.db; BD_REMOTE=\n\
+             model=stub-model; effort=high; context=long_context\n",
+        ]
     } else {
-        "dev-a: stub: hello there\n"
+        ["dev-a: stub: hello there\n", ""]
     };
-    assert!(stdout.contains(expected), "{stdout}\ndaemon log:\n{}", daemon_log());
+    let [start, end] = expected;
+    let found = stdout.find(start).is_some_and(|at| stdout[at + start.len()..].contains(end));
+    assert!(found, "{stdout}\ndaemon log:\n{}", daemon_log());
     assert!(!home.join(".bd").exists(), "ants must not initialize a tool workspace");
 
     let colony = run(ants(&["colony", "--json"]));
@@ -659,7 +666,8 @@ fn a_configured_adapter_serves_ants_the_messenger_and_the_cli() {
     let daemon_log = || std::fs::read_to_string(dir.join("daemon.log")).unwrap_or_default();
     let ask = |args: &[&str], expected: &str| {
         let ask = run(ants(&[&["ask", "--wait"], args].concat()));
-        assert!(stdout(&ask).contains(expected), "{}{}\ndaemon log:\n{}", stdout(&ask), stderr(&ask), daemon_log());
+        let said = unbriefed(&stdout(&ask));
+        assert!(said.contains(expected), "{}{}\ndaemon log:\n{}", stdout(&ask), stderr(&ask), daemon_log());
     };
     ask(&["@dev-a", "hello"], "dev-a: stub: hello\nargs=--flag two words; OVERRIDDEN=ant");
     ask(&["hello"], "messenger: stub: hello\nargs=--flag two words; OVERRIDDEN=definition");
@@ -842,6 +850,16 @@ fn get(addr: &str, path: &str) -> (u16, String) {
     stream.read_to_string(&mut answer).unwrap();
     let (head, body) = answer.split_once("\r\n\r\n").unwrap_or_else(|| panic!("GET {path}: {answer:?}"));
     (head.split(' ').nth(1).unwrap().parse().unwrap(), body.to_owned())
+}
+
+/// The text without the sugar brief that the first prompt of a session carries.
+fn unbriefed(text: &str) -> String {
+    const START: &str = "[ants brief from sugar]\n";
+    const END: &str = "- sugar_brief: show this brief again.\n\n";
+    match text.find(START).and_then(|at| text[at..].find(END).map(|len| (at, at + len + END.len()))) {
+        Some((start, end)) => format!("{}{}", &text[..start], &text[end..]),
+        None => text.to_owned(),
+    }
 }
 
 fn run(mut command: Command) -> Output {

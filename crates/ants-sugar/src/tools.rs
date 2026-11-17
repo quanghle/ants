@@ -1,9 +1,9 @@
 //! sugar's tools: one [`ToolSpec`] each, in [`TOOLS`].
 
-use ants_proto::provider::{BoxFuture, Format, Output, Tool, ToolCall, ToolResult, served_name};
+use ants_proto::provider::{BoxFuture, Format, Output, Tool, ToolCall, ToolResult};
 use serde_json::{Value, json};
 
-use crate::{NAME, Sugar};
+use crate::Sugar;
 
 /// The most tools sugar may serve: each costs every session of every ant the room its schema takes.
 pub const MAX_TOOLS: usize = 12;
@@ -56,7 +56,7 @@ pub const TOOLS: &[ToolSpec] = &[
         name: "brief",
         description: "Show the brief of this thread again: identity, open work and the memories that matter.",
         schema: || object(&json!({})),
-        handler: not_available,
+        handler: crate::brief::brief,
     },
     ToolSpec {
         name: "remember",
@@ -195,11 +195,6 @@ fn handoff() -> Value {
         "decisions": strings(),
         "files": strings(),
     }))
-}
-
-fn not_available<'a>(_sugar: &'a Sugar, call: &'a ToolCall) -> BoxFuture<'a, Answer> {
-    let name = served_name(NAME, &call.name);
-    Box::pin(std::future::ready(Answer::error("not_available", format!("{name} is not available yet."))))
 }
 
 #[cfg(test)]

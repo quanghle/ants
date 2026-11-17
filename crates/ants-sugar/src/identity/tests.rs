@@ -190,7 +190,8 @@ async fn sugar_writes_the_card_from_events_and_briefs_and_acks_what_it_does_not_
     sugar.event(event("dev-a", "id1", "10:00:00", EventKind::AntAdded)).await.unwrap();
     let context = context("id1", "copilot", None, "studio");
     let request = BriefRequest { context: context.clone(), budget: 100, reason: BriefReason::Started };
-    assert_eq!(sugar.brief(request).await.unwrap(), Brief::default());
+    let brief = sugar.brief(request).await.unwrap().text;
+    assert!(brief.starts_with("## Identity\ndev-a") && brief.len() <= 100, "{brief}");
     let card = sugar.card(&dev_a()).await.unwrap().unwrap();
     assert_eq!((card.born, &card.harnesses[..]), (at("10:00:00"), &["copilot".to_owned()][..]));
 

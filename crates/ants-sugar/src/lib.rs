@@ -12,6 +12,7 @@ use ants_proto::provider::{
     PROTOCOL_VERSION, Provider, RpcError, ToolCall, ToolList, ToolResult,
 };
 
+pub mod brief;
 pub mod cache;
 pub mod identity;
 pub mod items;
@@ -79,13 +80,18 @@ impl Sugar {
         }
     }
 
+    /// The brief of the session starting as `request` tells, noting the session on the ant's card first; empty when
+    /// sugar keeps no data of the ant.
     async fn brief_for(&self, request: BriefRequest) -> Result<Brief, RpcError> {
-        let recorded = match self.items(&request.context.ant).await {
-            Ok(items) => identity::record_session(&*items, &request.context).await.map(drop),
-            Err(e) => Err(e),
+        let context = &request.context;
+        let composed = async {
+            let items = self.items(&context.ant).await?;
+            let card = identity::record_session(&*items, context).await?;
+            brief::compose(&*items, context, Some(&card), request.budget as usize).await
         };
-        match recorded {
-            Ok(()) | Err(StoreError::NotKept(_)) => Ok(Brief::default()),
+        match composed.await {
+            Ok(text) => Ok(Brief { text }),
+            Err(StoreError::NotKept(_)) => Ok(Brief::default()),
             Err(e) => Err(RpcError::unavailable(&e.to_string())),
         }
     }
@@ -201,15 +207,16 @@ mod tests {
     }
 
     #[test]
-    fn tools_not_built_yet_say_so_as_text_or_json() {
+    fn tools_of_a_sugar_keeping_no_data_refuse_as_text_or_json() {
         let sugar = connect();
         let text = ready(sugar.call_tool(call("brief", Format::Text))).unwrap();
         assert!(text.is_error);
-        assert_eq!(text.output, Output::Text("sugar_brief is not available yet.".into()));
+        let Output::Text(text) = text.output else { panic!("asked for text") };
+        assert!(text.starts_with("The brief is not available: sugar keeps no data here"), "{text}");
         let json = ready(sugar.call_tool(call("brief", Format::Json))).unwrap();
         assert!(json.is_error);
         let Output::Json(json) = json.output else { panic!("asked for JSON") };
-        assert_eq!(json["error"], "not_available");
+        assert_eq!(json["error"], "unavailable");
         let unknown = ready(sugar.call_tool(call("dance", Format::Text))).unwrap_err();
         assert_eq!(unknown.code, RpcError::INVALID_PARAMS);
     }

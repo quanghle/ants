@@ -89,12 +89,12 @@ async fn sugar_tools_are_served_with_its_prefix_and_the_json_argument() {
 
     let (ok, text) = call(&client, "sugar_brief", json!({})).await;
     assert!(!ok, "{text}");
-    assert_eq!(text, "sugar_brief is not available yet.");
+    assert!(text.starts_with("The brief is not available: sugar keeps no data here"), "{text}");
     let result =
         client.call_tool(CallToolRequestParams::new("sugar_brief").with_arguments(json_object(json!({"json": true}))));
     let result = result.await.unwrap();
     assert_eq!(result.is_error, Some(true));
-    assert_eq!(result.structured_content.unwrap()["error"], "not_available");
+    assert_eq!(result.structured_content.unwrap()["error"], "unavailable");
 }
 
 fn json_object(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {

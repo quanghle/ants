@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::cache::{Cache, CacheError, Hit};
 use crate::items::{Batch, Change, ITEM_EVENT, ITEMS_EVENT, Item, ItemId, Revision, Values};
-use crate::log::{APPEND_TRIES, AntLog, Checked, EventLog, LogError, Position, Signer, Verifier};
+use crate::log::{APPEND_TRIES, AntLog, Break, Checked, EventLog, LogError, Position, Signer, Verifier};
 
 /// Why a store did not answer.
 #[derive(Debug, thiserror::Error)]
@@ -355,6 +355,8 @@ pub trait Items: Send + Sync {
     fn sync(&self) -> BoxFuture<'_, Result<(), StoreError>>;
     /// The sugar identity whose items these are.
     fn sugar(&self) -> BoxFuture<'_, SugarId>;
+    /// The first break of the log read so far ([`crate::log::Chain::broken`]).
+    fn broken(&self) -> BoxFuture<'_, Option<Break>>;
 }
 
 impl<L, S, V> Items for tokio::sync::Mutex<Store<L, S, V>>
@@ -442,6 +444,10 @@ where
 
     fn sugar(&self) -> BoxFuture<'_, SugarId> {
         Box::pin(async move { self.lock().await.sugar().clone() })
+    }
+
+    fn broken(&self) -> BoxFuture<'_, Option<Break>> {
+        Box::pin(async move { self.lock().await.log().chain().broken().cloned() })
     }
 }
 
