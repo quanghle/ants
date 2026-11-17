@@ -131,6 +131,11 @@ pub enum Job {
     Unmute {
         thread: ThreadId,
     },
+    /// Change the entry of `channel` as `ants channel set|add|remove` does, refused as it refuses it.
+    Channel {
+        channel: ChannelId,
+        change: crate::channel::Change,
+    },
     /// Set the human's notify level of `channel`, as `ants channel notify` does.
     ChannelNotify {
         channel: ChannelId,
@@ -208,6 +213,8 @@ pub struct Done {
     pub withdrew: Option<Uuid>,
     /// The text, and the files fetched, of a message withdrawn to edit, for the bar.
     pub edit: Option<(String, Vec<PathBuf>)>,
+    /// The channel whose entry it changed, to read back.
+    pub channel: Option<ChannelId>,
 }
 
 impl Done {
@@ -325,6 +332,7 @@ impl Job {
             }
             Self::Mute { thread, hold } => Ok(Done::line(quiet::muted(&ctx.js, me, &thread, hold).await?)),
             Self::Unmute { thread } => Ok(Done::line(quiet::unmuted(&ctx.js, me, &thread).await?)),
+            Self::Channel { channel, change } => change_channel(ctx, channel, &change).await,
             Self::ChannelNotify { channel, level } => {
                 Ok(Done::line(quiet::channel_notify(&ctx.js, me, &channel, level).await?))
             }
@@ -356,6 +364,50 @@ impl Job {
             Self::Later(_) => Err(anyhow!("a message waits its turn once")),
             Self::Withdraw { ants, message, edit } => withdraw(ctx, &ants, message, edit.map(|e| *e)).await,
         }
+    }
+}
+
+/// Write `change` to the entry of `channel` with the human's credentials ([`crate::channel::Change::write`]).
+pub async fn change_channel(ctx: &Ctx, channel: ChannelId, change: &crate::channel::Change) -> Result<Done> {
+    let kv = crate::channel::open(&ctx.js).await?;
+    let humans = humans::load(&ctx.js, &ctx.me).await;
+    let changed = change.write(&ctx.js, &kv, &channel, &humans).await?;
+    let line = changed_line(&channel, change, &changed);
+    Ok(Done { line, warnings: changed.warnings, channel: Some(channel), ..Done::default() })
+}
+
+/// What a change to `channel`'s entry did, in a line.
+fn changed_line(channel: &ChannelId, change: &crate::channel::Change, changed: &crate::channel::Changed) -> String {
+    let names = |users: &[UserId]| users.iter().map(UserId::as_str).collect::<Vec<_>>().join(", ");
+    let mut parts = Vec::new();
+    if let Some(members) = &change.members {
+        parts.push(format!("members now {}", names(members)));
+    }
+    if !changed.added.is_empty() {
+        parts.push(format!("added {}", names(&changed.added)));
+    }
+    if !changed.removed.is_empty() {
+        parts.push(format!("removed {}", names(&changed.removed)));
+    }
+    match &change.messenger {
+        Some(Some(messenger)) => parts.push(format!("messenger now {messenger}")),
+        Some(None) => parts.push("messenger back to the default".into()),
+        None => {}
+    }
+    match &change.owner {
+        Some(Some(owner)) => parts.push(format!("owner now {owner}")),
+        Some(None) => parts.push("no owner".into()),
+        None => {}
+    }
+    match (&change.description, &changed.entry.description) {
+        (Some(_), Some(_)) => parts.push("description changed".into()),
+        (Some(_), None) => parts.push("no description".into()),
+        (None, _) => {}
+    }
+    if parts.is_empty() {
+        format!("nothing changed in #{channel}")
+    } else {
+        format!("#{channel}: {}", parts.join(", "))
     }
 }
 
@@ -805,5 +857,69 @@ mod tests {
         let (_, bytes) =
             attachments::fetch(&js, &listed.handle, Some(&listed.attachment), listed.stored).await.unwrap();
         assert_eq!(bytes, b"# plan");
+    }
+
+    /// The members editor's writes change the channel's entry as `ants channel add|remove|set` does, refused as it
+    /// refuses them, each telling the channel to read back.
+    #[tokio::test]
+    async fn a_channel_job_writes_the_entry_as_ants_channel_does() {
+        use ants_proto::ChannelEntry;
+
+        use crate::channel::{self, Change};
+
+        let Some(server) = crate::test_support::Server::start() else { return };
+        let (alice, bob) = (user("alice"), user("bob"));
+        let creds = [server.creds_as(&alice, ants_proto::Role::Human), server.creds_as(&bob, ants_proto::Role::Human)];
+        let nats: Vec<_> = creds.iter().map(|c| Nats::new(&server.url, Some(c), None).unwrap()).collect();
+        let (client, js) = nats[0].connect("test").await.unwrap();
+        let (_, bob_js) = nats[1].connect("test").await.unwrap();
+        humans::ensure(&js).await.unwrap();
+        humans::register(&js, &nats[0].me).await.unwrap();
+        humans::register(&bob_js, &nats[1].me).await.unwrap();
+        let kv = channel::open(&js).await.unwrap();
+        let ops: ChannelId = "ops".parse().unwrap();
+        channel::create(&kv, &ChannelEntry { members: vec![alice.clone()], ..ChannelEntry::new(ops.clone()) })
+            .await
+            .unwrap();
+        let (me, sealing) = (nats[0].me.clone(), Sealing::of(&nats[0]));
+        let (meta, admin) = (Err("unused".into()), Err("unused".into()));
+        let ctx = Ctx { client, js, me, domain: None, meta, sealing, account: None, keyring: None, admin };
+        let run = |change: Change| Job::Channel { channel: ops.clone(), change }.run(&ctx);
+
+        let add = Change { add: vec![user("dev-b"), bob.clone()], ..Change::default() };
+        let done = run(add.clone()).await.unwrap();
+        assert_eq!((done.line.as_str(), done.channel), ("#ops: added dev-b, bob", Some(ops.clone())));
+        let again = run(add).await.unwrap();
+        assert_eq!(again.line, "nothing changed in #ops");
+        assert_eq!(again.warnings[..2], ["dev-b is already a member of #ops", "bob is already a member of #ops"]);
+        let removed = run(Change { remove: vec![bob.clone()], ..Change::default() }).await.unwrap();
+        assert_eq!(removed.line, "#ops: removed bob");
+        let set = Change {
+            messenger: Some(Some(user("dev-m"))),
+            owner: Some(Some(user("dev-a"))),
+            description: Some(Some("  Deploys  ".to_owned())),
+            ..Change::default()
+        };
+        let done = run(set).await.unwrap();
+        assert_eq!(done.line, "#ops: messenger now dev-m, owner now dev-a, description changed");
+        let stored = channel::get(&kv, &ops).await.unwrap().unwrap();
+        let expected = ChannelEntry {
+            members: vec![alice.clone(), user("dev-b")],
+            messenger: Some(user("dev-m")),
+            owner: Some(user("dev-a")),
+            description: Some("Deploys".to_owned()),
+            ..ChannelEntry::new(ops.clone())
+        };
+        assert_eq!(stored, expected);
+
+        let human = run(Change { owner: Some(Some(bob.clone())), ..Change::default() }).await.unwrap_err();
+        assert_eq!(format!("{human:#}"), "bob is a human, who needs no ownership: humans change every channel");
+        let long = Change { description: Some(Some("x".repeat(1001))), ..Change::default() };
+        assert!(run(long).await.is_err(), "over 1000 characters");
+        let cleared = Change { messenger: Some(None), owner: Some(None), description: Some(None), ..Change::default() };
+        let done = run(cleared).await.unwrap();
+        assert_eq!(done.line, "#ops: messenger back to the default, no owner, no description");
+        let stored = channel::get(&kv, &ops).await.unwrap().unwrap();
+        assert_eq!((stored.messenger, stored.owner, stored.description), (None, None, None));
     }
 }

@@ -26,6 +26,8 @@ use async_nats::jetstream::kv::{self, UpdateErrorKind};
 use async_nats::jetstream::{self, consumer};
 use futures::StreamExt as _;
 
+pub use change::{Change, Changed};
+
 use crate::people::humans::Me;
 
 /// Attempts at a compare-and-set update before giving up on a channel that keeps changing.
@@ -600,6 +602,7 @@ pub fn render(threads: &[Thread], by: &dyn Fn(&ChannelPost) -> String) -> String
     out
 }
 
+mod change;
 pub mod reads;
 #[cfg(test)]
 mod tests;

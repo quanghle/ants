@@ -156,40 +156,27 @@ async fn manage(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
     let humans = humans::load(&js, &nats.me).await;
     match command {
         ChannelCommand::Create { channel, members, messenger, owner, description } => {
-            channel::check_messenger_not_human(messenger.as_ref(), &humans)?;
-            channel::check_owner_not_human(owner.as_ref(), &humans)?;
+            let change = channel::Change {
+                add: members,
+                messenger: Some(messenger),
+                owner: Some(owner),
+                description: Some(description),
+                ..channel::Change::default()
+            };
+            change.check(&channel, &humans)?;
             let mut entry = ants_proto::ChannelEntry::new(channel);
-            entry.set_description(description.as_deref())?;
-            for member in members {
-                entry.add_member(member);
-            }
-            entry.messenger = messenger;
-            entry.owner = owner;
+            change.apply(&mut entry);
             channel::create(&kv, &entry).await?;
             warn_unserved(&js, entry.members.iter().chain(&entry.messenger).chain(&entry.owner), &humans).await;
             println!("created {}", channel::describe(&entry));
         }
         command @ ChannelCommand::Set { .. } => set(&js, &kv, &humans, command).await?,
         ChannelCommand::Add { channel, users } => {
-            let (entry, added) = channel::update(&kv, &channel, |entry| {
-                users.iter().filter(|p| entry.add_member((*p).clone())).cloned().collect::<Vec<_>>()
-            })
-            .await?;
-            for user in users.iter().filter(|p| !added.contains(p)) {
-                tracing::warn!("{user} is already a member of #{channel}");
-            }
-            warn_unserved(&js, &added, &humans).await;
-            println!("{}", channel::describe(&entry));
+            write(&js, &kv, &humans, &channel, &channel::Change { add: users, ..channel::Change::default() }).await?;
         }
         ChannelCommand::Remove { channel, users } => {
-            let (entry, removed) = channel::update(&kv, &channel, |entry| {
-                users.iter().filter(|p| entry.remove_member(p)).cloned().collect::<Vec<_>>()
-            })
-            .await?;
-            for user in users.iter().filter(|p| !removed.contains(p)) {
-                tracing::warn!("{user} is no member of #{channel}");
-            }
-            println!("{}", channel::describe(&entry));
+            write(&js, &kv, &humans, &channel, &channel::Change { remove: users, ..channel::Change::default() })
+                .await?;
         }
         ChannelCommand::List => {
             let entries = channel::list(&kv).await?;
@@ -247,38 +234,35 @@ async fn set(
     else {
         unreachable!("`set` runs only `ants channel set`");
     };
-    let describes = description.is_some() || no_description;
-    let manages = members.is_some() || messenger.is_some() || default_messenger || owner.is_some() || no_owner;
-    if !manages && !describes {
+    let change = channel::Change {
+        members,
+        messenger: (messenger.is_some() || default_messenger).then_some(messenger),
+        owner: (owner.is_some() || no_owner).then_some(owner),
+        description: (description.is_some() || no_description).then_some(description),
+        ..channel::Change::default()
+    };
+    if change.is_empty() {
         bail!(
             "nothing to change: give --member, --messenger, --default-messenger, --owner, --no-owner, \
              --description or --no-description"
         );
     }
-    channel::check_messenger_not_human(messenger.as_ref(), humans)?;
-    channel::check_owner_not_human(owner.as_ref(), humans)?;
-    // Checked before the update, which stores whatever the closure leaves.
-    ants_proto::ChannelEntry::new(channel.clone()).set_description(description.as_deref())?;
-    let (entry, ()) = channel::update(kv, &channel, |entry| {
-        if let Some(members) = &members {
-            entry.members.clear();
-            for member in members {
-                entry.add_member(member.clone());
-            }
-        }
-        if messenger.is_some() || default_messenger {
-            entry.messenger.clone_from(&messenger);
-        }
-        if owner.is_some() || no_owner {
-            entry.owner.clone_from(&owner);
-        }
-        if describes {
-            let _ = entry.set_description(description.as_deref());
-        }
-    })
-    .await?;
-    warn_unserved(js, members.iter().flatten().chain(&messenger).chain(&owner), humans).await;
-    println!("{}", channel::describe(&entry));
+    write(js, kv, humans, &channel, &change).await
+}
+
+/// Write `change` to `channel`, warning of what it warns of, and print the channel as it stored it.
+async fn write(
+    js: &async_nats::jetstream::Context,
+    kv: &async_nats::jetstream::kv::Store,
+    humans: &ants_proto::Humans,
+    channel: &ChannelId,
+    change: &channel::Change,
+) -> Result<()> {
+    let changed = change.write(js, kv, channel, humans).await?;
+    for warning in &changed.warnings {
+        tracing::warn!("{warning}");
+    }
+    println!("{}", channel::describe(&changed.entry));
     Ok(())
 }
 

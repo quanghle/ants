@@ -34,15 +34,14 @@ pub fn rows(screen: Rect) -> u16 {
 pub fn draw(frame: &mut Frame, area: Rect, data: &Data, channel: &ChannelId, now: DateTime<Utc>) {
     let entry = data.channels.iter().find(|c| c.channel == *channel);
     let level = data.level(channel);
-    if area.height < ROWS {
+    let Some([info, members, activity]) = panes(area) else {
         frame.render_widget(Paragraph::new(summary(entry, channel, data, now)), area);
         return;
-    }
-    let [info, members, activity] =
-        Layout::horizontal([Constraint::Fill(2), Constraint::Fill(2), Constraint::Fill(3)]).areas(area);
+    };
     let inner = |r: Rect| (usize::from(r.width.saturating_sub(2)), usize::from(r.height.saturating_sub(2)));
     let (width, rows) = inner(info);
-    let block = style::block(format!(" #{channel} · notify {level} "), false);
+    let manage = Line::styled(" M manage ", style::dim()).right_aligned();
+    let block = style::block(format!(" #{channel} · notify {level} "), false).title_bottom(manage);
     frame.render_widget(Paragraph::new(about(entry, width, rows)).block(block), info);
     let (width, rows) = inner(members);
     let (title, lines) = match entry {
@@ -59,6 +58,12 @@ pub fn draw(frame: &mut Frame, area: Rect, data: &Data, channel: &ChannelId, now
         lines.push(Line::styled("nothing yet", style::dim()));
     }
     frame.render_widget(Paragraph::new(lines).block(style::block(" activity ".to_owned(), false)), activity);
+}
+
+/// The panes of the header in `area`: the channel's, its members' and its activity's; none when it is one line.
+pub fn panes(area: Rect) -> Option<[Rect; 3]> {
+    (area.height >= ROWS)
+        .then(|| Layout::horizontal([Constraint::Fill(2), Constraint::Fill(2), Constraint::Fill(3)]).areas(area))
 }
 
 /// The header in one line: the channel, its notify level, how many members it has and its latest activity.
@@ -107,7 +112,7 @@ fn about(entry: Option<&ChannelEntry>, width: usize, rows: usize) -> Vec<Line<'s
 
 /// A member: an ant with its state's mark and its face, a human by name; then a mark if it owns the channel, and
 /// another if it is its messenger.
-fn member(user: &UserId, entry: &ChannelEntry, data: &Data, now: DateTime<Utc>) -> Vec<Span<'static>> {
+pub fn member(user: &UserId, entry: &ChannelEntry, data: &Data, now: DateTime<Utc>) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     if !data.is_human(user) {
         let entries: Vec<&ColonyEntry> = data.live.colony.iter().filter(|e| e.ant == *user).collect();

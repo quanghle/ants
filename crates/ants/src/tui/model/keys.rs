@@ -66,6 +66,13 @@ impl Model {
         }
         if !self.bar.focused
             && self.focus == Focus::View
+            && let Some(Page::Channel(page)) = self.pages.last_mut()
+            && let Some(to) = page.write(key, &self.data)
+        {
+            return to.and_then(|to| self.go(to, now));
+        }
+        if !self.bar.focused
+            && self.focus == Focus::View
             && let Some(action) = self.card_key(key, now)
         {
             return action;
@@ -375,6 +382,9 @@ fn pasted(text: &str) -> String {
 
 /// Type `line` into the draft `page` is writing, if any: whether it took it.
 fn write(page: &mut Page, line: &str) -> bool {
+    if let Page::Channel(page) = page {
+        return page.paste(line);
+    }
     line.chars().all(|c| match page {
         Page::Dm(page) => page.write(Key::Char(c)).is_some(),
         Page::Ant(page) => page.write(Key::Char(c)).is_some(),

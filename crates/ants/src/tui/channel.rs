@@ -24,6 +24,7 @@ use crate::threads::thread::{Entry, Kind};
 
 mod activity;
 mod header;
+mod members;
 mod tabs;
 
 pub use activity::Activity;
@@ -164,15 +165,39 @@ pub struct Page {
     selected: Selection<Uuid>,
     /// The attachment `o` opens of the post with them, by its id.
     mark: attach::Mark<Uuid>,
+    /// The members editor `M` opens.
+    editor: Option<members::Editor>,
 }
 
 impl Page {
     pub fn new(channel: ChannelId) -> Self {
-        Self { channel, selected: Selection::default(), mark: attach::Mark::default() }
+        Self { channel, selected: Selection::default(), mark: attach::Mark::default(), editor: None }
     }
 
     pub const KEYS: &str =
-        "↑↓ post · Enter open its thread · ←→ tab · n notify level · o open file · ] next file · Esc nav";
+        "↑↓ post · Enter open its thread · ←→ tab · n notify level · M manage · o open file · ] next file · Esc nav";
+
+    pub fn keys(&self) -> &'static str {
+        self.editor.as_ref().map_or(Self::KEYS, members::Editor::keys)
+    }
+
+    /// Take `key` for the members editor when it is open: what to do, if anything.
+    pub fn write(&mut self, key: Key, data: &Data) -> Option<Option<To>> {
+        let editor = self.editor.as_mut()?;
+        Some(match editor.key(key, &self.channel, data) {
+            members::Edited::Kept => None,
+            members::Edited::Closed => {
+                self.editor = None;
+                None
+            }
+            members::Edited::To(to) => Some(*to),
+        })
+    }
+
+    /// Take `line` pasted for the members editor when it is open, into the row typed in if any.
+    pub fn paste(&mut self, line: &str) -> bool {
+        self.editor.as_mut().is_some_and(|editor| editor.paste(line))
+    }
 
     /// The tab chosen, as kept on the device.
     pub fn tab(&self, data: &Data) -> Tab {
@@ -223,6 +248,13 @@ impl Page {
                 self.selected = Selection::default();
                 return Some(To::Do(Action::KeepChannelTab(self.channel.clone(), tab)));
             }
+            Key::Char('M') => {
+                if !data.channels.iter().any(|c| c.channel == self.channel) {
+                    return Some(To::Refused(format!("#{} is not read yet", self.channel)));
+                }
+                self.editor = Some(members::Editor::default());
+                return None;
+            }
             Key::Char('n') => {
                 let level = next_level(data.level(&self.channel));
                 return Some(To::Do(Action::Run(
@@ -262,6 +294,7 @@ impl Page {
                 (Some(_), tab) => format!("no thread is {}", tab.label()),
             };
             frame.render_widget(Paragraph::new(text).block(block), area);
+            self.draw_editor(frame, head, tabs_row.union(area), data, now);
             return;
         }
         let selected = self.at(data);
@@ -275,6 +308,22 @@ impl Page {
             .collect();
         let list = List::new(items).block(block).highlight_style(style::highlight(focused));
         frame.render_stateful_widget(list, area, &mut ListState::default().with_selected(Some(selected)));
+        self.draw_editor(frame, head, tabs_row.union(area), data, now);
+    }
+
+    /// The members editor, if open: over the members pane of the header `head`, as wide as it needs; over the top
+    /// of `view` under a header in one line.
+    fn draw_editor(&self, frame: &mut Frame, head: Rect, view: Rect, data: &Data, now: DateTime<Utc>) {
+        let Some(editor) = &self.editor else { return };
+        let Some(entry) = data.channels.iter().find(|c| c.channel == self.channel) else { return };
+        let bottom = view.bottom();
+        let (x, y, width) = match header::panes(head) {
+            Some([_, members, _]) => (members.x, members.y, members.width.max(44)),
+            None => (view.x, view.y, view.width.min(60)),
+        };
+        let width = width.min(view.right().saturating_sub(x));
+        let height = editor.height(entry, data).min(bottom.saturating_sub(y));
+        editor.draw(frame, Rect { x, y, width, height }, entry, data, now);
     }
 }
 

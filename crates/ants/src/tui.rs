@@ -396,6 +396,9 @@ impl Chat {
             outcome = self.exec.next() => {
                 // A title set through the bar shows once read back.
                 self.cards.refresh();
+                if outcome.result.as_ref().is_ok_and(|done| done.channel.is_some()) {
+                    self.reads.read_directory();
+                }
                 self.model.outcome(outcome).into_iter().collect()
             }
             acted = self.acts.next() => {

@@ -289,6 +289,12 @@ impl Reads {
         self.to_react.push_back((message, reaction, remove));
     }
 
+    /// Read the directory again now, as the human changed a channel's entry.
+    pub fn read_directory(&mut self) {
+        self.directories.reset_immediately();
+        self.directory = None;
+    }
+
     /// Read everything again now.
     pub fn refresh(&mut self) {
         self.markers.reset_immediately();

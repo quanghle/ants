@@ -11,7 +11,7 @@ use ratatui::widgets::{Clear, Paragraph};
 
 use super::model::{Focus, Level, Model, Page};
 use super::style::{self, block, dim};
-use super::{approvals, catchup, channel, compact, home, nav, search, thread, work};
+use super::{approvals, catchup, compact, home, nav, search, thread, work};
 
 /// How wide the nav is.
 const NAV_WIDTH: u16 = 24;
@@ -92,7 +92,7 @@ fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
         (Focus::View, _, Some(cursor)) => cursor.keys(),
         (Focus::View, Page::Home(_), _) => home::Page::KEYS,
         (Focus::View, Page::Work(_), _) => work::Page::KEYS,
-        (Focus::View, Page::Channel(_), _) => channel::Page::KEYS,
+        (Focus::View, Page::Channel(page), _) => page.keys(),
         (Focus::View, Page::Thread(_), _) => thread::Page::KEYS,
         (Focus::View, Page::Dm(page), _) => page.keys(),
         (Focus::View, Page::Search(_), _) => search::Page::KEYS,
@@ -127,7 +127,7 @@ const HELP: &[(&str, &str)] = &[
     ("x Ctrl-X", "in a thread or work: cancel the prompt running there"),
     ("W E", "in a thread: withdraw a waiting message or post, or to edit it"),
     ("x y", "in a delegation tree: cancel every prompt in the selected subtree"),
-    ("n", "with a person: write a message; in a channel: its next notify level"),
+    ("n M", "with a person: write a message; in a channel: notify level, members"),
     ("/", "the bar on /search, as in: /search deploy from:dev-a"),
     ("R ?", "read everything again, this help"),
     ("q Ctrl-C", "quit"),
