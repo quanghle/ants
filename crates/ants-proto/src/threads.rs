@@ -395,6 +395,12 @@ impl ThreadMarks {
     ) -> Option<Mark> {
         self.mark(thread, last).or_else(|| cutoff.is_some_and(|c| self.idle(thread, last_at, c)).then_some(Mark::Idle))
     }
+
+    /// Whether lists leave `thread` out, marked as [`ThreadMarks::mark_at`] says: archived with no message stored on
+    /// it since, or idle.
+    pub fn hides(&self, thread: &ThreadId, last: u64, last_at: DateTime<Utc>, cutoff: Option<DateTime<Utc>>) -> bool {
+        matches!(self.mark_at(thread, last, last_at, cutoff), Some(Mark::Archived { new_activity: false } | Mark::Idle))
+    }
 }
 
 #[cfg(test)]

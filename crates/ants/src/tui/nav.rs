@@ -82,13 +82,13 @@ pub fn marker(entries: &[&ColonyEntry], now: DateTime<Utc>) -> (&'static str, Co
     ("●", style::CONNECTED)
 }
 
-/// The channel's unread posts its notify level counts, @mentions of the human and the other posts among those read,
-/// once which are read is known; else, without the credentials to know, only its unread @mentions as its inbox tells
+/// The channel's unread posts its notify level counts, @mentions of the human and the other posts among those read
+/// but for those on archived and idle threads, once which are read is known; else, without the credentials to know, only its unread @mentions as its inbox tells
 /// of them.
 fn unread(data: &Data, channel: &ChannelId) -> Unread {
     if let Some(markers) = &data.channel_reads {
         let (marker, level) = (markers.channels.get(channel), data.level(channel));
-        return data.feeds.unread(channel, marker, data.me(), level, |u| data.is_human(u));
+        return data.feeds.unread(channel, marker, data.me(), level, |u| data.is_human(u), |t| data.live.hidden(t));
     }
     let mentions = data
         .live

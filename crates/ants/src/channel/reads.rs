@@ -107,7 +107,8 @@ impl Unread {
 }
 
 /// The unread posts of `channel` by `markers`, for `reader` at notify level `level`, the team's humans being
-/// `humans`: only those after what the marker has read up to are read from the stream.
+/// `humans`, but for those on the threads `archive` leaves out: only those after what the marker has read up to are
+/// read from the stream.
 pub async fn unread(
     js: &jetstream::Context,
     reader: &Me,
@@ -115,10 +116,17 @@ pub async fn unread(
     markers: &ChannelReadMarkers,
     channel: &ChannelId,
     level: ChannelNotify,
+    archive: Option<&super::Archive>,
 ) -> Result<Unread> {
     let marker = markers.channels.get(channel);
     let from = marker.map_or(0, |m| m.below + 1);
     let posts = super::read_from(js, reader, channel, from).await?;
-    let posts = posts.iter().map(|(seq, post)| (*seq, &post.from, post.mentions.as_slice()));
+    // A thread with an unread post has its later posts read too, so its last post is among those read.
+    let hidden =
+        archive.map_or_else(std::collections::HashSet::new, |a| a.hidden(posts.iter().map(|(seq, post)| (*seq, post))));
+    let posts = posts
+        .iter()
+        .filter(|(_, post)| !hidden.contains(&post.thread_id))
+        .map(|(seq, post)| (*seq, &post.from, post.mentions.as_slice()));
     Ok(Unread::of(posts, marker, &reader.id, level, |u| humans.contains(u)))
 }

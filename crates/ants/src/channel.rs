@@ -18,7 +18,9 @@ use ants_daemon::bus;
 pub use ants_daemon::channel::list;
 use ants_daemon::channel::{CLOCK_SLACK, OriginFold, Stored, load, read_back};
 use ants_daemon::records::webhooks::Webhooks;
-use ants_proto::{ChannelEntry, ChannelId, ChannelPost, Humans, ThreadId, ThreadOrigin, UserId, Uuid, subject};
+use ants_proto::{
+    ChannelEntry, ChannelId, ChannelPost, Humans, ThreadId, ThreadMarks, ThreadOrigin, UserId, Uuid, subject,
+};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::kv::{self, UpdateErrorKind};
 use async_nats::jetstream::{self, consumer};
@@ -516,6 +518,30 @@ impl Thread {
     /// Whether the post that started the thread is among its posts.
     pub fn has_start(&self) -> bool {
         self.posts.first().is_some_and(ChannelPost::starts_thread)
+    }
+}
+
+/// What leaves the threads a human archived or left idle out of `ants channel read` and the unread posts counted.
+#[derive(Debug, Clone, Default)]
+pub struct Archive {
+    /// The human's marks.
+    pub marks: ThreadMarks,
+    /// The time threads last active then or before count as archived ([`crate::threads::thread::idle_before`]).
+    pub idle_before: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl Archive {
+    /// The threads of `posts`, each with its sequence, oldest first, left out by their last post: archived with no
+    /// post since, or idle.
+    pub fn hidden<'a>(&self, posts: impl IntoIterator<Item = (u64, &'a ChannelPost)>) -> HashSet<ThreadId> {
+        let mut last = HashMap::new();
+        for (seq, post) in posts {
+            last.insert(&post.thread_id, (seq, post.sent_at));
+        }
+        last.into_iter()
+            .filter(|(thread, (seq, at))| self.marks.hides(thread, *seq, *at, self.idle_before))
+            .map(|(thread, _)| thread.clone())
+            .collect()
     }
 }
 

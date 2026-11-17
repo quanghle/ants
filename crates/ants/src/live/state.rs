@@ -2,10 +2,10 @@
 //! each thread's live progress, the colony, the pending tool requests and the state of the connection, and a thread's
 //! history as it loads.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use ants_proto::{ApprovalRequest, ColonyEntry, Mark, StatusEvent, StatusUpdate, ThreadId, ThreadMarks, UserId, Uuid};
+use ants_proto::{ApprovalRequest, ColonyEntry, StatusEvent, StatusUpdate, ThreadId, ThreadMarks, UserId, Uuid};
 use chrono::{DateTime, Utc};
 
 use crate::messages::progress;
@@ -38,6 +38,8 @@ pub struct State {
     pub auto_archive: Option<Duration>,
     /// The threads, most recently active first, but for the archived ones with no message since and the idle ones.
     pub order: Vec<ThreadId>,
+    /// The archived threads with no message since and the idle ones, which lists leave out.
+    hidden: HashSet<ThreadId>,
     pub progress: HashMap<ThreadId, Progress>,
     /// The messages waiting their turn on their thread, by id, with how many go before each, as the ants' daemons
     /// told; a message leaves once its turn comes.
@@ -62,6 +64,7 @@ impl State {
             marks: ThreadMarks::default(),
             auto_archive: None,
             order: Vec::new(),
+            hidden: HashSet::new(),
             progress: HashMap::new(),
             queued: HashMap::new(),
             colony: Vec::new(),
@@ -89,16 +92,21 @@ impl State {
     /// Order the threads again at `now`, as after the marks changed.
     pub fn reorder(&mut self, now: DateTime<Utc>) {
         let idle_before = thread::idle_before(self.auto_archive, now);
-        let shown = |s: &&Summary| {
-            if s.catch_up {
-                return false;
-            }
-            let mark = self.marks.mark_at(&s.thread_id, s.last_seq, s.last_at, idle_before);
-            !matches!(mark, Some(Mark::Archived { new_activity: false } | Mark::Idle))
-        };
-        let mut order: Vec<&Summary> = self.threads.summaries().filter(shown).collect();
+        self.hidden = self
+            .threads
+            .summaries()
+            .filter(|s| self.marks.hides(&s.thread_id, s.last_seq, s.last_at, idle_before))
+            .map(|s| s.thread_id.clone())
+            .collect();
+        let mut order: Vec<&Summary> =
+            self.threads.summaries().filter(|s| !s.catch_up && !self.hidden.contains(&s.thread_id)).collect();
         order.sort_by(|a, b| (b.last_at, &b.thread_id).cmp(&(a.last_at, &a.thread_id)));
         self.order = order.into_iter().map(|s| s.thread_id.clone()).collect();
+    }
+
+    /// Whether lists leave `thread` out: archived with no message since, or idle.
+    pub fn hidden(&self, thread: &ThreadId) -> bool {
+        self.hidden.contains(thread)
     }
 
     pub fn status(&mut self, event: &StatusEvent, now: DateTime<Utc>) {
@@ -251,9 +259,11 @@ mod tests {
         ];
         s.stored(&read, at(20));
         assert_eq!(s.order, [live.clone(), kept.clone()], "idle since 10s ago or archived");
+        assert!(s.hidden(&archived) && s.hidden(&idle) && !s.hidden(&kept) && !s.hidden(&live));
         let read = [message(21, &idle, "dev-a", "alice", "back"), message(22, &archived, "dev-a", "alice", "news")];
         s.stored(&read, at(22));
         assert_eq!(s.order, [archived.clone(), idle.clone(), live.clone(), kept]);
+        assert!(!s.hidden(&archived) && !s.hidden(&idle));
         s.stored(&[], at(26));
         assert_eq!(s.order, [archived, idle, live], "kept until idle since being kept");
     }

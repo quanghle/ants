@@ -90,8 +90,8 @@ pub struct CliDefaults {
     pub nats: Option<String>,
     pub creds: Option<PathBuf>,
     pub js_domain: Option<JsDomain>,
-    /// How long a thread goes without a message before `ants thread list` and `ants dash` take it as archived for
-    /// the CLI's human; None (unset or 0) for never.
+    /// How long a thread goes without a message before `ants thread list`, `ants dash`, `ants channel` and `ants chat`
+    /// take it as archived for the CLI's human; None (unset or 0) for never.
     pub auto_archive: Option<Duration>,
     /// When and whom to ask for catch-up summaries.
     pub summaries: SummaryConfig,

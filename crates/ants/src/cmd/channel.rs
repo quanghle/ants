@@ -11,7 +11,7 @@ use crate::channel::reads;
 use crate::connection::{Connection, Nats};
 use crate::people::{humans, quiet};
 use crate::release::upgrade;
-use crate::threads::thread;
+use crate::threads::{thread, thread_meta};
 use crate::{channel, colony, completions};
 
 #[derive(Subcommand, Debug)]
@@ -86,7 +86,7 @@ pub(crate) enum ChannelCommand {
     },
     /// List the channels with the members, the messenger and the owner of each; for a human member of any, also the
     /// unread posts its notify level of each channel it is a member of counts (by default, those by humans or
-    /// @mentioning it), with how many @mention it, and the other unread posts.
+    /// @mentioning it), with how many @mention it, and the other unread posts, those on archived threads left out.
     List,
     /// Show or set which unread posts of a channel count for the CLI's human, on all its devices: `all`, `humans`
     /// (posts by humans and @mentions, the default) or `mentions` (@mentions only). The others show apart and dim.
@@ -99,7 +99,9 @@ pub(crate) enum ChannelCommand {
         level: Option<ChannelNotify>,
     },
     /// Print the posts of a channel kept in the stream, by thread: the post that started each thread, then the
-    /// replies on the thread, indented. A human's printed posts are marked read on all its devices.
+    /// replies on the thread, indented. A human's printed posts are marked read on all its devices. The threads the
+    /// human archived (`ants thread archive`) are left out, but for those with a post since; with `auto_archive` set
+    /// in the config file's `[cli]`, so are those with no post for that long.
     Read {
         /// The channel: `ops` or `'#ops'`.
         #[arg(value_parser = channel::parse_channel)]
@@ -112,6 +114,9 @@ pub(crate) enum ChannelCommand {
         /// Only the last this many threads.
         #[arg(long, conflicts_with = "thread")]
         limit: Option<usize>,
+        /// Only the threads left out as archived.
+        #[arg(long, conflicts_with = "thread")]
+        archived: bool,
         /// Print without marking read.
         #[arg(long)]
         peek: bool,
@@ -210,8 +215,8 @@ async fn manage(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
                 }
             }
         }
-        ChannelCommand::Read { channel, thread, limit, peek } => {
-            read(nats, &js, &kv, &channel, thread, limit, peek).await?;
+        ChannelCommand::Read { channel, thread, limit, archived, peek } => {
+            read(nats, &js, &kv, &channel, Pick { thread, limit, archived }, peek).await?;
         }
         ChannelCommand::Delete { channel } => {
             channel::delete(&kv, &channel).await?;
@@ -277,31 +282,47 @@ async fn set(
     Ok(())
 }
 
-/// `ants channel read`: print the posts of `channel` by thread, marking those printed read unless `peek`.
+/// Which threads `ants channel read` prints.
+struct Pick {
+    thread: Option<thread::Pick>,
+    limit: Option<usize>,
+    /// Only those left out as archived, rather than only the others.
+    archived: bool,
+}
+
+/// `ants channel read`: print the posts of `channel` by thread, as `pick` picks the threads, marking those printed
+/// read unless `peek`.
 async fn read(
     nats: &Nats<'_>,
     js: &async_nats::jetstream::Context,
     kv: &async_nats::jetstream::kv::Store,
     channel: &ChannelId,
-    thread: Option<thread::Pick>,
-    limit: Option<usize>,
+    pick: Pick,
     peek: bool,
 ) -> Result<()> {
     if channel::get(kv, channel).await?.is_none() {
         tracing::warn!("no channel #{channel}; showing the posts kept for #{channel} anyway");
     }
-    let thread = thread::resolve(thread, nats, js).await?;
+    let thread = thread::resolve(pick.thread, nats, js).await?;
     let posts = channel::read_from(js, &nats.me, channel, 0).await?;
     let mut threads = channel::threads(posts.iter().map(|(_, post)| post.clone()).collect());
+    let mut left_out = 0;
     if let Some(thread) = &thread {
         threads.retain(|t| t.id == *thread);
+    } else if let Some(archive) = archive(nats, js, pick.archived).await? {
+        let hidden = archive.hidden(posts.iter().map(|(seq, post)| (*seq, post)));
+        let all = threads.len();
+        threads.retain(|t| hidden.contains(&t.id) == pick.archived);
+        left_out = all - threads.len();
     }
-    if let Some(limit) = limit {
+    if let Some(limit) = pick.limit {
         threads.drain(..threads.len().saturating_sub(limit));
     }
     if threads.is_empty() {
         match thread {
             Some(thread) => println!("no posts on thread {thread} of #{channel}"),
+            None if pick.archived => println!("no archived threads in #{channel}"),
+            None if left_out > 0 => println!("no posts in #{channel} but on {left_out} archived threads (--archived)"),
             None => println!("no posts in #{channel}"),
         }
     }
@@ -317,8 +338,33 @@ async fn read(
     Ok(())
 }
 
-/// The unread posts of each channel among `entries` the human of `nats` is a member of, if its credentials may read
-/// its channel read markers and it is a member of any; none, with a warning, when reading them fails.
+/// What leaves the archived and idle threads of the CLI's human out of `ants channel`: none for an ant's credentials,
+/// or, with a warning, when the human's marks cannot be read, unless `required`, which fails then.
+async fn archive(
+    nats: &Nats<'_>,
+    js: &async_nats::jetstream::Context,
+    required: bool,
+) -> Result<Option<channel::Archive>> {
+    if !nats.me.role.is_human() {
+        if required {
+            bail!("archived threads are a human's; the credentials of {} are an ant's", nats.me.id);
+        }
+        return Ok(None);
+    }
+    let idle_before = thread::idle_before(crate::defaults::auto_archive()?, chrono::Utc::now());
+    match async { thread_meta::open(nats, js).await?.marks().await }.await {
+        Ok(marks) => Ok(Some(channel::Archive { marks, idle_before })),
+        Err(e) if !required => {
+            tracing::warn!("not leaving archived threads out: {e:#}");
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// The unread posts of each channel among `entries` the human of `nats` is a member of, but for those on its
+/// archived threads, if its credentials may read its channel read markers and it is a member of any; none, with a
+/// warning, when reading them fails.
 async fn unread(
     nats: &Nats<'_>,
     js: &async_nats::jetstream::Context,
@@ -328,6 +374,7 @@ async fn unread(
         return None;
     }
     let me = &nats.me;
+    let archive = archive(nats, js, false).await.inspect_err(|e| tracing::warn!("{e:#}")).ok().flatten();
     let counted = async {
         let (markers, _) = reads::ChannelReads::open(js, &me.id).await?.markers().await?;
         let humans = crate::people::humans::read(js).await?;
@@ -335,8 +382,8 @@ async fn unread(
         let mut unread = HashMap::new();
         for entry in entries.iter().filter(|e| e.is_member(&me.id)) {
             let level = prefs.channel(&entry.channel);
-            unread
-                .insert(entry.channel.clone(), reads::unread(js, me, &humans, &markers, &entry.channel, level).await?);
+            let counted = reads::unread(js, me, &humans, &markers, &entry.channel, level, archive.as_ref()).await?;
+            unread.insert(entry.channel.clone(), counted);
         }
         anyhow::Ok(unread)
     };

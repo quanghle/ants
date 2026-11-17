@@ -1,5 +1,6 @@
 //! A channel's feed: its top-level posts, newest first, each with its replies' count and latest time and the reactions
-//! to it, as `ants channel read` shows them; and which of the channels' posts the human has not read.
+//! to it, as `ants channel read` shows them, but for those of the threads the human archived or left idle; and which of
+//! the channels' posts the human has not read.
 
 use std::collections::HashMap;
 
@@ -120,7 +121,7 @@ impl Feeds {
     }
 
     /// The channel's posts read that `marker` (none: nothing read) leaves unread for `me` at notify level `level`,
-    /// `is_human` telling a human author from an ant.
+    /// `is_human` telling a human author from an ant, but for those on the threads `hidden` leaves out.
     pub fn unread(
         &self,
         channel: &ChannelId,
@@ -128,8 +129,9 @@ impl Feeds {
         me: &UserId,
         level: ChannelNotify,
         is_human: impl Fn(&UserId) -> bool,
+        hidden: impl Fn(&ThreadId) -> bool,
     ) -> Unread {
-        let posts = self.seen.get(channel).into_iter().flatten();
+        let posts = self.seen.get(channel).into_iter().flatten().filter(|s| !hidden(&s.thread));
         Unread::of(posts.map(|s| (s.seq, &s.from, s.mentions.as_slice())), marker, me, level, is_human)
     }
 
@@ -155,13 +157,18 @@ impl Page {
 
     pub const KEYS: &str = "↑↓ post · Enter open its thread · w its threads in work · n notify level · o open file · ] next file · Esc nav";
 
+    /// The channel's top-level posts shown, newest first: those of archived and idle threads are left out.
+    fn posts<'d>(&self, data: &'d Data) -> impl Iterator<Item = &'d Post> {
+        data.feeds.posts(&self.channel).filter(|p| !data.live.hidden(&p.thread))
+    }
+
     /// The selected post.
     pub fn post<'d>(&self, data: &'d Data) -> Option<&'d Post> {
-        data.feeds.posts(&self.channel).nth(self.at(data))
+        self.posts(data).nth(self.at(data))
     }
 
     fn ids(&self, data: &Data) -> Vec<Uuid> {
-        data.feeds.posts(&self.channel).map(|p| p.id).collect()
+        self.posts(data).map(|p| p.id).collect()
     }
 
     /// Where the selected post is among the channel's.
@@ -211,11 +218,18 @@ impl Page {
     }
 
     pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
-        let posts: Vec<&Post> = data.feeds.posts(&self.channel).collect();
+        let posts: Vec<&Post> = self.posts(data).collect();
+        let archived = data.feeds.posts(&self.channel).count() - posts.len();
         let level = data.level(&self.channel);
-        let block = style::block(format!(" #{} ({} posts · notify {level}) ", self.channel, posts.len()), focused);
+        let archived_note = if archived == 0 { String::new() } else { format!(" · {archived} archived") };
+        let title = format!(" #{} ({} posts{archived_note} · notify {level}) ", self.channel, posts.len());
+        let block = style::block(title, focused);
         if posts.is_empty() {
-            let text = if data.live.stored_at.is_some() { "no posts read" } else { "reading the stream…" };
+            let text = match (data.live.stored_at, archived) {
+                (None, _) => "reading the stream…",
+                (Some(_), 0) => "no posts read",
+                (Some(_), _) => "only posts on archived threads",
+            };
             frame.render_widget(Paragraph::new(text).block(block), area);
             return;
         }
@@ -316,6 +330,31 @@ mod tests {
         m.key(super::super::model::Key::Char('w'), at(5));
         let View::Work(work) = m.page() else { panic!("not the work view") };
         assert_eq!(work.filter, Filter { channel: Some(ops), ..Filter::default() });
+    }
+
+    #[test]
+    fn posts_on_archived_threads_leave_the_feed_and_its_unread_count_until_one_comes_on_them() {
+        let ops: ChannelId = "ops".parse().unwrap();
+        let done = ChannelPost::new(ops.clone(), user("bob"), "fixed");
+        let open = ChannelPost::new(ops.clone(), user("bob"), "deploy at noon");
+        let mut m = model();
+        m.data.live.marks.archive(&done.thread_id, 2);
+        m.stored(vec![post(1, &done), post(2, &open)], at(2));
+        m.select(nav::Item::Channel(ops.clone()));
+        let shown = |m: &crate::tui::model::Model| {
+            let View::Channel(page) = m.page() else { panic!("not the channel") };
+            page.posts(&m.data).map(|p| p.thread.clone()).collect::<Vec<_>>()
+        };
+        let unread = |m: &crate::tui::model::Model| {
+            let hidden = |t: &ThreadId| m.data.live.hidden(t);
+            m.data.feeds.unread(&ops, None, &user("alice"), ChannelNotify::All, |_| true, hidden).posts
+        };
+        assert_eq!(shown(&m), std::slice::from_ref(&open.thread_id));
+        assert_eq!(unread(&m), 1);
+        let reply = ChannelPost::on_thread(ops.clone(), done.thread_id.clone(), user("bob"), "broke again");
+        m.stored(vec![post(3, &reply)], at(3));
+        assert_eq!(shown(&m), [open.thread_id, done.thread_id], "posted on since it was archived");
+        assert_eq!(unread(&m), 3);
     }
 
     #[test]

@@ -135,6 +135,22 @@ fn posts_group_by_thread_with_replies_indented() {
     assert!(render(&grouped[3..], &alice).contains(" alice via dev-b: lost root\n"));
 }
 
+#[test]
+fn archived_and_idle_threads_are_left_out_by_their_last_post() {
+    let (done, quiet, busy) = (
+        at(ChannelPost::new(ops(), UserId::human(), "fixed"), 0),
+        at(ChannelPost::new(ops(), UserId::human(), "anyone?"), 1),
+        at(ChannelPost::new(ops(), UserId::human(), "deploying"), 2),
+    );
+    let mut archive = Archive { idle_before: Some(quiet.sent_at), ..Archive::default() };
+    archive.marks.archive(&done.thread_id, 3);
+    archive.marks.archive(&busy.thread_id, 3);
+    let reply = at(busy.reply(p("dev-a"), "done", &[], &Humans::default()).unwrap(), 4);
+    let posts = [(1, &done), (2, &quiet), (3, &busy), (4, &reply)];
+    let hidden = archive.hidden(posts);
+    assert_eq!(hidden, HashSet::from([done.thread_id, quiet.thread_id]), "busy has a post since it was archived");
+}
+
 /// With the human's credentials, so it also checks what they allow.
 #[tokio::test]
 async fn the_human_manages_channels_and_reads_them_back() {
@@ -401,7 +417,7 @@ async fn a_human_marks_channel_posts_read_for_itself_only() {
     let unread_at = |markers: ChannelReadMarkers, level| {
         let (js, me) = (a_js.clone(), as_alice.clone());
         let humans = ants_proto::Humans::from_entries([("bob", ants_proto::HumanEntry::new(p("bob")))]);
-        async move { reads::unread(&js, &me, &humans, &markers, &ops(), level).await.unwrap() }
+        async move { reads::unread(&js, &me, &humans, &markers, &ops(), level, None).await.unwrap() }
     };
     let unread = |markers| unread_at(markers, ChannelNotify::default());
     let counted = reads::Unread { posts: 2, mentions: 1, other: 1 };

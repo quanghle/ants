@@ -1,7 +1,7 @@
 //! A direct-message view with another human: the threads with messages between the CLI's human and that human, the
-//! newest first, each with its latest message and the messages the human has not read, by its read marker. `n` writes
-//! a message that starts a new thread, as `ants ask @human` does; `Enter` opens a thread. A DM is between two
-//! humans: a group talks in a channel.
+//! newest first, but for those the human archived or left idle, each with its latest message and the messages the
+//! human has not read, by its read marker. `n` writes a message that starts a new thread, as `ants ask @human` does;
+//! `Enter` opens a thread. A DM is between two humans: a group talks in a channel.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -103,14 +103,20 @@ impl Dms {
     }
 }
 
+/// The threads with messages between the human and `with` shown, the latest message newest first: archived and idle
+/// threads are left out.
+fn shown<'d>(data: &'d Data, with: &UserId) -> Vec<&'d Dm> {
+    data.people.dms.with(with).into_iter().filter(|dm| !data.live.hidden(&dm.thread)).collect()
+}
+
 /// How many messages on the thread the human has not read.
 fn unread_on(data: &Data, dm: &Dm) -> usize {
     dm.received.iter().filter(|seq| data.unread(**seq)).count()
 }
 
-/// How many messages from `with` the human has not read.
+/// How many messages from `with` on the threads shown the human has not read.
 pub fn unread(data: &Data, with: &UserId) -> usize {
-    data.people.dms.with(with).into_iter().map(|dm| unread_on(data, dm)).sum()
+    shown(data, with).into_iter().map(|dm| unread_on(data, dm)).sum()
 }
 
 /// What a message says, in a line: where every message of the view is rendered, a sealed one after a lock.
@@ -171,7 +177,7 @@ impl Page {
     }
 
     pub fn key(&mut self, key: Key, data: &Data) -> Option<To> {
-        let dms = data.people.dms.with(&self.with);
+        let dms = shown(data, &self.with);
         let threads: Vec<ThreadId> = dms.iter().map(|dm| dm.thread.clone()).collect();
         let at = self.selected.at(&threads);
         let to = match key {
@@ -215,7 +221,7 @@ impl Page {
             Some(false) => " · away",
             None => "",
         };
-        let dms = data.people.dms.with(&self.with);
+        let dms = shown(data, &self.with);
         let block = style::block(format!(" {}{state} ", self.with), focused && self.draft.is_none());
         if dms.is_empty() {
             let text = if data.live.stored_at.is_some() {
@@ -276,6 +282,22 @@ mod tests {
         m.data.marker.as_mut().unwrap().mark(2);
         assert_eq!(unread(&m.data, &user("bob")), 1, "read by the human's marker");
         assert_eq!(said(&dms[0].latest, 80), "bob: review my PR");
+    }
+
+    #[test]
+    fn archived_dm_threads_leave_the_list_and_its_unread_count() {
+        let (old, new) = (ThreadId::generate(), ThreadId::generate());
+        let mut m = model();
+        m.data.live.marks.archive(&old, 2);
+        m.stored(vec![message(1, &old, "bob", "alice", "lunch?"), message(2, &new, "bob", "alice", "PR")], at(2));
+        let threads = |m: &crate::tui::model::Model| -> Vec<ThreadId> {
+            shown(&m.data, &user("bob")).into_iter().map(|dm| dm.thread.clone()).collect()
+        };
+        assert_eq!(threads(&m), std::slice::from_ref(&new));
+        assert_eq!(unread(&m.data, &user("bob")), 1);
+        m.stored(vec![message(3, &old, "bob", "alice", "still on?")], at(3));
+        assert_eq!(threads(&m), [old, new], "a message since brings it back");
+        assert_eq!(unread(&m.data, &user("bob")), 3);
     }
 
     #[test]
