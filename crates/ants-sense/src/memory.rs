@@ -2,7 +2,8 @@
 //! is never overwritten or deleted: a new one supersedes it ([`Status::Superseded`], linked both ways), so its chain
 //! can be read back ([`chain`]). Core memories ([`core`]) appear in every brief, within [`CORE_BUDGET`].
 //!
-//! [`remember`] answers `sense_remember`, [`recall`] `sense_recall` (ranked by [`score`]) and [`vote`] `sense_vote`.
+//! [`remember`] answers `sense_remember`, [`recall`] `sense_recall` (ranked by [`score`]) and [`vote`] `sense_vote`;
+//! [`maintain`] is the daemon's daily maintenance.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -10,6 +11,7 @@ use std::str::FromStr;
 
 use ants_proto::UserId;
 use ants_proto::provider::CallContext;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -17,11 +19,17 @@ use crate::items::{Item, ItemId, Values};
 use crate::store::{Items, StoreError, Write};
 
 mod citations;
+mod maintain;
 mod recall;
 mod remember;
 mod vote;
 
 pub use citations::{CitationProblem, CitationRecheck, CitationWarning, recheck_citations};
+pub use maintain::{
+    ACCESS_WEIGHT, Action, CORE_IDLE_DAYS, CORE_USES, DECAY_FLOOR, MAINTENANCE, MAINTENANCE_EVERY_HOURS,
+    MAX_ACCESS_DAYS, MAX_CHANGES, MAX_CLUSTERS, Maintained, Maintenance, RETIRE_AFTER_DAYS, duplicates,
+    last_maintenance, maintain, needs_review, next_maintenance, salience,
+};
 pub use recall::{
     HALF_LIFE_DAYS, HELPFUL_WEIGHT, MAX_HELPFUL, NEEDS_REVIEW_WEIGHT, NOTE, Ranked, STALE_WEIGHT, framed, participants,
     recall, score, search, snippet, thread_repo, top,
@@ -210,8 +218,10 @@ pub enum Status {
     Superseded,
     /// Voted wrong.
     Wrong,
-    /// Voted stale, or its citations changed since it was written: to check again.
+    /// Voted stale, its citations changed since it was written, or faded with disuse ([`maintain`]): to check again.
     NeedsReview,
+    /// Left needing review, untouched, until maintenance retired it ([`RETIRE_AFTER_DAYS`]).
+    Retired,
 }
 
 impl Status {
@@ -221,6 +231,7 @@ impl Status {
             Self::Superseded => "superseded",
             Self::Wrong => "wrong",
             Self::NeedsReview => "needs_review",
+            Self::Retired => "retired",
         }
     }
 
@@ -294,6 +305,27 @@ pub struct Memory {
     pub digest: String,
     #[serde(default, skip_serializing_if = "Votes::is_empty")]
     pub votes: Votes,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<Access>,
+}
+
+/// How often a memory was read in full (`sense_recall` with its id, in a thread a webhook did not start): on how
+/// many days, each counted once, and when last.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Access {
+    pub days: u32,
+    pub last: DateTime<Utc>,
+}
+
+impl Access {
+    /// `access` after a read at `at`; none when a read was counted on that day (UTC) already.
+    pub fn read(access: Option<Self>, at: DateTime<Utc>) -> Option<Self> {
+        match access {
+            Some(access) if access.last.date_naive() >= at.date_naive() => None,
+            Some(access) => Some(Self { days: access.days.saturating_add(1), last: at }),
+            None => Some(Self { days: 1, last: at }),
+        }
+    }
 }
 
 impl Memory {
@@ -316,6 +348,7 @@ impl Memory {
             supersedes: None,
             superseded_by: None,
             votes: Votes::default(),
+            access: None,
         }
     }
 
@@ -340,6 +373,17 @@ impl Memory {
     /// The bytes it takes of [`CORE_BUDGET`]: its title's and its body's.
     pub fn core_bytes(&self) -> usize {
         self.title.len() + self.body.len()
+    }
+
+    /// When it was last used: written, voted helpful or read in full, whichever came last.
+    pub fn last_used(&self) -> DateTime<Utc> {
+        let read = self.access.map(|access| access.last);
+        [self.votes.confirmed, read].into_iter().flatten().fold(self.writer.at, DateTime::max)
+    }
+
+    /// How often it was used: its helpful votes and the days it was read in full.
+    pub fn uses(&self) -> u32 {
+        self.votes.helpful.saturating_add(self.access.map_or(0, |access| access.days))
     }
 }
 
@@ -379,12 +423,18 @@ pub fn digest(body: &str) -> String {
 
 /// How alike two texts are, from 0 to 1: the words they share of all their words (Jaccard), in lower case.
 pub fn similarity(a: &str, b: &str) -> f64 {
-    let words = |text: &str| -> BTreeSet<String> {
-        text.split(|c: char| !c.is_alphanumeric()).filter(|word| !word.is_empty()).map(str::to_lowercase).collect()
-    };
-    let (a, b) = (words(a), words(b));
-    let all = a.union(&b).count();
-    if all == 0 { 0.0 } else { a.intersection(&b).count() as f64 / all as f64 }
+    jaccard(&words(a), &words(b))
+}
+
+/// The words of `text`, in lower case, as [`similarity`] compares them.
+fn words(text: &str) -> BTreeSet<String> {
+    text.split(|c: char| !c.is_alphanumeric()).filter(|word| !word.is_empty()).map(str::to_lowercase).collect()
+}
+
+fn jaccard(a: &BTreeSet<String>, b: &BTreeSet<String>) -> f64 {
+    let shared = a.intersection(b).count();
+    let all = a.len() + b.len() - shared;
+    if all == 0 { 0.0 } else { shared as f64 / all as f64 }
 }
 
 /// Whether `text` holds a whole block of recalled memories: [`RECALLED_BEGIN`], then [`RECALLED_END`].

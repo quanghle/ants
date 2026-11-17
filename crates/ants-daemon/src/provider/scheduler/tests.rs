@@ -17,6 +17,8 @@ use crate::sync::MutexExt as _;
 
 mod probes;
 
+const DAY: Duration = Duration::from_hours(24);
+
 struct One {
     items: Arc<dyn Items>,
     reads: AtomicUsize,
@@ -141,7 +143,7 @@ async fn an_empty_schedule_sleeps_until_maintenance_or_a_tool_changes_it() {
     let scheduler = start(sense.clone(), host.clone(), settings());
     settle().await;
     let reads = stores.reads.load(Ordering::SeqCst);
-    tokio::time::advance(MAINTENANCE - Duration::from_secs(1)).await;
+    tokio::time::advance(DAY - Duration::from_secs(1)).await;
     settle().await;
     assert_eq!(stores.reads.load(Ordering::SeqCst), reads, "no trigger deadline means no polling before maintenance");
     let id = create(&sense, json!({"kind":"at","at":Utc::now()})).await;
@@ -239,7 +241,7 @@ async fn only_an_unknown_source_thread_falls_back_to_a_new_thread_with_the_same_
 async fn a_missing_host_stays_quiet_without_polling() {
     let scheduler = start(Arc::new(Sense::new()), Arc::new(Wakes::default()), settings());
     settle().await;
-    tokio::time::advance(MAINTENANCE).await;
+    tokio::time::advance(DAY).await;
     settle().await;
     assert!(scheduler.0.lock().await.as_ref().is_some_and(|task| !task.is_finished()));
     scheduler.stop().await;
@@ -257,7 +259,7 @@ async fn a_reminder_without_a_source_thread_wakes_on_a_new_thread() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn citations_are_rechecked_on_start_and_daily_without_trigger_polling() {
+async fn maintenance_rechecks_citations_on_start_then_daily_without_trigger_polling() {
     use ants_sense::memory::{Citation, Memory, MemoryKind, Scope};
 
     let root = ants_test_support::scratch_dir("scheduler-maintenance");
@@ -281,7 +283,8 @@ async fn citations_are_rechecked_on_start_and_daily_without_trigger_polling() {
     }];
     let first = ItemId::new();
     stores.items.write(&[memory.create(first.clone())], "test").await.unwrap();
-    let scheduler = start(sense, Arc::new(Wakes::default()), Settings { workdir: root.clone(), ..settings() });
+    let settings = || Settings { workdir: root.clone(), ..settings() };
+    let scheduler = start(sense.clone(), Arc::new(Wakes::default()), settings());
     for _ in 0..100 {
         if stores.items.get(&first).await.unwrap().unwrap().text("status") == "needs_review" {
             break;
@@ -289,23 +292,40 @@ async fn citations_are_rechecked_on_start_and_daily_without_trigger_polling() {
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
     assert_eq!(stores.items.get(&first).await.unwrap().unwrap().text("status"), "needs_review");
+    let run = memory::last_maintenance(&*stores.items).await.unwrap().unwrap();
+    assert_eq!((run.citations_checked, run.citations_marked), (1, 1));
     let second = ItemId::new();
     stores.items.write(&[memory.create(second.clone())], "test").await.unwrap();
     let reads = stores.reads.load(Ordering::SeqCst);
-    tokio::time::advance(MAINTENANCE - Duration::from_secs(1)).await;
+    tokio::time::advance(DAY - Duration::from_secs(1)).await;
     settle().await;
     assert_eq!(stores.reads.load(Ordering::SeqCst), reads, "no minute polling");
     assert_eq!(stores.items.get(&second).await.unwrap().unwrap().text("status"), "active");
-    tokio::time::advance(Duration::from_secs(2)).await;
-    for _ in 0..100 {
-        if stores.items.get(&second).await.unwrap().unwrap().text("status") == "needs_review" {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(1)).await;
-    }
-    assert_eq!(stores.items.get(&second).await.unwrap().unwrap().text("status"), "needs_review");
     scheduler.stop().await;
+    let day_later = run.ran + chrono::Duration::hours(24);
+    cycle(&sense, &*stores.items, &Wakes::default(), &settings(), day_later).await.unwrap();
+    assert_eq!(stores.items.get(&second).await.unwrap().unwrap().text("status"), "needs_review");
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn a_takeover_keeps_the_last_maintenance_run() {
+    let log = SharedLog::default();
+    let identity = SenseId::new();
+    let first = open(log.clone(), identity.clone()).await;
+    let now = Utc::now();
+    let next = cycle(&Sense::new(), &*first, &Wakes::default(), &settings(), now).await.unwrap().unwrap();
+    let ran = memory::last_maintenance(&*first).await.unwrap().unwrap().ran;
+    assert_eq!(next, ran + chrono::Duration::hours(24), "an empty schedule sleeps until maintenance");
+    drop(first);
+    let takeover = open(log, identity).await;
+    let hour_later = now + chrono::Duration::hours(1);
+    let next = cycle(&Sense::new(), &*takeover, &Wakes::default(), &settings(), hour_later).await.unwrap();
+    assert_eq!(memory::last_maintenance(&*takeover).await.unwrap().unwrap().ran, ran, "not again within a day");
+    assert_eq!(next, Some(ran + chrono::Duration::hours(24)));
+    let day_later = ran + chrono::Duration::hours(24);
+    cycle(&Sense::new(), &*takeover, &Wakes::default(), &settings(), day_later).await.unwrap();
+    assert!(memory::last_maintenance(&*takeover).await.unwrap().unwrap().ran >= day_later);
 }
 
 #[tokio::test(start_paused = true)]

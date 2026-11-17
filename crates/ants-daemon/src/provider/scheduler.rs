@@ -1,5 +1,6 @@
 //! The active daemon owns sense's durable schedule. A firing is stored before its wake, and confirmed only after
-//! delivery; a replacement daemon therefore resumes pending work with the same wake id.
+//! delivery; a replacement daemon therefore resumes pending work with the same wake id. It also runs sense's daily
+//! memory maintenance, whose last run is kept in sense data, so a replacement daemon runs it no sooner either.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -9,6 +10,7 @@ use std::time::Duration;
 use ants_proto::UserId;
 use ants_proto::provider::{CallContext, Host, RpcError, WakeRequest};
 use ants_sense::Sense;
+use ants_sense::memory;
 use ants_sense::remind::{self, ConditionCheck, Firing};
 use ants_sense::store::{Items, StoreError};
 use anyhow::Result;
@@ -19,7 +21,6 @@ use tokio::task::JoinHandle;
 mod conditions;
 
 const RETRY: Duration = Duration::from_secs(60);
-const MAINTENANCE: Duration = Duration::from_hours(24);
 
 struct Settings {
     ant: UserId,
@@ -72,25 +73,15 @@ fn start(sense: Arc<Sense>, host: Arc<dyn Host>, settings: Settings) -> Serving 
     Serving(Mutex::new(Some(tokio::spawn(async move {
         // Subscribe first: a successful tool call during a schedule read must wake the following sleep.
         let mut changes = sense.changes();
-        let mut maintenance = tokio::time::Instant::now();
         loop {
             let result = async {
                 let items = sense.items(&settings.ant).await?;
-                let next = cycle(&sense, &*items, &*host, &settings, Utc::now()).await;
-                if tokio::time::Instant::now() >= maintenance {
-                    ants_sense::memory::recheck_citations(&*items, &settings.workdir).await?;
-                    maintenance = tokio::time::Instant::now() + MAINTENANCE;
-                }
-                next
+                cycle(&sense, &*items, &*host, &settings, Utc::now()).await
             }
             .await;
             match result {
                 Ok(next) => {
-                    let keep = tokio::select! {
-                        keep = wait(&mut changes, next) => keep,
-                        _ = tokio::time::sleep_until(maintenance) => true,
-                    };
-                    if !keep {
+                    if !wait(&mut changes, next).await {
                         return;
                     }
                 }
@@ -138,9 +129,17 @@ async fn cycle(
         }
     }
     let now = now + chrono::Duration::from_std(started.elapsed()).expect("a bounded check");
+    if let Some(run) = memory::maintain(items, Some(&settings.workdir), now).await? {
+        let changes = run.changes.len();
+        tracing::info!(ant = %settings.ant, changes, clusters = run.duplicates.len(), "sense maintenance ran");
+    }
+    let maintenance = memory::next_maintenance(items).await?;
+    let next = match remind::next_due(items, now).await? {
+        Some(next) => Some(maintenance.map_or(next, |maintenance| next.min(maintenance))),
+        None => maintenance,
+    };
     // A concurrent schedule update or a stale reservation must not turn a due record into a busy loop.
-    Ok(remind::next_due(items, now)
-        .await?
+    Ok(next
         .map(|next| if next <= now { now + chrono::Duration::from_std(RETRY).expect("a bounded delay") } else { next }))
 }
 
