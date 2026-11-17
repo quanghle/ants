@@ -26,8 +26,8 @@ use ratatui::widgets::Paragraph;
 
 use super::acts::{About, Change};
 use super::exec::{Edit, Job, Quoted};
-use super::frame::{self, ago};
 use super::model::{Action, Data, Key, Model, To};
+use super::style::{self, ago};
 use super::timeline::Call;
 use super::{approvals, attach, catchup, images, question, work};
 use crate::attachments::Listed;
@@ -298,7 +298,7 @@ impl Page {
             (area, None)
         };
         let area = draw_cards(frame, area, model, thread, &self.history.entries, now);
-        let block = frame::block(title, focused);
+        let block = style::block(title, focused);
         let inner = block.inner(area);
         frame.render_widget(block, area);
         let area = catchup::draw_tldr(frame, inner, model, thread, now);
@@ -308,7 +308,7 @@ impl Page {
             lines.push(Line::styled(format!("▶ {line} ({})", ago(at, now)), Style::new().fg(Color::Green)));
         }
         if self.history.loading {
-            lines.push(Line::styled("reading the thread…", frame::dim()));
+            lines.push(Line::styled("reading the thread…", style::dim()));
         }
         let marked = self.attached().map(|e| (e.seq, self.mark.at(e.seq, e.attachments.len())));
         let busy = data.live.progress.contains_key(thread);
@@ -329,7 +329,7 @@ impl Page {
                 && Some(e.seq) == selected
             {
                 for line in &mut lines[start..] {
-                    line.style = line.style.patch(frame::highlight(focused));
+                    line.style = line.style.patch(style::highlight(focused));
                 }
                 range = Some((start, lines.len()));
             }
@@ -356,7 +356,7 @@ impl Page {
         images::draw(frame, &data.images, &shown.placed.borrow(), top, area);
         if let Some(panel) = panel {
             let lines = self.panel(data, calls, now, usize::from(PANEL_WIDTH.saturating_sub(4)));
-            frame.render_widget(Paragraph::new(lines).block(frame::block(String::new(), false)), panel);
+            frame.render_widget(Paragraph::new(lines).block(style::block(String::new(), false)), panel);
         }
     }
 
@@ -365,7 +365,7 @@ impl Page {
     fn panel(&self, data: &Data, calls: &[Call], now: DateTime<Utc>, width: usize) -> Vec<Line<'static>> {
         let thread = &self.history.thread;
         let summary = data.live.summary(thread);
-        let label = |name: &str| Span::styled(format!("{name:<7}"), frame::dim());
+        let label = |name: &str| Span::styled(format!("{name:<7}"), style::dim());
         let field =
             |name: &str, value: String| Line::from(vec![label(name), Span::raw(cut(&value, width.saturating_sub(7)))]);
         let state = data.state(thread);
@@ -381,7 +381,7 @@ impl Page {
         ants.dedup();
         lines.push(Line::from(label("ANTS")));
         if ants.is_empty() {
-            lines.push(Line::styled("  none", frame::dim()));
+            lines.push(Line::styled("  none", style::dim()));
         }
         let progress = data.live.progress.get(thread);
         for ant in ants {
@@ -445,7 +445,7 @@ fn draw_cards(
     let cards = approvals::cards(&model.data, Some(thread), now);
     let cards = cards.into_iter().enumerate().map(|(at, card)| {
         let lines = approvals::lines(card, model.asking.as_ref(), at == 0, now, width);
-        let style = if card.settled.is_some() { frame::dim() } else { Style::new().fg(Color::Yellow) };
+        let style = if card.settled.is_some() { style::dim() } else { Style::new().fg(style::PENDING) };
         (approvals::title(card), lines, style)
     });
     let questions = question::cards(&model.data, entries, now);
@@ -545,11 +545,7 @@ mod tests {
     }
 
     fn screen(page: &Page, m: &Model, width: u16, now: DateTime<Utc>) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
-        terminal.draw(|f| page.draw(f, f.area(), m, now, true)).unwrap();
-        let buffer = terminal.backend().buffer();
-        let cells: Vec<&str> = buffer.content.iter().map(ratatui::buffer::Cell::symbol).collect();
-        cells.chunks(usize::from(width)).map(|row| row.concat().trim_end().to_owned()).collect::<Vec<_>>().join("\n")
+        crate::test_support::render::rendered(width, 24, |f| page.draw(f, f.area(), m, now, true))
     }
 
     #[test]

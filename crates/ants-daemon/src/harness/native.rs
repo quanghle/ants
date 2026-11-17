@@ -554,6 +554,32 @@ pub(crate) fn mcp_servers_json(servers: &[McpServer]) -> Value {
     Value::Object(config)
 }
 
+/// An MCP server a CLI reports as the JSON object `server`, under its `name`; the protocol picks the other fields.
+pub(crate) fn mcp_server_state(
+    server: &Value,
+    status: ants_proto::McpStatus,
+    error: Option<&str>,
+    source: Option<&str>,
+    tools: Option<usize>,
+) -> ants_proto::McpServerState {
+    ants_proto::McpServerState::new(server["name"].as_str().unwrap_or_default(), status, error, source)
+        .with_tools(tools)
+}
+
+/// How an MCP server stands, in the words Claude Code and the Copilot CLI share: `connected`, `pending`,
+/// `needs-auth`, `failed` and `disabled`.
+pub(crate) fn mcp_status(word: Option<&str>) -> ants_proto::McpStatus {
+    use ants_proto::McpStatus;
+    match word {
+        Some("connected") => McpStatus::Connected,
+        Some("pending") => McpStatus::Pending,
+        Some("needs-auth") => McpStatus::NeedsAuth,
+        Some("failed") => McpStatus::Failed,
+        Some("disabled") => McpStatus::Disabled,
+        _ => McpStatus::Unknown,
+    }
+}
+
 /// The CLI says it is not signed in: ACP's `auth_required`, which makes the daemon hold messages and name the
 /// definition's `sign_in`.
 pub(crate) fn signed_out(detail: impl fmt::Display) -> Error {

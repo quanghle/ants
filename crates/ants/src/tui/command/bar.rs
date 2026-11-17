@@ -2,7 +2,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
@@ -11,7 +11,7 @@ use ants_proto::ThreadId;
 use super::COMMANDS;
 use crate::tui::exec::Quoted;
 use crate::tui::model::Key;
-use crate::tui::{attach, complete, frame};
+use crate::tui::{attach, complete, style};
 
 /// The most lines of text the bar shows at once.
 const MAX_LINES: usize = 6;
@@ -272,13 +272,13 @@ impl Bar {
             let line: String = quoted.quote.line().chars().take(room.saturating_sub(1)).collect();
             title = format!("{title}{line} ");
         }
-        let mut block = frame::block(title, self.focused);
+        let mut block = style::block(title, self.focused);
         if let Some(status) = &self.status {
             let style = match status.tone {
-                Tone::Busy => Style::new().fg(Color::Cyan),
-                Tone::Done => Style::new().fg(Color::Green),
-                Tone::Warn => Style::new().fg(Color::Yellow),
-                Tone::Error => Style::new().fg(Color::Red),
+                Tone::Busy => Style::new().fg(style::INFO),
+                Tone::Done => Style::new().fg(style::CONNECTED),
+                Tone::Warn => Style::new().fg(style::WARNING),
+                Tone::Error => Style::new().fg(style::ERROR),
             };
             let room = usize::from(area.width.saturating_sub(4));
             let text: String = status.text.replace('\n', " ").chars().take(room).collect();
@@ -286,7 +286,7 @@ impl Bar {
         }
         let shown: Vec<Line> = if self.chars.is_empty() {
             let pad = width.saturating_sub(HINT.chars().count());
-            vec![Line::from(vec![Span::raw(" ".repeat(pad)), Span::styled(HINT, frame::dim())])]
+            vec![Line::from(vec![Span::raw(" ".repeat(pad)), Span::styled(HINT, style::dim())])]
         } else {
             lines.into_iter().skip(top).take(MAX_LINES).map(Line::raw).collect()
         };
@@ -321,14 +321,14 @@ fn draw_list(frame: &mut Frame, bar: Rect) {
             Line::from(vec![
                 Span::styled(format!("/{name:<10}"), Style::new().bold()),
                 Span::raw(format!("{args:<24}")),
-                Span::styled(*what, frame::dim()),
+                Span::styled(*what, style::dim()),
             ])
         })
         .collect();
     let height = (u16::try_from(lines.len()).unwrap_or(u16::MAX) + 2).min(bar.y);
     let area = Rect { x: bar.x, y: bar.y.saturating_sub(height), width: bar.width.min(84), height };
     frame.render_widget(Clear, area);
-    frame.render_widget(Paragraph::new(lines).block(frame::block(" commands ".to_owned(), true)), area);
+    frame.render_widget(Paragraph::new(lines).block(style::block(" commands ".to_owned(), true)), area);
 }
 #[cfg(test)]
 mod tests {

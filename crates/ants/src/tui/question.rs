@@ -8,8 +8,8 @@ use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 
 use super::exec::Job;
-use super::frame;
 use super::model::{Action, Data, Key, To};
+use super::style;
 use crate::text::excerpt;
 use crate::thread::{Entry, answer_line, answers_to};
 
@@ -55,7 +55,7 @@ impl Card<'_> {
     }
 
     pub fn style(&self) -> Style {
-        if self.answers.is_empty() { Style::new().fg(Color::Cyan) } else { frame::dim() }
+        if self.answers.is_empty() { Style::new().fg(Color::Cyan) } else { style::dim() }
     }
 
     /// The question, its options, then its answers or the keys, each at most `width` wide.
@@ -63,7 +63,7 @@ impl Card<'_> {
         let mut lines =
             vec![Line::raw(excerpt(&self.question.text, width)), Line::raw(excerpt(&options(self.question), width))];
         if self.answers.is_empty() {
-            lines.push(Line::styled("1-9 answer", frame::dim()));
+            lines.push(Line::styled("1-9 answer", style::dim()));
         }
         lines.extend(self.answers.iter().map(|a| Line::styled(excerpt(a, width), Style::new().fg(Color::Green))));
         lines

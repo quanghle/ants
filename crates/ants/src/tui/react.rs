@@ -8,8 +8,8 @@ use ants_proto::{Reaction, UserId, Uuid};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
-use super::frame;
 use super::model::Key;
+use super::style;
 
 /// The names the picker offers, in order.
 pub const COMMON: [&str; 10] =
@@ -53,7 +53,7 @@ pub fn line(reacted: &[Reacted], me: &UserId) -> Option<Line<'static>> {
         if !spans.is_empty() {
             spans.push(Span::raw("  "));
         }
-        let style = if r.by.contains(me) { Style::new().fg(Color::Cyan).bold() } else { frame::dim() };
+        let style = if r.by.contains(me) { Style::new().fg(Color::Cyan).bold() } else { style::dim() };
         spans.push(Span::styled(format!("{} {}", glyph(r.reaction.as_str()), r.by.len()), style));
     }
     (!spans.is_empty()).then(|| Line::from(spans))
@@ -161,8 +161,8 @@ impl Picker {
             spans.push(Span::styled(text, style));
         }
         match &self.error {
-            Some(error) => spans.push(Span::styled(format!("  {error}"), Style::new().fg(Color::Red))),
-            None => spans.push(Span::styled("  ↑↓ choose · Enter react or take back · Esc close", frame::dim())),
+            Some(error) => spans.push(Span::styled(format!("  {error}"), Style::new().fg(style::ERROR))),
+            None => spans.push(Span::styled("  ↑↓ choose · Enter react or take back · Esc close", style::dim())),
         }
         Line::from(spans)
     }
@@ -182,7 +182,7 @@ mod tests {
         let line = line(&[reacted("eyes", &["dev-a", "alice"]), reacted("shipit", &["bob"])], &user("alice")).unwrap();
         assert_eq!(line.to_string(), "👀 2  :shipit: 1");
         assert_eq!(line.spans[0].style, Style::new().fg(Color::Cyan).bold(), "alice reacted so");
-        assert_eq!(line.spans[2].style, frame::dim());
+        assert_eq!(line.spans[2].style, style::dim());
         assert_eq!(super::line(&[], &user("alice")), None);
     }
 

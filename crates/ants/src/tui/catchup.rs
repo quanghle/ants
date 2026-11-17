@@ -21,16 +21,16 @@ use futures::stream::FuturesUnordered;
 use futures::{FutureExt as _, StreamExt as _};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use serde::{Deserialize, Serialize};
 
 use super::command::Tone;
-use super::frame::{self, ago};
 use super::home::{self, Why};
 use super::markdown;
 use super::model::{Action, Data, Key, Level, Model};
+use super::style::{self, ago};
 use super::timeline::Tools;
 use super::work;
 use crate::cmd::send;
@@ -185,7 +185,7 @@ pub fn since_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("Since {at} ({}): ", ago(since, now)), Style::new().bold()),
         Span::raw(format!("{finished} finished · {stuck} stuck · {waiting} waiting · {spent} spent today · ")),
-        Span::styled(digest, frame::dim()),
+        Span::styled(digest, style::dim()),
     ])
 }
 
@@ -195,19 +195,19 @@ pub fn tldr_lines(model: &Model, thread: &ThreadId, now: DateTime<Utc>, width: u
     let data = &model.data;
     let asking = model.catchup.asking.contains(thread);
     let Some(tldr) = data.cards.tldr.get(thread) else {
-        return if asking { vec![Line::styled("TL;DR  asking for one…", frame::dim())] } else { Vec::new() };
+        return if asking { vec![Line::styled("TL;DR  asking for one…", style::dim())] } else { Vec::new() };
     };
     let mut about = format!("TL;DR ({}, {}", tldr.by, ago(tldr.at, now));
     if !current(data, thread, tldr) {
         about.push_str(", stale");
     }
     about.push_str(if asking { ", asking for a new one…)" } else { ", S asks for a new one)" });
-    let mut lines = vec![Line::styled(about, frame::dim())];
+    let mut lines = vec![Line::styled(about, style::dim())];
     let text = markdown::render(&tldr.text, width.max(10));
     let more = text.len() > TLDR_LINES;
     lines.extend(text.into_iter().take(TLDR_LINES));
     if more && let Some(last) = lines.last_mut() {
-        last.spans.push(Span::styled(" …", frame::dim()));
+        last.spans.push(Span::styled(" …", style::dim()));
     }
     lines
 }
@@ -222,7 +222,7 @@ pub fn draw_tldr(frame: &mut Frame, area: Rect, model: &Model, thread: &ThreadId
     let [top, rule, rest] =
         Layout::vertical([Constraint::Length(height), Constraint::Length(1), Constraint::Min(0)]).areas(area);
     frame.render_widget(Paragraph::new(lines), top);
-    frame.render_widget(Paragraph::new("─".repeat(usize::from(rule.width))).style(frame::dim()), rule);
+    frame.render_widget(Paragraph::new("─".repeat(usize::from(rule.width))).style(style::dim()), rule);
     rest
 }
 
@@ -241,15 +241,17 @@ pub fn draw_digest(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
     let since =
         format!("{} ({})", digest.since.with_timezone(&chrono::Local).format("%b %-d %H:%M"), ago(digest.since, now));
     let (title, mut lines) = match &digest.got {
-        None => (format!(" Digest since {since} "), vec![Line::styled("asking for a digest…", frame::dim())]),
-        Some(Err(e)) => (format!(" Digest since {since} "), vec![Line::styled(e.clone(), Style::new().fg(Color::Red))]),
+        None => (format!(" Digest since {since} "), vec![Line::styled("asking for a digest…", style::dim())]),
+        Some(Err(e)) => {
+            (format!(" Digest since {since} "), vec![Line::styled(e.clone(), Style::new().fg(style::ERROR))])
+        }
         Some(Ok((by, text, tokens))) => {
             (format!(" Digest since {since} · {by} · {tokens} tokens "), markdown::render(text, inner.max(10)))
         }
     };
-    lines.extend([Line::raw(""), Line::styled("j/k scroll · s asks again · any other key closes", frame::dim())]);
+    lines.extend([Line::raw(""), Line::styled("j/k scroll · s asks again · any other key closes", style::dim())]);
     frame.render_widget(Clear, area);
-    let paragraph = Paragraph::new(lines).block(frame::block(title, true)).scroll((digest.top, 0));
+    let paragraph = Paragraph::new(lines).block(style::block(title, true)).scroll((digest.top, 0));
     frame.render_widget(paragraph, area);
 }
 
@@ -510,8 +512,6 @@ impl Ctx {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
 
     use super::*;
     use crate::test_support::live::{at, message, user};
@@ -533,15 +533,7 @@ mod tests {
     }
 
     fn shown(m: &Model, now: DateTime<Utc>) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
-        terminal.draw(|f| crate::tui::frame::draw(f, m, now)).unwrap();
-        let buffer = terminal.backend().buffer();
-        let cells: Vec<&str> = buffer.content.iter().map(ratatui::buffer::Cell::symbol).collect();
-        cells
-            .chunks(usize::from(buffer.area.width))
-            .map(|row| row.concat().trim_end().to_owned())
-            .collect::<Vec<_>>()
-            .join("\n")
+        crate::test_support::render::rendered(140, 30, |f| crate::tui::frame::draw(f, m, now))
     }
 
     /// A thread alice gave dev-a, which dev-a answered at `seq` + 1.

@@ -13,9 +13,9 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
 use super::attach;
 use super::exec::Job;
-use super::frame::{self, ago};
 use super::model::{Action, Data, Key, To};
 use super::select::Selection;
+use super::style::{self, ago};
 use super::work::Filter;
 use crate::attachments::Listed;
 use crate::channel::reads::Unread;
@@ -213,7 +213,7 @@ impl Page {
     pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
         let posts: Vec<&Post> = data.feeds.posts(&self.channel).collect();
         let level = data.level(&self.channel);
-        let block = frame::block(format!(" #{} ({} posts · notify {level}) ", self.channel, posts.len()), focused);
+        let block = style::block(format!(" #{} ({} posts · notify {level}) ", self.channel, posts.len()), focused);
         if posts.is_empty() {
             let text = if data.live.stored_at.is_some() { "no posts read" } else { "reading the stream…" };
             frame.render_widget(Paragraph::new(text).block(block), area);
@@ -228,7 +228,7 @@ impl Page {
                 ListItem::new(post_lines(p, data, now, marked))
             })
             .collect();
-        let list = List::new(items).block(block).highlight_style(frame::highlight(focused));
+        let list = List::new(items).block(block).highlight_style(style::highlight(focused));
         frame.render_stateful_widget(list, area, &mut ListState::default().with_selected(Some(selected)));
     }
 }
@@ -247,7 +247,7 @@ fn post_lines(post: &Post, data: &Data, now: DateTime<Utc>, marked: Option<usize
     let mut head: Vec<Span<'static>> = face.into_iter().flatten().collect();
     head.extend([
         Span::styled(post.by.clone(), Style::new().fg(Color::Blue).bold()),
-        Span::styled(format!(" {} ", ago(post.at, now)), frame::dim()),
+        Span::styled(format!(" {} ", ago(post.at, now)), style::dim()),
         Span::raw(crate::text::excerpt(first, 200)),
     ]);
     let mut lines = vec![Line::from(head)];
@@ -261,7 +261,7 @@ fn post_lines(post: &Post, data: &Data, now: DateTime<Utc>, marked: Option<usize
         under.push(format!("{} {}", super::react::glyph(r.reaction.as_str()), r.by.len()));
     }
     if !under.is_empty() {
-        lines.push(Line::styled(format!("  {}", under.join("  ")), frame::dim()));
+        lines.push(Line::styled(format!("  {}", under.join("  ")), style::dim()));
     }
     lines
 }

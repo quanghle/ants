@@ -12,8 +12,8 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::widgets::{Paragraph, Wrap};
 
-use super::frame;
 use super::model::Key;
+use super::style;
 use crate::live::maybe;
 
 /// The ant's memories, as last asked for.
@@ -99,7 +99,7 @@ impl Page {
     }
 
     pub fn draw(&self, frame: &mut Frame, area: Rect, ant: &UserId, focused: bool) {
-        let block = frame::block(format!(" memories of {ant} · read-only "), focused);
+        let block = style::block(format!(" memories of {ant} · read-only "), focused);
         let text = match &self.state {
             State::Unasked | State::Asking => format!("asking the daemon of {ant} for its memories…"),
             State::Failed(e) => format!("reading the memories: {e}"),

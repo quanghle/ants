@@ -19,12 +19,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
 
 use super::exec::Job;
-use super::frame::{self, ago};
 use super::mcp;
 use super::memories;
 use super::model::{Action, Data, Key, To};
 use super::select::Selection;
 use super::settings;
+use super::style::{self, ago};
 use super::work::{self, Filter};
 use crate::live::maybe;
 use crate::queue::{self, Waiting};
@@ -227,7 +227,7 @@ impl Page {
         let moved = data.looks.identity(&self.ant).and_then(|i| i.moved.as_ref());
         let title = match head {
             Some(head) => {
-                frame.render_widget(Paragraph::new(head).block(frame::block(String::new(), false)), face);
+                frame.render_widget(Paragraph::new(head).block(style::block(String::new(), false)), face);
                 format!(" {mark} {} · {} ", self.ant, crate::ant::state(entry, moved, now))
             }
             None => format!(
@@ -238,9 +238,9 @@ impl Page {
             ),
         };
 
-        let block = frame::block(title, focused).title_style(Style::new().fg(color));
+        let block = style::block(title, focused).title_style(Style::new().fg(color));
         frame.render_widget(Paragraph::new(about).block(block).wrap(Wrap { trim: false }), left);
-        let block = frame::block(" now ".to_owned(), false);
+        let block = style::block(" now ".to_owned(), false);
         frame.render_widget(Paragraph::new(status).block(block).wrap(Wrap { trim: false }), right);
         let threads = self.threads.rows(data).len();
         let mut spans = vec![Span::raw(" ")];
@@ -252,11 +252,11 @@ impl Page {
                 Pane::Mcp => self.mcp.count(),
                 Pane::Settings => self.settings.count(),
             };
-            let style = if pane == self.pane { frame::highlight(focused) } else { frame::dim() };
+            let style = if pane == self.pane { style::highlight(focused) } else { style::dim() };
             spans.push(Span::styled(format!(" {} ({count}) ", pane.label()), style));
             spans.push(Span::raw(" "));
         }
-        spans.push(Span::styled("←→", frame::dim()));
+        spans.push(Span::styled("←→", style::dim()));
         frame.render_widget(Paragraph::new(Line::from(spans)), tabs);
         match self.pane {
             Pane::Threads => self.threads.draw(frame, pane, data, now, focused),
@@ -283,7 +283,7 @@ impl Page {
     }
 
     fn draw_queue(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
-        let block = frame::block(format!(" waiting for {} ", self.ant), focused);
+        let block = style::block(format!(" waiting for {} ", self.ant), focused);
         let text = match &self.queue {
             Queue::Asking => Some(format!("asking the daemon of {}…", self.ant)),
             Queue::Unanswered => Some(queue::unanswered(&self.ant)),
@@ -312,14 +312,14 @@ impl Page {
             })
             .collect();
         let widths = [Constraint::Fill(3), Constraint::Fill(1), Constraint::Length(8), Constraint::Fill(1)];
-        let header = Row::new(["THREAD", "FROM", "AGE", "STATE"]).style(frame::dim());
+        let header = Row::new(["THREAD", "FROM", "AGE", "STATE"]).style(style::dim());
         let mut block = block;
         if let Queue::Read(_, more) = &self.queue
             && *more > 0
         {
             block = block.title_bottom(format!(" and {more} more in the stream "));
         }
-        let table = Table::new(rows, widths).header(header).block(block).row_highlight_style(frame::highlight(focused));
+        let table = Table::new(rows, widths).header(header).block(block).row_highlight_style(style::highlight(focused));
         let mut state = TableState::default().with_selected(Some(self.message.at(&self.messages())));
         frame.render_stateful_widget(table, area, &mut state);
     }
@@ -329,7 +329,7 @@ impl Page {
 /// wraps.
 fn about(entry: Option<&ColonyEntry>, now: DateTime<Utc>, width: usize) -> Vec<Line<'static>> {
     let Some(entry) = entry else {
-        return vec![Line::styled("not in the colony: no daemon serves it now", frame::dim())];
+        return vec![Line::styled("not in the colony: no daemon serves it now", style::dim())];
     };
     let rows = crate::ant::about(entry, now);
     let label = rows.iter().map(|(l, _)| l.len()).max().unwrap_or(0);
@@ -339,7 +339,7 @@ fn about(entry: Option<&ColonyEntry>, now: DateTime<Utc>, width: usize) -> Vec<L
         for (n, part) in text.lines().enumerate() {
             let name = if n == 0 { name } else { "" };
             lines.push(Line::from(vec![
-                Span::styled(format!("{name:<label$} "), frame::dim()),
+                Span::styled(format!("{name:<label$} "), style::dim()),
                 Span::raw(part.to_owned()),
             ]));
         }
@@ -353,11 +353,11 @@ fn status(ant: &UserId, entry: Option<&ColonyEntry>, data: &Data, now: DateTime<
     let moved = data.looks.identity(ant).and_then(|i| i.moved.as_ref());
     let holds = crate::ant::holds(ant, entry, moved, now);
     if holds.is_empty() {
-        lines.push(Line::styled(format!("nothing holds {ant} back"), frame::dim()));
+        lines.push(Line::styled(format!("nothing holds {ant} back"), style::dim()));
     }
-    lines.extend(holds.into_iter().map(|h| Line::styled(h, Style::new().fg(Color::Yellow))));
+    lines.extend(holds.into_iter().map(|h| Line::styled(h, Style::new().fg(style::WARNING))));
     for asked in data.credentials.of(ant.as_str()) {
-        lines.push(Line::styled(format!("{}: c answers", asked.describe()), Style::new().fg(Color::Yellow)));
+        lines.push(Line::styled(format!("{}: c answers", asked.describe()), Style::new().fg(style::PENDING)));
     }
     let mut working: Vec<(&ThreadId, String, DateTime<Utc>)> = data
         .live
@@ -367,13 +367,13 @@ fn status(ant: &UserId, entry: Option<&ColonyEntry>, data: &Data, now: DateTime<
         .collect();
     working.sort_by_key(|w| std::cmp::Reverse(w.2));
     if working.is_empty() {
-        lines.push(Line::styled("at work on no thread", frame::dim()));
+        lines.push(Line::styled("at work on no thread", style::dim()));
     }
     for (thread, stand, at) in working {
         lines.push(Line::from(vec![
             Span::styled(format!("{stand} "), Style::new().fg(Color::Green)),
             Span::raw(format!("on {}", data.title(thread))),
-            Span::styled(format!("  {}", ago(at, now)), frame::dim()),
+            Span::styled(format!("  {}", ago(at, now)), style::dim()),
         ]));
     }
     let spent =
@@ -384,7 +384,7 @@ fn status(ant: &UserId, entry: Option<&ColonyEntry>, data: &Data, now: DateTime<
         Some(spent) => format!("{} · {} tokens", work::dollars(spent.cost), spent.tokens),
         None => "not read yet".to_owned(),
     };
-    lines.push(Line::from(vec![Span::styled("spent today ", frame::dim()), Span::raw(spent)]));
+    lines.push(Line::from(vec![Span::styled("spent today ", style::dim()), Span::raw(spent)]));
     lines
 }
 
@@ -477,11 +477,7 @@ mod tests {
     use crate::tui::test_support::model;
 
     fn screen(m: &Model, now: DateTime<Utc>) -> String {
-        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 36)).unwrap();
-        terminal.draw(|f| crate::tui::frame::draw(f, m, now)).unwrap();
-        let buffer = terminal.backend().buffer();
-        let cells: Vec<&str> = buffer.content.iter().map(ratatui::buffer::Cell::symbol).collect();
-        cells.chunks(140).map(|row| row.concat().trim_end().to_owned()).collect::<Vec<_>>().join("\n")
+        crate::test_support::render::rendered(140, 36, |f| crate::tui::frame::draw(f, m, now))
     }
 
     fn waiting(thread: &ThreadId, from: &str, ahead: usize) -> Waiting {

@@ -6,23 +6,19 @@ use ants_proto::{ApprovalRequest, ColonyEntry, ThreadId, Verdict};
 use chrono::{DateTime, TimeDelta, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use super::model::{Detail, Level, Model, Pane};
 use crate::live::Link;
+use crate::tui::style::{self, ago, block, dim, highlight};
 use crate::{colony, thread, tools};
 
 /// How old the last read of the stream may be before it shows as stale: a few of the dashboard's periodic reads.
 const STALE: TimeDelta = TimeDelta::seconds(15);
 /// The most rows the ants and the tool requests each take.
 const MOST_ROWS: u16 = 8;
-
-/// `then` from `now`, such as `5s ago`.
-fn ago(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    format!("{} ago", colony::short(colony::since(then, now)))
-}
 
 /// `at` as `ants thread list` shows it, in UTC, without the year and seconds.
 fn short_time(at: DateTime<Utc>) -> String {
@@ -53,40 +49,26 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
 
 /// Who the dashboard runs as, the connection, and how fresh the stream and colony read are.
 fn header_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
-    let dim = Style::new().add_modifier(Modifier::DIM);
     let mut spans = vec![Span::styled(format!(" ants dash · {} · ", model.live.me), Style::new().bold())];
-    match model.live.link {
-        Link::Connected => spans.push(Span::styled("● connected", Style::new().fg(Color::Green))),
-        Link::Down(since) => spans.push(Span::styled(
-            format!(
-                "○ disconnected {}, reconnecting: what shows may be stale",
-                colony::short(colony::since(since, now))
-            ),
-            Style::new().fg(Color::Red).bold(),
-        )),
-    }
+    spans.push(style::link(model.live.link, now, ": what shows may be stale"));
     let stored = match model.live.stored_at {
         Some(at) => {
             let stale = model.live.link != Link::Connected || now - at > STALE;
-            let style = if stale { Style::new().fg(Color::Yellow) } else { dim };
+            let style = if stale { Style::new().fg(style::WARNING) } else { dim() };
             Span::styled(format!(" · stream read {}", ago(at, now)), style)
         }
-        None => Span::styled(" · reading the stream…", dim),
+        None => Span::styled(" · reading the stream…", dim()),
     };
     spans.push(stored);
     if let Some(at) = model.live.colony_at {
-        spans.push(Span::styled(format!(" · colony read {}", ago(at, now)), dim));
+        spans.push(Span::styled(format!(" · colony read {}", ago(at, now)), dim()));
     }
     Line::from(spans)
 }
 
 fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
     if let Some(notice) = model.notice_at(now) {
-        let style = match notice.level {
-            Level::Error => Style::new().fg(Color::Red),
-            Level::Info => Style::new().fg(Color::Cyan),
-        };
-        return Line::styled(format!(" {}", notice.text), style);
+        return style::notice(&notice.text, notice.level == Level::Error);
     }
     let keys = match (&model.detail, model.focus) {
         (Some(_), _) => " a allow once · A allow always · r reject · Esc back · Ctrl-C quit",
@@ -95,17 +77,7 @@ fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
         }
         (None, Pane::Approvals) => " ↑↓ request · Enter open to decide · Tab threads · R refresh · q quit",
     };
-    Line::styled(keys, Style::new().add_modifier(Modifier::DIM))
-}
-
-/// A bordered block titled `title`, its border bright when `focused`.
-fn block(title: String, focused: bool) -> Block<'static> {
-    let style = if focused { Style::new().fg(Color::Cyan) } else { Style::new().add_modifier(Modifier::DIM) };
-    Block::bordered().title(title).border_style(style)
-}
-
-fn highlight(focused: bool) -> Style {
-    if focused { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new().add_modifier(Modifier::BOLD) }
+    Line::styled(keys, dim())
 }
 
 fn draw_threads(frame: &mut Frame, model: &Model, area: Rect, now: DateTime<Utc>) {
@@ -156,8 +128,8 @@ fn draw_ants(frame: &mut Frame, model: &Model, area: Rect, now: DateTime<Utc>) {
 
 fn ant_row(entry: &ColonyEntry, now: DateTime<Utc>) -> Line<'static> {
     let (state, color) = match colony::State::of(entry, now) {
-        colony::State::Live => ("live ", Color::Green),
-        colony::State::Stale => ("stale", Color::Yellow),
+        colony::State::Live => ("live ", style::CONNECTED),
+        colony::State::Stale => ("stale", style::WARNING),
     };
     Line::from(vec![
         Span::raw(format!("{:<12} ", entry.ant)),
@@ -171,7 +143,7 @@ fn draw_approvals(frame: &mut Frame, model: &Model, area: Rect, now: DateTime<Ut
     let title = format!(" Tool requests ({}) ", model.live.approvals.len());
     let mut block = block(title, focused);
     if !model.live.approvals.is_empty() {
-        block = block.title_style(Style::new().fg(Color::Yellow).bold());
+        block = block.title_style(Style::new().fg(style::PENDING).bold());
     }
     if model.live.approvals.is_empty() {
         frame.render_widget(Paragraph::new("none pending").block(block), area);
@@ -205,13 +177,13 @@ fn draw_thread(frame: &mut Frame, model: &Model, area: Rect, now: DateTime<Utc>)
         Some((line, at)) => {
             lines.push(Line::styled(format!("▶ {line} ({})", ago(at, now)), Style::new().fg(Color::Green)));
         }
-        None => lines.push(Line::styled("no ant busy on it", Style::new().add_modifier(Modifier::DIM))),
+        None => lines.push(Line::styled("no ant busy on it", dim())),
     }
     let mut scroll = 0;
     match &model.history {
         Some(history) if history.thread == *thread => {
             if history.loading {
-                lines.push(Line::styled("reading the thread…", Style::new().add_modifier(Modifier::DIM)));
+                lines.push(Line::styled("reading the thread…", dim()));
             }
             let rendered = thread::render(&history.entries);
             lines.extend(rendered.lines().flat_map(|l| wrap(l, width)).map(Line::raw));
@@ -252,7 +224,7 @@ fn draw_detail(frame: &mut Frame, detail: &Detail, now: DateTime<Utc>) {
         tools::details(request, &detail.state, now).lines().map(|l| Line::raw(l.to_owned())).collect();
     lines.push(Line::raw(""));
     let id = tools::qualified(request);
-    let prompt = Style::new().fg(Color::Yellow).bold();
+    let prompt = Style::new().fg(style::PENDING).bold();
     if detail.deciding {
         lines.push(Line::styled("storing the decision…", prompt));
     } else if let Some(verdict) = detail.confirm {
@@ -270,7 +242,7 @@ fn draw_detail(frame: &mut Frame, detail: &Detail, now: DateTime<Utc>) {
         lines.push(Line::styled("answered already · Esc back", prompt));
     }
     frame.render_widget(Clear, area);
-    let block = Block::bordered().title(format!(" Tool request {id} ")).border_style(Style::new().fg(Color::Yellow));
+    let block = Block::bordered().title(format!(" Tool request {id} ")).border_style(Style::new().fg(style::PENDING));
     frame.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), area);
 }
 
@@ -278,22 +250,13 @@ fn draw_detail(frame: &mut Frame, detail: &Detail, now: DateTime<Utc>) {
 mod tests {
     use std::time::Duration;
 
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-
     use super::*;
     use crate::cmd::dash::model::{Action, Key};
     use crate::live::State;
     use crate::test_support::live::{at, message, request, user};
 
     fn screen(model: &Model, now: DateTime<Utc>) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
-        terminal.draw(|frame| draw(frame, model, now)).unwrap();
-        let buffer = terminal.backend().buffer();
-        let rows = (0..buffer.area.height).map(|y| {
-            (0..buffer.area.width).map(|x| buffer[(x, y)].symbol().to_owned()).collect::<String>().trim_end().to_owned()
-        });
-        rows.collect::<Vec<_>>().join("\n")
+        crate::test_support::render::rendered(140, 30, |frame| draw(frame, model, now))
     }
 
     #[test]

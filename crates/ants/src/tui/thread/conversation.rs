@@ -14,7 +14,7 @@ use crate::sealed;
 use crate::thread::{Entry, Kind};
 use crate::tui::model::Data;
 use crate::tui::timeline::{Call, End, Tools};
-use crate::tui::{attach, frame, images, markdown, react};
+use crate::tui::{attach, images, markdown, react, style};
 
 /// How deep delegations nest, deeper ones shown at this depth.
 const MAX_DEPTH: usize = 4;
@@ -235,7 +235,7 @@ impl Shown<'_> {
             Item::End(end) => {
                 let why = end.why.as_ref().map_or_default(|why| format!(": {why}"));
                 let line = format!("{first}{} {} ended without a reply{why}", hm(end.at), end.ant);
-                lines.push(Line::styled(cut(&line, self.width), frame::dim()));
+                lines.push(Line::styled(cut(&line, self.width), style::dim()));
             }
             Item::Message(e) if e.notice.is_some() => {
                 let from = e.from.as_ref().map_or("ants", UserId::as_str);
@@ -243,7 +243,7 @@ impl Shown<'_> {
                 let style = if e.notice.is_some_and(ants_proto::NoticeKind::needs_action) {
                     Style::new().fg(Color::Yellow)
                 } else {
-                    frame::dim()
+                    style::dim()
                 };
                 let line = format!("{first}{} {from} · {text}", hm(e.stored_at));
                 push(lines, &line, &format!("{rest}      "), style, self.width);
@@ -301,15 +301,15 @@ impl Shown<'_> {
         let mut head: Vec<Span<'static>> = face.into_iter().flatten().collect();
         head.extend([
             Span::styled(format!("{from}{to}"), from_style),
-            Span::styled(format!("  {}", hm(e.stored_at)), frame::dim()),
+            Span::styled(format!("  {}", hm(e.stored_at)), style::dim()),
         ]);
         let (what, style) = match e.kind {
             Kind::Escalation => {
                 (format!("escalation: {}", e.note.as_deref().unwrap_or("")), Style::new().fg(Color::Red))
             }
-            Kind::Mention => ("mention".to_owned(), frame::dim()),
-            Kind::Approval => ("tool request".to_owned(), Style::new().fg(Color::Yellow)),
-            Kind::Dead => (format!("gave up: {}", e.note.as_deref().unwrap_or("")), Style::new().fg(Color::Red)),
+            Kind::Mention => ("mention".to_owned(), style::dim()),
+            Kind::Approval => ("tool request".to_owned(), Style::new().fg(style::PENDING)),
+            Kind::Dead => (format!("gave up: {}", e.note.as_deref().unwrap_or("")), Style::new().fg(style::ERROR)),
             _ if e.question.is_some() => ("asks".to_owned(), Style::new().fg(Color::Yellow)),
             _ => (String::new(), Style::new()),
         };
@@ -368,9 +368,9 @@ impl Shown<'_> {
         let failed = if failed > 0 { format!(", {failed} failed") } else { String::new() };
         let room = self.width.saturating_sub(head.chars().count() + failed.chars().count());
         lines.push(Line::from(vec![
-            Span::styled(cut(&head, self.width), frame::dim()),
-            Span::styled(cut(&failed, self.width.saturating_sub(head.chars().count())), Style::new().fg(Color::Red)),
-            Span::styled(cut(&ended, room), frame::dim()),
+            Span::styled(cut(&head, self.width), style::dim()),
+            Span::styled(cut(&failed, self.width.saturating_sub(head.chars().count())), Style::new().fg(style::ERROR)),
+            Span::styled(cut(&ended, room), style::dim()),
         ]));
     }
 
@@ -378,20 +378,20 @@ impl Shown<'_> {
     fn call(&self, lines: &mut Vec<Line<'static>>, call: &Call, first: &str) {
         let kind = call.kind.as_deref().unwrap_or("tool");
         let (status, style) = match call.status.as_deref() {
-            Some("completed") => (format!("ok {}", took(call)), Style::new().fg(Color::Green)),
-            Some("failed") => (format!("failed {}", took(call)), Style::new().fg(Color::Red)),
+            Some("completed") => (format!("ok {}", took(call)), Style::new().fg(style::CONNECTED)),
+            Some("failed") => (format!("failed {}", took(call)), Style::new().fg(style::ERROR)),
             _ if self.busy => {
                 let elapsed = crate::colony::short(crate::colony::since(call.started, self.now));
                 let spin = SPINNER[usize::try_from(self.now.timestamp()).unwrap_or(0) % SPINNER.len()];
                 (format!("{spin} running {elapsed}"), busy())
             }
-            Some(status) => (status.replace('_', " "), frame::dim()),
-            None => ("started".to_owned(), frame::dim()),
+            Some(status) => (status.replace('_', " "), style::dim()),
+            None => ("started".to_owned(), style::dim()),
         };
         let head = format!("{first}{} {kind:<7} ", hm(call.started));
         let room = self.width.saturating_sub(head.chars().count() + status.chars().count() + 2);
         lines.push(Line::from(vec![
-            Span::styled(head, frame::dim()),
+            Span::styled(head, style::dim()),
             Span::raw(format!("{:<room$}  ", cut(&call.title, room))),
             Span::styled(status, style),
         ]));
@@ -407,9 +407,9 @@ fn nested(e: &Entry) -> (String, Style) {
     let forged = format!("{lock}{forged}");
     match e.kind {
         Kind::Note => (format!("{from} → notes{forged}"), Style::new()),
-        Kind::Approval => (format!("{from} asks to run{forged}"), Style::new().fg(Color::Yellow)),
-        Kind::Decision => (format!("{from} decided for {to}"), frame::dim()),
-        Kind::Dead => (format!("{to} gave up"), Style::new().fg(Color::Red)),
+        Kind::Approval => (format!("{from} asks to run{forged}"), Style::new().fg(style::PENDING)),
+        Kind::Decision => (format!("{from} decided for {to}"), style::dim()),
+        Kind::Dead => (format!("{to} gave up"), Style::new().fg(style::ERROR)),
         Kind::Escalation => (format!("{from} → {to} escalation{forged}"), Style::new().fg(Color::Red)),
         _ => (format!("{from} → {to}{forged}"), Style::new()),
     }
@@ -444,7 +444,7 @@ pub(super) fn body(e: &Entry, entries: &[Entry]) -> String {
 /// dim line on the message it replies to, if it quotes one.
 fn text(e: &Entry, entries: &[Entry], width: usize) -> Vec<Line<'static>> {
     let text = body(e, entries);
-    let mut lines: Vec<_> = e.quote.iter().map(|q| Line::styled(cut(&q.line(), width), frame::dim())).collect();
+    let mut lines: Vec<_> = e.quote.iter().map(|q| Line::styled(cut(&q.line(), width), style::dim())).collect();
     match e.kind {
         Kind::Message | Kind::Escalation | Kind::Mention | Kind::Post | Kind::Note if e.question.is_none() => {
             lines.extend(markdown::render(&text, width));

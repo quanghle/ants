@@ -22,7 +22,7 @@ use agent_client_protocol::v1::schema::{
     ContentBlock, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, PromptResponse, StopReason, ToolCall,
     ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, Usage,
 };
-use ants_proto::{McpServerState, McpStatus};
+use ants_proto::McpServerState;
 use anyhow::bail;
 use serde_json::{Value, json};
 use tokio::process::{ChildStdin, ChildStdout};
@@ -648,17 +648,9 @@ impl NativeSession for ClaudeSession {
 
 /// An MCP server as Claude Code's `mcp_status` reports it.
 fn mcp_server(server: &Value) -> McpServerState {
-    let status = match server["status"].as_str() {
-        Some("connected") => McpStatus::Connected,
-        Some("pending") => McpStatus::Pending,
-        Some("needs-auth") => McpStatus::NeedsAuth,
-        Some("failed") => McpStatus::Failed,
-        Some("disabled") => McpStatus::Disabled,
-        _ => McpStatus::Unknown,
-    };
-    let name = server["name"].as_str().unwrap_or_default();
-    McpServerState::new(name, status, server["error"].as_str(), server["scope"].as_str())
-        .with_tools(server["tools"].as_array().map(Vec::len))
+    let status = super::mcp_status(server["status"].as_str());
+    let tools = server["tools"].as_array().map(Vec::len);
+    super::mcp_server_state(server, status, server["error"].as_str(), server["scope"].as_str(), tools)
 }
 
 /// A prompt's content as Claude Code takes it: text, and images as base64 image blocks.

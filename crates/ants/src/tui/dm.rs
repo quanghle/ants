@@ -13,9 +13,9 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
-use super::frame::{self, ago};
 use super::model::{Action, Data, Key, To};
 use super::select::Selection;
+use super::style::{self, ago};
 use crate::sealed::State;
 use crate::thread::{Entry, Kind};
 
@@ -135,9 +135,9 @@ fn row(data: &Data, dm: &Dm, width: usize, now: DateTime<Utc>) -> ListItem<'stat
         Line::from(vec![
             Span::styled(badge, Style::new().fg(Color::Yellow).bold()),
             Span::raw(data.title(&dm.thread)),
-            Span::styled(format!("  {count} message{plural} · {}", ago(dm.latest.at, now)), frame::dim()),
+            Span::styled(format!("  {count} message{plural} · {}", ago(dm.latest.at, now)), style::dim()),
         ]),
-        Line::styled(format!("   {}", said(&dm.latest, width.saturating_sub(3))), frame::dim()),
+        Line::styled(format!("   {}", said(&dm.latest, width.saturating_sub(3))), style::dim()),
     ])
 }
 
@@ -216,7 +216,7 @@ impl Page {
             None => "",
         };
         let dms = data.people.dms.with(&self.with);
-        let block = frame::block(format!(" {}{state} ", self.with), focused && self.draft.is_none());
+        let block = style::block(format!(" {}{state} ", self.with), focused && self.draft.is_none());
         if dms.is_empty() {
             let text = if data.live.stored_at.is_some() {
                 format!("no messages with {} yet: n writes one", self.with)
@@ -227,15 +227,15 @@ impl Page {
         } else {
             let width = usize::from(list.width.saturating_sub(4));
             let rows: Vec<ListItem> = dms.iter().map(|dm| row(data, dm, width, now)).collect();
-            let list_widget = List::new(rows).block(block).highlight_style(frame::highlight(focused));
+            let list_widget = List::new(rows).block(block).highlight_style(style::highlight(focused));
             let selected = self.selected.at(&dms.iter().map(|dm| dm.thread.clone()).collect::<Vec<_>>());
             frame.render_stateful_widget(list_widget, list, &mut ListState::default().with_selected(Some(selected)));
         }
         let (text, style) = match &self.draft {
             Some(draft) => (format!("> {draft}_"), Style::new()),
-            None => (format!("n writes to {}, starting a thread", self.with), frame::dim()),
+            None => (format!("n writes to {}, starting a thread", self.with), style::dim()),
         };
-        let block = frame::block(String::new(), focused && self.draft.is_some());
+        let block = style::block(String::new(), focused && self.draft.is_some());
         frame.render_widget(Paragraph::new(Line::styled(text, style)).block(block), input);
     }
 }

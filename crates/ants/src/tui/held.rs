@@ -18,9 +18,9 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
-use super::frame::{self, ago};
 use super::model::{Action, Data, Key, To};
 use super::select::Selection;
+use super::style::{self, ago};
 use crate::live::maybe;
 
 /// How often the held orders are gathered.
@@ -93,7 +93,7 @@ impl Orders {
             if waiting.len() == 1 { "s" } else { "" },
             what.join(", ")
         );
-        Some(Line::styled(text, Style::new().fg(Color::Yellow)))
+        Some(Line::styled(text, Style::new().fg(style::PENDING)))
     }
 
     pub fn take(&mut self, event: Event, now: DateTime<Utc>) -> Option<Result<String, String>> {
@@ -168,7 +168,7 @@ impl Page {
 
     pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
         let held = &data.held;
-        let block = frame::block(format!(" Held orders ({}) ", held.orders.len()), focused);
+        let block = style::block(format!(" Held orders ({}) ", held.orders.len()), focused);
         let inner = block.inner(area);
         frame.render_widget(block, area);
         let read = match &held.read {
@@ -181,7 +181,7 @@ impl Page {
             ),
             Some(Err(e)) => format!("gathering the held orders: {e}"),
         };
-        let mut about = vec![Line::styled(read, frame::dim())];
+        let mut about = vec![Line::styled(read, style::dim())];
         if let Some(answer) = &held.busy {
             about.push(Line::styled(format!("{}…", answer.describe()), Style::new().fg(Color::Cyan)));
         }
@@ -205,10 +205,10 @@ impl Page {
             .map(|o| {
                 let status = match held.answered.get(&o.id) {
                     Some(ActAnswer::Confirm) => {
-                        Span::styled("confirmed, to be carried out", Style::new().fg(Color::Green))
+                        Span::styled("confirmed, to be carried out", Style::new().fg(style::CONNECTED))
                     }
-                    Some(ActAnswer::Deny) => Span::styled("denied, to be refused", Style::new().fg(Color::Red)),
-                    None => Span::styled("a confirm · r deny", frame::dim()),
+                    Some(ActAnswer::Deny) => Span::styled("denied, to be refused", Style::new().fg(style::ERROR)),
+                    None => Span::styled("a confirm · r deny", style::dim()),
                 };
                 ListItem::new(vec![
                     Line::from(vec![
@@ -216,15 +216,15 @@ impl Page {
                         Span::raw(format!("{} ordered {} of {} on {}", o.admin, o.op.describe(), o.ant, o.machine)),
                         Span::styled(
                             format!("  {} · expires in {}", ago(o.sent_at, now), left(o.sent_at + ORDER_HOLD, now)),
-                            frame::dim(),
+                            style::dim(),
                         ),
                     ]),
-                    Line::from(vec![Span::styled(format!("        {} · ", qualified(o)), frame::dim()), status]),
+                    Line::from(vec![Span::styled(format!("        {} · ", qualified(o)), style::dim()), status]),
                 ])
             })
             .collect();
         let selected = self.selected.at(&Self::ids(&held.orders));
-        let list_widget = List::new(rows).highlight_style(frame::highlight(focused));
+        let list_widget = List::new(rows).highlight_style(style::highlight(focused));
         frame.render_stateful_widget(list_widget, list, &mut ListState::default().with_selected(Some(selected)));
     }
 }
@@ -326,11 +326,7 @@ mod tests {
     use crate::tui::test_support::model;
 
     fn screen(m: &crate::tui::model::Model, now: DateTime<Utc>) -> String {
-        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
-        terminal.draw(|f| crate::tui::frame::draw(f, m, now)).unwrap();
-        let buffer = terminal.backend().buffer();
-        let cells: Vec<&str> = buffer.content.iter().map(ratatui::buffer::Cell::symbol).collect();
-        cells.chunks(140).map(|row| row.concat().trim_end().to_owned()).collect::<Vec<_>>().join("\n")
+        crate::test_support::render::rendered(140, 30, |f| crate::tui::frame::draw(f, m, now))
     }
 
     fn order(op: AdminOp, ant: &str, sent: i64) -> AdminOrder {

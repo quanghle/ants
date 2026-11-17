@@ -14,6 +14,7 @@ use ratatui::text::Line;
 use super::acts::Change;
 use super::home;
 use super::model::{Action, Data, Key, Model};
+use super::style;
 
 /// How long a snooze lasts unless edited.
 const DEFAULT: &str = "1h";
@@ -56,7 +57,7 @@ impl Prompt {
                 format!(" remind of a message on {title} in (1h, HH:MM, then a note): {}▏{tail}", self.text)
             }
         };
-        let color = if self.error.is_some() { Color::Red } else { Color::Yellow };
+        let color = if self.error.is_some() { style::ERROR } else { Color::Yellow };
         Line::styled(text, Style::new().fg(color))
     }
 

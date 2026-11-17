@@ -16,8 +16,8 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
-use super::frame;
 use super::model::{Action, Key};
+use super::style;
 use crate::live::maybe;
 
 /// The ant's MCP servers, as last asked for.
@@ -214,7 +214,7 @@ impl Page {
             u16::try_from(rows + 2).unwrap_or(u16::MAX)
         });
         let [servers, sign] = Layout::vertical([Constraint::Min(3), Constraint::Max(tall)]).areas(area);
-        let block = frame::block(format!(" MCP servers of {ant} "), focused && self.draft.is_none());
+        let block = style::block(format!(" MCP servers of {ant} "), focused && self.draft.is_none());
         let lines = match &self.state {
             State::Unasked | State::Asking => {
                 vec![Line::raw(format!("asking the daemon of {ant} for its MCP servers…"))]
@@ -228,7 +228,7 @@ impl Page {
         frame.render_widget(paragraph, servers);
         if let (Some(signing), Some(lines)) = (&self.signing, signing) {
             let title = format!(" sign in to {} ", signing.server);
-            let block = frame::block(title, focused && self.draft.is_some());
+            let block = style::block(title, focused && self.draft.is_some());
             frame.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), sign);
         }
     }
@@ -241,7 +241,7 @@ impl Page {
                 report.protocol,
                 report.read_at.format("%H:%M:%S")
             ),
-            frame::dim(),
+            style::dim(),
         )];
         let Some(servers) = &report.servers else {
             lines.push(Line::raw(
@@ -255,9 +255,9 @@ impl Page {
         let width = servers.iter().map(|s| s.name.chars().count()).max().unwrap_or(0);
         for (at, server) in servers.iter().enumerate() {
             let color = match server.status {
-                McpStatus::Connected => Color::Green,
-                McpStatus::Pending => Color::Yellow,
-                McpStatus::NeedsAuth | McpStatus::Failed => Color::Red,
+                McpStatus::Connected => style::CONNECTED,
+                McpStatus::Pending => style::PENDING,
+                McpStatus::NeedsAuth | McpStatus::Failed => style::ERROR,
                 McpStatus::Disabled | McpStatus::Unknown => Color::DarkGray,
             };
             let mut spans = vec![
@@ -268,15 +268,15 @@ impl Page {
                 spans.push(Span::raw(format!("  {tools} tools")));
             }
             if let Some(source) = &server.source {
-                spans.push(Span::styled(format!("  ({source})"), frame::dim()));
+                spans.push(Span::styled(format!("  ({source})"), style::dim()));
             }
             let mut line = Line::from(spans);
             if at == self.selected {
-                line = line.style(frame::highlight(focused && self.draft.is_none()));
+                line = line.style(style::highlight(focused && self.draft.is_none()));
             }
             lines.push(line);
             if let Some(error) = &server.error {
-                lines.push(Line::styled(format!("{:width$}  {error}", ""), frame::dim()));
+                lines.push(Line::styled(format!("{:width$}  {error}", ""), style::dim()));
             }
         }
         if report.truncated {
@@ -292,7 +292,7 @@ impl Page {
             Sign::Failed(e) => vec![Line::raw(format!("signing in: {e}"))],
             Sign::Done(status, error) => {
                 let mut lines = vec![Line::raw(format!("now {}", status.name()))];
-                lines.extend(error.iter().map(|e| Line::styled(e.clone(), frame::dim())));
+                lines.extend(error.iter().map(|e| Line::styled(e.clone(), style::dim())));
                 lines
             }
             Sign::Waiting => Vec::new(),
@@ -304,7 +304,7 @@ impl Page {
             lines.push(Line::styled(
                 "a browser on the ant's machine comes back on its own; one elsewhere ends on an address that fails to \
                  load: v hands it over",
-                frame::dim(),
+                style::dim(),
             ));
         }
         if let Some(draft) = &self.draft {

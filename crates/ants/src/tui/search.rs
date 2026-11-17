@@ -19,8 +19,8 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
-use super::frame::{self, ago};
 use super::model::{Data, Key, To};
+use super::style::{self, ago};
 use crate::live::maybe;
 use crate::sealed::Keyring;
 use crate::search::{self, Search};
@@ -139,10 +139,10 @@ impl Page {
             Some(Ok((entries, _))) => format!(" search {} · {} matches ", self.query, entries.len()),
             _ => format!(" search {} ", self.query),
         };
-        let block = frame::block(title, focused);
+        let block = style::block(title, focused);
         let text = match &self.found {
-            None => Some(Line::styled("searching…", frame::dim())),
-            Some(Err(e)) => Some(Line::styled(format!("searching failed: {e}"), Style::new().fg(Color::Red))),
+            None => Some(Line::styled("searching…", style::dim())),
+            Some(Err(e)) => Some(Line::styled(format!("searching failed: {e}"), Style::new().fg(style::ERROR))),
             Some(Ok((entries, _))) if entries.is_empty() => Some(Line::raw("no matching messages")),
             Some(Ok(_)) => None,
         };
@@ -151,7 +151,7 @@ impl Page {
             return;
         }
         let items: Vec<ListItem> = self.matches().iter().map(|e| ListItem::new(self.row(e, data, now))).collect();
-        let list = List::new(items).block(block).highlight_style(frame::highlight(focused));
+        let list = List::new(items).block(block).highlight_style(style::highlight(focused));
         frame.render_stateful_widget(list, area, &mut ListState::default().with_selected(Some(self.selected)));
     }
 
@@ -166,7 +166,7 @@ impl Page {
         Line::from(vec![
             Span::styled(format!("{:<PLACE$} ", crate::text::excerpt(&place, PLACE - 1)), Style::new().bold()),
             Span::styled(format!("{:<SENDER$} ", crate::text::excerpt(&from, SENDER)), Style::new().fg(Color::Blue)),
-            Span::styled(format!("{:>8}  ", ago(e.stored_at, now)), frame::dim()),
+            Span::styled(format!("{:>8}  ", ago(e.stored_at, now)), style::dim()),
             Span::raw(crate::text::excerpt(line.trim(), 200)),
         ])
     }

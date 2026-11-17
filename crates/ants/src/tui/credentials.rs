@@ -22,9 +22,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 use tokio::time::Instant;
 
-use super::frame::{self, ago};
 use super::model::{Action, Data, Key, To};
 use super::select::Selection;
+use super::style::{self, ago};
 use crate::enroll::{self, Approver};
 use crate::live::maybe;
 use crate::{auth, machines, renew};
@@ -156,7 +156,7 @@ impl Heard {
                 "requests for credentials are answered on machine {}, where the team's account key is",
                 recorded.machine
             );
-            return Some(Line::styled(text, frame::dim()));
+            return Some(Line::styled(text, style::dim()));
         }
         let names: Vec<String> = self
             .asked
@@ -167,7 +167,7 @@ impl Heard {
             })
             .collect();
         let text = format!("{} asking for credentials: {} · c lists them", self.asked.len(), names.join(", "));
-        Some(Line::styled(text, Style::new().fg(Color::Yellow)))
+        Some(Line::styled(text, Style::new().fg(style::PENDING)))
     }
 
     pub fn take(&mut self, event: Event, now: DateTime<Utc>) -> Option<Result<String, String>> {
@@ -244,12 +244,12 @@ impl Page {
 
     pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
         let heard = &data.credentials;
-        let block = frame::block(format!(" Credentials asked for ({}) ", heard.asked.len()), focused);
+        let block = style::block(format!(" Credentials asked for ({}) ", heard.asked.len()), focused);
         let inner = block.inner(area);
         frame.render_widget(block, area);
         let mut about = Vec::new();
         match &heard.holder {
-            None => about.push(Line::styled("looking for the team's account key…", frame::dim())),
+            None => about.push(Line::styled("looking for the team's account key…", style::dim())),
             Some(Holder::Elsewhere(why)) => {
                 let there = match &heard.recorded {
                     Some(recorded) => machines::held_on(recorded, now),
@@ -274,7 +274,7 @@ impl Page {
                     ),
                     Some(Err(e)) => format!("listening for requests: {e}"),
                 };
-                about.push(Line::styled(read, frame::dim()));
+                about.push(Line::styled(read, style::dim()));
             }
         }
         if let Some(order) = &heard.busy {
@@ -310,14 +310,14 @@ impl Page {
                     Line::from(vec![
                         Span::styled(format!("{label:<8}"), Style::new().fg(color)),
                         Span::raw(a.describe()),
-                        Span::styled(format!("  {}", ago(a.sent_at(), now)), frame::dim()),
+                        Span::styled(format!("  {}", ago(a.sent_at(), now)), style::dim()),
                     ]),
-                    Line::styled(format!("        {keys}"), frame::dim()),
+                    Line::styled(format!("        {keys}"), style::dim()),
                 ])
             })
             .collect();
         let selected = self.selected.at(&Self::ids(&heard.asked));
-        let list_widget = List::new(rows).highlight_style(frame::highlight(focused));
+        let list_widget = List::new(rows).highlight_style(style::highlight(focused));
         frame.render_stateful_widget(list_widget, list, &mut ListState::default().with_selected(Some(selected)));
     }
 }
@@ -521,11 +521,7 @@ mod tests {
     use crate::tui::test_support::model;
 
     fn screen(m: &Model, now: DateTime<Utc>) -> String {
-        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
-        terminal.draw(|f| crate::tui::frame::draw(f, m, now)).unwrap();
-        let buffer = terminal.backend().buffer();
-        let cells: Vec<&str> = buffer.content.iter().map(ratatui::buffer::Cell::symbol).collect();
-        cells.chunks(140).map(|row| row.concat().trim_end().to_owned()).collect::<Vec<_>>().join("\n")
+        crate::test_support::render::rendered(140, 30, |f| crate::tui::frame::draw(f, m, now))
     }
 
     fn enrolling(ant: &str, key: &str) -> Asked {
