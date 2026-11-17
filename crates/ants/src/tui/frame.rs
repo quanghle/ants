@@ -82,18 +82,24 @@ fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
     if model.bar.focused {
         return Line::styled(" Enter send · Alt-Enter new line · Ctrl-E editor · Ctrl-K commands · Esc leave", dim());
     }
-    let keys = match (model.focus, model.page()) {
-        (Focus::Nav, _) => "↑↓ select · Enter view",
-        (Focus::View, Page::Home(_)) => home::Page::KEYS,
-        (Focus::View, Page::Work(_)) => work::Page::KEYS,
-        (Focus::View, Page::Channel(_)) => channel::Page::KEYS,
-        (Focus::View, Page::Thread(_)) => thread::Page::KEYS,
-        (Focus::View, Page::Dm(page)) => page.keys(),
-        (Focus::View, Page::Search(_)) => search::Page::KEYS,
-        (Focus::View, Page::Tree(page)) => page.keys(),
-        (Focus::View, Page::Ant(page)) => page.keys(),
-        (Focus::View, Page::Credentials(page)) => page.keys(),
-        (Focus::View, Page::Held(page)) => page.keys(),
+    let card = match model.page() {
+        Page::Home(page) => page.card(&model.data, now).map(|(cursor, _)| cursor),
+        Page::Thread(page) => page.card(&model.data, now),
+        _ => None,
+    };
+    let keys = match (model.focus, model.page(), card) {
+        (Focus::Nav, _, _) => "↑↓ select · Enter view",
+        (Focus::View, _, Some(cursor)) => cursor.keys(),
+        (Focus::View, Page::Home(_), _) => home::Page::KEYS,
+        (Focus::View, Page::Work(_), _) => work::Page::KEYS,
+        (Focus::View, Page::Channel(_), _) => channel::Page::KEYS,
+        (Focus::View, Page::Thread(_), _) => thread::Page::KEYS,
+        (Focus::View, Page::Dm(page), _) => page.keys(),
+        (Focus::View, Page::Search(_), _) => search::Page::KEYS,
+        (Focus::View, Page::Tree(page), _) => page.keys(),
+        (Focus::View, Page::Ant(page), _) => page.keys(),
+        (Focus::View, Page::Credentials(page), _) => page.keys(),
+        (Focus::View, Page::Held(page), _) => page.keys(),
     };
     Line::styled(format!(" {keys} · Tab nav/view · / search · ? help · q quit"), dim())
 }
@@ -112,7 +118,7 @@ const HELP: &[(&str, &str)] = &[
     ("↑↓ Tab", "in the bar: pick and complete an @ant, #channel or /command"),
     ("y p m e d z", "in a thread: copy, pin, mute, archive, done, snooze (again to undo)"),
     ("a A r", "on a tool request: allow once, always or reject, at once"),
-    ("1-9 r", "on a question: answer with that option, or type an answer"),
+    ("1-9 Enter", "on a question: answer by number, or focus its card: ↑↓ Enter Esc"),
     ("g r f x d z s c o", "on home: grant, reply, forward, cancel, done, snooze, digest, credentials, held orders"),
     ("i > t S", "in a thread: reply, quote the selected, delegation tree, TL;DR"),
     ("+ f u b T", "in a thread: react, forward, unread from, remind; tool calls"),

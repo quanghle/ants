@@ -64,6 +64,12 @@ impl Model {
         {
             return action;
         }
+        if !self.bar.focused
+            && self.focus == Focus::View
+            && let Some(action) = self.card_key(key, now)
+        {
+            return action;
+        }
         if let Some(action) = self.bar_key(key, now) {
             return action;
         }
@@ -120,11 +126,32 @@ impl Model {
         }
         if !self.bar.focused
             && self.focus == Focus::View
-            && self.pages.last_mut().is_some_and(|page| write(page, &line))
+            && (self.card_paste(&line, now) || self.pages.last_mut().is_some_and(|page| write(page, &line)))
         {
             return;
         }
         self.paste_in_bar(&text);
+    }
+
+    /// Take `key` on the question card focused in the view shown, if any: where it leads, if anywhere.
+    fn card_key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Option<Action>> {
+        let data = &self.data;
+        let to = match self.pages.last_mut()? {
+            Page::Home(page) => page.card_key(key, data, now)?,
+            Page::Thread(page) => page.card_key(key, data, now)?,
+            _ => return None,
+        };
+        Some(to.and_then(|to| self.go(to, now)))
+    }
+
+    /// Type `text` pasted on the question card focused in the view shown, if any: whether it took it.
+    fn card_paste(&mut self, text: &str, now: DateTime<Utc>) -> bool {
+        let data = &self.data;
+        match self.pages.last_mut() {
+            Some(Page::Home(page)) => page.card_paste(text, data, now),
+            Some(Page::Thread(page)) => page.card_paste(text, data, now),
+            _ => false,
+        }
     }
 
     /// Take `key` while a tool request is being answered.

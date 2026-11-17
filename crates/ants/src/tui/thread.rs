@@ -3,15 +3,16 @@
 //!
 //! The timeline interleaves, in the order stored, the thread's messages, posts, notes, escalations and tool requests
 //! with the tool calls of its ants: those running now as their status updates tell ([`timeline::Calls::status`]), and
-//! those stored on their timelines ([`timeline::Calls::stored`]), each placed before the first message stored after
-//! it started. Messages between a human and an ant, and posts, are the top level; a message from one ant to another
-//! nests a level under the sender, and the receiver's calls and reply nest under that message, unless the receiver
-//! nests the sender already (a reply). Messages, posts and notes render as markdown, their attachments listed under
-//! them, images drawn under their lines when on ([`images`]). Opened from a search, the view selects the message found
-//! and holds it at its top until moved. The thread's tool requests show as cards under the conversation
-//! ([`approvals`]), a, A or r answering the oldest pending one and Enter showing it in full. Each message shows the
-//! reactions to it under it, live, and `+` reacts to the one selected ([`react`]). `>` opens the command bar to reply to
-//! the selected message, quoting it and @mentioning its author when an ant; a message quoting another shows
+//! those stored on their timelines ([`timeline::Calls::stored`]), each placed before the first message stored after it
+//! started. Messages between a human and an ant, and posts, are the top level; a message from one ant to another nests
+//! a level under the sender, and the receiver's calls and reply nest under that message, unless the receiver nests the
+//! sender already (a reply). Messages, posts and notes render as markdown, their attachments listed under them, images
+//! drawn under their lines when on ([`images`]). Opened from a search, the view selects the message found and holds it
+//! at its top until moved. The thread's tool requests show as cards under the conversation ([`approvals`]), a, A or r
+//! answering the oldest pending one and Enter showing it in full; its questions after them ([`question`]), 1-9
+//! answering the latest one waiting and Enter, once no tool request waits, focusing its card. Each message shows the
+//! reactions to it under it, live, and `+` reacts to the one selected ([`react`]). `>` opens the command bar to reply
+//! to the selected message, quoting it and @mentioning its author when an ant; a message quoting another shows
 //! `↪ replying to <author>: <excerpt>` above its text.
 
 use std::cell::{Cell, RefCell};
@@ -57,6 +58,8 @@ pub struct Page {
     at: Option<Uuid>,
     /// The attachment `o` opens of the message with them, by its sequence.
     mark: attach::Mark<u64>,
+    /// The cursor on the question card the keys answer, while Enter has focused it.
+    answering: Option<question::Cursor>,
 }
 
 impl Page {
@@ -68,6 +71,7 @@ impl Page {
             about: None,
             at: None,
             mark: attach::Mark::default(),
+            answering: None,
         }
     }
 
@@ -82,7 +86,7 @@ impl Page {
         self.messages().find(|e| e.id == Some(at)).map(|e| e.seq)
     }
 
-    pub const KEYS: &str = "↑↓ select · i reply · > reply to selected · y copy · f forward · o open file · ] next file · + react · p pin · m mute · e archive · d done · u unread from selected · b remind of selected · z snooze · t tree · T tool calls · S TL;DR · x cancel · W withdraw · E withdraw to edit · a A r answer a tool request · End latest · Esc back";
+    pub const KEYS: &str = "↑↓ select · i reply · > reply to selected · y copy · f forward · o open file · ] next file · + react · p pin · m mute · e archive · d done · u unread from selected · b remind of selected · z snooze · t tree · T tool calls · S TL;DR · x cancel · W withdraw · E withdraw to edit · a A r answer a tool request · 1-9 Enter answer a question · End latest · Esc back";
 
     /// The messages shown, in the order stored.
     fn messages(&self) -> impl DoubleEndedIterator<Item = &Entry> {
@@ -186,6 +190,27 @@ impl Page {
         self.selected = seqs.get(at.saturating_add_signed(by).min(seqs.len())).copied();
     }
 
+    /// The cursor on the focused question card, while its question is still the one the keys answer.
+    pub fn card(&self, data: &Data, now: DateTime<Utc>) -> Option<&question::Cursor> {
+        let cursor = self.answering.as_ref()?;
+        let (id, _) = question::keyed(data, &self.history.entries, now)?;
+        (id == cursor.question).then_some(cursor)
+    }
+
+    /// Take `key` on the focused question card, if any: where it leads, if anywhere.
+    pub fn card_key(&mut self, key: Key, data: &Data, now: DateTime<Utc>) -> Option<Option<To>> {
+        if self.card(data, now).is_none() {
+            self.answering = None;
+            return None;
+        }
+        question::focused(&mut self.answering, key, &self.history.thread)
+    }
+
+    /// Type `text` pasted on the focused question card, if any: whether it took it.
+    pub fn card_paste(&mut self, text: &str, data: &Data, now: DateTime<Utc>) -> bool {
+        self.card(data, now).is_some() && self.answering.as_mut().is_some_and(|c| c.paste(text))
+    }
+
     /// The sequence of the thread's last message, post or note read; 0 for none.
     fn last_reopening(&self, data: &Data) -> u64 {
         let read = self.messages().filter(|e| e.kind.reopens()).map(|e| e.seq).max().unwrap_or(0);
@@ -249,7 +274,11 @@ impl Page {
                 };
                 let pending = data.live.approvals.iter().filter(|r| r.thread_id == self.history.thread);
                 let Some(oldest) = pending.min_by_key(|r| r.requested_at) else {
-                    return question::thread_key(key, data, &self.history.thread, &self.history.entries, now);
+                    if key == Key::Enter {
+                        let keyed = question::keyed(data, &self.history.entries, now);
+                        self.answering = keyed.map(|(id, asked)| question::Cursor::new(id, asked));
+                    }
+                    return None;
                 };
                 return Some(To::Ask(oldest.clone(), verdict));
             }
@@ -297,7 +326,8 @@ impl Page {
         } else {
             (area, None)
         };
-        let area = draw_cards(frame, area, model, thread, &self.history.entries, now);
+        let cursor = self.card(data, now);
+        let area = draw_cards(frame, area, model, thread, &self.history.entries, cursor, now);
         let block = style::block(title, focused);
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -432,13 +462,15 @@ impl Page {
     }
 }
 
-/// Draw the cards of the tool requests of `thread` at the bottom of `area`, in at most half of it: the area left.
+/// Draw the cards of the tool requests and questions of `thread` at the bottom of `area`, in at most half of it, the
+/// question card the keys answer under `cursor` while focused: the area left.
 fn draw_cards(
     frame: &mut Frame,
     area: Rect,
     model: &Model,
     thread: &ThreadId,
     entries: &[Entry],
+    cursor: Option<&question::Cursor>,
     now: DateTime<Utc>,
 ) -> Rect {
     let width = usize::from(area.width.saturating_sub(2));
@@ -448,8 +480,10 @@ fn draw_cards(
         let style = if card.settled.is_some() { style::dim() } else { Style::new().fg(style::PENDING) };
         (approvals::title(card), lines, style)
     });
+    // Enter shows a pending tool request before it focuses a question.
+    let enter = !model.data.live.approvals.iter().any(|r| &r.thread_id == thread);
     let questions = question::cards(&model.data, entries, now);
-    let questions = questions.iter().map(|card| (card.title(), card.lines(width), card.style()));
+    let questions = questions.iter().map(|card| (card.title(), card.lines(width, cursor, enter), card.style()));
     let mut boxes = Vec::new();
     let mut height = 0;
     for (title, lines, style) in cards.chain(questions) {
@@ -515,7 +549,7 @@ fn count(n: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use ants_proto::{Answer, Question, ThreadDone};
+    use ants_proto::{Answer, Choice, Question, ThreadDone};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -828,6 +862,52 @@ mod tests {
         m.data.settled.add(push, crate::tools::State::Expired, at(2));
         let shown = screen(&page, &m, 100, at(3));
         assert!(shown.contains("expired unanswered: dev-a rejected it"), "{shown}");
+    }
+
+    #[test]
+    fn enter_focuses_the_question_card_once_no_tool_request_waits_and_esc_leaves_it() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let mut asks = message(1, &thread, "dev-a", "alice", "Backfill?");
+        let options = ["default every missing row to zero first".to_owned(), "skip".to_owned()];
+        asks.question = Some(Question::new("Backfill?", &options, false).unwrap());
+        let entries = vec![asks.clone()];
+        m.stored(entries.clone(), at(1));
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(entries)).unwrap();
+        m.pages.push(super::super::model::Page::Thread(page));
+        let shown = |m: &Model| match m.pages.last() {
+            Some(super::super::model::Page::Thread(page)) => screen(page, m, 40, at(2)),
+            _ => unreachable!(),
+        };
+        let request = crate::test_support::live::request("dev-a", "git push", vec![Verdict::AllowOnce]);
+        let push = ants_proto::ApprovalRequest { thread_id: thread.clone(), ..request };
+        m.data.live.approvals = vec![push.clone()];
+        let screen = shown(&m);
+        assert!(
+            screen.contains("│1-9 answer ") && !screen.contains("Enter choose"),
+            "Enter takes the request: {screen}"
+        );
+        m.key(Key::Enter, at(2));
+        assert!(m.asking.as_ref().is_some_and(|a| a.request == push), "the tool request first");
+        m.key(Key::Esc, at(2));
+        m.data.live.approvals.clear();
+
+        let screen = shown(&m);
+        assert!(screen.contains("│  1 default every missing row to zero │"), "one option a line: {screen}");
+        assert!(screen.contains("│    first ") && screen.contains("│  2 skip "), "wrapped: {screen}");
+        assert!(screen.contains("│1-9 answer · Enter choose"), "{screen}");
+        assert_eq!(m.key(Key::Enter, at(2)), None);
+        assert!(shown(&m).contains("│› 1 default every missing row to zero"), "{}", shown(&m));
+        assert_eq!(m.key(Key::Esc, at(2)), None);
+        assert_eq!(m.page().name(), "thread", "Esc leaves the card, not the thread");
+        assert!(!shown(&m).contains("› 1"), "{}", shown(&m));
+
+        m.key(Key::Enter, at(2));
+        m.key(Key::Down, at(2));
+        m.key(Key::Down, at(2));
+        let job = Job::Answer { thread: thread.clone(), question: asks.id.unwrap(), choice: Choice::Option(2) };
+        assert_eq!(m.key(Key::Enter, at(2)), Some(Action::Run(job, String::new())), "no typed row below the last");
     }
 
     #[test]

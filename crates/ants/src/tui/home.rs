@@ -63,7 +63,7 @@ impl Why {
     pub fn keys(self) -> &'static str {
         match self {
             Self::Approval => "a A r answer · z snooze",
-            Self::Question => "1-9 answer · d done · z snooze",
+            Self::Question => "1-9 answer · r reply · d done · z snooze",
             Self::Stuck => "g grant · x cancel · d done · z snooze",
             Self::Message | Self::Mention => "r reply · d done · z snooze",
             Self::Finished => "r follow up · d mark done · z snooze",
@@ -76,7 +76,8 @@ impl Why {
         match self {
             Self::Approval => "Enter details",
             Self::Finished => "Enter review",
-            Self::Question | Self::Stuck | Self::Message | Self::Mention | Self::Reminder => "Enter open",
+            Self::Question => "Enter choose",
+            Self::Stuck | Self::Message | Self::Mention | Self::Reminder => "Enter open",
         }
     }
 
@@ -301,6 +302,8 @@ pub struct Page {
     selected: Selection<Id>,
     /// The groups of tool requests listed one by one, by ant and thread.
     expanded: HashSet<(UserId, ThreadId)>,
+    /// The cursor on the selected question item's card, while Enter has focused it.
+    answering: Option<question::Cursor>,
 }
 
 impl Page {
@@ -346,6 +349,29 @@ impl Page {
         self.selected.at(&items.iter().map(Item::id).collect::<Vec<_>>())
     }
 
+    /// The cursor on the focused question card, and the thread of its question, while the question is still the
+    /// selected item's.
+    pub fn card(&self, data: &Data, now: DateTime<Utc>) -> Option<(&question::Cursor, ThreadId)> {
+        let cursor = self.answering.as_ref()?;
+        let items = self.rows(data, now);
+        let item = items.get(self.at(&items))?;
+        (item.question.as_ref()?.0 == cursor.question).then(|| (cursor, item.thread.clone()))
+    }
+
+    /// Take `key` on the focused question card, if any: where it leads, if anywhere.
+    pub fn card_key(&mut self, key: Key, data: &Data, now: DateTime<Utc>) -> Option<Option<To>> {
+        let Some((_, thread)) = self.card(data, now) else {
+            self.answering = None;
+            return None;
+        };
+        question::focused(&mut self.answering, key, &thread)
+    }
+
+    /// Type `text` pasted on the focused question card, if any: whether it took it.
+    pub fn card_paste(&mut self, text: &str, data: &Data, now: DateTime<Utc>) -> bool {
+        self.card(data, now).is_some() && self.answering.as_mut().is_some_and(|c| c.paste(text))
+    }
+
     pub fn key(&mut self, key: Key, data: &Data, now: DateTime<Utc>) -> Option<To> {
         let items = self.rows(data, now);
         let at = self.at(&items);
@@ -373,6 +399,11 @@ impl Page {
                 }
                 return None;
             }
+            Key::Enter if selected.is_some_and(|i| i.question.is_some()) => {
+                let (id, asked) = selected?.question.as_ref()?;
+                self.answering = Some(question::Cursor::new(*id, asked));
+                return None;
+            }
             Key::Enter => {
                 return match (pending, reminder.zip(reminded)) {
                     (Some(request), _) => Some(To::Ask(request, None)),
@@ -384,7 +415,7 @@ impl Page {
             Key::Char('b') => return thread().map(|t| To::Remind(t, reminded)),
             Key::Char('a' | 'A') => return pending.map(|request| To::Ask(request, verdict)),
             Key::Char('r') if pending.is_some() => return pending.map(|request| To::Ask(request, verdict)),
-            Key::Char('1'..='9' | 'r') if selected.is_some_and(|i| i.question.is_some()) => {
+            Key::Char('1'..='9') if selected.is_some_and(|i| i.question.is_some()) => {
                 let item = selected?;
                 let (id, asked) = item.question.as_ref()?;
                 return question::key(key, &item.thread, *id, asked);
@@ -438,6 +469,7 @@ impl Page {
         }
         let selected = self.at(&items);
         let width = usize::from(area.width.saturating_sub(9));
+        let cursor = self.card(data, now).map(|(cursor, _)| cursor);
         let rows: Vec<ListItem> = items
             .iter()
             .enumerate()
@@ -461,10 +493,18 @@ impl Page {
                             .collect::<Vec<_>>(),
                     ),
                 ];
+                let cursor = cursor.filter(|_| at == selected);
                 if let Some((_, question)) = &i.question {
-                    lines.push(Line::raw(format!("         {}", excerpt(&question::options(question), 160))));
+                    if cursor.is_some() {
+                        let rows = question::rows(question, cursor, width);
+                        lines.extend(rows.into_iter().map(|l| Line::styled(format!("         {l}"), l.style)));
+                    } else {
+                        lines.push(Line::raw(format!("         {}", excerpt(&question::numbered(question), 160))));
+                    }
                 }
-                if i.expanded {
+                if let Some(cursor) = cursor {
+                    lines.push(Line::styled(format!("         {}", cursor.keys()), style::dim()));
+                } else if i.expanded {
                     lines.push(Line::styled("         Enter collapses", style::dim()));
                 } else if let Some((request, settled)) = &i.request {
                     let card = approvals::Card { request, settled: settled.as_ref() };
@@ -623,7 +663,7 @@ mod tests {
     }
 
     #[test]
-    fn a_question_comes_after_the_approvals_and_answers_by_number_or_through_the_bar() {
+    fn a_question_comes_after_the_approvals_answers_by_number_and_enter_focuses_its_card() {
         use crate::tui::exec::Job;
 
         let (asked, stuck) = (ThreadId::generate(), ThreadId::generate());
@@ -636,18 +676,49 @@ mod tests {
         assert_eq!(whys, [Why::Question, Why::Stuck]);
         let screen = shown(&m, at(3));
         assert!(screen.contains("question Which retry policy?"), "{screen}");
-        assert!(screen.contains("1 exponential  2 fixed 5s  or r types an answer"), "{screen}");
-        assert!(screen.contains("1-9 answer · d done · z snooze · Enter open"), "{screen}");
+        assert!(screen.contains("         1 exponential  2 fixed 5s "), "{screen}");
+        assert!(screen.contains("1-9 answer · r reply · d done · z snooze · Enter choose"), "{screen}");
 
         assert_eq!(m.key(Key::Char('3'), at(3)), None, "no third option");
-        let job = Job::Answer {
-            thread: asked.clone(),
-            question: question.id.unwrap(),
-            choice: ants_proto::Choice::Option(2),
-        };
-        assert_eq!(m.key(Key::Char('2'), at(3)), Some(Action::Run(job, String::new())));
-        assert_eq!(m.key(Key::Char('r'), at(3)), None);
-        assert!(m.bar.focused && m.bar.text() == "/answer ", "r types an answer in the bar");
+        let answer = |choice| Job::Answer { thread: asked.clone(), question: question.id.unwrap(), choice };
+        let option = |n| Some(Action::Run(answer(ants_proto::Choice::Option(n)), String::new()));
+        assert_eq!(m.key(Key::Char('2'), at(3)), option(2), "a digit answers at once");
+
+        assert_eq!(m.key(Key::Enter, at(3)), None);
+        assert_eq!(m.page().name(), "home", "Enter focuses the card");
+        let screen = shown(&m, at(3));
+        assert!(screen.contains("› 1 exponential") && screen.contains("  2 fixed 5s"), "{screen}");
+        assert!(screen.contains("↑↓ move · Enter pick · 1-9 answer · Esc leave"), "{screen}");
+        m.key(Key::Down, at(3));
+        assert_eq!(m.key(Key::Enter, at(3)), option(2), "Enter picks the highlighted option");
+        assert!(!shown(&m, at(3)).contains("› "), "the card leaves the focus once answered");
+
+        m.key(Key::Enter, at(3));
+        assert_eq!(m.key(Key::Esc, at(3)), None);
+        assert!(!shown(&m, at(3)).contains("› "), "Esc leaves the card");
+        assert_eq!(m.key(Key::Down, at(3)), None);
+        assert!(shown(&m, at(3)).contains("stuck    help"), "and ↑↓ move between the items again");
+        m.key(Key::Home, at(3));
+
+        m.key(Key::Enter, at(3));
+        for _ in 0..2 {
+            m.key(Key::Down, at(3));
+        }
+        assert_eq!(m.key(Key::Char('q'), at(3)), None, "q types rather than quits");
+        m.paste("/later", at(3));
+        assert!(shown(&m, at(3)).contains("› type an answer: q/later▏"), "keys and pastes type on the last row");
+        let typed = Some(Action::Run(answer(ants_proto::Choice::Typed("q/later".into())), String::new()));
+        assert_eq!(m.key(Key::Enter, at(3)), typed);
+        m.key(Key::Enter, at(3));
+        m.key(Key::Down, at(3));
+        m.key(Key::Down, at(3));
+        assert_eq!(m.key(Key::Enter, at(3)), None);
+        assert!(m.bar.focused && m.bar.text() == "/answer ", "an empty typed answer goes through the bar");
+        m.key(Key::Esc, at(3));
+
+        assert_eq!(m.key(Key::Char('r'), at(3)), Some(Action::Open(asked.clone())), "r replies on the thread");
+        assert!(m.bar.focused);
+        m.key(Key::Esc, at(3));
         m.key(Key::Esc, at(3));
 
         let mut answer = message(3, &asked, "alice", "dev-b", "fixed 5s");
@@ -753,7 +824,10 @@ mod tests {
         assert_eq!(found, [(Why::Question, vec![(Why::Stuck, 1), (Why::Mention, 2)])]);
         let screen = shown(&m, at(5));
         assert!(screen.contains("question help · stuck · 2 mentions"), "{screen}");
-        assert!(screen.contains("1-9 answer · d done · z snooze · Enter open"), "the keys of the top reason: {screen}");
+        assert!(
+            screen.contains("1-9 answer · r reply · d done · z snooze · Enter choose"),
+            "the top reason's: {screen}"
+        );
         let job =
             Job::Answer { thread: busy.clone(), question: question.id.unwrap(), choice: ants_proto::Choice::Option(1) };
         assert_eq!(m.key(Key::Char('1'), at(5)), Some(Action::Run(job, String::new())));
