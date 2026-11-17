@@ -11,11 +11,11 @@ use super::{
     MemoryItem, MemoryKind, NEAR_DUPLICATE, Scope, Status, Trust, core, digest, holds_recalled_block,
     holds_recalled_marker, normalize_remote, similarity,
 };
-use crate::Sense;
 use crate::items::{ItemId, Values};
 use crate::sanitize::{Limit, Redaction, Refused, Sanitized, sanitize_body, sanitize_title};
 use crate::store::{Items, StoreError, Write};
 use crate::tools::Answer;
+use crate::{Sense, records};
 
 /// The best full-text matches compared for near duplicates.
 const CANDIDATES: usize = 20;
@@ -30,6 +30,9 @@ pub fn remember<'a>(sense: &'a Sense, call: &'a ToolCall) -> BoxFuture<'a, Answe
 }
 
 async fn remember_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
+    if let Some(kind) = call.arguments.get("kind").and_then(Value::as_str).filter(|kind| records::is_record(kind)) {
+        return records::remember(sense, call, kind).await;
+    }
     let request = Request::parse(&call.arguments)?;
     if holds_recalled_block(&request.title.text) || holds_recalled_block(&request.body.text) {
         let message = "Recalled memories are not stored again: write what was learned in new words.";
@@ -230,12 +233,17 @@ impl Request {
 }
 
 fn kinds(start: &str) -> String {
-    let all: Vec<_> = MemoryKind::ALL.iter().map(|kind| kind.name()).collect();
+    let mut all: Vec<_> = MemoryKind::ALL.iter().map(|kind| kind.name()).collect();
+    all.extend([records::SELF_MODEL, records::RELATIONSHIP]);
     format!("{start}: one of {}.", all.join(", "))
 }
 
 /// The sanitized value `name` given as `given`, which must hold text.
-fn sanitized(name: &str, given: Option<&str>, sanitized: Result<Sanitized, Refused>) -> Result<Sanitized, Answer> {
+pub(crate) fn sanitized(
+    name: &str,
+    given: Option<&str>,
+    sanitized: Result<Sanitized, Refused>,
+) -> Result<Sanitized, Answer> {
     match sanitized {
         Ok(sanitized) if given.is_some() && !sanitized.text.trim().is_empty() => Ok(sanitized),
         Ok(_) => Err(invalid(format!("{name} is missing."))),
@@ -313,11 +321,11 @@ async fn superseded(items: &dyn Items, id: &ItemId) -> Result<MemoryItem, Answer
     Ok(found)
 }
 
-pub(super) fn invalid(message: String) -> Answer {
+pub(crate) fn invalid(message: String) -> Answer {
     Answer::error("invalid", message)
 }
 
-pub(super) fn unavailable(e: StoreError) -> Answer {
+pub(crate) fn unavailable(e: StoreError) -> Answer {
     Answer::error("unavailable", format!("Memories are not available: {e}."))
 }
 
@@ -386,15 +394,8 @@ fn remembered(
         let _ =
             write!(text, "\nWarning: {}: {}; marked needs_review.", memory.citations[warning.citation], warning.reason);
     }
-    let mut redacted = Values::new();
-    for redaction in redactions {
-        let count = redacted.get(redaction.kind.name()).and_then(Value::as_u64).unwrap_or_default();
-        redacted.insert(redaction.kind.name().into(), json!(count + redaction.count as u64));
-    }
-    if !redacted.is_empty() {
-        let list: Vec<_> = redacted.iter().map(|(kind, count)| format!("{count} {kind}")).collect();
-        let _ = write!(text, "\nRedacted: {}.", list.join(", "));
-    }
+    let (redacted_text, redacted) = redacted(redactions);
+    text.push_str(&redacted_text);
     let json = json!({
         "id": id,
         "revision": revision,
@@ -410,4 +411,19 @@ fn remembered(
         "redactions": redacted,
     });
     Answer { text, json, is_error: false }
+}
+
+/// The `redactions` made, as a line to add to an answer, empty for none, and as JSON counts by kind.
+pub(crate) fn redacted(redactions: &[Redaction]) -> (String, Value) {
+    let mut redacted = Values::new();
+    for redaction in redactions {
+        let count = redacted.get(redaction.kind.name()).and_then(Value::as_u64).unwrap_or_default();
+        redacted.insert(redaction.kind.name().into(), json!(count + redaction.count as u64));
+    }
+    let mut text = String::new();
+    if !redacted.is_empty() {
+        let list: Vec<_> = redacted.iter().map(|(kind, count)| format!("{count} {kind}")).collect();
+        let _ = write!(text, "\nRedacted: {}.", list.join(", "));
+    }
+    (text, Value::Object(redacted))
 }

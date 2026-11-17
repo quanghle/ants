@@ -183,7 +183,7 @@ async fn a_dormant_ant_s_reminders_wait_for_its_revival() {
     let host = Arc::new(Wakes::default());
     let scheduler = start(sense.clone(), host.clone(), settings());
     settle().await;
-    tokio::time::advance(MAINTENANCE).await;
+    tokio::time::advance(DAY).await;
     settle().await;
     assert!(host.requests.locked().is_empty(), "nothing fires while dormant");
     sense.event(lifecycle(EventKind::AntRevived)).await.unwrap();

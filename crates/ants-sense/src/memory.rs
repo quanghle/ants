@@ -9,8 +9,8 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
 
-use ants_proto::UserId;
 use ants_proto::provider::CallContext;
+use ants_proto::{SenseId, UserId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -35,6 +35,7 @@ pub use recall::{
     recall, score, search, snippet, thread_repo, top,
 };
 pub use remember::remember;
+pub(crate) use remember::{invalid, redacted, sanitized, unavailable};
 pub use vote::{VOTE, Vote, Votes, vote};
 
 /// The kind of the items holding memories.
@@ -307,6 +308,9 @@ pub struct Memory {
     pub votes: Votes,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access: Option<Access>,
+    /// The sense identity a clone inherited it from ([`crate::fork`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited: Option<SenseId>,
 }
 
 /// How often a memory was read in full (`sense_recall` with its id, in a thread a webhook did not start): on how
@@ -349,6 +353,7 @@ impl Memory {
             superseded_by: None,
             votes: Votes::default(),
             access: None,
+            inherited: None,
         }
     }
 

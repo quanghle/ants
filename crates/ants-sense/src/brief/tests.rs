@@ -15,6 +15,7 @@ use crate::store::{Store, Stores};
 use crate::tools::Handler;
 
 mod citations;
+mod records;
 mod work;
 
 /// The items of one ant, the same at each call.

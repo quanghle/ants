@@ -60,7 +60,9 @@ pub const TOOLS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "remember",
-        description: "Store a memory: a fact, lesson, decision, preference, gotcha or episode, with citations.",
+        description: "Store a memory: a fact, lesson, decision, preference, gotcha or episode, with citations. Or, \
+                      with kind self_model or relationship, replace the self-model or the relationship record of a \
+                      human or ant from the revision read.",
         schema: remember,
         handler: crate::memory::remember,
     },
@@ -144,13 +146,21 @@ fn remember() -> Value {
         "required": ["path"],
     });
     let mut schema = object(&json!({
-        "kind": {"enum": ["fact", "lesson", "decision", "preference", "gotcha", "episode"]},
+        "kind": {
+            "enum": ["fact", "lesson", "decision", "preference", "gotcha", "episode", "self_model", "relationship"],
+        },
         "scope": {
             "type": "string",
-            "description": "Whom it is about: self (default), repo:<git remote>, human:<name> or ant:<name>.",
+            "description": "Whom it is about: self (default), repo:<git remote>, human:<name> or ant:<name>; \
+                            human:<name> or ant:<name> for a relationship.",
         },
         "title": {"type": "string", "maxLength": 200},
-        "body": {"type": "string", "description": "At most 4 KiB."},
+        "body": {"type": "string", "description": "At most 4 KiB; 2,000 bytes for a self-model or relationship."},
+        "revision": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "For a self-model or relationship: the revision replaced, none for the first.",
+        },
         "importance": {"type": "integer", "minimum": 1, "maximum": 5, "description": "3 by default."},
         "citations": {
             "type": "array",
