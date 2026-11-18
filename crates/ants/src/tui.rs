@@ -39,6 +39,8 @@ mod mouse;
 mod nav;
 mod notices;
 mod palette;
+#[cfg(test)]
+mod parity;
 mod people;
 mod question;
 mod react;
