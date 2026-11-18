@@ -306,6 +306,8 @@ async fn sage_findings(
             text: text.clone(),
             items: cited.memories.clone(),
             untrusted: untrusted_text,
+            key: None,
+            count: None,
             advice: Some(advice.clone()),
         });
     }
@@ -372,7 +374,7 @@ pub async fn review_sent(items: &dyn Items, number: u64) -> Result<(), StoreErro
 
 /// The ids of the open findings resting on untrusted text of the last dream when `thread` is its dream thread: what a
 /// write there answers may rest on them, so it is untrusted, and `sense_persona` and `sense_skill` refuse proposals
-/// made there. Empty on any other thread.
+/// made there but in answer to a trusted finding of the dream ([`super::untrusted`]). Empty on any other thread.
 pub async fn untrusted_on(items: &dyn Items, thread: &ThreadId) -> Result<Vec<String>, StoreError> {
     let Some((dream, _)) = last(items).await? else { return Ok(Vec::new()) };
     if dream.thread.as_ref() != Some(thread) {

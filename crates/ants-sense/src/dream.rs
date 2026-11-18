@@ -14,11 +14,12 @@
 //! [`proposal::CONFIRM_AFTER_HOURS`] or more before ([`proposals`], [`crate::proposal`]). The ant answers each with
 //! `sense_dream` ([`dream`]) as applied (naming the items it wrote), rejected or deferred, with a reason, applied
 //! confirming a proposal and rejected discarding it; the deferred and unanswered come again in the next dream while
-//! they still hold. A ripe proposal no dream offered makes a dream due ([`proposal_due`]). Writes on the dream thread
-//! through the tools that change memories count toward [`MAX_DREAM_WRITES`], and are untrusted while a finding resting
-//! on untrusted text is open ([`counted`], [`untrusted_on`]); persona and skill proposals are refused on untrusted
-//! ground ([`untrusted`]). Finishing a dream, or beginning the next one, writes its diary: an episode memory
-//! summarizing its verdicts.
+//! they still hold. A rejected finding rests ([`Rested`]): no dream gathers it again until what it is about changed
+//! since the verdict or [`REST_DAYS`] of the ant's active time passed. A ripe proposal no dream offered makes a dream
+//! due ([`proposal_due`]). Writes on the dream thread through the tools that change memories count toward
+//! [`MAX_DREAM_WRITES`], and are untrusted while a finding resting on untrusted text is open ([`counted`],
+//! [`untrusted_on`]); persona and skill proposals are refused on untrusted ground ([`untrusted`]). Finishing a dream,
+//! or beginning the next one, writes its diary: an episode memory summarizing its verdicts.
 
 use std::collections::BTreeSet;
 use std::fmt::{self, Write as _};
@@ -30,7 +31,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::Sense;
-use crate::items::{ItemId, Values};
+use crate::identity;
+use crate::items::{ItemId, Revision, Values};
 use crate::memory::{self, MAX_BODY_BYTES, MAX_TITLE_CHARS, MEMORY, Memory, MemoryItem, MemoryKind, Scope, Status};
 use crate::proposal;
 use crate::store::{Items, StoreError, Write, read_modify_write};
@@ -62,6 +64,8 @@ pub const MAX_FINDINGS: usize = 20;
 pub const MAX_DREAM_WRITES: usize = 20;
 /// The tools whose writes on a dream thread count toward [`MAX_DREAM_WRITES`]: those writing memories.
 pub const COUNTED: &[&str] = &["remember", "vote"];
+/// The days of the ant's active time a rejected finding rests unless what it is about changes ([`Rested`]).
+pub const REST_DAYS: i64 = 14;
 
 /// Who sense changes dream items for ([`crate::items::Stamp::by`]).
 pub(crate) const BY: &str = "sense:dream";
@@ -172,6 +176,14 @@ pub struct Finding {
     /// Whether it rests on untrusted text: an untrusted memory or thread.
     #[serde(default)]
     pub untrusted: bool,
+    /// Its kind and what it is about, `<kind>:<about>`, the same in every dream gathering it; none for a sage's. A
+    /// rejected finding rests under it ([`Rested`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// The count it rests on, for a finding about a count rather than items alone: a rejected one rests until it
+    /// differs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u64>,
     /// A sage's finding: its own kind, its evidence and the action it suggests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advice: Option<Advice>,
@@ -213,6 +225,29 @@ pub struct Verdict {
     #[serde(default)]
     pub items: Vec<ItemId>,
     pub at: DateTime<Utc>,
+}
+
+/// A finding the ant rejected, kept with the record of the last dream: no dream gathers it again until what it is
+/// about changed since the verdict (one of its items, other than by a read, or the count it rests on) or
+/// [`REST_DAYS`] of the ant's active time passed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rested {
+    /// Its [`Finding::key`].
+    pub key: String,
+    /// Its id when rejected.
+    pub finding: String,
+    /// When it was rejected.
+    pub at: DateTime<Utc>,
+    /// The count it rested on ([`Finding::count`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u64>,
+}
+
+/// The record of the last dream.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct Record {
+    number: u64,
+    rested: Vec<Rested>,
 }
 
 /// A dream, as its item holds it.
@@ -315,16 +350,31 @@ impl Dream {
             .iter()
             .filter(|finding| self.verdict(&finding.id).is_none_or(|verdict| verdict.verdict == Judgement::Deferred))
     }
+
+    /// The findings with a key the ant rejected, to rest.
+    fn rejected(&self) -> impl Iterator<Item = Rested> {
+        self.verdicts.iter().filter(|verdict| verdict.verdict == Judgement::Rejected).filter_map(|verdict| {
+            let finding = self.findings.iter().find(|finding| finding.id == verdict.finding)?;
+            Some(Rested {
+                key: finding.key.clone()?,
+                finding: finding.id.clone(),
+                at: verdict.at,
+                count: finding.count,
+            })
+        })
+    }
 }
 
 fn record_id() -> ItemId {
     ItemId::named(DREAMS, RECORD)
 }
 
-/// The number of the last dream and the revision of its record; none before the first.
-async fn record(items: &dyn Items) -> Result<Option<(u64, u64)>, StoreError> {
+/// The record of the last dream and the revision of its item; none before the first.
+async fn record(items: &dyn Items) -> Result<Option<(Record, u64)>, StoreError> {
     let Some(item) = items.get(&record_id()).await? else { return Ok(None) };
-    Ok(item.values.get("number").and_then(Value::as_u64).map(|number| (number, item.revision)))
+    let record = serde_json::from_value(Value::Object(item.values))
+        .map_err(|e| StoreError::Unavailable(format!("unreadable record of the last dream: {e}")))?;
+    Ok(Some((record, item.revision)))
 }
 
 /// Dream `number` and the revision of its item.
@@ -338,7 +388,7 @@ pub async fn get(items: &dyn Items, number: u64) -> Result<Option<(Dream, u64)>,
 /// The last dream, and the revision of its item; none before the first.
 pub async fn last(items: &dyn Items) -> Result<Option<(Dream, u64)>, StoreError> {
     match record(items).await? {
-        Some((number, _)) => get(items, number).await,
+        Some((record, _)) => get(items, record.number).await,
         None => Ok(None),
     }
 }
@@ -361,23 +411,30 @@ pub struct Start<'a> {
 }
 
 /// Begin the next dream as `start` says, unless one began within [`DREAM_EVERY_HOURS`]: its findings gathered, the
-/// last dream closed with its diary if the ant left it unfinished, in one write. Returns the new dream; none when one
-/// began meanwhile.
+/// last dream closed with its diary if the ant left it unfinished, and the findings rejected in it rested, in one
+/// write. Returns the new dream; none when one began meanwhile.
 pub async fn begin(items: &dyn Items, start: Start<'_>) -> Result<Option<Dream>, StoreError> {
+    let card = identity::card(items).await?;
+    let ages = &memory::Ages::new(start.at, card.iter().flat_map(|card| card.dormant(start.at)));
     let start = &start;
     read_modify_write(|| async move {
         let record = record(items).await?;
-        let previous = match record {
-            Some((number, _)) => get(items, number).await?,
+        let previous = match &record {
+            Some((record, _)) => get(items, record.number).await?,
             None => None,
         };
         if previous.as_ref().is_some_and(|(previous, _)| previous.next() > start.at) {
             return Ok(None);
         }
-        let number = record.map_or(1, |(number, _)| number + 1);
-        let since = since(previous.as_ref().map(|(previous, _)| previous), start.at);
-        let findings =
-            findings(items, previous.as_ref().map(|(previous, _)| previous), number, since, start.at).await?;
+        let number = record.as_ref().map_or(1, |(record, _)| record.number + 1);
+        let last = previous.as_ref().map(|(previous, _)| previous);
+        let since = since(last, start.at);
+        let mut rested = record.as_ref().map_or_else(Vec::new, |(record, _)| record.rested.clone());
+        for rejected in last.into_iter().flat_map(Dream::rejected) {
+            rested.retain(|rested| rested.key != rejected.key);
+            rested.push(rejected);
+        }
+        let findings = findings(items, last, number, since, start.at, &mut rested, ages).await?;
         let mut writes = Vec::new();
         if let Some((previous, revision)) = previous
             && previous.state != State::Done
@@ -411,6 +468,7 @@ pub async fn begin(items: &dyn Items, start: Start<'_>) -> Result<Option<Dream>,
         });
         let mut values = Values::new();
         values.insert("number".into(), json!(number));
+        values.insert("rested".into(), json!(rested));
         let expected = Some(record.map_or(0, |(_, revision)| revision));
         writes.push(Write::Put { id: record_id(), kind: DREAMS.into(), values, expected });
         items.write(&writes, BY).await?;
@@ -474,11 +532,11 @@ pub async fn finding(items: &dyn Items, id: &str) -> Result<Option<Finding>, Sto
     Ok(dream.findings.into_iter().find(|finding| finding.id == id))
 }
 
-/// Why what the ant writes in `context`, in answer to `finding` if it names one, rests on untrusted text; none when it
-/// does not (requirements ants-x39hk.6.5 and ants-x39hk.12.5). It does when the thread came from a webhook, the
-/// finding is untrusted ([`Finding::untrusted`]), or the call is on the thread of a dream whose packet held untrusted
-/// text, an untrusted finding or the history of an untrusted thread: the ant may answer any of them without naming
-/// it. `sense_persona` and `sense_skill` refuse their proposals then.
+/// Why a persona or skill proposal made in `context`, in answer to `finding` if it names one, rests on untrusted text;
+/// none when it does not (requirements ants-x39hk.6.5 and ants-x39hk.12.5). It does when the thread came from a
+/// webhook, or when the finding it names is untrusted ([`Finding::untrusted`]). On the thread of a dream whose packet
+/// holds untrusted text, an untrusted finding or the history of an untrusted thread, it does too unless it names a
+/// finding of that dream: one naming none, or a finding the dream does not hold, may answer the untrusted text.
 pub async fn untrusted(
     items: &dyn Items,
     context: &CallContext,
@@ -487,30 +545,94 @@ pub async fn untrusted(
     if !context.trusted() {
         return Ok(Some("the thread came from a webhook".into()));
     }
-    if let Some(id) = finding
-        && self::finding(items, id).await?.is_some_and(|finding| finding.untrusted)
-    {
-        return Ok(Some(format!("finding {id} rests on untrusted text")));
-    }
     let on = items.list_by(DREAM, "thread", Some(&json!(context.thread)), 1).await?;
-    let Some(dream) = on.first().map(Dream::of).transpose()? else { return Ok(None) };
+    let dream = on.first().map(Dream::of).transpose()?;
+    if let Some(id) = finding {
+        let held = dream.as_ref().and_then(|dream| dream.findings.iter().find(|finding| finding.id == id));
+        let untrusted = match held {
+            Some(held) => held.untrusted,
+            None => self::finding(items, id).await?.is_some_and(|finding| finding.untrusted),
+        };
+        if untrusted {
+            return Ok(Some(format!("finding {id} rests on untrusted text")));
+        }
+        if held.is_some() || dream.is_none() {
+            return Ok(None);
+        }
+    }
+    let Some(dream) = dream else { return Ok(None) };
+    let answers = match finding {
+        Some(id) => format!("finding {id} is not one of its findings"),
+        None => "the proposal names none of its findings in `finding`".into(),
+    };
     if let Some(finding) = dream.findings.iter().find(|finding| finding.untrusted) {
-        return Ok(Some(format!("dream {} offers untrusted finding {}", dream.number, finding.id)));
+        return Ok(Some(format!("dream {} offers untrusted finding {} and {answers}", dream.number, finding.id)));
     }
     if dream.threads.iter().any(|covered| covered.untrusted) {
-        return Ok(Some(format!("the packet of dream {} holds the history of an untrusted thread", dream.number)));
+        return Ok(Some(format!(
+            "the packet of dream {} holds the history of an untrusted thread and {answers}",
+            dream.number
+        )));
     }
     Ok(None)
 }
 
+/// A finding gathered for a dream, before it is numbered.
+///
+/// A finding is about its items, or about a subject without items, and may rest on a count: [`Gathered::key`] names
+/// it the same in every dream, so a rejected one rests ([`Rested`]) until an item changes or the count differs.
+struct Gathered {
+    kind: FindingKind,
+    /// What it is about: its items' ids joined by commas, or a subject naming it without items.
+    about: String,
+    items: Vec<ItemId>,
+    count: Option<u64>,
+    text: String,
+    untrusted: bool,
+}
+
+impl Gathered {
+    /// A finding of `kind` about `items`.
+    fn on(kind: FindingKind, items: Vec<ItemId>, text: String, untrusted: bool) -> Self {
+        let about = items.iter().map(ItemId::as_str).collect::<Vec<_>>().join(",");
+        Self { kind, about, items, count: None, text, untrusted }
+    }
+
+    fn key(&self) -> String {
+        format!("{}:{}", self.kind, self.about)
+    }
+
+    /// Whether what it is about changed since `rested` was rejected: the count it rests on, or one of its items other
+    /// than by a read ([`memory::Access`]).
+    async fn changed(&self, items: &dyn Items, rested: &Rested) -> Result<bool, StoreError> {
+        if self.count != rested.count {
+            return Ok(true);
+        }
+        for id in &self.items {
+            let history = items.history(id).await?;
+            let changed = |revision: &Revision| {
+                revision.at > rested.at && revision.change.after.keys().any(|value| value != "access")
+            };
+            if history.iter().any(changed) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
 /// The findings of dream `number`, beginning at `at` and reviewing from `since`: the open findings of `previous` that
-/// still hold, then the packet's own on what they do not cover yet, up to [`MAX_FINDINGS`].
+/// still hold, then the packet's own on what they do not cover yet, up to [`MAX_FINDINGS`]. One of the `rested`
+/// stays out while what it is about is unchanged and the ant was active less than [`REST_DAYS`] since the verdict,
+/// as `ages` counts; `rested` keeps those resting on.
 async fn findings(
     items: &dyn Items,
     previous: Option<&Dream>,
     number: u64,
     since: DateTime<Utc>,
     at: DateTime<Utc>,
+    rested: &mut Vec<Rested>,
+    ages: &memory::Ages,
 ) -> Result<Vec<Finding>, StoreError> {
     let proposals = proposals(items, at).await?;
     let memories: Vec<_> = items.list(MEMORY, usize::MAX).await?.into_iter().filter_map(MemoryItem::of).collect();
@@ -529,6 +651,51 @@ async fn findings(
             found.push(open.clone());
         }
     }
+    let diary = previous.and_then(|previous| previous.diary.as_ref());
+    let fresh = gather(items, &memories, since, diary, proposals).await?;
+    let covered: BTreeSet<_> = found.iter().filter_map(|finding| finding.key.clone()).collect();
+    let resting = |at| ages.since(at) < Duration::days(REST_DAYS);
+    let mut n = 0;
+    for gathered in fresh {
+        if found.len() >= MAX_FINDINGS {
+            break;
+        }
+        let key = gathered.key();
+        if covered.contains(&key) {
+            continue;
+        }
+        if let Some(index) = rested.iter().position(|rested| rested.key == key) {
+            if resting(rested[index].at) && !gathered.changed(items, &rested[index]).await? {
+                continue;
+            }
+            rested.remove(index);
+        }
+        n += 1;
+        found.push(Finding {
+            id: format!("{number}.{n}"),
+            kind: gathered.kind,
+            text: gathered.text,
+            items: gathered.items,
+            untrusted: gathered.untrusted,
+            key: Some(key),
+            count: gathered.count,
+            advice: None,
+        });
+    }
+    found.truncate(MAX_FINDINGS);
+    rested.retain(|rested| resting(rested.at));
+    Ok(found)
+}
+
+/// The packet's own findings on `memories` and `proposals`, for a dream reviewing from `since`, the last dream's
+/// `diary` left out of those to distill.
+async fn gather(
+    items: &dyn Items,
+    memories: &[MemoryItem],
+    since: DateTime<Utc>,
+    diary: Option<&ItemId>,
+    proposals: Vec<Proposal>,
+) -> Result<Vec<Gathered>, StoreError> {
     let mut fresh = Vec::new();
     let mine = |found: &MemoryItem| found.memory.trust == memory::Trust::Untrusted;
     for found in memories.iter().filter(|found| found.memory.status.live()) {
@@ -541,7 +708,7 @@ async fn findings(
                 votes.helpful,
                 votes.stale
             );
-            fresh.push((FindingKind::Contradiction, vec![found.id().clone()], text, mine(found)));
+            fresh.push(Gathered::on(FindingKind::Contradiction, vec![found.id().clone()], text, mine(found)));
         }
     }
     for found in memory::needs_review(items).await? {
@@ -551,7 +718,7 @@ async fn findings(
             found.id(),
             found.memory.title
         );
-        fresh.push((FindingKind::NeedsReview, vec![found.id().clone()], text, mine(&found)));
+        fresh.push(Gathered::on(FindingKind::NeedsReview, vec![found.id().clone()], text, mine(&found)));
     }
     for cluster in memory::duplicates(items).await? {
         let named: Vec<_> = cluster.iter().map(|found| format!("{} \"{}\"", found.id(), found.memory.title)).collect();
@@ -559,15 +726,9 @@ async fn findings(
             "Memories {} are near duplicates: keep one, superseding it with what all hold, and vote the others wrong.",
             named.join(", ")
         );
-        let untrusted = cluster.iter().any(mine);
-        fresh.push((
-            FindingKind::Duplicates,
-            cluster.iter().map(|found| found.id().clone()).collect(),
-            text,
-            untrusted,
-        ));
+        let ids = cluster.iter().map(|found| found.id().clone()).collect();
+        fresh.push(Gathered::on(FindingKind::Duplicates, ids, text, cluster.iter().any(mine)));
     }
-    let diary = previous.and_then(|previous| previous.diary.as_ref());
     let mut episodes: Vec<_> = memories
         .iter()
         .filter(|found| found.memory.kind == MemoryKind::Episode && found.memory.status.live())
@@ -580,24 +741,12 @@ async fn findings(
             found.id(),
             found.memory.title
         );
-        fresh.push((FindingKind::Distill, vec![found.id().clone()], text, mine(found)));
+        fresh.push(Gathered::on(FindingKind::Distill, vec![found.id().clone()], text, mine(found)));
     }
     for proposal in proposals {
-        fresh.push((FindingKind::Proposal, vec![proposal.id], proposal.text, proposal.untrusted));
+        fresh.push(Gathered::on(FindingKind::Proposal, vec![proposal.id], proposal.text, proposal.untrusted));
     }
-    let covered: BTreeSet<_> = found.iter().map(|finding| (finding.kind, finding.items.clone())).collect();
-    let mut n = 0;
-    for (kind, ids, text, untrusted) in fresh {
-        if found.len() >= MAX_FINDINGS {
-            break;
-        }
-        if !covered.contains(&(kind, ids.clone())) {
-            n += 1;
-            found.push(Finding { id: format!("{number}.{n}"), kind, text, items: ids, untrusted, advice: None });
-        }
-    }
-    found.truncate(MAX_FINDINGS);
-    Ok(found)
+    Ok(fresh)
 }
 
 /// The writes closing `dream`, at `revision`, with its diary written in `context` at `at`.

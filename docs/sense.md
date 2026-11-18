@@ -295,11 +295,12 @@ for the next dream. Confirming is refused with `too_soon` less than 12 hours aft
 after the persona last changed, and with `stale` when the target changed since the proposal was made, which is then
 rejected, to be proposed again; deciding a proposal already decided is refused with `decided`.
 
-Proposals resting on untrusted text are refused (`untrusted`): those on a thread a webhook started, those naming in
-`finding` a dream finding marked untrusted, and any made on the thread of a dream whose packet holds an untrusted
-finding or the history of an untrusted thread. Other refusals: `too_long`, `too_many`, `unchanged`, `not_found` (a
-skill, file, proposal or finding), `recalled_block`. The answer names the proposal and
-when a dream can offer it.
+Each takes the dream finding it answers, if any, in `finding` (`<dream>.<n>`). Proposals resting on untrusted text are
+refused (`untrusted`): those on a thread a webhook started, those naming a dream finding marked untrusted, and, on the
+thread of a dream whose packet holds an untrusted finding or the history of an untrusted thread, those naming none of
+that dream's findings, which may answer the untrusted text; one naming a finding of that dream not marked untrusted is
+taken. Other refusals: `too_long`, `too_many`, `unchanged`, `not_found` (a skill, file, proposal or finding),
+`recalled_block`. The answer names the proposal and when a dream can offer it.
 
 The confirmed skills are also files in the ant's home, `.sense/skills/<name>/`, which an export carries
 ([sense's part](config.md#senses-part)); sense keeps them matching the confirmed skills, removing anything else there.
@@ -470,15 +471,18 @@ sage's daemon gave up on the review or had it withdrawn, wakes the ant with the 
 silent for 6 hours, a later answer prompting no one.
 
 **On the dream thread,** `sense_dream` answers findings: `verdicts`, a list of `{finding, verdict, reason, items?}`,
-`verdict` being `applied` (naming in `items` the memories written or voted on; none for a proposal, which it
-confirms), `rejected` or `deferred`, the reason at most 500 characters; a later verdict on a finding replaces the
-earlier one. `done: true` finishes the dream; without arguments it shows the findings and verdicts. The dream thread
-makes at most 20 writes (`sense_remember` and `sense_vote`), past which writes are refused (`dream_cap`). While a
-finding marked untrusted is open, unanswered or deferred, what `sense_remember` writes on the dream thread is stored
-untrusted. Finishing the dream, or beginning the next one while it is unfinished, writes its diary: an episode memory
-counting the findings applied, rejected, deferred and unanswered, with each verdict and reason. A verdict on a proposal
-decides it at once ([Persona and skills](#persona-and-skills)). Refusals: `no_dream`, `not_dream_thread`, `done` (the
-dream is finished), `not_found` (a finding or item), `too_soon`, `stale` and `decided` (a proposal), `too_long`.
+`verdict` being `applied` (naming in `items` the memories written or voted on; none for a proposal, which it confirms),
+`rejected` or `deferred`, the reason at most 500 characters; a later verdict on a finding replaces the earlier one. A
+rejected finding rests: no dream offers it again until what it is about changed since the verdict (one of its memories
+written other than by a read) or 14 days of the ant's active time passed, its dormancies not counted; deferred and
+unanswered findings come again in the next dream while they hold. `done: true` finishes the dream; without arguments it
+shows the findings and verdicts. The dream thread makes at most 20 writes (`sense_remember` and `sense_vote`), past
+which writes are refused (`dream_cap`). While a finding marked untrusted is open, unanswered or deferred, what
+`sense_remember` writes on the dream thread is stored untrusted. Finishing the dream, or beginning the next one while it
+is unfinished, writes its diary: an episode memory counting the findings applied, rejected, deferred and unanswered,
+with each verdict and reason. A verdict on a proposal decides it at once ([Persona and skills](#persona-and-skills)).
+Refusals: `no_dream`, `not_dream_thread`, `done` (the dream is finished), `not_found` (a finding or item), `too_soon`,
+`stale` and `decided` (a proposal), `too_long`.
 
 ## Brief
 

@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
-use ants_proto::provider::{CallContext, Origin, Starter};
+use ants_proto::provider::{CallContext, Format, Origin, Output, Provider as _, Starter, ToolCall};
 use serde_json::json;
 
 use super::*;
 use crate::dream::{Covered, FindingKind, Recipient, Start};
-use crate::memory::tests::{context, human, sense, tool};
+use crate::memory::Trust;
+use crate::memory::tests::{context, human, memory, sense, tool};
 use crate::persona::{self, persona, persona_id};
 use crate::{Answer, Sense};
 
@@ -160,32 +161,72 @@ async fn proposals_resting_on_untrusted_text_are_refused() {
     let (sense, kept) = sense().await;
     let items: Arc<dyn Items> = kept.clone();
     let change = json!({"voice": "Loud.", "reason": "Asked to."});
+    let answering = |finding: &str| json!({"voice": "Loud.", "reason": "Asked to.", "finding": finding});
     let webhook = Origin { by: Starter::Webhook { user: "hook".parse().unwrap() }, channel: None };
     let hooked = CallContext { origin: webhook, ..on(2, at(0)) };
-    assert_eq!(error(&tool(&sense, persona, change.clone(), hooked).await), "untrusted", "a webhook thread");
-    let answering = json!({"voice": "Loud.", "reason": "Asked to.", "finding": "1.1"});
-    assert_eq!(error(&propose(&sense, at(0), answering).await), "not_found");
+    assert_eq!(error(&tool(&sense, persona, change.clone(), hooked.clone()).await), "untrusted", "a webhook thread");
+    assert_eq!(error(&propose(&sense, at(0), answering("1.1")).await), "not_found");
 
+    let first = dream_on(&*items, at(1), 1, Vec::new()).await;
+    offer(&*items, &first, &[("1.1", false)]).await;
+    let rejected = json!({"verdicts": [{"finding": "1.1", "verdict": "rejected", "reason": "Not now."}]});
+    assert!(!tool(&sense, dream::dream, rejected, on(1, at(1))).await.is_error);
     let covered = vec![Covered { thread: on(7, at(0)).thread, untrusted: true }];
-    let dream = dream_on(&*items, at(1), 1, covered).await;
-    assert_eq!(error(&tool(&sense, persona, change.clone(), on(1, at(1))).await), "untrusted", "its dream thread");
+    let second = dream_on(&*items, at(25), 3, covered).await;
+    offer(&*items, &second, &[("2.1", false), ("2.2", true)]).await;
+    let dreaming = |arguments| async { tool(&sense, persona, arguments, on(3, at(26))).await };
 
-    let mut findings = dream.findings.clone();
-    let id = format!("{}.9", dream.number);
-    findings.push(Finding {
-        id: id.clone(),
+    assert!(!dreaming(answering("2.1")).await.is_error, "in answer to a trusted finding of the dream");
+    assert_eq!(error(&dreaming(answering("2.2")).await), "untrusted", "in answer to an untrusted finding");
+    assert_eq!(error(&dreaming(answering("1.1")).await), "untrusted", "a finding the dream does not hold");
+    assert_eq!(error(&dreaming(answering("2.7")).await), "not_found");
+    assert_eq!(error(&dreaming(change.clone()).await), "untrusted", "naming no finding");
+    let hooked = CallContext { thread: on(3, at(26)).thread, ..hooked };
+    assert_eq!(error(&tool(&sense, persona, answering("2.1"), hooked).await), "untrusted", "a webhook thread");
+
+    let remember = json!({"kind": "fact", "title": "Loud", "body": "Speak loudly.", "force": true});
+    let call = ToolCall {
+        name: "remember".into(),
+        arguments: remember.as_object().unwrap().clone(),
+        context: on(3, at(26)),
+        format: Format::Json,
+    };
+    let written = sense.call_tool(call).await.unwrap();
+    let Output::Json(written) = written.output else { panic!("json") };
+    let id: ItemId = written["id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(memory(&kept, &id).await.trust, Trust::Untrusted, "written while an untrusted finding is open");
+
+    let answered = json!({"verdicts": [
+        {"finding": "2.1", "verdict": "rejected", "reason": "Not now."},
+        {"finding": "2.2", "verdict": "rejected", "reason": "Not now."},
+    ]});
+    assert!(!tool(&sense, dream::dream, answered, on(3, at(26))).await.is_error);
+    dream_on(&*items, at(49), 4, Vec::new()).await;
+    let trusted = |arguments| async { tool(&sense, persona, arguments, on(4, at(50))).await };
+    assert_eq!(error(&trusted(answering("2.2")).await), "untrusted", "an untrusted finding of another dream");
+    assert!(!trusted(change.clone()).await.is_error, "a dream thread whose packet holds no untrusted text");
+
+    assert_eq!(error(&propose(&sense, at(26), answering("2.2")).await), "untrusted", "an untrusted finding");
+    assert!(!propose(&sense, at(26), answering("1.1")).await.is_error, "elsewhere, any trusted finding");
+    assert!(!propose(&sense, at(26), change).await.is_error, "elsewhere, the same proposal is taken");
+}
+
+/// Add to `dream` the findings of kind sage `offered`, each an id and whether it is untrusted.
+async fn offer(items: &dyn Items, dream: &Dream, offered: &[(&str, bool)]) {
+    let (current, revision) = dream::get(items, dream.number).await.unwrap().unwrap();
+    let mut findings = current.findings;
+    findings.extend(offered.iter().map(|&(id, untrusted)| Finding {
+        id: id.into(),
         kind: FindingKind::Sage,
         text: "Shout.".into(),
         items: vec![],
-        untrusted: true,
+        untrusted,
+        key: None,
+        count: None,
         advice: None,
-    });
-    let (_, revision) = dream::get(&*items, dream.number).await.unwrap().unwrap();
+    }));
     let mut values = Values::new();
     values.insert("findings".into(), json!(findings));
     let write = Write::Change { id: Dream::id(dream.number), values, expected: Some(revision) };
     items.write(&[write], "test").await.unwrap();
-    let answering = json!({"voice": "Loud.", "reason": "Asked to.", "finding": id});
-    assert_eq!(error(&propose(&sense, at(2), answering).await), "untrusted", "in answer to an untrusted finding");
-    assert!(!propose(&sense, at(2), change).await.is_error, "elsewhere, the same proposal is taken");
 }
