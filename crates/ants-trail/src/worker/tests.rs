@@ -8,8 +8,22 @@ const META: &str = "meta = {\"name\": \"t\", \"description\": \"a test\", \"phas
 fn start(script: &str, limits: Limits) -> Response {
     let request = Request::Start {
         script: format!("{META}{script}"),
+        entry: None,
         args: json!({"items": ["a", "b", "c"]}),
         limits,
+        clock: 1_700_000_000,
+        seed: 7,
+    };
+    serve(&serde_json::to_string(&request).unwrap())
+}
+
+/// Starts `script`, a whole trail, at the waypoint `entry` with `state`.
+fn enter(script: &str, entry: &str, state: Value) -> Response {
+    let request = Request::Start {
+        script: script.to_owned(),
+        entry: Some(entry.to_owned()),
+        args: state,
+        limits: Limits::default(),
         clock: 1_700_000_000,
         seed: 7,
     };
@@ -157,4 +171,41 @@ fn bad_requests_are_refused_and_foreign_snapshots_unrestorable() {
     let request = json!({"resume": {"snapshot": {"nope": 1}, "answers": [], "limits": limits, "seed": 7, "steps": 0}});
     let response = serve(&request.to_string());
     assert!(matches!(&response, Response::Unrestorable { error } if error.starts_with("unreadable snapshot")));
+}
+
+const WAYPOINTS: &str = r#"meta = {"name": "fix", "description": "", "phases": [], "waypoints": ["triage", "patch"]}
+PREFIX = "patch"
+
+async def triage(state):
+    return await agent("triage")
+
+async def patch(state):
+    found = await agent(f"{PREFIX} {state['bug']}")
+    if found == "raise":
+        raise ValueError(found)
+    return [state, found]
+"#;
+
+#[test]
+fn a_start_at_a_waypoint_runs_its_top_level_then_awaits_only_it_with_the_state() {
+    let started = enter(WAYPOINTS, "patch", json!({"bug": 7}));
+    let first = calls(&started);
+    assert_eq!(first.iter().map(|c| &c.args).collect::<Vec<_>>(), [&json!({"prompt": "patch 7"})]);
+    let done = resume(&started, &[(first[0].call, Answer::Ok(json!("fixed")))], 1);
+    assert_eq!(result(done), json!([{"bug": 7}, "fixed"]));
+    let raised = resume(&started, &[(first[0].call, Answer::Ok(json!("raise")))], 1);
+    let error = error(raised);
+    assert!(error.contains("File \"trail.py\", line 10, in patch"), "{error}");
+}
+
+#[test]
+fn an_entry_the_meta_does_not_list_is_refused() {
+    let plain = format!("{META}await agent('x')\n");
+    for (script, entry) in [(WAYPOINTS, "review"), (plain.as_str(), "x")] {
+        let response = enter(script, entry, json!(null));
+        assert!(
+            matches!(&response, Response::Refused { error } if error.contains(&format!("no waypoint {entry:?}"))),
+            "{response:?}"
+        );
+    }
 }

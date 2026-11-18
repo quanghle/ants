@@ -279,7 +279,7 @@ impl Trails {
         if size > MAX_TRAIL_ARGS {
             return Err(format!("the arguments have {size} bytes of JSON; a run takes at most {MAX_TRAIL_ARGS}"));
         }
-        let engine = Run::new(&script, args.clone(), engine_limits(&limits)).map_err(|e| e.to_string())?;
+        let engine = Run::new(&script, None, args.clone(), engine_limits(&limits)).map_err(|e| e.to_string())?;
         let meta = engine.state().meta().clone();
         let session = serde_json::to_string(engine.state()).map_err(|e| e.to_string())?;
         let now = Utc::now();

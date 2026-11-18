@@ -17,6 +17,7 @@ num-bigint = { version = "0.4", default-features = false }
 # Monty's own parser, at Monty's version: reads a trail's meta without running it.
 ruff_python_ast = "0.0.14"
 ruff_python_parser = "0.0.14"
+ruff_text_size = "0.0.14"
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 thiserror = "2.0.21"

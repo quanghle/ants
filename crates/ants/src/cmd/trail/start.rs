@@ -73,7 +73,7 @@ pub(super) fn file_plan(path: &Path) -> Result<Plan> {
 /// The plan of the saved trail `found`: the colony's by name, a local one inline, as its conductor may run on another
 /// machine.
 pub(super) fn found_plan(found: saved::Found, now: chrono::DateTime<Utc>) -> Plan {
-    let saved::Trail { name, description, phases, source, script } = found.trail;
+    let saved::Trail { name, description, phases, source, script, .. } = found.trail;
     let (from, source) = match source {
         saved::Source::Colony { saved_by, saved_at } => (
             format!("saved for the colony by {saved_by} {} ago", short(since(saved_at, now))),

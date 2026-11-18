@@ -287,6 +287,7 @@ dependencies = [
  "num-bigint",
  "ruff_python_ast",
  "ruff_python_parser",
+ "ruff_text_size",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

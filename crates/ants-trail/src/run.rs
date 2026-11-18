@@ -41,6 +41,9 @@ pub enum RunError {
     Trail(#[from] TrailError),
     #[error("{0}")]
     Limits(String),
+    /// The run enters its trail at no waypoint the trail has.
+    #[error("{0}")]
+    Entry(String),
     /// The worker gave no response: the run is unchanged and the same call may be retried.
     #[error(transparent)]
     Worker(#[from] WorkerError),
@@ -66,6 +69,9 @@ pub enum RunError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunState {
     script: String,
+    /// The waypoint the run enters its trail at; none for a trail without waypoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    entry: Option<String>,
     args: Value,
     limits: Limits,
     clock: i64,
@@ -94,6 +100,12 @@ impl RunState {
     #[must_use]
     pub fn status(&self) -> &Status {
         &self.status
+    }
+
+    /// The waypoint the run enters its trail at; none for a trail without waypoints, entered at its start.
+    #[must_use]
+    pub fn entry(&self) -> Option<&str> {
+        self.entry.as_deref()
     }
 
     #[must_use]
@@ -125,20 +137,31 @@ pub struct Run {
 }
 
 impl Run {
-    /// A run of `script` reading the current time and a fresh seed.
-    pub fn new(script: &str, args: Value, limits: Limits) -> Result<Self, RunError> {
+    /// A run of `script` entering it at the waypoint `entry`, else at its start, with `args` as its input, reading
+    /// the current time and a fresh seed.
+    pub fn new(script: &str, entry: Option<&str>, args: Value, limits: Limits) -> Result<Self, RunError> {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
         let clock = i64::try_from(now.as_secs()).unwrap_or(i64::MAX);
         let seed = u64::from(now.subsec_nanos()) ^ (u64::from(std::process::id()) << 32) ^ now.as_secs();
-        Self::with_clock(script, args, limits, clock, seed)
+        Self::with_clock(script, entry, args, limits, clock, seed)
     }
 
-    /// A run of `script` whose clock reads `clock` (Unix seconds) and whose `random` is seeded with `seed`.
-    pub fn with_clock(script: &str, args: Value, limits: Limits, clock: i64, seed: u64) -> Result<Self, RunError> {
+    /// A run of `script` as [`Run::new`] makes one, whose clock reads `clock` (Unix seconds) and whose `random` is
+    /// seeded with `seed`. Refused when the script's meta lists no waypoint `entry`.
+    pub fn with_clock(
+        script: &str,
+        entry: Option<&str>,
+        args: Value,
+        limits: Limits,
+        clock: i64,
+        seed: u64,
+    ) -> Result<Self, RunError> {
         limits.check().map_err(RunError::Limits)?;
         let meta = trail::check(script)?;
+        let entry = meta.entry(entry).map_err(RunError::Entry)?.map(str::to_owned);
         let state = RunState {
             script: script.to_owned(),
+            entry,
             args,
             limits,
             clock,
@@ -173,9 +196,9 @@ impl Run {
         Self { state, journal }
     }
 
-    /// Rebuilds the session from the journal alone, with no snapshot: runs the script again with the run's clock
-    /// and seed and answers each call from the journal in order. Fails naming the first call the script makes
-    /// otherwise than the journal holds.
+    /// Rebuilds the session from the journal alone, with no snapshot: runs the script again from the run's entry,
+    /// with the run's input, clock and seed, and answers each call from the journal in order. Fails naming the first
+    /// call the script makes otherwise than the journal holds.
     pub async fn replay(
         state: RunState,
         journal: Vec<JournalEntry>,
@@ -185,6 +208,7 @@ impl Run {
         let state = &run.state;
         let start = Request::Start {
             script: state.script.clone(),
+            entry: state.entry.clone(),
             args: state.args.clone(),
             limits: state.limits,
             clock: state.clock,
@@ -231,6 +255,7 @@ impl Run {
         let state = &self.state;
         let request = Request::Start {
             script: state.script.clone(),
+            entry: state.entry.clone(),
             args: state.args.clone(),
             limits: state.limits,
             clock: state.clock,
@@ -454,7 +479,7 @@ mod tests {
 
     fn run(limits: Limits) -> Run {
         let script = "meta = {\"name\": \"t\", \"description\": \"a test\", \"phases\": []}\nawait agent('a')\n";
-        Run::with_clock(script, json!(null), limits, 0, 0).unwrap()
+        Run::with_clock(script, None, json!(null), limits, 0, 0).unwrap()
     }
 
     #[tokio::test]

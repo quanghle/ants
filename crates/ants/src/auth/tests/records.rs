@@ -311,6 +311,7 @@ async fn humans_save_the_trails_ants_read_and_each_ant_keeps_only_the_runs_it_co
         name: "deploy".parse().unwrap(),
         description: "Ship it".to_owned(),
         phases: vec!["build".to_owned()],
+        waypoints: Vec::new(),
         script: "agent('build')".to_owned(),
         saved_by: human.clone(),
         saved_at: chrono::Utc::now(),

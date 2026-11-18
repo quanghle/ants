@@ -136,9 +136,13 @@ pub enum Event {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Request {
-    /// Runs a script from its start.
+    /// Runs a script from its start, or from the waypoint `entry`.
     Start {
         script: String,
+        /// The waypoint to enter: the script's top level runs, then the waypoint is awaited with `args`. None runs
+        /// the script as it is, the start of a trail without waypoints.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry: Option<String>,
         args: Value,
         limits: Limits,
         /// The clock the script reads, in Unix seconds, fixed for the run.
