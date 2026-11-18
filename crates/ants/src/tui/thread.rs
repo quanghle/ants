@@ -60,6 +60,8 @@ pub struct Page {
     mark: attach::Mark<u64>,
     /// The cursor on the question card the keys answer, while Enter has focused it.
     answering: Option<question::Cursor>,
+    /// How wide the cards were drawn last, which tells whether a tool request shows whole on its card.
+    cards_width: Cell<Option<usize>>,
 }
 
 impl Page {
@@ -72,6 +74,7 @@ impl Page {
             at: None,
             mark: attach::Mark::default(),
             answering: None,
+            cards_width: Cell::new(None),
         }
     }
 
@@ -280,6 +283,8 @@ impl Page {
                     }
                     return None;
                 };
+                // A request its card does not show whole opens in full, where the keys answer it.
+                let verdict = verdict.filter(|_| approvals::fits(oldest, self.cards_width.get()));
                 return Some(To::Ask(oldest.clone(), verdict));
             }
             Key::Char('n') => {
@@ -337,6 +342,7 @@ impl Page {
             (area, None)
         };
         let cursor = self.card(data, now);
+        self.cards_width.set(Some(usize::from(area.width.saturating_sub(2))));
         let area = draw_cards(frame, area, model, thread, &self.history.entries, cursor, now);
         let block = style::block(title, focused);
         let inner = block.inner(area);
@@ -907,6 +913,14 @@ mod tests {
             "the oldest takes the keys: {shown}"
         );
         assert!(shown.contains("execute: git tag v1") && !shown.contains("execute: ls"), "{shown}");
+
+        let mut long = request("git push");
+        let words: Vec<String> = (0..500).map(|n| format!("w{n:03}")).collect();
+        long.tool.input = Some(format!("{}…", &serde_json::json!({ "command": words.join(" ") }).to_string()[..2000]));
+        m.data.live.approvals = vec![long.clone()];
+        let shown = screen(&page, &m, 100, at(2));
+        assert!(shown.contains("w000 w001") && shown.contains("more lines: Enter shows them"), "{shown}");
+        assert_eq!(page.key(Key::Char('a'), &m.data, at(2)), Some(To::Ask(long, None)), "too long to answer at once");
 
         m.data.live.approvals.clear();
         assert_eq!(page.key(Key::Char('a'), &m.data, at(2)), None, "nothing pending, nothing to answer");

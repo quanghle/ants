@@ -210,7 +210,10 @@ mod tests {
         let push = crate::test_support::live::request("dev-a", "git push", vec![ants_proto::Verdict::AllowOnce]);
         m.data.live.approvals = vec![push.clone()];
         let shown = screen(&m, at(0));
-        assert!(shown.contains("approve") && shown.contains("asks to run execute: git push"), "{shown}");
+        assert!(
+            shown.contains("approve") && shown.contains("dev-a asks to run:") && shown.contains("execute: git push"),
+            "{shown}"
+        );
         m.key(Key::Enter, at(0));
         let shown = screen(&m, at(0));
         assert!(shown.contains(&format!(" Tool request {} ", crate::tools::qualified(&push))), "{shown}");

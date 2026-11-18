@@ -109,15 +109,49 @@ fn keys(request: &ApprovalRequest) -> String {
         .join(" · ")
 }
 
-/// The lines of `card`, at most `width` wide: the tool, its input if any, and its keys (with `keyed`, the card the
-/// keys answer), that its answer is being stored, or how it was settled.
+/// How many lines the card the keys answer gives what its request asks.
+pub const CARD_LINES: usize = 6;
+/// How wide the compact pane's one line shows a request, no card being drawn there.
+const COMPACT_WIDTH: usize = 100;
+
+/// What `request` asks as its card shows it, wrapped at `width`: the tool's kind, then its command, its file and content
+/// or its input ([`text::asked`]).
+fn card_text(request: &ApprovalRequest, width: usize) -> Vec<Line<'static>> {
+    let mut asked = text::asked(request);
+    if let Some(first) = asked.first_mut() {
+        first.spans.insert(0, Span::raw(format!("{}: ", request.tool.kind)));
+    }
+    text::wrapped(&asked, width)
+}
+
+/// Whether what `request` asks shows whole on the card the keys answer, as last drawn `width` wide; with no card drawn,
+/// on the compact pane's one line. A key answers at once only a request that does.
+pub fn fits(request: &ApprovalRequest, width: Option<usize>) -> bool {
+    match width {
+        Some(width) => card_text(request, width).len() <= CARD_LINES,
+        None => card_text(request, COMPACT_WIDTH).len() <= 1,
+    }
+}
+
+/// The lines of `card`, at most `width` wide: with `keyed`, the card the keys answer, what the request asks over
+/// [`CARD_LINES`] lines at most, how many more are left, and its keys; else the tool on one line; then that its answer
+/// is being stored, or how it was settled.
 pub fn lines(card: Card, asking: Option<&Asking>, keyed: bool, now: DateTime<Utc>, width: usize) -> Vec<Line<'static>> {
     let request = card.request;
-    let tool = format!("{}: {}", request.tool.kind, request.tool.title.replace('\n', " "));
-    let mut lines = vec![Line::raw(cut(&tool, width))];
-    if let Some(input) = &request.tool.input {
-        lines.push(Line::styled(cut(&format!("input {}", input.replace('\n', " ")), width), style::dim()));
-    } else if !request.tool.locations.is_empty() {
+    let mut lines = if keyed && card.settled.is_none() {
+        let mut lines = card_text(request, width);
+        let left = lines.len().saturating_sub(CARD_LINES);
+        lines.truncate(CARD_LINES);
+        if left > 0 {
+            let what = if left == 1 { "line" } else { "lines" };
+            lines.push(Line::styled(format!("… {left} more {what}: Enter shows them"), style::dim()));
+        }
+        lines
+    } else {
+        let tool = format!("{}: {}", request.tool.kind, request.tool.title.replace('\n', " "));
+        vec![Line::raw(cut(&tool, width))]
+    };
+    if keyed && request.tool.input.is_none() && !request.tool.locations.is_empty() {
         lines.push(Line::styled(cut(&format!("files {}", request.tool.locations.join(", ")), width), style::dim()));
     }
     if let Some(always) = request.label(Verdict::AllowAlways).filter(|_| card.settled.is_none()) {
