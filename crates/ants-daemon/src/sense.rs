@@ -68,6 +68,16 @@ impl Sense {
         Ok(stores::note_growth(ant, &*items, record).await?)
     }
 
+    /// Note on the card of `ant` the birth and the prompt count its identity record holds now ([`Self::grown`]), as its
+    /// daemon does once it stops serving it with no prompt in flight, so a record made again after a revoke starts
+    /// from every prompt counted.
+    pub(crate) async fn stopping(&self, ant: &UserId, identity: &Identity) -> Result<()> {
+        match identity.read().await? {
+            Some(record) => self.grown(ant, &record).await,
+            None => Ok(()),
+        }
+    }
+
     /// A host connection starts, over which sense reaches the logs of the ants served ([`Hosting`]).
     pub fn hosting(&self) -> Hosting {
         self.stores.hosting()

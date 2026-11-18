@@ -86,6 +86,8 @@ const EVICT_EVERY: Duration = Duration::from_secs(30);
 const PRUNE_WORKTREES_EVERY: Duration = Duration::from_hours(1);
 /// Inbox messages in hand per harness: prompting, or waiting for their thread or for a free harness.
 const IN_HAND_PER_HARNESS: usize = 2;
+/// How long a daemon stopping waits for the ant's sense to note its growth ([`growth`]).
+const GROWN_WAIT: Duration = Duration::from_secs(10);
 
 /// A few progress periods, so one late or lost progress ack does not redeliver a message still in hand.
 const fn ack_wait(progress_every: Duration) -> Duration {
@@ -444,8 +446,20 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts, providers: &Pr
     };
     let served = Box::pin(serve_inbox(&inbox, messages, channels, config, stop, &registration, &storage)).await?;
     forget_if_retired(&served, config, &js, retired_before).await;
-    wind_down(&served, registration, pool, lifecycle.as_ref()).await;
+    wind_down(&served, registration, pool, lifecycle.as_ref(), growth(config, identity.as_ref(), providers)).await;
     Ok(served)
+}
+
+/// Note on the sense card of the ant the prompts its identity record counts, so a record made again after a revoke starts
+/// from all of them ([`crate::sense::Sense::stopping`]); a failure only warns.
+async fn growth(config: &Config, identity: Option<&Identity>, providers: &Providers) {
+    let (Some(identity), Some(sense)) = (identity, providers.sense_of(&config.provider)) else { return };
+    let error = match tokio::time::timeout(GROWN_WAIT, sense.stopping(&config.ant, identity)).await {
+        Ok(Ok(())) => return,
+        Ok(Err(e)) => format!("{e:#}"),
+        Err(_) => format!("no answer within {GROWN_WAIT:?}"),
+    };
+    tracing::warn!(error, "noting the ant's growth in its sense data");
 }
 
 /// The ant's workload, paused and drifting as the config says at start.
@@ -471,16 +485,25 @@ async fn forget_if_retired(
     }
 }
 
-/// Leave the colony and end the harness sessions once [`serve`] ended; on a stop, tell the ant's provider of its
-/// retirement when that stop retired it ([`Lifecycle::stopped`]), before leaving the colony: a retirement revokes the
-/// ant's credentials once it left, and the provider may sign what it records with them.
-async fn wind_down(served: &Served, registration: colony::Registration, pool: Pool, lifecycle: Option<&Lifecycle>) {
+/// Leave the colony and end the harness sessions once [`serve`] ended; on a stop, once no prompt is in flight, have the
+/// ant's sense note its growth (`grown`) and tell its provider of its retirement when that stop retired it
+/// ([`Lifecycle::stopped`]), before leaving the colony: a retirement revokes the ant's credentials once it left, and
+/// the provider may sign what it records with them. A handover or a move leaves the growth to the daemon serving the
+/// ant next, which notes it on opening the ant's sense data.
+async fn wind_down(
+    served: &Served,
+    registration: colony::Registration,
+    pool: Pool,
+    lifecycle: Option<&Lifecycle>,
+    grown: impl Future<Output = ()>,
+) {
     if *served != Served::Stopped {
         registration.deregister().await;
         pool.shutdown().await;
         return;
     }
     pool.shutdown().await;
+    grown.await;
     if let Some(lifecycle) = lifecycle {
         lifecycle.stopped(events::RETIRED_WAIT).await;
     }
