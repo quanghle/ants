@@ -6,7 +6,7 @@ use ants_proto::provider::{Origin, Starter};
 use ants_proto::{
     CallAnswer, JournalEntry, PendingCall, QueuedCall, Role, RunId, RunState, StepStage, TRAIL_RUNS_BUCKET, ThreadId,
     TrailFunction, TrailLimits, TrailParent, TrailRun, TrailRunIndex, TrailSession, TrailStepThread, UserId, Uuid,
-    trail_call_key, trail_runs_index_key, trail_session_key, trail_step_key,
+    trail_call_key, trail_runs_index_key, trail_session_key, trail_thread_step_key,
 };
 use async_nats::jetstream;
 use chrono::{TimeDelta, Utc};
@@ -274,6 +274,20 @@ fn a_child_run_shows_the_call_it_answers_and_a_trail_call_its_child() {
     assert!(text.contains(&row) && !text.contains("child run answering"), "{text}");
 }
 
+#[test]
+fn a_run_failed_on_a_limit_shows_which() {
+    let now = Utc::now();
+    let shown = |state| {
+        let run = record(&p("dev-a"), Some("release"), state, now);
+        runs::render(&runs::Detail { run, pending: Vec::new(), queued: Vec::new(), journal: Vec::new() }, now)
+    };
+    let error = "the run reached its limit of 200 turns".to_owned();
+    let text = shown(RunState::Failed { error: error.clone(), limit: Some(ants_proto::RunLimit::Turns) });
+    assert!(text.contains(&format!("\nstate: failed on its turns limit: {error}\n")), "{text}");
+    let text = shown(RunState::Failed { error: error.clone(), limit: None });
+    assert!(text.contains(&format!("\nstate: failed: {error}\n")), "{text}");
+}
+
 /// Put `value` under `key` of [`TRAIL_RUNS_BUCKET`], as the conductor owning the key does.
 async fn put(js: &jetstream::Context, key: &str, value: &impl serde::Serialize) {
     let payload = serde_json::to_vec(value).unwrap();
@@ -455,10 +469,10 @@ async fn humans_read_the_steps_a_conductor_recorded_on_the_thread_of_its_runs() 
         to: p(to),
         run_thread: run.thread.clone(),
     };
-    put(&lead_js, &trail_step_key(&lead, &answered), &mark(&running, 0, "dev-c")).await;
-    put(&lead_js, &trail_step_key(&lead, &waiting), &mark(&running, 1, "dev-b")).await;
-    put(&lead_js, &trail_step_key(&lead, &left), &mark(&done, 0, "dev-b")).await;
-    put(&lead_js, &trail_step_key(&lead, &other), &mark(&elsewhere, 0, "dev-b")).await;
+    put(&lead_js, &trail_thread_step_key(&lead, &running.thread, &answered), &mark(&running, 0, "dev-c")).await;
+    put(&lead_js, &trail_thread_step_key(&lead, &running.thread, &waiting), &mark(&running, 1, "dev-b")).await;
+    put(&lead_js, &trail_thread_step_key(&lead, &done.thread, &left), &mark(&done, 0, "dev-b")).await;
+    put(&lead_js, &trail_thread_step_key(&lead, &elsewhere.thread, &other), &mark(&elsewhere, 0, "dev-b")).await;
     put(&lead_js, &trail_call_key(&lead, &running.run, 0), &journal(0, "build", CallAnswer::Ok(json!("built")))).await;
     let session = TrailSession { session: "opaque".to_owned(), pending: vec![waited(1, &waiting)], queued: Vec::new() };
     put(&lead_js, &trail_session_key(&lead, &running.run), &session).await;

@@ -173,8 +173,9 @@ out
         let step = lead.step().await;
         assert!(lead.reply(&step, &step.text.to_uppercase()).await);
     }
-    let RunState::Failed { error } = lead.ended(&run).await else { panic!("not failed") };
+    let RunState::Failed { error, limit } = lead.ended(&run).await else { panic!("not failed") };
     assert!(error.contains("trail many failed: the run reached its limit of 2 turns"), "{error}");
+    assert_eq!(limit, Some(RunLimit::Turns), "failed on its child's turns, its own");
     let header = lead.header(&run).await;
     assert_eq!((header.steps, header.turns), (3, 2));
     std::fs::remove_dir_all(&dir).unwrap();

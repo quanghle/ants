@@ -13,7 +13,7 @@ mod trail;
 mod value;
 pub mod worker;
 
-pub use protocol::{Answer, Call, Event, Function, JournalEntry, Limits, Request, Response};
+pub use protocol::{Answer, Call, Event, Function, JournalEntry, Limit, Limits, Request, Response};
 pub use run::{Progress, Run, RunError, RunState, Status};
 pub use runner::{GRACE, Worker, WorkerError, deadline};
 pub use trail::{Meta, SCRIPT_NAME, TrailError, check};

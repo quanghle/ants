@@ -18,6 +18,8 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::provider::Origin;
+#[cfg(doc)]
+use crate::trail_thread_step_key;
 use crate::{Envelope, Error, MAX_TITLE, RunId, ThreadId, TrailName, UserId, subject};
 #[cfg(doc)]
 use crate::{
@@ -283,12 +285,25 @@ pub enum RunState {
     /// The script returned `result`.
     Done { result: Value },
     /// The script raised, or the run broke a limit or could not go on.
-    Failed { error: String },
+    Failed {
+        error: String,
+        /// The limit the run broke, failing on it: a run failed on one resumes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<RunLimit>,
+    },
 }
 
 impl RunState {
     pub fn finished(&self) -> bool {
         matches!(self, Self::Done { .. } | Self::Failed { .. })
+    }
+
+    /// The limit a failed run broke.
+    pub fn failed_on(&self) -> Option<RunLimit> {
+        match self {
+            Self::Failed { limit, .. } => *limit,
+            _ => None,
+        }
     }
 }
 
@@ -408,7 +423,8 @@ pub struct TrailRunIndex {
 
 /// A step's thread, as its conductor keeps it in [`TRAIL_RUNS_BUCKET`] under [`trail_step_key`] from before the step is
 /// sent, so a message on it after the run ended, or after a restart, is still told to be the step's and reported on the
-/// run's thread rather than prompting the conductor.
+/// run's thread rather than prompting the conductor; and under [`trail_thread_step_key`], so a human reads the steps
+/// of the runs on one thread by its keys alone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrailStepThread {
     pub run: RunId,
@@ -553,6 +569,37 @@ pub struct WaitingStep {
     pub message: Uuid,
 }
 
+/// The limit a failed run broke ([`RunState::Failed`]): those of [`TrailLimits`], and the memory of its script.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunLimit {
+    /// A call past [`TrailLimits::steps`] raised in the script, which then failed.
+    Steps,
+    /// A step found none of [`TrailLimits::turns`] left to reserve.
+    Turns,
+    /// [`TrailLimits::wall_secs`] passed.
+    Wall,
+    /// The script computed past [`TrailLimits::compute_ms`] between two suspensions.
+    Compute,
+    /// The dumped session outgrew [`TrailLimits::session_bytes`], or its record.
+    Session,
+    /// The script's heap outgrew the memory a script has.
+    Memory,
+}
+
+impl std::fmt::Display for RunLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Steps => "steps",
+            Self::Turns => "turns",
+            Self::Wall => "wall time",
+            Self::Compute => "compute",
+            Self::Session => "session size",
+            Self::Memory => "memory",
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -689,10 +736,14 @@ mod tests {
 
     #[test]
     fn a_runs_state_sits_beside_its_other_fields() {
-        let state = RunState::Failed { error: "steps limit reached".to_owned() };
+        let state = RunState::Failed { error: "steps limit reached".to_owned(), limit: None };
         let json = json!({"state": "failed", "error": "steps limit reached"});
         assert_eq!(serde_json::to_value(&state).unwrap(), json);
         assert!(state.finished() && !RunState::Stopped { by: p("alice") }.finished());
+        let state = RunState::Failed { error: "out of turns".to_owned(), limit: Some(RunLimit::Turns) };
+        let json = json!({"state": "failed", "error": "out of turns", "limit": "turns"});
+        assert_eq!(serde_json::to_value(&state).unwrap(), json);
+        assert_eq!(serde_json::from_value::<RunState>(json).unwrap().failed_on(), Some(RunLimit::Turns));
     }
 
     #[test]

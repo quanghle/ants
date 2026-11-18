@@ -109,6 +109,7 @@ pub use keys::{
     trail_session_key, trail_step_key, unserved_key, webhook_marker_key, webhook_marker_subject, webhook_seen_key,
 };
 pub(crate) use keys::{STORAGE_WARNING_PREFIX, WEBHOOK_MARKER};
+pub use keys::{TRAIL_STEPS_ON, trail_thread_step_key, trail_thread_steps_prefix};
 pub use login::{
     BOOTSTRAP_MAX_PAYLOAD, BOOTSTRAP_USER, LOGIN_REPEAT, LOGIN_TTL, LoginAnswer, LoginReply, LoginRequest,
     MAX_REGISTRATIONS, REGISTERED_TAG, tagged_registered,
@@ -158,6 +159,7 @@ pub use timeline::{
     MergedCall, MergedEnd, MergedNoReply, MergedRejection, NoReplyWhy, PromptEnd, TIMELINE_EVERY, Timeline,
     TimelineCall, TimelineEnd, TimelineEntry, TimelineRejection, Timelines,
 };
+pub use trails::RunLimit;
 pub use trails::{
     CallAnswer, JournalEntry, MAX_TRAIL_ARGS, MAX_TRAIL_DESCRIPTION, MAX_TRAIL_PHASES, MAX_TRAIL_SCRIPT,
     MAX_TRAIL_WAYPOINTS, PendingCall, QueuedCall, RunState, SavedTrail, TRAIL_RUN_RETENTION, TrailAction,
@@ -327,7 +329,8 @@ pub const TRAILS_BUCKET: &str = "ants_trails";
 /// KV bucket of the trail runs, each under its conductor's keys: its [`TrailRun`] ([`trail_run_key`]), its
 /// [`TrailSession`] ([`trail_session_key`]), the [`JournalEntry`] of each call answered ([`trail_call_key`]), and the
 /// conductor's [`TrailRunIndex`] ([`trail_runs_index_key`]) and the [`TrailStepThread`] of each step's thread
-/// ([`trail_step_key`]). Each ant reads and writes only its own keys
+/// ([`trail_step_key`]), kept again under the thread of the step's run ([`trail_thread_step_key`]). Each ant reads and
+/// writes only its own keys
 /// ([`trail_runs_subject`]), by direct gets naming them; humans read all, by direct gets naming no subject, and write
 /// none: a run is started, stopped and resumed by its conductor. Entries expire [`TRAIL_RUN_RETENTION`] and a run's most
 /// wall time ([`TrailLimits::MAX`]) after their last put, so a run's entries outlive its end by

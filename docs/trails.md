@@ -150,10 +150,11 @@ A run reports on the thread it started with, as its conductor:
 - **In `ants chat`:** the thread view of the run thread lists each step where it started, with its label, the ant it
   went to, its stage and its thread, which `Enter` on the step opens ([cli.md](cli.md#ants-chat)). Status events are
   never stored, so the view also reads the steps from the records of the runs that the ants on the thread conduct
-  when the thread shows: the marker of each step's thread (its time the step's start), the journal (`answered`, or
-  `failed` for an error) and, while the run goes on, the calls its session waits on (`started`); a step otherwise is
-  `dropped`, as is one sent anew on a new thread after a resume. A run's thread opened after its steps ran lists
-  them all the same, for as long as the run's records are kept.
+  when the thread shows: the markers each conductor keeps under the thread (`<ant>.on.<thread>.*`, read by a filtered
+  direct get, so a thread's steps are read alone; each marker's time is its step's start), then for each run found its
+  journal (`answered`, or `failed` for an error) and, while it goes on, the calls its session waits on (`started`); a
+  step otherwise is `dropped`, as is one sent anew on a new thread after a resume. A run's thread opened after its
+  steps ran lists them all the same, for as long as the run's records are kept.
 - **End message:** once the run is done, failed or stopped, the conductor messages the owner, else the default human,
   on the run thread: `Run <run> of trail <name> is done (N steps, M turns):` with the result (cut at 8000 characters,
   `ants trail show <run>` showing the rest), the error (naming `ants trail resume <run>` when a limit was met), or who
@@ -180,6 +181,11 @@ they may be raised on resume:
 | Dumped session, the script's suspended state | 768 KiB | 768 KiB | none | the run fails, naming its size |
 | Memory of the script | 64 MiB | 64 MiB | none | `MemoryError`, the run fails |
 | Python call depth | 200 | 200 | none | `RecursionError` in the script |
+
+A run failed on a limit keeps which in its record's `limit`: `steps` (a call past them raised and the script then
+failed), `turns`, `wall`, `compute`, `session` or `memory`; a run failing as its child run failed on one keeps the
+child's. `ants trail show RUN` names it (`state: failed on its turns limit: …`), and a failed run resumes only with one
+([Restarts, stops and resumes](#restarts-stops-and-resumes)).
 
 Each `agent()` step reserves up to 8 of the run's turns as its message's turn budget; the turns its reply spent, and
 one per re-ask, count against the run's turns, and a run that cannot reserve one fails on its turn limit. Each step
@@ -210,7 +216,7 @@ the run.
 | Store | Kept | Holds |
 |---|---|---|
 | KV `ants_trails` | never expires | Saved trails, keyed by name: name, description, phases, script, who saved it and when. |
-| KV `ants_trail_runs` | 37 days after the last write | Each conductor's runs, keyed under the conductor: `<ant>.<run>` the run's header (trail or inline script, args, owner, origin, limits, state, spending, thread, times), `<ant>.<run>.session` the dumped session with the calls waiting and queued, `<ant>.<run>.call.<n>` one journal entry per answered call (`{call, function, args, answer}`), `<ant>.runs` the conductor's unfinished runs, and `<ant>.steps.<thread>` a marker per step's thread. |
+| KV `ants_trail_runs` | 37 days after the last write | Each conductor's runs, keyed under the conductor: `<ant>.<run>` the run's header (trail or inline script, args, owner, origin, limits, state, spending, thread, times), `<ant>.<run>.session` the dumped session with the calls waiting and queued, `<ant>.<run>.call.<n>` one journal entry per answered call (`{call, function, args, answer}`), `<ant>.runs` the conductor's unfinished runs, `<ant>.steps.<thread>` a marker per step's thread (`{run, call, to, run_thread}`), and `<ant>.on.<thread>.<step thread>` the same marker under the thread of the step's run, put with it before the step goes out. |
 
 `ants init` creates both buckets. A run's states are `running`, `waiting` (on human steps only), `stopped`, `done` and
 `failed`. Its records stay 37 days after their last write: 30 days of keeping plus the longest wall time, so a
@@ -232,8 +238,8 @@ finished run stays at least 30 days. The full layout is in [architecture.md](arc
   order](auth.md#admin-orders): unlike the request, which only a daemon up answers, the order waits for the machine's
   daemon while it is away and is recorded with the admin and time (`ants ant orders ANT`), its result listing the steps
   in other ants' queues. Wall time keeps running while stopped.
-- **Resume:** `ants trail resume RUN` resumes a stopped run, or one whose error names a limit, from its last stored
-  session; the steps waited on go out anew, on new threads. Limit flags replace the run's limits they name, within the
+- **Resume:** `ants trail resume RUN` resumes a stopped run, or one whose record names the limit it failed on, from
+  its last stored session; the steps waited on go out anew, on new threads. Limit flags replace the run's limits they name, within the
   maxima. A run done, failed otherwise, running or waiting is refused. An admin's `ants ant resume-trail ANT RUN`
   resumes it by admin order the same way, limit flags included.
 
@@ -261,7 +267,7 @@ workers = 4
 A worker failing with the run unchanged is retried, after 1 s and up to 1 min apart.
 
 `ants doctor` starts the worker of the daemon service's `ants`, else its own, as a daemon does, with a request it
-refuses before running anything. With a human's credentials it lists the runs stuck: those stopped or failed on a
-limit that `ants trail resume` may still continue, naming the limits to raise; those whose steps went to ants not in
-the colony, naming `ants trail stop`; and those whose conductor is not in the colony
-([cli.md](cli.md#identity-setup-completions-and-doctor)).
+refuses before running anything. With a human's credentials it lists the runs stuck: those stopped or failed on a limit
+(steps, turns or wall time, as their records say) that `ants trail resume` may still continue, naming the limits to
+raise; those whose steps went to ants not in the colony, naming `ants trail stop`; and those whose conductor is not in
+the colony ([cli.md](cli.md#identity-setup-completions-and-doctor)).

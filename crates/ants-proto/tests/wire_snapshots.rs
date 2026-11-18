@@ -1398,7 +1398,7 @@ fn trails() {
         RunState::Running,
         RunState::Waiting,
         RunState::Stopped { by: user("alice") },
-        RunState::Failed { error: "steps limit of 20 reached".to_owned() },
+        RunState::Failed { error: "steps limit of 20 reached".to_owned(), limit: None },
     ];
     let runs: Vec<_> = states.into_iter().map(|state| TrailRun { state, ended_at: None, ..header.clone() }).collect();
     snap("trail_run_states", &runs);
@@ -1477,4 +1477,13 @@ fn trail_control() {
             reply(TrailOutcome::Refused { error: "no saved trail release".to_owned() }),
         ],
     );
+}
+
+#[test]
+fn trail_run_limits() {
+    use ants_proto::RunLimit;
+    let limits =
+        [RunLimit::Steps, RunLimit::Turns, RunLimit::Wall, RunLimit::Compute, RunLimit::Session, RunLimit::Memory];
+    let failed = limits.map(|limit| RunState::Failed { error: format!("past its {limit} limit"), limit: Some(limit) });
+    snap("trail_run_failed_on_limits", &failed.to_vec());
 }

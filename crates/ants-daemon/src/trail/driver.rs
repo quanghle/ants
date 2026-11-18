@@ -5,9 +5,10 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use ants_proto::{
-    DEFAULT_TURN_BUDGET, PendingCall, RunId, RunState, StepStage, ThreadId, TrailFunction, TrailRun, TrailStepThread,
+    DEFAULT_TURN_BUDGET, PendingCall, RunId, RunLimit, RunState, StepStage, ThreadId, TrailFunction, TrailRun,
+    TrailStepThread,
 };
-use ants_trail::{Call, Event, Function, JournalEntry, Progress, Run, RunError, Status, WorkerError};
+use ants_trail::{Call, Event, Function, JournalEntry, Limit, Progress, Run, RunError, Status, WorkerError};
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
@@ -94,8 +95,15 @@ impl Trails {
 
     async fn pass(&self, slot: &Slot) -> Result<()> {
         let mut engine = slot.engine.lock().await;
+        // What the run fails on should the script fail next: the limit an answer handed to it raises for, or the run
+        // broke.
+        let mut broke = None;
         loop {
-            let answers = std::mem::take(&mut slot.book().answers);
+            let (answers, raised) = {
+                let mut book = slot.book();
+                (std::mem::take(&mut book.answers), book.broke.take())
+            };
+            broke = broke.or(raised);
             for (call, answer) in answers {
                 if let Err(e) = engine.answer(call, answer) {
                     tracing::debug!(call, error = %e, "a trail answer the run no longer takes");
@@ -106,6 +114,9 @@ impl Trails {
                 return Ok(());
             }
             let progress = if overdue(&header) {
+                if matches!(engine.status(), Status::Running) {
+                    broke = Some(RunLimit::Wall);
+                }
                 engine.fail(format!("the run ran past its wall time limit of {}", wall(&header)))
             } else if matches!(header.state, RunState::Stopped { .. }) {
                 return Ok(());
@@ -115,17 +126,22 @@ impl Trails {
             self.progressed(slot, &progress).await;
             match engine.status().clone() {
                 Status::Done { result } => return self.end(slot, RunState::Done { result }).await,
-                Status::Failed { error } => return self.end(slot, RunState::Failed { error }).await,
+                Status::Failed { error, limit } => {
+                    let limit = limit.map(run_limit).or(broke);
+                    return self.end(slot, RunState::Failed { error, limit }).await;
+                }
                 Status::Running => {}
             }
             let issued = self.issue(slot, &engine).await?;
             if !issued.answers.is_empty() {
+                broke = issued.broke;
                 for entry in issued.answers {
                     engine.answer(entry.call, entry.answer)?;
                 }
                 continue;
             }
             if issued.out_of_turns {
+                broke = Some(RunLimit::Turns);
                 engine.fail(format!("the run reached its limit of {} turns", header.limits.turns));
                 continue;
             }
@@ -133,6 +149,7 @@ impl Trails {
             let record =
                 session.len() + slot.book().pending.iter().map(|call| call.args.to_string().len()).sum::<usize>();
             if record > MAX_RECORD {
+                broke = Some(RunLimit::Session);
                 engine.fail(format!("the run's session outgrew the {MAX_RECORD} bytes its record holds"));
                 continue;
             }
@@ -176,7 +193,8 @@ impl Trails {
                 Ok(progress)
             }
             Err(RunError::Worker(e @ (WorkerError::ComputeLimit(_) | WorkerError::OutOfMemory))) => {
-                Ok(engine.fail(format!("replaying the run's journal: {e}")))
+                let limit = if e == WorkerError::OutOfMemory { Limit::Memory } else { Limit::Compute };
+                Ok(engine.fail_on(Some(limit), format!("replaying the run's journal: {e}")))
             }
             Err(RunError::Worker(e)) => Err(anyhow!(e).context("replaying the trail's journal")),
             Err(e) => Ok(engine.fail(e.to_string())),
@@ -269,6 +287,7 @@ impl Trails {
             if steps >= budget.limits.steps {
                 let error = format!("the run reached its limit of {} steps", budget.limits.steps);
                 issued.answers.push(self.raise(&header.run, call, error).await?);
+                issued.broke = Some(RunLimit::Steps);
                 continue;
             }
             let to = if call.function == Function::Trail {
@@ -436,8 +455,20 @@ impl Trails {
 struct Issued {
     /// Answers to calls no step can serve.
     answers: Vec<JournalEntry>,
+    /// The limit one of those answers raises for: steps, for a call past them.
+    broke: Option<RunLimit>,
     /// Whether a call waits for turns no step it waits on will give back.
     out_of_turns: bool,
+}
+
+/// The limit of a run's record that `limit`, of its script's worker, is.
+fn run_limit(limit: Limit) -> RunLimit {
+    match limit {
+        Limit::Steps => RunLimit::Steps,
+        Limit::Compute => RunLimit::Compute,
+        Limit::Session => RunLimit::Session,
+        Limit::Memory => RunLimit::Memory,
+    }
 }
 
 /// The turns a pending step may still spend.

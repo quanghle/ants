@@ -422,6 +422,22 @@ pub fn trail_step_key(conductor: &UserId, thread: &ThreadId) -> String {
     format!("{conductor}.{TRAIL_STEPS}.{thread}")
 }
 
+/// The key token under which a conductor indexes its [`TrailStepThread`]s by the thread of their run
+/// ([`trail_thread_step_key`]), which no [`RunId`] is.
+pub const TRAIL_STEPS_ON: &str = "on";
+
+/// Key of the [`TrailStepThread`] of the step thread `step` of one of a conductor's runs reporting on `thread`, in
+/// [`TRAIL_RUNS_BUCKET`]: the index by which a reader takes the steps on one thread alone, the keys starting with
+/// [`trail_thread_steps_prefix`].
+pub fn trail_thread_step_key(conductor: &UserId, thread: &ThreadId, step: &ThreadId) -> String {
+    format!("{}{step}", trail_thread_steps_prefix(conductor, thread))
+}
+
+/// The start of every [`trail_thread_step_key`] of a conductor's runs reporting on `thread`.
+pub fn trail_thread_steps_prefix(conductor: &UserId, thread: &ThreadId) -> String {
+    format!("{conductor}.{TRAIL_STEPS_ON}.{thread}.")
+}
+
 /// The subject of every key of a conductor's runs in the stream of [`TRAIL_RUNS_BUCKET`]: those its credentials write.
 pub fn trail_runs_subject(conductor: &UserId) -> String {
     format!("$KV.{TRAIL_RUNS_BUCKET}.{conductor}.>")
@@ -447,6 +463,8 @@ mod tests {
             trail_session_key(&dev_a, &run),
             trail_call_key(&dev_a, &run, 7),
             trail_runs_index_key(&dev_a),
+            trail_step_key(&dev_a, &ThreadId::generate()),
+            trail_thread_step_key(&dev_a, &ThreadId::generate(), &ThreadId::generate()),
         ];
         let own = trail_runs_subject(&dev_a);
         let own = own.strip_suffix('>').unwrap();

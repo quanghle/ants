@@ -43,8 +43,9 @@ pub(super) fn identity_rights() -> [String; 3] {
 
 /// What a human's credentials need of the trails: creating and looking up [`TRAILS_BUCKET`] and [`TRAIL_RUNS_BUCKET`],
 /// whose stream info lists the saved trails and every conductor's runs, putting and deleting every saved trail, which
-/// every user reads, and reading every run's records by direct gets naming no subject (`ants trail runs`), writing
-/// none: a run's conductor alone writes them, and stops or resumes a run on a human's request.
+/// every user reads, and reading every run's records by direct gets naming no subject (`ants trail runs`, and in `ants
+/// chat` the steps a conductor keeps under one thread), writing none: a run's conductor alone writes them, and stops or
+/// resumes a run on a human's request.
 pub(super) fn trail_rights() -> [String; 6] {
     let (trails, runs) = (kv_stream(TRAILS_BUCKET), kv_stream(TRAIL_RUNS_BUCKET));
     [

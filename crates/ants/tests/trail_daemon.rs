@@ -17,9 +17,10 @@ use ants_daemon::trail::{Conducting, StartRun, Trails};
 use ants_proto::provider::{Origin, Starter};
 use ants_proto::{
     AdminOp, AdminOrder, AdminOutcome, AssistantGrant, ColonyEntry, DeviceId, Envelope, MACHINES_BUCKET, Machine,
-    NotesPost, NoticeKind, OrderState, Pick, Role, RunId, RunState, StatusEvent, StatusUpdate, StepStage,
+    NotesPost, NoticeKind, OrderState, Pick, Role, RunId, RunLimit, RunState, StatusEvent, StatusUpdate, StepStage,
     TRAIL_RUNS_BUCKET, ThreadId, TrailAction, TrailLimits, TrailOutcome, TrailReply, TrailRequest, TrailRun,
-    TrailSession, TrailSource, TrailStart, UserId, WaitingStep, subject, trail_run_key, trail_session_key,
+    TrailSession, TrailSource, TrailStart, TrailStepThread, UserId, WaitingStep, subject, trail_run_key,
+    trail_session_key, trail_thread_step_key,
 };
 use ants_test_support::{NatsServer, eventually, eventually_within, scratch_dir};
 use futures::StreamExt as _;
@@ -463,10 +464,18 @@ async fn a_run_past_its_wall_time_fails() {
         state.finished()
     })
     .await;
-    let RunState::Failed { error } = state else { panic!("not failed: {state:?}") };
+    let RunState::Failed { error, limit } = state else { panic!("not failed: {state:?}") };
     assert!(error.contains("wall time"), "{error}");
+    assert_eq!(limit, Some(RunLimit::Wall), "the record says which limit failed it");
     let told = lead.told().await;
     assert!(told.text.contains(" failed (1 steps, 0 turns): ") && told.text.contains(&error), "{}", told.text);
+    assert!(told.text.contains("under raised limits"), "{}", told.text);
+
+    let raised = TrailLimits { wall_secs: 3600, ..limits };
+    lead.trails.resume(&run, &UserId::human(), Some(raised)).await.unwrap();
+    let step = lead.step().await;
+    assert!(lead.reply(&step, "answered").await);
+    assert_eq!(lead.ended(&run).await, RunState::Done { result: json!("answered") }, "resumed past its wall time");
 }
 
 /// The next status event on `status` that tells a step.
@@ -568,6 +577,11 @@ async fn a_reply_after_the_run_ended_is_noted_on_its_thread_not_prompted() {
     let thread = ThreadId::generate();
     let run = lead.start_on(r#"await agent("a", ant="dev")"#, TrailLimits::default(), thread.clone()).await;
     let step = lead.step().await;
+    let runs = DirectKv::new(&lead.js, None, TRAIL_RUNS_BUCKET).await.unwrap();
+    let marker = runs.get(trail_thread_step_key(&ant("lead"), &thread, &step.thread_id)).await.unwrap();
+    let marker: TrailStepThread = serde_json::from_slice(&marker.expect("kept under the run's thread")).unwrap();
+    let call = step.trail_step.as_ref().unwrap().call;
+    assert_eq!((marker.run, marker.call, marker.run_thread), (run.clone(), call, thread.clone()));
     assert!(lead.reply(&step, "A").await);
     lead.ended(&run).await;
     let late = |text: &str| step.reply(ant("dev"), text, Role::Ant).unwrap();
@@ -662,9 +676,12 @@ async fn a_replay_of_a_changed_script_fails_the_run_naming_the_call_that_differs
 
     let again = conductor(&server, &ants_binary(), Vec::new()).await;
     assert!(again.reply(&b, "B").await);
-    let RunState::Failed { error } = again.ended(&run).await else { panic!("not failed") };
+    let RunState::Failed { error, limit } = again.ended(&run).await else { panic!("not failed") };
     assert!(error.contains("diverges from the journal: call "), "{error}");
     assert!(error.contains(r#""prompt":"z""#) && error.contains(r#""prompt":"a""#), "{error}");
+    assert_eq!(limit, None);
+    let refused = again.trails.resume(&run, &UserId::human(), None).await.unwrap_err();
+    assert!(refused.contains("failed, not on a limit"), "{refused}");
 }
 
 /// A user JWT for `name`, tagged `tag`, signed by `account` for the key `key`.
