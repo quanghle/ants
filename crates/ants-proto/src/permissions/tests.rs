@@ -1055,6 +1055,26 @@ fn humans_save_trails_every_user_reads_and_each_ant_writes_only_the_runs_it_cond
 }
 
 #[test]
+fn humans_ask_and_only_the_conductor_hears_and_answers_trail_requests() {
+    let control = |perms: &Permissions| -> (Vec<String>, Vec<String>) {
+        let of = |rights: &[String]| rights.iter().filter(|s| s.starts_with("ants.trail")).cloned().collect();
+        (of(&perms.publish), of(&perms.subscribe))
+    };
+    let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
+    assert_eq!(control(&ant), (vec!["ants.trailed.dev-a".to_owned()], vec!["ants.trail.dev-a".to_owned()]));
+    let human = Permissions::for_user(&p("alice"), Role::Human);
+    assert_eq!(control(&human).0, [subject::ALL_TRAIL_REQUESTS]);
+    assert!(human.subscribe.iter().any(|s| s == subject::ALL), "the answers");
+    // Its request names no one the ant's daemon could check, so an assistant asks none.
+    let assistant = Permissions::for_assistant(&p("pa"), &p("alice"));
+    assert!(!assistant.publish.iter().any(|have| covers(have, "ants.trail.dev-a")));
+    let leaf = Permissions::for_leaf(&"m1".parse().unwrap(), [(&p("dev-a"), LeafRole::Ant)]);
+    assert!(leaf.subscribe.iter().any(|have| covers(have, "ants.trail.dev-a")));
+    assert!(leaf.publish.iter().any(|have| covers(have, "ants.trailed.dev-a")));
+    assert_eq!(subject::outbox(&subject::trail(&p("dev-a"))), None, "never stored, so never buffered");
+}
+
+#[test]
 fn users_write_only_their_own_attachments_and_ants_read_those_of_the_messages_they_read() {
     let files = |perms: &Permissions| -> Vec<String> {
         perms.publish.iter().chain(&perms.subscribe).filter(|s| s.contains("ants_files")).cloned().collect()
@@ -1322,6 +1342,7 @@ fn an_assistant_keeps_its_ant_rights_and_a_humans_under_its_own_name() {
         "ants.approvals.*.*",
         "ants.cancel.*.*",
         "ants.queue.*",
+        "ants.trail.*",
         "$KV.ants_attempts.*.msg.*",
         "$KV.ants_owners.*.*",
         "ants.out.owners.*.*",

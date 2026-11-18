@@ -17,8 +17,8 @@ use crate::{
 #[cfg(doc)]
 use crate::{
     AttachmentHandle, HeldNotices, NotifyPrefs, PRESENCE_BUCKET, QueueRequest, REACTIONS_BUCKET, ReadMarker,
-    channel_manager_serving_key, daily_spend_key, link_outbox, message_mark_key, owner_outbox, storage_warning_key,
-    thread_spend_key, unserved_key,
+    TrailRequest, channel_manager_serving_key, daily_spend_key, link_outbox, message_mark_key, owner_outbox,
+    storage_warning_key, thread_spend_key, unserved_key,
 };
 
 /// What a user's credentials need for attachments ([`FILES_BUCKET`]): writing the chunks of those of the messages it
@@ -115,7 +115,9 @@ impl Permissions {
     ///
     /// Every ant and human reads the saved trails ([`TRAILS_BUCKET`]) by direct gets naming no subject, which only a
     /// human puts and deletes. An ant gets, puts and deletes only the records of the trail runs it conducts
-    /// ([`trail_runs_subject`]); a human reads every run's and writes none ([`trail_rights`]).
+    /// ([`trail_runs_subject`]); a human reads every run's and writes none ([`trail_rights`]), but asks an ant's daemon to
+    /// start, stop or resume the runs it conducts ([`TrailRequest`], on [`subject::trail`], which the ant alone hears
+    /// and answers on [`subject::trailed`]).
     ///
     /// Each inbox, notes and channel subject an ant may publish, and its own dead letter and timeline subjects, it may
     /// also publish in its outbox form ([`subject::outbox`]), which only a leaf node's outbox keeps, and so the links it passes on
@@ -281,6 +283,7 @@ impl Permissions {
             subject::status_of(user),
             subject::cancelled_of(user),
             subject::queued(user),
+            subject::trailed(user),
             subject::chanadm_from(user),
             // Put and delete of its own colony entry, and of its own escalation chain.
             subject::colony(user),
@@ -348,6 +351,8 @@ impl Permissions {
             subject::all_cancels_of(user),
             subject::queue(user),
             subject::queues_by_of(user),
+            // A human's requests to start, stop and resume the trail runs it conducts.
+            subject::trail(user),
             // Live replies to its ask_ant calls, which the inbox consumer holds back while the asking prompt runs.
             subject::inbox_of(user),
             subject::renew_reply(user.as_str()),
