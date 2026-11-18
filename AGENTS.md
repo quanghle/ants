@@ -8,8 +8,8 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
 - `bd show <id>` shows details; `bd close <id> -r "<what was done>"` closes it.
 - Record discovered work with `bd create ... --dep discovered-from:<id>`.
 - Specs: `bd spec list`, `bd spec show <area>`. Areas: wire, transport, daemon, harness, memory, cli, efficiency,
-  messenger, channels, webhooks, admin, assistant, sense (with sense/identity, sense/memory, sense/brief, sense/work,
-  sense/triggers, sense/store, sense/dreams).
+  messenger, channels, webhooks, admin, assistant, trails, sense (with sense/identity, sense/memory, sense/brief,
+  sense/work, sense/triggers, sense/store, sense/dreams).
 - Link every piece of work to the requirement it serves (`bd spec link <id> <requirement>`) or mark it
   `bd spec none <id> -r "<why>"`. `bd spec drift` must report 0 problems.
 - A behaviour change that contradicts a requirement goes through `bd spec change`, not a silent edit.
@@ -24,7 +24,8 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
   helpers: tools on PATH, throwaway nats-server).
 - The daemon reaches `ants-sense` only through its `sense` module (`crates/ants-daemon/src/sense.rs`), the `ants`
   crate through that module and, for the files of an ant's home, the few files `sense/tests.rs` lists.
-- Keep the footprint small: tokio current-thread, minimal features, no per-session helper processes.
+- Keep the footprint small: tokio current-thread, minimal features, no per-session helper processes; the one
+  exception is a trail's one-shot `ants subprocess` worker, run only while the trail's script computes.
 - TLS stays on rustls.
 - A daemon acks a JetStream message only after its effects are stored.
 - Also in the repo: `contrib/` (launchd and systemd units, agent skill), `scripts/` (`check.sh`,
