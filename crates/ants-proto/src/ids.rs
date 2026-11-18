@@ -1,5 +1,5 @@
-//! Identifiers that travel as subject tokens: [`UserId`], [`ThreadId`], [`ChannelId`], [`Reaction`] and [`JsDomain`],
-//! each 1-64 of `a-z`, `0-9` and `-`; a machine's name ([`Machine`]), with the subjects and consumers of its leaf node;
+//! Identifiers that travel as subject tokens: [`UserId`], [`ThreadId`], [`ChannelId`], [`Reaction`], [`JsDomain`],
+//! [`TrailName`] and [`RunId`], each 1-64 of `a-z`, `0-9` and `-`; a machine's name ([`Machine`]), with the subjects and consumers of its leaf node;
 //! and the [`Role`] of a user, human or ant.
 
 use std::fmt;
@@ -10,7 +10,10 @@ use uuid::Uuid;
 
 #[cfg(doc)]
 use crate::{AttachmentHandle, HUMANS_BUCKET, Humans, INTAKE_STREAM, STREAM, link_outbox, owner_outbox};
-use crate::{Error, FILES_BUCKET, LINKS_BUCKET, OUTBOX_CONSUMER, OUTBOX_STREAM, OWNERS_BUCKET, inbox_prefix, subject};
+use crate::{
+    Error, FILES_BUCKET, LINKS_BUCKET, OUTBOX_CONSUMER, OUTBOX_STREAM, OWNERS_BUCKET, TRAIL_RUNS_INDEX, inbox_prefix,
+    subject,
+};
 
 /// Whether `s` is safe as one NATS subject token and as a JetStream consumer name.
 fn valid_token(s: &str) -> bool {
@@ -80,6 +83,15 @@ token_id!(Reaction, "reaction");
 // The JetStream domain of the hub (`jetstream { domain: ... }`). Clients on a leaf node reach the hub's JetStream only
 // through it, as `$JS.<domain>.API`: the plain `$JS.API` stays on the leaf.
 token_id!(JsDomain, "JetStream domain");
+// The name of a saved trail, its key in `ants_trails`.
+token_id!(TrailName, "trail name");
+token_id!(
+    /// A trail run's id, unique to its conductor's runs: one key token in [`crate::TRAIL_RUNS_BUCKET`], so never
+    /// [`TRAIL_RUNS_INDEX`], the key token of the conductor's index.
+    RunId,
+    |s: &str| valid_token(s) && s != TRAIL_RUNS_INDEX,
+    |value| Error::InvalidId { kind: "trail run id", value }
+);
 
 impl UserId {
     /// The default human: a human whether or not [`HUMANS_BUCKET`] lists it, and the one escalations go to when a
@@ -246,6 +258,13 @@ impl Machine {
     }
 }
 
+impl RunId {
+    /// A new, time-ordered run id.
+    pub fn generate() -> Self {
+        Self(Uuid::now_v7().to_string())
+    }
+}
+
 impl ThreadId {
     /// A new, time-ordered thread id.
     pub fn generate() -> Self {
@@ -296,6 +315,15 @@ mod tests {
         }
         assert_eq!(p("dev-b2").as_str(), "dev-b2");
         assert!(serde_json::from_str::<UserId>(r#""a.b""#).is_err());
+    }
+
+    #[test]
+    fn run_ids_are_tokens_other_than_the_index_key() {
+        let run = RunId::generate();
+        assert_eq!(run.as_str().parse::<RunId>().unwrap(), run);
+        for bad in [TRAIL_RUNS_INDEX, "a.b", "", "-r"] {
+            assert!(bad.parse::<RunId>().is_err(), "{bad:?} should be rejected");
+        }
     }
 
     #[test]

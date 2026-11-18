@@ -173,6 +173,7 @@ fn envelope() -> Envelope {
             thread: Some(other_thread()),
             local: Some("/home/dev/app/.git".to_owned()),
         }],
+        trail_step: Some(Box::new(trail_step())),
         sent_at: at(0),
     }
 }
@@ -201,7 +202,21 @@ fn plain_envelope() -> Envelope {
         sealed: None,
         notice: None,
         review_commits: Vec::new(),
+        trail_step: None,
         ..envelope()
+    }
+}
+
+fn run() -> RunId {
+    "019a7d2f-0000-7000-8000-000000000001".parse().unwrap()
+}
+
+fn trail_step() -> TrailStep {
+    TrailStep {
+        run: run(),
+        call: 3,
+        label: Some("review".to_owned()),
+        schema: Some(serde_json::json!({"properties": {"ok": {"type": "boolean"}}, "type": "object"})),
     }
 }
 
@@ -1242,4 +1257,85 @@ fn admin_orders_of_providers() {
         ..Memories::default()
     };
     snap("admin_memories_of_a_provider", &memories);
+}
+
+#[test]
+fn trails() {
+    snap(
+        "envelope_step",
+        &Envelope { from: user("planner"), to: user("dev-a"), ..plain_envelope().as_step(trail_step()) },
+    );
+    snap(
+        "saved_trail",
+        &SavedTrail {
+            name: "release".parse().unwrap(),
+            description: "Cut a release".to_owned(),
+            phases: vec!["build".to_owned(), "review".to_owned()],
+            script: "agent('dev-a', 'build it')".to_owned(),
+            saved_by: user("alice"),
+            saved_at: at(0),
+        },
+    );
+    let header = TrailRun {
+        run: run(),
+        conductor: user("planner"),
+        trail: Some("release".parse().unwrap()),
+        script: "agent('dev-a', 'build it')".to_owned(),
+        args: serde_json::json!({"version": "1.2.0"}),
+        owner: Some(user("alice")),
+        thread: thread(),
+        origin: provider::Origin { by: provider::Starter::Human { user: user("alice") }, channel: Some(channel()) },
+        limits: TrailLimits { steps: 20, ..TrailLimits::DEFAULT },
+        state: RunState::Done { result: serde_json::json!({"tag": "v1.2.0"}) },
+        phase: Some("review".to_owned()),
+        steps: 3,
+        turns: 5,
+        started_at: at(0),
+        updated_at: at(9),
+        ended_at: Some(at(9)),
+    };
+    snap("trail_run", &header);
+    let mut newer = serde_json::to_value(&header).unwrap();
+    newer["paused_at"] = serde_json::json!("2025-01-01T12:05:00Z");
+    assert_eq!(serde_json::from_value::<TrailRun>(newer).unwrap(), header, "unknown fields are additions");
+    let states = [
+        RunState::Running,
+        RunState::Waiting,
+        RunState::Stopped { by: user("alice") },
+        RunState::Failed { error: "steps limit of 20 reached".to_owned() },
+    ];
+    let runs: Vec<_> = states.into_iter().map(|state| TrailRun { state, ended_at: None, ..header.clone() }).collect();
+    snap("trail_run_states", &runs);
+    snap(
+        "trail_session",
+        &TrailSession {
+            session: r#"{"monty":"dump"}"#.to_owned(),
+            pending: vec![PendingCall {
+                call: 3,
+                function: TrailFunction::Agent,
+                args: serde_json::json!(["dev-a", "review it"]),
+                to: user("dev-a"),
+                thread: other_thread(),
+                message: id(5),
+                sent_at: at(4),
+            }],
+            queued: vec![QueuedCall { call: 4, function: TrailFunction::Human, args: serde_json::json!(["ship it?"]) }],
+        },
+    );
+    let answer = |call, answer| JournalEntry {
+        call,
+        function: TrailFunction::Agent,
+        args: serde_json::json!(["dev-a", "build it"]),
+        answer,
+    };
+    snap(
+        "journal_entries",
+        &[
+            answer(1, CallAnswer::Ok(serde_json::json!({"ok": true}))),
+            answer(2, CallAnswer::Error("dev-a is not an ant".to_owned())),
+        ],
+    );
+    snap("trail_run_index", &TrailRunIndex { runs: vec![run()] });
+    let limits: TrailLimits = parse(r#"{"steps": 10}"#);
+    assert_eq!(limits, TrailLimits { steps: 10, ..TrailLimits::DEFAULT }, "missing limits take their defaults");
 }

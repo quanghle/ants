@@ -1,0 +1,30 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "session": "{\"monty\":\"dump\"}",
+  "pending": [
+    {
+      "call": 3,
+      "function": "agent",
+      "args": [
+        "dev-a",
+        "review it"
+      ],
+      "to": "dev-a",
+      "thread": "019a7d2c-0000-7000-8000-000000000002",
+      "message": "019a7d2e-0000-7000-8000-000000000005",
+      "sent_at": "2025-01-01T12:04:00Z"
+    }
+  ],
+  "queued": [
+    {
+      "call": 4,
+      "function": "human",
+      "args": [
+        "ship it?"
+      ]
+    }
+  ]
+}
