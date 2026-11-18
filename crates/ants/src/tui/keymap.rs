@@ -26,14 +26,13 @@ pub const HELP_HINT: &str = "? help";
 #[derive(Debug, Clone, Copy)]
 pub struct Entry {
     /// The keys the row stands for.
-    #[expect(dead_code, reason = "the help reads it")]
+    #[cfg_attr(not(test), expect(dead_code, reason = "the test of each view's keys reads them"))]
     pub keys: &'static [Key],
     /// How the footer and the help write the keys.
     pub label: &'static str,
     /// What the keys do, in the footer.
     pub short: &'static str,
     /// What the keys do, in the help.
-    #[expect(dead_code, reason = "the help reads it")]
     pub long: &'static str,
     /// How important the row is: lower comes first in the footer.
     pub rank: u8,
@@ -81,6 +80,29 @@ pub enum View {
     Settings,
     Credentials,
     Held,
+}
+
+impl View {
+    /// How the help heads the view's keys.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Nav => "the nav",
+            Self::Home => "home",
+            Self::Work => "work, and an ant's threads",
+            Self::Channel => "a channel",
+            Self::Thread => "a thread",
+            Self::Dm => "a person",
+            Self::Search => "a search",
+            Self::Tree => "a delegation tree",
+            Self::Ant => "an ant",
+            Self::AntQueue => "an ant's queue",
+            Self::Memories => "an ant's memories",
+            Self::Mcp => "an ant's MCP servers",
+            Self::Settings => "an ant's settings",
+            Self::Credentials => "credentials",
+            Self::Held => "held orders",
+        }
+    }
 }
 
 /// The views whose keys hold on `model`'s screen, the most particular first.

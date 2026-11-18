@@ -8,6 +8,7 @@ use super::{Action, Focus, Key, Level, Model, Page, To};
 use crate::tui::approvals::{Answer, Asking};
 use crate::tui::command::{Note, Tone};
 use crate::tui::exec::Job;
+use crate::tui::help::Help;
 use crate::tui::react::{self, Pick, Picker};
 use crate::tui::{channel, credentials, held, nav, thread, work};
 
@@ -16,14 +17,16 @@ impl Model {
         if key == Key::Interrupt {
             return Some(Action::Quit);
         }
-        if self.asking.as_ref().is_some_and(Asking::takes_keys) && !self.help {
+        if self.asking.as_ref().is_some_and(Asking::takes_keys) && self.help.is_none() {
             return self.answer(key, now);
         }
         if self.compact {
             return self.compact_key(key, now);
         }
-        if self.help {
-            self.help = false;
+        if let Some(help) = &mut self.help {
+            if !help.key(key) {
+                self.help = None;
+            }
             return None;
         }
         if self.catchup.shown() {
@@ -90,7 +93,7 @@ impl Model {
                 None
             }
             Key::Char('?') => {
-                self.help = true;
+                self.help = Some(Help::default());
                 None
             }
             Key::Char('R') => Some(Action::Refresh),
@@ -115,7 +118,7 @@ impl Model {
         let text = pasted(text);
         if text.is_empty()
             || self.compact
-            || self.help
+            || self.help.is_some()
             || self.catchup.shown()
             || self.interrupting.is_some()
             || self.asking.as_ref().is_some_and(Asking::takes_keys)

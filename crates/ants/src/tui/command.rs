@@ -567,9 +567,9 @@ mod tests {
         m.paste("so\n", at(0));
         assert_eq!(m.bar.text(), "so\nq\nnow    please\ndone", "pasted at the cursor");
         m.key(Key::Esc, at(0));
-        m.help = true;
+        m.help = Some(crate::tui::help::Help::default());
         m.paste("q", at(0));
-        assert!(m.help && !m.bar.focused, "help takes no paste");
+        assert!(m.help.is_some() && !m.bar.focused, "help takes no paste");
     }
 
     #[test]

@@ -4,13 +4,13 @@
 
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use super::model::{Focus, Level, Model, Page};
-use super::style::{self, block, dim};
+use super::style::{self, dim};
 use super::{approvals, catchup, compact, keymap, nav};
 
 /// How wide the nav is.
@@ -47,8 +47,8 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
         approvals::draw_full(frame, asking, now);
     }
     catchup::draw_digest(frame, model, now);
-    if model.help {
-        draw_help(frame);
+    if let Some(help) = &model.help {
+        help.draw(frame, model, now);
     }
 }
 
@@ -110,54 +110,6 @@ fn footer_line(model: &Model, now: DateTime<Utc>, width: u16) -> Line<'static> {
     keymap::footer(model, now, width)
 }
 
-/// The keys, over the middle of the screen.
-const HELP: &[(&str, &str)] = &[
-    ("Tab", "move between the nav and the view"),
-    ("↑↓ j k", "move the selection, or scroll a thread"),
-    ("PgUp PgDn Home End", "move further"),
-    ("Enter", "open the selection"),
-    ("Esc", "back to the previous view, else to the nav"),
-    ("w ←→ a", "on an ant: its threads in work, pane, ask; in a channel: ←→ its state tab"),
-    ("[ ] \\", "on an ant: scroll its about or now column up, down; switch between the two"),
-    ("Ctrl-K @ #", "the command bar: @ant asks, #channel posts, else reply"),
-    ("/command", "in the bar: a command on the selection (Ctrl-K lists them)"),
-    ("Alt-Enter Ctrl-E", "in the bar: a new line, the text in the editor"),
-    ("↑↓ Tab", "in the bar: pick and complete an @ant, #channel or /command"),
-    ("y p m e d z", "in a thread: copy, pin, mute, archive, done, snooze (again to undo)"),
-    ("a A r n", "on a tool request: allow once, always, reject at once, or reject with a note to the ant"),
-    ("1-9 Enter", "on a question: answer by number, or focus its card: ↑↓ ←→ Space Enter Esc"),
-    ("g r f x d z s c o", "on home: grant, reply, forward, cancel, done, snooze, digest, credentials, held orders"),
-    ("i > t S", "in a thread: reply, quote the selected, delegation tree, TL;DR"),
-    ("+ f u b T", "in a thread: react, forward, unread from, remind; tool calls"),
-    ("o ]", "in a thread or channel: open the marked attachment, mark the next"),
-    ("x Ctrl-X", "in a thread or work: cancel the prompt running there"),
-    ("W E", "in a thread: withdraw a waiting message or post, or to edit it"),
-    ("x y", "in a delegation tree: cancel every prompt in the selected subtree"),
-    ("n M", "with a person: write a message; in a channel: notify level, members"),
-    ("/", "the bar on /search, as in: /search deploy from:dev-a"),
-    ("R ?", "read everything again, this help"),
-    ("q Ctrl-C", "quit"),
-];
-
-fn draw_help(frame: &mut Frame) {
-    let lines: Vec<Line> = HELP
-        .iter()
-        .map(|(keys, what)| {
-            Line::from(vec![Span::styled(format!("{keys:>20}  "), Style::new().bold()), Span::raw(*what)])
-        })
-        .chain([Line::raw(""), Line::styled("any key closes this help", dim())])
-        .collect();
-    let area = centered(frame.area(), 90, u16::try_from(lines.len()).unwrap_or(u16::MAX) + 2);
-    frame.render_widget(Clear, area);
-    frame.render_widget(Paragraph::new(lines).block(block(" Keys ".to_owned(), true)), area);
-}
-
-/// An area of at most `width` by `height` in the middle of `area`.
-fn centered(area: Rect, width: u16, height: u16) -> Rect {
-    let (width, height) = (width.min(area.width), height.min(area.height));
-    Rect { x: area.x + (area.width - width) / 2, y: area.y + (area.height - height) / 2, width, height }
-}
-
 #[cfg(test)]
 mod tests {
     use ants_proto::ThreadId;
@@ -197,7 +149,7 @@ mod tests {
         m.key(Key::Char('?'), at(3));
         let shown = screen(&m, at(30));
         assert!(shown.contains("○ disconnected 27s, reconnecting"), "{shown}");
-        assert!(shown.contains("any key closes this help"), "{shown}");
+        assert!(shown.contains(crate::tui::help::CLOSE), "{shown}");
     }
 
     #[test]

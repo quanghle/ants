@@ -16,6 +16,7 @@ use super::acts::{Acted, Change};
 use super::approvals::{self, Asking};
 use super::command::{self, Bar, Tone};
 use super::exec::{Job, Quoted};
+use super::help::Help;
 use super::interrupt::Confirm;
 use super::react::{self, Picker};
 use super::reads::{Levels, Mark, Read};
@@ -321,7 +322,8 @@ pub struct Model {
     pub focus: Focus,
     /// The nav's view, then those opened from it, the shown one last; never empty.
     pub pages: Vec<Page>,
-    pub help: bool,
+    /// The help, while shown.
+    pub help: Option<Help>,
     pub notice: Option<Notice>,
     pub bar: Bar,
     /// The tool request being answered.
@@ -371,7 +373,7 @@ impl Model {
             pages: vec![Page::of(&nav)],
             nav,
             focus: Focus::View,
-            help: false,
+            help: None,
             notice: None,
             bar: Bar::default(),
             asking: None,
@@ -907,12 +909,12 @@ mod tests {
     }
 
     #[test]
-    fn help_shows_until_a_key_and_q_or_ctrl_c_quit() {
+    fn help_shows_until_closed_and_q_or_ctrl_c_quit() {
         let mut m = model();
         assert_eq!(m.key(Key::Char('?'), at(0)), None);
-        assert!(m.help);
-        assert_eq!(m.key(Key::Char('q'), at(0)), None, "a key closes the help first");
-        assert!(!m.help);
+        assert!(m.help.is_some());
+        assert_eq!(m.key(Key::Char('q'), at(0)), None, "q closes the help first");
+        assert!(m.help.is_none());
         assert_eq!(m.key(Key::Char('q'), at(0)), Some(Action::Quit));
         m.key(Key::Char('?'), at(0));
         assert_eq!(m.key(Key::Interrupt, at(0)), Some(Action::Quit));

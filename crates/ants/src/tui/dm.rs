@@ -332,7 +332,7 @@ mod tests {
         for key in [Key::Char('q'), Key::Char('?'), Key::Char('x'), Key::Backspace, Key::Tab, Key::Char(' ')] {
             assert_eq!(m.key(key, at(2)), None, "{key:?} goes to the message being written");
         }
-        assert!(!m.help && m.focus == Focus::View);
+        assert!(m.help.is_none() && m.focus == Focus::View);
         let View::Dm(page) = m.page() else { panic!("not a DM") };
         assert_eq!(page.prompt(), Some(Page::WRITING_KEYS));
         let draft = Draft { to: user("bob"), text: "q? ".to_owned() };

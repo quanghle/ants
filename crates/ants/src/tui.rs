@@ -22,6 +22,7 @@ mod exec;
 mod faces;
 mod frame;
 mod held;
+mod help;
 mod home;
 mod images;
 mod interrupt;
