@@ -328,7 +328,7 @@ impl Trails {
         header.state = RunState::Running;
         header.ended_at = None;
         header.updated_at = Utc::now();
-        let slot = self.load(header, false).await.map_err(stored)?;
+        let slot = self.load(header, true).await.map_err(stored)?;
         if let Some(held) = held {
             for call in &held.book().pending {
                 self.retire(run, call);

@@ -229,7 +229,12 @@ impl Trails {
         };
         let mut issued = Issued::default();
         let mut colony = None;
-        let has_step = |call: &Call| slot.book().pending.iter().any(|pending| pending.call == call.call);
+        // A call answered while the script computed is outstanding in the engine until the next pass hands it in.
+        let has_step = |call: &Call| {
+            let book = slot.book();
+            book.pending.iter().any(|pending| pending.call == call.call)
+                || book.answers.iter().any(|(answered, _)| *answered == call.call)
+        };
         for call in engine.outstanding().iter().filter(|call| !has_step(call)) {
             let to = match self.recipient(&header, call, &mut colony).await? {
                 Ok(to) => to,
