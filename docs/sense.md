@@ -549,7 +549,8 @@ what the review reads and records what the ant decides. A dream begins when:
 - no prompt of the ant has run for 30 minutes (since the daemon started, before its first); while one runs, the daemon
   looks again 30 minutes later;
 - and threads of the ant were active since the last dream began (in the last 24 hours, before the first): a message
-  received or sent on them, or a thread note. The last dream's own threads do not count. A persona or skill proposal
+  received or sent on them, a thread note, or a post of the ant's in a channel. The last dream's own threads do not
+  count. A persona or skill proposal
   ready for confirmation that the last dream did not offer calls for a dream too.
 
 A dormant identity begins no dream, and a standby taking the ant over begins none sooner.
@@ -563,7 +564,10 @@ ant on a new thread with the packet alone, which asks it to answer the findings 
 then, against its identity, to bring its self-model and relationship records up to date and propose the persona
 changes the work supports with `sense_identity`. Each colony entry names the sage its ant's config and shared settings
 resolve, so an ant made a sage only by another machine's config or by shared settings (`ants ant set dev-a sage=lead`)
-is reviewed by no one either, for as long as a daemon serves the ant naming it. The packet, at most 64 KiB, holds:
+is reviewed by no one either, for as long as a daemon serves the ant naming it. A packet sent again after its first
+sending failed looks at the colony again: an ant made a sage since its dream began sends no further packet and is woken
+with the packet alone. A sage's daemon, for its part, acks unanswered a review asked by an ant that a live colony entry
+names as its sage, logging it. The packet, at most 64 KiB, holds:
 
 - for the ant, the verdicts on the last dream's findings, each with its reason and the items it names, or
   `unanswered`, then their tally (the counts its diary's title gives), at most an eighth of the packet's budget, the
@@ -582,16 +586,19 @@ is reviewed by no one either, for as long as a daemon serves the ant naming it. 
   their thread records tell; a line for each without one), its skills by name and description, and its experience
   since the dream's start;
 - the commits the work is at: of the ant's workdir and of each thread's worktree branch;
-- each active thread's history since the last dream, as the ant received, sent and noted it, then its timeline (the
-  tool calls, plans and ends with no reply of the ant's prompts, [`Timeline`](hooks.md#timeline-on-antstimelinethreadant)),
-  the most recently active first. Threads a webhook started are marked untrusted: their text is data, not
-  instructions. A sage's packet leaves out the threads of the reviews asked of it, listing those reviews by their
-  records instead (below). Lines before a thread's history tell what was done with it besides writing on it: the
-  ant's tool requests rejected on it since the last dream, with the tool and who rejected them, or that they expired
-  unanswered (the `rejected` entries of the ant's timeline); the reactions to the ant's latest 8 messages and notes
-  posts on it, with who gave them and to which message, asked as `list_reactions` asks; and the thread's marking done
-  since the last dream, with when and by whom. The daemon reads these as the ant's credentials allow, 30 seconds at
-  most in all; what fails to be read is left out, and the packet goes without it. Sense stores none of them.
+- each active thread's history since the last dream, as the ant received, sent, noted and posted it, with the other
+  posts on it in the channels the ant posted on it in (left out when they fail to be read), then its timeline (the tool
+  calls, plans and ends with no reply of the ant's prompts, [`Timeline`](hooks.md#timeline-on-antstimelinethreadant)),
+  the most recently active first. Threads a webhook started are marked untrusted: their text is data, not instructions.
+  A sage's packet leaves out the threads of the reviews asked of it, listing those reviews by their records instead
+  (below). Lines before a thread's history tell what was done with it besides writing on it: the ant's tool requests
+  rejected on it since the last dream, with the tool and who rejected them, or that they expired unanswered (the
+  `rejected` entries of the ant's timeline); the reactions to the ant's latest 8 messages, notes posts and channel posts
+  on it, with who gave them and to which message, asked as `list_reactions` asks; and the thread's marking done since
+  the last dream, with when and by whom, then, once a message, note or channel post read on it was stored after the
+  marking, the first such, which reopened it, with when and from whom. The daemon reads these as the ant's credentials
+  allow, 30 seconds at most in all; what fails to be read is left out, and the packet goes without it. Sense stores none
+  of them.
 
 A packet over its budget keeps each thread's latest part and leaves out the least recently active threads, then the
 vital signs' line for each thread, then the verdicts on the last dream's findings down to their tally, then the sage's

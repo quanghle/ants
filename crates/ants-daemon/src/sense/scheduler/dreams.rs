@@ -6,7 +6,8 @@
 //! to a review ([`ants_proto::REVIEW_ALLOW`]) naming the commits for the sage's daemon to check out
 //! ([`crate::checkouts`]), and takes the sage's answer there as it arrives ([`review_answer`]); without a sage, or once
 //! the sage leaves the review unanswered or answers with nothing readable, it wakes the ant on a new thread with the
-//! packet alone.
+//! packet alone. A packet sent again, after a failure, looks again whether a live ant names the ant as its sage: one
+//! made a sage since its dream began sends no further packet and is woken with the packet alone.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -47,6 +48,8 @@ pub(crate) trait Dreaming: Send + Sync {
     fn commits<'a>(&'a self, threads: &'a [ThreadId]) -> BoxFuture<'a, Vec<Commit>>;
     /// The ant's sage, when it has one, a daemon serves it now and no live ant names the ant as its own sage.
     fn sage(&self) -> BoxFuture<'_, Result<Option<UserId>>>;
+    /// The live ant naming the ant as its own sage, if any: the ant is a sage, reviewed by no one.
+    fn named_sage(&self) -> BoxFuture<'_, Result<Option<UserId>>>;
     /// Send the review packet `text` of `dream` to `sage` as its review's message on its thread, naming the dream's
     /// commits for the sage's daemon to check out and telling what is new in the verdicts and outcomes of the sage's
     /// earlier findings ([`Dream::review_outcomes`]).
@@ -84,6 +87,14 @@ pub(super) async fn step(
         }
         if current.review_due(now).is_some() {
             let threads = covered(dreams, current).await?;
+            if let Some(reviewed) = dreams.daemon.named_sage().await? {
+                tracing::info!(
+                    ant = %settings.ant, dream = current.number, %reviewed,
+                    "the ant became a sage since its dream began: it sends no review and dreams on the packet alone"
+                );
+                wake(items, host, &settings.ant, current, &threads).await?;
+                return Ok(current.next());
+            }
             review(items, dreams, &settings.ant, current, &threads).await?;
         }
         if let Some(deadline) = current.deadline() {
@@ -305,7 +316,17 @@ impl Dreaming for Daemon {
             let mut threads = Vec::with_capacity(active.len());
             let mut actions =
                 actions::Actions::new(&self.js, self.js_domain.as_ref(), &self.ant, self.reactions.as_ref()).await;
-            for history::Active { thread: id, history: text, timeline, sent, rejections, ends, escalations } in active {
+            for history::Active {
+                thread: id,
+                history: text,
+                timeline,
+                sent,
+                reopenings,
+                rejections,
+                ends,
+                escalations,
+            } in active
+            {
                 let origin = match &self.origins {
                     Some(origins) => origins.get(&id).await.unwrap_or_else(|e| {
                         tracing::warn!(thread = %id, error = format!("{e:#}"), "reading the origin of a thread");
@@ -316,7 +337,7 @@ impl Dreaming for Daemon {
                 let untrusted = origin.as_ref().is_some_and(|origin| !origin.trusted());
                 let review = origin.as_ref().is_some_and(|origin| matches!(origin.by, Starter::Review { .. }));
                 let started_by = origin.map_or_else(|| "someone not known".to_owned(), |origin| starter(&origin.by));
-                let actions = actions.of(&id, &sent, &rejections, (since, until)).await;
+                let actions = actions.of(&id, &sent, &rejections, &reopenings, (since, until)).await;
                 let signs = vitals::signs(&ends, escalations, &actions);
                 threads.push(Thread { id, untrusted, review, started_by, text, timeline, actions, signs });
             }
@@ -354,6 +375,13 @@ impl Dreaming for Daemon {
         })
     }
 
+    fn named_sage(&self) -> BoxFuture<'_, Result<Option<UserId>>> {
+        Box::pin(async move {
+            let entries = (self.colony)().await?;
+            Ok(crate::colony::naming_as_sage(&self.ant, &entries, Utc::now()).map(|entry| entry.ant.clone()))
+        })
+    }
+
     fn review<'a>(&'a self, sage: &'a UserId, dream: &'a Dream, text: String) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let Some(review) = &dream.review else { return Ok(()) };
@@ -371,10 +399,7 @@ impl Dreaming for Daemon {
 /// a live entry of another ant names `ant` as its sage, as a sage is reviewed by no one, whichever machine's config or
 /// shared settings made it one, nor while no daemon serves `sage` ([`crate::mcp::why_unserved`]).
 pub(super) fn serving_sage(ant: &UserId, sage: UserId, entries: &[ColonyEntry], now: DateTime<Utc>) -> Option<UserId> {
-    let names_ant = |entry: &&ColonyEntry| {
-        entry.ant != *ant && entry.sage.as_ref() == Some(ant) && crate::colony::is_live(entry, now)
-    };
-    if let Some(reviewed) = entries.iter().find(names_ant) {
+    if let Some(reviewed) = crate::colony::naming_as_sage(ant, entries, now) {
         tracing::debug!(
             %ant, %sage, reviewed = %reviewed.ant,
             "the ant dreams without its sage: a live ant names it as its sage, and a sage is reviewed by no one"

@@ -169,9 +169,14 @@ impl Bus {
 
     /// Publish `ant` in the colony with `escalate_to` as its chain.
     async fn put_colony(&self, ant: &UserId, escalate_to: &[UserId]) {
+        self.put_colony_with(ant, |entry| entry.escalate_to = escalate_to.to_vec()).await;
+    }
+
+    /// Publish `ant` in the colony, live, its entry as `set` makes it.
+    async fn put_colony_with(&self, ant: &UserId, set: impl FnOnce(&mut ants_proto::ColonyEntry)) {
         let colony = bus::ensure_colony(&self.js, ants_proto::COLONY_TTL).await.unwrap();
         let now = chrono::Utc::now();
-        let entry = ants_proto::ColonyEntry {
+        let mut entry = ants_proto::ColonyEntry {
             ant: ant.clone(),
             machine: "m".to_owned(),
             instance: "run-1".to_owned(),
@@ -187,7 +192,7 @@ impl Bus {
             activity: ants_proto::Activity::Idle,
             handling: 0,
             harnesses: 0,
-            escalate_to: escalate_to.to_vec(),
+            escalate_to: Vec::new(),
             sage: None,
             version: ants_proto::ANTS_VERSION.to_owned(),
             perms: ants_proto::PERMISSIONS_VERSION,
@@ -201,6 +206,7 @@ impl Bus {
             drift: Vec::new(),
             mcp: false,
         };
+        set(&mut entry);
         colony.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
     }
 
