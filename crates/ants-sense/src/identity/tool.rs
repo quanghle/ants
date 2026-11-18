@@ -4,7 +4,8 @@
 //! `relationship` and `who`, it replaces that record from the revision read, at once ([`records::replace`]); with
 //! persona fields and a reason, it proposes a persona change a later dream confirms ([`persona::propose`]), the
 //! profile among them, which the colony reads once confirmed; with `history`, it shows every version of the persona
-//! ([`persona::history`]).
+//! ([`persona::history`]), and with `history` and `who` every revision of the self-model (`self`) or of a relationship
+//! record ([`records::history`]).
 
 use std::fmt::Write as _;
 
@@ -49,10 +50,18 @@ pub fn schema() -> Value {
                 "description": "Why the persona changes: kept with the version.",
             },
             "finding": {"type": "string", "description": "The dream finding a persona change answers, such as 3.1."},
-            "history": {"type": "boolean", "description": "Show every version of the persona and its reason."},
+            "history": {
+                "type": "boolean",
+                "description": "Show every version of the persona and its reason; with who, every revision of that \
+                                record instead.",
+            },
             "self_model": record("The self-model: what the ant holds true of itself"),
             "relationship": record("The relationship record of who: working with them"),
-            "who": {"type": "string", "description": "With relationship: human:<name> or ant:<name>."},
+            "who": {
+                "type": "string",
+                "description": "With relationship: human:<name> or ant:<name>. With history: self for the self-model, \
+                                or the relationship record's human:<name> or ant:<name>.",
+            },
             "title": {
                 "type": "string",
                 "maxLength": MAX_TITLE_CHARS,
@@ -115,21 +124,28 @@ async fn answer(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
         }
         (Some(body), None) | (None, Some(body)) => body,
         (None, None) => {
-            if request.who.is_some()
-                || request.title.is_some()
-                || request.revision.is_some()
-                || request.quotes.is_some()
-            {
-                return Err(Answer::invalid("who, title, revision and quotes go with self_model or relationship."));
+            let writing = request.title.is_some() || request.revision.is_some() || request.quotes.is_some();
+            if request.history {
+                if proposing || writing {
+                    let message = "history shows versions: pass it alone for the persona's, or with who alone for a \
+                                   record's.";
+                    return Err(Answer::invalid(message));
+                }
+                return match &request.who {
+                    None => persona::history(&*items).await,
+                    Some(who) => records::history(&*items, who).await,
+                };
             }
-            if proposing && request.history {
-                return Err(Answer::invalid("history shows the persona's versions: pass it without fields."));
+            if request.who.is_some() || writing {
+                let message = "who, title, revision and quotes go with self_model or relationship; who also with \
+                               history.";
+                return Err(Answer::invalid(message));
             }
             if proposing {
                 let (reason, finding) = (request.reason.as_deref(), request.finding.as_deref());
                 return persona::propose(&*items, context, fields, reason, finding).await;
             }
-            return if request.history { persona::history(&*items).await } else { show(&*items, context).await };
+            return show(&*items, context).await;
         }
     };
     if proposing || request.history {
