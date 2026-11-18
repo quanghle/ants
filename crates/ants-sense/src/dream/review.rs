@@ -209,7 +209,7 @@ fn evidence_of(object: &Map<String, Value>) -> Evidence {
 
 /// `text` on one line, its secrets redacted, at most `max` characters, the markers of the block it is shown in made
 /// plain brackets; none when blank.
-fn clean(text: &str, max: usize) -> Option<String> {
+pub(in crate::dream) fn clean(text: &str, max: usize) -> Option<String> {
     let text = text.trim();
     let text = match text.char_indices().nth(max) {
         Some((at, _)) => format!("{}…", &text[..at]),

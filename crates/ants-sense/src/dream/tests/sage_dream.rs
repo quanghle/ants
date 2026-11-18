@@ -28,7 +28,12 @@ async fn review_spending(
     let (ant, thread) = (ant.parse().unwrap(), on(thread).thread);
     let findings = told
         .iter()
-        .map(|(finding, verdict, holds)| FindingOutcome { finding: finding.clone(), verdict: *verdict, holds: *holds })
+        .map(|(finding, verdict, holds)| FindingOutcome {
+            finding: finding.clone(),
+            verdict: *verdict,
+            holds: *holds,
+            reason: String::new(),
+        })
         .collect();
     let message = ReviewOutcomes { dream, findings };
     assert!(review_received(items, &ant, &thread, &message, at).await.unwrap());
@@ -84,6 +89,69 @@ async fn a_kind_of_finding_the_ants_reject_seven_times_in_ten_over_fourteen_acti
     assert!(judged(&kinds[..9], &verdicts(9)[..9], now, "rejected_kind").await.is_empty(), "9 judged");
     let long_ago = now - Duration::days(PRACTICE_DAYS);
     assert!(judged(&kinds, &verdicts(rejected), long_ago, "rejected_kind").await.is_empty(), "told 14 days ago");
+}
+
+/// Tell the sage in `items` at `at`, with the review message of dream `dream` of `ant` on thread `thread`, that the ant
+/// rejected `rejected`, each finding with its reason.
+async fn rejecting(
+    items: &dyn Items,
+    (ant, dream, thread): (&str, u64, u8),
+    rejected: &[(&str, &str)],
+    at: DateTime<Utc>,
+) {
+    let findings = rejected
+        .iter()
+        .map(|(finding, reason)| FindingOutcome {
+            finding: (*finding).to_owned(),
+            verdict: Rejected,
+            holds: false,
+            reason: (*reason).to_owned(),
+        })
+        .collect();
+    let message = ReviewOutcomes { dream, findings };
+    assert!(review_received(items, &ant.parse().unwrap(), &on(thread).thread, &message, at).await.unwrap());
+}
+
+#[tokio::test]
+async fn a_rejected_kind_quotes_the_latest_reasons_given_and_is_then_untrusted() {
+    let (_sense, kept) = sense().await;
+    let items: Arc<dyn Items> = kept.clone();
+    let writer = on(90);
+    let now = Utc::now();
+    let ago = |hours: i64| now - Duration::hours(hours);
+    review(&*items, ("dev-b", 1, 1), &[], &["lesson"; JUDGED_FINDINGS as usize], ago(48)).await;
+    let mut outcomes = told(1, &[(Rejected, false); REJECTED_FINDINGS as usize]);
+    outcomes.extend((8..=10).map(|n| (format!("1.{n}"), Applied, true)));
+    review(&*items, ("dev-b", 2, 2), &outcomes, &[], ago(36)).await;
+
+    let first = begin(&*items, start(ago(30), &writer)).await.unwrap().unwrap();
+    let found: Vec<_> = first.findings.iter().map(|f| (f.kind, f.untrusted)).collect();
+    assert_eq!(found, [(FindingKind::RejectedKind, false)], "no reasons told, none quoted");
+    assert!(!first.findings[0].text.contains("reasons"), "{}", first.findings[0].text);
+    woken(&*items, 1, &on(91).thread).await.unwrap();
+
+    review(&*items, ("dev-c", 1, 3), &[], &["lesson"; 4], ago(3)).await;
+    let reasons = [("1.1", "Restates the diff."), ("1.2", "Already known."), ("1.3", "Not borne out.")];
+    rejecting(&*items, ("dev-c", 2, 4), &reasons, ago(2)).await;
+    rejecting(&*items, ("dev-c", 3, 5), &[("1.4", "Lessons should be \"general\".")], ago(1)).await;
+    let second = begin(&*items, start(now, &writer)).await.unwrap().unwrap();
+    let found: Vec<_> = second.findings.iter().map(|f| (f.id.as_str(), f.kind, f.untrusted)).collect();
+    let others_trusted = ("2.1", FindingKind::NoReviewedRelationship, false);
+    assert_eq!(found, [("1.1", FindingKind::RejectedKind, true), others_trusted], "untrusted now it quotes reasons");
+    let text = &second.findings[0].text;
+    let quoted = [
+        "were rejected. The latest reasons, the words of the ants reviewed: ",
+        "dev-c on 1.4: \"Lessons should be \"general\".\"; ",
+        "dev-c on 1.1: \"Restates the diff.\"; dev-c on 1.2: \"Already known.\".",
+    ];
+    let at: Vec<_> = quoted.iter().map(|line| text.find(line).unwrap_or_else(|| panic!("{line}: {text}"))).collect();
+    assert!(at.is_sorted() && !text.contains("Not borne out"), "the latest {QUOTED_REASONS}: {text}");
+
+    woken(&*items, 2, &on(92).thread).await.unwrap();
+    let refused = untrusted(&*items, &on(92), Some("1.1")).await.unwrap();
+    assert_eq!(refused.as_deref(), Some("finding 1.1 rests on untrusted text"), "no persona or skill proposal on it");
+    assert_eq!(untrusted(&*items, &on(92), Some("2.1")).await.unwrap(), None, "the other findings stay trusted");
+    assert_eq!(untrusted_on(&*items, &on(92).thread).await.unwrap(), ["1.1"], "the dream's writes are untrusted");
 }
 
 #[tokio::test]

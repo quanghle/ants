@@ -13,6 +13,7 @@ use std::fmt::Write as _;
 use ants_proto::{FindingOutcome, FindingVerdict, UserId};
 use chrono::{DateTime, Duration, Utc};
 
+use crate::dream::reviews::told_reason;
 use crate::dream::vitals::percent;
 use crate::dream::{Dream, Finding, FindingKind, FindingTally, Judgement, Signs, TREND, Verdict, get};
 use crate::items::ItemId;
@@ -261,7 +262,7 @@ fn own(dream: &Dream) -> impl Iterator<Item = (&Finding, String)> {
 /// What the review of dream `number`, by `ages` of the ant's active time, tells `sage` of its earlier findings for the
 /// ant: those of the dreams [`track_record`] covers whose last verdict, or for one applied whether what was written
 /// for it still holds ([`outcome`]), is new since the ant's earlier reviews by `sage` told them, the oldest first, each
-/// by its id in the sage's record of its review ([`own`]).
+/// by its id in the sage's record of its review ([`own`]) and with the reason for the verdict ([`told_reason`]).
 pub(in crate::dream) async fn outcomes(
     items: &dyn Items,
     number: u64,
@@ -289,13 +290,14 @@ pub(in crate::dream) async fn outcomes(
                 }
             }
         }
+        let reason = told_reason(&verdict.reason);
         let verdict = match verdict.verdict {
             Judgement::Applied => FindingVerdict::Applied,
             Judgement::Rejected => FindingVerdict::Rejected,
             Judgement::Deferred => FindingVerdict::Deferred,
         };
         if told.get(told_as.as_str()) != Some(&(verdict, holds)) {
-            outcomes.push(FindingOutcome { finding: told_as, verdict, holds });
+            outcomes.push(FindingOutcome { finding: told_as, verdict, holds, reason });
         }
     }
     Ok(outcomes)

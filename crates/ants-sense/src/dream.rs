@@ -29,8 +29,9 @@
 //!
 //! A sage's own dream covers the reviews it was asked as threads too ([`Covered::review`]), but its packet lists them by
 //! their records ([`Reviewing`]), leaving out their text, the packets of other ants' work: so they make nothing of the
-//! dream untrusted. Each record keeps what its review thread spent ([`ReviewSpend`]), which the sage's tally shows a
-//! review and a finding still holding ([`ReviewCost`]).
+//! dream untrusted, but for a finding on its practice quoting the reasons the ants reviewed gave for rejecting its
+//! findings ([`practice_findings`]). Each record keeps what its review thread spent ([`ReviewSpend`]), which the sage's
+//! tally shows a review and a finding still holding ([`ReviewCost`]).
 
 use std::collections::BTreeSet;
 use std::fmt::{self, Write as _};
@@ -65,8 +66,8 @@ pub use packet::{
     TrackRecord, compose, packet, reviewing, track_record,
 };
 pub use practice_findings::{
-    COSTLY_REVIEW_COST_MICROS, COSTLY_REVIEW_TOKENS, COSTLY_REVIEWS, JUDGED_FINDINGS, PRACTICE_DAYS, REJECTED_FINDINGS,
-    RELATIONSHIP_AFTER_REVIEWS, UNANSWERED_PERCENT, UNANSWERED_REVIEWS, UNDONE_FINDINGS,
+    COSTLY_REVIEW_COST_MICROS, COSTLY_REVIEW_TOKENS, COSTLY_REVIEWS, JUDGED_FINDINGS, PRACTICE_DAYS, QUOTED_REASONS,
+    REJECTED_FINDINGS, RELATIONSHIP_AFTER_REVIEWS, UNANSWERED_PERCENT, UNANSWERED_REVIEWS, UNDONE_FINDINGS,
 };
 pub use review::{
     Advice, Evidence, Parsed, REVIEW_BEGIN, REVIEW_END, Review, Reviewed, answered, parse, review_sent, untrusted_on,
@@ -783,7 +784,7 @@ impl Gathered {
 /// first, then those on the identity of the ant ([`identity_findings`]), then those on its practice as a sage from the
 /// records of the `reviews` it made ([`practice_findings`]), then those on the vital signs of the work ([`vitals`]), up
 /// to [`MAX_FINDINGS`]. An open finding on the identity, the practice or the vital signs holds while its ground does,
-/// taking the text and count gathered now. One of the `rested` stays out while what it is about is unchanged and the
+/// taking the text, count and trust gathered now. One of the `rested` stays out while what it is about is unchanged and the
 /// ant was active less than [`REST_DAYS`] since the verdict, as `ages` counts; `rested` keeps those resting on.
 async fn findings(
     items: &dyn Items,
@@ -815,6 +816,7 @@ async fn findings(
                 let now = regathered.find(|gathered| open.key.as_ref() == Some(&gathered.key()));
                 if let Some(now) = now {
                     (open.text, open.items, open.count) = (now.text.clone(), now.items.clone(), now.count);
+                    open.untrusted = now.untrusted;
                 }
                 now.is_some()
             }

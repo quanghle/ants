@@ -622,10 +622,12 @@ no untrusted text: a review thread is one whose origin asks a review, or one a r
 how the findings fared and to keep what that teaches of reviewing, as a lesson with `sense_remember`, in the
 self-model or a relationship record of an ant reviewed with `sense_identity`, or in a skill for how to review with
 `sense_skill`. Findings on the sage's practice come from those records alone, never thread text, so none is
-untrusted, after the identity findings and before `vitals`:
+untrusted but a `rejected_kind` quoting reasons, after the identity findings and before `vitals`:
 
 - `rejected_kind`: a kind of finding with 10 verdicts or more told over the last 14 active days, 7 in 10 of them or
-  more rejected, one finding each;
+  more rejected, one finding each, quoting the reasons of up to 3 of the latest rejected (the latest told first),
+  each with the ant and finding: the reviewed ants' text, so one quoting any, offered first or again, is untrusted,
+  the sage's other findings staying trusted;
 - `undone_findings`: 3 applied findings or more undone since (a memory written for one voted wrong or stale, a
   proposal rejected), as told over the last 14 active days, naming at most 5;
 - `unanswered_reviews`: an ant reviewed within the last 14 active days that left half or more of the findings of its
@@ -690,14 +692,18 @@ offered again (the limit of 20 holds); an answer arriving after the next dream b
 
 **The sage's records:** the review message carries, besides the commits it names, the dream's number and what is new
 in the verdicts and outcomes of the sage's earlier findings since the ant's last review by the sage
-(`review_outcomes`): each finding's last verdict and, for one applied, whether it still holds, as the earlier findings
-judge them, only where that differs from what the ant's earlier review messages told. The message takes the same
+(`review_outcomes`): each finding's last verdict, the ant's reason for it (`reason`, at most 200 characters, on one
+line, its secrets redacted, the ant's text and untrusted) and, for one applied, whether it still holds, as the earlier
+findings judge them, only where the verdict or whether it holds differs from what the ant's earlier review messages
+told. The message takes the same
 outcomes on every try. The sage's daemon tells the sage's sense of each review: the message makes the review's record,
 an item of kind `review` named after the ant and its dream, and applies the verdicts and outcomes it carries to the
 records of the earlier reviews; the sage's answer gives the record its findings by kind, read and numbered as the ant's
 daemon reads them, the first answer kept. Sense alone writes the records, as it does the thread records, from the
 ant, the dream, the review thread, when the message arrived and was answered, and each finding's id, kind, verdict,
-whether it holds and when that was last told: no text of the ant's threads nor of the findings. With the answer, the
+whether it holds and when that was last told, with the reason told with the verdict, sanitized again and cut to 200
+characters: no text of the ant's threads nor of the findings. The reasons show only in a `rejected_kind` finding
+(above). With the answer, the
 sage's daemon hands over what the review thread spent, from its spend ledger (`<ant>.<thread>.spend`,
 [config.md](config.md#prompt-limits-and-spending-caps)): the tokens and cost the harness reported over every prompt on
 it, retries and restarts included, which the record keeps as the review's spend; nothing reported leaves it unknown,

@@ -178,7 +178,13 @@ pub struct FindingOutcome {
     /// Whether the change applying it still holds; only for an applied finding.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub holds: bool,
+    /// The sender's reason for its verdict, at most [`MAX_OUTCOME_REASON`] characters: the sender's text, untrusted.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
 }
+
+/// The most characters of a verdict's reason ([`FindingOutcome::reason`]) a sender tells and a receiver keeps.
+pub const MAX_OUTCOME_REASON: usize = 200;
 
 /// An ant's verdict on a reviewer's finding ([`FindingOutcome::verdict`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
