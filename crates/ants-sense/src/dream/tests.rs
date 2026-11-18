@@ -387,6 +387,64 @@ fn a_packet_over_its_budget_trims_threads_to_their_latest_then_leaves_out_thread
 }
 
 #[test]
+fn over_its_budget_the_verdicts_on_the_last_dream_shrink_to_their_tally_before_the_reviews_made() {
+    let dream = Dream { number: 2, ..reviewing(3, 5) };
+    let threads = [thread(1, 3_000, false), thread(2, 3_000, true), thread(3, 3_000, false)];
+    let identity = Identity {
+        whole: format!("\n### Persona\n\n{}\n", "Voice: plain.\n".repeat(300)),
+        titles: "\nCut to titles for room.\n\n### Persona\n\nFields: Voice.\n".into(),
+    };
+    let last = |findings: usize, bytes: usize| {
+        let at = Utc::now();
+        let verdict = |finding: &Finding| {
+            let reason = "x".repeat(bytes);
+            Verdict { finding: finding.id.clone(), verdict: Judgement::Applied, reason, items: Vec::new(), at }
+        };
+        let mut last = reviewing(0, findings);
+        last.verdicts = last.findings.iter().take(findings - 1).map(verdict).collect();
+        last
+    };
+    let tally = |findings: usize| {
+        format!("\nDream 1: {findings} findings, {} applied, 0 rejected, 0 deferred, 1 unanswered.\n", findings - 1)
+    };
+
+    let long = last(30, 400);
+    let shared = compose(&dream, Earlier::Last(Some(&long)), &[], &ant(), &identity, &threads, PACKET_BUDGET);
+    assert!(shared.contains("- 1.18 (needs_review): applied") && !shared.contains("- 1.19 ("), "an eighth: {shared}");
+    assert!(shared.contains("\n12 verdicts left out for room.\n") && shared.contains(&tally(30)), "{shared}");
+    assert!(shared.contains("message 3") && shared.contains(&identity.whole), "{shared}");
+
+    let previous = last(10, 30);
+    let reviews = Section {
+        head: "\n## Reviews made\n\n".into(),
+        entries: vec![format!("- 1 of dev-b: {}\n", "y".repeat(100))],
+        tally: "\n1 review in all.\n".into(),
+        noun: "earlier review",
+    };
+    let earlier = Earlier::Reviewing(Some(&previous), &reviews);
+    let within = |budget| compose(&dream, earlier, &[], &ant(), &identity, &threads, budget);
+    let whole = within(PACKET_BUDGET);
+    assert!(whole.contains("- 1.10 (needs_review): unanswered\n") && !whole.contains("left out for room."), "{whole}");
+    assert!(whole.find("## Verdicts on dream 1").unwrap() < whole.find("## Reviews made").unwrap(), "{whole}");
+
+    let bare = within(whole.len() - 8_500);
+    assert!(!bare.contains(" of a thread") && bare.contains("- 1.10 (needs_review)"), "{bare}");
+
+    let shrunk = within(bare.len() - 1);
+    assert!(shrunk.contains("- 1.9 (needs_review)") && !shrunk.contains("- 1.10 ("), "{shrunk}");
+    assert!(shrunk.contains("\n1 verdict left out for room.\n") && shrunk.contains("- 1 of dev-b:"), "{shrunk}");
+
+    let left_out = "\n10 verdicts left out for room.\n";
+    let listed = whole.find("- 1.1 (").unwrap()..whole.find(&tally(10)).unwrap();
+    let tallied = within(bare.len() - listed.len() + left_out.len());
+    assert!(tallied.contains(left_out) && tallied.contains(&tally(10)), "{tallied}");
+    assert!(tallied.contains("- 1 of dev-b:") && tallied.contains(&identity.whole), "{tallied}");
+
+    let fewer = within(tallied.len() - 1);
+    assert!(fewer.contains("1 earlier review left out for room.") && fewer.contains(&identity.whole), "{fewer}");
+}
+
+#[test]
 fn a_thread_shows_its_timeline_after_its_history_the_latest_of_both_kept_for_room() {
     let dream = reviewing(2, 0);
     let lines =
@@ -445,6 +503,7 @@ fn a_thread_shows_what_was_done_with_it_besides_writing_before_its_history() {
         Action::Rejected { at: at(20), tool: "fetch: example.com".into(), by: None },
         Action::Reaction { reaction: "thumbsup".into(), by: "bob".into(), message, opening: "fixed the build".into() },
         Action::Done { at: at(30), by: "alice via asst".into() },
+        Action::Reopened { at: at(40), by: "a channel post from bob".into() },
     ];
     let threads = [packet::Thread { actions, ..thread(1, 200, false) }];
     for reader in [ant(), Reader::Sage(on(1).ant)] {
@@ -454,7 +513,8 @@ fn a_thread_shows_what_was_done_with_it_besides_writing_before_its_history() {
              - A tool request rejected by alice at 2026-11-14 09:05 UTC: execute: rm -rf target.\n\
              - A tool request expired unanswered at 2026-11-14 09:20 UTC, so rejected: fetch: example.com.\n\
              - bob reacted thumbsup to message {message}, \"fixed the build\".\n\
-             - Marked done by alice via asst at 2026-11-14 09:30 UTC.\n\n\
+             - Marked done by alice via asst at 2026-11-14 09:30 UTC.\n\
+             - Reopened by a channel post from bob at 2026-11-14 09:40 UTC, so no longer done.\n\n\
              message 1 of a thread\n",
             on(1).thread
         );

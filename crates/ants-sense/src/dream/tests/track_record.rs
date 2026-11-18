@@ -12,7 +12,8 @@ fn user(name: &str) -> UserId {
 
 /// A finding of a sage, of `kind`, first offered as `id`.
 fn advised(id: &str, kind: &str, text: &str) -> Finding {
-    let advice = Advice { kind: kind.into(), evidence: Evidence::default(), action: format!("Act on {id}.") };
+    let action = format!("Act on {id}.");
+    let advice = Advice { kind: kind.into(), evidence: Evidence::default(), action, follows: None };
     Finding { id: id.into(), kind: FindingKind::Sage, text: text.into(), advice: Some(advice), ..finding(1) }
 }
 
@@ -207,7 +208,7 @@ async fn a_finding_applied_three_dreams_ago_shows_the_signs_of_the_dreams_before
 
     let early = dream(5, hours(36), None, Vec::new(), Vec::new());
     let record = track_record(&*items, &early, &UserId::sage(), &user("dev-a")).await.unwrap();
-    let text = record.text(record.findings.len());
+    let text = record.text(record.entries.len());
     assert!(text.contains("before it was applied | none since: threads 2, 4, 1 | none;"), "{text}");
 }
 
@@ -235,12 +236,12 @@ async fn the_earlier_findings_reach_back_thirty_active_days_the_dormant_ones_not
 
     let current = reviewed(3, now, "sage", Vec::new(), Vec::new());
     let record = track_record(&*items, &current, &UserId::sage(), &user("dev-a")).await.unwrap();
-    let text = record.text(record.findings.len());
+    let text = record.text(record.entries.len());
     assert!(text.contains("Ten active days ago.") && !text.contains("Forty active days ago."), "{text}");
     assert!(text.contains("- lesson: 1 made, 0 applied (0 still holding), 0 rejected, 0 deferred, 1 unanswered."));
 
     let none = track_record(&*items, &current, &user("elder"), &user("dev-a")).await.unwrap();
-    assert!(none.findings.is_empty(), "{none:?}");
+    assert!(none.is_empty(), "{none:?}");
     assert_eq!(none.tally, "\nNo findings of elder in the last 30 active days of dev-a.\n");
 }
 
@@ -273,7 +274,7 @@ async fn the_outcomes_told_the_sage_reach_back_ninety_active_days_the_track_reco
     assert_eq!(told, [undone], "followed for {OUTCOME_DAYS} active days, the older not told");
     let current = reviewed(3, now, "sage", Vec::new(), Vec::new());
     let record = track_record(&*items, &current, &UserId::sage(), &user("dev-a")).await.unwrap();
-    assert!(record.findings.is_empty(), "the packet shows {TRACK_RECORD_DAYS} active days: {record:?}");
+    assert!(record.is_empty(), "the packet shows {TRACK_RECORD_DAYS} active days: {record:?}");
 }
 
 #[test]
@@ -284,10 +285,11 @@ fn over_its_budget_the_earlier_findings_shrink_to_their_tally_before_the_identit
         whole: format!("\n### Persona\n\n{}\n", "Voice: plain.\n".repeat(300)),
         titles: "\nCut to titles for room.\n\n### Persona\n\nFields: Voice.\n".into(),
     };
-    let record = |findings: usize, bytes: usize| TrackRecord {
+    let record = |findings: usize, bytes: usize| Section {
         head: "\n## Earlier findings of sage\n\nThe findings.\n".into(),
-        findings: (1..=findings).map(|n| format!("- 0.{n} (lesson): {}\n", "x".repeat(bytes))).collect(),
+        entries: (1..=findings).map(|n| format!("- 0.{n} (lesson): {}\n", "x".repeat(bytes))).collect(),
         tally: "\n### Tally of the last 30 active days\n\n- lesson: 10 made.\n".into(),
+        noun: "earlier finding",
     };
     let reader = Reader::Sage(user("dev-a"));
 

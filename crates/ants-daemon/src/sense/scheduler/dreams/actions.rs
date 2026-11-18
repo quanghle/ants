@@ -1,8 +1,9 @@
 //! What was done with the ant's threads besides writing on them, for its review packets ([`Action`]): a thread's
-//! marking done, from its done state ([`ThreadDone`]) read by direct get as the ant's credentials allow; the ant's tool
-//! requests rejected, from the timeline it reads back ([`history::Active::rejections`]); and the reactions to its
-//! messages, asked as `list_reactions` asks them ([`ReactionAsker`]). Each is read within [`TIMEOUT`] in all, and left
-//! out when it fails.
+//! marking done, from its done state ([`ThreadDone`]) read by direct get as the ant's credentials allow, and the first
+//! message, note or channel post read back on it after ([`history::Active::reopenings`]), which reopened it; the ant's
+//! tool requests rejected, from the timeline it reads back ([`history::Active::rejections`]); and the reactions to its
+//! messages and channel posts, asked as `list_reactions` asks them ([`ReactionAsker`]). Each is read within [`TIMEOUT`]
+//! in all, and left out when it fails.
 
 use ants_proto::{
     DecidedBy, JsDomain, MergedRejection, ReactionsOutcome, ReactionsRequest, THREADS_BUCKET, ThreadDone, ThreadId,
@@ -18,11 +19,11 @@ use crate::mcp::ReactionAsker;
 use crate::records::direct_kv::{DirectKv, Lookup};
 #[cfg(doc)]
 use crate::stream::history;
-use crate::stream::history::Sent;
+use crate::stream::history::{Reopening, Sent};
 
 /// How long reading what was done with the threads of a packet may take in all.
 const TIMEOUT: Duration = Duration::from_secs(30);
-/// The most of the ant's latest messages on a thread whose reactions are asked for.
+/// The most of the ant's latest messages and channel posts on a thread whose reactions are asked for.
 const REACTED: usize = 8;
 
 /// Reads what was done with each thread of a packet. A source that fails, answers nothing or runs out of time is read
@@ -51,18 +52,26 @@ impl<'a> Actions<'a> {
     }
 
     /// What was done with thread `id` from `since` to `until` besides writing on it: the tool requests `rejections` of
-    /// the ant rejected, the reactions to `sent`, its messages on it, and its marking done.
+    /// the ant rejected, the reactions to `sent`, its messages and channel posts on it, and its marking done, then the
+    /// first of `reopenings`, the entries read back on it, stored after it.
     pub(super) async fn of(
         &mut self,
         id: &ThreadId,
         sent: &[Sent],
         rejections: &[MergedRejection],
+        reopenings: &[Reopening],
         (since, until): (DateTime<Utc>, DateTime<Utc>),
     ) -> Vec<Action> {
         let between = |at: &DateTime<Utc>| (since..=until).contains(at);
         let mut actions: Vec<Action> = rejections.iter().filter(|r| between(&r.at)).map(rejected).collect();
         actions.extend(self.reactions(sent).await);
-        actions.extend(self.done(id).await.filter(|done| between(&done.at)).map(|done| done_by(&done)));
+        if let Some(done) = self.done(id).await.filter(|done| between(&done.at)) {
+            actions.push(done_by(&done));
+            if let Some(reopening) = reopenings.iter().find(|reopening| !done.holds(reopening.seq)) {
+                let by = format!("a {} from {}", reopening.kind, reopening.from);
+                actions.push(Action::Reopened { at: reopening.at.into(), by });
+            }
+        }
         actions
     }
 
@@ -208,7 +217,7 @@ mod tests {
         ];
         let messages = [sent(1, "fixed the build"), sent(2, "a message gone"), sent(3, "lost"), sent(4, "never asked")];
 
-        let got = actions.of(&thread, &messages, &rejections, period).await;
+        let got = actions.of(&thread, &messages, &rejections, &[], period).await;
         let tool = "execute: rm -rf target".to_owned();
         let expected = vec![
             Action::Rejected { at: rejections[1].at, tool: tool.clone(), by: Some("human alice".into()) },
@@ -223,7 +232,7 @@ mod tests {
         assert_eq!(got, expected, "the ant's own reaction and the rejection before the period left out");
         assert_eq!(asked.load(Ordering::SeqCst), 3, "no request after the failing one");
 
-        let got = actions.of(&thread, &[sent(1, "fixed the build")], &rejections[1..2], period).await;
+        let got = actions.of(&thread, &[sent(1, "fixed the build")], &rejections[1..2], &[], period).await;
         assert_eq!(got, expected[..1], "the reactions asked no more once a request failed");
         assert_eq!(asked.load(Ordering::SeqCst), 3);
     }
@@ -256,10 +265,25 @@ mod tests {
         let mut actions = Actions::new(&js, None, &ant, None).await;
         let period = (marked.at - TimeDelta::hours(1), marked.at + TimeDelta::minutes(1));
 
-        let got = actions.of(&done, &[sent(1, "done")], &[], period).await;
-        assert_eq!(got, [Action::Done { at: marked.at, by: "asst for alice".into() }]);
-        assert_eq!(actions.of(&open, &[], &[], period).await, []);
+        let got = actions.of(&done, &[sent(1, "done")], &[], &[], period).await;
+        let marked_done = Action::Done { at: marked.at, by: "asst for alice".into() };
+        assert_eq!(got, std::slice::from_ref(&marked_done));
+        assert_eq!(actions.of(&open, &[], &[], &[], period).await, []);
         let before = (period.0 - TimeDelta::hours(1), period.0);
-        assert_eq!(actions.of(&done, &[], &[], before).await, [], "marked done after the period");
+        assert_eq!(actions.of(&done, &[], &[], &[], before).await, [], "marked done after the period");
+
+        let reopening = |seq, minutes, from: &str, kind| Reopening {
+            seq,
+            at: (marked.at + TimeDelta::minutes(minutes)).into(),
+            from: p(from),
+            kind,
+        };
+        let seen = [reopening(7, -5, "dev-a", "message")];
+        let got = actions.of(&done, &[], &[], &seen, period).await;
+        assert_eq!(got, std::slice::from_ref(&marked_done), "seen when marked done");
+        let reopened = [seen[0].clone(), reopening(8, 3, "bob", "channel post"), reopening(9, 4, "dev-a", "message")];
+        let got = actions.of(&done, &[], &[], &reopened, period).await;
+        let by = "a channel post from bob".to_owned();
+        assert_eq!(got, [marked_done, Action::Reopened { at: marked.at + TimeDelta::minutes(3), by }]);
     }
 }

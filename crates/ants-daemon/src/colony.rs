@@ -672,6 +672,12 @@ pub fn is_live(entry: &ColonyEntry, now: DateTime<Utc>) -> bool {
     (now - entry.heartbeat_at).to_std().unwrap_or_default() <= STALE_AFTER
 }
 
+/// The live entry, of the colony's `entries` at `now`, of another ant naming `ant` as its sage: `ant` is a sage while
+/// there is one, whichever machine's config or shared settings made it one, and a sage is reviewed by no one.
+pub fn naming_as_sage<'a>(ant: &UserId, entries: &'a [ColonyEntry], now: DateTime<Utc>) -> Option<&'a ColonyEntry> {
+    entries.iter().find(|entry| entry.ant != *ant && entry.sage.as_ref() == Some(ant) && is_live(entry, now))
+}
+
 /// The ant `request`, needing `capability`, goes to, of the entries other than `asking` that advertise it: ants not
 /// paused before paused ones, then ants whose harness is signed in and starting before those signed out or failing to
 /// start, then those held back by no provider limit before limited ones, unless a fallback answers for them, then

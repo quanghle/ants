@@ -28,8 +28,8 @@
 //! signs of the work it reviews, measured by the daemon as it begins ([`Signs`]).
 //!
 //! A sage's own dream covers the reviews it was asked as threads too ([`Covered::review`]), but its packet lists them by
-//! their records ([`Reviewing`]), leaving out their text, the packets of other ants' work: so they make nothing of the
-//! dream untrusted, but for a finding on its practice quoting the reasons the ants reviewed gave for rejecting its
+//! their records ([`reviewing()`]), leaving out their text, the packets of other ants' work: so they make nothing of
+//! the dream untrusted, but for a finding on its practice quoting the reasons the ants reviewed gave for rejecting its
 //! findings ([`practice_findings`]). Each record keeps what its review thread spent ([`ReviewSpend`]), which the sage's
 //! tally shows a review and a finding still holding ([`ReviewCost`]).
 
@@ -62,15 +62,16 @@ pub use identity_findings::{
     OWN_AFTER_THREADS, PERSONA_AFTER_THREADS, RELATIONSHIP_AFTER_THREADS, SELF_MODEL_AFTER_THREADS, STALE_ACTIVE_DAYS,
 };
 pub use packet::{
-    Action, Earlier, Identity, MIN_THREAD_BYTES, OUTCOME_DAYS, PACKET_BUDGET, REVIEWING_SHARE, Reader, Reviewing,
-    TRACK_RECORD_DAYS, Thread, TrackRecord, compose, packet, reviewing, track_record,
+    Action, Earlier, Identity, MIN_THREAD_BYTES, OUTCOME_DAYS, PACKET_BUDGET, REVIEWING_SHARE, Reader, Section,
+    TRACK_RECORD_DAYS, Thread, VERDICTS_SHARE, compose, packet, reviewing, track_record,
 };
 pub use practice_findings::{
     COSTLY_REVIEW_COST_MICROS, COSTLY_REVIEW_TOKENS, COSTLY_REVIEWS, JUDGED_FINDINGS, PRACTICE_DAYS, QUOTED_REASONS,
     REJECTED_FINDINGS, RELATIONSHIP_AFTER_REVIEWS, UNANSWERED_PERCENT, UNANSWERED_REVIEWS, UNDONE_FINDINGS,
 };
 pub use review::{
-    Advice, Evidence, Parsed, REVIEW_BEGIN, REVIEW_END, Review, Reviewed, answered, parse, review_sent, untrusted_on,
+    Advice, Evidence, FOLLOW_UP, FollowUp, Parsed, REVIEW_BEGIN, REVIEW_END, Review, Reviewed, answered, parse,
+    review_sent, untrusted_on,
 };
 pub use reviews::{
     AntTally, FindingTally, KindTally, REVIEW, ReviewCost, ReviewRecord, ReviewSpend, ReviewTally, ReviewedFinding,
@@ -156,7 +157,7 @@ pub struct Covered {
     pub thread: ThreadId,
     #[serde(default)]
     pub untrusted: bool,
-    /// A review asked of the ant: the packet lists it by its record ([`Reviewing`]), its text, another ant's work,
+    /// A review asked of the ant: the packet lists it by its record ([`reviewing()`]), its text, another ant's work,
     /// left out.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub review: bool,

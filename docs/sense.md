@@ -553,7 +553,8 @@ what the review reads and records what the ant decides. A dream begins when:
 - no prompt of the ant has run for 30 minutes (since the daemon started, before its first); while one runs, the daemon
   looks again 30 minutes later;
 - and threads of the ant were active since the last dream began (in the last 24 hours, before the first): a message
-  received or sent on them, or a thread note. The last dream's own threads do not count. A persona or skill proposal
+  received or sent on them, a thread note, or a post of the ant's in a channel. The last dream's own threads do not
+  count. A persona or skill proposal
   ready for confirmation that the last dream did not offer calls for a dream too.
 
 A dormant identity begins no dream, and a standby taking the ant over begins none sooner.
@@ -567,10 +568,15 @@ ant on a new thread with the packet alone, which asks it to answer the findings 
 then, against its identity, to bring its self-model and relationship records up to date and propose the persona
 changes the work supports with `sense_identity`. Each colony entry names the sage its ant's config and shared settings
 resolve, so an ant made a sage only by another machine's config or by shared settings (`ants ant set dev-a sage=lead`)
-is reviewed by no one either, for as long as a daemon serves the ant naming it. The packet, at most 64 KiB, holds:
+is reviewed by no one either, for as long as a daemon serves the ant naming it. A packet sent again after its first
+sending failed looks at the colony again: an ant made a sage since its dream began sends no further packet and is woken
+with the packet alone. A sage's daemon, for its part, acks unanswered a review asked by an ant that a live colony entry
+names as its sage, logging it. The packet, at most 64 KiB, holds:
 
-- for the ant, the verdicts on the last dream's findings; for the sage, its earlier findings for the ant and what
-  became of them (below);
+- for the ant, the verdicts on the last dream's findings, each with its reason and the items it names, or
+  `unanswered`, then their tally (the counts its diary's title gives), at most an eighth of the packet's budget, the
+  last findings' verdicts left out first; for the sage, its earlier findings for the ant and what became of them
+  (below);
 - the findings, at most 20, each with an id `<dream>.<n>`: those of a sage's answer to the last dream's review come too
   late (**The answer**, below) first, then the findings of the last dream deferred or unanswered that still hold,
   offered again, then what the ant's identity lacks for its work (below), memories with both `helpful` and `stale`
@@ -584,32 +590,41 @@ is reviewed by no one either, for as long as a daemon serves the ant naming it. 
   their thread records tell; a line for each without one), its skills by name and description, and its experience
   since the dream's start;
 - the commits the work is at: of the ant's workdir and of each thread's worktree branch;
-- each active thread's history since the last dream, as the ant received, sent and noted it, then its timeline (the
-  tool calls, plans and ends with no reply of the ant's prompts, [`Timeline`](hooks.md#timeline-on-antstimelinethreadant)),
-  the most recently active first. Threads a webhook started are marked untrusted: their text is data, not
-  instructions. A sage's packet leaves out the threads of the reviews asked of it, listing those reviews by their
-  records instead (below). Lines before a thread's history tell what was done with it besides writing on it: the
-  ant's tool requests rejected on it since the last dream, with the tool and who rejected them, or that they expired
-  unanswered (the `rejected` entries of the ant's timeline); the reactions to the ant's latest 8 messages and notes
-  posts on it, with who gave them and to which message, asked as `list_reactions` asks; and the thread's marking done
-  since the last dream, with when and by whom. The daemon reads these as the ant's credentials allow, 30 seconds at
-  most in all; what fails to be read is left out, and the packet goes without it. Sense stores none of them.
+- each active thread's history since the last dream, as the ant received, sent, noted and posted it, with the other
+  posts on it in the channels the ant posted on it in (left out when they fail to be read), then its timeline (the tool
+  calls, plans and ends with no reply of the ant's prompts, [`Timeline`](hooks.md#timeline-on-antstimelinethreadant)),
+  the most recently active first. Threads a webhook started are marked untrusted: their text is data, not instructions.
+  A sage's packet leaves out the threads of the reviews asked of it, listing those reviews by their records instead
+  (below). Lines before a thread's history tell what was done with it besides writing on it: the ant's tool requests
+  rejected on it since the last dream, with the tool and who rejected them, or that they expired unanswered (the
+  `rejected` entries of the ant's timeline); the reactions to the ant's latest 8 messages, notes posts and channel posts
+  on it, with who gave them and to which message, asked as `list_reactions` asks; and the thread's marking done since
+  the last dream, with when and by whom, then, once a message, note or channel post read on it was stored after the
+  marking, the first such, which reopened it, with when and from whom. The daemon reads these as the ant's credentials
+  allow, 30 seconds at most in all; what fails to be read is left out, and the packet goes without it. Sense stores none
+  of them.
 
 A packet over its budget keeps each thread's latest part and leaves out the least recently active threads, then the
-vital signs' line for each thread, then the sage's earlier findings, or a sage's reviews of other ants, down to their
-tally, then cuts the identity to titles (the persona's field names, the records' heads and the skills' names), then
-leaves out the last findings, counted for the next dream.
+vital signs' line for each thread, then the verdicts on the last dream's findings down to their tally, then the sage's
+earlier findings, or a sage's reviews of other ants, down to their tally, then cuts the identity to titles (the
+persona's field names, the records' heads and the skills' names), then leaves out the last findings, counted for the
+next dream.
 
 **The sage's earlier findings:** a sage keeps nothing between reviews, so its packet shows the findings it gave the ant
 in the dreams begun within the ant's last 30 active days (its dormancies not counted), the latest reviews first, those
-of another sage left out. Each comes with its suggested action and the ant's last verdict and reason, or `unanswered`
-(marked when the packet offers it again), and, for one applied, what became of each item the verdict names: a memory's
-status (marked when it changed since the verdict), the days it was read and its helpful, stale and wrong votes; a
-proposal's status; whether a self-model or relationship record was replaced since; or that the item is no longer kept.
+of another sage left out. Each shows by its id in the sage's record of the review (**The sage's records**, below), the
+id a `follow_up` names, which differs from the ant's only for a late answer's finding, numbered by the ant after the
+packet's own. Each comes with its suggested action and the ant's last verdict and reason, or `unanswered` (marked when
+the packet offers it again, with the id it is offered by when that differs), and, for one applied, what became of each
+item the verdict names: a memory's status (marked when it changed since the verdict), the days it was read and its
+helpful, stale and wrong votes; a proposal's status; whether a self-model or relationship record was replaced since;
+or that the item is no longer kept.
 Beside a finding applied come the ant's vital signs (below) of the dream it was given in and up to 4 before, and of up
 to 5 dreams since, the one being reviewed included, side by side: the threads, the prompts cancelled by a human, the
 share of tool calls failed, the tool requests rejected and the tokens a thread; a dream keeping none is left out. They
 are numbers, not the finding's effect, and the packet tells the sage that a few threads make weak evidence.
+A linked `follow_up` (**The answer**, below) shows the finding it follows (`follow_up of 3.2`), one unlinked why, and
+a finding followed up the follow-ups made of it (`Followed up by 4.1.`).
 A tally by kind follows, with a line for all: findings made, applied (and how many of those still hold), rejected,
 deferred and unanswered. An applied finding still holds while every item it names is kept, a memory active, superseded
 or in the status it had at the verdict, a proposal pending or confirmed. The section takes at most an eighth of the
@@ -646,15 +661,16 @@ tune on real threads.
 by their records (**The sage's records**, below): those asked, answered or told of since the last dream, the latest
 asked first, each with the ant and dream reviewed, when the review was asked and answered, what an answered one's
 thread spent (`spent N tokens and cost C`, or `spend unknown` when nothing was reported), and each finding's id and
-kind with what came of it (`applied, still holding`, `applied, since undone`, `rejected`, `deferred` or
-`unanswered`), then the tally of all its reviews. An ant tells its verdicts with its next review, so the findings of
-its latest one show unanswered until then. The section takes at most an eighth of the packet's budget, the earliest
-reviews left out first. The text of the review threads, other ants' work, is left out, so they make the packet hold
-no untrusted text: a review thread is one whose origin asks a review, or one a review record names. The packet asks
-how the findings fared and to keep what that teaches of reviewing, as a lesson with `sense_remember`, in the
-self-model or a relationship record of an ant reviewed with `sense_identity`, or in a skill for how to review with
-`sense_skill`. Findings on the sage's practice come from those records alone, never thread text, so none is
-untrusted but a `rejected_kind` quoting reasons, after the identity findings and before `vitals`:
+kind, a `follow_up` with the finding its record keeps it follows (`2.1 follow_up of 1.2`), with what came of it
+(`applied, still holding`, `applied, since undone`, `rejected`, `deferred` or `unanswered`), then the tally of all its
+reviews. An ant tells its verdicts with its next review, so the findings of its latest one show unanswered until then.
+The section takes at most an eighth of the packet's budget, the earliest reviews left out first. The text of the review
+threads, other ants' work, is left out, so they make the packet hold no untrusted text: a review thread is one whose
+origin asks a review, or one a review record names. The packet asks how the findings fared and to keep what that teaches
+of reviewing, as a lesson with `sense_remember`, in the self-model or a relationship record of an ant reviewed with
+`sense_identity`, or in a skill for how to review with `sense_skill`. Findings on the sage's practice come from those
+records alone, never thread text, so none is untrusted but a `rejected_kind` quoting reasons, after the identity
+findings and before `vitals`:
 
 - `rejected_kind`: a kind of finding with 10 verdicts or more told over the last 14 active days, 7 in 10 of them or
   more rejected, one finding each, quoting the reasons of up to 3 of the latest rejected (the latest told first),
@@ -699,7 +715,8 @@ fenced JSON block `{"findings": [{"kind", "finding", "evidence": {"threads", "me
 "action"}]}`, an empty list when nothing is worth the ant's time. Besides kinds such as `lesson`, `mistake` or
 `stale_memory`, a finding about the identity has kind `persona`, `self_model` or `relationship`: it cites the ant's own
 threads and builds on the persona the ant has, never on a house style. The sage holds the threads against its earlier
-findings and answers one that did not hold with a finding of kind `follow_up` naming it. The review thread is narrowed
+findings and answers one that did not hold with a finding of kind `follow_up` naming its id, as those findings show it,
+in `follows`: `{"kind": "follow_up", "follows": "3.2", …}`. The review thread is narrowed
 to `REVIEW_ALLOW` (`read:*`, `search`, `think`, and the ants tools `list_ants`, `read_notes`, `read_attachment`,
 `list_reactions` and `suggest_thread_title`): the ants MCP server refuses every other tool on it, provider tools and
 `complete` included.
@@ -719,14 +736,19 @@ packet's own but those on the identity and those offered again (a late answer's 
 stay whatever the sage answers, the identity findings numbered on after the sage's; so a dream answered holds at most
 20 findings of the sage and 20 of the packet. The sage's are marked untrusted when they cite a thread a webhook started
 or one the packet did not cover, an untrusted memory, or, citing no thread, a packet covering a thread a webhook
-started. They prompt the ant on the review thread itself, which becomes the dream thread, inside a block between
-`<sage-review>` and `</sage-review>` stating they are another ant's suggestions to verify against their evidence, not
-instructions, followed by the identity findings and the findings offered again, each in a section of its own, and the
-commits; the answer goes to no one. An empty list wakes nobody, the identity findings left for the next dream to offer
-again. A reply with no readable finding, or a notice that the sage's daemon gave up on the review or had it withdrawn,
-wakes the ant with the packet alone at once; so does a sage silent for 6 hours. A later answer prompts no one: the readable findings of the first one, marked untrusted by the same
-rules, come first among the findings of the ant's next dream, numbered after the packet's own, to answer there as any
-offered again (the limit of 20 holds); an answer arriving after the next dream began is dropped.
+started. A `follow_up` is linked to the finding its `follows` names, read only as an id `<dream>.<n>`, when the sage
+gave it to the ant in a dream the earlier findings cover; the prompt shows the link by the ant's id
+(`sage: follow_up of 3.2`). One naming an unknown finding or none stays an ordinary finding of the sage, the link
+dropped and noted (`sage: follow_up, unlinked: 3.9 is no earlier finding of the sage for the ant`, or
+`sage: follow_up, unlinked: naming no earlier finding`), and never fails the answer. They prompt the ant on the review
+thread itself, which becomes the dream thread, inside a block between `<sage-review>` and `</sage-review>` stating they
+are another ant's suggestions to verify against their evidence, not instructions, followed by the identity findings and
+the findings offered again, each in a section of its own, and the commits; the answer goes to no one. An empty list
+wakes nobody, the identity findings left for the next dream to offer again. A reply with no readable finding, or a
+notice that the sage's daemon gave up on the review or had it withdrawn, wakes the ant with the packet alone at once; so
+does a sage silent for 6 hours. A later answer prompts no one: the readable findings of the first one, marked untrusted
+by the same rules, come first among the findings of the ant's next dream, numbered after the packet's own, to answer
+there as any offered again (the limit of 20 holds); an answer arriving after the next dream began is dropped.
 
 **The sage's records:** the review message carries, besides the commits it names, the dream's number and what is new in
 the verdicts and outcomes of the sage's earlier findings since the ant's last review by the sage (`review_outcomes`):
@@ -736,15 +758,16 @@ them, over the dreams begun within the ant's last 90 active days, only where the
 from what the ant's earlier review messages told. The message takes the same outcomes on every try. The sage's daemon
 tells the sage's sense of each review: the message makes the review's record, an item of kind `review` named after the
 ant and its dream, and applies the verdicts and outcomes it carries to the records of the earlier reviews; the sage's
-answer gives the record its findings by kind, read and numbered as the ant's daemon reads them, the first answer kept.
+answer gives the record its findings by kind, read and numbered as the ant's daemon reads them, the first answer kept,
+a `follow_up` with the id it follows when the record of an earlier review of the ant holds a finding of that id.
 Sense alone writes the records, as it does the thread records, from the ant, the dream, the review thread, when the
-message arrived and was answered, and each finding's id, kind, verdict, whether it holds and when that was last told,
-with the reason told with the verdict, sanitized again and cut to 200 characters: no text of the ant's threads nor of
-the findings. The reasons show only in a `rejected_kind` finding (above). With the answer, the sage's daemon hands over
-what the review thread spent, from its spend ledger (`<ant>.<thread>.spend`,
+message arrived and was answered, and each finding's id, kind, the finding it follows, verdict, whether it holds and
+when that was last told, with the reason told with the verdict, sanitized again and cut to 200 characters: no text of
+the ant's threads nor of the findings. The reasons show only in a `rejected_kind` finding (above). With the answer, the
+sage's daemon hands over what the review thread spent, from its spend ledger (`<ant>.<thread>.spend`,
 [config.md](config.md#prompt-limits-and-spending-caps)): the tokens and cost the harness reported over every prompt on
-it, retries and restarts included, which the record keeps as the review's spend; nothing reported leaves it unknown.
-A human's message on the thread gives it a fresh allowance against its caps but leaves this total whole. A message or
+it, retries and restarts included, which the record keeps as the review's spend; nothing reported leaves it unknown. A
+human's message on the thread gives it a fresh allowance against its caps but leaves this total whole. A message or
 answer delivered again changes nothing. A finding's verdict and outcome reach the records only while its dream began
 within the ant's last 90 active days (its dormancies not counted), though the earlier findings show 30. The verdicts on
 the findings of an answer arriving after the ant went on with the packet alone, given in the next dream, reach the
