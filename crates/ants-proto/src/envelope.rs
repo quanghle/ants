@@ -13,8 +13,8 @@ use crate::{
 };
 #[cfg(doc)]
 use crate::{
-    ChannelPost, LINKS_BUCKET, MAX_TITLE, OWNERS_BUCKET, THREADS_BUCKET, ThreadOrigin, ThreadSummary, ThreadTitle,
-    Verdict, WEBHOOK_ALLOW, WEBHOOKS_BUCKET, owner_key, summary_key, title_key, webhook_marker_key,
+    ChannelPost, LINKS_BUCKET, MAX_TITLE, OWNERS_BUCKET, REVIEW_ALLOW, THREADS_BUCKET, ThreadOrigin, ThreadSummary,
+    ThreadTitle, Verdict, WEBHOOK_ALLOW, WEBHOOKS_BUCKET, owner_key, summary_key, title_key, webhook_marker_key,
 };
 
 /// One message between ants, or between an ant and a human.
@@ -144,7 +144,28 @@ pub struct Envelope {
     /// it with [`Envelope::as_notice`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notice: Option<NoticeKind>,
+    /// The commits the review packet the message carries names, on a message from an ant narrowed to [`REVIEW_ALLOW`]:
+    /// the recipient's daemon checks each out for the review under its ant's home. Never copied by [`Envelope::reply`]
+    /// or [`Envelope::follow_up`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub review_commits: Vec<ReviewCommit>,
     pub sent_at: DateTime<Utc>,
+}
+
+/// A commit a dream's review packet names ([`Envelope::review_commits`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewCommit {
+    /// The repository's normalized git remote, such as `github.com/owner/repo`.
+    pub repo: String,
+    /// The full commit id.
+    pub commit: String,
+    /// The thread whose worktree is at it; none for the ant's workdir.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<ThreadId>,
+    /// The repository's git directory on the machine of the sender's daemon, for a recipient on the same machine to
+    /// fetch the commit from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local: Option<String>,
 }
 
 /// What a daemon's notice ([`Envelope::notice`]) tells of.
@@ -347,6 +368,7 @@ impl Envelope {
             attachments: Vec::new(),
             sealed: None,
             notice: None,
+            review_commits: Vec::new(),
             sent_at: Utc::now(),
         }
     }
@@ -519,6 +541,7 @@ impl Envelope {
             attachments: Vec::new(),
             sealed: None,
             notice: None,
+            review_commits: Vec::new(),
             sent_at: Utc::now(),
         })
     }

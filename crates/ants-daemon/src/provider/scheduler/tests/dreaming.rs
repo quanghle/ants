@@ -38,7 +38,13 @@ impl Dreaming for Fake {
         Box::pin(async move { Ok(sage) })
     }
 
-    fn review<'a>(&'a self, sage: &'a UserId, review: &'a Review, text: String) -> BoxFuture<'a, Result<()>> {
+    fn review<'a>(
+        &'a self,
+        sage: &'a UserId,
+        review: &'a Review,
+        _: &'a [Commit],
+        text: String,
+    ) -> BoxFuture<'a, Result<()>> {
         self.reviews.locked().push((sage.clone(), review.clone(), text));
         Box::pin(async { Ok(()) })
     }
@@ -313,4 +319,24 @@ async fn a_proposal_ripe_for_confirmation_calls_for_a_dream_without_new_work() {
     let requests = host.requests.locked().clone();
     assert_eq!(requests.len(), 1, "a quiet ant dreams for its proposal");
     assert!(requests[0].text.contains("Voice: plain."), "{}", requests[0].text);
+}
+
+#[tokio::test]
+async fn a_review_names_the_git_directory_its_commits_are_in() {
+    let Some(repo) = crate::test_support::repo("dreams-review-commits") else { return };
+    let worktree = repo.parent().unwrap().join("worktree");
+    crate::test_support::run(&repo, &["worktree", "add", "--quiet", "-b", "t1", worktree.to_str().unwrap()]);
+    let commit = |thread: Option<&str>| Commit {
+        repo: "github.com/ants/dreams".into(),
+        commit: "c0ffee".into(),
+        thread: thread.map(|thread| thread.parse().unwrap()),
+    };
+    assert_eq!(super::super::dreams::review_commits(&worktree, &[]).await, []);
+
+    let named = super::super::dreams::review_commits(&worktree, &[commit(None), commit(Some("t1"))]).await;
+
+    let local = repo.join(".git").display().to_string();
+    assert_eq!(named.iter().map(|c| c.local.as_deref()).collect::<Vec<_>>(), [Some(&*local), Some(&*local)]);
+    assert_eq!(named[1].thread, Some("t1".parse().unwrap()));
+    std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
 }

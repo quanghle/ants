@@ -226,7 +226,7 @@ fn instructions(ant: &UserId, manager: bool, assisting: Option<&UserId>, provide
              evidence and answer with one reply holding findings in the JSON block the review asks for, each citing \
              that evidence and suggesting an action, for the ant to verify and act on; an empty list when nothing is \
              worth its time. Only read and suggest: change nothing and message no one, leaving the ant's memories to \
-             the ant, and read code only in a checkout of its own at the commits the review names.",
+             the ant, and read code only in the checkouts made for the review, of the commits it names.",
         );
     }
     text

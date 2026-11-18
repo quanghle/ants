@@ -784,7 +784,8 @@ async fn delivery_marks(home: &std::path::Path) -> (Answered, Buried) {
     (answered, buried)
 }
 
-/// The ant's harness pool, isolating threads in worktrees when asked to, or else cleaning up the ones left behind.
+/// The ant's harness pool, isolating threads in worktrees when asked to, or else cleaning up the ones left behind, and
+/// reviews among their checkouts, cleared of those an earlier run left.
 async fn harness_pool(
     config: &Config,
     launch: Launch,
@@ -793,8 +794,11 @@ async fn harness_pool(
 ) -> Pool {
     let (pooling, home, base) = (&config.pooling, &config.storage.home, config.worktrees.base);
     let fallbacks = config.harness.fallbacks.iter().map(|f| (f.name(), launch.with_fallback(f))).collect();
+    let checkouts = crate::checkouts::Checkouts::new(home);
+    checkouts.clear();
     let mut pool = Pool::new(launch, sessions, pooling.max_harnesses, pooling.idle_timeout)
         .with_fallbacks(fallbacks)
+        .with_checkouts(checkouts)
         .reporting_to(workload.clone())
         .with_memory_pressure(pooling.memory_pressure, crate::limits::pressure::system_probe());
     let isolating = if config.worktrees.per_thread == Some(true) {

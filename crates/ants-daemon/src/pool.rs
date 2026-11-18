@@ -24,6 +24,7 @@ use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
+use crate::checkouts::Checkouts;
 use crate::colony::Workload;
 use crate::harness::{Launch, Prompt, Reply, Session};
 use crate::limits::fallback::OnFallback;
@@ -143,6 +144,8 @@ pub struct Pool {
     worktrees: Option<Worktrees>,
     /// Each thread works in its worktree, instead of the shared workdir.
     isolate: bool,
+    /// The checkouts of reviews: a thread with some works among them.
+    checkouts: Option<Checkouts>,
     /// Told the agent each harness starts with, and whether memory is low, for the colony.
     workload: Option<Arc<Workload>>,
     /// Watches for low memory, with the cap while it is low.
@@ -188,6 +191,7 @@ impl Pool {
             changed: Notify::new(),
             worktrees: None,
             isolate: false,
+            checkouts: None,
             workload: None,
             pressure: None,
             memory_low: AtomicBool::new(false),
@@ -239,6 +243,17 @@ impl Pool {
     #[must_use]
     pub fn with_worktrees(self, worktrees: Worktrees) -> Self {
         Self { worktrees: Some(worktrees), isolate: true, ..self }
+    }
+
+    /// A thread under review works among its checkouts ([`Checkouts::workdir`]), not in its worktree or the workdir.
+    #[must_use]
+    pub fn with_checkouts(self, checkouts: Checkouts) -> Self {
+        Self { checkouts: Some(checkouts), ..self }
+    }
+
+    /// The checkouts of reviews.
+    pub fn checkouts(&self) -> Option<&Checkouts> {
+        self.checkouts.as_ref()
     }
 
     /// Threads share the workdir, and the worktrees left from when each had its own are pruned
@@ -517,7 +532,9 @@ impl Pool {
         let cloned = stored.as_ref().is_some_and(|stored| stored.cloned);
         let resume = stored.filter(|_| !moved && !cloned).map(|stored| stored.session);
         let mut launch = launch.for_thread(thread);
-        if let Some(worktrees) = self.worktrees.as_ref().filter(|_| self.isolate) {
+        if let Some(dir) = self.checkouts.as_ref().and_then(|checkouts| checkouts.workdir(thread)) {
+            launch = launch.in_dir(dir);
+        } else if let Some(worktrees) = self.worktrees.as_ref().filter(|_| self.isolate) {
             match worktrees.checkout(thread).await {
                 Ok(dir) => launch = launch.in_dir(dir),
                 Err(e) => tracing::warn!(%thread, error = format!("{e:#}"), "working in the shared workdir"),

@@ -13,6 +13,7 @@ use async_nats::jetstream::{self, AckKind};
 
 use crate::bus;
 use crate::channel::{self, Context, Earlier};
+use crate::checkouts::Prepared;
 use crate::delivery::attempts::{Marker, Reply};
 use crate::escalation::{self, Stuck};
 use crate::files::Attached;
@@ -180,12 +181,12 @@ impl Inbox<'_> {
 
         // A message joining a running prompt takes over the turn of the message it started with.
         let joining = incoming.steered == Steered::Joining;
-        let launch = self.pool.launch();
-        self.warn_unnarrowed(incoming, launch);
-        let _narrowed = (!joining).then(|| launch.policy().narrow(thread, envelope.allow.as_deref()));
+        self.warn_unnarrowed(incoming);
+        let _narrowed = (!joining).then(|| self.pool.launch().policy().narrow(thread, envelope.allow.as_deref()));
         let _turn = self.mcp.filter(|_| !joining).map(|mcp| begin_turn(mcp, incoming, msg));
         let _asking = self.approvals.filter(|_| !joining).map(|approvals| approvals.begin(envelope));
         let text = self.prompt_for(incoming, read.as_ref(), &humans, cut_off, own.then_some(spent)).await;
+        let (text, _checkouts) = self.review_checkouts(incoming, msg, joining, text).await;
         // The answer of a prompt a message joined is sent while the turn of the one it started with lasts.
         let mut _answering = None;
         let ran = if joining {
@@ -260,6 +261,27 @@ impl Inbox<'_> {
         self.deliver(incoming, &reply, msg, seq).await
     }
 
+    /// Prompt `text` telling of the checkouts of the commits `incoming` names, with the checkouts, to keep while the
+    /// prompt lasts, when it is a review an ant asked for: a message, not a post or a webhook's, narrowed to
+    /// [`ants_proto::REVIEW_ALLOW`] ([`crate::checkouts`]). `text` alone for one `joining` a running prompt.
+    async fn review_checkouts(
+        &self,
+        incoming: &Incoming,
+        msg: &jetstream::Message,
+        joining: bool,
+        text: String,
+    ) -> (String, Option<Prepared>) {
+        let envelope = &incoming.envelope;
+        let review = !joining
+            && incoming.post.is_none()
+            && !envelope.webhook
+            && !self.humans.sender_role(envelope).is_human()
+            && ants_proto::is_review(envelope.allow.as_deref());
+        let Some(checkouts) = self.pool.checkouts().filter(|_| review) else { return (text, None) };
+        let prepared = self.acking(msg, checkouts.prepare(envelope)).await;
+        (format!("{text}\n\n{}", prepared.note()), Some(prepared))
+    }
+
     /// Why `incoming` is a review ([`ants_proto::REVIEW_ALLOW`]) that nothing would hold to read-only tools, unless it
     /// joins a prompt running.
     fn unheld_review(&self, incoming: &Incoming) -> Option<String> {
@@ -289,8 +311,8 @@ impl Inbox<'_> {
 
     /// Warn, once per sender, that the tool rules a message not joining a prompt narrows the thread to do not reach a
     /// harness running its tools unasked. A review's do ([`crate::harness::Launch::for_review`]).
-    fn warn_unnarrowed(&self, incoming: &Incoming, launch: &crate::harness::Launch) {
-        let envelope = &incoming.envelope;
+    fn warn_unnarrowed(&self, incoming: &Incoming) {
+        let (envelope, launch) = (&incoming.envelope, self.pool.launch());
         if incoming.steered != Steered::Joining
             && envelope.allow.as_deref().is_some_and(|allow| !crate::harness::allows_all(allow))
             && !ants_proto::is_review(envelope.allow.as_deref())

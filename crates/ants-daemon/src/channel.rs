@@ -246,6 +246,7 @@ pub fn as_envelope(post: &ChannelPost, ant: &UserId) -> Envelope {
         attachments: Vec::new(),
         sealed: None,
         notice: None,
+        review_commits: Vec::new(),
         sent_at: post.sent_at,
     }
 }
