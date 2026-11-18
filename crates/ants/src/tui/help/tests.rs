@@ -109,10 +109,11 @@ fn the_fold_keys_have_rows_in_the_table() {
 
 #[test]
 fn every_key_a_view_takes_has_a_row_in_the_table() {
-    let views: [(&str, &str, &[View]); 21] = [
+    let views: [(&str, &str, &[View]); 22] = [
         ("model/keys.rs", "nav_key", &[View::Nav]),
         ("thread.rs", "find_key", &[View::Thread]),
         ("command/bar.rs", "key", &[View::Bar]),
+        ("input.rs", "key", &[View::Bar]),
         ("command/history.rs", "history_key", &[View::Bar]),
         ("command/history.rs", "search_key", &[View::Bar]),
         ("complete.rs", "complete_key", &[View::Bar]),
@@ -135,6 +136,7 @@ fn every_key_a_view_takes_has_a_row_in_the_table() {
     let source = |file: &str| match file {
         "model/keys.rs" => include_str!("../model/keys.rs"),
         "command/bar.rs" => include_str!("../command/bar.rs"),
+        "input.rs" => include_str!("../input.rs"),
         "command/history.rs" => include_str!("../command/history.rs"),
         "complete.rs" => include_str!("../complete.rs"),
         "approvals.rs" => include_str!("../approvals.rs"),

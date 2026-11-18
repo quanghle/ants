@@ -10,6 +10,7 @@ use ants_proto::{ApprovalRequest, ThreadId};
 use unicode_width::UnicodeWidthChar as _;
 
 use crate::tui::exec::Quoted;
+use crate::tui::input::{Input, PASTED};
 use crate::tui::model::Key;
 use crate::tui::{attach, complete, style};
 
@@ -18,10 +19,6 @@ const MAX_LINES: usize = 6;
 /// A paste of more characters than this, or of more lines than `PASTE_LINES`, shows as a placeholder.
 const PASTE_CHARS: usize = 800;
 const PASTE_LINES: usize = 3;
-/// The first of the private-use characters standing in the text for the pastes shown as placeholders.
-const PASTED: u32 = 0xF_0000;
-/// How many pastes there may be placeholders for: the characters of the Supplementary Private Use Area-A.
-const PASTES: usize = 0xFFFE;
 
 /// How the bar's status line reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,11 +53,7 @@ pub enum Edited {
 pub struct Bar {
     /// Whether keys go to the bar.
     pub focused: bool,
-    chars: Vec<char>,
-    /// The pastes shown as placeholders, each standing in `chars` as the character `PASTED` plus its index.
-    pastes: Vec<String>,
-    /// Where the cursor is, in characters.
-    cursor: usize,
+    input: Input,
     pub status: Option<Status>,
     /// The completion selected in the list of those of the word at the cursor.
     pub pick: complete::Pick,
@@ -72,26 +65,15 @@ pub struct Bar {
     pub noting: Option<Note>,
     /// The notes being sent, by their text, each with its request, to come back as a reply if sending fails.
     notes: Vec<(String, Box<ApprovalRequest>)>,
-    /// What a key deleted last, for Ctrl-Y to put back.
-    killed: Vec<Killed>,
     /// Whether Ctrl-X came last, so that Ctrl-E after it opens the editor.
     ctrl_x: bool,
-}
-
-/// A character deleted, or a paste whose placeholder was.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Killed {
-    Char(char),
-    Paste(String),
 }
 
 /// What the bar holds for a conversation not shown: its text, with the cursor, and what Enter does with it beyond
 /// where the conversation sends.
 #[derive(Debug, Default)]
 pub struct Draft {
-    chars: Vec<char>,
-    pastes: Vec<String>,
-    cursor: usize,
+    input: Input,
     quoting: Option<(ThreadId, Quoted)>,
     noting: Option<Note>,
 }
@@ -99,24 +81,16 @@ pub struct Draft {
 impl Draft {
     /// The draft of `text`, replying to the message `quoting` or the note `noting` if any.
     pub fn of(text: &str, quoting: Option<(ThreadId, Quoted)>, noting: Option<Note>) -> Self {
-        let chars: Vec<char> = text.chars().collect();
-        Self { cursor: chars.len(), chars, pastes: Vec::new(), quoting, noting }
+        Self { input: Input::from(text), quoting, noting }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.chars.is_empty() && self.quoting.is_none() && self.noting.is_none()
+        self.input.is_empty() && self.quoting.is_none() && self.noting.is_none()
     }
 
     /// The text, its pastes in full.
     pub fn text(&self) -> String {
-        let paste = |c: &char| self.pastes.get(usize::try_from(u32::from(*c).checked_sub(PASTED)?).ok()?);
-        self.chars.iter().fold(String::new(), |mut text, c| {
-            match paste(c) {
-                Some(paste) => text.push_str(paste),
-                None => text.push(*c),
-            }
-            text
-        })
+        self.input.text()
     }
 }
 
@@ -140,10 +114,10 @@ impl Note {
 impl Bar {
     /// Hold `draft` in place of the draft held, which is returned.
     pub fn swap(&mut self, draft: Draft) -> Draft {
+        let mut input = draft.input;
+        input.keep_killed(&mut self.input);
         let held = Draft {
-            chars: std::mem::replace(&mut self.chars, draft.chars),
-            pastes: std::mem::replace(&mut self.pastes, draft.pastes),
-            cursor: std::mem::replace(&mut self.cursor, draft.cursor),
+            input: std::mem::replace(&mut self.input, input),
             quoting: std::mem::replace(&mut self.quoting, draft.quoting),
             noting: std::mem::replace(&mut self.noting, draft.noting),
         };
@@ -164,25 +138,12 @@ impl Bar {
 
     /// The text, its pastes in full.
     pub fn text(&self) -> String {
-        let mut text = String::with_capacity(self.chars.len());
-        for c in &self.chars {
-            match self.pasted(*c) {
-                Some(paste) => text.push_str(paste),
-                None => text.push(*c),
-            }
-        }
-        text
+        self.input.text()
     }
 
     /// The text with its pastes as the characters standing for them, which `set_raw` takes back.
     pub fn raw(&self) -> String {
-        self.chars.iter().collect()
-    }
-
-    /// The paste `c` stands for, if any.
-    fn pasted(&self, c: char) -> Option<&str> {
-        let at = u32::from(c).checked_sub(PASTED)?;
-        self.pastes.get(usize::try_from(at).ok()?).map(String::as_str)
+        self.input.raw()
     }
 
     /// Empty the bar, dropping the reply `>`, the note set up and the list picked from.
@@ -194,160 +155,62 @@ impl Bar {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.chars.is_empty()
+        self.input.is_empty()
     }
 
     /// Replace the text with `text`, the cursor at its end.
     pub fn set_text(&mut self, text: &str) {
-        self.pastes.clear();
-        self.set_raw(text);
+        self.input.set_text(text);
     }
 
     /// Replace the text with `raw`, as `raw` gave it, keeping the pastes.
     pub fn set_raw(&mut self, raw: &str) {
-        self.chars = raw.chars().collect();
-        self.cursor = self.chars.len();
+        self.input.set_raw(raw);
     }
 
     pub fn insert(&mut self, c: char) {
-        self.chars.insert(self.cursor, c);
-        self.cursor += 1;
+        self.input.insert(c);
     }
 
     /// Put `text` at the cursor, the cursor after it: as is when short, else as a placeholder that the cursor and
     /// deleting take as one character and that sending puts back.
     pub fn paste(&mut self, text: &str) {
         let long = text.chars().count() > PASTE_CHARS || text.lines().count() > PASTE_LINES;
-        if long && let Some(c) = self.stand_in(text) {
-            self.insert(c);
+        if long && let Some(c) = self.input.stand_in(text) {
+            self.input.insert(c);
             return;
         }
         // Shown as spaces, a tab having no width of its own.
-        let text = text.replace('\t', "    ");
-        let at = self.cursor;
-        self.chars.splice(at..at, text.chars());
-        self.cursor = at + text.chars().count();
-    }
-
-    /// The placeholder character for the paste `text`, one already standing for it or a new one; None once there are
-    /// no more.
-    fn stand_in(&mut self, text: &str) -> Option<char> {
-        let at = match self.pastes.iter().position(|paste| paste == text) {
-            Some(at) => at,
-            None if self.pastes.len() < PASTES => {
-                self.pastes.push(text.to_owned());
-                self.pastes.len() - 1
-            }
-            None => return None,
-        };
-        u32::try_from(at).ok().and_then(|at| char::from_u32(PASTED + at))
-    }
-
-    /// Where the line of the cursor starts.
-    fn line_start(&self) -> usize {
-        self.chars[..self.cursor].iter().rposition(|c| *c == '\n').map_or(0, |at| at + 1)
-    }
-
-    /// Where the line of the cursor ends, before its line break.
-    fn line_end(&self) -> usize {
-        self.chars[self.cursor..].iter().position(|c| *c == '\n').map_or(self.chars.len(), |at| self.cursor + at)
-    }
-
-    /// Where the word before the cursor starts, as Alt-B goes: past what is no letter or digit, then past those that
-    /// are.
-    fn word_back(&self) -> usize {
-        let mut at = self.cursor;
-        while at > 0 && !self.chars[at - 1].is_alphanumeric() {
-            at -= 1;
-        }
-        while at > 0 && self.chars[at - 1].is_alphanumeric() {
-            at -= 1;
-        }
-        at
-    }
-
-    /// Where the word after the cursor ends, as Alt-F goes.
-    fn word_forward(&self) -> usize {
-        let mut at = self.cursor;
-        while at < self.chars.len() && !self.chars[at].is_alphanumeric() {
-            at += 1;
-        }
-        while at < self.chars.len() && self.chars[at].is_alphanumeric() {
-            at += 1;
-        }
-        at
-    }
-
-    /// Delete the characters in `range`, kept for Ctrl-Y, the cursor where they were.
-    fn kill(&mut self, range: std::ops::Range<usize>) {
-        if range.is_empty() {
-            return;
-        }
-        self.killed = self.chars[range.clone()]
-            .iter()
-            .map(|c| self.pasted(*c).map_or(Killed::Char(*c), |paste| Killed::Paste(paste.to_owned())))
-            .collect();
-        self.cursor = range.start;
-        self.chars.drain(range);
-    }
-
-    /// Put back at the cursor what was deleted last.
-    fn yank(&mut self) {
-        for killed in self.killed.clone() {
-            match killed {
-                Killed::Char(c) => self.insert(c),
-                Killed::Paste(text) => match self.stand_in(&text) {
-                    Some(c) => self.insert(c),
-                    None => text.chars().for_each(|c| self.insert(c)),
-                },
-            }
-        }
+        self.input.insert_str(&text.replace('\t', "    "));
     }
 
     /// Move the cursor to the line above (`up`) or below, if any, as near its column as that line allows.
     fn line_up_down(&mut self, up: bool) {
-        let (start, end) = (self.line_start(), self.line_end());
-        let column = self.cursor - start;
+        let (start, end) = (self.input.line_start(), self.input.line_end());
+        let (chars, column) = (self.input.chars(), self.input.cursor() - start);
         let (from, to) = if up {
             let Some(before) = start.checked_sub(1) else { return };
-            let from = self.chars[..before].iter().rposition(|c| *c == '\n').map_or(0, |at| at + 1);
+            let from = chars[..before].iter().rposition(|c| *c == '\n').map_or(0, |at| at + 1);
             (from, before)
         } else {
-            if end == self.chars.len() {
+            if end == chars.len() {
                 return;
             }
-            let to = self.chars[end + 1..].iter().position(|c| *c == '\n').map_or(self.chars.len(), |at| end + 1 + at);
+            let to = chars[end + 1..].iter().position(|c| *c == '\n').map_or(chars.len(), |at| end + 1 + at);
             (end + 1, to)
         };
-        self.cursor = from + column.min(to - from);
-    }
-
-    /// Whether `c` ends a word: whitespace, or a paste's placeholder.
-    fn breaks(&self, c: char) -> bool {
-        c.is_whitespace() || self.pasted(c).is_some()
+        self.input.go(from + column.min(to - from));
     }
 
     /// Where the word at the cursor starts, and its text up to the cursor.
     pub fn word(&self) -> (usize, String) {
-        let start = self.chars[..self.cursor].iter().rposition(|c| self.breaks(*c)).map_or(0, |at| at + 1);
-        (start, self.chars[start..self.cursor].iter().collect())
+        self.input.word()
     }
 
     /// Put `word` and a space in place of the word at the cursor, the cursor after them.
     pub fn complete(&mut self, word: &str) {
-        let (start, _) = self.word();
-        let end = self.chars[self.cursor..]
-            .iter()
-            .position(|c| self.breaks(*c))
-            .map_or(self.chars.len(), |at| self.cursor + at);
-        let spaced = self.chars.get(end).is_some_and(|c| *c == ' ');
-        let mut put: Vec<char> = word.chars().collect();
         // A directory completed goes on to its entries.
-        if !spaced && !word.ends_with('/') {
-            put.push(' ');
-        }
-        self.cursor = start + put.len() + usize::from(spaced);
-        self.chars.splice(start..end, put);
+        self.input.complete(word, !word.ends_with('/'));
         self.pick = complete::Pick::default();
     }
 
@@ -355,59 +218,22 @@ impl Bar {
         self.status = Some(Status { text: text.into(), tone });
     }
 
-    /// Take `key`, the bar being focused: it edits as a shell's line does.
+    /// Take `key`, the bar being focused: it edits as a shell's line does ([`Input::key`]), with lines.
     pub fn key(&mut self, key: Key) -> Edited {
         let after_ctrl_x = std::mem::take(&mut self.ctrl_x);
+        let cursor = self.input.cursor();
         match key {
-            Key::Char(c) => self.insert(c),
-            Key::Newline => self.insert('\n'),
-            Key::Backspace if self.cursor > 0 => {
-                self.cursor -= 1;
-                self.chars.remove(self.cursor);
-            }
-            Key::Delete if self.cursor < self.chars.len() => {
-                self.chars.remove(self.cursor);
-            }
-            Key::Left => self.cursor = self.cursor.saturating_sub(1),
-            Key::Right => self.cursor = (self.cursor + 1).min(self.chars.len()),
+            Key::Ctrl('e') if after_ctrl_x => return Edited::Editor(self.text()),
+            Key::Newline => self.input.insert('\n'),
             Key::Up => self.line_up_down(true),
             Key::Down => self.line_up_down(false),
-            Key::Home | Key::Ctrl('a') => self.cursor = self.line_start(),
-            Key::Ctrl('e') if after_ctrl_x => return Edited::Editor(self.text()),
-            Key::End | Key::Ctrl('e') => self.cursor = self.line_end(),
-            Key::Alt('b' | 'B') | Key::WordLeft => self.cursor = self.word_back(),
-            Key::Alt('f' | 'F') | Key::WordRight => self.cursor = self.word_forward(),
-            // At the end of a line, Ctrl-K takes its line break, and Ctrl-U at its start the one before it.
-            Key::Ctrl('k') => {
-                let end = self.line_end();
-                let end = if end == self.cursor { (end + 1).min(self.chars.len()) } else { end };
-                self.kill(self.cursor..end);
-            }
-            Key::Ctrl('u') => {
-                let start = self.line_start();
-                let start = if start == self.cursor { start.saturating_sub(1) } else { start };
-                self.kill(start..self.cursor);
-            }
-            Key::Ctrl('w') => {
-                let mut start = self.cursor;
-                while start > 0 && self.chars[start - 1].is_whitespace() {
-                    start -= 1;
-                }
-                while start > 0 && !self.chars[start - 1].is_whitespace() {
-                    start -= 1;
-                }
-                self.kill(start..self.cursor);
-            }
-            Key::Alt('d' | 'D') => self.kill(self.cursor..self.word_forward()),
-            Key::AltBackspace => self.kill(self.word_back()..self.cursor),
-            Key::Ctrl('y') => self.yank(),
             Key::Ctrl('x') => self.ctrl_x = true,
             Key::Ctrl('g') => return Edited::Editor(self.text()),
             // A backslash before Enter makes it a new line, as in a shell.
-            Key::Enter if self.cursor > 0 && self.chars[self.cursor - 1] == '\\' => self.chars[self.cursor - 1] = '\n',
+            Key::Enter if cursor > 0 && self.input.chars()[cursor - 1] == '\\' => self.input.replace_before('\n'),
             Key::Enter if !self.text().trim().is_empty() => return Edited::Submit(self.text()),
             Key::Esc => self.focused = false,
-            _ => {}
+            _ => _ = self.input.key(key),
         }
         Edited::Done
     }
@@ -426,7 +252,7 @@ impl Bar {
         let (mut rows, mut row): (Vec<Vec<Cell>>, Vec<Cell>) = (Vec::new(), Vec::new());
         // The row's column, and where it may break: after its last space.
         let (mut column, mut after_space) = (0, None);
-        for (at, c) in self.chars.iter().enumerate() {
+        for (at, c) in self.input.chars().iter().enumerate() {
             if *c == '\n' {
                 row.push(Cell { at, c: '\n', columns: 0 });
                 rows.push(std::mem::take(&mut row));
@@ -434,7 +260,7 @@ impl Bar {
                 continue;
             }
             let mut one = [0; 4];
-            let label = self.pasted(*c).map(|paste| placeholder(u32::from(*c) - PASTED + 1, paste));
+            let label = self.input.pasted(*c).map(|paste| placeholder(u32::from(*c) - PASTED + 1, paste));
             let shown = label.as_deref().unwrap_or_else(|| c.encode_utf8(&mut one));
             for c in shown.chars() {
                 let columns = c.width().unwrap_or(0);
@@ -453,7 +279,7 @@ impl Bar {
         }
         rows.push(row);
         let found = rows.iter().enumerate().find_map(|(nth, row)| {
-            let at = row.iter().position(|cell| cell.at >= self.cursor)?;
+            let at = row.iter().position(|cell| cell.at >= self.input.cursor())?;
             Some((nth, row[..at].iter().map(|cell| cell.columns).sum()))
         });
         let cursor = found.unwrap_or_else(|| {
@@ -502,7 +328,7 @@ impl Bar {
             let text = style::fit(&format!("{mark}{}", status.text.replace('\n', " ")), room);
             block = block.title_bottom(Line::styled(format!(" {text} "), style));
         }
-        let shown: Vec<Line> = if self.chars.is_empty() {
+        let shown: Vec<Line> = if self.input.is_empty() {
             let hint = style::hints(hint, width);
             let pad = width.saturating_sub(hint.chars().count());
             vec![Line::from(vec![Span::raw(" ".repeat(pad)), Span::styled(hint, style::dim())])]
@@ -570,14 +396,14 @@ mod tests {
     fn at(text: &str) -> Bar {
         let mut bar = Bar::default();
         bar.set_text(&text.replace('|', ""));
-        bar.cursor = text.chars().position(|c| c == '|').unwrap_or_else(|| unreachable!());
+        bar.input.set_cursor(text.chars().position(|c| c == '|').unwrap_or_else(|| unreachable!()));
         bar
     }
 
     /// The bar's text with `|` at its cursor.
     fn shown(bar: &Bar) -> String {
-        let mut chars = bar.chars.clone();
-        chars.insert(bar.cursor, '|');
+        let mut chars = bar.input.chars().to_vec();
+        chars.insert(bar.input.cursor(), '|');
         chars.into_iter().collect()
     }
 
@@ -624,7 +450,7 @@ mod tests {
         bar.key(Key::Ctrl('y'));
         bar.key(Key::Ctrl('y'));
         assert_eq!(bar.text(), format!("a{log}a{log}"));
-        assert_eq!(bar.chars.len(), 4, "a character each");
+        assert_eq!(bar.input.chars().len(), 4, "a character each");
         bar.set_text("");
         bar.paste(&"x".repeat(900));
         bar.key(Key::Ctrl('y'));

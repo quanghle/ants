@@ -17,6 +17,7 @@ use crate::channel::{self, Change};
 use crate::text::excerpt;
 use crate::tui::complete::{self, Candidate, Pick};
 use crate::tui::exec::Job;
+use crate::tui::input::Input;
 use crate::tui::model::{Action, Data, Key, To};
 use crate::tui::style;
 
@@ -38,7 +39,7 @@ const FIELDS: [Field; 4] = [Field::Add, Field::Messenger, Field::Owner, Field::D
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Typing {
     field: Field,
-    text: String,
+    text: Input,
     pick: Pick,
 }
 
@@ -115,7 +116,7 @@ impl Editor {
     /// Type `line` pasted in the row typed in, if any; the editor takes it anyway.
     pub fn paste(&mut self, line: &str) -> bool {
         if let Some(typing) = &mut self.typing {
-            typing.text.push_str(line);
+            typing.text.paste(line);
             typing.pick = Pick::default();
         }
         true
@@ -129,7 +130,7 @@ impl Editor {
             Field::Owner => entry.owner.as_ref().map_or_else(String::new, |o| format!("@{o}")),
             Field::Description => entry.description.clone().unwrap_or_default(),
         };
-        self.typing = Some(Typing { field, text, pick: Pick::default() });
+        self.typing = Some(Typing { field, text: Input::from(text.as_str()), pick: Pick::default() });
     }
 
     fn type_key(&mut self, key: Key, entry: &ChannelEntry, data: &Data) -> Edited {
@@ -143,7 +144,7 @@ impl Editor {
                 Key::Down => typing.pick.selected = (selected + 1) % candidates.len(),
                 Key::Esc => typing.pick.closed = true,
                 Key::Tab => typing.complete(word),
-                Key::Enter if last_word(&typing.text) != word => typing.complete(word),
+                Key::Enter if typing.text.word().1 != *word => typing.complete(word),
                 _ => return self.edit_key(key, &entry.channel, data),
             }
             return Edited::Kept;
@@ -154,17 +155,9 @@ impl Editor {
     fn edit_key(&mut self, key: Key, channel: &ChannelId, data: &Data) -> Edited {
         let typing = self.typing.as_mut().expect("typing");
         match key {
-            Key::Char(c) => {
-                typing.text.push(c);
-                typing.pick = Pick::default();
-            }
-            Key::Backspace => {
-                typing.text.pop();
-                typing.pick = Pick::default();
-            }
             Key::Esc => self.typing = None,
             Key::Enter => {
-                return match change(typing.field, &typing.text, channel, data) {
+                return match change(typing.field, &typing.text.text(), channel, data) {
                     Ok(change) => {
                         self.typing = None;
                         Edited::To(Box::new(run(channel, change)))
@@ -172,18 +165,22 @@ impl Editor {
                     Err(why) => Edited::To(Box::new(To::Refused(why))),
                 };
             }
-            _ => {}
+            key => {
+                if typing.text.key(key) {
+                    typing.pick = Pick::default();
+                }
+            }
         }
         Edited::Kept
     }
 
-    /// The completions of the last word typed, by name: for a member to add, the colony's ants and the humans not
+    /// The completions of the word before the cursor, by name: for a member to add, the colony's ants and the humans not
     /// in `entry` yet; for the messenger or owner, the colony's ants.
     fn completions(&self, entry: &ChannelEntry, data: &Data) -> Vec<Candidate> {
         let Some(typing) = self.typing.as_ref().filter(|t| !t.pick.closed && t.field != Field::Description) else {
             return Vec::new();
         };
-        let word = last_word(&typing.text);
+        let (_, word) = typing.text.word();
         if word.is_empty() {
             return Vec::new();
         }
@@ -211,7 +208,7 @@ impl Editor {
         let scroll = focus.end.saturating_sub(rows).min(focus.start);
         let mut block = style::block(format!(" manage #{} ", entry.channel), true);
         if let Some(Typing { field: Field::Description, text, .. }) = &self.typing {
-            let count = text.trim().chars().count();
+            let count = text.text().trim().chars().count();
             let style = if count > MAX_CHANNEL_DESCRIPTION {
                 ratatui::style::Style::new().fg(style::ERROR)
             } else {
@@ -262,12 +259,7 @@ impl Editor {
             let start = lines.len();
             match self.typing.as_ref().filter(|t| t.field == field) {
                 Some(typing) => {
-                    let room = width.saturating_sub(15);
-                    let shown: String = {
-                        let chars: Vec<char> = typing.text.chars().collect();
-                        chars[chars.len().saturating_sub(room)..].iter().collect()
-                    };
-                    spans.extend([Span::raw("> "), Span::raw(shown), Span::raw("_").slow_blink()]);
+                    spans.extend([Span::raw("> "), Span::raw(typing.text.caret(width.saturating_sub(14)))]);
                     lines.push(Line::from(spans));
                     let candidates = self.completions(entry, data);
                     let picked = typing.pick.selected.min(candidates.len().saturating_sub(1));
@@ -309,23 +301,16 @@ impl Editor {
 }
 
 impl Typing {
-    /// Put `word` in place of the last word typed; after it, a member to add may follow.
+    /// Put `word` in place of the word at the cursor; after it, a member to add may follow.
     fn complete(&mut self, word: &str) {
-        let start = self.text.len() - last_word(&self.text).len();
-        self.text.truncate(start);
-        self.text.push_str(word);
-        if self.field == Field::Add {
-            self.text.push(' ');
+        let add = self.field == Field::Add;
+        self.text.complete(word, add);
+        if add {
             self.pick = Pick::default();
         } else {
             self.pick.closed = true;
         }
     }
-}
-
-/// The word `text` ends with.
-fn last_word(text: &str) -> &str {
-    text.rsplit(char::is_whitespace).next().unwrap_or_default()
 }
 
 /// Write `change` to `channel`.
@@ -378,6 +363,7 @@ mod tests {
     use crate::test_support::render::rendered;
     use crate::tui::command::Tone;
     use crate::tui::exec::{Done, Outcome};
+    use crate::tui::input::{Typed, exercise};
     use crate::tui::model::{Model, Page};
     use crate::tui::nav;
     use crate::tui::reads::Read;
@@ -471,7 +457,7 @@ mod tests {
         keys(&mut m, [Key::Tab]);
         typed(&mut m, "@c");
         keys(&mut m, [Key::Enter]);
-        assert_eq!(editor(&m).unwrap().typing.as_ref().unwrap().text, "@dev-b @carol ", "Enter completes first");
+        assert_eq!(editor(&m).unwrap().typing.as_ref().unwrap().text.text(), "@dev-b @carol ", "Enter completes first");
         let change = Change { add: vec![user("dev-b"), user("carol")], ..Change::default() };
         assert_eq!(keys(&mut m, [Key::Enter]), written(change));
         assert_eq!(status(&m), ("running…".to_owned(), Tone::Busy));
@@ -486,7 +472,7 @@ mod tests {
         assert!(!m.bar.focused && m.bar.is_empty() && editor(&m).unwrap().typing.is_none(), "dropped");
         keys(&mut m, [Key::Char('a')]);
         m.paste("dev-b\n", at(1));
-        assert_eq!(editor(&m).unwrap().typing.as_ref().unwrap().text, "@dev-b ");
+        assert_eq!(editor(&m).unwrap().typing.as_ref().unwrap().text.text(), "@dev-b ");
     }
 
     #[test]
@@ -505,10 +491,10 @@ mod tests {
         keys(&mut m, [Key::Up, Key::Char('M')]);
         row(&mut m, 5);
         keys(&mut m, [Key::Enter]);
-        assert_eq!(editor(&m).unwrap().typing.as_ref().unwrap().text, "@dev-m", "from what it is");
+        assert_eq!(editor(&m).unwrap().typing.as_ref().unwrap().text.text(), "@dev-m", "from what it is");
         keys(&mut m, std::iter::repeat_n(Key::Backspace, 3));
         keys(&mut m, [Key::Down, Key::Enter]);
-        assert_eq!(editor(&m).unwrap().typing.as_ref().unwrap().text, "@dev-b", "completed");
+        assert_eq!(editor(&m).unwrap().typing.as_ref().unwrap().text.text(), "@dev-b", "completed");
         let set = keys(&mut m, [Key::Enter]);
         assert_eq!(set, written(Change { messenger: Some(Some(user("dev-b"))), ..Change::default() }));
 
@@ -551,7 +537,7 @@ mod tests {
         keys(&mut m, [Key::Up, Key::Char('M')]);
         row(&mut m, 7);
         keys(&mut m, [Key::Enter]);
-        assert_eq!(editor(&m).unwrap().typing.as_ref().unwrap().text, "Deploys and outages.");
+        assert_eq!(editor(&m).unwrap().typing.as_ref().unwrap().text.text(), "Deploys and outages.");
         typed(&mut m, &" x".repeat(500));
         assert_eq!(keys(&mut m, [Key::Enter]), None);
         assert!(status(&m).0.contains("1000"), "{:?}", status(&m));
@@ -562,6 +548,21 @@ mod tests {
         assert_eq!(set, written(Change { description: Some(Some("Releases".to_owned())), ..Change::default() }));
         let cleared = keys(&mut m, [Key::Char('d')]);
         assert_eq!(cleared, written(Change { description: Some(None), ..Change::default() }));
+    }
+
+    #[test]
+    fn a_row_typed_in_edits_as_the_bar_does() {
+        let mut m = ops();
+        keys(&mut m, [Key::Up, Key::Char('M')]);
+        row(&mut m, 7);
+        keys(&mut m, [Key::Enter, Key::Ctrl('u')]);
+        let want = exercise(|typed| match typed {
+            Typed::Key(key) => _ = m.key(key, at(1)),
+            Typed::Paste(text) => m.paste(text, at(1)),
+        });
+        assert_eq!(editor(&m).unwrap().typing.as_ref().unwrap().text.text(), want);
+        let set = keys(&mut m, [Key::Enter]);
+        assert_eq!(set, written(Change { description: Some(Some(want.to_owned())), ..Change::default() }));
     }
 
     #[test]
@@ -597,7 +598,7 @@ mod tests {
         let left = lines[0].chars().collect::<String>().split("manage #ops").next().unwrap().chars().count();
         assert!(left > 30 && left < 60, "over the members pane: {shown}");
         assert!(lines[1].contains("alice") && lines[4].contains("dev-m ✉"), "{shown}");
-        assert!(lines[5].contains("+ add") && lines[5].contains("> @c_"), "{shown}");
+        assert!(lines[5].contains("+ add") && lines[5].contains("> @c▏"), "{shown}");
         assert!(lines[6].contains("@carol") && lines[6].contains("human"), "{shown}");
         assert!(lines[7].contains("messenger") && lines[7].contains("dev-m"), "{shown}");
         assert!(lines[9].contains("description") && lines[9].contains("Deploys and outages."), "{shown}");
@@ -607,7 +608,7 @@ mod tests {
             let lines: Vec<&str> = shown.lines().collect();
             assert!(lines[0].starts_with("#ops · notify"), "the header in one line: {shown}");
             assert!(lines[1].starts_with("┌ manage #ops"), "at the top of the view: {shown}");
-            assert!(shown.contains("> @c_"), "the row typed in shows: {shown}");
+            assert!(shown.contains("> @c▏"), "the row typed in shows: {shown}");
         }
     }
 }

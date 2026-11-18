@@ -16,6 +16,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
+use super::input::Input;
 use super::model::{Action, Key};
 use super::style;
 use crate::live::maybe;
@@ -61,7 +62,7 @@ pub struct Page {
     /// How many sign-in orders were sent.
     pub signs: u32,
     /// The address the browser came back to, being written.
-    draft: Option<String>,
+    draft: Option<Input>,
 }
 
 impl Page {
@@ -172,7 +173,7 @@ impl Page {
             Key::Char('y') => return self.signing.as_ref()?.url.as_ref().map(|(url, _)| Action::Copy(url.clone())),
             Key::Char('v') => {
                 if self.signing.as_ref().is_some_and(|s| s.url.is_some()) {
-                    self.draft = Some(String::new());
+                    self.draft = Some(Input::default());
                 }
                 return None;
             }
@@ -186,23 +187,21 @@ impl Page {
         None
     }
 
-    /// Take `key` into the address being written: None when none is, the key being the pane's then. `Enter` hands
-    /// it over to the sign-in waiting for it, `Esc` drops it.
+    /// Take `key` into the address being written, edited as in the command bar: None when none is, the key being the
+    /// pane's then. `Enter` hands it over to the sign-in waiting for it, `Esc` drops it.
     pub fn write(&mut self, key: Key) -> Option<Option<Action>> {
         let draft = self.draft.as_mut()?;
         match key {
-            Key::Char(c) => draft.push(c),
-            Key::Backspace => _ = draft.pop(),
             Key::Esc => self.draft = None,
             Key::Enter => {
-                let callback = self.draft.take().map(|d| d.trim().to_owned()).filter(|d| !d.is_empty());
+                let callback = self.draft.take().map(|d| d.text().trim().to_owned()).filter(|d| !d.is_empty());
                 if let (Some(callback), Some(signing)) = (callback, self.signing.as_mut()) {
                     self.signs += 1;
                     signing.state = Sign::Asking;
                     signing.callback = Some(callback);
                 }
             }
-            _ => {}
+            key => _ = draft.key(key),
         }
         Some(None)
     }
@@ -309,7 +308,8 @@ impl Page {
             ));
         }
         if let Some(draft) = &self.draft {
-            lines.push(Line::raw(format!("address: {draft}▏")));
+            // The whole address, wrapped as the pane is.
+            lines.push(Line::raw(format!("address: {}", draft.caret(usize::MAX))));
         }
         lines
     }

@@ -17,6 +17,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
+use super::input::Input;
 use super::model::{Action, Key};
 use super::style::{self, ago};
 use crate::admin::orders::{self, Listed};
@@ -67,7 +68,7 @@ pub struct Pane {
     /// The field selected.
     at: usize,
     /// The `KEY = VALUE` being written, if any.
-    pub draft: Option<String>,
+    pub draft: Option<Input>,
     pub sent: Option<Sent>,
 }
 
@@ -103,27 +104,26 @@ impl Pane {
             Key::Enter => {
                 let Some((field, value, secret)) = fields.get(self.at) else { return };
                 let field = ants_daemon::config::edit::field_text(field);
-                self.draft = Some(if *secret { format!("{field} = ") } else { format!("{field} = {value}") });
+                let draft = if *secret { format!("{field} = ") } else { format!("{field} = {value}") };
+                self.draft = Some(Input::from(draft.as_str()));
                 self.drop_failure();
             }
             Key::Char('n') => {
-                self.draft = Some(String::new());
+                self.draft = Some(Input::default());
                 self.drop_failure();
             }
             _ => {}
         }
     }
 
-    /// Take `key` into the change being written: None when none is, the key being the pane's then. `Enter` sends it
-    /// as an order expecting the value read, `Esc` drops it.
+    /// Take `key` into the change being written, edited as in the command bar: None when none is, the key being the
+    /// pane's then. `Enter` sends it as an order expecting the value read, `Esc` drops it.
     pub fn write(&mut self, key: Key, ant: &UserId) -> Option<Option<Action>> {
         let draft = self.draft.as_mut()?;
         match key {
-            Key::Char(c) => draft.push(c),
-            Key::Backspace => _ = draft.pop(),
             Key::Esc => self.draft = None,
             Key::Enter => return Some(self.send(ant)),
-            _ => {}
+            key => _ = draft.key(key),
         }
         Some(None)
     }
@@ -136,7 +136,7 @@ impl Pane {
     }
 
     fn send(&mut self, ant: &UserId) -> Option<Action> {
-        let text = self.draft.as_deref().unwrap_or_default();
+        let text = self.draft.as_ref().map_or_else(String::new, Input::text);
         let assignment = match text.parse::<Assignment>() {
             Ok(assignment) => assignment,
             Err(e) => {
@@ -195,7 +195,7 @@ impl Pane {
             below,
         );
         let (text, style, title) = match (&self.draft, &self.sent) {
-            (Some(draft), _) => (format!("{draft}▏"), Style::new(), " change "),
+            (Some(draft), _) => (draft.caret(usize::from(input.width.saturating_sub(2))), Style::new(), " change "),
             (None, Some(sent)) => {
                 let (text, color) = sent_line(sent);
                 (text, Style::new().fg(color), " last order ")
@@ -402,6 +402,7 @@ mod tests {
     use super::*;
     use crate::test_support::colony::entry;
     use crate::test_support::live::{at, user};
+    use crate::tui::input::{Typed, exercise};
     use crate::tui::model::Focus;
     use crate::tui::nav;
     use crate::tui::test_support::model;
@@ -499,5 +500,22 @@ mod tests {
         m.key(Key::Esc, at(3));
         assert_eq!(m.key(Key::Char('R'), at(3)), Some(Action::Refresh));
         assert_eq!(m.settings_shown(), Some((user("dev-a"), true)));
+    }
+
+    #[test]
+    fn a_change_edits_as_the_bar_does() {
+        let mut m = model();
+        m.data.live.colony(vec![entry("dev-a", 60, 2, at(2))], at(2));
+        m.select(nav::Item::Ant(user("dev-a")));
+        m.focus = Focus::View;
+        m.key(Key::Left, at(3));
+        m.settings_event(Event::Read(user("dev-a"), Ok(reading())));
+        m.key(Key::Char('n'), at(3));
+        let want = exercise(|typed| match typed {
+            Typed::Key(key) => _ = m.key(key, at(3)),
+            Typed::Paste(text) => m.paste(text, at(3)),
+        });
+        assert!(screen(&m).contains(&format!("│{}▏{}", &want[..1], &want[1..])), "{}", screen(&m));
+        assert_eq!(m.page().name(), "ant", "keys go to the change");
     }
 }
