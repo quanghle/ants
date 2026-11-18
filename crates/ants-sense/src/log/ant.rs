@@ -48,7 +48,9 @@ impl<L: EventLog, S: Signer, V: Verifier> AntLog<L, S, V> {
         home: Option<PathBuf>,
     ) -> Result<Self, LogError> {
         let kept = match &home {
-            Some(home) => super::read_status(home).map_err(|e| LogError(format!("reading the chain status: {e}")))?,
+            Some(home) => {
+                super::read_status(home).map_err(|e| LogError::integrity(format!("reading the chain status: {e}")))?
+            }
             None => None,
         };
         let seen = kept.filter(|status| status.sense == sense).and_then(|status| status.seen);
@@ -146,7 +148,7 @@ impl<L: EventLog, S: Signer, V: Verifier> AntLog<L, S, V> {
         while after < last {
             let read = self.log.read_after(sense, after, READ_BATCH).await?;
             let Some(read_last) = read.last() else {
-                return Err(LogError(format!("the log ends before message {last}, read before")));
+                return Err(LogError::integrity(format!("the log ends before message {last}, read before")));
             };
             after = read_last.sequence;
             messages.extend(read.into_iter().filter(|stored| stored.sequence <= last));
@@ -202,10 +204,12 @@ impl<L: EventLog, S: Signer, V: Verifier> AntLog<L, S, V> {
             credentials: None,
             signature: None,
         };
-        if let Some(signature) = self.signer.sign(&event.signed()).map_err(|e| LogError(format!("signing: {e}")))? {
+        if let Some(signature) =
+            self.signer.sign(&event.signed()).map_err(|e| LogError::refused(format!("signing: {e}")))?
+        {
             (event.credentials, event.signature) = (Some(signature.credentials), Some(signature.signature));
         }
-        let payload = serde_json::to_vec(&event).map_err(|e| LogError(e.to_string()))?;
+        let payload = serde_json::to_vec(&event).map_err(|e| LogError::refused(e.to_string()))?;
         match self.log.append(self.chain.sense(), payload.clone(), self.chain.last_sequence()).await {
             Ok(sequence) => {
                 let stored = Stored { sequence, stored_at: Utc::now(), payload };
@@ -219,17 +223,18 @@ impl<L: EventLog, S: Signer, V: Verifier> AntLog<L, S, V> {
     }
 
     fn kept_appending(&self) -> LogError {
-        LogError(format!("other writers kept appending to sense identity {}", self.chain.sense()))
+        LogError::refused(format!("other writers kept appending to sense identity {}", self.chain.sense()))
     }
 
     fn keep_status(&self) -> Result<(), LogError> {
         let Some(home) = &self.home else { return Ok(()) };
-        super::write_status(home, &self.status()).map_err(|e| LogError(format!("keeping the chain status: {e}")))
+        super::write_status(home, &self.status())
+            .map_err(|e| LogError::integrity(format!("keeping the chain status: {e}")))
     }
 }
 
 fn verifying(e: VerifyError) -> LogError {
     match e {
-        VerifyError::Invalid(e) | VerifyError::Unavailable(e) => LogError(format!("verifying: {e}")),
+        VerifyError::Invalid(e) | VerifyError::Unavailable(e) => LogError::integrity(format!("verifying: {e}")),
     }
 }

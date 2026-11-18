@@ -1194,6 +1194,15 @@ fn provider_protocol() {
 }
 
 #[test]
+fn provider_wake_refusals() {
+    use provider::Woken;
+    use provider::jsonrpc::{RequestId, Response, RpcError};
+
+    let unknown = RpcError::new(RpcError::UNKNOWN_THREAD, format!("thread {} is no thread of ant dev-a", thread()));
+    snap("provider_wake_unknown_thread", &Response::new(RequestId::Number(8), Err::<Woken, _>(unknown)));
+}
+
+#[test]
 fn admin_orders_of_providers() {
     snap("admin_op_read_memories", &AdminOp::ReadMemories { identity: Some("0f1e".into()) });
     let payload = AdminPayload { id: id(9), machine: machine(), size: 300_000, sha256: "ab".repeat(32) };

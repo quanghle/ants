@@ -356,7 +356,7 @@ fn self_model_section(found: Option<&RecordItem>) -> Section {
 }
 
 /// The lines of `experience`: the threads and their days, then the people and the repositories of the most threads.
-fn experience_lines(experience: &Experience) -> String {
+pub(crate) fn experience_lines(experience: &Experience) -> String {
     let plural = |count: u32, noun: &str| if count == 1 { format!("1 {noun}") } else { format!("{count} {noun}s") };
     let mut lines = format!(
         "Experience: {}, {} done, on {}.",

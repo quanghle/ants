@@ -341,8 +341,8 @@ pub(crate) struct Open {
     /// serving a thread, not one opened to read them ([`mcp_host`]), to probe the harness or to fork (the session/load
     /// following it signs in).
     pub sign_ins: Option<Report>,
-    /// The directory of the ant's confirmed skills to offer it, if any ([`super::skills`]).
-    pub skills: Option<PathBuf>,
+    /// The ant's confirmed skills to offer it, if any ([`super::skills`]).
+    pub skills: Option<super::Skills>,
 }
 
 /// A setting the daemon selects on a session.

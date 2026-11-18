@@ -17,20 +17,18 @@ use data_encoding::BASE64;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::home::Home;
 use crate::log::{
-    AccountVerifier, Anchor, AntLog, Chain, Event, EventLog, IMPORTED, LogError, Mark, NoRevocations, Position,
-    SENSE_DIR, Signer, Stored, Verdict, Verifier, sha256,
+    AccountVerifier, Anchor, AntLog, Chain, Event, EventLog, IMPORTED, LogError, Mark, NoRevocations, Position, Signer,
+    Stored, Verdict, Verifier, sha256,
 };
 
 /// The version of [`Manifest`] written and read.
 pub const VERSION: u32 = 1;
 /// The export's file holding the log: each message as stored, one a line.
 pub const LOG_FILE: &str = "log.jsonl";
-/// The directory of [`SENSE_DIR`] holding the ant's skill files, and of the export holding them.
+/// The directory of the export holding the ant's skill files.
 pub const SKILLS_DIR: &str = "skills";
-
-/// The file of [`SENSE_DIR`] telling that the ant's sense data wait for an import ([`expect_import`]).
-pub const IMPORTING_FILE: &str = "importing";
 
 /// sense's part of an ant's export: what [`ants_proto::provider::Export::data`] holds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,14 +96,14 @@ pub enum ImportError {
 pub struct Imported {
     /// The events appended; none when the log held them all already.
     pub appended: u64,
-    /// The skill files, by their path under [`SKILLS_DIR`], for [`Imported::write_skills`].
+    /// The skill files, by their path under the skills directory, for [`Imported::write_skills`].
     pub skills: Vec<(PathBuf, Vec<u8>)>,
 }
 
 impl Imported {
-    /// Write the skill files into `home`'s [`SKILLS_DIR`].
+    /// Write the skill files into `home`'s skills directory ([`Home::skills`]).
     pub fn write_skills(&self, home: &Path) -> io::Result<()> {
-        let dir = skills_dir(home);
+        let dir = Home::new(home).skills();
         for (path, bytes) in &self.skills {
             let file = dir.join(path);
             std::fs::create_dir_all(file.parent().expect("a file in a directory"))?;
@@ -115,42 +113,29 @@ impl Imported {
     }
 }
 
-/// Where the mark of an import awaited is kept in `home`.
-pub fn importing_file(home: &Path) -> PathBuf {
-    home.join(SENSE_DIR).join(IMPORTING_FILE)
-}
-
-/// Mark `home`, restored from an export, as awaiting the import of the ant's sense data: until it lands
-/// ([`import_done`]), the daemon opens none of them, so nothing is written to the ant's log on the new bus first.
+/// Mark `home`, restored from an export, as awaiting the import of the ant's sense data ([`Home::awaits_import`]):
+/// until it lands ([`import_done`]), the daemon opens none of them, so nothing is written to the ant's log on the new
+/// bus first.
 pub fn expect_import(home: &Path) -> io::Result<()> {
-    let file = importing_file(home);
+    let file = Home::new(home).importing();
     std::fs::create_dir_all(file.parent().expect("a file in a directory"))?;
     std::fs::write(file, b"")
 }
 
-/// Whether `home` awaits the import of the ant's sense data ([`expect_import`]).
-pub fn importing(home: &Path) -> bool {
-    importing_file(home).exists()
-}
-
 /// The import of the ant's sense data into `home` landed: its mark goes.
 pub fn import_done(home: &Path) -> io::Result<()> {
-    match std::fs::remove_file(importing_file(home)) {
+    match std::fs::remove_file(Home::new(home).importing()) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
     }
 }
 
-/// Where the skill files of the ant whose home is `home` are kept.
-pub fn skills_dir(home: &Path) -> PathBuf {
-    home.join(SENSE_DIR).join(SKILLS_DIR)
-}
-
-/// The skill files kept in `home`, by their path under [`SKILLS_DIR`], `/`-separated: its regular files, symbolic links
-/// not followed.
+/// The skill files kept in `home`, by their path under its skills directory ([`Home::skills`]), `/`-separated: its
+/// regular files, symbolic links not followed.
 pub fn skill_files(home: &Path) -> io::Result<Vec<(String, Vec<u8>)>> {
+    let root = Home::new(home).skills();
     let mut files = Vec::new();
-    let mut dirs = vec![skills_dir(home)];
+    let mut dirs = vec![root.clone()];
     while let Some(dir) = dirs.pop() {
         let entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
@@ -164,7 +149,7 @@ pub fn skill_files(home: &Path) -> io::Result<Vec<(String, Vec<u8>)>> {
                 dirs.push(entry.path());
             } else if kind.is_file() {
                 let path = entry.path();
-                let relative = path.strip_prefix(skills_dir(home)).expect("under the skills directory");
+                let relative = path.strip_prefix(&root).expect("under the skills directory");
                 let name =
                     relative.to_str().ok_or_else(|| io::Error::other(format!("{} is not UTF-8", path.display())))?;
                 files.push((name.replace(std::path::MAIN_SEPARATOR, "/"), std::fs::read(&path)?));
@@ -188,7 +173,7 @@ pub fn pack(
     let mut signers: Vec<String> = accounts.to_vec();
     for stored in messages {
         if stored.payload.contains(&b'\n') {
-            return Err(LogError(format!("message {} holds a line break", stored.sequence)));
+            return Err(LogError::integrity(format!("message {} holds a line break", stored.sequence)));
         }
         log.extend_from_slice(&stored.payload);
         log.push(b'\n');
