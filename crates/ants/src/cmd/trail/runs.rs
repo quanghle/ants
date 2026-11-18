@@ -1,13 +1,15 @@
 //! The runs of trails, as their conductors keep them in [`TRAIL_RUNS_BUCKET`]: a human reads every conductor's, by
 //! batched direct gets.
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::str::FromStr;
 
 use ants_proto::provider::Starter;
 use ants_proto::{
-    CallAnswer, JournalEntry, PendingCall, QueuedCall, RunId, RunState, TRAIL_RUNS_BUCKET, TrailFunction, TrailRun,
-    TrailSession, UserId, Uuid, parse_trail_run_key, trail_run_key, trail_session_key,
+    CallAnswer, JournalEntry, PendingCall, QueuedCall, RunId, RunState, StepStage, TRAIL_RUNS_BUCKET, TRAIL_STEPS,
+    ThreadId, TrailFunction, TrailRun, TrailSession, TrailStepThread, UserId, Uuid, parse_trail_run_key, trail_run_key,
+    trail_session_key,
 };
 use anyhow::{Result, bail};
 use async_nats::jetstream;
@@ -16,7 +18,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::colony::{short, since};
-use crate::machines::latest_in;
+use crate::machines::{latest_in, latest_timed_in};
 use crate::text::excerpt;
 
 /// The runs `conductor` keeps, else those of every conductor, oldest first.
@@ -296,6 +298,108 @@ pub(super) fn render(detail: &Detail, now: DateTime<Utc>) -> String {
         out.push_str(&indented(&super::columns(&rows)));
     }
     out
+}
+
+/// A step of a trail run: the script's call `call`, labelled `label`, sent to `to` on its own thread `thread`, at
+/// `stage` since; as its conductor's status updates tell it ([`ants_proto::StatusUpdate::Step`]), or its records
+/// ([`steps_on`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Step {
+    pub(crate) run: RunId,
+    pub(crate) conductor: UserId,
+    pub(crate) call: u32,
+    pub(crate) label: Option<String>,
+    pub(crate) to: UserId,
+    pub(crate) thread: ThreadId,
+    pub(crate) stage: StepStage,
+    /// When it started.
+    pub(crate) at: DateTime<Utc>,
+}
+
+/// A step's thread as its conductor recorded it, with when.
+pub(super) type Marked = (ThreadId, TrailStepThread, DateTime<Utc>);
+
+/// The steps of the runs `conductor` conducts reporting on `thread`, by when each started, as its records in
+/// [`TRAIL_RUNS_BUCKET`] tell them: the step threads it recorded, each just before its step went out ([`staged`]),
+/// with each run's header, journal and, while the run goes on, the calls its session waits on.
+pub(crate) async fn steps_on(js: &jetstream::Context, conductor: &UserId, thread: &ThreadId) -> Result<Vec<Step>> {
+    let prefix = format!("{conductor}.{TRAIL_STEPS}.");
+    let filter = format!("$KV.{TRAIL_RUNS_BUCKET}.{prefix}*");
+    let mut marked: Vec<Marked> = Vec::new();
+    for (key, value, at) in latest_timed_in(js, TRAIL_RUNS_BUCKET, &filter).await? {
+        let Some(step) = key.strip_prefix(&prefix).and_then(|step| step.parse::<ThreadId>().ok()) else { continue };
+        if let Some(marker) = parse::<TrailStepThread>(&key, &value).filter(|m| m.run_thread == *thread) {
+            marked.push((step, marker, at));
+        }
+    }
+    let runs: BTreeSet<RunId> = marked.iter().map(|(_, marker, _)| marker.run.clone()).collect();
+    let mut steps = Vec::new();
+    for run in runs {
+        let key = trail_run_key(conductor, &run);
+        let header = format!("$KV.{TRAIL_RUNS_BUCKET}.{key}");
+        let header: Option<TrailRun> =
+            latest_in(js, TRAIL_RUNS_BUCKET, &header).await?.iter().find_map(|(k, v)| parse(k, v));
+        let calls = format!("$KV.{TRAIL_RUNS_BUCKET}.{key}.call.*");
+        let journal: Vec<JournalEntry> =
+            latest_in(js, TRAIL_RUNS_BUCKET, &calls).await?.iter().filter_map(|(k, v)| parse(k, v)).collect();
+        let going = header.as_ref().is_some_and(|h| matches!(h.state, RunState::Running | RunState::Waiting));
+        let pending = if going {
+            let session = format!("$KV.{TRAIL_RUNS_BUCKET}.{}", trail_session_key(conductor, &run));
+            let session: Option<TrailSession> =
+                latest_in(js, TRAIL_RUNS_BUCKET, &session).await?.iter().find_map(|(k, v)| parse(k, v));
+            session.map(|s| s.pending)
+        } else {
+            Some(Vec::new())
+        };
+        let of_run = marked.iter().filter(|(_, marker, _)| marker.run == run).cloned().collect();
+        steps.extend(staged(conductor, of_run, &journal, pending.as_deref()));
+    }
+    steps.sort_by_key(|s| (s.at, s.call));
+    Ok(steps)
+}
+
+/// The steps of a run its conductor `conductor` recorded the threads of, `marked`, at the stage its records tell:
+/// answered or failed as `journal` has its call's answer; dropped for a call sent anew on a thread recorded since;
+/// else started while the run waits on the call on that thread, as `pending`, the calls its session waits on, has it
+/// (not known: started), and dropped otherwise, as for a run ended or stopped.
+pub(super) fn staged(
+    conductor: &UserId,
+    marked: Vec<Marked>,
+    journal: &[JournalEntry],
+    pending: Option<&[PendingCall]>,
+) -> Vec<Step> {
+    let latest = |call: u32| marked.iter().filter(|(_, m, _)| m.call == call).max_by_key(|(_, _, at)| *at);
+    let steps = marked.iter().map(|(thread, marker, at)| {
+        let answered = journal.iter().find(|e| e.call == marker.call);
+        let waited = pending.map(|pending| pending.iter().find(|c| c.call == marker.call));
+        let superseded = latest(marker.call).is_some_and(|(newest, ..)| newest != thread);
+        let stage = match (answered, waited) {
+            _ if superseded => StepStage::Dropped,
+            (Some(entry), _) if matches!(entry.answer, CallAnswer::Error(_)) => StepStage::Failed,
+            (Some(_), _) => StepStage::Answered,
+            (None, None) => StepStage::Started,
+            (None, Some(Some(call))) if call.thread == *thread => StepStage::Started,
+            (None, Some(_)) => StepStage::Dropped,
+        };
+        let args = answered.map(|e| (e.function, &e.args)).or_else(|| {
+            let call = pending?.iter().find(|c| c.call == marker.call)?;
+            Some((call.function, &call.args))
+        });
+        let label = args
+            .filter(|(function, _)| *function == TrailFunction::Agent)
+            .and_then(|(_, args)| args.get("label")?.as_str().map(str::to_owned));
+        Step {
+            run: marker.run.clone(),
+            conductor: conductor.clone(),
+            call: marker.call,
+            label,
+            to: marker.to.clone(),
+            thread: thread.clone(),
+            stage,
+            at: *at,
+        }
+    });
+    steps.collect()
 }
 
 fn indented(text: &str) -> String {

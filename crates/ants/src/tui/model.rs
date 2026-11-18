@@ -24,7 +24,7 @@ use super::reads::{Levels, Mark, Read};
 use super::work::{Facts, Filter};
 use super::{
     ant, cards, catchup, channel, credentials, dm, faces, fold, held, home, images, mcp, memories, nav, people, search,
-    settings, snooze, thread, timeline, tree, work,
+    settings, snooze, steps, thread, timeline, tree, work,
 };
 use crate::live::{self, State};
 use crate::text::excerpt;
@@ -172,6 +172,8 @@ pub struct Data {
     pub calls: timeline::Threads,
     /// How the thread view shows them, kept on the device.
     pub tools: timeline::Tools,
+    /// The steps of the trail runs reporting on the threads, heard live or read from the runs' records.
+    pub steps: steps::Steps,
     /// The tab chosen in each channel's view, but the default, kept on the device.
     pub channel_tabs: HashMap<ChannelId, channel::Tab>,
     /// The tool requests settled while the UI runs.
@@ -400,6 +402,7 @@ impl Model {
             reactions: Reactions::new(),
             calls: timeline::Threads::default(),
             tools: timeline::Tools::default(),
+            steps: steps::Steps::default(),
             channel_tabs: HashMap::new(),
             settled: approvals::Settled::default(),
             people: people::People::default(),
@@ -472,6 +475,7 @@ impl Model {
             live::Event::Status(event) => {
                 self.data.live.status(&event, now);
                 self.data.calls.status(&event);
+                self.data.steps.status(&event);
             }
             live::Event::Following => self.data.live.approvals_reset(),
             live::Event::Approval(update) => self.approval(update, now),
@@ -820,6 +824,29 @@ impl Model {
     pub fn tree_shown(&self) -> Option<(ThreadId, Vec<ThreadId>)> {
         let Page::Tree(page) = self.page() else { return None };
         Some((page.root.clone(), self.data.delegations.threads(&page.root)))
+    }
+
+    /// The thread shown and the ants known on it, for the steps of the runs they conduct reporting there to be read.
+    pub fn steps_wanted(&self) -> Option<(ThreadId, Vec<UserId>)> {
+        let Page::Thread(page) = self.page() else { return None };
+        let thread = &page.history.thread;
+        let data = &self.data;
+        let summary = data.live.summary(thread).into_iter().flat_map(|s| &s.users);
+        let senders = page.history.entries.iter().filter_map(|e| e.from.as_ref());
+        let conductors = data.steps.of(thread).iter().map(|s| &s.conductor);
+        let mut ants: Vec<UserId> =
+            summary.chain(senders).chain(conductors).filter(|u| !data.is_human(u)).cloned().collect();
+        ants.sort();
+        ants.dedup();
+        Some((thread.clone(), ants))
+    }
+
+    /// Take the steps read of the runs reporting on a thread.
+    pub fn steps_read(&mut self, steps::Event(thread, read): steps::Event, now: DateTime<Utc>) {
+        match read {
+            Ok(read) => self.data.steps.read(&thread, read, now),
+            Err(e) => tracing::debug!(%thread, "reading the steps of the runs reporting on the thread: {e:#}"),
+        }
     }
 
     /// The ant shown, for its queue to be read.

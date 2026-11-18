@@ -136,6 +136,13 @@ A run reports on the thread it started with, as its conductor:
   `trail_step`; its recipient answers it as any message, and the first reply answers the call.
 - **Status events:** a `step` event (`run`, `call`, `label`, `to`, `step_thread`, `stage`: `started`, `answered`,
   `failed` or `dropped`) on the conductor's status of the run thread tells each step ([hooks.md](hooks.md)).
+- **In `ants chat`:** the thread view of the run thread lists each step where it started, with its label, the ant it
+  went to, its stage and its thread, which `Enter` on the step opens ([cli.md](cli.md#ants-chat)). Status events are
+  never stored, so the view also reads the steps from the records of the runs that the ants on the thread conduct
+  when the thread shows: the marker of each step's thread (its time the step's start), the journal (`answered`, or
+  `failed` for an error) and, while the run goes on, the calls its session waits on (`started`); a step otherwise is
+  `dropped`, as is one sent anew on a new thread after a resume. A run's thread opened after its steps ran lists
+  them all the same, for as long as the run's records are kept.
 - **End message:** once the run is done, failed or stopped, the conductor messages the owner, else the default human,
   on the run thread: `Run <run> of trail <name> is done (N steps, M turns):` with the result (cut at 8000 characters,
   `ants trail show <run>` showing the rest), the error (naming `ants trail resume <run>` when a limit was met), or who

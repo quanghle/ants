@@ -1,12 +1,12 @@
 //! `ants machines`: the machines whose daemons recorded the ants they serve ([`MACHINES_BUCKET`]), which stay there
 //! after an ant's colony entry expired, so that an ant that is offline still has a machine.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use ants_proto::{ACCOUNT_HOLDER_KEY, AccountHolder, MACHINES_BUCKET, Machine, MachineRecord, UserId, subject};
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::{StatusCode, jetstream};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
 use serde_json::json;
 
@@ -57,6 +57,15 @@ pub(crate) async fn latest_in(js: &jetstream::Context, bucket: &str, filter: &st
     Ok(latest_after(js, bucket, filter, 1).await?.0)
 }
 
+/// [`latest_in`], with when each entry was put.
+pub(crate) async fn latest_timed_in(
+    js: &jetstream::Context,
+    bucket: &str,
+    filter: &str,
+) -> Result<Vec<(String, Vec<u8>, DateTime<Utc>)>> {
+    Ok(timed_after(js, bucket, filter, 1).await?.0)
+}
+
 /// [`latest_in`] from the stream's sequence `from` on, with the sequence to read from next for the entries put since.
 pub(crate) async fn latest_after(
     js: &jetstream::Context,
@@ -64,6 +73,17 @@ pub(crate) async fn latest_after(
     filter: &str,
     from: u64,
 ) -> Result<(Vec<(String, Vec<u8>)>, u64)> {
+    let (entries, seq) = timed_after(js, bucket, filter, from).await?;
+    Ok((entries.into_iter().map(|(key, value, _)| (key, value)).collect(), seq))
+}
+
+/// [`latest_after`], with when each entry was put.
+async fn timed_after(
+    js: &jetstream::Context,
+    bucket: &str,
+    filter: &str,
+    from: u64,
+) -> Result<(Vec<(String, Vec<u8>, DateTime<Utc>)>, u64)> {
     let stream = format!("KV_{bucket}");
     let client = js.client();
     let wait = client.timeout().unwrap_or(Duration::from_secs(10));
@@ -100,7 +120,7 @@ pub(crate) async fn latest_after(
             seq = msg.sequence + 1;
             let deleted = msg.headers.get("KV-Operation").is_some();
             if let Some(key) = msg.subject.strip_prefix(prefix.as_str()).filter(|_| !deleted) {
-                entries.push((key.to_owned(), msg.payload.to_vec()));
+                entries.push((key.to_owned(), msg.payload.to_vec(), SystemTime::from(msg.time).into()));
             }
         }
     }

@@ -49,6 +49,7 @@ mod select;
 mod settings;
 mod snooze;
 mod status;
+mod steps;
 pub(crate) mod style;
 mod terminal;
 #[cfg(test)]
@@ -166,14 +167,7 @@ pub async fn run(nats: &crate::connection::Nats<'_>, since: Duration, compact: b
     }
     // The connection's log lines would go on the main screen before the full screen takes it.
     let _held = live::HeldLogs::hold();
-    let (client, js) = match tokio::time::timeout(CONNECT_WITHIN, nats.connect_only("ants-chat")).await {
-        Ok(Ok(connected)) => connected,
-        Ok(Err(e)) => match Unreached::of(&e, nats.creds.is_some()) {
-            Some(unreached) => return Err(anyhow!(unreached.hint(nats.url))),
-            None => return Err(e),
-        },
-        Err(_) => return Err(anyhow!(Unreached::NoServer.hint(nats.url))),
-    };
+    let (client, js) = reach(nats).await?;
     nats.prepare(&js).await;
     let meta = thread_meta::open(nats, &js).await.map_err(|e| format!("{e:#}"));
     let sealing = sealed::Sealing::of(nats);
@@ -232,6 +226,7 @@ pub async fn run(nats: &crate::connection::Nats<'_>, since: Duration, compact: b
             people,
             searches,
             trees,
+            steps: steps::Io::new(js.clone()),
             ants,
             memories,
             mcp,
@@ -259,6 +254,18 @@ pub async fn run(nats: &crate::connection::Nats<'_>, since: Duration, compact: b
     let (domain, device) = (nats.domain, nats.device);
     let approvals = presence::while_following(&js, domain, me, device, Following::Approvals, shown);
     Box::pin(presence::while_following(&js, domain, me, device, Following::Inbox, Box::pin(approvals))).await
+}
+
+/// Connect to the server within [`CONNECT_WITHIN`]; failing, say how to reach one when it is the first run's fault.
+async fn reach(nats: &crate::connection::Nats<'_>) -> Result<(async_nats::Client, async_nats::jetstream::Context)> {
+    match tokio::time::timeout(CONNECT_WITHIN, nats.connect_only("ants-chat")).await {
+        Ok(Ok(connected)) => Ok(connected),
+        Ok(Err(e)) => match Unreached::of(&e, nats.creds.is_some()) {
+            Some(unreached) => Err(anyhow!(unreached.hint(nats.url))),
+            None => Err(e),
+        },
+        Err(_) => Err(anyhow!(Unreached::NoServer.hint(nats.url))),
+    }
 }
 
 fn appearance(model: &mut Model) -> Result<ants_daemon::config::CliDefaults> {
@@ -345,6 +352,8 @@ struct Chat {
     people: people::Io,
     searches: Searches,
     trees: tree::Io,
+    /// The reads of the steps of the runs reporting on the thread shown.
+    steps: steps::Io,
     /// The reads of the shown ant's queue.
     ants: ant::Io,
     /// The reads of the shown ant's memories.
@@ -551,6 +560,10 @@ impl Chat {
                 self.model.tree_event(event, Utc::now());
                 Vec::new()
             }
+            read = self.steps.next() => {
+                self.model.steps_read(read, Utc::now());
+                Vec::new()
+            }
             event = self.ants.next() => {
                 self.model.ant_event(event);
                 Vec::new()
@@ -622,11 +635,12 @@ impl Chat {
         true
     }
 
-    /// Follow what the views show: the open thread's state, the delegation tree's links and spend, the ant's queue,
-    /// the images.
+    /// Follow what the views show: the open thread's state and the steps of the runs reporting there, the delegation
+    /// tree's links and spend, the ant's queue, the images.
     fn watch(&mut self) {
         self.acts.watch(self.model.open().cloned());
         self.trees.watch(self.model.tree_shown());
+        self.steps.watch(self.model.steps_wanted());
         self.ants.watch(self.model.ant_shown());
         self.memories.watch(self.model.memories_wanted());
         self.mcp.watch(self.model.mcp_wanted());
@@ -753,6 +767,7 @@ impl Chat {
                 self.acts.refresh();
                 self.people.refresh();
                 self.trees.refresh();
+                self.steps.refresh();
                 self.ants.refresh();
                 self.credentials.refresh();
                 self.held.refresh();

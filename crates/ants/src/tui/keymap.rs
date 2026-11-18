@@ -397,9 +397,17 @@ const THREAD: &[Entry] = &[
         4,
         thread_note,
     ),
-    Entry::new(&[Key::Enter], "Enter", "details", "the oldest tool request waiting in full", 5, thread_pending),
+    Entry::new(&[Key::Enter], "Enter", "details", "the oldest tool request waiting in full", 5, thread_pending_enter),
     Entry::new(DIGITS, "1-9", "answer", "answer the question waiting by number", 6, thread_question),
-    Entry::new(&[Key::Enter], "Enter", "answer", "focus the card of the question waiting", 7, thread_question),
+    Entry::new(&[Key::Enter], "Enter", "answer", "focus the card of the question waiting", 7, thread_question_enter),
+    Entry::new(
+        &[Key::Enter],
+        "Enter",
+        "step thread",
+        "open the thread of the selected step of a trail run",
+        4,
+        thread_step,
+    ),
     Entry::new(&[Key::Char('i')], "i", "write", "back to writing in the bar (End and Esc too)", 8, selecting),
     Entry::new(
         &[Key::CtrlHome, Key::CtrlEnd],
@@ -430,7 +438,7 @@ const THREAD: &[Entry] = &[
         UP_DOWN,
         "↑↓",
         "select or scroll",
-        "select a message, the latest at the bottom; through one taller than the view, scroll by line",
+        "select a message or a trail run's step, the latest at the bottom; through a message taller than the view, scroll by line",
         10,
         always,
     ),
@@ -850,6 +858,25 @@ fn thread_pending(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
         Page::Thread(page) => check(page.pending(&model.data).is_some(), "no tool request waits"),
         _ => Err("no thread open"),
     }
+}
+
+/// Whether Enter opens a selected step's thread rather than acting on a card.
+fn step_selected(model: &Model) -> bool {
+    matches!(model.page(), Page::Thread(page) if page.step_selected().is_some())
+}
+
+fn thread_step(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
+    check(step_selected(model), "no step of a trail run selected")
+}
+
+fn thread_pending_enter(model: &Model, now: DateTime<Utc>) -> Result<(), &'static str> {
+    check(!step_selected(model), "Enter opens the selected step's thread")?;
+    thread_pending(model, now)
+}
+
+fn thread_question_enter(model: &Model, now: DateTime<Utc>) -> Result<(), &'static str> {
+    check(!step_selected(model), "Enter opens the selected step's thread")?;
+    thread_question(model, now)
 }
 
 fn thread_waiting(model: &Model, now: DateTime<Utc>) -> Result<(), &'static str> {
