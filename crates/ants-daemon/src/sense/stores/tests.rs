@@ -385,3 +385,36 @@ async fn a_disconnected_initial_host_opens_the_cache_before_its_log_can_be_opene
     drop((items, hosting));
     std::fs::remove_dir_all(home).unwrap();
 }
+
+/// Over a sense stream created anew, items with no writes pending open again from it; items with writes pending stay
+/// as they are, keeping those writes.
+#[tokio::test]
+async fn a_new_stream_incarnation_opens_the_items_again_unless_writes_are_pending() {
+    let Some(server) = NatsServer::start() else { return };
+    let home = scratch_dir("sense-stores-incarnation");
+    let js = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap().1;
+    let stores = SenseStores::new();
+    stores.serve(&dev_a(), &home, None);
+    let hosting = stores.hosting();
+    hosting.up(link(&server).await);
+    let first = stores.items(&dev_a()).await.unwrap();
+    first.create("note", json!({"title":"online"}).as_object().unwrap().clone(), "t").await.unwrap();
+    assert_eq!(first.pending().await.unwrap(), 0);
+    js.delete_stream(SENSE_STREAM).await.unwrap();
+    let again = stores.hosting();
+    again.up(link(&server).await);
+    let anew = stores.items(&dev_a()).await.unwrap();
+    assert!(!Arc::ptr_eq(&first, &anew), "opened again over the new stream");
+    assert_eq!(anew.list("note", 10).await.unwrap(), [], "built from the new stream");
+
+    drop((first, hosting, again));
+    anew.create("note", json!({"title":"queued"}).as_object().unwrap().clone(), "t").await.unwrap();
+    assert_eq!(anew.pending().await.unwrap(), 1);
+    js.delete_stream(SENSE_STREAM).await.unwrap();
+    let third = stores.hosting();
+    third.up(link(&server).await);
+    assert!(Arc::ptr_eq(&anew, &stores.items(&dev_a()).await.unwrap()), "the pending write keeps the items");
+    assert_eq!(anew.pending().await.unwrap(), 1);
+    drop((anew, third));
+    std::fs::remove_dir_all(home).unwrap();
+}

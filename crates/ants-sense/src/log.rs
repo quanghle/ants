@@ -23,7 +23,7 @@ pub use chain::{Anchor, Break, Chain, Mark, Position, Verdict};
 pub use event::{EVENT_SIGNING_CONTEXT, Event, IMPORTED, RENAMED, Stored, sha256};
 pub use sign::{AccountVerifier, NoRevocations, Revocations, Signature, Signer, Unsigned, Verifier, VerifyError};
 pub use status::{CHAIN_FILE, ChainStatus, SENSE_DIR, SIZE_LIMIT, mib, read_status, status_file, write_status};
-pub use store::{AppendError, EventLog, LogError, MemoryLog};
+pub use store::{AppendError, EventLog, LogError, LogErrorKind, MemoryLog};
 
 #[cfg(doc)]
 use ants_proto::SenseId;

@@ -188,7 +188,7 @@ pub fn pack(
     let mut signers: Vec<String> = accounts.to_vec();
     for stored in messages {
         if stored.payload.contains(&b'\n') {
-            return Err(LogError(format!("message {} holds a line break", stored.sequence)));
+            return Err(LogError::integrity(format!("message {} holds a line break", stored.sequence)));
         }
         log.extend_from_slice(&stored.payload);
         log.push(b'\n');
