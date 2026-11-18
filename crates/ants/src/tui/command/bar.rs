@@ -63,6 +63,9 @@ pub struct Bar {
     pub quoting: Option<(ThreadId, Quoted)>,
     /// The tool request the text is a note about, n on its card having opened the bar.
     pub noting: Option<Note>,
+    /// The text of a slash command refused as unknown or malformed: while the bar holds it unchanged, the palette lists
+    /// the commands for it.
+    pub refused: Option<String>,
     /// The notes being sent, by their text, each with its request, to come back as a reply if sending fails.
     notes: Vec<(String, Box<ApprovalRequest>)>,
     /// Whether Ctrl-X came last, so that Ctrl-E after it opens the editor.

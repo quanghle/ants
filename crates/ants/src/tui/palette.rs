@@ -14,7 +14,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
 use super::command::{COMMANDS, Tone};
-use super::complete::narrow;
+use super::complete::{self, narrow};
 use super::keymap;
 use super::model::{Action, Key, Model};
 use super::style;
@@ -66,6 +66,13 @@ impl Model {
             };
             (name.to_owned(), (entry, false))
         });
+        if self.refused().is_some() {
+            // A command refused lists those it may have meant, else all of them.
+            let commands: Vec<_> = commands.collect();
+            let meant = narrow(&typed, commands.clone());
+            let listed = if meant.is_empty() { commands } else { meant };
+            return listed.into_iter().map(|(_, (e, _))| e).collect();
+        }
         let lower = typed.to_lowercase();
         let views = keymap::views(self);
         let keys = views.into_iter().flat_map(keymap::entries).chain(keymap::GLOBAL);
@@ -89,16 +96,27 @@ impl Model {
         entries.into_iter().map(|(_, (e, _))| e).collect()
     }
 
-    /// The text after the `/` starting the focused bar, up to the cursor, while the palette shows.
+    /// The text after the `/` starting the focused bar, up to the cursor, while the palette shows: the name of a
+    /// command refused while the bar holds it unchanged.
     fn palette_typed(&self) -> Option<String> {
         if !self.bar.focused || self.bar.pick.closed || self.bar.noting.is_some() {
             return None;
+        }
+        if let Some(name) = self.refused() {
+            return Some(name);
         }
         let (start, typed) = self.bar.word();
         if start != 0 {
             return None;
         }
         typed.strip_prefix('/').map(str::to_owned)
+    }
+
+    /// The name typed of the slash command refused, while the bar holds it unchanged.
+    fn refused(&self) -> Option<String> {
+        let refused = self.bar.refused.as_ref().filter(|text| **text == self.bar.raw())?;
+        let name = refused.trim_start().trim_start_matches('/').split_whitespace().next();
+        Some(name.unwrap_or_default().to_owned())
     }
 
     /// Take `key` for the palette when it shows: Up and Down pick, Enter runs the entry picked or completes the
@@ -128,6 +146,11 @@ impl Model {
                 self.bar.set_text(&format!("/{name}"));
                 return self.submit(format!("/{name}"), now);
             }
+            // The arguments of a command refused go with it.
+            Act::Command { name, .. } if self.refused().is_some() => {
+                self.bar.set_text(&format!("/{name} "));
+                self.bar.pick = complete::Pick::default();
+            }
             Act::Command { name, .. } => self.bar.complete(&format!("/{name}")),
             Act::Key(_) if entry.why.is_some() => self.bar.set_status(entry.why.unwrap_or_default(), Tone::Error),
             Act::Key(key) => {
@@ -153,9 +176,10 @@ impl Model {
         None
     }
 
-    /// Close the palette: a bar holding only the word typed for it is emptied and left, else the list closes.
+    /// Close the palette: a bar holding only the word typed for it is emptied and left, else (or for a command refused)
+    /// the list closes.
     pub(super) fn close_palette(&mut self) {
-        if self.bar.raw().contains(char::is_whitespace) {
+        if self.bar.raw().contains(char::is_whitespace) || self.refused().is_some() {
             self.bar.pick.closed = true;
         } else {
             self.bar.set_text("");
@@ -238,6 +262,30 @@ mod tests {
         let archive = Job::Mark { thread, marking: Marking::Archive };
         assert_eq!(m.key(Key::Enter, at(1)), Some(Action::Run(archive, "/archive".into())));
         assert!(!m.bar.focused && m.bar.is_empty());
+    }
+
+    #[test]
+    fn an_unknown_or_malformed_command_opens_the_palette_on_the_commands_it_may_mean() {
+        let (mut m, thread) = on_thread();
+        m.key(Key::Char('/'), at(1));
+        typed(&mut m, "nope");
+        assert!(m.palette(at(1)).is_empty());
+        assert_eq!(m.key(Key::Enter, at(1)), None);
+        assert_eq!(m.bar.status.as_ref().unwrap().text, "no command /nope: the palette lists them");
+        let words: Vec<String> = m.palette(at(1)).into_iter().map(|e| e.word).collect();
+        assert_eq!(words.len(), COMMANDS.len(), "matching none, all the commands: {words:?}");
+        let shown = crate::test_support::render::rendered(100, 20, |f| crate::tui::frame::draw(f, &m, at(1)));
+        assert!(shown.contains(&format!("1 of {}", COMMANDS.len())), "{shown}");
+        m.key(Key::Backspace, at(1));
+        assert!(m.palette(at(1)).is_empty(), "an edit narrows as typed again");
+
+        m.bar.set_text("/done now");
+        assert_eq!(m.key(Key::Enter, at(1)), None);
+        assert_eq!(m.bar.status.as_ref().unwrap().text, "usage: /done");
+        let words: Vec<String> = m.palette(at(1)).into_iter().map(|e| e.word).collect();
+        assert_eq!(words, ["/done", "/undone"]);
+        let done = Job::Done { thread, done: true };
+        assert_eq!(m.key(Key::Enter, at(1)), Some(Action::Run(done, "/done".into())), "Enter runs the one picked");
     }
 
     #[test]

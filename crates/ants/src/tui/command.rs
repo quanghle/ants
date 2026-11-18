@@ -106,6 +106,10 @@ impl Model {
         let action = match done {
             Ok(action) => action,
             Err(why) => {
+                if why.starts_with("usage:") || why.starts_with("no command") {
+                    self.bar.refused = Some(self.bar.raw());
+                    self.bar.pick = complete::Pick::default();
+                }
                 self.bar.set_status(why, Tone::Error);
                 return None;
             }
@@ -752,7 +756,7 @@ mod tests {
         assert_eq!(run(&mut m, "/unsnooze"), Some(Action::Change(thread.clone(), Change::Snooze(None), 1)));
         assert!(m.data.cards.snoozed.get(&thread, at(1)).is_none(), "woken at once");
         assert_eq!(run(&mut m, "/nope"), None);
-        assert_eq!(m.bar.status.as_ref().unwrap().text, "no command /nope: / on an empty bar lists them");
+        assert_eq!(m.bar.status.as_ref().unwrap().text, "no command /nope: the palette lists them");
         assert_eq!(run(&mut m, "/quit"), Some(Action::Quit));
     }
 
