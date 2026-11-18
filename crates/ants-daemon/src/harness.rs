@@ -29,6 +29,7 @@ pub use session::{
     probe, prompt_once,
 };
 pub use sign_in::{Handshake, Readiness, SignedOut, check, handshake};
+pub use skills::Skills;
 pub(crate) use steer::{SteerRequest, SteerResponse, advertise as advertise_steering};
 
 // The tests of the native translators take these through this module.

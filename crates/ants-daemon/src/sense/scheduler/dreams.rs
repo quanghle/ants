@@ -191,7 +191,7 @@ pub(crate) async fn review_answer(items: &dyn Items, envelope: &mut Envelope) ->
 
 /// Wake `ant` on a new thread with the packet of `dream`, covering `threads`, and note the thread.
 async fn wake(items: &dyn Items, host: &dyn Host, ant: &UserId, dream: &Dream, threads: &[Thread]) -> Result<()> {
-    let text = dream::packet(items, dream, &Reader::Ant, threads).await?;
+    let text = dream::packet(items, dream, &Reader::Ant(ant.clone()), threads).await?;
     // The beginning names the dream apart from a dream of the same number of another sense identity of the ant.
     let id = format!("dream-{}-{}", dream.number, dream.at.timestamp());
     let woken = host.wake(WakeRequest { ant: ant.clone(), thread: None, text, id }).await?;

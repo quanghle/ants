@@ -42,7 +42,7 @@ mod packet;
 mod review;
 mod tool;
 
-pub use packet::{MIN_THREAD_BYTES, PACKET_BUDGET, Reader, Thread, compose, packet};
+pub use packet::{Identity, MIN_THREAD_BYTES, PACKET_BUDGET, Reader, Thread, compose, packet};
 pub use review::{
     Advice, Evidence, Parsed, REVIEW_BEGIN, REVIEW_END, Review, Reviewed, answered, parse, review_sent, untrusted_on,
 };

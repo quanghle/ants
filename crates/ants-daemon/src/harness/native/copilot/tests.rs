@@ -379,7 +379,8 @@ async fn copilot_sessions_get_the_ants_skills_as_a_skill_directory() {
     let skills = played.dir.join(".sense/skills");
     std::fs::create_dir_all(skills.join("deploy")).unwrap();
     std::fs::write(skills.join("deploy/SKILL.md"), "---\nname: deploy\ndescription: Deploy.\n---\n").unwrap();
-    let launch = played.launch(ModelSettings::default()).with_skills(skills.clone());
+    let offered = crate::harness::Skills { dir: skills.clone(), plugin: played.dir.join(".sense") };
+    let launch = played.launch(ModelSettings::default()).with_skills(offered);
     Session::start(&launch, Some(SessionId::new("s1"))).await.unwrap().close().await;
     assert_eq!(played.requests("session.resume")[0]["skillDirectories"], json!([skills]));
 }

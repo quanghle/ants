@@ -21,7 +21,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::Sense;
-use crate::export::skills_dir;
+use crate::home::Home;
 use crate::items::{Item, ItemId, Values};
 use crate::memory::{holds_recalled_marker, redacted};
 use crate::proposal::{self, Proposal, ProposalItem, Status, time};
@@ -164,10 +164,10 @@ fn unquote(value: &str) -> &str {
     value
 }
 
-/// Make the skill files of `home` match `skills`: each in `<home>/.sense/skills/<name>/`, files changed written
-/// again, anything else there removed.
+/// Make the skill files of `home` match `skills`: each in `<name>/` of its skills directory ([`Home::skills`]), files
+/// changed written again, anything else there removed.
 pub fn materialize(skills: &[Skill], home: &Path) -> io::Result<()> {
-    let root = skills_dir(home);
+    let root = Home::new(home).skills();
     let wanted: BTreeMap<PathBuf, &str> = skills
         .iter()
         .flat_map(|skill| skill.files.iter().map(|(path, text)| (Path::new(&skill.name).join(path), text.as_str())))

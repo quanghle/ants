@@ -78,7 +78,7 @@ fn the_sense_id_is_minted_once_and_kept_in_the_home() {
     assert_eq!(read_id(&home).unwrap(), Some(id.clone()));
     assert_eq!(std::fs::read_to_string(home.join(".sense/id")).unwrap(), format!("{id}\n"));
     assert_eq!(std::fs::read_dir(home.join(".sense")).unwrap().count(), 1, "nothing left beside it");
-    std::fs::write(id_file(&home), "not an id").unwrap();
+    std::fs::write(Home::new(&home).id(), "not an id").unwrap();
     assert!(sense_id(&home).is_err(), "a damaged id is not replaced by another");
     std::fs::remove_dir_all(&home).unwrap();
 }
@@ -257,7 +257,7 @@ async fn a_renamed_ant_keeps_its_card_under_its_new_name_with_its_earlier_one() 
     let in_b = CallContext { ant: dev_b.clone(), ..context("id1", "claude", None, "laptop") };
     for reopened in 0..3 {
         if reopened == 2 {
-            std::fs::remove_file(home_b.join(SENSE_DIR).join("cache.db")).unwrap();
+            std::fs::remove_file(Home::new(&home_b).cache()).unwrap();
         }
         let new = items_in(log, &sense, "dev-b", earlier_names(&home_b).unwrap(), &home_b).await;
         let card = match reopened {

@@ -13,7 +13,7 @@ use ants_proto::ThreadId;
 #[cfg(test)]
 use super::Protocol;
 use super::mcp_sign_in::Report;
-use super::{Harness, McpSignIns, ModelSettings, skills};
+use super::{Harness, McpSignIns, ModelSettings, Skills, skills};
 use crate::permission::PermissionPolicy;
 
 /// Makes the transport to a fresh harness: a process, or an in-process agent in tests.
@@ -61,8 +61,8 @@ pub struct Launch {
     /// The environment the harness process gets over the daemon's, to find its executable; None for an in-process
     /// agent.
     pub(super) process_env: Option<Vec<(String, String)>>,
-    /// The directory of the ant's confirmed sense skills, offered to the harness once it holds one ([`skills`]).
-    pub(super) skills: Option<PathBuf>,
+    /// The ant's confirmed sense skills, offered to the harness once their directory holds one ([`skills`]).
+    pub(super) skills: Option<Skills>,
 }
 
 impl Launch {
@@ -159,15 +159,15 @@ impl Launch {
         Self { connect: connector(&self.harness, &self.settings, env, self.report(), self.skills.clone()), ..self }
     }
 
-    /// The same launch, offering its harness the skills `dir` holds through the harness's own skills mechanism.
+    /// The same launch, offering its harness `skills` through the harness's own skills mechanism.
     #[must_use]
-    pub fn with_skills(self, dir: PathBuf) -> Self {
-        Self { skills: Some(dir), ..self }.reporting()
+    pub fn with_skills(self, skills: Skills) -> Self {
+        Self { skills: Some(skills), ..self }.reporting()
     }
 
-    /// The directory of skills to offer a session opening now: None until it holds one.
-    pub(super) fn skills(&self) -> Option<&Path> {
-        skills::offered(self.skills.as_deref()?)
+    /// The skills to offer a session opening now: None until their directory holds one.
+    pub(super) fn skills(&self) -> Option<&Skills> {
+        skills::offered(self.skills.as_ref()?)
     }
 
     /// Prepend the ant's instructions to every prompt, including after session/load.
@@ -265,18 +265,18 @@ impl fmt::Debug for Launch {
 }
 
 /// A connector starting `harness` with the ant's `env` and `settings`, reporting sign-ins to MCP servers to `report`
-/// and offering the skills `skills` holds when it starts.
+/// and offering `skills` when it starts.
 fn connector(
     harness: &Arc<Harness>,
     settings: &ModelSettings,
     env: Vec<(String, String)>,
     report: Option<Report>,
-    skills: Option<PathBuf>,
+    skills: Option<Skills>,
 ) -> Connector {
     let (harness, settings) = (harness.clone(), settings.clone());
     Arc::new(move || {
-        let offered = skills.as_deref().and_then(skills::offered);
-        match offered.and_then(|dir| skills::env(&harness, &env, dir)) {
+        let offered = skills.as_ref().and_then(skills::offered);
+        match offered.and_then(|offered| skills::env(&harness, &env, &offered.dir)) {
             Some(skills) => harness.agent(&[env.as_slice(), &[skills]].concat(), &settings, report.clone()),
             None => harness.agent(&env, &settings, report.clone()),
         }
