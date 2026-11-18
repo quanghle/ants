@@ -3,10 +3,12 @@
 A trail is a Python script that coordinates several ants and humans over time. A conductor, the ant a run is started
 on, has its daemon run the script; each `agent()` or `human()` call of the script is a step, a message the conductor
 sends on a fresh thread, and the run waits for its answer without a process, surviving restarts. The script's code, not
-a model, decides which ant takes each step, how many steps run at once and how their results merge.
+a model, decides which ant takes each step, how many steps run at once and how their results merge. A run may go on
+in another trail at one of its waypoints (`goto()`), and a step may be a run of another trail (`trail()`), so small
+saved trails compose into routes at run time.
 
-This document says what a trail is, how runs start, report, stop and resume, what they may spend and trust, and where
-they are kept. How to write one is in the authoring guide,
+This document says what a trail is, how runs start, route, report, stop and resume, what they may spend and trust, and
+where they are kept. How to write one is in the authoring guide,
 [contrib/skills/ants-trails/SKILL.md](../contrib/skills/ants-trails/SKILL.md); how each part works is in
 [architecture.md](architecture.md#trail-workers) (workers) and [architecture.md](architecture.md#trails) (the
 daemon's part), and every command and setting in [cli.md](cli.md#commands) and [config.md](config.md#trails).
@@ -40,28 +42,52 @@ phase("report")
 ```
 
 The script runs top to bottom with `await` allowed at the top level; the value of its last expression, which must be
-JSON, is the run's result. It reaches the host only through these names:
+JSON, is the run's result (a trail with [waypoints](#waypoints) returns it from one). It reaches the host only through
+these names:
 
 | Name | What it does |
 |---|---|
 | `await agent(prompt, ant=None, capability=None, schema=None, label=None)` | One step: `prompt` to the ant `ant` names, to an ant other than the conductor advertising `capability` (picked as `route` picks one), or to the conductor itself. Returns the reply's text, or with `schema` (a JSON Schema) its JSON, asked for again at most twice on a mismatch. |
 | `await human(questions)` | One step: asks the run's owner, else the default human, 1 to 4 questions as `ask_human` does; returns the answer's text. |
+| `await trail(name, args=None)` | One step, answered by a child run of the saved trail `name` with `args` as its input; returns its result ([Child runs](#child-runs-trail)). |
+| `await goto(trail=None, at=None, state=None)` | Ends the leg where called and goes on in `trail` (this one without it) at waypoint `at` (its start without it) with `state` as `args`; returns only by raising ([Routes](#routes-goto)). |
 | `phase(title)`, `log(text)`, `print()` | Notes on the run's thread; never wait. |
-| `args` | The run's JSON input (`None` without). |
+| `args` | The leg's JSON input (`None` without): the run's input on its first leg, the goto's `state` on later ones. |
 | `await parallel(*coroutines)` | All results in argument order once every coroutine finished (`asyncio.gather`). |
 | `await pipeline(items, *stages)` | Each item through the async stages on its own pace; the last stage's results in item order. |
 
 A step that fails raises `RuntimeError` where it is awaited: an `ant=` naming a human or no valid ant name, a
 `capability` no ant but the conductor advertises, malformed `human()` questions, a reply still off its schema after
-two re-asks, a step's message withdrawn from its recipient's queue (`<ant> never answered`), or the run's step limit
-reached. A step to an ant no daemon serves waits in that ant's queue, as any message does, until the run ends or a
-human stops it. An exception the script does not catch fails the run with its traceback, lines numbered as in the
-file (`trail.py`).
+two re-asks, a step's message withdrawn from its recipient's queue (`<ant> never answered`), a child run that failed or
+could not start, or the run's step limit reached. A step to an ant no daemon serves waits in that ant's queue, as any
+message does, until the run ends or a human stops it. An exception the script does not catch fails the run with its
+traceback, lines numbered as in the file (`trail.py`).
 
-The script runs sandboxed: no files, environment, network, subprocesses or sleep; the clock reads the run's start time
-on every call and `random` is seeded once per run, so the same answers make the same calls. The authoring guide
+The script runs sandboxed: no files, environment, network, subprocesses or sleep; the clock reads the leg's start time
+on every call and `random` is seeded once per leg, so the same answers make the same calls. The authoring guide
 covers the API, the sandbox, the bundled modules, patterns and complete example trails, each run by the repository's
 tests (`crates/ants/tests/trail_guide.rs`); the `run_trail` tool's description carries a short version of it.
+
+## Waypoints
+
+A trail's meta may list up to 32 `waypoints`, the places a run enters it: each names a top-level
+`async def <name>(args)` of the script, which takes the leg's input and returns the leg's result. A run of the trail
+starts at its first waypoint, a [`goto()`](#routes-goto) enters it at any. The top level of such a trail holds only its
+meta, imports, definitions and constants, its steps in its waypoints: a top-level `await`, `if`, loop or expression
+fails the check.
+
+```python
+meta = {"name": "triage", "description": "Triages an issue", "waypoints": ["classify", "report"]}
+
+async def classify(args):
+    kind = await agent(f"Is issue {args['issue']} a bug or a question? Answer bug or question.")
+    if kind.strip() == "bug":
+        await goto("fix", state={"issue": args["issue"]})
+    return await report({"issue": args["issue"], "outcome": "answered"})
+
+async def report(args):
+    return await agent(f"Comment on issue {args['issue']}: {args['outcome']}.")
+```
 
 ## Saved trails
 
@@ -130,19 +156,65 @@ A run is started three ways; each names a conductor, an owner and a thread to re
 
 The conductor refuses limits over the maxima, a script over 256 KiB and args over 64 KiB; a run's id is a UUID.
 
+## Routes: goto()
+
+`await goto(trail=None, at=None, state=None)` ends the run's leg where it is called and starts the next: in the trail
+`trail` names, else the leg's own, at its waypoint `at`, else at its start (its first waypoint), with `state` (JSON, at
+most 64 KiB) as `args`. The leg left is given up as a stop gives up a run's steps: its session is dropped, the steps it
+waits on and queued (those of a `parallel()` beside the goto too) are dropped, and its child runs stopped. The run keeps
+its id, conductor, owner, origin, thread, limits and spending, and its new leg starts with no phase. A goto is no step:
+it sends no message and spends nothing. The legs a run went through are its route; the result of the leg that ends is
+the run's.
+
+A named trail is read as saved when the goto is taken, the colony's else the conductor's `~/.ants/trails`; without
+`trail`, the leg's own script goes on as the leg started it. The run's record pins each leg's script, so saving a trail
+anew mid-run changes no leg started.
+
+The conductor refuses a goto it cannot follow: `goto()` raises `RuntimeError` where it is awaited, naming why, and the
+script may catch it and take another exit. It refuses a trail not saved or a waypoint the trail does not list, a
+`state` over 64 KiB, a leg the run's record (1 MiB) has no room for, an inline script for an untrusted run
+([Trust](#trust)), and a trail and waypoint the run entered before:
+
+```text
+RuntimeError: the run entered trail fix at waypoint patch before; a run enters a trail at each waypoint only once
+```
+
+A run enters each waypoint of each trail at most once, so every route ends: a loop, such as fix and review rounds,
+belongs in one waypoint, bounded by its code. Of several gotos waiting at once, the first called that the conductor
+takes ends the leg; those refused before it raise.
+
+The route shows on the run thread as `triage@classify -> fix@reproduce -> fix@patch -> triage@report`: each leg's trail
+(`inline` for an inline script), with `@<waypoint>` when entered at a waypoint ([The run thread](#the-run-thread)).
+
+## Child runs: trail()
+
+`await trail(name, args=None)` is a step answered by a child run of the saved trail `name` (the colony's, else the
+conductor's `~/.ants/trails`; never an inline script), started at its start with `args` as its input. The conductor
+runs it as the parent's, with the parent's owner and origin, on a spin-off of the parent's thread, the step's thread,
+labelled `trail <name>`. Its steps and turns count against the limits of the root run, the run no other run started,
+and it ends within the wall time its parent has left. The result of its route answers the call; a child that fails
+raises `RuntimeError: trail <name> failed: <error>` there, which the script may catch. A trail already running among
+the calling runs (the caller's current leg, its parent's, and so on) is refused: no trail calls itself.
+
+Stopping or ending a run stops its children, and resuming it resumes them. A child tells its start and end in the notes
+of its own thread, messaging no one; its end note points to resuming its parent.
+
 ## The run thread
 
 A run reports on the thread it started with, as its conductor:
 
 - **Notes:** the start posts `Run <run> of trail <name> started: <description>` to the thread's notes, suggesting the
-  title `trail <name>: <description>`; a resume posts `Run <run> resumed by <human>.`. The `phase()`, `log()` and
+  title `trail <name>: <description>`; a resume posts `Run <run> resumed by <human>.`; each goto taken posts
+  `route: <route>`, the legs so far, such as `route: triage@classify -> fix@reproduce`. The `phase()`, `log()` and
   `print()` output of each resume of the script becomes one note of `phase: …` and `log: …` lines (at most 4000
   characters). Notices and escalations arriving on a step's thread, and replies the run no longer waits on, are
   quoted in notes too. Notes wake nobody and spend no turn.
 - **Step threads:** each step's thread is a spin-off of the run thread, keeps the run's owner and carries a
   `trail_step`; its recipient answers it as any message, and the first reply answers the call.
 - **Status events:** a `step` event (`run`, `call`, `label`, `to`, `step_thread`, `stage`: `started`, `answered`,
-  `failed` or `dropped`) on the conductor's status of the run thread tells each step ([hooks.md](hooks.md)).
+  `failed` or `dropped`) on the conductor's status of the run thread tells each step, and a `leg` event (`run`, `leg`
+  counted from 0, `trail` unless inline, `waypoint` when entered at one) each leg's start, the first at the run's start
+  ([hooks.md](hooks.md#statusevent-on-antsstatusantthread)).
 - **In `ants chat`:** the thread view of the run thread lists each step where it started, with its label, the ant it
   went to, its stage and its thread, which `Enter` on the step opens ([cli.md](cli.md#ants-chat)). Status events are
   never stored, so the view also reads the steps from the records of the runs that the ants on the thread conduct
@@ -151,14 +223,16 @@ A run reports on the thread it started with, as its conductor:
   `dropped`, as is one sent anew on a new thread after a resume. A run's thread opened after its steps ran lists
   them all the same, for as long as the run's records are kept.
 - **End message:** once the run is done, failed or stopped, the conductor messages the owner, else the default human,
-  on the run thread: `Run <run> of trail <name> is done (N steps, M turns):` with the result (cut at 8000 characters,
-  `ants trail show <run>` showing the rest), the error (naming `ants trail resume <run>` when a limit was met), or who
-  stopped it and how to resume it.
+  on the run thread: `Run <run> of trail <name> is done (N steps, M turns):`, naming the trail the run started, with
+  the result (cut at 8000 characters, `ants trail show <run>` showing the rest), the error (naming
+  `ants trail resume <run>` when a limit was met), or who stopped it and how to resume it; a run of more than one leg
+  ends it with a line `route: <route>`.
 
 `ants trail runs` lists the runs of every conductor, or `--ant CONDUCTOR`'s; `ants trail show RUN` prints a run (its
-id or a unique start of one): state, phase, spending, args, the calls waiting and queued, and its journal; `--follow`
-follows it as `ants trail run --follow` does. These need human credentials. In `ants chat`, `/trail runs` shows the
-same list in the pager.
+id or a unique start of one): state, phase, spending, args, its route (each leg's trail, waypoint, start and steps),
+its child runs with their states, the calls waiting and queued, and its journal; `--follow` follows it as
+`ants trail run --follow` does. These need human credentials. In `ants chat`, `/trail runs` shows the same list in the
+pager.
 
 ## Limits
 
@@ -167,7 +241,7 @@ table (the key of each, a duration such as `2d` for `wall`), and kept in its rec
 
 | Limit | Default | Maximum | Flag, key | Past it |
 |---|---|---|---|---|
-| Steps, `agent()` and `human()` calls (re-asks not counted) | 50 | 500 | `--steps`, `steps` | the call raises `RuntimeError: the run reached its limit of N steps` |
+| Steps, `agent()`, `human()` and `trail()` calls (re-asks not counted) | 50 | 500 | `--steps`, `steps` | the call raises `RuntimeError: the run reached its limit of N steps` |
 | Steps outstanding at once | 4 | 16 | `--at-once`, `at_once` | later steps wait in the run; nothing raises |
 | Turns the steps spend, as ant messages spend them | 200 | 2000 | `--turns`, `turns` | the run fails |
 | Wall time from start, stopped time included | 24h | 7d | `--wall`, `wall` | the run fails, waiting or not |
@@ -178,9 +252,10 @@ table (the key of each, a duration such as `2d` for `wall`), and kept in its rec
 
 Each `agent()` step reserves up to 8 of the run's turns as its message's turn budget; the turns its reply spent, and
 one per re-ask, count against the run's turns, and a run that cannot reserve one fails on its turn limit. Each step
-also counts against the spending caps of the ant answering it. Keep the script's own work small: only the compute
-between steps counts against the compute limit, and every variable counts against the session's size at each
-suspension.
+also counts against the spending caps of the ant answering it. A goto spends nothing and changes no limit: the run's
+legs share its limits, spending and wall time. A child run's steps and turns count against its root run's limits too,
+and its wall time ends with what its parent has left. Keep the script's own work small: only the compute between steps
+counts against the compute limit, and every variable counts against the session's size at each suspension.
 
 ## Trust
 
@@ -190,8 +265,11 @@ A run takes the trust of the thread it started on (its origin):
   started. These run saved trails and inline scripts alike.
 - **Untrusted:** runs on a thread a webhook or a schedule started, or one asking a review, which relays text from
   outside the bus. These run only saved trails: an inline script is refused (`a run started from a webhook's thread
-  runs only saved trails`), and each step's thread is narrowed to the read-only tool rules webhook threads get by
-  default ([config.md](config.md#tool-permissions)). A schedule starting a trail sets no `allow` of its own.
+  runs only saved trails`), a goto to one too (`… goes only to saved trails`), and each step's thread is narrowed to
+  the read-only tool rules webhook threads get by default ([config.md](config.md#tool-permissions)). A schedule
+  starting a trail sets no `allow` of its own.
+
+A run's legs and child runs keep its origin, so a goto or `trail()` never makes a run more trusted.
 
 Only humans start, stop and resume runs by request (`ants.trail.<ant>`, answered by the conductor's daemon while up),
 admins stop and resume them by [admin order](auth.md#admin-orders) as well, save and remove trails, and read every run's
@@ -204,8 +282,8 @@ the run.
 
 | Store | Kept | Holds |
 |---|---|---|
-| KV `ants_trails` | never expires | Saved trails, keyed by name: name, description, phases, script, who saved it and when. |
-| KV `ants_trail_runs` | 37 days after the last write | Each conductor's runs, keyed under the conductor: `<ant>.<run>` the run's header (trail or inline script, args, owner, origin, limits, state, spending, thread, times), `<ant>.<run>.session` the dumped session with the calls waiting and queued, `<ant>.<run>.call.<n>` one journal entry per answered call (`{call, function, args, answer}`), `<ant>.runs` the conductor's unfinished runs, and `<ant>.steps.<thread>` a marker per step's thread. |
+| KV `ants_trails` | never expires | Saved trails, keyed by name: name, description, phases, waypoints, script, who saved it and when. |
+| KV `ants_trail_runs` | 37 days after the last write | Each conductor's runs, keyed under the conductor: `<ant>.<run>` the run's header (its route: each leg's trail or inline script, waypoint, args, first call id and start; owner, origin, limits, state, spending, thread, parent run, times), `<ant>.<run>.session` the current leg's dumped session with the calls waiting and queued, `<ant>.<run>.call.<n>` one journal entry per answered call (`{call, function, args, answer}`, call ids numbered on across legs), `<ant>.runs` the conductor's unfinished runs, and `<ant>.steps.<thread>` a marker per step's thread. |
 
 `ants init` creates both buckets. A run's states are `running`, `waiting` (on human steps only), `stopped`, `done` and
 `failed`. Its records stay 37 days after their last write: 30 days of keeping plus the longest wall time, so a
@@ -217,8 +295,9 @@ finished run stays at least 30 days. The full layout is in [architecture.md](arc
   its steps go out. A restarted daemon continues every run its `<ant>.runs` lists: steps sent before wait on, steps
   never sent go out, answers stored past the session are given to the script.
 - **Replay:** a session the worker cannot restore (dumped by another Monty version, or lost) is rebuilt from the
-  journal: the script starts again with the run's clock and seed, its steps answered from the journal in order. A
-  script whose steps no longer match the journal fails the run, naming the first call that differs.
+  journal: the current leg's pinned script starts again at its waypoint with the leg's input, clock and seed, its
+  steps answered from the journal in order. A script whose steps no longer match the journal fails the run, naming
+  the first call that differs.
 - **Stop:** `ants trail stop RUN` stops a run: no further step goes out and the replies of the steps waited on answer
   nothing. The conductor withdraws the steps sent to itself; the command lists those still in other ants' queues, each
   with the `ants withdraw ANT MESSAGE` withdrawing it. The conductor stops a run it conducts the same way with
