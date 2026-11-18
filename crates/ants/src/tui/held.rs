@@ -129,11 +129,11 @@ pub struct Page {
 }
 
 impl Page {
-    pub const KEYS: &str = "↑↓ select · a confirm · r deny · Esc back";
     pub const ARMED_KEYS: &str = "y gives the answer above · any other key leaves the order held";
 
-    pub fn keys(&self) -> &'static str {
-        if self.armed.is_some() { Self::ARMED_KEYS } else { Self::KEYS }
+    /// The keys of the answer `a` or `r` asked to confirm, while it waits.
+    pub fn prompt(&self) -> Option<&'static str> {
+        self.armed.as_ref().map(|_| Self::ARMED_KEYS)
     }
 
     fn ids(orders: &[AdminOrder]) -> Vec<Uuid> {
@@ -356,7 +356,7 @@ mod tests {
         let shown = screen(&m, at(3));
         assert!(shown.contains("pa ordered pause of dev-a on m1") && shown.contains("expires in 6d23h"), "{shown}");
         assert!(shown.contains(&format!("m1/dev-a/{} · a confirm · r deny", pause.id)), "{shown}");
-        assert!(shown.contains(Page::KEYS), "{shown}");
+        assert!(shown.contains("a confirm · r deny · Esc back · ↑↓ select"), "{shown}");
 
         assert_eq!(m.key(Key::Char('y'), at(3)), None, "y alone gives no answer");
         m.key(Key::Char('a'), at(3));

@@ -174,11 +174,9 @@ impl Page {
         Self { channel, selected: Selection::default(), mark: attach::Mark::default(), editor: None }
     }
 
-    pub const KEYS: &str =
-        "↑↓ post · Enter open its thread · ←→ tab · n notify level · M manage · o open file · ] next file · Esc nav";
-
-    pub fn keys(&self) -> &'static str {
-        self.editor.as_ref().map_or(Self::KEYS, members::Editor::keys)
+    /// The keys of the members editor, which takes every key, when it is open.
+    pub fn prompt(&self) -> Option<&'static str> {
+        self.editor.as_ref().map(members::Editor::keys)
     }
 
     /// Take `key` for the members editor when it is open: what to do, if anything.

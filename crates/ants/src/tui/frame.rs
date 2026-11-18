@@ -11,7 +11,7 @@ use ratatui::widgets::{Clear, Paragraph};
 
 use super::model::{Focus, Level, Model, Page};
 use super::style::{self, block, dim};
-use super::{approvals, catchup, compact, home, nav, search, thread, work};
+use super::{approvals, catchup, compact, keymap, nav};
 
 /// How wide the nav is.
 const NAV_WIDTH: u16 = 24;
@@ -42,7 +42,7 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
         Page::Held(page) => page.draw(frame, view, data, now, focused),
     }
     model.bar.draw(frame, bar, &model.completions());
-    frame.render_widget(Paragraph::new(footer_line(model, now)), footer);
+    frame.render_widget(Paragraph::new(footer_line(model, now, footer.width)), footer);
     if let Some(asking) = model.asking.as_ref().filter(|a| a.full) {
         approvals::draw_full(frame, asking, now);
     }
@@ -63,7 +63,9 @@ fn header_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
     Line::from(spans)
 }
 
-fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
+/// The footer at most `width` wide: a prompt taking the keys, the latest notice, the keys of the bar or of a focused
+/// question card, a confirmation or draft of the view, else the hints of the key table ([`keymap::footer`]).
+fn footer_line(model: &Model, now: DateTime<Utc>, width: u16) -> Line<'static> {
     if let Some(picker) = &model.picking {
         return picker.line();
     }
@@ -77,31 +79,35 @@ fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
         return style::notice(&notice.text, notice.level == Level::Error);
     }
     if model.bar.focused && !model.completions().is_empty() {
-        return Line::styled(" ↑↓ select · Tab/Enter complete · Esc close the list", dim());
+        return keymap::prompt("↑↓ select · Tab/Enter complete · Esc close the list", width, false);
     }
     if model.bar.focused {
-        return Line::styled(" Enter send · Alt-Enter new line · Ctrl-E editor · Ctrl-K commands · Esc leave", dim());
+        let keys = "Enter send · Alt-Enter new line · Ctrl-E editor · Ctrl-K commands · Esc leave";
+        return keymap::prompt(keys, width, false);
     }
-    let card = match model.page() {
-        Page::Home(page) => page.card(&model.data, now).map(|(cursor, _)| cursor),
-        Page::Thread(page) => page.card(&model.data, now),
-        _ => None,
-    };
-    let keys = match (model.focus, model.page(), card) {
-        (Focus::Nav, _, _) => "↑↓ select · Enter view",
-        (Focus::View, _, Some(cursor)) => cursor.keys(),
-        (Focus::View, Page::Home(_), _) => home::Page::KEYS,
-        (Focus::View, Page::Work(_), _) => work::Page::KEYS,
-        (Focus::View, Page::Channel(page), _) => page.keys(),
-        (Focus::View, Page::Thread(_), _) => thread::Page::KEYS,
-        (Focus::View, Page::Dm(page), _) => page.keys(),
-        (Focus::View, Page::Search(_), _) => search::Page::KEYS,
-        (Focus::View, Page::Tree(page), _) => page.keys(),
-        (Focus::View, Page::Ant(page), _) => page.keys(),
-        (Focus::View, Page::Credentials(page), _) => page.keys(),
-        (Focus::View, Page::Held(page), _) => page.keys(),
-    };
-    Line::styled(format!(" {keys} · Tab nav/view · / search · ? help · q quit"), dim())
+    if model.focus == Focus::View {
+        let card = match model.page() {
+            Page::Home(page) => page.card(&model.data, now).map(|(cursor, _)| cursor),
+            Page::Thread(page) => page.card(&model.data, now),
+            _ => None,
+        };
+        if let Some(cursor) = card {
+            return keymap::prompt(cursor.keys(), width, false);
+        }
+        let (prompt, help) = match model.page() {
+            Page::Channel(page) => (page.prompt(), false),
+            Page::Dm(page) => (page.prompt(), false),
+            Page::Ant(page) => (page.prompt(), page.armed()),
+            Page::Tree(page) => (page.prompt(), true),
+            Page::Credentials(page) => (page.prompt(), true),
+            Page::Held(page) => (page.prompt(), true),
+            _ => (None, false),
+        };
+        if let Some(keys) = prompt {
+            return keymap::prompt(keys, width, help);
+        }
+    }
+    keymap::footer(model, now, width)
 }
 
 /// The keys, over the middle of the screen.
@@ -160,19 +166,11 @@ mod tests {
     use crate::test_support::colony::entry;
     use crate::test_support::live::{at, message, user};
     use crate::tui::model::Key;
-    use crate::tui::people;
     use crate::tui::test_support::model;
+    use crate::tui::{ant, people};
 
     fn screen(m: &Model, now: DateTime<Utc>) -> String {
         crate::test_support::render::rendered(120, 32, |f| draw(f, m, now))
-    }
-
-    #[test]
-    fn the_help_covers_every_key_of_the_thread_view() {
-        for key in thread::Page::KEYS.split(" · ").filter_map(|hint| hint.split(' ').next()) {
-            let covered = HELP.iter().any(|(keys, _)| keys.split(' ').any(|k| k.trim_end_matches(',') == key));
-            assert!(covered, "the help lacks {key}");
-        }
     }
 
     #[test]
@@ -187,9 +185,7 @@ mod tests {
         assert!(shown.contains("waiting on ant 1"), "{shown}");
         assert!(shown.contains("● {.~.} dev-a") && shown.contains("PEOPLE") && shown.contains("bob"), "{shown}");
         assert!(shown.contains("nothing waits on a human"), "{shown}");
-        let keys = "j/k move · Enter open · f forward · d done · z snooze · u unread · b remind · t tree · s digest · c \
-                    creds · Tab";
-        assert!(shown.contains(keys), "{shown}");
+        assert!(shown.contains(" Esc back · ↑↓ select · s digest · c creds · o held · Tab nav/view"), "{shown}");
 
         m.select(nav::Item::Work(None));
         m.key(Key::Enter, at(2));
@@ -260,5 +256,86 @@ mod tests {
         assert!(shown.contains(" bob · online "), "{shown}");
         assert!(shown.contains("no messages with bob yet: n writes one"), "{shown}");
         assert!(shown.contains("Enter open · n new message"), "{shown}");
+    }
+
+    fn text(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// A model showing each view in turn, the nav focused first, with a thread `thread` on it.
+    fn every_view(thread: &ThreadId) -> Vec<Model> {
+        let base = || {
+            let mut m = model();
+            m.data.live.colony(vec![entry("dev-a", 60, 5, at(0))], at(0));
+            m.stored(vec![message(1, thread, "alice", "dev-a", "deploy the site")], at(1));
+            m
+        };
+        let open = |page: Page| {
+            let mut m = base();
+            m.pages.push(page);
+            m
+        };
+        let shown = |item: nav::Item| {
+            let mut m = base();
+            m.select(item);
+            m.focus = Focus::View;
+            m
+        };
+        let mut nav = base();
+        nav.focus = Focus::Nav;
+        let search = crate::tui::search::parse("deploy", at(1)).unwrap();
+        let mut views = vec![
+            nav,
+            base(),
+            shown(nav::Item::Work(None)),
+            shown(nav::Item::Channel("ops".parse().unwrap())),
+            shown(nav::Item::Person(user("bob"))),
+            open(Page::Thread(crate::tui::thread::Page::new(thread.clone()))),
+            open(Page::Search(crate::tui::search::Page::new("deploy".to_owned(), &search))),
+            open(Page::Tree(crate::tui::tree::Page::new(thread.clone()))),
+            open(Page::Credentials(crate::tui::credentials::Page::default())),
+            open(Page::Held(crate::tui::held::Page::default())),
+        ];
+        for pane in [ant::Pane::Threads, ant::Pane::Queue, ant::Pane::Memories, ant::Pane::Mcp, ant::Pane::Settings] {
+            let mut m = shown(nav::Item::Ant(user("dev-a")));
+            let Some(Page::Ant(page)) = m.pages.last_mut() else { panic!("no ant view") };
+            page.pane = pane;
+            views.push(m);
+        }
+        views
+    }
+
+    #[test]
+    fn every_footer_ends_in_help_and_cuts_no_hint() {
+        for m in every_view(&ThreadId::generate()) {
+            let rows: Vec<&keymap::Entry> =
+                keymap::views(&m).into_iter().flat_map(keymap::entries).chain(keymap::GLOBAL).collect();
+            let hints: Vec<String> = rows.iter().filter(|e| e.applies(&m, at(2)).is_ok()).map(|e| e.hint()).collect();
+            for width in [80, 100, 120] {
+                let footer = text(&footer_line(&m, at(2), width));
+                assert!(Line::raw(footer.as_str()).width() <= usize::from(width), "{footer}");
+                let shown = footer.strip_suffix(" · ? help").unwrap_or_else(|| panic!("{width}: {footer}"));
+                for hint in shown.trim_start().split(" · ") {
+                    assert!(hints.iter().any(|h| h == hint), "{}: {hint} cut in {footer}", m.page().name());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_thread_shows_the_keys_of_a_tool_request_only_while_one_waits() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        m.stored(vec![message(1, &thread, "alice", "dev-a", "deploy the site")], at(1));
+        m.pages.push(Page::Thread(crate::tui::thread::Page::new(thread.clone())));
+        let footer = text(&footer_line(&m, at(2), 120));
+        for hint in ["a allow", "A always", "r reject", "n note", "Enter details"] {
+            assert!(!footer.contains(hint), "{footer}");
+        }
+        let push = crate::test_support::live::request("dev-a", "git push", vec![ants_proto::Verdict::AllowOnce]);
+        m.data.live.approvals = vec![ants_proto::ApprovalRequest { thread_id: thread, ..push }];
+        let footer = text(&footer_line(&m, at(2), 80));
+        assert!(footer.starts_with(" a allow · A always · r reject · n note · Enter details · "), "{footer}");
+        assert!(footer.ends_with(" · ? help"), "{footer}");
     }
 }

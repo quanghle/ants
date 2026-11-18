@@ -72,8 +72,6 @@ pub struct Pane {
 }
 
 impl Pane {
-    pub const KEYS: &str = "↑↓ field · Enter change · n new field · u read again · ←→ pane · [ ] \\ scroll \
-                            about/now · a ask · w work · r restart · p (un)pause · X retire · Esc back";
     pub const DRAFT_KEYS: &str = "KEY = VALUE, a TOML value or a word; KEY = removes · Enter send · Esc cancel";
 
     fn read(&self) -> Option<&settings::Read> {
@@ -163,8 +161,9 @@ impl Pane {
         Some(Action::Settings(Ask::Set(ant.clone(), machine, op)))
     }
 
-    pub fn keys(&self) -> &'static str {
-        if self.draft.is_some() { Self::DRAFT_KEYS } else { Self::KEYS }
+    /// The keys of the change being written, which takes every key, if one is.
+    pub fn prompt(&self) -> Option<&'static str> {
+        self.draft.as_ref().map(|_| Self::DRAFT_KEYS)
     }
 
     /// Take in what a read or an order brought.
@@ -463,7 +462,7 @@ mod tests {
         assert!(shown.contains("model = \"gpt-5\""), "{shown}");
         assert!(shown.contains("the read waits for the daemon of m1"), "{shown}");
         assert!(shown.contains("alice · restart on m1  pending"), "{shown}");
-        assert!(shown.contains(Pane::KEYS), "{shown}");
+        assert!(shown.contains("Enter change · n new field · Esc back · ↑↓ field"), "{shown}");
 
         m.key(Key::Down, at(3));
         m.key(Key::Enter, at(3));

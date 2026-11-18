@@ -399,15 +399,15 @@ pub struct Page {
 }
 
 impl Page {
-    pub const KEYS: &str = "↑↓ select · Enter open thread · x cancel subtree · Esc back";
     pub const ARMED_KEYS: &str = "y cancel every prompt in the selected subtree · any other key keeps them";
 
     pub fn new(root: ThreadId) -> Self {
         Self { root, selected: None, armed: false, links: Vec::new(), spend: None }
     }
 
-    pub fn keys(&self) -> &'static str {
-        if self.armed { Self::ARMED_KEYS } else { Self::KEYS }
+    /// The keys of the cancel `x` asked to confirm, while it waits.
+    pub fn prompt(&self) -> Option<&'static str> {
+        self.armed.then_some(Self::ARMED_KEYS)
     }
 
     pub fn tree(&self, data: &Data, now: DateTime<Utc>) -> Tree {
@@ -774,10 +774,10 @@ mod tests {
         assert_eq!(page.key(Key::Enter, data, at(9)), Some(To::Thread(spun.clone())), "tester's thread");
         assert_eq!(page.key(Key::Char('y'), data, at(9)), None, "y alone cancels nothing");
         assert_eq!(page.key(Key::Char('x'), data, at(9)), None);
-        assert_eq!(page.keys(), Page::ARMED_KEYS);
+        assert_eq!(page.prompt(), Some(Page::ARMED_KEYS));
         let only = vec![(user("tester"), spun.clone())];
         assert_eq!(page.key(Key::Char('y'), data, at(9)), Some(To::Do(Action::CancelSubtree(only))));
-        assert_eq!(page.keys(), Page::KEYS);
+        assert_eq!(page.prompt(), None);
 
         page.key(Key::Char('k'), data, at(9));
         page.key(Key::Char('k'), data, at(9));

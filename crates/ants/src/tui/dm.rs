@@ -169,11 +169,11 @@ impl Page {
         Self { with, selected: Selection::default(), draft: None }
     }
 
-    const KEYS: &str = "↑↓ thread · Enter open · n new message";
     const WRITING_KEYS: &str = "Enter send · Esc cancel";
 
-    pub fn keys(&self) -> &'static str {
-        if self.draft.is_some() { Self::WRITING_KEYS } else { Self::KEYS }
+    /// The keys of the message being written, which take every key, if one is.
+    pub fn prompt(&self) -> Option<&'static str> {
+        self.draft.as_ref().map(|_| Self::WRITING_KEYS)
     }
 
     pub fn key(&mut self, key: Key, data: &Data) -> Option<To> {
@@ -334,11 +334,11 @@ mod tests {
         }
         assert!(!m.help && m.focus == Focus::View);
         let View::Dm(page) = m.page() else { panic!("not a DM") };
-        assert_eq!(page.keys(), Page::WRITING_KEYS);
+        assert_eq!(page.prompt(), Some(Page::WRITING_KEYS));
         let draft = Draft { to: user("bob"), text: "q? ".to_owned() };
         assert_eq!(m.key(Key::Enter, at(2)), Some(Action::Send(draft)));
         let View::Dm(page) = m.page() else { panic!("not a DM") };
-        assert_eq!(page.keys(), Page::KEYS, "sent, so no longer written");
+        assert_eq!(page.prompt(), None, "sent, so no longer written");
 
         m.key(Key::Char('n'), at(3));
         assert_eq!(m.key(Key::Enter, at(3)), None, "nothing to send");

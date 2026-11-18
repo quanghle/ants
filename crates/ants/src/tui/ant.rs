@@ -112,10 +112,6 @@ pub struct Page {
 }
 
 impl Page {
-    pub const THREADS_KEYS: &str = "↑↓ thread · Enter open · x cancel · z snooze · S TL;DR · ←→ pane · \
-         [ ] \\ scroll about/now · a ask · w work · r restart · p (un)pause · X retire · Esc back";
-    pub const QUEUE_KEYS: &str = "↑↓ message · Enter open its thread · ←→ pane · [ ] \\ scroll about/now · a ask · \
-         w work · r restart · p (un)pause · X retire · Esc back";
     pub const ARMED_KEYS: &str = "y restart the ant's harnesses after their prompts · ! restart now, \
          cancelling the prompts · any other key keeps them";
 
@@ -140,15 +136,19 @@ impl Page {
         }
     }
 
-    pub fn keys(&self) -> &'static str {
+    /// The keys of the restart `r` asked to confirm, while it waits, else of what is being written in the pane.
+    pub fn prompt(&self) -> Option<&'static str> {
         match self.pane {
-            _ if self.armed => Self::ARMED_KEYS,
-            Pane::Threads => Self::THREADS_KEYS,
-            Pane::Queue => Self::QUEUE_KEYS,
-            Pane::Memories => memories::Page::KEYS,
-            Pane::Mcp => self.mcp.keys(),
-            Pane::Settings => self.settings.keys(),
+            _ if self.armed => Some(Self::ARMED_KEYS),
+            Pane::Mcp => self.mcp.prompt(),
+            Pane::Settings => self.settings.prompt(),
+            Pane::Threads | Pane::Queue | Pane::Memories => None,
         }
+    }
+
+    /// Whether `r` asked to restart the ant, which `y` or `!` then confirms.
+    pub fn armed(&self) -> bool {
+        self.armed
     }
 
     /// Take `key` into the change of a setting, or the MCP sign-in address, being written, if one is.
@@ -614,7 +614,7 @@ mod tests {
         assert!(shown.contains("running cargo test on deploy the site"), "{shown}");
         assert!(shown.contains("spent today $0.42 · 1234 tokens"), "{shown}");
         assert!(shown.contains("threads (1)") && shown.contains("queue (?)"), "{shown}");
-        assert!(shown.contains(Page::THREADS_KEYS), "{shown}");
+        assert!(shown.contains("Enter open · Esc back · ↑↓ thread · x cancel"), "{shown}");
         assert!(!shown.contains("other"), "only the ant's threads: {shown}");
 
         m.focus = crate::tui::model::Focus::View;
@@ -727,7 +727,7 @@ mod tests {
         let shown = screen(&m, at(3));
         assert!(shown.contains("queue (5)") && shown.contains("and 3 more in the stream"), "{shown}");
         assert!(shown.contains("next") && shown.contains("1 ahead"), "{shown}");
-        assert!(shown.contains(Page::QUEUE_KEYS), "{shown}");
+        assert!(shown.contains("Enter open · Esc back · ↑↓ message · ←→ pane"), "{shown}");
         m.key(Key::Down, at(3));
         assert_eq!(m.key(Key::Enter, at(3)), Some(Action::Open(thread)));
     }
@@ -759,7 +759,7 @@ mod tests {
         let shown = screen(&m, at(3));
         assert!(shown.contains("memories (1)") && shown.contains("memories of dev-a · read-only"), "{shown}");
         assert!(shown.contains("A tester.") && shown.contains("── AGENTS.md (9 B)"), "{shown}");
-        assert!(shown.contains(memories::Page::KEYS), "{shown}");
+        assert!(shown.contains("Esc back · ↑↓ scroll · u read again · ←→ pane"), "{shown}");
 
         m.focus = crate::tui::model::Focus::View;
         m.key(Key::Char('u'), at(3));

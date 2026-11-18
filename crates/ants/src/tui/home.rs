@@ -144,6 +144,11 @@ impl Item {
         }
     }
 
+    /// The pending tool request its keys answer: none on the head of a group listed one by one.
+    pub fn pending(&self) -> Option<&ApprovalRequest> {
+        self.request.as_ref().filter(|(_, settled)| settled.is_none() && !self.expanded).map(|(r, _)| r)
+    }
+
     /// Whether it stands for a pending tool request of the same ant on the same thread as `other`'s.
     fn groups(&self, other: &Item) -> bool {
         fn pending(i: &Item) -> Option<&ApprovalRequest> {
@@ -307,9 +312,6 @@ pub struct Page {
 }
 
 impl Page {
-    pub const KEYS: &str =
-        "j/k move · Enter open · f forward · d done · z snooze · u unread · b remind · t tree · s digest · c creds";
-
     /// The selected item's thread.
     pub fn thread(&self, data: &Data) -> Option<ThreadId> {
         let items = self.rows(data, Utc::now());
@@ -344,6 +346,13 @@ impl Page {
         rows
     }
 
+    /// The selected item at `now`, if any.
+    pub fn selected(&self, data: &Data, now: DateTime<Utc>) -> Option<Item> {
+        let items = self.rows(data, now);
+        let at = self.at(&items);
+        items.into_iter().nth(at)
+    }
+
     /// Where the selected item is among `items`.
     fn at(&self, items: &[Item]) -> usize {
         self.selected.at(&items.iter().map(Item::id).collect::<Vec<_>>())
@@ -376,11 +385,7 @@ impl Page {
         let items = self.rows(data, now);
         let at = self.at(&items);
         let selected = items.get(at);
-        let pending = selected
-            .filter(|i| !i.expanded)
-            .and_then(|i| i.request.as_ref())
-            .filter(|(_, s)| s.is_none())
-            .map(|(r, _)| r.clone());
+        let pending = selected.and_then(Item::pending).cloned();
         let verdict = match key {
             Key::Char('a') => Some(Verdict::AllowOnce),
             Key::Char('A') => Some(Verdict::AllowAlways),

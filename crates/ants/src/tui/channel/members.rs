@@ -435,10 +435,10 @@ mod tests {
     fn m_opens_the_editor_which_takes_the_keys_until_esc_closes_it() {
         let mut m = ops();
         let Page::Channel(page) = m.page() else { panic!() };
-        assert!(page.keys().contains("M manage"));
+        assert_eq!(page.prompt(), None);
         keys(&mut m, [Key::Char('M')]);
         let Page::Channel(page) = m.page() else { panic!() };
-        assert_eq!(page.keys(), "↑↓ row · Enter edit · a add · d remove or clear · Esc close");
+        assert_eq!(page.prompt().unwrap(), "↑↓ row · Enter edit · a add · d remove or clear · Esc close");
         assert_eq!(keys(&mut m, [Key::Char('q'), Key::Char('n'), Key::Char('/')]), None, "taken by the editor");
         assert!(!m.bar.focused && editor(&m).is_some());
         keys(&mut m, [Key::Esc]);

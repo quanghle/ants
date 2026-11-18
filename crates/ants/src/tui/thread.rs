@@ -17,7 +17,7 @@
 
 use std::cell::{Cell, RefCell};
 
-use ants_proto::{Quote, ThreadId, UserId, Uuid, Verdict};
+use ants_proto::{ApprovalRequest, Quote, ThreadId, UserId, Uuid, Verdict};
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -86,8 +86,6 @@ impl Page {
         self.messages().find(|e| e.id == Some(at)).map(|e| e.seq)
     }
 
-    pub const KEYS: &str = "↑↓ select · i reply · > reply to selected · y copy · f forward · o open file · ] next file · + react · p pin · m mute · e archive · d done · u unread from selected · b remind of selected · z snooze · t tree · T tool calls · S TL;DR · x cancel · W withdraw · E withdraw to edit · a A r answer a tool request · n reject it with a note · 1-9 Enter answer a question · End latest · Esc back";
-
     /// The messages shown, in the order stored.
     fn messages(&self) -> impl DoubleEndedIterator<Item = &Entry> {
         self.history.entries.iter().filter(|e| !e.kind.on_timeline())
@@ -110,7 +108,7 @@ impl Page {
     }
 
     /// The selected message, else the latest.
-    fn selection(&self) -> Option<&Entry> {
+    pub fn selection(&self) -> Option<&Entry> {
         let mut messages = self.messages();
         match self.selected.or_else(|| self.held()) {
             Some(seq) => messages.find(|e| e.seq == seq),
@@ -170,7 +168,7 @@ impl Page {
     }
 
     /// The message whose attachments `o` opens: the selected one, else the latest carrying any.
-    fn attached(&self) -> Option<&Entry> {
+    pub fn attached(&self) -> Option<&Entry> {
         match self.selected.or_else(|| self.held()) {
             Some(_) => self.selection(),
             None => self.messages().rev().find(|e| !e.attachments.is_empty()),
@@ -181,6 +179,12 @@ impl Page {
     pub fn attachment(&self) -> Option<&Listed> {
         let e = self.attached()?;
         e.attachments.get(self.mark.at(e.seq, e.attachments.len()))
+    }
+
+    /// The oldest tool request waiting on the thread, which a, A, r, n and Enter answer.
+    pub fn pending<'d>(&self, data: &'d Data) -> Option<&'d ApprovalRequest> {
+        let pending = data.live.approvals.iter().filter(|r| r.thread_id == self.history.thread);
+        pending.min_by_key(|r| r.requested_at)
     }
 
     /// Move the selection `by` messages, down for a positive one; past the latest it follows the latest again.
@@ -272,8 +276,7 @@ impl Page {
                     Key::Char('r') => Some(Verdict::Reject),
                     _ => None,
                 };
-                let pending = data.live.approvals.iter().filter(|r| r.thread_id == self.history.thread);
-                let Some(oldest) = pending.min_by_key(|r| r.requested_at) else {
+                let Some(oldest) = self.pending(data) else {
                     if key == Key::Enter {
                         let keyed = question::keyed(data, &self.history.entries, now);
                         self.answering = keyed.map(|(id, asked)| question::Cursor::new(id, asked));
@@ -282,10 +285,7 @@ impl Page {
                 };
                 return Some(To::Ask(oldest.clone(), verdict));
             }
-            Key::Char('n') => {
-                let pending = data.live.approvals.iter().filter(|r| r.thread_id == self.history.thread);
-                return pending.min_by_key(|r| r.requested_at).cloned().map(To::Note);
-            }
+            Key::Char('n') => return self.pending(data).cloned().map(To::Note),
             Key::Char('1'..='9') => {
                 return match question::thread_key(key, data, &self.history.thread, &self.history.entries, now)? {
                     question::Keyed::To(to) => Some(*to),

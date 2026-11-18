@@ -25,6 +25,7 @@ mod held;
 mod home;
 mod images;
 mod interrupt;
+mod keymap;
 mod markdown;
 mod mcp;
 mod memories;
