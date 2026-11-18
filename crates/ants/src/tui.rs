@@ -20,6 +20,7 @@ mod credentials;
 mod dm;
 mod exec;
 mod faces;
+mod fold;
 mod frame;
 mod held;
 mod home;
@@ -155,6 +156,8 @@ pub async fn run(nats: &crate::connection::Nats<'_>, since: Duration, compact: b
     if !nats.me.role.is_human() {
         bail!("the credentials of {me} are an ant's; `ants chat` shows what a human reads and answers");
     }
+    // The connection's log lines would go on the main screen before the full screen takes it.
+    let _held = live::HeldLogs::hold();
     let (client, js) = match tokio::time::timeout(CONNECT_WITHIN, nats.connect_only("ants-chat")).await {
         Ok(Ok(connected)) => connected,
         Ok(Err(e)) => match Unreached::of(&e, nats.creds.is_some()) {
@@ -205,10 +208,7 @@ pub async fn run(nats: &crate::connection::Nats<'_>, since: Duration, compact: b
     model.compact = compact;
     model.data.credentials.holder = Some(holder);
     let chat_state = catchup::state_path();
-    let kept = chat_state.as_deref().map_or_default(catchup::load);
-    model.catchup.since = kept.ended;
-    model.data.tools = kept.tools;
-    model.data.channel_tabs = kept.channel_tabs;
+    restore(&mut model, chat_state.as_deref().map_or_default(catchup::load));
     model.catchup.ahead = summaries.ahead();
     let inline_images = crate::defaults::inline_images()?;
     model.data.images = images::Images::new(inline_images);
@@ -252,6 +252,14 @@ pub async fn run(nats: &crate::connection::Nats<'_>, since: Duration, compact: b
     Box::pin(presence::while_following(&js, domain, me, device, Following::Inbox, Box::pin(approvals))).await
 }
 
+/// Set `model` as the previous `ants chat` on the device left it, by what `kept` keeps.
+fn restore(model: &mut Model, kept: catchup::ChatState) {
+    model.catchup.since = kept.ended;
+    model.data.tools = kept.tools;
+    model.data.channel_tabs = kept.channel_tabs;
+    model.fold.folds = kept.folds;
+}
+
 /// The key `key` is to the UI, if any.
 fn key_of(key: KeyEvent) -> Option<Key> {
     if key.code == KeyCode::Enter && key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) {
@@ -275,6 +283,8 @@ fn key_of(key: KeyEvent) -> Option<Key> {
             KeyCode::Enter => Some(Key::Enter),
             KeyCode::Left => Some(Key::WordLeft),
             KeyCode::Right => Some(Key::WordRight),
+            // Ctrl-\ comes as Ctrl-4 from a terminal that sends its control code, as most do.
+            KeyCode::Char('4') => Some(Key::Ctrl('\\')),
             KeyCode::Char(c) => Some(Key::Ctrl(c)),
             _ => None,
         };
@@ -622,6 +632,11 @@ impl Chat {
                     self.model.notify(format!("keeping the channel's tab: {e:#}"), Level::Error, Utc::now());
                 }
             }
+            Action::KeepFolds(folds) => {
+                if let Err(e) = catchup::state_path().and_then(|path| catchup::keep(&path, |kept| kept.folds = folds)) {
+                    self.model.notify(format!("keeping what folds: {e:#}"), Level::Error, Utc::now());
+                }
+            }
             Action::Search(search) => self.searches.start(search),
             Action::Summarise(ask) => self.summaries.ask(ask),
             Action::CancelSubtree(prompts) => {
@@ -728,6 +743,7 @@ mod tests {
         let key = |code, modifiers| key_of(KeyEvent::new(code, modifiers));
         assert_eq!(key(KeyCode::Char('c'), KeyModifiers::CONTROL), Some(Key::Interrupt));
         assert_eq!(key(KeyCode::Char('k'), KeyModifiers::CONTROL), Some(Key::Ctrl('k')));
+        assert_eq!(key(KeyCode::Char('4'), KeyModifiers::CONTROL), Some(Key::Ctrl('\\')), "Ctrl-\\ as sent");
         assert_eq!(key(KeyCode::Char('?'), KeyModifiers::SHIFT), Some(Key::Char('?')));
         assert_eq!(key(KeyCode::BackTab, KeyModifiers::SHIFT), Some(Key::Tab));
         assert_eq!(key(KeyCode::F(1), KeyModifiers::NONE), None);

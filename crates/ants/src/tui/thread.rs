@@ -39,9 +39,8 @@ mod conversation;
 
 use conversation::{Item, Shown, busy, cut, glyphs, hm, rows, started, withdrawn_from, woken};
 
-/// How wide the side panel is, shown only when the view is at least [`PANEL_FROM`] wide.
+/// How wide the side panel is, shown as [`super::fold`] has it.
 const PANEL_WIDTH: u16 = 34;
-const PANEL_FROM: u16 = 96;
 /// How many messages PgUp and PgDn move the selection.
 const PAGE: isize = 10;
 
@@ -325,12 +324,11 @@ impl Page {
         let data = &model.data;
         let thread = &self.history.thread;
         let summary = data.live.summary(thread);
-        let mut title = format!(" {} ", data.title(thread));
-        if let Some(s) = summary.filter(|s| !s.channels.is_empty()) {
+        let channels = summary.filter(|s| !s.channels.is_empty()).map_or_else(String::new, |s| {
             let channels: Vec<String> = s.channels.iter().map(|c| format!("#{c}")).collect();
-            title = format!("{title}· {} ", channels.join(" "));
-        }
-        let (area, panel) = if area.width >= PANEL_FROM {
+            format!(" · {}", channels.join(" "))
+        });
+        let (area, panel) = if model.fold.panel(frame.area().width) {
             let [left, right] = Layout::horizontal([Constraint::Min(20), Constraint::Length(PANEL_WIDTH)]).areas(area);
             (left, Some(right))
         } else {
@@ -338,12 +336,23 @@ impl Page {
         };
         let cursor = self.card(data, now);
         let area = draw_cards(frame, area, model, thread, &self.history.entries, cursor, now);
-        let block = style::block(title, focused);
-        let inner = block.inner(area);
+        let room = usize::from(area.width.saturating_sub(4));
+        let title = style::fit(&data.title(thread), room.saturating_sub(channels.chars().count()).max(10));
+        let title = style::fit(&format!("{title}{channels}"), room);
+        let block = style::block(format!(" {title} "), focused);
+        let mut inner = block.inner(area);
         frame.render_widget(block, area);
+        if panel.is_none() {
+            let [brief, rest] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
+            frame.render_widget(Paragraph::new(self.brief(data, usize::from(brief.width))), brief);
+            inner = rest;
+        }
         let area = catchup::draw_tldr(frame, inner, model, thread, now);
         let width = usize::from(area.width);
-        let mut lines = vec![work::why(data, thread)];
+        let mut lines = Vec::new();
+        if panel.is_some() || work::reason(data, thread).is_some() {
+            lines.push(style::clip(work::why(data, thread), width));
+        }
         if let Some((line, at)) = data.live.progress_of(thread, width.saturating_sub(16)) {
             lines.push(Line::styled(format!("▶ {line} ({})", ago(at, now)), Style::new().fg(Color::Green)));
         }
@@ -400,6 +409,66 @@ impl Page {
         }
     }
 
+    /// Where the thread is, as the header names it: its channels and its title.
+    pub fn place(&self, data: &Data) -> String {
+        let thread = &self.history.thread;
+        let title = data.title(thread);
+        match data.live.summary(thread).filter(|s| !s.channels.is_empty()) {
+            Some(s) => {
+                let channels: Vec<String> = s.channels.iter().map(|c| format!("#{c}")).collect();
+                format!("{} · {title}", channels.join(" "))
+            }
+            None => title,
+        }
+    }
+
+    /// The ants on the thread: those it names, those that wrote or were written to, those that made `calls`.
+    fn ants<'a>(&'a self, data: &'a Data, calls: &'a [Call]) -> Vec<&'a UserId> {
+        let mut ants: Vec<&UserId> =
+            data.live.summary(&self.history.thread).into_iter().flat_map(|s| &s.users).collect();
+        ants.extend(self.messages().flat_map(|e| e.from.iter().chain(&e.to)));
+        ants.extend(calls.iter().map(|c| &c.ant));
+        ants.retain(|u| !data.is_human(u));
+        ants.sort();
+        ants.dedup();
+        ants
+    }
+
+    /// The turns left, as the latest message carrying them says.
+    fn turns(&self) -> Option<u32> {
+        self.messages().rev().find_map(|e| e.turns)
+    }
+
+    /// The spend on the thread in cost and tokens, once read.
+    fn spend(&self) -> Option<(f64, u64)> {
+        let spend = self.about.as_ref().and_then(|a| a.spend.as_ref())?;
+        Some(spend.iter().fold((0.0, 0), |(c, t), r| (c + r.spent.cost, t + r.spent.tokens)))
+    }
+
+    /// The side panel's state, ants, turns and spend on one line in `width` columns, for when it is folded.
+    fn brief(&self, data: &Data, width: usize) -> Line<'static> {
+        let thread = &self.history.thread;
+        let state = data.state(thread);
+        let calls = data.calls.get(thread).map_or(&[][..], |c| c.calls());
+        let mut rest: Vec<String> = Vec::new();
+        let ants = self.ants(data, calls);
+        if !ants.is_empty() {
+            rest.push(ants.iter().map(|a| a.as_str()).collect::<Vec<_>>().join(" "));
+        }
+        if let Some(turns) = self.turns() {
+            rest.push(format!("{turns} turns left"));
+        }
+        if let Some((cost, tokens)) = self.spend() {
+            rest.push(format!("${cost:.2} · {} tokens", count(tokens)));
+        }
+        let label = state.label();
+        let rest = rest.iter().map(|r| format!(" · {r}")).collect::<String>();
+        Line::from(vec![
+            Span::styled(label, Style::new().fg(state.color())),
+            Span::styled(cut(&rest, width.saturating_sub(label.chars().count())), style::dim()),
+        ])
+    }
+
     /// The side panel: the thread's state, owner, ants and what each does, turns left, spend, age, origin, how the
     /// human holds it and the paths its tool calls touched.
     fn panel(&self, data: &Data, calls: &[Call], now: DateTime<Utc>, width: usize) -> Vec<Line<'static>> {
@@ -413,12 +482,7 @@ impl Page {
             vec![Line::from(vec![label("STATE"), Span::styled(state.label(), Style::new().fg(state.color()))])];
         let owner = summary.and_then(|s| s.owner.clone()).or_else(|| self.messages().find_map(|e| e.owner.clone()));
         lines.push(field("OWNER", owner.map_or_else(|| "none".to_owned(), |o| o.to_string())));
-        let mut ants: Vec<&UserId> = summary.into_iter().flat_map(|s| &s.users).collect();
-        ants.extend(self.messages().flat_map(|e| e.from.iter().chain(&e.to)));
-        ants.extend(calls.iter().map(|c| &c.ant));
-        ants.retain(|u| !data.is_human(u));
-        ants.sort();
-        ants.dedup();
+        let ants = self.ants(data, calls);
         lines.push(Line::from(label("ANTS")));
         if ants.is_empty() {
             lines.push(Line::styled("  none", style::dim()));
@@ -433,11 +497,10 @@ impl Page {
                 None => lines.push(Line::raw(format!("  {ant}"))),
             }
         }
-        if let Some(turns) = self.messages().rev().find_map(|e| e.turns) {
+        if let Some(turns) = self.turns() {
             lines.push(field("TURNS", format!("{turns} left")));
         }
-        if let Some(spend) = self.about.as_ref().and_then(|a| a.spend.as_ref()) {
-            let (cost, tokens) = spend.iter().fold((0.0, 0), |(c, t), r| (c + r.spent.cost, t + r.spent.tokens));
+        if let Some((cost, tokens)) = self.spend() {
             lines.push(field("SPEND", format!("${cost:.2} · {} tokens", count(tokens))));
         }
         let first = self.messages().next();
@@ -872,7 +935,10 @@ mod tests {
         let shown = screen(&page, &m, 110, at(47));
         assert!(!shown.contains("Ran 1") && !shown.contains("running 41s"), "{shown}");
         assert!(shown.contains("only in worker/retry.rs"), "{shown}");
+        let brief = "│working · dev-a dev-b · 8 turns left · $0.00 · 0 tokens";
+        assert!(shown.contains(brief) && !shown.contains("STATE"), "the panel folded on a line: {shown}");
         m.data.tools = Tools::Collapsed;
+        let shown = screen(&page, &m, 140, at(47));
         for field in ["STATE", "OWNER", "ANTS", "dev-a ◐", "dev-b", "SPEND  $0.00 · 0 tokens", "FROM   ask by alice"]
         {
             assert!(shown.contains(field), "{field}: {shown}");
@@ -1018,12 +1084,12 @@ mod tests {
         page.history.loaded(&thread, Ok(entries)).unwrap();
         let rows = |page: &Page| screen(page, &m, 80, at(40)).lines().map(str::to_owned).collect::<Vec<_>>();
         let shown = rows(&page);
-        assert!(shown[1].starts_with("│❯ alice → dev-a"), "{shown:#?}");
-        assert_eq!(shown[2].trim_end_matches('│').trim_end(), "│  line 5");
+        assert!(shown[2].starts_with("│❯ alice → dev-a"), "{shown:#?}");
+        assert_eq!(shown[3].trim_end_matches('│').trim_end(), "│  line 5");
         assert_eq!(page.key(Key::Char('y'), &m.data, at(40)), Some(To::Do(Action::Copy("line 5".to_owned()))));
-        assert_eq!(rows(&page)[2], shown[2], "held until moved");
+        assert_eq!(rows(&page)[3], shown[3], "held until moved");
         page.key(Key::Up, &m.data, at(40));
-        assert_eq!(rows(&page)[2].trim_end_matches('│').trim_end(), "│  line 4", "moving starts from it");
+        assert_eq!(rows(&page)[3].trim_end_matches('│').trim_end(), "│  line 4", "moving starts from it");
         page.key(Key::End, &m.data, at(40));
         assert!(rows(&page)[22].contains("line 30"), "the latest at the bottom");
     }

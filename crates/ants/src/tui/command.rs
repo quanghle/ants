@@ -346,6 +346,22 @@ impl Model {
         }
     }
 
+    /// The empty bar's hint: what Enter does with text alone in the view on screen, as [`Model::said`] routes it,
+    /// then what else may be typed.
+    pub fn enter_hint(&self) -> String {
+        let enter = match self.said() {
+            Route::Post { channel, thread: Some(_) } => format!("Enter posts on the thread in #{channel}"),
+            Route::Post { channel, thread: None } => format!("Enter starts a thread in #{channel}"),
+            Route::Reply { .. } => "Enter replies on the thread".to_owned(),
+            Route::Ask { to, thread: None } => format!("Enter writes to {to} on a new thread"),
+            Route::Ask { to, thread: Some(_) } => format!("Enter writes to {to} on the thread"),
+            Route::Unaddressed | Route::Command(_) | Route::Unnamed => {
+                "Enter asks the assistant or the messenger".to_owned()
+            }
+        };
+        format!("{enter} · / commands · @ ant · # channel · Ctrl-J new line")
+    }
+
     /// Open the bar to reply on `thread` to the message `quoted`, its text begun with an @mention of `mention` in
     /// place of any it began with.
     pub(super) fn quote(&mut self, thread: ThreadId, quoted: Quoted, mention: Option<&UserId>) {

@@ -304,7 +304,10 @@ impl Page {
             .enumerate()
             .map(|(at, p)| {
                 let marked = (at == selected).then(|| self.mark.at(p.id, p.attachments.len()));
-                ListItem::new(post_lines(p, data, now, marked))
+                let inner = usize::from(area.width.saturating_sub(2));
+                ListItem::new(
+                    post_lines(p, data, now, marked).into_iter().map(|l| style::clip(l, inner)).collect::<Vec<_>>(),
+                )
             })
             .collect();
         let list = List::new(items).block(block).highlight_style(style::highlight(focused));

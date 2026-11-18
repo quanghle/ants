@@ -467,38 +467,49 @@ impl Page {
         first.extend(data.held.line());
         let tall = u16::try_from(first.len() + 1).unwrap_or(u16::MAX);
         let [top, area] = Layout::vertical([Constraint::Length(tall), Constraint::Min(0)]).areas(inner);
+        let mut first: Vec<Line> = first.into_iter().map(|l| style::clip(l, usize::from(top.width))).collect();
         first.push(Line::styled("─".repeat(usize::from(top.width)), style::dim()));
         frame.render_widget(Paragraph::new(first), top);
         if items.is_empty() {
-            let text = if data.live.stored_at.is_some() { "nothing waits on a human" } else { "reading the stream…" };
+            let text = match data.live.stored_at {
+                None => vec![Line::raw("reading the stream…")],
+                Some(_) if data.live.order.is_empty() => what_to_type(),
+                Some(_) => vec![Line::raw("nothing waits on a human")],
+            };
             frame.render_widget(Paragraph::new(text), area);
             return;
         }
         let selected = self.at(&items);
-        let width = usize::from(area.width.saturating_sub(9));
+        let (full, width) = (usize::from(area.width), usize::from(area.width.saturating_sub(9)));
         let cursor = self.card(data, now).map(|(cursor, _)| cursor);
         let rows: Vec<ListItem> = items
             .iter()
             .enumerate()
             .map(|(at, i)| {
+                let mut after: Vec<Span> =
+                    data.drafts.mark(&Conversation::Thread(i.thread.clone())).into_iter().collect();
+                for (why, n) in &i.also {
+                    after.push(Span::styled(" · ", style::dim()));
+                    after.push(Span::styled(why.badge(*n), Style::new().fg(why.color())));
+                }
+                after.push(Span::styled(format!("  {}", ago(i.at, now)), style::dim()));
+                let room = width.saturating_sub(after.iter().map(Span::width).sum());
                 let mut first = vec![
                     Span::styled(format!("{:<9}", i.why.label()), Style::new().fg(i.why.color())),
-                    Span::raw(data.title(&i.thread)),
+                    Span::raw(style::fit(&data.title(&i.thread), room.max(10))),
                 ];
-                first.extend(data.drafts.mark(&Conversation::Thread(i.thread.clone())));
-                for (why, n) in &i.also {
-                    first.push(Span::styled(" · ", style::dim()));
-                    first.push(Span::styled(why.badge(*n), Style::new().fg(why.color())));
-                }
-                first.push(Span::styled(format!("  {}", ago(i.at, now)), style::dim()));
+                first.extend(after);
                 let mut lines = vec![
-                    Line::from(first),
-                    Line::from(
-                        [Span::raw("         ")]
-                            .into_iter()
-                            .chain(i.who.as_ref().and_then(|who| data.face(who)).into_iter().flatten())
-                            .chain([Span::styled(excerpt(&i.text, 160), style::dim())])
-                            .collect::<Vec<_>>(),
+                    style::clip(Line::from(first), full),
+                    style::clip(
+                        Line::from(
+                            [Span::raw("         ")]
+                                .into_iter()
+                                .chain(i.who.as_ref().and_then(|who| data.face(who)).into_iter().flatten())
+                                .chain([Span::styled(excerpt(&i.text, 160), style::dim())])
+                                .collect::<Vec<_>>(),
+                        ),
+                        full,
                     ),
                 ];
                 let cursor = cursor.filter(|_| at == selected);
@@ -507,11 +518,12 @@ impl Page {
                         let rows = question::body(question, *id, cursor, width);
                         lines.extend(rows.into_iter().map(|l| Line::styled(format!("         {l}"), l.style)));
                     } else {
-                        lines.push(Line::raw(format!("         {}", excerpt(&question::summary(question), 160))));
+                        let summary = format!("         {}", excerpt(&question::summary(question), 160));
+                        lines.push(Line::raw(style::fit(&summary, full)));
                     }
                 }
                 if let Some(cursor) = cursor {
-                    lines.push(Line::styled(format!("         {}", cursor.keys()), style::dim()));
+                    lines.push(Line::styled(format!("         {}", style::hints(cursor.keys(), width)), style::dim()));
                 } else if i.expanded {
                     lines.push(Line::styled("         Enter collapses", style::dim()));
                 } else if let Some((request, settled)) = &i.request {
@@ -530,7 +542,8 @@ impl Page {
                         Line::from(spans).style(line.style)
                     }));
                 } else {
-                    lines.push(Line::styled(format!("         {} · {}", i.why.keys(), i.why.enter()), style::dim()));
+                    let keys = format!("{} · {}", i.why.keys(), i.why.enter());
+                    lines.push(Line::styled(format!("         {}", style::hints(&keys, width)), style::dim()));
                 }
                 ListItem::new(lines)
             })
@@ -538,6 +551,20 @@ impl Page {
         let list = List::new(rows).highlight_style(style::highlight(focused));
         frame.render_stateful_widget(list, area, &mut ListState::default().with_selected(Some(selected)));
     }
+}
+
+/// What home says with no thread read: what can be typed.
+fn what_to_type() -> Vec<Line<'static>> {
+    let row = |keys: &str, does: &str| {
+        Line::from(vec![Span::styled(format!("  {keys:<21}"), Style::new().bold()), Span::raw(does.to_owned())])
+    };
+    vec![
+        Line::raw("No thread read yet. Type:"),
+        row("@ant and a text", "to ask an ant"),
+        row("#channel and a text", "to post in a channel"),
+        row("Ctrl-K and a text", "for the assistant or the messenger"),
+        row("?", "for the keys"),
+    ]
 }
 
 #[cfg(test)]

@@ -16,8 +16,6 @@ use crate::tui::{attach, complete, style};
 
 /// The most lines of text the bar shows at once.
 const MAX_LINES: usize = 6;
-/// What the empty bar shows.
-const HINT: &str = "/ commands · @ ant · # channel · Ctrl-J new line";
 /// A paste of more characters than this, or of more lines than `PASTE_LINES`, shows as a placeholder.
 const PASTE_CHARS: usize = 800;
 const PASTE_LINES: usize = 3;
@@ -474,9 +472,9 @@ impl Bar {
         u16::try_from(lines.len().min(MAX_LINES)).unwrap_or(1) + 2
     }
 
-    /// Draw the bar in `area`, its title naming where Enter sends (`to`), and above it the `completions` of the word
-    /// at the cursor, else the list of commands when shown.
-    pub fn draw(&self, frame: &mut Frame, area: Rect, completions: &[complete::Candidate], to: &str) {
+    /// Draw the bar in `area`, its title naming where Enter sends (`to`) and `hint` on it while it is empty, and above
+    /// it the `completions` of the word at the cursor, else the list of commands when shown.
+    pub fn draw(&self, frame: &mut Frame, area: Rect, completions: &[complete::Candidate], to: &str, hint: &str) {
         let width = usize::from(area.width.saturating_sub(2));
         let (lines, (row, column)) = self.lines(width);
         let top = (row + 1).saturating_sub(MAX_LINES);
@@ -502,8 +500,9 @@ impl Bar {
             block = block.title_bottom(Line::styled(format!(" {text} "), style));
         }
         let shown: Vec<Line> = if self.chars.is_empty() {
-            let pad = width.saturating_sub(HINT.chars().count());
-            vec![Line::from(vec![Span::raw(" ".repeat(pad)), Span::styled(HINT, style::dim())])]
+            let hint = style::hints(hint, width);
+            let pad = width.saturating_sub(hint.chars().count());
+            vec![Line::from(vec![Span::raw(" ".repeat(pad)), Span::styled(hint, style::dim())])]
         } else {
             lines.into_iter().skip(top).take(MAX_LINES).map(Line::raw).collect()
         };

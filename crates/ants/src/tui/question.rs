@@ -458,7 +458,7 @@ impl Card<'_> {
                     None if enter => "1-9 answer · Enter choose",
                     None => "1-9 answer",
                 };
-                lines.push(Line::styled(keys, style::dim()));
+                lines.push(Line::styled(style::hints(keys, width), style::dim()));
             }
             _ => {
                 for (n, question) in (1..).zip(questions) {

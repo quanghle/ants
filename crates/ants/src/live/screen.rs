@@ -63,6 +63,23 @@ impl Drop for Screen {
     }
 }
 
+/// Log lines held while this lives, from before a [`Screen`] opens, and written once it is dropped (or the screen
+/// restored).
+pub struct HeldLogs(());
+
+impl HeldLogs {
+    pub fn hold() -> Self {
+        progress::hold_logs();
+        Self(())
+    }
+}
+
+impl Drop for HeldLogs {
+    fn drop(&mut self) {
+        release_logs();
+    }
+}
+
 /// Have the terminal mark what is pasted, so that a paste comes as one, rather than as keys with Enter at each line
 /// break; a terminal that cannot leaves pastes as keys. Not on Windows, whose console input crossterm reads as key
 /// records with no pastes among them, so that the markers would come as keys.

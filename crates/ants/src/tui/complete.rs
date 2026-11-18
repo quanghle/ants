@@ -167,6 +167,7 @@ pub fn draw(frame: &mut Frame, bar: Rect, candidates: &[Candidate], selected: us
     let selected = selected.min(candidates.len().saturating_sub(1));
     let top = (selected + 1).saturating_sub(ROWS);
     let width = candidates.iter().map(|c| c.word.chars().count()).max().unwrap_or(0).max(12);
+    let inner = usize::from(bar.width.min(84).saturating_sub(2));
     let lines: Vec<Line> = candidates
         .iter()
         .enumerate()
@@ -177,6 +178,7 @@ pub fn draw(frame: &mut Frame, bar: Rect, candidates: &[Candidate], selected: us
                 Span::styled(format!("{:<width$}  ", c.word), Style::new().bold()),
                 Span::styled(c.detail.clone(), style::dim()),
             ]);
+            let line = style::clip(line, inner);
             if at == selected { line.reversed() } else { line }
         })
         .collect();

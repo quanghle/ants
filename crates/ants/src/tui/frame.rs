@@ -1,6 +1,6 @@
-//! The frame around the views: a header with the human, the server and the connection, the nav beside the shown view
-//! with the command bar under it, a footer with the view's keys, the latest notice or the command bar's keys, and the
-//! help over it all.
+//! The frame around the views: a header with the human, the server, the place shown and the connection, the nav beside
+//! the shown view (over it when folded and focused, [`super::fold`]) with the command bar under it, a footer with the
+//! view's keys, the latest notice or the command bar's keys, and the help over it all.
 
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
@@ -8,6 +8,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
+use unicode_width::UnicodeWidthStr;
 
 use super::model::{Focus, Level, Model, Page};
 use super::style::{self, block, dim};
@@ -22,9 +23,17 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
     }
     let [header, body, footer] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)]).areas(frame.area());
-    frame.render_widget(Paragraph::new(header_line(model, now)), header);
-    let [left, right] = Layout::horizontal([Constraint::Length(NAV_WIDTH), Constraint::Min(20)]).areas(body);
-    nav::draw(frame, left, &model.data, &model.nav, now, model.focus == Focus::Nav && !model.bar.focused);
+    frame.render_widget(Paragraph::new(header_line(model, now, header.width)), header);
+    let width = frame.area().width;
+    model.fold.drawn(width);
+    let nav_focused = model.focus == Focus::Nav && !model.bar.focused;
+    let right = if model.fold.nav(width) {
+        let [left, right] = Layout::horizontal([Constraint::Length(NAV_WIDTH), Constraint::Min(20)]).areas(body);
+        nav::draw(frame, left, &model.data, &model.nav, now, nav_focused);
+        right
+    } else {
+        body
+    };
     let [view, bar] =
         Layout::vertical([Constraint::Min(3), Constraint::Length(model.bar.height(right.width))]).areas(right);
     let focused = model.focus == Focus::View && !model.bar.focused;
@@ -41,7 +50,12 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
         Page::Credentials(page) => page.draw(frame, view, data, now, focused),
         Page::Held(page) => page.draw(frame, view, data, now, focused),
     }
-    model.bar.draw(frame, bar, &model.completions(), &model.bar_title());
+    model.bar.draw(frame, bar, &model.completions(), &model.bar_title(), &model.enter_hint());
+    if nav_focused && !model.fold.nav(width) {
+        let over = Rect { width: NAV_WIDTH.min(view.width), ..view };
+        frame.render_widget(Clear, over);
+        nav::draw(frame, over, &model.data, &model.nav, now, true);
+    }
     frame.render_widget(Paragraph::new(footer_line(model, now)), footer);
     if let Some(asking) = model.asking.as_ref().filter(|a| a.full) {
         approvals::draw_full(frame, asking, now);
@@ -52,15 +66,23 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
     }
 }
 
-/// Who the UI runs as, on which server, the view shown, and the connection.
-fn header_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
+/// Who the UI runs as, on which server, the place shown, and the connection.
+/// The header, its place cut first so the connection's state stays on screen.
+fn header_line(model: &Model, now: DateTime<Utc>, width: u16) -> Line<'static> {
     let data = &model.data;
-    let mut spans = vec![
-        Span::styled(format!(" ants · {}@{}", data.me(), data.server), Style::new().bold()),
-        Span::styled(format!(" · {} · ", model.page().name()), dim()),
+    let place = match model.page() {
+        Page::Thread(page) => page.place(data),
+        page => page.name().to_owned(),
+    };
+    let who = format!(" ants · {}@{}", data.me(), data.server);
+    let link = style::link(data.live.link, now, "");
+    let room = usize::from(width).saturating_sub(who.width() + link.width() + 6);
+    let spans = vec![
+        Span::styled(who, Style::new().bold()),
+        Span::styled(format!(" · {} · ", style::fit(&place, room.max(1))), dim()),
+        link,
     ];
-    spans.push(style::link(data.live.link, now, ""));
-    Line::from(spans)
+    style::clip(Line::from(spans), usize::from(width))
 }
 
 fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
@@ -114,6 +136,7 @@ const HELP: &[(&str, &str)] = &[
     ("PgUp PgDn Home End", "move further"),
     ("Enter", "open the selection"),
     ("Esc", "back to the previous view, else to the nav"),
+    ("Ctrl-O Ctrl-\\", "fold or show the nav; a thread's side panel (again: as the width has it)"),
     ("w ←→ a", "on an ant: its threads in work, pane, ask; in a channel: ←→ its state tab"),
     ("[ ] \\", "on an ant: scroll its about or now column up, down; switch between the two"),
     ("Ctrl-K @ #", "the command bar: @ant asks, #channel posts, else reply"),
@@ -163,7 +186,8 @@ mod tests {
     use super::*;
     use crate::test_support::colony::entry;
     use crate::test_support::live::{at, message, user};
-    use crate::tui::model::Key;
+    use crate::tui::fold;
+    use crate::tui::model::{Action, Key};
     use crate::tui::people;
     use crate::tui::test_support::model;
 
@@ -198,14 +222,91 @@ mod tests {
         m.select(nav::Item::Work(None));
         m.key(Key::Enter, at(2));
         let shown = screen(&m, at(2));
-        assert!(shown.contains("· thread ·"), "{shown}");
+        assert!(shown.contains(" · deploy the site · ● connected"), "the header names the thread: {shown}");
         assert!(shown.contains("waiting on ant") && shown.contains("reading the thread…"), "{shown}");
 
         m.data.live.link(false, at(3));
-        m.key(Key::Char('?'), at(3));
         let shown = screen(&m, at(30));
         assert!(shown.contains("○ disconnected 27s, reconnecting"), "{shown}");
+        m.key(Key::Char('?'), at(3));
+        let shown = screen(&m, at(30));
         assert!(shown.contains("any key closes this help"), "{shown}");
+    }
+
+    /// How wide the open thread's conversation is on a screen `width` columns wide.
+    fn conversation(m: &Model, width: u16) -> (usize, String) {
+        let shown = crate::test_support::render::rendered(width, 24, |f| draw(f, m, at(2)));
+        let row: Vec<char> = shown.lines().find(|l| l.contains("reading the thread…")).unwrap().chars().collect();
+        let borders: Vec<usize> = row.iter().enumerate().filter(|(_, c)| **c == '│').map(|(at, _)| at).collect();
+        let (left, right) = (borders[borders.len() - 2], borders[borders.len() - 1]);
+        let left = if row[right - 1] == '│' { borders[borders.len() - 3] } else { left };
+        (right - left - 1, shown)
+    }
+
+    #[test]
+    fn the_conversation_takes_the_width_and_the_nav_and_the_side_panel_fold() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        m.stored(vec![message(1, &thread, "alice", "dev-a", "deploy the site")], at(1));
+        m.select(nav::Item::Work(None));
+        screen(&m, at(2));
+        m.key(Key::Enter, at(2));
+        let (wide, shown) = conversation(&m, 80);
+        assert_eq!(wide, 78, "{shown}");
+        assert!(!shown.contains("Work 1"), "the nav folds: {shown}");
+        assert!(shown.contains("│waiting on ant · dev-a"), "the panel's state and ants on a line: {shown}");
+        assert!(conversation(&m, 120).0 >= 94);
+        let (_, shown) = conversation(&m, 140);
+        assert!(shown.contains("STATE") && shown.contains("OWNER"), "the panel from 140 columns: {shown}");
+
+        m.key(Key::Tab, at(2));
+        let shown = crate::test_support::render::rendered(80, 24, |f| draw(f, &m, at(2)));
+        assert!(shown.contains("│Work 1") && !shown.contains("reading the thread…"), "the nav over the view: {shown}");
+        m.key(Key::Tab, at(2));
+
+        let folds = |nav, panel| Some(Action::KeepFolds(fold::Folds { nav, panel }));
+        assert_eq!(m.key(Key::Ctrl('o'), at(2)), folds(Some(true), None));
+        let (wide, shown) = conversation(&m, 80);
+        assert!(shown.contains("Work 1") && wide == 54, "{shown}");
+        conversation(&m, 120);
+        assert_eq!(m.key(Key::Ctrl('\\'), at(2)), folds(Some(true), Some(true)));
+        let (_, shown) = conversation(&m, 120);
+        assert!(shown.contains("STATE"), "the panel shown by key: {shown}");
+        conversation(&m, 80);
+        assert_eq!(m.key(Key::Ctrl('o'), at(2)), folds(None, Some(true)), "again: as the width has it");
+    }
+
+    #[test]
+    fn no_text_ends_mid_word_at_the_edge_without_an_ellipsis() {
+        let ops: ants_proto::ChannelId = "ops".parse().unwrap();
+        let long = "deploy the site to production then update the docs and tell the whole team about it today";
+        let opening = ants_proto::ChannelPost::new(ops.clone(), user("alice"), long);
+        let thread = opening.thread_id.clone();
+        let mut m = model();
+        let asked = message(2, &thread, "dev-a", "alice", &format!("which region? {long}"));
+        let mut first = crate::tui::test_support::post(1, &opening);
+        first.owner = Some(user("alice"));
+        m.stored(vec![first, asked], at(1));
+        let cut = |shown: &str| {
+            assert!(shown.lines().next().is_some_and(|l| l.ends_with("● connected")), "{shown}");
+            let long = shown.lines().skip(1).filter(|l| l.contains("deploy") || l.contains("which"));
+            long.map(|l| l.chars().collect::<Vec<_>>())
+                .any(|row| row.len() >= 80 && if row[79] == '│' { row[78] } else { row[79] }.is_alphanumeric())
+        };
+        for item in [nav::Item::Home, nav::Item::Work(None), nav::Item::Channel(ops)] {
+            m.select(item);
+            let shown = crate::test_support::render::rendered(80, 24, |f| draw(f, &m, at(2)));
+            assert!(!cut(&shown) && shown.contains('…'), "{shown}");
+        }
+        m.select(nav::Item::Work(None));
+        screen(&m, at(2));
+        m.key(Key::Enter, at(2));
+        let shown = crate::test_support::render::rendered(80, 24, |f| draw(f, &m, at(2)));
+        assert!(
+            !cut(&shown)
+                && shown.contains("┌ deploy the site to production then update the docs and tell the whol… · #ops ┐"),
+            "{shown}"
+        );
     }
 
     #[test]
@@ -227,6 +328,25 @@ mod tests {
         assert_eq!(m.key(Key::Char('a'), at(0)), Some(decide));
         let shown = screen(&m, at(0));
         assert!(shown.contains("storing the decision…"), "{shown}");
+    }
+
+    #[test]
+    fn with_no_thread_read_home_says_what_to_type_and_the_bar_what_enter_does() {
+        let mut m = model();
+        m.stored(vec![], at(0));
+        let shown = screen(&m, at(0));
+        assert!(shown.contains("@ant and a text") && shown.contains("Ctrl-K and a text"), "{shown}");
+        assert!(shown.contains("Enter asks the assistant or the messenger · / commands · @ ant"), "{shown}");
+        let thread = ThreadId::generate();
+        m.stored(vec![message(1, &thread, "alice", "dev-a", "deploy the site")], at(1));
+        let shown = screen(&m, at(2));
+        assert!(shown.contains("nothing waits on a human") && !shown.contains("@ant and a text"), "{shown}");
+        m.select(nav::Item::Work(None));
+        screen(&m, at(2));
+        m.key(Key::Enter, at(2));
+        assert!(screen(&m, at(2)).contains("Enter replies on the thread · / commands"));
+        m.select(nav::Item::Channel("ops".parse().unwrap()));
+        assert!(screen(&m, at(2)).contains("Enter starts a thread in #ops · / commands"));
     }
 
     #[test]
