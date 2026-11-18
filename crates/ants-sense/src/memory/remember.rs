@@ -3,14 +3,14 @@
 
 use std::fmt::Write as _;
 
-use ants_proto::provider::{BoxFuture, ToolCall};
+use ants_proto::provider::{BoxFuture, ToolCall, normalize_remote};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{
     CORE_BUDGET, Citation, DEFAULT_IMPORTANCE, DIGEST, MAX_BODY_BYTES, MAX_CITATIONS, MAX_IMPORTANCE, MAX_TITLE_CHARS,
     MEMORY, Memory, MemoryItem, MemoryKind, NEAR_DUPLICATE, Scope, Status, Trust, core, digest, holds_recalled_block,
-    holds_recalled_marker, normalize_remote, similarity,
+    holds_recalled_marker, similarity,
 };
 use crate::items::{ItemId, Values};
 use crate::sanitize::{Limit, Redaction, Refused, Sanitized, sanitize_body, sanitize_title};

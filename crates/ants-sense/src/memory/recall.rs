@@ -15,14 +15,13 @@
 use std::fmt::Write as _;
 
 use ants_proto::UserId;
-use ants_proto::provider::{BoxFuture, CallContext, Starter, ToolCall};
+use ants_proto::provider::{BoxFuture, CallContext, Starter, ToolCall, normalize_remote};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use super::{
     Access, DEFAULT_IMPORTANCE, MEMORY, Memory, MemoryItem, RECALLED_BEGIN, RECALLED_END, Scope, Status, chain,
-    normalize_remote,
 };
 use crate::Sense;
 use crate::items::{Item, ItemId};
