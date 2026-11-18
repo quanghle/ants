@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
 
-use ants_proto::provider::CallContext;
+use ants_proto::provider::{CallContext, normalize_remote};
 use ants_proto::{SenseId, UserId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -164,56 +164,6 @@ impl fmt::Display for Scope {
             Self::Ant(ant) => write!(f, "ant:{ant}"),
         }
     }
-}
-
-/// `remote`, a git remote in any form git takes (`https://user@Host:443/owner/repo.git`,
-/// `git@host:owner/repo.git`, `ssh://…`, `host/owner/repo`), as `host/path`: without scheme, user, port, `.git` or
-/// slashes around, the host in lower case. None when it names no host and path.
-pub fn normalize_remote(remote: &str) -> Option<String> {
-    let remote = remote.trim();
-    let (authority, path) = match remote.split_once("://") {
-        Some((_, rest)) => rest.split_once('/')?,
-        // scp-like: `[user@]host:path`, a colon before any slash.
-        None => match (remote.find(':'), remote.find('/')) {
-            (Some(colon), slash) if slash.is_none_or(|slash| colon < slash) => (&remote[..colon], &remote[colon + 1..]),
-            _ => remote.split_once('/')?,
-        },
-    };
-    let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
-    let host = match host.rsplit_once(':') {
-        Some((host, port)) if port.bytes().all(|b| b.is_ascii_digit()) => host,
-        _ => host,
-    };
-    let path = path.trim_matches('/');
-    let path = path.strip_suffix(".git").unwrap_or(path).trim_end_matches('/');
-    let valid = |part: &str| !part.is_empty() && !part.contains(|c: char| c.is_whitespace() || c.is_control());
-    (valid(host) && valid(path) && !host.contains(['/', '@', ':']))
-        .then(|| format!("{}/{path}", host.to_ascii_lowercase()))
-}
-
-/// The URL of remote `origin` in `config`, a git config file, else of the first remote with one; includes and
-/// `insteadOf` rewrites are not followed.
-pub fn remote_url(config: &str) -> Option<&str> {
-    let (mut remote, mut first) = (None, None);
-    for line in config.lines().map(str::trim) {
-        if let Some(header) = line.strip_prefix('[') {
-            remote = header.split_once(']').and_then(|(header, _)| {
-                let (section, name) = header.split_once(char::is_whitespace)?;
-                section.eq_ignore_ascii_case("remote").then(|| name.trim().trim_matches('"'))
-            });
-            continue;
-        }
-        let (Some(name), Some((key, value))) = (remote, line.split_once('=')) else { continue };
-        let Some(url) = value.split_whitespace().next().map(|url| url.trim_matches('"')) else { continue };
-        if !key.trim().eq_ignore_ascii_case("url") || url.is_empty() {
-            continue;
-        }
-        if name == "origin" {
-            return Some(url);
-        }
-        first.get_or_insert(url);
-    }
-    first
 }
 
 /// Whether a memory's text is the ant's own.

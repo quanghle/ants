@@ -422,5 +422,6 @@ fn starter(by: &Starter) -> String {
         Starter::Webhook { user } => format!("webhook {user}"),
         Starter::Review { user } => format!("ant {user}, asking a review"),
         Starter::Provider { name } => format!("provider {name}"),
+        Starter::Unknown => "someone of a kind not known".to_owned(),
     }
 }

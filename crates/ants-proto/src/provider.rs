@@ -34,6 +34,7 @@ pub mod jsonrpc;
 pub use calls::{
     Ack, AntRef, Brief, BriefReason, BriefRequest, CallContext, Event, EventKind, Export, ImportRequest, MemoriesView,
     MemoryEntry, Origin, Output, Rebuilt, Starter, Tool, ToolCall, ToolList, ToolResult, WakeRequest, Woken,
+    normalize_remote, remote_url,
 };
 pub use handshake::{
     Agreed, Capabilities, Capability, Info, InitializeParams, InitializeResult, NegotiationError, choose_version,

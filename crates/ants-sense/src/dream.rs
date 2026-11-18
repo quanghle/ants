@@ -172,7 +172,7 @@ impl Covered {
 /// A commit a packet names, so its reader checks the code out as the threads left it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Commit {
-    /// The repository's normalized git remote ([`memory::normalize_remote`]).
+    /// The repository's normalized git remote ([`ants_proto::provider::normalize_remote`]).
     pub repo: String,
     pub commit: String,
     /// The thread whose worktree is at it; none for the ant's workdir.

@@ -527,7 +527,8 @@ pub fn task<'a>(sense: &'a Sense, call: &'a ToolCall) -> BoxFuture<'a, Answer> {
 async fn run(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
     let request = Request::parse(call)?;
     let items = sense.items(&call.context.ant).await.map_err(refused)?;
-    items.sync().await.map_err(refused)?;
+    // Tasks are worked only as the log has them: refused when the sync the call started with failed.
+    items.last_sync().await.map_err(refused)?;
     let graph = Graph::load(&*items).await.map_err(refused)?;
     match request.action {
         Action::List | Action::Ready => {
