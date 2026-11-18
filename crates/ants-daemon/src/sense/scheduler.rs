@@ -125,10 +125,16 @@ async fn cycle(
         return Ok(None);
     }
     let started = tokio::time::Instant::now();
+    // A failed wake ends the firings but holds back neither maintenance nor dreams, the cycle ending in its error.
+    let mut undelivered = None;
     for firing in remind::pending_work(items).await? {
-        deliver(items, host, &settings.ant, &firing).await?;
+        if let Err(error) = deliver(items, host, &settings.ant, &firing).await {
+            undelivered = Some(error);
+            break;
+        }
     }
-    for due in remind::due(items, now).await? {
+    let due = if undelivered.is_none() { remind::due(items, now).await? } else { Vec::new() };
+    for due in due {
         let at = now + chrono::Duration::from_std(started.elapsed()).expect("a bounded check");
         let firing = if due.condition.is_some() {
             match remind::reserve_condition(items, &due.id, at).await? {
@@ -138,8 +144,11 @@ async fn cycle(
         } else {
             remind::prepare_firing(items, &due.id, at, "reminder time reached").await?
         };
-        if let Some(firing) = firing {
-            deliver(items, host, &settings.ant, &firing).await?;
+        if let Some(firing) = firing
+            && let Err(error) = deliver(items, host, &settings.ant, &firing).await
+        {
+            undelivered = Some(error);
+            break;
         }
     }
     let now = now + chrono::Duration::from_std(started.elapsed()).expect("a bounded check");
@@ -154,6 +163,9 @@ async fn cycle(
         })),
         None => None,
     };
+    if let Some(error) = undelivered {
+        return Err(error);
+    }
     let next = [memory::next_maintenance(items).await?, remind::next_due(items, now).await?, dream];
     let next = next.into_iter().flatten().min();
     // A concurrent schedule update or a stale reservation must not turn a due record into a busy loop.

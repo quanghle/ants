@@ -402,7 +402,8 @@ occurrence. Weekdays are `mon` through `sun`; delays are 1 through 31,536,000 se
 The active daemon fires reminders; a standby fires none until it takes the ant over, then goes on with the stored
 schedule and any firing pending. While the ant's identity is dormant nothing fires. A firing wakes the ant
 ([Wake requests](architecture.md#wake-requests)) with the reminder's text and why it fired, on its source thread, or a
-new thread when no source thread remains.
+new thread when no source thread remains. A firing whose wake fails stays pending and is tried again a minute later,
+the firings after it with it, while memory maintenance and dreams go on.
 
 Condition triggers use the following objects:
 
