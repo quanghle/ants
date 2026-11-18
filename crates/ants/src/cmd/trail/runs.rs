@@ -98,10 +98,20 @@ pub(super) async fn pick(js: &jetstream::Context, pick: &Pick) -> Result<TrailRu
     if Uuid::try_parse(&pick.0).is_ok() {
         return find(js, &pick.0.parse()?).await;
     }
-    let mut found: Vec<TrailRun> =
-        list(js, None).await?.into_iter().filter(|r| r.run.as_str().starts_with(&pick.0)).collect();
+    picked(list(js, None).await?, pick, "`ants trail runs` lists the runs kept")
+}
+
+/// The run of `conductor` that `pick` names: the one of that id, else its one run whose id starts so.
+pub(crate) async fn pick_of(js: &jetstream::Context, conductor: &UserId, pick: &Pick) -> Result<TrailRun> {
+    let listed = format!("`ants trail runs --ant {conductor}` lists its runs");
+    picked(list(js, Some(conductor)).await?, pick, &listed)
+}
+
+/// The one run of `runs` whose id starts with `pick`; `listed` says where to find the runs when none does.
+fn picked(runs: Vec<TrailRun>, pick: &Pick, listed: &str) -> Result<TrailRun> {
+    let mut found: Vec<TrailRun> = runs.into_iter().filter(|r| r.run.as_str().starts_with(&pick.0)).collect();
     match found.len() {
-        0 => bail!("no run's id starts with {pick}: `ants trail runs` lists the runs kept"),
+        0 => bail!("no run's id starts with {pick}: {listed}"),
         1 => Ok(found.remove(0)),
         n => {
             let ids: Vec<&str> = found.iter().take(5).map(|r| r.run.as_str()).collect();
@@ -127,7 +137,7 @@ pub(super) async fn detail(js: &jetstream::Context, run: &RunId) -> Result<Detai
 }
 
 /// The run's state in a word.
-pub(super) fn state(state: &RunState) -> &'static str {
+pub(crate) fn state(state: &RunState) -> &'static str {
     match state {
         RunState::Running => "running",
         RunState::Waiting => "waiting",

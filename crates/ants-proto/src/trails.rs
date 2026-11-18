@@ -181,6 +181,14 @@ impl Default for TrailLimits {
     }
 }
 
+/// The limits a run's start sets, in a line: `50 steps, 4 at once, 200 turns, 1d of wall time`.
+impl std::fmt::Display for TrailLimits {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let wall = crate::duration::format(self.wall_time());
+        write!(f, "{} steps, {} at once, {} turns, {wall} of wall time", self.steps, self.concurrency, self.turns)
+    }
+}
+
 /// A run's header in [`TRAIL_RUNS_BUCKET`], under [`trail_run_key`]: what it runs, for whom and where, and how far it
 /// got. Its conductor's daemon puts it at the start and whenever its state or counters change; humans read it.
 /// Readers should treat unknown fields as additions, not errors.

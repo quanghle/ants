@@ -1309,6 +1309,13 @@ fn admin_orders_of_providers() {
 }
 
 #[test]
+fn admin_orders_of_trails() {
+    snap("admin_op_stop_trail", &AdminOp::StopTrail { run: run() });
+    let limits = TrailLimits { steps: 100, wall_secs: 2 * 24 * 3600, ..TrailLimits::DEFAULT };
+    snap("admin_op_resume_trail", &AdminOp::ResumeTrail { run: run(), limits: Some(limits) });
+}
+
+#[test]
 fn trails() {
     snap(
         "envelope_step",

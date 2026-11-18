@@ -437,5 +437,6 @@ those flags. `trail_status` tells how a run the ant conducts stands (state, step
 steps it waits on, the result), and `stop_trail` stops one, which only a human resumes. Saved trails are colony-wide,
 put and removed only by humans; a conductor's daemon also reads `~/.ants/trails/<name>.py` on its machine, the colony's
 trail winning a name both have. A run started on a thread a webhook or schedule started runs only a saved trail, its
-steps narrowed to read-only tools. `ants trail runs`, `show`, `stop` and `resume` manage runs; see the repository's
-`docs/trails.md`.
+steps narrowed to read-only tools. `ants trail runs`, `show`, `stop` and `resume` manage runs, and an admin's `ants ant
+stop-trail` and `resume-trail` stop and resume one by admin order, which waits for a conductor's daemon while it is
+away; see the repository's `docs/trails.md`.

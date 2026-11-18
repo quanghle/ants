@@ -8,7 +8,7 @@
 
 mod control;
 mod follow;
-mod runs;
+pub(crate) mod runs;
 mod saved;
 mod start;
 #[cfg(test)]
@@ -148,12 +148,12 @@ pub(crate) struct LimitArgs {
 }
 
 impl LimitArgs {
-    fn given(&self) -> bool {
+    pub(crate) fn given(&self) -> bool {
         self.steps.is_some() || self.at_once.is_some() || self.turns.is_some() || self.wall.is_some()
     }
 
     /// `base` with the limits given instead: refused when one is 0 or over its maximum.
-    fn over(&self, base: TrailLimits) -> Result<TrailLimits> {
+    pub(crate) fn over(&self, base: TrailLimits) -> Result<TrailLimits> {
         let max = TrailLimits::MAX;
         let wall = self.wall.map(|wall| wall.as_secs());
         let given = [

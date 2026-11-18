@@ -10,7 +10,8 @@
 //! their record ([`crate::profile::shared`]); [`settings`] reads them;
 //! [`pause`] pauses or resumes the ant there; [`restart`] has the daemon serving the ant restart its harnesses;
 //! [`memories`] reads the ant's memories, only while online; [`add`] adds an ant to the config, its credentials signed
-//! by `ants signer` on the order, and [`retire`] removes one, its credentials revoked so; [`clone`] adds a copy of one.
+//! by `ants signer` on the order, and [`retire`] removes one, its credentials revoked so; [`clone`] adds a copy of one;
+//! [`trail`] stops or resumes a trail run the ant conducts.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,7 +19,7 @@ use std::time::Duration;
 
 use ants_proto::{
     AdminOp, AdminOrder, AdminOutcome, DEVICES_BUCKET, IDENTITIES_BUCKET, JsDomain, MACHINES_BUCKET, Machine,
-    OrderState, STREAM, UserId, Uuid, admin_consumer, admin_outcome_key, revoked_device_key, subject,
+    OrderState, STREAM, TrailAction, UserId, Uuid, admin_consumer, admin_outcome_key, revoked_device_key, subject,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::consumer::{AckPolicy, PullConsumer, pull};
@@ -45,6 +46,7 @@ pub mod restart;
 mod retire;
 mod set;
 mod settings;
+pub mod trail;
 
 /// How long an order may stay in hand unacked before the stream delivers it again.
 const ACK_WAIT: Duration = Duration::from_secs(60);
@@ -447,6 +449,10 @@ async fn apply(
         AdminOp::ReadMcp => mcp::apply(orders, order, None, stored_at).await,
         AdminOp::McpSignIn { server, callback } => {
             mcp::apply(orders, order, Some((server, callback.as_deref())), stored_at).await
+        }
+        AdminOp::StopTrail { run } => trail::apply(orders, order, TrailAction::Stop { run: run.clone() }).await,
+        AdminOp::ResumeTrail { run, limits } => {
+            trail::apply(orders, order, TrailAction::Resume { run: run.clone(), limits: *limits }).await
         }
     })
 }

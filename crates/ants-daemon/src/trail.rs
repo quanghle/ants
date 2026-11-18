@@ -261,6 +261,11 @@ impl Trails {
         &self.inner.ant
     }
 
+    /// Whether `other` is a clone of these trails.
+    pub fn same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     /// Start a run: its records are stored and its first pass is due when this returns.
     pub async fn start(&self, start: StartRun) -> Result<RunId, String> {
         self.start_as(RunId::generate(), start).await

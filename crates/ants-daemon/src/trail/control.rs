@@ -1,6 +1,7 @@
-//! The conductor's control subject ([`subject::trail`]): humans asking it to start, stop and resume runs.
+//! The conductor's control subject ([`subject::trail`]): humans asking it to start, stop and resume runs. Admin orders
+//! to stop and resume one ([`crate::admin::trail`]) are carried out the same way ([`Trails::act`]).
 
-use ants_proto::{TrailAction, TrailOutcome, TrailRequest, subject};
+use ants_proto::{TrailAction, TrailOutcome, TrailRequest, UserId, subject};
 use futures::StreamExt as _;
 
 use super::Trails;
@@ -35,8 +36,12 @@ impl Trails {
                 return;
             }
         };
+        let by = &request.by;
         let outcome = match request.check_subject(message.subject.as_str()) {
-            Ok(()) => self.act(&request).await,
+            Ok(()) if !self.inner.humans.is_human(by) => {
+                TrailOutcome::Refused { error: format!("{by} is no human of the colony") }
+            }
+            Ok(()) => self.act(by, &request.action).await,
             Err(e) => TrailOutcome::Refused { error: e.to_string() },
         };
         let reply = request.answer(outcome);
@@ -49,12 +54,9 @@ impl Trails {
         }
     }
 
-    async fn act(&self, request: &TrailRequest) -> TrailOutcome {
-        let by = &request.by;
-        if !self.inner.humans.is_human(by) {
-            return TrailOutcome::Refused { error: format!("{by} is no human of the colony") };
-        }
-        let done = match &request.action {
+    /// Carry out `action` for `by`, a human: what a request on the control subject asks, or an admin's order.
+    pub(crate) async fn act(&self, by: &UserId, action: &TrailAction) -> TrailOutcome {
+        let done = match action {
             TrailAction::Start { trail, args, thread, limits } => self
                 .start_for(by, trail.clone(), args.clone(), thread.clone(), *limits)
                 .await

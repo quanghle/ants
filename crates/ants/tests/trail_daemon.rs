@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::v1::schema::McpServer;
+use ants_daemon::admin::restart::Restarts;
 use ants_daemon::harness::McpSession;
 use ants_daemon::mcp::Mcp;
 use ants_daemon::people::humans::Registry;
@@ -15,9 +16,10 @@ use ants_daemon::stream::notes::{JetStreamNotes, Notes, NotesStore};
 use ants_daemon::trail::{Conducting, StartRun, Trails};
 use ants_proto::provider::{Origin, Starter};
 use ants_proto::{
-    AssistantGrant, ColonyEntry, DeviceId, Envelope, NotesPost, NoticeKind, Pick, Role, RunId, RunState, StatusEvent,
-    StatusUpdate, StepStage, TRAIL_RUNS_BUCKET, ThreadId, TrailAction, TrailLimits, TrailOutcome, TrailReply,
-    TrailRequest, TrailRun, TrailSession, TrailSource, TrailStart, UserId, subject, trail_run_key, trail_session_key,
+    AdminOp, AdminOrder, AdminOutcome, AssistantGrant, ColonyEntry, DeviceId, Envelope, MACHINES_BUCKET, Machine,
+    NotesPost, NoticeKind, OrderState, Pick, Role, RunId, RunState, StatusEvent, StatusUpdate, StepStage,
+    TRAIL_RUNS_BUCKET, ThreadId, TrailAction, TrailLimits, TrailOutcome, TrailReply, TrailRequest, TrailRun,
+    TrailSession, TrailSource, TrailStart, UserId, WaitingStep, subject, trail_run_key, trail_session_key,
 };
 use ants_test_support::{NatsServer, eventually, eventually_within, scratch_dir};
 use futures::StreamExt as _;
@@ -884,4 +886,103 @@ async fn trail_status_and_stop_trail_reach_only_the_runs_the_ant_conducts() {
     let (ok, listed) = call(&client, "trail_status", json!({})).await;
     assert!(ok && listed == "This ant conducts no run that has not ended.", "{listed}");
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The outcome of `order` once its machine's daemon recorded it.
+async fn order_outcome(js: &async_nats::jetstream::Context, order: &AdminOrder) -> AdminOutcome {
+    let machines = DirectKv::new(js, None, MACHINES_BUCKET).await.unwrap();
+    let mut decided = None;
+    eventually("the order is decided", async || {
+        decided = machines.get(&order.outcome_key()).await.unwrap();
+        decided.is_some()
+    })
+    .await;
+    serde_json::from_slice(&decided.unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn admin_orders_stop_and_resume_a_run_once_the_conductor_s_daemon_is_back() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let (_, js) = ants_daemon::bus::connect(&server.url, None, None, &UserId::human(), "admin").await.unwrap();
+    ants_daemon::bus::ensure_stream(&js).await.unwrap();
+    js.create_key_value(ants_daemon::hub::machines_config()).await.unwrap();
+    let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
+    let run = lead.start(r#"await agent("go", ant="dev")"#, TrailLimits::default()).await;
+    let step = lead.step().await;
+
+    let (account, key, alice) = (nkeys::KeyPair::new_account(), nkeys::KeyPair::new_user(), ant("alice"));
+    let jwt = user_jwt(&account, &key, &alice, ants_proto::ADMIN_TAG);
+    let m1: Machine = "m1".parse().unwrap();
+    let order = |op| {
+        let mut order = AdminOrder::new(alice.clone(), m1.clone(), ant("lead"), op, jwt.clone());
+        order.signature = data_encoding::BASE64URL_NOPAD.encode(&key.sign(&order.signed()).unwrap());
+        order
+    };
+    let publish = async |order: &AdminOrder| {
+        let message = async_nats::jetstream::message::PublishMessage::build()
+            .payload(serde_json::to_vec(order).unwrap().into())
+            .message_id(order.id.to_string());
+        js.send_publish(order.subject(), message).await.unwrap().await.unwrap();
+    };
+
+    // m1's daemon is away: the order waits in the stream.
+    let stop = order(AdminOp::StopTrail { run: run.clone() });
+    publish(&stop).await;
+    // Back, it takes the order while the daemon serving lead connects, and applies it once lead conducts its runs.
+    let restarts = Restarts::default();
+    let _served = restarts.serve(&ant("lead"));
+    let orders = ants_daemon::admin::Orders {
+        machine: m1.clone(),
+        nats: server.url.clone(),
+        remote: true,
+        accounts: vec![account.public_key()],
+        config: None,
+        creds: None,
+        js_domain: None,
+        restarts: restarts.clone(),
+        providers: Default::default(),
+        leaf: None,
+        hold: ants_daemon::admin::held::Hold::new(Registry::new(UserId::human())),
+    };
+    let taking = tokio::spawn(ants_daemon::admin::serve(js.clone(), None, orders));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(lead.header(&run).await.state, RunState::Running, "not stopped before lead conducts its runs");
+    let conducted = restarts.conduct(&ant("lead"), &lead.trails);
+    let stopped = order_outcome(&js, &stop).await;
+    assert_eq!((stopped.state, stopped.admin.as_ref()), (OrderState::Applied, Some(&alice)), "{stopped:?}");
+    let waiting = vec![WaitingStep { to: ant("dev"), message: step.id }];
+    let answer: TrailOutcome = serde_json::from_value(stopped.result.unwrap()).unwrap();
+    assert_eq!(answer, TrailOutcome::Stopped { run: run.clone(), waiting }, "the steps for the admin to withdraw");
+    assert_eq!(lead.header(&run).await.state, RunState::Stopped { by: alice.clone() });
+    assert!(lead.told().await.text.contains("was stopped by alice"));
+
+    let limits = TrailLimits { steps: 9, turns: 40, ..TrailLimits::DEFAULT };
+    let resume = order(AdminOp::ResumeTrail { run: run.clone(), limits: Some(limits) });
+    publish(&resume).await;
+    let resumed = order_outcome(&js, &resume).await;
+    assert_eq!(resumed.state, OrderState::Applied, "{resumed:?}");
+    assert_eq!(
+        serde_json::from_value::<TrailOutcome>(resumed.result.unwrap()).unwrap(),
+        TrailOutcome::Resumed { run: run.clone() }
+    );
+    assert_eq!(lead.header(&run).await.limits, limits, "the run's record keeps the limits the order gave");
+    let step = lead.step().await;
+    assert!(lead.reply(&step, "went").await);
+    assert_eq!(lead.ended(&run).await, RunState::Done { result: json!("went") });
+
+    let refusals = [
+        (AdminOp::StopTrail { run: run.clone() }, format!("run {run} has ended")),
+        (AdminOp::ResumeTrail { run: run.clone(), limits: None }, format!("run {run} is done")),
+        (AdminOp::StopTrail { run: RunId::generate() }, "lead conducts no run".to_owned()),
+    ];
+    for (op, why) in refusals {
+        let refused = order(op);
+        publish(&refused).await;
+        let refused = order_outcome(&js, &refused).await;
+        assert_eq!(refused.state, OrderState::Refused, "{refused:?}");
+        assert!(refused.reason.as_deref().unwrap().contains(&why), "{why}: {refused:?}");
+    }
+    drop(conducted);
+    taking.abort();
 }

@@ -9,7 +9,9 @@ use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
 
 use crate::admin::settings::{self, Assignment};
-use crate::admin::{mcp, memories, orders, pause, restart};
+use crate::admin::{mcp, memories, orders, pause, restart, trail};
+use crate::cmd::trail::LimitArgs;
+use crate::cmd::trail::runs::Pick;
 use crate::serve::AntOptions;
 use crate::{ant, avatars, completions, export, sense_id};
 
@@ -212,6 +214,26 @@ pub(crate) enum AntCommand {
         #[command(flatten)]
         order: Order,
     },
+    /// Stop RUN, a trail run ANT conducts, by admin order: the daemon of its machine stops it as `ants trail stop` has
+    /// the conductor do, and while that daemon is away the order waits for it. Prints the steps still waiting in other
+    /// ants' queues, each with the command withdrawing it. Needs a human device's admin credentials.
+    StopTrail {
+        #[command(flatten)]
+        order: Order,
+        /// The run's id, or a unique start of one among ANT's runs (`ants trail runs --ant ANT`).
+        run: Pick,
+    },
+    /// Resume RUN, a stopped trail run ANT conducts or one failed on a limit, by admin order: the daemon of its machine
+    /// resumes it as `ants trail resume` has the conductor do, and while that daemon is away the order waits for it.
+    /// Limits given replace the run's own. Needs a human device's admin credentials.
+    ResumeTrail {
+        #[command(flatten)]
+        order: Order,
+        /// The run's id, or a unique start of one among ANT's runs (`ants trail runs --ant ANT`).
+        run: Pick,
+        #[command(flatten)]
+        limits: LimitArgs,
+    },
     /// Export ANT to a file another bus imports it from (`ants ant import`): its identity record (id, birth, avatar,
     /// prompts), the settings that make it (whoami, harness, model, reasoning_effort, context, fallback) and its
     /// home's memory files, packed between prompts, and the part of its provider when the provider exports one, which
@@ -299,6 +321,12 @@ pub(crate) async fn run(nats: &crate::connection::Nats<'_>, command: AntCommand)
         AntCommand::Pause { order: Order { ant, machine, wait } } => pause::run(nats, &ant, machine, true, wait).await,
         AntCommand::Resume { order: Order { ant, machine, wait } } => {
             pause::run(nats, &ant, machine, false, wait).await
+        }
+        AntCommand::StopTrail { order: Order { ant, machine, wait }, run } => {
+            trail::stop(nats, trail::Ordered { ant: &ant, run: &run, machine, wait }).await
+        }
+        AntCommand::ResumeTrail { order: Order { ant, machine, wait }, run, limits } => {
+            trail::resume(nats, trail::Ordered { ant: &ant, run: &run, machine, wait }, limits).await
         }
         AntCommand::Export { ant, out, seal, config, no_provider } => {
             Box::pin(export::export(nats, &ant, out, seal, config, !no_provider)).await
