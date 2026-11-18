@@ -4,7 +4,8 @@
 //! a review thread of its own ([`Review`]), else, as when the sage did not answer within [`SAGE_TIMEOUT_HOURS`] or
 //! answered with nothing readable, to the ant itself on a new dream thread with the packet alone
 //! ([`Dream::wake_due`]). The sage's findings prompt the ant on the review thread inside a marked block
-//! ([`answered`]); an answer without findings wakes nobody.
+//! ([`answered`]); an answer without findings wakes nobody, and the findings of one come after the ant was woken with
+//! the packet alone are offered in the next dream ([`Review::late`]).
 //!
 //! sense runs no model: it only gathers what a review judges and records what the ant decides. Each dream is an item of
 //! kind [`DREAM`], numbered, the last one named by a record of kind [`DREAMS`], so a daemon taking over dreams no sooner.
@@ -677,11 +678,13 @@ pub async fn proposal_due(items: &dyn Items, last: Option<&Dream>, now: DateTime
     Ok(proposal::pending(items).await?.iter().any(|found| found.proposal.ripe() <= now && !offered(found.id())))
 }
 
-/// Finding `id` (`<dream>.<n>`) of the dream that offered it; none when no dream has it.
+/// Finding `id` (`<dream>.<n>`) of the dream that offered it, or whose sage's answer gave it late ([`Review::late`]);
+/// none when no dream has it.
 pub async fn finding(items: &dyn Items, id: &str) -> Result<Option<Finding>, StoreError> {
     let Some(number) = id.split_once('.').and_then(|(number, _)| number.parse().ok()) else { return Ok(None) };
     let Some((dream, _)) = get(items, number).await? else { return Ok(None) };
-    Ok(dream.findings.into_iter().find(|finding| finding.id == id))
+    let late = dream.review.into_iter().flat_map(|review| review.late);
+    Ok(dream.findings.into_iter().chain(late).find(|finding| finding.id == id))
 }
 
 /// Why a persona or skill proposal made in `context`, in answer to `finding` if it names one, rests on untrusted text;
@@ -774,7 +777,8 @@ impl Gathered {
     }
 }
 
-/// The findings of dream `number`, beginning as `start` says after `previous`: the open findings of
+/// The findings of dream `number`, beginning as `start` says after `previous`: the findings of the sage's answer to
+/// the review of `previous` come after the ant was woken with the packet alone ([`Review::late`]), the open findings of
 /// `previous` that still hold, then the packet's own on what they do not cover yet, those on memories and proposals
 /// first, then those on the identity of the ant ([`identity_findings`]), then those on its practice as a sage from the
 /// records of the `reviews` it made ([`practice_findings`]), then those on the vital signs of the work ([`vitals`]), up
@@ -796,7 +800,8 @@ async fn findings(
     let identity_found = identity_findings::gather(items, &start.writer.ant).await?;
     let practice = practice_findings::gather(items, reviews, ages).await?;
     let vital = vitals::gather(&start.vitals, &vitals::trend(items, number).await?);
-    let mut found: Vec<Finding> = Vec::new();
+    let late = previous.and_then(|previous| previous.review.as_ref()).map(|review| review.late.iter());
+    let mut found: Vec<Finding> = late.into_iter().flatten().cloned().collect();
     for open in previous.into_iter().flat_map(Dream::open) {
         let mut open = open.clone();
         let holds = match open.kind {

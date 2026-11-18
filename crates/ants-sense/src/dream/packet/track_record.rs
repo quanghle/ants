@@ -99,7 +99,7 @@ pub async fn track_record(
     };
     let mut tallies: BTreeMap<String, FindingTally> = BTreeMap::new();
     for earlier in dreams.iter().filter(|earlier| earlier.sage.as_ref() == Some(sage)) {
-        for (n, finding) in own(earlier).enumerate() {
+        for (n, (finding, _)) in own(earlier).enumerate() {
             let found = verdicts.get(finding.id.as_str()).copied();
             let verdict = found.map(|(_, verdict)| verdict);
             let (mut written, mut signs) = (Vec::new(), None);
@@ -240,14 +240,28 @@ fn signs_line(before: &[(u64, Signs)], since: &[(u64, Signs)]) -> String {
     line
 }
 
-/// The findings the sage gave in the review of `dream`.
-fn own(dream: &Dream) -> impl Iterator<Item = &Finding> {
-    dream.findings.iter().filter(|finding| finding.kind == FindingKind::Sage && finding.dream() == dream.number)
+/// The findings the sage gave in the review of `dream`, each with its id in the sage's record of the review, numbered
+/// as the answer gave them: those of an answer in time, as the dream offered them, then those of a late one
+/// ([`Review::late`]).
+///
+/// [`Review::late`]: crate::dream::Review::late
+fn own(dream: &Dream) -> impl Iterator<Item = (&Finding, String)> {
+    let number = dream.number;
+    let in_time =
+        dream.findings.iter().filter(move |finding| finding.kind == FindingKind::Sage && finding.dream() == number);
+    let late = dream
+        .review
+        .iter()
+        .flat_map(|review| &review.late)
+        .zip(1..)
+        .map(move |(finding, n)| (finding, format!("{number}.{n}")));
+    in_time.map(|finding| (finding, finding.id.clone())).chain(late)
 }
 
 /// What the review of dream `number`, by `ages` of the ant's active time, tells `sage` of its earlier findings for the
 /// ant: those of the dreams [`track_record`] covers whose last verdict, or for one applied whether what was written
-/// for it still holds ([`outcome`]), is new since the ant's earlier reviews by `sage` told them, the oldest first.
+/// for it still holds ([`outcome`]), is new since the ant's earlier reviews by `sage` told them, the oldest first, each
+/// by its id in the sage's record of its review ([`own`]).
 pub(in crate::dream) async fn outcomes(
     items: &dyn Items,
     number: u64,
@@ -264,7 +278,7 @@ pub(in crate::dream) async fn outcomes(
         }
     }
     let mut outcomes = Vec::new();
-    for finding in by_sage.into_iter().flat_map(own) {
+    for (finding, told_as) in by_sage.into_iter().flat_map(own) {
         let Some((_, verdict)) = verdicts.get(finding.id.as_str()) else { continue };
         let mut holds = verdict.verdict == Judgement::Applied;
         if holds {
@@ -280,8 +294,8 @@ pub(in crate::dream) async fn outcomes(
             Judgement::Rejected => FindingVerdict::Rejected,
             Judgement::Deferred => FindingVerdict::Deferred,
         };
-        if told.get(finding.id.as_str()) != Some(&(verdict, holds)) {
-            outcomes.push(FindingOutcome { finding: finding.id.clone(), verdict, holds });
+        if told.get(told_as.as_str()) != Some(&(verdict, holds)) {
+            outcomes.push(FindingOutcome { finding: told_as, verdict, holds });
         }
     }
     Ok(outcomes)
