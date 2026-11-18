@@ -1,0 +1,158 @@
+use serde_json::{Value, json};
+
+use super::serve;
+use crate::protocol::{Answer, Call, Event, Function, Limits, Request, Response};
+
+const META: &str = "meta = {\"name\": \"t\", \"description\": \"a test\", \"phases\": []}\n";
+
+fn start(script: &str, limits: Limits) -> Response {
+    let request = Request::Start {
+        script: format!("{META}{script}"),
+        args: json!({"items": ["a", "b", "c"]}),
+        limits,
+        clock: 1_700_000_000,
+        seed: 7,
+    };
+    serve(&serde_json::to_string(&request).unwrap())
+}
+
+fn resume_with(response: &Response, answers: &[(u32, Answer)], limits: Limits, steps: u32) -> Response {
+    let Response::Suspended { snapshot, .. } = response else { panic!("not suspended: {response:?}") };
+    let request = Request::Resume { snapshot: snapshot.clone(), answers: answers.to_vec(), limits, seed: 7, steps };
+    serve(&serde_json::to_string(&request).unwrap())
+}
+
+fn resume(response: &Response, answers: &[(u32, Answer)], steps: u32) -> Response {
+    resume_with(response, answers, Limits::default(), steps)
+}
+
+fn calls(response: &Response) -> Vec<Call> {
+    match response {
+        Response::Suspended { calls, .. } => calls.clone(),
+        other => panic!("not suspended: {other:?}"),
+    }
+}
+
+fn result(response: Response) -> Value {
+    match response {
+        Response::Done { result, .. } => result,
+        other => panic!("not done: {other:?}"),
+    }
+}
+
+fn error(response: Response) -> String {
+    match response {
+        Response::Failed { error, .. } => error,
+        other => panic!("not failed: {other:?}"),
+    }
+}
+
+const FAN_OUT: &str = r#"
+async def item(name):
+    first = await agent(f"first {name}")
+    return await agent(f"then {first}", label=name)
+
+await parallel(*[item(name) for name in args["items"]])
+"#;
+
+#[test]
+fn call_ids_do_not_depend_on_how_answers_are_batched() {
+    let started = start(FAN_OUT, Limits::default());
+    let first = calls(&started);
+    assert_eq!(first.len(), 3);
+    assert_eq!(first[0].function, Function::Agent);
+    assert_eq!(first[0].args, json!({"prompt": "first a"}));
+
+    let answers = [(first[2].call, Answer::Ok(json!("C"))), (first[0].call, Answer::Ok(json!("A")))];
+    let batched = resume(&started, &answers, 3);
+    let one = resume(&started, &answers[..1], 3);
+    let two = resume(&one, &answers[1..], 4);
+    let mut separate = calls(&one);
+    separate.extend(calls(&two));
+    assert_eq!(calls(&batched), separate);
+    assert_eq!(separate[0].args, json!({"prompt": "then C", "label": "c"}));
+    let Response::Suspended { pending, .. } = &batched else { unreachable!() };
+    assert_eq!(pending.len(), 3);
+}
+
+#[test]
+fn phase_log_and_print_are_events_in_order() {
+    let script = "phase('scan')\nprint('a', 1)\nlog('b')\nprint('partial', end='')\n'end'\n";
+    let Response::Done { result, events } = start(script, Limits::default()) else { panic!() };
+    assert_eq!(result, json!("end"));
+    let logs = ["a 1", "b", "partial"].map(|s| Event::Log(s.to_owned()));
+    assert_eq!(events[0], Event::Phase("scan".to_owned()));
+    assert_eq!(events[1..], logs);
+}
+
+#[test]
+fn the_clock_and_random_are_fixed_by_the_request() {
+    let script = "import datetime, random, os\n[datetime.datetime.now().year, random.random(), os.urandom(4).hex()]\n";
+    let first = result(start(script, Limits::default()));
+    assert_eq!(first, result(start(script, Limits::default())));
+    assert_eq!(first[0], json!(2023));
+}
+
+#[test]
+fn other_os_calls_raise_in_the_script() {
+    for (call, raised) in [
+        ("open('/etc/hosts').read()", "PermissionError"),
+        ("import os; os.getenv('HOME')", "RuntimeError"),
+        ("import time; time.sleep(1)", "RuntimeError"),
+        ("import socket", "ModuleNotFoundError"),
+    ] {
+        let script = format!("try:\n    {call}\n    r = 'ran'\nexcept Exception as e:\n    r = type(e).__name__\nr\n");
+        assert_eq!(result(start(&script, Limits::default())), json!(raised), "{call}");
+    }
+}
+
+#[test]
+fn an_error_answer_raises_where_the_call_is_awaited() {
+    let script = "try:\n    await agent('x')\nexcept RuntimeError as e:\n    r = str(e)\nr\n";
+    let started = start(script, Limits::default());
+    let call = calls(&started)[0].call;
+    assert_eq!(result(resume(&started, &[(call, Answer::Error("no ant".to_owned()))], 1)), json!("no ant"));
+}
+
+#[test]
+fn an_uncaught_error_fails_with_the_traceback_of_the_script() {
+    let error = error(start("def f():\n    raise ValueError('bad')\nf()\n", Limits::default()));
+    assert!(error.contains("File \"trail.py\", line 4, in <module>"), "{error}");
+    assert!(error.contains("File \"trail.py\", line 3, in f"), "{error}");
+    assert!(error.ends_with("ValueError: bad"), "{error}");
+}
+
+#[test]
+fn the_call_past_the_step_limit_raises() {
+    let script = "for i in range(5):\n    try:\n        await agent(str(i))\n    except RuntimeError as e:\n        r = str(e)\n        break\nr\n";
+    let limits = Limits { steps: 1, ..Limits::default() };
+    let started = start(script, limits);
+    let call = calls(&started)[0].call;
+    let done = resume_with(&started, &[(call, Answer::Ok(json!(1)))], limits, 1);
+    assert_eq!(result(done), json!("the run reached its limit of 1 steps"));
+}
+
+#[test]
+fn a_step_argument_json_cannot_hold_raises_type_error() {
+    let error = error(start("await agent({1, 2})\n", Limits::default()));
+    assert!(error.ends_with("TypeError: agent() takes JSON values: a set is not a JSON value"), "{error}");
+}
+
+#[test]
+fn a_session_dumped_past_its_limit_fails() {
+    let limits = Limits { dump_bytes: 1024, ..Limits::default() };
+    let error = error(start("await agent('x')\n", limits));
+    assert!(
+        error.starts_with("the dumped session of ") && error.ends_with("passes the limit of 1024 bytes"),
+        "{error}"
+    );
+}
+
+#[test]
+fn bad_requests_are_refused() {
+    assert!(matches!(serve("{"), Response::Refused { .. }));
+    let started = start("await agent('x')\n", Limits::default());
+    assert!(matches!(started, Response::Suspended { .. }));
+    let request = json!({"resume": {"snapshot": {"nope": 1}, "answers": [], "limits": {}, "seed": 7, "steps": 0}});
+    assert!(matches!(serve(&request.to_string()), Response::Refused { .. }));
+}
