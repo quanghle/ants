@@ -6,16 +6,25 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use agent_client_protocol::v1::schema::McpServer;
+use ants_daemon::harness::McpSession;
+use ants_daemon::mcp::Mcp;
 use ants_daemon::people::humans::Registry;
 use ants_daemon::records::direct_kv::DirectKv;
+use ants_daemon::stream::notes::JetStreamNotes;
 use ants_daemon::trail::{Conducting, StartRun, Trails};
 use ants_proto::provider::{Origin, Starter};
 use ants_proto::{
     ColonyEntry, Envelope, Pick, Role, RunId, RunState, TRAIL_RUNS_BUCKET, ThreadId, TrailAction, TrailLimits,
-    TrailOutcome, TrailReply, TrailRequest, TrailRun, TrailSource, UserId, subject, trail_run_key,
+    TrailOutcome, TrailReply, TrailRequest, TrailRun, TrailSource, TrailStart, UserId, subject, trail_run_key,
 };
 use ants_test_support::{NatsServer, eventually, eventually_within, scratch_dir};
 use futures::StreamExt as _;
+use rmcp::model::{CallToolRequestParams, ClientConfig};
+use rmcp::service::RunningService;
+use rmcp::transport::StreamableHttpClientTransport;
+use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+use rmcp::{RoleClient, ServiceExt as _};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -51,6 +60,16 @@ async fn init(server: &NatsServer) {
 
 /// The conductor `lead`'s daemon, its runs continued, with `worker` as the `ants` binary and `colony` as the colony.
 async fn conductor(server: &NatsServer, worker: &Path, colony: Vec<ColonyEntry>) -> Conductor {
+    conductor_saving(server, worker, colony, None).await
+}
+
+/// Like [`conductor`], with the machine's saved trails in `trails_dir`.
+async fn conductor_saving(
+    server: &NatsServer,
+    worker: &Path,
+    colony: Vec<ColonyEntry>,
+    trails_dir: Option<PathBuf>,
+) -> Conductor {
     let lead = ant("lead");
     let (client, js) = ants_daemon::bus::connect(&server.url, None, None, &lead, "conductor").await.unwrap();
     let attempts = ants_daemon::bus::ensure_attempts(&js, None, &lead).await.unwrap();
@@ -73,11 +92,12 @@ async fn conductor(server: &NatsServer, worker: &Path, colony: Vec<ColonyEntry>)
         client: client.clone(),
         ant: lead,
         worker: worker.to_owned(),
-        trails_dir: None,
+        trails_dir,
         humans: Registry::new(UserId::human()),
         colony,
         outbox,
         attempts,
+        workers: ants_daemon::trail::DEFAULT_WORKERS,
     };
     let trails = Trails::new(conducting).await.unwrap();
     trails.restore().await;
@@ -348,4 +368,97 @@ async fn a_run_past_its_wall_time_fails() {
     .await;
     let RunState::Failed { error } = state else { panic!("not failed: {state:?}") };
     assert!(error.contains("wall time"), "{error}");
+}
+
+#[tokio::test]
+async fn a_schedule_s_firing_starts_its_saved_trail_once_on_its_thread() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let dir = scratch_dir("trail-fired");
+    std::fs::write(dir.join("count.py"), format!("{META}args[\"n\"] + 1\n")).unwrap();
+    let lead = conductor_saving(&server, &ants_binary(), Vec::new(), Some(dir.clone())).await;
+    let fire = |start: &TrailStart| {
+        Envelope::new(ant("nightly"), ant("lead"), "Scheduled run of trail.")
+            .with_owner(Some(UserId::human()))
+            .from_webhook()
+            .starting(Some(start.clone()))
+    };
+    let start = TrailStart { trail: "count".parse().unwrap(), args: json!({"n": 1}) };
+    let firing = fire(&start);
+
+    let run = lead.trails.start_fired(&firing, &start).await.unwrap();
+    assert_eq!(run.as_str(), firing.id.to_string(), "the run takes the firing's id");
+    assert_eq!(lead.ended(&run).await, RunState::Done { result: json!(2) });
+    let header = lead.header(&run).await;
+    assert_eq!((&header.thread, header.owner.as_ref()), (&firing.thread_id, Some(&UserId::human())));
+    assert_eq!(header.trail.as_ref(), Some(&start.trail));
+    assert!(!header.origin.trusted(), "a schedule's run is as untrusted as a webhook's: {:?}", header.origin);
+    assert_eq!(lead.trails.start_fired(&firing, &start).await.unwrap(), run, "delivered again");
+    assert_eq!(lead.header(&run).await.started_at, header.started_at, "no run starts again");
+
+    let missing = TrailStart { trail: "gone".parse().unwrap(), args: Value::Null };
+    let error = lead.trails.start_fired(&fire(&missing), &missing).await.unwrap_err();
+    assert!(error.contains("no trail is saved as gone"), "{error}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// An MCP client of `lead`'s tools as a session of `thread`.
+async fn mcp_client(mcp: &Mcp, thread: &ThreadId) -> RunningService<RoleClient, ClientConfig> {
+    let session = McpSession { thread, dir: Path::new("/"), harness: "test", model: None, http: true };
+    let [McpServer::Http(server)] = &mcp.servers()(&session)[..] else { panic!("one HTTP server") };
+    let token = server.headers[0].value.strip_prefix("Bearer ").unwrap();
+    let config = StreamableHttpClientTransportConfig::with_uri(server.url.as_str()).auth_header(token);
+    ClientConfig::default().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap()
+}
+
+/// Call `run_trail` with `args`: whether it succeeded, and its text.
+async fn run_trail(client: &RunningService<RoleClient, ClientConfig>, args: Value) -> (bool, String) {
+    let Value::Object(args) = args else { panic!("arguments are an object") };
+    let result = client.call_tool(CallToolRequestParams::new("run_trail").with_arguments(args)).await.unwrap();
+    let text = result.content.iter().filter_map(|c| c.as_text()).map(|t| t.text.as_str()).collect();
+    (result.is_error != Some(true), text)
+}
+
+#[tokio::test]
+async fn run_trail_starts_a_saved_or_inline_trail_and_a_webhook_s_thread_runs_only_saved_ones() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let dir = scratch_dir("trail-mcp");
+    std::fs::create_dir_all(dir.join("saved")).unwrap();
+    std::fs::write(dir.join("saved/count.py"), format!("{META}args[\"n\"] + 1\n")).unwrap();
+    let lead = conductor_saving(&server, &ants_binary(), Vec::new(), Some(dir.join("saved"))).await;
+    let outbox: ants_daemon::mcp::Outbox = Arc::new(|_| Box::pin(async { Ok(()) }));
+    let colony: ants_daemon::mcp::Colony = Arc::new(|| Box::pin(async { Ok(Vec::new()) }));
+    let notes = Arc::new(JetStreamNotes::new(lead.js.clone(), ant("lead")));
+    let humans = Registry::new(UserId::human());
+    let mcp = Mcp::start(ant("lead"), &dir.join("home"), outbox, colony, notes, humans, None).await.unwrap();
+    mcp.with_trails(lead.trails.clone());
+
+    let asked = Envelope::new(UserId::human(), ant("lead"), "count").with_owner(Some(UserId::human()));
+    let _turn = mcp.begin(&asked);
+    let client = mcp_client(&mcp, &asked.thread_id).await;
+    let script = format!("{META}args[\"n\"] * 10\n");
+    let (ok, text) = run_trail(&client, json!({"script": script, "args": {"n": 4}, "wait": true})).await;
+    assert!(ok && text.ends_with("is done. Result:\n40"), "{text}");
+    let (ok, text) = run_trail(&client, json!({"name": "count", "args": {"n": 4}})).await;
+    assert!(ok && text.starts_with("Started run "), "{text}");
+    let run: RunId = text["Started run ".len()..].split_once(' ').unwrap().0.parse().unwrap();
+    assert_eq!(lead.ended(&run).await, RunState::Done { result: json!(5) });
+    let header = lead.header(&run).await;
+    assert_eq!((&header.thread, header.owner.as_ref()), (&asked.thread_id, Some(&UserId::human())));
+    let (ok, text) = run_trail(&client, json!({"name": "count", "script": script})).await;
+    assert!(!ok && text.contains("either `name` or `script`"), "{text}");
+
+    let hooked = Envelope::new(ant("github"), ant("lead"), "an issue").from_webhook();
+    let _turn = mcp.begin(&hooked);
+    let client = mcp_client(&mcp, &hooked.thread_id).await;
+    let (ok, text) = run_trail(&client, json!({"script": script, "args": {"n": 1}})).await;
+    assert!(!ok && text.contains("only saved trails"), "{text}");
+    let (ok, text) = run_trail(&client, json!({"name": "count", "args": {"n": 1}, "wait": true})).await;
+    assert!(ok && text.ends_with("is done. Result:\n2"), "{text}");
+
+    let idle = ThreadId::generate();
+    let (ok, text) = run_trail(&mcp_client(&mcp, &idle).await, json!({"name": "count"})).await;
+    assert!(!ok && text.contains("no message is being handled"), "{text}");
+    std::fs::remove_dir_all(&dir).unwrap();
 }

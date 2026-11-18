@@ -162,6 +162,9 @@ pub struct Ant {
     /// The file's `[memory_pressure]` table.
     #[serde(skip)]
     pub memory_pressure: pressure::Settings,
+    /// The file's `[trails] workers`.
+    #[serde(skip)]
+    pub trail_workers: usize,
     /// What `provider` names among the file's providers; sense while it names none.
     #[serde(skip)]
     pub provider_setting: Setting,
@@ -259,6 +262,7 @@ impl Ant {
             machine: None,
             storage: storage::Settings::default(),
             memory_pressure: pressure::Settings::default(),
+            trail_workers: crate::trail::DEFAULT_WORKERS,
             provider_setting: Setting::Sense,
         }
     }
@@ -319,6 +323,7 @@ impl Ant {
                 max_harnesses: self.max_harnesses,
                 idle_timeout: self.idle_timeout,
                 memory_pressure: self.memory_pressure,
+                trail_workers: self.trail_workers,
             },
             worktrees: WorktreeSettings { per_thread: self.worktrees, base: self.worktree_base, publish: self.publish },
             policy: Policy {

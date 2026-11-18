@@ -12,7 +12,7 @@ use ants_daemon::schedule::Mentions;
 use ants_daemon::sync::MutexExt as _;
 use ants_proto::{
     CHANNELS_BUCKET, ChannelEntry, ChannelId, ChannelPost, Destination, Envelope, JsDomain, SERVING_EVERY, ThreadId,
-    UserId, WEBHOOKS_BUCKET, subject, webhook_marker_key,
+    TrailStart, UserId, WEBHOOKS_BUCKET, subject, webhook_marker_key,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream;
@@ -76,6 +76,8 @@ pub(crate) struct Delivery<'a> {
     /// The stream's `Nats-Msg-Id` of the message.
     pub(crate) message_id: String,
     pub(crate) text: String,
+    /// The trail run the ant is to start ([`Envelope::trail_start`]); for an ant only.
+    pub(crate) trail: Option<&'a TrailStart>,
 }
 
 /// The thread an event went to, if known, and whether it went there before.
@@ -121,7 +123,7 @@ impl Bus {
 
     /// Deliver `event` as a new thread unless it was delivered already, and return once the hub's stream stored it.
     pub(crate) async fn deliver(&self, event: Delivery<'_>) -> Result<Delivered> {
-        let Delivery { from, destination, mentions, owner, allow, key, message_id, text } = event;
+        let Delivery { from, destination, mentions, owner, allow, key, message_id, text, trail } = event;
         let allow = allow.map(<[String]>::to_vec);
         if let Some(seen) = self.seen(&key).await? {
             return Ok(Delivered { thread: Some(seen.thread), duplicate: true });
@@ -132,6 +134,7 @@ impl Bus {
                 let message = Envelope::new(from.clone(), ant.clone(), text)
                     .with_owner(owner.cloned())
                     .with_allow(allow)
+                    .starting(trail.cloned())
                     .from_webhook();
                 if let Some(owner) = owner {
                     owners::recording(&self.js, self.js_domain.as_ref(), &message.thread_id, ant, owner).await;

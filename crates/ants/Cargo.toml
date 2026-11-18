@@ -46,6 +46,7 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 agent-client-protocol = { workspace = true, features = ["stdio"] }
 ants-test-support.workspace = true
 chrono = { workspace = true, features = ["clock"] }
+rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 
 

@@ -10,14 +10,9 @@ use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use futures::stream::{FuturesUnordered, StreamExt as _};
-use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use super::{Answer, Slot, Step, Trails, load, locked, report, steps};
-
-/// Workers computing at once, across all the daemon's runs.
-pub const WORKERS: usize = 4;
-static COMPUTING: Semaphore = Semaphore::const_new(WORKERS);
 
 /// How long a pass that failed waits before the next, at first and at most.
 const RETRY_FIRST: Duration = Duration::from_secs(1);
@@ -156,7 +151,7 @@ impl Trails {
     /// Let the script compute in a worker, once one of the daemon's is free: an error leaving the run unchanged is
     /// returned, for the pass to be tried again; any other fails the run.
     async fn compute(&self, engine: &mut Run) -> Result<Progress> {
-        let _computing = COMPUTING.acquire().await?;
+        let _computing = super::computing().acquire().await?;
         match engine.resume(&self.inner.worker).await {
             Ok(progress) => Ok(progress),
             Err(RunError::Worker(e)) => Err(anyhow!(e).context("running the trail's worker")),

@@ -174,6 +174,10 @@ fn envelope() -> Envelope {
             local: Some("/home/dev/app/.git".to_owned()),
         }],
         trail_step: Some(Box::new(trail_step())),
+        trail_start: Some(Box::new(TrailStart {
+            trail: "nightly-audit".parse().unwrap(),
+            args: serde_json::json!({"repo": "app"}),
+        })),
         sent_at: at(0),
     }
 }
@@ -203,6 +207,7 @@ fn plain_envelope() -> Envelope {
         notice: None,
         review_commits: Vec::new(),
         trail_step: None,
+        trail_start: None,
         ..envelope()
     }
 }

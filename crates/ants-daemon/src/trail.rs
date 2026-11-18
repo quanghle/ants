@@ -19,18 +19,18 @@ mod tests;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use ants_proto::provider::{Origin, Starter};
 use ants_proto::{
     Envelope, JsDomain, MAX_TRAIL_ARGS, MAX_TRAIL_SCRIPT, PendingCall, QueuedCall, Role, RunId, RunState, ThreadId,
-    TrailFunction, TrailLimits, TrailRun, TrailSession, TrailSource, UserId, WaitingStep,
+    TrailFunction, TrailLimits, TrailRun, TrailSession, TrailSource, TrailStart, UserId, WaitingStep,
 };
 use ants_trail::{Answer, JournalEntry, Limits, Run, Worker};
 use anyhow::Result;
 use chrono::Utc;
 use serde_json::Value;
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 
 use crate::mcp::{Colony, Outbox};
 use crate::people::humans::Registry;
@@ -38,6 +38,21 @@ use crate::records::direct_kv::DirectKv;
 use saved::Saved;
 use steps::Taken;
 use store::Store;
+
+/// How to write a trail, in brief, for the tool starting runs to teach.
+pub const GUIDE: &str = ants_trail::GUIDE;
+
+/// Workers computing at once across the process's runs, unless `[trails] workers` sets otherwise.
+pub const DEFAULT_WORKERS: usize = 4;
+/// Most workers `[trails] workers` may set.
+pub const MAX_WORKERS: usize = 16;
+
+static COMPUTING: OnceLock<Semaphore> = OnceLock::new();
+
+/// The workers the process's runs compute in: as many as the first conductor started asked for.
+fn computing() -> &'static Semaphore {
+    COMPUTING.get_or_init(|| Semaphore::new(DEFAULT_WORKERS))
+}
 
 /// What a daemon conducts trails with.
 pub struct Conducting {
@@ -55,6 +70,8 @@ pub struct Conducting {
     pub outbox: Outbox,
     /// The conductor's attempts bucket, where it withdraws its own steps.
     pub attempts: DirectKv,
+    /// Workers computing at once across the process's runs, 1 to [`MAX_WORKERS`]: the first conductor's count holds.
+    pub workers: usize,
 }
 
 /// A run to start: what the MCP tool, a schedule and a human's [`ants_proto::TrailRequest`] ask for.
@@ -161,8 +178,9 @@ fn engine_limits(limits: &TrailLimits) -> Limits {
 
 impl Trails {
     pub async fn new(conducting: Conducting) -> Result<Self> {
-        let Conducting { js, js_domain, client, ant, worker, trails_dir, humans, colony, outbox, attempts } =
+        let Conducting { js, js_domain, client, ant, worker, trails_dir, humans, colony, outbox, attempts, workers } =
             conducting;
+        COMPUTING.get_or_init(|| Semaphore::new(workers.clamp(1, MAX_WORKERS)));
         let store = Store::new(&js, js_domain.as_ref(), ant.clone()).await?;
         let saved = Saved::new(&js, js_domain.as_ref(), trails_dir).await;
         let (wake, woken) = mpsc::unbounded_channel();
@@ -190,6 +208,38 @@ impl Trails {
 
     /// Start a run: its records are stored and its first pass is due when this returns.
     pub async fn start(&self, start: StartRun) -> Result<RunId, String> {
+        self.start_as(RunId::generate(), start).await
+    }
+
+    /// Start the run of the saved trail `start` that `firing`, a schedule's message to the conductor, asks for: on the
+    /// firing's thread, answering to its owner. The run takes the firing's id, so a firing delivered again starts none.
+    pub async fn start_fired(&self, firing: &Envelope, start: &TrailStart) -> Result<RunId, String> {
+        let run =
+            firing.id.to_string().parse::<RunId>().map_err(|e| format!("the firing's id makes no run id: {e}"))?;
+        if self.run(&run).await?.is_some() {
+            return Ok(run);
+        }
+        let start = StartRun {
+            trail: TrailSource::Saved(start.trail.clone()),
+            args: start.args.clone(),
+            owner: firing.owner.clone(),
+            origin: crate::provider::context::origin(firing, None, &self.inner.humans.humans()),
+            thread: firing.thread_id.clone(),
+            limits: TrailLimits::default(),
+        };
+        self.start_as(run, start).await
+    }
+
+    /// Run `run` as held or stored: None when the conductor has no such run.
+    pub async fn run(&self, run: &RunId) -> Result<Option<TrailRun>, String> {
+        let held = locked(&self.inner.runs).get(run).map(|slot| slot.header());
+        match held {
+            Some(header) => Ok(Some(header)),
+            None => self.inner.store.header(run).await.map_err(|e| format!("reading the run: {e:#}")),
+        }
+    }
+
+    async fn start_as(&self, run: RunId, start: StartRun) -> Result<RunId, String> {
         let StartRun { trail, args, owner, origin, thread, limits } = start;
         limits.check().map_err(|e| e.to_string())?;
         let (name, script) = match trail {
@@ -213,7 +263,7 @@ impl Trails {
         let session = serde_json::to_string(engine.state()).map_err(|e| e.to_string())?;
         let now = Utc::now();
         let header = TrailRun {
-            run: RunId::generate(),
+            run,
             conductor: self.inner.ant.clone(),
             trail: name,
             script,
