@@ -101,8 +101,9 @@ A run is started three ways; each names a conductor, an owner and a thread to re
   ants trail run ./draft.py --ant dev-a --thread last --yes
   ```
 
-  In `ants chat`, `/trail run NAME [@ANT] [ARGS]` does the same for a saved trail, under the default limits and on a
-  new thread: it shows the same summary over the view, and `y` starts the run ([cli.md](cli.md#ants-chat-command-bar)).
+  In `ants chat`, `/trail run NAME [@ANT] [--steps N] [--at-once N] [--turns N] [--wall DUR] [--thread THREAD]
+  [ARGS]` does the same for a saved trail, `--thread` also taking `here` for the thread open or selected: it shows the
+  same summary over the view, and `y` starts the run ([cli.md](cli.md#ants-chat-command-bar)).
 
 - **`run_trail`**, an MCP tool of ants ([architecture.md](architecture.md#mcp-tools)): the calling ant conducts a run of
   a saved trail (`name`) or of a script of its own (`script`), with `args`, on the current thread, owned by the thread's
@@ -165,8 +166,9 @@ same list in the pager, and `/trail show RUN` the run as `ants trail show RUN` p
 
 ## Limits
 
-A run's limits are set when it starts, by `ants trail run`'s flags, `run_trail`'s `limits` or a schedule's `limits`
-table (the key of each, a duration such as `2d` for `wall`), and kept in its record; they may be raised on resume:
+A run's limits are set when it starts, by `ants trail run`'s flags (`/trail run`'s in `ants chat`), `run_trail`'s
+`limits` or a schedule's `limits` table (the key of each, a duration such as `2d` for `wall`), and kept in its record;
+they may be raised on resume:
 
 | Limit | Default | Maximum | Flag, key | Past it |
 |---|---|---|---|---|

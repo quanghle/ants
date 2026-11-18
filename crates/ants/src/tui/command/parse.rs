@@ -3,13 +3,13 @@
 
 use std::time::Duration;
 
-use ants_proto::{ChannelId, ChannelNotify, Reaction, ThreadId, TrailName, UserId};
+use ants_proto::{ChannelId, ChannelNotify, Reaction, ThreadId, TrailLimits, TrailName, UserId};
 use chrono::TimeDelta;
 use serde_json::Value;
 
 use super::snooze;
-use crate::cmd::trail::Shown;
 use crate::cmd::trail::runs::Pick;
+use crate::cmd::trail::{LimitArgs, Shown};
 use crate::threads::thread_meta::Marking;
 
 /// The slash commands: name, arguments and what each does, as the list shows them. A command of several forms lists
@@ -52,7 +52,8 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("retire", "ANT", "retire the ant by admin order, its home kept"),
     (
         "trail",
-        "list | show NAME|RUN | runs | run NAME [@ANT] [ARGS] | stop RUN | resume RUN",
+        "list | show NAME|RUN | runs | run NAME [@ANT] [--steps N] [--at-once N] [--turns N] [--wall DUR] \
+         [--thread THREAD] [ARGS] | stop RUN | resume RUN",
         "list or show saved trails and runs, start a run of a saved trail once y confirms it, stop or resume a run",
     ),
     ("quit", "", "leave ants chat"),
@@ -135,14 +136,40 @@ pub enum Trail {
     Show(Shown),
     Runs,
     /// Start a run of the saved trail `trail` with `args`, a JSON value, on `conductor`, else whom a message naming no
-    /// one goes to, once confirmed.
+    /// one goes to, under `limits`, reporting on `thread`, else a new one, once confirmed.
     Run {
         trail: TrailName,
         conductor: Option<UserId>,
         args: Option<Value>,
+        limits: TrailLimits,
+        thread: Option<OnThread>,
     },
     Stop(Pick),
     Resume(Pick),
+}
+
+/// The thread `/trail run --thread` names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OnThread {
+    /// A thread, by its id or a start of one, as `/goto` takes it.
+    Id(String),
+    /// The thread most recently active among those read: `last`.
+    Last,
+    /// The thread slash commands act on, the open one, else the one selected: `here`.
+    Here,
+}
+
+impl std::str::FromStr for OnThread {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "last" => Ok(Self::Last),
+            "here" => Ok(Self::Here),
+            id if id.parse::<ThreadId>().is_ok() => Ok(Self::Id(id.to_owned())),
+            id => Err(format!("{id} is no thread id, start of one, `last` or `here`")),
+        }
+    }
 }
 
 /// Where `/goto` leads.
@@ -293,28 +320,77 @@ fn trail(args: &str) -> Result<Trail, Option<String>> {
             what.to_ascii_lowercase().parse().map(Trail::Show).map_err(|e| error(&e))
         }
         ("runs", "") => Ok(Trail::Runs),
-        ("run", rest) if !rest.is_empty() => {
-            let (name, rest) = first_word(rest);
-            let trail = name.parse().map_err(|e| error(&e))?;
-            let (conductor, rest) = match rest.strip_prefix('@') {
-                Some(after) => {
-                    let (ant, rest) = first_word(after);
-                    (Some(ant.parse().map_err(|e| error(&e))?), rest)
-                }
-                None => (None, rest),
-            };
-            let args = match rest {
-                "" => None,
-                json => Some(crate::cmd::trail::start::json_args(json).map_err(|e| Some(format!("ARGS {e}")))?),
-            };
-            Ok(Trail::Run { trail, conductor, args })
-        }
+        ("run", rest) if !rest.is_empty() => trail_run(rest),
         (verb @ ("stop" | "resume"), run) if !run.is_empty() && !run.contains(char::is_whitespace) => {
             let run = run.parse().map_err(|e: String| Some(e))?;
             Ok(if verb == "stop" { Trail::Stop(run) } else { Trail::Resume(run) })
         }
         _ => Err(None),
     }
+}
+
+/// The run `/trail run`'s `args` ask for: the trail's name, then the conductor and the options of `ants trail run` in
+/// any order, then the script's args; None for its usage.
+fn trail_run(args: &str) -> Result<Trail, Option<String>> {
+    let error = |e: &dyn std::fmt::Display| Some(e.to_string());
+    let (name, mut rest) = first_word(args);
+    let trail = name.parse().map_err(|e| error(&e))?;
+    let (mut conductor, mut limits, mut thread) = (None, LimitArgs::default(), None);
+    loop {
+        let (word, after) = first_word(rest);
+        if let Some(ant) = word.strip_prefix('@') {
+            if conductor.is_some() {
+                return Err(None);
+            }
+            conductor = Some(ant.parse().map_err(|e| error(&e))?);
+            rest = after;
+            continue;
+        }
+        let Some(option) = word.strip_prefix("--") else { break };
+        let (option, value, after) = match option.split_once('=') {
+            Some((option, value)) => (option, value, after),
+            None => {
+                let (value, after) = first_word(after);
+                (option, value, after)
+            }
+        };
+        let placeholder = match option {
+            "steps" | "at-once" | "turns" => "N",
+            "wall" => "DUR",
+            "thread" => "THREAD",
+            _ => return Err(Some(format!("no option --{option}: /trail run takes {OPTIONS}"))),
+        };
+        let shown = format!("'--{option} <{placeholder}>'");
+        if value.is_empty() {
+            return Err(Some(format!("a value is required for {shown} but none was supplied")));
+        }
+        let invalid = |e: &dyn std::fmt::Display| Some(format!("invalid value '{value}' for {shown}: {e}"));
+        let given = match option {
+            "steps" => once(&mut limits.steps, value.parse().map_err(|e| invalid(&e))?),
+            "at-once" => once(&mut limits.at_once, value.parse().map_err(|e| invalid(&e))?),
+            "turns" => once(&mut limits.turns, value.parse().map_err(|e| invalid(&e))?),
+            "wall" => once(&mut limits.wall, ants_proto::duration::parse(value).map_err(|e| invalid(&e))?),
+            _ => once(&mut thread, value.parse().map_err(|e| invalid(&e))?),
+        };
+        if !given {
+            return Err(Some(format!("{shown} is given twice")));
+        }
+        rest = after;
+    }
+    let limits = limits.over(TrailLimits::DEFAULT).map_err(|e| error(&e))?;
+    let args = match rest {
+        "" => None,
+        json => Some(crate::cmd::trail::start::json_args(json).map_err(|e| Some(format!("ARGS {e}")))?),
+    };
+    Ok(Trail::Run { trail, conductor, args, limits, thread })
+}
+
+/// The options `/trail run` takes, as `ants trail run` names them.
+const OPTIONS: &str = "--steps, --at-once, --turns, --wall and --thread";
+
+/// Set `slot` to `value` unless set already: whether it was not.
+fn once<T>(slot: &mut Option<T>, value: T) -> bool {
+    slot.replace(value).is_none()
 }
 
 fn goto(to: &str) -> Result<Goto, String> {
@@ -414,6 +490,8 @@ mod tests {
             trail: "review".parse().unwrap(),
             conductor: conductor.map(user),
             args,
+            limits: TrailLimits::DEFAULT,
+            thread: None,
         };
         assert_eq!(trail("/trail run review"), run(None, None));
         assert_eq!(trail("/TRAIL run review @lead"), run(Some("lead"), None));
@@ -422,7 +500,8 @@ mod tests {
         assert_eq!(trail(r#"/trail run review {"files": ["a.rs", "b.rs"]}"#), run(None, args));
         assert_eq!(trail("/trail stop 0190AB"), Trail::Stop("0190ab".parse().unwrap()));
         assert_eq!(trail("/trail resume 0190ab"), Trail::Resume("0190ab".parse().unwrap()));
-        let usage = "usage: /trail list | show NAME|RUN | runs | run NAME [@ANT] [ARGS] | stop RUN | resume RUN";
+        let usage = "usage: /trail list | show NAME|RUN | runs | run NAME [@ANT] [--steps N] [--at-once N] [--turns N] \
+                     [--wall DUR] [--thread THREAD] [ARGS] | stop RUN | resume RUN";
         for refused in [
             "/trail",
             "/trail runs all",
@@ -442,6 +521,52 @@ mod tests {
         assert!(parse("/trail stop review").unwrap_err().contains("hex digits"));
     }
 
+    #[test]
+    fn trail_run_takes_the_limits_and_thread_of_ants_trail_run_before_its_args() {
+        let trail = |text: &str| match parse(text) {
+            Ok(Command::Slash(Slash::Trail(trail))) => trail,
+            other => panic!("{text}: {other:?}"),
+        };
+        let limits = TrailLimits { steps: 10, concurrency: 2, turns: 2000, wall_secs: 7200, ..TrailLimits::DEFAULT };
+        assert_eq!(
+            trail(r#"/trail run review --steps 10 --at-once=2 @lead --turns 2000 --wall 2h --thread 0190AB [1, -2]"#),
+            Trail::Run {
+                trail: "review".parse().unwrap(),
+                conductor: Some(user("lead")),
+                args: Some(serde_json::json!([1, -2])),
+                limits,
+                thread: Some(OnThread::Id("0190ab".into())),
+            }
+        );
+        let thread = |text: &str| match trail(text) {
+            Trail::Run { thread, limits, .. } => (thread, limits.steps),
+            other => panic!("{text}: {other:?}"),
+        };
+        assert_eq!(thread("/trail run review --thread last"), (Some(OnThread::Last), 50));
+        assert_eq!(thread("/trail run review --thread=HERE --steps 500"), (Some(OnThread::Here), 500));
+        for (refused, why) in [
+            ("/trail run review --steps 0", "--steps must be more than 0"),
+            ("/trail run review --at-once 17", "--at-once is over the most a run may take, 16"),
+            ("/trail run review --turns 2001", "--turns is over the most a run may take, 2000"),
+            ("/trail run review --wall 8d", "--wall is over the most a run may take, 7d"),
+            ("/trail run review --steps ten", "invalid value 'ten' for '--steps <N>': invalid digit found in string"),
+            ("/trail run review --wall", "a value is required for '--wall <DUR>' but none was supplied"),
+            ("/trail run review --steps 2 --steps=3", "'--steps <N>' is given twice"),
+            (
+                "/trail run review --thread a.b",
+                "invalid value 'a.b' for '--thread <THREAD>': a.b is no thread id, start of one, `last` or `here`",
+            ),
+            (
+                "/trail run review --yes",
+                "no option --yes: /trail run takes --steps, --at-once, --turns, --wall and --thread",
+            ),
+        ] {
+            assert_eq!(parse(refused).unwrap_err(), why, "{refused}");
+        }
+        assert!(parse("/trail run review @lead @dev-a").unwrap_err().starts_with("usage: /trail"));
+        assert!(parse("/trail run review {} --steps 2").unwrap_err().starts_with("ARGS not JSON"));
+    }
+
     /// A sample of an argument [`COMMANDS`] names; a new placeholder needs one here.
     fn sample(arg: &str) -> &str {
         match arg {
@@ -449,7 +574,7 @@ mod tests {
             "TEXT" | "NOTE" | "QUERY" => "ship it",
             "N" => "2",
             "PICK..." => "2 'after lunch'",
-            "DURATION" => "2h",
+            "DURATION" | "DUR" => "2h",
             "TIME" => "17:00",
             "SINCE" => "1d",
             "NAME" => "eyes",
@@ -463,16 +588,33 @@ mod tests {
         }
     }
 
+    /// The arguments of `form`: its words, those of a bracketed run, as `[--steps N]`, one.
+    fn arguments(form: &str) -> Vec<String> {
+        let mut args: Vec<String> = Vec::new();
+        let mut open = false;
+        for word in form.split_whitespace() {
+            match args.last_mut() {
+                Some(last) if open => *last = format!("{last} {word}"),
+                _ => args.push(word.to_owned()),
+            }
+            open = (open || word.starts_with('[')) && !word.ends_with(']');
+        }
+        args
+    }
+
     #[test]
     fn every_listed_command_parses_with_its_arguments() {
         for (name, form) in COMMANDS.iter().flat_map(|(name, forms, _)| forms.split(" | ").map(move |f| (name, f))) {
             let mut lines = vec![format!("/{name}")];
-            for arg in form.split_whitespace() {
+            for arg in arguments(form) {
                 let (alternatives, optional) = match arg.strip_prefix('[').and_then(|a| a.strip_suffix(']')) {
                     Some(arg) => (arg, true),
-                    None => (arg, false),
+                    None => (arg.as_str(), false),
                 };
-                let samples: Vec<_> = alternatives.split('|').map(sample).collect();
+                let samples: Vec<String> = alternatives
+                    .split('|')
+                    .map(|words| words.split_whitespace().map(sample).collect::<Vec<_>>().join(" "))
+                    .collect();
                 lines = lines
                     .iter()
                     .flat_map(|line| {

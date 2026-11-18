@@ -785,7 +785,7 @@ const BAR: &[Entry] = &[
 ];
 
 const START: &[Entry] = &[
-    Entry::new(&[Key::Char('y')], "y", "start", "start the run its summary shows, on a new thread", 1, always),
+    Entry::new(&[Key::Char('y')], "y", "start", "start the run its summary shows, then show its thread", 1, always),
     Entry::new(&[Key::Esc], "Esc", "not started", "leave the run unstarted, as any key but y and ? does", 2, always),
     Entry::new(&[Key::Char('?')], "?", "help", "the keys of the run to start", HELP_ONLY, always),
 ];

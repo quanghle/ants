@@ -201,12 +201,14 @@ pub enum Job {
     TrailShow(crate::cmd::trail::Shown),
     /// List the runs of trails, as `ants trail runs` does.
     TrailRuns,
-    /// Plan a run of the saved trail `trail` with `args` on `conductor`, as `ants trail run` sums it up before asking to
-    /// start it ([`Done::planned`]).
+    /// Plan a run of the saved trail `trail` with `args` on `conductor` under `limits`, reporting on `thread`, else a
+    /// new one, as `ants trail run` sums it up before asking to start it ([`Done::planned`]).
     TrailPlan {
         trail: TrailName,
         conductor: Option<UserId>,
         args: Option<serde_json::Value>,
+        limits: ants_proto::TrailLimits,
+        thread: Option<ThreadId>,
     },
     /// Ask the conductor to start the run planned, as `ants trail run` does once confirmed.
     TrailStart(Box<crate::cmd::trail::start::Start>),
@@ -393,7 +395,9 @@ impl Job {
             Self::TrailList => trail::trails(ctx).await,
             Self::TrailShow(what) => trail::shown(ctx, what).await,
             Self::TrailRuns => trail::listed(ctx).await,
-            Self::TrailPlan { trail, conductor, args } => trail::planned(ctx, &trail, conductor, args).await,
+            Self::TrailPlan { trail, conductor, args, limits, thread } => {
+                trail::planned(ctx, &trail, conductor, args, limits, thread).await
+            }
             Self::TrailStart(start) => trail::started(ctx, &start).await,
             Self::TrailStop(run) => trail::stopped(ctx, &run).await,
             Self::TrailResume(run) => trail::resumed(ctx, &run).await,

@@ -28,7 +28,7 @@ mod route;
 pub use bar::{Bar, Draft, Edited, Note, Tone};
 pub use drafts::{Conversation, Drafts};
 pub use history::{FILE as HISTORY_FILE, History};
-pub use parse::{COMMANDS, Command, Goto, Slash, Trail, parse};
+pub use parse::{COMMANDS, Command, Goto, OnThread, Slash, Trail, parse};
 pub use route::Route;
 
 /// A paste of more bytes than this is staged as a text file rather than put in the bar.
@@ -300,7 +300,10 @@ impl Model {
                 Trail::List => Job::TrailList,
                 Trail::Show(what) => Job::TrailShow(what),
                 Trail::Runs => Job::TrailRuns,
-                Trail::Run { trail, conductor, args } => Job::TrailPlan { trail, conductor, args },
+                Trail::Run { trail, conductor, args, limits, thread } => {
+                    let thread = thread.map(|on| self.on_thread(on)).transpose()?;
+                    Job::TrailPlan { trail, conductor, args, limits, thread }
+                }
                 Trail::Stop(run) => Job::TrailStop(run),
                 Trail::Resume(run) => Job::TrailResume(run),
             }),
@@ -517,14 +520,7 @@ impl Model {
             Goto::User(user) if self.data.is_human(&user) => nav::Item::Person(user),
             Goto::User(user) => nav::Item::Ant(user),
             Goto::Thread(prefix) => {
-                let found: Vec<&ThreadId> =
-                    self.data.live.order.iter().filter(|t| t.as_str().starts_with(&prefix)).collect();
-                let thread = match found[..] {
-                    [thread] => (*thread).clone(),
-                    [] if ants_proto::Uuid::try_parse(&prefix).is_ok() => prefix.parse().map_err(|e| format!("{e}"))?,
-                    [] => return Err(format!("no thread {prefix} read")),
-                    _ => return Err(format!("{} threads start {prefix}: give more of the id", found.len())),
-                };
+                let thread = self.read_thread(&prefix)?;
                 self.focus = Focus::View;
                 self.pages.push(Page::Thread(thread::Page::new(thread.clone())));
                 return Ok(Some(Action::Open(thread)));
@@ -532,6 +528,27 @@ impl Model {
         };
         self.focus = Focus::View;
         Ok(self.select(item))
+    }
+
+    /// The thread `prefix` names: the one thread read whose id starts with it, else a whole id, as given.
+    fn read_thread(&self, prefix: &str) -> Result<ThreadId, String> {
+        let found: Vec<&ThreadId> = self.data.live.order.iter().filter(|t| t.as_str().starts_with(prefix)).collect();
+        match found[..] {
+            [thread] => Ok(thread.clone()),
+            [] if ants_proto::Uuid::try_parse(prefix).is_ok() => prefix.parse().map_err(|e| format!("{e}")),
+            [] => Err(format!("no thread {prefix} read")),
+            _ => Err(format!("{} threads start {prefix}: give more of the id", found.len())),
+        }
+    }
+
+    /// The thread `/trail run --thread` names: one read as `/goto` takes it, the most recently active one read, or the
+    /// one slash commands act on.
+    fn on_thread(&self, on: OnThread) -> Result<ThreadId, String> {
+        match on {
+            OnThread::Id(prefix) => self.read_thread(&prefix),
+            OnThread::Last => self.data.live.order.first().cloned().ok_or_else(|| "no thread read".to_owned()),
+            OnThread::Here => self.target(),
+        }
     }
 
     /// Take how a job the bar ran went: its line and warnings on the status line, opening the thread it started, the

@@ -55,7 +55,7 @@ impl Planned {
         frame.render_widget(Clear, area);
         frame.render_widget(outer, area);
         frame.render_widget(Paragraph::new(rows), body);
-        let line = " y starts it, on a new thread · another key leaves it unstarted";
+        let line = " y starts it · another key leaves it unstarted";
         frame.render_widget(Paragraph::new(Line::styled(line, dim())), keys);
     }
 }
@@ -112,18 +112,26 @@ pub async fn listed(ctx: &Ctx) -> Result<Done> {
 }
 
 /// Plan a run of the saved trail `name` with `args` on `conductor`, else whom a message naming no one goes to, under
-/// the default limits, reporting on a new thread: summed up as `ants trail run` sums it up, for `y` to start.
-pub async fn planned(ctx: &Ctx, name: &TrailName, conductor: Option<UserId>, args: Option<Value>) -> Result<Done> {
+/// `limits`, reporting on `thread`, else a new one: summed up as `ants trail run` sums it up, for `y` to start.
+pub async fn planned(
+    ctx: &Ctx,
+    name: &TrailName,
+    conductor: Option<UserId>,
+    args: Option<Value>,
+    limits: TrailLimits,
+    thread: Option<ThreadId>,
+) -> Result<Done> {
     let args = start::sized(args, "ARGS")?;
     let plan = start::saved_plan(&ctx.js, name).await?;
     let conductor = match conductor {
         Some(conductor) => conductor,
         None => send::unaddressed(&ctx.js, &ctx.me, ctx.account.as_deref()).await.to,
     };
-    let limits = TrailLimits::DEFAULT;
-    let summary = start::summary(&plan, &conductor, None, &limits);
-    let line = format!("trail {} on {conductor}, at most {}: y starts it", plan.name, start::limits_line(&limits));
-    let start = start::Start { source: plan.source, args, conductor, thread: ThreadId::generate(), limits };
+    let summary = start::summary(&plan, &conductor, thread.as_ref(), &limits);
+    let on = thread.as_ref().map_or_default(|thread| format!(", reporting on thread {thread}"));
+    let line = format!("trail {} on {conductor}{on}, at most {}: y starts it", plan.name, start::limits_line(&limits));
+    let thread = thread.unwrap_or_else(ThreadId::generate);
+    let start = start::Start { source: plan.source, args, conductor, thread, limits };
     Ok(Done { line, planned: Some(Box::new(Planned { summary, start })), ..Done::default() })
 }
 
@@ -160,7 +168,7 @@ mod tests {
 
     use super::*;
     use crate::connection::Nats;
-    use crate::test_support::live::{at, user};
+    use crate::test_support::live::{at, message, user};
     use crate::tui::exec::Outcome;
     use crate::tui::model::{Focus, Page};
     use crate::tui::test_support::model;
@@ -184,12 +192,13 @@ mod tests {
     #[test]
     fn trail_run_shows_what_the_run_may_spend_until_y_starts_it_and_another_key_leaves_it() {
         let mut m = model();
-        let Some(Action::Run(Job::TrailPlan { trail, conductor, args }, _)) =
+        let Some(Action::Run(Job::TrailPlan { trail, conductor, args, limits, thread }, _)) =
             run(&mut m, r#"/trail run review @lead {"files": ["a.rs"]}"#)
         else {
             panic!("no plan")
         };
         assert_eq!((trail.as_str(), conductor, args), ("review", Some(user("lead")), Some(json!({"files": ["a.rs"]}))));
+        assert_eq!((limits, thread), (TrailLimits::DEFAULT, None), "the default limits, on a new thread");
         let plan = start::Plan {
             name: "review".to_owned(),
             from: "saved for the colony by alice 1m ago".to_owned(),
@@ -218,7 +227,10 @@ mod tests {
 
         m.outcome(done(plan_done()));
         assert_eq!(m.key(Key::Char('?'), at(2)), None);
-        assert!(screen(&m).contains("start the run its summary shows, on a new thread"), "the help lists its keys");
+        assert!(
+            screen(&m).contains("start the run its summary shows, then show its thread"),
+            "the help lists its keys"
+        );
         m.key(Key::Esc, at(2));
         assert!(m.help.is_none() && m.starting.is_some(), "the run waits on after the help");
         let Some(Action::Run(Job::TrailStart(asked), _)) = m.key(Key::Char('y'), at(2)) else { panic!("no start") };
@@ -234,6 +246,30 @@ mod tests {
         let Some(Action::Run(Job::TrailStop(pick), _)) = run(&mut m, "/trail stop 0190ab") else { panic!("no stop") };
         assert_eq!(pick.to_string(), "0190ab");
         assert!(matches!(run(&mut m, "/trail resume 0190ab"), Some(Action::Run(Job::TrailResume(_), _))));
+    }
+
+    #[test]
+    fn trail_run_reports_on_a_thread_read_the_latest_or_the_one_open() {
+        let (older, newer) = ("0190aaaa-0000-7000-8000-000000000001", "0190bbbb-0000-7000-8000-000000000002");
+        let (older, newer): (ThreadId, ThreadId) = (older.parse().unwrap(), newer.parse().unwrap());
+        let mut m = model();
+        m.stored(vec![message(1, &older, "alice", "dev-a", "a"), message(2, &newer, "alice", "dev-a", "b")], at(1));
+        let thread = |m: &mut Model, text: &str| match run(m, text) {
+            Some(Action::Run(Job::TrailPlan { thread, limits, .. }, _)) => Ok((thread, limits.steps)),
+            _ => Err(m.bar.status.as_ref().unwrap().text.clone()),
+        };
+        assert_eq!(thread(&mut m, "/trail run review --thread 0190a --steps 10"), Ok((Some(older.clone()), 10)));
+        assert_eq!(thread(&mut m, "/trail run review --thread last"), Ok((Some(newer), 50)));
+        assert_eq!(
+            thread(&mut m, "/trail run review --thread 0190"),
+            Err("2 threads start 0190: give more of the id".into())
+        );
+        assert_eq!(thread(&mut m, "/trail run review --thread ffff"), Err("no thread ffff read".into()));
+        assert_eq!(thread(&mut m, "/trail run review --thread here"), Err("no thread open or selected".into()));
+        m.pages.push(Page::Thread(crate::tui::thread::Page::new(older.clone())));
+        assert_eq!(thread(&mut m, "/trail run review --thread here"), Ok((Some(older), 50)));
+        let error = thread(&mut m, "/trail run review --steps 501").unwrap_err();
+        assert_eq!(error, "--steps is over the most a run may take, 500");
     }
 
     /// Answer each request on `ant`'s control subject as its daemon does: a run started, stopped with a step left
@@ -375,13 +411,15 @@ mod tests {
         assert_eq!(listed(&ctx).await.unwrap().line, "no runs of trails");
         // A name no machine's ~/.ants/trails holds, as this one's are looked in too.
         let name: TrailName = "chat-test-review".parse().unwrap();
-        let error = planned(&ctx, &name, None, None).await.unwrap_err().to_string();
+        let error = planned(&ctx, &name, None, None, TrailLimits::DEFAULT, None).await.unwrap_err().to_string();
         assert!(error.starts_with("no trail chat-test-review"), "{error}");
         let saved = save(&ctx, &name).await;
         let big = Some(json!("x".repeat(ants_proto::MAX_TRAIL_ARGS)));
-        let error = planned(&ctx, &saved.name, None, big).await.unwrap_err().to_string();
+        let error = planned(&ctx, &saved.name, None, big, TrailLimits::DEFAULT, None).await.unwrap_err().to_string();
         assert!(error.starts_with("ARGS has 65538 bytes of JSON"), "{error}");
-        let plan = planned(&ctx, &saved.name, None, Some(json!({"files": ["a.rs"]}))).await.unwrap();
+        let plan = planned(&ctx, &saved.name, None, Some(json!({"files": ["a.rs"]})), TrailLimits::DEFAULT, None)
+            .await
+            .unwrap();
         let Planned { summary, start } = *plan.planned.unwrap();
         let messenger = UserId::messenger();
         assert_eq!(
@@ -394,10 +432,20 @@ mod tests {
         assert!(summary.contains(&format!("conductor {messenger}, reporting on a new thread")), "{summary}");
         assert_eq!((start.source, start.args), (TrailSource::Saved(saved.name.clone()), json!({"files": ["a.rs"]})));
 
-        let start = start::Start {
-            conductor: lead.clone(),
-            ..planned(&ctx, &saved.name, Some(lead.clone()), None).await.unwrap().planned.unwrap().start
-        };
+        let limits = TrailLimits { steps: 10, wall_secs: 7200, ..TrailLimits::DEFAULT };
+        let thread = ThreadId::generate();
+        let plan = planned(&ctx, &saved.name, Some(lead.clone()), None, limits, Some(thread.clone())).await.unwrap();
+        assert_eq!(
+            plan.line,
+            format!(
+                "trail {name} on lead, reporting on thread {thread}, at most 10 steps, 4 at once, 200 turns, 2h of wall \
+                 time: y starts it"
+            )
+        );
+        let Planned { summary, start } = *plan.planned.unwrap();
+        assert!(summary.contains(&format!("conductor lead, reporting on thread {thread}")), "{summary}");
+        assert!(summary.contains("steps:      10,") && summary.contains("wall time:  2h,"), "{summary}");
+        assert_eq!((&start.thread, start.limits), (&thread, limits));
         let started = started(&ctx, &start).await.unwrap();
         assert_eq!(started.open.as_ref(), Some(&start.thread));
         assert!(
