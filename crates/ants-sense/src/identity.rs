@@ -33,6 +33,7 @@ use crate::store::{Items, StoreError, Write, read_modify_write};
 
 mod tool;
 
+pub(crate) use tool::relationships;
 pub use tool::{identity, schema};
 
 /// The kind of the card's item; an ant has one.
