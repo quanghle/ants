@@ -1,13 +1,13 @@
-//! The admin orders of the human's assistant that machines' daemons hold until the human consents: gathered every
-//! while as `ants assistant confirm` lists them, counted on home, and listed on the page `o` opens there, where `a`
-//! confirms the selected one and `r` denies it once `y` gives the answer, as `ants assistant confirm MACHINE/ANT/ID`
+//! What the human's assistant did for it that waits for its consent: the admin orders machines' daemons hold, gathered
+//! every while as `ants assistant confirm` lists them, and the decisions on tool requests their ants hold, as following
+//! the tool requests tells them ([`crate::tools::follow`]). Counted on home, and listed on the page `o` opens there,
+//! where `a` confirms the selected one and `r` denies it once `y` gives the answer, as `ants assistant confirm ACT`
 //! (with `--deny`) does.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ants_proto::{Act, ActAnswer, AdminOrder, ORDER_HOLD, UserId, Uuid};
+use ants_proto::{Act, ActAnswer, AdminOrder, ApprovalRequest, ORDER_HOLD, UserId, Uuid};
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
 use futures::FutureExt as _;
@@ -22,19 +22,147 @@ use super::model::{Action, Data, Key, To};
 use super::select::Selection;
 use super::style::{self, ago};
 use crate::live::maybe;
+use crate::tools::{self, HeldAct};
 
 /// How often the held orders are gathered.
 const GATHER_EVERY: Duration = Duration::from_secs(15);
 
-/// An answer to a held order, as the key `y` gives it.
+/// A decision the human's assistant made for it on a tool request, which the request's ant holds until the human
+/// consents or the request expires.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decision {
+    pub request: ApprovalRequest,
+    pub act: HeldAct,
+}
+
+/// What waits for the human's consent.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Answer {
-    pub order: AdminOrder,
-    pub answer: ActAnswer,
+pub enum Item {
+    Order(Box<AdminOrder>),
+    Decision(Box<Decision>),
 }
 
 // An order's values are JSON, whose equality is total.
-impl Eq for Answer {}
+impl Eq for Item {}
+
+impl Item {
+    fn id(&self) -> Uuid {
+        match self {
+            Self::Order(order) => order.id,
+            Self::Decision(decision) => decision.request.id,
+        }
+    }
+
+    /// The assistant that sent it.
+    fn assistant(&self) -> &UserId {
+        match self {
+            Self::Order(order) => &order.admin,
+            Self::Decision(decision) => &decision.act.assistant,
+        }
+    }
+
+    fn sent_at(&self) -> DateTime<Utc> {
+        match self {
+            Self::Order(order) => order.sent_at,
+            Self::Decision(decision) => decision.act.sent_at,
+        }
+    }
+
+    fn expires_at(&self) -> DateTime<Utc> {
+        match self {
+            Self::Order(order) => order.sent_at + ORDER_HOLD,
+            Self::Decision(decision) => decision.request.expires_at,
+        }
+    }
+
+    /// Whether `other` is the same: the same order, or the same decision on the same request.
+    fn same(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Order(a), Self::Order(b)) => a.id == b.id,
+            (Self::Decision(a), Self::Decision(b)) => a == b,
+            _ => false,
+        }
+    }
+
+    /// As the command line names it: `MACHINE/ANT/ID` for an order, `ANT/ID` for a decision.
+    fn qualified(&self) -> String {
+        match self {
+            Self::Order(o) => Act::Order { machine: o.machine.clone(), ant: o.ant.clone(), id: o.id }.qualified(),
+            Self::Decision(decision) => tools::qualified(&decision.request),
+        }
+    }
+
+    /// What it is, in a few words: `pause of dev-a on m1`, `allow-once on dev-a's execute`.
+    fn what(&self) -> String {
+        match self {
+            Self::Order(o) => format!("{} of {} on {}", o.op.describe(), o.ant, o.machine),
+            Self::Decision(d) => {
+                format!("{} on {}'s {}", tools::spelling(d.act.verdict), d.request.ant, d.request.tool.kind)
+            }
+        }
+    }
+
+    /// Whom it is from, and what it is: `pa's order m1/dev-a/<id> (pause)`, `pa's allow-once on request dev-a/<id>
+    /// (execute: git push)`.
+    fn describe(&self) -> String {
+        match self {
+            Self::Order(order) => format!("{}'s order {} ({})", order.admin, self.qualified(), order.op.describe()),
+            Self::Decision(d) => format!(
+                "{}'s {} on request {} ({}: {})",
+                d.act.assistant,
+                tools::spelling(d.act.verdict),
+                self.qualified(),
+                d.request.tool.kind,
+                d.request.tool.title.lines().next().unwrap_or_default()
+            ),
+        }
+    }
+}
+
+/// What waits for the human's consent, oldest first: the orders held for it, and the decisions its assistant made on
+/// the pending tool requests.
+pub fn items(data: &Data) -> Vec<Item> {
+    let me = data.me();
+    let mut items: Vec<Item> = data.held.orders.iter().map(|order| Item::Order(Box::new(order.clone()))).collect();
+    for request in &data.live.approvals {
+        let acts = data.live.held.get(&(request.ant.clone(), request.id)).into_iter().flatten();
+        for act in acts.filter(|act| act.human == *me) {
+            items.push(Item::Decision(Box::new(Decision { request: request.clone(), act: act.clone() })));
+        }
+    }
+    items.sort_by_key(Item::sent_at);
+    items
+}
+
+/// What waits for an answer, as home's line counts it; None when nothing does.
+pub fn line(data: &Data) -> Option<Line<'static>> {
+    let waiting: Vec<Item> = items(data).into_iter().filter(|item| data.held.answer(item).is_none()).collect();
+    let first = waiting.first()?;
+    let orders = waiting.iter().filter(|item| matches!(item, Item::Order(_))).count();
+    let noun = match (orders, waiting.len() - orders) {
+        (1, 0) => "order",
+        (_, 0) => "orders",
+        (0, 1) => "decision",
+        (0, _) => "decisions",
+        _ => "orders and decisions",
+    };
+    let what: Vec<String> = waiting.iter().map(Item::what).collect();
+    let text = format!(
+        "{} {noun} of {} wait{} for confirmation: {} · o lists them",
+        waiting.len(),
+        first.assistant(),
+        if waiting.len() == 1 { "s" } else { "" },
+        what.join(", ")
+    );
+    Some(Line::styled(text, Style::new().fg(style::PENDING)))
+}
+
+/// An answer to what waits for the human's consent, as the key `y` gives it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Answer {
+    pub held: Item,
+    pub answer: ActAnswer,
+}
 
 impl Answer {
     /// The answer, as the key `y` gives it: `confirm pa's order m1/dev-a/<id> (pause)`.
@@ -43,13 +171,8 @@ impl Answer {
             ActAnswer::Confirm => "confirm",
             ActAnswer::Deny => "deny",
         };
-        format!("{verb} {}'s order {} ({})", self.order.admin, qualified(&self.order), self.order.op.describe())
+        format!("{verb} {}", self.held.describe())
     }
-}
-
-/// The order as the command line names it: `MACHINE/ANT/ID`.
-fn qualified(order: &AdminOrder) -> String {
-    Act::Order { machine: order.machine.clone(), ant: order.ant.clone(), id: order.id }.qualified()
 }
 
 /// The time left until `expires`, in days and hours past a day.
@@ -61,45 +184,38 @@ fn left(expires: DateTime<Utc>, now: DateTime<Utc>) -> String {
     }
 }
 
-/// The orders held for the human, and how the latest gathering and answer went.
+/// The orders held for the human, how the latest gathering went, and the answers to them and to the decisions held.
 #[derive(Debug, Default)]
-pub struct Orders {
+pub struct Held {
     /// Oldest first.
     pub orders: Vec<AdminOrder>,
     /// When the orders were last gathered, or why that failed.
     pub read: Option<Result<DateTime<Utc>, String>>,
     /// The answer being recorded.
     pub busy: Option<Answer>,
-    /// The answers recorded, by order: the daemon holding it decides it soon after, and drops it from its list.
-    pub answered: HashMap<Uuid, ActAnswer>,
+    /// The answers recorded: the daemon holding an order, or the ant holding a decision, decides it soon after, and
+    /// drops it.
+    answered: Vec<Answer>,
 }
 
-impl Orders {
-    fn waiting(&self) -> impl Iterator<Item = &AdminOrder> {
-        self.orders.iter().filter(|o| !self.answered.contains_key(&o.id))
+impl Held {
+    /// The answer recorded to `item`, if any.
+    fn answer(&self, item: &Item) -> Option<ActAnswer> {
+        self.answered.iter().find(|a| a.held.same(item)).map(|a| a.answer)
     }
 
-    /// The orders waiting for an answer, as home's line counts them; None when none does.
-    pub fn line(&self) -> Option<Line<'static>> {
-        let waiting: Vec<&AdminOrder> = self.waiting().collect();
-        let first = waiting.first()?;
-        let what: Vec<String> =
-            waiting.iter().map(|o| format!("{} of {} on {}", o.op.describe(), o.ant, o.machine)).collect();
-        let text = format!(
-            "{} {} of {} wait{} for confirmation: {} · o lists them",
-            waiting.len(),
-            if waiting.len() == 1 { "order" } else { "orders" },
-            first.admin,
-            if waiting.len() == 1 { "s" } else { "" },
-            what.join(", ")
-        );
-        Some(Line::styled(text, Style::new().fg(style::PENDING)))
+    /// Forget the answers to decisions no longer waiting among `items`, decided or expired since.
+    pub fn settled(&mut self, items: &[Item]) {
+        self.answered.retain(|a| matches!(a.held, Item::Order(_)) || items.iter().any(|item| a.held.same(item)));
     }
 
     pub fn take(&mut self, event: Event, now: DateTime<Utc>) -> Option<Result<String, String>> {
         match event {
             Event::Read(Ok(orders)) => {
-                self.answered.retain(|id, _| orders.iter().any(|o| o.id == *id));
+                self.answered.retain(|a| match &a.held {
+                    Item::Order(order) => orders.iter().any(|o| o.id == order.id),
+                    Item::Decision(_) => true,
+                });
                 self.orders = orders;
                 self.read = Some(Ok(now));
                 None
@@ -113,7 +229,7 @@ impl Orders {
                     self.busy = None;
                 }
                 if done.is_ok() {
-                    self.answered.insert(answer.order.id, answer.answer);
+                    self.answered.push(*answer);
                 }
                 Some(done)
             }
@@ -129,7 +245,7 @@ pub struct Page {
 }
 
 impl Page {
-    pub const ARMED_KEYS: &str = "y gives the answer above · any other key leaves the order held";
+    pub const ARMED_KEYS: &str = "y gives the answer above · any other key leaves it held";
 
     /// Drop the confirmation asked for, if any: whether there was one.
     pub fn disarm(&mut self) -> bool {
@@ -141,23 +257,23 @@ impl Page {
         self.armed.as_ref().map(|_| Self::ARMED_KEYS)
     }
 
-    fn ids(orders: &[AdminOrder]) -> Vec<Uuid> {
-        orders.iter().map(|o| o.id).collect()
+    fn ids(items: &[Item]) -> Vec<Uuid> {
+        items.iter().map(Item::id).collect()
     }
 
     pub fn key(&mut self, key: Key, data: &Data) -> Option<To> {
         let held = &data.held;
-        let ids = Self::ids(&held.orders);
+        let items = items(data);
+        let ids = Self::ids(&items);
         let at = self.selected.at(&ids);
         let armed = self.armed.take();
         let to = match key {
             Key::Char('a' | 'r') if held.busy.is_none() => {
                 let answer = if key == Key::Char('r') { ActAnswer::Deny } else { ActAnswer::Confirm };
-                self.armed = held
-                    .orders
+                self.armed = items
                     .get(at)
-                    .filter(|o| !held.answered.contains_key(&o.id))
-                    .map(|order| Answer { order: order.clone(), answer });
+                    .filter(|item| held.answer(item).is_none())
+                    .map(|item| Answer { held: item.clone(), answer });
                 return None;
             }
             Key::Char('y') => return armed.map(|answer| To::Do(Action::Answer(answer))),
@@ -173,14 +289,15 @@ impl Page {
 
     pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
         let held = &data.held;
-        let block = style::block(format!(" Held orders ({}) ", held.orders.len()), focused);
+        let items = items(data);
+        let block = style::block(format!(" Held for confirmation ({}) ", items.len()), focused);
         let inner = block.inner(area);
         frame.render_widget(block, area);
         let read = match &held.read {
             None => "gathering the orders held for confirmation…".to_owned(),
             Some(Ok(at)) => format!(
-                "orders of the assistant held by the machines' daemons until confirmed, for {} days at most; \
-                 gathered {}",
+                "orders of the assistant held by the machines' daemons until confirmed, for {} days at most, \
+                 gathered {}; its decisions on tool requests, held by their ants until the requests expire",
                 ORDER_HOLD.num_days(),
                 ago(*at, now)
             ),
@@ -193,9 +310,9 @@ impl Page {
         if let Some(answer) = &self.armed {
             about.push(Line::styled(format!("y to {}", answer.describe()), Style::new().fg(Color::Yellow).bold()));
         }
-        if held.orders.is_empty() {
+        if items.is_empty() {
             if matches!(held.read, Some(Ok(_))) {
-                about.push(Line::raw("no orders held"));
+                about.push(Line::raw("nothing held"));
             }
             frame.render_widget(Paragraph::new(about).wrap(Wrap { trim: false }), inner);
             return;
@@ -204,31 +321,49 @@ impl Page {
         let tall = u16::try_from(about.len() * 2).unwrap_or(u16::MAX);
         let [top, list] = Layout::vertical([Constraint::Max(tall), Constraint::Min(0)]).areas(inner);
         frame.render_widget(Paragraph::new(about).wrap(Wrap { trim: false }), top);
-        let rows: Vec<Text> = held
-            .orders
+        let rows: Vec<Text> = items
             .iter()
-            .map(|o| {
-                let status = match held.answered.get(&o.id) {
+            .map(|item| {
+                let order = matches!(item, Item::Order(_));
+                let status = match held.answer(item) {
                     Some(ActAnswer::Confirm) => {
-                        Span::styled("confirmed, to be carried out", Style::new().fg(style::CONNECTED))
+                        let then = if order { "to be carried out" } else { "to take effect" };
+                        Span::styled(format!("confirmed, {then}"), Style::new().fg(style::CONNECTED))
                     }
-                    Some(ActAnswer::Deny) => Span::styled("denied, to be refused", Style::new().fg(style::ERROR)),
+                    Some(ActAnswer::Deny) => {
+                        let then = if order { "to be refused" } else { "to be dropped" };
+                        Span::styled(format!("denied, {then}"), Style::new().fg(style::ERROR))
+                    }
                     None => Span::styled("a confirm · r deny", style::dim()),
                 };
+                let (kind, what) = match item {
+                    Item::Order(o) => {
+                        (o.op.kind(), format!("{} ordered {} of {} on {}", o.admin, o.op.describe(), o.ant, o.machine))
+                    }
+                    Item::Decision(d) => (
+                        "tool",
+                        format!(
+                            "{} chose {} on {}'s {}: {}",
+                            d.act.assistant,
+                            tools::spelling(d.act.verdict),
+                            d.request.ant,
+                            d.request.tool.kind,
+                            d.request.tool.title.lines().next().unwrap_or_default()
+                        ),
+                    ),
+                };
+                let when = format!("  {} · expires in {}", ago(item.sent_at(), now), left(item.expires_at(), now));
                 Text::from(vec![
                     Line::from(vec![
-                        Span::styled(format!("{:<8}", o.op.kind()), Style::new().fg(Color::Yellow)),
-                        Span::raw(format!("{} ordered {} of {} on {}", o.admin, o.op.describe(), o.ant, o.machine)),
-                        Span::styled(
-                            format!("  {} · expires in {}", ago(o.sent_at, now), left(o.sent_at + ORDER_HOLD, now)),
-                            style::dim(),
-                        ),
+                        Span::styled(format!("{kind:<8}"), Style::new().fg(Color::Yellow)),
+                        Span::raw(what),
+                        Span::styled(when, style::dim()),
                     ]),
-                    Line::from(vec![Span::styled(format!("        {} · ", qualified(o)), style::dim()), status]),
+                    Line::from(vec![Span::styled(format!("        {} · ", item.qualified()), style::dim()), status]),
                 ])
             })
             .collect();
-        let selected = self.selected.at(&Self::ids(&held.orders));
+        let selected = self.selected.at(&Self::ids(&items));
         super::mouse::list(frame, list, data, "held", rows, selected, focused);
     }
 }
@@ -301,16 +436,7 @@ impl Io {
         self.answer = Some(
             async move {
                 let done = match creds {
-                    Ok(creds) => crate::people::assistant::answer_order(
-                        &js,
-                        &creds,
-                        account.as_deref(),
-                        &me,
-                        &answer.order,
-                        answer.answer,
-                    )
-                    .await
-                    .map_err(|e| format!("{e:#}")),
+                    Ok(creds) => recorded(&js, &creds, account.as_deref(), &me, &answer).await,
                     Err(e) => Err(e),
                 };
                 let done = done.map_err(|e| format!("{}: {e}", answer.describe()));
@@ -322,16 +448,37 @@ impl Io {
     }
 }
 
+/// Record `answer` of `me`, signed with the device credentials `creds` of the team of `account`, as `ants assistant
+/// confirm` does: what was done, in a line.
+async fn recorded(
+    js: &jetstream::Context,
+    creds: &Path,
+    account: Option<&str>,
+    me: &UserId,
+    answer: &Answer,
+) -> Result<String, String> {
+    use crate::people::assistant::{answer_decision, answer_order};
+
+    let done = match &answer.held {
+        Item::Order(order) => answer_order(js, creds, account, me, order, answer.answer).await,
+        Item::Decision(d) => {
+            answer_decision(js, creds, account, me, &d.request, std::slice::from_ref(&d.act), answer.answer).await
+        }
+    };
+    done.map_err(|e| format!("{e:#}"))
+}
+
 #[cfg(test)]
 mod tests {
-    use ants_proto::AdminOp;
+    use ants_proto::{AdminOp, Verdict};
 
     use super::*;
     use crate::test_support::live::{at, user};
-    use crate::tui::model::Focus;
+    use crate::tools::Update;
+    use crate::tui::model::{Focus, Model};
     use crate::tui::test_support::model;
 
-    fn screen(m: &crate::tui::model::Model, now: DateTime<Utc>) -> String {
+    fn screen(m: &Model, now: DateTime<Utc>) -> String {
         crate::test_support::render::rendered(140, 30, |f| crate::tui::frame::draw(f, m, now))
     }
 
@@ -356,7 +503,7 @@ mod tests {
 
         m.focus = Focus::View;
         m.key(Key::Char('o'), at(3));
-        assert_eq!(m.page().name(), "held orders");
+        assert_eq!(m.page().name(), "held for confirmation");
         let shown = screen(&m, at(3));
         assert!(shown.contains("pa ordered pause of dev-a on m1") && shown.contains("expires in 6d23h"), "{shown}");
         assert!(shown.contains(&format!("m1/dev-a/{} · a confirm · r deny", pause.id)), "{shown}");
@@ -365,13 +512,13 @@ mod tests {
         assert_eq!(m.key(Key::Char('y'), at(3)), None, "y alone gives no answer");
         m.key(Key::Char('a'), at(3));
         let shown = screen(&m, at(3));
-        let confirm = Answer { order: pause.clone(), answer: ActAnswer::Confirm };
+        let confirm = Answer { held: Item::Order(Box::new(pause.clone())), answer: ActAnswer::Confirm };
         assert!(shown.contains(&format!("y to {}", confirm.describe())) && shown.contains(Page::ARMED_KEYS), "{shown}");
         m.key(Key::Char('n'), at(3));
         assert_eq!(m.key(Key::Char('y'), at(3)), None, "any other key disarms");
         m.key(Key::Down, at(3));
         m.key(Key::Char('r'), at(3));
-        let deny = Answer { order: restart, answer: ActAnswer::Deny };
+        let deny = Answer { held: Item::Order(Box::new(restart)), answer: ActAnswer::Deny };
         assert_eq!(m.key(Key::Char('y'), at(3)), Some(Action::Answer(deny.clone())));
         assert_eq!(m.data.held.busy, Some(deny.clone()));
         m.key(Key::Char('a'), at(3));
@@ -389,12 +536,141 @@ mod tests {
         m.key(Key::Char('a'), at(4));
         assert_eq!(m.key(Key::Char('y'), at(4)), Some(Action::Answer(confirm.clone())));
         m.held(Event::Done(Box::new(confirm), Err("refused".to_owned())), at(5));
-        assert!(!m.data.held.answered.contains_key(&pause.id), "a failed answer leaves the order waiting");
+        assert_eq!(
+            m.data.held.answer(&Item::Order(Box::new(pause.clone()))),
+            None,
+            "a failed answer leaves the order waiting"
+        );
 
         m.held(Event::Read(Ok(vec![pause])), at(6));
         assert!(m.data.held.answered.is_empty(), "the order the daemon decided goes");
         m.key(Key::Esc, at(6));
         let shown = screen(&m, at(6));
         assert!(shown.contains("1 order of pa waits for confirmation: pause of dev-a on m1 · o lists them"), "{shown}");
+    }
+
+    /// The decisions pa made for alice on pending tool requests wait with its orders, oldest first, counted on home;
+    /// `r` then `y` denies one, shown answered until the ant drops it. A decision for another human is not alice's
+    /// to answer.
+    #[test]
+    fn the_assistant_s_decisions_on_tool_requests_wait_with_its_orders() {
+        let mut m = model();
+        let request = |title: &str, sent: i64| ApprovalRequest {
+            requested_at: at(sent),
+            expires_at: at(sent + 300),
+            ..crate::test_support::live::request("dev-a", title, vec![Verdict::AllowOnce])
+        };
+        let act = |human: &str, sent: i64| HeldAct {
+            human: user(human),
+            assistant: user("pa"),
+            verdict: Verdict::AllowOnce,
+            sent_at: at(sent),
+        };
+        let (push, rm, pause) = (request("git push", 2), request("rm -rf build", 4), order(AdminOp::Pause, "dev-b", 1));
+        m.data.held.take(Event::Read(Ok(vec![pause.clone()])), at(5));
+        for (request, acts) in [(&push, vec![act("alice", 3)]), (&rm, vec![act("bob", 5)])] {
+            m.take(crate::live::Event::Approval(Update::Pending(request.clone())), at(5));
+            m.take(crate::live::Event::Approval(Update::Held(request.clone(), acts)), at(5));
+        }
+        let decision = Item::Decision(Box::new(Decision { request: push.clone(), act: act("alice", 3) }));
+        assert_eq!(
+            items(&m.data),
+            [Item::Order(Box::new(pause.clone())), decision.clone()],
+            "bob's is for bob to answer"
+        );
+        let shown = screen(&m, at(6));
+        let line = "2 orders and decisions of pa wait for confirmation: pause of dev-b on m1, allow-once on dev-a's \
+                    execute";
+        assert!(shown.contains(line), "{shown}");
+        assert!(shown.contains("pa chose allow-once for alice: o lists it"), "the request's card: {shown}");
+
+        m.focus = Focus::View;
+        m.key(Key::Char('o'), at(6));
+        let shown = screen(&m, at(6));
+        assert!(shown.contains("tool    pa chose allow-once on dev-a's execute: git push"), "{shown}");
+        assert!(shown.contains("expires in 4m56s"), "{shown}");
+        assert!(shown.contains(&format!("dev-a/{} · a confirm · r deny", push.id)), "{shown}");
+        m.key(Key::Down, at(6));
+        m.key(Key::Char('r'), at(6));
+        let deny = Answer { held: decision.clone(), answer: ActAnswer::Deny };
+        let shown = screen(&m, at(6));
+        let described = format!("deny pa's allow-once on request dev-a/{} (execute: git push)", push.id);
+        assert!(shown.contains(&format!("y to {described}")), "{shown}");
+        assert_eq!(m.key(Key::Char('y'), at(6)), Some(Action::Answer(deny.clone())));
+        m.held(Event::Done(Box::new(deny), Ok("denied".to_owned())), at(7));
+        let shown = screen(&m, at(7));
+        assert!(shown.contains("denied, to be dropped"), "{shown}");
+        m.key(Key::Char('a'), at(7));
+        assert_eq!(m.key(Key::Char('y'), at(7)), None, "a decision answered is not answered again");
+
+        m.held(Event::Read(Ok(vec![pause.clone()])), at(8));
+        assert_eq!(m.data.held.answer(&decision), Some(ActAnswer::Deny), "gathering the orders keeps it");
+        m.take(crate::live::Event::Approval(Update::Held(push, Vec::new())), at(8));
+        assert!(m.data.held.answered.is_empty(), "the decision dropped goes, its answer with it");
+        assert_eq!(items(&m.data), [Item::Order(Box::new(pause))]);
+    }
+
+    /// The page's answers to pa's decisions are recorded as `ants assistant confirm` records them: the request
+    /// confirmed is decided for alice, the one denied waits on, its decision dropped.
+    #[tokio::test]
+    async fn the_page_s_answers_to_decisions_are_recorded_as_ants_assistant_confirm_records_them() {
+        use ants_daemon::bus;
+        use ants_proto::{ApprovalDecision, Envelope, Role};
+
+        use crate::tools::State;
+
+        async fn recorded(io: &mut Io, answer: Answer) -> Result<String, String> {
+            assert!(io.answer(answer.clone()));
+            loop {
+                if let Event::Done(answered, done) = io.next().await {
+                    assert_eq!(*answered, answer);
+                    return done;
+                }
+            }
+        }
+
+        let Some(server) = crate::test_support::Server::start() else { return };
+        let (alice, pa, dev_a) = (user("alice"), user("pa"), user("dev-a"));
+        let creds = server.creds_as(&alice, Role::Human);
+        let account = crate::people::devices::account_of(Some(&creds)).unwrap();
+        let (_, js) = bus::connect(&server.url, Some(&creds), None, &alice, "test").await.unwrap();
+        crate::people::humans::ensure(&js).await.unwrap();
+        let (_, human) = server.connect(&UserId::human()).await;
+        let stream = bus::ensure_stream(&human).await.unwrap();
+        crate::people::assistant::designate(&js, &creds, &alice, &pa).await.unwrap();
+        let (_, ant_js) = server.connect(&dev_a).await;
+        let (_, pa_js) = server.connect(&pa).await;
+        let [push, rm] = ["git push", "rm -rf build"]
+            .map(|title| crate::test_support::live::request("dev-a", title, vec![Verdict::AllowOnce]));
+        for r in [&push, &rm] {
+            bus::publish_json(&ant_js, r.subject(), r, None).await.unwrap();
+            let decision = ApprovalDecision::new(r.id, dev_a.clone(), Verdict::AllowOnce);
+            let envelope = Envelope::decision(r.thread_id.clone(), pa.clone(), decision).on_behalf(Some(alice.clone()));
+            bus::publish_json(&pa_js, envelope.subject(), &envelope, None).await.unwrap();
+        }
+        let held = tools::held(&js, &stream, Utc::now()).await.unwrap();
+        let answer = |request: &ApprovalRequest, answer| {
+            let (_, acts) = held.iter().find(|(r, _)| r.id == request.id).expect("held for alice");
+            let decision = Decision { request: request.clone(), act: acts[0].clone() };
+            Answer { held: Item::Decision(Box::new(decision)), answer }
+        };
+
+        let mut io = Io::new(js.clone(), alice.clone(), account, Ok(creds.clone()));
+        let confirmed = recorded(&mut io, answer(&push, ActAnswer::Confirm)).await.unwrap();
+        assert_eq!(
+            confirmed,
+            format!("confirmed: pa's allow-once on request dev-a/{} takes effect for alice", push.id)
+        );
+        let denied = recorded(&mut io, answer(&rm, ActAnswer::Deny)).await.unwrap();
+        assert_eq!(denied, format!("denied: pa's allow-once on request dev-a/{} is dropped", rm.id));
+
+        let state_of = async |r: &ApprovalRequest| {
+            let (seq, _) = tools::find(&stream, &tools::qualified(r)).await.unwrap();
+            tools::state(&js, &stream, seq, r, Utc::now()).await.unwrap()
+        };
+        let State::DecidedByAnt(by, decision) = state_of(&push).await else { panic!("git push decided") };
+        assert_eq!((by, decision.on_behalf_of, decision.verdict), (pa, Some(alice), Verdict::AllowOnce));
+        assert_eq!(state_of(&rm).await, State::Pending, "denied, waiting for a decision");
+        assert!(tools::held(&js, &stream, Utc::now()).await.unwrap().is_empty(), "nothing waits for alice");
     }
 }

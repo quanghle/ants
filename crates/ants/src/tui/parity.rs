@@ -116,7 +116,7 @@ const CLI: &[(&str, Chat)] = &[
     ("assistant set", Missing(ASSISTANT)),
     ("assistant clear", Missing(ASSISTANT)),
     ("assistant allow", Missing(ASSISTANT)),
-    ("assistant confirm", Missing("ants-rjatj.17")),
+    ("assistant confirm", Press(View::Held, Key::Char('a'), "confirm")),
     ("assistant seal", Exempt("the assistant's enrollment as a device of the human, with a key of this machine")),
     ("assistant key", Exempt("prints or makes the encryption key of an ant of this machine's config file")),
     ("watch", Shown("the ant view's now column, as `ants watch ANT` follows an ant, and a thread's live tool calls")),

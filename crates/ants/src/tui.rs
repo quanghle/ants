@@ -761,7 +761,7 @@ impl Chat {
             Action::Answer(answer) => {
                 if !self.held.answer(answer) {
                     self.model.data.held.busy = None;
-                    self.model.notify("another answer to a held order runs", Level::Error, Utc::now());
+                    self.model.notify("another answer to what is held runs", Level::Error, Utc::now());
                 }
             }
             Action::Refresh => {

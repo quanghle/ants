@@ -395,9 +395,9 @@ impl Hub {
         self.send(&envelope).await?;
         let (ant, verdict) = (&request.ant, verdict.as_str());
         Ok(format!(
-            "Sent {verdict} on tool request {ant}/{id} for {human}. It takes effect only once {human} confirms it (`ants \
-             assistant confirm {ant}/{id}`) or a pre-allow rule of {human} covers the call; until then it is held, and \
-             {ant}'s daemon tells {human}."
+            "Sent {verdict} on tool request {ant}/{id} for {human}. It takes effect only once {human} confirms it (`o` \
+             on the home of ants chat lists it, or `ants assistant confirm {ant}/{id}`) or a pre-allow rule of {human} \
+             covers the call; until then it is held, and {ant}'s daemon tells {human}."
         ))
     }
 }
