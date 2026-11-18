@@ -10,6 +10,9 @@
 //! and its reminders paused, the daemon firing none, until a revival or an addition under another ants identity
 //! makes it active again, its reminders' expiry put off by the time it was dormant. The card keeps its last
 //! dormancies ([`Card::dormancies`]), so maintenance counts only its active time in the ages of its memories.
+//!
+//! `sense_identity` ([`identity`]) shows the card whole with the ant's persona, self-model, relationship records and
+//! skills, and is the one tool changing the persona, the self-model and the relationship records.
 
 use std::io;
 use std::path::Path;
@@ -27,6 +30,10 @@ use crate::items::{Item, Values};
 use crate::log::read_status;
 use crate::remind;
 use crate::store::{Items, StoreError, Write, read_modify_write};
+
+mod tool;
+
+pub use tool::{identity, schema};
 
 /// The kind of the card's item; an ant has one.
 pub const CARD: &str = "card";

@@ -17,12 +17,11 @@ async fn crowded() -> (Sense, Arc<dyn Items>) {
     }
     let commitment = json!({"title": "Send the notes", "promisee": "alice", "due": "2025-01-03T12:00:00Z"});
     call(&sense, promise::promise, THREAD, commitment).await;
-    let model = json!({"kind": "self_model", "title": "Knows parsers", "body": "careful ".repeat(120)});
-    call(&sense, memory::remember, THREAD, model).await;
-    let body = "patient ".repeat(100);
+    let model = json!({"self_model": "careful ".repeat(120), "title": "Knows parsers"});
+    call(&sense, identity::identity, THREAD, model).await;
     let relationship =
-        json!({"kind": "relationship", "scope": "human:alice", "title": "Works with Alice", "body": body});
-    call(&sense, memory::remember, THREAD, relationship).await;
+        json!({"relationship": "patient ".repeat(100), "who": "human:alice", "title": "Works with Alice"});
+    call(&sense, identity::identity, THREAD, relationship).await;
     let mut persona = Values::new();
     for (field, _) in FIELDS {
         let value = format!("{field} {}", "steady ".repeat(70));
@@ -95,7 +94,7 @@ async fn the_brief_cuts_its_work_then_its_core_loop_then_the_relationships_the_s
             !core_whole && has("sense_checkpoint, sense_task") && has("patient"),
             !has("patient") && has("Works with Alice") && has("careful"),
             !has("careful") && has("Knows parsers") && persona_whole,
-            !persona_whole && has("… more: sense_persona"),
+            !persona_whole && has("… more: sense_identity"),
         ];
         reached.iter_mut().zip(stages).for_each(|(reached, stage)| *reached |= stage);
     }

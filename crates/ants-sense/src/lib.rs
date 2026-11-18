@@ -345,7 +345,7 @@ mod tests {
                 "task",
                 "promise",
                 "remind",
-                "persona",
+                "identity",
                 "skill",
                 "dream"
             ]
