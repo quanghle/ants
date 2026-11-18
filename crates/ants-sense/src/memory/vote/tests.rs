@@ -43,7 +43,7 @@ async fn a_stale_vote_marks_a_memory_to_review_and_a_helpful_one_clears_it() {
     assert_eq!((stored.status, stored.votes.stale), (Status::NeedsReview, 1));
     let voted = ballot(&store, &id, &thread).await;
     assert_eq!((voted.kind.as_str(), voted.text("vote"), voted.text("reason")), (VOTE, "stale", "port moved"));
-    assert_eq!(voted.values[WRITER], writer(&context(human())));
+    assert_eq!(Ballot::of(&voted).unwrap().writer, context(human()));
 
     let answer = cast(&sense, json!({"id": id, "vote": "helpful"}), context(human())).await;
     assert_eq!((&answer.json["replaced"], &answer.json["status"]), (&json!("stale"), &json!("active")));

@@ -47,7 +47,7 @@ mod tool;
 pub use identity_findings::{
     OWN_AFTER_THREADS, PERSONA_AFTER_THREADS, RELATIONSHIP_AFTER_THREADS, SELF_MODEL_AFTER_THREADS, STALE_ACTIVE_DAYS,
 };
-pub use packet::{Identity, MIN_THREAD_BYTES, PACKET_BUDGET, Reader, Thread, compose, packet};
+pub use packet::{Action, Identity, MIN_THREAD_BYTES, PACKET_BUDGET, Reader, Thread, compose, packet};
 pub use review::{
     Advice, Evidence, Parsed, REVIEW_BEGIN, REVIEW_END, Review, Reviewed, answered, parse, review_sent, untrusted_on,
 };
@@ -325,6 +325,12 @@ impl Dream {
         }
     }
 
+    /// The write changing it, at `revision`, into `after`.
+    pub(crate) fn change(&self, after: &Self, revision: u64) -> Write {
+        let values = crate::items::changed(&self.values(), after.values());
+        Write::Change { id: Self::id(after.number), values, expected: Some(revision) }
+    }
+
     fn of(item: &crate::items::Item) -> Result<Self, StoreError> {
         serde_json::from_value(Value::Object(item.values.clone()))
             .map_err(|e| StoreError::Unavailable(format!("unreadable dream {}: {e}", item.id)))
@@ -368,6 +374,21 @@ impl Dream {
     /// When the next dream may begin.
     pub fn next(&self) -> DateTime<Utc> {
         self.at + Duration::hours(DREAM_EVERY_HOURS)
+    }
+
+    /// Its number and how many findings it has, applied, rejected, deferred and unanswered: the title of its diary.
+    pub fn summary(&self) -> String {
+        let count = |judgement| self.verdicts.iter().filter(|verdict| verdict.verdict == judgement).count();
+        let answered = self.findings.iter().filter(|finding| self.verdict(&finding.id).is_some()).count();
+        format!(
+            "Dream {}: {} findings, {} applied, {} rejected, {} deferred, {} unanswered",
+            self.number,
+            self.findings.len(),
+            count(Judgement::Applied),
+            count(Judgement::Rejected),
+            count(Judgement::Deferred),
+            self.findings.len() - answered,
+        )
     }
 
     /// The verdict on finding `id`, if any.
@@ -497,10 +518,8 @@ pub async fn begin(items: &dyn Items, start: Start<'_>) -> Result<Option<Dream>,
             values: dream.values(),
             expected: Some(0),
         });
-        let mut values = Values::new();
-        values.insert("number".into(), json!(number));
-        values.insert("rested".into(), json!(rested));
         let expected = Some(record.map_or(0, |(_, revision)| revision));
+        let values = crate::items::values_of(&Record { number, rested });
         writes.push(Write::Put { id: record_id(), kind: DREAMS.into(), values, expected });
         items.write(&writes, BY).await?;
         Ok(Some(dream))
@@ -809,17 +828,7 @@ fn close(mut dream: Dream, revision: u64, context: &CallContext, at: DateTime<Ut
 /// The diary episode of `dream`, written in `context`: how many findings it had, the verdict on each and the items
 /// written, within a memory's limits.
 fn diary(dream: &Dream, context: &CallContext) -> Memory {
-    let count = |judgement| dream.verdicts.iter().filter(|verdict| verdict.verdict == judgement).count();
-    let answered = dream.findings.iter().filter(|finding| dream.verdict(&finding.id).is_some()).count();
-    let title = format!(
-        "Dream {}: {} findings, {} applied, {} rejected, {} deferred, {} unanswered",
-        dream.number,
-        dream.findings.len(),
-        count(Judgement::Applied),
-        count(Judgement::Rejected),
-        count(Judgement::Deferred),
-        dream.findings.len() - answered,
-    );
+    let title = dream.summary();
     let mut lines = vec![format!(
         "Reviewed {} threads since {} UTC; {} of {MAX_DREAM_WRITES} writes made.",
         dream.threads.len(),

@@ -2,12 +2,11 @@ use chrono::{DateTime, Datelike, Duration, NaiveTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::Condition;
 use crate::store::StoreError;
 
 /// The most seconds of an `after` trigger: a year.
 pub const MAX_AFTER_SECONDS: u64 = 365 * 24 * 60 * 60;
-/// The most bytes of each text of a condition.
-pub const MAX_CONDITION_BYTES: usize = 4096;
 
 /// Reminder time zones are deliberately UTC, so a restart or host timezone change cannot move a firing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -17,11 +16,11 @@ pub enum Trigger {
     After { seconds: u64 },
     Daily { time: String, timezone: String },
     Weekly { weekday: String, time: String, timezone: String },
-    Condition { condition: Value },
+    Condition { condition: Condition },
 }
 
 impl Trigger {
-    pub fn condition(&self) -> Option<&Value> {
+    pub fn condition(&self) -> Option<&Condition> {
         match self {
             Self::Condition { condition } => Some(condition),
             _ => None,
@@ -47,7 +46,7 @@ impl Trigger {
                 }
                 Ok(())
             }
-            Self::Condition { condition } => validate_condition(condition),
+            Self::Condition { condition } => condition.validate(),
         }
     }
 
@@ -98,104 +97,8 @@ fn weekday_number(day: &str) -> Result<u32, String> {
         .ok_or_else(|| "weekday must be mon, tue, wed, thu, fri, sat or sun.".into())
 }
 
-fn validate_condition(condition: &Value) -> Result<(), String> {
-    let map = condition.as_object().ok_or("condition must be an object.")?;
-    let kind = map.get("kind").and_then(Value::as_str).ok_or("condition.kind must be a string.")?;
-    let keys: &[&str] = match kind {
-        "gh_pr" => &["kind", "repo", "number", "state"],
-        "gh_workflow" => &["kind", "repo", "run"],
-        "bd" => &["kind", "id", "state"],
-        "git" => &["kind", "commit", "reference"],
-        "file" => &["kind", "path", "event"],
-        "command" => &["kind", "command"],
-        "sense" => &["kind", "event", "id"],
-        _ => return Err("Unknown condition.kind.".into()),
-    };
-    if map.keys().any(|key| !keys.contains(&key.as_str())) {
-        return Err("Unknown condition field.".into());
-    }
-    let text = |name: &str| -> Result<&str, String> {
-        let value = map.get(name).and_then(Value::as_str).ok_or_else(|| format!("condition.{name} is required."))?;
-        if value.trim().is_empty() || value.len() > MAX_CONDITION_BYTES || value.chars().any(char::is_control) {
-            return Err(format!(
-                "condition.{name} must be a nonempty single-line string up to {MAX_CONDITION_BYTES} bytes."
-            ));
-        }
-        let clean = crate::sanitize::sanitize(
-            value,
-            crate::sanitize::Lines::Single,
-            crate::sanitize::Limit::Bytes(MAX_CONDITION_BYTES),
-        )
-        .map_err(|error| error.to_string())?;
-        if clean.text != value {
-            return Err(format!("condition.{name} contains hidden characters or secrets."));
-        }
-        Ok(value)
-    };
-    let one_of = |name: &str, allowed: &[&str]| -> Result<(), String> {
-        if !allowed.contains(&text(name)?) {
-            return Err(format!("Invalid condition.{name}."));
-        }
-        Ok(())
-    };
-    match kind {
-        "gh_pr" | "gh_workflow" => {
-            let repo = text("repo")?;
-            if repo.split('/').count() != 2 || repo.split('/').any(|part| part.is_empty() || part.starts_with('-')) {
-                return Err("condition.repo must be owner/repository.".into());
-            }
-            let number = if kind == "gh_pr" { "number" } else { "run" };
-            if map.get(number).and_then(Value::as_u64).is_none_or(|number| number == 0) {
-                return Err(format!("condition.{number} must be positive."));
-            }
-            if kind == "gh_pr" {
-                one_of("state", &["merged", "closed", "reviewed"])?;
-            }
-        }
-        "bd" => {
-            text("id")?;
-            one_of("state", &["closed", "ready"])?;
-        }
-        "git" => {
-            text("commit")?;
-            text("reference")?;
-        }
-        "file" => {
-            text("path")?;
-            one_of("event", &["appeared", "changed"])?;
-        }
-        "command" => {
-            text("command")?;
-        }
-        "sense" => {
-            one_of("event", &["commitment_overdue", "lease_expired"])?;
-            if map.contains_key("id") {
-                text("id")?.parse::<crate::items::ItemId>().map_err(|_| "condition.id must be an item id.")?;
-            }
-        }
-        _ => unreachable!(),
-    }
-    Ok(())
-}
-
 pub(super) fn schema() -> Value {
-    let text = json!({"type":"string","minLength":1,"maxLength":MAX_CONDITION_BYTES});
-    let condition = |kind: &str, fields: Value, required: &[&str]| {
-        let mut properties = fields.as_object().unwrap().clone();
-        properties.insert("kind".into(), json!({"const":kind}));
-        let required = std::iter::once("kind").chain(required.iter().copied()).collect::<Vec<_>>();
-        json!({"type":"object","additionalProperties":false,"properties":properties,"required":required})
-    };
-    let condition = json!({"oneOf":[
-        condition("gh_pr",json!({"repo":text,"number":{"type":"integer","minimum":1},
-            "state":{"enum":["merged","closed","reviewed"]}}),&["repo","number","state"]),
-        condition("gh_workflow",json!({"repo":text,"run":{"type":"integer","minimum":1}}),&["repo","run"]),
-        condition("bd",json!({"id":text,"state":{"enum":["closed","ready"]}}),&["id","state"]),
-        condition("git",json!({"commit":text,"reference":text}),&["commit","reference"]),
-        condition("file",json!({"path":text,"event":{"enum":["appeared","changed"]}}),&["path","event"]),
-        condition("command",json!({"command":text}),&["command"]),
-        condition("sense",json!({"event":{"enum":["commitment_overdue","lease_expired"]},"id":text}),&["event"])
-    ]});
+    let condition = super::condition::schema();
     json!({"oneOf":[
         {"type":"object","additionalProperties":false,"required":["kind","at"],
          "properties":{"kind":{"const":"at"},"at":{"type":"string","format":"date-time"}}},

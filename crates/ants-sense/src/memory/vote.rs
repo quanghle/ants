@@ -10,14 +10,15 @@
 use std::fmt::{self, Write as _};
 use std::str::FromStr;
 
-use ants_proto::provider::{BoxFuture, ToolCall};
+use ants_proto::ThreadId;
+use ants_proto::provider::{BoxFuture, CallContext, ToolCall};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{MemoryItem, Status, WRITER, writer};
+use super::{MemoryItem, Status};
 use crate::Sense;
-use crate::items::{ItemId, Values};
+use crate::items::{Item, ItemId, Values, values_of};
 use crate::sanitize::{Limit, sanitize_title};
 use crate::store::{Write, read_modify_write};
 use crate::tools::{Answer, MAX_REASON_CHARS};
@@ -91,6 +92,22 @@ fn is_zero(count: &u32) -> bool {
     *count == 0
 }
 
+/// A thread's vote on a memory, as its item holds it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct Ballot {
+    memory: ItemId,
+    vote: Vote,
+    reason: Option<String>,
+    thread: ThreadId,
+    writer: CallContext,
+}
+
+impl Ballot {
+    fn of(item: &Item) -> Option<Self> {
+        serde_json::from_value(Value::Object(item.values.clone())).ok()
+    }
+}
+
 /// Answers a `sense_vote` call.
 pub fn vote<'a>(sense: &'a Sense, call: &'a ToolCall) -> BoxFuture<'a, Answer> {
     Box::pin(async move { vote_in(sense, call).await.unwrap_or_else(|refused| refused) })
@@ -133,7 +150,7 @@ async fn vote_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
             return Ok(Err(Answer::error("conflict", message)));
         }
         let cast = items.get(ballot).await?;
-        let previous = cast.as_ref().and_then(|cast| cast.text("vote").parse::<Vote>().ok());
+        let previous = cast.as_ref().and_then(Ballot::of).map(|ballot| ballot.vote);
         let mut votes = memory.votes.clone();
         if let Some(previous) = previous {
             let count = votes.count(previous);
@@ -148,12 +165,13 @@ async fn vote_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
                 Status::Active
             }
         };
-        let mut values = Values::new();
-        values.insert("memory".into(), json!(id));
-        values.insert("vote".into(), json!(vote));
-        values.insert("reason".into(), if reason.is_empty() { Value::Null } else { json!(reason) });
-        values.insert("thread".into(), json!(context.thread));
-        values.insert(WRITER.into(), writer(context));
+        let record = Ballot {
+            memory: id.clone(),
+            vote,
+            reason: (!reason.is_empty()).then(|| reason.clone()),
+            thread: context.thread.clone(),
+            writer: context.clone(),
+        };
         let mut changed = Values::new();
         changed.insert("votes".into(), json!(votes));
         changed.insert("status".into(), json!(status));
@@ -161,7 +179,7 @@ async fn vote_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
             Write::Put {
                 id: ballot.clone(),
                 kind: VOTE.into(),
-                values,
+                values: values_of(&record),
                 expected: Some(cast.as_ref().map_or(0, |cast| cast.revision)),
             },
             Write::Change { id: id.clone(), values: changed, expected: Some(found.item.revision) },

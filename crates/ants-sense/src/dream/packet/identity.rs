@@ -73,14 +73,7 @@ pub async fn identity(items: &dyn Items, dream: &Dream, ant: &UserId) -> Result<
 
 /// The persona and its pending proposal, cut to the names of their fields for titles.
 async fn persona_part(identity: &mut Identity, items: &dyn Items) -> Result<(), StoreError> {
-    let fields = |values: &Values| {
-        let named: Vec<_> = persona::FIELDS
-            .iter()
-            .filter(|(field, _)| values.get(*field).is_some_and(|value| !value.is_null()))
-            .map(|(_, heading)| *heading)
-            .collect();
-        format!("Fields: {}.\n", named.join(", "))
-    };
+    let fields = |values: &Values| format!("Fields: {}.\n", persona::headings(values).join(", "));
     match persona::current(items).await? {
         Some(found) => identity.push(&format!("{}\n", persona::text(&found.values)), &fields(&found.values)),
         None => identity.both("No persona yet.\n"),

@@ -21,7 +21,8 @@ pub const SENSE_STREAM: &str = "ANTS_SENSE";
 const CROCKFORD: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 /// The id of a sense identity: a ULID (26 characters of Crockford's base32, uppercase, the first 0-7), minted by the
-/// daemon when an ant first uses sense and kept in the ant's home, `.sense/id`.
+/// daemon when an ant first uses sense and kept in the ant's home, `.sense/id`, and in its identity record
+/// ([`crate::AntIdentity::sense`]).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct SenseId(String);

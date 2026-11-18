@@ -3,10 +3,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
 
-use ants_proto::provider::{BoxFuture, ToolCall};
+use ants_proto::provider::{BoxFuture, CallContext, ToolCall};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::brief::Listing;
 use crate::items::{Item, ItemId, Values};
 use crate::sanitize::{Limit, sanitize_body, sanitize_title};
 use crate::store::{Items, StoreError, Write};
@@ -184,6 +186,42 @@ pub async fn claimed(
         .filter(|task| task.task.lease.as_ref().is_some_and(|lease| &lease.thread == thread))
         .take(limit)
         .collect())
+}
+
+/// Whether a task in progress, task `id` alone when given, is past its lease.
+pub async fn lease_expired(items: &dyn Items, id: Option<&ItemId>, now: DateTime<Utc>) -> Result<bool, StoreError> {
+    Ok(list(items, usize::MAX).await?.iter().any(|found| {
+        id.is_none_or(|id| id == found.id())
+            && found.task.status == Status::InProgress
+            && found.task.lease.as_ref().is_some_and(|lease| lease.expires_at <= now)
+    }))
+}
+
+/// The brief's lines of the tasks the thread of `context` claimed, then of those ready.
+pub(crate) async fn brief(items: &dyn Items, context: &CallContext) -> Result<[Listing; 2], StoreError> {
+    let mut claimed = Vec::new();
+    for found in self::claimed(items, &context.thread, usize::MAX).await? {
+        let mut line = brief_line(&found);
+        if found.task.lease.as_ref().is_some_and(|lease| lease.expires_at <= context.at) {
+            let _ = write!(line, "; lease expired; claim again: sense_task action=claim id={}", found.id());
+        } else if let Some(token) = fencing_token(items, &found).await? {
+            let _ = write!(line, "; claim token {token}");
+        }
+        claimed.push(line);
+    }
+    let ready = ready(items, usize::MAX).await?.iter().map(brief_line).collect();
+    Ok([
+        Listing { lines: claimed, more: "sense_task action=list limit=100" },
+        Listing { lines: ready, more: "sense_task action=ready limit=100" },
+    ])
+}
+
+fn brief_line(found: &TaskItem) -> String {
+    let mut line = format!("- {}", found.text());
+    if let Some(reference) = &found.task.external_ref {
+        let _ = write!(line, "; external {reference}");
+    }
+    line
 }
 
 struct Graph(BTreeMap<ItemId, TaskItem>);

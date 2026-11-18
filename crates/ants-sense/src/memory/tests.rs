@@ -36,7 +36,7 @@ pub(crate) async fn sense() -> (Sense, Arc<Kept>) {
 }
 
 /// The events of the log of `store`.
-async fn events(store: &Kept) -> Vec<Event> {
+pub(crate) async fn events(store: &Kept) -> Vec<Event> {
     let store = store.lock().await;
     let sense = store.log().chain().sense().clone();
     let stored = store.log().log().read_after(&sense, 0, 1_000).await.unwrap();
