@@ -42,7 +42,7 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
     draw_ants(frame, model, ants, now);
     draw_approvals(frame, model, approvals, now);
     draw_thread(frame, model, right, now);
-    frame.render_widget(Paragraph::new(footer_line(model, now)), footer);
+    frame.render_widget(Paragraph::new(footer_line(model, now, footer.width)), footer);
     if let Some(detail) = &model.detail {
         draw_detail(frame, detail, now);
     }
@@ -67,9 +67,9 @@ fn header_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
     Line::from(spans)
 }
 
-fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
+fn footer_line(model: &Model, now: DateTime<Utc>, width: u16) -> Line<'static> {
     if let Some(notice) = model.notice_at(now) {
-        return style::notice(&notice.text, notice.level == Level::Error);
+        return style::notice(&notice.text, notice.level == Level::Error, width);
     }
     let keys = match (&model.detail, model.focus) {
         (Some(_), _) => " a allow once · A allow always · r reject · Esc back · Ctrl-C quit",

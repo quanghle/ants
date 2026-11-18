@@ -32,6 +32,7 @@ mod mcp;
 mod memories;
 mod model;
 mod nav;
+mod notices;
 mod people;
 mod question;
 mod react;

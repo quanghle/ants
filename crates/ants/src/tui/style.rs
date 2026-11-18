@@ -51,7 +51,42 @@ pub fn link(link: Link, now: DateTime<Utc>, then: &str) -> Span<'static> {
     }
 }
 
-/// A notice as a footer shows it, in [`ERROR`] when it reports an `error`.
-pub fn notice(text: &str, error: bool) -> Line<'static> {
+/// What an error begins with, besides its colour.
+pub const ERROR_MARK: &str = "✗ ";
+
+/// A notice as a footer shows it on one line `width` wide, an ellipsis ending it when cut; in [`ERROR`] and after
+/// [`ERROR_MARK`] when it reports an `error`.
+pub fn notice(text: &str, error: bool, width: u16) -> Line<'static> {
+    let text = if error { format!("{ERROR_MARK}{text}") } else { text.to_owned() };
+    let text = cut(&text.replace('\n', " "), usize::from(width).saturating_sub(1));
     Line::styled(format!(" {text}"), Style::new().fg(if error { ERROR } else { INFO }))
+}
+
+/// An error as a footer shows it: after [`ERROR_MARK`], wrapped to `width` over [`ERROR_LINES`] at most, an
+/// ellipsis ending the last when cut.
+pub fn error(text: &str, width: u16) -> Vec<Line<'static>> {
+    let width = usize::from(width).saturating_sub(1).max(1);
+    let words = [Span::raw(format!("{ERROR_MARK}{}", text.replace('\n', " ")))];
+    let mut rows: Vec<String> = super::markdown::wrap(&words, width)
+        .into_iter()
+        .map(|row| row.iter().map(|s| s.content.as_ref()).collect())
+        .collect();
+    if rows.len() > ERROR_LINES {
+        let rest = rows.split_off(ERROR_LINES - 1).join(" ");
+        rows.push(cut(&rest, width));
+    }
+    rows.into_iter().map(|row| Line::styled(format!(" {row}"), Style::new().fg(ERROR))).collect()
+}
+
+/// How many lines an error takes in a footer at most.
+pub const ERROR_LINES: usize = 3;
+
+/// `text` in at most `width` characters, an ellipsis ending it when cut.
+pub fn cut(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_owned();
+    }
+    let mut cut: String = text.chars().take(width.saturating_sub(1)).collect();
+    cut.push('…');
+    cut
 }

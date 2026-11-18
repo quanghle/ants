@@ -9,7 +9,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use super::model::{Focus, Level, Model, Page};
+use super::model::{Focus, Level, Model, Notice, Page};
 use super::style::{self, dim};
 use super::{approvals, catchup, compact, keymap, nav};
 
@@ -22,8 +22,14 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
     if model.compact {
         return compact::draw(frame, model, now);
     }
+    let width = frame.area().width;
+    let footer_lines = match error_shown(model, now) {
+        Some(error) => style::error(&error.text, width),
+        None => vec![footer_line(model, now, width)],
+    };
+    let tall = u16::try_from(footer_lines.len()).unwrap_or(1);
     let [header, body, footer] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)]).areas(frame.area());
+        Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(tall)]).areas(frame.area());
     frame.render_widget(Paragraph::new(header_line(model, now)), header);
     let [left, right] = Layout::horizontal([Constraint::Length(NAV_WIDTH), Constraint::Min(20)]).areas(body);
     nav::draw(frame, left, &model.data, &model.nav, now, model.focus == Focus::Nav && !model.bar.focused);
@@ -44,7 +50,7 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
         Page::Held(page) => page.draw(frame, view, data, now, focused),
     }
     model.bar.draw(frame, bar, &model.completions());
-    frame.render_widget(Paragraph::new(footer_line(model, now, footer.width)), footer);
+    frame.render_widget(Paragraph::new(footer_lines), footer);
     if let Some(asking) = model.asking.as_ref().filter(|a| a.full) {
         approvals::draw_full(frame, asking, now);
     }
@@ -52,6 +58,16 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
     if let Some(help) = &model.help {
         help.draw(frame, model, now);
     }
+    if let Some(log) = &model.log {
+        log.draw(frame, &model.notices);
+    }
+}
+
+/// The error the footer shows, wrapped, if one waits for a key and no prompt takes the footer.
+fn error_shown(model: &Model, now: DateTime<Utc>) -> Option<&Notice> {
+    let prompt = model.quitting_at(now) || model.picking.is_some() || model.interrupting.is_some();
+    let error = model.notice_at(now).filter(|n| n.level == Level::Error);
+    error.filter(|_| !prompt && model.snoozing.is_none())
 }
 
 /// Who the UI runs as, on which server, the view shown, and the connection.
@@ -69,7 +85,7 @@ fn header_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
 /// question card, a confirmation or draft of the view, else the hints of the key table ([`keymap::footer`]).
 fn footer_line(model: &Model, now: DateTime<Utc>, width: u16) -> Line<'static> {
     if model.quitting_at(now) {
-        return style::notice(QUIT_AGAIN, false);
+        return style::notice(QUIT_AGAIN, false, width);
     }
     if let Some(picker) = &model.picking {
         return picker.line();
@@ -81,7 +97,7 @@ fn footer_line(model: &Model, now: DateTime<Utc>, width: u16) -> Line<'static> {
         return prompt.line(&model.data);
     }
     if let Some(notice) = model.notice_at(now) {
-        return style::notice(&notice.text, notice.level == Level::Error);
+        return style::notice(&notice.text, notice.level == Level::Error, width);
     }
     if model.bar.focused && !model.completions().is_empty() {
         return keymap::prompt("↑↓ select · Tab/Enter complete · Esc close the list", width, false);
@@ -277,6 +293,32 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn an_error_stays_until_a_key_wrapped_over_three_lines_at_most_after_its_mark() {
+        let mut m = model();
+        let reason = "the daemon refused the order because ".to_owned() + &"of a reason far too long ".repeat(12);
+        m.notify(reason.trim_end(), Level::Error, at(1));
+        m.notify("reconnected", Level::Info, at(2));
+        let shown = crate::test_support::render::rendered(80, 24, |f| draw(f, &m, at(60)));
+        let footer: Vec<&str> = shown.lines().skip(21).collect();
+        assert!(footer[0].starts_with(" ✗ the daemon refused the order"), "{shown}");
+        assert!(footer[2].trim_end().ends_with('…'), "cut on its third line: {shown}");
+        assert!(!shown.contains("reconnected"), "a notice waits behind the error: {shown}");
+        m.key(Key::Down, at(61));
+        let shown = crate::test_support::render::rendered(80, 24, |f| draw(f, &m, at(61)));
+        assert!(!shown.contains("refused") && shown.lines().nth(23).unwrap().contains("? help"), "{shown}");
+    }
+
+    #[test]
+    fn a_notice_cut_at_the_width_ends_in_an_ellipsis() {
+        let mut m = model();
+        m.notify("a notice far too long to fit ".repeat(4), Level::Info, at(1));
+        let line = text(&footer_line(&m, at(2), 40));
+        assert_eq!((line.chars().count(), line.ends_with('…')), (40, true), "{line}");
+        m.notify("short", Level::Error, at(3));
+        assert_eq!(text(&footer_line(&m, at(3), 40)), " ✗ short");
     }
 
     #[test]

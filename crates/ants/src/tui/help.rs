@@ -119,7 +119,7 @@ fn row(entry: &Entry, why: Option<&str>, width: usize) -> Vec<Line<'static>> {
 }
 
 /// An area of at most `width` by `height` in the middle of `area`.
-fn centered(area: Rect, width: u16, height: u16) -> Rect {
+pub fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let (width, height) = (width.min(area.width), height.min(area.height));
     Rect { x: area.x + (area.width - width) / 2, y: area.y + (area.height - height) / 2, width, height }
 }

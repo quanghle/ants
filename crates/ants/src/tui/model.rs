@@ -18,6 +18,7 @@ use super::command::{self, Bar, Tone};
 use super::exec::{Job, Quoted};
 use super::help::Help;
 use super::interrupt::Confirm;
+use super::notices;
 use super::react::{self, Picker};
 use super::reads::{Levels, Mark, Read};
 use super::work::{Facts, Filter};
@@ -326,7 +327,12 @@ pub struct Model {
     pub pages: Vec<Page>,
     /// The help, while shown.
     pub help: Option<Help>,
+    /// The latest notice: an error until a key is pressed, else for [`NOTICE_FOR`].
     pub notice: Option<Notice>,
+    /// The notices of the run, the earliest first, [`notices::KEPT`] at most.
+    pub notices: Vec<Notice>,
+    /// The notices listed over the view, `N`.
+    pub log: Option<notices::Log>,
     pub bar: Bar,
     /// The tool request being answered.
     pub asking: Option<Asking>,
@@ -342,7 +348,8 @@ pub struct Model {
     pub compact: bool,
     /// When Ctrl-C, nothing being open and the bar empty, asked for a second one to quit.
     pub quitting: Option<DateTime<Utc>>,
-    /// When q last closed the help, the digest or a tool request, or came again soon after: a q that soon never quits.
+    /// When q last closed the help, the notices, the digest or a tool request, or came again soon after: a q that soon
+    /// never quits.
     closed_by_q: Option<DateTime<Utc>>,
 }
 
@@ -381,6 +388,8 @@ impl Model {
             focus: Focus::View,
             help: None,
             notice: None,
+            notices: Vec::new(),
+            log: None,
             bar: Bar::default(),
             asking: None,
             picking: None,
@@ -397,8 +406,16 @@ impl Model {
         self.pages.last().expect("a view")
     }
 
+    /// Show a notice, unless an error waits for a key and it is none, and keep it with the notices of the run.
     pub fn notify(&mut self, text: impl Into<String>, level: Level, now: DateTime<Utc>) {
-        self.notice = Some(Notice { text: text.into(), at: now, level });
+        let notice = Notice { text: text.into(), at: now, level };
+        if self.notices.len() == notices::KEPT {
+            self.notices.remove(0);
+        }
+        self.notices.push(notice.clone());
+        if level == Level::Error || self.notice.as_ref().is_none_or(|n| n.level != Level::Error) {
+            self.notice = Some(notice);
+        }
     }
 
     /// Whether a Ctrl-C at `now` quits, the one before having asked for it.
@@ -408,7 +425,7 @@ impl Model {
 
     /// The notice to show at `now`, if one is recent.
     pub fn notice_at(&self, now: DateTime<Utc>) -> Option<&Notice> {
-        self.notice.as_ref().filter(|n| now - n.at < NOTICE_FOR)
+        self.notice.as_ref().filter(|n| n.level == Level::Error || now - n.at < NOTICE_FOR)
     }
 
     /// Take in what the live feed read or heard.

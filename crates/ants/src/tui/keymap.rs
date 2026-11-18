@@ -231,6 +231,14 @@ pub const GLOBAL: &[Entry] = &[
     ),
     Entry::new(&[Key::Char('?')], "?", "help", "this help", HELP_ONLY, always),
     Entry::new(
+        &[Key::Char('N')],
+        "N",
+        "notices",
+        "the notices of the run, the latest first, each in full with its time",
+        85,
+        always,
+    ),
+    Entry::new(
         &[Key::Interrupt],
         "Ctrl-C",
         "close",
