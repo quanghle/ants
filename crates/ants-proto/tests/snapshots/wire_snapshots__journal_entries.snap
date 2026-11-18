@@ -26,5 +26,16 @@ expression: value
     "answer": {
       "error": "dev-a is not an ant"
     }
+  },
+  {
+    "call": 3,
+    "function": "goto",
+    "args": {
+      "state": 7,
+      "trail": "triage"
+    },
+    "answer": {
+      "error": "the run entered trail triage at its start before"
+    }
   }
 ]

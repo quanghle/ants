@@ -17,6 +17,8 @@ use crate::value::{from_monty, to_monty};
 const STACK_BYTES: usize = 16 * 1024 * 1024;
 /// `print()` output one request may collect; past it `print()` raises MemoryError.
 const PRINT_BYTES: usize = 64 * 1024;
+/// Bytes of JSON a goto's state, the next leg's input, may have.
+const MAX_STATE: usize = 64 * 1024;
 /// The exit status of a worker that could not read its request or write its response, or whose thread panicked.
 const FAILED: i32 = 70;
 
@@ -109,6 +111,7 @@ fn start(script: &str, args: &serde_json::Value, limits: Limits, clock: i64, see
         MontyObject::function("__ants_agent", None),
         MontyObject::function("__ants_human", None),
         MontyObject::function("__ants_trail", None),
+        MontyObject::function("__ants_goto", None),
         MontyObject::function("__ants_phase", None),
         MontyObject::function("__ants_log", None),
     ];
@@ -242,6 +245,7 @@ impl Session {
             "__ants_agent" => Some(Function::Agent),
             "__ants_human" => Some(Function::Human),
             "__ants_trail" => Some(Function::Trail),
+            "__ants_goto" => Some(Function::Goto),
             "__ants_phase" | "__ants_log" => {
                 let text = call.args.arg(0).and_then(|a| a.as_str()).unwrap_or_default().to_owned();
                 self.flush(false);
@@ -257,16 +261,25 @@ impl Session {
         };
         let result = match function {
             None => ExtFunctionResult::NotFound(call.function_name.clone()),
-            Some(_) if self.steps >= self.limits.steps => ExtFunctionResult::Error(MontyException::new(
-                ExcType::RuntimeError,
-                Some(format!("the run reached its limit of {} steps", self.limits.steps)),
-            )),
+            Some(function) if function.is_step() && self.steps >= self.limits.steps => {
+                ExtFunctionResult::Error(MontyException::new(
+                    ExcType::RuntimeError,
+                    Some(format!("the run reached its limit of {} steps", self.limits.steps)),
+                ))
+            }
             Some(function) => match call.args.arg(0).map(from_monty).transpose() {
                 Ok(args) => {
-                    self.steps += 1;
                     let args = args.unwrap_or_default();
-                    self.calls.push(Call { call: call.call_id, function, args });
-                    return call.resume_pending(PrintWriter::CollectString(&mut self.print, Some(PRINT_BYTES)));
+                    match oversized(function, &args) {
+                        Some(error) => {
+                            ExtFunctionResult::Error(MontyException::new(ExcType::RuntimeError, Some(error)))
+                        }
+                        None => {
+                            self.steps += u32::from(function.is_step());
+                            self.calls.push(Call { call: call.call_id, function, args });
+                            return call.resume_pending(PrintWriter::CollectString(&mut self.print, Some(PRINT_BYTES)));
+                        }
+                    }
                 }
                 Err(e) => ExtFunctionResult::Error(MontyException::new(
                     ExcType::TypeError,
@@ -303,6 +316,13 @@ impl Session {
         let printed: String = self.print.drain(..end).collect();
         self.events.extend(printed.lines().map(|line| Event::Log(line.to_owned())));
     }
+}
+
+/// Why a goto's arguments are refused: a state of more than [`MAX_STATE`] bytes of JSON.
+fn oversized(function: Function, args: &serde_json::Value) -> Option<String> {
+    let state = args.get("state").filter(|_| function == Function::Goto)?;
+    let size = serde_json::to_vec(state).map_or(usize::MAX, |state| state.len());
+    (size > MAX_STATE).then(|| format!("goto()'s state has {size} bytes of JSON; a leg takes at most {MAX_STATE}"))
 }
 
 /// Bytes from the run's seed and the call's id (splitmix64): the same call of the same run reads the same bytes.

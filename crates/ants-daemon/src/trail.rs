@@ -12,6 +12,7 @@ mod driver;
 mod limits;
 mod load;
 mod report;
+mod route;
 mod saved;
 mod schema;
 mod steps;
@@ -26,8 +27,8 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use ants_proto::provider::{Origin, Starter};
 use ants_proto::{
     Envelope, JsDomain, MAX_TRAIL_ARGS, MAX_TRAIL_SCRIPT, NoticeKind, PendingCall, QueuedCall, Role, RunId, RunState,
-    StepStage, ThreadId, TrailFunction, TrailLimits, TrailRun, TrailSession, TrailSource, TrailStart, UserId,
-    WaitingStep,
+    StepStage, ThreadId, TrailFunction, TrailLeg, TrailLimits, TrailName, TrailRun, TrailSession, TrailSource,
+    TrailStart, UserId, WaitingStep,
 };
 use ants_trail::{Answer, JournalEntry, Limits, Run, Worker};
 use anyhow::Result;
@@ -206,20 +207,35 @@ impl Slot {
     }
 }
 
-/// The run of `header`'s script, checked to fit, and its session as JSON.
-fn prepare(header: &TrailRun) -> Result<(Run, String), String> {
-    let script = &header.script;
-    if script.len() > MAX_TRAIL_SCRIPT {
-        return Err(format!("the script has {} bytes; a trail takes at most {MAX_TRAIL_SCRIPT}", script.len()));
+/// A leg to start: a run of `trail`'s script, entered at the waypoint `at`, else at its start.
+struct Leg {
+    trail: Option<TrailName>,
+    script: String,
+    at: Option<String>,
+    args: Value,
+    /// The id of the leg's first call: past those of the run's legs before ([`TrailLeg::first_call`]).
+    first_call: u32,
+}
+
+impl Leg {
+    /// The leg, checked to fit, as the run's route records it, its run, and its session as JSON.
+    fn prepare(self, limits: &TrailLimits) -> Result<(TrailLeg, Run, String), String> {
+        let Self { trail, script, at, args, first_call } = self;
+        if script.len() > MAX_TRAIL_SCRIPT {
+            return Err(format!("the script has {} bytes; a trail takes at most {MAX_TRAIL_SCRIPT}", script.len()));
+        }
+        let size = serde_json::to_vec(&args).map_or(usize::MAX, |args| args.len());
+        if size > MAX_TRAIL_ARGS {
+            return Err(format!("the arguments have {size} bytes of JSON; a run takes at most {MAX_TRAIL_ARGS}"));
+        }
+        let engine = Run::new(&script, at.as_deref(), args.clone(), engine_limits(limits))
+            .map_err(|e| e.to_string())?
+            .numbered_from(first_call);
+        let session = serde_json::to_string(engine.state()).map_err(|e| e.to_string())?;
+        let at = engine.state().entry().map(str::to_owned);
+        let leg = TrailLeg { trail, at, script, args, first_call, started_at: Utc::now() };
+        Ok((leg, engine, session))
     }
-    let size = serde_json::to_vec(&header.args).map_or(usize::MAX, |args| args.len());
-    if size > MAX_TRAIL_ARGS {
-        return Err(format!("the arguments have {size} bytes of JSON; a run takes at most {MAX_TRAIL_ARGS}"));
-    }
-    let engine =
-        Run::new(script, None, header.args.clone(), engine_limits(&header.limits)).map_err(|e| e.to_string())?;
-    let session = serde_json::to_string(engine.state()).map_err(|e| e.to_string())?;
-    Ok((engine, session))
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -356,13 +372,12 @@ impl Trails {
             }
             TrailSource::Script(script) => (None, script),
         };
-        let now = Utc::now();
+        let (leg, engine, session) = Leg { trail: name, script, at: None, args, first_call: 0 }.prepare(&limits)?;
+        let now = leg.started_at;
         let header = TrailRun {
             run,
             conductor: self.inner.ant.clone(),
-            trail: name,
-            script,
-            args,
+            route: vec![leg],
             owner,
             thread,
             parent: None,
@@ -376,7 +391,6 @@ impl Trails {
             updated_at: now,
             ended_at: None,
         };
-        let (engine, session) = prepare(&header)?;
         let run = header.run.clone();
         self.launch(header, engine, session).await.map_err(|e| format!("storing the run: {e:#}"))?;
         Ok(run)
@@ -556,7 +570,7 @@ impl Trails {
         }
         let spent = match pending.function {
             TrailFunction::Agent => pending.turn_budget.saturating_sub(message.turn_budget),
-            TrailFunction::Human | TrailFunction::Trail => 0,
+            TrailFunction::Human | TrailFunction::Trail | TrailFunction::Goto => 0,
         };
         let answer = match steps::taken(&pending, message) {
             Taken::Answer(answer) => answer,

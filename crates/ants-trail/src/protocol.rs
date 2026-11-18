@@ -10,7 +10,7 @@ use serde_json::{Value, value::RawValue};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Limits {
-    /// Steps (agent and human calls) a run may make; the call past it raises in the script.
+    /// Steps (agent, human and trail calls) a run may make; the call past it raises in the script.
     pub steps: u32,
     /// Steps outstanding at once; the rest wait inside the run until one is answered.
     pub concurrency: u32,
@@ -76,7 +76,7 @@ impl Default for Limits {
     }
 }
 
-/// A host function a step calls.
+/// A host function the script calls, suspending until the host answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Function {
@@ -87,6 +87,10 @@ pub enum Function {
     Human,
     /// `trail(name, args=None)`: args `{"name", "args"?}`, answered by a run of the trail saved as `name`.
     Trail,
+    /// `goto(trail=None, at=None, state=None)`: args `{"trail"?, "at"?, "state"?}`. No step: the host ends the run's
+    /// leg there and goes on in a run of the next leg ([`crate::Run::numbered_from`]), or answers the call with an
+    /// error naming why not.
+    Goto,
 }
 
 impl Function {
@@ -96,14 +100,21 @@ impl Function {
             Self::Agent => "agent",
             Self::Human => "human",
             Self::Trail => "trail",
+            Self::Goto => "goto",
         }
+    }
+
+    /// Whether a call of the function is a step, counted against the step and concurrency limits.
+    #[must_use]
+    pub fn is_step(self) -> bool {
+        self != Self::Goto
     }
 }
 
-/// A call the script made that the host performs: a step.
+/// A call the script made that the host performs: a step, or a goto.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Call {
-    /// Monty's id of the call, unique within the run.
+    /// The call's id, unique within the run: Monty's, past the ids of the run's earlier legs.
     pub call: u32,
     pub function: Function,
     pub args: Value,
@@ -160,7 +171,7 @@ pub enum Request {
         answers: Vec<(u32, Answer)>,
         limits: Limits,
         seed: u64,
-        /// Steps the run made so far, against `limits.steps`.
+        /// Steps the leg made so far, against `limits.steps`.
         steps: u32,
     },
 }
@@ -175,7 +186,7 @@ pub enum Response {
     Suspended {
         /// The session, MontyRun's serde form (`RunProgress::ResolveFutures`) as JSON.
         snapshot: Box<RawValue>,
-        /// The steps called during this request, in call order.
+        /// The calls made during this request, in call order.
         calls: Vec<Call>,
         /// Every call the session still waits on, also earlier ones.
         pending: Vec<u32>,
@@ -184,7 +195,7 @@ pub enum Response {
     /// The script ended; `result` is its last expression's value.
     Done {
         result: Value,
-        /// The steps called during this request, in call order, which a replay checks against the journal.
+        /// The calls made during this request, in call order, which a replay checks against the journal.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         calls: Vec<Call>,
         events: Vec<Event>,
@@ -205,7 +216,7 @@ pub enum Response {
 }
 
 impl Response {
-    /// The steps called during the request.
+    /// The calls made during the request.
     #[must_use]
     pub fn calls(&self) -> &[Call] {
         match self {

@@ -131,6 +131,7 @@ fn answer(example: &str, call: &Call) -> Answer {
             let name = args["name"].as_str().unwrap_or_else(|| panic!("{example}: name {}", call.args));
             Answer::Ok(json!(format!("result of trail {name}")))
         }
+        Function::Goto => panic!("{example}: the fake host follows no goto() {}", call.args),
     }
 }
 

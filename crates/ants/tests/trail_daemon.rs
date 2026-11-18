@@ -35,6 +35,8 @@ use tokio::task::JoinHandle;
 
 #[path = "trail_daemon/children.rs"]
 mod children;
+#[path = "trail_daemon/goto.rs"]
+mod goto;
 
 const META: &str = "meta = {\"name\": \"t\", \"description\": \"a test\", \"phases\": [\"one\"]}\n";
 
@@ -732,7 +734,7 @@ async fn a_schedule_s_firing_starts_its_saved_trail_once_on_its_thread() {
     assert_eq!(lead.ended(&run).await, RunState::Done { result: json!(2) });
     let header = lead.header(&run).await;
     assert_eq!((&header.thread, header.owner.as_ref()), (&firing.thread_id, Some(&UserId::human())));
-    assert_eq!((header.trail.as_ref(), header.limits), (Some(&start.trail), limits), "under the limits asked for");
+    assert_eq!((header.trail(), header.limits), (Some(&start.trail), limits), "under the limits asked for");
     assert!(!header.origin.trusted(), "a schedule's run is as untrusted as a webhook's: {:?}", header.origin);
     assert_eq!(lead.trails.start_fired(&firing, &start).await.unwrap(), run, "delivered again");
     assert_eq!(lead.header(&run).await.started_at, header.started_at, "no run starts again");

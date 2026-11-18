@@ -17,7 +17,7 @@ use ants_trail::{Answer, Call};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 
-use super::{Slot, Trails, driver, locked, prepare, steps};
+use super::{Leg, Slot, Trails, driver, locked, steps};
 
 /// What a run's tree may still spend, as its root's counters and limits say.
 pub(super) struct Budget {
@@ -46,7 +46,7 @@ impl Trails {
         }
         let ancestors = self.ancestors(header);
         let mut callers = std::iter::once(header.clone()).chain(ancestors.iter().map(|slot| slot.header()));
-        let caller = callers.find(|caller| caller.trail.as_ref() == Some(&name))?;
+        let caller = callers.find(|caller| caller.trail() == Some(&name))?;
         Some(format!("trail {name} already runs among the calling runs, as run {}: no trail calls itself", caller.run))
     }
 
@@ -73,19 +73,23 @@ impl Trails {
             Ok(script) => script,
             Err(e) => return Ok(Err(e)),
         };
-        let now = Utc::now();
+        let limits = child_limits(parent, Utc::now());
+        let leg = Leg { trail: Some(name), script, at: None, args: args.args, first_call: 0 };
+        let (leg, engine, session) = match leg.prepare(&limits) {
+            Ok(prepared) => prepared,
+            Err(e) => return Ok(Err(e)),
+        };
+        let now = leg.started_at;
         let origin_thread = parent.parent.as_ref().map_or(&parent.thread, |link| &link.origin_thread).clone();
         let header = TrailRun {
             run,
             conductor: parent.conductor.clone(),
-            trail: Some(name),
-            script,
-            args: args.args,
+            route: vec![leg],
             owner: parent.owner.clone(),
             thread: call.thread.clone(),
             parent: Some(TrailParent { run: parent.run.clone(), call: call.call, origin_thread }),
             origin: parent.origin.clone(),
-            limits: child_limits(parent, now),
+            limits,
             state: RunState::Running,
             phase: None,
             steps: 0,
@@ -93,10 +97,6 @@ impl Trails {
             started_at: now,
             updated_at: now,
             ended_at: None,
-        };
-        let (engine, session) = match prepare(&header) {
-            Ok(prepared) => prepared,
-            Err(e) => return Ok(Err(e)),
         };
         self.launch(header, engine, session).await?;
         Ok(Ok(()))
@@ -109,7 +109,7 @@ impl Trails {
         let answer = match &child.state {
             RunState::Done { result } => Answer::Ok(result.clone()),
             RunState::Failed { error } => {
-                let name = child.trail.as_ref().map_or_else(|| child.run.to_string(), ToString::to_string);
+                let name = child.trail().map_or_else(|| child.run.to_string(), ToString::to_string);
                 Answer::Error(format!("trail {name} failed: {error}"))
             }
             RunState::Running | RunState::Waiting | RunState::Stopped { .. } => return Ok(()),

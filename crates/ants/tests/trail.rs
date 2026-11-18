@@ -361,6 +361,31 @@ async fn a_run_entered_at_a_waypoint_replays_from_its_journal() {
     assert_eq!(*done(&replayed), json!("patched"));
 }
 
+#[tokio::test]
+async fn a_goto_takes_no_concurrency_slot_and_the_next_leg_numbers_its_calls_past_the_last() {
+    let worker = worker();
+    let limits = Limits { concurrency: 1, ..Limits::default() };
+    let script = "await parallel(agent('a'), agent('b'), goto(at='patch', state={'bug': 7}))\n";
+    let mut first = run(script, json!(null), limits);
+    let calls = first.start(&worker).await.unwrap().calls;
+    let functions: Vec<Function> = calls.iter().map(|call| call.function).collect();
+    assert_eq!(functions, [Function::Agent, Function::Goto], "the goto goes out past the busy slot");
+    assert_eq!(calls[1].args, json!({"at": "patch", "state": {"bug": 7}}));
+    let next = first.state().next_call();
+    assert!(first.queued().iter().chain(&calls).all(|call| call.call < next));
+
+    let leg = Run::with_clock(WAYPOINTS, Some("patch"), json!({"bug": 7}), limits, 1_700_000_000, 7).unwrap();
+    let mut leg = leg.numbered_from(next);
+    let plan = leg.start(&worker).await.unwrap().calls;
+    assert_eq!((plan[0].call, prompts(&plan)), (next, vec!["plan 7"]));
+    let then = answer(&mut leg, &worker, &plan, "plan 7", json!("swap")).await.calls;
+    assert_eq!(leg.journal()[0].call, next);
+    let (mut replayed, _) = Run::replay(leg.state().clone(), leg.journal().to_vec(), &worker).await.unwrap();
+    assert_eq!(replayed.outstanding(), then.as_slice(), "a replay numbers the leg's calls as the leg did");
+    replayed.resolve(&worker, then[0].call, Answer::Ok(json!("patched"))).await.unwrap();
+    assert_eq!(*done(&replayed), json!("patched"));
+}
+
 #[test]
 fn a_run_entering_its_trail_at_no_waypoint_of_it_is_refused() {
     let refused = Run::new(WAYPOINTS, Some("review"), json!(null), Limits::default());

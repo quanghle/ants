@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use ants_proto::{
     CallAnswer, JournalEntry, PendingCall, QueuedCall, Role, RunId, RunState, ThreadId, TrailAction, TrailFunction,
-    TrailLimits, TrailOutcome, TrailRequest, TrailRunIndex, TrailSession, TrailSource, UserId, Uuid, WaitingStep,
-    subject, trail_runs_index_key,
+    TrailLeg, TrailLimits, TrailOutcome, TrailRequest, TrailRunIndex, TrailSession, TrailSource, UserId, Uuid,
+    WaitingStep, subject, trail_runs_index_key,
 };
 use chrono::{TimeDelta, Utc};
 use clap::Parser;
@@ -151,6 +151,19 @@ fn a_follower_prints_each_change_of_a_run_once() {
     assert_eq!(follower.header(&header), ["phase: test", "waiting on humans' answers"]);
     header.state = RunState::Running;
     assert_eq!(follower.header(&header), ["running"]);
+    let refused = JournalEntry {
+        call: 2,
+        function: TrailFunction::Goto,
+        args: json!({"at": "build"}),
+        answer: CallAnswer::Error("entered before".to_owned()),
+    };
+    let line = "call 2 to go to the same trail at waypoint build refused: entered before";
+    assert_eq!(follower.entry(&refused).as_deref(), Some(line));
+    let next =
+        TrailLeg { trail: Some("release".parse().unwrap()), at: Some("review".to_owned()), ..header.route[0].clone() };
+    header.route.push(next);
+    assert_eq!(follower.header(&header), ["went on to trail release at waypoint review"]);
+    assert!(follower.header(&header).is_empty());
 }
 
 /// Answer each request on `ant`'s control subject with what `answer` makes of it, as `ant`'s daemon does.

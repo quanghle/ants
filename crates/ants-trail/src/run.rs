@@ -26,7 +26,7 @@ pub enum Status {
 /// What one start or resume brought.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Progress {
-    /// Steps for the host to perform now, then answer with [`Run::answer`].
+    /// Calls for the host to perform now, steps and gotos, then answer with [`Run::answer`].
     pub calls: Vec<Call>,
     /// Steps handed out before that the script no longer waits on, as the gather siblings of a step that raised, or
     /// all of them once the run ended: the host may abandon them; [`Run::answer`] refuses their answers.
@@ -65,7 +65,8 @@ pub enum RunError {
     Diverged(String),
 }
 
-/// Everything a run needs to continue in another process, but its journal (see [`Run::restore`]).
+/// Everything a run needs to continue in another process, but its journal (see [`Run::restore`]). A run is one leg of
+/// a trail run: a goto() ends it, and the host goes on in a run of the next leg ([`Run::numbered_from`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunState {
     script: String,
@@ -87,7 +88,12 @@ pub struct RunState {
     answered: Vec<u32>,
     /// How many of `answered` the session has received.
     sent: usize,
+    /// The steps the session made.
     steps: u32,
+    /// What the session's call ids are offset by: the first call id of the leg.
+    first_call: u32,
+    /// The call id past every call made.
+    next_call: u32,
     status: Status,
 }
 
@@ -117,6 +123,18 @@ impl RunState {
     #[must_use]
     pub fn answered(&self) -> &[u32] {
         &self.answered
+    }
+
+    /// The id of the run's first call.
+    #[must_use]
+    pub fn first_call(&self) -> u32 {
+        self.first_call
+    }
+
+    /// The call id past every call the run made: the first of a leg following it.
+    #[must_use]
+    pub fn next_call(&self) -> u32 {
+        self.next_call
     }
 
     /// The state under `limits` instead, as when a run that failed on a limit continues under raised ones.
@@ -173,9 +191,20 @@ impl Run {
             answered: Vec::new(),
             sent: 0,
             steps: 0,
+            first_call: 0,
+            next_call: 0,
             status: Status::Running,
         };
         Ok(Self { state, journal: Vec::new() })
+    }
+
+    /// The run, not started, with its call ids from `first` on: a leg following another, numbered from that one's
+    /// [`RunState::next_call`], so call ids are unique across a trail run's legs.
+    #[must_use]
+    pub fn numbered_from(mut self, first: u32) -> Self {
+        self.state.first_call = first;
+        self.state.next_call = first;
+        self
     }
 
     /// Continues a run from its stored state and journal, in any order. Journal entries the state does not know yet,
@@ -205,29 +234,30 @@ impl Run {
         worker: &Worker,
     ) -> Result<(Self, Progress), RunError> {
         let mut run = Self::restore(state, journal);
-        let state = &run.state;
+        let (limits, seed) = (run.state.limits, run.state.seed);
         let start = Request::Start {
-            script: state.script.clone(),
-            entry: state.entry.clone(),
-            args: state.args.clone(),
-            limits: state.limits,
-            clock: state.clock,
-            seed: state.seed,
+            script: run.state.script.clone(),
+            entry: run.state.entry.clone(),
+            args: run.state.args.clone(),
+            limits,
+            clock: run.state.clock,
+            seed,
         };
-        let mut response = worker.call(&start, runner::deadline(state.limits.compute(), 0)).await?;
+        let mut response = worker.call(&start, runner::deadline(limits.compute(), 0)).await?;
+        run.number(&mut response);
         let mut made = response.calls().to_vec();
         if let Response::Suspended { snapshot, calls, .. } = &response
             && !run.journal.is_empty()
         {
-            let steps = u32::try_from(calls.len()).unwrap_or(u32::MAX);
             let resume = Request::Resume {
                 snapshot: snapshot.clone(),
-                answers: run.journal.iter().map(|entry| (entry.call, entry.answer.clone())).collect(),
-                limits: state.limits,
-                seed: state.seed,
-                steps,
+                answers: run.answers(0),
+                limits,
+                seed,
+                steps: steps(calls),
             };
-            response = worker.call(&resume, runner::deadline(state.limits.compute(), run.journal.len())).await?;
+            response = worker.call(&resume, runner::deadline(limits.compute(), run.journal.len())).await?;
+            run.number(&mut response);
             made.extend(response.calls().iter().cloned());
         }
         run.diverged(&made, &response)?;
@@ -236,7 +266,7 @@ impl Run {
         state.snapshot = None;
         state.status = Status::Running;
         state.sent = state.answered.len();
-        state.steps = u32::try_from(made.len()).unwrap_or(u32::MAX);
+        state.steps = steps(&made);
         let known: HashSet<u32> = state.outstanding.iter().chain(&state.queued).map(|call| call.call).collect();
         let answered: HashSet<u32> = state.answered.iter().copied().collect();
         let fresh = made.into_iter().filter(|call| !known.contains(&call.call) && !answered.contains(&call.call));
@@ -289,9 +319,8 @@ impl Run {
         if !self.started() {
             return self.start(worker).await;
         }
+        let answers = self.answers(self.state.sent);
         let state = &self.state;
-        let answers: Vec<(u32, Answer)> =
-            self.journal[state.sent..].iter().map(|e| (e.call, e.answer.clone())).collect();
         if answers.is_empty() {
             let mut progress = Progress::default();
             self.dispatch(&mut progress);
@@ -349,9 +378,33 @@ impl Run {
         &self.state.queued
     }
 
-    /// Whether the script ran: a run that made steps has, even with its session lost.
+    /// Whether the script ran: a run that made calls has, even with its session lost.
     fn started(&self) -> bool {
-        self.state.snapshot.is_some() || self.state.status != Status::Running || self.state.steps > 0
+        let state = &self.state;
+        state.snapshot.is_some() || state.status != Status::Running || state.next_call > state.first_call
+    }
+
+    /// Makes the session's call ids in `response` the run's, past those of its earlier legs.
+    fn number(&mut self, response: &mut Response) {
+        let first = self.state.first_call;
+        if let Response::Suspended { pending, .. } = response {
+            pending.iter_mut().for_each(|call| *call = call.saturating_add(first));
+        }
+        let (Response::Suspended { calls, .. } | Response::Done { calls, .. } | Response::Failed { calls, .. }) =
+            response
+        else {
+            return;
+        };
+        for call in calls {
+            call.call = call.call.saturating_add(first);
+            self.state.next_call = self.state.next_call.max(call.call.saturating_add(1));
+        }
+    }
+
+    /// The journal's answers from the `from`th on, by the session's call ids.
+    fn answers(&self, from: usize) -> Vec<(u32, Answer)> {
+        let first = self.state.first_call;
+        self.journal[from..].iter().map(|e| (e.call.saturating_sub(first), e.answer.clone())).collect()
     }
 
     fn respond(&mut self, response: Result<Response, WorkerError>) -> Result<Progress, RunError> {
@@ -359,10 +412,11 @@ impl Run {
         match response {
             Ok(Response::Refused { error }) => return Err(RunError::Refused(error)),
             Ok(Response::Unrestorable { error }) => return Err(RunError::Unrestorable(error)),
-            Ok(response) => {
+            Ok(mut response) => {
+                self.number(&mut response);
                 self.state.sent = self.state.answered.len();
                 if let Response::Suspended { calls, .. } = &response {
-                    self.state.steps += u32::try_from(calls.len()).unwrap_or(u32::MAX);
+                    self.state.steps += steps(calls);
                     self.state.queued.extend(calls.iter().cloned());
                 }
                 return self.absorb(response);
@@ -416,12 +470,21 @@ impl Run {
         Ok(progress)
     }
 
-    /// Hands out queued calls while concurrency slots are free.
+    /// Hands out queued steps while concurrency slots are free, and gotos at once.
     fn dispatch(&mut self, progress: &mut Progress) {
         let state = &mut self.state;
-        let free =
-            usize::try_from(state.limits.concurrency).unwrap_or(usize::MAX).saturating_sub(state.outstanding.len());
-        let handed: Vec<Call> = state.queued.drain(..free.min(state.queued.len())).collect();
+        let busy = state.outstanding.iter().filter(|call| call.function.is_step()).count();
+        let mut free = usize::try_from(state.limits.concurrency).unwrap_or(usize::MAX).saturating_sub(busy);
+        let mut handed = Vec::new();
+        state.queued.retain(|call| {
+            let step = call.function.is_step();
+            if step && free == 0 {
+                return true;
+            }
+            free -= usize::from(step);
+            handed.push(call.clone());
+            false
+        });
         state.outstanding.extend(handed.iter().cloned());
         progress.calls.extend(handed);
     }
@@ -465,6 +528,11 @@ impl Run {
         }
         Ok(())
     }
+}
+
+/// The steps among `calls`.
+fn steps(calls: &[Call]) -> u32 {
+    u32::try_from(calls.iter().filter(|call| call.function.is_step()).count()).unwrap_or(u32::MAX)
 }
 
 #[cfg(all(test, unix))]

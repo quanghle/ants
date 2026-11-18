@@ -8,8 +8,8 @@ use std::str::FromStr;
 use ants_proto::provider::Starter;
 use ants_proto::{
     CallAnswer, JournalEntry, PendingCall, QueuedCall, RunId, RunState, StepStage, TRAIL_RUNS_BUCKET, TRAIL_STEPS,
-    ThreadId, TrailFunction, TrailRun, TrailSession, TrailStepThread, UserId, Uuid, parse_trail_run_key, trail_run_key,
-    trail_session_key,
+    ThreadId, TrailFunction, TrailLeg, TrailRun, TrailSession, TrailStepThread, UserId, Uuid, parse_trail_run_key,
+    trail_run_key, trail_session_key,
 };
 use anyhow::{Result, bail};
 use async_nats::jetstream;
@@ -42,11 +42,14 @@ pub(super) fn parse<T: serde::de::DeserializeOwned>(key: &str, payload: &[u8]) -
     serde_json::from_slice(payload).inspect_err(|e| tracing::warn!(key, "skipping a malformed run entry: {e}")).ok()
 }
 
-/// A run's header as `ants trail runs --json` lists it: without its script, which `ants trail show RUN --json` gives.
+/// A run's header as `ants trail runs --json` lists it: without its legs' scripts, which `ants trail show RUN --json`
+/// gives.
 pub(super) fn header_json(run: &TrailRun) -> Result<String> {
     let mut value = serde_json::to_value(run)?;
-    if let Some(fields) = value.as_object_mut() {
-        fields.remove("script");
+    if let Some(legs) = value.get_mut("route").and_then(Value::as_array_mut) {
+        for leg in legs.iter_mut().filter_map(Value::as_object_mut) {
+            leg.remove("script");
+        }
     }
     Ok(value.to_string())
 }
@@ -157,6 +160,7 @@ pub(super) fn function(function: TrailFunction) -> &'static str {
         TrailFunction::Agent => "agent",
         TrailFunction::Human => "human",
         TrailFunction::Trail => "trail",
+        TrailFunction::Goto => "goto",
     }
 }
 
@@ -175,7 +179,7 @@ pub(crate) fn table(runs: &[TrailRun], now: DateTime<Utc>) -> String {
         .chain(runs.iter().map(|r| {
             [
                 r.run.to_string(),
-                r.trail.as_ref().map_or_else(|| "inline".to_owned(), ToString::to_string),
+                r.trail().map_or_else(|| "inline".to_owned(), ToString::to_string),
                 r.conductor.to_string(),
                 r.owner.as_ref().map_or_else(|| "-".to_owned(), ToString::to_string),
                 state(&r.state).to_owned(),
@@ -202,6 +206,24 @@ pub(super) fn gist(args: &Value) -> String {
     excerpt(&text, 60)
 }
 
+/// Where a goto() call asks to go: its trail, else the run's own, at its waypoint, else the trail's start.
+pub(super) fn destination(args: &Value) -> String {
+    let trail =
+        args.get("trail").and_then(Value::as_str).map_or_else(|| "the same trail".to_owned(), |t| format!("trail {t}"));
+    let at =
+        args.get("at").and_then(Value::as_str).map_or_else(|| "its start".to_owned(), |at| format!("waypoint {at}"));
+    excerpt(&format!("{trail} at {at}"), 60)
+}
+
+/// Where `leg` entered its trail.
+pub(super) fn entered(leg: &TrailLeg) -> String {
+    let trail = leg.trail.as_ref().map_or_else(|| "the inline script".to_owned(), |t| format!("trail {t}"));
+    match &leg.at {
+        Some(at) => format!("{trail} at waypoint {at}"),
+        None => format!("{trail} at its start"),
+    }
+}
+
 /// Whom an agent call asks: the ant it names, else the capability, else the conductor itself.
 fn whom(args: &Value) -> String {
     match (args.get("ant").and_then(Value::as_str), args.get("capability").and_then(Value::as_str)) {
@@ -223,10 +245,22 @@ fn starter(by: &Starter) -> String {
     }
 }
 
+/// A row per leg of a run's route: where it entered which trail, when, and with what state after the first.
+fn legs(route: &[TrailLeg]) -> Vec<[String; 4]> {
+    route
+        .iter()
+        .enumerate()
+        .map(|(at, leg)| {
+            let input = if at == 0 { String::new() } else { format!("state {}", excerpt(&leg.args.to_string(), 60)) };
+            [(at + 1).to_string(), entered(leg), format!("started {}", local(leg.started_at)), input]
+        })
+        .collect()
+}
+
 /// The run's header, limits, pending and queued calls and journal.
 pub(super) fn render(detail: &Detail, now: DateTime<Utc>) -> String {
     let Detail { run: r, pending, queued, journal } = detail;
-    let mut out = match &r.trail {
+    let mut out = match r.trail() {
         Some(trail) => format!("run {} of trail {trail}\n", r.run),
         None => format!("run {} of an inline script\n", r.run),
     };
@@ -271,8 +305,13 @@ pub(super) fn render(detail: &Detail, now: DateTime<Utc>) -> String {
         ants_proto::duration::format(l.compute()),
         l.session_bytes / 1024
     );
-    if !r.args.is_null() {
-        let _ = writeln!(out, "args: {}", excerpt(&r.args.to_string(), 200));
+    let args = r.route.first().map_or(&Value::Null, |leg| &leg.args);
+    if !args.is_null() {
+        let _ = writeln!(out, "args: {}", excerpt(&args.to_string(), 200));
+    }
+    if r.route.len() > 1 {
+        out.push_str("\nroute:\n");
+        out.push_str(&indented(&super::columns(&legs(&r.route))));
     }
     if !pending.is_empty() {
         out.push_str("\npending calls:\n");
@@ -311,9 +350,10 @@ pub(super) fn render(detail: &Detail, now: DateTime<Utc>) -> String {
                 let whom = match e.function {
                     TrailFunction::Agent => whom(&e.args),
                     TrailFunction::Human => r.owner.as_ref().map_or_else(|| "-".to_owned(), ToString::to_string),
-                    TrailFunction::Trail => r.conductor.to_string(),
+                    TrailFunction::Trail | TrailFunction::Goto => r.conductor.to_string(),
                 };
-                [e.call.to_string(), function(e.function).to_owned(), whom, gist(&e.args), answer]
+                let gist = if e.function == TrailFunction::Goto { destination(&e.args) } else { gist(&e.args) };
+                [e.call.to_string(), function(e.function).to_owned(), whom, gist, answer]
             })
             .collect();
         out.push_str(&indented(&super::columns(&rows)));

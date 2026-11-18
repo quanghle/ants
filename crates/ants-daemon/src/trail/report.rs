@@ -76,7 +76,7 @@ impl Trails {
         let label = match step.function {
             TrailFunction::Agent => steps::AgentArgs::of(&step.args).ok().and_then(|args| args.label),
             TrailFunction::Trail => steps::TrailArgs::of(&step.args).ok().map(|args| format!("trail {}", args.name)),
-            TrailFunction::Human => None,
+            TrailFunction::Human | TrailFunction::Goto => None,
         };
         let update = StatusUpdate::Step {
             run: run.run.clone(),
@@ -169,7 +169,7 @@ pub(super) struct Stray<'a> {
 
 /// The message telling the end of `run`; None while it runs.
 fn end_text(run: &TrailRun) -> Option<String> {
-    let name = match &run.trail {
+    let name = match run.trail() {
         Some(trail) => format!("Run {} of trail {trail}", run.run),
         None => format!("Run {}", run.run),
     };

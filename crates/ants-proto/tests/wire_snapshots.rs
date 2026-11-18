@@ -1320,9 +1320,14 @@ fn trail_child_runs() {
     let child = TrailRun {
         run: "019a7d2e-0000-7000-8000-000000000007".parse().unwrap(),
         conductor: user("planner"),
-        trail: Some("review".parse().unwrap()),
-        script: "await agent('review it', ant='dev-a')".to_owned(),
-        args: serde_json::json!({"pr": 7}),
+        route: vec![TrailLeg {
+            trail: Some("review".parse().unwrap()),
+            at: None,
+            script: "await agent('review it', ant='dev-a')".to_owned(),
+            args: serde_json::json!({"pr": 7}),
+            first_call: 0,
+            started_at: at(4),
+        }],
         owner: Some(user("alice")),
         thread: other_thread(),
         parent: Some(TrailParent { run: run(), call: 2, origin_thread: thread() }),
@@ -1353,6 +1358,44 @@ fn trail_child_runs() {
     snap("trail_child_call", &call);
 }
 
+/// A run that went from triage's start to release's review waypoint.
+fn routed_run() -> TrailRun {
+    TrailRun {
+        run: run(),
+        conductor: user("planner"),
+        route: vec![
+            TrailLeg {
+                trail: Some("triage".parse().unwrap()),
+                at: None,
+                script: "await goto('release', at='review', state={'version': '1.2.0'})".to_owned(),
+                args: serde_json::json!({"bug": 7}),
+                first_call: 0,
+                started_at: at(0),
+            },
+            TrailLeg {
+                trail: Some("release".parse().unwrap()),
+                at: Some("review".to_owned()),
+                script: "async def review(state):\n    return await agent(state['version'], ant='dev-a')".to_owned(),
+                args: serde_json::json!({"version": "1.2.0"}),
+                first_call: 3,
+                started_at: at(2),
+            },
+        ],
+        owner: Some(user("alice")),
+        thread: thread(),
+        parent: None,
+        origin: provider::Origin { by: provider::Starter::Human { user: user("alice") }, channel: Some(channel()) },
+        limits: TrailLimits { steps: 20, ..TrailLimits::DEFAULT },
+        state: RunState::Done { result: serde_json::json!({"tag": "v1.2.0"}) },
+        phase: Some("review".to_owned()),
+        steps: 3,
+        turns: 5,
+        started_at: at(0),
+        updated_at: at(9),
+        ended_at: Some(at(9)),
+    }
+}
+
 #[test]
 fn trails() {
     snap(
@@ -1371,25 +1414,7 @@ fn trails() {
             saved_at: at(0),
         },
     );
-    let header = TrailRun {
-        run: run(),
-        conductor: user("planner"),
-        trail: Some("release".parse().unwrap()),
-        script: "agent('dev-a', 'build it')".to_owned(),
-        args: serde_json::json!({"version": "1.2.0"}),
-        owner: Some(user("alice")),
-        thread: thread(),
-        parent: None,
-        origin: provider::Origin { by: provider::Starter::Human { user: user("alice") }, channel: Some(channel()) },
-        limits: TrailLimits { steps: 20, ..TrailLimits::DEFAULT },
-        state: RunState::Done { result: serde_json::json!({"tag": "v1.2.0"}) },
-        phase: Some("review".to_owned()),
-        steps: 3,
-        turns: 5,
-        started_at: at(0),
-        updated_at: at(9),
-        ended_at: Some(at(9)),
-    };
+    let header = routed_run();
     snap("trail_run", &header);
     let mut newer = serde_json::to_value(&header).unwrap();
     newer["paused_at"] = serde_json::json!("2025-01-01T12:05:00Z");
@@ -1427,11 +1452,18 @@ fn trails() {
         args: serde_json::json!(["dev-a", "build it"]),
         answer,
     };
+    let refused = JournalEntry {
+        call: 3,
+        function: TrailFunction::Goto,
+        args: serde_json::json!({"state": 7, "trail": "triage"}),
+        answer: CallAnswer::Error("the run entered trail triage at its start before".to_owned()),
+    };
     snap(
         "journal_entries",
         &[
             answer(1, CallAnswer::Ok(serde_json::json!({"ok": true}))),
             answer(2, CallAnswer::Error("dev-a is not an ant".to_owned())),
+            refused,
         ],
     );
     snap("trail_run_index", &TrailRunIndex { runs: vec![run()] });

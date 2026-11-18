@@ -205,19 +205,16 @@ impl std::fmt::Display for TrailLimits {
 }
 
 /// A run's header in [`TRAIL_RUNS_BUCKET`], under [`trail_run_key`]: what it runs, for whom and where, and how far it
-/// got. Its conductor's daemon puts it at the start and whenever its state or counters change; humans read it.
-/// Readers should treat unknown fields as additions, not errors.
+/// got. Its conductor's daemon puts it at the start, as a leg starts and whenever its state or counters change; humans
+/// read it. Readers should treat unknown fields as additions, not errors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrailRun {
     pub run: RunId,
     /// The ant running the script, under whose keys the run is kept.
     pub conductor: UserId,
-    /// The saved trail it runs; none for a script given inline.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trail: Option<TrailName>,
-    pub script: String,
-    /// The arguments the script got, JSON of at most [`MAX_TRAIL_ARGS`] bytes.
-    pub args: Value,
+    /// The legs the run went, in order: the first the trail it started, each next one a goto() of the one before led
+    /// to, the last the one it is on.
+    pub route: Vec<TrailLeg>,
     /// The human the run answers to, the owner of the thread that started it: its steps' threads carry it on. None when
     /// that thread had none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -253,10 +250,42 @@ impl TrailRun {
         crate::trail_run_key(&self.conductor, &self.run)
     }
 
+    /// The leg the run is on: the last of its route.
+    pub fn leg(&self) -> Option<&TrailLeg> {
+        self.route.last()
+    }
+
+    /// The saved trail the run is on; none for a script given inline.
+    pub fn trail(&self) -> Option<&TrailName> {
+        self.leg().and_then(|leg| leg.trail.as_ref())
+    }
+
     /// Whether the run is over: done or failed. A stopped run may still resume within its wall time.
     pub fn finished(&self) -> bool {
         self.state.finished()
     }
+}
+
+/// A leg of a run ([`TrailRun::route`]): its trail, entered at a waypoint with an input, its script pinned as the leg
+/// started, so a saved trail changed or removed since changes no leg already started. A run enters each (trail,
+/// waypoint) once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrailLeg {
+    /// The saved trail; none for a script given inline, which only a run's first leg is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trail: Option<TrailName>,
+    /// The waypoint the leg entered the trail at; none for a trail without waypoints, entered at its start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    pub script: String,
+    /// The leg's input, JSON of at most [`MAX_TRAIL_ARGS`] bytes: the run's arguments on its first leg, the state of
+    /// the goto() that led to it on the others.
+    pub args: Value,
+    /// The id of the leg's first call: a leg's calls are numbered past those of the legs before, so a call id is
+    /// unique within the run and keys one journal entry ([`trail_call_key`]).
+    #[serde(default)]
+    pub first_call: u32,
+    pub started_at: DateTime<Utc>,
 }
 
 /// The run a child run answers a trail() call of ([`TrailRun::parent`]). A child run has its parent's conductor, owner
@@ -293,13 +322,15 @@ impl RunState {
 }
 
 /// Who answers a call of the script: an ant, by a step sent to it, a human, by a question on a step, or a child run of
-/// a saved trail ([`TrailParent`]).
+/// a saved trail ([`TrailParent`]); or, for a goto(), the conductor, only with an error when it refuses to start the
+/// leg the call asks for ([`TrailLeg`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrailFunction {
     Agent,
     Human,
     Trail,
+    Goto,
 }
 
 /// A run's suspended session in [`TRAIL_RUNS_BUCKET`], under [`trail_session_key`]: the interpreter's dumped state and
