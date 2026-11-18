@@ -52,6 +52,13 @@ impl Model {
         }
         if !self.bar.focused
             && self.focus == Focus::View
+            && let Some(Page::Thread(page)) = self.pages.last_mut()
+            && page.find_key(key)
+        {
+            return None;
+        }
+        if !self.bar.focused
+            && self.focus == Focus::View
             && let Some(Page::Dm(page)) = self.pages.last_mut()
             && let Some(action) = page.write(key)
         {
@@ -82,7 +89,7 @@ impl Model {
         }
         match key {
             Key::Char('q') => Some(Action::Quit),
-            Key::Char('/') => {
+            Key::Char('/') | Key::Ctrl('f') => {
                 self.bar.focused = true;
                 if self.bar.is_empty() {
                     self.bar.set_text("/search ");
@@ -388,6 +395,7 @@ fn write(page: &mut Page, line: &str) -> bool {
     line.chars().all(|c| match page {
         Page::Dm(page) => page.write(Key::Char(c)).is_some(),
         Page::Ant(page) => page.write(Key::Char(c)).is_some(),
+        Page::Thread(page) => page.finding() && page.find_key(Key::Char(c)),
         _ => false,
     })
 }

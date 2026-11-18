@@ -36,6 +36,7 @@ use crate::messages::attachments::Listed;
 use crate::threads::thread::{Entry, Kind};
 
 mod conversation;
+mod find;
 
 pub use conversation::SPIN_MS;
 use conversation::{Item, Shown, busy, cut, glyphs, hm, rows, started, withdrawn_from, woken};
@@ -66,6 +67,8 @@ struct Laid {
     lines: usize,
     /// Each message's sequence and the lines it takes, from its first to past its last.
     messages: Vec<(u64, usize, usize)>,
+    /// The line of each match of the text found, in order.
+    found: Vec<usize>,
 }
 
 #[derive(Debug)]
@@ -89,6 +92,8 @@ pub struct Page {
     mark: attach::Mark<u64>,
     /// The cursor on the question card the keys answer, while Enter has focused it.
     answering: Option<question::Cursor>,
+    /// The text found in the conversation (Ctrl-F), while finding.
+    find: Option<find::Find>,
 }
 
 impl Page {
@@ -104,6 +109,7 @@ impl Page {
             at: None,
             mark: attach::Mark::default(),
             answering: None,
+            find: None,
         }
     }
 
@@ -118,7 +124,7 @@ impl Page {
         self.messages().find(|e| e.id == Some(at)).map(|e| e.seq)
     }
 
-    pub const KEYS: &str = "↑↓ select or scroll · PgUp PgDn scroll · Home first · v pager · i reply · > reply to selected · y copy · f forward · o open file · ] next file · + react · p pin · m mute · e archive · d done · u unread from selected · b remind of selected · z snooze · t tree · T tool calls · S TL;DR · x cancel · W withdraw · E withdraw to edit · a A r answer a tool request · n reject it with a note · 1-9 Enter answer a question · End latest · Esc back";
+    pub const KEYS: &str = "↑↓ select or scroll · PgUp PgDn scroll · Home first · v pager · Ctrl-F find · i reply · > reply to selected · y copy · f forward · o open file · ] next file · + react · p pin · m mute · e archive · d done · u unread from selected · b remind of selected · z snooze · t tree · T tool calls · S TL;DR · x cancel · W withdraw · E withdraw to edit · a A r answer a tool request · n reject it with a note · 1-9 Enter answer a question · End latest · Esc back";
 
     /// The messages shown, in the order stored.
     fn messages(&self) -> impl DoubleEndedIterator<Item = &Entry> {
@@ -262,6 +268,72 @@ impl Page {
         }
         drop(laid);
         self.step(if down { 1 } else { -1 });
+    }
+
+    /// Take `key` for finding text in the conversation: Ctrl-F starts asking for it in the footer, where typing changes
+    /// it, Enter and Shift-Enter step to the next and previous match and another key stops asking; then n and N step,
+    /// Ctrl-F asks again and Esc ends it. Whether it took `key`.
+    pub fn find_key(&mut self, key: Key) -> bool {
+        let Some(find) = &mut self.find else {
+            if key == Key::Ctrl('f') {
+                self.find = Some(find::Find { asking: true, ..find::Find::default() });
+            }
+            return key == Key::Ctrl('f');
+        };
+        match key {
+            Key::Ctrl('f') => find.asking = true,
+            Key::Esc => self.find = None,
+            Key::Char(c) if find.asking => {
+                find.text.push(c);
+                find.at = None;
+            }
+            Key::Backspace if find.asking => {
+                find.text.pop();
+                find.at = None;
+            }
+            Key::Enter if find.asking => self.step_find(true),
+            Key::Newline if find.asking => self.step_find(false),
+            Key::Char('n') => self.step_find(true),
+            Key::Char('N') => self.step_find(false),
+            _ => {
+                find.asking = false;
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Whether the footer asks for the text to find, which typing changes.
+    pub fn finding(&self) -> bool {
+        self.find.as_ref().is_some_and(|f| f.asking)
+    }
+
+    /// The footer while finding text in the conversation.
+    pub fn find_footer(&self) -> Option<Line<'static>> {
+        Some(self.find.as_ref()?.footer(self.laid.borrow().found.len()))
+    }
+
+    /// Step to the next match drawn last, or with `down` false the previous one, scrolling it into view by line.
+    fn step_find(&mut self, down: bool) {
+        let laid = self.laid.borrow();
+        let (found, top, height) = (&laid.found, self.top.get(), laid.height);
+        let Some(find) = self.find.as_mut().filter(|_| !found.is_empty()) else { return };
+        let n = found.len();
+        let at = match find.at.map(|at| at % n) {
+            Some(at) if down => (at + 1) % n,
+            Some(at) => (at + n - 1) % n,
+            None if down => found.iter().position(|&line| line >= top).unwrap_or(0),
+            None => found.iter().rposition(|&line| line < top + height).unwrap_or(n - 1),
+        };
+        find.at = Some(at);
+        let line = found[at];
+        if line < top || line >= top + height {
+            let top = line.saturating_sub(height / 2).min(laid.lines.saturating_sub(height));
+            self.top.set(top);
+            self.scroll.set(Scroll::At(top));
+        }
+        drop(laid);
+        self.at = None;
     }
 
     /// The cursor on the focused question card, while its question is still the one the keys answer.
@@ -456,6 +528,10 @@ impl Page {
             }
         }
         let height = usize::from(area.height);
+        let found = match &self.find {
+            Some(find) => find::mark(&mut lines, &find.text, find.at),
+            None => Vec::new(),
+        };
         let bottom = lines.len().saturating_sub(height);
         let top = match (range, self.scroll.get()) {
             (Some((start, _)), _) if held.is_some() => start.min(bottom),
@@ -470,7 +546,7 @@ impl Page {
         self.top.set(top);
         self.spinning.set(shown.spun.get());
         let newer = messages.iter().filter(|(_, start, _)| *start >= top + height).count();
-        *self.laid.borrow_mut() = Laid { height, lines: lines.len(), messages };
+        *self.laid.borrow_mut() = Laid { height, lines: lines.len(), messages, found };
         let block = match newer {
             0 => block,
             n => block.title_bottom(
@@ -1362,6 +1438,62 @@ mod tests {
             body(&asks, &[]),
             "Regions: Which regions?\n1 eu\n2 us\npick one or more\n\nQ2: Ship it?\n1 default 0\n2 skip"
         );
+    }
+
+    #[test]
+    fn ctrl_f_marks_the_matches_and_steps_to_them_scrolling_by_line() {
+        let thread = ThreadId::generate();
+        let m = model();
+        let entries: Vec<Entry> = (1..=30)
+            .map(|n| {
+                message(
+                    n,
+                    &thread,
+                    "alice",
+                    "dev-a",
+                    &if n % 10 == 3 { format!("the Needle {n}") } else { format!("line {n}") },
+                )
+            })
+            .collect();
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(entries)).unwrap();
+        let shown = screen(&page, &m, 80, at(40));
+        assert!(!shown.contains("Needle 3 ") && shown.contains("line 30"), "{shown}");
+        assert!(page.find_key(Key::Ctrl('f')) && page.finding());
+        "needle".chars().for_each(|c| assert!(page.find_key(Key::Char(c))));
+        screen(&page, &m, 80, at(40));
+        assert_eq!(
+            page.find_footer().unwrap().to_string(),
+            " find: needle_ · 3 found · Enter next · Shift-Enter previous · Esc end"
+        );
+        assert!(page.find_key(Key::Enter));
+        screen(&page, &m, 80, at(40));
+        assert!(page.find_footer().unwrap().to_string().contains("3 of 3"), "the first match in view");
+        assert!(page.find_key(Key::Newline), "Shift-Enter: the previous match");
+        let shown = screen(&page, &m, 80, at(40));
+        assert!(shown.contains("the Needle 13 ") && !shown.contains("line 30"), "scrolled to it: {shown}");
+        assert!(page.find_footer().unwrap().to_string().contains("2 of 3"));
+        assert!(!page.find_key(Key::Up) && !page.finding(), "another key stops asking");
+        assert!(page.find_key(Key::Char('N')));
+        let shown = screen(&page, &m, 80, at(40));
+        assert!(
+            shown.contains("the Needle 3 ") && page.find_footer().unwrap().to_string().contains("1 of 3"),
+            "{shown}"
+        );
+        assert!(page.find_key(Key::Char('n')));
+        screen(&page, &m, 80, at(40));
+        assert!(page.find_footer().unwrap().to_string().contains("2 of 3"));
+        assert_eq!(page.selected, None, "the view scrolls, the selection stays");
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| page.draw(f, f.area(), &m, at(40), true)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let (x, y) = (0..24)
+            .flat_map(|y| (0..80).map(move |x| (x, y)))
+            .find(|&(x, y)| buffer[(x, y)].symbol() == "N" && buffer[(x + 1, y)].symbol() == "e")
+            .unwrap();
+        assert!(buffer[(x, y)].modifier.contains(Modifier::REVERSED), "the match marked");
+        assert!(page.find_key(Key::Esc) && page.find_footer().is_none(), "Esc ends it");
+        assert!(!page.find_key(Key::Char('n')), "n is no longer taken");
     }
 
     #[test]

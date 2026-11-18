@@ -1005,6 +1005,38 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_f_finds_in_the_open_thread_and_elsewhere_opens_the_bar_on_search() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        m.key(Key::Tab, at(0));
+        assert_eq!(m.key(Key::Ctrl('f'), at(0)), None);
+        assert_eq!((m.bar.focused, m.bar.text()), (true, "/search ".to_owned()));
+        m.key(Key::Esc, at(0));
+        let messages =
+            vec![message(1, &thread, "alice", "dev-a", "deploy"), message(2, &thread, "dev-a", "alice", "deployed")];
+        m.stored(messages.clone(), at(1));
+        m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
+        m.take(live::Event::History(thread, Ok(messages)), at(1));
+        m.focus = Focus::View;
+        let footer = |m: &Model| {
+            let shown = crate::test_support::render::rendered(100, 20, |f| super::super::frame::draw(f, m, at(2)));
+            shown.lines().last().unwrap_or_default().to_owned()
+        };
+        m.key(Key::Ctrl('f'), at(2));
+        m.paste("depl", at(2));
+        for c in "oy".chars() {
+            assert_eq!(m.key(Key::Char(c), at(2)), None);
+        }
+        assert!(!m.bar.focused, "the footer takes the text");
+        assert!(footer(&m).starts_with(" find: deploy_ · 3 found"), "with the title: {}", footer(&m));
+        m.key(Key::Enter, at(2));
+        assert!(footer(&m).contains(" of 3"), "{}", footer(&m));
+        m.key(Key::Esc, at(2));
+        assert_eq!((m.page().name(), m.bar.focused), ("thread", false), "Esc ends the find, the thread stays");
+        assert!(!footer(&m).starts_with(" find"), "{}", footer(&m));
+    }
+
+    #[test]
     fn slash_searches_and_a_match_opens_its_thread_at_it() {
         let thread = ThreadId::generate();
         let mut m = model();

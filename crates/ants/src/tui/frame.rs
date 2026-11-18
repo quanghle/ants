@@ -82,6 +82,12 @@ fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
     if model.bar.focused {
         return Line::styled(" Enter send · Alt-Enter new line · Ctrl-E editor · Ctrl-K commands · Esc leave", dim());
     }
+    if model.focus == Focus::View
+        && let Page::Thread(page) = model.page()
+        && let Some(footer) = page.find_footer()
+    {
+        return footer;
+    }
     let card = match model.page() {
         Page::Home(page) => page.card(&model.data, now).map(|(cursor, _)| cursor),
         Page::Thread(page) => page.card(&model.data, now),
@@ -129,6 +135,7 @@ const HELP: &[(&str, &str)] = &[
     ("x y", "in a delegation tree: cancel every prompt in the selected subtree"),
     ("n M", "with a person: write a message; in a channel: notify level, members"),
     ("/", "the bar on /search, as in: /search deploy from:dev-a"),
+    ("Ctrl-F n N", "in a thread: find text, step to the next and previous match; elsewhere the bar on /search"),
     ("R ?", "read everything again, this help"),
     ("q Ctrl-C", "quit"),
 ];
