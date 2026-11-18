@@ -354,28 +354,10 @@ impl Job {
             }
             Self::Post { channel, thread, text, quote } => post(ctx, channel, thread, text, quote, queue, &files).await,
             Self::Reply { thread, to, text, quote } => reply(ctx, thread, to, text, quote, queue, &files).await,
-            Self::Grant { thread, text } => {
-                let entries = thread::history(&ctx.js, &thread, None, thread::Activity::None, None).await?;
-                let ant = stuck(&entries).ok_or_else(|| anyhow!("no ant is stuck on thread {thread}"))?;
-                ask(ctx, ant.into(), Some(thread), text, None, false, &files).await
-            }
-            Self::Restart { ant, now } => {
-                let admin = ctx.admin.as_ref().map_err(|e| anyhow!("{e}"))?;
-                let (order, outcome) = crate::admin::restart::send(admin, &ctx.js, None, &ant, now).await?;
-                Ok(Done::line(crate::admin::restart::told(&order, outcome)?))
-            }
+            Self::Grant { thread, text } => grant(ctx, thread, text, &files).await,
+            Self::Restart { ant, now } => restart(ctx, &ant, now).await,
             Self::Cancel { thread, ants } => cancel_all(ctx, &thread, ants).await,
-            Self::Answer { thread, question, picks } => {
-                let entries = thread::history(&ctx.js, &thread, None, thread::Activity::None, None).await?;
-                waiting(&entries, me, &thread, question)?;
-                let envelope = send::answering(&ctx.js, me, question, send::Picks::Made(picks)).await?;
-                let stored = send::deliver(&ctx.js, ctx.domain.as_ref(), &envelope).await?;
-                Ok(Done {
-                    line: format!("answered {} on thread {thread}", envelope.to),
-                    warnings: outbox(stored),
-                    ..Done::default()
-                })
-            }
+            Self::Answer { thread, question, picks } => answer(ctx, &thread, question, picks).await,
             Self::Done { thread, done } => {
                 Ok(Done::line(thread_meta::marked_done(&ctx.js, ctx.meta()?, &thread, done).await?))
             }
@@ -399,17 +381,7 @@ impl Job {
                 let post = send::post_notes(&ctx.js, me, thread, text, &files).await?;
                 Ok(Done::line(format!("{}{}", send::notes_posted(&post), with(&files))))
             }
-            Self::React { thread, message, reaction } => {
-                let message = match message {
-                    Some(message) => message,
-                    None => {
-                        let entries = thread::history(&ctx.js, &thread, None, thread::Activity::None, None).await?;
-                        latest(&entries, me).ok_or_else(|| anyhow!("no message on thread {thread} to react to"))?
-                    }
-                };
-                let changed = reactions::add(&ctx.js, ctx.domain.as_ref(), me, &message, &reaction).await?;
-                Ok(Done::line(send::reacted_line(&reaction, message, false, changed)))
-            }
+            Self::React { thread, message, reaction } => react(ctx, &thread, message, reaction).await,
             Self::Open(listed) => Ok(Done::line(attach::open(&ctx.js, ctx.keyring.as_deref(), &listed).await?)),
             Self::Save(listed, to) => {
                 Ok(Done::line(attach::save(&ctx.js, ctx.keyring.as_deref(), &listed, to.as_deref()).await?))
@@ -422,10 +394,7 @@ impl Job {
                 Ok(Done { line: dead::dropped(&ctx.js, seq).await?, dead: Some(seq), ..Done::default() })
             }
             Self::Forward { to, source, note } => forward(ctx, to, &source, &note, &files).await,
-            Self::Pause { ant, paused } => {
-                let admin = ctx.admin.as_ref().map_err(|e| anyhow!("{e}"))?;
-                Ok(Done::line(pause::order(admin, &ctx.js, &ant, None, paused, pause::WAIT).await?))
-            }
+            Self::Pause { ant, paused } => pause(ctx, &ant, paused).await,
             Self::Attached { .. } => Err(anyhow!("files are attached to one message")),
             Self::Later(_) => Err(anyhow!("a message waits its turn once")),
             Self::Withdraw { ants, message, edit } => withdraw(ctx, &ants, message, edit.map(|e| *e)).await,
@@ -440,6 +409,54 @@ impl Job {
             Self::TrailResume(run) => trail::resumed(ctx, &run).await,
         }
     }
+}
+
+/// Ask the ant stuck on `thread` again with `text`, granting what it waits for.
+async fn grant(ctx: &Ctx, thread: ThreadId, text: String, files: &[File]) -> Result<Done> {
+    let entries = thread::history(&ctx.js, &thread, None, thread::Activity::None, None).await?;
+    let ant = stuck(&entries).ok_or_else(|| anyhow!("no ant is stuck on thread {thread}"))?;
+    ask(ctx, ant.into(), Some(thread), text, None, false, files).await
+}
+
+/// Send `ant` a restart order, at once when `now`.
+async fn restart(ctx: &Ctx, ant: &UserId, now: bool) -> Result<Done> {
+    let admin = ctx.admin.as_ref().map_err(|e| anyhow!("{e}"))?;
+    let (order, outcome) = crate::admin::restart::send(admin, &ctx.js, None, ant, now).await?;
+    Ok(Done::line(crate::admin::restart::told(&order, outcome)?))
+}
+
+/// Answer the questions of message `question` on `thread`, still waiting on the human, with `picks`.
+async fn answer(ctx: &Ctx, thread: &ThreadId, question: Uuid, picks: Vec<Pick>) -> Result<Done> {
+    let me = &ctx.me.id;
+    let entries = thread::history(&ctx.js, thread, None, thread::Activity::None, None).await?;
+    waiting(&entries, me, thread, question)?;
+    let envelope = send::answering(&ctx.js, me, question, send::Picks::Made(picks)).await?;
+    let stored = send::deliver(&ctx.js, ctx.domain.as_ref(), &envelope).await?;
+    Ok(Done {
+        line: format!("answered {} on thread {thread}", envelope.to),
+        warnings: outbox(stored),
+        ..Done::default()
+    })
+}
+
+/// React with `reaction` to `message`, else to the latest message on `thread` not the human's.
+async fn react(ctx: &Ctx, thread: &ThreadId, message: Option<Uuid>, reaction: Reaction) -> Result<Done> {
+    let me = &ctx.me.id;
+    let message = match message {
+        Some(message) => message,
+        None => {
+            let entries = thread::history(&ctx.js, thread, None, thread::Activity::None, None).await?;
+            latest(&entries, me).ok_or_else(|| anyhow!("no message on thread {thread} to react to"))?
+        }
+    };
+    let changed = reactions::add(&ctx.js, ctx.domain.as_ref(), me, &message, &reaction).await?;
+    Ok(Done::line(send::reacted_line(&reaction, message, false, changed)))
+}
+
+/// Send `ant` an order pausing it, or resuming it unless `paused`.
+async fn pause(ctx: &Ctx, ant: &UserId, paused: bool) -> Result<Done> {
+    let admin = ctx.admin.as_ref().map_err(|e| anyhow!("{e}"))?;
+    Ok(Done::line(pause::order(admin, &ctx.js, ant, None, paused, pause::WAIT).await?))
 }
 
 /// Write `change` to the entry of `channel` with the human's credentials ([`crate::channel::Change::write`]).
