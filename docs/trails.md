@@ -102,7 +102,9 @@ A run is started three ways; each names a conductor, an owner and a thread to re
   of a saved trail (`name`) or of a script of its own (`script`), with `args`, on the current thread, owned by the
   thread's owner. It returns the run's id at once, or with `wait: true` the run's result or error, waiting up to
   `timeout` (default `5m`, at most `30m`), else the run's id while the run goes on. Runs started by ants take the
-  default limits. The tool is offered only while the bus keeps trail runs.
+  default limits. `trail_status` tells the ant how a run it conducts stands, or lists those not ended, and
+  `stop_trail` stops one ([Restarts, stops and resumes](#restarts-stops-and-resumes)). The tools are offered only while
+  the bus keeps trail runs.
 - **A schedule** with `trail = "NAME"` in place of `text` ([config.md](config.md#schedules)): each firing sends `ant`,
   the conductor, a message `Scheduled run of trail NAME.` carrying the trail and `args` (a TOML table); its daemon
   starts the saved trail on the firing's new thread instead of prompting the ant, owned by the schedule's `owner`,
@@ -179,8 +181,9 @@ A run takes the trust of the thread it started on (its origin):
   default ([config.md](config.md#tool-permissions)). A schedule starting a trail sets no `allow` of its own.
 
 Only humans start, stop and resume runs by request (`ants.trail.<ant>`, answered by the conductor's daemon), save and
-remove trails, and read every run's records; an ant reads and writes only the runs it conducts, and starts runs only
-with `run_trail` ([auth.md](auth.md)). A `human()` step goes to the run's owner, and a step's thread keeps that
+remove trails, and read every run's records; an ant reads and writes only the runs it conducts, starts runs only with
+`run_trail`, reads and stops those it conducts with `trail_status` and `stop_trail`, and resumes none
+([auth.md](auth.md)). A `human()` step goes to the run's owner, and a step's thread keeps that
 owner, so replies and escalations of the step's recipient reach the human who owns the run.
 
 ## Storage
@@ -204,7 +207,9 @@ finished run stays at least 30 days. The full layout is in [architecture.md](arc
   script whose steps no longer match the journal fails the run, naming the first call that differs.
 - **Stop:** `ants trail stop RUN` stops a run: no further step goes out and the replies of the steps waited on answer
   nothing. The conductor withdraws the steps sent to itself; the command lists those still in other ants' queues,
-  each with the `ants withdraw ANT MESSAGE` withdrawing it. Wall time keeps running while stopped.
+  each with the `ants withdraw ANT MESSAGE` withdrawing it. The conductor stops a run it conducts the same way with
+  `stop_trail`, the run then stopped by the conductor, and the tool lists the steps in other ants' queues for a human
+  to withdraw. Wall time keeps running while stopped.
 - **Resume:** `ants trail resume RUN` resumes a stopped run, or one whose error names a limit, from its last stored
   session; the steps waited on go out anew, on new threads. Limit flags replace the run's limits they name, within the
   maxima. A run done, failed otherwise, running or waiting is refused.

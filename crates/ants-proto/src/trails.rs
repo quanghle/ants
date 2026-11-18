@@ -240,7 +240,7 @@ pub enum RunState {
     Running,
     /// The script waits only for steps humans answer.
     Waiting,
-    /// A human stopped it: it sends no step until resumed, while its wall time runs on.
+    /// A human, or its conductor, stopped it: it sends no step until a human resumes it, while its wall time runs on.
     Stopped { by: UserId },
     /// The script returned `result`.
     Done { result: Value },

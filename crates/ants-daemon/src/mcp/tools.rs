@@ -209,7 +209,8 @@ fn instructions(ant: &UserId, hub: &Hub, assisting: Option<&UserId>, provider: O
     if hub.trails.get().is_some() {
         text.push_str(
             " run_trail starts a trail run this ant conducts, a script whose code sends steps to ants and merges \
-             their replies: a saved trail by name, or a script written for the work at hand.",
+             their replies: a saved trail by name, or a script written for the work at hand. trail_status tells how \
+             a run this ant conducts stands, and stop_trail stops one.",
         );
     }
     if hub.requester.get().is_some() {
