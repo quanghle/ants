@@ -604,7 +604,7 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         assert!(!edited.contains("memory"), "a field the config leaves out stays out: {edited}");
 
         let loaded = ants_daemon::config::load(&path).unwrap();
-        let served = crate::serve::configs(loaded.ants, &loaded.harnesses, &server.url, None, None, Some(&shared));
+        let served = crate::serve::configs(loaded.ants, &loaded.harnesses, &server.url, None, Some(&shared));
         let served = served.unwrap().remove(0);
         assert_eq!(
             (served.harness.model_settings.model.as_deref(), served.drift.get()),
@@ -630,7 +630,7 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         let m2_bucket = Bucket { identities: &m2_kv, devices: &m2_devices, accounts: &accounts };
         ants_daemon::profile::shared::refresh(m2_bucket, Some(&m2), &standby, std::slice::from_ref(&dev_a)).await;
         assert_eq!(verified_of(&admin, &js, &dev_a).await, Some(changed), "the first record stays");
-        let taken = crate::serve::configs(vec![own], &Harnesses::builtin(), &server.url, None, None, Some(&standby));
+        let taken = crate::serve::configs(vec![own], &Harnesses::builtin(), &server.url, None, Some(&standby));
         let taken = taken.unwrap().remove(0);
         assert_eq!(
             (taken.harness.model_settings.model.as_deref(), taken.drift.get()),

@@ -216,13 +216,24 @@ fn check_config(path: &Path, checks: &mut Vec<Check>) -> Option<config::Loaded> 
     match config::load(path) {
         Ok(loaded) => {
             let names: Vec<&str> = loaded.ants.iter().map(|ant| ant.name.as_str()).collect();
-            let elsewhere = loaded.sage_elsewhere.as_ref().map_or(String::new(), |creds| {
-                format!(
-                    "; the built-in sage, without credentials at {} here, is left to another machine",
-                    creds.display()
-                )
-            });
-            checks.push(Check::ok("config", format!("{} lists {}{elsewhere}", path.display(), names.join(", "))));
+            let elsewhere: String = loaded
+                .elsewhere
+                .iter()
+                .map(|left| {
+                    format!(
+                        "; the built-in {}, without credentials at {} here, is left to another machine",
+                        left.ant.name,
+                        left.creds.display()
+                    )
+                })
+                .collect();
+            let detail = format!("{} lists {}{elsewhere}", path.display(), names.join(", "));
+            if names.is_empty() {
+                let fix = format!("add an [[ant]] to {}, or copy a built-in ant's credentials here", path.display());
+                checks.push(Check::fail("config", format!("{detail}: nothing to serve here"), vec![fix]));
+            } else {
+                checks.push(Check::ok("config", detail));
+            }
             Some(loaded)
         }
         Err(e) => {
