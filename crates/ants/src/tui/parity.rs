@@ -35,7 +35,6 @@ const SERVICE: &str = "a service, run on its own";
 const CREDENTIALS: &str = "the credentials files and keys of the machine running it";
 const MACHINE: &str = "sets up or checks the machine running it";
 const MOVING: &str = "moves an ant between machines: files, config file and provider data of the machine running it";
-const ADD_ANT: &str = "ants-rjatj.13";
 const NOTES: &str = "ants-rjatj.14";
 const ASSISTANT: &str = "ants-waemb";
 const DEAD: &str = "ants-rjatj.18";
@@ -50,8 +49,8 @@ const CLI: &[(&str, Chat)] = &[
     ("colony", Shown("the nav's ants with their states, and the ant view of each")),
     ("ant show", Shown("the ant view, which an ant of the nav opens")),
     ("ant orders", Shown("the ant view's settings pane, listing the latest admin orders to the ant")),
-    ("ant add", Missing(ADD_ANT)),
-    ("ant clone", Missing(ADD_ANT)),
+    ("ant add", Slash("add")),
+    ("ant clone", Slash("clone")),
     ("ant retire", Slash("retire")),
     ("ant set", Press(View::Settings, Key::Enter, "change")),
     ("ant avatar", Shown("the ant view's avatar head; its seed and colour change from the command line")),
@@ -182,7 +181,7 @@ const MCP: &[(&str, Chat)] = &[
     ("manage_channel", Press(View::Channel, Key::Char('M'), "members")),
     ("escalate", Press(View::Home, Key::Char('g'), "grant")),
     ("decide_approval", Slash("approve reject")),
-    ("request_ant", Missing(ADD_ANT)),
+    ("request_ant", Slash("add")),
     ("retire_ant", Slash("retire")),
     ("run_trail", Slash("trail")),
     ("trail_status", Shown("/trail runs, and the steps a run's thread lists")),

@@ -6,37 +6,58 @@ use std::time::Duration;
 
 use ants_proto::{AdminOp, Machine, OrderState, UserId};
 use anyhow::{Result, bail};
-use serde_json::Value;
+use async_nats::jetstream;
+use clap_complete::engine::ArgValueCandidates;
+use serde_json::{Map, Value};
 
 use super::Admin;
+use crate::completions;
 use crate::connection::Nats;
 use crate::serve::AntOptions;
 
+/// The arguments of `ants ant clone`, which `/clone` of `ants chat` takes too.
+#[derive(clap::Args, Debug)]
+pub struct Args {
+    #[arg(add = ArgValueCandidates::new(completions::ants))]
+    pub src: UserId,
+    pub new: UserId,
+    /// The machine running SRC (default: the one that last recorded serving it).
+    #[arg(long)]
+    pub machine: Option<Machine>,
+    #[command(flatten)]
+    pub options: Box<AntOptions>,
+    /// How long to wait for the daemon's outcome (a duration such as 90s, 10m or 1h).
+    #[arg(long, value_name = "DURATION", default_value = "40m", value_parser = ants_proto::duration::parse)]
+    pub wait: Duration,
+}
+
 /// `ants ant clone`: send the order and wait up to `wait` for its outcome.
-pub async fn run(
-    nats: &Nats<'_>,
+pub async fn run(nats: &Nats<'_>, args: Args) -> Result<()> {
+    let settings = super::add::settings(&args.new, &args.options)?;
+    let (_, js) = nats.connect("ants-ant-clone").await?;
+    println!("{}", clone(&Admin::of(nats)?, &js, &args.src, &args.new, args.machine, settings, args.wait).await?);
+    Ok(())
+}
+
+/// Send the order cloning `src` as `new` with `settings` over its own, signed by `admin`, to `machine`, else to the
+/// machine that last recorded serving `src`, and wait up to `wait` for its outcome: what it did, a line each, or that
+/// it is still pending. Fails when the daemon refused it.
+pub async fn clone(
+    admin: &Admin,
+    js: &jetstream::Context,
     src: &UserId,
     new: &UserId,
     machine: Option<Machine>,
-    options: &AntOptions,
+    settings: Map<String, Value>,
     wait: Duration,
-) -> Result<()> {
-    if new.is_human() {
-        bail!("{new} is a human's name: an ant's name is lowercase");
-    }
-    let settings = super::add::settings(new, options)?;
-    let (_, js) = nats.connect("ants-ant-clone").await?;
+) -> Result<String> {
     let op = AdminOp::Clone { new: new.clone(), settings };
-    let (order, outcome) = Admin::of(nats)?.send(&js, machine, src, op, wait).await?;
-    let Some(outcome) = outcome else {
-        println!("{}", super::pending_note(&order));
-        return Ok(());
-    };
+    let (order, outcome) = admin.send(js, machine, src, op, wait).await?;
+    let Some(outcome) = outcome else { return Ok(super::pending_note(&order)) };
     if outcome.state != OrderState::Applied {
         bail!("the daemon of {} refused to clone {src} as {new}: {}", order.machine, super::reason(&outcome));
     }
-    println!("{}", summary(src, new, &order.machine, &outcome.result.unwrap_or_default()));
-    Ok(())
+    Ok(summary(src, new, &order.machine, &outcome.result.unwrap_or_default()))
 }
 
 /// What the clone did, a line each.

@@ -11,7 +11,8 @@ use std::time::Duration;
 use ants_daemon::bus;
 use ants_daemon::records::reactions;
 use ants_proto::{
-    ChannelId, ChannelNotify, EscalationReason, JsDomain, Pick, Quote, Reaction, ThreadId, TrailName, UserId, Uuid,
+    ChannelId, ChannelNotify, EscalationReason, JsDomain, Machine, Pick, Quote, Reaction, ThreadId, TrailName, UserId,
+    Uuid,
 };
 use anyhow::{Result, anyhow, bail};
 use async_nats::jetstream;
@@ -175,6 +176,23 @@ pub enum Job {
         job: Box<Job>,
         files: Rc<[File]>,
     },
+    /// Add the ant `name` on `machine` with `settings` by admin order, waiting up to `wait` for its outcome, as `ants
+    /// ant add` does.
+    Add {
+        name: UserId,
+        machine: Machine,
+        settings: serde_json::Map<String, serde_json::Value>,
+        wait: Duration,
+    },
+    /// Clone `src` as `new` with `settings` over its own by admin order to `machine`, else to the machine serving it,
+    /// waiting up to `wait` for its outcome, as `ants ant clone` does.
+    Clone {
+        src: UserId,
+        new: UserId,
+        machine: Option<Machine>,
+        settings: serde_json::Map<String, serde_json::Value>,
+        wait: Duration,
+    },
     /// Retire `ant` by admin order, as `ants ant retire` does.
     Retire {
         ant: UserId,
@@ -331,8 +349,7 @@ impl Job {
                 ask(ctx, ant.into(), Some(thread), text, None, false, &files).await
             }
             Self::Restart { ant, now } => {
-                let admin = ctx.admin.as_ref().map_err(|e| anyhow!("{e}"))?;
-                let (order, outcome) = crate::admin::restart::send(admin, &ctx.js, None, &ant, now).await?;
+                let (order, outcome) = crate::admin::restart::send(admin(ctx)?, &ctx.js, None, &ant, now).await?;
                 Ok(Done::line(crate::admin::restart::told(&order, outcome)?))
             }
             Self::Cancel { thread, ants } => cancel_all(ctx, &thread, ants).await,
@@ -377,11 +394,18 @@ impl Job {
             Self::Save(listed, to) => {
                 Ok(Done::line(attach::save(&ctx.js, ctx.keyring.as_deref(), &listed, to.as_deref()).await?))
             }
+            Self::Add { name, machine, settings, wait } => {
+                let said = orders::add::add(admin(ctx)?, &ctx.js, &name, machine, settings, wait).await?;
+                Ok(Done::line(said.replace('\n', " ")))
+            }
+            Self::Clone { src, new, machine, settings, wait } => {
+                let said = orders::clone::clone(admin(ctx)?, &ctx.js, &src, &new, machine, settings, wait).await?;
+                Ok(Done::line(said.replace('\n', " ")))
+            }
             Self::Retire { ant } => retire(ctx, &ant).await,
             Self::Forward { to, source, note } => forward(ctx, to, &source, &note, &files).await,
             Self::Pause { ant, paused } => {
-                let admin = ctx.admin.as_ref().map_err(|e| anyhow!("{e}"))?;
-                Ok(Done::line(pause::order(admin, &ctx.js, &ant, None, paused, pause::WAIT).await?))
+                Ok(Done::line(pause::order(admin(ctx)?, &ctx.js, &ant, None, paused, pause::WAIT).await?))
             }
             Self::Attached { .. } => Err(anyhow!("files are attached to one message")),
             Self::Later(_) => Err(anyhow!("a message waits its turn once")),
@@ -523,11 +547,14 @@ async fn forward(ctx: &Ctx, to: UserId, source: &forward::Source, note: &str, fi
     deliver(ctx, to.into(), envelope, None, &files, true).await
 }
 
+/// The human's admin credentials, which sign admin orders, or why there are none.
+fn admin(ctx: &Ctx) -> Result<&orders::Admin> {
+    ctx.admin.as_ref().map_err(|e| anyhow!("{e}"))
+}
+
 /// Retire `ant` by admin order, as `ants ant retire` does.
 async fn retire(ctx: &Ctx, ant: &UserId) -> Result<Done> {
-    let admin = ctx.admin.as_ref().map_err(|e| anyhow!("{e}"))?;
-    let said =
-        crate::admin::orders::retire::retire(admin, &ctx.js, ant, None, crate::admin::orders::retire::WAIT).await?;
+    let said = orders::retire::retire(admin(ctx)?, &ctx.js, ant, None, orders::retire::WAIT).await?;
     Ok(Done::line(said.replace('\n', " ")))
 }
 
@@ -889,6 +916,69 @@ mod tests {
         let (_, bytes) =
             attachments::fetch(&js, &listed.handle, Some(&listed.attachment), listed.stored).await.unwrap();
         assert_eq!(bytes, b"# plan");
+    }
+
+    /// `/add` and `/clone` send the orders `ants ant add` and `ants ant clone` send, signed with the human's admin
+    /// credentials, and tell what came of them as those print it: the ant added once `ants signer` signed its key on
+    /// the order, its table holding the flags given; a clone into a name listed already refused, with why.
+    #[tokio::test]
+    async fn add_and_clone_from_the_bar_send_the_orders_of_ants_ant_add_and_clone() {
+        use ants_daemon::admin::ConfigFile;
+        use ants_proto::Role;
+
+        use crate::auth::{NewDevice, issue_device_with};
+        use crate::credentials::revoke::Kind;
+        use crate::test_support::orders::{WAIT, host_of_m1, with_signer};
+        use crate::tui::model::Action;
+
+        let Some(server) = crate::test_support::Server::start() else { return };
+        let (alice, bob) = (user("alice"), user("bob"));
+        let (_, h_js) = server.connect_as(&bob, Role::Human).await;
+        ants_daemon::bus::ensure_stream(&h_js).await.unwrap();
+        ants_daemon::bus::ensure_colony(&h_js, ants_proto::COLONY_TTL).await.unwrap();
+        h_js.create_stream(ants_daemon::hub::threads_config()).await.unwrap();
+        h_js.create_key_value(ants_daemon::hub::machines_config()).await.unwrap();
+        h_js.create_key_value(ants_daemon::hub::devices_config()).await.unwrap();
+        let creds = server.dir().join("alice-admin.creds");
+        let device = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
+        let rights = ants_proto::Permissions::for_user(&alice, Role::Human);
+        issue_device_with(&server.dir().join("auth"), &alice, Kind::Human, rights, &device, &creds).unwrap();
+        let nats = Nats::new(&server.url, Some(&creds), None).unwrap();
+        let (client, js) = nats.connect("test").await.unwrap();
+        let work = server.dir().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let path = server.dir().join("config.toml");
+        std::fs::write(&path, format!("harness = \"copilot\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = {work:?}\n"))
+            .unwrap();
+        let triggers = crate::reload::Triggers::new(path.clone(), None, Duration::from_secs(3600)).unwrap();
+        let (ants, task) = host_of_m1(&server, &js, true, Some(ConfigFile::new(path.clone(), triggers.edits()))).await;
+        let (me, sealing) = (nats.me.clone(), Sealing::of(&nats));
+        let (meta, admin) = (Err("unused".into()), orders::Admin::of(&nats).map_err(|e| format!("{e:#}")));
+        let ctx = Ctx { client, js, me, domain: None, meta, sealing, account: None, keyring: None, admin };
+        let mut m = crate::tui::test_support::model();
+        let mut job = |text: String| match m.submit(text.clone(), chrono::Utc::now()) {
+            Some(Action::Run(job, _)) => job,
+            other => panic!("{text}: {other:?}"),
+        };
+
+        let add = job(format!("/add @dev-b --on m1 --workdir {} --model gpt-5", work.display()));
+        let done = with_signer(&server, Box::pin(add.run(&ctx))).await.unwrap();
+        let line = &done.line;
+        assert!(
+            line.starts_with("dev-b added on m1 with key U") && line.ends_with("; its daemon starts it."),
+            "{line}"
+        );
+        let loaded = ants_daemon::config::load(&path).unwrap();
+        let ant = loaded.ants.iter().find(|a| a.name == user("dev-b")).expect("listed");
+        assert_eq!(ant.model.as_deref(), Some("gpt-5"));
+        assert_eq!(ant.workdir.canonicalize().unwrap(), work.canonicalize().unwrap());
+
+        let clone = job(format!("/clone dev-a dev-b --home {}", server.dir().join("home-b").display()));
+        let refused = format!("{:#}", Box::pin(clone.run(&ctx)).await.unwrap_err());
+        assert!(refused.starts_with("the daemon of m1 refused to clone dev-a as dev-b: "), "{refused}");
+        assert!(refused.contains("lists dev-b already"), "{refused}");
+        drop(ants);
+        tokio::time::timeout(WAIT, task).await.unwrap().unwrap().unwrap();
     }
 
     /// The members editor's writes change the channel's entry as `ants channel add|remove|set` does, refused as it

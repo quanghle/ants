@@ -633,10 +633,11 @@ const ANT: &[Entry] = &[
         2,
         ant_restart_armed,
     ),
-    Entry::new(&[Key::Char('X')], "X", "retire", "retire the ant, in the command bar", 25, always),
-    Entry::new(&[Key::Char('c')], "c", "creds", "the credentials asked for", 26, always),
-    Entry::new(&[Key::Char('['), Key::Char(']')], "[ ]", "scroll", "scroll the about or now column", 27, always),
-    Entry::new(&[Key::Char('\\')], "\\", "column", "switch between the about and now columns", 28, always),
+    Entry::new(&[Key::Char('C')], "C", "clone", "clone the ant by admin order, in the command bar", 25, always),
+    Entry::new(&[Key::Char('X')], "X", "retire", "retire the ant, in the command bar", 26, always),
+    Entry::new(&[Key::Char('c')], "c", "creds", "the credentials asked for", 27, always),
+    Entry::new(&[Key::Char('['), Key::Char(']')], "[ ]", "scroll", "scroll the about or now column", 28, always),
+    Entry::new(&[Key::Char('\\')], "\\", "column", "switch between the about and now columns", 29, always),
 ];
 
 const ANT_QUEUE: &[Entry] = &[
