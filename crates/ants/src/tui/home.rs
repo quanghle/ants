@@ -14,7 +14,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{ListState, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use super::acts::Change;
 use super::approvals;
@@ -343,6 +343,17 @@ impl Default for Page {
 }
 
 impl Page {
+    pub fn mouse_question(&mut self, question: Uuid, at: usize, data: &Data, now: DateTime<Utc>) -> bool {
+        if self.card(data, now).is_none() {
+            self.key(Key::Enter, data, now);
+        }
+        if let Some(cursor) = self.answering.as_mut().filter(|cursor| cursor.question == question) {
+            cursor.mouse_select(at);
+            return true;
+        }
+        false
+    }
+
     /// The selected item's thread.
     pub fn thread(&self, data: &Data) -> Option<ThreadId> {
         let items = self.rows(data, Utc::now());
@@ -604,8 +615,28 @@ impl Page {
             .collect();
         self.room.set(Some(room));
         self.carded.set(carded);
-        let list = style::list(rows, Some(selected), focused);
-        frame.render_stateful_widget(list, area, &mut ListState::default().with_selected(Some(selected)));
+        draw_list(frame, area, data, rows, selected, focused, cursor.map(|c| c.question));
+    }
+}
+
+fn draw_list(
+    frame: &mut Frame,
+    area: Rect,
+    data: &Data,
+    rows: Vec<Text<'static>>,
+    selected: usize,
+    focused: bool,
+    question: Option<Uuid>,
+) {
+    let question_lines = question.map(|id| {
+        let start: usize = rows.iter().take(selected).map(|row| row.lines.len()).sum();
+        (id, start, rows[selected].lines.clone())
+    });
+    let top = super::mouse::list(frame, area, data, "home", rows, selected, focused);
+    if let Some((id, start, lines)) = question_lines {
+        let offset = u16::try_from(start.saturating_sub(top)).unwrap_or(u16::MAX);
+        let area = Rect { y: area.y.saturating_add(offset), height: area.height.saturating_sub(offset), ..area };
+        question::mouse_regions(data, area, &lines, top.saturating_sub(start), id);
     }
 }
 

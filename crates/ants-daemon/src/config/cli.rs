@@ -29,6 +29,19 @@ pub(super) struct CliSection {
     #[serde(default)]
     theme: Theme,
     animate: Option<bool>,
+    mouse: Option<bool>,
+    #[serde(default)]
+    notify: Notify,
+}
+
+/// How an unfocused `ants chat` announces a new item on home.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Notify {
+    #[default]
+    Bell,
+    Terminal,
+    Off,
 }
 
 /// The terminal background the avatars' colours are picked for: `[cli]` `theme`.
@@ -101,6 +114,8 @@ pub struct CliDefaults {
     pub theme: Theme,
     /// Whether `ants chat` moves the avatars with their ants' states; still heads otherwise.
     pub animate: bool,
+    pub mouse: bool,
+    pub notify: Notify,
 }
 
 impl Default for CliDefaults {
@@ -114,6 +129,8 @@ impl Default for CliDefaults {
             inline_images: false,
             theme: Theme::Auto,
             animate: true,
+            mouse: true,
+            notify: Notify::Bell,
         }
     }
 }
@@ -150,7 +167,9 @@ impl CliDefaults {
         let js_domain = view.cli.js_domain.or(view.js_domain);
         let (inline_images, theme, animate) =
             (view.cli.inline_images, view.cli.theme, view.cli.animate.unwrap_or(true));
-        Ok(Self { nats, creds, js_domain, auto_archive, summaries, inline_images, theme, animate })
+        let mouse = view.cli.mouse.unwrap_or(true);
+        let notify = view.cli.notify;
+        Ok(Self { nats, creds, js_domain, auto_archive, summaries, inline_images, theme, animate, mouse, notify })
     }
 }
 

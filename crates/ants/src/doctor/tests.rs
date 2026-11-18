@@ -593,7 +593,8 @@ fn sense_keeping_none_of_its_ants_data_fails_naming_the_fixes() {
     };
     let (sense, none) = (ants_daemon::provider::Setting::Sense, ants_daemon::provider::Setting::None);
     let mut host = config::HostSettings::default();
-    let check = |host: &config::HostSettings, ants: &[Ant]| check_sense_kept(host, ants, "box.local");
+    let check =
+        |host: &config::HostSettings, ants: &[Ant]| check_sense_kept(host, ants, "box.local", &[], chrono::Utc::now());
     assert!(check(&host, &[ant("dev-a", false, sense.clone())]).is_none(), "no authentication: kept as no one");
     let ants = [ant("dev-a", true, sense.clone()), ant("dev-b", true, none.clone()), ant("dev-c", true, sense)];
     let failed = check(&host, &ants).unwrap();
@@ -603,6 +604,40 @@ fn sense_keeping_none_of_its_ants_data_fails_naming_the_fixes() {
     assert!(check(&host, &[ant("dev-b", true, none)]).is_none(), "no ant uses sense");
     host.creds = Some(PathBuf::from("host.creds"));
     assert!(check(&host, &ants).is_none(), "sense writes the logs with the host credentials");
+}
+
+#[test]
+fn sense_keeping_none_of_the_data_of_an_ant_its_colony_entry_names_fails_without_a_config_file() {
+    let now = chrono::Utc::now();
+    let entry = |ant: &str, machine: &str, unkept: Option<&str>, heartbeat: chrono::DateTime<chrono::Utc>| {
+        let json = serde_json::json!({
+            "ant": ant, "machine": machine, "instance": "run-1", "harness": "copilot", "capabilities": [],
+            "started_at": heartbeat, "heartbeat_at": heartbeat, "activity": "idle", "handling": 0, "harnesses": 0,
+            "version": ants_proto::ANTS_VERSION, "perms": PERMISSIONS_VERSION, "sense_unkept": unkept,
+        });
+        serde_json::from_value::<ants_proto::ColonyEntry>(json).unwrap()
+    };
+    let colony = [
+        entry("dev-a", "box.local", Some("no host credentials on box"), now),
+        entry("dev-b", "box.local", None, now),
+        entry("dev-c", "other.local", Some("no host credentials on other"), now),
+        entry("dev-d", "box.local", Some("no host credentials on box"), now - chrono::Duration::hours(1)),
+    ];
+    let mut host = config::HostSettings::default();
+    let failed = check_sense_kept(&host, &[], "box.local", &colony, now).unwrap();
+    assert_eq!((failed.status, failed.check.as_str()), (Status::Fail, "sense data"), "{failed}");
+    let told = "the colony entry of dev-a says sense keeps none of its data: no host credentials on box";
+    assert_eq!(failed.detail, told, "a live entry of this machine alone");
+    assert!(failed.fix[0].starts_with("ants auth host box ") && failed.fix.len() == 1, "{failed}");
+    assert!(check_sense_kept(&host, &[], "box.local", &colony[1..], now).is_none());
+    host.top_machine = Some("other.local".to_owned());
+    let failed = check_sense_kept(&host, &[], "box.local", &colony[1..], now).unwrap();
+    assert!(failed.detail.contains("entry of dev-c "), "the config's machine names this one too: {failed}");
+    let ant =
+        Ant { creds: Some(PathBuf::from("dev-a.creds")), ..Ant::new("dev-a".parse().unwrap(), PathBuf::from("/w")) };
+    let failed = check_sense_kept(&host, &[ant], "box.local", &colony[..1], now).unwrap();
+    assert!(failed.detail.starts_with("sense keeps none of the data of dev-a:"), "{failed}");
+    assert!(!failed.detail.contains("colony entry"), "an ant named once: {failed}");
 }
 
 #[test]

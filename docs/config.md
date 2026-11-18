@@ -27,6 +27,8 @@ summary_daily_tokens = 50000               # most tokens summaries asked ahead o
 inline_images = true                       # draw image attachments in ants chat's thread view (default false; docs/cli.md)
 theme = "auto"                             # avatar palette: "dark", "light" or "auto" (default: ask the terminal, else COLORFGBG, else dark)
 animate = true                             # avatar heads and spinners in ants chat move (default true; false keeps heads still and spinners at a frame a second)
+mouse = true                               # mouse wheel and clicks in ants chat (default true; false leaves native terminal selection)
+notify = "bell"                            # new home items while chat is unfocused: "bell" (default), "terminal" or "off"
 
 [storage]                                  # JetStream capacity warnings (see docs/architecture.md, JetStream storage)
 warn_percent = 80                          # warn past this share of a store's limit (default 80; 0 disables)

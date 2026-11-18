@@ -506,7 +506,15 @@ impl Page {
         total.extend(tree.elapsed.map(crate::colony::short));
         lines.push(Line::from(vec![Span::styled("total  ", style::dim()), Span::raw(total.join(" · "))]));
         let height = usize::from(area.height.saturating_sub(2));
-        let top = (selected + 1).saturating_sub(height);
+        let inner = style::block(String::new(), focused).inner(area);
+        let top = data.mouse.top("tree", inner, selected, selected, selected + 1, lines.len());
+        for n in 0..tree.nodes.len() {
+            let row = n + 1;
+            if row >= top && row < top + height {
+                data.mouse
+                    .add(Rect { y: inner.y + (row - top) as u16, height: 1, ..inner }, super::mouse::Target::Row(n));
+            }
+        }
         let title = format!(" delegation tree · {} ", data.title(&self.root));
         let paragraph = Paragraph::new(lines)
             .block(style::block(title, focused))

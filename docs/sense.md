@@ -93,11 +93,13 @@ a thread whose origin is of a kind this version of sense does not know.
 - **`ants doctor`:** `sense chain` fails at a break in the ant's log, and `sense size` warns past 32 MiB
   ([cli.md](cli.md)); the ant's brief warns of both too. `sense data` fails when sense keeps none of the ants' data:
   no host credentials on a server with authentication. It names the fixes: `ants auth host MACHINE`, or
-  `provider = "none"` for an ant meant to go without.
+  `provider = "none"` for an ant meant to go without. It fails too for each ant whose live colony entry on the machine
+  says why sense keeps none of its data (`sense_unkept`), as one `ants daemon --ant` serves from flags, with no config
+  file.
 - **Sense keeping none of the ant's data:** the daemon warns once per ant as it starts, and the ant's colony entry
-  carries why (`sense_unkept`), which `ants colony` and `ants ant show` show; the ant is still served, without
-  memories, tasks or brief, as one whose external provider is down is. It still answers other ants, and as a sage
-  their reviews, keeping no record of them.
+  carries why (`sense_unkept`) until sense keeps the data again, which `ants colony` and `ants ant show` show; the ant
+  is still served, without memories, tasks or brief, as one whose external provider is down is. It still answers other
+  ants, and as a sage their reviews, keeping no record of them.
 - **Export and import:** `ants ant export` carries the log and skill files to another bus
   ([sense's part](config.md#senses-part)).
 - **Reviews:** a dream sent to the sage is a message from the ant on a review thread of its own. The sage's sense data
@@ -147,14 +149,15 @@ While the machine's host connection is down:
 
 While the host connection is first being made and no cache exists, events wait in the ant's queue and briefs fail.
 Sense writes the logs with the machine's host credentials (`ants auth host`), over the host connection, or, in a daemon
-serving one ant (`ants daemon --ant`), which makes none, over a link of its own carrying the logs alone. A daemon with
-neither, as one without host credentials on a server with authentication, and no cache keeps no data: events are
-acked with no effect, briefs are empty and the sense tools answer `unavailable`, naming why. The ant is still served,
-and `ants doctor`, the daemon's log and the ant's colony entry say so ([What an operator sees and
-configures](#what-an-operator-sees-and-configures)). A daemon serves the sense data of all its ants using
-sense before starting any of them, so an event of one ant about another, as a clone's about its source, finds the
-other's data whichever starts first; an event of an ant the daemon serves no sense data of, as one queued under a name
-the ant has left, is acked with no effect.
+serving one ant (`ants daemon --ant`), which makes none, over a link of its own carrying the logs alone. That link,
+when it fails, as with credentials the server refuses, is tried again after 1 second, the wait doubling up to 5
+minutes, and at once on a reload. A daemon with neither up, as one without host credentials on a server with
+authentication, and no cache keeps no data: events are acked with no effect, briefs are empty and the sense tools
+answer `unavailable`, naming why. The ant is still served, and `ants doctor`, the daemon's log and the ant's colony
+entry say so ([What an operator sees and configures](#what-an-operator-sees-and-configures)). A daemon serves the
+sense data of all its ants using sense before starting any of them, so an event of one ant about another, as a clone's
+about its source, finds the other's data whichever starts first; an event of an ant the daemon serves no sense data
+of, as one queued under a name the ant has left, is acked with no effect.
 
 ## Arguments and refusals
 

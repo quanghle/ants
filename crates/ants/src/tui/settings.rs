@@ -15,7 +15,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{List, ListItem, Paragraph, Wrap};
 
 use super::input::Input;
 use super::model::{Action, Key};
@@ -176,7 +176,15 @@ impl Pane {
         }
     }
 
-    pub fn draw(&self, frame: &mut Frame, area: Rect, ant: &UserId, now: DateTime<Utc>, focused: bool) {
+    pub fn draw(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        ant: &UserId,
+        now: DateTime<Utc>,
+        focused: bool,
+        data: &super::model::Data,
+    ) {
         let orders = match &self.reading {
             Some(Ok(reading)) => &reading.orders[reading.orders.len().saturating_sub(ORDERS_SHOWN)..],
             _ => &[],
@@ -184,7 +192,7 @@ impl Pane {
         let tall = u16::try_from(orders.len().max(1) + 2).unwrap_or(u16::MAX);
         let [fields, below, input] =
             Layout::vertical([Constraint::Min(3), Constraint::Length(tall), Constraint::Length(3)]).areas(area);
-        self.draw_fields(frame, fields, ant, now, focused);
+        self.draw_fields(frame, fields, ant, now, focused, data);
         let items: Vec<ListItem> = if orders.is_empty() {
             vec![ListItem::new(Line::styled(format!("no admin orders to {ant}"), style::dim()))]
         } else {
@@ -211,7 +219,15 @@ impl Pane {
         frame.render_widget(Paragraph::new(Span::styled(text, style)).block(block), input);
     }
 
-    fn draw_fields(&self, frame: &mut Frame, area: Rect, ant: &UserId, now: DateTime<Utc>, focused: bool) {
+    fn draw_fields(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        ant: &UserId,
+        now: DateTime<Utc>,
+        focused: bool,
+        data: &super::model::Data,
+    ) {
         let reading = match &self.reading {
             None => Err(format!("reading the settings of {ant}…")),
             Some(Err(e)) => Err(format!("reading the settings: {e}")),
@@ -248,9 +264,9 @@ impl Pane {
                 Text::from(Line::from(spans))
             })
             .collect();
-        let list = style::list(items, Some(self.at), focused && self.draft.is_none()).block(block);
-        let mut state = ListState::default().with_selected(Some(self.at));
-        frame.render_stateful_widget(list, area, &mut state);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        super::mouse::list(frame, inner, data, "ant-settings", items, self.at, focused && self.draft.is_none());
     }
 }
 

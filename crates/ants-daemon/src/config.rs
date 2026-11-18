@@ -27,6 +27,8 @@
 //! inline_images = true              # draw image attachments in `ants chat` (default false: their lines only)
 //! theme = "auto"                    # the avatars' colours: "auto" (ask the terminal, the default), "dark" or "light"
 //! animate = true                    # move the avatars in `ants chat` with their ants' states (the default)
+//! mouse = true                      # mouse wheel and clicks in `ants chat` (default true)
+//! notify = "bell"                   # unfocused chat: "bell" (default), "terminal" or "off"
 //!
 //! [storage]                         # warnings of JetStream storage filling up (crate::monitoring::storage)
 //! warn_percent = 80                 # warn a human past this share of a store's limit; 0 never
@@ -139,7 +141,7 @@ mod templated;
 
 pub use amend::{append, template_of, with_allow_rule, without_ant, write};
 pub use ant::{Ant, builtin_messenger, builtin_sage};
-pub use cli::{CliDefaults, Summaries, SummaryConfig, Theme, with_cli_login};
+pub use cli::{CliDefaults, Notify, Summaries, SummaryConfig, Theme, with_cli_login};
 pub use dropin::{dropin_dir, dropin_files};
 pub use entry::{entry, template_entry, toml_string};
 pub use host::HostSettings;

@@ -90,7 +90,7 @@ ants inbox                                          # unread replies across devi
 ants colony                                         # active ants and harness status
 ants channel create ops --member dev-a
 ants post --wait '#ops' "@dev-a check the failing build"
-ants                                                # full-screen terminal chat UI (also: ants chat)
+ants                                                # full-screen chat with mouse, clipboard and background alerts (also: ants chat)
 ```
 
 `ants setup --managed-nats` instead has `ants daemon` start, supervise and stop that `nats-server` itself, with no separate NATS service ([docs/operations.md](docs/operations.md#managed-nats-server)).

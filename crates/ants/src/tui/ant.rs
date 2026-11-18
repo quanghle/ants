@@ -121,6 +121,12 @@ pub enum Armed {
 }
 
 impl Page {
+    pub fn mouse_scroll(&self, column: usize, by: isize) {
+        let mut scrolled = self.scrolled.get();
+        scrolled[column] = scrolled[column].saturating_add_signed(by).min(self.scrollable.get()[column]);
+        self.scrolled.set(scrolled);
+    }
+
     pub const ARMED_KEYS: &str = "y restart the ant's harnesses after their prompts · ! restart now, \
          cancelling the prompts · any other key keeps them";
     const PAUSE_KEYS: &str = "y pause the ant · any other key keeps it working";
@@ -318,12 +324,15 @@ impl Page {
         let (width, height) = inner(left);
         let block = style::block(title, focused && self.column == Column::About).title_style(Style::new().fg(color));
         frame.render_widget(self.scroll(Column::About, about(entry, now, width), height, block), left);
+        data.mouse.add(left, super::mouse::Target::AntColumn(0));
         let (width, height) = inner(right);
         let block = style::block(" now ".to_owned(), focused && self.column == Column::Now);
         let status = wrapped(status(&self.ant, entry, data, now), width);
         frame.render_widget(self.scroll(Column::Now, status, height, block), right);
+        data.mouse.add(right, super::mouse::Target::AntColumn(1));
         let threads = self.threads.rows(data).len();
         let mut spans = vec![Span::raw(" ")];
+        let mut x = tabs.x + 1;
         for pane in self.panes(data) {
             let count = match pane {
                 Pane::Threads => threads.to_string(),
@@ -333,7 +342,14 @@ impl Page {
                 Pane::Settings => self.settings.count(),
             };
             let style = if pane == self.pane { style::highlight(focused) } else { style::dim() };
-            spans.push(Span::styled(format!(" {} ({count}) ", pane.label()), style));
+            let label = format!(" {} ({count}) ", pane.label());
+            let width = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
+            data.mouse.add(
+                Rect { x, width: width.min(tabs.right().saturating_sub(x)), ..tabs },
+                super::mouse::Target::AntPane(pane),
+            );
+            x = x.saturating_add(width + 1);
+            spans.push(Span::styled(label, style));
             spans.push(Span::raw(" "));
         }
         spans.push(Span::styled("←→", style::dim()));
@@ -342,8 +358,8 @@ impl Page {
             Pane::Threads => self.threads.draw(frame, pane, data, now, focused),
             Pane::Queue => self.draw_queue(frame, pane, data, now, focused),
             Pane::Memories => self.memories.draw(frame, pane, &self.ant, focused),
-            Pane::Mcp => self.mcp.draw(frame, pane, &self.ant, focused),
-            Pane::Settings => self.settings.draw(frame, pane, &self.ant, now, focused),
+            Pane::Mcp => self.mcp.draw(frame, pane, &self.ant, focused, data),
+            Pane::Settings => self.settings.draw(frame, pane, &self.ant, now, focused, data),
         }
     }
 
@@ -401,19 +417,22 @@ impl Page {
             return;
         }
         let waiting = self.waiting();
+        let selected = self.message.at(&self.messages());
         let rows: Vec<Row> = waiting
             .iter()
-            .map(|m| {
+            .enumerate()
+            .map(|(at, m)| {
                 let from = match &m.channel {
                     Some(channel) => format!("{} in #{channel}", m.from),
                     None => m.from.to_string(),
                 };
-                Row::new([
+                let row = Row::new([
                     Cell::from(data.title(&m.thread_id)),
                     Cell::from(from),
                     Cell::from(ago(m.sent_at, now)),
                     Cell::from(queue::state(m)),
-                ])
+                ]);
+                if at == selected { row.style(style::highlight(focused)) } else { row }
             })
             .collect();
         let widths = [Constraint::Fill(3), Constraint::Fill(1), Constraint::Length(8), Constraint::Fill(1)];
@@ -425,7 +444,8 @@ impl Page {
             block = block.title_bottom(format!(" and {more} more in the stream "));
         }
         let table = Table::new(rows, widths).header(header).block(block).row_highlight_style(style::highlight(focused));
-        let mut state = TableState::default().with_selected(Some(self.message.at(&self.messages())));
+        let top = super::mouse::table(data, "ant-queue", area, selected, waiting.len());
+        let mut state = TableState::default().with_offset(top);
         frame.render_stateful_widget(table, area, &mut state);
     }
 }

@@ -154,6 +154,11 @@ impl Sense {
         self.stores.unkept(why);
     }
 
+    /// Why the process keeps none of its ants' data, followed ([`Self::unkept`]).
+    pub fn why_unkept(&self) -> tokio::sync::watch::Receiver<Option<String>> {
+        self.stores.why_unkept()
+    }
+
     /// The skills sense offers the harness of the ant whose home is `home`: its skills directory, in the Claude Code
     /// plugin of its sense files.
     pub fn skills(&self, home: &Path) -> crate::harness::Skills {

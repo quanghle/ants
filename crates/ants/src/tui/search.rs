@@ -17,7 +17,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{ListState, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use super::model::{Data, Key, To};
 use super::style::{self, ago};
@@ -149,8 +149,9 @@ impl Page {
             return;
         }
         let items: Vec<Text> = self.matches().iter().map(|e| Text::from(self.row(e, data, now))).collect();
-        let list = style::list(items, Some(self.selected), focused).block(block);
-        frame.render_stateful_widget(list, area, &mut ListState::default().with_selected(Some(self.selected)));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        super::mouse::list(frame, inner, data, "search", items, self.selected, focused);
     }
 
     /// A match: where it was, who sent it, how long ago, and its line matching the text, else its first.
