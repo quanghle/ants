@@ -911,4 +911,4 @@ catch_up = true                               # optional: send latest missed fir
 
 ## Trails
 
-`[trails]` applies to every ant in the file: `workers` (default 4, 1 to 16; others fail config loading) caps the trail workers computing at once across the daemon process's runs ([architecture.md](architecture.md#trails)), the first ant to start setting it for the process. Each worker is an `ants subprocess` process alive only while a run's script computes, so the cap bounds the memory and CPU trails take beside the harnesses. Changing it takes a restart of the daemon.
+`[trails]` applies to every ant in the file ([trails.md](trails.md)): `workers` (default 4, 1 to 16; others fail config loading) caps the trail workers computing at once across the daemon process's runs ([architecture.md](architecture.md#trails)), the first ant to start setting it for the process. Each worker is an `ants subprocess` process alive only while a run's script computes, so the cap bounds the memory and CPU trails take beside the harnesses. Changing it takes a restart of the daemon.
