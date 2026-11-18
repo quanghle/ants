@@ -16,7 +16,7 @@ pub(super) fn signs(calls: &[MergedCall], ends: &[MergedEnd], escalations: u32, 
             Action::Done { .. } => signs.done = 1,
             Action::Rejected { by: Some(_), .. } => signs.rejected += 1,
             Action::Rejected { by: None, .. } => signs.expired += 1,
-            Action::Reaction { .. } => {}
+            Action::Reopened { .. } | Action::Reaction { .. } => {}
         }
     }
     for MergedCall { call, .. } in calls {

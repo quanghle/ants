@@ -10,8 +10,8 @@ use std::pin::Pin;
 use std::time::SystemTime;
 
 use ants_proto::{
-    ChannelId, Envelope, EscalationReason, MergedCall, MergedEnd, MergedRejection, NotesPost, ThreadId, UserId, Uuid,
-    inbox_consumer, notes_consumer, sent_reader, subject,
+    ChannelId, ChannelPost, Envelope, EscalationReason, MergedCall, MergedEnd, MergedRejection, NotesPost, ThreadId,
+    UserId, Uuid, inbox_consumer, notes_consumer, sent_reader, subject,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, consumer};
@@ -240,9 +240,7 @@ impl Thread {
                     && post.thread_id == self.thread
                     && (seq < self.before || post.from == self.ant)
                 {
-                    let attachments = earlier_lines(&post.attachments, |id| post.attachment_handle(id));
-                    let place = Place::Channel(post.channel);
-                    entries.insert(seq, Entry { from: post.from, place, text: post.text, attachments, at });
+                    entries.insert(seq, Entry::posted(post, at));
                 }
                 ControlFlow::Continue(())
             },
@@ -256,12 +254,14 @@ impl Thread {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Active {
     pub thread: ThreadId,
-    /// What the ant received and sent on it and its notes, as a prompt shows a history.
+    /// What the ant received and sent on it, its notes and the channel posts on it, as a prompt shows a history.
     pub history: String,
     /// The tool-call timeline the ant stored on it, oldest first: empty when it stored none, or it could not be read.
     pub timeline: String,
-    /// The ant's messages and notes posts on it, oldest first.
+    /// The ant's messages, notes posts and channel posts on it, oldest first.
     pub sent: Vec<Sent>,
+    /// The entries of its history, each of which reopens it if it was marked done before, oldest first.
+    pub reopenings: Vec<Reopening>,
     /// The ant's tool requests rejected on it, as its timeline keeps them: empty when it could not be read.
     pub rejections: Vec<MergedRejection>,
     /// The ant's tool calls on it, as its timeline keeps them: empty when it could not be read.
@@ -281,6 +281,19 @@ pub(crate) struct Sent {
     pub opening: String,
 }
 
+/// A message, note or channel post stored on a thread, which reopens it if it was marked done before
+/// ([`ants_proto::ThreadDone::holds`]), as [`active`] read it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Reopening {
+    /// Its stream sequence.
+    pub seq: u64,
+    /// When the stream stored it.
+    pub at: SystemTime,
+    pub from: UserId,
+    /// What it is: `message`, `thread note` or `channel post`.
+    pub kind: &'static str,
+}
+
 /// The most bytes of a message's text [`Sent::opening`] keeps.
 const OPENING_BYTES: usize = 80;
 
@@ -297,9 +310,9 @@ impl Sent {
 }
 
 /// The threads of `ant` active from `since` to `until`, the most recently active first, each with what the ant received
-/// and sent on it and its notes from `since` on, as a prompt shows a history within `budget` bytes, the messages and
-/// notes posts of the ant among them, and the timeline it stored on it meanwhile. Read as its daemon reads
-/// ([`Reading::daemon`]).
+/// and sent on it, its notes and, on the threads the ant posted on in a channel, the channel's posts on them, from
+/// `since` on, as a prompt shows a history within `budget` bytes, the messages, notes posts and channel posts of the
+/// ant among them, and the timeline it stored on it meanwhile. Read as its daemon reads ([`Reading::daemon`]).
 pub(crate) async fn active(
     js: &jetstream::Context,
     ant: &UserId,
@@ -310,7 +323,7 @@ pub(crate) async fn active(
 ) -> Result<Vec<Active>> {
     let start = || consumer::DeliverPolicy::ByStartTime { start_time: since.into() };
     let mut threads: BTreeMap<ThreadId, BTreeMap<u64, Entry>> = BTreeMap::new();
-    // The ids of the ant's own messages and notes posts on each thread, by stream sequence.
+    // The ids of the ant's own messages, notes posts and channel posts on each thread, by stream sequence.
     let mut own: BTreeMap<ThreadId, BTreeMap<u64, Uuid>> = BTreeMap::new();
     let mut escalated: BTreeMap<ThreadId, HashSet<(EscalationReason, Option<Uuid>)>> = BTreeMap::new();
     let mut take = |seq, at, subject: &str, payload: &[u8]| {
@@ -348,6 +361,7 @@ pub(crate) async fn active(
             .await
             .context("reading back the messages sent")?;
     }
+    channel_posts(js, ant, reading, (since, until), &mut threads, &mut own).await;
     let reader = notes_consumer(ant);
     for (thread, entries) in &mut threads {
         let filter = subject::notes_of(thread);
@@ -387,10 +401,65 @@ pub(crate) async fn active(
         let escalations = escalated.remove(&thread).map_or(0, |issues| u32::try_from(issues.len()).unwrap_or(u32::MAX));
         let own = own.remove(&thread).unwrap_or_default().into_iter();
         let sent = own.filter_map(|(seq, id)| entries.get(&seq).map(|entry| Sent::new(id, &entry.text))).collect();
+        let reopenings = entries
+            .iter()
+            .map(|(&seq, entry)| Reopening { seq, at: entry.at, from: entry.from.clone(), kind: entry.place.noun() })
+            .collect();
         let history = format(entries.into_values().collect(), budget);
-        Active { thread, history, timeline, sent, rejections, calls, ends, escalations }
+        Active { thread, history, timeline, sent, reopenings, rejections, calls, ends, escalations }
     });
     Ok(active.collect())
+}
+
+/// Add to `threads` the channel posts of `ant` from `since` to `until`, their ids to `own`, then the posts of others on
+/// the threads it posted on, a read of each channel. Best effort, so a thread is shown without them rather than not at
+/// all.
+async fn channel_posts(
+    js: &jetstream::Context,
+    ant: &UserId,
+    reading: Reading,
+    (since, until): (SystemTime, SystemTime),
+    threads: &mut BTreeMap<ThreadId, BTreeMap<u64, Entry>>,
+    own: &mut BTreeMap<ThreadId, BTreeMap<u64, Uuid>>,
+) {
+    let start = || consumer::DeliverPolicy::ByStartTime { start_time: since.into() };
+    let mut posted: BTreeMap<ChannelId, BTreeSet<ThreadId>> = BTreeMap::new();
+    let filter = subject::chan_from(ant);
+    let read = crate::channel::read_back(js, ant, reading.beside(), &filter, start(), |seq, at, _, post| {
+        if at > until {
+            return ControlFlow::Break(());
+        }
+        if let Ok(post) = post {
+            own.entry(post.thread_id.clone()).or_default().insert(seq, post.id);
+            posted.entry(post.channel.clone()).or_default().insert(post.thread_id.clone());
+            threads.entry(post.thread_id.clone()).or_default().insert(seq, Entry::posted(post, at));
+        }
+        ControlFlow::Continue(())
+    })
+    .await;
+    if let Err(e) = read {
+        tracing::warn!(%ant, error = format!("{e:#}"), "reading back the ant's channel posts");
+    }
+    for (channel, on) in &posted {
+        let room = subject::chan_room(channel);
+        let read = crate::channel::read_back(js, ant, reading.beside(), &room, start(), |seq, at, _, post| {
+            if at > until {
+                return ControlFlow::Break(());
+            }
+            if let Ok(post) = post
+                && post.from != *ant
+                && on.contains(&post.thread_id)
+                && let Some(entries) = threads.get_mut(&post.thread_id)
+            {
+                entries.insert(seq, Entry::posted(post, at));
+            }
+            ControlFlow::Continue(())
+        })
+        .await;
+        if let Err(e) = read {
+            tracing::warn!(%ant, %channel, error = format!("{e:#}"), "reading back the posts of a channel");
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -423,7 +492,24 @@ enum Place {
     Channel(ChannelId),
 }
 
+impl Place {
+    /// What an entry in the place is.
+    fn noun(&self) -> &'static str {
+        match self {
+            Self::Inbox(_) => "message",
+            Self::Notes => "thread note",
+            Self::Channel(_) => "channel post",
+        }
+    }
+}
+
 impl Entry {
+    /// The channel post `post`, stored at `at`.
+    fn posted(post: ChannelPost, at: SystemTime) -> Self {
+        let attachments = earlier_lines(&post.attachments, |id| post.attachment_handle(id));
+        Self { from: post.from, place: Place::Channel(post.channel), text: post.text, attachments, at }
+    }
+
     /// The entry as a prompt shows it, its text cut to `most` bytes, then a line for each attachment.
     fn show(&self, most: usize) -> String {
         let from = &self.from;
@@ -650,6 +736,46 @@ mod tests {
             )
         );
         assert_eq!(threads[1].sent[0].id, note.id);
+        let reopenings: Vec<_> = threads[1].reopenings.iter().map(|r| (r.from.as_str(), r.kind)).collect();
+        assert_eq!(reopenings, [("alice", "message"), ("dev-a", "thread note")]);
+        assert!(threads[1].reopenings.is_sorted_by_key(|r| r.seq));
+    }
+
+    #[tokio::test]
+    async fn the_threads_the_ant_posted_on_in_a_channel_are_active_with_the_channels_posts_on_them() {
+        let Some(server) = ants_test_support::NatsServer::start() else { return };
+        let js = async_nats::jetstream::new(async_nats::connect(&server.url).await.unwrap());
+        js.create_stream(crate::hub::stream_config()).await.unwrap();
+        let post = async |post: &ChannelPost| {
+            js.publish(post.subject(), serde_json::to_vec(post).unwrap().into()).await.unwrap().await.unwrap();
+        };
+        let (ops, dev): (ChannelId, ChannelId) = ("ops".parse().unwrap(), "dev".parse().unwrap());
+        let asked = ChannelPost::new(ops.clone(), p("bob"), "who broke the build?");
+        let thread = asked.thread_id.clone();
+        post(&ChannelPost::on_thread(ops.clone(), thread.clone(), p("bob"), "long ago")).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let since = SystemTime::now();
+        post(&asked).await;
+        let answer = ChannelPost::on_thread(ops.clone(), thread.clone(), p("dev-a"), "mine, fixing it");
+        post(&answer).await;
+        post(&ChannelPost::new(ops.clone(), p("carol"), "another thread")).await;
+        post(&ChannelPost::on_thread(dev.clone(), thread.clone(), p("carol"), "a channel dev-a posted none in")).await;
+        post(&ChannelPost::on_thread(ops.clone(), thread.clone(), p("bob"), "thanks")).await;
+        let until = SystemTime::now();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        post(&ChannelPost::on_thread(ops.clone(), thread.clone(), p("bob"), "too late")).await;
+
+        let threads = active(&js, &p("dev-a"), Reading::Gets, since, until, DEFAULT_BUDGET).await.unwrap();
+        assert_eq!(threads.iter().map(|active| &active.thread).collect::<Vec<_>>(), [&thread]);
+        let history = &threads[0].history;
+        assert!(history.contains("bob in channel ops:\nwho broke the build?"), "{history}");
+        assert!(history.contains("mine, fixing it") && history.contains("thanks"), "{history}");
+        for left in ["long ago", "another thread", "posted none in", "too late"] {
+            assert!(!history.contains(left), "{left}: {history}");
+        }
+        assert_eq!(threads[0].sent, [Sent::new(answer.id, "mine, fixing it")]);
+        let reopenings: Vec<_> = threads[0].reopenings.iter().map(|r| (r.from.as_str(), r.kind)).collect();
+        assert_eq!(reopenings, [("bob", "channel post"), ("dev-a", "channel post"), ("bob", "channel post")]);
     }
 
     /// A timeline's entries: a completed call of `title`.

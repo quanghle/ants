@@ -445,6 +445,7 @@ fn a_thread_shows_what_was_done_with_it_besides_writing_before_its_history() {
         Action::Rejected { at: at(20), tool: "fetch: example.com".into(), by: None },
         Action::Reaction { reaction: "thumbsup".into(), by: "bob".into(), message, opening: "fixed the build".into() },
         Action::Done { at: at(30), by: "alice via asst".into() },
+        Action::Reopened { at: at(40), by: "a channel post from bob".into() },
     ];
     let threads = [packet::Thread { actions, ..thread(1, 200, false) }];
     for reader in [ant(), Reader::Sage(on(1).ant)] {
@@ -454,7 +455,8 @@ fn a_thread_shows_what_was_done_with_it_besides_writing_before_its_history() {
              - A tool request rejected by alice at 2026-11-14 09:05 UTC: execute: rm -rf target.\n\
              - A tool request expired unanswered at 2026-11-14 09:20 UTC, so rejected: fetch: example.com.\n\
              - bob reacted thumbsup to message {message}, \"fixed the build\".\n\
-             - Marked done by alice via asst at 2026-11-14 09:30 UTC.\n\n\
+             - Marked done by alice via asst at 2026-11-14 09:30 UTC.\n\
+             - Reopened by a channel post from bob at 2026-11-14 09:40 UTC, so no longer done.\n\n\
              message 1 of a thread\n",
             on(1).thread
         );
