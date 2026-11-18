@@ -102,7 +102,7 @@ fn footer_line(model: &Model, now: DateTime<Utc>, width: u16) -> Line<'static> {
         let (prompt, help) = match model.page() {
             Page::Channel(page) => (page.prompt(), false),
             Page::Dm(page) => (page.prompt(), false),
-            Page::Ant(page) => (page.prompt(), page.armed()),
+            Page::Ant(page) => (page.prompt(), page.armed().is_some()),
             Page::Tree(page) => (page.prompt(), true),
             Page::Credentials(page) => (page.prompt(), true),
             Page::Held(page) => (page.prompt(), true),

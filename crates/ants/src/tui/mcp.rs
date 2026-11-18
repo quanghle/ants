@@ -89,6 +89,13 @@ impl Page {
         }
     }
 
+    /// Ask again, if asked before.
+    pub fn reread(&mut self) {
+        if self.state != State::Unasked {
+            self.ask();
+        }
+    }
+
     fn ask(&mut self) {
         self.state = State::Asking;
         self.asked += 1;
@@ -156,10 +163,6 @@ impl Page {
     pub fn key(&mut self, key: Key) -> Option<Action> {
         let last = self.servers().len().saturating_sub(1);
         self.selected = match key {
-            Key::Char('u') => {
-                self.ask();
-                return None;
-            }
             Key::Char('s') | Key::Enter => {
                 let server = self.servers().get(self.selected)?.name.clone();
                 self.signs += 1;

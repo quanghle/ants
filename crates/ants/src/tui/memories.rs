@@ -46,6 +46,14 @@ impl Page {
         }
     }
 
+    /// Ask again, if asked before.
+    pub fn reread(&mut self) {
+        if self.state != State::Unasked {
+            self.ask();
+            self.scroll = 0;
+        }
+    }
+
     fn ask(&mut self) {
         self.state = State::Asking;
         self.asked += 1;
@@ -82,10 +90,6 @@ impl Page {
             _ => 0,
         };
         self.scroll = match key {
-            Key::Char('u') => {
-                self.ask();
-                0
-            }
             Key::Up | Key::Char('k') => self.scroll.saturating_sub(1),
             Key::Down | Key::Char('j') => self.scroll + 1,
             Key::PageUp => self.scroll.saturating_sub(10),

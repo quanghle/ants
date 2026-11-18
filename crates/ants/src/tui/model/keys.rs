@@ -100,7 +100,7 @@ impl Model {
                 self.help = Some(Help::default());
                 None
             }
-            Key::Char('R') => Some(Action::Refresh),
+            Key::Char('R') => self.reread(),
             Key::Tab => {
                 self.focus = match self.focus {
                     Focus::Nav => Focus::View,
@@ -113,6 +113,14 @@ impl Model {
                 Focus::View => self.view_key(key, now),
             },
         }
+    }
+
+    /// R: read everything again, the shown ant's memories, MCP servers and settings too.
+    fn reread(&mut self) -> Option<Action> {
+        if let Some(Page::Ant(page)) = self.pages.last_mut() {
+            page.reread();
+        }
+        Some(Action::Refresh)
     }
 
     /// Whether the help, the digest or a tool request in full covers the view.

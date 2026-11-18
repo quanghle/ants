@@ -213,7 +213,14 @@ pub const GLOBAL: &[Entry] = &[
         70,
         on_view,
     ),
-    Entry::new(&[Key::Char('R')], "R", "read again", "read everything again", 80, always),
+    Entry::new(
+        &[Key::Char('R')],
+        "R",
+        "read again",
+        "read everything again, on an ant its memories, MCP servers and settings too",
+        80,
+        always,
+    ),
     Entry::new(
         &[Key::Char('q')],
         "q",
@@ -404,15 +411,23 @@ const ANT: &[Entry] = &[
     Entry::new(&[Key::Char('a')], "a", "ask", "ask the ant in the command bar", 21, always),
     Entry::new(&[Key::Char('w')], "w", "work", "the ant's threads in work", 22, always),
     Entry::new(&[Key::Char('r')], "r", "restart", "restart the ant's harnesses, once y or ! confirms", 23, always),
+    Entry::new(&[Key::Char('p')], "p", "(un)pause", "pause the ant, or resume it, once y confirms", 24, always),
     Entry::new(
-        &[Key::Char('y'), Key::Char('!')],
-        "y !",
+        &[Key::Char('y')],
+        "y",
         "confirm",
-        "confirm the restart r asked for: y after the prompts running, ! at once, cancelling them",
+        "confirm what r or p asked for: a restart after the prompts running, the pause or the resume",
         1,
         ant_armed,
     ),
-    Entry::new(&[Key::Char('p')], "p", "(un)pause", "pause the ant, or resume it", 24, always),
+    Entry::new(
+        &[Key::Char('!')],
+        "!",
+        "restart now",
+        "confirm the restart r asked for at once, cancelling the prompts running",
+        2,
+        ant_restart_armed,
+    ),
     Entry::new(&[Key::Char('X')], "X", "retire", "retire the ant, in the command bar", 25, always),
     Entry::new(&[Key::Char('c')], "c", "creds", "the credentials asked for", 26, always),
     Entry::new(&[Key::Char('['), Key::Char(']')], "[ ]", "scroll", "scroll the about or now column", 27, always),
@@ -428,7 +443,6 @@ const ANT_QUEUE: &[Entry] = &[
 
 const MEMORIES: &[Entry] = &[
     Entry::new(UP_DOWN, "↑↓", "scroll", "scroll the memories", 10, always),
-    Entry::new(&[Key::Char('u')], "u", "read again", "read the memories again", 11, always),
     Entry::new(PAGES, "PgUp PgDn", "page", "scroll further", 92, always),
     Entry::new(ENDS, "Home End", "top/bottom", "scroll to the top or the bottom", 95, always),
 ];
@@ -438,7 +452,6 @@ const MCP: &[Entry] = &[
     Entry::new(&[Key::Char('s'), Key::Enter], "s", "sign in", "sign in to the selected server (Enter too)", 5, always),
     Entry::new(&[Key::Char('y')], "y", "copy address", "copy the address the sign-in gave", 3, mcp_signing),
     Entry::new(&[Key::Char('v')], "v", "hand back", "hand back the address the browser came back to", 4, mcp_signing),
-    Entry::new(&[Key::Char('u')], "u", "read again", "read the servers again", 11, always),
     Entry::new(ENDS, "Home End", "first/last", "select the first or the last", 95, always),
 ];
 
@@ -446,7 +459,6 @@ const SETTINGS: &[Entry] = &[
     Entry::new(UP_DOWN, "↑↓", "field", "select a field", 10, always),
     Entry::new(&[Key::Enter], "Enter", "change", "change the selected field", 5, always),
     Entry::new(&[Key::Char('n')], "n", "new field", "set a field not listed", 6, always),
-    Entry::new(&[Key::Char('u')], "u", "read again", "read the settings again", 11, always),
     Entry::new(ENDS, "Home End", "first/last", "select the first or the last", 95, always),
 ];
 
@@ -584,7 +596,12 @@ fn tree_armed(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
 }
 
 fn ant_armed(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
-    check(matches!(model.page(), Page::Ant(page) if page.armed()), "no restart asked for")
+    check(matches!(model.page(), Page::Ant(page) if page.armed().is_some()), "no restart or pause asked for")
+}
+
+fn ant_restart_armed(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
+    let armed = matches!(model.page(), Page::Ant(page) if page.armed() == Some(super::ant::Armed::Restart));
+    check(armed, "no restart asked for")
 }
 
 fn mcp_signing(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {

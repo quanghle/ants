@@ -17,7 +17,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
-use super::model::{Action, Key, To};
+use super::model::{Action, Key};
 use super::style::{self, ago};
 use crate::admin::orders::{self, Listed};
 use crate::admin::settings::{self, Assignment, Reading};
@@ -93,7 +93,7 @@ impl Pane {
         if self.read().is_some() { self.fields().len().to_string() } else { "?".to_owned() }
     }
 
-    pub fn key(&mut self, key: Key, ant: &UserId) -> Option<To> {
+    pub fn key(&mut self, key: Key) {
         let fields = self.fields();
         match key {
             Key::Up | Key::Char('k') => self.at = self.at.saturating_sub(1),
@@ -101,7 +101,7 @@ impl Pane {
             Key::Home => self.at = 0,
             Key::End => self.at = fields.len().saturating_sub(1),
             Key::Enter => {
-                let (field, value, secret) = fields.get(self.at)?;
+                let Some((field, value, secret)) = fields.get(self.at) else { return };
                 let field = ants_daemon::config::edit::field_text(field);
                 self.draft = Some(if *secret { format!("{field} = ") } else { format!("{field} = {value}") });
                 self.drop_failure();
@@ -110,13 +110,8 @@ impl Pane {
                 self.draft = Some(String::new());
                 self.drop_failure();
             }
-            Key::Char('u') => {
-                self.reading = None;
-                return Some(To::Do(Action::Settings(Ask::Read(ant.clone()))));
-            }
             _ => {}
         }
-        None
     }
 
     /// Take `key` into the change being written: None when none is, the key being the pane's then. `Enter` sends it
@@ -502,7 +497,7 @@ mod tests {
         assert_eq!(m.key(Key::Enter, at(3)), None);
         assert!(screen(&m).contains("\"nope\" sets nothing"), "{}", screen(&m));
         m.key(Key::Esc, at(3));
-        assert_eq!(m.key(Key::Char('u'), at(3)), Some(Action::Settings(Ask::Read(user("dev-a")))));
+        assert_eq!(m.key(Key::Char('R'), at(3)), Some(Action::Refresh));
         assert_eq!(m.settings_shown(), Some((user("dev-a"), true)));
     }
 }
