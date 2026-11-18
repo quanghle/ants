@@ -1,3 +1,6 @@
+use ants_proto::provider::Starter;
+
+use super::identity_findings::started;
 use super::*;
 
 fn sage() -> UserId {
@@ -141,4 +144,54 @@ async fn an_answer_without_findings_wakes_nobody_and_an_unreadable_one_leaves_th
     let thread = sent(&*items).await;
     let gave_up = answered(&*items, &sage(), &thread, uuid::Uuid::now_v7(), None).await.unwrap();
     assert_eq!(gave_up, Some(Reviewed::Fallback), "the sage's daemon gave up on it");
+}
+
+#[tokio::test]
+async fn a_sages_answer_keeps_the_identity_findings_of_the_packet_numbered_after_its_own() {
+    let (_sense, kept) = sense().await;
+    let items: Arc<dyn Items> = kept.clone();
+    let alice = Starter::Human { user: "alice".parse().unwrap() };
+    store(&kept, &Memory { status: Status::NeedsReview, ..lesson("Doubted") }).await;
+    started(&*items, 20..25, &alice, "github.com/o/r", Utc::now() - Duration::days(10)).await;
+    let thread = sent(&*items).await;
+    let (dream, _) = last(&*items).await.unwrap().unwrap();
+    let kinds: Vec<_> = dream.findings.iter().map(|finding| (finding.id.as_str(), finding.kind)).collect();
+    let identity = [FindingKind::NoPersona, FindingKind::NoSelfModel, FindingKind::NoRelationship];
+    assert_eq!(kinds[..3], [("1.1", identity[0]), ("1.2", identity[1]), ("1.3", identity[2])], "first in the packet");
+    assert_eq!(kinds[3], ("1.4", FindingKind::NeedsReview));
+
+    let cited = json!({"threads": [on(1).thread.to_string()]});
+    let answer = fenced(&[finding("lesson", "Test first", cited.clone()), finding("mistake", "Pushed red", cited)]);
+    let Some(Reviewed::Prompt(prompt)) =
+        answered(&*items, &sage(), &thread, uuid::Uuid::now_v7(), Some(&answer)).await.unwrap()
+    else {
+        panic!("findings prompt the ant");
+    };
+    let (dream, _) = last(&*items).await.unwrap().unwrap();
+    let kinds: Vec<_> = dream.findings.iter().map(|finding| (finding.id.as_str(), finding.kind)).collect();
+    let sage_kind = FindingKind::Sage;
+    let kept_too = [("1.3", identity[0]), ("1.4", identity[1]), ("1.5", identity[2])];
+    assert_eq!(kinds, [[("1.1", sage_kind), ("1.2", sage_kind)].as_slice(), &kept_too].concat(), "the doubt replaced");
+    assert_eq!(dream.findings[4].key.as_deref(), Some("no_relationship:human:alice"), "rests and holds as gathered");
+    assert!(prompt.contains("answered with 2 findings"), "{prompt}");
+    let (block, after) = prompt.split_once(REVIEW_END).unwrap();
+    assert!(!block.contains("no_persona"), "{prompt}");
+    let identity_section = after.split_once("## Findings on the identity\n\n").unwrap().1;
+    assert!(identity_section.starts_with("- 1.3 (no_persona): No persona after 5 threads"), "{prompt}");
+    assert!(identity_section.contains("- 1.5 (no_relationship): No relationship record of human:alice"), "{prompt}");
+
+    let (_sense, kept) = sense().await;
+    let items: Arc<dyn Items> = kept.clone();
+    store(&kept, &Memory { status: Status::NeedsReview, ..lesson("Doubted") }).await;
+    started(&*items, 20..25, &alice, "github.com/o/r", Utc::now() - Duration::days(10)).await;
+    let thread = sent(&*items).await;
+    let empty = "```json\n{\"findings\": []}\n```";
+    let quiet = answered(&*items, &sage(), &thread, uuid::Uuid::now_v7(), Some(empty)).await.unwrap();
+    assert_eq!(quiet, Some(Reviewed::Quiet), "an empty answer wakes nobody still");
+    let (dream, _) = last(&*items).await.unwrap().unwrap();
+    let kinds: Vec<_> = dream.findings.iter().map(|finding| (finding.id.as_str(), finding.kind)).collect();
+    assert_eq!(kinds, [("1.1", identity[0]), ("1.2", identity[1]), ("1.3", identity[2])], "the doubt judged");
+    let next = begin(&*items, start(dream.next(), &on(9))).await.unwrap().unwrap();
+    let again: Vec<_> = next.findings.iter().map(|finding| (finding.id.as_str(), finding.kind)).collect();
+    assert_eq!(again[..3], [("1.1", identity[0]), ("1.2", identity[1]), ("1.3", identity[2])], "offered again");
 }

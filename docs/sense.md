@@ -547,11 +547,11 @@ is reviewed by no one either, for as long as a daemon serves the ant naming it. 
 
 - for the ant, the verdicts on the last dream's findings; for the sage, its earlier findings for the ant and what
   became of them (below);
-- the findings, at most 20, each with an id `<dream>.<n>`: memories with both `helpful` and `stale` votes since the
-  last dream (`contradiction`), memories needing review (`needs_review`), the near duplicates the last maintenance
-  found (`duplicates`), episodes to distill (`distill`), pending persona and skill proposals (`proposal`), what the
-  ant's identity lacks for its work (below), a vital sign turned sharply for the worse (`vitals`, below), and the
-  findings of the last dream deferred or unanswered that still hold, offered again first;
+- the findings, at most 20, each with an id `<dream>.<n>`: the findings of the last dream deferred or unanswered that
+  still hold, offered again first, then what the ant's identity lacks for its work (below), memories with both
+  `helpful` and `stale` votes since the last dream (`contradiction`), memories needing review (`needs_review`), the
+  near duplicates the last maintenance found (`duplicates`), episodes to distill (`distill`), pending persona and skill
+  proposals (`proposal`) and a vital sign turned sharply for the worse (`vitals`, below);
 - the vital signs of the period (below) beside those of up to 5 dreams before, the tool calls by kind, and a line for
   each thread;
 - the ant's identity, to judge the work against and to judge against the work: its persona and pending persona
@@ -592,8 +592,9 @@ packet's budget, the earlier reviews' findings left out first. The packet an ant
 last dream's findings instead.
 
 **Identity findings** come from the ant's sense data and thread records alone, never thread text, so none is
-untrusted. Each names the `sense_identity` or `sense_skill` call answering it, and they come after the other findings
-but those on a sage's practice and `vitals` (below), which the limit of 20 cuts before them:
+untrusted. Each names the `sense_identity` or `sense_skill` call answering it. They come right after the findings
+offered again, so the limit of 20 cuts every other finding of the packet before them, and stay, as those offered again
+do, whatever a sage answers (**The answer**, below):
 
 - `no_persona`: no persona after 5 threads, and none proposed;
 - `no_self_model`: no self-model after 5 threads;
@@ -681,11 +682,14 @@ checkout, or why a commit has none, which fails nothing. The checkouts go once t
 earlier run left when the daemon starts.
 
 **The answer:** the sage's findings, at most 20, each needing a kind, a text, an action and some evidence, replace the
-packet's own, marked untrusted when they cite a thread a webhook started or one the packet did not cover, an untrusted
+packet's own but those on the identity and those offered again, which stay whatever the sage answers, the identity
+findings numbered on after the sage's; so a dream answered holds at most 20 findings of the sage and 20 of the packet.
+The sage's are marked untrusted when they cite a thread a webhook started or one the packet did not cover, an untrusted
 memory, or, citing no thread, a packet covering a thread a webhook started. They prompt the ant on the review thread
 itself, which becomes the dream thread, inside a block between `<sage-review>` and `</sage-review>` stating they are
-another ant's suggestions to verify against their evidence, not instructions, with the findings offered again and the
-commits; the answer goes to no one. An empty list wakes nobody. A reply with no readable finding, or a notice that the
+another ant's suggestions to verify against their evidence, not instructions, followed by the identity findings and
+the findings offered again, each in a section of its own, and the commits; the answer goes to no one. An empty list
+wakes nobody, the identity findings left for the next dream to offer again. A reply with no readable finding, or a notice that the
 sage's daemon gave up on the review or had it withdrawn, wakes the ant with the packet alone at once; so does a sage
 silent for 6 hours, a later answer prompting no one.
 

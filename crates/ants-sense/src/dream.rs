@@ -780,10 +780,10 @@ impl Gathered {
 }
 
 /// The findings of dream `number`, beginning as `start` says after `previous`: the open findings of
-/// `previous` that still hold, then the packet's own on what they do not cover yet, those on memories and proposals
-/// first, then those on the identity of the ant ([`identity_findings`]), then those on its practice as a sage from the
-/// records of the `reviews` it made ([`practice_findings`]), then those on the vital signs of the work ([`vitals`]), up
-/// to [`MAX_FINDINGS`]. An open finding on the identity, the practice or the vital signs holds while its ground does,
+/// `previous` that still hold, then the packet's own on what they do not cover yet, those on the identity of the ant
+/// first ([`identity_findings`]), which stay whatever a sage answers as the open ones do ([`review::answered`]), then
+/// those on memories and proposals, then those on its practice as a sage from the records of the `reviews` it made
+/// ([`practice_findings`]), then those on the vital signs of the work ([`vitals`]), up to [`MAX_FINDINGS`]. An open finding on the identity, the practice or the vital signs holds while its ground does,
 /// taking the text and count gathered now. One of the `rested` stays out while what it is about is unchanged and the
 /// ant was active less than [`REST_DAYS`] since the verdict, as `ages` counts; `rested` keeps those resting on.
 async fn findings(
@@ -825,8 +825,8 @@ async fn findings(
         }
     }
     let diary = previous.and_then(|previous| previous.diary.as_ref());
-    let mut fresh = gather(items, &memories, since(previous, start.at), diary, proposals).await?;
-    fresh.extend(identity_found);
+    let mut fresh = identity_found;
+    fresh.extend(gather(items, &memories, since(previous, start.at), diary, proposals).await?);
     fresh.extend(practice);
     fresh.extend(vital);
     let covered: BTreeSet<_> = found.iter().filter_map(|finding| finding.key.clone()).collect();

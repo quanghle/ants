@@ -21,7 +21,7 @@ fn webhook() -> Starter {
 }
 
 /// Note threads `threads` started by `by` in repository `repo`, one a day from `from`.
-async fn started(items: &dyn Items, threads: Range<u8>, by: &Starter, repo: &str, from: DateTime<Utc>) {
+pub(super) async fn started(items: &dyn Items, threads: Range<u8>, by: &Starter, repo: &str, from: DateTime<Utc>) {
     for n in threads.clone() {
         thread_started(items, &on(n).thread, by, repo, from + Duration::days(i64::from(n - threads.start))).await;
     }
