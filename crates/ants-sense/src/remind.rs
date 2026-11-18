@@ -26,11 +26,51 @@ pub use condition::{Condition, FileEvent, IssueState, PrState, SenseEvent};
 pub use trigger::Trigger;
 
 pub const KIND: &str = "reminder";
+/// The most reminders active at once, commitments' included.
 pub const MAX_ACTIVE: usize = 50;
 pub const CONDITION_DAYS: i64 = 30;
 const SCHEDULER: &str = "sense:scheduler";
 /// The tool call listing the reminders, which the brief's sections of them end with when cut.
 const LIST: &str = "sense_remind action=list";
+
+/// Why a reminder is not set or changed: the ant's quota of active reminders, a trigger giving no time to fire at, or
+/// its store.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RemindError {
+    #[error("at most {MAX_ACTIVE} reminders may be active")]
+    TooMany,
+    #[error("{0}")]
+    Trigger(String),
+    #[error(transparent)]
+    Store(#[from] StoreError),
+}
+
+/// The refusal of a reminder: `too_many` or `invalid_trigger`, else as its store refuses.
+impl From<RemindError> for Answer {
+    fn from(error: RemindError) -> Self {
+        match error {
+            RemindError::TooMany => {
+                let message = format!(
+                    "At most {MAX_ACTIVE} reminders may be active, commitments' included: drop one or resolve a \
+                     commitment first."
+                );
+                Self::error("too_many", message)
+            }
+            RemindError::Trigger(why) => Self::error("invalid_trigger", why),
+            RemindError::Store(error) => error.into(),
+        }
+    }
+}
+
+/// A reminder's error met by the scheduler, a stored trigger giving no time counting as sense's data unavailable.
+impl From<RemindError> for StoreError {
+    fn from(error: RemindError) -> Self {
+        match error {
+            RemindError::Store(error) => error,
+            error => Self::Unavailable(error.to_string()),
+        }
+    }
+}
 
 /// A reminder, as its item keeps it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -170,7 +210,7 @@ impl Reminder {
         Some(CallContext { thread, ..self.source_context.clone().unwrap_or_else(|| self.writer.clone()) })
     }
 
-    fn renewed_expiry(&self, now: DateTime<Utc>) -> Result<DateTime<Utc>, StoreError> {
+    fn renewed_expiry(&self, now: DateTime<Utc>) -> Result<DateTime<Utc>, RemindError> {
         let due = self.promise.as_ref().and(self.first_due).unwrap_or(now);
         add(now.max(due), Duration::days(CONDITION_DAYS))
     }
@@ -553,7 +593,7 @@ pub(crate) fn for_commitment(
     writer: &CallContext,
     workdir: Option<&Path>,
     now: DateTime<Utc>,
-) -> Result<Write, StoreError> {
+) -> Result<Write, RemindError> {
     let expires = add(now.max(due), Duration::days(CONDITION_DAYS))?;
     let trigger = Trigger::At { at: due };
     let mut reminder = Reminder::new(title.to_owned(), writer.thread.clone(), trigger, due, expires, writer, workdir);
@@ -576,7 +616,7 @@ pub(crate) async fn write_creations(
     writes: &[Write],
     by: &str,
     now: DateTime<Utc>,
-) -> Result<Vec<Item>, StoreError> {
+) -> Result<Vec<Item>, RemindError> {
     let (mut added, mut removed) = (0, 0);
     for write in writes {
         match write {
@@ -600,7 +640,7 @@ pub(crate) async fn write_creations(
         }
     }
     if added == 0 {
-        return items.write(writes, by).await;
+        return Ok(items.write(writes, by).await?);
     }
     let guard = &ItemId::named("reminder-quota", "active");
     // Only a conflict on the quota is decided again: one on the writes given is the caller's to answer.
@@ -609,7 +649,7 @@ pub(crate) async fn write_creations(
         let active = readable(list_active(items).await?, Reminder::of);
         let count = active.iter().filter(|(_, reminder)| !reminder.expired(now)).count();
         if count.saturating_sub(removed) + added > MAX_ACTIVE {
-            return Err(StoreError::Unavailable(format!("at most {MAX_ACTIVE} active reminders are permitted")));
+            return Ok(Err(RemindError::TooMany));
         }
         let revision = quota.as_ref().map_or(0, |item| item.revision);
         let mut batch = writes.to_vec();
@@ -625,7 +665,7 @@ pub(crate) async fn write_creations(
                 Ok(Ok(items))
             }
             Err(StoreError::Conflict { expected, current }) if current.id != *guard => {
-                Ok(Err(StoreError::Conflict { expected, current }))
+                Ok(Err(StoreError::Conflict { expected, current }.into()))
             }
             Err(e) => Err(e),
         }
@@ -685,8 +725,8 @@ async fn change(items: &dyn Items, item: &Item, reminder: &Reminder) -> Result<I
     Ok(items.write_confirmed(&[change_to(item, reminder)?], SCHEDULER).await?.remove(0))
 }
 
-fn add(at: DateTime<Utc>, duration: Duration) -> Result<DateTime<Utc>, StoreError> {
-    at.checked_add_signed(duration).ok_or_else(|| StoreError::Unavailable("reminder time is out of range".into()))
+fn add(at: DateTime<Utc>, duration: Duration) -> Result<DateTime<Utc>, RemindError> {
+    at.checked_add_signed(duration).ok_or_else(|| RemindError::Trigger("The reminder's time is out of range.".into()))
 }
 
 #[cfg(test)]

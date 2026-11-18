@@ -267,11 +267,11 @@ async fn active_limit_includes_promises_and_renewals_and_resolution_releases_a_s
     }
     let too_many =
         remind(&sense, &call(now(), json!({"title":"overflow","trigger":{"kind":"after","seconds":60}}))).await;
-    assert!(too_many.is_error);
+    assert_eq!(too_many.json["error"], "too_many", "{too_many:?}");
     let promise =
         crate::promise::promise(&sense, &call(now(), json!({"title":"commitment","promisee":"alice","due":now()})))
             .await;
-    assert!(promise.is_error);
+    assert_eq!(promise.json["error"], "too_many", "{promise:?}");
     assert!(items.list(crate::promise::KIND, 100).await.unwrap().is_empty(), "batch rejected atomically");
     assert!(!remind(&sense, &call(now(), json!({"action":"drop","id":ids[0]}))).await.is_error);
     let commitment =
@@ -300,8 +300,21 @@ async fn active_limit_includes_promises_and_renewals_and_resolution_releases_a_s
         assert!(!answer.is_error, "{answer:?}");
     }
     let renewal = remind(&sense, &call(later, json!({"action":"renew","id":ids[1]}))).await;
-    assert!(renewal.is_error, "{renewal:?}");
+    assert_eq!(renewal.json["error"], "too_many", "{renewal:?}");
     assert_eq!(active(&*items, later).await.unwrap().len(), MAX_ACTIVE);
+}
+
+#[tokio::test]
+async fn a_trigger_giving_no_time_to_fire_at_is_refused_as_invalid() {
+    let (sense, items) = setup().await;
+    let end = DateTime::<Utc>::MAX_UTC - Duration::hours(1);
+    let late = remind(&sense, &call(end, json!({"title":"too late","trigger":{"kind":"after","seconds":7200}}))).await;
+    assert_eq!(late.json["error"], "invalid_trigger", "{late:?}");
+    let due = DateTime::<Utc>::MAX_UTC - Duration::days(1);
+    let promised =
+        crate::promise::promise(&sense, &call(now(), json!({"title":"forever","promisee":"alice","due":due}))).await;
+    assert_eq!(promised.json["error"], "invalid_trigger", "{promised:?}");
+    assert!(items.list(KIND, 10).await.unwrap().is_empty());
 }
 
 #[tokio::test]
