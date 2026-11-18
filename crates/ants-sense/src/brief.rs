@@ -5,8 +5,11 @@
 //! relationship records of the thread's participants, the core and top memories, the skills index, and the core loop
 //! of tools.
 //!
-//! The brief stays within its byte budget ([`fit`]): memories are shortened to their titles first, then the longest
-//! section is cut, again and again, each cut ending with a line naming the tool call that shows the rest.
+//! The brief stays within its byte budget ([`fit`]), cutting what other calls show before the ant's identity
+//! ([`Order`]): memories and skills are shortened to their titles first, then the work sections, memories and skills
+//! are cut, the longest first; then the core loop is shortened to the tool names; and only then are the relationship
+//! records, the self-model and the persona cut. Each cut section ends with a line naming the tool call that shows the
+//! rest, and the shortened core loop points to the tools' descriptions; the warnings and the identity are never cut.
 
 use std::fmt::Write as _;
 
@@ -55,24 +58,41 @@ const CORE_LOOP: &[(&str, &str)] = &[
     ("brief", "show this brief again"),
 ];
 
+/// When a section shortens and is cut over the brief's budget: each in turn, until the brief fits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Order {
+    /// The work sections, memories and skills, shown again by their tools.
+    Work,
+    /// The core loop, which each tool's description tells again.
+    Help,
+    Relationships,
+    SelfModel,
+    Persona,
+}
+
+impl Order {
+    const ALL: [Self; 5] = [Self::Work, Self::Help, Self::Relationships, Self::SelfModel, Self::Persona];
+}
+
 /// A part of the brief: its heading, its body, and how it shortens.
 #[derive(Debug, Clone)]
 struct Section {
     heading: String,
     body: String,
-    /// The body with its memories shortened to their titles.
+    /// The body shortened to its titles, or to its tools' names.
     titles: Option<String>,
     /// Whether the body is shown in the block of recalled memories ([`framed`]).
     framed: bool,
     /// The tool call showing what a cut leaves out; none for a section never cut.
     more: Option<String>,
     cut: bool,
+    order: Order,
 }
 
 impl Section {
     /// A section kept whole.
     fn whole(heading: String, body: String) -> Self {
-        Self { heading, body, titles: None, framed: false, more: None, cut: false }
+        Self { heading, body, titles: None, framed: false, more: None, cut: false, order: Order::Work }
     }
 
     /// A section cut when the brief is over its budget, `more` showing the rest.
@@ -134,29 +154,32 @@ fn cut_text(text: &str, max: usize) -> String {
     kept.trim_end().to_owned()
 }
 
-/// `sections` joined within `budget` bytes: whole when they fit; else with memories shortened to their titles; then
-/// with the longest section cut, down to the next longest or as much as needed, until they fit. Sections kept whole
-/// that do not fit alone are cut on a character boundary.
+/// `sections` joined within `budget` bytes: whole when they fit; else, [`Order`] by order until they fit, with the
+/// sections of each shortened to their titles, then the longest of them cut, down to the next longest or as much as
+/// needed. Sections kept whole that do not fit alone are cut on a character boundary.
 fn fit(mut sections: Vec<Section>, budget: usize) -> String {
     let joined = |sections: &[Section]| sections.iter().map(Section::render).collect::<Vec<_>>().join("\n\n");
-    if joined(&sections).len() > budget {
-        sections.iter_mut().for_each(Section::shorten);
-    }
     let mut stuck = vec![false; sections.len()];
-    loop {
-        let total = joined(&sections).len();
-        let Some(over) = total.checked_sub(budget).filter(|over| *over > 0) else { break };
-        let lengths: Vec<_> = sections.iter().map(|section| section.render().len()).collect();
-        let cuttable = |i: &usize| !stuck[*i] && sections[*i].more.is_some();
-        let Some(longest) = (0..sections.len()).filter(cuttable).max_by_key(|i| lengths[*i]) else { break };
-        let next = (0..sections.len()).filter(cuttable).filter(|i| *i != longest).map(|i| lengths[i]).max();
-        let length = lengths[longest];
-        let mut target = length.saturating_sub(over).max(next.unwrap_or(0));
-        if target >= length {
-            target = length.saturating_sub(over);
+    for order in Order::ALL {
+        if joined(&sections).len() <= budget {
+            break;
         }
-        if !sections[longest].cut_to(target) {
-            stuck[longest] = true;
+        sections.iter_mut().filter(|section| section.order == order).for_each(Section::shorten);
+        loop {
+            let total = joined(&sections).len();
+            let Some(over) = total.checked_sub(budget).filter(|over| *over > 0) else { break };
+            let lengths: Vec<_> = sections.iter().map(|section| section.render().len()).collect();
+            let cuttable = |i: &usize| !stuck[*i] && sections[*i].order == order && sections[*i].more.is_some();
+            let Some(longest) = (0..sections.len()).filter(cuttable).max_by_key(|i| lengths[*i]) else { break };
+            let next = (0..sections.len()).filter(cuttable).filter(|i| *i != longest).map(|i| lengths[i]).max();
+            let length = lengths[longest];
+            let mut target = length.saturating_sub(over).max(next.unwrap_or(0));
+            if target >= length {
+                target = length.saturating_sub(over);
+            }
+            if !sections[longest].cut_to(target) {
+                stuck[longest] = true;
+            }
         }
     }
     let text = joined(&sections);
@@ -278,7 +301,10 @@ fn identity_section(card: Option<&Card>, context: &CallContext) -> Section {
 
 fn persona_section(found: Option<&Item>) -> Section {
     match found {
-        Some(found) => Section::cut_with("## Persona", persona::text(&found.values), "sense_persona"),
+        Some(found) => Section {
+            order: Order::Persona,
+            ..Section::cut_with("## Persona", persona::text(&found.values), "sense_persona")
+        },
         None => {
             let body = "No persona yet: propose values, voice, boundaries or working style with sense_persona.";
             Section::whole("## Persona".to_owned(), body.to_owned())
@@ -305,7 +331,7 @@ fn self_model_section(found: Option<&RecordItem>) -> Section {
         return Section::whole("## Self-model".to_owned(), body.to_owned());
     };
     let more = format!("sense_recall id={}", found.id());
-    let mut section = Section::cut_with("## Self-model", found.text(), &more);
+    let mut section = Section { order: Order::SelfModel, ..Section::cut_with("## Self-model", found.text(), &more) };
     (section.framed, section.titles) = (true, Some(found.head()));
     section
 }
@@ -317,17 +343,22 @@ fn relationships_section(found: &[RecordItem]) -> Option<Section> {
     }
     let body: Vec<_> = found.iter().map(RecordItem::text).collect();
     let titles: Vec<_> = found.iter().map(RecordItem::head).collect();
-    let mut section = Section::cut_with("## Relationships", body.join("\n"), "sense_recall id=<id>");
+    let mut section = Section {
+        order: Order::Relationships,
+        ..Section::cut_with("## Relationships", body.join("\n"), "sense_recall id=<id>")
+    };
     (section.framed, section.titles) = (true, Some(titles.join("\n")));
     Some(section)
 }
 
 fn register_section(register: Option<&Register>) -> Section {
-    let body = match register {
-        Some(register) => register.text().trim_end().to_owned(),
-        None => "No resume register yet: start one with sense_checkpoint, without a revision.".to_owned(),
-    };
-    Section::cut_with("## This thread", body, thread::READ)
+    match register {
+        Some(register) => Section::cut_with("## This thread", register.text().trim_end().to_owned(), thread::READ),
+        None => {
+            let body = "No resume register yet: start one with sense_checkpoint, without a revision.";
+            Section::whole("## This thread".to_owned(), body.to_owned())
+        }
+    }
 }
 
 /// The section of `handoffs`, ending with the tool call showing the rest when there are `more`.
@@ -511,9 +542,12 @@ fn head(found: &MemoryItem) -> String {
     head
 }
 
+/// The core loop, shortened to the tools' names over the brief's budget.
 fn core_loop() -> Section {
     let lines: Vec<_> = CORE_LOOP.iter().map(|(tool, when)| format!("- sense_{tool}: {when}.")).collect();
-    Section::whole("## Core loop".to_owned(), lines.join("\n"))
+    let names: Vec<_> = CORE_LOOP.iter().map(|(tool, _)| format!("sense_{tool}")).collect();
+    let names = format!("{}: each tool's description says when to use it.", names.join(", "));
+    Section { titles: Some(names), order: Order::Help, ..Section::whole("## Core loop".to_owned(), lines.join("\n")) }
 }
 
 /// Answers a `sense_brief` call: the brief of the thread, within the budget of a session's.

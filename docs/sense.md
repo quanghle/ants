@@ -69,7 +69,7 @@ vote or propose.
 | What | Limit |
 |---|---|
 | Tools | 12 |
-| Brief | 8000 bytes, cut section by section ([Brief](#brief)) |
+| Brief | 8000 bytes; over it, the work is cut first and the persona last ([Brief](#brief)) |
 | Memory | title 200 characters, body 4 KiB; the live core memories 2,000 bytes in all |
 | Self-model, relationship record | title 200 characters, body 2,000 bytes |
 | Persona | 500 bytes a field |
@@ -495,10 +495,19 @@ Sense's brief ([Briefs](architecture.md#briefs)) holds, in order, the sections i
 12. `## Skills`: each skill's name and description;
 13. `## Core loop`: each sense tool and when to use it.
 
-The brief stays within the request's budget, 8000 bytes. Over it, the self-model, relationship records and memories
-are shortened to their titles, and the skills to their names, first; then the longest sections but the warnings, the
-identity and the core loop are cut (`ants_sense::brief`). Each shortened or cut section ends with a line naming the
-call that shows the rest:
+The brief stays within the request's budget, 8000 bytes. Over it, the brief gives up what other calls show first and
+the ant's identity last, each step taken only while the brief is still over (`ants_sense::brief`):
+
+1. the memories are shortened to their titles and the skills to their names;
+2. the work sections (the register, handoffs, commitments, reminders and tasks), the memories and the skills are cut,
+   the longest first;
+3. the core loop is shortened to the tools' names, each tool's description telling when to use it;
+4. the relationship records are shortened to their titles, then cut;
+5. the self-model likewise;
+6. the persona is cut.
+
+The warnings and the identity are never cut. Each shortened or cut section ends with a line naming the call that shows
+the rest:
 
 - `… more: sense_checkpoint without arguments`, for the register and the handoffs;
 - `… more: sense_promise action=list`, for commitments;
