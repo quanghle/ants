@@ -178,6 +178,8 @@ async fn proposals_resting_on_untrusted_text_are_refused() {
         text: "Shout.".into(),
         items: vec![],
         untrusted: true,
+        key: None,
+        count: None,
         advice: None,
     });
     let (_, revision) = dream::get(&*items, dream.number).await.unwrap().unwrap();

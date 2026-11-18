@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ants_proto::provider::{CallContext, Format, Output, Provider as _, ToolCall};
+use ants_proto::provider::{CallContext, Event, EventKind, Format, Output, Provider as _, ToolCall};
 use serde_json::json;
 
 use super::*;
@@ -109,6 +109,8 @@ async fn findings_gather_what_needs_judging_and_the_open_ones_come_again() {
             ("1.4", FindingKind::Distill, episode.clone(), false),
         ]
     );
+    let shown = packet(&*items, &first, &Reader::Ant, &[]).await.unwrap();
+    assert!(shown.contains("- 1.3 (needs_review, untrusted): Memory"), "{shown}");
     woken(&*items, 1, &on(1).thread).await.unwrap();
     let verdicts = json!({"verdicts": [
         {"finding": "1.1", "verdict": "applied", "reason": "Voted it helpful again.", "items": [disputed]},
@@ -127,15 +129,92 @@ async fn findings_gather_what_needs_judging_and_the_open_ones_come_again() {
     let found: Vec<_> = second.findings.iter().map(|f| (f.id.as_str(), f.kind)).collect();
     assert_eq!(
         found,
-        [("1.2", FindingKind::NeedsReview), ("1.4", FindingKind::Distill), ("2.1", FindingKind::NeedsReview)],
-        "the deferred and unanswered come again first, the applied and rejected not, nor the diary to distill; the \
-         untrusted memory still needs review"
+        [("1.2", FindingKind::NeedsReview), ("1.4", FindingKind::Distill)],
+        "the deferred and unanswered come again, the applied and rejected not, nor the diary to distill"
     );
     let packet = packet(&*items, &second, &Reader::Ant, &[]).await.unwrap();
     assert!(packet.contains("## Verdicts on dream 1"), "{packet}");
     assert!(packet.contains("- 1.4 (distill): unanswered"), "{packet}");
     assert!(packet.contains("- 1.2 (needs_review, offered again): Memory"), "{packet}");
-    assert!(packet.contains("- 2.1 (needs_review, untrusted): Memory"), "{packet}");
+}
+
+/// Begin dream `number` at `at` and reject its `finding` on its thread.
+async fn reject(sense: &Sense, items: &dyn Items, number: u64, at: DateTime<Utc>, finding: &str) -> Dream {
+    let writer = on(9);
+    let dream = begin(items, start(at, &writer)).await.unwrap().unwrap();
+    assert_eq!(dream.number, number);
+    let thread = u8::try_from(number).unwrap();
+    woken(items, number, &on(thread).thread).await.unwrap();
+    let verdicts = json!({"verdicts": [{"finding": finding, "verdict": "rejected", "reason": "Still holds."}]});
+    let answered = answer(sense, thread, verdicts).await;
+    assert!(!answered.is_error, "{answered:?}");
+    dream
+}
+
+async fn rested(items: &dyn Items) -> Vec<String> {
+    let (record, _) = record(items).await.unwrap().unwrap();
+    record.rested.into_iter().map(|rested| rested.finding).collect()
+}
+
+fn ids(dream: &Dream) -> Vec<(&str, &ItemId)> {
+    dream.findings.iter().map(|finding| (finding.id.as_str(), &finding.items[0])).collect()
+}
+
+#[tokio::test]
+async fn a_rejected_finding_rests_until_what_it_is_about_changes() {
+    let (sense, kept) = sense().await;
+    let items: Arc<dyn Items> = kept.clone();
+    let doubted = store(&kept, &Memory { status: Status::NeedsReview, ..lesson("Doubted") }).await;
+    let other = store(&kept, &Memory { status: Status::NeedsReview, ..lesson("Questioned") }).await;
+    let now = Utc::now();
+    let day = |n: i64| now + Duration::days(n);
+
+    let first = reject(&sense, &*items, 1, day(0), "1.1").await;
+    assert_eq!(ids(&first), [("1.1", &doubted), ("1.2", &other)]);
+    assert_eq!(first.findings[0].key, Some(format!("needs_review:{doubted}")));
+    let read = tool(&sense, memory::recall, json!({"id": doubted}), on(1)).await;
+    assert!(!read.is_error && memory(&kept, &doubted).await.access.is_some(), "{read:?}");
+
+    let second = reject(&sense, &*items, 2, day(1), "1.2").await;
+    assert_eq!(ids(&second), [("1.2", &other)], "the rejected rests though read since; the unanswered comes again");
+    assert_eq!(rested(&*items).await, ["1.1"]);
+    let third = begin(&*items, start(day(2), &on(9))).await.unwrap().unwrap();
+    assert!(third.findings.is_empty(), "{:?}", third.findings);
+
+    let mut values = Values::new();
+    values.insert("importance".into(), json!(4));
+    items.change(&doubted, values, None, "test").await.unwrap();
+    let fourth = begin(&*items, start(day(3), &on(9))).await.unwrap().unwrap();
+    assert_eq!(ids(&fourth), [("4.1", &doubted)], "changed since the verdict; the other still rests");
+    assert_eq!(rested(&*items).await, ["1.2"]);
+}
+
+#[tokio::test]
+async fn a_rejected_finding_comes_again_after_fourteen_active_days() {
+    let (sense, kept) = sense().await;
+    let items: Arc<dyn Items> = kept.clone();
+    let doubted = store(&kept, &Memory { status: Status::NeedsReview, ..lesson("Doubted") }).await;
+    // The store's clock stamps the verdict now.
+    let now = Utc::now();
+    let day = |n: i64| now + Duration::days(n);
+    let lifecycle = |n: i64, kind: EventKind| Event {
+        id: uuid::Uuid::now_v7(),
+        ant: "dev-a".parse().unwrap(),
+        identity: "id1".into(),
+        thread: None,
+        at: day(n),
+        kind,
+    };
+    for (n, kind) in [(-10, EventKind::AntAdded), (3, EventKind::AntRetired), (8, EventKind::AntRevived)] {
+        identity::record_event(&*items, &lifecycle(n, kind)).await.unwrap();
+    }
+
+    reject(&sense, &*items, 1, day(0), "1.1").await;
+    let resting = begin(&*items, start(day(15), &on(9))).await.unwrap().unwrap();
+    assert!(resting.findings.is_empty(), "10 active days since the verdict: {:?}", resting.findings);
+    let back = begin(&*items, start(day(20), &on(9))).await.unwrap().unwrap();
+    assert_eq!(ids(&back), [("3.1", &doubted)], "15 active days since the verdict");
+    assert!(rested(&*items).await.is_empty());
 }
 
 #[tokio::test]
@@ -218,6 +297,8 @@ fn finding(n: usize) -> Finding {
         text,
         items: Vec::new(),
         untrusted: false,
+        key: None,
+        count: None,
         advice: None,
     }
 }

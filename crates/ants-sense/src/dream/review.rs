@@ -309,6 +309,8 @@ async fn sage_findings(
             text: text.clone(),
             items: cited.memories.clone(),
             untrusted: untrusted_text,
+            key: None,
+            count: None,
             advice: Some(advice.clone()),
         });
     }
