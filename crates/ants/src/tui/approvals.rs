@@ -154,7 +154,8 @@ pub fn lines(
         lines.truncate(rows);
         if left > 0 {
             let what = if left == 1 { "line" } else { "lines" };
-            lines.push(Line::styled(format!("… {left} more {what}: Enter shows them"), style::dim()));
+            let more = if rows == 0 { "" } else { " more" };
+            lines.push(Line::styled(format!("… {left}{more} {what}: Enter shows them"), style::dim()));
         }
         lines
     } else {

@@ -822,6 +822,10 @@ fn draw_cards(
             let card = requests[at];
             let lines = |rows| approvals::lines(card, model.asking.as_ref(), (true, writing), now, (width, rows));
             let rows = (1..=approvals::CARD_LINES).rev().find(|rows| lines(*rows).len() <= room).unwrap_or(1);
+            // On a view too short for the card, it gives the request fewer lines, none when even its others do not
+            // show.
+            let height = usize::from(area.height);
+            let rows = (0..=rows).rev().find(|rows| lines(*rows).len() + 2 <= height).unwrap_or(0);
             let style = if card.settled.is_some() { style::dim() } else { Style::new().fg(style::PENDING) };
             let id = format!("{}/{} ", card.request.ant, card.request.id);
             let asked = entries
@@ -1345,6 +1349,11 @@ mod tests {
         let shown = screen(&page, &m, 100, at(2));
         assert!(shown.contains("w000 w001") && shown.contains("more lines: Enter shows them"), "{shown}");
         assert_eq!(page.key(Key::Char('a'), &m.data, at(2)), Some(To::Ask(long, None)), "too long to answer at once");
+
+        m.data.live.approvals = vec![push.clone()];
+        let shown = crate::test_support::render::rendered(100, 3, |f| page.draw(f, f.area(), &m, at(2), true));
+        assert!(!shown.contains("a allow"), "{shown}");
+        assert_eq!(page.key(Key::Char('a'), &m.data, at(2)), Some(To::Ask(push.clone(), None)), "its keys cut off");
 
         m.data.live.approvals.clear();
         assert_eq!(page.key(Key::Char('a'), &m.data, at(2)), None, "nothing pending, nothing to answer");

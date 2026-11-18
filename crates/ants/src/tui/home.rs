@@ -323,13 +323,22 @@ pub struct Page {
     expanded: HashSet<(UserId, ThreadId)>,
     /// The cursor on the selected question item's card, while Enter has focused it.
     answering: Option<question::Cursor>,
-    /// How wide the cards were drawn last, which tells whether a tool request shows whole on its card.
-    width: Cell<Option<usize>>,
+    /// How wide the card the keys answer was drawn last and over how many lines what its request asks, which tells
+    /// whether the request shows whole on screen; none on the compact pane.
+    room: Cell<Option<(usize, usize)>>,
+    /// The request of the card the keys answer, as last drawn.
+    carded: Cell<Option<Uuid>>,
 }
 
 impl Default for Page {
     fn default() -> Self {
-        Self { selected: Selection::on_top(), expanded: HashSet::new(), answering: None, width: Cell::new(None) }
+        Self {
+            selected: Selection::on_top(),
+            expanded: HashSet::new(),
+            answering: None,
+            room: Cell::new(None),
+            carded: Cell::new(None),
+        }
     }
 }
 
@@ -405,7 +414,7 @@ impl Page {
 
     /// Forget the cards' width: the compact pane shows the top request on one line.
     pub fn compacted(&self) {
-        self.width.set(None);
+        self.room.set(None);
     }
 
     pub fn key(&mut self, key: Key, data: &Data, now: DateTime<Utc>) -> Option<To> {
@@ -447,8 +456,9 @@ impl Page {
             Key::Char('b') => return thread().map(|t| To::Remind(t, reminded)),
             Key::Char('a' | 'A' | 'r') if let Some(request) = pending => {
                 // A request its card does not show whole opens in full, where the keys answer it.
-                let verdict =
-                    verdict.filter(|_| approvals::fits(&request, self.width.get().map(|w| (w, approvals::CARD_LINES))));
+                let drawn = self.carded.get() == Some(request.id);
+                let room = self.room.get().map(|(width, rows)| (width, if drawn { rows } else { 0 }));
+                let verdict = verdict.filter(|_| approvals::fits(&request, room));
                 return Some(To::Ask(request, verdict));
             }
             Key::Char('a' | 'A') => return None,
@@ -519,7 +529,7 @@ impl Page {
         let selected = self.selected.drawn(&items.iter().map(Item::id).collect::<Vec<_>>());
         // The selection's bar takes the first column.
         let (full, width) = (usize::from(area.width.saturating_sub(1)), usize::from(area.width.saturating_sub(10)));
-        self.width.set(Some(width));
+        let (mut room, mut carded) = ((width, 0), None);
         let cursor = self.card(data, now).map(|(cursor, _)| cursor);
         let rows: Vec<Text> = items
             .iter()
@@ -558,13 +568,20 @@ impl Page {
                     lines.push(Line::styled("         Enter collapses", style::dim()));
                 } else if let Some((request, settled)) = &i.request {
                     let card = approvals::Card { request, settled: settled.as_ref() };
-                    let card = approvals::lines(
-                        card,
-                        model.asking.as_ref(),
-                        (at == selected, false),
-                        now,
-                        (width, approvals::CARD_LINES),
-                    );
+                    let card = |rows| {
+                        approvals::lines(card, model.asking.as_ref(), (at == selected, false), now, (width, rows))
+                    };
+                    // The card the keys answer gives what its request asks the lines left on screen by its others,
+                    // none when even those do not show.
+                    let rows = if keyed.is_some() {
+                        let height = usize::from(area.height);
+                        let fit = (0..=approvals::CARD_LINES).rev().find(|r| lines.len() + card(*r).len() <= height);
+                        (room, carded) = ((width, fit.unwrap_or(0)), Some(request.id));
+                        room.1
+                    } else {
+                        approvals::CARD_LINES
+                    };
+                    let card = card(rows);
                     let enter = format!("Enter lists all {}", i.requests.len());
                     // Off the card the keys answer, the tool shows on the line before.
                     lines.extend(card.into_iter().skip(usize::from(keyed.is_none())).map(|line| {
@@ -585,6 +602,8 @@ impl Page {
                 Text::from(lines)
             })
             .collect();
+        self.room.set(Some(room));
+        self.carded.set(carded);
         let list = style::list(rows, Some(selected), focused);
         frame.render_stateful_widget(list, area, &mut ListState::default().with_selected(Some(selected)));
     }
@@ -713,9 +732,13 @@ mod tests {
 
         m.key(Key::Down, at(4));
         m.key(Key::Down, at(4));
+        assert_eq!(m.key(Key::Char('r'), at(4)), None, "a card not drawn yet shows its request in full");
+        m.key(Key::Esc, at(4));
+        shown(&m, at(4));
         assert_eq!(m.key(Key::Char('r'), at(4)), Some(Action::Decide(Box::new(second.clone()), Verdict::Reject)));
         assert!(shown(&m, at(4)).contains("storing the decision…"), "the card says so until stored");
         m.key(Key::Up, at(4));
+        shown(&m, at(4));
         assert_eq!(m.key(Key::Char('a'), at(4)), None, "one decision stored at a time");
         assert!(m.notice_at(at(4)).is_some_and(|n| n.text.contains("answer again once it is stored")));
         m.take(Event::Decided(Ok("rejected".to_owned())), at(5));
@@ -780,6 +803,26 @@ mod tests {
         assert_eq!(m.key(Key::Char('a'), at(0)), None);
         assert!(m.asking.as_ref().is_some_and(|a| a.full), "a shows the request in full");
         assert_eq!(m.key(Key::Char('a'), at(0)), Some(Action::Decide(Box::new(long), Verdict::AllowOnce)));
+    }
+
+    #[test]
+    fn a_request_its_card_does_not_show_whole_on_a_short_screen_opens_in_full_on_its_keys() {
+        let words: Vec<String> = (0..60).map(|n| format!("w{n:03}")).collect();
+        let command = format!("echo {}", words.join(" "));
+        let push = running(&command);
+        let mut m = model();
+        m.data.live.approvals = vec![push.clone()];
+        let screen = crate::test_support::render::rendered(100, 30, |f| crate::tui::frame::draw(f, &m, at(0)));
+        assert!(words.iter().all(|w| screen.contains(w.as_str())), "whole on a tall screen: {screen}");
+        assert_eq!(m.key(Key::Char('a'), at(0)), Some(Action::Decide(Box::new(push.clone()), Verdict::AllowOnce)));
+        for height in [16, 9, 6] {
+            let mut m = model();
+            m.data.live.approvals = vec![push.clone()];
+            let screen = crate::test_support::render::rendered(100, height, |f| crate::tui::frame::draw(f, &m, at(0)));
+            assert!(!screen.contains("w059"), "{screen}");
+            assert_eq!(m.key(Key::Char('a'), at(0)), None, "{screen}");
+            assert!(m.asking.as_ref().is_some_and(|a| a.full), "a shows the request in full: {screen}");
+        }
     }
 
     fn shown(m: &crate::tui::model::Model, now: DateTime<Utc>) -> String {
