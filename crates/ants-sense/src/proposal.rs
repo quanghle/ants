@@ -26,7 +26,15 @@ use crate::tools::{Answer, MAX_REASON_CHARS};
 /// The kind of a proposal's item.
 pub const PROPOSAL: &str = "proposal";
 /// The hours from a proposal to the dream that may confirm it, at least.
-pub const CONFIRM_AFTER_HOURS: i64 = 12;
+pub const CONFIRM_AFTER_HOURS: i64 = confirm_after_hours!();
+
+/// [`CONFIRM_AFTER_HOURS`] as a literal, for the texts `concat!` writes.
+macro_rules! confirm_after_hours {
+    () => {
+        12
+    };
+}
+pub(crate) use confirm_after_hours;
 
 /// Where a proposal stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
