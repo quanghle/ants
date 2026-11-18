@@ -13,7 +13,7 @@ use std::time::Duration;
 use ants_daemon::config;
 use ants_daemon::harness::{self, Harnesses};
 use ants_daemon::secrets::creds;
-use ants_proto::JsDomain;
+use ants_proto::{ColonyEntry, JsDomain};
 use async_nats::jetstream;
 use serde::Serialize;
 
@@ -156,12 +156,13 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     let settings = loaded.as_ref().map_or_default(|l| l.storage);
     checks.extend(check_storage(connected.as_ref(), setup, settings).await);
     checks.extend(ants_checked);
-    if let Some(loaded) = &loaded {
-        let hostname = ants_daemon::colony::machine().await;
-        checks.push(check_host(&loaded.host, ants, &hostname, now));
-        checks.extend(check_sense_kept(&loaded.host, ants, &hostname));
-        checks.extend(check_machine_name(&loaded.host, &hostname));
-    }
+    let hostname = ants_daemon::colony::machine().await;
+    let host = loaded.as_ref().map(|l| &l.host);
+    checks.extend(host.map(|host| check_host(host, ants, &hostname, now)));
+    let colony = connected.as_ref().map_or_default(|c| c.colony.as_slice());
+    let unset = config::HostSettings::default();
+    checks.extend(check_sense_kept(host.unwrap_or(&unset), ants, &hostname, colony, chrono::Utc::now()));
+    checks.extend(host.and_then(|host| check_machine_name(host, &hostname)));
     checks.extend(check_shared_workdirs(ants, &setup.config));
     checks.extend(check_sense_logs(ants));
     checks.extend(reactions);
@@ -203,6 +204,8 @@ struct Identity {
 struct Connected {
     js: jetstream::Context,
     rights: Rights,
+    /// The colony's entries; none where unread.
+    colony: Vec<ColonyEntry>,
 }
 
 fn check_config(path: &Path, checks: &mut Vec<Check>) -> Option<config::Loaded> {

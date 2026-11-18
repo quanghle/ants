@@ -128,7 +128,7 @@ pub struct Hosting {
 }
 
 impl Hosting {
-    /// The host connection is up as `link`.
+    /// The host connection is up as `link`: sense keeps its ants' data again ([`SenseStores::unkept`]).
     pub fn up(&self, link: Link) {
         let mut state = self.stores.state();
         if state.generation == self.generation {
@@ -136,6 +136,7 @@ impl Hosting {
             *route(&state.route) = Some(link.clone());
             state.host = Host::Up(link);
             self.stores.changed.notify_one();
+            self.stores.unkept(None);
         }
     }
 }

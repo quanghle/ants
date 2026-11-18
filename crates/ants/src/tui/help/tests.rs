@@ -109,7 +109,7 @@ fn the_fold_keys_have_rows_in_the_table() {
 
 #[test]
 fn every_key_a_view_takes_has_a_row_in_the_table() {
-    let views: [(&str, &str, &[View]); 22] = [
+    let views: [(&str, &str, &[View]); 23] = [
         ("model/keys.rs", "nav_key", &[View::Nav]),
         ("thread.rs", "find_key", &[View::Thread]),
         ("command/bar.rs", "key", &[View::Bar]),
@@ -123,6 +123,7 @@ fn every_key_a_view_takes_has_a_row_in_the_table() {
         ("work.rs", "key", &[View::Work]),
         ("channel.rs", "key", &[View::Channel]),
         ("thread.rs", "key", &[View::Thread]),
+        ("thread/pending.rs", "waiting_key", &[View::Pending]),
         ("dm.rs", "key", &[View::Dm]),
         ("search.rs", "key", &[View::Search]),
         ("tree.rs", "key", &[View::Tree]),
@@ -145,6 +146,7 @@ fn every_key_a_view_takes_has_a_row_in_the_table() {
         "work.rs" => include_str!("../work.rs"),
         "channel.rs" => include_str!("../channel.rs"),
         "thread.rs" => include_str!("../thread.rs"),
+        "thread/pending.rs" => include_str!("../thread/pending.rs"),
         "dm.rs" => include_str!("../dm.rs"),
         "search.rs" => include_str!("../search.rs"),
         "tree.rs" => include_str!("../tree.rs"),

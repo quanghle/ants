@@ -13,6 +13,7 @@ mod attach;
 mod cards;
 mod catchup;
 mod channel;
+mod clipboard;
 mod command;
 mod compact;
 mod complete;
@@ -25,6 +26,7 @@ mod frame;
 mod held;
 mod help;
 mod home;
+mod hyperlinks;
 mod images;
 mod input;
 mod interrupt;
@@ -33,6 +35,7 @@ mod markdown;
 mod mcp;
 mod memories;
 mod model;
+mod mouse;
 mod nav;
 mod notices;
 mod palette;
@@ -47,6 +50,7 @@ mod settings;
 mod snooze;
 mod status;
 pub(crate) mod style;
+mod terminal;
 #[cfg(test)]
 mod test_support;
 mod thread;
@@ -54,7 +58,7 @@ mod timeline;
 mod tree;
 mod work;
 
-use std::io::{IsTerminal as _, Write as _};
+use std::io::IsTerminal as _;
 use std::ops::ControlFlow;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -66,7 +70,6 @@ use chrono::Utc;
 use clap::CommandFactory as _;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui::crossterm::{execute, terminal};
 
 use self::acts::Acts;
 use self::exec::Exec;
@@ -215,16 +218,13 @@ pub async fn run(nats: &crate::connection::Nats<'_>, since: Duration, compact: b
     let chat_state = catchup::state_path();
     restore(&mut model, chat_state.as_deref().map_or_default(catchup::load));
     model.catchup.ahead = summaries.ahead();
-    let inline_images = crate::defaults::inline_images()?;
-    model.data.images = images::Images::new(inline_images);
-    // Before the screen takes the terminal, which then answers no query of its background.
-    model.data.looks = faces::Looks::of_terminal();
+    let cli = appearance(&mut model)?;
     let looks = faces::Io::new(js.clone());
     // The UI shows the replies and the tool requests as they come, so notifications spare this device theirs meanwhile.
     let shown = async {
         let mut screen = Screen::open_telling_keys_apart()?;
-        let images = inline_images.then(|| images::Io::new(images::picker(), js.clone(), feed.keyring()));
-        let exec = Exec::new(ctx);
+        let _interaction = terminal::Session::open(cli.mouse);
+        let images = cli.inline_images.then(|| images::Io::new(images::picker(), js.clone(), feed.keyring()));
         let chat = Chat {
             feed,
             reads,
@@ -242,9 +242,13 @@ pub async fn run(nats: &crate::connection::Nats<'_>, since: Duration, compact: b
             summaries,
             images,
             looks,
-            exec,
+            exec: Exec::new(ctx),
             model,
             handover: None,
+            attention: terminal::Attention::new(cli.notify),
+            clipboard: None,
+            mouse: mouse::Mouse::default(),
+            hyperlinks: hyperlinks::supported(),
         };
         let ran = Box::pin(chat.run(&mut screen.terminal)).await;
         if let Err(e) = chat_state.and_then(|path| catchup::keep(&path, |kept| kept.ended = Some(Utc::now()))) {
@@ -255,6 +259,14 @@ pub async fn run(nats: &crate::connection::Nats<'_>, since: Duration, compact: b
     let (domain, device) = (nats.domain, nats.device);
     let approvals = presence::while_following(&js, domain, me, device, Following::Approvals, shown);
     Box::pin(presence::while_following(&js, domain, me, device, Following::Inbox, Box::pin(approvals))).await
+}
+
+fn appearance(model: &mut Model) -> Result<ants_daemon::config::CliDefaults> {
+    let cli = crate::defaults::cli()?;
+    model.data.images = images::Images::new(cli.inline_images);
+    // Before the alternate screen takes the terminal, which then answers no query of its background.
+    model.data.looks = faces::Looks::of_terminal();
+    Ok(cli)
 }
 
 /// Set `model` as the previous `ants chat` on the device left it, by what `kept` keeps.
@@ -354,6 +366,10 @@ struct Chat {
     model: Model,
     /// What to hand the terminal over to next.
     handover: Option<Handover>,
+    attention: terminal::Attention,
+    clipboard: Option<tokio::task::JoinHandle<Result<String>>>,
+    mouse: mouse::Mouse,
+    hyperlinks: bool,
 }
 
 /// What takes the terminal for a while.
@@ -362,6 +378,7 @@ enum Handover {
     Edit(String),
     /// The pager, on a message's text.
     Page(String),
+    Suspend,
 }
 
 impl Chat {
@@ -395,6 +412,9 @@ impl Chat {
         if self.read_terminal(dirty)?.is_break() {
             return Ok(ControlFlow::Break(()));
         }
+        self.attention
+            .update(&home::waiting(&self.model.data, Utc::now()), &mut std::io::stdout())
+            .context("announcing waiting items")?;
         *dirty |= self.held_log(logged);
         self.cards.threads(&self.model.data.live.order);
         *dirty |= self.animate(started);
@@ -405,7 +425,11 @@ impl Chat {
             if self.model.data.history.unsaved() {
                 self.model.keep_history();
             }
-            terminal.draw(|f| frame::draw(f, &self.model, Utc::now())).context("drawing")?;
+            let frame = terminal.draw(|f| frame::draw(f, &self.model, Utc::now())).context("drawing")?;
+            if self.hyperlinks {
+                let links = hyperlinks::find(frame.buffer, &self.model);
+                hyperlinks::draw(&links, &mut std::io::stdout()).context("drawing hyperlinks")?;
+            }
             (*dirty, *drawn) = (false, Instant::now());
         }
         Ok(ControlFlow::Continue(()))
@@ -456,7 +480,14 @@ impl Chat {
                 match handover {
                     Handover::Edit(text) => self.edit_in(terminal, text).await,
                     Handover::Page(text) => self.page_in(terminal, text).await,
+                    Handover::Suspend => {
+                        if let Err(e) = hand_over(terminal, "suspend", || Ok(terminal::suspend()?)).await {
+                            self.model.notify(format!("suspending: {e:#}"), Level::Error, Utc::now());
+                        }
+                        self.redraw_images();
+                    }
                 }
+                self.attention.resumed();
                 dirty = true;
             }
             self.watch();
@@ -466,6 +497,16 @@ impl Chat {
     /// Wait for word from anything but the ticks, take it in, and return the actions it calls for.
     async fn changed(&mut self) -> Vec<Action> {
         tokio::select! {
+            copied = next_clipboard(self.clipboard.as_mut()) => {
+                self.clipboard = None;
+                let result = copied.context("running clipboard command").and_then(|result| result);
+                let (text, level) = match result {
+                    Ok(text) => (text, Level::Info),
+                    Err(e) => (format!("copying: {e:#}"), Level::Error),
+                };
+                self.model.notify(text, level, Utc::now());
+                Vec::new()
+            }
             event = self.feed.next() => {
                 self.model.take(event, Utc::now())
             }
@@ -613,6 +654,16 @@ impl Chat {
                     self.model.paste(&text, Utc::now());
                 }
                 Event::Resize(..) => *dirty = true,
+                Event::FocusGained => self.attention.focus(true),
+                Event::FocusLost => self.attention.focus(false),
+                Event::Mouse(event) if terminal::mouse() => {
+                    *dirty = true;
+                    if let Some(action) = self.mouse.event(&mut self.model, event, Utc::now())
+                        && self.act(action).is_break()
+                    {
+                        return Ok(ControlFlow::Break(()));
+                    }
+                }
                 _ => {}
             }
         }
@@ -630,6 +681,7 @@ impl Chat {
     fn act(&mut self, action: Action) -> ControlFlow<()> {
         match action {
             Action::Quit => return ControlFlow::Break(()),
+            Action::Suspend => self.handover = Some(Handover::Suspend),
             Action::Open(thread) => {
                 self.feed.load_history(thread.clone(), true);
                 self.reads.mark_read(thread);
@@ -641,13 +693,11 @@ impl Chat {
                 self.acts.change(thread, change, last);
             }
             Action::Copy(text) => {
-                let copied =
-                    std::io::stdout().write_all(osc52(&text).as_bytes()).and_then(|()| std::io::stdout().flush());
-                let line = match copied {
-                    Ok(()) => (format!("copied {} characters", text.chars().count()), Level::Info),
-                    Err(e) => (format!("copying: {e}"), Level::Error),
-                };
-                self.model.notify(line.0, line.1, Utc::now());
+                if self.clipboard.is_some() {
+                    self.model.notify("clipboard command already running", Level::Error, Utc::now());
+                } else {
+                    self.clipboard = Some(tokio::spawn(clipboard::copy(text)));
+                }
             }
             Action::MarkRead(thread) => self.reads.mark_read(thread),
             Action::MarkUnread(thread, seqs) => self.reads.mark_unread(thread, seqs),
@@ -727,18 +777,27 @@ async fn next_image(
     }
 }
 
+async fn next_clipboard(
+    copying: Option<&mut tokio::task::JoinHandle<Result<String>>>,
+) -> std::result::Result<Result<String>, tokio::task::JoinError> {
+    match copying {
+        Some(copying) => copying.await,
+        None => std::future::pending().await,
+    }
+}
+
 /// Run `run`, as the editor or pager `what` names, with the terminal handed over to it meanwhile.
 async fn hand_over<T: Send + 'static>(
     terminal: &mut DefaultTerminal,
     what: &str,
     run: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> Result<T> {
+    terminal::pause();
     live::keyboard(false);
     live::bracket_pastes(false);
     ratatui::restore();
     let ran = tokio::task::spawn_blocking(run).await;
-    terminal::enable_raw_mode().context("setting up the terminal")?;
-    execute!(std::io::stdout(), terminal::EnterAlternateScreen).context("setting up the terminal")?;
+    terminal::restore_raw().context("setting up the terminal")?;
     live::bracket_pastes(true);
     live::keyboard(true);
     terminal.clear().context("drawing")?;

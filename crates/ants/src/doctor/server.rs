@@ -10,7 +10,7 @@ use ants_daemon::{bus, hub};
 use ants_proto::{STREAM, UserId, inbox_consumer};
 use async_nats::jetstream;
 
-use super::colony::{check_avatars, check_drift, check_harness_versions, check_versions};
+use super::colony::{check_avatars, check_drift, check_harness_versions, check_versions, read_colony};
 use super::leaf_node::Leaf;
 use super::services::start_server;
 use super::transports::same_address;
@@ -63,10 +63,11 @@ pub(super) async fn reach(
     checks.extend(check_hub(&js, identity).await);
     checks.extend(check_consumers(&js, identity).await);
     checks.push(check_versions(&js, identity).await);
-    checks.push(check_harness_versions(&js).await);
+    let colony = read_colony(&js).await;
+    checks.push(check_harness_versions(&colony));
     checks.extend(check_avatars(&js, identity).await);
     checks.push(check_drift(&js, identity).await);
-    (checks, Some(Connected { js, rights: identity.rights.clone() }))
+    (checks, Some(Connected { js, rights: identity.rights.clone(), colony: colony.unwrap_or_default() }))
 }
 
 /// The oldest nats-server, major and minor version, ants runs on.
@@ -302,7 +303,7 @@ pub(super) async fn check_storage(
     settings: storage::Settings,
 ) -> Vec<Check> {
     let check = "storage";
-    let Some(Connected { js, rights }) = connected else {
+    let Some(Connected { js, rights, .. }) = connected else {
         return vec![Check::skip(check, "JetStream does not answer")];
     };
     if !rights.may_publish("$JS.API.INFO") {
