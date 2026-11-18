@@ -288,9 +288,7 @@ impl Dreaming for Daemon {
             let mut threads = Vec::with_capacity(active.len());
             let mut actions =
                 actions::Actions::new(&self.js, self.js_domain.as_ref(), &self.ant, self.reactions.as_ref()).await;
-            for history::Active { thread: id, history: text, timeline, sent, rejections, calls, ends, escalations } in
-                active
-            {
+            for history::Active { thread: id, history: text, timeline, sent, rejections, ends, escalations } in active {
                 let origin = match &self.origins {
                     Some(origins) => origins.get(&id).await.unwrap_or_else(|e| {
                         tracing::warn!(thread = %id, error = format!("{e:#}"), "reading the origin of a thread");
@@ -302,7 +300,7 @@ impl Dreaming for Daemon {
                 let review = origin.as_ref().is_some_and(|origin| matches!(origin.by, Starter::Review { .. }));
                 let started_by = origin.map_or_else(|| "someone not known".to_owned(), |origin| starter(&origin.by));
                 let actions = actions.of(&id, &sent, &rejections, (since, until)).await;
-                let signs = vitals::signs(&calls, &ends, escalations, &actions);
+                let signs = vitals::signs(&ends, escalations, &actions);
                 threads.push(Thread { id, untrusted, review, started_by, text, timeline, actions, signs });
             }
             Ok(threads)

@@ -648,10 +648,12 @@ the packet, the ant's timeline above all, and hands the measures to sense with t
 sum, one record a day, so sense holds the trend for as long as the log lives and it moves with the ant, with nothing
 written between dreams. They count the threads worked and marked done; the prompts by how they ended (replied, with
 no reply, cancelled by a human, cut by a cap, failed: the `ended` entries of the
-[`Timeline`](hooks.md#timeline-on-antstimelinethreadant)); the tool calls by kind and those failed; the time in
-prompts; the tokens and cost the harness reported; the tool requests asked of humans or the chain, rejected and expired;
-the issues escalated (a reason, or tool request, once a thread, tool requests and questions to humans aside); the
-prompts run in a session rebuilt; and the calls of sense's own tools. A dream offers a `vitals` finding, naming the
+[`Timeline`](hooks.md#timeline-on-antstimelinethreadant)); the tool calls by kind and those failed, as the `ended`
+entries count them, calls past the 200 a timeline keeps of a prompt included; the time in prompts, from when each got
+its thread's harness, a wait for a free one left out; the tokens and cost the harness reported; the tool requests asked
+of humans or the chain, rejected and expired; the issues escalated (a reason, or tool request, once a thread, tool
+requests and questions to humans aside); the prompts run in a session rebuilt; and the calls of sense's own tools. A
+prompt cut off by a crash of its daemon stores no `ended` entry, and counts in none of these. A dream offers a `vitals` finding, naming the
 threads it counts, when a sign turned sharply for the worse in its period: 3 prompts cancelled by a human, 2 cut by a
 cap, 3 tool requests rejected, or, over 20 tool calls or more, a share of them failed at least twice the mean of the
 dreams before among the last 5 that made calls and at least 10%, so a failure or two after dreams with none makes no

@@ -973,6 +973,7 @@ fn timeline() {
         },
     ];
     snap("timeline_no_reply", &Timeline { entries: ends, omitted: 0, ..record.clone() });
+    let calls = [("execute", CallCount { calls: 240, failed: 12 }), ("other", CallCount { calls: 3, failed: 0 })];
     let ended = TimelineEnd {
         how: PromptEnd::Capped,
         duration_ms: 95_000,
@@ -980,10 +981,20 @@ fn timeline() {
         cost: 0.37,
         asked: 2,
         rebuilt: true,
+        calls: calls.map(|(kind, count)| (kind.to_owned(), count)).into(),
+        sense_calls: 2,
     };
     snap("timeline_ended", &Timeline { entries: vec![TimelineEntry::Ended(ended)], omitted: 0, ..record.clone() });
-    let replied =
-        TimelineEnd { how: PromptEnd::Replied, duration_ms: 800, tokens: 0, cost: 0.0, asked: 0, rebuilt: false };
+    let replied = TimelineEnd {
+        how: PromptEnd::Replied,
+        duration_ms: 800,
+        tokens: 0,
+        cost: 0.0,
+        asked: 0,
+        rebuilt: false,
+        calls: std::collections::BTreeMap::new(),
+        sense_calls: 0,
+    };
     snap("timeline_ended_bare", &Timeline { entries: vec![TimelineEntry::Ended(replied)], omitted: 0, ..record });
 }
 
