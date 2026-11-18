@@ -454,7 +454,12 @@ built-in messenger and sage, the daemon wakes the ant on a new thread with the p
 - each active thread's history since the last dream, as the ant received, sent and noted it, then its timeline (the
   tool calls, plans and ends with no reply of the ant's prompts, [`Timeline`](hooks.md#timeline-on-antstimelinethreadant)),
   the most recently active first. Threads a webhook started are marked untrusted: their text is data, not
-  instructions.
+  instructions. Lines before a thread's history tell what was done with it besides writing on it: the ant's tool
+  requests rejected since the last dream, with the tool and who rejected them, or that they expired unanswered (its
+  `rejected` timeline entries); the reactions to its latest 8 messages and notes posts there, with who gave them and to
+  which message, asked as `list_reactions` asks; and its marking done since the last dream, with when and by whom.
+  The daemon reads these as the ant's credentials allow, 30 seconds at most in all; what fails to be read is left
+  out, and the packet goes without it. Sense stores none of them.
 
 A packet over its budget keeps each thread's latest part and leaves out the least recently active threads, then the
 last findings, counted for the next dream.

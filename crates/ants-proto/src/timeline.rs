@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{Error, MAX_TOOL_PATHS, PlanStep, ThreadId, UserId, subject};
+use crate::{DecidedBy, Error, MAX_TOOL_PATHS, PlanStep, ThreadId, UserId, subject};
 
 /// The most entries a [`Timeline`] record holds.
 pub const MAX_TIMELINE_ENTRIES: usize = 50;
@@ -25,8 +25,8 @@ pub const MAX_TIMELINE_CALLS: usize = 200;
 pub const TIMELINE_EVERY: Duration = Duration::from_secs(30);
 
 /// Part of the tool-call timeline of `ant` on a thread: the calls of the prompt that handled `message` that changed
-/// since the last record, the prompt's plan as last reported, and whether it ended with no reply sent, stored on
-/// [`subject::timeline`]. A record holds 1 to [`MAX_TIMELINE_ENTRIES`] entries, never a tool's input or output, message
+/// since the last record, the prompt's plan as last reported, its tool requests rejected, and whether it ended with no
+/// reply sent, stored on [`subject::timeline`]. A record holds 1 to [`MAX_TIMELINE_ENTRIES`] entries, never a tool's input or output, message
 /// text or thoughts, but for the final text of a prompt that ended with no reply sent ([`TimelineEntry::NoReply`]),
 /// which no message carries. Calls are merged by message and call id, later records replacing earlier ones
 /// ([`Timelines`]). Readers ignore unknown entry kinds and fields.
@@ -66,6 +66,8 @@ pub enum TimelineEntry {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         text: String,
     },
+    /// A tool request of the prompt was rejected: by whoever decided it, or as it expired unanswered.
+    Rejected(TimelineRejection),
     /// An entry of a kind this version does not know, read as this and ignored: a reader older than a kind skips it
     /// (one before [`TimelineEntry::NoReply`] skips that). Stays the last variant.
     #[serde(other)]
@@ -82,6 +84,36 @@ pub enum NoReplyWhy {
     Completed,
     /// A later message steered the prompt, whose answer went to that one; `reason` names it.
     Steered,
+}
+
+/// A tool request rejected ([`TimelineEntry::Rejected`]), as the ant's approver settled it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineRejection {
+    /// The approval request's id.
+    pub request: Uuid,
+    /// ACP tool kind of the call asked for.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+    /// The call's title as the request showed it: redacted, at most [`MAX_TIMELINE_TITLE`] characters.
+    #[serde(default)]
+    pub title: String,
+    /// Who rejected it: a human, an ant of the chain, or its expiry.
+    pub by: DecidedBy,
+    /// The human or ant of the chain that rejected it; none for an expiry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decider: Option<UserId>,
+    /// The assistant that rejected it for that human.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<UserId>,
+}
+
+impl TimelineRejection {
+    /// The rejection with its title cut to what a record keeps.
+    #[must_use]
+    pub fn bounded(mut self) -> Self {
+        cut(&mut self.title, MAX_TIMELINE_TITLE);
+        self
+    }
 }
 
 /// A tool call as a [`Timeline`] record holds it.
@@ -193,9 +225,22 @@ pub struct MergedNoReply {
     pub at: DateTime<Utc>,
 }
 
-/// The tool calls, plans and ends with no reply of [`Timeline`] records, merged: fed in the order they were stored,
-/// each call, plan and end is as its latest record has it. Calls are keyed by ant, message and call id, since a
-/// channel post reaches several ants under one message id; plans and ends by ant and message.
+/// A tool request of a thread's timeline that was rejected ([`TimelineEntry::Rejected`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergedRejection {
+    pub ant: UserId,
+    pub thread_id: ThreadId,
+    /// The message whose prompt asked for the tool.
+    pub message: Uuid,
+    pub rejection: TimelineRejection,
+    /// When the record saying so was made.
+    pub at: DateTime<Utc>,
+}
+
+/// The tool calls, plans, rejected tool requests and ends with no reply of [`Timeline`] records, merged: fed in the
+/// order they were stored, each call, plan and end is as its latest record has it. Calls are keyed by ant, message and
+/// call id, since a channel post reaches several ants under one message id; plans and ends by ant and message;
+/// rejections by ant and request.
 #[derive(Debug, Clone, Default)]
 pub struct Timelines {
     calls: Vec<MergedCall>,
@@ -203,6 +248,7 @@ pub struct Timelines {
     plans: HashMap<(UserId, Uuid), Vec<PlanStep>>,
     omitted: HashMap<(UserId, Uuid), u32>,
     no_replies: Vec<MergedNoReply>,
+    rejections: Vec<MergedRejection>,
 }
 
 impl Timelines {
@@ -238,6 +284,17 @@ impl Timelines {
                         None => self.no_replies.push(end),
                     }
                 }
+                TimelineEntry::Rejected(rejection) => {
+                    let request = rejection.request;
+                    let (ant, thread_id) = (ant.clone(), thread_id.clone());
+                    let rejected = MergedRejection { ant, thread_id, message, rejection, at };
+                    let had =
+                        self.rejections.iter_mut().find(|r| r.ant == rejected.ant && r.rejection.request == request);
+                    match had {
+                        Some(had) => *had = rejected,
+                        None => self.rejections.push(rejected),
+                    }
+                }
                 TimelineEntry::Unknown => {}
             }
         }
@@ -254,6 +311,11 @@ impl Timelines {
         &self.no_replies
     }
 
+    /// Every tool request rejected, in the order first stored.
+    pub fn rejections(&self) -> &[MergedRejection] {
+        &self.rejections
+    }
+
     /// The plan of `ant` for `message` as last stored, if any.
     pub fn plan(&self, ant: &UserId, message: Uuid) -> Option<&[PlanStep]> {
         self.plans.get(&(ant.clone(), message)).map(Vec::as_slice)
@@ -265,7 +327,7 @@ impl Timelines {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.calls.is_empty() && self.plans.is_empty() && self.no_replies.is_empty()
+        self.calls.is_empty() && self.plans.is_empty() && self.no_replies.is_empty() && self.rejections.is_empty()
     }
 }
 
@@ -344,6 +406,44 @@ mod tests {
         assert!(timelines.add(&subject, Timeline::new(p("dev-a"), t, m2, vec![end(NoReplyWhy::ReplyToOwn, "")], 0)));
         let ends: Vec<_> = timelines.no_replies().iter().map(|n| (n.message, n.why, n.text.as_str())).collect();
         assert_eq!(ends, [(m1, NoReplyWhy::Completed, "done"), (m2, NoReplyWhy::ReplyToOwn, "")]);
+    }
+
+    #[test]
+    fn a_rejected_tool_request_is_kept_once_with_who_rejected_it() {
+        let t: ThreadId = "t1".parse().unwrap();
+        let rejected = |request: u128, by, decider: Option<&str>| {
+            let rejection = TimelineRejection {
+                request: Uuid::from_u128(request),
+                kind: "execute".to_owned(),
+                title: "rm -rf target".to_owned(),
+                by,
+                decider: decider.map(p),
+                via: None,
+            };
+            TimelineEntry::Rejected(rejection)
+        };
+        let json = serde_json::to_value(rejected(1, DecidedBy::Human, Some("alice"))).unwrap();
+        let wire = serde_json::json!({
+            "type": "rejected", "request": Uuid::from_u128(1), "kind": "execute", "title": "rm -rf target",
+            "by": "human", "decider": "alice",
+        });
+        assert_eq!(json, wire);
+        let mut timelines = Timelines::default();
+        let m1 = Uuid::from_u128(7);
+        let first = Timeline::new(p("dev-a"), t.clone(), m1, vec![rejected(1, DecidedBy::Expiry, None)], 0);
+        let subject = first.subject();
+        assert!(timelines.add(&subject, first));
+        let entries = vec![rejected(1, DecidedBy::Expiry, None), rejected(2, DecidedBy::Chain, Some("dev-b"))];
+        assert!(timelines.add(&subject, Timeline::new(p("dev-a"), t, m1, entries, 0)));
+        assert!(!timelines.is_empty());
+        let kept: Vec<_> =
+            timelines.rejections().iter().map(|r| (r.rejection.request.as_u128(), r.rejection.by)).collect();
+        assert_eq!(kept, [(1, DecidedBy::Expiry), (2, DecidedBy::Chain)]);
+        let long = TimelineRejection {
+            title: "é".repeat(MAX_TIMELINE_TITLE + 1),
+            ..timelines.rejections()[0].rejection.clone()
+        };
+        assert_eq!(long.bounded().title.chars().count(), MAX_TIMELINE_TITLE);
     }
 
     #[test]

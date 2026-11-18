@@ -306,7 +306,8 @@ fn finding(n: usize) -> Finding {
 fn thread(n: u8, bytes: usize, untrusted: bool) -> packet::Thread {
     let line = format!("message {n} of a thread\n");
     let text = line.repeat(bytes / line.len());
-    packet::Thread { id: on(n).thread, untrusted, started_by: "alice".into(), text, timeline: String::new() }
+    let (started_by, timeline) = ("alice".into(), String::new());
+    packet::Thread { id: on(n).thread, untrusted, started_by, text, timeline, actions: Vec::new() }
 }
 
 /// The first dream, covering threads 1 to `threads` (2 untrusted), with `findings` findings.
@@ -406,6 +407,35 @@ fn a_thread_shows_its_timeline_after_its_history_the_latest_of_both_kept_for_roo
     assert!(!trimmed.contains("call 000 of thread 1") && !trimmed.contains("message 000 of thread 1"), "{trimmed}");
     assert!(trimmed.contains("message 099 of thread 1\n\n#### Timeline"), "{trimmed}");
     assert!(trimmed.ends_with("call 099 of thread 2\n"), "the latest kept: {trimmed}");
+}
+
+#[test]
+fn a_thread_shows_what_was_done_with_it_besides_writing_before_its_history() {
+    let dream = reviewing(1, 0);
+    let at = |minute: i64| DateTime::from_timestamp(1_794_646_800 + minute * 60, 0).unwrap();
+    let message = ants_proto::Uuid::from_u128(7);
+    let actions = vec![
+        Action::Rejected { at: at(5), tool: "execute: rm -rf target".into(), by: Some("alice".into()) },
+        Action::Rejected { at: at(20), tool: "fetch: example.com".into(), by: None },
+        Action::Reaction { reaction: "thumbsup".into(), by: "bob".into(), message, opening: "fixed the build".into() },
+        Action::Done { at: at(30), by: "alice via asst".into() },
+    ];
+    let threads = [packet::Thread { actions, ..thread(1, 200, false) }];
+    for reader in [Reader::Ant, Reader::Sage(on(1).ant)] {
+        let packet = compose(&dream, None, &reader, &threads, PACKET_BUDGET);
+        let lines = format!(
+            "### Thread {}, started by alice\n\n\
+             - A tool request rejected by alice at 2026-11-14 09:05 UTC: execute: rm -rf target.\n\
+             - A tool request expired unanswered at 2026-11-14 09:20 UTC, so rejected: fetch: example.com.\n\
+             - bob reacted thumbsup to message {message}, \"fixed the build\".\n\
+             - Marked done by alice via asst at 2026-11-14 09:30 UTC.\n\n\
+             message 1 of a thread\n",
+            on(1).thread
+        );
+        assert!(packet.contains(&lines), "{packet}");
+    }
+    let bare = compose(&dream, None, &Reader::Ant, &[thread(1, 200, false)], PACKET_BUDGET);
+    assert!(bare.contains("started by alice\n\nmessage 1 of a thread\n"), "no lines without actions: {bare}");
 }
 
 mod review;

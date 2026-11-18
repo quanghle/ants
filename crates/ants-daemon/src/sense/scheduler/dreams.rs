@@ -1,6 +1,7 @@
 //! The daemon's part of the ant's dreams ([`ants_sense::dream`]): when one is due, the ant has had no prompt running
 //! for [`IDLE_MINUTES`] and its threads were active since the last dream, it gathers them, with the timeline the ant
-//! stored on them, and the commits they left, and begins the dream. It sends the packet to the ant's sage when one
+//! stored on them and what was done with them besides writing on them ([`actions`]), and the commits they left, and
+//! begins the dream. It sends the packet to the ant's sage when one
 //! serves it, as a message from the ant on a new thread narrowed to a review ([`ants_proto::REVIEW_ALLOW`]) naming the
 //! commits for the sage's daemon to check out ([`crate::checkouts`]), and takes the sage's answer there as it arrives ([`review_answer`]); without a sage, or once the sage leaves the review
 //! unanswered or answers with nothing readable, it wakes the ant on a new thread with the packet alone.
@@ -10,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use ants_proto::provider::{BoxFuture, CallContext, Host, Origin, Starter, WakeRequest};
-use ants_proto::{Envelope, NoticeKind, REVIEW_ALLOW, ReviewCommit, ThreadId, UserId};
+use ants_proto::{Envelope, JsDomain, NoticeKind, REVIEW_ALLOW, ReviewCommit, ThreadId, UserId};
 use ants_sense::dream::{
     self, Commit, Covered, Dream, IDLE_MINUTES, PACKET_BUDGET, Reader, Review, Reviewed, SAGE_TIMEOUT_HOURS, Start,
     Thread,
@@ -22,11 +23,13 @@ use chrono::{DateTime, Duration, Utc};
 
 use super::Settings;
 use crate::colony::Workload;
-use crate::mcp::{ColonyLookup, Outbox};
+use crate::mcp::{ColonyLookup, Outbox, ReactionAsker};
 use crate::provider::origins::OriginStore;
 use crate::stream::history;
 use crate::stream::reading::Reading;
 use crate::sync::MutexExt as _;
+
+mod actions;
 
 /// How long a git command naming a commit may take.
 const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -221,6 +224,8 @@ async fn writer(
 /// The daemon serving the ant, as its dreams need it.
 pub(crate) struct Daemon {
     pub js: jetstream::Context,
+    /// The domain `js` was made for.
+    pub js_domain: Option<JsDomain>,
     pub ant: UserId,
     /// How the daemon reads through the ant's own readers ([`Reading::daemon`]).
     pub reading: Reading,
@@ -234,6 +239,8 @@ pub(crate) struct Daemon {
     pub lookup: ColonyLookup,
     /// Sends the review packets, redacted.
     pub outbox: Outbox,
+    /// Asks for the reactions to the ant's messages, as `list_reactions` does.
+    pub reactions: Option<ReactionAsker>,
 }
 
 impl Dreaming for Daemon {
@@ -246,7 +253,9 @@ impl Dreaming for Daemon {
             let (from, to) = (SystemTime::from(since), SystemTime::from(until));
             let active = history::active(&self.js, &self.ant, self.reading, from, to, PACKET_BUDGET).await?;
             let mut threads = Vec::with_capacity(active.len());
-            for history::Active { thread: id, history: text, timeline } in active {
+            let mut actions =
+                actions::Actions::new(&self.js, self.js_domain.as_ref(), &self.ant, self.reactions.as_ref()).await;
+            for history::Active { thread: id, history: text, timeline, sent, rejections } in active {
                 let origin = match &self.origins {
                     Some(origins) => origins.get(&id).await.unwrap_or_else(|e| {
                         tracing::warn!(thread = %id, error = format!("{e:#}"), "reading the origin of a thread");
@@ -256,7 +265,8 @@ impl Dreaming for Daemon {
                 };
                 let untrusted = origin.as_ref().is_some_and(|origin| !origin.trusted());
                 let started_by = origin.map_or_else(|| "someone not known".to_owned(), |origin| starter(&origin.by));
-                threads.push(Thread { id, untrusted, started_by, text, timeline });
+                let actions = actions.of(&id, &sent, &rejections, (since, until)).await;
+                threads.push(Thread { id, untrusted, started_by, text, timeline, actions });
             }
             Ok(threads)
         })

@@ -930,6 +930,7 @@ fn log_serving(config: &Config) {
 fn dreaming(inbox: &Inbox<'_>, config: &Config) -> std::sync::Arc<dyn crate::sense::Dreaming> {
     std::sync::Arc::new(crate::sense::Daemon {
         js: inbox.js.clone(),
+        js_domain: config.connection.js_domain.clone(),
         ant: config.ant.clone(),
         reading: inbox.reading,
         origins: inbox.mcp.and_then(crate::mcp::Mcp::origin_store).cloned(),
@@ -942,6 +943,7 @@ fn dreaming(inbox: &Inbox<'_>, config: &Config) -> std::sync::Arc<dyn crate::sen
             crate::mcp::jetstream_outbox(inbox.js.clone()),
             std::sync::Arc::new(inbox.redactor.clone()),
         ),
+        reactions: inbox.mcp.and_then(crate::mcp::Mcp::reaction_asker),
     })
 }
 
