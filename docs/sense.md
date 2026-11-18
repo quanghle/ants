@@ -697,9 +697,10 @@ ant, the dream, the review thread, when the message arrived and was answered, an
 whether it holds and when that was last told: no text of the ant's threads nor of the findings. With the answer, the
 sage's daemon hands over what the review thread spent, from its spend ledger (`<ant>.<thread>.spend`,
 [config.md](config.md#prompt-limits-and-spending-caps)): the tokens and cost the harness reported over every prompt on
-it, retries and restarts included, which the record keeps as the review's spend; nothing reported leaves it unknown,
-and a human's message on the thread starts the ledger over. A message or answer delivered again changes nothing. A finding's verdict and outcome reach the records only while its dream is within the
-30 active days the earlier findings cover, and the findings of an answer arriving after the ant went on with the packet
+it, retries and restarts included, which the record keeps as the review's spend; nothing reported leaves it unknown.
+A human's message on the thread gives it a fresh allowance against its caps but leaves this total whole. A message or
+answer delivered again changes nothing. A finding's verdict and outcome reach the records only while its dream is within
+the 30 active days the earlier findings cover, and the findings of an answer arriving after the ant went on with the packet
 alone stay unanswered. The tally of the sage's identity is counted from these records ([Identity](#identity)). A clone
 inherits no review record.
 
