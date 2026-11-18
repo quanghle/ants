@@ -14,6 +14,7 @@ use crate::items::{Batch, Change, ITEM_EVENT, ITEMS_EVENT, Item, ItemId, Revisio
 use crate::log::{
     APPEND_TRIES, AntLog, Break, Checked, EventLog, LogError, LogErrorKind, Position, Signer, Stored, Verifier,
 };
+use crate::thread::calls::Calls;
 use crate::thread::experience::Experience;
 
 /// Why a store did not answer.
@@ -237,6 +238,11 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
         top: usize,
     ) -> Result<Option<Experience>, StoreError> {
         Ok(self.cache.experience(own, since, top)?)
+    }
+
+    /// [`Cache::calls`].
+    pub fn calls(&self, since: DateTime<Utc>) -> Result<Vec<Calls>, StoreError> {
+        Ok(self.cache.calls(since)?)
     }
 
     /// The items matching `text` best ([`Cache::search`]).
@@ -581,6 +587,8 @@ pub trait Items: Send + Sync {
         since: Option<DateTime<Utc>>,
         top: usize,
     ) -> BoxFuture<'a, Result<Option<Experience>, StoreError>>;
+    /// [`Store::calls`].
+    fn calls(&self, since: DateTime<Utc>) -> BoxFuture<'_, Result<Vec<Calls>, StoreError>>;
     /// [`Store::history`].
     /// Cached history, including pending revisions with sequence 0; never requires another network round trip.
     fn history<'a>(&'a self, id: &'a ItemId) -> BoxFuture<'a, Result<Vec<Revision>, StoreError>>;
@@ -721,6 +729,14 @@ where
             let mut store = self.lock().await;
             store.replay().await?;
             store.experience(own, since, top)
+        })
+    }
+
+    fn calls(&self, since: DateTime<Utc>) -> BoxFuture<'_, Result<Vec<Calls>, StoreError>> {
+        Box::pin(async move {
+            let mut store = self.lock().await;
+            store.replay().await?;
+            store.calls(since)
         })
     }
 
