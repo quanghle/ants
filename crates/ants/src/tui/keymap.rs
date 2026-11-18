@@ -95,6 +95,8 @@ pub enum View {
     Bar,
     /// A tool request shown in full.
     Request,
+    /// The waiting requests and questions of a thread.
+    Pending,
     /// A thread, a channel's feed or a DM with nothing selected, a printable key written in the bar.
     Typing,
 }
@@ -120,6 +122,7 @@ impl View {
             Self::Held => "held orders",
             Self::Bar => "the command bar",
             Self::Request => "a tool request in full",
+            Self::Pending => "a thread's waiting cards",
             Self::Typing => "a conversation, writing",
         }
     }
@@ -132,6 +135,9 @@ pub fn views(model: &Model) -> Vec<View> {
     }
     if model.focus == Focus::Nav {
         return vec![View::Nav];
+    }
+    if matches!(model.page(), Page::Thread(page) if page.listing()) {
+        return vec![View::Pending];
     }
     let view = match model.page() {
         Page::Home(_) => View::Home,
@@ -206,6 +212,7 @@ pub fn entries(view: View) -> &'static [Entry] {
         View::Held => HELD,
         View::Bar => BAR,
         View::Request => REQUEST,
+        View::Pending => PENDING,
         View::Typing => TYPING,
     }
 }
@@ -227,6 +234,22 @@ const DIGITS: &[Key] = &[
 
 /// The rows that hold everywhere, under the views'.
 pub const GLOBAL: &[Entry] = &[
+    Entry::new(
+        &[Key::Ctrl('z')],
+        "Ctrl-Z",
+        "suspend",
+        "restore the terminal and suspend; fg resumes and redraws (Unix)",
+        HELP_ONLY,
+        always,
+    ),
+    Entry::new(
+        &[],
+        "Mouse",
+        "scroll/select",
+        "wheel scrolls under the pointer by line; click selects, a second click opens; Shift, or Option in iTerm2, keeps native terminal selection; [cli] mouse = false disables reporting",
+        HELP_ONLY,
+        always,
+    ),
     Entry::new(&[Key::Esc], "Esc", "back", "back to the previous view, else to the nav", 9, not_selecting),
     Entry::new(&[Key::Tab], "Tab", "nav/view", "move between the nav and the view", 40, always),
     Entry::new(
@@ -355,6 +378,14 @@ const HOME: &[Entry] = &[
 ];
 
 const THREAD: &[Entry] = &[
+    Entry::new(
+        &[Key::Ctrl('l')],
+        "Ctrl-L",
+        "waiting",
+        "list every waiting tool request and question on the open thread; Enter opens the selection",
+        8,
+        thread_waiting,
+    ),
     Entry::new(&[Key::Char('a')], "a", "allow", "allow the oldest tool request waiting once", 1, thread_pending),
     Entry::new(&[Key::Char('A')], "A", "always", "allow the oldest tool request waiting always", 2, thread_pending),
     Entry::new(&[Key::Char('r')], "r", "reject", "reject the oldest tool request waiting at once", 3, thread_pending),
@@ -455,6 +486,31 @@ const THREAD: &[Entry] = &[
     Entry::new(&[Key::Char('E')], "E", "edit", "withdraw a message or post still waiting, to edit it", 31, always),
     Entry::new(PAGES, "PgUp PgDn", "scroll", "scroll half a view", 92, always),
     Entry::new(ENDS, "Home End", "first/latest", "select the first message, or follow the latest", 95, always),
+];
+
+const PENDING: &[Entry] = &[
+    Entry::new(
+        &[Key::Enter],
+        "Enter",
+        "open",
+        "open the selected tool request in full or focus the selected question's card",
+        0,
+        always,
+    ),
+    Entry::new(UP_DOWN, "↑↓ j k", "select", "select a waiting tool request or question", 1, always),
+    Entry::new(
+        &[Key::Esc, Key::Ctrl('l'), Key::Char('q')],
+        "Esc Ctrl-L q",
+        "close",
+        "close the list and return to the thread, keeping the draft",
+        2,
+        always,
+    ),
+    Entry::new(PAGES, "PgUp PgDn", "page", "select half a view back or ahead", 90, always),
+    Entry::new(ENDS, "Home End", "first/last", "select the first or the last waiting card", 95, always),
+    Entry::new(&[Key::Char('?')], "?", "help", "the keys of this list", HELP_ONLY, always),
+    Entry::new(&[Key::Ctrl('k')], "Ctrl-K", "commands", "open the palette", HELP_ONLY, always),
+    Entry::new(&[Key::Tab], "Tab", "nav", "move to the nav", HELP_ONLY, always),
 ];
 
 const WORK: &[Entry] = &[
@@ -792,6 +848,13 @@ fn home_stuck(model: &Model, now: DateTime<Utc>) -> Result<(), &'static str> {
 fn thread_pending(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
     match model.page() {
         Page::Thread(page) => check(page.pending(&model.data).is_some(), "no tool request waits"),
+        _ => Err("no thread open"),
+    }
+}
+
+fn thread_waiting(model: &Model, now: DateTime<Utc>) -> Result<(), &'static str> {
+    match model.page() {
+        Page::Thread(page) => check(page.waiting(&model.data, now) > 0, "no tool request or question waits"),
         _ => Err("no thread open"),
     }
 }

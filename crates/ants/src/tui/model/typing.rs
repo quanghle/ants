@@ -12,7 +12,10 @@ impl Model {
     /// selected by Up.
     pub fn typing(&self) -> bool {
         let here = self.conversation();
-        self.focus == Focus::View && here != Conversation::None && self.selecting.as_ref() != Some(&here)
+        self.focus == Focus::View
+            && here != Conversation::None
+            && !matches!(self.page(), Page::Thread(page) if page.listing())
+            && self.selecting.as_ref() != Some(&here)
     }
 
     /// Take `key` while the bar is not focused in a conversation: written in the bar or selecting while typing, back to

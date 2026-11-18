@@ -448,13 +448,27 @@ impl Page {
         let columns = columns(list.width.saturating_sub(2));
         let table: Vec<Row> = rows
             .iter()
-            .map(|(thread, state)| row(data, thread, *state, snoozed.contains_key(thread), now, &columns))
+            .enumerate()
+            .map(|(n, (thread, state))| {
+                let row = row(data, thread, *state, snoozed.contains_key(thread), now, &columns);
+                if n == at { row.style(style::highlight(focused)) } else { row }
+            })
             .collect();
         let widths = columns.iter().map(|(_, width)| Constraint::Length(*width));
         let header = Row::new(columns.iter().map(|(column, _)| column.name())).style(style::dim());
         let table =
             Table::new(table, widths).header(header).block(block).row_highlight_style(style::highlight(focused));
-        let mut state = TableState::default().with_selected(Some(at));
+        let inner = ratatui::layout::Rect {
+            x: list.x + 1,
+            y: list.y + 2,
+            width: list.width.saturating_sub(2),
+            height: list.height.saturating_sub(3),
+        };
+        let top = data.mouse.top("work", inner, at, at, at + 1, rows.len());
+        for n in top..rows.len().min(top + usize::from(inner.height)) {
+            data.mouse.add(Rect { y: inner.y + (n - top) as u16, height: 1, ..inner }, super::mouse::Target::Row(n));
+        }
+        let mut state = TableState::default().with_offset(top);
         frame.render_stateful_widget(table, list, &mut state);
         if let (Some(detail), Some((thread, _))) = (detail, rows.get(at)) {
             let block = style::block(" Selected ".to_owned(), false);

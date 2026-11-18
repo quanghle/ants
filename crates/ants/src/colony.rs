@@ -292,8 +292,11 @@ async fn read_unserved(js: &jetstream::Context, ants: &[&UserId]) -> Result<Vec<
     Ok(warnings)
 }
 
+/// The most characters of a profile the colony table shows.
+const PROFILE_WIDTH: usize = 40;
+
 /// The colony as a table: one row per ant under a header, columns padded to line up. `-` stands for what an entry
-/// leaves out.
+/// leaves out. The PROFILE column, last, shows the start of each ant's profile, its own words, on one line.
 pub fn table(entries: &[ColonyEntry], now: DateTime<Utc>) -> String {
     let header = [
         "ANT",
@@ -310,9 +313,10 @@ pub fn table(entries: &[ColonyEntry], now: DateTime<Utc>) -> String {
         "CAPABILITIES",
         "ESCALATE_TO",
         "WORKDIR",
+        "PROFILE",
     ]
     .map(str::to_owned);
-    let rows: Vec<[String; 14]> = std::iter::once(header)
+    let rows: Vec<[String; 15]> = std::iter::once(header)
         .chain(entries.iter().map(|e| {
             [
                 e.ant.to_string(),
@@ -329,10 +333,13 @@ pub fn table(entries: &[ColonyEntry], now: DateTime<Utc>) -> String {
                 if e.capabilities.is_empty() { "-".to_owned() } else { e.capabilities.join(",") },
                 chain(e),
                 e.workdir.clone().unwrap_or_else(|| "-".to_owned()),
+                Some(crate::text::one_line(e.profile.as_deref().unwrap_or_default(), PROFILE_WIDTH))
+                    .filter(|profile| !profile.is_empty())
+                    .unwrap_or_else(|| "-".to_owned()),
             ]
         }))
         .collect();
-    let mut widths = [0; 14];
+    let mut widths = [0; 15];
     for row in &rows {
         for (width, cell) in widths.iter_mut().zip(row) {
             *width = (*width).max(cell.chars().count());
@@ -468,6 +475,8 @@ mod tests {
         busy.escalate_to = vec!["lead".parse().unwrap(), "dev-b".parse().unwrap()];
         (busy.version, busy.perms) = ("0.2.0".to_owned(), PermissionsVersion(2));
         busy.agent = Some(ants_proto::HarnessAgent { name: "copilot".to_owned(), version: "1.0.3".to_owned() });
+        busy.profile = Some("Good for NATS\nreconnects\tand \u{1b}[31mflaky tests, much more than that.".to_owned());
+        quiet.profile = Some("\u{7}\n".to_owned());
         let older = ColonyEntry { version: "0.1.0".to_owned(), ..entry("dev-c", 60, 4, now) };
         assert_eq!(
             crate::release::versions::colony_note(&[busy.clone(), older, quiet.clone()], now).as_deref(),
@@ -496,7 +505,8 @@ mod tests {
                 "UP",
                 "CAPABILITIES",
                 "ESCALATE_TO",
-                "WORKDIR"
+                "WORKDIR",
+                "PROFILE"
             ]
         );
         assert_eq!(
@@ -516,7 +526,14 @@ mod tests {
                 "3m",
                 "rust,review",
                 "lead,dev-b",
-                "/src/app"
+                "/src/app",
+                "Good",
+                "for",
+                "NATS",
+                "reconnects",
+                "and",
+                "[31mflaky",
+                "t…"
             ]
         );
         let perms = ants_proto::PERMISSIONS_VERSION.to_string();
@@ -535,6 +552,7 @@ mod tests {
                 "25s",
                 "ago",
                 "2h",
+                "-",
                 "-",
                 "-",
                 "-"

@@ -332,7 +332,7 @@ impl Trails {
             *colony = Some((self.inner.colony)().await?);
         }
         let entries = colony.as_deref().unwrap_or_default();
-        Ok(match crate::colony::pick(entries, capability, &self.inner.ant, Utc::now()) {
+        Ok(match crate::colony::pick(entries, capability, &args.prompt, &self.inner.ant, Utc::now()) {
             Some(entry) => Ok(entry.ant.clone()),
             None => Err(format!("no ant of the colony but the conductor has the capability {capability:?}")),
         })

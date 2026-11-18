@@ -1,7 +1,7 @@
 //! Tool-call timelines: what an ant did while it worked on a message, stored compactly so a thread's history can show
 //! it after the live status updates are gone.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -135,7 +135,7 @@ impl PromptEnd {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TimelineEnd {
     pub how: PromptEnd,
-    /// How long the prompt ran.
+    /// How long the prompt ran, from when it got its thread's harness: a wait for a free one is not counted.
     pub duration_ms: u64,
     /// The tokens the harness reported the prompt spent.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
@@ -149,6 +149,21 @@ pub struct TimelineEnd {
     /// Whether the thread's session was rebuilt for the prompt: lost, or outgrown and started anew.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub rebuilt: bool,
+    /// The prompt's tool calls by ACP kind, `other` for those without one: all of them, those past
+    /// [`MAX_TIMELINE_CALLS`] that the timeline only counts included.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub calls: BTreeMap<String, CallCount>,
+    /// How many of the prompt's tool calls called the built-in sense's own tools (`sense_<tool>`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub sense_calls: u32,
+}
+
+/// Tool calls of a kind, and how many of them failed ([`TimelineEnd::calls`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallCount {
+    pub calls: u32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub failed: u32,
 }
 
 /// A tool request rejected ([`TimelineEntry::Rejected`]), as the ant's approver settled it.
@@ -542,7 +557,16 @@ mod tests {
     fn every_prompt_end_is_kept_and_an_unknown_end_reads() {
         let t: ThreadId = "t1".parse().unwrap();
         let ended = |how, tokens| {
-            let end = TimelineEnd { how, duration_ms: 1500, tokens, cost: 0.0, asked: 0, rebuilt: false };
+            let end = TimelineEnd {
+                how,
+                duration_ms: 1500,
+                tokens,
+                cost: 0.0,
+                asked: 0,
+                rebuilt: false,
+                calls: BTreeMap::new(),
+                sense_calls: 0,
+            };
             TimelineEntry::Ended(end)
         };
         let json = serde_json::to_value(ended(PromptEnd::Cancelled, 0)).unwrap();

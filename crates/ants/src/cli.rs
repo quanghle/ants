@@ -67,8 +67,8 @@ pub(crate) enum Command {
     /// Print the replies to the CLI's human not read yet, including those that arrived while no CLI was running, and
     /// mark them read.
     Inbox(inbox::InboxArgs),
-    /// List the ants being served: harness, machine, capabilities, escalation chain, last heartbeat, and whether it
-    /// is recent.
+    /// List the ants being served: harness, machine, capabilities, escalation chain, last heartbeat, whether it is
+    /// recent, and the start of the profile each ant wrote of itself.
     Colony {
         /// One JSON entry per line, with its state.
         #[arg(long)]

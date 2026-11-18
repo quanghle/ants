@@ -7,7 +7,8 @@
 //! 4. its self-model;
 //! 5. each relationship record;
 //! 6. its skills, by name and description;
-//! 7. its last dream: the title of its diary, with its verdict counts and the vital signs of its period;
+//! 7. its last dream: the title of its diary, with its verdict counts and the vital signs of its period, each with its
+//!    change against the mean of the dreams before ([`dream::changes`]);
 //! 8. its core memories, then its top [`DEFAULT_LIMIT`] memories of every scope, as `sense_recall` ranks them without
 //!    a query.
 //!
@@ -121,8 +122,8 @@ async fn persona_entry(items: &dyn Items) -> Result<Option<MemoryEntry>, StoreEr
     Ok(Some(MemoryEntry { key, content }))
 }
 
-/// The last dream: the title of its diary, when it began, where it stands, and the vital signs of its period; none
-/// before the first.
+/// The last dream: the title of its diary, when it began, where it stands, and the vital signs of its period with their
+/// change against the dreams before; none before the first.
 async fn dream_entry(items: &dyn Items) -> Result<Option<MemoryEntry>, StoreError> {
     let Some((dream, revision)) = dream::last(items).await? else { return Ok(None) };
     let mut content = format!("{}\nBegan {}, {}", dream.summary(), time(dream.at), dream.state);
@@ -132,6 +133,9 @@ async fn dream_entry(items: &dyn Items) -> Result<Option<MemoryEntry>, StoreErro
     content.push('.');
     if let Some(vitals) = &dream.vitals {
         let _ = write!(content, "\nVital signs: {}.", vitals.line());
+        if let Some(changes) = dream::changes(vitals, &dream::trend(items, dream.number).await?) {
+            let _ = write!(content, "\nAgainst {changes}.");
+        }
     }
     Ok(Some(MemoryEntry {
         key: format!("{} ({DREAM}, self), trust self, revision {revision}", Dream::id(dream.number)),
@@ -278,6 +282,35 @@ mod tests {
         );
         assert!(content(6).ends_with(".\nVital signs: 2 prompts (2 replied)."), "{}", content(6));
         assert!(content(7).starts_with("Always rebase\nMerges hide history."), "{}", content(7));
+    }
+
+    #[tokio::test]
+    async fn the_last_dream_shows_its_vital_signs_against_the_dreams_before() {
+        let (_sense, kept) = sense().await;
+        let items: Arc<dyn Items> = kept.clone();
+        let writer = context(human());
+        let replied = |replied| {
+            let mut signs = dream::Signs { threads: 1, ..dream::Signs::default() };
+            signs.prompts.replied = replied;
+            vec![(ants_proto::ThreadId::generate(), signs)]
+        };
+        let start = |at, vitals| Start {
+            at,
+            recipient: Recipient::Ant,
+            threads: vec![],
+            commits: vec![],
+            writer: &writer,
+            vitals,
+        };
+        let yesterday = Utc::now() - chrono::Duration::hours(25);
+        dream::begin(&*items, start(yesterday, replied(1))).await.unwrap().unwrap();
+        let first = dream_entry(&*items).await.unwrap().unwrap().content;
+        assert!(first.ends_with(".\nVital signs: 1 prompt (1 replied)."), "no dream before: {first}");
+        dream::begin(&*items, start(Utc::now(), replied(2))).await.unwrap().unwrap();
+        let second = dream_entry(&*items).await.unwrap().unwrap().content;
+        let vitals = ".\nVital signs: 2 prompts (2 replied).\nAgainst the mean of the dream before: threads worked 1 \
+                      (mean 1, +0%); prompts replied 2 (mean 1, +100%).";
+        assert!(second.ends_with(vitals), "{second}");
     }
 
     #[test]

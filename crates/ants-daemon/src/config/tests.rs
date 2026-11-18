@@ -851,6 +851,15 @@ fn the_cli_section_overrides_the_top_level_server() {
     let still = cli("[cli]\ntheme = \"light\"\nanimate = false").unwrap();
     assert_eq!((still.theme, still.animate), (Theme::Light, false));
     assert!(cli("[cli]\ntheme = \"blue\"").is_err());
+    assert!(relative.mouse, "mouse reporting is enabled by default");
+    assert_eq!(relative.notify, Notify::Bell);
+    let quiet = cli("[cli]\nmouse = false\nnotify = \"off\"").unwrap();
+    assert!(!quiet.mouse);
+    assert_eq!(quiet.notify, Notify::Off);
+    assert_eq!(cli("[cli]\nnotify = \"terminal\"").unwrap().notify, Notify::Terminal);
+    assert!(parse_all("[cli]\nmouse = false\nnotify = \"terminal\"").is_ok());
+    assert!(cli("[cli]\nnotify = \"desktop\"").is_err());
+    assert!(cli("[cli]\nmouse = \"off\"").is_err());
 
     assert_eq!(relative.summaries, SummaryConfig::default(), "on demand, by the messenger");
     let ahead = cli("[cli]\nsummaries = \"ahead\"\nsummary_daily_tokens = 50000\nsummary_ant = \"scribe\"").unwrap();

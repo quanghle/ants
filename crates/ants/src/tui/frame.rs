@@ -20,6 +20,7 @@ const NAV_WIDTH: u16 = 24;
 pub const QUIT_AGAIN: &str = "Ctrl-C again to quit";
 
 pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
+    model.data.mouse.clear();
     if model.compact {
         return compact::draw(frame, model, now);
     }
@@ -42,6 +43,7 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
         Layout::vertical([Constraint::Min(3), Constraint::Length(model.bar.height(right.width))]).areas(right);
     let focused = model.focus == Focus::View && !model.bar.focused;
     let data = &model.data;
+    data.mouse.add(view, super::mouse::Target::View);
     match model.page() {
         Page::Home(page) => page.draw(frame, view, model, now, focused),
         Page::Work(page) => page.draw(frame, view, data, now, focused),
@@ -55,9 +57,14 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
         Page::Held(page) => page.draw(frame, view, data, now, focused),
     }
     model.bar.draw(frame, bar, &model.completions(), &model.bar_title(), &model.enter_hint());
+    let completions = model.completions();
+    if !completions.is_empty() {
+        super::mouse::completions(data, bar, completions.len(), model.bar.pick.selected, false);
+    }
     let palette = model.palette(now);
     if !palette.is_empty() {
         palette::draw(frame, bar, &palette, model.bar.pick.selected);
+        super::mouse::completions(data, bar, palette.len(), model.bar.pick.selected, true);
     }
     if nav_focused && !model.fold.nav(width) {
         let over = Rect { width: NAV_WIDTH.min(view.width), ..view };
@@ -68,14 +75,24 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
     let footer_lines = error.unwrap_or_else(|| vec![footer_line(model, now, width)]);
     frame.render_widget(Paragraph::new(footer_lines), footer);
     if let Some(asking) = model.asking.as_ref().filter(|a| a.full) {
+        data.mouse.add(frame.area(), super::mouse::Target::Overlay);
         approvals::draw_full(frame, asking, now);
+    }
+    if model.catchup.shown() {
+        data.mouse.add(frame.area(), super::mouse::Target::Overlay);
     }
     catchup::draw_digest(frame, model, now);
     if let Some(help) = &model.help {
+        data.mouse.add(frame.area(), super::mouse::Target::Overlay);
         help.draw(frame, model, now);
     }
     if let Some(log) = &model.log {
+        data.mouse.add(frame.area(), super::mouse::Target::Overlay);
         log.draw(frame, &model.notices);
+    }
+    if let Some(copying) = &model.copying {
+        data.mouse.add(frame.area(), super::mouse::Target::Overlay);
+        copying.draw(frame, data);
     }
 }
 
