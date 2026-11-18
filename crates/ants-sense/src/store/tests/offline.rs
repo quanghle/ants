@@ -87,7 +87,7 @@ async fn offline_batches_keep_order_and_cas_across_restart_then_join_the_verifie
     store.sync().await.unwrap();
     assert_eq!(store.get(&one.id).unwrap(), local, "acknowledgment preserves the accepted local change's stamp");
     assert_eq!(store.pending().unwrap(), 0);
-    assert!(!crate::cache::cache_file(&home).with_extension("pending").exists());
+    assert!(!crate::home::Home::new(&home).has_pending_writes());
     let history = store.history(&one.id).unwrap();
     assert_eq!(history.iter().map(|revision| revision.sequence).collect::<Vec<_>>(), [1, 2, 3]);
     assert_eq!(store.history(&two).unwrap()[0].sequence, 2);

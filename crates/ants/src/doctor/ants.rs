@@ -212,7 +212,7 @@ fn check_sense_log(ant: &Ant) -> Vec<Check> {
         Ok(Some(status)) => status,
         Ok(None) => return Vec::new(),
         Err(e) => {
-            let file = ants_sense::log::status_file(&home);
+            let file = ants_sense::home::Home::new(&home).status();
             let check = format!("ant {} sense chain", ant.name);
             return vec![Check::warn(check, format!("{}: {e}", file.display()), Vec::new())];
         }

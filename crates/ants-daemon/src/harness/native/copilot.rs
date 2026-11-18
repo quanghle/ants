@@ -271,8 +271,8 @@ macro_rules! settings {
         if let Some(tools) = &shared.args.excluded {
             config = config.with_excluded_tools(tools.clone());
         }
-        if let Some(dir) = open.skills {
-            config = config.with_skill_directories([dir]);
+        if let Some(skills) = open.skills {
+            config = config.with_skill_directories([skills.dir]);
         }
         let mut servers = shared.mcp.clone();
         if let Value::Object(own) = mcp_servers_json(&open.mcp_servers) {

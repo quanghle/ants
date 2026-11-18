@@ -137,8 +137,8 @@ async fn a_renamed_ant_keeps_its_card() {
     let id = identity::read_id(&home_a).unwrap().expect("minted");
     drop(hosting);
 
-    std::fs::create_dir_all(identity::id_file(&home_b).parent().unwrap()).unwrap();
-    std::fs::copy(identity::id_file(&home_a), identity::id_file(&home_b)).unwrap();
+    std::fs::create_dir_all(Home::new(&home_b).dir()).unwrap();
+    std::fs::copy(Home::new(&home_a).id(), Home::new(&home_b).id()).unwrap();
     identity::note_renamed(&home_b, &dev_a()).unwrap();
     for reopened in [false, true] {
         let stores = SenseStores::new();
@@ -181,9 +181,9 @@ async fn an_export_moves_the_sense_data_to_another_bus() {
     let kind = ants_sense::skill::SKILL.into();
     let write = ants_sense::store::Write::Create { id: ants_sense::skill::skill_id("review"), kind, values: skill };
     stores.items(&dev_a()).await.unwrap().write(&[write], "test").await.unwrap();
-    std::fs::create_dir_all(export::skills_dir(&home_a).join("stray")).unwrap();
+    std::fs::create_dir_all(Home::new(&home_a).skills().join("stray")).unwrap();
     let exported = sense.export(AntRef { ant: dev_a(), identity: "id1".into() }).await.unwrap();
-    assert!(!export::skills_dir(&home_a).join("stray").exists(), "the skill files are those of the log");
+    assert!(!Home::new(&home_a).skills().join("stray").exists(), "the skill files are those of the log");
     let id = identity::read_id(&home_a).unwrap().unwrap();
     drop(hosting);
 
@@ -197,9 +197,9 @@ async fn an_export_moves_the_sense_data_to_another_bus() {
     assert!(awaiting.to_string().contains("await their import"), "{awaiting}");
     let request = |export: &Export| ImportRequest { ant: dev_a(), identity: "id1".into(), export: export.clone() };
     sense.import(request(&exported)).await.unwrap();
-    assert!(!export::importing(&home_b), "the home no longer awaits them");
+    assert!(!Home::new(&home_b).awaits_import(), "the home no longer awaits them");
     assert_eq!(identity::read_id(&home_b).unwrap(), Some(id.clone()));
-    assert_eq!(std::fs::read_to_string(export::skills_dir(&home_b).join("review/SKILL.md")).unwrap(), "review well");
+    assert_eq!(std::fs::read_to_string(Home::new(&home_b).skills().join("review/SKILL.md")).unwrap(), "review well");
     let card = sense.card(&dev_a()).await.unwrap().unwrap();
     assert_eq!((&card.sense, card.identities.as_slice()), (&id, &["id1".to_owned()][..]));
     let js = bus::connect(&bus_b.url, None, None, &UserId::human(), "test").await.unwrap().1;
