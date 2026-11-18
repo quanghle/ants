@@ -26,7 +26,7 @@ summaries = "on-demand"                    # default; "ahead" also allows asking
 summary_daily_tokens = 50000               # most tokens summaries asked ahead of time spend per human and UTC day (default 0)
 inline_images = true                       # draw image attachments in ants chat's thread view (default false; docs/cli.md)
 theme = "auto"                             # avatar palette: "dark", "light" or "auto" (default: ask the terminal, else COLORFGBG, else dark)
-animate = true                             # avatar heads in ants chat move with their ant's state (default true; false keeps them still)
+animate = true                             # avatar heads and spinners in ants chat move (default true; false keeps heads still and spinners at a frame a second)
 
 [storage]                                  # JetStream capacity warnings (see docs/architecture.md, JetStream storage)
 warn_percent = 80                          # warn past this share of a store's limit (default 80; 0 disables)
@@ -709,8 +709,8 @@ one-line face before its name, and the ant view of `ants chat` and `ants ant ava
 picks the palette for the terminal's background: `dark`, `light`, or `auto` (the default), which asks the terminal for
 its background colour (OSC 11) and waits up to 200 ms for an answer, then reads `COLORFGBG`, else takes `dark`. With
 `NO_COLOR` set, or off a terminal, faces show without colour and the head as ASCII. `[cli]` `animate = false` keeps the
-heads in `ants chat` still; otherwise only the head on screen moves, and the screen is drawn again only when its frame
-changes.
+heads in `ants chat` still and turns its spinners a frame a second; otherwise only the head on screen moves, spinners
+turn 8 frames a second, and the screen is drawn again only when a frame changes.
 
 ## Exporting and importing an ant
 

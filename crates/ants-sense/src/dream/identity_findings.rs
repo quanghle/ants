@@ -180,7 +180,7 @@ async fn skills(items: &dyn Items, ground: &Ground) -> Result<Vec<Gathered>, Sto
 }
 
 /// A finding of `kind` about `about`, which has no item yet.
-fn subject(kind: FindingKind, about: &str, count: u32, text: String) -> Gathered {
+pub(super) fn subject(kind: FindingKind, about: &str, count: u32, text: String) -> Gathered {
     Gathered { kind, about: about.into(), items: Vec::new(), count: Some(count.into()), text, untrusted: false }
 }
 
@@ -196,7 +196,7 @@ async fn known(items: &dyn Items, at: DateTime<Utc>) -> Result<HashSet<Scope>, S
         match record.origin.by {
             Starter::Human { user } => known.insert(Scope::Human(user)),
             Starter::Ant { user } => known.insert(Scope::Ant(user)),
-            Starter::Webhook { .. } | Starter::Provider { .. } => false,
+            Starter::Webhook { .. } | Starter::Review { .. } | Starter::Provider { .. } => false,
         };
         known.extend(record.repo.and_then(|repo| format!("repo:{repo}").parse().ok()));
     }
@@ -204,7 +204,7 @@ async fn known(items: &dyn Items, at: DateTime<Utc>) -> Result<HashSet<Scope>, S
 }
 
 /// `n` stepped down to the largest of `first` doubled any times that is at most `n`; `first` below it.
-fn step(n: u32, first: u32) -> u32 {
+pub(super) fn step(n: u32, first: u32) -> u32 {
     let mut step = first.max(1);
     while step.saturating_mul(2) <= n {
         step *= 2;

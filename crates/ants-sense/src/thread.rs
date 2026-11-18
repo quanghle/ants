@@ -16,7 +16,8 @@
 //! Every text passes the sanitizer, and each item carries its writer, taken from the call's context, never from text.
 //!
 //! Beside what the ant keeps, sense records each thread from its lifecycle events: who started it, where, and when it
-//! started and ended ([`record`]), and counts the ant's experience from those records ([`experience`]).
+//! started and ended ([`record`]), and counts the ant's experience from those records ([`experience`]) and the calls of
+//! its tools from what they wrote ([`calls`]).
 
 use std::fmt::Write as _;
 
@@ -32,6 +33,7 @@ use crate::sanitize::{Limit, Lines, sanitize};
 use crate::store::{Items, StoreError, Write};
 use crate::{Answer, Sense};
 
+pub mod calls;
 pub mod experience;
 pub mod record;
 

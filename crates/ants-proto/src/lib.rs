@@ -81,7 +81,8 @@ pub use enroll::{
     enrollment_user,
 };
 pub use envelope::{
-    Envelope, Mention, NotesPost, NoticeKind, Quote, ReviewCommit, SummaryOf, SummaryRequest, parse_mentions,
+    Envelope, FindingOutcome, FindingVerdict, Mention, NotesPost, NoticeKind, Quote, ReviewCommit, ReviewOutcomes,
+    SummaryOf, SummaryRequest, parse_mentions,
 };
 pub use error::Error;
 pub use escalation::{Away, ChainEntry, Escalation, EscalationReason, Hop, OwnerBecause};

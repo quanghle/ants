@@ -158,6 +158,20 @@ expression: value
         "repo": "app"
       }
     },
+    "review_outcomes": {
+      "dream": 7,
+      "findings": [
+        {
+          "finding": "5.1",
+          "verdict": "applied",
+          "holds": true
+        },
+        {
+          "finding": "5.2",
+          "verdict": "rejected"
+        }
+      ]
+    },
     "sent_at": "2025-01-01T12:00:00Z"
   },
   "payload": "{\"id\":"

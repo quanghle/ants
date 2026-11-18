@@ -1,6 +1,6 @@
-//! The frame around the views: a header with the human, the server and the connection, the nav beside the shown view
-//! with the command bar under it, a footer with the view's keys, the latest notice or the command bar's keys, and the
-//! help over it all.
+//! The frame around the views: a header with the human, the server, the place shown and the connection, the nav beside
+//! the shown view (over it when folded and focused, [`super::fold`]) with the command bar under it, a footer with the
+//! view's keys, the latest notice or the command bar's keys, and the help over it all.
 
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
@@ -8,23 +8,36 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
+use unicode_width::UnicodeWidthStr;
 
-use super::model::{Focus, Level, Model, Page};
-use super::style::{self, block, dim};
-use super::{approvals, catchup, compact, home, nav, search, thread, work};
+use super::model::{Focus, Level, Model, Notice, Page};
+use super::style::{self, dim};
+use super::{approvals, catchup, compact, keymap, nav, palette};
 
 /// How wide the nav is.
 const NAV_WIDTH: u16 = 24;
+/// The footer after a first Ctrl-C with nothing open and the bar empty.
+pub const QUIT_AGAIN: &str = "Ctrl-C again to quit";
 
 pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
     if model.compact {
         return compact::draw(frame, model, now);
     }
+    let width = frame.area().width;
+    let error = error_shown(model, now).map(|error| style::error(&error.text, width));
+    let tall = error.as_ref().map_or(1, |lines| u16::try_from(lines.len()).unwrap_or(1));
     let [header, body, footer] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)]).areas(frame.area());
-    frame.render_widget(Paragraph::new(header_line(model, now)), header);
-    let [left, right] = Layout::horizontal([Constraint::Length(NAV_WIDTH), Constraint::Min(20)]).areas(body);
-    nav::draw(frame, left, &model.data, &model.nav, now, model.focus == Focus::Nav && !model.bar.focused);
+        Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(tall)]).areas(frame.area());
+    frame.render_widget(Paragraph::new(header_line(model, now, header.width)), header);
+    model.fold.drawn(width);
+    let nav_focused = model.focus == Focus::Nav && !model.bar.focused;
+    let right = if model.fold.nav(width) {
+        let [left, right] = Layout::horizontal([Constraint::Length(NAV_WIDTH), Constraint::Min(20)]).areas(body);
+        nav::draw(frame, left, &model.data, &model.nav, now, nav_focused);
+        right
+    } else {
+        body
+    };
     let [view, bar] =
         Layout::vertical([Constraint::Min(3), Constraint::Length(model.bar.height(right.width))]).areas(right);
     let focused = model.focus == Focus::View && !model.bar.focused;
@@ -41,29 +54,63 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
         Page::Credentials(page) => page.draw(frame, view, data, now, focused),
         Page::Held(page) => page.draw(frame, view, data, now, focused),
     }
-    model.bar.draw(frame, bar, &model.completions());
-    frame.render_widget(Paragraph::new(footer_line(model, now)), footer);
+    model.bar.draw(frame, bar, &model.completions(), &model.bar_title(), &model.enter_hint());
+    let palette = model.palette(now);
+    if !palette.is_empty() {
+        palette::draw(frame, bar, &palette, model.bar.pick.selected);
+    }
+    if nav_focused && !model.fold.nav(width) {
+        let over = Rect { width: NAV_WIDTH.min(view.width), ..view };
+        frame.render_widget(Clear, over);
+        nav::draw(frame, over, &model.data, &model.nav, now, true);
+    }
+    // After the view: a thread's find counts the matches it drew.
+    let footer_lines = error.unwrap_or_else(|| vec![footer_line(model, now, width)]);
+    frame.render_widget(Paragraph::new(footer_lines), footer);
     if let Some(asking) = model.asking.as_ref().filter(|a| a.full) {
         approvals::draw_full(frame, asking, now);
     }
     catchup::draw_digest(frame, model, now);
-    if model.help {
-        draw_help(frame);
+    if let Some(help) = &model.help {
+        help.draw(frame, model, now);
+    }
+    if let Some(log) = &model.log {
+        log.draw(frame, &model.notices);
     }
 }
 
-/// Who the UI runs as, on which server, the view shown, and the connection.
-fn header_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
-    let data = &model.data;
-    let mut spans = vec![
-        Span::styled(format!(" ants · {}@{}", data.me(), data.server), Style::new().bold()),
-        Span::styled(format!(" · {} · ", model.page().name()), dim()),
-    ];
-    spans.push(style::link(data.live.link, now, ""));
-    Line::from(spans)
+/// The error the footer shows, wrapped, if one waits for a key and no prompt takes the footer.
+fn error_shown(model: &Model, now: DateTime<Utc>) -> Option<&Notice> {
+    let prompt = model.quitting_at(now) || model.picking.is_some() || model.interrupting.is_some();
+    let error = model.notice_at(now).filter(|n| n.level == Level::Error);
+    error.filter(|_| !prompt && model.snoozing.is_none())
 }
 
-fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
+/// Who the UI runs as, on which server, the place shown, and the connection.
+/// The header, its place cut first so the connection's state stays on screen.
+fn header_line(model: &Model, now: DateTime<Utc>, width: u16) -> Line<'static> {
+    let data = &model.data;
+    let place = match model.page() {
+        Page::Thread(page) => page.place(data),
+        page => page.name().to_owned(),
+    };
+    let who = format!(" ants · {}@{}", data.me(), data.server);
+    let link = style::link(data.live.link, now, "");
+    let room = usize::from(width).saturating_sub(who.width() + link.width() + 6);
+    let spans = vec![
+        Span::styled(who, Style::new().bold()),
+        Span::styled(format!(" · {} · ", style::fit(&place, room.max(1))), dim()),
+        link,
+    ];
+    style::clip(Line::from(spans), usize::from(width))
+}
+
+/// The footer at most `width` wide: a prompt taking the keys, the latest notice, the keys of the bar or of a focused
+/// question card, a confirmation or draft of the view, else the hints of the key table ([`keymap::footer`]).
+fn footer_line(model: &Model, now: DateTime<Utc>, width: u16) -> Line<'static> {
+    if model.quitting_at(now) {
+        return style::notice(QUIT_AGAIN, false, width);
+    }
     if let Some(picker) = &model.picking {
         return picker.line();
     }
@@ -74,82 +121,53 @@ fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
         return prompt.line(&model.data);
     }
     if let Some(notice) = model.notice_at(now) {
-        return style::notice(&notice.text, notice.level == Level::Error);
+        return style::notice(&notice.text, notice.level == Level::Error, width);
+    }
+    if !model.palette(now).is_empty() {
+        return keymap::prompt("↑↓ select · Enter run · Tab complete · Esc close", width, false);
     }
     if model.bar.focused && !model.completions().is_empty() {
-        return Line::styled(" ↑↓ select · Tab/Enter complete · Esc close the list", dim());
+        return keymap::prompt("↑↓ select · Tab/Enter complete · Esc close the list", width, false);
+    }
+    if model.data.history.searching().is_some() {
+        return keymap::prompt(
+            "type to search the texts sent · Ctrl-R earlier · Enter take · Esc put back",
+            width,
+            false,
+        );
     }
     if model.bar.focused {
-        return Line::styled(" Enter send · Alt-Enter new line · Ctrl-E editor · Ctrl-K commands · Esc leave", dim());
+        let keys = "Enter send · Ctrl-J new line · Ctrl-G editor · / palette · Esc leave";
+        return keymap::prompt(keys, width, false);
     }
-    let card = match model.page() {
-        Page::Home(page) => page.card(&model.data, now).map(|(cursor, _)| cursor),
-        Page::Thread(page) => page.card(&model.data, now),
-        _ => None,
-    };
-    let keys = match (model.focus, model.page(), card) {
-        (Focus::Nav, _, _) => "↑↓ select · Enter view",
-        (Focus::View, _, Some(cursor)) => cursor.keys(),
-        (Focus::View, Page::Home(_), _) => home::Page::KEYS,
-        (Focus::View, Page::Work(_), _) => work::Page::KEYS,
-        (Focus::View, Page::Channel(page), _) => page.keys(),
-        (Focus::View, Page::Thread(_), _) => thread::Page::KEYS,
-        (Focus::View, Page::Dm(page), _) => page.keys(),
-        (Focus::View, Page::Search(_), _) => search::Page::KEYS,
-        (Focus::View, Page::Tree(page), _) => page.keys(),
-        (Focus::View, Page::Ant(page), _) => page.keys(),
-        (Focus::View, Page::Credentials(page), _) => page.keys(),
-        (Focus::View, Page::Held(page), _) => page.keys(),
-    };
-    Line::styled(format!(" {keys} · Tab nav/view · / search · ? help · q quit"), dim())
-}
-
-/// The keys, over the middle of the screen.
-const HELP: &[(&str, &str)] = &[
-    ("Tab", "move between the nav and the view"),
-    ("↑↓ j k", "move the selection, or scroll a thread"),
-    ("PgUp PgDn Home End", "move further"),
-    ("Enter", "open the selection"),
-    ("Esc", "back to the previous view, else to the nav"),
-    ("w ←→ a", "on an ant: its threads in work, pane, ask; in a channel: ←→ its state tab"),
-    ("[ ] \\", "on an ant: scroll its about or now column up, down; switch between the two"),
-    ("Ctrl-K @ #", "the command bar: @ant asks, #channel posts, else reply"),
-    ("/command", "in the bar: a command on the selection (Ctrl-K lists them)"),
-    ("Alt-Enter Ctrl-E", "in the bar: a new line, the text in the editor"),
-    ("↑↓ Tab", "in the bar: pick and complete an @ant, #channel or /command"),
-    ("y p m e d z", "in a thread: copy, pin, mute, archive, done, snooze (again to undo)"),
-    ("a A r n", "on a tool request: allow once, always, reject at once, or reject with a note to the ant"),
-    ("1-9 Enter", "on a question: answer by number, or focus its card: ↑↓ ←→ Space Enter Esc"),
-    ("g r f x d z s c o", "on home: grant, reply, forward, cancel, done, snooze, digest, credentials, held orders"),
-    ("i > t S", "in a thread: reply, quote the selected, delegation tree, TL;DR"),
-    ("+ f u b T", "in a thread: react, forward, unread from, remind; tool calls"),
-    ("o ]", "in a thread or channel: open the marked attachment, mark the next"),
-    ("x Ctrl-X", "in a thread or work: cancel the prompt running there"),
-    ("W E", "in a thread: withdraw a waiting message or post, or to edit it"),
-    ("x y", "in a delegation tree: cancel every prompt in the selected subtree"),
-    ("n M", "with a person: write a message; in a channel: notify level, members"),
-    ("/", "the bar on /search, as in: /search deploy from:dev-a"),
-    ("R ?", "read everything again, this help"),
-    ("q Ctrl-C", "quit"),
-];
-
-fn draw_help(frame: &mut Frame) {
-    let lines: Vec<Line> = HELP
-        .iter()
-        .map(|(keys, what)| {
-            Line::from(vec![Span::styled(format!("{keys:>20}  "), Style::new().bold()), Span::raw(*what)])
-        })
-        .chain([Line::raw(""), Line::styled("any key closes this help", dim())])
-        .collect();
-    let area = centered(frame.area(), 90, u16::try_from(lines.len()).unwrap_or(u16::MAX) + 2);
-    frame.render_widget(Clear, area);
-    frame.render_widget(Paragraph::new(lines).block(block(" Keys ".to_owned(), true)), area);
-}
-
-/// An area of at most `width` by `height` in the middle of `area`.
-fn centered(area: Rect, width: u16, height: u16) -> Rect {
-    let (width, height) = (width.min(area.width), height.min(area.height));
-    Rect { x: area.x + (area.width - width) / 2, y: area.y + (area.height - height) / 2, width, height }
+    if model.focus == Focus::View
+        && let Page::Thread(page) = model.page()
+        && let Some(footer) = page.find_footer()
+    {
+        return style::clip(footer, usize::from(width));
+    }
+    if model.focus == Focus::View {
+        let card = match model.page() {
+            Page::Home(page) => page.card(&model.data, now).map(|(cursor, _)| cursor),
+            Page::Thread(page) => page.card(&model.data, now),
+            _ => None,
+        };
+        if let Some(cursor) = card {
+            return keymap::prompt(cursor.keys(), width, false);
+        }
+        let (prompt, help) = match model.page() {
+            Page::Channel(page) => (page.prompt(), false),
+            Page::Ant(page) => (page.prompt(), page.armed().is_some()),
+            Page::Tree(page) => (page.prompt(), true),
+            Page::Credentials(page) => (page.prompt(), true),
+            Page::Held(page) => (page.prompt(), true),
+            _ => (None, false),
+        };
+        if let Some(keys) = prompt {
+            return keymap::prompt(keys, width, help);
+        }
+    }
+    keymap::footer(model, now, width)
 }
 
 #[cfg(test)]
@@ -159,20 +177,13 @@ mod tests {
     use super::*;
     use crate::test_support::colony::entry;
     use crate::test_support::live::{at, message, user};
-    use crate::tui::model::Key;
-    use crate::tui::people;
+    use crate::tui::fold;
+    use crate::tui::model::{Action, Key};
     use crate::tui::test_support::model;
+    use crate::tui::{ant, people};
 
     fn screen(m: &Model, now: DateTime<Utc>) -> String {
         crate::test_support::render::rendered(120, 32, |f| draw(f, m, now))
-    }
-
-    #[test]
-    fn the_help_covers_every_key_of_the_thread_view() {
-        for key in thread::Page::KEYS.split(" · ").filter_map(|hint| hint.split(' ').next()) {
-            let covered = HELP.iter().any(|(keys, _)| keys.split(' ').any(|k| k.trim_end_matches(',') == key));
-            assert!(covered, "the help lacks {key}");
-        }
     }
 
     #[test]
@@ -184,24 +195,102 @@ mod tests {
         let shown = screen(&m, at(2));
         assert!(shown.contains(" ants · alice@hub:4222 · home · ● connected"), "{shown}");
         assert!(shown.contains("Work 1"), "{shown}");
-        assert!(shown.contains("waiting on ant 1"), "{shown}");
+        assert!(!shown.contains("waiting on ant 1"), "the states fold off work: {shown}");
         assert!(shown.contains("● {.~.} dev-a") && shown.contains("PEOPLE") && shown.contains("bob"), "{shown}");
         assert!(shown.contains("nothing waits on a human"), "{shown}");
-        let keys = "j/k move · Enter open · f forward · d done · z snooze · u unread · b remind · t tree · s digest · c \
-                    creds · Tab";
-        assert!(shown.contains(keys), "{shown}");
+        assert!(shown.contains(" Esc back · ↑↓ select · s digest · c creds · o held · Tab nav/view"), "{shown}");
 
         m.select(nav::Item::Work(None));
+        assert!(screen(&m, at(2)).contains("waiting on ant 1"), "and show on it");
         m.key(Key::Enter, at(2));
         let shown = screen(&m, at(2));
-        assert!(shown.contains("· thread ·"), "{shown}");
+        assert!(shown.contains(" · deploy the site · ● connected"), "the header names the thread: {shown}");
         assert!(shown.contains("waiting on ant") && shown.contains("reading the thread…"), "{shown}");
 
         m.data.live.link(false, at(3));
-        m.key(Key::Char('?'), at(3));
         let shown = screen(&m, at(30));
         assert!(shown.contains("○ disconnected 27s, reconnecting"), "{shown}");
-        assert!(shown.contains("any key closes this help"), "{shown}");
+        m.key(Key::Char('?'), at(3));
+        let shown = screen(&m, at(30));
+        assert!(shown.contains(crate::tui::help::CLOSE), "{shown}");
+    }
+
+    /// How wide the open thread's conversation is on a screen `width` columns wide.
+    fn conversation(m: &Model, width: u16) -> (usize, String) {
+        let shown = crate::test_support::render::rendered(width, 24, |f| draw(f, m, at(2)));
+        let row: Vec<char> = shown.lines().find(|l| l.contains("reading the thread…")).unwrap().chars().collect();
+        let borders: Vec<usize> = row.iter().enumerate().filter(|(_, c)| **c == '│').map(|(at, _)| at).collect();
+        let (left, right) = (borders[borders.len() - 2], borders[borders.len() - 1]);
+        let left = if row[right - 1] == '│' { borders[borders.len() - 3] } else { left };
+        (right - left - 1, shown)
+    }
+
+    #[test]
+    fn the_conversation_takes_the_width_and_the_nav_and_the_side_panel_fold() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        m.stored(vec![message(1, &thread, "alice", "dev-a", "deploy the site")], at(1));
+        m.select(nav::Item::Work(None));
+        screen(&m, at(2));
+        m.key(Key::Enter, at(2));
+        let (wide, shown) = conversation(&m, 80);
+        assert_eq!(wide, 78, "{shown}");
+        assert!(!shown.contains("Work 1"), "the nav folds: {shown}");
+        assert!(shown.contains("│waiting on ant · dev-a"), "the panel's state and ants on a line: {shown}");
+        assert!(conversation(&m, 120).0 >= 94);
+        let (_, shown) = conversation(&m, 140);
+        assert!(shown.contains("STATE") && shown.contains("OWNER"), "the panel from 140 columns: {shown}");
+
+        m.key(Key::Tab, at(2));
+        let shown = crate::test_support::render::rendered(80, 24, |f| draw(f, &m, at(2)));
+        assert!(shown.contains("│Work 1") && !shown.contains("reading the thread…"), "the nav over the view: {shown}");
+        m.key(Key::Tab, at(2));
+
+        let folds = |nav, panel| Some(Action::KeepFolds(fold::Folds { nav, panel }));
+        assert_eq!(m.key(Key::Ctrl('o'), at(2)), folds(Some(true), None));
+        let (wide, shown) = conversation(&m, 80);
+        assert!(shown.contains("Work 1") && wide == 54, "{shown}");
+        conversation(&m, 120);
+        assert_eq!(m.key(Key::Ctrl('\\'), at(2)), folds(Some(true), Some(true)));
+        let (_, shown) = conversation(&m, 120);
+        assert!(shown.contains("STATE"), "the panel shown by key: {shown}");
+        conversation(&m, 80);
+        assert_eq!(m.key(Key::Ctrl('o'), at(2)), folds(None, Some(true)), "again: as the width has it");
+    }
+
+    #[test]
+    fn no_text_ends_mid_word_at_the_edge_without_an_ellipsis() {
+        let ops: ants_proto::ChannelId = "ops".parse().unwrap();
+        let long = "deploy the site to production then update the docs and tell the whole team about it today";
+        let opening = ants_proto::ChannelPost::new(ops.clone(), user("alice"), long);
+        let thread = opening.thread_id.clone();
+        let mut m = model();
+        let asked = message(2, &thread, "dev-a", "alice", &format!("which region? {long}"));
+        let mut first = crate::tui::test_support::post(1, &opening);
+        first.owner = Some(user("alice"));
+        m.stored(vec![first, asked], at(1));
+        let cut = |shown: &str| {
+            assert!(shown.lines().next().is_some_and(|l| l.ends_with("● connected")), "{shown}");
+            // A row cut with an ellipsis may still end at the edge with what follows the cut, as home's age.
+            let long =
+                shown.lines().skip(1).filter(|l| (l.contains("deploy") || l.contains("which")) && !l.contains('…'));
+            long.map(|l| l.chars().collect::<Vec<_>>())
+                .any(|row| row.len() >= 80 && if row[79] == '│' { row[78] } else { row[79] }.is_alphanumeric())
+        };
+        for item in [nav::Item::Home, nav::Item::Work(None), nav::Item::Channel(ops)] {
+            m.select(item);
+            let shown = crate::test_support::render::rendered(80, 24, |f| draw(f, &m, at(2)));
+            assert!(!cut(&shown) && shown.contains('…'), "{shown}");
+        }
+        m.select(nav::Item::Work(None));
+        screen(&m, at(2));
+        m.key(Key::Enter, at(2));
+        let shown = crate::test_support::render::rendered(80, 24, |f| draw(f, &m, at(2)));
+        assert!(
+            !cut(&shown)
+                && shown.contains("┌ deploy the site to production then update the docs and tell the whol… · #ops ┐"),
+            "{shown}"
+        );
     }
 
     #[test]
@@ -210,7 +299,10 @@ mod tests {
         let push = crate::test_support::live::request("dev-a", "git push", vec![ants_proto::Verdict::AllowOnce]);
         m.data.live.approvals = vec![push.clone()];
         let shown = screen(&m, at(0));
-        assert!(shown.contains("approve") && shown.contains("asks to run execute: git push"), "{shown}");
+        assert!(
+            shown.contains("approve") && shown.contains("dev-a asks to run:") && shown.contains("execute: git push"),
+            "{shown}"
+        );
         m.key(Key::Enter, at(0));
         let shown = screen(&m, at(0));
         assert!(shown.contains(&format!(" Tool request {} ", crate::tools::qualified(&push))), "{shown}");
@@ -226,10 +318,29 @@ mod tests {
     }
 
     #[test]
+    fn with_no_thread_read_home_says_what_to_type_and_the_bar_what_enter_does() {
+        let mut m = model();
+        m.stored(vec![], at(0));
+        let shown = screen(&m, at(0));
+        assert!(shown.contains("@ant and a text") && shown.contains("Ctrl-K and a text"), "{shown}");
+        assert!(shown.contains("Enter asks the assistant or the messenger · / commands · @ ant"), "{shown}");
+        let thread = ThreadId::generate();
+        m.stored(vec![message(1, &thread, "alice", "dev-a", "deploy the site")], at(1));
+        let shown = screen(&m, at(2));
+        assert!(shown.contains("nothing waits on a human") && !shown.contains("@ant and a text"), "{shown}");
+        m.select(nav::Item::Work(None));
+        screen(&m, at(2));
+        m.key(Key::Enter, at(2));
+        assert!(screen(&m, at(2)).contains("Enter replies on the thread · / commands"));
+        m.select(nav::Item::Channel("ops".parse().unwrap()));
+        assert!(screen(&m, at(2)).contains("Enter starts a thread in #ops · / commands"));
+    }
+
+    #[test]
     fn the_command_bar_shows_its_hint_then_its_text_status_and_keys() {
         let mut m = model();
         let shown = screen(&m, at(0));
-        assert!(shown.contains("Ctrl-K commands · @ ant · # channel"), "{shown}");
+        assert!(shown.contains("/ commands · @ ant · # channel"), "{shown}");
         m.key(Key::Char('@'), at(0));
         let shown = screen(&m, at(0));
         assert!(shown.contains("@bob") && shown.contains("human"), "{shown}");
@@ -241,10 +352,12 @@ mod tests {
         let shown = screen(&m, at(0));
         assert!(shown.contains("@dev-a"), "{shown}");
         assert!(shown.contains("nothing to send to @dev-a"), "{shown}");
-        assert!(shown.contains("Enter send · Alt-Enter new line"), "{shown}");
-        m.key(Key::Ctrl('k'), at(0));
+        assert!(shown.contains("Enter send · Ctrl-J new line"), "{shown}");
+        m.key(Key::Ctrl('u'), at(0));
+        m.key(Key::Char('/'), at(0));
         let shown = screen(&m, at(0));
-        assert!(shown.contains("/approve   [ID] [--always]   ") && shown.contains("/reject"), "{shown}");
+        assert!(shown.contains("/goto       THREAD|#channel|@user"), "{shown}");
+        assert!(shown.contains("↑↓ select · Enter run · Tab complete · Esc close"), "{shown}");
     }
 
     #[test]
@@ -258,7 +371,125 @@ mod tests {
         m.select(nav::Item::Person(bob));
         let shown = screen(&m, at(1));
         assert!(shown.contains(" bob · online "), "{shown}");
-        assert!(shown.contains("no messages with bob yet: n writes one"), "{shown}");
-        assert!(shown.contains("Enter open · n new message"), "{shown}");
+        assert!(shown.contains("no messages with bob yet: type one"), "{shown}");
+        assert!(shown.contains("a-z write · ↑ select · Enter open"), "{shown}");
+    }
+
+    fn text(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// A model showing each view in turn, the nav focused first, with a thread `thread` on it.
+    fn every_view(thread: &ThreadId) -> Vec<Model> {
+        let base = || {
+            let mut m = model();
+            m.data.live.colony(vec![entry("dev-a", 60, 5, at(0))], at(0));
+            m.stored(vec![message(1, thread, "alice", "dev-a", "deploy the site")], at(1));
+            m
+        };
+        let open = |page: Page| {
+            let mut m = base();
+            m.pages.push(page);
+            m
+        };
+        let shown = |item: nav::Item| {
+            let mut m = base();
+            m.select(item);
+            m.focus = Focus::View;
+            m
+        };
+        let mut nav = base();
+        nav.focus = Focus::Nav;
+        let search = crate::tui::search::parse("deploy", at(1)).unwrap();
+        let mut views = vec![
+            nav,
+            base(),
+            shown(nav::Item::Work(None)),
+            shown(nav::Item::Channel("ops".parse().unwrap())),
+            shown(nav::Item::Person(user("bob"))),
+            open(Page::Thread(crate::tui::thread::Page::new(thread.clone()))),
+            open(Page::Search(crate::tui::search::Page::new("deploy".to_owned(), &search))),
+            open(Page::Tree(crate::tui::tree::Page::new(thread.clone()))),
+            open(Page::Credentials(crate::tui::credentials::Page::default())),
+            open(Page::Held(crate::tui::held::Page::default())),
+        ];
+        for pane in [ant::Pane::Threads, ant::Pane::Queue, ant::Pane::Memories, ant::Pane::Mcp, ant::Pane::Settings] {
+            let mut m = shown(nav::Item::Ant(user("dev-a")));
+            let Some(Page::Ant(page)) = m.pages.last_mut() else { panic!("no ant view") };
+            page.pane = pane;
+            views.push(m);
+        }
+        views
+    }
+
+    #[test]
+    fn every_footer_ends_in_help_and_cuts_no_hint() {
+        for m in every_view(&ThreadId::generate()) {
+            let rows: Vec<&keymap::Entry> =
+                keymap::views(&m).into_iter().flat_map(keymap::entries).chain(keymap::GLOBAL).collect();
+            let hints: Vec<String> = rows.iter().filter(|e| e.applies(&m, at(2)).is_ok()).map(|e| e.hint()).collect();
+            for width in [80, 100, 120] {
+                let footer = text(&footer_line(&m, at(2), width));
+                assert!(Line::raw(footer.as_str()).width() <= usize::from(width), "{footer}");
+                let shown = footer.strip_suffix(" · ? help").unwrap_or_else(|| panic!("{width}: {footer}"));
+                for hint in shown.trim_start().split(" · ") {
+                    assert!(hints.iter().any(|h| h == hint), "{}: {hint} cut in {footer}", m.page().name());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_error_stays_until_a_key_wrapped_over_three_lines_at_most_after_its_mark() {
+        let mut m = model();
+        let reason = "the daemon refused the order because ".to_owned() + &"of a reason far too long ".repeat(12);
+        m.notify(reason.trim_end(), Level::Error, at(1));
+        m.notify("reconnected", Level::Info, at(2));
+        let shown = crate::test_support::render::rendered(80, 24, |f| draw(f, &m, at(60)));
+        let footer: Vec<&str> = shown.lines().skip(21).collect();
+        assert!(footer[0].starts_with(" ✗ the daemon refused the order"), "{shown}");
+        assert!(footer[2].trim_end().ends_with('…'), "cut on its third line: {shown}");
+        assert!(!shown.contains("reconnected"), "a notice waits behind the error: {shown}");
+        m.key(Key::Down, at(61));
+        let shown = crate::test_support::render::rendered(80, 24, |f| draw(f, &m, at(61)));
+        assert!(!shown.contains("refused") && shown.lines().nth(23).unwrap().contains("? help"), "{shown}");
+    }
+
+    #[test]
+    fn a_notice_cut_at_the_width_ends_in_an_ellipsis() {
+        let mut m = model();
+        m.notify("notices far too long to fit ".repeat(4), Level::Info, at(1));
+        let line = text(&footer_line(&m, at(2), 40));
+        assert_eq!((line.chars().count(), line.ends_with('…')), (40, true), "{line}");
+        m.notify("short", Level::Error, at(3));
+        assert_eq!(text(&footer_line(&m, at(3), 40)), " ✗ short");
+    }
+
+    #[test]
+    fn a_first_ctrl_c_on_an_empty_bar_asks_for_a_second_for_a_second() {
+        let mut m = model();
+        m.key(Key::Interrupt, at(0));
+        assert_eq!(text(&footer_line(&m, at(0), 100)).trim(), QUIT_AGAIN);
+        assert!(text(&footer_line(&m, at(1), 100)).ends_with("? help"));
+    }
+
+    #[test]
+    fn a_thread_shows_the_keys_of_a_tool_request_only_while_one_waits() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        m.stored(vec![message(1, &thread, "alice", "dev-a", "deploy the site")], at(1));
+        m.pages.push(Page::Thread(crate::tui::thread::Page::new(thread.clone())));
+        let footer = text(&footer_line(&m, at(2), 120));
+        for hint in ["a allow", "A always", "r reject", "n note", "Enter details"] {
+            assert!(!footer.contains(hint), "{footer}");
+        }
+        let push = crate::test_support::live::request("dev-a", "git push", vec![ants_proto::Verdict::AllowOnce]);
+        m.data.live.approvals = vec![ants_proto::ApprovalRequest { thread_id: thread, ..push }];
+        let footer = text(&footer_line(&m, at(2), 80));
+        assert!(footer.starts_with(" a-z write · ↑ select · Enter details · "), "letters written: {footer}");
+        m.key(Key::Up, at(2));
+        let footer = text(&footer_line(&m, at(2), 80));
+        assert!(footer.starts_with(" a allow · A always · r reject · n note · Enter details · "), "{footer}");
+        assert!(footer.ends_with(" · ? help"), "{footer}");
     }
 }

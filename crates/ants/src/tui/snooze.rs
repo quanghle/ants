@@ -13,6 +13,7 @@ use ratatui::text::Line;
 
 use super::acts::Change;
 use super::home;
+use super::input::Input;
 use super::model::{Action, Data, Key, Model};
 use super::style;
 
@@ -25,7 +26,7 @@ pub struct Prompt {
     thread: ThreadId,
     /// To be reminded of the thread, or of this message on it, rather than to snooze it.
     remind: Option<Option<Uuid>>,
-    text: String,
+    text: Input,
     /// Whether a key changed the text: the first one typed replaces the default.
     edited: bool,
     /// Why the text was refused.
@@ -34,7 +35,7 @@ pub struct Prompt {
 
 impl Prompt {
     pub fn new(thread: ThreadId) -> Self {
-        Self { thread, remind: None, text: DEFAULT.to_owned(), edited: false, error: None }
+        Self { thread, remind: None, text: Input::from(DEFAULT), edited: false, error: None }
     }
 
     /// The footer asking when to be reminded of `thread`, or of `message` on it, and what to note.
@@ -50,12 +51,11 @@ impl Prompt {
             (None, None) => " · Enter snooze · Esc keep it on home".to_owned(),
             (None, Some(_)) => " · Enter set · Esc cancel".to_owned(),
         };
+        let typed = self.text.caret(60);
         let text = match self.remind {
-            None => format!(" snooze {title} for (at most 7d): {}▏{tail}", self.text),
-            Some(None) => format!(" remind of {title} in (1h, HH:MM, then a note): {}▏{tail}", self.text),
-            Some(Some(_)) => {
-                format!(" remind of a message on {title} in (1h, HH:MM, then a note): {}▏{tail}", self.text)
-            }
+            None => format!(" snooze {title} for (at most 7d): {typed}{tail}"),
+            Some(None) => format!(" remind of {title} in (1h, HH:MM, then a note): {typed}{tail}"),
+            Some(Some(_)) => format!(" remind of a message on {title} in (1h, HH:MM, then a note): {typed}{tail}"),
         };
         let color = if self.error.is_some() { style::ERROR } else { Color::Yellow };
         Line::styled(text, Style::new().fg(color))
@@ -63,7 +63,7 @@ impl Prompt {
 
     /// Until when the text says to snooze, from `now`.
     fn until(&self, now: DateTime<Utc>) -> Result<DateTime<Utc>, String> {
-        duration(&self.text).map(|d| now + d)
+        duration(&self.text.text()).map(|d| now + d)
     }
 }
 
@@ -110,19 +110,8 @@ impl Model {
         let prompt = self.snoozing.as_mut()?;
         match key {
             Key::Esc => self.snoozing = None,
-            Key::Backspace => {
-                prompt.text.pop();
-                (prompt.edited, prompt.error) = (true, None);
-            }
-            Key::Char(c) => {
-                if !prompt.edited {
-                    prompt.text.clear();
-                }
-                prompt.text.push(c);
-                (prompt.edited, prompt.error) = (true, None);
-            }
             Key::Enter if let Some(message) = prompt.remind => {
-                let (thread, text) = (prompt.thread.clone(), prompt.text.clone());
+                let (thread, text) = (prompt.thread.clone(), prompt.text.text());
                 match self.remind_as(thread, message, &text, now) {
                     Ok(action) => {
                         self.snoozing = None;
@@ -139,7 +128,14 @@ impl Model {
                 }
                 Err(error) => prompt.error = Some(error),
             },
-            _ => {}
+            key => {
+                if !prompt.edited && matches!(key, Key::Char(_)) {
+                    prompt.text = Input::default();
+                }
+                if prompt.text.key(key) {
+                    (prompt.edited, prompt.error) = (true, None);
+                }
+            }
         }
         None
     }
@@ -149,6 +145,7 @@ impl Model {
 mod tests {
     use super::*;
     use crate::test_support::live::at;
+    use crate::tui::input::{Typed, exercise};
     use crate::tui::test_support::model;
 
     #[test]
@@ -176,5 +173,21 @@ mod tests {
         assert_eq!(m.key(Key::Enter, at(0)), None, "zero refused");
         m.key(Key::Esc, at(0));
         assert!(m.snoozing.is_none(), "Esc keeps it on home");
+    }
+
+    #[test]
+    fn the_prompt_edits_as_the_bar_does() {
+        let thread = ThreadId::generate();
+        for remind in [false, true] {
+            let mut m = model();
+            let asked = if remind { m.remind(thread.clone(), None) } else { m.snooze(thread.clone(), at(0)) };
+            assert_eq!(asked, None);
+            let want = exercise(|typed| match typed {
+                Typed::Key(key) => _ = m.key(key, at(0)),
+                Typed::Paste(text) => m.paste(text, at(0)),
+            });
+            assert_eq!(m.snoozing.as_ref().unwrap().text.text(), want, "remind: {remind}");
+            assert!(m.snoozing.as_ref().unwrap().line(&m.data).to_string().contains(": X▏a b hi ·"));
+        }
     }
 }

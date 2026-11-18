@@ -1,4 +1,5 @@
-//! The nav: home, the assistant's activity once there is any, work with a count per state, the human's channels with their unread posts and @mentions, the ants
+//! The nav: home, the assistant's activity once there is any, work with a count per state (shown while work or a state
+//! is selected), the human's channels with their unread posts and @mentions, the ants
 //! with their state, and the team's other humans, online or not. Each entry selects a view.
 
 use ants_proto::{Activity, ChannelId, ColonyEntry, Humans, ThreadId, UserId};
@@ -9,6 +10,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use super::command::Conversation;
 use super::model::Data;
 use super::style;
 use super::work::ThreadState;
@@ -42,14 +44,16 @@ impl Item {
     }
 }
 
-/// The nav's entries, in order.
-pub fn items(data: &Data, _now: DateTime<Utc>) -> Vec<Item> {
+/// The nav's entries, in order, the states under Work only while `selected` is Work or one of them.
+pub fn items(data: &Data, selected: &Item, _now: DateTime<Utc>) -> Vec<Item> {
     let mut items = vec![Item::Home];
     if data.live.order.iter().any(ThreadId::is_activity) {
         items.push(Item::Activity);
     }
     items.push(Item::Work(None));
-    items.extend(ThreadState::ALL.map(|s| Item::Work(Some(s))));
+    if matches!(selected, Item::Work(_)) {
+        items.extend(ThreadState::ALL.map(|s| Item::Work(Some(s))));
+    }
     items.extend(data.channels.iter().map(|c| Item::Channel(c.channel.clone())));
     let mut ants: Vec<&UserId> = data.live.colony.iter().map(|e| &e.ant).collect();
     ants.sort();
@@ -85,7 +89,7 @@ pub fn marker(entries: &[&ColonyEntry], now: DateTime<Utc>) -> (&'static str, Co
 /// The channel's unread posts its notify level counts, @mentions of the human and the other posts among those read
 /// but for those on archived and idle threads, once which are read is known; else, without the credentials to know, only its unread @mentions as its inbox tells
 /// of them.
-fn unread(data: &Data, channel: &ChannelId) -> Unread {
+pub(super) fn unread(data: &Data, channel: &ChannelId) -> Unread {
     if let Some(markers) = &data.channel_reads {
         let (marker, level) = (markers.channels.get(channel), data.level(channel));
         return data.feeds.unread(channel, marker, data.me(), level, |u| data.is_human(u), |t| data.live.hidden(t));
@@ -132,6 +136,7 @@ fn line(
             if unread.other > 0 {
                 spans.push(Span::styled(format!(" ·{}", unread.other), style::dim()));
             }
+            spans.extend(data.drafts.mark(&Conversation::Channel(channel.clone())));
             Line::from(spans)
         }
         Item::Ant(ant) => {
@@ -144,7 +149,11 @@ fn line(
                 Span::raw(format!(" {ant}")),
             ])
         }
-        Item::Person(person) => super::people::nav_line(data, person),
+        Item::Person(person) => {
+            let mut line = super::people::nav_line(data, person);
+            line.spans.extend(data.drafts.mark(&Conversation::Person(person.clone())));
+            line
+        }
     }
 }
 
@@ -153,7 +162,7 @@ pub fn draw(frame: &mut Frame, area: Rect, data: &Data, selected: &Item, now: Da
     let mut lines = Vec::new();
     let mut section = None;
     let mut at = 0;
-    for item in items(data, now) {
+    for item in items(data, selected, now) {
         if item.section() != section {
             section = item.section();
             lines.push(Line::raw(""));
@@ -192,10 +201,12 @@ mod tests {
         let humans = Humans::from_entries(["alice", "carol"].map(|h| (h, HumanEntry::new(user(h)))));
         m.read(Read::Directory(Ok((vec![ops], humans))), at(0));
         m.data.live.colony(vec![entry("dev-b", 60, 5, at(0)), entry("dev-a", 60, 5, at(0))], at(0));
-        let items = items(&m.data, at(0));
+        let at_work = items(&m.data, &Item::Work(Some(ThreadState::Idle)), at(0));
+        assert_eq!(at_work[2..8], ThreadState::ALL.map(|s| Item::Work(Some(s))), "the states show at work");
+        let items = items(&m.data, &Item::Home, at(0));
         assert_eq!(items[..2], [Item::Home, Item::Work(None)]);
         assert_eq!(
-            items[8..],
+            items[2..],
             [
                 Item::Channel("ops".parse().unwrap()),
                 Item::Ant(user("dev-a")),
@@ -203,6 +214,25 @@ mod tests {
                 Item::Person(user("carol")),
             ]
         );
+    }
+
+    #[test]
+    fn with_home_selected_the_states_fold_and_the_first_channel_is_two_rows_under_work() {
+        let mut m = model();
+        let ops = ChannelEntry { members: vec![user("alice")], ..ChannelEntry::new("ops".parse().unwrap()) };
+        m.read(Read::Directory(Ok((vec![ops], Humans::default()))), at(0));
+        let rows = |selected: &Item| {
+            let shown =
+                crate::test_support::render::rendered(30, 20, |f| draw(f, f.area(), &m.data, selected, at(0), true));
+            let rows: Vec<String> =
+                shown.lines().map(|l| l.trim_matches(|c: char| c == '│' || c == ' ').to_owned()).collect();
+            let row = |name: &str| rows.iter().position(|r| r == name).unwrap();
+            (row("Work"), row("#ops"), rows.iter().any(|r| r == "idle"))
+        };
+        let (work, ops, states) = rows(&Item::Home);
+        assert_eq!((ops - work, states), (3, false), "Work, a blank line and CHANNELS, then #ops");
+        let (work, ops, states) = rows(&Item::Work(None));
+        assert_eq!((ops - work, states), (9, true), "the six states unfold under Work");
     }
 
     #[test]

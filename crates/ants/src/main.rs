@@ -28,6 +28,7 @@ mod tools;
 // The full-screen views.
 mod avatars;
 mod live;
+mod tty;
 mod tui;
 
 // Services: `ants daemon` and its schedules, the services' units and reloads, webhooks and notifications.

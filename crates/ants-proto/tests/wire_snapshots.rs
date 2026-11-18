@@ -178,6 +178,13 @@ fn envelope() -> Envelope {
             trail: "nightly-audit".parse().unwrap(),
             args: serde_json::json!({"repo": "app"}),
         })),
+        review_outcomes: Some(ReviewOutcomes {
+            dream: 7,
+            findings: vec![
+                FindingOutcome { finding: "5.1".to_owned(), verdict: FindingVerdict::Applied, holds: true },
+                FindingOutcome { finding: "5.2".to_owned(), verdict: FindingVerdict::Rejected, holds: false },
+            ],
+        }),
         sent_at: at(0),
     }
 }
@@ -208,6 +215,7 @@ fn plain_envelope() -> Envelope {
         review_commits: Vec::new(),
         trail_step: None,
         trail_start: None,
+        review_outcomes: None,
         ..envelope()
     }
 }

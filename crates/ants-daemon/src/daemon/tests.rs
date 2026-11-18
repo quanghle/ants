@@ -66,6 +66,8 @@ struct Bus {
     /// How long a failed message waits for its redelivery.
     retry_delay: Duration,
     lifecycle: Option<crate::provider::events::Lifecycle>,
+    /// Built-in sense, for an ant using it.
+    sense: Option<crate::sense::Sense>,
 }
 
 impl Bus {
@@ -122,6 +124,7 @@ impl Bus {
             account: None,
             retry_delay: Duration::from_millis(300),
             lifecycle: None,
+            sense: None,
         };
         (bus, replies)
     }
@@ -282,7 +285,7 @@ impl Bus {
             identity: self.identity.as_ref(),
             home: &home,
             lifecycle: self.lifecycle.as_ref(),
-            sense: None,
+            sense: self.sense.as_ref(),
             trails: None,
         };
         let stop = || {

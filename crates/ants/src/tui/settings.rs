@@ -14,10 +14,11 @@ use futures::future::LocalBoxFuture;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
-use super::model::{Action, Key, To};
+use super::input::Input;
+use super::model::{Action, Key};
 use super::style::{self, ago};
 use crate::admin::orders::{self, Listed};
 use crate::admin::settings::{self, Assignment, Reading};
@@ -67,13 +68,11 @@ pub struct Pane {
     /// The field selected.
     at: usize,
     /// The `KEY = VALUE` being written, if any.
-    pub draft: Option<String>,
+    pub draft: Option<Input>,
     pub sent: Option<Sent>,
 }
 
 impl Pane {
-    pub const KEYS: &str = "↑↓ field · Enter change · n new field · u read again · ←→ pane · [ ] \\ scroll \
-                            about/now · a ask · w work · r restart · p (un)pause · X retire · Esc back";
     pub const DRAFT_KEYS: &str = "KEY = VALUE, a TOML value or a word; KEY = removes · Enter send · Esc cancel";
 
     fn read(&self) -> Option<&settings::Read> {
@@ -95,7 +94,7 @@ impl Pane {
         if self.read().is_some() { self.fields().len().to_string() } else { "?".to_owned() }
     }
 
-    pub fn key(&mut self, key: Key, ant: &UserId) -> Option<To> {
+    pub fn key(&mut self, key: Key) {
         let fields = self.fields();
         match key {
             Key::Up | Key::Char('k') => self.at = self.at.saturating_sub(1),
@@ -103,34 +102,28 @@ impl Pane {
             Key::Home => self.at = 0,
             Key::End => self.at = fields.len().saturating_sub(1),
             Key::Enter => {
-                let (field, value, secret) = fields.get(self.at)?;
+                let Some((field, value, secret)) = fields.get(self.at) else { return };
                 let field = ants_daemon::config::edit::field_text(field);
-                self.draft = Some(if *secret { format!("{field} = ") } else { format!("{field} = {value}") });
+                let draft = if *secret { format!("{field} = ") } else { format!("{field} = {value}") };
+                self.draft = Some(Input::from(draft.as_str()));
                 self.drop_failure();
             }
             Key::Char('n') => {
-                self.draft = Some(String::new());
+                self.draft = Some(Input::default());
                 self.drop_failure();
-            }
-            Key::Char('u') => {
-                self.reading = None;
-                return Some(To::Do(Action::Settings(Ask::Read(ant.clone()))));
             }
             _ => {}
         }
-        None
     }
 
-    /// Take `key` into the change being written: None when none is, the key being the pane's then. `Enter` sends it
-    /// as an order expecting the value read, `Esc` drops it.
+    /// Take `key` into the change being written, edited as in the command bar: None when none is, the key being the
+    /// pane's then. `Enter` sends it as an order expecting the value read, `Esc` drops it.
     pub fn write(&mut self, key: Key, ant: &UserId) -> Option<Option<Action>> {
         let draft = self.draft.as_mut()?;
         match key {
-            Key::Char(c) => draft.push(c),
-            Key::Backspace => _ = draft.pop(),
             Key::Esc => self.draft = None,
             Key::Enter => return Some(self.send(ant)),
-            _ => {}
+            key => _ = draft.key(key),
         }
         Some(None)
     }
@@ -143,7 +136,7 @@ impl Pane {
     }
 
     fn send(&mut self, ant: &UserId) -> Option<Action> {
-        let text = self.draft.as_deref().unwrap_or_default();
+        let text = self.draft.as_ref().map_or_else(String::new, Input::text);
         let assignment = match text.parse::<Assignment>() {
             Ok(assignment) => assignment,
             Err(e) => {
@@ -163,8 +156,9 @@ impl Pane {
         Some(Action::Settings(Ask::Set(ant.clone(), machine, op)))
     }
 
-    pub fn keys(&self) -> &'static str {
-        if self.draft.is_some() { Self::DRAFT_KEYS } else { Self::KEYS }
+    /// The keys of the change being written, which takes every key, if one is.
+    pub fn prompt(&self) -> Option<&'static str> {
+        self.draft.as_ref().map(|_| Self::DRAFT_KEYS)
     }
 
     /// Take in what a read or an order brought.
@@ -201,7 +195,7 @@ impl Pane {
             below,
         );
         let (text, style, title) = match (&self.draft, &self.sent) {
-            (Some(draft), _) => (format!("{draft}▏"), Style::new(), " change "),
+            (Some(draft), _) => (draft.caret(usize::from(input.width.saturating_sub(2))), Style::new(), " change "),
             (None, Some(sent)) => {
                 let (text, color) = sent_line(sent);
                 (text, Style::new().fg(color), " last order ")
@@ -239,7 +233,7 @@ impl Pane {
         if let Some(stale) = &reading.stale {
             block = block.title_bottom(Line::styled(format!(" {stale} "), Style::new().fg(style::WARNING)));
         }
-        let items: Vec<ListItem> = self
+        let items: Vec<Text> = self
             .fields()
             .into_iter()
             .map(|(field, value, secret)| {
@@ -251,10 +245,10 @@ impl Pane {
                 if secret {
                     spans.push(Span::styled("  (secret)", style::dim()));
                 }
-                ListItem::new(Line::from(spans))
+                Text::from(Line::from(spans))
             })
             .collect();
-        let list = List::new(items).block(block).highlight_style(style::highlight(focused && self.draft.is_none()));
+        let list = style::list(items, Some(self.at), focused && self.draft.is_none()).block(block);
         let mut state = ListState::default().with_selected(Some(self.at));
         frame.render_stateful_widget(list, area, &mut state);
     }
@@ -408,6 +402,7 @@ mod tests {
     use super::*;
     use crate::test_support::colony::entry;
     use crate::test_support::live::{at, user};
+    use crate::tui::input::{Typed, exercise};
     use crate::tui::model::Focus;
     use crate::tui::nav;
     use crate::tui::test_support::model;
@@ -463,7 +458,7 @@ mod tests {
         assert!(shown.contains("model = \"gpt-5\""), "{shown}");
         assert!(shown.contains("the read waits for the daemon of m1"), "{shown}");
         assert!(shown.contains("alice · restart on m1  pending"), "{shown}");
-        assert!(shown.contains(Pane::KEYS), "{shown}");
+        assert!(shown.contains("Enter change · n new field · Esc back · ↑↓ field"), "{shown}");
 
         m.key(Key::Down, at(3));
         m.key(Key::Enter, at(3));
@@ -503,7 +498,24 @@ mod tests {
         assert_eq!(m.key(Key::Enter, at(3)), None);
         assert!(screen(&m).contains("\"nope\" sets nothing"), "{}", screen(&m));
         m.key(Key::Esc, at(3));
-        assert_eq!(m.key(Key::Char('u'), at(3)), Some(Action::Settings(Ask::Read(user("dev-a")))));
+        assert_eq!(m.key(Key::Char('R'), at(3)), Some(Action::Refresh));
         assert_eq!(m.settings_shown(), Some((user("dev-a"), true)));
+    }
+
+    #[test]
+    fn a_change_edits_as_the_bar_does() {
+        let mut m = model();
+        m.data.live.colony(vec![entry("dev-a", 60, 2, at(2))], at(2));
+        m.select(nav::Item::Ant(user("dev-a")));
+        m.focus = Focus::View;
+        m.key(Key::Left, at(3));
+        m.settings_event(Event::Read(user("dev-a"), Ok(reading())));
+        m.key(Key::Char('n'), at(3));
+        let want = exercise(|typed| match typed {
+            Typed::Key(key) => _ = m.key(key, at(3)),
+            Typed::Paste(text) => m.paste(text, at(3)),
+        });
+        assert!(screen(&m).contains(&format!("│{}▏{}", &want[..1], &want[1..])), "{}", screen(&m));
+        assert_eq!(m.page().name(), "ant", "keys go to the change");
     }
 }

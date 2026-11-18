@@ -1,19 +1,20 @@
 //! A direct-message view with another human: the threads with messages between the CLI's human and that human, the
 //! newest first, but for those the human archived or left idle, each with its latest message and the messages the
-//! human has not read, by its read marker. `n` writes a message that starts a new thread, as `ants ask @human` does;
-//! `Enter` opens a thread. A DM is between two humans: a group talks in a channel.
+//! human has not read, by its read marker. What is typed is written in the command bar, which writes to that human on a
+//! new thread, sealed, as `ants ask @human` does; with a thread selected, `n` focuses it and `Enter` opens the thread. A
+//! DM is between two humans: a group talks in a channel.
 
 use std::collections::{BTreeSet, HashMap};
 
 use ants_proto::{ThreadId, UserId};
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{ListState, Paragraph};
 
-use super::model::{Action, Data, Key, To};
+use super::model::{Data, Key, To};
 use super::select::Selection;
 use super::style::{self, ago};
 use crate::people::sealed::State;
@@ -132,12 +133,12 @@ fn said(said: &Said, width: usize) -> String {
 
 /// The row of a direct thread in the list: its unread badge and title, how many messages it has and when the latest
 /// came, then what that one says.
-fn row(data: &Data, dm: &Dm, width: usize, now: DateTime<Utc>) -> ListItem<'static> {
+fn row(data: &Data, dm: &Dm, width: usize, now: DateTime<Utc>) -> Text<'static> {
     let unread = unread_on(data, dm);
     let badge = if unread == 0 { "   ".to_owned() } else { format!("{unread:>2} ") };
     let count = dm.messages.len();
     let plural = if count == 1 { "" } else { "s" };
-    ListItem::new(vec![
+    Text::from(vec![
         Line::from(vec![
             Span::styled(badge, Style::new().fg(Color::Yellow).bold()),
             Span::raw(data.title(&dm.thread)),
@@ -147,33 +148,17 @@ fn row(data: &Data, dm: &Dm, width: usize, now: DateTime<Utc>) -> ListItem<'stat
     ])
 }
 
-/// A message to write to another human, on a new thread.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Draft {
-    pub to: UserId,
-    pub text: String,
-}
-
 #[derive(Debug)]
 pub struct Page {
     /// The other human.
     pub with: UserId,
     /// The selected thread, kept on it as messages reorder the threads.
     selected: Selection<ThreadId>,
-    /// The message being written, if any.
-    draft: Option<String>,
 }
 
 impl Page {
     pub fn new(with: UserId) -> Self {
-        Self { with, selected: Selection::default(), draft: None }
-    }
-
-    const KEYS: &str = "↑↓ thread · Enter open · n new message";
-    const WRITING_KEYS: &str = "Enter send · Esc cancel";
-
-    pub fn keys(&self) -> &'static str {
-        if self.draft.is_some() { Self::WRITING_KEYS } else { Self::KEYS }
+        Self { with, selected: Selection::default() }
     }
 
     pub fn key(&mut self, key: Key, data: &Data) -> Option<To> {
@@ -182,10 +167,7 @@ impl Page {
         let at = self.selected.at(&threads);
         let to = match key {
             Key::Enter => return dms.get(at).map(|dm| To::Thread(dm.thread.clone())),
-            Key::Char('n') => {
-                self.draft = Some(String::new());
-                return None;
-            }
+            Key::Char('n') => return Some(To::Write),
             Key::Up | Key::Char('k') => at.saturating_sub(1),
             Key::Down | Key::Char('j') => at + 1,
             Key::Home => 0,
@@ -196,53 +178,28 @@ impl Page {
         None
     }
 
-    /// Take `key` into the message being written: None when none is, the key being the view's then. `Enter` sends a
-    /// message that is not blank and `Esc` drops it.
-    pub fn write(&mut self, key: Key) -> Option<Option<Action>> {
-        let draft = self.draft.as_mut()?;
-        match key {
-            Key::Char(c) => draft.push(c),
-            Key::Backspace => _ = draft.pop(),
-            Key::Esc => self.draft = None,
-            Key::Enter if draft.trim().is_empty() => {}
-            Key::Enter => {
-                let text = self.draft.take().unwrap_or_default();
-                return Some(Some(Action::Send(Draft { to: self.with.clone(), text })));
-            }
-            _ => {}
-        }
-        Some(None)
-    }
-
     pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
-        let [list, input] = Layout::vertical([Constraint::Min(3), Constraint::Length(3)]).areas(area);
         let state = match data.people.online(&self.with) {
             Some(true) => " · online",
             Some(false) => " · away",
             None => "",
         };
         let dms = shown(data, &self.with);
-        let block = style::block(format!(" {}{state} ", self.with), focused && self.draft.is_none());
+        let block = style::block(format!(" {}{state} ", self.with), focused);
         if dms.is_empty() {
             let text = if data.live.stored_at.is_some() {
-                format!("no messages with {} yet: n writes one", self.with)
+                format!("no messages with {} yet: type one", self.with)
             } else {
                 "reading the stream…".to_owned()
             };
-            frame.render_widget(Paragraph::new(text).block(block), list);
+            frame.render_widget(Paragraph::new(text).block(block), area);
         } else {
-            let width = usize::from(list.width.saturating_sub(4));
-            let rows: Vec<ListItem> = dms.iter().map(|dm| row(data, dm, width, now)).collect();
-            let list_widget = List::new(rows).block(block).highlight_style(style::highlight(focused));
+            let width = usize::from(area.width.saturating_sub(4));
+            let rows: Vec<Text> = dms.iter().map(|dm| row(data, dm, width, now)).collect();
             let selected = self.selected.at(&dms.iter().map(|dm| dm.thread.clone()).collect::<Vec<_>>());
-            frame.render_stateful_widget(list_widget, list, &mut ListState::default().with_selected(Some(selected)));
+            let list_widget = style::list(rows, Some(selected), focused).block(block);
+            frame.render_stateful_widget(list_widget, area, &mut ListState::default().with_selected(Some(selected)));
         }
-        let (text, style) = match &self.draft {
-            Some(draft) => (format!("> {draft}_"), Style::new()),
-            None => (format!("n writes to {}, starting a thread", self.with), style::dim()),
-        };
-        let block = style::block(String::new(), focused && self.draft.is_some());
-        frame.render_widget(Paragraph::new(Line::styled(text, style)).block(block), input);
     }
 }
 
@@ -252,7 +209,9 @@ mod tests {
 
     use super::*;
     use crate::test_support::live::{at, message, user};
-    use crate::tui::model::{Focus, Page as View};
+    use crate::tui::exec::Job;
+    use crate::tui::input::{Typed, exercise};
+    use crate::tui::model::{Action, Focus};
     use crate::tui::nav;
     use crate::tui::test_support::model;
 
@@ -320,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn selecting_a_person_opens_the_dm_whose_threads_open_and_where_a_message_is_written() {
+    fn selecting_a_person_opens_the_dm_whose_threads_open_and_whose_bar_writes_to_them() {
         let thread = ThreadId::generate();
         let mut m = model();
         m.stored(vec![message(1, &thread, "bob", "alice", "hi")], at(1));
@@ -328,25 +287,22 @@ mod tests {
         assert_eq!((m.page().name(), m.focus), ("dm", Focus::View));
         assert_eq!(m.key(Key::Enter, at(2)), Some(Action::Open(thread)));
         m.key(Key::Esc, at(2));
-        m.key(Key::Char('n'), at(2));
-        for key in [Key::Char('q'), Key::Char('?'), Key::Char('x'), Key::Backspace, Key::Tab, Key::Char(' ')] {
-            assert_eq!(m.key(key, at(2)), None, "{key:?} goes to the message being written");
-        }
-        assert!(!m.help && m.focus == Focus::View);
-        let View::Dm(page) = m.page() else { panic!("not a DM") };
-        assert_eq!(page.keys(), Page::WRITING_KEYS);
-        let draft = Draft { to: user("bob"), text: "q? ".to_owned() };
-        assert_eq!(m.key(Key::Enter, at(2)), Some(Action::Send(draft)));
-        let View::Dm(page) = m.page() else { panic!("not a DM") };
-        assert_eq!(page.keys(), Page::KEYS, "sent, so no longer written");
+        let shown = crate::test_support::render::rendered(120, 32, |f| crate::tui::frame::draw(f, &m, at(2)));
+        assert!(!shown.contains("n writes to"), "no input of its own: {shown}");
+        assert_eq!(shown.matches("┌ > to bob on a new thread, sealed ─").count(), 1, "the bar writes to bob: {shown}");
 
-        m.key(Key::Char('n'), at(3));
-        assert_eq!(m.key(Key::Enter, at(3)), None, "nothing to send");
-        m.paste("see\r\nyou", at(3));
-        let draft = Draft { to: user("bob"), text: "see you".to_owned() };
-        assert_eq!(m.key(Key::Enter, at(3)), Some(Action::Send(draft)), "a paste is written on one line");
-        m.key(Key::Char('n'), at(3));
-        m.key(Key::Esc, at(3));
-        assert_eq!(m.key(Key::Char('q'), at(3)), Some(Action::Quit), "Esc dropped the message");
+        assert_eq!(m.key(Key::Char('n'), at(2)), None);
+        assert_eq!((m.bar.text().as_str(), m.bar.focused), ("n", true), "with nothing selected, a key is written");
+        m.key(Key::Ctrl('u'), at(2));
+        m.key(Key::Esc, at(2));
+        m.key(Key::Up, at(2));
+        assert_eq!(m.key(Key::Char('n'), at(2)), None);
+        assert!(m.bar.focused && m.bar.is_empty(), "with a thread selected, n focuses the bar");
+        let want = exercise(|typed| match typed {
+            Typed::Key(key) => _ = m.key(key, at(2)),
+            Typed::Paste(text) => m.paste(text, at(2)),
+        });
+        let ask = Job::Ask { to: user("bob"), thread: None, text: want.to_owned(), quote: None };
+        assert_eq!(m.key(Key::Enter, at(2)), Some(Action::Run(ask, want.to_owned())));
     }
 }

@@ -96,7 +96,7 @@ async fn both_readers_see_the_records_of_the_threads_starters_the_skills_and_the
     values.insert("files".into(), json!({"SKILL.md": "---\nname: release\ndescription: Cut a release.\n---\n"}));
     items.write(&[Write::Create { id: skill_id("release"), kind: SKILL.into(), values }], "test").await.unwrap();
     let writer = on(9);
-    let threads = (1..=6).map(|n| Covered { thread: on(n).thread, untrusted: n == 5 }).collect();
+    let threads = (1..=6).map(|n| Covered { thread: on(n).thread, untrusted: n == 5, review: false }).collect();
     let dream = begin(&*items, Start { threads, ..start(at(12), &writer) }).await.unwrap().unwrap();
 
     for reader in [ant(), Reader::Sage(user("dev-a"))] {

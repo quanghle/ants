@@ -198,7 +198,7 @@ async fn proposals_resting_on_untrusted_text_are_refused() {
     offer(&*items, &first, &[("1.1", false)]).await;
     let rejected = json!({"verdicts": [{"finding": "1.1", "verdict": "rejected", "reason": "Not now."}]});
     assert!(!tool(&sense, dream::dream, rejected, on(1, at(1))).await.is_error);
-    let covered = vec![Covered { thread: on(7, at(0)).thread, untrusted: true }];
+    let covered = vec![Covered { thread: on(7, at(0)).thread, untrusted: true, review: false }];
     let second = dream_on(&*items, at(25), 3, covered).await;
     offer(&*items, &second, &[("2.1", false), ("2.2", true)]).await;
     let dreaming = |arguments| async { tool(&sense, identity, arguments, on(3, at(26))).await };

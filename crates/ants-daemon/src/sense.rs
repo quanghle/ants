@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use ants_proto::provider::Provider;
 use ants_proto::{AntIdentity, Envelope, UserId};
+use ants_sense::store::{Items, StoreError};
 use anyhow::{Context as _, Result};
 
 pub mod log;
@@ -85,11 +86,47 @@ impl Sense {
         scheduler::serve(self.provider.clone(), self.wakers.clone(), config, machine, dreaming)
     }
 
+    /// The items of `ant`, synced; none when sense keeps none of its data, as the ant is still served without them.
+    /// Data kept but out of reach is an error, so that a message waits for its effects.
+    async fn kept(&self, ant: &UserId) -> Result<Option<Arc<dyn Items>>> {
+        match self.provider.synced(ant).await {
+            Ok(items) => Ok(Some(items)),
+            Err(StoreError::NotKept(_)) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Take `envelope`, a message from an ant to `ant`, if it is its sage's answer to the review of a dream: whether
-    /// the ant is to answer it, none when it is no such answer ([`scheduler::review_answer`]).
+    /// the ant is to answer it, none when it is no such answer or sense keeps none of the ant's data
+    /// ([`scheduler::review_answer`]).
     pub(crate) async fn review_answer(&self, ant: &UserId, envelope: &mut Envelope) -> Result<Option<bool>> {
-        let items = self.provider.synced(ant).await?;
+        let Some(items) = self.kept(ant).await? else { return Ok(None) };
         scheduler::review_answer(&*items, envelope).await
+    }
+
+    /// Note in the sense data of `sage` the review message `envelope` that arrived for it from an ant, if sense keeps
+    /// them ([`scheduler::review_received`]).
+    pub(crate) async fn review_received(&self, sage: &UserId, envelope: &Envelope) -> Result<()> {
+        let Some(items) = self.kept(sage).await? else { return Ok(()) };
+        scheduler::review_received(&*items, envelope).await
+    }
+
+    /// Note in the sense data of `sage` its answer `text` to the review message `request`, with what its thread `spent`
+    /// when known, if sense keeps them ([`scheduler::review_given`]).
+    pub(crate) async fn review_given(
+        &self,
+        sage: &UserId,
+        request: &Envelope,
+        text: &str,
+        spent: Option<crate::limits::caps::Spent>,
+    ) -> Result<()> {
+        let Some(items) = self.kept(sage).await? else { return Ok(()) };
+        // Saturates on a cost out of range, and a negative one counts as none.
+        let spent = spent.map(|spent| ants_sense::dream::ReviewSpend {
+            tokens: spent.tokens,
+            cost_micros: (spent.cost * 1e6).round() as u64,
+        });
+        scheduler::review_given(&*items, request, text, spent).await
     }
 
     /// Keep what `workload` puts in `ant`'s colony entry of its sense data current, until dropped: the profile of the

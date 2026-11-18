@@ -302,15 +302,20 @@ impl Inbox<'_> {
         joining: bool,
         text: String,
     ) -> (String, Option<Prepared>) {
+        let review = !joining && self.asks_review(incoming);
+        let Some(checkouts) = self.pool.checkouts().filter(|_| review) else { return (text, None) };
+        let prepared = self.acking(msg, checkouts.prepare(&incoming.envelope)).await;
+        (format!("{text}\n\n{}", prepared.note()), Some(prepared))
+    }
+
+    /// Whether `incoming` is a review an ant asked for: a message, not a post or a webhook's, narrowed to
+    /// [`ants_proto::REVIEW_ALLOW`].
+    pub(super) fn asks_review(&self, incoming: &Incoming) -> bool {
         let envelope = &incoming.envelope;
-        let review = !joining
-            && incoming.post.is_none()
+        incoming.post.is_none()
             && !envelope.webhook
             && !self.humans.sender_role(envelope).is_human()
-            && ants_proto::is_review(envelope.allow.as_deref());
-        let Some(checkouts) = self.pool.checkouts().filter(|_| review) else { return (text, None) };
-        let prepared = self.acking(msg, checkouts.prepare(envelope)).await;
-        (format!("{text}\n\n{}", prepared.note()), Some(prepared))
+            && ants_proto::is_review(envelope.allow.as_deref())
     }
 
     /// Why `incoming` is a review ([`ants_proto::REVIEW_ALLOW`]) that nothing would hold to read-only tools, unless it

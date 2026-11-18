@@ -10,10 +10,11 @@ use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{ListState, Paragraph};
 
 use super::attach;
+use super::command::Conversation;
 use super::exec::Job;
 use super::model::{Action, Data, Key, To};
 use super::select::Selection;
@@ -174,11 +175,9 @@ impl Page {
         Self { channel, selected: Selection::default(), mark: attach::Mark::default(), editor: None }
     }
 
-    pub const KEYS: &str =
-        "↑↓ post · Enter open its thread · ←→ tab · n notify level · M manage · o open file · ] next file · Esc nav";
-
-    pub fn keys(&self) -> &'static str {
-        self.editor.as_ref().map_or(Self::KEYS, members::Editor::keys)
+    /// The keys of the members editor, which takes every key, when it is open.
+    pub fn prompt(&self) -> Option<&'static str> {
+        self.editor.as_ref().map(members::Editor::keys)
     }
 
     /// Take `key` for the members editor when it is open: what to do, if anything.
@@ -298,15 +297,18 @@ impl Page {
             return;
         }
         let selected = self.at(data);
-        let items: Vec<ListItem> = posts
+        let items: Vec<Text> = posts
             .iter()
             .enumerate()
             .map(|(at, p)| {
                 let marked = (at == selected).then(|| self.mark.at(p.id, p.attachments.len()));
-                ListItem::new(post_lines(p, data, now, marked))
+                let inner = usize::from(area.width.saturating_sub(3));
+                Text::from(
+                    post_lines(p, data, now, marked).into_iter().map(|l| style::clip(l, inner)).collect::<Vec<_>>(),
+                )
             })
             .collect();
-        let list = List::new(items).block(block).highlight_style(style::highlight(focused));
+        let list = style::list(items, Some(selected), focused).block(block);
         frame.render_stateful_widget(list, area, &mut ListState::default().with_selected(Some(selected)));
         self.draw_editor(frame, head, tabs_row.union(area), data, now);
     }
@@ -344,6 +346,7 @@ fn post_lines(post: &Post, data: &Data, now: DateTime<Utc>, marked: Option<usize
         Span::styled(format!(" {} ", ago(post.at, now)), style::dim()),
         Span::raw(crate::text::excerpt(first, 200)),
     ]);
+    head.extend(data.drafts.mark(&Conversation::Thread(post.thread.clone())));
     let mut lines = vec![Line::from(head)];
     lines.extend(attach::lines(&post.attachments, marked, "  "));
     let state = data.state(&post.thread);
@@ -506,6 +509,7 @@ mod tests {
         let mut m = model();
         m.select(nav::Item::Channel(ops.clone()));
         let set = |level| Some(Action::Run(Job::ChannelNotify { channel: ops.clone(), level }, String::new()));
+        m.key(Key::Up, at(1));
         assert_eq!(m.key(Key::Char('n'), at(1)), set(ChannelNotify::Mentions));
         assert_eq!(m.data.level(&ops), ChannelNotify::Mentions, "shown before it is stored");
         assert_eq!(m.key(Key::Char('n'), at(1)), set(ChannelNotify::All));

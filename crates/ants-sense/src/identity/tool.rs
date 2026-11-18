@@ -18,7 +18,7 @@ use crate::persona::{self, MAX_FIELD_BYTES, MAX_PROFILE_BYTES};
 use crate::records::{self, Change, MAX_RECORD_BYTES, RELATIONSHIP, RecordItem};
 use crate::store::{Items, StoreError};
 use crate::tools::{Answer, MAX_REASON_CHARS};
-use crate::{Sense, skill, thread};
+use crate::{Sense, dream, skill, thread};
 
 /// The JSON Schema of `sense_identity`'s arguments.
 pub fn schema() -> Value {
@@ -146,17 +146,19 @@ async fn answer(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
     records::replace(&*items, context, change).await
 }
 
-/// Who the ant of `context` is: its card and experience, its persona and pending proposal, its self-model, its
+/// Who the ant of `context` is: its card, experience and review tally, its persona and pending proposal, its self-model, its
 /// relationship records by title and its skills by name.
 async fn show(items: &dyn Items, context: &CallContext) -> Result<Answer, Answer> {
     let card = super::card(items).await?;
     let experience = thread::experience::experience(items, &context.ant, TOP_EXPERIENCE).await?;
+    let reviews = dream::review_tally(items, TOP_EXPERIENCE).await?;
     let persona = persona::show(items).await?;
     let self_model = records::self_model(items).await?;
     let relationships = relationships(items).await?;
     let skills = skill::skills(items).await?;
 
-    let mut text = format!("## Identity\n{}", identity_text(card.as_ref(), &context.ant, experience.as_ref()));
+    let identity = identity_text(card.as_ref(), &context.ant, experience.as_ref(), reviews.as_ref());
+    let mut text = format!("## Identity\n{identity}");
     let _ = write!(text, "\n\n## Persona\n{}", persona.text);
     text.push_str("\n\n## Self-model\n");
     match &self_model {
@@ -182,6 +184,7 @@ async fn show(items: &dyn Items, context: &CallContext) -> Result<Answer, Answer
     let json = json!({
         "card": card,
         "experience": experience,
+        "reviews": reviews,
         "persona": persona.json["persona"],
         "pending": persona.json["pending"],
         "self_model": self_model.as_ref().map(RecordItem::json),

@@ -1,6 +1,7 @@
 //! The identity section of a review packet: who the ant is, for its sage and itself to judge the work against, and to
 //! judge against the work. It holds the persona and its pending proposal, the self-model, the relationship records of
-//! the humans and other ants who started the threads covered, as their thread records tell ([`thread::record`]), the
+//! the humans and other ants who started the threads covered, or asked the reviews among them, as their thread records
+//! tell ([`thread::record`]), the
 //! skills by name and description, and the experience since the review's start ([`experience_since`]). Once the
 //! threads are left out for room, it is cut to titles ([`Identity::titles`]).
 
@@ -86,8 +87,8 @@ async fn persona_part(identity: &mut Identity, items: &dyn Items) -> Result<(), 
     Ok(())
 }
 
-/// The relationship records of the humans and other ants who started the threads `dream` covers, the most recently
-/// active first, each once, with a line for each without one.
+/// The relationship records of the humans and other ants who started the threads `dream` covers, or asked the reviews
+/// among them, the most recently active first, each once, with a line for each without one.
 async fn relationships_part(
     identity: &mut Identity,
     items: &dyn Items,
@@ -101,8 +102,10 @@ async fn relationships_part(
         let Some(record) = thread::record::record(items, &covered.thread).await? else { continue };
         let scope = match record.origin.by {
             Starter::Human { user } => Scope::Human(user),
-            Starter::Ant { user } if !own.contains(&user) => Scope::Ant(user),
-            Starter::Ant { .. } | Starter::Webhook { .. } | Starter::Provider { .. } => continue,
+            Starter::Ant { user } | Starter::Review { user } if !own.contains(&user) => Scope::Ant(user),
+            Starter::Ant { .. } | Starter::Review { .. } | Starter::Webhook { .. } | Starter::Provider { .. } => {
+                continue;
+            }
         };
         if !people.contains(&scope) {
             people.push(scope);

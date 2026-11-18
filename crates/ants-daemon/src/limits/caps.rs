@@ -446,6 +446,12 @@ impl Ledger {
         .await
     }
 
+    /// What the ant spent on the thread since a human's last message on it.
+    pub async fn thread_spent(&self, thread: &ThreadId) -> Result<Spent> {
+        let spent: ThreadSpend = self.store.get(thread_spend_key(&self.ant, thread)).await?;
+        Ok(Spent { tokens: spent.tokens, cost: spent.cost })
+    }
+
     /// The reminder of the thread's escalation, if it has one.
     pub async fn reminder(&self, thread: &ThreadId) -> Result<Option<Reminder>> {
         let spent: ThreadSpend = self.store.get(thread_spend_key(&self.ant, thread)).await?;
@@ -875,6 +881,8 @@ mod tests {
         assert_eq!(day, Spent { tokens: 70, cost: 0.5 });
         let spent: ThreadSpend = store.get(thread_spend_key(&ant(), &thread(1))).await.unwrap();
         assert_eq!((spent.tokens, spent.cost), (70, 0.5));
+        assert_eq!(ledger.thread_spent(&thread(1)).await.unwrap(), Spent { tokens: 70, cost: 0.5 });
+        assert_eq!(ledger.thread_spent(&thread(2)).await.unwrap(), Spent::default(), "nothing spent on it");
     }
 
     #[tokio::test]

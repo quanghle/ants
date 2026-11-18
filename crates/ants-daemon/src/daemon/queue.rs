@@ -181,7 +181,8 @@ impl Inbox<'_> {
                     None => break,
                     Some(Err(e)) => tracing::warn!(error = %e, "inbox stream"),
                     Some(Ok(msg)) => {
-                        let Some(thread) = self.take_in(msg, &mut channels, &mut threads).await else { continue };
+                        let taken = Box::pin(self.take_in(msg, &mut channels, &mut threads)).await;
+                        let Some(thread) = taken else { continue };
                         ready = Some(vec![thread]);
                     }
                 }

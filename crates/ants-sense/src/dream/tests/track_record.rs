@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::time::Duration as Pause;
 
 use super::*;
@@ -150,6 +151,62 @@ async fn a_sage_reads_its_earlier_findings_with_their_verdicts_and_what_became_o
     let alone = packet(&*items, &current, &ant(), &[]).await.unwrap();
     assert!(alone.contains("## Verdicts on dream 3\n\n- 2.3 (sage): applied: Proposed a plainer voice."), "{alone}");
     assert!(!alone.contains("Earlier findings") && !alone.contains("follow_up"), "{alone}");
+}
+
+/// Vital signs of `threads` threads: `cancelled` prompts, `calls` tool calls `failed` of them, `rejected` tool
+/// requests and `tokens`.
+fn signs(threads: u32, cancelled: u32, (calls, failed): (u32, u32), rejected: u32, tokens: u64) -> Signs {
+    let calls = if calls == 0 { BTreeMap::new() } else { BTreeMap::from([("edit".into(), Tally { calls, failed })]) };
+    let prompts = Ends { replied: threads, cancelled, ..Ends::default() };
+    Signs { threads, prompts, calls, rejected, tokens, ..Signs::default() }
+}
+
+#[tokio::test]
+async fn a_finding_applied_three_dreams_ago_shows_the_signs_of_the_dreams_before_and_since_side_by_side() {
+    let (_, kept) = sense().await;
+    let items: Arc<dyn Items> = kept.clone();
+    let now = Utc::now();
+    let hours = |n: i64| now - Duration::hours(n);
+    let judged = hours(47);
+    let dream =
+        |number, at, vitals, findings, verdicts| Dream { vitals, ..reviewed(number, at, "sage", findings, verdicts) };
+    let earlier = [
+        // Beyond the 30 active days the track record covers, yet among the dreams before the finding.
+        dream(1, now - Duration::days(40), Some(signs(2, 3, (10, 5), 2, 20_000)), Vec::new(), Vec::new()),
+        dream(2, hours(96), None, Vec::new(), Vec::new()),
+        dream(3, hours(72), Some(signs(4, 1, (0, 0), 0, 40_000)), Vec::new(), Vec::new()),
+        dream(
+            4,
+            hours(48),
+            Some(signs(1, 2, (4, 1), 1, 5_000)),
+            vec![advised("4.1", "lesson", "Ask before a long run."), advised("4.2", "mistake", "Wrong branch.")],
+            vec![
+                verdict("4.1", Judgement::Applied, "Remembered.", &[], judged),
+                verdict("4.2", Judgement::Rejected, "It was right.", &[], judged),
+            ],
+        ),
+        dream(5, hours(36), Some(signs(3, 0, (20, 1), 0, 30_000)), Vec::new(), Vec::new()),
+        dream(6, hours(24), Some(Signs::default()), Vec::new(), Vec::new()),
+    ];
+    for dream in &earlier {
+        keep(&*items, dream).await;
+    }
+    let current = dream(7, now, Some(signs(2, 1, (10, 0), 0, 8_000)), Vec::new(), Vec::new());
+
+    let read = packet(&*items, &current, &Reader::Sage(user("dev-a")), &[]).await.unwrap();
+    let record = part(&read, "\n## Earlier findings of sage\n");
+    let applied = "- 4.1 (lesson): Ask before a long run.\n  Suggested action: Act on 4.1.\n  Verdict: applied: \
+                   Remembered.\n  Signs of dreams 1, 3, 4 before it was applied | 5, 6, 7 since: threads 2, 4, 1 | 3, \
+                   0, 2; prompts cancelled 3, 1, 2 | 0, 0, 1; tool calls failed 50%, -, 25% | 5%, -, 0%; tool requests \
+                   rejected 2, 0, 1 | 0, 0, 0; tokens a thread 10000, 10000, 5000 | 10000, -, 4000\n";
+    assert!(record.contains(applied), "{record}");
+    assert_eq!(record.matches("  Signs of dreams").count(), 1, "only the applied finding shows signs: {record}");
+    assert!(read.contains("a few threads make weak evidence"), "the instructions say so: {read}");
+
+    let early = dream(5, hours(36), None, Vec::new(), Vec::new());
+    let record = track_record(&*items, &early, &UserId::sage(), &user("dev-a")).await.unwrap();
+    let text = record.text(record.findings.len());
+    assert!(text.contains("before it was applied | none since: threads 2, 4, 1 | none;"), "{text}");
 }
 
 #[tokio::test]

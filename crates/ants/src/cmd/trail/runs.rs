@@ -198,6 +198,7 @@ fn starter(by: &Starter) -> String {
         Starter::Human { user } => format!("human {user}"),
         Starter::Ant { user } => format!("ant {user}"),
         Starter::Webhook { user } => format!("webhook {user}, untrusted"),
+        Starter::Review { user } => format!("ant {user}, asking a review, untrusted"),
         Starter::Provider { name } => format!("provider {name}"),
     }
 }

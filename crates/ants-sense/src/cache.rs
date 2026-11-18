@@ -13,9 +13,11 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::Value;
 
+use crate::dream::ReviewTally;
 use crate::home::Home;
 use crate::items::{BODY, Batch, Change, ITEM_EVENT, ITEMS_EVENT, Item, ItemId, Revision, TITLE, state_at};
 use crate::log::{Checked, Position};
+use crate::thread::calls::{self, Calls};
 use crate::thread::experience::{self, Experience};
 
 /// The schema's version, in `PRAGMA user_version`: a cache of another is built again.
@@ -278,6 +280,18 @@ impl Cache {
         top: usize,
     ) -> Result<Option<Experience>, CacheError> {
         experience::count(&self.db, own, since, top)
+    }
+
+    /// The tally of the reviews the items record, with the `top` kinds and ants ([`crate::dream::review_tally`]).
+    pub fn review_tally(&self, top: usize) -> Result<Option<ReviewTally>, CacheError> {
+        crate::dream::reviews::count(&self.db, top)
+    }
+
+    /// The calls of sense's tools the ant's threads made since `since`, pending writes too ([`crate::thread::calls`]).
+    pub fn calls(&self, since: DateTime<Utc>) -> Result<Vec<Calls>, CacheError> {
+        let pending = self.pending()?.into_iter().take(self.pending_ready()?);
+        let pending = pending.map(|pending| pending.revisions()).collect::<Result<Vec<_>, _>>()?;
+        calls::count(&self.db, &pending, since)
     }
 
     /// The items, of `kind` if given, whose title or body holds any word of `text`, the best matches first (BM25, a

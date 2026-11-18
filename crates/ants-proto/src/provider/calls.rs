@@ -62,7 +62,8 @@ pub struct CallContext {
 }
 
 impl CallContext {
-    /// Whether what the call writes can be trusted as the ant's own: not when its thread came from a webhook.
+    /// Whether what the call writes can be trusted as the ant's own: not when its thread came from a webhook or asks a
+    /// review.
     pub fn trusted(&self) -> bool {
         self.origin.trusted()
     }
@@ -78,9 +79,10 @@ pub struct Origin {
 }
 
 impl Origin {
-    /// Whether the thread's text comes from ants and humans of the bus: not from a webhook, which relays the outside.
+    /// Whether the thread's text comes from ants and humans of the bus: not from a webhook, which relays the outside,
+    /// nor from an ant asking a review, whose packet carries its threads, webhooks' among them.
     pub fn trusted(&self) -> bool {
-        !matches!(self.by, Starter::Webhook { .. })
+        !matches!(self.by, Starter::Webhook { .. } | Starter::Review { .. })
     }
 }
 
@@ -96,6 +98,10 @@ pub enum Starter {
     },
     /// A webhook or a schedule, relaying what came from outside the bus.
     Webhook {
+        user: UserId,
+    },
+    /// An ant asking the ant, its sage, to review a dream ([`crate::REVIEW_ALLOW`]): the ant under review.
+    Review {
         user: UserId,
     },
     /// A provider's wake request ([`super::method::WAKE`]), by the provider's name.
@@ -279,13 +285,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn webhook_threads_are_untrusted() {
+    fn webhook_and_review_threads_are_untrusted() {
         let by = |by| Origin { by, channel: None };
         let user = || "x".parse::<UserId>().unwrap();
         assert!(by(Starter::Human { user: user() }).trusted());
         assert!(by(Starter::Ant { user: user() }).trusted());
         assert!(by(Starter::Provider { name: "sense".to_owned() }).trusted());
         assert!(!by(Starter::Webhook { user: user() }).trusted());
+        assert!(!by(Starter::Review { user: user() }).trusted());
+        let review = json!({"by": {"kind": "review", "user": "x"}});
+        assert_eq!(serde_json::from_value::<Origin>(review).unwrap(), by(Starter::Review { user: user() }));
     }
 
     #[test]

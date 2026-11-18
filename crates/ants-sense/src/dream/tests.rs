@@ -4,7 +4,7 @@ use ants_proto::provider::{CallContext, Event, EventKind, Format, Output, Provid
 use serde_json::json;
 
 use super::*;
-use crate::memory::tests::{Kept, context, human, memory, sense, tool};
+use crate::memory::tests::{Kept, context, events, human, memory, sense, tool};
 use crate::memory::{Memory, Votes};
 
 fn on(thread: u8) -> CallContext {
@@ -325,6 +325,7 @@ fn thread(n: u8, bytes: usize, untrusted: bool) -> packet::Thread {
     packet::Thread {
         id: on(n).thread,
         untrusted,
+        review: false,
         started_by,
         text,
         timeline,
@@ -344,7 +345,7 @@ fn reviewing(threads: u8, findings: usize) -> Dream {
         sage: None,
         review: None,
         thread: None,
-        threads: (1..=threads).map(|n| Covered { thread: on(n).thread, untrusted: n == 2 }).collect(),
+        threads: (1..=threads).map(|n| Covered { thread: on(n).thread, untrusted: n == 2, review: false }).collect(),
         commits: vec![Commit { repo: "github.com/o/r".into(), commit: "abc123".into(), thread: Some(on(1).thread) }],
         findings: (1..=findings).map(finding).collect(),
         verdicts: Vec::new(),
@@ -474,5 +475,7 @@ fn a_thread_shows_what_was_done_with_it_besides_writing_before_its_history() {
 mod identity_findings;
 mod identity_section;
 mod review;
+mod reviews;
+mod sage_dream;
 mod track_record;
 mod vitals;

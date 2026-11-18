@@ -1,18 +1,19 @@
 //! The memories view of sense ([`ants_proto::provider::method::MEMORIES`]): what `ants ant memories` and the memories
 //! pane of the ant view show humans of who an ant has become. In order:
 //!
-//! 1. its identity: its card and experience;
-//! 2. its persona, with its pending proposal;
-//! 3. its self-model;
-//! 4. each relationship record;
-//! 5. its skills, by name and description;
-//! 6. its last dream: the title of its diary, with its verdict counts and the vital signs of its period;
-//! 7. its core memories, then its top [`DEFAULT_LIMIT`] memories of every scope, as `sense_recall` ranks them without
+//! 1. its identity: its card and experience, and the tally of the reviews it made as a sage;
+//! 2. its growth report ([`report`]): how its identity grew, in counts;
+//! 3. its persona, with its pending proposal;
+//! 4. its self-model;
+//! 5. each relationship record;
+//! 6. its skills, by name and description;
+//! 7. its last dream: the title of its diary, with its verdict counts and the vital signs of its period;
+//! 8. its core memories, then its top [`DEFAULT_LIMIT`] memories of every scope, as `sense_recall` ranks them without
 //!    a query.
 //!
 //! Each entry's key names its id, kind, scope and trust. The view is read from the ant's cache and writes nothing: it
 //! notes no session on the card. Its entries fit [`MEMORIES_CAP`], the ones left out counted by a last entry; an ant
-//! sense keeps no data of shows none.
+//! sense keeps no data of shows one entry reading [`NO_DATA`].
 
 use std::fmt::Write as _;
 
@@ -33,6 +34,10 @@ use crate::skill::{self, SKILL, skill_id};
 use crate::store::{Items, StoreError};
 use crate::thread::experience::experience;
 
+mod report;
+
+pub use report::{KEY as REPORT, NO_DATA};
+
 /// The key of the entry counting the entries left out.
 pub const LEFT_OUT: &str = "left out";
 
@@ -47,14 +52,16 @@ pub async fn memories(sense: &Sense, ant: AntRef) -> Result<MemoriesView, RpcErr
     };
     match read.await {
         Ok(entries) => Ok(MemoriesView { memories: capped(entries) }),
-        Err(StoreError::NotKept(_)) => Ok(MemoriesView::default()),
+        Err(StoreError::NotKept(_)) => Ok(MemoriesView { memories: vec![no_data()] }),
         Err(e) => Err(RpcError::unavailable(&e.to_string())),
     }
 }
 
 /// Every entry of the view of `ant`, its memories ranked at `now`.
 async fn entries(items: &dyn Items, ant: &UserId, now: DateTime<Utc>) -> Result<Vec<MemoryEntry>, StoreError> {
+    let Some(report) = report::report(items, ant, now).await? else { return Ok(vec![no_data()]) };
     let mut entries: Vec<_> = identity_entry(items, ant).await?.into_iter().collect();
+    entries.push(MemoryEntry { key: REPORT.to_owned(), content: report });
     entries.extend(persona_entry(items).await?);
     let records = records::self_model(items).await?.into_iter().chain(identity::relationships(items).await?);
     entries.extend(records.map(|found| split(&found.full())));
@@ -70,16 +77,22 @@ async fn entries(items: &dyn Items, ant: &UserId, now: DateTime<Utc>) -> Result<
     Ok(entries)
 }
 
-/// The card and experience of `ant`, under its sense id; none before either.
+/// The one entry of an ant sense keeps no data of.
+fn no_data() -> MemoryEntry {
+    MemoryEntry { key: REPORT.to_owned(), content: NO_DATA.to_owned() }
+}
+
+/// The card and experience of `ant`, and the tally of its reviews, under its sense id; none before any.
 async fn identity_entry(items: &dyn Items, ant: &UserId) -> Result<Option<MemoryEntry>, StoreError> {
     let card = card(items).await?;
     let experience = experience(items, ant, TOP_EXPERIENCE).await?;
-    if card.is_none() && experience.is_none() {
+    let reviews = dream::review_tally(items, TOP_EXPERIENCE).await?;
+    if card.is_none() && experience.is_none() && reviews.is_none() {
         return Ok(None);
     }
     Ok(Some(MemoryEntry {
         key: format!("{} (identity, self), trust self", items.sense().await),
-        content: identity_text(card.as_ref(), ant, experience.as_ref()),
+        content: identity_text(card.as_ref(), ant, experience.as_ref(), reviews.as_ref()),
     }))
 }
 
@@ -180,10 +193,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_ant_without_sense_data_shows_an_empty_view() {
-        assert_eq!(Sense::new().memories(of("dev-a")).await.unwrap(), MemoriesView::default());
+    async fn an_ant_without_sense_data_reads_no_sense_data() {
+        let none = MemoriesView { memories: vec![MemoryEntry { key: REPORT.into(), content: NO_DATA.into() }] };
+        assert_eq!(Sense::new().memories(of("dev-a")).await.unwrap(), none);
         let (sense, _) = sense().await;
-        assert_eq!(sense.memories(of("dev-a")).await.unwrap(), MemoriesView::default());
+        assert_eq!(sense.memories(of("dev-a")).await.unwrap(), none);
     }
 
     #[tokio::test]
@@ -237,6 +251,7 @@ mod tests {
         let card = identity::card(&*items).await.unwrap().unwrap();
         let expected = [
             format!("{} (identity, self), trust self", card.sense),
+            REPORT.to_owned(),
             format!("{} (persona, self), trust self, revision 1", persona_id()),
             "(self_model, self), trust self, revision 1".to_owned(),
             "(relationship, human:alice), trust self, revision 1".to_owned(),
@@ -251,17 +266,18 @@ mod tests {
         }
         let content = |n: usize| view.memories[n].content.as_str();
         assert!(content(0).starts_with("dev-a (sense identity "), "{}", content(0));
-        assert!(content(1).starts_with("Confirmed 2025-01-01T12:00:00Z: Asked for.\nVoice: Plain.\nProposal "));
-        assert!(content(1).ends_with("Voice: Terse."), "{}", content(1));
-        assert!(content(2).starts_with("A careful reviewer\nCareful.\nWritten "), "{}", content(2));
-        assert_eq!(content(4), "release: Cut a release.");
+        assert!(content(1).starts_with("Threads: none recorded.\nBy week from Monday (UTC)"), "{}", content(1));
+        assert!(content(2).starts_with("Confirmed 2025-01-01T12:00:00Z: Asked for.\nVoice: Plain.\nProposal "));
+        assert!(content(2).ends_with("Voice: Terse."), "{}", content(2));
+        assert!(content(3).starts_with("A careful reviewer\nCareful.\nWritten "), "{}", content(3));
+        assert_eq!(content(5), "release: Cut a release.");
         assert!(
-            content(5).starts_with("Dream 1: 1 findings, 0 applied, 0 rejected, 0 deferred, 1 unanswered\nBegan "),
+            content(6).starts_with("Dream 1: 1 findings, 0 applied, 0 rejected, 0 deferred, 1 unanswered\nBegan "),
             "{}",
-            content(5)
+            content(6)
         );
-        assert!(content(5).ends_with(".\nVital signs: 2 prompts (2 replied)."), "{}", content(5));
-        assert!(content(6).starts_with("Always rebase\nMerges hide history."), "{}", content(6));
+        assert!(content(6).ends_with(".\nVital signs: 2 prompts (2 replied)."), "{}", content(6));
+        assert!(content(7).starts_with("Always rebase\nMerges hide history."), "{}", content(7));
     }
 
     #[test]

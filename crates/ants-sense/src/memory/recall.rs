@@ -186,11 +186,12 @@ pub fn thread_repo(context: &CallContext) -> Option<Scope> {
     context.repo.as_deref().and_then(normalize_remote).map(Scope::Repo)
 }
 
-/// The scopes of the people of the thread of `context`: the human or ant who started it.
+/// The scopes of the people of the thread of `context`: the human or ant who started it, or the ant a review it asks of
+/// the ant, its sage, is of.
 pub fn participants(context: &CallContext) -> Vec<Scope> {
     match &context.origin.by {
         Starter::Human { user } => vec![Scope::Human(user.clone())],
-        Starter::Ant { user } => vec![Scope::Ant(user.clone())],
+        Starter::Ant { user } | Starter::Review { user } => vec![Scope::Ant(user.clone())],
         Starter::Webhook { .. } | Starter::Provider { .. } => Vec::new(),
     }
 }
@@ -504,6 +505,7 @@ fn starter(by: &Starter) -> String {
         Starter::Human { user } => format!("human {user}"),
         Starter::Ant { user } => format!("ant {user}"),
         Starter::Webhook { user } => format!("webhook {user}"),
+        Starter::Review { user } => format!("ant {user}, asking a review"),
         Starter::Provider { name } => format!("provider {name}"),
     }
 }

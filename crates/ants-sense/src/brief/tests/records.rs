@@ -54,3 +54,26 @@ async fn records_shorten_to_their_titles_and_cut_naming_the_record_to_read() {
 async fn items_of(sense: &Sense) -> Arc<dyn Items> {
     sense.items(&"dev-a".parse().unwrap()).await.unwrap()
 }
+
+#[tokio::test]
+async fn a_review_s_brief_shows_what_the_sage_keeps_of_the_ant_under_review_alone() {
+    let (sense, _) = sense().await;
+    record(&sense, "relationship", "ant:dev-b", "dev-b takes findings citing file and line.").await;
+    let fact = json!({"kind": "fact", "scope": "ant:dev-b", "title": "dev-b runs its tests twice", "body": "Flaky."});
+    call(&sense, memory::remember, THREAD, fact).await;
+    let lesson = json!({"kind": "lesson", "title": "Cite the commit", "body": "Every finding cites the commit."});
+    call(&sense, memory::remember, THREAD, lesson).await;
+    let review = async |ant: &str| {
+        let origin = Origin { by: Starter::Review { user: ant.parse().unwrap() }, channel: None };
+        let context = CallContext { origin, ..context(OTHER) };
+        sense.brief(BriefRequest { context, budget: 8_000, reason: BriefReason::Started }).await.unwrap().text
+    };
+
+    let of_b = review("dev-b").await;
+    position(&of_b, "(ant:dev-b, revision 1): ant:dev-b\n  dev-b takes findings citing file and line.");
+    position(&of_b, "dev-b runs its tests twice");
+    position(&of_b, "Cite the commit");
+    let of_c = review("dev-c").await;
+    assert!(!of_c.contains("dev-b takes findings") && !of_c.contains("dev-b runs its tests"), "{of_c}");
+    position(&of_c, "Cite the commit");
+}
