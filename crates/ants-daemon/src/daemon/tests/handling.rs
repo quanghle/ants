@@ -25,7 +25,7 @@ async fn a_failed_message_is_retried_before_the_rest_of_its_thread() {
 }
 
 #[tokio::test]
-async fn a_thread_is_told_started_by_its_first_message_only() {
+async fn a_thread_is_told_started_in_the_repository_of_the_workdir_by_its_first_message_only() {
     use ants_proto::provider::{EventKind, Origin, Starter};
 
     use crate::provider::events::{Lifecycle, tests};
@@ -33,7 +33,10 @@ async fn a_thread_is_told_started_by_its_first_message_only() {
     let provider = tests::Recording::taking_events();
     let outbox = tests::outbox_to(provider.clone()).await;
     let home = ants_test_support::scratch_dir("handling-lifecycle");
-    bus.lifecycle = Lifecycle::open(&outbox, &bus.dev, "id-1", &home).await;
+    let workdir = home.join("repo");
+    std::fs::create_dir_all(workdir.join(".git")).unwrap();
+    std::fs::write(workdir.join(".git/config"), "[remote \"origin\"]\n\turl = git@github.com:o/r.git\n").unwrap();
+    bus.lifecycle = Lifecycle::open(&outbox, &bus.dev, "id-1", &home).await.map(|l| l.with_workdir(workdir));
     let mut replies = bus.replies().await;
     let (launch, _, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
@@ -54,7 +57,8 @@ async fn a_thread_is_told_started_by_its_first_message_only() {
     let started = |thread: &ThreadId, user: &str| {
         let user = user.parse().unwrap();
         let by = if thread == &t1 { Starter::Human { user } } else { Starter::Ant { user } };
-        (Some(thread.clone()), EventKind::ThreadStarted { origin: Origin { by, channel: None } })
+        let repo = Some("github.com/o/r".to_owned());
+        (Some(thread.clone()), EventKind::ThreadStarted { origin: Origin { by, channel: None }, repo })
     };
     let mut told: Vec<_> =
         provider.got.locked().iter().map(|event| (event.thread.clone(), event.kind.clone())).collect();

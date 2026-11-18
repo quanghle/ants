@@ -89,7 +89,7 @@ pub fn built_in() -> &'static Sense {
 }
 
 /// Built-in sense of the process when `setting` names it.
-pub(crate) fn of(setting: &Setting) -> Option<&'static Sense> {
+pub fn of(setting: &Setting) -> Option<&'static Sense> {
     matches!(setting, Setting::Sense).then(built_in)
 }
 

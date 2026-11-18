@@ -1151,6 +1151,7 @@ fn provider_protocol() {
         EventKind::AntRevived,
         EventKind::ThreadStarted {
             origin: provider::Origin { by: Starter::Ant { user: user("dev-b") }, channel: None },
+            repo: Some("github.com/o/r".into()),
         },
         EventKind::ThreadDone,
         EventKind::ThreadExpired,

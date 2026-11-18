@@ -931,8 +931,13 @@ fn appending_keeps_the_file_as_it_was_and_checks_it() {
     add("dev-b").unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.starts_with(&format!("{old}\n\n[[ant]]\nname = \"dev-b\"")), "{text}");
-    let names: Vec<_> = load(&path).unwrap().ants.into_iter().map(|ant| ant.name.to_string()).collect();
-    assert_eq!(names, ["dev-a", "dev-b", "messenger", "sage"]);
+    let loaded = load(&path).unwrap().ants;
+    let names: Vec<_> = loaded.iter().filter(|ant| !ant.builtin).map(|ant| ant.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["dev-a", "dev-b"],
+        "besides the built-in ants, the sage among them only where the home holds its credentials"
+    );
 
     let err = format!("{:#}", add("dev-a").unwrap_err());
     assert!(err.contains("ant dev-a is listed twice"), "{err}");
