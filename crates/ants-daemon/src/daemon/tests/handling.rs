@@ -26,6 +26,40 @@ async fn a_failed_message_is_retried_before_the_rest_of_its_thread() {
     assert_eq!(bus.unacked().await, 0);
 }
 
+/// Sense keeping none of the ant's data, for want of a host connection, leaves the ant served: it answers another ant,
+/// and as a sage the review that ant asks of it, each message taken once.
+#[tokio::test]
+async fn an_ant_whose_sense_keeps_no_data_answers_other_ants_and_their_reviews() {
+    let Some((mut bus, _)) = Bus::start().await else { return };
+    let sense = crate::sense::Sense::new(crate::provider::wake::Wakers::default());
+    sense.serve(&bus.dev, &bus._server.dir().join("dev-a"), None);
+    bus.sense = Some(sense);
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let dev_b: UserId = "dev-b".parse().unwrap();
+    let mut to_dev_b = bus.client.subscribe(subject::inbox_of(&dev_b)).await.unwrap();
+    bus.client.flush().await.unwrap();
+    let (asked, reviewed) = (ThreadId::generate(), ThreadId::generate());
+    bus.send_from(dev_b.clone(), &asked, "hello").await;
+    let review = Envelope::on_thread(reviewed.clone(), dev_b, bus.dev.clone(), "review this")
+        .with_allow(Some(ants_proto::REVIEW_ALLOW.map(str::to_owned).to_vec()));
+    let last = bus::publish_json(&bus.js, review.subject(), &review, None).await.unwrap();
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let mut answered = [next_envelope(&mut to_dev_b).await.thread_id, next_envelope(&mut to_dev_b).await.thread_id];
+        answered.sort();
+        let mut expected = [asked.clone(), reviewed.clone()];
+        expected.sort();
+        assert_eq!(answered, expected);
+        bus.until_acked(last).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(log.locked().prompted, 2, "each message prompted once");
+    assert_eq!(bus.unacked().await, 0);
+}
+
 #[tokio::test]
 async fn a_thread_is_told_started_in_the_repository_of_the_workdir_by_its_first_message_only() {
     use ants_proto::provider::{EventKind, Origin, Starter};

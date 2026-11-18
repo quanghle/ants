@@ -93,7 +93,8 @@ vote or propose.
   `provider = "none"` for an ant meant to go without.
 - **Sense keeping none of the ant's data:** the daemon warns once per ant as it starts, and the ant's colony entry
   carries why (`sense_unkept`), which `ants colony` and `ants ant show` show; the ant is still served, without
-  memories, tasks or brief, as one whose external provider is down is.
+  memories, tasks or brief, as one whose external provider is down is. It still answers other ants, and as a sage
+  their reviews, keeping no record of them.
 - **Export and import:** `ants ant export` carries the log and skill files to another bus
   ([sense's part](config.md#senses-part)).
 - **Reviews:** a dream sent to the sage is a message from the ant on a review thread of its own. The sage's sense data
