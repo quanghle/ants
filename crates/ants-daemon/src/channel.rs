@@ -1072,6 +1072,7 @@ mod tests {
             capabilities: vec!["rust".to_owned(), "ci".to_owned()],
             whoami: Some("Keeps the build\ngreen.".to_owned()),
             profile: Some("Good for flaky\ntests.".to_owned()),
+            sense_unkept: None,
             workdir: None,
             started_at: now,
             heartbeat_at: now,

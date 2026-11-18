@@ -133,6 +133,7 @@ fn listed(name: &str, capabilities: &[&str]) -> ColonyEntry {
         capabilities: capabilities.iter().map(|c| (*c).to_owned()).collect(),
         whoami: None,
         profile: None,
+        sense_unkept: None,
         workdir: None,
         started_at: now,
         heartbeat_at: now,

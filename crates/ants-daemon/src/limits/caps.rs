@@ -203,11 +203,13 @@ impl Warning {
     }
 }
 
-/// What counting a harness's report found: the cap reached, if any, and the warnings due.
+/// What counting a harness's report found: the cap reached, if any, the warnings due, and the cost in US dollars the
+/// report added.
 #[derive(Debug, Default, PartialEq)]
 pub struct Recorded {
     pub reached: Option<String>,
     pub warnings: Vec<Warning>,
+    pub cost: f64,
 }
 
 /// Where a thread's escalation stands.
@@ -692,7 +694,7 @@ impl Ledger {
             self.pool_spent(daily, today).await
         };
         let reached = self.check(&spent, daily).or_else(|| pool.and_then(|(pool, spent, _)| check_pool(pool, spent)));
-        Ok(Recorded { reached, warnings })
+        Ok(Recorded { reached, warnings, cost })
     }
 
     /// What the ant's pool spent on `today`, `own` being the ant's share, and the pool's warnings given by any member.
@@ -933,7 +935,7 @@ mod tests {
         assert_eq!(recorded, Recorded::default(), "short of the warning share");
         let recorded = ledger.record_on(&t1, &Spend::Tokens(6), DAY).await.unwrap();
         let warning = Warning { key: "max_thread_tokens", pool: None, figure: "85/100 tokens".to_owned(), percent: 85 };
-        assert_eq!(recorded, Recorded { reached: None, warnings: vec![warning.clone()] });
+        assert_eq!(recorded, Recorded { reached: None, warnings: vec![warning.clone()], cost: 0.0 });
         assert!(!warning.daily());
         let text = warning.text(&ant(), &t1);
         assert!(text.starts_with("[ants] dev-a spent 85/100 tokens (85%) of max_thread_tokens on thread t1"), "{text}");
@@ -947,6 +949,7 @@ mod tests {
         assert_eq!(recorded.warnings.len(), 1, "a fresh allowance warns again");
 
         let recorded = ledger.record_on(&t1, &cost("s1", 1.7), DAY).await.unwrap();
+        assert!((recorded.cost - 1.7).abs() < 1e-9, "the cost the report added: {}", recorded.cost);
         let warning = Warning { key: "max_daily_cost", pool: None, figure: "1.70/2.00".to_owned(), percent: 85 };
         assert_eq!(recorded.warnings, std::slice::from_ref(&warning));
         assert!(warning.daily() && warning.text(&ant(), &t1).contains("today (UTC), last on thread t1"));
@@ -986,7 +989,7 @@ mod tests {
             figure: "85/100 tokens".to_owned(),
             percent: 85,
         };
-        assert_eq!(recorded, Recorded { reached: None, warnings: vec![warning.clone()] });
+        assert_eq!(recorded, Recorded { reached: None, warnings: vec![warning.clone()], cost: 0.0 });
         assert!(warning.daily());
         let text = warning.text(&b, &thread(2));
         assert!(text.starts_with("[ants] The ants added from template worker spent 85/100 tokens (85%)"), "{text}");

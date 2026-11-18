@@ -128,12 +128,7 @@ pub(super) fn check_ant_creds(ant: &Ant, now: u64) -> Check {
 pub(super) fn check_host(host: &config::HostSettings, ants: &[Ant], hostname: &str, now: u64) -> Check {
     let check = "host credentials";
     let machine = host.machine_or(hostname);
-    let issue = || {
-        vec![format!(
-            "ants auth host {machine} on the machine holding the team keys, then copy them to \
-             ~/.config/ants/auth/host.creds here, or name them in `creds` of [host]"
-        )]
-    };
+    let issue = || vec![issue_host(&machine)];
     let Some(path) = &host.creds else {
         if ants.iter().all(|ant| ant.creds.is_none()) {
             return Check::skip(check, "none, as no ant has any: the daemon records the machine's ants as no one");
@@ -151,6 +146,36 @@ pub(super) fn check_host(host: &config::HostSettings, ants: &[Ant], hostname: &s
         Ok(_) => check_creds(check, path, &finding, now),
         Err(e) => Check::fail(check, format!("{e:#}"), issue()),
     }
+}
+
+/// How to give `machine` host credentials.
+fn issue_host(machine: &Machine) -> String {
+    format!(
+        "ants auth host {machine} on the machine holding the team keys, then copy them to \
+         ~/.config/ants/auth/host.creds here, or name them in `creds` of [host]"
+    )
+}
+
+/// A failure when sense, the provider of some of `ants`, keeps none of their data: without host credentials, which it
+/// writes their logs with, where the ants have their own, on a server with authentication; `ants daemon` serves them
+/// without it, whole file or one ant (`--ant`) alike. Nothing where no ant uses sense or it keeps their data.
+pub(super) fn check_sense_kept(host: &config::HostSettings, ants: &[Ant], hostname: &str) -> Option<Check> {
+    let sensed: Vec<&str> = ants
+        .iter()
+        .filter(|a| a.provider_setting == ants_daemon::provider::Setting::Sense)
+        .map(|a| a.name.as_str())
+        .collect();
+    if sensed.is_empty() || host.creds.is_some() || ants.iter().all(|ant| ant.creds.is_none()) {
+        return None;
+    }
+    let detail = format!(
+        "sense keeps none of the data of {}: no host credentials, which it writes their logs with on a server with \
+         authentication; they are served without memories, tasks or brief",
+        sensed.join(", ")
+    );
+    let without = "provider = \"none\" in the [[ant]] table of an ant meant to go without, or at the top of the config \
+                   file for all of them";
+    Some(Check::fail("sense data", detail, vec![issue_host(&host.machine_or(hostname)), without.to_owned()]))
 }
 
 /// A warning when the config file's top-level `machine`, which names the machine in its ants' colony entries, is no

@@ -141,7 +141,10 @@ fn exercise_daemon(custom_tools: bool) {
              model=stub-model; effort=high; context=long_context\n",
         ]
     } else {
-        ["dev-a: stub: hello there\n", ""]
+        [
+            "dev-a: stub: [ants brief from sense]\n## Identity\ndev-a (sense identity ",
+            "- sense_brief: show this brief again.\n\nhello there\n",
+        ]
     };
     let [start, end] = expected;
     let found = stdout.find(start).is_some_and(|at| stdout[at + start.len()..].contains(end));
@@ -159,7 +162,8 @@ fn exercise_daemon(custom_tools: bool) {
         assert!(entry.get("whoami").is_none());
     }
 
-    // The identity record names the sense id the home keeps, none without built-in sense.
+    // The identity record names the sense id the home keeps: an ant served alone (`--ant`) keeps one too, sense
+    // linking on its own.
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let record = runtime.block_on(async {
         let (_, js) = ants_daemon::bus::connect(&server.url, None, None, &UserId::human(), "e2e").await.unwrap();
@@ -168,7 +172,7 @@ fn exercise_daemon(custom_tools: bool) {
     });
     let kept = std::fs::read_to_string(home.join(".sense/id")).ok();
     assert_eq!(record.sense.as_ref().map(SenseId::as_str), kept.as_deref().map(str::trim), "{record:?}");
-    assert_eq!(kept.is_some(), custom_tools, "only the ant with built-in sense keeps a sense id");
+    assert!(kept.is_some(), "an ant with built-in sense keeps a sense id");
 
     let shown = run(ants(&["ant", "show", "dev-a"]));
     let text = String::from_utf8_lossy(&shown.stdout);
@@ -252,7 +256,7 @@ fn exercise_daemon(custom_tools: bool) {
         let file = dir.join("message.md");
         std::fs::write(&file, "first line\n\n  indented\nlast\n").unwrap();
         let ask = run(ants(&["ask", "--wait", "@dev-a", "--file", file.to_str().unwrap()]));
-        let stdout = String::from_utf8_lossy(&ask.stdout);
+        let stdout = unbriefed(&String::from_utf8_lossy(&ask.stdout));
         assert!(stdout.contains("dev-a: stub: first line\n\n  indented\nlast\n"), "{stdout}\n{}", daemon_log());
         #[cfg(unix)]
         {
@@ -262,7 +266,7 @@ fn exercise_daemon(custom_tools: bool) {
             let mut edit = ants(&["ask", "--wait", "--edit", "@dev-a"]);
             edit.env_remove("VISUAL").env("EDITOR", &editor);
             let ask = run(edit);
-            let stdout = String::from_utf8_lossy(&ask.stdout);
+            let stdout = unbriefed(&String::from_utf8_lossy(&ask.stdout));
             assert!(stdout.contains("dev-a: stub: from the\n  editor\n"), "{stdout}\n{}", daemon_log());
             let mut cancel = ants(&["ask", "--edit", "@dev-a"]);
             cancel.env("VISUAL", "true");

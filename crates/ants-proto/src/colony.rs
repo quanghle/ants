@@ -39,6 +39,11 @@ pub struct ColonyEntry {
     /// which its humans write. Missing for an ant without sense and for one whose persona holds no profile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    /// Why sense, the ant's provider, keeps none of the ant's data on `machine`, such as no host credentials there on
+    /// a server with authentication: the ant is served with no identity and no memory, sense's tools refusing. Missing
+    /// while sense keeps them and for an ant without sense.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sense_unkept: Option<String>,
     /// Directory the harness works in, on `machine`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workdir: Option<String>,
@@ -291,6 +296,7 @@ mod tests {
             capabilities: vec!["rust".to_owned(), "nats".to_owned()],
             whoami: Some("Maintain the Rust backend.\nReview NATS changes.".to_owned()),
             profile: None,
+            sense_unkept: None,
             workdir: None,
             started_at: Utc::now(),
             heartbeat_at: Utc::now(),
@@ -331,7 +337,7 @@ mod tests {
         assert!(!json.contains("signed_out") && !json.contains("limited") && !json.contains("failing"), "{json}");
         assert!(!json.contains("agent") && !json.contains("fallback") && !json.contains("memory_low"), "{json}");
         assert!(!json.contains("model") && !json.contains("paused") && !json.contains("sage"), "{json}");
-        assert!(!json.contains("profile"), "{json}");
+        assert!(!json.contains("profile") && !json.contains("sense_unkept"), "{json}");
         assert_eq!(serde_json::from_str::<ColonyEntry>(&json).unwrap(), entry);
         assert_eq!(entry.leader(), None);
         let agent = HarnessAgent { name: "copilot-agent".to_owned(), version: "1.0.3".to_owned() };
@@ -344,6 +350,8 @@ mod tests {
         round_trips(&ColonyEntry { sage: Some(p("lead")), ..entry.clone() }, r#""sage":"lead""#);
         let profiled = ColonyEntry { profile: Some("Good for Rust daemons.".to_owned()), ..entry.clone() };
         round_trips(&profiled, r#"Review NATS changes.","profile":"Good for Rust daemons.","started_at""#);
+        let unkept = ColonyEntry { sense_unkept: Some("no host credentials".to_owned()), ..entry.clone() };
+        round_trips(&unkept, r#"NATS changes.","sense_unkept":"no host credentials","started_at""#);
         let busy = ColonyEntry { activity: Activity::Working, handling: 2, harnesses: 1, ..entry.clone() };
         round_trips(&busy, r#""activity":"working","handling":2,"harnesses":1"#);
         assert_eq!(AntModel::of(None, None, None), None);
@@ -403,6 +411,7 @@ mod tests {
             "activity":"idle","handling":0,"harnesses":0,"version":"0.3.1","perms":1}"#;
         let entry: ColonyEntry = serde_json::from_str(minimal).unwrap();
         assert!(entry.escalate_to.is_empty() && entry.sage.is_none() && entry.profile.is_none());
+        assert_eq!(entry.sense_unkept, None);
         assert_eq!((entry.agent, entry.whoami, entry.workdir), (None, None, None));
         assert_eq!((entry.signed_out, entry.limited, entry.failing), (None, None, None));
         assert_eq!((entry.fallback, entry.memory_low, entry.model, entry.paused), (None, None, None, None));

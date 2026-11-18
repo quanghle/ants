@@ -351,7 +351,7 @@ impl Connected<'_> {
                     .flatten();
                 let _ = reply.send(match limited {
                     Some(limited) => Err(limited.into()),
-                    None => Ok(Reply { text, cut }),
+                    None => Ok(Reply { text, cut, rebuilt: false }),
                 });
             }
             Some(Err(e)) if cut.is_none() => {
@@ -362,7 +362,7 @@ impl Connected<'_> {
             // Cancelled, but the harness failed or did not end the prompt: stop it, the prompt is over.
             _ => {
                 tracing::warn!(session = %id, "{} did not end a cancelled prompt; stopping it", self.launch.harness);
-                let _ = reply.send(Ok(Reply { text, cut }));
+                let _ = reply.send(Ok(Reply { text, cut, rebuilt: false }));
                 return Ok(ControlFlow::Break(()));
             }
         }
