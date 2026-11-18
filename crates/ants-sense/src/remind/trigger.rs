@@ -2,8 +2,7 @@ use chrono::{DateTime, Datelike, Duration, NaiveTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::Condition;
-use crate::store::StoreError;
+use super::{Condition, RemindError};
 
 /// The most seconds of an `after` trigger: a year.
 pub const MAX_AFTER_SECONDS: u64 = 365 * 24 * 60 * 60;
@@ -50,24 +49,22 @@ impl Trigger {
         }
     }
 
-    pub(crate) fn first(&self, now: DateTime<Utc>) -> Result<DateTime<Utc>, StoreError> {
+    pub(crate) fn first(&self, now: DateTime<Utc>) -> Result<DateTime<Utc>, RemindError> {
         match self {
             Self::At { at } => Ok(*at),
             Self::After { seconds } => super::add(now, Duration::seconds(*seconds as i64)),
             Self::Condition { .. } => Ok(now),
-            _ => self.next(now)?.ok_or_else(|| StoreError::Unavailable("no recurring deadline".into())),
+            _ => self.next(now)?.ok_or_else(no_time),
         }
     }
 
-    pub(crate) fn next(&self, now: DateTime<Utc>) -> Result<Option<DateTime<Utc>>, StoreError> {
+    pub(crate) fn next(&self, now: DateTime<Utc>) -> Result<Option<DateTime<Utc>>, RemindError> {
         let (time, weekday) = match self {
             Self::Daily { time, .. } => (time, None),
-            Self::Weekly { time, weekday, .. } => {
-                (time, Some(weekday_number(weekday).map_err(StoreError::Unavailable)?))
-            }
+            Self::Weekly { time, weekday, .. } => (time, Some(weekday_number(weekday).map_err(RemindError::Trigger)?)),
             _ => return Ok(None),
         };
-        let time = clock(time).map_err(StoreError::Unavailable)?;
+        let time = clock(time).map_err(RemindError::Trigger)?;
         for days in 0..=7 {
             let date = super::add(now, Duration::days(days))?.date_naive();
             if weekday.is_some_and(|wanted| date.weekday().num_days_from_monday() != wanted) {
@@ -78,8 +75,12 @@ impl Trigger {
                 return Ok(Some(candidate));
             }
         }
-        Err(StoreError::Unavailable("no recurring deadline".into()))
+        Err(no_time())
     }
+}
+
+fn no_time() -> RemindError {
+    RemindError::Trigger("The trigger has no time to come.".into())
 }
 
 fn clock(time: &str) -> Result<NaiveTime, String> {

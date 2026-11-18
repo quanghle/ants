@@ -360,7 +360,9 @@ async fn read(items: &dyn Items, id: &ItemId, history: bool, context: &CallConte
     if let Some(found) = items.get(id).await?.and_then(RecordItem::of) {
         if history {
             return Err(Answer::invalid(format!(
-                "{id} is a record, replaced in place: history needs the id of a memory."
+                "{id} is a record, replaced in place: history needs the id of a memory; sense_identity with history \
+                 and who {} shows the record's revisions.",
+                found.record.scope
             )));
         }
         let json = json!({"note": NOTE, "record": found.json()});
