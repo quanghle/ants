@@ -344,13 +344,25 @@ impl Chat {
         if *dirty || drawn.elapsed() >= REDRAW {
             self.model.look(Utc::now());
             self.model.follow_drafts();
+            if self.model.data.history.unsaved() {
+                self.model.keep_history();
+            }
             terminal.draw(|f| frame::draw(f, &self.model, Utc::now())).context("drawing")?;
             (*dirty, *drawn) = (false, Instant::now());
         }
         Ok(ControlFlow::Continue(()))
     }
 
+    /// Show the UI until it quits, the bar's history and drafts taken from the device and kept there.
     async fn run(mut self, terminal: &mut DefaultTerminal) -> Result<()> {
+        let kept = catchup::state_path().ok().map(|path| path.with_file_name(command::HISTORY_FILE));
+        self.model.load_history(kept);
+        let ran = self.serve(terminal).await;
+        self.model.keep_history();
+        ran
+    }
+
+    async fn serve(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         let mut ticks = tokio::time::interval(TICK);
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let (mut dirty, mut drawn, mut logged, started) = (true, Instant::now(), None, Instant::now());

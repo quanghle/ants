@@ -137,6 +137,9 @@ impl Model {
 
     /// What the bar's title says Enter does with the text as it stands.
     pub fn bar_title(&self) -> String {
+        if let Some(searching) = self.data.history.searching() {
+            return searching;
+        }
         match &self.bar.noting {
             Some(Note::Reject(request)) => {
                 format!("reject {} with a note to {}", crate::tools::qualified(request), request.ant)

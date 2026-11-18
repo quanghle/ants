@@ -21,11 +21,13 @@ use crate::{live, tools};
 
 mod bar;
 mod drafts;
+mod history;
 mod parse;
 mod route;
 
 pub use bar::{Bar, Draft, Edited, Note, Tone};
 pub use drafts::{Conversation, Drafts};
+pub use history::{FILE as HISTORY_FILE, History};
 pub use parse::{COMMANDS, Command, Goto, Slash, parse};
 pub use route::Route;
 
@@ -56,11 +58,15 @@ impl Model {
             self.bar.focused = true;
             return Some(None);
         }
+        if self.history_key(key) {
+            return Some(None);
+        }
         if self.complete_key(key) {
             return Some(None);
         }
         let before = self.bar.text();
         let edited = self.bar.key(key);
+        self.escaped(key, now);
         if self.bar.text() != before {
             self.bar.pick = complete::Pick::default();
         }
@@ -103,6 +109,7 @@ impl Model {
                 return None;
             }
         };
+        self.push_history(&text);
         self.bar.set_text("");
         self.bar.list = false;
         self.bar.status = None;

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use ants_proto::{ChannelId, ThreadId, UserId};
 use ratatui::style::Style;
 use ratatui::text::Span;
+use serde::{Deserialize, Serialize};
 
 use super::Draft;
 use crate::tui::model::{Model, Page};
@@ -15,7 +16,8 @@ use crate::tui::style;
 const MARK: &str = " ✎";
 
 /// What the bar's text belongs to.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Conversation {
     /// No conversation: home, work and the other lists.
     #[default]
@@ -67,6 +69,11 @@ impl Drafts {
     pub fn sent(&mut self, text: &str) -> Option<Conversation> {
         let at = self.sending.iter().position(|(sending, _)| sending == text)?;
         Some(self.sending.remove(at).1)
+    }
+
+    /// The drafts of the conversations not shown.
+    pub fn kept(&self) -> impl Iterator<Item = (&Conversation, &Draft)> {
+        self.kept.iter()
     }
 
     /// Keep `draft` for `conversation` unless it holds one already: whether it was kept.

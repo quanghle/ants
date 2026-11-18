@@ -99,6 +99,18 @@ impl Draft {
     pub fn is_empty(&self) -> bool {
         self.chars.is_empty() && self.quoting.is_none() && self.noting.is_none()
     }
+
+    /// The text, its pastes in full.
+    pub fn text(&self) -> String {
+        let paste = |c: &char| self.pastes.get(usize::try_from(u32::from(*c).checked_sub(PASTED)?).ok()?);
+        self.chars.iter().fold(String::new(), |mut text, c| {
+            match paste(c) {
+                Some(paste) => text.push_str(paste),
+                None => text.push(*c),
+            }
+            text
+        })
+    }
 }
 
 /// What Enter does with the note in the bar on a tool request.

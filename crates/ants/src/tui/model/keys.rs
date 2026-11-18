@@ -17,6 +17,9 @@ impl Model {
         if key == Key::Interrupt {
             return Some(Action::Quit);
         }
+        if self.esc_again(key, now) {
+            return None;
+        }
         if self.asking.as_ref().is_some_and(Asking::takes_keys) && !self.help {
             return self.answer(key, now);
         }
