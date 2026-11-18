@@ -241,6 +241,7 @@ pub async fn entry(config: &Config) -> ColonyEntry {
         handling: 0,
         harnesses: 0,
         escalate_to: config.policy.escalation.escalate_to.clone(),
+        sage: config.policy.sage.clone(),
         version: ANTS_VERSION.to_owned(),
         perms: PERMISSIONS_VERSION,
         signed_out: None,
@@ -711,6 +712,7 @@ mod tests {
             handling: 0,
             harnesses: 0,
             escalate_to: Vec::new(),
+            sage: None,
             version: ANTS_VERSION.to_owned(),
             perms: PERMISSIONS_VERSION,
             signed_out: None,
@@ -723,6 +725,26 @@ mod tests {
             drift: Vec::new(),
             mcp: false,
         }
+    }
+
+    #[tokio::test]
+    async fn the_entry_names_the_sage_the_ant_s_config_and_shared_settings_resolve() {
+        use crate::config::{Ant, Sage};
+        use crate::profile::shared::Roles;
+
+        let harnesses = crate::harness::Harnesses::builtin();
+        let sage_of = async |ant: Ant| super::entry(&ant.into_config("nats://unused", &harnesses).unwrap()).await.sage;
+        let mut dev_a = Ant::new("dev-a".parse().unwrap(), "/".into());
+        dev_a.harness = Some("copilot".to_owned());
+        dev_a.machine = Some("m1".to_owned());
+        assert_eq!(sage_of(dev_a.clone()).await, Some(UserId::sage()), "the default");
+        let shared = Roles { sage: Some(Sage::Ant("lead".parse().unwrap())), ..Roles::default() };
+        assert_eq!(sage_of(shared.overlay(dev_a.clone())).await, Some("lead".parse().unwrap()), "shared settings'");
+        dev_a.sage = Some(Sage::None);
+        assert_eq!(sage_of(dev_a.clone()).await, None, "reviews off");
+        dev_a.sage = None;
+        dev_a.is_sage = true;
+        assert_eq!(sage_of(dev_a).await, None, "a sage has none");
     }
 
     #[test]

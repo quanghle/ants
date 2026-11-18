@@ -52,6 +52,11 @@ pub struct ColonyEntry {
     /// leads. Published so any daemon can follow the chain while the ant is offline.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub escalate_to: Vec<UserId>,
+    /// The ant reviewing this one, its sage, as the ant's config and shared settings resolve it. Missing for a sage,
+    /// which has none of its own, and where reviews are off. Published so a daemon tells its ant is some live ant's
+    /// sage, sending none of its review packets then, as a sage is reviewed by no one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sage: Option<UserId>,
     /// The version of ants the daemon runs ([`ANTS_VERSION`]).
     pub version: String,
     /// The permissions version of the ants the daemon runs ([`PERMISSIONS_VERSION`]).
@@ -288,6 +293,7 @@ mod tests {
             handling: 0,
             harnesses: 0,
             escalate_to: Vec::new(),
+            sage: None,
             version: "0.3.1".to_owned(),
             perms: PermissionsVersion(2),
             signed_out: None,
@@ -319,7 +325,7 @@ mod tests {
         assert!(!json.contains("workdir") && !json.contains("escalate_to"), "{json}");
         assert!(!json.contains("signed_out") && !json.contains("limited") && !json.contains("failing"), "{json}");
         assert!(!json.contains("agent") && !json.contains("fallback") && !json.contains("memory_low"), "{json}");
-        assert!(!json.contains("model") && !json.contains("paused"), "{json}");
+        assert!(!json.contains("model") && !json.contains("paused") && !json.contains("sage"), "{json}");
         assert_eq!(serde_json::from_str::<ColonyEntry>(&json).unwrap(), entry);
         assert_eq!(entry.leader(), None);
         let agent = HarnessAgent { name: "copilot-agent".to_owned(), version: "1.0.3".to_owned() };
@@ -329,6 +335,7 @@ mod tests {
         let chained = ColonyEntry { escalate_to: vec![p("lead"), p("dev-b")], ..entry.clone() };
         round_trips(&chained, r#""escalate_to":["lead","dev-b"]"#);
         assert_eq!(chained.leader(), Some(&p("lead")));
+        round_trips(&ColonyEntry { sage: Some(p("lead")), ..entry.clone() }, r#""sage":"lead""#);
         let busy = ColonyEntry { activity: Activity::Working, handling: 2, harnesses: 1, ..entry.clone() };
         round_trips(&busy, r#""activity":"working","handling":2,"harnesses":1"#);
         assert_eq!(AntModel::of(None, None, None), None);
@@ -387,7 +394,7 @@ mod tests {
             "started_at":"2026-01-01T00:00:00Z","heartbeat_at":"2026-01-01T00:00:10Z",
             "activity":"idle","handling":0,"harnesses":0,"version":"0.3.1","perms":1}"#;
         let entry: ColonyEntry = serde_json::from_str(minimal).unwrap();
-        assert!(entry.escalate_to.is_empty());
+        assert!(entry.escalate_to.is_empty() && entry.sage.is_none());
         assert_eq!((entry.agent, entry.whoami, entry.workdir), (None, None, None));
         assert_eq!((entry.signed_out, entry.limited, entry.failing), (None, None, None));
         assert_eq!((entry.fallback, entry.memory_low, entry.model, entry.paused), (None, None, None, None));

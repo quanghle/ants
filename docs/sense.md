@@ -438,12 +438,14 @@ what the review reads and records what the ant decides. A dream begins when:
 
 A dormant identity begins no dream, and a standby taking the ant over begins none sooner.
 
-**Who reviews:** when the ant names a sage other than itself ([The sage](config.md#the-sage)) and a daemon serves it
+**Who reviews:** when the ant names a sage other than itself ([The sage](config.md#the-sage)), a daemon serves it
 (its colony entry live and not paused, and, unless a fallback answers for it, its harness neither signed out, nor
-failing to start, nor held by a provider limit past 6 hours), the review packet goes to the sage as a message from the
-ant on a new review thread. Otherwise, as for an ant with `sage = "none"` (which turns reviews off, not dreams) and the
-built-in messenger and sage, the daemon wakes the ant on a new thread with the packet alone. The packet, at most
-64 KiB, holds:
+failing to start, nor held by a provider limit past 6 hours) and no live colony entry of another ant names the ant as
+its `sage`, the review packet goes to the sage as a message from the ant on a new review thread. Otherwise, as for an
+ant with `sage = "none"` (which turns reviews off, not dreams) and the built-in messenger and sage, the daemon wakes the
+ant on a new thread with the packet alone. Each colony entry names the sage its ant's config and shared settings
+resolve, so an ant made a sage only by another machine's config or by shared settings (`ants ant set dev-a sage=lead`)
+is reviewed by no one either, for as long as a daemon serves the ant naming it. The packet, at most 64 KiB, holds:
 
 - the verdicts on the last dream's findings;
 - the findings, at most 20, each with an id `<dream>.<n>`: memories with both `helpful` and `stale` votes since the
