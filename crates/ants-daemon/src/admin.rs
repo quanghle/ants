@@ -450,9 +450,11 @@ async fn apply(
         AdminOp::McpSignIn { server, callback } => {
             mcp::apply(orders, order, Some((server, callback.as_deref())), stored_at).await
         }
-        AdminOp::StopTrail { run } => trail::apply(orders, order, TrailAction::Stop { run: run.clone() }).await,
+        AdminOp::StopTrail { run } => {
+            Box::pin(trail::apply(orders, order, TrailAction::Stop { run: run.clone() })).await
+        }
         AdminOp::ResumeTrail { run, limits } => {
-            trail::apply(orders, order, TrailAction::Resume { run: run.clone(), limits: *limits }).await
+            Box::pin(trail::apply(orders, order, TrailAction::Resume { run: run.clone(), limits: *limits })).await
         }
     })
 }

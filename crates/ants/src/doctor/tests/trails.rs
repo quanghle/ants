@@ -25,6 +25,7 @@ fn record(conductor: &str, state: RunState, hours: i64, now: DateTime<Utc>) -> T
         args: serde_json::Value::Null,
         owner: Some(p("alice")),
         thread: ThreadId::generate(),
+        parent: None,
         origin: Origin { by: Starter::Human { user: p("alice") }, channel: None },
         limits: TrailLimits::default(),
         state,

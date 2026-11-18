@@ -5,8 +5,8 @@ use std::path::Path;
 use ants_proto::provider::{Origin, Starter};
 use ants_proto::{
     CallAnswer, JournalEntry, PendingCall, QueuedCall, Role, RunId, RunState, StepStage, TRAIL_RUNS_BUCKET, ThreadId,
-    TrailFunction, TrailLimits, TrailRun, TrailRunIndex, TrailSession, TrailStepThread, UserId, Uuid, trail_call_key,
-    trail_runs_index_key, trail_session_key, trail_step_key,
+    TrailFunction, TrailLimits, TrailParent, TrailRun, TrailRunIndex, TrailSession, TrailStepThread, UserId, Uuid,
+    trail_call_key, trail_runs_index_key, trail_session_key, trail_step_key,
 };
 use async_nats::jetstream;
 use chrono::{TimeDelta, Utc};
@@ -233,6 +233,7 @@ fn record(conductor: &UserId, trail: Option<&str>, state: RunState, started: chr
         args: json!({"branch": "main"}),
         owner: Some(p("alice")),
         thread: ThreadId::generate(),
+        parent: None,
         origin: Origin { by: Starter::Human { user: p("alice") }, channel: None },
         limits: TrailLimits::default(),
         state,
@@ -243,6 +244,34 @@ fn record(conductor: &UserId, trail: Option<&str>, state: RunState, started: chr
         updated_at: started,
         ended_at: None,
     }
+}
+
+#[test]
+fn a_child_run_shows_the_call_it_answers_and_a_trail_call_its_child() {
+    let now = Utc::now();
+    let parent = record(&p("dev-a"), Some("release"), RunState::Waiting, now);
+    let mut child = record(&p("dev-a"), Some("review"), RunState::Running, now);
+    child.parent = Some(TrailParent { run: parent.run.clone(), call: 1, origin_thread: parent.thread.clone() });
+    let call = PendingCall {
+        call: 1,
+        function: TrailFunction::Trail,
+        args: json!({"name": "review", "args": {"pr": 7}}),
+        to: p("dev-a"),
+        thread: child.thread.clone(),
+        message: child.run.as_str().parse().unwrap(),
+        sent_at: now,
+        sent: true,
+        turn_budget: 0,
+        retries: 0,
+    };
+    let shown = |run: &TrailRun, pending: Vec<PendingCall>| {
+        runs::render(&runs::Detail { run: run.clone(), pending, queued: Vec::new(), journal: Vec::new() }, now)
+    };
+    let text = shown(&child, Vec::new());
+    assert!(text.contains(&format!("\nchild run answering call 1 of run {}\n", parent.run)), "{text}");
+    let text = shown(&parent, vec![call]);
+    let row = format!("  1  trail  run {}  sent 0s ago  thread {}  trail review\n", child.run, child.thread);
+    assert!(text.contains(&row) && !text.contains("child run answering"), "{text}");
 }
 
 /// Put `value` under `key` of [`TRAIL_RUNS_BUCKET`], as the conductor owning the key does.

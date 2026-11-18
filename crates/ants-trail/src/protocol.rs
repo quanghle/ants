@@ -85,6 +85,8 @@ pub enum Function {
     Agent,
     /// `human(questions)`: args `{"questions"}`.
     Human,
+    /// `trail(name, args=None)`: args `{"name", "args"?}`, answered by a run of the trail saved as `name`.
+    Trail,
 }
 
 impl Function {
@@ -93,6 +95,7 @@ impl Function {
         match self {
             Self::Agent => "agent",
             Self::Human => "human",
+            Self::Trail => "trail",
         }
     }
 }

@@ -1,7 +1,8 @@
 //! Where a run reports what it does, on its own thread: its start, what its script reports (phase(), log()) and what
 //! arrives on its steps' threads answering no call, as thread notes of the conductor; each step starting and ending, as
 //! status events of the conductor on the run's thread ([`StatusUpdate::Step`]); and its end, as a message to its
-//! owner. Reports are best effort: one that fails is logged, never failing the run.
+//! owner, or, for a child run, whose parent reports, as a note. Reports are best effort: one that fails is logged,
+//! never failing the run.
 
 use std::fmt::Write as _;
 
@@ -25,7 +26,11 @@ impl Trails {
     /// Tell the start of `run`, a run of the trail `meta` describes, in the notes of its thread, suggesting a title
     /// for the thread.
     pub(super) async fn report_start(&self, run: &TrailRun, meta: &Meta) {
-        let text = format!("Run {} of trail {} started: {}", run.run, meta.name, meta.description);
+        let answering = run
+            .parent
+            .as_ref()
+            .map_or_else(String::new, |parent| format!(", answering call {} of run {}", parent.call, parent.run));
+        let text = format!("Run {} of trail {} started{answering}: {}", run.run, meta.name, meta.description);
         let title: String = format!("trail {}: {}", meta.name, meta.description)
             .chars()
             .map(|c| if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') { ' ' } else { c })
@@ -68,9 +73,11 @@ impl Trails {
     pub(super) fn report_step(&self, run: &TrailRun, step: &PendingCall, stage: StepStage) {
         tracing::info!(run = %run.run, call = step.call, to = %step.to, thread = %step.thread, stage = stage.as_str(),
             "trail step");
-        let label = (step.function == TrailFunction::Agent)
-            .then(|| steps::AgentArgs::of(&step.args).ok().and_then(|args| args.label))
-            .flatten();
+        let label = match step.function {
+            TrailFunction::Agent => steps::AgentArgs::of(&step.args).ok().and_then(|args| args.label),
+            TrailFunction::Trail => steps::TrailArgs::of(&step.args).ok().map(|args| format!("trail {}", args.name)),
+            TrailFunction::Human => None,
+        };
         let update = StatusUpdate::Step {
             run: run.run.clone(),
             call: step.call,
@@ -109,10 +116,13 @@ impl Trails {
     }
 
     /// Tell the end of `run` to its owner, else the default human, on the run's thread: its result, its error, or who
-    /// stopped it.
+    /// stopped it; a child run's in the notes of its thread, its parent telling the owner.
     pub(super) async fn report_end(&self, run: &TrailRun) {
         tracing::info!(run = %run.run, state = ?run.state, steps = run.steps, turns = run.turns, "trail run ended");
         let Some(text) = end_text(run) else { return };
+        if run.parent.is_some() {
+            return self.note(run, &clip(&text, MAX_NOTE), None).await;
+        }
         let to = self.inner.humans.owner_or_default(run.owner.as_ref());
         let message =
             Envelope::on_thread(run.thread.clone(), self.inner.ant.clone(), to, text).with_owner(run.owner.clone());

@@ -313,6 +313,7 @@ mod tests {
             args: json!(null),
             owner: Some(alice.clone()),
             thread: start.thread.clone(),
+            parent: None,
             origin: Origin { by: Starter::Human { user: alice.clone() }, channel: None },
             limits: TrailLimits::DEFAULT,
             state: RunState::Running,

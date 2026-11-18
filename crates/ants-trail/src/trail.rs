@@ -14,8 +14,8 @@ pub const SCRIPT_NAME: &str = "trail.py";
 const MAX_WAYPOINTS: usize = 32;
 const PRELUDE_NAME: &str = "<prelude>";
 
-/// The trail API, defined before the script runs. The `__ants_*` externals are answered by the worker: agent and
-/// human suspend the run on a future, phase and log return at once.
+/// The trail API, defined before the script runs. The `__ants_*` externals are answered by the worker: agent, human
+/// and trail suspend the run on a future, phase and log return at once.
 const PRELUDE: &str = r#"import asyncio
 
 async def agent(prompt, ant=None, capability=None, schema=None, label=None):
@@ -24,6 +24,10 @@ async def agent(prompt, ant=None, capability=None, schema=None, label=None):
 
 async def human(questions):
     return await __ants_human({"questions": questions})
+
+async def trail(name, args=None):
+    request = {"name": name, "args": args}
+    return await __ants_trail({k: v for k, v in request.items() if v is not None})
 
 def phase(title):
     __ants_phase(str(title))
@@ -45,7 +49,8 @@ def pipeline(items, *stages):
 "#;
 
 /// The script's inputs, in this order.
-pub(crate) const INPUTS: [&str; 5] = ["args", "__ants_agent", "__ants_human", "__ants_phase", "__ants_log"];
+pub(crate) const INPUTS: [&str; 6] =
+    ["args", "__ants_agent", "__ants_human", "__ants_trail", "__ants_phase", "__ants_log"];
 
 /// A trail's description, the literal `meta = {"name": …, "description": …, "phases": […], "waypoints": […]}` it
 /// starts with, `"waypoints"` optional.

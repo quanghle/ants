@@ -1316,6 +1316,44 @@ fn admin_orders_of_trails() {
 }
 
 #[test]
+fn trail_child_runs() {
+    let child = TrailRun {
+        run: "019a7d2e-0000-7000-8000-000000000007".parse().unwrap(),
+        conductor: user("planner"),
+        trail: Some("review".parse().unwrap()),
+        script: "await agent('review it', ant='dev-a')".to_owned(),
+        args: serde_json::json!({"pr": 7}),
+        owner: Some(user("alice")),
+        thread: other_thread(),
+        parent: Some(TrailParent { run: run(), call: 2, origin_thread: thread() }),
+        origin: provider::Origin { by: provider::Starter::Human { user: user("alice") }, channel: Some(channel()) },
+        limits: TrailLimits { steps: 20, ..TrailLimits::DEFAULT },
+        state: RunState::Running,
+        phase: None,
+        steps: 1,
+        turns: 1,
+        started_at: at(4),
+        updated_at: at(5),
+        ended_at: None,
+    };
+    snap("trail_run_child", &child);
+    let call = PendingCall {
+        call: 2,
+        function: TrailFunction::Trail,
+        args: serde_json::json!({"args": {"pr": 7}, "name": "review"}),
+        to: user("planner"),
+        thread: other_thread(),
+        message: id(7),
+        sent_at: at(4),
+        sent: true,
+        turn_budget: 0,
+        retries: 0,
+    };
+    assert_eq!(call.child(), Some(child.run), "a trail() call's message is its child run's id");
+    snap("trail_child_call", &call);
+}
+
+#[test]
 fn trails() {
     snap(
         "envelope_step",
@@ -1341,6 +1379,7 @@ fn trails() {
         args: serde_json::json!({"version": "1.2.0"}),
         owner: Some(user("alice")),
         thread: thread(),
+        parent: None,
         origin: provider::Origin { by: provider::Starter::Human { user: user("alice") }, channel: Some(channel()) },
         limits: TrailLimits { steps: 20, ..TrailLimits::DEFAULT },
         state: RunState::Done { result: serde_json::json!({"tag": "v1.2.0"}) },

@@ -156,6 +156,7 @@ pub(super) fn function(function: TrailFunction) -> &'static str {
     match function {
         TrailFunction::Agent => "agent",
         TrailFunction::Human => "human",
+        TrailFunction::Trail => "trail",
     }
 }
 
@@ -189,8 +190,11 @@ pub(crate) fn table(runs: &[TrailRun], now: DateTime<Utc>) -> String {
     super::columns(&rows)
 }
 
-/// What a call asks, in short: its label, else its prompt or questions.
+/// What a call asks, in short: its label, else its prompt or questions, or the trail it runs.
 pub(super) fn gist(args: &Value) -> String {
+    if let Some(trail) = args.get("name").and_then(Value::as_str) {
+        return excerpt(&format!("trail {trail}"), 60);
+    }
     let text = ["label", "prompt", "questions"]
         .iter()
         .find_map(|key| args.get(key))
@@ -235,6 +239,9 @@ pub(super) fn render(detail: &Detail, now: DateTime<Utc>) -> String {
         r.thread,
         starter(&r.origin.by)
     );
+    if let Some(parent) = &r.parent {
+        let _ = writeln!(out, "child run answering call {} of run {}", parent.call, parent.run);
+    }
     let _ = match &r.state {
         RunState::Stopped { by } => writeln!(out, "state: stopped by {by}"),
         RunState::Done { result } => writeln!(out, "state: done, result: {result}"),
@@ -275,7 +282,7 @@ pub(super) fn render(detail: &Detail, now: DateTime<Utc>) -> String {
                 [
                     c.call.to_string(),
                     function(c.function).to_owned(),
-                    format!("to {}", c.to),
+                    c.child().map_or_else(|| format!("to {}", c.to), |child| format!("run {child}")),
                     format!("sent {}", ago(c.sent_at, now)),
                     format!("thread {}", c.thread),
                     gist(&c.args),
@@ -304,6 +311,7 @@ pub(super) fn render(detail: &Detail, now: DateTime<Utc>) -> String {
                 let whom = match e.function {
                     TrailFunction::Agent => whom(&e.args),
                     TrailFunction::Human => r.owner.as_ref().map_or_else(|| "-".to_owned(), ToString::to_string),
+                    TrailFunction::Trail => r.conductor.to_string(),
                 };
                 [e.call.to_string(), function(e.function).to_owned(), whom, gist(&e.args), answer]
             })

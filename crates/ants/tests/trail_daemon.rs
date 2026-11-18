@@ -33,6 +33,9 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+#[path = "trail_daemon/children.rs"]
+mod children;
+
 const META: &str = "meta = {\"name\": \"t\", \"description\": \"a test\", \"phases\": [\"one\"]}\n";
 
 fn ant(name: &str) -> UserId {

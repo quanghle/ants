@@ -147,6 +147,22 @@ fn the_call_past_the_step_limit_raises() {
 }
 
 #[test]
+fn a_trail_call_is_a_step_counted_against_the_limit() {
+    let script = "first = await trail('review', args={'pr': 7})\ntry:\n    await trail('lint')\nexcept RuntimeError as e:\n    r = str(e)\n[first, r]\n";
+    let limits = Limits { steps: 1, ..Limits::default() };
+    let started = start(script, limits);
+    let first = calls(&started);
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].function, Function::Trail);
+    assert_eq!(first[0].args, json!({"name": "review", "args": {"pr": 7}}));
+    let done = resume_with(&started, &[(first[0].call, Answer::Ok(json!("ok")))], limits, 1);
+    assert_eq!(result(done), json!(["ok", "the run reached its limit of 1 steps"]));
+
+    let started = start("await trail('lint')\n", Limits::default());
+    assert_eq!(calls(&started)[0].args, json!({"name": "lint"}));
+}
+
+#[test]
 fn a_step_argument_json_cannot_hold_raises_type_error() {
     let error = error(start("await agent({1, 2})\n", Limits::default()));
     assert!(error.ends_with("TypeError: agent() takes JSON values: a set is not a JSON value"), "{error}");
