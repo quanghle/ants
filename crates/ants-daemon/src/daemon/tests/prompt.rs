@@ -21,6 +21,32 @@ async fn replies_are_redacted() {
 }
 
 #[tokio::test]
+async fn a_review_nothing_holds_to_read_only_tools_is_declined_unprompted() {
+    let Some((bus, _)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let agy = crate::harness::Harnesses::builtin().get("antigravity").unwrap();
+    let pool = Pool::new(launch.with_harness(agy), SessionStore::memory(), 2, IDLE);
+    let dev_b: UserId = "dev-b".parse().unwrap();
+    let mut to_dev_b = bus.client.subscribe(subject::inbox_of(&dev_b)).await.unwrap();
+    bus.client.flush().await.unwrap();
+    let review = Envelope::on_thread(ThreadId::generate(), dev_b, bus.dev.clone(), "review this")
+        .with_allow(Some(ants_proto::REVIEW_ALLOW.map(str::to_owned).to_vec()));
+    bus::publish_json(&bus.js, review.subject(), &review, None).await.unwrap();
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let text = next_envelope(&mut to_dev_b).await.text;
+        assert!(
+            text.starts_with("[ants] dev-a declines the review: harness antigravity runs its tools unasked"),
+            "{text}"
+        );
+        assert_eq!(log.locked().starts, 0, "not prompted");
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+}
+
+#[tokio::test]
 async fn a_human_s_summary_request_is_prompted_as_one_and_the_reply_carries_it_with_its_tokens() {
     let Some((bus, mut to_human)) = Bus::start().await else { return };
     let (launch, log, _) = fake::launch();

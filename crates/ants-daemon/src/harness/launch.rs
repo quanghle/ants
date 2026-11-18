@@ -106,6 +106,20 @@ impl Launch {
         self.harness.bypasses_permissions()
     }
 
+    /// The same launch, for sessions reviewing for a sage: on the harness's review variant ([`Harness::reviewing`]),
+    /// answering permission requests held to [`ants_proto::REVIEW_ALLOW`] ([`PermissionPolicy::for_review`]). None
+    /// when the harness runs its tools unasked and sets no review.
+    pub fn for_review(&self) -> Option<Self> {
+        let harness = Arc::new(self.harness.reviewing()?);
+        let policy = self.policy.for_review(self.harness.bypasses_permissions());
+        Some(Self { harness, policy, ..self.clone() }.reporting())
+    }
+
+    /// Why a review is declined on the harness it starts ([`Harness::unheld_review`]).
+    pub fn unheld_review(&self) -> Option<String> {
+        self.harness.unheld_review()
+    }
+
     /// The same launch, for sessions serving `thread`.
     #[must_use]
     pub fn for_thread(&self, thread: &ThreadId) -> Self {
@@ -184,6 +198,7 @@ impl Launch {
             env: BTreeMap::new(),
             mode: None,
             bypass_permissions: false,
+            review: None,
             context: BTreeMap::new(),
             sign_in: None,
             entra_client_id: None,
