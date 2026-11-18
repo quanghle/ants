@@ -6,7 +6,9 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use ants_proto::ToolCall;
+use ants_sense::remind::{Condition, FileEvent, IssueState, PrState, SenseEvent};
 use ants_sense::store::Items;
+use ants_sense::{promise, task};
 use anyhow::{Context as _, Result, bail};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
@@ -31,7 +33,7 @@ pub(super) struct Observation {
 }
 
 pub(super) async fn evaluate(
-    condition: &Value,
+    condition: &Condition,
     previous: Option<&Value>,
     context: &Context<'_>,
 ) -> Result<Observation> {
@@ -40,19 +42,19 @@ pub(super) async fn evaluate(
         .context("condition check exceeded 30 seconds")?
 }
 
-async fn probe(condition: &Value, previous: Option<&Value>, context: &Context<'_>) -> Result<Observation> {
-    let (fired, value, reason) = match text(condition, "kind")? {
-        "gh_pr" => {
-            let repo = text(condition, "repo")?;
-            let number = positive(condition, "number")?.to_string();
+async fn probe(condition: &Condition, previous: Option<&Value>, context: &Context<'_>) -> Result<Observation> {
+    let (fired, value, reason) = match condition {
+        Condition::GhPr { repo, number, state } => {
+            let repo = arg(repo, "repo")?;
+            let number = positive(*number, "number")?.to_string();
             let output =
                 output("gh", &["pr", "view", &number, "--repo", repo, "--json", "state,mergedAt,reviews"], context)
                     .await?;
             let value: Value = serde_json::from_slice(&output).context("reading gh's pull request state")?;
-            let fired = match text(condition, "state")? {
-                "merged" => value["mergedAt"].as_str().is_some_and(|at| !at.is_empty()),
-                "closed" => value["state"] == "CLOSED" || value["state"] == "MERGED",
-                "reviewed" => value["reviews"].as_array().is_some_and(|reviews| {
+            let fired = match state {
+                PrState::Merged => value["mergedAt"].as_str().is_some_and(|at| !at.is_empty()),
+                PrState::Closed => value["state"] == "CLOSED" || value["state"] == "MERGED",
+                PrState::Reviewed => value["reviews"].as_array().is_some_and(|reviews| {
                     reviews.iter().any(|review| {
                         matches!(
                             review["state"].as_str(),
@@ -60,52 +62,49 @@ async fn probe(condition: &Value, previous: Option<&Value>, context: &Context<'_
                         )
                     })
                 }),
-                _ => bail!("unknown pull request condition"),
             };
             (fired, json!(fired), "GitHub pull request condition matched")
         }
-        "gh_workflow" => {
-            let repo = text(condition, "repo")?;
-            let run = positive(condition, "run")?.to_string();
+        Condition::GhWorkflow { repo, run } => {
+            let repo = arg(repo, "repo")?;
+            let run = positive(*run, "run")?.to_string();
             let output = output("gh", &["run", "view", &run, "--repo", repo, "--json", "status"], context).await?;
             let value: Value = serde_json::from_slice(&output).context("reading gh's workflow state")?;
             let fired = value["status"] == "completed";
             (fired, value["status"].clone(), "GitHub workflow run finished")
         }
-        "bd" => {
-            let id = text(condition, "id")?;
-            let fired = match text(condition, "state")? {
-                "closed" => {
+        Condition::Bd { id, state } => {
+            let id = arg(id, "id")?;
+            let fired = match state {
+                IssueState::Closed => {
                     let output = output("bd", &["show", id, "--json"], context).await?;
                     let value: Value = serde_json::from_slice(&output).context("reading bd's issue state")?;
                     value["status"] == "closed"
                 }
-                "ready" => {
+                IssueState::Ready => {
                     let output = output("bd", &["ready", "--json"], context).await?;
                     let value: Value = serde_json::from_slice(&output).context("reading bd's ready issues")?;
                     value.as_array().is_some_and(|issues| issues.iter().any(|issue| issue["id"] == id))
                 }
-                _ => bail!("unknown bd condition"),
             };
             (fired, json!(fired), "bd issue condition matched")
         }
-        "git" => {
-            let commit = text(condition, "commit")?;
-            let reference = text(condition, "reference")?;
+        Condition::Git { commit, reference } => {
+            let commit = arg(commit, "commit")?;
+            let reference = arg(reference, "reference")?;
             let fired = status("git", &["merge-base", "--is-ancestor", commit, reference], context).await?;
             (fired, json!(fired), "commit reached the git reference")
         }
-        "file" => {
-            let value = file(text(condition, "path")?, context.workdir).await?;
-            let fired = match text(condition, "event")? {
-                "appeared" => !value.is_null(),
-                "changed" => previous.is_some_and(|previous| previous != &value),
-                _ => bail!("unknown file condition"),
+        Condition::File { path, event } => {
+            let value = file(arg(path, "path")?, context.workdir).await?;
+            let fired = match event {
+                FileEvent::Appeared => !value.is_null(),
+                FileEvent::Changed => previous.is_some_and(|previous| previous != &value),
             };
             (fired, value, "file condition matched")
         }
-        "command" => {
-            let command = text(condition, "command")?;
+        Condition::Command { command } => {
+            let command = arg(command, "command")?;
             let tool = ToolCall {
                 kind: "execute".into(),
                 title: command.into(),
@@ -121,50 +120,29 @@ async fn probe(condition: &Value, previous: Option<&Value>, context: &Context<'_
             let fired = status("cmd.exe", &["/D", "/S", "/C", command], context).await?;
             (fired, json!(fired), "command exited successfully")
         }
-        "sense" => {
-            let fired = sense_event(condition, context).await?;
+        Condition::Sense { event, id } => {
+            let fired = match event {
+                SenseEvent::CommitmentOverdue => promise::overdue(context.items, id.as_ref(), context.now).await?,
+                SenseEvent::LeaseExpired => task::lease_expired(context.items, id.as_ref(), context.now).await?,
+            };
             (fired, json!(fired), "sense event condition matched")
         }
-        _ => bail!("unknown condition kind"),
     };
     Ok(Observation { fired, value, reason })
 }
 
-async fn sense_event(condition: &Value, context: &Context<'_>) -> Result<bool> {
-    let kind = match text(condition, "event")? {
-        "commitment_overdue" => "promise",
-        "lease_expired" => "task",
-        _ => bail!("unknown sense event condition"),
-    };
-    let items = context.items.list(kind, usize::MAX).await?;
-    let id = condition.get("id").and_then(Value::as_str);
-    Ok(items.iter().any(|item| {
-        if id.is_some_and(|id| item.id.as_str() != id) {
-            return false;
-        }
-        if kind == "promise" {
-            item.text("status") == "open" && due(item.values.get("due"), context.now)
-        } else {
-            item.text("status") == "in_progress"
-                && due(item.values.get("lease").and_then(|lease| lease.get("expires_at")), context.now)
-        }
-    }))
-}
-
-fn due(value: Option<&Value>, now: DateTime<Utc>) -> bool {
-    value.and_then(Value::as_str).and_then(|at| at.parse::<DateTime<Utc>>().ok()).is_some_and(|at| at <= now)
-}
-
-fn text<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
-    let text = value.get(field).and_then(Value::as_str).filter(|text| !text.is_empty());
-    match text {
-        Some(text) if !text.starts_with('-') && !text.contains('\0') => Ok(text),
-        _ => bail!("condition needs a valid {field}"),
+fn arg<'a>(text: &'a str, field: &str) -> Result<&'a str> {
+    if text.is_empty() || text.starts_with('-') || text.contains('\0') {
+        bail!("condition needs a valid {field}");
     }
+    Ok(text)
 }
 
-fn positive(value: &Value, field: &str) -> Result<u64> {
-    value.get(field).and_then(Value::as_u64).filter(|number| *number > 0).context(format!("condition needs {field}"))
+fn positive(number: u64, field: &str) -> Result<u64> {
+    if number == 0 {
+        bail!("condition needs {field}");
+    }
+    Ok(number)
 }
 
 fn command(program: &str, args: &[&str], context: &Context<'_>, capture: bool) -> Command {

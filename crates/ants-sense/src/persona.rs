@@ -10,9 +10,9 @@ use std::fmt::Write as _;
 use ants_proto::provider::CallContext;
 use serde_json::{Value, json};
 
-use crate::items::{Item, ItemId, Values};
+use crate::items::{Item, ItemId, Values, stamp};
 use crate::memory::{holds_recalled_marker, redacted, sanitized};
-use crate::proposal::{self, Proposal, ProposalItem, Status, time};
+use crate::proposal::{self, Confirmation, Proposal, ProposalItem, Status, time};
 use crate::sanitize::{Limit, Redaction, sanitize_body};
 use crate::store::{Items, StoreError};
 use crate::tools::Answer;
@@ -50,6 +50,12 @@ pub async fn current(items: &dyn Items) -> Result<Option<Item>, StoreError> {
 /// The profile of the confirmed persona in `items`: what the ant published to the colony; none without one.
 pub async fn profile(items: &dyn Items) -> Result<Option<String>, StoreError> {
     Ok(current(items).await?.and_then(|persona| Some(persona.values.get(PROFILE)?.as_str()?.to_owned())))
+}
+
+/// The headings of the fields the persona `values` holds, in the order shown.
+pub fn headings(values: &Values) -> Vec<&'static str> {
+    let held = FIELDS.iter().filter(|(field, _)| values.get(*field).is_some_and(|value| !value.is_null()));
+    held.map(|(_, heading)| *heading).collect()
 }
 
 /// The fields of the persona `values` holds, one paragraph each under its heading.
@@ -116,7 +122,6 @@ pub(crate) async fn propose(
     for (field, _) in FIELDS {
         version.entry((*field).to_owned()).or_insert(Value::Null);
     }
-    version.insert("reason".into(), json!(reason));
     let made = Proposal {
         target: persona_id(),
         kind: PERSONA.into(),
@@ -174,13 +179,16 @@ pub(crate) async fn show(items: &dyn Items) -> Result<Answer, Answer> {
     let current = current(items).await?;
     let pending = proposal::pending_for(items, &persona_id()).await?;
     let mut text = match &current {
-        Some(current) => format!(
-            "Persona, revision {}, confirmed {}: {}\n{}",
-            current.revision,
-            current.text("confirmed"),
-            current.text("reason"),
-            self::text(&current.values)
-        ),
+        Some(current) => {
+            let confirmation = Confirmation::of(&current.values);
+            let confirmed = confirmation.confirmed.map_or_default(stamp);
+            let reason = confirmation.reason;
+            format!(
+                "Persona, revision {}, confirmed {confirmed}: {reason}\n{}",
+                current.revision,
+                self::text(&current.values)
+            )
+        }
         None => "No persona yet: propose one with sense_identity, giving values, voice, boundaries, working_style or \
                  profile and a reason."
             .to_owned(),
@@ -204,7 +212,7 @@ pub(crate) async fn history(items: &dyn Items) -> Result<Answer, Answer> {
     let mut text = format!("{} versions of the persona, the newest first:", versions.len());
     let mut json = Vec::new();
     for (revision, at, values) in versions.iter().rev() {
-        let reason = values.get("reason").and_then(Value::as_str).unwrap_or_default();
+        let reason = Confirmation::of(values).reason;
         let _ = write!(
             text,
             "\n- Revision {revision}, {}: {reason}\n  {}",

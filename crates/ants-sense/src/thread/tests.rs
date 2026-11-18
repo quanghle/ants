@@ -5,8 +5,8 @@ use ants_proto::{SenseId, UserId};
 
 use super::*;
 use crate::cache::Cache;
-use crate::items::{BODY, TITLE};
 use crate::log::{AccountVerifier, AntLog, MemoryLog, NoRevocations, Unsigned};
+use crate::memory::WRITER;
 use crate::store::{Store, Stores};
 
 /// The items of one ant, the same at each call.
@@ -124,14 +124,11 @@ async fn a_handoff_keeps_the_work_and_an_episode_memory_written_by_the_call_s_co
     assert_eq!(writer["origin"]["by"], json!({"kind": "webhook", "user": "hook"}));
 
     let episode = items.get(&handoff.episode.unwrap()).await.unwrap().unwrap();
-    assert_eq!(
-        (episode.kind.as_str(), episode.text("type"), episode.text("trust")),
-        ("memory", "episode", "untrusted")
-    );
-    assert_eq!(episode.text(TITLE), "Handoff of thread t1: wrote the parser");
-    assert!(episode.text(BODY).contains("In flight:\n- the lexer\n"), "{}", episode.text(BODY));
-    assert_eq!((&episode.values[WRITER], &episode.values["status"]), (writer, &json!("active")));
     let memory = crate::memory::Memory::of(&episode).unwrap();
+    assert_eq!((memory.kind, memory.trust), (MemoryKind::Episode, crate::memory::Trust::Untrusted));
+    assert_eq!(memory.title, "Handoff of thread t1: wrote the parser");
+    assert!(memory.body.contains("In flight:\n- the lexer\n"), "{}", memory.body);
+    assert_eq!((json!(memory.writer), memory.status), (writer.clone(), crate::memory::Status::Active));
     assert_eq!((memory.scope.to_string(), memory.importance, memory.core), ("self".into(), 3, false));
     let (episode, handoff) = (items.history(&episode.id).await.unwrap(), items.history(&item.id).await.unwrap());
     assert_eq!(episode[0].sequence, handoff[0].sequence, "one event writes both");
@@ -237,8 +234,8 @@ async fn texts_pass_the_sanitizer_and_their_limits() {
     let id: ItemId = handed.json["handoff"]["id"].as_str().unwrap().parse().unwrap();
     let handoff = Handoff::of(&items.get(&id).await.unwrap().unwrap()).unwrap();
     assert_eq!(handoff.work.done, ["pushed with [redacted:github-token]"]);
-    let episode = items.get(&handoff.episode.unwrap()).await.unwrap().unwrap();
-    assert!(!episode.text(TITLE).contains("ghp_") && !episode.text(BODY).contains("ghp_"));
+    let episode = crate::memory::Memory::of(&items.get(&handoff.episode.unwrap()).await.unwrap().unwrap()).unwrap();
+    assert!(!episode.title.contains("ghp_") && !episode.body.contains("ghp_"));
 }
 
 #[test]

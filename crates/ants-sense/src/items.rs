@@ -7,7 +7,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use ants_proto::Machine;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -125,6 +125,57 @@ impl Item {
     pub fn text(&self, name: &str) -> &str {
         self.values.get(name).and_then(Value::as_str).unwrap_or_default()
     }
+}
+
+/// The values of `after` that differ from `before`, null for one removed: the change of an item holding `before`
+/// into one holding `after`.
+pub fn changed(before: &Values, after: Values) -> Values {
+    let removed: Vec<_> =
+        before.keys().filter(|name| !after.contains_key(*name)).map(|name| (name.clone(), Value::Null)).collect();
+    let changed = after.into_iter().filter(|(name, value)| before.get(name).unwrap_or(&Value::Null) != value);
+    changed.chain(removed).collect()
+}
+
+/// The values of an item holding `value`, a struct.
+pub(crate) fn values_of(value: &impl Serialize) -> Values {
+    match serde_json::to_value(value) {
+        Ok(Value::Object(values)) => values,
+        _ => unreachable!("an item holds a struct"),
+    }
+}
+
+/// What `read` makes of each of `found`, beside its item. One it cannot read is left out with a warning naming it,
+/// so a malformed item hides itself alone from a listing.
+pub(crate) fn readable<T, E: std::fmt::Display>(
+    found: Vec<Item>,
+    read: impl Fn(&Item) -> Result<T, E>,
+) -> Vec<(Item, T)> {
+    let read = |item: Item| match read(&item) {
+        Ok(read) => Some((item, read)),
+        Err(error) => {
+            tracing::warn!(item = %item.id, kind = %item.kind, "left an unreadable item out: {error}");
+            None
+        }
+    };
+    found.into_iter().filter_map(read).collect()
+}
+
+/// A flag kept only while set: null when unset.
+pub(crate) mod flag {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(crate) fn serialize<S: Serializer>(flag: &bool, serializer: S) -> Result<S::Ok, S::Error> {
+        if *flag { serializer.serialize_bool(true) } else { serializer.serialize_none() }
+    }
+
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+        Option::<bool>::deserialize(deserializer).map(Option::unwrap_or_default)
+    }
+}
+
+/// `at` as values keep a time: RFC 3339 in UTC, its fraction of a second only when it has one.
+pub fn stamp(at: DateTime<Utc>) -> String {
+    at.to_rfc3339_opts(SecondsFormat::AutoSi, true)
 }
 
 /// One change of one item, the data of an [`ITEM_EVENT`]: its creation, or new values for some of its values.
