@@ -60,7 +60,7 @@ impl Provider for Fake {
 
 async fn with_fake(mcp: &Mcp) -> Arc<Fake> {
     let fake = Arc::new(Fake::default());
-    mcp.with_provider(crate::provider::connect(fake.clone()).await.expect("the fake connects"));
+    mcp.with_provider(crate::provider::connect(fake.clone(), &Default::default()).await.expect("the fake connects"));
     fake
 }
 
@@ -72,7 +72,7 @@ async fn names(client: &Client) -> Vec<String> {
 async fn sense_tools_are_served_with_its_prefix_and_the_json_argument() {
     let home = home("sense");
     let (mcp, _sent) = start(&home).await;
-    mcp.with_provider(crate::provider::connect(crate::sense::keeping_none()).await.unwrap());
+    mcp.with_provider(crate::provider::connect(crate::sense::keeping_none(), &Default::default()).await.unwrap());
     mcp.with_callers(Callers::known(user("dev-a"), "m1", "id-1"));
     let current = from_human();
     let (url, token) = http_server(&mcp, &current.thread_id);
@@ -116,7 +116,7 @@ async fn the_instructions_leave_memory_to_the_provider_and_tell_the_handoffs_apa
     assert!(!text.contains("_* come from"), "{text}");
 
     let (sense, _sent) = start(&homes[1]).await;
-    sense.with_provider(crate::provider::connect(crate::sense::keeping_none()).await.unwrap());
+    sense.with_provider(crate::provider::connect(crate::sense::keeping_none(), &Default::default()).await.unwrap());
     let text = instructions(&sense).await;
     assert!(text.contains("The tools named sense_* come from sense"), "{text}");
     assert!(text.contains("sense_handoff, unlike handoff, sends nothing"), "{text}");

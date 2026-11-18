@@ -98,10 +98,12 @@ async fn a_sage_reads_its_earlier_findings_with_their_verdicts_and_what_became_o
             advised("2.3", "persona", "The voice is too formal."),
             advised("3.1", "lesson", "Lint before pushing."),
             advised("3.2", "skill", "A release skill would help."),
+            advised("3.3", "no_persona", "No persona after 12 threads."),
         ],
         vec![
             verdict("2.3", Judgement::Applied, "Proposed a plainer voice.", &[&persona], judged),
             verdict("3.1", Judgement::Applied, "Remembered.", &[&used], judged),
+            verdict("3.3", Judgement::Deferred, "After the release.", &[], judged),
         ],
     );
     for dream in [&first, &second, &third] {
@@ -119,6 +121,8 @@ async fn a_sage_reads_its_earlier_findings_with_their_verdicts_and_what_became_o
         "\"Run the linter first\": active, read on 1 day, last ",
         "- 3.2 (skill): A release skill would help.\n  Suggested action: Act on 3.2.\n  Verdict: unanswered (offered \
          again below)\n",
+        "- 3.3 (no_persona): No persona after 12 threads.\n  Suggested action: Act on 3.3.\n  Verdict: deferred: \
+         After the release.\n",
         "### Review of dream 2, ",
         "- 2.1 (lesson): Flaky jobs pass on a retry.\n  Suggested action: Act on 2.1.\n  Verdict: applied: Worth \
          keeping.\n  Written: memory ",
@@ -130,9 +134,10 @@ async fn a_sage_reads_its_earlier_findings_with_their_verdicts_and_what_became_o
         " (persona): confirmed\n",
         "### Tally of the last 30 active days\n\n- lesson: 2 made, 2 applied (1 still holding), 0 rejected, 0 \
          deferred, 0 unanswered.\n- mistake: 1 made, 0 applied (0 still holding), 1 rejected, 0 deferred, 0 \
-         unanswered.\n- persona: 1 made, 1 applied (1 still holding), 0 rejected, 0 deferred, 0 unanswered.\n- \
-         skill: 1 made, 0 applied (0 still holding), 0 rejected, 0 deferred, 1 unanswered.\n- all: 5 made, 3 \
-         applied (2 still holding), 1 rejected, 0 deferred, 1 unanswered.\n",
+         unanswered.\n- no_persona: 1 made, 0 applied (0 still holding), 0 rejected, 1 deferred, 0 unanswered.\n- \
+         persona: 1 made, 1 applied (1 still holding), 0 rejected, 0 deferred, 0 unanswered.\n- skill: 1 made, 0 \
+         applied (0 still holding), 0 rejected, 0 deferred, 1 unanswered.\n- all: 6 made, 3 applied (2 still \
+         holding), 1 rejected, 1 deferred, 1 unanswered.\n",
     ];
     let mut rest = earlier;
     for entry in entries {

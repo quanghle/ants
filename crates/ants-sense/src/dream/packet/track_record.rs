@@ -105,7 +105,7 @@ pub async fn track_record(
         ),
         ..TrackRecord::default()
     };
-    let mut tallies: BTreeMap<&str, Tally> = BTreeMap::new();
+    let mut tallies: BTreeMap<String, Tally> = BTreeMap::new();
     for earlier in dreams.iter().filter(|earlier| earlier.sage.as_ref() == Some(sage)) {
         let own = earlier.findings.iter().filter(|f| f.kind == FindingKind::Sage && f.dream() == earlier.number);
         for (n, finding) in own.enumerate() {
@@ -117,8 +117,7 @@ pub async fn track_record(
                 }
             }
             let holds = written.iter().all(|(_, holds)| *holds);
-            let kind = finding.advice.as_ref().map_or("sage", |advice| advice.kind.as_str());
-            tallies.entry(kind).or_default().add(verdict.map(|verdict| verdict.verdict), holds);
+            tallies.entry(kind(finding)).or_default().add(verdict.map(|verdict| verdict.verdict), holds);
             let mut entry = String::new();
             if n == 0 {
                 let (number, day) = (earlier.number, earlier.at.format("%Y-%m-%d"));
@@ -147,8 +146,7 @@ pub async fn track_record(
 /// `finding` as the section shows it, with the last `verdict` on it and what became of the items `written` for it;
 /// `again` when the dream of the packet offers it again.
 fn finding_entry(finding: &Finding, verdict: Option<&Verdict>, written: &[(String, bool)], again: bool) -> String {
-    let kind = finding.advice.as_ref().map_or("sage", |advice| advice.kind.as_str());
-    let mut entry = format!("- {} ({kind}): {}\n", finding.id, finding.text);
+    let mut entry = format!("- {} ({}): {}\n", finding.id, kind(finding), finding.text);
     if let Some(advice) = &finding.advice {
         let _ = writeln!(entry, "  Suggested action: {}", advice.action);
     }
@@ -167,6 +165,12 @@ fn finding_entry(finding: &Finding, verdict: Option<&Verdict>, written: &[(Strin
         let _ = writeln!(entry, "  Written: {}", lines.join("; "));
     }
     entry
+}
+
+/// The kind of `finding` as the section names it: the sage's own, such as `lesson`, or `no_persona` for one of the
+/// packet's it passed on, else its kind in the dream.
+fn kind(finding: &Finding) -> String {
+    finding.advice.as_ref().map_or_else(|| finding.kind.to_string(), |advice| advice.kind.clone())
 }
 
 /// What became of item `id`, written or voted on for a finding applied at `at`: a line telling it, and whether it still

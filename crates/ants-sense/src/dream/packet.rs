@@ -225,7 +225,7 @@ fn render(
              [\"path:line\"]}}, \"action\": \"what to do\"}}]}}: at most {MAX_FINDINGS} findings, each with a kind \
              (such as lesson, mistake, contradiction, stale_memory or skill, or persona, self_model or relationship \
              for the identity), its evidence and a suggested action, the most worth the time of {ant} first; an \
-             empty list when nothing is.{follow_up} The findings below were gathered from its memories: include \
+             empty list when nothing is.{follow_up} The findings below come from its memories and identity: include \
              those worth answering; those offered again stay offered whatever the review says. The identity below \
              shows who {ant} is: judge the work against it and it against the work. A finding of an identity kind \
              cites the threads of {ant} and builds on the persona {ant} has, never on a house style. Each thread \

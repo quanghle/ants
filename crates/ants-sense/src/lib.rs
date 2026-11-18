@@ -4,8 +4,9 @@
 //!
 //! sense asks nothing of humans: no approvals, gates, review queues or notifications.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use ants_proto::UserId;
 use ants_proto::provider::{
@@ -54,9 +55,17 @@ pub const CAPABILITIES: Capabilities =
     Capabilities { tools: true, context: true, events: true, wake: true, memories: true, export: true };
 
 /// The built-in provider. One serves every ant of a daemon, each call naming its ant.
+#[derive(Default)]
 pub struct Sense {
     stores: Option<Arc<dyn Stores>>,
     workdirs: Option<Arc<dyn Workdirs>>,
+    ants: Mutex<HashMap<UserId, Arc<Ant>>>,
+}
+
+/// What sense keeps of an ant between its calls.
+#[derive(Default)]
+struct Ant {
+    /// Sent when a call changed the ant's items, waking its schedule.
     changed: tokio::sync::watch::Sender<()>,
     /// Taken by each write on a dream thread, counted toward [`dream::MAX_DREAM_WRITES`].
     dream_writes: tokio::sync::Mutex<()>,
@@ -65,17 +74,6 @@ pub struct Sense {
 /// Directories supplied by the daemon, never taken from a tool's arguments.
 pub trait Workdirs: Send + Sync {
     fn workdir(&self, context: &CallContext) -> Option<PathBuf>;
-}
-
-impl Default for Sense {
-    fn default() -> Self {
-        Self {
-            stores: None,
-            workdirs: None,
-            changed: tokio::sync::watch::channel(()).0,
-            dream_writes: tokio::sync::Mutex::new(()),
-        }
-    }
 }
 
 impl Sense {
@@ -104,17 +102,55 @@ impl Sense {
         self.stores.as_ref()?.home(ant)
     }
 
-    /// Subscribe before reading triggers, so a change during the read cannot be missed.
-    pub fn changes(&self) -> tokio::sync::watch::Receiver<()> {
-        self.changed.subscribe()
+    fn ant(&self, ant: &UserId) -> Arc<Ant> {
+        self.ants.lock().unwrap_or_else(std::sync::PoisonError::into_inner).entry(ant.clone()).or_default().clone()
     }
 
-    /// The items of `ant`.
+    /// The changes of the items of `ant` made by its calls. Subscribe before reading triggers, so a change during the
+    /// read cannot be missed.
+    pub fn changes(&self, ant: &UserId) -> tokio::sync::watch::Receiver<()> {
+        self.ant(ant).changed.subscribe()
+    }
+
+    fn changed(&self, ant: &UserId) {
+        self.ant(ant).changed.send_replace(());
+    }
+
+    /// The items of `ant`, served from the cache: the provider call reading them caught them up with the log as it
+    /// started ([`Sense::synced`]).
     pub async fn items(&self, ant: &UserId) -> Result<Arc<dyn Items>, StoreError> {
         match &self.stores {
             Some(stores) => stores.items(ant).await,
             None => Err(StoreError::NotKept("no stores".into())),
         }
+    }
+
+    /// The items of `ant` caught up with its log, as a provider call starts ([`Stores::synced`]).
+    pub async fn synced(&self, ant: &UserId) -> Result<Arc<dyn Items>, StoreError> {
+        match &self.stores {
+            Some(stores) => stores.synced(ant).await,
+            None => Err(StoreError::NotKept("no stores".into())),
+        }
+    }
+
+    /// Run `call`, a tool call on the items of `ant`, once they caught up with its log, and wake the ant's schedule if
+    /// the call changed them: its log or the writes waiting for it. A log failing other than by being out of reach
+    /// fails the call, its reads no longer meeting the log.
+    async fn changing(&self, ant: &UserId, call: impl Future<Output = Answer>) -> Answer {
+        async fn written(items: &dyn Items) -> (u64, usize) {
+            (items.log_bytes().await, items.pending().await.unwrap_or_default())
+        }
+        let items = match self.synced(ant).await {
+            Ok(items) => items,
+            Err(StoreError::NotKept(_)) => return call.await,
+            Err(error) => return error.into(),
+        };
+        let before = written(&*items).await;
+        let output = call.await;
+        if written(&*items).await != before {
+            self.changed(ant);
+        }
+        output
     }
 
     /// The identity card of `ant`; none before its first use of sense.
@@ -128,7 +164,7 @@ impl Sense {
             return Ok(Ack {});
         }
         let recorded = async {
-            let items = self.items(&event.ant).await?;
+            let items = self.synced(&event.ant).await?;
             if thread {
                 return thread::record::record_event(&*items, &event).await.map(drop);
             }
@@ -137,7 +173,7 @@ impl Sense {
             }
             identity::record_event(&*items, &event).await?;
             // A dormancy starting or ending pauses or resumes the ant's reminders.
-            self.changed.send_replace(());
+            self.changed(&event.ant);
             Ok(())
         };
         match recorded.await {
@@ -156,7 +192,7 @@ impl Sense {
         if identity::card(clone).await?.is_some_and(|card| card.events.contains(&event.id)) {
             return Ok(());
         }
-        let source = match self.items(from).await {
+        let source = match self.synced(from).await {
             Ok(source) => source,
             Err(StoreError::NotKept(_)) => return Ok(()),
             Err(e) => return Err(e),
@@ -186,7 +222,7 @@ impl Sense {
         let stores = self.stores.as_ref().ok_or_else(|| RpcError::unavailable("sense keeps no data here"))?;
         match stores.import(&request.ant, export).await {
             Ok(()) => {
-                self.changed.send_replace(());
+                self.changed(&request.ant);
                 Ok(Ack {})
             }
             Err(StoreError::Import(e @ export::ImportError::Invalid(_))) => {
@@ -201,7 +237,7 @@ impl Sense {
     async fn brief_for(&self, request: BriefRequest) -> Result<Brief, RpcError> {
         let context = &request.context;
         let composed = async {
-            let items = self.items(&context.ant).await?;
+            let items = self.synced(&context.ant).await?;
             let card = identity::record_session(&*items, context).await?;
             if let Some(workdir) = self.workdir(context) {
                 memory::recheck_citations(&*items, &workdir).await?;
@@ -247,16 +283,14 @@ impl Provider for Sense {
             return ready(Err(RpcError::invalid_params(&format!("sense has no tool {:?}", call.name))));
         };
         Box::pin(async move {
-            let format = call.format;
-            let answer = if dream::COUNTED.contains(&spec.name) {
-                dream::counted(self, spec.handler, &call).await
-            } else {
-                (spec.handler)(self, &call).await
-            };
-            if !answer.is_error {
-                self.changed.send_replace(());
-            }
-            Ok(answer.render(format))
+            let answer = self.changing(&call.context.ant, async {
+                if dream::COUNTED.contains(&spec.name) {
+                    dream::counted(self, spec.handler, &call).await
+                } else {
+                    (spec.handler)(self, &call).await
+                }
+            });
+            Ok(answer.await.render(call.format))
         })
     }
 

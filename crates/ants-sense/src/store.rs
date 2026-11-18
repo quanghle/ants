@@ -354,7 +354,12 @@ impl<L: EventLog, S: Signer, V: Verifier> Store<L, S, V> {
         Ok(())
     }
 
-    async fn refresh(&mut self) -> Result<(), StoreError> {
+    /// Append the writes queued while the hub could not be reached, once it can: the only round trip of a read, whose
+    /// provider call caught the items up with the log as it started ([`Stores::synced`]).
+    async fn replay(&mut self) -> Result<(), StoreError> {
+        if self.pending()? == 0 {
+            return Ok(());
+        }
         match self.sync().await {
             Err(StoreError::Log(error)) if is_offline(&error) => Ok(()),
             result => result,
@@ -666,7 +671,7 @@ where
     fn get<'a>(&'a self, id: &'a ItemId) -> BoxFuture<'a, Result<Option<Item>, StoreError>> {
         Box::pin(async move {
             let mut store = self.lock().await;
-            store.refresh().await?;
+            store.replay().await?;
             store.get(id)
         })
     }
@@ -674,7 +679,7 @@ where
     fn list<'a>(&'a self, kind: &'a str, limit: usize) -> BoxFuture<'a, Result<Vec<Item>, StoreError>> {
         Box::pin(async move {
             let mut store = self.lock().await;
-            store.refresh().await?;
+            store.replay().await?;
             store.list(kind, limit)
         })
     }
@@ -688,7 +693,7 @@ where
     ) -> BoxFuture<'a, Result<Vec<Item>, StoreError>> {
         Box::pin(async move {
             let mut store = self.lock().await;
-            store.refresh().await?;
+            store.replay().await?;
             store.list_by(kind, name, value, limit)
         })
     }
@@ -701,7 +706,7 @@ where
     ) -> BoxFuture<'a, Result<Vec<Hit>, StoreError>> {
         Box::pin(async move {
             let mut store = self.lock().await;
-            store.refresh().await?;
+            store.replay().await?;
             store.search(text, kind, limit)
         })
     }
@@ -714,7 +719,7 @@ where
     ) -> BoxFuture<'a, Result<Option<Experience>, StoreError>> {
         Box::pin(async move {
             let mut store = self.lock().await;
-            store.refresh().await?;
+            store.replay().await?;
             store.experience(own, since, top)
         })
     }
@@ -755,7 +760,23 @@ where
 /// What finds the items of each ant a daemon serves, opening the ant's [`Store`] on first use: the daemon provides it
 /// ([`crate::Sense::with_stores`]), as it holds the ant's home, credentials and connection.
 pub trait Stores: Send + Sync {
+    /// The items of `ant`, caught up with its log as they open and served from the cache after.
     fn items<'a>(&'a self, ant: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>>;
+
+    /// The items of `ant` caught up with its log, as a provider call starts, so that the reads of the call serve the
+    /// cache; still the items when the hub cannot be reached or writes wait for the log, as the reads meet any failure
+    /// appending them.
+    fn synced<'a>(&'a self, ant: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
+        Box::pin(async move {
+            let items = self.items(ant).await?;
+            match items.sync().await {
+                Err(StoreError::Log(error)) if is_offline(&error) || items.pending().await? > 0 => {}
+                Err(StoreError::Unavailable(_)) => {}
+                result => result?,
+            }
+            Ok(items)
+        })
+    }
 
     /// The export of `ant`'s sense data, to take to another bus ([`crate::export`]).
     fn export<'a>(&'a self, ant: &'a UserId) -> BoxFuture<'a, Result<SenseExport, StoreError>> {

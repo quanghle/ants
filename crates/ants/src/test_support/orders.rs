@@ -50,6 +50,7 @@ pub(crate) async fn host_of_m1_serving(
         remote_admin: remote,
         config,
         restarts,
+        providers: Default::default(),
         leaf: None,
     };
     let (ants, watched) = tokio::sync::watch::channel(vec![p("dev-a")]);

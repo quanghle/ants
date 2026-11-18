@@ -277,10 +277,9 @@ impl SenseStores {
         let (items, home, creds) = (served.items.clone(), served.home.clone(), served.creds.clone());
         Ok(Of { items, home, creds, link, route: state.route.clone(), named: served.named.clone() })
     }
-}
 
-impl Stores for SenseStores {
-    fn items<'a>(&'a self, ant: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
+    /// The items of `ant`, caught up with its log as they open, and again when `sync` says so.
+    fn opened<'a>(&'a self, ant: &'a UserId, sync: bool) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
         Box::pin(async move {
             let Of { items: slot, home, creds, link, route, named } = self.of(ant)?;
             let files = Home::new(&home);
@@ -293,7 +292,9 @@ impl Stores for SenseStores {
             }
             let mut opened = slot.lock().await;
             let mut current = opened.clone();
-            if let Some(items) = &current {
+            if let Some(items) = &current
+                && sync
+            {
                 match items.sync().await {
                     Err(StoreError::Log(error))
                         if error.kind == LogErrorKind::Incarnation && items.pending().await? == 0 =>
@@ -302,7 +303,9 @@ impl Stores for SenseStores {
                         current = None;
                     }
                     // The items remain readable, including when a conflict requires explicit reconciliation.
-                    Ok(()) | Err(StoreError::Log(_)) | Err(StoreError::Unavailable(_)) => {}
+                    Ok(()) | Err(StoreError::Unavailable(_)) => {}
+                    // Out of reach the cache serves; reads meet any other failure as they append the writes pending.
+                    Err(StoreError::Log(error)) if is_offline(&error) || items.pending().await? > 0 => {}
                     Err(error) => return Err(error),
                 }
             }
@@ -342,6 +345,16 @@ impl Stores for SenseStores {
             }
             Ok(items)
         })
+    }
+}
+
+impl Stores for SenseStores {
+    fn items<'a>(&'a self, ant: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
+        self.opened(ant, false)
+    }
+
+    fn synced<'a>(&'a self, ant: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
+        self.opened(ant, true)
     }
 
     fn home(&self, ant: &UserId) -> Option<PathBuf> {
