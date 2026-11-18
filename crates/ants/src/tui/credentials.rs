@@ -211,11 +211,16 @@ pub struct Page {
 }
 
 impl Page {
-    pub const KEYS: &str = "↑↓ select · a approve or renew · r reject · Esc back";
     pub const ARMED_KEYS: &str = "y confirms the order above · any other key leaves the request waiting";
 
-    pub fn keys(&self) -> &'static str {
-        if self.armed.is_some() { Self::ARMED_KEYS } else { Self::KEYS }
+    /// Drop the confirmation asked for, if any: whether there was one.
+    pub fn disarm(&mut self) -> bool {
+        self.armed.take().is_some()
+    }
+
+    /// The keys of the order `a` or `r` asked to confirm, while it waits.
+    pub fn prompt(&self) -> Option<&'static str> {
+        self.armed.as_ref().map(|_| Self::ARMED_KEYS)
     }
 
     fn ids(asked: &[Asked]) -> Vec<Id> {
@@ -564,7 +569,7 @@ mod tests {
         let shown = screen(&m, at(3));
         assert!(shown.contains("enroll  dev-c asks to enroll from host m2, key UCKEYOFDEVC0…"), "{shown}");
         assert!(shown.contains("a approve · r reject") && shown.contains("a renew"), "{shown}");
-        assert!(shown.contains(Page::KEYS), "{shown}");
+        assert!(shown.contains("a approve · r reject · Esc back · ↑↓ select"), "{shown}");
 
         assert_eq!(m.key(Key::Char('y'), at(3)), None, "y alone confirms nothing");
         m.key(Key::Char('a'), at(3));

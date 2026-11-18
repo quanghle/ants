@@ -128,15 +128,17 @@ impl Model {
         self.data.history.push(text, private);
     }
 
-    /// Empty the bar into its history.
+    /// Empty the bar into its history, and so the draft of the conversation shown: what Esc twice and Ctrl-C do to a
+    /// bar holding text.
     pub fn empty_into_history(&mut self) {
         let text = self.bar.text();
         self.push_history(&text);
-        self.bar.set_text("");
-        self.bar.quoting = None;
-        self.bar.noting = None;
+        self.bar.clear();
         self.data.history.browsing = None;
-        self.bar.set_status("kept in the history: Ctrl-P recalls the text", Tone::Done);
+        self.follow_drafts();
+        if !text.trim().is_empty() {
+            self.bar.set_status("kept in the history: Ctrl-P recalls the text", Tone::Done);
+        }
     }
 
     /// Note that the bar's `key` at `now` left it holding text, so that another Esc soon empties it.
@@ -361,6 +363,19 @@ mod tests {
         m.key(Key::Esc, at(1));
         m.key(Key::Esc, at(3));
         assert_eq!(m.bar.text(), "@dev-a later maybe", "too late for a second Esc");
+    }
+
+    #[test]
+    fn ctrl_c_empties_the_bar_into_the_history() {
+        let mut m = model();
+        m.key(Key::Ctrl('k'), at(1));
+        typed(&mut m, "@dev-a later maybe");
+        m.key(Key::Interrupt, at(1));
+        assert!(m.bar.is_empty(), "Ctrl-C empties the bar");
+        assert!(!m.data.drafts.holds(m.data.drafts.here()), "and so the draft");
+        m.key(Key::Ctrl('k'), at(2));
+        m.key(Key::Ctrl('p'), at(2));
+        assert_eq!(m.bar.text(), "@dev-a later maybe", "Ctrl-P recalls it");
     }
 
     #[test]

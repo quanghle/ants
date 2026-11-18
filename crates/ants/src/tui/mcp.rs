@@ -65,10 +65,6 @@ pub struct Page {
 }
 
 impl Page {
-    pub const KEYS: &str = "↑↓ server · s sign in · u read again · ←→ pane · [ ] \\ scroll about/now · a ask · \
-         w work · r restart · p (un)pause · X retire · Esc back";
-    pub const SIGNING_KEYS: &str = "↑↓ server · y copy the address · v hand back where the browser came back to · \
-         s sign in again · u read again · ←→ pane · [ ] \\ scroll about/now · Esc back";
     pub const DRAFT_KEYS: &str =
         "type or paste the address the browser came back to · Enter hand it over · Esc drop it";
 
@@ -76,17 +72,26 @@ impl Page {
         Self { state: State::Unasked, asked: 0, selected: 0, signing: None, signs: 0, draft: None }
     }
 
-    pub fn keys(&self) -> &'static str {
-        match (&self.draft, &self.signing) {
-            (Some(_), _) => Self::DRAFT_KEYS,
-            (None, Some(Signing { url: Some(_), .. })) => Self::SIGNING_KEYS,
-            _ => Self::KEYS,
-        }
+    /// The keys of the address being written, which takes every key, if one is.
+    pub fn prompt(&self) -> Option<&'static str> {
+        self.draft.as_ref().map(|_| Self::DRAFT_KEYS)
+    }
+
+    /// Whether a sign-in gave an address to open, which `y` copies and `v` hands back.
+    pub fn signing(&self) -> bool {
+        self.signing.as_ref().is_some_and(|s| s.url.is_some())
     }
 
     /// Ask for the servers, unless they were already.
     pub fn shown(&mut self) {
         if self.state == State::Unasked {
+            self.ask();
+        }
+    }
+
+    /// Ask again, if asked before.
+    pub fn reread(&mut self) {
+        if self.state != State::Unasked {
             self.ask();
         }
     }
@@ -158,10 +163,6 @@ impl Page {
     pub fn key(&mut self, key: Key) -> Option<Action> {
         let last = self.servers().len().saturating_sub(1);
         self.selected = match key {
-            Key::Char('u') => {
-                self.ask();
-                return None;
-            }
             Key::Char('s') | Key::Enter => {
                 let server = self.servers().get(self.selected)?.name.clone();
                 self.signs += 1;

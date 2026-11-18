@@ -429,9 +429,6 @@ impl Page {
         None
     }
 
-    pub const KEYS: &str =
-        "↑↓ thread · Enter open · x cancel · z snooze · u unread · b remind · S TL;DR · f forward · Esc back";
-
     pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
         let rows = self.rows(data);
         let block = style::block(format!(" {} ({}) ", self.filter.title(), rows.len()), focused);

@@ -188,6 +188,14 @@ impl Bar {
         self.pastes.get(usize::try_from(at).ok()?).map(String::as_str)
     }
 
+    /// Empty the bar, dropping the reply `>`, the note set up and the list picked from.
+    pub fn clear(&mut self) {
+        self.set_text("");
+        self.pick = complete::Pick::default();
+        self.quoting = None;
+        self.noting = None;
+    }
+
     pub fn is_empty(&self) -> bool {
         self.chars.is_empty()
     }
@@ -496,7 +504,8 @@ impl Bar {
                 Tone::Error => Style::new().fg(style::ERROR),
             };
             let room = usize::from(area.width.saturating_sub(4));
-            let text: String = status.text.replace('\n', " ").chars().take(room).collect();
+            let mark = if status.tone == Tone::Error { style::ERROR_MARK } else { "" };
+            let text = style::fit(&format!("{mark}{}", status.text.replace('\n', " ")), room);
             block = block.title_bottom(Line::styled(format!(" {text} "), style));
         }
         let shown: Vec<Line> = if self.chars.is_empty() {
@@ -549,6 +558,15 @@ fn draw_list(frame: &mut Frame, bar: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_status_cut_at_the_width_ends_in_an_ellipsis_and_an_error_begins_with_its_mark() {
+        let mut bar = Bar::default();
+        bar.set_status("refused: ".to_owned() + &"reasons far too long ".repeat(4), Tone::Error);
+        let shown = crate::test_support::render::rendered(40, 4, |f| bar.draw(f, f.area(), &[], "", ""));
+        let bottom = shown.lines().nth(3).unwrap();
+        assert!(bottom.starts_with("└ ✗ refused: reasons") && bottom.ends_with("… ┘"), "{shown}");
+    }
 
     #[test]
     fn the_bar_edits_its_text() {

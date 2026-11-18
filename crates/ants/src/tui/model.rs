@@ -16,7 +16,9 @@ use super::acts::{Acted, Change};
 use super::approvals::{self, Asking};
 use super::command::{self, Bar, Tone};
 use super::exec::{Job, Quoted};
+use super::help::Help;
 use super::interrupt::Confirm;
+use super::notices;
 use super::react::{self, Picker};
 use super::reads::{Levels, Mark, Read};
 use super::work::{Facts, Filter};
@@ -133,6 +135,8 @@ pub enum Level {
 
 /// How long a notice shows.
 const NOTICE_FOR: TimeDelta = TimeDelta::seconds(15);
+/// How soon a second Ctrl-C quits, and a q after one closing an overlay does nothing.
+const QUIT_WITHIN: TimeDelta = TimeDelta::seconds(1);
 
 /// Everything read of the ants that the views show: what the live feed reads, what the UI reads besides, and what is
 /// worked out of the messages read.
@@ -337,8 +341,14 @@ pub struct Model {
     pub focus: Focus,
     /// The nav's view, then those opened from it, the shown one last; never empty.
     pub pages: Vec<Page>,
-    pub help: bool,
+    /// The help, while shown.
+    pub help: Option<Help>,
+    /// The latest notice: an error until a key is pressed, else for [`NOTICE_FOR`].
     pub notice: Option<Notice>,
+    /// The notices of the run, the earliest first, [`notices::KEPT`] at most.
+    pub notices: Vec<Notice>,
+    /// The notices listed over the view, `N`.
+    pub log: Option<notices::Log>,
     pub bar: Bar,
     /// The tool request being answered.
     pub asking: Option<Asking>,
@@ -354,6 +364,11 @@ pub struct Model {
     pub compact: bool,
     /// Whether the nav and the thread's side panel show.
     pub fold: fold::Fold,
+    /// When Ctrl-C, nothing being open and the bar empty, asked for a second one to quit.
+    pub quitting: Option<DateTime<Utc>>,
+    /// When q last closed the help, the notices, the digest or a tool request, or came again soon after: a q that soon
+    /// never quits.
+    closed_by_q: Option<DateTime<Utc>>,
 }
 
 impl Model {
@@ -391,8 +406,10 @@ impl Model {
             pages: vec![Page::of(&nav)],
             nav,
             focus: Focus::View,
-            help: false,
+            help: None,
             notice: None,
+            notices: Vec::new(),
+            log: None,
             bar: Bar::default(),
             asking: None,
             picking: None,
@@ -401,6 +418,8 @@ impl Model {
             catchup: catchup::Catchup::default(),
             compact: false,
             fold: fold::Fold::default(),
+            quitting: None,
+            closed_by_q: None,
         }
     }
 
@@ -408,13 +427,26 @@ impl Model {
         self.pages.last().expect("a view")
     }
 
+    /// Show a notice, unless an error waits for a key and it is none, and keep it with the notices of the run.
     pub fn notify(&mut self, text: impl Into<String>, level: Level, now: DateTime<Utc>) {
-        self.notice = Some(Notice { text: text.into(), at: now, level });
+        let notice = Notice { text: text.into(), at: now, level };
+        if self.notices.len() == notices::KEPT {
+            self.notices.remove(0);
+        }
+        self.notices.push(notice.clone());
+        if level == Level::Error || self.notice.as_ref().is_none_or(|n| n.level != Level::Error) {
+            self.notice = Some(notice);
+        }
+    }
+
+    /// Whether a Ctrl-C at `now` quits, the one before having asked for it.
+    pub fn quitting_at(&self, now: DateTime<Utc>) -> bool {
+        self.quitting.is_some_and(|at| now - at < QUIT_WITHIN)
     }
 
     /// The notice to show at `now`, if one is recent.
     pub fn notice_at(&self, now: DateTime<Utc>) -> Option<&Notice> {
-        self.notice.as_ref().filter(|n| now - n.at < NOTICE_FOR)
+        self.notice.as_ref().filter(|n| n.level == Level::Error || now - n.at < NOTICE_FOR)
     }
 
     /// Take in what the live feed read or heard.
@@ -933,15 +965,42 @@ mod tests {
     }
 
     #[test]
-    fn help_shows_until_a_key_and_q_or_ctrl_c_quit() {
+    fn q_closes_the_help_without_quitting_however_fast_it_comes_again() {
         let mut m = model();
         assert_eq!(m.key(Key::Char('?'), at(0)), None);
-        assert!(m.help);
-        assert_eq!(m.key(Key::Char('q'), at(0)), None, "a key closes the help first");
-        assert!(!m.help);
-        assert_eq!(m.key(Key::Char('q'), at(0)), Some(Action::Quit));
+        assert!(m.help.is_some());
+        assert_eq!(m.key(Key::Char('q'), at(0)), None, "q closes the help first");
+        assert!(m.help.is_none());
+        let soon = at(0) + TimeDelta::milliseconds(600);
+        assert_eq!(m.key(Key::Char('q'), soon), None, "a q right after does nothing");
+        assert_eq!(m.key(Key::Char('q'), soon + TimeDelta::milliseconds(600)), None, "nor one right after that");
+        assert_eq!(m.key(Key::Char('q'), at(3)), Some(Action::Quit));
+    }
+
+    #[test]
+    fn ctrl_c_closes_then_empties_the_bar_then_quits_on_a_second_within_a_second() {
+        let mut m = model();
         m.key(Key::Char('?'), at(0));
-        assert_eq!(m.key(Key::Interrupt, at(0)), Some(Action::Quit));
+        assert_eq!(m.key(Key::Interrupt, at(0)), None, "Ctrl-C closes the help");
+        assert!(m.help.is_none());
+        m.bar.set_text("draft");
+        assert_eq!(m.key(Key::Char('q'), at(2)), None, "q quits with an empty bar only");
+        assert_eq!(m.bar.text(), "draft");
+        assert_eq!(m.key(Key::Interrupt, at(3)), None);
+        assert_eq!(m.bar.text(), "", "the first Ctrl-C empties the bar");
+        assert_eq!(m.key(Key::Interrupt, at(3) + TimeDelta::milliseconds(500)), None, "the second asks for a third");
+        assert!(m.quitting_at(at(4)));
+        assert!(!m.quitting_at(at(5)), "for a second");
+        assert_eq!(m.key(Key::Interrupt, at(5)), None, "too late: it asks again");
+        assert_eq!(m.key(Key::Interrupt, at(5) + TimeDelta::milliseconds(900)), Some(Action::Quit));
+    }
+
+    #[test]
+    fn a_key_between_two_ctrl_c_keeps_the_ui_open() {
+        let mut m = model();
+        assert_eq!(m.key(Key::Interrupt, at(0)), None);
+        m.key(Key::Down, at(0));
+        assert_eq!(m.key(Key::Interrupt, at(0)), None);
     }
 
     #[test]
@@ -1090,7 +1149,7 @@ mod tests {
         m.key(Key::Char('/'), at(4));
         assert_eq!((m.bar.focused, m.bar.text()), (true, "/search ".to_owned()), "a draft in the bar stays");
         m.key(Key::Esc, at(4));
-        assert_eq!(m.key(Key::Char('q'), at(4)), Some(Action::Quit));
+        assert_eq!(m.key(Key::Char('q'), at(4)), None, "q keeps the draft");
     }
 
     #[test]

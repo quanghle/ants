@@ -89,8 +89,6 @@ impl Page {
         Self { query, found: None, grep: search.grep.clone(), selected: 0 }
     }
 
-    pub const KEYS: &str = "↑↓ match · Enter open its thread at it · Esc close";
-
     /// Take the matches found, given oldest first.
     pub fn found(&mut self, found: Found) {
         self.found = Some(match found {

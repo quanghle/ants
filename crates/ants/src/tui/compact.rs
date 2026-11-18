@@ -81,14 +81,18 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
         spans.push(Span::styled(format!("○ disconnected {}", ago(since, now)), Style::new().fg(style::ERROR)));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), first);
-    frame.render_widget(Paragraph::new(second_line(model, &items, now)), second);
+    frame.render_widget(Paragraph::new(second_line(model, &items, now, second.width)), second);
 }
 
 /// The latest notice, else the top home item with the keys.
-fn second_line(model: &Model, items: &[home::Item], now: DateTime<Utc>) -> Line<'static> {
+fn second_line(model: &Model, items: &[home::Item], now: DateTime<Utc>, width: u16) -> Line<'static> {
+    if model.quitting_at(now) {
+        return Line::styled(format!("      {}", super::frame::QUIT_AGAIN), Style::new().fg(style::INFO));
+    }
     if let Some(notice) = model.notice_at(now) {
-        let color = if notice.level == Level::Error { style::ERROR } else { style::INFO };
-        return Line::styled(format!("      {}", notice.text), Style::new().fg(color));
+        let mut line = style::notice(&notice.text, notice.level == Level::Error, width.saturating_sub(5));
+        line.spans.insert(0, Span::raw("     "));
+        return line;
     }
     if let Some(line) = model.asking.as_ref().and_then(super::approvals::Asking::status) {
         return line;
@@ -129,7 +133,7 @@ impl Model {
     /// does.
     pub(super) fn compact_key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
         match key {
-            Key::Char('q') => return Some(Action::Quit),
+            Key::Char('q') => return self.quit(now),
             Key::Char('R') => return Some(Action::Refresh),
             Key::Up | Key::Down | Key::Char('j' | 'k') | Key::PageUp | Key::PageDown | Key::Home | Key::End => {
                 return None;
