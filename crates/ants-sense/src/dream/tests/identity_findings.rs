@@ -226,6 +226,13 @@ async fn what_a_clone_inherited_is_found_after_five_threads_of_its_own_until_mad
         gathered[2].text
     );
     assert!(gathered[2].text.ends_with("or reject this finding to keep it as it is."), "{}", gathered[2].text);
+    begin(&*items, start(Utc::now(), &on(9))).await.unwrap().unwrap();
+    woken(&*items, 1, &on(1).thread).await.unwrap();
+    let model = record_id(&Scope::Own).unwrap();
+    let applied = |finding: &str| json!({"verdicts": [{"finding": finding, "verdict": "applied", "reason": "Mine.", "items": [model]}]});
+    let refused = answer(&sense, 1, applied("1.3")).await;
+    assert!(refused.text.starts_with("Finding 1.3 (inherited): applied names the skill proposal made;"), "{refused:?}");
+    assert!(!answer(&sense, 1, applied("1.2")).await.is_error, "the self-model answers its own");
 
     identity(&sense, json!({"voice": "Plainer.", "reason": "Its own."})).await;
     identity(&sense, json!({"self_model": "Bolder.", "title": "Me", "revision": 1})).await;
@@ -294,4 +301,41 @@ async fn an_identity_finding_is_applied_naming_the_record_written_or_rests_when_
     let third = begin(&*items, start(day(2), &on(9))).await.unwrap().unwrap();
     let kinds: Vec<_> = third.findings.iter().map(|finding| (finding.id.as_str(), finding.kind)).collect();
     assert_eq!(kinds, [("3.1", FindingKind::NoPersona)], "10 threads now");
+}
+
+#[tokio::test]
+async fn an_identity_finding_applied_names_the_item_of_the_kind_it_asks_for() {
+    let (sense, kept) = sense().await;
+    let items: Arc<dyn Items> = kept.clone();
+    let now = Utc::now();
+    started(&*items, 20..25, &Starter::Human { user: user("alice") }, "github.com/o/r", now - Duration::days(10)).await;
+    let first = begin(&*items, start(now, &on(9))).await.unwrap().unwrap();
+    let kinds: Vec<_> = first.findings.iter().map(|finding| (finding.id.as_str(), finding.kind)).collect();
+    let asked =
+        [("1.1", FindingKind::NoPersona), ("1.2", FindingKind::NoSelfModel), ("1.3", FindingKind::NoRelationship)];
+    assert_eq!(kinds, asked);
+    woken(&*items, 1, &on(1).thread).await.unwrap();
+    let applied = |finding: &str, item: &serde_json::Value| json!({"verdicts": [{"finding": finding, "verdict": "applied", "reason": "Written.", "items": [item]}]});
+    let lesson = json!(store(&kept, &lesson("Alice asks for tests")).await);
+    let bob = json!({"relationship": "Terse.", "who": "human:bob", "title": "Bob"});
+    let bob = identity(&sense, bob).await.json["id"].clone();
+    let model = identity(&sense, json!({"self_model": "Careful.", "title": "Me"})).await.json["id"].clone();
+    for (finding, item, asks) in [
+        ("1.1", &model, "Finding 1.1 (no_persona): applied names the persona proposal made;"),
+        ("1.2", &lesson, "Finding 1.2 (no_self_model): applied names the self-model written;"),
+        ("1.3", &bob, "Finding 1.3 (no_relationship): applied names the relationship record of human:alice written;"),
+    ] {
+        let refused = answer(&sense, 1, applied(finding, item)).await;
+        assert_eq!(error(&refused), "invalid_arguments");
+        assert!(refused.text.starts_with(asks), "{}", refused.text);
+    }
+
+    let proposed = json!({"voice": "Plain.", "reason": "The threads ask for it.", "finding": "1.1"});
+    let proposal = identity(&sense, proposed).await.json["proposal"]["id"].clone();
+    let alice = json!({"relationship": "Tests first.", "who": "human:alice", "title": "Alice"});
+    let alice = identity(&sense, alice).await.json["id"].clone();
+    for (finding, item) in [("1.1", &proposal), ("1.2", &model), ("1.3", &alice)] {
+        let answered = answer(&sense, 1, applied(finding, item)).await;
+        assert!(!answered.is_error, "{answered:?}");
+    }
 }

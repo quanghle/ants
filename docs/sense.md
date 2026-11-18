@@ -710,7 +710,13 @@ inherits no review record.
 **On the dream thread,** `sense_dream` answers findings: `verdicts`, a list of `{finding, verdict, reason, items?}`,
 `verdict` being `applied` (naming in `items` the memories or records written or voted on, or the proposal made; none
 for a `proposal` finding, which it confirms), `rejected` or `deferred`, the reason at most 500 characters; a later
-verdict on a finding replaces the earlier one. A rejected finding rests, as does an applied one on a sage's practice:
+verdict on a finding replaces the earlier one. A finding on the identity or a sage's practice applied names, among its
+items, one of the kind it asks for, else the verdict is refused (`invalid_arguments`): a persona proposal (or the
+persona) for `no_persona`; the self-model for `no_self_model` and `stale_self_model`; the relationship record of the
+human or ant named for `no_relationship` and `no_reviewed_relationship`; for `inherited`, the self-model or a proposal
+of the persona or skill it is about; a memory, the self-model or a skill proposal for `rejected_kind` and
+`undone_findings`, and those or the relationship record of the ant named for `unanswered_reviews` and
+`costly_reviews`. A rejected finding rests, as does an applied one on a sage's practice:
 no dream offers it again until what it is about
 changed since the verdict (one of its items written other than by a read, or the count it rests on) or 14 days of the
 ant's active time passed, its dormancies not counted; deferred and

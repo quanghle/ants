@@ -8,13 +8,15 @@ use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{BY, Dream, FindingKind, Judgement, MAX_DREAM_WRITES, MAX_FINDINGS, State, Verdict, close, get};
-use crate::items::{ItemId, Values};
-use crate::proposal::{self, Status};
+use super::{BY, Dream, Finding, FindingKind, Judgement, MAX_DREAM_WRITES, MAX_FINDINGS, State, Verdict, close, get};
+use crate::items::{Item, ItemId, Values};
+use crate::memory::{MEMORY, Scope};
+use crate::persona::persona_id;
+use crate::proposal::{self, ProposalItem, Status};
 use crate::sanitize::{Limit, sanitize_title};
 use crate::store::{Items, StoreError, Write, read_modify_write};
 use crate::tools::{Answer, MAX_REASON_CHARS};
-use crate::{Sense, skill};
+use crate::{Sense, records, skill};
 
 /// The JSON Schema of `sense_dream`'s arguments.
 pub fn schema() -> Value {
@@ -34,8 +36,9 @@ pub fn schema() -> Value {
                             "type": "array",
                             "items": {"type": "string"},
                             "description": "With applied: the ids of the memories or records written or voted \
-                                            on, or of the proposal made; none for a proposal, which applied \
-                                            confirms.",
+                                            on, or of the proposal made, among them the item the finding asks for \
+                                            (such as the self-model for no_self_model); none for a proposal, which \
+                                            applied confirms.",
                         },
                     },
                     "required": ["finding", "verdict", "reason"],
@@ -148,9 +151,9 @@ async fn verdicts(items: &dyn Items, dream: &Dream, given: Vec<GivenVerdict>) ->
         let text = |given: Option<String>| given.map(|text| text.trim().to_owned()).filter(|text| !text.is_empty());
         let finding = text(given.finding).ok_or_else(|| Answer::invalid("Each verdict names its finding."))?;
         let finding = finding.as_str();
-        if !dream.findings.iter().any(|known| known.id == finding) {
+        let Some(known) = dream.findings.iter().find(|known| known.id == finding) else {
             return Err(Answer::error("not_found", format!("Dream {} has no finding {finding:?}.", dream.number)));
-        }
+        };
         let verdict = given.verdict.ok_or_else(|| {
             Answer::invalid(format!("Finding {finding}: the verdict is applied, rejected or deferred."))
         })?;
@@ -159,29 +162,104 @@ async fn verdicts(items: &dyn Items, dream: &Dream, given: Vec<GivenVerdict>) ->
         let reason = sanitize_title(&reason, Limit::Chars(MAX_REASON_CHARS))
             .map_err(|refused| Answer::error("too_long", format!("Finding {finding}: the reason is {refused}.")))?
             .text;
-        let mut written = Vec::new();
+        let mut named = Vec::new();
         for id in given.items.iter().flatten() {
             let id = id
                 .trim()
                 .parse::<ItemId>()
                 .map_err(|_| Answer::invalid(format!("Finding {finding}: items are item ids.")))?;
-            if items.get(&id).await?.is_none() {
-                return Err(Answer::error("not_found", format!("Finding {finding}: no item {id}.")));
-            }
-            written.push(id);
+            let item = items.get(&id).await?;
+            named.push(item.ok_or_else(|| Answer::error("not_found", format!("Finding {finding}: no item {id}.")))?);
         }
-        let known = dream.findings.iter().find(|known| known.id == finding);
-        if known.is_some_and(|known| known.kind == FindingKind::Proposal) {
-            written = known.map_or_else(Vec::new, |known| known.items.clone());
+        let mut written: Vec<_> = named.iter().map(|item| item.id.clone()).collect();
+        if known.kind == FindingKind::Proposal {
+            written.clone_from(&known.items);
         } else if verdict == Judgement::Applied && written.is_empty() {
             return Err(Answer::invalid(format!(
                 "Finding {finding}: applied names the items written or voted on, or the proposal made."
+            )));
+        } else if verdict == Judgement::Applied
+            && let Some(asked) = asked(known)
+            && !named.iter().any(|item| asked.answered_by(item))
+        {
+            return Err(Answer::invalid(format!(
+                "Finding {finding} ({}): applied names {}; none of the items given is.",
+                known.kind, asked.text
             )));
         }
         verdicts.retain(|earlier| earlier.finding != finding);
         verdicts.push(Verdict { finding: finding.to_owned(), verdict, reason, items: written, at });
     }
     Ok(verdicts)
+}
+
+/// What an applied verdict on a finding names among its items, as the finding asks.
+struct Asked {
+    /// The records it asks written.
+    records: Vec<ItemId>,
+    /// The items a proposal answering it changes: the persona or a skill.
+    targets: Vec<ItemId>,
+    /// Whether a lesson of the practice answers it too: a memory, or a skill proposal.
+    lessons: bool,
+    /// What it asks, as a refusal tells.
+    text: String,
+}
+
+impl Asked {
+    fn answered_by(&self, item: &Item) -> bool {
+        let proposed = ProposalItem::of(item.clone()).map(|found| found.proposal);
+        self.records.contains(&item.id)
+            || proposed.as_ref().is_some_and(|proposal| self.targets.contains(&proposal.target))
+            || self.lessons && (item.kind == MEMORY || proposed.is_some_and(|proposal| proposal.kind == skill::SKILL))
+    }
+}
+
+/// What an applied verdict on `finding` names among its items, by the finding's kind: for one on the identity, the
+/// record or proposal it asks for; for one on a sage's practice, a lesson, the self-model or, for one about an ant
+/// reviewed, its relationship record. None for a finding any item answers.
+fn asked(finding: &Finding) -> Option<Asked> {
+    let self_model = records::record_id(&Scope::Own)?;
+    let relationship = || {
+        let scope: Scope = finding.about()?.parse().ok()?;
+        Some((records::record_id(&scope)?, scope))
+    };
+    let lessons = "a memory, the self-model or a skill proposal written";
+    let (records, targets, lessons, text) = match finding.kind {
+        FindingKind::NoPersona => {
+            (vec![persona_id()], vec![persona_id()], false, "the persona proposal made".to_owned())
+        }
+        FindingKind::NoSelfModel | FindingKind::StaleSelfModel => {
+            (vec![self_model], Vec::new(), false, "the self-model written".to_owned())
+        }
+        FindingKind::NoRelationship | FindingKind::NoReviewedRelationship => {
+            let (record, scope) = relationship()?;
+            (vec![record], Vec::new(), false, format!("the relationship record of {scope} written"))
+        }
+        FindingKind::Inherited if finding.items.contains(&self_model) => {
+            (vec![self_model], Vec::new(), false, "the self-model written".to_owned())
+        }
+        FindingKind::Inherited if finding.items.contains(&persona_id()) => {
+            (Vec::new(), vec![persona_id()], false, "the persona proposal made".to_owned())
+        }
+        FindingKind::Inherited => (Vec::new(), finding.items.clone(), false, "the skill proposal made".to_owned()),
+        FindingKind::RejectedKind | FindingKind::UndoneFindings => {
+            (vec![self_model], Vec::new(), true, lessons.to_owned())
+        }
+        FindingKind::UnansweredReviews | FindingKind::CostlyReviews => match relationship() {
+            Some((record, scope)) => {
+                (vec![record, self_model], Vec::new(), true, format!("the relationship record of {scope}, {lessons}"))
+            }
+            None => (vec![self_model], Vec::new(), true, lessons.to_owned()),
+        },
+        FindingKind::Contradiction
+        | FindingKind::NeedsReview
+        | FindingKind::Duplicates
+        | FindingKind::Distill
+        | FindingKind::Proposal
+        | FindingKind::Sage
+        | FindingKind::Vitals => return None,
+    };
+    Some(Asked { records, targets, lessons, text })
 }
 
 /// `dream`'s findings and the verdicts on them.

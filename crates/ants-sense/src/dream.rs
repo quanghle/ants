@@ -294,6 +294,11 @@ impl Finding {
     pub fn dream(&self) -> u64 {
         self.id.split_once('.').and_then(|(number, _)| number.parse().ok()).unwrap_or_default()
     }
+
+    /// What it is about, as its key tells, such as `self` or `human:alice`; none for a sage's.
+    pub fn about(&self) -> Option<&str> {
+        self.key.as_deref()?.split_once(':').map(|(_, about)| about)
+    }
 }
 
 /// How the ant judged a finding.
