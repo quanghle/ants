@@ -28,8 +28,8 @@ pub const REJECTED_FINDING: u32 = 3;
 /// How many times the mean share of failed tool calls of the dreams before a period's share makes a finding.
 pub const FAILED_SHARE_FACTOR: f64 = 2.0;
 /// The least share of failed tool calls in a dream's period that makes a finding, however low the mean of the dreams
-/// before: after dreams with no failed call, the mean is zero, and any failure would be twice it. A first guess, to tune
-/// on the signs of real ants.
+/// before: after dreams with no failed call, the mean is zero, and any failure would be twice it. A first guess, to
+/// tune on the signs of real ants.
 pub const FAILED_SHARE_FLOOR: f64 = 0.1;
 /// The fewest tool calls in a dream's period whose failed share makes a finding.
 pub const FAILED_MIN_CALLS: u32 = 20;
