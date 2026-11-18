@@ -22,7 +22,7 @@ use crate::machines::{latest_in, latest_timed_in};
 use crate::text::excerpt;
 
 /// The runs `conductor` keeps, else those of every conductor, oldest first.
-pub(super) async fn list(js: &jetstream::Context, conductor: Option<&UserId>) -> Result<Vec<TrailRun>> {
+pub(crate) async fn list(js: &jetstream::Context, conductor: Option<&UserId>) -> Result<Vec<TrailRun>> {
     let filter = match conductor {
         Some(conductor) => format!("$KV.{TRAIL_RUNS_BUCKET}.{conductor}.*"),
         None => format!("$KV.{TRAIL_RUNS_BUCKET}.*.*"),
@@ -96,7 +96,7 @@ impl std::fmt::Display for Pick {
 }
 
 /// The run `pick` names, of whichever conductor keeps it: the one of that id, else the one run whose id starts so.
-pub(super) async fn pick(js: &jetstream::Context, pick: &Pick) -> Result<TrailRun> {
+pub(crate) async fn pick(js: &jetstream::Context, pick: &Pick) -> Result<TrailRun> {
     if Uuid::try_parse(&pick.0).is_ok() {
         return find(js, &pick.0.parse()?).await;
     }
@@ -154,7 +154,7 @@ fn local(at: DateTime<Utc>) -> String {
     at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string()
 }
 
-pub(super) fn table(runs: &[TrailRun], now: DateTime<Utc>) -> String {
+pub(crate) fn table(runs: &[TrailRun], now: DateTime<Utc>) -> String {
     let header = ["RUN", "TRAIL", "CONDUCTOR", "OWNER", "STATE", "PHASE", "STEPS", "TURNS", "STARTED", "ENDED"]
         .map(str::to_owned);
     let rows: Vec<[String; 10]> = std::iter::once(header)

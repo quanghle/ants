@@ -99,6 +99,8 @@ pub enum View {
     Pending,
     /// A thread, a channel's feed or a DM with nothing selected, a printable key written in the bar.
     Typing,
+    /// A run of a trail `/trail run` planned, waiting to start.
+    Start,
 }
 
 impl View {
@@ -124,6 +126,7 @@ impl View {
             Self::Request => "a tool request in full",
             Self::Pending => "a thread's waiting cards",
             Self::Typing => "a conversation, writing",
+            Self::Start => "a trail's run to start",
         }
     }
 }
@@ -132,6 +135,9 @@ impl View {
 pub fn views(model: &Model) -> Vec<View> {
     if model.asking.as_ref().is_some_and(Asking::takes_keys) {
         return vec![View::Request];
+    }
+    if model.starting.is_some() {
+        return vec![View::Start];
     }
     if model.focus == Focus::Nav {
         return vec![View::Nav];
@@ -214,6 +220,7 @@ pub fn entries(view: View) -> &'static [Entry] {
         View::Request => REQUEST,
         View::Pending => PENDING,
         View::Typing => TYPING,
+        View::Start => START,
     }
 }
 
@@ -775,6 +782,12 @@ const BAR: &[Entry] = &[
         always,
     ),
     Entry::new(&[Key::Ctrl('y')], "Ctrl-Y", "yank", "put back the text killed last", 14, always),
+];
+
+const START: &[Entry] = &[
+    Entry::new(&[Key::Char('y')], "y", "start", "start the run its summary shows, on a new thread", 1, always),
+    Entry::new(&[Key::Esc], "Esc", "not started", "leave the run unstarted, as any key but y and ? does", 2, always),
+    Entry::new(&[Key::Char('?')], "?", "help", "the keys of the run to start", HELP_ONLY, always),
 ];
 
 const REQUEST: &[Entry] = &[

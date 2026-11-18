@@ -55,6 +55,9 @@ impl Model {
         if self.interrupting.is_some() {
             return self.confirm_key(key);
         }
+        if self.starting.is_some() {
+            return self.start_key(key);
+        }
         if self.snoozing.is_some() {
             return self.snooze_key(key, now);
         }
@@ -204,6 +207,7 @@ impl Model {
             || self.copying.is_some()
             || self.log.is_some()
             || self.catchup.shown()
+            || self.starting.is_some()
             || self.asking.as_ref().is_some_and(Asking::takes_keys)
             || matches!(self.page(), Page::Thread(page) if page.listing())
     }
@@ -253,7 +257,11 @@ impl Model {
             self.answer(Key::Esc, now);
             return true;
         }
-        if self.picking.take().is_some() || self.interrupting.take().is_some() || self.snoozing.take().is_some() {
+        if self.picking.take().is_some()
+            || self.interrupting.take().is_some()
+            || self.starting.take().is_some()
+            || self.snoozing.take().is_some()
+        {
             return true;
         }
         if self.bar.focused && !self.completions().is_empty() {
@@ -299,6 +307,7 @@ impl Model {
             || self.copying.is_some()
             || self.catchup.shown()
             || self.interrupting.is_some()
+            || self.starting.is_some()
             || self.asking.as_ref().is_some_and(Asking::takes_keys)
             || (!self.bar.focused && matches!(self.page(), Page::Thread(page) if page.listing()))
         {

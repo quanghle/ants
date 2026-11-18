@@ -109,7 +109,7 @@ fn the_fold_keys_have_rows_in_the_table() {
 
 #[test]
 fn every_key_a_view_takes_has_a_row_in_the_table() {
-    let views: [(&str, &str, &[View]); 23] = [
+    let views: [(&str, &str, &[View]); 24] = [
         ("model/keys.rs", "nav_key", &[View::Nav]),
         ("thread.rs", "find_key", &[View::Thread]),
         ("command/bar.rs", "key", &[View::Bar]),
@@ -133,6 +133,7 @@ fn every_key_a_view_takes_has_a_row_in_the_table() {
         ("settings.rs", "key", &[View::Settings]),
         ("credentials.rs", "key", &[View::Credentials]),
         ("held.rs", "key", &[View::Held]),
+        ("trail.rs", "start_key", &[View::Start]),
     ];
     let source = |file: &str| match file {
         "model/keys.rs" => include_str!("../model/keys.rs"),
@@ -156,6 +157,7 @@ fn every_key_a_view_takes_has_a_row_in_the_table() {
         "settings.rs" => include_str!("../settings.rs"),
         "credentials.rs" => include_str!("../credentials.rs"),
         "held.rs" => include_str!("../held.rs"),
+        "trail.rs" => include_str!("../trail.rs"),
         _ => unreachable!(),
     };
     for (file, name, views) in views {

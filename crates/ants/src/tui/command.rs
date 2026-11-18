@@ -28,7 +28,7 @@ mod route;
 pub use bar::{Bar, Draft, Edited, Note, Tone};
 pub use drafts::{Conversation, Drafts};
 pub use history::{FILE as HISTORY_FILE, History};
-pub use parse::{COMMANDS, Command, Goto, Slash, parse};
+pub use parse::{COMMANDS, Command, Goto, Slash, Trail, parse};
 pub use route::Route;
 
 /// A paste of more bytes than this is staged as a text file rather than put in the bar.
@@ -296,6 +296,12 @@ impl Model {
                 run(Job::Save(Box::new(listed), to.map(|to| attach::expand(&to))))
             }
             Slash::Retire(ant) => run(Job::Retire { ant }),
+            Slash::Trail(trail) => run(match trail {
+                Trail::Runs => Job::TrailRuns,
+                Trail::Run { trail, conductor, args } => Job::TrailPlan { trail, conductor, args },
+                Trail::Stop(run) => Job::TrailStop(run),
+                Trail::Resume(run) => Job::TrailResume(run),
+            }),
             Slash::Attach(_) | Slash::Detach => Ok(None),
             Slash::Quit => Ok(Some(Action::Quit)),
         }
@@ -526,9 +532,10 @@ impl Model {
         Ok(self.select(item))
     }
 
-    /// Take how a job the bar ran went: its line and warnings on the status line, opening the thread it started, and
-    /// the text and files of a message withdrawn to edit into the bar; on failure, the error, and its text and quote
-    /// back as the draft of the conversation it was typed in if that holds none.
+    /// Take how a job the bar ran went: its line and warnings on the status line, opening the thread it started, the
+    /// text and files of a message withdrawn to edit into the bar, the run of a trail planned to confirm, and what it
+    /// shows in the pager; on failure, the error, and its text and quote back as the draft of the conversation it was
+    /// typed in if that holds none.
     pub fn outcome(&mut self, outcome: Outcome) -> Option<Action> {
         self.follow_drafts();
         self.bar.staged.sent(&outcome.text, outcome.result.is_err());
@@ -549,6 +556,12 @@ impl Model {
                 let tone = if done.warnings.is_empty() { Tone::Done } else { Tone::Warn };
                 let text = std::iter::once(done.line).chain(done.warnings).collect::<Vec<_>>().join(" · ");
                 self.bar.set_status(text, tone);
+                if let Some(planned) = done.planned {
+                    self.starting = Some(*planned);
+                }
+                if let Some(page) = done.page {
+                    return Some(Action::Page(page));
+                }
                 let thread = done.open?;
                 if matches!(self.page(), Page::Thread(page) if page.history.thread == thread) {
                     return None;

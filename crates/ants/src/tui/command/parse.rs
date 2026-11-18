@@ -3,13 +3,16 @@
 
 use std::time::Duration;
 
-use ants_proto::{ChannelId, ChannelNotify, Reaction, ThreadId, UserId};
+use ants_proto::{ChannelId, ChannelNotify, Reaction, ThreadId, TrailName, UserId};
 use chrono::TimeDelta;
+use serde_json::Value;
 
 use super::snooze;
+use crate::cmd::trail::runs::Pick;
 use crate::threads::thread_meta::Marking;
 
-/// The slash commands: name, arguments and what each does, as the list shows them.
+/// The slash commands: name, arguments and what each does, as the list shows them. A command of several forms lists
+/// them between ` | `.
 pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("approve", "[ID] [--always]", "allow a tool request, once or for the session"),
     ("reject", "[ID]", "refuse a tool request"),
@@ -46,6 +49,11 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("detach", "", "drop the files attached"),
     ("save", "[PATH]", "save the marked attachment"),
     ("retire", "ANT", "retire the ant by admin order, its home kept"),
+    (
+        "trail",
+        "runs | run NAME [@ANT] [ARGS] | stop RUN | resume RUN",
+        "list the runs of trails, start a run of a saved trail once y confirms its limits, stop or resume a run",
+    ),
     ("quit", "", "leave ants chat"),
 ];
 
@@ -114,7 +122,23 @@ pub enum Slash {
     Save(Option<String>),
     /// Retire the ant by admin order.
     Retire(UserId),
+    Trail(Trail),
     Quit,
+}
+
+/// What `/trail` asks of the runs of trails, as `ants trail` does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Trail {
+    Runs,
+    /// Start a run of the saved trail `trail` with `args`, a JSON value, on `conductor`, else whom a message naming no
+    /// one goes to, once confirmed.
+    Run {
+        trail: TrailName,
+        conductor: Option<UserId>,
+        args: Option<Value>,
+    },
+    Stop(Pick),
+    Resume(Pick),
 }
 
 /// Where `/goto` leads.
@@ -249,9 +273,39 @@ fn slash(text: &str) -> Result<Slash, String> {
             let ant = text()?;
             ant.strip_prefix('@').unwrap_or(&ant).parse().map(Slash::Retire).map_err(|e| format!("{e}"))
         }
+        "trail" => trail(args).map(Slash::Trail).map_err(|why| why.unwrap_or_else(usage)),
         "quit" => bare(Slash::Quit),
         _ if COMMANDS.iter().any(|(n, ..)| *n == name) => Err(usage()),
         _ => Err(format!("no command /{name}: the palette lists them")),
+    }
+}
+
+/// What `/trail`'s `args` ask, or why not: None for its usage.
+fn trail(args: &str) -> Result<Trail, Option<String>> {
+    let error = |e: &dyn std::fmt::Display| Some(e.to_string());
+    match first_word(args) {
+        ("runs", "") => Ok(Trail::Runs),
+        ("run", rest) if !rest.is_empty() => {
+            let (name, rest) = first_word(rest);
+            let trail = name.parse().map_err(|e| error(&e))?;
+            let (conductor, rest) = match rest.strip_prefix('@') {
+                Some(after) => {
+                    let (ant, rest) = first_word(after);
+                    (Some(ant.parse().map_err(|e| error(&e))?), rest)
+                }
+                None => (None, rest),
+            };
+            let args = match rest {
+                "" => None,
+                json => Some(crate::cmd::trail::start::json_args(json).map_err(|e| Some(format!("ARGS {e}")))?),
+            };
+            Ok(Trail::Run { trail, conductor, args })
+        }
+        (verb @ ("stop" | "resume"), run) if !run.is_empty() && !run.contains(char::is_whitespace) => {
+            let run = run.parse().map_err(|e: String| Some(e))?;
+            Ok(if verb == "stop" { Trail::Stop(run) } else { Trail::Resume(run) })
+        }
+        _ => Err(None),
     }
 }
 
@@ -336,10 +390,39 @@ mod tests {
         assert!(parse("/react Thumbs Up").is_err());
     }
 
+    #[test]
+    fn trail_lists_starts_stops_and_resumes_runs() {
+        let trail = |text: &str| match parse(text) {
+            Ok(Command::Slash(Slash::Trail(trail))) => trail,
+            other => panic!("{text}: {other:?}"),
+        };
+        assert_eq!(trail("/trail runs"), Trail::Runs);
+        let run = |conductor: Option<&str>, args| Trail::Run {
+            trail: "review".parse().unwrap(),
+            conductor: conductor.map(user),
+            args,
+        };
+        assert_eq!(trail("/trail run review"), run(None, None));
+        assert_eq!(trail("/TRAIL run review @lead"), run(Some("lead"), None));
+        let args = Some(serde_json::json!({"files": ["a.rs", "b.rs"]}));
+        assert_eq!(trail(r#"/trail run review @lead {"files": ["a.rs", "b.rs"]}"#), run(Some("lead"), args.clone()));
+        assert_eq!(trail(r#"/trail run review {"files": ["a.rs", "b.rs"]}"#), run(None, args));
+        assert_eq!(trail("/trail stop 0190AB"), Trail::Stop("0190ab".parse().unwrap()));
+        assert_eq!(trail("/trail resume 0190ab"), Trail::Resume("0190ab".parse().unwrap()));
+        let usage = "usage: /trail runs | run NAME [@ANT] [ARGS] | stop RUN | resume RUN";
+        for refused in ["/trail", "/trail runs all", "/trail run", "/trail stop", "/trail stop a b", "/trail list"] {
+            assert_eq!(parse(refused).unwrap_err(), usage, "{refused}");
+        }
+        assert!(parse("/trail run Not_A_Name").unwrap_err().contains("trail name"));
+        assert!(parse("/trail run review {files").unwrap_err().starts_with("ARGS not JSON"));
+        assert!(parse("/trail run review @Lead").is_err());
+        assert!(parse("/trail stop review").unwrap_err().contains("hex digits"));
+    }
+
     /// A sample of an argument [`COMMANDS`] names; a new placeholder needs one here.
     fn sample(arg: &str) -> &str {
         match arg {
-            "ID" | "THREAD" => "019a",
+            "ID" | "THREAD" | "RUN" => "019a",
             "TEXT" | "NOTE" | "QUERY" => "ship it",
             "N" => "2",
             "PICK..." => "2 'after lunch'",
@@ -351,6 +434,7 @@ mod tests {
             "@user" | "@ANT" => "@dev-b",
             "ANT" => "dev-a",
             "PATH" => "notes.txt",
+            "ARGS" => r#"{"files": ["a.rs"]}"#,
             literal if literal.starts_with("--") || literal.chars().all(|c| c.is_ascii_lowercase()) => literal,
             other => panic!("no sample for {other}"),
         }
@@ -358,9 +442,9 @@ mod tests {
 
     #[test]
     fn every_listed_command_parses_with_its_arguments() {
-        for (name, args, _) in COMMANDS {
+        for (name, form) in COMMANDS.iter().flat_map(|(name, forms, _)| forms.split(" | ").map(move |f| (name, f))) {
             let mut lines = vec![format!("/{name}")];
-            for arg in args.split_whitespace() {
+            for arg in form.split_whitespace() {
                 let (alternatives, optional) = match arg.strip_prefix('[').and_then(|a| a.strip_suffix(']')) {
                     Some(arg) => (arg, true),
                     None => (arg, false),

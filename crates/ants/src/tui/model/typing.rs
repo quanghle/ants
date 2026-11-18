@@ -9,10 +9,11 @@ use crate::tui::command::Conversation;
 
 impl Model {
     /// Whether a printable key is written in the bar: a thread, a channel's feed or a DM is shown with nothing of it
-    /// selected by Up.
+    /// selected by Up, and no run of a trail waits to start.
     pub fn typing(&self) -> bool {
         let here = self.conversation();
         self.focus == Focus::View
+            && self.starting.is_none()
             && here != Conversation::None
             && !matches!(self.page(), Page::Thread(page) if page.listing())
             && self.selecting.as_ref() != Some(&here)

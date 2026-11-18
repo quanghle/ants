@@ -24,7 +24,7 @@ use super::reads::{Levels, Mark, Read};
 use super::work::{Facts, Filter};
 use super::{
     ant, cards, catchup, channel, credentials, dm, faces, fold, held, home, images, mcp, memories, nav, people, search,
-    settings, snooze, steps, thread, timeline, tree, work,
+    settings, snooze, steps, thread, timeline, trail, tree, work,
 };
 use crate::live::{self, State};
 use crate::text::excerpt;
@@ -367,6 +367,8 @@ pub struct Model {
     pub copying: Option<super::clipboard::Picker>,
     /// The cancel waiting for y while an ant runs a tool call.
     pub interrupting: Option<Confirm>,
+    /// The run of a trail `/trail run` planned, waiting for y to start.
+    pub starting: Option<trail::Planned>,
     /// How long to snooze a thread from home, or when to be reminded of it, being asked.
     pub snoozing: Option<snooze::Prompt>,
     /// The catch-up summaries: the span home's first line counts, the TL;DRs asked for, the digest.
@@ -431,6 +433,7 @@ impl Model {
             picking: None,
             copying: None,
             interrupting: None,
+            starting: None,
             snoozing: None,
             catchup: catchup::Catchup::default(),
             compact: false,

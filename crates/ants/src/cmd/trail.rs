@@ -6,11 +6,11 @@
 //! [`ants_proto::TRAIL_RUNS_BUCKET`], which humans read ([`runs`], [`follow`]), and humans ask a run's conductor to
 //! start, stop and resume one ([`control`], [`start`]).
 
-mod control;
+pub(crate) mod control;
 mod follow;
 pub(crate) mod runs;
 mod saved;
-mod start;
+pub(crate) mod start;
 #[cfg(test)]
 mod tests;
 

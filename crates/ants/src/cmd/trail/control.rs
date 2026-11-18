@@ -41,7 +41,7 @@ pub(super) async fn ask(
 }
 
 /// Stop `run` as human `by`; what `ants trail stop` prints.
-pub(super) async fn stop(client: &async_nats::Client, by: &UserId, run: &TrailRun) -> Result<String> {
+pub(crate) async fn stop(client: &async_nats::Client, by: &UserId, run: &TrailRun) -> Result<String> {
     if run.finished() {
         bail!("run {} has ended: {}", run.run, super::runs::state(&run.state));
     }
@@ -68,7 +68,7 @@ pub(super) fn stopped(run: &RunId, conductor: &UserId, waiting: &[WaitingStep]) 
 }
 
 /// Resume `run` as human `by`, under `limits` when given; what `ants trail resume` prints.
-pub(super) async fn resume(
+pub(crate) async fn resume(
     client: &async_nats::Client,
     by: &UserId,
     run: &TrailRun,

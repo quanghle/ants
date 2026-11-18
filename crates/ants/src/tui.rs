@@ -56,6 +56,7 @@ mod terminal;
 mod test_support;
 mod thread;
 mod timeline;
+mod trail;
 mod tree;
 mod work;
 

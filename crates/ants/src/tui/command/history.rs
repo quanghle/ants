@@ -122,7 +122,7 @@ impl Data {
 }
 
 /// The slash commands acting on no thread.
-const THREADLESS: &[&str] = &["goto", "search", "digest", "attach", "detach", "retire", "quit", "notify"];
+const THREADLESS: &[&str] = &["goto", "search", "digest", "attach", "detach", "retire", "quit", "notify", "trail"];
 
 impl Model {
     /// Whether `text` typed in `conversation` is kept for the run only: addressed to another human ([`Data::private`]),

@@ -1,6 +1,7 @@
 //! What the command bar's sends and slash commands do over the CLI's connection, in the background while the UI goes
 //! on: the same library code as `ants ask`, `ants post`, `ants answer`, `ants react`, `ants cancel`, `ants thread
-//! done|title|pin|mute...` run, each returning the line those print and the warnings they log.
+//! done|title|pin|mute...` and `ants trail` ([`super::trail`]) run, each returning the line those print and the warnings
+//! they log.
 
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -9,14 +10,16 @@ use std::time::Duration;
 
 use ants_daemon::bus;
 use ants_daemon::records::reactions;
-use ants_proto::{ChannelId, ChannelNotify, EscalationReason, JsDomain, Pick, Quote, Reaction, ThreadId, UserId, Uuid};
+use ants_proto::{
+    ChannelId, ChannelNotify, EscalationReason, JsDomain, Pick, Quote, Reaction, ThreadId, TrailName, UserId, Uuid,
+};
 use anyhow::{Result, anyhow, bail};
 use async_nats::jetstream;
 use futures::future::LocalBoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt as _, StreamExt as _};
 
-use super::attach;
+use super::{attach, trail};
 use crate::admin::orders;
 use crate::admin::pause;
 use crate::cmd::{cancel, send};
@@ -192,6 +195,21 @@ pub enum Job {
         source: forward::Source,
         note: String,
     },
+    /// List the runs of trails, as `ants trail runs` does.
+    TrailRuns,
+    /// Plan a run of the saved trail `trail` with `args` on `conductor`, as `ants trail run` sums it up before asking to
+    /// start it ([`Done::planned`]).
+    TrailPlan {
+        trail: TrailName,
+        conductor: Option<UserId>,
+        args: Option<serde_json::Value>,
+    },
+    /// Ask the conductor to start the run planned, as `ants trail run` does once confirmed.
+    TrailStart(Box<crate::cmd::trail::start::Start>),
+    /// Stop the run picked, as `ants trail stop` does.
+    TrailStop(crate::cmd::trail::runs::Pick),
+    /// Resume the run picked, as `ants trail resume` does.
+    TrailResume(crate::cmd::trail::runs::Pick),
 }
 
 /// A message withdrawn to send again: its text and attachments.
@@ -216,6 +234,10 @@ pub struct Done {
     pub edit: Option<(String, Vec<PathBuf>)>,
     /// The channel whose entry it changed, to read back.
     pub channel: Option<ChannelId>,
+    /// What to show in the pager: a table the CLI prints.
+    pub page: Option<String>,
+    /// The run of a trail planned, to start once confirmed.
+    pub planned: Option<Box<trail::Planned>>,
 }
 
 impl Done {
@@ -364,6 +386,11 @@ impl Job {
             Self::Attached { .. } => Err(anyhow!("files are attached to one message")),
             Self::Later(_) => Err(anyhow!("a message waits its turn once")),
             Self::Withdraw { ants, message, edit } => withdraw(ctx, &ants, message, edit.map(|e| *e)).await,
+            Self::TrailRuns => trail::listed(ctx).await,
+            Self::TrailPlan { trail, conductor, args } => trail::planned(ctx, &trail, conductor, args).await,
+            Self::TrailStart(start) => trail::started(ctx, &start).await,
+            Self::TrailStop(run) => trail::stopped(ctx, &run).await,
+            Self::TrailResume(run) => trail::resumed(ctx, &run).await,
         }
     }
 }

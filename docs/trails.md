@@ -98,6 +98,9 @@ A run is started three ways; each names a conductor, an owner and a thread to re
   ants trail run ./draft.py --ant dev-a --thread last --yes
   ```
 
+  In `ants chat`, `/trail run NAME [@ANT] [ARGS]` does the same for a saved trail, under the default limits and on a
+  new thread: it shows the same summary over the view, and `y` starts the run ([cli.md](cli.md#ants-chat-command-bar)).
+
 - **`run_trail`**, an MCP tool of ants ([architecture.md](architecture.md#mcp-tools)): the calling ant conducts a run
   of a saved trail (`name`) or of a script of its own (`script`), with `args`, on the current thread, owned by the
   thread's owner. It returns the run's id at once, or with `wait: true` the run's result or error, waiting up to
@@ -150,7 +153,8 @@ A run reports on the thread it started with, as its conductor:
 
 `ants trail runs` lists the runs of every conductor, or `--ant CONDUCTOR`'s; `ants trail show RUN` prints a run (its
 id or a unique start of one): state, phase, spending, args, the calls waiting and queued, and its journal; `--follow`
-follows it as `ants trail run --follow` does. These need human credentials.
+follows it as `ants trail run --follow` does. These need human credentials. In `ants chat`, `/trail runs` shows the
+same list in the pager.
 
 ## Limits
 
@@ -221,6 +225,9 @@ ants trail runs
 ants trail stop 0198c4
 ants trail resume 0198c4 --turns 400 --wall 2d --follow
 ```
+
+`/trail stop RUN` and `/trail resume RUN` in `ants chat` stop and resume a run the same way, a resume under the run's
+own limits.
 
 ## Workers
 
