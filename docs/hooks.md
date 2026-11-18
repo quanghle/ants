@@ -189,7 +189,7 @@ the human in `decider` and the assistant in `via`; no `ApprovalDecision` is stor
 ### `Timeline` on `ants.timeline.<thread>.<ant>`
 
 Stored in `ANTS`: part of the tool-call timeline of an ant's prompt on a thread, so a thread's history shows the calls
-after their live status updates are gone, and whether the prompt ended with no reply sent. Humans read it back by
+after their live status updates are gone, whether the prompt ended with no reply sent, and how it ended. Humans read it back by
 message gets (`ants thread show`). An ant's daemon reads back the ant's own records alone, through its sent reader
 `sentread-<ant>` filtered to `ants.timeline.*.<ant>`, only for its [dreams](sense.md#dreams)' packets; no
 ant reads another's.
@@ -202,12 +202,14 @@ left out past 200) and 1 to 50 `entries`, each named by `type`:
 | `plan` | `steps`: `[{"content", "status"}]` (≤ 50) | The prompt's plan as last reported |
 | `no_reply` | `why` (`reply_to_own`, `completed`, `steered`), `reason`?, `text`? | The prompt sent no reply: the message was another ant's reply to the ant's own, the ant called `complete` (with `reason`), or a later message steering the prompt took its answer (`reason` names it); `text` is the final text that went to nobody, redacted as replies are |
 | `rejected` | `request`, `kind`?, `title` (≤ 200 chars), `by` (`human`, `chain`, `expiry`), `decider`?, `via`? | A tool request of the ant rejected: by a human (`decider`; for one an assistant decided and the human confirmed, the assistant in `via`), by an ant of its chain (`decider`), or as it expired unanswered |
+| `ended` | `how` (`replied`, `no_reply`, `cancelled`, `capped`, `failed`), `duration_ms`, `tokens`?, `cost`?, `asked`?, `rebuilt`? | How the prompt ended: its answer sent as a reply, none sent, cancelled by a human, cut by a prompt limit or spending cap, or failed after it began; how long it ran, the tokens and cost (US dollars) the harness reported, the tool requests it asked of humans or the chain, and whether its session was rebuilt (lost, or out of room) |
 
 A daemon stores a record at most every 30 s while calls changed and the rest when the prompt ends, a `no_reply` entry
-then too. Its approver stores a record holding a `rejected` entry alone when it settles a tool request as rejected,
+then too, and a record holding an `ended` entry alone as the prompt ends, before its message is settled: one for each
+run of a message's prompt, so a message prompted again has several. Its approver stores a record holding a `rejected` entry alone when it settles a tool request as rejected,
 under the message being answered on the thread (the nil id when none), before the ant goes on. Merge calls by `ant`,
-`message` and `id`, later records replacing earlier ones, and rejections by `ant` and `request`; ignore entries of
-other types and unknown fields.
+`message` and `id`, later records replacing earlier ones, and rejections by `ant` and `request`; keep every `ended`
+entry; ignore entries of other types and unknown fields.
 Check: `subject == "ants.timeline." + thread_id + "." + ant`.
 
 ### `ColonyEntry` at `ants_colony` key `<ant>`

@@ -7,8 +7,8 @@ use std::ops::ControlFlow;
 use std::time::SystemTime;
 
 use ants_proto::{
-    MergedRejection, NoReplyWhy, ThreadId, Timeline, TimelineCall, TimelineEntry, Timelines, UserId, Uuid, sent_reader,
-    subject,
+    MergedCall, MergedEnd, MergedRejection, NoReplyWhy, PromptEnd, ThreadId, Timeline, TimelineCall, TimelineEntry,
+    Timelines, UserId, Uuid, sent_reader, subject,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, consumer};
@@ -21,7 +21,8 @@ use crate::stream::reading::{self, Reading};
 pub(super) struct Thread {
     timelines: Timelines,
     /// The messages whose prompts the records cover, in the order of their first record, with its time: but those
-    /// covered only by tool requests rejected, which [`Thread::show`] leaves to [`Thread::rejections`].
+    /// covered only by tool requests rejected, which [`Thread::show`] leaves to [`Thread::rejections`], and by ends it
+    /// shows no line for.
     prompts: Vec<(Uuid, DateTime<Utc>)>,
 }
 
@@ -47,7 +48,11 @@ pub(super) async fn read(
             && let Ok(record) = serde_json::from_slice::<Timeline>(payload)
         {
             let (message, at) = (record.message, record.at);
-            let shown = record.entries.iter().any(|entry| !matches!(entry, TimelineEntry::Rejected(_)));
+            let shown = record.entries.iter().any(|entry| match entry {
+                TimelineEntry::Rejected(_) => false,
+                TimelineEntry::Ended(end) => end_text(end.how).is_some(),
+                _ => true,
+            });
             let thread = threads.entry(thread).or_default();
             if thread.timelines.add(subject, record) && shown && !thread.prompts.iter().any(|(m, _)| *m == message) {
                 thread.prompts.push((message, at));
@@ -66,8 +71,19 @@ impl Thread {
         self.timelines.rejections()
     }
 
+    /// The ant's tool calls, in the order first stored.
+    pub(super) fn calls(&self) -> &[MergedCall] {
+        self.timelines.calls()
+    }
+
+    /// How the ant's prompts ended, in the order stored.
+    pub(super) fn ends(&self) -> &[MergedEnd] {
+        self.timelines.ends()
+    }
+
     /// The timeline of `ant`, oldest prompt first: a line naming each prompt's message, then a line for each of its
-    /// tool calls, its plan, the calls left out and its end with no reply, whose final text is cut to `most` bytes.
+    /// tool calls, its plan, the calls left out, its end with no reply, whose final text is cut to `most` bytes, and its
+    /// cancelling, cutting by a cap or failing.
     pub(super) fn show(&self, ant: &UserId, most: usize) -> String {
         let mut text = String::new();
         for (message, first) in &self.prompts {
@@ -114,8 +130,33 @@ impl Thread {
                     );
                 }
             }
+            for ended in self.timelines.ends().iter().filter(|ended| ended.message == *message) {
+                if let Some(how) = end_text(ended.end.how) {
+                    let (at, ran) = (ended.at.format("%H:%M"), ran(ended.end.duration_ms));
+                    let _ = writeln!(text, "- {at} {how} after {ran}");
+                }
+            }
         }
         text
+    }
+}
+
+/// The line a prompt's end shows: none for an end of the usual kinds.
+fn end_text(how: PromptEnd) -> Option<&'static str> {
+    match how {
+        PromptEnd::Cancelled => Some("cancelled by a human"),
+        PromptEnd::Capped => Some("cut by a cap"),
+        PromptEnd::Failed => Some("failed"),
+        PromptEnd::Replied | PromptEnd::NoReply | PromptEnd::Unknown => None,
+    }
+}
+
+/// `ms` as minutes and seconds.
+fn ran(ms: u64) -> String {
+    let seconds = ms / 1000;
+    match seconds {
+        0..60 => format!("{seconds} s"),
+        _ => format!("{} min {} s", seconds / 60, seconds % 60),
     }
 }
 
@@ -200,6 +241,12 @@ mod tests {
             text: "é".repeat(20),
         };
         add(m2, vec![end], 0);
+        let ended = |how, duration_ms| {
+            let end = ants_proto::TimelineEnd { how, duration_ms, tokens: 0, cost: 0.0, asked: 0, rebuilt: false };
+            TimelineEntry::Ended(end)
+        };
+        add(m2, vec![ended(PromptEnd::NoReply, 1_000)], 0);
+        add(m1, vec![ended(PromptEnd::Cancelled, 123_456)], 0);
         assert_eq!(
             shown.show(&ant, 11),
             format!(
@@ -208,6 +255,7 @@ mod tests {
                  - 09:02 tool: Edit a.rs (failed, 40 ms); src/a.rs, src/b.rs\n\
                  - plan: test (completed); fix it (pending)\n\
                  - 3 more tool calls left out\n\
+                 - 09:10 cancelled by a human after 2 min 3 s\n\
                  2026-11-14 09:10 UTC, the prompt of message {m2}:\n\
                  - 09:10 ended with no reply: the ant called complete, nothing to add; its final text, sent to nobody:\n\
                  ééééé … (30 bytes left out)\n"

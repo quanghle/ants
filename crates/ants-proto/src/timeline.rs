@@ -25,12 +25,12 @@ pub const MAX_TIMELINE_CALLS: usize = 200;
 pub const TIMELINE_EVERY: Duration = Duration::from_secs(30);
 
 /// Part of the tool-call timeline of `ant` on a thread: the calls of the prompt that handled `message` that changed
-/// since the last record, the prompt's plan as last reported, its tool requests rejected, and whether it ended with no
-/// reply sent, stored on [`subject::timeline`]. A record holds 1 to [`MAX_TIMELINE_ENTRIES`] entries, never a tool's input or output, message
+/// since the last record, the prompt's plan as last reported, its tool requests rejected, whether it ended with no
+/// reply sent, and how it ended ([`TimelineEntry::Ended`]), stored on [`subject::timeline`]. A record holds 1 to [`MAX_TIMELINE_ENTRIES`] entries, never a tool's input or output, message
 /// text or thoughts, but for the final text of a prompt that ended with no reply sent ([`TimelineEntry::NoReply`]),
 /// which no message carries. Calls are merged by message and call id, later records replacing earlier ones
 /// ([`Timelines`]). Readers ignore unknown entry kinds and fields.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Timeline {
     pub ant: UserId,
     pub thread_id: ThreadId,
@@ -48,8 +48,18 @@ fn is_zero(n: &u32) -> bool {
     *n == 0
 }
 
+#[expect(clippy::trivially_copy_pass_by_ref, reason = "serde's skip_serializing_if takes a reference")]
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
+}
+
+#[expect(clippy::trivially_copy_pass_by_ref, reason = "serde's skip_serializing_if takes a reference")]
+fn is_zero_f64(n: &f64) -> bool {
+    *n == 0.0
+}
+
 /// One entry of a [`Timeline`] record, tagged by `type`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TimelineEntry {
     Tool(TimelineCall),
@@ -68,6 +78,8 @@ pub enum TimelineEntry {
     },
     /// A tool request of the prompt was rejected: by whoever decided it, or as it expired unanswered.
     Rejected(TimelineRejection),
+    /// How the prompt ended, in a record of its own once it did: one per run of the prompt.
+    Ended(TimelineEnd),
     /// An entry of a kind this version does not know, read as this and ignored: a reader older than a kind skips it
     /// (one before [`TimelineEntry::NoReply`] skips that). Stays the last variant.
     #[serde(other)]
@@ -84,6 +96,58 @@ pub enum NoReplyWhy {
     Completed,
     /// A later message steered the prompt, whose answer went to that one; `reason` names it.
     Steered,
+}
+
+/// How a prompt ended ([`TimelineEntry::Ended`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptEnd {
+    /// Its answer went out as a reply, a steering message's or a restart's interruption told in it.
+    Replied,
+    /// It ended with no reply sent ([`TimelineEntry::NoReply`] tells why).
+    NoReply,
+    /// A human, or an assistant for its human, cancelled it.
+    Cancelled,
+    /// A prompt limit or spending cap cut it, or its spend reached a cap.
+    Capped,
+    /// The harness failed it after it began.
+    Failed,
+    /// A value from a newer daemon.
+    #[serde(other)]
+    Unknown,
+}
+
+impl PromptEnd {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Replied => "replied",
+            Self::NoReply => "no_reply",
+            Self::Cancelled => "cancelled",
+            Self::Capped => "capped",
+            Self::Failed => "failed",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// How a prompt ended and what it took ([`TimelineEntry::Ended`]): the measures of the ant's work the daemon keeps.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TimelineEnd {
+    pub how: PromptEnd,
+    /// How long the prompt ran.
+    pub duration_ms: u64,
+    /// The tokens the harness reported the prompt spent.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub tokens: u64,
+    /// The cost in US dollars the harness reported the prompt spent.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub cost: f64,
+    /// How many tool requests the prompt asked of humans or the ant's chain.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub asked: u32,
+    /// Whether the thread's session was rebuilt for the prompt: lost, or outgrown and started anew.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rebuilt: bool,
 }
 
 /// A tool request rejected ([`TimelineEntry::Rejected`]), as the ant's approver settled it.
@@ -237,10 +301,23 @@ pub struct MergedRejection {
     pub at: DateTime<Utc>,
 }
 
-/// The tool calls, plans, rejected tool requests and ends with no reply of [`Timeline`] records, merged: fed in the
-/// order they were stored, each call, plan and end is as its latest record has it. Calls are keyed by ant, message and
-/// call id, since a channel post reaches several ants under one message id; plans and ends by ant and message;
-/// rejections by ant and request.
+/// How a prompt of a thread's timeline ended ([`TimelineEntry::Ended`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MergedEnd {
+    pub ant: UserId,
+    pub thread_id: ThreadId,
+    /// The message whose prompt ended so.
+    pub message: Uuid,
+    pub end: TimelineEnd,
+    /// When the record saying so was made.
+    pub at: DateTime<Utc>,
+}
+
+/// The tool calls, plans, rejected tool requests, ends with no reply and prompt ends of [`Timeline`] records, merged:
+/// fed in the order they were stored, each call, plan and end with no reply is as its latest record has it. Calls are
+/// keyed by ant, message and call id, since a channel post reaches several ants under one message id; plans and ends
+/// with no reply by ant and message; rejections by ant and request. Every prompt end is kept, a message prompted again
+/// having one per run.
 #[derive(Debug, Clone, Default)]
 pub struct Timelines {
     calls: Vec<MergedCall>,
@@ -249,6 +326,7 @@ pub struct Timelines {
     omitted: HashMap<(UserId, Uuid), u32>,
     no_replies: Vec<MergedNoReply>,
     rejections: Vec<MergedRejection>,
+    ends: Vec<MergedEnd>,
 }
 
 impl Timelines {
@@ -295,6 +373,10 @@ impl Timelines {
                         None => self.rejections.push(rejected),
                     }
                 }
+                TimelineEntry::Ended(end) => {
+                    let (ant, thread_id) = (ant.clone(), thread_id.clone());
+                    self.ends.push(MergedEnd { ant, thread_id, message, end, at });
+                }
                 TimelineEntry::Unknown => {}
             }
         }
@@ -316,6 +398,11 @@ impl Timelines {
         &self.rejections
     }
 
+    /// How every prompt ended, in the order stored.
+    pub fn ends(&self) -> &[MergedEnd] {
+        &self.ends
+    }
+
     /// The plan of `ant` for `message` as last stored, if any.
     pub fn plan(&self, ant: &UserId, message: Uuid) -> Option<&[PlanStep]> {
         self.plans.get(&(ant.clone(), message)).map(Vec::as_slice)
@@ -327,7 +414,11 @@ impl Timelines {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.calls.is_empty() && self.plans.is_empty() && self.no_replies.is_empty() && self.rejections.is_empty()
+        self.calls.is_empty()
+            && self.plans.is_empty()
+            && self.no_replies.is_empty()
+            && self.rejections.is_empty()
+            && self.ends.is_empty()
     }
 }
 
@@ -444,6 +535,29 @@ mod tests {
             ..timelines.rejections()[0].rejection.clone()
         };
         assert_eq!(long.bounded().title.chars().count(), MAX_TIMELINE_TITLE);
+    }
+
+    #[test]
+    fn every_prompt_end_is_kept_and_an_unknown_end_reads() {
+        let t: ThreadId = "t1".parse().unwrap();
+        let ended = |how, tokens| {
+            let end = TimelineEnd { how, duration_ms: 1500, tokens, cost: 0.0, asked: 0, rebuilt: false };
+            TimelineEntry::Ended(end)
+        };
+        let json = serde_json::to_value(ended(PromptEnd::Cancelled, 0)).unwrap();
+        assert_eq!(json, serde_json::json!({"type": "ended", "how": "cancelled", "duration_ms": 1500}));
+        let m1 = Uuid::from_u128(1);
+        let mut timelines = Timelines::default();
+        let first = Timeline::new(p("dev-a"), t.clone(), m1, vec![ended(PromptEnd::Failed, 10)], 0);
+        let subject = first.subject();
+        assert!(timelines.add(&subject, first));
+        assert!(!timelines.is_empty());
+        assert!(timelines.add(&subject, Timeline::new(p("dev-a"), t, m1, vec![ended(PromptEnd::Replied, 20)], 0)));
+        let ends: Vec<_> = timelines.ends().iter().map(|e| (e.message, e.end.how, e.end.tokens)).collect();
+        assert_eq!(ends, [(m1, PromptEnd::Failed, 10), (m1, PromptEnd::Replied, 20)]);
+        let later = serde_json::json!({"type": "ended", "how": "exploded", "duration_ms": 1});
+        let TimelineEntry::Ended(end) = serde_json::from_value(later).unwrap() else { panic!("an end") };
+        assert_eq!((end.how, end.cost, end.asked, end.rebuilt), (PromptEnd::Unknown, 0.0, 0, false));
     }
 
     #[test]

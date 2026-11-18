@@ -4,14 +4,14 @@
 //! its daemon makes through the readers themselves, and the messages it sent through its own [`sent_reader`]; an
 //! assistant reads them all by direct gets.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::ControlFlow;
 use std::pin::Pin;
 use std::time::SystemTime;
 
 use ants_proto::{
-    ChannelId, Envelope, MergedRejection, NotesPost, ThreadId, UserId, Uuid, inbox_consumer, notes_consumer,
-    sent_reader, subject,
+    ChannelId, Envelope, EscalationReason, MergedCall, MergedEnd, MergedRejection, NotesPost, ThreadId, UserId, Uuid,
+    inbox_consumer, notes_consumer, sent_reader, subject,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, consumer};
@@ -253,7 +253,7 @@ impl Thread {
 }
 
 /// A thread of an ant active over a time, as [`active`] reads it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Active {
     pub thread: ThreadId,
     /// What the ant received and sent on it and its notes, as a prompt shows a history.
@@ -264,6 +264,13 @@ pub(crate) struct Active {
     pub sent: Vec<Sent>,
     /// The ant's tool requests rejected on it, as its timeline keeps them: empty when it could not be read.
     pub rejections: Vec<MergedRejection>,
+    /// The ant's tool calls on it, as its timeline keeps them: empty when it could not be read.
+    pub calls: Vec<MergedCall>,
+    /// How the ant's prompts on it ended, as its timeline keeps them: empty when it could not be read.
+    pub ends: Vec<MergedEnd>,
+    /// The issues the ant escalated on it: each reason, and tool request, once, however many messages it took. Tool
+    /// requests and questions to humans are not counted.
+    pub escalations: u32,
 }
 
 /// A message the ant sent on a thread, or posted to its notes, as [`active`] read it.
@@ -305,6 +312,7 @@ pub(crate) async fn active(
     let mut threads: BTreeMap<ThreadId, BTreeMap<u64, Entry>> = BTreeMap::new();
     // The ids of the ant's own messages and notes posts on each thread, by stream sequence.
     let mut own: BTreeMap<ThreadId, BTreeMap<u64, Uuid>> = BTreeMap::new();
+    let mut escalated: BTreeMap<ThreadId, HashSet<(EscalationReason, Option<Uuid>)>> = BTreeMap::new();
     let mut take = |seq, at, subject: &str, payload: &[u8]| {
         if at > until {
             return ControlFlow::Break(());
@@ -314,6 +322,13 @@ pub(crate) async fn active(
         {
             if envelope.from == *ant {
                 own.entry(envelope.thread_id.clone()).or_default().insert(seq, envelope.id);
+                if let Some(escalation) = envelope.escalation.as_deref()
+                    && escalation.stuck == *ant
+                    && !matches!(escalation.reason, EscalationReason::Approval | EscalationReason::Question)
+                {
+                    let issue = (escalation.reason, escalation.request_id);
+                    escalated.entry(escalation.thread_id.clone()).or_default().insert(issue);
+                }
             }
             let attachments = earlier_lines(&envelope.attachments, |id| envelope.attachment_handle(id));
             let entry =
@@ -366,10 +381,14 @@ pub(crate) async fn active(
     let active = threads.into_iter().map(|(thread, entries)| {
         let stored = timelines.remove(&thread);
         let timeline = stored.as_ref().map_or_default(|stored| stored.show(ant, budget / ENTRY_SHARE));
-        let rejections = stored.map_or_default(|stored| stored.rejections().to_vec());
+        let rejections = stored.as_ref().map_or_default(|stored| stored.rejections().to_vec());
+        let calls = stored.as_ref().map_or_default(|stored| stored.calls().to_vec());
+        let ends = stored.map_or_default(|stored| stored.ends().to_vec());
+        let escalations = escalated.remove(&thread).map_or(0, |issues| u32::try_from(issues.len()).unwrap_or(u32::MAX));
         let own = own.remove(&thread).unwrap_or_default().into_iter();
         let sent = own.filter_map(|(seq, id)| entries.get(&seq).map(|entry| Sent::new(id, &entry.text))).collect();
-        Active { history: format(entries.into_values().collect(), budget), timeline, sent, rejections, thread }
+        let history = format(entries.into_values().collect(), budget);
+        Active { thread, history, timeline, sent, rejections, calls, ends, escalations }
     });
     Ok(active.collect())
 }
@@ -565,24 +584,23 @@ mod tests {
         let note = NotesPost::new(one.clone(), p("dev-a"), "the plan");
         publish(note.subject(), serde_json::to_vec(&note).unwrap()).await;
         message(&two, "dev-a", "bob", "a question").await;
-        message(&one, "alice", "bob", "not to dev-a").await;
-        let call = |title: &str| {
-            let call = ants_proto::TimelineCall {
-                id: title.to_owned(),
-                tool_kind: Some("execute".to_owned()),
-                title: title.to_owned(),
-                status: Some("completed".to_owned()),
-                started: chrono::Utc::now(),
-                duration_ms: None,
-                paths: Vec::new(),
-            };
-            vec![ants_proto::TimelineEntry::Tool(call)]
+        let escalate = async |text: &str, reason, stuck: &str| {
+            let escalation = ants_proto::Escalation::new(p(stuck), two.clone(), reason);
+            let envelope =
+                Envelope::on_thread(two.clone(), p("dev-a"), p("bob"), text).with_escalation(Some(escalation));
+            publish(envelope.subject(), serde_json::to_vec(&envelope).unwrap()).await;
         };
-        let record = async |thread: &ThreadId, ant: &str, title: &str| {
-            let record = ants_proto::Timeline::new(p(ant), thread.clone(), ants_proto::Uuid::nil(), call(title), 0);
+        escalate("capped", EscalationReason::Cap, "dev-a").await;
+        escalate("still capped", EscalationReason::Cap, "dev-a").await;
+        escalate("a tool request", EscalationReason::Approval, "dev-a").await;
+        escalate("passed on", EscalationReason::Asked, "dev-c").await;
+        message(&one, "alice", "bob", "not to dev-a").await;
+        let record = async |thread: &ThreadId, ant: &str, entries: Vec<ants_proto::TimelineEntry>| {
+            let record = ants_proto::Timeline::new(p(ant), thread.clone(), ants_proto::Uuid::nil(), entries, 0);
             publish(record.subject(), serde_json::to_vec(&record).unwrap()).await;
         };
-        record(&one, "dev-a", "cargo build").await;
+        record(&one, "dev-a", call("cargo build")).await;
+        record(&one, "dev-a", ended(ants_proto::PromptEnd::Cancelled)).await;
         let rejection = ants_proto::TimelineRejection {
             request: ants_proto::Uuid::from_u128(9),
             kind: "execute".to_owned(),
@@ -594,12 +612,12 @@ mod tests {
         let rejected = vec![ants_proto::TimelineEntry::Rejected(rejection)];
         let alone = ants_proto::Timeline::new(p("dev-a"), one.clone(), ants_proto::Uuid::from_u128(8), rejected, 0);
         publish(alone.subject(), serde_json::to_vec(&alone).unwrap()).await;
-        record(&one, "bob", "not dev-a's").await;
-        record(&"t3".parse().unwrap(), "dev-a", "no thread active").await;
+        record(&one, "bob", call("not dev-a's")).await;
+        record(&"t3".parse().unwrap(), "dev-a", call("no thread active")).await;
         let until = SystemTime::now();
         tokio::time::sleep(Duration::from_millis(50)).await;
         message(&two, "bob", "dev-a", "too late").await;
-        record(&two, "dev-a", "cargo late").await;
+        record(&two, "dev-a", call("cargo late")).await;
 
         let threads = active(&js, &p("dev-a"), Reading::Gets, since, until, DEFAULT_BUDGET).await.unwrap();
         assert_eq!(threads.iter().map(|active| active.thread.clone()).collect::<Vec<_>>(), [two, one]);
@@ -610,6 +628,11 @@ mod tests {
         assert!(!first.contains("long ago") && !first.contains("not to dev-a"), "{first}");
         let timeline = &threads[1].timeline;
         assert!(timeline.contains("execute: cargo build (completed)\n") && !timeline.contains("dev-a's"), "{timeline}");
+        assert!(timeline.contains(" cancelled by a human after 1 s\n"), "{timeline}");
+        let titles: Vec<_> = threads[1].calls.iter().map(|c| c.call.title.as_str()).collect();
+        assert_eq!((titles, threads[1].ends.len()), (vec!["cargo build"], 1));
+        assert!(threads[0].calls.is_empty() && threads[0].ends.is_empty());
+        assert_eq!((threads[0].escalations, threads[1].escalations), (1, 0), "a reason once, tool requests aside");
         assert_eq!(
             timeline.matches("the prompt of message").count(),
             1,
@@ -621,9 +644,32 @@ mod tests {
         let sent = |active: &Active| active.sent.iter().map(|sent| sent.opening.clone()).collect::<Vec<_>>();
         assert_eq!(
             (sent(&threads[0]), sent(&threads[1])),
-            (vec!["a question".to_owned()], vec!["the plan".to_owned()])
+            (
+                ["a question", "capped", "still capped", "a tool request", "passed on"].map(str::to_owned).to_vec(),
+                vec!["the plan".to_owned()]
+            )
         );
         assert_eq!(threads[1].sent[0].id, note.id);
+    }
+
+    /// A timeline's entries: a completed call of `title`.
+    fn call(title: &str) -> Vec<ants_proto::TimelineEntry> {
+        let call = ants_proto::TimelineCall {
+            id: title.to_owned(),
+            tool_kind: Some("execute".to_owned()),
+            title: title.to_owned(),
+            status: Some("completed".to_owned()),
+            started: chrono::Utc::now(),
+            duration_ms: None,
+            paths: Vec::new(),
+        };
+        vec![ants_proto::TimelineEntry::Tool(call)]
+    }
+
+    /// A timeline's entries: a prompt that ended `how` after a second.
+    fn ended(how: ants_proto::PromptEnd) -> Vec<ants_proto::TimelineEntry> {
+        let end = ants_proto::TimelineEnd { how, duration_ms: 1_000, tokens: 0, cost: 0.0, asked: 0, rebuilt: false };
+        vec![ants_proto::TimelineEntry::Ended(end)]
     }
 
     #[test]

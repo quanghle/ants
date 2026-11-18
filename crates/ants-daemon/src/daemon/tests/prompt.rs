@@ -157,31 +157,27 @@ async fn tool_calls_are_stored_on_the_thread_timeline() {
     let ctrl_c = Arc::new(Semaphore::new(0));
     let check = async {
         assert_eq!(next_reply(&mut replies).await, (t1.clone(), "tools 2".to_owned()));
-        let subject = subject::timeline(&t1, &bus.dev);
-        let msg = timeout(WAIT, async {
-            loop {
-                if let Ok(msg) = bus.stream.direct_get_last_for_subject(&subject).await {
-                    break msg;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
+        let tool = |entry: &ants_proto::TimelineEntry| matches!(entry, ants_proto::TimelineEntry::Tool(_));
+        let ended = |entry: &ants_proto::TimelineEntry| matches!(entry, ants_proto::TimelineEntry::Ended(_));
+        let records = timeline_on(&bus, &t1, |records| {
+            records.iter().any(|r| r.entries.iter().any(tool)) && records.iter().any(|r| r.entries.iter().any(ended))
         })
-        .await
-        .expect("no timeline record");
-        let record: ants_proto::Timeline = serde_json::from_slice(&msg.payload).unwrap();
-        assert_eq!(record.check_subject(&msg.subject), Ok(()));
-        assert_eq!(record.message, sent.id);
-        let calls: Vec<_> = record
-            .entries
+        .await;
+        assert!(records.iter().all(|record| record.message == sent.id), "{records:?}");
+        let calls: Vec<_> = records
             .iter()
-            .map(|e| match e {
+            .flat_map(|record| &record.entries)
+            .filter_map(|e| match e {
                 ants_proto::TimelineEntry::Tool(call) => {
-                    (call.id.as_str(), call.title.as_str(), call.status.as_deref())
+                    Some((call.id.as_str(), call.title.as_str(), call.status.as_deref()))
                 }
+                ants_proto::TimelineEntry::Ended(_) => None,
                 other => panic!("{other:?}"),
             })
             .collect();
         assert_eq!(calls, [("call-0", "tool", Some("pending")), ("call-1", "tool", Some("pending"))]);
+        let [(message, end)] = &ends_on(&bus, &t1, 1).await[..] else { unreachable!() };
+        assert_eq!((*message, end.how, end.asked, end.rebuilt), (sent.id, PromptEnd::Replied, 0, false));
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
@@ -246,6 +242,9 @@ async fn a_prompt_past_its_limit_is_cancelled_and_the_human_told() {
         let text = "partial\n\n[ants] Prompt time limit reached (100ms); the prompt was cancelled.";
         assert_eq!(notice.text, text);
         assert_eq!(next_reply(&mut replies).await, (t1.clone(), "after".to_owned()), "and nothing else");
+        let ends: Vec<_> = ends_on(&bus, &t1, 2).await.into_iter().map(|(_, end)| end).collect();
+        assert_eq!(ends.iter().map(|end| end.how).collect::<Vec<_>>(), [PromptEnd::Capped, PromptEnd::Replied]);
+        assert!(ends[0].duration_ms >= 100, "{ends:?}");
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);

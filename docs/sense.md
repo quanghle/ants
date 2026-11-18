@@ -63,7 +63,7 @@ vote or propose.
   `memories of provider sense`, who the ant has become, read from its cache without noting a session or writing
   anything: its identity (card and experience), its persona with its pending proposal, its self-model, each
   relationship record, its skills by name and description, its last dream (the title of its diary, with its verdict
-  counts), then its core memories and its top 10 memories of every scope as `sense_recall` ranks them without a
+  counts and the vital signs of its period), then its core memories and its top 10 memories of every scope as `sense_recall` ranks them without a
   query. Each entry is keyed by its id, kind, scope and trust. Entries past the size cap of a memories read are left
   out and counted; an ant with no sense data shows an empty section ([cli.md](cli.md)).
 - **`ants doctor`:** `sense chain` fails at a break in the ant's log, and `sense size` warns past 32 MiB
@@ -487,8 +487,11 @@ is reviewed by no one either, for as long as a daemon serves the ant naming it. 
 - the verdicts on the last dream's findings;
 - the findings, at most 20, each with an id `<dream>.<n>`: memories with both `helpful` and `stale` votes since the
   last dream (`contradiction`), memories needing review (`needs_review`), the near duplicates the last maintenance
-  found (`duplicates`), episodes to distill (`distill`), pending persona and skill proposals (`proposal`), and the
-  findings of the last dream deferred or unanswered that still hold, offered again;
+  found (`duplicates`), episodes to distill (`distill`), pending persona and skill proposals (`proposal`), a vital sign
+  turned sharply for the worse (`vitals`, below), and the findings of the last dream deferred or unanswered that still
+  hold, offered again;
+- the vital signs of the period (below) beside those of up to 5 dreams before, the tool calls by kind, and a line for
+  each thread;
 - the ant's identity, to judge the work against and to judge against the work: its persona and pending persona
   proposal, its self-model, the relationship records of the humans and other ants who started the threads covered (as
   their thread records tell; a line for each without one), its skills by name and description, and its experience
@@ -504,9 +507,22 @@ is reviewed by no one either, for as long as a daemon serves the ant naming it. 
   last dream, with when and by whom. The daemon reads these as the ant's credentials allow, 30 seconds at most in all;
   what fails to be read is left out, and the packet goes without it. Sense stores none of them.
 
-A packet over its budget keeps each thread's latest part and leaves out the least recently active threads, then cuts
-the identity to titles (the persona's field names, the records' heads and the skills' names), then leaves out the last
+A packet over its budget keeps each thread's latest part and leaves out the least recently active threads, then the
+vital signs' line for each thread, then cuts the identity to titles (the persona's field names, the records' heads and the skills' names), then leaves out the last
 findings, counted for the next dream.
+
+**Vital signs:** as a dream begins, the daemon measures the ant's work on each thread it covers from what it reads for
+the packet, the ant's timeline above all, and hands the measures to sense with the dream's start; the dream keeps their
+sum, one record a day, so sense holds the trend for as long as the log lives and it moves with the ant, with nothing
+written between dreams. They count the threads worked and marked done; the prompts by how they ended (replied, with
+no reply, cancelled by a human, cut by a cap, failed: the `ended` entries of the
+[`Timeline`](hooks.md#timeline-on-antstimelinethreadant)); the tool calls by kind and those failed; the time in
+prompts; the tokens and cost the harness reported; the tool requests asked of humans or the chain, rejected and expired;
+the issues escalated (a reason, or tool request, once a thread, tool requests and questions to humans aside); the
+prompts run in a session rebuilt; and the calls of sense's own tools. A dream offers a `vitals` finding, naming the
+threads it counts, when a sign turned sharply for the worse in its period: 3 prompts cancelled by a human, 2 cut by a
+cap, 3 tool requests rejected, or, over 20 tool calls or more, a share of them failed at least twice the mean of the
+dreams before among the last 5 that made calls. Rejected, it rests 14 days of the ant's active time.
 
 **The sage's review:** the packet asks for a review that reads only, with read-only tools, reading code only in the
 checkouts made for it, never the ant's workdir or worktrees, and messaging no one, answered by one reply holding a

@@ -126,7 +126,7 @@ async fn a_reply_kept_in_the_outbox_answers_its_message_once() {
     };
     tokio::join!(bus.serve_timed(&pool, &ctrl_c, progress_every, ack_wait), down);
     drop(pool);
-    assert_eq!(uplinked.kept().await, 1, "the reply is kept in the outbox");
+    assert_eq!(uplinked.kept().await, 2, "the reply and the prompt's end are kept in the outbox");
 
     uplinked.switch(Link::Up).await;
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
