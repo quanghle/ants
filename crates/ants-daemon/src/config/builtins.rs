@@ -1,14 +1,15 @@
 //! Which of the built-in ants a file serves, the messenger ([`super::builtin_messenger`]) and the sage
 //! ([`super::builtin_sage`]), the machine serves: on a server taking credentials, only those whose own are on the
-//! machine, each other one being left to another machine ([`Elsewhere`]).
+//! machine, each other one being left to another machine ([`Elsewhere`]); and whose credentials `ants daemon --creds`
+//! stands for ([`Loaded::credit`]).
 
 use std::path::{Path, PathBuf};
 
 use ants_proto::UserId;
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 use super::ant::builtin_creds;
-use super::{Ant, HostSettings, home_dir};
+use super::{Ant, HostSettings, Loaded, home_dir};
 
 /// A built-in ant the file serves but the machine leaves to another, the server taking credentials and the ant having
 /// none on the machine.
@@ -44,10 +45,49 @@ pub(super) fn leave(ants: &mut Vec<Ant>, host: &HostSettings, home: &Path) -> Ve
         .collect()
 }
 
+impl Loaded {
+    /// Have `creds` (`ants daemon --creds`) stand for the credentials of the ant `named` (`--ant`), else of the file's
+    /// one `[[ant]]`, where it has none of its own: never for a built-in ant's unless named, one the machine leaves to
+    /// another then served here with them. With them the server takes credentials, so of the whole file's ants the
+    /// built-in ones without their own are left to another machine. Fails where none is named and the file lists
+    /// several `[[ant]]` entries, or none.
+    pub fn credit(&mut self, named: Option<&UserId>, creds: &Path) -> Result<()> {
+        let creds = Some(creds.to_owned());
+        if let Some(name) = named {
+            if let Some(i) = self.elsewhere.iter().position(|left| left.ant.name == *name) {
+                let ant = self.elsewhere.remove(i).ant;
+                self.ants.push(Ant { creds, ..ant });
+            } else if let Some(ant) = self.ants.iter_mut().find(|ant| ant.name == *name && ant.creds.is_none()) {
+                ant.creds = creds;
+            }
+            return Ok(());
+        }
+        let mut listed = self.ants.iter_mut().filter(|ant| !ant.builtin);
+        match (listed.next(), listed.count()) {
+            (Some(ant), 0) => {
+                if ant.creds.is_none() {
+                    ant.creds = creds;
+                }
+            }
+            (Some(_), more) => bail!(
+                "--creds (ANTS_CREDS) stands for one ant's credentials, and the file lists {} [[ant]] entries: set \
+                 creds in each, or serve one with --ant",
+                more + 1
+            ),
+            (None, _) => bail!(
+                "--creds (ANTS_CREDS) stands for one ant's credentials, and the file lists no [[ant]]: a built-in \
+                 ant takes them from ~/.config/ants/auth/<name>.creds, or from --creds with --ant naming it"
+            ),
+        }
+        self.elsewhere.extend(leave(&mut self.ants, &self.host, &self.home));
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Loaded, parse};
+    use crate::config::parse;
 
     fn ant(name: &str, more: &str) -> String {
         format!("[[ant]]\nname = \"{name}\"\nworkdir = \".\"\n{more}\n")
@@ -132,5 +172,40 @@ mod tests {
         assert!(listed.elsewhere.is_empty());
         let off = home.load(&format!("messenger = false\n{leaf}"));
         assert_eq!((names(&off.ants), left(&off)), (vec!["dev-b".to_owned(), "sage".to_owned()], vec![]));
+    }
+
+    #[test]
+    fn creds_given_stand_for_the_named_ant_or_the_files_one_never_a_builtin_ant_unnamed() {
+        let home = Home::new("builtins-credit");
+        let creds = Path::new("/keys/given.creds");
+        let credited = |text: &str, named: Option<&str>| {
+            let mut loaded = home.load(text);
+            loaded.credit(named.map(|name| name.parse().unwrap()).as_ref(), creds).map(|()| loaded)
+        };
+        let (bare, two) = (ant("dev-a", ""), format!("{}{}", ant("dev-a", ""), ant("dev-b", "")));
+
+        let one = credited(&bare, None).unwrap();
+        assert_eq!(names(&one.ants), ["dev-a"], "with them the server takes credentials, the built-in ants none here");
+        assert_eq!((one.ants[0].creds.as_deref(), left(&one)), (Some(creds), vec!["messenger".into(), "sage".into()]));
+
+        let named = credited(&bare, Some("sage")).unwrap();
+        let sage = named.ants.iter().find(|ant| ant.name == UserId::sage()).unwrap();
+        assert_eq!(sage.creds.as_deref(), Some(creds), "the sage named");
+        let leaf = ant("dev-a", "creds = \"~/.config/ants/auth/dev-a.creds\"");
+        let named = credited(&leaf, Some("sage")).unwrap();
+        assert_eq!(names(&named.ants), ["dev-a", "sage"]);
+        assert_eq!(named.ants[1].creds.as_deref(), Some(creds), "the sage left to another machine, served here");
+        assert_eq!(left(&named), ["messenger"]);
+        let own = credited(&leaf, None).unwrap();
+        assert_eq!(own.ants[0].creds, Some(home.auth.join("dev-a.creds")), "the file's own come first");
+        let named = credited(&two, Some("dev-b")).unwrap();
+        assert_eq!((named.ants[0].creds.as_deref(), named.ants[1].creds.as_deref()), (None, Some(creds)));
+        let messenger = credited("", Some("messenger")).unwrap();
+        assert_eq!(messenger.ants[0].creds.as_deref(), Some(creds), "the messenger named");
+
+        let e = format!("{:#}", credited(&two, None).unwrap_err());
+        assert!(e.contains("the file lists 2 [[ant]] entries: set creds in each, or serve one with --ant"), "{e}");
+        let e = format!("{:#}", credited("", None).unwrap_err());
+        assert!(e.contains("the file lists no [[ant]]: a built-in ant takes them from"), "{e}");
     }
 }

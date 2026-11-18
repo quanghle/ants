@@ -284,12 +284,17 @@ pub struct Listed {
 /// described by flags the harnesses and host settings of the file at `default_path` if it exists, and its top-level
 /// `harness` unless the flags name one. The schedules run only when the daemon serves the whole file, not one ant
 /// picked with `--ant`. `hostname` names the machine where the file does
-/// not. A daemon serving the whole file says once why it leaves a built-in ant to another machine
-/// ([`config::Loaded::elsewhere`]), and fails where that leaves nothing to serve.
-pub fn ants(args: &DaemonArgs, default_path: &Path, hostname: &str) -> Result<Listed> {
+/// not. `creds` (`--creds`) are the credentials of the ant described by flags, else of the file's ant `--ant` names,
+/// else of its one `[[ant]]`, where it sets none ([`config::Loaded::credit`]): never a built-in ant's unless named, and
+/// refused for a file listing several or none. A daemon serving the whole file says once why it leaves a built-in ant
+/// to another machine ([`config::Loaded::elsewhere`]), and fails where that leaves nothing to serve.
+pub fn ants(args: &DaemonArgs, default_path: &Path, hostname: &str, creds: Option<&Path>) -> Result<Listed> {
     match source(args, default_path)? {
         Source::Flags(name) => {
             let mut ant = args.options.apply(Ant::new(name, std::env::current_dir()?));
+            if ant.creds.is_none() {
+                ant.creds = creds.map(Path::to_path_buf);
+            }
             let summary = Summary::load(default_path)?;
             if ant.harness.is_none() {
                 ant.harness = summary.harness;
@@ -313,7 +318,10 @@ pub fn ants(args: &DaemonArgs, default_path: &Path, hostname: &str) -> Result<Li
             })
         }
         Source::File(path) => {
-            let loaded = config::load(&path)?;
+            let mut loaded = config::load(&path)?;
+            if let Some(creds) = creds {
+                loaded.credit(args.ant.as_ref(), creds).with_context(|| format!("config {}", path.display()))?;
+            }
             let whole = args.ant.is_none();
             if whole {
                 tell_elsewhere(&loaded.elsewhere);
@@ -385,7 +393,9 @@ pub(super) fn pick(all: Vec<Ant>, elsewhere: &[Elsewhere], args: &DaemonArgs, pa
         Some(name) => {
             let p = all.into_iter().find(|p| &p.name == name).with_context(|| {
                 match elsewhere.iter().find(|left| left.ant.name == *name) {
-                    Some(left) => format!("{}, or serve the {name} where they are", self::elsewhere(left)),
+                    Some(left) => {
+                        format!("{}, pass them with --creds, or serve the {name} where they are", self::elsewhere(left))
+                    }
                     None => format!("ant {name} is not in {}", path.display()),
                 }
             })?;
@@ -405,28 +415,19 @@ pub(super) fn pick(all: Vec<Ant>, elsewhere: &[Elsewhere], args: &DaemonArgs, pa
     }
 }
 
-/// Daemon configs, with their harnesses from `harnesses`, `nats` as the server, `js_domain` as the JetStream domain
-/// and, for a lone ant, `creds` as the credentials where the ant sets none. Several ants cannot share one set of
-/// credentials, so `creds` is ignored for them. An ant with settings in `shared` is served with those in place of its
+/// Daemon configs, with their harnesses from `harnesses`, `nats` as the server and `js_domain` as the JetStream domain
+/// where the ant sets none. An ant with settings in `shared` is served with those in place of its
 /// table's ([`Shared::overlaid`]), and told the fields its table sets otherwise (its drift); shared settings this
 /// machine cannot serve, such as a harness it lacks, are warned of and its table's serve it.
 pub fn configs(
     ants: Vec<Ant>,
     harnesses: &Harnesses,
     nats: &str,
-    creds: Option<PathBuf>,
     js_domain: Option<JsDomain>,
     shared: Option<&Shared>,
 ) -> Result<Vec<Config>> {
-    let lone = ants.len() == 1;
-    if !lone && creds.is_some() {
-        tracing::warn!("ignoring --creds (ANTS_CREDS) while serving several ants; set creds per ant instead");
-    }
     ants.into_iter()
         .map(|mut p| {
-            if lone && p.creds.is_none() {
-                p.creds.clone_from(&creds);
-            }
             if p.js_domain.is_none() {
                 p.js_domain.clone_from(&js_domain);
             }

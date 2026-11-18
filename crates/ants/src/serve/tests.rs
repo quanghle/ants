@@ -5,7 +5,7 @@ use ants_daemon::config::builtins::Elsewhere;
 use ants_daemon::{Harnesses, config};
 use clap::Parser;
 
-use super::selection::{Source, pick, source};
+use super::selection::{Listed, Source, pick, source};
 use super::*;
 
 #[derive(Parser)]
@@ -52,7 +52,7 @@ fn the_file_names_the_machine_as_the_host_connection_would() {
     let config = dir.join("config.toml");
     let listing = |text: &str, line: &str| {
         std::fs::write(&config, text).unwrap();
-        ants(&args(&format!("--config {} {line}", config.display())), &config, "gen-4f2a.internal")
+        ants(&args(&format!("--config {} {line}", config.display())), &config, "gen-4f2a.internal", None)
     };
     let listed = |text: &str, line: &str| listing(text, line).unwrap();
     let top = "harness = \"copilot\"\nmachine = \"dev-vm1\"\n";
@@ -79,7 +79,7 @@ fn the_file_names_the_machine_as_the_host_connection_would() {
         Some(dir.join("h.creds")),
         "sense links with the host's credentials"
     );
-    let flags = ants(&args("--ant dev-a"), &dir.join("none.toml"), "gen-4f2a.internal").unwrap();
+    let flags = ants(&args("--ant dev-a"), &dir.join("none.toml"), "gen-4f2a.internal", None).unwrap();
     assert_eq!(flags.machine, None, "an ant described by flags goes by the host name");
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -91,7 +91,7 @@ fn without_a_host_connection_sense_links_with_the_host_credentials_where_the_ant
         let mut p = ant(name);
         p.creds = creds.then(|| PathBuf::from(format!("{name}.creds")));
         p.provider_setting = provider;
-        configs(vec![p], &Harnesses::builtin(), "nats://cli:4222", None, None, None).unwrap().remove(0)
+        configs(vec![p], &Harnesses::builtin(), "nats://cli:4222", None, None).unwrap().remove(0)
     };
     let link = |settings: Option<HostSettings>, configs: &[Config]| {
         sense_link(None, settings, configs, "nats://cli:4222", None, "box.local")
@@ -149,7 +149,10 @@ fn flags_override_the_picked_ant() {
     let left = [Elsewhere { ant: sage, creds: PathBuf::from("auth/sage.creds") }];
     let err = pick(all.clone(), &left, &args("--ant sage"), path).unwrap_err().to_string();
     assert!(err.contains("no credentials of the built-in sage at auth/sage.creds"), "{err}");
-    assert!(err.contains("`ants auth user sage`") && err.contains("or serve the sage where they are"), "{err}");
+    assert!(
+        err.contains("`ants auth user sage`") && err.contains("pass them with --creds, or serve the sage"),
+        "{err}"
+    );
     assert_eq!(pick(all.clone(), &left, &args(""), path).unwrap(), all, "the others serve all the same");
     let err = pick(all, &[], &args("--workdir ."), path).unwrap_err().to_string();
     assert!(err.contains("add --ant"), "{err}");
@@ -164,37 +167,55 @@ fn flags_override_the_picked_ant() {
 fn the_file_wins_over_global_flags() {
     let mut bare = ant("dev-a");
     bare.nats = None;
-    bare.creds = None;
-    let cli_creds = Some(PathBuf::from("cli.creds"));
     let (cli_domain, own_domain): (JsDomain, JsDomain) = ("cli".parse().unwrap(), "own".parse().unwrap());
 
-    let one = configs(
-        vec![bare.clone()],
-        &Harnesses::builtin(),
-        "nats://cli:4222",
-        cli_creds.clone(),
-        Some(cli_domain.clone()),
-        None,
-    )
-    .unwrap();
-    assert_eq!(
-        (one[0].connection.nats_url.as_str(), one[0].connection.creds.clone()),
-        ("nats://cli:4222", cli_creds.clone())
-    );
+    let one = configs(vec![bare], &Harnesses::builtin(), "nats://cli:4222", Some(cli_domain.clone()), None).unwrap();
+    assert_eq!(one[0].connection.nats_url, "nats://cli:4222");
     assert_eq!(one[0].connection.js_domain, Some(cli_domain.clone()));
 
     let mut own = ant("dev-a");
     own.js_domain = Some(own_domain.clone());
-    let one = configs(vec![own], &Harnesses::builtin(), "nats://cli:4222", cli_creds.clone(), Some(cli_domain), None)
-        .unwrap();
+    let one = configs(vec![own], &Harnesses::builtin(), "nats://cli:4222", Some(cli_domain), None).unwrap();
     assert_eq!(one[0].connection.nats_url, "nats://dev-a:4222");
-    assert_eq!(one[0].connection.creds, Some(PathBuf::from("dev-a.creds")));
     assert_eq!(one[0].connection.js_domain, Some(own_domain));
+}
 
-    let two =
-        configs(vec![bare, ant("dev-b")], &Harnesses::builtin(), "nats://cli:4222", cli_creds, None, None).unwrap();
-    assert_eq!((two[0].connection.nats_url.as_str(), two[0].connection.creds.clone()), ("nats://cli:4222", None));
-    assert_eq!(two[1].connection.creds, Some(PathBuf::from("dev-b.creds")));
+#[test]
+fn creds_given_stand_for_the_one_ant_named_or_listed_never_a_builtin_ant_unnamed() {
+    let dir = ants_test_support::scratch_dir("serve-creds").canonicalize().unwrap();
+    let config = dir.join("config.toml");
+    let cli = dir.join("cli.creds");
+    let listing = |text: &str, line: &str| {
+        std::fs::write(&config, format!("harness = \"copilot\"\n{text}")).unwrap();
+        ants(&args(&format!("--config {} {line}", config.display())), &config, "box", Some(&cli))
+    };
+    let creds = |listed: &Listed| -> Vec<(String, Option<PathBuf>)> {
+        listed.ants.iter().map(|ant| (ant.name.to_string(), ant.creds.clone())).collect()
+    };
+    let dev = |name: &str, more: &str| format!("[[ant]]\nname = \"{name}\"\nworkdir = \".\"\n{more}");
+    let lone = listing(&dev("dev-a", ""), "").unwrap();
+    assert_eq!(creds(&lone)[0], ("dev-a".to_owned(), Some(cli.clone())), "the file's one ant, with the sage it names");
+    let builtin_here = |name: &str| builtin_creds_here(name).then(|| name.to_owned());
+    let served: Vec<String> = creds(&lone).into_iter().skip(1).map(|(name, _)| name).collect();
+    let expected: Vec<String> = ["messenger", "sage"].into_iter().filter_map(builtin_here).collect();
+    assert_eq!(served, expected, "the built-in ants are left to another machine but where their own are");
+
+    let two = format!("{}\n{}", dev("dev-a", ""), dev("dev-b", ""));
+    let err = format!("{:#}", listing(&two, "").unwrap_err());
+    assert!(err.contains("--creds (ANTS_CREDS) stands for one ant's credentials, and the file lists 2"), "{err}");
+    let picked = listing(&two, "--ant dev-b").unwrap();
+    assert_eq!(creds(&picked), [("dev-b".to_owned(), Some(cli.clone()))]);
+    let own = listing(&dev("dev-a", "creds = \"own.creds\""), "--ant dev-a").unwrap();
+    assert_eq!(creds(&own), [("dev-a".to_owned(), Some(dir.join("own.creds")))], "the file's own come first");
+    if !builtin_creds_here("sage") {
+        let sage = listing(&dev("dev-a", "creds = \"own.creds\""), "--ant sage").unwrap();
+        assert_eq!(creds(&sage), [("sage".to_owned(), Some(cli.clone()))], "the sage left elsewhere, served here");
+    }
+    let err = format!("{:#}", listing("", "").unwrap_err());
+    assert!(err.contains("the file lists no [[ant]]"), "{err}");
+    let flags = ants(&args("--ant dev-c"), &dir.join("none.toml"), "box", Some(&cli)).unwrap();
+    assert_eq!(creds(&flags), [("dev-c".to_owned(), Some(cli.clone()))], "an ant described by flags");
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -202,7 +223,7 @@ fn a_reload_starts_new_ants_and_stops_or_restarts_the_others() {
     let config = |name: &str, model: Option<&str>| {
         let mut p = ant(name);
         p.model = model.map(str::to_owned);
-        configs(vec![p], &Harnesses::builtin(), "nats://cli:4222", None, None, None).unwrap().remove(0)
+        configs(vec![p], &Harnesses::builtin(), "nats://cli:4222", None, None).unwrap().remove(0)
     };
     let names = |start: Vec<(Config, Stop)>| start.into_iter().map(|(c, _)| c.ant.to_string()).collect::<Vec<_>>();
     let state = |running: &HashMap<UserId, Running>, name: &str| {
@@ -239,7 +260,7 @@ fn a_reload_hands_a_running_ant_its_pool_s_new_members_without_a_restart() {
             members: Members::new(members.iter().map(|m| member(m)).collect()),
         };
         let p = Ant { pool: Some(pool), ..ant("lead-a") };
-        configs(vec![p], &Harnesses::builtin(), "nats://cli:4222", None, None, None).unwrap().remove(0)
+        configs(vec![p], &Harnesses::builtin(), "nats://cli:4222", None, None).unwrap().remove(0)
     };
     let mut running = HashMap::new();
     let (served, _) = reconcile(&mut running, vec![config(&["lead-a"])]).remove(0);
@@ -252,7 +273,7 @@ fn a_reload_hands_a_running_ant_its_pool_s_new_members_without_a_restart() {
 fn a_reload_pauses_and_resumes_a_running_ant_without_a_restart() {
     let ant_named = |paused: bool, model: Option<&str>| {
         let p = Ant { paused, model: model.map(str::to_owned), ..ant("dev-a") };
-        configs(vec![p], &Harnesses::builtin(), "nats://cli:4222", None, None, None).unwrap().remove(0)
+        configs(vec![p], &Harnesses::builtin(), "nats://cli:4222", None, None).unwrap().remove(0)
     };
     let dev_a: UserId = "dev-a".parse().unwrap();
     let mut running = HashMap::new();
@@ -291,7 +312,7 @@ fn a_change_of_drift_alone_restarts_no_ant() {
     let served = |ant: Ant| {
         shared.listed(std::slice::from_ref(&ant));
         let harnesses = Harnesses::builtin();
-        configs(vec![ant], &harnesses, "nats://cli:4222", None, None, Some(&shared)).unwrap().remove(0)
+        configs(vec![ant], &harnesses, "nats://cli:4222", None, Some(&shared)).unwrap().remove(0)
     };
     let mut running = HashMap::new();
     let (config, _) = reconcile(&mut running, vec![served(dev_a())]).remove(0);
@@ -321,7 +342,7 @@ fn a_reload_restarts_an_ant_whose_credentials_file_changed() {
     std::fs::write(&creds, "issued").unwrap();
     let mut p = ant("dev-a");
     p.creds = Some(creds.clone());
-    let config = configs(vec![p], &Harnesses::builtin(), "nats://cli:4222", None, None, None).unwrap().remove(0);
+    let config = configs(vec![p], &Harnesses::builtin(), "nats://cli:4222", None, None).unwrap().remove(0);
     let mut running = HashMap::new();
     assert_eq!(reconcile(&mut running, vec![config.clone()]).len(), 1);
     assert!(reconcile(&mut running, vec![config.clone()]).is_empty());
