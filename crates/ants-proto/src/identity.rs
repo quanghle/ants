@@ -95,8 +95,40 @@ impl AntIdentity {
         self.avatar.as_deref().or(self.sense.as_ref().map(SenseId::as_str)).unwrap_or(&self.id)
     }
 
+    /// Where [`Self::seed`] comes from.
+    pub fn seed_source(&self) -> SeedSource {
+        if self.avatar.is_some() {
+            SeedSource::Set
+        } else if self.sense.is_some() {
+            SeedSource::Sense
+        } else {
+            SeedSource::Id
+        }
+    }
+
     pub fn stage(&self) -> Stage {
         Stage::of(self.prompts)
+    }
+}
+
+/// Where an ant's avatar seed comes from ([`AntIdentity::seed`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeedSource {
+    /// The seed a human set (`avatar`).
+    Set,
+    /// The sense identity (`sense`).
+    Sense,
+    /// The record's id (`id`).
+    Id,
+}
+
+impl SeedSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Set => "avatar",
+            Self::Sense => "sense",
+            Self::Id => "id",
+        }
     }
 }
 

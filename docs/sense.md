@@ -173,8 +173,10 @@ and in its identity record in `ants_identities` (`sense`), so its homes on every
 the same one. A daemon opening the ant's sense data settles its home's id against the record: the home's id is written
 to a record naming none, by compare-and-set, the first writer winning; a home without one takes the record's, as after
 its `.sense/id` was removed; and an id is minted only when neither has one. A home and a record naming different ids are
-refused, sense keeping the ant's data closed and the error saying how to settle it: removing the home's `.sense/id`
-takes the record's, `ants auth revoke` and adding the ant again keeps the home's. A record naming no sense id yet, as
+refused, sense keeping the ant's data closed and the error saying how to settle it on the home's machine
+([`ants ant sense-id`](cli.md#commands)): `--take home` names the home's id in the record, `--take record` has the home
+keep the record's, refused while writes wait in the home to be appended to the log; the other id's data stay in the log,
+and the daemon opens sense under the settled id when next used, without a restart. A record naming no sense id yet, as
 one made again after `ants auth revoke` and adding the ant again with the same home, starts from the birth and the
 prompt count the card kept of the earlier record: the earlier birth, and those prompts added to its own, so the ant
 keeps its growth stage ([Avatars](config.md#avatars)). Until the daemon has read the record, as at start while another

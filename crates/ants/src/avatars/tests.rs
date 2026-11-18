@@ -26,13 +26,18 @@ fn a_record_s_avatar_is_described_with_its_growth() {
     assert_eq!(lines[ants_proto::HEAD_ROWS], format!("{} dev-a  blue (set)", avatar.face()));
     assert!(lines[ants_proto::HEAD_ROWS + 1].starts_with(&format!("{antennae} antennae, ")), "{text}");
     assert_eq!(lines[ants_proto::HEAD_ROWS + 2], "born 2025-01-02 03:04:05Z (3d ago)");
-    assert_eq!(lines[ants_proto::HEAD_ROWS + 3], "worker, 42 prompts; veteran at 100");
+    assert_eq!(
+        lines[ants_proto::HEAD_ROWS + 3],
+        "no sense id (the seed is the record's id 00112233445566778899aabbccddeeff)"
+    );
+    assert_eq!(lines[ants_proto::HEAD_ROWS + 4], "worker, 42 prompts; veteran at 100");
 
     record.sense = Some("01JD8X5G3T7Q9R2M4N6P8S0V1W".parse().unwrap());
     let faces = Faces::new(Identities::from([(dev_a.clone(), record)]), Depth::Plain, Theme::Dark);
     let sensed = describe(&faces, &dev_a, born);
     let face = Avatar::derive("01JD8X5G3T7Q9R2M4N6P8S0V1W").face();
     assert!(sensed.contains(&format!("{face} dev-a  blue (set)\n")), "drawn from the sense id: {sensed}");
+    assert!(sensed.contains("\nsense id 01JD8X5G3T7Q9R2M4N6P8S0V1W (the seed)\n"), "{sensed}");
 
     let unborn = describe(&faces, &dev_b, born);
     let named = Avatar::derive("dev-b");

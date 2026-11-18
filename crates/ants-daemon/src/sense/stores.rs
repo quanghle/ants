@@ -481,9 +481,9 @@ async fn settle(ant: &UserId, home: &Path, record: &Identity, items: &dyn Items)
     };
     match stored.as_ref().and_then(|stored| stored.sense.as_ref()) {
         Some(named) if *named != sense => Err(StoreError::Unavailable(format!(
-            "the home of {ant} keeps sense identity {sense} and its identity record names {named}: removing {} takes \
-             the record's, `ants auth revoke {ant}` and adding it again keeps the home's",
-            Home::new(home).id().display()
+            "the home of {ant} ({}) keeps sense identity {sense} and its identity record names {named}: `ants ant \
+             sense-id {ant} --take home` on this machine keeps the home's, `--take record` the record's",
+            home.display()
         ))),
         _ => {
             if let Some(stored) = &stored

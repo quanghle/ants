@@ -22,6 +22,7 @@ mod colony;
 mod export;
 mod machines;
 mod queue;
+mod sense_id;
 mod spend;
 mod tools;
 

@@ -11,7 +11,7 @@ use clap_complete::engine::ArgValueCandidates;
 use crate::admin::settings::{self, Assignment};
 use crate::admin::{mcp, memories, orders, pause, restart};
 use crate::serve::AntOptions;
-use crate::{ant, avatars, completions, export};
+use crate::{ant, avatars, completions, export, sense_id};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum AntCommand {
@@ -106,8 +106,8 @@ pub(crate) enum AntCommand {
         #[arg(long)]
         no_wait: bool,
     },
-    /// Print ANT's avatar: its pixel-art head, one-line face, parts and colour, when it was born and how it grew with
-    /// the prompts it completed. --seed or --reset and --color or --auto-color change it in the ant's identity record
+    /// Print ANT's avatar: its pixel-art head, one-line face, parts and colour, when it was born, its sense id and where
+    /// the avatar's seed comes from, and how it grew with the prompts it completed. --seed or --reset and --color or --auto-color change it in the ant's identity record
     /// by compare-and-set, the same for every machine and viewer. Needs a human's credentials.
     Avatar {
         #[arg(add = ArgValueCandidates::new(completions::ants))]
@@ -126,6 +126,21 @@ pub(crate) enum AntCommand {
         /// Colour the avatar in the hue its seed picks again.
         #[arg(long)]
         auto_color: bool,
+    },
+    /// Print the sense id ANT's home on this machine keeps and the one its identity record names; while they differ,
+    /// ANT's daemon refuses to open sense. --take settles them: `home` names the home's in the record, `record` has the
+    /// home keep the record's; the data of the id left stay in the log. Refused where data would be lost: `record`
+    /// while writes wait in the home to be appended to the log, either while the home's sense data await their
+    /// import. Runs on the machine whose config file lists ANT, with a human's credentials.
+    SenseId {
+        #[arg(add = ArgValueCandidates::new(completions::ants))]
+        ant: UserId,
+        /// The side to keep.
+        #[arg(long, value_enum)]
+        take: Option<sense_id::Take>,
+        /// Config file listing ANT (default: ~/.ants/config.toml).
+        #[arg(long, env = "ANTS_CONFIG")]
+        config: Option<PathBuf>,
     },
     /// Show ANT's memories, which an admin order asks the daemon of its machine to read while online: its core
     /// memories (whoami, memory, tasks), which a set order edits, the memories view of its provider when it serves one
@@ -274,6 +289,7 @@ pub(crate) async fn run(nats: &crate::connection::Nats<'_>, command: AntCommand)
             };
             avatars::show(nats, &ant, change).await
         }
+        AntCommand::SenseId { ant, take, config } => sense_id::run(nats, &ant, take, config).await,
         AntCommand::Memories { ant, json, machine } => memories::show(nats, &ant, machine, json).await,
         AntCommand::Mcp { ant, json, machine, sign_in, callback } => {
             mcp::show(nats, &ant, machine, json, sign_in, callback).await

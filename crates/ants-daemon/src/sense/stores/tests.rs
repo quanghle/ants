@@ -167,7 +167,8 @@ async fn an_ant_s_items_open_on_first_use_with_its_sense_id_and_log() {
 
 /// The identity record names the ant's sense id, so its homes on every machine open one sense identity: the first
 /// home's id is written to the record, a home without one takes the record's, also once its id file is removed, and a
-/// home keeping another is refused, its items closed. A home whose daemon has not read the record opens only under the
+/// home keeping another is refused, its items closed, until it is made to keep the record's, unless writes wait there
+/// to be appended. A home whose daemon has not read the record opens only under the
 /// id it keeps, and an ant whose record and home name none, as a clone, mints its own.
 #[tokio::test]
 async fn the_identity_record_names_one_sense_identity_for_every_home() {
@@ -215,13 +216,20 @@ async fn the_identity_record_names_one_sense_identity_for_every_home() {
     identified(&stores, &dev_a()).await;
     let refused = stores.items(&dev_a()).await.err().unwrap();
     assert!(
-        matches!(&refused, StoreError::Unavailable(e) if e.contains(&format!("its identity record names {id}"))),
+        matches!(&refused, StoreError::Unavailable(e) if e.contains(&format!("its identity record names {id}"))
+            && e.contains("`ants ant sense-id dev-a --take home`")),
         "{refused}"
     );
     let slot = stores.state().ants[&dev_a()].items.clone();
     assert!(slot.lock().await.is_none(), "the items opened are closed");
     assert_eq!(identity::read_id(&homes[2]).unwrap(), Some(other), "the home is left alone");
     assert_eq!(record.read().await.unwrap().unwrap().sense, Some(id.clone()), "and so is the record");
+    std::fs::write(Home::new(&homes[2]).pending(), b"").unwrap();
+    let lost = crate::sense::follow_record(&homes[2], &id).unwrap_err().to_string();
+    assert!(lost.contains("to be appended"), "writes pending under the home's id refuse the record's: {lost}");
+    std::fs::remove_file(Home::new(&homes[2]).pending()).unwrap();
+    crate::sense::follow_record(&homes[2], &id).unwrap();
+    assert_eq!(stores.items(&dev_a()).await.unwrap().sense().await, id, "settled by taking the record's, unrestarted");
 
     let dev_b: UserId = "dev-b".parse().unwrap();
     let home_b = scratch_dir("sense-named-clone");

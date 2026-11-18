@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ants_proto::provider::Provider;
-use ants_proto::{AntIdentity, Envelope, UserId};
+use ants_proto::{AntIdentity, Envelope, SenseId, UserId};
 use ants_sense::store::{Items, StoreError};
 use anyhow::{Context as _, Result};
 
@@ -167,6 +167,43 @@ pub fn take_over(home: &Path, ant: &UserId) -> Result<Option<UserId>> {
 pub fn earlier_names(home: &Path) -> Result<Vec<UserId>> {
     ants_sense::identity::earlier_names(home)
         .with_context(|| format!("reading {}", ants_sense::home::Home::new(home).names().display()))
+}
+
+/// What the home of an ant keeps of its sense identity ([`home_sense`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HomeSense {
+    /// The sense id it keeps, if any.
+    pub id: Option<SenseId>,
+    /// The file of the writes of that id waiting in its cache to be appended to the log, when some wait.
+    pub pending: Option<PathBuf>,
+    /// The marker of its sense data awaiting their import, when they do.
+    pub importing: Option<PathBuf>,
+}
+
+/// What the home `home` keeps of its sense identity.
+pub fn home_sense(home: &Path) -> Result<HomeSense> {
+    let files = ants_sense::home::Home::new(home);
+    let id = ants_sense::identity::read_id(home).with_context(|| format!("reading {}", files.id().display()))?;
+    Ok(HomeSense {
+        id,
+        pending: files.has_pending_writes().then(|| files.pending()),
+        importing: files.awaits_import().then(|| files.importing()),
+    })
+}
+
+/// Have the home `home` keep `id`, the sense id its ant's identity record names, in place of the one it keeps, whose
+/// data stay in the log: refused while writes wait in its cache or its sense data await their import, which the change
+/// would lose. A daemon serving the ant opens sense under `id` when next used: its cache and chain status follow.
+pub fn follow_record(home: &Path, id: &SenseId) -> Result<()> {
+    let kept = home_sense(home)?;
+    if let Some(pending) = kept.pending {
+        anyhow::bail!("writes wait in {} to be appended to the log", pending.display());
+    }
+    if let Some(importing) = kept.importing {
+        anyhow::bail!("the sense data of the home await their import ({})", importing.display());
+    }
+    let file = ants_sense::home::Home::new(home).id();
+    ants_sense::identity::keep_id(home, id).with_context(|| format!("writing {}", file.display()))
 }
 
 /// Sense keeping no data, its tools that need some refusing.

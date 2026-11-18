@@ -349,7 +349,8 @@ pub fn table(entries: &[ColonyEntry], now: DateTime<Utc>) -> String {
 }
 
 /// An entry as one JSON object, with its `state` added, and from the ant's identity record in `faces` when it has one,
-/// its `born` and `prompts`, and its `avatar` (the face) and `color`.
+/// its `born`, `prompts` and `sense` (its sense id), and its `avatar` (the face), `color` and `seed`: where the face's
+/// seed comes from, `avatar` (set by a human), `sense`, `id` (the record's) or `name` (no record).
 pub fn json(entry: &ColonyEntry, now: DateTime<Utc>, faces: &Faces) -> Result<String> {
     let mut value = serde_json::to_value(entry)?;
     if let Some(object) = value.as_object_mut() {
@@ -360,6 +361,11 @@ pub fn json(entry: &ColonyEntry, now: DateTime<Utc>, faces: &Faces) -> Result<St
         object.insert("avatar".to_owned(), avatar.face().into());
         object.insert("color".to_owned(), avatar.hue_name().into());
         object.insert("prompts".to_owned(), identity.map(|i| i.prompts).into());
+        object.insert(
+            "sense".to_owned(),
+            identity.and_then(|i| i.sense.as_ref()).map(ants_proto::SenseId::as_str).into(),
+        );
+        object.insert("seed".to_owned(), identity.map_or("name", |i| i.seed_source().as_str()).into());
     }
     Ok(value.to_string())
 }
@@ -628,11 +634,13 @@ mod tests {
         let born = now - chrono::Duration::days(1);
         let mut record = ants_proto::AntIdentity::new("dev-b".parse().unwrap(), "b-id".to_owned(), born);
         record.prompts = 12;
+        let sense = ants_proto::SenseId::new();
+        record.sense = Some(sense.clone());
         let identities = avatars::Identities::from([(record.ant.clone(), record)]);
         let faces = Faces::new(identities, avatars::Depth::Plain, ants_proto::Theme::Dark);
         let table = table(&entries, now);
         let lines: Vec<String> = faced(&table, &entries, &faces).lines().map(str::to_owned).collect();
-        let (a, b) = (ants_proto::Avatar::derive("dev-a"), ants_proto::Avatar::derive("b-id"));
+        let (a, b) = (ants_proto::Avatar::derive("dev-a"), ants_proto::Avatar::derive(sense.as_str()));
         assert!(lines[0].starts_with("      ANT "), "{lines:?}");
         assert!(lines[1].starts_with(&format!("{} dev-a ", a.face())), "{lines:?}");
         assert!(lines[2].starts_with(&format!("{} dev-b ", b.face())), "{lines:?}");
@@ -640,8 +648,10 @@ mod tests {
         let born = shown(&entries[1]);
         assert_eq!((born["avatar"].as_str(), born["color"].as_str()), (Some(&*b.face()), Some(b.hue_name())));
         assert_eq!((born["prompts"].as_u64(), born["born"].is_string()), (Some(12), true));
+        assert_eq!((born["sense"].as_str(), born["seed"].as_str()), (Some(sense.as_str()), Some("sense")));
         let unborn = shown(&entries[0]);
         assert_eq!((unborn["avatar"].as_str(), unborn["born"].is_null()), (Some(&*a.face()), true), "from the name");
+        assert_eq!((unborn["sense"].is_null(), unborn["seed"].as_str()), (true, Some("name")));
     }
 
     #[test]

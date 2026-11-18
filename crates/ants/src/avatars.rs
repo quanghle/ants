@@ -9,8 +9,8 @@ use std::time::Duration;
 use ants_daemon::config::Theme as ThemeSetting;
 use ants_daemon::records::direct_kv::{DirectKv, Lookup};
 use ants_proto::{
-    AntIdentity, Avatar, Frame, IDENTITIES_BUCKET, INCARNATION_KEY, JsDomain, Palette, Rgb, Stage, Theme, UserId,
-    hue_named,
+    AntIdentity, Avatar, Frame, IDENTITIES_BUCKET, INCARNATION_KEY, JsDomain, Palette, Rgb, SeedSource, Stage, Theme,
+    UserId, hue_named,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
@@ -255,6 +255,26 @@ pub async fn update(
     {
         bail!("no colour {color}: one of {}", ants_proto::HUE_NAMES.join(", "));
     }
+    change(js, js_domain, ant, |record| {
+        if let Some(seed) = &seed {
+            record.avatar.clone_from(seed);
+        }
+        if let Some(color) = &color {
+            record.color = color.as_deref().and_then(hue_named).map(|i| ants_proto::HUE_NAMES[i].to_owned());
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// Make `edit` to `ant`'s identity record by compare-and-set, with a human's credentials, reading the record again
+/// when another writer came first. The record as stored.
+pub async fn change(
+    js: &jetstream::Context,
+    js_domain: Option<&JsDomain>,
+    ant: &UserId,
+    mut edit: impl FnMut(&mut AntIdentity) -> Result<()>,
+) -> Result<AntIdentity> {
     let kv = DirectKv::whole(js, js_domain, IDENTITIES_BUCKET).await?;
     for _ in 0..5 {
         let (found, last) = kv.lookup_last(ant.as_str()).await?;
@@ -268,12 +288,7 @@ pub async fn update(
                 record
             }
         };
-        if let Some(seed) = &seed {
-            record.avatar.clone_from(seed);
-        }
-        if let Some(color) = &color {
-            record.color = color.as_deref().and_then(hue_named).map(|i| ants_proto::HUE_NAMES[i].to_owned());
-        }
+        edit(&mut record)?;
         if kv.update(ant.as_str(), serde_json::to_vec(&record)?, last).await? {
             return Ok(record);
         }
@@ -310,7 +325,17 @@ pub async fn show(nats: &crate::connection::Nats<'_>, ant: &UserId, change: Chan
     Ok(())
 }
 
-/// The head of `ant` and lines on its face, parts, colour, birth and growth.
+/// The ant's sense id and where its avatar's seed comes from.
+fn seeded(record: &AntIdentity) -> String {
+    let sense = record.sense.as_ref().map_or_else(|| "no sense id".to_owned(), |s| format!("sense id {s}"));
+    match record.seed_source() {
+        SeedSource::Set => format!("{sense} (the seed is set)"),
+        SeedSource::Sense => format!("{sense} (the seed)"),
+        SeedSource::Id => format!("{sense} (the seed is the record's id {})", record.id),
+    }
+}
+
+/// The head of `ant` and lines on its face, parts, colour, birth, sense id and seed, and growth.
 pub fn describe(faces: &Faces, ant: &UserId, now: chrono::DateTime<chrono::Utc>) -> String {
     use std::fmt::Write as _;
     let record = faces.identity(ant);
@@ -337,6 +362,7 @@ pub fn describe(faces: &Faces, ant: &UserId, now: chrono::DateTime<chrono::Utc>)
     };
     let age = crate::colony::short(crate::colony::since(record.born, now));
     let _ = writeln!(out, "born {} ({age} ago)", record.born.format("%Y-%m-%d %H:%M:%SZ"));
+    let _ = writeln!(out, "{}", seeded(record));
     let next = match stage.next_at() {
         Some(at) => format!("; {} at {at}", Stage::of(at).as_str()),
         None => String::new(),

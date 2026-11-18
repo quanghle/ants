@@ -414,7 +414,7 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 /// The identity record of `ant` and its sequence: None when absent.
-async fn read(kv: &DirectKv, ant: &UserId) -> Result<(Option<AntIdentity>, u64)> {
+pub(crate) async fn read(kv: &DirectKv, ant: &UserId) -> Result<(Option<AntIdentity>, u64)> {
     let (found, last) = kv.lookup_last(ant.as_str()).await?;
     match found {
         Lookup::NoBucket => bail!("no {IDENTITIES_BUCKET} bucket: `ants init` creates it"),

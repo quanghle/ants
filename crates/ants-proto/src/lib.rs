@@ -92,7 +92,7 @@ pub use grant::{
 pub use humans::{HumanEntry, Humans, writes_human_entries};
 pub use identity::{
     AntIdentity, Avatar, Cell, ClonedFrom, FACE_WIDTH, Frame, Grid, HEAD_COLUMNS, HEAD_ROWS, HUE_NAMES, Mood, Motion,
-    MovedMark, Palette, Pixel, Rgb, Side, Stage, Theme, hue_named,
+    MovedMark, Palette, Pixel, Rgb, SeedSource, Side, Stage, Theme, hue_named,
 };
 pub use ids::{ChannelId, JsDomain, Machine, Reaction, Role, ThreadId, UserId};
 pub use inbox::{ChannelNotify, ChannelReadMarkers, HeldNotices, NotifyPrefs, ReadMarker};
