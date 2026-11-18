@@ -418,9 +418,9 @@ pub fn builtin_messenger(harness: Option<&str>, home: &Path) -> Ant {
 }
 
 /// The ant a file serves while one of its ants names `sage` as its sage and it lists no ant of the name
-/// ([`super::sage::settle`]); set up, and left to another machine, as the built-in messenger is ([`builtin_messenger`]),
-/// in `~/.ants/sage`, with `~/.config/ants/auth/sage.creds`. Its shared settings, such as its model and reasoning effort, change as any
-/// ant's.
+/// ([`super::sage::settle`]); set up, and left to another machine, as the built-in messenger is
+/// ([`builtin_messenger`]), in `~/.ants/sage`, with `~/.config/ants/auth/sage.creds`. Its shared settings, such as its
+/// model and reasoning effort, change as any ant's.
 pub fn builtin_sage(harness: Option<&str>, home: &Path) -> Ant {
     builtin(UserId::sage(), harness, home)
 }

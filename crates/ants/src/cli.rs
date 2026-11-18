@@ -38,8 +38,8 @@ pub(crate) struct Ants<C: Subcommand> {
 
     /// NATS credentials file (`ants auth user` writes one). Needed when the server enforces per-user permissions.
     /// The CLI acts as the human they name, and registers it in `ants_humans` on connecting; without them, as `human`.
-    /// Unset, the config file's `[cli]` `creds` apply, except to `ants daemon` and `ants add`. To `ants daemon` they are
-    /// the credentials of the ant --ant names, else of the file's one [[ant]] where it sets none.
+    /// Unset, the config file's `[cli]` `creds` apply, except to `ants daemon` and `ants add`. To `ants daemon` they
+    /// are the credentials of the ant --ant names, else of the file's one [[ant]] where it sets none.
     /// A human's also create the hub's stream and buckets that are missing on connecting, as `ants init` does.
     #[arg(long, global = true, env = "ANTS_CREDS")]
     pub(crate) creds: Option<PathBuf>,
