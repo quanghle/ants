@@ -32,7 +32,7 @@ pub use maintain::{
 };
 pub use recall::{
     DEFAULT_LIMIT, HALF_LIFE_DAYS, HELPFUL_WEIGHT, MAX_HELPFUL, MAX_LIMIT, MAX_WITH, NEEDS_REVIEW_WEIGHT, NOTE, Ranked,
-    STALE_WEIGHT, framed, participants, recall, score, search, snippet, thread_repo, top,
+    STALE_WEIGHT, framed, participants, recall, score, search, snippet, thread_repo, top, top_of_all,
 };
 pub use remember::remember;
 pub(crate) use remember::{Quotes, redacted, sanitized};

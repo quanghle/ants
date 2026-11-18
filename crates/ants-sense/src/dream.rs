@@ -346,6 +346,21 @@ impl Dream {
         self.at + Duration::hours(DREAM_EVERY_HOURS)
     }
 
+    /// Its number and how many findings it has, applied, rejected, deferred and unanswered: the title of its diary.
+    pub fn summary(&self) -> String {
+        let count = |judgement| self.verdicts.iter().filter(|verdict| verdict.verdict == judgement).count();
+        let answered = self.findings.iter().filter(|finding| self.verdict(&finding.id).is_some()).count();
+        format!(
+            "Dream {}: {} findings, {} applied, {} rejected, {} deferred, {} unanswered",
+            self.number,
+            self.findings.len(),
+            count(Judgement::Applied),
+            count(Judgement::Rejected),
+            count(Judgement::Deferred),
+            self.findings.len() - answered,
+        )
+    }
+
     /// The verdict on finding `id`, if any.
     pub fn verdict(&self, id: &str) -> Option<&Verdict> {
         self.verdicts.iter().find(|verdict| verdict.finding == id)
@@ -771,17 +786,7 @@ fn close(mut dream: Dream, revision: u64, context: &CallContext, at: DateTime<Ut
 /// The diary episode of `dream`, written in `context`: how many findings it had, the verdict on each and the items
 /// written, within a memory's limits.
 fn diary(dream: &Dream, context: &CallContext) -> Memory {
-    let count = |judgement| dream.verdicts.iter().filter(|verdict| verdict.verdict == judgement).count();
-    let answered = dream.findings.iter().filter(|finding| dream.verdict(&finding.id).is_some()).count();
-    let title = format!(
-        "Dream {}: {} findings, {} applied, {} rejected, {} deferred, {} unanswered",
-        dream.number,
-        dream.findings.len(),
-        count(Judgement::Applied),
-        count(Judgement::Rejected),
-        count(Judgement::Deferred),
-        dream.findings.len() - answered,
-    );
+    let title = dream.summary();
     let mut lines = vec![format!(
         "Reviewed {} threads since {} UTC; {} of {MAX_DREAM_WRITES} writes made.",
         dream.threads.len(),
