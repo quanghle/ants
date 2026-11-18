@@ -311,7 +311,7 @@ pub fn body(questions: &Questions, id: Uuid, cursor: Option<&Cursor>, width: usi
     match (questions.questions.get(cursor.tab), cursor.tabs.get(cursor.tab)) {
         (Some(question), Some(tab)) => {
             if cursor.several() {
-                lines.push(Line::raw(excerpt(&question.text, width)));
+                lines.extend(wrapped(&question.text, width));
             }
             lines.extend(rows(question, tab, focused, width));
         }
@@ -392,6 +392,11 @@ fn rows(question: &Question, tab: &Tab, focused: bool, width: usize) -> Vec<Line
     lines
 }
 
+/// A question's `text` in lines at most `width` wide, each of its lines wrapped.
+fn wrapped(text: &str, width: usize) -> impl Iterator<Item = Line<'static>> {
+    text.lines().flat_map(move |line| wrap(line, width)).map(Line::raw)
+}
+
 /// `text` in lines at most `width` wide, broken between words where it can be.
 pub(super) fn wrap(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
@@ -450,7 +455,7 @@ impl Card<'_> {
         match (self.keys, self.asked.id) {
             (true, Some(id)) => {
                 if let [one] = questions {
-                    lines.push(Line::raw(excerpt(&one.text, width)));
+                    lines.extend(wrapped(&one.text, width));
                 }
                 lines.extend(body(self.question, id, cursor, width));
                 let keys = match cursor {

@@ -60,8 +60,9 @@ pub struct Page {
     mark: attach::Mark<u64>,
     /// The cursor on the question card the keys answer, while Enter has focused it.
     answering: Option<question::Cursor>,
-    /// How wide the cards were drawn last, which tells whether a tool request shows whole on its card.
-    cards_width: Cell<Option<usize>>,
+    /// The room the oldest pending tool request had on its card as last drawn, `(width, lines)`, which tells whether it
+    /// showed whole there: no lines when its card was not drawn.
+    card_room: Cell<Option<(usize, usize)>>,
 }
 
 impl Page {
@@ -74,7 +75,7 @@ impl Page {
             at: None,
             mark: attach::Mark::default(),
             answering: None,
-            cards_width: Cell::new(None),
+            card_room: Cell::new(None),
         }
     }
 
@@ -284,14 +285,15 @@ impl Page {
                     return None;
                 };
                 // A request its card does not show whole opens in full, where the keys answer it.
-                let verdict = verdict.filter(|_| approvals::fits(oldest, self.cards_width.get()));
+                let verdict = verdict.filter(|_| approvals::fits(oldest, self.card_room.get()));
                 return Some(To::Ask(oldest.clone(), verdict));
             }
             Key::Char('n') => {
                 let pending = data.live.approvals.iter().filter(|r| r.thread_id == self.history.thread);
                 return pending.min_by_key(|r| r.requested_at).cloned().map(To::Note);
             }
-            Key::Char('1'..='9') => {
+            // The question's card folds while a tool request waits: its keys answer the request's.
+            Key::Char('1'..='9') if !data.live.approvals.iter().any(|r| r.thread_id == self.history.thread) => {
                 return match question::thread_key(key, data, &self.history.thread, &self.history.entries, now)? {
                     question::Keyed::To(to) => Some(*to),
                     question::Keyed::Focus(cursor) => {
@@ -342,8 +344,9 @@ impl Page {
             (area, None)
         };
         let cursor = self.card(data, now);
-        self.cards_width.set(Some(usize::from(area.width.saturating_sub(2))));
-        let area = draw_cards(frame, area, model, thread, &self.history.entries, cursor, now);
+        let cards = draw_cards(frame, area, model, thread, &self.history.entries, cursor, now);
+        self.card_room.set(Some(cards.room));
+        let area = cards.rest;
         let block = style::block(title, focused);
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -358,7 +361,7 @@ impl Page {
         }
         let marked = self.attached().map(|e| (e.seq, self.mark.at(e.seq, e.attachments.len())));
         let busy = data.live.progress.contains_key(thread);
-        let shown = Shown { data, now, busy, width, marked, placed: RefCell::default() };
+        let shown = Shown { data, now, busy, width, marked, placed: RefCell::default(), carded: cards.carded };
         let calls = data.calls.get(thread).map_or(&[][..], |c| c.calls());
         let ends = data.calls.get(thread).map_or(&[][..], |c| c.ends());
         let rows = rows(&self.history.entries, calls, ends, data.tools, busy, |u| data.is_human(u));
@@ -478,8 +481,24 @@ impl Page {
     }
 }
 
-/// Draw the cards of the tool requests and questions of `thread` at the bottom of `area`, in at most half of it, the
-/// question card the keys answer under `cursor` while focused: the area left.
+/// What drawing a thread's cards left: the area above them, the room the oldest pending tool request had on its card
+/// (`(width, lines)`, no lines when not drawn), and the message whose card was drawn, by its sequence.
+struct Cards {
+    rest: Rect,
+    room: (usize, usize),
+    carded: Option<u64>,
+}
+
+/// The card a thread shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Shows {
+    Request(usize),
+    Question(usize),
+}
+
+/// Draw the cards of `thread` at the bottom of `area`: the one the keys answer whole, in a third of `area` where it
+/// fits: a focused question's, else the oldest pending tool request's, else the question's the keys answer, else the
+/// first one; its bottom border counting the others, which the conversation shows in full.
 fn draw_cards(
     frame: &mut Frame,
     area: Rect,
@@ -488,39 +507,100 @@ fn draw_cards(
     entries: &[Entry],
     cursor: Option<&question::Cursor>,
     now: DateTime<Utc>,
-) -> Rect {
+) -> Cards {
     let width = usize::from(area.width.saturating_sub(2));
-    let cards = approvals::cards(&model.data, Some(thread), now);
-    let cards = cards.into_iter().enumerate().map(|(at, card)| {
-        let lines = approvals::lines(card, model.asking.as_ref(), at == 0, now, width);
-        let style = if card.settled.is_some() { style::dim() } else { Style::new().fg(style::PENDING) };
-        (approvals::title(card), lines, style)
-    });
-    // Enter shows a pending tool request before it focuses a question.
-    let enter = !model.data.live.approvals.iter().any(|r| &r.thread_id == thread);
+    let requests = approvals::cards(&model.data, Some(thread), now);
     let questions = question::cards(&model.data, entries, now);
-    let questions = questions.iter().map(|card| (card.title(), card.lines(width, cursor, enter), card.style()));
-    let mut boxes = Vec::new();
-    let mut height = 0;
-    for (title, lines, style) in cards.chain(questions) {
-        let tall = u16::try_from(lines.len()).unwrap_or(u16::MAX).saturating_add(2);
-        if height + tall > area.height / 2 {
-            break;
+    let pending = requests.iter().position(|c| c.settled.is_none()).map(Shows::Request);
+    let keyed = questions.iter().position(|c| c.keys).map(Shows::Question);
+    let first = if requests.is_empty() {
+        (!questions.is_empty()).then_some(Shows::Question(0))
+    } else {
+        Some(Shows::Request(0))
+    };
+    let shows = cursor.and(keyed).or(pending).or(keyed).or(first);
+    let Some(shows) = shows else {
+        return Cards { rest: area, room: (width, 0), carded: None };
+    };
+    // Two borders, then a line of what is asked and one of keys at least.
+    let room = usize::from(area.height / 3).max(4) - 2;
+    let (title, lines, style, rows, carded) = match shows {
+        Shows::Request(at) => {
+            let card = requests[at];
+            let lines = |rows| approvals::lines(card, model.asking.as_ref(), true, now, (width, rows));
+            let rows = (1..=approvals::CARD_LINES).rev().find(|rows| lines(*rows).len() <= room).unwrap_or(1);
+            let style = if card.settled.is_some() { style::dim() } else { Style::new().fg(style::PENDING) };
+            let id = format!("{}/{} ", card.request.ant, card.request.id);
+            let asked = entries
+                .iter()
+                .rfind(|e| e.kind == Kind::Approval && e.note.as_ref().is_some_and(|n| n.starts_with(&id)));
+            (approvals::title(card), lines(rows), style, rows, asked.map(|e| e.seq))
         }
-        height += tall;
-        boxes.push((title, lines, style, tall));
+        Shows::Question(at) => {
+            let card = &questions[at];
+            // Enter shows a pending tool request before it focuses a question.
+            let lines = card.lines(width, cursor, pending.is_none());
+            (card.title(), scrolled(lines, room, cursor.is_some()), card.style(), 0, Some(card.asked.seq))
+        }
+    };
+    let mut others = [0; 3];
+    for (at, card) in requests.iter().enumerate() {
+        if shows != Shows::Request(at) {
+            others[if card.settled.is_none() { 0 } else { 2 }] += 1;
+        }
     }
-    if boxes.is_empty() {
-        return area;
+    for (at, card) in questions.iter().enumerate() {
+        if shows != Shows::Question(at) {
+            others[if card.answers.is_empty() { 1 } else { 2 }] += 1;
+        }
     }
-    let [rest, mut below] = Layout::vertical([Constraint::Min(3), Constraint::Length(height)]).areas(area);
-    for (title, lines, style, tall) in boxes {
-        let [this, next] = Layout::vertical([Constraint::Length(tall), Constraint::Min(0)]).areas(below);
-        let block = ratatui::widgets::Block::bordered().title(title).border_style(style);
-        frame.render_widget(Paragraph::new(lines).block(block), this);
-        below = next;
+    let tall = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX).min(area.height);
+    let rest = Rect { height: area.height - tall, ..area };
+    let below = Rect { y: area.y + rest.height, height: tall, ..area };
+    let mut block = ratatui::widgets::Block::bordered().title(title).border_style(style);
+    if let Some(folded) = folded(others) {
+        block = block.title_bottom(Line::styled(folded, style::dim()));
     }
-    rest
+    frame.render_widget(Paragraph::new(lines).block(block), below);
+    let room = (width, if pending.is_some() && Some(shows) == pending { rows } else { 0 });
+    Cards { rest, room, carded }
+}
+
+/// What the bottom border of a thread's card says of the others, `[requests, questions]` waiting and those settled or
+/// answered lately: ` 1 tool request and 1 question also wait above · 1 settled or answered lately `.
+fn folded([requests, questions, settled]: [usize; 3]) -> Option<String> {
+    let count = |n: usize, what: &str| (n > 0).then(|| format!("{n} {what}{}", if n == 1 { "" } else { "s" }));
+    let wait: Vec<String> =
+        [count(requests, "tool request"), count(questions, "question")].into_iter().flatten().collect();
+    let verb = if requests + questions == 1 { "waits" } else { "wait" };
+    match (wait.is_empty(), settled) {
+        (true, 0) => None,
+        (true, n) => Some(format!(" {n} more settled or answered lately above ")),
+        (false, 0) => Some(format!(" {} also {verb} above ", wait.join(" and "))),
+        (false, n) => Some(format!(" {} also {verb} above · {n} settled or answered lately ", wait.join(" and "))),
+    }
+}
+
+/// The `lines` of a question's card in `room` lines: its last, the keys, always, and above it those around the
+/// focused row, else the first ones and a line counting those left out.
+fn scrolled(mut lines: Vec<Line<'static>>, room: usize, focused: bool) -> Vec<Line<'static>> {
+    if lines.len() <= room || room < 2 {
+        return lines;
+    }
+    let keys = lines.pop().unwrap_or_default();
+    let above = room - 1;
+    if focused {
+        let at = lines.iter().position(|l| l.spans.first().is_some_and(|s| s.content.starts_with('›')));
+        let top = (at.unwrap_or_default() + 1).saturating_sub(above);
+        let mut shown: Vec<_> = lines.into_iter().skip(top).take(above).collect();
+        shown.push(keys);
+        return shown;
+    }
+    let left = lines.len() - (above - 1);
+    lines.truncate(above - 1);
+    lines.push(Line::styled(format!("… {left} more lines: Enter shows them"), style::dim()));
+    lines.push(keys);
+    lines
 }
 
 /// How the human holds a thread.
@@ -912,7 +992,8 @@ mod tests {
             shown.contains("a allow · r reject · n reject with a note · Enter details"),
             "the oldest takes the keys: {shown}"
         );
-        assert!(shown.contains("execute: git tag v1") && !shown.contains("execute: ls"), "{shown}");
+        assert!(shown.contains("1 tool request also waits above") && !shown.contains("execute: git tag v1"), "{shown}");
+        assert!(!shown.contains("execute: ls"), "{shown}");
 
         let mut long = request("git push");
         let words: Vec<String> = (0..500).map(|n| format!("w{n:03}")).collect();
@@ -927,6 +1008,46 @@ mod tests {
         m.data.settled.add(push, crate::tools::State::Expired, at(2));
         let shown = screen(&page, &m, 100, at(3));
         assert!(shown.contains("expired unanswered: dev-a rejected it"), "{shown}");
+    }
+
+    #[test]
+    fn the_card_the_keys_answer_shows_whole_the_others_counted_and_the_conversation_gives_it_one_line() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let request = |command: &str, secs| {
+            let request = crate::test_support::live::request("dev-a", command, vec![Verdict::AllowOnce]);
+            ants_proto::ApprovalRequest { thread_id: thread.clone(), requested_at: at(secs), ..request }
+        };
+        let (push, tag) = (request("git push origin main", 2), request("git tag v1", 3));
+        let asked = |seq, r: &ants_proto::ApprovalRequest| {
+            let mut parser = crate::threads::thread::Parser::default();
+            parser.entry(seq, at(2), &r.subject(), &serde_json::to_vec(r).unwrap()).unwrap()
+        };
+        let mut question = message(4, &thread, "dev-a", "alice", "Backfill the table?");
+        let options = ["yes".to_owned(), "no".to_owned()];
+        question.question = Some(Question::new("Backfill the table?", &options, false).unwrap().into());
+        let entries = vec![message(1, &thread, "alice", "dev-a", "deploy"), asked(2, &push), asked(3, &tag), question];
+        m.stored(entries.clone(), at(4));
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(entries)).unwrap();
+        m.pages.push(super::super::model::Page::Thread(page));
+        m.data.live.approvals = vec![tag, push.clone()];
+        for height in [20, 30] {
+            let shown = crate::test_support::render::rendered(100, height, |f| crate::tui::frame::draw(f, &m, at(5)));
+            assert!(shown.contains("│execute: git push origin main"), "{height}: {shown}");
+            assert!(shown.contains("a allow · r reject"), "{height}: {shown}");
+            assert!(shown.contains("1 tool request and 1 question also wait"), "{height}: {shown}");
+            assert!(shown.contains("tool request  execute: git pus… · card below"), "one line: {shown}");
+            assert!(shown.contains("execute: git tag v1") && shown.contains("1 yes"), "the others in full: {shown}");
+        }
+        assert_eq!(m.key(Key::Char('1'), at(5)), None, "the question's card is not on screen");
+        assert!(m.asking.is_none());
+        assert_eq!(m.key(Key::Char('a'), at(5)), Some(Action::Decide(Box::new(push), Verdict::AllowOnce)));
+
+        m.data.live.approvals.clear();
+        let shown = crate::test_support::render::rendered(100, 20, |f| crate::tui::frame::draw(f, &m, at(5)));
+        assert!(shown.contains("│Backfill the table?") && shown.contains("│1-9 answer · Enter choose"), "{shown}");
+        assert!(shown.contains("asks  Backfill the table? · card below"), "{shown}");
     }
 
     #[test]
@@ -950,9 +1071,11 @@ mod tests {
         m.data.live.approvals = vec![push.clone()];
         let screen = shown(&m);
         assert!(
-            screen.contains("│1-9 answer ") && !screen.contains("Enter choose"),
-            "Enter takes the request: {screen}"
+            screen.contains("1 question also waits above") && !screen.contains("1-9 answer"),
+            "the request's card shows, the question's folds: {screen}"
         );
+        assert_eq!(m.key(Key::Char('1'), at(2)), None, "no key answers a card not on screen");
+        assert!(m.asking.is_none());
         m.key(Key::Enter, at(2));
         assert!(m.asking.as_ref().is_some_and(|a| a.request == push), "the tool request first");
         m.key(Key::Esc, at(2));

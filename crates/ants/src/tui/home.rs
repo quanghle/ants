@@ -442,7 +442,8 @@ impl Page {
             Key::Char('b') => return thread().map(|t| To::Remind(t, reminded)),
             Key::Char('a' | 'A' | 'r') if let Some(request) = pending => {
                 // A request its card does not show whole opens in full, where the keys answer it.
-                let verdict = verdict.filter(|_| approvals::fits(&request, self.width.get()));
+                let verdict =
+                    verdict.filter(|_| approvals::fits(&request, self.width.get().map(|w| (w, approvals::CARD_LINES))));
                 return Some(To::Ask(request, verdict));
             }
             Key::Char('a' | 'A') => return None,
@@ -551,7 +552,13 @@ impl Page {
                     lines.push(Line::styled("         Enter collapses", style::dim()));
                 } else if let Some((request, settled)) = &i.request {
                     let card = approvals::Card { request, settled: settled.as_ref() };
-                    let card = approvals::lines(card, model.asking.as_ref(), at == selected, now, width);
+                    let card = approvals::lines(
+                        card,
+                        model.asking.as_ref(),
+                        at == selected,
+                        now,
+                        (width, approvals::CARD_LINES),
+                    );
                     let enter = format!("Enter lists all {}", i.requests.len());
                     // Off the card the keys answer, the tool shows on the line before.
                     lines.extend(card.into_iter().skip(usize::from(keyed.is_none())).map(|line| {
