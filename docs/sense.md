@@ -59,6 +59,13 @@ vote or propose.
 - **The ant's home:** `.sense/id` (the sense id), `.sense/names` (earlier names), `.sense/cache.db` (the cache of its
   items), `.sense/chain.json` (the log as last verified), `.sense/skills/` (the confirmed skills), and, on a sage,
   `reviews/` (the checkouts of the reviews running).
+- **The memories view:** `ants ant memories` and the memories pane of the ant view in `ants chat` show, under
+  `memories of provider sense`, who the ant has become, read from its cache without noting a session or writing
+  anything: its identity (card and experience), its persona with its pending proposal, its self-model, each
+  relationship record, its skills by name and description, its last dream (the title of its diary, with its verdict
+  counts), then its core memories and its top 10 memories of every scope as `sense_recall` ranks them without a
+  query. Each entry is keyed by its id, kind, scope and trust. Entries past the size cap of a memories read are left
+  out and counted; an ant with no sense data shows an empty section ([cli.md](cli.md)).
 - **`ants doctor`:** `sense chain` fails at a break in the ant's log, and `sense size` warns past 32 MiB
   ([cli.md](cli.md)); the ant's brief warns of both too.
 - **Export and import:** `ants ant export` carries the log and skill files to another bus
