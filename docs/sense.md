@@ -385,13 +385,16 @@ bytes), and its skills change only through proposals the ant itself confirms in 
 confirmed version stays in the log with its reason.
 
 The profile is where the ant tells the colony what it is good for, in its own words, beside the `whoami` its humans
-write. The daemon serving the ant publishes the confirmed profile as `profile` in the ant's colony entry
-([Colony, identity and memory](architecture.md#colony-identity-and-memory)), reading it when it starts serving the ant
-and again after each change sense makes, so a confirmed profile shows within a heartbeat, and goes when a confirmed
+write. The daemon serving the ant publishes the confirmed profile as `profile` in the ant's colony entry ([Colony,
+identity and memory](architecture.md#colony-identity-and-memory)), reading it before the ant's first colony entry, which
+shows it when read within 2 seconds, and again with each read of the ant's schedule, which follows each change sense
+makes (a failed read retried a minute later), so a confirmed profile shows within a heartbeat, and goes when a confirmed
 version drops it. `list_ants` and the messenger's triage show it after the `whoami`, marked as the ant's own words and,
-like the `whoami`, no instructions; `ants colony --json` and `ants ant show` show it too. `route` keeps matching
-capabilities. A proposal changing the profile says so in the dream finding offering it. An ant without sense has no
-profile. A skill follows the Agent Skills layout: a directory named after it holding `SKILL.md`, whose front matter
+like the `whoami`, no instructions; `ants ant show` and `ants colony --json` show it too, and the `ants colony` table
+its first 40 characters on one line. `route` picks by capabilities and the ant's state first; the profile only breaks a
+tie among ants equal in all of those, by the words it shares with the request ([MCP tools](architecture.md#mcp-tools)),
+and is never echoed. A proposal changing the profile says so in the dream finding offering it. An ant without sense has
+no profile. A skill follows the Agent Skills layout: a directory named after it holding `SKILL.md`, whose front matter
 (between two lines `---`) gives its `name` and `description`, and the files it refers to.
 
 - `sense_identity` proposes a persona change given any of `values`, `voice`, `boundaries`, `working_style` and
