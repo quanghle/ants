@@ -1,23 +1,26 @@
 //! Tool request cards: the pending tool requests, on home and on their thread, with the ant, the tool and its input,
 //! answered at once with a, A or r through the path of `ants tools approve` and `reject`, the first decision winning
-//! ([`crate::live::Feed::decide`]); Enter shows a request in full as `ants dash` does, where a, A or r answer it
-//! too. n opens the command bar on a note: Enter rejects the request, and once the rejection is stored sends the note
-//! to the ant on the request's thread, as `ants tools reject --note` does; refused, the note comes back into the bar.
+//! ([`crate::live::Feed::decide`]); Enter shows a request in full ([`full`]), where a, A or r answer it too. n opens
+//! the command bar on a note: Enter rejects the request, and once the rejection is stored sends the note to the ant on
+//! the request's thread, as `ants tools reject --note` does; refused, the note comes back into the bar.
 //! A request settled while the UI runs keeps its card a while ([`SETTLED_FOR`]), saying how it was settled and by
 //! whom, unless the human decided it here.
+
+use std::cell::Cell;
 
 use ants_proto::{ApprovalRequest, ThreadId, Verdict};
 use chrono::{DateTime, Local, TimeDelta, Utc};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 use super::model::{Data, Key};
 use super::style;
 use crate::live;
 use crate::tools::{self, State};
+
+mod full;
+mod text;
 
 /// How long the card of a request settled while the UI runs stays.
 pub const SETTLED_FOR: TimeDelta = TimeDelta::minutes(2);
@@ -106,15 +109,53 @@ fn keys(request: &ApprovalRequest) -> String {
         .join(" · ")
 }
 
-/// The lines of `card`, at most `width` wide: the tool, its input if any, and its keys (with `keyed`, the card the
-/// keys answer), that its answer is being stored, or how it was settled.
-pub fn lines(card: Card, asking: Option<&Asking>, keyed: bool, now: DateTime<Utc>, width: usize) -> Vec<Line<'static>> {
+/// How many lines the card the keys answer gives what its request asks, at most.
+pub const CARD_LINES: usize = 6;
+/// How wide the compact pane's one line shows a request, no card being drawn there.
+const COMPACT_WIDTH: usize = 100;
+
+/// What `request` asks as its card shows it, wrapped at `width`: the tool's kind, then its command, its file and content
+/// or its input ([`text::asked`]).
+fn card_text(request: &ApprovalRequest, width: usize) -> Vec<Line<'static>> {
+    let mut asked = text::asked(request);
+    if let Some(first) = asked.first_mut() {
+        first.spans.insert(0, Span::raw(format!("{}: ", request.tool.kind)));
+    }
+    text::wrapped(&asked, width)
+}
+
+/// Whether what `request` asks shows whole on the card the keys answer, as last drawn: `width` wide over `rows` lines;
+/// with no card drawn, on the compact pane's one line. A key answers at once only a request that does.
+pub fn fits(request: &ApprovalRequest, room: Option<(usize, usize)>) -> bool {
+    let (width, rows) = room.unwrap_or((COMPACT_WIDTH, 1));
+    card_text(request, width).len() <= rows
+}
+
+/// The lines of `card`, at most `width` wide: with `keyed`, the card the keys answer, what the request asks over `rows`
+/// lines at most, how many more are left, and its keys; else the tool on one line; then that its answer is being stored,
+/// or how it was settled.
+pub fn lines(
+    card: Card,
+    asking: Option<&Asking>,
+    keyed: bool,
+    now: DateTime<Utc>,
+    (width, rows): (usize, usize),
+) -> Vec<Line<'static>> {
     let request = card.request;
-    let tool = format!("{}: {}", request.tool.kind, request.tool.title.replace('\n', " "));
-    let mut lines = vec![Line::raw(cut(&tool, width))];
-    if let Some(input) = &request.tool.input {
-        lines.push(Line::styled(cut(&format!("input {}", input.replace('\n', " ")), width), style::dim()));
-    } else if !request.tool.locations.is_empty() {
+    let mut lines = if keyed && card.settled.is_none() {
+        let mut lines = card_text(request, width);
+        let left = lines.len().saturating_sub(rows);
+        lines.truncate(rows);
+        if left > 0 {
+            let what = if left == 1 { "line" } else { "lines" };
+            lines.push(Line::styled(format!("… {left} more {what}: Enter shows them"), style::dim()));
+        }
+        lines
+    } else {
+        let tool = format!("{}: {}", request.tool.kind, request.tool.title.replace('\n', " "));
+        vec![Line::raw(cut(&tool, width))]
+    };
+    if keyed && request.tool.input.is_none() && !request.tool.locations.is_empty() {
         lines.push(Line::styled(cut(&format!("files {}", request.tool.locations.join(", ")), width), style::dim()));
     }
     if let Some(always) = request.label(Verdict::AllowAlways).filter(|_| card.settled.is_none()) {
@@ -163,6 +204,9 @@ pub struct Asking {
     pub storing: bool,
     /// The note to send the ant once the rejection being stored is stored.
     pub note: Option<String>,
+    /// The first row of the body shown in full, and how many rows a page scrolls, as last drawn.
+    top: Cell<usize>,
+    page: Cell<usize>,
 }
 
 /// What a key does to the request being answered.
@@ -185,7 +229,15 @@ pub enum Answer {
 impl Asking {
     /// Show the pending `request` in full.
     pub fn full(request: ApprovalRequest) -> Self {
-        Self { request, state: State::Pending, full: true, storing: false, note: None }
+        Self {
+            request,
+            state: State::Pending,
+            full: true,
+            storing: false,
+            note: None,
+            top: Cell::default(),
+            page: Cell::default(),
+        }
     }
 
     /// Answer the pending `request` with `verdict` at once, its decision then being stored. Refused for a verdict the
@@ -195,7 +247,7 @@ impl Asking {
         if let Some(refusal) = live::refusal(&request, &state, verdict) {
             return Err(refusal);
         }
-        Ok(Self { request, state, full: false, storing: true, note: None })
+        Ok(Self { request, state, full: false, storing: true, note: None, top: Cell::default(), page: Cell::default() })
     }
 
     /// Whether keys go to it rather than to the view: while shown in full.
@@ -204,6 +256,12 @@ impl Asking {
     }
 
     pub fn key(&mut self, key: Key) -> Answer {
+        if self.full
+            && let Some(top) = full::scrolled(key, self.top.get(), self.page.get())
+        {
+            self.top.set(top);
+            return Answer::Keep;
+        }
         if self.storing {
             if self.full && matches!(key, Key::Esc | Key::Char('q')) {
                 self.full = false;
@@ -258,34 +316,9 @@ impl Asking {
     }
 }
 
-/// The request being answered in full over the screen, as `ants dash` shows it.
+/// The request being answered in full over the screen.
 pub fn draw_full(f: &mut Frame, asking: &Asking, now: DateTime<Utc>) {
-    let [_, area, _] =
-        Layout::vertical([Constraint::Percentage(15), Constraint::Percentage(70), Constraint::Percentage(15)])
-            .areas(f.area());
-    let [_, area, _] =
-        Layout::horizontal([Constraint::Percentage(10), Constraint::Percentage(80), Constraint::Percentage(10)])
-            .areas(area);
-    let request = &asking.request;
-    let mut lines: Vec<Line> =
-        tools::details(request, &asking.state, now).lines().map(|l| Line::raw(l.to_owned())).collect();
-    if asking.state != State::Pending {
-        lines.push(Line::raw(format!("settled  {}", how(&asking.state, &request.ant))));
-    }
-    lines.push(Line::raw(""));
-    let id = tools::qualified(request);
-    let prompt = Style::new().fg(style::PENDING).bold();
-    if asking.storing {
-        lines.push(Line::styled("storing the decision…", prompt));
-    } else if asking.state == State::Pending {
-        let keys = keys(request).replace("Enter details", "Enter open its thread · Esc back");
-        lines.push(Line::styled(keys, prompt));
-    } else {
-        lines.push(Line::styled("answered already · Enter open its thread · Esc back", prompt));
-    }
-    f.render_widget(Clear, area);
-    let block = Block::bordered().title(format!(" Tool request {id} ")).border_style(Style::new().fg(style::PENDING));
-    f.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), area);
+    full::draw(f, asking, now);
 }
 
 /// `text` in at most `width` characters, an ellipsis ending it when cut.
@@ -367,18 +400,18 @@ mod tests {
         assert_eq!(cards(&m.data, Some(&push.thread_id), at(10)).len(), 1);
         assert_eq!(cards(&m.data, None, at(200)).len(), 1, "a settled card goes after a while");
 
-        let pending = text(&lines(shown[0], None, true, at(10), 80));
+        let pending = text(&lines(shown[0], None, true, at(10), (80, CARD_LINES)));
         assert_eq!(pending[0], "execute: git push");
         assert!(
             pending[1].starts_with("a allow · r reject · n reject with a note · Enter details · expires in "),
             "{pending:?}"
         );
-        let narrow = text(&lines(shown[0], None, true, at(10), 60));
+        let narrow = text(&lines(shown[0], None, true, at(10), (60, CARD_LINES)));
         assert_eq!(narrow[1], "a allow · r reject · n reject with a note · expires in 0s", "the last hints go whole");
-        let settled = text(&lines(shown[1], None, false, at(10), 60));
+        let settled = text(&lines(shown[1], None, false, at(10), (60, CARD_LINES)));
         assert!(settled[1].starts_with("rejected by bob at "), "{settled:?}");
         let asking = Asking::decide(push, Verdict::AllowOnce).unwrap();
-        assert_eq!(text(&lines(shown[0], Some(&asking), true, at(10), 60))[1], "storing the decision…");
+        assert_eq!(text(&lines(shown[0], Some(&asking), true, at(10), (60, CARD_LINES)))[1], "storing the decision…");
     }
 
     #[test]
@@ -387,14 +420,17 @@ mod tests {
         let push = request("dev-a", "git push", vec![Verdict::AllowOnce, Verdict::AllowAlways])
             .labelled([(Verdict::AllowAlways, always.to_owned())].into());
         let card = Card { request: &push, settled: None };
-        let shown = text(&lines(card, None, true, at(10), 80));
+        let shown = text(&lines(card, None, true, at(10), (80, CARD_LINES)));
         assert_eq!(shown[1], format!("A always: {always}"), "{shown:?}");
         assert!(shown[2].starts_with("a allow · A always · r reject"), "{shown:?}");
-        assert_eq!(text(&lines(card, None, true, at(10), 20))[1], "A always: Yes, and …");
+        assert_eq!(text(&lines(card, None, true, at(10), (20, CARD_LINES)))[1], "A always: Yes, and …");
         let full = tools::details(&push, &State::Pending, at(10));
         assert!(full.contains(&format!("\nalways   {always}\n")), "{full}");
 
         let expired = Card { request: &push, settled: Some(&State::Expired) };
-        assert!(!text(&lines(expired, None, false, at(10), 80)).iter().any(|l| l.contains(always)), "settled");
+        assert!(
+            !text(&lines(expired, None, false, at(10), (80, CARD_LINES))).iter().any(|l| l.contains(always)),
+            "settled"
+        );
     }
 }

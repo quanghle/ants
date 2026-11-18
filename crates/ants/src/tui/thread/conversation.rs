@@ -192,6 +192,8 @@ pub(super) struct Shown<'a> {
     pub(super) marked: Option<(u64, usize)>,
     /// Where the images drawn go among the lines.
     pub(super) placed: RefCell<Vec<images::Placed>>,
+    /// The message whose card shows under the conversation, by its sequence: the conversation gives it one line.
+    pub(super) carded: Option<u64>,
 }
 
 /// Whether message `id` was withdrawn: here, or as the daemon's notice answering it among `entries` tells.
@@ -255,6 +257,7 @@ impl Shown<'_> {
                 lines.push(self.stamped(Line::from(Span::styled(said, style::dim())), end.at));
             }
             Item::Message(e) if e.notice.is_some() => self.notice(lines, e, first, rest),
+            Item::Message(e) if self.carded == Some(e.seq) => self.carded(lines, e, entries, first, row.depth == 0),
             Item::Turn(turn) => self.turn(lines, turn, first, rest),
             Item::Message(e) if row.depth == 0 => self.block(lines, e, entries),
             Item::Message(e) => self.nested(lines, e, entries, first, rest),
@@ -321,6 +324,19 @@ impl Shown<'_> {
         lines.extend(text(e, entries, self.width.saturating_sub(2)).into_iter().map(|line| indented("  ", line)));
         self.attachments(lines, e, "  ");
         lines.extend(self.reactions(e).map(|line| indented("  ", line)));
+    }
+
+    /// A message whose card shows under the conversation: its heading after `first`, at the `top` level or not, and its
+    /// text's first line, cut, on one line.
+    fn carded(&self, lines: &mut Vec<Line<'static>>, e: &Entry, entries: &[Entry], first: &str, top: bool) {
+        const BELOW: &str = " · card below";
+        let mut head = Line::raw(first.to_owned());
+        head.spans.extend(self.heading(e, entries, top));
+        let text = e.text.lines().find(|l| !l.trim().is_empty()).unwrap_or_default();
+        let room = self.width.saturating_sub(head.width() + 2 + BELOW.len() + STAMP);
+        head.spans.push(Span::raw(format!("  {}", cut(text, room))));
+        head.spans.push(Span::styled(BELOW, style::dim()));
+        lines.push(self.stamped(head, e.stored_at));
     }
 
     /// A message nested under another: its heading after `first` and its time, and its text on the heading's line

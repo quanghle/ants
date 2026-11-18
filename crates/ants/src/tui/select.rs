@@ -1,6 +1,7 @@
 //! A list's selection kept on the same item as items arrive, leave or move: by the item's key, and once the item
 //! leaves on the item now where it was. Drawing the list pins the item drawn selected, so a key acts on the item the
-//! human saw selected even when items arrived meanwhile.
+//! human saw selected even when items arrived meanwhile. A selection may follow the top item instead, until a key
+//! moves it.
 
 use std::cell::{Cell, RefCell};
 
@@ -10,11 +11,20 @@ pub struct Selection<K> {
     key: RefCell<Option<K>>,
     /// Where it was last seen.
     at: Cell<usize>,
+    /// Whether drawing selects the top item, no key having moved the selection yet.
+    top: bool,
 }
 
 impl<K> Default for Selection<K> {
     fn default() -> Self {
-        Self { key: RefCell::new(None), at: Cell::new(0) }
+        Self { key: RefCell::new(None), at: Cell::new(0), top: false }
+    }
+}
+
+impl<K> Selection<K> {
+    /// A selection on the top item, as drawn, until a key moves it.
+    pub fn on_top() -> Self {
+        Self { top: true, ..Self::default() }
     }
 }
 
@@ -29,8 +39,19 @@ impl<K: PartialEq + Clone> Selection<K> {
         at
     }
 
+    /// Where the selected item is among `keys` as they are drawn: the top one, while the selection follows it, else as
+    /// [`Self::at`] says.
+    pub fn drawn(&self, keys: &[K]) -> usize {
+        if !self.top {
+            return self.at(keys);
+        }
+        self.pin(keys, 0);
+        0
+    }
+
     /// Select the item at `to` among `keys`, the last one at most.
     pub fn select(&mut self, keys: &[K], to: usize) {
+        self.top = false;
         if let Some(last) = keys.len().checked_sub(1) {
             self.pin(keys, to.min(last));
         }
@@ -58,5 +79,15 @@ mod tests {
         selection.select(&["x", "a", "b", "d"], usize::MAX);
         assert_eq!(selection.at(&["x", "a"]), 1, "the last item at most");
         assert_eq!(selection.at(&[]), 0);
+    }
+
+    #[test]
+    fn a_selection_on_top_follows_the_top_item_until_a_key_moves_it() {
+        let mut selection = Selection::on_top();
+        assert_eq!(selection.drawn(&["b", "c"]), 0);
+        assert_eq!(selection.drawn(&["a", "b", "c"]), 0, "the item arrived above drawn selected");
+        assert_eq!(selection.at(&["x", "a", "b", "c"]), 1, "a key acts on the item drawn selected");
+        selection.select(&["a", "b", "c"], 0);
+        assert_eq!(selection.drawn(&["x", "a", "b", "c"]), 1, "moved, it stays with its item");
     }
 }
