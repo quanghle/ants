@@ -27,9 +27,9 @@ A trail is a `.py` file whose first statement is a literal `meta`: a `name` of l
 taking one state argument, the first entered at start, with the top level then holding only `meta`, imports,
 definitions and constants). The meta is read without running the script; a file without it
 is refused. A trail is saved under a name of 1-64 lowercase letters, digits and `-`: its meta's `name` when it is one,
-else the name `ants trail save --name` gives. Without `waypoints`, the script runs top to bottom with `await` allowed
-at the top level, and the value of its last expression,
-which must be JSON (None, bools, numbers, strings, lists, dicts with string keys), is the run's result.
+else the name `ants trail save --name` gives. The script runs top to bottom with `await` allowed at the top level, and
+the value of its last expression, which must be JSON (None, bools, numbers, strings, lists, dicts with string keys),
+is the run's result.
 
 ```python
 meta = {
@@ -52,6 +52,37 @@ Args:
 {"repo": "/src/ants", "path": "crates/ants-trail/src/run.rs"}
 ```
 
+A meta may also list `waypoints`, at most 32: the places a run enters the trail ([Routes](#routes)). Each names a
+top-level `async def <name>(args)`, which takes the leg's input and returns the leg's result. A run starts such a
+trail at its first waypoint, and a `goto()` enters it at any. Its top level then holds only the meta, imports,
+definitions and constants, its steps in its waypoints: a top-level `await`, `if`, loop or expression is refused. A
+waypoint is a function too, which another waypoint may await without leaving its leg.
+
+```python
+meta = {
+    "name": "greet",
+    "description": "Greets a new contributor, or welcomes one back",
+    "phases": [],
+    "waypoints": ["start", "welcome"],
+}
+
+
+async def start(args):
+    if args.get("returning"):
+        await goto(at="welcome", state=args)
+    return await agent(f"Greet {args['who']}, a new contributor to {args['repo']}, in one sentence.", label="greet")
+
+
+async def welcome(args):
+    return await agent(f"Welcome {args['who']} back to {args['repo']} in one sentence.", label="welcome")
+```
+
+Args:
+
+```json
+{"repo": "/src/ants", "who": "ada", "returning": true}
+```
+
 ## The API
 
 Nothing else of the host is reachable: these names are defined before the script runs.
@@ -67,29 +98,35 @@ Nothing else of the host is reachable: these names are defined before the script
   `description`), and optionally a `header`, `multi_select` (default False) and `free_text` (default True). Returns the
   answer as text: for one question, the label picked (labels joined by `, ` with `multi_select`) or the text typed; for
   several, one line per question, `title: answer`. Set `"free_text": False` to compare the answer with a label.
-- `await trail(name, args=None)`: one step answered by a child run of saved trail `name` on a spin-off thread with the
-  same conductor, owner and origin, sharing the root run's limits and returning its JSON result. Refuses an unknown
-  trail, `args` over 64 KiB, or a trail on the calling run's ancestor chain.
+- `await trail(name, args=None)`: one step, answered by a child run of the saved trail `name`, started at its start
+  with `args` as its input, on a thread of its own spun off the run's, for the run's owner; returns its result. Its
+  steps and turns count against the run's limits. A trail already running among the calling runs is refused: no trail
+  calls itself, directly or through others. A child run that fails raises `RuntimeError: trail <name> failed: …`.
+- `await goto(trail=None, at=None, state=None)`: ends the run's leg here and goes on in the saved trail `trail` (the
+  leg's own script without it), at its waypoint `at` (its start, its first waypoint, without it), with `state` as
+  `args`. It never returns: a goto taken ends the leg, and one refused raises `RuntimeError` naming why
+  ([Routes](#routes)).
 - `phase(title)`: starts a phase, named as in meta's `phases`, shown as a note on the run's thread.
 - `log(text)`: a note on the run's thread; `print()` writes notes too. Neither waits.
-- `args`: the JSON value the run was started with (None without).
+- `args`: the leg's input (None without): the JSON value the run was started with on its first leg, the goto's
+  `state` on later ones.
 - `await parallel(*coroutines)`: runs the coroutines at once and returns their results in argument order once every
   one has finished: a barrier.
 - `await pipeline(items, *stages)`: passes each item through `stages`, async functions of one argument, each item
   moving on to its next stage as soon as its own step is answered, with no barrier between stages; returns the last
   stage's results in item order.
 
-Only `agent()`, `human()` and `trail()` suspend a run. All three are coroutine functions: await them, or hand their
-coroutines to `parallel`. Their arguments must be JSON: anything else raises TypeError.
+Only `agent()`, `human()`, `trail()` and `goto()` suspend a run. They are coroutine functions: await them, or hand
+their coroutines to `parallel`. Their arguments must be JSON: anything else raises TypeError.
 
 ### Errors
 
 A step that fails (an `ant=` naming a human or no valid ant name, a `capability=` no ant but the conductor
 advertises, malformed questions, a reply still off its schema after two retries, the step's message withdrawn from its
 recipient's queue, an unknown trail, ancestor cycle or failed child run in `trail()`, the run's step limit reached)
-raises `RuntimeError` with the reason where the step is awaited. A
-step to an ant no daemon serves raises nothing: it waits in that ant's queue, as any message does, until the run ends
-or a human stops it. An exception the script does not catch fails the run with
+raises `RuntimeError` with the reason where the step is awaited. A step to an ant no daemon serves raises nothing: it
+waits in that ant's queue, as any message does, until the run ends or a human stops it. An exception the script does
+not catch fails the run with
 its traceback, lines numbered as in the file. Inside `parallel` or `pipeline`, an uncaught exception of one coroutine
 fails the whole gather, and the run abandons the other steps. Catch a step's error inside the per-item coroutine when
 the trail can go on without that item, and log what was lost.
@@ -99,8 +136,8 @@ the trail can go on without that item, and log what was lost.
 - No files, environment, network or subprocesses: `open()` raises PermissionError, `os.getenv()` RuntimeError, and
   modules Monty does not bundle (`socket`, `subprocess`, third-party packages) are not found. Monty bundles `json`,
   `re`, `math`, `datetime`, `random`, `collections`, `itertools`, `functools`, `dataclasses` and a few more.
-- The clock and `random` are fixed per run: `datetime.datetime.now()` returns the run's start time on every call,
-  and `random` is seeded once per run, so a replay of the run makes the same calls. `time.sleep()` raises: to wait,
+- The clock and `random` are fixed per leg: `datetime.datetime.now()` returns the leg's start time on every call,
+  and `random` is seeded once per leg, so a replay of the leg makes the same calls. `time.sleep()` raises: to wait,
   ask a step to.
 - No type checking: annotations are not checked, and a mistake surfaces only when its line runs. Try a trail on a
   small input first.
@@ -119,9 +156,32 @@ the trail can go on without that item, and log what was lost.
 | Nested calls | 200 | `RecursionError` in the script |
 
 A run's limits are set when it starts, and each step also counts against the spending caps of the ant that answers
-it. A run failed on a limit continues from its stored record with `ants trail resume`. Keep the script's own work
-small: only the compute between steps (parsing, sorting, building prompts) counts against the compute limit, and
-large variables (whole files, long lists of replies) count against the session limit at every suspension.
+it. A run's legs share its limits and what it spent, and a goto spends nothing. A child run's steps and turns count
+against the limits of its root run, the one no `trail()` started, and its wall time ends with its parent's. A run
+failed on a limit continues from its stored record with `ants trail resume`. Keep the script's own work small: only
+the compute between steps (parsing, sorting, building prompts) counts against the compute limit, and large variables
+(whole files, long lists of replies) count against the session limit at every suspension.
+
+## Routes
+
+A run's legs are its route: the first enters the trail the run was started with, each `goto()` the next, and the leg
+whose script ends gives the run's result. On a goto, the leg's suspended state is dropped with every step it still
+waits on (a goto's `parallel()` siblings too), and its child runs stop: the next leg knows only its `state`, at most
+64 KiB of JSON. The run keeps its id, thread, owner, limits and spending. A goto is no step: it sends no message.
+
+The conductor refuses a goto it cannot follow, raising `RuntimeError` where it is awaited: to a trail not saved, to a
+waypoint the trail lacks, to anything but a saved trail for a run a webhook or schedule started, and to a trail at a
+waypoint the run entered before. A run enters each waypoint of each trail once, so no route cycles. Catch the error to
+take another exit, such as asking a human:
+
+```text
+RuntimeError: the run entered trail hotfix at waypoint patch before; a run enters a trail at each waypoint only once
+```
+
+A goto without `trail` goes on in the leg's own script as it was when the leg started; a trail a goto names is read as
+saved then, so saving a trail anew changes only the legs started after. The run's thread notes each goto taken with
+the route so far (`route: triage@classify -> fix@reproduce`), its end message names the route, and
+`ants trail show` lists the legs and the child runs.
 
 ## Patterns
 
@@ -141,12 +201,20 @@ large variables (whole files, long lists of replies) count against the session l
   question and the shape of the answer in the prompt itself, and pass earlier results into it as text.
 - **Handle a step's error.** Wrap a step in `try`/`except RuntimeError` when the run can go on without it; let it
   raise when nothing after it makes sense.
+- **Hand on, or take a detour.** `goto()` hands the run on for good, to another trail or to a later waypoint of its
+  own; `trail()` takes a detour that comes back with a result. Keep a shared verifier or approval in a small trail of
+  its own, for any trail to call.
+- **Loops inside one waypoint.** A run enters a waypoint once: a fix-and-review loop is a `for` loop in one waypoint,
+  under a round cap, not gotos back and forth.
+- **Carry the state.** A goto's `state` is all the next leg knows: pass on the repository, the item and the earlier
+  results it needs.
 - **Budget the steps.** Count the steps the input implies (files × steps per file) against the step limit before
   starting a large run; a run needing more takes a higher limit.
 
 ## Examples
 
-Each example below is a complete trail, run with the args after it by the repository's tests.
+Each example below is a complete trail, run with the args after it by the repository's tests. A `goto()` or
+`trail()` of an example leads to the example of that name, as it would to a saved trail.
 
 ### Review every changed file, with adversarial verify
 
@@ -433,6 +501,560 @@ Args:
 {"repo": "/src/ants", "change": "rename the retired term persona to ant in docs/", "ant": "dev-a"}
 ```
 
+### Triage an issue, through a fix and back
+
+`triage` classifies an issue. A bug goes on in `fix`, which reproduces it, patches it under review and rejoins
+`triage` at its `report` waypoint: `triage@classify -> fix@reproduce -> fix@patch -> triage@report`. A question stays
+in its leg, `classify` awaiting `report` as a function. The patch-review loop is a `for` loop inside `patch`, under a
+round cap.
+
+```python
+meta = {
+    "name": "triage",
+    "description": "Classifies an issue, routes a bug to the fix trail, answers a question, and reports on the issue",
+    "phases": ["classify", "report"],
+    "waypoints": ["classify", "report"],
+}
+
+ISSUE = {
+    "type": "object",
+    "properties": {"kind": {"type": "string", "enum": ["bug", "question"]}, "summary": {"type": "string"}},
+    "required": ["kind", "summary"],
+}
+
+
+async def classify(args):
+    phase("classify")
+    issue = await agent(
+        f"Read issue {args['issue']} of the repository at {args['repo']}. Classify it as a bug (the code "
+        "misbehaves) or a question (how to use it), and summarize it in one sentence.",
+        schema=ISSUE,
+        label="classify",
+    )
+    state = {**args, "summary": issue["summary"]}
+    if issue["kind"] == "bug":
+        await goto("fix", state=state)
+    answer = await agent(
+        f"Answer this question from the docs of the repository at {args['repo']}: {issue['summary']}",
+        label="answer",
+    )
+    return await report({**state, "outcome": answer})
+
+
+async def report(args):
+    phase("report")
+    await agent(
+        f"Comment on issue {args['issue']} of the repository at {args['repo']} with this outcome, and close the "
+        f"issue if the outcome settles it:\n{args['outcome']}",
+        label="report",
+    )
+    return {"issue": args["issue"], "outcome": args["outcome"]}
+```
+
+Args:
+
+```json
+{"repo": "/src/app", "issue": 413}
+```
+
+```python
+meta = {
+    "name": "fix",
+    "description": "Reproduces a bug, patches it under review, and reports back to the triage trail",
+    "phases": ["reproduce", "patch"],
+    "waypoints": ["reproduce", "patch"],
+}
+
+REPRODUCED = {
+    "type": "object",
+    "properties": {"reproduced": {"type": "boolean"}, "test": {"type": "string"}},
+    "required": ["reproduced", "test"],
+}
+
+REVIEW = {
+    "type": "object",
+    "properties": {"approved": {"type": "boolean"}, "comments": {"type": "string"}},
+    "required": ["approved", "comments"],
+}
+
+
+async def reproduce(args):
+    phase("reproduce")
+    found = await agent(
+        f"Write a failing test that reproduces this bug, issue {args['issue']} of the repository at {args['repo']}: "
+        f"{args['summary']}\nReply with whether the test reproduced it, and the test's name.",
+        capability="rust",
+        schema=REPRODUCED,
+        label="reproduce",
+    )
+    if not found["reproduced"]:
+        outcome = "Could not reproduce the bug; more detail is needed."
+        await goto("triage", at="report", state={**args, "outcome": outcome})
+    await goto(at="patch", state={**args, "test": found["test"]})
+
+
+async def patch(args):
+    phase("patch")
+    comments = "none yet"
+    for n in range(1, 4):
+        branch = await agent(
+            f"Fix issue {args['issue']} of the repository at {args['repo']} on branch fix-{args['issue']}, so that "
+            f"test {args['test']} passes: {args['summary']}\nAddress these review comments: {comments}\n"
+            "Commit, and reply with the branch only.",
+            capability="rust",
+            label=f"patch {n}",
+        )
+        review = await agent(
+            f"Review branch {branch} of the repository at {args['repo']}, a fix of issue {args['issue']}. "
+            "Approve it only if it fixes the bug without breaking anything else.",
+            capability="review",
+            schema=REVIEW,
+            label=f"review {n}",
+        )
+        if review["approved"]:
+            await goto("triage", at="report", state={**args, "outcome": f"Fixed on branch {branch}."})
+        comments = review["comments"]
+    log(f"no approval after 3 rounds: {comments}")
+    outcome = f"Not fixed yet; the review still asks: {comments}"
+    await goto("triage", at="report", state={**args, "outcome": outcome})
+```
+
+Args:
+
+```json
+{"repo": "/src/app", "issue": 413, "summary": "A draft saved twice is duplicated."}
+```
+
+### Review with a security detour
+
+`review` lists a pull request's findings. When one bears on security, the run goes on in `security-audit`, which
+models the threats, has each checked by the shared `verify` trail and rejoins `review` at its `verdict` waypoint:
+`review@findings -> security-audit@model -> security-audit@confirm -> review@verdict`. The audit runs once: a second
+would enter `security-audit@model` again, which the run refuses.
+
+```python
+meta = {
+    "name": "review",
+    "description": "Reviews a pull request, detouring through a security audit when a finding bears on security",
+    "phases": ["findings", "verdict"],
+    "waypoints": ["findings", "verdict"],
+}
+
+FINDINGS = {
+    "type": "object",
+    "properties": {
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"issue": {"type": "string"}, "security": {"type": "boolean"}},
+                "required": ["issue", "security"],
+            },
+        },
+    },
+    "required": ["findings"],
+}
+
+
+async def findings(args):
+    phase("findings")
+    found = await agent(
+        f"Review pull request {args['pr']} of the repository at {args['repo']}. Report each defect in one sentence, "
+        "and whether it bears on security: authentication, injection, secrets or permissions.",
+        capability="review",
+        schema=FINDINGS,
+        label="findings",
+    )
+    issues = [f["issue"] for f in found["findings"]]
+    if any(f["security"] for f in found["findings"]):
+        await goto("security-audit", state={**args, "findings": issues})
+    return await verdict({**args, "findings": issues, "threats": []})
+
+
+async def verdict(args):
+    phase("verdict")
+    listed = "\n".join(f"- {issue}" for issue in args["findings"]) or "none"
+    threats = "\n".join(f"- {t['claim']}: {t['reason']}" for t in args["threats"]) or "none"
+    await agent(
+        f"Post a review of pull request {args['pr']} of the repository at {args['repo']}: request changes if a "
+        f"finding or threat below stands, else approve.\nFindings:\n{listed}\nConfirmed threats:\n{threats}",
+        capability="review",
+        label="verdict",
+    )
+    return {"pr": args["pr"], "findings": args["findings"], "threats": args["threats"]}
+```
+
+Args:
+
+```json
+{"repo": "/src/app", "pr": 80}
+```
+
+```python
+meta = {
+    "name": "security-audit",
+    "description": "Models the threats of a review's findings, verifies each, and returns to the review's verdict",
+    "phases": ["threat model", "confirm"],
+    "waypoints": ["model", "confirm"],
+}
+
+THREATS = {
+    "type": "object",
+    "properties": {"threats": {"type": "array", "items": {"type": "string"}}},
+    "required": ["threats"],
+}
+
+
+async def model(args):
+    phase("threat model")
+    listed = "\n".join(f"- {issue}" for issue in args["findings"])
+    found = await agent(
+        f"Threat-model pull request {args['pr']} of the repository at {args['repo']} given these review findings:\n"
+        f"{listed}\nReply with each concrete threat in one sentence naming the code at risk.",
+        capability="security",
+        schema=THREATS,
+        label="threat model",
+    )
+    await goto(at="confirm", state={**args, "threats": found["threats"]})
+
+
+async def check(repo, threat):
+    try:
+        return await trail("verify", {"repo": repo, "claim": threat})
+    except RuntimeError as e:
+        log(f"unverified, kept: {threat}: {e}")
+        return {"claim": threat, "real": True, "reason": "not verified"}
+
+
+async def confirm(args):
+    phase("confirm")
+    verdicts = await parallel(*[check(args["repo"], threat) for threat in args["threats"]])
+    confirmed = [v for v in verdicts if v["real"]]
+    log(f"{len(confirmed)} of {len(verdicts)} threats confirmed")
+    await goto("review", at="verdict", state={**args, "threats": confirmed})
+```
+
+Args:
+
+```json
+{"repo": "/src/app", "pr": 80, "findings": ["The session token is compared with ==, not in constant time."]}
+```
+
+### A shared verifier
+
+`verify` is one skeptic step, a trail of its own so that any trail verifies a claim with
+`await trail("verify", {"repo": ..., "claim": ...})`, each call a child run on its own thread.
+
+```python
+meta = {
+    "name": "verify",
+    "description": "Has a skeptic try to refute one claim about a repository, and says whether it holds",
+    "phases": [],
+}
+
+VERDICT = {
+    "type": "object",
+    "properties": {"real": {"type": "boolean"}, "reason": {"type": "string"}},
+    "required": ["real", "reason"],
+}
+
+verdict = await agent(
+    f"Someone claims this about the repository at {args['repo']}: {args['claim']}\n"
+    "Read the code and try to refute the claim. Set real to true only if it holds, and give the reason.",
+    capability="review",
+    schema=VERDICT,
+    label="verify",
+)
+{"claim": args["claim"], "real": verdict["real"], "reason": verdict["reason"]}
+```
+
+Args:
+
+```json
+{"repo": "/src/app", "claim": "src/auth.rs compares the session token with ==, leaking its length in time."}
+```
+
+### Upgrade a dependency
+
+`upgrade` bumps a dependency, migrates the code only when the bump breaks the build, then runs the tests:
+`upgrade@bump -> upgrade@migrate -> upgrade@test`, or `upgrade@bump -> upgrade@test`. A license change detours
+through `license-review`, a trail asking the run's owner, whose answer comes back to the step.
+
+```python
+meta = {
+    "name": "upgrade",
+    "description": "Upgrades a dependency: bumps it, migrates the code when the bump breaks the build, then tests",
+    "phases": ["bump", "migrate", "test"],
+    "waypoints": ["bump", "migrate", "test"],
+}
+
+BUMP = {
+    "type": "object",
+    "properties": {"builds": {"type": "boolean"}, "license": {"type": "string"}, "errors": {"type": "string"}},
+    "required": ["builds", "license", "errors"],
+}
+
+TESTS = {
+    "type": "object",
+    "properties": {"passed": {"type": "boolean"}, "failures": {"type": "string"}},
+    "required": ["passed", "failures"],
+}
+
+
+async def bump(args):
+    phase("bump")
+    bumped = await agent(
+        f"On a new branch of the repository at {args['repo']}, bump {args['crate']} to {args['version']} and "
+        "build. Reply with whether it builds, the new version's license (an SPDX id) and the build errors.",
+        ant=args["dev"],
+        schema=BUMP,
+        label="bump",
+    )
+    if bumped["license"] != args["license"]:
+        review = {"crate": args["crate"], "from": args["license"], "to": bumped["license"]}
+        if await trail("license-review", review) != "accept":
+            return {"upgraded": False, "why": f"license {bumped['license']} not accepted"}
+    state = {**args, "errors": bumped["errors"]}
+    if not bumped["builds"]:
+        await goto(at="migrate", state=state)
+    await goto(at="test", state=state)
+
+
+async def migrate(args):
+    phase("migrate")
+    await agent(
+        f"Read the changelog of {args['crate']} {args['version']}, and migrate the code of the repository at "
+        f"{args['repo']} on its upgrade branch until it builds. The build failed with:\n{args['errors']}",
+        ant=args["dev"],
+        label="migrate",
+    )
+    await goto(at="test", state=args)
+
+
+async def test(args):
+    phase("test")
+    tested = await agent(
+        f"Run the tests of the repository at {args['repo']} on the branch upgrading {args['crate']} to "
+        f"{args['version']}. Reply with whether they pass and the failures.",
+        ant=args["dev"],
+        schema=TESTS,
+        label="test",
+    )
+    return {"upgraded": tested["passed"], "failures": tested["failures"]}
+```
+
+Args:
+
+```json
+{"repo": "/src/app", "crate": "serde_yaml", "version": "0.10.0", "license": "MIT", "dev": "dev-a"}
+```
+
+```python
+meta = {
+    "name": "license-review",
+    "description": "Asks the run's owner whether a dependency's new license is acceptable",
+    "phases": [],
+}
+
+answer = await human([
+    {
+        "question": f"{args['crate']} moves from the {args['from']} license to {args['to']}. Accept it?",
+        "header": "License",
+        "options": [
+            {"label": "accept", "description": "the upgrade goes on"},
+            {"label": "reject", "description": "the upgrade stops"},
+        ],
+        "free_text": False,
+    }
+])
+answer
+```
+
+Args:
+
+```json
+{"crate": "serde_yaml", "from": "MIT", "to": "BUSL-1.1"}
+```
+
+### Handle an incident
+
+`incident` diagnoses an incident. A bad deploy goes on in `rollback`, which asks the run's owner before rolling back
+and rejoins `incident` at its `postmortem` waypoint: `incident@diagnose -> rollback -> incident@postmortem`. A bad
+config change is reverted within the leg, which then goes on at `postmortem` too.
+
+```python
+meta = {
+    "name": "incident",
+    "description": "Diagnoses an incident, rolls back a bad deploy or reverts a bad config, then writes the postmortem",
+    "phases": ["diagnose", "postmortem"],
+    "waypoints": ["diagnose", "postmortem"],
+}
+
+CAUSE = {
+    "type": "object",
+    "properties": {
+        "cause": {"type": "string", "enum": ["deploy", "config", "unknown"]},
+        "detail": {"type": "string"},
+    },
+    "required": ["cause", "detail"],
+}
+
+
+async def diagnose(args):
+    phase("diagnose")
+    found = await agent(
+        f"Diagnose this incident of service {args['service']}: {args['alert']}\nSay whether the last deploy, a "
+        "config change or something else caused it, and what points to it.",
+        capability="ops",
+        schema=CAUSE,
+        label="diagnose",
+    )
+    state = {**args, "cause": found["cause"], "detail": found["detail"]}
+    if found["cause"] == "deploy":
+        await goto("rollback", state=state)
+    action = "none: the cause is unknown"
+    if found["cause"] == "config":
+        action = await agent(
+            f"Revert the config change of service {args['service']} that caused this: {found['detail']}\n"
+            "Reply with what was reverted.",
+            capability="ops",
+            label="revert config",
+        )
+    await goto(at="postmortem", state={**state, "action": action})
+
+
+async def postmortem(args):
+    phase("postmortem")
+    text = await agent(
+        f"Write the postmortem of the incident of service {args['service']}: alert {args['alert']}, cause "
+        f"{args['cause']} ({args['detail']}), action taken: {args['action']}. Reply with its text.",
+        label="postmortem",
+    )
+    return {"cause": args["cause"], "action": args["action"], "postmortem": text}
+```
+
+Args:
+
+```json
+{"service": "checkout", "alert": "error rate over 5% for 7 minutes since 14:02"}
+```
+
+```python
+meta = {
+    "name": "rollback",
+    "description": "Rolls a service back to its previous release once the run's owner approves",
+    "phases": ["approve", "roll back"],
+}
+
+phase("approve")
+choice = await human([
+    {
+        "question": f"Roll {args['service']} back to its previous release? The last deploy caused: {args['detail']}",
+        "header": "Rollback",
+        "options": [
+            {"label": "roll back", "description": "a step rolls the service back now"},
+            {"label": "hold", "description": "nothing changes, and the postmortem says so"},
+        ],
+        "free_text": False,
+    }
+])
+action = "none: the rollback was held"
+if choice == "roll back":
+    phase("roll back")
+    action = await agent(
+        f"Roll service {args['service']} back to its previous release and check it is healthy; "
+        "reply with the release it runs now.",
+        capability="ops",
+        label="roll back",
+    )
+await goto("incident", at="postmortem", state={**args, "action": action})
+```
+
+Args:
+
+```json
+{
+  "service": "checkout",
+  "alert": "error rate over 5% for 7 minutes since 14:02",
+  "cause": "deploy",
+  "detail": "release 2024.6.3 at 14:00 changed the payment client"
+}
+```
+
+### A loop the run refuses
+
+`hotfix` patches a bug, then checks the patch at its `check` waypoint. A rejected patch cannot go back to `patch`, a
+waypoint the run entered already: the goto raises, and `check` asks a human instead. A loop meant to retry belongs in
+one waypoint, as `fix`'s `patch` above.
+
+```python
+meta = {
+    "name": "hotfix",
+    "description": "Patches a production bug and has the patch checked, asking a human when the check rejects it",
+    "phases": ["patch", "check"],
+    "waypoints": ["patch", "check"],
+}
+
+CHECK = {
+    "type": "object",
+    "properties": {"approved": {"type": "boolean"}, "comments": {"type": "string"}},
+    "required": ["approved", "comments"],
+}
+
+
+async def patch(args):
+    phase("patch")
+    branch = await agent(
+        f"Patch this production bug of the repository at {args['repo']} on a new branch off {args['release']}: "
+        f"{args['bug']}\nAddress these review comments, if any: {args.get('comments', 'none')}\n"
+        "Commit, and reply with the branch only.",
+        ant=args["dev"],
+        label="patch",
+    )
+    await goto(at="check", state={**args, "branch": branch})
+
+
+async def check(args):
+    phase("check")
+    review = await agent(
+        f"Check branch {args['branch']} of the repository at {args['repo']}, a hotfix of: {args['bug']}\n"
+        "Approve it only if it fixes the bug and is safe to ship today.",
+        ant=args["reviewer"],
+        schema=CHECK,
+        label="check",
+    )
+    if review["approved"]:
+        return {"branch": args["branch"], "approved": True}
+    try:
+        await goto(at="patch", state={**args, "comments": review["comments"]})
+    except RuntimeError as e:
+        log(f"no second patch: {e}")
+    choice = await human([
+        {
+            "question": f"The check rejected hotfix branch {args['branch']}: {review['comments']}",
+            "header": "Hotfix",
+            "options": [
+                {"label": "take over", "description": "a human finishes the branch"},
+                {"label": "drop", "description": "the fix waits for the next release"},
+            ],
+            "free_text": False,
+        }
+    ])
+    return {"branch": args["branch"], "approved": False, "decision": choice}
+```
+
+Args:
+
+```json
+{
+  "repo": "/src/app",
+  "release": "release-2024.6",
+  "bug": "Checkout fails for carts holding a gift card.",
+  "dev": "dev-a",
+  "reviewer": "dev-b"
+}
+```
+
 ## Running a trail
 
 A human starts a run with `ants trail run`, which shows what the run may spend before it starts and takes the limit
@@ -443,7 +1065,7 @@ result; a `[[schedule]]` entry with `trail =` (and `args =`, a table) starts a s
 those flags. `trail_status` tells how a run the ant conducts stands (state, steps and turns spent of its limits, the
 steps it waits on, the result), and `stop_trail` stops one, which only a human resumes. Saved trails are colony-wide,
 put and removed only by humans; a conductor's daemon also reads `~/.ants/trails/<name>.py` on its machine, the colony's
-trail winning a name both have. A run started on a thread a webhook or schedule started runs only a saved trail, its
+trail winning a name both have. A run started on a thread a webhook or schedule started runs only saved trails, its
 steps narrowed to read-only tools. `ants trail runs`, `show`, `stop` and `resume` manage runs, and an admin's `ants ant
 stop-trail` and `resume-trail` stop and resume one by admin order, which waits for a conductor's daemon while it is
 away; see the repository's `docs/trails.md`.

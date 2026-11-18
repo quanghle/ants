@@ -1,7 +1,7 @@
 use ants_proto::provider::{Origin, Starter};
 use ants_proto::{
-    ColonyEntry, PendingCall, Role, RunId, RunLimit, RunState, TRAIL_RUNS_BUCKET, ThreadId, TrailFunction, TrailLimits,
-    TrailRun, TrailSession, UserId, Uuid, trail_session_key,
+    ColonyEntry, PendingCall, Role, RunId, RunLimit, RunState, TRAIL_RUNS_BUCKET, ThreadId, TrailFunction, TrailLeg,
+    TrailLimits, TrailRun, TrailSession, UserId, Uuid, trail_session_key,
 };
 use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::json;
@@ -20,9 +20,15 @@ fn record(conductor: &str, state: RunState, hours: i64, now: DateTime<Utc>) -> T
     TrailRun {
         run: RunId::generate(),
         conductor: p(conductor),
-        trail: Some("deploy".parse().unwrap()),
-        script: "agent('build')\n".to_owned(),
-        args: serde_json::Value::Null,
+        route: vec![TrailLeg {
+            trail: Some("deploy".parse().unwrap()),
+            at: None,
+            script: "agent('build')\n".to_owned(),
+            args: serde_json::Value::Null,
+            first_call: 0,
+            started_at: now - TimeDelta::hours(hours),
+            steps: 0,
+        }],
         owner: Some(p("alice")),
         thread: ThreadId::generate(),
         parent: None,

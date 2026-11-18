@@ -13,7 +13,7 @@ use anyhow::{Result, anyhow};
 use async_nats::jetstream;
 use serde_json::Value;
 
-use super::runs::{gist, header_json, parse};
+use super::runs::{destination, entered, gist, header_json, parse};
 use crate::machines::latest_after;
 use crate::text::excerpt;
 
@@ -29,12 +29,18 @@ pub(super) struct Follower {
     sent: HashMap<u32, (Uuid, u32)>,
     queued: HashSet<u32>,
     answered: HashSet<u32>,
+    /// The legs of the run's route seen.
+    legs: usize,
 }
 
 impl Follower {
     /// The lines for the run's header: a new phase, or the run running again or waiting on humans.
     pub(super) fn header(&mut self, run: &TrailRun) -> Vec<String> {
         let mut lines = Vec::new();
+        for leg in run.route.iter().skip(self.legs.max(1)) {
+            lines.push(format!("went on to {}", entered(leg)));
+        }
+        self.legs = self.legs.max(run.route.len());
         if run.phase != self.phase {
             if let Some(phase) = &run.phase {
                 lines.push(format!("phase: {phase}"));
@@ -85,9 +91,12 @@ impl Follower {
         if !self.answered.insert(entry.call) {
             return None;
         }
-        Some(match &entry.answer {
-            CallAnswer::Ok(value) => format!("step {} answered: {}", entry.call, excerpt(&text(value), 200)),
-            CallAnswer::Error(error) => format!("step {} failed: {}", entry.call, excerpt(error, 200)),
+        Some(match (entry.function, &entry.answer) {
+            (TrailFunction::Goto, CallAnswer::Error(error)) => {
+                format!("call {} to go to {} refused: {}", entry.call, destination(&entry.args), excerpt(error, 200))
+            }
+            (_, CallAnswer::Ok(value)) => format!("step {} answered: {}", entry.call, excerpt(&text(value), 200)),
+            (_, CallAnswer::Error(error)) => format!("step {} failed: {}", entry.call, excerpt(error, 200)),
         })
     }
 }
@@ -100,6 +109,7 @@ fn sent(call: &PendingCall) -> String {
             Some(child) => format!("step {} runs {} as run {child}", call.call, gist(&call.args)),
             None => format!("step {} runs {}", call.call, gist(&call.args)),
         },
+        TrailFunction::Goto => format!("call {} goes to {}", call.call, destination(&call.args)),
     }
 }
 
@@ -144,7 +154,7 @@ async fn read(js: &jetstream::Context, key: &str, seqs: &mut (u64, u64)) -> Resu
 pub(super) async fn follow(js: &jetstream::Context, run: TrailRun, json: bool) -> Result<()> {
     let key = trail_run_key(&run.conductor, &run.run);
     if !json {
-        let trail = run.trail.as_ref().map_or_else(|| "an inline script".to_owned(), |t| format!("trail {t}"));
+        let trail = run.trail().map_or_else(|| "an inline script".to_owned(), |t| format!("trail {t}"));
         println!(
             "following run {} of {trail} on {} (interrupting stops the following, not the run)",
             run.run, run.conductor

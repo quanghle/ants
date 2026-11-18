@@ -175,6 +175,20 @@ fn a_trail_call_is_a_step_counted_against_the_limit() {
 }
 
 #[test]
+fn a_goto_is_a_call_past_the_step_limit_and_its_state_is_bounded() {
+    let script = "a = await agent('a')\ntry:\n    await goto('fix', state=a)\nexcept RuntimeError as e:\n    r = [str(e)]\ntry:\n    await goto(state='x' * 70000)\nexcept RuntimeError as e:\n    r.append(str(e))\nr\n";
+    let limits = Limits { steps: 1, ..Limits::default() };
+    let started = start(script, limits);
+    let call = calls(&started)[0].call;
+    let moved = resume_with(&started, &[(call, Answer::Ok(json!("A")))], limits, 1);
+    let goto = calls(&moved);
+    assert_eq!((goto[0].function, &goto[0].args), (Function::Goto, &json!({"trail": "fix", "state": "A"})));
+    let done = resume_with(&moved, &[(goto[0].call, Answer::Error("no trail fix".to_owned()))], limits, 1);
+    let oversized = "goto()'s state has 70002 bytes of JSON; a leg takes at most 65536";
+    assert_eq!(result(done), json!(["no trail fix", oversized]));
+}
+
+#[test]
 fn a_step_argument_json_cannot_hold_raises_type_error() {
     let error = error(start("await agent({1, 2})\n", Limits::default()));
     assert!(error.ends_with("TypeError: agent() takes JSON values: a set is not a JSON value"), "{error}");

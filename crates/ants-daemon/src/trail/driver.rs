@@ -20,8 +20,8 @@ use super::{Answer, Slot, Step, Trails, load, locked, steps};
 /// How long a pass that failed waits before the next, at first and at most.
 const RETRY_FIRST: Duration = Duration::from_secs(1);
 const RETRY_MAX: Duration = Duration::from_mins(1);
-/// Most bytes of a run's session record: NATS's 1 MiB payload, less room for its headers.
-const MAX_RECORD: usize = 1024 * 1024 - 8 * 1024;
+/// Most bytes of a run's session record, and of its header: NATS's 1 MiB payload, less room for its headers.
+pub(super) const MAX_RECORD: usize = 1024 * 1024 - 8 * 1024;
 
 impl Trails {
     /// Drive each run woken, one pass at a time per run, and wake those whose wall time passed.
@@ -132,6 +132,9 @@ impl Trails {
                 }
                 Status::Running => {}
             }
+            if self.take_gotos(slot, &mut engine).await? {
+                continue;
+            }
             let issued = self.issue(slot, &engine).await?;
             if !issued.answers.is_empty() {
                 broke = issued.broke;
@@ -215,14 +218,22 @@ impl Trails {
             book.pending = pending;
             (book.header.clone(), cancelled)
         };
-        self.report_events(&header, &progress.events).await;
-        self.stop_children(&cancelled, &self.inner.ant).await;
         for call in &cancelled {
             self.retire(&header.run, call);
+        }
+        self.report_events(&header, &progress.events).await;
+        self.abandon(&header, &cancelled).await;
+    }
+
+    /// Give up `calls`, steps the run of `header` no longer waits on, their threads retired: their child runs stop, the
+    /// steps sent are reported dropped, and those the conductor sent itself withdrawn.
+    pub(super) async fn abandon(&self, header: &TrailRun, calls: &[PendingCall]) {
+        self.stop_children(calls, &self.inner.ant).await;
+        for call in calls {
             if call.sent {
-                self.report_step(&header, call, StepStage::Dropped);
+                self.report_step(header, call, StepStage::Dropped);
             }
-            self.withdraw_own(&header, call).await;
+            self.withdraw_own(header, call).await;
         }
     }
 
@@ -283,7 +294,7 @@ impl Trails {
             book.pending.iter().any(|pending| pending.call == call.call)
                 || book.answers.iter().any(|(answered, _)| *answered == call.call)
         };
-        for call in engine.outstanding().iter().filter(|call| !has_step(call)) {
+        for call in engine.outstanding().iter().filter(|call| call.function.is_step() && !has_step(call)) {
             if steps >= budget.limits.steps {
                 let error = format!("the run reached its limit of {} steps", budget.limits.steps);
                 issued.answers.push(self.raise(&header.run, call, error).await?);
@@ -308,7 +319,7 @@ impl Trails {
             let turn_budget = match call.function {
                 Function::Agent => DEFAULT_TURN_BUDGET.min(turns),
                 Function::Human => DEFAULT_TURN_BUDGET,
-                Function::Trail => 0,
+                Function::Trail | Function::Goto => 0,
             };
             if turn_budget == 0 && call.function == Function::Agent {
                 if self.holds_turns(&header) {
@@ -343,7 +354,7 @@ impl Trails {
             steps += 1;
             {
                 let mut book = slot.book();
-                book.header.steps += 1;
+                count_steps(&mut book.header, 1);
                 book.pending.push(pending);
             }
             self.charge(&header, 1, 0);
@@ -389,7 +400,7 @@ impl Trails {
     }
 
     /// Answer `call` with `error`, raising in the script, as its journal entry, stored.
-    async fn raise(&self, run: &RunId, call: &Call, error: String) -> Result<JournalEntry> {
+    pub(super) async fn raise(&self, run: &RunId, call: &Call, error: String) -> Result<JournalEntry> {
         let entry = JournalEntry {
             call: call.call,
             function: call.function,
@@ -461,6 +472,14 @@ struct Issued {
     out_of_turns: bool,
 }
 
+/// Count `steps` sent to the run of `header` and to the leg it is on.
+pub(super) fn count_steps(header: &mut TrailRun, steps: u32) {
+    header.steps = header.steps.saturating_add(steps);
+    if let Some(leg) = header.route.last_mut() {
+        leg.steps = leg.steps.saturating_add(steps);
+    }
+}
+
 /// The limit of a run's record that `limit`, of its script's worker, is.
 fn run_limit(limit: Limit) -> RunLimit {
     match limit {
@@ -475,7 +494,7 @@ fn run_limit(limit: Limit) -> RunLimit {
 pub(super) fn reserved(call: &PendingCall) -> u32 {
     match call.function {
         TrailFunction::Agent => call.turn_budget,
-        TrailFunction::Human | TrailFunction::Trail => 0,
+        TrailFunction::Human | TrailFunction::Trail | TrailFunction::Goto => 0,
     }
 }
 

@@ -1,8 +1,8 @@
-//! Where a run reports what it does, on its own thread: its start, what its script reports (phase(), log()) and what
-//! arrives on its steps' threads answering no call, as thread notes of the conductor; each step starting and ending, as
-//! status events of the conductor on the run's thread ([`StatusUpdate::Step`]); and its end, as a message to its
-//! owner, or, for a child run, whose parent reports, as a note. Reports are best effort: one that fails is logged,
-//! never failing the run.
+//! Where a run reports what it does, on its own thread: its start, what its script reports (phase(), log()), its route
+//! at each goto() and what arrives on its steps' threads answering no call, as thread notes of the conductor; each step
+//! starting and ending and each leg starting, as status events of the conductor on the run's thread
+//! ([`StatusUpdate::Step`], [`StatusUpdate::Leg`]); and its end, as a message to its owner, or, for a child run, whose
+//! parent reports, as a note. Reports are best effort: one that fails is logged, never failing the run.
 
 use std::fmt::Write as _;
 
@@ -36,6 +36,23 @@ impl Trails {
             .map(|c| if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') { ' ' } else { c })
             .collect();
         self.note(run, &text, Some(clip(title.trim(), MAX_TITLE))).await;
+    }
+
+    /// Tell the leg `run` entered last, by a goto(), in the notes of its thread as its route so far, and as the leg's
+    /// start.
+    pub(super) async fn report_route(&self, run: &TrailRun) {
+        self.note(run, &clip(&format!("route: {}", run.route_text()), MAX_NOTE), None).await;
+        self.report_leg(run);
+    }
+
+    /// Tell the start of the leg `run` entered last on the run's thread.
+    pub(super) fn report_leg(&self, run: &TrailRun) {
+        let Some(leg) = run.leg() else { return };
+        let index = u32::try_from(run.route.len() - 1).unwrap_or(u32::MAX);
+        tracing::info!(run = %run.run, leg = index, trail = ?leg.trail, at = ?leg.at, "trail leg");
+        let update =
+            StatusUpdate::Leg { run: run.run.clone(), leg: index, trail: leg.trail.clone(), waypoint: leg.at.clone() };
+        crate::monitoring::status::publish(&self.inner.client, &self.inner.ant, &run.thread, update);
     }
 
     pub(super) async fn report_resumed(&self, run: &TrailRun, by: &UserId) {
@@ -76,7 +93,7 @@ impl Trails {
         let label = match step.function {
             TrailFunction::Agent => steps::AgentArgs::of(&step.args).ok().and_then(|args| args.label),
             TrailFunction::Trail => steps::TrailArgs::of(&step.args).ok().map(|args| format!("trail {}", args.name)),
-            TrailFunction::Human => None,
+            TrailFunction::Human | TrailFunction::Goto => None,
         };
         let update = StatusUpdate::Step {
             run: run.run.clone(),
@@ -116,10 +133,16 @@ impl Trails {
     }
 
     /// Tell the end of `run` to its owner, else the default human, on the run's thread: its result, its error, or who
-    /// stopped it; a child run's in the notes of its thread, its parent telling the owner.
+    /// stopped it and which run to resume; a child run's in the notes of its thread, its parent telling the owner.
     pub(super) async fn report_end(&self, run: &TrailRun) {
         tracing::info!(run = %run.run, state = ?run.state, steps = run.steps, turns = run.turns, "trail run ended");
-        let Some(text) = end_text(run) else { return };
+        // A child run's error answers its parent's call: none resumes it.
+        let resume = match (&run.parent, &run.state) {
+            (None, _) => Some(run.run.clone()),
+            (Some(_), RunState::Stopped { by }) => self.stopped_root(run, by),
+            (Some(_), _) => None,
+        };
+        let Some(text) = end_text(run, resume.as_ref()) else { return };
         if run.parent.is_some() {
             return self.note(run, &clip(&text, MAX_NOTE), None).await;
         }
@@ -167,22 +190,32 @@ pub(super) struct Stray<'a> {
     pub(super) waited: bool,
 }
 
-/// The message telling the end of `run`; None while it runs.
-fn end_text(run: &TrailRun) -> Option<String> {
-    let name = match &run.trail {
+/// The message telling the end of `run`, naming `resume` as the run whose resume continues it; None while it runs. Past
+/// one leg, its last line is the run's route.
+fn end_text(run: &TrailRun, resume: Option<&RunId>) -> Option<String> {
+    let mut text = end_state(run, resume)?;
+    if run.route.len() > 1 {
+        let _ = write!(text, "\nroute: {}", run.route_text());
+    }
+    Some(text)
+}
+
+fn end_state(run: &TrailRun, resume: Option<&RunId>) -> Option<String> {
+    let name = match run.first_trail() {
         Some(trail) => format!("Run {} of trail {trail}", run.run),
         None => format!("Run {}", run.run),
     };
     let spent = format!("{} steps, {} turns", run.steps, run.turns);
-    let resume = format!("`ants trail resume {}` continues it", run.run);
-    Some(match &run.state {
-        RunState::Running | RunState::Waiting => return None,
-        RunState::Stopped { by } => format!("{name} was stopped by {by} ({spent}); {resume}."),
-        RunState::Failed { error, limit: Some(_) } => {
+    let resume = resume.map(|resume| format!("`ants trail resume {resume}` continues it"));
+    Some(match (&run.state, resume) {
+        (RunState::Running | RunState::Waiting, _) => return None,
+        (RunState::Stopped { by }, Some(resume)) => format!("{name} was stopped by {by} ({spent}); {resume}."),
+        (RunState::Stopped { by }, None) => format!("{name} was stopped by {by} ({spent})."),
+        (RunState::Failed { error, limit: Some(_) }, Some(resume)) => {
             format!("{name} failed ({spent}): {error}\n{resume}, under raised limits.")
         }
-        RunState::Failed { error, limit: None } => format!("{name} failed ({spent}): {error}"),
-        RunState::Done { result } => {
+        (RunState::Failed { error, .. }, _) => format!("{name} failed ({spent}): {error}"),
+        (RunState::Done { result }, _) => {
             let (text, fence) = match result {
                 serde_json::Value::Null => return Some(format!("{name} is done ({spent}).")),
                 serde_json::Value::String(text) => (text.clone(), false),

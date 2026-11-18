@@ -3,11 +3,11 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use ants_proto::{PendingCall, QueuedCall, RunId, RunState, TrailFunction, TrailRun};
+use ants_proto::{PendingCall, QueuedCall, RunId, RunState, TrailFunction, TrailLeg, TrailRun, TrailSession};
 use ants_trail::{Run, RunState as Session};
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, anyhow};
 
-use super::{Book, Slot, Step, Trails, engine_limits, locked, steps};
+use super::{Book, Leg, Slot, Step, Trails, engine_limits, locked, steps};
 
 impl Trails {
     /// The run of `header` as its records hold it: its stored session, given the answers its journal holds beyond it.
@@ -18,6 +18,9 @@ impl Trails {
         let run = header.run.clone();
         let stored = store.session(&run).await?.context("the run has no stored session")?;
         let mut session: Session = serde_json::from_str(&stored.session).context("parsing the run's session")?;
+        if header.leg().is_none_or(|leg| leg.first_call != session.first_call()) {
+            return self.load_moved(header, stored);
+        }
         if resumed {
             session = session.with_limits(engine_limits(&header.limits))?;
         }
@@ -50,6 +53,32 @@ impl Trails {
         let session = stored.session;
         let book =
             Book { header, session, pending, queued, answers: Vec::new(), broke: None, late: false, starved: false };
+        Ok(Slot::new(engine, book))
+    }
+
+    /// The run of `header`, which went on to its last leg before storing that leg's session: the leg starts afresh, and
+    /// the steps of the leg before, which `stored` still lists, are no longer waited on.
+    fn load_moved(&self, header: TrailRun, stored: TrailSession) -> Result<Arc<Slot>> {
+        let leg = header.leg().context("the run has no leg")?.clone();
+        let TrailLeg { trail, at, script, args, first_call, .. } = leg;
+        let (_, engine, session) =
+            Leg { trail, script, at, args, first_call }.prepare(&header.limits).map_err(|e| anyhow!(e))?;
+        {
+            let mut threads = locked(&self.inner.threads);
+            for call in stored.pending.iter().filter(|call| call.function != TrailFunction::Trail) {
+                threads.insert(call.thread.clone(), Step::Retired { run: header.run.clone(), to: call.to.clone() });
+            }
+        }
+        let book = Book {
+            header,
+            session,
+            pending: Vec::new(),
+            queued: Vec::new(),
+            answers: Vec::new(),
+            broke: None,
+            late: false,
+            starved: false,
+        };
         Ok(Slot::new(engine, book))
     }
 

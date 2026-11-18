@@ -5,11 +5,29 @@ expression: value
 {
   "run": "019a7d2f-0000-7000-8000-000000000001",
   "conductor": "planner",
-  "trail": "release",
-  "script": "agent('dev-a', 'build it')",
-  "args": {
-    "version": "1.2.0"
-  },
+  "route": [
+    {
+      "trail": "triage",
+      "script": "await goto('release', at='review', state={'version': '1.2.0'})",
+      "args": {
+        "bug": 7
+      },
+      "first_call": 0,
+      "started_at": "2025-01-01T12:00:00Z",
+      "steps": 2
+    },
+    {
+      "trail": "release",
+      "at": "review",
+      "script": "async def review(state):\n    return await agent(state['version'], ant='dev-a')",
+      "args": {
+        "version": "1.2.0"
+      },
+      "first_call": 3,
+      "started_at": "2025-01-01T12:02:00Z",
+      "steps": 1
+    }
+  ],
   "owner": "alice",
   "thread": "019a7d2c-0000-7000-8000-000000000001",
   "origin": {

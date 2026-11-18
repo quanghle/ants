@@ -71,7 +71,7 @@ fn description() -> String {
          (`steps`, `at_once`, `turns`, `wall`). The run reports on the current thread and answers to the thread's \
          owner, who gets its end there. Returns the run id at once, or with `wait` the run's result or error (waiting \
          at most `timeout`). trail_status tells how a run stands and stop_trail stops one. Write a trail for work \
-         whose steps are known in code: fan-outs, pipelines, verification rounds.\n\n{}",
+         whose steps are known in code: fan-outs, pipelines, verification rounds, routes through saved trails.\n\n{}",
         crate::trail::GUIDE
     )
 }
@@ -158,7 +158,7 @@ fn run_id(run: &str) -> Result<RunId, String> {
 
 /// The run's name: its trail's, or an inline script's.
 fn named(header: &TrailRun) -> String {
-    match &header.trail {
+    match header.trail() {
         Some(trail) => format!("Run {} of trail {trail}", header.run),
         None => format!("Run {} of an inline script", header.run),
     }

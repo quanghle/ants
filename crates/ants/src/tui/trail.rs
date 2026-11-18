@@ -160,8 +160,8 @@ pub async fn resumed(ctx: &Ctx, pick: &Pick) -> Result<Done> {
 mod tests {
     use ants_proto::provider::{Origin, Starter};
     use ants_proto::{
-        Role, RunId, RunState, SavedTrail, TRAIL_RUNS_BUCKET, TRAILS_BUCKET, TrailAction, TrailOutcome, TrailRequest,
-        TrailRun, TrailSource, Uuid, WaitingStep, subject,
+        Role, RunId, RunState, SavedTrail, TRAIL_RUNS_BUCKET, TRAILS_BUCKET, TrailAction, TrailLeg, TrailOutcome,
+        TrailRequest, TrailRun, TrailSource, Uuid, WaitingStep, subject,
     };
     use futures::StreamExt as _;
     use serde_json::json;
@@ -179,6 +179,19 @@ mod tests {
 
     fn done(result: Done) -> Outcome {
         Outcome { result: Ok(result), text: String::new(), quoting: None }
+    }
+
+    /// The leg starting a run of `trail` with `script`.
+    fn first_leg(trail: &TrailName, script: &str) -> TrailLeg {
+        TrailLeg {
+            trail: Some(trail.clone()),
+            at: None,
+            script: script.to_owned(),
+            args: json!(null),
+            first_call: 0,
+            started_at: Utc::now(),
+            steps: 0,
+        }
     }
 
     /// Send `text` from the bar of the view shown.
@@ -343,9 +356,7 @@ mod tests {
         let record = TrailRun {
             run: "0190aaaa-0000-7000-8000-000000000001".parse().unwrap(),
             conductor: lead.clone(),
-            trail: Some(trail.clone()),
-            script: SCRIPT.to_owned(),
-            args: json!(null),
+            route: vec![first_leg(trail, SCRIPT)],
             owner: Some(owner.clone()),
             thread,
             parent: None,

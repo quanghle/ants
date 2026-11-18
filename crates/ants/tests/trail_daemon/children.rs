@@ -12,7 +12,7 @@ async fn conductor_with_saved(server: &NatsServer, dir: &Path, saved: &[(&str, &
 
 impl Conductor {
     /// Start a run of the saved trail `name` for `origin`, owned by the human, reporting on `thread`.
-    async fn start_saved(&self, name: &str, origin: Origin, limits: TrailLimits, thread: ThreadId) -> RunId {
+    pub(super) async fn start_saved(&self, name: &str, origin: Origin, limits: TrailLimits, thread: ThreadId) -> RunId {
         let start = StartRun {
             trail: TrailSource::Saved(name.parse().unwrap()),
             args: Value::Null,
@@ -25,7 +25,7 @@ impl Conductor {
     }
 
     /// The result of `run`, which ends done.
-    async fn result(&self, run: &RunId) -> Value {
+    pub(super) async fn result(&self, run: &RunId) -> Value {
         match self.ended(run).await {
             RunState::Done { result } => result,
             state => panic!("not done: {state:?}"),
@@ -33,7 +33,7 @@ impl Conductor {
     }
 }
 
-fn human_origin() -> Origin {
+pub(super) fn human_origin() -> Origin {
     Origin { by: Starter::Human { user: UserId::human() }, channel: None }
 }
 
@@ -68,7 +68,7 @@ except RuntimeError as e:
     let header = lead.header(&child).await;
     let parent = header.parent.as_ref().expect("a parent");
     assert_eq!((&parent.run, parent.call, &parent.origin_thread), (&run, 0, &thread));
-    assert_eq!((&header.thread, header.trail.as_ref().map(ToString::to_string)), (&step_thread, Some("echo".into())));
+    assert_eq!((&header.thread, header.trail().map(ToString::to_string)), (&step_thread, Some("echo".into())));
     assert_eq!((header.owner.as_ref(), &header.origin), (Some(&UserId::human()), &human_origin()));
     assert_eq!(step.origin_thread.as_ref(), Some(&thread), "the child's steps link to the root run's thread");
     assert_eq!(step.owner, Some(UserId::human()));
@@ -199,6 +199,8 @@ async fn stopping_a_run_stops_its_child_and_resuming_it_resumes_the_child() {
     assert_eq!(lead.header(&run).await.state, RunState::Stopped { by: human.clone() });
     let told = lead.told().await;
     assert!(told.text.starts_with(&format!("Run {run} was stopped by human")), "{}", told.text);
+    let ended = lead.notes(&lead.header(&child).await.thread, 2).await.pop().unwrap();
+    assert!(ended.ends_with(&format!("; `ants trail resume {run}` continues it.")), "the parent's resume: {ended}");
     assert!(lead.reply(&step, "late").await, "the stopped child's step's reply is not prompted");
     assert!(lead.sends_no_step(Duration::from_secs(1)).await);
 

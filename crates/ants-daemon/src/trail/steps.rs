@@ -44,11 +44,29 @@ impl TrailArgs {
     }
 }
 
+/// The arguments of a goto() call, as the engine hands them out.
+#[derive(Deserialize)]
+pub(super) struct GotoArgs {
+    #[serde(default)]
+    pub(super) trail: Option<String>,
+    #[serde(default)]
+    pub(super) at: Option<String>,
+    #[serde(default)]
+    pub(super) state: Value,
+}
+
+impl GotoArgs {
+    pub(super) fn of(args: &Value) -> Result<Self, String> {
+        serde_json::from_value(args.clone()).map_err(|e| format!("goto() takes a trail and a waypoint by name: {e}"))
+    }
+}
+
 pub(super) fn function(function: Function) -> TrailFunction {
     match function {
         Function::Agent => TrailFunction::Agent,
         Function::Human => TrailFunction::Human,
         Function::Trail => TrailFunction::Trail,
+        Function::Goto => TrailFunction::Goto,
     }
 }
 
@@ -57,6 +75,7 @@ pub(super) fn engine_function(function: TrailFunction) -> Function {
         TrailFunction::Agent => Function::Agent,
         TrailFunction::Human => Function::Human,
         TrailFunction::Trail => Function::Trail,
+        TrailFunction::Goto => Function::Goto,
     }
 }
 
@@ -95,6 +114,7 @@ pub(super) fn envelope(run: &TrailRun, pending: &PendingCall) -> Result<Envelope
         TrailFunction::Agent => Envelope::on_thread(thread, from, to, prompt(&AgentArgs::of(&pending.args)?)),
         TrailFunction::Human => Envelope::asking(thread, from, to, crate::mcp::asked_questions(pending.args.clone())?),
         TrailFunction::Trail => return Err("a trail() call sends no message".to_owned()),
+        TrailFunction::Goto => return Err("a goto() call sends no message".to_owned()),
     };
     let allow = (!run.origin.trusted()).then(|| WEBHOOK_ALLOW.map(str::to_owned).to_vec());
     let origin_thread = run.parent.as_ref().map_or(&run.thread, |parent| &parent.origin_thread);
