@@ -1,6 +1,6 @@
 //! Markdown in messages, as the views draw it: headings, bold, italic, strikethrough, inline code, fenced and indented
-//! code blocks (dimmed, neither highlighted nor reflowed), nested lists, block quotes, links with their URL, rules and
-//! simple tables, as styled lines no wider than asked.
+//! code blocks (behind a dim bar, neither highlighted nor reflowed, a line too wide going on below after a mark),
+//! nested lists, block quotes, links with their URL, rules and simple tables, as styled lines no wider than asked.
 //!
 //! A line break in the text stays one, as in a chat message, rather than joining the lines as CommonMark does. Control
 //! characters, as text or as character references, are dropped (tabs become spaces), so no escape sequence of a
@@ -13,11 +13,13 @@ use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
 /// How many columns a tab in a code block takes.
 const TAB: usize = 4;
-/// How far code blocks are indented.
-const CODE_INDENT: &str = "  ";
+/// Before each line of a code block.
+const CODE_BAR: &str = "▎ ";
+/// Before the rest of a line of a code block too wide for the view, on the lines below it.
+const CODE_GOES_ON: &str = "▎↳";
 
-/// `text`, markdown, as lines at most `width` columns wide, but for code blocks and tables too wide for it, which are
-/// cut at the width rather than reflowed.
+/// `text`, markdown, as lines at most `width` columns wide: a code block's line too wide for it is cut at the width, the
+/// rest going on below, and a table too wide for it has each row wrapped.
 pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
     let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     let mut renderer = Renderer::new(width.max(1));
@@ -217,10 +219,11 @@ impl Renderer {
             }
             TagEnd::CodeBlock => {
                 let code = self.code.take().unwrap_or_default();
-                let width = self.width.saturating_sub(self.indent() + CODE_INDENT.len()).max(1);
+                let width = self.width.saturating_sub(self.indent() + CODE_BAR.width()).max(1);
                 for line in code.lines() {
-                    for row in cut(&clean_code(line), width) {
-                        self.emit(vec![Span::raw(CODE_INDENT), Span::styled(row, dim())]);
+                    for (n, row) in cut(&clean_code(line), width).into_iter().enumerate() {
+                        let bar = if n == 0 { CODE_BAR } else { CODE_GOES_ON };
+                        self.emit(vec![Span::styled(bar, dim()), Span::raw(row)]);
                     }
                 }
                 self.gap = true;
@@ -527,15 +530,26 @@ mod tests {
     }
 
     #[test]
-    fn code_blocks_are_dimmed_and_keep_their_lines_and_spaces() {
+    fn code_blocks_keep_their_lines_and_spaces_behind_a_dim_bar() {
         let lines = render("Run:\n\n```sh\nfor x in a b; do\n\techo  \"$x\"   # twice\ndone\n```\nafter", 24);
         assert_eq!(
             text(&lines),
-            ["Run:", "", "  for x in a b; do", "      echo  \"$x\"   # twi", "  ce", "  done", "", "after"]
+            ["Run:", "", "▎ for x in a b; do", "▎     echo  \"$x\"   # twi", "▎↳ce", "▎ done", "", "after"]
         );
-        assert_eq!(style_of(&lines, "done"), dim(), "no highlighting");
+        assert_eq!(style_of(&lines, "done"), Style::new(), "normal brightness, no highlighting");
+        assert_eq!(style_of(&lines, "▎"), dim());
         let indented = render("text\n\n    let x = 1;", 80);
-        assert_eq!(text(&indented), ["text", "", "  let x = 1;"]);
+        assert_eq!(text(&indented), ["text", "", "▎ let x = 1;"]);
+    }
+
+    #[test]
+    fn a_code_line_wider_than_the_view_shows_whole_going_on_below() {
+        let line: String = (0..200).map(|n| char::from(b'a' + u8::try_from(n % 26).unwrap())).collect();
+        let lines = text(&render(&format!("```\n{line}\n```"), 80));
+        assert!(lines.iter().all(|l| l.width() <= 80), "{lines:#?}");
+        assert!(lines[0].starts_with("▎ ") && lines[1..].iter().all(|l| l.starts_with("▎↳")), "{lines:#?}");
+        let shown: String = lines.iter().map(|l| l.chars().skip(2).collect::<String>()).collect();
+        assert_eq!(shown, line);
     }
 
     #[test]
@@ -609,6 +623,6 @@ mod tests {
         for span in lines.iter().flat_map(|l| &l.spans) {
             assert!(!span.content.chars().any(char::is_control), "{:?}", span.content);
         }
-        assert_eq!(text(&lines), ["a [31mred [2J", "", "  ]52;c;aGk=", "", "x (https://e.example/[0m)"]);
+        assert_eq!(text(&lines), ["a [31mred [2J", "", "▎ ]52;c;aGk=", "", "x (https://e.example/[0m)"]);
     }
 }

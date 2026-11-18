@@ -64,6 +64,11 @@ impl Looks {
         Self::new(depth, theme, animate)
     }
 
+    /// Whether what moves on screen moves (`[cli] animate`).
+    pub fn animates(&self) -> bool {
+        self.animate
+    }
+
     pub fn set(&mut self, identities: Identities) {
         self.identities = identities;
     }

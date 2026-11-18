@@ -21,7 +21,7 @@ use ants_proto::{Quote, ThreadId, UserId, Uuid, Verdict};
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -36,13 +36,38 @@ use crate::messages::attachments::Listed;
 use crate::threads::thread::{Entry, Kind};
 
 mod conversation;
+mod find;
 
+pub use conversation::SPIN_MS;
 use conversation::{Item, Shown, busy, cut, glyphs, hm, rows, started, withdrawn_from, woken};
 
 /// How wide the side panel is, shown as [`super::fold`] has it.
 const PANEL_WIDTH: u16 = 34;
-/// How many messages PgUp and PgDn move the selection.
-const PAGE: isize = 10;
+/// Where the conversation stands, as the keys left it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scroll {
+    /// At the bottom, following the latest lines.
+    Latest,
+    /// From this line, which new messages leave where it is.
+    At(usize),
+    /// The selected message brought into view, from its last line when moving up, else from its first; then [`At`].
+    ///
+    /// [`At`]: Scroll::At
+    Reveal { up: bool },
+}
+
+/// What the conversation drawn last laid out, for the keys that scroll it.
+#[derive(Debug, Default)]
+struct Laid {
+    /// How many lines the view shows.
+    height: usize,
+    /// How many lines the conversation takes.
+    lines: usize,
+    /// Each message's sequence and the lines it takes, from its first to past its last.
+    messages: Vec<(u64, usize, usize)>,
+    /// The line of each match of the text found, in order.
+    found: Vec<usize>,
+}
 
 #[derive(Debug)]
 pub struct Page {
@@ -51,6 +76,12 @@ pub struct Page {
     selected: Option<u64>,
     /// The first line of the conversation drawn last, so that the selection moves within it.
     top: Cell<usize>,
+    /// Where the conversation stands.
+    scroll: Cell<Scroll>,
+    /// What the conversation drawn last laid out.
+    laid: RefCell<Laid>,
+    /// Whether the conversation drawn last showed a spinner.
+    pub spinning: Cell<bool>,
     /// What the side panel shows of the thread besides its messages, once read.
     pub about: Option<About>,
     /// The message the thread was opened at, selected and held at the top of the view until a key moves it.
@@ -62,6 +93,8 @@ pub struct Page {
     /// The room the oldest pending tool request had on its card as last drawn, `(width, lines)`, which tells whether it
     /// showed whole there: no lines when its card was not drawn.
     card_room: Cell<Option<(usize, usize)>>,
+    /// The text found in the conversation (Ctrl-F), while finding.
+    find: Option<find::Find>,
 }
 
 impl Page {
@@ -70,11 +103,15 @@ impl Page {
             history: History::new(thread),
             selected: None,
             top: Cell::new(0),
+            scroll: Cell::new(Scroll::Latest),
+            laid: RefCell::default(),
+            spinning: Cell::new(false),
             about: None,
             at: None,
             mark: attach::Mark::default(),
             answering: None,
             card_room: Cell::new(None),
+            find: None,
         }
     }
 
@@ -89,7 +126,7 @@ impl Page {
         self.messages().find(|e| e.id == Some(at)).map(|e| e.seq)
     }
 
-    pub const KEYS: &str = "↑↓ select · i reply · > reply to selected · y copy · f forward · o open file · ] next file · + react · p pin · m mute · e archive · d done · u unread from selected · b remind of selected · z snooze · t tree · T tool calls · S TL;DR · x cancel · W withdraw · E withdraw to edit · a A r answer a tool request · n reject it with a note · 1-9 Enter answer a question · End latest · Esc back";
+    pub const KEYS: &str = "↑↓ select or scroll · PgUp PgDn scroll · Home first · v pager · Ctrl-F find · i reply · > reply to selected · y copy · f forward · o open file · ] next file · + react · p pin · m mute · e archive · d done · u unread from selected · b remind of selected · z snooze · t tree · T tool calls · S TL;DR · x cancel · W withdraw · E withdraw to edit · a A r answer a tool request · n reject it with a note · 1-9 Enter answer a question · End latest · Esc back";
 
     /// The messages shown, in the order stored.
     fn messages(&self) -> impl DoubleEndedIterator<Item = &Entry> {
@@ -186,11 +223,119 @@ impl Page {
         e.attachments.get(self.mark.at(e.seq, e.attachments.len()))
     }
 
-    /// Move the selection `by` messages, down for a positive one; past the latest it follows the latest again.
+    /// Move the selection `by` messages, down for a positive one, bringing it into view; past the latest it follows
+    /// the latest again.
     fn step(&mut self, by: isize) {
         let seqs: Vec<u64> = self.messages().map(|e| e.seq).collect();
         let at = self.selected.and_then(|s| seqs.iter().position(|seq| *seq == s)).unwrap_or(seqs.len());
         self.selected = seqs.get(at.saturating_add_signed(by).min(seqs.len())).copied();
+        self.scroll.set(match self.selected {
+            None => Scroll::Latest,
+            Some(_) => Scroll::Reveal { up: by < 0 },
+        });
+    }
+
+    /// Scroll the conversation `by` lines, down for a positive one; at the bottom with nothing selected it follows the
+    /// latest again.
+    fn scroll_by(&self, by: isize) {
+        let laid = self.laid.borrow();
+        let bottom = laid.lines.saturating_sub(laid.height);
+        let top = self.top.get().saturating_add_signed(by).min(bottom);
+        self.top.set(top);
+        self.scroll.set(if top == bottom && self.selected.is_none() { Scroll::Latest } else { Scroll::At(top) });
+    }
+
+    /// Up, or with `down` Down: scroll inside the selected message while it goes on past the view that way, else
+    /// select the next message that way; with the selection out of view, select the message in view nearest that way.
+    fn line(&mut self, down: bool) {
+        let laid = self.laid.borrow();
+        let (top, height) = (self.top.get(), laid.height);
+        let selected = self.selected.and_then(|seq| laid.messages.iter().find(|m| m.0 == seq).copied());
+        let shown = |&(_, start, end): &(u64, usize, usize)| start < top + height && end > top;
+        let within =
+            |m @ (_, start, end): (u64, usize, usize)| shown(&m) && if down { end > top + height } else { start < top };
+        if selected.is_some_and(within) {
+            drop(laid);
+            return self.scroll_by(if down { 1 } else { -1 });
+        }
+        if selected.is_none_or(|m| !shown(&m)) && self.scroll.get() != Scroll::Latest {
+            let mut in_view = laid.messages.iter().filter(|m| shown(m));
+            let nearest = if down { in_view.next() } else { in_view.next_back() };
+            if let Some(&(seq, ..)) = nearest {
+                drop(laid);
+                self.selected = Some(seq);
+                self.scroll.set(Scroll::Reveal { up: !down });
+                return;
+            }
+        }
+        drop(laid);
+        self.step(if down { 1 } else { -1 });
+    }
+
+    /// Take `key` for finding text in the conversation: Ctrl-F starts asking for it in the footer, where typing changes
+    /// it, Enter and Shift-Enter step to the next and previous match and another key stops asking; then n and N step,
+    /// Ctrl-F asks again and Esc ends it. Whether it took `key`.
+    pub fn find_key(&mut self, key: Key) -> bool {
+        let Some(find) = &mut self.find else {
+            if key == Key::Ctrl('f') {
+                self.find = Some(find::Find { asking: true, ..find::Find::default() });
+            }
+            return key == Key::Ctrl('f');
+        };
+        match key {
+            Key::Ctrl('f') => find.asking = true,
+            Key::Esc => self.find = None,
+            Key::Char(c) if find.asking => {
+                find.text.push(c);
+                find.at = None;
+            }
+            Key::Backspace if find.asking => {
+                find.text.pop();
+                find.at = None;
+            }
+            Key::Enter if find.asking => self.step_find(true),
+            Key::Newline if find.asking => self.step_find(false),
+            Key::Char('n') => self.step_find(true),
+            Key::Char('N') => self.step_find(false),
+            _ => {
+                find.asking = false;
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Whether the footer asks for the text to find, which typing changes.
+    pub fn finding(&self) -> bool {
+        self.find.as_ref().is_some_and(|f| f.asking)
+    }
+
+    /// The footer while finding text in the conversation.
+    pub fn find_footer(&self) -> Option<Line<'static>> {
+        Some(self.find.as_ref()?.footer(self.laid.borrow().found.len()))
+    }
+
+    /// Step to the next match drawn last, or with `down` false the previous one, scrolling it into view by line.
+    fn step_find(&mut self, down: bool) {
+        let laid = self.laid.borrow();
+        let (found, top, height) = (&laid.found, self.top.get(), laid.height);
+        let Some(find) = self.find.as_mut().filter(|_| !found.is_empty()) else { return };
+        let n = found.len();
+        let at = match find.at.map(|at| at % n) {
+            Some(at) if down => (at + 1) % n,
+            Some(at) => (at + n - 1) % n,
+            None if down => found.iter().position(|&line| line >= top).unwrap_or(0),
+            None => found.iter().rposition(|&line| line < top + height).unwrap_or(n - 1),
+        };
+        find.at = Some(at);
+        let line = found[at];
+        if line < top || line >= top + height {
+            let top = line.saturating_sub(height / 2).min(laid.lines.saturating_sub(height));
+            self.top.set(top);
+            self.scroll.set(Scroll::At(top));
+        }
+        drop(laid);
+        self.at = None;
     }
 
     /// The cursor on the focused question card, while its question is still the one the keys answer.
@@ -248,20 +393,27 @@ impl Page {
         if matches!(
             key,
             Key::Up | Key::Down | Key::Char('k' | 'j') | Key::PageUp | Key::PageDown | Key::Home | Key::End
-        ) {
-            self.at = None;
+        ) && self.at.take().is_some()
+        {
+            self.scroll.set(Scroll::At(self.top.get()));
         }
+        let half = isize::try_from(self.laid.borrow().height / 2).unwrap_or(isize::MAX).max(1);
         match key {
-            Key::Up | Key::Char('k') => self.step(-1),
-            Key::Down | Key::Char('j') => self.step(1),
-            Key::PageUp => self.step(-PAGE),
-            Key::PageDown => self.step(PAGE),
+            Key::Up | Key::Char('k') => self.line(false),
+            Key::Down | Key::Char('j') => self.line(true),
+            Key::PageUp => self.scroll_by(-half),
+            Key::PageDown => self.scroll_by(half),
             Key::Home => {
                 let first = self.messages().next().map(|e| e.seq);
                 self.selected = first;
+                self.scroll.set(Scroll::Reveal { up: false });
             }
-            Key::End => self.selected = None,
+            Key::End => {
+                self.selected = None;
+                self.scroll.set(Scroll::Latest);
+            }
             Key::Char('y') => return self.selection().map(|e| To::Do(Action::Copy(e.text.clone()))),
+            Key::Char('v') => return self.selection().map(|e| To::Do(Action::Page(e.text.clone()))),
             Key::Char('+') => return self.selection().and_then(|e| e.id).map(To::React),
             Key::Char('>') => return self.quote(data),
             Key::Char('p') => return change(Change::Pin(!flags.pinned)),
@@ -330,11 +482,6 @@ impl Page {
     pub fn draw(&self, frame: &mut Frame, area: Rect, model: &Model, now: DateTime<Utc>, focused: bool) {
         let data = &model.data;
         let thread = &self.history.thread;
-        let summary = data.live.summary(thread);
-        let channels = summary.filter(|s| !s.channels.is_empty()).map_or_else(String::new, |s| {
-            let channels: Vec<String> = s.channels.iter().map(|c| format!("#{c}")).collect();
-            format!(" · {}", channels.join(" "))
-        });
         let (area, panel) = if model.fold.panel(frame.area().width) {
             let [left, right] = Layout::horizontal([Constraint::Min(20), Constraint::Length(PANEL_WIDTH)]).areas(area);
             (left, Some(right))
@@ -345,18 +492,15 @@ impl Page {
         let cards = draw_cards(frame, area, model, thread, &self.history.entries, cursor, now);
         self.card_room.set(Some(cards.room));
         let area = cards.rest;
-        let room = usize::from(area.width.saturating_sub(4));
-        let title = style::fit(&data.title(thread), room.saturating_sub(channels.chars().count()).max(10));
-        let title = style::fit(&format!("{title}{channels}"), room);
-        let block = style::block(format!(" {title} "), focused);
+        let block = style::block(self.title(data, usize::from(area.width.saturating_sub(4))), focused);
         let mut inner = block.inner(area);
-        frame.render_widget(block, area);
         if panel.is_none() {
             let [brief, rest] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
             frame.render_widget(Paragraph::new(self.brief(data, usize::from(brief.width))), brief);
             inner = rest;
         }
-        let area = catchup::draw_tldr(frame, inner, model, thread, now);
+        let (outer, area) = (area, catchup::draw_tldr(frame, inner, model, thread, now));
+        let [gutter, area] = Layout::horizontal([Constraint::Length(1), Constraint::Min(0)]).areas(area);
         let width = usize::from(area.width);
         let mut lines = Vec::new();
         if panel.is_some() || work::reason(data, thread).is_some() {
@@ -370,52 +514,95 @@ impl Page {
         }
         let marked = self.attached().map(|e| (e.seq, self.mark.at(e.seq, e.attachments.len())));
         let busy = data.live.progress.contains_key(thread);
-        let shown = Shown { data, now, busy, width, marked, placed: RefCell::default(), carded: cards.carded };
+        let shown = Shown {
+            data,
+            now,
+            busy,
+            width,
+            marked,
+            placed: RefCell::default(),
+            carded: cards.carded,
+            spun: Cell::new(false),
+        };
         let calls = data.calls.get(thread).map_or(&[][..], |c| c.calls());
         let ends = data.calls.get(thread).map_or(&[][..], |c| c.ends());
         let rows = rows(&self.history.entries, calls, ends, data.tools, busy, |u| data.is_human(u));
         let held = self.held();
         let selected = self.selected.or(held).and_then(|_| self.selection()).map(|e| e.seq);
         let mut range = None;
+        let mut messages = Vec::new();
         for (at, (row, (first, rest))) in rows.iter().zip(glyphs(&rows)).enumerate() {
             if at > 0 && row.depth == 0 {
                 lines.push(Line::raw(""));
             }
             let start = lines.len();
             shown.row(&mut lines, row, &self.history.entries, &first, &rest);
-            if let Item::Message(e) = row.item
-                && Some(e.seq) == selected
-            {
-                for line in &mut lines[start..] {
-                    line.style = line.style.patch(style::highlight(focused));
+            if let Item::Message(e) = row.item {
+                messages.push((e.seq, start, lines.len()));
+                if Some(e.seq) == selected {
+                    lines[start].style = lines[start].style.add_modifier(Modifier::BOLD);
+                    range = Some((start, lines.len()));
                 }
-                range = Some((start, lines.len()));
             }
         }
         let height = usize::from(area.height);
-        let bottom = lines.len().saturating_sub(height);
-        let top = match range {
-            None => bottom,
-            Some((start, _)) if held.is_some() => start.min(bottom),
-            Some((start, end)) => {
-                let top = self.top.get().min(bottom);
-                if start < top {
-                    start
-                } else if end > top + height {
-                    end.saturating_sub(height).min(start)
-                } else {
-                    top
-                }
-            }
+        let found = match &self.find {
+            Some(find) => find::mark(&mut lines, &find.text, find.at),
+            None => Vec::new(),
         };
-        self.top.set(top);
+        let top = self.scrolled(range, held.is_some(), lines.len(), height);
+        self.spinning.set(shown.spun.get());
+        let newer = messages.iter().filter(|(_, start, _)| *start >= top + height).count();
+        *self.laid.borrow_mut() = Laid { height, lines: lines.len(), messages, found };
+        let block = match newer {
+            0 => block,
+            n => block.title_bottom(
+                Line::styled(format!(" ↓ {n} newer · End shows them "), Style::new().fg(style::INFO)).right_aligned(),
+            ),
+        };
+        frame.render_widget(block, outer);
         let paragraph = Paragraph::new(lines).scroll((u16::try_from(top).unwrap_or(u16::MAX), 0));
         frame.render_widget(paragraph, area);
+        if let Some((start, end)) = range {
+            let bars =
+                (top..top + height).map(|at| if (start..end).contains(&at) { style::bar(focused) } else { "".into() });
+            frame.render_widget(Paragraph::new(bars.map(Line::from).collect::<Vec<_>>()), gutter);
+        }
         images::draw(frame, &data.images, &shown.placed.borrow(), top, area);
         if let Some(panel) = panel {
             let lines = self.panel(data, calls, now, usize::from(PANEL_WIDTH.saturating_sub(4)));
             frame.render_widget(Paragraph::new(lines).block(style::block(String::new(), false)), panel);
         }
+    }
+
+    /// The conversation's border title in `room` columns: the thread's title, cut to leave room for its channels.
+    fn title(&self, data: &Data, room: usize) -> String {
+        let summary = data.live.summary(&self.history.thread);
+        let channels = summary.filter(|s| !s.channels.is_empty()).map_or_else(String::new, |s| {
+            let channels: Vec<String> = s.channels.iter().map(|c| format!("#{c}")).collect();
+            format!(" · {}", channels.join(" "))
+        });
+        let title =
+            style::fit(&data.title(&self.history.thread), room.saturating_sub(channels.chars().count()).max(10));
+        format!(" {} ", style::fit(&format!("{title}{channels}"), room))
+    }
+
+    /// The first line of the conversation to show, `height` lines of its `lines`, as the keys left it: the selected
+    /// message's lines, from `range`, at the top while `held`; the scroll settled where it reveals them.
+    fn scrolled(&self, range: Option<(usize, usize)>, held: bool, lines: usize, height: usize) -> usize {
+        let bottom = lines.saturating_sub(height);
+        let top = match (range, self.scroll.get()) {
+            (Some((start, _)), _) if held => start.min(bottom),
+            (_, Scroll::Latest) => bottom,
+            (_, Scroll::At(top)) => top.min(bottom),
+            (None, Scroll::Reveal { .. }) => self.top.get().min(bottom),
+            (Some((start, end)), Scroll::Reveal { up }) => reveal(self.top.get(), (start, end), height, up).min(bottom),
+        };
+        if let Scroll::Reveal { .. } = self.scroll.get() {
+            self.scroll.set(Scroll::At(top));
+        }
+        self.top.set(top);
+        top
     }
 
     /// Where the thread is, as the header names it: its channels and its title.
@@ -664,6 +851,27 @@ fn scrolled(mut lines: Vec<Line<'static>>, room: usize, focused: bool) -> Vec<Li
     lines.push(Line::styled(format!("… {left} more lines: Enter shows them"), style::dim()));
     lines.push(keys);
     lines
+}
+
+/// The first line to show of a view `height` lines high, at `top` before, to bring into it the message on lines
+/// `start..end`: whole if it fits, else from its last line when moving `up`, from its first otherwise; the view moving
+/// no further than it has to.
+fn reveal(top: usize, (start, end): (usize, usize), height: usize, up: bool) -> usize {
+    if end - start <= height {
+        if start < top {
+            start
+        } else if end > top + height {
+            end - height
+        } else {
+            top
+        }
+    } else if up {
+        if end > top && end <= top + height { top } else { end - height }
+    } else if start >= top && start < top + height {
+        top
+    } else {
+        start
+    }
 }
 
 /// How the human holds a thread.
@@ -989,6 +1197,31 @@ mod tests {
     }
 
     #[test]
+    fn a_spinner_turns_eight_times_a_second_unless_animate_is_off() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let entries = vec![message(1, &thread, "alice", "dev-a", "fix the build")];
+        m.stored(entries.clone(), at(1));
+        m.data.calls.status(&tool(&thread, "dev-a", "c1", Some("Run `cargo test`"), "in_progress", 2));
+        let busy = ants_proto::StatusUpdate::State { state: ants_proto::State::Working };
+        m.data.live.status(
+            &ants_proto::StatusEvent::new(crate::test_support::live::user("dev-a"), thread.clone(), busy),
+            at(2),
+        );
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(entries)).unwrap();
+        let spinner = |m: &Model, now| {
+            let shown = screen(&page, m, 80, now);
+            shown.chars().find(|c| conversation::SPINNER.iter().any(|s| s.starts_with(*c))).unwrap()
+        };
+        let later = at(10) + chrono::TimeDelta::milliseconds(125);
+        assert_ne!(spinner(&m, at(10)), spinner(&m, later));
+        assert!(page.spinning.get());
+        m.data.looks = crate::tui::faces::Looks::new(crate::avatars::Depth::Plain, ants_proto::Theme::Dark, false);
+        assert_eq!(spinner(&m, at(10)), spinner(&m, later), "a frame a second");
+    }
+
+    #[test]
     fn the_view_shows_the_timeline_with_running_calls_and_a_panel_beside_it() {
         let thread = ThreadId::generate();
         let mut m = model();
@@ -1103,7 +1336,7 @@ mod tests {
             assert!(shown.contains("│execute: git push origin main"), "{height}: {shown}");
             assert!(shown.contains("a allow · r reject"), "{height}: {shown}");
             assert!(shown.contains("1 tool request and 1 question also wait"), "{height}: {shown}");
-            assert!(shown.contains("tool request  execute: git pus… · card below"), "one line: {shown}");
+            assert!(shown.contains("tool request  execute: git pu… · card below"), "one line: {shown}");
             assert!(shown.contains("execute: git tag v1") && shown.contains("1 yes"), "the others in full: {shown}");
         }
         assert_eq!(m.key(Key::Char('1'), at(5)), None, "the question's card is not on screen");
@@ -1185,8 +1418,8 @@ mod tests {
         m.data.reactions.insert(nested, vec![reacted("check", &["alice"])]);
         let shown = screen(&page, &m, 100, at(2));
         // A wide glyph's second cell shows as a space on the test screen.
-        assert!(shown.contains("│  👀  2  :shipit: 1"), "{shown}");
-        assert!(shown.contains("│      ✅  1"), "under a nested message too: {shown}");
+        assert!(shown.contains("│   👀  2  :shipit: 1"), "{shown}");
+        assert!(shown.contains("│       ✅  1"), "under a nested message too: {shown}");
 
         m.pages.push(super::super::model::Page::Thread(page));
         m.key(Key::Home, at(2));
@@ -1221,14 +1454,123 @@ mod tests {
         page.history.loaded(&thread, Ok(entries)).unwrap();
         let rows = |page: &Page| screen(page, &m, 80, at(40)).lines().map(str::to_owned).collect::<Vec<_>>();
         let shown = rows(&page);
-        assert!(shown[2].starts_with("│❯ alice → dev-a"), "{shown:#?}");
-        assert_eq!(shown[3].trim_end_matches('│').trim_end(), "│  line 5");
+        assert!(shown[2].starts_with("│▌❯ alice → dev-a"), "selected: {shown:#?}");
+        assert_eq!(shown[3].trim_end_matches('│').trim_end(), "│▌  line 5");
         assert_eq!(page.key(Key::Char('y'), &m.data, at(40)), Some(To::Do(Action::Copy("line 5".to_owned()))));
         assert_eq!(rows(&page)[3], shown[3], "held until moved");
         page.key(Key::Up, &m.data, at(40));
-        assert_eq!(rows(&page)[3].trim_end_matches('│').trim_end(), "│  line 4", "moving starts from it");
+        assert_eq!(rows(&page)[3].trim_end_matches('│').trim_end(), "│▌  line 4", "moving starts from it");
         page.key(Key::End, &m.data, at(40));
         assert!(rows(&page)[22].contains("line 30"), "the latest at the bottom");
+    }
+
+    /// A thread of a short question, an answer drawn on 241 lines (its heading and 240 rows) and a short reply.
+    fn tall(thread: &ThreadId) -> Page {
+        let rows: Vec<String> = (1..=240).map(|n| format!("- row {n}.")).collect();
+        let entries = vec![
+            message(1, thread, "alice", "dev-a", "how did the deploy go?"),
+            message(2, thread, "dev-a", "alice", &rows.join("\n")),
+            message(3, thread, "alice", "dev-a", "thanks"),
+        ];
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(thread, Ok(entries)).unwrap();
+        page
+    }
+
+    /// The rows of the tall answer `shown` shows.
+    fn rows_shown(shown: &str) -> Vec<usize> {
+        let rows = shown.split("row ").skip(1);
+        rows.filter_map(|r| r.split_once('.').and_then(|(n, _)| n.parse().ok())).collect()
+    }
+
+    #[test]
+    fn page_down_alone_brings_every_line_of_a_message_taller_than_the_view_into_it() {
+        let thread = ThreadId::generate();
+        let m = model();
+        let mut page = tall(&thread);
+        let draw =
+            |page: &Page| crate::test_support::render::rendered(120, 30, |f| page.draw(f, f.area(), &m, at(9), true));
+        draw(&page);
+        page.key(Key::Home, &m.data, at(9));
+        let mut seen = std::collections::BTreeSet::new();
+        let mut shown = draw(&page);
+        for _ in 0..40 {
+            seen.extend(rows_shown(&shown));
+            page.key(Key::PageDown, &m.data, at(9));
+            let next = draw(&page);
+            if next == shown {
+                break;
+            }
+            shown = next;
+        }
+        assert_eq!(seen, (1..=240).collect(), "{shown}");
+        assert!(shown.contains("thanks"), "{shown}");
+        assert_eq!(page.chosen().map(|e| e.text.as_str()), Some("how did the deploy go?"), "PgDn keeps the selection");
+        page.key(Key::PageUp, &m.data, at(9));
+        let back = rows_shown(&draw(&page));
+        assert!(back.contains(&220) && !back.contains(&240), "PgUp scrolls back by half a view: {back:?}");
+    }
+
+    #[test]
+    fn up_and_down_scroll_inside_a_selected_message_taller_than_the_view_before_moving_on() {
+        let thread = ThreadId::generate();
+        let m = model();
+        let mut page = tall(&thread);
+        let draw =
+            |page: &Page| crate::test_support::render::rendered(120, 30, |f| page.draw(f, f.area(), &m, at(9), true));
+        draw(&page);
+        page.key(Key::Home, &m.data, at(9));
+        draw(&page);
+        page.key(Key::Down, &m.data, at(9));
+        let mut shown = draw(&page);
+        assert_eq!(rows_shown(&shown).first(), Some(&1), "from its first line: {shown}");
+        let answer = |page: &Page| page.chosen().is_some_and(|e| e.text.starts_with("- row 1."));
+        let mut seen = std::collections::BTreeSet::new();
+        while answer(&page) {
+            seen.extend(rows_shown(&shown));
+            page.key(Key::Down, &m.data, at(9));
+            shown = draw(&page);
+        }
+        assert_eq!(seen, (1..=240).collect());
+        assert_eq!(page.chosen().map(|e| e.text.as_str()), Some("thanks"));
+        page.key(Key::Up, &m.data, at(9));
+        let shown = draw(&page);
+        assert!(answer(&page) && rows_shown(&shown).contains(&240), "from its last line: {shown}");
+        page.key(Key::Up, &m.data, at(9));
+        assert!(answer(&page), "Up scrolls inside it");
+        let text = page.chosen().unwrap().text.clone();
+        assert_eq!(page.key(Key::Char('v'), &m.data, at(9)), Some(To::Do(Action::Page(text))));
+    }
+
+    #[test]
+    fn a_message_arriving_while_scrolled_up_leaves_the_view_and_shows_in_the_count() {
+        let thread = ThreadId::generate();
+        let m = model();
+        let entries: Vec<Entry> =
+            (1..=30).map(|n| message(n, &thread, "dev-a", "alice", &format!("line {n}"))).collect();
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(entries)).unwrap();
+        let draw =
+            |page: &Page| crate::test_support::render::rendered(80, 24, |f| page.draw(f, f.area(), &m, at(40), true));
+        let newer = |shown: &str| {
+            let border = shown.lines().last().unwrap_or_default();
+            border
+                .split_once("↓ ")
+                .and_then(|(_, n)| n.split_once(" newer · End shows them"))
+                .map(|(n, _)| n.to_owned())
+        };
+        assert_eq!(newer(&draw(&page)), None, "following the latest");
+        page.key(Key::PageUp, &m.data, at(40));
+        let before = draw(&page);
+        let count: usize = newer(&before).unwrap().parse().unwrap();
+        page.history.stored(vec![message(31, &thread, "dev-a", "alice", "line 31")]);
+        let after = draw(&page);
+        let body = |shown: &str| shown.lines().take(23).map(str::to_owned).collect::<Vec<_>>();
+        assert_eq!(body(&after), body(&before), "the view stays");
+        assert_eq!(newer(&after), Some((count + 1).to_string()), "{after}");
+        page.key(Key::End, &m.data, at(40));
+        let latest = draw(&page);
+        assert!(latest.contains("line 31") && newer(&latest).is_none(), "{latest}");
     }
 
     #[test]
@@ -1246,10 +1588,10 @@ mod tests {
         let shown = screen(&page, &m, 80, at(40));
         let shown: Vec<&str> = shown.lines().map(|l| l.trim_end_matches('│').trim_end()).collect();
         let from = shown.iter().position(|l| l.contains("alice → dev-a")).unwrap();
-        assert_eq!(shown[from + 1..from + 5], ["│  done:", "│", "│  • one", "│  • two"], "{shown:#?}");
-        assert!(shown[from + 5].starts_with("│  ⎿ ● dev-a → dev-b  check retry.rs  "), "one line on its heading");
-        assert!(shown[from + 6].starts_with("│      ⎿ ● dev-b → notes  "), "{shown:#?}");
-        assert_eq!(shown[from + 7..from + 10], ["│          Found", "│", "│          in two places"]);
+        assert_eq!(shown[from + 1..from + 5], ["│   done:", "│", "│   • one", "│   • two"], "{shown:#?}");
+        assert!(shown[from + 5].starts_with("│   ⎿ ● dev-a → dev-b  check retry.rs  "), "one line on its heading");
+        assert!(shown[from + 6].starts_with("│       ⎿ ● dev-b → notes  "), "{shown:#?}");
+        assert_eq!(shown[from + 7..from + 10], ["│           Found", "│", "│           in two places"]);
     }
 
     #[test]
@@ -1264,8 +1606,8 @@ mod tests {
         let shown = screen(&page, &m, 80, at(40));
         let shown: Vec<&str> = shown.lines().map(|l| l.trim_end_matches('│').trim_end()).collect();
         let from = shown.iter().position(|l| l.contains("alice → dev-b")).unwrap();
-        let quoted = "│  ↪ replying to dev-a: picked dev-b for the deploy";
-        assert_eq!(shown[from + 1..from + 3], [quoted, "│  why that one?"], "{shown:#?}");
+        let quoted = "│   ↪ replying to dev-a: picked dev-b for the deploy";
+        assert_eq!(shown[from + 1..from + 3], [quoted, "│   why that one?"], "{shown:#?}");
     }
 
     #[test]
@@ -1288,11 +1630,11 @@ mod tests {
         let shown: Vec<&str> = shown.lines().map(|l| l.trim_end_matches('│').trim_end()).collect();
         let from = shown.iter().position(|l| l.contains("alice → bob")).unwrap();
         assert!(shown[from].contains("alice → bob  🔒 "), "{shown:#?}");
-        assert_eq!(shown[from + 1], "│  lunch at noon?");
+        assert_eq!(shown[from + 1], "│   lunch at noon?");
         assert!(shown[from + 3].contains("🔒") && !shown[from + 3].contains("forged"), "{shown:#?}");
-        assert_eq!(shown[from + 4], "│  [sealed] sent before this device had a key");
+        assert_eq!(shown[from + 4], "│   [sealed] sent before this device had a key");
         assert!(shown[from + 6].contains("🔒") && shown[from + 6].contains("  forged  "), "{shown:#?}");
-        assert!(shown[from + 7].starts_with("│  [forged] "), "{shown:#?}");
+        assert!(shown[from + 7].starts_with("│   [forged] "), "{shown:#?}");
     }
 
     #[test]
@@ -1321,6 +1663,82 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_f_marks_the_matches_and_steps_to_them_scrolling_by_line() {
+        let thread = ThreadId::generate();
+        let m = model();
+        let entries: Vec<Entry> = (1..=30)
+            .map(|n| {
+                message(
+                    n,
+                    &thread,
+                    "alice",
+                    "dev-a",
+                    &if n % 10 == 4 { format!("the Needle {n}") } else { format!("line {n}") },
+                )
+            })
+            .collect();
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(entries)).unwrap();
+        let shown = screen(&page, &m, 80, at(40));
+        assert!(!shown.contains("Needle 4 ") && shown.contains("line 30"), "{shown}");
+        assert!(page.find_key(Key::Ctrl('f')) && page.finding());
+        "needle".chars().for_each(|c| assert!(page.find_key(Key::Char(c))));
+        screen(&page, &m, 80, at(40));
+        assert_eq!(
+            page.find_footer().unwrap().to_string(),
+            " find: needle_ · 3 found · Enter next · Shift-Enter previous · Esc end"
+        );
+        assert!(page.find_key(Key::Enter));
+        screen(&page, &m, 80, at(40));
+        assert!(page.find_footer().unwrap().to_string().contains("3 of 3"), "the first match in view");
+        assert!(page.find_key(Key::Newline), "Shift-Enter: the previous match");
+        let shown = screen(&page, &m, 80, at(40));
+        assert!(shown.contains("the Needle 14 ") && !shown.contains("line 30"), "scrolled to it: {shown}");
+        assert!(page.find_footer().unwrap().to_string().contains("2 of 3"));
+        assert!(!page.find_key(Key::Up) && !page.finding(), "another key stops asking");
+        assert!(page.find_key(Key::Char('N')));
+        let shown = screen(&page, &m, 80, at(40));
+        assert!(
+            shown.contains("the Needle 4 ") && page.find_footer().unwrap().to_string().contains("1 of 3"),
+            "{shown}"
+        );
+        assert!(page.find_key(Key::Char('n')));
+        screen(&page, &m, 80, at(40));
+        assert!(page.find_footer().unwrap().to_string().contains("2 of 3"));
+        assert_eq!(page.selected, None, "the view scrolls, the selection stays");
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| page.draw(f, f.area(), &m, at(40), true)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let (x, y) = (0..24)
+            .flat_map(|y| (0..80).map(move |x| (x, y)))
+            .find(|&(x, y)| buffer[(x, y)].symbol() == "N" && buffer[(x + 1, y)].symbol() == "e")
+            .unwrap();
+        assert!(buffer[(x, y)].modifier.contains(Modifier::REVERSED), "the match marked");
+        assert!(page.find_key(Key::Esc) && page.find_footer().is_none(), "Esc ends it");
+        assert!(!page.find_key(Key::Char('n')), "n is no longer taken");
+    }
+
+    #[test]
+    fn a_question_wraps_at_words() {
+        let thread = ThreadId::generate();
+        let said = "Run a backfill now, even though it locks the orders table for an hour or so?";
+        // Asked of bob: a question to the human on screen would show whole on its card instead.
+        let mut asks = message(1, &thread, "dev-a", "bob", said);
+        asks.question = Some(Question::new(said, &["yes".to_owned(), "no".to_owned()], true).unwrap().into());
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(vec![asks])).unwrap();
+        let m = model();
+        for width in 60..=110 {
+            let shown = screen(&page, &m, width, at(2));
+            let conversation = shown.split('└').next().unwrap();
+            let words: Vec<&str> = conversation.split(|c: char| c.is_whitespace() || c == '│').collect();
+            for word in ["locks", "the", "orders", "table"] {
+                assert!(words.contains(&word), "{word:?} cut at {width}:\n{shown}");
+            }
+        }
+    }
+
+    #[test]
     fn keys_move_the_selection_copy_it_and_toggle_how_the_human_holds_the_thread() {
         let thread = ThreadId::generate();
         let mut m = model();
@@ -1336,8 +1754,8 @@ mod tests {
         assert_eq!(page.key(Key::Char('y'), data, at(8)), copy("only in worker/retry.rs"));
         page.key(Key::Home, data, at(8));
         assert_eq!(page.key(Key::Char('y'), data, at(8)), copy("deploy the site"));
-        page.key(Key::PageDown, data, at(8));
-        assert_eq!(page.selected, None, "past the latest it follows the latest again");
+        page.key(Key::End, data, at(8));
+        assert_eq!(page.selected, None, "End follows the latest again");
 
         let change = |change| Some(To::Do(Action::Change(thread.clone(), change, 7)));
         for (key, on) in [('p', Change::Pin(true)), ('m', Change::Mute(true)), ('e', Change::Archive(true))] {
@@ -1377,8 +1795,8 @@ mod tests {
         page.history.loaded(&thread, Ok(entries)).unwrap();
         let shown = screen(&page, &m, 80, at(3));
         // The paperclip takes two cells.
-        assert!(shown.contains("│  📎  before.png (1.5 KiB) image/png ◂"), "{shown}");
-        assert!(shown.contains("│  📎  after.png (1.5 KiB) image/png  "), "{shown}");
+        assert!(shown.contains("│   📎  before.png (1.5 KiB) image/png ◂"), "{shown}");
+        assert!(shown.contains("│   📎  after.png (1.5 KiB) image/png  "), "{shown}");
 
         let open = |page: &mut Page| match page.key(Key::Char('o'), &m.data, at(3)) {
             Some(To::Do(Action::Run(Job::Open(listed), text))) if text.is_empty() => listed.attachment.name,
@@ -1430,6 +1848,6 @@ mod tests {
             .filter(|&(x, y)| terminal.backend().buffer()[(x, y)].bg == red)
             .collect();
         let y = u16::try_from(line).unwrap() + 1;
-        assert_eq!(drawn, [(3, y), (4, y), (5, y), (6, y), (3, y + 1), (4, y + 1), (5, y + 1), (6, y + 1)]);
+        assert_eq!(drawn, [(4, y), (5, y), (6, y), (7, y), (4, y + 1), (5, y + 1), (6, y + 1), (7, y + 1)]);
     }
 }

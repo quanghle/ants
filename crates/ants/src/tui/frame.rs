@@ -107,6 +107,12 @@ fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
     if model.bar.focused {
         return Line::styled(" Enter send · Ctrl-J new line · Ctrl-G editor · / commands · Esc leave", dim());
     }
+    if model.focus == Focus::View
+        && let Page::Thread(page) = model.page()
+        && let Some(footer) = page.find_footer()
+    {
+        return footer;
+    }
     let card = match model.page() {
         Page::Home(page) => page.card(&model.data, now).map(|(cursor, _)| cursor),
         Page::Thread(page) => page.card(&model.data, now),
@@ -133,7 +139,7 @@ fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
 const HELP: &[(&str, &str)] = &[
     ("Tab", "move between the nav and the view"),
     ("↑↓ j k", "move the selection, or scroll a thread"),
-    ("PgUp PgDn Home End", "move further"),
+    ("PgUp PgDn Home End", "move further; in a thread: scroll half a view, first, latest"),
     ("Enter", "open the selection"),
     ("Esc", "back to the previous view, else to the nav"),
     ("Ctrl-O Ctrl-\\", "fold or show the nav; a thread's side panel (again: as the width has it)"),
@@ -149,13 +155,14 @@ const HELP: &[(&str, &str)] = &[
     ("1-9 Enter", "on a question: answer by number, or focus its card: ↑↓ ←→ Space Enter Esc"),
     ("g r f x d z s c o", "on home: grant, reply, forward, cancel, done, snooze, digest, credentials, held orders"),
     ("i > t S", "in a thread: reply, quote the selected, delegation tree, TL;DR"),
-    ("+ f u b T", "in a thread: react, forward, unread from, remind; tool calls"),
+    ("+ f u b T v", "in a thread: react, forward, unread from, remind; tool calls; pager"),
     ("o ]", "in a thread or channel: open the marked attachment, mark the next"),
     ("x Ctrl-X", "in a thread or work: cancel the prompt running there"),
     ("W E", "in a thread: withdraw a waiting message or post, or to edit it"),
     ("x y", "in a delegation tree: cancel every prompt in the selected subtree"),
     ("n M", "with a person: write a message; in a channel: notify level, members"),
     ("/", "the bar on /search, as in: /search deploy from:dev-a"),
+    ("Ctrl-F n N", "in a thread: find text, step to the next and previous match; elsewhere the bar on /search"),
     ("R ?", "read everything again, this help"),
     ("q Ctrl-C", "quit"),
 ];
@@ -289,7 +296,9 @@ mod tests {
         m.stored(vec![first, asked], at(1));
         let cut = |shown: &str| {
             assert!(shown.lines().next().is_some_and(|l| l.ends_with("● connected")), "{shown}");
-            let long = shown.lines().skip(1).filter(|l| l.contains("deploy") || l.contains("which"));
+            // A row cut with an ellipsis may still end at the edge with what follows the cut, as home's age.
+            let long =
+                shown.lines().skip(1).filter(|l| (l.contains("deploy") || l.contains("which")) && !l.contains('…'));
             long.map(|l| l.chars().collect::<Vec<_>>())
                 .any(|row| row.len() >= 80 && if row[79] == '│' { row[78] } else { row[79] }.is_alphanumeric())
         };

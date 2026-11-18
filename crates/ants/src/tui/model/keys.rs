@@ -57,26 +57,8 @@ impl Model {
         if let Some(action) = self.fold_key(key, now) {
             return Some(action);
         }
-        if !self.bar.focused
-            && self.focus == Focus::View
-            && let Some(Page::Dm(page)) = self.pages.last_mut()
-            && let Some(action) = page.write(key)
-        {
+        if let Some(action) = self.typed_key(key, now) {
             return action;
-        }
-        if !self.bar.focused
-            && self.focus == Focus::View
-            && let Some(Page::Ant(page)) = self.pages.last_mut()
-            && let Some(action) = page.write(key)
-        {
-            return action;
-        }
-        if !self.bar.focused
-            && self.focus == Focus::View
-            && let Some(Page::Channel(page)) = self.pages.last_mut()
-            && let Some(to) = page.write(key, &self.data)
-        {
-            return to.and_then(|to| self.go(to, now));
         }
         if !self.bar.focused
             && self.focus == Focus::View
@@ -89,7 +71,7 @@ impl Model {
         }
         match key {
             Key::Char('q') => Some(Action::Quit),
-            Key::Char('/') => {
+            Key::Char('/') | Key::Ctrl('f') => {
                 self.bar.focused = true;
                 if self.bar.is_empty() {
                     self.bar.set_text("/search ");
@@ -112,6 +94,24 @@ impl Model {
                 Focus::Nav => self.nav_key(key, now),
                 Focus::View => self.view_key(key, now),
             },
+        }
+    }
+
+    /// Take `key` if it is typed into what the view on screen holds: the text found in a thread, a DM's message, an
+    /// ant's prompt or a channel's editor.
+    fn typed_key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Option<Action>> {
+        if self.bar.focused || self.focus != Focus::View {
+            return None;
+        }
+        match self.pages.last_mut()? {
+            Page::Thread(page) => page.find_key(key).then_some(None),
+            Page::Dm(page) => page.write(key),
+            Page::Ant(page) => page.write(key),
+            Page::Channel(page) => {
+                let to = page.write(key, &self.data)?;
+                Some(to.and_then(|to| self.go(to, now)))
+            }
+            _ => None,
         }
     }
 
@@ -396,6 +396,7 @@ fn write(page: &mut Page, line: &str) -> bool {
     line.chars().all(|c| match page {
         Page::Dm(page) => page.write(Key::Char(c)).is_some(),
         Page::Ant(page) => page.write(Key::Char(c)).is_some(),
+        Page::Thread(page) => page.finding() && page.find_key(Key::Char(c)),
         _ => false,
     })
 }

@@ -10,8 +10,8 @@ use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{ListState, Paragraph};
 
 use super::attach;
 use super::command::Conversation;
@@ -299,18 +299,18 @@ impl Page {
             return;
         }
         let selected = self.at(data);
-        let items: Vec<ListItem> = posts
+        let items: Vec<Text> = posts
             .iter()
             .enumerate()
             .map(|(at, p)| {
                 let marked = (at == selected).then(|| self.mark.at(p.id, p.attachments.len()));
-                let inner = usize::from(area.width.saturating_sub(2));
-                ListItem::new(
+                let inner = usize::from(area.width.saturating_sub(3));
+                Text::from(
                     post_lines(p, data, now, marked).into_iter().map(|l| style::clip(l, inner)).collect::<Vec<_>>(),
                 )
             })
             .collect();
-        let list = List::new(items).block(block).highlight_style(style::highlight(focused));
+        let list = style::list(items, Some(selected), focused).block(block);
         frame.render_stateful_widget(list, area, &mut ListState::default().with_selected(Some(selected)));
         self.draw_editor(frame, head, tabs_row.union(area), data, now);
     }

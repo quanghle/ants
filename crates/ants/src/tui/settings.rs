@@ -14,7 +14,7 @@ use futures::future::LocalBoxFuture;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
 use super::model::{Action, Key, To};
@@ -239,7 +239,7 @@ impl Pane {
         if let Some(stale) = &reading.stale {
             block = block.title_bottom(Line::styled(format!(" {stale} "), Style::new().fg(style::WARNING)));
         }
-        let items: Vec<ListItem> = self
+        let items: Vec<Text> = self
             .fields()
             .into_iter()
             .map(|(field, value, secret)| {
@@ -251,10 +251,10 @@ impl Pane {
                 if secret {
                     spans.push(Span::styled("  (secret)", style::dim()));
                 }
-                ListItem::new(Line::from(spans))
+                Text::from(Line::from(spans))
             })
             .collect();
-        let list = List::new(items).block(block).highlight_style(style::highlight(focused && self.draft.is_none()));
+        let list = style::list(items, Some(self.at), focused && self.draft.is_none()).block(block);
         let mut state = ListState::default().with_selected(Some(self.at));
         frame.render_stateful_widget(list, area, &mut state);
     }

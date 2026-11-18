@@ -239,7 +239,7 @@ pub async fn run(nats: &crate::connection::Nats<'_>, since: Duration, compact: b
             looks,
             exec,
             model,
-            edit: None,
+            handover: None,
         };
         let ran = Box::pin(chat.run(&mut screen.terminal)).await;
         if let Err(e) = chat_state.and_then(|path| catchup::keep(&path, |kept| kept.ended = Some(Utc::now()))) {
@@ -345,8 +345,16 @@ struct Chat {
     /// The reads of the ants' identity records, for their avatars.
     looks: faces::Io,
     model: Model,
-    /// The command bar's text to edit in the editor.
-    edit: Option<String>,
+    /// What to hand the terminal over to next.
+    handover: Option<Handover>,
+}
+
+/// What takes the terminal for a while.
+enum Handover {
+    /// The editor, on the command bar's text.
+    Edit(String),
+    /// The pager, on a message's text.
+    Page(String),
 }
 
 impl Chat {
@@ -358,6 +366,14 @@ impl Chat {
             (ant, mood)
         });
         self.model.data.looks.tick(shown, started.elapsed().as_secs_f64())
+    }
+
+    /// Whether a spinner on screen is due its next frame since the screen was `drawn`.
+    fn spin(&self, drawn: Instant) -> bool {
+        let frame = |at: chrono::DateTime<Utc>| at.timestamp_millis() / thread::SPIN_MS;
+        let now = Utc::now();
+        self.model.spinning()
+            && frame(now) != frame(now - chrono::TimeDelta::from_std(drawn.elapsed()).unwrap_or_default())
     }
 
     /// Read the terminal and draw what changed, or everything every `REDRAW`.
@@ -375,6 +391,7 @@ impl Chat {
         *dirty |= self.held_log(logged);
         self.cards.threads(&self.model.data.live.order);
         *dirty |= self.animate(started);
+        *dirty |= self.spin(*drawn);
         if *dirty || drawn.elapsed() >= REDRAW {
             self.model.look(Utc::now());
             self.model.follow_drafts();
@@ -428,8 +445,11 @@ impl Chat {
                     return Ok(());
                 }
             }
-            if let Some(text) = self.edit.take() {
-                self.edit_in(terminal, text).await;
+            if let Some(handover) = self.handover.take() {
+                match handover {
+                    Handover::Edit(text) => self.edit_in(terminal, text).await,
+                    Handover::Page(text) => self.page_in(terminal, text).await,
+                }
                 dirty = true;
             }
             self.watch();
@@ -520,7 +540,21 @@ impl Chat {
 
     /// Edit `text` in the editor, which takes the terminal meanwhile, and take in what it left.
     async fn edit_in(&mut self, terminal: &mut DefaultTerminal, text: String) {
-        self.model.edited(edit(terminal, text).await);
+        let edited = hand_over(terminal, "the editor", move || compose::edit_text(&text)).await;
+        self.model.edited(edited);
+        self.redraw_images();
+    }
+
+    /// Show `text` in the pager, which takes the terminal meanwhile.
+    async fn page_in(&mut self, terminal: &mut DefaultTerminal, text: String) {
+        if let Err(e) = hand_over(terminal, "the pager", move || compose::page_text(&text)).await {
+            self.model.notify(format!("{e:#}"), Level::Error, Utc::now());
+        }
+        self.redraw_images();
+    }
+
+    /// Have the images drawn again, after the terminal was handed over.
+    fn redraw_images(&mut self) {
         if let Some(images) = &mut self.images {
             images.reset();
             self.model.data.images.clear();
@@ -615,7 +649,8 @@ impl Chat {
                 self.model.data.settled.deciding(&request);
                 self.feed.decide(*request, verdict, self.model.data.me().clone());
             }
-            Action::Edit(text) => self.edit = Some(text),
+            Action::Edit(text) => self.handover = Some(Handover::Edit(text)),
+            Action::Page(text) => self.handover = Some(Handover::Page(text)),
             Action::MarkChannel(channel, marks) => self.reads.mark_channel(channel, marks),
             Action::Reactions(messages) => self.reads.watch_reactions(messages),
             Action::React(message, reaction, remove) => self.reads.react(message, reaction, remove),
@@ -686,18 +721,22 @@ async fn next_image(
     }
 }
 
-/// Edit `text` in the editor, as `ants ask --edit` does, the terminal handed over to it meanwhile.
-async fn edit(terminal: &mut DefaultTerminal, text: String) -> Result<String> {
+/// Run `run`, as the editor or pager `what` names, with the terminal handed over to it meanwhile.
+async fn hand_over<T: Send + 'static>(
+    terminal: &mut DefaultTerminal,
+    what: &str,
+    run: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
     live::keyboard(false);
     live::bracket_pastes(false);
     ratatui::restore();
-    let edited = tokio::task::spawn_blocking(move || compose::edit_text(&text)).await;
+    let ran = tokio::task::spawn_blocking(run).await;
     terminal::enable_raw_mode().context("setting up the terminal")?;
     execute!(std::io::stdout(), terminal::EnterAlternateScreen).context("setting up the terminal")?;
     live::bracket_pastes(true);
     live::keyboard(true);
     terminal.clear().context("drawing")?;
-    edited.context("running the editor")?
+    ran.with_context(|| format!("running {what}"))?
 }
 
 /// The OSC 52 sequence that has the terminal put `text` on its clipboard, through SSH and tmux alike.

@@ -92,6 +92,8 @@ pub enum Action {
     Decide(Box<ApprovalRequest>, Verdict),
     /// Edit the command bar's text in the editor.
     Edit(String),
+    /// Show the text in the pager, else in the editor.
+    Page(String),
     /// React to the message so, or with true take the reaction back, as `ants react` does.
     React(Uuid, Reaction, bool),
     /// Find the messages matching the search, replacing any search running.
@@ -781,6 +783,11 @@ impl Model {
     }
 
     /// The ant shown, for its queue to be read.
+    /// Whether the view drawn last shows a spinner that moves, so that the screen is drawn at its frame rate.
+    pub fn spinning(&self) -> bool {
+        self.data.looks.animates() && matches!(self.page(), Page::Thread(page) if page.spinning.get())
+    }
+
     pub fn ant_shown(&self) -> Option<UserId> {
         let Page::Ant(page) = self.page() else { return None };
         Some(page.ant.clone())
@@ -1014,6 +1021,38 @@ mod tests {
             m.notice_at(at(5))
                 .is_some_and(|n| n.text == "thread deploy archived; its messages and its work stay as they are")
         );
+    }
+
+    #[test]
+    fn ctrl_f_finds_in_the_open_thread_and_elsewhere_opens_the_bar_on_search() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        m.key(Key::Tab, at(0));
+        assert_eq!(m.key(Key::Ctrl('f'), at(0)), None);
+        assert_eq!((m.bar.focused, m.bar.text()), (true, "/search ".to_owned()));
+        m.key(Key::Esc, at(0));
+        let messages =
+            vec![message(1, &thread, "alice", "dev-a", "deploy"), message(2, &thread, "dev-a", "alice", "deployed")];
+        m.stored(messages.clone(), at(1));
+        m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
+        m.take(live::Event::History(thread, Ok(messages)), at(1));
+        m.focus = Focus::View;
+        let footer = |m: &Model| {
+            let shown = crate::test_support::render::rendered(100, 20, |f| super::super::frame::draw(f, m, at(2)));
+            shown.lines().last().unwrap_or_default().to_owned()
+        };
+        m.key(Key::Ctrl('f'), at(2));
+        m.paste("depl", at(2));
+        for c in "oy".chars() {
+            assert_eq!(m.key(Key::Char(c), at(2)), None);
+        }
+        assert!(!m.bar.focused, "the footer takes the text");
+        assert!(footer(&m).starts_with(" find: deploy_ · 3 found"), "with the title: {}", footer(&m));
+        m.key(Key::Enter, at(2));
+        assert!(footer(&m).contains(" of 3"), "{}", footer(&m));
+        m.key(Key::Esc, at(2));
+        assert_eq!((m.page().name(), m.bar.focused), ("thread", false), "Esc ends the find, the thread stays");
+        assert!(!footer(&m).starts_with(" find"), "{}", footer(&m));
     }
 
     #[test]
