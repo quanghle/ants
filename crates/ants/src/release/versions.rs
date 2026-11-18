@@ -290,6 +290,7 @@ mod tests {
                 .map(|(name, version)| ants_proto::HarnessAgent { name: name.to_owned(), version: version.to_owned() }),
             capabilities: Vec::new(),
             whoami: None,
+            profile: None,
             workdir: None,
             started_at: now,
             heartbeat_at: now,

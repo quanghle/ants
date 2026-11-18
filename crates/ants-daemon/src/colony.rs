@@ -31,7 +31,8 @@ pub struct Registration {
 
 /// What the daemon is doing, shared by the inbox loop and the heartbeats: the messages being handled, the live
 /// harnesses, the agent the latest harness start named, whether the harness is signed out, held back by a provider
-/// limit or failing to start, the fallback answering meanwhile, whether memory is low, and whether the ant is paused.
+/// limit or failing to start, the fallback answering meanwhile, whether memory is low, whether the ant is paused, its
+/// drift and the profile it published.
 #[derive(Debug, Default)]
 pub struct Workload {
     handling: AtomicUsize,
@@ -44,12 +45,13 @@ pub struct Workload {
     memory_low: Mutex<Option<MemoryLow>>,
     paused: Mutex<Option<Paused>>,
     drift: Mutex<Vec<String>>,
+    profile: Mutex<Option<String>>,
     /// When the last message handled ended.
     worked: Mutex<Option<DateTime<Utc>>>,
     /// Wakes the heartbeats when the ant turns idle or working, its harness signed out or in or started with another
     /// agent, a provider limit starts or ends, the harness's start failures hold messages or no longer do, a fallback
-    /// starts or stops answering, memory turns low or recovers, the ant is paused or resumed, or its drift changes, so
-    /// the colony shows it before the next beat.
+    /// starts or stops answering, memory turns low or recovers, the ant is paused or resumed, or its drift or profile
+    /// changes, so the colony shows it before the next beat.
     changed: Notify,
 }
 
@@ -167,6 +169,19 @@ impl Workload {
         self.drift.locked().clone()
     }
 
+    /// Note the profile the ant's confirmed persona holds, or with `None` that it holds none.
+    pub fn set_profile(&self, profile: Option<String>) {
+        let mut current = self.profile.locked();
+        if *current != profile {
+            *current = profile;
+            self.changed.notify_one();
+        }
+    }
+
+    pub fn profile(&self) -> Option<String> {
+        self.profile.locked().clone()
+    }
+
     pub fn memory_low(&self) -> Option<MemoryLow> {
         self.memory_low.locked().clone()
     }
@@ -202,6 +217,7 @@ impl Workload {
         entry.memory_low = self.memory_low();
         entry.paused = self.paused();
         entry.drift = self.drift();
+        entry.profile = self.profile();
     }
 }
 
@@ -234,6 +250,7 @@ pub async fn entry(config: &Config) -> ColonyEntry {
         agent: None,
         capabilities: presence.capabilities.clone(),
         whoami: presence.whoami.clone(),
+        profile: None,
         workdir: Some(harness.workdir.display().to_string()),
         started_at: now,
         heartbeat_at: now,
@@ -426,6 +443,7 @@ async fn due(ticks: &mut tokio::time::Interval, workload: Option<&Workload>, ent
                 && entry.fallback == workload.fallback()
                 && entry.paused == workload.paused()
                 && entry.drift == workload.drift()
+                && entry.profile == workload.profile()
             {
                 // Turned and turned back before this task ran: nothing new to show.
                 continue;
@@ -705,6 +723,7 @@ mod tests {
             agent: None,
             capabilities: capabilities.iter().map(|c| (*c).to_owned()).collect(),
             whoami: None,
+            profile: None,
             workdir: None,
             started_at: now,
             heartbeat_at: now,
@@ -812,6 +831,18 @@ mod tests {
         assert_eq!(stamped.memory_low, Some(lower));
         workload.set_memory_low(None);
         assert!(futures::FutureExt::now_or_never(workload.changed.notified()).is_some(), "recovering too");
+
+        let profile = Some("Good for Rust daemons.".to_owned());
+        workload.set_profile(profile.clone());
+        assert!(futures::FutureExt::now_or_never(workload.changed.notified()).is_some(), "a profile shows at once");
+        workload.set_profile(profile.clone());
+        assert!(futures::FutureExt::now_or_never(workload.changed.notified()).is_none(), "the same profile again");
+        workload.stamp(&mut stamped);
+        assert_eq!(stamped.profile, profile);
+        workload.set_profile(None);
+        assert!(futures::FutureExt::now_or_never(workload.changed.notified()).is_some(), "its drop too");
+        workload.stamp(&mut stamped);
+        assert_eq!(stamped.profile, None);
     }
 
     #[test]

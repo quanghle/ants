@@ -5,7 +5,7 @@
 //! ([`Supervised`]). What any provider gets is here; what is built-in sense's alone is in [`crate::sense`].
 
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use ants_proto::UserId;
 use ants_proto::provider::{Capabilities, Connected, Info, InitializeParams, Provider};
@@ -26,6 +26,7 @@ pub mod wake;
 pub use definition::{Definition, NONE, Protocol, SENSE, Setting, define};
 pub use supervisor::Supervised;
 
+use crate::sense::Sense;
 use crate::sync::MutexExt as _;
 
 /// The capabilities ants declares at initialize: those it calls, and wake, which it serves ([`wake`]).
@@ -36,31 +37,10 @@ pub fn client() -> Info {
     Info { name: "ants".to_owned(), version: env!("CARGO_PKG_VERSION").to_owned() }
 }
 
-static SENSE_PROVIDER: OnceCell<Option<Connected>> = OnceCell::const_new();
-static PROVIDERS: LazyLock<Providers> = LazyLock::new(Providers::default);
-
-/// The provider of `ant`, connected: none when its setting is [`NONE`] or when it cannot be connected, the ant then
-/// going without one. An ant never [`assign`]ed has sense.
-pub async fn of(ant: &UserId) -> Option<Connected> {
-    PROVIDERS.of(ant).await
-}
-
-/// Serve `ant` with the provider `setting` names from now on, starting it if it is external and not running yet, or
-/// running with another definition.
-pub fn assign(ant: &UserId, setting: &Setting) {
-    PROVIDERS.assign(ant, setting);
-}
-
-/// Serve the ants listed with the providers their settings name, as [`assign`] does, and stop the external providers
-/// none of them names any more.
-pub fn reconcile<'a>(settings: impl IntoIterator<Item = (&'a UserId, &'a Setting)>) {
-    PROVIDERS.reconcile(settings);
-}
-
-/// Initialize `provider` and agree with it on what both sides use.
-pub async fn connect(provider: Arc<dyn Provider>) -> Option<Connected> {
+/// Initialize `provider` and agree with it on what both sides use, its wake requests waking the ants `wakers` lists.
+pub async fn connect(provider: Arc<dyn Provider>, wakers: &wake::Wakers) -> Option<Connected> {
     let params = InitializeParams::new(client(), USES);
-    let host = Arc::new(wake::Ants::default());
+    let host = Arc::new(wake::Ants::new(wakers.clone()));
     match Connected::connect(provider, params, host.clone()).await {
         Ok(connected) => {
             host.named(connected.name());
@@ -74,9 +54,54 @@ pub async fn connect(provider: Arc<dyn Provider>) -> Option<Connected> {
     }
 }
 
-/// The providers of a process's ants: the setting of each, and the external providers running.
-#[derive(Default)]
-struct Providers(Mutex<Registry>);
+/// The providers of a process's ants: the setting of each, the external providers running and built-in sense, with
+/// what they reach of the ants: the wakes of those served here ([`wake`]) and the outbox of their events
+/// ([`events`]). Made once where the process starts its ants; clones share it.
+#[derive(Clone)]
+pub struct Providers(Arc<Shared>);
+
+struct Shared {
+    registry: Mutex<Registry>,
+    sense: Sense,
+    /// Built-in sense, connected on first use.
+    connected: OnceCell<Option<Connected>>,
+    wakers: wake::Wakers,
+    outbox: events::Outbox,
+}
+
+impl Default for Providers {
+    fn default() -> Self {
+        Self(Arc::new_cyclic(|shared: &Weak<Shared>| {
+            let shared = shared.clone();
+            let resolve: events::Resolve = Arc::new(move |ant: UserId| {
+                let providers = shared.upgrade().map(Providers);
+                Box::pin(async move { providers?.of(&ant).await })
+            });
+            let wakers = wake::Wakers::default();
+            Shared {
+                registry: Mutex::default(),
+                sense: Sense::new(wakers.clone()),
+                connected: OnceCell::new(),
+                wakers,
+                outbox: events::Outbox::new(resolve),
+            }
+        }))
+    }
+}
+
+impl std::fmt::Debug for Providers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_set().entries(self.0.registry.locked().settings.keys()).finish()
+    }
+}
+
+impl PartialEq for Providers {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for Providers {}
 
 #[derive(Default)]
 struct Registry {
@@ -105,28 +130,37 @@ impl Registry {
 }
 
 impl Providers {
-    async fn of(&self, ant: &UserId) -> Option<Connected> {
-        let setting = self.0.locked().settings.get(ant).cloned().unwrap_or_default();
+    /// The provider of `ant`, connected: none when its setting is [`NONE`] or when it cannot be connected, the ant then
+    /// going without one. An ant never [`Providers::assign`]ed has sense.
+    pub async fn of(&self, ant: &UserId) -> Option<Connected> {
+        let setting = self.0.registry.locked().settings.get(ant).cloned().unwrap_or_default();
         match setting {
-            Setting::Sense => SENSE_PROVIDER.get_or_init(|| connect(crate::sense::built_in().provider())).await.clone(),
+            Setting::Sense => {
+                let sense = || connect(self.0.sense.provider(), &self.0.wakers);
+                self.0.connected.get_or_init(sense).await.clone()
+            }
             Setting::None => None,
             Setting::External(definition) => {
-                let supervised = self.0.locked().run(&definition);
-                connect(supervised).await
+                let supervised = self.0.registry.locked().run(&definition);
+                connect(supervised, &self.0.wakers).await
             }
         }
     }
 
-    fn assign(&self, ant: &UserId, setting: &Setting) {
-        let mut registry = self.0.locked();
+    /// Serve `ant` with the provider `setting` names from now on, starting it if it is external and not running yet,
+    /// or running with another definition.
+    pub fn assign(&self, ant: &UserId, setting: &Setting) {
+        let mut registry = self.0.registry.locked();
         if let Setting::External(definition) = setting {
             registry.run(definition);
         }
         registry.settings.insert(ant.clone(), setting.clone());
     }
 
-    fn reconcile<'a>(&self, settings: impl IntoIterator<Item = (&'a UserId, &'a Setting)>) {
-        let mut registry = self.0.locked();
+    /// Serve the ants listed with the providers their settings name, as [`Providers::assign`] does, and stop the
+    /// external providers none of them names any more.
+    pub fn reconcile<'a>(&self, settings: impl IntoIterator<Item = (&'a UserId, &'a Setting)>) {
+        let mut registry = self.0.registry.locked();
         registry.settings = settings.into_iter().map(|(ant, setting)| (ant.clone(), setting.clone())).collect();
         let named: Vec<Arc<Definition>> = registry
             .settings
@@ -150,6 +184,28 @@ impl Providers {
     }
 }
 
+impl Providers {
+    /// Built-in sense of the process.
+    pub fn sense(&self) -> &Sense {
+        &self.0.sense
+    }
+
+    /// Built-in sense of the process when `setting` names it.
+    pub fn sense_of(&self, setting: &Setting) -> Option<&Sense> {
+        matches!(setting, Setting::Sense).then_some(&self.0.sense)
+    }
+
+    /// The outbox of the events of the process's ants, delivering each to the ant's provider.
+    pub fn outbox(&self) -> &events::Outbox {
+        &self.0.outbox
+    }
+
+    /// The ants served here, which their providers may wake.
+    pub fn wakers(&self) -> &wake::Wakers {
+        &self.0.wakers
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ants_proto::provider::Capability;
@@ -158,11 +214,12 @@ mod tests {
 
     #[tokio::test]
     async fn every_ant_gets_sense_with_its_tools_and_brief() {
-        let provider = of(&"dev-a".parse().unwrap()).await.expect("sense connects");
+        let providers = Providers::default();
+        let provider = providers.of(&"dev-a".parse().unwrap()).await.expect("sense connects");
         assert_eq!(provider.name(), crate::sense::NAME);
         assert_eq!(provider.capabilities(), crate::sense::CAPABILITIES);
         assert!(provider.has(Capability::Tools) && provider.has(Capability::Context));
-        let other = of(&"dev-b".parse().unwrap()).await.unwrap();
+        let other = providers.of(&"dev-b".parse().unwrap()).await.unwrap();
         assert_eq!(other.agreed(), provider.agreed());
     }
 
@@ -184,14 +241,14 @@ mod tests {
         assert_eq!(providers.of(&a).await.expect("connected while down").name(), "memo");
         assert!(providers.of(&b).await.is_none());
         assert_eq!(providers.of(&"dev-d".parse().unwrap()).await.unwrap().name(), crate::sense::NAME);
-        assert_eq!(providers.0.locked().running.len(), 1, "one run for both ants");
+        assert_eq!(providers.0.registry.locked().running.len(), 1, "one run for both ants");
 
         let moved = Setting::External(Arc::new(Definition { command: "/nonexistent/memo2".into(), ..(*memo).clone() }));
         providers.reconcile([(&a, &moved)]);
-        let running = providers.0.locked().running["memo"].0.clone();
+        let running = providers.0.registry.locked().running["memo"].0.clone();
         assert_eq!(running.command, std::path::Path::new("/nonexistent/memo2"));
         providers.reconcile([]);
-        assert!(providers.0.locked().running.is_empty());
+        assert!(providers.0.registry.locked().running.is_empty());
         assert_eq!(providers.of(&a).await.unwrap().name(), crate::sense::NAME, "unlisted, back to sense");
     }
 }

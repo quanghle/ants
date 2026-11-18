@@ -215,7 +215,8 @@ Check: `subject == "ants.timeline." + thread_id + "." + ant`.
 ### `ColonyEntry` at `ants_colony` key `<ant>`
 
 What a daemon says of an ant it serves: `ant`, `machine`, `instance`, `harness`, `agent`? (`{name, version}`),
-`model`? (`{model, reasoning_effort, context}`), `capabilities`, `whoami`?, `workdir`, `started_at`, `heartbeat_at`,
+`model`? (`{model, reasoning_effort, context}`), `capabilities`, `whoami`?, `profile`? (what the ant is good for, in
+its own words), `workdir`, `started_at`, `heartbeat_at`,
 `activity` (`idle`, `working`), `handling`, `harnesses`, `escalate_to`?, `sage`? (the ant reviewing it), `drift`?
 (`[field, ...]`), `version`, `perms`, `signed_out`?, `limited`?, `failing`?, `fallback`?, `memory_low`? (`{since,
 available, max_harnesses}`), `paused`? (`{since, by?}`), `mcp`? (`true` when the harness's protocol reports its MCP

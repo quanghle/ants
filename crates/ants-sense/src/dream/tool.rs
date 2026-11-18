@@ -33,8 +33,9 @@ pub fn schema() -> Value {
                         "items": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "With applied: the ids of the memories written or voted on; none for a \
-                                            proposal, which applied confirms.",
+                            "description": "With applied: the ids of the memories or records written or voted \
+                                            on, or of the proposal made; none for a proposal, which applied \
+                                            confirms.",
                         },
                     },
                     "required": ["finding", "verdict", "reason"],
@@ -173,7 +174,9 @@ async fn verdicts(items: &dyn Items, dream: &Dream, given: Vec<GivenVerdict>) ->
         if known.is_some_and(|known| known.kind == FindingKind::Proposal) {
             written = known.map_or_else(Vec::new, |known| known.items.clone());
         } else if verdict == Judgement::Applied && written.is_empty() {
-            return Err(Answer::invalid(format!("Finding {finding}: applied names the items written or voted on.")));
+            return Err(Answer::invalid(format!(
+                "Finding {finding}: applied names the items written or voted on, or the proposal made."
+            )));
         }
         verdicts.retain(|earlier| earlier.finding != finding);
         verdicts.push(Verdict { finding: finding.to_owned(), verdict, reason, items: written, at });

@@ -41,6 +41,7 @@ async fn registered_humans_are_humans_to_the_tools() {
 async fn requests_are_routed_by_colony_capabilities() {
     let mut billing = listed("dev-c", &["Rust", "billing"]);
     billing.whoami = Some("Maintain billing services.\nReview invoices.".to_owned());
+    billing.profile = Some("Good for invoices and payment providers.".to_owned());
     let mut docs = listed("docs", &[]);
     docs.activity = ants_proto::Activity::Working;
     docs.agent = Some(ants_proto::HarnessAgent { name: "copilot".to_owned(), version: "1.0.3".to_owned() });
@@ -68,7 +69,9 @@ async fn requests_are_routed_by_colony_capabilities() {
             && text.contains("docs: no capabilities (copilot running copilot 1.0.3 on m1, working)"),
         "{text}"
     );
-    assert!(text.contains("whoami (advertised):\nMaintain billing services.\nReview invoices."), "{text}");
+    let described = "whoami (advertised):\nMaintain billing services.\nReview invoices.\n  profile (the ant's own \
+                     words):\nGood for invoices and payment providers.";
+    assert!(text.contains(described), "{text}");
     assert!(
         text.contains(
             "ops: billing (copilot on m1, signed out)\n  harness signed out since 2026-01-01T00:00:00Z: messages \

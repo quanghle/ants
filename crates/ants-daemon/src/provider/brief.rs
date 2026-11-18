@@ -125,7 +125,7 @@ pub(crate) mod fake {
     /// The fake answering `answer`, connected, with the context capability unless `context` is false.
     pub(crate) async fn connected(answer: Answer, context: bool) -> (Connected, Arc<Fake>) {
         let fake = Arc::new(Fake { answer, context, asked: Mutex::default() });
-        let connected = crate::provider::connect(fake.clone()).await.expect("the fake connects");
+        let connected = crate::provider::connect(fake.clone(), &Default::default()).await.expect("the fake connects");
         (connected, fake)
     }
 }

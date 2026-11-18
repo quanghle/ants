@@ -36,8 +36,10 @@ use crate::people::humans::Registry;
 use crate::permission::{Allowlist, PermissionPolicy};
 use crate::pool::{Pool, SessionStore};
 use crate::profile::identity::Identity;
+use crate::provider::Providers;
 use crate::provider::context::Callers;
 use crate::provider::events::{self, Lifecycle};
+use crate::provider::wake;
 use crate::publish::{Publish, Publisher};
 use crate::records::webhooks::Webhooks;
 use crate::secrets::redact::Redactor;
@@ -229,7 +231,7 @@ pub struct Storage {
 /// the NATS server can be reached and its JetStream answers the daemon keeps trying ([`bus::connect_retrying`]). A daemon
 /// that defers to others ([`Presence::defer_to_others`]) and hands the ant over waits for its turn again.
 pub async fn run(config: Config) -> Result<()> {
-    run_until(config, &Stop::default(), &Restarts::default()).await
+    run_until(config, &Stop::default(), &Restarts::default(), &Providers::default()).await
 }
 
 /// A request to stop serving one ant, as the first Ctrl-C does: it takes no more messages, hands back those waiting
@@ -244,9 +246,9 @@ impl Stop {
     }
 }
 
-/// [`run`], also stopping on `stop`'s request, and restarting the ant's harnesses on the admin orders `restarts`
-/// passes on.
-pub async fn run_until(config: Config, stop: &Stop, restarts: &Restarts) -> Result<()> {
+/// [`run`], also stopping on `stop`'s request, restarting the ant's harnesses on the admin orders `restarts` passes on,
+/// and serving the ant with its provider among `providers`, those of the process.
+pub async fn run_until(config: Config, stop: &Stop, restarts: &Restarts, providers: &Providers) -> Result<()> {
     let _serving = crate::monitoring::metrics::ant(&config.ant).serving();
     let _served = restarts.serve(&config.ant);
     let harness = &config.harness.harness;
@@ -255,7 +257,7 @@ pub async fn run_until(config: Config, stop: &Stop, restarts: &Restarts) -> Resu
     }
     let config = settle_worktrees(config).await;
     loop {
-        match Box::pin(serve(&config, stop, restarts)).await? {
+        match Box::pin(serve(&config, stop, restarts, providers)).await? {
             Served::Stopped => return Ok(()),
             Served::HandedOver => tracing::info!("another daemon serves the ant; waiting for it to stop"),
             Served::Moved => tracing::info!("the ant moved to another bus; waiting for `ants ant unseal`"),
@@ -343,7 +345,7 @@ async fn assistant_sealing(
 /// Serve the ant's inbox until Ctrl-C or `stop`, or until another daemon takes over its colony entry. A stop by a
 /// retirement marked while served ([`events::mark_retired`]) deletes the ant's channel and done consumers
 /// ([`bus::forget_retired`]) before it leaves the colony, which the retirement waits for to revoke its credentials.
-async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Served> {
+async fn serve(config: &Config, stop: &Stop, restarts: &Restarts, providers: &Providers) -> Result<Served> {
     let allow = Allowlist::parse(&config.policy.allow)?;
     // A mark left by an earlier retirement the ant was served again after, which a provider taking no events keeps.
     let retired_before = events::retirement(&config.storage.home).await;
@@ -377,7 +379,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         mcp,
         launch,
         mcp_sign_ins,
-    } = services(config, &client, &js, &humans, allow, &entry.machine).await?;
+    } = services(config, &client, &js, &humans, allow, &entry.machine, providers).await?;
     let stream = bus::open_stream(&js, &config.ant).await?;
     let threads = Threads::new(js.clone(), config.ant.clone(), sessions_kv.clone()).reading(reading);
     let storage = storage_watcher(config, &js, &sessions_kv);
@@ -385,7 +387,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
     let attempts_kv = bus::ensure_attempts(&js, config.connection.js_domain.as_ref(), &config.ant).await?;
     let attempts = Attempts::new(attempts_kv.clone(), config.ant.clone());
     let outbox = redacting_outbox(crate::mcp::jetstream_outbox(js.clone()), redactor.clone());
-    let _waking = crate::provider::wake::serve(&config.ant, &js, outbox, sessions.clone(), attempts_kv).await;
+    let _waking = wake::serve(providers, &config.ant, &js, outbox, sessions.clone(), attempts_kv).await;
     let (answered, buried) = delivery_marks(&config.storage.home).await;
     let pool = harness_pool(config, launch, sessions, &workload).await.with_lifecycle(lifecycle.clone());
     let publisher = publisher(config, &js, &redactor, &pool).await;
@@ -438,7 +440,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         identity: identity.as_ref(),
         home: &config.storage.home,
         lifecycle: lifecycle.as_ref(),
-        sense: crate::sense::of(&config.provider),
+        sense: providers.sense_of(&config.provider),
     };
     let served = Box::pin(serve_inbox(&inbox, messages, channels, config, stop, &registration, &storage)).await?;
     forget_if_retired(&served, config, &js, retired_before).await;
@@ -524,7 +526,7 @@ struct Services {
 }
 
 /// Set up the ant's redactor, approvals, notes, spending ledger, escalator and records, and start its MCP server, its
-/// provider's tool calls naming `machine` for the machine serving the ant.
+/// provider among `providers` taking tool calls naming `machine` for the machine serving the ant.
 async fn services(
     config: &Config,
     client: &async_nats::Client,
@@ -532,6 +534,7 @@ async fn services(
     humans: &Registry,
     allow: Allowlist,
     machine: &str,
+    providers: &Providers,
 ) -> Result<Services> {
     let redactor = std::sync::Arc::new(redactor(config.policy.redact, &config.harness));
     let colony = crate::mcp::jetstream_colony(js.clone());
@@ -549,13 +552,13 @@ async fn services(
     let ledger = ledger(&config.ant, &config.spending, &sessions_kv);
     let escalator = escalator(config, js, &colony, humans, &ledger, &redactor, assistants);
     let (identity, identity_id) = ant_records(config, js).await;
-    let sense = crate::sense::of(&config.provider);
+    let sense = providers.sense_of(&config.provider);
     if let Some(sense) = sense {
         sense.serve(&config.ant, &config.storage.home, config.connection.creds.clone());
         sense.identify(&config.ant, identity.clone());
     }
     let lifecycle = match &identity_id {
-        Some(id) => Lifecycle::open(events::outbox(), &config.ant, id, &config.storage.home)
+        Some(id) => Lifecycle::open(providers.outbox(), &config.ant, id, &config.storage.home)
             .await
             .map(|lifecycle| lifecycle.with_workdir(config.harness.workdir.clone())),
         None => None,
@@ -570,7 +573,7 @@ async fn services(
         Some(escalator.clone()),
     )
     .await?;
-    connect_mcp(&mut mcp, config, client, js, &redactor, humans).await?;
+    connect_mcp(&mut mcp, config, client, js, &redactor, humans, providers).await?;
     mcp.with_origins(crate::provider::origins::OriginStore::kv(sessions_kv.clone(), config.ant.clone()));
     if let Some(identity) = &identity {
         mcp.with_callers(Callers::new(config.ant.clone(), machine.to_owned(), identity.clone()));
@@ -718,7 +721,8 @@ fn escalator(
     std::sync::Arc::new(escalator)
 }
 
-/// Give the ant's MCP server its live inbox and its ways to the bus, and an assistant's the human it acts for.
+/// Give the ant's MCP server its live inbox, its ways to the bus and its provider among `providers`, and an
+/// assistant's the human it acts for.
 async fn connect_mcp(
     mcp: &mut Mcp,
     config: &Config,
@@ -726,6 +730,7 @@ async fn connect_mcp(
     js: &jetstream::Context,
     redactor: &std::sync::Arc<Redactor>,
     humans: &Registry,
+    providers: &Providers,
 ) -> Result<()> {
     mcp.listen(bus::live_inbox(client, &config.ant).await?);
     mcp.with_channels(redacting_posts(crate::mcp::jetstream_channels(js.clone()), redactor.clone()));
@@ -741,8 +746,8 @@ async fn connect_mcp(
         mcp.with_requester(requester.clone());
     }
     mcp.manage_channels(crate::chanadm::nats_admin(client.clone(), js.clone()));
-    crate::provider::assign(&config.ant, &config.provider);
-    if let Some(provider) = crate::provider::of(&config.ant).await {
+    providers.assign(&config.ant, &config.provider);
+    if let Some(provider) = providers.of(&config.ant).await {
         mcp.with_provider(provider);
     }
     assist(mcp, config, js, humans).await;
@@ -1013,6 +1018,12 @@ where
         () = inbox.hear_restarts() => {}
         () = inbox.hear_clones() => {}
         () = inbox.hear_mcp() => {}
+        () = async {
+            match inbox.sense {
+                Some(sense) => sense.publish_profile(&config.ant, inbox.workload).await,
+                None => std::future::pending().await,
+            }
+        } => {}
         () = crate::secrets::creds::recheck(config.connection.creds.as_deref()) => {}
         () = storage.watch(crate::monitoring::storage::CHECK_EVERY) => {}
         () = tell_unserved(inbox.js, inbox.humans, &mut unserved) => {}

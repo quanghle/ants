@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ants_proto::provider::{
     BriefReason, BriefRequest, Event, EventKind, Format, Origin, Output, Provider, Starter, ToolResult,
@@ -9,7 +10,9 @@ use uuid::Uuid;
 
 use super::*;
 use crate::cache::Cache;
-use crate::log::{AccountVerifier, AntLog, EventLog, MemoryLog, NoRevocations, Unsigned};
+use crate::log::{
+    AccountVerifier, AntLog, AppendError, EventLog, LogError, MemoryLog, NoRevocations, Stored, Unsigned,
+};
 use crate::memory::{NOTE, RECALLED_BEGIN, RECALLED_END};
 use crate::store::{Store, Stores};
 use crate::tools::Handler;
@@ -32,7 +35,7 @@ impl Stores for One {
 }
 
 /// sense keeping the items of its one ant in `log`.
-async fn sense_on(log: MemoryLog, sense: SenseId) -> (Sense, Arc<dyn Items>) {
+async fn sense_on(log: impl EventLog + Send + Sync + 'static, sense: SenseId) -> (Sense, Arc<dyn Items>) {
     let verifier = AccountVerifier::new(vec![], NoRevocations);
     let log = AntLog::new(log, Unsigned, verifier, sense, "dev-a".parse().unwrap(), "m1".parse().unwrap(), None);
     let store = Store::open(log.unwrap(), Cache::in_memory().unwrap()).await.unwrap();
@@ -179,24 +182,101 @@ async fn an_empty_ant_is_told_to_start_a_register_and_the_tool_shows_the_brief_a
 }
 
 #[tokio::test]
-async fn successful_provider_calls_notify_the_sleeping_scheduler() {
+async fn a_call_writing_wakes_the_schedule_of_its_ant_alone_and_one_reading_none() {
     let (sense, _) = sense().await;
-    let mut changes = sense.changes();
-    let call = ToolCall {
-        name: "remember".into(),
-        arguments: json!({"kind":"fact","title":"Parser spans","body":"Tokens carry byte spans."})
-            .as_object()
-            .unwrap()
-            .clone(),
+    let mut changes = sense.changes(&"dev-a".parse().unwrap());
+    let others = sense.changes(&"dev-b".parse().unwrap());
+    let tool = |name: &str, arguments: Value| ToolCall {
+        name: name.into(),
+        arguments: arguments.as_object().unwrap().clone(),
         context: context(THREAD),
         format: Format::Json,
     };
-    assert!(!changes.has_changed().unwrap());
-    assert!(!sense.call_tool(call.clone()).await.unwrap().is_error);
+    let remember = tool("remember", json!({"kind":"fact","title":"Parser spans","body":"Tokens carry byte spans."}));
+    assert!(!sense.call_tool(tool("brief", json!({}))).await.unwrap().is_error);
+    assert!(!changes.has_changed().unwrap(), "a read wakes no schedule");
+    assert!(!sense.call_tool(remember.clone()).await.unwrap().is_error);
     assert!(changes.has_changed().unwrap());
+    assert!(!others.has_changed().unwrap(), "the write was of dev-a's items");
     changes.borrow_and_update();
-    assert!(sense.call_tool(call).await.unwrap().is_error, "duplicate memory");
+    assert!(sense.call_tool(remember).await.unwrap().is_error, "duplicate memory");
     assert!(!changes.has_changed().unwrap(), "refused calls do not change the schedule");
+}
+
+/// A log counting its reads, one each time a store caught up with it catches up again, and failing them with
+/// `failure` when one is set.
+#[derive(Default)]
+struct Counting {
+    log: MemoryLog,
+    reads: Arc<AtomicUsize>,
+    failure: Arc<std::sync::Mutex<Option<LogError>>>,
+}
+
+impl EventLog for Counting {
+    async fn append(&self, sense: &SenseId, payload: Vec<u8>, expected_last: u64) -> Result<u64, AppendError> {
+        self.log.append(sense, payload, expected_last).await
+    }
+
+    async fn read_after(&self, sense: &SenseId, after: u64, limit: usize) -> Result<Vec<Stored>, LogError> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        if let Some(failure) = self.failure.lock().unwrap().clone() {
+            return Err(failure);
+        }
+        self.log.read_after(sense, after, limit).await
+    }
+
+    async fn last_sequence(&self, sense: &SenseId) -> Result<u64, LogError> {
+        self.log.last_sequence(sense).await
+    }
+
+    fn incarnation(&self) -> &str {
+        self.log.incarnation()
+    }
+}
+
+#[tokio::test]
+async fn a_brief_syncs_the_log_once_and_serves_its_reads_from_the_cache() {
+    let reads = Arc::new(AtomicUsize::new(0));
+    let (sense, _) = sense_on(Counting { reads: reads.clone(), ..Counting::default() }, SenseId::new()).await;
+    call(&sense, thread::checkpoint, THREAD, json!({"goal": "Ship the parser", "next": "Write the tests"})).await;
+    call(&sense, thread::handoff, OTHER, json!({"done": ["Lexer"], "next": ["Parser"]})).await;
+    let core = json!({"kind": "preference", "title": "Short commits", "body": "Keep each commit small.", "core": true});
+    call(&sense, memory::remember, THREAD, core).await;
+    session_brief(&sense, 8_000).await;
+    let before = reads.load(Ordering::SeqCst);
+    let brief = session_brief(&sense, 8_000).await;
+    assert!(brief.contains("Ship the parser") && brief.contains("Short commits"), "{brief}");
+    assert_eq!(reads.load(Ordering::SeqCst) - before, 1);
+    let call = ToolCall {
+        name: "brief".into(),
+        arguments: serde_json::Map::new(),
+        context: context(THREAD),
+        format: Format::Text,
+    };
+    assert!(!sense.call_tool(call).await.unwrap().is_error);
+    assert_eq!(reads.load(Ordering::SeqCst) - before, 2, "a tool call syncs once too");
+}
+
+#[tokio::test]
+async fn a_log_failing_other_than_out_of_reach_fails_the_calls_reading_the_cache() {
+    let failure = Arc::new(std::sync::Mutex::new(None));
+    let (sense, _) = sense_on(Counting { failure: failure.clone(), ..Counting::default() }, SenseId::new()).await;
+    call(&sense, thread::checkpoint, THREAD, json!({"goal": "Ship the parser", "next": "Write the tests"})).await;
+    let recall = || ToolCall {
+        name: "recall".into(),
+        arguments: json!({"query": "parser"}).as_object().unwrap().clone(),
+        context: context(THREAD),
+        format: Format::Text,
+    };
+    let brief = || sense.brief(BriefRequest { context: context(THREAD), budget: 8_000, reason: BriefReason::Started });
+    *failure.lock().unwrap() = Some(LogError::unreachable("hub timed out"));
+    assert!(brief().await.unwrap().text.contains("Ship the parser"), "offline, the cache serves");
+    assert!(!sense.call_tool(recall()).await.unwrap().is_error);
+    *failure.lock().unwrap() = Some(LogError::refused("permission denied"));
+    let error = brief().await.unwrap_err();
+    assert!(error.message.contains("permission denied"), "{error:?}");
+    let answer = sense.call_tool(recall()).await.unwrap();
+    assert!(answer.is_error && matches!(&answer.output, Output::Text(text) if text.contains("permission denied")));
 }
 
 #[tokio::test]

@@ -127,7 +127,7 @@ fn a_packet_over_its_budget_leaves_out_threads_before_it_cuts_the_identity_to_ti
         whole: format!("\n### Persona\n\n{}\n", "Voice: plain.\n".repeat(300)),
         titles: "\nCut to titles for room.\n\n### Persona\n\nFields: Voice.\n".into(),
     };
-    let within = |budget| compose(&dream, None, &[], &ant(), &identity, &threads, budget);
+    let within = |budget| compose(&dream, Earlier::Last(None), &[], &ant(), &identity, &threads, budget);
     let whole = within(PACKET_BUDGET);
     assert!(whole.contains(&identity.whole) && whole.contains("message 3"), "{whole}");
     assert!(whole.find("## Findings").unwrap() < whole.find("## Identity").unwrap(), "{whole}");

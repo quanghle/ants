@@ -15,8 +15,7 @@ use std::fmt::Write as _;
 
 use ants_proto::UserId;
 use ants_proto::provider::{BRIEF_BUDGET, BoxFuture, CallContext, ToolCall};
-use chrono::{DateTime, Utc};
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::identity::{self, Card};
 use crate::items::{Item, ItemId};
@@ -58,12 +57,19 @@ const CORE_LOOP: &[(&str, &str)] = &[
     (
         "identity",
         "show who the ant is; replace the self-model or a relationship record from the revision shown; propose a \
-         change of values, voice, boundaries or working style, which a later dream confirms",
+         change of values, voice, boundaries, working style or the profile the colony reads, which a later dream \
+         confirms",
     ),
     ("skill", "read a skill; propose a new, changed or removed one, which a later dream confirms"),
     ("handoff", "hand the work over as the thread's last write"),
     ("brief", "show this brief again"),
 ];
+
+/// What a module of work gives its section of the brief: a line for each item, and the tool call showing them all.
+pub(crate) struct Listing {
+    pub lines: Vec<String>,
+    pub more: &'static str,
+}
 
 /// When a section shortens and is cut over the brief's budget: each in turn, until the brief fits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,9 +235,7 @@ async fn sections(items: &dyn Items, context: &CallContext, card: Option<&Card>)
     {
         sections.push(Section::cut_with("## Last handoff", last.text().trim_end().to_owned(), thread::READ));
     }
-    sections.extend(commitments_section(items, context.at).await?);
-    sections.extend(reminders_sections(items, context.at).await?);
-    sections.extend(tasks_sections(items, context).await?);
+    sections.extend(work_sections(items, context).await?);
     sections.extend(relationships_section(&records::relationships(items, &participants(context)).await?));
     let episodes: Vec<_> = handoffs.into_iter().filter_map(|handoff| handoff.episode).collect();
     sections.extend(memories_section(items, context, &episodes).await?);
@@ -324,7 +328,8 @@ fn persona_section(found: Option<&Item>) -> Section {
             ..Section::cut_with("## Persona", persona::text(&found.values), "sense_identity")
         },
         None => {
-            let body = "No persona yet: propose values, voice, boundaries or working style with sense_identity.";
+            let body = "No persona yet: propose values, voice, boundaries, working style or a profile for the colony \
+                        with sense_identity.";
             Section::whole("## Persona".to_owned(), body.to_owned())
         }
     }
@@ -419,107 +424,21 @@ fn handoffs_section(handoffs: &[Handoff], more: bool) -> Option<Section> {
     Some(section)
 }
 
-async fn commitments_section(items: &dyn Items, now: DateTime<Utc>) -> Result<Option<Section>, StoreError> {
-    let promises = promise::open(items, now).await?;
-    let lines = promises
-        .iter()
-        .map(|item| {
-            let overdue =
-                if item.text("due").parse::<DateTime<Utc>>().is_ok_and(|due| due <= now) { ", overdue" } else { "" };
-            format!(
-                "- {} (revision {}, open{overdue}): {} — to {}, due {}; source thread {}",
-                item.id,
-                item.revision,
-                item.text("title"),
-                item.text("promisee"),
-                item.text("due"),
-                item.text("source_thread")
-            )
-        })
-        .collect();
-    Ok(work_section("## Open commitments", lines, "sense_promise action=list"))
-}
-
-async fn reminders_sections(items: &dyn Items, now: DateTime<Utc>) -> Result<Vec<Section>, StoreError> {
-    let (mut fired, mut upcoming) = (Vec::new(), Vec::new());
-    for item in remind::active(items, now).await? {
-        let is_fired = item.values.get("occurrence_firings").and_then(Value::as_u64).unwrap_or(0) > 0;
-        let mut line = format!(
-            "- {} (revision {}, {}): {}",
-            item.id,
-            item.revision,
-            if is_fired { "fired" } else { "upcoming" },
-            item.text("title")
-        );
-        if is_fired {
-            let pending = item.values.get("pending");
-            let firing = pending.or_else(|| item.values.get("delivered"));
-            if let Some(firing) = firing {
-                let _ = write!(
-                    line,
-                    "; firing {} at {}",
-                    firing["id"].as_str().unwrap_or_default(),
-                    firing["at"].as_str().unwrap_or_default()
-                );
-            }
-            line.push_str(if pending.is_some() { "; delivery pending" } else { "; awaiting acknowledgement" });
-        }
-        if let Some(next) = item.values.get("next_due").and_then(Value::as_str) {
-            let _ = write!(line, "; next {next}");
-        }
-        if !is_fired && let Some(trigger) = item.values.get("trigger") {
-            let _ = write!(line, "; trigger {trigger}");
-        }
-        let _ = write!(line, "; thread {}", item.text("thread"));
-        if let Some(promise) = item.values.get("promise").and_then(Value::as_str) {
-            let _ = write!(line, "; commitment {promise}");
-        }
-        if is_fired {
-            fired.push(line);
-        } else {
-            upcoming.push(line);
-        }
-    }
+/// The sections of the work: open commitments, fired and upcoming reminders, claimed and ready tasks.
+async fn work_sections(items: &dyn Items, context: &CallContext) -> Result<Vec<Section>, StoreError> {
+    let [fired, upcoming] = remind::brief(items, context.at).await?;
+    let [claimed, ready] = task::brief(items, context).await?;
     Ok([
-        work_section("## Fired reminders", fired, "sense_remind action=list"),
-        work_section("## Upcoming reminders", upcoming, "sense_remind action=list"),
+        ("## Open commitments", promise::brief(items, context.at).await?),
+        ("## Fired reminders", fired),
+        ("## Upcoming reminders", upcoming),
+        ("## Claimed tasks (this thread)", claimed),
+        ("## Ready tasks", ready),
     ]
     .into_iter()
-    .flatten()
+    .filter(|(_, listing)| !listing.lines.is_empty())
+    .map(|(heading, listing)| Section::cut_with(heading, listing.lines.join("\n"), listing.more))
     .collect())
-}
-
-async fn tasks_sections(items: &dyn Items, context: &CallContext) -> Result<Vec<Section>, StoreError> {
-    let mut claimed = Vec::new();
-    for found in task::claimed(items, &context.thread, usize::MAX).await? {
-        let mut line = task_line(&found);
-        if found.task.lease.as_ref().is_some_and(|lease| lease.expires_at <= context.at) {
-            let _ = write!(line, "; lease expired; claim again: sense_task action=claim id={}", found.id());
-        } else if let Some(token) = task::fencing_token(items, &found).await? {
-            let _ = write!(line, "; claim token {token}");
-        }
-        claimed.push(line);
-    }
-    let ready = task::ready(items, usize::MAX).await?.iter().map(task_line).collect();
-    Ok([
-        work_section("## Claimed tasks (this thread)", claimed, "sense_task action=list limit=100"),
-        work_section("## Ready tasks", ready, "sense_task action=ready limit=100"),
-    ]
-    .into_iter()
-    .flatten()
-    .collect())
-}
-
-fn task_line(found: &task::TaskItem) -> String {
-    let mut line = format!("- {}", found.text());
-    if let Some(reference) = &found.task.external_ref {
-        let _ = write!(line, "; external {reference}");
-    }
-    line
-}
-
-fn work_section(heading: &str, lines: Vec<String>, more: &str) -> Option<Section> {
-    (!lines.is_empty()).then(|| Section::cut_with(heading, lines.join("\n"), more))
 }
 
 /// The core memories, then the top memories of the thread's scopes but the `episodes` of the handoffs shown.

@@ -88,7 +88,8 @@ async fn a_persona_proposal_is_offered_after_twelve_hours_and_takes_effect_once_
     assert!(confirmed.text.contains(&format!("Proposal {id} (confirmed")), "{}", confirmed.text);
     let current = persona::current(&*items).await.unwrap().unwrap();
     assert_eq!(persona::text(&current.values), "Voice: Plain and brief.");
-    assert_eq!((current.text("reason"), current.text("proposal")), ("Users skim.", id.to_string().as_str()));
+    let confirmation = Confirmation::of(&current.values);
+    assert_eq!((confirmation.reason.as_str(), confirmation.proposal.as_ref()), ("Users skim.", Some(&id)));
     assert_eq!(status(&*items, &id).await, Status::Confirmed);
     let (dream, _) = dream::get(&*items, dream.number).await.unwrap().unwrap();
     assert_eq!(dream.verdicts[0].items, std::slice::from_ref(&id), "the verdict names the proposal");
@@ -120,6 +121,30 @@ async fn the_persona_changes_at_most_once_a_day_and_keeps_every_version_with_its
     assert_eq!(versions.len(), 2, "{history:?}");
     assert_eq!((versions[0]["reason"].as_str(), versions[0]["voice"].as_str()), (Some("Second."), None));
     assert_eq!((versions[1]["reason"].as_str(), versions[1]["voice"].as_str()), (Some("First."), Some("Warm.")));
+}
+
+#[tokio::test]
+async fn a_confirmed_profile_is_published_until_the_persona_drops_it() {
+    let (sense, kept) = sense().await;
+    let items: Arc<dyn Items> = kept.clone();
+    let good_for = "Good for Rust daemons and NATS.";
+    propose(&sense, at(0), json!({"voice": "Plain.", "profile": good_for, "reason": "To be found."})).await;
+    assert_eq!(persona::profile(&*items).await.unwrap(), None, "a proposal publishes nothing yet");
+    let dream = dream_on(&*items, at(12), 1, Vec::new()).await;
+    let finding = offered(&dream)[0].clone();
+    assert!(finding.text.contains(&format!("Profile: {good_for}")), "{}", finding.text);
+    assert!(finding.text.contains("the profile shows in the ant's colony entry"), "{}", finding.text);
+    assert!(!judge(&sense, 1, &finding.id, "applied").await.is_error);
+    assert_eq!(persona::profile(&*items).await.unwrap().as_deref(), Some(good_for));
+
+    propose(&sense, at(1), json!({"profile": "", "reason": "Found already."})).await;
+    let dream = dream_on(&*items, Utc::now(), 2, Vec::new()).await;
+    let finding = offered(&dream)[0].clone();
+    assert!(finding.text.contains("the profile leaves the ant's colony entry"), "{}", finding.text);
+    let tomorrow = Utc::now() + Duration::hours(25);
+    decide(&*items, dream.number, &finding, &verdict(&finding, Judgement::Applied), tomorrow).await.unwrap();
+    assert_eq!(persona::profile(&*items).await.unwrap(), None);
+    assert_eq!(persona::text(&persona::current(&*items).await.unwrap().unwrap().values), "Voice: Plain.");
 }
 
 #[tokio::test]

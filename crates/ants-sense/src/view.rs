@@ -24,9 +24,10 @@ use crate::Sense;
 use crate::brief::{TOP_EXPERIENCE, identity_text};
 use crate::dream::{self, DREAM, Dream};
 use crate::identity::{self, card};
+use crate::items::stamp;
 use crate::memory::{self, DEFAULT_LIMIT};
 use crate::persona::{self, PERSONA, persona_id};
-use crate::proposal::{self, time};
+use crate::proposal::{self, Confirmation, time};
 use crate::records;
 use crate::skill::{self, SKILL, skill_id};
 use crate::store::{Items, StoreError};
@@ -41,7 +42,7 @@ const RESERVE: usize = 1024;
 /// The memories view of `ant`.
 pub async fn memories(sense: &Sense, ant: AntRef) -> Result<MemoriesView, RpcError> {
     let read = async {
-        let items = sense.items(&ant.ant).await?;
+        let items = sense.synced(&ant.ant).await?;
         entries(&*items, &ant.ant, Utc::now()).await
     };
     match read.await {
@@ -90,10 +91,11 @@ async fn persona_entry(items: &dyn Items) -> Result<Option<MemoryEntry>, StoreEr
     let mut content = match &current {
         Some(current) => {
             let _ = write!(key, ", revision {}", current.revision);
+            let confirmation = Confirmation::of(&current.values);
             format!(
                 "Confirmed {}: {}\n{}",
-                current.text("confirmed"),
-                current.text("reason"),
+                confirmation.confirmed.map_or_default(stamp),
+                confirmation.reason,
                 persona::text(&current.values)
             )
         }

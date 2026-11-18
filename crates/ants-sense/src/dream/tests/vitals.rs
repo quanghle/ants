@@ -97,7 +97,7 @@ fn a_packet_leaves_out_the_vital_signs_by_thread_after_the_threads() {
         packet::Thread { signs: replied(1), ..thread(1, 3_000, false) },
         packet::Thread { signs: replied(1), ..thread(2, 3_000, false) },
     ];
-    let compose = |budget| compose(&dream, None, &[], &ant(), &Identity::default(), &threads, budget);
+    let compose = |budget| compose(&dream, Earlier::Last(None), &[], &ant(), &Identity::default(), &threads, budget);
     let whole = compose(PACKET_BUDGET);
     assert!(whole.contains("\nBy thread:\n") && whole.contains("| prompts replied | 2 |"), "{whole}");
     let least = compose(0);
