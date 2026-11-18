@@ -7,6 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
 use ants_proto::{ApprovalRequest, ThreadId};
+use unicode_width::UnicodeWidthChar as _;
 
 use super::COMMANDS;
 use crate::tui::exec::Quoted;
@@ -163,7 +164,7 @@ impl Bar {
                 return;
             }
         }
-        // Shown as spaces, since the bar counts a character a column.
+        // Shown as spaces, a tab having no width of its own.
         let text = text.replace('\t', "    ");
         let at = self.cursor;
         self.chars.splice(at..at, text.chars());
@@ -243,7 +244,8 @@ impl Bar {
         Edited::Done
     }
 
-    /// The lines the text takes at `width`, and the cursor's line and column among them.
+    /// The lines the text takes at `width` columns, and the cursor's line and column among them. A character of no
+    /// width, such as a combining mark, goes with the one before it.
     fn lines(&self, width: usize) -> (Vec<String>, (usize, usize)) {
         let width = width.max(1);
         let (mut lines, mut line) = (Vec::new(), String::new());
@@ -261,7 +263,8 @@ impl Bar {
             let label = self.pasted(*c).map(|paste| placeholder(u32::from(*c) - PASTED + 1, paste));
             let shown = label.as_deref().unwrap_or_else(|| c.encode_utf8(&mut one));
             for (nth, c) in shown.chars().enumerate() {
-                if column == width {
+                let columns = c.width().unwrap_or(0);
+                if columns > 0 && column > 0 && column + columns > width {
                     lines.push(std::mem::take(&mut line));
                     column = 0;
                     if at == self.cursor && nth == 0 {
@@ -269,11 +272,11 @@ impl Bar {
                     }
                 }
                 line.push(c);
-                column += 1;
+                column += columns;
             }
         }
         if self.cursor == self.chars.len() {
-            if column == width {
+            if column >= width {
                 lines.push(std::mem::take(&mut line));
                 column = 0;
             }
@@ -431,5 +434,18 @@ mod tests {
         bar.key(Key::Home);
         assert_eq!(bar.lines(4).1, (0, 0));
         assert_eq!(bar.height(6), 3);
+    }
+
+    #[test]
+    fn wide_characters_take_two_columns_and_a_combining_mark_none() {
+        let mut bar = Bar::default();
+        bar.set_text("héllo 👍 wide 日本語 end");
+        assert_eq!(bar.lines(110).1, (0, 24), "the cursor where the text ends");
+        bar.set_text("a日本\u{301}b");
+        assert_eq!(bar.lines(4), (vec!["a日".into(), "本\u{301}b".into()], (1, 3)), "wrapped at 4 columns");
+        bar.key(Key::Left);
+        assert_eq!(bar.lines(4).1, (1, 2), "the mark with the character before it");
+        bar.set_text("e\u{301}");
+        assert_eq!(bar.lines(1), (vec!["e\u{301}".into(), String::new()], (1, 0)));
     }
 }
