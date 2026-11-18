@@ -8,13 +8,12 @@ use chrono::Utc;
 use serde_json::{Value, json};
 
 use super::{
-    BY, Dream, FindingKind, Judgement, MAX_DREAM_WRITES, MAX_FINDINGS, MAX_REASON_CHARS, State, TRIES, Verdict, close,
-    get,
+    BY, Dream, FindingKind, Judgement, MAX_DREAM_WRITES, MAX_FINDINGS, MAX_REASON_CHARS, State, Verdict, close, get,
 };
 use crate::items::{ItemId, Values};
 use crate::proposal::{self, Status};
 use crate::sanitize::{Limit, sanitize_title};
-use crate::store::{Items, StoreError, Write};
+use crate::store::{Items, StoreError, Write, read_modify_write};
 use crate::tools::Answer;
 use crate::{Sense, skill};
 
@@ -91,13 +90,14 @@ async fn dream_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
     {
         let _ = write!(warning, "\nWarning: the skill files were not written, the next brief tries again: {e}.");
     }
-    for _ in 0..TRIES {
-        let gone = || unavailable(StoreError::NotFound(Dream::id(dream.number)));
-        let (mut current, revision) = get(&*items, dream.number).await.map_err(unavailable)?.ok_or_else(gone)?;
+    let (items, dream, verdicts, decided, warning) = (&*items, &dream, &verdicts, &decided, &warning);
+    let answer = read_modify_write(|| async move {
+        let gone = || StoreError::NotFound(Dream::id(dream.number));
+        let (mut current, revision) = get(items, dream.number).await?.ok_or_else(gone)?;
         if current.state == State::Done {
-            return Err(finished(&current));
+            return Ok(Err(finished(&current)));
         }
-        for verdict in &verdicts {
+        for verdict in verdicts {
             current.verdicts.retain(|earlier| earlier.finding != verdict.finding);
             current.verdicts.push(verdict.clone());
         }
@@ -108,24 +108,20 @@ async fn dream_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
             values.insert("verdicts".into(), json!(current.verdicts));
             vec![Write::Change { id: Dream::id(current.number), values, expected: Some(revision) }]
         };
-        match items.write(&writes, BY).await {
-            Ok(written) => {
-                if done {
-                    current.state = State::Done;
-                    current.diary = written.first().map(|diary| diary.id.clone());
-                }
-                let mut answer = answered(&current, verdicts.len());
-                for found in &decided {
-                    let _ = write!(answer.text, "\n{}", found.line());
-                }
-                answer.text.push_str(&warning);
-                return Ok(answer);
-            }
-            Err(StoreError::Conflict { .. }) => {}
-            Err(e) => return Err(unavailable(e)),
+        let written = items.write(&writes, BY).await?;
+        if done {
+            current.state = State::Done;
+            current.diary = written.first().map(|diary| diary.id.clone());
         }
-    }
-    Err(unavailable(StoreError::Unavailable(format!("dream {} kept changing meanwhile", dream.number))))
+        let mut answer = answered(&current, verdicts.len());
+        for found in decided {
+            let _ = write!(answer.text, "\n{}", found.line());
+        }
+        answer.text.push_str(warning);
+        Ok(Ok(answer))
+    })
+    .await;
+    answer.map_err(unavailable)?
 }
 
 /// The verdicts `arguments` give on findings of `dream`, checked.

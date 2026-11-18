@@ -21,6 +21,10 @@ pub enum StoreError {
     /// A change expected another revision of the item than its current one, given.
     #[error("item {} is at revision {}, not {expected}", current.id, current.revision)]
     Conflict { expected: u64, current: Box<Item> },
+    /// Other writers kept changing the item between a read of it and the write decided on it, [`TRIES`] times
+    /// ([`read_modify_write`]).
+    #[error("item {0} kept changing meanwhile")]
+    Contended(ItemId),
     #[error("sense's data is not available: {0}")]
     Unavailable(String),
     /// No daemon connection has opened the ant's log here, and no existing cache can serve it.
@@ -492,6 +496,30 @@ async fn holds(log: &impl EventLog, built: &crate::cache::Built) -> Result<bool,
     }
     let read = log.read_after(&built.sense, sequence - 1, 1).await?;
     Ok(read.first().is_some_and(|stored| stored.sequence == *sequence && stored.sha256() == tip.sha256))
+}
+
+/// How many times a read-modify-write of items is made before it gives up ([`read_modify_write`]). Each write of one
+/// is appended to the log in turn by [`APPEND_TRIES`] attempts of its own, decided again on what others appended.
+pub const TRIES: usize = 8;
+
+/// Read items, decide on them and write the change at the revisions read, by `attempt`: made again from the reading
+/// while the write is refused as another writer changed an item meanwhile ([`StoreError::Conflict`]), [`TRIES`] times
+/// at most, then given up as [`StoreError::Contended`]. An attempt changing several items writes them at once
+/// ([`Items::write`]), so all of them change or none.
+pub async fn read_modify_write<T, F>(mut attempt: impl FnMut() -> F) -> Result<T, StoreError>
+where
+    F: Future<Output = Result<T, StoreError>>,
+{
+    let mut tries = 1;
+    loop {
+        match attempt().await {
+            Err(StoreError::Conflict { current, .. }) if tries >= TRIES => {
+                return Err(StoreError::Contended(current.id));
+            }
+            Err(StoreError::Conflict { .. }) => tries += 1,
+            result => return result,
+        }
+    }
 }
 
 /// An ant's items as sense's tools reach them, each call taking its turn: a [`Store`] behind a lock.

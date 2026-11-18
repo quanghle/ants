@@ -13,9 +13,8 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 
 use super::{Citation, MEMORY, MemoryItem, Status, normalize_remote};
 use crate::items::{ItemId, Values};
-use crate::store::{Items, StoreError};
+use crate::store::{Items, StoreError, read_modify_write};
 
-const TRIES: usize = 3;
 const RECHECK_BY: &str = "sense:citation-recheck";
 const MAX_GIT_METADATA_BYTES: u64 = 64 * 1024;
 
@@ -106,71 +105,81 @@ pub async fn recheck_citations(items: &dyn Items, workdir: &Path) -> Result<Cita
     Ok(summary)
 }
 
-async fn recheck(
+/// Recheck the citations of `found`, read again when a change of it is refused as another writer changed it meanwhile.
+async fn recheck(items: &dyn Items, found: MemoryItem, repository: &Repository) -> Result<CitationRecheck, StoreError> {
+    let id = &found.id().clone();
+    let mut read = Some(found);
+    read_modify_write(|| {
+        let read = read.take();
+        async move {
+            let found = match read {
+                Some(found) => found,
+                None => match items.get(id).await?.and_then(MemoryItem::of) {
+                    Some(found) => found,
+                    None => return Ok(CitationRecheck::default()),
+                },
+            };
+            recheck_once(items, &found, repository).await
+        }
+    })
+    .await
+}
+
+async fn recheck_once(
     items: &dyn Items,
-    mut found: MemoryItem,
+    found: &MemoryItem,
     repository: &Repository,
 ) -> Result<CitationRecheck, StoreError> {
-    for _ in 0..TRIES {
-        let memory = &found.memory;
-        if !memory.status.live() {
-            return Ok(CitationRecheck::default());
+    let memory = &found.memory;
+    if !memory.status.live() {
+        return Ok(CitationRecheck::default());
+    }
+    let mut summary = CitationRecheck::default();
+    let mut warnings = Vec::new();
+    let mut problem = false;
+    for (index, citation) in memory.citations.iter().enumerate() {
+        if !repository.matches(citation) {
+            summary.skipped += 1;
+            warnings.extend(memory.citation_warnings.iter().filter(|warning| warning.citation == index).cloned());
+            continue;
         }
-        let mut summary = CitationRecheck::default();
-        let mut warnings = Vec::new();
-        let mut problem = false;
-        for (index, citation) in memory.citations.iter().enumerate() {
-            if !repository.matches(citation) {
+        let result = repository.snapshot(citation).await;
+        let reason = match (result, &citation.hash) {
+            (Ok(_), None) => {
                 summary.skipped += 1;
                 warnings.extend(memory.citation_warnings.iter().filter(|warning| warning.citation == index).cloned());
                 continue;
             }
-            let result = repository.snapshot(citation).await;
-            let reason = match (result, &citation.hash) {
-                (Ok(_), None) => {
-                    summary.skipped += 1;
-                    warnings
-                        .extend(memory.citation_warnings.iter().filter(|warning| warning.citation == index).cloned());
-                    continue;
-                }
-                (Ok(_), Some(hash)) if !valid_hash(hash) => Some(CitationProblem::InvalidHash),
-                (Ok(snapshot), Some(hash)) if snapshot.hash.eq_ignore_ascii_case(hash) => {
-                    summary.unchanged += 1;
-                    None
-                }
-                (Ok(_), Some(_)) => Some(CitationProblem::Changed),
-                (Err(reason), _) => Some(reason),
-            };
-            summary.checked += 1;
-            if let Some(reason) = reason {
-                problem = true;
-                warnings.push(CitationWarning { citation: index, reason });
+            (Ok(_), Some(hash)) if !valid_hash(hash) => Some(CitationProblem::InvalidHash),
+            (Ok(snapshot), Some(hash)) if snapshot.hash.eq_ignore_ascii_case(hash) => {
+                summary.unchanged += 1;
+                None
             }
-        }
-        if problem || (!warnings.is_empty() && memory.status == Status::NeedsReview) {
-            summary.needs_review.push(found.id().clone());
-            summary.marked = usize::from(problem && memory.status == Status::Active);
-        }
-        let mut values = Values::new();
-        if problem && memory.status != Status::NeedsReview {
-            values.insert("status".into(), json!(Status::NeedsReview));
-        }
-        if warnings != memory.citation_warnings {
-            values.insert("citation_warnings".into(), if warnings.is_empty() { Value::Null } else { json!(warnings) });
-        }
-        if values.is_empty() {
-            return Ok(summary);
-        }
-        match items.change(found.id(), values, Some(found.item.revision), RECHECK_BY).await {
-            Ok(_) => return Ok(summary),
-            Err(StoreError::Conflict { current, .. }) => match MemoryItem::of(*current) {
-                Some(current) => found = current,
-                None => return Ok(CitationRecheck::default()),
-            },
-            Err(e) => return Err(e),
+            (Ok(_), Some(_)) => Some(CitationProblem::Changed),
+            (Err(reason), _) => Some(reason),
+        };
+        summary.checked += 1;
+        if let Some(reason) = reason {
+            problem = true;
+            warnings.push(CitationWarning { citation: index, reason });
         }
     }
-    Err(StoreError::Unavailable(format!("memory {} kept changing during citation recheck", found.id())))
+    if problem || (!warnings.is_empty() && memory.status == Status::NeedsReview) {
+        summary.needs_review.push(found.id().clone());
+        summary.marked = usize::from(problem && memory.status == Status::Active);
+    }
+    let mut values = Values::new();
+    if problem && memory.status != Status::NeedsReview {
+        values.insert("status".into(), json!(Status::NeedsReview));
+    }
+    if warnings != memory.citation_warnings {
+        values.insert("citation_warnings".into(), if warnings.is_empty() { Value::Null } else { json!(warnings) });
+    }
+    if values.is_empty() {
+        return Ok(summary);
+    }
+    items.change(found.id(), values, Some(found.item.revision), RECHECK_BY).await?;
+    Ok(summary)
 }
 
 /// Fill missing metadata from the actual repository, not a caller's claimed scope. Supplied baselines are compared,

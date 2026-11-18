@@ -20,7 +20,7 @@ use super::{MemoryItem, Status, WRITER, writer};
 use crate::Sense;
 use crate::items::{ItemId, Values};
 use crate::sanitize::{Limit, sanitize_title};
-use crate::store::{StoreError, Write};
+use crate::store::{StoreError, Write, read_modify_write};
 use crate::tools::Answer;
 
 /// The kind of the items holding votes.
@@ -28,8 +28,6 @@ pub const VOTE: &str = "vote";
 
 /// The most characters of a vote's reason.
 const MAX_REASON_CHARS: usize = 500;
-/// How many times a vote is counted again on a memory changed meanwhile.
-const TRIES: usize = 3;
 
 /// A thread's feedback on a memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -127,17 +125,19 @@ async fn vote_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
         return Err(Answer::error("untrusted", message.into()));
     }
     let items = sense.items(&context.ant).await.map_err(unavailable)?;
-    let ballot = ItemId::named(VOTE, &format!("{id}/{}", context.thread));
-    for _ in 0..TRIES {
-        let found = items.get(&id).await.map_err(unavailable)?.and_then(MemoryItem::of);
-        let found = found.ok_or_else(|| Answer::error("not_found", format!("No memory {id}.")))?;
+    let (items, id, reason) = (&*items, &id, &reason);
+    let ballot = &ItemId::named(VOTE, &format!("{id}/{}", context.thread));
+    let answer = read_modify_write(|| async move {
+        let Some(found) = items.get(id).await?.and_then(MemoryItem::of) else {
+            return Ok(Err(Answer::error("not_found", format!("No memory {id}."))));
+        };
         let memory = &found.memory;
         if !memory.status.live() {
             let by = memory.superseded_by.as_ref().map_or_else(String::new, |by| format!(" by {by}"));
             let message = format!("Memory {id} is {}{by}: vote on a live one.", memory.status.name());
-            return Err(Answer::error("conflict", message));
+            return Ok(Err(Answer::error("conflict", message)));
         }
-        let cast = items.get(&ballot).await.map_err(unavailable)?;
+        let cast = items.get(ballot).await?;
         let previous = cast.as_ref().and_then(|cast| cast.text("vote").parse::<Vote>().ok());
         let mut votes = memory.votes.clone();
         if let Some(previous) = previous {
@@ -171,13 +171,16 @@ async fn vote_in(sense: &Sense, call: &ToolCall) -> Result<Answer, Answer> {
             },
             Write::Change { id: id.clone(), values: changed, expected: Some(found.item.revision) },
         ];
-        match items.write(&writes, context.thread.as_str()).await {
-            Ok(written) => return Ok(voted(&found, vote, previous, status, &votes, written[1].revision)),
-            Err(StoreError::Conflict { .. }) => continue,
-            Err(e) => return Err(unavailable(e)),
+        let written = items.write(&writes, context.thread.as_str()).await?;
+        Ok(Ok(voted(&found, vote, previous, status, &votes, written[1].revision)))
+    })
+    .await;
+    match answer {
+        Err(StoreError::Contended(_)) => {
+            Err(Answer::error("conflict", format!("Memory {id} kept changing meanwhile: try again.")))
         }
+        answer => answer.map_err(unavailable)?,
     }
-    Err(Answer::error("conflict", format!("Memory {id} kept changing meanwhile: try again.")))
 }
 
 fn voted(

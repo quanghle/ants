@@ -23,9 +23,9 @@ use uuid::Uuid;
 
 use crate::cache::CacheError;
 use crate::items::{Item, Values};
-use crate::log::{APPEND_TRIES, SENSE_DIR, read_status};
+use crate::log::{SENSE_DIR, read_status};
 use crate::remind;
-use crate::store::{Items, StoreError, Write};
+use crate::store::{Items, StoreError, Write, read_modify_write};
 
 /// The file of [`SENSE_DIR`] holding the ant's sense id.
 pub const ID_FILE: &str = "id";
@@ -347,7 +347,7 @@ pub async fn card(items: &dyn Items) -> Result<Option<Card>, StoreError> {
 /// An event ending the ant's dormancy resumes its reminders in the same write ([`remind::resumed`]).
 pub async fn record_event(items: &dyn Items, event: &Event) -> Result<Card, StoreError> {
     let apply = |card: &mut Card| card.apply(event);
-    for _ in 0..APPEND_TRIES {
+    read_modify_write(|| async move {
         let Some(item) = items.list(CARD, 1).await?.pop() else {
             return update(items, &event.ant, event.at, apply).await;
         };
@@ -363,13 +363,9 @@ pub async fn record_event(items: &dyn Items, event: &Event) -> Result<Card, Stor
             values: card.patch(&item.values)?,
             expected: Some(item.revision),
         });
-        match items.write(&writes, BY).await {
-            Ok(mut written) => return Card::of(&written.pop().expect("the card written last")),
-            Err(StoreError::Conflict { .. }) => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Err(kept_changing())
+        Card::of(&items.write(&writes, BY).await?.pop().expect("the card written last"))
+    })
+    .await
 }
 
 /// Note on the card in `items`, made first when there is none, the session starting as `context` says.
@@ -396,15 +392,19 @@ async fn update(
     at: DateTime<Utc>,
     change: impl Fn(&mut Card),
 ) -> Result<Card, StoreError> {
-    for _ in 0..APPEND_TRIES {
-        let Some(item) = items.list(CARD, 1).await?.pop() else {
-            let mut card = Card::new(items.sense().await, ant.clone(), items.earlier_names().await, at);
-            change(&mut card);
-            let (item, created) = items.single(CARD, card.values()?, BY).await?;
-            if created {
-                return Card::of(&item);
+    let change = &change;
+    read_modify_write(|| async move {
+        let item = match items.list(CARD, 1).await?.pop() {
+            Some(item) => item,
+            None => {
+                let mut card = Card::new(items.sense().await, ant.clone(), items.earlier_names().await, at);
+                change(&mut card);
+                let (item, created) = items.single(CARD, card.values()?, BY).await?;
+                if created {
+                    return Card::of(&item);
+                }
+                item
             }
-            continue;
         };
         let current = Card::of(&item)?;
         let mut card = current.clone();
@@ -412,17 +412,9 @@ async fn update(
         if card == current {
             return Ok(card);
         }
-        match items.change(&item.id, card.patch(&item.values)?, Some(item.revision), BY).await {
-            Ok(item) => return Card::of(&item),
-            Err(StoreError::Conflict { .. }) => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Err(kept_changing())
-}
-
-fn kept_changing() -> StoreError {
-    StoreError::Unavailable("other writers kept changing the card".into())
+        Card::of(&items.change(&item.id, card.patch(&item.values)?, Some(item.revision), BY).await?)
+    })
+    .await
 }
 
 #[cfg(test)]
