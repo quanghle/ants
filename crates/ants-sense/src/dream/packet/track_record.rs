@@ -5,7 +5,8 @@
 //! The sage keeps nothing between reviews: its record of an ant lives in the ant's dreams and comes back
 //! in each packet, holding the findings of that sage alone. It takes at most a share of the packet's budget
 //! ([`TRACK_RECORD_SHARE`]), the earlier reviews' findings left out first, and shrinks to its tally for room before the
-//! identity is cut to titles.
+//! identity is cut to titles. The verdicts and outcomes the ant's reviews tell the sage's records reach further back:
+//! [`OUTCOME_DAYS`] ([`outcomes`]).
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
@@ -24,6 +25,9 @@ use crate::store::{Items, StoreError};
 
 /// The days of the ant's active time, its dormancies not counted, a sage's earlier findings reach back over.
 pub const TRACK_RECORD_DAYS: i64 = 30;
+/// The days of the ant's active time, its dormancies not counted, over which the verdicts on a sage's findings, and
+/// whether an applied one still holds, are told to the sage's records (`review_outcomes`): further than the packet shows.
+pub const OUTCOME_DAYS: i64 = 90;
 /// The share of a packet's budget the sage's earlier findings take at most: one part in this many.
 pub const TRACK_RECORD_SHARE: usize = 8;
 
@@ -86,7 +90,7 @@ pub async fn track_record(
 ) -> Result<TrackRecord, StoreError> {
     let card = crate::identity::card(items).await?;
     let ages = memory::Ages::new(dream.at, card.iter().flat_map(|card| card.dormant(dream.at)));
-    let dreams = earlier(items, dream.number, &ages).await?;
+    let dreams = earlier(items, dream.number, &ages, TRACK_RECORD_DAYS).await?;
     let verdicts = last_verdicts(&dreams);
     let mut vitals = Vitals::new(items, dream, &dreams);
     let mut record = TrackRecord {
@@ -137,13 +141,12 @@ pub async fn track_record(
     Ok(record)
 }
 
-/// The dreams before dream `number` that began within [`TRACK_RECORD_DAYS`] of the ant's active time, by `ages`, the
-/// latest first.
-async fn earlier(items: &dyn Items, number: u64, ages: &memory::Ages) -> Result<Vec<Dream>, StoreError> {
+/// The dreams before dream `number` that began within `days` of the ant's active time, by `ages`, the latest first.
+async fn earlier(items: &dyn Items, number: u64, ages: &memory::Ages, days: i64) -> Result<Vec<Dream>, StoreError> {
     let mut dreams = Vec::new();
     for number in (1..number).rev() {
         let Some((earlier, _)) = get(items, number).await? else { continue };
-        if ages.since(earlier.at) > Duration::days(TRACK_RECORD_DAYS) {
+        if ages.since(earlier.at) > Duration::days(days) {
             break;
         }
         dreams.push(earlier);
@@ -260,16 +263,17 @@ fn own(dream: &Dream) -> impl Iterator<Item = (&Finding, String)> {
 }
 
 /// What the review of dream `number`, by `ages` of the ant's active time, tells `sage` of its earlier findings for the
-/// ant: those of the dreams [`track_record`] covers whose last verdict, or for one applied whether what was written
-/// for it still holds ([`outcome`]), is new since the ant's earlier reviews by `sage` told them, the oldest first, each
-/// by its id in the sage's record of its review ([`own`]) and with the reason for the verdict ([`told_reason`]).
+/// ant: those of the dreams begun within [`OUTCOME_DAYS`] before it whose last verdict, or for one applied whether what
+/// was written for it still holds ([`outcome`]), is new since the ant's earlier reviews by `sage` told them, the oldest
+/// first, each by its id in the sage's record of its review ([`own`]) and with the reason for the verdict
+/// ([`told_reason`]).
 pub(in crate::dream) async fn outcomes(
     items: &dyn Items,
     number: u64,
     ages: &memory::Ages,
     sage: &UserId,
 ) -> Result<Vec<FindingOutcome>, StoreError> {
-    let dreams = earlier(items, number, ages).await?;
+    let dreams = earlier(items, number, ages, OUTCOME_DAYS).await?;
     let verdicts = last_verdicts(&dreams);
     let by_sage: Vec<_> = dreams.iter().rev().filter(|earlier| earlier.sage.as_ref() == Some(sage)).collect();
     let mut told = HashMap::new();

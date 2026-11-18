@@ -62,8 +62,8 @@ pub use identity_findings::{
     OWN_AFTER_THREADS, PERSONA_AFTER_THREADS, RELATIONSHIP_AFTER_THREADS, SELF_MODEL_AFTER_THREADS, STALE_ACTIVE_DAYS,
 };
 pub use packet::{
-    Action, Earlier, Identity, MIN_THREAD_BYTES, PACKET_BUDGET, REVIEWING_SHARE, Reader, Reviewing, Thread,
-    TrackRecord, compose, packet, reviewing, track_record,
+    Action, Earlier, Identity, MIN_THREAD_BYTES, OUTCOME_DAYS, PACKET_BUDGET, REVIEWING_SHARE, Reader, Reviewing,
+    TRACK_RECORD_DAYS, Thread, TrackRecord, compose, packet, reviewing, track_record,
 };
 pub use practice_findings::{
     COSTLY_REVIEW_COST_MICROS, COSTLY_REVIEW_TOKENS, COSTLY_REVIEWS, JUDGED_FINDINGS, PRACTICE_DAYS, QUOTED_REASONS,

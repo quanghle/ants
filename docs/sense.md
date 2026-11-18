@@ -690,28 +690,28 @@ silent for 6 hours. A later answer prompts no one: the readable findings of the 
 rules, come first among the findings of the ant's next dream, numbered after the packet's own, to answer there as any
 offered again (the limit of 20 holds); an answer arriving after the next dream began is dropped.
 
-**The sage's records:** the review message carries, besides the commits it names, the dream's number and what is new
-in the verdicts and outcomes of the sage's earlier findings since the ant's last review by the sage
-(`review_outcomes`): each finding's last verdict, the ant's reason for it (`reason`, at most 200 characters, on one
-line, its secrets redacted, the ant's text and untrusted) and, for one applied, whether it still holds, as the earlier
-findings judge them, only where the verdict or whether it holds differs from what the ant's earlier review messages
-told. The message takes the same
-outcomes on every try. The sage's daemon tells the sage's sense of each review: the message makes the review's record,
-an item of kind `review` named after the ant and its dream, and applies the verdicts and outcomes it carries to the
-records of the earlier reviews; the sage's answer gives the record its findings by kind, read and numbered as the ant's
-daemon reads them, the first answer kept. Sense alone writes the records, as it does the thread records, from the
-ant, the dream, the review thread, when the message arrived and was answered, and each finding's id, kind, verdict,
-whether it holds and when that was last told, with the reason told with the verdict, sanitized again and cut to 200
-characters: no text of the ant's threads nor of the findings. The reasons show only in a `rejected_kind` finding
-(above). With the answer, the
-sage's daemon hands over what the review thread spent, from its spend ledger (`<ant>.<thread>.spend`,
+**The sage's records:** the review message carries, besides the commits it names, the dream's number and what is new in
+the verdicts and outcomes of the sage's earlier findings since the ant's last review by the sage (`review_outcomes`):
+each finding's last verdict, the ant's reason for it (`reason`, at most 200 characters, on one line, its secrets
+redacted, the ant's text and untrusted) and, for one applied, whether it still holds, as the earlier findings judge
+them, over the dreams begun within the ant's last 90 active days, only where the verdict or whether it holds differs
+from what the ant's earlier review messages told. The message takes the same outcomes on every try. The sage's daemon
+tells the sage's sense of each review: the message makes the review's record, an item of kind `review` named after the
+ant and its dream, and applies the verdicts and outcomes it carries to the records of the earlier reviews; the sage's
+answer gives the record its findings by kind, read and numbered as the ant's daemon reads them, the first answer kept.
+Sense alone writes the records, as it does the thread records, from the ant, the dream, the review thread, when the
+message arrived and was answered, and each finding's id, kind, verdict, whether it holds and when that was last told,
+with the reason told with the verdict, sanitized again and cut to 200 characters: no text of the ant's threads nor of
+the findings. The reasons show only in a `rejected_kind` finding (above). With the answer, the sage's daemon hands over
+what the review thread spent, from its spend ledger (`<ant>.<thread>.spend`,
 [config.md](config.md#prompt-limits-and-spending-caps)): the tokens and cost the harness reported over every prompt on
-it, retries and restarts included, which the record keeps as the review's spend; nothing reported leaves it unknown,
-and a human's message on the thread starts the ledger over. A message or answer delivered again changes nothing. A finding's verdict and outcome reach the records only while its dream is within the
-30 active days the earlier findings cover. The verdicts on the findings of an answer arriving after the ant went on
-with the packet alone, given in the next dream, reach the record of the review they answer, by the sage's numbering.
-The tally of the sage's identity is counted from these records ([Identity](#identity)). A clone
-inherits no review record.
+it, retries and restarts included, which the record keeps as the review's spend; nothing reported leaves it unknown, and
+a human's message on the thread starts the ledger over. A message or answer delivered again changes nothing. A finding's
+verdict and outcome reach the records only while its dream began within the ant's last 90 active days (its dormancies
+not counted), though the earlier findings show 30. The verdicts on the findings of an answer arriving after the ant went
+on with the packet alone, given in the next dream, reach the record of the review they answer, by the sage's numbering.
+The tally of the sage's identity is counted from these records ([Identity](#identity)). A clone inherits no review
+record.
 
 **On the dream thread,** `sense_dream` answers findings: `verdicts`, a list of `{finding, verdict, reason, items?}`,
 `verdict` being `applied` (naming in `items` the memories or records written or voted on, or the proposal made; none
