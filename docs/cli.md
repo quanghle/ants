@@ -173,8 +173,9 @@ A quoted reply (`ants ask --reply-to`, `ants post --reply-to`, or `>` in the `an
 
 `ants chat` enables mouse reporting by default (`[cli] mouse = false` disables it). The wheel scrolls the
 conversation, list or overlay under the pointer one line at a time. Click a row, navigation entry, state tab,
-question option or completion to select it; click again to open or apply it. Hold Shift for native terminal text
-selection, or Option in iTerm2. Mouse reporting stops on exit, panic and editor or pager handover.
+question option or completion to select it; click again to open or apply it. Over the box of a run `/trail run`
+asks to start, the mouse does nothing: keys alone answer it. Hold Shift for native terminal text selection, or Option
+in iTerm2. Mouse reporting stops on exit, panic and editor or pager handover.
 
 The terminal reports focus while chat runs. A new item on home rings the bell once while unfocused.
 `[cli] notify = "terminal"` uses terminal notifications (OSC 99 on kitty, OSC 777 on rxvt, OSC 9 otherwise);
