@@ -248,6 +248,8 @@ pub fn as_envelope(post: &ChannelPost, ant: &UserId) -> Envelope {
         sealed: None,
         notice: None,
         review_commits: Vec::new(),
+        trail_step: None,
+        trail_start: None,
         review_outcomes: None,
         sent_at: post.sent_at,
     }

@@ -127,6 +127,11 @@ impl AskHuman {
     }
 }
 
+/// The questions of `asked`, ask_human's arguments (`{"questions": [...]}`), checked as ask_human checks them.
+pub(crate) fn asked_questions(asked: serde_json::Value) -> Result<Questions, String> {
+    serde_json::from_value::<AskHuman>(asked).map_err(|e| e.to_string())?.questions()
+}
+
 impl Hub {
     /// A message from the ant, following on from the one `thread` is handling and keeping its owner: on the same
     /// thread unless `on` names another (`new` for a fresh one), and with one turn less unless it answers a human or

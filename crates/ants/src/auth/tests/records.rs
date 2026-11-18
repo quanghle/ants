@@ -1,5 +1,5 @@
 //! What ants and humans record in the team's buckets: colony entries, storage warnings, escalation chains,
-//! links, attachments and reactions.
+//! links, attachments, reactions, saved trails and trail runs.
 
 use super::*;
 
@@ -293,4 +293,47 @@ async fn humans_write_only_their_own_reactions_and_ants_change_theirs_through_an
     let all = reactions::load(&h_js, &[message]).await.unwrap();
     assert_eq!(all[&message][1], Reacted::new(eyes, vec![human]));
     serving.abort();
+}
+
+#[tokio::test]
+async fn humans_save_the_trails_ants_read_and_each_ant_keeps_only_the_runs_it_conducts() {
+    use ants_proto::{RunId, SavedTrail, TRAIL_RUNS_BUCKET, TRAILS_BUCKET, trail_run_key, trail_session_key};
+    let Some(server) = Server::start() else { return };
+    let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
+    let (_a, a_js) = server.connect(&dev_a).await;
+    let (_h, h_js) = server.connect(&human).await;
+    for config in [ants_daemon::hub::trails_config(), ants_daemon::hub::trail_runs_config()] {
+        assert!(a_js.create_key_value(config.clone()).await.is_err(), "only a human creates {}", config.bucket);
+        h_js.create_key_value(config).await.unwrap();
+    }
+
+    let trail = SavedTrail {
+        name: "deploy".parse().unwrap(),
+        description: "Ship it".to_owned(),
+        phases: vec!["build".to_owned()],
+        script: "agent('build')".to_owned(),
+        saved_by: human.clone(),
+        saved_at: chrono::Utc::now(),
+    };
+    let saved = DirectKv::whole(&h_js, None, TRAILS_BUCKET).await.unwrap();
+    saved.put(trail.key(), serde_json::to_vec(&trail).unwrap()).await.unwrap();
+    let read = DirectKv::whole(&a_js, None, TRAILS_BUCKET).await.unwrap();
+    let got: SavedTrail = serde_json::from_slice(&read.get("deploy").await.unwrap().unwrap()).unwrap();
+    assert_eq!(got, trail);
+    assert!(read.put("deploy", b"spoof".to_vec()).await.is_err(), "an ant saves no trail");
+    assert!(read.delete("deploy").await.is_err(), "nor deletes one");
+    saved.delete("deploy").await.unwrap();
+    assert!(read.get("deploy").await.unwrap().is_none(), "a human deletes it");
+
+    let run = RunId::generate();
+    let runs = DirectKv::new(&a_js, None, TRAIL_RUNS_BUCKET).await.unwrap();
+    runs.put(trail_session_key(&dev_a, &run), b"{}".to_vec()).await.unwrap();
+    assert_eq!(runs.get(trail_session_key(&dev_a, &run)).await.unwrap().as_deref(), Some(&b"{}"[..]));
+    assert!(runs.put(trail_run_key(&dev_b, &run), b"{}".to_vec()).await.is_err(), "dev-a writes no run of dev-b's");
+    let (_b, b_js) = server.connect(&dev_b).await;
+    let theirs = DirectKv::new(&b_js, None, TRAIL_RUNS_BUCKET).await.unwrap();
+    assert!(theirs.get(trail_session_key(&dev_a, &run)).await.is_err(), "dev-b reads none of dev-a's");
+    let all = DirectKv::whole(&h_js, None, TRAIL_RUNS_BUCKET).await.unwrap();
+    assert_eq!(all.get(trail_session_key(&dev_a, &run)).await.unwrap().as_deref(), Some(&b"{}"[..]));
+    assert!(all.put(trail_session_key(&dev_a, &run), b"{}".to_vec()).await.is_err(), "a human writes no run");
 }

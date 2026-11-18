@@ -1,0 +1,72 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+[
+  {
+    "id": "019a7d2e-0000-7000-8000-000000000001",
+    "ant": "planner",
+    "by": "alice",
+    "sent_at": "2025-01-01T12:00:00Z",
+    "action": "start",
+    "trail": {
+      "saved": "release"
+    },
+    "args": {
+      "version": "1.2.0"
+    },
+    "thread": "019a7d2c-0000-7000-8000-000000000001",
+    "limits": {
+      "steps": 20,
+      "concurrency": 4,
+      "turns": 200,
+      "wall_secs": 86400,
+      "compute_ms": 10000,
+      "session_bytes": 786432
+    }
+  },
+  {
+    "id": "019a7d2e-0000-7000-8000-000000000001",
+    "ant": "planner",
+    "by": "alice",
+    "sent_at": "2025-01-01T12:00:00Z",
+    "action": "start",
+    "trail": {
+      "script": "agent('dev-a', 'build it')"
+    },
+    "args": null,
+    "thread": "019a7d2c-0000-7000-8000-000000000001",
+    "limits": {
+      "steps": 50,
+      "concurrency": 4,
+      "turns": 200,
+      "wall_secs": 86400,
+      "compute_ms": 10000,
+      "session_bytes": 786432
+    }
+  },
+  {
+    "id": "019a7d2e-0000-7000-8000-000000000001",
+    "ant": "planner",
+    "by": "alice",
+    "sent_at": "2025-01-01T12:00:00Z",
+    "action": "stop",
+    "run": "019a7d2f-0000-7000-8000-000000000001"
+  },
+  {
+    "id": "019a7d2e-0000-7000-8000-000000000001",
+    "ant": "planner",
+    "by": "alice",
+    "sent_at": "2025-01-01T12:00:00Z",
+    "action": "resume",
+    "run": "019a7d2f-0000-7000-8000-000000000001",
+    "limits": {
+      "steps": 40,
+      "concurrency": 4,
+      "turns": 200,
+      "wall_secs": 86400,
+      "compute_ms": 10000,
+      "session_bytes": 786432
+    }
+  }
+]

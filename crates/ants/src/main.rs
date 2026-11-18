@@ -1,8 +1,8 @@
 //! `ants`: talk to agent teams over NATS from the terminal, and run the ant daemon.
 
 #![cfg_attr(
-    all(test, target_os = "macos"),
-    allow(linker_messages, reason = "the test binary's unwind tables outgrow what ld64 encodes compactly (16 MB)")
+    all(any(test, debug_assertions), target_os = "macos"),
+    allow(linker_messages, reason = "a debug binary's unwind tables outgrow what ld64 encodes compactly (16 MB)")
 )]
 
 // The command line, and how it reaches NATS.
@@ -57,7 +57,15 @@ mod test_support;
 
 use anyhow::Result;
 
+/// Counts live bytes for a trail worker's memory limit.
+#[global_allocator]
+static ALLOCATOR: ants_trail::Allocator = ants_trail::Allocator;
+
 fn main() -> Result<()> {
+    // A trail worker, `ants subprocess`, serves one request before anything else starts.
+    if ants_trail::worker::asked() {
+        std::process::exit(ants_trail::worker::main());
+    }
     completions::answer();
     run()
 }

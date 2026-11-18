@@ -51,6 +51,7 @@ pub(crate) mod signer;
 pub(crate) mod spend;
 pub(crate) mod thread;
 pub(crate) mod tools;
+pub(crate) mod trail;
 pub(crate) mod watch;
 pub(crate) mod webhook;
 
@@ -84,6 +85,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         Command::React { message, reaction, remove } => send::react(&nats()?, message, reaction, remove).await,
         Command::Answer { message, answer } => send::answer(&nats()?, message, answer).await,
         Command::Thread(command) => thread::run(&nats()?, command).await,
+        Command::Trail(command) => trail::run(&nats()?, command).await,
         Command::Digest { since } => summary::digest(&nats()?, since).await,
         Command::Attachment(command) => attachment::run(&nats()?, command).await,
         Command::Notify(command) => notify::run(&nats()?, command).await,

@@ -39,6 +39,9 @@ max_memory_store = "1GB"                   # hub max_memory_store (default: unkn
 min_available = "1GB"                      # default; bytes, 1024-based K/M/G/T[B] or a share like "10%"; "0" disables
 max_harnesses = 1                          # default; per-ant harness cap while memory is low (at least 1)
 
+[trails]                                   # trail runs the daemon's ants conduct (see Trails)
+workers = 4                                # default; trail workers computing at once across the process (1 to 16)
+
 [host]                                     # the machine's host connection (docs/auth.md, Machine host credentials)
 creds = "~/.config/ants/auth/host.creds"   # default: that file, else host-<machine>.creds beside it, if either exists
 machine = "dev-vm1"                        # default: the credentials' name, else the top-level machine, else the host name
@@ -118,6 +121,14 @@ cron = "0 3 * * 1-5"
 ant = "dev-a"
 text = "Triage the failing nightly tests."
 allow = ["read:*", "execute:cargo test*"]
+
+[[schedule]]
+name = "weekly-review"
+creds = "~/.config/ants/auth/weekly-review.creds"
+cron = "@weekly"
+ant = "lead"
+trail = "review"                           # start saved trail review on lead, in place of text
+args = { repo = "app" }
 ```
 
 `machine` (1–64 characters, no control characters) labels where the file's ants run, such as a VM or container whose host name is generated: `ants colony`, `ants dash`, `list_ants` and the sign-in, quota and failing-harness notices show it in place of the host name. A daemon serving a single ant from CLI flags alone uses the host name. When it is also a machine name (1–64 letters, digits, `-` and `_`, starting with a letter or digit) it names the machine for its [host credentials](auth.md#machine-host-credentials), its record in `ants_machines`, its admin orders (`--on MACHINE`) and the signer's record, where neither the `[host]` table's `machine` nor the host credentials name one; otherwise those use the host name's first label, and `ants doctor` warns.
@@ -884,7 +895,7 @@ Top-level `redact = false` disables daemon redaction. Files a human attaches wit
 
 ## Schedules
 
-`[[schedule]]` entries send `text` literally as a new thread to `ant` or `channel` on a timetable (run by `ants daemon` when serving the whole config file, not `--ant`):
+`[[schedule]]` entries send `text` literally as a new thread to `ant` or `channel`, or start a run of a saved trail on `ant`, on a timetable (run by `ants daemon` when serving the whole config file, not `--ant`):
 
 ```toml
 [[schedule]]
@@ -901,4 +912,9 @@ catch_up = true                               # optional: send latest missed fir
 
 - **Timetable & DST:** set either `cron` (5-field cron with lists, ranges, steps, month/weekday names, `0`/`7` Sunday, or `@yearly`/`@monthly`/`@weekly`/`@daily`/`@hourly`; restricted day-of-month and day-of-week OR together) or `every` (≥ `1m`, epoch-aligned UTC). `cron` uses IANA `timezone` (`/usr/share/zoneinfo` or `TZDIR` on Unix; bundled DB on Windows): spring-forward gaps fire once at the jump; fall-back overlaps fire once on the first pass.
 - **Webhook identity & deduplication:** schedules use `--webhook` credentials (`--webhook NAME` in `ants auth leaf`), set `webhook: true`, refresh `<schedule>.webhook` in `ants_webhooks` hourly, and narrow threads to `allow`. Multiple daemons or restarts deduplicate firings via `<schedule>.<unix_time>` in `ants_webhooks` (7 d) and `Nats-Msg-Id: schedule.<schedule>.<unix_time>` (24 h).
+- **Trails:** `trail = "NAME"` in place of `text` starts a run of saved trail `NAME` ([architecture.md](architecture.md#trails)) on `ant`, its conductor, with `args` (a TOML table, the script's JSON `args`; none: `null`). Each firing sends the ant a message carrying `trail_start`; its daemon starts the run on the firing's new thread instead of prompting the ant, the run owned by `owner` (else the default human) and as untrusted as a webhook's thread, once per firing (the run takes the message's id). A run that cannot start, such as for an unknown trail, is told to the owner on that thread. An entry gives exactly one of `text` and `trail`; `args` without `trail`, `trail` with `channel`, and `trail` with `allow` (the run's steps are narrowed as a webhook's threads are) fail config loading.
 - **Grace & catch-up:** firings retry every 5 s for up to 1 m (`GRACE`). Firings missed by > 1 m are skipped unless `catch_up = true`, which sends only the **latest** missed firing within the past 7 d (unless the next firing is due within 1 m) with `(Sent late: due YYYY-MM-DD HH:MM UTC.)` appended, retrying every 5 s until the next firing time.
+
+## Trails
+
+`[trails]` applies to every ant in the file ([trails.md](trails.md)): `workers` (default 4, 1 to 16; others fail config loading) caps the trail workers computing at once across the daemon process's runs ([architecture.md](architecture.md#trails)), the first ant to start setting it for the process. Each worker is an `ants subprocess` process alive only while a run's script computes, so the cap bounds the memory and CPU trails take beside the harnesses. Changing it takes a restart of the daemon.
