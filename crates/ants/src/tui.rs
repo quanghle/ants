@@ -26,6 +26,7 @@ mod held;
 mod help;
 mod home;
 mod images;
+mod input;
 mod interrupt;
 mod keymap;
 mod markdown;
@@ -181,7 +182,7 @@ pub async fn run(nats: &crate::connection::Nats<'_>, since: Duration, compact: b
         me: nats.me.clone(),
         domain: nats.domain.cloned(),
         meta,
-        sealing: sealing.clone(),
+        sealing,
         account: nats.account.clone(),
         keyring: feed.keyring(),
         admin: crate::admin::orders::Admin::of(nats).map_err(|e| format!("{e:#}")),
@@ -195,7 +196,7 @@ pub async fn run(nats: &crate::connection::Nats<'_>, since: Duration, compact: b
         thread_meta::open(nats, &js).await.map(|m| m.checking(feed.behalf())),
     );
     let may_read = nats.rights.may_publish(&presence::online_right());
-    let people = people::Io::new(js.clone(), nats.domain.cloned(), nats.me.clone(), sealing, may_read);
+    let people = people::Io::new(js.clone(), me, may_read);
     let searches = Searches::new(js.clone(), feed.keyring(), feed.behalf());
     let trees = tree::Io::new(js.clone(), nats.domain.cloned(), me.clone());
     let ants = ant::Io::new(js.clone(), nats.domain.cloned(), me.clone());
@@ -657,7 +658,6 @@ impl Chat {
             Action::MarkChannel(channel, marks) => self.reads.mark_channel(channel, marks),
             Action::Reactions(messages) => self.reads.watch_reactions(messages),
             Action::React(message, reaction, remove) => self.reads.react(message, reaction, remove),
-            Action::Send(draft) => self.people.send(draft),
             Action::Settings(ask) => self.settings.ask(ask),
             Action::KeepTools(tools) => {
                 if let Err(e) = catchup::state_path().and_then(|path| catchup::keep(&path, |kept| kept.tools = tools)) {

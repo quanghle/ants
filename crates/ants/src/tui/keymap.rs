@@ -462,7 +462,7 @@ const CHANNEL: &[Entry] = &[
 const DM: &[Entry] = &[
     Entry::new(UP_DOWN, "↑↓", "thread", "select a thread", 10, always),
     Entry::new(&[Key::Enter], "Enter", "open", "open the selected thread", 5, always),
-    Entry::new(&[Key::Char('n')], "n", "new message", "write a new message to the person", 6, always),
+    Entry::new(&[Key::Char('n')], "n", "write", "write to the person in the command bar", 6, always),
     Entry::new(ENDS, "Home End", "first/last", "select the first or the last", 95, always),
 ];
 

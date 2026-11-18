@@ -150,7 +150,6 @@ fn footer_line(model: &Model, now: DateTime<Utc>, width: u16) -> Line<'static> {
         }
         let (prompt, help) = match model.page() {
             Page::Channel(page) => (page.prompt(), false),
-            Page::Dm(page) => (page.prompt(), false),
             Page::Ant(page) => (page.prompt(), page.armed().is_some()),
             Page::Tree(page) => (page.prompt(), true),
             Page::Credentials(page) => (page.prompt(), true),
@@ -364,7 +363,7 @@ mod tests {
         let shown = screen(&m, at(1));
         assert!(shown.contains(" bob · online "), "{shown}");
         assert!(shown.contains("no messages with bob yet: n writes one"), "{shown}");
-        assert!(shown.contains("Enter open · n new message"), "{shown}");
+        assert!(shown.contains("Enter open · n write"), "{shown}");
     }
 
     fn text(line: &Line) -> String {

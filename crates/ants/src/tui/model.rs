@@ -84,8 +84,6 @@ pub enum Action {
     Change(ThreadId, Change, u64),
     /// Copy the text to the terminal's clipboard.
     Copy(String),
-    /// Send a message to another human on a new thread, as `ants ask @human` does.
-    Send(dm::Draft),
     /// Read again what may have missed changes.
     Refresh,
     /// Run the command bar's job, for the bar's text.
@@ -318,6 +316,8 @@ pub enum To {
     Unread(ThreadId, Option<u64>),
     /// The command bar, open on this text.
     Bar(String),
+    /// The command bar, focused on its draft for the view shown.
+    Write,
     /// Ask for a new TL;DR of the thread.
     Tldr(ThreadId),
     /// The digest of what changed since the last `ants chat` on the device ended.
@@ -703,18 +703,11 @@ impl Model {
         }
     }
 
-    /// Take what was read of the other humans, or done for them.
+    /// Take what was read of the other humans.
     pub fn people(&mut self, event: people::Event, now: DateTime<Utc>) {
-        match event {
-            people::Event::Online(read) => {
-                if let Some(text) = self.data.people.read(read) {
-                    self.notify(text, Level::Error, now);
-                }
-            }
-            people::Event::Sent(sent) => {
-                let (text, level) = sent.notice();
-                self.notify(text, level, now);
-            }
+        let people::Event::Online(read) = event;
+        if let Some(text) = self.data.people.read(read) {
+            self.notify(text, Level::Error, now);
         }
     }
 

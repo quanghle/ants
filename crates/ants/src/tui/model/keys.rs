@@ -103,15 +103,14 @@ impl Model {
         }
     }
 
-    /// Take `key` if it is typed into what the view on screen holds: the text found in a thread, a DM's message, an
-    /// ant's prompt or a channel's editor.
+    /// Take `key` if it is typed into what the view on screen holds: the text found in a thread, an ant's prompt
+    /// or a channel's editor.
     fn typed_key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Option<Action>> {
         if self.bar.focused || self.focus != Focus::View {
             return None;
         }
         match self.pages.last_mut()? {
             Page::Thread(page) => page.find_key(key).then_some(None),
-            Page::Dm(page) => page.write(key),
             Page::Ant(page) => page.write(key),
             Page::Channel(page) => {
                 let to = page.write(key, &self.data)?;
@@ -216,7 +215,6 @@ impl Model {
         let data = &self.data;
         let closed = match self.pages.last_mut() {
             Some(Page::Thread(page)) => page.find_key(Key::Esc),
-            Some(Page::Dm(page)) => page.write(Key::Esc).is_some(),
             Some(Page::Ant(page)) => page.write(Key::Esc).is_some() || page.disarm(),
             Some(Page::Channel(page)) => page.write(Key::Esc, data).is_some(),
             Some(Page::Tree(page)) => page.disarm(),
@@ -435,6 +433,10 @@ impl Model {
             To::Unread(thread, from) => self.mark_unread(thread, from, now),
             To::Remind(thread, message) => self.remind(thread, message),
             To::Unremind(thread) => Some(self.set_reminder(thread, None)),
+            To::Write => {
+                self.bar.focused = true;
+                None
+            }
             To::Bar(text) => {
                 self.bar.set_text(&text);
                 self.bar.focused = true;
@@ -506,7 +508,6 @@ fn write(page: &mut Page, line: &str) -> bool {
         return page.paste(line);
     }
     line.chars().all(|c| match page {
-        Page::Dm(page) => page.write(Key::Char(c)).is_some(),
         Page::Ant(page) => page.write(Key::Char(c)).is_some(),
         Page::Thread(page) => page.finding() && page.find_key(Key::Char(c)),
         _ => false,

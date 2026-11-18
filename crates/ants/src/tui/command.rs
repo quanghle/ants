@@ -682,13 +682,11 @@ mod tests {
     }
 
     #[test]
-    fn a_dm_being_written_keeps_its_keys_and_the_bar_asks_its_person() {
+    fn n_on_a_dm_focuses_the_bar_which_asks_its_person() {
         let mut m = model();
         m.pages.push(Page::Dm(crate::tui::dm::Page::new(user("bob"))));
-        typed(&mut m, "n@");
-        assert!(!m.bar.focused, "@ goes to the message being written");
-        m.key(Key::Esc, at(0));
-        m.key(Key::Ctrl('k'), at(0));
+        typed(&mut m, "n");
+        assert!(m.bar.focused && m.bar.is_empty(), "n writes in the bar");
         typed(&mut m, "n");
         assert_eq!(m.bar.text(), "n", "the focused bar takes the keys of the DM");
         let job = Job::Ask { to: user("bob"), thread: None, text: "n".into(), quote: None };

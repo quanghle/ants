@@ -590,6 +590,7 @@ mod tests {
     use super::*;
     use crate::test_support::colony::entry;
     use crate::test_support::live::{at, message, user};
+    use crate::tui::input::{Typed, exercise};
     use crate::tui::model::{Action, Model};
     use crate::tui::nav;
     use crate::tui::test_support::model;
@@ -861,6 +862,13 @@ mod tests {
         assert_eq!(m.key(Key::Char('y'), at(3)), Some(Action::Copy(url)));
 
         m.key(Key::Char('v'), at(3));
+        let want = exercise(|typed| match typed {
+            Typed::Key(key) => _ = m.key(key, at(3)),
+            Typed::Paste(text) => m.paste(text, at(3)),
+        });
+        assert!(screen(&m, at(3)).contains(&format!("address: X▏{}", &want[1..])), "the address edits as the bar does");
+        m.key(Key::End, at(3));
+        m.key(Key::Ctrl('u'), at(3));
         let callback = "http://127.0.0.1:4100/callback?code=abc&state=r";
         for c in callback.chars() {
             m.key(Key::Char(c), at(3));

@@ -8,6 +8,7 @@ use ants_proto::{Reaction, UserId, Uuid};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
+use super::input::Input;
 use super::model::Key;
 use super::style;
 
@@ -79,7 +80,7 @@ pub fn done_line(message: Uuid, reaction: &Reaction, remove: bool, changed: bool
 pub struct Picker {
     pub message: Uuid,
     /// What is typed: the start of a common name, or a name of its own.
-    typed: String,
+    typed: Input,
     /// The choice selected, of [`Picker::choices`].
     selected: usize,
     error: Option<String>,
@@ -96,16 +97,17 @@ pub enum Pick {
 
 impl Picker {
     pub fn new(message: Uuid) -> Self {
-        Self { message, typed: String::new(), selected: 0, error: None }
+        Self { message, typed: Input::default(), selected: 0, error: None }
     }
 
     /// The names to choose from: the common ones starting with what is typed, then what is typed when it is no
     /// common name.
     fn choices(&self) -> Vec<String> {
+        let typed = self.typed.text();
         let mut choices: Vec<String> =
-            COMMON.iter().filter(|c| c.starts_with(&self.typed)).map(|c| (*c).to_owned()).collect();
-        if !self.typed.is_empty() && !COMMON.contains(&self.typed.as_str()) {
-            choices.push(self.typed.clone());
+            COMMON.iter().filter(|c| c.starts_with(&typed)).map(|c| (*c).to_owned()).collect();
+        if !typed.is_empty() && !COMMON.contains(&typed.as_str()) {
+            choices.push(typed);
         }
         choices
     }
@@ -130,19 +132,11 @@ impl Picker {
             }
             Key::Down | Key::Tab => self.selected = (self.selected + 1) % count.max(1),
             Key::Up => self.selected = (self.selected + count.max(1) - 1) % count.max(1),
-            Key::Char(c) => {
-                self.typed.push(c);
-                self.selected = 0;
+            key => {
+                if self.typed.key(key) {
+                    self.selected = 0;
+                }
             }
-            Key::Backspace => {
-                self.typed.pop();
-                self.selected = 0;
-            }
-            Key::Ctrl('u') => {
-                self.typed.clear();
-                self.selected = 0;
-            }
-            _ => {}
         }
         Pick::Typing
     }
@@ -152,8 +146,8 @@ impl Picker {
     pub fn line(&self) -> Line<'static> {
         let mut spans = vec![
             Span::styled(" react ", Style::new().fg(Color::Cyan).bold()),
-            Span::raw(self.typed.clone()),
-            Span::raw("▏ "),
+            Span::raw(self.typed.caret(40)),
+            Span::raw(" "),
         ];
         for (at, choice) in self.choices().into_iter().enumerate() {
             let text = format!(" {} {choice} ", glyph(&choice));
@@ -172,6 +166,7 @@ impl Picker {
 mod tests {
     use super::*;
     use crate::test_support::live::user;
+    use crate::tui::input::{Typed, exercise};
 
     fn reacted(reaction: &str, by: &[&str]) -> Reacted {
         Reacted::new(reaction.parse().unwrap(), by.iter().map(|b| user(b)).collect())
@@ -209,5 +204,19 @@ mod tests {
         assert_eq!(picker.key(Key::Enter), Pick::Typing);
         assert!(picker.line().to_string().contains("a reaction is 1 to 64 of a-z"), "{}", picker.line());
         assert_eq!(picker.key(Key::Esc), Pick::Close);
+    }
+
+    #[test]
+    fn the_picker_edits_what_is_typed_as_the_bar_does() {
+        let mut m = crate::tui::test_support::model();
+        m.picking = Some(Picker::new(Uuid::now_v7()));
+        let now = crate::test_support::live::at(0);
+        let want = exercise(|typed| match typed {
+            Typed::Key(key) => _ = m.key(key, now),
+            Typed::Paste(text) => m.paste(text, now),
+        });
+        let picker = m.picking.as_ref().unwrap();
+        assert_eq!(picker.typed.text(), want);
+        assert!(picker.line().to_string().starts_with(" react X▏a b hi "), "{}", picker.line());
     }
 }
