@@ -141,7 +141,7 @@ mod tests {
         let mut m = model();
         m.stored(vec![message(1, &a, "alice", "dev-a", "deploy"), message(2, &b, "alice", "dev-b", "docs")], at(1));
         show(&mut m, &a);
-        m.key(Key::Ctrl('k'), at(1));
+        m.bar.focused = true;
         typed(&mut m, "ship it");
         assert!(m.data.drafts.holds(&Conversation::Thread(a.clone())));
         show(&mut m, &b);
@@ -165,7 +165,7 @@ mod tests {
         let (a, b) = (ThreadId::generate(), ThreadId::generate());
         let mut m = model();
         show(&mut m, &a);
-        m.key(Key::Ctrl('k'), at(1));
+        m.bar.focused = true;
         typed(&mut m, "ship it");
         let Some(Action::Run(_, text)) = m.key(Key::Enter, at(1)) else { panic!() };
         show(&mut m, &b);

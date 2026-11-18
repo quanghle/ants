@@ -27,7 +27,6 @@ pub const HELP_HINT: &str = "? help";
 #[derive(Debug, Clone, Copy)]
 pub struct Entry {
     /// The keys the row stands for.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the test of each view's keys reads them"))]
     pub keys: &'static [Key],
     /// How the footer and the help write the keys.
     pub label: &'static str,
@@ -215,14 +214,21 @@ const DIGITS: &[Key] = &[
 pub const GLOBAL: &[Entry] = &[
     Entry::new(&[Key::Esc], "Esc", "back", "back to the previous view, else to the nav", 9, on_view),
     Entry::new(&[Key::Tab], "Tab", "nav/view", "move between the nav and the view", 40, always),
-    Entry::new(&[Key::Ctrl('k')], "Ctrl-K", "commands", "the command bar, listing its /commands", 45, always),
     Entry::new(
-        &[Key::Char('/'), Key::Ctrl('f')],
-        "/",
-        "search",
-        "the bar on /search, as in: /search deploy from:dev-a (Ctrl-F too, but in a thread)",
-        50,
+        &[Key::Ctrl('k'), Key::Char('/')],
+        "Ctrl-K /",
+        "commands",
+        "the palette: the /commands and the view's keys, narrowed as typed, those that cannot act here dim with the reason",
+        45,
         always,
+    ),
+    Entry::new(
+        &[Key::Ctrl('f')],
+        "Ctrl-F",
+        "search",
+        "the bar on /search, as in: /search deploy from:dev-a",
+        50,
+        no_thread_open,
     ),
     Entry::new(
         &[Key::Ctrl('o')],
@@ -677,6 +683,10 @@ fn bar_empty(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
 
 fn check(holds: bool, why: &'static str) -> Result<(), &'static str> {
     if holds { Ok(()) } else { Err(why) }
+}
+
+fn no_thread_open(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {
+    check(!matches!(model.page(), Page::Thread(_)), "Ctrl-F finds in the thread: /search searches every thread")
 }
 
 fn on_view(model: &Model, _: DateTime<Utc>) -> Result<(), &'static str> {

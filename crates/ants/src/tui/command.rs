@@ -49,6 +49,7 @@ impl Model {
     pub fn bar_key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Option<Action>> {
         if !self.bar.focused {
             match key {
+                Key::Ctrl('k') if self.bar.is_empty() => self.bar.insert('/'),
                 Key::Ctrl('k') => {}
                 Key::Char(c @ ('@' | '#')) if self.focus == Focus::View => self.bar.insert(c),
                 // The bar replies on the thread open.
@@ -60,6 +61,9 @@ impl Model {
         }
         if self.history_key(key) {
             return Some(None);
+        }
+        if let Some(taken) = self.palette_key(key, now) {
+            return Some(taken);
         }
         if self.complete_key(key) {
             return Some(None);
@@ -83,7 +87,7 @@ impl Model {
     }
 
     /// Do what the bar's `text` says, emptying the bar; else keep it and tell why on its status line.
-    fn submit(&mut self, text: String, now: DateTime<Utc>) -> Option<Action> {
+    pub(super) fn submit(&mut self, text: String, now: DateTime<Utc>) -> Option<Action> {
         if let Some(note) = self.bar.noting.clone() {
             return self.note(note, text);
         }
@@ -104,14 +108,12 @@ impl Model {
         let action = match done {
             Ok(action) => action,
             Err(why) => {
-                self.bar.list = why.starts_with("usage:") || why.starts_with("no command");
                 self.bar.set_status(why, Tone::Error);
                 return None;
             }
         };
         self.push_history(&text);
         self.bar.set_text("");
-        self.bar.list = false;
         self.bar.status = None;
         if slash {
             self.bar.focused = false;
@@ -310,7 +312,6 @@ impl Model {
             },
         };
         self.bar.set_text("");
-        self.bar.list = false;
         self.bar.set_status(line, Tone::Done);
     }
 
@@ -423,6 +424,32 @@ impl Model {
             Page::Dm(_) | Page::Search(_) | Page::Credentials(_) | Page::Held(_) => None,
         };
         thread.ok_or_else(|| "no thread open or selected".to_owned())
+    }
+
+    /// Why the slash command `name`, without the arguments naming another target, cannot act here at `now`, if it
+    /// cannot.
+    pub(super) fn unfit(&self, name: &str, now: DateTime<Utc>) -> Option<String> {
+        let target = self.target();
+        match name {
+            "approve" | "reject" => match target {
+                Ok(thread) if !self.data.live.approvals.iter().any(|r| r.thread_id == thread) => {
+                    Some("no tool request waits on the thread".to_owned())
+                }
+                found => found.err(),
+            },
+            "cancel" => match target {
+                Ok(thread) if self.busy(&thread).is_empty() => Some("no ant is at work on the thread".to_owned()),
+                found => found.err(),
+            },
+            "later" => (!matches!(self.page(), Page::Thread(_))).then(|| "no thread open".to_owned()),
+            "answer" => self.question(now).err(),
+            "notify" => self.channel_on_view().is_none().then(|| "no channel shown".to_owned()),
+            "forward" if matches!(self.page(), Page::Thread(page) if page.chosen().is_some()) => None,
+            "save" => self.attachment().is_none().then(|| "no attachment on the selected message".to_owned()),
+            "grant" | "done" | "undone" | "pin" | "unpin" | "mute" | "unmute" | "snooze" | "unsnooze" | "remind"
+            | "unremind" | "archive" | "unarchive" | "title" | "react" | "tldr" | "tree" | "forward" => target.err(),
+            _ => None,
+        }
     }
 
     /// The questions `/answer` answers at `now`, the message asking them and its thread: on an open thread, those of
@@ -627,7 +654,8 @@ mod tests {
     fn ctrl_k_or_at_or_hash_focus_the_bar_which_then_takes_every_key() {
         let mut m = model();
         assert_eq!(m.key(Key::Ctrl('k'), at(0)), None);
-        assert!(m.bar.focused);
+        assert!(m.bar.focused && m.bar.text() == "/", "on the palette");
+        m.key(Key::Backspace, at(0));
         assert_eq!(m.key(Key::Char('q'), at(0)), None, "q types");
         assert_eq!(m.key(Key::Esc, at(0)), None);
         assert!(!m.bar.focused && m.bar.text() == "q", "Esc leaves the bar, keeping its text");
@@ -650,7 +678,7 @@ mod tests {
     fn plain_text_replies_on_the_open_thread_and_else_goes_unaddressed() {
         let thread = ThreadId::generate();
         let mut m = model();
-        m.key(Key::Ctrl('k'), at(0));
+        m.bar.focused = true;
         typed(&mut m, "who owns billing?");
         let job = Job::Unaddressed { text: "who owns billing?".into() };
         assert_eq!(m.key(Key::Enter, at(0)), Some(Action::Run(job, "who owns billing?".into())));
@@ -688,7 +716,7 @@ mod tests {
         typed(&mut m, "n@");
         assert!(!m.bar.focused, "@ goes to the message being written");
         m.key(Key::Esc, at(0));
-        m.key(Key::Ctrl('k'), at(0));
+        m.bar.focused = true;
         typed(&mut m, "n");
         assert_eq!(m.bar.text(), "n", "the focused bar takes the keys of the DM");
         let job = Job::Ask { to: user("bob"), thread: None, text: "n".into(), quote: None };
@@ -727,7 +755,7 @@ mod tests {
         assert_eq!(run(&mut m, "/unsnooze"), Some(Action::Change(thread.clone(), Change::Snooze(None), 1)));
         assert!(m.data.cards.snoozed.get(&thread, at(1)).is_none(), "woken at once");
         assert_eq!(run(&mut m, "/nope"), None);
-        assert!(m.bar.list, "an unknown command shows the list");
+        assert_eq!(m.bar.status.as_ref().unwrap().text, "no command /nope: / on an empty bar lists them");
         assert_eq!(run(&mut m, "/quit"), Some(Action::Quit));
     }
 
@@ -902,7 +930,7 @@ mod tests {
     fn later_replies_on_the_open_thread_waiting_its_turn() {
         let thread = ThreadId::generate();
         let mut m = model();
-        m.key(Key::Ctrl('k'), at(0));
+        m.bar.focused = true;
         typed(&mut m, "/later then the docs");
         assert_eq!(m.key(Key::Enter, at(0)), None);
         assert_eq!(m.bar.status.as_ref().unwrap().text, "/later replies on an open thread: open one first");
@@ -975,7 +1003,7 @@ mod tests {
         m.key(Key::Ctrl('u'), at(3));
         m.key(Key::Esc, at(3));
         assert_eq!(m.bar.quoting, None);
-        m.key(Key::Ctrl('k'), at(3));
+        m.bar.focused = true;
 
         m.key(Key::Esc, at(3));
         m.key(Key::Up, at(3));
@@ -1101,7 +1129,7 @@ mod tests {
         let dir = ants_test_support::scratch_dir("bar-attach");
         std::fs::write(dir.join("notes.txt"), b"notes").unwrap();
         let mut m = model();
-        m.key(Key::Ctrl('k'), at(0));
+        m.bar.focused = true;
         typed(&mut m, &format!("/attach {}/no", dir.display()));
         assert_eq!(m.completions()[0].word, format!("{}/notes.txt", dir.display()), "paths complete");
         typed(&mut m, "tes.txt");
@@ -1129,7 +1157,7 @@ mod tests {
         m.bar.set_text("/done");
         assert_eq!(m.key(Key::Enter, at(0)), Some(Action::Run(Job::Done { thread, done: true }, "/done".into())));
         assert_eq!(m.bar.staged.names(), ["notes.txt"], "only a message takes the files");
-        m.key(Key::Ctrl('k'), at(0));
+        m.bar.focused = true;
         typed(&mut m, "/detach");
         m.key(Key::Enter, at(0));
         assert_eq!(m.bar.status.as_ref().unwrap().text, "dropped the file attached");

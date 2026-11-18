@@ -1115,11 +1115,11 @@ mod tests {
     }
 
     #[test]
-    fn slash_searches_and_a_match_opens_its_thread_at_it() {
+    fn ctrl_f_searches_and_a_match_opens_its_thread_at_it() {
         let thread = ThreadId::generate();
         let mut m = model();
         m.key(Key::Tab, at(0));
-        assert_eq!(m.key(Key::Char('/'), at(0)), None);
+        assert_eq!(m.key(Key::Ctrl('f'), at(0)), None);
         for c in "deploy since:soon".chars() {
             assert_eq!(m.key(Key::Char(c), at(0)), None, "keys go to the command bar");
         }
@@ -1132,7 +1132,7 @@ mod tests {
         assert_eq!(search.grep.as_deref(), Some("deploy"));
         assert_eq!((m.bar.focused, m.page().name(), m.focus), (false, "search", Focus::View));
 
-        m.key(Key::Char('/'), at(1));
+        m.key(Key::Ctrl('f'), at(1));
         m.key(Key::Char('d'), at(1));
         assert!(matches!(m.key(Key::Enter, at(1)), Some(Action::Search(_))));
         let Page::Search(earlier) = &m.pages[1] else { panic!("not a search") };
@@ -1143,10 +1143,10 @@ mod tests {
         assert_eq!(m.page().name(), "thread");
         m.key(Key::Esc, at(3));
         assert_eq!(m.page().name(), "search", "Esc goes back to the matches");
-        m.key(Key::Char('/'), at(4));
+        m.key(Key::Ctrl('f'), at(4));
         m.key(Key::Esc, at(4));
         assert!(!m.bar.focused, "Esc leaves the bar");
-        m.key(Key::Char('/'), at(4));
+        m.key(Key::Ctrl('f'), at(4));
         assert_eq!((m.bar.focused, m.bar.text()), (true, "/search ".to_owned()), "a draft in the bar stays");
         m.key(Key::Esc, at(4));
         assert_eq!(m.key(Key::Char('q'), at(4)), None, "q keeps the draft");

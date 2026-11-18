@@ -295,7 +295,7 @@ mod tests {
     }
 
     fn sent(m: &mut Model, text: &str) {
-        m.key(Key::Ctrl('k'), at(1));
+        m.bar.focused = true;
         typed(m, text);
         m.key(Key::Enter, at(1));
         assert!(m.bar.is_empty(), "{text}: {:?}", m.bar.status);
@@ -307,7 +307,7 @@ mod tests {
         sent(&mut m, "@dev-a deploy");
         sent(&mut m, "/search deploy");
         sent(&mut m, "@dev-a deploy");
-        m.key(Key::Ctrl('k'), at(1));
+        m.bar.focused = true;
         typed(&mut m, "half");
         m.key(Key::Ctrl('p'), at(1));
         assert_eq!(m.bar.text(), "@dev-a deploy", "the latest, sent twice, once");
@@ -327,7 +327,7 @@ mod tests {
         for text in ["@dev-a deploy the site", "@dev-b review", "@dev-a deploy the docs"] {
             sent(&mut m, text);
         }
-        m.key(Key::Ctrl('k'), at(1));
+        m.bar.focused = true;
         typed(&mut m, "draft");
         m.key(Key::Ctrl('r'), at(1));
         typed(&mut m, "DEPLOY");
@@ -351,13 +351,13 @@ mod tests {
     #[test]
     fn esc_twice_empties_the_bar_into_the_history() {
         let mut m = model();
-        m.key(Key::Ctrl('k'), at(1));
+        m.bar.focused = true;
         typed(&mut m, "@dev-a later maybe");
         m.key(Key::Esc, at(1));
         assert!(!m.bar.focused && m.bar.text() == "@dev-a later maybe", "one Esc leaves the bar");
         m.key(Key::Esc, at(1));
         assert!(m.bar.is_empty());
-        m.key(Key::Ctrl('k'), at(1));
+        m.bar.focused = true;
         m.key(Key::Ctrl('p'), at(1));
         assert_eq!(m.bar.text(), "@dev-a later maybe");
         m.key(Key::Esc, at(1));
@@ -368,12 +368,12 @@ mod tests {
     #[test]
     fn ctrl_c_empties_the_bar_into_the_history() {
         let mut m = model();
-        m.key(Key::Ctrl('k'), at(1));
+        m.bar.focused = true;
         typed(&mut m, "@dev-a later maybe");
         m.key(Key::Interrupt, at(1));
         assert!(m.bar.is_empty(), "Ctrl-C empties the bar");
         assert!(!m.data.drafts.holds(m.data.drafts.here()), "and so the draft");
-        m.key(Key::Ctrl('k'), at(2));
+        m.bar.focused = true;
         m.key(Key::Ctrl('p'), at(2));
         assert_eq!(m.bar.text(), "@dev-a later maybe", "Ctrl-P recalls it");
     }
@@ -416,7 +416,7 @@ mod tests {
         let mut m = model();
         m.load_history(Some(path));
         assert_eq!(m.bar.text(), "who owns billing?", "home's draft");
-        m.key(Key::Ctrl('k'), at(1));
+        m.bar.focused = true;
         m.bar.set_text("");
         m.key(Key::Ctrl('p'), at(1));
         assert_eq!(m.bar.text(), "@dev-a deploy the site");

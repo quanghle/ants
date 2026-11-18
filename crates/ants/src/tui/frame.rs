@@ -12,7 +12,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::model::{Focus, Level, Model, Notice, Page};
 use super::style::{self, dim};
-use super::{approvals, catchup, compact, keymap, nav};
+use super::{approvals, catchup, compact, keymap, nav, palette};
 
 /// How wide the nav is.
 const NAV_WIDTH: u16 = 24;
@@ -55,6 +55,10 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
         Page::Held(page) => page.draw(frame, view, data, now, focused),
     }
     model.bar.draw(frame, bar, &model.completions(), &model.bar_title(), &model.enter_hint());
+    let palette = model.palette(now);
+    if !palette.is_empty() {
+        palette::draw(frame, bar, &palette, model.bar.pick.selected);
+    }
     if nav_focused && !model.fold.nav(width) {
         let over = Rect { width: NAV_WIDTH.min(view.width), ..view };
         frame.render_widget(Clear, over);
@@ -119,6 +123,9 @@ fn footer_line(model: &Model, now: DateTime<Utc>, width: u16) -> Line<'static> {
     if let Some(notice) = model.notice_at(now) {
         return style::notice(&notice.text, notice.level == Level::Error, width);
     }
+    if !model.palette(now).is_empty() {
+        return keymap::prompt("↑↓ select · Enter run · Tab complete · Esc close", width, false);
+    }
     if model.bar.focused && !model.completions().is_empty() {
         return keymap::prompt("↑↓ select · Tab/Enter complete · Esc close the list", width, false);
     }
@@ -130,7 +137,7 @@ fn footer_line(model: &Model, now: DateTime<Utc>, width: u16) -> Line<'static> {
         );
     }
     if model.bar.focused {
-        let keys = "Enter send · Ctrl-J new line · Ctrl-G editor · / commands · Esc leave";
+        let keys = "Enter send · Ctrl-J new line · Ctrl-G editor · / palette · Esc leave";
         return keymap::prompt(keys, width, false);
     }
     if model.focus == Focus::View
@@ -349,7 +356,8 @@ mod tests {
         m.key(Key::Ctrl('u'), at(0));
         m.key(Key::Char('/'), at(0));
         let shown = screen(&m, at(0));
-        assert!(shown.contains("/approve      [ID] [--always]") && shown.contains("/reject"), "{shown}");
+        assert!(shown.contains("/goto       THREAD|#channel|@user"), "{shown}");
+        assert!(shown.contains("↑↓ select · Enter run · Tab complete · Esc close"), "{shown}");
     }
 
     #[test]

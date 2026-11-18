@@ -34,6 +34,7 @@ mod memories;
 mod model;
 mod nav;
 mod notices;
+mod palette;
 mod people;
 mod question;
 mod react;

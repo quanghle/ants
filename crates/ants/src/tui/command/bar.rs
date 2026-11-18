@@ -4,12 +4,11 @@ use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use ants_proto::{ApprovalRequest, ThreadId};
 use unicode_width::UnicodeWidthChar as _;
 
-use super::COMMANDS;
 use crate::tui::exec::Quoted;
 use crate::tui::model::Key;
 use crate::tui::{attach, complete, style};
@@ -63,8 +62,6 @@ pub struct Bar {
     /// Where the cursor is, in characters.
     cursor: usize,
     pub status: Option<Status>,
-    /// Whether the list of commands shows above the bar.
-    pub list: bool,
     /// The completion selected in the list of those of the word at the cursor.
     pub pick: complete::Pick,
     /// The files `/attach` staged for the next message.
@@ -409,10 +406,7 @@ impl Bar {
             // A backslash before Enter makes it a new line, as in a shell.
             Key::Enter if self.cursor > 0 && self.chars[self.cursor - 1] == '\\' => self.chars[self.cursor - 1] = '\n',
             Key::Enter if !self.text().trim().is_empty() => return Edited::Submit(self.text()),
-            Key::Esc => {
-                self.focused = false;
-                self.list = false;
-            }
+            Key::Esc => self.focused = false,
             _ => {}
         }
         Edited::Done
@@ -481,7 +475,7 @@ impl Bar {
     }
 
     /// Draw the bar in `area`, its title naming where Enter sends (`to`) and `hint` on it while it is empty, and above
-    /// it the `completions` of the word at the cursor, else the list of commands when shown.
+    /// it the `completions` of the word at the cursor.
     pub fn draw(&self, frame: &mut Frame, area: Rect, completions: &[complete::Candidate], to: &str, hint: &str) {
         let width = usize::from(area.width.saturating_sub(2));
         let (lines, (row, column)) = self.lines(width);
@@ -524,8 +518,6 @@ impl Bar {
         }
         if !completions.is_empty() {
             complete::draw(frame, area, completions, self.pick.selected);
-        } else if self.list {
-            draw_list(frame, area);
         }
     }
 }
@@ -538,23 +530,6 @@ fn placeholder(nth: u32, paste: &str) -> String {
     }
 }
 
-/// The slash commands, over the view just above the bar at `bar`.
-fn draw_list(frame: &mut Frame, bar: Rect) {
-    let lines: Vec<Line> = COMMANDS
-        .iter()
-        .map(|(name, args, what)| {
-            Line::from(vec![
-                Span::styled(format!("/{name:<10}"), Style::new().bold()),
-                Span::raw(format!("{args:<24}")),
-                Span::styled(*what, style::dim()),
-            ])
-        })
-        .collect();
-    let height = (u16::try_from(lines.len()).unwrap_or(u16::MAX) + 2).min(bar.y);
-    let area = Rect { x: bar.x, y: bar.y.saturating_sub(height), width: bar.width.min(84), height };
-    frame.render_widget(Clear, area);
-    frame.render_widget(Paragraph::new(lines).block(style::block(" commands ".to_owned(), true)), area);
-}
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -76,7 +76,7 @@ impl Model {
             Key::Char('/') | Key::Ctrl('f') => {
                 self.bar.focused = true;
                 if self.bar.is_empty() {
-                    self.bar.set_text("/search ");
+                    self.bar.set_text(if key == Key::Ctrl('f') { "/search " } else { "/" });
                 }
                 None
             }
@@ -185,8 +185,8 @@ impl Model {
         None
     }
 
-    /// Close what is open, the topmost first: the help or the notices, the digest, a tool request in full, a prompt, the bar's list,
-    /// or what the view asks, finds or has being written. Whether anything was.
+    /// Close what is open, the topmost first: the help or the notices, the digest, a tool request in full, a prompt, the
+    /// bar's list or the palette, or what the view asks, finds or has being written. Whether anything was.
     fn close(&mut self, now: DateTime<Utc>) -> bool {
         if self.help.take().is_some() || self.log.take().is_some() {
             return true;
@@ -206,8 +206,8 @@ impl Model {
             self.bar.pick.closed = true;
             return true;
         }
-        if self.bar.focused && self.bar.list {
-            self.bar.list = false;
+        if !self.palette(now).is_empty() {
+            self.close_palette();
             return true;
         }
         if self.bar.focused || self.focus != Focus::View {
