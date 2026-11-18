@@ -1,5 +1,6 @@
 //! The ant's entry in the colony, kept alive by heartbeats.
 
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -677,18 +678,22 @@ pub fn naming_as_sage<'a>(ant: &UserId, entries: &'a [ColonyEntry], now: DateTim
     entries.iter().find(|entry| entry.ant != *ant && entry.sage.as_ref() == Some(ant) && is_live(entry, now))
 }
 
-/// The ant a request needing `capability` goes to, of the entries other than `asking` that advertise it: ants not
+/// The ant `request`, needing `capability`, goes to, of the entries other than `asking` that advertise it: ants not
 /// paused before paused ones, then ants whose harness is signed in and starting before those signed out or failing to
 /// start, then those held back by no provider limit before limited ones, unless a fallback answers for them, then
 /// those answered by their own harness before those answered by a fallback, then live entries before stale ones, then
 /// idle ants before those of an activity unknown to this daemon (newer daemons) and those working, then the fewest
-/// messages in hand, then the first by id. The same colony at the same time always gives the same answer.
+/// messages in hand, then the ant whose profile shares the most words with `request` ([`shared_words`]), then the
+/// first by id. A profile, the ant's own untrusted words, thus only breaks a tie of all the rest. The same colony at
+/// the same time always gives the same answer.
 pub fn pick<'a>(
     entries: &'a [ColonyEntry],
     capability: &str,
+    request: &str,
     asking: &UserId,
     now: DateTime<Utc>,
 ) -> Option<&'a ColonyEntry> {
+    let wanted = words(request);
     entries.iter().filter(|e| &e.ant != asking && has_capability(e, capability)).min_by_key(|e| {
         let busyness = match e.activity {
             Activity::Idle => 0,
@@ -703,9 +708,39 @@ pub fn pick<'a>(
             !is_live(e, now),
             busyness,
             e.handling,
+            std::cmp::Reverse(shared_words(&wanted, e)),
             &e.ant,
         )
     })
+}
+
+/// Words too common in requests and profiles to tell ants apart.
+const COMMON_WORDS: &[&str] = &[
+    "about", "after", "all", "also", "and", "any", "are", "been", "but", "can", "could", "did", "does", "done", "each",
+    "for", "from", "good", "had", "has", "have", "how", "into", "its", "just", "more", "most", "not", "only", "our",
+    "out", "please", "should", "some", "than", "that", "the", "their", "them", "then", "there", "these", "they",
+    "this", "those", "very", "was", "were", "what", "when", "where", "which", "who", "why", "will", "with", "would",
+    "you", "your",
+];
+
+/// The words of `text` [`pick`] compares: runs of letters and digits, lowercased, of at least 3 characters and not
+/// among [`COMMON_WORDS`], a longer one without a trailing `s`, so that `invoices` matches `invoice`.
+fn words(text: &str) -> BTreeSet<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .map(str::to_lowercase)
+        .filter(|word| word.chars().count() >= 3 && !COMMON_WORDS.contains(&word.as_str()))
+        .map(|mut word| {
+            if word.chars().count() > 3 && word.ends_with('s') {
+                word.pop();
+            }
+            word
+        })
+        .collect()
+}
+
+/// How many of the `wanted` words ([`words`]) the profile of `entry` holds, each counted once.
+fn shared_words(wanted: &BTreeSet<String>, entry: &ColonyEntry) -> usize {
+    entry.profile.as_deref().map_or(0, |profile| words(profile).intersection(wanted).count())
 }
 
 async fn put(kv: &kv::Store, entry: &ColonyEntry) -> Result<()> {
@@ -890,12 +925,12 @@ mod tests {
         ];
         let me: UserId = "dev-a".parse().unwrap();
         let now = Utc::now();
-        let picked = |capability| pick(&entries, capability, &me, now).map(|e| e.ant.as_str());
+        let picked = |capability| pick(&entries, capability, "", &me, now).map(|e| e.ant.as_str());
         assert_eq!(picked("rust"), Some("dev-b"));
         assert_eq!(picked("RUST "), Some("dev-b"));
         assert_eq!(picked("rust-ops"), Some("ops"));
         assert_eq!(picked("ops"), None, "tags match whole, not in part");
-        assert_eq!(pick(&entries, "rust", &"dev-b".parse().unwrap(), now).map(|e| e.ant.as_str()), Some("dev-a"));
+        assert_eq!(pick(&entries, "rust", "", &"dev-b".parse().unwrap(), now).map(|e| e.ant.as_str()), Some("dev-a"));
     }
 
     #[test]
@@ -908,7 +943,7 @@ mod tests {
             ..entry(ant, &["rust"])
         };
         let me: UserId = "me".parse().unwrap();
-        let picked = |entries: &[ColonyEntry]| pick(entries, "rust", &me, now).map(|e| e.ant.to_string());
+        let picked = |entries: &[ColonyEntry]| pick(entries, "rust", "", &me, now).map(|e| e.ant.to_string());
         let (idle, working, unknown) = (Activity::Idle, Activity::Working, Activity::Unknown);
 
         let mut entries = vec![
@@ -951,6 +986,31 @@ mod tests {
         assert_eq!(picked(&entries).as_deref(), Some("dev-0"), "an ant not paused, even stale, before a paused one");
         entries[1].signed_out = Some(SignInNeeded { since: now, sign_in: None });
         assert_eq!(picked(&entries).as_deref(), Some("dev-0"), "a signed-out ant before a paused one");
+    }
+
+    #[test]
+    fn a_profile_sharing_more_words_with_the_request_only_breaks_a_tie() {
+        let now = Utc::now();
+        let with =
+            |ant, profile: Option<&str>| ColonyEntry { profile: profile.map(str::to_owned), ..entry(ant, &["rust"]) };
+        let me: UserId = "me".parse().unwrap();
+        let mut entries = vec![
+            with("dev-a", None),
+            with("dev-b", Some("Good for NATS reconnects and Rust daemons.")),
+            with("dev-c", Some("NATS, NATS and NATS again.")),
+            ColonyEntry { profile: Some("Rust daemons reconnecting to NATS.".to_owned()), ..entry("dev-0", &["go"]) },
+        ];
+        let picked =
+            |entries: &[ColonyEntry], request| pick(entries, "rust", request, &me, now).unwrap().ant.to_string();
+        let slow = "The nats client reconnect is slow";
+        assert_eq!(picked(&entries, slow), "dev-b", "two words shared, each counted once");
+        assert_eq!(picked(&entries, "Fix the build, please."), "dev-a", "no word shared: the first by name");
+        assert_eq!(picked(&entries, "For the daemon?"), "dev-b", "common words left out, a plural matched");
+        assert_eq!(picked(&entries, "Reconnecting daemons"), "dev-b", "never an ant without the capability");
+        (entries[1].activity, entries[1].handling) = (Activity::Working, 1);
+        assert_eq!(picked(&entries, slow), "dev-c", "an idle ant before a busy one whatever its profile");
+        entries[2].handling = 1;
+        assert_eq!(picked(&entries, slow), "dev-a", "the fewest messages in hand before the profile");
     }
 
     #[test]

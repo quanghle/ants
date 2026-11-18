@@ -7,12 +7,12 @@
 //! ([`ants_proto::TimelineEntry::NoReply`]) is stored before its message is acked instead, still best effort
 //! ([`publish`]).
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use ants_proto::{
-    MAX_TIMELINE_CALLS, MAX_TIMELINE_ENTRIES, PlanStep, StatusUpdate, ThreadId, Timeline, TimelineCall, TimelineEntry,
-    UserId,
+    CallCount, MAX_TIMELINE_CALLS, MAX_TIMELINE_ENTRIES, PlanStep, StatusUpdate, ThreadId, Timeline, TimelineCall,
+    TimelineEntry, UserId,
 };
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
@@ -38,8 +38,17 @@ pub struct Collector<'a> {
     plan: Option<Vec<PlanStep>>,
     plan_changed: bool,
     /// The calls past [`MAX_TIMELINE_CALLS`], only counted.
-    left_out: HashSet<String>,
+    left_out: HashMap<String, LeftOut>,
     left_out_changed: bool,
+}
+
+/// What is kept of a call past [`MAX_TIMELINE_CALLS`], for [`Collector::counts`].
+#[derive(Debug, Default)]
+struct LeftOut {
+    kind: Option<String>,
+    failed: bool,
+    /// Whether it calls sense's own tools.
+    sense: bool,
 }
 
 impl<'a> Collector<'a> {
@@ -54,7 +63,7 @@ impl<'a> Collector<'a> {
             changed: BTreeSet::new(),
             plan: None,
             plan_changed: false,
-            left_out: HashSet::new(),
+            left_out: HashMap::new(),
             left_out_changed: false,
         }
     }
@@ -63,7 +72,19 @@ impl<'a> Collector<'a> {
     pub fn push(&mut self, update: &StatusUpdate, now: DateTime<Utc>) {
         match update {
             StatusUpdate::Tool { id, title, tool_kind, status, paths } => {
-                let Some(i) = self.call(id, now) else { return };
+                let Some(i) = self.call(id, now) else {
+                    let Some(left) = self.left_out.get_mut(id) else { return };
+                    if tool_kind.is_some() {
+                        left.kind.clone_from(tool_kind);
+                    }
+                    if let Some(title) = title {
+                        left.sense = crate::sense::calls_own_tool(title);
+                    }
+                    if let Some(status) = status {
+                        left.failed = status == "failed";
+                    }
+                    return;
+                };
                 let call = &mut self.calls[i];
                 if let Some(title) = title {
                     call.title.clone_from(title);
@@ -102,12 +123,33 @@ impl<'a> Collector<'a> {
             return Some(i);
         }
         if self.calls.len() >= MAX_TIMELINE_CALLS {
-            self.left_out_changed |= self.left_out.insert(id.to_owned());
+            if !self.left_out.contains_key(id) {
+                self.left_out.insert(id.to_owned(), LeftOut::default());
+                self.left_out_changed = true;
+            }
             return None;
         }
         self.index.insert(id.to_owned(), self.calls.len());
         self.calls.push(TimelineCall { id: id.to_owned(), ..empty_call(now) });
         Some(self.calls.len() - 1)
+    }
+
+    /// The prompt's tool calls by kind, `other` for those without one, and how many of them called sense's own tools:
+    /// every call heard of, those left out of the records included.
+    pub fn counts(&self) -> (BTreeMap<String, CallCount>, u32) {
+        let kept = self.calls.iter().map(|call| {
+            let sense = crate::sense::calls_own_tool(&call.title);
+            (call.tool_kind.as_deref(), call.status.as_deref() == Some("failed"), sense)
+        });
+        let left_out = self.left_out.values().map(|left| (left.kind.as_deref(), left.failed, left.sense));
+        let (mut counts, mut sense_calls) = (BTreeMap::<String, CallCount>::new(), 0);
+        for (kind, failed, sense) in kept.chain(left_out) {
+            let count = counts.entry(kind.unwrap_or("other").to_owned()).or_default();
+            count.calls += 1;
+            count.failed += u32::from(failed);
+            sense_calls += u32::from(sense);
+        }
+        (counts, sense_calls)
     }
 
     /// Whether anything changed since the last record.
@@ -271,5 +313,21 @@ mod tests {
         let record = timeline.take().unwrap();
         assert_eq!(record.omitted, 4);
         assert_eq!(calls(&record)[0].id, format!("c{}", MAX_TIMELINE_CALLS - 1), "the count goes with the last call");
+
+        // Yet every call counts by its kind, whether it failed and whether it called sense's own tools.
+        timeline.push(&tool("c0", None, Some("failed")), now);
+        let left_out = StatusUpdate::Tool {
+            id: "c-new".to_owned(),
+            title: Some("mcp__ants__sense_recall".to_owned()),
+            tool_kind: Some("other".to_owned()),
+            status: Some("failed".to_owned()),
+            paths: None,
+        };
+        timeline.push(&left_out, now);
+        timeline.push(&tool(&format!("c{}", MAX_TIMELINE_CALLS + 1), None, Some("failed")), now);
+        let (counts, sense_calls) = timeline.counts();
+        let counts: Vec<_> = counts.iter().map(|(kind, count)| (kind.as_str(), count.calls, count.failed)).collect();
+        let execute = u32::try_from(MAX_TIMELINE_CALLS).unwrap() + 3;
+        assert_eq!((counts, sense_calls), (vec![("execute", execute, 2), ("other", 1, 1)], 1));
     }
 }

@@ -7,8 +7,8 @@ use std::ops::ControlFlow;
 use std::time::SystemTime;
 
 use ants_proto::{
-    MergedCall, MergedEnd, MergedRejection, NoReplyWhy, PromptEnd, ThreadId, Timeline, TimelineCall, TimelineEntry,
-    Timelines, UserId, Uuid, sent_reader, subject,
+    MergedEnd, MergedRejection, NoReplyWhy, PromptEnd, ThreadId, Timeline, TimelineCall, TimelineEntry, Timelines,
+    UserId, Uuid, sent_reader, subject,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, consumer};
@@ -69,11 +69,6 @@ impl Thread {
     /// The ant's tool requests rejected, in the order first stored.
     pub(super) fn rejections(&self) -> &[MergedRejection] {
         self.timelines.rejections()
-    }
-
-    /// The ant's tool calls, in the order first stored.
-    pub(super) fn calls(&self) -> &[MergedCall] {
-        self.timelines.calls()
     }
 
     /// How the ant's prompts ended, in the order stored.
@@ -242,7 +237,16 @@ mod tests {
         };
         add(m2, vec![end], 0);
         let ended = |how, duration_ms| {
-            let end = ants_proto::TimelineEnd { how, duration_ms, tokens: 0, cost: 0.0, asked: 0, rebuilt: false };
+            let end = ants_proto::TimelineEnd {
+                how,
+                duration_ms,
+                tokens: 0,
+                cost: 0.0,
+                asked: 0,
+                rebuilt: false,
+                calls: BTreeMap::new(),
+                sense_calls: 0,
+            };
             TimelineEntry::Ended(end)
         };
         add(m2, vec![ended(PromptEnd::NoReply, 1_000)], 0);

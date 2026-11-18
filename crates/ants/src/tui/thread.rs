@@ -37,6 +37,7 @@ use crate::threads::thread::{Entry, Kind};
 
 mod conversation;
 mod find;
+mod pending;
 
 pub use conversation::SPIN_MS;
 use conversation::{Item, Shown, busy, cut, glyphs, hm, rows, started, withdrawn_from, woken};
@@ -90,6 +91,8 @@ pub struct Page {
     mark: attach::Mark<u64>,
     /// The cursor on the question card the keys answer, while Enter has focused it.
     answering: Option<question::Cursor>,
+    /// The waiting requests and questions listed individually, opened by Ctrl-L.
+    listing: Option<pending::List>,
     /// The room the oldest pending tool request had on its card as last drawn, `(width, lines)`, which tells whether it
     /// showed whole there: no lines when its card was not drawn.
     card_room: Cell<Option<(usize, usize)>>,
@@ -110,6 +113,7 @@ impl Page {
             at: None,
             mark: attach::Mark::default(),
             answering: None,
+            listing: None,
             card_room: Cell::new(None),
             find: None,
         }
@@ -249,6 +253,42 @@ impl Page {
         self.scroll.set(if top == bottom && self.selected.is_none() { Scroll::Latest } else { Scroll::At(top) });
     }
 
+    pub fn mouse_scroll(&self, by: isize) {
+        if !self.listing() {
+            self.scroll_by(by);
+        }
+    }
+
+    pub fn mouse_select(&mut self, seq: u64) {
+        if !self.listing() {
+            self.selected = Some(seq);
+            self.at = None;
+            self.answering = None;
+        }
+    }
+
+    pub fn mouse_question(&mut self, question: Uuid, at: usize, data: &Data, now: DateTime<Utc>) -> bool {
+        if self.card(data, now).is_none() {
+            self.key(Key::Enter, data, now);
+        }
+        if let Some(cursor) = self.answering.as_mut().filter(|cursor| cursor.question == question) {
+            cursor.mouse_select(at);
+            return true;
+        }
+        false
+    }
+
+    #[cfg(test)]
+    pub fn mouse_top(&self) -> usize {
+        self.top.get()
+    }
+
+    #[cfg(test)]
+    pub fn mouse_bottom(&self) -> usize {
+        let laid = self.laid.borrow();
+        laid.lines.saturating_sub(laid.height)
+    }
+
     /// Select the message held at the top, else the one selected, else the latest, or the latest in view when scrolled
     /// up: Up from typing.
     pub fn select(&mut self) {
@@ -310,6 +350,9 @@ impl Page {
     /// it, Enter and Shift-Enter step to the next and previous match and another key stops asking; then n and N step,
     /// Ctrl-F asks again and Esc ends it. Whether it took `key`.
     pub fn find_key(&mut self, key: Key) -> bool {
+        if self.listing() || self.answering.is_some() {
+            return false;
+        }
         let Some(find) = &mut self.find else {
             if key == Key::Ctrl('f') {
                 self.find = Some(find::Find { asking: true, ..find::Find::default() });
@@ -341,11 +384,14 @@ impl Page {
 
     /// Whether the footer asks for the text to find, which typing changes.
     pub fn finding(&self) -> bool {
-        self.find.as_ref().is_some_and(|f| f.asking)
+        !self.listing() && self.answering.is_none() && self.find.as_ref().is_some_and(|f| f.asking)
     }
 
     /// The footer while finding text in the conversation.
     pub fn find_footer(&self) -> Option<Line<'static>> {
+        if self.listing() || self.answering.is_some() {
+            return None;
+        }
         Some(self.find.as_ref()?.footer(self.laid.borrow().found.len()))
     }
 
@@ -375,17 +421,43 @@ impl Page {
     /// The cursor on the focused question card, while its question is still the one the keys answer.
     pub fn card(&self, data: &Data, now: DateTime<Utc>) -> Option<&question::Cursor> {
         let cursor = self.answering.as_ref()?;
-        let (id, _) = question::keyed(data, &self.history.entries, now)?;
-        (id == cursor.question).then_some(cursor)
+        question::cards(data, &self.history.entries, now)
+            .iter()
+            .any(|card| card.asked.id == Some(cursor.question) && card.answers.is_empty())
+            .then_some(cursor)
+    }
+
+    /// The focused question's exact message, else the latest waiting question; never a newer question in place of
+    /// one answered elsewhere while its typed answer was being composed.
+    pub fn question<'a>(&'a self, data: &Data, now: DateTime<Utc>) -> Option<(Uuid, &'a ants_proto::Questions)> {
+        if self.listing() {
+            return None;
+        }
+        if let Some(cursor) = &self.answering {
+            self.card(data, now)?;
+            let asked = self.history.entries.iter().find(|e| e.id == Some(cursor.question))?;
+            return Some((cursor.question, asked.question.as_ref()?));
+        }
+        question::keyed(data, &self.history.entries, now)
     }
 
     /// Take `key` on the focused question card, if any: where it leads, if anywhere.
     pub fn card_key(&mut self, key: Key, data: &Data, now: DateTime<Utc>) -> Option<Option<To>> {
-        if self.card(data, now).is_none() {
-            self.answering = None;
-            return None;
+        if self.listing() {
+            return self.waiting_key(key, data, now);
         }
-        question::focused(&mut self.answering, key, &self.history.thread)
+        if self.card(data, now).is_none() {
+            return self.answering.take().map(|_| None);
+        }
+        let to = self.answering.as_mut()?.key(key, &self.history.thread);
+        match to {
+            None => Some(None),
+            Some(Some(to @ To::Bar(_))) => Some(Some(to)),
+            Some(to) => {
+                self.answering = None;
+                Some(to)
+            }
+        }
     }
 
     /// Type `text` pasted on the focused question card, if any: whether it took it.
@@ -418,6 +490,13 @@ impl Page {
     }
 
     pub fn key(&mut self, key: Key, data: &Data, now: DateTime<Utc>) -> Option<To> {
+        if self.listing() {
+            return self.waiting_key(key, data, now).flatten();
+        }
+        if key == Key::Ctrl('l') {
+            self.toggle_waiting();
+            return None;
+        }
         let (thread, last) = (self.history.thread.clone(), self.last_reopening(data));
         let change = |change| Some(To::Do(Action::Change(thread, change, last)));
         let flags = self.flags(data, now);
@@ -466,24 +545,7 @@ impl Page {
             Key::Char('m') => return change(Change::Mute(!flags.muted)),
             Key::Char('e') => return change(Change::Archive(!flags.archived)),
             Key::Char('d') => return change(Change::Done(!flags.done)),
-            Key::Char('a' | 'A' | 'r') | Key::Enter => {
-                let verdict = match key {
-                    Key::Char('a') => Some(Verdict::AllowOnce),
-                    Key::Char('A') => Some(Verdict::AllowAlways),
-                    Key::Char('r') => Some(Verdict::Reject),
-                    _ => None,
-                };
-                let Some(oldest) = self.pending(data) else {
-                    if key == Key::Enter {
-                        let keyed = question::keyed(data, &self.history.entries, now);
-                        self.answering = keyed.map(|(id, asked)| question::Cursor::new(id, asked));
-                    }
-                    return None;
-                };
-                // A request its card does not show whole opens in full, where the keys answer it.
-                let verdict = verdict.filter(|_| approvals::fits(oldest, self.card_room.get()));
-                return Some(To::Ask(oldest.clone(), verdict));
-            }
+            Key::Char('a' | 'A' | 'r') | Key::Enter => return self.request_key(key, data, now),
             Key::Char('n') => return self.pending(data).cloned().map(To::Note),
             // The question's card folds while a tool request waits: its keys answer the request's.
             Key::Char('1'..='9') if self.pending(data).is_none() => {
@@ -521,8 +583,31 @@ impl Page {
         None
     }
 
+    fn request_key(&mut self, key: Key, data: &Data, now: DateTime<Utc>) -> Option<To> {
+        let verdict = match key {
+            Key::Char('a') => Some(Verdict::AllowOnce),
+            Key::Char('A') => Some(Verdict::AllowAlways),
+            Key::Char('r') => Some(Verdict::Reject),
+            _ => None,
+        };
+        let Some(oldest) = self.pending(data) else {
+            if key == Key::Enter {
+                let keyed = question::keyed(data, &self.history.entries, now);
+                self.answering = keyed.map(|(id, asked)| question::Cursor::new(id, asked));
+            }
+            return None;
+        };
+        // A request its card does not show whole opens in full, where the keys answer it.
+        let verdict = verdict.filter(|_| approvals::fits(oldest, self.card_room.get()));
+        Some(To::Ask(oldest.clone(), verdict))
+    }
+
     pub fn draw(&self, frame: &mut Frame, area: Rect, model: &Model, now: DateTime<Utc>, focused: bool) {
         let data = &model.data;
+        if let Some(list) = &self.listing {
+            list.draw(frame, area, self, data, now);
+            return;
+        }
         let thread = &self.history.thread;
         let (area, panel) = if model.fold.panel(frame.area().width) {
             let [left, right] = Layout::horizontal([Constraint::Min(20), Constraint::Length(PANEL_WIDTH)]).areas(area);
@@ -595,6 +680,7 @@ impl Page {
         let top = self.scrolled(range, held.is_some(), lines.len(), height);
         self.spinning.set(shown.spun.get());
         let newer = messages.iter().filter(|(_, start, _)| *start >= top + height).count();
+        message_hits(data, &messages, area, top, height);
         *self.laid.borrow_mut() = Laid { height, lines: lines.len(), messages, found };
         let block = match newer {
             0 => block,
@@ -803,7 +889,12 @@ fn draw_cards(
     let width = usize::from(area.width.saturating_sub(2));
     let writing = model.typing();
     let requests = approvals::cards(&model.data, Some(thread), now);
-    let questions = question::cards(&model.data, entries, now);
+    let mut questions = question::cards(&model.data, entries, now);
+    if let Some(cursor) = cursor {
+        for card in &mut questions {
+            card.keys = card.asked.id == Some(cursor.question);
+        }
+    }
     let pending = requests.iter().position(|c| c.settled.is_none()).map(Shows::Request);
     let keyed = questions.iter().position(|c| c.keys).map(Shows::Question);
     let first = if requests.is_empty() {
@@ -855,8 +946,13 @@ fn draw_cards(
     let rest = Rect { height: area.height - tall, ..area };
     let below = Rect { y: area.y + rest.height, height: tall, ..area };
     let mut block = ratatui::widgets::Block::bordered().title(title).border_style(style);
-    if let Some(folded) = folded(others) {
+    if let Some(folded) = folded(others, width) {
         block = block.title_bottom(Line::styled(folded, style::dim()));
+    }
+    if let Shows::Question(at) = shows
+        && let Some(id) = questions[at].asked.id
+    {
+        question::mouse_regions(&model.data, block.inner(below), &lines, 0, id);
     }
     frame.render_widget(Paragraph::new(lines).block(block), below);
     let room = (width, if pending.is_some() && Some(shows) == pending { rows } else { 0 });
@@ -864,17 +960,37 @@ fn draw_cards(
 }
 
 /// What the bottom border of a thread's card says of the others, `[requests, questions]` waiting and those settled or
-/// answered lately: ` 1 tool request and 1 question also wait above · 1 settled or answered lately `.
-fn folded([requests, questions, settled]: [usize; 3]) -> Option<String> {
+/// answered lately, with the key listing every waiting card.
+fn folded([requests, questions, settled]: [usize; 3], width: usize) -> Option<String> {
     let count = |n: usize, what: &str| (n > 0).then(|| format!("{n} {what}{}", if n == 1 { "" } else { "s" }));
     let wait: Vec<String> =
         [count(requests, "tool request"), count(questions, "question")].into_iter().flatten().collect();
     let verb = if requests + questions == 1 { "waits" } else { "wait" };
-    match (wait.is_empty(), settled) {
+    let text = match (wait.is_empty(), settled) {
         (true, 0) => None,
         (true, n) => Some(format!(" {n} more settled or answered lately above ")),
-        (false, 0) => Some(format!(" {} also {verb} above ", wait.join(" and "))),
-        (false, n) => Some(format!(" {} also {verb} above · {n} settled or answered lately ", wait.join(" and "))),
+        (false, 0) => Some(format!(" Ctrl-L lists all · {} also {verb} above ", wait.join(" and "))),
+        (false, n) => Some(format!(
+            " Ctrl-L lists all · {} also {verb} above · {n} settled or answered lately ",
+            wait.join(" and ")
+        )),
+    }?;
+    if !wait.is_empty() && Line::raw(&text).width() > width {
+        return Some(style::fit(&format!(" Ctrl-L: {} ", wait.join(", ")), width));
+    }
+    Some(text)
+}
+
+fn message_hits(data: &Data, messages: &[(u64, usize, usize)], area: Rect, top: usize, height: usize) {
+    for &(seq, start, end) in messages {
+        let from = start.max(top);
+        let to = end.min(top + height);
+        if from < to {
+            data.mouse.add(
+                Rect { y: area.y + (from - top) as u16, height: (to - from) as u16, ..area },
+                super::mouse::Target::Message(seq),
+            );
+        }
     }
 }
 
@@ -1429,7 +1545,7 @@ mod tests {
         m.data.live.approvals = vec![push.clone()];
         let screen = shown(&m);
         assert!(
-            screen.contains("1 question also waits above") && !screen.contains("1-9 answer"),
+            screen.contains("Ctrl-L: 1 question") && !screen.contains("1-9 answer"),
             "the request's card shows, the question's folds: {screen}"
         );
         m.key(Key::Up, at(2));
@@ -1455,6 +1571,232 @@ mod tests {
         m.key(Key::Down, at(2));
         let job = Job::Answer { thread: thread.clone(), question: asks.id.unwrap(), picks: vec![Pick::option(2)] };
         assert_eq!(m.key(Key::Enter, at(2)), Some(Action::Run(job, String::new())), "no typed row below the last");
+    }
+
+    fn waiting_model() -> (Model, [ApprovalRequest; 2], [Entry; 2]) {
+        let thread = ThreadId::generate();
+        let requests = ["git push", "git tag v1"].map(|command| {
+            let request = crate::test_support::live::request("dev-a", command, vec![Verdict::AllowOnce]);
+            ApprovalRequest { thread_id: thread.clone(), ..request }
+        });
+        let mut questions = ["Backfill?", "Ship?"].map(|text| message(1, &thread, "dev-a", "alice", text));
+        for (n, entry) in questions.iter_mut().enumerate() {
+            entry.seq = n as u64 + 1;
+            entry.question = Some(Question::new(&entry.text, &["yes".into(), "no".into()], true).unwrap().into());
+        }
+        let mut m = model();
+        m.stored(questions.to_vec(), at(3));
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(questions.to_vec())).unwrap();
+        m.pages.push(crate::tui::model::Page::Thread(page));
+        m.focus = crate::tui::model::Focus::View;
+        m.data.live.approvals = requests.to_vec();
+        (m, requests, questions)
+    }
+
+    fn waiting_screen(m: &Model, width: u16, height: u16) -> String {
+        crate::test_support::render::rendered(width, height, |f| crate::tui::frame::draw(f, m, at(10)))
+    }
+
+    #[test]
+    fn ctrl_l_lists_every_waiting_card_and_enter_opens_the_selected_request_not_the_oldest() {
+        let (mut m, [push, tag], questions) = waiting_model();
+        let thread = push.thread_id.clone();
+        let mut answered = message(3, &thread, "dev-a", "alice", "already answered");
+        answered.question = questions[0].question.clone();
+        let mut answer = message(4, &thread, "alice", "dev-a", "yes");
+        answer.answer = Some(Answer { question: answered.id.unwrap(), picks: vec![Pick::option(1)] });
+        let mut forged = message(5, &thread, "dev-a", "alice", "forged question");
+        forged.question = questions[0].question.clone();
+        forged.forged = true;
+        let mut other_human = message(6, &thread, "dev-a", "bob", "question for bob");
+        other_human.question = questions[0].question.clone();
+        m.stored(vec![answered, answer, forged, other_human], at(6));
+        m.data.live.approvals.push(crate::test_support::live::request("dev-b", "another thread", vec![]));
+        m.data.settled.add(ApprovalRequest { id: Uuid::now_v7(), ..push.clone() }, crate::tools::State::Expired, at(6));
+
+        assert_eq!(m.key(Key::Enter, at(10)), None);
+        assert_eq!(m.asking.as_ref().unwrap().request, push, "Enter without the list still opens the oldest");
+        m.key(Key::Esc, at(10));
+        m.key(Key::Ctrl('l'), at(10));
+        for (width, height) in [(100, 20), (100, 30), (40, 12)] {
+            let shown = waiting_screen(&m, width, height);
+            for text in ["Waiting (4)", "git push", "git tag v1", "Backfill?", "Ship?", "Enter open"] {
+                assert!(shown.contains(text), "{width}x{height}, {text}: {shown}");
+            }
+            assert!(!shown.contains("another thread") && !shown.contains("already answered"), "{shown}");
+        }
+        m.key(Key::Down, at(10));
+        m.key(Key::Enter, at(10));
+        assert_eq!(m.asking.as_ref().unwrap().request, tag);
+        m.key(Key::Esc, at(10));
+        let earlier = ApprovalRequest { requested_at: at(-1), id: Uuid::now_v7(), ..push };
+        m.data.live.approvals.push(earlier);
+        waiting_screen(&m, 100, 20);
+        m.key(Key::Enter, at(10));
+        assert_eq!(m.asking.as_ref().unwrap().request, tag, "an arrival does not move the selection");
+    }
+
+    #[test]
+    fn the_list_opens_an_older_question_visibly_even_while_tools_wait_and_keeps_its_answer_pinned() {
+        for (width, height) in [(100, 20), (100, 30), (40, 12)] {
+            let (mut m, _, [older, newer]) = waiting_model();
+            m.key(Key::Ctrl('l'), at(10));
+            for _ in 0..2 {
+                m.key(Key::Down, at(10));
+            }
+            m.key(Key::Enter, at(10));
+            let shown = waiting_screen(&m, width, height);
+            assert!(shown.contains("Backfill?") && shown.contains("› 1 yes"), "{width}x{height}: {shown}");
+            assert!(m.asking.is_none());
+            let mut latest = newer;
+            latest.id = Some(Uuid::now_v7());
+            latest.seq = 3;
+            m.stored(vec![latest], at(10));
+            m.key(Key::Down, at(10));
+            let job =
+                Job::Answer { thread: older.thread_id, question: older.id.unwrap(), picks: vec![Pick::option(2)] };
+            assert_eq!(m.key(Key::Enter, at(10)), Some(Action::Run(job, String::new())));
+        }
+    }
+
+    #[test]
+    fn every_waiting_row_scrolls_into_a_narrow_list_and_an_empty_list_answers_nothing() {
+        for width in [24, 40, 100] {
+            let (mut m, [request, _], _) = waiting_model();
+            if let crate::tui::model::Page::Thread(page) = m.pages.last_mut().unwrap() {
+                page.history.entries.clear();
+            }
+            m.data.live.approvals = (0..12)
+                .map(|n| {
+                    let mut request = ApprovalRequest { id: Uuid::now_v7(), requested_at: at(n), ..request.clone() };
+                    request.tool.title = format!("command-{n:02}");
+                    request
+                })
+                .collect();
+            m.key(Key::Ctrl('l'), at(10));
+            for n in 0..12 {
+                let shown = waiting_screen(&m, width, 10);
+                assert!(shown.contains(&format!("command-{n:02}")), "{width}, row {n}: {shown}");
+                m.key(Key::Down, at(10));
+            }
+            m.key(Key::Enter, at(10));
+            assert_eq!(m.asking.as_ref().unwrap().request.tool.title, "command-11");
+            m.key(Key::Esc, at(10));
+            m.data.live.approvals.clear();
+            let shown = waiting_screen(&m, width, 10);
+            assert!(shown.contains("Waiting (0)"), "{shown}");
+            assert_eq!(m.key(Key::Enter, at(10)), None);
+            assert!(m.asking.is_none());
+            m.key(Key::Esc, at(10));
+            assert!(m.typing());
+        }
+    }
+
+    #[test]
+    fn a_listed_questions_typed_answer_stays_on_that_question_and_refuses_one_answered_elsewhere() {
+        for settled in [false, true] {
+            let (mut m, _, [older, _]) = waiting_model();
+            m.key(Key::Ctrl('l'), at(10));
+            for _ in 0..2 {
+                m.key(Key::Down, at(10));
+            }
+            m.key(Key::Enter, at(10));
+            for _ in 0..2 {
+                m.key(Key::Down, at(10));
+            }
+            m.key(Key::Enter, at(10));
+            assert_eq!(m.bar.text(), "/answer ");
+            if settled {
+                let mut answer = message(3, &older.thread_id, "alice", "dev-a", "no");
+                answer.answer = Some(Answer { question: older.id.unwrap(), picks: vec![Pick::option(2)] });
+                m.stored(vec![answer], at(10));
+            }
+            for c in "after lunch".chars() {
+                m.key(Key::Char(c), at(10));
+            }
+            let result = m.key(Key::Enter, at(10));
+            if settled {
+                assert_eq!(result, None, "never answer the newer question instead");
+                assert_eq!(m.bar.text(), "/answer after lunch", "keep the refused answer");
+                assert!(m.bar.status.as_ref().is_some_and(|s| s.tone == crate::tui::command::Tone::Error));
+            } else {
+                let job = Job::Answer {
+                    thread: older.thread_id,
+                    question: older.id.unwrap(),
+                    picks: vec![Pick::Typed("after lunch".into())],
+                };
+                assert_eq!(result, Some(Action::Run(job, "/answer after lunch".into())));
+            }
+        }
+    }
+
+    #[test]
+    fn a_listed_question_takes_its_typed_answer_instead_of_the_threads_find() {
+        let (mut m, _, [older, _]) = waiting_model();
+        m.key(Key::Ctrl('f'), at(10));
+        m.key(Key::Char('n'), at(10));
+        m.key(Key::Ctrl('l'), at(10));
+        for _ in 0..2 {
+            m.key(Key::Down, at(10));
+        }
+        m.key(Key::Enter, at(10));
+        for _ in 0..2 {
+            m.key(Key::Down, at(10));
+        }
+        for c in "noon".chars() {
+            m.key(Key::Char(c), at(10));
+        }
+        let job = Job::Answer {
+            thread: older.thread_id,
+            question: older.id.unwrap(),
+            picks: vec![Pick::Typed("noon".into())],
+        };
+        assert_eq!(m.key(Key::Enter, at(10)), Some(Action::Run(job, String::new())));
+    }
+
+    #[test]
+    fn the_waiting_list_keeps_composition_and_uses_its_own_help_and_palette_keys() {
+        let (mut m, _, _) = waiting_model();
+        for c in "draft".chars() {
+            m.key(Key::Char(c), at(10));
+        }
+        assert!(m.bar.focused);
+        m.key(Key::Ctrl('l'), at(10));
+        assert!(!m.bar.focused && !m.typing());
+        assert_eq!(m.bar.text(), "draft");
+        m.key(Key::Char('a'), at(10));
+        m.paste("not an answer", at(10));
+        assert_eq!(m.bar.text(), "draft");
+        assert!(m.asking.is_none(), "a hidden request is not answered");
+        assert_eq!(crate::tui::keymap::views(&m), vec![crate::tui::keymap::View::Pending]);
+        m.key(Key::Char('?'), at(10));
+        assert!(m.help.is_some());
+        m.key(Key::Esc, at(10));
+        for close in [Key::Esc, Key::Char('q'), Key::Interrupt, Key::Ctrl('l')] {
+            assert_eq!(m.key(close, at(10)), None);
+            assert!(m.typing() && m.bar.text() == "draft", "{close:?}");
+            m.key(Key::Ctrl('l'), at(10));
+        }
+        m.key(Key::Esc, at(10));
+        m.key(Key::Char('!'), at(10));
+        assert_eq!(m.bar.text(), "draft!", "type-to-compose resumes");
+
+        m.bar.set_text("");
+        m.bar.focused = false;
+        m.key(Key::Ctrl('k'), at(10));
+        for c in "waiting".chars() {
+            m.key(Key::Char(c), at(10));
+        }
+        assert!(m.palette(at(10)).iter().any(|e| e.word == "Ctrl-L" && e.why.is_none()));
+        m.key(Key::Enter, at(10));
+        assert_eq!(crate::tui::keymap::views(&m), vec![crate::tui::keymap::View::Pending]);
+        m.key(Key::Ctrl('k'), at(10));
+        for c in "close".chars() {
+            m.key(Key::Char(c), at(10));
+        }
+        m.key(Key::Enter, at(10));
+        assert!(m.typing(), "the palette's close key acts on the list");
     }
 
     #[test]

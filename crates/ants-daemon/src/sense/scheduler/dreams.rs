@@ -323,7 +323,6 @@ impl Dreaming for Daemon {
                 sent,
                 reopenings,
                 rejections,
-                calls,
                 ends,
                 escalations,
             } in active
@@ -339,7 +338,7 @@ impl Dreaming for Daemon {
                 let review = origin.as_ref().is_some_and(|origin| matches!(origin.by, Starter::Review { .. }));
                 let started_by = origin.map_or_else(|| "someone not known".to_owned(), |origin| starter(&origin.by));
                 let actions = actions.of(&id, &sent, &rejections, &reopenings, (since, until)).await;
-                let signs = vitals::signs(&calls, &ends, escalations, &actions);
+                let signs = vitals::signs(&ends, escalations, &actions);
                 threads.push(Thread { id, untrusted, review, started_by, text, timeline, actions, signs });
             }
             Ok(threads)

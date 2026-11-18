@@ -1,7 +1,7 @@
 //! What the colony records: the versions of ants and harnesses running across the team, avatars, and the machines'
 //! drift.
 
-use ants_proto::PERMISSIONS_VERSION;
+use ants_proto::{ColonyEntry, PERMISSIONS_VERSION};
 use async_nats::jetstream;
 
 use super::{Check, Identity, NETWORK_TIMEOUT};
@@ -48,18 +48,26 @@ pub(super) async fn check_versions(js: &jetstream::Context, identity: &Identity)
     }
 }
 
-/// Whether live ants run the same harness agent at different versions on different machines, as their colony entries
-/// name it ([`versions::harness_drift`]).
-pub(super) async fn check_harness_versions(js: &jetstream::Context) -> Check {
+/// The colony's entries, read within twice [`NETWORK_TIMEOUT`], else why not.
+pub(super) async fn read_colony(js: &jetstream::Context) -> Result<Vec<ColonyEntry>, String> {
     use anyhow::Context as _;
     let read = async {
         let kv = js.get_key_value(ants_proto::COLONY_BUCKET).await.context("opening the colony")?;
         ants_daemon::colony::list_entries(&kv).await
     };
     match tokio::time::timeout(NETWORK_TIMEOUT * 2, read).await {
-        Ok(Ok(entries)) => harness_versions(&entries, chrono::Utc::now()),
-        Ok(Err(e)) => Check::skip("harness versions", format!("no colony read: {e:#}")),
-        Err(_) => Check::skip("harness versions", "no colony read within 10s"),
+        Ok(Ok(entries)) => Ok(entries),
+        Ok(Err(e)) => Err(format!("no colony read: {e:#}")),
+        Err(_) => Err("no colony read within 10s".to_owned()),
+    }
+}
+
+/// Whether live ants run the same harness agent at different versions on different machines, as their colony entries
+/// `colony` name it ([`versions::harness_drift`]).
+pub(super) fn check_harness_versions(colony: &Result<Vec<ColonyEntry>, String>) -> Check {
+    match colony {
+        Ok(entries) => harness_versions(entries, chrono::Utc::now()),
+        Err(why) => Check::skip("harness versions", why.clone()),
     }
 }
 
@@ -145,7 +153,7 @@ pub(super) fn avatars(entries: &[ants_proto::ColonyEntry], faces: Faces) -> Chec
     Check::warn(check, "ants look alike", collisions)
 }
 
-pub(super) fn harness_versions(entries: &[ants_proto::ColonyEntry], now: chrono::DateTime<chrono::Utc>) -> Check {
+pub(super) fn harness_versions(entries: &[ColonyEntry], now: chrono::DateTime<chrono::Utc>) -> Check {
     let check = "harness versions";
     let drift = versions::harness_drift(entries, now);
     if !drift.is_empty() {

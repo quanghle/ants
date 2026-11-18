@@ -11,7 +11,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{ListState, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use super::attach;
 use super::command::Conversation;
@@ -280,7 +280,22 @@ impl Page {
         header::draw(frame, head, data, &self.channel, now);
         let tab = self.tab(data);
         let counts = tabs::counts(data.feeds.posts(&self.channel).map(|p| &p.thread), data);
-        frame.render_widget(Paragraph::new(tabs::line(tab, &counts, usize::from(tabs_row.width), focused)), tabs_row);
+        let tabs = tabs::line(tab, &counts, usize::from(tabs_row.width), focused);
+        let mut x = tabs_row.x;
+        for span in &tabs.spans {
+            if let Some(tab) = Tab::ALL.into_iter().find(|t| span.content.starts_with(&format!("{} ", t.label()))) {
+                data.mouse.add(
+                    Rect {
+                        x,
+                        width: u16::try_from(span.width()).unwrap_or(u16::MAX).min(tabs_row.right().saturating_sub(x)),
+                        ..tabs_row
+                    },
+                    super::mouse::Target::ChannelTab(tab),
+                );
+            }
+            x = x.saturating_add(u16::try_from(span.width()).unwrap_or(u16::MAX));
+        }
+        frame.render_widget(Paragraph::new(tabs), tabs_row);
         let posts: Vec<&Post> = self.posts(data).collect();
         let block = style::block(format!(" #{} · {} ", self.channel, tab.label()), focused);
         if posts.is_empty() {
@@ -308,8 +323,9 @@ impl Page {
                 )
             })
             .collect();
-        let list = style::list(items, Some(selected), focused).block(block);
-        frame.render_stateful_widget(list, area, &mut ListState::default().with_selected(Some(selected)));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        super::mouse::list(frame, inner, data, &format!("channel:{}", self.channel), items, selected, focused);
         self.draw_editor(frame, head, tabs_row.union(area), data, now);
     }
 

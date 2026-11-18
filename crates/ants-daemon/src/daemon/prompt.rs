@@ -1,12 +1,12 @@
 //! Prompting the harness with a message: the prompt's text, running it with its status, spend and cancels, and the
 //! notices its reply carries, escalating what the ant cannot settle.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
 
 use ants_proto::{
-    Envelope, Error as ProtoError, EscalationReason, Hold, Humans, NoReplyWhy, NoticeKind, PromptEnd, Stage, State,
-    StatusUpdate, SummaryOf, SummaryRequest, ThreadId, Timeline, TimelineEnd, TimelineEntry, UserId, Uuid,
+    CallCount, Envelope, Error as ProtoError, EscalationReason, Hold, Humans, NoReplyWhy, NoticeKind, PromptEnd, Stage,
+    State, StatusUpdate, SummaryOf, SummaryRequest, ThreadId, Timeline, TimelineEnd, TimelineEntry, UserId, Uuid,
 };
 use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
@@ -63,20 +63,38 @@ pub(super) struct Ran {
 struct Measured {
     /// The message the prompt ran for, whose timeline the end joins.
     message: Uuid,
+    /// When the prompt began: when it got its thread's harness, once told so through `harnessed`.
     began: tokio::time::Instant,
+    harnessed: tokio::sync::oneshot::Receiver<tokio::time::Instant>,
     /// How long the prompt ran, once it ended.
     took: std::time::Duration,
     /// The tokens the prompt spent so far, as the harness reported them.
     tokens: u64,
     /// The cost in US dollars the prompt spent so far, as the harness reported it.
     cost: f64,
+    /// The prompt's tool calls by kind, once it ended ([`TimelineEnd::calls`]).
+    calls: BTreeMap<String, CallCount>,
+    /// How many of its tool calls called sense's own tools, once it ended.
+    sense_calls: u32,
 }
 
 impl Measured {
-    /// The measures of the prompt for `message`, beginning now.
-    fn new(message: Uuid) -> Self {
-        let began = tokio::time::Instant::now();
-        Self { message, began, took: std::time::Duration::ZERO, tokens: 0, cost: 0.0 }
+    /// The measures of the prompt for `message`, beginning now or when told through the sender returned
+    /// ([`Prompt::began`]).
+    fn new(message: Uuid) -> (Self, tokio::sync::oneshot::Sender<tokio::time::Instant>) {
+        let (tx, harnessed) = tokio::sync::oneshot::channel();
+        let (began, took) = (tokio::time::Instant::now(), std::time::Duration::ZERO);
+        (Self { message, began, harnessed, took, tokens: 0, cost: 0.0, calls: BTreeMap::new(), sense_calls: 0 }, tx)
+    }
+
+    /// Note that the prompt ended now, with the tool calls `calls` collected. A wait for a free harness is not the
+    /// prompt's.
+    fn end(&mut self, calls: &crate::monitoring::timeline::Collector) {
+        if let Ok(at) = self.harnessed.try_recv() {
+            self.began = at;
+        }
+        self.took = self.began.elapsed();
+        (self.calls, self.sense_calls) = calls.counts();
     }
 }
 
@@ -508,6 +526,8 @@ impl Inbox<'_> {
             cost: measured.cost,
             asked: self.approvals.map_or(0, |approvals| approvals.asked(thread)),
             rebuilt,
+            calls: measured.calls.clone(),
+            sense_calls: measured.sense_calls,
         };
         let entries = vec![TimelineEntry::Ended(end)];
         let record = Timeline::new(self.ant.clone(), thread.clone(), measured.message, entries, 0);
@@ -739,8 +759,7 @@ impl Inbox<'_> {
         let thread = &envelope.thread_id;
         let (spend_tx, mut spend) = tokio::sync::mpsc::unbounded_channel();
         let (stop_tx, stop) = tokio::sync::oneshot::channel();
-        let mut stop_tx = Some(stop_tx);
-        let mut reached = None;
+        let (mut stop_tx, mut reached) = (Some(stop_tx), None);
         let (progress_tx, mut streamed) = tokio::sync::mpsc::channel(status::BUFFER);
         let mut status = Status::new(self.client, self.ant, thread, self.redactor);
         let every = self.timeline_every;
@@ -751,6 +770,7 @@ impl Inbox<'_> {
         let (brief, channel) = tokio::join!(self.briefing(incoming), self.channel_note(incoming));
         let (ready_tx, ready) = tokio::sync::oneshot::channel();
         let (steer_tx, steers) = tokio::sync::mpsc::channel(STEERS);
+        let (mut measured, began) = Measured::new(envelope.id);
         let prompt = Prompt {
             text,
             limits: self.limits,
@@ -762,6 +782,7 @@ impl Inbox<'_> {
             steering: Some(Steering { ready: ready_tx, steers }),
             brief,
             channel,
+            began: Some(began),
         };
         let mut ready = futures::FutureExt::fuse(ready);
         let mut joins = None;
@@ -779,7 +800,6 @@ impl Inbox<'_> {
         let mut progress = self.progress();
         // Whether a tool call started, so tools may have run; streamed text, such as a harness's error, runs nothing.
         let mut worked = false;
-        let mut measured = Measured::new(envelope.id);
         let reply = loop {
             tokio::select! {
                 r = &mut prompt => break r,
@@ -820,12 +840,12 @@ impl Inbox<'_> {
                 }
             }
         };
-        measured.took = measured.began.elapsed();
         while let Ok(update) = streamed.try_recv() {
             worked |= matches!(update, StatusUpdate::Tool { .. });
             calls.push(&update, chrono::Utc::now());
             status.push(update);
         }
+        measured.end(&calls);
         status.flush();
         while let Some(record) = calls.take() {
             crate::monitoring::timeline::store(self.js, record);

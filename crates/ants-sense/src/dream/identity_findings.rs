@@ -1,10 +1,12 @@
 //! The findings of a dream on the ant's identity ([`super`]): what it lacks for the work it did, gathered from its
-//! sense data and thread records alone, never thread text, so never untrusted. Once the ant worked enough threads:
+//! sense data and thread records alone, never thread text, so never untrusted. The threads counted are those of work
+//! ([`experience::work`]), never those of its dreams nor of reviews. Once the ant worked enough threads:
 //!
 //! - no persona after [`PERSONA_AFTER_THREADS`] threads, and none proposed;
 //! - no self-model after [`SELF_MODEL_AFTER_THREADS`] threads;
 //! - no relationship record of a human or ant who started [`RELATIONSHIP_AFTER_THREADS`] of its threads or more, one
-//!   finding each;
+//!   finding each; for an ant the ant also reviewed as a sage [`RELATIONSHIP_AFTER_REVIEWS`] times or more, it tells
+//!   of both and stands for the practice's finding on the same record ([`super::practice_findings`]);
 //! - a self-model unchanged over [`STALE_ACTIVE_DAYS`] active days or more in which the ant worked with someone or in a
 //!   repository it had not before;
 //! - a persona, self-model or skill a clone still holds as inherited ([`crate::fork`]) after [`OWN_AFTER_THREADS`]
@@ -19,7 +21,8 @@ use ants_proto::UserId;
 use ants_proto::provider::Starter;
 use chrono::{DateTime, Utc};
 
-use super::{FindingKind, Gathered};
+use super::practice_findings::RELATIONSHIP_AFTER_REVIEWS;
+use super::{FindingKind, Gathered, ReviewRecord};
 use crate::fork::INHERITED;
 use crate::items::{Item, ItemId};
 use crate::memory::Scope;
@@ -43,10 +46,14 @@ pub const OWN_AFTER_THREADS: u32 = 5;
 /// The most of the people and repositories new to the ant a stale self-model's finding names.
 const MAX_NAMED: usize = 5;
 
-/// The findings on the identity of `ant` in `items`: the persona's, then the self-model's, then the relationships',
-/// the most threads first, then the skills', by name.
-pub(super) async fn gather(items: &dyn Items, ant: &UserId) -> Result<Vec<Gathered>, StoreError> {
-    let Some(worked) = experience::experience(items, ant, usize::MAX).await? else { return Ok(Vec::new()) };
+/// The findings on the identity of `ant` in `items`, which made `reviews` as a sage: the persona's, then the
+/// self-model's, then the relationships', the most threads first, then the skills', by name.
+pub(super) async fn gather(
+    items: &dyn Items,
+    ant: &UserId,
+    reviews: &[ReviewRecord],
+) -> Result<Vec<Gathered>, StoreError> {
+    let Some(worked) = experience::work(items, ant, None, usize::MAX).await? else { return Ok(Vec::new()) };
     let proposed = proposal::pending(items).await?.into_iter().map(|found| found.proposal.target).collect();
     let from = identity::card(items).await?.and_then(|card| card.cloned_from);
     let source = from.map_or_else(|| "its source".into(), |from| from.ant.to_string());
@@ -54,7 +61,7 @@ pub(super) async fn gather(items: &dyn Items, ant: &UserId) -> Result<Vec<Gather
     let mut found = Vec::new();
     found.extend(persona(items, &ground).await?);
     found.extend(self_model(items, ant, &ground).await?);
-    found.extend(relationships(items, &worked.people).await?);
+    found.extend(relationships(items, &worked.people, reviews).await?);
     found.extend(skills(items, &ground).await?);
     Ok(found)
 }
@@ -120,7 +127,7 @@ async fn self_model(items: &dyn Items, ant: &UserId, ground: &Ground) -> Result<
         return Ok(ground.inherited("self", "self-model", item, &call(Some(revision))));
     }
     let since = item.updated.at;
-    let Some(lately) = experience::experience_since(items, ant, since, usize::MAX).await? else { return Ok(None) };
+    let Some(lately) = experience::work(items, ant, Some(since), usize::MAX).await? else { return Ok(None) };
     if lately.active_days < STALE_ACTIVE_DAYS {
         return Ok(None);
     }
@@ -145,7 +152,11 @@ async fn self_model(items: &dyn Items, ant: &UserId, ground: &Ground) -> Result<
     Ok(Some(on(FindingKind::StaleSelfModel, "self", item, count, text)))
 }
 
-async fn relationships(items: &dyn Items, people: &[Tally]) -> Result<Vec<Gathered>, StoreError> {
+async fn relationships(
+    items: &dyn Items,
+    people: &[Tally],
+    reviews: &[ReviewRecord],
+) -> Result<Vec<Gathered>, StoreError> {
     let people: Vec<_> = people.iter().filter(|tally| tally.threads >= RELATIONSHIP_AFTER_THREADS).collect();
     let scopes: Vec<_> = people.iter().map(|tally| tally.scope.clone()).collect();
     let recorded: Vec<_> = records::relationships(items, &scopes).await?.into_iter().map(|r| r.record.scope).collect();
@@ -153,12 +164,29 @@ async fn relationships(items: &dyn Items, people: &[Tally]) -> Result<Vec<Gather
     Ok(unrecorded
         .map(|tally| {
             let (who, n) = (&tally.scope, tally.threads);
+            let count = step(n, RELATIONSHIP_AFTER_THREADS);
+            let reviewed = match who {
+                Scope::Ant(ant) => reviews.iter().filter(|review| review.ant == *ant).count(),
+                _ => 0,
+            };
+            let reviewed = u32::try_from(reviewed).unwrap_or(u32::MAX);
+            if reviewed < RELATIONSHIP_AFTER_REVIEWS {
+                let text = format!(
+                    "No relationship record of {who}, who started {n} of the ant's threads: write one with \
+                     sense_identity, giving relationship (what working together taught), who {who} and a title, then \
+                     answer applied naming the record written."
+                );
+                return subject(FindingKind::NoRelationship, &who.to_string(), count, text);
+            }
             let text = format!(
-                "No relationship record of {who}, who started {n} of the ant's threads: write one with \
-                 sense_identity, giving relationship (what working together taught), who {who} and a title, then \
-                 answer applied naming the record written."
+                "No relationship record of {who}, who started {n} of the ant's threads and was reviewed {reviewed} \
+                 times by the ant: write one with sense_identity, giving relationship (what working together taught \
+                 and what works in reviewing {who}), who {who} and a title, then answer applied naming the record \
+                 written; the reviews of {who} show it."
             );
-            subject(FindingKind::NoRelationship, &who.to_string(), step(n, RELATIONSHIP_AFTER_THREADS), text)
+            // Resting on both counts, it comes again when either steps.
+            let count = count.saturating_add(step(reviewed, RELATIONSHIP_AFTER_REVIEWS));
+            subject(FindingKind::NoRelationship, &who.to_string(), count, text)
         })
         .collect())
 }

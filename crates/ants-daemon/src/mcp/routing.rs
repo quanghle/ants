@@ -1,5 +1,6 @@
-//! Finding ants in the colony: `list_ants`, and `route`, which picks the ant to send a request to by capability. A
-//! message to an ant no daemon serves now is checked for first ([`Hub::unserved`]), naming ants to message instead.
+//! Finding ants in the colony: `list_ants`, and `route`, which picks the ant to send a request to by capability, a
+//! profile only breaking a tie ([`colony::pick`]). A message to an ant no daemon serves now is checked for first
+//! ([`Hub::unserved`]), naming ants to message instead.
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -151,7 +152,8 @@ impl Tools {
     #[tool(description = "Route a request to an ant whose colony capabilities include `capability`, other than \
         this one: an ant not paused before a paused one, then an ant whose harness is signed in before one signed \
         out, then a live ant before a stale one, then \
-        an idle ant before a busy one, then the one with the fewest messages in hand, then the first by name. By \
+        an idle ant before a busy one, then the one with the fewest messages in hand, then the one whose profile \
+        shares the most words with `text`, then the first by name: a profile only breaks a tie. By \
         default it waits for the reply and returns it, like ask_ant; \
         with `wait` false it sends and returns at once, like send_message. Either way it goes on the current thread \
         and follows its turn budget, as those do, and `attach` attaches files as they do.")]
@@ -165,7 +167,7 @@ impl Tools {
             let wait = ask_wait(args.timeout.as_deref())?;
             let entries = self.hub.others().await?;
             let capability = args.capability.trim();
-            let to = colony::pick(&entries, capability, &self.hub.ant, chrono::Utc::now())
+            let to = colony::pick(&entries, capability, &args.text, &self.hub.ant, chrono::Utc::now())
                 .ok_or_else(|| nobody_has(capability, &entries))?
                 .ant
                 .to_string();

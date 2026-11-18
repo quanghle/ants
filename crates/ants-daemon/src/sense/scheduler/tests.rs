@@ -9,7 +9,8 @@ use ants_sense::items::ItemId;
 use ants_sense::log::{
     AccountVerifier, AntLog, AppendError, EventLog, LogError, MemoryLog, NoRevocations, Stored, Unsigned,
 };
-use ants_sense::store::{Store, Stores};
+use ants_sense::persona::{PERSONA, PROFILE, persona_id};
+use ants_sense::store::{Store, Stores, Write};
 use serde_json::{Value, json};
 
 use super::*;
@@ -85,6 +86,7 @@ fn settings() -> Settings {
         env: BTreeMap::new(),
         allow: Vec::new(),
         dreams: None,
+        workload: Arc::new(crate::colony::Workload::default()),
     }
 }
 
@@ -116,6 +118,20 @@ async fn create(sense: &Sense, trigger: Value) -> ItemId {
     assert!(!result.is_error, "{result:?}");
     let ants_proto::provider::Output::Json(result) = result.output else { panic!("requested JSON") };
     result["reminder"]["id"].as_str().unwrap().parse().unwrap()
+}
+
+/// Confirm a persona holding `profile`, as a dream does, and tell `sense` so through a call that writes: the register
+/// of a thread of its own.
+async fn confirm(sense: &Sense, items: &dyn Items, profile: Option<&str>) {
+    let mut values = ants_sense::items::Values::new();
+    values.insert("voice".into(), json!("Plain."));
+    values.insert(PROFILE.into(), profile.map_or(Value::Null, |profile| json!(profile)));
+    let put = Write::Put { id: persona_id(), kind: PERSONA.into(), values, expected: None };
+    items.write(&[put], "test").await.unwrap();
+    let mut noted = call(json!({"goal": format!("Publish the profile {profile:?}"), "next": "Watch the colony entry"}));
+    noted.name = "checkpoint".into();
+    noted.context.thread = format!("profile-{}", uuid::Uuid::new_v4().simple()).parse().unwrap();
+    assert!(!sense.call_tool(noted).await.unwrap().is_error);
 }
 
 #[derive(Default)]
@@ -166,6 +182,25 @@ async fn an_empty_schedule_sleeps_until_maintenance_or_a_tool_changes_it() {
     // The call's own: as it starts, caught up with the log, and as it writes.
     assert_eq!(stores.reads.load(Ordering::SeqCst), reads + 2, "stopped scheduler no longer reads");
     assert_eq!(host.requests.locked().len(), 1);
+}
+
+#[tokio::test]
+async fn each_read_publishes_the_confirmed_profile_until_the_persona_drops_it() {
+    let (sense, stores) = setup().await;
+    let settings = settings();
+    let workload = settings.workload.clone();
+    let scheduler = start(sense.clone(), Arc::new(Wakes::default()), settings);
+    let published = async |want: Option<&str>| {
+        let shows = async || workload.profile().as_deref() == want;
+        ants_test_support::eventually_within(Duration::from_secs(5), &format!("the profile {want:?}"), shows).await;
+    };
+    confirm(&sense, &*stores.items, Some("Good for Rust daemons.")).await;
+    published(Some("Good for Rust daemons.")).await;
+    confirm(&sense, &*stores.items, None).await;
+    published(None).await;
+    confirm(&sense, &*stores.items, Some("Good for reviews.")).await;
+    published(Some("Good for reviews.")).await;
+    scheduler.stop().await;
 }
 
 fn lifecycle(kind: ants_proto::provider::EventKind) -> ants_proto::provider::Event {
